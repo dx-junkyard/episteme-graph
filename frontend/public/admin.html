@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Episteme Graph — 管理画面</title>
+  <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+  <div class="admin-app">
+    <!-- Top Bar -->
+    <div class="topbar">
+      <div class="topbar-l">
+        <span class="logo">Episteme Graph</span>
+        <span class="sep">/</span>
+        <span class="crse">管理画面</span>
+      </div>
+      <div class="topbar-r">
+        <a href="/" style="color:var(--color-text-info);text-decoration:none;font-size:12px">学習画面へ</a>
+        <span style="opacity:.3">|</span>
+        <span id="admin-username"></span>
+        <button id="logout-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px">ログアウト</button>
+      </div>
+    </div>
+
+    <!-- Tab navigation -->
+    <div class="admin-tabs" id="adminTabs">
+      <button class="admin-tab on" data-tab="materials">教材管理</button>
+      <button class="admin-tab" data-tab="course-builder">コース構築</button>
+    </div>
+
+    <!-- Materials tab -->
+    <div class="admin-panel vis" id="tab-materials">
+      <!-- Upload area -->
+      <div class="admin-section">
+        <h3 class="admin-section-title">教材アップロード</h3>
+        <div class="upload-zone" id="upload-zone">
+          <div class="upload-icon">&#128196;</div>
+          <p>PDFファイルをドラッグ＆ドロップ</p>
+          <p style="font-size:12px;color:var(--color-text-tertiary)">または</p>
+          <label class="upload-btn">
+            ファイルを選択
+            <input type="file" id="file-input" accept=".pdf" hidden>
+          </label>
+        </div>
+        <div id="upload-status" class="upload-status"></div>
+      </div>
+
+      <!-- Materials list -->
+      <div class="admin-section">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <h3 class="admin-section-title" style="margin-bottom:0">アップロード済み教材</h3>
+          <button id="refresh-materials" class="admin-action-btn">更新</button>
+        </div>
+        <table class="admin-table" id="materials-table">
+          <thead>
+            <tr>
+              <th>ファイル名</th>
+              <th>タイトル</th>
+              <th>ステータス</th>
+              <th>アップロード日時</th>
+            </tr>
+          </thead>
+          <tbody id="materials-tbody">
+            <tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">読み込み中...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Course builder tab -->
+    <div class="admin-panel" id="tab-course-builder">
+      <div class="course-builder">
+        <!-- Left pane: Chat -->
+        <div class="cb-chat-pane">
+          <div class="cb-chat-header">AIアシスタントとコース設計</div>
+          <div class="cb-chat-area" id="cb-chat-area">
+            <div class="mg ai" style="color:var(--color-text-tertiary)">
+              コースの設計を始めましょう。どのような学習プログラムを作成しますか？<br>
+              例：「〇〇の教材を使って場の量子論の基礎コースを作って」
+            </div>
+          </div>
+          <div class="ia">
+            <input type="text" id="cb-chat-input" placeholder="コースの要件を入力してください...">
+            <button id="cb-send-btn">送信</button>
+          </div>
+        </div>
+
+        <!-- Right pane: Preview -->
+        <div class="cb-preview-pane">
+          <div class="cb-preview-header">コース構成プレビュー</div>
+          <div class="cb-preview-area" id="cb-preview-area">
+            <div style="color:var(--color-text-tertiary);font-size:13px;padding:20px">
+              AIとの対話でコース構成が生成されると、ここにプレビューが表示されます。
+            </div>
+          </div>
+          <div class="cb-approve-area" id="cb-approve-area" style="display:none">
+            <button id="cb-approve-btn" class="cb-approve-btn">承認してコースを登録</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/admin.js"></script>
+</body>
+</html>
