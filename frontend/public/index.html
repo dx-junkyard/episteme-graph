@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Episteme Graph — 学習支援</title>
+  <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+  <div class="app">
+    <!-- Top Bar -->
+    <div class="topbar">
+      <div class="topbar-l">
+        <span class="logo">Episteme Graph</span>
+        <span class="sep">/</span>
+        <span class="crse" id="course-name">読み込み中...</span>
+      </div>
+      <div class="topbar-r">
+        <span id="streak" style="color:var(--color-text-success)"></span>
+        <span style="opacity:.3">|</span>
+        <span id="username"></span>
+      </div>
+    </div>
+
+    <!-- Sidebar -->
+    <div class="sb" id="sidebar">
+      <div class="sb-hd">学習パス</div>
+    </div>
+
+    <!-- Main Chat Area -->
+    <div class="mn">
+      <div class="ca" id="chat-area">
+        <div class="mg ai" style="color:var(--color-text-tertiary)">
+          トピックを選択して学習を始めましょう。
+        </div>
+      </div>
+      <div class="ia">
+        <input type="text" id="chat-input" placeholder="質問を入力してください...">
+        <button id="send-btn">送信</button>
+      </div>
+    </div>
+
+    <!-- Right Panel -->
+    <div class="rp">
+      <div class="tb" id="tabBar">
+        <button class="on" data-tab="context">コンテキスト</button>
+        <button data-tab="progress">進捗</button>
+        <button data-tab="sources">出典</button>
+      </div>
+      <div class="tp vis" id="tab-context"></div>
+      <div class="tp" id="tab-progress"></div>
+      <div class="tp" id="tab-sources"></div>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>
