@@ -234,6 +234,7 @@
       body: formData,
     })
       .then(function (res) {
+        if (res.status === 413) throw { detail: "ファイルサイズが大きすぎます（上限: 50MB）" };
         if (!res.ok) return res.json().then(function (d) { throw d; });
         return res.json();
       })
