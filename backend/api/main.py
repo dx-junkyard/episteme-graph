@@ -763,6 +763,136 @@ _LEARNING_SYSTEM_PROMPT = """あなたは素粒子物理学・場の量子論を
 - 回答の末尾に深掘りできるトピックを `[〇〇について詳しく聞く]` の形式で提示（必ずこのフォーマットを使用）"""
 
 
+_GUIDANCE_SYSTEM_PROMPT = """あなたは素粒子物理学・場の量子論を専門とする学習者の深い理解を支援する家庭教師です。
+現在、教材テキストの検索結果がありません。しかし、コースの構造情報（章構成、トピック一覧、概念マップ、登録教材）は利用可能です。
+以下の方針で回答してください：
+1. コースの構造情報を使って、学習の道筋やトピックの概要を案内してください。
+2. 「何から学べばよいか」「このトピックの概要は？」といったメタ的な質問には、コースの章順序・トピック依存関係に基づいて具体的に案内してください。
+3. 数式の詳細な導出や教材の具体的な内容についての質問には、「この点は教材を参照する必要があります」と正直に伝え、どの章やトピックを参照すべきか示してください。
+4. 説明の最後に、関連する概念へのドリルダウン選択肢を `[〇〇について詳しく聞く]` の形式で提示してください。
+**フォーマット:**
+- 数式は必ず LaTeX 記法で記述（インラインは `$...$`、ディスプレイは `$$...$$`）
+- 回答の末尾に深掘りできるトピックを `[〇〇について詳しく聞く]` の形式で提示"""
+
+
+def _generate_guidance_without_rag(
+    course_data: dict,
+    topic_title: str,
+    user_message: str,
+    history: list[dict],
+) -> str:
+    """RAGチャンクが見つからない場合に、コース構造情報を使ってLLMに学習ガイダンスを生成させる。"""
+    course_title = course_data.get("title", "")
+    chapters = course_data.get("chapters", [])
+    topics = course_data.get("topics", [])
+    concepts = course_data.get("concepts", [])
+    sources = course_data.get("sources", [])
+
+    structure_parts: list[str] = []
+
+    # 章構成
+    if chapters:
+        chapter_lines = []
+        for i, ch in enumerate(chapters):
+            chapter_topics = [t for t in topics if t.get("chapter_index") == i]
+            topic_names = ", ".join(t.get("title", "") for t in chapter_topics)
+            status = ch.get("status", "locked")
+            chapter_lines.append(f"  第{i+1}章: {ch.get('title', '')} (状態: {status})")
+            if topic_names:
+                chapter_lines.append(f"    トピック: {topic_names}")
+        structure_parts.append("## コースの章構成\n" + "\n".join(chapter_lines))
+
+    # 概念マップ
+    if concepts:
+        concept_lines = []
+        for c in concepts:
+            name = c.get("name", "")
+            status = c.get("status", "future")
+            children = c.get("children", [])
+            line = f"  - {name} (状態: {status})"
+            if children:
+                line += f" → 子概念: {', '.join(children)}"
+            concept_lines.append(line)
+        structure_parts.append("## 概念マップ\n" + "\n".join(concept_lines))
+
+    # 登録教材
+    if sources:
+        source_lines = []
+        for s in sources:
+            title = s.get("title", "")
+            subtitle = s.get("subtitle", "")
+            info = title
+            if subtitle:
+                info += f" — {subtitle}"
+            source_lines.append(f"  - {info}")
+        structure_parts.append("## 登録済み教材\n" + "\n".join(source_lines))
+
+    # 現在のトピックの前後関係
+    current_topic_info = None
+    prev_topic = None
+    next_topic = None
+    for i, t in enumerate(topics):
+        if t.get("title") == topic_title or t.get("id") == topic_title:
+            current_topic_info = t
+            if i > 0:
+                prev_topic = topics[i - 1]
+            if i < len(topics) - 1:
+                next_topic = topics[i + 1]
+            break
+
+    if current_topic_info:
+        nav_info = f"## 現在のトピック: {topic_title}\n"
+        if prev_topic:
+            nav_info += f"  前のトピック: {prev_topic.get('title', '')}\n"
+        if next_topic:
+            nav_info += f"  次のトピック: {next_topic.get('title', '')}\n"
+        prereqs = current_topic_info.get("prerequisites", [])
+        if prereqs:
+            nav_info += f"  前提知識: {', '.join(p.get('name', '') for p in prereqs)}\n"
+        structure_parts.append(nav_info)
+
+    context_block = "\n\n".join(structure_parts) if structure_parts else "(コース構造情報なし)"
+
+    messages: list[dict] = [
+        {"role": "system", "content": _GUIDANCE_SYSTEM_PROMPT},
+        {"role": "user", "content": (
+            f"コース: {course_title}\n"
+            f"現在のトピック: {topic_title}\n\n"
+            f"{context_block}\n\n"
+            "上記のコース構造情報を使って質問に回答してください。\n"
+            "教材の具体的なテキストは現在利用できませんが、コースの構成に基づいて学習の案内ができます。"
+        )},
+        {"role": "assistant", "content": (
+            f"了解しました。「{topic_title}」について、コースの構成情報を参照しながらご案内します。"
+        )},
+    ]
+    for turn in history:
+        messages.append({"role": turn["role"], "content": turn["content"]})
+    messages.append({"role": "user", "content": user_message})
+
+    try:
+        client = _openai()
+        response = client.chat.completions.create(
+            model=_OPENAI_ANALYSIS_MODEL,
+            messages=messages,
+            temperature=0.4,
+        )
+        return response.choices[0].message.content or ""
+    except Exception as exc:
+        logger.exception("Guidance generation failed for topic %s", topic_title)
+        first_topic = topics[0].get("title", "") if topics else "最初のトピック"
+        return (
+            f"「{topic_title}」の学習を始めましょう。\n\n"
+            f"このコース「{course_title}」では以下の順序で学習を進めることをお勧めします：\n\n"
+            + "\n".join(
+                f"**第{i+1}章: {ch.get('title', '')}**"
+                for i, ch in enumerate(chapters)
+            )
+            + f"\n\nまずは最初のトピック「{first_topic}」から始めてみましょう。\n\n"
+            + f"[{first_topic}について詳しく聞く]"
+        )
+
+
 @app.post(
     "/api/learning/courses/{course_id}/topics/{topic_id}/chat",
     response_model=LearningChatResponse,
@@ -812,23 +942,26 @@ def learning_chat(
         for s in course_data.get("sources", [])
         if s.get("arxiv_id")
     ]
+    material_ids = [
+        s["material_id"]
+        for s in course_data.get("sources", [])
+        if s.get("material_id")
+    ]
     relevant_chunks, relevance_scores = _search_relevant_chunks_with_scores(
-        body.message, arxiv_ids, top_k=5
+        body.message, arxiv_ids, material_ids=material_ids, top_k=5
     )
 
     # 3a. フェイルセーフ: 関連チャンクが0件またはスコアが極端に低い場合はLLMをスキップ
     _RELEVANCE_THRESHOLD = 0.35
     if not relevant_chunks or (relevance_scores and max(relevance_scores) < _RELEVANCE_THRESHOLD):
-        failsafe_answer = (
-            "この点については提供文献に記述がありません。\n\n"
-            "別の角度から質問を試みるか、関連する教材を追加してください。\n\n"
-            f"[{topic_title}の基礎概念について詳しく聞く]"
+        guidance_answer = _generate_guidance_without_rag(
+            course_data, topic_title, body.message, body.history,
         )
         _persist_chat_history(
             current_user["id"], course_id, topic_id,
-            body.history, body.message, failsafe_answer,
+            body.history, body.message, guidance_answer,
         )
-        return LearningChatResponse(answer=failsafe_answer, course_update=None)
+        return LearningChatResponse(answer=guidance_answer, course_update=None)
 
     context_parts: list[str] = []
     if relevant_chunks:
@@ -1010,10 +1143,11 @@ def _persist_chat_history(
 def _search_relevant_chunks_with_scores(
     query: str,
     arxiv_ids: list[str],
+    material_ids: list[str] | None = None,
     top_k: int = 5,
 ) -> tuple[list[str], list[float]]:
     """Qdrant から関連チャンクをベクトル検索し、テキストとスコアの両方を返す。"""
-    if not arxiv_ids:
+    if not arxiv_ids and not material_ids:
         return [], []
 
     try:
@@ -1023,16 +1157,19 @@ def _search_relevant_chunks_with_scores(
         return [], []
 
     try:
-        if len(arxiv_ids) == 1:
-            qfilter = Filter(must=[
-                FieldCondition(key="arxiv_id", match=MatchValue(value=arxiv_ids[0]))
-            ])
-        else:
-            from qdrant_client.models import Filter as QFilter
-            should_conditions = [
+        from qdrant_client.models import Filter as QFilter
+        should_conditions = []
+        for aid in (arxiv_ids or []):
+            should_conditions.append(
                 FieldCondition(key="arxiv_id", match=MatchValue(value=aid))
-                for aid in arxiv_ids
-            ]
+            )
+        for mid in (material_ids or []):
+            should_conditions.append(
+                FieldCondition(key="material_id", match=MatchValue(value=mid))
+            )
+        if len(should_conditions) == 1:
+            qfilter = Filter(must=[should_conditions[0]])
+        else:
             qfilter = QFilter(should=should_conditions)
 
         result = _qdrant().query_points(
