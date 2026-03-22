@@ -720,15 +720,23 @@ def get_chat_history(
     return LearningChatHistoryResponse(history=history)
 
 
-_LEARNING_SYSTEM_PROMPT = """あなたは学習者の深い理解を支援する家庭教師です。
+_LEARNING_SYSTEM_PROMPT = """あなたは素粒子物理学・場の量子論を専門とする学習者の深い理解を支援する家庭教師です。
 以下の原則に従ってください。
 
 **教育方針:**
-1. 学生の誤解を発見したら「訂正：」と明記し、なぜその誤解が生じやすいか説明してください。
-2. 概念の説明は具体的な数式、図、または例を使って行ってください。
+1. 学生の誤解を発見したら「訂正：」と明記し、**誤謬の構造的理由**を必ず含めてください。
+   - 「数式のこの項を見落としがちですが…」のように、数式レベルで誤解の原因を指摘
+   - 「〇〇と△△を混同しやすいですが…」のように、類似概念との混同パターンを説明
+   - 正答だけでなく、なぜ間違えやすいかの構造を必ず示す
+2. 概念の説明は具体的な数式（LaTeX）、ファインマン図の説明、または物理的直観を使って行ってください。
 3. 教材から引用できる場合は出典（セクション番号等）を明記してください。
 4. 説明の最後に、理解を確認するための質問をしてください。
 5. 関連する概念へのドリルダウン選択肢を提示してください。
+
+**数式の導出サポート:**
+- 数式の行間（導出）に関する質問には、前提となる数学的公式・定理を最初に提示してください。
+- ステップ・バイ・ステップで、各変形の物理的意味を添えて説明してください。
+- 例: 「ここで部分積分を使い、表面項が消えることを仮定すると…」
 
 **RAGコンテキスト利用:**
 - 提供される「教材チャンク」はベクトル検索で取得した関連箇所です。
@@ -736,9 +744,10 @@ _LEARNING_SYSTEM_PROMPT = """あなたは学習者の深い理解を支援する
 - コンテキストに含まれない情報について推測する場合はその旨を明記してください。
 
 **フォーマット:**
+- 数式は必ず LaTeX 記法で記述（インラインは `$...$`、ディスプレイは `$$...$$`）
 - 誤解の訂正が必要な場合は最初に「訂正：」と記述
 - 参照した教材のセクションがあれば言及
-- 回答の末尾に深掘りできるトピックを `[〇〇について詳しく聞く]` の形式で提示"""
+- 回答の末尾に深掘りできるトピックを `[〇〇について詳しく聞く]` の形式で提示（必ずこのフォーマットを使用）"""
 
 
 @app.post(
@@ -771,15 +780,43 @@ def learning_chat(
             break
     topic_title = topic_info["title"] if topic_info else topic_id
 
-    # 2. RAG: コースの教材に紐づいた arxiv_id を収集してチャンク検索
+    # 2. Adaptive Routing: 前提知識の自動判定
+    # Neo4j から現在のトピックの REQUIRES エッジ（前提知識）を検索
+    prerequisite_intervention = _check_prerequisites(
+        current_user["id"], course_id, course_data, topic_title, body.message
+    )
+    if prerequisite_intervention:
+        # 未習得の前提知識がある場合、LLMをスキップして逆質問を返す
+        _persist_chat_history(
+            current_user["id"], course_id, topic_id,
+            body.history, body.message, prerequisite_intervention,
+        )
+        return LearningChatResponse(answer=prerequisite_intervention, course_update=None)
+
+    # 3. RAG: コースの教材に紐づいた arxiv_id を収集してチャンク検索
     arxiv_ids = [
         s["arxiv_id"]
         for s in course_data.get("sources", [])
         if s.get("arxiv_id")
     ]
-    relevant_chunks = _search_relevant_chunks(body.message, arxiv_ids, top_k=5)
+    relevant_chunks, relevance_scores = _search_relevant_chunks_with_scores(
+        body.message, arxiv_ids, top_k=5
+    )
 
-    # 3. コンテキストブロックを構築
+    # 3a. フェイルセーフ: 関連チャンクが0件またはスコアが極端に低い場合はLLMをスキップ
+    _RELEVANCE_THRESHOLD = 0.35
+    if not relevant_chunks or (relevance_scores and max(relevance_scores) < _RELEVANCE_THRESHOLD):
+        failsafe_answer = (
+            "この点については提供文献に記述がありません。\n\n"
+            "別の角度から質問を試みるか、関連する教材を追加してください。\n\n"
+            f"[{topic_title}の基礎概念について詳しく聞く]"
+        )
+        _persist_chat_history(
+            current_user["id"], course_id, topic_id,
+            body.history, body.message, failsafe_answer,
+        )
+        return LearningChatResponse(answer=failsafe_answer, course_update=None)
+
     context_parts: list[str] = []
     if relevant_chunks:
         context_parts.append(
@@ -798,7 +835,7 @@ def learning_chat(
 
     context_block = "\n\n".join(context_parts) if context_parts else "(教材コンテキストなし)"
 
-    # 4. LLM メッセージ構築
+    # 5. LLM メッセージ構築
     course_title = course_data.get("title", course_id)
     messages: list[dict] = [
         {"role": "system", "content": _LEARNING_SYSTEM_PROMPT},
@@ -817,7 +854,7 @@ def learning_chat(
         messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": body.message})
 
-    # 5. LLM 呼び出し
+    # 6. LLM 呼び出し
     try:
         client = _openai()
         response = client.chat.completions.create(
@@ -830,17 +867,105 @@ def learning_chat(
         logger.exception("Learning chat LLM call failed for topic %s", topic_id)
         raise HTTPException(status_code=500, detail=f"Chat failed: {exc}") from exc
 
-    # 6. 誤解検出: LLMの応答に「訂正」が含まれていたらコースデータに追記
+    # 7. 誤解検出: LLMの応答に「訂正」が含まれていたらコースデータに追記
     course_update = None
     if topic_info and "訂正" in answer:
         course_update = _detect_and_record_misconception(
             current_user["id"], course_id, course_data, topic_id, body.message, answer
         )
 
-    # 7. チャット履歴を永続化
-    updated_history = body.history + [
-        {"role": "user", "content": body.message},
-        {"role": "assistant", "content": answer},
+    # 8. チャット履歴を永続化
+    _persist_chat_history(
+        current_user["id"], course_id, topic_id,
+        body.history, body.message, answer,
+    )
+
+    return LearningChatResponse(answer=answer, course_update=course_update)
+
+
+# ---------------------------------------------------------------------------
+# Adaptive Routing: 前提知識チェック (Task 2)
+# ---------------------------------------------------------------------------
+
+def _check_prerequisites(
+    user_id: str,
+    course_id: str,
+    course_data: dict,
+    topic_title: str,
+    user_message: str,
+) -> str | None:
+    """Neo4j の REQUIRES エッジから前提知識を検索し、未習得なら逆質問を返す。
+
+    Returns None if no intervention needed, otherwise returns the intervention message.
+    """
+    try:
+        driver = _neo4j_driver()
+        with driver.session() as session:
+            # トピック名またはユーザーの質問に関連するエンティティの REQUIRES エッジを検索
+            records = session.run(
+                """
+                MATCH (concept)-[r:REQUIRES]->(prereq)
+                WHERE concept.name CONTAINS $topic OR concept.value CONTAINS $topic
+                RETURN DISTINCT prereq.name AS prereq_name,
+                       prereq.value AS prereq_value
+                LIMIT 10
+                """,
+                topic=topic_title,
+            ).data()
+
+        if not records:
+            return None
+
+        # ユーザーの学習状態を確認: チャット履歴があるトピックは「習得済み」と見なす
+        learned_topics: set[str] = set()
+        for t in course_data.get("topics", []):
+            t_title = t.get("title", "").lower()
+            learned_topics.add(t_title)
+            # 概念名も追加
+            for concept in course_data.get("concepts", []):
+                if concept.get("status") in ("learned", "reviewed"):
+                    learned_topics.add(concept.get("name", "").lower())
+
+        # 未習得の前提知識を特定
+        unlearned_prereqs: list[str] = []
+        for rec in records:
+            prereq_name = rec.get("prereq_value") or rec.get("prereq_name") or ""
+            if prereq_name and prereq_name.lower() not in learned_topics:
+                unlearned_prereqs.append(prereq_name)
+
+        if not unlearned_prereqs:
+            return None
+
+        # 逆質問を生成
+        prereq_list = "、".join(unlearned_prereqs[:3])
+        return (
+            f"「{topic_title}」を理解するには、まず以下の前提知識を押さえる必要があります：\n\n"
+            f"**{prereq_list}**\n\n"
+            f"これらの概念については理解していますか？\n"
+            f"理解している場合はその旨を伝えてください。そうでなければ、前提知識から順に説明します。\n\n"
+            + "".join(f"[{p}について詳しく聞く]" for p in unlearned_prereqs[:3])
+        )
+    except Exception:
+        logger.warning("Prerequisite check failed, continuing without intervention", exc_info=True)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Chat history persistence helper
+# ---------------------------------------------------------------------------
+
+def _persist_chat_history(
+    user_id: str,
+    course_id: str,
+    topic_id: str,
+    history: list[dict],
+    user_message: str,
+    assistant_answer: str,
+) -> None:
+    """チャット履歴を Neo4j に永続化する。"""
+    updated_history = history + [
+        {"role": "user", "content": user_message},
+        {"role": "assistant", "content": assistant_answer},
     ]
     try:
         driver = _neo4j_driver()
@@ -852,7 +977,7 @@ def learning_chat(
                 MERGE (u)-[r:LEARNING_CHAT]->(lt)
                 SET r.history = $history, r.updated_at = $now
                 """,
-                user_id=current_user["id"],
+                user_id=user_id,
                 topic_id=topic_id,
                 course_id=course_id,
                 history=json.dumps(updated_history, ensure_ascii=False),
@@ -861,10 +986,59 @@ def learning_chat(
     except Exception:
         logger.exception(
             "Failed to persist learning chat for user=%s topic=%s",
-            current_user["id"], topic_id,
+            user_id, topic_id,
         )
 
-    return LearningChatResponse(answer=answer, course_update=course_update)
+
+# ---------------------------------------------------------------------------
+# RAG search with scores (Task 3: failsafe threshold)
+# ---------------------------------------------------------------------------
+
+def _search_relevant_chunks_with_scores(
+    query: str,
+    arxiv_ids: list[str],
+    top_k: int = 5,
+) -> tuple[list[str], list[float]]:
+    """Qdrant から関連チャンクをベクトル検索し、テキストとスコアの両方を返す。"""
+    if not arxiv_ids:
+        return [], []
+
+    try:
+        query_vector = _embed_text(query)
+    except Exception as exc:
+        logger.warning("Embedding failed: %s", exc)
+        return [], []
+
+    try:
+        if len(arxiv_ids) == 1:
+            qfilter = Filter(must=[
+                FieldCondition(key="arxiv_id", match=MatchValue(value=arxiv_ids[0]))
+            ])
+        else:
+            from qdrant_client.models import Filter as QFilter
+            should_conditions = [
+                FieldCondition(key="arxiv_id", match=MatchValue(value=aid))
+                for aid in arxiv_ids
+            ]
+            qfilter = QFilter(should=should_conditions)
+
+        result = _qdrant().query_points(
+            collection_name=_QDRANT_COLLECTION,
+            query=query_vector,
+            query_filter=qfilter,
+            limit=top_k,
+            with_payload=True,
+        )
+        texts = [
+            hit.payload.get("text", "")
+            for hit in result.points
+            if hit.payload
+        ]
+        scores = [hit.score for hit in result.points if hit.payload]
+        return texts, scores
+    except Exception as exc:
+        logger.warning("Qdrant search failed: %s", exc)
+        return [], []
 
 
 # ---------------------------------------------------------------------------
