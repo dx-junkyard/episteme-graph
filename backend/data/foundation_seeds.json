@@ -1,0 +1,202 @@
+[
+  {
+    "concept_name": "共有地の悲劇 (Tragedy of the Commons)",
+    "core_mechanism": "排除困難で競合的な共有資源に対し、各主体が私的利得（追加利用の便益）を最大化して利用量を増やすと、資源ストックが減少し再生・回復より消費が上回る。劣化は全員に薄く拡散され（外部性）、短期の「利用増＝得」の強化ループが優勢になる一方、長期の「枯渇＝損」の均衡ループは遅れて効くため、過剰利用が自己強化的に進む。個々の合理的行動が集団の非合理（パレート劣位）を作る点が核心。",
+    "variables": [
+      "共有資源ストック",
+      "利用者（主体）",
+      "個別利用量",
+      "再生率/回復率",
+      "排除コスト",
+      "監視・制裁",
+      "外部性（共有コスト）",
+      "ルール/権利配分"
+    ],
+    "cross_domain_examples": [
+      "クラウド/ネットワーク帯域の共用（過負荷とレート制限）",
+      "オープンソースのメンテナ負荷（利用者増→要求増→燃え尽き）",
+      "温室効果ガス削減（気候安定という共有財）"
+    ],
+    "key_references": [
+      "Hardin, G. (1968). The Tragedy of the Commons.",
+      "Lloyd, W. F. (1833). Two Lectures on the Checks to Population.",
+      "Gordon, H. S. (1954). The Economic Theory of a Common-Property Resource: The Fishery.",
+      "Ostrom, E. (1990). Governing the Commons: The Evolution of Institutions for Collective Action.",
+      "Ostrom, E. (2009). A General Framework for Analyzing Sustainability of Social-Ecological Systems."
+    ]
+  },
+  {
+    "concept_name": "囚人のジレンマ (Prisoner's Dilemma)",
+    "core_mechanism": "協力/裏切りの2戦略を持つ2主体の同時ゲームで、裏切りが支配戦略（相手に依らず得）になる利得順序（T>R>P>S）を持つため、合理的選択の帰結として相互裏切りがナッシュ均衡になる。しかし均衡利得Pは相互協力Rより低く、個別最適と集団最適が乖離する。反復・観察・評判・制裁で将来利得が内生化されると、協力均衡が成立し得る。協力を安定化する鍵は、相手の行動を未来に結びつける制度設計である。",
+    "variables": [
+      "プレイヤーA",
+      "プレイヤーB",
+      "戦略集合（協力/裏切り）",
+      "利得行列（T,R,P,S）",
+      "相互作用回数/割引率",
+      "情報・観察可能性",
+      "制裁/報酬",
+      "コミットメント可能性"
+    ],
+    "cross_domain_examples": [
+      "価格競争（値下げ）が相互に収益を毀損する構図",
+      "ドーピング/軍拡などのエスカレーション",
+      "サイバー防衛での攻撃者・防御者の投資競争"
+    ],
+    "key_references": [
+      "Flood, M. M. (1952). Some Experimental Games. RAND Research Memorandum RM-789-1.",
+      "Rapoport, A., & Chammah, A. M. (1965). Prisoner's Dilemma: A Study in Conflict and Cooperation.",
+      "Axelrod, R. (1984). The Evolution of Cooperation."
+    ]
+  },
+  {
+    "concept_name": "赤の女王仮説 (Red Queen Hypothesis)",
+    "core_mechanism": "種間相互作用（宿主-寄生者、捕食-被食、競争者など）で双方が適応すると、片方の適応はもう片方の相対適応度を下げ、適応景観そのものが動き続ける。結果として「現状維持のための継続的適応」という軍拡ループが生まれ、負の頻度依存選択が遺伝的多様性を保持しやすい。適応停止は相対的劣位を招くため、長期的に“走り続ける”動態が維持される。絶対的な“進歩”より、相対順位の維持が生存を左右する。",
+    "variables": [
+      "種Aの適応形質/適応度",
+      "種Bの適応形質/適応度",
+      "遺伝的多様性",
+      "変異率/組換え率",
+      "相互作用強度（感染率等）",
+      "世代時間",
+      "選択圧（頻度依存）",
+      "環境変化率"
+    ],
+    "cross_domain_examples": [
+      "マルウェアと検知/防御の“いたちごっこ”（サイバー赤の女王）",
+      "企業の機能競争（差別化→模倣→再差別化の循環）",
+      "広告配信/レコメンドとコンテンツ最適化の軍拡"
+    ],
+    "key_references": [
+      "Van Valen, L. (1973). A New Evolutionary Law.",
+      "Hamilton, W. D. (1980). Sex versus non-sex versus parasite.",
+      "Lively, C. M. (2010). A review of Red Queen models for the persistence of obligate sexual reproduction."
+    ]
+  },
+  {
+    "concept_name": "競争排除則 (Competitive Exclusion Principle)",
+    "core_mechanism": "資源利用が同一（ニッチ重複が大）で、同じ制限要因により成長が決まる2種が競争すると、わずかな優位が資源獲得を増やし（強化）、劣位種は資源不足→成長率低下→個体数減少→さらに資源獲得低下という自己強化に落ち込み、長期的に一方が排除される。共存には空間・時間の分割、攪乱、トレードオフ、資源多様化などで実効ニッチを分離する必要がある。数理的には競争系で安定平衡が片方の消失側に偏る。",
+    "variables": [
+      "種1個体数",
+      "種2個体数",
+      "制限資源量",
+      "資源利用効率",
+      "ニッチ重複度",
+      "環境の異質性",
+      "攪乱/移入率",
+      "適応・進化速度"
+    ],
+    "cross_domain_examples": [
+      "プラットフォーム市場での“勝者総取り”と参入障壁",
+      "検索/推薦アルゴリズムの競争での標準化・単一支配",
+      "研究資金・人材の集中による研究領域の淘汰"
+    ],
+    "key_references": [
+      "Gause, G. F. (1934). The Struggle for Existence.",
+      "Hardin, G. (1960). The Competitive Exclusion Principle."
+    ]
+  },
+  {
+    "concept_name": "成長の限界／成功の限界 (Limits to Growth / Success to the Successful)",
+    "core_mechanism": "成長の限界は、強化ループ（投資/学習→能力→産出→再投資）が成長を駆動するが、資源制約・容量・環境負荷・品質低下などの均衡ループが遅れて立ち上がり、逓減や停滞、遅延が大きいとオーバーシュートを招く構造。成功の限界は、複数主体が限られた資源（資金・注意・人材）を奪い合い、初期優位が資源配分を呼び込み（強化×2）、累積優位が格差を自己増幅して勝者固定・敗者縮退へ向かう。制約の正体が見えないまま“押し込む”と、遅延が増えて崩れやすい。",
+    "variables": [
+      "成長ストック（人口/資本/ユーザー数）",
+      "成長率",
+      "投資/学習/ネットワーク効果",
+      "制約容量（資源・環境・運用）",
+      "劣化/枯渇率",
+      "遅延（意思決定・建設・回復）",
+      "資源配分比率",
+      "累積優位/格差"
+    ],
+    "cross_domain_examples": [
+      "スタートアップの成長が採用・運用・品質の制約で頭打ちになる",
+      "都市交通が需要増で混雑（容量制約）に達し便益が逓減する",
+      "推薦アルゴリズムで人気が人気を呼ぶ“注目の複利”が格差を固定する"
+    ],
+    "key_references": [
+      "Forrester, J. W. (1971). World Dynamics.",
+      "Meadows, D. H., Meadows, D. L., Randers, J., & Behrens III, W. W. (1972). The Limits to Growth.",
+      "Senge, P. M. (1990). The Fifth Discipline: The Art and Practice of the Learning Organization.",
+      "Sterman, J. D. (2000). Business Dynamics: Systems Thinking and Modeling for a Complex World.",
+      "Merton, R. K. (1968). The Matthew Effect in Science."
+    ]
+  },
+  {
+    "concept_name": "予期せぬ結果の法則 (Law of Unintended Consequences)",
+    "core_mechanism": "介入（政策・設計・ルール変更）は、(1)無知や誤認、(2)短期利益の優先、(3)価値/規範の固定、(4)自己成就・自己破壊的予言、(5)相互依存と遅延を通じて、目的外の副作用や逆効果を生む。指標最適化が行動の適応（ゲーミング）を誘発すると、隠れたフィードバックが増幅し、問題が別部位へ転移したり長期劣化が進む。複雑系では“二次・三次の結果”が支配的になりやすい。対策は、因果仮説の検証と、システム境界を広げた評価（副作用の計測）にある。",
+    "variables": [
+      "介入（政策/設計/ルール変更）",
+      "目的指標",
+      "副作用指標",
+      "情報の欠落/誤差",
+      "時間遅れ",
+      "行為者の適応行動",
+      "結合度（相互依存）",
+      "外部性/転嫁経路"
+    ],
+    "cross_domain_examples": [
+      "モデレーション強化が“回避技術”を進化させる（いたちごっこ）",
+      "補助金・規制が市場構造を歪め逆に供給不足を生む",
+      "KPI最適化がゲーミングを誘発し本来目的を損なう（Goodhart化）"
+    ],
+    "key_references": [
+      "Merton, R. K. (1936). The Unanticipated Consequences of Purposive Social Action.",
+      "Scott, J. C. (1998). Seeing Like a State: How Certain Schemes to Improve the Human Condition Have Failed.",
+      "Perrow, C. (1984). Normal Accidents: Living with High-Risk Technologies."
+    ]
+  },
+  {
+    "concept_name": "相転移 (Phase Transition)",
+    "core_mechanism": "制御パラメータ（温度・密度・結合確率など）が臨界値を越えると、秩序変数（磁化、相、巨大連結成分サイズ等）が連続/不連続に変化し、微視ルールは同じでも巨視状態が急に切り替わる。臨界付近では相関長が伸び、ゆらぎが多スケール化し、応答が遅くなる（臨界スローダウン）。スケーリング則・普遍性が現れ、ネットワーク拡散や集団行動でも閾値カスケードとして相転移的転換が起きる。可視化の鍵は、どの変数が秩序変数になり得るかを見極めること。",
+    "variables": [
+      "制御パラメータ",
+      "秩序変数",
+      "臨界値",
+      "相関長",
+      "ゆらぎ強度",
+      "相互作用ネットワーク",
+      "応答時間/臨界スローダウン",
+      "ノイズ/温度"
+    ],
+    "cross_domain_examples": [
+      "金融ネットワークでの連鎖破綻（臨界点を超えると急崩壊）",
+      "SNS拡散での“バズ”発生（閾値カスケード）",
+      "交通流が密度閾値を超えて渋滞相へ遷移する"
+    ],
+    "key_references": [
+      "Stanley, H. E. (1971). Introduction to Phase Transitions and Critical Phenomena.",
+      "Wilson, K. G. (1971). Renormalization Group and Critical Phenomena. I. Renormalization Group and the Kadanoff Scaling Picture.",
+      "Goldenfeld, N. (1992). Lectures on Phase Transitions and the Renormalization Group.",
+      "Watts, D. J. (2002). A simple model of global cascades on random networks."
+    ]
+  },
+  {
+    "concept_name": "ボトルネック／制約理論 (Bottleneck / Theory of Constraints)",
+    "core_mechanism": "システムの到達可能な成果（スループット/アウトカム）は最も制約の強い工程・資源で上限が決まる。制約以外の局所効率を上げても、WIPや待ち行列が膨らむだけで全体は伸びない。TOCは①制約特定②制約の徹底活用（停止削減）③他工程を制約に従属（過剰生産抑制）④制約能力の増強⑤次の制約へ、の反復でフローを最適化する。ボトルネック前のバッファ設計が変動吸収の鍵となる。局所最適から全体最適へ視点を切り替える“焦点化”が理論の核。",
+    "variables": [
+      "システム目標（スループット/利益/アウトカム）",
+      "制約工程能力",
+      "需要/到着率",
+      "WIP/バッファ",
+      "リードタイム",
+      "ボトルネック利用率",
+      "スケジューリング規律（DBR等）",
+      "改善投資/能力増強"
+    ],
+    "cross_domain_examples": [
+      "ソフトウェア開発のデリバリーパイプライン（レビュー待ちが制約）",
+      "病院救急の患者フロー（検査・病床が制約）",
+      "教育/研修の育成パイプライン（指導者・実習枠が制約）"
+    ],
+    "key_references": [
+      "Goldratt, E. M., & Cox, J. (1984). The Goal: A Process of Ongoing Improvement.",
+      "Goldratt, E. M. (1990). What Is This Thing Called Theory of Constraints and How Should It Be Implemented?",
+      "Dettmer, H. W. (1997). Goldratt's Theory of Constraints: A Systems Approach to Continuous Improvement.",
+      "Mabin, V. J., & Balderstone, S. J. (2003). The performance of the theory of constraints methodology: Analysis and discussion of successful TOC applications.",
+      "Blackstone, J. H. (2001). Theory of constraints - A status report.",
+      "Hopp, W. J., & Spearman, M. L. (2011). Factory Physics: Third Edition."
+    ]
+  }
+]
+
