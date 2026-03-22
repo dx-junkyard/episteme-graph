@@ -227,38 +227,83 @@
     ca.innerHTML = html;
     ca.scrollTop = ca.scrollHeight;
 
-    // Bind drill-down buttons
-    ca.querySelectorAll(".dd button").forEach(function (btn) {
+    // Bind suggest buttons (drill-down)
+    ca.querySelectorAll(".suggest-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
-        sendMessage(this.textContent.replace(/\s*↗$/, ""));
+        var suggest = this.getAttribute("data-suggest") || this.textContent.replace(/\s*↗$/, "");
+        sendMessage(suggest);
       });
     });
+
+    // Render KaTeX for any remaining raw LaTeX (fallback)
+    if (window.renderMathInElement) {
+      try {
+        window.renderMathInElement(ca, {
+          delimiters: [
+            { left: "$$", right: "$$", display: true },
+            { left: "$", right: "$", display: false },
+          ],
+          throwOnError: false,
+        });
+      } catch (e) { /* KaTeX not yet loaded */ }
+    }
   }
 
   function renderAiContent(text) {
-    // Simple markdown-like rendering
-    let html = text;
-    // Escape HTML first
-    html = escHtml(html);
+    // Preserve LaTeX expressions before HTML escaping
+    var latexBlocks = [];
+    var preserved = text;
+
+    // Preserve display math $$...$$ first
+    preserved = preserved.replace(/\$\$([\s\S]+?)\$\$/g, function (m, expr) {
+      var idx = latexBlocks.length;
+      latexBlocks.push({ display: true, expr: expr });
+      return "\x00LATEX_BLOCK_" + idx + "\x00";
+    });
+    // Preserve inline math $...$
+    preserved = preserved.replace(/\$([^\$\n]+?)\$/g, function (m, expr) {
+      var idx = latexBlocks.length;
+      latexBlocks.push({ display: false, expr: expr });
+      return "\x00LATEX_BLOCK_" + idx + "\x00";
+    });
+
+    // Extract drill-down suggestions [〇〇について詳しく聞く] before escaping
+    var suggestions = [];
+    preserved = preserved.replace(/\[([^\]]*について詳しく聞く[^\]]*)\]/g, function (_, s) {
+      suggestions.push(s);
+      return "\x00SUGGEST_" + (suggestions.length - 1) + "\x00";
+    });
+
+    // Escape HTML
+    var html = escHtml(preserved);
     // Bold
     html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-    // Inline code
+    // Inline code (but not LaTeX placeholders)
     html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
     // Line breaks → paragraphs
     html = html.split("\n\n").map(function (p) { return "<p>" + p + "</p>"; }).join("");
     html = html.replace(/\n/g, "<br>");
 
-    // Extract drill-down suggestions [〇〇について詳しく聞く]
-    const suggestions = [];
-    html = html.replace(/\[([^\]]+)\]/g, function (_, s) {
-      suggestions.push(s);
-      return "";
+    // Restore LaTeX blocks
+    html = html.replace(/\x00LATEX_BLOCK_(\d+)\x00/g, function (_, idx) {
+      var block = latexBlocks[parseInt(idx)];
+      try {
+        return window.katex
+          ? window.katex.renderToString(block.expr, { displayMode: block.display, throwOnError: false })
+          : (block.display ? "$$" + block.expr + "$$" : "$" + block.expr + "$");
+      } catch (e) {
+        return block.display ? "$$" + escHtml(block.expr) + "$$" : "$" + escHtml(block.expr) + "$";
+      }
     });
 
+    // Restore suggestions as placeholder (remove from inline text)
+    html = html.replace(/\x00SUGGEST_(\d+)\x00/g, "");
+
+    // Render suggestion buttons
     if (suggestions.length > 0) {
       html += '<div class="dd">';
       suggestions.forEach(function (s) {
-        html += "<button>" + s + " ↗</button>";
+        html += '<button class="suggest-btn" data-suggest="' + escHtml(s) + '">' + escHtml(s) + ' ↗</button>';
       });
       html += "</div>";
     }
