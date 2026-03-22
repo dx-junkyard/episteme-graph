@@ -19,6 +19,7 @@ POST /api/learning/courses/{cid}/topics/{tid}/chat       RAGチャット
 POST /api/admin/materials/upload                         PDF教材アップロード
 GET  /api/admin/materials                                教材一覧
 GET  /api/admin/materials/{material_id}                  教材詳細(グラフ構造)
+POST /api/admin/course-builder/chat                     コース構築AIチャット
 GET  /healthz                                            ヘルスチェック
 """
 
@@ -287,6 +288,18 @@ class LearningChatResponse(BaseModel):
 
 class LearningChatHistoryResponse(BaseModel):
     history: list[dict]
+
+
+class CourseBuilderChatRequest(BaseModel):
+    """コース構築AIチャットリクエスト。"""
+    message: str
+    history: list[dict] = []
+
+
+class CourseBuilderChatResponse(BaseModel):
+    """コース構築AIチャットレスポンス。"""
+    answer: str
+    course_draft: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1552,6 +1565,157 @@ def get_material(
         uploaded_at=record.get("uploaded_at", ""),
         knowledge_graph=kg,
     )
+
+
+# ---------------------------------------------------------------------------
+# Admin: Course Builder AI Chat
+# ---------------------------------------------------------------------------
+
+_COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（シラバス）を設計するのを支援するAIアシスタントです。
+
+**あなたの役割:**
+- 教員の要望に基づいて、体系的な学習コースの構成案を段階的に作成・改善する
+- 不足している前提知識や学習順序の問題を指摘する
+- 各章・トピックが論理的に繋がるよう構成を提案する
+
+**コース構成のJSONスキーマ (course_draft):**
+生成するコース構成案は以下の形式に従ってください:
+{
+  "title": "コースタイトル",
+  "target_audience": "対象者（例: 物理学専攻の大学院1年生）",
+  "goal": "到達目標",
+  "prerequisites": ["前提知識1", "前提知識2"],
+  "chapters": [
+    {
+      "title": "章タイトル",
+      "topics": [
+        {"title": "トピック名"},
+        {"title": "トピック名"}
+      ]
+    }
+  ],
+  "concepts": [
+    {"name": "概念名", "children": ["子概念1", "子概念2"]}
+  ],
+  "sources": [
+    {"title": "教材タイトル", "subtitle": "補足情報"}
+  ]
+}
+
+**対話の進め方:**
+1. まず教員の要望（テーマ、対象者、使用教材等）をヒアリングする
+2. 初期のコース構成案を提示する
+3. 教員のフィードバックに基づいて構成案を改善する
+4. 前提知識の不足や学習順序の問題があれば指摘する
+
+**重要なルール:**
+- 応答は必ず日本語で行う
+- コース構成案を提示・更新する場合は、応答テキストの最後に `---COURSE_DRAFT_JSON---` という区切り文字の後にJSONを出力する
+- JSONは上記スキーマに従った valid JSON であること
+- 構成案がまだ不完全な場合でも、現時点の案を出力する
+- 教員が単なる質問をしている場合（構成変更を伴わない場合）は区切り文字とJSONを出力しない"""
+
+
+@app.post(
+    "/api/admin/course-builder/chat",
+    response_model=CourseBuilderChatResponse,
+)
+def course_builder_chat(
+    body: CourseBuilderChatRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> CourseBuilderChatResponse:
+    """教員がAIと対話しながらコースを設計するエンドポイント。
+
+    LLMにコース構成のスキーマを教え、教員の要望に基づいて
+    コース構成案を段階的に生成・更新する。
+    """
+    messages: list[dict] = [
+        {"role": "system", "content": _COURSE_BUILDER_SYSTEM_PROMPT},
+    ]
+
+    # 利用可能な教材情報をコンテキストに含める
+    try:
+        driver = _neo4j_driver()
+        with driver.session() as session:
+            records = session.run(
+                """
+                MATCH (u:User {id: $user_id})-[:UPLOADED]->(m:Material)
+                WHERE m.status = 'completed'
+                RETURN m.title AS title, m.filename AS filename,
+                       m.knowledge_graph AS kg
+                """,
+                user_id=current_user["id"],
+            ).data()
+
+        if records:
+            materials_ctx = "## 利用可能な教材:\n"
+            for r in records:
+                materials_ctx += f"- {r.get('title', r.get('filename', ''))}"
+                if r.get("kg"):
+                    try:
+                        kg = json.loads(r["kg"])
+                        if kg.get("domain"):
+                            materials_ctx += f" (分野: {kg['domain']})"
+                    except Exception:
+                        pass
+                materials_ctx += "\n"
+            messages.append({
+                "role": "user",
+                "content": materials_ctx + "\n上記の教材が利用可能です。",
+            })
+            messages.append({
+                "role": "assistant",
+                "content": "承知しました。これらの教材を踏まえてコース設計を支援します。",
+            })
+    except Exception:
+        logger.warning("Failed to load materials context for course builder", exc_info=True)
+
+    # 会話履歴を追加
+    for turn in body.history:
+        messages.append({"role": turn["role"], "content": turn["content"]})
+    messages.append({"role": "user", "content": body.message})
+
+    # LLM呼び出し
+    try:
+        client = _openai()
+        response = client.chat.completions.create(
+            model=_OPENAI_ANALYSIS_MODEL,
+            messages=messages,
+            temperature=0.4,
+        )
+        raw_answer = response.choices[0].message.content or ""
+    except Exception as exc:
+        logger.exception("Course builder chat LLM call failed")
+        raise HTTPException(status_code=500, detail=f"Chat failed: {exc}") from exc
+
+    # course_draft JSONを分離
+    answer = raw_answer
+    course_draft = None
+
+    if "---COURSE_DRAFT_JSON---" in raw_answer:
+        parts = raw_answer.split("---COURSE_DRAFT_JSON---", 1)
+        answer = parts[0].strip()
+        json_part = parts[1].strip()
+        # マークダウンコードフェンスを除去
+        if json_part.startswith("```"):
+            json_part = json_part.split("\n", 1)[1] if "\n" in json_part else json_part[3:]
+        if json_part.endswith("```"):
+            json_part = json_part[:-3]
+        json_part = json_part.strip()
+        if json_part.startswith("json"):
+            json_part = json_part[4:].strip()
+        try:
+            course_draft = json.loads(json_part)
+        except Exception:
+            logger.warning("Failed to parse course_draft JSON: %s", json_part[:200])
+
+    logger.info(
+        "Course builder chat for user=%s, draft=%s",
+        current_user["id"],
+        "yes" if course_draft else "no",
+    )
+
+    return CourseBuilderChatResponse(answer=answer, course_draft=course_draft)
 
 
 # ---------------------------------------------------------------------------
