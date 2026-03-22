@@ -624,7 +624,39 @@
       streakEl.style.color = "var(--color-text-success)";
     }
 
-    const usernameEl = document.getElementById("username");
+    renderSidebar();
+    if (state.currentTopicId) {
+      state.chatMessages = await loadChatHistory(state.courseId, state.currentTopicId);
+    }
+    renderChat();
+    renderRightPanel();
+  }
+
+  // ── Utilities ──────────────────────────────────────────────────────
+  function escHtml(s) {
+    if (!s) return "";
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  // ── Logout ───────────────────────────────────────────────────────
+  function initLogout() {
+    var btn = document.getElementById("logout-btn");
+    if (btn) {
+      btn.addEventListener("click", function () {
+        state.token = null;
+        state.username = null;
+        localStorage.removeItem("eg_token");
+        localStorage.removeItem("eg_username");
+        localStorage.removeItem("eg_course");
+        renderAuth();
+      });
+    }
+  }
+
+  // ── Role-based UI setup ───────────────────────────────────────────
+  function setupRoleUI() {
+    // Show username
+    var usernameEl = document.getElementById("username");
     if (usernameEl) usernameEl.textContent = state.username || "";
 
     // Show admin link for TEACHER / SYSTEM_ADMIN
@@ -643,19 +675,6 @@
         topbarR.insertBefore(adminLink, topbarR.firstChild);
       }
     }
-
-    renderSidebar();
-    if (state.currentTopicId) {
-      state.chatMessages = await loadChatHistory(state.courseId, state.currentTopicId);
-    }
-    renderChat();
-    renderRightPanel();
-  }
-
-  // ── Utilities ──────────────────────────────────────────────────────
-  function escHtml(s) {
-    if (!s) return "";
-    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
   // ── Init ───────────────────────────────────────────────────────────
@@ -664,8 +683,10 @@
       renderAuth();
       return;
     }
+    setupRoleUI();
     initTabs();
     initInput();
+    initLogout();
     await initCourseSelector();
   }
 
