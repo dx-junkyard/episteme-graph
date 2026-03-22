@@ -9,12 +9,27 @@
   const state = {
     token: localStorage.getItem("eg_token") || null,
     username: localStorage.getItem("eg_username") || null,
+    role: null,
     courseId: localStorage.getItem("eg_course") || null,
     course: null, // loaded course data
     currentTopicId: null,
     chatMessages: [], // {role, content}
     sending: false,
   };
+
+  function parseJwtPayload(token) {
+    try {
+      var parts = token.split(".");
+      if (parts.length !== 3) return null;
+      var payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+      return JSON.parse(atob(payload));
+    } catch (e) { return null; }
+  }
+
+  if (state.token) {
+    var decoded = parseJwtPayload(state.token);
+    if (decoded) state.role = decoded.role || "STUDENT";
+  }
 
   // ── API helpers ────────────────────────────────────────────────────
   const API = "/api";
@@ -95,6 +110,8 @@
         const data = await res.json();
         state.token = data.access_token;
         state.username = username;
+        var decoded = parseJwtPayload(data.access_token);
+        state.role = decoded ? (decoded.role || "STUDENT") : "STUDENT";
         localStorage.setItem("eg_token", data.access_token);
         localStorage.setItem("eg_username", username);
         overlay.remove();
@@ -609,6 +626,23 @@
 
     const usernameEl = document.getElementById("username");
     if (usernameEl) usernameEl.textContent = state.username || "";
+
+    // Show admin link for TEACHER / SYSTEM_ADMIN
+    if (state.role === "TEACHER" || state.role === "SYSTEM_ADMIN") {
+      var topbarR = document.querySelector(".topbar-r");
+      if (topbarR && !document.getElementById("admin-link")) {
+        var adminLink = document.createElement("a");
+        adminLink.id = "admin-link";
+        adminLink.href = "/admin.html";
+        adminLink.textContent = "管理画面へ";
+        adminLink.style.cssText = "color:var(--color-text-info);text-decoration:none;font-size:12px";
+        var sep = document.createElement("span");
+        sep.style.opacity = ".3";
+        sep.textContent = "|";
+        topbarR.insertBefore(sep, topbarR.firstChild);
+        topbarR.insertBefore(adminLink, topbarR.firstChild);
+      }
+    }
 
     renderSidebar();
     if (state.currentTopicId) {

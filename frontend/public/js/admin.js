@@ -9,6 +9,7 @@
   var state = {
     token: localStorage.getItem("eg_token") || null,
     username: localStorage.getItem("eg_username") || null,
+    role: null,
     chatHistory: [],
     chatMessages: [],
     courseDraft: null,
@@ -16,6 +17,20 @@
   };
 
   var API = "/api";
+
+  function parseJwtPayload(token) {
+    try {
+      var parts = token.split(".");
+      if (parts.length !== 3) return null;
+      var payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+      return JSON.parse(atob(payload));
+    } catch (e) { return null; }
+  }
+
+  if (state.token) {
+    var decoded = parseJwtPayload(state.token);
+    if (decoded) state.role = decoded.role || "STUDENT";
+  }
 
   // ── API helpers ────────────────────────────────────────────────────
   function apiFetch(path, opts) {
@@ -112,6 +127,8 @@
         .then(function (data) {
           state.token = data.access_token;
           state.username = username;
+          var decoded = parseJwtPayload(data.access_token);
+          state.role = decoded ? (decoded.role || "STUDENT") : "STUDENT";
           localStorage.setItem("eg_token", data.access_token);
           localStorage.setItem("eg_username", username);
           overlay.remove();
@@ -516,14 +533,166 @@
     });
   }
 
+  // ── User Management ────────────────────────────────────────────────
+  function initUserManagement() {
+    // 学生管理タブ (TEACHER)
+    var studentForm = document.getElementById("student-form");
+    if (studentForm) {
+      studentForm.addEventListener("submit", function (e) {
+        e.preventDefault();
+        var username = document.getElementById("student-username").value.trim();
+        var email = document.getElementById("student-email").value.trim();
+        var password = document.getElementById("student-password").value;
+        var msgEl = document.getElementById("student-msg");
+        if (!username || !password) return;
+        msgEl.textContent = "作成中...";
+        msgEl.className = "upload-status upload-status-info";
+        apiFetch("/admin/users/student", {
+          method: "POST",
+          body: JSON.stringify({ username: username, email: email || username + "@learning.local", password: password }),
+        })
+          .then(function (res) {
+            if (res.status === 409) throw { detail: "そのユーザー名は既に使用されています" };
+            if (!res.ok) return res.json().then(function (d) { throw d; });
+            return res.json();
+          })
+          .then(function (data) {
+            msgEl.textContent = "学生「" + escHtml(data.username) + "」を作成しました。";
+            msgEl.className = "upload-status upload-status-success";
+            studentForm.reset();
+          })
+          .catch(function (err) {
+            msgEl.textContent = "作成に失敗しました: " + (err.detail || "不明なエラー");
+            msgEl.className = "upload-status upload-status-error";
+          });
+      });
+    }
+
+    // 教員管理タブ (SYSTEM_ADMIN)
+    var teacherForm = document.getElementById("teacher-form");
+    if (teacherForm) {
+      teacherForm.addEventListener("submit", function (e) {
+        e.preventDefault();
+        var username = document.getElementById("teacher-username").value.trim();
+        var email = document.getElementById("teacher-email").value.trim();
+        var password = document.getElementById("teacher-password").value;
+        var msgEl = document.getElementById("teacher-msg");
+        if (!username || !password) return;
+        msgEl.textContent = "作成中...";
+        msgEl.className = "upload-status upload-status-info";
+        apiFetch("/admin/users/teacher", {
+          method: "POST",
+          body: JSON.stringify({ username: username, email: email || username + "@learning.local", password: password }),
+        })
+          .then(function (res) {
+            if (res.status === 409) throw { detail: "そのユーザー名は既に使用されています" };
+            if (!res.ok) return res.json().then(function (d) { throw d; });
+            return res.json();
+          })
+          .then(function (data) {
+            msgEl.textContent = "教員「" + escHtml(data.username) + "」を作成しました。";
+            msgEl.className = "upload-status upload-status-success";
+            teacherForm.reset();
+          })
+          .catch(function (err) {
+            msgEl.textContent = "作成に失敗しました: " + (err.detail || "不明なエラー");
+            msgEl.className = "upload-status upload-status-error";
+          });
+      });
+    }
+  }
+
+  // ── Role-based UI setup ───────────────────────────────────────────
+  function setupRoleBasedUI() {
+    // Redirect STUDENT to learning page
+    if (state.role === "STUDENT") {
+      window.location.href = "/";
+      return false;
+    }
+
+    var tabsEl = document.getElementById("adminTabs");
+
+    // Show student management tab for TEACHER
+    if (state.role === "TEACHER" || state.role === "SYSTEM_ADMIN") {
+      var studentTab = document.createElement("button");
+      studentTab.className = "admin-tab";
+      studentTab.dataset.tab = "students";
+      studentTab.textContent = "学生管理";
+      tabsEl.appendChild(studentTab);
+    }
+
+    // Show teacher management tab for SYSTEM_ADMIN only
+    if (state.role === "SYSTEM_ADMIN") {
+      var teacherTab = document.createElement("button");
+      teacherTab.className = "admin-tab";
+      teacherTab.dataset.tab = "teachers";
+      teacherTab.textContent = "教員管理";
+      tabsEl.appendChild(teacherTab);
+    }
+
+    // Create student management panel
+    var studentPanel = document.createElement("div");
+    studentPanel.className = "admin-panel";
+    studentPanel.id = "tab-students";
+    studentPanel.innerHTML =
+      '<div class="admin-section">' +
+        '<h3 class="admin-section-title">学生アカウント追加</h3>' +
+        '<form id="student-form" class="admin-user-form">' +
+          '<div class="admin-form-row">' +
+            '<label>ユーザー名 <input id="student-username" type="text" required placeholder="student_name"></label>' +
+          '</div>' +
+          '<div class="admin-form-row">' +
+            '<label>メールアドレス <input id="student-email" type="email" placeholder="student@example.com"></label>' +
+          '</div>' +
+          '<div class="admin-form-row">' +
+            '<label>パスワード <input id="student-password" type="password" required placeholder="パスワード"></label>' +
+          '</div>' +
+          '<button type="submit" class="admin-action-btn">学生を作成</button>' +
+        '</form>' +
+        '<div id="student-msg" class="upload-status"></div>' +
+      '</div>';
+    tabsEl.parentElement.appendChild(studentPanel);
+
+    // Create teacher management panel (SYSTEM_ADMIN only)
+    if (state.role === "SYSTEM_ADMIN") {
+      var teacherPanel = document.createElement("div");
+      teacherPanel.className = "admin-panel";
+      teacherPanel.id = "tab-teachers";
+      teacherPanel.innerHTML =
+        '<div class="admin-section">' +
+          '<h3 class="admin-section-title">教員アカウント追加</h3>' +
+          '<form id="teacher-form" class="admin-user-form">' +
+            '<div class="admin-form-row">' +
+              '<label>ユーザー名 <input id="teacher-username" type="text" required placeholder="teacher_name"></label>' +
+            '</div>' +
+            '<div class="admin-form-row">' +
+              '<label>メールアドレス <input id="teacher-email" type="email" placeholder="teacher@example.com"></label>' +
+            '</div>' +
+            '<div class="admin-form-row">' +
+              '<label>パスワード <input id="teacher-password" type="password" required placeholder="パスワード"></label>' +
+            '</div>' +
+            '<button type="submit" class="admin-action-btn">教員を作成</button>' +
+          '</form>' +
+          '<div id="teacher-msg" class="upload-status"></div>' +
+        '</div>';
+      tabsEl.parentElement.appendChild(teacherPanel);
+    }
+
+    return true;
+  }
+
   // ── Init ───────────────────────────────────────────────────────────
   function initApp() {
+    // Role-based access control
+    if (!setupRoleBasedUI()) return;
+
     var usernameEl = document.getElementById("admin-username");
     if (usernameEl) usernameEl.textContent = state.username || "";
 
     initTabs();
     initUpload();
     initCourseBuilder();
+    initUserManagement();
     initLogout();
     loadMaterials();
 
@@ -532,6 +701,11 @@
 
   // Boot
   document.addEventListener("DOMContentLoaded", function () {
+    // Check role before showing auth or app
+    if (state.token && state.role === "STUDENT") {
+      window.location.href = "/";
+      return;
+    }
     renderAuth();
     if (state.token) initApp();
   });
