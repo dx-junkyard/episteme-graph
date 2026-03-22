@@ -27,6 +27,7 @@ GET  /healthz                                            ヘルスチェック
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import hashlib
 import json
@@ -102,31 +103,44 @@ async def _lifespan(application: FastAPI):
         logger.critical("CRITICAL: ADMIN_PASSWORD is not set in .env.")
         sys.exit(1)
 
-    driver = _neo4j_driver()
-    with driver.session() as session:
-        existing = session.run(
-            "MATCH (u:User {username: 'Administrator'}) RETURN u.id AS id LIMIT 1"
-        ).single()
-        if not existing:
-            admin_id = str(uuid.uuid4())
-            hashed_pw = _hash_password(_ADMIN_PASSWORD)
-            session.run(
-                """
-                CREATE (u:User {
-                    id:              $id,
-                    username:        'Administrator',
-                    email:           'admin@system.local',
-                    hashed_password: $hashed_password,
-                    role:            $role
-                })
-                """,
-                id=admin_id,
-                hashed_password=hashed_pw,
-                role=ROLE_SYSTEM_ADMIN,
-            )
-            logger.info("Created system administrator account 'Administrator' (id=%s)", admin_id)
-        else:
-            logger.info("System administrator account 'Administrator' already exists.")
+    # Neo4jの起動を待つ（最大30秒）
+    max_retries = 10
+    for attempt in range(max_retries):
+        try:
+            driver = _neo4j_driver()
+            with driver.session() as session:
+                existing = session.run(
+                    "MATCH (u:User {username: 'Administrator'}) RETURN u.id AS id LIMIT 1"
+                ).single()
+                if not existing:
+                    admin_id = str(uuid.uuid4())
+                    hashed_pw = _hash_password(_ADMIN_PASSWORD)
+                    session.run(
+                        """
+                        CREATE (u:User {
+                            id:              $id,
+                            username:        'Administrator',
+                            email:           'admin@system.local',
+                            hashed_password: $hashed_password,
+                            role:            $role
+                        })
+                        """,
+                        id=admin_id,
+                        hashed_password=hashed_pw,
+                        role=ROLE_SYSTEM_ADMIN,
+                    )
+                    logger.info("Created system administrator account 'Administrator' (id=%s)", admin_id)
+                else:
+                    logger.info("System administrator account 'Administrator' already exists.")
+            break
+        except Exception as exc:
+            if attempt < max_retries - 1:
+                wait = 3 * (attempt + 1)
+                logger.warning("Neo4j not ready (attempt %d/%d): %s. Retrying in %ds...", attempt + 1, max_retries, exc, wait)
+                await asyncio.sleep(wait)
+            else:
+                logger.critical("Failed to connect to Neo4j after %d attempts.", max_retries)
+                sys.exit(1)
     yield
 
 
