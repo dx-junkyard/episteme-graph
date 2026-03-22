@@ -210,7 +210,7 @@ body {
 
 /* ── Main chat area ─────────────────────────────────────────────── */
 .mn {
-  overflow-y: auto;
+  overflow: hidden;
   padding: 20px;
   display: flex;
   flex-direction: column;

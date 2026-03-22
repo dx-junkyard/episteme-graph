@@ -658,6 +658,21 @@
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
+  // ── Logout ───────────────────────────────────────────────────────
+  function initLogout() {
+    var btn = document.getElementById("logout-btn");
+    if (btn) {
+      btn.addEventListener("click", function () {
+        state.token = null;
+        state.username = null;
+        localStorage.removeItem("eg_token");
+        localStorage.removeItem("eg_username");
+        localStorage.removeItem("eg_course");
+        renderAuth();
+      });
+    }
+  }
+
   // ── Init ───────────────────────────────────────────────────────────
   async function initApp() {
     if (!state.token) {
@@ -666,6 +681,7 @@
     }
     initTabs();
     initInput();
+    initLogout();
     await initCourseSelector();
   }
 
