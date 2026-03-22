@@ -20,18 +20,23 @@ POST /api/admin/materials/upload                         PDF教材アップロ�
 GET  /api/admin/materials                                教材一覧
 GET  /api/admin/materials/{material_id}                  教材詳細(グラフ構造)
 POST /api/admin/course-builder/chat                     コース構築AIチャット
+POST /api/admin/users/student                           学生アカウント作成 (TEACHER)
+POST /api/admin/users/teacher                           教員アカウント作成 (SYSTEM_ADMIN)
 GET  /healthz                                            ヘルスチェック
 """
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import hashlib
 import json
 import logging
 import os
+import sys
 import threading
 import uuid
+from contextlib import asynccontextmanager
 from functools import lru_cache
 
 import jwt
@@ -72,7 +77,17 @@ _MINIO_ENDPOINT: str = os.environ.get("MINIO_ENDPOINT", "minio:9000")
 _MINIO_ACCESS_KEY: str = os.environ.get("MINIO_ACCESS_KEY", "minioadmin")
 _MINIO_SECRET_KEY: str = os.environ.get("MINIO_SECRET_KEY", "minioadmin")
 
+_ADMIN_PASSWORD: str = os.environ.get("ADMIN_PASSWORD", "")
+
 _pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# ---------------------------------------------------------------------------
+# Role definitions
+# ---------------------------------------------------------------------------
+
+ROLE_STUDENT = "STUDENT"
+ROLE_TEACHER = "TEACHER"
+ROLE_SYSTEM_ADMIN = "SYSTEM_ADMIN"
 
 # ---------------------------------------------------------------------------
 # Singletons
@@ -80,7 +95,56 @@ _pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 _bearer = HTTPBearer()
 
-app = FastAPI(title="Episteme Graph API", version="0.1.0")
+
+@asynccontextmanager
+async def _lifespan(application: FastAPI):
+    """起動時にシステム管理者アカウントを初期化する。"""
+    if not _ADMIN_PASSWORD:
+        logger.critical("CRITICAL: ADMIN_PASSWORD is not set in .env.")
+        sys.exit(1)
+
+    # Neo4jの起動を待つ（最大30秒）
+    max_retries = 10
+    for attempt in range(max_retries):
+        try:
+            driver = _neo4j_driver()
+            with driver.session() as session:
+                existing = session.run(
+                    "MATCH (u:User {username: 'Administrator'}) RETURN u.id AS id LIMIT 1"
+                ).single()
+                if not existing:
+                    admin_id = str(uuid.uuid4())
+                    hashed_pw = _hash_password(_ADMIN_PASSWORD)
+                    session.run(
+                        """
+                        CREATE (u:User {
+                            id:              $id,
+                            username:        'Administrator',
+                            email:           'admin@system.local',
+                            hashed_password: $hashed_password,
+                            role:            $role
+                        })
+                        """,
+                        id=admin_id,
+                        hashed_password=hashed_pw,
+                        role=ROLE_SYSTEM_ADMIN,
+                    )
+                    logger.info("Created system administrator account 'Administrator' (id=%s)", admin_id)
+                else:
+                    logger.info("System administrator account 'Administrator' already exists.")
+            break
+        except Exception as exc:
+            if attempt < max_retries - 1:
+                wait = 3 * (attempt + 1)
+                logger.warning("Neo4j not ready (attempt %d/%d): %s. Retrying in %ds...", attempt + 1, max_retries, exc, wait)
+                await asyncio.sleep(wait)
+            else:
+                logger.critical("Failed to connect to Neo4j after %d attempts.", max_retries)
+                sys.exit(1)
+    yield
+
+
+app = FastAPI(title="Episteme Graph API", version="0.1.0", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -117,9 +181,9 @@ def _verify_password(plain: str, hashed: str) -> bool:
     return _pwd_context.verify(plain, hashed)
 
 
-def _create_token(user_id: str, username: str, email: str) -> str:
+def _create_token(user_id: str, username: str, email: str, role: str = ROLE_STUDENT) -> str:
     expire = datetime.datetime.utcnow() + datetime.timedelta(hours=_JWT_EXPIRE_HOURS)
-    payload = {"sub": user_id, "username": username, "email": email, "exp": expire}
+    payload = {"sub": user_id, "username": username, "email": email, "role": role, "exp": expire}
     return jwt.encode(payload, _JWT_SECRET, algorithm=_JWT_ALGORITHM)
 
 
@@ -135,11 +199,26 @@ def _get_current_user(
             "id": payload["sub"],
             "username": payload["username"],
             "email": payload["email"],
+            "role": payload.get("role", ROLE_STUDENT),
         }
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def _require_teacher(current_user: dict = Depends(_get_current_user)) -> dict:
+    """TEACHER または SYSTEM_ADMIN ロールを要求する。"""
+    if current_user["role"] not in (ROLE_TEACHER, ROLE_SYSTEM_ADMIN):
+        raise HTTPException(status_code=403, detail="Teacher or admin role required")
+    return current_user
+
+
+def _require_system_admin(current_user: dict = Depends(_get_current_user)) -> dict:
+    """SYSTEM_ADMIN ロールを要求する。"""
+    if current_user["role"] != ROLE_SYSTEM_ADMIN:
+        raise HTTPException(status_code=403, detail="System admin role required")
+    return current_user
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +245,14 @@ class UserOut(BaseModel):
     id: str
     username: str
     email: str
+    role: str = ROLE_STUDENT
+
+
+class CreateUserRequest(BaseModel):
+    """学生または教員アカウント作成リクエスト。"""
+    username: str
+    email: str
+    password: str
 
 
 class MaterialOut(BaseModel):
@@ -1264,7 +1351,7 @@ def _detect_and_record_misconception(
 
 @app.post("/api/auth/register", response_model=TokenResponse, status_code=201)
 def auth_register(body: RegisterRequest) -> TokenResponse:
-    """新規ユーザーを Neo4j に登録し、JWT を返す。"""
+    """新規ユーザーを Neo4j に登録し、JWT を返す。デフォルトは STUDENT ロール。"""
     driver = _neo4j_driver()
     with driver.session() as session:
         existing = session.run(
@@ -1282,17 +1369,19 @@ def auth_register(body: RegisterRequest) -> TokenResponse:
                 id:              $id,
                 username:        $username,
                 email:           $email,
-                hashed_password: $hashed_password
+                hashed_password: $hashed_password,
+                role:            $role
             })
             """,
             id=user_id,
             username=body.username,
             email=body.email,
             hashed_password=hashed_pw,
+            role=ROLE_STUDENT,
         )
 
-    logger.info("Registered new user '%s' (id=%s)", body.username, user_id)
-    return TokenResponse(access_token=_create_token(user_id, body.username, body.email))
+    logger.info("Registered new user '%s' (id=%s, role=STUDENT)", body.username, user_id)
+    return TokenResponse(access_token=_create_token(user_id, body.username, body.email, ROLE_STUDENT))
 
 
 @app.post("/api/auth/login", response_model=TokenResponse)
@@ -1302,15 +1391,16 @@ def auth_login(body: LoginRequest) -> TokenResponse:
     with driver.session() as session:
         record = session.run(
             "MATCH (u:User {username: $username}) "
-            "RETURN u.id AS id, u.email AS email, u.hashed_password AS hashed_password",
+            "RETURN u.id AS id, u.email AS email, u.hashed_password AS hashed_password, u.role AS role",
             username=body.username,
         ).single()
 
     if not record or not _verify_password(body.password, record["hashed_password"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
+    role = record.get("role") or ROLE_STUDENT
     return TokenResponse(
-        access_token=_create_token(record["id"], body.username, record["email"])
+        access_token=_create_token(record["id"], body.username, record["email"], role)
     )
 
 
@@ -1557,7 +1647,7 @@ def _embed_chunks(material_id: str, chunks: list[str]) -> None:
 @app.post("/api/admin/materials/upload", response_model=MaterialOut, status_code=202)
 def upload_material(
     file: UploadFile = File(...),
-    current_user: dict = Depends(_get_current_user),
+    current_user: dict = Depends(_require_teacher),
 ) -> MaterialOut:
     """PDF教材をアップロードし、バックグラウンドでグラフ化処理を開始する。"""
     if not file.filename or not file.filename.lower().endswith(".pdf"):
@@ -1617,7 +1707,7 @@ def upload_material(
 
 @app.get("/api/admin/materials", response_model=list[MaterialOut])
 def list_materials(
-    current_user: dict = Depends(_get_current_user),
+    current_user: dict = Depends(_require_teacher),
 ) -> list[MaterialOut]:
     """アップロード済み教材の一覧を返す。"""
     driver = _neo4j_driver()
@@ -1663,7 +1753,7 @@ def list_materials(
 @app.get("/api/admin/materials/{material_id}", response_model=MaterialOut)
 def get_material(
     material_id: str,
-    current_user: dict = Depends(_get_current_user),
+    current_user: dict = Depends(_require_teacher),
 ) -> MaterialOut:
     """教材の詳細情報（ナレッジグラフ含む）を返す。"""
     driver = _neo4j_driver()
@@ -1759,7 +1849,7 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
 )
 def course_builder_chat(
     body: CourseBuilderChatRequest,
-    current_user: dict = Depends(_get_current_user),
+    current_user: dict = Depends(_require_teacher),
 ) -> CourseBuilderChatResponse:
     """教員がAIと対話しながらコースを設計するエンドポイント。
 
@@ -1853,6 +1943,86 @@ def course_builder_chat(
     )
 
     return CourseBuilderChatResponse(answer=answer, course_draft=course_draft)
+
+
+# ---------------------------------------------------------------------------
+# Admin: User Management
+# ---------------------------------------------------------------------------
+
+@app.post("/api/admin/users/student", response_model=UserOut, status_code=201)
+def create_student(
+    body: CreateUserRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> UserOut:
+    """教員が学生アカウントを作成する。TEACHER 権限が必要。"""
+    driver = _neo4j_driver()
+    with driver.session() as session:
+        existing = session.run(
+            "MATCH (u:User {username: $username}) RETURN u.id AS id LIMIT 1",
+            username=body.username,
+        ).single()
+        if existing:
+            raise HTTPException(status_code=409, detail="Username already taken")
+
+        user_id = str(uuid.uuid4())
+        hashed_pw = _hash_password(body.password)
+        session.run(
+            """
+            CREATE (u:User {
+                id:              $id,
+                username:        $username,
+                email:           $email,
+                hashed_password: $hashed_password,
+                role:            $role
+            })
+            """,
+            id=user_id,
+            username=body.username,
+            email=body.email,
+            hashed_password=hashed_pw,
+            role=ROLE_STUDENT,
+        )
+
+    logger.info("Teacher '%s' created student '%s' (id=%s)", current_user["username"], body.username, user_id)
+    return UserOut(id=user_id, username=body.username, email=body.email, role=ROLE_STUDENT)
+
+
+@app.post("/api/admin/users/teacher", response_model=UserOut, status_code=201)
+def create_teacher(
+    body: CreateUserRequest,
+    current_user: dict = Depends(_require_system_admin),
+) -> UserOut:
+    """管理者が教員アカウントを作成する。SYSTEM_ADMIN 権限が必要。"""
+    driver = _neo4j_driver()
+    with driver.session() as session:
+        existing = session.run(
+            "MATCH (u:User {username: $username}) RETURN u.id AS id LIMIT 1",
+            username=body.username,
+        ).single()
+        if existing:
+            raise HTTPException(status_code=409, detail="Username already taken")
+
+        user_id = str(uuid.uuid4())
+        hashed_pw = _hash_password(body.password)
+        session.run(
+            """
+            CREATE (u:User {
+                id:              $id,
+                username:        $username,
+                email:           $email,
+                hashed_password: $hashed_password,
+                role:            $role
+            })
+            """,
+            id=user_id,
+            username=body.username,
+            email=body.email,
+            hashed_password=hashed_pw,
+            role=ROLE_TEACHER,
+        )
+
+    logger.info("Admin '%s' created teacher '%s' (id=%s)", current_user["username"], body.username, user_id)
+    return UserOut(id=user_id, username=body.username, email=body.email, role=ROLE_TEACHER)
 
 
 # ---------------------------------------------------------------------------
