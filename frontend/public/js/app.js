@@ -624,26 +624,6 @@
       streakEl.style.color = "var(--color-text-success)";
     }
 
-    const usernameEl = document.getElementById("username");
-    if (usernameEl) usernameEl.textContent = state.username || "";
-
-    // Show admin link for TEACHER / SYSTEM_ADMIN
-    if (state.role === "TEACHER" || state.role === "SYSTEM_ADMIN") {
-      var topbarR = document.querySelector(".topbar-r");
-      if (topbarR && !document.getElementById("admin-link")) {
-        var adminLink = document.createElement("a");
-        adminLink.id = "admin-link";
-        adminLink.href = "/admin.html";
-        adminLink.textContent = "管理画面へ";
-        adminLink.style.cssText = "color:var(--color-text-info);text-decoration:none;font-size:12px";
-        var sep = document.createElement("span");
-        sep.style.opacity = ".3";
-        sep.textContent = "|";
-        topbarR.insertBefore(sep, topbarR.firstChild);
-        topbarR.insertBefore(adminLink, topbarR.firstChild);
-      }
-    }
-
     renderSidebar();
     if (state.currentTopicId) {
       state.chatMessages = await loadChatHistory(state.courseId, state.currentTopicId);
@@ -673,12 +653,37 @@
     }
   }
 
+  // ── Role-based UI setup ───────────────────────────────────────────
+  function setupRoleUI() {
+    // Show username
+    var usernameEl = document.getElementById("username");
+    if (usernameEl) usernameEl.textContent = state.username || "";
+
+    // Show admin link for TEACHER / SYSTEM_ADMIN
+    if (state.role === "TEACHER" || state.role === "SYSTEM_ADMIN") {
+      var topbarR = document.querySelector(".topbar-r");
+      if (topbarR && !document.getElementById("admin-link")) {
+        var adminLink = document.createElement("a");
+        adminLink.id = "admin-link";
+        adminLink.href = "/admin.html";
+        adminLink.textContent = "管理画面へ";
+        adminLink.style.cssText = "color:var(--color-text-info);text-decoration:none;font-size:12px";
+        var sep = document.createElement("span");
+        sep.style.opacity = ".3";
+        sep.textContent = "|";
+        topbarR.insertBefore(sep, topbarR.firstChild);
+        topbarR.insertBefore(adminLink, topbarR.firstChild);
+      }
+    }
+  }
+
   // ── Init ───────────────────────────────────────────────────────────
   async function initApp() {
     if (!state.token) {
       renderAuth();
       return;
     }
+    setupRoleUI();
     initTabs();
     initInput();
     initLogout();
