@@ -10,15 +10,25 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class OntologyType(str, Enum):
-    """OSL (.isom) 準拠の上位オントロジー型。
+    """ナレッジグラフのノード型。
 
-    OSL バリデーションに適合させるため、ノード型は以下の 4 種に限定する。
+    OSL (.isom) 準拠の汎用 4 型に加え、素粒子物理学（場の量子論等）の
+    学習支援に必要なドメイン固有型を定義する。
     """
 
+    # --- 汎用 (OSL 準拠) ---
     AGENT = "Agent"
     EVENT = "Event"
     RESOURCE = "Resource"
     INTENTIONAL_MOMENT = "Intentional Moment"
+
+    # --- 素粒子物理学向け拡張 ---
+    MATHEMATICAL_OBJECT = "MathematicalObject"       # テンソル、群、多様体、作用素など
+    PHYSICAL_PHENOMENON = "PhysicalPhenomenon"       # 相転移、散乱、崩壊、輻射補正など
+    THEORETICAL_FRAMEWORK = "TheoreticalFramework"   # QFT、QED、QCD、標準模型など
+    THEOREM = "Theorem"                               # Noetherの定理、Ward恒等式、LSZ公式など
+    SYMMETRY = "Symmetry"                             # ゲージ対称性、ローレンツ対称性、CPT対称性など
+    PARTICLE = "Particle"                             # クォーク、レプトン、ゲージボソン、ヒッグス場など
 
 
 class CorePredicate(str, Enum):
@@ -132,6 +142,25 @@ class AbstractStructure(BaseModel):
     smiles_dsl: str = Field(default="", description="Episteme Graph-SMILES format (e.g., (a:Agent:Organization) ==[CAUSES:operationalizes:+]=> (r:Resource:Profit))")
 
 
+class VariableDefinition(BaseModel):
+    """数式中の変数とその物理的意味の対応。"""
+
+    symbol: str = Field(description="LaTeX記法の変数シンボル (例: '$L$', '$\\\\psi$')")
+    description: str = Field(description="変数の物理的意味 (例: 'ラグランジアン密度', 'ディラック場')")
+
+
+class KeyEquation(BaseModel):
+    """論文中の重要な数式とその変数定義。"""
+
+    latex: str = Field(description="LaTeX形式の数式 (例: '$\\\\mathcal{L} = \\\\bar{\\\\psi}(i\\\\gamma^\\\\mu D_\\\\mu - m)\\\\psi$')")
+    description: str = Field(default="", description="数式の物理的意味・役割の説明")
+    variables: list[VariableDefinition] = Field(
+        default_factory=list,
+        description="数式中の各変数とその物理的意味",
+    )
+    context: str = Field(default="", description="数式が登場する文脈 (例: 'QEDラグランジアン', 'ファインマンルール導出')")
+
+
 class PaperStructure(BaseModel):
     """Full extracted structure for a single paper."""
 
@@ -145,6 +174,10 @@ class PaperStructure(BaseModel):
     methodology: Methodology = Field(default_factory=Methodology)
     constraints: Constraints = Field(default_factory=Constraints)
     abstract_structure: AbstractStructure = Field(default_factory=AbstractStructure)
+    key_equations: list[KeyEquation] = Field(
+        default_factory=list,
+        description="論文中の重要な数式（LaTeX）とその変数定義のリスト",
+    )
     license: str = Field(default="", description="The license of the paper (e.g., from arXiv metadata)")
     review_status: ReviewStatus = Field(default=ReviewStatus.PENDING)
     reviewer_notes: str = Field(default="")
