@@ -230,7 +230,7 @@ def search_similar_papers(
             params["exclude_id"] = exclude_arxiv_id
 
         query += """
-            ORDER BY c.arxiv_id, c.embedding <=> :query_vector::vector
+            ORDER BY c.arxiv_id, c.embedding::halfvec(3072) <=> :query_vector::halfvec(3072)
             LIMIT :limit
         """
         params["limit"] = top_k * 3
@@ -283,7 +283,7 @@ def search_fanns_hybrid(
             params["dsl_pattern"] = f"%{query_dsl_regex}%"
 
         query += """
-            ORDER BY c.arxiv_id, c.embedding <=> :query_vector::vector
+            ORDER BY c.arxiv_id, c.embedding::halfvec(3072) <=> :query_vector::halfvec(3072)
             LIMIT :limit
         """
         params["limit"] = top_k * 3

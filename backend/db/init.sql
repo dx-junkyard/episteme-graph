@@ -100,10 +100,10 @@ CREATE INDEX idx_chunks_document ON chunks(document_id);
 CREATE INDEX idx_chunks_arxiv ON chunks(arxiv_id);
 CREATE INDEX idx_chunks_material ON chunks(material_id);
 
--- IVFFlat index for vector similarity search (HNSW limited to 2000 dimensions)
+-- HNSW index on halfvec cast (pgvector limits HNSW/IVFFlat to 2000 dims;
+-- casting to halfvec allows indexing 3072-dim vectors)
 CREATE INDEX idx_chunks_embedding ON chunks
-    USING ivfflat (embedding vector_cosine_ops)
-    WITH (lists = 100);
+    USING hnsw ((embedding::halfvec(3072)) halfvec_cosine_ops);
 
 -- ============================================================
 -- 学習者状態

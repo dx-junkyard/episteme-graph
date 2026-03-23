@@ -516,7 +516,7 @@ def _search_relevant_chunks(
                     FROM chunks c
                     WHERE c.arxiv_id IN ({placeholders})
                       AND c.embedding IS NOT NULL
-                    ORDER BY c.embedding <=> :query_vector::vector
+                    ORDER BY c.embedding::halfvec(3072) <=> :query_vector::halfvec(3072)
                     LIMIT :limit
                 """),
                 params,
@@ -1245,11 +1245,11 @@ def _search_relevant_chunks_with_scores(
             rows = session.execute(
                 sa_text(f"""
                     SELECT c.text,
-                           1 - (c.embedding <=> :query_vector::vector) AS score
+                           1 - (c.embedding::halfvec(3072) <=> :query_vector::halfvec(3072)) AS score
                     FROM chunks c
                     WHERE ({where_clause})
                       AND c.embedding IS NOT NULL
-                    ORDER BY c.embedding <=> :query_vector::vector
+                    ORDER BY c.embedding::halfvec(3072) <=> :query_vector::halfvec(3072)
                     LIMIT :limit
                 """),
                 params,
