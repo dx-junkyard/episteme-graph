@@ -14,15 +14,24 @@ services:
     networks:
       - episteme
 
-  qdrant:
-    image: qdrant/qdrant:v1.9.7
+  postgres:
+    image: pgvector/pgvector:pg16
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: episteme
+      POSTGRES_USER: episteme
+      POSTGRES_PASSWORD: episteme
     volumes:
-      - qdrant_data:/qdrant/storage
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/db/init.sql:/docker-entrypoint-initdb.d/01_init.sql
     networks:
       - episteme
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U episteme"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   minio:
     image: minio/minio:latest
@@ -52,16 +61,18 @@ services:
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-large}
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_AUTH: neo4j/episteme
-      QDRANT_HOST: qdrant
-      QDRANT_PORT: "6333"
+      DATABASE_URL: postgresql://episteme:episteme@postgres:5432/episteme
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
     depends_on:
-      - neo4j
-      - qdrant
-      - minio
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_started
+      minio:
+        condition: service_started
     networks:
       - episteme
     extra_hosts:
@@ -80,7 +91,7 @@ services:
 
 volumes:
   neo4j_data:
-  qdrant_data:
+  postgres_data:
   minio_data:
 
 networks:

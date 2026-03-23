@@ -47,8 +47,9 @@ from neo4j import GraphDatabase
 from openai import OpenAI
 from passlib.context import CryptContext
 from pydantic import BaseModel
-from qdrant_client import QdrantClient
-from qdrant_client.models import FieldCondition, Filter, MatchValue
+from sqlalchemy import text as sa_text
+
+from core.postgres import get_session as _pg_session, check_connection as _pg_check
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -60,11 +61,6 @@ logger = logging.getLogger(__name__)
 _JWT_SECRET: str = os.environ.get("JWT_SECRET", "episteme-dev-secret-change-in-prod")
 _JWT_ALGORITHM: str = "HS256"
 _JWT_EXPIRE_HOURS: int = 24
-
-_QDRANT_HOST: str = os.environ.get("QDRANT_HOST", "qdrant")
-_QDRANT_PORT: int = int(os.environ.get("QDRANT_PORT", "6333"))
-_QDRANT_COLLECTION: str = "papers"
-_VECTOR_DIM: int = 3072
 
 _NEO4J_URI: str = os.environ.get("NEO4J_URI", "bolt://neo4j:7687")
 _NEO4J_AUTH_STR: str = os.environ.get("NEO4J_AUTH", "neo4j/episteme")
@@ -98,48 +94,44 @@ _bearer = HTTPBearer()
 
 @asynccontextmanager
 async def _lifespan(application: FastAPI):
-    """起動時にシステム管理者アカウントを初期化する。"""
+    """起動時にシステム管理者アカウントを初期化する（PostgreSQL）。"""
     if not _ADMIN_PASSWORD:
         logger.critical("CRITICAL: ADMIN_PASSWORD is not set in .env.")
         sys.exit(1)
 
-    # Neo4jの起動を待つ（最大30秒）
+    # PostgreSQL の起動を待つ（最大30秒）
     max_retries = 10
     for attempt in range(max_retries):
         try:
-            driver = _neo4j_driver()
-            with driver.session() as session:
-                existing = session.run(
-                    "MATCH (u:User {username: 'Administrator'}) RETURN u.id AS id LIMIT 1"
-                ).single()
+            session = _pg_session()
+            try:
+                existing = session.execute(
+                    sa_text("SELECT id FROM users WHERE display_name = 'Administrator' LIMIT 1")
+                ).fetchone()
                 if not existing:
-                    admin_id = str(uuid.uuid4())
+                    admin_id = uuid.uuid4()
                     hashed_pw = _hash_password(_ADMIN_PASSWORD)
-                    session.run(
-                        """
-                        CREATE (u:User {
-                            id:              $id,
-                            username:        'Administrator',
-                            email:           'admin@system.local',
-                            hashed_password: $hashed_password,
-                            role:            $role
-                        })
-                        """,
-                        id=admin_id,
-                        hashed_password=hashed_pw,
-                        role=ROLE_SYSTEM_ADMIN,
+                    session.execute(
+                        sa_text("""
+                            INSERT INTO users (id, email, display_name, role, password_hash)
+                            VALUES (:id, 'admin@system.local', 'Administrator', 'admin', :pw)
+                        """),
+                        {"id": admin_id, "pw": hashed_pw},
                     )
+                    session.commit()
                     logger.info("Created system administrator account 'Administrator' (id=%s)", admin_id)
                 else:
                     logger.info("System administrator account 'Administrator' already exists.")
+            finally:
+                session.close()
             break
         except Exception as exc:
             if attempt < max_retries - 1:
                 wait = 3 * (attempt + 1)
-                logger.warning("Neo4j not ready (attempt %d/%d): %s. Retrying in %ds...", attempt + 1, max_retries, exc, wait)
+                logger.warning("PostgreSQL not ready (attempt %d/%d): %s. Retrying in %ds...", attempt + 1, max_retries, exc, wait)
                 await asyncio.sleep(wait)
             else:
-                logger.critical("Failed to connect to Neo4j after %d attempts.", max_retries)
+                logger.critical("Failed to connect to PostgreSQL after %d attempts.", max_retries)
                 sys.exit(1)
     yield
 
@@ -157,11 +149,6 @@ app.add_middleware(
 def _neo4j_driver():
     user, password = _NEO4J_AUTH_STR.split("/", 1)
     return GraphDatabase.driver(_NEO4J_URI, auth=(user, password))
-
-
-@lru_cache(maxsize=1)
-def _qdrant() -> QdrantClient:
-    return QdrantClient(host=_QDRANT_HOST, port=_QDRANT_PORT)
 
 
 @lru_cache(maxsize=1)
@@ -205,6 +192,18 @@ def _get_current_user(
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def _pg_role_to_app_role(pg_role: str) -> str:
+    """PostgreSQL の role 値をアプリケーションの role 定数にマッピングする。"""
+    mapping = {"learner": ROLE_STUDENT, "instructor": ROLE_TEACHER, "admin": ROLE_SYSTEM_ADMIN}
+    return mapping.get(pg_role, ROLE_STUDENT)
+
+
+def _app_role_to_pg_role(app_role: str) -> str:
+    """アプリケーションの role 定数を PostgreSQL の role 値にマッピングする。"""
+    mapping = {ROLE_STUDENT: "learner", ROLE_TEACHER: "instructor", ROLE_SYSTEM_ADMIN: "admin"}
+    return mapping.get(app_role, "learner")
 
 
 def _require_teacher(current_user: dict = Depends(_get_current_user)) -> dict:
@@ -394,62 +393,86 @@ class CourseBuilderChatResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _get_course_data(user_id: str, course_id: str) -> dict | None:
-    """Neo4j から LearningCourse データを取得する。"""
-    driver = _neo4j_driver()
-    with driver.session() as session:
-        record = session.run(
-            """
-            MATCH (u:User {id: $user_id})-[:ENROLLED_IN]->(lc:LearningCourse {id: $course_id})
-            RETURN lc.data AS data
-            """,
-            user_id=user_id,
-            course_id=course_id,
-        ).single()
-        if record and record["data"]:
-            try:
-                return json.loads(record["data"])
-            except Exception:
-                return None
+    """PostgreSQL から LearningCourse データを取得する。"""
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("""
+                SELECT data FROM learning_courses
+                WHERE user_id = :user_id::uuid AND id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+        if record and record[0]:
+            return record[0] if isinstance(record[0], dict) else json.loads(record[0])
+    finally:
+        session.close()
     return None
 
 
 def _save_course_data(user_id: str, course_id: str, data: dict) -> None:
-    """LearningCourse データを Neo4j に永続化する。"""
-    driver = _neo4j_driver()
-    with driver.session() as session:
-        session.run(
-            """
-            MERGE (u:User {id: $user_id})
-            MERGE (lc:LearningCourse {id: $course_id})
-            MERGE (u)-[:ENROLLED_IN]->(lc)
-            SET lc.data = $data, lc.updated_at = $now
-            """,
-            user_id=user_id,
-            course_id=course_id,
-            data=json.dumps(data, ensure_ascii=False),
-            now=datetime.datetime.utcnow().isoformat(),
-        )
+    """LearningCourse データを PostgreSQL に永続化する。"""
+    session = _pg_session()
+    try:
+        existing = session.execute(
+            sa_text("SELECT id FROM learning_courses WHERE id = :course_id AND user_id = :user_id::uuid"),
+            {"course_id": course_id, "user_id": user_id},
+        ).fetchone()
+        if existing:
+            session.execute(
+                sa_text("""
+                    UPDATE learning_courses
+                    SET data = :data::jsonb, title = :title, updated_at = now()
+                    WHERE id = :course_id AND user_id = :user_id::uuid
+                """),
+                {
+                    "data": json.dumps(data, ensure_ascii=False),
+                    "title": data.get("title", course_id),
+                    "course_id": course_id,
+                    "user_id": user_id,
+                },
+            )
+        else:
+            session.execute(
+                sa_text("""
+                    INSERT INTO learning_courses (id, user_id, title, data)
+                    VALUES (:course_id, :user_id::uuid, :title, :data::jsonb)
+                """),
+                {
+                    "course_id": course_id,
+                    "user_id": user_id,
+                    "title": data.get("title", course_id),
+                    "data": json.dumps(data, ensure_ascii=False),
+                },
+            )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def _delete_course_data(user_id: str, course_id: str) -> bool:
-    """LearningCourse ノードとリレーションを削除する。"""
-    driver = _neo4j_driver()
-    with driver.session() as session:
-        result = session.run(
-            """
-            MATCH (u:User {id: $user_id})-[r:ENROLLED_IN]->(lc:LearningCourse {id: $course_id})
-            DELETE r
-            WITH lc
-            OPTIONAL MATCH (lc)<-[:ENROLLED_IN]-(:User)
-            WITH lc, count(*) AS remaining
-            WHERE remaining = 0
-            DELETE lc
-            RETURN true AS deleted
-            """,
-            user_id=user_id,
-            course_id=course_id,
-        ).single()
+    """LearningCourse レコードを削除する。"""
+    session = _pg_session()
+    try:
+        result = session.execute(
+            sa_text("""
+                DELETE FROM learning_courses
+                WHERE id = :course_id AND user_id = :user_id::uuid
+                RETURNING id
+            """),
+            {"course_id": course_id, "user_id": user_id},
+        ).fetchone()
+        session.commit()
         return result is not None
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 # ---------------------------------------------------------------------------
@@ -468,11 +491,7 @@ def _search_relevant_chunks(
     arxiv_ids: list[str],
     top_k: int = 5,
 ) -> list[str]:
-    """Qdrant から関連チャンクをベクトル検索する。
-
-    コースに紐づいた論文(arxiv_ids)のチャンクから、質問に最も近いものを返す。
-    arxiv_ids が空の場合はフィルタなしで全体から検索する。
-    """
+    """PostgreSQL pgvector から関連チャンクをベクトル検索する。"""
     if not arxiv_ids:
         return []
 
@@ -483,46 +502,30 @@ def _search_relevant_chunks(
         return []
 
     try:
-        # 複数の arxiv_id に跨って検索
-        must_conditions = []
-        if len(arxiv_ids) == 1:
-            must_conditions.append(
-                FieldCondition(key="arxiv_id", match=MatchValue(value=arxiv_ids[0]))
-            )
-        else:
-            # Qdrant の should で OR 検索
-            from qdrant_client.models import Filter as QFilter
-            should_conditions = [
-                FieldCondition(key="arxiv_id", match=MatchValue(value=aid))
-                for aid in arxiv_ids
-            ]
-            result = _qdrant().query_points(
-                collection_name=_QDRANT_COLLECTION,
-                query=query_vector,
-                query_filter=QFilter(should=should_conditions),
-                limit=top_k,
-                with_payload=True,
-            )
-            return [
-                hit.payload.get("text", "")
-                for hit in result.points
-                if hit.payload
-            ]
+        session = _pg_session()
+        try:
+            # プレースホルダ配列を構築
+            placeholders = ", ".join(f":aid_{i}" for i in range(len(arxiv_ids)))
+            params: dict = {"query_vector": str(query_vector), "limit": top_k}
+            for i, aid in enumerate(arxiv_ids):
+                params[f"aid_{i}"] = aid
 
-        result = _qdrant().query_points(
-            collection_name=_QDRANT_COLLECTION,
-            query=query_vector,
-            query_filter=Filter(must=must_conditions),
-            limit=top_k,
-            with_payload=True,
-        )
-        return [
-            hit.payload.get("text", "")
-            for hit in result.points
-            if hit.payload
-        ]
+            rows = session.execute(
+                sa_text(f"""
+                    SELECT c.text
+                    FROM chunks c
+                    WHERE c.arxiv_id IN ({placeholders})
+                      AND c.embedding IS NOT NULL
+                    ORDER BY c.embedding <=> :query_vector::vector
+                    LIMIT :limit
+                """),
+                params,
+            ).fetchall()
+            return [row[0] for row in rows if row[0]]
+        finally:
+            session.close()
     except Exception as exc:
-        logger.warning("Qdrant search failed: %s", exc)
+        logger.warning("pgvector search failed: %s", exc)
         return []
 
 
@@ -542,55 +545,51 @@ def _calculate_progress(user_id: str, course_id: str, course_data: dict) -> dict
     for t in topics:
         total_misconceptions += len(t.get("misconceptions", []))
 
-    # セッション履歴を Neo4j のチャット履歴から構築
-    sessions = []
-    driver = _neo4j_driver()
-    with driver.session() as session:
-        records = session.run(
-            """
-            MATCH (u:User {id: $user_id})-[r:LEARNING_CHAT]->(lt:LearningTopic {course_id: $course_id})
-            RETURN lt.id AS topic_id, r.history AS history, r.updated_at AS updated_at
-            ORDER BY r.updated_at DESC
-            LIMIT 10
-            """,
-            user_id=user_id,
-            course_id=course_id,
-        ).data()
+    # セッション履歴を PostgreSQL のチャット履歴から構築
+    sessions_list = []
+    pg_session = _pg_session()
+    try:
+        records = pg_session.execute(
+            sa_text("""
+                SELECT topic_id, history, updated_at
+                FROM learning_chat_history
+                WHERE user_id = :user_id::uuid AND course_id = :course_id
+                ORDER BY updated_at DESC
+                LIMIT 10
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchall()
+    finally:
+        pg_session.close()
 
     for r in records:
-        history = []
-        if r.get("history"):
-            try:
-                history = json.loads(r["history"])
-            except Exception:
-                pass
+        topic_id_val = r[0]
+        history = r[1] if isinstance(r[1], list) else []
 
         # トピック名を取得
-        topic_name = r["topic_id"]
+        topic_name = topic_id_val
         for t in topics:
-            if t.get("id") == r["topic_id"]:
+            if t.get("id") == topic_id_val:
                 topic_name = t.get("title", topic_name)
                 break
 
-        # メッセージ数からおおよその時間を推定 (1メッセージ≒2分)
         msg_count = len(history)
         duration_min = max(5, msg_count * 2)
 
         date_str = ""
-        if r.get("updated_at"):
+        if r[2]:
             try:
-                dt = datetime.datetime.fromisoformat(r["updated_at"])
+                dt = r[2]
                 date_str = f"{dt.month}/{dt.day}"
             except Exception:
                 pass
 
-        sessions.append({
+        sessions_list.append({
             "date": date_str or "---",
             "topic": topic_name,
             "duration": f"{duration_min}分",
         })
 
-    # 連続学習日数を計算
     streak = _calculate_streak(user_id, course_id)
 
     return {
@@ -598,43 +597,32 @@ def _calculate_progress(user_id: str, course_id: str, course_data: dict) -> dict
         "learning_concepts": learning,
         "misconceptions": total_misconceptions,
         "streak_days": streak,
-        "sessions": sessions[:5],
+        "sessions": sessions_list[:5],
     }
 
 
 def _calculate_streak(user_id: str, course_id: str) -> int:
     """チャット履歴の日付から連続学習日数を算出する。"""
-    driver = _neo4j_driver()
-    with driver.session() as session:
-        records = session.run(
-            """
-            MATCH (u:User {id: $user_id})-[r:LEARNING_CHAT]->(lt:LearningTopic {course_id: $course_id})
-            WHERE r.updated_at IS NOT NULL
-            RETURN DISTINCT r.updated_at AS updated_at
-            ORDER BY r.updated_at DESC
-            """,
-            user_id=user_id,
-            course_id=course_id,
-        ).data()
+    pg_session = _pg_session()
+    try:
+        records = pg_session.execute(
+            sa_text("""
+                SELECT DISTINCT DATE(updated_at) AS d
+                FROM learning_chat_history
+                WHERE user_id = :user_id::uuid AND course_id = :course_id
+                ORDER BY d DESC
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchall()
+    finally:
+        pg_session.close()
 
     if not records:
         return 0
 
-    dates = set()
-    for r in records:
-        try:
-            dt = datetime.datetime.fromisoformat(r["updated_at"])
-            dates.add(dt.date())
-        except Exception:
-            continue
-
-    if not dates:
-        return 0
-
-    sorted_dates = sorted(dates, reverse=True)
+    sorted_dates = [r[0] for r in records]
     today = datetime.date.today()
 
-    # 今日または昨日から連続している日数を数える
     if sorted_dates[0] < today - datetime.timedelta(days=1):
         return 0
 
@@ -685,30 +673,16 @@ def list_courses(
     current_user: dict = Depends(_get_current_user),
 ) -> list[LearningCourseOut]:
     """ユーザーが登録しているコース一覧を返す。"""
-    driver = _neo4j_driver()
-    with driver.session() as session:
-        records = session.run(
-            """
-            MATCH (u:User {id: $user_id})-[:ENROLLED_IN]->(lc:LearningCourse)
-            RETURN lc.id AS id, lc.data AS data
-            """,
-            user_id=current_user["id"],
-        ).data()
+    session = _pg_session()
+    try:
+        records = session.execute(
+            sa_text("SELECT id, title FROM learning_courses WHERE user_id = :user_id::uuid"),
+            {"user_id": current_user["id"]},
+        ).fetchall()
+    finally:
+        session.close()
 
-    courses = []
-    for r in records:
-        data = {}
-        if r.get("data"):
-            try:
-                data = json.loads(r["data"])
-            except Exception:
-                pass
-        courses.append(LearningCourseOut(
-            id=r["id"],
-            title=data.get("title", r["id"]),
-        ))
-
-    return courses
+    return [LearningCourseOut(id=r[0], title=r[1]) for r in records]
 
 
 @app.get("/api/learning/courses/{course_id}", response_model=LearningCourseDetail)
@@ -797,26 +771,23 @@ def get_chat_history(
     current_user: dict = Depends(_get_current_user),
 ) -> LearningChatHistoryResponse:
     """トピックのチャット履歴を返す。"""
-    driver = _neo4j_driver()
-    with driver.session() as session:
-        record = session.run(
-            """
-            MATCH (u:User {id: $user_id})-[r:LEARNING_CHAT]->(lt:LearningTopic {id: $topic_id, course_id: $course_id})
-            RETURN r.history AS history
-            """,
-            user_id=current_user["id"],
-            topic_id=topic_id,
-            course_id=course_id,
-        ).single()
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("""
+                SELECT history FROM learning_chat_history
+                WHERE user_id = :user_id::uuid AND course_id = :course_id AND topic_id = :topic_id
+                LIMIT 1
+            """),
+            {"user_id": current_user["id"], "course_id": course_id, "topic_id": topic_id},
+        ).fetchone()
+    finally:
+        session.close()
 
-    if not record or not record.get("history"):
+    if not record or not record[0]:
         return LearningChatHistoryResponse(history=[])
 
-    try:
-        history = json.loads(record["history"])
-    except Exception:
-        history = []
-
+    history = record[0] if isinstance(record[0], list) else []
     return LearningChatHistoryResponse(history=history)
 
 
@@ -1195,27 +1166,34 @@ def _persist_chat_history(
     user_message: str,
     assistant_answer: str,
 ) -> None:
-    """チャット履歴を Neo4j に永続化する。"""
+    """チャット履歴を PostgreSQL に永続化する。"""
     updated_history = history + [
         {"role": "user", "content": user_message},
         {"role": "assistant", "content": assistant_answer},
     ]
     try:
-        driver = _neo4j_driver()
-        with driver.session() as session:
-            session.run(
-                """
-                MERGE (u:User {id: $user_id})
-                MERGE (lt:LearningTopic {id: $topic_id, course_id: $course_id})
-                MERGE (u)-[r:LEARNING_CHAT]->(lt)
-                SET r.history = $history, r.updated_at = $now
-                """,
-                user_id=user_id,
-                topic_id=topic_id,
-                course_id=course_id,
-                history=json.dumps(updated_history, ensure_ascii=False),
-                now=datetime.datetime.utcnow().isoformat(),
+        session = _pg_session()
+        try:
+            session.execute(
+                sa_text("""
+                    INSERT INTO learning_chat_history (user_id, course_id, topic_id, history, updated_at)
+                    VALUES (:user_id::uuid, :course_id, :topic_id, :history::jsonb, now())
+                    ON CONFLICT (user_id, course_id, topic_id)
+                    DO UPDATE SET history = :history::jsonb, updated_at = now()
+                """),
+                {
+                    "user_id": user_id,
+                    "course_id": course_id,
+                    "topic_id": topic_id,
+                    "history": json.dumps(updated_history, ensure_ascii=False),
+                },
             )
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
     except Exception:
         logger.exception(
             "Failed to persist learning chat for user=%s topic=%s",
@@ -1233,7 +1211,7 @@ def _search_relevant_chunks_with_scores(
     material_ids: list[str] | None = None,
     top_k: int = 5,
 ) -> tuple[list[str], list[float]]:
-    """Qdrant から関連チャンクをベクトル検索し、テキストとスコアの両方を返す。"""
+    """PostgreSQL pgvector から関連チャンクをベクトル検索し、テキストとスコアの両方を返す。"""
     if not arxiv_ids and not material_ids:
         return [], []
 
@@ -1244,37 +1222,46 @@ def _search_relevant_chunks_with_scores(
         return [], []
 
     try:
-        from qdrant_client.models import Filter as QFilter
-        should_conditions = []
-        for aid in (arxiv_ids or []):
-            should_conditions.append(
-                FieldCondition(key="arxiv_id", match=MatchValue(value=aid))
-            )
-        for mid in (material_ids or []):
-            should_conditions.append(
-                FieldCondition(key="material_id", match=MatchValue(value=mid))
-            )
-        if len(should_conditions) == 1:
-            qfilter = Filter(must=[should_conditions[0]])
-        else:
-            qfilter = QFilter(should=should_conditions)
+        session = _pg_session()
+        try:
+            # OR条件を構築: arxiv_id IN (...) OR material_id IN (...)
+            conditions = []
+            params: dict = {"query_vector": str(query_vector), "limit": top_k}
 
-        result = _qdrant().query_points(
-            collection_name=_QDRANT_COLLECTION,
-            query=query_vector,
-            query_filter=qfilter,
-            limit=top_k,
-            with_payload=True,
-        )
-        texts = [
-            hit.payload.get("text", "")
-            for hit in result.points
-            if hit.payload
-        ]
-        scores = [hit.score for hit in result.points if hit.payload]
-        return texts, scores
+            if arxiv_ids:
+                aid_placeholders = ", ".join(f":aid_{i}" for i in range(len(arxiv_ids)))
+                conditions.append(f"c.arxiv_id IN ({aid_placeholders})")
+                for i, aid in enumerate(arxiv_ids):
+                    params[f"aid_{i}"] = aid
+
+            if material_ids:
+                mid_placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
+                conditions.append(f"c.material_id IN ({mid_placeholders})")
+                for i, mid in enumerate(material_ids):
+                    params[f"mid_{i}"] = mid
+
+            where_clause = " OR ".join(conditions) if conditions else "TRUE"
+
+            rows = session.execute(
+                sa_text(f"""
+                    SELECT c.text,
+                           1 - (c.embedding <=> :query_vector::vector) AS score
+                    FROM chunks c
+                    WHERE ({where_clause})
+                      AND c.embedding IS NOT NULL
+                    ORDER BY c.embedding <=> :query_vector::vector
+                    LIMIT :limit
+                """),
+                params,
+            ).fetchall()
+
+            texts = [row[0] for row in rows if row[0]]
+            scores = [float(row[1]) for row in rows]
+            return texts, scores
+        finally:
+            session.close()
     except Exception as exc:
-        logger.warning("Qdrant search failed: %s", exc)
+        logger.warning("pgvector search failed: %s", exc)
         return [], []
 
 
@@ -1351,56 +1338,54 @@ def _detect_and_record_misconception(
 
 @app.post("/api/auth/register", response_model=TokenResponse, status_code=201)
 def auth_register(body: RegisterRequest) -> TokenResponse:
-    """新規ユーザーを Neo4j に登録し、JWT を返す。デフォルトは STUDENT ロール。"""
-    driver = _neo4j_driver()
-    with driver.session() as session:
-        existing = session.run(
-            "MATCH (u:User {username: $username}) RETURN u.id AS id LIMIT 1",
-            username=body.username,
-        ).single()
+    """新規ユーザーを PostgreSQL に登録し、JWT を返す。デフォルトは learner ロール。"""
+    session = _pg_session()
+    try:
+        existing = session.execute(
+            sa_text("SELECT id FROM users WHERE display_name = :username LIMIT 1"),
+            {"username": body.username},
+        ).fetchone()
         if existing:
             raise HTTPException(status_code=409, detail="Username already taken")
 
-        user_id = str(uuid.uuid4())
+        user_id = uuid.uuid4()
         hashed_pw = _hash_password(body.password)
-        session.run(
-            """
-            CREATE (u:User {
-                id:              $id,
-                username:        $username,
-                email:           $email,
-                hashed_password: $hashed_password,
-                role:            $role
-            })
-            """,
-            id=user_id,
-            username=body.username,
-            email=body.email,
-            hashed_password=hashed_pw,
-            role=ROLE_STUDENT,
+        session.execute(
+            sa_text("""
+                INSERT INTO users (id, email, display_name, role, password_hash)
+                VALUES (:id, :email, :username, 'learner', :pw)
+            """),
+            {"id": user_id, "email": body.email, "username": body.username, "pw": hashed_pw},
         )
+        session.commit()
+    finally:
+        session.close()
 
-    logger.info("Registered new user '%s' (id=%s, role=STUDENT)", body.username, user_id)
-    return TokenResponse(access_token=_create_token(user_id, body.username, body.email, ROLE_STUDENT))
+    logger.info("Registered new user '%s' (id=%s, role=learner)", body.username, user_id)
+    return TokenResponse(access_token=_create_token(str(user_id), body.username, body.email, ROLE_STUDENT))
 
 
 @app.post("/api/auth/login", response_model=TokenResponse)
 def auth_login(body: LoginRequest) -> TokenResponse:
     """ユーザー名とパスワードを検証し、JWT を返す。"""
-    driver = _neo4j_driver()
-    with driver.session() as session:
-        record = session.run(
-            "MATCH (u:User {username: $username}) "
-            "RETURN u.id AS id, u.email AS email, u.hashed_password AS hashed_password, u.role AS role",
-            username=body.username,
-        ).single()
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("""
+                SELECT id, email, password_hash, role
+                FROM users WHERE display_name = :username LIMIT 1
+            """),
+            {"username": body.username},
+        ).fetchone()
+    finally:
+        session.close()
 
-    if not record or not _verify_password(body.password, record["hashed_password"]):
+    if not record or not _verify_password(body.password, record[2]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    role = record.get("role") or ROLE_STUDENT
+    role = _pg_role_to_app_role(record[3])
     return TokenResponse(
-        access_token=_create_token(record["id"], body.username, record["email"], role)
+        access_token=_create_token(str(record[0]), body.username, record[1], role)
     )
 
 
@@ -1504,15 +1489,16 @@ def _build_knowledge_graph(text: str, title: str) -> dict:
 
 def _process_material_background(
     material_id: str,
+    doc_id: str,
     filename: str,
     pdf_bytes: bytes,
 ) -> None:
     """バックグラウンドでPDF処理パイプラインを実行する。
 
     1. PDFテキスト抽出
-    2. テキストをチャンク分割してQdrantにembedding
+    2. テキストをチャンク分割してPostgreSQLにembedding
     3. LLMでナレッジグラフ構築
-    4. Neo4jにグラフ構造を保存
+    4. PostgreSQLに保存
     """
     with _material_lock:
         _material_status[material_id] = {
@@ -1522,40 +1508,44 @@ def _process_material_background(
 
     try:
         # 1. PDFテキスト抽出
-        text = _extract_pdf_text(pdf_bytes)
-        logger.info("Extracted %d chars from PDF %s", len(text), filename)
+        extracted_text = _extract_pdf_text(pdf_bytes)
+        logger.info("Extracted %d chars from PDF %s", len(extracted_text), filename)
 
-        # 2. Embeddingをチャンク分割してQdrantに保存
-        chunks = _chunk_text(text, chunk_size=1000, overlap=100)
+        # 2. Embeddingをチャンク分割してPostgreSQLに保存
+        chunks = _chunk_text(extracted_text, chunk_size=1000, overlap=100)
         if chunks:
-            _embed_chunks(material_id, chunks)
+            _embed_chunks(material_id, doc_id, chunks)
 
         # 3. ナレッジグラフ構築
         title = os.path.splitext(filename)[0]
-        knowledge_graph = _build_knowledge_graph(text, title)
+        knowledge_graph = _build_knowledge_graph(extracted_text, title)
 
-        # 4. Neo4jに保存
-        driver = _neo4j_driver()
-        with driver.session() as session:
-            session.run(
-                """
-                MERGE (m:Material {id: $material_id})
-                SET m.filename = $filename,
-                    m.title = $title,
-                    m.status = 'completed',
-                    m.knowledge_graph = $kg,
-                    m.text_length = $text_length,
-                    m.chunk_count = $chunk_count,
-                    m.updated_at = $now
-                """,
-                material_id=material_id,
-                filename=filename,
-                title=title,
-                kg=json.dumps(knowledge_graph, ensure_ascii=False),
-                text_length=len(text),
-                chunk_count=len(chunks),
-                now=datetime.datetime.utcnow().isoformat(),
+        # 4. PostgreSQLに保存
+        session = _pg_session()
+        try:
+            session.execute(
+                sa_text("""
+                    UPDATE documents
+                    SET status = 'completed',
+                        knowledge_graph = :kg::jsonb,
+                        text_length = :text_length,
+                        chunk_count = :chunk_count,
+                        updated_at = now()
+                    WHERE id = :doc_id::uuid
+                """),
+                {
+                    "doc_id": doc_id,
+                    "kg": json.dumps(knowledge_graph, ensure_ascii=False),
+                    "text_length": len(extracted_text),
+                    "chunk_count": len(chunks),
+                },
             )
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
         with _material_lock:
             _material_status[material_id]["status"] = "completed"
@@ -1568,16 +1558,17 @@ def _process_material_background(
             _material_status[material_id]["status"] = "failed"
 
         try:
-            driver = _neo4j_driver()
-            with driver.session() as session:
-                session.run(
-                    """
-                    MERGE (m:Material {id: $material_id})
-                    SET m.status = 'failed', m.updated_at = $now
-                    """,
-                    material_id=material_id,
-                    now=datetime.datetime.utcnow().isoformat(),
+            session = _pg_session()
+            try:
+                session.execute(
+                    sa_text("UPDATE documents SET status = 'failed', updated_at = now() WHERE id = :doc_id::uuid"),
+                    {"doc_id": doc_id},
                 )
+                session.commit()
+            except Exception:
+                session.rollback()
+            finally:
+                session.close()
         except Exception:
             pass
 
@@ -1595,23 +1586,11 @@ def _chunk_text(text: str, chunk_size: int = 1000, overlap: int = 100) -> list[s
     return chunks
 
 
-def _embed_chunks(material_id: str, chunks: list[str]) -> None:
-    """テキストチャンクをembeddingしてQdrantに保存する。"""
+def _embed_chunks(material_id: str, doc_id: str, chunks: list[str]) -> None:
+    """テキストチャンクをembeddingしてPostgreSQLに保存する。"""
     client = _openai()
-    qdrant = _qdrant()
 
     try:
-        from qdrant_client.models import Distance, PointStruct, VectorParams
-
-        # コレクション作成（なければ）
-        collections = [c.name for c in qdrant.get_collections().collections]
-        if _QDRANT_COLLECTION not in collections:
-            qdrant.create_collection(
-                collection_name=_QDRANT_COLLECTION,
-                vectors_config=VectorParams(size=_VECTOR_DIM, distance=Distance.COSINE),
-            )
-
-        # バッチでembedding
         batch_size = 50
         for i in range(0, len(chunks), batch_size):
             batch = chunks[i:i + batch_size]
@@ -1619,25 +1598,31 @@ def _embed_chunks(material_id: str, chunks: list[str]) -> None:
                 model=_OPENAI_EMBEDDING_MODEL,
                 input=batch,
             )
-            points = []
-            for j, emb in enumerate(resp.data):
-                point_id = hashlib.md5(
-                    f"{material_id}:{i + j}".encode()
-                ).hexdigest()
-                # Qdrant expects UUID or int for point ID
-                point_int = int(point_id[:16], 16)
-                points.append(
-                    PointStruct(
-                        id=point_int,
-                        vector=emb.embedding,
-                        payload={
-                            "material_id": material_id,
+            session = _pg_session()
+            try:
+                for j, emb in enumerate(resp.data):
+                    import uuid as _uuid
+                    chunk_id = _uuid.uuid4()
+                    session.execute(
+                        sa_text("""
+                            INSERT INTO chunks (id, document_id, chunk_index, text, embedding, material_id)
+                            VALUES (:id, :doc_id::uuid, :idx, :text, :embedding, :material_id)
+                        """),
+                        {
+                            "id": chunk_id,
+                            "doc_id": doc_id,
+                            "idx": i + j,
                             "text": batch[j],
-                            "chunk_index": i + j,
+                            "embedding": str(emb.embedding),
+                            "material_id": material_id,
                         },
                     )
-                )
-            qdrant.upsert(collection_name=_QDRANT_COLLECTION, points=points)
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+            finally:
+                session.close()
 
         logger.info("Embedded %d chunks for material %s", len(chunks), material_id)
     except Exception:
@@ -1658,35 +1643,36 @@ def upload_material(
         raise HTTPException(status_code=400, detail="Empty file")
 
     material_id = str(uuid.uuid4())[:12]
+    doc_id = uuid.uuid4()
     now = datetime.datetime.utcnow().isoformat()
 
-    # Neo4jに初期レコード作成
-    driver = _neo4j_driver()
-    with driver.session() as session:
-        session.run(
-            """
-            MERGE (u:User {id: $user_id})
-            CREATE (m:Material {
-                id: $material_id,
-                filename: $filename,
-                title: $title,
-                status: 'uploaded',
-                uploaded_by: $user_id,
-                uploaded_at: $now
-            })
-            CREATE (u)-[:UPLOADED]->(m)
-            """,
-            user_id=current_user["id"],
-            material_id=material_id,
-            filename=file.filename,
-            title=os.path.splitext(file.filename)[0],
-            now=now,
+    # PostgreSQL に初期レコード作成
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO documents (id, title, filename, status, uploaded_by, doc_type, source_path)
+                VALUES (:id, :title, :filename, 'uploaded', :uploaded_by::uuid, 'textbook', :material_id)
+            """),
+            {
+                "id": doc_id,
+                "title": os.path.splitext(file.filename)[0],
+                "filename": file.filename,
+                "uploaded_by": current_user["id"],
+                "material_id": material_id,
+            },
         )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
     # バックグラウンド処理を開始
     thread = threading.Thread(
         target=_process_material_background,
-        args=(material_id, file.filename, pdf_bytes),
+        args=(material_id, str(doc_id), file.filename, pdf_bytes),
         daemon=True,
     )
     thread.start()
@@ -1710,40 +1696,37 @@ def list_materials(
     current_user: dict = Depends(_require_teacher),
 ) -> list[MaterialOut]:
     """アップロード済み教材の一覧を返す。"""
-    driver = _neo4j_driver()
-    with driver.session() as session:
-        records = session.run(
-            """
-            MATCH (u:User {id: $user_id})-[:UPLOADED]->(m:Material)
-            RETURN m.id AS id, m.filename AS filename, m.title AS title,
-                   m.status AS status, m.uploaded_at AS uploaded_at,
-                   m.knowledge_graph AS knowledge_graph
-            ORDER BY m.uploaded_at DESC
-            """,
-            user_id=current_user["id"],
-        ).data()
+    session = _pg_session()
+    try:
+        records = session.execute(
+            sa_text("""
+                SELECT source_path, filename, title, status, created_at, knowledge_graph
+                FROM documents
+                WHERE uploaded_by = :user_id::uuid AND filename IS NOT NULL
+                ORDER BY created_at DESC
+            """),
+            {"user_id": current_user["id"]},
+        ).fetchall()
+    finally:
+        session.close()
 
     materials = []
     for r in records:
-        kg = None
-        if r.get("knowledge_graph"):
-            try:
-                kg = json.loads(r["knowledge_graph"])
-            except Exception:
-                pass
+        mid = r[0] or ""
+        kg = r[5] if r[5] else None
 
-        # インメモリステータスで上書き（処理中の場合）
-        status = r.get("status", "uploaded")
+        status = r[3] or "uploaded"
         with _material_lock:
-            if r["id"] in _material_status:
-                status = _material_status[r["id"]].get("status", status)
+            if mid in _material_status:
+                status = _material_status[mid].get("status", status)
 
+        uploaded_at = r[4].isoformat() if r[4] else ""
         materials.append(MaterialOut(
-            material_id=r["id"],
-            filename=r.get("filename", ""),
-            title=r.get("title", ""),
+            material_id=mid,
+            filename=r[1] or "",
+            title=r[2] or "",
             status=status,
-            uploaded_at=r.get("uploaded_at", ""),
+            uploaded_at=uploaded_at,
             knowledge_graph=kg,
         ))
 
@@ -1756,40 +1739,37 @@ def get_material(
     current_user: dict = Depends(_require_teacher),
 ) -> MaterialOut:
     """教材の詳細情報（ナレッジグラフ含む）を返す。"""
-    driver = _neo4j_driver()
-    with driver.session() as session:
-        record = session.run(
-            """
-            MATCH (u:User {id: $user_id})-[:UPLOADED]->(m:Material {id: $material_id})
-            RETURN m.id AS id, m.filename AS filename, m.title AS title,
-                   m.status AS status, m.uploaded_at AS uploaded_at,
-                   m.knowledge_graph AS knowledge_graph
-            """,
-            user_id=current_user["id"],
-            material_id=material_id,
-        ).single()
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("""
+                SELECT source_path, filename, title, status, created_at, knowledge_graph
+                FROM documents
+                WHERE uploaded_by = :user_id::uuid AND source_path = :material_id
+                LIMIT 1
+            """),
+            {"user_id": current_user["id"], "material_id": material_id},
+        ).fetchone()
+    finally:
+        session.close()
 
     if not record:
         raise HTTPException(status_code=404, detail="Material not found")
 
-    kg = None
-    if record.get("knowledge_graph"):
-        try:
-            kg = json.loads(record["knowledge_graph"])
-        except Exception:
-            pass
+    kg = record[5] if record[5] else None
 
-    status = record.get("status", "uploaded")
+    status = record[3] or "uploaded"
     with _material_lock:
         if material_id in _material_status:
             status = _material_status[material_id].get("status", status)
 
+    uploaded_at = record[4].isoformat() if record[4] else ""
     return MaterialOut(
-        material_id=record["id"],
-        filename=record.get("filename", ""),
-        title=record.get("title", ""),
+        material_id=record[0] or "",
+        filename=record[1] or "",
+        title=record[2] or "",
         status=status,
-        uploaded_at=record.get("uploaded_at", ""),
+        uploaded_at=uploaded_at,
         knowledge_graph=kg,
     )
 
@@ -1862,29 +1842,25 @@ def course_builder_chat(
 
     # 利用可能な教材情報をコンテキストに含める
     try:
-        driver = _neo4j_driver()
-        with driver.session() as session:
-            records = session.run(
-                """
-                MATCH (u:User {id: $user_id})-[:UPLOADED]->(m:Material)
-                WHERE m.status = 'completed'
-                RETURN m.title AS title, m.filename AS filename,
-                       m.knowledge_graph AS kg
-                """,
-                user_id=current_user["id"],
-            ).data()
+        pg_session = _pg_session()
+        try:
+            records = pg_session.execute(
+                sa_text("""
+                    SELECT title, filename, knowledge_graph
+                    FROM documents
+                    WHERE uploaded_by = :user_id::uuid AND status = 'completed'
+                """),
+                {"user_id": current_user["id"]},
+            ).fetchall()
+        finally:
+            pg_session.close()
 
         if records:
             materials_ctx = "## 利用可能な教材:\n"
             for r in records:
-                materials_ctx += f"- {r.get('title', r.get('filename', ''))}"
-                if r.get("kg"):
-                    try:
-                        kg = json.loads(r["kg"])
-                        if kg.get("domain"):
-                            materials_ctx += f" (分野: {kg['domain']})"
-                    except Exception:
-                        pass
+                materials_ctx += f"- {r[0] or r[1] or ''}"
+                if r[2] and isinstance(r[2], dict) and r[2].get("domain"):
+                    materials_ctx += f" (分野: {r[2]['domain']})"
                 materials_ctx += "\n"
             messages.append({
                 "role": "user",
@@ -1955,36 +1931,30 @@ def create_student(
     current_user: dict = Depends(_require_teacher),
 ) -> UserOut:
     """教員が学生アカウントを作成する。TEACHER 権限が必要。"""
-    driver = _neo4j_driver()
-    with driver.session() as session:
-        existing = session.run(
-            "MATCH (u:User {username: $username}) RETURN u.id AS id LIMIT 1",
-            username=body.username,
-        ).single()
+    session = _pg_session()
+    try:
+        existing = session.execute(
+            sa_text("SELECT id FROM users WHERE display_name = :username LIMIT 1"),
+            {"username": body.username},
+        ).fetchone()
         if existing:
             raise HTTPException(status_code=409, detail="Username already taken")
 
-        user_id = str(uuid.uuid4())
+        user_id = uuid.uuid4()
         hashed_pw = _hash_password(body.password)
-        session.run(
-            """
-            CREATE (u:User {
-                id:              $id,
-                username:        $username,
-                email:           $email,
-                hashed_password: $hashed_password,
-                role:            $role
-            })
-            """,
-            id=user_id,
-            username=body.username,
-            email=body.email,
-            hashed_password=hashed_pw,
-            role=ROLE_STUDENT,
+        session.execute(
+            sa_text("""
+                INSERT INTO users (id, email, display_name, role, password_hash)
+                VALUES (:id, :email, :username, 'learner', :pw)
+            """),
+            {"id": user_id, "email": body.email, "username": body.username, "pw": hashed_pw},
         )
+        session.commit()
+    finally:
+        session.close()
 
     logger.info("Teacher '%s' created student '%s' (id=%s)", current_user["username"], body.username, user_id)
-    return UserOut(id=user_id, username=body.username, email=body.email, role=ROLE_STUDENT)
+    return UserOut(id=str(user_id), username=body.username, email=body.email, role=ROLE_STUDENT)
 
 
 @app.post("/api/admin/users/teacher", response_model=UserOut, status_code=201)
@@ -1993,36 +1963,30 @@ def create_teacher(
     current_user: dict = Depends(_require_system_admin),
 ) -> UserOut:
     """管理者が教員アカウントを作成する。SYSTEM_ADMIN 権限が必要。"""
-    driver = _neo4j_driver()
-    with driver.session() as session:
-        existing = session.run(
-            "MATCH (u:User {username: $username}) RETURN u.id AS id LIMIT 1",
-            username=body.username,
-        ).single()
+    session = _pg_session()
+    try:
+        existing = session.execute(
+            sa_text("SELECT id FROM users WHERE display_name = :username LIMIT 1"),
+            {"username": body.username},
+        ).fetchone()
         if existing:
             raise HTTPException(status_code=409, detail="Username already taken")
 
-        user_id = str(uuid.uuid4())
+        user_id = uuid.uuid4()
         hashed_pw = _hash_password(body.password)
-        session.run(
-            """
-            CREATE (u:User {
-                id:              $id,
-                username:        $username,
-                email:           $email,
-                hashed_password: $hashed_password,
-                role:            $role
-            })
-            """,
-            id=user_id,
-            username=body.username,
-            email=body.email,
-            hashed_password=hashed_pw,
-            role=ROLE_TEACHER,
+        session.execute(
+            sa_text("""
+                INSERT INTO users (id, email, display_name, role, password_hash)
+                VALUES (:id, :email, :username, 'instructor', :pw)
+            """),
+            {"id": user_id, "email": body.email, "username": body.username, "pw": hashed_pw},
         )
+        session.commit()
+    finally:
+        session.close()
 
     logger.info("Admin '%s' created teacher '%s' (id=%s)", current_user["username"], body.username, user_id)
-    return UserOut(id=user_id, username=body.username, email=body.email, role=ROLE_TEACHER)
+    return UserOut(id=str(user_id), username=body.username, email=body.email, role=ROLE_TEACHER)
 
 
 # ---------------------------------------------------------------------------
