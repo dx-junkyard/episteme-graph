@@ -1413,7 +1413,7 @@ def _extract_pdf_text(pdf_bytes: bytes) -> str:
     for page in doc:
         text_parts.append(page.get_text())
     doc.close()
-    return "\n".join(text_parts)
+    return "\n".join(text_parts).replace("\x00", "")
 
 
 def _build_knowledge_graph(text: str, title: str) -> dict:

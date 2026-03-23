@@ -186,7 +186,7 @@ def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
         with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
             for page in doc:
                 parts.append(page.get_text())
-        return "\n".join(parts)
+        return "\n".join(parts).replace("\x00", "")
 
 
 def chunk_text(text: str, chunk_size: int = _FALLBACK_CHUNK_SIZE) -> list[str]:
