@@ -100,9 +100,10 @@ CREATE INDEX idx_chunks_document ON chunks(document_id);
 CREATE INDEX idx_chunks_arxiv ON chunks(arxiv_id);
 CREATE INDEX idx_chunks_material ON chunks(material_id);
 
--- HNSW index for vector similarity search (better recall than IVFFlat)
+-- IVFFlat index for vector similarity search (HNSW limited to 2000 dimensions)
 CREATE INDEX idx_chunks_embedding ON chunks
-    USING hnsw (embedding vector_cosine_ops);
+    USING ivfflat (embedding vector_cosine_ops)
+    WITH (lists = 100);
 
 -- ============================================================
 -- 学習者状態
