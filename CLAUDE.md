@@ -11,8 +11,8 @@
 |---|---|
 | フロントエンド | Vanilla JS SPA + nginx |
 | API | FastAPI (Python 3.11) |
-| グラフDB | Neo4j 5 (Cypher) |
-| ベクトルDB | Qdrant (cosine, 3072次元) |
+| RDB + ベクトル | PostgreSQL 16 + pgvector (cosine, 3072次元) |
+| グラフDB | Neo4j 5 (Cypher) — グラフ走査専用 |
 | ストレージ | MinIO (S3互換) |
 | LLM | OpenAI API |
 | 認証 | JWT + bcrypt |
@@ -23,6 +23,7 @@
 frontend/          → 学習UI (HTML/CSS/JS, nginx)
 backend/api/       → 統合APIサーバー (認証・学習・Admin)
 backend/core/      → コアエンジン (抽出・検索・グラフ化)
+backend/db/        → PostgreSQL スキーマ定義 (init.sql)
 ```
 
 ## 開発ルール
@@ -44,8 +45,13 @@ backend/core/      → コアエンジン (抽出・検索・グラフ化)
 ### 4. PDF処理パイプライン
 1. PDFアップロード → MinIOに保存
 2. PyMuPDFでテキスト抽出
-3. チャンク分割 → Qdrantにembedding
-4. LLMでナレッジグラフ構築 → Neo4jに保存
+3. チャンク分割 → PostgreSQL pgvectorにembedding
+4. LLMでナレッジグラフ構築 → PostgreSQL (documents) + Neo4j (グラフ走査用)
+
+### 4a. データストア構成
+- **PostgreSQL（正本）:** ユーザー・認証、教材メタデータ、チャンク本文+embedding (pgvector)、学習者状態、コース管理、対話履歴
+- **Neo4j（グラフ走査専用）:** 概念グラフ (REQUIRES, RELATES_TO, CONTAINS)、チャンク↔概念クロスリンク
+- **MinIO:** PDF原本、PaperStructure JSON
 
 ### 5. RAGチャット
 - 教材チャンクをベクトル検索でコンテキストとして取得
