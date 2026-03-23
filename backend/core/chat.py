@@ -75,7 +75,7 @@ def search_chunks(question: str, arxiv_id: str, top_k: int = 5) -> list[str]:
                 FROM chunks c
                 WHERE c.arxiv_id = :arxiv_id
                   AND c.embedding IS NOT NULL
-                ORDER BY c.embedding <=> :query_vector::vector
+                ORDER BY c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
                 LIMIT :limit
             """),
             {
