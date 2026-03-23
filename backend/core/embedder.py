@@ -120,7 +120,7 @@ def embed_and_store(
                     "id": chunk_id,
                     "doc_id": doc_id,
                     "idx": i,
-                    "text": chunk_text[:500],
+                    "text": chunk_text,
                     "embedding": str(vector),
                     "arxiv_id": arxiv_id,
                     "smiles_dsl": smiles_dsl,
@@ -176,21 +176,37 @@ def embed_and_store_pattern(
                 {"id": doc_id, "title": f"Pattern: {pattern_id}", "source_path": f"pattern:{pattern_id}"},
             )
 
-        chunk_id = uuid.uuid4()
-        session.execute(
-            text("""
-                INSERT INTO chunks (id, document_id, chunk_index, text, embedding, arxiv_id)
-                VALUES (:id, :doc_id, 0, :text, :embedding, :arxiv_id)
-                ON CONFLICT (id) DO UPDATE SET embedding = EXCLUDED.embedding, text = EXCLUDED.text
-            """),
-            {
-                "id": chunk_id,
-                "doc_id": doc_id,
-                "text": pattern_text[:500],
-                "embedding": str(vector),
-                "arxiv_id": f"pattern:{pattern_id}",
-            },
-        )
+        existing = session.execute(
+            text("SELECT id FROM chunks WHERE document_id = :doc_id AND chunk_index = 0 LIMIT 1"),
+            {"doc_id": doc_id},
+        ).fetchone()
+
+        if existing:
+            session.execute(
+                text("""
+                    UPDATE chunks SET text = :text, embedding = :embedding
+                    WHERE id = :id
+                """),
+                {
+                    "id": existing[0],
+                    "text": pattern_text,
+                    "embedding": str(vector),
+                },
+            )
+        else:
+            session.execute(
+                text("""
+                    INSERT INTO chunks (id, document_id, chunk_index, text, embedding, arxiv_id)
+                    VALUES (:id, :doc_id, 0, :text, :embedding, :arxiv_id)
+                """),
+                {
+                    "id": uuid.uuid4(),
+                    "doc_id": doc_id,
+                    "text": pattern_text,
+                    "embedding": str(vector),
+                    "arxiv_id": f"pattern:{pattern_id}",
+                },
+            )
 
         session.commit()
         logger.info("Stored pattern embedding for pattern_id=%s", pattern_id)
@@ -214,7 +230,7 @@ def search_similar_papers(
 
     session = get_session()
     try:
-        query = """
+        inner = """
             SELECT DISTINCT ON (c.arxiv_id)
                    c.arxiv_id,
                    1 - (c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))) AS score,
@@ -226,23 +242,27 @@ def search_similar_papers(
         params: dict = {"query_vector": str(vector)}
 
         if exclude_arxiv_id:
-            query += " AND c.arxiv_id != :exclude_id"
+            inner += " AND c.arxiv_id != :exclude_id"
             params["exclude_id"] = exclude_arxiv_id
 
-        query += """
+        inner += """
             ORDER BY c.arxiv_id, c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
+        """
+
+        query = f"""
+            SELECT arxiv_id, score, text
+            FROM ({inner}) AS deduped
+            ORDER BY score DESC
             LIMIT :limit
         """
-        params["limit"] = top_k * 3
+        params["limit"] = top_k
 
         rows = session.execute(text(query), params).fetchall()
 
-        results = [
+        return [
             {"arxiv_id": row[0], "score": float(row[1]), "text": row[2]}
             for row in rows
         ]
-        results.sort(key=lambda x: x["score"], reverse=True)
-        return results[:top_k]
     finally:
         session.close()
 
@@ -265,7 +285,7 @@ def search_fanns_hybrid(
 
     session = get_session()
     try:
-        query = """
+        inner = """
             SELECT DISTINCT ON (c.arxiv_id)
                    c.arxiv_id,
                    1 - (c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))) AS score,
@@ -279,34 +299,37 @@ def search_fanns_hybrid(
         params: dict = {"query_vector": str(query_vector)}
 
         if query_dsl_regex:
-            query += " AND c.smiles_dsl LIKE :dsl_pattern"
+            inner += " AND c.smiles_dsl LIKE :dsl_pattern"
             params["dsl_pattern"] = f"%{query_dsl_regex}%"
 
-        query += """
+        inner += """
             ORDER BY c.arxiv_id, c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
+        """
+
+        query = f"""
+            SELECT arxiv_id, score, text, smiles_dsl, variables
+            FROM ({inner}) AS deduped
+            ORDER BY score DESC
             LIMIT :limit
         """
-        params["limit"] = top_k * 3
+        params["limit"] = top_k
 
         rows = session.execute(text(query), params).fetchall()
 
-        seen: dict[str, dict] = {}
-        for row in rows:
-            arxiv_id = row[0]
-            if arxiv_id not in seen or float(row[1]) > seen[arxiv_id]["score"]:
-                seen[arxiv_id] = {
-                    "arxiv_id": arxiv_id,
-                    "score": float(row[1]),
-                    "text": row[2] or "",
-                    "smiles_dsl": row[3] or "",
-                    "variables": row[4] or [],
-                }
-
-        ranked = sorted(seen.values(), key=lambda x: x["score"], reverse=True)
+        results = [
+            {
+                "arxiv_id": row[0],
+                "score": float(row[1]),
+                "text": row[2] or "",
+                "smiles_dsl": row[3] or "",
+                "variables": row[4] or [],
+            }
+            for row in rows
+        ]
         logger.info(
-            "FANNS hybrid search: filter=%r, unique=%d, returned=%d",
-            query_dsl_regex, len(seen), min(len(ranked), top_k),
+            "FANNS hybrid search: filter=%r, returned=%d",
+            query_dsl_regex, len(results),
         )
-        return ranked[:top_k]
+        return results
     finally:
         session.close()
