@@ -2,7 +2,7 @@
 
 ユーザーの質問に対して:
 1. text-embedding-3-large で質問をベクトル化
-2. Qdrant で対象論文のチャンクを類似度検索
+2. PostgreSQL pgvector で対象論文のチャンクを類似度検索
 3. MinIO から PaperStructure を取得
 4. チャンク + 構造 + 履歴 + 質問をプロンプトに組み込んで LLM に回答生成
 """
@@ -13,10 +13,10 @@ import json
 import logging
 
 from openai import OpenAI
-from qdrant_client.models import FieldCondition, Filter, MatchValue
+from sqlalchemy import text
 
-from core.embedder import _COLLECTION, _qdrant
 from core.llm import get_client, get_settings
+from core.postgres import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -61,28 +61,33 @@ def _embed_query(question: str, client: OpenAI, model: str) -> list[float]:
 
 
 def search_chunks(question: str, arxiv_id: str, top_k: int = 5) -> list[str]:
-    """Qdrant で arxiv_id に属するチャンクを類似度検索して返す。"""
+    """PostgreSQL pgvector で arxiv_id に属するチャンクを類似度検索して返す。"""
     settings = get_settings()
     client = get_client()
 
     query_vector = _embed_query(question, client, settings.embedding_model)
 
-    result = _qdrant().query_points(
-        collection_name=_COLLECTION,
-        query=query_vector,
-        query_filter=Filter(
-            must=[
-                FieldCondition(
-                    key="arxiv_id",
-                    match=MatchValue(value=arxiv_id),
-                )
-            ]
-        ),
-        limit=top_k,
-        with_payload=True,
-    )
+    session = get_session()
+    try:
+        rows = session.execute(
+            text("""
+                SELECT c.text
+                FROM chunks c
+                WHERE c.arxiv_id = :arxiv_id
+                  AND c.embedding IS NOT NULL
+                ORDER BY c.embedding <=> :query_vector::vector
+                LIMIT :limit
+            """),
+            {
+                "arxiv_id": arxiv_id,
+                "query_vector": str(query_vector),
+                "limit": top_k,
+            },
+        ).fetchall()
 
-    return [hit.payload.get("text", "") for hit in result.points if hit.payload]
+        return [row[0] for row in rows if row[0]]
+    finally:
+        session.close()
 
 
 def _get_paper_structure(arxiv_id: str, minio_client) -> dict:
@@ -105,24 +110,7 @@ def generate_chat_response(
     history: list[dict],
     minio_client,
 ) -> str:
-    """RAG ベースでユーザーの質問に回答する。
-
-    Parameters
-    ----------
-    arxiv_id:
-        対象論文の arXiv ID。
-    message:
-        ユーザーの最新メッセージ。
-    history:
-        過去の対話履歴。各要素は {"role": "user"|"assistant", "content": str}。
-    minio_client:
-        MinIO クライアント（StorageManager.client）。
-
-    Returns
-    -------
-    str
-        LLM が生成した回答文字列。
-    """
+    """RAG ベースでユーザーの質問に回答する。"""
     settings = get_settings()
     client = get_client()
 
@@ -132,7 +120,6 @@ def generate_chat_response(
     # 2. PaperStructure を取得
     structure = _get_paper_structure(arxiv_id, minio_client)
 
-    # 【デバッグ用】取得した構造データをログに出力して確認する
     logger.info(f"DEBUG: Loaded structure for {arxiv_id}: {json.dumps(structure.get('abstract_structure', {}), ensure_ascii=False)}")
 
     # 3. コンテキストブロックを構築
@@ -147,10 +134,8 @@ def generate_chat_response(
 
     context_block = "\n\n".join(context_parts) if context_parts else "(No context available)"
 
-    # 4. メッセージリストを構築（コンテキストをシステムターン後に挿入）
+    # 4. メッセージリストを構築
     messages: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
-
-    # コンテキストをアシスタントに事前提示
     messages.append({
         "role": "user",
         "content": (
@@ -163,11 +148,8 @@ def generate_chat_response(
         "content": "Understood. I will use this context to answer your questions about the paper.",
     })
 
-    # 過去の履歴を追加
     for turn in history:
         messages.append({"role": turn["role"], "content": turn["content"]})
-
-    # 最新の質問
     messages.append({"role": "user", "content": message})
 
     # 5. LLM を呼び出して回答を生成
