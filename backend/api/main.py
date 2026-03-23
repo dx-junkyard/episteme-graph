@@ -399,7 +399,7 @@ def _get_course_data(user_id: str, course_id: str) -> dict | None:
         record = session.execute(
             sa_text("""
                 SELECT data FROM learning_courses
-                WHERE user_id = :user_id::uuid AND id = :course_id
+                WHERE user_id = CAST(:user_id AS uuid) AND id = :course_id
                 LIMIT 1
             """),
             {"user_id": user_id, "course_id": course_id},
@@ -416,15 +416,15 @@ def _save_course_data(user_id: str, course_id: str, data: dict) -> None:
     session = _pg_session()
     try:
         existing = session.execute(
-            sa_text("SELECT id FROM learning_courses WHERE id = :course_id AND user_id = :user_id::uuid"),
+            sa_text("SELECT id FROM learning_courses WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)"),
             {"course_id": course_id, "user_id": user_id},
         ).fetchone()
         if existing:
             session.execute(
                 sa_text("""
                     UPDATE learning_courses
-                    SET data = :data::jsonb, title = :title, updated_at = now()
-                    WHERE id = :course_id AND user_id = :user_id::uuid
+                    SET data = CAST(:data AS jsonb), title = :title, updated_at = now()
+                    WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
                 """),
                 {
                     "data": json.dumps(data, ensure_ascii=False),
@@ -437,7 +437,7 @@ def _save_course_data(user_id: str, course_id: str, data: dict) -> None:
             session.execute(
                 sa_text("""
                     INSERT INTO learning_courses (id, user_id, title, data)
-                    VALUES (:course_id, :user_id::uuid, :title, :data::jsonb)
+                    VALUES (:course_id, CAST(:user_id AS uuid), :title, CAST(:data AS jsonb))
                 """),
                 {
                     "course_id": course_id,
@@ -461,7 +461,7 @@ def _delete_course_data(user_id: str, course_id: str) -> bool:
         result = session.execute(
             sa_text("""
                 DELETE FROM learning_courses
-                WHERE id = :course_id AND user_id = :user_id::uuid
+                WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
                 RETURNING id
             """),
             {"course_id": course_id, "user_id": user_id},
@@ -516,7 +516,7 @@ def _search_relevant_chunks(
                     FROM chunks c
                     WHERE c.arxiv_id IN ({placeholders})
                       AND c.embedding IS NOT NULL
-                    ORDER BY c.embedding::halfvec(3072) <=> :query_vector::halfvec(3072)
+                    ORDER BY c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
                     LIMIT :limit
                 """),
                 params,
@@ -553,7 +553,7 @@ def _calculate_progress(user_id: str, course_id: str, course_data: dict) -> dict
             sa_text("""
                 SELECT topic_id, history, updated_at
                 FROM learning_chat_history
-                WHERE user_id = :user_id::uuid AND course_id = :course_id
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
                 ORDER BY updated_at DESC
                 LIMIT 10
             """),
@@ -609,7 +609,7 @@ def _calculate_streak(user_id: str, course_id: str) -> int:
             sa_text("""
                 SELECT DISTINCT DATE(updated_at) AS d
                 FROM learning_chat_history
-                WHERE user_id = :user_id::uuid AND course_id = :course_id
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
                 ORDER BY d DESC
             """),
             {"user_id": user_id, "course_id": course_id},
@@ -676,7 +676,7 @@ def list_courses(
     session = _pg_session()
     try:
         records = session.execute(
-            sa_text("SELECT id, title FROM learning_courses WHERE user_id = :user_id::uuid"),
+            sa_text("SELECT id, title FROM learning_courses WHERE user_id = CAST(:user_id AS uuid)"),
             {"user_id": current_user["id"]},
         ).fetchall()
     finally:
@@ -776,7 +776,7 @@ def get_chat_history(
         record = session.execute(
             sa_text("""
                 SELECT history FROM learning_chat_history
-                WHERE user_id = :user_id::uuid AND course_id = :course_id AND topic_id = :topic_id
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id AND topic_id = :topic_id
                 LIMIT 1
             """),
             {"user_id": current_user["id"], "course_id": course_id, "topic_id": topic_id},
@@ -1177,9 +1177,9 @@ def _persist_chat_history(
             session.execute(
                 sa_text("""
                     INSERT INTO learning_chat_history (user_id, course_id, topic_id, history, updated_at)
-                    VALUES (:user_id::uuid, :course_id, :topic_id, :history::jsonb, now())
+                    VALUES (CAST(:user_id AS uuid), :course_id, :topic_id, CAST(:history AS jsonb), now())
                     ON CONFLICT (user_id, course_id, topic_id)
-                    DO UPDATE SET history = :history::jsonb, updated_at = now()
+                    DO UPDATE SET history = CAST(:history AS jsonb), updated_at = now()
                 """),
                 {
                     "user_id": user_id,
@@ -1245,11 +1245,11 @@ def _search_relevant_chunks_with_scores(
             rows = session.execute(
                 sa_text(f"""
                     SELECT c.text,
-                           1 - (c.embedding::halfvec(3072) <=> :query_vector::halfvec(3072)) AS score
+                           1 - (c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))) AS score
                     FROM chunks c
                     WHERE ({where_clause})
                       AND c.embedding IS NOT NULL
-                    ORDER BY c.embedding::halfvec(3072) <=> :query_vector::halfvec(3072)
+                    ORDER BY c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
                     LIMIT :limit
                 """),
                 params,
@@ -1527,11 +1527,11 @@ def _process_material_background(
                 sa_text("""
                     UPDATE documents
                     SET status = 'completed',
-                        knowledge_graph = :kg::jsonb,
+                        knowledge_graph = CAST(:kg AS jsonb),
                         text_length = :text_length,
                         chunk_count = :chunk_count,
                         updated_at = now()
-                    WHERE id = :doc_id::uuid
+                    WHERE id = CAST(:doc_id AS uuid)
                 """),
                 {
                     "doc_id": doc_id,
@@ -1561,7 +1561,7 @@ def _process_material_background(
             session = _pg_session()
             try:
                 session.execute(
-                    sa_text("UPDATE documents SET status = 'failed', updated_at = now() WHERE id = :doc_id::uuid"),
+                    sa_text("UPDATE documents SET status = 'failed', updated_at = now() WHERE id = CAST(:doc_id AS uuid)"),
                     {"doc_id": doc_id},
                 )
                 session.commit()
@@ -1606,7 +1606,7 @@ def _embed_chunks(material_id: str, doc_id: str, chunks: list[str]) -> None:
                     session.execute(
                         sa_text("""
                             INSERT INTO chunks (id, document_id, chunk_index, text, embedding, material_id)
-                            VALUES (:id, :doc_id::uuid, :idx, :text, :embedding, :material_id)
+                            VALUES (:id, CAST(:doc_id AS uuid), :idx, :text, :embedding, :material_id)
                         """),
                         {
                             "id": chunk_id,
@@ -1652,7 +1652,7 @@ def upload_material(
         session.execute(
             sa_text("""
                 INSERT INTO documents (id, title, filename, status, uploaded_by, doc_type, source_path)
-                VALUES (:id, :title, :filename, 'uploaded', :uploaded_by::uuid, 'textbook', :material_id)
+                VALUES (:id, :title, :filename, 'uploaded', CAST(:uploaded_by AS uuid), 'textbook', :material_id)
             """),
             {
                 "id": doc_id,
@@ -1702,7 +1702,7 @@ def list_materials(
             sa_text("""
                 SELECT source_path, filename, title, status, created_at, knowledge_graph
                 FROM documents
-                WHERE uploaded_by = :user_id::uuid AND filename IS NOT NULL
+                WHERE uploaded_by = CAST(:user_id AS uuid) AND filename IS NOT NULL
                 ORDER BY created_at DESC
             """),
             {"user_id": current_user["id"]},
@@ -1745,7 +1745,7 @@ def get_material(
             sa_text("""
                 SELECT source_path, filename, title, status, created_at, knowledge_graph
                 FROM documents
-                WHERE uploaded_by = :user_id::uuid AND source_path = :material_id
+                WHERE uploaded_by = CAST(:user_id AS uuid) AND source_path = :material_id
                 LIMIT 1
             """),
             {"user_id": current_user["id"], "material_id": material_id},
@@ -1848,7 +1848,7 @@ def course_builder_chat(
                 sa_text("""
                     SELECT title, filename, knowledge_graph
                     FROM documents
-                    WHERE uploaded_by = :user_id::uuid AND status = 'completed'
+                    WHERE uploaded_by = CAST(:user_id AS uuid) AND status = 'completed'
                 """),
                 {"user_id": current_user["id"]},
             ).fetchall()

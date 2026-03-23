@@ -217,7 +217,7 @@ def search_similar_papers(
         query = """
             SELECT DISTINCT ON (c.arxiv_id)
                    c.arxiv_id,
-                   1 - (c.embedding <=> :query_vector::vector) AS score,
+                   1 - (c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))) AS score,
                    c.text
             FROM chunks c
             WHERE c.arxiv_id IS NOT NULL
@@ -230,7 +230,7 @@ def search_similar_papers(
             params["exclude_id"] = exclude_arxiv_id
 
         query += """
-            ORDER BY c.arxiv_id, c.embedding::halfvec(3072) <=> :query_vector::halfvec(3072)
+            ORDER BY c.arxiv_id, c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
             LIMIT :limit
         """
         params["limit"] = top_k * 3
@@ -268,7 +268,7 @@ def search_fanns_hybrid(
         query = """
             SELECT DISTINCT ON (c.arxiv_id)
                    c.arxiv_id,
-                   1 - (c.embedding <=> :query_vector::vector) AS score,
+                   1 - (c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))) AS score,
                    c.text,
                    c.smiles_dsl,
                    c.variables
@@ -283,7 +283,7 @@ def search_fanns_hybrid(
             params["dsl_pattern"] = f"%{query_dsl_regex}%"
 
         query += """
-            ORDER BY c.arxiv_id, c.embedding::halfvec(3072) <=> :query_vector::halfvec(3072)
+            ORDER BY c.arxiv_id, c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
             LIMIT :limit
         """
         params["limit"] = top_k * 3
