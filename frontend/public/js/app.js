@@ -566,41 +566,83 @@
     const courses = await loadCourses();
     const topbarCrse = document.getElementById("course-name");
 
-    if (courses.length === 0) {
+    // A2: 自分のコースと受講可能なテンプレートを分離
+    const ownCourses = courses.filter(function (c) { return !c.is_enrollable; });
+    const enrollableCourses = courses.filter(function (c) { return c.is_enrollable; });
+
+    if (ownCourses.length === 0 && enrollableCourses.length === 0) {
       topbarCrse.textContent = "コースなし";
       return;
     }
 
-    // If we have a saved courseId, use it; otherwise use first
-    if (!state.courseId || !courses.find(function (c) { return c.id === state.courseId; })) {
-      state.courseId = courses[0].id;
-      localStorage.setItem("eg_course", state.courseId);
-    }
+    // 自分のコースがある場合はセレクターを表示
+    if (ownCourses.length > 0) {
+      if (!state.courseId || !ownCourses.find(function (c) { return c.id === state.courseId; })) {
+        state.courseId = ownCourses[0].id;
+        localStorage.setItem("eg_course", state.courseId);
+      }
 
-    // Create selector if multiple courses
-    if (courses.length > 1) {
-      const sel = document.createElement("select");
-      sel.className = "course-select";
-      courses.forEach(function (c) {
-        const opt = document.createElement("option");
-        opt.value = c.id;
-        opt.textContent = c.title;
-        if (c.id === state.courseId) opt.selected = true;
-        sel.appendChild(opt);
-      });
-      sel.addEventListener("change", function () {
-        state.courseId = this.value;
-        localStorage.setItem("eg_course", this.value);
-        loadAndRenderCourse();
-      });
-      topbarCrse.textContent = "";
-      topbarCrse.appendChild(sel);
+      if (ownCourses.length > 1) {
+        const sel = document.createElement("select");
+        sel.className = "course-select";
+        ownCourses.forEach(function (c) {
+          const opt = document.createElement("option");
+          opt.value = c.id;
+          opt.textContent = c.title;
+          if (c.id === state.courseId) opt.selected = true;
+          sel.appendChild(opt);
+        });
+        sel.addEventListener("change", function () {
+          state.courseId = this.value;
+          localStorage.setItem("eg_course", this.value);
+          loadAndRenderCourse();
+        });
+        topbarCrse.textContent = "";
+        topbarCrse.appendChild(sel);
+      } else {
+        topbarCrse.textContent = ownCourses[0].title;
+      }
+
+      await loadAndRenderCourse();
     } else {
-      topbarCrse.textContent = courses[0].title;
+      // 自分のコースがない → 受講可能なコース一覧を表示
+      topbarCrse.textContent = "受講可能なコース";
     }
 
-    await loadAndRenderCourse();
+    // A2: 受講可能なコースをサイドバーに表示
+    if (enrollableCourses.length > 0) {
+      renderEnrollableSection(enrollableCourses);
+    }
   }
+
+  // A2: 受講可能なコース一覧をサイドバーに表示
+  function renderEnrollableSection(enrollableCourses) {
+    const sb = document.getElementById("sidebar");
+    let html = '<div class="sb-hd" style="margin-top:14px">受講可能なコース</div>';
+    enrollableCourses.forEach(function (c) {
+      html +=
+        '<div class="ni" style="justify-content:space-between;padding-right:8px">' +
+        '<span>' + escHtml(c.title) + '</span>' +
+        '<button onclick="enrollCourse(\'' + escHtml(c.id) + '\')" ' +
+        'style="font-size:11px;padding:2px 8px;background:var(--color-text-info);color:#fff;border:none;border-radius:4px;cursor:pointer">受講開始</button>' +
+        '</div>';
+    });
+    sb.innerHTML = (sb.innerHTML || "") + html;
+  }
+
+  // A2: テンプレートに受講登録してリロード
+  window.enrollCourse = async function (courseId) {
+    try {
+      const res = await apiFetch("/learning/courses/" + courseId + "/enroll", { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        state.courseId = data.id;
+        localStorage.setItem("eg_course", data.id);
+        // ページをリロードして新しいコースを反映
+        window.location.reload();
+      }
+    } catch (_) { /* ignore */ }
+  };
 
   async function loadAndRenderCourse() {
     const course = await loadCourse(state.courseId);
