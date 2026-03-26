@@ -5,24 +5,30 @@
 
 Endpoints
 ---------
-POST /api/auth/register                                  ユーザー登録
-POST /api/auth/login                                     ログイン
-GET  /api/auth/me                                        現在のユーザー情報
-POST /api/learning/courses                              コースを新規作成
-GET  /api/learning/courses                              コース一覧
-GET  /api/learning/courses/{course_id}                  コース詳細
-PUT  /api/learning/courses/{course_id}                  コースを更新
-DELETE /api/learning/courses/{course_id}                 コースを削除
-GET  /api/learning/courses/{course_id}/progress          進捗データ
-GET  /api/learning/courses/{cid}/topics/{tid}/chat       チャット履歴
-POST /api/learning/courses/{cid}/topics/{tid}/chat       RAGチャット
-POST /api/admin/materials/upload                         PDF教材アップロード
-GET  /api/admin/materials                                教材一覧
-GET  /api/admin/materials/{material_id}                  教材詳細(グラフ構造)
-POST /api/admin/course-builder/chat                     コース構築AIチャット
-POST /api/admin/users/student                           学生アカウント作成 (TEACHER)
-POST /api/admin/users/teacher                           教員アカウント作成 (SYSTEM_ADMIN)
-GET  /healthz                                            ヘルスチェック
+POST /api/auth/register                                         ユーザー登録
+POST /api/auth/login                                            ログイン
+GET  /api/auth/me                                               現在のユーザー情報
+POST /api/learning/courses                                      コースを新規作成
+GET  /api/learning/courses                                      コース一覧 (公開テンプレート含む)
+GET  /api/learning/courses/{course_id}                          コース詳細
+PUT  /api/learning/courses/{course_id}                          コースを更新
+DELETE /api/learning/courses/{course_id}                        コースを削除
+GET  /api/learning/courses/{course_id}/progress                 進捗データ
+POST /api/learning/courses/{course_id}/enroll                   公開コースに受講登録
+GET  /api/learning/courses/{cid}/topics/{tid}/chat              チャット履歴
+POST /api/learning/courses/{cid}/topics/{tid}/chat              RAGチャット
+POST /api/admin/materials/upload                                PDF教材アップロード
+GET  /api/admin/materials                                       教材一覧
+GET  /api/admin/materials/{material_id}                         教材詳細(グラフ構造)
+POST /api/admin/course-builder/sessions                         コース構築セッション作成
+GET  /api/admin/course-builder/sessions                         セッション一覧
+GET  /api/admin/course-builder/sessions/{session_id}            セッション取得
+PUT  /api/admin/course-builder/sessions/{session_id}            セッション更新
+POST /api/admin/course-builder/chat                             コース構築AIチャット
+PUT  /api/admin/courses/{course_id}/publish                     コースを学生に公開
+POST /api/admin/users/student                                   学生アカウント作成 (TEACHER)
+POST /api/admin/users/teacher                                   教員アカウント作成 (SYSTEM_ADMIN)
+GET  /healthz                                                   ヘルスチェック
 """
 
 from __future__ import annotations
@@ -321,6 +327,7 @@ class CourseCreateRequest(BaseModel):
     topics: list[LearningTopic] = []
     concepts: list[LearningConcept] = []
     sources: list[LearningSource] = []
+    is_template: bool = False  # Trueの場合、教員作成テンプレートとして扱う
 
 
 class CourseUpdateRequest(BaseModel):
@@ -336,6 +343,9 @@ class CourseUpdateRequest(BaseModel):
 class LearningCourseOut(BaseModel):
     id: str
     title: str
+    is_template: bool = False
+    is_published: bool = False
+    is_enrollable: bool = False  # True: 自分未登録の公開テンプレート
 
 
 class LearningCourseDetail(BaseModel):
@@ -381,11 +391,30 @@ class CourseBuilderChatRequest(BaseModel):
     """コース構築AIチャットリクエスト。"""
     message: str
     history: list[dict] = []
+    session_id: str | None = None
 
 
 class CourseBuilderChatResponse(BaseModel):
     """コース構築AIチャットレスポンス。"""
     answer: str
+    course_draft: dict | None = None
+
+
+class CourseBuilderSessionOut(BaseModel):
+    """コース構築セッション情報。"""
+    session_id: str
+    title: str
+    created_at: str
+    updated_at: str
+
+
+class CourseBuilderSessionCreate(BaseModel):
+    title: str = "新しいセッション"
+
+
+class CourseBuilderSessionUpdate(BaseModel):
+    title: str | None = None
+    history: list[dict] | None = None
     course_draft: dict | None = None
 
 
@@ -421,6 +450,10 @@ def _save_course_data(user_id: str, course_id: str, data: dict) -> None:
             """
             MERGE (u:User {id: $user_id})
             MERGE (lc:LearningCourse {id: $course_id})
+            ON CREATE SET lc.owner_id = $user_id,
+                          lc.is_template = false,
+                          lc.is_published = false,
+                          lc.created_at = $now
             MERGE (u)-[:ENROLLED_IN]->(lc)
             SET lc.data = $data, lc.updated_at = $now
             """,
@@ -675,28 +708,56 @@ def create_course(
     }
 
     _save_course_data(current_user["id"], course_id, data)
-    logger.info("Created course '%s' (id=%s) for user=%s", body.title, course_id, current_user["id"])
 
-    return LearningCourseOut(id=course_id, title=body.title)
+    # テンプレートフラグを設定
+    if body.is_template:
+        driver = _neo4j_driver()
+        with driver.session() as session:
+            session.run(
+                "MATCH (lc:LearningCourse {id: $id}) SET lc.is_template = true, lc.owner_id = $uid",
+                id=course_id,
+                uid=current_user["id"],
+            )
+
+    logger.info("Created course '%s' (id=%s) for user=%s", body.title, course_id, current_user["id"])
+    return LearningCourseOut(id=course_id, title=body.title, is_template=body.is_template)
 
 
 @app.get("/api/learning/courses", response_model=list[LearningCourseOut])
 def list_courses(
     current_user: dict = Depends(_get_current_user),
 ) -> list[LearningCourseOut]:
-    """ユーザーが登録しているコース一覧を返す。"""
+    """ユーザーが登録しているコース一覧を返す。公開テンプレートも含む。"""
     driver = _neo4j_driver()
     with driver.session() as session:
-        records = session.run(
+        # 自分が登録しているコース
+        own_records = session.run(
             """
             MATCH (u:User {id: $user_id})-[:ENROLLED_IN]->(lc:LearningCourse)
-            RETURN lc.id AS id, lc.data AS data
+            RETURN lc.id AS id, lc.data AS data,
+                   COALESCE(lc.is_template, false) AS is_template,
+                   COALESCE(lc.is_published, false) AS is_published
+            """,
+            user_id=current_user["id"],
+        ).data()
+
+        # 公開テンプレート (自分がまだ登録していないもの)
+        template_records = session.run(
+            """
+            MATCH (lc:LearningCourse)
+            WHERE lc.is_published = true AND lc.is_template = true
+            AND NOT EXISTS {
+                MATCH (u:User {id: $user_id})-[:ENROLLED_IN]->(lc)
+            }
+            RETURN lc.id AS id, lc.data AS data,
+                   true AS is_template,
+                   true AS is_published
             """,
             user_id=current_user["id"],
         ).data()
 
     courses = []
-    for r in records:
+    for r in own_records:
         data = {}
         if r.get("data"):
             try:
@@ -706,6 +767,24 @@ def list_courses(
         courses.append(LearningCourseOut(
             id=r["id"],
             title=data.get("title", r["id"]),
+            is_template=bool(r.get("is_template", False)),
+            is_published=bool(r.get("is_published", False)),
+            is_enrollable=False,
+        ))
+
+    for r in template_records:
+        data = {}
+        if r.get("data"):
+            try:
+                data = json.loads(r["data"])
+            except Exception:
+                pass
+        courses.append(LearningCourseOut(
+            id=r["id"],
+            title=data.get("title", r["id"]),
+            is_template=True,
+            is_published=True,
+            is_enrollable=True,
         ))
 
     return courses
@@ -1127,56 +1206,75 @@ def _check_prerequisites(
     topic_title: str,
     user_message: str,
 ) -> str | None:
-    """Neo4j の REQUIRES エッジから前提知識を検索し、未習得なら逆質問を返す。
+    """コースデータの prerequisites フィールドを基に前提知識を確認し、未習得なら逆質問を返す。
+
+    「理解している」旨のメッセージが含まれている場合はスキップ。
+    チャット履歴の有無で習得状態を判定する。
 
     Returns None if no intervention needed, otherwise returns the intervention message.
     """
+    # ユーザーが理解済みを示すキーワードがあればスキップ
+    skip_keywords = ["理解", "わかります", "わかっています", "知っています", "できます", "学習済み"]
+    if any(kw in user_message for kw in skip_keywords):
+        return None
+
     try:
+        # 現在のトピック情報をコースデータから取得
+        current_topic = None
+        for t in course_data.get("topics", []):
+            if t.get("title") == topic_title or t.get("id") == topic_title:
+                current_topic = t
+                break
+
+        if not current_topic:
+            return None
+
+        prereqs = current_topic.get("prerequisites", [])
+        if not prereqs:
+            return None
+
+        # このコースでチャット履歴があるトピックIDを取得
         driver = _neo4j_driver()
         with driver.session() as session:
-            # トピック名またはユーザーの質問に関連するエンティティの REQUIRES エッジを検索
             records = session.run(
                 """
-                MATCH (concept)-[r:REQUIRES]->(prereq)
-                WHERE concept.name CONTAINS $topic OR concept.value CONTAINS $topic
-                RETURN DISTINCT prereq.name AS prereq_name,
-                       prereq.value AS prereq_value
-                LIMIT 10
+                MATCH (u:User {id: $user_id})-[r:LEARNING_CHAT]->(lt:LearningTopic {course_id: $course_id})
+                RETURN lt.id AS topic_id
                 """,
-                topic=topic_title,
+                user_id=user_id,
+                course_id=course_id,
             ).data()
+        topics_with_history: set[str] = {r["topic_id"] for r in records}
 
-        if not records:
-            return None
-
-        # ユーザーの学習状態を確認: チャット履歴があるトピックは「習得済み」と見なす
-        learned_topics: set[str] = set()
+        # トピックタイトル → topic_id のマッピング
+        title_to_id: dict[str, str] = {}
         for t in course_data.get("topics", []):
-            t_title = t.get("title", "").lower()
-            learned_topics.add(t_title)
-            # 概念名も追加
-            for concept in course_data.get("concepts", []):
-                if concept.get("status") in ("learned", "reviewed"):
-                    learned_topics.add(concept.get("name", "").lower())
+            title = t.get("title", "").lower().strip()
+            if title:
+                title_to_id[title] = t.get("id", "")
 
-        # 未習得の前提知識を特定
-        unlearned_prereqs: list[str] = []
-        for rec in records:
-            prereq_name = rec.get("prereq_value") or rec.get("prereq_name") or ""
-            if prereq_name and prereq_name.lower() not in learned_topics:
-                unlearned_prereqs.append(prereq_name)
+        # 未習得の前提知識を判定
+        unlearned: list[str] = []
+        for prereq in prereqs:
+            prereq_name = prereq.get("name", "") if isinstance(prereq, dict) else str(prereq)
+            prereq_name = prereq_name.strip()
+            if not prereq_name:
+                continue
+            prereq_topic_id = title_to_id.get(prereq_name.lower(), "")
+            if prereq_topic_id and prereq_topic_id in topics_with_history:
+                continue  # チャット履歴あり → 習得済みとみなす
+            unlearned.append(prereq_name)
 
-        if not unlearned_prereqs:
+        if not unlearned:
             return None
 
-        # 逆質問を生成
-        prereq_list = "、".join(unlearned_prereqs[:3])
+        prereq_list = "、".join(unlearned[:3])
         return (
             f"「{topic_title}」を理解するには、まず以下の前提知識を押さえる必要があります：\n\n"
             f"**{prereq_list}**\n\n"
             f"これらの概念については理解していますか？\n"
             f"理解している場合はその旨を伝えてください。そうでなければ、前提知識から順に説明します。\n\n"
-            + "".join(f"[{p}について詳しく聞く]" for p in unlearned_prereqs[:3])
+            + "".join(f"[{p}について詳しく聞く]" for p in unlearned[:3])
         )
     except Exception:
         logger.warning("Prerequisite check failed, continuing without intervention", exc_info=True)
@@ -1816,8 +1914,8 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
     {
       "title": "章タイトル",
       "topics": [
-        {"title": "トピック名"},
-        {"title": "トピック名"}
+        {"title": "トピック名", "prerequisites": []},
+        {"title": "トピック名", "prerequisites": ["前のトピック名"]}
       ]
     }
   ],
@@ -1840,7 +1938,10 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
 - コース構成案を提示・更新する場合は、応答テキストの最後に `---COURSE_DRAFT_JSON---` という区切り文字の後にJSONを出力する
 - JSONは上記スキーマに従った valid JSON であること
 - 構成案がまだ不完全な場合でも、現時点の案を出力する
-- 教員が単なる質問をしている場合（構成変更を伴わない場合）は区切り文字とJSONを出力しない"""
+- 教員が単なる質問をしている場合（構成変更を伴わない場合）は区切り文字とJSONを出力しない
+- topics[].prerequisites には、そのトピックを学ぶ前に習得しておくべき**同コース内の**トピックのタイトルを列挙する
+  - 例: 第2章のトピックは第1章のトピックタイトルを prerequisites に入れる
+  - 最初のトピックや前提知識不要なトピックは prerequisites を空配列 [] にする"""
 
 
 @app.post(
@@ -1942,7 +2043,282 @@ def course_builder_chat(
         "yes" if course_draft else "no",
     )
 
+    # セッションIDが指定されていれば履歴と draft を永続化
+    if body.session_id:
+        updated_history = body.history + [
+            {"role": "user", "content": body.message},
+            {"role": "assistant", "content": answer},
+        ]
+        _save_cb_session(current_user["id"], body.session_id, updated_history, course_draft)
+
     return CourseBuilderChatResponse(answer=answer, course_draft=course_draft)
+
+
+# ---------------------------------------------------------------------------
+# A1: Course Builder Session helpers & endpoints
+# ---------------------------------------------------------------------------
+
+def _save_cb_session(
+    user_id: str,
+    session_id: str,
+    history: list[dict],
+    course_draft: dict | None,
+) -> None:
+    """コース構築セッションの履歴と draft を Neo4j に保存する。"""
+    try:
+        driver = _neo4j_driver()
+        with driver.session() as db_session:
+            db_session.run(
+                """
+                MATCH (u:User {id: $user_id})-[:HAS_CB_SESSION]->(s:CourseBuilderSession {id: $session_id})
+                SET s.history = $history,
+                    s.course_draft = $course_draft,
+                    s.updated_at = $now
+                """,
+                user_id=user_id,
+                session_id=session_id,
+                history=json.dumps(history, ensure_ascii=False),
+                course_draft=json.dumps(course_draft, ensure_ascii=False) if course_draft is not None else None,
+                now=datetime.datetime.utcnow().isoformat(),
+            )
+    except Exception:
+        logger.exception("Failed to save course builder session %s", session_id)
+
+
+@app.post("/api/admin/course-builder/sessions", response_model=CourseBuilderSessionOut, status_code=201)
+def create_cb_session(
+    body: CourseBuilderSessionCreate,
+    current_user: dict = Depends(_require_teacher),
+) -> CourseBuilderSessionOut:
+    """コース構築セッションを新規作成する。"""
+    session_id = str(uuid.uuid4())[:12]
+    now = datetime.datetime.utcnow().isoformat()
+    driver = _neo4j_driver()
+    with driver.session() as db_session:
+        db_session.run(
+            """
+            MERGE (u:User {id: $user_id})
+            CREATE (s:CourseBuilderSession {
+                id: $session_id,
+                title: $title,
+                history: '[]',
+                course_draft: null,
+                created_at: $now,
+                updated_at: $now
+            })
+            CREATE (u)-[:HAS_CB_SESSION]->(s)
+            """,
+            user_id=current_user["id"],
+            session_id=session_id,
+            title=body.title,
+            now=now,
+        )
+    logger.info("Created course builder session %s for user=%s", session_id, current_user["id"])
+    return CourseBuilderSessionOut(session_id=session_id, title=body.title, created_at=now, updated_at=now)
+
+
+@app.get("/api/admin/course-builder/sessions", response_model=list[CourseBuilderSessionOut])
+def list_cb_sessions(
+    current_user: dict = Depends(_require_teacher),
+) -> list[CourseBuilderSessionOut]:
+    """コース構築セッション一覧を返す（更新日時の降順）。"""
+    driver = _neo4j_driver()
+    with driver.session() as db_session:
+        records = db_session.run(
+            """
+            MATCH (u:User {id: $user_id})-[:HAS_CB_SESSION]->(s:CourseBuilderSession)
+            RETURN s.id AS id, s.title AS title,
+                   s.created_at AS created_at, s.updated_at AS updated_at
+            ORDER BY s.updated_at DESC
+            """,
+            user_id=current_user["id"],
+        ).data()
+    return [
+        CourseBuilderSessionOut(
+            session_id=r["id"],
+            title=r.get("title") or "新しいセッション",
+            created_at=r.get("created_at") or "",
+            updated_at=r.get("updated_at") or "",
+        )
+        for r in records
+    ]
+
+
+@app.get("/api/admin/course-builder/sessions/{session_id}")
+def get_cb_session(
+    session_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """コース構築セッションの詳細（履歴・draft含む）を返す。"""
+    driver = _neo4j_driver()
+    with driver.session() as db_session:
+        record = db_session.run(
+            """
+            MATCH (u:User {id: $user_id})-[:HAS_CB_SESSION]->(s:CourseBuilderSession {id: $session_id})
+            RETURN s.id AS id, s.title AS title, s.history AS history,
+                   s.course_draft AS course_draft,
+                   s.created_at AS created_at, s.updated_at AS updated_at
+            """,
+            user_id=current_user["id"],
+            session_id=session_id,
+        ).single()
+
+    if not record:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    history = []
+    if record.get("history"):
+        try:
+            history = json.loads(record["history"])
+        except Exception:
+            pass
+
+    course_draft = None
+    if record.get("course_draft"):
+        try:
+            course_draft = json.loads(record["course_draft"])
+        except Exception:
+            pass
+
+    return {
+        "session_id": record["id"],
+        "title": record.get("title") or "新しいセッション",
+        "history": history,
+        "course_draft": course_draft,
+        "created_at": record.get("created_at") or "",
+        "updated_at": record.get("updated_at") or "",
+    }
+
+
+@app.put("/api/admin/course-builder/sessions/{session_id}", response_model=CourseBuilderSessionOut)
+def update_cb_session(
+    session_id: str,
+    body: CourseBuilderSessionUpdate,
+    current_user: dict = Depends(_require_teacher),
+) -> CourseBuilderSessionOut:
+    """コース構築セッションのタイトル・履歴・draft を更新する。"""
+    now = datetime.datetime.utcnow().isoformat()
+    driver = _neo4j_driver()
+    with driver.session() as db_session:
+        # 現在の値を取得
+        record = db_session.run(
+            """
+            MATCH (u:User {id: $user_id})-[:HAS_CB_SESSION]->(s:CourseBuilderSession {id: $session_id})
+            RETURN s.title AS title, s.history AS history, s.course_draft AS course_draft,
+                   s.created_at AS created_at
+            """,
+            user_id=current_user["id"],
+            session_id=session_id,
+        ).single()
+        if not record:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        new_title = body.title if body.title is not None else (record.get("title") or "新しいセッション")
+        new_history = (
+            json.dumps(body.history, ensure_ascii=False)
+            if body.history is not None
+            else (record.get("history") or "[]")
+        )
+        new_draft = (
+            json.dumps(body.course_draft, ensure_ascii=False)
+            if body.course_draft is not None
+            else record.get("course_draft")
+        )
+
+        db_session.run(
+            """
+            MATCH (u:User {id: $user_id})-[:HAS_CB_SESSION]->(s:CourseBuilderSession {id: $session_id})
+            SET s.title = $title, s.history = $history, s.course_draft = $draft, s.updated_at = $now
+            """,
+            user_id=current_user["id"],
+            session_id=session_id,
+            title=new_title,
+            history=new_history,
+            draft=new_draft,
+            now=now,
+        )
+
+    return CourseBuilderSessionOut(
+        session_id=session_id,
+        title=new_title,
+        created_at=record.get("created_at") or "",
+        updated_at=now,
+    )
+
+
+# ---------------------------------------------------------------------------
+# A2: Course publish & enroll endpoints
+# ---------------------------------------------------------------------------
+
+@app.put("/api/admin/courses/{course_id}/publish")
+def publish_course(
+    course_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """コースを学生に公開する。所有者の TEACHER または SYSTEM_ADMIN のみ可。"""
+    driver = _neo4j_driver()
+    with driver.session() as session:
+        result = session.run(
+            """
+            MATCH (u:User {id: $user_id})-[:ENROLLED_IN]->(lc:LearningCourse {id: $course_id})
+            SET lc.is_published = true, lc.is_template = true, lc.owner_id = $user_id
+            RETURN lc.id AS id
+            """,
+            user_id=current_user["id"],
+            course_id=course_id,
+        ).single()
+    if not result:
+        raise HTTPException(status_code=404, detail="Course not found")
+    logger.info("Course %s published by user=%s", course_id, current_user["id"])
+    return {"course_id": course_id, "is_published": True}
+
+
+@app.post("/api/learning/courses/{course_id}/enroll", response_model=LearningCourseOut, status_code=201)
+def enroll_course(
+    course_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> LearningCourseOut:
+    """公開テンプレートコースをクローンして自分のコースとして登録する。"""
+    driver = _neo4j_driver()
+    with driver.session() as session:
+        record = session.run(
+            """
+            MATCH (lc:LearningCourse {id: $course_id})
+            WHERE lc.is_published = true AND lc.is_template = true
+            RETURN lc.data AS data
+            """,
+            course_id=course_id,
+        ).single()
+
+    if not record or not record.get("data"):
+        raise HTTPException(status_code=404, detail="Published course not found")
+
+    try:
+        template_data = json.loads(record["data"])
+    except Exception:
+        raise HTTPException(status_code=500, detail="Invalid course data")
+
+    # クローンを作成
+    new_course_id = str(uuid.uuid4())[:8]
+    cloned_data = dict(template_data)
+    cloned_data["id"] = new_course_id
+
+    _save_course_data(current_user["id"], new_course_id, cloned_data)
+
+    # cloned_from を設定
+    driver = _neo4j_driver()
+    with driver.session() as session:
+        session.run(
+            "MATCH (lc:LearningCourse {id: $id}) SET lc.cloned_from = $original_id",
+            id=new_course_id,
+            original_id=course_id,
+        )
+
+    logger.info(
+        "User=%s enrolled in course %s (cloned as %s)",
+        current_user["id"], course_id, new_course_id,
+    )
+    return LearningCourseOut(id=new_course_id, title=cloned_data.get("title", ""))
 
 
 # ---------------------------------------------------------------------------
