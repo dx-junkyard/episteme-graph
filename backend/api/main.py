@@ -5,24 +5,30 @@
 
 Endpoints
 ---------
-POST /api/auth/register                                  ユーザー登録
-POST /api/auth/login                                     ログイン
-GET  /api/auth/me                                        現在のユーザー情報
-POST /api/learning/courses                              コースを新規作成
-GET  /api/learning/courses                              コース一覧
-GET  /api/learning/courses/{course_id}                  コース詳細
-PUT  /api/learning/courses/{course_id}                  コースを更新
-DELETE /api/learning/courses/{course_id}                 コースを削除
-GET  /api/learning/courses/{course_id}/progress          進捗データ
-GET  /api/learning/courses/{cid}/topics/{tid}/chat       チャット履歴
-POST /api/learning/courses/{cid}/topics/{tid}/chat       RAGチャット
-POST /api/admin/materials/upload                         PDF教材アップロード
-GET  /api/admin/materials                                教材一覧
-GET  /api/admin/materials/{material_id}                  教材詳細(グラフ構造)
-POST /api/admin/course-builder/chat                     コース構築AIチャット
-POST /api/admin/users/student                           学生アカウント作成 (TEACHER)
-POST /api/admin/users/teacher                           教員アカウント作成 (SYSTEM_ADMIN)
-GET  /healthz                                            ヘルスチェック
+POST /api/auth/register                                         ユーザー登録
+POST /api/auth/login                                            ログイン
+GET  /api/auth/me                                               現在のユーザー情報
+POST /api/learning/courses                                      コースを新規作成
+GET  /api/learning/courses                                      コース一覧 (公開テンプレート含む)
+GET  /api/learning/courses/{course_id}                          コース詳細
+PUT  /api/learning/courses/{course_id}                          コースを更新
+DELETE /api/learning/courses/{course_id}                        コースを削除
+GET  /api/learning/courses/{course_id}/progress                 進捗データ
+POST /api/learning/courses/{course_id}/enroll                   公開コースに受講登録
+GET  /api/learning/courses/{cid}/topics/{tid}/chat              チャット履歴
+POST /api/learning/courses/{cid}/topics/{tid}/chat              RAGチャット
+POST /api/admin/materials/upload                                PDF教材アップロード
+GET  /api/admin/materials                                       教材一覧
+GET  /api/admin/materials/{material_id}                         教材詳細(グラフ構造)
+POST /api/admin/course-builder/sessions                         コース構築セッション作成
+GET  /api/admin/course-builder/sessions                         セッション一覧
+GET  /api/admin/course-builder/sessions/{session_id}            セッション取得
+PUT  /api/admin/course-builder/sessions/{session_id}            セッション更新
+POST /api/admin/course-builder/chat                             コース構築AIチャット
+PUT  /api/admin/courses/{course_id}/publish                     コースを学生に公開
+POST /api/admin/users/student                                   学生アカウント作成 (TEACHER)
+POST /api/admin/users/teacher                                   教員アカウント作成 (SYSTEM_ADMIN)
+GET  /healthz                                                   ヘルスチェック
 """
 
 from __future__ import annotations
@@ -92,6 +98,52 @@ ROLE_SYSTEM_ADMIN = "SYSTEM_ADMIN"
 _bearer = HTTPBearer()
 
 
+def _run_migrations() -> None:
+    """既存DBに対してマイグレーション002（A1/A2/A3）を適用する。IF NOT EXISTS で冪等。"""
+    session = _pg_session()
+    try:
+        # A1: course_builder_sessions テーブル
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS course_builder_sessions (
+                id          TEXT PRIMARY KEY,
+                user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                title       TEXT NOT NULL DEFAULT '新しいセッション',
+                history     JSONB NOT NULL DEFAULT '[]',
+                course_draft JSONB,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_cb_sessions_user ON course_builder_sessions(user_id)"
+        ))
+
+        # A2: learning_courses への追加カラム
+        for ddl in [
+            "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS is_template  BOOLEAN NOT NULL DEFAULT false",
+            "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS is_published BOOLEAN NOT NULL DEFAULT false",
+            "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS owner_id     UUID REFERENCES users(id)",
+            "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS cloned_from  TEXT REFERENCES learning_courses(id)",
+        ]:
+            session.execute(sa_text(ddl))
+        session.execute(sa_text(
+            "UPDATE learning_courses SET owner_id = user_id WHERE owner_id IS NULL"
+        ))
+        session.execute(sa_text("""
+            CREATE INDEX IF NOT EXISTS idx_courses_published ON learning_courses(is_published, is_template)
+            WHERE is_published = true AND is_template = true
+        """))
+
+        session.commit()
+        logger.info("Migration 002 (A1/A2/A3) applied successfully.")
+    except Exception as exc:
+        session.rollback()
+        logger.error("Migration 002 failed: %s", exc)
+        raise
+    finally:
+        session.close()
+
+
 @asynccontextmanager
 async def _lifespan(application: FastAPI):
     """起動時にシステム管理者アカウントを初期化する（PostgreSQL）。"""
@@ -124,6 +176,7 @@ async def _lifespan(application: FastAPI):
                     logger.info("System administrator account 'Administrator' already exists.")
             finally:
                 session.close()
+            _run_migrations()
             break
         except Exception as exc:
             if attempt < max_retries - 1:
@@ -320,6 +373,7 @@ class CourseCreateRequest(BaseModel):
     topics: list[LearningTopic] = []
     concepts: list[LearningConcept] = []
     sources: list[LearningSource] = []
+    is_template: bool = False  # Trueの場合、教員作成テンプレートとして扱う
 
 
 class CourseUpdateRequest(BaseModel):
@@ -335,6 +389,9 @@ class CourseUpdateRequest(BaseModel):
 class LearningCourseOut(BaseModel):
     id: str
     title: str
+    is_template: bool = False
+    is_published: bool = False
+    is_enrollable: bool = False  # True: 自分未登録の公開テンプレート
 
 
 class LearningCourseDetail(BaseModel):
@@ -380,11 +437,30 @@ class CourseBuilderChatRequest(BaseModel):
     """コース構築AIチャットリクエスト。"""
     message: str
     history: list[dict] = []
+    session_id: str | None = None
 
 
 class CourseBuilderChatResponse(BaseModel):
     """コース構築AIチャットレスポンス。"""
     answer: str
+    course_draft: dict | None = None
+
+
+class CourseBuilderSessionOut(BaseModel):
+    """コース構築セッション情報。"""
+    session_id: str
+    title: str
+    created_at: str
+    updated_at: str
+
+
+class CourseBuilderSessionCreate(BaseModel):
+    title: str = "新しいセッション"
+
+
+class CourseBuilderSessionUpdate(BaseModel):
+    title: str | None = None
+    history: list[dict] | None = None
     course_draft: dict | None = None
 
 
@@ -411,41 +487,38 @@ def _get_course_data(user_id: str, course_id: str) -> dict | None:
     return None
 
 
-def _save_course_data(user_id: str, course_id: str, data: dict) -> None:
-    """LearningCourse データを PostgreSQL に永続化する。"""
+def _save_course_data(user_id: str, course_id: str, data: dict, is_template: bool = False) -> None:
+    """LearningCourse データを PostgreSQL に UPSERT する。
+
+    is_template は初回作成時のみ設定される（更新では変更しない）。
+    """
     session = _pg_session()
     try:
-        existing = session.execute(
-            sa_text("SELECT id FROM learning_courses WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)"),
-            {"course_id": course_id, "user_id": user_id},
-        ).fetchone()
-        if existing:
-            session.execute(
-                sa_text("""
-                    UPDATE learning_courses
-                    SET data = CAST(:data AS jsonb), title = :title, updated_at = now()
-                    WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
-                """),
-                {
-                    "data": json.dumps(data, ensure_ascii=False),
-                    "title": data.get("title", course_id),
-                    "course_id": course_id,
-                    "user_id": user_id,
-                },
-            )
-        else:
-            session.execute(
-                sa_text("""
-                    INSERT INTO learning_courses (id, user_id, title, data)
-                    VALUES (:course_id, CAST(:user_id AS uuid), :title, CAST(:data AS jsonb))
-                """),
-                {
-                    "course_id": course_id,
-                    "user_id": user_id,
-                    "title": data.get("title", course_id),
-                    "data": json.dumps(data, ensure_ascii=False),
-                },
-            )
+        session.execute(
+            sa_text("""
+                INSERT INTO learning_courses (id, user_id, title, data, is_template, is_published, owner_id)
+                VALUES (
+                    :course_id,
+                    CAST(:user_id AS uuid),
+                    :title,
+                    CAST(:data AS jsonb),
+                    :is_template,
+                    false,
+                    CAST(:user_id AS uuid)
+                )
+                ON CONFLICT (id) DO UPDATE
+                SET data = CAST(EXCLUDED.data AS jsonb),
+                    title = EXCLUDED.title,
+                    updated_at = now()
+            """),
+            {
+                "course_id": course_id,
+                "user_id": user_id,
+                "title": data.get("title", course_id),
+                "data": json.dumps(data, ensure_ascii=False),
+                "is_template": is_template,
+            },
+        )
         session.commit()
     except Exception:
         session.rollback()
@@ -662,27 +735,70 @@ def create_course(
         "referenced_sections": [],
     }
 
-    _save_course_data(current_user["id"], course_id, data)
-    logger.info("Created course '%s' (id=%s) for user=%s", body.title, course_id, current_user["id"])
+    _save_course_data(current_user["id"], course_id, data, is_template=body.is_template)
 
-    return LearningCourseOut(id=course_id, title=body.title)
+    logger.info("Created course '%s' (id=%s) for user=%s", body.title, course_id, current_user["id"])
+    return LearningCourseOut(id=course_id, title=body.title, is_template=body.is_template)
 
 
 @app.get("/api/learning/courses", response_model=list[LearningCourseOut])
 def list_courses(
     current_user: dict = Depends(_get_current_user),
 ) -> list[LearningCourseOut]:
-    """ユーザーが登録しているコース一覧を返す。"""
+    """ユーザーが登録しているコース一覧を返す。公開テンプレートも含む。"""
     session = _pg_session()
     try:
-        records = session.execute(
-            sa_text("SELECT id, title FROM learning_courses WHERE user_id = CAST(:user_id AS uuid)"),
+        # 自分が所有するコース
+        own_records = session.execute(
+            sa_text("""
+                SELECT id, title,
+                       COALESCE(is_template, false) AS is_template,
+                       COALESCE(is_published, false) AS is_published
+                FROM learning_courses
+                WHERE user_id = CAST(:user_id AS uuid)
+            """),
+            {"user_id": current_user["id"]},
+        ).fetchall()
+
+        # 公開テンプレート（自分が未受講 = まだ cloned_from でこのIDを参照していない）
+        template_records = session.execute(
+            sa_text("""
+                SELECT lc.id, lc.title
+                FROM learning_courses lc
+                WHERE lc.is_published = true AND lc.is_template = true
+                  AND lc.user_id != CAST(:user_id AS uuid)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM learning_courses lc2
+                      WHERE lc2.user_id = CAST(:user_id AS uuid)
+                        AND lc2.cloned_from = lc.id
+                  )
+            """),
             {"user_id": current_user["id"]},
         ).fetchall()
     finally:
         session.close()
 
-    return [LearningCourseOut(id=r[0], title=r[1]) for r in records]
+    courses = [
+        LearningCourseOut(
+            id=r[0],
+            title=r[1],
+            is_template=bool(r[2]),
+            is_published=bool(r[3]),
+            is_enrollable=False,
+        )
+        for r in own_records
+    ]
+    courses.extend(
+        LearningCourseOut(
+            id=r[0],
+            title=r[1],
+            is_template=True,
+            is_published=True,
+            is_enrollable=True,
+        )
+        for r in template_records
+    )
+    return courses
 
 
 @app.get("/api/learning/courses/{course_id}", response_model=LearningCourseDetail)
@@ -1098,56 +1214,76 @@ def _check_prerequisites(
     topic_title: str,
     user_message: str,
 ) -> str | None:
-    """Neo4j の REQUIRES エッジから前提知識を検索し、未習得なら逆質問を返す。
+    """コースデータの prerequisites フィールドを基に前提知識を確認し、未習得なら逆質問を返す。
+
+    「理解している」旨のメッセージが含まれている場合はスキップ。
+    チャット履歴の有無で習得状態を判定する。
 
     Returns None if no intervention needed, otherwise returns the intervention message.
     """
+    # ユーザーが理解済みを示すキーワードがあればスキップ
+    skip_keywords = ["理解", "わかります", "わかっています", "知っています", "できます", "学習済み"]
+    if any(kw in user_message for kw in skip_keywords):
+        return None
+
     try:
-        driver = _neo4j_driver()
-        with driver.session() as session:
-            # トピック名またはユーザーの質問に関連するエンティティの REQUIRES エッジを検索
-            records = session.run(
-                """
-                MATCH (concept)-[r:REQUIRES]->(prereq)
-                WHERE concept.name CONTAINS $topic OR concept.value CONTAINS $topic
-                RETURN DISTINCT prereq.name AS prereq_name,
-                       prereq.value AS prereq_value
-                LIMIT 10
-                """,
-                topic=topic_title,
-            ).data()
-
-        if not records:
-            return None
-
-        # ユーザーの学習状態を確認: チャット履歴があるトピックは「習得済み」と見なす
-        learned_topics: set[str] = set()
+        # 現在のトピック情報をコースデータから取得
+        current_topic = None
         for t in course_data.get("topics", []):
-            t_title = t.get("title", "").lower()
-            learned_topics.add(t_title)
-            # 概念名も追加
-            for concept in course_data.get("concepts", []):
-                if concept.get("status") in ("learned", "reviewed"):
-                    learned_topics.add(concept.get("name", "").lower())
+            if t.get("title") == topic_title or t.get("id") == topic_title:
+                current_topic = t
+                break
 
-        # 未習得の前提知識を特定
-        unlearned_prereqs: list[str] = []
-        for rec in records:
-            prereq_name = rec.get("prereq_value") or rec.get("prereq_name") or ""
-            if prereq_name and prereq_name.lower() not in learned_topics:
-                unlearned_prereqs.append(prereq_name)
-
-        if not unlearned_prereqs:
+        if not current_topic:
             return None
 
-        # 逆質問を生成
-        prereq_list = "、".join(unlearned_prereqs[:3])
+        prereqs = current_topic.get("prerequisites", [])
+        if not prereqs:
+            return None
+
+        # このコースでチャット履歴があるトピックIDを取得 (PostgreSQL)
+        pg = _pg_session()
+        try:
+            rows = pg.execute(
+                sa_text("""
+                    SELECT topic_id FROM learning_chat_history
+                    WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                """),
+                {"user_id": user_id, "course_id": course_id},
+            ).fetchall()
+        finally:
+            pg.close()
+        topics_with_history: set[str] = {r[0] for r in rows}
+
+        # トピックタイトル → topic_id のマッピング
+        title_to_id: dict[str, str] = {}
+        for t in course_data.get("topics", []):
+            title = t.get("title", "").lower().strip()
+            if title:
+                title_to_id[title] = t.get("id", "")
+
+        # 未習得の前提知識を判定
+        unlearned: list[str] = []
+        for prereq in prereqs:
+            prereq_name = prereq.get("name", "") if isinstance(prereq, dict) else str(prereq)
+            prereq_name = prereq_name.strip()
+            if not prereq_name:
+                continue
+            prereq_topic_id = title_to_id.get(prereq_name.lower(), "")
+            if prereq_topic_id and prereq_topic_id in topics_with_history:
+                continue  # チャット履歴あり → 習得済みとみなす
+            unlearned.append(prereq_name)
+
+        if not unlearned:
+            return None
+
+        prereq_list = "、".join(unlearned[:3])
         return (
             f"「{topic_title}」を理解するには、まず以下の前提知識を押さえる必要があります：\n\n"
             f"**{prereq_list}**\n\n"
             f"これらの概念については理解していますか？\n"
             f"理解している場合はその旨を伝えてください。そうでなければ、前提知識から順に説明します。\n\n"
-            + "".join(f"[{p}について詳しく聞く]" for p in unlearned_prereqs[:3])
+            + "".join(f"[{p}について詳しく聞く]" for p in unlearned[:3])
         )
     except Exception:
         logger.warning("Prerequisite check failed, continuing without intervention", exc_info=True)
@@ -1796,8 +1932,8 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
     {
       "title": "章タイトル",
       "topics": [
-        {"title": "トピック名"},
-        {"title": "トピック名"}
+        {"title": "トピック名", "prerequisites": []},
+        {"title": "トピック名", "prerequisites": ["前のトピック名"]}
       ]
     }
   ],
@@ -1820,7 +1956,10 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
 - コース構成案を提示・更新する場合は、応答テキストの最後に `---COURSE_DRAFT_JSON---` という区切り文字の後にJSONを出力する
 - JSONは上記スキーマに従った valid JSON であること
 - 構成案がまだ不完全な場合でも、現時点の案を出力する
-- 教員が単なる質問をしている場合（構成変更を伴わない場合）は区切り文字とJSONを出力しない"""
+- 教員が単なる質問をしている場合（構成変更を伴わない場合）は区切り文字とJSONを出力しない
+- topics[].prerequisites には、そのトピックを学ぶ前に習得しておくべき**同コース内の**トピックのタイトルを列挙する
+  - 例: 第2章のトピックは第1章のトピックタイトルを prerequisites に入れる
+  - 最初のトピックや前提知識不要なトピックは prerequisites を空配列 [] にする"""
 
 
 @app.post(
@@ -1918,7 +2057,316 @@ def course_builder_chat(
         "yes" if course_draft else "no",
     )
 
+    # セッションIDが指定されていれば履歴と draft を永続化
+    if body.session_id:
+        updated_history = body.history + [
+            {"role": "user", "content": body.message},
+            {"role": "assistant", "content": answer},
+        ]
+        _save_cb_session(current_user["id"], body.session_id, updated_history, course_draft)
+
     return CourseBuilderChatResponse(answer=answer, course_draft=course_draft)
+
+
+# ---------------------------------------------------------------------------
+# A1: Course Builder Session helpers & endpoints
+# ---------------------------------------------------------------------------
+
+def _save_cb_session(
+    user_id: str,
+    session_id: str,
+    history: list[dict],
+    course_draft: dict | None,
+) -> None:
+    """コース構築セッションの履歴と draft を PostgreSQL に保存する。"""
+    try:
+        session = _pg_session()
+        try:
+            session.execute(
+                sa_text("""
+                    UPDATE course_builder_sessions
+                    SET history = CAST(:history AS jsonb),
+                        course_draft = CAST(:course_draft AS jsonb),
+                        updated_at = now()
+                    WHERE id = :session_id AND user_id = CAST(:user_id AS uuid)
+                """),
+                {
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "history": json.dumps(history, ensure_ascii=False),
+                    "course_draft": (
+                        json.dumps(course_draft, ensure_ascii=False)
+                        if course_draft is not None else None
+                    ),
+                },
+            )
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+    except Exception:
+        logger.exception("Failed to save course builder session %s", session_id)
+
+
+@app.post("/api/admin/course-builder/sessions", response_model=CourseBuilderSessionOut, status_code=201)
+def create_cb_session(
+    body: CourseBuilderSessionCreate,
+    current_user: dict = Depends(_require_teacher),
+) -> CourseBuilderSessionOut:
+    """コース構築セッションを新規作成する。"""
+    session_id = str(uuid.uuid4())[:12]
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO course_builder_sessions (id, user_id, title, history, course_draft)
+                VALUES (:session_id, CAST(:user_id AS uuid), :title, '[]', null)
+            """),
+            {"session_id": session_id, "user_id": current_user["id"], "title": body.title},
+        )
+        row = session.execute(
+            sa_text("SELECT created_at, updated_at FROM course_builder_sessions WHERE id = :id"),
+            {"id": session_id},
+        ).fetchone()
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+    created_at = row[0].isoformat() if row and row[0] else ""
+    updated_at = row[1].isoformat() if row and row[1] else ""
+    logger.info("Created course builder session %s for user=%s", session_id, current_user["id"])
+    return CourseBuilderSessionOut(
+        session_id=session_id, title=body.title,
+        created_at=created_at, updated_at=updated_at,
+    )
+
+
+@app.get("/api/admin/course-builder/sessions", response_model=list[CourseBuilderSessionOut])
+def list_cb_sessions(
+    current_user: dict = Depends(_require_teacher),
+) -> list[CourseBuilderSessionOut]:
+    """コース構築セッション一覧を返す（更新日時の降順）。"""
+    session = _pg_session()
+    try:
+        records = session.execute(
+            sa_text("""
+                SELECT id, title, created_at, updated_at
+                FROM course_builder_sessions
+                WHERE user_id = CAST(:user_id AS uuid)
+                ORDER BY updated_at DESC
+            """),
+            {"user_id": current_user["id"]},
+        ).fetchall()
+    finally:
+        session.close()
+    return [
+        CourseBuilderSessionOut(
+            session_id=r[0],
+            title=r[1] or "新しいセッション",
+            created_at=r[2].isoformat() if r[2] else "",
+            updated_at=r[3].isoformat() if r[3] else "",
+        )
+        for r in records
+    ]
+
+
+@app.get("/api/admin/course-builder/sessions/{session_id}")
+def get_cb_session(
+    session_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """コース構築セッションの詳細（履歴・draft含む）を返す。"""
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("""
+                SELECT id, title, history, course_draft, created_at, updated_at
+                FROM course_builder_sessions
+                WHERE id = :session_id AND user_id = CAST(:user_id AS uuid)
+            """),
+            {"session_id": session_id, "user_id": current_user["id"]},
+        ).fetchone()
+    finally:
+        session.close()
+
+    if not record:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    history = record[2] if isinstance(record[2], list) else (
+        json.loads(record[2]) if record[2] else []
+    )
+    course_draft = record[3] if isinstance(record[3], dict) else (
+        json.loads(record[3]) if record[3] else None
+    )
+
+    return {
+        "session_id": record[0],
+        "title": record[1] or "新しいセッション",
+        "history": history,
+        "course_draft": course_draft,
+        "created_at": record[4].isoformat() if record[4] else "",
+        "updated_at": record[5].isoformat() if record[5] else "",
+    }
+
+
+@app.put("/api/admin/course-builder/sessions/{session_id}", response_model=CourseBuilderSessionOut)
+def update_cb_session(
+    session_id: str,
+    body: CourseBuilderSessionUpdate,
+    current_user: dict = Depends(_require_teacher),
+) -> CourseBuilderSessionOut:
+    """コース構築セッションのタイトル・履歴・draft を更新する。"""
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("""
+                SELECT title, history, course_draft, created_at
+                FROM course_builder_sessions
+                WHERE id = :session_id AND user_id = CAST(:user_id AS uuid)
+            """),
+            {"session_id": session_id, "user_id": current_user["id"]},
+        ).fetchone()
+        if not record:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        new_title = body.title if body.title is not None else (record[0] or "新しいセッション")
+        new_history = (
+            json.dumps(body.history, ensure_ascii=False)
+            if body.history is not None
+            else json.dumps(
+                record[1] if isinstance(record[1], list) else (json.loads(record[1]) if record[1] else []),
+                ensure_ascii=False,
+            )
+        )
+        new_draft = (
+            json.dumps(body.course_draft, ensure_ascii=False)
+            if body.course_draft is not None
+            else (json.dumps(record[2]) if record[2] else None)
+        )
+
+        updated = session.execute(
+            sa_text("""
+                UPDATE course_builder_sessions
+                SET title = :title,
+                    history = CAST(:history AS jsonb),
+                    course_draft = CAST(:draft AS jsonb),
+                    updated_at = now()
+                WHERE id = :session_id AND user_id = CAST(:user_id AS uuid)
+                RETURNING updated_at
+            """),
+            {
+                "session_id": session_id,
+                "user_id": current_user["id"],
+                "title": new_title,
+                "history": new_history,
+                "draft": new_draft,
+            },
+        ).fetchone()
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    created_at = record[3].isoformat() if record[3] else ""
+    updated_at = updated[0].isoformat() if updated and updated[0] else ""
+    return CourseBuilderSessionOut(
+        session_id=session_id, title=new_title,
+        created_at=created_at, updated_at=updated_at,
+    )
+
+
+# ---------------------------------------------------------------------------
+# A2: Course publish & enroll endpoints
+# ---------------------------------------------------------------------------
+
+@app.put("/api/admin/courses/{course_id}/publish")
+def publish_course(
+    course_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """コースを学生に公開する。所有者の TEACHER または SYSTEM_ADMIN のみ可。"""
+    session = _pg_session()
+    try:
+        result = session.execute(
+            sa_text("""
+                UPDATE learning_courses
+                SET is_published = true, is_template = true, updated_at = now()
+                WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
+                RETURNING id
+            """),
+            {"course_id": course_id, "user_id": current_user["id"]},
+        ).fetchone()
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Course not found")
+    logger.info("Course %s published by user=%s", course_id, current_user["id"])
+    return {"course_id": course_id, "is_published": True}
+
+
+@app.post("/api/learning/courses/{course_id}/enroll", response_model=LearningCourseOut, status_code=201)
+def enroll_course(
+    course_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> LearningCourseOut:
+    """公開テンプレートコースをクローンして自分のコースとして登録する。"""
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("""
+                SELECT data FROM learning_courses
+                WHERE id = :course_id AND is_published = true AND is_template = true
+                LIMIT 1
+            """),
+            {"course_id": course_id},
+        ).fetchone()
+    finally:
+        session.close()
+
+    if not record or not record[0]:
+        raise HTTPException(status_code=404, detail="Published course not found")
+
+    template_data = record[0] if isinstance(record[0], dict) else json.loads(record[0])
+
+    # クローンを作成
+    new_course_id = str(uuid.uuid4())[:8]
+    cloned_data = dict(template_data)
+    cloned_data["id"] = new_course_id
+
+    _save_course_data(current_user["id"], new_course_id, cloned_data)
+
+    # cloned_from を設定
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("UPDATE learning_courses SET cloned_from = :original_id WHERE id = :id"),
+            {"id": new_course_id, "original_id": course_id},
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    logger.info(
+        "User=%s enrolled in course %s (cloned as %s)",
+        current_user["id"], course_id, new_course_id,
+    )
+    return LearningCourseOut(id=new_course_id, title=cloned_data.get("title", ""))
 
 
 # ---------------------------------------------------------------------------
