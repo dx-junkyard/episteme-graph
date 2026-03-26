@@ -124,9 +124,9 @@ backend/scripts/   → 初期化スクリプト
 - テストファイルは `backend/tests/` に配置
 - 既存の `test_diff_merge.py` が `metaweave.extractor` を参照しているのは既知の問題（モジュールパスは実際は `core.extractor`）
 
-## 優先タスク（Priority A）
+## 優先タスク（Priority A）— 実装完了 (2026-03-26)
 
-以下の3課題を順番に実装する。作業は feature branch で行い、各課題ごとに commit する。
+以下の3課題は `feature/a1-a2-a3-priority-fixes` ブランチで実装済み。
 
 ### A1: コース構築チャット履歴の永続化
 
