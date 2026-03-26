@@ -98,6 +98,52 @@ ROLE_SYSTEM_ADMIN = "SYSTEM_ADMIN"
 _bearer = HTTPBearer()
 
 
+def _run_migrations() -> None:
+    """既存DBに対してマイグレーション002（A1/A2/A3）を適用する。IF NOT EXISTS で冪等。"""
+    session = _pg_session()
+    try:
+        # A1: course_builder_sessions テーブル
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS course_builder_sessions (
+                id          TEXT PRIMARY KEY,
+                user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                title       TEXT NOT NULL DEFAULT '新しいセッション',
+                history     JSONB NOT NULL DEFAULT '[]',
+                course_draft JSONB,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_cb_sessions_user ON course_builder_sessions(user_id)"
+        ))
+
+        # A2: learning_courses への追加カラム
+        for ddl in [
+            "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS is_template  BOOLEAN NOT NULL DEFAULT false",
+            "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS is_published BOOLEAN NOT NULL DEFAULT false",
+            "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS owner_id     UUID REFERENCES users(id)",
+            "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS cloned_from  TEXT REFERENCES learning_courses(id)",
+        ]:
+            session.execute(sa_text(ddl))
+        session.execute(sa_text(
+            "UPDATE learning_courses SET owner_id = user_id WHERE owner_id IS NULL"
+        ))
+        session.execute(sa_text("""
+            CREATE INDEX IF NOT EXISTS idx_courses_published ON learning_courses(is_published, is_template)
+            WHERE is_published = true AND is_template = true
+        """))
+
+        session.commit()
+        logger.info("Migration 002 (A1/A2/A3) applied successfully.")
+    except Exception as exc:
+        session.rollback()
+        logger.error("Migration 002 failed: %s", exc)
+        raise
+    finally:
+        session.close()
+
+
 @asynccontextmanager
 async def _lifespan(application: FastAPI):
     """起動時にシステム管理者アカウントを初期化する（PostgreSQL）。"""
@@ -130,6 +176,7 @@ async def _lifespan(application: FastAPI):
                     logger.info("System administrator account 'Administrator' already exists.")
             finally:
                 session.close()
+            _run_migrations()
             break
         except Exception as exc:
             if attempt < max_retries - 1:
