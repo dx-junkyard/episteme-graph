@@ -14,6 +14,7 @@
     chatMessages: [],
     courseDraft: null,
     sending: false,
+    currentSessionId: null,
   };
 
   var API = "/api";
@@ -289,6 +290,106 @@
     document.getElementById("cb-approve-btn").addEventListener("click", function () {
       approveCourse();
     });
+
+    // A1: セッション一覧をロード
+    loadSessions();
+  }
+
+  // ── Session Management ─────────────────────────────────────────────
+  function loadSessions() {
+    apiFetch("/admin/course-builder/sessions")
+      .then(function (res) { return res.json(); })
+      .then(function (sessions) {
+        if (!sessions || sessions.length === 0) {
+          createNewSession();
+        } else {
+          renderSessionBar(sessions);
+          selectSession(sessions[0].session_id);
+        }
+      })
+      .catch(function () {
+        var bar = document.getElementById("cb-session-bar");
+        if (bar) bar.style.display = "none";
+      });
+  }
+
+  function renderSessionBar(sessions) {
+    var bar = document.getElementById("cb-session-bar");
+    if (!bar) return;
+
+    var selectHtml = '<select id="session-select" style="flex:1;padding:4px 6px;background:var(--color-bg-secondary);border:1px solid var(--color-border);border-radius:4px;color:var(--color-text-primary);font-size:12px">';
+    sessions.forEach(function (s) {
+      selectHtml += '<option value="' + escHtml(s.session_id) + '">' + escHtml(s.title) + "</option>";
+    });
+    selectHtml += "</select>";
+
+    bar.innerHTML =
+      '<div style="display:flex;gap:8px;align-items:center;padding:6px 12px;border-bottom:1px solid var(--color-border)">' +
+      selectHtml +
+      '<button id="new-session-btn" style="padding:4px 10px;font-size:12px;background:var(--color-bg-tertiary);border:1px solid var(--color-border);border-radius:4px;color:var(--color-text-primary);cursor:pointer;white-space:nowrap">+ 新規</button>' +
+      "</div>";
+
+    if (state.currentSessionId) {
+      var sel = document.getElementById("session-select");
+      if (sel) sel.value = state.currentSessionId;
+    }
+
+    document.getElementById("session-select").addEventListener("change", function () {
+      selectSession(this.value);
+    });
+    document.getElementById("new-session-btn").addEventListener("click", function () {
+      createNewSession();
+    });
+  }
+
+  function createNewSession() {
+    apiFetch("/admin/course-builder/sessions", {
+      method: "POST",
+      body: JSON.stringify({ title: "新しいセッション" }),
+    })
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        state.currentSessionId = data.session_id;
+        state.chatHistory = [];
+        state.chatMessages = [];
+        state.courseDraft = null;
+        renderCourseChat();
+        renderCoursePreview();
+        reloadSessionBar(data.session_id);
+      })
+      .catch(function () {
+        // セッション作成失敗時は session_id なしで動作継続
+      });
+  }
+
+  function reloadSessionBar(selectId) {
+    apiFetch("/admin/course-builder/sessions")
+      .then(function (res) { return res.json(); })
+      .then(function (sessions) {
+        renderSessionBar(sessions);
+        if (selectId) {
+          var sel = document.getElementById("session-select");
+          if (sel) sel.value = selectId;
+          state.currentSessionId = selectId;
+        }
+      })
+      .catch(function () {});
+  }
+
+  function selectSession(sessionId) {
+    apiFetch("/admin/course-builder/sessions/" + sessionId)
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        state.currentSessionId = data.session_id;
+        state.chatHistory = data.history || [];
+        state.chatMessages = data.history || [];
+        state.courseDraft = data.course_draft || null;
+        renderCourseChat();
+        renderCoursePreview();
+        var sel = document.getElementById("session-select");
+        if (sel) sel.value = sessionId;
+      })
+      .catch(function () {});
   }
 
   function sendCourseChat(text) {
@@ -305,6 +406,7 @@
       body: JSON.stringify({
         message: text,
         history: state.chatHistory,
+        session_id: state.currentSessionId || null,
       }),
     })
       .then(function (res) {
@@ -452,17 +554,24 @@
       sources: [],
     };
 
-    // Build topics from chapters
+    // Build topics from chapters (A3: prerequisites を draft から伝達)
     var topicIndex = 0;
     (draft.chapters || []).forEach(function (ch, ci) {
       (ch.topics || []).forEach(function (t) {
         var topicTitle = typeof t === "string" ? t : (t.title || t);
+        var prereqs = [];
+        if (t && t.prerequisites && Array.isArray(t.prerequisites)) {
+          t.prerequisites.forEach(function (p) {
+            var name = typeof p === "string" ? p : (p && p.name ? p.name : "");
+            if (name) prereqs.push({ name: name, status: "not_started" });
+          });
+        }
         courseData.topics.push({
           id: "t" + topicIndex,
           title: topicTitle,
           chapter_index: ci,
           status: topicIndex === 0 ? "in_progress" : "locked",
-          prerequisites: [],
+          prerequisites: prereqs,
           misconceptions: [],
         });
         topicIndex++;
@@ -496,9 +605,10 @@
       }
     });
 
+    // A2: is_template: true を付与してコースを登録
     apiFetch("/learning/courses", {
       method: "POST",
-      body: JSON.stringify(courseData),
+      body: JSON.stringify(Object.assign({}, courseData, { is_template: true })),
     })
       .then(function (res) {
         if (!res.ok) throw new Error("Course creation failed");
@@ -508,10 +618,23 @@
         btn.textContent = "登録完了!";
         btn.style.background = "var(--color-text-success)";
 
+        // A2: 「学生に公開する」ボタンを表示
+        var approveArea = document.getElementById("cb-approve-area");
+        if (approveArea && !document.getElementById("cb-publish-btn")) {
+          var publishBtn = document.createElement("button");
+          publishBtn.id = "cb-publish-btn";
+          publishBtn.textContent = "学生に公開する";
+          publishBtn.style.cssText = "margin-left:8px;padding:8px 16px;background:var(--color-text-info);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px";
+          publishBtn.addEventListener("click", function () {
+            publishCourse(data.id, publishBtn);
+          });
+          approveArea.appendChild(publishBtn);
+        }
+
         // Show success message in chat
         state.chatMessages.push({
           role: "assistant",
-          content: "コース「" + (data.title || draft.title) + "」が正常に登録されました。（ID: " + data.id + "）\n\n学習画面から受講を開始できます。",
+          content: "コース「" + (data.title || draft.title) + "」が正常に登録されました。（ID: " + data.id + "）\n\n「学生に公開する」ボタンで学生が受講できるようになります。",
         });
         renderCourseChat();
       })
@@ -519,6 +642,30 @@
         btn.disabled = false;
         btn.textContent = "承認してコースを登録";
         showUploadStatus("コースの登録に失敗しました。", "error");
+      });
+  }
+
+  // A2: コースを学生に公開する
+  function publishCourse(courseId, btn) {
+    btn.disabled = true;
+    btn.textContent = "公開中...";
+    apiFetch("/admin/courses/" + courseId + "/publish", { method: "PUT" })
+      .then(function (res) {
+        if (!res.ok) throw new Error("Publish failed");
+        return res.json();
+      })
+      .then(function () {
+        btn.textContent = "公開済み ✓";
+        btn.style.background = "var(--color-text-success)";
+        state.chatMessages.push({
+          role: "assistant",
+          content: "コースを学生に公開しました。学習画面から「受講開始」ボタンで受講できるようになります。",
+        });
+        renderCourseChat();
+      })
+      .catch(function () {
+        btn.disabled = false;
+        btn.textContent = "学生に公開する";
       });
   }
 

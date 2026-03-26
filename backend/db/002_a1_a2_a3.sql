@@ -1,0 +1,52 @@
+-- Episteme Graph — Schema Changes for A1, A2, A3
+-- NOTE: このシステムは Neo4j (グラフDB) を使用しているため、
+--       SQL マイグレーションではなく、Cypher クエリによるスキーマ変更を記述する。
+--
+-- 実際の変更は backend/api/main.py 内の各エンドポイントで自動的に適用される。
+-- 以下は変更内容のドキュメント (Cypher 形式) として残す。
+
+-- =============================================================================
+-- A1: コース構築チャット履歴の永続化
+-- =============================================================================
+--
+-- 新ノード: CourseBuilderSession
+-- プロパティ:
+--   id          TEXT PRIMARY KEY  -- UUID[:12]
+--   title       TEXT              -- セッション名
+--   history     TEXT              -- JSON: [{role, content}, ...] (LLM会話履歴)
+--   course_draft TEXT             -- JSON: コース構成案
+--   created_at  TEXT              -- ISO8601
+--   updated_at  TEXT              -- ISO8601
+--
+-- 新リレーション: (User)-[:HAS_CB_SESSION]->(CourseBuilderSession)
+--
+-- Cypher (作成例):
+-- CREATE (s:CourseBuilderSession {
+--   id: $session_id, title: $title,
+--   history: '[]', course_draft: null,
+--   created_at: $now, updated_at: $now
+-- })
+-- MERGE (u:User {id: $user_id})-[:HAS_CB_SESSION]->(s)
+
+-- =============================================================================
+-- A2: 教員作成コースの学生共有機能
+-- =============================================================================
+--
+-- 既存ノード: LearningCourse — 以下のプロパティを追加
+--   is_template  BOOLEAN DEFAULT false  -- 教員がコースビルダーで作成したテンプレート
+--   is_published BOOLEAN DEFAULT false  -- 学生に公開済みか
+--   owner_id     TEXT                   -- 作成者 user_id
+--   cloned_from  TEXT DEFAULT null      -- クローン元コースID
+--
+-- Cypher (既存ノードへのプロパティ設定例):
+-- MATCH (lc:LearningCourse)
+-- WHERE lc.is_template IS NULL
+-- SET lc.is_template = false, lc.is_published = false
+
+-- =============================================================================
+-- A3: 前提知識チェック
+-- =============================================================================
+--
+-- スキーマ変更なし。
+-- _check_prerequisites() の実装を Neo4j REQUIRES エッジ依存から
+-- course_data["topics"][].prerequisites 依存に変更 (main.py 内のみ)。
