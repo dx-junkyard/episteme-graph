@@ -26,6 +26,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./backend/db/init.sql:/docker-entrypoint-initdb.d/01_init.sql
       - ./backend/db/002_a1_a2_a3.sql:/docker-entrypoint-initdb.d/02_a1_a2_a3.sql
+      - ./backend/db/003_unanswered_queries.sql:/docker-entrypoint-initdb.d/03_unanswered_queries.sql
     networks:
       - episteme
     healthcheck:
