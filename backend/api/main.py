@@ -1172,7 +1172,7 @@ def learning_chat(
 
     # 7. 誤解検出: LLMの応答に「訂正」が含まれていたらコースデータに追記
     course_update = None
-    if topic_info and "訂正" in answer:
+    if topic_info and any(kw in answer for kw in ["訂正：", "訂正:", "【訂正】"]):
         course_update = _detect_and_record_misconception(
             current_user["id"], course_id, course_data, topic_id, body.message, answer
         )
@@ -1461,18 +1461,11 @@ def _detect_and_record_misconception(
 
     # 訂正部分を抽出（「訂正：」以降の最初の段落）
     correct = ""
+    _CORRECTION_MARKERS = ["訂正：", "訂正:", "【訂正】"]
     for line in ai_response.split("\n"):
-        if "訂正" in line:
-            # 「訂正：」の後のテキストを取得
-            idx = line.find("訂正")
-            rest = line[idx:]
-            # 「訂正：」や「訂正」の後のテキスト
-            for sep in ["：", ":", "】"]:
-                if sep in rest:
-                    correct = rest.split(sep, 1)[1].strip()
-                    break
-            if not correct:
-                correct = rest.replace("訂正", "").strip()
+        matched_marker = next((m for m in _CORRECTION_MARKERS if m in line), None)
+        if matched_marker:
+            correct = line.split(matched_marker, 1)[1].strip()
             break
 
     if not correct:
