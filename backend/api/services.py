@@ -1,0 +1,870 @@
+"""Episteme Graph — ビジネスロジック関数。
+
+ルーターから呼び出されるヘルパー関数群。循環インポートを防ぐため main.py から分離。
+"""
+
+from __future__ import annotations
+
+import datetime
+import json
+import logging
+import os
+import threading
+import uuid
+from functools import lru_cache
+
+from neo4j import GraphDatabase
+from openai import OpenAI
+from sqlalchemy import text as sa_text
+
+from core.postgres import get_session as _pg_session
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+_NEO4J_URI: str = os.environ.get("NEO4J_URI", "bolt://neo4j:7687")
+_NEO4J_AUTH_STR: str = os.environ.get("NEO4J_AUTH", "neo4j/episteme")
+
+_OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
+_OPENAI_ANALYSIS_MODEL: str = os.environ.get("OPENAI_ANALYSIS_MODEL", "gpt-4o")
+_OPENAI_EMBEDDING_MODEL: str = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large")
+
+_MINIO_ENDPOINT: str = os.environ.get("MINIO_ENDPOINT", "minio:9000")
+_MINIO_ACCESS_KEY: str = os.environ.get("MINIO_ACCESS_KEY", "minioadmin")
+_MINIO_SECRET_KEY: str = os.environ.get("MINIO_SECRET_KEY", "minioadmin")
+
+# ---------------------------------------------------------------------------
+# Singletons
+# ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=1)
+def _neo4j_driver():
+    user, password = _NEO4J_AUTH_STR.split("/", 1)
+    return GraphDatabase.driver(_NEO4J_URI, auth=(user, password))
+
+
+@lru_cache(maxsize=1)
+def _openai() -> OpenAI:
+    return OpenAI(api_key=_OPENAI_API_KEY)
+
+
+# ---------------------------------------------------------------------------
+# Background material processing state
+# ---------------------------------------------------------------------------
+
+_material_lock = threading.Lock()
+_material_status: dict[str, dict] = {}
+
+# ---------------------------------------------------------------------------
+# Course CRUD helpers
+# ---------------------------------------------------------------------------
+
+
+def get_course_data(user_id: str, course_id: str) -> dict | None:
+    """PostgreSQL から LearningCourse データを取得する。"""
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("""
+                SELECT data FROM learning_courses
+                WHERE user_id = CAST(:user_id AS uuid) AND id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+        if record and record[0]:
+            return record[0] if isinstance(record[0], dict) else json.loads(record[0])
+    finally:
+        session.close()
+    return None
+
+
+def save_course_data(user_id: str, course_id: str, data: dict, is_template: bool = False) -> None:
+    """LearningCourse データを PostgreSQL に UPSERT する。"""
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO learning_courses (id, user_id, title, data, is_template, is_published, owner_id)
+                VALUES (
+                    :course_id,
+                    CAST(:user_id AS uuid),
+                    :title,
+                    CAST(:data AS jsonb),
+                    :is_template,
+                    false,
+                    CAST(:user_id AS uuid)
+                )
+                ON CONFLICT (id) DO UPDATE
+                SET data = CAST(EXCLUDED.data AS jsonb),
+                    title = EXCLUDED.title,
+                    updated_at = now()
+            """),
+            {
+                "course_id": course_id,
+                "user_id": user_id,
+                "title": data.get("title", course_id),
+                "data": json.dumps(data, ensure_ascii=False),
+                "is_template": is_template,
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def delete_course_data(user_id: str, course_id: str) -> bool:
+    """LearningCourse レコードを削除する。"""
+    session = _pg_session()
+    try:
+        result = session.execute(
+            sa_text("""
+                DELETE FROM learning_courses
+                WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
+                RETURNING id
+            """),
+            {"course_id": course_id, "user_id": user_id},
+        ).fetchone()
+        session.commit()
+        return result is not None
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# Embedding / RAG helpers
+# ---------------------------------------------------------------------------
+
+
+def embed_text(text: str) -> list[float]:
+    """テキストを embedding ベクトルに変換する。"""
+    client = _openai()
+    resp = client.embeddings.create(model=_OPENAI_EMBEDDING_MODEL, input=[text])
+    return resp.data[0].embedding
+
+
+def search_relevant_chunks(
+    query: str,
+    arxiv_ids: list[str],
+    top_k: int = 5,
+) -> list[str]:
+    """PostgreSQL pgvector から関連チャンクをベクトル検索する。"""
+    if not arxiv_ids:
+        return []
+
+    try:
+        query_vector = embed_text(query)
+    except Exception as exc:
+        logger.warning("Embedding failed: %s", exc)
+        return []
+
+    try:
+        session = _pg_session()
+        try:
+            placeholders = ", ".join(f":aid_{i}" for i in range(len(arxiv_ids)))
+            params: dict = {"query_vector": str(query_vector), "limit": top_k}
+            for i, aid in enumerate(arxiv_ids):
+                params[f"aid_{i}"] = aid
+
+            rows = session.execute(
+                sa_text(f"""
+                    SELECT c.text
+                    FROM chunks c
+                    WHERE c.arxiv_id IN ({placeholders})
+                      AND c.embedding IS NOT NULL
+                    ORDER BY c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
+                    LIMIT :limit
+                """),
+                params,
+            ).fetchall()
+            return [row[0] for row in rows if row[0]]
+        finally:
+            session.close()
+    except Exception as exc:
+        logger.warning("pgvector search failed: %s", exc)
+        return []
+
+
+def search_relevant_chunks_with_scores(
+    query: str,
+    arxiv_ids: list[str],
+    material_ids: list[str] | None = None,
+    top_k: int = 5,
+) -> tuple[list[str], list[float]]:
+    """PostgreSQL pgvector から関連チャンクをベクトル検索し、テキストとスコアの両方を返す。"""
+    if not arxiv_ids and not material_ids:
+        return [], []
+
+    try:
+        query_vector = embed_text(query)
+    except Exception as exc:
+        logger.warning("Embedding failed: %s", exc)
+        return [], []
+
+    try:
+        session = _pg_session()
+        try:
+            conditions = []
+            params: dict = {"query_vector": str(query_vector), "limit": top_k}
+
+            if arxiv_ids:
+                aid_placeholders = ", ".join(f":aid_{i}" for i in range(len(arxiv_ids)))
+                conditions.append(f"c.arxiv_id IN ({aid_placeholders})")
+                for i, aid in enumerate(arxiv_ids):
+                    params[f"aid_{i}"] = aid
+
+            if material_ids:
+                mid_placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
+                conditions.append(f"c.material_id IN ({mid_placeholders})")
+                for i, mid in enumerate(material_ids):
+                    params[f"mid_{i}"] = mid
+
+            where_clause = " OR ".join(conditions) if conditions else "TRUE"
+
+            rows = session.execute(
+                sa_text(f"""
+                    SELECT c.text,
+                           1 - (c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))) AS score
+                    FROM chunks c
+                    WHERE ({where_clause})
+                      AND c.embedding IS NOT NULL
+                    ORDER BY c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
+                    LIMIT :limit
+                """),
+                params,
+            ).fetchall()
+
+            texts = [row[0] for row in rows if row[0]]
+            scores = [float(row[1]) for row in rows]
+            return texts, scores
+        finally:
+            session.close()
+    except Exception as exc:
+        logger.warning("pgvector search failed: %s", exc)
+        return [], []
+
+
+def search_chunks_with_metadata(
+    query: str,
+    top_k: int = 8,
+) -> list[dict]:
+    """システム全域の chunks をベクトル検索し、出典情報を付けて返す。"""
+    try:
+        query_vector = embed_text(query)
+    except Exception as exc:
+        logger.warning("Embedding failed: %s", exc)
+        return []
+
+    try:
+        session = _pg_session()
+        try:
+            rows = session.execute(
+                sa_text("""
+                    SELECT c.text,
+                           COALESCE(d.title, '') AS source_title,
+                           COALESCE(d.filename, '') AS source_file,
+                           1 - (c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))) AS score
+                    FROM chunks c
+                    LEFT JOIN documents d ON c.document_id = d.id
+                    WHERE c.embedding IS NOT NULL
+                    ORDER BY c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
+                    LIMIT :limit
+                """),
+                {"query_vector": str(query_vector), "limit": top_k},
+            ).fetchall()
+            return [
+                {
+                    "text": row[0],
+                    "source_title": row[1] or row[2] or "不明な教材",
+                    "source_file": row[2],
+                    "score": float(row[3]),
+                }
+                for row in rows
+                if row[0]
+            ]
+        finally:
+            session.close()
+    except Exception as exc:
+        logger.warning("System-wide pgvector search failed: %s", exc)
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Progress calculation
+# ---------------------------------------------------------------------------
+
+
+def calculate_progress(user_id: str, course_id: str, course_data: dict) -> dict:
+    """コースデータとチャット履歴から進捗を計算する。"""
+    topics = course_data.get("topics", [])
+    concepts = course_data.get("concepts", [])
+
+    mastered = sum(1 for c in concepts if c.get("status") == "mastered")
+    learning = sum(1 for c in concepts if c.get("status") == "learning")
+
+    total_misconceptions = 0
+    for t in topics:
+        total_misconceptions += len(t.get("misconceptions", []))
+
+    sessions_list = []
+    pg_session = _pg_session()
+    try:
+        records = pg_session.execute(
+            sa_text("""
+                SELECT topic_id, history, updated_at
+                FROM learning_chat_history
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                ORDER BY updated_at DESC
+                LIMIT 10
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchall()
+    finally:
+        pg_session.close()
+
+    for r in records:
+        topic_id_val = r[0]
+        history = r[1] if isinstance(r[1], list) else []
+
+        topic_name = topic_id_val
+        for t in topics:
+            if t.get("id") == topic_id_val:
+                topic_name = t.get("title", topic_name)
+                break
+
+        msg_count = len(history)
+        duration_min = max(5, msg_count * 2)
+
+        date_str = ""
+        if r[2]:
+            try:
+                dt = r[2]
+                date_str = f"{dt.month}/{dt.day}"
+            except Exception:
+                pass
+
+        sessions_list.append({
+            "date": date_str or "---",
+            "topic": topic_name,
+            "duration": f"{duration_min}分",
+        })
+
+    streak = calculate_streak(user_id, course_id)
+
+    return {
+        "mastered_concepts": mastered,
+        "learning_concepts": learning,
+        "misconceptions": total_misconceptions,
+        "streak_days": streak,
+        "sessions": sessions_list[:5],
+    }
+
+
+def calculate_streak(user_id: str, course_id: str) -> int:
+    """チャット履歴の日付から連続学習日数を算出する。"""
+    pg_session = _pg_session()
+    try:
+        records = pg_session.execute(
+            sa_text("""
+                SELECT DISTINCT DATE(updated_at) AS d
+                FROM learning_chat_history
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                ORDER BY d DESC
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchall()
+    finally:
+        pg_session.close()
+
+    if not records:
+        return 0
+
+    sorted_dates = [r[0] for r in records]
+    today = datetime.date.today()
+
+    if sorted_dates[0] < today - datetime.timedelta(days=1):
+        return 0
+
+    streak = 1
+    for i in range(1, len(sorted_dates)):
+        if sorted_dates[i] == sorted_dates[i - 1] - datetime.timedelta(days=1):
+            streak += 1
+        else:
+            break
+
+    return streak
+
+
+# ---------------------------------------------------------------------------
+# Prerequisites check (Adaptive Routing)
+# ---------------------------------------------------------------------------
+
+
+def check_prerequisites(
+    user_id: str,
+    course_id: str,
+    course_data: dict,
+    topic_title: str,
+    user_message: str,
+) -> str | None:
+    """コースデータの prerequisites フィールドを基に前提知識を確認し、未習得なら逆質問を返す。"""
+    skip_keywords = ["理解", "わかります", "わかっています", "知っています", "できます", "学習済み"]
+    if any(kw in user_message for kw in skip_keywords):
+        return None
+
+    try:
+        current_topic = None
+        for t in course_data.get("topics", []):
+            if t.get("title") == topic_title or t.get("id") == topic_title:
+                current_topic = t
+                break
+
+        if not current_topic:
+            return None
+
+        prereqs = current_topic.get("prerequisites", [])
+        if not prereqs:
+            return None
+
+        pg = _pg_session()
+        try:
+            rows = pg.execute(
+                sa_text("""
+                    SELECT topic_id FROM learning_chat_history
+                    WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                """),
+                {"user_id": user_id, "course_id": course_id},
+            ).fetchall()
+        finally:
+            pg.close()
+        topics_with_history: set[str] = {r[0] for r in rows}
+
+        title_to_id: dict[str, str] = {}
+        for t in course_data.get("topics", []):
+            title = t.get("title", "").lower().strip()
+            if title:
+                title_to_id[title] = t.get("id", "")
+
+        unlearned: list[str] = []
+        for prereq in prereqs:
+            prereq_name = prereq.get("name", "") if isinstance(prereq, dict) else str(prereq)
+            prereq_name = prereq_name.strip()
+            if not prereq_name:
+                continue
+            prereq_topic_id = title_to_id.get(prereq_name.lower(), "")
+            if prereq_topic_id and prereq_topic_id in topics_with_history:
+                continue
+            unlearned.append(prereq_name)
+
+        if not unlearned:
+            return None
+
+        prereq_list = "、".join(unlearned[:3])
+        return (
+            f"「{topic_title}」を理解するには、まず以下の前提知識を押さえる必要があります：\n\n"
+            f"**{prereq_list}**\n\n"
+            f"これらの概念については理解していますか？\n"
+            f"理解している場合はその旨を伝えてください。そうでなければ、前提知識から順に説明します。\n\n"
+            + "".join(f"[{p}について詳しく聞く]" for p in unlearned[:3])
+        )
+    except Exception:
+        logger.warning("Prerequisite check failed, continuing without intervention", exc_info=True)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Chat history persistence
+# ---------------------------------------------------------------------------
+
+
+def persist_chat_history(
+    user_id: str,
+    course_id: str,
+    topic_id: str,
+    history: list[dict],
+    user_message: str,
+    assistant_answer: str,
+) -> None:
+    """チャット履歴を PostgreSQL に永続化する。"""
+    updated_history = history + [
+        {"role": "user", "content": user_message},
+        {"role": "assistant", "content": assistant_answer},
+    ]
+    try:
+        session = _pg_session()
+        try:
+            session.execute(
+                sa_text("""
+                    INSERT INTO learning_chat_history (user_id, course_id, topic_id, history, updated_at)
+                    VALUES (CAST(:user_id AS uuid), :course_id, :topic_id, CAST(:history AS jsonb), now())
+                    ON CONFLICT (user_id, course_id, topic_id)
+                    DO UPDATE SET history = CAST(:history AS jsonb), updated_at = now()
+                """),
+                {
+                    "user_id": user_id,
+                    "course_id": course_id,
+                    "topic_id": topic_id,
+                    "history": json.dumps(updated_history, ensure_ascii=False),
+                },
+            )
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+    except Exception:
+        logger.exception(
+            "Failed to persist learning chat for user=%s topic=%s",
+            user_id, topic_id,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Misconception detection
+# ---------------------------------------------------------------------------
+
+
+def detect_and_record_misconception(
+    user_id: str,
+    course_id: str,
+    course_data: dict,
+    topic_id: str,
+    user_message: str,
+    ai_response: str,
+) -> dict | None:
+    """AI応答から誤解を検出し、コースデータに記録する。"""
+    wrong = user_message
+    if len(wrong) > 60:
+        wrong = wrong[:60] + "…"
+
+    correct = ""
+    _CORRECTION_MARKERS = ["訂正：", "訂正:", "【訂正】"]
+    for line in ai_response.split("\n"):
+        matched_marker = next((m for m in _CORRECTION_MARKERS if m in line), None)
+        if matched_marker:
+            correct = line.split(matched_marker, 1)[1].strip()
+            break
+
+    if not correct:
+        correct = "（AIの応答を参照してください）"
+
+    today = datetime.date.today()
+    misconception = {
+        "label": f"{today.month}/{today.day} の訂正",
+        "wrong": wrong,
+        "correct": correct,
+    }
+
+    for t in course_data.get("topics", []):
+        if t.get("id") == topic_id:
+            if "misconceptions" not in t:
+                t["misconceptions"] = []
+            t["misconceptions"].insert(0, misconception)
+            t["misconceptions"] = t["misconceptions"][:5]
+            break
+
+    save_course_data(user_id, course_id, course_data)
+
+    return {
+        "topics": course_data.get("topics", []),
+        "concepts": course_data.get("concepts", []),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Unanswered query logging
+# ---------------------------------------------------------------------------
+
+
+def log_unanswered_query(user_id: str, course_id: str, topic_id: str, question: str) -> None:
+    """RAG検索で回答できなかった質問をDBに記録する。"""
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO unanswered_query_logs (id, user_id, course_id, topic_id, question)
+                VALUES (:id, CAST(:user_id AS uuid), :course_id, :topic_id, :question)
+            """),
+            {
+                "id": str(uuid.uuid4()),
+                "user_id": user_id,
+                "course_id": course_id,
+                "topic_id": topic_id,
+                "question": question,
+            },
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.warning("Failed to log unanswered query: %s", exc)
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# PDF processing helpers
+# ---------------------------------------------------------------------------
+
+
+def extract_pdf_text(pdf_bytes: bytes) -> str:
+    """PDFからテキストを抽出する。PyMuPDFを使用。"""
+    import fitz  # PyMuPDF
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    text_parts = []
+    for page in doc:
+        text_parts.append(page.get_text())
+    doc.close()
+    return "\n".join(text_parts).replace("\x00", "")
+
+
+def build_knowledge_graph(text: str, title: str) -> dict:
+    """抽出したテキストからDSLベースのナレッジグラフを構築する。"""
+    client = _openai()
+
+    prompt = f"""以下の教材テキストから知識グラフを構築してください。
+
+**教材タイトル:** {title}
+
+**教材テキスト (抜粋):**
+{text[:8000]}
+
+以下のJSON形式で出力してください:
+{{
+  "title": "教材タイトル",
+  "domain": "分野名",
+  "concepts": [
+    {{
+      "id": "concept_1",
+      "name": "概念名",
+      "description": "概念の説明",
+      "type": "definition|theorem|method|example"
+    }}
+  ],
+  "relationships": [
+    {{
+      "source": "concept_1",
+      "target": "concept_2",
+      "relation": "REQUIRES|CONTAINS|CAUSES|DEFINES|EXTENDS|APPLIES_TO",
+      "description": "関係の説明"
+    }}
+  ],
+  "chapters": [
+    {{
+      "title": "章タイトル",
+      "concepts": ["concept_1", "concept_2"],
+      "topics": [
+        {{
+          "id": "topic_1",
+          "title": "トピックタイトル",
+          "concepts": ["concept_1"]
+        }}
+      ]
+    }}
+  ]
+}}"""
+
+    try:
+        response = client.chat.completions.create(
+            model=_OPENAI_ANALYSIS_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+        )
+        raw = response.choices[0].message.content or ""
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+        if raw.endswith("```"):
+            raw = raw[:-3]
+        raw = raw.strip()
+        if raw.startswith("json"):
+            raw = raw[4:].strip()
+        return json.loads(raw)
+    except Exception as exc:
+        logger.warning("Knowledge graph extraction failed: %s", exc)
+        return {"title": title, "concepts": [], "relationships": [], "chapters": []}
+
+
+def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 100) -> list[str]:
+    """テキストをチャンクに分割する。"""
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunk = text[start:end]
+        if chunk.strip():
+            chunks.append(chunk.strip())
+        start = end - overlap
+    return chunks
+
+
+def embed_chunks(material_id: str, doc_id: str, chunks: list[str]) -> None:
+    """テキストチャンクをembeddingしてPostgreSQLに保存する。"""
+    client = _openai()
+
+    try:
+        batch_size = 50
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i:i + batch_size]
+            resp = client.embeddings.create(
+                model=_OPENAI_EMBEDDING_MODEL,
+                input=batch,
+            )
+            session = _pg_session()
+            try:
+                for j, emb in enumerate(resp.data):
+                    chunk_id = uuid.uuid4()
+                    session.execute(
+                        sa_text("""
+                            INSERT INTO chunks (id, document_id, chunk_index, text, embedding, material_id)
+                            VALUES (:id, CAST(:doc_id AS uuid), :idx, :text, :embedding, :material_id)
+                        """),
+                        {
+                            "id": chunk_id,
+                            "doc_id": doc_id,
+                            "idx": i + j,
+                            "text": batch[j],
+                            "embedding": str(emb.embedding),
+                            "material_id": material_id,
+                        },
+                    )
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+            finally:
+                session.close()
+
+        logger.info("Embedded %d chunks for material %s", len(chunks), material_id)
+    except Exception:
+        logger.exception("Embedding failed for material %s", material_id)
+
+
+def process_material_background(
+    material_id: str,
+    doc_id: str,
+    filename: str,
+    pdf_bytes: bytes,
+) -> None:
+    """バックグラウンドでPDF処理パイプラインを実行する。"""
+    with _material_lock:
+        _material_status[material_id] = {
+            "status": "processing",
+            "filename": filename,
+        }
+
+    try:
+        extracted_text = extract_pdf_text(pdf_bytes)
+        logger.info("Extracted %d chars from PDF %s", len(extracted_text), filename)
+
+        chunks = chunk_text(extracted_text, chunk_size=1000, overlap=100)
+        if chunks:
+            embed_chunks(material_id, doc_id, chunks)
+
+        title = os.path.splitext(filename)[0]
+        knowledge_graph = build_knowledge_graph(extracted_text, title)
+
+        session = _pg_session()
+        try:
+            session.execute(
+                sa_text("""
+                    UPDATE documents
+                    SET status = 'completed',
+                        knowledge_graph = CAST(:kg AS jsonb),
+                        text_length = :text_length,
+                        chunk_count = :chunk_count,
+                        updated_at = now()
+                    WHERE id = CAST(:doc_id AS uuid)
+                """),
+                {
+                    "doc_id": doc_id,
+                    "kg": json.dumps(knowledge_graph, ensure_ascii=False),
+                    "text_length": len(extracted_text),
+                    "chunk_count": len(chunks),
+                },
+            )
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+        with _material_lock:
+            _material_status[material_id]["status"] = "completed"
+
+        logger.info("Material processing completed: %s", material_id)
+
+    except Exception:
+        logger.exception("Material processing failed: %s", material_id)
+        with _material_lock:
+            _material_status[material_id]["status"] = "failed"
+
+        try:
+            session = _pg_session()
+            try:
+                session.execute(
+                    sa_text("UPDATE documents SET status = 'failed', updated_at = now() WHERE id = CAST(:doc_id AS uuid)"),
+                    {"doc_id": doc_id},
+                )
+                session.commit()
+            except Exception:
+                session.rollback()
+            finally:
+                session.close()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Course Builder session helpers
+# ---------------------------------------------------------------------------
+
+
+def save_cb_session(
+    user_id: str,
+    session_id: str,
+    history: list[dict],
+    course_draft: dict | None,
+) -> None:
+    """コース構築セッションの履歴と draft を PostgreSQL に保存する。"""
+    try:
+        session = _pg_session()
+        try:
+            session.execute(
+                sa_text("""
+                    UPDATE course_builder_sessions
+                    SET history = CAST(:history AS jsonb),
+                        course_draft = CAST(:course_draft AS jsonb),
+                        updated_at = now()
+                    WHERE id = :session_id AND user_id = CAST(:user_id AS uuid)
+                """),
+                {
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "history": json.dumps(history, ensure_ascii=False),
+                    "course_draft": (
+                        json.dumps(course_draft, ensure_ascii=False)
+                        if course_draft is not None else None
+                    ),
+                },
+            )
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+    except Exception:
+        logger.exception("Failed to save course builder session %s", session_id)
