@@ -106,4 +106,4 @@ docker compose up -d
 
 ## ライセンス
 
-MIT
+Apache-2.0
