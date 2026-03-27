@@ -27,6 +27,7 @@
     <div class="admin-tabs" id="adminTabs">
       <button class="admin-tab on" data-tab="materials">教材管理</button>
       <button class="admin-tab" data-tab="course-builder">コース構築</button>
+      <button class="admin-tab" data-tab="stumbles">つまづきデータ</button>
     </div>
 
     <!-- Materials tab -->
@@ -99,6 +100,36 @@
             <button id="cb-approve-btn" class="cb-approve-btn">承認してコースを登録</button>
           </div>
         </div>
+      </div>
+    </div>
+    <!-- Stumbles tab -->
+    <div class="admin-panel" id="tab-stumbles">
+      <div class="admin-section">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <h3 class="admin-section-title" style="margin-bottom:0">学生のつまづきデータ</h3>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="stumbles-course-select" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
+              <option value="">コースを選択...</option>
+            </select>
+            <button id="refresh-stumbles" class="admin-action-btn">更新</button>
+          </div>
+        </div>
+        <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:12px">
+          RAG検索で教材から回答できなかった質問の一覧です。教材の補強やコース改善に活用してください。
+        </p>
+        <table class="admin-table" id="stumbles-table">
+          <thead>
+            <tr>
+              <th>日時</th>
+              <th>学生</th>
+              <th>トピック</th>
+              <th>質問内容</th>
+            </tr>
+          </thead>
+          <tbody id="stumbles-tbody">
+            <tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">コースを選択してください</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
   </div>
