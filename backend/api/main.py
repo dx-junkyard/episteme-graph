@@ -926,8 +926,9 @@ _LEARNING_SYSTEM_PROMPT = """あなたは素粒子物理学・場の量子論を
 - 例: 「ここで部分積分を使い、表面項が消えることを仮定すると…」
 
 **RAGコンテキスト利用:**
-- 提供される「教材チャンク」はベクトル検索で取得した関連箇所です。
-- これらを根拠として回答し、出典を明記してください。
+- 提供される「教材チャンク」はシステム全域のベクトル検索で取得した関連箇所です。各チャンクには `[出典: 『書籍名』]` の形式で出典が付いています。
+- 回答中で教材を参照する際は必ず「『書籍名』によれば…」「『書籍名』では…と述べられています」のように出典を明記してください。
+- 複数の教材から情報を統合する場合は、それぞれの出典を区別して示してください。
 - コンテキストに含まれない情報について推測する場合はその旨を明記してください。
 
 **フォーマット:**
@@ -1110,24 +1111,13 @@ def learning_chat(
         )
         return LearningChatResponse(answer=prerequisite_intervention, course_update=None)
 
-    # 3. RAG: コースの教材に紐づいた arxiv_id を収集してチャンク検索
-    arxiv_ids = [
-        s["arxiv_id"]
-        for s in course_data.get("sources", [])
-        if s.get("arxiv_id")
-    ]
-    material_ids = [
-        s["material_id"]
-        for s in course_data.get("sources", [])
-        if s.get("material_id")
-    ]
-    relevant_chunks, relevance_scores = _search_relevant_chunks_with_scores(
-        body.message, arxiv_ids, material_ids=material_ids, top_k=5
-    )
-
-    # 3a. フェイルセーフ: 関連チャンクが0件またはスコアが極端に低い場合はLLMをスキップ
+    # 3. RAG: システム全域のチャンクを検索（出典メタデータ付き）
     _RELEVANCE_THRESHOLD = 0.35
-    if not relevant_chunks or (relevance_scores and max(relevance_scores) < _RELEVANCE_THRESHOLD):
+    chunk_results = _search_chunks_with_metadata(body.message, top_k=8)
+
+    # 3a. フェイルセーフ: 閾値以上のチャンクが0件の場合はLLMをスキップ
+    above_threshold = [r for r in chunk_results if r["score"] >= _RELEVANCE_THRESHOLD]
+    if not above_threshold:
         guidance_answer = _generate_guidance_without_rag(
             course_data, topic_title, body.message, body.history,
         )
@@ -1137,23 +1127,16 @@ def learning_chat(
         )
         return LearningChatResponse(answer=guidance_answer, course_update=None)
 
-    context_parts: list[str] = []
-    if relevant_chunks:
-        context_parts.append(
-            "## 教材から検索された関連箇所\n" + "\n---\n".join(relevant_chunks)
-        )
+    # 出典情報を付けてコンテキストブロックを構築
+    cited_chunks = []
+    for r in above_threshold:
+        cited_chunks.append(f"[出典: 『{r['source_title']}』]\n{r['text']}")
 
-    # コースのソース情報もコンテキストに含める
-    sources_info = []
-    for s in course_data.get("sources", []):
-        info = s.get("title", "")
-        if s.get("subtitle"):
-            info += f" — {s['subtitle']}"
-        sources_info.append(info)
-    if sources_info:
-        context_parts.append("## 登録済み教材\n" + "\n".join(f"- {s}" for s in sources_info))
+    context_parts: list[str] = [
+        "## 教材から検索された関連箇所（出典付き）\n" + "\n---\n".join(cited_chunks)
+    ]
 
-    context_block = "\n\n".join(context_parts) if context_parts else "(教材コンテキストなし)"
+    context_block = "\n\n".join(context_parts)
 
     # 5. LLM メッセージ構築
     course_title = course_data.get("title", course_id)
@@ -1399,6 +1382,59 @@ def _search_relevant_chunks_with_scores(
     except Exception as exc:
         logger.warning("pgvector search failed: %s", exc)
         return [], []
+
+
+# ---------------------------------------------------------------------------
+# System-wide RAG search with source metadata
+# ---------------------------------------------------------------------------
+
+def _search_chunks_with_metadata(
+    query: str,
+    top_k: int = 8,
+) -> list[dict]:
+    """システム全域の chunks をベクトル検索し、出典情報（ドキュメントタイトル・ファイル名）を付けて返す。
+
+    Returns:
+        list of {"text": str, "source_title": str, "source_file": str, "score": float}
+    """
+    try:
+        query_vector = _embed_text(query)
+    except Exception as exc:
+        logger.warning("Embedding failed: %s", exc)
+        return []
+
+    try:
+        session = _pg_session()
+        try:
+            rows = session.execute(
+                sa_text("""
+                    SELECT c.text,
+                           COALESCE(d.title, '') AS source_title,
+                           COALESCE(d.filename, '') AS source_file,
+                           1 - (c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))) AS score
+                    FROM chunks c
+                    LEFT JOIN documents d ON c.document_id = d.id
+                    WHERE c.embedding IS NOT NULL
+                    ORDER BY c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
+                    LIMIT :limit
+                """),
+                {"query_vector": str(query_vector), "limit": top_k},
+            ).fetchall()
+            return [
+                {
+                    "text": row[0],
+                    "source_title": row[1] or row[2] or "不明な教材",
+                    "source_file": row[2],
+                    "score": float(row[3]),
+                }
+                for row in rows
+                if row[0]
+            ]
+        finally:
+            session.close()
+    except Exception as exc:
+        logger.warning("System-wide pgvector search failed: %s", exc)
+        return []
 
 
 # ---------------------------------------------------------------------------
