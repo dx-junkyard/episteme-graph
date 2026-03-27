@@ -134,55 +134,12 @@ def _run_migrations() -> None:
             WHERE is_published = true AND is_template = true
         """))
 
-        # 003: unanswered_query_logs テーブル
-        session.execute(sa_text("""
-            CREATE TABLE IF NOT EXISTS unanswered_query_logs (
-                id        TEXT PRIMARY KEY,
-                user_id   UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                course_id TEXT NOT NULL,
-                topic_id  TEXT NOT NULL,
-                question  TEXT NOT NULL,
-                asked_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-            )
-        """))
-        session.execute(sa_text(
-            "CREATE INDEX IF NOT EXISTS idx_unanswered_course ON unanswered_query_logs(course_id)"
-        ))
-        session.execute(sa_text(
-            "CREATE INDEX IF NOT EXISTS idx_unanswered_user ON unanswered_query_logs(user_id)"
-        ))
-
         session.commit()
-        logger.info("Migrations (002 A1/A2/A3, 003 unanswered_queries) applied successfully.")
+        logger.info("Migration 002 (A1/A2/A3) applied successfully.")
     except Exception as exc:
         session.rollback()
-        logger.error("Migration failed: %s", exc)
+        logger.error("Migration 002 failed: %s", exc)
         raise
-    finally:
-        session.close()
-
-
-def _log_unanswered_query(user_id: str, course_id: str, topic_id: str, question: str) -> None:
-    """RAG検索で回答できなかった質問をDBに記録する。"""
-    session = _pg_session()
-    try:
-        session.execute(
-            sa_text("""
-                INSERT INTO unanswered_query_logs (id, user_id, course_id, topic_id, question)
-                VALUES (:id, CAST(:user_id AS uuid), :course_id, :topic_id, :question)
-            """),
-            {
-                "id": str(uuid.uuid4()),
-                "user_id": user_id,
-                "course_id": course_id,
-                "topic_id": topic_id,
-                "question": question,
-            },
-        )
-        session.commit()
-    except Exception as exc:
-        session.rollback()
-        logger.warning("Failed to log unanswered query: %s", exc)
     finally:
         session.close()
 
@@ -1168,20 +1125,17 @@ def learning_chat(
         body.message, arxiv_ids, material_ids=material_ids, top_k=5
     )
 
-    # 3a. フェイルセーフ: 関連チャンクが0件またはスコアが閾値未満の場合はLLMを呼ばずに応答
+    # 3a. フェイルセーフ: 関連チャンクが0件またはスコアが極端に低い場合はLLMをスキップ
     _RELEVANCE_THRESHOLD = 0.35
     if not relevant_chunks or (relevance_scores and max(relevance_scores) < _RELEVANCE_THRESHOLD):
-        _log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
-        no_answer = (
-            "申し訳ありませんが、ご質問の内容はこのコースの教材には見つかりませんでした。\n\n"
-            "教材に含まれていない内容についてはお答えできません。\n"
-            "別の表現で質問するか、担当教員にお問い合わせください。"
+        guidance_answer = _generate_guidance_without_rag(
+            course_data, topic_title, body.message, body.history,
         )
         _persist_chat_history(
             current_user["id"], course_id, topic_id,
-            body.history, body.message, no_answer,
+            body.history, body.message, guidance_answer,
         )
-        return LearningChatResponse(answer=no_answer, course_update=None)
+        return LearningChatResponse(answer=guidance_answer, course_update=None)
 
     context_parts: list[str] = []
     if relevant_chunks:
@@ -2361,40 +2315,6 @@ def publish_course(
         raise HTTPException(status_code=404, detail="Course not found")
     logger.info("Course %s published by user=%s", course_id, current_user["id"])
     return {"course_id": course_id, "is_published": True}
-
-
-@app.get("/api/admin/courses/{course_id}/unanswered-queries")
-def list_unanswered_queries(
-    course_id: str,
-    current_user: dict = Depends(_require_teacher),
-) -> list[dict]:
-    """コースに紐づくつまづきデータ（RAG未回答クエリ）を返す。TEACHER 以上のみ。"""
-    session = _pg_session()
-    try:
-        rows = session.execute(
-            sa_text("""
-                SELECT uql.id, uql.topic_id, uql.question, uql.asked_at,
-                       u.display_name AS student_name
-                FROM unanswered_query_logs uql
-                JOIN users u ON uql.user_id = u.id
-                WHERE uql.course_id = :course_id
-                ORDER BY uql.asked_at DESC
-                LIMIT 200
-            """),
-            {"course_id": course_id},
-        ).fetchall()
-    finally:
-        session.close()
-    return [
-        {
-            "id": r[0],
-            "topic_id": r[1],
-            "question": r[2],
-            "asked_at": r[3].isoformat() if r[3] else "",
-            "student_name": r[4] or "",
-        }
-        for r in rows
-    ]
 
 
 @app.post("/api/learning/courses/{course_id}/enroll", response_model=LearningCourseOut, status_code=201)

@@ -669,69 +669,6 @@
       });
   }
 
-  // ── Stumbles (Unanswered Queries) ──────────────────────────────────
-  function initStumbles() {
-    var select = document.getElementById("stumbles-course-select");
-    var refreshBtn = document.getElementById("refresh-stumbles");
-
-    // コース一覧をセレクトボックスに読み込む
-    apiFetch("/learning/courses")
-      .then(function (res) { return res.json(); })
-      .then(function (courses) {
-        courses.forEach(function (c) {
-          if (c.is_template || c.is_published) {
-            var opt = document.createElement("option");
-            opt.value = c.id;
-            opt.textContent = c.title;
-            select.appendChild(opt);
-          }
-        });
-      })
-      .catch(function () {});
-
-    function loadStumbles() {
-      var courseId = select.value;
-      var tbody = document.getElementById("stumbles-tbody");
-      if (!courseId) {
-        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">コースを選択してください</td></tr>';
-        return;
-      }
-      tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">読み込み中...</td></tr>';
-      apiFetch("/admin/courses/" + courseId + "/unanswered-queries")
-        .then(function (res) { return res.json(); })
-        .then(function (rows) {
-          if (!rows || rows.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">つまづきデータはまだありません</td></tr>';
-            return;
-          }
-          var html = "";
-          rows.forEach(function (r) {
-            var dt = "";
-            if (r.asked_at) {
-              try {
-                var d = new Date(r.asked_at);
-                dt = d.getFullYear() + "/" + (d.getMonth() + 1) + "/" + d.getDate() + " " +
-                  d.getHours() + ":" + String(d.getMinutes()).padStart(2, "0");
-              } catch (e) { dt = r.asked_at; }
-            }
-            html += "<tr>";
-            html += "<td style='white-space:nowrap'>" + escHtml(dt) + "</td>";
-            html += "<td>" + escHtml(r.student_name) + "</td>";
-            html += "<td>" + escHtml(r.topic_id) + "</td>";
-            html += "<td style='max-width:400px;word-break:break-word'>" + escHtml(r.question) + "</td>";
-            html += "</tr>";
-          });
-          tbody.innerHTML = html;
-        })
-        .catch(function () {
-          tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-danger)">読み込みに失敗しました</td></tr>';
-        });
-    }
-
-    select.addEventListener("change", loadStumbles);
-    refreshBtn.addEventListener("click", loadStumbles);
-  }
-
   // ── Logout ─────────────────────────────────────────────────────────
   function initLogout() {
     document.getElementById("logout-btn").addEventListener("click", function () {
@@ -902,7 +839,6 @@
     initTabs();
     initUpload();
     initCourseBuilder();
-    initStumbles();
     initUserManagement();
     initLogout();
     loadMaterials();
