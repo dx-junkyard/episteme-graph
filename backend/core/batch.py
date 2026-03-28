@@ -5,44 +5,35 @@
 
 処理フロー
 ----------
-1. Qdrant でパターンのベクトルと類似度の高い過去の論文を上位 N 件取得
+1. PostgreSQL でパターンのベクトルと類似度の高い過去の論文を上位 N 件取得
 2. 候補論文の PaperStructure を MinIO からロード
 3. LLM（Reasoning モデル）で構造的同型性を評価
 4. 閾値以上の場合、Neo4j に MATCHES_PATTERN エッジを作成
-
-Notes on Reasoning models
--------------------------
-system ロールは使用不可。user ロールのみ。
-temperature / max_tokens は指定しない。
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 
 from core.db import get_driver
 from core.embedder import search_similar_papers
-from core.llm import get_client, get_settings
+from core.llm import generate_text
 from core.schema import AbstractionPattern, PaperStructure, PatternMatch
 
 logger = logging.getLogger(__name__)
 
 # [PHASE 4 — ISOMORPHISM EVALUATION]
 # 同型性評価の自信度スコア閾値
-# クロスドメイン（例: 生態学 ↔ 経済学）では意味的距離が大きいため、
-# 表面的な語彙の一致ではなく構造的同型性のみを根拠とするスコアは
-# 自然に低めになる傾向がある。0.6 は同一ドメイン内マッチに適した値であり、
-# 異分野横断パターン検索では偽陰性（見逃し）が増加する。
-# 0.5 に下げることで、構造的に有効なクロスドメインマッチを捕捉しやすくする。
 _CONFIDENCE_THRESHOLD = 0.5
 
-# Qdrant から取得する候補論文数
+# PostgreSQL から取得する候補論文数
 _TOP_K = 5
 
 
 def _build_pattern_query_text(pattern: AbstractionPattern) -> str:
-    """パターンの検索クエリテキストを構築する。"""
+    """��ターンの検索クエリテキストを構築���る。"""
     rules = "; ".join(pattern.structural_rules) if pattern.structural_rules else ""
     variables = ", ".join(pattern.variables_template) if pattern.variables_template else ""
     return (
@@ -69,23 +60,14 @@ def _evaluate_isomorphism(
     pattern: AbstractionPattern,
     paper: PaperStructure,
 ) -> PatternMatch | None:
-    """LLM を使ってパターンと論文の構造的同型性を評価する。
-
-    Returns
-    -------
-    PatternMatch | None
-        閾値以上の自信度の場合は PatternMatch を返す。閾値未満なら None。
-    """
-    client = get_client()
-    settings = get_settings()
-
+    """LLM を使ってパターンと論文の構造的同型性を評価する。"""
     prompt = (
         "あなたはメタ構造転写エンジンの同型性評価モジュールです。\n"
         "以下の「抽象化パターン」が、対象論文の構造と「構造的同型性（Structural Isomorphism）」\n"
         "を持つかどうかを評価してください。\n\n"
         "=== [PHASE 4 — CROSS-DOMAIN ISOMORPHISM EVALUATION] ===\n"
-        "【重要】このシステムの目的は「異分野横断」パターン検索です。\n"
-        "パターンと論文が同一ドメイン（例: どちらも経済学）である必要はありません。\n"
+        "【重要】このシステムの目的は「異分野横断」パターン検索です��\n"
+        "パターンと論文が同一ドメイン（例: どちらも経済学）である必要は��りません。\n"
         "生態学の論文から抽出されたパターンが経済学論文の構造と同型であれば、\n"
         "それは価値ある発見です。表面的な語彙の一致ではなく、\n"
         "「変数間の関係構造」が対応しているかどうかを判断してください。\n\n"
@@ -113,14 +95,9 @@ def _evaluate_isomorphism(
     )
 
     try:
-        resp = client.chat.completions.create(
-            model=settings.analysis_model,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = resp.choices[0].message.content or "{}"
+        raw = generate_text(messages=[{"role": "user", "content": prompt}])
 
         # JSON 抽出
-        import re
         match = re.search(r"\{[\s\S]*\}", raw)
         if not match:
             logger.warning("Could not extract JSON from LLM response for pattern %s / paper %s",
@@ -181,37 +158,19 @@ def run_pattern_evaluation_task(
     pattern: AbstractionPattern,
     storage_client,
 ) -> list[PatternMatch]:
-    """新しいパターンに対して、過去の論文群から構造的同型性を評価するバッチタスク。
-
-    Parameters
-    ----------
-    pattern:
-        評価対象の AbstractionPattern。
-    storage_client:
-        MinIO クライアント（PaperStructure のロードに使用）。
-
-    Returns
-    -------
-    list[PatternMatch]
-        閾値以上のマッチ結果のリスト。
-    """
+    """新しいパターンに対して、過去の論文群から構造的同型性を評価するバッチタスク。"""
     logger.info("Starting pattern evaluation task for pattern_id=%s", pattern.pattern_id)
-
-    client = get_client()
-    settings = get_settings()
 
     # 1. パターンのテキスト表現で類似論文を検索
     query_text = _build_pattern_query_text(pattern)
     try:
         candidates = search_similar_papers(
             query_text=query_text,
-            openai_client=client,
-            embedding_model=settings.embedding_model,
             top_k=_TOP_K,
             exclude_arxiv_id=pattern.source_arxiv_id,
         )
     except Exception:
-        logger.exception("Qdrant search failed for pattern %s", pattern.pattern_id)
+        logger.exception("PostgreSQL search failed for pattern %s", pattern.pattern_id)
         return []
 
     if not candidates:

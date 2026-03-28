@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import sys
 import uuid
 from contextlib import asynccontextmanager
@@ -46,16 +45,11 @@ from sqlalchemy import text as sa_text
 
 from dependencies import _hash_password
 from routes import auth, learning, admin
+from core.config import get_settings as _get_settings
 from core.postgres import get_session as _pg_session, check_connection as _pg_check
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-_ADMIN_PASSWORD: str = os.environ.get("ADMIN_PASSWORD", "")
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +129,7 @@ def _run_migrations() -> None:
 @asynccontextmanager
 async def _lifespan(application: FastAPI):
     """起動時にシステム管理者アカウントを初期化する（PostgreSQL）。"""
+    _ADMIN_PASSWORD = _get_settings().admin_password
     if not _ADMIN_PASSWORD:
         logger.critical("CRITICAL: ADMIN_PASSWORD is not set in .env.")
         sys.exit(1)

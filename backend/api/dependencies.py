@@ -6,18 +6,18 @@ JWT トークン生成・検証、ロールマッピング、パスワードハ�
 from __future__ import annotations
 
 import datetime
-import os
 
 import jwt
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from passlib.context import CryptContext
 
+from core.config import get_settings as _get_settings
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-_JWT_SECRET: str = os.environ.get("JWT_SECRET", "episteme-dev-secret-change-in-prod")
 _JWT_ALGORITHM: str = "HS256"
 _JWT_EXPIRE_HOURS: int = 24
 
@@ -57,7 +57,7 @@ def _verify_password(plain: str, hashed: str) -> bool:
 def _create_token(user_id: str, username: str, email: str, role: str = ROLE_STUDENT) -> str:
     expire = datetime.datetime.utcnow() + datetime.timedelta(hours=_JWT_EXPIRE_HOURS)
     payload = {"sub": user_id, "username": username, "email": email, "role": role, "exp": expire}
-    return jwt.encode(payload, _JWT_SECRET, algorithm=_JWT_ALGORITHM)
+    return jwt.encode(payload, _get_settings().jwt_secret, algorithm=_JWT_ALGORITHM)
 
 
 def _get_current_user(
@@ -66,7 +66,7 @@ def _get_current_user(
     """Bearer トークンをデコードしてユーザー情報を返す。"""
     try:
         payload = jwt.decode(
-            credentials.credentials, _JWT_SECRET, algorithms=[_JWT_ALGORITHM]
+            credentials.credentials, _get_settings().jwt_secret, algorithms=[_JWT_ALGORITHM]
         )
         return {
             "id": payload["sub"],

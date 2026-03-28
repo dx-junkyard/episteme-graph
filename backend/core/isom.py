@@ -11,15 +11,15 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 from pathlib import Path
 
+from core.config import get_settings
 from core.schema import PaperStructure
 
 logger = logging.getLogger(__name__)
 
 # Default output directory for batch .isom files
-_DEFAULT_OUTPUT_DIR = os.environ.get("ISOM_OUTPUT_DIR", "output/incoming")
+_DEFAULT_OUTPUT_DIR = get_settings().isom_output_dir
 
 
 def _source_id(structure: PaperStructure) -> str:

@@ -2,10 +2,6 @@
 
 各論文のチャンクを text-embedding-3-large でベクトル化し、
 PostgreSQL の chunks テーブルに pgvector embedding 付きで保存する。
-
-環境変数
---------
-DATABASE_URL   PostgreSQL 接続文字列 (default: postgresql://episteme:episteme@postgres:5432/episteme)
 """
 
 from __future__ import annotations
@@ -13,10 +9,9 @@ from __future__ import annotations
 import logging
 import uuid
 
-from openai import OpenAI
 from sqlalchemy import text
 
-from core.llm import get_client, get_settings
+from core.llm import generate_embeddings
 from core.postgres import get_session
 from core.schema import CausalEdge, PaperStructure
 
@@ -58,23 +53,20 @@ def _build_ancestors_map(edges: list[CausalEdge]) -> dict[str, list[str]]:
 def embed_and_store(
     chunks: list[str],
     arxiv_id: str,
-    openai_client: OpenAI,
-    embedding_model: str,
     extracted_structure: PaperStructure | None = None,
 ) -> None:
     """チャンクリストを一括 Embedding して PostgreSQL chunks テーブルに保存する。"""
     if not chunks:
         return
 
-    # OpenAI Embeddings API でバッチ処理
+    # LLM 抽象化レイヤーでバッチ処理
     _BATCH = 100
     all_embeddings: list[list[float]] = []
     for i in range(0, len(chunks), _BATCH):
         batch = chunks[i : i + _BATCH]
-        resp = openai_client.embeddings.create(model=embedding_model, input=batch)
-        all_embeddings.extend([e.embedding for e in resp.data])
+        all_embeddings.extend(generate_embeddings(batch))
 
-    # extracted_structure からメタデータを抽出
+    # extracted_structure からメタデー���を抽出
     smiles_dsl = None
     variables = None
     ancestors = None
@@ -149,12 +141,10 @@ def embed_and_store(
 def embed_and_store_pattern(
     pattern_id: str,
     pattern_text: str,
-    openai_client: OpenAI,
-    embedding_model: str,
 ) -> None:
     """パターンのテキスト表現を Embedding して PostgreSQL に保存する。"""
-    resp = openai_client.embeddings.create(model=embedding_model, input=[pattern_text])
-    vector = resp.data[0].embedding
+    vectors = generate_embeddings([pattern_text])
+    vector = vectors[0]
 
     session = get_session()
     try:
@@ -219,14 +209,12 @@ def embed_and_store_pattern(
 
 def search_similar_papers(
     query_text: str,
-    openai_client: OpenAI,
-    embedding_model: str,
     top_k: int = 5,
     exclude_arxiv_id: str | None = None,
 ) -> list[dict]:
     """パターン（またはクエリテキスト）に類似する過去の論文チャンクを PostgreSQL から検索する。"""
-    resp = openai_client.embeddings.create(model=embedding_model, input=[query_text])
-    vector = resp.data[0].embedding
+    vectors = generate_embeddings([query_text])
+    vector = vectors[0]
 
     session = get_session()
     try:
@@ -277,11 +265,8 @@ def search_fanns_hybrid(
     top_k: int = 5,
 ) -> list[dict]:
     """Filtered ANNS by SMILES DSL + vector similarity search on PostgreSQL."""
-    client = get_client()
-    settings = get_settings()
-
-    resp = client.embeddings.create(model=settings.embedding_model, input=[query_text])
-    query_vector = resp.data[0].embedding
+    vectors = generate_embeddings([query_text])
+    query_vector = vectors[0]
 
     session = get_session()
     try:

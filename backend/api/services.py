@@ -14,27 +14,13 @@ import uuid
 from functools import lru_cache
 
 from neo4j import GraphDatabase
-from openai import OpenAI
 from sqlalchemy import text as sa_text
 
+from core.config import get_settings as _get_settings
+from core.llm import generate_text, generate_embeddings
 from core.postgres import get_session as _pg_session
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-_NEO4J_URI: str = os.environ.get("NEO4J_URI", "bolt://neo4j:7687")
-_NEO4J_AUTH_STR: str = os.environ.get("NEO4J_AUTH", "neo4j/episteme")
-
-_OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
-_OPENAI_ANALYSIS_MODEL: str = os.environ.get("OPENAI_ANALYSIS_MODEL", "gpt-4o")
-_OPENAI_EMBEDDING_MODEL: str = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large")
-
-_MINIO_ENDPOINT: str = os.environ.get("MINIO_ENDPOINT", "minio:9000")
-_MINIO_ACCESS_KEY: str = os.environ.get("MINIO_ACCESS_KEY", "minioadmin")
-_MINIO_SECRET_KEY: str = os.environ.get("MINIO_SECRET_KEY", "minioadmin")
 
 # ---------------------------------------------------------------------------
 # Singletons
@@ -43,13 +29,9 @@ _MINIO_SECRET_KEY: str = os.environ.get("MINIO_SECRET_KEY", "minioadmin")
 
 @lru_cache(maxsize=1)
 def _neo4j_driver():
-    user, password = _NEO4J_AUTH_STR.split("/", 1)
-    return GraphDatabase.driver(_NEO4J_URI, auth=(user, password))
-
-
-@lru_cache(maxsize=1)
-def _openai() -> OpenAI:
-    return OpenAI(api_key=_OPENAI_API_KEY)
+    settings = _get_settings()
+    user, password = settings.neo4j_auth.split("/", 1)
+    return GraphDatabase.driver(settings.neo4j_uri, auth=(user, password))
 
 
 # ---------------------------------------------------------------------------
@@ -148,9 +130,8 @@ def delete_course_data(user_id: str, course_id: str) -> bool:
 
 def embed_text(text: str) -> list[float]:
     """テキストを embedding ベクトルに変換する。"""
-    client = _openai()
-    resp = client.embeddings.create(model=_OPENAI_EMBEDDING_MODEL, input=[text])
-    return resp.data[0].embedding
+    vectors = generate_embeddings([text])
+    return vectors[0]
 
 
 def search_relevant_chunks(
@@ -631,8 +612,6 @@ def extract_pdf_text(pdf_bytes: bytes) -> str:
 
 def build_knowledge_graph(text: str, title: str) -> dict:
     """抽出したテキストからDSLベースのナレッジグラフを構築する。"""
-    client = _openai()
-
     prompt = f"""以下の教材テキストから知識グラフを構築してください。
 
 **教材タイトル:** {title}
@@ -676,12 +655,10 @@ def build_knowledge_graph(text: str, title: str) -> dict:
 }}"""
 
     try:
-        response = client.chat.completions.create(
-            model=_OPENAI_ANALYSIS_MODEL,
+        raw = generate_text(
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
         )
-        raw = response.choices[0].message.content or ""
         raw = raw.strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
@@ -711,19 +688,14 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 100) -> list[st
 
 def embed_chunks(material_id: str, doc_id: str, chunks: list[str]) -> None:
     """テキストチャンクをembeddingしてPostgreSQLに保存する。"""
-    client = _openai()
-
     try:
         batch_size = 50
         for i in range(0, len(chunks), batch_size):
             batch = chunks[i:i + batch_size]
-            resp = client.embeddings.create(
-                model=_OPENAI_EMBEDDING_MODEL,
-                input=batch,
-            )
+            embeddings = generate_embeddings(batch)
             session = _pg_session()
             try:
-                for j, emb in enumerate(resp.data):
+                for j, embedding in enumerate(embeddings):
                     chunk_id = uuid.uuid4()
                     session.execute(
                         sa_text("""
@@ -735,7 +707,7 @@ def embed_chunks(material_id: str, doc_id: str, chunks: list[str]) -> None:
                             "doc_id": doc_id,
                             "idx": i + j,
                             "text": batch[j],
-                            "embedding": str(emb.embedding),
+                            "embedding": str(embedding),
                             "material_id": material_id,
                         },
                     )
