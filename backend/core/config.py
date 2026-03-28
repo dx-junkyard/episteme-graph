@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,10 +32,20 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # --- OpenAI / LLM ---
-    openai_api_key: str = ""
-    openai_analysis_model: str = "gpt-4o"
-    openai_embedding_model: str = "text-embedding-3-large"
+    # --- LLM ---
+    # ベンダーニュートラルな変数名。後方互換のため OPENAI_* 環境変数も受け付ける。
+    llm_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("LLM_API_KEY", "OPENAI_API_KEY"),
+    )
+    llm_analysis_model: str = Field(
+        default="o3-mini",
+        validation_alias=AliasChoices("LLM_ANALYSIS_MODEL", "OPENAI_ANALYSIS_MODEL"),
+    )
+    llm_embedding_model: str = Field(
+        default="text-embedding-3-large",
+        validation_alias=AliasChoices("LLM_EMBEDDING_MODEL", "OPENAI_EMBEDDING_MODEL"),
+    )
 
     # --- JWT / Auth ---
     jwt_secret: str = "episteme-dev-secret-change-in-prod"
