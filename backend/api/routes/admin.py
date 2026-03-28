@@ -32,11 +32,10 @@ from schemas import (
 from services import (
     _material_lock,
     _material_status,
-    _openai,
-    _OPENAI_ANALYSIS_MODEL,
     process_material_background,
     save_cb_session,
 )
+from core.llm import generate_text
 from core.postgres import get_session as _pg_session
 
 logger = logging.getLogger(__name__)
@@ -297,13 +296,7 @@ def course_builder_chat(
     messages.append({"role": "user", "content": body.message})
 
     try:
-        client = _openai()
-        response = client.chat.completions.create(
-            model=_OPENAI_ANALYSIS_MODEL,
-            messages=messages,
-            temperature=0.4,
-        )
-        raw_answer = response.choices[0].message.content or ""
+        raw_answer = generate_text(messages=messages, temperature=0.4)
     except Exception as exc:
         logger.exception("Course builder chat LLM call failed")
         raise HTTPException(status_code=500, detail=f"Chat failed: {exc}") from exc

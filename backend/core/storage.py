@@ -3,33 +3,24 @@
 from __future__ import annotations
 
 import io
-import os
 from datetime import timedelta
 
 from minio import Minio
+
+from core.config import get_settings
 
 BUCKETS = ("raw-papers", "raw-texts", "extracted-structures")
 
 
 class StorageManager:
-    """Thin wrapper around the MinIO Python client.
-
-    Environment variables
-    ---------------------
-    MINIO_ENDPOINT   Endpoint for all MinIO operations (default: localhost:9000).
-                     With ``extra_hosts: localhost:host-gateway`` in docker-compose,
-                     this resolves to the Docker host inside the container, which is
-                     the same address the browser uses — so pre-signed URL signatures
-                     are always valid without any hostname rewriting.
-    MINIO_ACCESS_KEY MinIO access key (default: minioadmin).
-    MINIO_SECRET_KEY MinIO secret key (default: minioadmin).
-    """
+    """Thin wrapper around the MinIO Python client."""
 
     def __init__(self) -> None:
-        endpoint = os.environ.get("MINIO_ENDPOINT", "localhost:9000")
-        access_key = os.environ.get("MINIO_ACCESS_KEY", "minioadmin")
-        secret_key = os.environ.get("MINIO_SECRET_KEY", "minioadmin")
-        self._public_endpoint = os.environ.get("MINIO_PUBLIC_ENDPOINT", "localhost:9000")
+        settings = get_settings()
+        endpoint = settings.minio_endpoint
+        access_key = settings.minio_access_key
+        secret_key = settings.minio_secret_key
+        self._public_endpoint = settings.minio_public_endpoint
 
         self.client = Minio(endpoint, access_key=access_key, secret_key=secret_key, secure=False)
         self._ensure_buckets()
@@ -69,20 +60,18 @@ class StorageManager:
         expires: timedelta = timedelta(hours=1),
     ) -> str:
         # MinIOに対して、署名計算時に使用する Host ヘッダーを強制する。
-        # こうすることで、ブラウザから 'localhost:9000' でアクセスしても署名エラーにならない。
         url = self.client.presigned_get_object(
-            bucket, 
-            object_name, 
+            bucket,
+            object_name,
             expires=expires,
-            # ここが最重要ポイント
-            extra_query_params={"host": self._public_endpoint} 
+            extra_query_params={"host": self._public_endpoint}
         )
-        
-        # 最後に、URLのドメイン部分を minio:9000 から localhost:9000 に置換する
-        internal_endpoint = os.environ.get("MINIO_ENDPOINT", "minio:9000")
+
+        # URLのドメイン部分を内部エンドポイントから公開エンドポイントに置換する
+        internal_endpoint = get_settings().minio_endpoint
         if internal_endpoint != self._public_endpoint:
              url = url.replace(internal_endpoint, self._public_endpoint, 1)
-             
+
         return url
 
 

@@ -21,8 +21,6 @@ from schemas import (
     LearningProgress,
 )
 from services import (
-    _openai,
-    _OPENAI_ANALYSIS_MODEL,
     calculate_progress,
     check_prerequisites,
     detect_and_record_misconception,
@@ -33,6 +31,7 @@ from services import (
     delete_course_data,
     search_chunks_with_metadata,
 )
+from core.llm import generate_text
 from core.postgres import get_session as _pg_session
 
 logger = logging.getLogger(__name__)
@@ -405,13 +404,7 @@ def learning_chat(
 
     # 6. LLM 呼び出し
     try:
-        client = _openai()
-        response = client.chat.completions.create(
-            model=_OPENAI_ANALYSIS_MODEL,
-            messages=messages,
-            temperature=0.3,
-        )
-        answer = response.choices[0].message.content or ""
+        answer = generate_text(messages=messages, temperature=0.3)
     except Exception as exc:
         logger.exception("Learning chat LLM call failed for topic %s", topic_id)
         raise HTTPException(status_code=500, detail=f"Chat failed: {exc}") from exc
