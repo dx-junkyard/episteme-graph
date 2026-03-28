@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from schemas import (
+from api.schemas import (
     ReextractionJobOut,
     SchemaProposalItemOut,
     SchemaProposalOut,
