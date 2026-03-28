@@ -266,3 +266,32 @@ class SchemaTypeCreateRequest(BaseModel):
     id: str
     label: str
     description: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Shadow Testing / Simulation (Issue #45)
+# ---------------------------------------------------------------------------
+
+class SimulationDocResult(BaseModel):
+    """シミュレーション結果：1ドキュメント分。"""
+    doc_id: str
+    title: str = ""
+    before: dict = {}
+    after: dict = {}
+    diff: dict = {}
+
+
+class SimulationResult(BaseModel):
+    """スキーマ提案のシミュレーション結果全体。"""
+    proposal_id: str
+    summary: str = ""
+    target_docs: list[SimulationDocResult] = []
+    similar_docs: list[SimulationDocResult] = []
+    control_docs: list[SimulationDocResult] = []
+    overall_summary: str = ""
+
+
+class ApproveWithScopeRequest(BaseModel):
+    """スコープ付き承認リクエスト（カナリア or 全体適用）。"""
+    scope: str = "full"  # "canary" | "full"
+    course_ids: list[str] = []  # scope="canary" の場合のみ

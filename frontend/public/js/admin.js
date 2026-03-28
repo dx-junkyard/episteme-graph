@@ -980,6 +980,162 @@
     loadSchemaDefinitions();
   }
 
+  // ── Simulation result rendering helpers ─────────────────────────────
+  function renderSimDocDiff(doc) {
+    var html = '<div style="border:1px solid var(--color-border);border-radius:6px;padding:8px;margin-bottom:6px">';
+    html += '<strong>' + escHtml(doc.title || doc.doc_id) + '</strong>';
+    html += '<div style="display:flex;gap:16px;font-size:0.85em;margin:4px 0">';
+    html += '<span>Before: 概念 ' + (doc.before.concept_count || 0) + ' / 関係 ' + (doc.before.relationship_count || 0) + '</span>';
+    html += '<span>After: 概念 ' + (doc.after.concept_count || 0) + ' / 関係 ' + (doc.after.relationship_count || 0) + '</span>';
+    html += '</div>';
+
+    var diff = doc.diff || {};
+    if (diff.added_concepts && diff.added_concepts.length > 0) {
+      html += '<div style="font-size:0.8em;margin:4px 0"><span style="color:#22c55e;font-weight:bold">+ 追加概念:</span> ';
+      diff.added_concepts.forEach(function (c, i) {
+        if (i > 0) html += ', ';
+        html += escHtml(c.name || c.id) + ' (' + escHtml(c.type || '') + ')';
+      });
+      html += '</div>';
+    }
+    if (diff.removed_concepts && diff.removed_concepts.length > 0) {
+      html += '<div style="font-size:0.8em;margin:4px 0"><span style="color:#ef4444;font-weight:bold">- 削除概念:</span> ';
+      diff.removed_concepts.forEach(function (c, i) {
+        if (i > 0) html += ', ';
+        html += escHtml(c.name || c.id);
+      });
+      html += '</div>';
+    }
+    if (diff.reclassified_concepts && diff.reclassified_concepts.length > 0) {
+      html += '<div style="font-size:0.8em;margin:4px 0"><span style="color:#3b82f6;font-weight:bold">~ 再分類:</span> ';
+      diff.reclassified_concepts.forEach(function (c, i) {
+        if (i > 0) html += ', ';
+        html += escHtml(c.name || c.id) + ' (' + escHtml(c.old_type || '') + ' → ' + escHtml(c.new_type || '') + ')';
+      });
+      html += '</div>';
+    }
+    if (diff.added_relationships && diff.added_relationships.length > 0) {
+      html += '<div style="font-size:0.8em;margin:4px 0"><span style="color:#22c55e;font-weight:bold">+ 追加関係:</span> ';
+      diff.added_relationships.forEach(function (r, i) {
+        if (i > 0) html += ', ';
+        html += escHtml(r.source) + ' → ' + escHtml(r.target) + ' (' + escHtml(r.relation || '') + ')';
+      });
+      html += '</div>';
+    }
+    if (diff.summary) {
+      html += '<div style="font-size:0.8em;color:var(--color-text-secondary);margin-top:4px">' + escHtml(diff.summary) + '</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function renderSimCategory(label, color, docs) {
+    if (!docs || docs.length === 0) {
+      return '<div style="margin-bottom:12px"><strong style="color:' + color + '">' + escHtml(label) + '</strong>' +
+        '<p style="font-size:0.85em;color:var(--color-text-tertiary);margin:4px 0">対象ドキュメントなし</p></div>';
+    }
+    var html = '<div style="margin-bottom:12px"><strong style="color:' + color + '">' + escHtml(label) + ' (' + docs.length + '件)</strong>';
+    docs.forEach(function (doc) { html += renderSimDocDiff(doc); });
+    html += '</div>';
+    return html;
+  }
+
+  function renderSimulationResult(simResult, proposalId) {
+    var html = '<div id="sim-result-' + escHtml(proposalId) + '" style="background:var(--color-background-secondary);border-radius:8px;padding:12px;margin-top:8px">';
+    html += '<h5 style="margin:0 0 8px">シミュレーション結果</h5>';
+    html += '<p style="font-size:0.85em;margin-bottom:8px">' + escHtml(simResult.overall_summary || '') + '</p>';
+    html += renderSimCategory('Target (対象ドキュメント)', '#f59e0b', simResult.target_docs);
+    html += renderSimCategory('Similar (類似ドキュメント)', '#3b82f6', simResult.similar_docs);
+    html += renderSimCategory('Control (ベースライン)', '#6b7280', simResult.control_docs);
+
+    // Approval actions with scope selection
+    html += '<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--color-border)">';
+    html += '<strong style="font-size:0.9em">適用方法を選択:</strong>';
+    html += '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">';
+    html += '<button class="admin-action-btn schema-approve-full-btn" data-id="' + escHtml(proposalId) + '" style="font-size:0.85em;padding:4px 12px">システム全体に適用</button>';
+    html += '<button class="admin-action-btn schema-approve-canary-btn" data-id="' + escHtml(proposalId) + '" style="font-size:0.85em;padding:4px 12px;background:#f59e0b;color:#fff">カナリアリリース（コース限定）</button>';
+    html += '<button class="admin-action-btn schema-reject-btn" data-id="' + escHtml(proposalId) + '" style="font-size:0.85em;padding:4px 12px;background:var(--color-bg-tertiary);color:var(--color-text)">却下</button>';
+    html += '</div>';
+    html += '<div id="canary-select-' + escHtml(proposalId) + '" style="display:none;margin-top:8px">';
+    html += '<label style="font-size:0.85em">適用するコースIDを入力（カンマ区切り）:</label>';
+    html += '<input type="text" class="canary-course-input" data-id="' + escHtml(proposalId) + '" placeholder="course_id_1, course_id_2" style="width:100%;padding:4px 8px;margin-top:4px;border:1px solid var(--color-border);border-radius:4px">';
+    html += '<button class="admin-action-btn schema-confirm-canary-btn" data-id="' + escHtml(proposalId) + '" style="font-size:0.85em;padding:4px 12px;margin-top:4px">カナリア適用を確定</button>';
+    html += '</div>';
+    html += '</div>';
+    html += '</div>';
+    return html;
+  }
+
+  function bindSimulationApprovalButtons(container) {
+    // Full approval
+    container.querySelectorAll(".schema-approve-full-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var pid = btn.dataset.id;
+        btn.disabled = true;
+        btn.textContent = "処理中...";
+        apiFetch("/admin/schema-proposals/" + pid + "/approve", {
+          method: "PUT",
+          body: JSON.stringify({ scope: "full", course_ids: [] })
+        })
+          .then(function (res) { return res.json(); })
+          .then(function () {
+            loadSchemaProposals();
+            loadSchemaJobs();
+            loadSchemaDefinitions();
+          })
+          .catch(function () { btn.disabled = false; btn.textContent = "システム全体に適用"; });
+      });
+    });
+
+    // Canary toggle
+    container.querySelectorAll(".schema-approve-canary-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var pid = btn.dataset.id;
+        var selectDiv = document.getElementById("canary-select-" + pid);
+        if (selectDiv) selectDiv.style.display = selectDiv.style.display === "none" ? "block" : "none";
+      });
+    });
+
+    // Canary confirm
+    container.querySelectorAll(".schema-confirm-canary-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var pid = btn.dataset.id;
+        var input = container.querySelector('.canary-course-input[data-id="' + pid + '"]');
+        var courseIds = (input && input.value) ? input.value.split(",").map(function (s) { return s.trim(); }).filter(Boolean) : [];
+        if (courseIds.length === 0) {
+          alert("コースIDを1つ以上入力してください。");
+          return;
+        }
+        btn.disabled = true;
+        btn.textContent = "処理中...";
+        apiFetch("/admin/schema-proposals/" + pid + "/approve", {
+          method: "PUT",
+          body: JSON.stringify({ scope: "canary", course_ids: courseIds })
+        })
+          .then(function (res) { return res.json(); })
+          .then(function () {
+            loadSchemaProposals();
+            loadSchemaJobs();
+            loadSchemaDefinitions();
+          })
+          .catch(function () { btn.disabled = false; btn.textContent = "カナリア適用を確定"; });
+      });
+    });
+
+    // Reject buttons (within simulation results)
+    container.querySelectorAll(".schema-reject-btn").forEach(function (btn) {
+      if (btn._bound) return;
+      btn._bound = true;
+      btn.addEventListener("click", function () {
+        var pid = btn.dataset.id;
+        btn.disabled = true;
+        apiFetch("/admin/schema-proposals/" + pid + "/reject", { method: "PUT" })
+          .then(function () { loadSchemaProposals(); })
+          .catch(function () { btn.disabled = false; });
+      });
+    });
+  }
+
   function loadSchemaProposals() {
     var container = document.getElementById("schema-proposals-list");
     apiFetch("/admin/schema-proposals")
@@ -996,7 +1152,7 @@
             : p.status === "approved"
               ? '<span style="color:#22c55e;font-weight:bold">承認済</span>'
               : '<span style="color:#ef4444;font-weight:bold">却下</span>';
-          html += '<div style="border:1px solid var(--color-border);border-radius:8px;padding:12px;margin-bottom:8px">';
+          html += '<div style="border:1px solid var(--color-border);border-radius:8px;padding:12px;margin-bottom:8px" id="proposal-card-' + escHtml(p.proposal_id) + '">';
           html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
           html += '<strong>' + escHtml(p.summary) + '</strong>' + statusBadge;
           html += '</div>';
@@ -1011,22 +1167,51 @@
             html += '</ul>';
           }
           if (p.status === "pending") {
-            html += '<div style="margin-top:8px;display:flex;gap:8px">';
+            html += '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">';
+            html += '<button class="admin-action-btn schema-simulate-btn" data-id="' + escHtml(p.proposal_id) + '" style="font-size:0.85em;padding:4px 12px;background:#8b5cf6;color:#fff">シミュレーションを実行</button>';
             html += '<button class="admin-action-btn schema-approve-btn" data-id="' + escHtml(p.proposal_id) + '" style="font-size:0.85em;padding:4px 12px">承認して適用</button>';
             html += '<button class="admin-action-btn schema-reject-btn" data-id="' + escHtml(p.proposal_id) + '" style="font-size:0.85em;padding:4px 12px;background:var(--color-bg-tertiary);color:var(--color-text)">却下</button>';
             html += '</div>';
+            html += '<div id="sim-area-' + escHtml(p.proposal_id) + '"></div>';
           }
           html += '</div>';
         });
         container.innerHTML = html;
 
-        // Bind approve/reject buttons
+        // Bind simulation buttons
+        container.querySelectorAll(".schema-simulate-btn").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var pid = btn.dataset.id;
+            var simArea = document.getElementById("sim-area-" + pid);
+            btn.disabled = true;
+            btn.textContent = "シミュレーション実行中...";
+            simArea.innerHTML = '<p style="color:var(--color-text-secondary);font-size:0.85em;margin-top:8px">対象ドキュメントを分析中です。しばらくお待ちください...</p>';
+            apiFetch("/admin/schema-proposals/" + pid + "/simulate", { method: "POST" })
+              .then(function (res) { return res.json(); })
+              .then(function (simResult) {
+                btn.disabled = false;
+                btn.textContent = "シミュレーションを再実行";
+                simArea.innerHTML = renderSimulationResult(simResult, pid);
+                bindSimulationApprovalButtons(simArea);
+              })
+              .catch(function (err) {
+                btn.disabled = false;
+                btn.textContent = "シミュレーションを実行";
+                simArea.innerHTML = '<p style="color:var(--color-text-danger);font-size:0.85em;margin-top:8px">シミュレーションに失敗しました。</p>';
+              });
+          });
+        });
+
+        // Bind direct approve/reject buttons (without simulation)
         container.querySelectorAll(".schema-approve-btn").forEach(function (btn) {
           btn.addEventListener("click", function () {
             var pid = btn.dataset.id;
             btn.disabled = true;
             btn.textContent = "処理中...";
-            apiFetch("/admin/schema-proposals/" + pid + "/approve", { method: "PUT" })
+            apiFetch("/admin/schema-proposals/" + pid + "/approve", {
+              method: "PUT",
+              body: JSON.stringify({ scope: "full", course_ids: [] })
+            })
               .then(function (res) { return res.json(); })
               .then(function () {
                 loadSchemaProposals();

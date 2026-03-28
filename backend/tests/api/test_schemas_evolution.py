@@ -9,11 +9,14 @@ from __future__ import annotations
 import pytest
 
 from api.schemas import (
+    ApproveWithScopeRequest,
     ReextractionJobOut,
     SchemaProposalItemOut,
     SchemaProposalOut,
     SchemaTypeCreateRequest,
     SchemaTypeOut,
+    SimulationDocResult,
+    SimulationResult,
 )
 
 
@@ -156,3 +159,93 @@ class TestSchemaTypeCreateRequest:
         )
         assert obj.id == "Experiment"
         assert obj.description == "実験手法"
+
+
+# ---------------------------------------------------------------------------
+# Issue #45: Shadow Testing / Simulation schemas
+# ---------------------------------------------------------------------------
+
+
+class TestSimulationDocResult:
+    """SimulationDocResult ���デルのテスト。"""
+
+    def test_defaults(self):
+        obj = SimulationDocResult(doc_id="d-1")
+        assert obj.title == ""
+        assert obj.before == {}
+        assert obj.after == {}
+        assert obj.diff == {}
+
+    def test_full_construction(self):
+        obj = SimulationDocResult(
+            doc_id="d-1",
+            title="テスト論文",
+            before={"concept_count": 5, "relationship_count": 3},
+            after={"concept_count": 7, "relationship_count": 4},
+            diff={
+                "added_concepts": [{"id": "new1", "name": "X"}],
+                "removed_concepts": [],
+                "summary": "2概念追加",
+            },
+        )
+        assert obj.title == "テスト論文"
+        assert obj.before["concept_count"] == 5
+        assert obj.after["concept_count"] == 7
+
+
+class TestSimulationResult:
+    """SimulationResult モ���ルのテスト。"""
+
+    def test_defaults(self):
+        obj = SimulationResult(proposal_id="p-1")
+        assert obj.summary == ""
+        assert obj.target_docs == []
+        assert obj.similar_docs == []
+        assert obj.control_docs == []
+        assert obj.overall_summary == ""
+
+    def test_full_construction(self):
+        obj = SimulationResult(
+            proposal_id="p-1",
+            summary="テスト提案",
+            target_docs=[
+                SimulationDocResult(doc_id="d-1", title="Target"),
+            ],
+            similar_docs=[
+                SimulationDocResult(doc_id="d-2", title="Similar"),
+            ],
+            control_docs=[],
+            overall_summary="3件のドキュメントを分析",
+        )
+        assert len(obj.target_docs) == 1
+        assert len(obj.similar_docs) == 1
+        assert len(obj.control_docs) == 0
+
+    def test_model_dump(self):
+        obj = SimulationResult(proposal_id="p-1")
+        d = obj.model_dump()
+        assert "proposal_id" in d
+        assert "target_docs" in d
+        assert "overall_summary" in d
+
+
+class TestApproveWithScopeRequest:
+    """ApproveWithScopeRequest モデルのテスト。"""
+
+    def test_defaults(self):
+        obj = ApproveWithScopeRequest()
+        assert obj.scope == "full"
+        assert obj.course_ids == []
+
+    def test_canary_scope(self):
+        obj = ApproveWithScopeRequest(
+            scope="canary",
+            course_ids=["course-1", "course-2"],
+        )
+        assert obj.scope == "canary"
+        assert len(obj.course_ids) == 2
+
+    def test_full_scope(self):
+        obj = ApproveWithScopeRequest(scope="full")
+        assert obj.scope == "full"
+        assert obj.course_ids == []

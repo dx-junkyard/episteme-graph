@@ -20,6 +20,7 @@ from dependencies import (
     ROLE_TEACHER,
 )
 from schemas import (
+    ApproveWithScopeRequest,
     CourseBuilderChatRequest,
     CourseBuilderChatResponse,
     CourseBuilderSessionCreate,
@@ -31,6 +32,7 @@ from schemas import (
     SchemaProposalOut,
     SchemaTypeCreateRequest,
     SchemaTypeOut,
+    SimulationResult,
     UserOut,
 )
 from services import (
@@ -735,12 +737,59 @@ def trigger_schema_analysis(
     return SchemaProposalOut(**result)
 
 
+@router.post(
+    "/schema-proposals/{proposal_id}/simulate",
+    response_model=SimulationResult,
+)
+def simulate_schema_proposal(
+    proposal_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> SimulationResult:
+    """スキーマ提案のShadow Testingシミュレーションを実行する。
+
+    Target/Similar/Control の3層ドキュメントに対して新スキーマを
+    インメモリ適用し、既存グラフとの差分を返す。
+    """
+    from core.simulator import run_simulation
+
+    try:
+        result = run_simulation(proposal_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Simulation failed for proposal %s", proposal_id)
+        raise HTTPException(
+            status_code=500, detail=f"Simulation failed: {exc}"
+        ) from exc
+
+    logger.info(
+        "Simulation completed for proposal %s by user=%s: target=%d, similar=%d, control=%d",
+        proposal_id,
+        current_user["id"],
+        len(result["target_docs"]),
+        len(result["similar_docs"]),
+        len(result["control_docs"]),
+    )
+    return SimulationResult(**result)
+
+
 @router.put("/schema-proposals/{proposal_id}/approve")
 def approve_schema_proposal(
     proposal_id: str,
+    body: ApproveWithScopeRequest | None = None,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """スキーマ拡張提案を承認し、新しいType/Predicateを登録する。"""
+    """スキーマ拡張提案を承認し、新しいType/Predicateを登録する。
+
+    body.scope が "canary" の場合、指定されたコースのみに適用する
+    （再抽出対象を限定）。"full" の場合は全ドキュメントに適用。
+    """
+    scope = "full"
+    course_ids: list[str] = []
+    if body:
+        scope = body.scope
+        course_ids = body.course_ids
+
     success = approve_proposal(proposal_id, current_user["id"])
     if not success:
         raise HTTPException(status_code=404, detail="Proposal not found or already reviewed")
@@ -748,12 +797,14 @@ def approve_schema_proposal(
     # 再抽出ジョブをキューに追加
     job = enqueue_reextraction(proposal_id)
     logger.info(
-        "Schema proposal %s approved by user=%s, reextraction job %s enqueued",
-        proposal_id, current_user["id"], job["job_id"],
+        "Schema proposal %s approved by user=%s (scope=%s, courses=%s), reextraction job %s enqueued",
+        proposal_id, current_user["id"], scope, course_ids, job["job_id"],
     )
     return {
         "proposal_id": proposal_id,
         "status": "approved",
+        "scope": scope,
+        "course_ids": course_ids,
         "reextraction_job": job,
     }
 
