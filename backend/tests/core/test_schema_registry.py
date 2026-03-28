@@ -108,3 +108,70 @@ class TestPromptBuilding:
         result = build_ontology_type_prompt()
         assert result.strip() == "X"
         assert " — " not in result
+
+    @patch("core.schema_registry.get_ontology_types")
+    def test_build_ontology_type_prompt_empty_list(self, mock_get):
+        """空リストの場合は空文字列を返す。"""
+        mock_get.return_value = []
+        result = build_ontology_type_prompt()
+        assert result == ""
+
+    @patch("core.schema_registry.get_predicates")
+    def test_build_predicate_prompt_empty_list(self, mock_get):
+        """空リストの場合は空文字列を返す。"""
+        mock_get.return_value = []
+        result = build_predicate_prompt()
+        assert result == ""
+
+    @patch("core.schema_registry.get_ontology_types")
+    def test_get_ontology_type_names_empty(self, mock_get):
+        """空リストの場合は空リストを返す。"""
+        mock_get.return_value = []
+        names = get_ontology_type_names()
+        assert names == []
+
+    @patch("core.schema_registry.get_predicates")
+    def test_get_predicate_names_empty(self, mock_get):
+        """空リストの場合は空リストを返す。"""
+        mock_get.return_value = []
+        names = get_predicate_names()
+        assert names == []
+
+    @patch("core.schema_registry.get_ontology_types")
+    def test_build_prompt_multiple_types_multiline(self, mock_get):
+        """複数タイプが改行区切りで出力される。"""
+        mock_get.return_value = [
+            {"id": "A", "label": "A", "description": "desc_a", "is_builtin": True},
+            {"id": "B", "label": "B", "description": "desc_b", "is_builtin": False},
+        ]
+        result = build_ontology_type_prompt()
+        lines = result.strip().split("\n")
+        assert len(lines) == 2
+        assert "A" in lines[0]
+        assert "B" in lines[1]
+
+
+class TestCacheTimestamp:
+    """キャッシュのタイムスタンプ管理テスト。"""
+
+    def test_invalidate_sets_ts_to_zero(self):
+        from core.schema_registry import _cache, _cache_lock
+
+        with _cache_lock:
+            _cache["ts"] = 12345.0
+
+        invalidate_cache()
+
+        with _cache_lock:
+            assert _cache["ts"] == 0.0
+
+    def test_multiple_invalidations(self):
+        """連続した無効化呼び出しが安全に動作する。"""
+        invalidate_cache()
+        invalidate_cache()
+        invalidate_cache()
+
+        from core.schema_registry import _cache, _cache_lock
+
+        with _cache_lock:
+            assert _cache["ontology_types"] is None

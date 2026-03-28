@@ -137,3 +137,72 @@ class TestAnalyzeUnansweredQueries:
         from core.meta_analyzer import analyze_unanswered_queries
         result = analyze_unanswered_queries(min_queries=3)
         assert result is None
+
+    @patch("core.meta_analyzer._pg_session")
+    @patch("core.meta_analyzer.get_ontology_types")
+    @patch("core.meta_analyzer.get_predicates")
+    @patch("core.meta_analyzer.generate_text_with_structured_output")
+    def test_returns_none_when_llm_raises_exception(
+        self, mock_llm, mock_preds, mock_types, mock_pg,
+    ):
+        """LLM呼び出しが例外を投げた場合はNoneを返す。"""
+        mock_session = MagicMock()
+        rows = [
+            (f"question{i}", f"topic{i}", "course1", None)
+            for i in range(5)
+        ]
+        mock_session.execute.return_value.fetchall.return_value = rows
+        mock_pg.return_value = mock_session
+
+        mock_types.return_value = [{"id": "Agent", "description": "agent"}]
+        mock_preds.return_value = [{"id": "CAUSES", "description": "causes"}]
+
+        mock_llm.side_effect = RuntimeError("LLM API error")
+
+        from core.meta_analyzer import analyze_unanswered_queries
+        result = analyze_unanswered_queries(min_queries=3)
+        assert result is None
+
+    @patch("core.meta_analyzer._pg_session")
+    def test_returns_none_when_zero_queries(self, mock_pg):
+        """クエリが0件の場合はNoneを返す。"""
+        mock_session = MagicMock()
+        mock_session.execute.return_value.fetchall.return_value = []
+        mock_pg.return_value = mock_session
+
+        from core.meta_analyzer import analyze_unanswered_queries
+        result = analyze_unanswered_queries(min_queries=1)
+        assert result is None
+
+
+class TestSchemaAnalysisResultSerialization:
+    """SchemaAnalysisResult のシリアライズテスト。"""
+
+    def test_model_dump_includes_all_fields(self):
+        result = SchemaAnalysisResult(
+            has_proposals=True,
+            summary="テスト",
+            reasoning="理由",
+            items=[
+                ProposedSchemaItem(
+                    item_type="ontology_type",
+                    key="X",
+                    label="X",
+                    description="desc",
+                ),
+            ],
+        )
+        d = result.model_dump()
+        assert "has_proposals" in d
+        assert "summary" in d
+        assert "reasoning" in d
+        assert "items" in d
+        assert len(d["items"]) == 1
+
+    def test_empty_items_default(self):
+        result = SchemaAnalysisResult(
+            has_proposals=False,
+            summary="",
+            reasoning="",
+        )
+        assert result.items == []
