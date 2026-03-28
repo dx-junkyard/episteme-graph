@@ -111,8 +111,80 @@ def _run_migrations() -> None:
             "CREATE INDEX IF NOT EXISTS idx_unanswered_user ON unanswered_query_logs(user_id)"
         ))
 
+        # Migration 004: Schema Evolution (Issue #36)
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS schema_ontology_types (
+                id          TEXT PRIMARY KEY,
+                label       TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                is_builtin  BOOLEAN NOT NULL DEFAULT false,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS schema_predicates (
+                id          TEXT PRIMARY KEY,
+                label       TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                is_builtin  BOOLEAN NOT NULL DEFAULT false,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS schema_proposals (
+                id          TEXT PRIMARY KEY,
+                status      TEXT NOT NULL DEFAULT 'pending'
+                                CHECK (status IN ('pending', 'approved', 'rejected')),
+                summary     TEXT NOT NULL DEFAULT '',
+                reasoning   TEXT NOT NULL DEFAULT '',
+                source_query_count INTEGER NOT NULL DEFAULT 0,
+                created_by  UUID REFERENCES users(id),
+                reviewed_by UUID REFERENCES users(id),
+                reviewed_at TIMESTAMPTZ,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_schema_proposals_status ON schema_proposals(status)"
+        ))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS schema_proposal_items (
+                id          TEXT PRIMARY KEY,
+                proposal_id TEXT NOT NULL REFERENCES schema_proposals(id) ON DELETE CASCADE,
+                item_type   TEXT NOT NULL CHECK (item_type IN ('ontology_type', 'predicate')),
+                key         TEXT NOT NULL,
+                label       TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_proposal_items_proposal ON schema_proposal_items(proposal_id)"
+        ))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS reextraction_jobs (
+                id            TEXT PRIMARY KEY,
+                proposal_id   TEXT REFERENCES schema_proposals(id),
+                status        TEXT NOT NULL DEFAULT 'pending'
+                                  CHECK (status IN ('pending', 'running', 'completed', 'failed')),
+                total_docs    INTEGER NOT NULL DEFAULT 0,
+                processed_docs INTEGER NOT NULL DEFAULT 0,
+                error_message TEXT,
+                started_at    TIMESTAMPTZ,
+                completed_at  TIMESTAMPTZ,
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_reextraction_status ON reextraction_jobs(status)"
+        ))
+
         session.commit()
-        logger.info("Migrations (002 A1/A2/A3, 003 unanswered_queries) applied successfully.")
+        logger.info("Migrations (002-004) applied successfully.")
+
+        # Seed builtin schema types/predicates
+        from core.schema_registry import seed_builtin_schema
+        seed_builtin_schema()
     except Exception as exc:
         session.rollback()
         logger.error("Migration failed: %s", exc)

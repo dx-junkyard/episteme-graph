@@ -837,6 +837,54 @@
       tabsEl.appendChild(teacherTab);
     }
 
+    // Show schema evolution tab for TEACHER/SYSTEM_ADMIN
+    if (state.role === "TEACHER" || state.role === "SYSTEM_ADMIN") {
+      var schemaTab = document.createElement("button");
+      schemaTab.className = "admin-tab";
+      schemaTab.dataset.tab = "schema";
+      schemaTab.textContent = "スキーマ管理";
+      tabsEl.appendChild(schemaTab);
+    }
+
+    // Create schema management panel
+    var schemaPanel = document.createElement("div");
+    schemaPanel.className = "admin-panel";
+    schemaPanel.id = "tab-schema";
+    schemaPanel.innerHTML =
+      '<div class="admin-section">' +
+        '<h3 class="admin-section-title">DSLスキーマ自己進化</h3>' +
+        '<p style="color:var(--color-text-secondary);margin-bottom:12px">' +
+          '学生のつまづきデータを分析し、不足している概念カテゴリや関係性の拡張をAIが提案します。' +
+        '</p>' +
+        '<div style="display:flex;gap:8px;margin-bottom:16px">' +
+          '<button id="schema-analyze-btn" class="admin-action-btn">AIメタ分析を実行</button>' +
+          '<button id="schema-refresh-btn" class="admin-action-btn" style="background:var(--color-bg-tertiary);color:var(--color-text)">提案を更新</button>' +
+        '</div>' +
+        '<div id="schema-analyze-msg" class="upload-status" style="display:none"></div>' +
+        '<h4 style="margin:16px 0 8px">提案一覧</h4>' +
+        '<div id="schema-proposals-list" style="margin-bottom:24px">' +
+          '<p style="color:var(--color-text-tertiary)">読み込み中...</p>' +
+        '</div>' +
+        '<h4 style="margin:16px 0 8px">再抽出ジョブ</h4>' +
+        '<div id="schema-jobs-list">' +
+          '<p style="color:var(--color-text-tertiary)">読み込み中...</p>' +
+        '</div>' +
+      '</div>' +
+      '<div class="admin-section" style="margin-top:24px">' +
+        '<h3 class="admin-section-title">現在のスキーマ定義</h3>' +
+        '<div style="display:flex;gap:24px;flex-wrap:wrap">' +
+          '<div style="flex:1;min-width:300px">' +
+            '<h4>概念カテゴリ (OntologyType)</h4>' +
+            '<div id="schema-types-list"><p style="color:var(--color-text-tertiary)">読み込み中...</p></div>' +
+          '</div>' +
+          '<div style="flex:1;min-width:300px">' +
+            '<h4>関係性タイプ (CorePredicate)</h4>' +
+            '<div id="schema-preds-list"><p style="color:var(--color-text-tertiary)">読み込み中...</p></div>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    tabsEl.parentElement.appendChild(schemaPanel);
+
     // Create student management panel
     var studentPanel = document.createElement("div");
     studentPanel.className = "admin-panel";
@@ -888,6 +936,204 @@
     return true;
   }
 
+  // ── Schema Evolution ───────────────────────────────────────────────
+  function initSchemaEvolution() {
+    var analyzeBtn = document.getElementById("schema-analyze-btn");
+    var refreshBtn = document.getElementById("schema-refresh-btn");
+    if (!analyzeBtn) return;
+
+    analyzeBtn.addEventListener("click", function () {
+      var msgEl = document.getElementById("schema-analyze-msg");
+      msgEl.style.display = "block";
+      msgEl.textContent = "AIがつまづきデータを分析中...";
+      msgEl.className = "upload-status upload-status-info";
+      analyzeBtn.disabled = true;
+
+      apiFetch("/admin/schema-proposals/analyze", { method: "POST" })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          analyzeBtn.disabled = false;
+          if (data.message) {
+            msgEl.textContent = data.message;
+            msgEl.className = "upload-status upload-status-info";
+          } else {
+            msgEl.textContent = "提案が生成されました: " + escHtml(data.summary || "");
+            msgEl.className = "upload-status upload-status-success";
+            loadSchemaProposals();
+          }
+        })
+        .catch(function () {
+          analyzeBtn.disabled = false;
+          msgEl.textContent = "分析に失敗しました";
+          msgEl.className = "upload-status upload-status-error";
+        });
+    });
+
+    refreshBtn.addEventListener("click", function () {
+      loadSchemaProposals();
+      loadSchemaJobs();
+      loadSchemaDefinitions();
+    });
+
+    loadSchemaProposals();
+    loadSchemaJobs();
+    loadSchemaDefinitions();
+  }
+
+  function loadSchemaProposals() {
+    var container = document.getElementById("schema-proposals-list");
+    apiFetch("/admin/schema-proposals")
+      .then(function (res) { return res.json(); })
+      .then(function (proposals) {
+        if (!proposals || proposals.length === 0) {
+          container.innerHTML = '<p style="color:var(--color-text-tertiary)">提案はまだありません。「AIメタ分析を実行」ボタンで生成できます。</p>';
+          return;
+        }
+        var html = "";
+        proposals.forEach(function (p) {
+          var statusBadge = p.status === "pending"
+            ? '<span style="color:#f59e0b;font-weight:bold">保留中</span>'
+            : p.status === "approved"
+              ? '<span style="color:#22c55e;font-weight:bold">承認済</span>'
+              : '<span style="color:#ef4444;font-weight:bold">却下</span>';
+          html += '<div style="border:1px solid var(--color-border);border-radius:8px;padding:12px;margin-bottom:8px">';
+          html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
+          html += '<strong>' + escHtml(p.summary) + '</strong>' + statusBadge;
+          html += '</div>';
+          html += '<p style="font-size:0.85em;color:var(--color-text-secondary);margin-bottom:8px">' + escHtml(p.reasoning) + '</p>';
+          html += '<div style="font-size:0.8em;color:var(--color-text-tertiary)">分析クエリ数: ' + p.source_query_count + '</div>';
+          if (p.items && p.items.length > 0) {
+            html += '<ul style="margin:8px 0 0;padding-left:20px;font-size:0.9em">';
+            p.items.forEach(function (item) {
+              var typeLabel = item.item_type === "ontology_type" ? "[概念]" : "[関係]";
+              html += '<li>' + typeLabel + ' <code>' + escHtml(item.key) + '</code>: ' + escHtml(item.description) + '</li>';
+            });
+            html += '</ul>';
+          }
+          if (p.status === "pending") {
+            html += '<div style="margin-top:8px;display:flex;gap:8px">';
+            html += '<button class="admin-action-btn schema-approve-btn" data-id="' + escHtml(p.proposal_id) + '" style="font-size:0.85em;padding:4px 12px">承認して適用</button>';
+            html += '<button class="admin-action-btn schema-reject-btn" data-id="' + escHtml(p.proposal_id) + '" style="font-size:0.85em;padding:4px 12px;background:var(--color-bg-tertiary);color:var(--color-text)">却下</button>';
+            html += '</div>';
+          }
+          html += '</div>';
+        });
+        container.innerHTML = html;
+
+        // Bind approve/reject buttons
+        container.querySelectorAll(".schema-approve-btn").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var pid = btn.dataset.id;
+            btn.disabled = true;
+            btn.textContent = "処理中...";
+            apiFetch("/admin/schema-proposals/" + pid + "/approve", { method: "PUT" })
+              .then(function (res) { return res.json(); })
+              .then(function () {
+                loadSchemaProposals();
+                loadSchemaJobs();
+                loadSchemaDefinitions();
+              })
+              .catch(function () { btn.disabled = false; btn.textContent = "承認して適用"; });
+          });
+        });
+        container.querySelectorAll(".schema-reject-btn").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var pid = btn.dataset.id;
+            btn.disabled = true;
+            apiFetch("/admin/schema-proposals/" + pid + "/reject", { method: "PUT" })
+              .then(function () { loadSchemaProposals(); })
+              .catch(function () { btn.disabled = false; });
+          });
+        });
+      })
+      .catch(function () {
+        container.innerHTML = '<p style="color:var(--color-text-danger)">読み込みに失敗しました</p>';
+      });
+  }
+
+  function loadSchemaJobs() {
+    var container = document.getElementById("schema-jobs-list");
+    apiFetch("/admin/reextraction-jobs")
+      .then(function (res) { return res.json(); })
+      .then(function (jobs) {
+        if (!jobs || jobs.length === 0) {
+          container.innerHTML = '<p style="color:var(--color-text-tertiary)">再抽出ジョブはありません</p>';
+          return;
+        }
+        var html = '<table style="width:100%;font-size:0.9em"><thead><tr><th>ID</th><th>ステータス</th><th>進捗</th><th>開始</th></tr></thead><tbody>';
+        jobs.forEach(function (j) {
+          var statusLabel = j.status === "running"
+            ? '<span style="color:#3b82f6">実行中</span>'
+            : j.status === "completed"
+              ? '<span style="color:#22c55e">完了</span>'
+              : j.status === "failed"
+                ? '<span style="color:#ef4444">失敗</span>'
+                : '<span style="color:var(--color-text-tertiary)">待機中</span>';
+          html += '<tr>';
+          html += '<td><code>' + escHtml(j.job_id) + '</code></td>';
+          html += '<td>' + statusLabel + '</td>';
+          html += '<td>' + j.processed_docs + '/' + j.total_docs + '</td>';
+          html += '<td>' + escHtml(j.created_at ? j.created_at.substring(0, 16) : "") + '</td>';
+          html += '</tr>';
+        });
+        html += '</tbody></table>';
+        container.innerHTML = html;
+      })
+      .catch(function () {
+        container.innerHTML = '<p style="color:var(--color-text-danger)">読み込みに失敗しました</p>';
+      });
+  }
+
+  function loadSchemaDefinitions() {
+    // Load ontology types
+    apiFetch("/admin/schema/types")
+      .then(function (res) { return res.json(); })
+      .then(function (types) {
+        var container = document.getElementById("schema-types-list");
+        if (!types || types.length === 0) {
+          container.innerHTML = '<p style="color:var(--color-text-tertiary)">なし</p>';
+          return;
+        }
+        var html = '<ul style="list-style:none;padding:0;font-size:0.9em">';
+        types.forEach(function (t) {
+          var badge = t.is_builtin ? '' : ' <span style="color:#f59e0b;font-size:0.8em">[拡張]</span>';
+          html += '<li style="padding:4px 0;border-bottom:1px solid var(--color-border)">';
+          html += '<strong>' + escHtml(t.label) + '</strong>' + badge;
+          if (t.description) html += '<br><span style="font-size:0.85em;color:var(--color-text-secondary)">' + escHtml(t.description) + '</span>';
+          html += '</li>';
+        });
+        html += '</ul>';
+        container.innerHTML = html;
+      })
+      .catch(function () {
+        document.getElementById("schema-types-list").innerHTML = '<p style="color:var(--color-text-danger)">読み込み失敗</p>';
+      });
+
+    // Load predicates
+    apiFetch("/admin/schema/predicates")
+      .then(function (res) { return res.json(); })
+      .then(function (preds) {
+        var container = document.getElementById("schema-preds-list");
+        if (!preds || preds.length === 0) {
+          container.innerHTML = '<p style="color:var(--color-text-tertiary)">なし</p>';
+          return;
+        }
+        var html = '<ul style="list-style:none;padding:0;font-size:0.9em">';
+        preds.forEach(function (p) {
+          var badge = p.is_builtin ? '' : ' <span style="color:#f59e0b;font-size:0.8em">[拡張]</span>';
+          html += '<li style="padding:4px 0;border-bottom:1px solid var(--color-border)">';
+          html += '<strong>' + escHtml(p.label) + '</strong>' + badge;
+          if (p.description) html += '<br><span style="font-size:0.85em;color:var(--color-text-secondary)">' + escHtml(p.description) + '</span>';
+          html += '</li>';
+        });
+        html += '</ul>';
+        container.innerHTML = html;
+      })
+      .catch(function () {
+        document.getElementById("schema-preds-list").innerHTML = '<p style="color:var(--color-text-danger)">読み込み失敗</p>';
+      });
+  }
+
   // ── Init ───────────────────────────────────────────────────────────
   function initApp() {
     // Role-based access control
@@ -900,6 +1146,7 @@
     initUpload();
     initCourseBuilder();
     initStumbles();
+    initSchemaEvolution();
     initUserManagement();
     initLogout();
     loadMaterials();
