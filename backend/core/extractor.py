@@ -35,6 +35,12 @@ from bs4 import BeautifulSoup, Tag
 from core.config import get_settings as get_app_settings
 from core.llm import generate_text, generate_text_with_structured_output, generate_embeddings
 from core.schema import AbstractionPattern, FieldDiff, MergeResult, PaperStructure
+from core.schema_registry import (
+    build_ontology_type_prompt,
+    build_predicate_prompt,
+    get_ontology_type_names,
+    get_predicate_names,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -361,16 +367,9 @@ def _finalize_structure(state: _AnalysisState, paper_id: str, license: str = "")
         "- PERIPHERAL (is_core=false): Supplementary, contextual, or domain-specific relationships "
         "that provide supporting detail but are not essential to the core mechanism.\n\n"
         "=== CorePredicate (標準述語) — MANDATORY ===\n"
-        "Each CausalEdge MUST set core_predicate to ONE of the following nine standardized values:\n"
-        "  CAUSES     → one variable directly produces or triggers another\n"
-        "  INHIBITS   → one variable suppresses, blocks, or reduces another\n"
-        "  CORRELATES → two variables co-vary without clear directionality\n"
-        "  DEFINES    → one variable characterizes, specifies, or constitutes another\n"
-        "  MEASURES   → one variable operationalizes or quantifies another\n"
-        "  TRANSFORMS → one variable converts or changes the state of another\n"
-        "  REQUIRES   → one variable depends on or presupposes another (prerequisite/dependency)\n"
-        "  CONTAINS   → parent-child (macro-micro) inclusion; the source contains the target as a constituent\n"
-        "  EQUIVALENT → equivalence or contrast between concepts at the same hierarchical level (lateral relation)\n\n"
+        "Each CausalEdge MUST set core_predicate to ONE of the following standardized values "
+        "(loaded dynamically from the schema registry):\n"
+        f"{build_predicate_prompt()}\n\n"
         "=== Hierarchical & Lateral Relationship Rules ===\n"
         "- When extracting elements and causal relationships, ALWAYS check where each element sits "
         "in the paper's overall structure (macro context).\n"
@@ -403,9 +402,8 @@ def _finalize_structure(state: _AnalysisState, paper_id: str, license: str = "")
         "=== [PHASE 1 — ONTOLOGY ENFORCEMENT] OntologyType Mandatory Rules ===\n"
         "CRITICAL: Every single node in the DSL string MUST include OntologyType. "
         "Nodes without OntologyType are INVALID and must be rejected.\n\n"
-        "VALID OntologyType values (10 types — OSL 汎用 4 型 + 素粒子物理学拡張 6 型):\n"
-        "  Agent | Event | Resource | Intentional Moment\n"
-        "  MathematicalObject | PhysicalPhenomenon | TheoreticalFramework | Theorem | Symmetry | Particle\n\n"
+        "VALID OntologyType values (loaded dynamically from the schema registry):\n"
+        f"  {' | '.join(get_ontology_type_names())}\n\n"
         "ENFORCEMENT CHECKLIST — before finalizing smiles_dsl, verify EVERY node satisfies:\n"
         "  [✓] Format is (varID:OntologyType:ConcreteValue) — all three parts present\n"
         "  [✓] OntologyType is one of the ten valid values listed above\n"
@@ -414,23 +412,14 @@ def _finalize_structure(state: _AnalysisState, paper_id: str, license: str = "")
         "  [✓] No bare (varID:OntologyType) without ConcreteValue (this is FORBIDDEN)\n"
         "  [✓] Back-references (varID) (for cycles) are acceptable only if the variable "
         "was already declared with full (varID:OntologyType:ConcreteValue) earlier in the same DSL string\n\n"
-        "Classification guide:\n"
-        "  Agent              → human, organization, institution, team, government, legal entity, actor that initiates action\n"
-        "  Event              → occurrence, process, phenomenon, dynamic change\n"
-        "  Resource           → material, information, capital, output, artifact\n"
-        "  Intentional Moment → intention, goal, belief, commitment, mental state\n"
-        "  MathematicalObject → tensor, group, manifold, operator, spinor, metric, Lie algebra, Hilbert space, functional integral\n"
-        "  PhysicalPhenomenon → phase transition, scattering, decay, radiative correction, confinement, symmetry breaking, Hawking radiation\n"
-        "  TheoreticalFramework → QFT, QED, QCD, Standard Model, string theory, effective field theory, lattice gauge theory\n"
-        "  Theorem            → Noether's theorem, Ward identity, LSZ reduction formula, CPT theorem, Goldstone theorem, optical theorem\n"
-        "  Symmetry           → gauge symmetry, Lorentz symmetry, CPT symmetry, chiral symmetry, supersymmetry, conformal symmetry\n"
-        "  Particle           → quark, lepton, gauge boson, Higgs field, gluon, photon, fermion field, ghost field\n\n"
+        "Classification guide (from schema registry):\n"
+        f"{build_ontology_type_prompt()}\n\n"
         "=== DOMAIN RULE: For physics papers (domain containing 'physics', 'QFT', '場の量子論', '素粒子' etc.), ===\n"
         "STRONGLY PREFER the physics-specific OntologyTypes (MathematicalObject, PhysicalPhenomenon, "
         "TheoreticalFramework, Theorem, Symmetry, Particle) over generic types. "
         "Only fall back to Agent/Event/Resource/Intentional Moment when no physics type fits.\n\n"
         "Rules:\n"
-        "1. Each variable must be assigned an OntologyType from the ten valid values. "
+        "1. Each variable must be assigned an OntologyType from the valid values listed above. "
         "No exceptions. If uncertain, choose the closest type.\n"
         "2. Each CausalEdge must specify polarity (+, -, +/-, or ?) in both the edge's polarity field "
         "and the DSL string.\n"

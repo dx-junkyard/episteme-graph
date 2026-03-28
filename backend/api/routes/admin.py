@@ -27,6 +27,10 @@ from schemas import (
     CourseBuilderSessionUpdate,
     CreateUserRequest,
     MaterialOut,
+    ReextractionJobOut,
+    SchemaProposalOut,
+    SchemaTypeCreateRequest,
+    SchemaTypeOut,
     UserOut,
 )
 from services import (
@@ -36,7 +40,20 @@ from services import (
     save_cb_session,
 )
 from core.llm import generate_text
+from core.meta_analyzer import (
+    analyze_unanswered_queries,
+    approve_proposal,
+    get_proposals,
+    reject_proposal,
+)
 from core.postgres import get_session as _pg_session
+from core.reextractor import enqueue_reextraction, get_jobs as get_reextraction_jobs
+from core.schema_registry import (
+    add_ontology_type,
+    add_predicate,
+    get_ontology_types,
+    get_predicates,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -650,3 +667,113 @@ def create_teacher(
 
     logger.info("Admin '%s' created teacher '%s' (id=%s)", current_user["username"], body.username, user_id)
     return UserOut(id=str(user_id), username=body.username, email=body.email, role=ROLE_TEACHER)
+
+
+# ---------------------------------------------------------------------------
+# Schema Evolution (Issue #36)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/schema/types", response_model=list[SchemaTypeOut])
+def list_ontology_types(
+    current_user: dict = Depends(_require_teacher),
+) -> list[SchemaTypeOut]:
+    """登録済みOntologyType一覧を返す。"""
+    types = get_ontology_types()
+    return [SchemaTypeOut(**t) for t in types]
+
+
+@router.post("/schema/types", response_model=SchemaTypeOut, status_code=201)
+def create_ontology_type(
+    body: SchemaTypeCreateRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> SchemaTypeOut:
+    """新しいOntologyTypeを追加する。"""
+    add_ontology_type(body.id, body.label, body.description)
+    logger.info("OntologyType '%s' added by user=%s", body.id, current_user["id"])
+    return SchemaTypeOut(id=body.id, label=body.label, description=body.description, is_builtin=False)
+
+
+@router.get("/schema/predicates", response_model=list[SchemaTypeOut])
+def list_predicates(
+    current_user: dict = Depends(_require_teacher),
+) -> list[SchemaTypeOut]:
+    """登録済みCorePredicate一覧を返す。"""
+    preds = get_predicates()
+    return [SchemaTypeOut(**p) for p in preds]
+
+
+@router.post("/schema/predicates", response_model=SchemaTypeOut, status_code=201)
+def create_predicate(
+    body: SchemaTypeCreateRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> SchemaTypeOut:
+    """新しいCorePredicateを追加する。"""
+    add_predicate(body.id, body.label, body.description)
+    logger.info("Predicate '%s' added by user=%s", body.id, current_user["id"])
+    return SchemaTypeOut(id=body.id, label=body.label, description=body.description, is_builtin=False)
+
+
+@router.get("/schema-proposals", response_model=list[SchemaProposalOut])
+def list_schema_proposals(
+    status: str | None = None,
+    current_user: dict = Depends(_require_teacher),
+) -> list[SchemaProposalOut]:
+    """スキーマ拡張提案一覧を返す。"""
+    proposals = get_proposals(status=status)
+    return [SchemaProposalOut(**p) for p in proposals]
+
+
+@router.post("/schema-proposals/analyze", response_model=SchemaProposalOut | dict)
+def trigger_schema_analysis(
+    current_user: dict = Depends(_require_teacher),
+) -> SchemaProposalOut | dict:
+    """未回答クエリを分析してスキーマ拡張提案を生成する。"""
+    result = analyze_unanswered_queries()
+    if result is None:
+        return {"message": "分析の結果、スキーマ拡張の提案はありません。未回答クエリが不足しているか、現在のスキーマで十分カバーされています。"}
+    return SchemaProposalOut(**result)
+
+
+@router.put("/schema-proposals/{proposal_id}/approve")
+def approve_schema_proposal(
+    proposal_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """スキーマ拡張提案を承認し、新しいType/Predicateを登録する。"""
+    success = approve_proposal(proposal_id, current_user["id"])
+    if not success:
+        raise HTTPException(status_code=404, detail="Proposal not found or already reviewed")
+
+    # 再抽出ジョブをキューに追加
+    job = enqueue_reextraction(proposal_id)
+    logger.info(
+        "Schema proposal %s approved by user=%s, reextraction job %s enqueued",
+        proposal_id, current_user["id"], job["job_id"],
+    )
+    return {
+        "proposal_id": proposal_id,
+        "status": "approved",
+        "reextraction_job": job,
+    }
+
+
+@router.put("/schema-proposals/{proposal_id}/reject")
+def reject_schema_proposal(
+    proposal_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """スキーマ拡張提案を却下する。"""
+    success = reject_proposal(proposal_id, current_user["id"])
+    if not success:
+        raise HTTPException(status_code=404, detail="Proposal not found or already reviewed")
+    return {"proposal_id": proposal_id, "status": "rejected"}
+
+
+@router.get("/reextraction-jobs", response_model=list[ReextractionJobOut])
+def list_reextraction_jobs(
+    current_user: dict = Depends(_require_teacher),
+) -> list[ReextractionJobOut]:
+    """再抽出ジョブ一覧を返す。"""
+    jobs = get_reextraction_jobs()
+    return [ReextractionJobOut(**j) for j in jobs]

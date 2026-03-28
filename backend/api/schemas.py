@@ -213,3 +213,56 @@ class CourseBuilderSessionUpdate(BaseModel):
     title: str | None = None
     history: list[dict] | None = None
     course_draft: dict | None = None
+
+
+# ---------------------------------------------------------------------------
+# Schema Evolution (Issue #36)
+# ---------------------------------------------------------------------------
+
+class SchemaTypeOut(BaseModel):
+    """OntologyType / Predicate の情報。"""
+    id: str
+    label: str
+    description: str = ""
+    is_builtin: bool = False
+
+
+class SchemaProposalItemOut(BaseModel):
+    """スキーマ拡張提案の個別アイテム。"""
+    id: str
+    item_type: str  # ontology_type | predicate
+    key: str
+    label: str
+    description: str = ""
+
+
+class SchemaProposalOut(BaseModel):
+    """スキーマ拡張提案。"""
+    proposal_id: str
+    status: str = "pending"  # pending | approved | rejected
+    summary: str = ""
+    reasoning: str = ""
+    source_query_count: int = 0
+    items: list[SchemaProposalItemOut] = []
+    created_at: str = ""
+    reviewed_at: str = ""
+
+
+class ReextractionJobOut(BaseModel):
+    """再抽出ジョブ情報。"""
+    job_id: str
+    proposal_id: str = ""
+    status: str = "pending"  # pending | running | completed | failed
+    total_docs: int = 0
+    processed_docs: int = 0
+    error_message: str | None = None
+    started_at: str = ""
+    completed_at: str = ""
+    created_at: str = ""
+
+
+class SchemaTypeCreateRequest(BaseModel):
+    """OntologyType / Predicate の追加リクエスト。"""
+    id: str
+    label: str
+    description: str = ""
