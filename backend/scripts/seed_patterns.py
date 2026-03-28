@@ -3,7 +3,7 @@
 人類が既に確立している強力な抽象化パターンを
 ``backend/data/foundation_seeds.json`` から読み込み、
 LLM で ``AbstractionPattern`` スキーマに変換した後、
-Qdrant (ベクトル) と Neo4j (グラフ) に一括登録する。
+PostgreSQL pgvector (ベクトル) と Neo4j (グラフ) に一括登録する。
 
 実行方法
 --------
@@ -11,10 +11,7 @@ backend/ ディレクトリで::
 
     python -m scripts.seed_patterns
 
-環境変数
---------
-OPENAI_API_KEY, OPENAI_ANALYSIS_MODEL, OPENAI_EMBEDDING_MODEL,
-QDRANT_HOST, QDRANT_PORT, NEO4J_URI, NEO4J_AUTH
+環境変数は ``core/config.py`` の Settings で一元管理。
 """
 
 from __future__ import annotations
@@ -26,7 +23,7 @@ from pathlib import Path
 
 from core.db import get_driver
 from core.embedder import embed_and_store_pattern
-from core.llm import get_client, get_settings
+from core.llm import generate_text_with_structured_output
 from core.schema import AbstractionPattern
 
 logging.basicConfig(
@@ -49,7 +46,7 @@ def _load_seeds(path: Path = _SEEDS_PATH) -> list[dict]:
     return seeds
 
 
-def _generate_pattern(seed: dict, client, settings) -> AbstractionPattern:
+def _generate_pattern(seed: dict) -> AbstractionPattern:
     """1 つのシードデータを LLM で AbstractionPattern に変換する."""
     prompt = (
         "あなたはメタ構造転写エンジンの一部です。\n"
@@ -83,17 +80,15 @@ def _generate_pattern(seed: dict, client, settings) -> AbstractionPattern:
         "JSONスキーマに厳格に従って出力してください。"
     )
 
-    resp = client.beta.chat.completions.parse(
-        model=settings.analysis_model,
+    pattern = generate_text_with_structured_output(
         messages=[{"role": "user", "content": prompt}],
         response_format=AbstractionPattern,
     )
-    pattern: AbstractionPattern = resp.choices[0].message.parsed
     return pattern.model_copy(update={"source_arxiv_id": "foundation_seed"})
 
 
-def _store_to_qdrant(pattern: AbstractionPattern, client, settings) -> None:
-    """パターンを Qdrant patterns コレクションに UPSERT する."""
+def _store_to_pgvector(pattern: AbstractionPattern) -> None:
+    """パターンを PostgreSQL pgvector に UPSERT する."""
     pattern_text = (
         f"{pattern.name}\n{pattern.description}\n"
         + "\n".join(pattern.structural_rules)
@@ -101,8 +96,6 @@ def _store_to_qdrant(pattern: AbstractionPattern, client, settings) -> None:
     embed_and_store_pattern(
         pattern_id=pattern.pattern_id,
         pattern_text=pattern_text,
-        openai_client=client,
-        embedding_model=settings.embedding_model,
     )
 
 
@@ -144,8 +137,6 @@ def _store_to_neo4j(pattern: AbstractionPattern) -> None:
 def main() -> None:
     """シードデータの読み込み → LLM 変換 → DB 登録のメインフロー."""
     seeds = _load_seeds()
-    client = get_client()
-    settings = get_settings()
 
     succeeded = 0
     failed = 0
@@ -155,7 +146,7 @@ def main() -> None:
         logger.info("[%d/%d] Processing: %s", i, len(seeds), concept)
 
         try:
-            pattern = _generate_pattern(seed, client, settings)
+            pattern = _generate_pattern(seed)
             logger.info("  -> Generated pattern: %s (id=%s)", pattern.name, pattern.pattern_id)
         except Exception:
             logger.exception("  !! LLM generation failed for: %s", concept)
@@ -163,10 +154,10 @@ def main() -> None:
             continue
 
         try:
-            _store_to_qdrant(pattern, client, settings)
-            logger.info("  -> Stored in Qdrant")
+            _store_to_pgvector(pattern)
+            logger.info("  -> Stored in PostgreSQL pgvector")
         except Exception:
-            logger.exception("  !! Qdrant storage failed for: %s", concept)
+            logger.exception("  !! pgvector storage failed for: %s", concept)
             failed += 1
             continue
 

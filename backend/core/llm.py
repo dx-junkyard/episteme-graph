@@ -28,7 +28,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
-from core.config import Settings, get_settings
+from core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -240,48 +240,6 @@ def generate_embeddings(
 
     resp = client.embeddings.create(model=model_name, input=texts)
     return [e.embedding for e in resp.data]
-
-
-# ---------------------------------------------------------------------------
-# 後方互換: 旧 API（段階的に廃止予定）
-# ---------------------------------------------------------------------------
-
-def get_client():
-    """OpenAI クライアントを返す（後方互換）。
-
-    .. deprecated::
-        ``generate_text()`` / ``generate_embeddings()`` を使用してください。
-    """
-    return _get_openai_client()
-
-
-class _LegacySettings:
-    """旧 LLMSettings の後方互換ラッパー。"""
-
-    def __init__(self, settings: Settings) -> None:
-        self._settings = settings
-
-    @property
-    def api_key(self) -> str:
-        return self._settings.openai_api_key
-
-    @property
-    def analysis_model(self) -> str:
-        return self._settings.openai_analysis_model
-
-    @property
-    def embedding_model(self) -> str:
-        return self._settings.openai_embedding_model
-
-
-@lru_cache(maxsize=1)
-def get_settings_legacy() -> _LegacySettings:
-    """旧 get_settings() の後方互換。
-
-    .. deprecated::
-        ``core.config.get_settings()`` を使用してください。
-    """
-    return _LegacySettings(get_settings())
 
 
 # ---------------------------------------------------------------------------

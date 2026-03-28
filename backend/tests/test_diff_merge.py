@@ -10,7 +10,7 @@ Covers:
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -266,20 +266,15 @@ class TestEvaluateAndMergeNoChanges:
 # ---------------------------------------------------------------------------
 
 class TestEvaluateAndMergeDiffBased:
-    @patch("metaweave.extractor.get_client")
-    @patch("metaweave.extractor.get_settings")
-    def test_accept_change_applied(self, mock_settings, mock_client):
+    @patch("core.extractor.generate_text")
+    def test_accept_change_applied(self, mock_generate_text):
         from core.extractor import evaluate_and_merge_proposals
-
-        mock_settings.return_value = MagicMock(analysis_model="test-model")
 
         # LLM が title の変更を accept するレスポンスを返す
         llm_response = json.dumps([
             {"field_path": "title", "action": "accept", "final_value": "Better Title", "reason": "More descriptive"},
         ])
-        mock_resp = MagicMock()
-        mock_resp.choices = [MagicMock(message=MagicMock(content=llm_response))]
-        mock_client.return_value.chat.completions.create.return_value = mock_resp
+        mock_generate_text.return_value = llm_response
 
         base = _make_structure()
         proposed = _make_structure(title="Better Title")
@@ -288,19 +283,14 @@ class TestEvaluateAndMergeDiffBased:
         assert result.merged_structure.title == "Better Title"
         assert "[ACCEPT] title" in result.evaluation_reasoning
 
-    @patch("metaweave.extractor.get_client")
-    @patch("metaweave.extractor.get_settings")
-    def test_reject_preserves_base(self, mock_settings, mock_client):
+    @patch("core.extractor.generate_text")
+    def test_reject_preserves_base(self, mock_generate_text):
         from core.extractor import evaluate_and_merge_proposals
-
-        mock_settings.return_value = MagicMock(analysis_model="test-model")
 
         llm_response = json.dumps([
             {"field_path": "title", "action": "reject", "final_value": "", "reason": "Original is better"},
         ])
-        mock_resp = MagicMock()
-        mock_resp.choices = [MagicMock(message=MagicMock(content=llm_response))]
-        mock_client.return_value.chat.completions.create.return_value = mock_resp
+        mock_generate_text.return_value = llm_response
 
         base = _make_structure()
         proposed = _make_structure(title="Worse Title")
@@ -309,20 +299,15 @@ class TestEvaluateAndMergeDiffBased:
         assert result.merged_structure.title == "Test Paper"  # base value preserved
         assert "[REJECT] title" in result.evaluation_reasoning
 
-    @patch("metaweave.extractor.get_client")
-    @patch("metaweave.extractor.get_settings")
-    def test_unchanged_fields_never_touched(self, mock_settings, mock_client):
+    @patch("core.extractor.generate_text")
+    def test_unchanged_fields_never_touched(self, mock_generate_text):
         """未変更フィールド (smiles_dsl 等) が LLM ハルシネーションで破損しないことを検証。"""
         from core.extractor import evaluate_and_merge_proposals
-
-        mock_settings.return_value = MagicMock(analysis_model="test-model")
 
         llm_response = json.dumps([
             {"field_path": "title", "action": "accept", "final_value": "New Title", "reason": "ok"},
         ])
-        mock_resp = MagicMock()
-        mock_resp.choices = [MagicMock(message=MagicMock(content=llm_response))]
-        mock_client.return_value.chat.completions.create.return_value = mock_resp
+        mock_generate_text.return_value = llm_response
 
         original_dsl = "(x:Agent:X) -[CAUSES:causes:+]-> (y:Resource:Y)"
         base = _make_structure()
@@ -336,20 +321,15 @@ class TestEvaluateAndMergeDiffBased:
         assert result.merged_structure.hypothesis.statement == "Main hypothesis"
         assert result.merged_structure.methodology.techniques == ["deep learning", "transformers"]
 
-    @patch("metaweave.extractor.get_client")
-    @patch("metaweave.extractor.get_settings")
-    def test_paper_id_always_preserved(self, mock_settings, mock_client):
+    @patch("core.extractor.generate_text")
+    def test_paper_id_always_preserved(self, mock_generate_text):
         """マージ後も paper_id は必ず base のものが引き継がれる。"""
         from core.extractor import evaluate_and_merge_proposals
-
-        mock_settings.return_value = MagicMock(analysis_model="test-model")
 
         llm_response = json.dumps([
             {"field_path": "title", "action": "accept", "final_value": "X", "reason": "ok"},
         ])
-        mock_resp = MagicMock()
-        mock_resp.choices = [MagicMock(message=MagicMock(content=llm_response))]
-        mock_client.return_value.chat.completions.create.return_value = mock_resp
+        mock_generate_text.return_value = llm_response
 
         base = _make_structure(paper_id="2401.00001")
         proposed = _make_structure(paper_id="different", title="X")
