@@ -112,6 +112,19 @@ from core.llm import generate_text, generate_embeddings, generate_text_with_stru
 - 全 API エンドポイントで認証デコレータを使用
 - RBAC: STUDENT / TEACHER / SYSTEM_ADMIN
 
+## CI テストパターンの更新（必須）
+
+**機能の追加・更新を行った場合、必ず対応するテストパターンも追加・更新すること。**
+
+実装完了後、`episteme-graph-ci-tests` スキルの手順に従い、以下を実行する:
+
+1. 変更対象に対応するテストファイルが `backend/tests/` に存在するか確認
+2. 不足しているテストパターンを追加（正常系・エッジケース・異常系）
+3. 既存テストが変更後のコードと整合するか確認し、必要に応じて更新
+4. `cd backend && python -m pytest tests/ -v` でテストが通ることを確認
+
+テストの配置規則・コード規約・設計原則の詳細は `episteme-graph-ci-tests` スキルを参照。
+
 ## 動的参照ガイド
 
 コード生成時は、以下のファイルを直接読み込んで最新の定義を確認すること:

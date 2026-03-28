@@ -97,3 +97,17 @@ CorePredicate の定義は `backend/core/schema.py` を直接読んで最新の�
 4. **検索精度向上**: `backend/core/embedder.py` のチャンク戦略・クエリ戦略を調整
 5. **LLM 呼び出し**: 必ず `core/llm.py` の公開 API (`generate_text`, `generate_embeddings`, `generate_text_with_structured_output`) を経由する。`openai` SDK を直接使用しない
 6. **設定値**: `core/config.py` の `get_settings()` を経由する。`os.environ` を直接使用しない
+
+## CI テストパターンの更新（必須）
+
+**ナレッジグラフ関連の変更を行った場合、必ず対応するテストパターンも追加・更新すること。**
+
+実装完了後、`episteme-graph-ci-tests` スキルの手順に従い、以下を実行する:
+
+1. 変更対象に対応するテストファイルが `backend/tests/core/` に存在するか確認
+2. スキーマ変更時: バリデーション・シリアライズ・デフォルト値のテストを追加
+3. 抽出ロジック変更時: `test_diff_merge.py` のヘルパー (`_make_structure`) が新フィールドに対応しているか確認
+4. パターンマッチング変更時: `backend/tests/core/test_batch.py` にテストを追加
+5. `cd backend && python -m pytest tests/ -v` でテストが通ることを確認
+
+テストの配置規則・コード規約・設計原則の詳細は `episteme-graph-ci-tests` スキルを参照。
