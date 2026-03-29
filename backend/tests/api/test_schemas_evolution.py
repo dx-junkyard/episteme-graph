@@ -9,11 +9,16 @@ from __future__ import annotations
 import pytest
 
 from api.schemas import (
+    ApproveWithScopeRequest,
     ReextractionJobOut,
     SchemaProposalItemOut,
     SchemaProposalOut,
     SchemaTypeCreateRequest,
     SchemaTypeOut,
+    SimulationDocResult,
+    SimulationResponse,
+    SimulationResults,
+    SimulationStats,
 )
 
 
@@ -156,3 +161,143 @@ class TestSchemaTypeCreateRequest:
         )
         assert obj.id == "Experiment"
         assert obj.description == "実験手法"
+
+
+# ---------------------------------------------------------------------------
+# Shadow Testing / Simulation (Issue #45)
+# ---------------------------------------------------------------------------
+
+
+class TestSimulationDocResult:
+    """SimulationDocResult モデルのテスト。"""
+
+    def test_defaults(self):
+        obj = SimulationDocResult(doc_id="doc-1")
+        assert obj.title == ""
+        assert obj.added_concepts == []
+        assert obj.removed_concepts == []
+        assert obj.added_relations == []
+        assert obj.removed_relations == []
+        assert obj.reclassified_nodes == []
+        assert obj.summary == ""
+
+    def test_full_construction(self):
+        obj = SimulationDocResult(
+            doc_id="doc-1",
+            title="Test Paper",
+            added_concepts=[{"name": "X", "type": "Experiment"}],
+            removed_concepts=[{"name": "Y", "type": "Agent"}],
+            added_relations=[{"source": "A", "target": "B", "predicate": "CAUSES"}],
+            removed_relations=[],
+            reclassified_nodes=[{"name": "Z", "old_type": "Event", "new_type": "Experiment"}],
+            summary="実験カテゴリが追加",
+        )
+        assert len(obj.added_concepts) == 1
+        assert len(obj.reclassified_nodes) == 1
+        assert obj.summary == "実験カテゴリが追加"
+
+
+class TestSimulationStats:
+    """SimulationStats モデルのテスト。"""
+
+    def test_defaults(self):
+        obj = SimulationStats()
+        assert obj.target_doc_count == 0
+        assert obj.total_added_concepts == 0
+        assert obj.total_reclassified_nodes == 0
+
+    def test_with_values(self):
+        obj = SimulationStats(
+            target_doc_count=3,
+            similar_doc_count=2,
+            control_doc_count=1,
+            total_added_concepts=5,
+            total_removed_concepts=2,
+            total_reclassified_nodes=1,
+        )
+        assert obj.target_doc_count == 3
+        assert obj.total_added_concepts == 5
+
+
+class TestSimulationResults:
+    """SimulationResults モデルのテスト。"""
+
+    def test_defaults(self):
+        obj = SimulationResults()
+        assert obj.target == []
+        assert obj.similar == []
+        assert obj.control == []
+
+    def test_with_docs(self):
+        obj = SimulationResults(
+            target=[SimulationDocResult(doc_id="d1", title="Paper A")],
+            similar=[SimulationDocResult(doc_id="d2")],
+            control=[],
+        )
+        assert len(obj.target) == 1
+        assert len(obj.similar) == 1
+        assert obj.target[0].title == "Paper A"
+
+
+class TestSimulationResponse:
+    """SimulationResponse モデルのテスト。"""
+
+    def test_defaults(self):
+        obj = SimulationResponse(proposal_id="p1")
+        assert obj.proposal_summary == ""
+        assert obj.proposal_items == []
+        assert obj.results.target == []
+        assert obj.stats.target_doc_count == 0
+
+    def test_full_construction(self):
+        obj = SimulationResponse(
+            proposal_id="p1",
+            proposal_summary="テスト提案",
+            proposal_items=[
+                SchemaProposalItemOut(
+                    id="i1", item_type="ontology_type",
+                    key="Exp", label="Exp", description="実験",
+                ),
+            ],
+            results=SimulationResults(
+                target=[SimulationDocResult(doc_id="d1", title="Paper")],
+            ),
+            stats=SimulationStats(target_doc_count=1, total_added_concepts=2),
+        )
+        assert obj.proposal_id == "p1"
+        assert len(obj.proposal_items) == 1
+        assert len(obj.results.target) == 1
+        assert obj.stats.total_added_concepts == 2
+
+    def test_model_dump_structure(self):
+        obj = SimulationResponse(proposal_id="p1")
+        d = obj.model_dump()
+        assert "proposal_id" in d
+        assert "results" in d
+        assert "stats" in d
+        assert "target" in d["results"]
+        assert "similar" in d["results"]
+        assert "control" in d["results"]
+
+
+class TestApproveWithScopeRequest:
+    """ApproveWithScopeRequest モデルのテスト。"""
+
+    def test_defaults(self):
+        obj = ApproveWithScopeRequest()
+        assert obj.scope == "full"
+        assert obj.course_ids == []
+
+    def test_canary_scope(self):
+        obj = ApproveWithScopeRequest(
+            scope="canary",
+            course_ids=["course-1", "course-2"],
+        )
+        assert obj.scope == "canary"
+        assert len(obj.course_ids) == 2
+
+    def test_model_dump(self):
+        obj = ApproveWithScopeRequest(scope="full")
+        d = obj.model_dump()
+        assert d["scope"] == "full"
+        assert d["course_ids"] == []

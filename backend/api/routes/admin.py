@@ -20,6 +20,7 @@ from dependencies import (
     ROLE_TEACHER,
 )
 from schemas import (
+    ApproveWithScopeRequest,
     CourseBuilderChatRequest,
     CourseBuilderChatResponse,
     CourseBuilderSessionCreate,
@@ -28,6 +29,7 @@ from schemas import (
     CreateUserRequest,
     MaterialOut,
     ReextractionJobOut,
+    SimulationResponse,
     SchemaProposalOut,
     SchemaTypeCreateRequest,
     SchemaTypeOut,
@@ -777,3 +779,63 @@ def list_reextraction_jobs(
     """再抽出ジョブ一覧を返す。"""
     jobs = get_reextraction_jobs()
     return [ReextractionJobOut(**j) for j in jobs]
+
+
+# ---------------------------------------------------------------------------
+# Shadow Testing / Simulation (Issue #45)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/schema-proposals/{proposal_id}/simulate",
+    response_model=SimulationResponse,
+)
+def simulate_schema_proposal(
+    proposal_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> SimulationResponse:
+    """スキーマ提案のShadow Testingシミュレーションを実行する。
+
+    Target/Similar/Control の3層のドキュメントに対して新スキーマを
+    テスト適用し、差分（Diff）を返す。
+    """
+    from core.simulator import run_simulation
+
+    result = run_simulation(proposal_id)
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Proposal not found",
+        )
+    return SimulationResponse(**result)
+
+
+@router.put("/schema-proposals/{proposal_id}/approve-with-scope")
+def approve_schema_proposal_with_scope(
+    proposal_id: str,
+    body: ApproveWithScopeRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """スキーマ提案をスコープ付きで承認する。
+
+    scope="full": システム全体に適用
+    scope="canary": 指定コースのみに適用（カナリアリリース）
+    """
+    from core.simulator import approve_with_scope
+
+    result = approve_with_scope(
+        proposal_id=proposal_id,
+        reviewer_id=current_user["id"],
+        scope=body.scope,
+        course_ids=body.course_ids,
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Proposal not found or already reviewed",
+        )
+    logger.info(
+        "Schema proposal %s approved (scope=%s) by user=%s",
+        proposal_id, body.scope, current_user["id"],
+    )
+    return result

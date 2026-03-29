@@ -936,6 +936,321 @@
     return true;
   }
 
+  // ── Schema Proposals (Shadow Testing — Issue #45) ──────────────────
+  var _currentSimProposalId = null;
+
+  function initSchemaProposals() {
+    loadSchemaProposalsList();
+    initApproveActions();
+  }
+
+  function loadSchemaProposalsList() {
+    var container = document.getElementById("sp-proposals-list");
+    if (!container) return;
+
+    apiFetch("/admin/schema-proposals")
+      .then(function (res) { return res.json(); })
+      .then(function (proposals) {
+        if (!proposals || proposals.length === 0) {
+          container.innerHTML = '<p style="color:var(--color-text-tertiary)">提案はまだありません。「スキーマ管理」タブからAIメタ分析を実行してください。</p>';
+          return;
+        }
+        var html = "";
+        proposals.forEach(function (p) {
+          var statusBadge = p.status === "pending"
+            ? '<span style="color:#f59e0b;font-weight:bold">保留中</span>'
+            : p.status === "approved"
+              ? '<span style="color:#22c55e;font-weight:bold">承認済</span>'
+              : '<span style="color:#ef4444;font-weight:bold">却下</span>';
+
+          html += '<div class="sp-proposal-card" style="border:1px solid var(--color-border);border-radius:8px;padding:12px;margin-bottom:12px">';
+          html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
+          html += '<strong style="flex:1">' + escHtml(p.summary) + '</strong>' + statusBadge;
+          html += '</div>';
+          html += '<p style="font-size:0.85em;color:var(--color-text-secondary);margin-bottom:8px">' + escHtml(p.reasoning) + '</p>';
+
+          if (p.items && p.items.length > 0) {
+            html += '<div style="margin-bottom:8px">';
+            html += '<span style="font-size:0.8em;font-weight:bold;color:var(--color-text-secondary)">提案アイテム:</span>';
+            html += '<ul style="margin:4px 0 0;padding-left:20px;font-size:0.9em">';
+            p.items.forEach(function (item) {
+              var typeLabel = item.item_type === "ontology_type"
+                ? '<span style="background:#3b82f6;color:#fff;padding:1px 6px;border-radius:3px;font-size:0.75em">概念</span>'
+                : '<span style="background:#8b5cf6;color:#fff;padding:1px 6px;border-radius:3px;font-size:0.75em">関係</span>';
+              html += '<li>' + typeLabel + ' <code>' + escHtml(item.key) + '</code>: ' + escHtml(item.description) + '</li>';
+            });
+            html += '</ul></div>';
+          }
+
+          html += '<div style="font-size:0.8em;color:var(--color-text-tertiary);margin-bottom:8px">分析クエリ数: ' + p.source_query_count + ' | 作成: ' + escHtml(p.created_at ? p.created_at.substring(0, 16) : "") + '</div>';
+
+          if (p.status === "pending") {
+            html += '<div style="display:flex;gap:8px">';
+            html += '<button class="admin-action-btn sp-simulate-btn" data-id="' + escHtml(p.proposal_id) + '" style="font-size:0.85em;padding:4px 12px">シミュレーションを実行</button>';
+            html += '</div>';
+          }
+
+          html += '</div>';
+        });
+        container.innerHTML = html;
+
+        // Bind simulate buttons
+        container.querySelectorAll(".sp-simulate-btn").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            runSimulation(btn.dataset.id, btn);
+          });
+        });
+      })
+      .catch(function () {
+        container.innerHTML = '<p style="color:var(--color-text-danger)">読み込みに失敗しました</p>';
+      });
+  }
+
+  function runSimulation(proposalId, btn) {
+    btn.disabled = true;
+    btn.textContent = "シミュレーション中...";
+    _currentSimProposalId = proposalId;
+
+    apiFetch("/admin/schema-proposals/" + proposalId + "/simulate", { method: "POST" })
+      .then(function (res) {
+        if (!res.ok) throw new Error("Simulation failed");
+        return res.json();
+      })
+      .then(function (data) {
+        btn.textContent = "シミュレーション完了";
+        btn.style.background = "var(--color-text-success)";
+        btn.style.color = "#fff";
+        renderSimulationResult(data);
+      })
+      .catch(function () {
+        btn.disabled = false;
+        btn.textContent = "シミュレーションを実行";
+        var msgEl = document.getElementById("sp-approve-msg");
+        if (msgEl) {
+          msgEl.style.display = "block";
+          msgEl.textContent = "シミュレーションに失敗しました。ドキュメントが不足している可能性があります。";
+          msgEl.className = "upload-status upload-status-error";
+        }
+      });
+  }
+
+  function renderSimulationResult(data) {
+    var area = document.getElementById("sp-simulation-area");
+    var summaryEl = document.getElementById("sp-simulation-summary");
+    var detailsEl = document.getElementById("sp-simulation-details");
+    var actionsEl = document.getElementById("sp-approve-actions");
+
+    area.style.display = "block";
+
+    // Summary stats
+    var stats = data.stats || {};
+    var summaryHtml = '<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px">';
+    summaryHtml += renderStatCard("Target", stats.target_doc_count || 0, "#3b82f6");
+    summaryHtml += renderStatCard("Similar", stats.similar_doc_count || 0, "#8b5cf6");
+    summaryHtml += renderStatCard("Control", stats.control_doc_count || 0, "#6b7280");
+    summaryHtml += '</div>';
+    summaryHtml += '<div style="display:flex;gap:16px;flex-wrap:wrap">';
+    summaryHtml += renderStatCard("追加コンセプト", stats.total_added_concepts || 0, "#22c55e");
+    summaryHtml += renderStatCard("削除コンセプト", stats.total_removed_concepts || 0, "#ef4444");
+    summaryHtml += renderStatCard("再分類ノード", stats.total_reclassified_nodes || 0, "#f59e0b");
+    summaryHtml += '</div>';
+    summaryEl.innerHTML = summaryHtml;
+
+    // Detail diff per category
+    var detailHtml = "";
+    var categories = [
+      { key: "target", label: "Target ドキュメント", color: "#3b82f6", desc: "提案トリガーとなった未回答クエリに紐づくドキュメント" },
+      { key: "similar", label: "Similar ドキュメント", color: "#8b5cf6", desc: "Targetと同系統のドキュメント" },
+      { key: "control", label: "Control ドキュメント", color: "#6b7280", desc: "ベースライン（関連性が低いドキュメント）" },
+    ];
+
+    var results = data.results || {};
+    categories.forEach(function (cat) {
+      var docs = results[cat.key] || [];
+      detailHtml += '<div style="margin-top:16px">';
+      detailHtml += '<h4 style="color:' + cat.color + ';margin-bottom:4px">' + cat.label + ' (' + docs.length + '件)</h4>';
+      detailHtml += '<p style="font-size:0.8em;color:var(--color-text-tertiary);margin-bottom:8px">' + cat.desc + '</p>';
+
+      if (docs.length === 0) {
+        detailHtml += '<p style="color:var(--color-text-tertiary);font-size:0.9em">対象ドキュメントなし</p>';
+      } else {
+        docs.forEach(function (doc) {
+          detailHtml += renderDocDiff(doc, cat.color);
+        });
+      }
+      detailHtml += '</div>';
+    });
+
+    detailsEl.innerHTML = detailHtml;
+    actionsEl.style.display = "block";
+
+    // Scroll to simulation area
+    area.scrollIntoView({ behavior: "smooth" });
+  }
+
+  function renderStatCard(label, value, color) {
+    return '<div style="background:var(--color-bg-secondary);border:1px solid var(--color-border);border-radius:6px;padding:8px 16px;text-align:center;min-width:100px">' +
+      '<div style="font-size:1.5em;font-weight:bold;color:' + color + '">' + value + '</div>' +
+      '<div style="font-size:0.8em;color:var(--color-text-secondary)">' + escHtml(label) + '</div>' +
+    '</div>';
+  }
+
+  function renderDocDiff(doc, borderColor) {
+    var html = '<div style="border-left:3px solid ' + borderColor + ';padding:8px 12px;margin-bottom:8px;background:var(--color-bg-secondary);border-radius:0 6px 6px 0">';
+    html += '<div style="font-weight:bold;margin-bottom:4px">' + escHtml(doc.title || doc.doc_id) + '</div>';
+
+    if (doc.summary) {
+      html += '<p style="font-size:0.85em;color:var(--color-text-secondary);margin-bottom:8px">' + escHtml(doc.summary) + '</p>';
+    }
+
+    // Added concepts
+    if (doc.added_concepts && doc.added_concepts.length > 0) {
+      html += '<div style="margin-bottom:4px"><span style="color:#22c55e;font-size:0.85em;font-weight:bold">+ 追加コンセプト:</span>';
+      html += '<ul style="margin:2px 0 0;padding-left:20px;font-size:0.85em">';
+      doc.added_concepts.forEach(function (c) {
+        html += '<li style="color:#22c55e">' + escHtml(c.name || JSON.stringify(c)) + (c.type ? ' <code style="font-size:0.8em">' + escHtml(c.type) + '</code>' : '') + '</li>';
+      });
+      html += '</ul></div>';
+    }
+
+    // Removed concepts
+    if (doc.removed_concepts && doc.removed_concepts.length > 0) {
+      html += '<div style="margin-bottom:4px"><span style="color:#ef4444;font-size:0.85em;font-weight:bold">- 削除コンセプト:</span>';
+      html += '<ul style="margin:2px 0 0;padding-left:20px;font-size:0.85em">';
+      doc.removed_concepts.forEach(function (c) {
+        html += '<li style="color:#ef4444">' + escHtml(c.name || JSON.stringify(c)) + '</li>';
+      });
+      html += '</ul></div>';
+    }
+
+    // Added relations
+    if (doc.added_relations && doc.added_relations.length > 0) {
+      html += '<div style="margin-bottom:4px"><span style="color:#22c55e;font-size:0.85em;font-weight:bold">+ 追加リレーション:</span>';
+      html += '<ul style="margin:2px 0 0;padding-left:20px;font-size:0.85em">';
+      doc.added_relations.forEach(function (r) {
+        html += '<li style="color:#22c55e">' + escHtml(r.source) + ' <code>' + escHtml(r.predicate) + '</code> ' + escHtml(r.target) + '</li>';
+      });
+      html += '</ul></div>';
+    }
+
+    // Removed relations
+    if (doc.removed_relations && doc.removed_relations.length > 0) {
+      html += '<div style="margin-bottom:4px"><span style="color:#ef4444;font-size:0.85em;font-weight:bold">- 削除リレーション:</span>';
+      html += '<ul style="margin:2px 0 0;padding-left:20px;font-size:0.85em">';
+      doc.removed_relations.forEach(function (r) {
+        html += '<li style="color:#ef4444">' + escHtml(r.source) + ' <code>' + escHtml(r.predicate) + '</code> ' + escHtml(r.target) + '</li>';
+      });
+      html += '</ul></div>';
+    }
+
+    // Reclassified nodes
+    if (doc.reclassified_nodes && doc.reclassified_nodes.length > 0) {
+      html += '<div style="margin-bottom:4px"><span style="color:#f59e0b;font-size:0.85em;font-weight:bold">~ 再分類ノード:</span>';
+      html += '<ul style="margin:2px 0 0;padding-left:20px;font-size:0.85em">';
+      doc.reclassified_nodes.forEach(function (n) {
+        html += '<li style="color:#f59e0b">' + escHtml(n.name) + ': <code>' + escHtml(n.old_type) + '</code> → <code>' + escHtml(n.new_type) + '</code></li>';
+      });
+      html += '</ul></div>';
+    }
+
+    if ((!doc.added_concepts || doc.added_concepts.length === 0) &&
+        (!doc.removed_concepts || doc.removed_concepts.length === 0) &&
+        (!doc.added_relations || doc.added_relations.length === 0) &&
+        (!doc.removed_relations || doc.removed_relations.length === 0) &&
+        (!doc.reclassified_nodes || doc.reclassified_nodes.length === 0)) {
+      html += '<p style="color:var(--color-text-tertiary);font-size:0.85em">変化なし</p>';
+    }
+
+    html += '</div>';
+    return html;
+  }
+
+  function initApproveActions() {
+    var fullBtn = document.getElementById("sp-approve-full");
+    var canaryBtn = document.getElementById("sp-approve-canary");
+    var canaryOpts = document.getElementById("sp-canary-options");
+    var canaryConfirm = document.getElementById("sp-canary-confirm");
+
+    if (!fullBtn) return;
+
+    fullBtn.addEventListener("click", function () {
+      if (!_currentSimProposalId) return;
+      approveWithScope(_currentSimProposalId, "full", []);
+    });
+
+    canaryBtn.addEventListener("click", function () {
+      canaryOpts.style.display = canaryOpts.style.display === "none" ? "block" : "none";
+      loadCanaryCourses();
+    });
+
+    canaryConfirm.addEventListener("click", function () {
+      if (!_currentSimProposalId) return;
+      var select = document.getElementById("sp-canary-course-select");
+      var selectedIds = [];
+      for (var i = 0; i < select.options.length; i++) {
+        if (select.options[i].selected) selectedIds.push(select.options[i].value);
+      }
+      if (selectedIds.length === 0) {
+        var msgEl = document.getElementById("sp-approve-msg");
+        msgEl.style.display = "block";
+        msgEl.textContent = "適用するコースを選択してください。";
+        msgEl.className = "upload-status upload-status-error";
+        return;
+      }
+      approveWithScope(_currentSimProposalId, "canary", selectedIds);
+    });
+  }
+
+  function loadCanaryCourses() {
+    var select = document.getElementById("sp-canary-course-select");
+    if (!select || select.options.length > 0) return;
+
+    apiFetch("/learning/courses")
+      .then(function (res) { return res.json(); })
+      .then(function (courses) {
+        courses.forEach(function (c) {
+          var opt = document.createElement("option");
+          opt.value = c.id;
+          opt.textContent = c.title + (c.is_published ? " [公開中]" : "");
+          select.appendChild(opt);
+        });
+      })
+      .catch(function () {});
+  }
+
+  function approveWithScope(proposalId, scope, courseIds) {
+    var msgEl = document.getElementById("sp-approve-msg");
+    msgEl.style.display = "block";
+    msgEl.textContent = "承認処理中...";
+    msgEl.className = "upload-status upload-status-info";
+
+    var fullBtn = document.getElementById("sp-approve-full");
+    var canaryBtn = document.getElementById("sp-approve-canary");
+    fullBtn.disabled = true;
+    canaryBtn.disabled = true;
+
+    apiFetch("/admin/schema-proposals/" + proposalId + "/approve-with-scope", {
+      method: "PUT",
+      body: JSON.stringify({ scope: scope, course_ids: courseIds }),
+    })
+      .then(function (res) {
+        if (!res.ok) throw new Error("Approve failed");
+        return res.json();
+      })
+      .then(function () {
+        var scopeLabel = scope === "full" ? "システム全体" : "カナリアリリース";
+        msgEl.textContent = "スキーマ提案を承認しました（" + scopeLabel + "）。再抽出ジョブが開始されます。";
+        msgEl.className = "upload-status upload-status-success";
+        loadSchemaProposalsList();
+      })
+      .catch(function () {
+        fullBtn.disabled = false;
+        canaryBtn.disabled = false;
+        msgEl.textContent = "承認に失敗しました。";
+        msgEl.className = "upload-status upload-status-error";
+      });
+  }
+
   // ── Schema Evolution ───────────────────────────────────────────────
   function initSchemaEvolution() {
     var analyzeBtn = document.getElementById("schema-analyze-btn");
@@ -1146,6 +1461,7 @@
     initUpload();
     initCourseBuilder();
     initStumbles();
+    initSchemaProposals();
     initSchemaEvolution();
     initUserManagement();
     initLogout();

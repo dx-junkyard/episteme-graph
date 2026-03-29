@@ -28,6 +28,7 @@
       <button class="admin-tab on" data-tab="materials">教材管理</button>
       <button class="admin-tab" data-tab="course-builder">コース構築</button>
       <button class="admin-tab" data-tab="stumbles">つまづきデータ</button>
+      <button class="admin-tab" data-tab="schema-proposals">スキーマ提案</button>
     </div>
 
     <!-- Materials tab -->
@@ -102,6 +103,39 @@
         </div>
       </div>
     </div>
+    <!-- Schema Proposals tab (Issue #45) -->
+    <div class="admin-panel" id="tab-schema-proposals">
+      <div class="admin-section">
+        <h3 class="admin-section-title">スキーマ提案 (Shadow Testing)</h3>
+        <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:16px">
+          AIが提案したスキーマ拡張をシミュレーションで検証し、安全に承認できます。
+        </p>
+        <div id="sp-proposals-list">
+          <p style="color:var(--color-text-tertiary)">読み込み中...</p>
+        </div>
+      </div>
+
+      <!-- Simulation result area (hidden by default) -->
+      <div class="admin-section" id="sp-simulation-area" style="display:none;margin-top:24px">
+        <h3 class="admin-section-title">シミュレーション結果</h3>
+        <div id="sp-simulation-summary" style="margin-bottom:16px"></div>
+        <div id="sp-simulation-details"></div>
+        <div id="sp-approve-actions" style="margin-top:16px;display:none">
+          <h4 style="margin-bottom:8px">承認アクション</h4>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button id="sp-approve-full" class="admin-action-btn">システム全体に適用</button>
+            <button id="sp-approve-canary" class="admin-action-btn" style="background:var(--color-bg-tertiary);color:var(--color-text-primary)">カナリアリリース（特定コースのみ）</button>
+          </div>
+          <div id="sp-canary-options" style="display:none;margin-top:8px">
+            <select id="sp-canary-course-select" multiple style="width:100%;min-height:60px;padding:4px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
+            </select>
+            <button id="sp-canary-confirm" class="admin-action-btn" style="margin-top:8px;font-size:12px">選択したコースに適用</button>
+          </div>
+          <div id="sp-approve-msg" class="upload-status" style="display:none;margin-top:8px"></div>
+        </div>
+      </div>
+    </div>
+
     <!-- Stumbles tab -->
     <div class="admin-panel" id="tab-stumbles">
       <div class="admin-section">
