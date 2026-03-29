@@ -266,3 +266,51 @@ class SchemaTypeCreateRequest(BaseModel):
     id: str
     label: str
     description: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Shadow Testing / Simulation (Issue #45)
+# ---------------------------------------------------------------------------
+
+class SimulationDocResult(BaseModel):
+    """シミュレーション結果（ドキュメント単位）。"""
+    doc_id: str
+    title: str = ""
+    added_concepts: list[dict] = []
+    removed_concepts: list[dict] = []
+    added_relations: list[dict] = []
+    removed_relations: list[dict] = []
+    reclassified_nodes: list[dict] = []
+    summary: str = ""
+
+
+class SimulationStats(BaseModel):
+    """シミュレーション統計。"""
+    target_doc_count: int = 0
+    similar_doc_count: int = 0
+    control_doc_count: int = 0
+    total_added_concepts: int = 0
+    total_removed_concepts: int = 0
+    total_reclassified_nodes: int = 0
+
+
+class SimulationResults(BaseModel):
+    """シミュレーション結果（カテゴリ別）。"""
+    target: list[SimulationDocResult] = []
+    similar: list[SimulationDocResult] = []
+    control: list[SimulationDocResult] = []
+
+
+class SimulationResponse(BaseModel):
+    """シミュレーションAPIレスポンス。"""
+    proposal_id: str
+    proposal_summary: str = ""
+    proposal_items: list[SchemaProposalItemOut] = []
+    results: SimulationResults = SimulationResults()
+    stats: SimulationStats = SimulationStats()
+
+
+class ApproveWithScopeRequest(BaseModel):
+    """スコープ付き承認リクエスト。"""
+    scope: str = "full"  # "full" or "canary"
+    course_ids: list[str] = []
