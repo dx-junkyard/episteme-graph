@@ -561,88 +561,191 @@
     });
   }
 
-  // ── Course selector ────────────────────────────────────────────────
+  // ── Course selector (topbar dropdown) ───────────────────────────
+  let _allCourses = []; // cached course list for re-render
+
   async function initCourseSelector() {
     const courses = await loadCourses();
-    const topbarCrse = document.getElementById("course-name");
+    _allCourses = courses;
 
-    // A2: 自分のコースと受講可能なテンプレートを分離
     const ownCourses = courses.filter(function (c) { return !c.is_enrollable; });
     const enrollableCourses = courses.filter(function (c) { return c.is_enrollable; });
 
+    // No courses at all → empty state
     if (ownCourses.length === 0 && enrollableCourses.length === 0) {
-      topbarCrse.textContent = "コースなし";
+      showNoCourseState();
       return;
     }
 
-    // 自分のコースがある場合はセレクターを表示
+    // Resolve which course to load
     if (ownCourses.length > 0) {
       if (!state.courseId || !ownCourses.find(function (c) { return c.id === state.courseId; })) {
         state.courseId = ownCourses[0].id;
         localStorage.setItem("eg_course", state.courseId);
       }
+    } else {
+      state.courseId = null;
+    }
 
-      if (ownCourses.length > 1) {
-        const sel = document.createElement("select");
-        sel.className = "course-select";
-        ownCourses.forEach(function (c) {
-          const opt = document.createElement("option");
-          opt.value = c.id;
-          opt.textContent = c.title;
-          if (c.id === state.courseId) opt.selected = true;
-          sel.appendChild(opt);
-        });
-        sel.addEventListener("change", function () {
-          state.courseId = this.value;
-          localStorage.setItem("eg_course", this.value);
-          loadAndRenderCourse();
-        });
-        topbarCrse.textContent = "";
-        topbarCrse.appendChild(sel);
-      } else {
-        topbarCrse.textContent = ownCourses[0].title;
-      }
+    // Build dropdown menu
+    renderCourseMenu(ownCourses, enrollableCourses);
+    initCourseDropdown();
 
+    // Load course if we have one
+    if (state.courseId) {
       await loadAndRenderCourse();
     } else {
-      // 自分のコースがない → 受講可能なコース一覧を表示
-      topbarCrse.textContent = "受講可能なコース";
+      showNoCourseState();
+    }
+  }
+
+  function renderCourseMenu(ownCourses, enrollableCourses) {
+    const nameEl = document.getElementById("course-name");
+    const menu = document.getElementById("course-selector-menu");
+
+    // Set button label to current course
+    const current = ownCourses.find(function (c) { return c.id === state.courseId; });
+    nameEl.textContent = current ? current.title : (ownCourses.length > 0 ? "コースを選択" : "受講可能なコース");
+
+    let html = "";
+
+    // Own courses section
+    if (ownCourses.length > 0) {
+      html += '<div class="course-menu-label">マイコース</div>';
+      ownCourses.forEach(function (c) {
+        const activeClass = c.id === state.courseId ? " active" : "";
+        html += '<div class="course-menu-item' + activeClass + '" data-course-id="' + escHtml(c.id) + '">';
+        html += escHtml(c.title);
+        html += '</div>';
+      });
     }
 
-    // A2: 受講可能なコースをサイドバーに表示
+    // Enrollable courses section
     if (enrollableCourses.length > 0) {
-      renderEnrollableSection(enrollableCourses);
+      if (ownCourses.length > 0) html += '<div class="course-menu-divider"></div>';
+      html += '<div class="course-menu-label">受講可能なコース</div>';
+      enrollableCourses.forEach(function (c) {
+        html += '<div class="course-menu-item" data-enroll-id="' + escHtml(c.id) + '">';
+        html += '<span>' + escHtml(c.title) + '</span>';
+        html += '<button class="enroll-btn">受講開始</button>';
+        html += '</div>';
+      });
     }
-  }
 
-  // A2: 受講可能なコース一覧をサイドバーに表示
-  function renderEnrollableSection(enrollableCourses) {
-    const sb = document.getElementById("sidebar");
-    let html = '<div class="sb-hd" style="margin-top:14px">受講可能なコース</div>';
-    enrollableCourses.forEach(function (c) {
-      html +=
-        '<div class="ni" style="justify-content:space-between;padding-right:8px">' +
-        '<span>' + escHtml(c.title) + '</span>' +
-        '<button onclick="enrollCourse(\'' + escHtml(c.id) + '\')" ' +
-        'style="font-size:11px;padding:2px 8px;background:var(--color-text-info);color:#fff;border:none;border-radius:4px;cursor:pointer">受講開始</button>' +
-        '</div>';
+    menu.innerHTML = html;
+
+    // Bind course switch clicks
+    menu.querySelectorAll("[data-course-id]").forEach(function (el) {
+      el.addEventListener("click", function () {
+        const id = this.getAttribute("data-course-id");
+        if (id !== state.courseId) {
+          switchCourse(id);
+        }
+        closeCourseMenu();
+      });
     });
-    sb.innerHTML = (sb.innerHTML || "") + html;
+
+    // Bind enroll clicks
+    menu.querySelectorAll("[data-enroll-id]").forEach(function (el) {
+      var enrollBtn = el.querySelector(".enroll-btn");
+      if (enrollBtn) {
+        enrollBtn.addEventListener("click", function (e) {
+          e.stopPropagation();
+          const id = el.getAttribute("data-enroll-id");
+          enrollCourse(id);
+        });
+      }
+    });
   }
 
-  // A2: テンプレートに受講登録してリロード
-  window.enrollCourse = async function (courseId) {
+  function initCourseDropdown() {
+    const selector = document.getElementById("course-selector");
+    const btn = document.getElementById("course-selector-btn");
+
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      selector.classList.toggle("open");
+    });
+
+    document.addEventListener("click", function () {
+      closeCourseMenu();
+    });
+
+    document.getElementById("course-selector-menu").addEventListener("click", function (e) {
+      e.stopPropagation();
+    });
+  }
+
+  function closeCourseMenu() {
+    var el = document.getElementById("course-selector");
+    if (el) el.classList.remove("open");
+  }
+
+  async function switchCourse(courseId) {
+    state.courseId = courseId;
+    localStorage.setItem("eg_course", courseId);
+
+    // Clear current state
+    state.currentTopicId = null;
+    state.chatMessages = [];
+    state.course = null;
+
+    // Re-render with clean state
+    renderSidebar();
+    renderChat();
+    renderRightPanel();
+
+    // Update dropdown menu active state
+    const ownCourses = _allCourses.filter(function (c) { return !c.is_enrollable; });
+    const enrollableCourses = _allCourses.filter(function (c) { return c.is_enrollable; });
+    renderCourseMenu(ownCourses, enrollableCourses);
+
+    // Re-enable chat input
+    setChatEnabled(true);
+
+    // Load the new course data
+    await loadAndRenderCourse();
+  }
+
+  async function enrollCourse(courseId) {
+    closeCourseMenu();
     try {
       const res = await apiFetch("/learning/courses/" + courseId + "/enroll", { method: "POST" });
       if (res.ok) {
         const data = await res.json();
-        state.courseId = data.id;
-        localStorage.setItem("eg_course", data.id);
-        // ページをリロードして新しいコースを反映
-        window.location.reload();
+        // Refresh course list and switch to the new course
+        const courses = await loadCourses();
+        _allCourses = courses;
+        await switchCourse(data.id);
       }
     } catch (_) { /* ignore */ }
-  };
+  }
+
+  function showNoCourseState() {
+    const nameEl = document.getElementById("course-name");
+    nameEl.textContent = "コースなし";
+
+    var arrow = document.querySelector(".course-selector-arrow");
+    if (arrow) arrow.style.display = "none";
+
+    var ca = document.getElementById("chat-area");
+    ca.innerHTML = '<div class="no-course-message">現在受講可能なコースはありません。<br>教員がコースを公開するまでお待ちください。</div>';
+
+    setChatEnabled(false);
+
+    var sb = document.getElementById("sidebar");
+    sb.innerHTML = '<div class="sb-hd">コース未選択</div>';
+  }
+
+  function setChatEnabled(enabled) {
+    var input = document.getElementById("chat-input");
+    var btn = document.getElementById("send-btn");
+    if (input) {
+      input.disabled = !enabled;
+      input.placeholder = enabled ? "質問を入力してください..." : "コースを選択してください";
+    }
+    if (btn) btn.disabled = !enabled;
+  }
 
   async function loadAndRenderCourse() {
     const course = await loadCourse(state.courseId);
@@ -656,9 +759,13 @@
     const inProgress = (course.topics || []).find(function (t) { return t.status === "in_progress"; });
     state.currentTopicId = inProgress ? inProgress.id : (course.topics && course.topics.length > 0 ? course.topics[0].id : null);
 
-    // Update topbar
+    // Update topbar course name
     const nameEl = document.getElementById("course-name");
-    if (nameEl && nameEl.tagName !== "SELECT") nameEl.textContent = course.title;
+    if (nameEl) nameEl.textContent = course.title;
+
+    // Restore arrow visibility in case it was hidden by empty state
+    var arrow = document.querySelector(".course-selector-arrow");
+    if (arrow) arrow.style.display = "";
 
     const streakEl = document.getElementById("streak");
     if (streakEl && progress) {
