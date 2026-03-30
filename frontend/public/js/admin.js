@@ -148,6 +148,14 @@
   }
 
   // ── Tab Switching ──────────────────────────────────────────────────
+  // Callbacks fired when a tab becomes active (keyed by data-tab value)
+  var _tabActivateCallbacks = {};
+
+  function onTabActivate(tabName, fn) {
+    if (!_tabActivateCallbacks[tabName]) _tabActivateCallbacks[tabName] = [];
+    _tabActivateCallbacks[tabName].push(fn);
+  }
+
   function initTabs() {
     document.getElementById("adminTabs").addEventListener("click", function (e) {
       var btn = e.target.closest(".admin-tab");
@@ -157,6 +165,12 @@
       document.querySelectorAll(".admin-panel").forEach(function (p) { p.classList.remove("vis"); });
       var target = document.getElementById("tab-" + btn.dataset.tab);
       if (target) target.classList.add("vis");
+
+      // Fire tab activation callbacks
+      var cbs = _tabActivateCallbacks[btn.dataset.tab];
+      if (cbs) {
+        cbs.forEach(function (fn) { fn(); });
+      }
     });
   }
 
@@ -942,6 +956,11 @@
   function initSchemaProposals() {
     loadSchemaProposalsList();
     initApproveActions();
+
+    // Refresh proposals list when the tab is activated
+    onTabActivate("schema-proposals", function () {
+      loadSchemaProposalsList();
+    });
   }
 
   function loadSchemaProposalsList() {
