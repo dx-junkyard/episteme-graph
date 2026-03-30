@@ -12,10 +12,9 @@ from __future__ import annotations
 import json
 import logging
 
-from openai import OpenAI
 from sqlalchemy import text
 
-from core.llm import get_client, get_settings
+from core.llm import generate_text, generate_embeddings
 from core.postgres import get_session
 
 logger = logging.getLogger(__name__)
@@ -54,18 +53,15 @@ Answer clearly and concisely in the same language as the user's question.
 If the provided context does not contain enough information to answer, say so honestly."""
 
 
-def _embed_query(question: str, client: OpenAI, model: str) -> list[float]:
+def _embed_query(question: str) -> list[float]:
     """質問文字列を embedding ベクトルに変換する。"""
-    resp = client.embeddings.create(model=model, input=[question])
-    return resp.data[0].embedding
+    vectors = generate_embeddings([question])
+    return vectors[0]
 
 
 def search_chunks(question: str, arxiv_id: str, top_k: int = 5) -> list[str]:
     """PostgreSQL pgvector で arxiv_id に属するチャンクを類似度検索して返す。"""
-    settings = get_settings()
-    client = get_client()
-
-    query_vector = _embed_query(question, client, settings.embedding_model)
+    query_vector = _embed_query(question)
 
     session = get_session()
     try:
@@ -111,9 +107,6 @@ def generate_chat_response(
     minio_client,
 ) -> str:
     """RAG ベースでユーザーの質問に回答する。"""
-    settings = get_settings()
-    client = get_client()
-
     # 1. 関連チャンクをベクトル検索
     chunks = search_chunks(message, arxiv_id, top_k=5)
 
@@ -153,10 +146,4 @@ def generate_chat_response(
     messages.append({"role": "user", "content": message})
 
     # 5. LLM を呼び出して回答を生成
-    response = client.chat.completions.create(
-        model=settings.analysis_model,
-        messages=messages,
-        temperature=0.3,
-    )
-
-    return response.choices[0].message.content or ""
+    return generate_text(messages=messages, temperature=0.3)

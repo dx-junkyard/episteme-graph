@@ -25,7 +25,6 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import logging
-import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -33,13 +32,17 @@ from typing import Any
 import requests
 from bs4 import BeautifulSoup, Tag
 
-from core.llm import get_client, get_settings
+from core.config import get_settings as get_app_settings
+from core.llm import generate_text, generate_text_with_structured_output, generate_embeddings
 from core.schema import AbstractionPattern, FieldDiff, MergeResult, PaperStructure
+from core.schema_registry import (
+    build_ontology_type_prompt,
+    build_predicate_prompt,
+    get_ontology_type_names,
+    get_predicate_names,
+)
 
 logger = logging.getLogger(__name__)
-
-# GROBID 接続先（docker-compose で GROBID_URL 環境変数として注入）
-_GROBID_URL = os.environ.get("GROBID_URL", "http://localhost:8070")
 
 # セクション分割フォールバック用の閾値
 _MAX_SECTION_CHARS = 8_000
@@ -68,7 +71,8 @@ class _AnalysisState:
 
 def extract_tei_xml_from_pdf_bytes(pdf_bytes: bytes) -> str:
     """PDF バイナリを GROBID の processFulltextDocument API に送信し TEI XML を返す。"""
-    url = f"{_GROBID_URL}/api/processFulltextDocument"
+    grobid_url = get_app_settings().grobid_url
+    url = f"{grobid_url}/api/processFulltextDocument"
     resp = requests.post(
         url,
         files={"input": ("paper.pdf", pdf_bytes, "application/pdf")},
@@ -260,9 +264,6 @@ def _generate_hypothesis(first_chunk: str, paper_id: str) -> dict[str, Any]:
     LLM に渡すプロンプトはコスト削減のため最小限にする。
     返却 JSON のキー: problem / hypothesis / methodology / contributions
     """
-    client = get_client()
-    settings = get_settings()
-
     prompt = (
         f"[paper_id: {paper_id}] 以下は論文の冒頭です。\n"
         "全体像の初期仮説ドラフトを簡潔に作成してください。\n"
@@ -270,11 +271,7 @@ def _generate_hypothesis(first_chunk: str, paper_id: str) -> dict[str, Any]:
         f"{first_chunk}"
     )
 
-    resp = client.chat.completions.create(
-        model=settings.analysis_model,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    raw = resp.choices[0].message.content or "{}"
+    raw = generate_text(messages=[{"role": "user", "content": prompt}])
     result = _parse_json(raw)
     if not result:
         # JSON 抽出失敗時のフォールバック
@@ -299,9 +296,6 @@ def _to_str(item: object) -> str:
 
 def _refine_with_chunk(state: _AnalysisState, chunk: str, chunk_idx: int) -> None:
     """チャンクを読み込んで分析状態をインプレースで更新する。"""
-    client = get_client()
-    settings = get_settings()
-
     draft_str = (
         f"Problem: {state.draft.get('problem', '')[:200]}\n"
         f"Hypothesis: {state.draft.get('hypothesis', '')[:200]}"
@@ -328,11 +322,7 @@ def _refine_with_chunk(state: _AnalysisState, chunk: str, chunk_idx: int) -> Non
         '(keys: "confirmed"[], "revised"[], "new_info"[], "pending"[], "summary" str):'
     )
 
-    resp = client.chat.completions.create(
-        model=settings.analysis_model,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    raw = resp.choices[0].message.content or "{}"
+    raw = generate_text(messages=[{"role": "user", "content": prompt}])
     update = _parse_json(raw)
     if update:
         state.confirmed.extend(update.get("confirmed") or [])
@@ -347,8 +337,6 @@ def _refine_with_chunk(state: _AnalysisState, chunk: str, chunk_idx: int) -> Non
 
 def _finalize_structure(state: _AnalysisState, paper_id: str, license: str = "") -> PaperStructure:
     """蓄積された分析状態から最終的な PaperStructure を生成する。"""
-    client = get_client()
-    settings = get_settings()
 
     def _bullets(items: list, limit: int = 8) -> str:
         return "\n".join(f"- {_to_str(x)}" for x in items[:limit]) or "none"
@@ -379,16 +367,9 @@ def _finalize_structure(state: _AnalysisState, paper_id: str, license: str = "")
         "- PERIPHERAL (is_core=false): Supplementary, contextual, or domain-specific relationships "
         "that provide supporting detail but are not essential to the core mechanism.\n\n"
         "=== CorePredicate (標準述語) — MANDATORY ===\n"
-        "Each CausalEdge MUST set core_predicate to ONE of the following nine standardized values:\n"
-        "  CAUSES     → one variable directly produces or triggers another\n"
-        "  INHIBITS   → one variable suppresses, blocks, or reduces another\n"
-        "  CORRELATES → two variables co-vary without clear directionality\n"
-        "  DEFINES    → one variable characterizes, specifies, or constitutes another\n"
-        "  MEASURES   → one variable operationalizes or quantifies another\n"
-        "  TRANSFORMS → one variable converts or changes the state of another\n"
-        "  REQUIRES   → one variable depends on or presupposes another (prerequisite/dependency)\n"
-        "  CONTAINS   → parent-child (macro-micro) inclusion; the source contains the target as a constituent\n"
-        "  EQUIVALENT → equivalence or contrast between concepts at the same hierarchical level (lateral relation)\n\n"
+        "Each CausalEdge MUST set core_predicate to ONE of the following standardized values "
+        "(loaded dynamically from the schema registry):\n"
+        f"{build_predicate_prompt()}\n\n"
         "=== Hierarchical & Lateral Relationship Rules ===\n"
         "- When extracting elements and causal relationships, ALWAYS check where each element sits "
         "in the paper's overall structure (macro context).\n"
@@ -421,9 +402,8 @@ def _finalize_structure(state: _AnalysisState, paper_id: str, license: str = "")
         "=== [PHASE 1 — ONTOLOGY ENFORCEMENT] OntologyType Mandatory Rules ===\n"
         "CRITICAL: Every single node in the DSL string MUST include OntologyType. "
         "Nodes without OntologyType are INVALID and must be rejected.\n\n"
-        "VALID OntologyType values (10 types — OSL 汎用 4 型 + 素粒子物理学拡張 6 型):\n"
-        "  Agent | Event | Resource | Intentional Moment\n"
-        "  MathematicalObject | PhysicalPhenomenon | TheoreticalFramework | Theorem | Symmetry | Particle\n\n"
+        "VALID OntologyType values (loaded dynamically from the schema registry):\n"
+        f"  {' | '.join(get_ontology_type_names())}\n\n"
         "ENFORCEMENT CHECKLIST — before finalizing smiles_dsl, verify EVERY node satisfies:\n"
         "  [✓] Format is (varID:OntologyType:ConcreteValue) — all three parts present\n"
         "  [✓] OntologyType is one of the ten valid values listed above\n"
@@ -432,23 +412,14 @@ def _finalize_structure(state: _AnalysisState, paper_id: str, license: str = "")
         "  [✓] No bare (varID:OntologyType) without ConcreteValue (this is FORBIDDEN)\n"
         "  [✓] Back-references (varID) (for cycles) are acceptable only if the variable "
         "was already declared with full (varID:OntologyType:ConcreteValue) earlier in the same DSL string\n\n"
-        "Classification guide:\n"
-        "  Agent              → human, organization, institution, team, government, legal entity, actor that initiates action\n"
-        "  Event              → occurrence, process, phenomenon, dynamic change\n"
-        "  Resource           → material, information, capital, output, artifact\n"
-        "  Intentional Moment → intention, goal, belief, commitment, mental state\n"
-        "  MathematicalObject → tensor, group, manifold, operator, spinor, metric, Lie algebra, Hilbert space, functional integral\n"
-        "  PhysicalPhenomenon → phase transition, scattering, decay, radiative correction, confinement, symmetry breaking, Hawking radiation\n"
-        "  TheoreticalFramework → QFT, QED, QCD, Standard Model, string theory, effective field theory, lattice gauge theory\n"
-        "  Theorem            → Noether's theorem, Ward identity, LSZ reduction formula, CPT theorem, Goldstone theorem, optical theorem\n"
-        "  Symmetry           → gauge symmetry, Lorentz symmetry, CPT symmetry, chiral symmetry, supersymmetry, conformal symmetry\n"
-        "  Particle           → quark, lepton, gauge boson, Higgs field, gluon, photon, fermion field, ghost field\n\n"
+        "Classification guide (from schema registry):\n"
+        f"{build_ontology_type_prompt()}\n\n"
         "=== DOMAIN RULE: For physics papers (domain containing 'physics', 'QFT', '場の量子論', '素粒子' etc.), ===\n"
         "STRONGLY PREFER the physics-specific OntologyTypes (MathematicalObject, PhysicalPhenomenon, "
         "TheoreticalFramework, Theorem, Symmetry, Particle) over generic types. "
         "Only fall back to Agent/Event/Resource/Intentional Moment when no physics type fits.\n\n"
         "Rules:\n"
-        "1. Each variable must be assigned an OntologyType from the ten valid values. "
+        "1. Each variable must be assigned an OntologyType from the valid values listed above. "
         "No exceptions. If uncertain, choose the closest type.\n"
         "2. Each CausalEdge must specify polarity (+, -, +/-, or ?) in both the edge's polarity field "
         "and the DSL string.\n"
@@ -481,21 +452,19 @@ def _finalize_structure(state: _AnalysisState, paper_id: str, license: str = "")
         "- For derived quantities, note what they are derived from (e.g., '作用からの変分 / variation of the action')\n"
     )
 
-    resp = client.beta.chat.completions.parse(
-        model=settings.analysis_model,
+    structure = generate_text_with_structured_output(
         messages=[{"role": "user", "content": prompt}],
         response_format=PaperStructure,
     )
-    structure: PaperStructure = resp.choices[0].message.parsed
     return structure.model_copy(update={"paper_id": paper_id, "license": license})
 
 
 def _embed_and_store_chunks(chunks: list[str], paper_id: str) -> None:
-    """チャンクを Embedding して Qdrant に保存する（ベストエフォート）。"""
+    """チャンクを Embedding して PostgreSQL に保存する（ベストエフォート）。"""
     try:
         from core.embedder import embed_and_store  # 循環 import 回避のため遅延
 
-        embed_and_store(chunks, paper_id, get_client(), get_settings().embedding_model)
+        embed_and_store(chunks, paper_id)
     except Exception:
         logger.warning(
             "Embedding/Qdrant storage failed for %s (continuing without embeddings)",
@@ -714,9 +683,6 @@ def evaluate_and_merge_proposals(
     logger.info("Diff detected: %d field(s) changed", len(diffs))
 
     # --- Step 2: 差分のみを LLM に送信 ---
-    client = get_client()
-    settings = get_settings()
-
     diff_lines: list[str] = []
     for d in diffs:
         diff_lines.append(
@@ -745,11 +711,7 @@ def evaluate_and_merge_proposals(
         "JSON 配列のみで回答してください。"
     )
 
-    resp = client.chat.completions.create(
-        model=settings.analysis_model,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    raw = resp.choices[0].message.content or "[]"
+    raw = generate_text(messages=[{"role": "user", "content": prompt}])
 
     # --- Step 3: LLM 結果をパースして base に差分適用 ---
     decisions = _parse_diff_decisions(raw)
@@ -835,9 +797,6 @@ def extract_abstraction_pattern(structure: PaperStructure) -> AbstractionPattern
     AbstractionPattern
         抽出された抽象化パターン。source_arxiv_id には元論文のIDがセットされる。
     """
-    client = get_client()
-    settings = get_settings()
-
     # Core edges のみを優先して抽出データを構築
     core_edges = [e for e in structure.abstract_structure.edges if e.is_core]
     peripheral_edges = [e for e in structure.abstract_structure.edges if not e.is_core]
@@ -889,10 +848,8 @@ def extract_abstraction_pattern(structure: PaperStructure) -> AbstractionPattern
         "JSONスキーマに厳格に従って出力してください。"
     )
 
-    resp = client.beta.chat.completions.parse(
-        model=settings.analysis_model,
+    pattern = generate_text_with_structured_output(
         messages=[{"role": "user", "content": prompt}],
         response_format=AbstractionPattern,
     )
-    pattern: AbstractionPattern = resp.choices[0].message.parsed
     return pattern.model_copy(update={"source_arxiv_id": structure.paper_id})

@@ -6,36 +6,29 @@ Usage::
 
     with get_session() as session:
         session.execute(text("SELECT 1"))
-
-Environment variables
----------------------
-DATABASE_URL : PostgreSQL connection string (default: postgresql://episteme:episteme@postgres:5432/episteme)
 """
 
 from __future__ import annotations
 
 import logging
-import os
 from functools import lru_cache
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-logger = logging.getLogger(__name__)
+from core.config import get_settings
 
-_DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://episteme:episteme@postgres:5432/episteme",
-)
+logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=1)
 def get_engine() -> Engine:
     """Return the shared SQLAlchemy Engine (connection pool)."""
-    logger.info("Connecting to PostgreSQL at %s", _DATABASE_URL.split("@")[-1])
+    database_url = get_settings().database_url
+    logger.info("Connecting to PostgreSQL at %s", database_url.split("@")[-1])
     return create_engine(
-        _DATABASE_URL,
+        database_url,
         pool_size=10,
         max_overflow=20,
         pool_pre_ping=True,

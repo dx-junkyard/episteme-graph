@@ -15,6 +15,7 @@
     courseDraft: null,
     sending: false,
     currentSessionId: null,
+    importedFromCourseId: null,
   };
 
   var API = "/api";
@@ -148,6 +149,14 @@
   }
 
   // ── Tab Switching ──────────────────────────────────────────────────
+  // Callbacks fired when a tab becomes active (keyed by data-tab value)
+  var _tabActivateCallbacks = {};
+
+  function onTabActivate(tabName, fn) {
+    if (!_tabActivateCallbacks[tabName]) _tabActivateCallbacks[tabName] = [];
+    _tabActivateCallbacks[tabName].push(fn);
+  }
+
   function initTabs() {
     document.getElementById("adminTabs").addEventListener("click", function (e) {
       var btn = e.target.closest(".admin-tab");
@@ -157,6 +166,12 @@
       document.querySelectorAll(".admin-panel").forEach(function (p) { p.classList.remove("vis"); });
       var target = document.getElementById("tab-" + btn.dataset.tab);
       if (target) target.classList.add("vis");
+
+      // Fire tab activation callbacks
+      var cbs = _tabActivateCallbacks[btn.dataset.tab];
+      if (cbs) {
+        cbs.forEach(function (fn) { fn(); });
+      }
     });
   }
 
@@ -327,6 +342,7 @@
       '<div style="display:flex;gap:8px;align-items:center;padding:6px 12px;border-bottom:1px solid var(--color-border)">' +
       selectHtml +
       '<button id="new-session-btn" style="padding:4px 10px;font-size:12px;background:var(--color-bg-tertiary);border:1px solid var(--color-border);border-radius:4px;color:var(--color-text-primary);cursor:pointer;white-space:nowrap">+ 新規</button>' +
+      '<button id="import-course-btn" style="padding:4px 10px;font-size:12px;background:var(--color-bg-tertiary);border:1px solid var(--color-border);border-radius:4px;color:var(--color-text-info);cursor:pointer;white-space:nowrap">既存コースを読込</button>' +
       "</div>";
 
     if (state.currentSessionId) {
@@ -339,6 +355,9 @@
     });
     document.getElementById("new-session-btn").addEventListener("click", function () {
       createNewSession();
+    });
+    document.getElementById("import-course-btn").addEventListener("click", function () {
+      openImportCourseModal();
     });
   }
 
@@ -353,6 +372,7 @@
         state.chatHistory = [];
         state.chatMessages = [];
         state.courseDraft = null;
+        state.importedFromCourseId = null;
         renderCourseChat();
         renderCoursePreview();
         reloadSessionBar(data.session_id);
@@ -384,6 +404,7 @@
         state.chatHistory = data.history || [];
         state.chatMessages = data.history || [];
         state.courseDraft = data.course_draft || null;
+        state.importedFromCourseId = null;
         renderCourseChat();
         renderCoursePreview();
         var sel = document.getElementById("session-select");
@@ -401,11 +422,25 @@
 
     document.getElementById("cb-chat-input").value = "";
 
+    // Issue #50: インポートされたコースの場合、AIに現在の構成を伝えるためにコンテキストを付与
+    var chatHistory = state.chatHistory;
+    if (state.courseDraft && chatHistory.length <= 1) {
+      var draftContext = {
+        role: "user",
+        content: "【現在のコース構成（JSON）】\n```json\n" + JSON.stringify(state.courseDraft, null, 2) + "\n```\nこの構成をベースに再編集を行います。",
+      };
+      var draftAck = {
+        role: "assistant",
+        content: "現在のコース構成を確認しました。どのように変更・アップデートしますか？",
+      };
+      chatHistory = [draftContext, draftAck].concat(chatHistory);
+    }
+
     apiFetch("/admin/course-builder/chat", {
       method: "POST",
       body: JSON.stringify({
         message: text,
-        history: state.chatHistory,
+        history: chatHistory,
         session_id: state.currentSessionId || null,
       }),
     })
@@ -669,6 +704,213 @@
       });
   }
 
+  // ── Course Import (Issue #50) ───────────────────────────────────────
+  function openImportCourseModal() {
+    // Remove existing modal if any
+    var existing = document.getElementById("import-course-modal");
+    if (existing) existing.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = "import-course-modal";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+
+    overlay.innerHTML =
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border-secondary);border-radius:8px;padding:24px;min-width:400px;max-width:600px;max-height:70vh;display:flex;flex-direction:column">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">' +
+          '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">既存コースを読み込む</h3>' +
+          '<button id="import-modal-close" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
+        '</div>' +
+        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 12px">登録済みのコースを選択して、Course Builderで再編集できます。</p>' +
+        '<div id="import-course-list" style="overflow-y:auto;flex:1">' +
+          '<p style="color:var(--color-text-tertiary);font-size:13px">読み込み中...</p>' +
+        '</div>' +
+      '</div>';
+
+    document.body.appendChild(overlay);
+
+    // Close on overlay click
+    overlay.addEventListener("click", function (e) {
+      if (e.target === overlay) overlay.remove();
+    });
+    document.getElementById("import-modal-close").addEventListener("click", function () {
+      overlay.remove();
+    });
+
+    // Fetch teacher's courses
+    apiFetch("/admin/courses")
+      .then(function (res) { return res.json(); })
+      .then(function (courses) {
+        var listEl = document.getElementById("import-course-list");
+        if (!courses || courses.length === 0) {
+          listEl.innerHTML = '<p style="color:var(--color-text-tertiary);font-size:13px">登録済みのコースがありません。</p>';
+          return;
+        }
+        var html = "";
+        courses.forEach(function (c) {
+          var statusBadge = "";
+          if (c.is_published) {
+            statusBadge = '<span style="font-size:10px;background:var(--color-text-success);color:#fff;padding:1px 6px;border-radius:3px;margin-left:6px">公開中</span>';
+          } else if (c.is_template) {
+            statusBadge = '<span style="font-size:10px;background:var(--color-text-info);color:#fff;padding:1px 6px;border-radius:3px;margin-left:6px">テンプレート</span>';
+          }
+          var updatedAt = "";
+          if (c.updated_at) {
+            try {
+              var dt = new Date(c.updated_at);
+              updatedAt = dt.getFullYear() + "/" + (dt.getMonth() + 1) + "/" + dt.getDate();
+            } catch (e) { updatedAt = ""; }
+          }
+          html +=
+            '<div class="import-course-item" data-course-id="' + escHtml(c.id) + '" style="padding:10px 12px;border:1px solid var(--color-border-secondary);border-radius:6px;margin-bottom:8px;cursor:pointer;transition:background 0.15s">' +
+              '<div style="display:flex;justify-content:space-between;align-items:center">' +
+                '<div>' +
+                  '<div style="font-size:14px;color:var(--color-text-primary);font-weight:500">' + escHtml(c.title) + statusBadge + '</div>' +
+                  '<div style="font-size:11px;color:var(--color-text-tertiary);margin-top:2px">ID: ' + escHtml(c.id) + (updatedAt ? ' | 更新: ' + updatedAt : '') + '</div>' +
+                '</div>' +
+                '<span style="font-size:12px;color:var(--color-text-info)">選択 &rarr;</span>' +
+              '</div>' +
+            '</div>';
+        });
+        listEl.innerHTML = html;
+
+        // Add click handlers
+        listEl.querySelectorAll(".import-course-item").forEach(function (item) {
+          item.addEventListener("mouseenter", function () {
+            this.style.background = "var(--color-background-tertiary)";
+          });
+          item.addEventListener("mouseleave", function () {
+            this.style.background = "";
+          });
+          item.addEventListener("click", function () {
+            var courseId = this.getAttribute("data-course-id");
+            importCourse(courseId);
+            overlay.remove();
+          });
+        });
+      })
+      .catch(function () {
+        var listEl = document.getElementById("import-course-list");
+        if (listEl) listEl.innerHTML = '<p style="color:var(--color-text-danger);font-size:13px">コース一覧の取得に失敗しました。</p>';
+      });
+  }
+
+  function importCourse(courseId) {
+    // 1. Fetch course data in draft format
+    apiFetch("/admin/courses/" + courseId + "/draft-format")
+      .then(function (res) {
+        if (!res.ok) throw new Error("Failed to load course");
+        return res.json();
+      })
+      .then(function (data) {
+        var draft = data.course_draft;
+        var courseTitle = data.course_title || "不明なコース";
+
+        // 2. Create a new session for the import
+        return apiFetch("/admin/course-builder/sessions", {
+          method: "POST",
+          body: JSON.stringify({ title: "再編集: " + courseTitle }),
+        })
+          .then(function (res) { return res.json(); })
+          .then(function (sessionData) {
+            var sessionId = sessionData.session_id;
+
+            // 3. Set state with imported data
+            var initMessage = "コース「" + courseTitle + "」のデータを読み込みました。どのように変更・アップデートしますか？\n\n現在のコース構成はプレビューに表示されています。例えば以下のような指示ができます：\n- 「第3章に新しいトピックを追加して」\n- 「この概念をもう少し細かく分割して」\n- 「前提知識の順序を見直して」";
+            state.currentSessionId = sessionId;
+            state.chatHistory = [
+              { role: "assistant", content: initMessage },
+            ];
+            state.chatMessages = [
+              { role: "assistant", content: initMessage },
+            ];
+            state.courseDraft = draft;
+            state.importedFromCourseId = courseId;
+
+            // 4. Save session with initial state
+            return apiFetch("/admin/course-builder/sessions/" + sessionId, {
+              method: "PUT",
+              body: JSON.stringify({
+                title: "再編集: " + courseTitle,
+                history: state.chatHistory,
+                course_draft: draft,
+              }),
+            });
+          });
+      })
+      .then(function () {
+        renderCourseChat();
+        renderCoursePreview();
+        reloadSessionBar(state.currentSessionId);
+      })
+      .catch(function () {
+        state.chatMessages.push({
+          role: "assistant",
+          content: "コースの読み込みに失敗しました。もう一度お試しください。",
+        });
+        renderCourseChat();
+      });
+  }
+
+  // ── Stumbles (Unanswered Queries) ──────────────────────────────────
+  function initStumbles() {
+    var select = document.getElementById("stumbles-course-select");
+    var refreshBtn = document.getElementById("refresh-stumbles");
+
+    apiFetch("/learning/courses")
+      .then(function (res) { return res.json(); })
+      .then(function (courses) {
+        courses.forEach(function (c) {
+          var opt = document.createElement("option");
+          opt.value = c.id;
+          opt.textContent = c.title + (c.is_published ? " [公開中]" : "");
+          select.appendChild(opt);
+        });
+      })
+      .catch(function () {});
+
+    function loadStumbles() {
+      var courseId = select.value;
+      var tbody = document.getElementById("stumbles-tbody");
+      if (!courseId) {
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">コースを選択してください</td></tr>';
+        return;
+      }
+      tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">読み込み中...</td></tr>';
+      apiFetch("/admin/courses/" + courseId + "/unanswered-queries")
+        .then(function (res) { return res.json(); })
+        .then(function (rows) {
+          if (!rows || rows.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">つまづきデータはまだありません</td></tr>';
+            return;
+          }
+          var html = "";
+          rows.forEach(function (r) {
+            var dt = "";
+            if (r.asked_at) {
+              try {
+                var d = new Date(r.asked_at);
+                dt = d.getFullYear() + "/" + (d.getMonth() + 1) + "/" + d.getDate() + " " +
+                  d.getHours() + ":" + String(d.getMinutes()).padStart(2, "0");
+              } catch (e) { dt = r.asked_at; }
+            }
+            html += "<tr>";
+            html += "<td style='white-space:nowrap'>" + escHtml(dt) + "</td>";
+            html += "<td>" + escHtml(r.student_name) + "</td>";
+            html += "<td>" + escHtml(r.topic_id) + "</td>";
+            html += "<td style='max-width:400px;word-break:break-word'>" + escHtml(r.question) + "</td>";
+            html += "</tr>";
+          });
+          tbody.innerHTML = html;
+        })
+        .catch(function () {
+          tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-danger)">読み込みに失敗しました</td></tr>';
+        });
+    }
+
+    select.addEventListener("change", loadStumbles);
+    refreshBtn.addEventListener("click", loadStumbles);
+  }
+
   // ── Logout ─────────────────────────────────────────────────────────
   function initLogout() {
     document.getElementById("logout-btn").addEventListener("click", function () {
@@ -777,6 +1019,54 @@
       tabsEl.appendChild(teacherTab);
     }
 
+    // Show schema evolution tab for TEACHER/SYSTEM_ADMIN
+    if (state.role === "TEACHER" || state.role === "SYSTEM_ADMIN") {
+      var schemaTab = document.createElement("button");
+      schemaTab.className = "admin-tab";
+      schemaTab.dataset.tab = "schema";
+      schemaTab.textContent = "スキーマ管理";
+      tabsEl.appendChild(schemaTab);
+    }
+
+    // Create schema management panel
+    var schemaPanel = document.createElement("div");
+    schemaPanel.className = "admin-panel";
+    schemaPanel.id = "tab-schema";
+    schemaPanel.innerHTML =
+      '<div class="admin-section">' +
+        '<h3 class="admin-section-title">DSLスキーマ自己進化</h3>' +
+        '<p style="color:var(--color-text-secondary);margin-bottom:12px">' +
+          '学生のつまづきデータを分析し、不足している概念カテゴリや関係性の拡張をAIが提案します。' +
+        '</p>' +
+        '<div style="display:flex;gap:8px;margin-bottom:16px">' +
+          '<button id="schema-analyze-btn" class="admin-action-btn">AIメタ分析を実行</button>' +
+          '<button id="schema-refresh-btn" class="admin-action-btn" style="background:var(--color-bg-tertiary);color:var(--color-text)">提案を更新</button>' +
+        '</div>' +
+        '<div id="schema-analyze-msg" class="upload-status" style="display:none"></div>' +
+        '<h4 style="margin:16px 0 8px">提案一覧</h4>' +
+        '<div id="schema-proposals-list" style="margin-bottom:24px">' +
+          '<p style="color:var(--color-text-tertiary)">読み込み中...</p>' +
+        '</div>' +
+        '<h4 style="margin:16px 0 8px">再抽出ジョブ</h4>' +
+        '<div id="schema-jobs-list">' +
+          '<p style="color:var(--color-text-tertiary)">読み込み中...</p>' +
+        '</div>' +
+      '</div>' +
+      '<div class="admin-section" style="margin-top:24px">' +
+        '<h3 class="admin-section-title">現在のスキーマ定義</h3>' +
+        '<div style="display:flex;gap:24px;flex-wrap:wrap">' +
+          '<div style="flex:1;min-width:300px">' +
+            '<h4>概念カテゴリ (OntologyType)</h4>' +
+            '<div id="schema-types-list"><p style="color:var(--color-text-tertiary)">読み込み中...</p></div>' +
+          '</div>' +
+          '<div style="flex:1;min-width:300px">' +
+            '<h4>関係性タイプ (CorePredicate)</h4>' +
+            '<div id="schema-preds-list"><p style="color:var(--color-text-tertiary)">読み込み中...</p></div>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    tabsEl.parentElement.appendChild(schemaPanel);
+
     // Create student management panel
     var studentPanel = document.createElement("div");
     studentPanel.className = "admin-panel";
@@ -828,6 +1118,524 @@
     return true;
   }
 
+  // ── Schema Proposals (Shadow Testing — Issue #45) ──────────────────
+  var _currentSimProposalId = null;
+
+  function initSchemaProposals() {
+    loadSchemaProposalsList();
+    initApproveActions();
+
+    // Refresh proposals list when the tab is activated
+    onTabActivate("schema-proposals", function () {
+      loadSchemaProposalsList();
+    });
+  }
+
+  function loadSchemaProposalsList() {
+    var container = document.getElementById("sp-proposals-list");
+    if (!container) return;
+
+    apiFetch("/admin/schema-proposals")
+      .then(function (res) { return res.json(); })
+      .then(function (proposals) {
+        if (!proposals || proposals.length === 0) {
+          container.innerHTML = '<p style="color:var(--color-text-tertiary)">提案はまだありません。「スキーマ管理」タブからAIメタ分析を実行してください。</p>';
+          return;
+        }
+        var html = "";
+        proposals.forEach(function (p) {
+          var statusBadge = p.status === "pending"
+            ? '<span style="color:#f59e0b;font-weight:bold">保留中</span>'
+            : p.status === "approved"
+              ? '<span style="color:#22c55e;font-weight:bold">承認済</span>'
+              : '<span style="color:#ef4444;font-weight:bold">却下</span>';
+
+          html += '<div class="sp-proposal-card" style="border:1px solid var(--color-border);border-radius:8px;padding:12px;margin-bottom:12px">';
+          html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
+          html += '<strong style="flex:1">' + escHtml(p.summary) + '</strong>' + statusBadge;
+          html += '</div>';
+          html += '<p style="font-size:0.85em;color:var(--color-text-secondary);margin-bottom:8px">' + escHtml(p.reasoning) + '</p>';
+
+          if (p.items && p.items.length > 0) {
+            html += '<div style="margin-bottom:8px">';
+            html += '<span style="font-size:0.8em;font-weight:bold;color:var(--color-text-secondary)">提案アイテム:</span>';
+            html += '<ul style="margin:4px 0 0;padding-left:20px;font-size:0.9em">';
+            p.items.forEach(function (item) {
+              var typeLabel = item.item_type === "ontology_type"
+                ? '<span style="background:#3b82f6;color:#fff;padding:1px 6px;border-radius:3px;font-size:0.75em">概念</span>'
+                : '<span style="background:#8b5cf6;color:#fff;padding:1px 6px;border-radius:3px;font-size:0.75em">関係</span>';
+              html += '<li>' + typeLabel + ' <code>' + escHtml(item.key) + '</code>: ' + escHtml(item.description) + '</li>';
+            });
+            html += '</ul></div>';
+          }
+
+          html += '<div style="font-size:0.8em;color:var(--color-text-tertiary);margin-bottom:8px">分析クエリ数: ' + p.source_query_count + ' | 作成: ' + escHtml(p.created_at ? p.created_at.substring(0, 16) : "") + '</div>';
+
+          if (p.status === "pending") {
+            html += '<div style="display:flex;gap:8px">';
+            html += '<button class="admin-action-btn sp-simulate-btn" data-id="' + escHtml(p.proposal_id) + '" style="font-size:0.85em;padding:4px 12px">シミュレーションを実行</button>';
+            html += '</div>';
+          }
+
+          html += '</div>';
+        });
+        container.innerHTML = html;
+
+        // Bind simulate buttons
+        container.querySelectorAll(".sp-simulate-btn").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            runSimulation(btn.dataset.id, btn);
+          });
+        });
+      })
+      .catch(function () {
+        container.innerHTML = '<p style="color:var(--color-text-danger)">読み込みに失敗しました</p>';
+      });
+  }
+
+  function runSimulation(proposalId, btn) {
+    btn.disabled = true;
+    btn.textContent = "シミュレーション中...";
+    _currentSimProposalId = proposalId;
+
+    apiFetch("/admin/schema-proposals/" + proposalId + "/simulate", { method: "POST" })
+      .then(function (res) {
+        if (!res.ok) throw new Error("Simulation failed");
+        return res.json();
+      })
+      .then(function (data) {
+        btn.textContent = "シミュレーション完了";
+        btn.style.background = "var(--color-text-success)";
+        btn.style.color = "#fff";
+        renderSimulationResult(data);
+      })
+      .catch(function () {
+        btn.disabled = false;
+        btn.textContent = "シミュレーションを実行";
+        var msgEl = document.getElementById("sp-approve-msg");
+        if (msgEl) {
+          msgEl.style.display = "block";
+          msgEl.textContent = "シミュレーションに失敗しました。ドキュメントが不足している可能性があります。";
+          msgEl.className = "upload-status upload-status-error";
+        }
+      });
+  }
+
+  function renderSimulationResult(data) {
+    var area = document.getElementById("sp-simulation-area");
+    var summaryEl = document.getElementById("sp-simulation-summary");
+    var detailsEl = document.getElementById("sp-simulation-details");
+    var actionsEl = document.getElementById("sp-approve-actions");
+
+    area.style.display = "block";
+
+    // Summary stats
+    var stats = data.stats || {};
+    var summaryHtml = '<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px">';
+    summaryHtml += renderStatCard("Target", stats.target_doc_count || 0, "#3b82f6");
+    summaryHtml += renderStatCard("Similar", stats.similar_doc_count || 0, "#8b5cf6");
+    summaryHtml += renderStatCard("Control", stats.control_doc_count || 0, "#6b7280");
+    summaryHtml += '</div>';
+    summaryHtml += '<div style="display:flex;gap:16px;flex-wrap:wrap">';
+    summaryHtml += renderStatCard("追加コンセプト", stats.total_added_concepts || 0, "#22c55e");
+    summaryHtml += renderStatCard("削除コンセプト", stats.total_removed_concepts || 0, "#ef4444");
+    summaryHtml += renderStatCard("再分類ノード", stats.total_reclassified_nodes || 0, "#f59e0b");
+    summaryHtml += '</div>';
+    summaryEl.innerHTML = summaryHtml;
+
+    // Detail diff per category
+    var detailHtml = "";
+    var categories = [
+      { key: "target", label: "Target ドキュメント", color: "#3b82f6", desc: "提案トリガーとなった未回答クエリに紐づくドキュメント" },
+      { key: "similar", label: "Similar ドキュメント", color: "#8b5cf6", desc: "Targetと同系統のドキュメント" },
+      { key: "control", label: "Control ドキュメント", color: "#6b7280", desc: "ベースライン（関連性が低いドキュメント）" },
+    ];
+
+    var results = data.results || {};
+    categories.forEach(function (cat) {
+      var docs = results[cat.key] || [];
+      detailHtml += '<div style="margin-top:16px">';
+      detailHtml += '<h4 style="color:' + cat.color + ';margin-bottom:4px">' + cat.label + ' (' + docs.length + '件)</h4>';
+      detailHtml += '<p style="font-size:0.8em;color:var(--color-text-tertiary);margin-bottom:8px">' + cat.desc + '</p>';
+
+      if (docs.length === 0) {
+        detailHtml += '<p style="color:var(--color-text-tertiary);font-size:0.9em">対象ドキュメントなし</p>';
+      } else {
+        docs.forEach(function (doc) {
+          detailHtml += renderDocDiff(doc, cat.color);
+        });
+      }
+      detailHtml += '</div>';
+    });
+
+    detailsEl.innerHTML = detailHtml;
+    actionsEl.style.display = "block";
+
+    // Scroll to simulation area
+    area.scrollIntoView({ behavior: "smooth" });
+  }
+
+  function renderStatCard(label, value, color) {
+    return '<div style="background:var(--color-bg-secondary);border:1px solid var(--color-border);border-radius:6px;padding:8px 16px;text-align:center;min-width:100px">' +
+      '<div style="font-size:1.5em;font-weight:bold;color:' + color + '">' + value + '</div>' +
+      '<div style="font-size:0.8em;color:var(--color-text-secondary)">' + escHtml(label) + '</div>' +
+    '</div>';
+  }
+
+  function renderDocDiff(doc, borderColor) {
+    var html = '<div style="border-left:3px solid ' + borderColor + ';padding:8px 12px;margin-bottom:8px;background:var(--color-bg-secondary);border-radius:0 6px 6px 0">';
+    html += '<div style="font-weight:bold;margin-bottom:4px">' + escHtml(doc.title || doc.doc_id) + '</div>';
+
+    if (doc.summary) {
+      html += '<p style="font-size:0.85em;color:var(--color-text-secondary);margin-bottom:8px">' + escHtml(doc.summary) + '</p>';
+    }
+
+    // Added concepts
+    if (doc.added_concepts && doc.added_concepts.length > 0) {
+      html += '<div style="margin-bottom:4px"><span style="color:#22c55e;font-size:0.85em;font-weight:bold">+ 追加コンセプト:</span>';
+      html += '<ul style="margin:2px 0 0;padding-left:20px;font-size:0.85em">';
+      doc.added_concepts.forEach(function (c) {
+        html += '<li style="color:#22c55e">' + escHtml(c.name || JSON.stringify(c)) + (c.type ? ' <code style="font-size:0.8em">' + escHtml(c.type) + '</code>' : '') + '</li>';
+      });
+      html += '</ul></div>';
+    }
+
+    // Removed concepts
+    if (doc.removed_concepts && doc.removed_concepts.length > 0) {
+      html += '<div style="margin-bottom:4px"><span style="color:#ef4444;font-size:0.85em;font-weight:bold">- 削除コンセプト:</span>';
+      html += '<ul style="margin:2px 0 0;padding-left:20px;font-size:0.85em">';
+      doc.removed_concepts.forEach(function (c) {
+        html += '<li style="color:#ef4444">' + escHtml(c.name || JSON.stringify(c)) + '</li>';
+      });
+      html += '</ul></div>';
+    }
+
+    // Added relations
+    if (doc.added_relations && doc.added_relations.length > 0) {
+      html += '<div style="margin-bottom:4px"><span style="color:#22c55e;font-size:0.85em;font-weight:bold">+ 追加リレーション:</span>';
+      html += '<ul style="margin:2px 0 0;padding-left:20px;font-size:0.85em">';
+      doc.added_relations.forEach(function (r) {
+        html += '<li style="color:#22c55e">' + escHtml(r.source) + ' <code>' + escHtml(r.predicate) + '</code> ' + escHtml(r.target) + '</li>';
+      });
+      html += '</ul></div>';
+    }
+
+    // Removed relations
+    if (doc.removed_relations && doc.removed_relations.length > 0) {
+      html += '<div style="margin-bottom:4px"><span style="color:#ef4444;font-size:0.85em;font-weight:bold">- 削除リレーション:</span>';
+      html += '<ul style="margin:2px 0 0;padding-left:20px;font-size:0.85em">';
+      doc.removed_relations.forEach(function (r) {
+        html += '<li style="color:#ef4444">' + escHtml(r.source) + ' <code>' + escHtml(r.predicate) + '</code> ' + escHtml(r.target) + '</li>';
+      });
+      html += '</ul></div>';
+    }
+
+    // Reclassified nodes
+    if (doc.reclassified_nodes && doc.reclassified_nodes.length > 0) {
+      html += '<div style="margin-bottom:4px"><span style="color:#f59e0b;font-size:0.85em;font-weight:bold">~ 再分類ノード:</span>';
+      html += '<ul style="margin:2px 0 0;padding-left:20px;font-size:0.85em">';
+      doc.reclassified_nodes.forEach(function (n) {
+        html += '<li style="color:#f59e0b">' + escHtml(n.name) + ': <code>' + escHtml(n.old_type) + '</code> → <code>' + escHtml(n.new_type) + '</code></li>';
+      });
+      html += '</ul></div>';
+    }
+
+    if ((!doc.added_concepts || doc.added_concepts.length === 0) &&
+        (!doc.removed_concepts || doc.removed_concepts.length === 0) &&
+        (!doc.added_relations || doc.added_relations.length === 0) &&
+        (!doc.removed_relations || doc.removed_relations.length === 0) &&
+        (!doc.reclassified_nodes || doc.reclassified_nodes.length === 0)) {
+      html += '<p style="color:var(--color-text-tertiary);font-size:0.85em">変化なし</p>';
+    }
+
+    html += '</div>';
+    return html;
+  }
+
+  function initApproveActions() {
+    var fullBtn = document.getElementById("sp-approve-full");
+    var canaryBtn = document.getElementById("sp-approve-canary");
+    var canaryOpts = document.getElementById("sp-canary-options");
+    var canaryConfirm = document.getElementById("sp-canary-confirm");
+
+    if (!fullBtn) return;
+
+    fullBtn.addEventListener("click", function () {
+      if (!_currentSimProposalId) return;
+      approveWithScope(_currentSimProposalId, "full", []);
+    });
+
+    canaryBtn.addEventListener("click", function () {
+      canaryOpts.style.display = canaryOpts.style.display === "none" ? "block" : "none";
+      loadCanaryCourses();
+    });
+
+    canaryConfirm.addEventListener("click", function () {
+      if (!_currentSimProposalId) return;
+      var select = document.getElementById("sp-canary-course-select");
+      var selectedIds = [];
+      for (var i = 0; i < select.options.length; i++) {
+        if (select.options[i].selected) selectedIds.push(select.options[i].value);
+      }
+      if (selectedIds.length === 0) {
+        var msgEl = document.getElementById("sp-approve-msg");
+        msgEl.style.display = "block";
+        msgEl.textContent = "適用するコースを選択してください。";
+        msgEl.className = "upload-status upload-status-error";
+        return;
+      }
+      approveWithScope(_currentSimProposalId, "canary", selectedIds);
+    });
+  }
+
+  function loadCanaryCourses() {
+    var select = document.getElementById("sp-canary-course-select");
+    if (!select || select.options.length > 0) return;
+
+    apiFetch("/learning/courses")
+      .then(function (res) { return res.json(); })
+      .then(function (courses) {
+        courses.forEach(function (c) {
+          var opt = document.createElement("option");
+          opt.value = c.id;
+          opt.textContent = c.title + (c.is_published ? " [公開中]" : "");
+          select.appendChild(opt);
+        });
+      })
+      .catch(function () {});
+  }
+
+  function approveWithScope(proposalId, scope, courseIds) {
+    var msgEl = document.getElementById("sp-approve-msg");
+    msgEl.style.display = "block";
+    msgEl.textContent = "承認処理中...";
+    msgEl.className = "upload-status upload-status-info";
+
+    var fullBtn = document.getElementById("sp-approve-full");
+    var canaryBtn = document.getElementById("sp-approve-canary");
+    fullBtn.disabled = true;
+    canaryBtn.disabled = true;
+
+    apiFetch("/admin/schema-proposals/" + proposalId + "/approve-with-scope", {
+      method: "PUT",
+      body: JSON.stringify({ scope: scope, course_ids: courseIds }),
+    })
+      .then(function (res) {
+        if (!res.ok) throw new Error("Approve failed");
+        return res.json();
+      })
+      .then(function () {
+        var scopeLabel = scope === "full" ? "システム全体" : "カナリアリリース";
+        msgEl.textContent = "スキーマ提案を承認しました（" + scopeLabel + "）。再抽出ジョブが開始されます。";
+        msgEl.className = "upload-status upload-status-success";
+        loadSchemaProposalsList();
+      })
+      .catch(function () {
+        fullBtn.disabled = false;
+        canaryBtn.disabled = false;
+        msgEl.textContent = "承認に失敗しました。";
+        msgEl.className = "upload-status upload-status-error";
+      });
+  }
+
+  // ── Schema Evolution ───────────────────────────────────────────────
+  function initSchemaEvolution() {
+    var analyzeBtn = document.getElementById("schema-analyze-btn");
+    var refreshBtn = document.getElementById("schema-refresh-btn");
+    if (!analyzeBtn) return;
+
+    analyzeBtn.addEventListener("click", function () {
+      var msgEl = document.getElementById("schema-analyze-msg");
+      msgEl.style.display = "block";
+      msgEl.textContent = "AIがつまづきデータを分析中...";
+      msgEl.className = "upload-status upload-status-info";
+      analyzeBtn.disabled = true;
+
+      apiFetch("/admin/schema-proposals/analyze", { method: "POST" })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          analyzeBtn.disabled = false;
+          if (data.message) {
+            msgEl.textContent = data.message;
+            msgEl.className = "upload-status upload-status-info";
+          } else {
+            msgEl.textContent = "提案が生成されました: " + escHtml(data.summary || "");
+            msgEl.className = "upload-status upload-status-success";
+            loadSchemaProposals();
+          }
+        })
+        .catch(function () {
+          analyzeBtn.disabled = false;
+          msgEl.textContent = "分析に失敗しました";
+          msgEl.className = "upload-status upload-status-error";
+        });
+    });
+
+    refreshBtn.addEventListener("click", function () {
+      loadSchemaProposals();
+      loadSchemaJobs();
+      loadSchemaDefinitions();
+    });
+
+    loadSchemaProposals();
+    loadSchemaJobs();
+    loadSchemaDefinitions();
+  }
+
+  function loadSchemaProposals() {
+    var container = document.getElementById("schema-proposals-list");
+    apiFetch("/admin/schema-proposals")
+      .then(function (res) { return res.json(); })
+      .then(function (proposals) {
+        if (!proposals || proposals.length === 0) {
+          container.innerHTML = '<p style="color:var(--color-text-tertiary)">提案はまだありません。「AIメタ分析を実行」ボタンで生成できます。</p>';
+          return;
+        }
+        var html = "";
+        proposals.forEach(function (p) {
+          var statusBadge = p.status === "pending"
+            ? '<span style="color:#f59e0b;font-weight:bold">保留中</span>'
+            : p.status === "approved"
+              ? '<span style="color:#22c55e;font-weight:bold">承認済</span>'
+              : '<span style="color:#ef4444;font-weight:bold">却下</span>';
+          html += '<div style="border:1px solid var(--color-border);border-radius:8px;padding:12px;margin-bottom:8px">';
+          html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
+          html += '<strong>' + escHtml(p.summary) + '</strong>' + statusBadge;
+          html += '</div>';
+          html += '<p style="font-size:0.85em;color:var(--color-text-secondary);margin-bottom:8px">' + escHtml(p.reasoning) + '</p>';
+          html += '<div style="font-size:0.8em;color:var(--color-text-tertiary)">分析クエリ数: ' + p.source_query_count + '</div>';
+          if (p.items && p.items.length > 0) {
+            html += '<ul style="margin:8px 0 0;padding-left:20px;font-size:0.9em">';
+            p.items.forEach(function (item) {
+              var typeLabel = item.item_type === "ontology_type" ? "[概念]" : "[関係]";
+              html += '<li>' + typeLabel + ' <code>' + escHtml(item.key) + '</code>: ' + escHtml(item.description) + '</li>';
+            });
+            html += '</ul>';
+          }
+          if (p.status === "pending") {
+            html += '<div style="margin-top:8px;display:flex;gap:8px">';
+            html += '<button class="admin-action-btn schema-approve-btn" data-id="' + escHtml(p.proposal_id) + '" style="font-size:0.85em;padding:4px 12px">承認して適用</button>';
+            html += '<button class="admin-action-btn schema-reject-btn" data-id="' + escHtml(p.proposal_id) + '" style="font-size:0.85em;padding:4px 12px;background:var(--color-bg-tertiary);color:var(--color-text)">却下</button>';
+            html += '</div>';
+          }
+          html += '</div>';
+        });
+        container.innerHTML = html;
+
+        // Bind approve/reject buttons
+        container.querySelectorAll(".schema-approve-btn").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var pid = btn.dataset.id;
+            btn.disabled = true;
+            btn.textContent = "処理中...";
+            apiFetch("/admin/schema-proposals/" + pid + "/approve", { method: "PUT" })
+              .then(function (res) { return res.json(); })
+              .then(function () {
+                loadSchemaProposals();
+                loadSchemaJobs();
+                loadSchemaDefinitions();
+              })
+              .catch(function () { btn.disabled = false; btn.textContent = "承認して適用"; });
+          });
+        });
+        container.querySelectorAll(".schema-reject-btn").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var pid = btn.dataset.id;
+            btn.disabled = true;
+            apiFetch("/admin/schema-proposals/" + pid + "/reject", { method: "PUT" })
+              .then(function () { loadSchemaProposals(); })
+              .catch(function () { btn.disabled = false; });
+          });
+        });
+      })
+      .catch(function () {
+        container.innerHTML = '<p style="color:var(--color-text-danger)">読み込みに失敗しました</p>';
+      });
+  }
+
+  function loadSchemaJobs() {
+    var container = document.getElementById("schema-jobs-list");
+    apiFetch("/admin/reextraction-jobs")
+      .then(function (res) { return res.json(); })
+      .then(function (jobs) {
+        if (!jobs || jobs.length === 0) {
+          container.innerHTML = '<p style="color:var(--color-text-tertiary)">再抽出ジョブはありません</p>';
+          return;
+        }
+        var html = '<table style="width:100%;font-size:0.9em"><thead><tr><th>ID</th><th>ステータス</th><th>進捗</th><th>開始</th></tr></thead><tbody>';
+        jobs.forEach(function (j) {
+          var statusLabel = j.status === "running"
+            ? '<span style="color:#3b82f6">実行中</span>'
+            : j.status === "completed"
+              ? '<span style="color:#22c55e">完了</span>'
+              : j.status === "failed"
+                ? '<span style="color:#ef4444">失敗</span>'
+                : '<span style="color:var(--color-text-tertiary)">待機中</span>';
+          html += '<tr>';
+          html += '<td><code>' + escHtml(j.job_id) + '</code></td>';
+          html += '<td>' + statusLabel + '</td>';
+          html += '<td>' + j.processed_docs + '/' + j.total_docs + '</td>';
+          html += '<td>' + escHtml(j.created_at ? j.created_at.substring(0, 16) : "") + '</td>';
+          html += '</tr>';
+        });
+        html += '</tbody></table>';
+        container.innerHTML = html;
+      })
+      .catch(function () {
+        container.innerHTML = '<p style="color:var(--color-text-danger)">読み込みに失敗しました</p>';
+      });
+  }
+
+  function loadSchemaDefinitions() {
+    // Load ontology types
+    apiFetch("/admin/schema/types")
+      .then(function (res) { return res.json(); })
+      .then(function (types) {
+        var container = document.getElementById("schema-types-list");
+        if (!types || types.length === 0) {
+          container.innerHTML = '<p style="color:var(--color-text-tertiary)">なし</p>';
+          return;
+        }
+        var html = '<ul style="list-style:none;padding:0;font-size:0.9em">';
+        types.forEach(function (t) {
+          var badge = t.is_builtin ? '' : ' <span style="color:#f59e0b;font-size:0.8em">[拡張]</span>';
+          html += '<li style="padding:4px 0;border-bottom:1px solid var(--color-border)">';
+          html += '<strong>' + escHtml(t.label) + '</strong>' + badge;
+          if (t.description) html += '<br><span style="font-size:0.85em;color:var(--color-text-secondary)">' + escHtml(t.description) + '</span>';
+          html += '</li>';
+        });
+        html += '</ul>';
+        container.innerHTML = html;
+      })
+      .catch(function () {
+        document.getElementById("schema-types-list").innerHTML = '<p style="color:var(--color-text-danger)">読み込み失敗</p>';
+      });
+
+    // Load predicates
+    apiFetch("/admin/schema/predicates")
+      .then(function (res) { return res.json(); })
+      .then(function (preds) {
+        var container = document.getElementById("schema-preds-list");
+        if (!preds || preds.length === 0) {
+          container.innerHTML = '<p style="color:var(--color-text-tertiary)">なし</p>';
+          return;
+        }
+        var html = '<ul style="list-style:none;padding:0;font-size:0.9em">';
+        preds.forEach(function (p) {
+          var badge = p.is_builtin ? '' : ' <span style="color:#f59e0b;font-size:0.8em">[拡張]</span>';
+          html += '<li style="padding:4px 0;border-bottom:1px solid var(--color-border)">';
+          html += '<strong>' + escHtml(p.label) + '</strong>' + badge;
+          if (p.description) html += '<br><span style="font-size:0.85em;color:var(--color-text-secondary)">' + escHtml(p.description) + '</span>';
+          html += '</li>';
+        });
+        html += '</ul>';
+        container.innerHTML = html;
+      })
+      .catch(function () {
+        document.getElementById("schema-preds-list").innerHTML = '<p style="color:var(--color-text-danger)">読み込み失敗</p>';
+      });
+  }
+
   // ── Init ───────────────────────────────────────────────────────────
   function initApp() {
     // Role-based access control
@@ -839,6 +1647,9 @@
     initTabs();
     initUpload();
     initCourseBuilder();
+    initStumbles();
+    initSchemaProposals();
+    initSchemaEvolution();
     initUserManagement();
     initLogout();
     loadMaterials();

@@ -7,20 +7,16 @@ Usage::
     driver = get_driver()
     with driver.session() as session:
         session.run("MERGE (u:User {id: $id})", id="alice")
-
-Environment variables
----------------------
-NEO4J_URI   : bolt URI of the Neo4j instance  (default: bolt://neo4j:7687)
-NEO4J_AUTH  : "<user>/<password>" pair         (default: neo4j/password)
 """
 
 from __future__ import annotations
 
 import logging
-import os
 from typing import Optional
 
 from neo4j import Driver, GraphDatabase
+
+from core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +34,9 @@ class _Neo4jSingleton:
 
     def get_driver(self) -> Driver:
         if self._driver is None:
-            uri = os.environ.get("NEO4J_URI", "bolt://neo4j:7687")
-            auth_env = os.environ.get("NEO4J_AUTH", "neo4j/password")
+            settings = get_settings()
+            uri = settings.neo4j_uri
+            auth_env = settings.neo4j_auth
             user, _, password = auth_env.partition("/")
             logger.info("Connecting to Neo4j at %s as '%s'", uri, user)
             self._driver = GraphDatabase.driver(uri, auth=(user, password))
@@ -72,25 +69,7 @@ def create_system_meta_proposal(
     arxiv_id: str = "",
     created_at: str = "",
 ) -> None:
-    """SystemMetaProposal を Neo4j に保存し、元の StructureProposal と関連付ける。
-
-    Parameters
-    ----------
-    meta_issue_id : str
-        SystemMetaProposal のユニーク ID。
-    issue_type : str
-        MetaIssueCategory の値（例: "temporal_limitation"）。
-    description : str
-        表現モデルの限界に関する詳細説明。
-    suggested_solution : str
-        提案される解決策。
-    source_proposal_id : str
-        この課題を引き起こした StructureProposal の proposal_id。
-    arxiv_id : str
-        関連する arXiv ID（任意）。
-    created_at : str
-        作成日時の ISO 文字列（任意）。
-    """
+    """SystemMetaProposal を Neo4j に保存し、元の StructureProposal と関連付ける。"""
     driver = get_driver()
     with driver.session() as session:
         session.run(
