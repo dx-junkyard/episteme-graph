@@ -715,7 +715,7 @@
     overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
 
     overlay.innerHTML =
-      '<div style="background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:8px;padding:24px;min-width:400px;max-width:600px;max-height:70vh;display:flex;flex-direction:column">' +
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border-secondary);border-radius:8px;padding:24px;min-width:400px;max-width:600px;max-height:70vh;display:flex;flex-direction:column">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">' +
           '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">既存コースを読み込む</h3>' +
           '<button id="import-modal-close" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
@@ -761,7 +761,7 @@
             } catch (e) { updatedAt = ""; }
           }
           html +=
-            '<div class="import-course-item" data-course-id="' + escHtml(c.id) + '" style="padding:10px 12px;border:1px solid var(--color-border);border-radius:6px;margin-bottom:8px;cursor:pointer;transition:background 0.15s">' +
+            '<div class="import-course-item" data-course-id="' + escHtml(c.id) + '" style="padding:10px 12px;border:1px solid var(--color-border-secondary);border-radius:6px;margin-bottom:8px;cursor:pointer;transition:background 0.15s">' +
               '<div style="display:flex;justify-content:space-between;align-items:center">' +
                 '<div>' +
                   '<div style="font-size:14px;color:var(--color-text-primary);font-weight:500">' + escHtml(c.title) + statusBadge + '</div>' +
@@ -776,7 +776,7 @@
         // Add click handlers
         listEl.querySelectorAll(".import-course-item").forEach(function (item) {
           item.addEventListener("mouseenter", function () {
-            this.style.background = "var(--color-bg-tertiary)";
+            this.style.background = "var(--color-background-tertiary)";
           });
           item.addEventListener("mouseleave", function () {
             this.style.background = "";
