@@ -15,6 +15,7 @@
     courseDraft: null,
     sending: false,
     currentSessionId: null,
+    importedFromCourseId: null,
   };
 
   var API = "/api";
@@ -341,6 +342,7 @@
       '<div style="display:flex;gap:8px;align-items:center;padding:6px 12px;border-bottom:1px solid var(--color-border)">' +
       selectHtml +
       '<button id="new-session-btn" style="padding:4px 10px;font-size:12px;background:var(--color-bg-tertiary);border:1px solid var(--color-border);border-radius:4px;color:var(--color-text-primary);cursor:pointer;white-space:nowrap">+ 新規</button>' +
+      '<button id="import-course-btn" style="padding:4px 10px;font-size:12px;background:var(--color-bg-tertiary);border:1px solid var(--color-border);border-radius:4px;color:var(--color-text-info);cursor:pointer;white-space:nowrap">既存コースを読込</button>' +
       "</div>";
 
     if (state.currentSessionId) {
@@ -353,6 +355,9 @@
     });
     document.getElementById("new-session-btn").addEventListener("click", function () {
       createNewSession();
+    });
+    document.getElementById("import-course-btn").addEventListener("click", function () {
+      openImportCourseModal();
     });
   }
 
@@ -367,6 +372,7 @@
         state.chatHistory = [];
         state.chatMessages = [];
         state.courseDraft = null;
+        state.importedFromCourseId = null;
         renderCourseChat();
         renderCoursePreview();
         reloadSessionBar(data.session_id);
@@ -398,6 +404,7 @@
         state.chatHistory = data.history || [];
         state.chatMessages = data.history || [];
         state.courseDraft = data.course_draft || null;
+        state.importedFromCourseId = null;
         renderCourseChat();
         renderCoursePreview();
         var sel = document.getElementById("session-select");
@@ -415,11 +422,25 @@
 
     document.getElementById("cb-chat-input").value = "";
 
+    // Issue #50: インポートされたコースの場合、AIに現在の構成を伝えるためにコンテキストを付与
+    var chatHistory = state.chatHistory;
+    if (state.courseDraft && chatHistory.length <= 1) {
+      var draftContext = {
+        role: "user",
+        content: "【現在のコース構成（JSON）】\n```json\n" + JSON.stringify(state.courseDraft, null, 2) + "\n```\nこの構成をベースに再編集を行います。",
+      };
+      var draftAck = {
+        role: "assistant",
+        content: "現在のコース構成を確認しました。どのように変更・アップデートしますか？",
+      };
+      chatHistory = [draftContext, draftAck].concat(chatHistory);
+    }
+
     apiFetch("/admin/course-builder/chat", {
       method: "POST",
       body: JSON.stringify({
         message: text,
-        history: state.chatHistory,
+        history: chatHistory,
         session_id: state.currentSessionId || null,
       }),
     })
@@ -680,6 +701,153 @@
       .catch(function () {
         btn.disabled = false;
         btn.textContent = "学生に公開する";
+      });
+  }
+
+  // ── Course Import (Issue #50) ───────────────────────────────────────
+  function openImportCourseModal() {
+    // Remove existing modal if any
+    var existing = document.getElementById("import-course-modal");
+    if (existing) existing.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = "import-course-modal";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+
+    overlay.innerHTML =
+      '<div style="background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:8px;padding:24px;min-width:400px;max-width:600px;max-height:70vh;display:flex;flex-direction:column">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">' +
+          '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">既存コースを読み込む</h3>' +
+          '<button id="import-modal-close" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
+        '</div>' +
+        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 12px">登録済みのコースを選択して、Course Builderで再編集できます。</p>' +
+        '<div id="import-course-list" style="overflow-y:auto;flex:1">' +
+          '<p style="color:var(--color-text-tertiary);font-size:13px">読み込み中...</p>' +
+        '</div>' +
+      '</div>';
+
+    document.body.appendChild(overlay);
+
+    // Close on overlay click
+    overlay.addEventListener("click", function (e) {
+      if (e.target === overlay) overlay.remove();
+    });
+    document.getElementById("import-modal-close").addEventListener("click", function () {
+      overlay.remove();
+    });
+
+    // Fetch teacher's courses
+    apiFetch("/admin/courses")
+      .then(function (res) { return res.json(); })
+      .then(function (courses) {
+        var listEl = document.getElementById("import-course-list");
+        if (!courses || courses.length === 0) {
+          listEl.innerHTML = '<p style="color:var(--color-text-tertiary);font-size:13px">登録済みのコースがありません。</p>';
+          return;
+        }
+        var html = "";
+        courses.forEach(function (c) {
+          var statusBadge = "";
+          if (c.is_published) {
+            statusBadge = '<span style="font-size:10px;background:var(--color-text-success);color:#fff;padding:1px 6px;border-radius:3px;margin-left:6px">公開中</span>';
+          } else if (c.is_template) {
+            statusBadge = '<span style="font-size:10px;background:var(--color-text-info);color:#fff;padding:1px 6px;border-radius:3px;margin-left:6px">テンプレート</span>';
+          }
+          var updatedAt = "";
+          if (c.updated_at) {
+            try {
+              var dt = new Date(c.updated_at);
+              updatedAt = dt.getFullYear() + "/" + (dt.getMonth() + 1) + "/" + dt.getDate();
+            } catch (e) { updatedAt = ""; }
+          }
+          html +=
+            '<div class="import-course-item" data-course-id="' + escHtml(c.id) + '" style="padding:10px 12px;border:1px solid var(--color-border);border-radius:6px;margin-bottom:8px;cursor:pointer;transition:background 0.15s">' +
+              '<div style="display:flex;justify-content:space-between;align-items:center">' +
+                '<div>' +
+                  '<div style="font-size:14px;color:var(--color-text-primary);font-weight:500">' + escHtml(c.title) + statusBadge + '</div>' +
+                  '<div style="font-size:11px;color:var(--color-text-tertiary);margin-top:2px">ID: ' + escHtml(c.id) + (updatedAt ? ' | 更新: ' + updatedAt : '') + '</div>' +
+                '</div>' +
+                '<span style="font-size:12px;color:var(--color-text-info)">選択 &rarr;</span>' +
+              '</div>' +
+            '</div>';
+        });
+        listEl.innerHTML = html;
+
+        // Add click handlers
+        listEl.querySelectorAll(".import-course-item").forEach(function (item) {
+          item.addEventListener("mouseenter", function () {
+            this.style.background = "var(--color-bg-tertiary)";
+          });
+          item.addEventListener("mouseleave", function () {
+            this.style.background = "";
+          });
+          item.addEventListener("click", function () {
+            var courseId = this.getAttribute("data-course-id");
+            importCourse(courseId);
+            overlay.remove();
+          });
+        });
+      })
+      .catch(function () {
+        var listEl = document.getElementById("import-course-list");
+        if (listEl) listEl.innerHTML = '<p style="color:var(--color-text-danger);font-size:13px">コース一覧の取得に失敗しました。</p>';
+      });
+  }
+
+  function importCourse(courseId) {
+    // 1. Fetch course data in draft format
+    apiFetch("/admin/courses/" + courseId + "/draft-format")
+      .then(function (res) {
+        if (!res.ok) throw new Error("Failed to load course");
+        return res.json();
+      })
+      .then(function (data) {
+        var draft = data.course_draft;
+        var courseTitle = data.course_title || "不明なコース";
+
+        // 2. Create a new session for the import
+        return apiFetch("/admin/course-builder/sessions", {
+          method: "POST",
+          body: JSON.stringify({ title: "再編集: " + courseTitle }),
+        })
+          .then(function (res) { return res.json(); })
+          .then(function (sessionData) {
+            var sessionId = sessionData.session_id;
+
+            // 3. Set state with imported data
+            var initMessage = "コース「" + courseTitle + "」のデータを読み込みました。どのように変更・アップデートしますか？\n\n現在のコース構成はプレビューに表示されています。例えば以下のような指示ができます：\n- 「第3章に新しいトピックを追加して」\n- 「この概念をもう少し細かく分割して」\n- 「前提知識の順序を見直して」";
+            state.currentSessionId = sessionId;
+            state.chatHistory = [
+              { role: "assistant", content: initMessage },
+            ];
+            state.chatMessages = [
+              { role: "assistant", content: initMessage },
+            ];
+            state.courseDraft = draft;
+            state.importedFromCourseId = courseId;
+
+            // 4. Save session with initial state
+            return apiFetch("/admin/course-builder/sessions/" + sessionId, {
+              method: "PUT",
+              body: JSON.stringify({
+                title: "再編集: " + courseTitle,
+                history: state.chatHistory,
+                course_draft: draft,
+              }),
+            });
+          });
+      })
+      .then(function () {
+        renderCourseChat();
+        renderCoursePreview();
+        reloadSessionBar(state.currentSessionId);
+      })
+      .catch(function () {
+        state.chatMessages.push({
+          role: "assistant",
+          content: "コースの読み込みに失敗しました。もう一度お試しください。",
+        });
+        renderCourseChat();
       });
   }
 

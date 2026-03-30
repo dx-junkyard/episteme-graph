@@ -538,6 +538,136 @@ def update_cb_session(
 # ---------------------------------------------------------------------------
 
 
+@router.get("/courses")
+def list_teacher_courses(
+    current_user: dict = Depends(_require_teacher),
+) -> list[dict]:
+    """教員が所有するコース一覧を返す（コースビルダーでのインポート用）。"""
+    session = _pg_session()
+    try:
+        records = session.execute(
+            sa_text("""
+                SELECT id, title,
+                       COALESCE(is_template, false) AS is_template,
+                       COALESCE(is_published, false) AS is_published,
+                       created_at, updated_at
+                FROM learning_courses
+                WHERE user_id = CAST(:user_id AS uuid)
+                ORDER BY updated_at DESC
+            """),
+            {"user_id": current_user["id"]},
+        ).fetchall()
+    finally:
+        session.close()
+
+    return [
+        {
+            "id": r[0],
+            "title": r[1],
+            "is_template": bool(r[2]),
+            "is_published": bool(r[3]),
+            "created_at": r[4].isoformat() if r[4] else "",
+            "updated_at": r[5].isoformat() if r[5] else "",
+        }
+        for r in records
+    ]
+
+
+@router.get("/courses/{course_id}/draft-format")
+def get_course_as_draft(
+    course_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """登録済みコースのデータを course_draft 形式に変換して返す。
+
+    Course Builder にインポートするためのアダプタエンドポイント。
+    """
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("""
+                SELECT data, title FROM learning_courses
+                WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
+                LIMIT 1
+            """),
+            {"course_id": course_id, "user_id": current_user["id"]},
+        ).fetchone()
+    finally:
+        session.close()
+
+    if not record:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    data = record[0] if isinstance(record[0], dict) else (
+        json.loads(record[0]) if record[0] else {}
+    )
+    course_title = record[1] or data.get("title", "")
+
+    # --- Convert registered course data → course_draft format ---
+    topics = data.get("topics", [])
+    chapters_raw = data.get("chapters", [])
+
+    # Group topics by chapter_index
+    chapter_topics: dict[int, list] = {}
+    for t in topics:
+        ci = t.get("chapter_index", 0)
+        if ci not in chapter_topics:
+            chapter_topics[ci] = []
+        prereqs = []
+        for p in t.get("prerequisites", []):
+            name = p.get("name", "") if isinstance(p, dict) else str(p)
+            if name:
+                prereqs.append(name)
+        chapter_topics[ci].append({
+            "title": t.get("title", ""),
+            "prerequisites": prereqs,
+        })
+
+    # Build chapters with topics
+    chapters = []
+    for ci, ch in enumerate(chapters_raw):
+        chapters.append({
+            "title": ch.get("title", ""),
+            "topics": chapter_topics.get(ci, []),
+        })
+
+    # Build concepts
+    concepts = []
+    for c in data.get("concepts", []):
+        concepts.append({
+            "name": c.get("name", ""),
+            "children": c.get("children", []),
+        })
+
+    # Build sources
+    sources = []
+    for s in data.get("sources", []):
+        sources.append({
+            "title": s.get("title", ""),
+            "subtitle": s.get("subtitle", ""),
+            "license": s.get("license", ""),
+            "used_section": s.get("used_section", ""),
+            "arxiv_id": s.get("arxiv_id", ""),
+            "material_id": s.get("material_id", ""),
+        })
+
+    draft = {
+        "title": course_title,
+        "target_audience": "",
+        "goal": "",
+        "prerequisites": [],
+        "chapters": chapters,
+        "concepts": concepts,
+        "sources": sources,
+    }
+
+    return {
+        "course_id": course_id,
+        "course_title": course_title,
+        "course_draft": draft,
+    }
+
+
 @router.put("/courses/{course_id}/publish")
 def publish_course(
     course_id: str,
