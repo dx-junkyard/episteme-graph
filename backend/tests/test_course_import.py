@@ -162,7 +162,7 @@ def auth_headers(teacher_token):
 class TestListTeacherCourses:
     """GET /api/admin/courses エンドポイントのテスト。"""
 
-    @patch("core.postgres.get_session")
+    @patch("routes.admin._pg_session")
     def test_list_courses_empty(self, mock_session, client, auth_headers):
         """コースが0件の場合、空リストが返ること。"""
         mock_pg = MagicMock()
@@ -173,7 +173,7 @@ class TestListTeacherCourses:
         assert resp.status_code == 200
         assert resp.json() == []
 
-    @patch("core.postgres.get_session")
+    @patch("routes.admin._pg_session")
     def test_list_courses_with_data(self, mock_session, client, auth_headers):
         """コースがある場合、正しい形式で返ること。"""
         from datetime import datetime
@@ -204,7 +204,7 @@ class TestListTeacherCourses:
 class TestGetCourseAsDraft:
     """GET /api/admin/courses/{id}/draft-format エンドポイントのテスト。"""
 
-    @patch("core.postgres.get_session")
+    @patch("routes.admin._pg_session")
     def test_convert_course_to_draft(self, mock_session, client, auth_headers):
         """コースデータが draft 形式に変換されること。"""
         course_data = {
@@ -280,7 +280,7 @@ class TestGetCourseAsDraft:
         assert len(draft["sources"]) == 1
         assert draft["sources"][0]["title"] == "Griffiths QM"
 
-    @patch("core.postgres.get_session")
+    @patch("routes.admin._pg_session")
     def test_course_not_found(self, mock_session, client, auth_headers):
         """存在しないコースIDで404が返ること。"""
         mock_pg = MagicMock()
