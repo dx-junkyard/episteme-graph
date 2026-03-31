@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import re
 from functools import lru_cache
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel
 
@@ -32,6 +32,43 @@ from core.config import get_settings
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
+
+# ---------------------------------------------------------------------------
+# マルチモード LLM パラメータ取得
+# ---------------------------------------------------------------------------
+
+LLMMode = Literal["fast", "standard", "deep"]
+
+
+def get_llm_params(mode: LLMMode) -> dict[str, Any]:
+    """指定モードに応じた LLM パラメータ (model, reasoning_effort) を返す。
+
+    Parameters
+    ----------
+    mode : ``"fast"`` | ``"standard"`` | ``"deep"``
+
+    Returns
+    -------
+    dict
+        ``{"model": str, "reasoning_effort": str}``
+    """
+    settings = get_settings()
+    mode_map: dict[str, dict[str, str]] = {
+        "fast": {
+            "model": settings.llm_fast_model,
+            "reasoning_effort": settings.llm_fast_effort,
+        },
+        "standard": {
+            "model": settings.llm_standard_model,
+            "reasoning_effort": settings.llm_standard_effort,
+        },
+        "deep": {
+            "model": settings.llm_deep_model,
+            "reasoning_effort": settings.llm_deep_effort,
+        },
+    }
+    return mode_map.get(mode, mode_map["fast"])
+
 
 # ---------------------------------------------------------------------------
 # Reasoning モデル判定
@@ -77,6 +114,7 @@ def _build_api_kwargs(
     *,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    reasoning_effort: str | None = None,
     extra_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Reasoning モデルでは temperature / max_tokens を除去し、
@@ -88,6 +126,9 @@ def _build_api_kwargs(
         # Reasoning モデル: temperature 禁止, max_tokens → max_completion_tokens
         if max_tokens is not None:
             kwargs["max_completion_tokens"] = max_tokens
+        # reasoning_effort が指定されていれば付与
+        if reasoning_effort is not None:
+            kwargs["reasoning_effort"] = reasoning_effort
     else:
         if temperature is not None:
             kwargs["temperature"] = temperature
@@ -128,6 +169,7 @@ def generate_text(
     model: str | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    reasoning_effort: str | None = None,
 ) -> str:
     """チャット補完でテキストを生成する。
 
@@ -142,6 +184,8 @@ def generate_text(
         Reasoning モデルでは自動的に除去される。
     max_tokens : int | None
         Reasoning モデルでは max_completion_tokens に変換される。
+    reasoning_effort : str | None
+        Reasoning モデルの推論レベル (``"low"`` / ``"medium"`` / ``"high"``)。
 
     Returns
     -------
@@ -157,6 +201,7 @@ def generate_text(
         model_name,
         temperature=temperature,
         max_tokens=max_tokens,
+        reasoning_effort=reasoning_effort,
     )
 
     response = client.chat.completions.create(
