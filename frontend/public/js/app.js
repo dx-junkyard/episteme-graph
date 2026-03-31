@@ -221,6 +221,30 @@
   }
 
   // ── Render: Chat ───────────────────────────────────────────────────
+  function _getFirstTopicTitle() {
+    if (!state.course || !state.currentTopicId) return null;
+    var topic = (state.course.topics || []).find(function (t) { return t.id === state.currentTopicId; });
+    return topic ? topic.title : null;
+  }
+
+  function _renderInitialSuggestions() {
+    var courseTitle = state.course ? escHtml(state.course.title || "") : "";
+    var topicTitle = _getFirstTopicTitle();
+    var topicLabel = topicTitle ? escHtml(topicTitle) : "最初のトピック";
+
+    var html = '<div class="mg ai">';
+    html += "「" + courseTitle + "」の学習サポートへようこそ！<br>";
+    html += "現在のあなたのレベルと前提知識に合わせてサポートします。何から始めますか？";
+    html += "</div>";
+    html += '<div class="initial-suggestions">';
+    html += '<button class="suggest-btn initial-suggest-btn" data-suggest="' + topicLabel + 'の学習を開始する">';
+    html += topicLabel + "の学習を開始する</button>";
+    html += '<button class="suggest-btn initial-suggest-btn" data-suggest="このコースに必要な前提知識を確認する">';
+    html += "このコースに必要な前提知識を確認する</button>";
+    html += "</div>";
+    return html;
+  }
+
   function renderChat() {
     const ca = document.getElementById("chat-area");
     if (!state.course || !state.currentTopicId) {
@@ -229,6 +253,12 @@
     }
 
     let html = "";
+
+    // 初期状態（チャット履歴なし）ならサジェストUIを表示
+    if (state.chatMessages.length === 0 && !state.sending) {
+      html += _renderInitialSuggestions();
+    }
+
     state.chatMessages.forEach(function (msg) {
       if (msg.role === "user") {
         html += '<div class="mg usr">' + escHtml(msg.content) + "</div>";
@@ -244,7 +274,7 @@
     ca.innerHTML = html;
     ca.scrollTop = ca.scrollHeight;
 
-    // Bind suggest buttons (drill-down)
+    // Bind suggest buttons (drill-down + initial suggestions)
     ca.querySelectorAll(".suggest-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
         var suggest = this.getAttribute("data-suggest") || this.textContent.replace(/\s*↗$/, "");
