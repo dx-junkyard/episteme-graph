@@ -2,7 +2,8 @@
 
 ワークフロー:
   QueryAnalyzer (Fast)
-    → Retrieval (LLM不使用)
+    → [greeting] → GreetingResponse (Fast) → FormatGuard → 最終出力
+    → [その他] → Retrieval (LLM不使用)
       → [チャンク0件] → 範囲外エラー応答で終了
       → [チャンクあり] → PedagogicalEval (Standard)
         → [誤解 or 複雑な数式] → GenerateDeep (Deep)
@@ -42,6 +43,7 @@ def query_analyzer_node(state: StudentState) -> dict[str, Any]:
         '{"intent": "<factual|conceptual|misconception|formula|other>", '
         '"search_keywords": ["keyword1", "keyword2", ...]}\n\n'
         "intent の判定基準:\n"
+        "- greeting: 挨拶、学習の開始・終了、システムへの一般的な要望（例：「学習を始めたい」「こんにちは」「よろしくお願いします」）\n"
         "- factual: 事実・定義を問う質問\n"
         "- conceptual: 概念の理解・関係性を問う質問\n"
         "- misconception: 誤った理解を含む質問\n"
@@ -66,6 +68,40 @@ def query_analyzer_node(state: StudentState) -> dict[str, Any]:
             "intent": "other",
             "search_keywords": [question],
         }
+
+
+def greeting_response_node(state: StudentState) -> dict[str, Any]:
+    """挨拶や学習開始の要求に対する応答 (Fast モード)。RAG検索は行わない。"""
+    params = get_llm_params("fast")
+    course_title = state.get("course_title", "未選択コース")
+    topic_title = state.get("topic_title", "最初のトピック")
+
+    prompt = (
+        f"あなたは「{course_title}」の学習をサポートするAIチューターです。\n"
+        f"学生から「{state['question']}」というメッセージを受け取りました。\n\n"
+        "以下のルールで返答してください:\n"
+        "1. 学生を歓迎し、学習意欲を肯定する短い挨拶をする。\n"
+        f"2. 現在のトピックが「{topic_title}」であることを踏まえ、「まずは〇〇について確認しましょうか？」と最初のステップを提案する。\n"
+        "3. 物理学の具体的な解説はこの時点では行わない。\n"
+    )
+
+    try:
+        answer = generate_text(
+            messages=[{"role": "user", "content": prompt}],
+            model=params["model"],
+            reasoning_effort=params["reasoning_effort"],
+        )
+        return {"raw_answer": answer}
+    except Exception:
+        logger.warning("GreetingResponse LLM call failed, returning fallback")
+        return {"raw_answer": "こんにちは！学習を始めましょう。まずはどのトピックから進めますか？"}
+
+
+def _route_after_analyzer(state: StudentState) -> str:
+    """QueryAnalyzer の直後に分岐: greeting ならRAGをスキップ。"""
+    if state.get("intent") == "greeting":
+        return "greeting"
+    return "retrieval"
 
 
 def retrieval_node(state: StudentState) -> dict[str, Any]:
@@ -280,6 +316,7 @@ def build_student_graph() -> StateGraph:
 
     # ノード登録
     graph.add_node("query_analyzer", query_analyzer_node)
+    graph.add_node("greeting_response", greeting_response_node)
     graph.add_node("retrieval", retrieval_node)
     graph.add_node("no_chunks_response", no_chunks_response_node)
     graph.add_node("pedagogical_eval", pedagogical_eval_node)
@@ -287,9 +324,19 @@ def build_student_graph() -> StateGraph:
     graph.add_node("generate_deep", generate_deep_node)
     graph.add_node("format_guard", format_guard_node)
 
-    # エッジ: エントリ → QueryAnalyzer → Retrieval
+    # エッジ: エントリ → QueryAnalyzer → (greeting | retrieval)
     graph.set_entry_point("query_analyzer")
-    graph.add_edge("query_analyzer", "retrieval")
+    graph.add_conditional_edges(
+        "query_analyzer",
+        _route_after_analyzer,
+        {
+            "greeting": "greeting_response",
+            "retrieval": "retrieval",
+        },
+    )
+
+    # GreetingResponse → FormatGuard へ合流
+    graph.add_edge("greeting_response", "format_guard")
 
     # 条件分岐: Retrieval → (no_chunks | has_chunks)
     graph.add_conditional_edges(

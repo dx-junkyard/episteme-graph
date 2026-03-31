@@ -22,7 +22,7 @@ class StudentState(TypedDict, total=False):
     user_id: str
 
     # --- QueryAnalyzer 出力 ---
-    intent: str  # "factual" | "conceptual" | "misconception" | "formula" | "other"
+    intent: str  # "greeting" | "factual" | "conceptual" | "misconception" | "formula" | "other"
     search_keywords: list[str]
 
     # --- Retrieval 出力 ---

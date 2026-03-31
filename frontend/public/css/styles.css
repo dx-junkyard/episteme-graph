@@ -294,6 +294,36 @@ body {
   border-color: var(--color-border-info);
 }
 
+/* Initial suggestion buttons */
+.initial-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0 8px 40px;
+}
+
+.initial-suggest-btn {
+  font-size: 13px;
+  padding: 10px 16px;
+  border-radius: 10px;
+  background: var(--color-background-secondary);
+  border: 1px solid var(--color-border-info);
+  cursor: pointer;
+  color: var(--color-text-info);
+  transition: all 0.15s;
+  font-family: inherit;
+  text-align: left;
+}
+
+.initial-suggest-btn::before {
+  content: "\1F449 ";
+}
+
+.initial-suggest-btn:hover {
+  background: var(--color-background-info);
+  border-color: var(--color-text-info);
+}
+
 /* ── Input area ─────────────────────────────────────────────────── */
 .ia {
   display: flex;
