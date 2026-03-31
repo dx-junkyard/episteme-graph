@@ -314,3 +314,18 @@ class ApproveWithScopeRequest(BaseModel):
     """スコープ付き承認リクエスト。"""
     scope: str = "full"  # "full" or "canary"
     course_ids: list[str] = []
+
+
+# ---------------------------------------------------------------------------
+# Background Tasks (Issue #63)
+# ---------------------------------------------------------------------------
+
+class BackgroundTaskOut(BaseModel):
+    """バックグラウンドタスクのステータス情報。"""
+    task_id: str
+    task_type: str = "material_processing"
+    status: str = "pending"  # pending | processing | completed | failed
+    result_data: dict | None = None
+    error_message: str | None = None
+    created_at: str = ""
+    updated_at: str = ""

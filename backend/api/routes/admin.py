@@ -21,6 +21,7 @@ from dependencies import (
 )
 from schemas import (
     ApproveWithScopeRequest,
+    BackgroundTaskOut,
     CourseBuilderChatRequest,
     CourseBuilderChatResponse,
     CourseBuilderSessionCreate,
@@ -38,6 +39,8 @@ from schemas import (
 from services import (
     _material_lock,
     _material_status,
+    create_background_task,
+    get_background_task,
     process_material_background,
     save_cb_session,
 )
@@ -67,12 +70,15 @@ router = APIRouter(prefix="/api/admin", tags=["Admin"])
 # ---------------------------------------------------------------------------
 
 
-@router.post("/materials/upload", response_model=MaterialOut, status_code=202)
+@router.post("/materials/upload", status_code=202)
 def upload_material(
     file: UploadFile = File(...),
     current_user: dict = Depends(_require_teacher),
-) -> MaterialOut:
-    """PDF教材をアップロードし、バックグラウンドでグラフ化処理を開始する。"""
+) -> dict:
+    """PDF教材をアップロードし、バックグラウンドでグラフ化処理を開始する。
+
+    即座に task_id を返却し、処理完了はポーリングで確認する。
+    """
     import datetime
 
     if not file.filename or not file.filename.lower().endswith(".pdf"):
@@ -84,6 +90,7 @@ def upload_material(
 
     material_id = str(uuid.uuid4())[:12]
     doc_id = uuid.uuid4()
+    task_id = str(uuid.uuid4())[:12]
     now = datetime.datetime.utcnow().isoformat()
 
     session = _pg_session()
@@ -108,25 +115,28 @@ def upload_material(
     finally:
         session.close()
 
+    create_background_task(task_id, "material_processing", current_user["id"])
+
     thread = threading.Thread(
         target=process_material_background,
-        args=(material_id, str(doc_id), file.filename, pdf_bytes),
+        args=(material_id, str(doc_id), file.filename, pdf_bytes, task_id),
         daemon=True,
     )
     thread.start()
 
     logger.info(
-        "Material upload accepted: %s (%s) by user=%s",
-        material_id, file.filename, current_user["id"],
+        "Material upload accepted: %s (%s) task=%s by user=%s",
+        material_id, file.filename, task_id, current_user["id"],
     )
 
-    return MaterialOut(
-        material_id=material_id,
-        filename=file.filename,
-        title=os.path.splitext(file.filename)[0],
-        status="uploaded",
-        uploaded_at=now,
-    )
+    return {
+        "task_id": task_id,
+        "material_id": material_id,
+        "filename": file.filename,
+        "title": os.path.splitext(file.filename)[0],
+        "status": "pending",
+        "uploaded_at": now,
+    }
 
 
 @router.get("/materials", response_model=list[MaterialOut])
@@ -210,6 +220,23 @@ def get_material(
         uploaded_at=uploaded_at,
         knowledge_graph=kg,
     )
+
+
+# ---------------------------------------------------------------------------
+# Background Task Polling (Issue #63)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/tasks/{task_id}", response_model=BackgroundTaskOut)
+def get_task_status(
+    task_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> BackgroundTaskOut:
+    """バックグラウンドタスクのステータスを返す。ポーリング用エンドポイント。"""
+    task = get_background_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return BackgroundTaskOut(**task)
 
 
 # ---------------------------------------------------------------------------
