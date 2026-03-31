@@ -251,6 +251,9 @@
     });
   }
 
+  // ── Task Polling State ──────────────────────────────────────────
+  var _activePollingTimers = {};
+
   function uploadFile(file) {
     if (!file.name.toLowerCase().endsWith(".pdf")) {
       showUploadStatus("PDFファイルのみアップロードできます。", "error");
@@ -258,6 +261,7 @@
     }
 
     showUploadStatus(escHtml(file.name) + " をアップロード中...", "info");
+    disableUploadUI(true);
 
     var formData = new FormData();
     formData.append("file", file);
@@ -272,12 +276,92 @@
         return res.json();
       })
       .then(function (data) {
-        showUploadStatus(escHtml(file.name) + " のアップロードが完了しました。バックグラウンドで処理中です。", "success");
+        showUploadStatus(
+          escHtml(file.name) + " のアップロードが完了しました。グラフ構築中..." +
+          '<span class="typing" style="display:inline-flex;margin-left:8px"><span></span><span></span><span></span></span>',
+          "info"
+        );
         loadMaterials();
+        if (data.task_id) {
+          startTaskPolling(data.task_id, file.name);
+        } else {
+          disableUploadUI(false);
+        }
       })
       .catch(function (err) {
         showUploadStatus("アップロードに失敗しました: " + (err.detail || "不明なエラー"), "error");
+        disableUploadUI(false);
       });
+  }
+
+  function disableUploadUI(disabled) {
+    var zone = document.getElementById("upload-zone");
+    var fileInput = document.getElementById("file-input");
+    if (zone) {
+      zone.style.opacity = disabled ? "0.5" : "1";
+      zone.style.pointerEvents = disabled ? "none" : "auto";
+    }
+    if (fileInput) fileInput.disabled = disabled;
+  }
+
+  function startTaskPolling(taskId, filename) {
+    var retryCount = 0;
+    var maxRetries = 3;
+    var intervalMs = 3000;
+
+    function poll() {
+      apiFetch("/admin/tasks/" + taskId)
+        .then(function (res) {
+          if (!res.ok) throw new Error("Status check failed");
+          return res.json();
+        })
+        .then(function (task) {
+          retryCount = 0; // reset on success
+
+          if (task.status === "completed") {
+            stopTaskPolling(taskId);
+            showUploadStatus(
+              escHtml(filename) + " のグラフ構築が完了しました。",
+              "success"
+            );
+            disableUploadUI(false);
+            loadMaterials();
+          } else if (task.status === "failed") {
+            stopTaskPolling(taskId);
+            var errMsg = task.error_message || "不明なエラー";
+            showUploadStatus(
+              escHtml(filename) + " の処理に失敗しました: " + escHtml(errMsg),
+              "error"
+            );
+            disableUploadUI(false);
+            loadMaterials();
+          }
+          // pending/processing: continue polling
+        })
+        .catch(function () {
+          retryCount++;
+          if (retryCount >= maxRetries) {
+            stopTaskPolling(taskId);
+            showUploadStatus(
+              escHtml(filename) + " の進捗確認に失敗しました。「更新」ボタンで教材一覧を確認してください。",
+              "error"
+            );
+            disableUploadUI(false);
+          }
+          // else: retry on next interval
+        });
+    }
+
+    _activePollingTimers[taskId] = setInterval(poll, intervalMs);
+    // Initial poll immediately
+    poll();
+  }
+
+  function stopTaskPolling(taskId) {
+    if (_activePollingTimers[taskId]) {
+      clearInterval(_activePollingTimers[taskId]);
+      delete _activePollingTimers[taskId];
+    }
   }
 
   function showUploadStatus(message, type) {

@@ -179,8 +179,29 @@ def _run_migrations() -> None:
             "CREATE INDEX IF NOT EXISTS idx_reextraction_status ON reextraction_jobs(status)"
         ))
 
+        # Migration 005: background_tasks テーブル (Issue #63)
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS background_tasks (
+                id            TEXT PRIMARY KEY,
+                task_type     TEXT NOT NULL DEFAULT 'material_processing',
+                status        TEXT NOT NULL DEFAULT 'pending'
+                                  CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+                created_by    UUID REFERENCES users(id) ON DELETE SET NULL,
+                result_data   JSONB,
+                error_message TEXT,
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_bg_tasks_status ON background_tasks(status)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_bg_tasks_created_by ON background_tasks(created_by)"
+        ))
+
         session.commit()
-        logger.info("Migrations (002-004) applied successfully.")
+        logger.info("Migrations (002-005) applied successfully.")
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema
