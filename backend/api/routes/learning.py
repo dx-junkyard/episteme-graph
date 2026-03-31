@@ -278,17 +278,60 @@ def _is_greeting(message: str) -> bool:
 
 
 def _generate_greeting_response(
-    course_title: str, topic_title: str, message: str,
+    course_title: str,
+    topic_title: str,
+    message: str,
+    *,
+    topic_info: dict | None = None,
+    course_data: dict | None = None,
 ) -> str:
-    """挨拶・メタ対話に対するLLM応答を生成する (Fast モード)。"""
-    params = get_llm_params("fast")
+    """学習開始時のオーバービューを生成する (Standard モード)。
+
+    topic_info / course_data からトピックの主要概念・前提知識を抽出し、
+    学習の全体像を提示するメッセージを生成する。
+    """
+    params = get_llm_params("standard")
+
+    # トピックメタ情報を抽出
+    prerequisites: list[str] = []
+    concepts: list[str] = []
+
+    if topic_info:
+        for p in topic_info.get("prerequisites", []):
+            name = p.get("name", p) if isinstance(p, dict) else str(p)
+            if name:
+                prerequisites.append(name)
+
+    if course_data:
+        for c in course_data.get("concepts", []):
+            name = c.get("name", c) if isinstance(c, dict) else str(c)
+            if name:
+                concepts.append(name)
+
+    # プロンプト用のメタ情報ブロック構築
+    concepts_block = ""
+    if concepts:
+        concepts_block = "■ このトピックで習得すべき主要概念:\n" + "\n".join(
+            f"  - {c}" for c in concepts
+        ) + "\n\n"
+
+    prereqs_block = ""
+    if prerequisites:
+        prereqs_block = "■ このトピックに必要な前提知識:\n" + "\n".join(
+            f"  - {p}" for p in prerequisites
+        ) + "\n\n"
+
     prompt = (
         f"あなたは「{course_title}」の学習をサポートするAIチューターです。\n"
-        f"学生から「{message}」というメッセージを受け取りました。\n\n"
-        "以下のルールで返答してください:\n"
-        "1. 学生を歓迎し、学習意欲を肯定する短い挨拶をする。\n"
-        f"2. 現在のトピックが「{topic_title}」であることを踏まえ、「まずは〇〇について確認しましょうか？」と最初のステップを提案する。\n"
-        "3. 物理学の具体的な解説はこの時点では行わない。\n"
+        f"学生が新しく「{topic_title}」の学習を開始しようとしています。\n\n"
+        f"{concepts_block}"
+        f"{prereqs_block}"
+        "以下の構成で、学習の導入となる最初のメッセージを作成してください:\n"
+        "1. 【歓迎と目標】このトピックで学ぶことの全体像と、最終的な学習目標を簡潔に説明する。\n"
+        "2. 【構成要素】習得すべき主要な概念をリストアップする。\n"
+        "3. 【前提知識の確認】このトピックを学ぶために必要な前提知識を提示する。\n"
+        "4. 【ネクストアクション】「まずは前提知識の復習から始めますか？ それとも最初の概念の説明に進みますか？」と、学生に次の行動を選ばせる質問で締めくくる。\n\n"
+        "※注意: ここでは具体的な解説（数式展開など）はまだ行わないこと。"
     )
 
     try:
@@ -300,8 +343,11 @@ def _generate_greeting_response(
     except Exception:
         logger.warning("Greeting response LLM call failed, returning fallback")
         return (
-            f"こんにちは！「{course_title}」の学習サポートへようこそ。\n\n"
-            f"現在のトピックは「{topic_title}」です。まずはこのトピックについて確認しましょうか？"
+            f"「{course_title}」の学習サポートへようこそ！\n\n"
+            f"これから「{topic_title}」の学習を始めます。\n\n"
+            + (f"**習得すべき主要概念:** {', '.join(concepts)}\n\n" if concepts else "")
+            + (f"**必要な前提知識:** {', '.join(prerequisites)}\n\n" if prerequisites else "")
+            + "まずは前提知識の復習から始めますか？ それとも最初の概念の説明に進みますか？"
         )
 
 
@@ -390,10 +436,13 @@ def learning_chat(
             break
     topic_title = topic_info["title"] if topic_info else topic_id
 
-    # 2. Greeting / メタ対話のバイパス: RAG検索をスキップ
+    # 2. Greeting / メタ対話のバイパス: RAG検索をスキップ → オーバービュー提示
     course_title = course_data.get("title", course_id)
     if _is_greeting(body.message):
-        greeting_answer = _generate_greeting_response(course_title, topic_title, body.message)
+        greeting_answer = _generate_greeting_response(
+            course_title, topic_title, body.message,
+            topic_info=topic_info, course_data=course_data,
+        )
         persist_chat_history(
             current_user["id"], course_id, topic_id,
             body.history, body.message, greeting_answer,

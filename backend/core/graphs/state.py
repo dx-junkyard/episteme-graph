@@ -21,6 +21,10 @@ class StudentState(TypedDict, total=False):
     course_title: str
     user_id: str
 
+    # --- トピックメタ情報 (オーバービュー用) ---
+    topic_concepts: list[str]       # トピックに関連する主要概念名
+    topic_prerequisites: list[str]  # トピックの前提知識名
+
     # --- QueryAnalyzer 出力 ---
     intent: str  # "greeting" | "factual" | "conceptual" | "misconception" | "formula" | "other"
     search_keywords: list[str]
