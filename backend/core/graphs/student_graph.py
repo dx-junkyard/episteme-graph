@@ -2,7 +2,7 @@
 
 ワークフロー:
   QueryAnalyzer (Fast)
-    → [greeting] → GreetingResponse (Fast) → FormatGuard → 最終出力
+    → [greeting] → GreetingResponse (Standard: オーバービュー提示) → FormatGuard → 最終出力
     → [その他] → Retrieval (LLM不使用)
       → [チャンク0件] → 範囲外エラー応答で終了
       → [チャンクあり] → PedagogicalEval (Standard)
@@ -71,18 +71,38 @@ def query_analyzer_node(state: StudentState) -> dict[str, Any]:
 
 
 def greeting_response_node(state: StudentState) -> dict[str, Any]:
-    """挨拶や学習開始の要求に対する応答 (Fast モード)。RAG検索は行わない。"""
-    params = get_llm_params("fast")
+    """学習開始時のオーバービューとナビゲーションを生成 (Standard モード)。"""
+    params = get_llm_params("standard")
     course_title = state.get("course_title", "未選択コース")
     topic_title = state.get("topic_title", "最初のトピック")
 
+    # トピックメタ情報（概念・前提知識）をプロンプトに埋め込む
+    concepts = state.get("topic_concepts", [])
+    prerequisites = state.get("topic_prerequisites", [])
+
+    concepts_block = ""
+    if concepts:
+        concepts_block = "■ このトピックで習得すべき主要概念:\n" + "\n".join(
+            f"  - {c}" for c in concepts
+        ) + "\n\n"
+
+    prereqs_block = ""
+    if prerequisites:
+        prereqs_block = "■ このトピックに必要な前提知識:\n" + "\n".join(
+            f"  - {p}" for p in prerequisites
+        ) + "\n\n"
+
     prompt = (
         f"あなたは「{course_title}」の学習をサポートするAIチューターです。\n"
-        f"学生から「{state['question']}」というメッセージを受け取りました。\n\n"
-        "以下のルールで返答してください:\n"
-        "1. 学生を歓迎し、学習意欲を肯定する短い挨拶をする。\n"
-        f"2. 現在のトピックが「{topic_title}」であることを踏まえ、「まずは〇〇について確認しましょうか？」と最初のステップを提案する。\n"
-        "3. 物理学の具体的な解説はこの時点では行わない。\n"
+        f"学生が新しく「{topic_title}」の学習を開始しようとしています。\n\n"
+        f"{concepts_block}"
+        f"{prereqs_block}"
+        "以下の構成で、学習の導入となる最初のメッセージを作成してください:\n"
+        "1. 【歓迎と目標】このトピックで学ぶことの全体像と、最終的な学習目標を簡潔に説明する。\n"
+        "2. 【構成要素】習得すべき主要な概念をリストアップする。\n"
+        "3. 【前提知識の確認】このトピックを学ぶために必要な前提知識を提示する。\n"
+        "4. 【ネクストアクション】「まずは前提知識の復習から始めますか？ それとも最初の概念の説明に進みますか？」と、学生に次の行動を選ばせる質問で締めくくる。\n\n"
+        "※注意: ここでは具体的な解説（数式展開など）はまだ行わないこと。"
     )
 
     try:
@@ -94,7 +114,7 @@ def greeting_response_node(state: StudentState) -> dict[str, Any]:
         return {"raw_answer": answer}
     except Exception:
         logger.warning("GreetingResponse LLM call failed, returning fallback")
-        return {"raw_answer": "こんにちは！学習を始めましょう。まずはどのトピックから進めますか？"}
+        return {"raw_answer": f"{topic_title} の学習を始めましょう！まずは前提知識の確認から行いますか？"}
 
 
 def _route_after_analyzer(state: StudentState) -> str:
