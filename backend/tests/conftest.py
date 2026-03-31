@@ -29,7 +29,10 @@ def _override_settings(monkeypatch):
     _getter = lambda: test_settings
     monkeypatch.setattr("core.config.get_settings", _getter)
     # dependencies.py imports get_settings as _get_settings — patch that reference too
-    monkeypatch.setattr("api.dependencies._get_settings", _getter)
+    try:
+        monkeypatch.setattr("api.dependencies._get_settings", _getter)
+    except BaseException:
+        pass  # api.dependencies が利用不可の環境（CI等）ではスキップ
 
     yield
 

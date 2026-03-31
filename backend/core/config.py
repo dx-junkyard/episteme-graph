@@ -15,6 +15,7 @@ Usage::
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -46,6 +47,19 @@ class Settings(BaseSettings):
         default="text-embedding-3-large",
         validation_alias=AliasChoices("LLM_EMBEDDING_MODEL", "OPENAI_EMBEDDING_MODEL"),
     )
+
+    # --- LLM マルチモード設定 ---
+    # Fast: 意図分類、フォーマット整形など軽量タスク
+    llm_fast_model: str = "gpt-5.4-nano"
+    llm_fast_effort: Literal["low", "medium", "high"] = "low"
+
+    # Standard: 通常の対話、前提知識評価、論理構造抽出
+    llm_standard_model: str = "gpt-5.2"
+    llm_standard_effort: Literal["low", "medium", "high"] = "medium"
+
+    # Deep: 深刻な誤解の訂正、複雑な数式展開、グラフ依存関係解決
+    llm_deep_model: str = "gpt-5.2"
+    llm_deep_effort: Literal["low", "medium", "high"] = "high"
 
     # --- JWT / Auth ---
     jwt_secret: str = "episteme-dev-secret-change-in-prod"
