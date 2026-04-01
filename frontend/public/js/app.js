@@ -911,6 +911,11 @@
     // Load lecture sequence with failsafe
     try {
       await loadLectureSequence();
+
+      // 【追加・重要】シーケンス読み込み完了後、自動的に再生を開始する
+      if (lectureState.segments && lectureState.segments.length > 0) {
+        await startPlayback();
+      }
     } catch (err) {
       _restoreChatUI();
     }
@@ -1039,9 +1044,11 @@
         return '<span class="lecture-sentence" data-sentence-idx="' + i + '" style="opacity:0;transition:opacity 0.5s ease;">' + inner + '</span>';
       }).join(" ");
     } else if (isCurrent) {
-      // 現在のセグメントだが未再生: テキストを表示状態で見せる（再生ボタンを押す前）
-      text = sentences.map(function (s) {
-        return escapeAndRestore(s);
+      // 【修正・重要】現在のセグメントだが未再生: 1文目だけ表示し、残りは透明で待機する
+      text = sentences.map(function (s, i) {
+        var processed = escapeAndRestore(s);
+        var initialOpacity = (i === 0) ? "1" : "0";
+        return '<span class="lecture-sentence" data-sentence-idx="' + i + '" style="opacity:' + initialOpacity + ';transition:opacity 0.5s ease;">' + processed + '</span>';
       }).join(" ");
     } else {
       // 過去/未来のセグメント: 通常表示
@@ -1150,9 +1157,29 @@
           _revealSentencesByTime();
         });
 
-        lectureState.audio.play();
-        _revealSentencesByTime();
-        startHighlighting();
+        // 【修正・重要】自動再生エラー（ブラウザブロック）の安全なハンドリング
+        var playPromise = lectureState.audio.play();
+        if (playPromise !== undefined) {
+          playPromise.then(function() {
+            // 再生成功時
+            _revealSentencesByTime();
+            startHighlighting();
+          }).catch(function(error) {
+            // ブラウザに自動再生をブロックされた場合
+            console.warn("Autoplay blocked by browser:", error);
+            lectureState.playing = false;
+            updateLectureControls();
+
+            // ユーザーに再生ボタンを押すよう案内を出す
+            var currentEl = document.querySelector(".lecture-segment.current");
+            if (currentEl && !document.getElementById("autoplay-warning")) {
+              currentEl.insertAdjacentHTML("afterbegin",
+                '<div id="autoplay-warning" style="color: var(--color-text-danger); background: #fcebeb; padding: 10px; border-radius: 8px; margin-bottom: 12px; font-size: 12px;">' +
+                'ブラウザの制限により自動再生がブロックされました。下の「▶（再生）」ボタンを押して開始してください。</div>'
+              );
+            }
+          });
+        }
       } else {
         // No TTS available, simulate with timer
         simulatePlayback(seg);
