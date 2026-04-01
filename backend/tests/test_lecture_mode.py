@@ -338,3 +338,177 @@ class TestLectureModels:
         assert hasattr(LectureAudioCache, "duration_ms")
         assert hasattr(LectureAudioCache, "word_timestamps")
         assert LectureAudioCache.__tablename__ == "lecture_audio_cache"
+
+
+# ---------------------------------------------------------------------------
+# 6. 適応的セグメント分類テスト
+# ---------------------------------------------------------------------------
+
+class TestClassifySegment:
+    """_classify_segment による full / summary / skip 分類ロジック。"""
+
+    def test_no_mastered_returns_full(self):
+        from core.lecture import _classify_segment
+
+        result = _classify_segment("Some text about linear algebra", set(), set())
+        assert result == "full"
+
+    def test_short_chunk_with_mastered_prereq_returns_skip(self):
+        from core.lecture import _classify_segment
+
+        text = "線形代数の基本的な定義です。"  # short (<= 200 chars)
+        mastered = {"線形代数"}
+        prereqs = {"線形代数"}
+        result = _classify_segment(text, mastered, prereqs)
+        assert result == "skip"
+
+    def test_medium_chunk_with_multiple_prereqs_returns_summary(self):
+        from core.lecture import _classify_segment
+
+        # 201-500 chars: triggers "summary" instead of "skip"
+        text = "線形代数と微分積分はどちらも重要な基礎科目です。これらの概念は高度な数学の基盤となります。" * 5
+        assert 200 < len(text) <= 500, f"text len={len(text)}"
+        mastered = {"線形代数", "微分積分"}
+        prereqs = {"線形代数", "微分積分"}
+        result = _classify_segment(text, mastered, prereqs)
+        assert result == "summary"
+
+    def test_long_chunk_returns_full(self):
+        from core.lecture import _classify_segment
+
+        text = "線形代数の応用について。" * 100  # > 500 chars
+        mastered = {"線形代数"}
+        prereqs = {"線形代数"}
+        result = _classify_segment(text, mastered, prereqs)
+        assert result == "full"
+
+    def test_mastered_but_not_prereq_short(self):
+        from core.lecture import _classify_segment
+
+        text = "量子力学の基本です。"
+        mastered = {"量子力学"}
+        prereqs = set()  # not a prerequisite
+        result = _classify_segment(text, mastered, prereqs)
+        # matched_prereq == 0, so won't skip even though short
+        assert result == "full"
+
+    def test_no_concept_match_returns_full(self):
+        from core.lecture import _classify_segment
+
+        text = "This text has no matching concepts at all."
+        mastered = {"量子力学", "線形代数"}
+        prereqs = {"量子力学", "線形代数"}
+        result = _classify_segment(text, mastered, prereqs)
+        assert result == "full"
+
+
+# ---------------------------------------------------------------------------
+# 7. 習得済み概念を考慮したレクチャーシーケンス構築テスト
+# ---------------------------------------------------------------------------
+
+class TestBuildLectureSequenceWithMastery:
+    """mastered_concepts を渡した場合の build_lecture_sequence 動作。"""
+
+    def test_no_mastery_all_full(self):
+        from core.lecture import build_lecture_sequence
+
+        chunks = [
+            {"id": "c1", "chunk_index": 0, "text": "新しい概念の説明", "spoken_text": "新しい概念の説明"},
+            {"id": "c2", "chunk_index": 1, "text": "別の概念", "spoken_text": "別の概念"},
+        ]
+        result = build_lecture_sequence("topic-1", {"topics": []}, chunks, mastered_concepts=None)
+        assert len(result) == 2
+        assert all(s["segment_mode"] == "full" for s in result)
+
+    def test_skip_short_mastered_prereq_chunk(self):
+        from core.lecture import build_lecture_sequence
+
+        course_data = {
+            "topics": [{
+                "id": "topic-1",
+                "title": "応用数学",
+                "prerequisites": [{"name": "線形代数", "status": "mastered"}],
+            }],
+        }
+        chunks = [
+            {"id": "c1", "chunk_index": 0, "text": "線形代数の基本定義", "spoken_text": "線形代数の基本定義"},
+            {"id": "c2", "chunk_index": 1, "text": "応用数学の新しいトピックについて詳細に解説する長いテキスト" * 10,
+             "spoken_text": "応用数学の新しいトピック"},
+        ]
+        result = build_lecture_sequence(
+            "topic-1", course_data, chunks, mastered_concepts={"線形代数"},
+        )
+        # c1 is short and about a mastered prereq -> skipped
+        assert len(result) == 1
+        assert result[0]["chunk_id"] == "c2"
+
+    def test_summary_medium_mastered_prereq_chunk(self):
+        from core.lecture import build_lecture_sequence
+
+        course_data = {
+            "topics": [{
+                "id": "topic-1",
+                "title": "応用",
+                "prerequisites": [
+                    {"name": "線形代数", "status": "mastered"},
+                    {"name": "微分積分", "status": "mastered"},
+                ],
+            }],
+        }
+        # 201-500 chars to trigger "summary" (not "skip")
+        text = "線形代数と微分積分の基礎を復習します。これらの概念は高度な数学の基盤となり、応用分野で活用されます。" * 5
+        assert 200 < len(text) <= 500, f"text len={len(text)}"
+        chunks = [
+            {"id": "c1", "chunk_index": 0, "text": text, "spoken_text": text},
+        ]
+        result = build_lecture_sequence(
+            "topic-1", course_data, chunks, mastered_concepts={"線形代数", "微分積分"},
+        )
+        assert len(result) == 1
+        assert result[0]["segment_mode"] == "summary"
+
+    def test_segment_mode_in_output(self):
+        from core.lecture import build_lecture_sequence
+
+        chunks = [
+            {"id": "c1", "chunk_index": 0, "text": "test", "spoken_text": "test"},
+        ]
+        result = build_lecture_sequence("topic-1", {"topics": []}, chunks)
+        assert "segment_mode" in result[0]
+        assert result[0]["segment_mode"] == "full"
+
+
+# ---------------------------------------------------------------------------
+# 8. スキーマの segment_mode / skipped_segments / summary_segments テスト
+# ---------------------------------------------------------------------------
+
+class TestLectureSchemasAdaptive:
+    """適応的シーケンス関連の Pydantic フィールド。"""
+
+    def test_segment_mode_default(self):
+        from schemas import LectureSegment
+
+        seg = LectureSegment(
+            chunk_id="abc", chunk_index=0, text="t", spoken_text="t",
+        )
+        assert seg.segment_mode == "full"
+
+    def test_segment_mode_summary(self):
+        from schemas import LectureSegment
+
+        seg = LectureSegment(
+            chunk_id="abc", chunk_index=0, text="t", spoken_text="t",
+            segment_mode="summary",
+        )
+        assert seg.segment_mode == "summary"
+
+    def test_sequence_response_skipped_and_summary(self):
+        from schemas import LectureSequenceResponse
+
+        resp = LectureSequenceResponse(
+            course_id="c1", topic_id="t1",
+            total_segments=5, total_duration_ms=0,
+            skipped_segments=2, summary_segments=1,
+        )
+        assert resp.skipped_segments == 2
+        assert resp.summary_segments == 1

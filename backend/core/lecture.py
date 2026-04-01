@@ -145,8 +145,12 @@ def build_lecture_sequence(
     topic_id: str,
     course_data: dict,
     chunks: list[dict],
+    mastered_concepts: set[str] | None = None,
 ) -> list[dict]:
     """トピックに紐づくチャンクを学習順序に並べてレクチャーシーケンスを構築する。
+
+    受講者の習得済み概念 (``mastered_concepts``) を考慮し、
+    既知の基礎概念に相当するセグメントをスキップまたは簡易版に変換する。
 
     Parameters
     ----------
@@ -156,6 +160,8 @@ def build_lecture_sequence(
         コースの JSONB データ (topics, chapters, concepts など)
     chunks : list[dict]
         トピックに関連するチャンクのリスト
+    mastered_concepts : set[str] | None
+        受講者が習得済みの概念名の集合。None の場合はスキップ判定を行わない。
 
     Returns
     -------
@@ -165,6 +171,9 @@ def build_lecture_sequence(
     if not chunks:
         return []
 
+    mastered = mastered_concepts or set()
+    mastered_lower = {c.lower() for c in mastered} if mastered else set()
+
     # トピックの前提知識情報を取得
     topic_info = None
     for t in course_data.get("topics", []):
@@ -172,22 +181,168 @@ def build_lecture_sequence(
             topic_info = t
             break
 
-    # chunk_index でソート（トポロジカルソートの簡易版）
+    # 前提知識の概念名リストを収集（習得済みかどうかの判定に使う）
+    prerequisite_names: set[str] = set()
+    if topic_info:
+        for p in topic_info.get("prerequisites", []):
+            name = p.get("name", p) if isinstance(p, dict) else str(p)
+            if name:
+                prerequisite_names.add(name.lower())
+
+    # chunk_index でソート（トポロジカルソートの基盤）
     sorted_chunks = sorted(chunks, key=lambda c: c.get("chunk_index", 0))
 
     segments = []
     for chunk in sorted_chunks:
         spoken = chunk.get("spoken_text") or chunk.get("text", "")
         formulas = chunk.get("formulas") or []
+        text = chunk.get("text", "")
+
+        # 適応的スキップ判定: チャンクが習得済み前提知識のみに関わる場合
+        segment_mode = _classify_segment(
+            text, mastered_lower, prerequisite_names,
+        )
+
+        if segment_mode == "skip":
+            # 完全スキップ: 習得済み前提知識のみのチャンクは除外
+            continue
+        elif segment_mode == "summary":
+            # 簡易版: テキストを短い要約に置換
+            spoken = f"（この部分は既に習得済みの内容です。要約: {text[:80]}…）"
 
         segments.append({
             "chunk_id": str(chunk.get("id", "")),
             "chunk_index": chunk.get("chunk_index", 0),
-            "text": chunk.get("text", ""),
+            "text": text,
             "spoken_text": spoken,
             "formulas": formulas,
             "has_audio": chunk.get("has_audio", False),
             "duration_ms": chunk.get("duration_ms", 0),
+            "segment_mode": segment_mode,
         })
 
     return segments
+
+
+def _classify_segment(
+    text: str,
+    mastered_lower: set[str],
+    prerequisite_names: set[str],
+) -> str:
+    """チャンクテキストと習得状態から、セグメントの扱いを分類する。
+
+    Returns
+    -------
+    str
+        ``"full"`` — 通常表示
+        ``"summary"`` — 簡易版 (習得済み前提概念の解説チャンク)
+        ``"skip"`` — 完全スキップ (習得済み概念のみで構成される短い定義チャンク)
+    """
+    if not mastered_lower:
+        return "full"
+
+    text_lower = text.lower()
+    text_len = len(text)
+
+    # テキスト内に含まれる習得済み概念をカウント
+    matched_mastered = 0
+    matched_prereq = 0
+    for concept in mastered_lower:
+        if concept in text_lower:
+            matched_mastered += 1
+            if concept in prerequisite_names:
+                matched_prereq += 1
+
+    if matched_mastered == 0:
+        return "full"
+
+    # 短いチャンク（200文字以下）で習得済み概念のみ → スキップ
+    if text_len <= 200 and matched_prereq > 0 and matched_mastered >= 1:
+        return "skip"
+
+    # やや長いチャンクで習得済み前提概念の説明が主 → 簡易版
+    if matched_prereq >= 2 and text_len <= 500:
+        return "summary"
+
+    return "full"
+
+
+# ---------------------------------------------------------------------------
+# 習得済み概念の取得
+# ---------------------------------------------------------------------------
+
+
+def get_user_mastered_concepts(user_id: str, course_id: str, course_data: dict) -> set[str]:
+    """受講者の習得済み概念名を収集する。
+
+    1. コースデータ内の concepts で status="mastered" のもの
+    2. PostgreSQL の learner_mastered_concepts テーブル
+    3. チャット履歴が存在するトピックの概念 (学習済みとみなす)
+
+    Returns
+    -------
+    set[str]
+        習得済み概念名の集合（小文字正規化なし、原文のまま）
+    """
+    mastered: set[str] = set()
+
+    # 1. コースデータ内の concepts.status == "mastered"
+    for c in course_data.get("concepts", []):
+        if c.get("status") == "mastered":
+            name = c.get("name", "")
+            if name:
+                mastered.add(name)
+
+    # 2. PostgreSQL learner_mastered_concepts
+    try:
+        from core.postgres import get_session as _pg_session
+        from sqlalchemy import text as sa_text
+
+        session = _pg_session()
+        try:
+            rows = session.execute(
+                sa_text("""
+                    SELECT lmc.concept_id
+                    FROM learner_mastered_concepts lmc
+                    JOIN learner_profiles lp ON lmc.learner_id = lp.id
+                    WHERE lp.user_id = CAST(:user_id AS uuid)
+                """),
+                {"user_id": user_id},
+            ).fetchall()
+            for row in rows:
+                if row[0]:
+                    mastered.add(row[0])
+        finally:
+            session.close()
+    except Exception:
+        logger.warning("Failed to fetch learner_mastered_concepts", exc_info=True)
+
+    # 3. チャット履歴があるトピックの関連概念を習得済みとみなす
+    try:
+        from core.postgres import get_session as _pg_session
+        from sqlalchemy import text as sa_text
+
+        session = _pg_session()
+        try:
+            rows = session.execute(
+                sa_text("""
+                    SELECT topic_id FROM learning_chat_history
+                    WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                """),
+                {"user_id": user_id, "course_id": course_id},
+            ).fetchall()
+            studied_topic_ids = {r[0] for r in rows}
+        finally:
+            session.close()
+
+        # 学習済みトピックに紐づく前提知識概念を mastered に追加
+        for t in course_data.get("topics", []):
+            if t.get("id") in studied_topic_ids:
+                for p in t.get("prerequisites", []):
+                    name = p.get("name", p) if isinstance(p, dict) else str(p)
+                    if name:
+                        mastered.add(name)
+    except Exception:
+        logger.warning("Failed to fetch chat history for mastery inference", exc_info=True)
+
+    return mastered

@@ -351,6 +351,7 @@ class LectureSegment(BaseModel):
     formulas: list[LectureFormulaItem] = []
     has_audio: bool = False
     duration_ms: int = 0
+    segment_mode: str = "full"  # full | summary | skip
 
 
 class LectureSequenceResponse(BaseModel):
@@ -360,6 +361,8 @@ class LectureSequenceResponse(BaseModel):
     segments: list[LectureSegment] = []
     total_segments: int = 0
     total_duration_ms: int = 0
+    skipped_segments: int = 0  # 習得済みスキップ数
+    summary_segments: int = 0  # 簡易版変換数
 
 
 class LectureTTSRequest(BaseModel):

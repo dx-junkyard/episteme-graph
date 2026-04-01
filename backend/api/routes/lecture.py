@@ -32,7 +32,12 @@ from services import (
     persist_chat_history,
     search_chunks_with_metadata,
 )
-from core.lecture import build_lecture_sequence, estimate_word_timestamps, generate_spoken_text_and_formulas
+from core.lecture import (
+    build_lecture_sequence,
+    estimate_word_timestamps,
+    generate_spoken_text_and_formulas,
+    get_user_mastered_concepts,
+)
 from core.llm import generate_text, get_llm_params
 from core.postgres import get_session as _pg_session
 
@@ -160,7 +165,11 @@ def get_lecture_sequence(
     if chunks_to_update:
         _persist_spoken_text(chunks_to_update)
 
-    segments = build_lecture_sequence(topic_id, course_data, chunks)
+    # 受講者の習得済み概念を取得し、適応的シーケンスを構築
+    mastered_concepts = get_user_mastered_concepts(
+        current_user["id"], course_id, course_data,
+    )
+    segments = build_lecture_sequence(topic_id, course_data, chunks, mastered_concepts)
 
     lecture_segments = [
         LectureSegment(
@@ -171,11 +180,16 @@ def get_lecture_sequence(
             formulas=[LectureFormulaItem(**f) for f in s["formulas"]],
             has_audio=s["has_audio"],
             duration_ms=s["duration_ms"],
+            segment_mode=s.get("segment_mode", "full"),
         )
         for s in segments
     ]
 
     total_duration = sum(s.duration_ms for s in lecture_segments)
+    summary_count = sum(1 for s in lecture_segments if s.segment_mode == "summary")
+    # skipped segments were already removed by build_lecture_sequence;
+    # compute how many were dropped
+    skipped_count = len(chunks) - len(segments)
 
     return LectureSequenceResponse(
         course_id=course_id,
@@ -183,6 +197,8 @@ def get_lecture_sequence(
         segments=lecture_segments,
         total_segments=len(lecture_segments),
         total_duration_ms=total_duration,
+        skipped_segments=skipped_count,
+        summary_segments=summary_count,
     )
 
 
