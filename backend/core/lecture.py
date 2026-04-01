@@ -100,7 +100,7 @@ def generate_spoken_text_and_formulas(chunk_text: str) -> dict:
             lines = cleaned.split("\n")
             lines = [ln for ln in lines if not ln.strip().startswith("```")]
             cleaned = "\n".join(lines)
-        result = json.loads(cleaned)
+        result = json.loads(cleaned, strict=False)
         return {
             "spoken_text": result.get("spoken_text", ""),
             "formulas": result.get("formulas", []),
