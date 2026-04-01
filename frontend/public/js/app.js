@@ -827,6 +827,474 @@
     sendMessage(text);
   };
 
+  // ── Interactive Lecture Mode (Issue #66) ───────────────────────────
+  const lectureState = {
+    active: false,
+    segments: [],
+    currentSegmentIndex: 0,
+    playing: false,
+    audio: null,
+    pausePositionMs: 0,
+    interruptHistory: [],
+    wordTimestamps: [],
+    highlightTimer: null,
+  };
+
+  function initLectureMode() {
+    var toggleBtn = document.getElementById("lecture-toggle");
+    var playBtn = document.getElementById("lecture-play");
+    var prevBtn = document.getElementById("lecture-prev");
+    var nextBtn = document.getElementById("lecture-next");
+    var questionBtn = document.getElementById("lecture-question");
+    var chatCloseBtn = document.getElementById("lecture-chat-close");
+    var chatSendBtn = document.getElementById("lecture-chat-send");
+    var chatInput = document.getElementById("lecture-chat-input");
+    var resumeBtn = document.getElementById("lecture-chat-resume");
+
+    if (toggleBtn) toggleBtn.addEventListener("click", toggleLectureMode);
+    if (playBtn) playBtn.addEventListener("click", togglePlayPause);
+    if (prevBtn) prevBtn.addEventListener("click", prevSegment);
+    if (nextBtn) nextBtn.addEventListener("click", nextSegment);
+    if (questionBtn) questionBtn.addEventListener("click", openInterruptChat);
+    if (chatCloseBtn) chatCloseBtn.addEventListener("click", closeInterruptChat);
+    if (chatSendBtn) chatSendBtn.addEventListener("click", sendInterruptMessage);
+    if (resumeBtn) resumeBtn.addEventListener("click", resumeLecture);
+
+    if (chatInput) {
+      chatInput.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+          e.preventDefault();
+          sendInterruptMessage();
+        }
+      });
+    }
+  }
+
+  async function toggleLectureMode() {
+    var toggleBtn = document.getElementById("lecture-toggle");
+    var chatArea = document.getElementById("chat-area");
+    var lectureContent = document.getElementById("lecture-content");
+    var lecturePlayer = document.getElementById("lecture-player");
+    var chatInput = document.getElementById("chat-input");
+    var sendBtn = document.getElementById("send-btn");
+
+    if (lectureState.active) {
+      // Deactivate lecture mode
+      lectureState.active = false;
+      stopPlayback();
+      toggleBtn.classList.remove("active");
+      chatArea.style.display = "";
+      lectureContent.classList.remove("visible");
+      lecturePlayer.classList.remove("visible");
+      chatInput.style.display = "";
+      sendBtn.style.display = "";
+      return;
+    }
+
+    if (!state.courseId || !state.currentTopicId) return;
+
+    // Activate lecture mode
+    lectureState.active = true;
+    toggleBtn.classList.add("active");
+    chatArea.style.display = "none";
+    chatInput.style.display = "none";
+    sendBtn.style.display = "none";
+    lectureContent.classList.add("visible");
+    lecturePlayer.classList.add("visible");
+
+    // Load lecture sequence
+    await loadLectureSequence();
+  }
+
+  async function loadLectureSequence() {
+    var lectureContent = document.getElementById("lecture-content");
+    lectureContent.innerHTML = '<div class="mg ai"><div class="typing"><span></span><span></span><span></span></div></div>';
+
+    try {
+      var res = await apiFetch(
+        "/learning/lecture/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/sequence"
+      );
+      if (!res.ok) throw new Error("Failed to load sequence");
+      var data = await res.json();
+      lectureState.segments = data.segments || [];
+      lectureState.currentSegmentIndex = 0;
+      renderLectureContent();
+      updateLectureControls();
+    } catch (err) {
+      lectureContent.innerHTML = '<div class="mg ai" style="color:var(--color-text-danger)">レクチャーシーケンスの読み込みに失敗しました。</div>';
+    }
+  }
+
+  function renderLectureContent() {
+    var lectureContent = document.getElementById("lecture-content");
+    if (!lectureState.segments.length) {
+      lectureContent.innerHTML = '<div class="mg ai" style="color:var(--color-text-tertiary)">このトピックにはレクチャーコンテンツがありません。</div>';
+      return;
+    }
+
+    var html = "";
+    lectureState.segments.forEach(function (seg, idx) {
+      var cls = "lecture-segment";
+      if (idx < lectureState.currentSegmentIndex) cls += " visible past";
+      else if (idx === lectureState.currentSegmentIndex) cls += " visible current";
+
+      var content = renderSegmentContent(seg, idx === lectureState.currentSegmentIndex);
+      html += '<div class="' + cls + '" data-segment="' + idx + '">' + content + '</div>';
+    });
+
+    lectureContent.innerHTML = html;
+
+    // Render KaTeX
+    if (window.renderMathInElement) {
+      try {
+        window.renderMathInElement(lectureContent, {
+          delimiters: [
+            { left: "$$", right: "$$", display: true },
+            { left: "$", right: "$", display: false },
+          ],
+          throwOnError: false,
+        });
+      } catch (e) { /* ignore */ }
+    }
+
+    // Scroll to current segment
+    var currentEl = lectureContent.querySelector(".lecture-segment.current");
+    if (currentEl) currentEl.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  function renderSegmentContent(seg, isCurrent) {
+    var text = seg.text || "";
+
+    // Render formulas with KaTeX
+    var formulas = seg.formulas || [];
+    formulas.forEach(function (f) {
+      if (f.latex) {
+        try {
+          var rendered = window.katex
+            ? window.katex.renderToString(f.latex, { displayMode: f.latex.length > 30, throwOnError: false })
+            : "$" + f.latex + "$";
+          var cls = f.latex.length > 30 ? "lecture-formula-block" : "lecture-formula";
+          if (isCurrent) cls += " visible";
+          text = text.replace("$" + f.latex + "$", '<span class="' + cls + '">' + rendered + '</span>');
+          text = text.replace("$$" + f.latex + "$$", '<span class="' + cls + '">' + rendered + '</span>');
+        } catch (e) { /* keep original */ }
+      }
+    });
+
+    // Wrap words for karaoke highlighting if current segment
+    if (isCurrent && lectureState.playing) {
+      var escaped = escHtml(text);
+      var words = escaped.split(/(\s+)/);
+      text = words.map(function (w, i) {
+        if (/^\s+$/.test(w)) return w;
+        return '<span class="lecture-word" data-word-idx="' + i + '">' + w + '</span>';
+      }).join("");
+    } else {
+      text = escHtml(text);
+    }
+
+    // Bold
+    text = text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    // Line breaks
+    text = text.split("\n\n").map(function (p) { return "<p>" + p + "</p>"; }).join("");
+    text = text.replace(/\n/g, "<br>");
+
+    return text;
+  }
+
+  function updateLectureControls() {
+    var label = document.getElementById("lecture-segment-label");
+    var progressFill = document.getElementById("lecture-progress-fill");
+    var playBtn = document.getElementById("lecture-play");
+
+    var total = lectureState.segments.length;
+    var current = lectureState.currentSegmentIndex + 1;
+
+    if (label) label.textContent = "セグメント " + current + " / " + total;
+    if (progressFill) progressFill.style.width = (total > 0 ? (current / total * 100) : 0) + "%";
+    if (playBtn) {
+      playBtn.innerHTML = lectureState.playing ? "&#9646;&#9646;" : "&#9654;";
+      playBtn.className = lectureState.playing ? "lecture-pause-btn" : "lecture-play-btn";
+      playBtn.title = lectureState.playing ? "一時停止" : "再生";
+    }
+  }
+
+  async function togglePlayPause() {
+    if (lectureState.playing) {
+      pausePlayback();
+    } else {
+      await startPlayback();
+    }
+  }
+
+  async function startPlayback() {
+    if (!lectureState.segments.length) return;
+
+    var seg = lectureState.segments[lectureState.currentSegmentIndex];
+    lectureState.playing = true;
+    updateLectureControls();
+    renderLectureContent();
+
+    // Try to load and play TTS audio
+    try {
+      var res = await apiFetch(
+        "/learning/lecture/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/tts",
+        {
+          method: "POST",
+          body: JSON.stringify({ chunk_id: seg.chunk_id, voice: "alloy" }),
+        }
+      );
+
+      if (res.ok) {
+        var data = await res.json();
+        var audioSrc = "data:" + (data.content_type || "audio/mp3") + ";base64," + data.audio_base64;
+
+        if (lectureState.audio) {
+          lectureState.audio.pause();
+          lectureState.audio = null;
+        }
+
+        lectureState.audio = new Audio(audioSrc);
+        lectureState.wordTimestamps = data.word_timestamps || [];
+
+        lectureState.audio.addEventListener("ended", function () {
+          stopHighlighting();
+          autoAdvance();
+        });
+
+        lectureState.audio.addEventListener("timeupdate", function () {
+          updateTimeDisplay();
+          updateWordHighlighting();
+        });
+
+        lectureState.audio.play();
+        startHighlighting();
+      } else {
+        // No TTS available, simulate with timer
+        simulatePlayback(seg);
+      }
+    } catch (err) {
+      simulatePlayback(seg);
+    }
+  }
+
+  function simulatePlayback(seg) {
+    // Estimate reading time: ~300 chars/min for Japanese
+    var chars = (seg.spoken_text || seg.text || "").length;
+    var durationMs = Math.max(3000, chars * 200);
+    var startTime = Date.now();
+
+    lectureState.highlightTimer = setInterval(function () {
+      var elapsed = Date.now() - startTime;
+      var timeEl = document.getElementById("lecture-time");
+      if (timeEl) {
+        var sec = Math.floor(elapsed / 1000);
+        var min = Math.floor(sec / 60);
+        timeEl.textContent = min + ":" + (sec % 60 < 10 ? "0" : "") + (sec % 60);
+      }
+
+      if (elapsed >= durationMs) {
+        stopHighlighting();
+        autoAdvance();
+      }
+    }, 200);
+  }
+
+  function pausePlayback() {
+    lectureState.playing = false;
+    if (lectureState.audio) {
+      lectureState.pausePositionMs = Math.floor((lectureState.audio.currentTime || 0) * 1000);
+      lectureState.audio.pause();
+    }
+    stopHighlighting();
+    updateLectureControls();
+  }
+
+  function stopPlayback() {
+    lectureState.playing = false;
+    if (lectureState.audio) {
+      lectureState.audio.pause();
+      lectureState.audio = null;
+    }
+    lectureState.pausePositionMs = 0;
+    stopHighlighting();
+    updateLectureControls();
+  }
+
+  function autoAdvance() {
+    if (lectureState.currentSegmentIndex < lectureState.segments.length - 1) {
+      lectureState.currentSegmentIndex++;
+      renderLectureContent();
+      updateLectureControls();
+      if (lectureState.playing) startPlayback();
+    } else {
+      lectureState.playing = false;
+      updateLectureControls();
+    }
+  }
+
+  function prevSegment() {
+    if (lectureState.currentSegmentIndex > 0) {
+      stopPlayback();
+      lectureState.currentSegmentIndex--;
+      renderLectureContent();
+      updateLectureControls();
+    }
+  }
+
+  function nextSegment() {
+    if (lectureState.currentSegmentIndex < lectureState.segments.length - 1) {
+      stopPlayback();
+      lectureState.currentSegmentIndex++;
+      renderLectureContent();
+      updateLectureControls();
+    }
+  }
+
+  function startHighlighting() {
+    // Word highlighting is driven by audio timeupdate or simulation timer
+  }
+
+  function stopHighlighting() {
+    if (lectureState.highlightTimer) {
+      clearInterval(lectureState.highlightTimer);
+      lectureState.highlightTimer = null;
+    }
+    // Remove all highlights
+    var words = document.querySelectorAll(".lecture-word.highlight");
+    words.forEach(function (el) { el.classList.remove("highlight"); });
+  }
+
+  function updateTimeDisplay() {
+    if (!lectureState.audio) return;
+    var timeEl = document.getElementById("lecture-time");
+    if (timeEl) {
+      var sec = Math.floor(lectureState.audio.currentTime);
+      var min = Math.floor(sec / 60);
+      timeEl.textContent = min + ":" + (sec % 60 < 10 ? "0" : "") + (sec % 60);
+    }
+  }
+
+  function updateWordHighlighting() {
+    if (!lectureState.audio || !lectureState.wordTimestamps.length) return;
+    var currentMs = lectureState.audio.currentTime * 1000;
+
+    var wordEls = document.querySelectorAll(".lecture-word");
+    wordEls.forEach(function (el) { el.classList.remove("highlight"); });
+
+    // Find the current word based on timestamps
+    for (var i = 0; i < lectureState.wordTimestamps.length && i < wordEls.length; i++) {
+      var ts = lectureState.wordTimestamps[i];
+      if (currentMs >= ts.start_ms && currentMs <= ts.end_ms) {
+        wordEls[i].classList.add("highlight");
+        break;
+      }
+    }
+  }
+
+  // ── Interrupt Chat ──────────────────────────────────────────────
+  function openInterruptChat() {
+    pausePlayback();
+    lectureState.interruptHistory = [];
+    var popup = document.getElementById("lecture-chat-popup");
+    popup.classList.add("visible");
+    var messages = document.getElementById("lecture-chat-messages");
+    messages.innerHTML = '<div class="mg ai">講義を一時停止しました。ご質問をどうぞ。</div>';
+    var input = document.getElementById("lecture-chat-input");
+    if (input) input.focus();
+  }
+
+  function closeInterruptChat() {
+    var popup = document.getElementById("lecture-chat-popup");
+    popup.classList.remove("visible");
+  }
+
+  async function sendInterruptMessage() {
+    var input = document.getElementById("lecture-chat-input");
+    var message = input.value.trim();
+    if (!message) return;
+    input.value = "";
+
+    var messages = document.getElementById("lecture-chat-messages");
+    messages.innerHTML += '<div class="mg usr">' + escHtml(message) + '</div>';
+    messages.innerHTML += '<div class="mg ai"><div class="typing"><span></span><span></span><span></span></div></div>';
+    messages.scrollTop = messages.scrollHeight;
+
+    var seg = lectureState.segments[lectureState.currentSegmentIndex];
+
+    try {
+      var res = await apiFetch(
+        "/learning/lecture/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/interrupt",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            message: message,
+            current_chunk_id: seg ? seg.chunk_id : "",
+            pause_position_ms: lectureState.pausePositionMs,
+            history: lectureState.interruptHistory,
+          }),
+        }
+      );
+
+      // Remove typing indicator
+      var typingEl = messages.querySelector(".typing");
+      if (typingEl) typingEl.parentElement.remove();
+
+      if (res.ok) {
+        var data = await res.json();
+        messages.innerHTML += '<div class="mg ai">' + renderAiContent(data.answer) + '</div>';
+        lectureState.interruptHistory.push({ role: "user", content: message });
+        lectureState.interruptHistory.push({ role: "assistant", content: data.answer });
+
+        if (data.course_update && state.course) {
+          Object.assign(state.course, data.course_update);
+          renderSidebar();
+          renderRightPanel();
+        }
+      } else {
+        messages.innerHTML += '<div class="mg ai" style="color:var(--color-text-danger)">エラーが発生しました。</div>';
+      }
+    } catch (err) {
+      var typingEl2 = messages.querySelector(".typing");
+      if (typingEl2) typingEl2.parentElement.remove();
+      messages.innerHTML += '<div class="mg ai" style="color:var(--color-text-danger)">サーバーに接続できません。</div>';
+    }
+
+    messages.scrollTop = messages.scrollHeight;
+
+    // Render KaTeX in popup
+    if (window.renderMathInElement) {
+      try {
+        window.renderMathInElement(messages, {
+          delimiters: [
+            { left: "$$", right: "$$", display: true },
+            { left: "$", right: "$", display: false },
+          ],
+          throwOnError: false,
+        });
+      } catch (e) { /* ignore */ }
+    }
+  }
+
+  function resumeLecture() {
+    closeInterruptChat();
+    startPlayback();
+  }
+
+  // ── Init ───────────────────────────────────────────────────────────
+  async function initApp() {
+    if (!state.token) {
+      renderAuth();
+      return;
+    }
+    setupRoleUI();
+    initTabs();
+    initInput();
+    initLogout();
+    initLectureMode();
+    await initCourseSelector();
+  }
+
   // Boot
   document.addEventListener("DOMContentLoaded", function () {
     renderAuth();
