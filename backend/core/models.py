@@ -195,6 +195,19 @@ class LearnerMisconceptionCorrection(Base):
 # コース管理
 # ============================================================
 
+class BackgroundTask(Base):
+    __tablename__ = "background_tasks"
+
+    id = Column(Text, primary_key=True)
+    task_type = Column(Text, nullable=False, default="material_processing")
+    status = Column(Text, nullable=False, default="pending")  # pending | processing | completed | failed
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    result_data = Column(JSONB, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
 class LearningCourse(Base):
     __tablename__ = "learning_courses"
 

@@ -31,7 +31,7 @@ from services import (
     delete_course_data,
     search_chunks_with_metadata,
 )
-from core.llm import generate_text
+from core.llm import generate_text, get_llm_params
 from core.postgres import get_session as _pg_session
 
 logger = logging.getLogger(__name__)
@@ -257,6 +257,100 @@ def enroll_course(
 # Chat (RAG)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Greeting / Meta-dialogue detection
+# ---------------------------------------------------------------------------
+
+_GREETING_PATTERNS = [
+    "こんにちは", "こんばんは", "おはよう", "はじめまして",
+    "よろしくお願い", "学習を始め", "学習を開始", "勉強を始め",
+    "始めたい", "開始したい", "スタート",
+    "第1章の学習を開始する", "前提知識を確認する",
+]
+
+
+def _is_greeting(message: str) -> bool:
+    """メッセージが挨拶・メタ対話かどうかを判定する。"""
+    msg = message.strip()
+    if len(msg) < 30 and any(p in msg for p in _GREETING_PATTERNS):
+        return True
+    return False
+
+
+def _generate_greeting_response(
+    course_title: str,
+    topic_title: str,
+    message: str,
+    *,
+    topic_info: dict | None = None,
+    course_data: dict | None = None,
+) -> str:
+    """学習開始時のオーバービューを生成する (Standard モード)。
+
+    topic_info / course_data からトピックの主要概念・前提知識を抽出し、
+    学習の全体像を提示するメッセージを生成する。
+    """
+    params = get_llm_params("standard")
+
+    # トピックメタ情報を抽出
+    prerequisites: list[str] = []
+    concepts: list[str] = []
+
+    if topic_info:
+        for p in topic_info.get("prerequisites", []):
+            name = p.get("name", p) if isinstance(p, dict) else str(p)
+            if name:
+                prerequisites.append(name)
+
+    if course_data:
+        for c in course_data.get("concepts", []):
+            name = c.get("name", c) if isinstance(c, dict) else str(c)
+            if name:
+                concepts.append(name)
+
+    # プロンプト用のメタ情報ブロック構築
+    concepts_block = ""
+    if concepts:
+        concepts_block = "■ このトピックで習得すべき主要概念:\n" + "\n".join(
+            f"  - {c}" for c in concepts
+        ) + "\n\n"
+
+    prereqs_block = ""
+    if prerequisites:
+        prereqs_block = "■ このトピックに必要な前提知識:\n" + "\n".join(
+            f"  - {p}" for p in prerequisites
+        ) + "\n\n"
+
+    prompt = (
+        f"あなたは「{course_title}」の学習をサポートするAIチューターです。\n"
+        f"学生が新しく「{topic_title}」の学習を開始しようとしています。\n\n"
+        f"{concepts_block}"
+        f"{prereqs_block}"
+        "以下の構成で、学習の導入となる最初のメッセージを作成してください:\n"
+        "1. 【歓迎と目標】このトピックで学ぶことの全体像と、最終的な学習目標を簡潔に説明する。\n"
+        "2. 【構成要素】習得すべき主要な概念をリストアップする。\n"
+        "3. 【前提知識の確認】このトピックを学ぶために必要な前提知識を提示する。\n"
+        "4. 【ネクストアクション】「まずは前提知識の復習から始めますか？ それとも最初の概念の説明に進みますか？」と、学生に次の行動を選ばせる質問で締めくくる。\n\n"
+        "※注意: ここでは具体的な解説（数式展開など）はまだ行わないこと。"
+    )
+
+    try:
+        return generate_text(
+            messages=[{"role": "user", "content": prompt}],
+            model=params["model"],
+            reasoning_effort=params["reasoning_effort"],
+        )
+    except Exception:
+        logger.warning("Greeting response LLM call failed, returning fallback")
+        return (
+            f"「{course_title}」の学習サポートへようこそ！\n\n"
+            f"これから「{topic_title}」の学習を始めます。\n\n"
+            + (f"**習得すべき主要概念:** {', '.join(concepts)}\n\n" if concepts else "")
+            + (f"**必要な前提知識:** {', '.join(prerequisites)}\n\n" if prerequisites else "")
+            + "まずは前提知識の復習から始めますか？ それとも最初の概念の説明に進みますか？"
+        )
+
+
 _LEARNING_SYSTEM_PROMPT = """あなたは素粒子物理学・場の量子論を専門とする学習者の深い理解を支援する家庭教師です。
 以下の原則に従ってください。
 
@@ -342,7 +436,20 @@ def learning_chat(
             break
     topic_title = topic_info["title"] if topic_info else topic_id
 
-    # 2. Adaptive Routing: 前提知識の自動判定
+    # 2. Greeting / メタ対話のバイパス: RAG検索をスキップ → オーバービュー提示
+    course_title = course_data.get("title", course_id)
+    if _is_greeting(body.message):
+        greeting_answer = _generate_greeting_response(
+            course_title, topic_title, body.message,
+            topic_info=topic_info, course_data=course_data,
+        )
+        persist_chat_history(
+            current_user["id"], course_id, topic_id,
+            body.history, body.message, greeting_answer,
+        )
+        return LearningChatResponse(answer=greeting_answer, course_update=None)
+
+    # 3. Adaptive Routing: 前提知識の自動判定
     prerequisite_intervention = check_prerequisites(
         current_user["id"], course_id, course_data, topic_title, body.message
     )
@@ -353,11 +460,11 @@ def learning_chat(
         )
         return LearningChatResponse(answer=prerequisite_intervention, course_update=None)
 
-    # 3. RAG: システム全域のチャンクを検索（出典メタデータ付き）
+    # 4. RAG: システム全域のチャンクを検索（出典メタデータ付き）
     _RELEVANCE_THRESHOLD = 0.35
     chunk_results = search_chunks_with_metadata(body.message, top_k=8)
 
-    # 3a. フェイルセーフ: 閾値以上のチャンクが0件の場合
+    # 4a. フェイルセーフ: 閾値以上のチャンクが0件の場合
     above_threshold = [r for r in chunk_results if r["score"] >= _RELEVANCE_THRESHOLD]
     if not above_threshold:
         log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
@@ -383,8 +490,7 @@ def learning_chat(
 
     context_block = "\n\n".join(context_parts)
 
-    # 5. LLM メッセージ構築
-    course_title = course_data.get("title", course_id)
+    # 6. LLM メッセージ構築
     messages: list[dict] = [
         {"role": "system", "content": _LEARNING_SYSTEM_PROMPT},
         {"role": "user", "content": (
@@ -402,21 +508,21 @@ def learning_chat(
         messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": body.message})
 
-    # 6. LLM 呼び出し
+    # 7. LLM 呼び出し
     try:
         answer = generate_text(messages=messages, temperature=0.3)
     except Exception as exc:
         logger.exception("Learning chat LLM call failed for topic %s", topic_id)
         raise HTTPException(status_code=500, detail=f"Chat failed: {exc}") from exc
 
-    # 7. 誤解検出
+    # 8. 誤解検出
     course_update = None
     if topic_info and any(kw in answer for kw in ["訂正：", "訂正:", "【訂正】"]):
         course_update = detect_and_record_misconception(
             current_user["id"], course_id, course_data, topic_id, body.message, answer
         )
 
-    # 8. チャット履歴を永続化
+    # 9. チャット履歴を永続化
     persist_chat_history(
         current_user["id"], course_id, topic_id,
         body.history, body.message, answer,

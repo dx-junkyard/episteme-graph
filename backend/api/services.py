@@ -41,6 +41,91 @@ def _neo4j_driver():
 _material_lock = threading.Lock()
 _material_status: dict[str, dict] = {}
 
+
+# ---------------------------------------------------------------------------
+# Background task DB helpers (Issue #63)
+# ---------------------------------------------------------------------------
+
+
+def create_background_task(
+    task_id: str,
+    task_type: str = "material_processing",
+    created_by: str | None = None,
+) -> None:
+    """background_tasks テーブルにタスクレコードを作成する。"""
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO background_tasks (id, task_type, status, created_by)
+                VALUES (:id, :task_type, 'pending', CAST(:created_by AS uuid))
+            """),
+            {"id": task_id, "task_type": task_type, "created_by": created_by},
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def update_background_task(
+    task_id: str,
+    status: str,
+    result_data: dict | None = None,
+    error_message: str | None = None,
+) -> None:
+    """background_tasks テーブルのステータスを更新する。"""
+    session = _pg_session()
+    try:
+        params: dict = {"id": task_id, "status": status}
+        set_clauses = ["status = :status", "updated_at = now()"]
+
+        if result_data is not None:
+            set_clauses.append("result_data = CAST(:result_data AS jsonb)")
+            params["result_data"] = json.dumps(result_data, ensure_ascii=False)
+        if error_message is not None:
+            set_clauses.append("error_message = :error_message")
+            params["error_message"] = error_message
+
+        session.execute(
+            sa_text(f"UPDATE background_tasks SET {', '.join(set_clauses)} WHERE id = :id"),
+            params,
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.warning("Failed to update background task %s: %s", task_id, status, exc_info=True)
+    finally:
+        session.close()
+
+
+def get_background_task(task_id: str) -> dict | None:
+    """background_tasks テーブルからタスク情報を取得する。"""
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT id, task_type, status, result_data, error_message, created_at, updated_at
+                FROM background_tasks WHERE id = :id
+            """),
+            {"id": task_id},
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "task_id": row[0],
+            "task_type": row[1],
+            "status": row[2],
+            "result_data": row[3],
+            "error_message": row[4],
+            "created_at": row[5].isoformat() if row[5] else "",
+            "updated_at": row[6].isoformat() if row[6] else "",
+        }
+    finally:
+        session.close()
+
 # ---------------------------------------------------------------------------
 # Course CRUD helpers
 # ---------------------------------------------------------------------------
@@ -728,6 +813,7 @@ def process_material_background(
     doc_id: str,
     filename: str,
     pdf_bytes: bytes,
+    task_id: str | None = None,
 ) -> None:
     """バックグラウンドでPDF処理パイプラインを実行する。"""
     with _material_lock:
@@ -735,6 +821,9 @@ def process_material_background(
             "status": "processing",
             "filename": filename,
         }
+
+    if task_id:
+        update_background_task(task_id, "processing")
 
     try:
         extracted_text = extract_pdf_text(pdf_bytes)
@@ -776,12 +865,24 @@ def process_material_background(
         with _material_lock:
             _material_status[material_id]["status"] = "completed"
 
+        if task_id:
+            update_background_task(task_id, "completed", result_data={
+                "material_id": material_id,
+                "doc_id": doc_id,
+                "text_length": len(extracted_text),
+                "chunk_count": len(chunks),
+            })
+
         logger.info("Material processing completed: %s", material_id)
 
-    except Exception:
+    except Exception as exc:
         logger.exception("Material processing failed: %s", material_id)
         with _material_lock:
             _material_status[material_id]["status"] = "failed"
+
+        error_msg = str(exc)
+        if task_id:
+            update_background_task(task_id, "failed", error_message=error_msg)
 
         try:
             session = _pg_session()
