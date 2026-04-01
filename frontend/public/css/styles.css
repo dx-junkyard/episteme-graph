@@ -1363,6 +1363,16 @@ body {
   display: flex;
 }
 
+.lecture-loading {
+  display: flex;
+  align-items: center;
+  padding: 8px 0;
+}
+
+.lecture-sentence {
+  display: inline;
+}
+
 .lecture-segment {
   opacity: 0;
   transform: translateY(8px);

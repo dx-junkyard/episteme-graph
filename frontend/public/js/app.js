@@ -886,6 +886,7 @@
       chatArea.style.display = "";
       lectureContent.classList.remove("visible");
       lecturePlayer.classList.remove("visible");
+      lecturePlayer.style.display = "";
       chatInput.style.display = "";
       sendBtn.style.display = "";
       return;
@@ -902,8 +903,24 @@
     lectureContent.classList.add("visible");
     lecturePlayer.classList.add("visible");
 
-    // Load lecture sequence
-    await loadLectureSequence();
+    // Ensure player is actually visible (override any CSS hiding)
+    if (lecturePlayer) {
+      lecturePlayer.style.display = "flex";
+    }
+
+    // Load lecture sequence with failsafe
+    try {
+      await loadLectureSequence();
+    } catch (err) {
+      _restoreChatUI();
+    }
+  }
+
+  function _restoreChatUI() {
+    var chatInput = document.getElementById("chat-input");
+    var sendBtn = document.getElementById("send-btn");
+    if (chatInput) chatInput.style.display = "";
+    if (sendBtn) sendBtn.style.display = "";
   }
 
   async function loadLectureSequence() {
@@ -922,6 +939,7 @@
       updateLectureControls();
     } catch (err) {
       lectureContent.innerHTML = '<div class="mg ai" style="color:var(--color-text-danger)">レクチャーシーケンスの読み込みに失敗しました。</div>';
+      _restoreChatUI();
     }
   }
 
@@ -963,7 +981,7 @@
   }
 
   function renderSegmentContent(seg, isCurrent) {
-    var text = seg.text || "";
+    var text = seg.spoken_text || seg.text || "";
 
     // Render formulas with KaTeX
     var formulas = seg.formulas || [];
@@ -981,15 +999,35 @@
       }
     });
 
-    // Wrap words for karaoke highlighting if current segment
+    // Split text into sentence-level fragments for progressive fade-in
+    // Split on Japanese/English sentence endings while keeping delimiters
+    var fragments = text.split(/((?:[。！？\.!\?]+))/);
+    var sentences = [];
+    for (var fi = 0; fi < fragments.length; fi += 2) {
+      var sentence = (fragments[fi] || "") + (fragments[fi + 1] || "");
+      if (sentence.trim()) sentences.push(sentence);
+    }
+    if (!sentences.length) sentences = [text];
+
     if (isCurrent && lectureState.playing) {
-      var escaped = escHtml(text);
-      var words = escaped.split(/(\s+)/);
-      text = words.map(function (w, i) {
-        if (/^\s+$/.test(w)) return w;
-        return '<span class="lecture-word" data-word-idx="' + i + '">' + w + '</span>';
-      }).join("");
+      // Wrap each sentence as a fade-in unit; initially hidden, revealed by timer
+      text = sentences.map(function (s, i) {
+        var escaped = escHtml(s);
+        // Wrap words inside each sentence for karaoke highlighting
+        var words = escaped.split(/(\s+)/);
+        var inner = words.map(function (w, wi) {
+          if (/^\s+$/.test(w)) return w;
+          return '<span class="lecture-word" data-word-idx="' + wi + '">' + w + '</span>';
+        }).join("");
+        return '<span class="lecture-sentence" data-sentence-idx="' + i + '" style="opacity:0;transition:opacity 0.5s ease;">' + inner + '</span>';
+      }).join(" ");
+    } else if (isCurrent) {
+      // Current but not yet playing: show all sentences hidden, ready for fade-in
+      text = sentences.map(function (s, i) {
+        return '<span class="lecture-sentence" data-sentence-idx="' + i + '" style="opacity:0;transition:opacity 0.5s ease;">' + escHtml(s) + '</span>';
+      }).join(" ");
     } else {
+      // Past or future segment: show all text normally
       text = escHtml(text);
     }
 
@@ -1031,23 +1069,48 @@
     if (!lectureState.segments.length) return;
 
     var seg = lectureState.segments[lectureState.currentSegmentIndex];
-    lectureState.playing = true;
-    updateLectureControls();
-    renderLectureContent();
 
-    // Try to load and play TTS audio
+    // Show loading spinner before TTS fetch
+    var lectureContent = document.getElementById("lecture-content");
+    var currentEl = lectureContent
+      ? lectureContent.querySelector('.lecture-segment[data-segment="' + lectureState.currentSegmentIndex + '"]')
+      : null;
+    if (currentEl) {
+      currentEl.insertAdjacentHTML("afterbegin",
+        '<div class="lecture-loading" id="lecture-loading">' +
+        '<div class="typing"><span></span><span></span><span></span></div>' +
+        '<span style="font-size:12px;color:var(--color-text-tertiary);margin-left:8px;">音声を準備中...</span></div>');
+    }
+
     try {
-      var res = await apiFetch(
-        "/learning/lecture/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/tts",
-        {
-          method: "POST",
-          body: JSON.stringify({ chunk_id: seg.chunk_id, voice: "alloy" }),
+      // Fetch TTS audio first (while spinner is visible)
+      var ttsData = null;
+      try {
+        var res = await apiFetch(
+          "/learning/lecture/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/tts",
+          {
+            method: "POST",
+            body: JSON.stringify({ chunk_id: seg.chunk_id, voice: "alloy" }),
+          }
+        );
+        if (res.ok) {
+          ttsData = await res.json();
         }
-      );
+      } catch (_ttsErr) {
+        // TTS unavailable — will fall back to simulation
+      }
 
-      if (res.ok) {
-        var data = await res.json();
-        var audioSrc = "data:" + (data.content_type || "audio/mp3") + ";base64," + data.audio_base64;
+      // Remove spinner
+      var loadingEl = document.getElementById("lecture-loading");
+      if (loadingEl) loadingEl.remove();
+
+      // Now enter playing state and re-render with fade-in sentences
+      lectureState.playing = true;
+      updateLectureControls();
+      renderLectureContent();
+
+      if (ttsData) {
+        var audioSrc = "data:" + (ttsData.content_type || "audio/mp3") + ";base64," + ttsData.audio_base64;
 
         if (lectureState.audio) {
           lectureState.audio.pause();
@@ -1055,7 +1118,7 @@
         }
 
         lectureState.audio = new Audio(audioSrc);
-        lectureState.wordTimestamps = data.word_timestamps || [];
+        lectureState.wordTimestamps = ttsData.word_timestamps || [];
 
         lectureState.audio.addEventListener("ended", function () {
           stopHighlighting();
@@ -1065,16 +1128,44 @@
         lectureState.audio.addEventListener("timeupdate", function () {
           updateTimeDisplay();
           updateWordHighlighting();
+          _revealSentencesByTime();
         });
 
         lectureState.audio.play();
+        _revealSentencesByTime();
         startHighlighting();
       } else {
         // No TTS available, simulate with timer
         simulatePlayback(seg);
       }
     } catch (err) {
-      simulatePlayback(seg);
+      // Remove spinner if still present
+      var loadingEl2 = document.getElementById("lecture-loading");
+      if (loadingEl2) loadingEl2.remove();
+      lectureState.playing = false;
+      updateLectureControls();
+      _restoreChatUI();
+    }
+  }
+
+  function _revealSentencesByTime() {
+    // Progressive reveal of sentence spans based on audio progress
+    var sentenceEls = document.querySelectorAll(".lecture-segment.current .lecture-sentence");
+    if (!sentenceEls.length) return;
+    var totalSentences = sentenceEls.length;
+
+    if (lectureState.audio && lectureState.audio.duration) {
+      var progress = lectureState.audio.currentTime / lectureState.audio.duration;
+      // Reveal sentences proportionally to playback progress
+      var revealCount = Math.ceil(progress * totalSentences);
+      // Always reveal at least the first sentence once playback starts
+      if (lectureState.playing && revealCount < 1) revealCount = 1;
+      for (var i = 0; i < totalSentences; i++) {
+        sentenceEls[i].style.opacity = i < revealCount ? "1" : "0";
+      }
+    } else if (lectureState.playing) {
+      // No duration info yet — reveal first sentence
+      sentenceEls[0].style.opacity = "1";
     }
   }
 
@@ -1084,6 +1175,10 @@
     var durationMs = Math.max(3000, chars * 200);
     var startTime = Date.now();
 
+    // Count sentence spans for progressive reveal
+    var sentenceEls = document.querySelectorAll(".lecture-segment.current .lecture-sentence");
+    var totalSentences = sentenceEls.length;
+
     lectureState.highlightTimer = setInterval(function () {
       var elapsed = Date.now() - startTime;
       var timeEl = document.getElementById("lecture-time");
@@ -1091,6 +1186,15 @@
         var sec = Math.floor(elapsed / 1000);
         var min = Math.floor(sec / 60);
         timeEl.textContent = min + ":" + (sec % 60 < 10 ? "0" : "") + (sec % 60);
+      }
+
+      // Progressive sentence reveal based on elapsed time
+      if (totalSentences > 0) {
+        var progress = elapsed / durationMs;
+        var revealCount = Math.max(1, Math.ceil(progress * totalSentences));
+        for (var i = 0; i < totalSentences; i++) {
+          sentenceEls[i].style.opacity = i < revealCount ? "1" : "0";
+        }
       }
 
       if (elapsed >= durationMs) {
