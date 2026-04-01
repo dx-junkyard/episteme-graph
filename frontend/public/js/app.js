@@ -981,11 +981,14 @@
   }
 
   function renderSegmentContent(seg, isCurrent) {
-    var text = seg.spoken_text || seg.text || "";
+    var rawText = seg.spoken_text || seg.text || "";
 
-    // Render formulas with KaTeX
+    // 1. テキストをまずHTMLエスケープ（数式プレースホルダーは後で差し替える）
     var formulas = seg.formulas || [];
-    formulas.forEach(function (f) {
+    // 数式部分を一時プレースホルダーに置換してからエスケープし、後でHTMLに戻す
+    var placeholders = [];
+    var textWithPlaceholders = rawText;
+    formulas.forEach(function (f, fi) {
       if (f.latex) {
         try {
           var rendered = window.katex
@@ -993,28 +996,42 @@
             : "$" + f.latex + "$";
           var cls = f.latex.length > 30 ? "lecture-formula-block" : "lecture-formula";
           if (isCurrent) cls += " visible";
-          text = text.replace("$" + f.latex + "$", '<span class="' + cls + '">' + rendered + '</span>');
-          text = text.replace("$$" + f.latex + "$$", '<span class="' + cls + '">' + rendered + '</span>');
+          var placeholder = "\x00FORMULA_" + fi + "\x00";
+          var html = '<span class="' + cls + '">' + rendered + '</span>';
+          // $$...$$ を先に（$...$ が部分一致するのを防ぐ）
+          textWithPlaceholders = textWithPlaceholders.replace("$$" + f.latex + "$$", placeholder);
+          textWithPlaceholders = textWithPlaceholders.replace("$" + f.latex + "$", placeholder);
+          placeholders.push({ placeholder: placeholder, html: html });
         } catch (e) { /* keep original */ }
       }
     });
 
-    // Split text into sentence-level fragments for progressive fade-in
-    // Split on Japanese/English sentence endings while keeping delimiters
-    var fragments = text.split(/((?:[。！？\.!\?]+))/);
+    // 2. 文単位で分割（数式プレースホルダーは句点と干渉しない）
+    var fragments = textWithPlaceholders.split(/((?:[。！？\.!\?]+))/);
     var sentences = [];
     for (var fi = 0; fi < fragments.length; fi += 2) {
       var sentence = (fragments[fi] || "") + (fragments[fi + 1] || "");
       if (sentence.trim()) sentences.push(sentence);
     }
-    if (!sentences.length) sentences = [text];
+    if (!sentences.length) sentences = [textWithPlaceholders];
 
+    // 3. 各文をエスケープしてから数式プレースホルダーをHTMLに差し戻す
+    function escapeAndRestore(s) {
+      var escaped = escHtml(s);
+      placeholders.forEach(function (p) {
+        // escHtml はプレースホルダー内の \x00 を変えないのでそのまま置換できる
+        escaped = escaped.replace(p.placeholder, p.html);
+      });
+      return escaped;
+    }
+
+    var text;
     if (isCurrent && lectureState.playing) {
-      // Wrap each sentence as a fade-in unit; initially hidden, revealed by timer
+      // 再生中: 文ごとに非表示→タイマーで順次フェードイン + ワードハイライト用 span
       text = sentences.map(function (s, i) {
-        var escaped = escHtml(s);
-        // Wrap words inside each sentence for karaoke highlighting
-        var words = escaped.split(/(\s+)/);
+        var processed = escapeAndRestore(s);
+        // ワードハイライト用にテキストノード部分を span で囲む
+        var words = processed.split(/(\s+)/);
         var inner = words.map(function (w, wi) {
           if (/^\s+$/.test(w)) return w;
           return '<span class="lecture-word" data-word-idx="' + wi + '">' + w + '</span>';
@@ -1022,13 +1039,13 @@
         return '<span class="lecture-sentence" data-sentence-idx="' + i + '" style="opacity:0;transition:opacity 0.5s ease;">' + inner + '</span>';
       }).join(" ");
     } else if (isCurrent) {
-      // Current but not yet playing: show all sentences hidden, ready for fade-in
-      text = sentences.map(function (s, i) {
-        return '<span class="lecture-sentence" data-sentence-idx="' + i + '" style="opacity:0;transition:opacity 0.5s ease;">' + escHtml(s) + '</span>';
+      // 現在のセグメントだが未再生: テキストを表示状態で見せる（再生ボタンを押す前）
+      text = sentences.map(function (s) {
+        return escapeAndRestore(s);
       }).join(" ");
     } else {
-      // Past or future segment: show all text normally
-      text = escHtml(text);
+      // 過去/未来のセグメント: 通常表示
+      text = escapeAndRestore(textWithPlaceholders);
     }
 
     // Bold
@@ -1049,7 +1066,9 @@
     var current = lectureState.currentSegmentIndex + 1;
 
     if (label) label.textContent = "セグメント " + current + " / " + total;
-    if (progressFill) progressFill.style.width = (total > 0 ? (current / total * 100) : 0) + "%";
+    // 修正: セグメントの「完了度」ではなく、開始インデックスベースの進捗にする
+    if (progressFill) progressFill.style.width = (total > 0 ? (lectureState.currentSegmentIndex / total * 100) : 0) + "%";
+
     if (playBtn) {
       playBtn.innerHTML = lectureState.playing ? "&#9646;&#9646;" : "&#9654;";
       playBtn.className = lectureState.playing ? "lecture-pause-btn" : "lecture-play-btn";
