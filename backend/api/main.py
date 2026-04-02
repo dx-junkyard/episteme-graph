@@ -44,7 +44,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text as sa_text
 
 from dependencies import _hash_password
-from routes import auth, learning, admin, lecture
+from routes import auth, learning, admin, lecture, lecture_studio
 from core.config import get_settings as _get_settings
 from core.postgres import get_session as _pg_session, check_connection as _pg_check
 
@@ -305,6 +305,7 @@ app.include_router(auth.router)
 app.include_router(learning.router)
 app.include_router(admin.router)
 app.include_router(lecture.router)
+app.include_router(lecture_studio.router)
 
 
 @app.get("/healthz")
