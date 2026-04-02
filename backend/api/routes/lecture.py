@@ -221,19 +221,33 @@ def _generate_sequence_from_search(
         )
 
     segments = []
+    chunks_to_update = []
     for i, cr in enumerate(chunk_results):
         if cr["score"] < 0.3:
             continue
+        chunk_id = cr.get("id", f"search_{i}")
         result = generate_spoken_text_and_formulas(cr["text"])
+        is_valid_uuid = _is_valid_uuid(chunk_id)
+
+        if is_valid_uuid:
+            chunks_to_update.append({
+                "id": chunk_id,
+                "spoken_text": result["spoken_text"],
+                "formulas": result["formulas"],
+            })
+
         segments.append(LectureSegment(
-            chunk_id=f"search_{i}",
+            chunk_id=chunk_id,
             chunk_index=i,
             text=cr["text"],
             spoken_text=result["spoken_text"],
             formulas=[LectureFormulaItem(**f) for f in result["formulas"]],
-            has_audio=False,
+            has_audio=_check_audio_cache(chunk_id) if is_valid_uuid else False,
             duration_ms=0,
         ))
+
+    if chunks_to_update:
+        _persist_spoken_text(chunks_to_update)
 
     return LectureSequenceResponse(
         course_id=course_id,
@@ -420,8 +434,19 @@ def lecture_interrupt_chat(
 # ---------------------------------------------------------------------------
 
 
+def _is_valid_uuid(value: str) -> bool:
+    """文字列が有効な UUID 形式かどうかを判定する。"""
+    try:
+        uuid.UUID(value)
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
 def _check_audio_cache(chunk_id: str) -> bool:
     """指定チャンクの音声キャッシュが存在するか確認する。"""
+    if not _is_valid_uuid(chunk_id):
+        return False
     session = _pg_session()
     try:
         row = session.execute(
@@ -437,6 +462,8 @@ def _check_audio_cache(chunk_id: str) -> bool:
 
 def _get_audio_cache(chunk_id: str, voice: str) -> dict | None:
     """音声キャッシュを取得する。"""
+    if not _is_valid_uuid(chunk_id):
+        return None
     session = _pg_session()
     try:
         row = session.execute(
@@ -474,6 +501,9 @@ def _save_audio_cache(
     word_timestamps: list[dict],
 ) -> None:
     """音声キャッシュを保存する。"""
+    if not _is_valid_uuid(chunk_id):
+        logger.debug("Skipping audio cache save for non-UUID chunk_id: %s", chunk_id)
+        return
     session = _pg_session()
     try:
         session.execute(
@@ -504,6 +534,8 @@ def _save_audio_cache(
 
 def _get_chunk_spoken_text(chunk_id: str) -> str | None:
     """チャンクの spoken_text を取得する。なければ text から生成。"""
+    if not _is_valid_uuid(chunk_id):
+        return None
     session = _pg_session()
     try:
         row = session.execute(
@@ -530,7 +562,7 @@ def _get_chunk_spoken_text(chunk_id: str) -> str | None:
 
 def _get_chunk_text(chunk_id: str) -> str:
     """チャンクのテキストを取得する。"""
-    if chunk_id.startswith("search_"):
+    if not _is_valid_uuid(chunk_id):
         return ""
     session = _pg_session()
     try:
@@ -547,9 +579,12 @@ def _get_chunk_text(chunk_id: str) -> str:
 
 def _persist_spoken_text(chunks: list[dict]) -> None:
     """チャンクの spoken_text と formulas を DB に永続化する。"""
+    valid_chunks = [c for c in chunks if _is_valid_uuid(c["id"])]
+    if not valid_chunks:
+        return
     session = _pg_session()
     try:
-        for chunk in chunks:
+        for chunk in valid_chunks:
             session.execute(
                 sa_text("""
                     UPDATE chunks

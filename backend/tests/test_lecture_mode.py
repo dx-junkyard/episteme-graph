@@ -512,3 +512,127 @@ class TestLectureSchemasAdaptive:
         )
         assert resp.skipped_segments == 2
         assert resp.summary_segments == 1
+
+
+# ---------------------------------------------------------------------------
+# 9. UUID バリデーション / フォールバック安全性テスト (Issue #68)
+# ---------------------------------------------------------------------------
+
+
+class TestIsValidUuid:
+    """_is_valid_uuid ヘルパーの検証。"""
+
+    def test_valid_uuid4(self):
+        from api.routes.lecture import _is_valid_uuid
+
+        assert _is_valid_uuid("550e8400-e29b-41d4-a716-446655440000") is True
+
+    def test_search_prefix_is_invalid(self):
+        from api.routes.lecture import _is_valid_uuid
+
+        assert _is_valid_uuid("search_0") is False
+        assert _is_valid_uuid("search_42") is False
+
+    def test_empty_string_is_invalid(self):
+        from api.routes.lecture import _is_valid_uuid
+
+        assert _is_valid_uuid("") is False
+
+    def test_arbitrary_string_is_invalid(self):
+        from api.routes.lecture import _is_valid_uuid
+
+        assert _is_valid_uuid("not-a-uuid") is False
+
+    def test_none_is_invalid(self):
+        from api.routes.lecture import _is_valid_uuid
+
+        assert _is_valid_uuid(None) is False
+
+
+class TestHelperUuidGuards:
+    """DB ヘルパー関数が非 UUID chunk_id でクラッシュしないことを検証 (Issue #68)。"""
+
+    def test_check_audio_cache_non_uuid(self):
+        from api.routes.lecture import _check_audio_cache
+
+        assert _check_audio_cache("search_0") is False
+
+    def test_get_audio_cache_non_uuid(self):
+        from api.routes.lecture import _get_audio_cache
+
+        assert _get_audio_cache("search_0", "alloy") is None
+
+    @patch("api.routes.lecture._pg_session")
+    def test_save_audio_cache_non_uuid_skips_db(self, mock_session):
+        from api.routes.lecture import _save_audio_cache
+
+        _save_audio_cache("search_0", "alloy", b"audio", 1000, [])
+        mock_session.assert_not_called()
+
+    def test_get_chunk_spoken_text_non_uuid(self):
+        from api.routes.lecture import _get_chunk_spoken_text
+
+        assert _get_chunk_spoken_text("search_0") is None
+
+    def test_get_chunk_text_non_uuid(self):
+        from api.routes.lecture import _get_chunk_text
+
+        assert _get_chunk_text("search_0") == ""
+
+    @patch("api.routes.lecture._pg_session")
+    def test_persist_spoken_text_filters_non_uuid(self, mock_session):
+        from api.routes.lecture import _persist_spoken_text
+
+        _persist_spoken_text([
+            {"id": "search_0", "spoken_text": "test", "formulas": []},
+            {"id": "search_1", "spoken_text": "test2", "formulas": []},
+        ])
+        # All entries are non-UUID, so DB should not be touched
+        mock_session.assert_not_called()
+
+
+class TestGenerateSequenceFromSearchUsesRealIds:
+    """_generate_sequence_from_search が検索結果の実 UUID を使用することを検証。"""
+
+    @patch("api.routes.lecture._persist_spoken_text")
+    @patch("api.routes.lecture._check_audio_cache", return_value=False)
+    @patch("api.routes.lecture.generate_spoken_text_and_formulas")
+    @patch("api.routes.lecture.search_chunks_with_metadata")
+    def test_uses_chunk_id_from_search_results(
+        self, mock_search, mock_gen, mock_cache, mock_persist,
+    ):
+        from api.routes.lecture import _generate_sequence_from_search
+
+        real_uuid = "550e8400-e29b-41d4-a716-446655440000"
+        mock_search.return_value = [
+            {"id": real_uuid, "text": "test content", "score": 0.9},
+        ]
+        mock_gen.return_value = {"spoken_text": "spoken", "formulas": []}
+
+        result = _generate_sequence_from_search(
+            "course-1", "topic-1", "Test Topic", {}, {"id": "user-1"},
+        )
+
+        assert len(result.segments) == 1
+        assert result.segments[0].chunk_id == real_uuid
+
+    @patch("api.routes.lecture._persist_spoken_text")
+    @patch("api.routes.lecture.generate_spoken_text_and_formulas")
+    @patch("api.routes.lecture.search_chunks_with_metadata")
+    def test_fallback_id_when_no_id_in_result(
+        self, mock_search, mock_gen, mock_persist,
+    ):
+        from api.routes.lecture import _generate_sequence_from_search
+
+        mock_search.return_value = [
+            {"text": "test content", "score": 0.9},  # no "id" key
+        ]
+        mock_gen.return_value = {"spoken_text": "spoken", "formulas": []}
+
+        result = _generate_sequence_from_search(
+            "course-1", "topic-1", "Test Topic", {}, {"id": "user-1"},
+        )
+
+        assert len(result.segments) == 1
+        assert result.segments[0].chunk_id == "search_0"
+        assert result.segments[0].has_audio is False
