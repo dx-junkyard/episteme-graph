@@ -126,6 +126,9 @@ class Chunk(Base):
     variables = Column(JSONB, nullable=True)
     ancestors = Column(JSONB, nullable=True)
     neo4j_node_id = Column(Text, nullable=True)
+    # Interactive Lecture Mode (Issue #66)
+    spoken_text = Column(Text, nullable=True)
+    formulas = Column(JSONB, default=list)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
 
     document = relationship("Document", back_populates="chunks")
@@ -134,6 +137,20 @@ class Chunk(Base):
 # ============================================================
 # 学習者状態
 # ============================================================
+
+class LectureAudioCache(Base):
+    """TTS 音声キャッシュ (Issue #66)。"""
+    __tablename__ = "lecture_audio_cache"
+    __table_args__ = (UniqueConstraint("chunk_id", "voice"),)
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    chunk_id = Column(UUID(as_uuid=True), ForeignKey("chunks.id", ondelete="CASCADE"), nullable=False)
+    voice = Column(Text, nullable=False, default="alloy")
+    audio_data = Column(Text, nullable=False)  # base64-encoded audio
+    duration_ms = Column(Integer, nullable=False, default=0)
+    word_timestamps = Column(JSONB, default=list)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
 
 class LearnerProfile(Base):
     __tablename__ = "learner_profiles"

@@ -44,7 +44,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text as sa_text
 
 from dependencies import _hash_password
-from routes import auth, learning, admin
+from routes import auth, learning, admin, lecture
 from core.config import get_settings as _get_settings
 from core.postgres import get_session as _pg_session, check_connection as _pg_check
 
@@ -200,8 +200,31 @@ def _run_migrations() -> None:
             "CREATE INDEX IF NOT EXISTS idx_bg_tasks_created_by ON background_tasks(created_by)"
         ))
 
+        # Migration 006: Interactive Lecture Mode (Issue #66)
+        session.execute(sa_text(
+            "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS spoken_text TEXT"
+        ))
+        session.execute(sa_text(
+            "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS formulas JSONB DEFAULT '[]'::jsonb"
+        ))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS lecture_audio_cache (
+                id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                chunk_id        UUID NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+                voice           TEXT NOT NULL DEFAULT 'alloy',
+                audio_data      BYTEA NOT NULL,
+                duration_ms     INTEGER NOT NULL DEFAULT 0,
+                word_timestamps JSONB DEFAULT '[]'::jsonb,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE(chunk_id, voice)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_lecture_audio_cache_chunk_id ON lecture_audio_cache(chunk_id)"
+        ))
+
         session.commit()
-        logger.info("Migrations (002-005) applied successfully.")
+        logger.info("Migrations (002-006) applied successfully.")
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema
@@ -281,6 +304,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(learning.router)
 app.include_router(admin.router)
+app.include_router(lecture.router)
 
 
 @app.get("/healthz")

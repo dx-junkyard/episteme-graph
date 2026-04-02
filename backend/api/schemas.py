@@ -329,3 +329,68 @@ class BackgroundTaskOut(BaseModel):
     error_message: str | None = None
     created_at: str = ""
     updated_at: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Interactive Lecture Mode (Issue #66)
+# ---------------------------------------------------------------------------
+
+class LectureFormulaItem(BaseModel):
+    """チャンク内の数式メタデータ。"""
+    id: str  # formula_0, formula_1, ...
+    latex: str
+    spoken: str  # 音声読み上げ用テキスト
+
+
+class LectureSegment(BaseModel):
+    """レクチャーモードの1セグメント（チャンク単位）。"""
+    chunk_id: str
+    chunk_index: int
+    text: str
+    spoken_text: str
+    formulas: list[LectureFormulaItem] = []
+    has_audio: bool = False
+    duration_ms: int = 0
+    segment_mode: str = "full"  # full | summary | skip
+
+
+class LectureSequenceResponse(BaseModel):
+    """レクチャーシーケンス API レスポンス。"""
+    course_id: str
+    topic_id: str
+    segments: list[LectureSegment] = []
+    total_segments: int = 0
+    total_duration_ms: int = 0
+    skipped_segments: int = 0  # 習得済みスキップ数
+    summary_segments: int = 0  # 簡易版変換数
+
+
+class LectureTTSRequest(BaseModel):
+    """TTS 音声生成リクエスト。"""
+    chunk_id: str
+    voice: str = "alloy"
+
+
+class LectureTTSResponse(BaseModel):
+    """TTS 音声生成レスポンス。"""
+    chunk_id: str
+    audio_base64: str
+    duration_ms: int = 0
+    word_timestamps: list[dict] = []
+    content_type: str = "audio/mp3"
+
+
+class LectureInterruptRequest(BaseModel):
+    """レクチャー中断チャットリクエスト。"""
+    message: str
+    current_chunk_id: str
+    pause_position_ms: int = 0
+    history: list[dict] = []
+
+
+class LectureInterruptResponse(BaseModel):
+    """レクチャー中断チャットレスポンス。"""
+    answer: str
+    resume_chunk_id: str
+    resume_position_ms: int = 0
+    course_update: dict | None = None
