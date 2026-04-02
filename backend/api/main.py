@@ -223,8 +223,18 @@ def _run_migrations() -> None:
             "CREATE INDEX IF NOT EXISTS idx_lecture_audio_cache_chunk_id ON lecture_audio_cache(chunk_id)"
         ))
 
+        # Migration 007: arxiv_id カラムを廃止し material_id に統一 (Issue #70)
+        session.execute(sa_text("""
+            UPDATE chunks
+            SET material_id = arxiv_id
+            WHERE arxiv_id IS NOT NULL
+              AND (material_id IS NULL OR material_id = '')
+        """))
+        session.execute(sa_text("DROP INDEX IF EXISTS idx_chunks_arxiv"))
+        session.execute(sa_text("ALTER TABLE chunks DROP COLUMN IF EXISTS arxiv_id"))
+
         session.commit()
-        logger.info("Migrations (002-006) applied successfully.")
+        logger.info("Migrations (002-007) applied successfully.")
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema

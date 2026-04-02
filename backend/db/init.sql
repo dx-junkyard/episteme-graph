@@ -86,8 +86,6 @@ CREATE TABLE chunks (
                                               'table', 'definition', 'theorem', 'example')),
     latex_formulas  TEXT[] DEFAULT '{}',
     embedding       vector(3072),
-    -- Legacy fields for arXiv paper compatibility
-    arxiv_id        TEXT,
     material_id     TEXT,
     smiles_dsl      TEXT,
     variables       JSONB,
@@ -97,7 +95,6 @@ CREATE TABLE chunks (
 );
 
 CREATE INDEX idx_chunks_document ON chunks(document_id);
-CREATE INDEX idx_chunks_arxiv ON chunks(arxiv_id);
 CREATE INDEX idx_chunks_material ON chunks(material_id);
 
 -- HNSW index on halfvec cast (pgvector limits HNSW/IVFFlat to 2000 dims;

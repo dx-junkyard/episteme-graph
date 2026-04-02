@@ -59,8 +59,8 @@ def _embed_query(question: str) -> list[float]:
     return vectors[0]
 
 
-def search_chunks(question: str, arxiv_id: str, top_k: int = 5) -> list[str]:
-    """PostgreSQL pgvector で arxiv_id に属するチャンクを類似度検索して返す。"""
+def search_chunks(question: str, material_id: str, top_k: int = 5) -> list[str]:
+    """PostgreSQL pgvector で material_id に属するチャンクを類似度検索して返す。"""
     query_vector = _embed_query(question)
 
     session = get_session()
@@ -69,13 +69,13 @@ def search_chunks(question: str, arxiv_id: str, top_k: int = 5) -> list[str]:
             text("""
                 SELECT c.text
                 FROM chunks c
-                WHERE c.arxiv_id = :arxiv_id
+                WHERE c.material_id = :material_id
                   AND c.embedding IS NOT NULL
                 ORDER BY c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
                 LIMIT :limit
             """),
             {
-                "arxiv_id": arxiv_id,
+                "material_id": material_id,
                 "query_vector": str(query_vector),
                 "limit": top_k,
             },
@@ -86,9 +86,9 @@ def search_chunks(question: str, arxiv_id: str, top_k: int = 5) -> list[str]:
         session.close()
 
 
-def _get_paper_structure(arxiv_id: str, minio_client) -> dict:
+def _get_paper_structure(paper_id: str, minio_client) -> dict:
     """MinIO から抽出済み PaperStructure JSON を取得して dict で返す。"""
-    safe_id = arxiv_id.replace("/", "_")
+    safe_id = paper_id.replace("/", "_")
     try:
         response = minio_client.get_object("extracted-structures", f"{safe_id}.json")
         data = response.read()
@@ -96,24 +96,24 @@ def _get_paper_structure(arxiv_id: str, minio_client) -> dict:
         response.release_conn()
         return json.loads(data)
     except Exception as exc:
-        logger.warning("Could not load PaperStructure for %s: %s", arxiv_id, exc)
+        logger.warning("Could not load PaperStructure for %s: %s", paper_id, exc)
         return {}
 
 
 def generate_chat_response(
-    arxiv_id: str,
+    material_id: str,
     message: str,
     history: list[dict],
     minio_client,
 ) -> str:
     """RAG ベースでユーザーの質問に回答する。"""
     # 1. 関連チャンクをベクトル検索
-    chunks = search_chunks(message, arxiv_id, top_k=5)
+    chunks = search_chunks(message, material_id, top_k=5)
 
     # 2. PaperStructure を取得
-    structure = _get_paper_structure(arxiv_id, minio_client)
+    structure = _get_paper_structure(material_id, minio_client)
 
-    logger.info(f"DEBUG: Loaded structure for {arxiv_id}: {json.dumps(structure.get('abstract_structure', {}), ensure_ascii=False)}")
+    logger.info(f"DEBUG: Loaded structure for {material_id}: {json.dumps(structure.get('abstract_structure', {}), ensure_ascii=False)}")
 
     # 3. コンテキストブロックを構築
     context_parts: list[str] = []
@@ -132,7 +132,7 @@ def generate_chat_response(
     messages.append({
         "role": "user",
         "content": (
-            f"Context for paper `{arxiv_id}`:\n\n{context_block}\n\n"
+            f"Context for paper `{material_id}`:\n\n{context_block}\n\n"
             "Please keep the above context in mind when answering my questions."
         ),
     })

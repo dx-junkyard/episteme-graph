@@ -270,7 +270,7 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
     {"name": "概念名", "children": ["子概念1", "子概念2"]}
   ],
   "sources": [
-    {"title": "教材タイトル", "subtitle": "補足情報", "material_id": "教材のID"}
+    {"title": "教材タイトル", "subtitle": "補足情報", "material_id": "教材のID（必須）"}
   ]
 }
 
@@ -677,7 +677,6 @@ def get_course_as_draft(
             "subtitle": s.get("subtitle", ""),
             "license": s.get("license", ""),
             "used_section": s.get("used_section", ""),
-            "arxiv_id": s.get("arxiv_id", ""),
             "material_id": s.get("material_id", ""),
         })
 

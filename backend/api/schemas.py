@@ -97,7 +97,6 @@ class LearningSource(BaseModel):
     subtitle: str = ""
     license: str = ""
     used_section: str = ""
-    arxiv_id: str = ""  # 論文IDと紐付ける場合
     material_id: str = ""  # アップロード教材と紐付ける場合
 
 

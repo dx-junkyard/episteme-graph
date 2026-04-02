@@ -167,7 +167,7 @@ def run_pattern_evaluation_task(
         candidates = search_similar_papers(
             query_text=query_text,
             top_k=_TOP_K,
-            exclude_arxiv_id=pattern.source_arxiv_id,
+            exclude_material_id=pattern.source_arxiv_id,
         )
     except Exception:
         logger.exception("PostgreSQL search failed for pattern %s", pattern.pattern_id)
@@ -181,16 +181,16 @@ def run_pattern_evaluation_task(
         "Found %d candidate papers for pattern %s: %s",
         len(candidates),
         pattern.pattern_id,
-        [c["arxiv_id"] for c in candidates],
+        [c["material_id"] for c in candidates],
     )
 
     # 2–4. 各候補論文に対して同型性を評価
     matches: list[PatternMatch] = []
     for candidate in candidates:
-        arxiv_id = candidate["arxiv_id"]
+        mid = candidate["material_id"]
 
         # 2. PaperStructure をロード
-        paper = _load_paper_structure(arxiv_id, storage_client)
+        paper = _load_paper_structure(mid, storage_client)
         if paper is None:
             continue
 
@@ -204,7 +204,7 @@ def run_pattern_evaluation_task(
             _save_match_to_neo4j(match)
             matches.append(match)
         except Exception:
-            logger.exception("Failed to save match to Neo4j for %s", arxiv_id)
+            logger.exception("Failed to save match to Neo4j for %s", mid)
 
     logger.info(
         "Pattern evaluation completed for pattern_id=%s: %d matches found",

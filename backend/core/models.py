@@ -119,8 +119,6 @@ class Chunk(Base):
     chunk_type = Column(Text, default="prose")
     latex_formulas = Column(ARRAY(Text), default=list)
     embedding = Column(Vector(3072), nullable=True)
-    # Legacy compatibility
-    arxiv_id = Column(Text, nullable=True)
     material_id = Column(Text, nullable=True)
     smiles_dsl = Column(Text, nullable=True)
     variables = Column(JSONB, nullable=True)

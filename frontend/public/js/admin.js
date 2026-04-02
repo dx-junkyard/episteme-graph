@@ -718,7 +718,6 @@
           subtitle: s.subtitle || "",
           license: s.license || "",
           used_section: s.used_section || "",
-          arxiv_id: s.arxiv_id || "",
           material_id: s.material_id || "",
         });
       }

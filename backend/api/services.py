@@ -221,11 +221,11 @@ def embed_text(text: str) -> list[float]:
 
 def search_relevant_chunks(
     query: str,
-    arxiv_ids: list[str],
+    material_ids: list[str],
     top_k: int = 5,
 ) -> list[str]:
     """PostgreSQL pgvector から関連チャンクをベクトル検索する。"""
-    if not arxiv_ids:
+    if not material_ids:
         return []
 
     try:
@@ -237,16 +237,16 @@ def search_relevant_chunks(
     try:
         session = _pg_session()
         try:
-            placeholders = ", ".join(f":aid_{i}" for i in range(len(arxiv_ids)))
+            placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
             params: dict = {"query_vector": str(query_vector), "limit": top_k}
-            for i, aid in enumerate(arxiv_ids):
-                params[f"aid_{i}"] = aid
+            for i, mid in enumerate(material_ids):
+                params[f"mid_{i}"] = mid
 
             rows = session.execute(
                 sa_text(f"""
                     SELECT c.text
                     FROM chunks c
-                    WHERE c.arxiv_id IN ({placeholders})
+                    WHERE c.material_id IN ({placeholders})
                       AND c.embedding IS NOT NULL
                     ORDER BY c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
                     LIMIT :limit
@@ -263,12 +263,11 @@ def search_relevant_chunks(
 
 def search_relevant_chunks_with_scores(
     query: str,
-    arxiv_ids: list[str],
-    material_ids: list[str] | None = None,
+    material_ids: list[str],
     top_k: int = 5,
 ) -> tuple[list[str], list[float]]:
     """PostgreSQL pgvector から関連チャンクをベクトル検索し、テキストとスコアの両方を返す。"""
-    if not arxiv_ids and not material_ids:
+    if not material_ids:
         return [], []
 
     try:
@@ -280,22 +279,12 @@ def search_relevant_chunks_with_scores(
     try:
         session = _pg_session()
         try:
-            conditions = []
+            mid_placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
             params: dict = {"query_vector": str(query_vector), "limit": top_k}
+            for i, mid in enumerate(material_ids):
+                params[f"mid_{i}"] = mid
 
-            if arxiv_ids:
-                aid_placeholders = ", ".join(f":aid_{i}" for i in range(len(arxiv_ids)))
-                conditions.append(f"c.arxiv_id IN ({aid_placeholders})")
-                for i, aid in enumerate(arxiv_ids):
-                    params[f"aid_{i}"] = aid
-
-            if material_ids:
-                mid_placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
-                conditions.append(f"c.material_id IN ({mid_placeholders})")
-                for i, mid in enumerate(material_ids):
-                    params[f"mid_{i}"] = mid
-
-            where_clause = " OR ".join(conditions) if conditions else "TRUE"
+            where_clause = f"c.material_id IN ({mid_placeholders})"
 
             rows = session.execute(
                 sa_text(f"""

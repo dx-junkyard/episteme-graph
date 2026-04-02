@@ -48,29 +48,18 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
     """コースのソース教材からチャンクを取得する。"""
     sources = course_data.get("sources", [])
     material_ids = [s.get("material_id") for s in sources if s.get("material_id")]
-    arxiv_ids = [s.get("arxiv_id") for s in sources if s.get("arxiv_id")]
 
-    if not material_ids and not arxiv_ids:
+    if not material_ids:
         return []
 
     session = _pg_session()
     try:
-        conditions = []
+        mid_placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
         params: dict = {}
+        for i, mid in enumerate(material_ids):
+            params[f"mid_{i}"] = mid
 
-        if material_ids:
-            mid_placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
-            conditions.append(f"c.material_id IN ({mid_placeholders})")
-            for i, mid in enumerate(material_ids):
-                params[f"mid_{i}"] = mid
-
-        if arxiv_ids:
-            aid_placeholders = ", ".join(f":aid_{i}" for i in range(len(arxiv_ids)))
-            conditions.append(f"c.arxiv_id IN ({aid_placeholders})")
-            for i, aid in enumerate(arxiv_ids):
-                params[f"aid_{i}"] = aid
-
-        where_clause = " OR ".join(conditions)
+        where_clause = f"c.material_id IN ({mid_placeholders})"
         rows = session.execute(
             sa_text(f"""
                 SELECT c.id, c.chunk_index, c.text, c.spoken_text, c.formulas
