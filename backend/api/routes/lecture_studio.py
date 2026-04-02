@@ -36,7 +36,7 @@ from core.postgres import get_session as _pg_session
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/admin", tags=["Lecture Script Studio"])
+router = APIRouter(tags=["Lecture Script Studio"])
 
 
 # ---------------------------------------------------------------------------
