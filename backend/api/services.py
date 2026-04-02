@@ -336,7 +336,8 @@ def search_chunks_with_metadata(
         try:
             rows = session.execute(
                 sa_text("""
-                    SELECT c.text,
+                    SELECT c.id,
+                           c.text,
                            COALESCE(d.title, '') AS source_title,
                            COALESCE(d.filename, '') AS source_file,
                            1 - (c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))) AS score
@@ -350,13 +351,14 @@ def search_chunks_with_metadata(
             ).fetchall()
             return [
                 {
-                    "text": row[0],
-                    "source_title": row[1] or row[2] or "不明な教材",
-                    "source_file": row[2],
-                    "score": float(row[3]),
+                    "id": str(row[0]),
+                    "text": row[1],
+                    "source_title": row[2] or row[3] or "不明な教材",
+                    "source_file": row[3],
+                    "score": float(row[4]),
                 }
                 for row in rows
-                if row[0]
+                if row[1]
             ]
         finally:
             session.close()
