@@ -188,6 +188,7 @@ class CourseBuilderChatRequest(BaseModel):
     message: str
     history: list[dict] = []
     session_id: str | None = None
+    selected_material_ids: list[str] = []
 
 
 class CourseBuilderChatResponse(BaseModel):

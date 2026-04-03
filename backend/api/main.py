@@ -224,12 +224,8 @@ def _run_migrations() -> None:
         ))
 
         # Migration 007: arxiv_id カラムを廃止し material_id に統一 (Issue #70)
-        session.execute(sa_text("""
-            UPDATE chunks
-            SET material_id = arxiv_id
-            WHERE arxiv_id IS NOT NULL
-              AND (material_id IS NULL OR material_id = '')
-        """))
+        # UPDATE chunks SET material_id = arxiv_id は既存DBからの移行用のため削除済み
+        # クリーンなDBには arxiv_id カラムが存在しないため実行しない
         session.execute(sa_text("DROP INDEX IF EXISTS idx_chunks_arxiv"))
         session.execute(sa_text("ALTER TABLE chunks DROP COLUMN IF EXISTS arxiv_id"))
 

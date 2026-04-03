@@ -16,6 +16,8 @@
     sending: false,
     currentSessionId: null,
     importedFromCourseId: null,
+    availableMaterials: [],
+    selectedMaterialIds: [],
   };
 
   var API = "/api";
@@ -392,6 +394,63 @@
 
     // A1: セッション一覧をロード
     loadSessions();
+    // Issue #72: 利用可能な教材一覧をロード
+    loadMaterialsForSelection();
+  }
+
+  // ── Material Selection (Issue #72) ────────────────────────────────
+  function loadMaterialsForSelection() {
+    apiFetch("/admin/materials")
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        var materials = Array.isArray(data) ? data : (data.materials || []);
+        state.availableMaterials = materials.filter(function (m) {
+          return m.status === "completed";
+        });
+        renderMaterialCheckboxes();
+      })
+      .catch(function () {
+        var listEl = document.getElementById("cb-material-select-list");
+        if (listEl) listEl.innerHTML = '<span style="color:var(--color-text-tertiary);font-size:12px">教材の読み込みに失敗しました</span>';
+      });
+  }
+
+  function renderMaterialCheckboxes() {
+    var listEl = document.getElementById("cb-material-select-list");
+    if (!listEl) return;
+
+    if (!state.availableMaterials || state.availableMaterials.length === 0) {
+      listEl.innerHTML = '<span style="color:var(--color-text-tertiary);font-size:12px">利用可能な教材がありません</span>';
+      return;
+    }
+
+    var html = "";
+    state.availableMaterials.forEach(function (m) {
+      var mid = escHtml(m.material_id || m.id || "");
+      var title = escHtml(m.title || m.filename || "不明な教材");
+      var checked = state.selectedMaterialIds.indexOf(m.material_id || m.id || "") !== -1;
+      html += '<label class="cb-material-checkbox' + (checked ? " selected" : "") + '" data-mid="' + mid + '">';
+      html += '<input type="checkbox" value="' + mid + '"' + (checked ? " checked" : "") + '>';
+      html += title;
+      html += "</label>";
+    });
+    listEl.innerHTML = html;
+
+    listEl.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
+      cb.addEventListener("change", function () {
+        var mid = this.value;
+        var label = this.parentElement;
+        if (this.checked) {
+          if (state.selectedMaterialIds.indexOf(mid) === -1) {
+            state.selectedMaterialIds.push(mid);
+          }
+          label.classList.add("selected");
+        } else {
+          state.selectedMaterialIds = state.selectedMaterialIds.filter(function (id) { return id !== mid; });
+          label.classList.remove("selected");
+        }
+      });
+    });
   }
 
   // ── Session Management ─────────────────────────────────────────────
@@ -526,6 +585,7 @@
         message: text,
         history: chatHistory,
         session_id: state.currentSessionId || null,
+        selected_material_ids: state.selectedMaterialIds,
       }),
     })
       .then(function (res) {
@@ -708,20 +768,42 @@
       });
     });
 
-    // Build sources
-    (draft.sources || []).forEach(function (s) {
-      if (typeof s === "string") {
-        courseData.sources.push({ title: s });
-      } else {
+    // Build sources from UI selection to guarantee material_id binding
+    courseData.sources = [];
+    if (state.selectedMaterialIds && state.selectedMaterialIds.length > 0) {
+      state.selectedMaterialIds.forEach(function (mid) {
+        var mat = null;
+        for (var i = 0; i < state.availableMaterials.length; i++) {
+          var m = state.availableMaterials[i];
+          if ((m.material_id || m.id) === mid) {
+            mat = m;
+            break;
+          }
+        }
         courseData.sources.push({
-          title: s.title || "",
-          subtitle: s.subtitle || "",
-          license: s.license || "",
-          used_section: s.used_section || "",
-          material_id: s.material_id || "",
+          title: mat ? (mat.title || mat.filename) : "",
+          subtitle: "",
+          license: "",
+          used_section: "",
+          material_id: mid,
         });
-      }
-    });
+      });
+    } else {
+      // Fallback to draft sources if no UI selection
+      (draft.sources || []).forEach(function (s) {
+        if (typeof s === "string") {
+          courseData.sources.push({ title: s, subtitle: "", license: "", used_section: "", material_id: "" });
+        } else {
+          courseData.sources.push({
+            title: s.title || "",
+            subtitle: s.subtitle || "",
+            license: s.license || "",
+            used_section: s.used_section || "",
+            material_id: s.material_id || "",
+          });
+        }
+      });
+    }
 
     // A2: is_template: true を付与してコースを登録
     apiFetch("/learning/courses", {
