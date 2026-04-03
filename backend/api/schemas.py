@@ -415,8 +415,16 @@ class LectureScriptGenerateRequest(BaseModel):
     override: bool = False  # 既存スクリプトを上書きするか
 
 
+class LectureScriptGenerateStartResponse(BaseModel):
+    """バッチスクリプト生成開始レスポンス（非同期）。"""
+    task_id: str
+    course_id: str
+    total_chunks: int = 0
+    status: str = "pending"
+
+
 class LectureScriptGenerateResponse(BaseModel):
-    """バッチスクリプト生成レスポンス。"""
+    """バッチスクリプト生成レスポンス（後方互換）。"""
     course_id: str
     total_chunks: int = 0
     generated: int = 0

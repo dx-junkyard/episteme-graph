@@ -2018,7 +2018,7 @@
   function lsBatchGenerate() {
     lsState.generating = true;
     document.getElementById("ls-generate-all-btn").disabled = true;
-    lsShowProgress("スクリプトを生成中...", "info");
+    lsShowProgress("スクリプト生成を開始しています...", "info");
 
     apiFetch("/admin/courses/" + lsState.courseId + "/lecture-scripts/generate", {
       method: "POST",
@@ -2029,20 +2029,73 @@
         return res.json();
       })
       .then(function (data) {
-        lsState.chunks = data.chunks || [];
-        lsRenderChunkList();
-        lsShowProgress(
-          "生成完了: " + data.generated + "件生成 / " + data.skipped + "件スキップ (全" + data.total_chunks + "件)",
-          "success"
-        );
+        var taskId = data.task_id;
+        var totalChunks = data.total_chunks || 0;
+        lsShowProgress("スクリプト生成中... (0 / " + totalChunks + ")", "info");
+        _lsPollGenerateTask(taskId, totalChunks);
       })
       .catch(function (err) {
         lsShowProgress("生成に失敗しました: " + (err.message || "不明なエラー"), "error");
-      })
-      .finally(function () {
         lsState.generating = false;
         document.getElementById("ls-generate-all-btn").disabled = false;
       });
+  }
+
+  function _lsPollGenerateTask(taskId, totalChunks) {
+    var retryCount = 0;
+    var maxRetries = 5;
+    var intervalMs = 3000;
+
+    function poll() {
+      apiFetch("/admin/tasks/" + taskId)
+        .then(function (res) {
+          if (!res.ok) throw new Error("Status check failed");
+          return res.json();
+        })
+        .then(function (task) {
+          retryCount = 0;
+
+          var rd = task.result_data || {};
+          var generated = rd.generated || 0;
+          var skipped = rd.skipped || 0;
+          var progress = rd.progress || 0;
+          var processed = generated + skipped;
+
+          if (task.status === "completed") {
+            clearInterval(timer);
+            lsShowProgress(
+              "生成完了: " + generated + "件生成 / " + skipped + "件スキップ (全" + totalChunks + "件)",
+              "success"
+            );
+            lsState.generating = false;
+            document.getElementById("ls-generate-all-btn").disabled = false;
+            lsLoadScripts(lsState.courseId);
+          } else if (task.status === "failed") {
+            clearInterval(timer);
+            lsShowProgress("生成に失敗しました: " + (task.error_message || "不明なエラー"), "error");
+            lsState.generating = false;
+            document.getElementById("ls-generate-all-btn").disabled = false;
+          } else {
+            // pending / processing
+            lsShowProgress(
+              "スクリプト生成中... (" + processed + " / " + totalChunks + " — " + progress + "%)",
+              "info"
+            );
+          }
+        })
+        .catch(function () {
+          retryCount++;
+          if (retryCount >= maxRetries) {
+            clearInterval(timer);
+            lsShowProgress("進捗確認に失敗しました。ページをリロードして状況を確認してください。", "error");
+            lsState.generating = false;
+            document.getElementById("ls-generate-all-btn").disabled = false;
+          }
+        });
+    }
+
+    var timer = setInterval(poll, intervalMs);
+    poll();
   }
 
   function lsBatchAudio() {

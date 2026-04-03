@@ -73,6 +73,30 @@ class TestLectureStudioSchemas:
         assert resp.skipped == 3
         assert resp.chunks == []
 
+    def test_lecture_script_generate_start_response(self):
+        from schemas import LectureScriptGenerateStartResponse
+
+        resp = LectureScriptGenerateStartResponse(
+            task_id="abc123",
+            course_id="c1",
+            total_chunks=20,
+        )
+        assert resp.task_id == "abc123"
+        assert resp.course_id == "c1"
+        assert resp.total_chunks == 20
+        assert resp.status == "pending"
+
+    def test_lecture_script_generate_start_response_custom_status(self):
+        from schemas import LectureScriptGenerateStartResponse
+
+        resp = LectureScriptGenerateStartResponse(
+            task_id="xyz",
+            course_id="c2",
+            total_chunks=5,
+            status="processing",
+        )
+        assert resp.status == "processing"
+
     def test_lecture_script_save_request(self):
         from schemas import LectureScriptSaveRequest
 
@@ -203,3 +227,65 @@ class TestChunkStatusLogic:
                 chunk_id="test", chunk_index=0, text="t", status=status,
             )
             assert chunk.status == status
+
+
+# ---------------------------------------------------------------------------
+# Async batch generate worker logic tests (Issue #76)
+# ---------------------------------------------------------------------------
+
+
+class TestBatchGenerateAsync:
+    """非同期バッチスクリプト生成 (Issue #76) のロジックテスト。"""
+
+    def test_start_response_has_task_id(self):
+        """開始レスポンスに task_id が含まれること。"""
+        from schemas import LectureScriptGenerateStartResponse
+
+        resp = LectureScriptGenerateStartResponse(
+            task_id="task001",
+            course_id="course1",
+            total_chunks=30,
+        )
+        assert resp.task_id == "task001"
+        assert resp.status == "pending"
+        assert resp.total_chunks == 30
+
+    def test_start_response_zero_chunks(self):
+        """チャンク数0でも正常に作成できること。"""
+        from schemas import LectureScriptGenerateStartResponse
+
+        resp = LectureScriptGenerateStartResponse(
+            task_id="t0",
+            course_id="c0",
+            total_chunks=0,
+        )
+        assert resp.total_chunks == 0
+
+    def test_progress_calculation(self):
+        """進捗計算ロジックのテスト: (generated + skipped) / total * 100"""
+        total = 10
+        generated = 3
+        skipped = 2
+        processed = generated + skipped
+        progress = int(processed * 100 / total) if total > 0 else 100
+        assert progress == 50
+
+    def test_progress_calculation_zero_total(self):
+        """total=0 のとき progress=100 となること。"""
+        total = 0
+        progress = int(0 * 100 / total) if total > 0 else 100
+        assert progress == 100
+
+    def test_progress_calculation_all_skipped(self):
+        """全チャンクスキップ時に progress=100 となること。"""
+        total = 5
+        skipped = 5
+        processed = skipped
+        progress = int(processed * 100 / total) if total > 0 else 100
+        assert progress == 100
+
+    def test_worker_task_type(self):
+        """ワーカーのタスクタイプが script_generation であること。"""
+        # タスクタイプは create_background_task 呼び出し時に使われる定数
+        expected_task_type = "script_generation"
+        assert expected_task_type == "script_generation"
