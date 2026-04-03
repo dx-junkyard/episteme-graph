@@ -768,20 +768,42 @@
       });
     });
 
-    // Build sources
-    (draft.sources || []).forEach(function (s) {
-      if (typeof s === "string") {
-        courseData.sources.push({ title: s });
-      } else {
+    // Build sources from UI selection to guarantee material_id binding
+    courseData.sources = [];
+    if (state.selectedMaterialIds && state.selectedMaterialIds.length > 0) {
+      state.selectedMaterialIds.forEach(function (mid) {
+        var mat = null;
+        for (var i = 0; i < state.availableMaterials.length; i++) {
+          var m = state.availableMaterials[i];
+          if ((m.material_id || m.id) === mid) {
+            mat = m;
+            break;
+          }
+        }
         courseData.sources.push({
-          title: s.title || "",
-          subtitle: s.subtitle || "",
-          license: s.license || "",
-          used_section: s.used_section || "",
-          material_id: s.material_id || "",
+          title: mat ? (mat.title || mat.filename) : "",
+          subtitle: "",
+          license: "",
+          used_section: "",
+          material_id: mid,
         });
-      }
-    });
+      });
+    } else {
+      // Fallback to draft sources if no UI selection
+      (draft.sources || []).forEach(function (s) {
+        if (typeof s === "string") {
+          courseData.sources.push({ title: s, subtitle: "", license: "", used_section: "", material_id: "" });
+        } else {
+          courseData.sources.push({
+            title: s.title || "",
+            subtitle: s.subtitle || "",
+            license: s.license || "",
+            used_section: s.used_section || "",
+            material_id: s.material_id || "",
+          });
+        }
+      });
+    }
 
     // A2: is_template: true を付与してコースを登録
     apiFetch("/learning/courses", {
