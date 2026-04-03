@@ -57,8 +57,8 @@ _SPOKEN_TEXT_PROMPT = """あなたは学術テキストを音声読み上げ用�
    - 参照番号や図表番号は省略してよい
 2. **formulas**: テキスト中に出現するすべての数式をリストアップしてください。各数式は:
    - `id`: "formula_0", "formula_1", ... の連番
-   - `latex`: 元の LaTeX 表記
-   - `spoken`: 音声読み上げ用のテキスト
+   - `latex`: 元の LaTeX 表記（**必須** — 絶対に省略・改名しないこと）
+   - `spoken`: 音声読み上げ用のテキスト（**必須** — 絶対に省略・改名しないこと）
 
 ## チャンクテキスト:
 {chunk_text}
@@ -71,11 +71,63 @@ _SPOKEN_TEXT_PROMPT = """あなたは学術テキストを音声読み上げ用�
   ]
 }}
 
-重要: JSON のみを出力してください。マークダウンコードフェンスは不要です。"""
+重要:
+- JSON のみを出力してください。マークダウンコードフェンスは不要です。
+- formulas の各要素には必ず `latex` と `spoken` の両方のキーを含めてください。
+- `latex` を `formula`・`expression`・`math` などに改名してはいけません。
+- `spoken` を `reading`・`text`・`description` などに改名してはいけません。"""
+
+
+_FORMULA_REQUIRED_KEYS = {"latex", "spoken"}
+_MAX_LLM_ATTEMPTS = 3
+_LATEX_EXTRACTION_ERROR = "[LaTeX extraction error: manual completion required]"
+
+
+def _parse_spoken_text_response(raw: str) -> dict:
+    """LLM レスポンスをパースし、必須キーを検証する。
+
+    Parameters
+    ----------
+    raw : str
+        LLM の生出力テキスト
+
+    Returns
+    -------
+    dict
+        ``{"spoken_text": str, "formulas": list[dict]}``
+
+    Raises
+    ------
+    ValueError
+        JSON パース失敗または formulas 内の必須キー欠落時
+    """
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.split("\n")
+        lines = [ln for ln in lines if not ln.strip().startswith("```")]
+        cleaned = "\n".join(lines)
+
+    result = json.loads(cleaned, strict=False)
+
+    formulas = result.get("formulas", [])
+    for i, f in enumerate(formulas):
+        missing = _FORMULA_REQUIRED_KEYS - set(f.keys())
+        if missing:
+            raise ValueError(
+                f"formulas[{i}] is missing required keys: {missing}. Got: {list(f.keys())}"
+            )
+
+    return {
+        "spoken_text": result.get("spoken_text", ""),
+        "formulas": formulas,
+    }
 
 
 def generate_spoken_text_and_formulas(chunk_text: str) -> dict:
     """チャンクテキストから spoken_text と formulas を LLM で生成する。
+
+    LLM 出力が不正な場合は最大 ``_MAX_LLM_ATTEMPTS`` 回まで自動リトライする。
+    全試行が失敗した場合はフォールバック値を返す（クラッシュしない）。
 
     Returns
     -------
@@ -88,47 +140,68 @@ def generate_spoken_text_and_formulas(chunk_text: str) -> dict:
     params = get_llm_params("fast")
     prompt = _SPOKEN_TEXT_PROMPT.format(chunk_text=chunk_text[:4000])
 
-    try:
-        raw = generate_text(
-            messages=[{"role": "user", "content": prompt}],
-            model=params["model"],
-            reasoning_effort=params["reasoning_effort"],
-        )
-        cleaned = raw.strip()
-        # Strip markdown fences if present
-        if cleaned.startswith("```"):
-            lines = cleaned.split("\n")
-            lines = [ln for ln in lines if not ln.strip().startswith("```")]
-            cleaned = "\n".join(lines)
-        result = json.loads(cleaned, strict=False)
-        return {
-            "spoken_text": result.get("spoken_text", ""),
-            "formulas": result.get("formulas", []),
-        }
-    except Exception:
-        logger.warning("spoken_text generation failed, using fallback", exc_info=True)
-        return _fallback_spoken_text(chunk_text)
+    last_exc: Exception | None = None
+    for attempt in range(1, _MAX_LLM_ATTEMPTS + 1):
+        try:
+            raw = generate_text(
+                messages=[{"role": "user", "content": prompt}],
+                model=params["model"],
+                reasoning_effort=params["reasoning_effort"],
+            )
+            return _parse_spoken_text_response(raw)
+        except (json.JSONDecodeError, ValueError) as exc:
+            last_exc = exc
+            logger.warning(
+                "spoken_text generation attempt %d/%d failed validation: %s",
+                attempt, _MAX_LLM_ATTEMPTS, exc,
+            )
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                "spoken_text generation attempt %d/%d failed: %s",
+                attempt, _MAX_LLM_ATTEMPTS, exc, exc_info=True,
+            )
+
+    logger.error(
+        "spoken_text generation failed after %d attempts, using fallback. Last error: %s",
+        _MAX_LLM_ATTEMPTS, last_exc,
+    )
+    return _fallback_spoken_text(chunk_text)
 
 
 def _fallback_spoken_text(chunk_text: str) -> dict:
-    """LLM が失敗した場合のフォールバック: 数式を簡易的に置換する。"""
-    formulas = []
+    """LLM が全試行失敗した場合のフォールバック: 数式を簡易的に置換する。
+
+    LaTeX 抽出に失敗した数式には視認性の高いエラープレースホルダーを設定する。
+    空文字列は使わない（教員が見落とすリスクを避けるため）。
+    """
+    formulas: list[dict] = []
     spoken = chunk_text
 
     # Display math $$...$$
-    def _replace_display(m):
+    def _replace_display(m: re.Match) -> str:
         idx = len(formulas)
-        latex = m.group(1).strip()
-        formulas.append({"id": f"formula_{idx}", "latex": latex, "spoken": f"（数式{idx + 1}）"})
+        raw_latex = m.group(1).strip()
+        latex = raw_latex if raw_latex else _LATEX_EXTRACTION_ERROR
+        formulas.append({
+            "id": f"formula_{idx}",
+            "latex": latex,
+            "spoken": _LATEX_EXTRACTION_ERROR,
+        })
         return f"（数式{idx + 1}）"
 
     spoken = re.sub(r"\$\$([\s\S]+?)\$\$", _replace_display, spoken)
 
     # Inline math $...$
-    def _replace_inline(m):
+    def _replace_inline(m: re.Match) -> str:
         idx = len(formulas)
-        latex = m.group(1).strip()
-        formulas.append({"id": f"formula_{idx}", "latex": latex, "spoken": f"（数式{idx + 1}）"})
+        raw_latex = m.group(1).strip()
+        latex = raw_latex if raw_latex else _LATEX_EXTRACTION_ERROR
+        formulas.append({
+            "id": f"formula_{idx}",
+            "latex": latex,
+            "spoken": _LATEX_EXTRACTION_ERROR,
+        })
         return f"（数式{idx + 1}）"
 
     spoken = re.sub(r"\$([^\$\n]+?)\$", _replace_inline, spoken)
