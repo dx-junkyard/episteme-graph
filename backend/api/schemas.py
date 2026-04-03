@@ -97,7 +97,6 @@ class LearningSource(BaseModel):
     subtitle: str = ""
     license: str = ""
     used_section: str = ""
-    arxiv_id: str = ""  # 論文IDと紐付ける場合
     material_id: str = ""  # アップロード教材と紐付ける場合
 
 
@@ -394,3 +393,64 @@ class LectureInterruptResponse(BaseModel):
     resume_chunk_id: str
     resume_position_ms: int = 0
     course_update: dict | None = None
+
+
+# ---------------------------------------------------------------------------
+# Lecture Script Studio (Issue #70)
+# ---------------------------------------------------------------------------
+
+class LectureScriptChunkOut(BaseModel):
+    """チャンク単位のレクチャースクリプト情報。"""
+    chunk_id: str
+    chunk_index: int
+    text: str
+    spoken_text: str = ""
+    formulas: list[LectureFormulaItem] = []
+    status: str = "ungenerated"  # ungenerated | generated | edited | audio_ready
+
+
+class LectureScriptGenerateRequest(BaseModel):
+    """バッチスクリプト生成リクエスト。"""
+    override: bool = False  # 既存スクリプトを上書きするか
+
+
+class LectureScriptGenerateResponse(BaseModel):
+    """バッチスクリプト生成レスポンス。"""
+    course_id: str
+    total_chunks: int = 0
+    generated: int = 0
+    skipped: int = 0
+    chunks: list[LectureScriptChunkOut] = []
+
+
+class LectureScriptSaveRequest(BaseModel):
+    """手動スクリプト保存リクエスト。"""
+    spoken_text: str
+    formulas: list[dict] = []
+
+
+class LectureScriptSaveResponse(BaseModel):
+    """手動スクリプト保存レスポンス。"""
+    chunk_id: str
+    status: str = "edited"
+
+
+class LectureScriptRewriteRequest(BaseModel):
+    """AI スクリプト書き換えリクエスト。"""
+    prompt: str
+
+
+class LectureScriptRewriteResponse(BaseModel):
+    """AI スクリプト書き換えレスポンス。"""
+    chunk_id: str
+    spoken_text: str
+    formulas: list[LectureFormulaItem] = []
+
+
+class LectureAudioGenerateResponse(BaseModel):
+    """バッチ音声生成レスポンス。"""
+    course_id: str
+    total_chunks: int = 0
+    generated: int = 0
+    skipped: int = 0
+    errors: int = 0

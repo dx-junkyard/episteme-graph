@@ -27,6 +27,7 @@
     <div class="admin-tabs" id="adminTabs">
       <button class="admin-tab on" data-tab="materials">教材管理</button>
       <button class="admin-tab" data-tab="course-builder">コース構築</button>
+      <button class="admin-tab" data-tab="lecture-studio">原稿スタジオ</button>
       <button class="admin-tab" data-tab="stumbles">つまづきデータ</button>
       <button class="admin-tab" data-tab="schema-proposals">スキーマ提案</button>
     </div>
@@ -103,6 +104,67 @@
         </div>
       </div>
     </div>
+    <!-- Lecture Script Studio tab (Issue #70) -->
+    <div class="admin-panel" id="tab-lecture-studio">
+      <div class="ls-container">
+        <!-- Top bar: course selector + global actions -->
+        <div class="ls-topbar">
+          <div class="ls-topbar-left">
+            <label style="font-size:13px;color:var(--color-text-secondary)">コース:</label>
+            <select id="ls-course-select" style="flex:1;max-width:400px;padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
+              <option value="">コースを選択...</option>
+            </select>
+          </div>
+          <div class="ls-topbar-right">
+            <button id="ls-generate-all-btn" class="admin-action-btn" disabled>全スクリプト生成</button>
+            <button id="ls-audio-all-btn" class="admin-action-btn" disabled style="background:var(--color-text-info);color:#fff">音声を一括生成</button>
+          </div>
+        </div>
+        <div id="ls-progress" class="upload-status" style="display:none;margin:8px 16px"></div>
+
+        <!-- Three-panel layout -->
+        <div class="ls-panels">
+          <!-- Left: chunk navigation -->
+          <div class="ls-nav-panel">
+            <div class="ls-nav-header">チャンク一覧</div>
+            <div id="ls-chunk-list" class="ls-chunk-list">
+              <div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">コースを選択してください</div>
+            </div>
+          </div>
+
+          <!-- Center: editor -->
+          <div class="ls-editor-panel">
+            <div class="ls-editor-section">
+              <div class="ls-editor-label">ソーステキスト（読み取り専用）</div>
+              <div id="ls-source-text" class="ls-source-text">
+                <span style="color:var(--color-text-tertiary)">チャンクを選択すると表示されます</span>
+              </div>
+            </div>
+            <div class="ls-editor-section" style="flex:1;display:flex;flex-direction:column">
+              <div class="ls-editor-label">音声原稿（編集可能）</div>
+              <textarea id="ls-spoken-text" class="ls-spoken-textarea" placeholder="チャンクを選択してください..." disabled></textarea>
+            </div>
+          </div>
+
+          <!-- Right: AI assistant + actions -->
+          <div class="ls-action-panel">
+            <div class="ls-action-header">AI アシスタント</div>
+            <div class="ls-action-body">
+              <div style="margin-bottom:12px">
+                <label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:4px">書き換え指示:</label>
+                <textarea id="ls-rewrite-prompt" class="ls-rewrite-textarea" placeholder="例: 前提知識の説明を1文追加して" disabled></textarea>
+              </div>
+              <button id="ls-rewrite-btn" class="admin-action-btn" disabled style="width:100%;margin-bottom:12px">AIで書き換え</button>
+              <hr style="border:none;border-top:1px solid var(--color-border);margin:12px 0">
+              <button id="ls-save-btn" class="admin-action-btn" disabled style="width:100%;background:var(--color-text-success);color:#fff">原稿を保存</button>
+              <div id="ls-action-status" class="upload-status" style="display:none;margin-top:8px"></div>
+              <div id="ls-formulas" style="margin-top:16px"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Schema Proposals tab (Issue #45) -->
     <div class="admin-panel" id="tab-schema-proposals">
       <div class="admin-section">

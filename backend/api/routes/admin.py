@@ -270,7 +270,7 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
     {"name": "概念名", "children": ["子概念1", "子概念2"]}
   ],
   "sources": [
-    {"title": "教材タイトル", "subtitle": "補足情報"}
+    {"title": "教材タイトル", "subtitle": "補足情報", "material_id": "教材のID（必須）"}
   ]
 }
 
@@ -310,7 +310,7 @@ def course_builder_chat(
         try:
             records = pg_session.execute(
                 sa_text("""
-                    SELECT title, filename, knowledge_graph
+                    SELECT source_path, title, filename, knowledge_graph
                     FROM documents
                     WHERE uploaded_by = CAST(:user_id AS uuid) AND status = 'completed'
                 """),
@@ -322,10 +322,13 @@ def course_builder_chat(
         if records:
             materials_ctx = "## 利用可能な教材:\n"
             for r in records:
-                materials_ctx += f"- {r[0] or r[1] or ''}"
-                if r[2] and isinstance(r[2], dict) and r[2].get("domain"):
-                    materials_ctx += f" (分野: {r[2]['domain']})"
+                mid = r[0] or ""
+                title = r[1] or r[2] or ""
+                materials_ctx += f"- {title} (material_id: \"{mid}\")"
+                if r[3] and isinstance(r[3], dict) and r[3].get("domain"):
+                    materials_ctx += f" (分野: {r[3]['domain']})"
                 materials_ctx += "\n"
+            materials_ctx += "\n**重要:** sources に教材を追加する場合は、上記の material_id を必ず含めてください。"
             messages.append({
                 "role": "user",
                 "content": materials_ctx + "\n上記の教材が利用可能です。",
@@ -674,7 +677,6 @@ def get_course_as_draft(
             "subtitle": s.get("subtitle", ""),
             "license": s.get("license", ""),
             "used_section": s.get("used_section", ""),
-            "arxiv_id": s.get("arxiv_id", ""),
             "material_id": s.get("material_id", ""),
         })
 
@@ -996,3 +998,11 @@ def approve_schema_proposal_with_scope(
         proposal_id, body.scope, current_user["id"],
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Lecture Script Studio (Issue #70) — サブルーターとしてインクルード
+# ---------------------------------------------------------------------------
+from routes.lecture_studio import router as _lecture_studio_router  # noqa: E402
+
+router.include_router(_lecture_studio_router)
