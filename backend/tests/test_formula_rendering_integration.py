@@ -1,5 +1,6 @@
 """数式レンダリングパイプラインの結合テスト (Issue #91)。
 
+プレースホルダー分離方式（[[FORMULA_N]]）による数式レンダリングの安定性を検証する。
 教員によるバッチスクリプト生成 → DB 永続化 → 学生によるレクチャーシーケンス取得
 の一連の流れを通して、数式データ（display_text / formulas）が欠落・破損なく
 フロントエンドに届くことを検証する。
@@ -25,7 +26,7 @@ if _API_DIR not in sys.path:
 
 
 # ---------------------------------------------------------------------------
-# テスト用定数 — LLM モックが返す数式入りレスポンス
+# テスト用定数 — LLM モックが返すプレースホルダー方式レスポンス
 # ---------------------------------------------------------------------------
 
 _CHUNK_TEXT_RAW = (
@@ -37,8 +38,8 @@ _CHUNK_TEXT_RAW = (
 _LLM_RESPONSE = {
     "display_text": (
         "量子力学の基本方程式として、シュレーディンガー方程式 "
-        "$$i\\hbar \\frac{\\partial}{\\partial t}\\Psi = \\hat{H}\\Psi$$ がある。\n\n"
-        "また、エネルギーと質量の関係は $E = mc^2$ で表される。"
+        "[[FORMULA_0]] がある。\n\n"
+        "また、エネルギーと質量の関係は [[FORMULA_1]] で表される。"
     ),
     "spoken_text": (
         "量子力学の基本方程式として、シュレーディンガー方程式 "
@@ -47,14 +48,16 @@ _LLM_RESPONSE = {
     ),
     "formulas": [
         {
-            "id": "formula_0",
+            "id": "[[FORMULA_0]]",
             "latex": "i\\hbar \\frac{\\partial}{\\partial t}\\Psi = \\hat{H}\\Psi",
             "spoken": "アイ エイチバー パーシャルティー分のパーシャルプサイ イコール ハミルトニアンプサイ",
+            "is_display": True,
         },
         {
-            "id": "formula_1",
+            "id": "[[FORMULA_1]]",
             "latex": "E = mc^2",
             "spoken": "Eイコールmcの二乗",
+            "is_display": False,
         },
     ],
 }
@@ -82,32 +85,37 @@ _COURSE_DATA = {
     "sources": [{"title": "教材A", "material_id": _MATERIAL_ID}],
 }
 
+# プレースホルダーパターン: [[FORMULA_N]] 形式
+_PLACEHOLDER_PATTERN = re.compile(r"\[\[FORMULA_\d+\]\]")
+
 
 # ---------------------------------------------------------------------------
-# 1. LLM モック設定 — 数式プレースホルダー + 数式辞書を返す
+# 1. LLM モック設定 — プレースホルダー + 数式辞書を返す
 # ---------------------------------------------------------------------------
 
 
 class TestLLMMockConfiguration:
-    """LLM モックが数式メタデータ付きレスポンスを正しく生成すること。"""
+    """LLM モックがプレースホルダー方式の数式メタデータ付きレスポンスを正しく生成すること。"""
 
     @patch("core.lecture.generate_text")
-    def test_mock_returns_display_text_with_latex(self, mock_gen):
-        """LLM モックが display_text に LaTeX 数式を含むレスポンスを返す。"""
+    def test_mock_returns_display_text_with_placeholders(self, mock_gen):
+        """LLM モックが display_text にプレースホルダー [[FORMULA_N]] を含むレスポンスを返す。"""
         from core.lecture import generate_spoken_text_and_formulas
 
         mock_gen.return_value = json.dumps(_LLM_RESPONSE)
 
         result = generate_spoken_text_and_formulas(_CHUNK_TEXT_RAW)
 
-        # display_text に LaTeX デリミタ ($...$ や $$...$$) が含まれること
-        assert "$$" in result["display_text"] or "$" in result["display_text"]
-        assert "\\hbar" in result["display_text"]
-        assert "$E = mc^2$" in result["display_text"]
+        # display_text にプレースホルダーが含まれること
+        assert "[[FORMULA_0]]" in result["display_text"]
+        assert "[[FORMULA_1]]" in result["display_text"]
+        # display_text に生の LaTeX デリミタ ($, $$) が含まれないこと
+        assert "$$" not in result["display_text"]
+        assert re.search(r"(?<!\[)\$(?!\$)", result["display_text"]) is None
 
     @patch("core.lecture.generate_text")
     def test_mock_returns_formulas_with_required_keys(self, mock_gen):
-        """formulas 配列の各要素に id / latex / spoken が含まれること。"""
+        """formulas 配列の各要素に id / latex / spoken / is_display が含まれること。"""
         from core.lecture import generate_spoken_text_and_formulas
 
         mock_gen.return_value = json.dumps(_LLM_RESPONSE)
@@ -119,12 +127,14 @@ class TestLLMMockConfiguration:
             assert "id" in f
             assert "latex" in f
             assert "spoken" in f
+            assert "is_display" in f
             assert f["latex"]  # 空文字でないこと
             assert f["spoken"]  # 空文字でないこと
+            assert isinstance(f["is_display"], bool)
 
     @patch("core.lecture.generate_text")
-    def test_formula_ids_are_sequential(self, mock_gen):
-        """formula ID が formula_0, formula_1, ... の連番であること。"""
+    def test_formula_ids_match_placeholders(self, mock_gen):
+        """formula ID が display_text 内のプレースホルダーと完全一致すること。"""
         from core.lecture import generate_spoken_text_and_formulas
 
         mock_gen.return_value = json.dumps(_LLM_RESPONSE)
@@ -132,11 +142,15 @@ class TestLLMMockConfiguration:
         result = generate_spoken_text_and_formulas(_CHUNK_TEXT_RAW)
 
         ids = [f["id"] for f in result["formulas"]]
-        assert ids == ["formula_0", "formula_1"]
+        assert ids == ["[[FORMULA_0]]", "[[FORMULA_1]]"]
+
+        # 各 ID が display_text 内に存在すること
+        for fid in ids:
+            assert fid in result["display_text"]
 
     @patch("core.lecture.generate_text")
     def test_spoken_text_contains_no_raw_latex(self, mock_gen):
-        """spoken_text に生の LaTeX デリミタが含まれないこと。"""
+        """spoken_text に生の LaTeX デリミタやプレースホルダーが含まれないこと。"""
         from core.lecture import generate_spoken_text_and_formulas
 
         mock_gen.return_value = json.dumps(_LLM_RESPONSE)
@@ -145,6 +159,21 @@ class TestLLMMockConfiguration:
 
         assert "$" not in result["spoken_text"]
         assert "\\frac" not in result["spoken_text"]
+        assert "[[FORMULA_" not in result["spoken_text"]
+
+    @patch("core.lecture.generate_text")
+    def test_is_display_flag_values(self, mock_gen):
+        """is_display フラグがブロック数式/インライン数式を正しく区別すること。"""
+        from core.lecture import generate_spoken_text_and_formulas
+
+        mock_gen.return_value = json.dumps(_LLM_RESPONSE)
+
+        result = generate_spoken_text_and_formulas(_CHUNK_TEXT_RAW)
+
+        # formula_0 はブロック数式 (シュレーディンガー方程式)
+        assert result["formulas"][0]["is_display"] is True
+        # formula_1 はインライン数式 (E=mc^2)
+        assert result["formulas"][1]["is_display"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -200,8 +229,15 @@ class TestTeacherBatchGeneration:
         assert formulas_json[0]["latex"] == _LLM_RESPONSE["formulas"][0]["latex"]
         assert formulas_json[1]["latex"] == _LLM_RESPONSE["formulas"][1]["latex"]
 
-        # display_text に LaTeX が含まれていること
-        assert "$$" in params["display_text"] or "$" in params["display_text"]
+        # display_text にプレースホルダーが含まれていること
+        assert "[[FORMULA_0]]" in params["display_text"]
+        assert "[[FORMULA_1]]" in params["display_text"]
+        # display_text に生の LaTeX デリミタが含まれないこと
+        assert "$$" not in params["display_text"]
+
+        # formulas に is_display フラグが含まれていること
+        assert formulas_json[0]["is_display"] is True
+        assert formulas_json[1]["is_display"] is False
 
         # commit が呼ばれたこと
         mock_session.commit.assert_called()
@@ -217,7 +253,7 @@ class TestTeacherBatchGeneration:
                 "chunk_index": 0,
                 "text": _CHUNK_TEXT_RAW,
                 "spoken_text": "既に生成済みのテキスト",
-                "formulas": [{"id": "formula_0", "latex": "x", "spoken": "エックス"}],
+                "formulas": [{"id": "[[FORMULA_0]]", "latex": "x", "spoken": "エックス", "is_display": False}],
             },
         ]
 
@@ -261,10 +297,10 @@ class TestStudentLectureSequenceRetrieval:
     @patch("api.routes.lecture._check_audio_cache", return_value=False)
     @patch("api.routes.lecture._pg_session")
     @patch("api.routes.lecture.get_course_data", return_value=_COURSE_DATA)
-    def test_sequence_api_returns_display_text_with_latex(
+    def test_sequence_api_returns_display_text_with_placeholders(
         self, mock_course, mock_pg, mock_audio, mock_mastery,
     ):
-        """GET /sequence のレスポンス segments[].text に LaTeX 数式が含まれること。"""
+        """GET /sequence のレスポンス segments[].text にプレースホルダーが含まれること。"""
         from api.routes.lecture import get_lecture_sequence
 
         mock_session = MagicMock()
@@ -277,9 +313,11 @@ class TestStudentLectureSequenceRetrieval:
         assert resp.total_segments >= 1
         seg = resp.segments[0]
 
-        # display_text に LaTeX が含まれていること
-        assert "$$" in seg.text or "$" in seg.text
-        assert "\\hbar" in seg.text
+        # display_text にプレースホルダーが含まれていること
+        assert "[[FORMULA_0]]" in seg.text
+        assert "[[FORMULA_1]]" in seg.text
+        # 生の LaTeX デリミタが含まれないこと
+        assert "$$" not in seg.text
 
     @patch("api.routes.lecture.get_user_mastered_concepts", return_value=set())
     @patch("api.routes.lecture._check_audio_cache", return_value=False)
@@ -301,15 +339,18 @@ class TestStudentLectureSequenceRetrieval:
         seg = resp.segments[0]
         assert len(seg.formulas) == 2
 
-        # 各 formula に id / latex / spoken が含まれること
+        # 各 formula に id / latex / spoken / is_display が含まれること
         for f in seg.formulas:
-            assert f.id.startswith("formula_")
+            assert f.id.startswith("[[FORMULA_")
             assert f.latex  # 空でない
             assert f.spoken  # 空でない
+            assert isinstance(f.is_display, bool)
 
         # 具体的な値の検証
         assert seg.formulas[0].latex == _LLM_RESPONSE["formulas"][0]["latex"]
         assert seg.formulas[1].latex == "E = mc^2"
+        assert seg.formulas[0].is_display is True
+        assert seg.formulas[1].is_display is False
 
     @patch("api.routes.lecture.get_user_mastered_concepts", return_value=set())
     @patch("api.routes.lecture._check_audio_cache", return_value=False)
@@ -318,7 +359,8 @@ class TestStudentLectureSequenceRetrieval:
     def test_sequence_api_spoken_text_is_natural_language(
         self, mock_course, mock_pg, mock_audio, mock_mastery,
     ):
-        """GET /sequence の spoken_text が自然言語であり、LaTeX を含まないこと。"""
+        """GET /sequence の spoken_text が自然言語であり、
+        LaTeX やプレースホルダーを含まないこと。"""
         from api.routes.lecture import get_lecture_sequence
 
         mock_session = MagicMock()
@@ -331,16 +373,17 @@ class TestStudentLectureSequenceRetrieval:
         seg = resp.segments[0]
         assert "$" not in seg.spoken_text
         assert "\\frac" not in seg.spoken_text
+        assert "[[FORMULA_" not in seg.spoken_text
         assert "Eイコール" in seg.spoken_text
 
     @patch("api.routes.lecture.get_user_mastered_concepts", return_value=set())
     @patch("api.routes.lecture._check_audio_cache", return_value=False)
     @patch("api.routes.lecture._pg_session")
     @patch("api.routes.lecture.get_course_data", return_value=_COURSE_DATA)
-    def test_formula_latex_matches_display_text_content(
+    def test_formula_ids_match_display_text_placeholders(
         self, mock_course, mock_pg, mock_audio, mock_mastery,
     ):
-        """formulas[].latex の値が display_text 内の LaTeX 表現と一致すること。"""
+        """formulas[].id の値が display_text 内のプレースホルダーと完全一致すること。"""
         from api.routes.lecture import get_lecture_sequence
 
         mock_session = MagicMock()
@@ -353,16 +396,14 @@ class TestStudentLectureSequenceRetrieval:
         seg = resp.segments[0]
         display = seg.text
 
-        # display_text 内の LaTeX 式を抽出
-        display_math = re.findall(r"\$\$([\s\S]+?)\$\$", display)
-        inline_math = re.findall(r"\$([^\$\n]+?)\$", display)
-        all_latex_in_text = display_math + inline_math
+        # display_text 内の全プレースホルダーを抽出
+        placeholders_in_text = set(_PLACEHOLDER_PATTERN.findall(display))
+        formula_ids = {f.id for f in seg.formulas}
 
-        # formulas 配列の latex 値がすべて display_text のどこかに存在すること
-        for f in seg.formulas:
-            assert any(
-                f.latex in latex_expr for latex_expr in all_latex_in_text
-            ), f"Formula '{f.latex}' not found in display_text LaTeX expressions: {all_latex_in_text}"
+        # formulas 配列の全 ID が display_text に存在すること
+        assert formula_ids == placeholders_in_text, (
+            f"Mismatch: formula IDs={formula_ids}, placeholders in text={placeholders_in_text}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -372,43 +413,49 @@ class TestStudentLectureSequenceRetrieval:
 
 class TestFrontendSubstitutionValidity:
     """フロントエンドが formulas 配列を使って display_text から
-    数式をレンダリングできることを検証するシミュレーション。"""
+    プレースホルダーを数式に置換できることを検証するシミュレーション。"""
 
-    def test_all_latex_in_display_text_have_matching_formula(self):
-        """display_text 内の全 LaTeX 式に対応する formula エントリが存在すること。"""
+    def test_all_placeholders_have_matching_formula(self):
+        """display_text 内の全プレースホルダーに対応する formula エントリが存在すること。"""
         display = _LLM_RESPONSE["display_text"]
         formulas = _LLM_RESPONSE["formulas"]
 
-        # display_text 内の LaTeX 式を抽出
-        display_math = re.findall(r"\$\$([\s\S]+?)\$\$", display)
-        inline_math = re.findall(r"(?<!\$)\$([^\$\n]+?)\$(?!\$)", display)
-        all_latex_in_text = display_math + inline_math
+        placeholders_in_text = set(_PLACEHOLDER_PATTERN.findall(display))
+        formula_ids = {f["id"] for f in formulas}
 
-        formula_latex_set = {f["latex"] for f in formulas}
+        assert placeholders_in_text == formula_ids, (
+            f"Mismatch: placeholders={placeholders_in_text}, formula IDs={formula_ids}"
+        )
 
-        for latex_expr in all_latex_in_text:
-            assert latex_expr in formula_latex_set, (
-                f"LaTeX expression '{latex_expr}' in display_text has no matching formula entry. "
-                f"Available: {formula_latex_set}"
-            )
+    def test_placeholder_substitution_replaces_all(self):
+        """formulas の ID を使った split/join 置換で全プレースホルダーが消えること。
+        これはフロントエンドの text.split(f.id).join(rendered) と同等のロジック。"""
+        display = _LLM_RESPONSE["display_text"]
+        formulas = _LLM_RESPONSE["formulas"]
 
-    def test_formula_spoken_can_replace_latex_for_audio(self):
-        """formulas[].spoken を使って display_text の LaTeX 部分を
-        音声用テキストに置換できること（フロントエンド TTS フォールバック相当）。"""
+        result = display
+        for f in formulas:
+            # フロントエンドと同じ split/join 置換
+            result = result.replace(f["id"], f"[RENDERED:{f['latex']}]")
+
+        # 置換後にプレースホルダーが残っていないこと
+        remaining = _PLACEHOLDER_PATTERN.findall(result)
+        assert remaining == [], f"Unreplaced placeholders: {remaining}"
+
+    def test_formula_spoken_can_replace_placeholders_for_audio(self):
+        """formulas[].spoken を使ってプレースホルダーを音声用テキストに置換できること。"""
         display = _LLM_RESPONSE["display_text"]
         formulas = _LLM_RESPONSE["formulas"]
 
         audio_text = display
         for f in formulas:
-            # display math
-            audio_text = audio_text.replace(f"$${f['latex']}$$", f["spoken"])
-            # inline math
-            audio_text = audio_text.replace(f"${f['latex']}$", f["spoken"])
+            audio_text = audio_text.replace(f["id"], f["spoken"])
 
-        # 置換後のテキストに LaTeX デリミタが残っていないこと
+        # 置換後にプレースホルダーが残っていないこと
+        remaining = _PLACEHOLDER_PATTERN.findall(audio_text)
+        assert remaining == [], f"Unreplaced placeholders: {remaining}"
+        # LaTeX デリミタも含まれないこと
         assert "$$" not in audio_text
-        remaining_dollars = re.findall(r"\$[^\$]+\$", audio_text)
-        assert remaining_dollars == [], f"Unreplaced LaTeX: {remaining_dollars}"
 
     def test_formulas_array_is_not_empty_for_math_content(self):
         """数式を含むチャンクの formulas が空でないこと。"""
@@ -442,6 +489,8 @@ class TestFrontendSubstitutionValidity:
         assert len(dumped["formulas"]) == 2
         assert dumped["formulas"][0]["latex"] == _LLM_RESPONSE["formulas"][0]["latex"]
         assert dumped["formulas"][1]["latex"] == "E = mc^2"
+        assert dumped["formulas"][0]["is_display"] is True
+        assert dumped["formulas"][1]["is_display"] is False
         assert dumped["text"] == _LLM_RESPONSE["display_text"]
 
     def test_json_roundtrip_preserves_backslashes(self):
@@ -454,6 +503,15 @@ class TestFrontendSubstitutionValidity:
             assert orig["latex"] == rest["latex"], (
                 f"LaTeX corrupted by JSON roundtrip: {orig['latex']!r} → {rest['latex']!r}"
             )
+
+    def test_display_text_contains_no_latex_delimiters(self):
+        """display_text に $...$ や $$...$$ が含まれないこと（プレースホルダー方式の核心）。"""
+        display = _LLM_RESPONSE["display_text"]
+        assert "$$" not in display
+        # 単独の $ もないこと（文脈的に通貨記号等を除外）
+        assert not re.search(r"\$[A-Za-z\\]", display), (
+            "display_text contains LaTeX-like dollar sign pattern"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -512,16 +570,16 @@ class TestMultiChunkFormulaIntegrity:
             {
                 "id": "c1",
                 "chunk_index": 0,
-                "text": "チャンク1: $E = mc^2$",
+                "text": "チャンク1: [[FORMULA_0]]",
                 "spoken_text": "チャンク1",
-                "formulas": [{"id": "formula_0", "latex": "E = mc^2", "spoken": "Eイコールmcの二乗"}],
+                "formulas": [{"id": "[[FORMULA_0]]", "latex": "E = mc^2", "spoken": "Eイコールmcの二乗", "is_display": False}],
             },
             {
                 "id": "c2",
                 "chunk_index": 1,
-                "text": "チャンク2: $F = ma$",
+                "text": "チャンク2: [[FORMULA_0]]",
                 "spoken_text": "チャンク2",
-                "formulas": [{"id": "formula_0", "latex": "F = ma", "spoken": "Fイコールma"}],
+                "formulas": [{"id": "[[FORMULA_0]]", "latex": "F = ma", "spoken": "Fイコールma", "is_display": False}],
             },
         ]
 
@@ -533,3 +591,81 @@ class TestMultiChunkFormulaIntegrity:
         # 各チャンクの formulas が混在していないこと
         assert len(result[0]["formulas"]) == 1
         assert len(result[1]["formulas"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# 7. フォールバック（LLM 失敗時）のプレースホルダー方式テスト
+# ---------------------------------------------------------------------------
+
+
+class TestFallbackPlaceholderFormat:
+    """LLM が失敗した場合のフォールバックもプレースホルダー方式を使用すること。"""
+
+    def test_fallback_display_math_uses_placeholder(self):
+        """フォールバックで $$...$$ がプレースホルダーに変換されること。"""
+        from core.lecture import _fallback_spoken_text
+
+        text = "エネルギーは $$E = mc^2$$ で表される。"
+        result = _fallback_spoken_text(text)
+
+        # display_text にプレースホルダーが含まれること
+        assert "[[FORMULA_0]]" in result["display_text"]
+        # display_text に生の LaTeX デリミタが含まれないこと
+        assert "$$" not in result["display_text"]
+        # formulas の id がプレースホルダー形式であること
+        assert result["formulas"][0]["id"] == "[[FORMULA_0]]"
+        assert result["formulas"][0]["latex"] == "E = mc^2"
+        assert result["formulas"][0]["is_display"] is True
+
+    def test_fallback_inline_math_uses_placeholder(self):
+        """フォールバックで $...$ がプレースホルダーに変換されること。"""
+        from core.lecture import _fallback_spoken_text
+
+        text = "変数 $x$ と $y$ の関係"
+        result = _fallback_spoken_text(text)
+
+        assert "[[FORMULA_0]]" in result["display_text"]
+        assert "[[FORMULA_1]]" in result["display_text"]
+        assert "$" not in result["display_text"]
+        assert len(result["formulas"]) == 2
+        assert result["formulas"][0]["is_display"] is False
+        assert result["formulas"][1]["is_display"] is False
+
+    def test_fallback_mixed_math_uses_placeholder(self):
+        """フォールバックでインラインとディスプレイ数式が混在するケース。"""
+        from core.lecture import _fallback_spoken_text
+
+        text = "インライン $a+b$ とディスプレイ $$F = ma$$ が混在"
+        result = _fallback_spoken_text(text)
+
+        assert len(result["formulas"]) == 2
+        # 各 formula に is_display フラグが正しくセットされていること
+        display_flags = {f["id"]: f["is_display"] for f in result["formulas"]}
+        # $$F = ma$$ はブロック数式
+        block_formulas = [f for f in result["formulas"] if f["is_display"] is True]
+        inline_formulas = [f for f in result["formulas"] if f["is_display"] is False]
+        assert len(block_formulas) == 1
+        assert len(inline_formulas) == 1
+        assert block_formulas[0]["latex"] == "F = ma"
+        assert inline_formulas[0]["latex"] == "a+b"
+
+    def test_fallback_no_math(self):
+        """フォールバックで数式なしテキストはそのまま返ること。"""
+        from core.lecture import _fallback_spoken_text
+
+        text = "これは普通のテキストです。"
+        result = _fallback_spoken_text(text)
+
+        assert result["display_text"] == text
+        assert result["spoken_text"] == text
+        assert result["formulas"] == []
+
+    def test_fallback_spoken_text_replaces_with_reference(self):
+        """フォールバックの spoken_text で数式が（数式N）に置換されること。"""
+        from core.lecture import _fallback_spoken_text
+
+        text = "式は $$E = mc^2$$ である。"
+        result = _fallback_spoken_text(text)
+
+        assert "（数式1）" in result["spoken_text"]
+        assert "$$" not in result["spoken_text"]
