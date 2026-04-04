@@ -2101,7 +2101,7 @@
   function lsBatchAudio() {
     lsState.generating = true;
     document.getElementById("ls-audio-all-btn").disabled = true;
-    lsShowProgress("音声を生成中... (数分かかる場合があります)", "info");
+    lsShowProgress("音声生成を開始しています...", "info");
 
     apiFetch("/admin/courses/" + lsState.courseId + "/lecture-audio/generate", {
       method: "POST",
@@ -2112,22 +2112,76 @@
         return res.json();
       })
       .then(function (data) {
-        lsShowProgress(
-          "音声生成完了: " + data.generated + "件生成 / " + data.skipped + "件スキップ" +
-          (data.errors > 0 ? " / " + data.errors + "件エラー" : "") +
-          " (全" + data.total_chunks + "件)",
-          data.errors > 0 ? "error" : "success"
-        );
-        // Reload scripts to update statuses
-        lsLoadScripts(lsState.courseId);
+        var taskId = data.task_id;
+        var totalChunks = data.total_chunks || 0;
+        lsShowProgress("音声生成中... (0 / " + totalChunks + ")", "info");
+        _lsPollAudioTask(taskId, totalChunks);
       })
       .catch(function (err) {
         lsShowProgress("音声生成に失敗しました: " + (err.message || "不明なエラー"), "error");
-      })
-      .finally(function () {
         lsState.generating = false;
         document.getElementById("ls-audio-all-btn").disabled = false;
       });
+  }
+
+  function _lsPollAudioTask(taskId, totalChunks) {
+    var retryCount = 0;
+    var maxRetries = 5;
+    var intervalMs = 3000;
+
+    function poll() {
+      apiFetch("/admin/tasks/" + taskId)
+        .then(function (res) {
+          if (!res.ok) throw new Error("Status check failed");
+          return res.json();
+        })
+        .then(function (task) {
+          retryCount = 0;
+
+          var rd = task.result_data || {};
+          var generated = rd.generated || 0;
+          var skipped = rd.skipped || 0;
+          var errors = rd.errors || 0;
+          var progress = rd.progress || 0;
+          var processed = generated + skipped + errors;
+
+          if (task.status === "completed") {
+            clearInterval(timer);
+            lsShowProgress(
+              "音声生成完了: " + generated + "件生成 / " + skipped + "件スキップ" +
+              (errors > 0 ? " / " + errors + "件エラー" : "") +
+              " (全" + totalChunks + "件)",
+              errors > 0 ? "error" : "success"
+            );
+            lsState.generating = false;
+            document.getElementById("ls-audio-all-btn").disabled = false;
+            lsLoadScripts(lsState.courseId);
+          } else if (task.status === "failed") {
+            clearInterval(timer);
+            lsShowProgress("音声生成に失敗しました: " + (task.error_message || "不明なエラー"), "error");
+            lsState.generating = false;
+            document.getElementById("ls-audio-all-btn").disabled = false;
+          } else {
+            // pending / processing
+            lsShowProgress(
+              "音声生成中... (" + processed + " / " + totalChunks + " — " + progress + "%)",
+              "info"
+            );
+          }
+        })
+        .catch(function () {
+          retryCount++;
+          if (retryCount >= maxRetries) {
+            clearInterval(timer);
+            lsShowProgress("進捗確認に失敗しました。ページをリロードして状況を確認してください。", "error");
+            lsState.generating = false;
+            document.getElementById("ls-audio-all-btn").disabled = false;
+          }
+        });
+    }
+
+    var timer = setInterval(poll, intervalMs);
+    poll();
   }
 
   function lsSaveScript() {
