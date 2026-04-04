@@ -37,7 +37,7 @@ from services import (
     get_course_data,
     update_background_task,
 )
-from core.lecture import generate_spoken_text_and_formulas
+from core.lecture import generate_spoken_text_and_formulas, normalize_to_placeholder_format
 from core.llm import generate_text, get_llm_params
 from core.postgres import get_session as _pg_session
 
@@ -78,16 +78,20 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
             params,
         ).fetchall()
 
-        return [
-            {
+        chunks = []
+        for row in rows:
+            text = row[3] or row[2] or ""
+            formulas = row[5] if row[5] else []
+            # 旧フォーマット（$...$）のデータをプレースホルダー方式に正規化
+            text, formulas = normalize_to_placeholder_format(text, formulas)
+            chunks.append({
                 "id": str(row[0]),
                 "chunk_index": row[1],
-                "text": row[3] or row[2] or "",
+                "text": text,
                 "spoken_text": row[4] or "",
-                "formulas": row[5] if row[5] else [],
-            }
-            for row in rows
-        ]
+                "formulas": formulas,
+            })
+        return chunks
     finally:
         session.close()
 
@@ -351,8 +355,8 @@ _REWRITE_PROMPT = """あなたは大学講義の音声原稿を改善するア�
 **重要:**
 - 教員の指示に従い、必要に応じて一般的な物理学・数学の知識を補足してください
 - ソーステキストに限定されず、教員が指示する内容を反映させてください
-- display_text では LaTeX 数式（`$$...$$` や `$...$`）を保持してください
-- LaTeX 数式は自然言語に変換してください（例: `$E = mc^2$` → 「Eイコールmcの二乗」）
+- display_text では数式を `[[FORMULA_0]]`, `[[FORMULA_1]]` のようなプレースホルダーで表現してください。`$...$` や `$$...$$` は使わないでください
+- spoken_text では LaTeX 数式を自然言語に変換してください（例: `E = mc^2` → 「Eイコールmcの二乗」）
 - 自然な日本語の講義調で書いてください
 - 数式メタデータも更新してください
 
@@ -370,10 +374,10 @@ _REWRITE_PROMPT = """あなたは大学講義の音声原稿を改善するア�
 
 ## 出力形式 (厳密にJSON):
 {{
-  "display_text": "画面表示用テキスト（LaTeXは保持）",
-  "spoken_text": "書き換えた音声原稿",
+  "display_text": "エネルギーは [[FORMULA_0]] で表される。",
+  "spoken_text": "エネルギーは Eイコールmcの二乗 で表される。",
   "formulas": [
-    {{"id": "formula_0", "latex": "E = mc^2", "spoken": "Eイコールmcの二乗"}}
+    {{"id": "[[FORMULA_0]]", "latex": "E = mc^2", "spoken": "Eイコールmcの二乗", "is_display": false}}
   ]
 }}
 

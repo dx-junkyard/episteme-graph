@@ -42,26 +42,27 @@ _SPOKEN_TEXT_PROMPT = """あなたは大学院レベルの学習を支援する�
 ## 指示:
 1. **display_text**: 画面表示用テキストを再構築してください。
    - 抽出テキスト内の欠落・OCRノイズ・崩れた数式を補正し、教材として自然に読める本文へ修復する
-   - 数式は必ず正しい LaTeX で復元し、本文中に `$...$` または `$$...$$` 形式で埋め込む
-   - 表示用であるため、数式そのものは自然言語に言い換えない
+   - 本文中に数式の LaTeX コードを直接書かず、代わりに `[[FORMULA_0]]`, `[[FORMULA_1]]` のような一意のプレースホルダーを配置する
+   - `$...$` や `$$...$$` などの LaTeX デリミタは display_text に絶対に使わないこと
    - 段落構造は維持し、必要に応じて文を補完してよい
 2. **spoken_text**: 上記の「現在地」の文脈を踏まえ、このチャンクがコース全体の中で果たすべき役割（導入、詳細解説、まとめ等）を意識して、音声読み上げ用のテキストを構築してください。
    - 抽出の欠落や論理の飛躍がある場合は、該当分野の標準知識を用いて、前後の文脈と整合するように補完してください。
-   - LaTeX 数式は自然言語に変換する（例: `$E = mc^2$` → 「Eイコールmcの二乗」）
+   - LaTeX 数式は自然言語に変換する（例: `E = mc^2` → 「Eイコールmcの二乗」）
    - 専門用語にはふりがなや読み方を含める
    - 段落の区切りは自然な「間」を表す「...」を入れる
    - 参照番号や図表番号は省略してよい
 3. **formulas**: スクリプトに登場する重要な数式をリストアップしてください。
-   - `id`: "formula_0", "formula_1", ... の連番
+   - `id`: "[[FORMULA_0]]", "[[FORMULA_1]]", ... のように display_text に埋め込んだプレースホルダーと完全一致する文字列
    - `latex`: 元の LaTeX 表記（**必須** — 絶対に省略・改名しないこと）
    - `spoken`: 音声読み上げ用のテキスト（**必須** — 絶対に省略・改名しないこと）
+   - `is_display`: ブロック数式（独立行）なら true、インライン数式なら false を指定（**必須**）
 
 ## 出力形式 (厳密にJSON):
 {{
-  "display_text": "...",
-  "spoken_text": "...",
+  "display_text": "エネルギーは [[FORMULA_0]] で表される。",
+  "spoken_text": "エネルギーは Eイコールmcの二乗 で表される。",
   "formulas": [
-    {{"id": "formula_0", "latex": "E = mc^2", "spoken": "Eイコールmcの二乗"}}
+    {{"id": "[[FORMULA_0]]", "latex": "E = mc^2", "spoken": "Eイコールmcの二乗", "is_display": false}}
   ]
 }}
 
@@ -70,10 +71,11 @@ _SPOKEN_TEXT_PROMPT = """あなたは大学院レベルの学習を支援する�
 - formulas の各要素には必ず `latex` と `spoken` の両方のキーを含めてください。
 - `latex` を `formula`・`expression`・`math` などに改名してはいけません。
 - `spoken` を `reading`・`text`・`description` などに改名してはいけません。
+- display_text には `$` や `$$` を絶対に含めないでください。数式は必ず `[[FORMULA_N]]` プレースホルダーで表現してください。
 """
 
 
-_FORMULA_REQUIRED_KEYS = {"latex", "spoken"}
+_FORMULA_REQUIRED_KEYS = {"latex", "spoken", "is_display"}
 _MAX_LLM_ATTEMPTS = 3
 _LATEX_EXTRACTION_ERROR = "[LaTeX extraction error: manual completion required]"
 
@@ -197,39 +199,146 @@ def _fallback_spoken_text(chunk_text: str) -> dict:
 
     LaTeX 抽出に失敗した数式には視認性の高いエラープレースホルダーを設定する。
     空文字列は使わない（教員が見落とすリスクを避けるため）。
+
+    display_text にはプレースホルダー方式 ``[[FORMULA_N]]`` を使用する。
     """
     formulas: list[dict] = []
+    display = chunk_text
     spoken = chunk_text
 
     # Display math $$...$$
-    def _replace_display(m: re.Match) -> str:
+    def _replace_display_disp(m: re.Match) -> str:
         idx = len(formulas)
         raw_latex = m.group(1).strip()
         latex = raw_latex if raw_latex else _LATEX_EXTRACTION_ERROR
         formulas.append({
-            "id": f"formula_{idx}",
+            "id": f"[[FORMULA_{idx}]]",
             "latex": latex,
             "spoken": _LATEX_EXTRACTION_ERROR,
+            "is_display": True,
         })
+        return f"[[FORMULA_{idx}]]"
+
+    display = re.sub(r"\$\$([\s\S]+?)\$\$", _replace_display_disp, display)
+
+    def _replace_display_spoken(m: re.Match) -> str:
+        # formulas は既に _replace_display_disp で追加済みなのでカウントだけ合わせる
+        nonlocal _spoken_formula_idx
+        idx = _spoken_formula_idx
+        _spoken_formula_idx += 1
         return f"（数式{idx + 1}）"
 
-    spoken = re.sub(r"\$\$([\s\S]+?)\$\$", _replace_display, spoken)
+    _spoken_formula_idx = 0
+    spoken = re.sub(r"\$\$([\s\S]+?)\$\$", _replace_display_spoken, spoken)
 
     # Inline math $...$
-    def _replace_inline(m: re.Match) -> str:
+    def _replace_inline_disp(m: re.Match) -> str:
         idx = len(formulas)
         raw_latex = m.group(1).strip()
         latex = raw_latex if raw_latex else _LATEX_EXTRACTION_ERROR
         formulas.append({
-            "id": f"formula_{idx}",
+            "id": f"[[FORMULA_{idx}]]",
             "latex": latex,
             "spoken": _LATEX_EXTRACTION_ERROR,
+            "is_display": False,
         })
+        return f"[[FORMULA_{idx}]]"
+
+    display = re.sub(r"\$([^\$\n]+?)\$", _replace_inline_disp, display)
+
+    def _replace_inline_spoken(m: re.Match) -> str:
+        nonlocal _spoken_formula_idx
+        idx = _spoken_formula_idx
+        _spoken_formula_idx += 1
         return f"（数式{idx + 1}）"
 
-    spoken = re.sub(r"\$([^\$\n]+?)\$", _replace_inline, spoken)
+    spoken = re.sub(r"\$([^\$\n]+?)\$", _replace_inline_spoken, spoken)
 
-    return {"display_text": chunk_text, "spoken_text": spoken, "formulas": formulas}
+    return {"display_text": display, "spoken_text": spoken, "formulas": formulas}
+
+
+# ---------------------------------------------------------------------------
+# 旧フォーマット → プレースホルダー方式への正規化
+# ---------------------------------------------------------------------------
+
+_PLACEHOLDER_RE = re.compile(r"\[\[FORMULA_\d+\]\]")
+
+
+def normalize_to_placeholder_format(
+    display_text: str,
+    formulas: list[dict],
+) -> tuple[str, list[dict]]:
+    """旧フォーマット（LaTeX デリミタ方式）のデータをプレースホルダー方式に変換する。
+
+    既にプレースホルダー方式のデータはそのまま返す。
+
+    Parameters
+    ----------
+    display_text : str
+        画面表示用テキスト（旧形式: ``$...$`` / ``$$...$$`` を含む場合がある）
+    formulas : list[dict]
+        数式メタデータのリスト
+
+    Returns
+    -------
+    tuple[str, list[dict]]
+        正規化済みの (display_text, formulas)
+    """
+    if not display_text:
+        return display_text, formulas
+
+    # 既にプレースホルダー方式なら何もしない
+    if _PLACEHOLDER_RE.search(display_text):
+        return display_text, formulas
+
+    # LaTeX デリミタが含まれていなければ変換不要
+    if "$$" not in display_text and "$" not in display_text:
+        return display_text, formulas
+
+    # 旧フォーマットをプレースホルダーに変換
+    new_formulas: list[dict] = []
+    new_display = display_text
+
+    # Display math $$...$$ → [[FORMULA_N]]
+    def _replace_display(m: re.Match) -> str:
+        idx = len(new_formulas)
+        raw_latex = m.group(1).strip()
+        # 旧 formulas から spoken を探す
+        spoken = _find_spoken_for_latex(raw_latex, formulas)
+        new_formulas.append({
+            "id": f"[[FORMULA_{idx}]]",
+            "latex": raw_latex,
+            "spoken": spoken,
+            "is_display": True,
+        })
+        return f"[[FORMULA_{idx}]]"
+
+    new_display = re.sub(r"\$\$([\s\S]+?)\$\$", _replace_display, new_display)
+
+    # Inline math $...$ → [[FORMULA_N]]
+    def _replace_inline(m: re.Match) -> str:
+        idx = len(new_formulas)
+        raw_latex = m.group(1).strip()
+        spoken = _find_spoken_for_latex(raw_latex, formulas)
+        new_formulas.append({
+            "id": f"[[FORMULA_{idx}]]",
+            "latex": raw_latex,
+            "spoken": spoken,
+            "is_display": False,
+        })
+        return f"[[FORMULA_{idx}]]"
+
+    new_display = re.sub(r"\$([^\$\n]+?)\$", _replace_inline, new_display)
+
+    return new_display, new_formulas
+
+
+def _find_spoken_for_latex(latex: str, formulas: list[dict]) -> str:
+    """旧 formulas リストから LaTeX に対応する spoken テキストを探す。"""
+    for f in formulas:
+        if f.get("latex", "").strip() == latex:
+            return f.get("spoken", "")
+    return ""
 
 
 # ---------------------------------------------------------------------------
