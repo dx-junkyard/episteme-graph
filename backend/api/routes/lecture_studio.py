@@ -12,7 +12,9 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import threading
 import time
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text as sa_text
@@ -23,13 +25,17 @@ from schemas import (
     LectureFormulaItem,
     LectureScriptChunkOut,
     LectureScriptGenerateRequest,
-    LectureScriptGenerateResponse,
+    LectureScriptGenerateStartResponse,
     LectureScriptRewriteRequest,
     LectureScriptRewriteResponse,
     LectureScriptSaveRequest,
     LectureScriptSaveResponse,
 )
-from services import get_course_data
+from services import (
+    create_background_task,
+    get_course_data,
+    update_background_task,
+)
 from core.lecture import generate_spoken_text_and_formulas, estimate_word_timestamps
 from core.llm import generate_text, get_llm_params
 from core.postgres import get_session as _pg_session
@@ -112,19 +118,103 @@ def _chunk_status(chunk: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _batch_generate_worker(
+    task_id: str,
+    course_id: str,
+    chunks: list[dict],
+    override: bool,
+    course_data: dict,
+) -> None:
+    """バックグラウンドスレッドでスクリプトを一括生成する。"""
+    total = len(chunks)
+    generated = 0
+    skipped = 0
+
+    update_background_task(task_id, "processing", result_data={
+        "course_id": course_id,
+        "total_chunks": total,
+        "generated": 0,
+        "skipped": 0,
+        "progress": 0,
+    })
+
+    session = _pg_session()
+    try:
+        for i, chunk in enumerate(chunks):
+            if chunk["spoken_text"] and not override:
+                skipped += 1
+            else:
+                result = generate_spoken_text_and_formulas(
+                    chunk_text=chunk["text"],
+                    chunk_index=chunk["chunk_index"],
+                    course_data=course_data
+                )
+                spoken_text = result["spoken_text"]
+                formulas = result["formulas"]
+
+                session.execute(
+                    sa_text("""
+                        UPDATE chunks
+                        SET spoken_text = :spoken_text,
+                            formulas = CAST(:formulas AS jsonb)
+                        WHERE id = CAST(:id AS uuid)
+                    """),
+                    {
+                        "id": chunk["id"],
+                        "spoken_text": spoken_text,
+                        "formulas": json.dumps(formulas, ensure_ascii=False),
+                    },
+                )
+                session.commit()
+                generated += 1
+
+            # チャンクごとに進捗を更新
+            processed = generated + skipped
+            update_background_task(task_id, "processing", result_data={
+                "course_id": course_id,
+                "total_chunks": total,
+                "generated": generated,
+                "skipped": skipped,
+                "progress": int(processed * 100 / total) if total > 0 else 100,
+            })
+
+    except Exception as exc:
+        session.rollback()
+        error_msg = str(exc)
+        logger.error("batch_generate_worker failed for task %s: %s", task_id, error_msg)
+        update_background_task(task_id, "failed", error_message=error_msg)
+        return
+    finally:
+        session.close()
+
+    update_background_task(task_id, "completed", result_data={
+        "course_id": course_id,
+        "total_chunks": total,
+        "generated": generated,
+        "skipped": skipped,
+        "progress": 100,
+    })
+    logger.info(
+        "batch_generate_worker completed: task=%s course=%s generated=%d skipped=%d",
+        task_id, course_id, generated, skipped,
+    )
+
+
 @router.post(
     "/courses/{course_id}/lecture-scripts/generate",
-    response_model=LectureScriptGenerateResponse,
+    response_model=LectureScriptGenerateStartResponse,
+    status_code=202,
 )
 def batch_generate_scripts(
     course_id: str,
     body: LectureScriptGenerateRequest,
     current_user: dict = Depends(_require_teacher),
-) -> LectureScriptGenerateResponse:
-    """コースの全チャンクに対して spoken_text と formulas を一括生成する。
+) -> LectureScriptGenerateStartResponse:
+    """コースの全チャンクに対して spoken_text と formulas を一括生成する（非同期）。
 
-    既存スクリプトがある場合は override=true でのみ上書きする。
-    TTS音声はこの段階では生成しない。
+    即座に task_id を返し、処理はバックグラウンドで実行される。
+    進捗は GET /api/admin/tasks/{task_id} でポーリングして確認する。
+    result_data.progress (0-100) で進捗率を取得できる。
     """
     course_data = get_course_data(current_user["id"], course_id)
     if not course_data:
@@ -134,65 +224,26 @@ def batch_generate_scripts(
     if not chunks:
         raise HTTPException(status_code=404, detail="No chunks found for this course")
 
-    generated = 0
-    skipped = 0
-    result_chunks: list[LectureScriptChunkOut] = []
+    task_id = str(uuid.uuid4())[:12]
+    create_background_task(task_id, "script_generation", current_user["id"])
 
-    session = _pg_session()
-    try:
-        for chunk in chunks:
-            if chunk["spoken_text"] and not body.override:
-                skipped += 1
-                result_chunks.append(LectureScriptChunkOut(
-                    chunk_id=chunk["id"],
-                    chunk_index=chunk["chunk_index"],
-                    text=chunk["text"],
-                    spoken_text=chunk["spoken_text"],
-                    formulas=[LectureFormulaItem(**f) for f in chunk["formulas"]] if chunk["formulas"] else [],
-                    status=_chunk_status(chunk),
-                ))
-                continue
+    thread = threading.Thread(
+        target=_batch_generate_worker,
+        args=(task_id, course_id, chunks, body.override, course_data),
+        daemon=True,
+    )
+    thread.start()
 
-            result = generate_spoken_text_and_formulas(chunk["text"])
-            spoken_text = result["spoken_text"]
-            formulas = result["formulas"]
+    logger.info(
+        "batch_generate_scripts accepted: task=%s course=%s chunks=%d by user=%s",
+        task_id, course_id, len(chunks), current_user["id"],
+    )
 
-            session.execute(
-                sa_text("""
-                    UPDATE chunks
-                    SET spoken_text = :spoken_text,
-                        formulas = CAST(:formulas AS jsonb)
-                    WHERE id = CAST(:id AS uuid)
-                """),
-                {
-                    "id": chunk["id"],
-                    "spoken_text": spoken_text,
-                    "formulas": json.dumps(formulas, ensure_ascii=False),
-                },
-            )
-            generated += 1
-            result_chunks.append(LectureScriptChunkOut(
-                chunk_id=chunk["id"],
-                chunk_index=chunk["chunk_index"],
-                text=chunk["text"],
-                spoken_text=spoken_text,
-                formulas=[LectureFormulaItem(**f) for f in formulas],
-                status="generated",
-            ))
-
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
-
-    return LectureScriptGenerateResponse(
+    return LectureScriptGenerateStartResponse(
+        task_id=task_id,
         course_id=course_id,
         total_chunks=len(chunks),
-        generated=generated,
-        skipped=skipped,
-        chunks=result_chunks,
+        status="pending",
     )
 
 

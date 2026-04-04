@@ -47,21 +47,37 @@ def estimate_word_timestamps(text: str, total_duration_ms: int) -> list[dict]:
 # spoken_text / formulas 生成
 # ---------------------------------------------------------------------------
 
-_SPOKEN_TEXT_PROMPT = """あなたは学術テキストを音声読み上げ用に変換するアシスタントです。
+_SPOKEN_TEXT_PROMPT = """あなたは大学院レベルの学習を支援する教育者AIです。
 
-以下のチャンクテキストを処理してください:
-1. **spoken_text**: 音声で読み上げるためのテキストを生成してください。
+以下の「チャンクテキスト」は、PDFから抽出された教材の一部であり、OCRノイズや数式の欠落が含まれる不完全なテキストです。
+このテキストが意図している学術的な主張を推測し、その学問分野の標準的な知識に基づいて、正確で論理的な講義スクリプトを再構築してください。
+
+## コース情報
+- タイトル: {course_title}
+- 到達目標: {course_goal}
+- 対象となる前提知識: {course_prerequisites}
+
+## コースの全体構成（マップ）
+{course_structure}
+
+## 今回処理するチャンク情報
+- チャンク番号: {chunk_index} 番目（コース全体の教材順序における位置）
+
+## チャンクテキスト (不完全な抽出テキスト):
+{chunk_text}
+
+
+## 指示:
+1. **spoken_text**: 上記の「現在地」の文脈を踏まえ、このチャンクがコース全体の中で果たすべき役割（導入、詳細解説、まとめ等）を意識して、音声読み上げ用のテキストを構築してください。
+   - 抽出の欠落や論理の飛躍がある場合は、該当分野の標準知識を用いて、前後の文脈と整合するように補完してください。
    - LaTeX 数式は自然言語に変換する（例: `$E = mc^2$` → 「Eイコールmcの二乗」）
    - 専門用語にはふりがなや読み方を含める
    - 段落の区切りは自然な「間」を表す「...」を入れる
    - 参照番号や図表番号は省略してよい
-2. **formulas**: テキスト中に出現するすべての数式をリストアップしてください。各数式は:
+2. **formulas**: スクリプトに登場する重要な数式をリストアップしてください。
    - `id`: "formula_0", "formula_1", ... の連番
    - `latex`: 元の LaTeX 表記（**必須** — 絶対に省略・改名しないこと）
    - `spoken`: 音声読み上げ用のテキスト（**必須** — 絶対に省略・改名しないこと）
-
-## チャンクテキスト:
-{chunk_text}
 
 ## 出力形式 (厳密にJSON):
 {{
@@ -71,11 +87,12 @@ _SPOKEN_TEXT_PROMPT = """あなたは学術テキストを音声読み上げ用�
   ]
 }}
 
-重要:
+## 重要:
 - JSON のみを出力してください。マークダウンコードフェンスは不要です。
 - formulas の各要素には必ず `latex` と `spoken` の両方のキーを含めてください。
 - `latex` を `formula`・`expression`・`math` などに改名してはいけません。
-- `spoken` を `reading`・`text`・`description` などに改名してはいけません。"""
+- `spoken` を `reading`・`text`・`description` などに改名してはいけません。
+"""
 
 
 _FORMULA_REQUIRED_KEYS = {"latex", "spoken"}
@@ -122,23 +139,50 @@ def _parse_spoken_text_response(raw: str) -> dict:
         "formulas": formulas,
     }
 
+def _build_course_context_text(course_data: dict) -> str:
+    """コースデータから章・トピック構成を文字列化する"""
+    lines = []
+    for i, ch in enumerate(course_data.get("chapters", [])):
+        title = ch if isinstance(ch, str) else ch.get("title", "")
+        lines.append(f"第{i+1}章: {title}")
+        for t in course_data.get("topics", []):
+            if t.get("chapter_index") == i:
+                lines.append(f"  - トピック: {t.get('title', '')}")
+    return "\n".join(lines)
 
-def generate_spoken_text_and_formulas(chunk_text: str) -> dict:
-    """チャンクテキストから spoken_text と formulas を LLM で生成する。
 
-    LLM 出力が不正な場合は最大 ``_MAX_LLM_ATTEMPTS`` 回まで自動リトライする。
-    全試行が失敗した場合はフォールバック値を返す（クラッシュしない）。
-
-    Returns
-    -------
-    dict
-        ``{"spoken_text": str, "formulas": list[dict]}``
-    """
+def generate_spoken_text_and_formulas(
+    chunk_text: str, 
+    chunk_index: int = 0, 
+    course_data: dict | None = None
+) -> dict:
+    """チャンクテキストから spoken_text と formulas を LLM で生成する。"""
     if not chunk_text or not chunk_text.strip():
         return {"spoken_text": "", "formulas": []}
 
+    # コンテキスト情報の抽出
+    course_title = "不明"
+    course_goal = "特になし"
+    course_prereqs = "特になし"
+    course_structure = "不明"
+
+    if course_data:
+        course_title = course_data.get("title", course_title)
+        course_goal = course_data.get("goal", course_goal)
+        prereqs = course_data.get("prerequisites", [])
+        if prereqs:
+            course_prereqs = ", ".join(prereqs)
+        course_structure = _build_course_context_text(course_data)
+
     params = get_llm_params("fast")
-    prompt = _SPOKEN_TEXT_PROMPT.format(chunk_text=chunk_text[:4000])
+    prompt = _SPOKEN_TEXT_PROMPT.format(
+        course_title=course_title,
+        course_goal=course_goal,
+        course_prerequisites=course_prereqs,
+        course_structure=course_structure,
+        chunk_index=chunk_index,
+        chunk_text=chunk_text[:4000]
+    )
 
     last_exc: Exception | None = None
     for attempt in range(1, _MAX_LLM_ATTEMPTS + 1):
