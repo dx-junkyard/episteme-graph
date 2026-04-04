@@ -269,9 +269,7 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
   "concepts": [
     {"name": "概念名", "children": ["子概念1", "子概念2"]}
   ],
-  "sources": [
-    {"title": "教材タイトル", "subtitle": "補足情報"}
-  ]
+  "sources": []
 }
 
 **対話の進め方:**
@@ -288,7 +286,8 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
 - 教員が単なる質問をしている場合（構成変更を伴わない場合）は区切り文字とJSONを出力しない
 - topics[].prerequisites には、そのトピックを学ぶ前に習得しておくべき**同コース内の**トピックのタイトルを列挙する
   - 例: 第2章のトピックは第1章のトピックタイトルを prerequisites に入れる
-  - 最初のトピックや前提知識不要なトピックは prerequisites を空配列 [] にする"""
+  - 最初のトピックや前提知識不要なトピックは prerequisites を空配列 [] にする
+- sources フィールドは常に空配列 [] のままにすること（教材はシステムが自動的に設定する）"""
 
 
 @router.post(
@@ -304,38 +303,44 @@ def course_builder_chat(
         {"role": "system", "content": _COURSE_BUILDER_SYSTEM_PROMPT},
     ]
 
-    # 利用可能な教材情報をコンテキストに含める
-    try:
-        pg_session = _pg_session()
+    # 選択教材のタイトル・分野のみをコンテキストとして渡す（material_id は含めない）
+    if body.selected_material_ids:
         try:
-            records = pg_session.execute(
-                sa_text("""
-                    SELECT title, filename, knowledge_graph
-                    FROM documents
-                    WHERE uploaded_by = CAST(:user_id AS uuid) AND status = 'completed'
-                """),
-                {"user_id": current_user["id"]},
-            ).fetchall()
-        finally:
-            pg_session.close()
+            pg_session = _pg_session()
+            try:
+                placeholders = ", ".join(f":mid_{i}" for i in range(len(body.selected_material_ids)))
+                params: dict = {}
+                for i, mid in enumerate(body.selected_material_ids):
+                    params[f"mid_{i}"] = mid
+                records = pg_session.execute(
+                    sa_text(f"""
+                        SELECT title, filename, knowledge_graph
+                        FROM documents
+                        WHERE source_path IN ({placeholders}) AND status = 'completed'
+                    """),
+                    params,
+                ).fetchall()
+            finally:
+                pg_session.close()
 
-        if records:
-            materials_ctx = "## 利用可能な教材:\n"
-            for r in records:
-                materials_ctx += f"- {r[0] or r[1] or ''}"
-                if r[2] and isinstance(r[2], dict) and r[2].get("domain"):
-                    materials_ctx += f" (分野: {r[2]['domain']})"
-                materials_ctx += "\n"
-            messages.append({
-                "role": "user",
-                "content": materials_ctx + "\n上記の教材が利用可能です。",
-            })
-            messages.append({
-                "role": "assistant",
-                "content": "承知しました。これらの教材を踏まえてコース設計を支援します。",
-            })
-    except Exception:
-        logger.warning("Failed to load materials context for course builder", exc_info=True)
+            if records:
+                materials_ctx = "## 使用する教材:\n"
+                for r in records:
+                    title = r[0] or r[1] or ""
+                    materials_ctx += f"- {title}"
+                    if r[2] and isinstance(r[2], dict) and r[2].get("domain"):
+                        materials_ctx += f" (分野: {r[2]['domain']})"
+                    materials_ctx += "\n"
+                messages.append({
+                    "role": "user",
+                    "content": materials_ctx + "\n上記の教材を使ってコースを設計してください。",
+                })
+                messages.append({
+                    "role": "assistant",
+                    "content": "承知しました。これらの教材を踏まえてコース設計を支援します。",
+                })
+        except Exception:
+            logger.warning("Failed to load selected materials context for course builder", exc_info=True)
 
     for turn in body.history:
         messages.append({"role": turn["role"], "content": turn["content"]})
@@ -365,6 +370,37 @@ def course_builder_chat(
             course_draft = json.loads(json_part)
         except Exception:
             logger.warning("Failed to parse course_draft JSON: %s", json_part[:200])
+
+    # 選択教材の正しい material_id を確定的に course_draft["sources"] に注入する
+    if course_draft is not None and body.selected_material_ids:
+        try:
+            pg_session = _pg_session()
+            try:
+                placeholders = ", ".join(f":mid_{i}" for i in range(len(body.selected_material_ids)))
+                params = {}
+                for i, mid in enumerate(body.selected_material_ids):
+                    params[f"mid_{i}"] = mid
+                records = pg_session.execute(
+                    sa_text(f"""
+                        SELECT source_path, title, filename
+                        FROM documents
+                        WHERE source_path IN ({placeholders}) AND status = 'completed'
+                    """),
+                    params,
+                ).fetchall()
+            finally:
+                pg_session.close()
+
+            sources = []
+            for r in records:
+                sources.append({
+                    "material_id": r[0] or "",
+                    "title": r[1] or r[2] or "",
+                    "subtitle": "",
+                })
+            course_draft["sources"] = sources
+        except Exception:
+            logger.warning("Failed to inject material sources into course_draft", exc_info=True)
 
     logger.info(
         "Course builder chat for user=%s, draft=%s",
@@ -674,7 +710,6 @@ def get_course_as_draft(
             "subtitle": s.get("subtitle", ""),
             "license": s.get("license", ""),
             "used_section": s.get("used_section", ""),
-            "arxiv_id": s.get("arxiv_id", ""),
             "material_id": s.get("material_id", ""),
         })
 
@@ -996,3 +1031,11 @@ def approve_schema_proposal_with_scope(
         proposal_id, body.scope, current_user["id"],
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Lecture Script Studio (Issue #70) — サブルーターとしてインクルード
+# ---------------------------------------------------------------------------
+from routes.lecture_studio import router as _lecture_studio_router  # noqa: E402
+
+router.include_router(_lecture_studio_router)

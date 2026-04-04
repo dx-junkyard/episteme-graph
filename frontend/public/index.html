@@ -40,10 +40,41 @@
           トピックを選択して学習を始めましょう。
         </div>
       </div>
+      <!-- Lecture content area (hidden by default) -->
+      <div class="lecture-content" id="lecture-content"></div>
+      <!-- Lecture player bar -->
+      <div class="lecture-player" id="lecture-player">
+        <div class="lecture-controls">
+          <button class="lecture-prev-btn" id="lecture-prev" title="前のセグメント">&#9664;</button>
+          <button class="lecture-play-btn" id="lecture-play" title="再生">&#9654;</button>
+          <div class="lecture-progress-info">
+            <span class="lecture-segment-label" id="lecture-segment-label">--</span>
+            <div class="lecture-progress-bar"><div class="lecture-progress-fill" id="lecture-progress-fill"></div></div>
+          </div>
+          <span class="lecture-time" id="lecture-time">0:00</span>
+          <button class="lecture-next-btn" id="lecture-next" title="次のセグメント">&#9654;</button>
+          <button class="lecture-question-btn" id="lecture-question" title="質問する">&#10067; 質問</button>
+        </div>
+      </div>
       <div class="ia">
+        <button class="lecture-toggle-btn" id="lecture-toggle" title="レクチャーモード切替">&#127897; レクチャー</button>
         <input type="text" id="chat-input" placeholder="質問を入力してください...">
         <button id="send-btn">送信</button>
       </div>
+    </div>
+
+    <!-- Lecture interrupt chat popup -->
+    <div class="lecture-chat-popup" id="lecture-chat-popup">
+      <div class="lecture-chat-header">
+        <span>&#10067; 講義中の質問</span>
+        <button class="lecture-chat-close" id="lecture-chat-close">&times;</button>
+      </div>
+      <div class="lecture-chat-messages" id="lecture-chat-messages"></div>
+      <div class="lecture-chat-input-area">
+        <input type="text" id="lecture-chat-input" placeholder="質問を入力...">
+        <button id="lecture-chat-send">送信</button>
+      </div>
+      <button class="lecture-chat-resume-btn" id="lecture-chat-resume">&#9654; 講義を再開する</button>
     </div>
 
     <!-- Right Panel -->

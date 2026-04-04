@@ -16,6 +16,8 @@
     sending: false,
     currentSessionId: null,
     importedFromCourseId: null,
+    availableMaterials: [],
+    selectedMaterialIds: [],
   };
 
   var API = "/api";
@@ -392,6 +394,63 @@
 
     // A1: セッション一覧をロード
     loadSessions();
+    // Issue #72: 利用可能な教材一覧をロード
+    loadMaterialsForSelection();
+  }
+
+  // ── Material Selection (Issue #72) ────────────────────────────────
+  function loadMaterialsForSelection() {
+    apiFetch("/admin/materials")
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        var materials = Array.isArray(data) ? data : (data.materials || []);
+        state.availableMaterials = materials.filter(function (m) {
+          return m.status === "completed";
+        });
+        renderMaterialCheckboxes();
+      })
+      .catch(function () {
+        var listEl = document.getElementById("cb-material-select-list");
+        if (listEl) listEl.innerHTML = '<span style="color:var(--color-text-tertiary);font-size:12px">教材の読み込みに失敗しました</span>';
+      });
+  }
+
+  function renderMaterialCheckboxes() {
+    var listEl = document.getElementById("cb-material-select-list");
+    if (!listEl) return;
+
+    if (!state.availableMaterials || state.availableMaterials.length === 0) {
+      listEl.innerHTML = '<span style="color:var(--color-text-tertiary);font-size:12px">利用可能な教材がありません</span>';
+      return;
+    }
+
+    var html = "";
+    state.availableMaterials.forEach(function (m) {
+      var mid = escHtml(m.material_id || m.id || "");
+      var title = escHtml(m.title || m.filename || "不明な教材");
+      var checked = state.selectedMaterialIds.indexOf(m.material_id || m.id || "") !== -1;
+      html += '<label class="cb-material-checkbox' + (checked ? " selected" : "") + '" data-mid="' + mid + '">';
+      html += '<input type="checkbox" value="' + mid + '"' + (checked ? " checked" : "") + '>';
+      html += title;
+      html += "</label>";
+    });
+    listEl.innerHTML = html;
+
+    listEl.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
+      cb.addEventListener("change", function () {
+        var mid = this.value;
+        var label = this.parentElement;
+        if (this.checked) {
+          if (state.selectedMaterialIds.indexOf(mid) === -1) {
+            state.selectedMaterialIds.push(mid);
+          }
+          label.classList.add("selected");
+        } else {
+          state.selectedMaterialIds = state.selectedMaterialIds.filter(function (id) { return id !== mid; });
+          label.classList.remove("selected");
+        }
+      });
+    });
   }
 
   // ── Session Management ─────────────────────────────────────────────
@@ -526,6 +585,7 @@
         message: text,
         history: chatHistory,
         session_id: state.currentSessionId || null,
+        selected_material_ids: state.selectedMaterialIds,
       }),
     })
       .then(function (res) {
@@ -708,21 +768,42 @@
       });
     });
 
-    // Build sources
-    (draft.sources || []).forEach(function (s) {
-      if (typeof s === "string") {
-        courseData.sources.push({ title: s });
-      } else {
+    // Build sources from UI selection to guarantee material_id binding
+    courseData.sources = [];
+    if (state.selectedMaterialIds && state.selectedMaterialIds.length > 0) {
+      state.selectedMaterialIds.forEach(function (mid) {
+        var mat = null;
+        for (var i = 0; i < state.availableMaterials.length; i++) {
+          var m = state.availableMaterials[i];
+          if ((m.material_id || m.id) === mid) {
+            mat = m;
+            break;
+          }
+        }
         courseData.sources.push({
-          title: s.title || "",
-          subtitle: s.subtitle || "",
-          license: s.license || "",
-          used_section: s.used_section || "",
-          arxiv_id: s.arxiv_id || "",
-          material_id: s.material_id || "",
+          title: mat ? (mat.title || mat.filename) : "",
+          subtitle: "",
+          license: "",
+          used_section: "",
+          material_id: mid,
         });
-      }
-    });
+      });
+    } else {
+      // Fallback to draft sources if no UI selection
+      (draft.sources || []).forEach(function (s) {
+        if (typeof s === "string") {
+          courseData.sources.push({ title: s, subtitle: "", license: "", used_section: "", material_id: "" });
+        } else {
+          courseData.sources.push({
+            title: s.title || "",
+            subtitle: s.subtitle || "",
+            license: s.license || "",
+            used_section: s.used_section || "",
+            material_id: s.material_id || "",
+          });
+        }
+      });
+    }
 
     // A2: is_template: true を付与してコースを登録
     apiFetch("/learning/courses", {
@@ -1720,6 +1801,468 @@
       });
   }
 
+  // ── Lecture Script Studio (Issue #70) ───────────────────────────────
+  var lsState = {
+    courseId: null,
+    chunks: [],
+    selectedChunkId: null,
+    generating: false,
+  };
+
+  function initLectureStudio() {
+    var courseSelect = document.getElementById("ls-course-select");
+    var generateAllBtn = document.getElementById("ls-generate-all-btn");
+    var audioAllBtn = document.getElementById("ls-audio-all-btn");
+    var saveBtn = document.getElementById("ls-save-btn");
+    var rewriteBtn = document.getElementById("ls-rewrite-btn");
+
+    courseSelect.addEventListener("change", function () {
+      var courseId = this.value;
+      if (courseId) {
+        lsState.courseId = courseId;
+        generateAllBtn.disabled = false;
+        audioAllBtn.disabled = false;
+        lsLoadScripts(courseId);
+      } else {
+        lsState.courseId = null;
+        lsState.chunks = [];
+        lsState.selectedChunkId = null;
+        generateAllBtn.disabled = true;
+        audioAllBtn.disabled = true;
+        lsRenderChunkList();
+        lsClearEditor();
+      }
+    });
+
+    generateAllBtn.addEventListener("click", function () {
+      if (!lsState.courseId || lsState.generating) return;
+      lsBatchGenerate();
+    });
+
+    audioAllBtn.addEventListener("click", function () {
+      if (!lsState.courseId || lsState.generating) return;
+      lsBatchAudio();
+    });
+
+    saveBtn.addEventListener("click", function () {
+      lsSaveScript();
+    });
+
+    rewriteBtn.addEventListener("click", function () {
+      lsRewriteScript();
+    });
+
+    // Load courses on tab activation
+    onTabActivate("lecture-studio", function () {
+      lsLoadCourses();
+    });
+
+    lsLoadCourses();
+  }
+
+  function lsLoadCourses() {
+    var select = document.getElementById("ls-course-select");
+    var currentVal = select.value;
+    // Keep first placeholder option, remove the rest
+    while (select.options.length > 1) select.remove(1);
+
+    apiFetch("/admin/courses")
+      .then(function (res) { return res.json(); })
+      .then(function (courses) {
+        courses.forEach(function (c) {
+          var opt = document.createElement("option");
+          opt.value = c.id;
+          opt.textContent = c.title + (c.is_published ? " [公開中]" : "");
+          select.appendChild(opt);
+        });
+        if (currentVal) select.value = currentVal;
+      })
+      .catch(function () {});
+  }
+
+  function lsLoadScripts(courseId) {
+    var listEl = document.getElementById("ls-chunk-list");
+    listEl.innerHTML = '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">読み込み中...</div>';
+
+    apiFetch("/admin/courses/" + courseId + "/lecture-scripts")
+      .then(function (res) {
+        if (!res.ok) throw new Error("Failed to load scripts");
+        return res.json();
+      })
+      .then(function (chunks) {
+        lsState.chunks = chunks;
+        lsState.selectedChunkId = null;
+        lsRenderChunkList();
+        lsClearEditor();
+      })
+      .catch(function () {
+        listEl.innerHTML = '<div style="padding:16px;color:var(--color-text-danger);font-size:13px">読み込みに失敗しました</div>';
+      });
+  }
+
+  function lsRenderChunkList() {
+    var listEl = document.getElementById("ls-chunk-list");
+    if (!lsState.chunks || lsState.chunks.length === 0) {
+      listEl.innerHTML = '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">チャンクがありません</div>';
+      return;
+    }
+
+    var html = "";
+    lsState.chunks.forEach(function (c, i) {
+      var active = c.chunk_id === lsState.selectedChunkId ? " active" : "";
+      var preview = (c.text || "").substring(0, 40).replace(/\n/g, " ");
+      if (c.text && c.text.length > 40) preview += "...";
+      html +=
+        '<div class="ls-chunk-item' + active + '" data-chunk-id="' + escHtml(c.chunk_id) + '">' +
+          '<span class="ls-chunk-status ' + escHtml(c.status) + '"></span>' +
+          '<span class="ls-chunk-label">#' + (c.chunk_index || i) + " " + escHtml(preview) + '</span>' +
+        '</div>';
+    });
+    listEl.innerHTML = html;
+
+    // Bind click handlers
+    listEl.querySelectorAll(".ls-chunk-item").forEach(function (item) {
+      item.addEventListener("click", function () {
+        var chunkId = this.getAttribute("data-chunk-id");
+        lsSelectChunk(chunkId);
+      });
+    });
+  }
+
+  function lsSelectChunk(chunkId) {
+    lsState.selectedChunkId = chunkId;
+    var chunk = null;
+    for (var i = 0; i < lsState.chunks.length; i++) {
+      if (lsState.chunks[i].chunk_id === chunkId) {
+        chunk = lsState.chunks[i];
+        break;
+      }
+    }
+    if (!chunk) return;
+
+    // Update active class
+    document.querySelectorAll(".ls-chunk-item").forEach(function (el) {
+      el.classList.remove("active");
+      if (el.getAttribute("data-chunk-id") === chunkId) el.classList.add("active");
+    });
+
+    // Fill editor
+    var sourceEl = document.getElementById("ls-source-text");
+    sourceEl.textContent = chunk.text || "(テキストなし)";
+
+    var spokenEl = document.getElementById("ls-spoken-text");
+    spokenEl.value = chunk.spoken_text || "";
+    spokenEl.disabled = false;
+
+    document.getElementById("ls-rewrite-prompt").disabled = false;
+    document.getElementById("ls-rewrite-btn").disabled = false;
+    document.getElementById("ls-save-btn").disabled = false;
+
+    // Show formulas
+    lsRenderFormulas(chunk.formulas || []);
+  }
+
+  function lsClearEditor() {
+    document.getElementById("ls-source-text").innerHTML = '<span style="color:var(--color-text-tertiary)">チャンクを選択すると表示されます</span>';
+    var spokenEl = document.getElementById("ls-spoken-text");
+    spokenEl.value = "";
+    spokenEl.disabled = true;
+    document.getElementById("ls-rewrite-prompt").disabled = true;
+    document.getElementById("ls-rewrite-btn").disabled = true;
+    document.getElementById("ls-save-btn").disabled = true;
+    document.getElementById("ls-formulas").innerHTML = "";
+    lsHideActionStatus();
+  }
+
+  function lsRenderFormulas(formulas) {
+    var el = document.getElementById("ls-formulas");
+    if (!formulas || formulas.length === 0) {
+      el.innerHTML = "";
+      return;
+    }
+    var html = '<div style="font-size:11px;font-weight:600;color:var(--color-text-secondary);margin-bottom:6px">数式一覧</div>';
+    formulas.forEach(function (f) {
+      html +=
+        '<div class="ls-formula-item">' +
+          '<span class="ls-formula-latex">' + escHtml(f.latex || f.id || "") + '</span><br>' +
+          '<span class="ls-formula-spoken">' + escHtml(f.spoken || "") + '</span>' +
+        '</div>';
+    });
+    el.innerHTML = html;
+  }
+
+  function lsShowProgress(msg, type) {
+    var el = document.getElementById("ls-progress");
+    el.innerHTML = msg;
+    el.className = "upload-status upload-status-" + (type || "info");
+    el.style.display = "block";
+  }
+
+  function lsHideProgress() {
+    var el = document.getElementById("ls-progress");
+    el.style.display = "none";
+  }
+
+  function lsShowActionStatus(msg, type) {
+    var el = document.getElementById("ls-action-status");
+    el.textContent = msg;
+    el.className = "upload-status upload-status-" + (type || "info");
+    el.style.display = "block";
+  }
+
+  function lsHideActionStatus() {
+    var el = document.getElementById("ls-action-status");
+    el.style.display = "none";
+  }
+
+  function lsBatchGenerate() {
+    lsState.generating = true;
+    document.getElementById("ls-generate-all-btn").disabled = true;
+    lsShowProgress("スクリプト生成を開始しています...", "info");
+
+    apiFetch("/admin/courses/" + lsState.courseId + "/lecture-scripts/generate", {
+      method: "POST",
+      body: JSON.stringify({ override: false }),
+    })
+      .then(function (res) {
+        if (!res.ok) throw new Error("Generation failed");
+        return res.json();
+      })
+      .then(function (data) {
+        var taskId = data.task_id;
+        var totalChunks = data.total_chunks || 0;
+        lsShowProgress("スクリプト生成中... (0 / " + totalChunks + ")", "info");
+        _lsPollGenerateTask(taskId, totalChunks);
+      })
+      .catch(function (err) {
+        lsShowProgress("生成に失敗しました: " + (err.message || "不明なエラー"), "error");
+        lsState.generating = false;
+        document.getElementById("ls-generate-all-btn").disabled = false;
+      });
+  }
+
+  function _lsPollGenerateTask(taskId, totalChunks) {
+    var retryCount = 0;
+    var maxRetries = 5;
+    var intervalMs = 3000;
+
+    function poll() {
+      apiFetch("/admin/tasks/" + taskId)
+        .then(function (res) {
+          if (!res.ok) throw new Error("Status check failed");
+          return res.json();
+        })
+        .then(function (task) {
+          retryCount = 0;
+
+          var rd = task.result_data || {};
+          var generated = rd.generated || 0;
+          var skipped = rd.skipped || 0;
+          var progress = rd.progress || 0;
+          var processed = generated + skipped;
+
+          if (task.status === "completed") {
+            clearInterval(timer);
+            lsShowProgress(
+              "生成完了: " + generated + "件生成 / " + skipped + "件スキップ (全" + totalChunks + "件)",
+              "success"
+            );
+            lsState.generating = false;
+            document.getElementById("ls-generate-all-btn").disabled = false;
+            lsLoadScripts(lsState.courseId);
+          } else if (task.status === "failed") {
+            clearInterval(timer);
+            lsShowProgress("生成に失敗しました: " + (task.error_message || "不明なエラー"), "error");
+            lsState.generating = false;
+            document.getElementById("ls-generate-all-btn").disabled = false;
+          } else {
+            // pending / processing
+            lsShowProgress(
+              "スクリプト生成中... (" + processed + " / " + totalChunks + " — " + progress + "%)",
+              "info"
+            );
+          }
+        })
+        .catch(function () {
+          retryCount++;
+          if (retryCount >= maxRetries) {
+            clearInterval(timer);
+            lsShowProgress("進捗確認に失敗しました。ページをリロードして状況を確認してください。", "error");
+            lsState.generating = false;
+            document.getElementById("ls-generate-all-btn").disabled = false;
+          }
+        });
+    }
+
+    var timer = setInterval(poll, intervalMs);
+    poll();
+  }
+
+  function lsBatchAudio() {
+    lsState.generating = true;
+    document.getElementById("ls-audio-all-btn").disabled = true;
+    lsShowProgress("音声生成を開始しています...", "info");
+
+    apiFetch("/admin/courses/" + lsState.courseId + "/lecture-audio/generate", {
+      method: "POST",
+      body: "{}",
+    })
+      .then(function (res) {
+        if (!res.ok) throw new Error("Audio generation failed");
+        return res.json();
+      })
+      .then(function (data) {
+        var taskId = data.task_id;
+        var totalChunks = data.total_chunks || 0;
+        lsShowProgress("音声生成中... (0 / " + totalChunks + ")", "info");
+        _lsPollAudioTask(taskId, totalChunks);
+      })
+      .catch(function (err) {
+        lsShowProgress("音声生成に失敗しました: " + (err.message || "不明なエラー"), "error");
+        lsState.generating = false;
+        document.getElementById("ls-audio-all-btn").disabled = false;
+      });
+  }
+
+  function _lsPollAudioTask(taskId, totalChunks) {
+    var retryCount = 0;
+    var maxRetries = 5;
+    var intervalMs = 3000;
+
+    function poll() {
+      apiFetch("/admin/tasks/" + taskId)
+        .then(function (res) {
+          if (!res.ok) throw new Error("Status check failed");
+          return res.json();
+        })
+        .then(function (task) {
+          retryCount = 0;
+
+          var rd = task.result_data || {};
+          var generated = rd.generated || 0;
+          var skipped = rd.skipped || 0;
+          var errors = rd.errors || 0;
+          var progress = rd.progress || 0;
+          var processed = generated + skipped + errors;
+
+          if (task.status === "completed") {
+            clearInterval(timer);
+            lsShowProgress(
+              "音声生成完了: " + generated + "件生成 / " + skipped + "件スキップ" +
+              (errors > 0 ? " / " + errors + "件エラー" : "") +
+              " (全" + totalChunks + "件)",
+              errors > 0 ? "error" : "success"
+            );
+            lsState.generating = false;
+            document.getElementById("ls-audio-all-btn").disabled = false;
+            lsLoadScripts(lsState.courseId);
+          } else if (task.status === "failed") {
+            clearInterval(timer);
+            lsShowProgress("音声生成に失敗しました: " + (task.error_message || "不明なエラー"), "error");
+            lsState.generating = false;
+            document.getElementById("ls-audio-all-btn").disabled = false;
+          } else {
+            // pending / processing
+            lsShowProgress(
+              "音声生成中... (" + processed + " / " + totalChunks + " — " + progress + "%)",
+              "info"
+            );
+          }
+        })
+        .catch(function () {
+          retryCount++;
+          if (retryCount >= maxRetries) {
+            clearInterval(timer);
+            lsShowProgress("進捗確認に失敗しました。ページをリロードして状況を確認してください。", "error");
+            lsState.generating = false;
+            document.getElementById("ls-audio-all-btn").disabled = false;
+          }
+        });
+    }
+
+    var timer = setInterval(poll, intervalMs);
+    poll();
+  }
+
+  function lsSaveScript() {
+    if (!lsState.selectedChunkId) return;
+
+    var spokenText = document.getElementById("ls-spoken-text").value;
+    document.getElementById("ls-save-btn").disabled = true;
+    lsShowActionStatus("保存中...", "info");
+
+    apiFetch("/admin/chunks/" + lsState.selectedChunkId + "/lecture-script", {
+      method: "PUT",
+      body: JSON.stringify({ spoken_text: spokenText, formulas: [] }),
+    })
+      .then(function (res) {
+        if (!res.ok) throw new Error("Save failed");
+        return res.json();
+      })
+      .then(function () {
+        lsShowActionStatus("保存しました", "success");
+        // Update local state
+        for (var i = 0; i < lsState.chunks.length; i++) {
+          if (lsState.chunks[i].chunk_id === lsState.selectedChunkId) {
+            lsState.chunks[i].spoken_text = spokenText;
+            lsState.chunks[i].status = "edited";
+            break;
+          }
+        }
+        lsRenderChunkList();
+      })
+      .catch(function () {
+        lsShowActionStatus("保存に失敗しました", "error");
+      })
+      .finally(function () {
+        document.getElementById("ls-save-btn").disabled = false;
+      });
+  }
+
+  function lsRewriteScript() {
+    if (!lsState.selectedChunkId) return;
+
+    var prompt = document.getElementById("ls-rewrite-prompt").value.trim();
+    if (!prompt) {
+      lsShowActionStatus("指示を入力してください", "error");
+      return;
+    }
+
+    document.getElementById("ls-rewrite-btn").disabled = true;
+    lsShowActionStatus("AIで書き換え中...", "info");
+
+    apiFetch("/admin/chunks/" + lsState.selectedChunkId + "/lecture-script/rewrite", {
+      method: "POST",
+      body: JSON.stringify({ prompt: prompt }),
+    })
+      .then(function (res) {
+        if (!res.ok) throw new Error("Rewrite failed");
+        return res.json();
+      })
+      .then(function (data) {
+        // Update editor
+        document.getElementById("ls-spoken-text").value = data.spoken_text;
+        lsRenderFormulas(data.formulas || []);
+        lsShowActionStatus("書き換え完了", "success");
+        // Update local state
+        for (var i = 0; i < lsState.chunks.length; i++) {
+          if (lsState.chunks[i].chunk_id === lsState.selectedChunkId) {
+            lsState.chunks[i].spoken_text = data.spoken_text;
+            lsState.chunks[i].formulas = data.formulas || [];
+            lsState.chunks[i].status = "edited";
+            break;
+          }
+        }
+        lsRenderChunkList();
+      })
+      .catch(function () {
+        lsShowActionStatus("書き換えに失敗しました", "error");
+      })
+      .finally(function () {
+        document.getElementById("ls-rewrite-btn").disabled = false;
+      });
+  }
+
   // ── Init ───────────────────────────────────────────────────────────
   function initApp() {
     // Role-based access control
@@ -1731,6 +2274,7 @@
     initTabs();
     initUpload();
     initCourseBuilder();
+    initLectureStudio();
     initStumbles();
     initSchemaProposals();
     initSchemaEvolution();

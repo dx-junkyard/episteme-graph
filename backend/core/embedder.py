@@ -52,7 +52,7 @@ def _build_ancestors_map(edges: list[CausalEdge]) -> dict[str, list[str]]:
 
 def embed_and_store(
     chunks: list[str],
-    arxiv_id: str,
+    material_id: str,
     extracted_structure: PaperStructure | None = None,
 ) -> None:
     """チャンクリストを一括 Embedding して PostgreSQL chunks テーブルに保存する。"""
@@ -81,21 +81,21 @@ def embed_and_store(
     session = get_session()
     try:
         result = session.execute(
-            text("SELECT id FROM documents WHERE source_path = :arxiv_id LIMIT 1"),
-            {"arxiv_id": arxiv_id},
+            text("SELECT id FROM documents WHERE source_path = :mid LIMIT 1"),
+            {"mid": material_id},
         ).fetchone()
 
         if result:
             doc_id = result[0]
         else:
             doc_id = uuid.uuid4()
-            title = extracted_structure.title if extracted_structure else arxiv_id
+            title = extracted_structure.title if extracted_structure else material_id
             session.execute(
                 text("""
                     INSERT INTO documents (id, title, doc_type, source_path)
                     VALUES (:id, :title, 'paper', :source_path)
                 """),
-                {"id": doc_id, "title": title, "source_path": arxiv_id},
+                {"id": doc_id, "title": title, "source_path": material_id},
             )
 
         # チャンクを一括挿入
@@ -104,9 +104,9 @@ def embed_and_store(
             session.execute(
                 text("""
                     INSERT INTO chunks (id, document_id, chunk_index, text, embedding,
-                                        arxiv_id, smiles_dsl, variables, ancestors)
+                                        material_id, smiles_dsl, variables, ancestors)
                     VALUES (:id, :doc_id, :idx, :text, :embedding,
-                            :arxiv_id, :smiles_dsl, :variables, :ancestors)
+                            :material_id, :smiles_dsl, :variables, :ancestors)
                 """),
                 {
                     "id": chunk_id,
@@ -114,7 +114,7 @@ def embed_and_store(
                     "idx": i,
                     "text": chunk_text,
                     "embedding": str(vector),
-                    "arxiv_id": arxiv_id,
+                    "material_id": material_id,
                     "smiles_dsl": smiles_dsl,
                     "variables": variables if variables else None,
                     "ancestors": ancestors if ancestors else None,
@@ -123,9 +123,9 @@ def embed_and_store(
 
         session.commit()
         logger.info(
-            "Stored %d chunk embeddings for arxiv_id=%s in PostgreSQL",
+            "Stored %d chunk embeddings for material_id=%s in PostgreSQL",
             len(all_embeddings),
-            arxiv_id,
+            material_id,
         )
     except Exception:
         session.rollback()
@@ -186,15 +186,15 @@ def embed_and_store_pattern(
         else:
             session.execute(
                 text("""
-                    INSERT INTO chunks (id, document_id, chunk_index, text, embedding, arxiv_id)
-                    VALUES (:id, :doc_id, 0, :text, :embedding, :arxiv_id)
+                    INSERT INTO chunks (id, document_id, chunk_index, text, embedding, material_id)
+                    VALUES (:id, :doc_id, 0, :text, :embedding, :material_id)
                 """),
                 {
                     "id": uuid.uuid4(),
                     "doc_id": doc_id,
                     "text": pattern_text,
                     "embedding": str(vector),
-                    "arxiv_id": f"pattern:{pattern_id}",
+                    "material_id": f"pattern:{pattern_id}",
                 },
             )
 
@@ -210,7 +210,7 @@ def embed_and_store_pattern(
 def search_similar_papers(
     query_text: str,
     top_k: int = 5,
-    exclude_arxiv_id: str | None = None,
+    exclude_material_id: str | None = None,
 ) -> list[dict]:
     """パターン（またはクエリテキスト）に類似する過去の論文チャンクを PostgreSQL から検索する。"""
     vectors = generate_embeddings([query_text])
@@ -219,26 +219,26 @@ def search_similar_papers(
     session = get_session()
     try:
         inner = """
-            SELECT DISTINCT ON (c.arxiv_id)
-                   c.arxiv_id,
+            SELECT DISTINCT ON (c.material_id)
+                   c.material_id,
                    1 - (c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))) AS score,
                    c.text
             FROM chunks c
-            WHERE c.arxiv_id IS NOT NULL
-              AND c.arxiv_id NOT LIKE 'pattern:%%'
+            WHERE c.material_id IS NOT NULL
+              AND c.material_id NOT LIKE 'pattern:%%'
         """
         params: dict = {"query_vector": str(vector)}
 
-        if exclude_arxiv_id:
-            inner += " AND c.arxiv_id != :exclude_id"
-            params["exclude_id"] = exclude_arxiv_id
+        if exclude_material_id:
+            inner += " AND c.material_id != :exclude_id"
+            params["exclude_id"] = exclude_material_id
 
         inner += """
-            ORDER BY c.arxiv_id, c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
+            ORDER BY c.material_id, c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
         """
 
         query = f"""
-            SELECT arxiv_id, score, text
+            SELECT material_id, score, text
             FROM ({inner}) AS deduped
             ORDER BY score DESC
             LIMIT :limit
@@ -248,7 +248,7 @@ def search_similar_papers(
         rows = session.execute(text(query), params).fetchall()
 
         return [
-            {"arxiv_id": row[0], "score": float(row[1]), "text": row[2]}
+            {"material_id": row[0], "score": float(row[1]), "text": row[2]}
             for row in rows
         ]
     finally:
@@ -271,15 +271,15 @@ def search_fanns_hybrid(
     session = get_session()
     try:
         inner = """
-            SELECT DISTINCT ON (c.arxiv_id)
-                   c.arxiv_id,
+            SELECT DISTINCT ON (c.material_id)
+                   c.material_id,
                    1 - (c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))) AS score,
                    c.text,
                    c.smiles_dsl,
                    c.variables
             FROM chunks c
-            WHERE c.arxiv_id IS NOT NULL
-              AND c.arxiv_id NOT LIKE 'pattern:%%'
+            WHERE c.material_id IS NOT NULL
+              AND c.material_id NOT LIKE 'pattern:%%'
         """
         params: dict = {"query_vector": str(query_vector)}
 
@@ -288,11 +288,11 @@ def search_fanns_hybrid(
             params["dsl_pattern"] = f"%{query_dsl_regex}%"
 
         inner += """
-            ORDER BY c.arxiv_id, c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
+            ORDER BY c.material_id, c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
         """
 
         query = f"""
-            SELECT arxiv_id, score, text, smiles_dsl, variables
+            SELECT material_id, score, text, smiles_dsl, variables
             FROM ({inner}) AS deduped
             ORDER BY score DESC
             LIMIT :limit
@@ -303,7 +303,7 @@ def search_fanns_hybrid(
 
         results = [
             {
-                "arxiv_id": row[0],
+                "material_id": row[0],
                 "score": float(row[1]),
                 "text": row[2] or "",
                 "smiles_dsl": row[3] or "",
