@@ -40,19 +40,25 @@ _SPOKEN_TEXT_PROMPT = """あなたは大学院レベルの学習を支援する�
 
 
 ## 指示:
-1. **spoken_text**: 上記の「現在地」の文脈を踏まえ、このチャンクがコース全体の中で果たすべき役割（導入、詳細解説、まとめ等）を意識して、音声読み上げ用のテキストを構築してください。
+1. **display_text**: 画面表示用テキストを再構築してください。
+   - 抽出テキスト内の欠落・OCRノイズ・崩れた数式を補正し、教材として自然に読める本文へ修復する
+   - 数式は必ず正しい LaTeX で復元し、本文中に `$...$` または `$$...$$` 形式で埋め込む
+   - 表示用であるため、数式そのものは自然言語に言い換えない
+   - 段落構造は維持し、必要に応じて文を補完してよい
+2. **spoken_text**: 上記の「現在地」の文脈を踏まえ、このチャンクがコース全体の中で果たすべき役割（導入、詳細解説、まとめ等）を意識して、音声読み上げ用のテキストを構築してください。
    - 抽出の欠落や論理の飛躍がある場合は、該当分野の標準知識を用いて、前後の文脈と整合するように補完してください。
    - LaTeX 数式は自然言語に変換する（例: `$E = mc^2$` → 「Eイコールmcの二乗」）
    - 専門用語にはふりがなや読み方を含める
    - 段落の区切りは自然な「間」を表す「...」を入れる
    - 参照番号や図表番号は省略してよい
-2. **formulas**: スクリプトに登場する重要な数式をリストアップしてください。
+3. **formulas**: スクリプトに登場する重要な数式をリストアップしてください。
    - `id`: "formula_0", "formula_1", ... の連番
    - `latex`: 元の LaTeX 表記（**必須** — 絶対に省略・改名しないこと）
    - `spoken`: 音声読み上げ用のテキスト（**必須** — 絶対に省略・改名しないこと）
 
 ## 出力形式 (厳密にJSON):
 {{
+  "display_text": "...",
   "spoken_text": "...",
   "formulas": [
     {{"id": "formula_0", "latex": "E = mc^2", "spoken": "Eイコールmcの二乗"}}
@@ -83,7 +89,7 @@ def _parse_spoken_text_response(raw: str) -> dict:
     Returns
     -------
     dict
-        ``{"spoken_text": str, "formulas": list[dict]}``
+        ``{"display_text": str, "spoken_text": str, "formulas": list[dict]}``
 
     Raises
     ------
@@ -107,6 +113,7 @@ def _parse_spoken_text_response(raw: str) -> dict:
             )
 
     return {
+        "display_text": result.get("display_text", ""),
         "spoken_text": result.get("spoken_text", ""),
         "formulas": formulas,
     }
@@ -128,9 +135,9 @@ def generate_spoken_text_and_formulas(
     chunk_index: int = 0, 
     course_data: dict | None = None
 ) -> dict:
-    """チャンクテキストから spoken_text と formulas を LLM で生成する。"""
+    """チャンクテキストから display_text / spoken_text / formulas を LLM で生成する。"""
     if not chunk_text or not chunk_text.strip():
-        return {"spoken_text": "", "formulas": []}
+        return {"display_text": "", "spoken_text": "", "formulas": []}
 
     # コンテキスト情報の抽出
     course_title = "不明"
@@ -222,7 +229,7 @@ def _fallback_spoken_text(chunk_text: str) -> dict:
 
     spoken = re.sub(r"\$([^\$\n]+?)\$", _replace_inline, spoken)
 
-    return {"spoken_text": spoken, "formulas": formulas}
+    return {"display_text": chunk_text, "spoken_text": spoken, "formulas": formulas}
 
 
 # ---------------------------------------------------------------------------

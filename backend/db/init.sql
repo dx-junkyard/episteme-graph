@@ -91,6 +91,9 @@ CREATE TABLE chunks (
     variables       JSONB,
     ancestors       JSONB,
     neo4j_node_id   TEXT,
+    display_text    TEXT,
+    spoken_text     TEXT,
+    formulas        JSONB DEFAULT '[]'::jsonb,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

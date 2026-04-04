@@ -205,6 +205,9 @@ def _run_migrations() -> None:
             "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS spoken_text TEXT"
         ))
         session.execute(sa_text(
+            "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS display_text TEXT"
+        ))
+        session.execute(sa_text(
             "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS formulas JSONB DEFAULT '[]'::jsonb"
         ))
         session.execute(sa_text("""
