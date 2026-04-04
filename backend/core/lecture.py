@@ -16,34 +16,6 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# ワードタイムスタンプ推定
-# ---------------------------------------------------------------------------
-
-
-def estimate_word_timestamps(text: str, total_duration_ms: int) -> list[dict]:
-    """テキストの文字位置に基づいてワードタイムスタンプを近似的に生成する。"""
-    words = re.findall(r'\S+', text)
-    if not words:
-        return []
-
-    total_chars = sum(len(w) for w in words)
-    if total_chars == 0:
-        return []
-
-    timestamps = []
-    current_ms = 0
-    for word in words:
-        word_duration = int(total_duration_ms * len(word) / total_chars)
-        timestamps.append({
-            "word": word,
-            "start_ms": current_ms,
-            "end_ms": current_ms + word_duration,
-        })
-        current_ms += word_duration
-
-    return timestamps
-
-# ---------------------------------------------------------------------------
 # spoken_text / formulas 生成
 # ---------------------------------------------------------------------------
 

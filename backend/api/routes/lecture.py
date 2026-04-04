@@ -34,7 +34,6 @@ from services import (
 )
 from core.lecture import (
     build_lecture_sequence,
-    estimate_word_timestamps,
     generate_spoken_text_and_formulas,
     get_user_mastered_concepts,
 )
@@ -301,21 +300,17 @@ def generate_tts(
         # 簡易的な再生時間推定（MP3: ~128kbps → bytes / 16000 * 1000 ms）
         estimated_duration_ms = max(1000, len(audio_bytes) * 8 // 128)
 
-        # Word timestamps: TTS-1 では直接取得できないため、
-        # テキスト長に基づく均等分割で近似
-        word_timestamps = estimate_word_timestamps(spoken_text, estimated_duration_ms)
-
         # キャッシュに保存
         _save_audio_cache(
             chunk_id, body.voice, audio_bytes,
-            estimated_duration_ms, word_timestamps,
+            estimated_duration_ms, [],
         )
 
         return LectureTTSResponse(
             chunk_id=chunk_id,
             audio_base64=audio_b64,
             duration_ms=estimated_duration_ms,
-            word_timestamps=word_timestamps,
+            word_timestamps=[],
         )
 
     except ImportError:

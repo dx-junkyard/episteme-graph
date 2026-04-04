@@ -37,7 +37,7 @@ from services import (
     get_course_data,
     update_background_task,
 )
-from core.lecture import generate_spoken_text_and_formulas, estimate_word_timestamps
+from core.lecture import generate_spoken_text_and_formulas
 from core.llm import generate_text, get_llm_params
 from core.postgres import get_session as _pg_session
 
@@ -524,21 +524,18 @@ def _batch_audio_worker(
                     )
                     audio_bytes = response.content
                     duration_ms = max(1000, len(audio_bytes) * 8 // 128)
-                    word_timestamps = estimate_word_timestamps(spoken_text, duration_ms)
 
                     session = _pg_session()
                     try:
                         session.execute(
                             sa_text("""
                                 INSERT INTO lecture_audio_cache
-                                    (chunk_id, voice, audio_data, duration_ms, word_timestamps)
+                                    (chunk_id, voice, audio_data, duration_ms )
                                 VALUES
-                                    (CAST(:cid AS uuid), :voice, :audio_data, :duration_ms,
-                                     CAST(:wt AS jsonb))
+                                    (CAST(:cid AS uuid), :voice, :audio_data, :duration_ms)
                                 ON CONFLICT (chunk_id, voice) DO UPDATE
                                 SET audio_data = EXCLUDED.audio_data,
                                     duration_ms = EXCLUDED.duration_ms,
-                                    word_timestamps = EXCLUDED.word_timestamps,
                                     created_at = now()
                             """),
                             {
@@ -546,7 +543,6 @@ def _batch_audio_worker(
                                 "voice": "alloy",
                                 "audio_data": audio_bytes,
                                 "duration_ms": duration_ms,
-                                "wt": json.dumps(word_timestamps, ensure_ascii=False),
                             },
                         )
                         session.commit()
