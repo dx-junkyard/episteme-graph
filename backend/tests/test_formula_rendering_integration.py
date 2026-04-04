@@ -669,3 +669,156 @@ class TestFallbackPlaceholderFormat:
 
         assert "（数式1）" in result["spoken_text"]
         assert "$$" not in result["spoken_text"]
+
+
+# ---------------------------------------------------------------------------
+# 8. 旧フォーマット → プレースホルダー方式の正規化テスト
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeToPlaceholderFormat:
+    """DB に保存された旧フォーマットデータをプレースホルダー方式に正規化する。"""
+
+    def test_already_placeholder_format_unchanged(self):
+        """既にプレースホルダー方式のデータはそのまま返ること。"""
+        from core.lecture import normalize_to_placeholder_format
+
+        display = "量子力学: [[FORMULA_0]] がある"
+        formulas = [{"id": "[[FORMULA_0]]", "latex": "E=mc^2", "spoken": "...", "is_display": False}]
+
+        new_display, new_formulas = normalize_to_placeholder_format(display, formulas)
+        assert new_display == display
+        assert new_formulas == formulas
+
+    def test_old_display_math_converted(self):
+        """旧フォーマットの $$...$$ がプレースホルダーに変換されること。"""
+        from core.lecture import normalize_to_placeholder_format
+
+        display = "式は $$E = mc^2$$ で表される。"
+        old_formulas = [{"id": "formula_0", "latex": "E = mc^2", "spoken": "Eイコールmcの二乗"}]
+
+        new_display, new_formulas = normalize_to_placeholder_format(display, old_formulas)
+
+        assert "[[FORMULA_0]]" in new_display
+        assert "$$" not in new_display
+        assert new_formulas[0]["id"] == "[[FORMULA_0]]"
+        assert new_formulas[0]["latex"] == "E = mc^2"
+        assert new_formulas[0]["spoken"] == "Eイコールmcの二乗"
+        assert new_formulas[0]["is_display"] is True
+
+    def test_old_inline_math_converted(self):
+        """旧フォーマットの $...$ がプレースホルダーに変換されること。"""
+        from core.lecture import normalize_to_placeholder_format
+
+        display = "変数 $x$ と $y$ の関係"
+        old_formulas = [
+            {"id": "formula_0", "latex": "x", "spoken": "エックス"},
+            {"id": "formula_1", "latex": "y", "spoken": "ワイ"},
+        ]
+
+        new_display, new_formulas = normalize_to_placeholder_format(display, old_formulas)
+
+        assert "[[FORMULA_0]]" in new_display
+        assert "[[FORMULA_1]]" in new_display
+        assert "$" not in new_display
+        assert len(new_formulas) == 2
+        assert new_formulas[0]["is_display"] is False
+        assert new_formulas[1]["is_display"] is False
+        # spoken が旧 formulas からマッチされていること
+        assert new_formulas[0]["spoken"] == "エックス"
+        assert new_formulas[1]["spoken"] == "ワイ"
+
+    def test_old_mixed_math_converted(self):
+        """旧フォーマットの混在（$$...$$ + $...$）が正しく変換されること。"""
+        from core.lecture import normalize_to_placeholder_format
+
+        display = "インライン $a+b$ とブロック $$F = ma$$ が混在"
+        old_formulas = [
+            {"id": "formula_0", "latex": "a+b", "spoken": "aプラスb"},
+            {"id": "formula_1", "latex": "F = ma", "spoken": "Fイコールma"},
+        ]
+
+        new_display, new_formulas = normalize_to_placeholder_format(display, old_formulas)
+
+        assert "$$" not in new_display
+        assert "$" not in new_display
+        assert len(new_formulas) == 2
+        # $$F = ma$$ は先に処理されるのでブロック数式
+        block = [f for f in new_formulas if f["is_display"] is True]
+        inline = [f for f in new_formulas if f["is_display"] is False]
+        assert len(block) == 1
+        assert len(inline) == 1
+
+    def test_no_math_text_unchanged(self):
+        """数式を含まないテキストはそのまま返ること。"""
+        from core.lecture import normalize_to_placeholder_format
+
+        display = "これは普通のテキストです。"
+        formulas: list[dict] = []
+
+        new_display, new_formulas = normalize_to_placeholder_format(display, formulas)
+        assert new_display == display
+        assert new_formulas == []
+
+    def test_empty_display_text(self):
+        """空の display_text はそのまま返ること。"""
+        from core.lecture import normalize_to_placeholder_format
+
+        new_display, new_formulas = normalize_to_placeholder_format("", [])
+        assert new_display == ""
+        assert new_formulas == []
+
+    def test_old_format_without_spoken_fallback(self):
+        """旧 formulas にマッチする spoken がない場合は空文字になること。"""
+        from core.lecture import normalize_to_placeholder_format
+
+        display = "式は $E = mc^2$ です。"
+        old_formulas: list[dict] = []  # formulas が空（旧データの一部のケース）
+
+        new_display, new_formulas = normalize_to_placeholder_format(display, old_formulas)
+
+        assert "[[FORMULA_0]]" in new_display
+        assert new_formulas[0]["spoken"] == ""  # マッチなしで空文字
+
+    def test_student_api_with_old_format_data(self):
+        """学生APIが旧フォーマットの DB データを正規化して返すこと（E2E模擬）。"""
+        from api.routes.lecture import get_lecture_sequence
+
+        old_display = "エネルギーは $$E = mc^2$$ で表される。"
+        old_formulas = [{"id": "formula_0", "latex": "E = mc^2", "spoken": "Eイコールmcの二乗"}]
+        old_spoken = "エネルギーは Eイコールmcの二乗 で表される。"
+
+        db_row = (
+            uuid.UUID(_CHUNK_ID),
+            0,
+            _CHUNK_TEXT_RAW,
+            old_display,
+            old_spoken,
+            old_formulas,
+            "第1章",
+            "1.1",
+        )
+
+        mock_session = MagicMock()
+        mock_session.execute.return_value.fetchall.return_value = [db_row]
+
+        with (
+            patch("api.routes.lecture.get_course_data", return_value=_COURSE_DATA),
+            patch("api.routes.lecture._pg_session", return_value=mock_session),
+            patch("api.routes.lecture._check_audio_cache", return_value=False),
+            patch("api.routes.lecture.get_user_mastered_concepts", return_value=set()),
+        ):
+            current_user = {"id": _USER_ID, "username": "student", "email": "s@test.com", "role": "STUDENT"}
+            resp = get_lecture_sequence(_COURSE_ID, _TOPIC_ID, current_user)
+
+        seg = resp.segments[0]
+        # display_text がプレースホルダー方式に変換されていること
+        assert "[[FORMULA_0]]" in seg.text
+        assert "$$" not in seg.text
+        # formulas の id がプレースホルダー形式であること
+        assert seg.formulas[0].id == "[[FORMULA_0]]"
+        assert seg.formulas[0].latex == "E = mc^2"
+        assert seg.formulas[0].is_display is True
+        # フロントエンドの置換がシミュレートできること
+        result = seg.text.replace(seg.formulas[0].id, f"[RENDERED:{seg.formulas[0].latex}]")
+        assert "[[FORMULA_" not in result

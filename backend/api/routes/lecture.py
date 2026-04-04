@@ -36,6 +36,7 @@ from core.lecture import (
     build_lecture_sequence,
     generate_spoken_text_and_formulas,
     get_user_mastered_concepts,
+    normalize_to_placeholder_format,
 )
 from core.llm import generate_text, get_llm_params
 from core.postgres import get_session as _pg_session
@@ -138,6 +139,9 @@ def get_lecture_sequence(
                 "spoken_text": spoken_text,
                 "formulas": formulas,
             })
+
+        # 旧フォーマット（$...$）のデータをプレースホルダー方式に正規化
+        display_text, formulas = normalize_to_placeholder_format(display_text, formulas)
 
         # 音声キャッシュの有無を確認
         has_audio = _check_audio_cache(chunk_id)

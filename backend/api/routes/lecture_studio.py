@@ -37,7 +37,7 @@ from services import (
     get_course_data,
     update_background_task,
 )
-from core.lecture import generate_spoken_text_and_formulas
+from core.lecture import generate_spoken_text_and_formulas, normalize_to_placeholder_format
 from core.llm import generate_text, get_llm_params
 from core.postgres import get_session as _pg_session
 
@@ -78,16 +78,20 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
             params,
         ).fetchall()
 
-        return [
-            {
+        chunks = []
+        for row in rows:
+            text = row[3] or row[2] or ""
+            formulas = row[5] if row[5] else []
+            # 旧フォーマット（$...$）のデータをプレースホルダー方式に正規化
+            text, formulas = normalize_to_placeholder_format(text, formulas)
+            chunks.append({
                 "id": str(row[0]),
                 "chunk_index": row[1],
-                "text": row[3] or row[2] or "",
+                "text": text,
                 "spoken_text": row[4] or "",
-                "formulas": row[5] if row[5] else [],
-            }
-            for row in rows
-        ]
+                "formulas": formulas,
+            })
+        return chunks
     finally:
         session.close()
 

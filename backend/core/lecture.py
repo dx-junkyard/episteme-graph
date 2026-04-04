@@ -258,6 +258,90 @@ def _fallback_spoken_text(chunk_text: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 旧フォーマット → プレースホルダー方式への正規化
+# ---------------------------------------------------------------------------
+
+_PLACEHOLDER_RE = re.compile(r"\[\[FORMULA_\d+\]\]")
+
+
+def normalize_to_placeholder_format(
+    display_text: str,
+    formulas: list[dict],
+) -> tuple[str, list[dict]]:
+    """旧フォーマット（LaTeX デリミタ方式）のデータをプレースホルダー方式に変換する。
+
+    既にプレースホルダー方式のデータはそのまま返す。
+
+    Parameters
+    ----------
+    display_text : str
+        画面表示用テキスト（旧形式: ``$...$`` / ``$$...$$`` を含む場合がある）
+    formulas : list[dict]
+        数式メタデータのリスト
+
+    Returns
+    -------
+    tuple[str, list[dict]]
+        正規化済みの (display_text, formulas)
+    """
+    if not display_text:
+        return display_text, formulas
+
+    # 既にプレースホルダー方式なら何もしない
+    if _PLACEHOLDER_RE.search(display_text):
+        return display_text, formulas
+
+    # LaTeX デリミタが含まれていなければ変換不要
+    if "$$" not in display_text and "$" not in display_text:
+        return display_text, formulas
+
+    # 旧フォーマットをプレースホルダーに変換
+    new_formulas: list[dict] = []
+    new_display = display_text
+
+    # Display math $$...$$ → [[FORMULA_N]]
+    def _replace_display(m: re.Match) -> str:
+        idx = len(new_formulas)
+        raw_latex = m.group(1).strip()
+        # 旧 formulas から spoken を探す
+        spoken = _find_spoken_for_latex(raw_latex, formulas)
+        new_formulas.append({
+            "id": f"[[FORMULA_{idx}]]",
+            "latex": raw_latex,
+            "spoken": spoken,
+            "is_display": True,
+        })
+        return f"[[FORMULA_{idx}]]"
+
+    new_display = re.sub(r"\$\$([\s\S]+?)\$\$", _replace_display, new_display)
+
+    # Inline math $...$ → [[FORMULA_N]]
+    def _replace_inline(m: re.Match) -> str:
+        idx = len(new_formulas)
+        raw_latex = m.group(1).strip()
+        spoken = _find_spoken_for_latex(raw_latex, formulas)
+        new_formulas.append({
+            "id": f"[[FORMULA_{idx}]]",
+            "latex": raw_latex,
+            "spoken": spoken,
+            "is_display": False,
+        })
+        return f"[[FORMULA_{idx}]]"
+
+    new_display = re.sub(r"\$([^\$\n]+?)\$", _replace_inline, new_display)
+
+    return new_display, new_formulas
+
+
+def _find_spoken_for_latex(latex: str, formulas: list[dict]) -> str:
+    """旧 formulas リストから LaTeX に対応する spoken テキストを探す。"""
+    for f in formulas:
+        if f.get("latex", "").strip() == latex:
+            return f.get("spoken", "")
+    return ""
+
+
+# ---------------------------------------------------------------------------
 # レクチャーシーケンス構築
 # ---------------------------------------------------------------------------
 
