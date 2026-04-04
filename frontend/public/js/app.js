@@ -1062,8 +1062,15 @@
       return "\x00MATH_BLOCK_" + idx + "\x00";
     });
 
-    // 2. HTMLエスケープしてから数式を戻す
+    // 2. HTMLエスケープ
     var text = escHtml(textWithPlaceholders);
+
+    // 3. テキストの装飾・段落・改行処理
+    text = text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    text = text.split("\n\n").map(function (p) { return "<p>" + p + "</p>"; }).join("");
+    text = text.replace(/\n/g, "<br>");
+
+    // 4. 最後に数式（KaTeX）を復元
     text = text.replace(/\x00MATH_BLOCK_(\d+)\x00/g, function (_, idx) {
       var block = mathBlocks[parseInt(idx, 10)];
       if (!block) return "";
@@ -1081,11 +1088,6 @@
         ? "$$" + escHtml(block.expr) + "$$"
         : "$" + escHtml(block.expr) + "$";
     });
-
-    // 3. Bold・段落・改行
-    text = text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-    text = text.split("\n\n").map(function (p) { return "<p>" + p + "</p>"; }).join("");
-    text = text.replace(/\n/g, "<br>");
 
     return text;
   }
