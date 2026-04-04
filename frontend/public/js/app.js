@@ -1042,39 +1042,52 @@
   }
 
   function renderSegmentContent(seg) {
-    var rawText = seg.spoken_text || seg.text || "";
+    var rawText = seg.text || seg.display_text || seg.spoken_text || "";
 
-    // 1. 数式プレースホルダー置換（エスケープ前に抽出して後で戻す）
-    var formulas = seg.formulas || [];
-    var placeholders = [];
+    // 1. 数式を本文から直接抽出（formulas配列への厳密一致依存を避ける）
+    var mathBlocks = [];
     var textWithPlaceholders = rawText;
-    formulas.forEach(function (f, fi) {
-      if (f.latex) {
-        try {
-          var rendered = window.katex
-            ? window.katex.renderToString(f.latex, { displayMode: f.latex.length > 30, throwOnError: false })
-            : "$" + f.latex + "$";
-          var cls = f.latex.length > 30 ? "lecture-formula-block" : "lecture-formula";
-          var placeholder = "\x00FORMULA_" + fi + "\x00";
-          var html = '<span class="' + cls + '">' + rendered + '</span>';
-          // $$...$$ を先に（$...$ が部分一致するのを防ぐ）
-          textWithPlaceholders = textWithPlaceholders.replace("$$" + f.latex + "$$", placeholder);
-          textWithPlaceholders = textWithPlaceholders.replace("$" + f.latex + "$", placeholder);
-          placeholders.push({ placeholder: placeholder, html: html });
-        } catch (e) { /* keep original */ }
-      }
+
+    // $$...$$ を先に抽出（$...$ との衝突回避）
+    textWithPlaceholders = textWithPlaceholders.replace(/\$\$([\s\S]+?)\$\$/g, function (_, expr) {
+      var idx = mathBlocks.length;
+      mathBlocks.push({ display: true, expr: expr });
+      return "\x00MATH_BLOCK_" + idx + "\x00";
     });
 
-    // 2. HTMLエスケープしてから数式を戻す
+    // $...$ を抽出（改行をまたがないインライン数式）
+    textWithPlaceholders = textWithPlaceholders.replace(/\$([^\$\n]+?)\$/g, function (_, expr) {
+      var idx = mathBlocks.length;
+      mathBlocks.push({ display: false, expr: expr });
+      return "\x00MATH_BLOCK_" + idx + "\x00";
+    });
+
+    // 2. HTMLエスケープ
     var text = escHtml(textWithPlaceholders);
-    placeholders.forEach(function (p) {
-      text = text.replace(p.placeholder, p.html);
-    });
 
-    // 3. Bold・段落・改行
+    // 3. テキストの装飾・段落・改行処理
     text = text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
     text = text.split("\n\n").map(function (p) { return "<p>" + p + "</p>"; }).join("");
     text = text.replace(/\n/g, "<br>");
+
+    // 4. 最後に数式（KaTeX）を復元
+    text = text.replace(/\x00MATH_BLOCK_(\d+)\x00/g, function (_, idx) {
+      var block = mathBlocks[parseInt(idx, 10)];
+      if (!block) return "";
+      try {
+        if (window.katex) {
+          var rendered = window.katex.renderToString(block.expr.trim(), {
+            displayMode: block.display,
+            throwOnError: false,
+          });
+          var cls = block.display ? "lecture-formula-block" : "lecture-formula";
+          return '<span class="' + cls + '">' + rendered + '</span>';
+        }
+      } catch (e) { /* keep raw latex */ }
+      return block.display
+        ? "$$" + escHtml(block.expr) + "$$"
+        : "$" + escHtml(block.expr) + "$";
+    });
 
     return text;
   }
