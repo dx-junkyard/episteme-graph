@@ -125,6 +125,7 @@ class Chunk(Base):
     ancestors = Column(JSONB, nullable=True)
     neo4j_node_id = Column(Text, nullable=True)
     # Interactive Lecture Mode (Issue #66)
+    display_text = Column(Text, nullable=True)
     spoken_text = Column(Text, nullable=True)
     formulas = Column(JSONB, default=list)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
