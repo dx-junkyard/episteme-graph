@@ -22,6 +22,7 @@ from sqlalchemy import text as sa_text
 from dependencies import _require_teacher
 from schemas import (
     LectureAudioGenerateResponse,
+    LectureAudioGenerateStartResponse,
     LectureFormulaItem,
     LectureScriptChunkOut,
     LectureScriptGenerateRequest,
@@ -464,17 +465,145 @@ def rewrite_lecture_script(
 # ---------------------------------------------------------------------------
 
 
+def _batch_audio_worker(
+    task_id: str,
+    course_id: str,
+    chunks: list[dict],
+) -> None:
+    """バックグラウンドスレッドで TTS 音声を一括生成する。"""
+    total = len(chunks)
+    generated = 0
+    skipped = 0
+    errors = 0
+
+    update_background_task(task_id, "processing", result_data={
+        "course_id": course_id,
+        "total_chunks": total,
+        "generated": 0,
+        "skipped": 0,
+        "errors": 0,
+        "progress": 0,
+    })
+
+    try:
+        from core.config import get_settings
+        import openai
+        settings = get_settings()
+        client = openai.OpenAI(api_key=settings.llm_api_key)
+    except Exception as exc:
+        update_background_task(task_id, "failed", error_message=str(exc))
+        return
+
+    for chunk in chunks:
+        spoken_text = chunk.get("spoken_text")
+        if not spoken_text:
+            skipped += 1
+        else:
+            # キャッシュ確認
+            session = _pg_session()
+            try:
+                cached = session.execute(
+                    sa_text(
+                        "SELECT 1 FROM lecture_audio_cache WHERE chunk_id = CAST(:cid AS uuid) LIMIT 1"
+                    ),
+                    {"cid": chunk["id"]},
+                ).fetchone()
+            finally:
+                session.close()
+
+            if cached:
+                skipped += 1
+            else:
+                # TTS 生成
+                try:
+                    response = client.audio.speech.create(
+                        model="tts-1",
+                        voice="alloy",
+                        input=spoken_text[:4096],
+                        response_format="mp3",
+                    )
+                    audio_bytes = response.content
+                    duration_ms = max(1000, len(audio_bytes) * 8 // 128)
+                    word_timestamps = estimate_word_timestamps(spoken_text, duration_ms)
+
+                    session = _pg_session()
+                    try:
+                        session.execute(
+                            sa_text("""
+                                INSERT INTO lecture_audio_cache
+                                    (chunk_id, voice, audio_data, duration_ms, word_timestamps)
+                                VALUES
+                                    (CAST(:cid AS uuid), :voice, :audio_data, :duration_ms,
+                                     CAST(:wt AS jsonb))
+                                ON CONFLICT (chunk_id, voice) DO UPDATE
+                                SET audio_data = EXCLUDED.audio_data,
+                                    duration_ms = EXCLUDED.duration_ms,
+                                    word_timestamps = EXCLUDED.word_timestamps,
+                                    created_at = now()
+                            """),
+                            {
+                                "cid": chunk["id"],
+                                "voice": "alloy",
+                                "audio_data": audio_bytes,
+                                "duration_ms": duration_ms,
+                                "wt": json.dumps(word_timestamps, ensure_ascii=False),
+                            },
+                        )
+                        session.commit()
+                        generated += 1
+                    except Exception:
+                        session.rollback()
+                        errors += 1
+                        logger.warning("Failed to cache audio for chunk %s", chunk["id"], exc_info=True)
+                    finally:
+                        session.close()
+
+                    # レート制限対策: チャンク間に 0.5 秒の遅延
+                    time.sleep(0.5)
+
+                except Exception:
+                    errors += 1
+                    logger.warning("TTS generation failed for chunk %s", chunk["id"], exc_info=True)
+
+        # チャンクごとに進捗を更新
+        processed = generated + skipped + errors
+        update_background_task(task_id, "processing", result_data={
+            "course_id": course_id,
+            "total_chunks": total,
+            "generated": generated,
+            "skipped": skipped,
+            "errors": errors,
+            "progress": int(processed * 100 / total) if total > 0 else 100,
+        })
+
+    update_background_task(task_id, "completed", result_data={
+        "course_id": course_id,
+        "total_chunks": total,
+        "generated": generated,
+        "skipped": skipped,
+        "errors": errors,
+        "progress": 100,
+    })
+    logger.info(
+        "batch_audio_worker completed: task=%s course=%s generated=%d skipped=%d errors=%d",
+        task_id, course_id, generated, skipped, errors,
+    )
+
+
 @router.post(
     "/courses/{course_id}/lecture-audio/generate",
-    response_model=LectureAudioGenerateResponse,
+    response_model=LectureAudioGenerateStartResponse,
+    status_code=202,
 )
 def batch_generate_audio(
     course_id: str,
     current_user: dict = Depends(_require_teacher),
-) -> LectureAudioGenerateResponse:
-    """コースの全スクリプトに対して TTS 音声を一括生成する。
+) -> LectureAudioGenerateStartResponse:
+    """コースの全スクリプトに対して TTS 音声を一括生成する（非同期）。
 
-    レート制限を考慮して各チャンク間に遅延を入れる。
+    即座に task_id を返し、処理はバックグラウンドで実行される。
+    進捗は GET /api/admin/tasks/{task_id} でポーリングして確認する。
+    result_data.progress (0-100) で進捗率を取得できる。
     """
     course_data = get_course_data(current_user["id"], course_id)
     if not course_data:
@@ -484,94 +613,24 @@ def batch_generate_audio(
     if not chunks:
         raise HTTPException(status_code=404, detail="No chunks found for this course")
 
-    try:
-        from core.config import get_settings
-        import openai
-        settings = get_settings()
-        client = openai.OpenAI(api_key=settings.llm_api_key)
-    except ImportError:
-        raise HTTPException(status_code=501, detail="OpenAI SDK not available for TTS")
+    task_id = str(uuid.uuid4())[:12]
+    create_background_task(task_id, "audio_generation", current_user["id"])
 
-    generated = 0
-    skipped = 0
-    errors = 0
+    thread = threading.Thread(
+        target=_batch_audio_worker,
+        args=(task_id, course_id, chunks),
+        daemon=True,
+    )
+    thread.start()
 
-    for chunk in chunks:
-        spoken_text = chunk.get("spoken_text")
-        if not spoken_text:
-            skipped += 1
-            continue
+    logger.info(
+        "batch_generate_audio accepted: task=%s course=%s chunks=%d by user=%s",
+        task_id, course_id, len(chunks), current_user["id"],
+    )
 
-        # キャッシュ確認
-        session = _pg_session()
-        try:
-            cached = session.execute(
-                sa_text(
-                    "SELECT 1 FROM lecture_audio_cache WHERE chunk_id = CAST(:cid AS uuid) LIMIT 1"
-                ),
-                {"cid": chunk["id"]},
-            ).fetchone()
-            if cached:
-                skipped += 1
-                continue
-        finally:
-            session.close()
-
-        # TTS 生成
-        try:
-            response = client.audio.speech.create(
-                model="tts-1",
-                voice="alloy",
-                input=spoken_text[:4096],
-                response_format="mp3",
-            )
-            audio_bytes = response.content
-            duration_ms = max(1000, len(audio_bytes) * 8 // 128)
-            word_timestamps = estimate_word_timestamps(spoken_text, duration_ms)
-
-            session = _pg_session()
-            try:
-                session.execute(
-                    sa_text("""
-                        INSERT INTO lecture_audio_cache
-                            (chunk_id, voice, audio_data, duration_ms, word_timestamps)
-                        VALUES
-                            (CAST(:cid AS uuid), :voice, :audio_data, :duration_ms,
-                             CAST(:wt AS jsonb))
-                        ON CONFLICT (chunk_id, voice) DO UPDATE
-                        SET audio_data = EXCLUDED.audio_data,
-                            duration_ms = EXCLUDED.duration_ms,
-                            word_timestamps = EXCLUDED.word_timestamps,
-                            created_at = now()
-                    """),
-                    {
-                        "cid": chunk["id"],
-                        "voice": "alloy",
-                        "audio_data": audio_bytes,
-                        "duration_ms": duration_ms,
-                        "wt": json.dumps(word_timestamps, ensure_ascii=False),
-                    },
-                )
-                session.commit()
-                generated += 1
-            except Exception:
-                session.rollback()
-                errors += 1
-                logger.warning("Failed to cache audio for chunk %s", chunk["id"], exc_info=True)
-            finally:
-                session.close()
-
-            # レート制限対策: チャンク間に 0.5 秒の遅延
-            time.sleep(0.5)
-
-        except Exception:
-            errors += 1
-            logger.warning("TTS generation failed for chunk %s", chunk["id"], exc_info=True)
-
-    return LectureAudioGenerateResponse(
+    return LectureAudioGenerateStartResponse(
+        task_id=task_id,
         course_id=course_id,
         total_chunks=len(chunks),
-        generated=generated,
-        skipped=skipped,
-        errors=errors,
+        status="pending",
     )

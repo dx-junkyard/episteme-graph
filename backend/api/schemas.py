@@ -457,9 +457,17 @@ class LectureScriptRewriteResponse(BaseModel):
 
 
 class LectureAudioGenerateResponse(BaseModel):
-    """バッチ音声生成レスポンス。"""
+    """バッチ音声生成レスポンス（後方互換）。"""
     course_id: str
     total_chunks: int = 0
     generated: int = 0
     skipped: int = 0
     errors: int = 0
+
+
+class LectureAudioGenerateStartResponse(BaseModel):
+    """バッチ音声生成開始レスポンス（非同期）。"""
+    task_id: str
+    course_id: str
+    total_chunks: int = 0
+    status: str = "pending"

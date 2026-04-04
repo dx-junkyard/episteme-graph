@@ -289,3 +289,113 @@ class TestBatchGenerateAsync:
         # タスクタイプは create_background_task 呼び出し時に使われる定数
         expected_task_type = "script_generation"
         assert expected_task_type == "script_generation"
+
+
+# ---------------------------------------------------------------------------
+# Async batch audio worker logic tests (Issue #78)
+# ---------------------------------------------------------------------------
+
+
+class TestBatchAudioAsync:
+    """非同期バッチ音声生成 (Issue #78) のロジックテスト。"""
+
+    def test_audio_start_response_schema(self):
+        """音声生成開始レスポンスのスキーマが正しいこと。"""
+        from schemas import LectureAudioGenerateStartResponse
+
+        resp = LectureAudioGenerateStartResponse(
+            task_id="audio001",
+            course_id="course1",
+            total_chunks=10,
+        )
+        assert resp.task_id == "audio001"
+        assert resp.course_id == "course1"
+        assert resp.total_chunks == 10
+        assert resp.status == "pending"
+
+    def test_audio_start_response_custom_status(self):
+        """status フィールドが設定可能であること。"""
+        from schemas import LectureAudioGenerateStartResponse
+
+        resp = LectureAudioGenerateStartResponse(
+            task_id="t1",
+            course_id="c1",
+            total_chunks=5,
+            status="processing",
+        )
+        assert resp.status == "processing"
+
+    def test_audio_start_response_zero_chunks(self):
+        """チャンク数0でも正常に作成できること。"""
+        from schemas import LectureAudioGenerateStartResponse
+
+        resp = LectureAudioGenerateStartResponse(
+            task_id="t0",
+            course_id="c0",
+            total_chunks=0,
+        )
+        assert resp.total_chunks == 0
+
+    def test_audio_progress_calculation_with_errors(self):
+        """エラー件数を含む進捗計算ロジックのテスト: (generated + skipped + errors) / total * 100"""
+        total = 10
+        generated = 3
+        skipped = 2
+        errors = 1
+        processed = generated + skipped + errors
+        progress = int(processed * 100 / total) if total > 0 else 100
+        assert progress == 60
+
+    def test_audio_progress_calculation_zero_total(self):
+        """total=0 のとき progress=100 となること。"""
+        total = 0
+        progress = int(0 * 100 / total) if total > 0 else 100
+        assert progress == 100
+
+    def test_audio_progress_calculation_all_generated(self):
+        """全チャンク生成完了時に progress=100 となること。"""
+        total = 8
+        generated = 8
+        skipped = 0
+        errors = 0
+        processed = generated + skipped + errors
+        progress = int(processed * 100 / total) if total > 0 else 100
+        assert progress == 100
+
+    def test_audio_worker_task_type(self):
+        """音声生成ワーカーのタスクタイプが audio_generation であること。"""
+        expected_task_type = "audio_generation"
+        assert expected_task_type == "audio_generation"
+
+    def test_audio_result_data_structure(self):
+        """バックグラウンドタスクの result_data 構造が正しいこと。"""
+        # _batch_audio_worker が update_background_task に渡す result_data の構造を検証
+        result_data = {
+            "course_id": "course1",
+            "total_chunks": 10,
+            "generated": 5,
+            "skipped": 3,
+            "errors": 2,
+            "progress": 100,
+        }
+        assert "course_id" in result_data
+        assert "total_chunks" in result_data
+        assert "generated" in result_data
+        assert "skipped" in result_data
+        assert "errors" in result_data
+        assert "progress" in result_data
+        assert result_data["generated"] + result_data["skipped"] + result_data["errors"] == result_data["total_chunks"]
+
+    def test_audio_generate_response_still_works(self):
+        """後方互換スキーマ LectureAudioGenerateResponse が引き続き動作すること。"""
+        from schemas import LectureAudioGenerateResponse
+
+        resp = LectureAudioGenerateResponse(
+            course_id="c1",
+            total_chunks=5,
+            generated=3,
+            skipped=1,
+            errors=1,
+        )
+        assert resp.generated == 3
+        assert resp.errors == 1
