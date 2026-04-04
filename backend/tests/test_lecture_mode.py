@@ -205,48 +205,7 @@ class TestBuildLectureSequence:
 
 
 # ---------------------------------------------------------------------------
-# 3. ワードタイムスタンプ推定テスト
-# ---------------------------------------------------------------------------
-
-class TestEstimateWordTimestamps:
-    """ワードタイムスタンプの近似推定。"""
-
-    def test_basic_timestamps(self):
-        from core.lecture import estimate_word_timestamps
-
-        result = estimate_word_timestamps("hello world test", 3000)
-
-        assert len(result) == 3
-        assert result[0]["word"] == "hello"
-        assert result[0]["start_ms"] == 0
-        assert result[-1]["end_ms"] <= 3000
-
-    def test_empty_text(self):
-        from core.lecture import estimate_word_timestamps
-
-        result = estimate_word_timestamps("", 1000)
-        assert result == []
-
-    def test_single_word(self):
-        from core.lecture import estimate_word_timestamps
-
-        result = estimate_word_timestamps("hello", 1000)
-        assert len(result) == 1
-        assert result[0]["word"] == "hello"
-        assert result[0]["start_ms"] == 0
-
-    def test_timestamps_are_contiguous(self):
-        from core.lecture import estimate_word_timestamps
-
-        result = estimate_word_timestamps("aaa bbb ccc", 3000)
-        assert len(result) == 3
-        # Each word starts where the previous ends
-        for i in range(1, len(result)):
-            assert result[i]["start_ms"] == result[i - 1]["end_ms"]
-
-
-# ---------------------------------------------------------------------------
-# 4. Pydantic スキーマ検証テスト
+# 3. Pydantic スキーマ検証テスト (旧4)
 # ---------------------------------------------------------------------------
 
 class TestLectureSchemas:

@@ -836,7 +836,6 @@
     audio: null,
     pausePositionMs: 0,
     interruptHistory: [],
-    wordTimestamps: [],
     highlightTimer: null,
   };
 
@@ -961,7 +960,7 @@
       if (idx < lectureState.currentSegmentIndex) cls += " visible past";
       else if (idx === lectureState.currentSegmentIndex) cls += " visible current";
 
-      var content = renderSegmentContent(seg, idx === lectureState.currentSegmentIndex);
+      var content = renderSegmentContent(seg);
       html += '<div class="' + cls + '" data-segment="' + idx + '">' + content + '</div>';
     });
 
@@ -985,12 +984,11 @@
     if (currentEl) currentEl.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
-  function renderSegmentContent(seg, isCurrent) {
+  function renderSegmentContent(seg) {
     var rawText = seg.spoken_text || seg.text || "";
 
-    // 1. テキストをまずHTMLエスケープ（数式プレースホルダーは後で差し替える）
+    // 1. 数式プレースホルダー置換（エスケープ前に抽出して後で戻す）
     var formulas = seg.formulas || [];
-    // 数式部分を一時プレースホルダーに置換してからエスケープし、後でHTMLに戻す
     var placeholders = [];
     var textWithPlaceholders = rawText;
     formulas.forEach(function (f, fi) {
@@ -1000,7 +998,6 @@
             ? window.katex.renderToString(f.latex, { displayMode: f.latex.length > 30, throwOnError: false })
             : "$" + f.latex + "$";
           var cls = f.latex.length > 30 ? "lecture-formula-block" : "lecture-formula";
-          if (isCurrent) cls += " visible";
           var placeholder = "\x00FORMULA_" + fi + "\x00";
           var html = '<span class="' + cls + '">' + rendered + '</span>';
           // $$...$$ を先に（$...$ が部分一致するのを防ぐ）
@@ -1011,53 +1008,14 @@
       }
     });
 
-    // 2. 文単位で分割（数式プレースホルダーは句点と干渉しない）
-    var fragments = textWithPlaceholders.split(/((?:[。！？\.!\?]+))/);
-    var sentences = [];
-    for (var fi = 0; fi < fragments.length; fi += 2) {
-      var sentence = (fragments[fi] || "") + (fragments[fi + 1] || "");
-      if (sentence.trim()) sentences.push(sentence);
-    }
-    if (!sentences.length) sentences = [textWithPlaceholders];
+    // 2. HTMLエスケープしてから数式を戻す
+    var text = escHtml(textWithPlaceholders);
+    placeholders.forEach(function (p) {
+      text = text.replace(p.placeholder, p.html);
+    });
 
-    // 3. 各文をエスケープしてから数式プレースホルダーをHTMLに差し戻す
-    function escapeAndRestore(s) {
-      var escaped = escHtml(s);
-      placeholders.forEach(function (p) {
-        // escHtml はプレースホルダー内の \x00 を変えないのでそのまま置換できる
-        escaped = escaped.replace(p.placeholder, p.html);
-      });
-      return escaped;
-    }
-
-    var text;
-    if (isCurrent && lectureState.playing) {
-      // 再生中: 文ごとに非表示→タイマーで順次フェードイン + ワードハイライト用 span
-      text = sentences.map(function (s, i) {
-        var processed = escapeAndRestore(s);
-        // ワードハイライト用にテキストノード部分を span で囲む
-        var words = processed.split(/(\s+)/);
-        var inner = words.map(function (w, wi) {
-          if (/^\s+$/.test(w)) return w;
-          return '<span class="lecture-word" data-word-idx="' + wi + '">' + w + '</span>';
-        }).join("");
-        return '<span class="lecture-sentence" data-sentence-idx="' + i + '" style="opacity:0;transition:opacity 0.5s ease;">' + inner + '</span>';
-      }).join(" ");
-    } else if (isCurrent) {
-      // 【修正・重要】現在のセグメントだが未再生: 1文目だけ表示し、残りは透明で待機する
-      text = sentences.map(function (s, i) {
-        var processed = escapeAndRestore(s);
-        var initialOpacity = (i === 0) ? "1" : "0";
-        return '<span class="lecture-sentence" data-sentence-idx="' + i + '" style="opacity:' + initialOpacity + ';transition:opacity 0.5s ease;">' + processed + '</span>';
-      }).join(" ");
-    } else {
-      // 過去/未来のセグメント: 通常表示
-      text = escapeAndRestore(textWithPlaceholders);
-    }
-
-    // Bold
+    // 3. Bold・段落・改行
     text = text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-    // Line breaks
     text = text.split("\n\n").map(function (p) { return "<p>" + p + "</p>"; }).join("");
     text = text.replace(/\n/g, "<br>");
 
@@ -1144,7 +1102,6 @@
         }
 
         lectureState.audio = new Audio(audioSrc);
-        lectureState.wordTimestamps = ttsData.word_timestamps || [];
 
         lectureState.audio.addEventListener("ended", function () {
           stopHighlighting();
@@ -1153,8 +1110,6 @@
 
         lectureState.audio.addEventListener("timeupdate", function () {
           updateTimeDisplay();
-          updateWordHighlighting();
-          _revealSentencesByTime();
         });
 
         // 【修正・重要】自動再生エラー（ブラウザブロック）の安全なハンドリング
@@ -1162,8 +1117,6 @@
         if (playPromise !== undefined) {
           playPromise.then(function() {
             // 再生成功時
-            _revealSentencesByTime();
-            startHighlighting();
           }).catch(function(error) {
             // ブラウザに自動再生をブロックされた場合
             console.warn("Autoplay blocked by browser:", error);
@@ -1194,36 +1147,11 @@
     }
   }
 
-  function _revealSentencesByTime() {
-    // Progressive reveal of sentence spans based on audio progress
-    var sentenceEls = document.querySelectorAll(".lecture-segment.current .lecture-sentence");
-    if (!sentenceEls.length) return;
-    var totalSentences = sentenceEls.length;
-
-    if (lectureState.audio && lectureState.audio.duration) {
-      var progress = lectureState.audio.currentTime / lectureState.audio.duration;
-      // Reveal sentences proportionally to playback progress
-      var revealCount = Math.ceil(progress * totalSentences);
-      // Always reveal at least the first sentence once playback starts
-      if (lectureState.playing && revealCount < 1) revealCount = 1;
-      for (var i = 0; i < totalSentences; i++) {
-        sentenceEls[i].style.opacity = i < revealCount ? "1" : "0";
-      }
-    } else if (lectureState.playing) {
-      // No duration info yet — reveal first sentence
-      sentenceEls[0].style.opacity = "1";
-    }
-  }
-
   function simulatePlayback(seg) {
     // Estimate reading time: ~300 chars/min for Japanese
     var chars = (seg.spoken_text || seg.text || "").length;
     var durationMs = Math.max(3000, chars * 200);
     var startTime = Date.now();
-
-    // Count sentence spans for progressive reveal
-    var sentenceEls = document.querySelectorAll(".lecture-segment.current .lecture-sentence");
-    var totalSentences = sentenceEls.length;
 
     lectureState.highlightTimer = setInterval(function () {
       var elapsed = Date.now() - startTime;
@@ -1232,15 +1160,6 @@
         var sec = Math.floor(elapsed / 1000);
         var min = Math.floor(sec / 60);
         timeEl.textContent = min + ":" + (sec % 60 < 10 ? "0" : "") + (sec % 60);
-      }
-
-      // Progressive sentence reveal based on elapsed time
-      if (totalSentences > 0) {
-        var progress = elapsed / durationMs;
-        var revealCount = Math.max(1, Math.ceil(progress * totalSentences));
-        for (var i = 0; i < totalSentences; i++) {
-          sentenceEls[i].style.opacity = i < revealCount ? "1" : "0";
-        }
       }
 
       if (elapsed >= durationMs) {
@@ -1302,7 +1221,7 @@
   }
 
   function startHighlighting() {
-    // Word highlighting is driven by audio timeupdate or simulation timer
+    // No-op: segment-based coloring is handled by CSS classes
   }
 
   function stopHighlighting() {
@@ -1310,9 +1229,6 @@
       clearInterval(lectureState.highlightTimer);
       lectureState.highlightTimer = null;
     }
-    // Remove all highlights
-    var words = document.querySelectorAll(".lecture-word.highlight");
-    words.forEach(function (el) { el.classList.remove("highlight"); });
   }
 
   function updateTimeDisplay() {
@@ -1322,23 +1238,6 @@
       var sec = Math.floor(lectureState.audio.currentTime);
       var min = Math.floor(sec / 60);
       timeEl.textContent = min + ":" + (sec % 60 < 10 ? "0" : "") + (sec % 60);
-    }
-  }
-
-  function updateWordHighlighting() {
-    if (!lectureState.audio || !lectureState.wordTimestamps.length) return;
-    var currentMs = lectureState.audio.currentTime * 1000;
-
-    var wordEls = document.querySelectorAll(".lecture-word");
-    wordEls.forEach(function (el) { el.classList.remove("highlight"); });
-
-    // Find the current word based on timestamps
-    for (var i = 0; i < lectureState.wordTimestamps.length && i < wordEls.length; i++) {
-      var ts = lectureState.wordTimestamps[i];
-      if (currentMs >= ts.start_ms && currentMs <= ts.end_ms) {
-        wordEls[i].classList.add("highlight");
-        break;
-      }
     }
   }
 
