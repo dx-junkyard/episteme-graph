@@ -69,7 +69,7 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
         where_clause = f"c.material_id IN ({mid_placeholders})"
         rows = session.execute(
             sa_text(f"""
-                SELECT c.id, c.chunk_index, c.text, c.spoken_text, c.formulas
+                SELECT c.id, c.chunk_index, c.text, c.display_text, c.spoken_text, c.formulas
                 FROM chunks c
                 WHERE ({where_clause})
                   AND c.text IS NOT NULL AND c.text != ''
@@ -82,9 +82,9 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
             {
                 "id": str(row[0]),
                 "chunk_index": row[1],
-                "text": row[2],
-                "spoken_text": row[3] or "",
-                "formulas": row[4] if row[4] else [],
+                "text": row[3] or row[2] or "",
+                "spoken_text": row[4] or "",
+                "formulas": row[5] if row[5] else [],
             }
             for row in rows
         ]
@@ -150,18 +150,21 @@ def _batch_generate_worker(
                     chunk_index=chunk["chunk_index"],
                     course_data=course_data
                 )
+                display_text = result.get("display_text") or chunk["text"]
                 spoken_text = result["spoken_text"]
                 formulas = result["formulas"]
 
                 session.execute(
                     sa_text("""
                         UPDATE chunks
-                        SET spoken_text = :spoken_text,
+                        SET display_text = :display_text,
+                            spoken_text = :spoken_text,
                             formulas = CAST(:formulas AS jsonb)
                         WHERE id = CAST(:id AS uuid)
                     """),
                     {
                         "id": chunk["id"],
+                        "display_text": display_text,
                         "spoken_text": spoken_text,
                         "formulas": json.dumps(formulas, ensure_ascii=False),
                     },
@@ -342,18 +345,22 @@ def save_lecture_script(
 
 _REWRITE_PROMPT = """あなたは大学講義の音声原稿を改善するアシスタントです。
 
-以下のソーステキストと現在の音声読み上げ原稿、そして教員からの指示に基づいて、
-音声原稿を書き換えてください。
+以下のソーステキストと現在の表示テキスト・音声読み上げ原稿、そして教員からの指示に基づいて、
+画面表示テキストと音声原稿を書き換えてください。
 
 **重要:**
 - 教員の指示に従い、必要に応じて一般的な物理学・数学の知識を補足してください
 - ソーステキストに限定されず、教員が指示する内容を反映させてください
+- display_text では LaTeX 数式（`$$...$$` や `$...$`）を保持してください
 - LaTeX 数式は自然言語に変換してください（例: `$E = mc^2$` → 「Eイコールmcの二乗」）
 - 自然な日本語の講義調で書いてください
 - 数式メタデータも更新してください
 
 ## ソーステキスト:
 {source_text}
+
+## 現在の表示テキスト:
+{current_display_text}
 
 ## 現在の音声原稿:
 {current_spoken_text}
@@ -363,6 +370,7 @@ _REWRITE_PROMPT = """あなたは大学講義の音声原稿を改善するア�
 
 ## 出力形式 (厳密にJSON):
 {{
+  "display_text": "画面表示用テキスト（LaTeXは保持）",
   "spoken_text": "書き換えた音声原稿",
   "formulas": [
     {{"id": "formula_0", "latex": "E = mc^2", "spoken": "Eイコールmcの二乗"}}
@@ -388,19 +396,21 @@ def rewrite_lecture_script(
     session = _pg_session()
     try:
         row = session.execute(
-            sa_text("SELECT text, spoken_text FROM chunks WHERE id = CAST(:cid AS uuid)"),
+            sa_text("SELECT text, display_text, spoken_text FROM chunks WHERE id = CAST(:cid AS uuid)"),
             {"cid": chunk_id},
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Chunk not found")
 
         source_text = row[0] or ""
-        current_spoken = row[1] or source_text
+        current_display = row[1] or source_text
+        current_spoken = row[2] or source_text
     finally:
         session.close()
 
     prompt = _REWRITE_PROMPT.format(
         source_text=source_text[:4000],
+        current_display_text=current_display[:4000],
         current_spoken_text=current_spoken[:4000],
         instructor_prompt=body.prompt[:2000],
     )
@@ -419,6 +429,7 @@ def rewrite_lecture_script(
             lines = [ln for ln in lines if not ln.strip().startswith("```")]
             cleaned = "\n".join(lines)
         result = json.loads(cleaned, strict=False)
+        display_text = result.get("display_text") or current_display
         spoken_text = result.get("spoken_text", current_spoken)
         formulas = result.get("formulas", [])
     except Exception:
@@ -431,12 +442,14 @@ def rewrite_lecture_script(
         session.execute(
             sa_text("""
                 UPDATE chunks
-                SET spoken_text = :spoken_text,
+                SET display_text = :display_text,
+                    spoken_text = :spoken_text,
                     formulas = CAST(:formulas AS jsonb)
                 WHERE id = CAST(:cid AS uuid)
             """),
             {
                 "cid": chunk_id,
+                "display_text": display_text,
                 "spoken_text": spoken_text,
                 "formulas": json.dumps(formulas, ensure_ascii=False),
             },
