@@ -123,6 +123,7 @@ def _batch_generate_worker(
     course_id: str,
     chunks: list[dict],
     override: bool,
+    course_data: dict,
 ) -> None:
     """バックグラウンドスレッドでスクリプトを一括生成する。"""
     total = len(chunks)
@@ -143,7 +144,11 @@ def _batch_generate_worker(
             if chunk["spoken_text"] and not override:
                 skipped += 1
             else:
-                result = generate_spoken_text_and_formulas(chunk["text"])
+                result = generate_spoken_text_and_formulas(
+                    chunk_text=chunk["text"],
+                    chunk_index=chunk["chunk_index"],
+                    course_data=course_data
+                )
                 spoken_text = result["spoken_text"]
                 formulas = result["formulas"]
 
@@ -224,7 +229,7 @@ def batch_generate_scripts(
 
     thread = threading.Thread(
         target=_batch_generate_worker,
-        args=(task_id, course_id, chunks, body.override),
+        args=(task_id, course_id, chunks, body.override, course_data),
         daemon=True,
     )
     thread.start()
