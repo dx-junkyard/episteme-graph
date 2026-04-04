@@ -1448,19 +1448,6 @@ body {
   border-left: 3px solid var(--color-text-info);
 }
 
-/* Karaoke-style word highlighting */
-.lecture-word {
-  transition: color 0.15s, background-color 0.15s;
-  border-radius: 2px;
-  padding: 0 1px;
-}
-
-.lecture-word.highlight {
-  color: var(--color-text-info);
-  background-color: rgba(55, 138, 221, 0.08);
-  font-weight: 500;
-}
-
 /* Lecture formula display */
 .lecture-formula {
   display: inline-block;
