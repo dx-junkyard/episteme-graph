@@ -244,7 +244,7 @@ class TestGetCourseAsDraft:
                 {"name": "波動関数", "status": "future", "children": ["確率振幅"], "expanded": False},
             ],
             "sources": [
-                {"title": "Griffiths QM", "subtitle": "第3版", "license": "", "used_section": "", "arxiv_id": "", "material_id": "m-001"},
+                {"title": "Griffiths QM", "subtitle": "第3版", "license": "", "used_section": "", "material_id": "m-001"},
             ],
         }
 

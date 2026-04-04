@@ -97,7 +97,6 @@ class LearningSource(BaseModel):
     subtitle: str = ""
     license: str = ""
     used_section: str = ""
-    arxiv_id: str = ""  # 論文IDと紐付ける場合
     material_id: str = ""  # アップロード教材と紐付ける場合
 
 
@@ -189,6 +188,7 @@ class CourseBuilderChatRequest(BaseModel):
     message: str
     history: list[dict] = []
     session_id: str | None = None
+    selected_material_ids: list[str] = []
 
 
 class CourseBuilderChatResponse(BaseModel):
@@ -329,3 +329,145 @@ class BackgroundTaskOut(BaseModel):
     error_message: str | None = None
     created_at: str = ""
     updated_at: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Interactive Lecture Mode (Issue #66)
+# ---------------------------------------------------------------------------
+
+class LectureFormulaItem(BaseModel):
+    """チャンク内の数式メタデータ。"""
+    id: str  # formula_0, formula_1, ...
+    latex: str
+    spoken: str  # 音声読み上げ用テキスト
+
+
+class LectureSegment(BaseModel):
+    """レクチャーモードの1セグメント（チャンク単位）。"""
+    chunk_id: str
+    chunk_index: int
+    text: str
+    spoken_text: str
+    formulas: list[LectureFormulaItem] = []
+    has_audio: bool = False
+    duration_ms: int = 0
+    segment_mode: str = "full"  # full | summary | skip
+
+
+class LectureSequenceResponse(BaseModel):
+    """レクチャーシーケンス API レスポンス。"""
+    course_id: str
+    topic_id: str
+    segments: list[LectureSegment] = []
+    total_segments: int = 0
+    total_duration_ms: int = 0
+    skipped_segments: int = 0  # 習得済みスキップ数
+    summary_segments: int = 0  # 簡易版変換数
+
+
+class LectureTTSRequest(BaseModel):
+    """TTS 音声生成リクエスト。"""
+    chunk_id: str
+    voice: str = "alloy"
+
+
+class LectureTTSResponse(BaseModel):
+    """TTS 音声生成レスポンス。"""
+    chunk_id: str
+    audio_base64: str
+    duration_ms: int = 0
+    word_timestamps: list[dict] = []
+    content_type: str = "audio/mp3"
+
+
+class LectureInterruptRequest(BaseModel):
+    """レクチャー中断チャットリクエスト。"""
+    message: str
+    current_chunk_id: str
+    pause_position_ms: int = 0
+    history: list[dict] = []
+
+
+class LectureInterruptResponse(BaseModel):
+    """レクチャー中断チャットレスポンス。"""
+    answer: str
+    resume_chunk_id: str
+    resume_position_ms: int = 0
+    course_update: dict | None = None
+
+
+# ---------------------------------------------------------------------------
+# Lecture Script Studio (Issue #70)
+# ---------------------------------------------------------------------------
+
+class LectureScriptChunkOut(BaseModel):
+    """チャンク単位のレクチャースクリプト情報。"""
+    chunk_id: str
+    chunk_index: int
+    text: str
+    spoken_text: str = ""
+    formulas: list[LectureFormulaItem] = []
+    status: str = "ungenerated"  # ungenerated | generated | edited | audio_ready
+
+
+class LectureScriptGenerateRequest(BaseModel):
+    """バッチスクリプト生成リクエスト。"""
+    override: bool = False  # 既存スクリプトを上書きするか
+
+
+class LectureScriptGenerateStartResponse(BaseModel):
+    """バッチスクリプト生成開始レスポンス（非同期）。"""
+    task_id: str
+    course_id: str
+    total_chunks: int = 0
+    status: str = "pending"
+
+
+class LectureScriptGenerateResponse(BaseModel):
+    """バッチスクリプト生成レスポンス（後方互換）。"""
+    course_id: str
+    total_chunks: int = 0
+    generated: int = 0
+    skipped: int = 0
+    chunks: list[LectureScriptChunkOut] = []
+
+
+class LectureScriptSaveRequest(BaseModel):
+    """手動スクリプト保存リクエスト。"""
+    spoken_text: str
+    formulas: list[dict] = []
+
+
+class LectureScriptSaveResponse(BaseModel):
+    """手動スクリプト保存レスポンス。"""
+    chunk_id: str
+    status: str = "edited"
+
+
+class LectureScriptRewriteRequest(BaseModel):
+    """AI スクリプト書き換えリクエスト。"""
+    prompt: str
+
+
+class LectureScriptRewriteResponse(BaseModel):
+    """AI スクリプト書き換えレスポンス。"""
+    chunk_id: str
+    spoken_text: str
+    formulas: list[LectureFormulaItem] = []
+
+
+class LectureAudioGenerateResponse(BaseModel):
+    """バッチ音声生成レスポンス（後方互換）。"""
+    course_id: str
+    total_chunks: int = 0
+    generated: int = 0
+    skipped: int = 0
+    errors: int = 0
+
+
+class LectureAudioGenerateStartResponse(BaseModel):
+    """バッチ音声生成開始レスポンス（非同期）。"""
+    task_id: str
+    course_id: str
+    total_chunks: int = 0
+    status: str = "pending"
