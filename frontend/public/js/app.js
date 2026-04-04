@@ -837,6 +837,7 @@
     pausePositionMs: 0,
     interruptHistory: [],
     highlightTimer: null,
+    voiceRecognition: null,
   };
 
   function initLectureMode() {
@@ -848,6 +849,7 @@
     var chatCloseBtn = document.getElementById("lecture-chat-close");
     var chatSendBtn = document.getElementById("lecture-chat-send");
     var chatInput = document.getElementById("lecture-chat-input");
+    var chatMicBtn = document.getElementById("lecture-chat-mic");
     var resumeBtn = document.getElementById("lecture-chat-resume");
 
     if (toggleBtn) toggleBtn.addEventListener("click", toggleLectureMode);
@@ -857,6 +859,7 @@
     if (questionBtn) questionBtn.addEventListener("click", openInterruptChat);
     if (chatCloseBtn) chatCloseBtn.addEventListener("click", closeInterruptChat);
     if (chatSendBtn) chatSendBtn.addEventListener("click", sendInterruptMessage);
+    if (chatMicBtn) chatMicBtn.addEventListener("click", toggleVoiceInput);
     if (resumeBtn) resumeBtn.addEventListener("click", resumeLecture);
 
     if (chatInput) {
@@ -867,6 +870,60 @@
         }
       });
     }
+  }
+
+  function toggleVoiceInput() {
+    var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    var micBtn = document.getElementById("lecture-chat-mic");
+
+    // Stop if already recording
+    if (lectureState.voiceRecognition) {
+      lectureState.voiceRecognition.stop();
+      return;
+    }
+
+    if (!SpeechRecognition) {
+      alert("このブラウザは音声認識に対応していません。Chrome または Edge をお試しください。");
+      return;
+    }
+
+    var recognition = new SpeechRecognition();
+    recognition.lang = "ja-JP";
+    recognition.interimResults = true;
+    recognition.continuous = false;
+    lectureState.voiceRecognition = recognition;
+
+    recognition.onstart = function () {
+      if (micBtn) micBtn.classList.add("recording");
+    };
+
+    recognition.onresult = function (event) {
+      var transcript = "";
+      for (var i = event.resultIndex; i < event.results.length; i++) {
+        transcript += event.results[i][0].transcript;
+      }
+      var input = document.getElementById("lecture-chat-input");
+      if (input) input.value = transcript;
+    };
+
+    recognition.onend = function () {
+      lectureState.voiceRecognition = null;
+      if (micBtn) micBtn.classList.remove("recording");
+      var input = document.getElementById("lecture-chat-input");
+      if (input && input.value.trim()) {
+        sendInterruptMessage();
+      }
+    };
+
+    recognition.onerror = function (event) {
+      lectureState.voiceRecognition = null;
+      if (micBtn) micBtn.classList.remove("recording");
+      if (event.error === "not-allowed") {
+        alert("マイクの使用が許可されていません。ブラウザのアドレスバーからマイクの許可を確認してください。");
+      }
+    };
+
+    recognition.start();
   }
 
   async function toggleLectureMode() {
@@ -1254,6 +1311,13 @@
   }
 
   function closeInterruptChat() {
+    // Stop any active voice recognition before closing
+    if (lectureState.voiceRecognition) {
+      lectureState.voiceRecognition.abort();
+      lectureState.voiceRecognition = null;
+      var micBtn = document.getElementById("lecture-chat-mic");
+      if (micBtn) micBtn.classList.remove("recording");
+    }
     var popup = document.getElementById("lecture-chat-popup");
     popup.classList.remove("visible");
   }
