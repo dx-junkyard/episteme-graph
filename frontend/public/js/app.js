@@ -1062,7 +1062,7 @@
               displayMode: f.is_display === true,
               throwOnError: false,
             });
-            var cls = f.is_display ? "lecture-formula-block" : "lecture-formula";
+            var cls = f.is_display ? "lecture-formula-block visible" : "lecture-formula visible";
             rendered = '<span class="' + cls + '">' + rendered + '</span>';
           }
         } catch (e) {
