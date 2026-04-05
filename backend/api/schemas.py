@@ -337,9 +337,10 @@ class BackgroundTaskOut(BaseModel):
 
 class LectureFormulaItem(BaseModel):
     """チャンク内の数式メタデータ。"""
-    id: str  # formula_0, formula_1, ...
+    id: str  # [[FORMULA_0]], [[FORMULA_1]], ...
     latex: str
     spoken: str  # 音声読み上げ用テキスト
+    is_display: bool = False  # True: ブロック数式（独立行）, False: インライン数式
 
 
 class LectureSegment(BaseModel):

@@ -1042,39 +1042,36 @@
   }
 
   function renderSegmentContent(seg) {
-    var rawText = seg.spoken_text || seg.text || "";
+    var rawText = seg.text || seg.display_text || seg.spoken_text || "";
 
-    // 1. 数式プレースホルダー置換（エスケープ前に抽出して後で戻す）
-    var formulas = seg.formulas || [];
-    var placeholders = [];
-    var textWithPlaceholders = rawText;
-    formulas.forEach(function (f, fi) {
-      if (f.latex) {
-        try {
-          var rendered = window.katex
-            ? window.katex.renderToString(f.latex, { displayMode: f.latex.length > 30, throwOnError: false })
-            : "$" + f.latex + "$";
-          var cls = f.latex.length > 30 ? "lecture-formula-block" : "lecture-formula";
-          var placeholder = "\x00FORMULA_" + fi + "\x00";
-          var html = '<span class="' + cls + '">' + rendered + '</span>';
-          // $$...$$ を先に（$...$ が部分一致するのを防ぐ）
-          textWithPlaceholders = textWithPlaceholders.replace("$$" + f.latex + "$$", placeholder);
-          textWithPlaceholders = textWithPlaceholders.replace("$" + f.latex + "$", placeholder);
-          placeholders.push({ placeholder: placeholder, html: html });
-        } catch (e) { /* keep original */ }
-      }
-    });
+    // 1. 本文全体を安全にエスケープ（数式部分はプレースホルダーなので壊れない）
+    var text = escHtml(rawText);
 
-    // 2. HTMLエスケープしてから数式を戻す
-    var text = escHtml(textWithPlaceholders);
-    placeholders.forEach(function (p) {
-      text = text.replace(p.placeholder, p.html);
-    });
-
-    // 3. Bold・段落・改行
+    // 2. 段落・改行処理
     text = text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
     text = text.split("\n\n").map(function (p) { return "<p>" + p + "</p>"; }).join("");
     text = text.replace(/\n/g, "<br>");
+
+    // 3. IDをキーにして確実に数式をはめ込む（正規表現を使わない堅牢な置換）
+    if (seg.formulas && seg.formulas.length > 0) {
+      seg.formulas.forEach(function(f) {
+        var rendered = "";
+        try {
+          if (window.katex) {
+            rendered = window.katex.renderToString(f.latex.trim(), {
+              displayMode: f.is_display === true,
+              throwOnError: false,
+            });
+            var cls = f.is_display ? "lecture-formula-block visible" : "lecture-formula visible";
+            rendered = '<span class="' + cls + '">' + rendered + '</span>';
+          }
+        } catch (e) {
+          rendered = "<span>" + escHtml(f.latex) + "</span>";
+        }
+        // split/join を使って本文中の [[FORMULA_x]] を確実にHTMLに置換
+        text = text.split(escHtml(f.id)).join(rendered);
+      });
+    }
 
     return text;
   }

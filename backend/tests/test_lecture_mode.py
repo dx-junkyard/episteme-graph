@@ -35,10 +35,14 @@ class TestFallbackSpokenText:
         result = _fallback_spoken_text(text)
 
         assert "spoken_text" in result
+        # display_text はプレースホルダー方式に変換される
+        assert "[[FORMULA_0]]" in result["display_text"]
+        assert "$$" not in result["display_text"]
         assert "formulas" in result
         assert len(result["formulas"]) == 1
         assert result["formulas"][0]["latex"] == "E = mc^2"
-        assert result["formulas"][0]["id"] == "formula_0"
+        assert result["formulas"][0]["id"] == "[[FORMULA_0]]"
+        assert result["formulas"][0]["is_display"] is True
         assert "（数式1）" in result["spoken_text"]
 
     def test_fallback_with_inline_math(self):
@@ -58,12 +62,14 @@ class TestFallbackSpokenText:
         result = _fallback_spoken_text(text)
 
         assert result["spoken_text"] == text
+        assert result["display_text"] == text
         assert len(result["formulas"]) == 0
 
     def test_fallback_empty_text(self):
         from core.lecture import _fallback_spoken_text
 
         result = _fallback_spoken_text("")
+        assert result["display_text"] == ""
         assert result["spoken_text"] == ""
         assert result["formulas"] == []
 
@@ -87,11 +93,13 @@ class TestGenerateSpokenTextAndFormulas:
         from core.lecture import generate_spoken_text_and_formulas
 
         mock_gen.return_value = json.dumps({
+            "display_text": "Energy is [[FORMULA_0]]",
             "spoken_text": "Eイコールmcの二乗",
-            "formulas": [{"id": "formula_0", "latex": "E=mc^2", "spoken": "Eイコールmcの二乗"}],
+            "formulas": [{"id": "[[FORMULA_0]]", "latex": "E=mc^2", "spoken": "Eイコールmcの二乗", "is_display": False}],
         })
 
         result = generate_spoken_text_and_formulas("Energy is $E=mc^2$")
+        assert result["display_text"] == "Energy is [[FORMULA_0]]"
         assert result["spoken_text"] == "Eイコールmcの二乗"
         assert len(result["formulas"]) == 1
 
@@ -99,9 +107,10 @@ class TestGenerateSpokenTextAndFormulas:
     def test_llm_with_code_fences(self, mock_gen):
         from core.lecture import generate_spoken_text_and_formulas
 
-        mock_gen.return_value = '```json\n{"spoken_text": "テスト", "formulas": []}\n```'
+        mock_gen.return_value = '```json\n{"display_text":"テスト", "spoken_text": "テスト", "formulas": []}\n```'
 
         result = generate_spoken_text_and_formulas("テスト")
+        assert result["display_text"] == "テスト"
         assert result["spoken_text"] == "テスト"
         assert result["formulas"] == []
 
@@ -112,6 +121,9 @@ class TestGenerateSpokenTextAndFormulas:
         mock_gen.side_effect = Exception("API Error")
 
         result = generate_spoken_text_and_formulas("$E=mc^2$")
+        # フォールバックはプレースホルダー方式に変換する
+        assert "[[FORMULA_0]]" in result["display_text"]
+        assert "$" not in result["display_text"]
         assert "spoken_text" in result
         assert len(result["formulas"]) == 1
 
@@ -119,6 +131,7 @@ class TestGenerateSpokenTextAndFormulas:
         from core.lecture import generate_spoken_text_and_formulas
 
         result = generate_spoken_text_and_formulas("")
+        assert result["display_text"] == ""
         assert result["spoken_text"] == ""
         assert result["formulas"] == []
 
@@ -126,6 +139,7 @@ class TestGenerateSpokenTextAndFormulas:
         from core.lecture import generate_spoken_text_and_formulas
 
         result = generate_spoken_text_and_formulas("   ")
+        assert result["display_text"] == ""
         assert result["spoken_text"] == ""
         assert result["formulas"] == []
 

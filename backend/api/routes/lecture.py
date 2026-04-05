@@ -36,6 +36,7 @@ from core.lecture import (
     build_lecture_sequence,
     generate_spoken_text_and_formulas,
     get_user_mastered_concepts,
+    normalize_to_placeholder_format,
 )
 from core.llm import generate_text, get_llm_params
 from core.postgres import get_session as _pg_session
@@ -98,7 +99,7 @@ def get_lecture_sequence(
         where_clause = f"c.material_id IN ({mid_placeholders})"
         rows = session.execute(
             sa_text(f"""
-                SELECT c.id, c.chunk_index, c.text, c.spoken_text, c.formulas,
+                SELECT c.id, c.chunk_index, c.text, c.display_text, c.spoken_text, c.formulas,
                        c.chapter, c.section
                 FROM chunks c
                 WHERE ({where_clause})
@@ -123,18 +124,24 @@ def get_lecture_sequence(
         chunk_id = str(row[0])
         chunk_index = row[1]
         text = row[2]
-        spoken_text = row[3]
-        formulas = row[4] if row[4] else []
+        display_text = row[3] or text
+        spoken_text = row[4]
+        formulas = row[5] if row[5] else []
 
         if not spoken_text:
             result = generate_spoken_text_and_formulas(text)
+            display_text = result.get("display_text") or text
             spoken_text = result["spoken_text"]
             formulas = result["formulas"]
             chunks_to_update.append({
                 "id": chunk_id,
+                "display_text": display_text,
                 "spoken_text": spoken_text,
                 "formulas": formulas,
             })
+
+        # 旧フォーマット（$...$）のデータをプレースホルダー方式に正規化
+        display_text, formulas = normalize_to_placeholder_format(display_text, formulas)
 
         # 音声キャッシュの有無を確認
         has_audio = _check_audio_cache(chunk_id)
@@ -142,7 +149,7 @@ def get_lecture_sequence(
         chunks.append({
             "id": chunk_id,
             "chunk_index": chunk_index,
-            "text": text,
+            "text": display_text,
             "spoken_text": spoken_text,
             "formulas": formulas,
             "has_audio": has_audio,
@@ -215,11 +222,13 @@ def _generate_sequence_from_search(
             continue
         chunk_id = cr.get("id", f"search_{i}")
         result = generate_spoken_text_and_formulas(cr["text"])
+        display_text = result.get("display_text") or cr["text"]
         is_valid_uuid = _is_valid_uuid(chunk_id)
 
         if is_valid_uuid:
             chunks_to_update.append({
                 "id": chunk_id,
+                "display_text": display_text,
                 "spoken_text": result["spoken_text"],
                 "formulas": result["formulas"],
             })
@@ -227,7 +236,7 @@ def _generate_sequence_from_search(
         segments.append(LectureSegment(
             chunk_id=chunk_id,
             chunk_index=i,
-            text=cr["text"],
+            text=display_text,
             spoken_text=result["spoken_text"],
             formulas=[LectureFormulaItem(**f) for f in result["formulas"]],
             has_audio=_check_audio_cache(chunk_id) if is_valid_uuid else False,
@@ -523,7 +532,7 @@ def _get_chunk_spoken_text(chunk_id: str) -> str | None:
     session = _pg_session()
     try:
         row = session.execute(
-            sa_text("SELECT spoken_text, text FROM chunks WHERE id = CAST(:cid AS uuid) LIMIT 1"),
+            sa_text("SELECT spoken_text, text, display_text FROM chunks WHERE id = CAST(:cid AS uuid) LIMIT 1"),
             {"cid": chunk_id},
         ).fetchone()
         if not row:
@@ -538,7 +547,12 @@ def _get_chunk_spoken_text(chunk_id: str) -> str | None:
         result = generate_spoken_text_and_formulas(text)
         spoken = result["spoken_text"]
         # 永続化
-        _persist_spoken_text([{"id": chunk_id, "spoken_text": spoken, "formulas": result["formulas"]}])
+        _persist_spoken_text([{
+            "id": chunk_id,
+            "display_text": result.get("display_text") or text,
+            "spoken_text": spoken,
+            "formulas": result["formulas"],
+        }])
         return spoken
     finally:
         session.close()
@@ -562,7 +576,7 @@ def _get_chunk_text(chunk_id: str) -> str:
 
 
 def _persist_spoken_text(chunks: list[dict]) -> None:
-    """チャンクの spoken_text と formulas を DB に永続化する。"""
+    """チャンクの display_text / spoken_text / formulas を DB に永続化する。"""
     valid_chunks = [c for c in chunks if _is_valid_uuid(c["id"])]
     if not valid_chunks:
         return
@@ -572,12 +586,14 @@ def _persist_spoken_text(chunks: list[dict]) -> None:
             session.execute(
                 sa_text("""
                     UPDATE chunks
-                    SET spoken_text = :spoken_text,
+                    SET display_text = :display_text,
+                        spoken_text = :spoken_text,
                         formulas = CAST(:formulas AS jsonb)
                     WHERE id = CAST(:id AS uuid)
                 """),
                 {
                     "id": chunk["id"],
+                    "display_text": chunk.get("display_text", ""),
                     "spoken_text": chunk["spoken_text"],
                     "formulas": json.dumps(chunk["formulas"], ensure_ascii=False),
                 },
@@ -588,5 +604,3 @@ def _persist_spoken_text(chunks: list[dict]) -> None:
         logger.warning("Failed to persist spoken_text", exc_info=True)
     finally:
         session.close()
-
-
