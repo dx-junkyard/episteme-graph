@@ -31,13 +31,21 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     # --- LLM ---
-    # ベンダーニュートラルな変数名。後方互換のため OPENAI_* 環境変数も受け付ける。
+    # プロバイダ切替 (openai | gemini)。.env の LLM_PROVIDER で切り替える。
+    llm_provider: Literal["openai", "gemini"] = Field(
+        default="openai",
+        validation_alias=AliasChoices("LLM_PROVIDER"),
+    )
+    # ベンダーニュートラルな変数名。後方互換のため OPENAI_* / GEMINI_* 環境変数も受け付ける。
     llm_api_key: str = Field(
         default="",
-        validation_alias=AliasChoices("LLM_API_KEY", "OPENAI_API_KEY"),
+        validation_alias=AliasChoices(
+            "LLM_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"
+        ),
     )
     llm_analysis_model: str = Field(
         default="o3-mini",
@@ -46,6 +54,12 @@ class Settings(BaseSettings):
     llm_embedding_model: str = Field(
         default="text-embedding-3-large",
         validation_alias=AliasChoices("LLM_EMBEDDING_MODEL", "OPENAI_EMBEDDING_MODEL"),
+    )
+    # 埋め込みベクトルの次元数。pgvector のスキーマと一致させる必要がある。
+    # OpenAI text-embedding-3-large = 3072、Gemini text-embedding-004 = 768 など。
+    llm_embedding_dim: int = Field(
+        default=3072,
+        validation_alias=AliasChoices("LLM_EMBEDDING_DIM"),
     )
 
     # --- LLM マルチモード設定 ---

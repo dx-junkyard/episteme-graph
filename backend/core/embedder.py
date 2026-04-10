@@ -11,13 +11,11 @@ import uuid
 
 from sqlalchemy import text
 
-from core.llm import generate_embeddings
+from core.llm import generate_embeddings, get_embedding_dim
 from core.postgres import get_session
 from core.schema import CausalEdge, PaperStructure
 
 logger = logging.getLogger(__name__)
-
-_VECTOR_DIM = 3072  # text-embedding-3-large の次元数
 
 
 def _build_ancestors_map(edges: list[CausalEdge]) -> dict[str, list[str]]:
@@ -216,12 +214,13 @@ def search_similar_papers(
     vectors = generate_embeddings([query_text])
     vector = vectors[0]
 
+    dim = get_embedding_dim()
     session = get_session()
     try:
-        inner = """
+        inner = f"""
             SELECT DISTINCT ON (c.material_id)
                    c.material_id,
-                   1 - (c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))) AS score,
+                   1 - (c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))) AS score,
                    c.text
             FROM chunks c
             WHERE c.material_id IS NOT NULL
@@ -233,8 +232,8 @@ def search_similar_papers(
             inner += " AND c.material_id != :exclude_id"
             params["exclude_id"] = exclude_material_id
 
-        inner += """
-            ORDER BY c.material_id, c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
+        inner += f"""
+            ORDER BY c.material_id, c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))
         """
 
         query = f"""
@@ -268,12 +267,13 @@ def search_fanns_hybrid(
     vectors = generate_embeddings([query_text])
     query_vector = vectors[0]
 
+    dim = get_embedding_dim()
     session = get_session()
     try:
-        inner = """
+        inner = f"""
             SELECT DISTINCT ON (c.material_id)
                    c.material_id,
-                   1 - (c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))) AS score,
+                   1 - (c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))) AS score,
                    c.text,
                    c.smiles_dsl,
                    c.variables
@@ -287,8 +287,8 @@ def search_fanns_hybrid(
             inner += " AND c.smiles_dsl LIKE :dsl_pattern"
             params["dsl_pattern"] = f"%{query_dsl_regex}%"
 
-        inner += """
-            ORDER BY c.material_id, c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
+        inner += f"""
+            ORDER BY c.material_id, c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))
         """
 
         query = f"""

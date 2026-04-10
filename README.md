@@ -17,10 +17,10 @@ PDF文献から概念・関係性を自動抽出してナレッジグラフを�
 |---|---|
 | フロントエンド | Vanilla JS SPA + nginx |
 | APIサーバー | FastAPI (Python 3.11) |
-| RDB + ベクトル検索 | PostgreSQL 16 + pgvector (cosine, 3072次元) |
+| RDB + ベクトル検索 | PostgreSQL 16 + pgvector (cosine, 次元数は `LLM_EMBEDDING_DIM` で設定) |
 | グラフDB | Neo4j 5（概念グラフ走査専用） |
 | オブジェクトストレージ | MinIO（S3互換） |
-| LLM | OpenAI API (gpt-4o, text-embedding-3-large) |
+| LLM | OpenAI API または Google Gemini API（`LLM_PROVIDER` で切替） |
 | TTS 音声合成 | OpenAI TTS API (tts-1) |
 | 認証 | JWT (HS256) + bcrypt |
 
@@ -29,14 +29,15 @@ PDF文献から概念・関係性を自動抽出してナレッジグラフを�
 ### 前提条件
 
 - Docker & Docker Compose
-- OpenAI APIキー
+- LLM APIキー（OpenAI または Google Gemini）
 
 ### 起動手順
 
 ```bash
 # 1. 環境変数を設定
 cp .env.example .env
-# .env を編集: OPENAI_API_KEY, ADMIN_PASSWORD, JWT_SECRET を必ず設定
+# .env を編集: LLM_API_KEY (または OPENAI_API_KEY / GEMINI_API_KEY), ADMIN_PASSWORD, JWT_SECRET を必ず設定
+# Gemini を使う場合は LLM_PROVIDER=gemini, LLM_EMBEDDING_DIM=768 なども設定
 
 # 2. 全サービスを起動
 docker compose up -d
@@ -89,7 +90,7 @@ docker compose logs -f api-server
 PDF アップロード
   → PyMuPDF テキスト抽出
   → LLM 仮説駆動型分析 → PaperStructure 生成
-  → テキストチャンク → PostgreSQL pgvector（3072次元）
+  → テキストチャンク → PostgreSQL pgvector（次元数は `LLM_EMBEDDING_DIM` 準拠）
   → 概念ノード・エッジ → Neo4j（REQUIRES / RELATES_TO / CONTAINS）
   → PaperStructure JSON → MinIO（extracted-structures バケット）
 ```
@@ -188,7 +189,7 @@ episteme-graph/
 │   │   ├── embedder.py        # pgvector ベクトル保存・検索
 │   │   ├── chat.py            # RAG チャットロジック
 │   │   ├── lecture.py         # レクチャーシーケンス生成・TTS補助
-│   │   ├── llm.py             # OpenAI クライアント
+│   │   ├── llm.py             # LLM アダプタ（OpenAI / Gemini 切替）
 │   │   ├── storage.py         # MinIO S3互換ストレージ
 │   │   ├── batch.py           # 構造的同型性評価バッチ
 │   │   ├── meta_analyzer.py   # 未回答クエリ → スキーマ拡張提案

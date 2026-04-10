@@ -20,6 +20,7 @@ Reasoning モデル（o1, o3-mini, gpt-5.x 等）向けの自動変換を行う:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from functools import lru_cache
@@ -32,6 +33,11 @@ from core.config import get_settings
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def get_embedding_dim() -> int:
+    """現在の埋め込みベクトル次元数を返す (pgvector スキーマと一致する必要がある)。"""
+    return int(get_settings().llm_embedding_dim)
 
 # ---------------------------------------------------------------------------
 # マルチモード LLM パラメータ取得
@@ -160,6 +166,119 @@ def _get_openai_client():
 
 
 # ---------------------------------------------------------------------------
+# Gemini Adapter（内部実装）
+# ---------------------------------------------------------------------------
+
+@lru_cache(maxsize=1)
+def _get_gemini_module():
+    """google-generativeai モジュールを初期化して返す。"""
+    import google.generativeai as genai  # type: ignore
+
+    settings = get_settings()
+    if not settings.llm_api_key:
+        raise EnvironmentError(
+            "LLM API キーが設定されていません。"
+            " .env ファイルに LLM_API_KEY=... (または GEMINI_API_KEY=...) を追記してください。"
+        )
+    genai.configure(api_key=settings.llm_api_key)
+    return genai
+
+
+def _messages_to_gemini(
+    messages: list[dict[str, str]],
+) -> tuple[str | None, list[dict[str, Any]]]:
+    """OpenAI 形式メッセージを Gemini 形式 (system_instruction, contents) に変換する。
+
+    - ``system`` → ``system_instruction`` に集約
+    - ``user`` → ``role="user"``
+    - ``assistant`` → ``role="model"``
+    """
+    system_parts: list[str] = []
+    contents: list[dict[str, Any]] = []
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if role == "system":
+            system_parts.append(content)
+        elif role == "assistant":
+            contents.append({"role": "model", "parts": [content]})
+        else:
+            contents.append({"role": "user", "parts": [content]})
+    system_instruction = "\n\n".join(system_parts) if system_parts else None
+    return system_instruction, contents
+
+
+def _gemini_generate_text(
+    messages: list[dict[str, str]],
+    model_name: str,
+    *,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> str:
+    genai = _get_gemini_module()
+    system_instruction, contents = _messages_to_gemini(messages)
+    generation_config: dict[str, Any] = {}
+    if temperature is not None:
+        generation_config["temperature"] = temperature
+    if max_tokens is not None:
+        generation_config["max_output_tokens"] = max_tokens
+
+    model = genai.GenerativeModel(
+        model_name=model_name,
+        system_instruction=system_instruction,
+    )
+    response = model.generate_content(
+        contents,
+        generation_config=generation_config or None,
+    )
+    return (getattr(response, "text", "") or "").strip()
+
+
+def _gemini_generate_structured(
+    messages: list[dict[str, str]],
+    response_format: type[T],
+    model_name: str,
+) -> T:
+    genai = _get_gemini_module()
+    system_instruction, contents = _messages_to_gemini(messages)
+    schema = response_format.model_json_schema()
+    model = genai.GenerativeModel(
+        model_name=model_name,
+        system_instruction=system_instruction,
+    )
+    response = model.generate_content(
+        contents,
+        generation_config={
+            "response_mime_type": "application/json",
+            "response_schema": schema,
+        },
+    )
+    raw = getattr(response, "text", "") or ""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Gemini の構造化レスポンスを JSON として解析できませんでした: {raw!r}") from exc
+    return response_format.model_validate(data)
+
+
+def _gemini_generate_embeddings(
+    texts: list[str],
+    model_name: str,
+) -> list[list[float]]:
+    genai = _get_gemini_module()
+    # Gemini の embed_content は text 単位のためループで呼び出す。
+    result: list[list[float]] = []
+    for t in texts:
+        resp = genai.embed_content(model=model_name, content=t)
+        # resp は dict-like: {"embedding": [...]} または {"embedding": {"values": [...]}}
+        emb = resp["embedding"] if isinstance(resp, dict) else getattr(resp, "embedding", None)
+        if isinstance(emb, dict) and "values" in emb:
+            emb = emb["values"]
+        result.append(list(emb or []))
+    return result
+
+
+# ---------------------------------------------------------------------------
 # 公開 API: テキスト生成
 # ---------------------------------------------------------------------------
 
@@ -194,6 +313,15 @@ def generate_text(
     """
     settings = get_settings()
     model_name = model or settings.llm_analysis_model
+
+    if settings.llm_provider == "gemini":
+        return _gemini_generate_text(
+            messages,
+            model_name,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
     client = _get_openai_client()
 
     adapted_messages = _adapt_messages_for_model(messages, model_name)
@@ -238,6 +366,10 @@ def generate_text_with_structured_output(
     """
     settings = get_settings()
     model_name = model or settings.llm_analysis_model
+
+    if settings.llm_provider == "gemini":
+        return _gemini_generate_structured(messages, response_format, model_name)
+
     client = _get_openai_client()
 
     adapted_messages = _adapt_messages_for_model(messages, model_name)
@@ -278,6 +410,10 @@ def generate_embeddings(
 
     settings = get_settings()
     model_name = model or settings.llm_embedding_model
+
+    if settings.llm_provider == "gemini":
+        return _gemini_generate_embeddings(texts, model_name)
+
     client = _get_openai_client()
 
     resp = client.embeddings.create(model=model_name, input=texts)

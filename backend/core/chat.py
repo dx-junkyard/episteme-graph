@@ -14,7 +14,7 @@ import logging
 
 from sqlalchemy import text
 
-from core.llm import generate_text, generate_embeddings
+from core.llm import generate_text, generate_embeddings, get_embedding_dim
 from core.postgres import get_session
 
 logger = logging.getLogger(__name__)
@@ -62,16 +62,17 @@ def _embed_query(question: str) -> list[float]:
 def search_chunks(question: str, material_id: str, top_k: int = 5) -> list[str]:
     """PostgreSQL pgvector で material_id に属するチャンクを類似度検索して返す。"""
     query_vector = _embed_query(question)
+    dim = get_embedding_dim()
 
     session = get_session()
     try:
         rows = session.execute(
-            text("""
+            text(f"""
                 SELECT c.text
                 FROM chunks c
                 WHERE c.material_id = :material_id
                   AND c.embedding IS NOT NULL
-                ORDER BY c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
+                ORDER BY c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))
                 LIMIT :limit
             """),
             {
