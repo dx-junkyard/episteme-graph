@@ -184,6 +184,54 @@ def _get_gemini_module():
     return genai
 
 
+# ---------------------------------------------------------------------------
+# Gemini Vertex AI Adapter（廃止予定 / Deprecated）
+# ---------------------------------------------------------------------------
+
+@lru_cache(maxsize=1)
+def _get_gemini_vertex_module():
+    """Vertex AI ADC で初期化した google-generativeai モジュールを返す。
+
+    .. deprecated::
+        この認証方式は廃止予定です。
+        将来的には ``LLM_PROVIDER=gemini`` と ``LLM_API_KEY`` による認証に移行してください。
+
+    ADC の設定手順::
+
+        gcloud auth application-default login
+
+    ``GOOGLE_CLOUD_PROJECT`` と ``GOOGLE_CLOUD_LOCATION`` 環境変数も参照する。
+    """
+    import google.auth  # type: ignore[import]
+    import google.auth.exceptions  # type: ignore[import]
+    import google.generativeai as genai  # type: ignore[import]
+
+    settings = get_settings()
+    location = settings.google_cloud_location or "us-central1"
+
+    try:
+        credentials, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+    except google.auth.exceptions.DefaultCredentialsError as exc:
+        raise EnvironmentError(
+            "Vertex AI ADC が見つかりません。\n"
+            "  gcloud auth application-default login\n"
+            "を実行してから再起動してください。"
+        ) from exc
+
+    genai.configure(
+        credentials=credentials,
+        client_options={"api_endpoint": f"{location}-aiplatform.googleapis.com"},
+    )
+    logger.info(
+        "Gemini Vertex AI adapter initialized (project=%s, location=%s) [DEPRECATED]",
+        settings.google_cloud_project or "<ADC default>",
+        location,
+    )
+    return genai
+
+
 def _messages_to_gemini(
     messages: list[dict[str, str]],
 ) -> tuple[str | None, list[dict[str, Any]]]:
@@ -212,10 +260,11 @@ def _gemini_generate_text(
     messages: list[dict[str, str]],
     model_name: str,
     *,
+    genai_module: Any,
     temperature: float | None = None,
     max_tokens: int | None = None,
 ) -> str:
-    genai = _get_gemini_module()
+    genai = genai_module
     system_instruction, contents = _messages_to_gemini(messages)
     generation_config: dict[str, Any] = {}
     if temperature is not None:
@@ -238,8 +287,10 @@ def _gemini_generate_structured(
     messages: list[dict[str, str]],
     response_format: type[T],
     model_name: str,
+    *,
+    genai_module: Any,
 ) -> T:
-    genai = _get_gemini_module()
+    genai = genai_module
     system_instruction, contents = _messages_to_gemini(messages)
     schema = response_format.model_json_schema()
     model = genai.GenerativeModel(
@@ -264,8 +315,10 @@ def _gemini_generate_structured(
 def _gemini_generate_embeddings(
     texts: list[str],
     model_name: str,
+    *,
+    genai_module: Any,
 ) -> list[list[float]]:
-    genai = _get_gemini_module()
+    genai = genai_module
     # Gemini の embed_content は text 単位のためループで呼び出す。
     result: list[list[float]] = []
     for t in texts:
@@ -318,6 +371,16 @@ def generate_text(
         return _gemini_generate_text(
             messages,
             model_name,
+            genai_module=_get_gemini_module(),
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+    if settings.llm_provider == "gemini-vertex":  # 廃止予定
+        return _gemini_generate_text(
+            messages,
+            model_name,
+            genai_module=_get_gemini_vertex_module(),
             temperature=temperature,
             max_tokens=max_tokens,
         )
@@ -368,7 +431,10 @@ def generate_text_with_structured_output(
     model_name = model or settings.llm_analysis_model
 
     if settings.llm_provider == "gemini":
-        return _gemini_generate_structured(messages, response_format, model_name)
+        return _gemini_generate_structured(messages, response_format, model_name, genai_module=_get_gemini_module())
+
+    if settings.llm_provider == "gemini-vertex":  # 廃止予定
+        return _gemini_generate_structured(messages, response_format, model_name, genai_module=_get_gemini_vertex_module())
 
     client = _get_openai_client()
 
@@ -412,7 +478,10 @@ def generate_embeddings(
     model_name = model or settings.llm_embedding_model
 
     if settings.llm_provider == "gemini":
-        return _gemini_generate_embeddings(texts, model_name)
+        return _gemini_generate_embeddings(texts, model_name, genai_module=_get_gemini_module())
+
+    if settings.llm_provider == "gemini-vertex":  # 廃止予定
+        return _gemini_generate_embeddings(texts, model_name, genai_module=_get_gemini_vertex_module())
 
     client = _get_openai_client()
 
