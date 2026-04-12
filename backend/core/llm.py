@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from functools import lru_cache
 from typing import Any, Literal, TypeVar
@@ -185,6 +186,138 @@ def _get_gemini_module():
 
 
 # ---------------------------------------------------------------------------
+# Google Vertex AI Adapter（google-cloud-aiplatform / vertexai SDK）
+# ---------------------------------------------------------------------------
+
+@lru_cache(maxsize=1)
+def _get_vertex_ai_client():
+    """Vertex AI SDK (google-cloud-aiplatform) を初期化して返す。
+
+    認証は以下の優先順で解決される:
+
+    1. ``settings.google_application_credentials`` (= ``GOOGLE_APPLICATION_CREDENTIALS`` 環境変数)
+       が設定されていればそのファイルを使用。Docker では ``/app/.gcp/credentials.json`` が既定。
+    2. ``gcloud auth application-default login`` で生成された ADC クレデンシャル。
+    3. GCE / Cloud Run 上のメタデータサーバー（サービスアカウント自動付与）。
+
+    ``LLM_API_KEY`` / ``GEMINI_API_KEY`` は不要。
+    """
+    settings = get_settings()
+    project = settings.gcp_project_id or settings.google_cloud_project or None
+    location = settings.gcp_location or settings.google_cloud_location or "us-central1"
+
+    # ① 認証ファイルパスを os.environ に明示セット（Google SDK が自動参照する）
+    #    import より前に行うことでファイル不在を早期に検出できる。
+    cred_path = settings.google_application_credentials
+    if cred_path:
+        if not os.path.isfile(cred_path):
+            raise EnvironmentError(
+                f"GOOGLE_APPLICATION_CREDENTIALS に指定されたファイルが見つかりません: {cred_path}\n"
+                "  - .gcp/credentials.json が存在するか確認してください。\n"
+                "  - docker-compose.yml の volumes で .gcp/ がマウントされているか確認してください。"
+            )
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = cred_path
+        logger.debug("GOOGLE_APPLICATION_CREDENTIALS を設定しました: %s", cred_path)
+
+    # ② SDK インポート & Vertex AI 初期化
+    #    ADC は Google SDK が GOOGLE_APPLICATION_CREDENTIALS を自動参照する。
+    import vertexai  # type: ignore[import]
+    import google.auth.exceptions  # type: ignore[import]
+
+    try:
+        vertexai.init(project=project, location=location)
+    except google.auth.exceptions.DefaultCredentialsError as exc:
+        raise EnvironmentError(
+            "Vertex AI ADC が見つかりません。以下のいずれかを設定してください:\n"
+            "  1. .gcp/credentials.json にサービスアカウントキーを配置\n"
+            "     (GOOGLE_APPLICATION_CREDENTIALS=/app/.gcp/credentials.json)\n"
+            "  2. gcloud auth application-default login を実行し ADC を生成\n"
+            "  3. GCP 環境（GCE / Cloud Run）上で実行する"
+        ) from exc
+
+    logger.info(
+        "Vertex AI adapter initialized (project=%s, location=%s, creds=%s)",
+        project or "<ADC default>",
+        location,
+        cred_path or "<ADC auto>",
+    )
+    import vertexai as _vtx  # noqa: F811
+    return _vtx
+
+
+def _vertex_ai_generate_text(
+    messages: list[dict[str, str]],
+    model_name: str,
+    *,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> str:
+    from vertexai.generative_models import GenerativeModel, GenerationConfig  # type: ignore[import]
+
+    system_instruction, contents = _messages_to_gemini(messages)
+    config_kwargs: dict[str, Any] = {}
+    if temperature is not None:
+        config_kwargs["temperature"] = temperature
+    if max_tokens is not None:
+        config_kwargs["max_output_tokens"] = max_tokens
+    generation_config = GenerationConfig(**config_kwargs) if config_kwargs else None
+
+    model = GenerativeModel(
+        model_name=model_name,
+        system_instruction=system_instruction,
+    )
+    # Vertex AI の contents は {"role": ..., "parts": [...]} 形式でそのまま使用可
+    response = model.generate_content(
+        contents,
+        generation_config=generation_config,
+    )
+    return (getattr(response, "text", "") or "").strip()
+
+
+def _vertex_ai_generate_structured(
+    messages: list[dict[str, str]],
+    response_format: type[T],
+    model_name: str,
+) -> T:
+    from vertexai.generative_models import GenerativeModel, GenerationConfig  # type: ignore[import]
+
+    system_instruction, contents = _messages_to_gemini(messages)
+    schema = response_format.model_json_schema()
+
+    model = GenerativeModel(
+        model_name=model_name,
+        system_instruction=system_instruction,
+    )
+    response = model.generate_content(
+        contents,
+        generation_config=GenerationConfig(
+            response_mime_type="application/json",
+            response_schema=schema,
+        ),
+    )
+    raw = getattr(response, "text", "") or ""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Vertex AI の構造化レスポンスを JSON として解析できませんでした: {raw!r}"
+        ) from exc
+    return response_format.model_validate(data)
+
+
+def _vertex_ai_generate_embeddings(
+    texts: list[str],
+    model_name: str,
+) -> list[list[float]]:
+    from vertexai.language_models import TextEmbeddingModel, TextEmbeddingInput  # type: ignore[import]
+
+    model = TextEmbeddingModel.from_pretrained(model_name)
+    inputs = [TextEmbeddingInput(text=t) for t in texts]
+    embeddings = model.get_embeddings(inputs)
+    return [list(e.values) for e in embeddings]
+
+
+# ---------------------------------------------------------------------------
 # Gemini Vertex AI Adapter（廃止予定 / Deprecated）
 # ---------------------------------------------------------------------------
 
@@ -194,7 +327,7 @@ def _get_gemini_vertex_module():
 
     .. deprecated::
         この認証方式は廃止予定です。
-        将来的には ``LLM_PROVIDER=gemini`` と ``LLM_API_KEY`` による認証に移行してください。
+        ``LLM_PROVIDER=google`` への移行を推奨します。
 
     ADC の設定手順::
 
@@ -243,15 +376,19 @@ def _messages_to_gemini(
     """
     system_parts: list[str] = []
     contents: list[dict[str, Any]] = []
+
     for msg in messages:
         role = msg.get("role", "user")
         content = msg.get("content", "")
+        
         if role == "system":
             system_parts.append(content)
         elif role == "assistant":
-            contents.append({"role": "model", "parts": [content]})
+            # Vertex AI SDK の厳格な仕様に合わせて {"text": content} とする
+            contents.append({"role": "model", "parts": [{"text": content}]})
         else:
-            contents.append({"role": "user", "parts": [content]})
+            contents.append({"role": "user", "parts": [{"text": content}]})
+            
     system_instruction = "\n\n".join(system_parts) if system_parts else None
     return system_instruction, contents
 
@@ -376,6 +513,15 @@ def generate_text(
             max_tokens=max_tokens,
         )
 
+    if settings.llm_provider == "google":
+        _get_vertex_ai_client()  # ADC 初期化（キャッシュ済み）
+        return _vertex_ai_generate_text(
+            messages,
+            model_name,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
     if settings.llm_provider == "gemini-vertex":  # 廃止予定
         return _gemini_generate_text(
             messages,
@@ -433,6 +579,10 @@ def generate_text_with_structured_output(
     if settings.llm_provider == "gemini":
         return _gemini_generate_structured(messages, response_format, model_name, genai_module=_get_gemini_module())
 
+    if settings.llm_provider == "google":
+        _get_vertex_ai_client()  # ADC 初期化（キャッシュ済み）
+        return _vertex_ai_generate_structured(messages, response_format, model_name)
+
     if settings.llm_provider == "gemini-vertex":  # 廃止予定
         return _gemini_generate_structured(messages, response_format, model_name, genai_module=_get_gemini_vertex_module())
 
@@ -479,6 +629,10 @@ def generate_embeddings(
 
     if settings.llm_provider == "gemini":
         return _gemini_generate_embeddings(texts, model_name, genai_module=_get_gemini_module())
+
+    if settings.llm_provider == "google":
+        _get_vertex_ai_client()  # ADC 初期化（キャッシュ済み）
+        return _vertex_ai_generate_embeddings(texts, model_name)
 
     if settings.llm_provider == "gemini-vertex":  # 廃止予定
         return _gemini_generate_embeddings(texts, model_name, genai_module=_get_gemini_vertex_module())
