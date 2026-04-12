@@ -765,12 +765,25 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 100) -> list[st
     return chunks
 
 
-def embed_chunks(material_id: str, doc_id: str, chunks: list[str]) -> None:
-    """テキストチャンクをembeddingしてPostgreSQLに保存する。"""
+def embed_chunks(material_id: str, doc_id: str, chunks: list[str]) -> int:
+    """テキストチャンクをembeddingしてPostgreSQLに保存する。
+
+    Returns:
+        実際にDBに保存できたチャンク数
+
+    Raises:
+        Exception: embedding生成またはDB保存に失敗した場合（呼び出し元で要ハンドリング）
+    """
+    embedded_count = 0
+    batch_size = 50
+    total = len(chunks)
     try:
-        batch_size = 50
-        for i in range(0, len(chunks), batch_size):
+        for i in range(0, total, batch_size):
             batch = chunks[i:i + batch_size]
+            logger.info(
+                "Embedding batch %d-%d / %d for material %s",
+                i + 1, i + len(batch), total, material_id,
+            )
             embeddings = generate_embeddings(batch)
             session = _pg_session()
             try:
@@ -791,15 +804,24 @@ def embed_chunks(material_id: str, doc_id: str, chunks: list[str]) -> None:
                         },
                     )
                 session.commit()
+                embedded_count += len(batch)
             except Exception:
                 session.rollback()
                 raise
             finally:
                 session.close()
 
-        logger.info("Embedded %d chunks for material %s", len(chunks), material_id)
-    except Exception:
-        logger.exception("Embedding failed for material %s", material_id)
+        logger.info(
+            "Embedded %d / %d chunks for material %s",
+            embedded_count, total, material_id,
+        )
+        return embedded_count
+    except Exception as exc:
+        logger.exception(
+            "Embedding failed for material %s after saving %d / %d chunks: %s",
+            material_id, embedded_count, total, exc,
+        )
+        raise  # 呼び出し元の process_material_background に伝搬させる
 
 
 def process_material_background(
@@ -809,7 +831,19 @@ def process_material_background(
     pdf_bytes: bytes,
     task_id: str | None = None,
 ) -> None:
-    """バックグラウンドでPDF処理パイプラインを実行する。"""
+    """バックグラウンドでPDF処理パイプラインを実行する。
+
+    各ステージで background_tasks.result_data["stage"] を更新するため、
+    失敗時にどのフェーズで止まったか GET /api/admin/tasks/{task_id} で確認できる。
+
+    Stages: extracting → chunking → embedding → building_graph → finalizing
+    """
+
+    def _update_stage(stage: str) -> None:
+        """現在の処理ステージを background_tasks に記録する。"""
+        if task_id:
+            update_background_task(task_id, "processing", result_data={"stage": stage})
+
     with _material_lock:
         _material_status[material_id] = {
             "status": "processing",
@@ -817,19 +851,62 @@ def process_material_background(
         }
 
     if task_id:
-        update_background_task(task_id, "processing")
+        update_background_task(task_id, "processing", result_data={"stage": "started"})
+
+    embedded_count = 0
 
     try:
+        # ── Stage 1: テキスト抽出 ──────────────────────────────────────────
+        _update_stage("extracting")
         extracted_text = extract_pdf_text(pdf_bytes)
-        logger.info("Extracted %d chars from PDF %s", len(extracted_text), filename)
+        logger.info(
+            "Stage[extracting] completed: material=%s doc=%s chars=%d",
+            material_id, doc_id, len(extracted_text),
+        )
 
+        # ── Stage 2: チャンク分割 ──────────────────────────────────────────
+        _update_stage("chunking")
         chunks = chunk_text(extracted_text, chunk_size=1000, overlap=100)
-        if chunks:
-            embed_chunks(material_id, doc_id, chunks)
+        logger.info(
+            "Stage[chunking] completed: material=%s doc=%s chunks=%d",
+            material_id, doc_id, len(chunks),
+        )
 
+        if not chunks:
+            logger.warning(
+                "Stage[chunking] produced 0 chunks for material=%s doc=%s filename=%s. "
+                "PDFが空か、テキスト抽出に失敗している可能性があります。",
+                material_id, doc_id, filename,
+            )
+
+        # ── Stage 3: Embedding & DB保存 ───────────────────────────────────
+        if chunks:
+            _update_stage("embedding")
+            try:
+                embedded_count = embed_chunks(material_id, doc_id, chunks)
+            except Exception as embed_exc:
+                # embed_chunks が失敗するとチャンクが1件も登録されない致命的エラー
+                raise RuntimeError(
+                    f"チャンクのEmbedding/DB保存に失敗しました "
+                    f"(material={material_id}, doc={doc_id}, "
+                    f"text_chunks={len(chunks)}): {embed_exc}"
+                ) from embed_exc
+            logger.info(
+                "Stage[embedding] completed: material=%s doc=%s embedded=%d",
+                material_id, doc_id, embedded_count,
+            )
+
+        # ── Stage 4: ナレッジグラフ構築 ───────────────────────────────────
+        _update_stage("building_graph")
         title = os.path.splitext(filename)[0]
         knowledge_graph = build_knowledge_graph(extracted_text, title)
+        logger.info(
+            "Stage[building_graph] completed: material=%s concepts=%d",
+            material_id, len(knowledge_graph.get("concepts", [])),
+        )
 
+        # ── Stage 5: documents テーブル更新 ───────────────────────────────
+        _update_stage("finalizing")
         session = _pg_session()
         try:
             session.execute(
@@ -846,7 +923,7 @@ def process_material_background(
                     "doc_id": doc_id,
                     "kg": json.dumps(knowledge_graph, ensure_ascii=False),
                     "text_length": len(extracted_text),
-                    "chunk_count": len(chunks),
+                    "chunk_count": embedded_count,  # 実際にDBに保存されたチャンク数
                 },
             )
             session.commit()
@@ -864,13 +941,20 @@ def process_material_background(
                 "material_id": material_id,
                 "doc_id": doc_id,
                 "text_length": len(extracted_text),
-                "chunk_count": len(chunks),
+                "chunk_count": embedded_count,
+                "stage": "completed",
             })
 
-        logger.info("Material processing completed: %s", material_id)
+        logger.info(
+            "Material processing completed: material=%s doc=%s filename=%s embedded_chunks=%d",
+            material_id, doc_id, filename, embedded_count,
+        )
 
     except Exception as exc:
-        logger.exception("Material processing failed: %s", material_id)
+        logger.exception(
+            "Material processing FAILED: material=%s doc=%s filename=%s: %s",
+            material_id, doc_id, filename, exc,
+        )
         with _material_lock:
             _material_status[material_id]["status"] = "failed"
 
@@ -878,11 +962,15 @@ def process_material_background(
         if task_id:
             update_background_task(task_id, "failed", error_message=error_msg)
 
+        # documents.status を 'failed' に更新する（ここでの失敗も明示的にログする）
         try:
             session = _pg_session()
             try:
                 session.execute(
-                    sa_text("UPDATE documents SET status = 'failed', updated_at = now() WHERE id = CAST(:doc_id AS uuid)"),
+                    sa_text(
+                        "UPDATE documents SET status = 'failed', updated_at = now() "
+                        "WHERE id = CAST(:doc_id AS uuid)"
+                    ),
                     {"doc_id": doc_id},
                 )
                 session.commit()
@@ -890,8 +978,14 @@ def process_material_background(
                 session.rollback()
             finally:
                 session.close()
-        except Exception:
-            pass
+        except Exception as db_exc:
+            # documents.status 更新まで失敗した場合はDBが不整合になるため critical で記録
+            logger.critical(
+                "CRITICAL: documents.status を 'failed' に更新できませんでした。"
+                "DBが不整合状態の可能性があります。"
+                " doc_id=%s material_id=%s error=%s",
+                doc_id, material_id, db_exc,
+            )
 
 
 # ---------------------------------------------------------------------------

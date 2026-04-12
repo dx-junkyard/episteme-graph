@@ -1820,8 +1820,10 @@
       var courseId = this.value;
       if (courseId) {
         lsState.courseId = courseId;
-        generateAllBtn.disabled = false;
-        audioAllBtn.disabled = false;
+        // ボタンはチャンク読み込み完了後に lsRenderChunkList で制御するため
+        // ここでは一旦無効化して読み込みを待つ
+        generateAllBtn.disabled = true;
+        audioAllBtn.disabled = true;
         lsLoadScripts(courseId);
       } else {
         lsState.courseId = null;
@@ -1902,11 +1904,20 @@
 
   function lsRenderChunkList() {
     var listEl = document.getElementById("ls-chunk-list");
+    var generateAllBtn = document.getElementById("ls-generate-all-btn");
+    var audioAllBtn = document.getElementById("ls-audio-all-btn");
+
     if (!lsState.chunks || lsState.chunks.length === 0) {
-      listEl.innerHTML = '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">チャンクがありません</div>';
+      listEl.innerHTML = '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">' +
+        '教材のチャンクが見つかりません。<br>' +
+        '教材がコースに紐づけられているか、PDF解析が完了しているかを確認してください。</div>';
+      generateAllBtn.disabled = true;
+      audioAllBtn.disabled = true;
       return;
     }
 
+    generateAllBtn.disabled = false;
+    audioAllBtn.disabled = false;
     var html = "";
     lsState.chunks.forEach(function (c, i) {
       var active = c.chunk_id === lsState.selectedChunkId ? " active" : "";
@@ -2025,7 +2036,14 @@
       body: JSON.stringify({ override: false }),
     })
       .then(function (res) {
-        if (!res.ok) throw new Error("Generation failed");
+        if (!res.ok) {
+          return res.json().then(function (errBody) {
+            var msg = (errBody && errBody.detail) || "スクリプト生成を開始できませんでした";
+            throw new Error(msg);
+          }, function () {
+            throw new Error("スクリプト生成を開始できませんでした");
+          });
+        }
         return res.json();
       })
       .then(function (data) {
@@ -2108,7 +2126,14 @@
       body: "{}",
     })
       .then(function (res) {
-        if (!res.ok) throw new Error("Audio generation failed");
+        if (!res.ok) {
+          return res.json().then(function (errBody) {
+            var msg = (errBody && errBody.detail) || "音声生成を開始できませんでした";
+            throw new Error(msg);
+          }, function () {
+            throw new Error("音声生成を開始できませんでした");
+          });
+        }
         return res.json();
       })
       .then(function (data) {
