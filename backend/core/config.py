@@ -31,13 +31,23 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     # --- LLM ---
-    # ベンダーニュートラルな変数名。後方互換のため OPENAI_* 環境変数も受け付ける。
+    # プロバイダ切替 (openai | gemini | google | gemini-vertex)。.env の LLM_PROVIDER で切り替える。
+    # google: Vertex AI ADC 認証（google-cloud-aiplatform / vertexai SDK を使用）
+    # gemini-vertex: Vertex AI ADC 認証 (廃止予定)
+    llm_provider: Literal["openai", "gemini", "google", "gemini-vertex"] = Field(
+        default="openai",
+        validation_alias=AliasChoices("LLM_PROVIDER"),
+    )
+    # ベンダーニュートラルな変数名。後方互換のため OPENAI_* / GEMINI_* 環境変数も受け付ける。
     llm_api_key: str = Field(
         default="",
-        validation_alias=AliasChoices("LLM_API_KEY", "OPENAI_API_KEY"),
+        validation_alias=AliasChoices(
+            "LLM_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"
+        ),
     )
     llm_analysis_model: str = Field(
         default="o3-mini",
@@ -46,6 +56,12 @@ class Settings(BaseSettings):
     llm_embedding_model: str = Field(
         default="text-embedding-3-large",
         validation_alias=AliasChoices("LLM_EMBEDDING_MODEL", "OPENAI_EMBEDDING_MODEL"),
+    )
+    # 埋め込みベクトルの次元数。pgvector のスキーマと一致させる必要がある。
+    # OpenAI text-embedding-3-large = 3072、Gemini text-embedding-004 = 768 など。
+    llm_embedding_dim: int = Field(
+        default=3072,
+        validation_alias=AliasChoices("LLM_EMBEDDING_DIM"),
     )
 
     # --- LLM マルチモード設定 ---
@@ -83,6 +99,40 @@ class Settings(BaseSettings):
 
     # --- ISOM ---
     isom_output_dir: str = "output/incoming"
+
+    # --- Google Cloud / Vertex AI ---
+    # LLM_PROVIDER=google または gemini-vertex のときに参照される。
+    # ADC は gcloud auth application-default login または GOOGLE_APPLICATION_CREDENTIALS で設定すること。
+    gcp_project_id: str = Field(
+        default="",
+        validation_alias=AliasChoices("GCP_PROJECT_ID", "GOOGLE_CLOUD_PROJECT"),
+    )
+    gcp_location: str = Field(
+        default="us-central1",
+        validation_alias=AliasChoices("GCP_LOCATION", "GOOGLE_CLOUD_LOCATION"),
+    )
+    gcp_use_vertex_ai: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("GCP_USE_VERTEX_AI"),
+    )
+    # GCP 認証ファイルの絶対パス。設定されている場合は llm.py 内で
+    # os.environ["GOOGLE_APPLICATION_CREDENTIALS"] に明示的にセットする。
+    # Docker では /app/.gcp/credentials.json が既定値 (docker-compose.yml 参照)。
+    google_application_credentials: str = Field(
+        default="",
+        validation_alias=AliasChoices("GOOGLE_APPLICATION_CREDENTIALS"),
+    )
+
+    # --- Google Cloud / Vertex AI (廃止予定) ---
+    # 後方互換のため残存。新規利用には gcp_project_id / gcp_location を使用すること。
+    google_cloud_project: str = Field(
+        default="",
+        validation_alias=AliasChoices("GOOGLE_CLOUD_PROJECT"),
+    )
+    google_cloud_location: str = Field(
+        default="us-central1",
+        validation_alias=AliasChoices("GOOGLE_CLOUD_LOCATION"),
+    )
 
 
 @lru_cache(maxsize=1)

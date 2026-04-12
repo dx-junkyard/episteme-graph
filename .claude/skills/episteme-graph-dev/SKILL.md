@@ -39,13 +39,26 @@ PDF教材からの知識抽出、RAGベースの対話型学習、コース管�
 |---|---|
 | API フレームワーク | FastAPI (ルーター分割済み) |
 | ORM | SQLAlchemy 2.x + pgvector |
-| RDB + ベクトル | PostgreSQL 16 + pgvector (cosine, 3072次元) |
+| RDB + ベクトル | PostgreSQL 16 + pgvector (cosine, 次元数は `LLM_EMBEDDING_DIM` で設定) |
 | グラフDB | Neo4j 5 (Cypher) — レガシー、グラフ走査のみ |
 | ストレージ | MinIO (S3互換) |
-| LLM | OpenAI API (gpt-4o / text-embedding-3-large、Reasoning モデル対応済み) |
+| LLM | **マルチプロバイダ対応** (OpenAI / Gemini)。`LLM_PROVIDER` 環境変数で切替。詳細は下記参照。 |
 | 認証 | JWT (HS256) + bcrypt |
 | 設定管理 | pydantic-settings (core/config.py) |
 | フロントエンド | Vanilla JS SPA + nginx |
+
+### LLM マルチプロバイダ構成
+
+`LLM_PROVIDER` 環境変数で LLM バックエンドを切り替える。
+
+| `LLM_PROVIDER` 値 | バックエンド | 必要な認証 |
+|---|---|---|
+| `openai` (デフォルト) | OpenAI API | `LLM_API_KEY` または `OPENAI_API_KEY` |
+| `gemini` | Google AI Studio (google-generativeai) | `LLM_API_KEY` または `GEMINI_API_KEY` |
+| `google` | Vertex AI (google-cloud-aiplatform) | GCP ADC または `GOOGLE_APPLICATION_CREDENTIALS` |
+| `gemini-vertex` | Vertex AI + generativeai SDK **(廃止予定)** | GCP ADC |
+
+**重要**: `google` / `gemini-vertex` (Vertex AI) は非推奨。新規実装では `openai` または `gemini` を使用すること。
 
 ## 開発時の必須ルール
 
@@ -75,23 +88,42 @@ api_key = settings.openai_api_key
 - 管理系 → `routes/admin.py`
 - 新ドメインが必要な場合 → 新しいルーターファイルを作成
 
-### 3. LLM 抽象化レイヤーの利用 — `openai` SDK の直接利用禁止
+### 3. LLM 抽象化レイヤーの利用 — ベンダ SDK の直接利用禁止
 
 LLM の呼び出しは必ず `core/llm.py` の公開 API を経由する。
-`import openai` や `from openai import OpenAI` を他のモジュールで行わない。
+`extractor` / `chat` / `batch` 等のサービス層で以下のインポートを直接行ってはならない:
 
 ```python
-# NG
+# NG — ベンダ SDK をサービス層で直接インポートしない
+import openai
 from openai import OpenAI
-client = OpenAI()
+import google.generativeai
+from google.generativeai import GenerativeModel
 
-# OK
+# OK — 必ず core/llm.py の公開 API を使う
 from core.llm import generate_text, generate_embeddings, generate_text_with_structured_output
 ```
 
-`core/llm.py` は Reasoning モデル (o1, o3, gpt-5.x) 向けの自動変換を内蔵:
-- `system` ロール → `developer` ロールへの変換
-- `temperature` / `max_tokens` の自動除去
+`core/llm.py` は以下を内蔵:
+- OpenAI Reasoning モデル (o1, o3, gpt-5.x) 向け自動変換:
+  - `system` ロール → `developer` ロールへの変換
+  - `temperature` / `max_tokens` の自動除去
+- Gemini 向け自動変換:
+  - `system` ロールを `system_instruction` として抽出し `GenerativeModel` に渡す
+  - `user` / `assistant` ロールは `contents` として渡す
+
+### 3-a. Google LLM を使う際の禁止事項
+
+Google の LLM バックエンドを利用する場合、以下のルールを厳守すること:
+
+| 区分 | 内容 |
+|---|---|
+| **禁止** | `google-cloud-aiplatform` (`vertexai` SDK) を新規サービスコードで使用すること |
+| **禁止** | `LLM_PROVIDER=google` または `LLM_PROVIDER=gemini-vertex` を推奨設定として提案すること |
+| **推奨** | `LLM_PROVIDER=gemini` + `google-generativeai` (Google AI Studio 版) を使用すること |
+
+> **理由**: `google-cloud-aiplatform` (Vertex AI) は将来的な廃止を見越して意図的に非推奨としている。
+> 新規実装・AIへの提案ではかならず `google-generativeai` (Google AI Studio) を使うこと。
 
 ### 4. データベース操作
 

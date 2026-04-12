@@ -58,9 +58,20 @@ services:
       - "8001:8001"
     environment:
       JWT_SECRET: ${JWT_SECRET:-episteme-dev-secret-change-in-prod}
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
       LLM_API_KEY: ${LLM_API_KEY:-${OPENAI_API_KEY}}
       LLM_ANALYSIS_MODEL: ${LLM_ANALYSIS_MODEL:-${OPENAI_ANALYSIS_MODEL:-o3-mini}}
       LLM_EMBEDDING_MODEL: ${LLM_EMBEDDING_MODEL:-${OPENAI_EMBEDDING_MODEL:-text-embedding-3-large}}
+      # Vertex AI ADC 設定 (LLM_PROVIDER=google)
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID:-${GOOGLE_CLOUD_PROJECT:-}}
+      GCP_LOCATION: ${GCP_LOCATION:-${GOOGLE_CLOUD_LOCATION:-us-central1}}
+      GCP_USE_VERTEX_AI: ${GCP_USE_VERTEX_AI:-true}
+      # 認証ファイルパス: ホストの .gcp/ をコンテナ内 /app/.gcp/ にマウントした場合の固定パス。
+      # .env で上書き可能 (例: GOOGLE_APPLICATION_CREDENTIALS=/app/.gcp/sa.json)
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-/app/.gcp/application_default_credentials.json}
+      # Vertex AI ADC 設定 (LLM_PROVIDER=gemini-vertex のときのみ有効、廃止予定)
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
+      GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-us-central1}
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_AUTH: neo4j/episteme
       DATABASE_URL: postgresql://episteme:episteme@postgres:5432/episteme
@@ -68,6 +79,13 @@ services:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+    # ローカルの .gcp/ をコンテナに読み取り専用でマウントする。
+    # ファイルが存在しない場合は空ディレクトリとしてマウントされる（エラーにはならない）。
+    # サービスアカウントキーを使う場合: .gcp/credentials.json に配置する。
+    # gcloud ADC を使う場合: .gcp/application_default_credentials.json に配置し
+    #   GOOGLE_APPLICATION_CREDENTIALS=/app/.gcp/application_default_credentials.json を .env に記載。
+    volumes:
+      - ./.gcp:/app/.gcp:ro
     depends_on:
       postgres:
         condition: service_healthy

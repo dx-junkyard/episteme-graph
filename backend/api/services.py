@@ -17,7 +17,7 @@ from neo4j import GraphDatabase
 from sqlalchemy import text as sa_text
 
 from core.config import get_settings as _get_settings
-from core.llm import generate_text, generate_embeddings
+from core.llm import generate_text, generate_embeddings, get_embedding_dim
 from core.postgres import get_session as _pg_session
 
 logger = logging.getLogger(__name__)
@@ -242,13 +242,14 @@ def search_relevant_chunks(
             for i, mid in enumerate(material_ids):
                 params[f"mid_{i}"] = mid
 
+            dim = get_embedding_dim()
             rows = session.execute(
                 sa_text(f"""
                     SELECT c.text
                     FROM chunks c
                     WHERE c.material_id IN ({placeholders})
                       AND c.embedding IS NOT NULL
-                    ORDER BY c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
+                    ORDER BY c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))
                     LIMIT :limit
                 """),
                 params,
@@ -285,15 +286,16 @@ def search_relevant_chunks_with_scores(
                 params[f"mid_{i}"] = mid
 
             where_clause = f"c.material_id IN ({mid_placeholders})"
+            dim = get_embedding_dim()
 
             rows = session.execute(
                 sa_text(f"""
                     SELECT c.text,
-                           1 - (c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))) AS score
+                           1 - (c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))) AS score
                     FROM chunks c
                     WHERE ({where_clause})
                       AND c.embedding IS NOT NULL
-                    ORDER BY c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
+                    ORDER BY c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))
                     LIMIT :limit
                 """),
                 params,
@@ -323,17 +325,18 @@ def search_chunks_with_metadata(
     try:
         session = _pg_session()
         try:
+            dim = get_embedding_dim()
             rows = session.execute(
-                sa_text("""
+                sa_text(f"""
                     SELECT c.id,
                            c.text,
                            COALESCE(d.title, '') AS source_title,
                            COALESCE(d.filename, '') AS source_file,
-                           1 - (c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))) AS score
+                           1 - (c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))) AS score
                     FROM chunks c
                     LEFT JOIN documents d ON c.document_id = d.id
                     WHERE c.embedding IS NOT NULL
-                    ORDER BY c.embedding::halfvec(3072) <=> CAST(:query_vector AS halfvec(3072))
+                    ORDER BY c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))
                     LIMIT :limit
                 """),
                 {"query_vector": str(query_vector), "limit": top_k},
