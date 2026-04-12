@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import types
 from unittest.mock import MagicMock, patch
@@ -309,3 +310,75 @@ class TestGoogleVertexAIProvider:
         )
         assert s.llm_provider == "google"
         assert s.llm_api_key == ""
+
+    def test_config_google_application_credentials_field(self, monkeypatch):
+        """GOOGLE_APPLICATION_CREDENTIALS が Settings に読み込まれる。"""
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/app/.gcp/credentials.json")
+        from core.config import Settings
+
+        s = Settings(_env_file=None)
+        assert s.google_application_credentials == "/app/.gcp/credentials.json"
+
+    def test_get_vertex_ai_client_raises_when_cred_file_missing(self, tmp_path):
+        """GOOGLE_APPLICATION_CREDENTIALS に存在しないパスを指定すると EnvironmentError。"""
+        from core import llm
+        from core.config import Settings
+
+        missing_path = str(tmp_path / "nonexistent.json")
+        settings = Settings(
+            _env_file=None,
+            llm_provider="google",
+            google_application_credentials=missing_path,
+        )
+
+        with patch.object(llm, "get_settings", return_value=settings):
+            llm._get_vertex_ai_client.cache_clear()
+            with pytest.raises(EnvironmentError, match="GOOGLE_APPLICATION_CREDENTIALS"):
+                llm._get_vertex_ai_client()
+            llm._get_vertex_ai_client.cache_clear()
+
+    def test_get_vertex_ai_client_sets_env_var_from_settings(self, tmp_path):
+        """設定ファイルが存在する場合、os.environ に GOOGLE_APPLICATION_CREDENTIALS がセットされる。"""
+        import json as _json
+        from core import llm
+        from core.config import Settings
+
+        # ダミーサービスアカウント JSON を作成
+        cred_file = tmp_path / "credentials.json"
+        cred_file.write_text(_json.dumps({"type": "service_account"}))
+
+        settings = Settings(
+            _env_file=None,
+            llm_provider="google",
+            gcp_project_id="test-proj",
+            google_application_credentials=str(cred_file),
+        )
+
+        fake_vertexai = MagicMock()
+
+        # google.auth.exceptions のモック階層
+        class FakeDCE(Exception):
+            pass
+
+        fake_exc_mod = types.ModuleType("google.auth.exceptions")
+        fake_exc_mod.DefaultCredentialsError = FakeDCE
+        fake_auth_mod = types.ModuleType("google.auth")
+        fake_auth_mod.exceptions = fake_exc_mod
+        fake_google_mod = types.ModuleType("google")
+        fake_google_mod.auth = fake_auth_mod
+
+        with patch.object(llm, "get_settings", return_value=settings), \
+             patch.dict("sys.modules", {
+                 "vertexai": fake_vertexai,
+                 "google": fake_google_mod,
+                 "google.auth": fake_auth_mod,
+                 "google.auth.exceptions": fake_exc_mod,
+             }), \
+             patch.dict("os.environ", {}, clear=False):
+            llm._get_vertex_ai_client.cache_clear()
+            llm._get_vertex_ai_client()
+            assert os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") == str(cred_file)
+            fake_vertexai.init.assert_called_once_with(
+                project="test-proj", location="us-central1"
+            )
+            llm._get_vertex_ai_client.cache_clear()

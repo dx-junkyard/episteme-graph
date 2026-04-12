@@ -66,7 +66,9 @@ services:
       GCP_PROJECT_ID: ${GCP_PROJECT_ID:-${GOOGLE_CLOUD_PROJECT:-}}
       GCP_LOCATION: ${GCP_LOCATION:-${GOOGLE_CLOUD_LOCATION:-us-central1}}
       GCP_USE_VERTEX_AI: ${GCP_USE_VERTEX_AI:-true}
-      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
+      # 認証ファイルパス: ホストの .gcp/ をコンテナ内 /app/.gcp/ にマウントした場合の固定パス。
+      # .env で上書き可能 (例: GOOGLE_APPLICATION_CREDENTIALS=/app/.gcp/sa.json)
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-/app/.gcp/credentials.json}
       # Vertex AI ADC 設定 (LLM_PROVIDER=gemini-vertex のときのみ有効、廃止予定)
       GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
       GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-us-central1}
@@ -77,19 +79,13 @@ services:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
-    # LLM_PROVIDER=google (Vertex AI ADC) を使う場合はいずれかの方法で認証情報をマウントする:
-    #
-    # 方法1: gcloud ADC クレデンシャルを直接マウント
-    #   volumes:
-    #     - ~/.config/gcloud:/root/.config/gcloud:ro
-    #
-    # 方法2: サービスアカウントキーファイルをマウント
-    #   volumes:
-    #     - /path/to/service-account.json:/secrets/sa.json:ro
-    #   environment:
-    #     GOOGLE_APPLICATION_CREDENTIALS: /secrets/sa.json
-    #
-    # LLM_PROVIDER=gemini-vertex を使う場合も同様 (廃止予定):
+    # ローカルの .gcp/ をコンテナに読み取り専用でマウントする。
+    # ファイルが存在しない場合は空ディレクトリとしてマウントされる（エラーにはならない）。
+    # サービスアカウントキーを使う場合: .gcp/credentials.json に配置する。
+    # gcloud ADC を使う場合: .gcp/application_default_credentials.json に配置し
+    #   GOOGLE_APPLICATION_CREDENTIALS=/app/.gcp/application_default_credentials.json を .env に記載。
+    volumes:
+      - ./.gcp:/app/.gcp:ro
     depends_on:
       postgres:
         condition: service_healthy

@@ -115,6 +115,13 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("GCP_USE_VERTEX_AI"),
     )
+    # GCP 認証ファイルの絶対パス。設定されている場合は llm.py 内で
+    # os.environ["GOOGLE_APPLICATION_CREDENTIALS"] に明示的にセットする。
+    # Docker では /app/.gcp/credentials.json が既定値 (docker-compose.yml 参照)。
+    google_application_credentials: str = Field(
+        default="",
+        validation_alias=AliasChoices("GOOGLE_APPLICATION_CREDENTIALS"),
+    )
 
     # --- Google Cloud / Vertex AI (廃止予定) ---
     # 後方互換のため残存。新規利用には gcp_project_id / gcp_location を使用すること。

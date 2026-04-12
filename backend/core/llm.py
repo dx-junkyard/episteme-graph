@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from functools import lru_cache
 from typing import Any, Literal, TypeVar
@@ -192,36 +193,53 @@ def _get_gemini_module():
 def _get_vertex_ai_client():
     """Vertex AI SDK (google-cloud-aiplatform) を初期化して返す。
 
-    ADC（Application Default Credentials）を自動参照する:
+    認証は以下の優先順で解決される:
 
-    - ``gcloud auth application-default login`` で設定したクレデンシャル
-    - ``GOOGLE_APPLICATION_CREDENTIALS`` 環境変数で指定したサービスアカウントキー
-    - GCE / Cloud Run 上のメタデータサーバー
+    1. ``settings.google_application_credentials`` (= ``GOOGLE_APPLICATION_CREDENTIALS`` 環境変数)
+       が設定されていればそのファイルを使用。Docker では ``/app/.gcp/credentials.json`` が既定。
+    2. ``gcloud auth application-default login`` で生成された ADC クレデンシャル。
+    3. GCE / Cloud Run 上のメタデータサーバー（サービスアカウント自動付与）。
 
-    ``GCP_PROJECT_ID`` および ``GCP_LOCATION`` 環境変数も参照する。
     ``LLM_API_KEY`` / ``GEMINI_API_KEY`` は不要。
     """
-    import vertexai  # type: ignore[import]
-    import google.auth.exceptions  # type: ignore[import]
-
     settings = get_settings()
     project = settings.gcp_project_id or settings.google_cloud_project or None
     location = settings.gcp_location or settings.google_cloud_location or "us-central1"
+
+    # ① 認証ファイルパスを os.environ に明示セット（Google SDK が自動参照する）
+    #    import より前に行うことでファイル不在を早期に検出できる。
+    cred_path = settings.google_application_credentials
+    if cred_path:
+        if not os.path.isfile(cred_path):
+            raise EnvironmentError(
+                f"GOOGLE_APPLICATION_CREDENTIALS に指定されたファイルが見つかりません: {cred_path}\n"
+                "  - .gcp/credentials.json が存在するか確認してください。\n"
+                "  - docker-compose.yml の volumes で .gcp/ がマウントされているか確認してください。"
+            )
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = cred_path
+        logger.debug("GOOGLE_APPLICATION_CREDENTIALS を設定しました: %s", cred_path)
+
+    # ② SDK インポート & Vertex AI 初期化
+    #    ADC は Google SDK が GOOGLE_APPLICATION_CREDENTIALS を自動参照する。
+    import vertexai  # type: ignore[import]
+    import google.auth.exceptions  # type: ignore[import]
 
     try:
         vertexai.init(project=project, location=location)
     except google.auth.exceptions.DefaultCredentialsError as exc:
         raise EnvironmentError(
             "Vertex AI ADC が見つかりません。以下のいずれかを設定してください:\n"
-            "  1. gcloud auth application-default login\n"
-            "  2. GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json\n"
+            "  1. .gcp/credentials.json にサービスアカウントキーを配置\n"
+            "     (GOOGLE_APPLICATION_CREDENTIALS=/app/.gcp/credentials.json)\n"
+            "  2. gcloud auth application-default login を実行し ADC を生成\n"
             "  3. GCP 環境（GCE / Cloud Run）上で実行する"
         ) from exc
 
     logger.info(
-        "Vertex AI adapter initialized (project=%s, location=%s)",
+        "Vertex AI adapter initialized (project=%s, location=%s, creds=%s)",
         project or "<ADC default>",
         location,
+        cred_path or "<ADC auto>",
     )
     import vertexai as _vtx  # noqa: F811
     return _vtx
