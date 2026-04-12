@@ -230,7 +230,13 @@ def batch_generate_scripts(
 
     chunks = _get_course_chunks(course_data)
     if not chunks:
-        raise HTTPException(status_code=404, detail="No chunks found for this course")
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "このコースに紐づくテキストチャンクが見つかりません。"
+                "教材がコースに設定されているか、またはPDF解析が完了しているかを確認してください。"
+            ),
+        )
 
     task_id = str(uuid.uuid4())[:12]
     create_background_task(task_id, "script_generation", current_user["id"])
@@ -624,7 +630,13 @@ def batch_generate_audio(
 
     chunks = _get_course_chunks(course_data)
     if not chunks:
-        raise HTTPException(status_code=404, detail="No chunks found for this course")
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "このコースに紐づくテキストチャンクが見つかりません。"
+                "教材がコースに設定されているか、またはPDF解析が完了しているかを確認してください。"
+            ),
+        )
 
     task_id = str(uuid.uuid4())[:12]
     create_background_task(task_id, "audio_generation", current_user["id"])
