@@ -39,22 +39,58 @@ cp .env.example .env
 # .env を編集: LLM_API_KEY (または OPENAI_API_KEY / GEMINI_API_KEY), ADMIN_PASSWORD, JWT_SECRET を必ず設定
 # Gemini を使う場合は LLM_PROVIDER=gemini, LLM_EMBEDDING_DIM=768 なども設定
 
-# 2. 全サービスを起動
+# 2. 全サービスを起動（本番 / CI 用）
 docker compose up -d
 
 # 3. ログ確認（初回はマイグレーション完了を確認）
 docker compose logs -f api-server
 ```
 
-### アクセス先
+> **ネットワーク設計:** 外部に公開されるポートは `frontend:3000` (Nginx) のみです。
+> `api-server` や各種データベースへの直接アクセスは Docker 内部ネットワーク経由のみで行われます。
+
+### アクセス先（本番 / 共通）
 
 | サービス | URL |
 |---|---|
 | 学習UI | http://localhost:3000 |
 | 管理UI | http://localhost:3000/admin.html |
-| API（Swagger） | http://localhost:8001/docs |
+
+### ローカル開発（ngrok + デバッグポート公開）
+
+開発時は `docker-compose.local.yml` を併用することで、DBクライアントや ngrok トンネルが利用できます。
+
+#### 事前準備
+
+1. [ngrok](https://ngrok.com) でアカウント作成・固定ドメインを取得
+2. `.env` に以下を追加:
+
+```
+NGROK_AUTHTOKEN=your_ngrok_auth_token
+NGROK_DOMAIN=your-subdomain.ngrok-free.app
+# ngrok 経由アクセスを CORS で許可（必要な場合）
+CORS_ORIGINS=https://your-subdomain.ngrok-free.app,http://localhost:3000
+```
+
+#### 起動コマンド
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+```
+
+#### アクセス先（ローカル開発時のみ）
+
+| サービス | URL |
+|---|---|
+| 学習UI（ローカル） | http://localhost:3000 |
+| 管理UI（ローカル） | http://localhost:3000/admin.html |
+| 学習UI（ngrok） | https://your-subdomain.ngrok-free.app |
+| ngrok Web UI | http://localhost:4040 |
 | Neo4j Browser | http://localhost:7474 |
 | MinIO コンソール | http://localhost:9001 |
+
+> **セキュリティ注意:** `api-server` のポート（8001）はローカル開発時も直接公開されません。
+> API へのアクセスは必ず Nginx（3000番）経由で行ってください。
 
 ### 初期アカウント
 
