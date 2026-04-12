@@ -1,4 +1,4 @@
-"""Issue #95: LLM プロバイダ抽象化 (OpenAI / Gemini) のテスト。"""
+"""Issue #95 / #99: LLM プロバイダ抽象化 (OpenAI / Gemini / Google Vertex AI) のテスト。"""
 
 from __future__ import annotations
 
@@ -15,16 +15,18 @@ class _DummyStruct(BaseModel):
     score: int
 
 
-def _make_settings(provider: str, dim: int = 3072):
+def _make_settings(provider: str, dim: int = 3072, **kwargs):
     from core.config import Settings
 
+    gemini_like = provider in ("gemini", "google")
     return Settings(
         _env_file=None,
         llm_provider=provider,  # type: ignore[arg-type]
-        llm_api_key="key-test",
-        llm_analysis_model="gemini-2.0-flash" if provider == "gemini" else "gpt-4o",
-        llm_embedding_model="text-embedding-004" if provider == "gemini" else "text-embedding-3-large",
+        llm_api_key="key-test" if provider not in ("google",) else "",
+        llm_analysis_model="gemini-2.0-flash" if gemini_like else "gpt-4o",
+        llm_embedding_model="text-embedding-004" if gemini_like else "text-embedding-3-large",
         llm_embedding_dim=dim,
+        **kwargs,
     )
 
 
@@ -157,3 +159,153 @@ class TestProviderBranching:
             assert isinstance(parsed, _DummyStruct)
             assert parsed.answer == "hi"
             assert parsed.score == 7
+
+
+# ---------------------------------------------------------------------------
+# Issue #99: LLM_PROVIDER=google (Vertex AI ADC) テスト
+# ---------------------------------------------------------------------------
+
+class TestGoogleVertexAIProvider:
+    """LLM_PROVIDER=google のルーティング・初期化テスト。"""
+
+    def _make_fake_vertex_model(self, text: str):
+        fake_resp = types.SimpleNamespace(text=text)
+        fake_model = MagicMock()
+        fake_model.generate_content.return_value = fake_resp
+        return fake_model
+
+    def test_config_accepts_google_provider(self):
+        from core.config import Settings
+
+        s = Settings(
+            _env_file=None,
+            llm_provider="google",
+            gcp_project_id="my-project",
+            gcp_location="asia-northeast1",
+        )
+        assert s.llm_provider == "google"
+        assert s.gcp_project_id == "my-project"
+        assert s.gcp_location == "asia-northeast1"
+        assert s.gcp_use_vertex_ai is True  # デフォルト値
+
+    def test_config_gcp_fields_default(self):
+        from core.config import Settings
+
+        s = Settings(_env_file=None, llm_provider="google")
+        assert s.gcp_project_id == ""
+        assert s.gcp_location == "us-central1"
+        assert s.gcp_use_vertex_ai is True
+
+    def test_config_gcp_project_id_env_alias(self, monkeypatch):
+        monkeypatch.setenv("GCP_PROJECT_ID", "proj-from-env")
+        monkeypatch.setenv("GCP_LOCATION", "us-east1")
+        from core.config import Settings
+
+        s = Settings(_env_file=None)
+        assert s.gcp_project_id == "proj-from-env"
+        assert s.gcp_location == "us-east1"
+
+    def test_config_gcp_backward_compat_alias(self, monkeypatch):
+        """GOOGLE_CLOUD_PROJECT も gcp_project_id にマップされる。"""
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "legacy-proj")
+        monkeypatch.delenv("GCP_PROJECT_ID", raising=False)
+        from core.config import Settings
+
+        s = Settings(_env_file=None)
+        assert s.gcp_project_id == "legacy-proj"
+
+    def test_generate_text_uses_vertex_ai_when_provider_google(self):
+        from core import llm
+
+        fake_model = self._make_fake_vertex_model("vertex-response")
+
+        fake_generative_model_cls = MagicMock(return_value=fake_model)
+        fake_generation_config_cls = MagicMock()
+
+        vertex_module = MagicMock()
+        vertex_module.GenerativeModel = fake_generative_model_cls
+        vertex_module.GenerationConfig = fake_generation_config_cls
+
+        with patch.object(llm, "get_settings", return_value=_make_settings("google")), \
+             patch.object(llm, "_get_vertex_ai_client", return_value=MagicMock()), \
+             patch.object(llm, "_get_openai_client") as openai_client, \
+             patch.object(llm, "_get_gemini_module") as gemini_mod, \
+             patch("core.llm._vertex_ai_generate_text", return_value="vertex-response") as vtx_gen:
+            out = llm.generate_text(
+                [{"role": "user", "content": "hello"}],
+                temperature=0.7,
+            )
+            assert out == "vertex-response"
+            vtx_gen.assert_called_once()
+            openai_client.assert_not_called()
+            gemini_mod.assert_not_called()
+
+    def test_generate_embeddings_uses_vertex_ai_when_provider_google(self):
+        from core import llm
+
+        with patch.object(llm, "get_settings", return_value=_make_settings("google")), \
+             patch.object(llm, "_get_vertex_ai_client", return_value=MagicMock()), \
+             patch("core.llm._vertex_ai_generate_embeddings", return_value=[[0.1, 0.2]]) as vtx_emb:
+            out = llm.generate_embeddings(["text"])
+            assert out == [[0.1, 0.2]]
+            vtx_emb.assert_called_once()
+
+    def test_generate_structured_uses_vertex_ai_when_provider_google(self):
+        from core import llm
+
+        with patch.object(llm, "get_settings", return_value=_make_settings("google")), \
+             patch.object(llm, "_get_vertex_ai_client", return_value=MagicMock()), \
+             patch("core.llm._vertex_ai_generate_structured",
+                   return_value=_DummyStruct(answer="v", score=1)) as vtx_struct:
+            out = llm.generate_text_with_structured_output(
+                [{"role": "user", "content": "q"}],
+                _DummyStruct,
+            )
+            assert isinstance(out, _DummyStruct)
+            vtx_struct.assert_called_once()
+
+    def test_get_vertex_ai_client_raises_on_missing_adc(self):
+        """ADC が見つからない場合は EnvironmentError を投げる。"""
+        from core import llm
+
+        # google.auth.exceptions.DefaultCredentialsError を模倣するダミー例外クラス
+        class FakeDefaultCredentialsError(Exception):
+            pass
+
+        fake_vertexai = MagicMock()
+        fake_vertexai.init.side_effect = FakeDefaultCredentialsError("no credentials")
+
+        # google / google.auth / google.auth.exceptions のモジュール階層を構築
+        fake_google_auth_exceptions = types.ModuleType("google.auth.exceptions")
+        fake_google_auth_exceptions.DefaultCredentialsError = FakeDefaultCredentialsError
+
+        fake_google_auth = types.ModuleType("google.auth")
+        fake_google_auth.exceptions = fake_google_auth_exceptions
+
+        fake_google = types.ModuleType("google")
+        fake_google.auth = fake_google_auth
+
+        with patch.object(llm, "get_settings", return_value=_make_settings("google")), \
+             patch.dict("sys.modules", {
+                 "vertexai": fake_vertexai,
+                 "google": fake_google,
+                 "google.auth": fake_google_auth,
+                 "google.auth.exceptions": fake_google_auth_exceptions,
+             }):
+            llm._get_vertex_ai_client.cache_clear()
+            with pytest.raises(EnvironmentError, match="Vertex AI ADC"):
+                llm._get_vertex_ai_client()
+            llm._get_vertex_ai_client.cache_clear()
+
+    def test_no_api_key_required_for_google_provider(self):
+        """LLM_PROVIDER=google は llm_api_key が空でも設定を受け付ける。"""
+        from core.config import Settings
+
+        s = Settings(
+            _env_file=None,
+            llm_provider="google",
+            llm_api_key="",
+            gcp_project_id="my-project",
+        )
+        assert s.llm_provider == "google"
+        assert s.llm_api_key == ""

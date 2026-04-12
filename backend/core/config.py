@@ -35,9 +35,10 @@ class Settings(BaseSettings):
     )
 
     # --- LLM ---
-    # プロバイダ切替 (openai | gemini | gemini-vertex)。.env の LLM_PROVIDER で切り替える。
+    # プロバイダ切替 (openai | gemini | google | gemini-vertex)。.env の LLM_PROVIDER で切り替える。
+    # google: Vertex AI ADC 認証（google-cloud-aiplatform / vertexai SDK を使用）
     # gemini-vertex: Vertex AI ADC 認証 (廃止予定)
-    llm_provider: Literal["openai", "gemini", "gemini-vertex"] = Field(
+    llm_provider: Literal["openai", "gemini", "google", "gemini-vertex"] = Field(
         default="openai",
         validation_alias=AliasChoices("LLM_PROVIDER"),
     )
@@ -99,9 +100,24 @@ class Settings(BaseSettings):
     # --- ISOM ---
     isom_output_dir: str = "output/incoming"
 
+    # --- Google Cloud / Vertex AI ---
+    # LLM_PROVIDER=google または gemini-vertex のときに参照される。
+    # ADC は gcloud auth application-default login または GOOGLE_APPLICATION_CREDENTIALS で設定すること。
+    gcp_project_id: str = Field(
+        default="",
+        validation_alias=AliasChoices("GCP_PROJECT_ID", "GOOGLE_CLOUD_PROJECT"),
+    )
+    gcp_location: str = Field(
+        default="us-central1",
+        validation_alias=AliasChoices("GCP_LOCATION", "GOOGLE_CLOUD_LOCATION"),
+    )
+    gcp_use_vertex_ai: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("GCP_USE_VERTEX_AI"),
+    )
+
     # --- Google Cloud / Vertex AI (廃止予定) ---
-    # LLM_PROVIDER=gemini-vertex のときのみ参照される。
-    # ADC は gcloud auth application-default login で設定すること。
+    # 後方互換のため残存。新規利用には gcp_project_id / gcp_location を使用すること。
     google_cloud_project: str = Field(
         default="",
         validation_alias=AliasChoices("GOOGLE_CLOUD_PROJECT"),

@@ -185,6 +185,121 @@ def _get_gemini_module():
 
 
 # ---------------------------------------------------------------------------
+# Google Vertex AI Adapter（google-cloud-aiplatform / vertexai SDK）
+# ---------------------------------------------------------------------------
+
+@lru_cache(maxsize=1)
+def _get_vertex_ai_client():
+    """Vertex AI SDK (google-cloud-aiplatform) を初期化して返す。
+
+    ADC（Application Default Credentials）を自動参照する:
+
+    - ``gcloud auth application-default login`` で設定したクレデンシャル
+    - ``GOOGLE_APPLICATION_CREDENTIALS`` 環境変数で指定したサービスアカウントキー
+    - GCE / Cloud Run 上のメタデータサーバー
+
+    ``GCP_PROJECT_ID`` および ``GCP_LOCATION`` 環境変数も参照する。
+    ``LLM_API_KEY`` / ``GEMINI_API_KEY`` は不要。
+    """
+    import vertexai  # type: ignore[import]
+    import google.auth.exceptions  # type: ignore[import]
+
+    settings = get_settings()
+    project = settings.gcp_project_id or settings.google_cloud_project or None
+    location = settings.gcp_location or settings.google_cloud_location or "us-central1"
+
+    try:
+        vertexai.init(project=project, location=location)
+    except google.auth.exceptions.DefaultCredentialsError as exc:
+        raise EnvironmentError(
+            "Vertex AI ADC が見つかりません。以下のいずれかを設定してください:\n"
+            "  1. gcloud auth application-default login\n"
+            "  2. GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json\n"
+            "  3. GCP 環境（GCE / Cloud Run）上で実行する"
+        ) from exc
+
+    logger.info(
+        "Vertex AI adapter initialized (project=%s, location=%s)",
+        project or "<ADC default>",
+        location,
+    )
+    import vertexai as _vtx  # noqa: F811
+    return _vtx
+
+
+def _vertex_ai_generate_text(
+    messages: list[dict[str, str]],
+    model_name: str,
+    *,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> str:
+    from vertexai.generative_models import GenerativeModel, GenerationConfig  # type: ignore[import]
+
+    system_instruction, contents = _messages_to_gemini(messages)
+    config_kwargs: dict[str, Any] = {}
+    if temperature is not None:
+        config_kwargs["temperature"] = temperature
+    if max_tokens is not None:
+        config_kwargs["max_output_tokens"] = max_tokens
+    generation_config = GenerationConfig(**config_kwargs) if config_kwargs else None
+
+    model = GenerativeModel(
+        model_name=model_name,
+        system_instruction=system_instruction,
+    )
+    # Vertex AI の contents は {"role": ..., "parts": [...]} 形式でそのまま使用可
+    response = model.generate_content(
+        contents,
+        generation_config=generation_config,
+    )
+    return (getattr(response, "text", "") or "").strip()
+
+
+def _vertex_ai_generate_structured(
+    messages: list[dict[str, str]],
+    response_format: type[T],
+    model_name: str,
+) -> T:
+    from vertexai.generative_models import GenerativeModel, GenerationConfig  # type: ignore[import]
+
+    system_instruction, contents = _messages_to_gemini(messages)
+    schema = response_format.model_json_schema()
+
+    model = GenerativeModel(
+        model_name=model_name,
+        system_instruction=system_instruction,
+    )
+    response = model.generate_content(
+        contents,
+        generation_config=GenerationConfig(
+            response_mime_type="application/json",
+            response_schema=schema,
+        ),
+    )
+    raw = getattr(response, "text", "") or ""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Vertex AI の構造化レスポンスを JSON として解析できませんでした: {raw!r}"
+        ) from exc
+    return response_format.model_validate(data)
+
+
+def _vertex_ai_generate_embeddings(
+    texts: list[str],
+    model_name: str,
+) -> list[list[float]]:
+    from vertexai.language_models import TextEmbeddingModel, TextEmbeddingInput  # type: ignore[import]
+
+    model = TextEmbeddingModel.from_pretrained(model_name)
+    inputs = [TextEmbeddingInput(text=t) for t in texts]
+    embeddings = model.get_embeddings(inputs)
+    return [list(e.values) for e in embeddings]
+
+
+# ---------------------------------------------------------------------------
 # Gemini Vertex AI Adapter（廃止予定 / Deprecated）
 # ---------------------------------------------------------------------------
 
@@ -194,7 +309,7 @@ def _get_gemini_vertex_module():
 
     .. deprecated::
         この認証方式は廃止予定です。
-        将来的には ``LLM_PROVIDER=gemini`` と ``LLM_API_KEY`` による認証に移行してください。
+        ``LLM_PROVIDER=google`` への移行を推奨します。
 
     ADC の設定手順::
 
@@ -376,6 +491,15 @@ def generate_text(
             max_tokens=max_tokens,
         )
 
+    if settings.llm_provider == "google":
+        _get_vertex_ai_client()  # ADC 初期化（キャッシュ済み）
+        return _vertex_ai_generate_text(
+            messages,
+            model_name,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
     if settings.llm_provider == "gemini-vertex":  # 廃止予定
         return _gemini_generate_text(
             messages,
@@ -433,6 +557,10 @@ def generate_text_with_structured_output(
     if settings.llm_provider == "gemini":
         return _gemini_generate_structured(messages, response_format, model_name, genai_module=_get_gemini_module())
 
+    if settings.llm_provider == "google":
+        _get_vertex_ai_client()  # ADC 初期化（キャッシュ済み）
+        return _vertex_ai_generate_structured(messages, response_format, model_name)
+
     if settings.llm_provider == "gemini-vertex":  # 廃止予定
         return _gemini_generate_structured(messages, response_format, model_name, genai_module=_get_gemini_vertex_module())
 
@@ -479,6 +607,10 @@ def generate_embeddings(
 
     if settings.llm_provider == "gemini":
         return _gemini_generate_embeddings(texts, model_name, genai_module=_get_gemini_module())
+
+    if settings.llm_provider == "google":
+        _get_vertex_ai_client()  # ADC 初期化（キャッシュ済み）
+        return _vertex_ai_generate_embeddings(texts, model_name)
 
     if settings.llm_provider == "gemini-vertex":  # 廃止予定
         return _gemini_generate_embeddings(texts, model_name, genai_module=_get_gemini_vertex_module())

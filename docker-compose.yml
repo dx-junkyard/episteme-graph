@@ -62,6 +62,11 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:-${OPENAI_API_KEY}}
       LLM_ANALYSIS_MODEL: ${LLM_ANALYSIS_MODEL:-${OPENAI_ANALYSIS_MODEL:-o3-mini}}
       LLM_EMBEDDING_MODEL: ${LLM_EMBEDDING_MODEL:-${OPENAI_EMBEDDING_MODEL:-text-embedding-3-large}}
+      # Vertex AI ADC 設定 (LLM_PROVIDER=google)
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID:-${GOOGLE_CLOUD_PROJECT:-}}
+      GCP_LOCATION: ${GCP_LOCATION:-${GOOGLE_CLOUD_LOCATION:-us-central1}}
+      GCP_USE_VERTEX_AI: ${GCP_USE_VERTEX_AI:-true}
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
       # Vertex AI ADC 設定 (LLM_PROVIDER=gemini-vertex のときのみ有効、廃止予定)
       GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
       GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-us-central1}
@@ -72,9 +77,19 @@ services:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
-    # LLM_PROVIDER=gemini-vertex を使う場合は ADC 認証ファイルのマウントが必要 (廃止予定):
+    # LLM_PROVIDER=google (Vertex AI ADC) を使う場合はいずれかの方法で認証情報をマウントする:
+    #
+    # 方法1: gcloud ADC クレデンシャルを直接マウント
     #   volumes:
     #     - ~/.config/gcloud:/root/.config/gcloud:ro
+    #
+    # 方法2: サービスアカウントキーファイルをマウント
+    #   volumes:
+    #     - /path/to/service-account.json:/secrets/sa.json:ro
+    #   environment:
+    #     GOOGLE_APPLICATION_CREDENTIALS: /secrets/sa.json
+    #
+    # LLM_PROVIDER=gemini-vertex を使う場合も同様 (廃止予定):
     depends_on:
       postgres:
         condition: service_healthy
