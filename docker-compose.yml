@@ -68,7 +68,7 @@ services:
       GCP_USE_VERTEX_AI: ${GCP_USE_VERTEX_AI:-true}
       # 認証ファイルパス: ホストの .gcp/ をコンテナ内 /app/.gcp/ にマウントした場合の固定パス。
       # .env で上書き可能 (例: GOOGLE_APPLICATION_CREDENTIALS=/app/.gcp/sa.json)
-      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-/app/.gcp/credentials.json}
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-/app/.gcp/application_default_credentials.json}
       # Vertex AI ADC 設定 (LLM_PROVIDER=gemini-vertex のときのみ有効、廃止予定)
       GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
       GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-us-central1}

@@ -376,15 +376,19 @@ def _messages_to_gemini(
     """
     system_parts: list[str] = []
     contents: list[dict[str, Any]] = []
+
     for msg in messages:
         role = msg.get("role", "user")
         content = msg.get("content", "")
+        
         if role == "system":
             system_parts.append(content)
         elif role == "assistant":
-            contents.append({"role": "model", "parts": [content]})
+            # Vertex AI SDK の厳格な仕様に合わせて {"text": content} とする
+            contents.append({"role": "model", "parts": [{"text": content}]})
         else:
-            contents.append({"role": "user", "parts": [content]})
+            contents.append({"role": "user", "parts": [{"text": content}]})
+            
     system_instruction = "\n\n".join(system_parts) if system_parts else None
     return system_instruction, contents
 
