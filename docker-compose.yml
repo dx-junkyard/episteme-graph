@@ -4,9 +4,6 @@ services:
   # ── Infrastructure ────────────────────────────────────────────────
   neo4j:
     image: neo4j:5-community
-    ports:
-      - "7474:7474"
-      - "7687:7687"
     environment:
       NEO4J_AUTH: neo4j/episteme
     volumes:
@@ -16,8 +13,6 @@ services:
 
   postgres:
     image: pgvector/pgvector:pg16
-    ports:
-      - "5432:5432"
     environment:
       POSTGRES_DB: episteme
       POSTGRES_USER: episteme
@@ -38,9 +33,6 @@ services:
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
-    ports:
-      - "9000:9000"
-      - "9001:9001"
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
@@ -54,8 +46,6 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    ports:
-      - "8001:8001"
     environment:
       JWT_SECRET: ${JWT_SECRET:-episteme-dev-secret-change-in-prod}
       LLM_PROVIDER: ${LLM_PROVIDER:-openai}
@@ -79,6 +69,7 @@ services:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
     # ローカルの .gcp/ をコンテナに読み取り専用でマウントする。
     # ファイルが存在しない場合は空ディレクトリとしてマウントされる（エラーにはならない）。
     # サービスアカウントキーを使う場合: .gcp/credentials.json に配置する。

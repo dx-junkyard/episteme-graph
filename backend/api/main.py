@@ -302,9 +302,11 @@ async def _lifespan(application: FastAPI):
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="Episteme Graph API", version="0.1.0", lifespan=_lifespan)
+_cors_origins_raw = _get_settings().cors_origins
+_cors_origins = _cors_origins_raw.split(",") if _cors_origins_raw != "*" else ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

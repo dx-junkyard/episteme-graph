@@ -94,6 +94,14 @@ class Settings(BaseSettings):
     minio_secret_key: str = "minioadmin"
     minio_public_endpoint: str = "localhost:9000"
 
+    # --- CORS ---
+    # カンマ区切りでオリジンを指定。"*" はワイルドカード（開発用デフォルト）。
+    # 例: CORS_ORIGINS=https://your-subdomain.ngrok-free.app,http://localhost:3000
+    cors_origins: str = Field(
+        default="*",
+        validation_alias=AliasChoices("CORS_ORIGINS"),
+    )
+
     # --- GROBID ---
     grobid_url: str = "http://localhost:8070"
 

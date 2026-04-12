@@ -1,0 +1,48 @@
+version: "3.9"
+
+# ローカル開発用オーバーライドファイル
+# 使用方法: docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+#
+# このファイルは本番用の docker-compose.yml を「上書き」する形で機能します。
+# 開発時のみ必要なポート公開や ngrok トンネルをここで定義します。
+#
+# ※ api-server のポートはここでも開放しません。
+#   すべての API アクセスは必ず Nginx (frontend:3000) 経由にしてください。
+
+services:
+  # ── 開発用ポート公開 ─────────────────────────────────────────────
+  neo4j:
+    ports:
+      - "7474:7474"   # Neo4j Browser
+      - "7687:7687"   # Bolt プロトコル (DB クライアント用)
+
+  postgres:
+    ports:
+      - "5432:5432"   # PostgreSQL クライアント (psql / TablePlus など)
+
+  minio:
+    ports:
+      - "9000:9000"   # MinIO S3 API
+      - "9001:9001"   # MinIO コンソール
+
+  # ── ngrok トンネル ───────────────────────────────────────────────
+  # 固定ドメインを使ったローカル→外部公開トンネル。
+  # frontend コンテナの 3000 番ポート（Nginx）にトラフィックを転送します。
+  #
+  # 事前準備:
+  #   1. https://ngrok.com でアカウント作成・固定ドメインを取得
+  #   2. .env に NGROK_AUTHTOKEN と NGROK_DOMAIN を設定
+  #      例: NGROK_AUTHTOKEN=your_auth_token
+  #          NGROK_DOMAIN=your-subdomain.ngrok-free.app
+  ngrok:
+    image: ngrok/ngrok:latest
+    restart: unless-stopped
+    command: http --domain=${NGROK_DOMAIN} frontend:3000
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+    depends_on:
+      - frontend
+    networks:
+      - episteme
+    ports:
+      - "4040:4040"   # ngrok Web UI (トンネル状態確認)
