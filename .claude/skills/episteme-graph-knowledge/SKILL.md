@@ -20,11 +20,34 @@ PDF 教材からの知識抽出、グラフ構造の定義、パターンマッ�
 | テーブル | 役割 |
 |---|---|
 | `documents` | 教材メタデータ (タイトル、著者、ステータス、knowledge_graph JSONB) |
-| `chunks` | テキストチャンク + embedding (pgvector 3072次元) + DSL メタデータ |
+| `chunks` | テキストチャンク + embedding (pgvector) + DSL メタデータ |
 
 - ベクトル検索: `chunks.embedding` カラム (pgvector cosine distance)
 - ナレッジグラフ構造: `documents.knowledge_graph` (JSONB)
 - DSL 情報: `chunks.smiles_dsl`, `chunks.variables`, `chunks.ancestors` (JSONB)
+
+### Embedding 次元数に関する注意事項
+
+pgvector の次元数は LLM プロバイダと Embedding モデルによって異なる。
+**次元数は絶対にハードコードしない**。必ず `core/llm.py` の `get_embedding_dim()` または `settings.llm_embedding_dim` を参照すること。
+
+| LLM プロバイダ / モデル | Embedding モデル | 次元数 |
+|---|---|---|
+| OpenAI `text-embedding-3-large` | `LLM_PROVIDER=openai` のデフォルト | **3072** |
+| Gemini `text-embedding-004` | `LLM_PROVIDER=gemini` で典型的に使用 | **768** |
+| Gemini `gemini-embedding-exp-03-07` | 高精度 Gemini Embedding | **3072** |
+
+```python
+# NG — 次元数ハードコード禁止
+ALTER TABLE chunks ADD COLUMN embedding vector(3072);
+pgvector_query = "SELECT * FROM chunks ORDER BY embedding <=> $1::vector(3072)"
+
+# OK — 設定値から取得する
+from core.llm import get_embedding_dim
+dim = get_embedding_dim()  # settings.llm_embedding_dim の値を返す
+```
+
+DBスキーマ変更・マイグレーション作成時は `LLM_EMBEDDING_DIM` の値を確認し、現在の次元数に合わせた SQL を生成すること。
 
 データモデルの最新定義は `backend/core/models.py` の `Document` / `Chunk` クラスを直接読んで確認すること。
 
@@ -89,14 +112,45 @@ CorePredicate の定義は `backend/core/schema.py` を直接読んで最新の�
 
 実装の詳細は `backend/core/batch.py` を直接読んで確認すること。
 
+## LLM プロバイダ環境変数仕様
+
+ナレッジグラフ・パイプライン実装時に参照が必要な主要環境変数:
+
+| 環境変数 | 説明 | デフォルト値 |
+|---|---|---|
+| `LLM_PROVIDER` | LLM バックエンド (`openai` / `gemini`) | `openai` |
+| `LLM_API_KEY` | API キー（`OPENAI_API_KEY` / `GEMINI_API_KEY` も可） | — |
+| `LLM_ANALYSIS_MODEL` | テキスト生成に使用するモデル名 | `o3-mini` |
+| `LLM_EMBEDDING_MODEL` | Embedding に使用するモデル名 | `text-embedding-3-large` |
+| `LLM_EMBEDDING_DIM` | Embedding ベクトル次元数（pgvector スキーマと一致が必要） | `3072` |
+
+> **禁止**: `google-cloud-aiplatform` (Vertex AI) を新規パイプラインコードで使用すること。
+> Google の LLM を使う場合は必ず `LLM_PROVIDER=gemini` (`google-generativeai`) を指定すること。
+
+### OpenAI → Gemini のロールマッピング
+
+`core/llm.py` はプロバイダ間のロール変換を内部で自動処理する。
+パイプライン実装時は OpenAI 形式のメッセージリストをそのまま渡してよい。
+
+```
+OpenAI 形式                      → Gemini への変換
+─────────────────────────────────────────────────────
+{"role": "system",  "content": "..."} → GenerativeModel(system_instruction="...")
+{"role": "user",    "content": "..."} → contents[{"role": "user",  "parts": [...]}]
+{"role": "assistant","content": "..."} → contents[{"role": "model", "parts": [...]}]
+```
+
+この変換は `core/llm.py` 内部で行われるため、`extractor.py` / `chat.py` / `batch.py` 側での分岐は不要。
+
 ## 開発ガイドライン
 
 1. **スキーマ変更**: `backend/core/schema.py` の Pydantic モデルを先に更新し、`backend/core/models.py` の ORM モデルも同期する
 2. **新しい関係型**: `CorePredicate` 列挙型に追加し、既存コードへの影響を確認
 3. **抽出精度向上**: `backend/core/extractor.py` のプロンプトを調整
 4. **検索精度向上**: `backend/core/embedder.py` のチャンク戦略・クエリ戦略を調整
-5. **LLM 呼び出し**: 必ず `core/llm.py` の公開 API (`generate_text`, `generate_embeddings`, `generate_text_with_structured_output`) を経由する。`openai` SDK を直接使用しない
+5. **LLM 呼び出し**: 必ず `core/llm.py` の公開 API (`generate_text`, `generate_embeddings`, `generate_text_with_structured_output`) を経由する。`openai` / `google.generativeai` SDK を直接使用しない
 6. **設定値**: `core/config.py` の `get_settings()` を経由する。`os.environ` を直接使用しない
+7. **Embedding 次元数**: `get_embedding_dim()` または `settings.llm_embedding_dim` を使用し、絶対にハードコードしない
 
 ## CI テストパターンの更新（必須）
 
