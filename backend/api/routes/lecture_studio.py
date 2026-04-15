@@ -62,36 +62,32 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
 
     session = _pg_session()
     try:
-        mid_placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
-        params: dict = {}
-        for i, mid in enumerate(material_ids):
-            params[f"mid_{i}"] = mid
-
-        where_clause = f"c.material_id IN ({mid_placeholders})"
-        rows = session.execute(
-            sa_text(f"""
-                SELECT c.id, c.chunk_index, c.text, c.display_text, c.spoken_text, c.formulas
-                FROM chunks c
-                WHERE ({where_clause})
-                  AND c.text IS NOT NULL AND c.text != ''
-                ORDER BY c.chunk_index
-            """),
-            params,
-        ).fetchall()
-
         chunks = []
-        for row in rows:
-            text = row[3] or row[2] or ""
-            formulas = row[5] if row[5] else []
-            # 旧フォーマット（$...$）のデータをプレースホルダー方式に正規化
-            text, formulas = normalize_to_placeholder_format(text, formulas)
-            chunks.append({
-                "id": str(row[0]),
-                "chunk_index": row[1],
-                "text": text,
-                "spoken_text": row[4] or "",
-                "formulas": formulas,
-            })
+        # IN句でまとめて取得せず、教材の登録順に取得して結合する
+        for mid in material_ids:
+            rows = session.execute(
+                sa_text("""
+                    SELECT c.id, c.chunk_index, c.text, c.display_text, c.spoken_text, c.formulas
+                    FROM chunks c
+                    WHERE c.material_id = CAST(:mid AS uuid)
+                      AND c.text IS NOT NULL AND c.text != ''
+                    ORDER BY c.chunk_index
+                """),
+                {"mid": mid},
+            ).fetchall()
+
+            for row in rows:
+                text = row[3] or row[2] or ""
+                formulas = row[5] if row[5] else []
+                # 旧フォーマット（$...$）のデータをプレースホルダー方式に正規化
+                text, formulas = normalize_to_placeholder_format(text, formulas)
+                chunks.append({
+                    "id": str(row[0]),
+                    "chunk_index": row[1],
+                    "text": text,
+                    "spoken_text": row[4] or "",
+                    "formulas": formulas,
+                })
         return chunks
     finally:
         session.close()
