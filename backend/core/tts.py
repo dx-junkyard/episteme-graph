@@ -5,11 +5,12 @@ MP3 音声データを返す。
 
 Usage::
 
-    from core.tts import generate_tts_audio
+    from core.tts import generate_tts_audio, TtsFatalError
 
-    audio_bytes = generate_tts_audio("読み上げるテキスト")
-    if audio_bytes is None:
-        # プロバイダが設定されていないか、生成に失敗した
+    try:
+        audio_bytes = generate_tts_audio("読み上げるテキスト")
+    except TtsFatalError:
+        # 設定起因の恒久エラー。リトライ不要
         ...
 """
 
@@ -20,6 +21,14 @@ import logging
 from core.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+class TtsFatalError(Exception):
+    """TTS プロバイダの設定に起因する恒久的なエラー（リトライ不要）。
+
+    API キー未設定、API 未有効化、権限不足など、何度リトライしても
+    成功しないことが確実なケースで送出される。
+    """
 
 
 def generate_tts_audio(spoken_text: str) -> bytes | None:
@@ -36,6 +45,9 @@ def generate_tts_audio(spoken_text: str) -> bytes | None:
 
     Returns:
         bytes: MP3 形式の音声データ。生成失敗またはプロバイダ未設定の場合は ``None``。
+
+    Raises:
+        TtsFatalError: API 未有効化・認証エラーなど、リトライしても回復しない恒久的なエラー。
     """
     settings = get_settings()
     api_key = settings.llm_api_key
@@ -53,7 +65,13 @@ def generate_tts_audio(spoken_text: str) -> bytes | None:
                 response_format="mp3",
             )
             return response.content
-        except Exception:
+        except Exception as exc:
+            exc_str = str(exc)
+            # 認証エラーはリトライしても回復しない
+            if "401" in exc_str or "AuthenticationError" in type(exc).__name__:
+                raise TtsFatalError(
+                    f"OpenAI TTS 認証エラー: API キーを確認してください。({exc_str})"
+                ) from exc
             logger.exception("OpenAI TTS の呼び出しに失敗しました")
             return None
 
@@ -76,7 +94,15 @@ def generate_tts_audio(spoken_text: str) -> bytes | None:
                 audio_config=audio_config,
             )
             return tts_response.audio_content
-        except Exception:
+        except Exception as exc:
+            exc_str = str(exc)
+            # SERVICE_DISABLED はリトライしても回復しない恒久エラー
+            if "SERVICE_DISABLED" in exc_str or "has not been used" in exc_str:
+                raise TtsFatalError(
+                    "Cloud Text-to-Speech API が GCP プロジェクトで無効です。"
+                    "以下の URL から有効化してください: "
+                    "https://console.developers.google.com/apis/api/texttospeech.googleapis.com/overview"
+                ) from exc
             logger.exception("Google Cloud TTS の呼び出しに失敗しました")
             return None
 

@@ -40,7 +40,7 @@ from services import (
 from core.lecture import generate_spoken_text_and_formulas, normalize_to_placeholder_format
 from core.llm import generate_text, get_llm_params
 from core.postgres import get_session as _pg_session
-from core.tts import generate_tts_audio
+from core.tts import TtsFatalError, generate_tts_audio
 
 logger = logging.getLogger(__name__)
 
@@ -549,6 +549,12 @@ def _batch_audio_worker(
                             "progress": int(processed * 100 / total) if total > 0 else 100,
                         })
                         continue
+                except TtsFatalError as exc:
+                    # API 未有効化・認証エラーなど恒久的な失敗: 残りチャンクを処理しても無駄なので即終了
+                    error_msg = str(exc)
+                    logger.error("TTS fatal error, aborting task %s: %s", task_id, error_msg)
+                    update_background_task(task_id, "failed", error_message=error_msg)
+                    return
                     duration_ms = max(1000, len(audio_bytes) * 8 // 128)
 
                     session = _pg_session()

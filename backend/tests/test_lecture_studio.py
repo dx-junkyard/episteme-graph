@@ -653,3 +653,72 @@ class TestGenerateTtsAudioProviderSelection:
         assert result == b"ok"
         assert len(received_inputs) == 1
         assert len(received_inputs[0]) == 4096
+
+    def test_service_disabled_raises_tts_fatal_error(self, monkeypatch):
+        """GCP の SERVICE_DISABLED エラー時に TtsFatalError が送出されること。"""
+        import types
+        import core.tts as tts_module
+        from core.tts import TtsFatalError
+
+        class FakeTTSClient:
+            def synthesize_speech(self, **kwargs):
+                raise RuntimeError(
+                    "403 Cloud Text-to-Speech API has not been used in project foo before or it is disabled. "
+                    "[reason: \"SERVICE_DISABLED\"]"
+                )
+
+        class FakeTextToSpeech:
+            TextToSpeechClient = FakeTTSClient
+
+            class SynthesisInput:
+                def __init__(self, text):
+                    self.text = text
+
+            class VoiceSelectionParams:
+                def __init__(self, **kwargs):
+                    pass
+
+            class AudioConfig:
+                def __init__(self, **kwargs):
+                    pass
+
+            class SsmlVoiceGender:
+                NEUTRAL = "NEUTRAL"
+
+            class AudioEncoding:
+                MP3 = "MP3"
+
+        self._register_fake_tts_module(monkeypatch, FakeTextToSpeech)
+        self._patch_settings(monkeypatch, "", "google")
+
+        import pytest
+        with pytest.raises(TtsFatalError, match="Cloud Text-to-Speech API"):
+            tts_module.generate_tts_audio("テストテキスト")
+
+    def test_openai_auth_error_raises_tts_fatal_error(self, monkeypatch):
+        """OpenAI の 401 認証エラー時に TtsFatalError が送出されること。"""
+        import sys
+        import types
+        import core.tts as tts_module
+        from core.tts import TtsFatalError
+
+        class FakeAuthError(Exception):
+            pass
+
+        class BrokenOpenAIClient:
+            class audio:
+                class speech:
+                    @staticmethod
+                    def create(**kwargs):
+                        raise FakeAuthError("401 Unauthorized - no API key")
+
+        fake_openai_mod = types.ModuleType("openai")
+        fake_openai_mod.OpenAI = lambda api_key: BrokenOpenAIClient()
+        fake_openai_mod.AuthenticationError = FakeAuthError
+        monkeypatch.setitem(sys.modules, "openai", fake_openai_mod)
+
+        self._patch_settings(monkeypatch, "any-key", "openai")
+
+        import pytest
+        with pytest.raises(TtsFatalError, match="認証エラー"):
+            tts_module.generate_tts_audio("テストテキスト")
