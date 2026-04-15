@@ -431,8 +431,8 @@ class TestGenerateTtsAudioProviderSelection:
             monkeypatch.setitem(sys.modules, "google.cloud", types.ModuleType("google.cloud"))
         monkeypatch.setitem(sys.modules, "google.cloud.texttospeech", fake_tts_class)
 
-    def test_openai_provider_selected_when_sk_key(self, monkeypatch):
-        """sk- で始まる API キーがある場合は OpenAI TTS が選択されること。"""
+    def test_openai_provider_selected_when_llm_provider_openai(self, monkeypatch):
+        """LLM_PROVIDER=openai のとき OpenAI TTS が選択されること。"""
         import sys
         import types
         import core.tts as tts_module
@@ -528,24 +528,16 @@ class TestGenerateTtsAudioProviderSelection:
         result = tts_module.generate_tts_audio("テストテキスト")
         assert result == b"fake-vertex-mp3"
 
-    def test_no_provider_returns_none(self, monkeypatch):
-        """OpenAI キーなし & provider=gemini の場合 None が返ること。"""
+    def test_gemini_provider_returns_none(self, monkeypatch):
+        """provider=gemini の場合 TTS 非対応として None が返ること。"""
         import core.tts as tts_module
 
         self._patch_settings(monkeypatch, "", "gemini")
         result = tts_module.generate_tts_audio("テストテキスト")
         assert result is None
 
-    def test_openai_empty_key_not_matched(self, monkeypatch):
-        """空の API キー (sk- で始まらない) は OpenAI TTS を選択しないこと。"""
-        import core.tts as tts_module
-
-        self._patch_settings(monkeypatch, "not-an-openai-key", "openai")
-        result = tts_module.generate_tts_audio("テストテキスト")
-        assert result is None
-
     def test_openai_exception_returns_none(self, monkeypatch):
-        """OpenAI TTS が例外を送出した場合 None が返ること。"""
+        """LLM_PROVIDER=openai で OpenAI TTS が例外を送出した場合 None が返ること。"""
         import sys
         import types
         import core.tts as tts_module
@@ -655,7 +647,7 @@ class TestGenerateTtsAudioProviderSelection:
         fake_openai_mod.OpenAI = lambda api_key: FakeOpenAIClient()
         monkeypatch.setitem(sys.modules, "openai", fake_openai_mod)
 
-        self._patch_settings(monkeypatch, "sk-test-key", "openai")
+        self._patch_settings(monkeypatch, "any-key", "openai")
         long_text = "a" * 8000
         result = tts_module.generate_tts_audio(long_text)
         assert result == b"ok"

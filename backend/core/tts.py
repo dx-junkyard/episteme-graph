@@ -26,7 +26,7 @@ def generate_tts_audio(spoken_text: str) -> bytes | None:
     """設定に基づいて TTS プロバイダを動的に選択し、MP3 音声データを返す。
 
     選択ロジック:
-      1. ``llm_api_key`` が ``sk-`` で始まる場合 → OpenAI TTS を使用
+      1. ``llm_provider`` が ``openai`` の場合 → OpenAI TTS を使用
       2. ``llm_provider`` が ``google`` または ``gemini-vertex`` の場合
          → Google Cloud Text-to-Speech (ADC 認証) を使用
       3. いずれにも該当しない場合 → エラーログを出力して ``None`` を返す
@@ -42,7 +42,7 @@ def generate_tts_audio(spoken_text: str) -> bytes | None:
     provider = settings.llm_provider
 
     # --- OpenAI TTS ---
-    if api_key.startswith("sk-"):
+    if provider == "openai":
         try:
             import openai  # type: ignore[import]
             client = openai.OpenAI(api_key=api_key)
@@ -83,9 +83,8 @@ def generate_tts_audio(spoken_text: str) -> bytes | None:
     # --- プロバイダ未設定 ---
     logger.error(
         "TTS プロバイダを特定できませんでした。"
-        "OpenAI キー (sk-...) を設定するか、LLM_PROVIDER=google を指定してください。"
-        "provider=%s api_key_prefix=%s",
+        "LLM_PROVIDER=openai または LLM_PROVIDER=google を指定してください。"
+        "provider=%s",
         provider,
-        (api_key[:8] + "...") if len(api_key) > 8 else "(empty)",
     )
     return None
