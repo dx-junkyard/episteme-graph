@@ -28,6 +28,7 @@ from schemas import (
     CourseBuilderSessionOut,
     CourseBuilderSessionUpdate,
     CreateUserRequest,
+    DeleteConfirmRequest,
     MaterialOut,
     ReextractionJobOut,
     SimulationResponse,
@@ -220,6 +221,115 @@ def get_material(
         uploaded_at=uploaded_at,
         knowledge_graph=kg,
     )
+
+
+# ---------------------------------------------------------------------------
+# Material Deletion
+# ---------------------------------------------------------------------------
+
+
+@router.delete("/materials/{material_id}")
+def delete_material(
+    material_id: str,
+    body: DeleteConfirmRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """教材を削除する。紐づくコースも同時に削除される。
+
+    confirm_name がタイトルと一致しない場合は 400 を返す。
+    """
+    session = _pg_session()
+    try:
+        # 1) 教材の存在確認 & タイトル照合
+        doc = session.execute(
+            sa_text("""
+                SELECT id, title, filename, source_path
+                FROM documents
+                WHERE source_path = :material_id
+                  AND uploaded_by = CAST(:user_id AS uuid)
+                LIMIT 1
+            """),
+            {"material_id": material_id, "user_id": current_user["id"]},
+        ).fetchone()
+
+        if not doc:
+            raise HTTPException(status_code=404, detail="Material not found")
+
+        doc_id = doc[0]
+        doc_title = doc[1] or doc[2] or ""
+
+        if body.confirm_name != doc_title:
+            raise HTTPException(
+                status_code=400,
+                detail="確認用の名前が一致しません。正確な教材名を入力してください。",
+            )
+
+        # 2) この教材を sources に含むコースを特定して削除
+        course_rows = session.execute(
+            sa_text("""
+                SELECT id FROM learning_courses
+                WHERE user_id = CAST(:user_id AS uuid)
+            """),
+            {"user_id": current_user["id"]},
+        ).fetchall()
+
+        deleted_course_ids: list[str] = []
+        for row in course_rows:
+            course_id = row[0]
+            course_data_row = session.execute(
+                sa_text("SELECT data FROM learning_courses WHERE id = :cid"),
+                {"cid": course_id},
+            ).fetchone()
+            if not course_data_row or not course_data_row[0]:
+                continue
+            data = course_data_row[0] if isinstance(course_data_row[0], dict) else json.loads(course_data_row[0])
+            sources = data.get("sources", [])
+            linked = any(
+                s.get("material_id") == material_id for s in sources if isinstance(s, dict)
+            )
+            if linked:
+                # 関連する学習チャット履歴を削除
+                session.execute(
+                    sa_text("DELETE FROM learning_chat_history WHERE course_id = :cid"),
+                    {"cid": course_id},
+                )
+                # コース削除
+                session.execute(
+                    sa_text("DELETE FROM learning_courses WHERE id = :cid"),
+                    {"cid": course_id},
+                )
+                deleted_course_ids.append(course_id)
+
+        # 3) チャンク削除
+        session.execute(
+            sa_text("DELETE FROM chunks WHERE document_id = :doc_id"),
+            {"doc_id": doc_id},
+        )
+
+        # 4) ドキュメント削除
+        session.execute(
+            sa_text("DELETE FROM documents WHERE id = :doc_id"),
+            {"doc_id": doc_id},
+        )
+
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    logger.info(
+        "Material %s (%s) deleted by user=%s, cascade-deleted courses: %s",
+        material_id, doc_title, current_user["id"], deleted_course_ids,
+    )
+    return {
+        "material_id": material_id,
+        "deleted": True,
+        "deleted_courses": deleted_course_ids,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -867,6 +977,63 @@ def publish_course(
         raise HTTPException(status_code=404, detail="Course not found")
     logger.info("Course %s published by user=%s", course_id, current_user["id"])
     return {"course_id": course_id, "is_published": True}
+
+
+@router.delete("/courses/{course_id}")
+def delete_course(
+    course_id: str,
+    body: DeleteConfirmRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """コースを削除する。
+
+    confirm_name がコースタイトルと一致しない場合は 400 を返す。
+    """
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("""
+                SELECT id, title FROM learning_courses
+                WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
+                LIMIT 1
+            """),
+            {"course_id": course_id, "user_id": current_user["id"]},
+        ).fetchone()
+
+        if not record:
+            raise HTTPException(status_code=404, detail="Course not found")
+
+        course_title = record[1] or ""
+        if body.confirm_name != course_title:
+            raise HTTPException(
+                status_code=400,
+                detail="確認用の名前が一致しません。正確なコース名を入力してください。",
+            )
+
+        # 関連する学習チャット履歴を削除
+        session.execute(
+            sa_text("DELETE FROM learning_chat_history WHERE course_id = :cid"),
+            {"cid": course_id},
+        )
+        # コース削除
+        session.execute(
+            sa_text("""
+                DELETE FROM learning_courses
+                WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
+            """),
+            {"course_id": course_id, "user_id": current_user["id"]},
+        )
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    logger.info("Course %s (%s) deleted by user=%s", course_id, course_title, current_user["id"])
+    return {"course_id": course_id, "deleted": True}
 
 
 @router.get("/courses/{course_id}/unanswered-queries")

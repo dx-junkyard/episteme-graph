@@ -183,6 +183,11 @@ class LearningChatHistoryResponse(BaseModel):
 # Course Builder
 # ---------------------------------------------------------------------------
 
+class DeleteConfirmRequest(BaseModel):
+    """名前入力による削除確認リクエスト。"""
+    confirm_name: str  # 削除対象の名前（一致しなければ拒否）
+
+
 class CourseBuilderChatRequest(BaseModel):
     """コース構築AIチャットリクエスト。"""
     message: str

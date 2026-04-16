@@ -193,7 +193,7 @@
   function renderMaterials(materials) {
     var tbody = document.getElementById("materials-tbody");
     if (!materials || materials.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">教材がまだアップロードされていません</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--color-text-tertiary)">教材がまだアップロードされていません</td></tr>';
       return;
     }
 
@@ -221,9 +221,118 @@
       html += "<td>" + escHtml(m.title) + "</td>";
       html += '<td><span class="admin-status ' + statusClass + '">' + statusLabel + "</span></td>";
       html += "<td>" + escHtml(uploadedAt) + "</td>";
+      html += '<td><button class="admin-delete-btn" data-material-id="' + escHtml(m.material_id) + '" data-material-title="' + escHtml(m.title) + '" style="background:none;border:1px solid var(--color-text-danger);color:var(--color-text-danger);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">削除</button></td>';
       html += "</tr>";
     });
     tbody.innerHTML = html;
+
+    // Attach delete handlers
+    tbody.querySelectorAll(".admin-delete-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var mid = this.getAttribute("data-material-id");
+        var title = this.getAttribute("data-material-title");
+        openDeleteConfirmModal("material", mid, title);
+      });
+    });
+  }
+
+  // ── Delete Confirmation Modal ──────────────────────────────────────
+  function openDeleteConfirmModal(kind, id, name) {
+    // kind: "material" | "course"
+    var existing = document.getElementById("delete-confirm-modal");
+    if (existing) existing.remove();
+
+    var kindLabel = kind === "material" ? "教材" : "コース";
+    var warningText = kind === "material"
+      ? "この教材を削除すると、紐づくコースも同時に削除されます。"
+      : "このコースを削除すると、関連する学習履歴も削除されます。";
+
+    var overlay = document.createElement("div");
+    overlay.id = "delete-confirm-modal";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+
+    overlay.innerHTML =
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border-secondary);border-radius:8px;padding:24px;min-width:400px;max-width:500px">' +
+        '<h3 style="margin:0 0 12px;font-size:16px;color:var(--color-text-danger)">' + kindLabel + 'の削除</h3>' +
+        '<p style="font-size:13px;color:var(--color-text-primary);margin:0 0 8px">' +
+          '以下の' + kindLabel + 'を削除しようとしています:' +
+        '</p>' +
+        '<p style="font-size:14px;font-weight:600;color:var(--color-text-primary);margin:0 0 12px;padding:8px;background:var(--color-bg-secondary);border-radius:4px">' +
+          escHtml(name) +
+        '</p>' +
+        '<p style="font-size:12px;color:var(--color-text-danger);margin:0 0 12px">' + warningText + '</p>' +
+        '<p style="font-size:13px;color:var(--color-text-secondary);margin:0 0 8px">' +
+          '削除を確認するには、' + kindLabel + '名を正確に入力してください:' +
+        '</p>' +
+        '<input type="text" id="delete-confirm-input" placeholder="' + escHtml(name) + '" style="width:100%;padding:8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary);box-sizing:border-box;margin-bottom:16px">' +
+        '<div id="delete-confirm-error" style="display:none;color:var(--color-text-danger);font-size:12px;margin-bottom:8px"></div>' +
+        '<div style="display:flex;gap:8px;justify-content:flex-end">' +
+          '<button id="delete-cancel-btn" style="padding:6px 16px;border:1px solid var(--color-border);border-radius:4px;background:none;color:var(--color-text-secondary);cursor:pointer;font-size:13px">キャンセル</button>' +
+          '<button id="delete-exec-btn" style="padding:6px 16px;border:none;border-radius:4px;background:var(--color-text-danger);color:#fff;cursor:pointer;font-size:13px" disabled>削除する</button>' +
+        '</div>' +
+      '</div>';
+
+    document.body.appendChild(overlay);
+
+    var input = document.getElementById("delete-confirm-input");
+    var execBtn = document.getElementById("delete-exec-btn");
+    var errorEl = document.getElementById("delete-confirm-error");
+
+    // Enable button only when name matches
+    input.addEventListener("input", function () {
+      execBtn.disabled = (input.value !== name);
+    });
+
+    // Cancel
+    overlay.addEventListener("click", function (e) {
+      if (e.target === overlay) overlay.remove();
+    });
+    document.getElementById("delete-cancel-btn").addEventListener("click", function () {
+      overlay.remove();
+    });
+
+    // Execute delete
+    execBtn.addEventListener("click", function () {
+      execBtn.disabled = true;
+      execBtn.textContent = "削除中...";
+      errorEl.style.display = "none";
+
+      var endpoint = kind === "material"
+        ? "/admin/materials/" + id
+        : "/admin/courses/" + id;
+
+      apiFetch(endpoint, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm_name: input.value }),
+      })
+        .then(function (res) {
+          if (!res.ok) return res.json().then(function (d) { throw new Error(d.detail || "削除に失敗しました"); });
+          return res.json();
+        })
+        .then(function (data) {
+          overlay.remove();
+          if (kind === "material") {
+            var msg = "教材「" + name + "」を削除しました。";
+            if (data.deleted_courses && data.deleted_courses.length > 0) {
+              msg += " 紐づく " + data.deleted_courses.length + " 件のコースも削除されました。";
+            }
+            showUploadStatus(msg, "success");
+            loadMaterials();
+          } else {
+            showUploadStatus("コース「" + name + "」を削除しました。", "success");
+          }
+        })
+        .catch(function (err) {
+          execBtn.disabled = false;
+          execBtn.textContent = "削除する";
+          errorEl.textContent = err.message || "削除に失敗しました";
+          errorEl.style.display = "block";
+        });
+    });
+
+    // Focus input
+    input.focus();
   }
 
   // ── File Upload ────────────────────────────────────────────────────
@@ -926,19 +1035,30 @@
             } catch (e) { updatedAt = ""; }
           }
           html +=
-            '<div class="import-course-item" data-course-id="' + escHtml(c.id) + '" style="padding:10px 12px;border:1px solid var(--color-border-secondary);border-radius:6px;margin-bottom:8px;cursor:pointer;transition:background 0.15s">' +
+            '<div class="import-course-item" data-course-id="' + escHtml(c.id) + '" style="padding:10px 12px;border:1px solid var(--color-border-secondary);border-radius:6px;margin-bottom:8px;transition:background 0.15s">' +
               '<div style="display:flex;justify-content:space-between;align-items:center">' +
-                '<div>' +
+                '<div class="import-course-select" style="flex:1;cursor:pointer">' +
                   '<div style="font-size:14px;color:var(--color-text-primary);font-weight:500">' + escHtml(c.title) + statusBadge + '</div>' +
                   '<div style="font-size:11px;color:var(--color-text-tertiary);margin-top:2px">ID: ' + escHtml(c.id) + (updatedAt ? ' | 更新: ' + updatedAt : '') + '</div>' +
                 '</div>' +
-                '<span style="font-size:12px;color:var(--color-text-info)">選択 &rarr;</span>' +
+                '<div style="display:flex;gap:8px;align-items:center">' +
+                  '<span class="import-course-select" style="font-size:12px;color:var(--color-text-info);cursor:pointer">選択 &rarr;</span>' +
+                  '<button class="course-delete-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '" style="background:none;border:1px solid var(--color-text-danger);color:var(--color-text-danger);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px">削除</button>' +
+                '</div>' +
               '</div>' +
             '</div>';
         });
         listEl.innerHTML = html;
 
-        // Add click handlers
+        // Add click handlers for import
+        listEl.querySelectorAll(".import-course-select").forEach(function (el) {
+          var item = el.closest(".import-course-item");
+          el.addEventListener("click", function () {
+            var courseId = item.getAttribute("data-course-id");
+            importCourse(courseId);
+            overlay.remove();
+          });
+        });
         listEl.querySelectorAll(".import-course-item").forEach(function (item) {
           item.addEventListener("mouseenter", function () {
             this.style.background = "var(--color-background-tertiary)";
@@ -946,10 +1066,15 @@
           item.addEventListener("mouseleave", function () {
             this.style.background = "";
           });
-          item.addEventListener("click", function () {
-            var courseId = this.getAttribute("data-course-id");
-            importCourse(courseId);
+        });
+        // Add click handlers for course delete
+        listEl.querySelectorAll(".course-delete-btn").forEach(function (btn) {
+          btn.addEventListener("click", function (e) {
+            e.stopPropagation();
+            var cid = this.getAttribute("data-course-id");
+            var title = this.getAttribute("data-course-title");
             overlay.remove();
+            openDeleteConfirmModal("course", cid, title);
           });
         });
       })
