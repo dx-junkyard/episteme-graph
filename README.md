@@ -17,10 +17,10 @@ PDF文献から概念・関係性を自動抽出してナレッジグラフを�
 |---|---|
 | フロントエンド | Vanilla JS SPA + nginx |
 | APIサーバー | FastAPI (Python 3.11) |
-| RDB + ベクトル検索 | PostgreSQL 16 + pgvector (cosine, 3072次元) |
+| RDB + ベクトル検索 | PostgreSQL 16 + pgvector (cosine, 次元数は `LLM_EMBEDDING_DIM` で設定) |
 | グラフDB | Neo4j 5（概念グラフ走査専用） |
 | オブジェクトストレージ | MinIO（S3互換） |
-| LLM | OpenAI API (gpt-4o, text-embedding-3-large) |
+| LLM | OpenAI API または Google Gemini API（`LLM_PROVIDER` で切替） |
 | TTS 音声合成 | OpenAI TTS API (tts-1) |
 | 認証 | JWT (HS256) + bcrypt |
 
@@ -29,31 +29,68 @@ PDF文献から概念・関係性を自動抽出してナレッジグラフを�
 ### 前提条件
 
 - Docker & Docker Compose
-- OpenAI APIキー
+- LLM APIキー（OpenAI または Google Gemini）
 
 ### 起動手順
 
 ```bash
 # 1. 環境変数を設定
 cp .env.example .env
-# .env を編集: OPENAI_API_KEY, ADMIN_PASSWORD, JWT_SECRET を必ず設定
+# .env を編集: LLM_API_KEY (または OPENAI_API_KEY / GEMINI_API_KEY), ADMIN_PASSWORD, JWT_SECRET を必ず設定
+# Gemini を使う場合は LLM_PROVIDER=gemini, LLM_EMBEDDING_DIM=768 なども設定
 
-# 2. 全サービスを起動
+# 2. 全サービスを起動（本番 / CI 用）
 docker compose up -d
 
 # 3. ログ確認（初回はマイグレーション完了を確認）
 docker compose logs -f api-server
 ```
 
-### アクセス先
+> **ネットワーク設計:** 外部に公開されるポートは `frontend:3000` (Nginx) のみです。
+> `api-server` や各種データベースへの直接アクセスは Docker 内部ネットワーク経由のみで行われます。
+
+### アクセス先（本番 / 共通）
 
 | サービス | URL |
 |---|---|
 | 学習UI | http://localhost:3000 |
 | 管理UI | http://localhost:3000/admin.html |
-| API（Swagger） | http://localhost:8001/docs |
+
+### ローカル開発（ngrok + デバッグポート公開）
+
+開発時は `docker-compose.local.yml` を併用することで、DBクライアントや ngrok トンネルが利用できます。
+
+#### 事前準備
+
+1. [ngrok](https://ngrok.com) でアカウント作成・固定ドメインを取得
+2. `.env` に以下を追加:
+
+```
+NGROK_AUTHTOKEN=your_ngrok_auth_token
+NGROK_DOMAIN=your-subdomain.ngrok-free.app
+# ngrok 経由アクセスを CORS で許可（必要な場合）
+CORS_ORIGINS=https://your-subdomain.ngrok-free.app,http://localhost:3000
+```
+
+#### 起動コマンド
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+```
+
+#### アクセス先（ローカル開発時のみ）
+
+| サービス | URL |
+|---|---|
+| 学習UI（ローカル） | http://localhost:3000 |
+| 管理UI（ローカル） | http://localhost:3000/admin.html |
+| 学習UI（ngrok） | https://your-subdomain.ngrok-free.app |
+| ngrok Web UI | http://localhost:4040 |
 | Neo4j Browser | http://localhost:7474 |
 | MinIO コンソール | http://localhost:9001 |
+
+> **セキュリティ注意:** `api-server` のポート（8001）はローカル開発時も直接公開されません。
+> API へのアクセスは必ず Nginx（3000番）経由で行ってください。
 
 ### 初期アカウント
 
@@ -89,7 +126,7 @@ docker compose logs -f api-server
 PDF アップロード
   → PyMuPDF テキスト抽出
   → LLM 仮説駆動型分析 → PaperStructure 生成
-  → テキストチャンク → PostgreSQL pgvector（3072次元）
+  → テキストチャンク → PostgreSQL pgvector（次元数は `LLM_EMBEDDING_DIM` 準拠）
   → 概念ノード・エッジ → Neo4j（REQUIRES / RELATES_TO / CONTAINS）
   → PaperStructure JSON → MinIO（extracted-structures バケット）
 ```
@@ -188,7 +225,7 @@ episteme-graph/
 │   │   ├── embedder.py        # pgvector ベクトル保存・検索
 │   │   ├── chat.py            # RAG チャットロジック
 │   │   ├── lecture.py         # レクチャーシーケンス生成・TTS補助
-│   │   ├── llm.py             # OpenAI クライアント
+│   │   ├── llm.py             # LLM アダプタ（OpenAI / Gemini 切替）
 │   │   ├── storage.py         # MinIO S3互換ストレージ
 │   │   ├── batch.py           # 構造的同型性評価バッチ
 │   │   ├── meta_analyzer.py   # 未回答クエリ → スキーマ拡張提案

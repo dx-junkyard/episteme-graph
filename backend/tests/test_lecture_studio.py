@@ -399,3 +399,326 @@ class TestBatchAudioAsync:
         )
         assert resp.generated == 3
         assert resp.errors == 1
+
+
+# ---------------------------------------------------------------------------
+# TTS プロバイダ選択ロジックのテスト
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateTtsAudioProviderSelection:
+    """generate_tts_audio のプロバイダ選択ロジックの単体テスト。
+
+    core.tts モジュールを直接インポートして、外部 API 呼び出しはモックに置き換える。
+    """
+
+    def _patch_settings(self, monkeypatch, api_key: str, provider: str):
+        """core.tts.get_settings をパッチするヘルパー。"""
+        import types
+        import core.tts as tts_module
+        fake_settings = types.SimpleNamespace(llm_api_key=api_key, llm_provider=provider)
+        monkeypatch.setattr(tts_module, "get_settings", lambda: fake_settings)
+
+    def _register_fake_tts_module(self, monkeypatch, fake_tts_class):
+        """google.cloud.texttospeech の親モジュールも含めて sys.modules に登録するヘルパー。"""
+        import sys
+        import types
+
+        # google, google.cloud の親モジュールが存在しない場合は作成する
+        if "google" not in sys.modules:
+            monkeypatch.setitem(sys.modules, "google", types.ModuleType("google"))
+        if "google.cloud" not in sys.modules:
+            monkeypatch.setitem(sys.modules, "google.cloud", types.ModuleType("google.cloud"))
+        monkeypatch.setitem(sys.modules, "google.cloud.texttospeech", fake_tts_class)
+
+    def test_openai_provider_selected_when_llm_provider_openai(self, monkeypatch):
+        """LLM_PROVIDER=openai のとき OpenAI TTS が選択されること。"""
+        import sys
+        import types
+        import core.tts as tts_module
+
+        class FakeSpeech:
+            def create(self, **kwargs):
+                class FakeResponse:
+                    content = b"fake-mp3-data"
+                return FakeResponse()
+
+        class FakeOpenAIClient:
+            audio = type("FakeAudio", (), {"speech": FakeSpeech()})()
+
+        fake_openai_mod = types.ModuleType("openai")
+        fake_openai_mod.OpenAI = lambda api_key: FakeOpenAIClient()
+        monkeypatch.setitem(sys.modules, "openai", fake_openai_mod)
+
+        self._patch_settings(monkeypatch, "sk-test-key", "openai")
+        result = tts_module.generate_tts_audio("テストテキスト")
+        assert result == b"fake-mp3-data"
+
+    def test_google_provider_selected_when_llm_provider_google(self, monkeypatch):
+        """LLM_PROVIDER=google のとき Google Cloud TTS が選択されること。"""
+        import types
+        import core.tts as tts_module
+
+        fake_tts_response = types.SimpleNamespace(audio_content=b"fake-gcp-mp3")
+
+        class FakeTTSClient:
+            def synthesize_speech(self, **kwargs):
+                return fake_tts_response
+
+        class FakeTextToSpeech:
+            TextToSpeechClient = FakeTTSClient
+
+            class SynthesisInput:
+                def __init__(self, text):
+                    self.text = text
+
+            class VoiceSelectionParams:
+                def __init__(self, **kwargs):
+                    pass
+
+            class AudioConfig:
+                def __init__(self, **kwargs):
+                    pass
+
+            class SsmlVoiceGender:
+                NEUTRAL = "NEUTRAL"
+
+            class AudioEncoding:
+                MP3 = "MP3"
+
+        self._register_fake_tts_module(monkeypatch, FakeTextToSpeech)
+        self._patch_settings(monkeypatch, "", "google")
+        result = tts_module.generate_tts_audio("テストテキスト")
+        assert result == b"fake-gcp-mp3"
+
+    def test_gemini_vertex_provider_selected(self, monkeypatch):
+        """LLM_PROVIDER=gemini-vertex のとき Google Cloud TTS が選択されること。"""
+        import types
+        import core.tts as tts_module
+
+        fake_tts_response = types.SimpleNamespace(audio_content=b"fake-vertex-mp3")
+
+        class FakeTTSClient:
+            def synthesize_speech(self, **kwargs):
+                return fake_tts_response
+
+        class FakeTextToSpeech:
+            TextToSpeechClient = FakeTTSClient
+
+            class SynthesisInput:
+                def __init__(self, text):
+                    self.text = text
+
+            class VoiceSelectionParams:
+                def __init__(self, **kwargs):
+                    pass
+
+            class AudioConfig:
+                def __init__(self, **kwargs):
+                    pass
+
+            class SsmlVoiceGender:
+                NEUTRAL = "NEUTRAL"
+
+            class AudioEncoding:
+                MP3 = "MP3"
+
+        self._register_fake_tts_module(monkeypatch, FakeTextToSpeech)
+        self._patch_settings(monkeypatch, "", "gemini-vertex")
+        result = tts_module.generate_tts_audio("テストテキスト")
+        assert result == b"fake-vertex-mp3"
+
+    def test_gemini_provider_returns_none(self, monkeypatch):
+        """provider=gemini の場合 TTS 非対応として None が返ること。"""
+        import core.tts as tts_module
+
+        self._patch_settings(monkeypatch, "", "gemini")
+        result = tts_module.generate_tts_audio("テストテキスト")
+        assert result is None
+
+    def test_openai_exception_returns_none(self, monkeypatch):
+        """LLM_PROVIDER=openai で OpenAI TTS が例外を送出した場合 None が返ること。"""
+        import sys
+        import types
+        import core.tts as tts_module
+
+        fake_openai_mod = types.ModuleType("openai")
+        fake_openai_mod.OpenAI = lambda api_key: (_ for _ in ()).throw(RuntimeError("connection failed"))
+        monkeypatch.setitem(sys.modules, "openai", fake_openai_mod)
+
+        self._patch_settings(monkeypatch, "sk-broken-key", "openai")
+        result = tts_module.generate_tts_audio("テストテキスト")
+        assert result is None
+
+    def test_google_tts_exception_returns_none(self, monkeypatch):
+        """Google Cloud TTS が例外を送出した場合 None が返ること。"""
+        import core.tts as tts_module
+
+        class BrokenTTSClient:
+            def synthesize_speech(self, **kwargs):
+                raise RuntimeError("GCP TTS connection failed")
+
+        class FakeTextToSpeech:
+            TextToSpeechClient = BrokenTTSClient
+
+            class SynthesisInput:
+                def __init__(self, text):
+                    self.text = text
+
+            class VoiceSelectionParams:
+                def __init__(self, **kwargs):
+                    pass
+
+            class AudioConfig:
+                def __init__(self, **kwargs):
+                    pass
+
+            class SsmlVoiceGender:
+                NEUTRAL = "NEUTRAL"
+
+            class AudioEncoding:
+                MP3 = "MP3"
+
+        self._register_fake_tts_module(monkeypatch, FakeTextToSpeech)
+        self._patch_settings(monkeypatch, "", "google")
+        result = tts_module.generate_tts_audio("テストテキスト")
+        assert result is None
+
+    def test_text_truncated_to_5000_for_google(self, monkeypatch):
+        """Google Cloud TTS へ渡すテキストが 5000 文字以内に切り詰められること。"""
+        import types
+        import core.tts as tts_module
+
+        received_texts = []
+
+        class CaptureTTSClient:
+            def synthesize_speech(self, input, voice, audio_config):
+                received_texts.append(input.text)
+                return types.SimpleNamespace(audio_content=b"ok")
+
+        class FakeTextToSpeech:
+            TextToSpeechClient = CaptureTTSClient
+
+            class SynthesisInput:
+                def __init__(self, text):
+                    self.text = text
+
+            class VoiceSelectionParams:
+                def __init__(self, **kwargs):
+                    pass
+
+            class AudioConfig:
+                def __init__(self, **kwargs):
+                    pass
+
+            class SsmlVoiceGender:
+                NEUTRAL = "NEUTRAL"
+
+            class AudioEncoding:
+                MP3 = "MP3"
+
+        self._register_fake_tts_module(monkeypatch, FakeTextToSpeech)
+        self._patch_settings(monkeypatch, "", "google")
+        long_text = "あ" * 6000
+        result = tts_module.generate_tts_audio(long_text)
+        assert result == b"ok"
+        assert len(received_texts) == 1
+        assert len(received_texts[0]) == 5000
+
+    def test_text_truncated_to_4096_for_openai(self, monkeypatch):
+        """OpenAI TTS へ渡すテキストが 4096 文字以内に切り詰められること。"""
+        import sys
+        import types
+        import core.tts as tts_module
+
+        received_inputs = []
+
+        class FakeSpeech:
+            def create(self, **kwargs):
+                received_inputs.append(kwargs.get("input", ""))
+                class FakeResponse:
+                    content = b"ok"
+                return FakeResponse()
+
+        class FakeOpenAIClient:
+            audio = type("FakeAudio", (), {"speech": FakeSpeech()})()
+
+        fake_openai_mod = types.ModuleType("openai")
+        fake_openai_mod.OpenAI = lambda api_key: FakeOpenAIClient()
+        monkeypatch.setitem(sys.modules, "openai", fake_openai_mod)
+
+        self._patch_settings(monkeypatch, "any-key", "openai")
+        long_text = "a" * 8000
+        result = tts_module.generate_tts_audio(long_text)
+        assert result == b"ok"
+        assert len(received_inputs) == 1
+        assert len(received_inputs[0]) == 4096
+
+    def test_service_disabled_raises_tts_fatal_error(self, monkeypatch):
+        """GCP の SERVICE_DISABLED エラー時に TtsFatalError が送出されること。"""
+        import types
+        import core.tts as tts_module
+        from core.tts import TtsFatalError
+
+        class FakeTTSClient:
+            def synthesize_speech(self, **kwargs):
+                raise RuntimeError(
+                    "403 Cloud Text-to-Speech API has not been used in project foo before or it is disabled. "
+                    "[reason: \"SERVICE_DISABLED\"]"
+                )
+
+        class FakeTextToSpeech:
+            TextToSpeechClient = FakeTTSClient
+
+            class SynthesisInput:
+                def __init__(self, text):
+                    self.text = text
+
+            class VoiceSelectionParams:
+                def __init__(self, **kwargs):
+                    pass
+
+            class AudioConfig:
+                def __init__(self, **kwargs):
+                    pass
+
+            class SsmlVoiceGender:
+                NEUTRAL = "NEUTRAL"
+
+            class AudioEncoding:
+                MP3 = "MP3"
+
+        self._register_fake_tts_module(monkeypatch, FakeTextToSpeech)
+        self._patch_settings(monkeypatch, "", "google")
+
+        import pytest
+        with pytest.raises(TtsFatalError, match="Cloud Text-to-Speech API"):
+            tts_module.generate_tts_audio("テストテキスト")
+
+    def test_openai_auth_error_raises_tts_fatal_error(self, monkeypatch):
+        """OpenAI の 401 認証エラー時に TtsFatalError が送出されること。"""
+        import sys
+        import types
+        import core.tts as tts_module
+        from core.tts import TtsFatalError
+
+        class FakeAuthError(Exception):
+            pass
+
+        class BrokenOpenAIClient:
+            class audio:
+                class speech:
+                    @staticmethod
+                    def create(**kwargs):
+                        raise FakeAuthError("401 Unauthorized - no API key")
+
+        fake_openai_mod = types.ModuleType("openai")
+        fake_openai_mod.OpenAI = lambda api_key: BrokenOpenAIClient()
+        fake_openai_mod.AuthenticationError = FakeAuthError
+        monkeypatch.setitem(sys.modules, "openai", fake_openai_mod)
+
+        self._patch_settings(monkeypatch, "any-key", "openai")
+
+        import pytest
+        with pytest.raises(TtsFatalError, match="認証エラー"):
+            tts_module.generate_tts_audio("テストテキスト")
