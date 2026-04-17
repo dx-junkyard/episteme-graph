@@ -40,6 +40,7 @@ from services import (
 from core.lecture import generate_spoken_text_and_formulas, normalize_to_placeholder_format
 from core.llm import generate_text, get_llm_params
 from core.postgres import get_session as _pg_session
+from core.tts import TtsFatalError, generate_tts_audio
 
 logger = logging.getLogger(__name__)
 
@@ -508,15 +509,6 @@ def _batch_audio_worker(
         "progress": 0,
     })
 
-    try:
-        from core.config import get_settings
-        import openai
-        settings = get_settings()
-        client = openai.OpenAI(api_key=settings.llm_api_key)
-    except Exception as exc:
-        update_background_task(task_id, "failed", error_message=str(exc))
-        return
-
     for chunk in chunks:
         spoken_text = chunk.get("spoken_text")
         if not spoken_text:
@@ -537,15 +529,32 @@ def _batch_audio_worker(
             if cached:
                 skipped += 1
             else:
-                # TTS 生成
+                # TTS 生成（プロバイダは generate_tts_audio が自動選択）
                 try:
-                    response = client.audio.speech.create(
-                        model="tts-1",
-                        voice="alloy",
-                        input=spoken_text[:4096],
-                        response_format="mp3",
-                    )
-                    audio_bytes = response.content
+                    audio_bytes = generate_tts_audio(spoken_text)
+                    if audio_bytes is None:
+                        errors += 1
+                        logger.warning(
+                            "TTS audio generation returned None for chunk %s (no provider available)",
+                            chunk["id"],
+                        )
+                        # 進捗を更新して次のチャンクへ
+                        processed = generated + skipped + errors
+                        update_background_task(task_id, "processing", result_data={
+                            "course_id": course_id,
+                            "total_chunks": total,
+                            "generated": generated,
+                            "skipped": skipped,
+                            "errors": errors,
+                            "progress": int(processed * 100 / total) if total > 0 else 100,
+                        })
+                        continue
+                except TtsFatalError as exc:
+                    # API 未有効化・認証エラーなど恒久的な失敗: 残りチャンクを処理しても無駄なので即終了
+                    error_msg = str(exc)
+                    logger.error("TTS fatal error, aborting task %s: %s", task_id, error_msg)
+                    update_background_task(task_id, "failed", error_message=error_msg)
+                    return
                     duration_ms = max(1000, len(audio_bytes) * 8 // 128)
 
                     session = _pg_session()

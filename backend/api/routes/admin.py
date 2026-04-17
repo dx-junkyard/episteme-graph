@@ -28,6 +28,7 @@ from schemas import (
     CourseBuilderSessionOut,
     CourseBuilderSessionUpdate,
     CreateUserRequest,
+    DeleteConfirmRequest,
     MaterialOut,
     ReextractionJobOut,
     SimulationResponse,
@@ -223,6 +224,115 @@ def get_material(
 
 
 # ---------------------------------------------------------------------------
+# Material Deletion
+# ---------------------------------------------------------------------------
+
+
+@router.delete("/materials/{material_id}")
+def delete_material(
+    material_id: str,
+    body: DeleteConfirmRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """教材を削除する。紐づくコースも同時に削除される。
+
+    confirm_name がタイトルと一致しない場合は 400 を返す。
+    """
+    session = _pg_session()
+    try:
+        # 1) 教材の存在確認 & タイトル照合
+        doc = session.execute(
+            sa_text("""
+                SELECT id, title, filename, source_path
+                FROM documents
+                WHERE source_path = :material_id
+                  AND uploaded_by = CAST(:user_id AS uuid)
+                LIMIT 1
+            """),
+            {"material_id": material_id, "user_id": current_user["id"]},
+        ).fetchone()
+
+        if not doc:
+            raise HTTPException(status_code=404, detail="Material not found")
+
+        doc_id = doc[0]
+        doc_title = doc[1] or doc[2] or ""
+
+        if body.confirm_name != doc_title:
+            raise HTTPException(
+                status_code=400,
+                detail="確認用の名前が一致しません。正確な教材名を入力してください。",
+            )
+
+        # 2) この教材を sources に含むコースを特定して削除
+        course_rows = session.execute(
+            sa_text("""
+                SELECT id FROM learning_courses
+                WHERE user_id = CAST(:user_id AS uuid)
+            """),
+            {"user_id": current_user["id"]},
+        ).fetchall()
+
+        deleted_course_ids: list[str] = []
+        for row in course_rows:
+            course_id = row[0]
+            course_data_row = session.execute(
+                sa_text("SELECT data FROM learning_courses WHERE id = :cid"),
+                {"cid": course_id},
+            ).fetchone()
+            if not course_data_row or not course_data_row[0]:
+                continue
+            data = course_data_row[0] if isinstance(course_data_row[0], dict) else json.loads(course_data_row[0])
+            sources = data.get("sources", [])
+            linked = any(
+                s.get("material_id") == material_id for s in sources if isinstance(s, dict)
+            )
+            if linked:
+                # 関連する学習チャット履歴を削除
+                session.execute(
+                    sa_text("DELETE FROM learning_chat_history WHERE course_id = :cid"),
+                    {"cid": course_id},
+                )
+                # コース削除
+                session.execute(
+                    sa_text("DELETE FROM learning_courses WHERE id = :cid"),
+                    {"cid": course_id},
+                )
+                deleted_course_ids.append(course_id)
+
+        # 3) チャンク削除
+        session.execute(
+            sa_text("DELETE FROM chunks WHERE document_id = :doc_id"),
+            {"doc_id": doc_id},
+        )
+
+        # 4) ドキュメント削除
+        session.execute(
+            sa_text("DELETE FROM documents WHERE id = :doc_id"),
+            {"doc_id": doc_id},
+        )
+
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    logger.info(
+        "Material %s (%s) deleted by user=%s, cascade-deleted courses: %s",
+        material_id, doc_title, current_user["id"], deleted_course_ids,
+    )
+    return {
+        "material_id": material_id,
+        "deleted": True,
+        "deleted_courses": deleted_course_ids,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Background Task Polling (Issue #63)
 # ---------------------------------------------------------------------------
 
@@ -250,6 +360,17 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
 - 不足している前提知識や学習順序の問題を指摘する
 - 各章・トピックが論理的に繋がるよう構成を提案する
 
+**【最重要】ソース文献への厳密な準拠:**
+- 提案するすべての章・トピック・概念は、提供された教材の記述内容に基づかなければならない
+- 教材に記載されていないトピックを「一般的だから」「基礎的だから」という理由で追加してはならない
+- 教材の内容を超えた一般知識に基づく補足は、明示的に「教材外の補足」として区別すること
+- 教材のチャンク（テキスト断片）やナレッジグラフが提供された場合、それらの情報を最大限活用してコースを設計すること
+
+**【重要】段階的構造化の原則:**
+- チャンクの並び順（chunk_index）は教材内の論理的な流れを反映しているため、この順序を尊重してコースの章立てを構成する
+- 前提知識が必要な概念は、その前提となる概念より後の章・トピックに配置する（依存関係に基づいたシラバス）
+- 初学者がその分野に初めて触れることを想定し、専門用語は最初に出現する章で定義・説明するよう構成する
+
 **コース構成のJSONスキーマ (course_draft):**
 生成するコース構成案は以下の形式に従ってください:
 {
@@ -274,9 +395,10 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
 
 **対話の進め方:**
 1. まず教員の要望（テーマ、対象者、使用教材等）をヒアリングする
-2. 初期のコース構成案を提示する
-3. 教員のフィードバックに基づいて構成案を改善する
-4. 前提知識の不足や学習順序の問題があれば指摘する
+2. 提供された教材の内容（ナレッジグラフ、テキストチャンク）を精査し、教材の範囲と構成を把握する
+3. 教材の内容に基づいた初期のコース構成案を提示する
+4. 教員のフィードバックに基づいて構成案を改善する
+5. 前提知識の不足や学習順序の問題があれば指摘する
 
 **重要なルール:**
 - 応答は必ず日本語で行う
@@ -288,6 +410,123 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
   - 例: 第2章のトピックは第1章のトピックタイトルを prerequisites に入れる
   - 最初のトピックや前提知識不要なトピックは prerequisites を空配列 [] にする
 - sources フィールドは常に空配列 [] のままにすること（教材はシステムが自動的に設定する）"""
+
+
+# ---------------------------------------------------------------------------
+# Course Builder: Material Context Builder
+# ---------------------------------------------------------------------------
+
+# チャンクテキストのサンプリング上限（1教材あたり）
+_MAX_CHUNK_CHARS_PER_MATERIAL = 4000
+
+
+def _build_material_context(
+    material_ids: list[str],
+    pg_session_factory=None,
+) -> str | None:
+    """選択された教材のナレッジグラフとチャンクテキストからコンテキスト文字列を構築する。
+
+    Returns None if no usable context could be built.
+    """
+    if not material_ids:
+        return None
+
+    _get_pg = pg_session_factory or _pg_session
+    session = _get_pg()
+    try:
+        # --- 1) ドキュメントメタデータ + knowledge_graph を取得 ---
+        placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
+        params: dict = {}
+        for i, mid in enumerate(material_ids):
+            params[f"mid_{i}"] = mid
+
+        doc_rows = session.execute(
+            sa_text(f"""
+                SELECT source_path, title, filename, knowledge_graph
+                FROM documents
+                WHERE source_path IN ({placeholders}) AND status = 'completed'
+            """),
+            params,
+        ).fetchall()
+
+        if not doc_rows:
+            return None
+
+        # --- 2) チャンクテキストを取得 (chunk_index 順) ---
+        chunk_rows = session.execute(
+            sa_text(f"""
+                SELECT material_id, chunk_index, chapter, section, text
+                FROM chunks
+                WHERE material_id IN ({placeholders})
+                ORDER BY material_id, chunk_index
+            """),
+            params,
+        ).fetchall()
+    finally:
+        session.close()
+
+    # --- 3) コンテキスト文字列を組み立て ---
+    sections: list[str] = []
+    sections.append("## 教材の内容詳細\n以下は選択された教材から抽出された詳細情報です。"
+                     "コース設計はこの内容に基づいて行ってください。\n")
+
+    for doc in doc_rows:
+        mid = doc[0] or ""
+        title = doc[1] or doc[2] or ""
+        kg = doc[3] if doc[3] and isinstance(doc[3], dict) else {}
+
+        sections.append(f"### 教材: {title}")
+
+        # ナレッジグラフの概要
+        if kg.get("summary"):
+            sections.append(f"**概要:** {kg['summary']}")
+
+        if kg.get("domain"):
+            sections.append(f"**分野:** {kg['domain']}")
+
+        # 主要概念
+        concepts = kg.get("concepts", [])
+        if concepts:
+            concept_lines = []
+            for c in concepts:
+                name = c.get("name", "") if isinstance(c, dict) else str(c)
+                desc = c.get("description", "") if isinstance(c, dict) else ""
+                ctype = c.get("type", "") if isinstance(c, dict) else ""
+                line = f"- {name}"
+                if ctype:
+                    line += f" ({ctype})"
+                if desc:
+                    line += f": {desc}"
+                concept_lines.append(line)
+            sections.append("**主要概念:**\n" + "\n".join(concept_lines))
+
+        # チャンクテキストのサンプリング
+        material_chunks = [r for r in chunk_rows if r[0] == mid]
+        if material_chunks:
+            sections.append("**教材テキスト（抜粋）:**")
+            char_budget = _MAX_CHUNK_CHARS_PER_MATERIAL
+            for chunk in material_chunks:
+                if char_budget <= 0:
+                    sections.append("... (以降省略)")
+                    break
+                idx = chunk[1]
+                chapter = chunk[2] or ""
+                section_ = chunk[3] or ""
+                text = chunk[4] or ""
+                header = f"[チャンク {idx}]"
+                if chapter:
+                    header += f" {chapter}"
+                if section_:
+                    header += f" / {section_}"
+                snippet = text[:char_budget]
+                if len(text) > char_budget:
+                    snippet += "..."
+                sections.append(f"{header}\n{snippet}")
+                char_budget -= len(snippet)
+
+        sections.append("")  # blank line separator
+
+    return "\n".join(sections)
 
 
 @router.post(
@@ -303,41 +542,21 @@ def course_builder_chat(
         {"role": "system", "content": _COURSE_BUILDER_SYSTEM_PROMPT},
     ]
 
-    # 選択教材のタイトル・分野のみをコンテキストとして渡す（material_id は含めない）
+    # 選択教材のナレッジグラフ・チャンクテキストを含む詳細コンテキストを注入
     if body.selected_material_ids:
         try:
-            pg_session = _pg_session()
-            try:
-                placeholders = ", ".join(f":mid_{i}" for i in range(len(body.selected_material_ids)))
-                params: dict = {}
-                for i, mid in enumerate(body.selected_material_ids):
-                    params[f"mid_{i}"] = mid
-                records = pg_session.execute(
-                    sa_text(f"""
-                        SELECT title, filename, knowledge_graph
-                        FROM documents
-                        WHERE source_path IN ({placeholders}) AND status = 'completed'
-                    """),
-                    params,
-                ).fetchall()
-            finally:
-                pg_session.close()
-
-            if records:
-                materials_ctx = "## 使用する教材:\n"
-                for r in records:
-                    title = r[0] or r[1] or ""
-                    materials_ctx += f"- {title}"
-                    if r[2] and isinstance(r[2], dict) and r[2].get("domain"):
-                        materials_ctx += f" (分野: {r[2]['domain']})"
-                    materials_ctx += "\n"
+            material_context = _build_material_context(body.selected_material_ids)
+            if material_context:
                 messages.append({
                     "role": "user",
-                    "content": materials_ctx + "\n上記の教材を使ってコースを設計してください。",
+                    "content": material_context
+                        + "\n\n上記の教材内容に基づいてコースを設計してください。"
+                        "教材に記載されている内容の範囲内で、段階的に学べるコース構成を提案してください。",
                 })
                 messages.append({
                     "role": "assistant",
-                    "content": "承知しました。これらの教材を踏まえてコース設計を支援します。",
+                    "content": "承知しました。提供された教材の内容を精査し、"
+                        "教材の記述に基づいたコース設計を支援します。",
                 })
         except Exception:
             logger.warning("Failed to load selected materials context for course builder", exc_info=True)
@@ -758,6 +977,63 @@ def publish_course(
         raise HTTPException(status_code=404, detail="Course not found")
     logger.info("Course %s published by user=%s", course_id, current_user["id"])
     return {"course_id": course_id, "is_published": True}
+
+
+@router.delete("/courses/{course_id}")
+def delete_course(
+    course_id: str,
+    body: DeleteConfirmRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """コースを削除する。
+
+    confirm_name がコースタイトルと一致しない場合は 400 を返す。
+    """
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("""
+                SELECT id, title FROM learning_courses
+                WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
+                LIMIT 1
+            """),
+            {"course_id": course_id, "user_id": current_user["id"]},
+        ).fetchone()
+
+        if not record:
+            raise HTTPException(status_code=404, detail="Course not found")
+
+        course_title = record[1] or ""
+        if body.confirm_name != course_title:
+            raise HTTPException(
+                status_code=400,
+                detail="確認用の名前が一致しません。正確なコース名を入力してください。",
+            )
+
+        # 関連する学習チャット履歴を削除
+        session.execute(
+            sa_text("DELETE FROM learning_chat_history WHERE course_id = :cid"),
+            {"cid": course_id},
+        )
+        # コース削除
+        session.execute(
+            sa_text("""
+                DELETE FROM learning_courses
+                WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
+            """),
+            {"course_id": course_id, "user_id": current_user["id"]},
+        )
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    logger.info("Course %s (%s) deleted by user=%s", course_id, course_title, current_user["id"])
+    return {"course_id": course_id, "deleted": True}
 
 
 @router.get("/courses/{course_id}/unanswered-queries")
