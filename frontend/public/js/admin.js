@@ -393,6 +393,7 @@
           "info"
         );
         loadMaterials();
+        loadMaterialsForSelection();
         if (data.task_id) {
           startTaskPolling(data.task_id, file.name);
         } else {
@@ -437,6 +438,7 @@
             );
             disableUploadUI(false);
             loadMaterials();
+            loadMaterialsForSelection();
           } else if (task.status === "failed") {
             stopTaskPolling(taskId);
             var errMsg = task.error_message || "不明なエラー";
