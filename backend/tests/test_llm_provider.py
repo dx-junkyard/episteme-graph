@@ -82,8 +82,8 @@ class TestMessageRoleMapping:
         ])
         assert system == "sys1\n\nsys2"
         assert [m["role"] for m in contents] == ["user", "model", "user"]
-        assert contents[0]["parts"] == ["hi"]
-        assert contents[1]["parts"] == ["hello"]
+        assert contents[0]["parts"] == [{"text": "hi"}]
+        assert contents[1]["parts"] == [{"text": "hello"}]
 
 
 class TestProviderBranching:
