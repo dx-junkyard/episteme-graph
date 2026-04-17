@@ -549,12 +549,7 @@ def _batch_audio_worker(
                             "progress": int(processed * 100 / total) if total > 0 else 100,
                         })
                         continue
-                except TtsFatalError as exc:
-                    # API 未有効化・認証エラーなど恒久的な失敗: 残りチャンクを処理しても無駄なので即終了
-                    error_msg = str(exc)
-                    logger.error("TTS fatal error, aborting task %s: %s", task_id, error_msg)
-                    update_background_task(task_id, "failed", error_message=error_msg)
-                    return
+
                     duration_ms = max(1000, len(audio_bytes) * 8 // 128)
 
                     session = _pg_session()
@@ -588,6 +583,12 @@ def _batch_audio_worker(
 
                     # レート制限対策: チャンク間に 0.5 秒の遅延
                     time.sleep(0.5)
+                except TtsFatalError as exc:
+                    # API 未有効化・認証エラーなど恒久的な失敗: 残りチャンクを処理しても無駄なので即終了
+                    error_msg = str(exc)
+                    logger.error("TTS fatal error, aborting task %s: %s", task_id, error_msg)
+                    update_background_task(task_id, "failed", error_message=error_msg)
+                    return
 
                 except Exception:
                     errors += 1
