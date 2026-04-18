@@ -28,6 +28,13 @@ POST /api/admin/course-builder/chat                             コース構築A
 PUT  /api/admin/courses/{course_id}/publish                     コースを学生に公開
 POST /api/admin/users/student                                   学生アカウント作成 (TEACHER)
 POST /api/admin/users/teacher                                   教員アカウント作成 (SYSTEM_ADMIN)
+POST /api/groups                                                グループ作成
+GET  /api/groups                                                自グループ一覧
+GET  /api/groups/{group_id}                                     グループ詳細
+POST /api/groups/{group_id}/members                             ユーザーを直接招待
+POST /api/groups/join-by-code                                   招待コードで参加
+GET  /api/me/invitations                                        自分宛ての招待一覧
+POST /api/me/invitations/{inv}/accept                           招待を承諾
 GET  /healthz                                                   ヘルスチェック
 """
 
@@ -44,7 +51,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text as sa_text
 
 from dependencies import _hash_password
-from routes import auth, learning, admin, lecture
+from routes import auth, learning, admin, lecture, groups
 from core.config import get_settings as _get_settings
 from core.postgres import get_session as _pg_session, check_connection as _pg_check
 
@@ -232,8 +239,80 @@ def _run_migrations() -> None:
         session.execute(sa_text("DROP INDEX IF EXISTS idx_chunks_arxiv"))
         session.execute(sa_text("ALTER TABLE chunks DROP COLUMN IF EXISTS arxiv_id"))
 
+        # Migration 009: グループ + 資料開示範囲 (Issue #121)
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS groups (
+                id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                name         TEXT NOT NULL,
+                description  TEXT NOT NULL DEFAULT '',
+                invite_code  TEXT UNIQUE,
+                created_by   UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_groups_created_by ON groups(created_by)"
+        ))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS group_members (
+                id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                group_id   UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                role       TEXT NOT NULL DEFAULT 'member'
+                              CHECK (role IN ('admin', 'member')),
+                joined_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE(group_id, user_id)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(user_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_group_members_group ON group_members(group_id)"
+        ))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS group_invitations (
+                id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                group_id         UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                invitee_user_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                inviter_user_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                status           TEXT NOT NULL DEFAULT 'pending'
+                                    CHECK (status IN ('pending', 'accepted', 'declined', 'revoked')),
+                created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+                responded_at     TIMESTAMPTZ,
+                UNIQUE(group_id, invitee_user_id, status)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_invitations_invitee ON group_invitations(invitee_user_id, status)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_invitations_group ON group_invitations(group_id)"
+        ))
+        for ddl in [
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'private'",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS group_id UUID REFERENCES groups(id) ON DELETE SET NULL",
+            "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'private'",
+            "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS group_id UUID REFERENCES groups(id) ON DELETE SET NULL",
+            "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT ''",
+        ]:
+            session.execute(sa_text(ddl))
+        # 既存の公開テンプレートを 'public' 扱いに移行（後方互換）
+        session.execute(sa_text("""
+            UPDATE learning_courses
+                SET visibility = 'public'
+                WHERE is_published = true AND is_template = true AND visibility = 'private'
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_documents_visibility ON documents(visibility)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_courses_visibility ON learning_courses(visibility)"
+        ))
+
         session.commit()
-        logger.info("Migrations (002-007) applied successfully.")
+        logger.info("Migrations (002-009) applied successfully.")
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema
@@ -316,6 +395,7 @@ app.include_router(auth.router)
 app.include_router(learning.router)
 app.include_router(admin.router)
 app.include_router(lecture.router)
+app.include_router(groups.router)
 
 
 @app.get("/healthz")

@@ -36,6 +36,7 @@ from schemas import (
     SchemaTypeCreateRequest,
     SchemaTypeOut,
     UserOut,
+    VisibilityUpdateRequest,
 )
 from services import (
     _material_lock,
@@ -44,6 +45,7 @@ from services import (
     get_background_task,
     process_material_background,
     save_cb_session,
+    user_can_access_group,
 )
 from core.llm import generate_text
 from core.meta_analyzer import (
@@ -149,7 +151,8 @@ def list_materials(
     try:
         records = session.execute(
             sa_text("""
-                SELECT source_path, filename, title, status, created_at, knowledge_graph
+                SELECT source_path, filename, title, status, created_at, knowledge_graph,
+                       COALESCE(visibility, 'private'), group_id
                 FROM documents
                 WHERE uploaded_by = CAST(:user_id AS uuid) AND filename IS NOT NULL
                 ORDER BY created_at DESC
@@ -177,6 +180,8 @@ def list_materials(
             status=status,
             uploaded_at=uploaded_at,
             knowledge_graph=kg,
+            visibility=r[6] or "private",
+            group_id=str(r[7]) if r[7] else None,
         ))
 
     return materials
@@ -192,7 +197,8 @@ def get_material(
     try:
         record = session.execute(
             sa_text("""
-                SELECT source_path, filename, title, status, created_at, knowledge_graph
+                SELECT source_path, filename, title, status, created_at, knowledge_graph,
+                       COALESCE(visibility, 'private'), group_id
                 FROM documents
                 WHERE uploaded_by = CAST(:user_id AS uuid) AND source_path = :material_id
                 LIMIT 1
@@ -220,7 +226,118 @@ def get_material(
         status=status,
         uploaded_at=uploaded_at,
         knowledge_graph=kg,
+        visibility=record[6] or "private",
+        group_id=str(record[7]) if record[7] else None,
     )
+
+
+@router.put("/materials/{material_id}/visibility")
+def update_material_visibility(
+    material_id: str,
+    body: VisibilityUpdateRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """教材の開示範囲を更新する。"""
+    if body.visibility not in ("public", "group", "private"):
+        raise HTTPException(status_code=400, detail=f"Invalid visibility: {body.visibility}")
+    if body.visibility == "group":
+        if not body.group_id:
+            raise HTTPException(status_code=400, detail="visibility='group' requires group_id")
+        if not user_can_access_group(current_user["id"], body.group_id):
+            raise HTTPException(status_code=403, detail="指定されたグループに参加していません")
+
+    session = _pg_session()
+    try:
+        result = session.execute(
+            sa_text("""
+                UPDATE documents
+                SET visibility = :visibility,
+                    group_id = CAST(:group_id AS uuid),
+                    updated_at = now()
+                WHERE source_path = :material_id
+                  AND uploaded_by = CAST(:user_id AS uuid)
+                RETURNING id
+            """),
+            {
+                "visibility": body.visibility,
+                "group_id": body.group_id if body.visibility == "group" else None,
+                "material_id": material_id,
+                "user_id": current_user["id"],
+            },
+        ).fetchone()
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Material not found")
+    logger.info(
+        "Material %s visibility=%s group=%s by user=%s",
+        material_id, body.visibility, body.group_id, current_user["id"],
+    )
+    return {
+        "material_id": material_id,
+        "visibility": body.visibility,
+        "group_id": body.group_id if body.visibility == "group" else None,
+    }
+
+
+@router.put("/courses/{course_id}/visibility")
+def update_course_visibility(
+    course_id: str,
+    body: VisibilityUpdateRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """コースの開示範囲を更新する。"""
+    if body.visibility not in ("public", "group", "private"):
+        raise HTTPException(status_code=400, detail=f"Invalid visibility: {body.visibility}")
+    if body.visibility == "group":
+        if not body.group_id:
+            raise HTTPException(status_code=400, detail="visibility='group' requires group_id")
+        if not user_can_access_group(current_user["id"], body.group_id):
+            raise HTTPException(status_code=403, detail="指定されたグループに参加していません")
+
+    session = _pg_session()
+    try:
+        result = session.execute(
+            sa_text("""
+                UPDATE learning_courses
+                SET visibility = :visibility,
+                    group_id = CAST(:group_id AS uuid),
+                    is_published = CASE WHEN :visibility = 'public' THEN true ELSE is_published END,
+                    is_template = CASE WHEN :visibility = 'public' THEN true ELSE is_template END,
+                    updated_at = now()
+                WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
+                RETURNING id
+            """),
+            {
+                "visibility": body.visibility,
+                "group_id": body.group_id if body.visibility == "group" else None,
+                "course_id": course_id,
+                "user_id": current_user["id"],
+            },
+        ).fetchone()
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Course not found")
+    logger.info(
+        "Course %s visibility=%s group=%s by user=%s",
+        course_id, body.visibility, body.group_id, current_user["id"],
+    )
+    return {
+        "course_id": course_id,
+        "visibility": body.visibility,
+        "group_id": body.group_id if body.visibility == "group" else None,
+    }
 
 
 # ---------------------------------------------------------------------------

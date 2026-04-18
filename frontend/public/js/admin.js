@@ -2416,6 +2416,304 @@
   }
 
   // ── Init ───────────────────────────────────────────────────────────
+  // ── Groups Management (Issue #121) ─────────────────────────────────
+  var _groupsState = { list: [], selectedId: null };
+
+  function initGroups() {
+    document.getElementById("groups-refresh").addEventListener("click", loadGroups);
+    document.getElementById("groups-create-btn").addEventListener("click", createGroup);
+    document.getElementById("groups-join-btn").addEventListener("click", joinByCode);
+    loadGroups();
+    loadMyInvitations();
+  }
+
+  function setGroupsStatus(msg, kind) {
+    var el = document.getElementById("groups-status");
+    if (!el) return;
+    if (!msg) { el.style.display = "none"; return; }
+    el.style.display = "block";
+    el.textContent = msg;
+    el.className = "upload-status upload-status-" + (kind || "info");
+  }
+
+  function loadGroups() {
+    apiFetch("/groups")
+      .then(function (res) { return res.json(); })
+      .then(function (list) {
+        _groupsState.list = list || [];
+        renderGroupsList();
+        // 選択解除されていたら先頭を選ぶ
+        if (_groupsState.list.length && !_groupsState.selectedId) {
+          selectGroup(_groupsState.list[0].id);
+        } else if (_groupsState.selectedId) {
+          selectGroup(_groupsState.selectedId);
+        }
+      })
+      .catch(function (e) { setGroupsStatus("グループ一覧の取得に失敗しました", "error"); });
+  }
+
+  function renderGroupsList() {
+    var el = document.getElementById("groups-list");
+    if (!_groupsState.list.length) {
+      el.innerHTML = '<div style="padding:12px;color:var(--color-text-tertiary);font-size:13px">まだグループに参加していません</div>';
+      return;
+    }
+    var html = "";
+    _groupsState.list.forEach(function (g) {
+      var badge = g.my_role === "admin" ? '<span style="color:var(--color-text-success);font-size:11px;margin-left:4px">(admin)</span>' : "";
+      var on = g.id === _groupsState.selectedId ? 'background:var(--color-bg-tertiary);' : "";
+      html += '<div data-gid="' + escHtml(g.id) + '" class="groups-item" style="padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--color-border);' + on + '">' +
+        '<div style="font-size:13px">' + escHtml(g.name) + badge + '</div>' +
+        '<div style="font-size:11px;color:var(--color-text-tertiary)">メンバー ' + (g.member_count || 0) + "人</div>" +
+        "</div>";
+    });
+    el.innerHTML = html;
+    var items = el.querySelectorAll(".groups-item");
+    for (var i = 0; i < items.length; i++) {
+      items[i].addEventListener("click", function () {
+        selectGroup(this.getAttribute("data-gid"));
+      });
+    }
+  }
+
+  function selectGroup(groupId) {
+    _groupsState.selectedId = groupId;
+    renderGroupsList();
+    apiFetch("/groups/" + encodeURIComponent(groupId))
+      .then(function (res) {
+        if (!res.ok) throw new Error("failed");
+        return res.json();
+      })
+      .then(renderGroupDetail)
+      .catch(function () {
+        document.getElementById("groups-detail").innerHTML =
+          '<p style="color:var(--color-text-tertiary)">取得に失敗しました</p>';
+      });
+  }
+
+  function renderGroupDetail(g) {
+    var isAdmin = g.my_role === "admin";
+    var members = (g.members || []).map(function (m) {
+      var actions = "";
+      if (isAdmin && m.role !== "admin") {
+        actions = '<button class="admin-action-btn groups-remove-btn" data-uid="' + escHtml(m.user_id) + '" style="font-size:11px">除名</button>';
+      } else if (!isAdmin && m.user_id === _meUserId()) {
+        actions = '<button class="admin-action-btn groups-leave-btn" style="font-size:11px">退会</button>';
+      }
+      return '<tr><td>' + escHtml(m.username) + '</td><td>' + escHtml(m.email || "") + '</td><td>' + escHtml(m.role) + '</td><td>' + actions + '</td></tr>';
+    }).join("");
+
+    var inviteCodeBlock = "";
+    if (isAdmin && g.invite_code) {
+      inviteCodeBlock =
+        '<div style="margin:8px 0">' +
+        '<strong>招待コード:</strong> <code style="font-size:13px;padding:2px 6px;background:var(--color-bg-tertiary);border-radius:3px">' + escHtml(g.invite_code) + '</code>' +
+        ' <button id="groups-rotate-btn" class="admin-action-btn" style="font-size:11px;margin-left:8px">再発行</button>' +
+        "</div>";
+    }
+
+    var inviteByUser = "";
+    if (isAdmin) {
+      inviteByUser =
+        '<div style="margin-top:16px;padding:12px;background:var(--color-bg-secondary);border-radius:4px">' +
+        '<h4 style="font-size:13px;margin:0 0 8px 0">ユーザーを直接招待</h4>' +
+        '<div style="display:flex;gap:8px">' +
+        '<input type="text" id="groups-invite-username" placeholder="ユーザー名" style="flex:1;padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">' +
+        '<button id="groups-invite-btn" class="admin-action-btn">招待</button>' +
+        "</div></div>";
+    }
+
+    var dangerZone = "";
+    if (isAdmin) {
+      dangerZone =
+        '<div style="margin-top:24px">' +
+        '<button id="groups-delete-btn" class="admin-action-btn" style="background:#dc2626;color:#fff">グループを削除</button>' +
+        "</div>";
+    }
+
+    document.getElementById("groups-detail").innerHTML =
+      '<h3 style="margin:0 0 4px 0">' + escHtml(g.name) + "</h3>" +
+      '<p style="color:var(--color-text-secondary);font-size:13px;margin:0 0 8px 0">' + escHtml(g.description || "") + "</p>" +
+      inviteCodeBlock +
+      '<h4 style="font-size:13px;margin:16px 0 8px 0">メンバー (' + (g.members || []).length + ")</h4>" +
+      '<table class="admin-table"><thead><tr><th>ユーザー名</th><th>メール</th><th>ロール</th><th></th></tr></thead><tbody>' +
+      members + "</tbody></table>" +
+      inviteByUser +
+      dangerZone;
+
+    if (isAdmin) {
+      var rot = document.getElementById("groups-rotate-btn");
+      if (rot) rot.addEventListener("click", function () { rotateInviteCode(g.id); });
+      var invBtn = document.getElementById("groups-invite-btn");
+      if (invBtn) invBtn.addEventListener("click", function () {
+        var u = document.getElementById("groups-invite-username").value.trim();
+        if (!u) return;
+        inviteUser(g.id, u);
+      });
+      var del = document.getElementById("groups-delete-btn");
+      if (del) del.addEventListener("click", function () {
+        if (!confirm("グループ「" + g.name + "」を削除します。よろしいですか？")) return;
+        deleteGroup(g.id);
+      });
+      var removeBtns = document.querySelectorAll(".groups-remove-btn");
+      for (var i = 0; i < removeBtns.length; i++) {
+        removeBtns[i].addEventListener("click", function () {
+          removeMember(g.id, this.getAttribute("data-uid"));
+        });
+      }
+    } else {
+      var leave = document.querySelector(".groups-leave-btn");
+      if (leave) leave.addEventListener("click", function () {
+        if (!confirm("グループを退会しますか？")) return;
+        removeMember(g.id, _meUserId());
+      });
+    }
+  }
+
+  function _meUserId() {
+    var decoded = parseJwtPayload(state.token);
+    return decoded ? (decoded.sub || "") : "";
+  }
+
+  function createGroup() {
+    var name = document.getElementById("groups-new-name").value.trim();
+    var desc = document.getElementById("groups-new-desc").value.trim();
+    if (!name) { setGroupsStatus("グループ名を入力してください", "error"); return; }
+    apiFetch("/groups", {
+      method: "POST",
+      body: JSON.stringify({ name: name, description: desc }),
+    })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw d; });
+        return res.json();
+      })
+      .then(function (g) {
+        setGroupsStatus("グループ「" + g.name + "」を作成しました。招待コード: " + g.invite_code, "success");
+        document.getElementById("groups-new-name").value = "";
+        document.getElementById("groups-new-desc").value = "";
+        _groupsState.selectedId = g.id;
+        loadGroups();
+      })
+      .catch(function (e) { setGroupsStatus("作成失敗: " + (e.detail || "不明なエラー"), "error"); });
+  }
+
+  function joinByCode() {
+    var code = document.getElementById("groups-join-code").value.trim();
+    if (!code) return;
+    apiFetch("/groups/join-by-code", {
+      method: "POST",
+      body: JSON.stringify({ invite_code: code }),
+    })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw d; });
+        return res.json();
+      })
+      .then(function (g) {
+        setGroupsStatus("グループ「" + g.name + "」に参加しました。", "success");
+        document.getElementById("groups-join-code").value = "";
+        _groupsState.selectedId = g.id;
+        loadGroups();
+      })
+      .catch(function (e) { setGroupsStatus("参加失敗: " + (e.detail || "不明なエラー"), "error"); });
+  }
+
+  function rotateInviteCode(gid) {
+    apiFetch("/groups/" + encodeURIComponent(gid) + "/invite-code/rotate", { method: "POST" })
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        setGroupsStatus("招待コードを再発行しました: " + data.invite_code, "success");
+        selectGroup(gid);
+      });
+  }
+
+  function inviteUser(gid, username) {
+    apiFetch("/groups/" + encodeURIComponent(gid) + "/members", {
+      method: "POST",
+      body: JSON.stringify({ username: username }),
+    })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw d; });
+        return res.json();
+      })
+      .then(function () {
+        setGroupsStatus("ユーザー「" + username + "」を招待しました。", "success");
+        document.getElementById("groups-invite-username").value = "";
+        selectGroup(gid);
+      })
+      .catch(function (e) { setGroupsStatus("招待失敗: " + (e.detail || "不明なエラー"), "error"); });
+  }
+
+  function removeMember(gid, uid) {
+    apiFetch("/groups/" + encodeURIComponent(gid) + "/members/" + encodeURIComponent(uid), { method: "DELETE" })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw d; });
+        setGroupsStatus("メンバーを削除しました。", "success");
+        loadGroups();
+      })
+      .catch(function (e) { setGroupsStatus("削除失敗: " + (e.detail || "不明なエラー"), "error"); });
+  }
+
+  function deleteGroup(gid) {
+    apiFetch("/groups/" + encodeURIComponent(gid), { method: "DELETE" })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw d; });
+        setGroupsStatus("グループを削除しました。", "success");
+        _groupsState.selectedId = null;
+        document.getElementById("groups-detail").innerHTML =
+          '<p style="color:var(--color-text-tertiary)">グループを選択してください</p>';
+        loadGroups();
+      })
+      .catch(function (e) { setGroupsStatus("削除失敗: " + (e.detail || "不明なエラー"), "error"); });
+  }
+
+  function loadMyInvitations() {
+    apiFetch("/me/invitations")
+      .then(function (res) { return res.json(); })
+      .then(function (list) {
+        var el = document.getElementById("groups-my-invitations");
+        if (!list || !list.length) { el.innerHTML = ""; return; }
+        var html = '<div style="padding:12px;background:var(--color-bg-secondary);border:1px solid var(--color-border);border-radius:4px;margin-bottom:12px">' +
+          '<h4 style="font-size:13px;margin:0 0 8px 0">未承諾の招待 (' + list.length + ")</h4>";
+        list.forEach(function (inv) {
+          html += '<div style="display:flex;align-items:center;gap:8px;padding:4px 0">' +
+            '<span style="flex:1;font-size:13px">グループ「' + escHtml(inv.group_name) + '」 (招待者: ' + escHtml(inv.inviter_username) + ")</span>" +
+            '<button class="admin-action-btn groups-inv-accept" data-id="' + escHtml(inv.id) + '" style="font-size:11px;background:var(--color-text-success);color:#fff">承諾</button>' +
+            '<button class="admin-action-btn groups-inv-decline" data-id="' + escHtml(inv.id) + '" style="font-size:11px">辞退</button>' +
+            "</div>";
+        });
+        html += "</div>";
+        el.innerHTML = html;
+        var accepts = el.querySelectorAll(".groups-inv-accept");
+        for (var i = 0; i < accepts.length; i++) {
+          accepts[i].addEventListener("click", function () { respondInvitation(this.getAttribute("data-id"), "accept"); });
+        }
+        var declines = el.querySelectorAll(".groups-inv-decline");
+        for (var j = 0; j < declines.length; j++) {
+          declines[j].addEventListener("click", function () { respondInvitation(this.getAttribute("data-id"), "decline"); });
+        }
+      });
+  }
+
+  function respondInvitation(invId, action) {
+    apiFetch("/me/invitations/" + encodeURIComponent(invId) + "/" + action, { method: "POST" })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw d; });
+        setGroupsStatus("招待を" + (action === "accept" ? "承諾" : "辞退") + "しました。", "success");
+        loadMyInvitations();
+        loadGroups();
+      })
+      .catch(function (e) { setGroupsStatus("操作失敗: " + (e.detail || "不明なエラー"), "error"); });
+  }
+
+  function parseJwtPayload(token) {
+    try {
+      var parts = token.split(".");
+      if (parts.length !== 3) return null;
+      var payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+      return JSON.parse(atob(payload));
+    } catch (e) { return null; }
+  }
+
   function initApp() {
     // Role-based access control
     if (!setupRoleBasedUI()) return;
@@ -2431,6 +2729,7 @@
     initSchemaProposals();
     initSchemaEvolution();
     initUserManagement();
+    initGroups();
     initLogout();
     loadMaterials();
 
