@@ -364,7 +364,8 @@ _REWRITE_PROMPT = """あなたは大学講義の音声原稿を改善するア�
 - ソーステキストに限定されず、教員が指示する内容を反映させてください
 - display_text では数式を `[[FORMULA_0]]`, `[[FORMULA_1]]` のようなプレースホルダーで表現してください。`$...$` や `$$...$$` は使わないでください
 - spoken_text では LaTeX 数式を自然言語に変換してください（例: `E = mc^2` → 「Eイコールmcの二乗」）
-- 自然な日本語の講義調で書いてください
+- ソーステキストが日本語の場合、自然な日本語の講義調で書いてください。
+- ソーステキストが英語の場合、無理にカタカナや全角に変換せず、**自然な半角英語の文章（Natural English sentences）**として書いてください
 - 数式メタデータも更新してください
 
 ## ソーステキスト:
@@ -549,12 +550,7 @@ def _batch_audio_worker(
                             "progress": int(processed * 100 / total) if total > 0 else 100,
                         })
                         continue
-                except TtsFatalError as exc:
-                    # API 未有効化・認証エラーなど恒久的な失敗: 残りチャンクを処理しても無駄なので即終了
-                    error_msg = str(exc)
-                    logger.error("TTS fatal error, aborting task %s: %s", task_id, error_msg)
-                    update_background_task(task_id, "failed", error_message=error_msg)
-                    return
+
                     duration_ms = max(1000, len(audio_bytes) * 8 // 128)
 
                     session = _pg_session()
@@ -588,6 +584,12 @@ def _batch_audio_worker(
 
                     # レート制限対策: チャンク間に 0.5 秒の遅延
                     time.sleep(0.5)
+                except TtsFatalError as exc:
+                    # API 未有効化・認証エラーなど恒久的な失敗: 残りチャンクを処理しても無駄なので即終了
+                    error_msg = str(exc)
+                    logger.error("TTS fatal error, aborting task %s: %s", task_id, error_msg)
+                    update_background_task(task_id, "failed", error_message=error_msg)
+                    return
 
                 except Exception:
                     errors += 1

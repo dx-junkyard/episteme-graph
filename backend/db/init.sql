@@ -85,7 +85,7 @@ CREATE TABLE chunks (
                         CHECK (chunk_type IN ('prose', 'equation', 'figure_caption',
                                               'table', 'definition', 'theorem', 'example')),
     latex_formulas  TEXT[] DEFAULT '{}',
-    embedding       vector(3072),
+    embedding       vector(768),
     material_id     TEXT,
     smiles_dsl      TEXT,
     variables       JSONB,
@@ -101,9 +101,9 @@ CREATE INDEX idx_chunks_document ON chunks(document_id);
 CREATE INDEX idx_chunks_material ON chunks(material_id);
 
 -- HNSW index on halfvec cast (pgvector limits HNSW/IVFFlat to 2000 dims;
--- casting to halfvec allows indexing 3072-dim vectors)
+-- casting to halfvec allows indexing 768-dim vectors)
 CREATE INDEX idx_chunks_embedding ON chunks
-    USING hnsw ((embedding::halfvec(3072)) halfvec_cosine_ops);
+    USING hnsw ((embedding::halfvec(768)) halfvec_cosine_ops);
 
 -- ============================================================
 -- 学習者状態
