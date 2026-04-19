@@ -1020,10 +1020,12 @@ def list_teacher_courses(
 ) -> list[dict]:
     """教員が管理できるコース一覧を返す。
 
-    - 自身が所有するコース
-    - editor 権限グループに所属している場合、そのグループにマッピングされたコース
+    - 自身が所有するコース (role='owner')
+    - editor 権限グループに所属している場合、そのグループにマッピングされたコース (role='editor')
+    - viewer 権限グループに所属している場合も同様にリストに含める (role='viewer')
 
     （Issue #125: editor 権限グループの教員も管理画面からコースの閲覧・編集が行える）
+    （Issue #129: viewer 権限グループのメンバーもコース管理画面で閲覧できるようにする）
     """
     session = _pg_session()
     try:
@@ -1034,14 +1036,15 @@ def list_teacher_courses(
                        COALESCE(lc.is_published, false) AS is_published,
                        lc.created_at, lc.updated_at,
                        CASE WHEN lc.user_id = CAST(:user_id AS uuid)
-                            THEN 'owner' ELSE 'editor' END AS role
+                            THEN 'owner' ELSE cgp.permission END AS role
                 FROM learning_courses lc
                 LEFT JOIN course_group_permissions cgp ON cgp.course_id = lc.id
                 LEFT JOIN group_members gm
                        ON gm.group_id = cgp.group_id
                       AND gm.user_id = CAST(:user_id AS uuid)
                 WHERE lc.user_id = CAST(:user_id AS uuid)
-                   OR (cgp.permission = 'editor' AND gm.user_id IS NOT NULL)
+                   OR (cgp.permission IN ('editor', 'viewer')
+                       AND gm.user_id IS NOT NULL)
                 ORDER BY lc.updated_at DESC
             """),
             {"user_id": current_user["id"]},
@@ -1057,7 +1060,7 @@ def list_teacher_courses(
             "is_published": bool(r[3]),
             "created_at": r[4].isoformat() if r[4] else "",
             "updated_at": r[5].isoformat() if r[5] else "",
-            "role": r[6],  # "owner" | "editor"
+            "role": r[6],  # "owner" | "editor" | "viewer"
         }
         for r in records
     ]
