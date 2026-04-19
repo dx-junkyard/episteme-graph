@@ -2752,9 +2752,14 @@
     }
     var html = "";
     _cmState.courses.forEach(function (c) {
-      var roleBadge = c.role === "owner"
-        ? '<span style="font-size:10px;background:var(--color-text-success);color:#fff;padding:1px 6px;border-radius:3px">所有</span>'
-        : '<span style="font-size:10px;background:var(--color-text-info);color:#fff;padding:1px 6px;border-radius:3px">editor</span>';
+      var roleBadge;
+      if (c.role === "owner") {
+        roleBadge = '<span style="font-size:10px;background:var(--color-text-success);color:#fff;padding:1px 6px;border-radius:3px">所有</span>';
+      } else if (c.role === "viewer") {
+        roleBadge = '<span style="font-size:10px;background:var(--color-text-tertiary);color:#fff;padding:1px 6px;border-radius:3px">viewer</span>';
+      } else {
+        roleBadge = '<span style="font-size:10px;background:var(--color-text-info);color:#fff;padding:1px 6px;border-radius:3px">editor</span>';
+      }
       var perms = c._perms || [];
       var permsHtml;
       if (!perms.length) {
@@ -2766,11 +2771,17 @@
             escHtml(p.group_name || p.group_id) + ' (' + escHtml(p.permission) + ')</span>';
         }).join("");
       }
+      var actionHtml;
+      if (c.role === "owner") {
+        actionHtml = '<button class="cm-manage-btn admin-action-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '">共有設定</button>';
+      } else {
+        actionHtml = '<span style="font-size:11px;color:var(--color-text-tertiary)">所有者のみ変更可</span>';
+      }
       html += '<tr>' +
         '<td>' + escHtml(c.title) + '</td>' +
         '<td>' + roleBadge + '</td>' +
         '<td>' + permsHtml + '</td>' +
-        '<td><button class="cm-manage-btn admin-action-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '">共有設定</button></td>' +
+        '<td>' + actionHtml + '</td>' +
         '</tr>';
     });
     tbody.innerHTML = html;

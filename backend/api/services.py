@@ -332,16 +332,14 @@ def get_course_group_permissions(course_id: str) -> list[dict]:
     ]
 
 
-def user_can_edit_course(user_id: str, course_id: str) -> bool:
-    """ユーザーがコースを編集できるかを判定する。
+def user_owns_course(user_id: str, course_id: str) -> bool:
+    """ユーザーがコースの所有者（オーナー）かを判定する。
 
-    - 所有者（learning_courses.user_id）
-    - editor 権限のあるグループメンバー
-    のいずれかに該当する場合に True。
+    共有設定の変更など、オーナー限定の操作の認可に使う。
     """
     session = _pg_session()
     try:
-        owner_row = session.execute(
+        row = session.execute(
             sa_text("""
                 SELECT 1 FROM learning_courses
                 WHERE id = :course_id AND user_id = CAST(:uid AS uuid)
@@ -349,9 +347,22 @@ def user_can_edit_course(user_id: str, course_id: str) -> bool:
             """),
             {"course_id": course_id, "uid": user_id},
         ).fetchone()
-        if owner_row:
-            return True
+        return row is not None
+    finally:
+        session.close()
 
+
+def user_can_edit_course(user_id: str, course_id: str) -> bool:
+    """ユーザーがコースを編集できるかを判定する。
+
+    - 所有者（learning_courses.user_id）
+    - editor 権限のあるグループメンバー
+    のいずれかに該当する場合に True。
+    """
+    if user_owns_course(user_id, course_id):
+        return True
+    session = _pg_session()
+    try:
         editor_row = session.execute(
             sa_text("""
                 SELECT 1

@@ -51,6 +51,8 @@ from services import (
     save_cb_session,
     user_can_access_group,
     user_can_edit_course,
+    user_can_view_course,
+    user_owns_course,
 )
 from core.llm import generate_text
 from core.meta_analyzer import (
@@ -1179,9 +1181,10 @@ def list_course_group_permissions(
 ) -> list[CourseGroupPermissionOut]:
     """コースに紐づくグループ権限マッピングの一覧を返す。
 
-    所有者、または editor 権限グループのメンバーのみアクセス可。
+    所有者、editor/viewer 権限グループのメンバーいずれもが現在の共有設定を
+    参照できる（表示用）。変更は所有者のみ。
     """
-    if not user_can_edit_course(current_user["id"], course_id):
+    if not user_can_view_course(current_user["id"], course_id):
         raise HTTPException(status_code=404, detail="Course not found")
     rows = get_course_group_permissions(course_id)
     return [CourseGroupPermissionOut(**r) for r in rows]
@@ -1199,13 +1202,13 @@ def upsert_course_group_permission(
 ) -> CourseGroupPermissionOut:
     """コースにグループ権限を付与する（既存なら権限を更新）。
 
-    所有者、または editor 権限グループのメンバーのみ操作可。
+    共有設定の変更はコースの所有者のみ可能。
     """
     if body.permission not in ("viewer", "editor"):
         raise HTTPException(
             status_code=400, detail="permission must be 'viewer' or 'editor'",
         )
-    if not user_can_edit_course(current_user["id"], course_id):
+    if not user_owns_course(current_user["id"], course_id):
         raise HTTPException(status_code=404, detail="Course not found")
 
     session = _pg_session()
@@ -1261,8 +1264,11 @@ def delete_course_group_permission(
     group_id: str,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """コースからグループ権限マッピングを削除する。"""
-    if not user_can_edit_course(current_user["id"], course_id):
+    """コースからグループ権限マッピングを削除する。
+
+    共有設定の変更はコースの所有者のみ可能。
+    """
+    if not user_owns_course(current_user["id"], course_id):
         raise HTTPException(status_code=404, detail="Course not found")
 
     session = _pg_session()
