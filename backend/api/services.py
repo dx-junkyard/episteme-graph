@@ -268,6 +268,106 @@ def get_user_group_ids(user_id: str) -> list[str]:
         session.close()
 
 
+def get_course_group_permissions(course_id: str) -> list[dict]:
+    """コースに紐づくグループ権限マッピング一覧を返す（グループ名付き）。"""
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT cgp.course_id,
+                       cgp.group_id,
+                       COALESCE(g.name, '') AS group_name,
+                       cgp.permission,
+                       cgp.created_at,
+                       cgp.updated_at
+                FROM course_group_permissions cgp
+                LEFT JOIN groups g ON g.id = cgp.group_id
+                WHERE cgp.course_id = :course_id
+                ORDER BY cgp.permission, g.name
+            """),
+            {"course_id": course_id},
+        ).fetchall()
+    finally:
+        session.close()
+    return [
+        {
+            "course_id": r[0],
+            "group_id": str(r[1]),
+            "group_name": r[2] or "",
+            "permission": r[3],
+            "created_at": r[4].isoformat() if r[4] else "",
+            "updated_at": r[5].isoformat() if r[5] else "",
+        }
+        for r in rows
+    ]
+
+
+def user_can_edit_course(user_id: str, course_id: str) -> bool:
+    """ユーザーがコースを編集できるかを判定する。
+
+    - 所有者（learning_courses.user_id）
+    - editor 権限のあるグループメンバー
+    のいずれかに該当する場合に True。
+    """
+    session = _pg_session()
+    try:
+        owner_row = session.execute(
+            sa_text("""
+                SELECT 1 FROM learning_courses
+                WHERE id = :course_id AND user_id = CAST(:uid AS uuid)
+                LIMIT 1
+            """),
+            {"course_id": course_id, "uid": user_id},
+        ).fetchone()
+        if owner_row:
+            return True
+
+        editor_row = session.execute(
+            sa_text("""
+                SELECT 1
+                FROM course_group_permissions cgp
+                JOIN group_members gm ON gm.group_id = cgp.group_id
+                WHERE cgp.course_id = :course_id
+                  AND cgp.permission = 'editor'
+                  AND gm.user_id = CAST(:uid AS uuid)
+                LIMIT 1
+            """),
+            {"course_id": course_id, "uid": user_id},
+        ).fetchone()
+        return editor_row is not None
+    finally:
+        session.close()
+
+
+def user_can_view_course(user_id: str, course_id: str) -> bool:
+    """ユーザーがコースを受講（閲覧）できるかを判定する。
+
+    - 所有者
+    - editor 権限のあるグループメンバー
+    - viewer 権限のあるグループメンバー
+    のいずれかに該当する場合に True。
+    """
+    if user_can_edit_course(user_id, course_id):
+        return True
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT 1
+                FROM course_group_permissions cgp
+                JOIN group_members gm ON gm.group_id = cgp.group_id
+                WHERE cgp.course_id = :course_id
+                  AND cgp.permission = 'viewer'
+                  AND gm.user_id = CAST(:uid AS uuid)
+                LIMIT 1
+            """),
+            {"course_id": course_id, "uid": user_id},
+        ).fetchone()
+        return row is not None
+    finally:
+        session.close()
+
+
 def user_can_access_group(user_id: str, group_id: str | None) -> bool:
     """ユーザーが指定のグループに属しているかを判定する。
 

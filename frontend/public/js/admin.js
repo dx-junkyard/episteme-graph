@@ -929,23 +929,10 @@
         btn.textContent = "登録完了!";
         btn.style.background = "var(--color-text-success)";
 
-        // A2: 「学生に公開する」ボタンを表示
-        var approveArea = document.getElementById("cb-approve-area");
-        if (approveArea && !document.getElementById("cb-publish-btn")) {
-          var publishBtn = document.createElement("button");
-          publishBtn.id = "cb-publish-btn";
-          publishBtn.textContent = "学生に公開する";
-          publishBtn.style.cssText = "margin-left:8px;padding:8px 16px;background:var(--color-text-info);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px";
-          publishBtn.addEventListener("click", function () {
-            publishCourse(data.id, publishBtn);
-          });
-          approveArea.appendChild(publishBtn);
-        }
-
         // Show success message in chat
         state.chatMessages.push({
           role: "assistant",
-          content: "コース「" + (data.title || draft.title) + "」が正常に登録されました。（ID: " + data.id + "）\n\n「学生に公開する」ボタンで学生が受講できるようになります。",
+          content: "コース「" + (data.title || draft.title) + "」が正常に登録されました。（ID: " + data.id + "）\n\n「コース管理」タブからグループ単位で受講可／編集可の権限を設定できます。",
         });
         renderCourseChat();
       })
@@ -953,30 +940,6 @@
         btn.disabled = false;
         btn.textContent = "承認してコースを登録";
         showUploadStatus("コースの登録に失敗しました。", "error");
-      });
-  }
-
-  // A2: コースを学生に公開する
-  function publishCourse(courseId, btn) {
-    btn.disabled = true;
-    btn.textContent = "公開中...";
-    apiFetch("/admin/courses/" + courseId + "/publish", { method: "PUT" })
-      .then(function (res) {
-        if (!res.ok) throw new Error("Publish failed");
-        return res.json();
-      })
-      .then(function () {
-        btn.textContent = "公開済み ✓";
-        btn.style.background = "var(--color-text-success)";
-        state.chatMessages.push({
-          role: "assistant",
-          content: "コースを学生に公開しました。学習画面から「受講開始」ボタンで受講できるようになります。",
-        });
-        renderCourseChat();
-      })
-      .catch(function () {
-        btn.disabled = false;
-        btn.textContent = "学生に公開する";
       });
   }
 
@@ -1024,9 +987,7 @@
         var html = "";
         courses.forEach(function (c) {
           var statusBadge = "";
-          if (c.is_published) {
-            statusBadge = '<span style="font-size:10px;background:var(--color-text-success);color:#fff;padding:1px 6px;border-radius:3px;margin-left:6px">公開中</span>';
-          } else if (c.is_template) {
+          if (c.is_template) {
             statusBadge = '<span style="font-size:10px;background:var(--color-text-info);color:#fff;padding:1px 6px;border-radius:3px;margin-left:6px">テンプレート</span>';
           }
           var updatedAt = "";
@@ -1154,7 +1115,7 @@
         courses.forEach(function (c) {
           var opt = document.createElement("option");
           opt.value = c.id;
-          opt.textContent = c.title + (c.is_published ? " [公開中]" : "");
+          opt.textContent = c.title;
           select.appendChild(opt);
         });
       })
@@ -1690,7 +1651,7 @@
         courses.forEach(function (c) {
           var opt = document.createElement("option");
           opt.value = c.id;
-          opt.textContent = c.title + (c.is_published ? " [公開中]" : "");
+          opt.textContent = c.title;
           select.appendChild(opt);
         });
       })
@@ -2001,7 +1962,7 @@
         courses.forEach(function (c) {
           var opt = document.createElement("option");
           opt.value = c.id;
-          opt.textContent = c.title + (c.is_published ? " [公開中]" : "");
+          opt.textContent = c.title;
           select.appendChild(opt);
         });
         if (currentVal) select.value = currentVal;
@@ -2730,6 +2691,247 @@
     } catch (e) { return null; }
   }
 
+  // ── Course Management (Issue #125) ────────────────────────────────
+  var _cmState = {
+    courses: [],
+    groups: [],
+    currentCourseId: null,
+    currentCourseTitle: "",
+    perms: [],
+  };
+
+  function initCourseManagement() {
+    var refreshBtn = document.getElementById("cm-refresh");
+    if (refreshBtn) refreshBtn.addEventListener("click", loadCourseManagement);
+    onTabActivate("course-management", loadCourseManagement);
+  }
+
+  function setCmStatus(msg, kind) {
+    var el = document.getElementById("cm-status");
+    if (!el) return;
+    if (!msg) { el.style.display = "none"; return; }
+    el.style.display = "block";
+    el.textContent = msg;
+    el.className = "upload-status upload-status-" + (kind || "info");
+  }
+
+  function loadCourseManagement() {
+    var tbody = document.getElementById("cm-tbody");
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">読み込み中...</td></tr>';
+
+    Promise.all([
+      apiFetch("/admin/courses").then(function (res) { return res.json(); }),
+      apiFetch("/groups").then(function (res) { return res.json(); }),
+    ])
+      .then(function (results) {
+        _cmState.courses = results[0] || [];
+        _cmState.groups = results[1] || [];
+        // グループ権限マッピングをコース毎に取得
+        if (!_cmState.courses.length) {
+          tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">コースがありません</td></tr>';
+          return;
+        }
+        return Promise.all(_cmState.courses.map(function (c) {
+          return apiFetch("/admin/courses/" + encodeURIComponent(c.id) + "/groups")
+            .then(function (r) { return r.ok ? r.json() : []; })
+            .then(function (perms) { c._perms = perms || []; return c; });
+        })).then(renderCourseManagementTable);
+      })
+      .catch(function () {
+        setCmStatus("コース一覧の取得に失敗しました", "error");
+      });
+  }
+
+  function renderCourseManagementTable() {
+    var tbody = document.getElementById("cm-tbody");
+    if (!tbody) return;
+    if (!_cmState.courses.length) {
+      tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">コースがありません</td></tr>';
+      return;
+    }
+    var html = "";
+    _cmState.courses.forEach(function (c) {
+      var roleBadge = c.role === "owner"
+        ? '<span style="font-size:10px;background:var(--color-text-success);color:#fff;padding:1px 6px;border-radius:3px">所有</span>'
+        : '<span style="font-size:10px;background:var(--color-text-info);color:#fff;padding:1px 6px;border-radius:3px">editor</span>';
+      var perms = c._perms || [];
+      var permsHtml;
+      if (!perms.length) {
+        permsHtml = '<span style="color:var(--color-text-tertiary);font-size:12px">未設定</span>';
+      } else {
+        permsHtml = perms.map(function (p) {
+          var color = p.permission === "editor" ? "var(--color-text-info)" : "var(--color-text-success)";
+          return '<span style="display:inline-block;margin:0 4px 4px 0;padding:2px 8px;font-size:11px;background:' + color + ';color:#fff;border-radius:3px">' +
+            escHtml(p.group_name || p.group_id) + ' (' + escHtml(p.permission) + ')</span>';
+        }).join("");
+      }
+      html += '<tr>' +
+        '<td>' + escHtml(c.title) + '</td>' +
+        '<td>' + roleBadge + '</td>' +
+        '<td>' + permsHtml + '</td>' +
+        '<td><button class="cm-manage-btn admin-action-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '">共有設定</button></td>' +
+        '</tr>';
+    });
+    tbody.innerHTML = html;
+    tbody.querySelectorAll(".cm-manage-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        openPermissionModal(this.getAttribute("data-course-id"), this.getAttribute("data-course-title"));
+      });
+    });
+  }
+
+  function openPermissionModal(courseId, courseTitle) {
+    _cmState.currentCourseId = courseId;
+    _cmState.currentCourseTitle = courseTitle;
+
+    var existing = document.getElementById("cm-perm-modal");
+    if (existing) existing.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = "cm-perm-modal";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+
+    overlay.innerHTML =
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border-secondary);border-radius:8px;padding:24px;min-width:480px;max-width:640px;max-height:80vh;display:flex;flex-direction:column">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">' +
+          '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">グループ共有設定</h3>' +
+          '<button id="cm-perm-close-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
+        '</div>' +
+        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 12px">コース:「' + escHtml(courseTitle) + '」の共有グループと権限を管理します。</p>' +
+        '<div id="cm-perm-status-inline" class="upload-status" style="display:none;margin-bottom:12px"></div>' +
+        '<h4 style="font-size:13px;margin:0 0 8px 0;color:var(--color-text-secondary)">現在の共有設定</h4>' +
+        '<div id="cm-perm-current" style="margin-bottom:16px;overflow-y:auto;flex:1"></div>' +
+        '<hr style="border:none;border-top:1px solid var(--color-border);margin:4px 0 12px 0">' +
+        '<h4 style="font-size:13px;margin:0 0 8px 0;color:var(--color-text-secondary)">グループを追加</h4>' +
+        '<div style="display:flex;gap:8px;align-items:center">' +
+          '<select id="cm-perm-group-select" style="flex:1;padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)"></select>' +
+          '<select id="cm-perm-role-select" style="padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">' +
+            '<option value="viewer">viewer (受講可)</option>' +
+            '<option value="editor">editor (編集可)</option>' +
+          '</select>' +
+          '<button id="cm-perm-add-btn" class="admin-action-btn" style="background:var(--color-text-success);color:#fff">追加</button>' +
+        '</div>' +
+      '</div>';
+
+    document.body.appendChild(overlay);
+
+    overlay.addEventListener("click", function (e) {
+      if (e.target === overlay) overlay.remove();
+    });
+    document.getElementById("cm-perm-close-btn").addEventListener("click", function () {
+      overlay.remove();
+    });
+    document.getElementById("cm-perm-add-btn").addEventListener("click", addPermissionMapping);
+
+    loadPermissionModal();
+  }
+
+  function setPermStatus(msg, kind) {
+    var el = document.getElementById("cm-perm-status-inline");
+    if (!el) return;
+    if (!msg) { el.style.display = "none"; return; }
+    el.style.display = "block";
+    el.textContent = msg;
+    el.className = "upload-status upload-status-" + (kind || "info");
+  }
+
+  function loadPermissionModal() {
+    var courseId = _cmState.currentCourseId;
+    apiFetch("/admin/courses/" + encodeURIComponent(courseId) + "/groups")
+      .then(function (res) { return res.json(); })
+      .then(function (perms) {
+        _cmState.perms = perms || [];
+        renderPermissionCurrent();
+        renderGroupDropdown();
+      })
+      .catch(function () { setPermStatus("共有設定の取得に失敗しました", "error"); });
+  }
+
+  function renderPermissionCurrent() {
+    var el = document.getElementById("cm-perm-current");
+    if (!el) return;
+    if (!_cmState.perms.length) {
+      el.innerHTML = '<p style="color:var(--color-text-tertiary);font-size:12px;margin:0">まだ共有グループは設定されていません。</p>';
+      return;
+    }
+    var html = '<table class="admin-table"><thead><tr><th>グループ</th><th>権限</th><th>操作</th></tr></thead><tbody>';
+    _cmState.perms.forEach(function (p) {
+      html += '<tr>' +
+        '<td>' + escHtml(p.group_name || p.group_id) + '</td>' +
+        '<td>' + escHtml(p.permission) + '</td>' +
+        '<td><button class="cm-perm-remove-btn admin-action-btn" data-gid="' + escHtml(p.group_id) + '" style="background:var(--color-text-danger);color:#fff">削除</button></td>' +
+        '</tr>';
+    });
+    html += "</tbody></table>";
+    el.innerHTML = html;
+    el.querySelectorAll(".cm-perm-remove-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        removePermissionMapping(this.getAttribute("data-gid"));
+      });
+    });
+  }
+
+  function renderGroupDropdown() {
+    var sel = document.getElementById("cm-perm-group-select");
+    if (!sel) return;
+    var assigned = {};
+    _cmState.perms.forEach(function (p) { assigned[p.group_id] = true; });
+    var html = '<option value="">グループを選択...</option>';
+    _cmState.groups.forEach(function (g) {
+      var suffix = assigned[g.id] ? " (設定済み)" : "";
+      html += '<option value="' + escHtml(g.id) + '">' + escHtml(g.name) + suffix + '</option>';
+    });
+    sel.innerHTML = html;
+  }
+
+  function addPermissionMapping() {
+    var groupSel = document.getElementById("cm-perm-group-select");
+    var roleSel = document.getElementById("cm-perm-role-select");
+    if (!groupSel.value) {
+      setPermStatus("グループを選択してください", "error");
+      return;
+    }
+    var courseId = _cmState.currentCourseId;
+    setPermStatus("追加中...", "info");
+    apiFetch("/admin/courses/" + encodeURIComponent(courseId) + "/groups", {
+      method: "POST",
+      body: JSON.stringify({ group_id: groupSel.value, permission: roleSel.value }),
+    })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw new Error(d.detail || "追加に失敗しました"); });
+        return res.json();
+      })
+      .then(function () {
+        setPermStatus("追加しました", "success");
+        loadPermissionModal();
+        loadCourseManagement();
+      })
+      .catch(function (e) {
+        setPermStatus(e.message || "追加に失敗しました", "error");
+      });
+  }
+
+  function removePermissionMapping(groupId) {
+    var courseId = _cmState.currentCourseId;
+    setPermStatus("削除中...", "info");
+    apiFetch("/admin/courses/" + encodeURIComponent(courseId) + "/groups/" + encodeURIComponent(groupId), {
+      method: "DELETE",
+    })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw new Error(d.detail || "削除に失敗しました"); });
+        return res.json();
+      })
+      .then(function () {
+        setPermStatus("削除しました", "success");
+        loadPermissionModal();
+        loadCourseManagement();
+      })
+      .catch(function (e) {
+        setPermStatus(e.message || "削除に失敗しました", "error");
+      });
+  }
+
   function initApp() {
     // Role-based access control
     if (!setupRoleBasedUI()) return;
@@ -2740,6 +2942,7 @@
     initTabs();
     initUpload();
     initCourseBuilder();
+    initCourseManagement();
     initLectureStudio();
     initStumbles();
     initSchemaProposals();

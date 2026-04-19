@@ -32,6 +32,7 @@ from services import (
     delete_course_data,
     search_chunks_with_metadata,
     user_can_access_group,
+    user_can_view_course,
 )
 from core.llm import generate_text, get_llm_params
 from core.postgres import get_session as _pg_session
@@ -149,6 +150,8 @@ def list_courses(
         ).fetchall()
 
         # グループ共有コース（自分が参加するグループ）
+        # - 旧: learning_courses.group_id + visibility='group' を参照
+        # - 新: course_group_permissions 多対多マッピング (viewer/editor)
         if user_groups:
             # UUID リストを展開
             gph = ", ".join(f"CAST(:g_{i} AS uuid)" for i in range(len(user_groups)))
@@ -157,14 +160,18 @@ def list_courses(
                 params[f"g_{i}"] = gid
             group_records = session.execute(
                 sa_text(f"""
-                    SELECT lc.id, lc.title,
+                    SELECT DISTINCT lc.id, lc.title,
                            COALESCE(lc.visibility, 'private'),
                            lc.group_id,
                            COALESCE(lc.description, '')
                     FROM learning_courses lc
-                    WHERE lc.visibility = 'group'
-                      AND lc.group_id IN ({gph})
-                      AND lc.user_id != CAST(:user_id AS uuid)
+                    LEFT JOIN course_group_permissions cgp ON cgp.course_id = lc.id
+                    WHERE lc.user_id != CAST(:user_id AS uuid)
+                      AND (
+                          (lc.visibility = 'group' AND lc.group_id IN ({gph}))
+                          OR (cgp.group_id IN ({gph})
+                              AND cgp.permission IN ('viewer', 'editor'))
+                      )
                       AND NOT EXISTS (
                           SELECT 1 FROM learning_courses lc2
                           WHERE lc2.user_id = CAST(:user_id AS uuid)
@@ -329,6 +336,9 @@ def enroll_course(
     elif visibility == "group" and group_id and user_can_access_group(
         current_user["id"], str(group_id)
     ):
+        enrollable = True
+    elif user_can_view_course(current_user["id"], course_id):
+        # course_group_permissions 経由で viewer/editor 権限を持つ場合
         enrollable = True
 
     if not enrollable:
