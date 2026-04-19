@@ -95,6 +95,9 @@ class Document(Base):
     text_length = Column(Integer, nullable=True)
     chunk_count = Column(Integer, nullable=True)
     uploaded_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    # Visibility / access control (Issue #121)
+    visibility = Column(Text, nullable=False, default="private")  # public | group | private
+    group_id = Column(UUID(as_uuid=True), ForeignKey("groups.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
 
@@ -231,6 +234,10 @@ class LearningCourse(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     title = Column(Text, nullable=False)
     data = Column(JSONB, nullable=False, default=dict)
+    # Visibility / access control (Issue #121)
+    visibility = Column(Text, nullable=False, default="private")  # public | group | private
+    group_id = Column(UUID(as_uuid=True), ForeignKey("groups.id", ondelete="SET NULL"), nullable=True)
+    description = Column(Text, nullable=False, default="")
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
 
@@ -282,3 +289,45 @@ class LearningChatHistory(Base):
     topic_id = Column(Text, nullable=False)
     history = Column(JSONB, nullable=False, default=list)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
+# ============================================================
+# グループ / 開示範囲（Issue #121）
+# ============================================================
+
+class Group(Base):
+    __tablename__ = "groups"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=False, default="")
+    invite_code = Column(Text, unique=True, nullable=True)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
+class GroupMember(Base):
+    __tablename__ = "group_members"
+    __table_args__ = (UniqueConstraint("group_id", "user_id"),)
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    group_id = Column(UUID(as_uuid=True), ForeignKey("groups.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    role = Column(Text, nullable=False, default="member")  # admin | member
+    joined_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+
+class GroupInvitation(Base):
+    __tablename__ = "group_invitations"
+    __table_args__ = (
+        UniqueConstraint("group_id", "invitee_user_id", "status"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    group_id = Column(UUID(as_uuid=True), ForeignKey("groups.id", ondelete="CASCADE"), nullable=False)
+    invitee_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    inviter_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    status = Column(Text, nullable=False, default="pending")  # pending | accepted | declined | revoked
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    responded_at = Column(DateTime(timezone=True), nullable=True)

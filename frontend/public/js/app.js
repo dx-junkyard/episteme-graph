@@ -819,7 +819,203 @@
     initTabs();
     initInput();
     initLogout();
+    initGroups();
     await initCourseSelector();
+    loadInvitationBadge();
+  }
+
+  // ── Groups (Issue #121) ────────────────────────────────────────────
+  function initGroups() {
+    var btn = document.getElementById("groups-btn");
+    if (btn) btn.addEventListener("click", openGroupsModal);
+  }
+
+  async function loadInvitationBadge() {
+    try {
+      var res = await apiFetch("/me/invitations");
+      if (!res.ok) return;
+      var list = await res.json();
+      var pending = (list || []).filter(function (i) { return i.status === "pending"; });
+      var badge = document.getElementById("groups-badge");
+      if (badge) {
+        if (pending.length > 0) {
+          badge.textContent = String(pending.length);
+          badge.style.display = "";
+        } else {
+          badge.style.display = "none";
+        }
+      }
+    } catch (_) { /* ignore */ }
+  }
+
+  function openGroupsModal() {
+    if (document.getElementById("groups-overlay")) return;
+    var overlay = document.createElement("div");
+    overlay.id = "groups-overlay";
+    overlay.className = "auth-overlay";
+    overlay.innerHTML =
+      '<div class="auth-box" style="width:440px;max-height:80vh;overflow-y:auto">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">' +
+          '<h2 style="margin:0">グループ</h2>' +
+          '<button id="groups-close" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--color-text-secondary)">&times;</button>' +
+        '</div>' +
+        '<div id="groups-invitations-section">' +
+          '<div style="font-size:12px;font-weight:600;color:var(--color-text-secondary);margin-bottom:6px">招待</div>' +
+          '<div id="groups-invitations-list" style="margin-bottom:14px;font-size:13px">読み込み中...</div>' +
+        '</div>' +
+        '<div>' +
+          '<div style="font-size:12px;font-weight:600;color:var(--color-text-secondary);margin-bottom:6px">招待コードで参加</div>' +
+          '<form id="groups-join-form" style="display:flex;gap:6px;margin-bottom:14px">' +
+            '<input id="groups-join-code" type="text" placeholder="招待コード" style="flex:1;padding:8px 10px;border:0.5px solid var(--color-border-secondary);border-radius:8px;font-size:13px" required>' +
+            '<button type="submit" style="padding:8px 14px;border-radius:8px;background:var(--color-text-info);color:#fff;border:none;cursor:pointer;font-size:13px">参加</button>' +
+          '</form>' +
+        '</div>' +
+        '<div>' +
+          '<div style="font-size:12px;font-weight:600;color:var(--color-text-secondary);margin-bottom:6px">参加中のグループ</div>' +
+          '<div id="groups-my-list" style="font-size:13px">読み込み中...</div>' +
+        '</div>' +
+        '<div id="groups-status" style="margin-top:10px;font-size:12px;min-height:16px"></div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    document.getElementById("groups-close").addEventListener("click", closeGroupsModal);
+    overlay.addEventListener("click", function (e) {
+      if (e.target === overlay) closeGroupsModal();
+    });
+    document.getElementById("groups-join-form").addEventListener("submit", function (e) {
+      e.preventDefault();
+      var code = document.getElementById("groups-join-code").value.trim();
+      if (code) joinGroupByCode(code);
+    });
+
+    refreshGroupsModal();
+  }
+
+  function closeGroupsModal() {
+    var overlay = document.getElementById("groups-overlay");
+    if (overlay) overlay.remove();
+  }
+
+  function setGroupsModalStatus(msg, isError) {
+    var el = document.getElementById("groups-status");
+    if (!el) return;
+    el.textContent = msg || "";
+    el.style.color = isError ? "var(--color-text-danger)" : "var(--color-text-success)";
+  }
+
+  async function refreshGroupsModal() {
+    await Promise.all([renderInvitations(), renderMyGroups()]);
+    loadInvitationBadge();
+  }
+
+  async function renderInvitations() {
+    var container = document.getElementById("groups-invitations-list");
+    if (!container) return;
+    try {
+      var res = await apiFetch("/me/invitations");
+      if (!res.ok) { container.textContent = "読み込みに失敗しました"; return; }
+      var invites = await res.json();
+      var pending = (invites || []).filter(function (i) { return i.status === "pending"; });
+      if (pending.length === 0) {
+        container.innerHTML = '<div style="color:var(--color-text-tertiary)">保留中の招待はありません</div>';
+        return;
+      }
+      var html = "";
+      pending.forEach(function (inv) {
+        html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;border:0.5px solid var(--color-border-secondary);border-radius:8px;margin-bottom:6px">';
+        html += '<div><div style="font-weight:500">' + escHtml(inv.group_name || "(グループ)") + '</div>';
+        html += '<div style="font-size:11px;color:var(--color-text-tertiary)">招待者: ' + escHtml(inv.inviter_username || "?") + '</div></div>';
+        html += '<div style="display:flex;gap:4px">';
+        html += '<button data-action="accept" data-id="' + escHtml(inv.id) + '" style="padding:4px 10px;border-radius:6px;background:var(--color-text-info);color:#fff;border:none;cursor:pointer;font-size:12px">承諾</button>';
+        html += '<button data-action="decline" data-id="' + escHtml(inv.id) + '" style="padding:4px 10px;border-radius:6px;background:var(--color-background-secondary);color:var(--color-text-primary);border:0.5px solid var(--color-border-secondary);cursor:pointer;font-size:12px">辞退</button>';
+        html += '</div></div>';
+      });
+      container.innerHTML = html;
+      container.querySelectorAll("button[data-action]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          respondInvitation(b.getAttribute("data-id"), b.getAttribute("data-action"));
+        });
+      });
+    } catch (_) {
+      container.textContent = "読み込みに失敗しました";
+    }
+  }
+
+  async function renderMyGroups() {
+    var container = document.getElementById("groups-my-list");
+    if (!container) return;
+    try {
+      var res = await apiFetch("/groups");
+      if (!res.ok) { container.textContent = "読み込みに失敗しました"; return; }
+      var groups = await res.json();
+      if (!groups || groups.length === 0) {
+        container.innerHTML = '<div style="color:var(--color-text-tertiary)">参加中のグループはありません</div>';
+        return;
+      }
+      var html = "";
+      groups.forEach(function (g) {
+        html += '<div style="padding:8px;border:0.5px solid var(--color-border-secondary);border-radius:8px;margin-bottom:6px">';
+        html += '<div style="font-weight:500">' + escHtml(g.name) + '</div>';
+        if (g.description) {
+          html += '<div style="font-size:11px;color:var(--color-text-tertiary);margin-top:2px">' + escHtml(g.description) + '</div>';
+        }
+        html += '<div style="font-size:11px;color:var(--color-text-tertiary);margin-top:2px">ロール: ' + escHtml(g.my_role || "member") + '</div>';
+        if (g.invite_code) {
+          html += '<div style="font-size:11px;color:var(--color-text-tertiary);margin-top:2px">招待コード: <code>' + escHtml(g.invite_code) + '</code></div>';
+        }
+        html += '</div>';
+      });
+      container.innerHTML = html;
+    } catch (_) {
+      container.textContent = "読み込みに失敗しました";
+    }
+  }
+
+  async function respondInvitation(invitationId, action) {
+    try {
+      var res = await apiFetch("/me/invitations/" + invitationId + "/" + action, { method: "POST" });
+      if (!res.ok) {
+        var err = await res.json().catch(function () { return {}; });
+        setGroupsModalStatus(err.detail || "処理に失敗しました", true);
+        return;
+      }
+      setGroupsModalStatus(action === "accept" ? "グループに参加しました" : "招待を辞退しました", false);
+      await refreshGroupsModal();
+      // New group → refresh course list so group-shared courses appear
+      if (action === "accept") {
+        var courses = await loadCourses();
+        _allCourses = courses;
+        var ownCourses = courses.filter(function (c) { return !c.is_enrollable; });
+        var enrollableCourses = courses.filter(function (c) { return c.is_enrollable; });
+        renderCourseSelect(ownCourses, enrollableCourses);
+      }
+    } catch (_) {
+      setGroupsModalStatus("処理に失敗しました", true);
+    }
+  }
+
+  async function joinGroupByCode(code) {
+    try {
+      var res = await apiFetch("/groups/join-by-code", {
+        method: "POST",
+        body: JSON.stringify({ invite_code: code }),
+      });
+      if (!res.ok) {
+        var err = await res.json().catch(function () { return {}; });
+        setGroupsModalStatus(err.detail || "参加に失敗しました", true);
+        return;
+      }
+      setGroupsModalStatus("グループに参加しました", false);
+      document.getElementById("groups-join-code").value = "";
+      await refreshGroupsModal();
+      var courses = await loadCourses();
+      _allCourses = courses;
+      var ownCourses = courses.filter(function (c) { return !c.is_enrollable; });
+      var enrollableCourses = courses.filter(function (c) { return c.is_enrollable; });
+      renderCourseSelect(ownCourses, enrollableCourses);
+    } catch (_) {
+      setGroupsModalStatus("参加に失敗しました", true);
+    }
   }
 
   // ── Expose sendPrompt globally for inline onclick ──────────────────

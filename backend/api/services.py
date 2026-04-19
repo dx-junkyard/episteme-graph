@@ -132,7 +132,7 @@ def get_background_task(task_id: str) -> dict | None:
 
 
 def get_course_data(user_id: str, course_id: str) -> dict | None:
-    """PostgreSQL から LearningCourse データを取得する。"""
+    """PostgreSQL から LearningCourse データを取得する（オーナー限定）。"""
     session = _pg_session()
     try:
         record = session.execute(
@@ -150,13 +150,69 @@ def get_course_data(user_id: str, course_id: str) -> dict | None:
     return None
 
 
-def save_course_data(user_id: str, course_id: str, data: dict, is_template: bool = False) -> None:
+def get_accessible_course_data(user_id: str, course_id: str) -> dict | None:
+    """visibility を考慮して、アクセス可能な LearningCourse データを返す。
+
+    - オーナー本人: 常に可
+    - visibility='public' かつ is_published かつ is_template: 可
+    - visibility='group' かつ自分がそのグループのメンバー: 可
+    """
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("""
+                SELECT data, user_id, COALESCE(visibility, 'private'),
+                       group_id, COALESCE(is_published, false), COALESCE(is_template, false)
+                FROM learning_courses
+                WHERE id = :course_id
+                LIMIT 1
+            """),
+            {"course_id": course_id},
+        ).fetchone()
+        if not record or not record[0]:
+            return None
+
+        data_raw, owner_id, visibility, group_id, is_published, is_template = record
+        data = data_raw if isinstance(data_raw, dict) else json.loads(data_raw)
+
+        if str(owner_id) == str(user_id):
+            return data
+        if visibility == "public" and is_published and is_template:
+            return data
+        if visibility == "group" and group_id:
+            row = session.execute(
+                sa_text("""
+                    SELECT 1 FROM group_members
+                    WHERE group_id = :gid AND user_id = CAST(:uid AS uuid)
+                    LIMIT 1
+                """),
+                {"gid": group_id, "uid": user_id},
+            ).fetchone()
+            if row:
+                return data
+        return None
+    finally:
+        session.close()
+
+
+def save_course_data(
+    user_id: str,
+    course_id: str,
+    data: dict,
+    is_template: bool = False,
+    *,
+    visibility: str = "private",
+    group_id: str | None = None,
+    description: str = "",
+) -> None:
     """LearningCourse データを PostgreSQL に UPSERT する。"""
     session = _pg_session()
     try:
         session.execute(
             sa_text("""
-                INSERT INTO learning_courses (id, user_id, title, data, is_template, is_published, owner_id)
+                INSERT INTO learning_courses
+                    (id, user_id, title, data, is_template, is_published, owner_id,
+                     visibility, group_id, description)
                 VALUES (
                     :course_id,
                     CAST(:user_id AS uuid),
@@ -164,11 +220,17 @@ def save_course_data(user_id: str, course_id: str, data: dict, is_template: bool
                     CAST(:data AS jsonb),
                     :is_template,
                     false,
-                    CAST(:user_id AS uuid)
+                    CAST(:user_id AS uuid),
+                    :visibility,
+                    CAST(:group_id AS uuid),
+                    :description
                 )
                 ON CONFLICT (id) DO UPDATE
                 SET data = CAST(EXCLUDED.data AS jsonb),
                     title = EXCLUDED.title,
+                    visibility = EXCLUDED.visibility,
+                    group_id = EXCLUDED.group_id,
+                    description = EXCLUDED.description,
                     updated_at = now()
             """),
             {
@@ -177,12 +239,53 @@ def save_course_data(user_id: str, course_id: str, data: dict, is_template: bool
                 "title": data.get("title", course_id),
                 "data": json.dumps(data, ensure_ascii=False),
                 "is_template": is_template,
+                "visibility": visibility,
+                "group_id": group_id,
+                "description": description,
             },
         )
         session.commit()
     except Exception:
         session.rollback()
         raise
+    finally:
+        session.close()
+
+
+def get_user_group_ids(user_id: str) -> list[str]:
+    """ユーザーが参加しているグループIDのリストを返す。"""
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT group_id FROM group_members
+                WHERE user_id = CAST(:uid AS uuid)
+            """),
+            {"uid": user_id},
+        ).fetchall()
+        return [str(r[0]) for r in rows]
+    finally:
+        session.close()
+
+
+def user_can_access_group(user_id: str, group_id: str | None) -> bool:
+    """ユーザーが指定のグループに属しているかを判定する。
+
+    group_id が None/空の場合は False を返す。
+    """
+    if not group_id:
+        return False
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT 1 FROM group_members
+                WHERE user_id = CAST(:uid AS uuid) AND group_id = CAST(:gid AS uuid)
+                LIMIT 1
+            """),
+            {"uid": user_id, "gid": group_id},
+        ).fetchone()
+        return row is not None
     finally:
         session.close()
 

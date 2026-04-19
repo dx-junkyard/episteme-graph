@@ -25,11 +25,13 @@ from services import (
     check_prerequisites,
     detect_and_record_misconception,
     get_course_data,
+    get_user_group_ids,
     log_unanswered_query,
     persist_chat_history,
     save_course_data,
     delete_course_data,
     search_chunks_with_metadata,
+    user_can_access_group,
 )
 from core.llm import generate_text, get_llm_params
 from core.postgres import get_session as _pg_session
@@ -43,12 +45,27 @@ router = APIRouter(prefix="/api/learning", tags=["Learning"])
 # ---------------------------------------------------------------------------
 
 
+def _validate_visibility(visibility: str, group_id: str | None, user_id: str) -> None:
+    """visibility の値と group_id の整合性を検証する。"""
+    if visibility not in ("public", "group", "private"):
+        raise HTTPException(status_code=400, detail=f"Invalid visibility: {visibility}")
+    if visibility == "group":
+        if not group_id:
+            raise HTTPException(status_code=400, detail="visibility='group' requires group_id")
+        if not user_can_access_group(user_id, group_id):
+            raise HTTPException(
+                status_code=403,
+                detail="指定されたグループに参加していません",
+            )
+
+
 @router.post("/courses", response_model=LearningCourseOut, status_code=201)
 def create_course(
     body: CourseCreateRequest,
     current_user: dict = Depends(_get_current_user),
 ) -> LearningCourseOut:
     """新しいコースを作成する。"""
+    _validate_visibility(body.visibility, body.group_id, current_user["id"])
     course_id = str(uuid.uuid4())[:8]
 
     data = {
@@ -61,35 +78,66 @@ def create_course(
         "referenced_sections": [],
     }
 
-    save_course_data(current_user["id"], course_id, data, is_template=body.is_template)
+    save_course_data(
+        current_user["id"],
+        course_id,
+        data,
+        is_template=body.is_template,
+        visibility=body.visibility,
+        group_id=body.group_id if body.visibility == "group" else None,
+        description=body.description,
+    )
 
     logger.info("Created course '%s' (id=%s) for user=%s", body.title, course_id, current_user["id"])
-    return LearningCourseOut(id=course_id, title=body.title, is_template=body.is_template)
+    return LearningCourseOut(
+        id=course_id,
+        title=body.title,
+        is_template=body.is_template,
+        visibility=body.visibility,
+        group_id=body.group_id if body.visibility == "group" else None,
+        description=body.description,
+    )
 
 
 @router.get("/courses", response_model=list[LearningCourseOut])
 def list_courses(
     current_user: dict = Depends(_get_current_user),
 ) -> list[LearningCourseOut]:
-    """ユーザーが登録しているコース一覧を返す。公開テンプレートも含む。"""
+    """ユーザーが登録しているコース一覧を返す。
+
+    以下を返す:
+    - 自分が所有するコース
+    - visibility='public' かつ公開テンプレートのコース（受講可能）
+    - visibility='group' かつ自分が参加するグループのコース（受講可能）
+    """
+    user_groups = get_user_group_ids(current_user["id"])
+
     session = _pg_session()
     try:
         own_records = session.execute(
             sa_text("""
                 SELECT id, title,
                        COALESCE(is_template, false) AS is_template,
-                       COALESCE(is_published, false) AS is_published
+                       COALESCE(is_published, false) AS is_published,
+                       COALESCE(visibility, 'private') AS visibility,
+                       group_id,
+                       COALESCE(description, '') AS description
                 FROM learning_courses
                 WHERE user_id = CAST(:user_id AS uuid)
             """),
             {"user_id": current_user["id"]},
         ).fetchall()
 
-        template_records = session.execute(
+        # 公開テンプレート
+        public_records = session.execute(
             sa_text("""
-                SELECT lc.id, lc.title
+                SELECT lc.id, lc.title,
+                       COALESCE(lc.visibility, 'private'),
+                       lc.group_id,
+                       COALESCE(lc.description, '')
                 FROM learning_courses lc
                 WHERE lc.is_published = true AND lc.is_template = true
+                  AND COALESCE(lc.visibility, 'public') = 'public'
                   AND lc.user_id != CAST(:user_id AS uuid)
                   AND NOT EXISTS (
                       SELECT 1 FROM learning_courses lc2
@@ -99,6 +147,34 @@ def list_courses(
             """),
             {"user_id": current_user["id"]},
         ).fetchall()
+
+        # グループ共有コース（自分が参加するグループ）
+        if user_groups:
+            # UUID リストを展開
+            gph = ", ".join(f"CAST(:g_{i} AS uuid)" for i in range(len(user_groups)))
+            params: dict = {"user_id": current_user["id"]}
+            for i, gid in enumerate(user_groups):
+                params[f"g_{i}"] = gid
+            group_records = session.execute(
+                sa_text(f"""
+                    SELECT lc.id, lc.title,
+                           COALESCE(lc.visibility, 'private'),
+                           lc.group_id,
+                           COALESCE(lc.description, '')
+                    FROM learning_courses lc
+                    WHERE lc.visibility = 'group'
+                      AND lc.group_id IN ({gph})
+                      AND lc.user_id != CAST(:user_id AS uuid)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM learning_courses lc2
+                          WHERE lc2.user_id = CAST(:user_id AS uuid)
+                            AND lc2.cloned_from = lc.id
+                      )
+                """),
+                params,
+            ).fetchall()
+        else:
+            group_records = []
     finally:
         session.close()
 
@@ -109,6 +185,9 @@ def list_courses(
             is_template=bool(r[2]),
             is_published=bool(r[3]),
             is_enrollable=False,
+            visibility=r[4] or "private",
+            group_id=str(r[5]) if r[5] else None,
+            description=r[6] or "",
         )
         for r in own_records
     ]
@@ -119,8 +198,24 @@ def list_courses(
             is_template=True,
             is_published=True,
             is_enrollable=True,
+            visibility=r[2] or "public",
+            group_id=str(r[3]) if r[3] else None,
+            description=r[4] or "",
         )
-        for r in template_records
+        for r in public_records
+    )
+    courses.extend(
+        LearningCourseOut(
+            id=r[0],
+            title=r[1],
+            is_template=False,
+            is_published=False,
+            is_enrollable=True,
+            visibility=r[2] or "group",
+            group_id=str(r[3]) if r[3] else None,
+            description=r[4] or "",
+        )
+        for r in group_records
     )
     return courses
 
@@ -208,13 +303,15 @@ def enroll_course(
     course_id: str,
     current_user: dict = Depends(_get_current_user),
 ) -> LearningCourseOut:
-    """公開テンプレートコースをクローンして自分のコースとして登録する。"""
+    """受講可能なコース（公開/グループ共有）をクローンして自分のコースとして登録する。"""
     session = _pg_session()
     try:
         record = session.execute(
             sa_text("""
-                SELECT data FROM learning_courses
-                WHERE id = :course_id AND is_published = true AND is_template = true
+                SELECT data, COALESCE(visibility, 'private'), group_id,
+                       COALESCE(is_published, false), COALESCE(is_template, false)
+                FROM learning_courses
+                WHERE id = :course_id
                 LIMIT 1
             """),
             {"course_id": course_id},
@@ -223,9 +320,21 @@ def enroll_course(
         session.close()
 
     if not record or not record[0]:
-        raise HTTPException(status_code=404, detail="Published course not found")
+        raise HTTPException(status_code=404, detail="Course not found")
 
-    template_data = record[0] if isinstance(record[0], dict) else json.loads(record[0])
+    data_raw, visibility, group_id, is_published, is_template = record
+    enrollable = False
+    if visibility == "public" and is_published and is_template:
+        enrollable = True
+    elif visibility == "group" and group_id and user_can_access_group(
+        current_user["id"], str(group_id)
+    ):
+        enrollable = True
+
+    if not enrollable:
+        raise HTTPException(status_code=403, detail="このコースを受講する権限がありません")
+
+    template_data = data_raw if isinstance(data_raw, dict) else json.loads(data_raw)
 
     new_course_id = str(uuid.uuid4())[:8]
     cloned_data = dict(template_data)

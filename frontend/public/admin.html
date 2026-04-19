@@ -30,6 +30,7 @@
       <button class="admin-tab" data-tab="lecture-studio">原稿スタジオ</button>
       <button class="admin-tab" data-tab="stumbles">つまづきデータ</button>
       <button class="admin-tab" data-tab="schema-proposals">スキーマ提案</button>
+      <button class="admin-tab" data-tab="groups">グループ管理</button>
     </div>
 
     <!-- Materials tab -->
@@ -201,6 +202,52 @@
             <button id="sp-canary-confirm" class="admin-action-btn" style="margin-top:8px;font-size:12px">選択したコースに適用</button>
           </div>
           <div id="sp-approve-msg" class="upload-status" style="display:none;margin-top:8px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Groups tab (Issue #121) -->
+    <div class="admin-panel" id="tab-groups">
+      <div class="admin-section">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <h3 class="admin-section-title" style="margin-bottom:0">グループ管理</h3>
+          <button id="groups-refresh" class="admin-action-btn">更新</button>
+        </div>
+        <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:16px">
+          教材・コースをグループ内限定で共有したり、ゼミ生にアカウント招待を送ることができます。
+        </p>
+
+        <!-- Pending invitations for me -->
+        <div id="groups-my-invitations" style="margin-bottom:16px"></div>
+
+        <!-- Join by code form -->
+        <form id="groups-join-form" style="display:flex;gap:8px;align-items:center;margin-bottom:16px">
+          <input type="text" id="groups-join-code" placeholder="招待コードを入力..." style="flex:1;max-width:240px;padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
+          <button type="submit" id="groups-join-btn" class="admin-action-btn">招待コードで参加</button>
+        </form>
+
+        <!-- Create group form -->
+        <form id="groups-create-form" style="display:flex;gap:8px;align-items:center;margin-bottom:16px">
+          <input type="text" id="groups-new-name" placeholder="新規グループ名..." style="flex:1;max-width:240px;padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
+          <input type="text" id="groups-new-desc" placeholder="説明 (任意)" style="flex:1;padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
+          <button type="submit" id="groups-create-btn" class="admin-action-btn" style="background:var(--color-text-success);color:#fff">グループを作成</button>
+        </form>
+
+        <div id="groups-status" class="upload-status" style="display:none"></div>
+
+        <!-- Group list + details -->
+        <div style="display:flex;gap:16px">
+          <div style="flex:0 0 260px">
+            <h4 style="font-size:13px;margin:0 0 8px 0;color:var(--color-text-secondary)">所属グループ</h4>
+            <div id="groups-list" style="border:1px solid var(--color-border);border-radius:4px;overflow:hidden">
+              <div style="padding:12px;color:var(--color-text-tertiary);font-size:13px">読み込み中...</div>
+            </div>
+          </div>
+          <div style="flex:1">
+            <div id="groups-detail">
+              <p style="color:var(--color-text-tertiary);font-size:13px">グループを選択してください</p>
+            </div>
+          </div>
         </div>
       </div>
     </div>
