@@ -563,3 +563,23 @@ class GroupInvitationOut(BaseModel):
     status: str = "pending"  # pending | accepted | declined | revoked
     created_at: str = ""
     responded_at: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Course-Group Permissions (Issue #125)
+# ---------------------------------------------------------------------------
+
+class CourseGroupPermissionOut(BaseModel):
+    """コースに紐づくグループ権限。"""
+    course_id: str
+    group_id: str
+    group_name: str = ""
+    permission: str = "viewer"  # viewer | editor
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class CourseGroupPermissionUpsertRequest(BaseModel):
+    """コースにグループ権限マッピングを追加/更新するリクエスト。"""
+    group_id: str
+    permission: str = "viewer"  # viewer | editor

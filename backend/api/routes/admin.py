@@ -27,6 +27,8 @@ from schemas import (
     CourseBuilderSessionCreate,
     CourseBuilderSessionOut,
     CourseBuilderSessionUpdate,
+    CourseGroupPermissionOut,
+    CourseGroupPermissionUpsertRequest,
     CreateUserRequest,
     DeleteConfirmRequest,
     MaterialOut,
@@ -43,9 +45,14 @@ from services import (
     _material_status,
     create_background_task,
     get_background_task,
+    get_course_group_permissions,
+    get_user_group_ids,
     process_material_background,
     save_cb_session,
     user_can_access_group,
+    user_can_edit_course,
+    user_can_view_course,
+    user_owns_course,
 )
 from core.llm import generate_text
 from core.meta_analyzer import (
@@ -146,18 +153,56 @@ def upload_material(
 def list_materials(
     current_user: dict = Depends(_require_teacher),
 ) -> list[MaterialOut]:
-    """アップロード済み教材の一覧を返す。"""
+    """アップロード済み教材の一覧を返す。
+
+    Issue #128: 「自分がアップロードしたもの」に加え、以下を含める。
+    - visibility='public' の教材
+    - visibility='group' かつ自分の参加グループで共有された教材
+    - 自分が editor/viewer 権限を持つコースで参照されている教材
+      （course_group_permissions 経由）
+    """
+    user_groups = get_user_group_ids(current_user["id"])
+
+    params: dict = {"user_id": current_user["id"]}
+    group_clause = "FALSE"
+    course_mat_clause = "FALSE"
+
+    if user_groups:
+        gph = ", ".join(f"CAST(:g_{i} AS uuid)" for i in range(len(user_groups)))
+        for i, gid in enumerate(user_groups):
+            params[f"g_{i}"] = gid
+        group_clause = f"(visibility = 'group' AND group_id IN ({gph}))"
+        course_mat_clause = f"""
+            source_path IN (
+                SELECT (jsonb_array_elements(lc.data->'sources')->>'material_id')
+                FROM learning_courses lc
+                JOIN course_group_permissions cgp ON cgp.course_id = lc.id
+                JOIN group_members gm ON gm.group_id = cgp.group_id
+                WHERE gm.user_id = CAST(:user_id AS uuid)
+                  AND cgp.group_id IN ({gph})
+                  AND cgp.permission IN ('viewer', 'editor')
+                  AND lc.data IS NOT NULL
+                  AND jsonb_typeof(lc.data->'sources') = 'array'
+            )
+        """
+
     session = _pg_session()
     try:
         records = session.execute(
-            sa_text("""
+            sa_text(f"""
                 SELECT source_path, filename, title, status, created_at, knowledge_graph,
                        COALESCE(visibility, 'private'), group_id
                 FROM documents
-                WHERE uploaded_by = CAST(:user_id AS uuid) AND filename IS NOT NULL
+                WHERE filename IS NOT NULL
+                  AND (
+                      uploaded_by = CAST(:user_id AS uuid)
+                      OR visibility = 'public'
+                      OR {group_clause}
+                      OR {course_mat_clause}
+                  )
                 ORDER BY created_at DESC
             """),
-            {"user_id": current_user["id"]},
+            params,
         ).fetchall()
     finally:
         session.close()
@@ -192,18 +237,52 @@ def get_material(
     material_id: str,
     current_user: dict = Depends(_require_teacher),
 ) -> MaterialOut:
-    """教材の詳細情報（ナレッジグラフ含む）を返す。"""
+    """教材の詳細情報（ナレッジグラフ含む）を返す。
+
+    Issue #128: list_materials と同じアクセスポリシーで判定する。
+    """
+    user_groups = get_user_group_ids(current_user["id"])
+
+    params: dict = {"user_id": current_user["id"], "material_id": material_id}
+    group_clause = "FALSE"
+    course_mat_clause = "FALSE"
+
+    if user_groups:
+        gph = ", ".join(f"CAST(:g_{i} AS uuid)" for i in range(len(user_groups)))
+        for i, gid in enumerate(user_groups):
+            params[f"g_{i}"] = gid
+        group_clause = f"(visibility = 'group' AND group_id IN ({gph}))"
+        course_mat_clause = f"""
+            source_path IN (
+                SELECT (jsonb_array_elements(lc.data->'sources')->>'material_id')
+                FROM learning_courses lc
+                JOIN course_group_permissions cgp ON cgp.course_id = lc.id
+                JOIN group_members gm ON gm.group_id = cgp.group_id
+                WHERE gm.user_id = CAST(:user_id AS uuid)
+                  AND cgp.group_id IN ({gph})
+                  AND cgp.permission IN ('viewer', 'editor')
+                  AND lc.data IS NOT NULL
+                  AND jsonb_typeof(lc.data->'sources') = 'array'
+            )
+        """
+
     session = _pg_session()
     try:
         record = session.execute(
-            sa_text("""
+            sa_text(f"""
                 SELECT source_path, filename, title, status, created_at, knowledge_graph,
                        COALESCE(visibility, 'private'), group_id
                 FROM documents
-                WHERE uploaded_by = CAST(:user_id AS uuid) AND source_path = :material_id
+                WHERE source_path = :material_id
+                  AND (
+                      uploaded_by = CAST(:user_id AS uuid)
+                      OR visibility = 'public'
+                      OR {group_clause}
+                      OR {course_mat_clause}
+                  )
                 LIMIT 1
             """),
-            {"user_id": current_user["id"], "material_id": material_id},
+            params,
         ).fetchone()
     finally:
         session.close()
@@ -941,18 +1020,34 @@ def update_cb_session(
 def list_teacher_courses(
     current_user: dict = Depends(_require_teacher),
 ) -> list[dict]:
-    """教員が所有するコース一覧を返す（コースビルダーでのインポート用）。"""
+    """教員が管理できるコース一覧を返す。
+
+    - 自身が所有するコース (role='owner')
+    - editor 権限グループに所属している場合、そのグループにマッピングされたコース (role='editor')
+    - viewer 権限グループに所属している場合も同様にリストに含める (role='viewer')
+
+    （Issue #125: editor 権限グループの教員も管理画面からコースの閲覧・編集が行える）
+    （Issue #129: viewer 権限グループのメンバーもコース管理画面で閲覧できるようにする）
+    """
     session = _pg_session()
     try:
         records = session.execute(
             sa_text("""
-                SELECT id, title,
-                       COALESCE(is_template, false) AS is_template,
-                       COALESCE(is_published, false) AS is_published,
-                       created_at, updated_at
-                FROM learning_courses
-                WHERE user_id = CAST(:user_id AS uuid)
-                ORDER BY updated_at DESC
+                SELECT DISTINCT lc.id, lc.title,
+                       COALESCE(lc.is_template, false) AS is_template,
+                       COALESCE(lc.is_published, false) AS is_published,
+                       lc.created_at, lc.updated_at,
+                       CASE WHEN lc.user_id = CAST(:user_id AS uuid)
+                            THEN 'owner' ELSE cgp.permission END AS role
+                FROM learning_courses lc
+                LEFT JOIN course_group_permissions cgp ON cgp.course_id = lc.id
+                LEFT JOIN group_members gm
+                       ON gm.group_id = cgp.group_id
+                      AND gm.user_id = CAST(:user_id AS uuid)
+                WHERE lc.user_id = CAST(:user_id AS uuid)
+                   OR (cgp.permission IN ('editor', 'viewer')
+                       AND gm.user_id IS NOT NULL)
+                ORDER BY lc.updated_at DESC
             """),
             {"user_id": current_user["id"]},
         ).fetchall()
@@ -967,6 +1062,7 @@ def list_teacher_courses(
             "is_published": bool(r[3]),
             "created_at": r[4].isoformat() if r[4] else "",
             "updated_at": r[5].isoformat() if r[5] else "",
+            "role": r[6],  # "owner" | "editor" | "viewer"
         }
         for r in records
     ]
@@ -980,16 +1076,20 @@ def get_course_as_draft(
     """登録済みコースのデータを course_draft 形式に変換して返す。
 
     Course Builder にインポートするためのアダプタエンドポイント。
+    所有者に加え、editor 権限グループのメンバーもアクセスできる。
     """
+    if not user_can_edit_course(current_user["id"], course_id):
+        raise HTTPException(status_code=404, detail="Course not found")
+
     session = _pg_session()
     try:
         record = session.execute(
             sa_text("""
                 SELECT data, title FROM learning_courses
-                WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
+                WHERE id = :course_id
                 LIMIT 1
             """),
-            {"course_id": course_id, "user_id": current_user["id"]},
+            {"course_id": course_id},
         ).fetchone()
     finally:
         session.close()
@@ -1066,22 +1166,120 @@ def get_course_as_draft(
     }
 
 
-@router.put("/courses/{course_id}/publish")
-def publish_course(
+# ---------------------------------------------------------------------------
+# Course × Group Permissions (Issue #125)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/courses/{course_id}/groups",
+    response_model=list[CourseGroupPermissionOut],
+)
+def list_course_group_permissions(
     course_id: str,
     current_user: dict = Depends(_require_teacher),
+) -> list[CourseGroupPermissionOut]:
+    """コースに紐づくグループ権限マッピングの一覧を返す。
+
+    所有者、editor/viewer 権限グループのメンバーいずれもが現在の共有設定を
+    参照できる（表示用）。変更は所有者のみ。
+    """
+    if not user_can_view_course(current_user["id"], course_id):
+        raise HTTPException(status_code=404, detail="Course not found")
+    rows = get_course_group_permissions(course_id)
+    return [CourseGroupPermissionOut(**r) for r in rows]
+
+
+@router.post(
+    "/courses/{course_id}/groups",
+    response_model=CourseGroupPermissionOut,
+    status_code=201,
+)
+def upsert_course_group_permission(
+    course_id: str,
+    body: CourseGroupPermissionUpsertRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> CourseGroupPermissionOut:
+    """コースにグループ権限を付与する（既存なら権限を更新）。
+
+    共有設定の変更はコースの所有者のみ可能。
+    """
+    if body.permission not in ("viewer", "editor"):
+        raise HTTPException(
+            status_code=400, detail="permission must be 'viewer' or 'editor'",
+        )
+    if not user_owns_course(current_user["id"], course_id):
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    session = _pg_session()
+    try:
+        group_row = session.execute(
+            sa_text("SELECT name FROM groups WHERE id = CAST(:gid AS uuid) LIMIT 1"),
+            {"gid": body.group_id},
+        ).fetchone()
+        if not group_row:
+            raise HTTPException(status_code=404, detail="Group not found")
+
+        row = session.execute(
+            sa_text("""
+                INSERT INTO course_group_permissions (course_id, group_id, permission)
+                VALUES (:course_id, CAST(:gid AS uuid), :permission)
+                ON CONFLICT (course_id, group_id) DO UPDATE
+                SET permission = EXCLUDED.permission,
+                    updated_at = now()
+                RETURNING course_id, group_id, permission, created_at, updated_at
+            """),
+            {
+                "course_id": course_id,
+                "gid": body.group_id,
+                "permission": body.permission,
+            },
+        ).fetchone()
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    logger.info(
+        "Course %s group permission set: group=%s permission=%s by user=%s",
+        course_id, body.group_id, body.permission, current_user["id"],
+    )
+    return CourseGroupPermissionOut(
+        course_id=row[0],
+        group_id=str(row[1]),
+        group_name=group_row[0] or "",
+        permission=row[2],
+        created_at=row[3].isoformat() if row[3] else "",
+        updated_at=row[4].isoformat() if row[4] else "",
+    )
+
+
+@router.delete("/courses/{course_id}/groups/{group_id}")
+def delete_course_group_permission(
+    course_id: str,
+    group_id: str,
+    current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """コースを学生に公開する。"""
+    """コースからグループ権限マッピングを削除する。
+
+    共有設定の変更はコースの所有者のみ可能。
+    """
+    if not user_owns_course(current_user["id"], course_id):
+        raise HTTPException(status_code=404, detail="Course not found")
+
     session = _pg_session()
     try:
         result = session.execute(
             sa_text("""
-                UPDATE learning_courses
-                SET is_published = true, is_template = true, updated_at = now()
-                WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
-                RETURNING id
+                DELETE FROM course_group_permissions
+                WHERE course_id = :course_id AND group_id = CAST(:gid AS uuid)
+                RETURNING course_id
             """),
-            {"course_id": course_id, "user_id": current_user["id"]},
+            {"course_id": course_id, "gid": group_id},
         ).fetchone()
         session.commit()
     except Exception:
@@ -1091,9 +1289,12 @@ def publish_course(
         session.close()
 
     if not result:
-        raise HTTPException(status_code=404, detail="Course not found")
-    logger.info("Course %s published by user=%s", course_id, current_user["id"])
-    return {"course_id": course_id, "is_published": True}
+        raise HTTPException(status_code=404, detail="Permission mapping not found")
+    logger.info(
+        "Course %s group permission removed: group=%s by user=%s",
+        course_id, group_id, current_user["id"],
+    )
+    return {"course_id": course_id, "group_id": group_id, "deleted": True}
 
 
 @router.delete("/courses/{course_id}")
@@ -1105,16 +1306,20 @@ def delete_course(
     """コースを削除する。
 
     confirm_name がコースタイトルと一致しない場合は 400 を返す。
+    所有者、または editor 権限グループのメンバーのみ削除可能。
     """
+    if not user_can_edit_course(current_user["id"], course_id):
+        raise HTTPException(status_code=404, detail="Course not found")
+
     session = _pg_session()
     try:
         record = session.execute(
             sa_text("""
                 SELECT id, title FROM learning_courses
-                WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
+                WHERE id = :course_id
                 LIMIT 1
             """),
-            {"course_id": course_id, "user_id": current_user["id"]},
+            {"course_id": course_id},
         ).fetchone()
 
         if not record:
@@ -1132,13 +1337,10 @@ def delete_course(
             sa_text("DELETE FROM learning_chat_history WHERE course_id = :cid"),
             {"cid": course_id},
         )
-        # コース削除
+        # コース削除（CASCADE で course_group_permissions も削除される）
         session.execute(
-            sa_text("""
-                DELETE FROM learning_courses
-                WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
-            """),
-            {"course_id": course_id, "user_id": current_user["id"]},
+            sa_text("DELETE FROM learning_courses WHERE id = :course_id"),
+            {"course_id": course_id},
         )
         session.commit()
     except HTTPException:

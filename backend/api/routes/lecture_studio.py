@@ -35,7 +35,10 @@ from schemas import (
 from services import (
     create_background_task,
     get_course_data,
+    get_editable_course_data,
+    get_viewable_course_data,
     update_background_task,
+    user_can_edit_course,
 )
 from core.lecture import generate_spoken_text_and_formulas, normalize_to_placeholder_format
 from core.llm import generate_text, get_llm_params
@@ -225,7 +228,7 @@ def batch_generate_scripts(
     進捗は GET /api/admin/tasks/{task_id} でポーリングして確認する。
     result_data.progress (0-100) で進捗率を取得できる。
     """
-    course_data = get_course_data(current_user["id"], course_id)
+    course_data = get_editable_course_data(current_user["id"], course_id)
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
 
@@ -275,8 +278,11 @@ def get_course_scripts(
     course_id: str,
     current_user: dict = Depends(_require_teacher),
 ) -> list[LectureScriptChunkOut]:
-    """コースに紐づくチャンクのスクリプト一覧を取得する。"""
-    course_data = get_course_data(current_user["id"], course_id)
+    """コースに紐づくチャンクのスクリプト一覧を取得する。
+
+    閲覧権限（オーナー / editor / viewer グループ）で許可する。
+    """
+    course_data = get_viewable_course_data(current_user["id"], course_id)
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
 
@@ -635,7 +641,7 @@ def batch_generate_audio(
     進捗は GET /api/admin/tasks/{task_id} でポーリングして確認する。
     result_data.progress (0-100) で進捗率を取得できる。
     """
-    course_data = get_course_data(current_user["id"], course_id)
+    course_data = get_editable_course_data(current_user["id"], course_id)
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
 

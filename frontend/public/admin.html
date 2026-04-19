@@ -27,6 +27,7 @@
     <div class="admin-tabs" id="adminTabs">
       <button class="admin-tab on" data-tab="materials">教材管理</button>
       <button class="admin-tab" data-tab="course-builder">コース構築</button>
+      <button class="admin-tab" data-tab="course-management">コース管理</button>
       <button class="admin-tab" data-tab="lecture-studio">原稿スタジオ</button>
       <button class="admin-tab" data-tab="stumbles">つまづきデータ</button>
       <button class="admin-tab" data-tab="schema-proposals">スキーマ提案</button>
@@ -112,6 +113,34 @@
         </div>
       </div>
     </div>
+    <!-- Course Management tab (Issue #125) -->
+    <div class="admin-panel" id="tab-course-management">
+      <div class="admin-section">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <h3 class="admin-section-title" style="margin-bottom:0">コース管理</h3>
+          <button id="cm-refresh" class="admin-action-btn">更新</button>
+        </div>
+        <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:16px">
+          作成済みのコースを一覧し、グループ単位での共有（viewer=受講可・editor=編集可）を設定できます。
+        </p>
+        <div id="cm-status" class="upload-status" style="display:none"></div>
+        <table class="admin-table" id="cm-table">
+          <thead>
+            <tr>
+              <th>タイトル</th>
+              <th>役割</th>
+              <th>共有グループ</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="cm-tbody">
+            <tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">読み込み中...</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+    </div>
+
     <!-- Lecture Script Studio tab (Issue #70) -->
     <div class="admin-panel" id="tab-lecture-studio">
       <div class="ls-container">

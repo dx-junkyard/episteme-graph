@@ -25,7 +25,9 @@ GET  /api/admin/course-builder/sessions                         セッション�
 GET  /api/admin/course-builder/sessions/{session_id}            セッション取得
 PUT  /api/admin/course-builder/sessions/{session_id}            セッション更新
 POST /api/admin/course-builder/chat                             コース構築AIチャット
-PUT  /api/admin/courses/{course_id}/publish                     コースを学生に公開
+GET  /api/admin/courses/{course_id}/groups                      コースに紐づくグループ権限一覧 (Issue #125)
+POST /api/admin/courses/{course_id}/groups                      コースにグループ権限を付与 (viewer/editor)
+DELETE /api/admin/courses/{course_id}/groups/{group_id}         コースからグループ権限を削除
 POST /api/admin/users/student                                   学生アカウント作成 (TEACHER)
 POST /api/admin/users/teacher                                   教員アカウント作成 (SYSTEM_ADMIN)
 POST /api/groups                                                グループ作成
@@ -311,8 +313,31 @@ def _run_migrations() -> None:
             "CREATE INDEX IF NOT EXISTS idx_courses_visibility ON learning_courses(visibility)"
         ))
 
+        # Migration 010: コース × グループ 権限マッピング (Issue #125)
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS course_group_permissions (
+                course_id   TEXT NOT NULL REFERENCES learning_courses(id) ON DELETE CASCADE,
+                group_id    UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                permission  TEXT NOT NULL DEFAULT 'viewer'
+                                CHECK (permission IN ('viewer', 'editor')),
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (course_id, group_id)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_cgp_course ON course_group_permissions(course_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_cgp_group ON course_group_permissions(group_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_cgp_group_permission "
+            "ON course_group_permissions(group_id, permission)"
+        ))
+
         session.commit()
-        logger.info("Migrations (002-009) applied successfully.")
+        logger.info("Migrations (002-010) applied successfully.")
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema
