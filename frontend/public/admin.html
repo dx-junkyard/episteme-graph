@@ -221,17 +221,17 @@
         <div id="groups-my-invitations" style="margin-bottom:16px"></div>
 
         <!-- Join by code form -->
-        <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px">
+        <form id="groups-join-form" style="display:flex;gap:8px;align-items:center;margin-bottom:16px">
           <input type="text" id="groups-join-code" placeholder="招待コードを入力..." style="flex:1;max-width:240px;padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
-          <button id="groups-join-btn" class="admin-action-btn">招待コードで参加</button>
-        </div>
+          <button type="submit" id="groups-join-btn" class="admin-action-btn">招待コードで参加</button>
+        </form>
 
         <!-- Create group form -->
-        <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px">
+        <form id="groups-create-form" style="display:flex;gap:8px;align-items:center;margin-bottom:16px">
           <input type="text" id="groups-new-name" placeholder="新規グループ名..." style="flex:1;max-width:240px;padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
           <input type="text" id="groups-new-desc" placeholder="説明 (任意)" style="flex:1;padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
-          <button id="groups-create-btn" class="admin-action-btn" style="background:var(--color-text-success);color:#fff">グループを作成</button>
-        </div>
+          <button type="submit" id="groups-create-btn" class="admin-action-btn" style="background:var(--color-text-success);color:#fff">グループを作成</button>
+        </form>
 
         <div id="groups-status" class="upload-status" style="display:none"></div>
 

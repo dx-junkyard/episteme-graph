@@ -2420,9 +2420,25 @@
   var _groupsState = { list: [], selectedId: null };
 
   function initGroups() {
-    document.getElementById("groups-refresh").addEventListener("click", loadGroups);
-    document.getElementById("groups-create-btn").addEventListener("click", createGroup);
-    document.getElementById("groups-join-btn").addEventListener("click", joinByCode);
+    var refreshBtn = document.getElementById("groups-refresh");
+    if (refreshBtn) refreshBtn.addEventListener("click", loadGroups);
+
+    var createForm = document.getElementById("groups-create-form");
+    if (createForm) {
+      createForm.addEventListener("submit", function (e) {
+        e.preventDefault();
+        createGroup();
+      });
+    }
+
+    var joinForm = document.getElementById("groups-join-form");
+    if (joinForm) {
+      joinForm.addEventListener("submit", function (e) {
+        e.preventDefault();
+        joinByCode();
+      });
+    }
+
     loadGroups();
     loadMyInvitations();
   }

@@ -77,6 +77,12 @@ class _FakeSession:
 
     def __init__(self, store: _Store):
         self.store = store
+        # rollback 用にスナップショットを取る（shallow なリスト/辞書コピー）
+        self._snapshot = {
+            "groups": {k: dict(v) for k, v in store.groups.items()},
+            "members": [dict(m) for m in store.members],
+            "invitations": [dict(i) for i in store.invitations],
+        }
 
     # -- helpers ----------------------------------------------------------
     def _group_row(self, g):
@@ -94,6 +100,39 @@ class _FakeSession:
     def execute(self, query, params=None):
         sql = str(query).strip()
         p = params or {}
+
+        # --- DELETE / UPDATE ブランチは SELECT より先に評価する
+        # (両者が "FROM groups WHERE id = CAST" という部分文字列を共有するため)
+        if sql.startswith("DELETE FROM group_members"):
+            gid = str(p["gid"]); uid = str(p["uid"])
+            before = len(self.store.members)
+            self.store.members = [
+                m for m in self.store.members
+                if not (m["group_id"] == gid and m["user_id"] == uid)
+            ]
+            if len(self.store.members) < before:
+                return _Result([(str(uuid.uuid4()),)])  # RETURNING id dummy
+            return _Result([])
+
+        if sql.startswith("DELETE FROM groups"):
+            gid = str(p["id"])
+            self.store.groups.pop(gid, None)
+            self.store.members = [m for m in self.store.members if m["group_id"] != gid]
+            self.store.invitations = [i for i in self.store.invitations if i["group_id"] != gid]
+            return _Result()
+
+        if sql.startswith("UPDATE groups"):
+            gid = str(p["id"])
+            g = self.store.groups.get(gid)
+            if g:
+                if "name" in p:
+                    g["name"] = p["name"]
+                if "description" in p:
+                    g["description"] = p["description"]
+                if "code" in p:
+                    g["invite_code"] = p["code"]
+                g["updated_at"] = dt.datetime.utcnow()
+            return _Result()
 
         # --- INSERT into groups ---
         if sql.startswith("INSERT INTO groups"):
@@ -312,48 +351,22 @@ class _FakeSession:
                     ))
             return _Result(out)
 
-        # --- DELETE group_members by group+user ---
-        if sql.startswith("DELETE FROM group_members"):
-            gid = str(p["gid"]); uid = str(p["uid"])
-            before = len(self.store.members)
-            self.store.members = [
-                m for m in self.store.members
-                if not (m["group_id"] == gid and m["user_id"] == uid)
-            ]
-            if len(self.store.members) < before:
-                return _Result([(str(uuid.uuid4()),)])  # RETURNING id dummy
-            return _Result([])
-
-        # --- DELETE group ---
-        if sql.startswith("DELETE FROM groups"):
-            gid = str(p["id"])
-            self.store.groups.pop(gid, None)
-            self.store.members = [m for m in self.store.members if m["group_id"] != gid]
-            self.store.invitations = [i for i in self.store.invitations if i["group_id"] != gid]
-            return _Result()
-
-        # --- UPDATE groups ---
-        if sql.startswith("UPDATE groups"):
-            gid = str(p["id"])
-            g = self.store.groups.get(gid)
-            if g:
-                if "name" in p:
-                    g["name"] = p["name"]
-                if "description" in p:
-                    g["description"] = p["description"]
-                if "code" in p:
-                    g["invite_code"] = p["code"]
-                g["updated_at"] = dt.datetime.utcnow()
-            return _Result()
-
         # Default
         return _Result()
 
     def commit(self):
-        pass
+        # スナップショットを現在の状態で更新
+        self._snapshot = {
+            "groups": {k: dict(v) for k, v in self.store.groups.items()},
+            "members": [dict(m) for m in self.store.members],
+            "invitations": [dict(i) for i in self.store.invitations],
+        }
 
     def rollback(self):
-        pass
+        # 直近 commit 時点の状態に戻す
+        self.store.groups = {k: dict(v) for k, v in self._snapshot["groups"].items()}
+        self.store.members = [dict(m) for m in self._snapshot["members"]]
+        self.store.invitations = [dict(i) for i in self._snapshot["invitations"]]
 
     def close(self):
         pass
@@ -577,6 +590,273 @@ class TestInviteCodeGeneration:
         for c in codes:
             assert len(c) == 12
             assert all(ch.isalnum() or ch in "-_" for ch in c)
+
+
+class TestInviteCodeRotation:
+    """招待コード再発行（無効化）フロー。"""
+
+    def test_rotate_invalidates_old_code_and_new_code_works(self, client_and_state):
+        client, current, store = client_and_state
+
+        # Alice がグループ作成
+        current["user"] = USER_ALICE
+        grp = client.post("/api/groups", json={"name": "RotGrp"}, headers=_h()).json()
+        old_code = grp["invite_code"]
+        gid = grp["id"]
+        assert old_code
+
+        # 招待コード再発行
+        resp = client.post(f"/api/groups/{gid}/invite-code/rotate", headers=_h())
+        assert resp.status_code == 200, resp.text
+        new_code = resp.json()["invite_code"]
+        assert new_code and new_code != old_code
+
+        # Bob が古いコードで参加しようとすると 404
+        current["user"] = USER_BOB
+        old_resp = client.post(
+            "/api/groups/join-by-code",
+            json={"invite_code": old_code},
+            headers=_h(),
+        )
+        assert old_resp.status_code == 404
+
+        # Bob が新しいコードで参加すると成功
+        new_resp = client.post(
+            "/api/groups/join-by-code",
+            json={"invite_code": new_code},
+            headers=_h(),
+        )
+        assert new_resp.status_code == 200, new_resp.text
+        assert new_resp.json()["id"] == gid
+
+    def test_non_admin_cannot_rotate_invite_code(self, client_and_state):
+        client, current, store = client_and_state
+
+        current["user"] = USER_ALICE
+        grp = client.post("/api/groups", json={"name": "G"}, headers=_h()).json()
+        code = grp["invite_code"]
+
+        # Bob が参加
+        current["user"] = USER_BOB
+        client.post("/api/groups/join-by-code", json={"invite_code": code}, headers=_h())
+
+        # Bob (member) が rotate を叩く → 403
+        resp = client.post(f"/api/groups/{grp['id']}/invite-code/rotate", headers=_h())
+        assert resp.status_code == 403
+
+
+class TestMemberRemoval:
+    """メンバー削除・退会・最後の admin 保護。"""
+
+    def test_admin_can_remove_member(self, client_and_state):
+        client, current, store = client_and_state
+
+        # Alice（admin）がグループ作成、Bob が参加
+        current["user"] = USER_ALICE
+        grp = client.post("/api/groups", json={"name": "RmGrp"}, headers=_h()).json()
+        current["user"] = USER_BOB
+        client.post(
+            "/api/groups/join-by-code",
+            json={"invite_code": grp["invite_code"]},
+            headers=_h(),
+        )
+        assert any(m["user_id"] == USER_BOB["id"] for m in store.members)
+
+        # Alice が Bob を除名
+        current["user"] = USER_ALICE
+        resp = client.delete(
+            f"/api/groups/{grp['id']}/members/{USER_BOB['id']}",
+            headers=_h(),
+        )
+        assert resp.status_code == 200
+        assert not any(
+            m["user_id"] == USER_BOB["id"] and m["group_id"] == grp["id"]
+            for m in store.members
+        )
+
+    def test_member_can_leave_themselves(self, client_and_state):
+        client, current, store = client_and_state
+
+        current["user"] = USER_ALICE
+        grp = client.post("/api/groups", json={"name": "LeaveGrp"}, headers=_h()).json()
+
+        current["user"] = USER_BOB
+        client.post(
+            "/api/groups/join-by-code",
+            json={"invite_code": grp["invite_code"]},
+            headers=_h(),
+        )
+        # Bob が自分自身を退会
+        resp = client.delete(
+            f"/api/groups/{grp['id']}/members/{USER_BOB['id']}",
+            headers=_h(),
+        )
+        assert resp.status_code == 200
+        assert not any(m["user_id"] == USER_BOB["id"] for m in store.members)
+
+    def test_non_admin_cannot_remove_others(self, client_and_state):
+        client, current, store = client_and_state
+
+        current["user"] = USER_ALICE
+        grp = client.post("/api/groups", json={"name": "G"}, headers=_h()).json()
+        current["user"] = USER_BOB
+        client.post(
+            "/api/groups/join-by-code",
+            json={"invite_code": grp["invite_code"]},
+            headers=_h(),
+        )
+
+        # Bob（member）が Alice（admin）を除名しようとする → 403
+        resp = client.delete(
+            f"/api/groups/{grp['id']}/members/{USER_ALICE['id']}",
+            headers=_h(),
+        )
+        assert resp.status_code == 403
+        # Alice はまだメンバーのまま
+        assert any(m["user_id"] == USER_ALICE["id"] for m in store.members)
+
+    def test_removing_last_admin_is_rejected(self, client_and_state):
+        client, current, store = client_and_state
+
+        # Alice だけのグループを作り、Alice が自分自身を退会しようとする
+        current["user"] = USER_ALICE
+        grp = client.post("/api/groups", json={"name": "LastAdmin"}, headers=_h()).json()
+
+        resp = client.delete(
+            f"/api/groups/{grp['id']}/members/{USER_ALICE['id']}",
+            headers=_h(),
+        )
+        assert resp.status_code == 400
+        # Alice は残っている（ロールバックされた）
+        assert any(
+            m["user_id"] == USER_ALICE["id"] and m["group_id"] == grp["id"]
+            for m in store.members
+        )
+
+    def test_remove_nonexistent_member_returns_404(self, client_and_state):
+        client, current, store = client_and_state
+
+        current["user"] = USER_ALICE
+        grp = client.post("/api/groups", json={"name": "G"}, headers=_h()).json()
+
+        # Bob は未参加
+        resp = client.delete(
+            f"/api/groups/{grp['id']}/members/{USER_BOB['id']}",
+            headers=_h(),
+        )
+        assert resp.status_code == 404
+
+
+class TestGroupDeletion:
+    """グループ削除と関連レコードの削除。"""
+
+    def test_admin_can_delete_group(self, client_and_state):
+        client, current, store = client_and_state
+
+        current["user"] = USER_ALICE
+        grp = client.post("/api/groups", json={"name": "ToDelete"}, headers=_h()).json()
+        gid = grp["id"]
+        assert gid in store.groups
+
+        resp = client.delete(f"/api/groups/{gid}", headers=_h())
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] is True
+        assert gid not in store.groups
+        # メンバーレコードも全て消える
+        assert not any(m["group_id"] == gid for m in store.members)
+
+    def test_non_admin_cannot_delete_group(self, client_and_state):
+        client, current, store = client_and_state
+
+        current["user"] = USER_ALICE
+        grp = client.post("/api/groups", json={"name": "NoDel"}, headers=_h()).json()
+        current["user"] = USER_BOB
+        client.post(
+            "/api/groups/join-by-code",
+            json={"invite_code": grp["invite_code"]},
+            headers=_h(),
+        )
+
+        # Bob (member) が削除を試みる → 403
+        resp = client.delete(f"/api/groups/{grp['id']}", headers=_h())
+        assert resp.status_code == 403
+        assert grp["id"] in store.groups
+
+    def test_delete_cascades_invitations(self, client_and_state):
+        client, current, store = client_and_state
+
+        current["user"] = USER_ALICE
+        grp = client.post("/api/groups", json={"name": "CascadeGrp"}, headers=_h()).json()
+        # Bob を招待
+        client.post(
+            f"/api/groups/{grp['id']}/members",
+            json={"username": "bob"},
+            headers=_h(),
+        )
+        assert len(store.invitations) == 1
+
+        # グループ削除
+        resp = client.delete(f"/api/groups/{grp['id']}", headers=_h())
+        assert resp.status_code == 200
+        # 招待も削除される
+        assert not any(inv["group_id"] == grp["id"] for inv in store.invitations)
+
+
+class TestEndToEndGroupLifecycle:
+    """作成 → 招待 → 参加 → ローテーション → 退会 → 削除 の一連フロー。"""
+
+    def test_full_group_lifecycle(self, client_and_state):
+        client, current, store = client_and_state
+
+        # 1. Alice がグループ作成
+        current["user"] = USER_ALICE
+        created = client.post(
+            "/api/groups",
+            json={"name": "FullFlow", "description": "E2E flow"},
+            headers=_h(),
+        )
+        assert created.status_code == 201
+        grp = created.json()
+        gid = grp["id"]
+        first_code = grp["invite_code"]
+
+        # 2. Bob を直接招待
+        inv_resp = client.post(
+            f"/api/groups/{gid}/members",
+            json={"username": "bob"},
+            headers=_h(),
+        )
+        assert inv_resp.status_code == 201
+        inv_id = inv_resp.json()["id"]
+
+        # 3. Bob が招待を承諾
+        current["user"] = USER_BOB
+        acc = client.post(f"/api/me/invitations/{inv_id}/accept", headers=_h())
+        assert acc.status_code == 200
+        assert acc.json()["status"] == "accepted"
+        assert any(m["user_id"] == USER_BOB["id"] and m["group_id"] == gid for m in store.members)
+
+        # 4. Alice が招待コードを再発行 → 旧コード無効化
+        current["user"] = USER_ALICE
+        rot = client.post(f"/api/groups/{gid}/invite-code/rotate", headers=_h())
+        assert rot.status_code == 200
+        new_code = rot.json()["invite_code"]
+        assert new_code != first_code
+
+        # 5. Bob が退会
+        current["user"] = USER_BOB
+        leave = client.delete(
+            f"/api/groups/{gid}/members/{USER_BOB['id']}",
+            headers=_h(),
+        )
+        assert leave.status_code == 200
+        assert not any(m["user_id"] == USER_BOB["id"] and m["group_id"] == gid for m in store.members)
+
+        # 6. Alice がグループを削除
+        current["user"] = USER_ALICE
+        dele = client.delete(f"/api/groups/{gid}", headers=_h())
+        assert dele.status_code == 200
+        assert gid not in store.groups
 
 
 # ---------------------------------------------------------------------------
