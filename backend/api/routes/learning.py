@@ -161,6 +161,8 @@ def list_courses(
             group_records = session.execute(
                 sa_text(f"""
                     SELECT DISTINCT lc.id, lc.title,
+                           COALESCE(lc.is_template, false) AS is_template,
+                           COALESCE(lc.is_published, false) AS is_published,
                            COALESCE(lc.visibility, 'private'),
                            lc.group_id,
                            COALESCE(lc.description, '')
@@ -215,12 +217,12 @@ def list_courses(
         LearningCourseOut(
             id=r[0],
             title=r[1],
-            is_template=False,
-            is_published=False,
+            is_template=bool(r[2]),
+            is_published=bool(r[3]),
             is_enrollable=True,
-            visibility=r[2] or "group",
-            group_id=str(r[3]) if r[3] else None,
-            description=r[4] or "",
+            visibility=r[4] or "group",
+            group_id=str(r[5]) if r[5] else None,
+            description=r[6] or "",
         )
         for r in group_records
     )

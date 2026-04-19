@@ -46,6 +46,7 @@ from services import (
     create_background_task,
     get_background_task,
     get_course_group_permissions,
+    get_user_group_ids,
     process_material_background,
     save_cb_session,
     user_can_access_group,
@@ -150,18 +151,56 @@ def upload_material(
 def list_materials(
     current_user: dict = Depends(_require_teacher),
 ) -> list[MaterialOut]:
-    """アップロード済み教材の一覧を返す。"""
+    """アップロード済み教材の一覧を返す。
+
+    Issue #128: 「自分がアップロードしたもの」に加え、以下を含める。
+    - visibility='public' の教材
+    - visibility='group' かつ自分の参加グループで共有された教材
+    - 自分が editor/viewer 権限を持つコースで参照されている教材
+      （course_group_permissions 経由）
+    """
+    user_groups = get_user_group_ids(current_user["id"])
+
+    params: dict = {"user_id": current_user["id"]}
+    group_clause = "FALSE"
+    course_mat_clause = "FALSE"
+
+    if user_groups:
+        gph = ", ".join(f"CAST(:g_{i} AS uuid)" for i in range(len(user_groups)))
+        for i, gid in enumerate(user_groups):
+            params[f"g_{i}"] = gid
+        group_clause = f"(visibility = 'group' AND group_id IN ({gph}))"
+        course_mat_clause = f"""
+            source_path IN (
+                SELECT (jsonb_array_elements(lc.data->'sources')->>'material_id')
+                FROM learning_courses lc
+                JOIN course_group_permissions cgp ON cgp.course_id = lc.id
+                JOIN group_members gm ON gm.group_id = cgp.group_id
+                WHERE gm.user_id = CAST(:user_id AS uuid)
+                  AND cgp.group_id IN ({gph})
+                  AND cgp.permission IN ('viewer', 'editor')
+                  AND lc.data IS NOT NULL
+                  AND jsonb_typeof(lc.data->'sources') = 'array'
+            )
+        """
+
     session = _pg_session()
     try:
         records = session.execute(
-            sa_text("""
+            sa_text(f"""
                 SELECT source_path, filename, title, status, created_at, knowledge_graph,
                        COALESCE(visibility, 'private'), group_id
                 FROM documents
-                WHERE uploaded_by = CAST(:user_id AS uuid) AND filename IS NOT NULL
+                WHERE filename IS NOT NULL
+                  AND (
+                      uploaded_by = CAST(:user_id AS uuid)
+                      OR visibility = 'public'
+                      OR {group_clause}
+                      OR {course_mat_clause}
+                  )
                 ORDER BY created_at DESC
             """),
-            {"user_id": current_user["id"]},
+            params,
         ).fetchall()
     finally:
         session.close()
@@ -196,18 +235,52 @@ def get_material(
     material_id: str,
     current_user: dict = Depends(_require_teacher),
 ) -> MaterialOut:
-    """教材の詳細情報（ナレッジグラフ含む）を返す。"""
+    """教材の詳細情報（ナレッジグラフ含む）を返す。
+
+    Issue #128: list_materials と同じアクセスポリシーで判定する。
+    """
+    user_groups = get_user_group_ids(current_user["id"])
+
+    params: dict = {"user_id": current_user["id"], "material_id": material_id}
+    group_clause = "FALSE"
+    course_mat_clause = "FALSE"
+
+    if user_groups:
+        gph = ", ".join(f"CAST(:g_{i} AS uuid)" for i in range(len(user_groups)))
+        for i, gid in enumerate(user_groups):
+            params[f"g_{i}"] = gid
+        group_clause = f"(visibility = 'group' AND group_id IN ({gph}))"
+        course_mat_clause = f"""
+            source_path IN (
+                SELECT (jsonb_array_elements(lc.data->'sources')->>'material_id')
+                FROM learning_courses lc
+                JOIN course_group_permissions cgp ON cgp.course_id = lc.id
+                JOIN group_members gm ON gm.group_id = cgp.group_id
+                WHERE gm.user_id = CAST(:user_id AS uuid)
+                  AND cgp.group_id IN ({gph})
+                  AND cgp.permission IN ('viewer', 'editor')
+                  AND lc.data IS NOT NULL
+                  AND jsonb_typeof(lc.data->'sources') = 'array'
+            )
+        """
+
     session = _pg_session()
     try:
         record = session.execute(
-            sa_text("""
+            sa_text(f"""
                 SELECT source_path, filename, title, status, created_at, knowledge_graph,
                        COALESCE(visibility, 'private'), group_id
                 FROM documents
-                WHERE uploaded_by = CAST(:user_id AS uuid) AND source_path = :material_id
+                WHERE source_path = :material_id
+                  AND (
+                      uploaded_by = CAST(:user_id AS uuid)
+                      OR visibility = 'public'
+                      OR {group_clause}
+                      OR {course_mat_clause}
+                  )
                 LIMIT 1
             """),
-            {"user_id": current_user["id"], "material_id": material_id},
+            params,
         ).fetchone()
     finally:
         session.close()
