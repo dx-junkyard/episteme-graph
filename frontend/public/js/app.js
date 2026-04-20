@@ -625,13 +625,17 @@
     if (state.courseId) {
       await loadAndRenderCourse();
     } else {
-      showNoCourseState();
+      showNoCourseState(enrollableCourses.length > 0);
     }
   }
 
   function renderCourseSelect(ownCourses, enrollableCourses) {
     const select = document.getElementById("course-select");
     let html = "";
+
+    if (ownCourses.length === 0 && enrollableCourses.length > 0) {
+      html += '<option value="" disabled selected>受講するコースを選択...</option>';
+    }
 
     // マイコース optgroup
     if (ownCourses.length > 0) {
@@ -710,13 +714,21 @@
     } catch (_) { /* ignore */ }
   }
 
-  function showNoCourseState() {
+  function showNoCourseState(hasEnrollable = false) {
     const select = document.getElementById("course-select");
-    select.innerHTML = '<option value="">コースなし</option>';
-    select.disabled = true;
+    if (!hasEnrollable) {
+      select.innerHTML = '<option value="">コースなし</option>';
+      select.disabled = true;
+    } else {
+      select.disabled = false; // 受講可能コースがあれば有効化しておく
+    }
 
     var ca = document.getElementById("chat-area");
-    ca.innerHTML = '<div class="no-course-message">現在受講可能なコースはありません。<br>教員がコースを公開するまでお待ちください。</div>';
+    if (hasEnrollable) {
+      ca.innerHTML = '<div class="no-course-message">左上のプルダウンから受講するコースを選択してください。</div>';
+    } else {
+      ca.innerHTML = '<div class="no-course-message">現在受講可能なコースはありません。<br>教員がコースを公開するまでお待ちください。</div>';
+    }
 
     setChatEnabled(false);
 

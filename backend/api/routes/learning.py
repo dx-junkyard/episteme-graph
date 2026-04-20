@@ -226,7 +226,18 @@ def list_courses(
         )
         for r in group_records
     )
-    return courses
+
+    # visibility='public' のテンプレートに course_group_permissions が張られていると
+    # public_records と group_records の両方にヒットし、同じコースが二度出る。
+    # own > public > group の優先順位で先勝ちで重複排除する。
+    seen_ids: set[str] = set()
+    unique_courses: list[LearningCourseOut] = []
+    for c in courses:
+        if c.id in seen_ids:
+            continue
+        seen_ids.add(c.id)
+        unique_courses.append(c)
+    return unique_courses
 
 
 @router.get("/courses/{course_id}", response_model=LearningCourseDetail)
