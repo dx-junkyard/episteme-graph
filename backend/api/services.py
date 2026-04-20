@@ -132,22 +132,155 @@ def get_background_task(task_id: str) -> dict | None:
 
 
 def get_course_data(user_id: str, course_id: str) -> dict | None:
-    """PostgreSQL から LearningCourse データを取得する（オーナー限定）。"""
+    """LearningCourse データを取得する（オーナー or 受講者）。
+
+    Issue #133: 受講時のクローン作成を廃止し、「1 つの不変なマスターコース」 +
+    「ユーザーごとの学習状態（learning_states）」の構成に変更。
+    - オーナー本人はそのままマスターデータを返す。
+    - 受講者（learning_states に行がある）はマスターデータに
+      personal_graph の差分（誤解など）をマージして返す。
+    - それ以外は None を返す（アクセス不可）。
+    """
     session = _pg_session()
     try:
         record = session.execute(
             sa_text("""
-                SELECT data FROM learning_courses
-                WHERE user_id = CAST(:user_id AS uuid) AND id = :course_id
+                SELECT data, user_id FROM learning_courses
+                WHERE id = :course_id
+                LIMIT 1
+            """),
+            {"course_id": course_id},
+        ).fetchone()
+        if not record or not record[0]:
+            return None
+
+        data = record[0] if isinstance(record[0], dict) else json.loads(record[0])
+        owner_id = record[1]
+
+        if str(owner_id) == str(user_id):
+            return data
+
+        # 受講者: learning_states.personal_graph をマージする
+        state_row = session.execute(
+            sa_text("""
+                SELECT personal_graph FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
                 LIMIT 1
             """),
             {"user_id": user_id, "course_id": course_id},
         ).fetchone()
-        if record and record[0]:
-            return record[0] if isinstance(record[0], dict) else json.loads(record[0])
+        if not state_row:
+            return None
+
+        personal_raw = state_row[0] if state_row[0] is not None else {}
+        personal = personal_raw if isinstance(personal_raw, dict) else json.loads(personal_raw)
+        misconceptions_by_topic = personal.get("misconceptions_by_topic", {}) or {}
+        for topic in data.get("topics", []):
+            tid = topic.get("id", "")
+            per_topic = misconceptions_by_topic.get(tid, [])
+            if per_topic:
+                base = topic.get("misconceptions", []) or []
+                topic["misconceptions"] = (per_topic + base)[:5]
+        return data
     finally:
         session.close()
-    return None
+
+
+def user_is_enrolled(user_id: str, course_id: str) -> bool:
+    """ユーザーが learning_states を通じてコースに受講登録済みかを判定する。"""
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT 1 FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+        return row is not None
+    finally:
+        session.close()
+
+
+def enroll_user_in_course(user_id: str, course_id: str) -> None:
+    """learning_states に受講レコードを作成する（UNIQUE で二重受講を防止）。"""
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO learning_states (user_id, course_id)
+                VALUES (CAST(:user_id AS uuid), :course_id)
+                ON CONFLICT (user_id, course_id) DO NOTHING
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def record_personal_misconception(
+    user_id: str,
+    course_id: str,
+    topic_id: str,
+    misconception: dict,
+) -> None:
+    """learning_states.personal_graph.misconceptions_by_topic に誤解を記録する。
+
+    受講者が学習チャットで検出した誤解は、マスターコースではなくこの per-user 状態に保存する。
+    per-topic で最新 5 件まで保持する（マスターの misconceptions と同じ上限）。
+    未受講の場合はレコードを自動生成してから書き込む（オーナーが自コースで学習する場合など）。
+    """
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO learning_states (user_id, course_id)
+                VALUES (CAST(:user_id AS uuid), :course_id)
+                ON CONFLICT (user_id, course_id) DO NOTHING
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        )
+        row = session.execute(
+            sa_text("""
+                SELECT personal_graph FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+
+        personal_raw = row[0] if row and row[0] is not None else {}
+        personal = personal_raw if isinstance(personal_raw, dict) else json.loads(personal_raw)
+        by_topic = personal.get("misconceptions_by_topic", {}) or {}
+        current = by_topic.get(topic_id, []) or []
+        current = [misconception] + current
+        by_topic[topic_id] = current[:5]
+        personal["misconceptions_by_topic"] = by_topic
+
+        session.execute(
+            sa_text("""
+                UPDATE learning_states
+                SET personal_graph = CAST(:personal AS jsonb),
+                    updated_at = now()
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+            """),
+            {
+                "user_id": user_id,
+                "course_id": course_id,
+                "personal": json.dumps(personal, ensure_ascii=False),
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def _fetch_course_data_row(course_id: str) -> dict | None:
@@ -847,7 +980,11 @@ def detect_and_record_misconception(
     user_message: str,
     ai_response: str,
 ) -> dict | None:
-    """AI応答から誤解を検出し、コースデータに記録する。"""
+    """AI応答から誤解を検出し、ユーザー個別の learning_states.personal_graph に記録する。
+
+    Issue #133: マスターコースは不変に保ち、誤解はユーザーごとの learning_states に保存する。
+    レスポンス用にはマージ済みの topics をコピーして返す。
+    """
     wrong = user_message
     if len(wrong) > 60:
         wrong = wrong[:60] + "…"
@@ -870,18 +1007,24 @@ def detect_and_record_misconception(
         "correct": correct,
     }
 
-    for t in course_data.get("topics", []):
+    try:
+        record_personal_misconception(user_id, course_id, topic_id, misconception)
+    except Exception:
+        logger.exception(
+            "Failed to record misconception to learning_states for user=%s course=%s",
+            user_id, course_id,
+        )
+
+    # UI 更新用レスポンス: course_data をコピーして当該 topic に今回の誤解を混ぜる
+    updated_topics = [dict(t) for t in course_data.get("topics", [])]
+    for t in updated_topics:
         if t.get("id") == topic_id:
-            if "misconceptions" not in t:
-                t["misconceptions"] = []
-            t["misconceptions"].insert(0, misconception)
-            t["misconceptions"] = t["misconceptions"][:5]
+            merged = [misconception] + list(t.get("misconceptions", []) or [])
+            t["misconceptions"] = merged[:5]
             break
 
-    save_course_data(user_id, course_id, course_data)
-
     return {
-        "topics": course_data.get("topics", []),
+        "topics": updated_topics,
         "concepts": course_data.get("concepts", []),
     }
 

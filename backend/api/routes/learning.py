@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import uuid
 
@@ -24,7 +23,9 @@ from services import (
     calculate_progress,
     check_prerequisites,
     detect_and_record_misconception,
+    enroll_user_in_course,
     get_course_data,
+    get_editable_course_data,
     get_user_group_ids,
     log_unanswered_query,
     persist_chat_history,
@@ -106,10 +107,14 @@ def list_courses(
 ) -> list[LearningCourseOut]:
     """ユーザーが登録しているコース一覧を返す。
 
+    Issue #133: 「1 つの不変なマスターコース」+「ユーザー個別の learning_states」
+    モデルに変更。受講時にコースをクローンせず、learning_states にレコードを作る。
+
     以下を返す:
-    - 自分が所有するコース
-    - visibility='public' かつ公開テンプレートのコース（受講可能）
-    - visibility='group' かつ自分が参加するグループのコース（受講可能）
+    - 自分が所有するコース（learning_courses.user_id = 自分）
+    - 自分が受講済みのマスターコース（learning_states 経由）
+    - visibility='public' かつ公開テンプレートで未受講のコース（受講可能）
+    - 自分が参加するグループに共有されているマスターコースで未受講のもの（受講可能）
     """
     user_groups = get_user_group_ids(current_user["id"])
 
@@ -129,7 +134,24 @@ def list_courses(
             {"user_id": current_user["id"]},
         ).fetchall()
 
-        # 公開テンプレート
+        # 受講中のマスターコース（learning_states 経由）
+        enrolled_records = session.execute(
+            sa_text("""
+                SELECT lc.id, lc.title,
+                       COALESCE(lc.is_template, false) AS is_template,
+                       COALESCE(lc.is_published, false) AS is_published,
+                       COALESCE(lc.visibility, 'private') AS visibility,
+                       lc.group_id,
+                       COALESCE(lc.description, '') AS description
+                FROM learning_courses lc
+                JOIN learning_states ls ON ls.course_id = lc.id
+                WHERE ls.user_id = CAST(:user_id AS uuid)
+                  AND lc.user_id != CAST(:user_id AS uuid)
+            """),
+            {"user_id": current_user["id"]},
+        ).fetchall()
+
+        # 公開テンプレート（未受講のみ）
         public_records = session.execute(
             sa_text("""
                 SELECT lc.id, lc.title,
@@ -141,15 +163,15 @@ def list_courses(
                   AND COALESCE(lc.visibility, 'public') = 'public'
                   AND lc.user_id != CAST(:user_id AS uuid)
                   AND NOT EXISTS (
-                      SELECT 1 FROM learning_courses lc2
-                      WHERE lc2.user_id = CAST(:user_id AS uuid)
-                        AND lc2.cloned_from = lc.id
+                      SELECT 1 FROM learning_states ls
+                      WHERE ls.user_id = CAST(:user_id AS uuid)
+                        AND ls.course_id = lc.id
                   )
             """),
             {"user_id": current_user["id"]},
         ).fetchall()
 
-        # グループ共有コース（自分が参加するグループ）
+        # グループ共有コース（自分が参加するグループ、かつ未受講のみ）
         # - 旧: learning_courses.group_id + visibility='group' を参照
         # - 新: course_group_permissions 多対多マッピング (viewer/editor)
         if user_groups:
@@ -175,9 +197,9 @@ def list_courses(
                               AND cgp.permission IN ('viewer', 'editor'))
                       )
                       AND NOT EXISTS (
-                          SELECT 1 FROM learning_courses lc2
-                          WHERE lc2.user_id = CAST(:user_id AS uuid)
-                            AND lc2.cloned_from = lc.id
+                          SELECT 1 FROM learning_states ls
+                          WHERE ls.user_id = CAST(:user_id AS uuid)
+                            AND ls.course_id = lc.id
                       )
                 """),
                 params,
@@ -200,6 +222,20 @@ def list_courses(
         )
         for r in own_records
     ]
+    # 受講中のマスターコースも「マイコース」として並べる（is_enrollable=False）
+    courses.extend(
+        LearningCourseOut(
+            id=r[0],
+            title=r[1],
+            is_template=bool(r[2]),
+            is_published=bool(r[3]),
+            is_enrollable=False,
+            visibility=r[4] or "private",
+            group_id=str(r[5]) if r[5] else None,
+            description=r[6] or "",
+        )
+        for r in enrolled_records
+    )
     courses.extend(
         LearningCourseOut(
             id=r[0],
@@ -227,9 +263,8 @@ def list_courses(
         for r in group_records
     )
 
-    # visibility='public' のテンプレートに course_group_permissions が張られていると
-    # public_records と group_records の両方にヒットし、同じコースが二度出る。
-    # own > public > group の優先順位で先勝ちで重複排除する。
+    # 同一マスターコースが own / enrolled / public / group 経由で複数ヒットする場合は
+    # own > enrolled > public > group の優先順位で先勝ちで重複排除する。
     seen_ids: set[str] = set()
     unique_courses: list[LearningCourseOut] = []
     for c in courses:
@@ -259,8 +294,12 @@ def update_course(
     body: CourseUpdateRequest,
     current_user: dict = Depends(_get_current_user),
 ) -> LearningCourseDetail:
-    """コースを部分更新する。指定されたフィールドのみ上書き。"""
-    data = get_course_data(current_user["id"], course_id)
+    """コースを部分更新する。指定されたフィールドのみ上書き。
+
+    Issue #133: 受講者はマスターコースを改変できない（learning_states に個別の
+    差分を持つのみ）。所有者または editor 権限グループのメンバーのみ編集可能。
+    """
+    data = get_editable_course_data(current_user["id"], course_id)
     if not data:
         raise HTTPException(status_code=404, detail="Course not found")
 
@@ -323,12 +362,18 @@ def enroll_course(
     course_id: str,
     current_user: dict = Depends(_get_current_user),
 ) -> LearningCourseOut:
-    """受講可能なコース（公開/グループ共有）をクローンして自分のコースとして登録する。"""
+    """受講可能なコース（公開/グループ共有）に受講登録する。
+
+    Issue #133: 旧仕様ではマスターコースを丸ごとクローンしていたが、
+    learning_states にレコードを作成する方式に変更。マスターコースは
+    不変に保たれ、ユーザーの学習状態のみが差分として管理される。
+    UNIQUE (user_id, course_id) により二重受講はDBレベルでブロックされる。
+    """
     session = _pg_session()
     try:
         record = session.execute(
             sa_text("""
-                SELECT data, COALESCE(visibility, 'private'), group_id,
+                SELECT title, COALESCE(visibility, 'private'), group_id,
                        COALESCE(is_published, false), COALESCE(is_template, false)
                 FROM learning_courses
                 WHERE id = :course_id
@@ -339,10 +384,10 @@ def enroll_course(
     finally:
         session.close()
 
-    if not record or not record[0]:
+    if not record:
         raise HTTPException(status_code=404, detail="Course not found")
 
-    data_raw, visibility, group_id, is_published, is_template = record
+    title, visibility, group_id, is_published, is_template = record
     enrollable = False
     if visibility == "public" and is_published and is_template:
         enrollable = True
@@ -357,32 +402,13 @@ def enroll_course(
     if not enrollable:
         raise HTTPException(status_code=403, detail="このコースを受講する権限がありません")
 
-    template_data = data_raw if isinstance(data_raw, dict) else json.loads(data_raw)
-
-    new_course_id = str(uuid.uuid4())[:8]
-    cloned_data = dict(template_data)
-    cloned_data["id"] = new_course_id
-
-    save_course_data(current_user["id"], new_course_id, cloned_data)
-
-    session = _pg_session()
-    try:
-        session.execute(
-            sa_text("UPDATE learning_courses SET cloned_from = :original_id WHERE id = :id"),
-            {"id": new_course_id, "original_id": course_id},
-        )
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
+    enroll_user_in_course(current_user["id"], course_id)
 
     logger.info(
-        "User=%s enrolled in course %s (cloned as %s)",
-        current_user["id"], course_id, new_course_id,
+        "User=%s enrolled in master course %s (learning_states row created)",
+        current_user["id"], course_id,
     )
-    return LearningCourseOut(id=new_course_id, title=cloned_data.get("title", ""))
+    return LearningCourseOut(id=course_id, title=title or "")
 
 
 # ---------------------------------------------------------------------------
