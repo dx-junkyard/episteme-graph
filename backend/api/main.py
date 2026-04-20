@@ -82,7 +82,6 @@ def _run_migrations() -> None:
             "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS is_template  BOOLEAN NOT NULL DEFAULT false",
             "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS is_published BOOLEAN NOT NULL DEFAULT false",
             "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS owner_id     UUID REFERENCES users(id)",
-            "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS cloned_from  TEXT REFERENCES learning_courses(id)",
         ]:
             session.execute(sa_text(ddl))
         session.execute(sa_text(
@@ -232,8 +231,48 @@ def _run_migrations() -> None:
         session.execute(sa_text("DROP INDEX IF EXISTS idx_chunks_arxiv"))
         session.execute(sa_text("ALTER TABLE chunks DROP COLUMN IF EXISTS arxiv_id"))
 
+        # Migration 011: コース原本と学習状態の完全分離 (Issue #133)
+        # 既存のクローンを持つDBを本マイグレーションで破壊的に正規化する。
+        # cloned_from カラムはパース時解決のため、存在確認してから動的SQLで実行する。
+        has_cloned_from = session.execute(sa_text("""
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'learning_courses' AND column_name = 'cloned_from'
+        """)).fetchone()
+        if has_cloned_from:
+            session.execute(sa_text("""
+                DELETE FROM learning_chat_history
+                WHERE course_id IN (
+                    SELECT id FROM learning_courses WHERE cloned_from IS NOT NULL
+                )
+            """))
+            session.execute(sa_text(
+                "DELETE FROM learning_courses WHERE cloned_from IS NOT NULL"
+            ))
+            session.execute(sa_text(
+                "ALTER TABLE learning_courses DROP COLUMN cloned_from"
+            ))
+
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS learning_states (
+                id             UUID PRIMARY KEY,
+                user_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                course_id      TEXT NOT NULL REFERENCES learning_courses(id) ON DELETE CASCADE,
+                progress_data  JSONB DEFAULT '{}'::jsonb,
+                personal_graph JSONB DEFAULT '{}'::jsonb,
+                enrolled_at    TIMESTAMPTZ DEFAULT now(),
+                updated_at     TIMESTAMPTZ DEFAULT now(),
+                UNIQUE (user_id, course_id)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_learning_states_user ON learning_states(user_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_learning_states_course ON learning_states(course_id)"
+        ))
+
         session.commit()
-        logger.info("Migrations (002-007) applied successfully.")
+        logger.info("Migrations (002-007, 011) applied successfully.")
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema

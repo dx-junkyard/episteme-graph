@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import uuid
 
@@ -24,7 +23,10 @@ from services import (
     calculate_progress,
     check_prerequisites,
     detect_and_record_misconception,
+    ensure_learning_state,
     get_course_data,
+    get_course_master,
+    get_course_owner,
     log_unanswered_query,
     persist_chat_history,
     save_course_data,
@@ -71,16 +73,35 @@ def create_course(
 def list_courses(
     current_user: dict = Depends(_get_current_user),
 ) -> list[LearningCourseOut]:
-    """ユーザーが登録しているコース一覧を返す。公開テンプレートも含む。"""
+    """ユーザーがアクセス可能なコース一覧を返す。
+
+    Issue #133 以降、学生は learning_states で受講中のコースのみを「マイコース」として扱い、
+    まだ受講していない公開テンプレートは「受講可能」として提示する。教員は自分が所有する
+    コース (is_template=true のもの含む) も合わせて返す。
+    """
     session = _pg_session()
     try:
         own_records = session.execute(
             sa_text("""
-                SELECT id, title,
-                       COALESCE(is_template, false) AS is_template,
-                       COALESCE(is_published, false) AS is_published
-                FROM learning_courses
-                WHERE user_id = CAST(:user_id AS uuid)
+                SELECT lc.id, lc.title,
+                       COALESCE(lc.is_template, false) AS is_template,
+                       COALESCE(lc.is_published, false) AS is_published
+                FROM learning_courses lc
+                WHERE lc.owner_id = CAST(:user_id AS uuid)
+                   OR lc.user_id = CAST(:user_id AS uuid)
+            """),
+            {"user_id": current_user["id"]},
+        ).fetchall()
+
+        enrolled_records = session.execute(
+            sa_text("""
+                SELECT lc.id, lc.title,
+                       COALESCE(lc.is_template, false) AS is_template,
+                       COALESCE(lc.is_published, false) AS is_published
+                FROM learning_states ls
+                JOIN learning_courses lc ON lc.id = ls.course_id
+                WHERE ls.user_id = CAST(:user_id AS uuid)
+                  AND COALESCE(lc.owner_id, lc.user_id) != CAST(:user_id AS uuid)
             """),
             {"user_id": current_user["id"]},
         ).fetchall()
@@ -90,11 +111,11 @@ def list_courses(
                 SELECT lc.id, lc.title
                 FROM learning_courses lc
                 WHERE lc.is_published = true AND lc.is_template = true
-                  AND lc.user_id != CAST(:user_id AS uuid)
+                  AND COALESCE(lc.owner_id, lc.user_id) != CAST(:user_id AS uuid)
                   AND NOT EXISTS (
-                      SELECT 1 FROM learning_courses lc2
-                      WHERE lc2.user_id = CAST(:user_id AS uuid)
-                        AND lc2.cloned_from = lc.id
+                      SELECT 1 FROM learning_states ls
+                      WHERE ls.user_id = CAST(:user_id AS uuid)
+                        AND ls.course_id = lc.id
                   )
             """),
             {"user_id": current_user["id"]},
@@ -102,26 +123,30 @@ def list_courses(
     finally:
         session.close()
 
-    courses = [
-        LearningCourseOut(
+    seen: set[str] = set()
+    courses: list[LearningCourseOut] = []
+    for r in list(own_records) + list(enrolled_records):
+        if r[0] in seen:
+            continue
+        seen.add(r[0])
+        courses.append(LearningCourseOut(
             id=r[0],
             title=r[1],
             is_template=bool(r[2]),
             is_published=bool(r[3]),
             is_enrollable=False,
-        )
-        for r in own_records
-    ]
-    courses.extend(
-        LearningCourseOut(
+        ))
+    for r in template_records:
+        if r[0] in seen:
+            continue
+        seen.add(r[0])
+        courses.append(LearningCourseOut(
             id=r[0],
             title=r[1],
             is_template=True,
             is_published=True,
             is_enrollable=True,
-        )
-        for r in template_records
-    )
+        ))
     return courses
 
 
@@ -144,11 +169,17 @@ def update_course(
     body: CourseUpdateRequest,
     current_user: dict = Depends(_get_current_user),
 ) -> LearningCourseDetail:
-    """コースを部分更新する。指定されたフィールドのみ上書き。"""
-    data = get_course_data(current_user["id"], course_id)
-    if not data:
+    """コース原本を部分更新する。コース所有者のみ許可。"""
+    owner_id = get_course_owner(course_id)
+    if not owner_id:
         raise HTTPException(status_code=404, detail="Course not found")
+    if owner_id != current_user["id"]:
+        raise HTTPException(
+            status_code=403,
+            detail="コース原本を編集できるのは所有者のみです。",
+        )
 
+    data = get_course_master(course_id) or {}
     if body.title is not None:
         data["title"] = body.title
     if body.chapters is not None:
@@ -161,7 +192,7 @@ def update_course(
         data["sources"] = [s.model_dump() for s in body.sources]
 
     save_course_data(current_user["id"], course_id, data)
-    logger.info("Updated course %s for user=%s", course_id, current_user["id"])
+    logger.info("Updated course %s for owner=%s", course_id, current_user["id"])
 
     return LearningCourseDetail(**data)
 
@@ -208,12 +239,16 @@ def enroll_course(
     course_id: str,
     current_user: dict = Depends(_get_current_user),
 ) -> LearningCourseOut:
-    """公開テンプレートコースをクローンして自分のコースとして登録する。"""
+    """公開テンプレートコースを受講登録する (Issue #133)。
+
+    コースのクローンは作成せず、learning_states に (user_id, course_id) の状態行を
+    登録するのみ。UNIQUE 制約により重複受講は DB レベルでブロックされる。
+    """
     session = _pg_session()
     try:
         record = session.execute(
             sa_text("""
-                SELECT data FROM learning_courses
+                SELECT id, title FROM learning_courses
                 WHERE id = :course_id AND is_published = true AND is_template = true
                 LIMIT 1
             """),
@@ -222,35 +257,21 @@ def enroll_course(
     finally:
         session.close()
 
-    if not record or not record[0]:
+    if not record:
         raise HTTPException(status_code=404, detail="Published course not found")
 
-    template_data = record[0] if isinstance(record[0], dict) else json.loads(record[0])
-
-    new_course_id = str(uuid.uuid4())[:8]
-    cloned_data = dict(template_data)
-    cloned_data["id"] = new_course_id
-
-    save_course_data(current_user["id"], new_course_id, cloned_data)
-
-    session = _pg_session()
-    try:
-        session.execute(
-            sa_text("UPDATE learning_courses SET cloned_from = :original_id WHERE id = :id"),
-            {"id": new_course_id, "original_id": course_id},
-        )
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
+    ensure_learning_state(current_user["id"], course_id)
 
     logger.info(
-        "User=%s enrolled in course %s (cloned as %s)",
-        current_user["id"], course_id, new_course_id,
+        "User=%s enrolled in course %s", current_user["id"], course_id,
     )
-    return LearningCourseOut(id=new_course_id, title=cloned_data.get("title", ""))
+    return LearningCourseOut(
+        id=record[0],
+        title=record[1] or "",
+        is_template=True,
+        is_published=True,
+        is_enrollable=False,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -994,7 +994,8 @@ def delete_course(
         record = session.execute(
             sa_text("""
                 SELECT id, title FROM learning_courses
-                WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
+                WHERE id = :course_id
+                  AND (owner_id = CAST(:user_id AS uuid) OR user_id = CAST(:user_id AS uuid))
                 LIMIT 1
             """),
             {"course_id": course_id, "user_id": current_user["id"]},
@@ -1015,11 +1016,12 @@ def delete_course(
             sa_text("DELETE FROM learning_chat_history WHERE course_id = :cid"),
             {"cid": course_id},
         )
-        # コース削除
+        # コース削除 (ON DELETE CASCADE により learning_states も自動削除)
         session.execute(
             sa_text("""
                 DELETE FROM learning_courses
-                WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
+                WHERE id = :course_id
+                  AND (owner_id = CAST(:user_id AS uuid) OR user_id = CAST(:user_id AS uuid))
             """),
             {"course_id": course_id, "user_id": current_user["id"]},
         )

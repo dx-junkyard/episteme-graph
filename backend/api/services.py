@@ -132,16 +132,96 @@ def get_background_task(task_id: str) -> dict | None:
 
 
 def get_course_data(user_id: str, course_id: str) -> dict | None:
-    """PostgreSQL から LearningCourse データを取得する。"""
+    """コース原本 + 当該ユーザーの personal_graph をマージして返す。
+
+    Issue #133: コース原本 (learning_courses.data) は不変。
+    ユーザー固有の状態 (誤解メモ等) は learning_states.personal_graph に保持し、
+    読み出し時にトピック単位でオーバーレイする。
+
+    アクセス権:
+      - コース所有者 (owner_id) は常にアクセス可能
+      - learning_states に行がある (受講済み) ユーザーはアクセス可能
+      - それ以外は None
+    """
     session = _pg_session()
     try:
         record = session.execute(
             sa_text("""
-                SELECT data FROM learning_courses
-                WHERE user_id = CAST(:user_id AS uuid) AND id = :course_id
+                SELECT lc.data, lc.owner_id, lc.user_id
+                FROM learning_courses lc
+                WHERE lc.id = :course_id
                 LIMIT 1
             """),
-            {"user_id": user_id, "course_id": course_id},
+            {"course_id": course_id},
+        ).fetchone()
+        if not record or not record[0]:
+            return None
+        master = record[0] if isinstance(record[0], dict) else json.loads(record[0])
+        owner_id = str(record[1]) if record[1] else None
+        legacy_user_id = str(record[2]) if record[2] else None
+
+        is_owner = user_id in (owner_id, legacy_user_id)
+
+        personal: dict = {}
+        if not is_owner:
+            state_row = session.execute(
+                sa_text("""
+                    SELECT personal_graph FROM learning_states
+                    WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                    LIMIT 1
+                """),
+                {"user_id": user_id, "course_id": course_id},
+            ).fetchone()
+            if not state_row:
+                return None
+            personal = (
+                state_row[0] if isinstance(state_row[0], dict)
+                else (json.loads(state_row[0]) if state_row[0] else {})
+            )
+        else:
+            # 所有者(教員)自身にも personal_graph をオーバーレイする（自己確認用）
+            state_row = session.execute(
+                sa_text("""
+                    SELECT personal_graph FROM learning_states
+                    WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                    LIMIT 1
+                """),
+                {"user_id": user_id, "course_id": course_id},
+            ).fetchone()
+            if state_row and state_row[0]:
+                personal = (
+                    state_row[0] if isinstance(state_row[0], dict)
+                    else json.loads(state_row[0])
+                )
+    finally:
+        session.close()
+
+    return _overlay_personal_graph(master, personal)
+
+
+def _overlay_personal_graph(master: dict, personal: dict) -> dict:
+    """master コースデータに personal_graph を非破壊的にマージする。
+
+    現状の personal_graph スキーマ:
+      {"topic_misconceptions": {"<topic_id>": [LearningMisconception, ...]}}
+    """
+    merged = json.loads(json.dumps(master, ensure_ascii=False))  # deep copy
+    topic_misc: dict = (personal or {}).get("topic_misconceptions", {}) or {}
+    if topic_misc:
+        for t in merged.get("topics", []):
+            tid = t.get("id")
+            if tid and tid in topic_misc:
+                t["misconceptions"] = topic_misc[tid][:5]
+    return merged
+
+
+def get_course_master(course_id: str) -> dict | None:
+    """コース原本 (personal_graph オーバーレイなし) を返す。"""
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("SELECT data FROM learning_courses WHERE id = :course_id LIMIT 1"),
+            {"course_id": course_id},
         ).fetchone()
         if record and record[0]:
             return record[0] if isinstance(record[0], dict) else json.loads(record[0])
@@ -150,8 +230,30 @@ def get_course_data(user_id: str, course_id: str) -> dict | None:
     return None
 
 
+def get_course_owner(course_id: str) -> str | None:
+    """コースの owner_id (所有者の user_id) を返す。"""
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("""
+                SELECT COALESCE(owner_id, user_id) FROM learning_courses
+                WHERE id = :course_id LIMIT 1
+            """),
+            {"course_id": course_id},
+        ).fetchone()
+        if record and record[0]:
+            return str(record[0])
+    finally:
+        session.close()
+    return None
+
+
 def save_course_data(user_id: str, course_id: str, data: dict, is_template: bool = False) -> None:
-    """LearningCourse データを PostgreSQL に UPSERT する。"""
+    """コース原本 (マスター) を UPSERT する。
+
+    Issue #133 以降、このヘルパーは「コース所有者 (教員)」が原本を書き換える時のみ
+    使用する想定。呼び出し側で所有者チェックを行うこと。
+    """
     session = _pg_session()
     try:
         session.execute(
@@ -188,19 +290,121 @@ def save_course_data(user_id: str, course_id: str, data: dict, is_template: bool
 
 
 def delete_course_data(user_id: str, course_id: str) -> bool:
-    """LearningCourse レコードを削除する。"""
+    """コース原本を削除する。所有者 (owner_id もしくは user_id) のみ削除可能。
+
+    ON DELETE CASCADE により関連する learning_states も自動削除される。
+    """
     session = _pg_session()
     try:
         result = session.execute(
             sa_text("""
                 DELETE FROM learning_courses
-                WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
+                WHERE id = :course_id
+                  AND (owner_id = CAST(:user_id AS uuid) OR user_id = CAST(:user_id AS uuid))
                 RETURNING id
             """),
             {"course_id": course_id, "user_id": user_id},
         ).fetchone()
         session.commit()
         return result is not None
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# Learning State helpers (Issue #133)
+# ---------------------------------------------------------------------------
+
+
+def get_learning_state(user_id: str, course_id: str) -> dict | None:
+    """受講中ユーザーの learning_states レコードを返す。"""
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("""
+                SELECT id, progress_data, personal_graph, enrolled_at, updated_at
+                FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+        if not record:
+            return None
+        progress = record[1] if isinstance(record[1], dict) else (json.loads(record[1]) if record[1] else {})
+        personal = record[2] if isinstance(record[2], dict) else (json.loads(record[2]) if record[2] else {})
+        return {
+            "id": str(record[0]),
+            "progress_data": progress or {},
+            "personal_graph": personal or {},
+            "enrolled_at": record[3].isoformat() if record[3] else "",
+            "updated_at": record[4].isoformat() if record[4] else "",
+        }
+    finally:
+        session.close()
+
+
+def ensure_learning_state(user_id: str, course_id: str) -> str:
+    """受講状態行を作成 (存在しない場合のみ)。UNIQUE(user_id, course_id) で増殖防止。"""
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("""
+                INSERT INTO learning_states (id, user_id, course_id, progress_data, personal_graph)
+                VALUES (
+                    :state_id,
+                    CAST(:user_id AS uuid),
+                    :course_id,
+                    '{}'::jsonb,
+                    '{}'::jsonb
+                )
+                ON CONFLICT (user_id, course_id) DO UPDATE
+                    SET updated_at = learning_states.updated_at
+                RETURNING id
+            """),
+            {
+                "state_id": str(uuid.uuid4()),
+                "user_id": user_id,
+                "course_id": course_id,
+            },
+        ).fetchone()
+        session.commit()
+        return str(record[0]) if record else ""
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def update_personal_graph(user_id: str, course_id: str, personal_graph: dict) -> None:
+    """learning_states.personal_graph を上書き保存する (UPSERT)。"""
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO learning_states (id, user_id, course_id, personal_graph)
+                VALUES (
+                    :state_id,
+                    CAST(:user_id AS uuid),
+                    :course_id,
+                    CAST(:personal AS jsonb)
+                )
+                ON CONFLICT (user_id, course_id) DO UPDATE
+                    SET personal_graph = CAST(:personal AS jsonb),
+                        updated_at = now()
+            """),
+            {
+                "state_id": str(uuid.uuid4()),
+                "user_id": user_id,
+                "course_id": course_id,
+                "personal": json.dumps(personal_graph, ensure_ascii=False),
+            },
+        )
+        session.commit()
     except Exception:
         session.rollback()
         raise
@@ -365,16 +569,19 @@ def search_chunks_with_metadata(
 
 
 def calculate_progress(user_id: str, course_id: str, course_data: dict) -> dict:
-    """コースデータとチャット履歴から進捗を計算する。"""
+    """コースデータとチャット履歴から進捗を計算する。
+
+    誤解件数はコース原本ではなく、当該ユーザーの personal_graph から集計する。
+    """
     topics = course_data.get("topics", [])
     concepts = course_data.get("concepts", [])
 
     mastered = sum(1 for c in concepts if c.get("status") == "mastered")
     learning = sum(1 for c in concepts if c.get("status") == "learning")
 
-    total_misconceptions = 0
-    for t in topics:
-        total_misconceptions += len(t.get("misconceptions", []))
+    state = get_learning_state(user_id, course_id) or {}
+    topic_misc = (state.get("personal_graph") or {}).get("topic_misconceptions", {}) or {}
+    total_misconceptions = sum(len(v or []) for v in topic_misc.values())
 
     sessions_list = []
     pg_session = _pg_session()
@@ -603,7 +810,11 @@ def detect_and_record_misconception(
     user_message: str,
     ai_response: str,
 ) -> dict | None:
-    """AI応答から誤解を検出し、コースデータに記録する。"""
+    """AI応答から誤解を検出し、ユーザー固有の learning_states.personal_graph に記録する。
+
+    Issue #133: コース原本 (learning_courses.data) は絶対に書き換えない。
+    検出した誤解は personal_graph["topic_misconceptions"][topic_id] に積む。
+    """
     wrong = user_message
     if len(wrong) > 60:
         wrong = wrong[:60] + "…"
@@ -626,18 +837,27 @@ def detect_and_record_misconception(
         "correct": correct,
     }
 
-    for t in course_data.get("topics", []):
-        if t.get("id") == topic_id:
-            if "misconceptions" not in t:
-                t["misconceptions"] = []
-            t["misconceptions"].insert(0, misconception)
-            t["misconceptions"] = t["misconceptions"][:5]
-            break
+    state = get_learning_state(user_id, course_id) or {}
+    personal = dict(state.get("personal_graph") or {})
+    topic_misc: dict = dict(personal.get("topic_misconceptions") or {})
+    current = list(topic_misc.get(topic_id) or [])
+    current.insert(0, misconception)
+    topic_misc[topic_id] = current[:5]
+    personal["topic_misconceptions"] = topic_misc
 
-    save_course_data(user_id, course_id, course_data)
+    update_personal_graph(user_id, course_id, personal)
+
+    # UI 更新用に、トピック単位で誤解を反映した topics を返す
+    updated_topics = []
+    for t in course_data.get("topics", []):
+        t = dict(t)
+        tid = t.get("id")
+        if tid and tid in topic_misc:
+            t["misconceptions"] = topic_misc[tid]
+        updated_topics.append(t)
 
     return {
-        "topics": course_data.get("topics", []),
+        "topics": updated_topics,
         "concepts": course_data.get("concepts", []),
     }
 
