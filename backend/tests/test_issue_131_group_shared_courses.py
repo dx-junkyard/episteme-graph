@@ -51,14 +51,18 @@ class TestListCoursesSharedViaPermissions:
             "ユーザーの所属グループを利用してフィルタしていない"
         )
 
-    def test_excludes_already_cloned_templates(self):
-        """既にクローン済みのテンプレートは再度出さない。"""
+    def test_excludes_already_enrolled_templates(self):
+        """既に受講済みのテンプレートは再度出さない。
+
+        Issue #133 でクローン方式から learning_states 方式へ移行したため、
+        既受講かどうかは learning_states のレコード存在で判定する。
+        """
         body = self._list_courses_body()
         assert re.search(
-            r"NOT\s+EXISTS\s*\(.*?cloned_from\s*=\s*lc\.id",
+            r"NOT\s+EXISTS\s*\(.*?FROM\s+learning_states\s+ls.*?ls\.course_id\s*=\s*lc\.id",
             body,
             re.DOTALL,
-        ), "既にクローン済みコースを除外する NOT EXISTS 句が見当たらない"
+        ), "既受講コースを除外する learning_states の NOT EXISTS 句が見当たらない"
 
     def test_deduplicates_by_course_id(self):
         """visibility='public' のテンプレートが course_group_permissions に

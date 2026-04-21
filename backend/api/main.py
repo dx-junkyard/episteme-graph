@@ -87,11 +87,11 @@ def _run_migrations() -> None:
         ))
 
         # A2: learning_courses への追加カラム
+        # NOTE: cloned_from カラムは Issue #133 (Migration 011) で廃止された。
         for ddl in [
             "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS is_template  BOOLEAN NOT NULL DEFAULT false",
             "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS is_published BOOLEAN NOT NULL DEFAULT false",
             "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS owner_id     UUID REFERENCES users(id)",
-            "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS cloned_from  TEXT REFERENCES learning_courses(id)",
         ]:
             session.execute(sa_text(ddl))
         session.execute(sa_text(
@@ -336,8 +336,46 @@ def _run_migrations() -> None:
             "ON course_group_permissions(group_id, permission)"
         ))
 
+        # Migration 011: コース原本と学習状態の完全分離 (Issue #133)
+        # マスターコースとユーザーごとの学習状態を分離する。
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS learning_states (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                course_id TEXT NOT NULL REFERENCES learning_courses(id) ON DELETE CASCADE,
+                progress_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+                personal_graph JSONB NOT NULL DEFAULT '{}'::jsonb,
+                enrolled_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (user_id, course_id)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_learning_states_user ON learning_states(user_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_learning_states_course ON learning_states(course_id)"
+        ))
+        # 既存の cloned_from カラムがあれば、クローンコースとその履歴をハードリセット後にカラム廃止
+        session.execute(sa_text("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'learning_courses' AND column_name = 'cloned_from'
+                ) THEN
+                    DELETE FROM learning_chat_history
+                    WHERE course_id IN (
+                        SELECT id FROM learning_courses WHERE cloned_from IS NOT NULL
+                    );
+                    DELETE FROM learning_courses WHERE cloned_from IS NOT NULL;
+                    ALTER TABLE learning_courses DROP COLUMN cloned_from;
+                END IF;
+            END $$
+        """))
+
         session.commit()
-        logger.info("Migrations (002-010) applied successfully.")
+        logger.info("Migrations (002-011) applied successfully.")
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema
