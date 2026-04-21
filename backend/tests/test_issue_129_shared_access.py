@@ -96,9 +96,13 @@ class TestAdminListTeacherCoursesViewer:
 
     def test_role_uses_cgp_permission(self):
         body = self._body()
-        # role 列が 'editor' ハードコードではなく cgp.permission を使っていること
-        assert "ELSE cgp.permission END AS role" in body, (
-            "role が cgp.permission ではなくハードコードのままになっている"
+        # 修正: LEFT JOINの増殖を防ぐ新クエリにおいて、グループ権限（editor/viewer）に基づく
+        # roleの動的出し分けが正しく実装されていることを確認する
+        assert "cgp.permission = 'editor'" in body, (
+            "editor権限を判定するロジックが含まれていません"
+        )
+        assert "ELSE 'viewer'" in body, (
+            "roleのフォールバック（viewer）が正しく設定されていません"
         )
 
     def test_role_comment_mentions_viewer(self):
