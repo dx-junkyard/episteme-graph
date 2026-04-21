@@ -1015,38 +1015,40 @@ def update_cb_session(
 # Course publish & unanswered queries
 # ---------------------------------------------------------------------------
 
-
 @router.get("/courses")
 def list_teacher_courses(
     current_user: dict = Depends(_require_teacher),
 ) -> list[dict]:
-    """教員が管理できるコース一覧を返す。
-
-    - 自身が所有するコース (role='owner')
-    - editor 権限グループに所属している場合、そのグループにマッピングされたコース (role='editor')
-    - viewer 権限グループに所属している場合も同様にリストに含める (role='viewer')
-
-    （Issue #125: editor 権限グループの教員も管理画面からコースの閲覧・編集が行える）
-    （Issue #129: viewer 権限グループのメンバーもコース管理画面で閲覧できるようにする）
-    """
+    """教員が管理できるコース一覧を返す。"""
     session = _pg_session()
     try:
+        # 修正: LEFT JOINによる行増殖を防ぎ、権限の優先順位（owner > editor > viewer）を厳密化
         records = session.execute(
             sa_text("""
-                SELECT DISTINCT lc.id, lc.title,
+                SELECT lc.id, lc.title,
                        COALESCE(lc.is_template, false) AS is_template,
                        COALESCE(lc.is_published, false) AS is_published,
                        lc.created_at, lc.updated_at,
-                       CASE WHEN lc.user_id = CAST(:user_id AS uuid)
-                            THEN 'owner' ELSE cgp.permission END AS role
+                       CASE 
+                           WHEN lc.user_id = CAST(:user_id AS uuid) THEN 'owner'
+                           WHEN EXISTS (
+                               SELECT 1 FROM course_group_permissions cgp
+                               JOIN group_members gm ON gm.group_id = cgp.group_id
+                               WHERE cgp.course_id = lc.id 
+                                 AND gm.user_id = CAST(:user_id AS uuid)
+                                 AND cgp.permission = 'editor'
+                           ) THEN 'editor'
+                           ELSE 'viewer'
+                       END AS role
                 FROM learning_courses lc
-                LEFT JOIN course_group_permissions cgp ON cgp.course_id = lc.id
-                LEFT JOIN group_members gm
-                       ON gm.group_id = cgp.group_id
-                      AND gm.user_id = CAST(:user_id AS uuid)
                 WHERE lc.user_id = CAST(:user_id AS uuid)
-                   OR (cgp.permission IN ('editor', 'viewer')
-                       AND gm.user_id IS NOT NULL)
+                   OR EXISTS (
+                       SELECT 1 FROM course_group_permissions cgp
+                       JOIN group_members gm ON gm.group_id = cgp.group_id
+                       WHERE cgp.course_id = lc.id 
+                         AND gm.user_id = CAST(:user_id AS uuid)
+                         AND cgp.permission IN ('editor', 'viewer')
+                   )
                 ORDER BY lc.updated_at DESC
             """),
             {"user_id": current_user["id"]},
