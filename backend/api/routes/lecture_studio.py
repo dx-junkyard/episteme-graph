@@ -187,6 +187,8 @@ def _batch_generate_worker(
                 )
                 session.commit()
                 generated += 1
+                # レート制限対策: 生成チャンク間に短い待機を挟む
+                time.sleep(1.5)
 
             # チャンクごとに進捗を更新
             processed = generated + skipped
