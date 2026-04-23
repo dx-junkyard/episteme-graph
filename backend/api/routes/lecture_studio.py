@@ -32,8 +32,10 @@ from schemas import (
     LectureScriptSaveRequest,
     LectureScriptSaveResponse,
 )
+from schemas import BackgroundTaskOut
 from services import (
     create_background_task,
+    get_active_task_for_course,
     get_course_data,
     get_editable_course_data,
     get_viewable_course_data,
@@ -133,8 +135,14 @@ def _batch_generate_worker(
     chunks: list[dict],
     override: bool,
     course_data: dict,
+    auto_audio: bool = False,
+    user_id: str | None = None,
 ) -> None:
-    """バックグラウンドスレッドでスクリプトを一括生成する。"""
+    """バックグラウンドスレッドでスクリプトを一括生成する。
+
+    auto_audio=True の場合、完了後に音声生成タスクを自動的にキックし、
+    結果データの ``next_task_id`` に新タスクIDを格納する (Issue #139)。
+    """
     total = len(chunks)
     generated = 0
     skipped = 0
@@ -199,13 +207,38 @@ def _batch_generate_worker(
     finally:
         session.close()
 
-    update_background_task(task_id, "completed", result_data={
+    # 自動パイプライン: 完了時に音声生成タスクをチェイン (Issue #139)
+    next_task_id: str | None = None
+    if auto_audio:
+        try:
+            fresh_chunks = _get_course_chunks(course_data)
+            audio_task_id = str(uuid.uuid4())[:12]
+            create_background_task(audio_task_id, "audio_generation", user_id)
+            threading.Thread(
+                target=_batch_audio_worker,
+                args=(audio_task_id, course_id, fresh_chunks),
+                daemon=True,
+            ).start()
+            next_task_id = audio_task_id
+            logger.info(
+                "auto_audio chain: script task=%s -> audio task=%s (course=%s)",
+                task_id, audio_task_id, course_id,
+            )
+        except Exception:
+            logger.exception("Failed to auto-chain audio task after script task %s", task_id)
+
+    completion_data = {
         "course_id": course_id,
         "total_chunks": total,
         "generated": generated,
         "skipped": skipped,
         "progress": 100,
-    })
+    }
+    if next_task_id:
+        completion_data["next_task_id"] = next_task_id
+        completion_data["next_task_type"] = "audio_generation"
+
+    update_background_task(task_id, "completed", result_data=completion_data)
     logger.info(
         "batch_generate_worker completed: task=%s course=%s generated=%d skipped=%d",
         task_id, course_id, generated, skipped,
@@ -247,14 +280,22 @@ def batch_generate_scripts(
 
     thread = threading.Thread(
         target=_batch_generate_worker,
-        args=(task_id, course_id, chunks, body.override, course_data),
+        args=(
+            task_id,
+            course_id,
+            chunks,
+            body.override,
+            course_data,
+            body.auto_audio,
+            current_user["id"],
+        ),
         daemon=True,
     )
     thread.start()
 
     logger.info(
-        "batch_generate_scripts accepted: task=%s course=%s chunks=%d by user=%s",
-        task_id, course_id, len(chunks), current_user["id"],
+        "batch_generate_scripts accepted: task=%s course=%s chunks=%d auto_audio=%s by user=%s",
+        task_id, course_id, len(chunks), body.auto_audio, current_user["id"],
     )
 
     return LectureScriptGenerateStartResponse(
@@ -676,3 +717,28 @@ def batch_generate_audio(
         total_chunks=len(chunks),
         status="pending",
     )
+
+
+# ---------------------------------------------------------------------------
+# 5. コース単位のアクティブタスク照会 (Issue #139)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/courses/{course_id}/tasks/active")
+def get_course_active_task(
+    course_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict | None:
+    """コースに紐づく進行中タスク (pending/processing) のうち最新1件を返す。
+
+    重複実行防止およびリロード後のポーリング再開に使用する。
+    進行中タスクが無い場合は null を返す。
+    """
+    course_data = get_viewable_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    task = get_active_task_for_course(course_id)
+    if not task:
+        return None
+    return BackgroundTaskOut(**task).model_dump()
