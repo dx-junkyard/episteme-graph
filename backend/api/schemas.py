@@ -436,6 +436,7 @@ class LectureScriptChunkOut(BaseModel):
 class LectureScriptGenerateRequest(BaseModel):
     """バッチスクリプト生成リクエスト。"""
     override: bool = False  # 既存スクリプトを上書きするか
+    auto_audio: bool = False  # スクリプト生成完了後、自動で音声生成タスクを起動するか (Issue #139)
 
 
 class LectureScriptGenerateStartResponse(BaseModel):

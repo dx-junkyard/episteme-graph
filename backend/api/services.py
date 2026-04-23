@@ -126,6 +126,37 @@ def get_background_task(task_id: str) -> dict | None:
     finally:
         session.close()
 
+
+def get_active_task_for_course(course_id: str) -> dict | None:
+    """指定コースに紐づく進行中 (pending/processing) タスクを最新1件返す (Issue #139)。"""
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT id, task_type, status, result_data, error_message, created_at, updated_at
+                FROM background_tasks
+                WHERE status IN ('pending', 'processing')
+                  AND result_data IS NOT NULL
+                  AND result_data->>'course_id' = :course_id
+                ORDER BY created_at DESC
+                LIMIT 1
+            """),
+            {"course_id": course_id},
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "task_id": row[0],
+            "task_type": row[1],
+            "status": row[2],
+            "result_data": row[3],
+            "error_message": row[4],
+            "created_at": row[5].isoformat() if row[5] else "",
+            "updated_at": row[6].isoformat() if row[6] else "",
+        }
+    finally:
+        session.close()
+
 # ---------------------------------------------------------------------------
 # Course CRUD helpers
 # ---------------------------------------------------------------------------

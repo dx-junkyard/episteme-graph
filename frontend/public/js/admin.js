@@ -935,12 +935,127 @@
           content: "コース「" + (data.title || draft.title) + "」が正常に登録されました。（ID: " + data.id + "）\n\n「コース管理」タブからグループ単位で受講可／編集可の権限を設定できます。",
         });
         renderCourseChat();
+
+        // Issue #139: 登録成功後、自動で原稿・音声生成パイプラインをキックする
+        if (data && data.id) {
+          kickAutoPipeline(data.id, data.title || draft.title);
+        }
       })
       .catch(function () {
         btn.disabled = false;
         btn.textContent = "承認してコースを登録";
         showUploadStatus("コースの登録に失敗しました。", "error");
       });
+  }
+
+  // ── Auto Pipeline (Issue #139) ─────────────────────────────────────
+  // コース登録直後に原稿→音声を連鎖的に自動生成し、進捗をチャットに通知する。
+  function kickAutoPipeline(courseId, courseTitle) {
+    var pipelineMsg = {
+      role: "assistant",
+      content: "コース登録完了。引き続き原稿と音声の自動生成を開始しました。（進捗: 0%）",
+    };
+    state.chatMessages.push(pipelineMsg);
+    renderCourseChat();
+
+    function setPipelineStatus(text) {
+      pipelineMsg.content = text;
+      renderCourseChat();
+    }
+
+    apiFetch("/admin/courses/" + courseId + "/lecture-scripts/generate", {
+      method: "POST",
+      body: JSON.stringify({ override: false, auto_audio: true }),
+    })
+      .then(function (res) {
+        if (!res.ok) {
+          return res.json().then(function (errBody) {
+            var msg = (errBody && errBody.detail) || "原稿生成を開始できませんでした";
+            throw new Error(msg);
+          }, function () {
+            throw new Error("原稿生成を開始できませんでした");
+          });
+        }
+        return res.json();
+      })
+      .then(function (data) {
+        var scriptTaskId = data.task_id;
+        var totalChunks = data.total_chunks || 0;
+        setPipelineStatus(
+          "コース「" + courseTitle + "」の原稿生成を開始しました。（0 / " + totalChunks + " チャンク）"
+        );
+        _pollPipelineTask(courseId, scriptTaskId, "script", totalChunks, setPipelineStatus);
+      })
+      .catch(function (err) {
+        setPipelineStatus(
+          "コース登録は完了しましたが、原稿生成の開始に失敗しました: " +
+          (err.message || "不明なエラー") +
+          "\n\n「Lecture Studio」タブから手動で実行してください。"
+        );
+      });
+  }
+
+  function _pollPipelineTask(courseId, taskId, phase, totalChunks, setStatus) {
+    var retryCount = 0;
+    var maxRetries = 5;
+    var intervalMs = 3000;
+    var phaseLabel = phase === "audio" ? "音声生成" : "原稿生成";
+
+    function poll() {
+      apiFetch("/admin/tasks/" + taskId)
+        .then(function (res) {
+          if (!res.ok) throw new Error("Status check failed");
+          return res.json();
+        })
+        .then(function (task) {
+          retryCount = 0;
+          var rd = task.result_data || {};
+          var progress = rd.progress || 0;
+          var generated = rd.generated || 0;
+          var skipped = rd.skipped || 0;
+          var errors = rd.errors || 0;
+          var processed = generated + skipped + errors;
+
+          if (task.status === "completed") {
+            clearInterval(timer);
+            if (phase === "script" && rd.next_task_id) {
+              // チェイン先の音声タスクに移行
+              setStatus(
+                "原稿生成完了（" + generated + "件生成 / " + skipped + "件スキップ）。音声生成を開始しました。（進捗: 0%）"
+              );
+              _pollPipelineTask(courseId, rd.next_task_id, "audio", totalChunks, setStatus);
+            } else {
+              setStatus(
+                "自動生成が完了しました。" + phaseLabel + ": " + generated + "件生成 / " +
+                skipped + "件スキップ" + (errors > 0 ? " / " + errors + "件エラー" : "") +
+                "\n\nLecture Studio タブから内容を確認できます。"
+              );
+            }
+          } else if (task.status === "failed") {
+            clearInterval(timer);
+            setStatus(
+              phaseLabel + "に失敗しました: " + (task.error_message || "不明なエラー") +
+              "\n\nLecture Studio タブから手動で再実行してください。"
+            );
+          } else {
+            setStatus(
+              phaseLabel + "中... (" + processed + " / " + totalChunks + " — " + progress + "%)"
+            );
+          }
+        })
+        .catch(function () {
+          retryCount++;
+          if (retryCount >= maxRetries) {
+            clearInterval(timer);
+            setStatus(
+              phaseLabel + "の進捗確認に失敗しました。Lecture Studio タブで最新の状態を確認してください。"
+            );
+          }
+        });
+    }
+
+    var timer = setInterval(poll, intervalMs);
+    poll();
   }
 
   // ── Course Import (Issue #50) ───────────────────────────────────────
@@ -1984,10 +2099,50 @@
         lsState.selectedChunkId = null;
         lsRenderChunkList();
         lsClearEditor();
+        // Issue #139: 進行中タスクがあればポーリング状態に復帰
+        lsCheckActiveTask(courseId);
       })
       .catch(function () {
         listEl.innerHTML = '<div style="padding:16px;color:var(--color-text-danger);font-size:13px">読み込みに失敗しました</div>';
       });
+  }
+
+  // Issue #139: コースに進行中のタスクがあれば、ボタンを無効化しポーリングを復帰させる
+  function lsCheckActiveTask(courseId) {
+    apiFetch("/admin/courses/" + courseId + "/tasks/active")
+      .then(function (res) {
+        if (!res.ok) return null;
+        return res.json();
+      })
+      .then(function (task) {
+        if (!task || !task.task_id) return;
+        // コース選択が切り替わっていたら無視
+        if (lsState.courseId !== courseId) return;
+
+        var rd = task.result_data || {};
+        var totalChunks = rd.total_chunks || 0;
+
+        if (task.task_type === "audio_generation") {
+          lsState.generating = true;
+          document.getElementById("ls-generate-all-btn").disabled = true;
+          document.getElementById("ls-audio-all-btn").disabled = true;
+          lsShowProgress(
+            "音声生成が進行中です... (進捗: " + (rd.progress || 0) + "%)",
+            "info"
+          );
+          _lsPollAudioTask(task.task_id, totalChunks);
+        } else if (task.task_type === "script_generation") {
+          lsState.generating = true;
+          document.getElementById("ls-generate-all-btn").disabled = true;
+          document.getElementById("ls-audio-all-btn").disabled = true;
+          lsShowProgress(
+            "スクリプト生成が進行中です... (進捗: " + (rd.progress || 0) + "%)",
+            "info"
+          );
+          _lsPollGenerateTask(task.task_id, totalChunks);
+        }
+      })
+      .catch(function () { /* ignore */ });
   }
 
   function lsRenderChunkList() {
@@ -2004,8 +2159,11 @@
       return;
     }
 
-    generateAllBtn.disabled = false;
-    audioAllBtn.disabled = false;
+    // Issue #139: 進行中タスクがある場合はボタン有効化を抑制（呼び出し側で制御）
+    if (!lsState.generating) {
+      generateAllBtn.disabled = false;
+      audioAllBtn.disabled = false;
+    }
     var html = "";
     lsState.chunks.forEach(function (c, i) {
       var active = c.chunk_id === lsState.selectedChunkId ? " active" : "";
@@ -2117,6 +2275,7 @@
   function lsBatchGenerate() {
     lsState.generating = true;
     document.getElementById("ls-generate-all-btn").disabled = true;
+    document.getElementById("ls-audio-all-btn").disabled = true;
     lsShowProgress("スクリプト生成を開始しています...", "info");
 
     apiFetch("/admin/courses/" + lsState.courseId + "/lecture-scripts/generate", {
@@ -2144,6 +2303,7 @@
         lsShowProgress("生成に失敗しました: " + (err.message || "不明なエラー"), "error");
         lsState.generating = false;
         document.getElementById("ls-generate-all-btn").disabled = false;
+        document.getElementById("ls-audio-all-btn").disabled = false;
       });
   }
 
@@ -2169,18 +2329,42 @@
 
           if (task.status === "completed") {
             clearInterval(timer);
+            // Issue #139: 自動パイプラインの場合は音声タスクへチェイン
+            if (rd.next_task_id) {
+              lsShowProgress(
+                "原稿生成完了 (" + generated + "件生成 / " + skipped + "件スキップ)。続いて音声生成を開始します...",
+                "info"
+              );
+              // チャンクリストを更新（spoken_text が埋まった状態を反映）
+              apiFetch("/admin/courses/" + lsState.courseId + "/lecture-scripts")
+                .then(function (res) { return res.ok ? res.json() : []; })
+                .then(function (chunks) {
+                  if (lsState.courseId) {
+                    lsState.chunks = chunks;
+                    lsRenderChunkList();
+                    // ボタンは音声生成中のため再度無効化
+                    document.getElementById("ls-generate-all-btn").disabled = true;
+                    document.getElementById("ls-audio-all-btn").disabled = true;
+                  }
+                })
+                .catch(function () {});
+              _lsPollAudioTask(rd.next_task_id, totalChunks);
+              return;
+            }
             lsShowProgress(
               "生成完了: " + generated + "件生成 / " + skipped + "件スキップ (全" + totalChunks + "件)",
               "success"
             );
             lsState.generating = false;
             document.getElementById("ls-generate-all-btn").disabled = false;
+            document.getElementById("ls-audio-all-btn").disabled = false;
             lsLoadScripts(lsState.courseId);
           } else if (task.status === "failed") {
             clearInterval(timer);
             lsShowProgress("生成に失敗しました: " + (task.error_message || "不明なエラー"), "error");
             lsState.generating = false;
             document.getElementById("ls-generate-all-btn").disabled = false;
+            document.getElementById("ls-audio-all-btn").disabled = false;
           } else {
             // pending / processing
             lsShowProgress(
@@ -2196,6 +2380,7 @@
             lsShowProgress("進捗確認に失敗しました。ページをリロードして状況を確認してください。", "error");
             lsState.generating = false;
             document.getElementById("ls-generate-all-btn").disabled = false;
+            document.getElementById("ls-audio-all-btn").disabled = false;
           }
         });
     }
@@ -2206,6 +2391,7 @@
 
   function lsBatchAudio() {
     lsState.generating = true;
+    document.getElementById("ls-generate-all-btn").disabled = true;
     document.getElementById("ls-audio-all-btn").disabled = true;
     lsShowProgress("音声生成を開始しています...", "info");
 
@@ -2233,6 +2419,7 @@
       .catch(function (err) {
         lsShowProgress("音声生成に失敗しました: " + (err.message || "不明なエラー"), "error");
         lsState.generating = false;
+        document.getElementById("ls-generate-all-btn").disabled = false;
         document.getElementById("ls-audio-all-btn").disabled = false;
       });
   }
@@ -2267,12 +2454,14 @@
               errors > 0 ? "error" : "success"
             );
             lsState.generating = false;
+            document.getElementById("ls-generate-all-btn").disabled = false;
             document.getElementById("ls-audio-all-btn").disabled = false;
             lsLoadScripts(lsState.courseId);
           } else if (task.status === "failed") {
             clearInterval(timer);
             lsShowProgress("音声生成に失敗しました: " + (task.error_message || "不明なエラー"), "error");
             lsState.generating = false;
+            document.getElementById("ls-generate-all-btn").disabled = false;
             document.getElementById("ls-audio-all-btn").disabled = false;
           } else {
             // pending / processing
@@ -2288,6 +2477,7 @@
             clearInterval(timer);
             lsShowProgress("進捗確認に失敗しました。ページをリロードして状況を確認してください。", "error");
             lsState.generating = false;
+            document.getElementById("ls-generate-all-btn").disabled = false;
             document.getElementById("ls-audio-all-btn").disabled = false;
           }
         });
