@@ -334,7 +334,16 @@ def generate_tts(
 # ---------------------------------------------------------------------------
 
 
-_TUTOR_SYSTEM_PROMPT = """あなたは学術講義中に学生の疑問をその場で即座に解消する「チューター（解説者）」です。
+def _get_tutor_system_prompt(domain: str) -> str:
+    """チューター（解説者）ロールのシステムプロンプトを生成する。
+
+    Parameters
+    ----------
+    domain : str
+        コースの専門分野。空文字の場合は「このコースの専門分野」でフォールバック。
+    """
+    domain_label = domain.strip() if domain.strip() else "このコースの専門分野"
+    return f"""あなたは{domain_label}の学術講義中に学生の疑問をその場で即座に解消する「チューター（解説者）」です。
 今まさに再生されている講義の局所的な疑問をすぐに解決し、速やかに講義の再開を促すことが使命です。
 
 **チューターとしての役割:**
@@ -375,12 +384,14 @@ def lecture_interrupt_chat(
             topic_info = t
             break
     topic_title = topic_info["title"] if topic_info else topic_id
+    # domain が未設定の場合は course_title にフォールバック
+    domain = course_data.get("domain") or course_title
 
     # 現在再生中のチャンクのテキストを取得してコンテキストに含める
     chunk_context = _get_chunk_text(body.current_chunk_id)
 
     messages: list[dict] = [
-        {"role": "system", "content": _TUTOR_SYSTEM_PROMPT},
+        {"role": "system", "content": _get_tutor_system_prompt(domain)},
         {"role": "user", "content": (
             f"コース: {course_title}\n"
             f"現在のトピック: {topic_title}\n\n"

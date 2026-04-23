@@ -571,6 +571,7 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
 生成するコース構成案は以下の形式に従ってください:
 {
   "title": "コースタイトル",
+  "domain": "コースの専門分野（例: 素粒子物理学、経済学、機械学習など）",
   "target_audience": "対象者（例: 物理学専攻の大学院1年生）",
   "goal": "到達目標",
   "prerequisites": ["前提知識1", "前提知識2"],
@@ -605,6 +606,8 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
 - topics[].prerequisites には、そのトピックを学ぶ前に習得しておくべき**同コース内の**トピックのタイトルを列挙する
   - 例: 第2章のトピックは第1章のトピックタイトルを prerequisites に入れる
   - 最初のトピックや前提知識不要なトピックは prerequisites を空配列 [] にする
+- domain フィールドは教材のナレッジグラフに記載されている「**分野:**」から引き継ぐこと
+  - 教材の分野情報がなければ、コースの内容を踏まえて適切な専門分野名を設定する
 - sources フィールドは常に空配列 [] のままにすること（教材はシステムが自動的に設定する）"""
 
 
@@ -1153,8 +1156,9 @@ def get_course_as_draft(
 
     draft = {
         "title": course_title,
-        "target_audience": "",
-        "goal": "",
+        "domain": data.get("domain", ""),
+        "target_audience": data.get("target_audience", ""),
+        "goal": data.get("goal", ""),
         "prerequisites": [],
         "chapters": chapters,
         "concepts": concepts,

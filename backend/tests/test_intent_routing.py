@@ -1,12 +1,18 @@
-"""Issue #141: 意図分類（Intent Routing）のテスト。
+"""Issue #141/#143: 意図分類（Intent Routing）と動的プロンプト生成のテスト。
 
+Issue #141:
 - _is_greeting との協調動作
 - _classify_intent のルール判定ショートカット（挨拶→LEARNING_ADVICE）
 - LLM 呼び出しによる CHIT_CHAT / LEARNING_ADVICE / DOMAIN_RAG 分類
 - LLM 失敗時のフォールバック（DOMAIN_RAG）
 - learning_chat の各ルートへの分岐動作
 - 基礎知識フォールバック（RAGヒット0件時のラベル付与）
-- _NAVIGATOR_SYSTEM_PROMPT / _TUTOR_SYSTEM_PROMPT が定義されていること
+
+Issue #143:
+- _get_navigator_system_prompt(domain) が domain を埋め込んだプロンプトを返す
+- _get_tutor_system_prompt(domain) が domain を埋め込んだプロンプトを返す
+- domain が空の場合はフォールバック文言を使う
+- _COURSE_BUILDER_SYSTEM_PROMPT に domain フィールドの定義が含まれる
 """
 
 from __future__ import annotations
@@ -168,56 +174,110 @@ class TestBasicKnowledgeFallback:
 
 
 class TestSystemPrompts:
-    """_NAVIGATOR_SYSTEM_PROMPT / _TUTOR_SYSTEM_PROMPT が正しく定義されていること。"""
+    """_get_navigator_system_prompt / _get_tutor_system_prompt が正しく定義されていること。"""
 
-    def test_navigator_system_prompt_defined(self):
-        """_NAVIGATOR_SYSTEM_PROMPT が learning.py に定義されている。"""
-        from api.routes.learning import _NAVIGATOR_SYSTEM_PROMPT
-        assert isinstance(_NAVIGATOR_SYSTEM_PROMPT, str)
-        assert len(_NAVIGATOR_SYSTEM_PROMPT) > 100
+    # --- ナビゲーター ---
+
+    def test_navigator_prompt_function_defined(self):
+        """_get_navigator_system_prompt 関数が learning.py に定義されている。"""
+        from api.routes.learning import _get_navigator_system_prompt
+        assert callable(_get_navigator_system_prompt)
+
+    def test_navigator_prompt_returns_string(self):
+        """_get_navigator_system_prompt は str を返す。"""
+        from api.routes.learning import _get_navigator_system_prompt
+        result = _get_navigator_system_prompt("素粒子物理学")
+        assert isinstance(result, str)
+        assert len(result) > 100
 
     def test_navigator_prompt_contains_role_description(self):
-        """_NAVIGATOR_SYSTEM_PROMPT にナビゲーターの役割説明が含まれる。"""
-        from api.routes.learning import _NAVIGATOR_SYSTEM_PROMPT
-        assert "ナビゲーター" in _NAVIGATOR_SYSTEM_PROMPT
+        """生成プロンプトにナビゲーターの役割説明が含まれる。"""
+        from api.routes.learning import _get_navigator_system_prompt
+        assert "ナビゲーター" in _get_navigator_system_prompt("量子力学")
+
+    def test_navigator_prompt_contains_domain(self):
+        """生成プロンプトに指定した domain が含まれる。"""
+        from api.routes.learning import _get_navigator_system_prompt
+        prompt = _get_navigator_system_prompt("経済学")
+        assert "経済学" in prompt
 
     def test_navigator_prompt_contains_latex_instruction(self):
-        """_NAVIGATOR_SYSTEM_PROMPT に LaTeX 記法の指示が含まれる。"""
-        from api.routes.learning import _NAVIGATOR_SYSTEM_PROMPT
-        assert "LaTeX" in _NAVIGATOR_SYSTEM_PROMPT
+        """生成プロンプトに LaTeX 記法の指示が含まれる。"""
+        from api.routes.learning import _get_navigator_system_prompt
+        assert "LaTeX" in _get_navigator_system_prompt("数学")
 
     def test_navigator_prompt_contains_drilldown_format(self):
-        """_NAVIGATOR_SYSTEM_PROMPT にドリルダウンフォーマット指示が含まれる。"""
-        from api.routes.learning import _NAVIGATOR_SYSTEM_PROMPT
-        assert "〇〇について詳しく聞く" in _NAVIGATOR_SYSTEM_PROMPT
+        """生成プロンプトにドリルダウンフォーマット指示が含まれる。"""
+        from api.routes.learning import _get_navigator_system_prompt
+        assert "〇〇について詳しく聞く" in _get_navigator_system_prompt("物理学")
 
-    def test_tutor_system_prompt_defined(self):
-        """_TUTOR_SYSTEM_PROMPT が lecture.py に定義されている。"""
-        from api.routes.lecture import _TUTOR_SYSTEM_PROMPT
-        assert isinstance(_TUTOR_SYSTEM_PROMPT, str)
-        assert len(_TUTOR_SYSTEM_PROMPT) > 100
+    def test_navigator_prompt_fallback_when_empty_domain(self):
+        """domain が空文字の場合はフォールバック文言が使われる。"""
+        from api.routes.learning import _get_navigator_system_prompt
+        prompt = _get_navigator_system_prompt("")
+        assert "このコースの専門分野" in prompt
+
+    # --- チューター ---
+
+    def test_tutor_prompt_function_defined(self):
+        """_get_tutor_system_prompt 関数が lecture.py に定義されている。"""
+        from api.routes.lecture import _get_tutor_system_prompt
+        assert callable(_get_tutor_system_prompt)
+
+    def test_tutor_prompt_returns_string(self):
+        """_get_tutor_system_prompt は str を返す。"""
+        from api.routes.lecture import _get_tutor_system_prompt
+        result = _get_tutor_system_prompt("素粒子物理学")
+        assert isinstance(result, str)
+        assert len(result) > 100
 
     def test_tutor_prompt_contains_role_description(self):
-        """_TUTOR_SYSTEM_PROMPT にチューターの役割説明が含まれる。"""
-        from api.routes.lecture import _TUTOR_SYSTEM_PROMPT
-        assert "チューター" in _TUTOR_SYSTEM_PROMPT
+        """生成プロンプトにチューターの役割説明が含まれる。"""
+        from api.routes.lecture import _get_tutor_system_prompt
+        assert "チューター" in _get_tutor_system_prompt("量子力学")
+
+    def test_tutor_prompt_contains_domain(self):
+        """生成プロンプトに指定した domain が含まれる。"""
+        from api.routes.lecture import _get_tutor_system_prompt
+        prompt = _get_tutor_system_prompt("経済学")
+        assert "経済学" in prompt
 
     def test_tutor_prompt_encourages_resume(self):
-        """_TUTOR_SYSTEM_PROMPT に講義再開を促す指示が含まれる。"""
-        from api.routes.lecture import _TUTOR_SYSTEM_PROMPT
-        assert "再生ボタン" in _TUTOR_SYSTEM_PROMPT
+        """生成プロンプトに講義再開を促す指示が含まれる。"""
+        from api.routes.lecture import _get_tutor_system_prompt
+        assert "再生ボタン" in _get_tutor_system_prompt("物理学")
 
-    def test_learning_system_prompt_renamed(self):
-        """旧 _LEARNING_SYSTEM_PROMPT は削除され、_NAVIGATOR_SYSTEM_PROMPT になっている。"""
+    def test_tutor_prompt_fallback_when_empty_domain(self):
+        """domain が空文字の場合はフォールバック文言が使われる。"""
+        from api.routes.lecture import _get_tutor_system_prompt
+        prompt = _get_tutor_system_prompt("")
+        assert "このコースの専門分野" in prompt
+
+    # --- 旧定数の廃止確認 ---
+
+    def test_learning_system_prompt_constant_removed(self):
+        """旧 _LEARNING_SYSTEM_PROMPT 定数は削除されている。"""
         import api.routes.learning as mod
         assert not hasattr(mod, "_LEARNING_SYSTEM_PROMPT"), \
-            "_LEARNING_SYSTEM_PROMPT は _NAVIGATOR_SYSTEM_PROMPT に統合されているはずです"
+            "_LEARNING_SYSTEM_PROMPT は _get_navigator_system_prompt() に統合されているはずです"
 
-    def test_lecture_interrupt_prompt_renamed(self):
-        """旧 _LECTURE_INTERRUPT_SYSTEM_PROMPT は _TUTOR_SYSTEM_PROMPT に統合されている。"""
+    def test_navigator_system_prompt_constant_removed(self):
+        """_NAVIGATOR_SYSTEM_PROMPT 定数ではなく関数になっている。"""
+        import api.routes.learning as mod
+        assert not hasattr(mod, "_NAVIGATOR_SYSTEM_PROMPT"), \
+            "_NAVIGATOR_SYSTEM_PROMPT は _get_navigator_system_prompt() に関数化されているはずです"
+
+    def test_lecture_interrupt_prompt_constant_removed(self):
+        """旧 _LECTURE_INTERRUPT_SYSTEM_PROMPT 定数は削除されている。"""
         import api.routes.lecture as mod
         assert not hasattr(mod, "_LECTURE_INTERRUPT_SYSTEM_PROMPT"), \
-            "_LECTURE_INTERRUPT_SYSTEM_PROMPT は _TUTOR_SYSTEM_PROMPT に統合されているはずです"
+            "_LECTURE_INTERRUPT_SYSTEM_PROMPT は _get_tutor_system_prompt() に統合されているはずです"
+
+    def test_tutor_prompt_constant_removed(self):
+        """_TUTOR_SYSTEM_PROMPT 定数ではなく関数になっている。"""
+        import api.routes.lecture as mod
+        assert not hasattr(mod, "_TUTOR_SYSTEM_PROMPT"), \
+            "_TUTOR_SYSTEM_PROMPT は _get_tutor_system_prompt() に関数化されているはずです"
 
 
 # ---------------------------------------------------------------------------
@@ -280,3 +340,59 @@ class TestGenerateLearningAdviceResponse:
             )
             assert "量子力学入門" in result
             assert "波動関数" in result
+
+
+# ---------------------------------------------------------------------------
+# 6. Issue #143: domain 引き継ぎ・動的プロンプト生成テスト
+# ---------------------------------------------------------------------------
+
+
+class TestDomainPropagation:
+    """course_data の domain がシステムプロンプトに動的に反映されること。"""
+
+    def test_navigator_prompt_uses_domain_from_course_data(self):
+        """_get_navigator_system_prompt に渡した domain がプロンプトに含まれる。"""
+        from api.routes.learning import _get_navigator_system_prompt
+
+        prompt = _get_navigator_system_prompt("機械学習")
+        assert "機械学習" in prompt
+        assert "ナビゲーター" in prompt
+
+    def test_tutor_prompt_uses_domain_from_course_data(self):
+        """_get_tutor_system_prompt に渡した domain がプロンプトに含まれる。"""
+        from api.routes.lecture import _get_tutor_system_prompt
+
+        prompt = _get_tutor_system_prompt("経済学")
+        assert "経済学" in prompt
+        assert "チューター" in prompt
+
+    def test_navigator_fallback_for_none_domain(self):
+        """domain が None（未設定）の場合にフォールバック文言が使われる。"""
+        from api.routes.learning import _get_navigator_system_prompt
+
+        # None は空文字として扱われることを確認（呼び出し側は or course_title を使う）
+        prompt = _get_navigator_system_prompt("")
+        assert "このコースの専門分野" in prompt
+        assert "素粒子物理学" not in prompt
+
+    def test_tutor_fallback_for_empty_domain(self):
+        """domain が空文字の場合にフォールバック文言が使われる。"""
+        from api.routes.lecture import _get_tutor_system_prompt
+
+        prompt = _get_tutor_system_prompt("")
+        assert "このコースの専門分野" in prompt
+
+    def test_course_builder_prompt_contains_domain_field(self):
+        """_COURSE_BUILDER_SYSTEM_PROMPT の JSON スキーマに domain フィールドが定義されている。"""
+        from api.routes.admin import _COURSE_BUILDER_SYSTEM_PROMPT
+
+        assert '"domain"' in _COURSE_BUILDER_SYSTEM_PROMPT
+        assert "専門分野" in _COURSE_BUILDER_SYSTEM_PROMPT
+
+    def test_course_builder_prompt_domain_instruction(self):
+        """_COURSE_BUILDER_SYSTEM_PROMPT に domain の設定方法の指示が含まれる。"""
+        from api.routes.admin import _COURSE_BUILDER_SYSTEM_PROMPT
+
+        assert "domain" in _COURSE_BUILDER_SYSTEM_PROMPT
+        # ナレッジグラフからの引き継ぎ指示
+        assert "ナレッジグラフ" in _COURSE_BUILDER_SYSTEM_PROMPT

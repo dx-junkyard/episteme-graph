@@ -555,7 +555,16 @@ def _generate_learning_advice_response(
         )
 
 
-_NAVIGATOR_SYSTEM_PROMPT = """あなたは素粒子物理学・場の量子論コースを担当する「ナビゲーター（教授）」です。
+def _get_navigator_system_prompt(domain: str) -> str:
+    """ナビゲーター（教授）ロールのシステムプロンプトを生成する。
+
+    Parameters
+    ----------
+    domain : str
+        コースの専門分野。空文字の場合は「このコースの専門分野」でフォールバック。
+    """
+    domain_label = domain.strip() if domain.strip() else "このコースの専門分野"
+    return f"""あなたは{domain_label}コースを担当する「ナビゲーター（教授）」です。
 コース全体のマクロな理解度を管理し、学生が体系的に学習を深められるよう導くことが使命です。
 
 **ナビゲーターとしての役割:**
@@ -569,15 +578,14 @@ _NAVIGATOR_SYSTEM_PROMPT = """あなたは素粒子物理学・場の量子論�
    - 「数式のこの項を見落としがちですが…」のように、数式レベルで誤解の原因を指摘
    - 「〇〇と△△を混同しやすいですが…」のように、類似概念との混同パターンを説明
    - 正答だけでなく、なぜ間違えやすいかの構造を必ず示す
-2. 概念の説明は具体的な数式（LaTeX）、ファインマン図の説明、または物理的直観を使って行ってください。
+2. 概念の説明は具体的な数式（LaTeX）、ファインマン図の説明、または分野の直観を使って行ってください。
 3. 教材から引用できる場合は出典（セクション番号等）を明記してください。
 4. 説明の最後に、理解を確認するための質問をしてください。
 5. 関連する概念へのドリルダウン選択肢を提示してください。
 
 **数式の導出サポート:**
 - 数式の行間（導出）に関する質問には、前提となる数学的公式・定理を最初に提示してください。
-- ステップ・バイ・ステップで、各変形の物理的意味を添えて説明してください。
-- 例: 「ここで部分積分を使い、表面項が消えることを仮定すると…」
+- ステップ・バイ・ステップで、各変形の意味を添えて説明してください。
 
 **RAGコンテキスト利用:**
 - 提供される「教材チャンク」はシステム全域のベクトル検索で取得した関連箇所です。各チャンクには `[出典: 『書籍名』]` の形式で出典が付いています。
@@ -645,6 +653,9 @@ def learning_chat(
             break
     topic_title = topic_info["title"] if topic_info else topic_id
     course_title = course_data.get("title", course_id)
+    # domain が未設定の場合は course_title にフォールバック
+    domain = course_data.get("domain") or course_title
+    navigator_prompt = _get_navigator_system_prompt(domain)
 
     # 2. 意図分類（Intent Routing）
     intent = _classify_intent(body.message, course_title)
@@ -695,7 +706,7 @@ def learning_chat(
         log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
 
         basic_messages: list[dict] = [
-            {"role": "system", "content": _NAVIGATOR_SYSTEM_PROMPT},
+            {"role": "system", "content": navigator_prompt},
             {"role": "user", "content": (
                 f"コース: {course_title}\n"
                 f"現在のトピック: {topic_title}\n\n"
@@ -740,7 +751,7 @@ def learning_chat(
     )
 
     messages: list[dict] = [
-        {"role": "system", "content": _NAVIGATOR_SYSTEM_PROMPT},
+        {"role": "system", "content": navigator_prompt},
         {"role": "user", "content": (
             f"コース: {course_title}\n"
             f"現在のトピック: {topic_title}\n\n"
