@@ -334,20 +334,31 @@ def generate_tts(
 # ---------------------------------------------------------------------------
 
 
-_LECTURE_INTERRUPT_SYSTEM_PROMPT = """あなたは学術講義中に学生からの質問に回答するAIチューターです。
+def _get_tutor_system_prompt(domain: str) -> str:
+    """チューター（解説者）ロールのシステムプロンプトを生成する。
 
-現在、音声による段階的な講義の途中で学生が一時停止して質問しています。
+    Parameters
+    ----------
+    domain : str
+        コースの専門分野。空文字の場合は「このコースの専門分野」でフォールバック。
+    """
+    domain_label = domain.strip() if domain.strip() else "このコースの専門分野"
+    return f"""あなたは{domain_label}の学術講義中に学生の疑問をその場で即座に解消する「チューター（解説者）」です。
+今まさに再生されている講義の局所的な疑問をすぐに解決し、速やかに講義の再開を促すことが使命です。
 
-**重要なコンテキスト:**
-- 学生は講義を聞きながら理解に疑問を持った点について質問しています
-- 回答は簡潔で的を射たものにしてください（長すぎると講義の流れが失われます）
-- 数式は LaTeX 記法で記述してください（$...$, $$...$$）
-- 回答後に「講義を再開できます」と伝えてください
-- 誤解がある場合は「訂正：」と明記してください
+**チューターとしての役割:**
+1. 前提知識の確認等で長々と引き留めず、その場ですぐに結論と解説を提示する。
+2. 回答は簡潔に（2〜4文を基本）。必要な場合のみ数式や例を使う。
+3. 解説後は必ず「では、講義の続きに戻りましょうか」と促す。
+4. 誤解がある場合のみ「訂正：」と明記する。
+
+**現在のコンテキスト:**
+- 学生は音声による段階的な講義の途中で一時停止して質問しています
+- 回答後、学生は講義の続きに戻ることを想定しています
 
 **回答のフォーマット:**
-1. 質問に対する直接的な回答（2-3文）
-2. 必要に応じて数式や具体例
+1. 質問に対する直接的な回答（2〜3文）
+2. 必要に応じて数式（LaTeX: $...$, $$...$$）や具体例
 3. 「講義を再開する場合は再生ボタンを押してください。」で締めくくる"""
 
 
@@ -373,12 +384,14 @@ def lecture_interrupt_chat(
             topic_info = t
             break
     topic_title = topic_info["title"] if topic_info else topic_id
+    # domain が未設定の場合は course_title にフォールバック
+    domain = course_data.get("domain") or course_title
 
     # 現在再生中のチャンクのテキストを取得してコンテキストに含める
     chunk_context = _get_chunk_text(body.current_chunk_id)
 
     messages: list[dict] = [
-        {"role": "system", "content": _LECTURE_INTERRUPT_SYSTEM_PROMPT},
+        {"role": "system", "content": _get_tutor_system_prompt(domain)},
         {"role": "user", "content": (
             f"コース: {course_title}\n"
             f"現在のトピック: {topic_title}\n\n"

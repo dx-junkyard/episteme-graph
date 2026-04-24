@@ -435,7 +435,44 @@ def _is_greeting(message: str) -> bool:
     return False
 
 
-def _generate_greeting_response(
+def _classify_intent(message: str, course_title: str) -> str:
+    """ユーザーメッセージの意図を分類する (Intent Routing)。
+
+    Returns
+    -------
+    str
+        ``'CHIT_CHAT'`` | ``'LEARNING_ADVICE'`` | ``'DOMAIN_RAG'``
+    """
+    if _is_greeting(message):
+        return "LEARNING_ADVICE"
+
+    params = get_llm_params("fast")
+    prompt = (
+        f"学習コース「{course_title}」の学習支援AIとして、学生からの質問を3つのルートに分類します。\n\n"
+        "分類ルート:\n"
+        "- CHIT_CHAT: 学習と無関係な雑談・日常会話（天気、食事、娯楽、個人的な話題など）\n"
+        "- LEARNING_ADVICE: 学習の進め方・方法に関するメタ質問（どう進めるか、何から学ぶか、学習計画の相談など）\n"
+        "- DOMAIN_RAG: 物理学・数学などの専門知識・概念に関する質問\n\n"
+        f"質問: {message}\n\n"
+        "上記のルートの中から最も適切な1つだけを返してください（説明不要）:"
+    )
+
+    try:
+        result = generate_text(
+            messages=[{"role": "user", "content": prompt}],
+            model=params["model"],
+            reasoning_effort=params["reasoning_effort"],
+        ).strip().upper()
+        for label in ("CHIT_CHAT", "LEARNING_ADVICE", "DOMAIN_RAG"):
+            if label in result:
+                return label
+    except Exception:
+        logger.warning("Intent classification failed, defaulting to DOMAIN_RAG")
+
+    return "DOMAIN_RAG"
+
+
+def _generate_learning_advice_response(
     course_title: str,
     topic_title: str,
     message: str,
@@ -443,14 +480,12 @@ def _generate_greeting_response(
     topic_info: dict | None = None,
     course_data: dict | None = None,
 ) -> str:
-    """学習開始時のオーバービューを生成する (Standard モード)。
+    """学習相談・メタ質問・学習開始への応答を生成する（ルート②: ナビゲーター）。
 
-    topic_info / course_data からトピックの主要概念・前提知識を抽出し、
-    学習の全体像を提示するメッセージを生成する。
+    コース全体の構造と現在のトピックをベースに、学習アドバイスや導入メッセージを提供する。
     """
     params = get_llm_params("standard")
 
-    # トピックメタ情報を抽出
     prerequisites: list[str] = []
     concepts: list[str] = []
 
@@ -466,7 +501,16 @@ def _generate_greeting_response(
             if name:
                 concepts.append(name)
 
-    # プロンプト用のメタ情報ブロック構築
+    # コース全体のトピック一覧（最大10件）
+    topics_block = ""
+    if course_data:
+        topics = course_data.get("topics", [])
+        if topics:
+            topics_list = "\n".join(
+                f"  - {t.get('title', t.get('id', ''))}" for t in topics[:10]
+            )
+            topics_block = f"■ コースのトピック一覧:\n{topics_list}\n\n"
+
     concepts_block = ""
     if concepts:
         concepts_block = "■ このトピックで習得すべき主要概念:\n" + "\n".join(
@@ -480,11 +524,13 @@ def _generate_greeting_response(
         ) + "\n\n"
 
     prompt = (
-        f"あなたは「{course_title}」の学習をサポートするAIチューターです。\n"
-        f"学生が新しく「{topic_title}」の学習を開始しようとしています。\n\n"
+        f"あなたは「{course_title}」の学習をサポートするナビゲーター教授です。\n"
+        f"学生は現在「{topic_title}」のトピックを学習しています。\n\n"
+        f"{topics_block}"
         f"{concepts_block}"
         f"{prereqs_block}"
-        "以下の構成で、学習の導入となる最初のメッセージを作成してください:\n"
+        f"学生からのメッセージ: {message}\n\n"
+        "コース全体の構造と学生の現在位置を踏まえ、以下の構成で回答してください:\n"
         "1. 【歓迎と目標】このトピックで学ぶことの全体像と、最終的な学習目標を簡潔に説明する。\n"
         "2. 【構成要素】習得すべき主要な概念をリストアップする。\n"
         "3. 【前提知識の確認】このトピックを学ぶために必要な前提知識を提示する。\n"
@@ -499,7 +545,7 @@ def _generate_greeting_response(
             reasoning_effort=params["reasoning_effort"],
         )
     except Exception:
-        logger.warning("Greeting response LLM call failed, returning fallback")
+        logger.warning("Learning advice response LLM call failed, returning fallback")
         return (
             f"「{course_title}」の学習サポートへようこそ！\n\n"
             f"これから「{topic_title}」の学習を始めます。\n\n"
@@ -509,35 +555,28 @@ def _generate_greeting_response(
         )
 
 
-_LEARNING_SYSTEM_PROMPT = """あなたは素粒子物理学・場の量子論を専門とする学習者の深い理解を支援する家庭教師です。
-以下の原則に従ってください。
+def _get_integrated_tutor_system_prompt(domain: str) -> str:
+    """知識統合型チューターのシステムプロンプトを生成する。
 
-**教育方針:**
-1. 学生の誤解を発見したら「訂正：」と明記し、**誤謬の構造的理由**を必ず含めてください。
-   - 「数式のこの項を見落としがちですが…」のように、数式レベルで誤解の原因を指摘
-   - 「〇〇と△△を混同しやすいですが…」のように、類似概念との混同パターンを説明
-   - 正答だけでなく、なぜ間違えやすいかの構造を必ず示す
-2. 概念の説明は具体的な数式（LaTeX）、ファインマン図の説明、または物理的直観を使って行ってください。
-3. 教材から引用できる場合は出典（セクション番号等）を明記してください。
-4. 説明の最後に、理解を確認するための質問をしてください。
-5. 関連する概念へのドリルダウン選択肢を提示してください。
+    Parameters
+    ----------
+    domain : str
+        コースの専門分野。空文字の場合は「このコースの専門分野」でフォールバック。
+    """
+    domain_label = domain.strip() if domain.strip() else "このコースの専門分野"
+    return f"""あなたは{domain_label}の学習をサポートする「親切な専属チューター」です。
+学生の疑問に対して、手元の教材とあなた自身の専門知識をシームレスに統合して、即座に分かりやすい解説を提供することが使命です。
 
-**数式の導出サポート:**
-- 数式の行間（導出）に関する質問には、前提となる数学的公式・定理を最初に提示してください。
-- ステップ・バイ・ステップで、各変形の物理的意味を添えて説明してください。
-- 例: 「ここで部分積分を使い、表面項が消えることを仮定すると…」
+**チューターとしての役割と回答ルール:**
+1. 【知識の統合】提供される「教材からのコンテキスト」を最優先で参照してください。ただし、コンテキストに十分な情報がない場合は、突き放したり「教材にありません」と謝罪したりせず、あなたの一般的な学術知識を用いて自然に解説を補完してください。
+2. 【自然な対話】回答の冒頭に「【基礎知識の補足】」のようなシステム的な警告ラベルは絶対に付けないでください。
+3. 【誤解の訂正】学生に誤解がある場合は、「訂正：」という冷たい表現は避け、「この点については、〇〇と考えるとより正確です」のように教育的配慮を持って導いてください。
+4. 【解説の深さ】前提知識の確認で長々と引き留めず、まずは直球で疑問に答えてください。必要に応じて数式（LaTeX）や具体例を交えてください。
+5. 【ドリルダウン】回答の末尾に、関連して深掘りできそうなトピックを `[〇〇について詳しく聞く]` の形式で1〜2つ提示してください。
 
-**RAGコンテキスト利用:**
-- 提供される「教材チャンク」はシステム全域のベクトル検索で取得した関連箇所です。各チャンクには `[出典: 『書籍名』]` の形式で出典が付いています。
-- 回答中で教材を参照する際は必ず「『書籍名』によれば…」「『書籍名』では…と述べられています」のように出典を明記してください。
-- 複数の教材から情報を統合する場合は、それぞれの出典を区別して示してください。
-- コンテキストに含まれない情報について推測する場合はその旨を明記してください。
-
-**フォーマット:**
-- 数式は必ず LaTeX 記法で記述（インラインは `$...$`、ディスプレイは `$$...$$`）
-- 誤解の訂正が必要な場合は最初に「訂正：」と記述
-- 参照した教材のセクションがあれば言及
-- 回答の末尾に深掘りできるトピックを `[〇〇について詳しく聞く]` の形式で提示（必ずこのフォーマットを使用）"""
+**フォーマット要件:**
+- 数式は必ず LaTeX 記法で記述（インラインは $...$、ディスプレイは $$...$$）
+- 教材を参照した場合は [出典: 『書籍名』] を文脈に自然に混ぜて言及すること。"""
 
 
 @router.get(
@@ -580,34 +619,51 @@ def learning_chat(
     body: LearningChatRequest,
     current_user: dict = Depends(_get_current_user),
 ) -> LearningChatResponse:
-    """RAG統合された学習チャットエンドポイント。"""
+    """RAG統合された学習チャットエンドポイント（意図分類ルーティング付き）。"""
     # 1. コースデータを取得
     course_data = get_course_data(current_user["id"], course_id)
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
 
-    # トピック情報を取得
     topic_info = None
     for t in course_data.get("topics", []):
         if t.get("id") == topic_id:
             topic_info = t
             break
     topic_title = topic_info["title"] if topic_info else topic_id
-
-    # 2. Greeting / メタ対話のバイパス: RAG検索をスキップ → オーバービュー提示
     course_title = course_data.get("title", course_id)
-    if _is_greeting(body.message):
-        greeting_answer = _generate_greeting_response(
+    # domain が未設定の場合は course_title にフォールバック
+    domain = course_data.get("domain") or course_title
+
+    # 2. 意図分類（Intent Routing）
+    intent = _classify_intent(body.message, course_title)
+
+    # ルート①: 雑談・無関係な質問 → 学習に関する質問を促す
+    if intent == "CHIT_CHAT":
+        chit_chat_answer = (
+            "申し訳ありませんが、私は物理学の学習支援に特化したAIです。\n\n"
+            "物理学・数学の概念についての質問や、学習の進め方についての相談でしたら、"
+            "喜んでお答えします。学習に関する質問をぜひ聞かせてください！"
+        )
+        persist_chat_history(
+            current_user["id"], course_id, topic_id,
+            body.history, body.message, chit_chat_answer,
+        )
+        return LearningChatResponse(answer=chit_chat_answer, course_update=None)
+
+    # ルート②: 学習相談・メタ質問 → RAGをスキップし、コース情報をベースにアドバイス
+    if intent == "LEARNING_ADVICE":
+        advice_answer = _generate_learning_advice_response(
             course_title, topic_title, body.message,
             topic_info=topic_info, course_data=course_data,
         )
         persist_chat_history(
             current_user["id"], course_id, topic_id,
-            body.history, body.message, greeting_answer,
+            body.history, body.message, advice_answer,
         )
-        return LearningChatResponse(answer=greeting_answer, course_update=None)
+        return LearningChatResponse(answer=advice_answer, course_update=None)
 
-    # 3. Adaptive Routing: 前提知識の自動判定
+    # 3. Adaptive Routing: 前提知識の自動判定 (ルート③/④の前に実行)
     prerequisite_intervention = check_prerequisites(
         current_user["id"], course_id, course_data, topic_title, body.message
     )
@@ -618,72 +674,51 @@ def learning_chat(
         )
         return LearningChatResponse(answer=prerequisite_intervention, course_update=None)
 
-    # 4. RAG: システム全域のチャンクを検索（出典メタデータ付き）
-    _RELEVANCE_THRESHOLD = 0.35
+    # 4. RAG: システム全域のチャンクを検索し、コンテキストを構築
     chunk_results = search_chunks_with_metadata(body.message, top_k=8)
-
-    # 4a. フェイルセーフ: 閾値以上のチャンクが0件の場合
-    above_threshold = [r for r in chunk_results if r["score"] >= _RELEVANCE_THRESHOLD]
-    if not above_threshold:
-        log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
-        no_answer = (
-            "申し訳ありませんが、ご質問の内容はシステムに登録された教材には見つかりませんでした。\n\n"
-            "教材に含まれていない内容についてはお答えできません。\n"
-            "別の表現で質問するか、担当教員にお問い合わせください。"
-        )
-        persist_chat_history(
-            current_user["id"], course_id, topic_id,
-            body.history, body.message, no_answer,
-        )
-        return LearningChatResponse(answer=no_answer, course_update=None)
-
-    # 出典情報を付けてコンテキストブロックを構築
     cited_chunks = []
-    for r in above_threshold:
-        cited_chunks.append(f"[出典: 『{r['source_title']}』]\n{r['text']}")
+    for r in chunk_results:
+        if r["score"] >= 0.30:
+            cited_chunks.append(f"[出典: 『{r['source_title']}』]\n{r['text']}")
 
-    context_parts: list[str] = [
-        "## 教材から検索された関連箇所（出典付き）\n" + "\n---\n".join(cited_chunks)
-    ]
+    if cited_chunks:
+        context_block = "## 関連する教材のコンテキスト\n" + "\n---\n".join(cited_chunks)
+    else:
+        context_block = "※この質問に直接関連する教材セクションは見つかりませんでした。一般的な学術知識を用いて回答してください。"
+        log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
 
-    context_block = "\n\n".join(context_parts)
-
-    # 6. LLM メッセージ構築
+    # 5. 回答の生成（ルート統合）
     messages: list[dict] = [
-        {"role": "system", "content": _LEARNING_SYSTEM_PROMPT},
+        {"role": "system", "content": _get_integrated_tutor_system_prompt(domain)},
         {"role": "user", "content": (
             f"コース: {course_title}\n"
             f"現在のトピック: {topic_title}\n\n"
             f"{context_block}\n\n"
-            "上記のコンテキストを念頭に置いて質問に回答してください。"
+            "上記のコンテキストを踏まえ（不足している場合は補完して）、以下の質問に答えてください。"
         )},
         {"role": "assistant", "content": (
-            f"了解しました。「{topic_title}」について、教材を参照しながら学習を進めましょう。"
+            f"はい、「{topic_title}」についてですね。お答えします。"
         )},
     ]
-
     for turn in body.history:
         messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": body.message})
 
-    # 7. LLM 呼び出し
     try:
         answer = generate_text(messages=messages, temperature=0.3)
     except Exception as exc:
         logger.exception("Learning chat LLM call failed for topic %s", topic_id)
         raise HTTPException(status_code=500, detail=f"Chat failed: {exc}") from exc
 
-    # 8. 誤解検出
+    # 誤解検出（マイルドな表現にも対応）
     course_update = None
-    if topic_info and any(kw in answer for kw in ["訂正：", "訂正:", "【訂正】"]):
+    if topic_info and any(kw in answer for kw in ["訂正", "より正確です", "誤解"]):
         course_update = detect_and_record_misconception(
             current_user["id"], course_id, course_data, topic_id, body.message, answer
         )
 
-    # 9. チャット履歴を永続化
     persist_chat_history(
         current_user["id"], course_id, topic_id,
         body.history, body.message, answer,
     )
-
     return LearningChatResponse(answer=answer, course_update=course_update)

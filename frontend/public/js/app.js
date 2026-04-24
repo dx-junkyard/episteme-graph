@@ -505,6 +505,39 @@
     el.innerHTML = html;
   }
 
+  // ── Topic Navigation ───────────────────────────────────────────────
+  function _getOrderedTopics() {
+    if (!state.course) return [];
+    var topics = state.course.topics || [];
+    var ordered = [];
+    (state.course.chapters || []).forEach(function (ch, ci) {
+      topics.filter(function (t) { return t.chapter_index === ci; }).forEach(function (t) {
+        ordered.push(t);
+      });
+    });
+    return ordered;
+  }
+
+  function getNextTopic() {
+    if (!state.currentTopicId) return null;
+    var ordered = _getOrderedTopics();
+    var idx = ordered.findIndex(function (t) { return t.id === state.currentTopicId; });
+    if (idx === -1 || idx >= ordered.length - 1) return null;
+    return ordered[idx + 1];
+  }
+
+  function updateNextTopicBtn() {
+    var btn = document.getElementById("next-topic-btn");
+    if (!btn) return;
+    var next = getNextTopic();
+    if (next) {
+      btn.style.display = "";
+      btn.title = "次のトピック: " + (next.title || "");
+    } else {
+      btn.style.display = "none";
+    }
+  }
+
   // ── Topic Selection ────────────────────────────────────────────────
   async function selectTopic(topicId) {
     state.currentTopicId = topicId;
@@ -512,6 +545,7 @@
     renderSidebar();
     renderChat();
     renderRightPanel();
+    updateNextTopicBtn();
 
     // Load chat history
     if (state.courseId && topicId) {
@@ -774,6 +808,7 @@
     }
     renderChat();
     renderRightPanel();
+    updateNextTopicBtn();
   }
 
   // ── Utilities ──────────────────────────────────────────────────────
@@ -1059,6 +1094,7 @@
     var chatInput = document.getElementById("lecture-chat-input");
     var chatMicBtn = document.getElementById("lecture-chat-mic");
     var resumeBtn = document.getElementById("lecture-chat-resume");
+    var nextTopicBtn = document.getElementById("next-topic-btn");
 
     if (toggleBtn) toggleBtn.addEventListener("click", toggleLectureMode);
     if (playBtn) playBtn.addEventListener("click", togglePlayPause);
@@ -1069,6 +1105,10 @@
     if (chatSendBtn) chatSendBtn.addEventListener("click", sendInterruptMessage);
     if (chatMicBtn) chatMicBtn.addEventListener("click", toggleVoiceInput);
     if (resumeBtn) resumeBtn.addEventListener("click", resumeLecture);
+    if (nextTopicBtn) nextTopicBtn.addEventListener("click", function () {
+      var next = getNextTopic();
+      if (next) selectTopic(next.id);
+    });
 
     if (chatInput) {
       chatInput.addEventListener("keydown", function (e) {
@@ -1147,6 +1187,7 @@
       lectureState.active = false;
       stopPlayback();
       toggleBtn.classList.remove("active");
+      toggleBtn.innerHTML = "&#127897; レクチャー";
       chatArea.style.display = "";
       lectureContent.classList.remove("visible");
       lecturePlayer.classList.remove("visible");
@@ -1161,6 +1202,7 @@
     // Activate lecture mode
     lectureState.active = true;
     toggleBtn.classList.add("active");
+    toggleBtn.innerHTML = "&#128196; テキスト";
     chatArea.style.display = "none";
     chatInput.style.display = "none";
     sendBtn.style.display = "none";
