@@ -1257,6 +1257,25 @@ body {
    Interactive Lecture Mode (Issue #66)
    =================================================================== */
 
+/* Next topic navigation button */
+.next-topic-btn {
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-success, #5DCAA5);
+  background: transparent;
+  color: var(--color-text-success, #5DCAA5);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.next-topic-btn:hover {
+  background: var(--color-background-success, rgba(93,202,165,0.12));
+}
+
 /* Lecture mode toggle button */
 .lecture-toggle-btn {
   padding: 6px 14px;

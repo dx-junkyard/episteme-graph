@@ -58,6 +58,21 @@ class TestLectureStudioSchemas:
         req = LectureScriptGenerateRequest(override=True)
         assert req.override is True
 
+    def test_lecture_script_generate_request_auto_audio_default(self):
+        """Issue #139: auto_audio デフォルトは False。"""
+        from schemas import LectureScriptGenerateRequest
+
+        req = LectureScriptGenerateRequest()
+        assert req.auto_audio is False
+
+    def test_lecture_script_generate_request_auto_audio_true(self):
+        """Issue #139: auto_audio=True でパイプライン連鎖モードを指定可能。"""
+        from schemas import LectureScriptGenerateRequest
+
+        req = LectureScriptGenerateRequest(override=True, auto_audio=True)
+        assert req.auto_audio is True
+        assert req.override is True
+
     def test_lecture_script_generate_response(self):
         from schemas import LectureScriptGenerateResponse
 

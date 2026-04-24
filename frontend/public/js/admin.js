@@ -929,25 +929,17 @@
         btn.textContent = "登録完了!";
         btn.style.background = "var(--color-text-success)";
 
-        // A2: 「学生に公開する」ボタンを表示
-        var approveArea = document.getElementById("cb-approve-area");
-        if (approveArea && !document.getElementById("cb-publish-btn")) {
-          var publishBtn = document.createElement("button");
-          publishBtn.id = "cb-publish-btn";
-          publishBtn.textContent = "学生に公開する";
-          publishBtn.style.cssText = "margin-left:8px;padding:8px 16px;background:var(--color-text-info);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px";
-          publishBtn.addEventListener("click", function () {
-            publishCourse(data.id, publishBtn);
-          });
-          approveArea.appendChild(publishBtn);
-        }
-
         // Show success message in chat
         state.chatMessages.push({
           role: "assistant",
-          content: "コース「" + (data.title || draft.title) + "」が正常に登録されました。（ID: " + data.id + "）\n\n「学生に公開する」ボタンで学生が受講できるようになります。",
+          content: "コース「" + (data.title || draft.title) + "」が正常に登録されました。（ID: " + data.id + "）\n\n「コース管理」タブからグループ単位で受講可／編集可の権限を設定できます。",
         });
         renderCourseChat();
+
+        // Issue #139: 登録成功後、自動で原稿・音声生成パイプラインをキックする
+        if (data && data.id) {
+          kickAutoPipeline(data.id, data.title || draft.title);
+        }
       })
       .catch(function () {
         btn.disabled = false;
@@ -956,28 +948,114 @@
       });
   }
 
-  // A2: コースを学生に公開する
-  function publishCourse(courseId, btn) {
-    btn.disabled = true;
-    btn.textContent = "公開中...";
-    apiFetch("/admin/courses/" + courseId + "/publish", { method: "PUT" })
+  // ── Auto Pipeline (Issue #139) ─────────────────────────────────────
+  // コース登録直後に原稿→音声を連鎖的に自動生成し、進捗をチャットに通知する。
+  function kickAutoPipeline(courseId, courseTitle) {
+    var pipelineMsg = {
+      role: "assistant",
+      content: "コース登録完了。引き続き原稿と音声の自動生成を開始しました。（進捗: 0%）",
+    };
+    state.chatMessages.push(pipelineMsg);
+    renderCourseChat();
+
+    function setPipelineStatus(text) {
+      pipelineMsg.content = text;
+      renderCourseChat();
+    }
+
+    apiFetch("/admin/courses/" + courseId + "/lecture-scripts/generate", {
+      method: "POST",
+      body: JSON.stringify({ override: false, auto_audio: true }),
+    })
       .then(function (res) {
-        if (!res.ok) throw new Error("Publish failed");
+        if (!res.ok) {
+          return res.json().then(function (errBody) {
+            var msg = (errBody && errBody.detail) || "原稿生成を開始できませんでした";
+            throw new Error(msg);
+          }, function () {
+            throw new Error("原稿生成を開始できませんでした");
+          });
+        }
         return res.json();
       })
-      .then(function () {
-        btn.textContent = "公開済み ✓";
-        btn.style.background = "var(--color-text-success)";
-        state.chatMessages.push({
-          role: "assistant",
-          content: "コースを学生に公開しました。学習画面から「受講開始」ボタンで受講できるようになります。",
-        });
-        renderCourseChat();
+      .then(function (data) {
+        var scriptTaskId = data.task_id;
+        var totalChunks = data.total_chunks || 0;
+        setPipelineStatus(
+          "コース「" + courseTitle + "」の原稿生成を開始しました。（0 / " + totalChunks + " チャンク）"
+        );
+        _pollPipelineTask(courseId, scriptTaskId, "script", totalChunks, setPipelineStatus);
       })
-      .catch(function () {
-        btn.disabled = false;
-        btn.textContent = "学生に公開する";
+      .catch(function (err) {
+        setPipelineStatus(
+          "コース登録は完了しましたが、原稿生成の開始に失敗しました: " +
+          (err.message || "不明なエラー") +
+          "\n\n「Lecture Studio」タブから手動で実行してください。"
+        );
       });
+  }
+
+  function _pollPipelineTask(courseId, taskId, phase, totalChunks, setStatus) {
+    var retryCount = 0;
+    var maxRetries = 5;
+    var intervalMs = 3000;
+    var phaseLabel = phase === "audio" ? "音声生成" : "原稿生成";
+
+    function poll() {
+      apiFetch("/admin/tasks/" + taskId)
+        .then(function (res) {
+          if (!res.ok) throw new Error("Status check failed");
+          return res.json();
+        })
+        .then(function (task) {
+          retryCount = 0;
+          var rd = task.result_data || {};
+          var progress = rd.progress || 0;
+          var generated = rd.generated || 0;
+          var skipped = rd.skipped || 0;
+          var errors = rd.errors || 0;
+          var processed = generated + skipped + errors;
+
+          if (task.status === "completed") {
+            clearInterval(timer);
+            if (phase === "script" && rd.next_task_id) {
+              // チェイン先の音声タスクに移行
+              setStatus(
+                "原稿生成完了（" + generated + "件生成 / " + skipped + "件スキップ）。音声生成を開始しました。（進捗: 0%）"
+              );
+              _pollPipelineTask(courseId, rd.next_task_id, "audio", totalChunks, setStatus);
+            } else {
+              setStatus(
+                "自動生成が完了しました。" + phaseLabel + ": " + generated + "件生成 / " +
+                skipped + "件スキップ" + (errors > 0 ? " / " + errors + "件エラー" : "") +
+                "\n\nLecture Studio タブから内容を確認できます。"
+              );
+            }
+          } else if (task.status === "failed") {
+            clearInterval(timer);
+            setStatus(
+              phaseLabel + "に失敗しました: " + (task.error_message || "不明なエラー") +
+              "\n\nLecture Studio タブから手動で再実行してください。"
+            );
+          } else {
+            setStatus(
+              phaseLabel + "中... (" + processed + " / " + totalChunks + " — " + progress + "%)"
+            );
+          }
+        })
+        .catch(function () {
+          retryCount++;
+          if (retryCount >= maxRetries) {
+            clearInterval(timer);
+            setStatus(
+              phaseLabel + "の進捗確認に失敗しました。Lecture Studio タブで最新の状態を確認してください。"
+            );
+          }
+        });
+    }
+
+    var timer = setInterval(poll, intervalMs);
+    poll();
   }
 
   // ── Course Import (Issue #50) ───────────────────────────────────────
@@ -1024,9 +1102,7 @@
         var html = "";
         courses.forEach(function (c) {
           var statusBadge = "";
-          if (c.is_published) {
-            statusBadge = '<span style="font-size:10px;background:var(--color-text-success);color:#fff;padding:1px 6px;border-radius:3px;margin-left:6px">公開中</span>';
-          } else if (c.is_template) {
+          if (c.is_template) {
             statusBadge = '<span style="font-size:10px;background:var(--color-text-info);color:#fff;padding:1px 6px;border-radius:3px;margin-left:6px">テンプレート</span>';
           }
           var updatedAt = "";
@@ -1154,7 +1230,7 @@
         courses.forEach(function (c) {
           var opt = document.createElement("option");
           opt.value = c.id;
-          opt.textContent = c.title + (c.is_published ? " [公開中]" : "");
+          opt.textContent = c.title;
           select.appendChild(opt);
         });
       })
@@ -1690,7 +1766,7 @@
         courses.forEach(function (c) {
           var opt = document.createElement("option");
           opt.value = c.id;
-          opt.textContent = c.title + (c.is_published ? " [公開中]" : "");
+          opt.textContent = c.title;
           select.appendChild(opt);
         });
       })
@@ -2001,7 +2077,7 @@
         courses.forEach(function (c) {
           var opt = document.createElement("option");
           opt.value = c.id;
-          opt.textContent = c.title + (c.is_published ? " [公開中]" : "");
+          opt.textContent = c.title;
           select.appendChild(opt);
         });
         if (currentVal) select.value = currentVal;
@@ -2023,10 +2099,50 @@
         lsState.selectedChunkId = null;
         lsRenderChunkList();
         lsClearEditor();
+        // Issue #139: 進行中タスクがあればポーリング状態に復帰
+        lsCheckActiveTask(courseId);
       })
       .catch(function () {
         listEl.innerHTML = '<div style="padding:16px;color:var(--color-text-danger);font-size:13px">読み込みに失敗しました</div>';
       });
+  }
+
+  // Issue #139: コースに進行中のタスクがあれば、ボタンを無効化しポーリングを復帰させる
+  function lsCheckActiveTask(courseId) {
+    apiFetch("/admin/courses/" + courseId + "/tasks/active")
+      .then(function (res) {
+        if (!res.ok) return null;
+        return res.json();
+      })
+      .then(function (task) {
+        if (!task || !task.task_id) return;
+        // コース選択が切り替わっていたら無視
+        if (lsState.courseId !== courseId) return;
+
+        var rd = task.result_data || {};
+        var totalChunks = rd.total_chunks || 0;
+
+        if (task.task_type === "audio_generation") {
+          lsState.generating = true;
+          document.getElementById("ls-generate-all-btn").disabled = true;
+          document.getElementById("ls-audio-all-btn").disabled = true;
+          lsShowProgress(
+            "音声生成が進行中です... (進捗: " + (rd.progress || 0) + "%)",
+            "info"
+          );
+          _lsPollAudioTask(task.task_id, totalChunks);
+        } else if (task.task_type === "script_generation") {
+          lsState.generating = true;
+          document.getElementById("ls-generate-all-btn").disabled = true;
+          document.getElementById("ls-audio-all-btn").disabled = true;
+          lsShowProgress(
+            "スクリプト生成が進行中です... (進捗: " + (rd.progress || 0) + "%)",
+            "info"
+          );
+          _lsPollGenerateTask(task.task_id, totalChunks);
+        }
+      })
+      .catch(function () { /* ignore */ });
   }
 
   function lsRenderChunkList() {
@@ -2043,8 +2159,11 @@
       return;
     }
 
-    generateAllBtn.disabled = false;
-    audioAllBtn.disabled = false;
+    // Issue #139: 進行中タスクがある場合はボタン有効化を抑制（呼び出し側で制御）
+    if (!lsState.generating) {
+      generateAllBtn.disabled = false;
+      audioAllBtn.disabled = false;
+    }
     var html = "";
     lsState.chunks.forEach(function (c, i) {
       var active = c.chunk_id === lsState.selectedChunkId ? " active" : "";
@@ -2156,6 +2275,7 @@
   function lsBatchGenerate() {
     lsState.generating = true;
     document.getElementById("ls-generate-all-btn").disabled = true;
+    document.getElementById("ls-audio-all-btn").disabled = true;
     lsShowProgress("スクリプト生成を開始しています...", "info");
 
     apiFetch("/admin/courses/" + lsState.courseId + "/lecture-scripts/generate", {
@@ -2183,6 +2303,7 @@
         lsShowProgress("生成に失敗しました: " + (err.message || "不明なエラー"), "error");
         lsState.generating = false;
         document.getElementById("ls-generate-all-btn").disabled = false;
+        document.getElementById("ls-audio-all-btn").disabled = false;
       });
   }
 
@@ -2208,18 +2329,42 @@
 
           if (task.status === "completed") {
             clearInterval(timer);
+            // Issue #139: 自動パイプラインの場合は音声タスクへチェイン
+            if (rd.next_task_id) {
+              lsShowProgress(
+                "原稿生成完了 (" + generated + "件生成 / " + skipped + "件スキップ)。続いて音声生成を開始します...",
+                "info"
+              );
+              // チャンクリストを更新（spoken_text が埋まった状態を反映）
+              apiFetch("/admin/courses/" + lsState.courseId + "/lecture-scripts")
+                .then(function (res) { return res.ok ? res.json() : []; })
+                .then(function (chunks) {
+                  if (lsState.courseId) {
+                    lsState.chunks = chunks;
+                    lsRenderChunkList();
+                    // ボタンは音声生成中のため再度無効化
+                    document.getElementById("ls-generate-all-btn").disabled = true;
+                    document.getElementById("ls-audio-all-btn").disabled = true;
+                  }
+                })
+                .catch(function () {});
+              _lsPollAudioTask(rd.next_task_id, totalChunks);
+              return;
+            }
             lsShowProgress(
               "生成完了: " + generated + "件生成 / " + skipped + "件スキップ (全" + totalChunks + "件)",
               "success"
             );
             lsState.generating = false;
             document.getElementById("ls-generate-all-btn").disabled = false;
+            document.getElementById("ls-audio-all-btn").disabled = false;
             lsLoadScripts(lsState.courseId);
           } else if (task.status === "failed") {
             clearInterval(timer);
             lsShowProgress("生成に失敗しました: " + (task.error_message || "不明なエラー"), "error");
             lsState.generating = false;
             document.getElementById("ls-generate-all-btn").disabled = false;
+            document.getElementById("ls-audio-all-btn").disabled = false;
           } else {
             // pending / processing
             lsShowProgress(
@@ -2235,6 +2380,7 @@
             lsShowProgress("進捗確認に失敗しました。ページをリロードして状況を確認してください。", "error");
             lsState.generating = false;
             document.getElementById("ls-generate-all-btn").disabled = false;
+            document.getElementById("ls-audio-all-btn").disabled = false;
           }
         });
     }
@@ -2245,6 +2391,7 @@
 
   function lsBatchAudio() {
     lsState.generating = true;
+    document.getElementById("ls-generate-all-btn").disabled = true;
     document.getElementById("ls-audio-all-btn").disabled = true;
     lsShowProgress("音声生成を開始しています...", "info");
 
@@ -2272,6 +2419,7 @@
       .catch(function (err) {
         lsShowProgress("音声生成に失敗しました: " + (err.message || "不明なエラー"), "error");
         lsState.generating = false;
+        document.getElementById("ls-generate-all-btn").disabled = false;
         document.getElementById("ls-audio-all-btn").disabled = false;
       });
   }
@@ -2306,12 +2454,14 @@
               errors > 0 ? "error" : "success"
             );
             lsState.generating = false;
+            document.getElementById("ls-generate-all-btn").disabled = false;
             document.getElementById("ls-audio-all-btn").disabled = false;
             lsLoadScripts(lsState.courseId);
           } else if (task.status === "failed") {
             clearInterval(timer);
             lsShowProgress("音声生成に失敗しました: " + (task.error_message || "不明なエラー"), "error");
             lsState.generating = false;
+            document.getElementById("ls-generate-all-btn").disabled = false;
             document.getElementById("ls-audio-all-btn").disabled = false;
           } else {
             // pending / processing
@@ -2327,6 +2477,7 @@
             clearInterval(timer);
             lsShowProgress("進捗確認に失敗しました。ページをリロードして状況を確認してください。", "error");
             lsState.generating = false;
+            document.getElementById("ls-generate-all-btn").disabled = false;
             document.getElementById("ls-audio-all-btn").disabled = false;
           }
         });
@@ -2416,6 +2567,572 @@
   }
 
   // ── Init ───────────────────────────────────────────────────────────
+  // ── Groups Management (Issue #121) ─────────────────────────────────
+  var _groupsState = { list: [], selectedId: null };
+
+  function initGroups() {
+    var refreshBtn = document.getElementById("groups-refresh");
+    if (refreshBtn) refreshBtn.addEventListener("click", loadGroups);
+
+    var createForm = document.getElementById("groups-create-form");
+    if (createForm) {
+      createForm.addEventListener("submit", function (e) {
+        e.preventDefault();
+        createGroup();
+      });
+    }
+
+    var joinForm = document.getElementById("groups-join-form");
+    if (joinForm) {
+      joinForm.addEventListener("submit", function (e) {
+        e.preventDefault();
+        joinByCode();
+      });
+    }
+
+    loadGroups();
+    loadMyInvitations();
+  }
+
+  function setGroupsStatus(msg, kind) {
+    var el = document.getElementById("groups-status");
+    if (!el) return;
+    if (!msg) { el.style.display = "none"; return; }
+    el.style.display = "block";
+    el.textContent = msg;
+    el.className = "upload-status upload-status-" + (kind || "info");
+  }
+
+  function loadGroups() {
+    apiFetch("/groups")
+      .then(function (res) { return res.json(); })
+      .then(function (list) {
+        _groupsState.list = list || [];
+        renderGroupsList();
+        // 選択解除されていたら先頭を選ぶ
+        if (_groupsState.list.length && !_groupsState.selectedId) {
+          selectGroup(_groupsState.list[0].id);
+        } else if (_groupsState.selectedId) {
+          selectGroup(_groupsState.selectedId);
+        }
+      })
+      .catch(function (e) { setGroupsStatus("グループ一覧の取得に失敗しました", "error"); });
+  }
+
+  function renderGroupsList() {
+    var el = document.getElementById("groups-list");
+    if (!_groupsState.list.length) {
+      el.innerHTML = '<div style="padding:12px;color:var(--color-text-tertiary);font-size:13px">まだグループに参加していません</div>';
+      return;
+    }
+    var html = "";
+    _groupsState.list.forEach(function (g) {
+      var badge = g.my_role === "admin" ? '<span style="color:var(--color-text-success);font-size:11px;margin-left:4px">(admin)</span>' : "";
+      var on = g.id === _groupsState.selectedId ? 'background:var(--color-bg-tertiary);' : "";
+      html += '<div data-gid="' + escHtml(g.id) + '" class="groups-item" style="padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--color-border);' + on + '">' +
+        '<div style="font-size:13px">' + escHtml(g.name) + badge + '</div>' +
+        '<div style="font-size:11px;color:var(--color-text-tertiary)">メンバー ' + (g.member_count || 0) + "人</div>" +
+        "</div>";
+    });
+    el.innerHTML = html;
+    var items = el.querySelectorAll(".groups-item");
+    for (var i = 0; i < items.length; i++) {
+      items[i].addEventListener("click", function () {
+        selectGroup(this.getAttribute("data-gid"));
+      });
+    }
+  }
+
+  function selectGroup(groupId) {
+    _groupsState.selectedId = groupId;
+    renderGroupsList();
+    apiFetch("/groups/" + encodeURIComponent(groupId))
+      .then(function (res) {
+        if (!res.ok) throw new Error("failed");
+        return res.json();
+      })
+      .then(renderGroupDetail)
+      .catch(function () {
+        document.getElementById("groups-detail").innerHTML =
+          '<p style="color:var(--color-text-tertiary)">取得に失敗しました</p>';
+      });
+  }
+
+  function renderGroupDetail(g) {
+    var isAdmin = g.my_role === "admin";
+    var members = (g.members || []).map(function (m) {
+      var actions = "";
+      if (isAdmin && m.role !== "admin") {
+        actions = '<button class="admin-action-btn groups-remove-btn" data-uid="' + escHtml(m.user_id) + '" style="font-size:11px">除名</button>';
+      } else if (!isAdmin && m.user_id === _meUserId()) {
+        actions = '<button class="admin-action-btn groups-leave-btn" style="font-size:11px">退会</button>';
+      }
+      return '<tr><td>' + escHtml(m.username) + '</td><td>' + escHtml(m.email || "") + '</td><td>' + escHtml(m.role) + '</td><td>' + actions + '</td></tr>';
+    }).join("");
+
+    var inviteCodeBlock = "";
+    if (isAdmin && g.invite_code) {
+      inviteCodeBlock =
+        '<div style="margin:8px 0">' +
+        '<strong>招待コード:</strong> <code style="font-size:13px;padding:2px 6px;background:var(--color-bg-tertiary);border-radius:3px">' + escHtml(g.invite_code) + '</code>' +
+        ' <button id="groups-rotate-btn" class="admin-action-btn" style="font-size:11px;margin-left:8px">再発行</button>' +
+        "</div>";
+    }
+
+    var inviteByUser = "";
+    if (isAdmin) {
+      inviteByUser =
+        '<div style="margin-top:16px;padding:12px;background:var(--color-bg-secondary);border-radius:4px">' +
+        '<h4 style="font-size:13px;margin:0 0 8px 0">ユーザーを直接招待</h4>' +
+        '<div style="display:flex;gap:8px">' +
+        '<input type="text" id="groups-invite-username" placeholder="ユーザー名" style="flex:1;padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">' +
+        '<button id="groups-invite-btn" class="admin-action-btn">招待</button>' +
+        "</div></div>";
+    }
+
+    var dangerZone = "";
+    if (isAdmin) {
+      dangerZone =
+        '<div style="margin-top:24px">' +
+        '<button id="groups-delete-btn" class="admin-action-btn" style="background:#dc2626;color:#fff">グループを削除</button>' +
+        "</div>";
+    }
+
+    document.getElementById("groups-detail").innerHTML =
+      '<h3 style="margin:0 0 4px 0">' + escHtml(g.name) + "</h3>" +
+      '<p style="color:var(--color-text-secondary);font-size:13px;margin:0 0 8px 0">' + escHtml(g.description || "") + "</p>" +
+      inviteCodeBlock +
+      '<h4 style="font-size:13px;margin:16px 0 8px 0">メンバー (' + (g.members || []).length + ")</h4>" +
+      '<table class="admin-table"><thead><tr><th>ユーザー名</th><th>メール</th><th>ロール</th><th></th></tr></thead><tbody>' +
+      members + "</tbody></table>" +
+      inviteByUser +
+      dangerZone;
+
+    if (isAdmin) {
+      var rot = document.getElementById("groups-rotate-btn");
+      if (rot) rot.addEventListener("click", function () { rotateInviteCode(g.id); });
+      var invBtn = document.getElementById("groups-invite-btn");
+      if (invBtn) invBtn.addEventListener("click", function () {
+        var u = document.getElementById("groups-invite-username").value.trim();
+        if (!u) return;
+        inviteUser(g.id, u);
+      });
+      var del = document.getElementById("groups-delete-btn");
+      if (del) del.addEventListener("click", function () {
+        if (!confirm("グループ「" + g.name + "」を削除します。よろしいですか？")) return;
+        deleteGroup(g.id);
+      });
+      var removeBtns = document.querySelectorAll(".groups-remove-btn");
+      for (var i = 0; i < removeBtns.length; i++) {
+        removeBtns[i].addEventListener("click", function () {
+          removeMember(g.id, this.getAttribute("data-uid"));
+        });
+      }
+    } else {
+      var leave = document.querySelector(".groups-leave-btn");
+      if (leave) leave.addEventListener("click", function () {
+        if (!confirm("グループを退会しますか？")) return;
+        removeMember(g.id, _meUserId());
+      });
+    }
+  }
+
+  function _meUserId() {
+    var decoded = parseJwtPayload(state.token);
+    return decoded ? (decoded.sub || "") : "";
+  }
+
+  function createGroup() {
+    var name = document.getElementById("groups-new-name").value.trim();
+    var desc = document.getElementById("groups-new-desc").value.trim();
+    if (!name) { setGroupsStatus("グループ名を入力してください", "error"); return; }
+    apiFetch("/groups", {
+      method: "POST",
+      body: JSON.stringify({ name: name, description: desc }),
+    })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw d; });
+        return res.json();
+      })
+      .then(function (g) {
+        setGroupsStatus("グループ「" + g.name + "」を作成しました。招待コード: " + g.invite_code, "success");
+        document.getElementById("groups-new-name").value = "";
+        document.getElementById("groups-new-desc").value = "";
+        _groupsState.selectedId = g.id;
+        loadGroups();
+      })
+      .catch(function (e) { setGroupsStatus("作成失敗: " + (e.detail || "不明なエラー"), "error"); });
+  }
+
+  function joinByCode() {
+    var code = document.getElementById("groups-join-code").value.trim();
+    if (!code) return;
+    apiFetch("/groups/join-by-code", {
+      method: "POST",
+      body: JSON.stringify({ invite_code: code }),
+    })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw d; });
+        return res.json();
+      })
+      .then(function (g) {
+        setGroupsStatus("グループ「" + g.name + "」に参加しました。", "success");
+        document.getElementById("groups-join-code").value = "";
+        _groupsState.selectedId = g.id;
+        loadGroups();
+      })
+      .catch(function (e) { setGroupsStatus("参加失敗: " + (e.detail || "不明なエラー"), "error"); });
+  }
+
+  function rotateInviteCode(gid) {
+    apiFetch("/groups/" + encodeURIComponent(gid) + "/invite-code/rotate", { method: "POST" })
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        setGroupsStatus("招待コードを再発行しました: " + data.invite_code, "success");
+        selectGroup(gid);
+      });
+  }
+
+  function inviteUser(gid, username) {
+    apiFetch("/groups/" + encodeURIComponent(gid) + "/members", {
+      method: "POST",
+      body: JSON.stringify({ username: username }),
+    })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw d; });
+        return res.json();
+      })
+      .then(function () {
+        setGroupsStatus("ユーザー「" + username + "」を招待しました。", "success");
+        document.getElementById("groups-invite-username").value = "";
+        selectGroup(gid);
+      })
+      .catch(function (e) { setGroupsStatus("招待失敗: " + (e.detail || "不明なエラー"), "error"); });
+  }
+
+  function removeMember(gid, uid) {
+    apiFetch("/groups/" + encodeURIComponent(gid) + "/members/" + encodeURIComponent(uid), { method: "DELETE" })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw d; });
+        setGroupsStatus("メンバーを削除しました。", "success");
+        loadGroups();
+      })
+      .catch(function (e) { setGroupsStatus("削除失敗: " + (e.detail || "不明なエラー"), "error"); });
+  }
+
+  function deleteGroup(gid) {
+    apiFetch("/groups/" + encodeURIComponent(gid), { method: "DELETE" })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw d; });
+        setGroupsStatus("グループを削除しました。", "success");
+        _groupsState.selectedId = null;
+        document.getElementById("groups-detail").innerHTML =
+          '<p style="color:var(--color-text-tertiary)">グループを選択してください</p>';
+        loadGroups();
+      })
+      .catch(function (e) { setGroupsStatus("削除失敗: " + (e.detail || "不明なエラー"), "error"); });
+  }
+
+  function loadMyInvitations() {
+    apiFetch("/me/invitations")
+      .then(function (res) { return res.json(); })
+      .then(function (list) {
+        var el = document.getElementById("groups-my-invitations");
+        if (!list || !list.length) { el.innerHTML = ""; return; }
+        var html = '<div style="padding:12px;background:var(--color-bg-secondary);border:1px solid var(--color-border);border-radius:4px;margin-bottom:12px">' +
+          '<h4 style="font-size:13px;margin:0 0 8px 0">未承諾の招待 (' + list.length + ")</h4>";
+        list.forEach(function (inv) {
+          html += '<div style="display:flex;align-items:center;gap:8px;padding:4px 0">' +
+            '<span style="flex:1;font-size:13px">グループ「' + escHtml(inv.group_name) + '」 (招待者: ' + escHtml(inv.inviter_username) + ")</span>" +
+            '<button class="admin-action-btn groups-inv-accept" data-id="' + escHtml(inv.id) + '" style="font-size:11px;background:var(--color-text-success);color:#fff">承諾</button>' +
+            '<button class="admin-action-btn groups-inv-decline" data-id="' + escHtml(inv.id) + '" style="font-size:11px">辞退</button>' +
+            "</div>";
+        });
+        html += "</div>";
+        el.innerHTML = html;
+        var accepts = el.querySelectorAll(".groups-inv-accept");
+        for (var i = 0; i < accepts.length; i++) {
+          accepts[i].addEventListener("click", function () { respondInvitation(this.getAttribute("data-id"), "accept"); });
+        }
+        var declines = el.querySelectorAll(".groups-inv-decline");
+        for (var j = 0; j < declines.length; j++) {
+          declines[j].addEventListener("click", function () { respondInvitation(this.getAttribute("data-id"), "decline"); });
+        }
+      });
+  }
+
+  function respondInvitation(invId, action) {
+    apiFetch("/me/invitations/" + encodeURIComponent(invId) + "/" + action, { method: "POST" })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw d; });
+        setGroupsStatus("招待を" + (action === "accept" ? "承諾" : "辞退") + "しました。", "success");
+        loadMyInvitations();
+        loadGroups();
+      })
+      .catch(function (e) { setGroupsStatus("操作失敗: " + (e.detail || "不明なエラー"), "error"); });
+  }
+
+  function parseJwtPayload(token) {
+    try {
+      var parts = token.split(".");
+      if (parts.length !== 3) return null;
+      var payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+      return JSON.parse(atob(payload));
+    } catch (e) { return null; }
+  }
+
+  // ── Course Management (Issue #125) ────────────────────────────────
+  var _cmState = {
+    courses: [],
+    groups: [],
+    currentCourseId: null,
+    currentCourseTitle: "",
+    perms: [],
+  };
+
+  function initCourseManagement() {
+    var refreshBtn = document.getElementById("cm-refresh");
+    if (refreshBtn) refreshBtn.addEventListener("click", loadCourseManagement);
+    onTabActivate("course-management", loadCourseManagement);
+  }
+
+  function setCmStatus(msg, kind) {
+    var el = document.getElementById("cm-status");
+    if (!el) return;
+    if (!msg) { el.style.display = "none"; return; }
+    el.style.display = "block";
+    el.textContent = msg;
+    el.className = "upload-status upload-status-" + (kind || "info");
+  }
+
+  function loadCourseManagement() {
+    var tbody = document.getElementById("cm-tbody");
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">読み込み中...</td></tr>';
+
+    Promise.all([
+      apiFetch("/admin/courses").then(function (res) { return res.json(); }),
+      apiFetch("/groups").then(function (res) { return res.json(); }),
+    ])
+      .then(function (results) {
+        _cmState.courses = results[0] || [];
+        _cmState.groups = results[1] || [];
+        // グループ権限マッピングをコース毎に取得
+        if (!_cmState.courses.length) {
+          tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">コースがありません</td></tr>';
+          return;
+        }
+        return Promise.all(_cmState.courses.map(function (c) {
+          return apiFetch("/admin/courses/" + encodeURIComponent(c.id) + "/groups")
+            .then(function (r) { return r.ok ? r.json() : []; })
+            .then(function (perms) { c._perms = perms || []; return c; });
+        })).then(renderCourseManagementTable);
+      })
+      .catch(function () {
+        setCmStatus("コース一覧の取得に失敗しました", "error");
+      });
+  }
+
+  function renderCourseManagementTable() {
+    var tbody = document.getElementById("cm-tbody");
+    if (!tbody) return;
+    if (!_cmState.courses.length) {
+      tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">コースがありません</td></tr>';
+      return;
+    }
+    var html = "";
+    _cmState.courses.forEach(function (c) {
+      var roleBadge;
+      if (c.role === "owner") {
+        roleBadge = '<span style="font-size:10px;background:var(--color-text-success);color:#fff;padding:1px 6px;border-radius:3px">所有</span>';
+      } else if (c.role === "viewer") {
+        roleBadge = '<span style="font-size:10px;background:var(--color-text-tertiary);color:#fff;padding:1px 6px;border-radius:3px">viewer</span>';
+      } else {
+        roleBadge = '<span style="font-size:10px;background:var(--color-text-info);color:#fff;padding:1px 6px;border-radius:3px">editor</span>';
+      }
+      var perms = c._perms || [];
+      var permsHtml;
+      if (!perms.length) {
+        permsHtml = '<span style="color:var(--color-text-tertiary);font-size:12px">未設定</span>';
+      } else {
+        permsHtml = perms.map(function (p) {
+          var color = p.permission === "editor" ? "var(--color-text-info)" : "var(--color-text-success)";
+          return '<span style="display:inline-block;margin:0 4px 4px 0;padding:2px 8px;font-size:11px;background:' + color + ';color:#fff;border-radius:3px">' +
+            escHtml(p.group_name || p.group_id) + ' (' + escHtml(p.permission) + ')</span>';
+        }).join("");
+      }
+      var actionHtml;
+      if (c.role === "owner") {
+        actionHtml = '<button class="cm-manage-btn admin-action-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '">共有設定</button>';
+      } else {
+        actionHtml = '<span style="font-size:11px;color:var(--color-text-tertiary)">所有者のみ変更可</span>';
+      }
+      html += '<tr>' +
+        '<td>' + escHtml(c.title) + '</td>' +
+        '<td>' + roleBadge + '</td>' +
+        '<td>' + permsHtml + '</td>' +
+        '<td>' + actionHtml + '</td>' +
+        '</tr>';
+    });
+    tbody.innerHTML = html;
+    tbody.querySelectorAll(".cm-manage-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        openPermissionModal(this.getAttribute("data-course-id"), this.getAttribute("data-course-title"));
+      });
+    });
+  }
+
+  function openPermissionModal(courseId, courseTitle) {
+    _cmState.currentCourseId = courseId;
+    _cmState.currentCourseTitle = courseTitle;
+
+    var existing = document.getElementById("cm-perm-modal");
+    if (existing) existing.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = "cm-perm-modal";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+
+    overlay.innerHTML =
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border-secondary);border-radius:8px;padding:24px;min-width:480px;max-width:640px;max-height:80vh;display:flex;flex-direction:column">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">' +
+          '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">グループ共有設定</h3>' +
+          '<button id="cm-perm-close-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
+        '</div>' +
+        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 12px">コース:「' + escHtml(courseTitle) + '」の共有グループと権限を管理します。</p>' +
+        '<div id="cm-perm-status-inline" class="upload-status" style="display:none;margin-bottom:12px"></div>' +
+        '<h4 style="font-size:13px;margin:0 0 8px 0;color:var(--color-text-secondary)">現在の共有設定</h4>' +
+        '<div id="cm-perm-current" style="margin-bottom:16px;overflow-y:auto;flex:1"></div>' +
+        '<hr style="border:none;border-top:1px solid var(--color-border);margin:4px 0 12px 0">' +
+        '<h4 style="font-size:13px;margin:0 0 8px 0;color:var(--color-text-secondary)">グループを追加</h4>' +
+        '<div style="display:flex;gap:8px;align-items:center">' +
+          '<select id="cm-perm-group-select" style="flex:1;padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)"></select>' +
+          '<select id="cm-perm-role-select" style="padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">' +
+            '<option value="viewer">viewer (受講可)</option>' +
+            '<option value="editor">editor (編集可)</option>' +
+          '</select>' +
+          '<button id="cm-perm-add-btn" class="admin-action-btn" style="background:var(--color-text-success);color:#fff">追加</button>' +
+        '</div>' +
+      '</div>';
+
+    document.body.appendChild(overlay);
+
+    overlay.addEventListener("click", function (e) {
+      if (e.target === overlay) overlay.remove();
+    });
+    document.getElementById("cm-perm-close-btn").addEventListener("click", function () {
+      overlay.remove();
+    });
+    document.getElementById("cm-perm-add-btn").addEventListener("click", addPermissionMapping);
+
+    loadPermissionModal();
+  }
+
+  function setPermStatus(msg, kind) {
+    var el = document.getElementById("cm-perm-status-inline");
+    if (!el) return;
+    if (!msg) { el.style.display = "none"; return; }
+    el.style.display = "block";
+    el.textContent = msg;
+    el.className = "upload-status upload-status-" + (kind || "info");
+  }
+
+  function loadPermissionModal() {
+    var courseId = _cmState.currentCourseId;
+    apiFetch("/admin/courses/" + encodeURIComponent(courseId) + "/groups")
+      .then(function (res) { return res.json(); })
+      .then(function (perms) {
+        _cmState.perms = perms || [];
+        renderPermissionCurrent();
+        renderGroupDropdown();
+      })
+      .catch(function () { setPermStatus("共有設定の取得に失敗しました", "error"); });
+  }
+
+  function renderPermissionCurrent() {
+    var el = document.getElementById("cm-perm-current");
+    if (!el) return;
+    if (!_cmState.perms.length) {
+      el.innerHTML = '<p style="color:var(--color-text-tertiary);font-size:12px;margin:0">まだ共有グループは設定されていません。</p>';
+      return;
+    }
+    var html = '<table class="admin-table"><thead><tr><th>グループ</th><th>権限</th><th>操作</th></tr></thead><tbody>';
+    _cmState.perms.forEach(function (p) {
+      html += '<tr>' +
+        '<td>' + escHtml(p.group_name || p.group_id) + '</td>' +
+        '<td>' + escHtml(p.permission) + '</td>' +
+        '<td><button class="cm-perm-remove-btn admin-action-btn" data-gid="' + escHtml(p.group_id) + '" style="background:var(--color-text-danger);color:#fff">削除</button></td>' +
+        '</tr>';
+    });
+    html += "</tbody></table>";
+    el.innerHTML = html;
+    el.querySelectorAll(".cm-perm-remove-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        removePermissionMapping(this.getAttribute("data-gid"));
+      });
+    });
+  }
+
+  function renderGroupDropdown() {
+    var sel = document.getElementById("cm-perm-group-select");
+    if (!sel) return;
+    var assigned = {};
+    _cmState.perms.forEach(function (p) { assigned[p.group_id] = true; });
+    var html = '<option value="">グループを選択...</option>';
+    _cmState.groups.forEach(function (g) {
+      var suffix = assigned[g.id] ? " (設定済み)" : "";
+      html += '<option value="' + escHtml(g.id) + '">' + escHtml(g.name) + suffix + '</option>';
+    });
+    sel.innerHTML = html;
+  }
+
+  function addPermissionMapping() {
+    var groupSel = document.getElementById("cm-perm-group-select");
+    var roleSel = document.getElementById("cm-perm-role-select");
+    if (!groupSel.value) {
+      setPermStatus("グループを選択してください", "error");
+      return;
+    }
+    var courseId = _cmState.currentCourseId;
+    setPermStatus("追加中...", "info");
+    apiFetch("/admin/courses/" + encodeURIComponent(courseId) + "/groups", {
+      method: "POST",
+      body: JSON.stringify({ group_id: groupSel.value, permission: roleSel.value }),
+    })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw new Error(d.detail || "追加に失敗しました"); });
+        return res.json();
+      })
+      .then(function () {
+        setPermStatus("追加しました", "success");
+        loadPermissionModal();
+        loadCourseManagement();
+      })
+      .catch(function (e) {
+        setPermStatus(e.message || "追加に失敗しました", "error");
+      });
+  }
+
+  function removePermissionMapping(groupId) {
+    var courseId = _cmState.currentCourseId;
+    setPermStatus("削除中...", "info");
+    apiFetch("/admin/courses/" + encodeURIComponent(courseId) + "/groups/" + encodeURIComponent(groupId), {
+      method: "DELETE",
+    })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw new Error(d.detail || "削除に失敗しました"); });
+        return res.json();
+      })
+      .then(function () {
+        setPermStatus("削除しました", "success");
+        loadPermissionModal();
+        loadCourseManagement();
+      })
+      .catch(function (e) {
+        setPermStatus(e.message || "削除に失敗しました", "error");
+      });
+  }
+
   function initApp() {
     // Role-based access control
     if (!setupRoleBasedUI()) return;
@@ -2426,11 +3143,13 @@
     initTabs();
     initUpload();
     initCourseBuilder();
+    initCourseManagement();
     initLectureStudio();
     initStumbles();
     initSchemaProposals();
     initSchemaEvolution();
     initUserManagement();
+    initGroups();
     initLogout();
     loadMaterials();
 

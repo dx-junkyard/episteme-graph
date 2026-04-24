@@ -53,6 +53,14 @@ class MaterialOut(BaseModel):
     status: str  # uploaded | processing | completed | failed
     uploaded_at: str
     knowledge_graph: dict | None = None
+    visibility: str = "private"  # public | group | private
+    group_id: str | None = None
+
+
+class VisibilityUpdateRequest(BaseModel):
+    """教材/コースの開示範囲を変更するリクエスト。"""
+    visibility: str  # public | group | private
+    group_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +124,9 @@ class CourseCreateRequest(BaseModel):
     concepts: list[LearningConcept] = []
     sources: list[LearningSource] = []
     is_template: bool = False  # Trueの場合、教員作成テンプレートとして扱う
+    visibility: str = "private"  # public | group | private
+    group_id: str | None = None
+    description: str = ""
 
 
 class CourseUpdateRequest(BaseModel):
@@ -126,6 +137,9 @@ class CourseUpdateRequest(BaseModel):
     topics: list[LearningTopic] | None = None
     concepts: list[LearningConcept] | None = None
     sources: list[LearningSource] | None = None
+    visibility: str | None = None
+    group_id: str | None = None
+    description: str | None = None
 
 
 class LearningCourseOut(BaseModel):
@@ -134,6 +148,9 @@ class LearningCourseOut(BaseModel):
     is_template: bool = False
     is_published: bool = False
     is_enrollable: bool = False  # True: 自分未登録の公開テンプレート
+    visibility: str = "private"
+    group_id: str | None = None
+    description: str = ""
 
 
 class LearningCourseDetail(BaseModel):
@@ -419,6 +436,7 @@ class LectureScriptChunkOut(BaseModel):
 class LectureScriptGenerateRequest(BaseModel):
     """バッチスクリプト生成リクエスト。"""
     override: bool = False  # 既存スクリプトを上書きするか
+    auto_audio: bool = False  # スクリプト生成完了後、自動で音声生成タスクを起動するか (Issue #139)
 
 
 class LectureScriptGenerateStartResponse(BaseModel):
@@ -477,3 +495,92 @@ class LectureAudioGenerateStartResponse(BaseModel):
     course_id: str
     total_chunks: int = 0
     status: str = "pending"
+
+
+# ---------------------------------------------------------------------------
+# Groups & Visibility (Issue #121)
+# ---------------------------------------------------------------------------
+
+class GroupCreateRequest(BaseModel):
+    """グループ作成リクエスト。"""
+    name: str
+    description: str = ""
+
+
+class GroupUpdateRequest(BaseModel):
+    """グループ更新リクエスト。"""
+    name: str | None = None
+    description: str | None = None
+
+
+class GroupMemberOut(BaseModel):
+    """グループ所属メンバー情報。"""
+    user_id: str
+    username: str
+    email: str = ""
+    role: str = "member"  # admin | member
+    joined_at: str = ""
+
+
+class GroupOut(BaseModel):
+    """グループ情報。"""
+    id: str
+    name: str
+    description: str = ""
+    invite_code: str | None = None  # admin のみ閲覧可能
+    created_by: str
+    my_role: str = "member"  # 現在ユーザーのロール
+    member_count: int = 0
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class GroupDetailOut(GroupOut):
+    """グループ詳細（メンバーリスト含む）。"""
+    members: list[GroupMemberOut] = []
+
+
+class GroupInviteByUserRequest(BaseModel):
+    """特定ユーザーに対する直接招待リクエスト。"""
+    # username または email のいずれかで識別
+    username: str | None = None
+    email: str | None = None
+
+
+class GroupInviteByCodeRequest(BaseModel):
+    """招待コードによる参加リクエスト。"""
+    invite_code: str
+
+
+class GroupInvitationOut(BaseModel):
+    """招待情報。"""
+    id: str
+    group_id: str
+    group_name: str = ""
+    invitee_user_id: str
+    invitee_username: str = ""
+    inviter_user_id: str
+    inviter_username: str = ""
+    status: str = "pending"  # pending | accepted | declined | revoked
+    created_at: str = ""
+    responded_at: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Course-Group Permissions (Issue #125)
+# ---------------------------------------------------------------------------
+
+class CourseGroupPermissionOut(BaseModel):
+    """コースに紐づくグループ権限。"""
+    course_id: str
+    group_id: str
+    group_name: str = ""
+    permission: str = "viewer"  # viewer | editor
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class CourseGroupPermissionUpsertRequest(BaseModel):
+    """コースにグループ権限マッピングを追加/更新するリクエスト。"""
+    group_id: str
+    permission: str = "viewer"  # viewer | editor
