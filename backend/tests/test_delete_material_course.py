@@ -373,8 +373,9 @@ class TestDeleteMaterial:
 class TestDeleteCourse:
     """DELETE /api/admin/courses/{course_id} エンドポイントのテスト。"""
 
+    @patch("routes.admin.user_can_edit_course", return_value=True)
     @patch("routes.admin._pg_session")
-    def test_delete_course_success(self, mock_session, client, auth_headers):
+    def test_delete_course_success(self, mock_session, _mock_edit, client, auth_headers):
         """コース削除が正常に行われること。"""
         mock_pg = MagicMock()
         mock_pg.execute.return_value.fetchone.return_value = (
@@ -395,8 +396,9 @@ class TestDeleteCourse:
         assert data["deleted"] is True
         mock_pg.commit.assert_called_once()
 
+    @patch("routes.admin.user_can_edit_course", return_value=True)
     @patch("routes.admin._pg_session")
-    def test_delete_course_name_mismatch(self, mock_session, client, auth_headers):
+    def test_delete_course_name_mismatch(self, mock_session, _mock_edit, client, auth_headers):
         """確認名が一致しない場合に400が返ること。"""
         mock_pg = MagicMock()
         mock_pg.execute.return_value.fetchone.return_value = (
@@ -414,8 +416,9 @@ class TestDeleteCourse:
         assert resp.status_code == 400
         assert "一致しません" in resp.json()["detail"]
 
+    @patch("routes.admin.user_can_edit_course", return_value=True)
     @patch("routes.admin._pg_session")
-    def test_delete_course_not_found(self, mock_session, client, auth_headers):
+    def test_delete_course_not_found(self, mock_session, _mock_edit, client, auth_headers):
         """存在しないコースで404が返ること。"""
         mock_pg = MagicMock()
         mock_pg.execute.return_value.fetchone.return_value = None
@@ -429,8 +432,9 @@ class TestDeleteCourse:
         )
         assert resp.status_code == 404
 
+    @patch("routes.admin.user_can_edit_course", return_value=True)
     @patch("routes.admin._pg_session")
-    def test_delete_course_deletes_chat_history(self, mock_session, client, auth_headers):
+    def test_delete_course_deletes_chat_history(self, mock_session, _mock_edit, client, auth_headers):
         """コース削除時にチャット履歴も削除されること。"""
         mock_pg = MagicMock()
 

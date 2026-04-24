@@ -181,7 +181,7 @@ class TestListTeacherCourses:
         now = datetime(2026, 3, 30, 12, 0, 0)
         mock_pg = MagicMock()
         mock_pg.execute.return_value.fetchall.return_value = [
-            ("c-001", "量子力学入門", True, True, now, now),
+            ("c-001", "量子力学入門", True, True, now, now, "owner"),
         ]
         mock_session.return_value = mock_pg
 
@@ -204,8 +204,9 @@ class TestListTeacherCourses:
 class TestGetCourseAsDraft:
     """GET /api/admin/courses/{id}/draft-format エンドポイントのテスト。"""
 
+    @patch("routes.admin.user_can_edit_course", return_value=True)
     @patch("routes.admin._pg_session")
-    def test_convert_course_to_draft(self, mock_session, client, auth_headers):
+    def test_convert_course_to_draft(self, mock_session, _mock_edit, client, auth_headers):
         """コースデータが draft 形式に変換されること。"""
         course_data = {
             "id": "c-001",
@@ -280,8 +281,9 @@ class TestGetCourseAsDraft:
         assert len(draft["sources"]) == 1
         assert draft["sources"][0]["title"] == "Griffiths QM"
 
+    @patch("routes.admin.user_can_edit_course", return_value=True)
     @patch("routes.admin._pg_session")
-    def test_course_not_found(self, mock_session, client, auth_headers):
+    def test_course_not_found(self, mock_session, _mock_edit, client, auth_headers):
         """存在しないコースIDで404が返ること。"""
         mock_pg = MagicMock()
         mock_pg.execute.return_value.fetchone.return_value = None

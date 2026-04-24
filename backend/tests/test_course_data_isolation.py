@@ -254,6 +254,9 @@ def client_and_users(monkeypatch):
     monkeypatch.setattr("routes.lecture_studio.user_can_edit_course", lambda uid, cid: True, raising=False)
     monkeypatch.setattr("routes.learning.user_can_view_course", lambda uid, cid: True, raising=False)
 
+    # --- lecture_studio が使う get_viewable_course_data の差し替え ---
+    monkeypatch.setattr("routes.lecture_studio.get_viewable_course_data", _fake_get_course_data)
+
     # --- _get_course_chunks の差し替え ---------------------------------------------
     def _fake_get_course_chunks(course_data):
         """course_data["sources"][*]["material_id"] を解釈して対応チャンクだけを返す。"""
