@@ -163,14 +163,12 @@ def get_active_task_for_course(course_id: str) -> dict | None:
 
 
 def get_course_data(user_id: str, course_id: str) -> dict | None:
-    """LearningCourse データを取得する（オーナー or 受講者）。
+    """LearningCourse のマスターデータを返す（オーナー or 受講者）。
 
-    Issue #133: 受講時のクローン作成を廃止し、「1 つの不変なマスターコース」 +
-    「ユーザーごとの学習状態（learning_states）」の構成に変更。
-    - オーナー本人はそのままマスターデータを返す。
-    - 受講者（learning_states に行がある）はマスターデータに
-      personal_graph の差分（誤解など）をマージして返す。
-    - それ以外は None を返す（アクセス不可）。
+    Issue #145: オーナー特例を削除。教員であっても自身の learning_states を通じて
+    アクセスし、一般学生と同じ学習体験を得る。
+    - オーナーが learning_states を持っていない場合は自動作成する。
+    - マスターデータのみを返す（個人レイヤーは get_personal_layer() で別途取得）。
     """
     session = _pg_session()
     try:
@@ -189,12 +187,14 @@ def get_course_data(user_id: str, course_id: str) -> dict | None:
         owner_id = record[1]
 
         if str(owner_id) == str(user_id):
+            # Issue #145: オーナーも learning_states を保持する（自動作成）
+            enroll_user_in_course(user_id, course_id)
             return data
 
-        # 受講者: learning_states.personal_graph をマージする
+        # 受講者チェック
         state_row = session.execute(
             sa_text("""
-                SELECT personal_graph FROM learning_states
+                SELECT 1 FROM learning_states
                 WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
                 LIMIT 1
             """),
@@ -203,16 +203,35 @@ def get_course_data(user_id: str, course_id: str) -> dict | None:
         if not state_row:
             return None
 
-        personal_raw = state_row[0] if state_row[0] is not None else {}
-        personal = personal_raw if isinstance(personal_raw, dict) else json.loads(personal_raw)
-        misconceptions_by_topic = personal.get("misconceptions_by_topic", {}) or {}
-        for topic in data.get("topics", []):
-            tid = topic.get("id", "")
-            per_topic = misconceptions_by_topic.get(tid, [])
-            if per_topic:
-                base = topic.get("misconceptions", []) or []
-                topic["misconceptions"] = (per_topic + base)[:5]
         return data
+    finally:
+        session.close()
+
+
+def get_personal_layer(user_id: str, course_id: str) -> dict:
+    """ユーザー固有の学習レイヤーデータを返す。
+
+    Issue #145: マスターコースとは分離して管理される個人データ。
+    - misconceptions_by_topic: トピックIDをキーとした誤解リスト
+    - chat_anchors: チャット履歴から生成された注釈データ（将来拡張用）
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT personal_graph FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+        if not row or not row[0]:
+            return {"misconceptions_by_topic": {}, "chat_anchors": {}}
+        personal = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        return {
+            "misconceptions_by_topic": personal.get("misconceptions_by_topic", {}) or {},
+            "chat_anchors": personal.get("chat_anchors", {}) or {},
+        }
     finally:
         session.close()
 
@@ -240,8 +259,8 @@ def enroll_user_in_course(user_id: str, course_id: str) -> None:
     try:
         session.execute(
             sa_text("""
-                INSERT INTO learning_states (user_id, course_id)
-                VALUES (CAST(:user_id AS uuid), :course_id)
+                INSERT INTO learning_states (id, user_id, course_id)
+                VALUES (gen_random_uuid(), CAST(:user_id AS uuid), :course_id)
                 ON CONFLICT (user_id, course_id) DO NOTHING
             """),
             {"user_id": user_id, "course_id": course_id},
@@ -270,8 +289,8 @@ def record_personal_misconception(
     try:
         session.execute(
             sa_text("""
-                INSERT INTO learning_states (user_id, course_id)
-                VALUES (CAST(:user_id AS uuid), :course_id)
+                INSERT INTO learning_states (id, user_id, course_id)
+                VALUES (gen_random_uuid(), CAST(:user_id AS uuid), :course_id)
                 ON CONFLICT (user_id, course_id) DO NOTHING
             """),
             {"user_id": user_id, "course_id": course_id},
@@ -780,9 +799,10 @@ def calculate_progress(user_id: str, course_id: str, course_data: dict) -> dict:
     mastered = sum(1 for c in concepts if c.get("status") == "mastered")
     learning = sum(1 for c in concepts if c.get("status") == "learning")
 
-    total_misconceptions = 0
-    for t in topics:
-        total_misconceptions += len(t.get("misconceptions", []))
+    # Issue #145: 個人誤解は personal_graph から取得（マスターデータには含まれない）
+    personal = get_personal_layer(user_id, course_id)
+    by_topic = personal.get("misconceptions_by_topic", {}) or {}
+    total_misconceptions = sum(len(v) for v in by_topic.values())
 
     sessions_list = []
     pg_session = _pg_session()
@@ -1046,18 +1066,9 @@ def detect_and_record_misconception(
             user_id, course_id,
         )
 
-    # UI 更新用レスポンス: course_data をコピーして当該 topic に今回の誤解を混ぜる
-    updated_topics = [dict(t) for t in course_data.get("topics", [])]
-    for t in updated_topics:
-        if t.get("id") == topic_id:
-            merged = [misconception] + list(t.get("misconceptions", []) or [])
-            t["misconceptions"] = merged[:5]
-            break
-
-    return {
-        "topics": updated_topics,
-        "concepts": course_data.get("concepts", []),
-    }
+    # Issue #145: 個人レイヤー更新をそのまま返す（マスターデータは不変）
+    personal = get_personal_layer(user_id, course_id)
+    return {"personal_layer": personal}
 
 
 # ---------------------------------------------------------------------------

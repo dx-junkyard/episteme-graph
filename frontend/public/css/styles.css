@@ -1865,3 +1865,28 @@ body {
   color: var(--color-text-secondary);
   font-style: italic;
 }
+
+/* Issue #145: 個人レイヤー注釈スタイル */
+.mc-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: #fcebeb;
+  color: #791f1f;
+  margin-left: 5px;
+  vertical-align: middle;
+}
+
+.mc-layer-note {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-bottom: 6px;
+  font-style: italic;
+}
+
+.mc-annotation {
+  border-left: 3px solid #E24B4A;
+  padding-left: 8px;
+}

@@ -164,6 +164,25 @@ class LearningCourseDetail(BaseModel):
     progress: dict | None = None
 
 
+class PersonalLayer(BaseModel):
+    """ユーザー固有の学習レイヤー（Issue #145）。
+
+    マスターコースとは分離して管理される個人データ。
+    """
+    misconceptions_by_topic: dict = {}
+    chat_anchors: dict = {}
+
+
+class LearningCourseLayeredResponse(BaseModel):
+    """レイヤー型コース詳細レスポンス（Issue #145）。
+
+    マスター教材と個人レイヤーを分離して返すことで、
+    教材の純粋性を保ちながら個人の学習コンテキストをフロントエンドで管理できる。
+    """
+    master_course: LearningCourseDetail
+    personal_layer: PersonalLayer
+
+
 class LearningSession(BaseModel):
     date: str
     topic: str
