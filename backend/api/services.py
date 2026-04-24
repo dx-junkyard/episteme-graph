@@ -126,37 +126,287 @@ def get_background_task(task_id: str) -> dict | None:
     finally:
         session.close()
 
+
+def get_active_task_for_course(course_id: str) -> dict | None:
+    """指定コースに紐づく進行中 (pending/processing) タスクを最新1件返す (Issue #139)。"""
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT id, task_type, status, result_data, error_message, created_at, updated_at
+                FROM background_tasks
+                WHERE status IN ('pending', 'processing')
+                  AND result_data IS NOT NULL
+                  AND result_data->>'course_id' = :course_id
+                ORDER BY created_at DESC
+                LIMIT 1
+            """),
+            {"course_id": course_id},
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "task_id": row[0],
+            "task_type": row[1],
+            "status": row[2],
+            "result_data": row[3],
+            "error_message": row[4],
+            "created_at": row[5].isoformat() if row[5] else "",
+            "updated_at": row[6].isoformat() if row[6] else "",
+        }
+    finally:
+        session.close()
+
 # ---------------------------------------------------------------------------
 # Course CRUD helpers
 # ---------------------------------------------------------------------------
 
 
 def get_course_data(user_id: str, course_id: str) -> dict | None:
-    """PostgreSQL から LearningCourse データを取得する。"""
+    """LearningCourse データを取得する（オーナー or 受講者）。
+
+    Issue #133: 受講時のクローン作成を廃止し、「1 つの不変なマスターコース」 +
+    「ユーザーごとの学習状態（learning_states）」の構成に変更。
+    - オーナー本人はそのままマスターデータを返す。
+    - 受講者（learning_states に行がある）はマスターデータに
+      personal_graph の差分（誤解など）をマージして返す。
+    - それ以外は None を返す（アクセス不可）。
+    """
     session = _pg_session()
     try:
         record = session.execute(
             sa_text("""
-                SELECT data FROM learning_courses
-                WHERE user_id = CAST(:user_id AS uuid) AND id = :course_id
+                SELECT data, user_id FROM learning_courses
+                WHERE id = :course_id
+                LIMIT 1
+            """),
+            {"course_id": course_id},
+        ).fetchone()
+        if not record or not record[0]:
+            return None
+
+        data = record[0] if isinstance(record[0], dict) else json.loads(record[0])
+        owner_id = record[1]
+
+        if str(owner_id) == str(user_id):
+            return data
+
+        # 受講者: learning_states.personal_graph をマージする
+        state_row = session.execute(
+            sa_text("""
+                SELECT personal_graph FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
                 LIMIT 1
             """),
             {"user_id": user_id, "course_id": course_id},
         ).fetchone()
-        if record and record[0]:
-            return record[0] if isinstance(record[0], dict) else json.loads(record[0])
+        if not state_row:
+            return None
+
+        personal_raw = state_row[0] if state_row[0] is not None else {}
+        personal = personal_raw if isinstance(personal_raw, dict) else json.loads(personal_raw)
+        misconceptions_by_topic = personal.get("misconceptions_by_topic", {}) or {}
+        for topic in data.get("topics", []):
+            tid = topic.get("id", "")
+            per_topic = misconceptions_by_topic.get(tid, [])
+            if per_topic:
+                base = topic.get("misconceptions", []) or []
+                topic["misconceptions"] = (per_topic + base)[:5]
+        return data
     finally:
         session.close()
-    return None
 
 
-def save_course_data(user_id: str, course_id: str, data: dict, is_template: bool = False) -> None:
+def user_is_enrolled(user_id: str, course_id: str) -> bool:
+    """ユーザーが learning_states を通じてコースに受講登録済みかを判定する。"""
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT 1 FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+        return row is not None
+    finally:
+        session.close()
+
+
+def enroll_user_in_course(user_id: str, course_id: str) -> None:
+    """learning_states に受講レコードを作成する（UNIQUE で二重受講を防止）。"""
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO learning_states (user_id, course_id)
+                VALUES (CAST(:user_id AS uuid), :course_id)
+                ON CONFLICT (user_id, course_id) DO NOTHING
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def record_personal_misconception(
+    user_id: str,
+    course_id: str,
+    topic_id: str,
+    misconception: dict,
+) -> None:
+    """learning_states.personal_graph.misconceptions_by_topic に誤解を記録する。
+
+    受講者が学習チャットで検出した誤解は、マスターコースではなくこの per-user 状態に保存する。
+    per-topic で最新 5 件まで保持する（マスターの misconceptions と同じ上限）。
+    未受講の場合はレコードを自動生成してから書き込む（オーナーが自コースで学習する場合など）。
+    """
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO learning_states (user_id, course_id)
+                VALUES (CAST(:user_id AS uuid), :course_id)
+                ON CONFLICT (user_id, course_id) DO NOTHING
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        )
+        row = session.execute(
+            sa_text("""
+                SELECT personal_graph FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+
+        personal_raw = row[0] if row and row[0] is not None else {}
+        personal = personal_raw if isinstance(personal_raw, dict) else json.loads(personal_raw)
+        by_topic = personal.get("misconceptions_by_topic", {}) or {}
+        current = by_topic.get(topic_id, []) or []
+        current = [misconception] + current
+        by_topic[topic_id] = current[:5]
+        personal["misconceptions_by_topic"] = by_topic
+
+        session.execute(
+            sa_text("""
+                UPDATE learning_states
+                SET personal_graph = CAST(:personal AS jsonb),
+                    updated_at = now()
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+            """),
+            {
+                "user_id": user_id,
+                "course_id": course_id,
+                "personal": json.dumps(personal, ensure_ascii=False),
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _fetch_course_data_row(course_id: str) -> dict | None:
+    """course_id だけから data 本体を取得する内部ヘルパ。"""
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("SELECT data FROM learning_courses WHERE id = :course_id LIMIT 1"),
+            {"course_id": course_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not record or not record[0]:
+        return None
+    return record[0] if isinstance(record[0], dict) else json.loads(record[0])
+
+
+def get_editable_course_data(user_id: str, course_id: str) -> dict | None:
+    """編集権限（オーナー or editor グループ）でコースデータを取得する。"""
+    # user_can_edit_course は下で定義されているので関数内で参照される
+    if not user_can_edit_course(user_id, course_id):
+        return None
+    return _fetch_course_data_row(course_id)
+
+
+def get_viewable_course_data(user_id: str, course_id: str) -> dict | None:
+    """閲覧権限（オーナー / editor / viewer グループ）でコースデータを取得する。"""
+    if not user_can_view_course(user_id, course_id):
+        return None
+    return _fetch_course_data_row(course_id)
+
+
+def get_accessible_course_data(user_id: str, course_id: str) -> dict | None:
+    """visibility を考慮して、アクセス可能な LearningCourse データを返す。
+
+    - オーナー本人: 常に可
+    - visibility='public' かつ is_published かつ is_template: 可
+    - visibility='group' かつ自分がそのグループのメンバー: 可
+    """
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("""
+                SELECT data, user_id, COALESCE(visibility, 'private'),
+                       group_id, COALESCE(is_published, false), COALESCE(is_template, false)
+                FROM learning_courses
+                WHERE id = :course_id
+                LIMIT 1
+            """),
+            {"course_id": course_id},
+        ).fetchone()
+        if not record or not record[0]:
+            return None
+
+        data_raw, owner_id, visibility, group_id, is_published, is_template = record
+        data = data_raw if isinstance(data_raw, dict) else json.loads(data_raw)
+
+        if str(owner_id) == str(user_id):
+            return data
+        if visibility == "public" and is_published and is_template:
+            return data
+        if visibility == "group" and group_id:
+            row = session.execute(
+                sa_text("""
+                    SELECT 1 FROM group_members
+                    WHERE group_id = :gid AND user_id = CAST(:uid AS uuid)
+                    LIMIT 1
+                """),
+                {"gid": group_id, "uid": user_id},
+            ).fetchone()
+            if row:
+                return data
+        return None
+    finally:
+        session.close()
+
+
+def save_course_data(
+    user_id: str,
+    course_id: str,
+    data: dict,
+    is_template: bool = False,
+    *,
+    visibility: str = "private",
+    group_id: str | None = None,
+    description: str = "",
+) -> None:
     """LearningCourse データを PostgreSQL に UPSERT する。"""
     session = _pg_session()
     try:
         session.execute(
             sa_text("""
-                INSERT INTO learning_courses (id, user_id, title, data, is_template, is_published, owner_id)
+                INSERT INTO learning_courses
+                    (id, user_id, title, data, is_template, is_published, owner_id,
+                     visibility, group_id, description)
                 VALUES (
                     :course_id,
                     CAST(:user_id AS uuid),
@@ -164,11 +414,17 @@ def save_course_data(user_id: str, course_id: str, data: dict, is_template: bool
                     CAST(:data AS jsonb),
                     :is_template,
                     false,
-                    CAST(:user_id AS uuid)
+                    CAST(:user_id AS uuid),
+                    :visibility,
+                    CAST(:group_id AS uuid),
+                    :description
                 )
                 ON CONFLICT (id) DO UPDATE
                 SET data = CAST(EXCLUDED.data AS jsonb),
                     title = EXCLUDED.title,
+                    visibility = EXCLUDED.visibility,
+                    group_id = EXCLUDED.group_id,
+                    description = EXCLUDED.description,
                     updated_at = now()
             """),
             {
@@ -177,12 +433,164 @@ def save_course_data(user_id: str, course_id: str, data: dict, is_template: bool
                 "title": data.get("title", course_id),
                 "data": json.dumps(data, ensure_ascii=False),
                 "is_template": is_template,
+                "visibility": visibility,
+                "group_id": group_id,
+                "description": description,
             },
         )
         session.commit()
     except Exception:
         session.rollback()
         raise
+    finally:
+        session.close()
+
+
+def get_user_group_ids(user_id: str) -> list[str]:
+    """ユーザーが参加しているグループIDのリストを返す。"""
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT group_id FROM group_members
+                WHERE user_id = CAST(:uid AS uuid)
+            """),
+            {"uid": user_id},
+        ).fetchall()
+        return [str(r[0]) for r in rows]
+    finally:
+        session.close()
+
+
+def get_course_group_permissions(course_id: str) -> list[dict]:
+    """コースに紐づくグループ権限マッピング一覧を返す（グループ名付き）。"""
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT cgp.course_id,
+                       cgp.group_id,
+                       COALESCE(g.name, '') AS group_name,
+                       cgp.permission,
+                       cgp.created_at,
+                       cgp.updated_at
+                FROM course_group_permissions cgp
+                LEFT JOIN groups g ON g.id = cgp.group_id
+                WHERE cgp.course_id = :course_id
+                ORDER BY cgp.permission, g.name
+            """),
+            {"course_id": course_id},
+        ).fetchall()
+    finally:
+        session.close()
+    return [
+        {
+            "course_id": r[0],
+            "group_id": str(r[1]),
+            "group_name": r[2] or "",
+            "permission": r[3],
+            "created_at": r[4].isoformat() if r[4] else "",
+            "updated_at": r[5].isoformat() if r[5] else "",
+        }
+        for r in rows
+    ]
+
+
+def user_owns_course(user_id: str, course_id: str) -> bool:
+    """ユーザーがコースの所有者（オーナー）かを判定する。
+
+    共有設定の変更など、オーナー限定の操作の認可に使う。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT 1 FROM learning_courses
+                WHERE id = :course_id AND user_id = CAST(:uid AS uuid)
+                LIMIT 1
+            """),
+            {"course_id": course_id, "uid": user_id},
+        ).fetchone()
+        return row is not None
+    finally:
+        session.close()
+
+
+def user_can_edit_course(user_id: str, course_id: str) -> bool:
+    """ユーザーがコースを編集できるかを判定する。
+
+    - 所有者（learning_courses.user_id）
+    - editor 権限のあるグループメンバー
+    のいずれかに該当する場合に True。
+    """
+    if user_owns_course(user_id, course_id):
+        return True
+    session = _pg_session()
+    try:
+        editor_row = session.execute(
+            sa_text("""
+                SELECT 1
+                FROM course_group_permissions cgp
+                JOIN group_members gm ON gm.group_id = cgp.group_id
+                WHERE cgp.course_id = :course_id
+                  AND cgp.permission = 'editor'
+                  AND gm.user_id = CAST(:uid AS uuid)
+                LIMIT 1
+            """),
+            {"course_id": course_id, "uid": user_id},
+        ).fetchone()
+        return editor_row is not None
+    finally:
+        session.close()
+
+
+def user_can_view_course(user_id: str, course_id: str) -> bool:
+    """ユーザーがコースを受講（閲覧）できるかを判定する。
+
+    - 所有者
+    - editor 権限のあるグループメンバー
+    - viewer 権限のあるグループメンバー
+    のいずれかに該当する場合に True。
+    """
+    if user_can_edit_course(user_id, course_id):
+        return True
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT 1
+                FROM course_group_permissions cgp
+                JOIN group_members gm ON gm.group_id = cgp.group_id
+                WHERE cgp.course_id = :course_id
+                  AND cgp.permission = 'viewer'
+                  AND gm.user_id = CAST(:uid AS uuid)
+                LIMIT 1
+            """),
+            {"course_id": course_id, "uid": user_id},
+        ).fetchone()
+        return row is not None
+    finally:
+        session.close()
+
+
+def user_can_access_group(user_id: str, group_id: str | None) -> bool:
+    """ユーザーが指定のグループに属しているかを判定する。
+
+    group_id が None/空の場合は False を返す。
+    """
+    if not group_id:
+        return False
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT 1 FROM group_members
+                WHERE user_id = CAST(:uid AS uuid) AND group_id = CAST(:gid AS uuid)
+                LIMIT 1
+            """),
+            {"uid": user_id, "gid": group_id},
+        ).fetchone()
+        return row is not None
     finally:
         session.close()
 
@@ -603,7 +1011,11 @@ def detect_and_record_misconception(
     user_message: str,
     ai_response: str,
 ) -> dict | None:
-    """AI応答から誤解を検出し、コースデータに記録する。"""
+    """AI応答から誤解を検出し、ユーザー個別の learning_states.personal_graph に記録する。
+
+    Issue #133: マスターコースは不変に保ち、誤解はユーザーごとの learning_states に保存する。
+    レスポンス用にはマージ済みの topics をコピーして返す。
+    """
     wrong = user_message
     if len(wrong) > 60:
         wrong = wrong[:60] + "…"
@@ -626,18 +1038,24 @@ def detect_and_record_misconception(
         "correct": correct,
     }
 
-    for t in course_data.get("topics", []):
+    try:
+        record_personal_misconception(user_id, course_id, topic_id, misconception)
+    except Exception:
+        logger.exception(
+            "Failed to record misconception to learning_states for user=%s course=%s",
+            user_id, course_id,
+        )
+
+    # UI 更新用レスポンス: course_data をコピーして当該 topic に今回の誤解を混ぜる
+    updated_topics = [dict(t) for t in course_data.get("topics", [])]
+    for t in updated_topics:
         if t.get("id") == topic_id:
-            if "misconceptions" not in t:
-                t["misconceptions"] = []
-            t["misconceptions"].insert(0, misconception)
-            t["misconceptions"] = t["misconceptions"][:5]
+            merged = [misconception] + list(t.get("misconceptions", []) or [])
+            t["misconceptions"] = merged[:5]
             break
 
-    save_course_data(user_id, course_id, course_data)
-
     return {
-        "topics": course_data.get("topics", []),
+        "topics": updated_topics,
         "concepts": course_data.get("concepts", []),
     }
 

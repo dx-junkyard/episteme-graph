@@ -25,9 +25,18 @@ GET  /api/admin/course-builder/sessions                         セッション�
 GET  /api/admin/course-builder/sessions/{session_id}            セッション取得
 PUT  /api/admin/course-builder/sessions/{session_id}            セッション更新
 POST /api/admin/course-builder/chat                             コース構築AIチャット
-PUT  /api/admin/courses/{course_id}/publish                     コースを学生に公開
+GET  /api/admin/courses/{course_id}/groups                      コースに紐づくグループ権限一覧 (Issue #125)
+POST /api/admin/courses/{course_id}/groups                      コースにグループ権限を付与 (viewer/editor)
+DELETE /api/admin/courses/{course_id}/groups/{group_id}         コースからグループ権限を削除
 POST /api/admin/users/student                                   学生アカウント作成 (TEACHER)
 POST /api/admin/users/teacher                                   教員アカウント作成 (SYSTEM_ADMIN)
+POST /api/groups                                                グループ作成
+GET  /api/groups                                                自グループ一覧
+GET  /api/groups/{group_id}                                     グループ詳細
+POST /api/groups/{group_id}/members                             ユーザーを直接招待
+POST /api/groups/join-by-code                                   招待コードで参加
+GET  /api/me/invitations                                        自分宛ての招待一覧
+POST /api/me/invitations/{inv}/accept                           招待を承諾
 GET  /healthz                                                   ヘルスチェック
 """
 
@@ -44,7 +53,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text as sa_text
 
 from dependencies import _hash_password
-from routes import auth, learning, admin, lecture
+from routes import auth, learning, admin, lecture, groups
 from core.config import get_settings as _get_settings
 from core.postgres import get_session as _pg_session, check_connection as _pg_check
 
@@ -78,11 +87,11 @@ def _run_migrations() -> None:
         ))
 
         # A2: learning_courses への追加カラム
+        # NOTE: cloned_from カラムは Issue #133 (Migration 011) で廃止された。
         for ddl in [
             "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS is_template  BOOLEAN NOT NULL DEFAULT false",
             "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS is_published BOOLEAN NOT NULL DEFAULT false",
             "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS owner_id     UUID REFERENCES users(id)",
-            "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS cloned_from  TEXT REFERENCES learning_courses(id)",
         ]:
             session.execute(sa_text(ddl))
         session.execute(sa_text(
@@ -232,8 +241,141 @@ def _run_migrations() -> None:
         session.execute(sa_text("DROP INDEX IF EXISTS idx_chunks_arxiv"))
         session.execute(sa_text("ALTER TABLE chunks DROP COLUMN IF EXISTS arxiv_id"))
 
+        # Migration 009: グループ + 資料開示範囲 (Issue #121)
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS groups (
+                id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                name         TEXT NOT NULL,
+                description  TEXT NOT NULL DEFAULT '',
+                invite_code  TEXT UNIQUE,
+                created_by   UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_groups_created_by ON groups(created_by)"
+        ))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS group_members (
+                id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                group_id   UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                role       TEXT NOT NULL DEFAULT 'member'
+                              CHECK (role IN ('admin', 'member')),
+                joined_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE(group_id, user_id)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(user_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_group_members_group ON group_members(group_id)"
+        ))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS group_invitations (
+                id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                group_id         UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                invitee_user_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                inviter_user_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                status           TEXT NOT NULL DEFAULT 'pending'
+                                    CHECK (status IN ('pending', 'accepted', 'declined', 'revoked')),
+                created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+                responded_at     TIMESTAMPTZ,
+                UNIQUE(group_id, invitee_user_id, status)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_invitations_invitee ON group_invitations(invitee_user_id, status)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_invitations_group ON group_invitations(group_id)"
+        ))
+        for ddl in [
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'private'",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS group_id UUID REFERENCES groups(id) ON DELETE SET NULL",
+            "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'private'",
+            "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS group_id UUID REFERENCES groups(id) ON DELETE SET NULL",
+            "ALTER TABLE learning_courses ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT ''",
+        ]:
+            session.execute(sa_text(ddl))
+        # 既存の公開テンプレートを 'public' 扱いに移行（後方互換）
+        session.execute(sa_text("""
+            UPDATE learning_courses
+                SET visibility = 'public'
+                WHERE is_published = true AND is_template = true AND visibility = 'private'
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_documents_visibility ON documents(visibility)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_courses_visibility ON learning_courses(visibility)"
+        ))
+
+        # Migration 010: コース × グループ 権限マッピング (Issue #125)
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS course_group_permissions (
+                course_id   TEXT NOT NULL REFERENCES learning_courses(id) ON DELETE CASCADE,
+                group_id    UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                permission  TEXT NOT NULL DEFAULT 'viewer'
+                                CHECK (permission IN ('viewer', 'editor')),
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (course_id, group_id)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_cgp_course ON course_group_permissions(course_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_cgp_group ON course_group_permissions(group_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_cgp_group_permission "
+            "ON course_group_permissions(group_id, permission)"
+        ))
+
+        # Migration 011: コース原本と学習状態の完全分離 (Issue #133)
+        # マスターコースとユーザーごとの学習状態を分離する。
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS learning_states (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                course_id TEXT NOT NULL REFERENCES learning_courses(id) ON DELETE CASCADE,
+                progress_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+                personal_graph JSONB NOT NULL DEFAULT '{}'::jsonb,
+                enrolled_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (user_id, course_id)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_learning_states_user ON learning_states(user_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_learning_states_course ON learning_states(course_id)"
+        ))
+        # 既存の cloned_from カラムがあれば、クローンコースとその履歴をハードリセット後にカラム廃止
+        session.execute(sa_text("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'learning_courses' AND column_name = 'cloned_from'
+                ) THEN
+                    DELETE FROM learning_chat_history
+                    WHERE course_id IN (
+                        SELECT id FROM learning_courses WHERE cloned_from IS NOT NULL
+                    );
+                    DELETE FROM learning_courses WHERE cloned_from IS NOT NULL;
+                    ALTER TABLE learning_courses DROP COLUMN cloned_from;
+                END IF;
+            END $$
+        """))
+
         session.commit()
-        logger.info("Migrations (002-007) applied successfully.")
+        logger.info("Migrations (002-011) applied successfully.")
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema
@@ -316,6 +458,7 @@ app.include_router(auth.router)
 app.include_router(learning.router)
 app.include_router(admin.router)
 app.include_router(lecture.router)
+app.include_router(groups.router)
 
 
 @app.get("/healthz")

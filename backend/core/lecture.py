@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 
 from core.llm import generate_text, get_llm_params
 
@@ -79,6 +80,14 @@ _SPOKEN_TEXT_PROMPT = """あなたは大学院レベルの学習を支援する�
 _FORMULA_REQUIRED_KEYS = {"latex", "spoken", "is_display"}
 _MAX_LLM_ATTEMPTS = 3
 _LATEX_EXTRACTION_ERROR = "[LaTeX extraction error: manual completion required]"
+# 429 / ResourceExhausted 時のリトライ待機秒数 (指数バックオフ)
+_RATE_LIMIT_BACKOFF_SECONDS = [30, 90]
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """例外が API レート制限 (429/ResourceExhausted) かどうかを判定する。"""
+    s = str(exc).lower()
+    return "429" in s or "resource exhausted" in s or "resource_exhausted" in s
 
 
 def _parse_spoken_text_response(raw: str) -> dict:
@@ -183,10 +192,19 @@ def generate_spoken_text_and_formulas(
             )
         except Exception as exc:
             last_exc = exc
-            logger.warning(
-                "spoken_text generation attempt %d/%d failed: %s",
-                attempt, _MAX_LLM_ATTEMPTS, exc, exc_info=True,
-            )
+            if _is_rate_limit_error(exc) and attempt < _MAX_LLM_ATTEMPTS:
+                wait_sec = _RATE_LIMIT_BACKOFF_SECONDS[attempt - 1]
+                logger.warning(
+                    "spoken_text generation attempt %d/%d rate-limited (429). "
+                    "Waiting %ds before retry. chunk_index=%d",
+                    attempt, _MAX_LLM_ATTEMPTS, wait_sec, chunk_index,
+                )
+                time.sleep(wait_sec)
+            else:
+                logger.warning(
+                    "spoken_text generation attempt %d/%d failed: %s",
+                    attempt, _MAX_LLM_ATTEMPTS, exc, exc_info=True,
+                )
 
     logger.error(
         "spoken_text generation failed after %d attempts, using fallback. Last error: %s",
