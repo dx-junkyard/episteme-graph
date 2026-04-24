@@ -259,8 +259,8 @@ def enroll_user_in_course(user_id: str, course_id: str) -> None:
     try:
         session.execute(
             sa_text("""
-                INSERT INTO learning_states (user_id, course_id)
-                VALUES (CAST(:user_id AS uuid), :course_id)
+                INSERT INTO learning_states (id, user_id, course_id)
+                VALUES (gen_random_uuid(), CAST(:user_id AS uuid), :course_id)
                 ON CONFLICT (user_id, course_id) DO NOTHING
             """),
             {"user_id": user_id, "course_id": course_id},
@@ -289,8 +289,8 @@ def record_personal_misconception(
     try:
         session.execute(
             sa_text("""
-                INSERT INTO learning_states (user_id, course_id)
-                VALUES (CAST(:user_id AS uuid), :course_id)
+                INSERT INTO learning_states (id, user_id, course_id)
+                VALUES (gen_random_uuid(), CAST(:user_id AS uuid), :course_id)
                 ON CONFLICT (user_id, course_id) DO NOTHING
             """),
             {"user_id": user_id, "course_id": course_id},
