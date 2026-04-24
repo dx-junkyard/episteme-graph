@@ -141,31 +141,26 @@ class TestClassifyIntentLLM:
 
 
 # ---------------------------------------------------------------------------
-# 3. 基礎知識フォールバックテスト
+# 3. RAGコンテキスト統合テスト（旧: 基礎知識フォールバック）
 # ---------------------------------------------------------------------------
 
 
-class TestBasicKnowledgeFallback:
-    """RAGヒット0件時の基礎知識フォールバック動作テスト。"""
+class TestRagContextIntegration:
+    """RAGヒットあり/なし問わず単一パイプラインで処理されることのテスト。"""
 
-    def test_basic_knowledge_label_added_when_missing(self):
-        """LLM 応答に【基礎知識の補足】がない場合は冒頭に追加される。"""
-        # ラベルなしの応答をシミュレート
-        response_without_label = "レプトンは素粒子の一種で、クォークと異なり強い相互作用をしません。"
-        assert not response_without_label.strip().startswith("【基礎知識")
-        labeled = "【基礎知識の補足】\n" + response_without_label
-        assert labeled.startswith("【基礎知識の補足】")
+    def test_no_basic_knowledge_label_in_system_prompt(self):
+        """統合チュータープロンプトに「基礎知識の補足」ラベルを付与する指示がないこと。"""
+        from api.routes.learning import _get_integrated_tutor_system_prompt
+        prompt = _get_integrated_tutor_system_prompt("物理学")
+        # プロンプトは「付けるな」という禁止指示として言及するが、付与を促す記述はない
+        assert "絶対に付けないでください" in prompt
 
-    def test_basic_knowledge_label_preserved_when_present(self):
-        """LLM 応答に【基礎知識の補足】が既にある場合は二重付与しない。"""
-        response_with_label = "【基礎知識の補足】\nレプトンは素粒子の一種です。"
-        assert response_with_label.strip().startswith("【基礎知識")
-        # ラベルなしなので追加しない
-        if not response_with_label.strip().startswith("【基礎知識"):
-            result = "【基礎知識の補足】\n" + response_with_label
-        else:
-            result = response_with_label
-        assert result.count("【基礎知識の補足】") == 1
+    def test_integrated_prompt_no_rejection_language(self):
+        """統合チュータープロンプトに「教材にありません」等の拒絶表現が含まれないこと。"""
+        from api.routes.learning import _get_integrated_tutor_system_prompt
+        prompt = _get_integrated_tutor_system_prompt("物理学")
+        assert "お答えできません" not in prompt
+        assert "範囲外" not in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -178,44 +173,50 @@ class TestSystemPrompts:
 
     # --- ナビゲーター ---
 
-    def test_navigator_prompt_function_defined(self):
-        """_get_navigator_system_prompt 関数が learning.py に定義されている。"""
-        from api.routes.learning import _get_navigator_system_prompt
-        assert callable(_get_navigator_system_prompt)
+    def test_integrated_tutor_prompt_function_defined(self):
+        """_get_integrated_tutor_system_prompt 関数が learning.py に定義されている。"""
+        from api.routes.learning import _get_integrated_tutor_system_prompt
+        assert callable(_get_integrated_tutor_system_prompt)
 
-    def test_navigator_prompt_returns_string(self):
-        """_get_navigator_system_prompt は str を返す。"""
-        from api.routes.learning import _get_navigator_system_prompt
-        result = _get_navigator_system_prompt("素粒子物理学")
+    def test_integrated_tutor_prompt_returns_string(self):
+        """_get_integrated_tutor_system_prompt は str を返す。"""
+        from api.routes.learning import _get_integrated_tutor_system_prompt
+        result = _get_integrated_tutor_system_prompt("素粒子物理学")
         assert isinstance(result, str)
         assert len(result) > 100
 
-    def test_navigator_prompt_contains_role_description(self):
-        """生成プロンプトにナビゲーターの役割説明が含まれる。"""
-        from api.routes.learning import _get_navigator_system_prompt
-        assert "ナビゲーター" in _get_navigator_system_prompt("量子力学")
+    def test_integrated_tutor_prompt_contains_role_description(self):
+        """生成プロンプトに親切な専属チューターの役割説明が含まれる。"""
+        from api.routes.learning import _get_integrated_tutor_system_prompt
+        assert "チューター" in _get_integrated_tutor_system_prompt("量子力学")
 
-    def test_navigator_prompt_contains_domain(self):
+    def test_integrated_tutor_prompt_contains_domain(self):
         """生成プロンプトに指定した domain が含まれる。"""
-        from api.routes.learning import _get_navigator_system_prompt
-        prompt = _get_navigator_system_prompt("経済学")
+        from api.routes.learning import _get_integrated_tutor_system_prompt
+        prompt = _get_integrated_tutor_system_prompt("経済学")
         assert "経済学" in prompt
 
-    def test_navigator_prompt_contains_latex_instruction(self):
+    def test_integrated_tutor_prompt_contains_latex_instruction(self):
         """生成プロンプトに LaTeX 記法の指示が含まれる。"""
-        from api.routes.learning import _get_navigator_system_prompt
-        assert "LaTeX" in _get_navigator_system_prompt("数学")
+        from api.routes.learning import _get_integrated_tutor_system_prompt
+        assert "LaTeX" in _get_integrated_tutor_system_prompt("数学")
 
-    def test_navigator_prompt_contains_drilldown_format(self):
+    def test_integrated_tutor_prompt_contains_drilldown_format(self):
         """生成プロンプトにドリルダウンフォーマット指示が含まれる。"""
-        from api.routes.learning import _get_navigator_system_prompt
-        assert "〇〇について詳しく聞く" in _get_navigator_system_prompt("物理学")
+        from api.routes.learning import _get_integrated_tutor_system_prompt
+        assert "〇〇について詳しく聞く" in _get_integrated_tutor_system_prompt("物理学")
 
-    def test_navigator_prompt_fallback_when_empty_domain(self):
+    def test_integrated_tutor_prompt_fallback_when_empty_domain(self):
         """domain が空文字の場合はフォールバック文言が使われる。"""
-        from api.routes.learning import _get_navigator_system_prompt
-        prompt = _get_navigator_system_prompt("")
+        from api.routes.learning import _get_integrated_tutor_system_prompt
+        prompt = _get_integrated_tutor_system_prompt("")
         assert "このコースの専門分野" in prompt
+
+    def test_integrated_tutor_prompt_no_warning_label_instruction(self):
+        """プロンプトに「基礎知識の補足」ラベルを付けない旨の指示が含まれる。"""
+        from api.routes.learning import _get_integrated_tutor_system_prompt
+        prompt = _get_integrated_tutor_system_prompt("物理学")
+        assert "基礎知識の補足" in prompt  # 付けないよう禁止する指示として含まれる
 
     # --- チューター ---
 
@@ -259,13 +260,13 @@ class TestSystemPrompts:
         """旧 _LEARNING_SYSTEM_PROMPT 定数は削除されている。"""
         import api.routes.learning as mod
         assert not hasattr(mod, "_LEARNING_SYSTEM_PROMPT"), \
-            "_LEARNING_SYSTEM_PROMPT は _get_navigator_system_prompt() に統合されているはずです"
+            "_LEARNING_SYSTEM_PROMPT は _get_integrated_tutor_system_prompt() に統合されているはずです"
 
-    def test_navigator_system_prompt_constant_removed(self):
-        """_NAVIGATOR_SYSTEM_PROMPT 定数ではなく関数になっている。"""
+    def test_navigator_system_prompt_removed(self):
+        """_get_navigator_system_prompt は _get_integrated_tutor_system_prompt に統合されている。"""
         import api.routes.learning as mod
-        assert not hasattr(mod, "_NAVIGATOR_SYSTEM_PROMPT"), \
-            "_NAVIGATOR_SYSTEM_PROMPT は _get_navigator_system_prompt() に関数化されているはずです"
+        assert not hasattr(mod, "_get_navigator_system_prompt"), \
+            "_get_navigator_system_prompt は _get_integrated_tutor_system_prompt() に置き換えられているはずです"
 
     def test_lecture_interrupt_prompt_constant_removed(self):
         """旧 _LECTURE_INTERRUPT_SYSTEM_PROMPT 定数は削除されている。"""
@@ -350,13 +351,13 @@ class TestGenerateLearningAdviceResponse:
 class TestDomainPropagation:
     """course_data の domain がシステムプロンプトに動的に反映されること。"""
 
-    def test_navigator_prompt_uses_domain_from_course_data(self):
-        """_get_navigator_system_prompt に渡した domain がプロンプトに含まれる。"""
-        from api.routes.learning import _get_navigator_system_prompt
+    def test_integrated_tutor_prompt_uses_domain_from_course_data(self):
+        """_get_integrated_tutor_system_prompt に渡した domain がプロンプトに含まれる。"""
+        from api.routes.learning import _get_integrated_tutor_system_prompt
 
-        prompt = _get_navigator_system_prompt("機械学習")
+        prompt = _get_integrated_tutor_system_prompt("機械学習")
         assert "機械学習" in prompt
-        assert "ナビゲーター" in prompt
+        assert "チューター" in prompt
 
     def test_tutor_prompt_uses_domain_from_course_data(self):
         """_get_tutor_system_prompt に渡した domain がプロンプトに含まれる。"""
@@ -366,14 +367,12 @@ class TestDomainPropagation:
         assert "経済学" in prompt
         assert "チューター" in prompt
 
-    def test_navigator_fallback_for_none_domain(self):
-        """domain が None（未設定）の場合にフォールバック文言が使われる。"""
-        from api.routes.learning import _get_navigator_system_prompt
+    def test_integrated_tutor_fallback_for_empty_domain(self):
+        """domain が空文字（未設定）の場合にフォールバック文言が使われる。"""
+        from api.routes.learning import _get_integrated_tutor_system_prompt
 
-        # None は空文字として扱われることを確認（呼び出し側は or course_title を使う）
-        prompt = _get_navigator_system_prompt("")
+        prompt = _get_integrated_tutor_system_prompt("")
         assert "このコースの専門分野" in prompt
-        assert "素粒子物理学" not in prompt
 
     def test_tutor_fallback_for_empty_domain(self):
         """domain が空文字の場合にフォールバック文言が使われる。"""

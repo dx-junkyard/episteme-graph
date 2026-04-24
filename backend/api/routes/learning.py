@@ -555,8 +555,8 @@ def _generate_learning_advice_response(
         )
 
 
-def _get_navigator_system_prompt(domain: str) -> str:
-    """ナビゲーター（教授）ロールのシステムプロンプトを生成する。
+def _get_integrated_tutor_system_prompt(domain: str) -> str:
+    """知識統合型チューターのシステムプロンプトを生成する。
 
     Parameters
     ----------
@@ -564,40 +564,19 @@ def _get_navigator_system_prompt(domain: str) -> str:
         コースの専門分野。空文字の場合は「このコースの専門分野」でフォールバック。
     """
     domain_label = domain.strip() if domain.strip() else "このコースの専門分野"
-    return f"""あなたは{domain_label}コースを担当する「ナビゲーター（教授）」です。
-コース全体のマクロな理解度を管理し、学生が体系的に学習を深められるよう導くことが使命です。
+    return f"""あなたは{domain_label}の学習をサポートする「親切な専属チューター」です。
+学生の疑問に対して、手元の教材とあなた自身の専門知識をシームレスに統合して、即座に分かりやすい解説を提供することが使命です。
 
-**ナビゲーターとしての役割:**
-1. コース全体の構造（チャプター・トピック・前提知識）を踏まえ、今どの段階を学んでいるかを意識させる。
-2. 次に学ぶべき概念や関連トピックへ積極的に誘導する。
-3. 基礎知識が不足していると判断した場合、前提トピックへの誘導を行う（ただし過度に引き留めない）。
-4. 学習の全体像を俯瞰し、「なぜこの概念を学ぶのか」という文脈を提供する。
+**チューターとしての役割と回答ルール:**
+1. 【知識の統合】提供される「教材からのコンテキスト」を最優先で参照してください。ただし、コンテキストに十分な情報がない場合は、突き放したり「教材にありません」と謝罪したりせず、あなたの一般的な学術知識を用いて自然に解説を補完してください。
+2. 【自然な対話】回答の冒頭に「【基礎知識の補足】」のようなシステム的な警告ラベルは絶対に付けないでください。
+3. 【誤解の訂正】学生に誤解がある場合は、「訂正：」という冷たい表現は避け、「この点については、〇〇と考えるとより正確です」のように教育的配慮を持って導いてください。
+4. 【解説の深さ】前提知識の確認で長々と引き留めず、まずは直球で疑問に答えてください。必要に応じて数式（LaTeX）や具体例を交えてください。
+5. 【ドリルダウン】回答の末尾に、関連して深掘りできそうなトピックを `[〇〇について詳しく聞く]` の形式で1〜2つ提示してください。
 
-**教育方針:**
-1. 学生の誤解を発見したら「訂正：」と明記し、**誤謬の構造的理由**を必ず含めてください。
-   - 「数式のこの項を見落としがちですが…」のように、数式レベルで誤解の原因を指摘
-   - 「〇〇と△△を混同しやすいですが…」のように、類似概念との混同パターンを説明
-   - 正答だけでなく、なぜ間違えやすいかの構造を必ず示す
-2. 概念の説明は具体的な数式（LaTeX）、ファインマン図の説明、または分野の直観を使って行ってください。
-3. 教材から引用できる場合は出典（セクション番号等）を明記してください。
-4. 説明の最後に、理解を確認するための質問をしてください。
-5. 関連する概念へのドリルダウン選択肢を提示してください。
-
-**数式の導出サポート:**
-- 数式の行間（導出）に関する質問には、前提となる数学的公式・定理を最初に提示してください。
-- ステップ・バイ・ステップで、各変形の意味を添えて説明してください。
-
-**RAGコンテキスト利用:**
-- 提供される「教材チャンク」はシステム全域のベクトル検索で取得した関連箇所です。各チャンクには `[出典: 『書籍名』]` の形式で出典が付いています。
-- 回答中で教材を参照する際は必ず「『書籍名』によれば…」「『書籍名』では…と述べられています」のように出典を明記してください。
-- 複数の教材から情報を統合する場合は、それぞれの出典を区別して示してください。
-- コンテキストに含まれない情報について推測する場合はその旨を明記してください。
-
-**フォーマット:**
-- 数式は必ず LaTeX 記法で記述（インラインは `$...$`、ディスプレイは `$$...$$`）
-- 誤解の訂正が必要な場合は最初に「訂正：」と記述
-- 参照した教材のセクションがあれば言及
-- 回答の末尾に深掘りできるトピックを `[〇〇について詳しく聞く]` の形式で提示（必ずこのフォーマットを使用）"""
+**フォーマット要件:**
+- 数式は必ず LaTeX 記法で記述（インラインは $...$、ディスプレイは $$...$$）
+- 教材を参照した場合は [出典: 『書籍名』] を文脈に自然に混ぜて言及すること。"""
 
 
 @router.get(
@@ -655,7 +634,6 @@ def learning_chat(
     course_title = course_data.get("title", course_id)
     # domain が未設定の場合は course_title にフォールバック
     domain = course_data.get("domain") or course_title
-    navigator_prompt = _get_navigator_system_prompt(domain)
 
     # 2. 意図分類（Intent Routing）
     intent = _classify_intent(body.message, course_title)
@@ -696,70 +674,30 @@ def learning_chat(
         )
         return LearningChatResponse(answer=prerequisite_intervention, course_update=None)
 
-    # 4. RAG: システム全域のチャンクを検索（ルート③/④）
-    _RELEVANCE_THRESHOLD = 0.35
+    # 4. RAG: システム全域のチャンクを検索し、コンテキストを構築
     chunk_results = search_chunks_with_metadata(body.message, top_k=8)
-    above_threshold = [r for r in chunk_results if r["score"] >= _RELEVANCE_THRESHOLD]
+    cited_chunks = []
+    for r in chunk_results:
+        if r["score"] >= 0.30:
+            cited_chunks.append(f"[出典: 『{r['source_title']}』]\n{r['text']}")
 
-    # ルート③: ドメイン知識の質問かつRAGヒット0件 → 基礎知識フォールバック
-    if not above_threshold:
+    if cited_chunks:
+        context_block = "## 関連する教材のコンテキスト\n" + "\n---\n".join(cited_chunks)
+    else:
+        context_block = "※この質問に直接関連する教材セクションは見つかりませんでした。一般的な学術知識を用いて回答してください。"
         log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
 
-        basic_messages: list[dict] = [
-            {"role": "system", "content": navigator_prompt},
-            {"role": "user", "content": (
-                f"コース: {course_title}\n"
-                f"現在のトピック: {topic_title}\n\n"
-                "【補足情報】この質問に関連する教材は登録資料に見つかりませんでした。"
-                "学術的な一般知識を使って補足説明してください。"
-                "回答の冒頭には必ず「【基礎知識の補足】」と記してください。"
-            )},
-            {"role": "assistant", "content": (
-                f"了解しました。「{topic_title}」に関連する基礎知識を補足説明します。"
-            )},
-        ]
-        for turn in body.history:
-            basic_messages.append({"role": turn["role"], "content": turn["content"]})
-        basic_messages.append({"role": "user", "content": body.message})
-
-        try:
-            basic_answer = generate_text(messages=basic_messages, temperature=0.3)
-            if not basic_answer.strip().startswith("【基礎知識"):
-                basic_answer = "【基礎知識の補足】\n" + basic_answer
-        except Exception:
-            logger.exception("Basic knowledge fallback LLM failed for topic %s", topic_id)
-            basic_answer = (
-                "【基礎知識の補足】\n"
-                "この質問に関連する教材は登録資料に見つかりませんでした。\n"
-                "担当教員にお問い合わせいただくか、別の表現で質問してください。"
-            )
-
-        persist_chat_history(
-            current_user["id"], course_id, topic_id,
-            body.history, body.message, basic_answer,
-        )
-        return LearningChatResponse(answer=basic_answer, course_update=None)
-
-    # ルート④: RAGヒット有り → 教材に基づいて回答
-    cited_chunks = []
-    for r in above_threshold:
-        cited_chunks.append(f"[出典: 『{r['source_title']}』]\n{r['text']}")
-
-    context_block = (
-        "## 教材から検索された関連箇所（出典付き）\n"
-        + "\n---\n".join(cited_chunks)
-    )
-
+    # 5. 回答の生成（ルート統合）
     messages: list[dict] = [
-        {"role": "system", "content": navigator_prompt},
+        {"role": "system", "content": _get_integrated_tutor_system_prompt(domain)},
         {"role": "user", "content": (
             f"コース: {course_title}\n"
             f"現在のトピック: {topic_title}\n\n"
             f"{context_block}\n\n"
-            "上記のコンテキストを念頭に置いて質問に回答してください。"
+            "上記のコンテキストを踏まえ（不足している場合は補完して）、以下の質問に答えてください。"
         )},
         {"role": "assistant", "content": (
-            f"了解しました。「{topic_title}」について、教材を参照しながら学習を進めましょう。"
+            f"はい、「{topic_title}」についてですね。お答えします。"
         )},
     ]
     for turn in body.history:
@@ -772,8 +710,9 @@ def learning_chat(
         logger.exception("Learning chat LLM call failed for topic %s", topic_id)
         raise HTTPException(status_code=500, detail=f"Chat failed: {exc}") from exc
 
+    # 誤解検出（マイルドな表現にも対応）
     course_update = None
-    if topic_info and any(kw in answer for kw in ["訂正：", "訂正:", "【訂正】"]):
+    if topic_info and any(kw in answer for kw in ["訂正", "より正確です", "誤解"]):
         course_update = detect_and_record_misconception(
             current_user["id"], course_id, course_data, topic_id, body.message, answer
         )
