@@ -16,8 +16,10 @@ from schemas import (
     LearningChatRequest,
     LearningChatResponse,
     LearningCourseDetail,
+    LearningCourseLayeredResponse,
     LearningCourseOut,
     LearningProgress,
+    PersonalLayer,
 )
 from services import (
     calculate_progress,
@@ -26,6 +28,7 @@ from services import (
     enroll_user_in_course,
     get_course_data,
     get_editable_course_data,
+    get_personal_layer,
     get_user_group_ids,
     log_unanswered_query,
     persist_chat_history,
@@ -275,17 +278,25 @@ def list_courses(
     return unique_courses
 
 
-@router.get("/courses/{course_id}", response_model=LearningCourseDetail)
+@router.get("/courses/{course_id}", response_model=LearningCourseLayeredResponse)
 def get_course(
     course_id: str,
     current_user: dict = Depends(_get_current_user),
-) -> LearningCourseDetail:
-    """コースの詳細データを返す。"""
+) -> LearningCourseLayeredResponse:
+    """コースの詳細データをレイヤー分離形式で返す（Issue #145）。
+
+    マスター教材（不変）と個人レイヤー（誤解・注釈）を分離して返す。
+    オーナー（教員）も一般学生と同じ学習体験を得る。
+    """
     data = get_course_data(current_user["id"], course_id)
     if not data:
         raise HTTPException(status_code=404, detail="Course not found")
 
-    return LearningCourseDetail(**data)
+    personal = get_personal_layer(current_user["id"], course_id)
+    return LearningCourseLayeredResponse(
+        master_course=LearningCourseDetail(**data),
+        personal_layer=PersonalLayer(**personal),
+    )
 
 
 @router.put("/courses/{course_id}", response_model=LearningCourseDetail)

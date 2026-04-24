@@ -11,7 +11,8 @@
     username: localStorage.getItem("eg_username") || null,
     role: null,
     courseId: localStorage.getItem("eg_course") || null,
-    course: null, // loaded course data
+    course: null,        // master_course（不変の教材データ）
+    personalLayer: null, // personal_layer（個人の誤解・注釈データ）
     currentTopicId: null,
     chatMessages: [], // {role, content}
     sending: false,
@@ -134,7 +135,18 @@
   async function loadCourse(courseId) {
     try {
       const res = await apiFetch("/learning/courses/" + courseId);
-      if (res.ok) return await res.json();
+      if (res.ok) {
+        const data = await res.json();
+        // Issue #145: レイヤー型レスポンスを展開する
+        if (data && data.master_course) {
+          return {
+            master: data.master_course,
+            personal: data.personal_layer || { misconceptions_by_topic: {}, chat_anchors: {} },
+          };
+        }
+        // 旧形式フォールバック
+        return { master: data, personal: { misconceptions_by_topic: {}, chat_anchors: {} } };
+      }
     } catch (_) { /* ignore */ }
     return null;
   }
@@ -187,8 +199,17 @@
         const tStatus = t.status || "locked";
         const cls = tActive ? "ni sub act" : tStatus === "locked" ? "ni sub lk" : "ni sub";
         const dotCls = tStatus === "completed" ? "dot-g" : tStatus === "in_progress" ? "dot-b" : "dot-x";
+
+        // Issue #145: 個人誤解がある場合は注釈マーカーを表示
+        const personalLayer = state.personalLayer || {};
+        const misconsByTopic = personalLayer.misconceptions_by_topic || {};
+        const misconsCount = (misconsByTopic[t.id] || []).length;
+        const annotationBadge = misconsCount > 0
+          ? '<span class="mc-badge" title="' + misconsCount + '件の誤解が記録されています">⚑ ' + misconsCount + '</span>'
+          : "";
+
         html += '<div class="' + cls + '" data-topic="' + t.id + '" style="padding-left:36px">';
-        html += escHtml(t.title);
+        html += escHtml(t.title) + annotationBadge;
         html += '<span class="dot ' + dotCls + '" style="margin-left:auto"></span></div>';
       });
     });
@@ -401,12 +422,15 @@
       html += "</div></div>";
     }
 
-    // Misconceptions
-    const misconceptions = topic ? (topic.misconceptions || []) : [];
+    // Issue #145: 誤解は personal_layer から取得（マスターデータには含まれない）
+    const personalLayer = state.personalLayer || {};
+    const misconsByTopic = personalLayer.misconceptions_by_topic || {};
+    const misconceptions = topic ? (misconsByTopic[topic.id] || []) : [];
     if (misconceptions.length > 0) {
-      html += '<div class="ps"><h4>指摘された誤解 <span class="mc-bd">' + misconceptions.length + '件</span></h4>';
+      html += '<div class="ps"><h4>あなたの誤解メモ <span class="mc-bd">' + misconceptions.length + '件</span></h4>';
+      html += '<div class="mc-layer-note">過去のチャットで指摘された理解の誤りです。</div>';
       misconceptions.forEach(function (m) {
-        html += '<div class="cc"><div class="lb" style="color:#A32D2D">' + escHtml(m.label || "訂正") + "</div>";
+        html += '<div class="cc mc-annotation"><div class="lb" style="color:#A32D2D">⚑ ' + escHtml(m.label || "訂正") + "</div>";
         html += escHtml(m.wrong) + "<br>→ " + escHtml(m.correct) + "</div>";
       });
       html += "</div>";
@@ -578,9 +602,24 @@
       if (res.ok) {
         const data = await res.json();
         state.chatMessages.push({ role: "assistant", content: data.answer });
-        // Update course data if side-effects returned
+        // Issue #145: 個人レイヤーの更新を反映する
         if (data.course_update) {
-          Object.assign(state.course, data.course_update);
+          if (data.course_update.personal_layer) {
+            // レイヤー型更新: personal_layer をマージする
+            if (!state.personalLayer) {
+              state.personalLayer = { misconceptions_by_topic: {}, chat_anchors: {} };
+            }
+            const newPersonal = data.course_update.personal_layer;
+            if (newPersonal.misconceptions_by_topic) {
+              Object.assign(
+                state.personalLayer.misconceptions_by_topic,
+                newPersonal.misconceptions_by_topic
+              );
+            }
+          } else {
+            // 旧形式フォールバック（topics/concepts の直接更新）
+            Object.assign(state.course, data.course_update);
+          }
           renderSidebar();
           renderRightPanel();
         }
@@ -717,6 +756,7 @@
     state.currentTopicId = null;
     state.chatMessages = [];
     state.course = null;
+    state.personalLayer = null;
 
     // Re-render with clean state
     renderSidebar();
@@ -781,12 +821,16 @@
   }
 
   async function loadAndRenderCourse() {
-    const course = await loadCourse(state.courseId);
-    if (!course) return;
+    const courseData = await loadCourse(state.courseId);
+    if (!courseData) return;
     const progress = await loadProgress(state.courseId);
-    if (progress) course.progress = progress;
 
-    state.course = course;
+    // Issue #145: マスターデータと個人レイヤーを分離して管理する
+    state.course = courseData.master;
+    state.personalLayer = courseData.personal;
+    if (progress) state.course.progress = progress;
+
+    const course = state.course;
 
     // Set initial topic to first in_progress topic
     const inProgress = (course.topics || []).find(function (t) { return t.status === "in_progress"; });
