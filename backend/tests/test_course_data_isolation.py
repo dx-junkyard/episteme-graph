@@ -249,6 +249,13 @@ def client_and_users(monkeypatch):
     monkeypatch.setattr("routes.lecture.get_course_data", _fake_get_course_data)
     monkeypatch.setattr("services.get_course_data", _fake_get_course_data)
 
+    # --- get_personal_layer の差し替え（Issue #145） ---
+    # レイヤー型レスポンスの個人レイヤー部分は空で返す（隔離テスト目的では不要）
+    def _fake_get_personal_layer(user_id, course_id):
+        return {"misconceptions_by_topic": {}, "chat_anchors": {}}
+
+    monkeypatch.setattr("routes.learning.get_personal_layer", _fake_get_personal_layer)
+
     # --- 権限チェックの差し替え（実際のDBへの接続を回避する） ---
     monkeypatch.setattr("routes.admin.user_can_edit_course", lambda uid, cid: True)
     monkeypatch.setattr("routes.lecture_studio.user_can_edit_course", lambda uid, cid: True, raising=False)
@@ -471,7 +478,12 @@ class TestLearningCourseIsolation:
         )
         assert resp.status_code == 200, resp.text
 
-        detail = resp.json()
+        # Issue #145: レスポンスは {master_course: {...}, personal_layer: {...}} 形式
+        response_data = resp.json()
+        assert "master_course" in response_data, f"master_course key missing: {response_data}"
+        assert "personal_layer" in response_data
+        detail = response_data["master_course"]
+
         assert detail["id"] == COURSE_A_ID
         assert detail["title"] == "コースA"
 
@@ -487,7 +499,7 @@ class TestLearningCourseIsolation:
         assert source_material_ids == {MATERIAL_A_ID}
         assert MATERIAL_B_ID not in source_material_ids
 
-        # 念のためレスポンス全体を文字列化し、コースBの文字列が一切出現しないこと
+        # 念のためマスターコース部分を文字列化し、コースBの文字列が一切出現しないこと
         blob = str(detail)
         assert COURSE_B_ID not in blob
         assert "コースB" not in blob
@@ -503,7 +515,12 @@ class TestLearningCourseIsolation:
         )
         assert resp.status_code == 200, resp.text
 
-        detail = resp.json()
+        # Issue #145: レスポンスは {master_course: {...}, personal_layer: {...}} 形式
+        response_data = resp.json()
+        assert "master_course" in response_data
+        assert "personal_layer" in response_data
+        detail = response_data["master_course"]
+
         assert detail["id"] == COURSE_B_ID
         assert detail["title"] == "コースB"
 
@@ -564,10 +581,14 @@ class TestLearningCourseIsolation:
         assert first.status_code == 200
         assert second.status_code == 200
 
-        a_topics = {t["id"] for t in first.json().get("topics", [])}
-        b_topics = {t["id"] for t in second.json().get("topics", [])}
-        a_materials = {s["material_id"] for s in first.json().get("sources", [])}
-        b_materials = {s["material_id"] for s in second.json().get("sources", [])}
+        # Issue #145: レスポンスは {master_course: {...}, personal_layer: {...}} 形式
+        first_master = first.json()["master_course"]
+        second_master = second.json()["master_course"]
+
+        a_topics = {t["id"] for t in first_master.get("topics", [])}
+        b_topics = {t["id"] for t in second_master.get("topics", [])}
+        a_materials = {s["material_id"] for s in first_master.get("sources", [])}
+        b_materials = {s["material_id"] for s in second_master.get("sources", [])}
 
         assert a_topics.isdisjoint(b_topics)
         assert a_materials.isdisjoint(b_materials)
