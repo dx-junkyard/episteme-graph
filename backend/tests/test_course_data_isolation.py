@@ -249,6 +249,11 @@ def client_and_users(monkeypatch):
     monkeypatch.setattr("routes.lecture.get_course_data", _fake_get_course_data)
     monkeypatch.setattr("services.get_course_data", _fake_get_course_data)
 
+    # --- 権限チェックの差し替え（実際のDBへの接続を回避する） ---
+    monkeypatch.setattr("routes.admin.user_can_edit_course", lambda uid, cid: True)
+    monkeypatch.setattr("routes.lecture_studio.user_can_edit_course", lambda uid, cid: True, raising=False)
+    monkeypatch.setattr("routes.learning.user_can_view_course", lambda uid, cid: True, raising=False)
+
     # --- _get_course_chunks の差し替え ---------------------------------------------
     def _fake_get_course_chunks(course_data):
         """course_data["sources"][*]["material_id"] を解釈して対応チャンクだけを返す。"""
