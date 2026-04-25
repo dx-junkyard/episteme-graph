@@ -786,20 +786,29 @@ def search_chunks_with_metadata(
         return []
 
 
-def get_chunks_by_ids(chunk_ids: list[str]) -> list[dict]:
-    """指定されたIDのチャンクをchunk_index順に取得する（ベクトル検索なし）。"""
-    if not chunk_ids:
+def get_course_chunks_ordered(course_data: dict) -> list[dict]:
+    """コースのソース教材からチャンクをchunk_index順に全件取得する。
+
+    lecture_studio._get_course_chunks と同じロジックで、学習ナビゲーション専用。
+    N番目のトピックにはこのリストのN番目のチャンクをそのまま表示する。
+    """
+    sources = course_data.get("sources", [])
+    material_ids = [s.get("material_id") for s in sources if s.get("material_id")]
+
+    if not material_ids:
         return []
+
     try:
         session = _pg_session()
         try:
-            placeholders = ", ".join(f":cid_{i}" for i in range(len(chunk_ids)))
-            params: dict = {f"cid_{i}": cid for i, cid in enumerate(chunk_ids)}
+            placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
+            params: dict = {f"mid_{i}": mid for i, mid in enumerate(material_ids)}
             rows = session.execute(
                 sa_text(f"""
-                    SELECT id, text, chunk_index, chapter, section
+                    SELECT id, chunk_index, text, chapter, section
                     FROM chunks
-                    WHERE id::text IN ({placeholders})
+                    WHERE material_id IN ({placeholders})
+                      AND text IS NOT NULL AND text != ''
                     ORDER BY chunk_index ASC
                 """),
                 params,
@@ -807,18 +816,17 @@ def get_chunks_by_ids(chunk_ids: list[str]) -> list[dict]:
             return [
                 {
                     "id": str(row[0]),
-                    "text": row[1],
-                    "chunk_index": row[2],
+                    "chunk_index": row[1],
+                    "text": row[2],
                     "chapter": row[3],
                     "section": row[4],
                 }
                 for row in rows
-                if row[1]
             ]
         finally:
             session.close()
     except Exception as exc:
-        logger.warning("get_chunks_by_ids failed: %s", exc)
+        logger.warning("get_course_chunks_ordered failed: %s", exc)
         return []
 
 

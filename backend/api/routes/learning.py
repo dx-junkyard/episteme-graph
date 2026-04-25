@@ -28,7 +28,7 @@ from services import (
     check_prerequisites,
     detect_and_record_misconception,
     enroll_user_in_course,
-    get_chunks_by_ids,
+    get_course_chunks_ordered,
     get_course_data,
     get_editable_course_data,
     get_personal_layer,
@@ -602,30 +602,37 @@ def get_topic_material(
     topic_id: str,
     current_user: dict = Depends(_get_current_user),
 ) -> TopicMaterialResponse:
-    """トピックに紐づく教材チャンクをインデックス順に返す（ベクトル検索なし）。"""
+    """N番目のトピックにN番目のチャンクを返す（ベクトル検索なし）。
+
+    lecture_studio._get_course_chunks と同じロジックでコース教材を chunk_index 順に全取得し、
+    トピックの配列インデックスと同じ位置のチャンクを返す。データ移行不要。
+    """
     course_data = get_course_data(current_user["id"], course_id)
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
 
-    topic_info = next(
-        (t for t in course_data.get("topics", []) if t.get("id") == topic_id),
+    topics = course_data.get("topics", [])
+    topic_index = next(
+        (i for i, t in enumerate(topics) if t.get("id") == topic_id),
         None,
     )
-    if not topic_info:
+    if topic_index is None:
         raise HTTPException(status_code=404, detail="Topic not found")
 
-    chunk_ids = topic_info.get("target_chunk_ids", [])
-    raw_chunks = get_chunks_by_ids(chunk_ids)
-    chunks = [
-        ChunkContent(
-            id=c["id"],
-            text=c["text"],
-            chunk_index=c["chunk_index"],
-            chapter=c["chapter"],
-            section=c["section"],
-        )
-        for c in raw_chunks
-    ]
+    all_chunks = get_course_chunks_ordered(course_data)
+
+    if topic_index < len(all_chunks):
+        raw = all_chunks[topic_index]
+        chunks = [ChunkContent(
+            id=raw["id"],
+            text=raw["text"],
+            chunk_index=raw["chunk_index"],
+            chapter=raw["chapter"],
+            section=raw["section"],
+        )]
+    else:
+        chunks = []
+
     return TopicMaterialResponse(topic_id=topic_id, chunks=chunks)
 
 
