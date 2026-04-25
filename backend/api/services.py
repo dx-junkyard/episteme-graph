@@ -738,6 +738,95 @@ def search_relevant_chunks_with_scores(
         return [], []
 
 
+def fetch_topic_material_chunks(
+    user_id: str,
+    course_id: str,
+    topic_id: str,
+    top_k: int = 5,
+) -> list[dict]:
+    """トピックに紐づく教材チャンクをベクトル検索で取得する。
+
+    コースに material_id が紐づく sources があればそれを優先し、
+    なければシステム全域のチャンクからトピックタイトル＋概念で検索する。
+    """
+    course_data = get_course_data(user_id, course_id)
+    if not course_data:
+        return []
+
+    topic_info = next(
+        (t for t in course_data.get("topics", []) if t.get("id") == topic_id),
+        None,
+    )
+    if not topic_info:
+        return []
+
+    topic_title = topic_info.get("title", topic_id)
+    concept_names = [
+        c.get("name", "") if isinstance(c, dict) else str(c)
+        for c in course_data.get("concepts", [])
+    ]
+    query = topic_title
+    if concept_names:
+        query += " " + " ".join(concept_names[:5])
+
+    material_ids = [
+        s["material_id"]
+        for s in course_data.get("sources", [])
+        if s.get("material_id")
+    ]
+
+    if material_ids:
+        try:
+            query_vector = embed_text(query)
+        except Exception as exc:
+            logger.warning("Embedding failed for topic material: %s", exc)
+            return []
+
+        session = _pg_session()
+        try:
+            dim = get_embedding_dim()
+            mid_ph = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
+            params: dict = {"query_vector": str(query_vector), "limit": top_k}
+            for i, mid in enumerate(material_ids):
+                params[f"mid_{i}"] = mid
+
+            rows = session.execute(
+                sa_text(f"""
+                    SELECT c.id, c.text,
+                           COALESCE(d.title, '') AS source_title,
+                           COALESCE(d.filename, '') AS source_file,
+                           1 - (c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))) AS score
+                    FROM chunks c
+                    LEFT JOIN documents d ON c.document_id = d.id
+                    WHERE c.material_id IN ({mid_ph})
+                      AND c.embedding IS NOT NULL
+                    ORDER BY c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))
+                    LIMIT :limit
+                """),
+                params,
+            ).fetchall()
+            return [
+                {
+                    "id": str(row[0]),
+                    "text": row[1],
+                    "source_title": row[2] or row[3] or "不明な教材",
+                    "source_file": row[3] or "",
+                    "score": float(row[4]),
+                }
+                for row in rows
+                if row[1]
+            ]
+        except Exception as exc:
+            logger.warning("Topic material chunk search failed: %s", exc)
+            return []
+        finally:
+            session.close()
+
+    # material_id 未登録の場合はシステム全域から検索
+    results = search_chunks_with_metadata(query, top_k=top_k)
+    return [r for r in results if r.get("score", 0.0) >= 0.25]
+
+
 def search_chunks_with_metadata(
     query: str,
     top_k: int = 8,

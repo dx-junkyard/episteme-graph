@@ -198,6 +198,24 @@ class LearningProgress(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Topic Material
+# ---------------------------------------------------------------------------
+
+class TopicMaterialChunk(BaseModel):
+    id: str
+    text: str
+    source_title: str
+    source_file: str = ""
+    score: float = 0.0
+
+
+class TopicMaterialResponse(BaseModel):
+    topic_id: str
+    topic_title: str
+    chunks: list[TopicMaterialChunk]
+
+
+# ---------------------------------------------------------------------------
 # Chat
 # ---------------------------------------------------------------------------
 

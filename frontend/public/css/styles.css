@@ -243,6 +243,57 @@ body {
   align-self: flex-start;
 }
 
+/* Topic Material Section */
+.material-section {
+  background: var(--color-background-secondary, #f8f9fa);
+  border: 1px solid var(--color-border-secondary, #dee2e6);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 8px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.material-header {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6c757d);
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-border-secondary, #dee2e6);
+}
+
+.material-chunk {
+  margin-bottom: 10px;
+}
+
+.material-chunk:last-of-type {
+  margin-bottom: 0;
+}
+
+.material-source {
+  font-size: 11px;
+  color: var(--color-text-tertiary, #9ca3af);
+  margin-bottom: 4px;
+}
+
+.material-text {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--color-text-primary, #1a1a1a);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.material-divider {
+  text-align: center;
+  font-size: 11px;
+  color: var(--color-text-tertiary, #9ca3af);
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--color-border-secondary, #dee2e6);
+}
+
 /* Correction block */
 .corr {
   border-left: 2px solid #e24b4a;

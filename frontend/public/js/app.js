@@ -15,6 +15,7 @@
     personalLayer: null, // personal_layer（個人の誤解・注釈データ）
     currentTopicId: null,
     chatMessages: [], // {role, content}
+    topicMaterial: null, // 教材コンテンツ {topic_id, topic_title, chunks}
     sending: false,
   };
 
@@ -274,6 +275,20 @@
     }
 
     let html = "";
+
+    // 教材コンテンツをチャットの上部に表示
+    if (state.topicMaterial && state.topicMaterial.chunks && state.topicMaterial.chunks.length > 0) {
+      html += '<div class="material-section">';
+      html += '<div class="material-header">📚 ' + escHtml(state.topicMaterial.topic_title) + ' — 教材本文</div>';
+      state.topicMaterial.chunks.forEach(function (chunk) {
+        html += '<div class="material-chunk">';
+        html += '<div class="material-source">[出典: ' + escHtml(chunk.source_title) + ']</div>';
+        html += '<div class="material-text">' + escHtml(chunk.text) + '</div>';
+        html += '</div>';
+      });
+      html += '<div class="material-divider">— AIへの質問はこちらからどうぞ —</div>';
+      html += '</div>';
+    }
 
     // 初期状態（チャット履歴なし）ならサジェストUIを表示
     if (state.chatMessages.length === 0 && !state.sending) {
@@ -562,18 +577,36 @@
     }
   }
 
+  // ── Topic Material ─────────────────────────────────────────────────
+  async function loadTopicMaterial(courseId, topicId) {
+    try {
+      const res = await apiFetch("/learning/courses/" + courseId + "/topics/" + topicId + "/material");
+      if (res.ok) {
+        state.topicMaterial = await res.json();
+      } else {
+        state.topicMaterial = null;
+      }
+    } catch (err) {
+      state.topicMaterial = null;
+    }
+  }
+
   // ── Topic Selection ────────────────────────────────────────────────
   async function selectTopic(topicId) {
     state.currentTopicId = topicId;
     state.chatMessages = [];
+    state.topicMaterial = null;
     renderSidebar();
     renderChat();
     renderRightPanel();
     updateNextTopicBtn();
 
-    // Load chat history
+    // Load chat history and material content in parallel
     if (state.courseId && topicId) {
-      const history = await loadChatHistory(state.courseId, topicId);
+      const [history] = await Promise.all([
+        loadChatHistory(state.courseId, topicId),
+        loadTopicMaterial(state.courseId, topicId),
+      ]);
       state.chatMessages = history;
       renderChat();
     }
@@ -848,7 +881,11 @@
 
     renderSidebar();
     if (state.currentTopicId) {
-      state.chatMessages = await loadChatHistory(state.courseId, state.currentTopicId);
+      const [history] = await Promise.all([
+        loadChatHistory(state.courseId, state.currentTopicId),
+        loadTopicMaterial(state.courseId, state.currentTopicId),
+      ]);
+      state.chatMessages = history;
     }
     renderChat();
     renderRightPanel();

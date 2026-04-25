@@ -20,12 +20,15 @@ from schemas import (
     LearningCourseOut,
     LearningProgress,
     PersonalLayer,
+    TopicMaterialChunk,
+    TopicMaterialResponse,
 )
 from services import (
     calculate_progress,
     check_prerequisites,
     detect_and_record_misconception,
     enroll_user_in_course,
+    fetch_topic_material_chunks,
     get_course_data,
     get_editable_course_data,
     get_personal_layer,
@@ -420,6 +423,54 @@ def enroll_course(
         current_user["id"], course_id,
     )
     return LearningCourseOut(id=course_id, title=title or "")
+
+
+# ---------------------------------------------------------------------------
+# Topic Material
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/courses/{course_id}/topics/{topic_id}/material",
+    response_model=TopicMaterialResponse,
+)
+def get_topic_material(
+    course_id: str,
+    topic_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> TopicMaterialResponse:
+    """トピックに紐づく教材チャンク（本文テキスト＋出典）を返す。
+
+    コース sources に material_id が登録されている場合はそこから優先的に
+    ベクトル検索し、未登録の場合はシステム全域のチャンクを対象とする。
+    """
+    course_data = get_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    topic_info = next(
+        (t for t in course_data.get("topics", []) if t.get("id") == topic_id),
+        None,
+    )
+    if topic_info is None:
+        raise HTTPException(status_code=404, detail="Topic not found")
+
+    raw_chunks = fetch_topic_material_chunks(current_user["id"], course_id, topic_id)
+
+    return TopicMaterialResponse(
+        topic_id=topic_id,
+        topic_title=topic_info.get("title", topic_id),
+        chunks=[
+            TopicMaterialChunk(
+                id=c["id"],
+                text=c["text"],
+                source_title=c["source_title"],
+                source_file=c.get("source_file", ""),
+                score=c.get("score", 0.0),
+            )
+            for c in raw_chunks
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------
