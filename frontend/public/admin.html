@@ -32,6 +32,7 @@
       <button class="admin-tab" data-tab="stumbles">つまづきデータ</button>
       <button class="admin-tab" data-tab="schema-proposals">スキーマ提案</button>
       <button class="admin-tab" data-tab="groups">グループ管理</button>
+      <button class="admin-tab" data-tab="system-stats" id="tab-btn-system-stats" style="display:none">システム統計</button>
     </div>
 
     <!-- Materials tab -->
@@ -307,6 +308,42 @@
           </thead>
           <tbody id="stumbles-tbody">
             <tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">コースを選択してください</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+    <!-- System Stats tab (Issue #144, SYSTEM_ADMIN only) -->
+    <div class="admin-panel" id="tab-system-stats">
+      <div class="admin-section">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <h3 class="admin-section-title" style="margin-bottom:0">全教材・パイプライン統計</h3>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="ss-teacher-filter" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
+              <option value="">全教員</option>
+            </select>
+            <button id="ss-refresh" class="admin-action-btn">更新</button>
+          </div>
+        </div>
+        <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:16px">
+          全教材の原稿・音声生成進捗と学生利用状況を一覧できます。
+        </p>
+        <div id="ss-status" class="upload-status" style="display:none"></div>
+        <table class="admin-table" id="ss-table">
+          <thead>
+            <tr>
+              <th class="ss-sortable" data-sort="title" style="cursor:pointer">タイトル &#9651;</th>
+              <th class="ss-sortable" data-sort="uploaded_by" style="cursor:pointer">アップロード者 &#9651;</th>
+              <th class="ss-sortable" data-sort="created_at" style="cursor:pointer">日時 &#9651;</th>
+              <th>原稿生成</th>
+              <th>音声生成</th>
+              <th class="ss-sortable" data-sort="enrolled_students" style="cursor:pointer">受講者数 &#9651;</th>
+              <th class="ss-sortable" data-sort="chat_count" style="cursor:pointer">チャット数 &#9651;</th>
+            </tr>
+          </thead>
+          <tbody id="ss-tbody">
+            <tr><td colspan="7" style="text-align:center;color:var(--color-text-tertiary)">読み込み中...</td></tr>
           </tbody>
         </table>
       </div>
