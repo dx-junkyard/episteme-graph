@@ -1385,6 +1385,9 @@
       teacherTab.dataset.tab = "teachers";
       teacherTab.textContent = "教員管理";
       tabsEl.appendChild(teacherTab);
+
+      var ssTabBtn = document.getElementById("tab-btn-system-stats");
+      if (ssTabBtn) ssTabBtn.style.display = "";
     }
 
     // Show schema evolution tab for TEACHER/SYSTEM_ADMIN
@@ -3133,6 +3136,135 @@
       });
   }
 
+  // ── System Statistics (Issue #144, SYSTEM_ADMIN only) ──────────────
+  var _ssAllStats = [];
+  var _ssSortKey = "created_at";
+  var _ssSortAsc = false;
+
+  function initSystemStats() {
+    if (state.role !== "SYSTEM_ADMIN") return;
+
+    onTabActivate("system-stats", loadSystemStats);
+
+    document.getElementById("ss-refresh").addEventListener("click", loadSystemStats);
+    document.getElementById("ss-teacher-filter").addEventListener("change", renderSystemStats);
+
+    document.getElementById("ss-table").addEventListener("click", function (e) {
+      var th = e.target.closest(".ss-sortable");
+      if (!th) return;
+      var key = th.dataset.sort;
+      if (_ssSortKey === key) {
+        _ssSortAsc = !_ssSortAsc;
+      } else {
+        _ssSortKey = key;
+        _ssSortAsc = key === "title" || key === "uploaded_by";
+      }
+      renderSystemStats();
+    });
+  }
+
+  function loadSystemStats() {
+    var tbody = document.getElementById("ss-tbody");
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--color-text-tertiary)">読み込み中...</td></tr>';
+
+    apiFetch("/admin/system/materials-stats")
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        _ssAllStats = data;
+        rebuildTeacherFilter(data);
+        renderSystemStats();
+      })
+      .catch(function () {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--color-text-danger)">読み込みに失敗しました</td></tr>';
+      });
+  }
+
+  function rebuildTeacherFilter(stats) {
+    var sel = document.getElementById("ss-teacher-filter");
+    var current = sel.value;
+    var teachers = {};
+    stats.forEach(function (s) { if (s.uploaded_by) teachers[s.uploaded_by] = true; });
+    sel.innerHTML = '<option value="">全教員</option>';
+    Object.keys(teachers).sort().forEach(function (name) {
+      var opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      if (name === current) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+
+  function renderSystemStats() {
+    var filter = document.getElementById("ss-teacher-filter").value;
+    var rows = _ssAllStats.filter(function (s) {
+      return !filter || s.uploaded_by === filter;
+    });
+
+    rows.sort(function (a, b) {
+      var av = a[_ssSortKey];
+      var bv = b[_ssSortKey];
+      if (typeof av === "string") av = av.toLowerCase();
+      if (typeof bv === "string") bv = bv.toLowerCase();
+      if (av < bv) return _ssSortAsc ? -1 : 1;
+      if (av > bv) return _ssSortAsc ? 1 : -1;
+      return 0;
+    });
+
+    // Update sort indicators
+    document.querySelectorAll("#ss-table .ss-sortable").forEach(function (th) {
+      var key = th.dataset.sort;
+      th.innerHTML = th.innerHTML.replace(/[△▽]/g, "").trim();
+      if (key === _ssSortKey) {
+        th.innerHTML += " " + (_ssSortAsc ? "&#9651;" : "&#9661;");
+      } else {
+        th.innerHTML += " &#9651;";
+      }
+    });
+
+    var tbody = document.getElementById("ss-tbody");
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--color-text-tertiary)">教材がありません</td></tr>';
+      return;
+    }
+
+    var html = "";
+    rows.forEach(function (s) {
+      var createdAt = s.created_at ? new Date(s.created_at).toLocaleString("ja-JP") : "";
+      html += "<tr>" +
+        "<td>" + escHtml(s.title || s.filename || "") + "</td>" +
+        "<td>" + escHtml(s.uploaded_by || "") + "</td>" +
+        "<td style='font-size:11px'>" + escHtml(createdAt) + "</td>" +
+        "<td>" + ssProgressBar(s.script_progress) + "</td>" +
+        "<td>" + ssProgressBar(s.audio_progress) + "</td>" +
+        "<td style='text-align:center'>" + s.enrolled_students + "</td>" +
+        "<td style='text-align:center'>" + s.chat_count + "</td>" +
+        "</tr>";
+    });
+    tbody.innerHTML = html;
+  }
+
+  function ssProgressBar(pct) {
+    var p = Math.round(pct || 0);
+    var color;
+    var label;
+    if (p >= 100) {
+      color = "var(--color-text-success)";
+      label = "完了";
+    } else if (p > 0) {
+      color = "var(--color-text-info)";
+      label = "処理中";
+    } else {
+      color = "var(--color-border)";
+      label = "未着手";
+    }
+    return '<div style="display:flex;align-items:center;gap:6px">' +
+      '<div style="flex:1;height:6px;background:var(--color-bg-tertiary);border-radius:3px;min-width:60px">' +
+        '<div style="height:100%;width:' + p + '%;background:' + color + ';border-radius:3px;transition:width .3s"></div>' +
+      '</div>' +
+      '<span style="font-size:11px;white-space:nowrap;color:' + color + '">' + label + ' ' + p + '%</span>' +
+    '</div>';
+  }
+
   function initApp() {
     // Role-based access control
     if (!setupRoleBasedUI()) return;
@@ -3150,6 +3282,7 @@
     initSchemaEvolution();
     initUserManagement();
     initGroups();
+    initSystemStats();
     initLogout();
     loadMaterials();
 

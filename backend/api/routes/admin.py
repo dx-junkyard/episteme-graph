@@ -1396,6 +1396,113 @@ def list_unanswered_queries(
 
 
 # ---------------------------------------------------------------------------
+# System Statistics (Issue #144)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/system/materials-stats")
+def get_materials_stats(
+    current_user: dict = Depends(_require_system_admin),
+) -> list[dict]:
+    """全教材のパイプライン進捗・利用統計を返す（SYSTEM_ADMIN 専用）。"""
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                WITH ChunkStats AS (
+                    SELECT
+                        document_id,
+                        COUNT(*) AS total_chunks,
+                        COUNT(spoken_text) AS script_chunks
+                    FROM chunks
+                    GROUP BY document_id
+                ),
+                AudioStats AS (
+                    SELECT
+                        c.document_id,
+                        COUNT(a.id) AS audio_chunks
+                    FROM chunks c
+                    LEFT JOIN lecture_audio_cache a ON c.id = a.chunk_id
+                    GROUP BY c.document_id
+                ),
+                CourseDocLinks AS (
+                    SELECT
+                        lc.id AS course_id,
+                        (src->>'material_id') AS material_id
+                    FROM learning_courses lc,
+                    LATERAL jsonb_array_elements(
+                        CASE WHEN jsonb_typeof(lc.data->'sources') = 'array'
+                             THEN lc.data->'sources'
+                             ELSE '[]'::jsonb
+                        END
+                    ) AS src
+                    WHERE src->>'material_id' IS NOT NULL
+                ),
+                EnrolledStats AS (
+                    SELECT
+                        cdl.material_id,
+                        COUNT(DISTINCT ls.user_id) AS enrolled_students
+                    FROM CourseDocLinks cdl
+                    JOIN learning_states ls ON ls.course_id = cdl.course_id
+                    GROUP BY cdl.material_id
+                ),
+                ChatStats AS (
+                    SELECT
+                        cdl.material_id,
+                        COALESCE(SUM(jsonb_array_length(lch.history)), 0) AS chat_count
+                    FROM CourseDocLinks cdl
+                    JOIN learning_chat_history lch ON lch.course_id = cdl.course_id
+                    GROUP BY cdl.material_id
+                )
+                SELECT
+                    d.id::text AS material_id,
+                    d.title,
+                    d.filename,
+                    u.display_name AS uploaded_by,
+                    d.created_at,
+                    COALESCE(d.text_length, 0) AS text_length,
+                    COALESCE(cs.total_chunks, 0) AS chunk_count,
+                    CASE
+                        WHEN COALESCE(cs.total_chunks, 0) = 0 THEN 0.0
+                        ELSE ROUND(cs.script_chunks::numeric / cs.total_chunks * 100, 1)
+                    END AS script_progress,
+                    CASE
+                        WHEN COALESCE(cs.total_chunks, 0) = 0 THEN 0.0
+                        ELSE ROUND(COALESCE(aus.audio_chunks, 0)::numeric / cs.total_chunks * 100, 1)
+                    END AS audio_progress,
+                    COALESCE(es.enrolled_students, 0) AS enrolled_students,
+                    COALESCE(chats.chat_count, 0) AS chat_count
+                FROM documents d
+                LEFT JOIN users u ON u.id = d.uploaded_by
+                LEFT JOIN ChunkStats cs ON cs.document_id = d.id
+                LEFT JOIN AudioStats aus ON aus.document_id = d.id
+                LEFT JOIN EnrolledStats es ON es.material_id = d.source_path
+                LEFT JOIN ChatStats chats ON chats.material_id = d.source_path
+                ORDER BY d.created_at DESC
+            """),
+        ).fetchall()
+    finally:
+        session.close()
+
+    return [
+        {
+            "material_id": r[0],
+            "title": r[1] or "",
+            "filename": r[2] or "",
+            "uploaded_by": r[3] or "",
+            "created_at": r[4].isoformat() if r[4] else "",
+            "text_length": int(r[5]) if r[5] else 0,
+            "chunk_count": int(r[6]) if r[6] else 0,
+            "script_progress": float(r[7]) if r[7] is not None else 0.0,
+            "audio_progress": float(r[8]) if r[8] is not None else 0.0,
+            "enrolled_students": int(r[9]) if r[9] else 0,
+            "chat_count": int(r[10]) if r[10] else 0,
+        }
+        for r in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
 # User Management
 # ---------------------------------------------------------------------------
 
