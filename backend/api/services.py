@@ -786,6 +786,42 @@ def search_chunks_with_metadata(
         return []
 
 
+def get_chunks_by_ids(chunk_ids: list[str]) -> list[dict]:
+    """指定されたIDのチャンクをchunk_index順に取得する（ベクトル検索なし）。"""
+    if not chunk_ids:
+        return []
+    try:
+        session = _pg_session()
+        try:
+            placeholders = ", ".join(f":cid_{i}" for i in range(len(chunk_ids)))
+            params: dict = {f"cid_{i}": cid for i, cid in enumerate(chunk_ids)}
+            rows = session.execute(
+                sa_text(f"""
+                    SELECT id, text, chunk_index, chapter, section
+                    FROM chunks
+                    WHERE id::text IN ({placeholders})
+                    ORDER BY chunk_index ASC
+                """),
+                params,
+            ).fetchall()
+            return [
+                {
+                    "id": str(row[0]),
+                    "text": row[1],
+                    "chunk_index": row[2],
+                    "chapter": row[3],
+                    "section": row[4],
+                }
+                for row in rows
+                if row[1]
+            ]
+        finally:
+            session.close()
+    except Exception as exc:
+        logger.warning("get_chunks_by_ids failed: %s", exc)
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Progress calculation
 # ---------------------------------------------------------------------------

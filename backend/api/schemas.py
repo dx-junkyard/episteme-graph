@@ -85,6 +85,20 @@ class LearningTopic(BaseModel):
     status: str = "locked"  # completed | in_progress | locked
     prerequisites: list[LearningPrerequisite] = []
     misconceptions: list[LearningMisconception] = []
+    target_chunk_ids: list[str] = []
+
+
+class ChunkContent(BaseModel):
+    id: str
+    text: str
+    chunk_index: int
+    chapter: str | None = None
+    section: str | None = None
+
+
+class TopicMaterialResponse(BaseModel):
+    topic_id: str
+    chunks: list[ChunkContent]
 
 
 class LearningChapter(BaseModel):
