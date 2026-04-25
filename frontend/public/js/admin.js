@@ -3175,7 +3175,7 @@
 
   function loadSystemStats() {
     var tbody = document.getElementById("ss-tbody");
-    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--color-text-tertiary)">読み込み中...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--color-text-tertiary)">読み込み中...</td></tr>';
 
     apiFetch("/admin/system/materials-stats")
       .then(function (res) { return res.json(); })
@@ -3185,7 +3185,7 @@
         renderSystemStats();
       })
       .catch(function () {
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--color-text-danger)">読み込みに失敗しました</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--color-text-danger)">読み込みに失敗しました</td></tr>';
       });
   }
 
@@ -3233,7 +3233,7 @@
 
     var tbody = document.getElementById("ss-tbody");
     if (!rows.length) {
-      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--color-text-tertiary)">教材がありません</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--color-text-tertiary)">教材がありません</td></tr>';
       return;
     }
 
@@ -3244,6 +3244,7 @@
         "<td>" + escHtml(s.title || "") + "</td>" +
         "<td>" + escHtml(s.uploaded_by || "") + "</td>" +
         "<td style='font-size:11px'>" + escHtml(createdAt) + "</td>" +
+        "<td style='text-align:center'>" + (s.chunk_count || 0) + "</td>" +
         "<td>" + ssGenerationCell(s, "script") + "</td>" +
         "<td>" + ssGenerationCell(s, "audio") + "</td>" +
         "<td style='text-align:center'>" + s.enrolled_students + "</td>" +
@@ -3255,9 +3256,9 @@
 
   function ssGenerationCell(row, kind) {
     var pct = kind === "audio" ? row.audio_progress : row.script_progress;
-    var html = ssProgressBar(pct);
     var courseId = row.course_id || "";
-    var runningKind = _ssRunningTasks[courseId];
+    var runningKind = _ssRunningTasks[courseId] || ssTaskKind(row.active_task_type);
+    var html = ssProgressBar(pct, runningKind === kind);
     var chunkCount = row.chunk_count || 0;
 
     if (runningKind === kind) {
@@ -3269,17 +3270,31 @@
     if (chunkCount <= 0) {
       return html + '<div style="font-size:11px;color:var(--color-text-tertiary);margin-top:4px">チャンクなし</div>';
     }
-    if (kind === "script" && Math.round(row.script_progress || 0) === 0) {
-      return html + ssGenerateButton(row.course_id, "script", "原稿生成");
+    if (kind === "script" && Math.round(row.script_progress || 0) < 100) {
+      return html + ssGenerateButton(
+        row.course_id,
+        "script",
+        Math.round(row.script_progress || 0) === 0 ? "原稿生成" : "原稿再実行"
+      );
     }
     if (
       kind === "audio" &&
-      Math.round(row.audio_progress || 0) === 0 &&
+      Math.round(row.audio_progress || 0) < 100 &&
       Math.round(row.script_progress || 0) >= 100
     ) {
-      return html + ssGenerateButton(row.course_id, "audio", "音声生成");
+      return html + ssGenerateButton(
+        row.course_id,
+        "audio",
+        Math.round(row.audio_progress || 0) === 0 ? "音声生成" : "音声再実行"
+      );
     }
     return html;
+  }
+
+  function ssTaskKind(taskType) {
+    if (taskType === "script_generation") return "script";
+    if (taskType === "audio_generation") return "audio";
+    return "";
   }
 
   function ssGenerateButton(courseId, kind, label) {
@@ -3392,16 +3407,19 @@
     poll();
   }
 
-  function ssProgressBar(pct) {
+  function ssProgressBar(pct, isRunning) {
     var p = Math.round(pct || 0);
     var color;
     var label;
     if (p >= 100) {
       color = "var(--color-text-success)";
       label = "完了";
-    } else if (p > 0) {
+    } else if (isRunning) {
       color = "var(--color-text-info)";
       label = "処理中";
+    } else if (p > 0) {
+      color = "var(--color-text-info)";
+      label = "未完了";
     } else {
       color = "var(--color-border)";
       label = "未着手";

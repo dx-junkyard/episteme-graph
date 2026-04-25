@@ -1449,6 +1449,16 @@ def get_materials_stats(
                         COALESCE(SUM(jsonb_array_length(lch.history)), 0) AS chat_count
                     FROM learning_chat_history lch
                     GROUP BY lch.course_id
+                ),
+                ActiveTasks AS (
+                    SELECT DISTINCT ON (result_data->>'course_id')
+                        result_data->>'course_id' AS course_id,
+                        task_type
+                    FROM background_tasks
+                    WHERE status IN ('pending', 'processing')
+                      AND result_data IS NOT NULL
+                      AND result_data->>'course_id' IS NOT NULL
+                    ORDER BY result_data->>'course_id', created_at DESC
                 )
                 SELECT
                     lc.id::text AS course_id,
@@ -1465,12 +1475,14 @@ def get_materials_stats(
                         ELSE ROUND(COALESCE(cs.audio_chunks, 0)::numeric / cs.total_chunks * 100, 1)
                     END AS audio_progress,
                     COALESCE(es.enrolled_students, 0) AS enrolled_students,
-                    COALESCE(chats.chat_count, 0) AS chat_count
+                    COALESCE(chats.chat_count, 0) AS chat_count,
+                    active.task_type AS active_task_type
                 FROM learning_courses lc
                 LEFT JOIN users u ON u.id = lc.user_id
                 LEFT JOIN ChunkStats cs ON cs.course_id = lc.id::text
                 LEFT JOIN EnrolledStats es ON es.course_id = lc.id
                 LEFT JOIN ChatStats chats ON chats.course_id = lc.id
+                LEFT JOIN ActiveTasks active ON active.course_id = lc.id::text
                 ORDER BY lc.created_at DESC
             """),
         ).fetchall()
@@ -1488,6 +1500,7 @@ def get_materials_stats(
             "audio_progress": float(r[6]) if r[6] is not None else 0.0,
             "enrolled_students": int(r[7]) if r[7] else 0,
             "chat_count": int(r[8]) if r[8] else 0,
+            "active_task_type": r[9] or "",
         }
         for r in rows
     ]
