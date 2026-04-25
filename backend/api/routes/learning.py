@@ -10,6 +10,7 @@ from sqlalchemy import text as sa_text
 
 from dependencies import _get_current_user
 from schemas import (
+    ChunkContent,
     CourseCreateRequest,
     CourseUpdateRequest,
     LearningChatHistoryResponse,
@@ -20,12 +21,14 @@ from schemas import (
     LearningCourseOut,
     LearningProgress,
     PersonalLayer,
+    TopicMaterialResponse,
 )
 from services import (
     calculate_progress,
     check_prerequisites,
     detect_and_record_misconception,
     enroll_user_in_course,
+    get_course_chunks_ordered,
     get_course_data,
     get_editable_course_data,
     get_personal_layer,
@@ -588,6 +591,50 @@ def _get_integrated_tutor_system_prompt(domain: str) -> str:
 **フォーマット要件:**
 - 数式は必ず LaTeX 記法で記述（インラインは $...$、ディスプレイは $$...$$）
 - 教材を参照した場合は [出典: 『書籍名』] を文脈に自然に混ぜて言及すること。"""
+
+
+@router.get(
+    "/courses/{course_id}/topics/{topic_id}/material",
+    response_model=TopicMaterialResponse,
+)
+def get_topic_material(
+    course_id: str,
+    topic_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> TopicMaterialResponse:
+    """N番目のトピックにN番目のチャンクを返す（ベクトル検索なし）。
+
+    lecture_studio._get_course_chunks と同じロジックでコース教材を chunk_index 順に全取得し、
+    トピックの配列インデックスと同じ位置のチャンクを返す。データ移行不要。
+    """
+    course_data = get_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    topics = course_data.get("topics", [])
+    topic_index = next(
+        (i for i, t in enumerate(topics) if t.get("id") == topic_id),
+        None,
+    )
+    if topic_index is None:
+        raise HTTPException(status_code=404, detail="Topic not found")
+
+    all_chunks = get_course_chunks_ordered(course_data)
+
+    if topic_index < len(all_chunks):
+        raw = all_chunks[topic_index]
+        chunks = [ChunkContent(
+            id=raw["id"],
+            text=raw["text"],
+            chunk_index=raw["chunk_index"],
+            formulas=raw.get("formulas", []),
+            chapter=raw["chapter"],
+            section=raw["section"],
+        )]
+    else:
+        chunks = []
+
+    return TopicMaterialResponse(topic_id=topic_id, chunks=chunks)
 
 
 @router.get(

@@ -15,6 +15,7 @@
     personalLayer: null, // personal_layer（個人の誤解・注釈データ）
     currentTopicId: null,
     chatMessages: [], // {role, content}
+    topicMaterial: [], // {id, text, chunk_index, chapter, section}
     sending: false,
   };
 
@@ -274,6 +275,22 @@
     }
 
     let html = "";
+
+    // 教材チャンクをチャット上部に静的表示（RAG検索不使用、数式KaTeXレンダリング）
+    if (state.topicMaterial && state.topicMaterial.length > 0) {
+      html += '<div class="material-block">';
+      html += '<div class="material-block-header">📖 教材</div>';
+      state.topicMaterial.forEach(function (chunk) {
+        html += '<div class="material-chunk">';
+        if (chunk.chapter || chunk.section) {
+          var loc = [chunk.chapter, chunk.section].filter(Boolean).join(" › ");
+          html += '<div class="material-chunk-loc">' + escHtml(loc) + '</div>';
+        }
+        html += '<div class="material-chunk-text">' + renderMaterialChunk(chunk) + '</div>';
+        html += '</div>';
+      });
+      html += '</div>';
+    }
 
     // 初期状態（チャット履歴なし）ならサジェストUIを表示
     if (state.chatMessages.length === 0 && !state.sending) {
@@ -562,18 +579,37 @@
     }
   }
 
+  // ── Topic Material Fetch ──────────────────────────────────────────
+  async function fetchTopicMaterial(courseId, topicId) {
+    try {
+      const res = await apiFetch("/learning/courses/" + courseId + "/topics/" + topicId + "/material");
+      if (res.ok) {
+        const data = await res.json();
+        return data.chunks || [];
+      }
+    } catch (err) {
+      // ネットワークエラー時は空を返す（UIを壊さない）
+    }
+    return [];
+  }
+
   // ── Topic Selection ────────────────────────────────────────────────
   async function selectTopic(topicId) {
     state.currentTopicId = topicId;
     state.chatMessages = [];
+    state.topicMaterial = [];
     renderSidebar();
     renderChat();
     renderRightPanel();
     updateNextTopicBtn();
 
-    // Load chat history
     if (state.courseId && topicId) {
-      const history = await loadChatHistory(state.courseId, topicId);
+      // 教材チャンクとチャット履歴を並行取得
+      const [material, history] = await Promise.all([
+        fetchTopicMaterial(state.courseId, topicId),
+        loadChatHistory(state.courseId, topicId),
+      ]);
+      state.topicMaterial = material;
       state.chatMessages = history;
       renderChat();
     }
@@ -1363,6 +1399,45 @@
           rendered = "<span>" + escHtml(f.latex) + "</span>";
         }
         // split/join を使って本文中の [[FORMULA_x]] を確実にHTMLに置換
+        text = text.split(escHtml(f.id)).join(rendered);
+      });
+    }
+
+    return text;
+  }
+
+  // ── Material chunk renderer（音声原稿スクリプト + KaTeX数式）───────────
+  function renderMaterialChunk(chunk) {
+    var rawText = chunk.text || "";
+
+    // 本文をエスケープ（[[FORMULA_N]] プレースホルダーは壊れない）
+    var text = escHtml(rawText);
+
+    // Markdown 簡易変換
+    text = text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    text = text.split("\n\n").map(function (p) { return "<p>" + p + "</p>"; }).join("");
+    text = text.replace(/\n/g, "<br>");
+
+    // [[FORMULA_N]] を KaTeX でレンダリング（renderSegmentContent と同一ロジック）
+    if (chunk.formulas && chunk.formulas.length > 0) {
+      chunk.formulas.forEach(function (f) {
+        var rendered = "";
+        try {
+          if (window.katex) {
+            rendered = window.katex.renderToString(f.latex.trim(), {
+              displayMode: f.is_display === true,
+              throwOnError: false,
+            });
+            var cls = f.is_display ? "lecture-formula-block visible" : "lecture-formula visible";
+            rendered = '<span class="' + cls + '">' + rendered + '</span>';
+          } else {
+            rendered = f.is_display
+              ? '<span class="lecture-formula-block">$$' + escHtml(f.latex) + '$$</span>'
+              : '<span class="lecture-formula">$' + escHtml(f.latex) + '$</span>';
+          }
+        } catch (e) {
+          rendered = "<span>" + escHtml(f.latex) + "</span>";
+        }
         text = text.split(escHtml(f.id)).join(rendered);
       });
     }
