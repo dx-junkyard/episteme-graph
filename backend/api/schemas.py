@@ -91,6 +91,7 @@ class ChunkContent(BaseModel):
     id: str
     text: str
     chunk_index: int
+    formulas: list[dict] = []
     chapter: str | None = None
     section: str | None = None
 

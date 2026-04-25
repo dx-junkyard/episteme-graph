@@ -276,7 +276,7 @@
 
     let html = "";
 
-    // 教材チャンクをチャット上部に静的表示（RAG検索不使用）
+    // 教材チャンクをチャット上部に静的表示（RAG検索不使用、数式KaTeXレンダリング）
     if (state.topicMaterial && state.topicMaterial.length > 0) {
       html += '<div class="material-block">';
       html += '<div class="material-block-header">📖 教材</div>';
@@ -286,7 +286,7 @@
           var loc = [chunk.chapter, chunk.section].filter(Boolean).join(" › ");
           html += '<div class="material-chunk-loc">' + escHtml(loc) + '</div>';
         }
-        html += '<div class="material-chunk-text">' + escHtml(chunk.text) + '</div>';
+        html += '<div class="material-chunk-text">' + renderMaterialChunk(chunk) + '</div>';
         html += '</div>';
       });
       html += '</div>';
@@ -1399,6 +1399,45 @@
           rendered = "<span>" + escHtml(f.latex) + "</span>";
         }
         // split/join を使って本文中の [[FORMULA_x]] を確実にHTMLに置換
+        text = text.split(escHtml(f.id)).join(rendered);
+      });
+    }
+
+    return text;
+  }
+
+  // ── Material chunk renderer（音声原稿スクリプト + KaTeX数式）───────────
+  function renderMaterialChunk(chunk) {
+    var rawText = chunk.text || "";
+
+    // 本文をエスケープ（[[FORMULA_N]] プレースホルダーは壊れない）
+    var text = escHtml(rawText);
+
+    // Markdown 簡易変換
+    text = text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    text = text.split("\n\n").map(function (p) { return "<p>" + p + "</p>"; }).join("");
+    text = text.replace(/\n/g, "<br>");
+
+    // [[FORMULA_N]] を KaTeX でレンダリング（renderSegmentContent と同一ロジック）
+    if (chunk.formulas && chunk.formulas.length > 0) {
+      chunk.formulas.forEach(function (f) {
+        var rendered = "";
+        try {
+          if (window.katex) {
+            rendered = window.katex.renderToString(f.latex.trim(), {
+              displayMode: f.is_display === true,
+              throwOnError: false,
+            });
+            var cls = f.is_display ? "lecture-formula-block visible" : "lecture-formula visible";
+            rendered = '<span class="' + cls + '">' + rendered + '</span>';
+          } else {
+            rendered = f.is_display
+              ? '<span class="lecture-formula-block">$$' + escHtml(f.latex) + '$$</span>'
+              : '<span class="lecture-formula">$' + escHtml(f.latex) + '$</span>';
+          }
+        } catch (e) {
+          rendered = "<span>" + escHtml(f.latex) + "</span>";
+        }
         text = text.split(escHtml(f.id)).join(rendered);
       });
     }

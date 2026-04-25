@@ -627,6 +627,7 @@ def get_topic_material(
             id=raw["id"],
             text=raw["text"],
             chunk_index=raw["chunk_index"],
+            formulas=raw.get("formulas", []),
             chapter=raw["chapter"],
             section=raw["section"],
         )]

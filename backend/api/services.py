@@ -17,6 +17,7 @@ from neo4j import GraphDatabase
 from sqlalchemy import text as sa_text
 
 from core.config import get_settings as _get_settings
+from core.lecture import normalize_to_placeholder_format as _normalize_formulas
 from core.llm import generate_text, generate_embeddings, get_embedding_dim
 from core.postgres import get_session as _pg_session
 
@@ -791,6 +792,8 @@ def get_course_chunks_ordered(course_data: dict) -> list[dict]:
 
     lecture_studio._get_course_chunks と同じロジックで、学習ナビゲーション専用。
     N番目のトピックにはこのリストのN番目のチャンクをそのまま表示する。
+    テキストは display_text（音声原稿用スクリプト）を優先し、旧フォーマットは
+    normalize_to_placeholder_format で [[FORMULA_N]] 形式に正規化する。
     """
     sources = course_data.get("sources", [])
     material_ids = [s.get("material_id") for s in sources if s.get("material_id")]
@@ -805,7 +808,7 @@ def get_course_chunks_ordered(course_data: dict) -> list[dict]:
             params: dict = {f"mid_{i}": mid for i, mid in enumerate(material_ids)}
             rows = session.execute(
                 sa_text(f"""
-                    SELECT id, chunk_index, text, chapter, section
+                    SELECT id, chunk_index, text, display_text, formulas, chapter, section
                     FROM chunks
                     WHERE material_id IN ({placeholders})
                       AND text IS NOT NULL AND text != ''
@@ -813,16 +816,20 @@ def get_course_chunks_ordered(course_data: dict) -> list[dict]:
                 """),
                 params,
             ).fetchall()
-            return [
-                {
+            result = []
+            for row in rows:
+                raw_text = row[3] or row[2] or ""  # display_text → text
+                raw_formulas = row[4] if row[4] else []
+                text, formulas = _normalize_formulas(raw_text, raw_formulas)
+                result.append({
                     "id": str(row[0]),
                     "chunk_index": row[1],
-                    "text": row[2],
-                    "chapter": row[3],
-                    "section": row[4],
-                }
-                for row in rows
-            ]
+                    "text": text,
+                    "formulas": formulas,
+                    "chapter": row[5],
+                    "section": row[6],
+                })
+            return result
         finally:
             session.close()
     except Exception as exc:
