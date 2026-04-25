@@ -3140,6 +3140,7 @@
   var _ssAllStats = [];
   var _ssSortKey = "created_at";
   var _ssSortAsc = false;
+  var _ssRunningTasks = {};
 
   function initSystemStats() {
     if (state.role !== "SYSTEM_ADMIN") return;
@@ -3150,6 +3151,15 @@
     document.getElementById("ss-teacher-filter").addEventListener("change", renderSystemStats);
 
     document.getElementById("ss-table").addEventListener("click", function (e) {
+      var actionBtn = e.target.closest(".ss-generate-btn");
+      if (actionBtn) {
+        ssStartGeneration(
+          actionBtn.getAttribute("data-course-id"),
+          actionBtn.getAttribute("data-kind")
+        );
+        return;
+      }
+
       var th = e.target.closest(".ss-sortable");
       if (!th) return;
       var key = th.dataset.sort;
@@ -3231,16 +3241,155 @@
     rows.forEach(function (s) {
       var createdAt = s.created_at ? new Date(s.created_at).toLocaleString("ja-JP") : "";
       html += "<tr>" +
-        "<td>" + escHtml(s.title || s.filename || "") + "</td>" +
+        "<td>" + escHtml(s.title || "") + "</td>" +
         "<td>" + escHtml(s.uploaded_by || "") + "</td>" +
         "<td style='font-size:11px'>" + escHtml(createdAt) + "</td>" +
-        "<td>" + ssProgressBar(s.script_progress) + "</td>" +
-        "<td>" + ssProgressBar(s.audio_progress) + "</td>" +
+        "<td>" + ssGenerationCell(s, "script") + "</td>" +
+        "<td>" + ssGenerationCell(s, "audio") + "</td>" +
         "<td style='text-align:center'>" + s.enrolled_students + "</td>" +
         "<td style='text-align:center'>" + s.chat_count + "</td>" +
         "</tr>";
     });
     tbody.innerHTML = html;
+  }
+
+  function ssGenerationCell(row, kind) {
+    var pct = kind === "audio" ? row.audio_progress : row.script_progress;
+    var html = ssProgressBar(pct);
+    var courseId = row.course_id || "";
+    var runningKind = _ssRunningTasks[courseId];
+    var chunkCount = row.chunk_count || 0;
+
+    if (runningKind === kind) {
+      return html + '<div style="font-size:11px;color:var(--color-text-info);margin-top:4px">実行中...</div>';
+    }
+    if (runningKind) {
+      return html;
+    }
+    if (chunkCount <= 0) {
+      return html + '<div style="font-size:11px;color:var(--color-text-tertiary);margin-top:4px">チャンクなし</div>';
+    }
+    if (kind === "script" && Math.round(row.script_progress || 0) === 0) {
+      return html + ssGenerateButton(row.course_id, "script", "原稿生成");
+    }
+    if (
+      kind === "audio" &&
+      Math.round(row.audio_progress || 0) === 0 &&
+      Math.round(row.script_progress || 0) >= 100
+    ) {
+      return html + ssGenerateButton(row.course_id, "audio", "音声生成");
+    }
+    return html;
+  }
+
+  function ssGenerateButton(courseId, kind, label) {
+    return '<button class="admin-action-btn ss-generate-btn" data-kind="' + escHtml(kind) +
+      '" data-course-id="' + escHtml(courseId || "") +
+      '" style="margin-top:6px;padding:3px 8px;font-size:11px">' + label + '</button>';
+  }
+
+  function ssSetStatus(msg, type) {
+    var el = document.getElementById("ss-status");
+    el.textContent = msg;
+    el.className = "upload-status upload-status-" + (type || "info");
+    el.style.display = "block";
+  }
+
+  function ssStartGeneration(courseId, kind) {
+    if (!courseId || _ssRunningTasks[courseId]) return;
+
+    var endpoint;
+    var body;
+    var label;
+    if (kind === "audio") {
+      endpoint = "/admin/courses/" + encodeURIComponent(courseId) + "/lecture-audio/generate";
+      body = "{}";
+      label = "音声生成";
+    } else {
+      endpoint = "/admin/courses/" + encodeURIComponent(courseId) + "/lecture-scripts/generate";
+      body = JSON.stringify({ override: false });
+      label = "原稿生成";
+    }
+
+    _ssRunningTasks[courseId] = kind;
+    renderSystemStats();
+    ssSetStatus(label + "を開始しています...", "info");
+
+    apiFetch(endpoint, {
+      method: "POST",
+      body: body,
+    })
+      .then(function (res) {
+        if (!res.ok) {
+          return res.json().then(function (errBody) {
+            throw new Error((errBody && errBody.detail) || label + "を開始できませんでした");
+          }, function () {
+            throw new Error(label + "を開始できませんでした");
+          });
+        }
+        return res.json();
+      })
+      .then(function (data) {
+        ssSetStatus(label + "を開始しました。進捗を確認しています...", "info");
+        ssPollTask(courseId, data.task_id, label);
+      })
+      .catch(function (err) {
+        delete _ssRunningTasks[courseId];
+        renderSystemStats();
+        ssSetStatus((err && err.message) || label + "を開始できませんでした", "error");
+      });
+  }
+
+  function ssPollTask(courseId, taskId, label) {
+    var retryCount = 0;
+    var maxRetries = 5;
+    var intervalMs = 3000;
+
+    function poll() {
+      apiFetch("/admin/tasks/" + taskId)
+        .then(function (res) {
+          if (!res.ok) throw new Error("Status check failed");
+          return res.json();
+        })
+        .then(function (task) {
+          retryCount = 0;
+          var rd = task.result_data || {};
+          var progress = rd.progress || 0;
+          var generated = rd.generated || 0;
+          var skipped = rd.skipped || 0;
+          var errors = rd.errors || 0;
+
+          if (task.status === "completed") {
+            clearInterval(timer);
+            delete _ssRunningTasks[courseId];
+            ssSetStatus(
+              label + "が完了しました: " + generated + "件生成 / " + skipped + "件スキップ" +
+              (errors > 0 ? " / " + errors + "件エラー" : ""),
+              errors > 0 ? "error" : "success"
+            );
+            loadSystemStats();
+          } else if (task.status === "failed") {
+            clearInterval(timer);
+            delete _ssRunningTasks[courseId];
+            renderSystemStats();
+            ssSetStatus(label + "に失敗しました: " + (task.error_message || "不明なエラー"), "error");
+          } else {
+            ssSetStatus(label + "中... (" + progress + "%)", "info");
+          }
+        })
+        .catch(function () {
+          retryCount++;
+          if (retryCount >= maxRetries) {
+            clearInterval(timer);
+            delete _ssRunningTasks[courseId];
+            renderSystemStats();
+            ssSetStatus("進捗確認に失敗しました。更新ボタンで状況を確認してください。", "error");
+          }
+        });
+    }
+
+    var timer = setInterval(poll, intervalMs);
+    poll();
   }
 
   function ssProgressBar(pct) {

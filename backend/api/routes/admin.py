@@ -1404,30 +1404,14 @@ def list_unanswered_queries(
 def get_materials_stats(
     current_user: dict = Depends(_require_system_admin),
 ) -> list[dict]:
-    """全教材のパイプライン進捗・利用統計を返す（SYSTEM_ADMIN 専用）。"""
+    """全コースのパイプライン進捗・利用統計を返す（SYSTEM_ADMIN 専用）。"""
     session = _pg_session()
     try:
         rows = session.execute(
             sa_text("""
-                WITH ChunkStats AS (
+                WITH CourseSources AS (
                     SELECT
-                        document_id,
-                        COUNT(*) AS total_chunks,
-                        COUNT(spoken_text) AS script_chunks
-                    FROM chunks
-                    GROUP BY document_id
-                ),
-                AudioStats AS (
-                    SELECT
-                        c.document_id,
-                        COUNT(a.id) AS audio_chunks
-                    FROM chunks c
-                    LEFT JOIN lecture_audio_cache a ON c.id = a.chunk_id
-                    GROUP BY c.document_id
-                ),
-                CourseDocLinks AS (
-                    SELECT
-                        lc.id AS course_id,
+                        lc.id::text AS course_id,
                         (src->>'material_id') AS material_id
                     FROM learning_courses lc,
                     LATERAL jsonb_array_elements(
@@ -1438,29 +1422,39 @@ def get_materials_stats(
                     ) AS src
                     WHERE src->>'material_id' IS NOT NULL
                 ),
+                ChunkStats AS (
+                    SELECT
+                        cs.course_id,
+                        COUNT(DISTINCT c.id) AS total_chunks,
+                        COUNT(DISTINCT CASE
+                            WHEN c.spoken_text IS NOT NULL AND c.spoken_text != '' THEN c.id
+                        END) AS script_chunks,
+                        COUNT(DISTINCT a.chunk_id) AS audio_chunks
+                    FROM CourseSources cs
+                    JOIN chunks c ON c.material_id = cs.material_id
+                    LEFT JOIN lecture_audio_cache a ON a.chunk_id = c.id
+                    WHERE c.text IS NOT NULL AND c.text != ''
+                    GROUP BY cs.course_id
+                ),
                 EnrolledStats AS (
                     SELECT
-                        cdl.material_id,
+                        ls.course_id,
                         COUNT(DISTINCT ls.user_id) AS enrolled_students
-                    FROM CourseDocLinks cdl
-                    JOIN learning_states ls ON ls.course_id = cdl.course_id
-                    GROUP BY cdl.material_id
+                    FROM learning_states ls
+                    GROUP BY ls.course_id
                 ),
                 ChatStats AS (
                     SELECT
-                        cdl.material_id,
+                        lch.course_id,
                         COALESCE(SUM(jsonb_array_length(lch.history)), 0) AS chat_count
-                    FROM CourseDocLinks cdl
-                    JOIN learning_chat_history lch ON lch.course_id = cdl.course_id
-                    GROUP BY cdl.material_id
+                    FROM learning_chat_history lch
+                    GROUP BY lch.course_id
                 )
                 SELECT
-                    d.id::text AS material_id,
-                    d.title,
-                    d.filename,
+                    lc.id::text AS course_id,
+                    lc.title,
                     u.display_name AS uploaded_by,
-                    d.created_at,
-                    COALESCE(d.text_length, 0) AS text_length,
+                    lc.created_at,
                     COALESCE(cs.total_chunks, 0) AS chunk_count,
                     CASE
                         WHEN COALESCE(cs.total_chunks, 0) = 0 THEN 0.0
@@ -1468,17 +1462,16 @@ def get_materials_stats(
                     END AS script_progress,
                     CASE
                         WHEN COALESCE(cs.total_chunks, 0) = 0 THEN 0.0
-                        ELSE ROUND(COALESCE(aus.audio_chunks, 0)::numeric / cs.total_chunks * 100, 1)
+                        ELSE ROUND(COALESCE(cs.audio_chunks, 0)::numeric / cs.total_chunks * 100, 1)
                     END AS audio_progress,
                     COALESCE(es.enrolled_students, 0) AS enrolled_students,
                     COALESCE(chats.chat_count, 0) AS chat_count
-                FROM documents d
-                LEFT JOIN users u ON u.id = d.uploaded_by
-                LEFT JOIN ChunkStats cs ON cs.document_id = d.id
-                LEFT JOIN AudioStats aus ON aus.document_id = d.id
-                LEFT JOIN EnrolledStats es ON es.material_id = d.source_path
-                LEFT JOIN ChatStats chats ON chats.material_id = d.source_path
-                ORDER BY d.created_at DESC
+                FROM learning_courses lc
+                LEFT JOIN users u ON u.id = lc.user_id
+                LEFT JOIN ChunkStats cs ON cs.course_id = lc.id::text
+                LEFT JOIN EnrolledStats es ON es.course_id = lc.id
+                LEFT JOIN ChatStats chats ON chats.course_id = lc.id
+                ORDER BY lc.created_at DESC
             """),
         ).fetchall()
     finally:
@@ -1486,17 +1479,15 @@ def get_materials_stats(
 
     return [
         {
-            "material_id": r[0],
+            "course_id": r[0],
             "title": r[1] or "",
-            "filename": r[2] or "",
-            "uploaded_by": r[3] or "",
-            "created_at": r[4].isoformat() if r[4] else "",
-            "text_length": int(r[5]) if r[5] else 0,
-            "chunk_count": int(r[6]) if r[6] else 0,
-            "script_progress": float(r[7]) if r[7] is not None else 0.0,
-            "audio_progress": float(r[8]) if r[8] is not None else 0.0,
-            "enrolled_students": int(r[9]) if r[9] else 0,
-            "chat_count": int(r[10]) if r[10] else 0,
+            "uploaded_by": r[2] or "",
+            "created_at": r[3].isoformat() if r[3] else "",
+            "chunk_count": int(r[4]) if r[4] else 0,
+            "script_progress": float(r[5]) if r[5] is not None else 0.0,
+            "audio_progress": float(r[6]) if r[6] is not None else 0.0,
+            "enrolled_students": int(r[7]) if r[7] else 0,
+            "chat_count": int(r[8]) if r[8] else 0,
         }
         for r in rows
     ]
