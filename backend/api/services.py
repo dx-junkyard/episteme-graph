@@ -787,6 +787,182 @@ def search_chunks_with_metadata(
         return []
 
 
+def _json_obj(value: object) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _find_text_offsets(text: str, needle: str) -> list[dict]:
+    if not text or not needle:
+        return []
+    haystack = text.lower()
+    target = needle.lower()
+    offsets: list[dict] = []
+    start = 0
+    while True:
+        idx = haystack.find(target, start)
+        if idx < 0:
+            break
+        offsets.append({"start": idx, "end": idx + len(needle)})
+        start = idx + len(needle)
+        if len(offsets) >= 5:
+            break
+    return offsets
+
+
+def _derive_graph_mentions(text: str, knowledge_graph: object, formulas: list[dict]) -> list[dict]:
+    """チャンク本文に現れる knowledge_graph 要素からサジェスト候補を作る。"""
+    graph = _json_obj(knowledge_graph)
+    concepts = graph.get("concepts", []) if isinstance(graph.get("concepts", []), list) else []
+    relationships = (
+        graph.get("relationships", [])
+        if isinstance(graph.get("relationships", []), list)
+        else []
+    )
+
+    concept_by_id: dict[str, dict] = {}
+    mentions: list[dict] = []
+
+    for c in concepts:
+        if not isinstance(c, dict):
+            continue
+        cid = str(c.get("id") or c.get("name") or "").strip()
+        name = str(c.get("name") or cid).strip()
+        if not cid or not name:
+            continue
+        concept_by_id[cid] = c
+        offsets = _find_text_offsets(text, name)
+        if not offsets:
+            continue
+        importance = 0.9 if c.get("type") in ("definition", "theorem", "method") else 0.75
+        mentions.append({
+            "element_id": cid,
+            "element_type": "concept",
+            "label": name,
+            "surface_text": name,
+            "importance_score": importance,
+            "offsets": offsets,
+        })
+
+    mentioned_ids = {m["element_id"] for m in mentions if m["element_type"] == "concept"}
+    for rel in relationships:
+        if not isinstance(rel, dict):
+            continue
+        source = str(rel.get("source") or "").strip()
+        target = str(rel.get("target") or "").strip()
+        relation = str(rel.get("relation") or "RELATED_TO").strip()
+        if not source or not target:
+            continue
+        source_name = str(concept_by_id.get(source, {}).get("name") or source)
+        target_name = str(concept_by_id.get(target, {}).get("name") or target)
+        source_seen = source in mentioned_ids or bool(_find_text_offsets(text, source_name))
+        target_seen = target in mentioned_ids or bool(_find_text_offsets(text, target_name))
+        if not (source_seen and target_seen):
+            continue
+        mentions.append({
+            "element_id": f"{source}:{relation}:{target}",
+            "element_type": "relationship",
+            "label": f"{source_name} と {target_name} の関係",
+            "surface_text": f"{source_name} / {target_name}",
+            "importance_score": 0.82,
+            "offsets": [],
+        })
+
+    for f in formulas[:3]:
+        formula_id = str(f.get("id") or "").strip() if isinstance(f, dict) else ""
+        latex = str(f.get("latex") or "").strip() if isinstance(f, dict) else ""
+        if not formula_id and not latex:
+            continue
+        mentions.append({
+            "element_id": formula_id or f"formula:{len(mentions)}",
+            "element_type": "formula",
+            "label": "この数式",
+            "surface_text": formula_id or latex[:60],
+            "importance_score": 0.7,
+            "offsets": _find_text_offsets(text, formula_id) if formula_id else [],
+        })
+
+    mentions.sort(key=lambda m: m.get("importance_score", 0), reverse=True)
+    deduped: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for mention in mentions:
+        key = (mention["element_type"], mention["element_id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(mention)
+        if len(deduped) >= 6:
+            break
+    return deduped
+
+
+def _get_or_create_chunk_graph_mentions(
+    session,
+    chunk_id: str,
+    material_id: str,
+    text: str,
+    knowledge_graph: object,
+    formulas: list[dict],
+) -> list[dict]:
+    rows = session.execute(
+        sa_text("""
+            SELECT element_id, element_type, surface_text, importance_score, offsets
+            FROM chunk_graph_mentions
+            WHERE chunk_id = CAST(:chunk_id AS uuid)
+            ORDER BY importance_score DESC, created_at ASC
+            LIMIT 6
+        """),
+        {"chunk_id": chunk_id},
+    ).fetchall()
+    if rows:
+        return [
+            {
+                "element_id": row[0],
+                "element_type": row[1],
+                "label": row[2] or row[0],
+                "surface_text": row[2] or "",
+                "importance_score": float(row[3]),
+                "offsets": row[4] if isinstance(row[4], list) else [],
+            }
+            for row in rows
+        ]
+
+    mentions = _derive_graph_mentions(text, knowledge_graph, formulas)
+    for mention in mentions:
+        session.execute(
+            sa_text("""
+                INSERT INTO chunk_graph_mentions (
+                    chunk_id, material_id, element_id, element_type,
+                    surface_text, importance_score, offsets
+                )
+                VALUES (
+                    CAST(:chunk_id AS uuid), :material_id, :element_id, :element_type,
+                    :surface_text, :importance_score, CAST(:offsets AS jsonb)
+                )
+                ON CONFLICT (chunk_id, element_id, element_type) DO NOTHING
+            """),
+            {
+                "chunk_id": chunk_id,
+                "material_id": material_id,
+                "element_id": mention["element_id"],
+                "element_type": mention["element_type"],
+                "surface_text": mention.get("label") or mention.get("surface_text") or "",
+                "importance_score": mention.get("importance_score", 0.5),
+                "offsets": json.dumps(mention.get("offsets", []), ensure_ascii=False),
+            },
+        )
+    if mentions:
+        session.commit()
+    return mentions
+
+
 def get_course_chunks_ordered(course_data: dict) -> list[dict]:
     """コースのソース教材からチャンクをchunk_index順に全件取得する。
 
@@ -808,11 +984,13 @@ def get_course_chunks_ordered(course_data: dict) -> list[dict]:
             params: dict = {f"mid_{i}": mid for i, mid in enumerate(material_ids)}
             rows = session.execute(
                 sa_text(f"""
-                    SELECT id, chunk_index, text, display_text, formulas, chapter, section
-                    FROM chunks
-                    WHERE material_id IN ({placeholders})
-                      AND text IS NOT NULL AND text != ''
-                    ORDER BY chunk_index ASC
+                    SELECT c.id, c.chunk_index, c.text, c.display_text, c.formulas,
+                           c.chapter, c.section, c.material_id, d.knowledge_graph
+                    FROM chunks c
+                    LEFT JOIN documents d ON c.document_id = d.id
+                    WHERE c.material_id IN ({placeholders})
+                      AND c.text IS NOT NULL AND c.text != ''
+                    ORDER BY c.chunk_index ASC
                 """),
                 params,
             ).fetchall()
@@ -821,13 +999,19 @@ def get_course_chunks_ordered(course_data: dict) -> list[dict]:
                 raw_text = row[3] or row[2] or ""  # display_text → text
                 raw_formulas = row[4] if row[4] else []
                 text, formulas = _normalize_formulas(raw_text, raw_formulas)
+                chunk_id = str(row[0])
+                material_id = row[7] or ""
                 result.append({
-                    "id": str(row[0]),
+                    "id": chunk_id,
                     "chunk_index": row[1],
                     "text": text,
                     "formulas": formulas,
                     "chapter": row[5],
                     "section": row[6],
+                    "material_id": material_id,
+                    "graph_mentions": _get_or_create_chunk_graph_mentions(
+                        session, chunk_id, material_id, text, row[8], formulas,
+                    ),
                 })
             return result
         finally:
@@ -1148,6 +1332,186 @@ def log_unanswered_query(user_id: str, course_id: str, topic_id: str, question: 
     except Exception as exc:
         session.rollback()
         logger.warning("Failed to log unanswered query: %s", exc)
+    finally:
+        session.close()
+
+
+def get_graph_element_context(
+    course_data: dict,
+    chunk_id: str,
+    element_id: str,
+    element_type: str | None = None,
+    element_label: str | None = None,
+) -> dict:
+    """EXPLAIN_GRAPH_ELEMENT 用にチャンク、グラフ説明、関連教材を集める。"""
+    material_ids = [
+        s.get("material_id")
+        for s in course_data.get("sources", [])
+        if isinstance(s, dict) and s.get("material_id")
+    ]
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT c.id, c.text, c.display_text, c.formulas, c.material_id,
+                       COALESCE(d.title, d.filename, '') AS source_title,
+                       d.knowledge_graph, d.uploaded_by
+                FROM chunks c
+                LEFT JOIN documents d ON c.document_id = d.id
+                WHERE c.id = CAST(:chunk_id AS uuid)
+                LIMIT 1
+            """),
+            {"chunk_id": chunk_id},
+        ).fetchone()
+        if not row:
+            return {}
+
+        raw_text = row[2] or row[1] or ""
+        raw_formulas = row[3] if row[3] else []
+        normalized_text, formulas = _normalize_formulas(raw_text, raw_formulas)
+        graph = _json_obj(row[6])
+        graph_description = ""
+        resolved_label = element_label or element_id
+        target_formula = None
+
+        if element_type == "formula":
+            for formula in formulas:
+                if not isinstance(formula, dict):
+                    continue
+                fid = str(formula.get("id") or "").strip()
+                latex = str(formula.get("latex") or "").strip()
+                if fid == element_id or fid == element_label or element_id in (fid, latex):
+                    target_formula = {
+                        "id": fid,
+                        "latex": latex,
+                        "is_display": formula.get("is_display", True),
+                    }
+                    resolved_label = "この数式"
+                    break
+            if target_formula is None and len(formulas) == 1 and isinstance(formulas[0], dict):
+                formula = formulas[0]
+                target_formula = {
+                    "id": str(formula.get("id") or "").strip(),
+                    "latex": str(formula.get("latex") or "").strip(),
+                    "is_display": formula.get("is_display", True),
+                }
+                resolved_label = "この数式"
+
+        if element_type == "relationship" or (element_type != "formula" and ":" in element_id):
+            for rel in graph.get("relationships", []) or []:
+                if not isinstance(rel, dict):
+                    continue
+                rel_id = f"{rel.get('source')}:{rel.get('relation', 'RELATED_TO')}:{rel.get('target')}"
+                if rel_id == element_id:
+                    graph_description = str(rel.get("description") or "")
+                    resolved_label = resolved_label or rel_id
+                    break
+        else:
+            for concept in graph.get("concepts", []) or []:
+                if not isinstance(concept, dict):
+                    continue
+                cid = str(concept.get("id") or concept.get("name") or "")
+                name = str(concept.get("name") or cid)
+                if cid == element_id or name == element_id or name == element_label:
+                    graph_description = str(concept.get("description") or "")
+                    resolved_label = name
+                    break
+
+        related_chunks: list[dict] = []
+        if material_ids:
+            placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
+            params = {
+                "chunk_id": chunk_id,
+                "label": f"%{resolved_label}%",
+                "limit": 3,
+                **{f"mid_{i}": mid for i, mid in enumerate(material_ids)},
+            }
+            related_rows = session.execute(
+                sa_text(f"""
+                    SELECT c.id, c.text, COALESCE(d.title, d.filename, '') AS source_title
+                    FROM chunks c
+                    LEFT JOIN documents d ON c.document_id = d.id
+                    WHERE c.material_id IN ({placeholders})
+                      AND c.id != CAST(:chunk_id AS uuid)
+                      AND c.text ILIKE :label
+                    ORDER BY c.chunk_index ASC
+                    LIMIT :limit
+                """),
+                params,
+            ).fetchall()
+            related_chunks = [
+                {
+                    "id": str(r[0]),
+                    "text": r[1],
+                    "source_title": r[2] or "教材",
+                }
+                for r in related_rows
+                if r[1]
+            ]
+
+        return {
+            "chunk_id": str(row[0]),
+            "chunk_text": normalized_text,
+            "formulas": formulas,
+            "material_id": row[4] or "",
+            "source_title": row[5] or "教材",
+            "instructor_id": str(row[7]) if row[7] else None,
+            "element_id": element_id,
+            "element_type": element_type or "concept",
+            "element_label": resolved_label,
+            "target_formula": target_formula,
+            "graph_description": graph_description,
+            "related_chunks": related_chunks,
+        }
+    finally:
+        session.close()
+
+
+def record_student_stumble_event(
+    *,
+    instructor_id: str | None,
+    student_id: str,
+    course_id: str,
+    material_id: str | None,
+    chunk_id: str | None,
+    element_id: str | None,
+    element_label: str | None,
+    event_type: str,
+    user_message: str | None = None,
+    generated_explanation: str | None = None,
+) -> None:
+    """教員向け教材改善フィードバックとして、説明要求や不足イベントを記録する。"""
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO student_stumble_events (
+                    instructor_id, student_id, course_id, material_id, chunk_id,
+                    element_id, element_label, event_type, user_message, generated_explanation
+                )
+                VALUES (
+                    CAST(:instructor_id AS uuid), CAST(:student_id AS uuid), :course_id,
+                    :material_id, CAST(:chunk_id AS uuid), :element_id, :element_label,
+                    :event_type, :user_message, :generated_explanation
+                )
+            """),
+            {
+                "instructor_id": instructor_id,
+                "student_id": student_id,
+                "course_id": course_id,
+                "material_id": material_id,
+                "chunk_id": chunk_id,
+                "element_id": element_id,
+                "element_label": element_label,
+                "event_type": event_type,
+                "user_message": user_message,
+                "generated_explanation": generated_explanation,
+            },
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.warning("Failed to record student stumble event: %s", exc)
     finally:
         session.close()
 

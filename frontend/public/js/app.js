@@ -287,6 +287,20 @@
           html += '<div class="material-chunk-loc">' + escHtml(loc) + '</div>';
         }
         html += '<div class="material-chunk-text">' + renderMaterialChunk(chunk) + '</div>';
+        if (chunk.graph_mentions && chunk.graph_mentions.length > 0) {
+          html += '<div class="graph-suggestions">';
+          chunk.graph_mentions.slice(0, 4).forEach(function (m) {
+            var label = m.label || m.surface_text || m.element_id || "この要素";
+            html += '<button class="graph-suggest-btn"'
+              + ' data-chunk-id="' + escHtml(chunk.id || "") + '"'
+              + ' data-element-id="' + escHtml(m.element_id || "") + '"'
+              + ' data-element-type="' + escHtml(m.element_type || "concept") + '"'
+              + ' data-element-label="' + escHtml(label) + '"'
+              + ' title="' + escHtml(label) + '">';
+            html += escHtml(label + "を説明") + '</button>';
+          });
+          html += '</div>';
+        }
         html += '</div>';
       });
       html += '</div>';
@@ -320,12 +334,27 @@
       });
     });
 
+    ca.querySelectorAll(".graph-suggest-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var label = this.getAttribute("data-element-label") || this.textContent.replace(/\s*を説明$/, "");
+        sendMessage(label + "を説明", {
+          action: "EXPLAIN_GRAPH_ELEMENT",
+          chunk_id: this.getAttribute("data-chunk-id") || "",
+          element_id: this.getAttribute("data-element-id") || "",
+          element_type: this.getAttribute("data-element-type") || "concept",
+          element_label: label,
+        });
+      });
+    });
+
     // Render KaTeX for any remaining raw LaTeX (fallback)
     if (window.renderMathInElement) {
       try {
         window.renderMathInElement(ca, {
           delimiters: [
             { left: "$$", right: "$$", display: true },
+            { left: "\\[", right: "\\]", display: true },
+            { left: "\\(", right: "\\)", display: false },
             { left: "$", right: "$", display: false },
           ],
           throwOnError: false,
@@ -345,6 +374,18 @@
       latexBlocks.push({ display: true, expr: expr });
       return "\x00LATEX_BLOCK_" + idx + "\x00";
     });
+    // Preserve display math \[...\]
+    preserved = preserved.replace(/\\\[([\s\S]+?)\\\]/g, function (m, expr) {
+      var idx = latexBlocks.length;
+      latexBlocks.push({ display: true, expr: expr });
+      return "\x00LATEX_BLOCK_" + idx + "\x00";
+    });
+    // Preserve inline math \(...\)
+    preserved = preserved.replace(/\\\(([\s\S]+?)\\\)/g, function (m, expr) {
+      var idx = latexBlocks.length;
+      latexBlocks.push({ display: false, expr: expr });
+      return "\x00LATEX_BLOCK_" + idx + "\x00";
+    });
     // Preserve inline math $...$
     preserved = preserved.replace(/\$([^\$\n]+?)\$/g, function (m, expr) {
       var idx = latexBlocks.length;
@@ -352,10 +393,21 @@
       return "\x00LATEX_BLOCK_" + idx + "\x00";
     });
 
-    // Extract drill-down suggestions [〇〇について詳しく聞く] before escaping
+    // Extract explicit action buttons before escaping.
+    // Preferred LLM format: [ACTION_BUTTON: 〇〇について聞く]
     var suggestions = [];
-    preserved = preserved.replace(/\[([^\]]*について詳しく聞く[^\]]*)\]/g, function (_, s) {
-      suggestions.push(s);
+    preserved = preserved.replace(/\[ACTION_BUTTON:\s*([^\]\n]{1,120})\]/g, function (_, s) {
+      var trimmed = s.trim();
+      suggestions.push(trimmed);
+      return "\x00SUGGEST_" + (suggestions.length - 1) + "\x00";
+    });
+
+    // Backward compatibility for older responses already stored in chat history.
+    preserved = preserved.replace(/\[([^\]\n]{4,80})\]/g, function (match, s) {
+      var trimmed = s.trim();
+      var isLegacySuggestion = /について詳しく聞く/.test(trimmed);
+      if (!isLegacySuggestion) return match;
+      suggestions.push(trimmed);
       return "\x00SUGGEST_" + (suggestions.length - 1) + "\x00";
     });
 
@@ -616,7 +668,7 @@
   }
 
   // ── Send Message ───────────────────────────────────────────────────
-  async function sendMessage(text) {
+  async function sendMessage(text, actionPayload) {
     if (!text || state.sending || !state.currentTopicId) return;
 
     state.chatMessages.push({ role: "user", content: text });
@@ -633,6 +685,7 @@
         body: JSON.stringify({
           message: text,
           history: state.chatMessages.slice(0, -1),
+          ...(actionPayload || {}),
         }),
       });
       if (res.ok) {
