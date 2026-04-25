@@ -19,7 +19,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text as sa_text
 
-from dependencies import _require_teacher
+from dependencies import ROLE_SYSTEM_ADMIN, _require_teacher
 from schemas import (
     LectureAudioGenerateResponse,
     LectureAudioGenerateStartResponse,
@@ -122,6 +122,21 @@ def _chunk_status(chunk: dict) -> str:
     finally:
         session.close()
     return "generated"
+
+
+def _get_system_admin_course_data(course_id: str) -> dict | None:
+    """SYSTEM_ADMIN のシステム統計画面用に course_id だけでコースデータを取得する。"""
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT data FROM learning_courses WHERE id = :course_id LIMIT 1"),
+            {"course_id": course_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not row or not row[0]:
+        return None
+    return row[0] if isinstance(row[0], dict) else json.loads(row[0])
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +279,8 @@ def batch_generate_scripts(
     result_data.progress (0-100) で進捗率を取得できる。
     """
     course_data = get_editable_course_data(current_user["id"], course_id)
+    if not course_data and current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        course_data = _get_system_admin_course_data(course_id)
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
 
@@ -685,6 +702,8 @@ def batch_generate_audio(
     result_data.progress (0-100) で進捗率を取得できる。
     """
     course_data = get_editable_course_data(current_user["id"], course_id)
+    if not course_data and current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        course_data = _get_system_admin_course_data(course_id)
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
 
