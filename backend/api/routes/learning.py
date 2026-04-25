@@ -31,10 +31,12 @@ from services import (
     get_course_chunks_ordered,
     get_course_data,
     get_editable_course_data,
+    get_graph_element_context,
     get_personal_layer,
     get_user_group_ids,
     log_unanswered_query,
     persist_chat_history,
+    record_student_stumble_event,
     save_course_data,
     delete_course_data,
     search_chunks_with_metadata,
@@ -587,10 +589,141 @@ def _get_integrated_tutor_system_prompt(domain: str) -> str:
 3. 【誤解の訂正】学生に誤解がある場合は、「訂正：」という冷たい表現は避け、「この点については、〇〇と考えるとより正確です」のように教育的配慮を持って導いてください。
 4. 【解説の深さ】前提知識の確認で長々と引き留めず、まずは直球で疑問に答えてください。必要に応じて数式（LaTeX）や具体例を交えてください。
 5. 【ドリルダウン】回答の末尾に、関連して深掘りできそうなトピックを `[〇〇について詳しく聞く]` の形式で1〜2つ提示してください。
+   ただし、クリック可能なボタンとして提示したい場合は必ず `[ACTION_BUTTON: 〇〇について聞く]` の形式を使ってください。
 
 **フォーマット要件:**
 - 数式は必ず LaTeX 記法で記述（インラインは $...$、ディスプレイは $$...$$）
 - 教材を参照した場合は [出典: 『書籍名』] を文脈に自然に混ぜて言及すること。"""
+
+
+def _generate_graph_element_explanation(
+    *,
+    user_id: str,
+    course_id: str,
+    topic_id: str,
+    course_title: str,
+    topic_title: str,
+    course_data: dict,
+    body: LearningChatRequest,
+) -> LearningChatResponse:
+    """グラフ要素サジェストのクリックを、通常チャットとは独立して処理する。"""
+    if not body.chunk_id or not body.element_id:
+        raise HTTPException(status_code=400, detail="EXPLAIN_GRAPH_ELEMENT requires chunk_id and element_id")
+
+    context = get_graph_element_context(
+        course_data,
+        body.chunk_id,
+        body.element_id,
+        body.element_type,
+        body.element_label,
+    )
+    if not context:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+
+    element_label = context.get("element_label") or body.element_label or body.element_id
+    instructor_id = context.get("instructor_id")
+    material_id = context.get("material_id")
+    source_title = context.get("source_title") or "教材"
+    user_message = body.message or f"{element_label}を説明"
+
+    record_student_stumble_event(
+        instructor_id=instructor_id,
+        student_id=user_id,
+        course_id=course_id,
+        material_id=material_id,
+        chunk_id=body.chunk_id,
+        element_id=body.element_id,
+        element_label=element_label,
+        event_type="clicked_explain",
+        user_message=user_message,
+    )
+
+    graph_description = (context.get("graph_description") or "").strip()
+    related_chunks = context.get("related_chunks") or []
+    target_formula = context.get("target_formula") or {}
+    target_formula_latex = str(target_formula.get("latex") or "").strip() if isinstance(target_formula, dict) else ""
+
+    if graph_description:
+        answer = (
+            f"**{element_label}** について説明します。\n\n"
+            f"{graph_description}\n\n"
+            f"現在のチャンクでは、この要素が周辺の議論を理解するための足場になります。"
+            f"[出典: 『{source_title}』]"
+        )
+    else:
+        if not related_chunks:
+            record_student_stumble_event(
+                instructor_id=instructor_id,
+                student_id=user_id,
+                course_id=course_id,
+                material_id=material_id,
+                chunk_id=body.chunk_id,
+                element_id=body.element_id,
+                element_label=element_label,
+                event_type="explanation_missing",
+                user_message=user_message,
+            )
+
+        related_block = "\n\n".join(
+            f"[出典: 『{r.get('source_title') or source_title}』]\n{r.get('text', '')[:1200]}"
+            for r in related_chunks[:3]
+        )
+        personal = get_personal_layer(user_id, course_id)
+        recent_history = "\n".join(
+            f"{h.get('role')}: {str(h.get('content', ''))[:240]}"
+            for h in (body.history or [])[-6:]
+        )
+        params = get_llm_params("standard")
+        prompt = (
+            f"あなたは「{course_title}」の学習を支援するチューターです。\n"
+            f"現在のトピック: {topic_title}\n"
+            f"説明対象: {element_label} ({context.get('element_type')})\n\n"
+            + (
+                f"対象数式（この式を必ずそのまま使って説明すること）:\n"
+                f"$${target_formula_latex}$$\n\n"
+                if target_formula_latex else ""
+            )
+            + f"現在表示中のチャンク:\n{context.get('chunk_text', '')[:2400]}\n\n"
+            f"関連教材:\n{related_block or '明示的な説明は見つかりませんでした。'}\n\n"
+            f"学習者の個人レイヤー:\n{personal}\n\n"
+            f"直近の会話:\n{recent_history}\n\n"
+            "上記を踏まえ、学生に合わせて説明してください。"
+            "既存教材に明示的な説明がない場合は、現在のチャンクの文脈から補って説明してください。"
+            "数式が関係する場合は、インライン数式は必ず $...$、別行数式は必ず $$...$$ で囲んでください。"
+            "裸の \\mathcal や \\frac など、区切り文字のないLaTeXコマンドは出力しないでください。"
+            "[[FORMULA_0]] のようなプレースホルダー名は説明文に出さないでください。"
+            "最後に短い確認文を1つ添えてください。"
+        )
+        answer = generate_text(
+            messages=[{"role": "user", "content": prompt}],
+            model=params["model"],
+            reasoning_effort=params["reasoning_effort"],
+            temperature=0.3,
+        )
+        if target_formula_latex:
+            formula_id = str(target_formula.get("id") or "").strip() if isinstance(target_formula, dict) else ""
+            if formula_id:
+                answer = answer.replace(formula_id, f"${target_formula_latex}$")
+            if target_formula_latex not in answer:
+                answer = f"対象の数式は次の式です。\n\n$${target_formula_latex}$$\n\n" + answer
+        record_student_stumble_event(
+            instructor_id=instructor_id,
+            student_id=user_id,
+            course_id=course_id,
+            material_id=material_id,
+            chunk_id=body.chunk_id,
+            element_id=body.element_id,
+            element_label=element_label,
+            event_type="generated_for_student",
+            user_message=user_message,
+            generated_explanation=answer[:4000],
+        )
+
+    persist_chat_history(
+        user_id, course_id, topic_id,
+        body.history, user_message, answer,
+    )
+    return LearningChatResponse(answer=answer, course_update=None)
 
 
 @router.get(
@@ -630,6 +763,8 @@ def get_topic_material(
             formulas=raw.get("formulas", []),
             chapter=raw["chapter"],
             section=raw["section"],
+            material_id=raw.get("material_id"),
+            graph_mentions=raw.get("graph_mentions", []),
         )]
     else:
         chunks = []
@@ -692,6 +827,18 @@ def learning_chat(
     course_title = course_data.get("title", course_id)
     # domain が未設定の場合は course_title にフォールバック
     domain = course_data.get("domain") or course_title
+
+    # UIサジェスト由来の明示アクションは自然文の意図分類より優先する。
+    if body.action == "EXPLAIN_GRAPH_ELEMENT":
+        return _generate_graph_element_explanation(
+            user_id=current_user["id"],
+            course_id=course_id,
+            topic_id=topic_id,
+            course_title=course_title,
+            topic_title=topic_title,
+            course_data=course_data,
+            body=body,
+        )
 
     # 2. 意図分類（Intent Routing）
     intent = _classify_intent(body.message, course_title)

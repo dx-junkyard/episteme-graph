@@ -87,6 +87,14 @@ class LearningTopic(BaseModel):
     misconceptions: list[LearningMisconception] = []
 
 
+class GraphMention(BaseModel):
+    element_id: str
+    label: str
+    element_type: str = "concept"  # concept | relationship | formula | keyword
+    surface_text: str = ""
+    importance_score: float = 0.5
+
+
 class ChunkContent(BaseModel):
     id: str
     text: str
@@ -94,6 +102,8 @@ class ChunkContent(BaseModel):
     formulas: list[dict] = []
     chapter: str | None = None
     section: str | None = None
+    material_id: str | None = None
+    graph_mentions: list[GraphMention] = []
 
 
 class TopicMaterialResponse(BaseModel):
@@ -218,6 +228,11 @@ class LearningProgress(BaseModel):
 class LearningChatRequest(BaseModel):
     message: str
     history: list[dict] = []
+    action: str | None = None
+    chunk_id: str | None = None
+    element_id: str | None = None
+    element_type: str | None = None
+    element_label: str | None = None
 
 
 class LearningChatResponse(BaseModel):

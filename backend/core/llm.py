@@ -46,6 +46,11 @@ def get_embedding_dim() -> int:
 
 LLMMode = Literal["fast", "standard", "deep"]
 
+_OPENAI_MODE_DEFAULTS = {
+    "gpt-5.4-nano",
+    "gpt-5.2",
+}
+
 
 def get_llm_params(mode: LLMMode) -> dict[str, Any]:
     """指定モードに応じた LLM パラメータ (model, reasoning_effort) を返す。
@@ -74,7 +79,16 @@ def get_llm_params(mode: LLMMode) -> dict[str, Any]:
             "reasoning_effort": settings.llm_deep_effort,
         },
     }
-    return mode_map.get(mode, mode_map["fast"])
+    params = mode_map.get(mode, mode_map["fast"]).copy()
+
+    # LLM_PROVIDER=google/gemini の環境で LLM_STANDARD_MODEL などが未注入だと、
+    # OpenAI 向けデフォルトが Vertex/Gemini に渡り 404 になる。
+    # その場合はプロバイダー共通の LLM_ANALYSIS_MODEL をフォールバックとして使う。
+    if settings.llm_provider != "openai" and params["model"] in _OPENAI_MODE_DEFAULTS:
+        params["model"] = settings.llm_analysis_model
+        params["reasoning_effort"] = None
+
+    return params
 
 
 # ---------------------------------------------------------------------------

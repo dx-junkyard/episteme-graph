@@ -8,7 +8,13 @@ from __future__ import annotations
 
 import pytest
 
-from core.llm import _adapt_messages_for_model, _build_api_kwargs, _is_reasoning_model
+from core.config import Settings
+from core.llm import (
+    _adapt_messages_for_model,
+    _build_api_kwargs,
+    _is_reasoning_model,
+    get_llm_params,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -112,3 +118,35 @@ class TestBuildApiKwargs:
         kwargs = _build_api_kwargs("o3-mini", temperature=0.5, extra_kwargs={"stream": True})
         assert "temperature" not in kwargs
         assert kwargs["stream"] is True
+
+
+# ---------------------------------------------------------------------------
+# get_llm_params
+# ---------------------------------------------------------------------------
+
+
+class TestGetLlmParams:
+    def test_non_openai_provider_falls_back_to_analysis_model_for_openai_defaults(self, monkeypatch):
+        settings = Settings(
+            llm_provider="google",
+            llm_analysis_model="gemini-2.5-pro",
+            llm_standard_model="gpt-5.2",
+        )
+        monkeypatch.setattr("core.llm.get_settings", lambda: settings)
+
+        params = get_llm_params("standard")
+
+        assert params["model"] == "gemini-2.5-pro"
+        assert params["reasoning_effort"] is None
+
+    def test_explicit_non_openai_mode_model_is_preserved(self, monkeypatch):
+        settings = Settings(
+            llm_provider="google",
+            llm_analysis_model="gemini-2.5-flash",
+            llm_standard_model="gemini-2.5-pro",
+        )
+        monkeypatch.setattr("core.llm.get_settings", lambda: settings)
+
+        params = get_llm_params("standard")
+
+        assert params["model"] == "gemini-2.5-pro"

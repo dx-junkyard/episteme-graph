@@ -356,6 +356,64 @@ def _run_migrations() -> None:
         session.execute(sa_text(
             "CREATE INDEX IF NOT EXISTS idx_learning_states_course ON learning_states(course_id)"
         ))
+        # Migration 012: チャンク別グラフサジェストと教員向けつまづき記録 (Issue #160)
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS chunk_graph_mentions (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                chunk_id UUID NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+                material_id TEXT,
+                element_id TEXT NOT NULL,
+                element_type TEXT NOT NULL
+                    CHECK (element_type IN ('concept', 'relationship', 'formula', 'keyword')),
+                surface_text TEXT NOT NULL DEFAULT '',
+                importance_score REAL NOT NULL DEFAULT 0.5,
+                offsets JSONB NOT NULL DEFAULT '[]'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (chunk_id, element_id, element_type)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_chunk_graph_mentions_chunk "
+            "ON chunk_graph_mentions(chunk_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_chunk_graph_mentions_material "
+            "ON chunk_graph_mentions(material_id)"
+        ))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS student_stumble_events (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                instructor_id UUID REFERENCES users(id) ON DELETE SET NULL,
+                student_id UUID REFERENCES users(id) ON DELETE CASCADE,
+                course_id TEXT REFERENCES learning_courses(id) ON DELETE CASCADE,
+                material_id TEXT,
+                chunk_id UUID REFERENCES chunks(id) ON DELETE SET NULL,
+                element_id TEXT,
+                element_label TEXT,
+                event_type TEXT NOT NULL
+                    CHECK (event_type IN (
+                        'clicked_explain',
+                        'explanation_missing',
+                        'generated_for_student',
+                        'misconception'
+                    )),
+                user_message TEXT,
+                generated_explanation TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_student_stumble_events_instructor "
+            "ON student_stumble_events(instructor_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_student_stumble_events_course "
+            "ON student_stumble_events(course_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_student_stumble_events_element "
+            "ON student_stumble_events(element_id, event_type)"
+        ))
         # 既存の cloned_from カラムがあれば、クローンコースとその履歴をハードリセット後にカラム廃止
         session.execute(sa_text("""
             DO $$
@@ -375,7 +433,7 @@ def _run_migrations() -> None:
         """))
 
         session.commit()
-        logger.info("Migrations (002-011) applied successfully.")
+        logger.info("Migrations (002-012) applied successfully.")
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema
