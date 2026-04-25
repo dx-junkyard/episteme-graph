@@ -124,15 +124,8 @@ def _chunk_status(chunk: dict) -> str:
     return "generated"
 
 
-def _get_generation_course_data(current_user: dict, course_id: str) -> dict | None:
-    """生成処理用にコースデータを取得する。
-
-    通常の教員は編集権限内に限定し、SYSTEM_ADMIN はシステム統計画面から
-    任意コースの未生成パイプラインを実行できるようにする。
-    """
-    if current_user.get("role") != ROLE_SYSTEM_ADMIN:
-        return get_editable_course_data(current_user["id"], course_id)
-
+def _get_system_admin_course_data(course_id: str) -> dict | None:
+    """SYSTEM_ADMIN のシステム統計画面用に course_id だけでコースデータを取得する。"""
     session = _pg_session()
     try:
         row = session.execute(
@@ -285,7 +278,9 @@ def batch_generate_scripts(
     進捗は GET /api/admin/tasks/{task_id} でポーリングして確認する。
     result_data.progress (0-100) で進捗率を取得できる。
     """
-    course_data = _get_generation_course_data(current_user, course_id)
+    course_data = get_editable_course_data(current_user["id"], course_id)
+    if not course_data and current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        course_data = _get_system_admin_course_data(course_id)
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
 
@@ -706,7 +701,9 @@ def batch_generate_audio(
     進捗は GET /api/admin/tasks/{task_id} でポーリングして確認する。
     result_data.progress (0-100) で進捗率を取得できる。
     """
-    course_data = _get_generation_course_data(current_user, course_id)
+    course_data = get_editable_course_data(current_user["id"], course_id)
+    if not course_data and current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        course_data = _get_system_admin_course_data(course_id)
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
 
