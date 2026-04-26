@@ -33,6 +33,13 @@ def _override_settings(monkeypatch):
         monkeypatch.setattr("api.dependencies._get_settings", _getter)
     except BaseException:
         pass  # api.dependencies が利用不可の環境（CI等）ではスキップ
+    # test_error_logs.py がモジュールレベルで routes.error_logs をインポートするため、
+    # 収集時に dependencies が top-level モジュールとして読み込まれる場合がある。
+    # その場合、api.dependencies とは別オブジェクトになるため個別にパッチする。
+    try:
+        monkeypatch.setattr("dependencies._get_settings", _getter)
+    except BaseException:
+        pass  # dependencies が未インポートの場合はスキップ
 
     yield
 

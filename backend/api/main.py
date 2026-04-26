@@ -53,12 +53,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text as sa_text
 
 from dependencies import _hash_password
-from routes import auth, learning, admin, lecture, groups
+from routes import auth, learning, admin, lecture, groups, error_logs
 from core.config import get_settings as _get_settings
 from core.postgres import get_session as _pg_session, check_connection as _pg_check
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+error_logs.install_error_log_capture()
 
 
 # ---------------------------------------------------------------------------
@@ -510,11 +511,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+error_logs.register_error_log_middleware(app)
 
 # ルーターのマウント
 app.include_router(auth.router)
 app.include_router(learning.router)
 app.include_router(admin.router)
+app.include_router(error_logs.router)
 app.include_router(lecture.router)
 app.include_router(groups.router)
 

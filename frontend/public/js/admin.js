@@ -18,6 +18,9 @@
     importedFromCourseId: null,
     availableMaterials: [],
     selectedMaterialIds: [],
+    errorLogs: [],
+    selectedErrorLogIds: new Set(),
+    lastSelectedErrorLogIndex: null,
   };
 
   var API = "/api";
@@ -146,8 +149,22 @@
 
   // ── Utilities ──────────────────────────────────────────────────────
   function escHtml(s) {
-    if (!s) return "";
+    if (s === null || s === undefined || s === "") return "";
+    s = String(s);
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  function formatDateTime(value) {
+    if (!value) return "";
+    try {
+      var d = new Date(value);
+      return d.getFullYear() + "/" + (d.getMonth() + 1) + "/" + d.getDate() + " " +
+        String(d.getHours()).padStart(2, "0") + ":" +
+        String(d.getMinutes()).padStart(2, "0") + ":" +
+        String(d.getSeconds()).padStart(2, "0");
+    } catch (e) {
+      return value;
+    }
   }
 
   // ── Tab Switching ──────────────────────────────────────────────────
@@ -163,6 +180,7 @@
     document.getElementById("adminTabs").addEventListener("click", function (e) {
       var btn = e.target.closest(".admin-tab");
       if (!btn || !btn.dataset.tab) return;
+      if (btn.style.display === "none") return;
       this.querySelectorAll(".admin-tab").forEach(function (b) { b.classList.remove("on"); });
       btn.classList.add("on");
       document.querySelectorAll(".admin-panel").forEach(function (p) { p.classList.remove("vis"); });
@@ -175,6 +193,15 @@
         cbs.forEach(function (fn) { fn(); });
       }
     });
+  }
+
+  function activateTabView(tabName) {
+    document.querySelectorAll(".admin-tab").forEach(function (b) {
+      b.classList.toggle("on", b.dataset.tab === tabName);
+    });
+    document.querySelectorAll(".admin-panel").forEach(function (p) { p.classList.remove("vis"); });
+    var target = document.getElementById("tab-" + tabName);
+    if (target) target.classList.add("vis");
   }
 
   // ── Materials Management ──────────────────────────────────────────
@@ -1279,6 +1306,306 @@
     refreshBtn.addEventListener("click", loadStumbles);
   }
 
+  // ── Error Log Analysis ─────────────────────────────────────────────
+  function initErrorAnalysis() {
+    if (state.role !== "SYSTEM_ADMIN") return;
+    var keywordEl = document.getElementById("error-log-keyword");
+    var minutesEl = document.getElementById("error-log-minutes");
+    var includeInfoEl = document.getElementById("error-log-include-info");
+    var refreshBtn = document.getElementById("error-log-refresh");
+    if (!keywordEl || !minutesEl || !includeInfoEl || !refreshBtn) return;
+
+    function load() {
+      loadErrorLogs();
+    }
+
+    refreshBtn.addEventListener("click", load);
+    minutesEl.addEventListener("change", load);
+    includeInfoEl.addEventListener("change", load);
+    keywordEl.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") load();
+    });
+    document.getElementById("error-log-list").addEventListener("click", function (e) {
+      var checkbox = e.target.closest(".error-log-select-row");
+      if (!checkbox) return;
+      toggleErrorLogSelection(Number(checkbox.dataset.logId), checkbox.checked, e.shiftKey);
+    });
+    document.getElementById("error-log-select-all").addEventListener("click", selectAllErrorLogs);
+    document.getElementById("error-log-clear-selection").addEventListener("click", clearErrorLogSelection);
+    document.getElementById("error-log-copy-selected").addEventListener("click", copySelectedErrorLogs);
+    document.getElementById("error-log-copy-visible").addEventListener("click", copyVisibleErrorLogs);
+    onTabActivate("error-analysis", load);
+    load();
+  }
+
+  function setErrorLogStatus(message, kind) {
+    var el = document.getElementById("error-log-status");
+    if (!el) return;
+    if (!message) {
+      el.style.display = "none";
+      el.textContent = "";
+      return;
+    }
+    el.textContent = message;
+    el.className = "upload-status upload-status-" + (kind || "info");
+    el.style.display = "block";
+  }
+
+  function loadErrorLogs() {
+    var listEl = document.getElementById("error-log-list");
+    var keywordEl = document.getElementById("error-log-keyword");
+    var minutesEl = document.getElementById("error-log-minutes");
+    var includeInfoEl = document.getElementById("error-log-include-info");
+    if (!listEl || !keywordEl || !minutesEl || !includeInfoEl) return;
+
+    setErrorLogStatus("", "");
+    listEl.innerHTML = '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">読み込み中...</div>';
+    var qs = "?keyword=" + encodeURIComponent(keywordEl.value.trim()) +
+      "&minutes=" + encodeURIComponent(minutesEl.value || "1440") +
+      "&limit=1000" +
+      "&include_info=" + encodeURIComponent(includeInfoEl.checked ? "true" : "false");
+    apiFetch("/admin/error-logs" + qs)
+      .then(function (res) {
+        if (!res.ok) return res.json().catch(function () { return {}; }).then(function (d) { throw d; });
+        return res.json();
+      })
+      .then(function (data) {
+        renderErrorLogs(data.items || []);
+      })
+      .catch(function (err) {
+        listEl.innerHTML = '<div style="padding:16px;color:var(--color-text-danger);font-size:13px">読み込みに失敗しました</div>';
+        setErrorLogStatus((err && err.detail) || "エラーログの取得に失敗しました", "error");
+      });
+  }
+
+  function renderErrorLogs(rows) {
+    var listEl = document.getElementById("error-log-list");
+    if (!listEl) return;
+    state.errorLogs = rows || [];
+    state.selectedErrorLogIds.clear();
+    state.lastSelectedErrorLogIndex = null;
+    updateErrorLogSelectionUi();
+    if (!rows || rows.length === 0) {
+      listEl.innerHTML = '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">条件に一致するエラーはありません</div>';
+      return;
+    }
+
+    var html = "";
+    rows.forEach(function (row, idx) {
+      var logId = String(idx);
+      var meta = [
+        ["session_id", "セッション"],
+        ["user_id", "ユーザー"],
+        ["material_id", "教材"],
+        ["course_id", "コース"],
+      ];
+      var chips = "";
+      meta.forEach(function (m) {
+        if (row[m[0]]) {
+          chips += '<span class="error-log-chip">' + escHtml(m[1]) + ': ' + escHtml(row[m[0]]) + '</span>';
+        }
+      });
+      if (!chips) chips = '<span class="error-log-chip muted">ID情報なし</span>';
+
+      html += '<div class="error-log-item" data-log-id="' + escHtml(logId) + '">' +
+        '<div class="error-log-item-head">' +
+          '<label class="error-log-check">' +
+            '<input class="error-log-select-row" type="checkbox" data-log-id="' + escHtml(logId) + '">' +
+          '</label>' +
+          '<div class="error-log-main">' +
+            '<div class="error-log-time">' + escHtml(formatDateTime(row.timestamp)) + ' / ' + escHtml(row.level) + ' / ' + escHtml(row.logger) + '</div>' +
+            '<div class="error-log-path">' + escHtml(row.method || "") + ' ' + escHtml(row.path || "") + '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="error-log-chips">' + chips + '</div>' +
+        '<pre class="error-log-message">' + escHtml(row.message || "") + '</pre>';
+      if (row.traceback) {
+        html += '<details class="error-log-trace"><summary>Traceback</summary><pre>' + escHtml(row.traceback) + '</pre></details>';
+      }
+      html += '</div>';
+    });
+    listEl.innerHTML = html;
+  }
+
+  function serializeErrorLog(row) {
+    return [
+      "timestamp: " + (row.timestamp || ""),
+      "level: " + (row.level || ""),
+      "logger: " + (row.logger || ""),
+      "method: " + (row.method || ""),
+      "path: " + (row.path || ""),
+      "session_id: " + (row.session_id || ""),
+      "user_id: " + (row.user_id || ""),
+      "material_id: " + (row.material_id || ""),
+      "course_id: " + (row.course_id || ""),
+      "message: " + (row.message || ""),
+      row.traceback ? "traceback:\n" + row.traceback : "",
+    ].filter(Boolean).join("\n");
+  }
+
+  function updateErrorLogSelectionUi() {
+    var countEl = document.getElementById("error-log-selection-count");
+    var copySelectedBtn = document.getElementById("error-log-copy-selected");
+    var selectedCount = state.selectedErrorLogIds.size;
+    if (countEl) countEl.textContent = selectedCount + "件選択中";
+    if (copySelectedBtn) copySelectedBtn.disabled = selectedCount === 0;
+
+    document.querySelectorAll(".error-log-item").forEach(function (item) {
+      var id = Number(item.dataset.logId);
+      var selected = state.selectedErrorLogIds.has(id);
+      item.classList.toggle("selected", selected);
+      var checkbox = item.querySelector(".error-log-select-row");
+      if (checkbox) checkbox.checked = selected;
+    });
+  }
+
+  function toggleErrorLogSelection(index, checked, shiftKey) {
+    if (!state.errorLogs || !state.errorLogs[index]) return;
+    if (shiftKey && state.lastSelectedErrorLogIndex !== null) {
+      var start = Math.min(state.lastSelectedErrorLogIndex, index);
+      var end = Math.max(state.lastSelectedErrorLogIndex, index);
+      for (var i = start; i <= end; i += 1) {
+        if (state.errorLogs[i]) {
+          if (checked) state.selectedErrorLogIds.add(i);
+          else state.selectedErrorLogIds.delete(i);
+        }
+      }
+    } else if (checked) {
+      state.selectedErrorLogIds.add(index);
+    } else {
+      state.selectedErrorLogIds.delete(index);
+    }
+    state.lastSelectedErrorLogIndex = index;
+    updateErrorLogSelectionUi();
+  }
+
+  function selectAllErrorLogs() {
+    (state.errorLogs || []).forEach(function (_, idx) {
+      state.selectedErrorLogIds.add(idx);
+    });
+    state.lastSelectedErrorLogIndex = null;
+    updateErrorLogSelectionUi();
+  }
+
+  function clearErrorLogSelection() {
+    state.selectedErrorLogIds.clear();
+    state.lastSelectedErrorLogIndex = null;
+    updateErrorLogSelectionUi();
+  }
+
+  function getSelectedErrorLogs() {
+    return Array.from(state.selectedErrorLogIds)
+      .sort(function (a, b) { return a - b; })
+      .map(function (idx) { return state.errorLogs[idx]; })
+      .filter(Boolean);
+  }
+
+  function getErrorLogCopyFormat() {
+    var el = document.getElementById("error-log-copy-format");
+    return el ? el.value : "ai-markdown";
+  }
+
+  function getErrorLogExportContext(rows) {
+    var keywordEl = document.getElementById("error-log-keyword");
+    var minutesEl = document.getElementById("error-log-minutes");
+    var includeInfoEl = document.getElementById("error-log-include-info");
+    return {
+      exported_at: new Date().toISOString(),
+      total_logs: rows.length,
+      keyword: keywordEl ? keywordEl.value.trim() : "",
+      minutes: minutesEl ? minutesEl.value || "1440" : "1440",
+      include_info: includeInfoEl ? !!includeInfoEl.checked : false,
+    };
+  }
+
+  function serializeErrorLogs(rows, format) {
+    var ctx = getErrorLogExportContext(rows);
+    if (format === "json") {
+      return JSON.stringify({
+        exported_at: ctx.exported_at,
+        total_logs: ctx.total_logs,
+        filters: {
+          keyword: ctx.keyword,
+          minutes: Number(ctx.minutes),
+          include_info: ctx.include_info,
+        },
+        logs: rows,
+      }, null, 2);
+    }
+    if (format === "plain") {
+      return rows.map(function (row, idx) {
+        return "===== Log " + (idx + 1) + " =====\n" + serializeErrorLog(row);
+      }).join("\n\n");
+    }
+    var lines = [
+      "# Error Log Analysis Input",
+      "",
+      "## Context",
+      "- Exported at: " + ctx.exported_at,
+      "- Total logs: " + ctx.total_logs,
+      "- Includes INFO: " + String(ctx.include_info),
+      "- Time window minutes: " + ctx.minutes,
+      "- Keyword: " + (ctx.keyword || "(none)"),
+      "",
+      "## Logs",
+    ];
+    rows.forEach(function (row, idx) {
+      lines.push(
+        "",
+        "### Log " + (idx + 1),
+        "````text",
+        serializeErrorLog(row),
+        "````"
+      );
+    });
+    return lines.join("\n");
+  }
+
+  function copyErrorLogText(text, successMessage) {
+    function ok() {
+      setErrorLogStatus(successMessage, "success");
+    }
+    function fallback() {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      try {
+        document.execCommand("copy");
+        ok();
+      } catch (e) {
+        setErrorLogStatus("コピーに失敗しました", "error");
+      }
+      document.body.removeChild(ta);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(ok).catch(fallback);
+    } else {
+      fallback();
+    }
+  }
+
+  function copyErrorLogs(rows, label) {
+    if (!rows || rows.length === 0) {
+      setErrorLogStatus("コピー対象のログがありません", "error");
+      return;
+    }
+    var format = getErrorLogCopyFormat();
+    var text = serializeErrorLogs(rows, format);
+    copyErrorLogText(text, label + " " + rows.length + "件をコピーしました");
+  }
+
+  function copySelectedErrorLogs() {
+    copyErrorLogs(getSelectedErrorLogs(), "選択したログ");
+  }
+
+  function copyVisibleErrorLogs() {
+    copyErrorLogs(state.errorLogs || [], "表示中のログ");
+  }
+
   // ── Logout ─────────────────────────────────────────────────────────
   function initLogout() {
     document.getElementById("logout-btn").addEventListener("click", function () {
@@ -1368,6 +1695,19 @@
     }
 
     var tabsEl = document.getElementById("adminTabs");
+
+    if (state.role === "SYSTEM_ADMIN") {
+      ["materials", "course-builder", "course-management", "lecture-studio"].forEach(function (tabName) {
+        var tabBtn = tabsEl.querySelector('.admin-tab[data-tab="' + tabName + '"]');
+        var panel = document.getElementById("tab-" + tabName);
+        if (tabBtn) tabBtn.style.display = "none";
+        if (panel) panel.classList.remove("vis");
+      });
+
+      var errorTabBtn = document.getElementById("tab-btn-error-analysis");
+      if (errorTabBtn) errorTabBtn.style.display = "";
+      activateTabView("error-analysis");
+    }
 
     // Show student management tab for TEACHER
     if (state.role === "TEACHER" || state.role === "SYSTEM_ADMIN") {
@@ -3440,10 +3780,13 @@
     if (usernameEl) usernameEl.textContent = state.username || "";
 
     initTabs();
-    initUpload();
-    initCourseBuilder();
-    initCourseManagement();
-    initLectureStudio();
+    initErrorAnalysis();
+    if (state.role !== "SYSTEM_ADMIN") {
+      initUpload();
+      initCourseBuilder();
+      initCourseManagement();
+      initLectureStudio();
+    }
     initStumbles();
     initSchemaProposals();
     initSchemaEvolution();
@@ -3451,9 +3794,11 @@
     initGroups();
     initSystemStats();
     initLogout();
-    loadMaterials();
 
-    document.getElementById("refresh-materials").addEventListener("click", loadMaterials);
+    if (state.role !== "SYSTEM_ADMIN") {
+      loadMaterials();
+      document.getElementById("refresh-materials").addEventListener("click", loadMaterials);
+    }
   }
 
   // Boot
