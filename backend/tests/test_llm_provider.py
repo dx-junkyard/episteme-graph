@@ -175,6 +175,17 @@ class TestGoogleVertexAIProvider:
         fake_model.generate_content.return_value = fake_resp
         return fake_model
 
+    def _make_vertex_response_from_parts(self, *texts: str):
+        return types.SimpleNamespace(
+            candidates=[
+                types.SimpleNamespace(
+                    content=types.SimpleNamespace(
+                        parts=[types.SimpleNamespace(text=text) for text in texts]
+                    )
+                )
+            ]
+        )
+
     def test_config_accepts_google_provider(self):
         from core.config import Settings
 
@@ -264,6 +275,36 @@ class TestGoogleVertexAIProvider:
             )
             assert isinstance(out, _DummyStruct)
             vtx_struct.assert_called_once()
+
+    def test_extract_vertex_ai_text_joins_multiple_parts(self):
+        from core.llm import _extract_vertex_ai_text
+
+        response = self._make_vertex_response_from_parts("hello ", "world")
+
+        assert _extract_vertex_ai_text(response) == "hello world"
+
+    def test_vertex_ai_generate_structured_accepts_multiple_text_parts(self):
+        from core import llm
+
+        fake_model = MagicMock()
+        fake_model.generate_content.return_value = self._make_vertex_response_from_parts(
+            '{"answer": "hi", ',
+            '"score": 7}',
+        )
+        fake_generative_model_cls = MagicMock(return_value=fake_model)
+        fake_generation_config_cls = MagicMock()
+        fake_vertex_models = types.ModuleType("vertexai.generative_models")
+        fake_vertex_models.GenerativeModel = fake_generative_model_cls
+        fake_vertex_models.GenerationConfig = fake_generation_config_cls
+
+        with patch.dict("sys.modules", {"vertexai.generative_models": fake_vertex_models}):
+            parsed = llm._vertex_ai_generate_structured(
+                [{"role": "user", "content": "q"}],
+                _DummyStruct,
+                "gemini-2.5-pro",
+            )
+
+        assert parsed == _DummyStruct(answer="hi", score=7)
 
     def test_get_vertex_ai_client_raises_on_missing_adc(self):
         """ADC が見つからない場合は EnvironmentError を投げる。"""
