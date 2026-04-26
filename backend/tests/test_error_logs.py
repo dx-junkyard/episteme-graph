@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import logging
 import os
 import sys
 
@@ -78,3 +79,52 @@ def test_error_log_limit_is_clamped_to_configured_max(monkeypatch):
 
     assert result["limit"] == 2
     assert len(result["items"]) == 2
+
+
+def test_redacts_sensitive_values_from_common_log_formats():
+    text = "\n".join([
+        "password=plain-secret",
+        "api_key: sk-test-secret",
+        '{"access_token":"token-secret","user":"alice"}',
+        "Authorization: Bearer jwt-secret",
+        "Cookie: session=secret; csrf=secret",
+        "client_secret='oauth-secret'",
+    ])
+
+    redacted = error_logs._redact_sensitive_text(text)
+
+    assert "plain-secret" not in redacted
+    assert "sk-test-secret" not in redacted
+    assert "token-secret" not in redacted
+    assert "jwt-secret" not in redacted
+    assert "session=secret" not in redacted
+    assert "oauth-secret" not in redacted
+    assert redacted.count("[REDACTED]") >= 6
+    assert '"user":"alice"' in redacted
+
+
+def test_log_handler_stores_redacted_message_and_traceback():
+    error_logs._LOG_BUFFER.clear()
+    try:
+        raise RuntimeError("failure with refresh_token=trace-secret")
+    except RuntimeError:
+        exc_info = sys.exc_info()
+
+    record = logging.LogRecord(
+        name="test",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg='failed login {"password":"body-secret"} Authorization: Bearer header-secret',
+        args=(),
+        exc_info=exc_info,
+    )
+
+    error_logs._ErrorLogHandler().emit(record)
+    stored = error_logs._LOG_BUFFER[0]
+
+    assert "body-secret" not in stored["message"]
+    assert "header-secret" not in stored["message"]
+    assert "trace-secret" not in stored["traceback"]
+    assert "[REDACTED]" in stored["message"]
+    assert "[REDACTED]" in stored["traceback"]

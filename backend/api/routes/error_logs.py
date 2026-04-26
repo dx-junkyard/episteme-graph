@@ -36,6 +36,39 @@ _KEY_PATTERNS = {
     "material_id": re.compile(r"(?:material[_ -]?id|material|doc(?:ument)?[_ -]?id)\s*[=:]\s*([A-Za-z0-9._:-]+)", re.I),
     "course_id": re.compile(r"(?:course[_ -]?id|course)\s*[=:]\s*([A-Za-z0-9._:-]+)", re.I),
 }
+_REDACTED = "[REDACTED]"
+_SENSITIVE_KEY_PATTERN = (
+    r"authorization|set-cookie|cookie|password|passwd|passphrase|passcode|"
+    r"access[_-]?token|refresh[_-]?token|id[_-]?token|token|jwt|"
+    r"api[_-]?key|secret|client[_-]?secret|openai[_-]?api[_-]?key|"
+    r"gemini[_-]?api[_-]?key|google[_-]?api[_-]?key|llm[_-]?api[_-]?key"
+)
+_BARE_SENSITIVE_KEY_PATTERN = (
+    r"password|passwd|passphrase|passcode|access[_-]?token|refresh[_-]?token|"
+    r"id[_-]?token|token|jwt|api[_-]?key|secret|client[_-]?secret|"
+    r"openai[_-]?api[_-]?key|gemini[_-]?api[_-]?key|"
+    r"google[_-]?api[_-]?key|llm[_-]?api[_-]?key"
+)
+_QUOTED_SECRET_RE = re.compile(
+    rf"(?P<prefix>(?P<key_quote>['\"]?)(?:{_SENSITIVE_KEY_PATTERN})(?P=key_quote)\s*:\s*)"
+    r"(?P<value_quote>['\"])(?P<value>.*?)(?P=value_quote)",
+    re.I | re.S,
+)
+_AUTH_HEADER_RE = re.compile(
+    rf"(?P<prefix>\b(?:authorization)\b\s*[:=]\s*(?:bearer|basic)\s+)"
+    r"(?P<value>[^\s,;]+)",
+    re.I,
+)
+_COOKIE_HEADER_RE = re.compile(
+    rf"(?P<prefix>\b(?:cookie|set-cookie)\b\s*[:=]\s*)"
+    r"(?P<value>[^\n\r]+)",
+    re.I,
+)
+_BARE_SECRET_RE = re.compile(
+    rf"(?P<prefix>\b(?:{_BARE_SENSITIVE_KEY_PATTERN})\b\s*[:=]\s*)"
+    r"(?P<value>[^\s,;}\])]+)",
+    re.I,
+)
 
 
 class _ErrorLogHandler(logging.Handler):
@@ -49,6 +82,8 @@ class _ErrorLogHandler(logging.Handler):
             exc_text = ""
             if record.exc_info:
                 exc_text = "".join(traceback.format_exception(*record.exc_info))
+            message = _redact_sensitive_text(message)
+            exc_text = _redact_sensitive_text(exc_text)
             ctx = dict(_request_context.get() or {})
             merged = _merge_ids(ctx, message + "\n" + exc_text)
             _LOG_BUFFER.appendleft(
@@ -147,6 +182,31 @@ def _merge_ids(ctx: dict[str, Any], text: str) -> dict[str, str]:
         if match:
             merged[key] = match.group(1).strip(".,;)]}")
     return merged
+
+
+def _redact_sensitive_text(text: Any) -> str:
+    """Mask common secret-bearing fields before logs reach the admin UI."""
+
+    if text is None:
+        return ""
+    redacted = str(text)
+    redacted = _QUOTED_SECRET_RE.sub(
+        lambda m: f"{m.group('prefix')}{m.group('value_quote')}{_REDACTED}{m.group('value_quote')}",
+        redacted,
+    )
+    redacted = _AUTH_HEADER_RE.sub(
+        lambda m: f"{m.group('prefix')}{_REDACTED}",
+        redacted,
+    )
+    redacted = _COOKIE_HEADER_RE.sub(
+        lambda m: f"{m.group('prefix')}{_REDACTED}",
+        redacted,
+    )
+    redacted = _BARE_SECRET_RE.sub(
+        lambda m: f"{m.group('prefix')}{_REDACTED}",
+        redacted,
+    )
+    return redacted
 
 
 def _matches_keyword(row: dict[str, Any], keyword: str) -> bool:
