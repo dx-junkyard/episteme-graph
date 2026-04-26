@@ -33,6 +33,46 @@
       <button class="admin-tab" data-tab="schema-proposals">スキーマ提案</button>
       <button class="admin-tab" data-tab="groups">グループ管理</button>
       <button class="admin-tab" data-tab="system-stats" id="tab-btn-system-stats" style="display:none">システム統計</button>
+      <button class="admin-tab" data-tab="error-analysis" id="tab-btn-error-analysis" style="display:none">エラー解析</button>
+    </div>
+
+    <!-- Error Analysis tab -->
+    <div class="admin-panel" id="tab-error-analysis">
+      <div class="admin-section">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+          <h3 class="admin-section-title" style="margin-bottom:0">エラーログ解析</h3>
+          <div class="error-log-controls">
+            <input id="error-log-keyword" type="search" placeholder="セッションID / ユーザーID / 教材ID / コースID / メッセージ" class="error-log-search">
+            <select id="error-log-minutes" class="error-log-select">
+              <option value="60">直近1時間</option>
+              <option value="360">直近6時間</option>
+              <option value="1440" selected>直近24時間</option>
+              <option value="10080">直近7日</option>
+            </select>
+            <label class="error-log-toggle">
+              <input id="error-log-include-info" type="checkbox">
+              <span>INFOを含める</span>
+            </label>
+            <button id="error-log-refresh" class="admin-action-btn">更新</button>
+          </div>
+        </div>
+        <div id="error-log-status" class="upload-status" style="display:none"></div>
+        <div class="error-log-copybar">
+          <div id="error-log-selection-count" class="error-log-selection-count">0件選択中</div>
+          <select id="error-log-copy-format" class="error-log-select" aria-label="コピー形式">
+            <option value="ai-markdown" selected>AI解析用Markdown</option>
+            <option value="json">JSON</option>
+            <option value="plain">プレーンテキスト</option>
+          </select>
+          <button id="error-log-select-all" class="admin-action-btn" type="button">表示中を選択</button>
+          <button id="error-log-clear-selection" class="admin-action-btn" type="button">選択解除</button>
+          <button id="error-log-copy-selected" class="admin-action-btn" type="button" disabled>選択したログをコピー</button>
+          <button id="error-log-copy-visible" class="admin-action-btn" type="button">表示中すべてをコピー</button>
+        </div>
+        <div id="error-log-list" class="error-log-list">
+          <div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">読み込み中...</div>
+        </div>
+      </div>
     </div>
 
     <!-- Materials tab -->
