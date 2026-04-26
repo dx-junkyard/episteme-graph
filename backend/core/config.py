@@ -102,6 +102,13 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CORS_ORIGINS"),
     )
 
+    # --- Admin error log analysis ---
+    # Admin 画面で保持・返却するメモリ上のログ最大件数。
+    admin_error_log_max_items: int = Field(
+        default=1000,
+        validation_alias=AliasChoices("ADMIN_ERROR_LOG_MAX_ITEMS"),
+    )
+
     # --- GROBID ---
     grobid_url: str = "http://localhost:8070"
 
