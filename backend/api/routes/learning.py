@@ -461,6 +461,8 @@ def _classify_intent(message: str, course_title: str) -> str:
     """
     if _is_greeting(message):
         return "LEARNING_ADVICE"
+    if "はい" in message and "理解" in message:
+        return "DOMAIN_RAG"
 
     params = get_llm_params("fast")
     prompt = (

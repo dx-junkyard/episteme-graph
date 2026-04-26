@@ -67,6 +67,15 @@ class TestClassifyIntentGreetingShortcut:
             mock_gen.assert_not_called()
             assert result == "LEARNING_ADVICE"
 
+    def test_prerequisite_confirmation_yes_returns_domain_rag_without_llm(self):
+        """前提知識を理解している確認は、現在トピックの説明へ進む。"""
+        from api.routes.learning import _classify_intent
+
+        with patch("api.routes.learning.generate_text") as mock_gen:
+            result = _classify_intent("はい、理解しています", "量子力学入門")
+            mock_gen.assert_not_called()
+            assert result == "DOMAIN_RAG"
+
 
 # ---------------------------------------------------------------------------
 # 2. LLM 分類テスト

@@ -1159,6 +1159,22 @@ def check_prerequisites(
         if not prereqs:
             return None
 
+        prereq_names: list[str] = []
+        for prereq in prereqs:
+            prereq_name = prereq.get("name", "") if isinstance(prereq, dict) else str(prereq)
+            prereq_name = prereq_name.strip()
+            if prereq_name:
+                prereq_names.append(prereq_name)
+
+        if not prereq_names:
+            return None
+
+        explanation_keywords = ["教えて", "説明", "詳しく", "知りたい", "わからない", "分からない"]
+        if any(name in user_message for name in prereq_names) and any(
+            kw in user_message for kw in explanation_keywords
+        ):
+            return None
+
         pg = _pg_session()
         try:
             rows = pg.execute(
@@ -1179,11 +1195,7 @@ def check_prerequisites(
                 title_to_id[title] = t.get("id", "")
 
         unlearned: list[str] = []
-        for prereq in prereqs:
-            prereq_name = prereq.get("name", "") if isinstance(prereq, dict) else str(prereq)
-            prereq_name = prereq_name.strip()
-            if not prereq_name:
-                continue
+        for prereq_name in prereq_names:
             prereq_topic_id = title_to_id.get(prereq_name.lower(), "")
             if prereq_topic_id and prereq_topic_id in topics_with_history:
                 continue
@@ -1193,12 +1205,15 @@ def check_prerequisites(
             return None
 
         prereq_list = "、".join(unlearned[:3])
+        first_prereq = unlearned[0]
         return (
             f"「{topic_title}」を理解するには、まず以下の前提知識を押さえる必要があります：\n\n"
             f"**{prereq_list}**\n\n"
-            f"これらの概念については理解していますか？\n"
-            f"理解している場合はその旨を伝えてください。そうでなければ、前提知識から順に説明します。\n\n"
-            + "".join(f"[{p}について詳しく聞く]" for p in unlearned[:3])
+            f"この前提知識を理解していますか？\n"
+            f"理解している場合は、その前提で「{topic_title}」の説明に進みます。"
+            f"理解できていない場合は、まず「{first_prereq}」から説明します。\n\n"
+            f"[ACTION_BUTTON: はい、理解しています]\n"
+            f"[ACTION_BUTTON: いいえ、理解できていないので{first_prereq}について教えてください]"
         )
     except Exception:
         logger.warning("Prerequisite check failed, continuing without intervention", exc_info=True)

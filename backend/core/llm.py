@@ -259,6 +259,26 @@ def _get_vertex_ai_client():
     return _vtx
 
 
+def _extract_vertex_ai_text(response: Any) -> str:
+    """Vertex AI response から text parts を結合して取り出す。"""
+    candidates = getattr(response, "candidates", None) or []
+    if candidates:
+        content = getattr(candidates[0], "content", None)
+        parts = getattr(content, "parts", None) or []
+        texts = [
+            text
+            for part in parts
+            if (text := getattr(part, "text", None))
+        ]
+        if texts:
+            return "".join(texts).strip()
+
+    try:
+        return (getattr(response, "text", "") or "").strip()
+    except ValueError as exc:
+        raise ValueError("Vertex AI response did not contain extractable text parts.") from exc
+
+
 def _vertex_ai_generate_text(
     messages: list[dict[str, str]],
     model_name: str,
@@ -285,7 +305,7 @@ def _vertex_ai_generate_text(
         contents,
         generation_config=generation_config,
     )
-    return (getattr(response, "text", "") or "").strip()
+    return _extract_vertex_ai_text(response)
 
 
 def _vertex_ai_generate_structured(
@@ -309,7 +329,7 @@ def _vertex_ai_generate_structured(
             response_schema=schema,
         ),
     )
-    raw = getattr(response, "text", "") or ""
+    raw = _extract_vertex_ai_text(response)
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
