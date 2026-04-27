@@ -248,8 +248,11 @@
       html += "<td>" + escHtml(m.title) + "</td>";
       html += '<td><span class="admin-status ' + statusClass + '">' + statusLabel + "</span></td>";
       html += "<td>" + escHtml(uploadedAt) + "</td>";
+      var hasPdf = m.has_pdf === true;
+      var pdfBtnLabel = hasPdf ? "登録済 (再登録)" : "PDF再登録";
+      var pdfBtnColor = hasPdf ? "#999" : "var(--color-text-secondary)";
       html += '<td style="display:flex;gap:6px">' +
-        '<button class="admin-pdf-reupload-btn" data-material-id="' + escHtml(m.material_id) + '" style="background:none;border:1px solid var(--color-text-secondary);color:var(--color-text-secondary);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px" title="PDFのみ再登録">PDF再登録</button>' +
+        '<button class="admin-pdf-reupload-btn" data-material-id="' + escHtml(m.material_id) + '" style="background:none;border:1px solid ' + pdfBtnColor + ';color:' + pdfBtnColor + ';padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px" title="PDFのみ再登録">' + pdfBtnLabel + '</button>' +
         '<button class="admin-delete-btn" data-material-id="' + escHtml(m.material_id) + '" data-material-title="' + escHtml(m.title) + '" style="background:none;border:1px solid var(--color-text-danger);color:var(--color-text-danger);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">削除</button>' +
         '</td>';
       html += "</tr>";

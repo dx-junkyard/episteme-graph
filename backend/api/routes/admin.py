@@ -228,6 +228,15 @@ def list_materials(
     finally:
         session.close()
 
+    # MinIO にPDFが存在する教材のIDセットを一括取得
+    existing_pdf_ids: set[str] = set()
+    try:
+        for obj_name in get_storage_client().list_objects("raw-papers", "uploads/"):
+            if obj_name.endswith(".pdf"):
+                existing_pdf_ids.add(obj_name[len("uploads/"):-len(".pdf")])
+    except Exception:
+        pass  # MinIO 不達の場合は全件 has_pdf=False のまま
+
     materials = []
     for r in records:
         mid = r[0] or ""
@@ -248,6 +257,7 @@ def list_materials(
             knowledge_graph=kg,
             visibility=r[6] or "private",
             group_id=str(r[7]) if r[7] else None,
+            has_pdf=mid in existing_pdf_ids,
         ))
 
     return materials

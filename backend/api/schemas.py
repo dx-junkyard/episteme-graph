@@ -55,6 +55,7 @@ class MaterialOut(BaseModel):
     knowledge_graph: dict | None = None
     visibility: str = "private"  # public | group | private
     group_id: str | None = None
+    has_pdf: bool = False
 
 
 class VisibilityUpdateRequest(BaseModel):
