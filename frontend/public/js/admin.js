@@ -248,7 +248,10 @@
       html += "<td>" + escHtml(m.title) + "</td>";
       html += '<td><span class="admin-status ' + statusClass + '">' + statusLabel + "</span></td>";
       html += "<td>" + escHtml(uploadedAt) + "</td>";
-      html += '<td><button class="admin-delete-btn" data-material-id="' + escHtml(m.material_id) + '" data-material-title="' + escHtml(m.title) + '" style="background:none;border:1px solid var(--color-text-danger);color:var(--color-text-danger);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">削除</button></td>';
+      html += '<td style="display:flex;gap:6px">' +
+        '<button class="admin-pdf-reupload-btn" data-material-id="' + escHtml(m.material_id) + '" style="background:none;border:1px solid var(--color-text-secondary);color:var(--color-text-secondary);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px" title="PDFのみ再登録">PDF再登録</button>' +
+        '<button class="admin-delete-btn" data-material-id="' + escHtml(m.material_id) + '" data-material-title="' + escHtml(m.title) + '" style="background:none;border:1px solid var(--color-text-danger);color:var(--color-text-danger);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">削除</button>' +
+        '</td>';
       html += "</tr>";
     });
     tbody.innerHTML = html;
@@ -259,6 +262,36 @@
         var mid = this.getAttribute("data-material-id");
         var title = this.getAttribute("data-material-title");
         openDeleteConfirmModal("material", mid, title);
+      });
+    });
+
+    // Attach PDF re-upload handlers
+    tbody.querySelectorAll(".admin-pdf-reupload-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var mid = this.getAttribute("data-material-id");
+        var input = document.createElement("input");
+        input.type = "file";
+        input.accept = ".pdf,application/pdf";
+        input.onchange = function () {
+          var file = input.files[0];
+          if (!file) return;
+          var formData = new FormData();
+          formData.append("file", file);
+          btn.disabled = true;
+          btn.textContent = "登録中...";
+          apiFetch("/admin/materials/" + mid + "/pdf", { method: "PUT", body: formData, _noJson: true })
+            .then(function (res) {
+              if (!res.ok) throw new Error("status " + res.status);
+              btn.textContent = "完了";
+              setTimeout(function () { btn.textContent = "PDF再登録"; btn.disabled = false; }, 2000);
+            })
+            .catch(function (err) {
+              btn.textContent = "失敗";
+              btn.disabled = false;
+              alert("PDF再登録に失敗しました: " + err.message);
+            });
+        };
+        input.click();
       });
     });
   }

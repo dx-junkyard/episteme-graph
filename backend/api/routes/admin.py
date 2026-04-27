@@ -355,6 +355,36 @@ def get_material_pdf(
     raise HTTPException(status_code=404, detail="PDF object not found")
 
 
+@router.put("/materials/{material_id}/pdf")
+def reupload_material_pdf(
+    material_id: str,
+    file: UploadFile = File(...),
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """既存教材のPDFのみをMinIOに再登録する（テキスト再処理なし）。
+
+    MinIOへのPDF保存が欠落している旧教材の復元に使用する。
+    """
+    get_material(material_id, current_user)  # アクセス権確認
+
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are accepted")
+
+    pdf_bytes = file.file.read()
+    if len(pdf_bytes) == 0:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    pdf_object_name = f"uploads/{material_id}.pdf"
+    try:
+        get_storage_client().upload_pdf("raw-papers", pdf_object_name, pdf_bytes)
+    except Exception:
+        logger.exception("Failed to re-upload PDF for material %s", material_id)
+        raise HTTPException(status_code=500, detail="PDF storage failed")
+
+    logger.info("PDF re-uploaded for material=%s size=%d", material_id, len(pdf_bytes))
+    return {"material_id": material_id, "object_name": pdf_object_name}
+
+
 @router.put("/materials/{material_id}/visibility")
 def update_material_visibility(
     material_id: str,
