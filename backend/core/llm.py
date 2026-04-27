@@ -316,7 +316,7 @@ def _vertex_ai_generate_structured(
     from vertexai.generative_models import GenerativeModel, GenerationConfig  # type: ignore[import]
 
     system_instruction, contents = _messages_to_gemini(messages)
-    schema = response_format.model_json_schema()
+    schema = _sanitize_vertex_response_schema(response_format.model_json_schema())
 
     model = GenerativeModel(
         model_name=model_name,
@@ -337,6 +337,41 @@ def _vertex_ai_generate_structured(
             f"Vertex AI の構造化レスポンスを JSON として解析できませんでした: {raw!r}"
         ) from exc
     return response_format.model_validate(data)
+
+
+def _sanitize_vertex_response_schema(schema: Any) -> Any:
+    """Vertex AI response_schema が受け付けるJSON Schemaサブセットへ寄せる。
+
+    Pydantic v2 は Optional[int] を ``anyOf: [{type: integer}, {type: null}]``
+    のように出力するが、Vertex AI SDK の Schema enum には NULL がなく
+    ParseError になる。nullable は「requiredに含めない」ことで表現し、
+    null 型は response_schema から除去する。
+    """
+    if isinstance(schema, list):
+        return [_sanitize_vertex_response_schema(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+
+    cleaned: dict[str, Any] = {}
+    for key, value in schema.items():
+        if key == "default":
+            continue
+        if key == "anyOf" and isinstance(value, list):
+            options = [
+                _sanitize_vertex_response_schema(item)
+                for item in value
+                if not (isinstance(item, dict) and str(item.get("type", "")).lower() == "null")
+            ]
+            if len(options) == 1 and isinstance(options[0], dict):
+                cleaned.update(options[0])
+            elif options:
+                cleaned[key] = options
+            continue
+        cleaned[key] = _sanitize_vertex_response_schema(value)
+
+    if str(cleaned.get("type", "")).lower() == "null":
+        cleaned.pop("type", None)
+    return cleaned
 
 
 def _vertex_ai_generate_embeddings(

@@ -930,6 +930,14 @@ body {
   display: block;
 }
 
+.admin-panel#tab-lecture-studio {
+  max-width: none;
+  width: 100%;
+  margin: 0;
+  padding: 20px 24px;
+  overflow-x: auto;
+}
+
 .admin-section {
   background: var(--color-background-primary);
   border-radius: 12px;
@@ -1899,11 +1907,14 @@ body {
   gap: 12px;
   flex: 1;
   min-height: 0;
+  overflow-x: auto;
+  padding-bottom: 4px;
 }
 
 .ls-nav-panel {
   width: 240px;
   min-width: 200px;
+  flex: 0 0 240px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
   display: flex;
@@ -1977,11 +1988,131 @@ body {
 }
 
 .ls-editor-panel {
-  flex: 1;
+  flex: 1 0 1460px;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  min-width: 0;
+  min-width: 1460px;
+}
+
+.ls-workbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 34px;
+}
+
+.ls-work-tabs,
+.ls-mini-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ls-work-tab,
+.ls-mini-tab {
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-secondary);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.ls-work-tab {
+  padding: 8px 12px;
+  border-radius: 6px;
+}
+
+.ls-mini-tab {
+  padding: 5px 8px;
+  border-radius: 5px;
+  font-size: 11px;
+}
+
+.ls-work-tab.active,
+.ls-mini-tab.active {
+  background: var(--color-text-info);
+  border-color: var(--color-text-info);
+  color: #fff;
+}
+
+.ls-chunk-meta {
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ls-workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ls-split {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 10px;
+  min-width: 1450px;
+}
+
+.ls-pane {
+  flex: 1 0 720px;
+  min-width: 720px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.ls-pane-head {
+  min-height: 38px;
+  padding: 6px 8px 6px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--color-bg-secondary);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.ls-pane-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.ls-pane-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: var(--color-background-primary);
+}
+
+.ls-empty-state {
+  padding: 16px;
+  color: var(--color-text-tertiary);
+  font-size: 13px;
+}
+
+.ls-pdf-view {
+  height: 100%;
+  min-height: 360px;
+}
+
+.ls-pdf-frame {
+  width: 100%;
+  height: 100%;
+  min-height: 360px;
+  border: 0;
+  background: #fff;
 }
 
 .ls-editor-section {
@@ -2003,17 +2134,19 @@ body {
   padding: 12px;
   font-size: 13px;
   line-height: 1.6;
-  max-height: 200px;
+  height: 100%;
   overflow-y: auto;
   color: var(--color-text-primary);
   background: var(--color-background-primary);
   white-space: pre-wrap;
 }
 
-.ls-spoken-textarea {
+.ls-spoken-textarea,
+.ls-script-textarea {
   flex: 1;
   width: 100%;
-  min-height: 200px;
+  height: 100%;
+  min-height: 360px;
   padding: 12px;
   font-size: 13px;
   line-height: 1.6;
@@ -2024,13 +2157,132 @@ body {
   font-family: inherit;
 }
 
-.ls-spoken-textarea:focus {
+.ls-spoken-textarea:focus,
+.ls-script-textarea:focus {
   outline: none;
+}
+
+.ls-script-textarea:disabled {
+  color: var(--color-text-secondary);
+  background: var(--color-bg-secondary);
+}
+
+.ls-display-preview {
+  height: 100%;
+  min-height: 360px;
+  padding: 14px 16px;
+  overflow-y: auto;
+  color: var(--color-text-primary);
+  font-size: 14px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ls-display-preview p {
+  margin: 0 0 12px;
+}
+
+.ls-display-preview .katex {
+  font-size: 1.05em;
+}
+
+.ls-display-preview .katex-display {
+  margin: 12px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 0 6px;
+}
+
+.ls-formula-chip {
+  display: inline-block;
+  max-width: 100%;
+  padding: 1px 5px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-text-info);
+  background: var(--color-bg-secondary);
+  white-space: normal;
+}
+
+.ls-structure-panel {
+  flex: 1;
+  min-height: 0;
+}
+
+.ls-structure-grid {
+  height: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.ls-code-view,
+.ls-graph-elements {
+  height: calc(100% - 30px);
+  min-height: 360px;
+  padding: 12px;
+  margin: 0;
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-top: 0;
+  border-radius: 0 0 8px 8px;
+  background: var(--color-background-primary);
+}
+
+.ls-code-view {
+  font-family: monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  color: var(--color-text-primary);
+}
+
+.ls-graph-row {
+  padding: 9px 10px;
+  margin-bottom: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg-secondary);
+  font-size: 12px;
+}
+
+.ls-graph-badge {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--color-text-info);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.ls-graph-desc {
+  margin-top: 4px;
+  color: var(--color-text-secondary);
+  line-height: 1.45;
+}
+
+.ls-graph-status {
+  margin-top: 4px;
+  color: var(--color-text-tertiary);
+  font-size: 10px;
+  font-family: monospace;
+}
+
+.ls-sync-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
 }
 
 .ls-action-panel {
   width: 280px;
   min-width: 240px;
+  flex: 0 0 280px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
   display: flex;
@@ -2081,9 +2333,21 @@ body {
   border: 1px solid var(--color-border);
 }
 
+.ls-formula-rendered {
+  max-width: 100%;
+  overflow-x: auto;
+  padding-bottom: 3px;
+}
+
+.ls-formula-rendered .lecture-formula,
+.ls-formula-rendered .lecture-formula-block {
+  margin: 2px 0 4px;
+}
+
 .ls-formula-latex {
   font-family: monospace;
   color: var(--color-text-info);
+  word-break: break-word;
 }
 
 .ls-formula-spoken {

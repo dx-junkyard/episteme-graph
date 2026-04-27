@@ -476,9 +476,21 @@ class LectureScriptChunkOut(BaseModel):
     chunk_id: str
     chunk_index: int
     text: str
+    raw_text: str = ""
+    display_text: str = ""
     spoken_text: str = ""
     formulas: list[LectureFormulaItem] = []
     status: str = "ungenerated"  # ungenerated | generated | edited | audio_ready
+    material_id: str = ""
+    document_id: str = ""
+    page_start: int | None = None
+    page_end: int | None = None
+    pdf_url: str | None = None
+    smiles_dsl: str = ""
+    variables: dict | list | None = None
+    ancestors: list | None = None
+    neo4j_node_id: str = ""
+    graph_elements: list[dict] = []
 
 
 class LectureScriptGenerateRequest(BaseModel):
@@ -507,6 +519,7 @@ class LectureScriptGenerateResponse(BaseModel):
 class LectureScriptSaveRequest(BaseModel):
     """手動スクリプト保存リクエスト。"""
     spoken_text: str
+    display_text: str | None = None
     formulas: list[dict] = []
 
 
@@ -524,6 +537,7 @@ class LectureScriptRewriteRequest(BaseModel):
 class LectureScriptRewriteResponse(BaseModel):
     """AI スクリプト書き換えレスポンス。"""
     chunk_id: str
+    display_text: str = ""
     spoken_text: str
     formulas: list[LectureFormulaItem] = []
 

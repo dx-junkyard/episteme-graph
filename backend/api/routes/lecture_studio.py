@@ -39,6 +39,7 @@ from services import (
     get_course_data,
     get_editable_course_data,
     get_viewable_course_data,
+    reanalyze_course_structure_background,
     update_background_task,
     user_can_edit_course,
 )
@@ -75,8 +76,12 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
         where_clause = f"c.material_id IN ({mid_placeholders})"
         rows = session.execute(
             sa_text(f"""
-                SELECT c.id, c.chunk_index, c.text, c.display_text, c.spoken_text, c.formulas
+                SELECT c.id, c.chunk_index, c.text, c.display_text, c.spoken_text, c.formulas,
+                       c.material_id, c.document_id, c.page_start, c.page_end,
+                       c.smiles_dsl, c.variables, c.ancestors, c.neo4j_node_id,
+                       d.knowledge_graph, d.neo4j_node_id
                 FROM chunks c
+                LEFT JOIN documents d ON c.document_id = d.id
                 WHERE ({where_clause})
                   AND c.text IS NOT NULL AND c.text != ''
                 ORDER BY c.chunk_index
@@ -86,25 +91,182 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
 
         chunks = []
         for row in rows:
-            text = row[3] or row[2] or ""
+            raw_text = row[2] or ""
+            display_text = row[3] or raw_text
+            spoken_text = row[4] or display_text
             formulas = row[5] if row[5] else []
             # 旧フォーマット（$...$）のデータをプレースホルダー方式に正規化
-            text, formulas = normalize_to_placeholder_format(text, formulas)
+            display_text, formulas = normalize_to_placeholder_format(display_text, formulas)
+            knowledge_graph = _json_obj(row[14])
+            graph_elements = _derive_chunk_graph_elements(
+                f"{raw_text}\n{display_text}",
+                knowledge_graph,
+                formulas,
+            )
+            material_id = row[6] or ""
+            variables = row[11] if row[11] is not None else _extract_document_variables(knowledge_graph)
+            ancestors = row[12] if isinstance(row[12], list) else _extract_document_edges(knowledge_graph)
             chunks.append({
                 "id": str(row[0]),
                 "chunk_index": row[1],
-                "text": text,
-                "spoken_text": row[4] or "",
+                "text": display_text,
+                "raw_text": raw_text,
+                "display_text": display_text,
+                "spoken_text": spoken_text,
+                "stored_spoken_text": row[4] or "",
                 "formulas": formulas,
+                "material_id": material_id,
+                "document_id": str(row[7]) if row[7] else "",
+                "page_start": row[8],
+                "page_end": row[9],
+                "pdf_url": f"/admin/materials/{material_id}/pdf" if material_id else None,
+                "smiles_dsl": row[10] or _extract_document_dsl(knowledge_graph),
+                "variables": variables,
+                "ancestors": ancestors,
+                "neo4j_node_id": row[13] or row[15] or "",
+                "graph_elements": graph_elements,
             })
         return chunks
     finally:
         session.close()
 
 
+def _json_obj(value: object) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _extract_document_dsl(knowledge_graph: dict) -> str:
+    abstract = knowledge_graph.get("abstract_structure")
+    if isinstance(abstract, dict):
+        dsl = str(abstract.get("smiles_dsl") or "").strip()
+        if dsl:
+            return dsl
+    return str(knowledge_graph.get("smiles_dsl") or "").strip()
+
+
+def _extract_document_variables(knowledge_graph: dict) -> dict | list | None:
+    abstract = knowledge_graph.get("abstract_structure")
+    if isinstance(abstract, dict) and abstract.get("variables"):
+        return abstract.get("variables")
+    concepts = knowledge_graph.get("concepts")
+    if isinstance(concepts, list) and concepts:
+        return [
+            {
+                "id": c.get("id") or c.get("name"),
+                "name": c.get("name") or c.get("id"),
+                "type": c.get("type"),
+                "description": c.get("description"),
+            }
+            for c in concepts
+            if isinstance(c, dict)
+        ]
+    return None
+
+
+def _extract_document_edges(knowledge_graph: dict) -> list:
+    abstract = knowledge_graph.get("abstract_structure")
+    if isinstance(abstract, dict) and isinstance(abstract.get("edges"), list):
+        return abstract.get("edges") or []
+    relationships = knowledge_graph.get("relationships")
+    return relationships if isinstance(relationships, list) else []
+
+
+def _derive_chunk_graph_elements(
+    text: str,
+    knowledge_graph: object,
+    formulas: list[dict] | None = None,
+) -> list[dict]:
+    """チャンク本文に現れる knowledge_graph 要素を構造確認用に返す。"""
+    graph = _json_obj(knowledge_graph)
+    concepts = graph.get("concepts", []) if isinstance(graph.get("concepts"), list) else []
+    relationships = graph.get("relationships", []) if isinstance(graph.get("relationships"), list) else []
+
+    concept_by_id: dict[str, dict] = {}
+    elements: list[dict] = []
+    seen_concepts: set[str] = set()
+
+    for concept in concepts:
+        if not isinstance(concept, dict):
+            continue
+        cid = str(concept.get("id") or concept.get("name") or "").strip()
+        name = str(concept.get("name") or cid).strip()
+        if not cid or not name:
+            continue
+        concept_by_id[cid] = concept
+        if name in text or cid in text:
+            seen_concepts.add(cid)
+            elements.append({
+                "type": "concept",
+                "id": cid,
+                "label": name,
+                "description": concept.get("description") or "",
+                "status": "registered",
+            })
+
+    for rel in relationships:
+        if not isinstance(rel, dict):
+            continue
+        source = str(rel.get("source") or "").strip()
+        target = str(rel.get("target") or "").strip()
+        relation = str(rel.get("relation") or "RELATED_TO").strip()
+        if not source or not target:
+            continue
+        source_name = str(concept_by_id.get(source, {}).get("name") or source)
+        target_name = str(concept_by_id.get(target, {}).get("name") or target)
+        if source in seen_concepts and target in seen_concepts:
+            elements.append({
+                "type": "relationship",
+                "id": f"{source}:{relation}:{target}",
+                "label": f"{source_name} -[{relation}]-> {target_name}",
+                "description": rel.get("description") or "",
+                "status": "registered",
+            })
+
+    for formula in (formulas or [])[:8]:
+        if not isinstance(formula, dict):
+            continue
+        formula_id = str(formula.get("id") or "").strip()
+        latex = str(formula.get("latex") or "").strip()
+        if not formula_id and not latex:
+            continue
+        elements.append({
+            "type": "formula",
+            "id": formula_id or latex[:80],
+            "label": formula_id or "formula",
+            "description": latex,
+            "status": "chunk_formula",
+        })
+
+    if not elements:
+        for concept in concepts[:8]:
+            if not isinstance(concept, dict):
+                continue
+            cid = str(concept.get("id") or concept.get("name") or "").strip()
+            name = str(concept.get("name") or cid).strip()
+            if not cid or not name:
+                continue
+            elements.append({
+                "type": "concept",
+                "id": cid,
+                "label": name,
+                "description": concept.get("description") or "",
+                "status": "document_graph",
+            })
+
+    return elements[:12]
+
+
 def _chunk_status(chunk: dict) -> str:
     """チャンクのスクリプトステータスを判定する。"""
-    if not chunk.get("spoken_text"):
+    if not chunk.get("stored_spoken_text"):
         return "ungenerated"
     # 音声キャッシュがあれば audio_ready
     session = _pg_session()
@@ -352,9 +514,21 @@ def get_course_scripts(
             chunk_id=c["id"],
             chunk_index=c["chunk_index"],
             text=c["text"],
+            raw_text=c["raw_text"],
+            display_text=c["display_text"],
             spoken_text=c["spoken_text"],
             formulas=[LectureFormulaItem(**f) for f in c["formulas"]] if c["formulas"] else [],
             status=_chunk_status(c),
+            material_id=c["material_id"],
+            document_id=c["document_id"],
+            page_start=c["page_start"],
+            page_end=c["page_end"],
+            pdf_url=c["pdf_url"],
+            smiles_dsl=c["smiles_dsl"],
+            variables=c["variables"],
+            ancestors=c["ancestors"],
+            neo4j_node_id=c["neo4j_node_id"],
+            graph_elements=c["graph_elements"],
         )
         for c in chunks
     ]
@@ -387,12 +561,14 @@ def save_lecture_script(
         session.execute(
             sa_text("""
                 UPDATE chunks
-                SET spoken_text = :spoken_text,
+                SET display_text = :display_text,
+                    spoken_text = :spoken_text,
                     formulas = CAST(:formulas AS jsonb)
                 WHERE id = CAST(:cid AS uuid)
             """),
             {
                 "cid": chunk_id,
+                "display_text": body.display_text if body.display_text is not None else body.spoken_text,
                 "spoken_text": body.spoken_text,
                 "formulas": json.dumps(body.formulas, ensure_ascii=False),
             },
@@ -546,6 +722,7 @@ def rewrite_lecture_script(
 
     return LectureScriptRewriteResponse(
         chunk_id=chunk_id,
+        display_text=display_text,
         spoken_text=spoken_text,
         formulas=[LectureFormulaItem(**f) for f in formulas],
     )
@@ -741,7 +918,69 @@ def batch_generate_audio(
 
 
 # ---------------------------------------------------------------------------
-# 5. コース単位のアクティブタスク照会 (Issue #139)
+# 5. コース教材の構造再解析
+# ---------------------------------------------------------------------------
+
+
+@router.post("/courses/{course_id}/structure/reanalyze")
+def reanalyze_course_structure(
+    course_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """既存チャンクを維持したまま、構造DSL/変数/ancestorsを再解析する。"""
+    course_data = get_editable_course_data(current_user["id"], course_id)
+    if not course_data and current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        course_data = _get_system_admin_course_data(course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    sources = course_data.get("sources", []) if isinstance(course_data, dict) else []
+    material_ids = [
+        str(s.get("material_id")).strip()
+        for s in sources
+        if isinstance(s, dict) and s.get("material_id")
+    ]
+    material_ids = list(dict.fromkeys(material_ids))
+    if not material_ids:
+        raise HTTPException(status_code=400, detail="No source materials linked to this course")
+
+    active = get_active_task_for_course(course_id)
+    if active:
+        raise HTTPException(status_code=409, detail="Another course task is already running")
+
+    task_id = str(uuid.uuid4())[:12]
+    create_background_task(task_id, "structure_reanalysis", current_user["id"])
+    update_background_task(task_id, "pending", result_data={
+        "course_id": course_id,
+        "total_materials": len(material_ids),
+        "processed_materials": 0,
+        "updated_chunks": 0,
+        "errors": 0,
+        "progress": 0,
+        "stage": "queued",
+    })
+
+    thread = threading.Thread(
+        target=reanalyze_course_structure_background,
+        args=(course_id, course_data, task_id),
+        daemon=True,
+    )
+    thread.start()
+
+    logger.info(
+        "structure reanalysis accepted: task=%s course=%s materials=%d by user=%s",
+        task_id, course_id, len(material_ids), current_user["id"],
+    )
+    return {
+        "task_id": task_id,
+        "course_id": course_id,
+        "total_materials": len(material_ids),
+        "status": "pending",
+    }
+
+
+# ---------------------------------------------------------------------------
+# 6. コース単位のアクティブタスク照会 (Issue #139)
 # ---------------------------------------------------------------------------
 
 

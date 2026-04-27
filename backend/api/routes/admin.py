@@ -9,6 +9,7 @@ import threading
 import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import Response
 from sqlalchemy import text as sa_text
 
 from dependencies import (
@@ -69,6 +70,7 @@ from core.schema_registry import (
     get_ontology_types,
     get_predicates,
 )
+from core.storage import get_storage_client
 
 logger = logging.getLogger(__name__)
 
@@ -99,9 +101,16 @@ def upload_material(
         raise HTTPException(status_code=400, detail="Empty file")
 
     material_id = str(uuid.uuid4())[:12]
+    pdf_object_name = f"uploads/{material_id}.pdf"
     doc_id = uuid.uuid4()
     task_id = str(uuid.uuid4())[:12]
     now = datetime.datetime.utcnow().isoformat()
+
+    try:
+        get_storage_client().upload_pdf("raw-papers", pdf_object_name, pdf_bytes)
+    except Exception:
+        logger.exception("Failed to store uploaded PDF for material %s", material_id)
+        raise HTTPException(status_code=500, detail="PDF storage failed")
 
     session = _pg_session()
     try:
@@ -308,6 +317,37 @@ def get_material(
         visibility=record[6] or "private",
         group_id=str(record[7]) if record[7] else None,
     )
+
+
+@router.get("/materials/{material_id}/pdf")
+def get_material_pdf(
+    material_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> Response:
+    """認証済みユーザーに教材PDFをプロキシ配信する。"""
+    material = get_material(material_id, current_user)
+    object_candidates = [
+        f"uploads/{material_id}.pdf",
+        material.filename,
+        material.material_id,
+    ]
+    storage = get_storage_client()
+    for object_name in object_candidates:
+        if not object_name:
+            continue
+        try:
+            pdf_bytes = storage.get_object("raw-papers", object_name)
+            return Response(
+                content=pdf_bytes,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f'inline; filename="{material_id}.pdf"',
+                    "Cache-Control": "private, max-age=300",
+                },
+            )
+        except Exception:
+            continue
+    raise HTTPException(status_code=404, detail="PDF object not found")
 
 
 @router.put("/materials/{material_id}/visibility")
@@ -1427,6 +1467,9 @@ def get_materials_stats(
                         cs.course_id,
                         COUNT(DISTINCT c.id) AS total_chunks,
                         COUNT(DISTINCT CASE
+                            WHEN c.smiles_dsl IS NOT NULL AND c.smiles_dsl != '' THEN c.id
+                        END) AS structure_chunks,
+                        COUNT(DISTINCT CASE
                             WHEN c.spoken_text IS NOT NULL AND c.spoken_text != '' THEN c.id
                         END) AS script_chunks,
                         COUNT(DISTINCT a.chunk_id) AS audio_chunks
@@ -1468,6 +1511,10 @@ def get_materials_stats(
                     COALESCE(cs.total_chunks, 0) AS chunk_count,
                     CASE
                         WHEN COALESCE(cs.total_chunks, 0) = 0 THEN 0.0
+                        ELSE ROUND(COALESCE(cs.structure_chunks, 0)::numeric / cs.total_chunks * 100, 1)
+                    END AS structure_progress,
+                    CASE
+                        WHEN COALESCE(cs.total_chunks, 0) = 0 THEN 0.0
                         ELSE ROUND(cs.script_chunks::numeric / cs.total_chunks * 100, 1)
                     END AS script_progress,
                     CASE
@@ -1496,11 +1543,12 @@ def get_materials_stats(
             "uploaded_by": r[2] or "",
             "created_at": r[3].isoformat() if r[3] else "",
             "chunk_count": int(r[4]) if r[4] else 0,
-            "script_progress": float(r[5]) if r[5] is not None else 0.0,
-            "audio_progress": float(r[6]) if r[6] is not None else 0.0,
-            "enrolled_students": int(r[7]) if r[7] else 0,
-            "chat_count": int(r[8]) if r[8] else 0,
-            "active_task_type": r[9] or "",
+            "structure_progress": float(r[5]) if r[5] is not None else 0.0,
+            "script_progress": float(r[6]) if r[6] is not None else 0.0,
+            "audio_progress": float(r[7]) if r[7] is not None else 0.0,
+            "enrolled_students": int(r[8]) if r[8] else 0,
+            "chat_count": int(r[9]) if r[9] else 0,
+            "active_task_type": r[10] or "",
         }
         for r in rows
     ]
