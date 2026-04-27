@@ -345,8 +345,13 @@ def get_material_pdf(
                     "Cache-Control": "private, max-age=300",
                 },
             )
-        except Exception:
+        except Exception as exc:
+            logger.debug(
+                "PDF not found in MinIO: bucket=raw-papers object=%s error=%s",
+                object_name, exc,
+            )
             continue
+    logger.warning("PDF object not found for material=%s candidates=%s", material_id, object_candidates)
     raise HTTPException(status_code=404, detail="PDF object not found")
 
 
