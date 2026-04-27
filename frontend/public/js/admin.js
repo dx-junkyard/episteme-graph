@@ -281,14 +281,23 @@
           btn.textContent = "登録中...";
           apiFetch("/admin/materials/" + mid + "/pdf", { method: "PUT", body: formData, _noJson: true })
             .then(function (res) {
-              if (!res.ok) throw new Error("status " + res.status);
+              if (res.status === 409) {
+                return res.json().then(function (body) {
+                  throw { mismatch: true, message: body.detail || "PDFが一致しません" };
+                });
+              }
+              if (!res.ok) throw { message: "status " + res.status };
               btn.textContent = "完了";
               setTimeout(function () { btn.textContent = "PDF再登録"; btn.disabled = false; }, 2000);
             })
             .catch(function (err) {
               btn.textContent = "失敗";
               btn.disabled = false;
-              alert("PDF再登録に失敗しました: " + err.message);
+              if (err && err.mismatch) {
+                alert("⚠ " + err.message);
+              } else {
+                alert("PDF再登録に失敗しました: " + (err.message || err));
+              }
             });
         };
         input.click();

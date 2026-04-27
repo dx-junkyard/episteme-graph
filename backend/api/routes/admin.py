@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import uuid
 
@@ -75,6 +76,17 @@ from core.storage import get_storage_client
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin", tags=["Admin"])
+
+
+def _word_set(text: str) -> set[str]:
+    """テキストを正規化して3文字以上の単語セットを返す。"""
+    return {w for w in re.findall(r"[A-Za-z0-9぀-鿿]+", text.lower()) if len(w) >= 3}
+
+
+def _jaccard(set_a: set[str], set_b: set[str]) -> float:
+    if not set_a or not set_b:
+        return 0.0
+    return len(set_a & set_b) / len(set_a | set_b)
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +386,45 @@ def reupload_material_pdf(
     if len(pdf_bytes) == 0:
         raise HTTPException(status_code=400, detail="Empty file")
 
+    # ── テキスト照合（先頭3ページ vs DBの先頭チャンク群） ──────────────
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        new_text = " ".join(
+            page.get_text().replace("\x00", "") for page in list(doc)[:3]
+        )
+        doc.close()
+    except Exception:
+        new_text = ""
+
+    if new_text.strip():
+        session = _pg_session()
+        try:
+            rows = session.execute(
+                sa_text("""
+                    SELECT text FROM chunks
+                    WHERE material_id = :mid
+                    ORDER BY chunk_index
+                    LIMIT 5
+                """),
+                {"mid": material_id},
+            ).fetchall()
+        finally:
+            session.close()
+
+        existing_text = " ".join(r[0] or "" for r in rows)
+        if existing_text.strip():
+            similarity = _jaccard(_word_set(new_text), _word_set(existing_text))
+            logger.info(
+                "PDF re-upload similarity check: material=%s similarity=%.3f",
+                material_id, similarity,
+            )
+            if similarity < 0.3:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"アップロードされたPDFは登録済みの教材と一致しません（テキスト類似度: {similarity:.0%}）。元と同じPDFファイルを選択してください。",
+                )
+
     pdf_object_name = f"uploads/{material_id}.pdf"
     try:
         get_storage_client().upload_pdf("raw-papers", pdf_object_name, pdf_bytes)
@@ -381,7 +432,7 @@ def reupload_material_pdf(
         logger.exception("Failed to re-upload PDF for material %s", material_id)
         raise HTTPException(status_code=500, detail="PDF storage failed")
 
-    logger.info("PDF re-uploaded for material=%s size=%d", material_id, len(pdf_bytes))
+    logger.info("PDF re-uploaded for material=%s size=%d similarity_ok=True", material_id, len(pdf_bytes))
     return {"material_id": material_id, "object_name": pdf_object_name}
 
 
