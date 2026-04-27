@@ -1815,6 +1815,10 @@ def _extract_chunk_structure_metadata(knowledge_graph: object) -> tuple[str | No
     edge_candidates = abstract.get("edges")
     if not isinstance(edge_candidates, list):
         edge_candidates = graph.get("relationships") if isinstance(graph.get("relationships"), list) else []
+
+    if not smiles_dsl and edge_candidates:
+        smiles_dsl = _synthesize_smiles_dsl(edge_candidates) or None
+
     ancestors = _build_ancestors_from_edges(edge_candidates)
 
     return smiles_dsl, variables, ancestors or None
@@ -2186,7 +2190,11 @@ def reanalyze_course_structure_background(
             knowledge_graph = build_knowledge_graph(full_text, title)
             smiles_dsl, variables, ancestors = _extract_chunk_structure_metadata(knowledge_graph)
             if not smiles_dsl:
-                raise RuntimeError("structure analysis completed but did not generate smiles_dsl")
+                # LLM が DSL を生成できなかった場合は題名から最小限のプレースホルダーを生成する
+                smiles_dsl = f"(doc:Resource:{_safe_dsl_value(title)})"
+                logger.warning(
+                    "smiles_dsl not generated for material %s, using placeholder", material_id
+                )
 
             session = _pg_session()
             try:
