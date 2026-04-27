@@ -21,6 +21,7 @@ from core.lecture import normalize_to_placeholder_format as _normalize_formulas
 from core.llm import generate_text, generate_text_with_structured_output, generate_embeddings, get_embedding_dim
 from core.postgres import get_session as _pg_session
 from core.schema import PaperStructure
+from core.storage import get_storage_client as _get_storage
 
 logger = logging.getLogger(__name__)
 
@@ -1978,6 +1979,13 @@ def process_material_background(
 
     if task_id:
         update_background_task(task_id, "processing", result_data={"stage": "started"})
+
+    # PDF を MinIO に保存（upload_material が古いバージョンで未保存だった場合の補完）
+    try:
+        _get_storage().upload_pdf("raw-papers", f"uploads/{material_id}.pdf", pdf_bytes)
+        logger.info("PDF saved to MinIO for material=%s", material_id)
+    except Exception as _storage_exc:
+        logger.warning("Failed to save PDF to MinIO for material=%s: %s", material_id, _storage_exc)
 
     embedded_count = 0
 

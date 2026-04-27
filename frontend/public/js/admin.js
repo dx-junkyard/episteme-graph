@@ -248,7 +248,13 @@
       html += "<td>" + escHtml(m.title) + "</td>";
       html += '<td><span class="admin-status ' + statusClass + '">' + statusLabel + "</span></td>";
       html += "<td>" + escHtml(uploadedAt) + "</td>";
-      html += '<td><button class="admin-delete-btn" data-material-id="' + escHtml(m.material_id) + '" data-material-title="' + escHtml(m.title) + '" style="background:none;border:1px solid var(--color-text-danger);color:var(--color-text-danger);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">削除</button></td>';
+      var hasPdf = m.has_pdf === true;
+      var pdfBtnLabel = hasPdf ? "登録済 (再登録)" : "PDF再登録";
+      var pdfBtnColor = hasPdf ? "#999" : "var(--color-text-secondary)";
+      html += '<td style="display:flex;gap:6px">' +
+        '<button class="admin-pdf-reupload-btn" data-material-id="' + escHtml(m.material_id) + '" style="background:none;border:1px solid ' + pdfBtnColor + ';color:' + pdfBtnColor + ';padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px" title="PDFのみ再登録">' + pdfBtnLabel + '</button>' +
+        '<button class="admin-delete-btn" data-material-id="' + escHtml(m.material_id) + '" data-material-title="' + escHtml(m.title) + '" style="background:none;border:1px solid var(--color-text-danger);color:var(--color-text-danger);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">削除</button>' +
+        '</td>';
       html += "</tr>";
     });
     tbody.innerHTML = html;
@@ -259,6 +265,45 @@
         var mid = this.getAttribute("data-material-id");
         var title = this.getAttribute("data-material-title");
         openDeleteConfirmModal("material", mid, title);
+      });
+    });
+
+    // Attach PDF re-upload handlers
+    tbody.querySelectorAll(".admin-pdf-reupload-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var mid = this.getAttribute("data-material-id");
+        var input = document.createElement("input");
+        input.type = "file";
+        input.accept = ".pdf,application/pdf";
+        input.onchange = function () {
+          var file = input.files[0];
+          if (!file) return;
+          var formData = new FormData();
+          formData.append("file", file);
+          btn.disabled = true;
+          btn.textContent = "登録中...";
+          apiFetch("/admin/materials/" + mid + "/pdf", { method: "PUT", body: formData, _noJson: true })
+            .then(function (res) {
+              if (res.status === 409) {
+                return res.json().then(function (body) {
+                  throw { mismatch: true, message: body.detail || "PDFが一致しません" };
+                });
+              }
+              if (!res.ok) throw { message: "status " + res.status };
+              btn.textContent = "完了";
+              setTimeout(function () { btn.textContent = "PDF再登録"; btn.disabled = false; }, 2000);
+            })
+            .catch(function (err) {
+              btn.textContent = "失敗";
+              btn.disabled = false;
+              if (err && err.mismatch) {
+                alert("⚠ " + err.message);
+              } else {
+                alert("PDF再登録に失敗しました: " + (err.message || err));
+              }
+            });
+        };
+        input.click();
       });
     });
   }
@@ -2358,6 +2403,7 @@
     displayView: "preview",
     syncSpoken: true,
     pdfObjectUrl: null,
+    pdfUrl: null,
   };
 
   function initLectureStudio() {
@@ -2578,10 +2624,6 @@
       if (el.getAttribute("data-chunk-id") === chunkId) el.classList.add("active");
     });
 
-    lsState.view = "edit";
-    document.querySelectorAll("#ls-work-tabs .ls-work-tab").forEach(function (b) {
-      b.classList.toggle("active", b.getAttribute("data-ls-view") === lsState.view);
-    });
     lsState.displayView = "preview";
     lsRenderWorkspace();
 
@@ -2797,8 +2839,15 @@
       pdfView.innerHTML = '<div class="ls-empty-state">このチャンクにPDF参照がありません</div>';
       return;
     }
-    if (pdfView.getAttribute("data-pdf-chunk") === chunk.chunk_id) return;
+    var page = chunk.page_start ? "#page=" + encodeURIComponent(chunk.page_start) : "";
+    // ページ情報があるチャンクは同一チャンクIDなら再描画スキップ
+    if (chunk.page_start && pdfView.getAttribute("data-pdf-chunk") === chunk.chunk_id) return;
     pdfView.setAttribute("data-pdf-chunk", chunk.chunk_id);
+    // 同じPDFが既に読み込み済みならBlobを再利用してiframeだけ差し替え
+    if (lsState.pdfObjectUrl && lsState.pdfUrl === chunk.pdf_url) {
+      pdfView.innerHTML = '<iframe class="ls-pdf-frame" src="' + escHtml(lsState.pdfObjectUrl + page) + '"></iframe>';
+      return;
+    }
     pdfView.innerHTML = '<div class="ls-empty-state">PDFを読み込み中...</div>';
     apiFetchRaw(chunk.pdf_url, { _noJson: true })
       .then(function (res) {
@@ -2808,7 +2857,7 @@
       .then(function (blob) {
         if (lsState.pdfObjectUrl) URL.revokeObjectURL(lsState.pdfObjectUrl);
         lsState.pdfObjectUrl = URL.createObjectURL(blob);
-        var page = chunk.page_start ? "#page=" + encodeURIComponent(chunk.page_start) : "";
+        lsState.pdfUrl = chunk.pdf_url;
         pdfView.innerHTML = '<iframe class="ls-pdf-frame" src="' + escHtml(lsState.pdfObjectUrl + page) + '"></iframe>';
       })
       .catch(function () {
@@ -2848,6 +2897,7 @@
       URL.revokeObjectURL(lsState.pdfObjectUrl);
       lsState.pdfObjectUrl = null;
     }
+    lsState.pdfUrl = null;
     document.getElementById("ls-workspace").innerHTML = '<div class="ls-empty-state">チャンクを選択すると編集ワークベンチが表示されます</div>';
     document.getElementById("ls-chunk-meta").textContent = "チャンクを選択してください";
     document.getElementById("ls-rewrite-prompt").disabled = true;
