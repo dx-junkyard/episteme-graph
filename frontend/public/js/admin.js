@@ -2358,6 +2358,7 @@
     displayView: "preview",
     syncSpoken: true,
     pdfObjectUrl: null,
+    pdfUrl: null,
   };
 
   function initLectureStudio() {
@@ -2578,10 +2579,6 @@
       if (el.getAttribute("data-chunk-id") === chunkId) el.classList.add("active");
     });
 
-    lsState.view = "edit";
-    document.querySelectorAll("#ls-work-tabs .ls-work-tab").forEach(function (b) {
-      b.classList.toggle("active", b.getAttribute("data-ls-view") === lsState.view);
-    });
     lsState.displayView = "preview";
     lsRenderWorkspace();
 
@@ -2797,8 +2794,15 @@
       pdfView.innerHTML = '<div class="ls-empty-state">このチャンクにPDF参照がありません</div>';
       return;
     }
-    if (pdfView.getAttribute("data-pdf-chunk") === chunk.chunk_id) return;
+    var page = chunk.page_start ? "#page=" + encodeURIComponent(chunk.page_start) : "";
+    // ページ情報があるチャンクは同一チャンクIDなら再描画スキップ
+    if (chunk.page_start && pdfView.getAttribute("data-pdf-chunk") === chunk.chunk_id) return;
     pdfView.setAttribute("data-pdf-chunk", chunk.chunk_id);
+    // 同じPDFが既に読み込み済みならBlobを再利用してiframeだけ差し替え
+    if (lsState.pdfObjectUrl && lsState.pdfUrl === chunk.pdf_url) {
+      pdfView.innerHTML = '<iframe class="ls-pdf-frame" src="' + escHtml(lsState.pdfObjectUrl + page) + '"></iframe>';
+      return;
+    }
     pdfView.innerHTML = '<div class="ls-empty-state">PDFを読み込み中...</div>';
     apiFetchRaw(chunk.pdf_url, { _noJson: true })
       .then(function (res) {
@@ -2808,7 +2812,7 @@
       .then(function (blob) {
         if (lsState.pdfObjectUrl) URL.revokeObjectURL(lsState.pdfObjectUrl);
         lsState.pdfObjectUrl = URL.createObjectURL(blob);
-        var page = chunk.page_start ? "#page=" + encodeURIComponent(chunk.page_start) : "";
+        lsState.pdfUrl = chunk.pdf_url;
         pdfView.innerHTML = '<iframe class="ls-pdf-frame" src="' + escHtml(lsState.pdfObjectUrl + page) + '"></iframe>';
       })
       .catch(function () {
@@ -2848,6 +2852,7 @@
       URL.revokeObjectURL(lsState.pdfObjectUrl);
       lsState.pdfObjectUrl = null;
     }
+    lsState.pdfUrl = null;
     document.getElementById("ls-workspace").innerHTML = '<div class="ls-empty-state">チャンクを選択すると編集ワークベンチが表示されます</div>';
     document.getElementById("ls-chunk-meta").textContent = "チャンクを選択してください";
     document.getElementById("ls-rewrite-prompt").disabled = true;
