@@ -1667,8 +1667,7 @@ def build_knowledge_graph(text: str, title: str) -> dict:
             response_format=PaperStructure,
         )
         graph = _paper_structure_to_knowledge_graph(structure)
-        if graph.get("abstract_structure", {}).get("smiles_dsl"):
-            return graph
+        return graph  # smiles_dsl がなくても返す。呼び出し元で合成・プレースホルダーを処理する
     except Exception as exc:
         logger.warning("Structured knowledge graph extraction failed: %s", exc, exc_info=True)
 
