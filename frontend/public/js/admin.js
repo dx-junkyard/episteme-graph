@@ -3522,17 +3522,24 @@
     _groupsState.list.forEach(function (g) {
       var badge = g.my_role === "admin" ? '<span style="color:var(--color-text-success);font-size:11px;margin-left:4px">(admin)</span>' : "";
       var isSelected = g.id === _groupsState.selectedId;
+      var cardStyle = isSelected
+        ? "border:2px solid var(--color-text-success);border-radius:8px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.12);margin-bottom:0"
+        : "border:1px solid var(--color-border);border-radius:6px;overflow:hidden;opacity:0.8";
       var headerBg = isSelected ? "var(--color-bg-tertiary)" : "var(--color-bg-secondary)";
       var bodyDisplay = isSelected ? "block" : "none";
       var toggleIcon = isSelected ? "▲" : "▼";
+      var accentBar = isSelected
+        ? '<div style="height:3px;background:var(--color-text-success)"></div>'
+        : "";
       html +=
-        '<div style="border:1px solid var(--color-border);border-radius:6px;overflow:hidden">' +
+        '<div style="' + cardStyle + '">' +
+          accentBar +
           '<div class="groups-item" data-gid="' + escHtml(g.id) + '" style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;cursor:pointer;background:' + headerBg + '">' +
             '<div>' +
-              '<div style="font-size:13px;font-weight:500">' + escHtml(g.name) + badge + "</div>" +
+              '<div style="font-size:13px;font-weight:' + (isSelected ? "600" : "500") + '">' + escHtml(g.name) + badge + "</div>" +
               '<div style="font-size:11px;color:var(--color-text-tertiary)">メンバー ' + (g.member_count || 0) + "人</div>" +
             "</div>" +
-            '<span style="font-size:10px;color:var(--color-text-tertiary)">' + toggleIcon + "</span>" +
+            '<span style="font-size:10px;color:' + (isSelected ? "var(--color-text-success)" : "var(--color-text-tertiary)") + '">' + toggleIcon + "</span>" +
           "</div>" +
           '<div id="groups-body-' + escHtml(g.id) + '" style="display:' + bodyDisplay + ";padding:16px;border-top:1px solid var(--color-border)\">" +
             (isSelected ? '<div style="font-size:13px;color:var(--color-text-tertiary)">読み込み中...</div>' : "") +
