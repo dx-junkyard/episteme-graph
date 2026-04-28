@@ -3521,10 +3521,29 @@
     var html = "";
     _groupsState.list.forEach(function (g) {
       var badge = g.my_role === "admin" ? '<span style="color:var(--color-text-success);font-size:11px;margin-left:4px">(admin)</span>' : "";
-      var on = g.id === _groupsState.selectedId ? 'background:var(--color-bg-tertiary);' : "";
-      html += '<div data-gid="' + escHtml(g.id) + '" class="groups-item" style="padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--color-border);' + on + '">' +
-        '<div style="font-size:13px">' + escHtml(g.name) + badge + '</div>' +
-        '<div style="font-size:11px;color:var(--color-text-tertiary)">メンバー ' + (g.member_count || 0) + "人</div>" +
+      var isSelected = g.id === _groupsState.selectedId;
+      var cardStyle = isSelected
+        ? "border:2px solid var(--color-text-success);border-radius:8px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.12);margin-bottom:0"
+        : "border:1px solid var(--color-border);border-radius:6px;overflow:hidden;opacity:0.8";
+      var headerBg = isSelected ? "var(--color-bg-tertiary)" : "var(--color-bg-secondary)";
+      var bodyDisplay = isSelected ? "block" : "none";
+      var toggleIcon = isSelected ? "▲" : "▼";
+      var accentBar = isSelected
+        ? '<div style="height:3px;background:var(--color-text-success)"></div>'
+        : "";
+      html +=
+        '<div style="' + cardStyle + '">' +
+          accentBar +
+          '<div class="groups-item" data-gid="' + escHtml(g.id) + '" style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;cursor:pointer;background:' + headerBg + '">' +
+            '<div>' +
+              '<div style="font-size:13px;font-weight:' + (isSelected ? "600" : "500") + '">' + escHtml(g.name) + badge + "</div>" +
+              '<div style="font-size:11px;color:var(--color-text-tertiary)">メンバー ' + (g.member_count || 0) + "人</div>" +
+            "</div>" +
+            '<span style="font-size:10px;color:' + (isSelected ? "var(--color-text-success)" : "var(--color-text-tertiary)") + '">' + toggleIcon + "</span>" +
+          "</div>" +
+          '<div id="groups-body-' + escHtml(g.id) + '" style="display:' + bodyDisplay + ";padding:16px;border-top:1px solid var(--color-border)\">" +
+            (isSelected ? '<div style="font-size:13px;color:var(--color-text-tertiary)">読み込み中...</div>' : "") +
+          "</div>" +
         "</div>";
     });
     el.innerHTML = html;
@@ -3546,12 +3565,15 @@
       })
       .then(renderGroupDetail)
       .catch(function () {
-        document.getElementById("groups-detail").innerHTML =
-          '<p style="color:var(--color-text-tertiary)">取得に失敗しました</p>';
+        var body = document.getElementById("groups-body-" + groupId);
+        if (body) body.innerHTML = '<p style="color:var(--color-text-tertiary)">取得に失敗しました</p>';
       });
   }
 
   function renderGroupDetail(g) {
+    var bodyEl = document.getElementById("groups-body-" + g.id);
+    if (!bodyEl) return;
+
     var isAdmin = g.my_role === "admin";
     var members = (g.members || []).map(function (m) {
       var actions = "";
@@ -3591,8 +3613,7 @@
         "</div>";
     }
 
-    document.getElementById("groups-detail").innerHTML =
-      '<h3 style="margin:0 0 4px 0">' + escHtml(g.name) + "</h3>" +
+    bodyEl.innerHTML =
       '<p style="color:var(--color-text-secondary);font-size:13px;margin:0 0 8px 0">' + escHtml(g.description || "") + "</p>" +
       inviteCodeBlock +
       '<h4 style="font-size:13px;margin:16px 0 8px 0">メンバー (' + (g.members || []).length + ")</h4>" +
@@ -3602,27 +3623,27 @@
       dangerZone;
 
     if (isAdmin) {
-      var rot = document.getElementById("groups-rotate-btn");
+      var rot = bodyEl.querySelector("#groups-rotate-btn");
       if (rot) rot.addEventListener("click", function () { rotateInviteCode(g.id); });
-      var invBtn = document.getElementById("groups-invite-btn");
+      var invBtn = bodyEl.querySelector("#groups-invite-btn");
       if (invBtn) invBtn.addEventListener("click", function () {
-        var u = document.getElementById("groups-invite-username").value.trim();
+        var u = bodyEl.querySelector("#groups-invite-username").value.trim();
         if (!u) return;
         inviteUser(g.id, u);
       });
-      var del = document.getElementById("groups-delete-btn");
+      var del = bodyEl.querySelector("#groups-delete-btn");
       if (del) del.addEventListener("click", function () {
         if (!confirm("グループ「" + g.name + "」を削除します。よろしいですか？")) return;
         deleteGroup(g.id);
       });
-      var removeBtns = document.querySelectorAll(".groups-remove-btn");
+      var removeBtns = bodyEl.querySelectorAll(".groups-remove-btn");
       for (var i = 0; i < removeBtns.length; i++) {
         removeBtns[i].addEventListener("click", function () {
           removeMember(g.id, this.getAttribute("data-uid"));
         });
       }
     } else {
-      var leave = document.querySelector(".groups-leave-btn");
+      var leave = bodyEl.querySelector(".groups-leave-btn");
       if (leave) leave.addEventListener("click", function () {
         if (!confirm("グループを退会しますか？")) return;
         removeMember(g.id, _meUserId());
@@ -3697,7 +3718,8 @@
       })
       .then(function () {
         setGroupsStatus("ユーザー「" + username + "」を招待しました。", "success");
-        document.getElementById("groups-invite-username").value = "";
+        var invInput = document.getElementById("groups-invite-username");
+        if (invInput) invInput.value = "";
         selectGroup(gid);
       })
       .catch(function (e) { setGroupsStatus("招待失敗: " + (e.detail || "不明なエラー"), "error"); });
@@ -3719,8 +3741,6 @@
         if (!res.ok) return res.json().then(function (d) { throw d; });
         setGroupsStatus("グループを削除しました。", "success");
         _groupsState.selectedId = null;
-        document.getElementById("groups-detail").innerHTML =
-          '<p style="color:var(--color-text-tertiary)">グループを選択してください</p>';
         loadGroups();
       })
       .catch(function (e) { setGroupsStatus("削除失敗: " + (e.detail || "不明なエラー"), "error"); });
