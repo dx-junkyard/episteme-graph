@@ -65,6 +65,17 @@ class TestProviderConfig:
         s = Settings(_env_file=None, llm_api_key="k", llm_embedding_dim=768)
         assert s.llm_embedding_dim == 768
 
+    def test_minio_credentials_fall_back_to_root_aliases(self, monkeypatch):
+        monkeypatch.delenv("MINIO_ACCESS_KEY", raising=False)
+        monkeypatch.delenv("MINIO_SECRET_KEY", raising=False)
+        monkeypatch.setenv("MINIO_ROOT_USER", "root-user")
+        monkeypatch.setenv("MINIO_ROOT_PASSWORD", "root-password")
+        from core.config import Settings
+
+        s = Settings(_env_file=None)
+        assert s.minio_access_key == "root-user"
+        assert s.minio_secret_key == "root-password"
+
 
 class TestEmbeddingDimHelper:
     def test_get_embedding_dim_reads_settings(self):
