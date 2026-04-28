@@ -90,8 +90,14 @@ class Settings(BaseSettings):
 
     # --- MinIO ---
     minio_endpoint: str = "localhost:9000"
-    minio_access_key: str = "minioadmin"
-    minio_secret_key: str = "minioadmin"
+    minio_access_key: str = Field(
+        default="minioadmin",
+        validation_alias=AliasChoices("MINIO_ACCESS_KEY", "MINIO_ROOT_USER"),
+    )
+    minio_secret_key: str = Field(
+        default="minioadmin",
+        validation_alias=AliasChoices("MINIO_SECRET_KEY", "MINIO_ROOT_PASSWORD"),
+    )
     minio_public_endpoint: str = "localhost:9000"
 
     # --- CORS ---
