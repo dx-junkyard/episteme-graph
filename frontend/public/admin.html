@@ -364,19 +364,10 @@
 
         <div id="groups-status" class="upload-status" style="display:none"></div>
 
-        <!-- Group list + details -->
-        <div style="display:flex;gap:16px">
-          <div style="flex:0 0 260px">
-            <h4 style="font-size:13px;margin:0 0 8px 0;color:var(--color-text-secondary)">所属グループ</h4>
-            <div id="groups-list" style="border:1px solid var(--color-border);border-radius:4px;overflow:hidden">
-              <div style="padding:12px;color:var(--color-text-tertiary);font-size:13px">読み込み中...</div>
-            </div>
-          </div>
-          <div style="flex:1">
-            <div id="groups-detail">
-              <p style="color:var(--color-text-tertiary);font-size:13px">グループを選択してください</p>
-            </div>
-          </div>
+        <!-- Group list (accordion) -->
+        <h4 style="font-size:13px;margin:0 0 8px 0;color:var(--color-text-secondary)">所属グループ</h4>
+        <div id="groups-list" style="display:flex;flex-direction:column;gap:8px">
+          <div style="padding:12px;color:var(--color-text-tertiary);font-size:13px">読み込み中...</div>
         </div>
       </div>
     </div>
