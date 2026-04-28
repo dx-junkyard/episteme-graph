@@ -171,6 +171,27 @@
     return [];
   }
 
+  async function clearChatHistory() {
+    if (!state.courseId || !state.currentTopicId || state.sending) return;
+    if (state.chatMessages.length === 0) return;
+    if (!confirm("このトピックの質疑応答履歴を削除します。よろしいですか？")) return;
+
+    var btn = document.getElementById("chat-clear-btn");
+    if (btn) btn.disabled = true;
+    try {
+      const res = await apiFetch(
+        "/learning/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/chat",
+        { method: "DELETE" }
+      );
+      if (!res.ok) throw new Error("Delete failed");
+      state.chatMessages = [];
+      renderChat();
+    } catch (err) {
+      alert("質疑応答履歴の削除に失敗しました。");
+      if (btn) btn.disabled = false;
+    }
+  }
+
   // ── Render: Sidebar ────────────────────────────────────────────────
   function renderSidebar() {
     const sb = document.getElementById("sidebar");
@@ -325,6 +346,8 @@
 
     ca.innerHTML = html;
     ca.scrollTop = ca.scrollHeight;
+    var clearBtn = document.getElementById("chat-clear-btn");
+    if (clearBtn) clearBtn.disabled = !state.course || !state.currentTopicId || state.sending || state.chatMessages.length === 0;
 
     // Bind suggest buttons (drill-down + initial suggestions)
     ca.querySelectorAll(".suggest-btn").forEach(function (btn) {
@@ -740,10 +763,12 @@
   function initInput() {
     const input = document.getElementById("chat-input");
     const btn = document.getElementById("send-btn");
+    const clearBtn = document.getElementById("chat-clear-btn");
 
     btn.addEventListener("click", function () {
       sendMessage(input.value.trim());
     });
+    if (clearBtn) clearBtn.addEventListener("click", clearChatHistory);
 
     input.addEventListener("keydown", function (e) {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
@@ -902,11 +927,13 @@
   function setChatEnabled(enabled) {
     var input = document.getElementById("chat-input");
     var btn = document.getElementById("send-btn");
+    var clearBtn = document.getElementById("chat-clear-btn");
     if (input) {
       input.disabled = !enabled;
       input.placeholder = enabled ? "質問を入力してください..." : "コースを選択してください";
     }
     if (btn) btn.disabled = !enabled;
+    if (clearBtn) clearBtn.disabled = !enabled || !state.currentTopicId || state.chatMessages.length === 0;
   }
 
   async function loadAndRenderCourse() {

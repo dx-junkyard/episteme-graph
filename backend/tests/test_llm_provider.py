@@ -16,6 +16,11 @@ class _DummyStruct(BaseModel):
     score: int
 
 
+class _OptionalStruct(BaseModel):
+    title: str
+    year: int | None = None
+
+
 def _make_settings(provider: str, dim: int = 3072, **kwargs):
     from core.config import Settings
 
@@ -305,6 +310,31 @@ class TestGoogleVertexAIProvider:
             )
 
         assert parsed == _DummyStruct(answer="hi", score=7)
+
+    def test_vertex_ai_structured_schema_strips_nullable_anyof(self):
+        from core import llm
+
+        fake_model = MagicMock()
+        fake_model.generate_content.return_value = self._make_vertex_response_from_parts(
+            '{"title": "paper", "year": 2026}'
+        )
+        fake_generative_model_cls = MagicMock(return_value=fake_model)
+        fake_generation_config_cls = MagicMock()
+        fake_vertex_models = types.ModuleType("vertexai.generative_models")
+        fake_vertex_models.GenerativeModel = fake_generative_model_cls
+        fake_vertex_models.GenerationConfig = fake_generation_config_cls
+
+        with patch.dict("sys.modules", {"vertexai.generative_models": fake_vertex_models}):
+            parsed = llm._vertex_ai_generate_structured(
+                [{"role": "user", "content": "q"}],
+                _OptionalStruct,
+                "gemini-2.5-pro",
+            )
+
+        schema = fake_generation_config_cls.call_args.kwargs["response_schema"]
+        assert "anyOf" not in schema["properties"]["year"]
+        assert schema["properties"]["year"]["type"] == "integer"
+        assert parsed == _OptionalStruct(title="paper", year=2026)
 
     def test_get_vertex_ai_client_raises_on_missing_adc(self):
         """ADC が見つからない場合は EnvironmentError を投げる。"""

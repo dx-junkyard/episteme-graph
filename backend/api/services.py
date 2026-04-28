@@ -18,8 +18,10 @@ from sqlalchemy import text as sa_text
 
 from core.config import get_settings as _get_settings
 from core.lecture import normalize_to_placeholder_format as _normalize_formulas
-from core.llm import generate_text, generate_embeddings, get_embedding_dim
+from core.llm import generate_text, generate_text_with_structured_output, generate_embeddings, get_embedding_dim
 from core.postgres import get_session as _pg_session
+from core.schema import PaperStructure
+from core.storage import get_storage_client as _get_storage
 
 logger = logging.getLogger(__name__)
 
@@ -1548,8 +1550,128 @@ def extract_pdf_text(pdf_bytes: bytes) -> str:
     return "\n".join(text_parts).replace("\x00", "")
 
 
+def extract_pdf_pages(pdf_bytes: bytes) -> list[dict]:
+    """PDFからページ単位のテキストを抽出する。"""
+    import fitz  # PyMuPDF
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    pages = []
+    for i, page in enumerate(doc, start=1):
+        pages.append({"page": i, "text": page.get_text().replace("\x00", "")})
+    doc.close()
+    return pages
+
+
+def _safe_dsl_value(value: str) -> str:
+    cleaned = str(value or "").strip()
+    cleaned = cleaned.replace("(", "[").replace(")", "]").replace(":", "-")
+    return cleaned[:80] or "Concept"
+
+
+def _node_var(value: str, index: int) -> str:
+    base = "".join(ch.lower() for ch in str(value or "") if ch.isalnum())
+    if not base:
+        base = f"v{index}"
+    if base[0].isdigit():
+        base = "v" + base
+    return base[:16]
+
+
+def _synthesize_smiles_dsl(edges: list[dict]) -> str:
+    node_vars: dict[str, str] = {}
+
+    def _var(node: str) -> str:
+        if node not in node_vars:
+            node_vars[node] = _node_var(node, len(node_vars))
+        return node_vars[node]
+
+    parts: list[str] = []
+    for edge in edges[:24]:
+        source = str(edge.get("source") or "").strip()
+        target = str(edge.get("target") or "").strip()
+        if not source or not target:
+            continue
+        predicate = str(edge.get("core_predicate") or edge.get("relation") or "RELATED_TO").upper()
+        domain_verb = str(edge.get("domain_verb") or predicate.lower()).replace(":", "-")
+        polarity = str(edge.get("polarity") or "+")
+        is_core = bool(edge.get("is_core", True))
+        arrow = f"==[{predicate}:{domain_verb}:{polarity}]=>" if is_core else f"-[{predicate}:{domain_verb}:{polarity}]->"
+        parts.append(
+            f"({_var(source)}:Resource:{_safe_dsl_value(source)}) "
+            f"{arrow} "
+            f"({_var(target)}:Resource:{_safe_dsl_value(target)})"
+        )
+    return " ".join(parts)
+
+
+def _paper_structure_to_knowledge_graph(structure: PaperStructure) -> dict:
+    data = structure.model_dump(mode="json")
+    abstract = data.get("abstract_structure") or {}
+    edges = abstract.get("edges") if isinstance(abstract.get("edges"), list) else []
+    smiles_dsl = str(abstract.get("smiles_dsl") or "").strip()
+    if not smiles_dsl and edges:
+        smiles_dsl = _synthesize_smiles_dsl(edges)
+        abstract["smiles_dsl"] = smiles_dsl
+
+    variables = abstract.get("variables") if isinstance(abstract.get("variables"), list) else []
+    concepts = [
+        {
+            "id": _node_var(str(v), i),
+            "name": str(v),
+            "description": "",
+            "type": "concept",
+        }
+        for i, v in enumerate(variables)
+    ]
+    relationships = [
+        {
+            "source": str(edge.get("source") or ""),
+            "target": str(edge.get("target") or ""),
+            "relation": str(edge.get("core_predicate") or "RELATED_TO"),
+            "description": str(edge.get("domain_verb") or ""),
+        }
+        for edge in edges
+        if edge.get("source") and edge.get("target")
+    ]
+    return {
+        "title": data.get("title") or structure.title,
+        "domain": data.get("domain") or "",
+        "concepts": concepts,
+        "relationships": relationships,
+        "abstract_structure": abstract,
+        "key_equations": data.get("key_equations") or [],
+        "chapters": [],
+    }
+
+
 def build_knowledge_graph(text: str, title: str) -> dict:
     """抽出したテキストからDSLベースのナレッジグラフを構築する。"""
+    structured_prompt = f"""以下の教材テキストから PaperStructure を抽出してください。
+
+教材タイトル: {title}
+
+教材テキスト:
+{text[:12000]}
+
+要件:
+- abstract_structure.variables に主要概念・物理量・理論枠組みを入れる
+- abstract_structure.edges に概念間の CONTAINS / REQUIRES / DEFINES / MEASURES / CAUSES / CORRELATES / EQUIVALENT 関係を入れる
+- abstract_structure.smiles_dsl は必ず非空にする
+- DSL のノードは必ず (varID:OntologyType:value) 形式にする
+- CONTAINS 関係がある場合は edges に必ず含める
+- 物理論文では MathematicalObject, PhysicalPhenomenon, TheoreticalFramework, Theorem, Symmetry, Particle を優先する
+"""
+
+    try:
+        structure = generate_text_with_structured_output(
+            messages=[{"role": "user", "content": structured_prompt}],
+            response_format=PaperStructure,
+        )
+        graph = _paper_structure_to_knowledge_graph(structure)
+        return graph  # smiles_dsl がなくても返す。呼び出し元で合成・プレースホルダーを処理する
+    except Exception as exc:
+        logger.warning("Structured knowledge graph extraction failed: %s", exc, exc_info=True)
+
     prompt = f"""以下の教材テキストから知識グラフを構築してください。
 
 **教材タイトル:** {title}
@@ -1577,6 +1699,20 @@ def build_knowledge_graph(text: str, title: str) -> dict:
       "description": "関係の説明"
     }}
   ],
+  "abstract_structure": {{
+    "variables": ["concept_1", "concept_2"],
+    "edges": [
+      {{
+        "source": "concept_1",
+        "target": "concept_2",
+        "core_predicate": "CONTAINS|REQUIRES|CAUSES|DEFINES|EXTENDS|APPLIES_TO",
+        "domain_verb": "contains",
+        "polarity": "+",
+        "is_core": true
+      }}
+    ],
+    "smiles_dsl": "(concept_1:Resource:概念名) ==[CONTAINS:contains:+]=> (concept_2:Resource:下位概念名)"
+  }},
   "chapters": [
     {{
       "title": "章タイトル",
@@ -1624,7 +1760,119 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 100) -> list[st
     return chunks
 
 
-def embed_chunks(material_id: str, doc_id: str, chunks: list[str]) -> int:
+def chunk_pdf_pages(pages: list[dict], chunk_size: int = 1000, overlap: int = 100) -> list[dict]:
+    """ページ単位テキストをチャンク化し、ページ範囲を保持する。"""
+    full = ""
+    spans: list[dict] = []
+    for page in pages:
+        page_text = str(page.get("text") or "")
+        start = len(full)
+        full += page_text + "\n"
+        spans.append({"page": page.get("page"), "start": start, "end": len(full)})
+
+    chunks: list[dict] = []
+    start = 0
+    while start < len(full):
+        end = start + chunk_size
+        chunk = full[start:end].strip()
+        if chunk:
+            touched = [
+                span["page"]
+                for span in spans
+                if span["page"] and span["start"] < end and span["end"] > start
+            ]
+            chunks.append({
+                "text": chunk,
+                "page_start": min(touched) if touched else None,
+                "page_end": max(touched) if touched else None,
+            })
+        start = end - overlap
+    return chunks
+
+
+def _extract_chunk_structure_metadata(knowledge_graph: object) -> tuple[str | None, object | None, object | None]:
+    """knowledge_graph から chunks に保存する構造メタデータを取り出す。"""
+    graph = _json_obj(knowledge_graph)
+    abstract = graph.get("abstract_structure") if isinstance(graph.get("abstract_structure"), dict) else {}
+
+    smiles_dsl = str(abstract.get("smiles_dsl") or graph.get("smiles_dsl") or "").strip() or None
+
+    variables: object | None = abstract.get("variables") or None
+    if variables is None:
+        concepts = graph.get("concepts")
+        if isinstance(concepts, list) and concepts:
+            variables = [
+                {
+                    "id": c.get("id") or c.get("name"),
+                    "name": c.get("name") or c.get("id"),
+                    "type": c.get("type"),
+                    "description": c.get("description"),
+                }
+                for c in concepts
+                if isinstance(c, dict)
+            ]
+
+    edge_candidates = abstract.get("edges")
+    if not isinstance(edge_candidates, list):
+        edge_candidates = graph.get("relationships") if isinstance(graph.get("relationships"), list) else []
+
+    if not smiles_dsl and edge_candidates:
+        smiles_dsl = _synthesize_smiles_dsl(edge_candidates) or None
+
+    ancestors = _build_ancestors_from_edges(edge_candidates)
+
+    return smiles_dsl, variables, ancestors or None
+
+
+def _edge_predicate(edge: dict) -> str:
+    return str(
+        edge.get("core_predicate")
+        or edge.get("relation")
+        or edge.get("predicate")
+        or ""
+    ).upper()
+
+
+def _build_ancestors_from_edges(edges: object) -> dict[str, list[str]]:
+    """CONTAINS エッジから child -> ancestors のマップを構築する。"""
+    if not isinstance(edges, list):
+        return {}
+
+    parent_of: dict[str, set[str]] = {}
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        if _edge_predicate(edge) != "CONTAINS":
+            continue
+        source = str(edge.get("source") or "").strip()
+        target = str(edge.get("target") or "").strip()
+        if source and target:
+            parent_of.setdefault(target, set()).add(source)
+
+    def _get_ancestors(node: str, visited: set[str] | None = None) -> list[str]:
+        visited = visited or set()
+        if node in visited:
+            return []
+        visited.add(node)
+        result: list[str] = []
+        for parent in sorted(parent_of.get(node, set())):
+            result.append(parent)
+            result.extend(_get_ancestors(parent, visited))
+        return result
+
+    return {
+        child: ancestors
+        for child in parent_of
+        if (ancestors := _get_ancestors(child))
+    }
+
+
+def embed_chunks(
+    material_id: str,
+    doc_id: str,
+    chunks: list[str] | list[dict],
+    knowledge_graph: object | None = None,
+) -> int:
     """テキストチャンクをembeddingしてPostgreSQLに保存する。
 
     Returns:
@@ -1635,31 +1883,51 @@ def embed_chunks(material_id: str, doc_id: str, chunks: list[str]) -> int:
     """
     embedded_count = 0
     batch_size = 50
-    total = len(chunks)
+    records = [
+        c if isinstance(c, dict) else {"text": c, "page_start": None, "page_end": None}
+        for c in chunks
+    ]
+    smiles_dsl, variables, ancestors = _extract_chunk_structure_metadata(knowledge_graph)
+    total = len(records)
     try:
         for i in range(0, total, batch_size):
-            batch = chunks[i:i + batch_size]
+            batch = records[i:i + batch_size]
+            batch_texts = [str(item.get("text") or "") for item in batch]
             logger.info(
                 "Embedding batch %d-%d / %d for material %s",
                 i + 1, i + len(batch), total, material_id,
             )
-            embeddings = generate_embeddings(batch)
+            embeddings = generate_embeddings(batch_texts)
             session = _pg_session()
             try:
                 for j, embedding in enumerate(embeddings):
+                    record = batch[j]
                     chunk_id = uuid.uuid4()
                     session.execute(
                         sa_text("""
-                            INSERT INTO chunks (id, document_id, chunk_index, text, embedding, material_id)
-                            VALUES (:id, CAST(:doc_id AS uuid), :idx, :text, :embedding, :material_id)
+                            INSERT INTO chunks (
+                                id, document_id, chunk_index, text, embedding,
+                                material_id, page_start, page_end,
+                                smiles_dsl, variables, ancestors
+                            )
+                            VALUES (
+                                :id, CAST(:doc_id AS uuid), :idx, :text, :embedding,
+                                :material_id, :page_start, :page_end,
+                                :smiles_dsl, CAST(:variables AS jsonb), CAST(:ancestors AS jsonb)
+                            )
                         """),
                         {
                             "id": chunk_id,
                             "doc_id": doc_id,
                             "idx": i + j,
-                            "text": batch[j],
+                            "text": record.get("text") or "",
                             "embedding": str(embedding),
                             "material_id": material_id,
+                            "page_start": record.get("page_start"),
+                            "page_end": record.get("page_end"),
+                            "smiles_dsl": smiles_dsl,
+                            "variables": json.dumps(variables, ensure_ascii=False) if variables is not None else None,
+                            "ancestors": json.dumps(ancestors, ensure_ascii=False) if ancestors is not None else None,
                         },
                     )
                 session.commit()
@@ -1712,12 +1980,20 @@ def process_material_background(
     if task_id:
         update_background_task(task_id, "processing", result_data={"stage": "started"})
 
+    # PDF を MinIO に保存（upload_material が古いバージョンで未保存だった場合の補完）
+    try:
+        _get_storage().upload_pdf("raw-papers", f"uploads/{material_id}.pdf", pdf_bytes)
+        logger.info("PDF saved to MinIO for material=%s", material_id)
+    except Exception as _storage_exc:
+        logger.warning("Failed to save PDF to MinIO for material=%s: %s", material_id, _storage_exc)
+
     embedded_count = 0
 
     try:
         # ── Stage 1: テキスト抽出 ──────────────────────────────────────────
         _update_stage("extracting")
-        extracted_text = extract_pdf_text(pdf_bytes)
+        pages = extract_pdf_pages(pdf_bytes)
+        extracted_text = "\n".join(str(p.get("text") or "") for p in pages).replace("\x00", "")
         logger.info(
             "Stage[extracting] completed: material=%s doc=%s chars=%d",
             material_id, doc_id, len(extracted_text),
@@ -1725,7 +2001,7 @@ def process_material_background(
 
         # ── Stage 2: チャンク分割 ──────────────────────────────────────────
         _update_stage("chunking")
-        chunks = chunk_text(extracted_text, chunk_size=1000, overlap=100)
+        chunks = chunk_pdf_pages(pages, chunk_size=1000, overlap=100)
         logger.info(
             "Stage[chunking] completed: material=%s doc=%s chunks=%d",
             material_id, doc_id, len(chunks),
@@ -1737,25 +2013,9 @@ def process_material_background(
                 "PDFが空か、テキスト抽出に失敗している可能性があります。",
                 material_id, doc_id, filename,
             )
+            raise RuntimeError("PDFからテキストチャンクを作成できませんでした")
 
-        # ── Stage 3: Embedding & DB保存 ───────────────────────────────────
-        if chunks:
-            _update_stage("embedding")
-            try:
-                embedded_count = embed_chunks(material_id, doc_id, chunks)
-            except Exception as embed_exc:
-                # embed_chunks が失敗するとチャンクが1件も登録されない致命的エラー
-                raise RuntimeError(
-                    f"チャンクのEmbedding/DB保存に失敗しました "
-                    f"(material={material_id}, doc={doc_id}, "
-                    f"text_chunks={len(chunks)}): {embed_exc}"
-                ) from embed_exc
-            logger.info(
-                "Stage[embedding] completed: material=%s doc=%s embedded=%d",
-                material_id, doc_id, embedded_count,
-            )
-
-        # ── Stage 4: ナレッジグラフ構築 ───────────────────────────────────
+        # ── Stage 3: ナレッジグラフ構築 ───────────────────────────────────
         _update_stage("building_graph")
         title = os.path.splitext(filename)[0]
         knowledge_graph = build_knowledge_graph(extracted_text, title)
@@ -1763,6 +2023,25 @@ def process_material_background(
             "Stage[building_graph] completed: material=%s concepts=%d",
             material_id, len(knowledge_graph.get("concepts", [])),
         )
+
+        # ── Stage 4: Embedding & DB保存 ───────────────────────────────────
+        _update_stage("embedding")
+        try:
+            embedded_count = embed_chunks(material_id, doc_id, chunks, knowledge_graph)
+        except Exception as embed_exc:
+            # embed_chunks が失敗するとチャンクが1件も登録されない致命的エラー
+            raise RuntimeError(
+                f"チャンクのEmbedding/DB保存に失敗しました "
+                f"(material={material_id}, doc={doc_id}, "
+                f"text_chunks={len(chunks)}): {embed_exc}"
+            ) from embed_exc
+        logger.info(
+            "Stage[embedding] completed: material=%s doc=%s embedded=%d",
+            material_id, doc_id, embedded_count,
+        )
+
+        if embedded_count == 0:
+            raise RuntimeError("テキストチャンクが1件もDBに保存されませんでした")
 
         # ── Stage 5: documents テーブル更新 ───────────────────────────────
         _update_stage("finalizing")
@@ -1845,6 +2124,155 @@ def process_material_background(
                 " doc_id=%s material_id=%s error=%s",
                 doc_id, material_id, db_exc,
             )
+
+
+def reanalyze_course_structure_background(
+    course_id: str,
+    course_data: dict,
+    task_id: str,
+) -> None:
+    """既存チャンクを維持したまま、コース教材の構造メタデータだけ再解析する。"""
+    sources = course_data.get("sources", []) if isinstance(course_data, dict) else []
+    material_ids = [
+        str(s.get("material_id")).strip()
+        for s in sources
+        if isinstance(s, dict) and s.get("material_id")
+    ]
+    material_ids = list(dict.fromkeys(material_ids))
+
+    total = len(material_ids)
+    result_data = {
+        "course_id": course_id,
+        "total_materials": total,
+        "processed_materials": 0,
+        "updated_chunks": 0,
+        "errors": 0,
+        "progress": 0,
+        "stage": "started",
+    }
+    update_background_task(task_id, "processing", result_data=result_data)
+
+    if not material_ids:
+        result_data["stage"] = "completed"
+        update_background_task(task_id, "completed", result_data=result_data)
+        return
+
+    processed = 0
+    updated_chunks = 0
+    errors: list[str] = []
+
+    for material_id in material_ids:
+        try:
+            session = _pg_session()
+            try:
+                row = session.execute(
+                    sa_text("""
+                        SELECT d.id, COALESCE(d.title, d.filename, d.source_path, '') AS title,
+                               string_agg(c.text, E'\n\n' ORDER BY c.chunk_index) AS full_text,
+                               COUNT(c.id) AS chunk_count
+                        FROM documents d
+                        LEFT JOIN chunks c ON c.document_id = d.id
+                        WHERE d.source_path = :material_id
+                        GROUP BY d.id, d.title, d.filename, d.source_path
+                        LIMIT 1
+                    """),
+                    {"material_id": material_id},
+                ).fetchone()
+            finally:
+                session.close()
+
+            if not row:
+                raise RuntimeError(f"material not found: {material_id}")
+
+            doc_id = str(row[0])
+            title = row[1] or material_id
+            full_text = row[2] or ""
+            chunk_count = int(row[3] or 0)
+            if not full_text.strip() or chunk_count == 0:
+                raise RuntimeError(f"no chunks to analyze: {material_id}")
+
+            result_data.update({
+                "stage": "building_graph",
+                "current_material_id": material_id,
+            })
+            update_background_task(task_id, "processing", result_data=result_data)
+
+            knowledge_graph = build_knowledge_graph(full_text, title)
+            smiles_dsl, variables, ancestors = _extract_chunk_structure_metadata(knowledge_graph)
+            if not smiles_dsl:
+                # LLM が DSL を生成できなかった場合は題名から最小限のプレースホルダーを生成する
+                smiles_dsl = f"(doc:Resource:{_safe_dsl_value(title)})"
+                logger.warning(
+                    "smiles_dsl not generated for material %s, using placeholder", material_id
+                )
+
+            session = _pg_session()
+            try:
+                session.execute(
+                    sa_text("""
+                        UPDATE documents
+                        SET knowledge_graph = CAST(:kg AS jsonb),
+                            text_length = :text_length,
+                            updated_at = now()
+                        WHERE id = CAST(:doc_id AS uuid)
+                    """),
+                    {
+                        "doc_id": doc_id,
+                        "kg": json.dumps(knowledge_graph, ensure_ascii=False),
+                        "text_length": len(full_text),
+                    },
+                )
+                update_result = session.execute(
+                    sa_text("""
+                        UPDATE chunks
+                        SET smiles_dsl = :smiles_dsl,
+                            variables = CAST(:variables AS jsonb),
+                            ancestors = CAST(:ancestors AS jsonb)
+                        WHERE document_id = CAST(:doc_id AS uuid)
+                    """),
+                    {
+                        "doc_id": doc_id,
+                        "smiles_dsl": smiles_dsl,
+                        "variables": json.dumps(variables, ensure_ascii=False) if variables is not None else None,
+                        "ancestors": json.dumps(ancestors, ensure_ascii=False) if ancestors is not None else None,
+                    },
+                )
+                session.commit()
+                updated_chunks += int(update_result.rowcount or 0) if smiles_dsl else 0
+            except Exception:
+                session.rollback()
+                raise
+            finally:
+                session.close()
+
+            processed += 1
+        except Exception as exc:
+            errors.append(f"{material_id}: {exc}")
+            logger.warning("Structure reanalysis failed for material %s: %s", material_id, exc, exc_info=True)
+        finally:
+            done = processed + len(errors)
+            result_data.update({
+                "processed_materials": processed,
+                "updated_chunks": updated_chunks,
+                "errors": len(errors),
+                "progress": int((done / total) * 100) if total else 100,
+            })
+            update_background_task(task_id, "processing", result_data=result_data)
+
+    result_data.update({
+        "stage": "completed",
+        "processed_materials": processed,
+        "updated_chunks": updated_chunks,
+        "errors": len(errors),
+        "progress": 100,
+    })
+    status = "completed" if not errors else "failed"
+    update_background_task(
+        task_id,
+        status,
+        result_data=result_data,
+        error_message="; ".join(errors[:10]) if errors else None,
+    )
 
 
 # ---------------------------------------------------------------------------

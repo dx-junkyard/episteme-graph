@@ -12,6 +12,7 @@ import re
 import time
 
 from core.llm import generate_text, get_llm_params
+from core.personas import persona_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,8 @@ _SPOKEN_TEXT_PROMPT = """あなたは大学院レベルの学習を支援する�
 ## チャンクテキスト (不完全な抽出テキスト):
 {chunk_text}
 
+## 語り口設定:
+{persona_instruction}
 
 ## 指示:
 1. **display_text**: 画面表示用テキストを再構築してください。
@@ -145,7 +148,8 @@ def _build_course_context_text(course_data: dict) -> str:
 def generate_spoken_text_and_formulas(
     chunk_text: str, 
     chunk_index: int = 0, 
-    course_data: dict | None = None
+    course_data: dict | None = None,
+    persona_id: str | None = None,
 ) -> dict:
     """チャンクテキストから display_text / spoken_text / formulas を LLM で生成する。"""
     if not chunk_text or not chunk_text.strip():
@@ -172,7 +176,8 @@ def generate_spoken_text_and_formulas(
         course_prerequisites=course_prereqs,
         course_structure=course_structure,
         chunk_index=chunk_index,
-        chunk_text=chunk_text[:4000]
+        chunk_text=chunk_text[:4000],
+        persona_instruction=persona_prompt(persona_id, target="narration") or "指定なし。通常の自然な講義調で生成してください。",
     )
 
     last_exc: Exception | None = None

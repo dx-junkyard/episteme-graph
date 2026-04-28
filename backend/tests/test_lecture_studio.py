@@ -130,6 +130,13 @@ class TestLectureStudioSchemas:
 
         req = LectureScriptRewriteRequest(prompt="前提知識を追加して")
         assert req.prompt == "前提知識を追加して"
+        assert req.narration_persona is None
+
+    def test_lecture_script_rewrite_request_with_persona(self):
+        from schemas import LectureScriptRewriteRequest
+
+        req = LectureScriptRewriteRequest(prompt="解説モードを反映して", narration_persona="general_friendly")
+        assert req.narration_persona == "general_friendly"
 
     def test_lecture_script_rewrite_response(self):
         from schemas import LectureScriptRewriteResponse, LectureFormulaItem
@@ -163,6 +170,88 @@ class TestLectureStudioSchemas:
         assert resp.generated == 0
         assert resp.skipped == 0
         assert resp.errors == 0
+
+    def test_lecture_studio_settings_defaults(self):
+        from schemas import LectureStudioSettings
+
+        settings = LectureStudioSettings()
+        assert settings.narration_persona == ""
+        assert settings.response_persona == ""
+
+    def test_lecture_studio_settings_with_personas(self):
+        from schemas import LectureStudioSettings
+
+        settings = LectureStudioSettings(narration_persona="expert_friendly", response_persona="general_formal")
+        assert settings.narration_persona == "expert_friendly"
+        assert settings.response_persona == "general_formal"
+
+
+class TestLectureStudioModeUI:
+    """原稿スタジオの解説モード設定UIの静的テスト。"""
+
+    def test_settings_button_exists(self):
+        from pathlib import Path
+
+        html = (Path(__file__).resolve().parents[2] / "frontend" / "public" / "admin.html").read_text(encoding="utf-8")
+        assert 'id="ls-settings-btn"' in html
+
+    def test_mode_settings_logic_exists(self):
+        from pathlib import Path
+
+        js = (Path(__file__).resolve().parents[2] / "frontend" / "public" / "js" / "admin.js").read_text(encoding="utf-8")
+        assert "lsOpenSettingsModal" in js
+        assert "/lecture-studio/settings" in js
+        assert "サイエンス・コミュニケーター" in js
+        assert "学会発表／査読者" in js
+
+
+class TestPersonaPromptHelpers:
+    """解説モードプロンプトのヘルパーテスト。"""
+
+    def test_persona_prompt_known_id(self):
+        from core.personas import persona_prompt
+
+        prompt = persona_prompt("general_friendly", target="narration")
+        assert "サイエンス・コミュニケーター" in prompt
+        assert "音声読み上げテキスト" in prompt
+
+    def test_persona_prompt_unknown_id_returns_empty(self):
+        from core.personas import persona_prompt
+
+        assert persona_prompt("unknown", target="response") == ""
+
+    def test_course_persona_settings_normalizes_unknown_values(self):
+        from core.personas import course_persona_settings
+
+        settings = course_persona_settings({
+            "lecture_studio_settings": {
+                "narration_persona": "expert_friendly",
+                "response_persona": "unknown",
+            },
+        })
+        assert settings["narration_persona"] == "expert_friendly"
+        assert settings["response_persona"] == ""
+
+
+class TestLectureStudioSettingsRegeneration:
+    """口調設定変更後の全スクリプト再生成フラグを検証する。"""
+
+    SOURCE_FILE = os.path.join(os.path.dirname(__file__), "..", "api", "routes", "lecture_studio.py")
+
+    def test_settings_change_marks_scripts_for_regeneration(self):
+        source = open(self.SOURCE_FILE, encoding="utf-8").read()
+        assert "scripts_need_regeneration" in source
+        assert "settings_changed" in source
+
+    def test_batch_generation_uses_effective_override(self):
+        source = open(self.SOURCE_FILE, encoding="utf-8").read()
+        assert "force_regenerate" in source
+        assert "effective_override = body.override or force_regenerate" in source
+
+    def test_successful_override_clears_regeneration_flag(self):
+        source = open(self.SOURCE_FILE, encoding="utf-8").read()
+        assert "_clear_script_regeneration_flag" in source
+        assert "if override:" in source
 
 
 # ---------------------------------------------------------------------------

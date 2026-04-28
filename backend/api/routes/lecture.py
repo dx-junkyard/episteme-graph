@@ -39,6 +39,7 @@ from core.lecture import (
     normalize_to_placeholder_format,
 )
 from core.llm import generate_text, get_llm_params
+from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
 
 logger = logging.getLogger(__name__)
@@ -118,6 +119,7 @@ def get_lecture_sequence(
         )
 
     # チャンクデータを構築し、spoken_text がなければ生成
+    narration_persona = course_persona_settings(course_data)["narration_persona"]
     chunks = []
     chunks_to_update = []
     for row in rows:
@@ -129,7 +131,12 @@ def get_lecture_sequence(
         formulas = row[5] if row[5] else []
 
         if not spoken_text:
-            result = generate_spoken_text_and_formulas(text)
+            result = generate_spoken_text_and_formulas(
+                text,
+                chunk_index=chunk_index,
+                course_data=course_data,
+                persona_id=narration_persona,
+            )
             display_text = result.get("display_text") or text
             spoken_text = result["spoken_text"]
             formulas = result["formulas"]
@@ -221,7 +228,12 @@ def _generate_sequence_from_search(
         if cr["score"] < 0.3:
             continue
         chunk_id = cr.get("id", f"search_{i}")
-        result = generate_spoken_text_and_formulas(cr["text"])
+        result = generate_spoken_text_and_formulas(
+            cr["text"],
+            chunk_index=i,
+            course_data=course_data,
+            persona_id=course_persona_settings(course_data)["narration_persona"],
+        )
         display_text = result.get("display_text") or cr["text"]
         is_valid_uuid = _is_valid_uuid(chunk_id)
 
@@ -334,7 +346,7 @@ def generate_tts(
 # ---------------------------------------------------------------------------
 
 
-def _get_tutor_system_prompt(domain: str) -> str:
+def _get_tutor_system_prompt(domain: str, response_persona: str | None = None) -> str:
     """チューター（解説者）ロールのシステムプロンプトを生成する。
 
     Parameters
@@ -343,6 +355,8 @@ def _get_tutor_system_prompt(domain: str) -> str:
         コースの専門分野。空文字の場合は「このコースの専門分野」でフォールバック。
     """
     domain_label = domain.strip() if domain.strip() else "このコースの専門分野"
+    persona_instruction = persona_prompt(response_persona, target="response")
+    persona_block = f"\n\n**口調設定:**\n{persona_instruction}" if persona_instruction else ""
     return f"""あなたは{domain_label}の学術講義中に学生の疑問をその場で即座に解消する「チューター（解説者）」です。
 今まさに再生されている講義の局所的な疑問をすぐに解決し、速やかに講義の再開を促すことが使命です。
 
@@ -359,7 +373,7 @@ def _get_tutor_system_prompt(domain: str) -> str:
 **回答のフォーマット:**
 1. 質問に対する直接的な回答（2〜3文）
 2. 必要に応じて数式（LaTeX: $...$, $$...$$）や具体例
-3. 「講義を再開する場合は再生ボタンを押してください。」で締めくくる"""
+3. 「講義を再開する場合は再生ボタンを押してください。」で締めくくる{persona_block}"""
 
 
 @router.post(
@@ -386,12 +400,13 @@ def lecture_interrupt_chat(
     topic_title = topic_info["title"] if topic_info else topic_id
     # domain が未設定の場合は course_title にフォールバック
     domain = course_data.get("domain") or course_title
+    response_persona = course_persona_settings(course_data)["response_persona"]
 
     # 現在再生中のチャンクのテキストを取得してコンテキストに含める
     chunk_context = _get_chunk_text(body.current_chunk_id)
 
     messages: list[dict] = [
-        {"role": "system", "content": _get_tutor_system_prompt(domain)},
+        {"role": "system", "content": _get_tutor_system_prompt(domain, response_persona)},
         {"role": "user", "content": (
             f"コース: {course_title}\n"
             f"現在のトピック: {topic_title}\n\n"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 from datetime import timedelta
+from functools import lru_cache
 
 from minio import Minio
 
@@ -50,6 +51,15 @@ class StorageManager:
         )
         return object_name
 
+    def get_object(self, bucket: str, object_name: str) -> bytes:
+        """Download an object from MinIO and return its bytes."""
+        response = self.client.get_object(bucket, object_name)
+        try:
+            return response.read()
+        finally:
+            response.close()
+            response.release_conn()
+
     # ------------------------------------------------------------------
     # Pre-signed URL
     # ------------------------------------------------------------------
@@ -85,3 +95,9 @@ class StorageManager:
             obj.object_name
             for obj in self.client.list_objects(bucket, prefix=prefix, recursive=True)
         ]
+
+
+@lru_cache(maxsize=1)
+def get_storage_client() -> StorageManager:
+    """Return a cached StorageManager instance."""
+    return StorageManager()
