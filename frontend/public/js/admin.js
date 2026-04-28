@@ -249,10 +249,15 @@
       html += '<td><span class="admin-status ' + statusClass + '">' + statusLabel + "</span></td>";
       html += "<td>" + escHtml(uploadedAt) + "</td>";
       var hasPdf = m.has_pdf === true;
-      var pdfBtnLabel = hasPdf ? "登録済 (再登録)" : "PDF再登録";
-      var pdfBtnColor = hasPdf ? "#999" : "var(--color-text-secondary)";
+      var chunkCount = typeof m.chunk_count === "number" ? m.chunk_count : null;
+      var pdfRegistrationFailed = m.status === "failed" || (m.status === "completed" && chunkCount === 0);
+      var pdfBtnLabel = pdfRegistrationFailed ? "失敗 (PDF再登録)" : (hasPdf ? "登録済" : "PDF再登録");
+      var pdfBtnClass = pdfRegistrationFailed ? " admin-pdf-reupload-btn-failed" : "";
+      var pdfBtnTitle = pdfRegistrationFailed
+        ? "教材処理に失敗、またはチャンクが作成されませんでした。PDFを再登録してください"
+        : "PDFのみ再登録";
       html += '<td style="display:flex;gap:6px">' +
-        '<button class="admin-pdf-reupload-btn" data-material-id="' + escHtml(m.material_id) + '" style="background:none;border:1px solid ' + pdfBtnColor + ';color:' + pdfBtnColor + ';padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px" title="PDFのみ再登録">' + pdfBtnLabel + '</button>' +
+        '<button class="admin-pdf-reupload-btn' + pdfBtnClass + '" data-material-id="' + escHtml(m.material_id) + '" title="' + escHtml(pdfBtnTitle) + '">' + pdfBtnLabel + '</button>' +
         '<button class="admin-delete-btn" data-material-id="' + escHtml(m.material_id) + '" data-material-title="' + escHtml(m.title) + '" style="background:none;border:1px solid var(--color-text-danger);color:var(--color-text-danger);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">削除</button>' +
         '</td>';
       html += "</tr>";
@@ -291,10 +296,12 @@
               }
               if (!res.ok) throw { message: "status " + res.status };
               btn.textContent = "完了";
+              btn.classList.remove("admin-pdf-reupload-btn-failed");
               setTimeout(function () { btn.textContent = "PDF再登録"; btn.disabled = false; }, 2000);
             })
             .catch(function (err) {
               btn.textContent = "失敗";
+              btn.classList.add("admin-pdf-reupload-btn-failed");
               btn.disabled = false;
               if (err && err.mismatch) {
                 alert("⚠ " + err.message);
@@ -2404,13 +2411,26 @@
     syncSpoken: true,
     pdfObjectUrl: null,
     pdfUrl: null,
+    settings: {
+      narration_persona: "",
+      response_persona: "",
+    },
   };
+
+  var lsPersonaOptions = [
+    { id: "", label: "標準" },
+    { id: "general_friendly", label: "サイエンス・コミュニケーター（一般 × フレンドリー）" },
+    { id: "general_formal", label: "科学ジャーナリスト（一般 × フォーマル）" },
+    { id: "expert_friendly", label: "研究室の共同研究者（専門 × フレンドリー）" },
+    { id: "expert_formal", label: "学会発表／査読者（専門 × フォーマル）" },
+  ];
 
   function initLectureStudio() {
     var courseSelect = document.getElementById("ls-course-select");
     var reanalyzeBtn = document.getElementById("ls-reanalyze-structure-btn");
     var generateAllBtn = document.getElementById("ls-generate-all-btn");
     var audioAllBtn = document.getElementById("ls-audio-all-btn");
+    var settingsBtn = document.getElementById("ls-settings-btn");
     var saveBtn = document.getElementById("ls-save-btn");
     var rewriteBtn = document.getElementById("ls-rewrite-btn");
 
@@ -2423,14 +2443,18 @@
         reanalyzeBtn.disabled = true;
         generateAllBtn.disabled = true;
         audioAllBtn.disabled = true;
+        settingsBtn.disabled = false;
+        lsLoadSettings(courseId);
         lsLoadScripts(courseId);
       } else {
         lsState.courseId = null;
         lsState.chunks = [];
         lsState.selectedChunkId = null;
+        lsState.settings = { narration_persona: "", response_persona: "" };
         reanalyzeBtn.disabled = true;
         generateAllBtn.disabled = true;
         audioAllBtn.disabled = true;
+        settingsBtn.disabled = true;
         lsRenderChunkList();
         lsClearEditor();
       }
@@ -2449,6 +2473,11 @@
     audioAllBtn.addEventListener("click", function () {
       if (!lsState.courseId || lsState.generating) return;
       lsBatchAudio();
+    });
+
+    settingsBtn.addEventListener("click", function () {
+      if (!lsState.courseId) return;
+      lsOpenSettingsModal();
     });
 
     saveBtn.addEventListener("click", function () {
@@ -2475,6 +2504,108 @@
     });
 
     lsLoadCourses();
+  }
+
+  function lsLoadSettings(courseId) {
+    apiFetch("/admin/courses/" + courseId + "/lecture-studio/settings")
+      .then(function (res) {
+        if (!res.ok) throw new Error("Failed to load settings");
+        return res.json();
+      })
+      .then(function (settings) {
+        if (lsState.courseId !== courseId) return;
+        lsState.settings = {
+          narration_persona: settings.narration_persona || "",
+          response_persona: settings.response_persona || "",
+        };
+      })
+      .catch(function () {
+        lsState.settings = { narration_persona: "", response_persona: "" };
+      });
+  }
+
+  function lsPersonaSelectHtml(id, selected) {
+    var html = '<select id="' + escHtml(id) + '" class="ls-settings-select">';
+    lsPersonaOptions.forEach(function (opt) {
+      html += '<option value="' + escHtml(opt.id) + '"' + (opt.id === selected ? " selected" : "") + '>' + escHtml(opt.label) + '</option>';
+    });
+    html += '</select>';
+    return html;
+  }
+
+  function lsOpenSettingsModal() {
+    var existing = document.getElementById("ls-settings-modal");
+    if (existing) existing.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = "ls-settings-modal";
+    overlay.className = "ls-settings-modal";
+    overlay.innerHTML =
+      '<div class="ls-settings-dialog">' +
+        '<div class="ls-settings-head">' +
+          '<h3>原稿スタジオ設定</h3>' +
+          '<button id="ls-settings-close" class="lecture-chat-close" type="button">&times;</button>' +
+        '</div>' +
+        '<label class="ls-settings-field">' +
+          '<span>読み上げテキストの解説モード</span>' +
+          lsPersonaSelectHtml("ls-narration-persona", lsState.settings.narration_persona || "") +
+        '</label>' +
+        '<label class="ls-settings-field">' +
+          '<span>質問への応答の解説モード</span>' +
+          lsPersonaSelectHtml("ls-response-persona", lsState.settings.response_persona || "") +
+        '</label>' +
+        '<div id="ls-settings-status" class="upload-status" style="display:none"></div>' +
+        '<div class="ls-settings-actions">' +
+          '<button id="ls-settings-cancel" class="admin-action-btn" type="button">キャンセル</button>' +
+          '<button id="ls-settings-save" class="admin-action-btn" type="button" style="background:var(--color-text-success);color:#fff">保存</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    function close() { overlay.remove(); }
+    document.getElementById("ls-settings-close").addEventListener("click", close);
+    document.getElementById("ls-settings-cancel").addEventListener("click", close);
+    overlay.addEventListener("click", function (e) {
+      if (e.target === overlay) close();
+    });
+    document.getElementById("ls-settings-save").addEventListener("click", function () {
+      lsSaveSettings(overlay);
+    });
+  }
+
+  function lsSaveSettings(modal) {
+    var statusEl = document.getElementById("ls-settings-status");
+    var saveBtn = document.getElementById("ls-settings-save");
+    var settings = {
+      narration_persona: document.getElementById("ls-narration-persona").value,
+      response_persona: document.getElementById("ls-response-persona").value,
+    };
+    statusEl.textContent = "保存中...";
+    statusEl.className = "upload-status upload-status-info";
+    statusEl.style.display = "block";
+    saveBtn.disabled = true;
+
+    apiFetch("/admin/courses/" + lsState.courseId + "/lecture-studio/settings", {
+      method: "PUT",
+      body: JSON.stringify(settings),
+    })
+      .then(function (res) {
+        if (!res.ok) throw new Error("Save failed");
+        return res.json();
+      })
+      .then(function (saved) {
+        lsState.settings = {
+          narration_persona: saved.narration_persona || "",
+          response_persona: saved.response_persona || "",
+        };
+        modal.remove();
+        lsShowProgress("原稿スタジオ設定を保存しました", "success");
+      })
+      .catch(function () {
+        statusEl.textContent = "保存に失敗しました";
+        statusEl.className = "upload-status upload-status-error";
+        saveBtn.disabled = false;
+      });
   }
 
   function lsLoadCourses() {
@@ -2574,6 +2705,7 @@
     var reanalyzeBtn = document.getElementById("ls-reanalyze-structure-btn");
     var generateAllBtn = document.getElementById("ls-generate-all-btn");
     var audioAllBtn = document.getElementById("ls-audio-all-btn");
+    var settingsBtn = document.getElementById("ls-settings-btn");
 
     if (!lsState.chunks || lsState.chunks.length === 0) {
       listEl.innerHTML = '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">' +
@@ -2582,6 +2714,7 @@
       reanalyzeBtn.disabled = true;
       generateAllBtn.disabled = true;
       audioAllBtn.disabled = true;
+      settingsBtn.disabled = !lsState.courseId;
       return;
     }
 
@@ -2590,6 +2723,7 @@
       reanalyzeBtn.disabled = false;
       generateAllBtn.disabled = false;
       audioAllBtn.disabled = false;
+      settingsBtn.disabled = false;
     }
     var html = "";
     lsState.chunks.forEach(function (c, i) {
@@ -2954,6 +3088,7 @@
     document.getElementById("ls-reanalyze-structure-btn").disabled = isBusy || !lsState.courseId || !lsState.chunks.length;
     document.getElementById("ls-generate-all-btn").disabled = isBusy || !lsState.courseId || !lsState.chunks.length;
     document.getElementById("ls-audio-all-btn").disabled = isBusy || !lsState.courseId || !lsState.chunks.length;
+    document.getElementById("ls-settings-btn").disabled = !lsState.courseId;
   }
 
   function lsReanalyzeStructure() {
@@ -3290,7 +3425,7 @@
 
     apiFetch("/admin/chunks/" + lsState.selectedChunkId + "/lecture-script/rewrite", {
       method: "POST",
-      body: JSON.stringify({ prompt: prompt }),
+      body: JSON.stringify({ prompt: prompt, narration_persona: lsState.settings.narration_persona || "" }),
     })
       .then(function (res) {
         if (!res.ok) throw new Error("Rewrite failed");

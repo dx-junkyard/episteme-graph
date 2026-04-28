@@ -31,6 +31,7 @@ from schemas import (
     LectureScriptRewriteResponse,
     LectureScriptSaveRequest,
     LectureScriptSaveResponse,
+    LectureStudioSettings,
 )
 from schemas import BackgroundTaskOut
 from services import (
@@ -45,12 +46,85 @@ from services import (
 )
 from core.lecture import generate_spoken_text_and_formulas, normalize_to_placeholder_format
 from core.llm import generate_text, get_llm_params
+from core.personas import course_persona_settings, normalize_persona_id, persona_prompt
 from core.postgres import get_session as _pg_session
 from core.tts import TtsFatalError, generate_tts_audio
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Lecture Script Studio"])
+
+
+def _save_lecture_studio_settings(course_id: str, course_data: dict, settings: dict[str, str]) -> None:
+    updated = dict(course_data)
+    previous = updated.get("lecture_studio_settings") or {}
+    if not isinstance(previous, dict):
+        previous = {}
+    normalized = {
+        "narration_persona": normalize_persona_id(settings.get("narration_persona")),
+        "response_persona": normalize_persona_id(settings.get("response_persona")),
+    }
+    settings_changed = (
+        normalize_persona_id(previous.get("narration_persona")) != normalized["narration_persona"]
+        or normalize_persona_id(previous.get("response_persona")) != normalized["response_persona"]
+    )
+    updated["lecture_studio_settings"] = {
+        **normalized,
+        "scripts_need_regeneration": bool(previous.get("scripts_need_regeneration")) or settings_changed,
+    }
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                UPDATE learning_courses
+                SET data = CAST(:data AS jsonb),
+                    updated_at = now()
+                WHERE id = :course_id
+            """),
+            {
+                "course_id": course_id,
+                "data": json.dumps(updated, ensure_ascii=False),
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _clear_script_regeneration_flag(course_id: str, course_data: dict) -> None:
+    updated = dict(course_data)
+    settings = updated.get("lecture_studio_settings") or {}
+    if not isinstance(settings, dict):
+        return
+    if not settings.get("scripts_need_regeneration"):
+        return
+    updated["lecture_studio_settings"] = {
+        **settings,
+        "scripts_need_regeneration": False,
+    }
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                UPDATE learning_courses
+                SET data = CAST(:data AS jsonb),
+                    updated_at = now()
+                WHERE id = :course_id
+            """),
+            {
+                "course_id": course_id,
+                "data": json.dumps(updated, ensure_ascii=False),
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.warning("Failed to clear script regeneration flag for course %s", course_id, exc_info=True)
+    finally:
+        session.close()
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +380,47 @@ def _get_system_admin_course_data(course_id: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
+@router.get(
+    "/courses/{course_id}/lecture-studio/settings",
+    response_model=LectureStudioSettings,
+)
+def get_lecture_studio_settings(
+    course_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> LectureStudioSettings:
+    """原稿スタジオのコース単位設定を取得する。"""
+    course_data = get_viewable_course_data(current_user["id"], course_id)
+    if not course_data and current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        course_data = _get_system_admin_course_data(course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+    return LectureStudioSettings(**course_persona_settings(course_data))
+
+
+@router.put(
+    "/courses/{course_id}/lecture-studio/settings",
+    response_model=LectureStudioSettings,
+)
+def update_lecture_studio_settings(
+    course_id: str,
+    body: LectureStudioSettings,
+    current_user: dict = Depends(_require_teacher),
+) -> LectureStudioSettings:
+    """原稿スタジオのコース単位設定を保存する。"""
+    course_data = get_editable_course_data(current_user["id"], course_id)
+    if not course_data and current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        course_data = _get_system_admin_course_data(course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    settings = {
+        "narration_persona": normalize_persona_id(body.narration_persona),
+        "response_persona": normalize_persona_id(body.response_persona),
+    }
+    _save_lecture_studio_settings(course_id, course_data, settings)
+    return LectureStudioSettings(**settings)
+
+
 def _batch_generate_worker(
     task_id: str,
     course_id: str,
@@ -323,6 +438,8 @@ def _batch_generate_worker(
     total = len(chunks)
     generated = 0
     skipped = 0
+    settings = course_persona_settings(course_data)
+    narration_persona = settings["narration_persona"]
 
     update_background_task(task_id, "processing", result_data={
         "course_id": course_id,
@@ -341,7 +458,8 @@ def _batch_generate_worker(
                 result = generate_spoken_text_and_formulas(
                     chunk_text=chunk["text"],
                     chunk_index=chunk["chunk_index"],
-                    course_data=course_data
+                    course_data=course_data,
+                    persona_id=narration_persona,
                 )
                 display_text = result.get("display_text") or chunk["text"]
                 spoken_text = result["spoken_text"]
@@ -418,6 +536,8 @@ def _batch_generate_worker(
         completion_data["next_task_type"] = "audio_generation"
 
     update_background_task(task_id, "completed", result_data=completion_data)
+    if override:
+        _clear_script_regeneration_flag(course_id, course_data)
     logger.info(
         "batch_generate_worker completed: task=%s course=%s generated=%d skipped=%d",
         task_id, course_id, generated, skipped,
@@ -458,6 +578,9 @@ def batch_generate_scripts(
 
     task_id = str(uuid.uuid4())[:12]
     create_background_task(task_id, "script_generation", current_user["id"])
+    settings = course_data.get("lecture_studio_settings") or {}
+    force_regenerate = isinstance(settings, dict) and bool(settings.get("scripts_need_regeneration"))
+    effective_override = body.override or force_regenerate
 
     thread = threading.Thread(
         target=_batch_generate_worker,
@@ -465,7 +588,7 @@ def batch_generate_scripts(
             task_id,
             course_id,
             chunks,
-            body.override,
+            effective_override,
             course_data,
             body.auto_audio,
             current_user["id"],
@@ -475,8 +598,8 @@ def batch_generate_scripts(
     thread.start()
 
     logger.info(
-        "batch_generate_scripts accepted: task=%s course=%s chunks=%d auto_audio=%s by user=%s",
-        task_id, course_id, len(chunks), body.auto_audio, current_user["id"],
+        "batch_generate_scripts accepted: task=%s course=%s chunks=%d override=%s auto_audio=%s by user=%s",
+        task_id, course_id, len(chunks), effective_override, body.auto_audio, current_user["id"],
     )
 
     return LectureScriptGenerateStartResponse(
@@ -622,6 +745,9 @@ _REWRITE_PROMPT = """あなたは大学講義の音声原稿を改善するア�
 ## 教員からの指示:
 {instructor_prompt}
 
+## 読み上げテキストの語り口設定:
+{persona_instruction}
+
 ## 出力形式 (厳密にJSON):
 {{
   "display_text": "エネルギーは [[FORMULA_0]] で表される。",
@@ -667,6 +793,7 @@ def rewrite_lecture_script(
         current_display_text=current_display[:4000],
         current_spoken_text=current_spoken[:4000],
         instructor_prompt=body.prompt[:2000],
+        persona_instruction=persona_prompt(body.narration_persona, target="narration") or "指定なし。通常の自然な講義調で書き換えてください。",
     )
 
     params = get_llm_params("fast")

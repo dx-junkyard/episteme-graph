@@ -52,6 +52,7 @@ class MaterialOut(BaseModel):
     title: str
     status: str  # uploaded | processing | completed | failed
     uploaded_at: str
+    chunk_count: int | None = None
     knowledge_graph: dict | None = None
     visibility: str = "private"  # public | group | private
     group_id: str | None = None
@@ -533,6 +534,7 @@ class LectureScriptSaveResponse(BaseModel):
 class LectureScriptRewriteRequest(BaseModel):
     """AI スクリプト書き換えリクエスト。"""
     prompt: str
+    narration_persona: str | None = None
 
 
 class LectureScriptRewriteResponse(BaseModel):
@@ -558,6 +560,12 @@ class LectureAudioGenerateStartResponse(BaseModel):
     course_id: str
     total_chunks: int = 0
     status: str = "pending"
+
+
+class LectureStudioSettings(BaseModel):
+    """原稿スタジオのコース単位設定。"""
+    narration_persona: str = ""
+    response_persona: str = ""
 
 
 # ---------------------------------------------------------------------------

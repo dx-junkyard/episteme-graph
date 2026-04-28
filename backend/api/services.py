@@ -2013,6 +2013,7 @@ def process_material_background(
                 "PDFが空か、テキスト抽出に失敗している可能性があります。",
                 material_id, doc_id, filename,
             )
+            raise RuntimeError("PDFからテキストチャンクを作成できませんでした")
 
         # ── Stage 3: ナレッジグラフ構築 ───────────────────────────────────
         _update_stage("building_graph")
@@ -2024,21 +2025,23 @@ def process_material_background(
         )
 
         # ── Stage 4: Embedding & DB保存 ───────────────────────────────────
-        if chunks:
-            _update_stage("embedding")
-            try:
-                embedded_count = embed_chunks(material_id, doc_id, chunks, knowledge_graph)
-            except Exception as embed_exc:
-                # embed_chunks が失敗するとチャンクが1件も登録されない致命的エラー
-                raise RuntimeError(
-                    f"チャンクのEmbedding/DB保存に失敗しました "
-                    f"(material={material_id}, doc={doc_id}, "
-                    f"text_chunks={len(chunks)}): {embed_exc}"
-                ) from embed_exc
-            logger.info(
-                "Stage[embedding] completed: material=%s doc=%s embedded=%d",
-                material_id, doc_id, embedded_count,
-            )
+        _update_stage("embedding")
+        try:
+            embedded_count = embed_chunks(material_id, doc_id, chunks, knowledge_graph)
+        except Exception as embed_exc:
+            # embed_chunks が失敗するとチャンクが1件も登録されない致命的エラー
+            raise RuntimeError(
+                f"チャンクのEmbedding/DB保存に失敗しました "
+                f"(material={material_id}, doc={doc_id}, "
+                f"text_chunks={len(chunks)}): {embed_exc}"
+            ) from embed_exc
+        logger.info(
+            "Stage[embedding] completed: material=%s doc=%s embedded=%d",
+            material_id, doc_id, embedded_count,
+        )
+
+        if embedded_count == 0:
+            raise RuntimeError("テキストチャンクが1件もDBに保存されませんでした")
 
         # ── Stage 5: documents テーブル更新 ───────────────────────────────
         _update_stage("finalizing")

@@ -76,6 +76,18 @@ class TestIndexHTMLCourseSelector:
         """送信ボタン (id=send-btn) が存在すること。"""
         assert 'id="send-btn"' in self.html
 
+    def test_chat_clear_button_exists(self):
+        """質疑応答履歴削除ボタン (id=chat-clear-btn) が存在すること。"""
+        assert 'id="chat-clear-btn"' in self.html
+        assert "質疑応答履歴を削除" in self.html
+
+    def test_chat_clear_button_is_in_right_panel(self):
+        """履歴削除ボタンが右サイドパネル内に配置されていること。"""
+        right_panel = re.search(r'<div class="rp">(.*?)</div>\s*</div>\s*<script', self.html, re.DOTALL)
+        assert right_panel
+        assert "rp-danger-zone" in right_panel.group(1)
+        assert "chat-clear-btn" in right_panel.group(1)
+
 
 # ---------------------------------------------------------------------------
 # app.js logic tests
@@ -116,6 +128,28 @@ class TestAppJSCourseSelector:
     def test_set_chat_enabled_exists(self):
         """setChatEnabled 関数が定義されていること。"""
         assert "function setChatEnabled" in self.js
+
+    def test_clear_chat_history_function_exists(self):
+        """質疑応答履歴削除関数が定義されていること。"""
+        assert "async function clearChatHistory" in self.js
+        assert '"DELETE"' in self.js
+
+    def test_clear_chat_button_handler_exists(self):
+        """履歴削除ボタンのクリックで clearChatHistory が呼ばれること。"""
+        assert "chat-clear-btn" in self.js
+        assert "clearBtn.addEventListener(\"click\", clearChatHistory)" in self.js
+
+    def test_clear_chat_history_resets_local_messages(self):
+        """削除成功後にローカルのチャット履歴を空にすること。"""
+        assert "state.chatMessages = []" in self.js
+        assert "質疑応答履歴を削除" in self.js
+
+    def test_chat_clear_button_has_danger_zone_css(self):
+        """履歴削除ボタンが薄赤色の危険操作スタイルを持つこと。"""
+        css = STYLES_CSS.read_text(encoding="utf-8")
+        assert ".rp-danger-zone" in css
+        assert ".chat-clear-btn" in css
+        assert "#fff5f5" in css
 
     def test_no_old_custom_dropdown_functions(self):
         """旧カスタムドロップダウンの関数が残っていないこと。"""
