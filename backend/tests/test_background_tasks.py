@@ -28,6 +28,7 @@ if _api_dir not in sys.path:
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend" / "public"
 ADMIN_HTML = FRONTEND_DIR / "admin.html"
 ADMIN_JS = FRONTEND_DIR / "js" / "admin.js"
+ADMIN_ROUTE = Path(__file__).resolve().parents[1] / "api" / "routes" / "admin.py"
 
 
 @pytest.fixture(autouse=True)
@@ -86,6 +87,32 @@ class TestAdminJSPolling:
     def test_polling_shows_error_message_from_task(self):
         """タスク失敗時にerror_messageを表示すること。"""
         assert "task.error_message" in self.js
+
+    def test_pdf_reupload_button_shows_failed_state(self):
+        """教材処理失敗またはチャンク0件時にPDF再登録ボタンを失敗表示にすること。"""
+        assert "pdfRegistrationFailed" in self.js
+        assert "admin-pdf-reupload-btn-failed" in self.js
+        assert "失敗 (PDF再登録)" in self.js
+
+
+class TestAdminPdfReupload:
+    """PDF再登録時の補助処理が実装されていることを静的に検証する。"""
+
+    @pytest.fixture(autouse=True)
+    def _load_admin_route(self):
+        self.route = ADMIN_ROUTE.read_text(encoding="utf-8")
+
+    def test_reupload_backfills_missing_chunk_page_info(self):
+        """ページ情報の無いチャンクだけを再登録PDFから補完すること。"""
+        assert "_backfill_missing_chunk_pages_from_pdf" in self.route
+        assert "extract_pdf_pages(pdf_bytes)" in self.route
+        assert "page_start IS NULL OR page_end IS NULL" in self.route
+        assert "UPDATE chunks" in self.route
+
+    def test_reupload_returns_page_info_updated_count(self):
+        """補完件数をレスポンスとログに含めること。"""
+        assert "page_info_updated" in self.route
+        assert '"page_info_updated": page_info_updated' in self.route
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +197,24 @@ class TestProcessMaterialBackgroundSignature:
         sig = inspect.signature(process_material_background)
         param = sig.parameters["task_id"]
         assert param.default is None
+
+
+class TestProcessMaterialBackgroundFailures:
+    """教材処理でチャンクが作成されないケースを失敗扱いにすることを検証。"""
+
+    SERVICES_FILE = Path(__file__).resolve().parents[1] / "api" / "services.py"
+
+    @pytest.fixture(autouse=True)
+    def _load_source(self):
+        self.source = self.SERVICES_FILE.read_text(encoding="utf-8")
+
+    def test_zero_chunks_raises_failure(self):
+        assert "if not chunks:" in self.source
+        assert "PDFからテキストチャンクを作成できませんでした" in self.source
+
+    def test_zero_embedded_chunks_raises_failure(self):
+        assert "if embedded_count == 0:" in self.source
+        assert "テキストチャンクが1件もDBに保存されませんでした" in self.source
 
 
 class TestServiceHelpers:

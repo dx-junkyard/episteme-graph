@@ -132,7 +132,10 @@ def _run_reextraction_job(job_id: str) -> None:
             # MinIOからPDFを取得してテキスト抽出
             try:
                 storage = get_storage_client()
-                pdf_bytes = storage.get_object("raw-papers", filename)
+                try:
+                    pdf_bytes = storage.get_object("raw-papers", f"uploads/{material_id}.pdf")
+                except Exception:
+                    pdf_bytes = storage.get_object("raw-papers", filename)
                 text = extract_pdf_text(pdf_bytes)
             except Exception:
                 logger.warning(
@@ -162,7 +165,7 @@ def _run_reextraction_job(job_id: str) -> None:
 
             # 新しいチャンクを埋め込み
             if chunks:
-                embed_chunks(material_id, doc_id, chunks)
+                embed_chunks(material_id, doc_id, chunks, knowledge_graph)
 
             # ドキュメントを更新
             session = _pg_session()

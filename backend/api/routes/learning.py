@@ -44,6 +44,7 @@ from services import (
     user_can_view_course,
 )
 from core.llm import generate_text, get_llm_params
+from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
 
 logger = logging.getLogger(__name__)
@@ -541,9 +542,14 @@ def _generate_learning_advice_response(
             f"  - {p}" for p in prerequisites
         ) + "\n\n"
 
+    response_persona = course_persona_settings(course_data).get("response_persona") if course_data else ""
+    persona_instruction = persona_prompt(response_persona, target="response")
+    persona_block = f"■ 口調設定:\n{persona_instruction}\n\n" if persona_instruction else ""
+
     prompt = (
         f"あなたは「{course_title}」の学習をサポートするナビゲーター教授です。\n"
         f"学生は現在「{topic_title}」のトピックを学習しています。\n\n"
+        f"{persona_block}"
         f"{topics_block}"
         f"{concepts_block}"
         f"{prereqs_block}"
@@ -573,7 +579,7 @@ def _generate_learning_advice_response(
         )
 
 
-def _get_integrated_tutor_system_prompt(domain: str) -> str:
+def _get_integrated_tutor_system_prompt(domain: str, response_persona: str | None = None) -> str:
     """知識統合型チューターのシステムプロンプトを生成する。
 
     Parameters
@@ -582,6 +588,8 @@ def _get_integrated_tutor_system_prompt(domain: str) -> str:
         コースの専門分野。空文字の場合は「このコースの専門分野」でフォールバック。
     """
     domain_label = domain.strip() if domain.strip() else "このコースの専門分野"
+    persona_instruction = persona_prompt(response_persona, target="response")
+    persona_block = f"\n\n**口調設定:**\n{persona_instruction}" if persona_instruction else ""
     return f"""あなたは{domain_label}の学習をサポートする「親切な専属チューター」です。
 学生の疑問に対して、手元の教材とあなた自身の専門知識をシームレスに統合して、即座に分かりやすい解説を提供することが使命です。
 
@@ -595,7 +603,7 @@ def _get_integrated_tutor_system_prompt(domain: str) -> str:
 
 **フォーマット要件:**
 - 数式は必ず LaTeX 記法で記述（インラインは $...$、ディスプレイは $$...$$）
-- 教材を参照した場合は [出典: 『書籍名』] を文脈に自然に混ぜて言及すること。"""
+- 教材を参照した場合は [出典: 『書籍名』] を文脈に自然に混ぜて言及すること。{persona_block}"""
 
 
 def _generate_graph_element_explanation(
@@ -675,11 +683,14 @@ def _generate_graph_element_explanation(
             f"{h.get('role')}: {str(h.get('content', ''))[:240]}"
             for h in (body.history or [])[-6:]
         )
+        response_persona = course_persona_settings(course_data)["response_persona"]
+        persona_instruction = persona_prompt(response_persona, target="response")
         params = get_llm_params("standard")
         prompt = (
             f"あなたは「{course_title}」の学習を支援するチューターです。\n"
             f"現在のトピック: {topic_title}\n"
             f"説明対象: {element_label} ({context.get('element_type')})\n\n"
+            + (f"口調設定:\n{persona_instruction}\n\n" if persona_instruction else "")
             + (
                 f"対象数式（この式を必ずそのまま使って説明すること）:\n"
                 f"$${target_formula_latex}$$\n\n"
@@ -804,6 +815,44 @@ def get_chat_history(
     return LearningChatHistoryResponse(history=history)
 
 
+@router.delete(
+    "/courses/{course_id}/topics/{topic_id}/chat",
+)
+def delete_chat_history(
+    course_id: str,
+    topic_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """受講者本人のトピック別チャット履歴だけを削除する。
+
+    質疑応答から派生した個人レイヤー、誤解記録、未回答ログなどは削除しない。
+    """
+    course_data = get_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                DELETE FROM learning_chat_history
+                WHERE user_id = CAST(:user_id AS uuid)
+                  AND course_id = :course_id
+                  AND topic_id = :topic_id
+            """),
+            {"user_id": current_user["id"], "course_id": course_id, "topic_id": topic_id},
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to delete learning chat history for user=%s topic=%s", current_user["id"], topic_id)
+        raise HTTPException(status_code=500, detail="Failed to delete chat history")
+    finally:
+        session.close()
+
+    return {"status": "deleted"}
+
+
 @router.post(
     "/courses/{course_id}/topics/{topic_id}/chat",
     response_model=LearningChatResponse,
@@ -829,6 +878,7 @@ def learning_chat(
     course_title = course_data.get("title", course_id)
     # domain が未設定の場合は course_title にフォールバック
     domain = course_data.get("domain") or course_title
+    response_persona = course_persona_settings(course_data)["response_persona"]
 
     # UIサジェスト由来の明示アクションは自然文の意図分類より優先する。
     if body.action == "EXPLAIN_GRAPH_ELEMENT":
@@ -896,7 +946,7 @@ def learning_chat(
 
     # 5. 回答の生成（ルート統合）
     messages: list[dict] = [
-        {"role": "system", "content": _get_integrated_tutor_system_prompt(domain)},
+        {"role": "system", "content": _get_integrated_tutor_system_prompt(domain, response_persona)},
         {"role": "user", "content": (
             f"コース: {course_title}\n"
             f"現在のトピック: {topic_title}\n\n"

@@ -52,9 +52,11 @@ class MaterialOut(BaseModel):
     title: str
     status: str  # uploaded | processing | completed | failed
     uploaded_at: str
+    chunk_count: int | None = None
     knowledge_graph: dict | None = None
     visibility: str = "private"  # public | group | private
     group_id: str | None = None
+    has_pdf: bool = False
 
 
 class VisibilityUpdateRequest(BaseModel):
@@ -476,9 +478,21 @@ class LectureScriptChunkOut(BaseModel):
     chunk_id: str
     chunk_index: int
     text: str
+    raw_text: str = ""
+    display_text: str = ""
     spoken_text: str = ""
     formulas: list[LectureFormulaItem] = []
     status: str = "ungenerated"  # ungenerated | generated | edited | audio_ready
+    material_id: str = ""
+    document_id: str = ""
+    page_start: int | None = None
+    page_end: int | None = None
+    pdf_url: str | None = None
+    smiles_dsl: str = ""
+    variables: dict | list | None = None
+    ancestors: list | None = None
+    neo4j_node_id: str = ""
+    graph_elements: list[dict] = []
 
 
 class LectureScriptGenerateRequest(BaseModel):
@@ -507,6 +521,7 @@ class LectureScriptGenerateResponse(BaseModel):
 class LectureScriptSaveRequest(BaseModel):
     """手動スクリプト保存リクエスト。"""
     spoken_text: str
+    display_text: str | None = None
     formulas: list[dict] = []
 
 
@@ -519,11 +534,13 @@ class LectureScriptSaveResponse(BaseModel):
 class LectureScriptRewriteRequest(BaseModel):
     """AI スクリプト書き換えリクエスト。"""
     prompt: str
+    narration_persona: str | None = None
 
 
 class LectureScriptRewriteResponse(BaseModel):
     """AI スクリプト書き換えレスポンス。"""
     chunk_id: str
+    display_text: str = ""
     spoken_text: str
     formulas: list[LectureFormulaItem] = []
 
@@ -543,6 +560,12 @@ class LectureAudioGenerateStartResponse(BaseModel):
     course_id: str
     total_chunks: int = 0
     status: str = "pending"
+
+
+class LectureStudioSettings(BaseModel):
+    """原稿スタジオのコース単位設定。"""
+    narration_persona: str = ""
+    response_persona: str = ""
 
 
 # ---------------------------------------------------------------------------

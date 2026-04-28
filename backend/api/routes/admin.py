@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import Response
 from sqlalchemy import text as sa_text
 
 from dependencies import (
@@ -44,6 +46,7 @@ from services import (
     _material_lock,
     _material_status,
     create_background_task,
+    extract_pdf_pages,
     get_background_task,
     get_course_group_permissions,
     get_user_group_ids,
@@ -69,10 +72,150 @@ from core.schema_registry import (
     get_ontology_types,
     get_predicates,
 )
+from core.storage import get_storage_client
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin", tags=["Admin"])
+
+
+def _word_set(text: str) -> set[str]:
+    """テキストを正規化して3文字以上の単語セットを返す。"""
+    return {w for w in re.findall(r"[A-Za-z0-9぀-鿿]+", text.lower()) if len(w) >= 3}
+
+
+def _jaccard(set_a: set[str], set_b: set[str]) -> float:
+    if not set_a or not set_b:
+        return 0.0
+    return len(set_a & set_b) / len(set_a | set_b)
+
+
+def _normalized_chars(text: str, *, max_chars: int = 20000) -> str:
+    """ページ推定用に空白差分を除いた比較文字列へ正規化する。"""
+    return re.sub(r"\s+", "", (text or "").replace("\x00", "").lower())[:max_chars]
+
+
+def _char_ngrams(text: str, *, size: int = 5) -> set[str]:
+    normalized = _normalized_chars(text)
+    if len(normalized) < size:
+        return {normalized} if normalized else set()
+    return {normalized[i : i + size] for i in range(len(normalized) - size + 1)}
+
+
+def _infer_chunk_page_range(
+    chunk_text: str,
+    pages: list[dict],
+    *,
+    max_window_pages: int = 3,
+    min_score: float = 0.04,
+    candidates: list[tuple[int, int, set[str]]] | None = None,
+) -> tuple[int | None, int | None, float]:
+    """PDFページ本文と既存チャンク本文を照合し、最も近いページ範囲を推定する。"""
+    chunk_grams = _char_ngrams(chunk_text)
+    if not chunk_grams:
+        return None, None, 0.0
+
+    best_start: int | None = None
+    best_end: int | None = None
+    best_score = 0.0
+    if candidates is None:
+        candidates = _build_page_window_candidates(pages, max_window_pages=max_window_pages)
+    for page_start, page_end, page_grams in candidates:
+        score = _jaccard(chunk_grams, page_grams)
+        if score > best_score:
+            best_score = score
+            best_start = page_start
+            best_end = page_end
+
+    if best_score < min_score:
+        return None, None, best_score
+    return best_start, best_end, best_score
+
+
+def _build_page_window_candidates(
+    pages: list[dict],
+    *,
+    max_window_pages: int = 3,
+) -> list[tuple[int, int, set[str]]]:
+    """連続ページの候補 n-gram を事前計算する。"""
+    candidates: list[tuple[int, int, set[str]]] = []
+    page_count = len(pages)
+    for start_idx in range(page_count):
+        combined_text = ""
+        for end_idx in range(start_idx, min(page_count, start_idx + max_window_pages)):
+            combined_text = f"{combined_text}\n{pages[end_idx].get('text') or ''}"
+            page_grams = _char_ngrams(combined_text)
+            if page_grams:
+                candidates.append(
+                    (
+                        int(pages[start_idx]["page"]),
+                        int(pages[end_idx]["page"]),
+                        page_grams,
+                    )
+                )
+    return candidates
+
+
+def _backfill_missing_chunk_pages_from_pdf(material_id: str, pdf_bytes: bytes) -> int:
+    """ページ情報が欠けている既存チャンクへ、再登録PDFから推定したページ情報を補完する。"""
+    pages = extract_pdf_pages(pdf_bytes)
+    pages = [page for page in pages if (page.get("text") or "").strip()]
+    if not pages:
+        return 0
+    candidates = _build_page_window_candidates(pages)
+    if not candidates:
+        return 0
+
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT id, text
+                FROM chunks
+                WHERE material_id = :mid
+                  AND (page_start IS NULL OR page_end IS NULL)
+                ORDER BY chunk_index, id
+            """),
+            {"mid": material_id},
+        ).fetchall()
+
+        updated = 0
+        for row in rows:
+            page_start, page_end, score = _infer_chunk_page_range(
+                row[1] or "",
+                pages,
+                candidates=candidates,
+            )
+            if page_start is None or page_end is None:
+                logger.debug(
+                    "Skipped chunk page backfill: material=%s chunk=%s score=%.3f",
+                    material_id,
+                    row[0],
+                    score,
+                )
+                continue
+            session.execute(
+                sa_text("""
+                    UPDATE chunks
+                    SET page_start = :page_start, page_end = :page_end
+                    WHERE id = :chunk_id
+                """),
+                {
+                    "page_start": page_start,
+                    "page_end": page_end,
+                    "chunk_id": row[0],
+                },
+            )
+            updated += 1
+
+        if updated:
+            session.commit()
+        return updated
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 # ---------------------------------------------------------------------------
@@ -99,9 +242,16 @@ def upload_material(
         raise HTTPException(status_code=400, detail="Empty file")
 
     material_id = str(uuid.uuid4())[:12]
+    pdf_object_name = f"uploads/{material_id}.pdf"
     doc_id = uuid.uuid4()
     task_id = str(uuid.uuid4())[:12]
     now = datetime.datetime.utcnow().isoformat()
+
+    try:
+        get_storage_client().upload_pdf("raw-papers", pdf_object_name, pdf_bytes)
+    except Exception:
+        logger.exception("Failed to store uploaded PDF for material %s", material_id)
+        raise HTTPException(status_code=500, detail="PDF storage failed")
 
     session = _pg_session()
     try:
@@ -171,9 +321,9 @@ def list_materials(
         gph = ", ".join(f"CAST(:g_{i} AS uuid)" for i in range(len(user_groups)))
         for i, gid in enumerate(user_groups):
             params[f"g_{i}"] = gid
-        group_clause = f"(visibility = 'group' AND group_id IN ({gph}))"
+        group_clause = f"(d.visibility = 'group' AND d.group_id IN ({gph}))"
         course_mat_clause = f"""
-            source_path IN (
+            d.source_path IN (
                 SELECT (jsonb_array_elements(lc.data->'sources')->>'material_id')
                 FROM learning_courses lc
                 JOIN course_group_permissions cgp ON cgp.course_id = lc.id
@@ -190,22 +340,37 @@ def list_materials(
     try:
         records = session.execute(
             sa_text(f"""
-                SELECT source_path, filename, title, status, created_at, knowledge_graph,
-                       COALESCE(visibility, 'private'), group_id
-                FROM documents
-                WHERE filename IS NOT NULL
+                SELECT d.source_path, d.filename, d.title, d.status, d.created_at, d.knowledge_graph,
+                       COALESCE(d.visibility, 'private'), d.group_id,
+                       COALESCE(d.chunk_count, cs.chunk_count, 0) AS chunk_count
+                FROM documents d
+                LEFT JOIN (
+                    SELECT material_id, COUNT(*) AS chunk_count
+                    FROM chunks
+                    GROUP BY material_id
+                ) cs ON cs.material_id = d.source_path
+                WHERE d.filename IS NOT NULL
                   AND (
-                      uploaded_by = CAST(:user_id AS uuid)
-                      OR visibility = 'public'
+                      d.uploaded_by = CAST(:user_id AS uuid)
+                      OR d.visibility = 'public'
                       OR {group_clause}
                       OR {course_mat_clause}
                   )
-                ORDER BY created_at DESC
+                ORDER BY d.created_at DESC
             """),
             params,
         ).fetchall()
     finally:
         session.close()
+
+    # MinIO にPDFが存在する教材のIDセットを一括取得
+    existing_pdf_ids: set[str] = set()
+    try:
+        for obj_name in get_storage_client().list_objects("raw-papers", "uploads/"):
+            if obj_name.endswith(".pdf"):
+                existing_pdf_ids.add(obj_name[len("uploads/"):-len(".pdf")])
+    except Exception:
+        pass  # MinIO 不達の場合は全件 has_pdf=False のまま
 
     materials = []
     for r in records:
@@ -224,9 +389,11 @@ def list_materials(
             title=r[2] or "",
             status=status,
             uploaded_at=uploaded_at,
+            chunk_count=int(r[8] or 0),
             knowledge_graph=kg,
             visibility=r[6] or "private",
             group_id=str(r[7]) if r[7] else None,
+            has_pdf=mid in existing_pdf_ids,
         ))
 
     return materials
@@ -251,9 +418,9 @@ def get_material(
         gph = ", ".join(f"CAST(:g_{i} AS uuid)" for i in range(len(user_groups)))
         for i, gid in enumerate(user_groups):
             params[f"g_{i}"] = gid
-        group_clause = f"(visibility = 'group' AND group_id IN ({gph}))"
+        group_clause = f"(d.visibility = 'group' AND d.group_id IN ({gph}))"
         course_mat_clause = f"""
-            source_path IN (
+            d.source_path IN (
                 SELECT (jsonb_array_elements(lc.data->'sources')->>'material_id')
                 FROM learning_courses lc
                 JOIN course_group_permissions cgp ON cgp.course_id = lc.id
@@ -270,13 +437,19 @@ def get_material(
     try:
         record = session.execute(
             sa_text(f"""
-                SELECT source_path, filename, title, status, created_at, knowledge_graph,
-                       COALESCE(visibility, 'private'), group_id
-                FROM documents
-                WHERE source_path = :material_id
+                SELECT d.source_path, d.filename, d.title, d.status, d.created_at, d.knowledge_graph,
+                       COALESCE(d.visibility, 'private'), d.group_id,
+                       COALESCE(d.chunk_count, cs.chunk_count, 0) AS chunk_count
+                FROM documents d
+                LEFT JOIN (
+                    SELECT material_id, COUNT(*) AS chunk_count
+                    FROM chunks
+                    GROUP BY material_id
+                ) cs ON cs.material_id = d.source_path
+                WHERE d.source_path = :material_id
                   AND (
-                      uploaded_by = CAST(:user_id AS uuid)
-                      OR visibility = 'public'
+                      d.uploaded_by = CAST(:user_id AS uuid)
+                      OR d.visibility = 'public'
                       OR {group_clause}
                       OR {course_mat_clause}
                   )
@@ -304,10 +477,131 @@ def get_material(
         title=record[2] or "",
         status=status,
         uploaded_at=uploaded_at,
+        chunk_count=int(record[8] or 0),
         knowledge_graph=kg,
         visibility=record[6] or "private",
         group_id=str(record[7]) if record[7] else None,
     )
+
+
+@router.get("/materials/{material_id}/pdf")
+def get_material_pdf(
+    material_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> Response:
+    """認証済みユーザーに教材PDFをプロキシ配信する。"""
+    material = get_material(material_id, current_user)
+    object_candidates = [
+        f"uploads/{material_id}.pdf",
+        material.filename,
+        material.material_id,
+    ]
+    storage = get_storage_client()
+    for object_name in object_candidates:
+        if not object_name:
+            continue
+        try:
+            pdf_bytes = storage.get_object("raw-papers", object_name)
+            return Response(
+                content=pdf_bytes,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f'inline; filename="{material_id}.pdf"',
+                    "Cache-Control": "private, max-age=300",
+                },
+            )
+        except Exception as exc:
+            logger.debug(
+                "PDF not found in MinIO: bucket=raw-papers object=%s error=%s",
+                object_name, exc,
+            )
+            continue
+    logger.warning("PDF object not found for material=%s candidates=%s", material_id, object_candidates)
+    raise HTTPException(status_code=404, detail="PDF object not found")
+
+
+@router.put("/materials/{material_id}/pdf")
+def reupload_material_pdf(
+    material_id: str,
+    file: UploadFile = File(...),
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """既存教材のPDFをMinIOへ再登録し、欠落したチャンクページ情報を補完する。
+
+    MinIOへのPDF保存が欠落している旧教材の復元に使用する。
+    """
+    get_material(material_id, current_user)  # アクセス権確認
+
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are accepted")
+
+    pdf_bytes = file.file.read()
+    if len(pdf_bytes) == 0:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    # ── テキスト照合（先頭3ページ vs DBの先頭チャンク群） ──────────────
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        new_text = " ".join(
+            page.get_text().replace("\x00", "") for page in list(doc)[:3]
+        )
+        doc.close()
+    except Exception:
+        new_text = ""
+
+    if new_text.strip():
+        session = _pg_session()
+        try:
+            rows = session.execute(
+                sa_text("""
+                    SELECT text FROM chunks
+                    WHERE material_id = :mid
+                    ORDER BY chunk_index
+                    LIMIT 5
+                """),
+                {"mid": material_id},
+            ).fetchall()
+        finally:
+            session.close()
+
+        existing_text = " ".join(r[0] or "" for r in rows)
+        if existing_text.strip():
+            similarity = _jaccard(_word_set(new_text), _word_set(existing_text))
+            logger.info(
+                "PDF re-upload similarity check: material=%s similarity=%.3f",
+                material_id, similarity,
+            )
+            if similarity < 0.3:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"アップロードされたPDFは登録済みの教材と一致しません（テキスト類似度: {similarity:.0%}）。元と同じPDFファイルを選択してください。",
+                )
+
+    pdf_object_name = f"uploads/{material_id}.pdf"
+    try:
+        get_storage_client().upload_pdf("raw-papers", pdf_object_name, pdf_bytes)
+    except Exception:
+        logger.exception("Failed to re-upload PDF for material %s", material_id)
+        raise HTTPException(status_code=500, detail="PDF storage failed")
+
+    page_info_updated = 0
+    try:
+        page_info_updated = _backfill_missing_chunk_pages_from_pdf(material_id, pdf_bytes)
+    except Exception:
+        logger.exception("Failed to backfill chunk page info for material %s", material_id)
+
+    logger.info(
+        "PDF re-uploaded for material=%s size=%d similarity_ok=True page_info_updated=%d",
+        material_id,
+        len(pdf_bytes),
+        page_info_updated,
+    )
+    return {
+        "material_id": material_id,
+        "object_name": pdf_object_name,
+        "page_info_updated": page_info_updated,
+    }
 
 
 @router.put("/materials/{material_id}/visibility")
@@ -1427,6 +1721,9 @@ def get_materials_stats(
                         cs.course_id,
                         COUNT(DISTINCT c.id) AS total_chunks,
                         COUNT(DISTINCT CASE
+                            WHEN c.smiles_dsl IS NOT NULL AND c.smiles_dsl != '' THEN c.id
+                        END) AS structure_chunks,
+                        COUNT(DISTINCT CASE
                             WHEN c.spoken_text IS NOT NULL AND c.spoken_text != '' THEN c.id
                         END) AS script_chunks,
                         COUNT(DISTINCT a.chunk_id) AS audio_chunks
@@ -1468,6 +1765,10 @@ def get_materials_stats(
                     COALESCE(cs.total_chunks, 0) AS chunk_count,
                     CASE
                         WHEN COALESCE(cs.total_chunks, 0) = 0 THEN 0.0
+                        ELSE ROUND(COALESCE(cs.structure_chunks, 0)::numeric / cs.total_chunks * 100, 1)
+                    END AS structure_progress,
+                    CASE
+                        WHEN COALESCE(cs.total_chunks, 0) = 0 THEN 0.0
                         ELSE ROUND(cs.script_chunks::numeric / cs.total_chunks * 100, 1)
                     END AS script_progress,
                     CASE
@@ -1496,11 +1797,12 @@ def get_materials_stats(
             "uploaded_by": r[2] or "",
             "created_at": r[3].isoformat() if r[3] else "",
             "chunk_count": int(r[4]) if r[4] else 0,
-            "script_progress": float(r[5]) if r[5] is not None else 0.0,
-            "audio_progress": float(r[6]) if r[6] is not None else 0.0,
-            "enrolled_students": int(r[7]) if r[7] else 0,
-            "chat_count": int(r[8]) if r[8] else 0,
-            "active_task_type": r[9] or "",
+            "structure_progress": float(r[5]) if r[5] is not None else 0.0,
+            "script_progress": float(r[6]) if r[6] is not None else 0.0,
+            "audio_progress": float(r[7]) if r[7] is not None else 0.0,
+            "enrolled_students": int(r[8]) if r[8] else 0,
+            "chat_count": int(r[9]) if r[9] else 0,
+            "active_task_type": r[10] or "",
         }
         for r in rows
     ]
