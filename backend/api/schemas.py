@@ -5,7 +5,7 @@ main.py から分離した API 固有のスキーマを集約する。
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +535,8 @@ class LectureScriptRewriteRequest(BaseModel):
     """AI スクリプト書き換えリクエスト。"""
     prompt: str
     narration_persona: str | None = None
+    studio_view: str = "edit"
+    theory_components: list[dict] = Field(default_factory=list)
 
 
 class LectureScriptRewriteResponse(BaseModel):
@@ -543,6 +545,7 @@ class LectureScriptRewriteResponse(BaseModel):
     display_text: str = ""
     spoken_text: str
     formulas: list[LectureFormulaItem] = []
+    theory_components: list[dict] = Field(default_factory=list)
 
 
 class LectureAudioGenerateResponse(BaseModel):
@@ -560,6 +563,91 @@ class LectureAudioGenerateStartResponse(BaseModel):
     course_id: str
     total_chunks: int = 0
     status: str = "pending"
+
+
+# ---------------------------------------------------------------------------
+# Theory Components for Lecture Studio
+# ---------------------------------------------------------------------------
+
+class TheorySourceRef(BaseModel):
+    chunk_id: str
+    page_start: int | None = None
+    page_end: int | None = None
+    quote: str = ""
+
+
+class TheoryIOItem(BaseModel):
+    label: str
+    type: str = "Concept"
+    required: bool = True
+    description: str = ""
+    source_refs: list[TheorySourceRef] = Field(default_factory=list)
+    needs_source: bool = False
+
+
+class TheoryConditionItem(BaseModel):
+    label: str
+    description: str = ""
+    source_refs: list[TheorySourceRef] = Field(default_factory=list)
+    needs_source: bool = False
+
+
+class TheoryBlackboxPolicy(BaseModel):
+    default_level: str = "summary"
+    expand_if_unlearned: bool = True
+
+
+class TheoryComponentOut(BaseModel):
+    id: str
+    course_id: str
+    primary_chunk_id: str | None = None
+    name: str
+    component_type: str = "theory"
+    summary: str = ""
+    status: str = "candidate"
+    source_chunks: list[TheorySourceRef] = Field(default_factory=list)
+    inputs: list[TheoryIOItem] = Field(default_factory=list)
+    outputs: list[TheoryIOItem] = Field(default_factory=list)
+    preconditions: list[TheoryConditionItem] = Field(default_factory=list)
+    constraints: list[TheoryConditionItem] = Field(default_factory=list)
+    invalid_conditions: list[TheoryConditionItem] = Field(default_factory=list)
+    dependencies: list[TheoryConditionItem] = Field(default_factory=list)
+    blackbox_policy: TheoryBlackboxPolicy = Field(default_factory=TheoryBlackboxPolicy)
+    validation_warnings: list[dict] = Field(default_factory=list)
+    teacher_notes: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class TheoryComponentUpsertRequest(BaseModel):
+    name: str
+    component_type: str = "theory"
+    summary: str = ""
+    status: str = "candidate"
+    source_chunks: list[TheorySourceRef] = Field(default_factory=list)
+    inputs: list[TheoryIOItem] = Field(default_factory=list)
+    outputs: list[TheoryIOItem] = Field(default_factory=list)
+    preconditions: list[TheoryConditionItem] = Field(default_factory=list)
+    constraints: list[TheoryConditionItem] = Field(default_factory=list)
+    invalid_conditions: list[TheoryConditionItem] = Field(default_factory=list)
+    dependencies: list[TheoryConditionItem] = Field(default_factory=list)
+    blackbox_policy: TheoryBlackboxPolicy = Field(default_factory=TheoryBlackboxPolicy)
+    teacher_notes: str = ""
+
+
+class TheoryComponentExtractRequest(BaseModel):
+    force: bool = False
+    use_llm: bool = True
+
+
+class TheoryComponentExtractResponse(BaseModel):
+    chunk_id: str
+    components: list[TheoryComponentOut] = Field(default_factory=list)
+
+
+class TheoryConnectionValidateRequest(BaseModel):
+    source_component_id: str
+    target_component_id: str
 
 
 class LectureStudioSettings(BaseModel):

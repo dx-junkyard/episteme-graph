@@ -2051,5 +2051,7 @@ def approve_schema_proposal_with_scope(
 # Lecture Script Studio (Issue #70) — サブルーターとしてインクルード
 # ---------------------------------------------------------------------------
 from routes.lecture_studio import router as _lecture_studio_router  # noqa: E402
+from routes.theory_components import router as _theory_components_router  # noqa: E402
 
 router.include_router(_lecture_studio_router)
+router.include_router(_theory_components_router)

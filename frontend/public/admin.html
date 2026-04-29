@@ -220,6 +220,7 @@
                 <button class="ls-work-tab" data-ls-view="compare">照合</button>
                 <button class="ls-work-tab active" data-ls-view="edit">編集</button>
                 <button class="ls-work-tab" data-ls-view="structure">構造</button>
+                <button class="ls-work-tab" data-ls-view="theory">理論</button>
                 <button class="ls-work-tab" data-ls-view="audio">音声</button>
               </div>
               <div id="ls-chunk-meta" class="ls-chunk-meta">チャンクを選択してください</div>
@@ -276,6 +277,14 @@
                 </div>
               </section>
 
+              <section id="ls-theory-panel" class="ls-theory-panel" hidden>
+                <div class="ls-theory-toolbar">
+                  <button id="ls-extract-theory-btn" class="admin-action-btn">理論コンポーネント候補を抽出</button>
+                  <span id="ls-theory-status" class="ls-theory-status"></span>
+                </div>
+                <div id="ls-theory-components" class="ls-theory-components"></div>
+              </section>
+
               <label id="ls-sync-row" class="ls-sync-row" hidden>
                 <input type="checkbox" id="ls-sync-spoken" checked>
                 <span>読み上げテキストを表示テキストと同期</span>
@@ -288,10 +297,10 @@
             <div class="ls-action-header">AI アシスタント</div>
             <div class="ls-action-body">
               <div style="margin-bottom:12px">
-                <label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:4px">書き換え指示:</label>
+                <label id="ls-assistant-label" style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:4px">書き換え指示:</label>
                 <textarea id="ls-rewrite-prompt" class="ls-rewrite-textarea" placeholder="例: 前提知識の説明を1文追加して" disabled></textarea>
               </div>
-              <button id="ls-rewrite-btn" class="admin-action-btn" disabled style="width:100%;margin-bottom:12px">AIで書き換え</button>
+              <button id="ls-rewrite-btn" class="admin-action-btn" disabled style="width:100%;margin-bottom:12px">AIで提案</button>
               <hr style="border:none;border-top:1px solid var(--color-border);margin:12px 0">
               <button id="ls-save-btn" class="admin-action-btn" disabled style="width:100%;background:var(--color-text-success);color:#fff">原稿を保存</button>
               <div id="ls-action-status" class="upload-status" style="display:none;margin-top:8px"></div>

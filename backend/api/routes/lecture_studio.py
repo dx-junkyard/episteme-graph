@@ -759,6 +759,134 @@ _REWRITE_PROMPT = """あなたは大学講義の音声原稿を改善するア�
 
 重要: JSON のみを出力してください。マークダウンコードフェンスは不要です。"""
 
+_THEORY_ASSIST_PROMPT = """あなたは原稿スタジオの理論コンポーネント編集アシスタントです。
+
+現在のタブ: 理論
+
+目的:
+- 既存コンポーネントの inputs / outputs は維持してください。
+- summary, preconditions, constraints, invalid_conditions, dependencies, teacher_notes を改善してください。
+- ソース本文・DSL・既存JSONを優先してください。
+- 一般的な素粒子物理学・場の理論・有効理論の知識で妥当に補える場合は補ってください。
+- 一般知識で補った項目は needs_source: true, source_refs: [] にしてください。
+- 推測にしかならない場合、label は「未確定」にしてください。
+- 「DSLから生成した候補」のような実装説明は summary に入れないでください。
+- 出力JSONには inputs と outputs を含めないでください。
+- JSONのみを出力してください。
+
+ソース本文:
+{source_text}
+
+表示テキスト:
+{current_display_text}
+
+構造情報:
+smiles_dsl:
+{smiles_dsl}
+
+variables:
+{variables}
+
+ancestors:
+{ancestors}
+
+現在の理論コンポーネントJSON:
+{theory_components}
+
+教員からの指示:
+{instructor_prompt}
+
+出力JSON:
+{{
+  "theory_components": [
+    {{
+      "id": "既存ID",
+      "name": "既存名",
+      "component_type": "theory",
+      "summary": "",
+      "status": "candidate",
+      "source_chunks": [],
+      "preconditions": [],
+      "constraints": [],
+      "invalid_conditions": [],
+      "dependencies": [],
+      "blackbox_policy": {{"default_level": "summary", "expand_if_unlearned": true}},
+      "teacher_notes": ""
+    }}
+  ]
+}}
+"""
+
+_AUDIO_ASSIST_PROMPT = """あなたは大学講義の読み上げ原稿を改善するアシスタントです。
+
+現在のタブ: 音声
+
+目的:
+- 表示テキストや数式プレースホルダーは変更せず、spoken_text だけを改善してください。
+- 音声で自然に理解できる文にしてください。
+- 数式・記号は必要に応じて自然な読みへ変換してください。
+- JSONのみを出力してください。
+
+ソース本文:
+{source_text}
+
+表示テキスト:
+{current_display_text}
+
+現在の読み上げテキスト:
+{current_spoken_text}
+
+教員からの指示:
+{instructor_prompt}
+
+読み上げテキストの語り口設定:
+{persona_instruction}
+
+出力JSON:
+{{
+  "display_text": "{current_display_text}",
+  "spoken_text": "",
+  "formulas": []
+}}
+"""
+
+_DISPLAY_ASSIST_PROMPT = """あなたは原稿スタジオの表示テキスト・数式編集アシスタントです。
+
+現在のタブ: {studio_view}
+
+目的:
+- 表示テキストと数式メタデータを改善してください。
+- display_text では数式を [[FORMULA_0]], [[FORMULA_1]] のようなプレースホルダーで表現してください。
+- formulas には各プレースホルダーの latex / spoken / is_display を入れてください。
+- spoken_text は表示テキストに対応する自然な読み上げ文にしてください。
+- JSONのみを出力してください。
+
+ソース本文:
+{source_text}
+
+現在の表示テキスト:
+{current_display_text}
+
+現在の読み上げテキスト:
+{current_spoken_text}
+
+現在の数式:
+{current_formulas}
+
+教員からの指示:
+{instructor_prompt}
+
+読み上げテキストの語り口設定:
+{persona_instruction}
+
+出力JSON:
+{{
+  "display_text": "",
+  "spoken_text": "",
+  "formulas": []
+}}
+"""
+
 
 @router.post(
     "/chunks/{chunk_id}/lecture-script/rewrite",
@@ -776,7 +904,11 @@ def rewrite_lecture_script(
     session = _pg_session()
     try:
         row = session.execute(
-            sa_text("SELECT text, display_text, spoken_text FROM chunks WHERE id = CAST(:cid AS uuid)"),
+            sa_text("""
+                SELECT text, display_text, spoken_text, formulas, smiles_dsl, variables, ancestors
+                FROM chunks
+                WHERE id = CAST(:cid AS uuid)
+            """),
             {"cid": chunk_id},
         ).fetchone()
         if not row:
@@ -785,16 +917,51 @@ def rewrite_lecture_script(
         source_text = row[0] or ""
         current_display = row[1] or source_text
         current_spoken = row[2] or source_text
+        current_formulas = row[3] if row[3] else []
+        smiles_dsl = row[4] or ""
+        variables = row[5] if row[5] is not None else None
+        ancestors = row[6] if row[6] is not None else None
     finally:
         session.close()
 
-    prompt = _REWRITE_PROMPT.format(
-        source_text=source_text[:4000],
-        current_display_text=current_display[:4000],
-        current_spoken_text=current_spoken[:4000],
-        instructor_prompt=body.prompt[:2000],
-        persona_instruction=persona_prompt(body.narration_persona, target="narration") or "指定なし。通常の自然な講義調で書き換えてください。",
-    )
+    studio_view = (body.studio_view or "edit").strip().lower()
+    persona_instruction = persona_prompt(body.narration_persona, target="narration") or "指定なし。通常の自然な講義調で書き換えてください。"
+    if studio_view == "theory":
+        prompt = _THEORY_ASSIST_PROMPT.format(
+            source_text=source_text[:4000],
+            current_display_text=current_display[:4000],
+            smiles_dsl=smiles_dsl[:3000],
+            variables=json.dumps(variables, ensure_ascii=False)[:3000],
+            ancestors=json.dumps(ancestors, ensure_ascii=False)[:3000],
+            theory_components=json.dumps(body.theory_components, ensure_ascii=False, indent=2)[:8000],
+            instructor_prompt=body.prompt[:2000],
+        )
+    elif studio_view == "audio":
+        prompt = _AUDIO_ASSIST_PROMPT.format(
+            source_text=source_text[:4000],
+            current_display_text=current_display[:4000],
+            current_spoken_text=current_spoken[:4000],
+            instructor_prompt=body.prompt[:2000],
+            persona_instruction=persona_instruction,
+        )
+    elif studio_view in ("compare", "edit"):
+        prompt = _DISPLAY_ASSIST_PROMPT.format(
+            studio_view=studio_view,
+            source_text=source_text[:4000],
+            current_display_text=current_display[:4000],
+            current_spoken_text=current_spoken[:4000],
+            current_formulas=json.dumps(current_formulas, ensure_ascii=False)[:3000],
+            instructor_prompt=body.prompt[:2000],
+            persona_instruction=persona_instruction,
+        )
+    else:
+        prompt = _REWRITE_PROMPT.format(
+            source_text=source_text[:4000],
+            current_display_text=current_display[:4000],
+            current_spoken_text=current_spoken[:4000],
+            instructor_prompt=body.prompt[:2000],
+            persona_instruction=persona_instruction,
+        )
 
     params = get_llm_params("fast")
 
@@ -810,48 +977,58 @@ def rewrite_lecture_script(
             lines = [ln for ln in lines if not ln.strip().startswith("```")]
             cleaned = "\n".join(lines)
         result = json.loads(cleaned, strict=False)
+        theory_components = result.get("theory_components", [])
         display_text = result.get("display_text") or current_display
         spoken_text = result.get("spoken_text", current_spoken)
-        formulas = result.get("formulas", [])
+        if studio_view == "theory":
+            display_text = current_display
+            spoken_text = current_spoken
+            formulas = current_formulas
+        elif studio_view == "audio":
+            display_text = current_display
+            formulas = current_formulas
+        else:
+            formulas = result.get("formulas", [])
     except Exception:
         logger.exception("AI rewrite failed for chunk %s", chunk_id)
         raise HTTPException(status_code=500, detail="AI rewrite failed")
 
-    # DB に保存
-    session = _pg_session()
-    try:
-        session.execute(
-            sa_text("""
-                UPDATE chunks
-                SET display_text = :display_text,
-                    spoken_text = :spoken_text,
-                    formulas = CAST(:formulas AS jsonb)
-                WHERE id = CAST(:cid AS uuid)
-            """),
-            {
-                "cid": chunk_id,
-                "display_text": display_text,
-                "spoken_text": spoken_text,
-                "formulas": json.dumps(formulas, ensure_ascii=False),
-            },
-        )
-        # 音声キャッシュを無効化
-        session.execute(
-            sa_text("DELETE FROM lecture_audio_cache WHERE chunk_id = CAST(:cid AS uuid)"),
-            {"cid": chunk_id},
-        )
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
+    if studio_view != "theory":
+        session = _pg_session()
+        try:
+            session.execute(
+                sa_text("""
+                    UPDATE chunks
+                    SET display_text = :display_text,
+                        spoken_text = :spoken_text,
+                        formulas = CAST(:formulas AS jsonb)
+                    WHERE id = CAST(:cid AS uuid)
+                """),
+                {
+                    "cid": chunk_id,
+                    "display_text": display_text,
+                    "spoken_text": spoken_text,
+                    "formulas": json.dumps(formulas, ensure_ascii=False),
+                },
+            )
+            # 音声キャッシュを無効化
+            session.execute(
+                sa_text("DELETE FROM lecture_audio_cache WHERE chunk_id = CAST(:cid AS uuid)"),
+                {"cid": chunk_id},
+            )
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
     return LectureScriptRewriteResponse(
         chunk_id=chunk_id,
         display_text=display_text,
         spoken_text=spoken_text,
         formulas=[LectureFormulaItem(**f) for f in formulas],
+        theory_components=theory_components if isinstance(theory_components, list) else [],
     )
 
 
