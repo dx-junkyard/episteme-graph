@@ -1,0 +1,62 @@
+{
+  "maturity_levels": [
+    {
+      "id": "canonical",
+      "label_ja": "標準知識",
+      "description": "教科書・標準理論レベルで定着している知識。"
+    },
+    {
+      "id": "standard_method",
+      "label_ja": "標準手法",
+      "description": "分野内で広く使われる解析手法・計算手法。"
+    },
+    {
+      "id": "reviewed_consensus",
+      "label_ja": "レビュー済み合意",
+      "description": "レビュー論文や複数研究で支持される知識。"
+    },
+    {
+      "id": "paper_claim",
+      "label_ja": "論文主張",
+      "description": "単一論文に基づく主張。"
+    },
+    {
+      "id": "paper_hypothesis",
+      "label_ja": "論文仮説",
+      "description": "論文中で提示された仮説・解釈。"
+    },
+    {
+      "id": "model_dependent_result",
+      "label_ja": "モデル依存結果",
+      "description": "特定モデル・近似・パラメータ化に依存する結果。"
+    },
+    {
+      "id": "experimental_report",
+      "label_ja": "実験報告",
+      "description": "実験結果・測定値・観測報告。"
+    },
+    {
+      "id": "speculative",
+      "label_ja": "探索的仮説",
+      "description": "先端的・未検証・探索的な仮説。"
+    },
+    {
+      "id": "contested",
+      "label_ja": "議論あり",
+      "description": "分野内で議論がある、または結果が一致していない知識。"
+    },
+    {
+      "id": "deprecated",
+      "label_ja": "非推奨・旧知識",
+      "description": "古くなった、または現在では採用されにくい知識。"
+    }
+  ],
+  "maturity_sources": [
+    {"id": "cartridge_default", "label_ja": "カートリッジ既定値"},
+    {"id": "curated_registry", "label_ja": "登録済みレジストリ"},
+    {"id": "llm_proposed", "label_ja": "LLM暫定提案"},
+    {"id": "teacher_reviewed", "label_ja": "教員レビュー済み"},
+    {"id": "external_registry", "label_ja": "外部レジストリ"},
+    {"id": "unknown", "label_ja": "不明"}
+  ]
+}

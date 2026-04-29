@@ -1,0 +1,83 @@
+{
+  "concept_types": [
+    {
+      "id": "Theory",
+      "label_ja": "理論",
+      "label_en": "Theory",
+      "examples": ["Standard Model", "HQET", "QCD"]
+    },
+    {
+      "id": "Approximation",
+      "label_ja": "近似",
+      "label_en": "Approximation",
+      "examples": ["heavy quark limit", "zero-recoil limit"]
+    },
+    {
+      "id": "Observable",
+      "label_ja": "観測量",
+      "label_en": "Observable",
+      "examples": ["R_D", "R_D*", "R_Λc", "branching ratio"]
+    },
+    {
+      "id": "CorrectionTerm",
+      "label_ja": "補正項",
+      "label_en": "Correction Term",
+      "examples": ["δR", "higher-order contribution"]
+    },
+    {
+      "id": "UncertaintySource",
+      "label_ja": "不確実性源",
+      "label_en": "Uncertainty Source",
+      "examples": ["form factor uncertainty", "experimental uncertainty"]
+    },
+    {
+      "id": "Operator",
+      "label_ja": "演算子",
+      "label_en": "Operator",
+      "examples": ["O_VL", "O_SL", "O_T"]
+    },
+    {
+      "id": "Parameter",
+      "label_ja": "パラメータ",
+      "label_en": "Parameter",
+      "examples": ["Wilson coefficient", "form factor", "Isgur-Wise function"]
+    },
+    {
+      "id": "DecayProcess",
+      "label_ja": "崩壊過程",
+      "label_en": "Decay Process",
+      "examples": ["B → Dτν", "Λb → Λcτν"]
+    }
+  ],
+  "aliases": [
+    {
+      "canonical": "Heavy Quark Effective Theory",
+      "aliases": ["HQET", "heavy quark effective theory"]
+    },
+    {
+      "canonical": "Standard Model",
+      "aliases": ["SM", "standard model"]
+    }
+  ],
+  "notation_patterns": [
+    {
+      "id": "observable_ratio_r",
+      "pattern": "R_[A-Za-z0-9*Λ_]+",
+      "concept_type": "Observable"
+    },
+    {
+      "id": "wilson_coefficient",
+      "pattern": "C_[A-Za-z0-9]+",
+      "concept_type": "Parameter"
+    }
+  ],
+  "extraction_hints": [
+    "Theory と Approximation は明示的に区別する。Heavy Quark Effective Theory は Theory、heavy quark limit は Approximation。",
+    "Observable と Parameter を混同しないように注意する。R_D は Observable、Wilson Coefficient C_VL は Parameter。",
+    "DecayProcess は最終状態粒子まで含めて特定する。"
+  ],
+  "normalization_rules": [
+    {"id": "lowercase_alias", "description": "alias 一致は大文字小文字を区別しない"},
+    {"id": "canonical_first", "description": "canonical 名で正規化したうえで保存する"}
+  ]
+}

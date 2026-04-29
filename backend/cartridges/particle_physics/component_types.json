@@ -1,0 +1,70 @@
+{
+  "component_types": [
+    {
+      "id": "DomainConceptComponent",
+      "origin": "domain",
+      "description": "分野内で共有される基本概念。",
+      "default_maturity_level": "canonical"
+    },
+    {
+      "id": "DomainTheoryComponent",
+      "origin": "domain",
+      "description": "分野内で標準的に共有される理論。",
+      "default_maturity_level": "canonical"
+    },
+    {
+      "id": "DomainMethodComponent",
+      "origin": "domain",
+      "description": "分野内で広く使われる解析・計算手法。",
+      "default_maturity_level": "standard_method"
+    },
+    {
+      "id": "DomainAssumptionComponent",
+      "origin": "domain",
+      "description": "分野で一般的に使われる近似・仮定。",
+      "default_maturity_level": "standard_method"
+    },
+    {
+      "id": "DomainObservableComponent",
+      "origin": "domain",
+      "description": "分野で共有される観測量定義。",
+      "default_maturity_level": "canonical"
+    },
+    {
+      "id": "PaperClaimComponent",
+      "origin": "paper",
+      "description": "個別論文に由来する主張。",
+      "default_maturity_level": "paper_claim"
+    },
+    {
+      "id": "PaperHypothesisComponent",
+      "origin": "paper",
+      "description": "個別論文に由来する仮説的主張。",
+      "default_maturity_level": "paper_hypothesis"
+    },
+    {
+      "id": "PaperRelationComponent",
+      "origin": "paper",
+      "description": "個別論文で提示・利用される関係式。",
+      "default_maturity_level": "paper_claim"
+    },
+    {
+      "id": "PaperCorrectionComponent",
+      "origin": "paper",
+      "description": "個別論文で導入・評価された補正項。",
+      "default_maturity_level": "model_dependent_result"
+    },
+    {
+      "id": "PaperUncertaintyComponent",
+      "origin": "paper",
+      "description": "個別論文で扱われる不確実性。",
+      "default_maturity_level": "model_dependent_result"
+    },
+    {
+      "id": "PaperEvidenceComponent",
+      "origin": "paper",
+      "description": "個別論文に含まれる数値結果・図表・実験結果。",
+      "default_maturity_level": "paper_claim"
+    }
+  ]
+}
