@@ -217,6 +217,20 @@ def _json_obj(value: object) -> dict:
     return {}
 
 
+def _normalize_rewrite_result(parsed: object, studio_view: str) -> dict:
+    """LLM の rewrite 応答を dict に正規化する。
+
+    LLM が JSON オブジェクトではなくトップレベル配列で返してくることがある。
+    studio_view="theory" の場合のみ、その配列を ``theory_components`` として扱う。
+    それ以外は空 dict を返してフォールバック値で穴埋めする。
+    """
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, list) and studio_view == "theory":
+        return {"theory_components": parsed}
+    return {}
+
+
 def _extract_document_dsl(knowledge_graph: dict) -> str:
     abstract = knowledge_graph.get("abstract_structure")
     if isinstance(abstract, dict):
@@ -976,7 +990,7 @@ def rewrite_lecture_script(
             lines = cleaned.split("\n")
             lines = [ln for ln in lines if not ln.strip().startswith("```")]
             cleaned = "\n".join(lines)
-        result = json.loads(cleaned, strict=False)
+        result = _normalize_rewrite_result(json.loads(cleaned, strict=False), studio_view)
         theory_components = result.get("theory_components", [])
         display_text = result.get("display_text") or current_display
         spoken_text = result.get("spoken_text", current_spoken)
