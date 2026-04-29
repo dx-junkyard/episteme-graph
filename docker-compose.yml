@@ -55,6 +55,9 @@ services:
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-${MINIO_ROOT_PASSWORD}}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      # Domain cartridge
+      EPISTEME_DEFAULT_CARTRIDGE_ID: ${EPISTEME_DEFAULT_CARTRIDGE_ID:-particle_physics}
+      EPISTEME_CARTRIDGES_DIR: ${EPISTEME_CARTRIDGES_DIR:-}
     # ローカルの .gcp/ をコンテナに読み取り専用でマウントする。
     # ファイルが存在しない場合は空ディレクトリとしてマウントされる（エラーにはならない）。
     # サービスアカウントキーを使う場合: .gcp/credentials.json に配置する。

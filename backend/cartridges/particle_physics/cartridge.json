@@ -1,0 +1,36 @@
+{
+  "cartridge_id": "particle_physics",
+  "name": "Particle Physics Cartridge",
+  "version": "0.1.0",
+  "description": "素粒子物理・理論物理文献から理論コンポーネントを抽出・検証するためのドメイン定義。",
+  "target_domain": [
+    "particle_physics",
+    "quantum_field_theory",
+    "flavor_physics",
+    "effective_field_theory"
+  ],
+  "default_language": "ja",
+  "source_policy": {
+    "allow_domain_inference": true,
+    "require_support_status": true,
+    "require_maturity_level": true,
+    "require_maturity_source": true,
+    "require_teacher_review_for": [
+      "domain_inferred",
+      "design_inferred",
+      "invalid_or_caution_conditions",
+      "validation_rules",
+      "maturity_level_if_llm_proposed"
+    ]
+  },
+  "files": {
+    "ontology": "ontology.json",
+    "component_types": "component_types.json",
+    "relation_types": "relation_types.json",
+    "maturity_levels": "maturity_levels.json",
+    "support_statuses": "support_statuses.json",
+    "extraction_prompt": "extraction_prompt.md",
+    "review_prompt": "review_prompt.md",
+    "validation_rules": "validation_rules.json"
+  }
+}
