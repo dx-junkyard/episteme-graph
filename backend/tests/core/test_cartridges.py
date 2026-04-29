@@ -14,12 +14,16 @@ from core.cartridges import (
     load_cartridge,
     resolve_maturity,
 )
+from core.config import get_settings
 
 
 @pytest.fixture(autouse=True)
 def _reset_cache():
+    """各テスト前後に設定キャッシュとカートリッジキャッシュをクリアする。"""
+    get_settings.cache_clear()
     clear_cache()
     yield
+    get_settings.cache_clear()
     clear_cache()
 
 
@@ -207,46 +211,81 @@ def test_resolve_maturity_unknown_when_no_signals():
 
 
 # ---------------------------------------------------------------------------
-# Internal consistency (negative cases via custom dir override)
+# Settings integration (Issue #176 follow-up)
 # ---------------------------------------------------------------------------
 
 
-def test_duplicate_ids_raise(tmp_path, monkeypatch):
-    cart_dir = tmp_path / "broken"
-    cart_dir.mkdir()
-    (cart_dir / "cartridge.json").write_text(
-        '{"cartridge_id": "broken", "name": "broken", "version": "0.0.1", "files": {}}',
-        encoding="utf-8",
-    )
-    (cart_dir / "ontology.json").write_text('{"concept_types": []}', encoding="utf-8")
-    (cart_dir / "component_types.json").write_text(
-        '{"component_types": [{"id": "Dup"}, {"id": "Dup"}]}', encoding="utf-8"
-    )
-    (cart_dir / "relation_types.json").write_text('{"relation_types": []}', encoding="utf-8")
-    (cart_dir / "maturity_levels.json").write_text('{"maturity_levels": []}', encoding="utf-8")
-    (cart_dir / "support_statuses.json").write_text('{"support_statuses": []}', encoding="utf-8")
-    (cart_dir / "validation_rules.json").write_text('{"validation_rules": []}', encoding="utf-8")
-    (cart_dir / "extraction_prompt.md").write_text("", encoding="utf-8")
-    (cart_dir / "review_prompt.md").write_text("", encoding="utf-8")
+def test_settings_default_cartridge_id_field(monkeypatch):
+    """Settings に EPISTEME_DEFAULT_CARTRIDGE_ID が読み込まれること。"""
+    monkeypatch.setenv("EPISTEME_DEFAULT_CARTRIDGE_ID", "particle_physics")
+    get_settings.cache_clear()
+    settings = get_settings()
+    assert settings.default_cartridge_id == "particle_physics"
 
+
+def test_settings_cartridges_dir_field(monkeypatch, tmp_path):
+    """Settings に EPISTEME_CARTRIDGES_DIR が読み込まれること。"""
     monkeypatch.setenv("EPISTEME_CARTRIDGES_DIR", str(tmp_path))
-    cartridge_loader.clear_cache()
-    with pytest.raises(ValueError, match="duplicate id"):
-        load_cartridge("broken")
-    cartridge_loader.clear_cache()
+    get_settings.cache_clear()
+    settings = get_settings()
+    assert settings.cartridges_dir == str(tmp_path)
 
 
-def test_unknown_default_maturity_raises(tmp_path, monkeypatch):
-    cart_dir = tmp_path / "unknown_maturity"
-    cart_dir.mkdir()
+def test_load_cartridge_uses_settings_default_cartridge_id(monkeypatch):
+    """EPISTEME_DEFAULT_CARTRIDGE_ID が load_cartridge() のデフォルトに反映されること。"""
+    monkeypatch.setenv("EPISTEME_DEFAULT_CARTRIDGE_ID", "particle_physics")
+    get_settings.cache_clear()
+    clear_cache()
+    cart = load_cartridge()
+    assert cart.cartridge_id == "particle_physics"
+
+
+def test_load_cartridge_falls_back_when_env_unset(monkeypatch):
+    """EPISTEME_DEFAULT_CARTRIDGE_ID 未設定時は particle_physics にフォールバックすること。"""
+    monkeypatch.delenv("EPISTEME_DEFAULT_CARTRIDGE_ID", raising=False)
+    get_settings.cache_clear()
+    clear_cache()
+    cart = load_cartridge()
+    assert cart.cartridge_id == "particle_physics"
+
+
+def test_load_cartridge_falls_back_when_env_empty(monkeypatch):
+    """EPISTEME_DEFAULT_CARTRIDGE_ID が空文字の場合も particle_physics にフォールバックすること。"""
+    monkeypatch.setenv("EPISTEME_DEFAULT_CARTRIDGE_ID", "")
+    get_settings.cache_clear()
+    clear_cache()
+    cart = load_cartridge()
+    assert cart.cartridge_id == "particle_physics"
+
+
+def test_cartridges_dir_from_settings(tmp_path, monkeypatch):
+    """EPISTEME_CARTRIDGES_DIR を Settings 経由で設定できること。"""
+    # particle_physics カートリッジを tmp_path にコピーして読み込めることを確認
+    import shutil
+    real_root = Path(__file__).resolve().parents[2] / "cartridges"
+    shutil.copytree(str(real_root), str(tmp_path / "copied"), dirs_exist_ok=True)
+
+    monkeypatch.setenv("EPISTEME_CARTRIDGES_DIR", str(tmp_path / "copied"))
+    get_settings.cache_clear()
+    clear_cache()
+    cart = load_cartridge("particle_physics")
+    assert cart.cartridge_id == "particle_physics"
+
+
+# ---------------------------------------------------------------------------
+# Internal consistency (negative cases via Settings-aware env override)
+# ---------------------------------------------------------------------------
+
+
+def _write_minimal_cartridge(cart_dir: Path, extra_component_types: str = "[]") -> None:
+    """テスト用最小カートリッジファイル一式を書き出す。"""
     (cart_dir / "cartridge.json").write_text(
-        '{"cartridge_id": "unknown_maturity", "name": "x", "version": "0.0.1", "files": {}}',
+        f'{{"cartridge_id": "{cart_dir.name}", "name": "test", "version": "0.0.1", "files": {{}}}}',
         encoding="utf-8",
     )
     (cart_dir / "ontology.json").write_text('{"concept_types": []}', encoding="utf-8")
     (cart_dir / "component_types.json").write_text(
-        '{"component_types": [{"id": "X", "default_maturity_level": "no_such"}]}',
-        encoding="utf-8",
+        f'{{"component_types": {extra_component_types}}}', encoding="utf-8"
     )
     (cart_dir / "relation_types.json").write_text('{"relation_types": []}', encoding="utf-8")
     (cart_dir / "maturity_levels.json").write_text(
@@ -257,8 +296,26 @@ def test_unknown_default_maturity_raises(tmp_path, monkeypatch):
     (cart_dir / "extraction_prompt.md").write_text("", encoding="utf-8")
     (cart_dir / "review_prompt.md").write_text("", encoding="utf-8")
 
+
+def test_duplicate_ids_raise(tmp_path, monkeypatch):
+    cart_dir = tmp_path / "broken"
+    cart_dir.mkdir()
+    _write_minimal_cartridge(cart_dir, '[{"id": "Dup"}, {"id": "Dup"}]')
+
     monkeypatch.setenv("EPISTEME_CARTRIDGES_DIR", str(tmp_path))
-    cartridge_loader.clear_cache()
+    get_settings.cache_clear()
+    clear_cache()
+    with pytest.raises(ValueError, match="duplicate id"):
+        load_cartridge("broken")
+
+
+def test_unknown_default_maturity_raises(tmp_path, monkeypatch):
+    cart_dir = tmp_path / "unknown_maturity"
+    cart_dir.mkdir()
+    _write_minimal_cartridge(cart_dir, '[{"id": "X", "default_maturity_level": "no_such"}]')
+
+    monkeypatch.setenv("EPISTEME_CARTRIDGES_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    clear_cache()
     with pytest.raises(ValueError, match="unknown default_maturity_level"):
         load_cartridge("unknown_maturity")
-    cartridge_loader.clear_cache()

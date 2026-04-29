@@ -17,11 +17,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+from core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -30,15 +31,23 @@ logger = logging.getLogger(__name__)
 # Path resolution
 # ---------------------------------------------------------------------------
 
-_DEFAULT_CARTRIDGE_ID = "particle_physics"
+_FALLBACK_CARTRIDGE_ID = "particle_physics"
+
+
+def _default_cartridge_id() -> str:
+    """Settings.default_cartridge_id を返す。未設定・空文字時は particle_physics にフォールバック。"""
+    settings = get_settings()
+    value = (getattr(settings, "default_cartridge_id", "") or "").strip()
+    return value or _FALLBACK_CARTRIDGE_ID
 
 
 def _cartridges_root() -> Path:
     """`backend/cartridges/` の絶対パスを返す。
 
-    環境変数 ``EPISTEME_CARTRIDGES_DIR`` で上書きできる(テスト用)。
+    ``Settings.cartridges_dir`` で上書きできる。未設定時は ``backend/cartridges``。
     """
-    override = os.getenv("EPISTEME_CARTRIDGES_DIR")
+    settings = get_settings()
+    override = (getattr(settings, "cartridges_dir", "") or "").strip()
     if override:
         return Path(override).resolve()
     # backend/core/cartridges.py → backend/
@@ -330,14 +339,18 @@ def _cached_load(cartridge_id: str, root: str) -> DomainCartridge:
 
 
 def load_cartridge(cartridge_id: str | None = None) -> DomainCartridge:
-    """カートリッジを読み込む。``cartridge_id`` 省略時はデフォルト(particle_physics)。"""
-    target = cartridge_id or _DEFAULT_CARTRIDGE_ID
+    """カートリッジを読み込む。
+
+    ``cartridge_id`` 省略時は ``Settings.default_cartridge_id`` を使用する。
+    ``Settings.default_cartridge_id`` が未設定・空文字の場合は particle_physics にフォールバックする。
+    """
+    target = (cartridge_id or "").strip() or _default_cartridge_id()
     root = str(_cartridges_root())
     return _cached_load(target, root)
 
 
 def get_default_cartridge() -> DomainCartridge:
-    return load_cartridge(_DEFAULT_CARTRIDGE_ID)
+    return load_cartridge()
 
 
 def list_cartridges() -> list[CartridgeSummary]:
