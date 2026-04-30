@@ -487,6 +487,10 @@ class LectureScriptChunkOut(BaseModel):
     document_id: str = ""
     page_start: int | None = None
     page_end: int | None = None
+    section_id: str = ""
+    section_title: str = ""
+    section_level: int = 0
+    section_order: int = 0
     pdf_url: str | None = None
     smiles_dsl: str = ""
     variables: dict | list | None = None
@@ -581,6 +585,8 @@ class TheorySourceScope(BaseModel):
     document_id: str = ""
     section_id: str = ""
     section_title: str = ""
+    section_level: int = 0
+    section_order: int = 0
     chunk_id: str = ""
     chunks: list[str] = Field(default_factory=list)
     pages: list[int] = Field(default_factory=list)
@@ -591,6 +597,10 @@ class TheorySourceScope(BaseModel):
 class TheoryConceptItem(BaseModel):
     name: str
     concept_type: str = "Concept"
+    raw: str = ""
+    normalized: str = ""
+    canonical: str = ""
+    normalization_source: str = ""
 
 
 class ClaimOut(BaseModel):
@@ -601,6 +611,7 @@ class ClaimOut(BaseModel):
     text: str
     normalized_text: str = ""
     concepts: list[TheoryConceptItem] = Field(default_factory=list)
+    equation: dict = Field(default_factory=dict)
     support_status: str = "source_backed"
     evidence_text: str = ""
     review_status: str = "teacher_review_required"
@@ -614,6 +625,7 @@ class ClaimUpsertRequest(BaseModel):
     text: str
     normalized_text: str = ""
     concepts: list[TheoryConceptItem] = Field(default_factory=list)
+    equation: dict = Field(default_factory=dict)
     support_status: str = "source_backed"
     evidence_text: str = ""
     review_status: str = "teacher_review_required"
@@ -684,6 +696,7 @@ class TheoryComponentOut(BaseModel):
     internal_flow: list[dict] = Field(default_factory=list)
     blackbox_policy: TheoryBlackboxPolicy = Field(default_factory=TheoryBlackboxPolicy)
     validation_warnings: list[dict] = Field(default_factory=list)
+    duplicate_candidates: list[dict] = Field(default_factory=list)
     teacher_notes: str = ""
     created_at: str = ""
     updated_at: str = ""
@@ -711,6 +724,7 @@ class TheoryComponentUpsertRequest(BaseModel):
     dependencies: list[TheoryConditionItem] = Field(default_factory=list)
     connectors: dict = Field(default_factory=dict)
     internal_flow: list[dict] = Field(default_factory=list)
+    duplicate_candidates: list[dict] = Field(default_factory=list)
     blackbox_policy: TheoryBlackboxPolicy = Field(default_factory=TheoryBlackboxPolicy)
     teacher_notes: str = ""
 
@@ -743,14 +757,20 @@ class ComponentGraphNode(BaseModel):
     component_id: str
     label: str
     review_status: str = "teacher_review_required"
+    display_order: int = 0
+    origin: str = "paper"
+    component_type: str = ""
 
 
 class ComponentGraphEdge(BaseModel):
     source_component_id: str
     target_component_id: str
-    relation: str = "SUPPORTS"
+    relation: str = "RELATED_TO"
+    edge_type: str = "explicit_connector"
+    confidence: float = 0.5
     support_status: str = "design_inferred"
     review_status: str = "teacher_review_required"
+    evidence: dict = Field(default_factory=dict)
 
 
 class ComponentGraphResponse(BaseModel):

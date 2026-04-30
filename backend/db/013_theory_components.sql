@@ -34,15 +34,11 @@ CREATE TABLE IF NOT EXISTS theory_claims (
     document_id        TEXT NOT NULL DEFAULT '',
     chunk_id           UUID REFERENCES chunks(id) ON DELETE CASCADE,
     source_scope       JSONB NOT NULL DEFAULT '{}'::jsonb,
-    claim_type         TEXT NOT NULL DEFAULT 'diagnostic_claim'
-                           CHECK (claim_type IN (
-                               'definition', 'assumption', 'approximation', 'equation', 'relation',
-                               'derivation_step', 'observable_definition', 'correction',
-                               'uncertainty', 'limitation', 'result', 'diagnostic_claim'
-                           )),
+    claim_type         TEXT NOT NULL DEFAULT 'diagnostic_claim',
     text               TEXT NOT NULL,
     normalized_text    TEXT NOT NULL DEFAULT '',
     concepts           JSONB NOT NULL DEFAULT '[]'::jsonb,
+    equation           JSONB NOT NULL DEFAULT '{}'::jsonb,
     support_status     TEXT NOT NULL DEFAULT 'source_backed',
     evidence_text      TEXT NOT NULL DEFAULT '',
     review_status      TEXT NOT NULL DEFAULT 'teacher_review_required',
@@ -54,6 +50,15 @@ CREATE TABLE IF NOT EXISTS theory_claims (
 CREATE INDEX IF NOT EXISTS idx_theory_claims_document ON theory_claims(document_id);
 CREATE INDEX IF NOT EXISTS idx_theory_claims_chunk ON theory_claims(chunk_id);
 CREATE INDEX IF NOT EXISTS idx_theory_claims_review ON theory_claims(review_status);
+ALTER TABLE theory_claims ADD COLUMN IF NOT EXISTS equation JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE theory_claims DROP CONSTRAINT IF EXISTS theory_claims_claim_type_check;
+ALTER TABLE theory_claims ADD CONSTRAINT theory_claims_claim_type_check CHECK (claim_type IN (
+    'definition', 'assumption', 'approximation', 'equation', 'relation',
+    'derivation_step', 'observable_definition', 'correction',
+    'uncertainty', 'limitation', 'result', 'diagnostic_claim',
+    'equation_definition', 'equation_relation', 'equation_transformation',
+    'equation_approximation', 'equation_constraint'
+));
 
 ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS source_scope JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS evidence_claims JSONB NOT NULL DEFAULT '[]'::jsonb;
@@ -64,7 +69,20 @@ ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS cautions JSONB NOT NULL D
 ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS connectors JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS component_type_text TEXT NOT NULL DEFAULT '';
 ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS internal_flow JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS duplicate_candidates JSONB NOT NULL DEFAULT '[]'::jsonb;
 CREATE INDEX IF NOT EXISTS idx_theory_components_review ON theory_components(review_status);
+
+CREATE TABLE IF NOT EXISTS theory_review_events (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    entity_type     TEXT NOT NULL,
+    entity_id       TEXT NOT NULL,
+    old_status      TEXT NOT NULL DEFAULT '',
+    new_status      TEXT NOT NULL DEFAULT '',
+    changed_by      UUID REFERENCES users(id),
+    metadata        JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_theory_review_events_entity ON theory_review_events(entity_type, entity_id);
 
 CREATE TABLE IF NOT EXISTS theory_component_links (
     id                    UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

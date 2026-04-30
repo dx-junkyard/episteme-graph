@@ -21,6 +21,14 @@ class _OptionalStruct(BaseModel):
     year: int | None = None
 
 
+class _NestedItem(BaseModel):
+    name: str
+
+
+class _NestedStruct(BaseModel):
+    items: list[_NestedItem]
+
+
 def _make_settings(provider: str, dim: int = 3072, **kwargs):
     from core.config import Settings
 
@@ -346,6 +354,32 @@ class TestGoogleVertexAIProvider:
         assert "anyOf" not in schema["properties"]["year"]
         assert schema["properties"]["year"]["type"] == "integer"
         assert parsed == _OptionalStruct(title="paper", year=2026)
+
+    def test_vertex_ai_structured_schema_inlines_nested_refs(self):
+        from core import llm
+
+        fake_model = MagicMock()
+        fake_model.generate_content.return_value = self._make_vertex_response_from_parts(
+            '{"items": [{"name": "alpha"}]}'
+        )
+        fake_generative_model_cls = MagicMock(return_value=fake_model)
+        fake_generation_config_cls = MagicMock()
+        fake_vertex_models = types.ModuleType("vertexai.generative_models")
+        fake_vertex_models.GenerativeModel = fake_generative_model_cls
+        fake_vertex_models.GenerationConfig = fake_generation_config_cls
+
+        with patch.dict("sys.modules", {"vertexai.generative_models": fake_vertex_models}):
+            parsed = llm._vertex_ai_generate_structured(
+                [{"role": "user", "content": "q"}],
+                _NestedStruct,
+                "gemini-2.5-pro",
+            )
+
+        schema = fake_generation_config_cls.call_args.kwargs["response_schema"]
+        assert "$defs" not in schema
+        assert "$ref" not in str(schema)
+        assert schema["properties"]["items"]["items"]["properties"]["name"]["type"] == "string"
+        assert parsed == _NestedStruct(items=[_NestedItem(name="alpha")])
 
     def test_get_vertex_ai_client_raises_on_missing_adc(self):
         """ADC が見つからない場合は EnvironmentError を投げる。"""
