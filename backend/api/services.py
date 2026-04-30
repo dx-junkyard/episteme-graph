@@ -1747,21 +1747,167 @@ def build_knowledge_graph(text: str, title: str) -> dict:
         return {"title": title, "concepts": [], "relationships": [], "chapters": []}
 
 
-def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 100) -> list[str]:
-    """テキストをチャンクに分割する。"""
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = start + chunk_size
-        chunk = text[start:end]
-        if chunk.strip():
-            chunks.append(chunk.strip())
-        start = end - overlap
+# ---------------------------------------------------------------------------
+# Embedding 制約
+# ---------------------------------------------------------------------------
+# Vertex AI の text-embedding 系モデルは
+#   - 1 入力あたり最大 ~2048 トークン
+#   - 1 リクエストあたり最大 ~20000 トークン (バッチ合計)
+# の制約を持つ。日本語や数式を含む論文ではトークン密度が高く、
+# 文字数だけで判定するとこの上限を超えやすい。
+# 安全側に倒した推定として「2 文字 = 1 トークン」を仮定し、
+# チャンク自体を超過させない/バッチ合計が上限を超えないように制御する。
+EMBEDDING_MAX_INPUT_TOKENS = 2000   # 1 入力あたりの安全上限 (Vertex AI 2048 に対して余裕)
+EMBEDDING_MAX_BATCH_TOKENS = 18000  # 1 リクエスト合計の安全上限 (Vertex AI 20000 に対して余裕)
+EMBEDDING_BATCH_MAX_ITEMS = 50      # 1 リクエストあたりの最大アイテム数
+
+
+def _estimate_tokens(text: str) -> int:
+    """テキストのトークン数を保守的に見積もる。
+
+    日本語・数式を含む可能性があるため、1 トークン = 約 2 文字と仮定する
+    (英語では実際にはもっと少ないが、過大評価で安全側に倒す)。
+    """
+    if not text:
+        return 0
+    return max(1, (len(text) + 1) // 2)
+
+
+# 段落 → 改行 → 文末 → 空白 の優先順で分割を試みる。
+_SPLIT_SEPARATORS: tuple[str, ...] = (
+    "\n\n",   # 段落
+    "\n",     # 改行
+    "。",     # 日本語句点
+    ". ",     # 英文末
+    "！",
+    "？",
+    "; ",
+    "、",
+    ", ",
+    " ",      # 空白 (最後のフォールバック)
+)
+
+
+def _split_with_separator(text: str, separator: str) -> list[str]:
+    """指定セパレータで分割するが、セパレータを各セグメント末尾に残す。"""
+    if not separator or separator not in text:
+        return [text]
+    parts: list[str] = []
+    remaining = text
+    while True:
+        idx = remaining.find(separator)
+        if idx == -1:
+            if remaining:
+                parts.append(remaining)
+            break
+        end = idx + len(separator)
+        parts.append(remaining[:end])
+        remaining = remaining[end:]
+    return parts
+
+
+def _split_oversize_segment(segment: str, max_chars: int) -> list[str]:
+    """max_chars を超える単一セグメントを、自然な境界で再分割する。"""
+    if len(segment) <= max_chars:
+        return [segment]
+    for sep in _SPLIT_SEPARATORS:
+        if sep in segment:
+            sub_parts = _split_with_separator(segment, sep)
+            if len(sub_parts) > 1:
+                # 分割結果を再帰的に max_chars 以下に揃える。
+                result: list[str] = []
+                for sub in sub_parts:
+                    if len(sub) <= max_chars:
+                        result.append(sub)
+                    else:
+                        result.extend(_split_oversize_segment(sub, max_chars))
+                return result
+    # 全セパレータで分割できなかった場合は文字単位で強制分割。
+    return [segment[i:i + max_chars] for i in range(0, len(segment), max_chars)]
+
+
+def chunk_text(
+    text: str,
+    chunk_size: int = 1000,
+    overlap: int = 100,
+    max_chars: int | None = None,
+) -> list[str]:
+    """テキストを段落・文・空白などの自然な境界で分割する。
+
+    Parameters
+    ----------
+    text : str
+        対象テキスト。
+    chunk_size : int
+        ターゲットとなるチャンク文字数 (これを超えたら次のチャンクを開始)。
+    overlap : int
+        隣接チャンク間のオーバーラップ文字数。
+    max_chars : int | None
+        ハード上限。1 チャンクが Embedding API の 1 入力上限を超えないようにする。
+        既定では ``EMBEDDING_MAX_INPUT_TOKENS`` 相当の文字数 (2 文字/トークン換算)。
+    """
+    if max_chars is None:
+        max_chars = EMBEDDING_MAX_INPUT_TOKENS * 2  # 1 トークン ≒ 2 文字 (保守的)
+    # max_chars と chunk_size の関係を保つ (chunk_size が max_chars を超えないように)。
+    chunk_size = min(chunk_size, max_chars)
+
+    if not text:
+        return []
+
+    # 1) まず段落で大きく分け、長すぎるものは更に細かく分割する。
+    raw_segments = _split_with_separator(text, "\n\n")
+    segments: list[str] = []
+    for seg in raw_segments:
+        if len(seg) > max_chars:
+            segments.extend(_split_oversize_segment(seg, max_chars))
+        else:
+            segments.append(seg)
+
+    # 2) chunk_size に届くまでセグメントを連結してチャンクを作る。
+    chunks: list[str] = []
+    current = ""
+    for seg in segments:
+        if not seg:
+            continue
+        if not current:
+            current = seg
+            continue
+        if len(current) + len(seg) <= chunk_size:
+            current += seg
+        else:
+            stripped = current.strip()
+            if stripped:
+                chunks.append(stripped)
+            # オーバーラップ: 直前チャンクの末尾を引き継いで文脈を維持する。
+            if overlap > 0 and len(current) > overlap:
+                tail = current[-overlap:]
+                # オーバーラップ + 次セグメントが max_chars を超えないようにする。
+                if len(tail) + len(seg) <= max_chars:
+                    current = tail + seg
+                else:
+                    current = seg
+            else:
+                current = seg
+    if current.strip():
+        chunks.append(current.strip())
+
     return chunks
 
 
-def chunk_pdf_pages(pages: list[dict], chunk_size: int = 1000, overlap: int = 100) -> list[dict]:
-    """ページ単位テキストをチャンク化し、ページ範囲を保持する。"""
+def chunk_pdf_pages(
+    pages: list[dict],
+    chunk_size: int = 1000,
+    overlap: int = 100,
+    max_chars: int | None = None,
+) -> list[dict]:
+    """ページ単位テキストをチャンク化し、ページ範囲を保持する。
+
+    Embedding API の入力トークン上限を超えないよう、段落・文・改行などの
+    自然な境界でチャンクを区切る。
+    """
+    if max_chars is None:
+        max_chars = EMBEDDING_MAX_INPUT_TOKENS * 2
+
     full = ""
     spans: list[dict] = []
     for page in pages:
@@ -1770,24 +1916,80 @@ def chunk_pdf_pages(pages: list[dict], chunk_size: int = 1000, overlap: int = 10
         full += page_text + "\n"
         spans.append({"page": page.get("page"), "start": start, "end": len(full)})
 
+    if not full.strip():
+        return []
+
+    text_chunks = chunk_text(full, chunk_size=chunk_size, overlap=overlap, max_chars=max_chars)
+
+    # 各チャンクに対応するページ範囲を、テキスト内出現位置から逆引きする。
     chunks: list[dict] = []
-    start = 0
-    while start < len(full):
-        end = start + chunk_size
-        chunk = full[start:end].strip()
-        if chunk:
-            touched = [
-                span["page"]
-                for span in spans
-                if span["page"] and span["start"] < end and span["end"] > start
-            ]
-            chunks.append({
-                "text": chunk,
-                "page_start": min(touched) if touched else None,
-                "page_end": max(touched) if touched else None,
-            })
-        start = end - overlap
+    cursor = 0
+    for chunk in text_chunks:
+        idx = full.find(chunk, cursor)
+        if idx == -1:
+            # オーバーラップにより strip されている可能性があるため、先頭一致でフォールバック。
+            head = chunk[:64]
+            idx = full.find(head, cursor) if head else -1
+        if idx == -1:
+            chunk_start = cursor
+            chunk_end = cursor + len(chunk)
+        else:
+            chunk_start = idx
+            chunk_end = idx + len(chunk)
+            cursor = max(cursor, chunk_end - overlap)
+
+        touched = [
+            span["page"]
+            for span in spans
+            if span["page"] and span["start"] < chunk_end and span["end"] > chunk_start
+        ]
+        chunks.append({
+            "text": chunk,
+            "page_start": min(touched) if touched else None,
+            "page_end": max(touched) if touched else None,
+        })
     return chunks
+
+
+def _build_embedding_batches(
+    texts: list[str],
+    *,
+    max_batch_tokens: int = EMBEDDING_MAX_BATCH_TOKENS,
+    max_input_tokens: int = EMBEDDING_MAX_INPUT_TOKENS,
+    max_items: int = EMBEDDING_BATCH_MAX_ITEMS,
+) -> list[list[int]]:
+    """インデックスのバッチ列を、トークン推定に基づいて構築する。
+
+    各バッチは ``max_batch_tokens`` を超えず、
+    各入力は ``max_input_tokens`` を超えないように切り詰める前提で
+    呼び出し側がチャンク分割済みであることを期待する
+    (チャンクが超過する場合でも、単独で 1 バッチに分けることでリクエスト自体は通す)。
+    """
+    batches: list[list[int]] = []
+    current: list[int] = []
+    current_tokens = 0
+    for i, text in enumerate(texts):
+        est = _estimate_tokens(text)
+        # 単独でバッチ上限を超える場合でも、1 アイテムだけのバッチとして送る。
+        if est >= max_batch_tokens:
+            if current:
+                batches.append(current)
+                current = []
+                current_tokens = 0
+            batches.append([i])
+            continue
+        if current and (
+            current_tokens + est > max_batch_tokens
+            or len(current) >= max_items
+        ):
+            batches.append(current)
+            current = []
+            current_tokens = 0
+        current.append(i)
+        current_tokens += est
+    if current:
+        batches.append(current)
+    return batches
 
 
 def _extract_chunk_structure_metadata(knowledge_graph: object) -> tuple[str | None, object | None, object | None]:
@@ -1882,20 +2084,46 @@ def embed_chunks(
         Exception: embedding生成またはDB保存に失敗した場合（呼び出し元で要ハンドリング）
     """
     embedded_count = 0
-    batch_size = 50
     records = [
         c if isinstance(c, dict) else {"text": c, "page_start": None, "page_end": None}
         for c in chunks
     ]
+
+    # Embedding API の 1 入力上限を超えそうなチャンクは、ここで再分割する。
+    # チャンク化の段階で対策はしているが、将来の入力経路に備えた最終ガード。
+    safe_records: list[dict] = []
+    for record in records:
+        text_value = str(record.get("text") or "")
+        if _estimate_tokens(text_value) <= EMBEDDING_MAX_INPUT_TOKENS:
+            safe_records.append(record)
+            continue
+        sub_texts = chunk_text(
+            text_value,
+            chunk_size=EMBEDDING_MAX_INPUT_TOKENS * 2,
+            overlap=0,
+            max_chars=EMBEDDING_MAX_INPUT_TOKENS * 2,
+        )
+        for sub in sub_texts:
+            safe_records.append({
+                "text": sub,
+                "page_start": record.get("page_start"),
+                "page_end": record.get("page_end"),
+            })
+    records = safe_records
+
     smiles_dsl, variables, ancestors = _extract_chunk_structure_metadata(knowledge_graph)
     total = len(records)
+    all_texts = [str(item.get("text") or "") for item in records]
+    batches = _build_embedding_batches(all_texts)
     try:
-        for i in range(0, total, batch_size):
-            batch = records[i:i + batch_size]
-            batch_texts = [str(item.get("text") or "") for item in batch]
+        progress = 0
+        for batch_indices in batches:
+            batch = [records[k] for k in batch_indices]
+            batch_texts = [all_texts[k] for k in batch_indices]
+            batch_tokens = sum(_estimate_tokens(t) for t in batch_texts)
             logger.info(
-                "Embedding batch %d-%d / %d for material %s",
-                i + 1, i + len(batch), total, material_id,
+                "Embedding batch items=%d est_tokens=%d (progress %d/%d) for material %s",
+                len(batch), batch_tokens, progress, total, material_id,
             )
             embeddings = generate_embeddings(batch_texts)
             session = _pg_session()
@@ -1919,7 +2147,7 @@ def embed_chunks(
                         {
                             "id": chunk_id,
                             "doc_id": doc_id,
-                            "idx": i + j,
+                            "idx": batch_indices[j],
                             "text": record.get("text") or "",
                             "embedding": str(embedding),
                             "material_id": material_id,
@@ -1932,6 +2160,7 @@ def embed_chunks(
                     )
                 session.commit()
                 embedded_count += len(batch)
+                progress += len(batch)
             except Exception:
                 session.rollback()
                 raise
