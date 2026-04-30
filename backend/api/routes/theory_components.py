@@ -10,7 +10,7 @@ import time
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy import text as sa_text
 
 from dependencies import ROLE_SYSTEM_ADMIN, _require_teacher
@@ -35,6 +35,8 @@ from services import (
     update_background_task,
 )
 from core.postgres import get_session as _pg_session
+from core.cartridges import load_cartridge
+from core.llm import generate_text, get_llm_params
 from core.theory_components import (
     enrich_theory_components_with_llm,
     extract_theory_components_from_dsl,
@@ -57,6 +59,7 @@ _JSON_FIELDS = (
     "invalid_conditions",
     "dependencies",
     "connectors",
+    "internal_flow",
     "blackbox_policy",
     "validation_warnings",
 )
@@ -75,6 +78,10 @@ _CLAIM_TYPES = {
     "result",
     "diagnostic_claim",
 }
+
+_LEGACY_COMPONENT_TYPES = {"theory", "concept", "law", "mechanism", "operator", "observation"}
+_CLAIM_EXTRACTABLE_ROLES = {"body", "abstract", "equation_block", "caption"}
+_CLAIM_SKIP_ROLES = {"front_matter", "metadata", "references", "acknowledgement"}
 
 
 def _dump_model(value: Any) -> dict:
@@ -102,7 +109,7 @@ def _row_to_out(row: Any) -> TheoryComponentOut:
         "course_id": row[1],
         "primary_chunk_id": str(row[2]) if row[2] else None,
         "name": row[3],
-        "component_type": row[4],
+        "component_type": row[26] or row[4],
         "summary": row[5] or "",
         "status": row[6],
         "source_chunks": _json_value(row[7], []),
@@ -122,6 +129,7 @@ def _row_to_out(row: Any) -> TheoryComponentOut:
         "review_status": row[21] or "teacher_review_required",
         "cautions": _json_value(row[22], []),
         "connectors": _json_value(row[23], {}),
+        "internal_flow": _json_value(row[27], []),
         "created_at": row[24].isoformat() if row[24] else "",
         "updated_at": row[25].isoformat() if row[25] else "",
     }
@@ -134,7 +142,8 @@ def _select_components_sql(where: str) -> str:
                source_chunks, inputs, outputs, preconditions, constraints,
                invalid_conditions, dependencies, blackbox_policy, validation_warnings,
                teacher_notes, source_scope, evidence_claims, maturity_level, maturity_source,
-               review_status, cautions, connectors, created_at, updated_at
+               review_status, cautions, connectors, created_at, updated_at,
+               component_type_text, internal_flow
         FROM theory_components
         WHERE {where}
         ORDER BY updated_at DESC, created_at DESC
@@ -416,11 +425,19 @@ def _source_ref_for_chunk(chunk: dict) -> dict:
 
 def _section_id_for_chunk(chunk: dict) -> str:
     document_id = chunk.get("document_id") or chunk.get("material_id") or "document"
-    page = chunk.get("page_start")
-    if page is not None:
-        return f"{document_id}:page_{page}"
+    heading = _detect_section_heading(chunk.get("raw_text") or chunk.get("text") or "")
+    if heading:
+        sec_num = re.sub(r"[^0-9A-Za-z]+", "_", heading["number"]).strip("_").lower()
+        return f"{document_id}:sec_{sec_num}"
     index = int(chunk.get("chunk_index") or 0)
-    return f"{document_id}:section_{max(1, (index // 4) + 1)}"
+    return f"{document_id}:chunk_group_{max(1, (index // 4) + 1)}"
+
+
+def _section_title_for_chunk(chunk: dict) -> str:
+    heading = _detect_section_heading(chunk.get("raw_text") or chunk.get("text") or "")
+    if heading:
+        return heading["title"]
+    return ""
 
 
 def _source_scope_for_chunk(chunk: dict, level: str = "chunk") -> dict:
@@ -433,6 +450,7 @@ def _source_scope_for_chunk(chunk: dict, level: str = "chunk") -> dict:
         "level": level,
         "document_id": str(chunk.get("document_id") or chunk.get("material_id") or ""),
         "section_id": _section_id_for_chunk(chunk),
+        "section_title": _section_title_for_chunk(chunk),
         "chunk_id": chunk_id if level == "chunk" else "",
         "chunks": [chunk_id] if chunk_id else [],
         "pages": pages,
@@ -498,13 +516,210 @@ def _claim_rows_for_section(document_id: str, section_id: str) -> list[ClaimOut]
         session.close()
 
 
-def _extract_claim_candidates(chunk: dict) -> list[dict]:
+def _parse_json_object(raw: str) -> dict[str, Any]:
+    cleaned = (raw or "").strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    try:
+        parsed = json.loads(cleaned, strict=False)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        match = re.search(r"\{[\s\S]*\}", cleaned)
+        if not match:
+            return {}
+        try:
+            parsed = json.loads(match.group(), strict=False)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+
+
+def _detect_section_heading(text: str) -> dict[str, str] | None:
+    for line in (text or "").splitlines()[:12]:
+        line = line.strip()
+        match = re.match(r"^((?:[1-9]\d*)(?:\.[1-9]\d*)*)\s+(.{3,120})$", line)
+        if not match:
+            continue
+        title = match.group(2).strip()
+        lower = title.lower()
+        if lower.startswith(("arxiv", "jhep", "doi", "received", "accepted", "published")):
+            continue
+        return {"number": match.group(1), "title": f"{match.group(1)} {title}"}
+    return None
+
+
+def _classify_chunk_role(chunk: dict) -> str:
+    text = (chunk.get("raw_text") or chunk.get("text") or "").strip()
+    lower = text.lower()
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    first_lines = "\n".join(lines[:12]).lower()
+    if not text:
+        return "unknown"
+    if re.search(r"^\s*(references|bibliography)\s*$", text, re.IGNORECASE | re.MULTILINE):
+        return "references"
+    if re.search(r"^\s*(acknowledg(e)?ments?)\s*$", text, re.IGNORECASE | re.MULTILINE):
+        return "acknowledgement"
+    if any(token in first_lines for token in (
+        "published for sissa", "received:", "accepted:", "published:", "springer",
+        "arxiv:", "doi:", "journal of high energy physics", "jhep",
+    )):
+        return "front_matter"
+    if len(lines) <= 8 and any(token in lower for token in ("received:", "published", "doi", "copyright", "open access")):
+        return "metadata"
+    if "abstract" in first_lines[:160]:
+        return "abstract"
+    if any(token in text for token in ("\\begin{equation}", "\\[", "$$")):
+        return "equation_block"
+    return "body"
+
+
+def _is_low_value_claim_text(text: str) -> bool:
+    lower = (text or "").strip().lower()
+    if not lower:
+        return True
+    if len(lower) < 24:
+        return True
+    bad_patterns = [
+        r"^jhep\d+",
+        r"^published for",
+        r"^springer$",
+        r"^received:",
+        r"^accepted:",
+        r"^published:",
+        r"^doi:",
+        r"^arxiv:",
+        r"^references$",
+        r"^bibliography$",
+    ]
+    return any(re.search(pattern, lower) for pattern in bad_patterns)
+
+
+def _normalize_claim_payload(raw: dict, chunk: dict) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    claim_type = str(raw.get("claim_type") or "diagnostic_claim").strip()
+    if claim_type not in _CLAIM_TYPES:
+        claim_type = "diagnostic_claim"
+    text = str(raw.get("text") or raw.get("normalized_text") or "").strip()
+    if _is_low_value_claim_text(text):
+        return None
+    evidence = str(raw.get("evidence_text") or "").strip()
+    if not evidence:
+        evidence = text[:360]
+    concepts = raw.get("concepts") if isinstance(raw.get("concepts"), list) else []
+    normalized_concepts = []
+    for concept in concepts[:8]:
+        if not isinstance(concept, dict):
+            continue
+        name = str(concept.get("name") or "").strip()
+        if not name:
+            continue
+        normalized_concepts.append({
+            "name": name,
+            "concept_type": str(concept.get("concept_type") or "Concept").strip() or "Concept",
+        })
+    if not normalized_concepts:
+        normalized_concepts = _fallback_concepts(text)
+    scope = _source_scope_for_chunk(chunk, "chunk")
+    if isinstance(raw.get("source_scope"), dict):
+        scope.update({k: v for k, v in raw["source_scope"].items() if v not in (None, "", [])})
+    return {
+        "claim_type": claim_type,
+        "text": text[:1200],
+        "normalized_text": str(raw.get("normalized_text") or text).strip()[:1200],
+        "concepts": normalized_concepts,
+        "support_status": str(raw.get("support_status") or "source_backed").strip() or "source_backed",
+        "evidence_text": evidence[:500],
+        "review_status": "teacher_review_required",
+        "source_scope": scope,
+    }
+
+
+def _fallback_concepts(text: str) -> list[dict]:
+    candidates = []
+    patterns = [
+        (r"heavy quark limit", "Approximation"),
+        (r"zero[- ]recoil limit", "Approximation"),
+        (r"sum rule", "Relation"),
+        (r"form factor[s]?", "UncertaintySource"),
+        (r"uncertaint(?:y|ies)", "Uncertainty"),
+        (r"correction[s]?", "CorrectionSource"),
+        (r"R[Λ\\A-Za-z0-9*_]+", "Observable"),
+    ]
+    for pattern, concept_type in patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            name = match.group(0)
+            if not any(c["name"].lower() == name.lower() for c in candidates):
+                candidates.append({"name": name, "concept_type": concept_type})
+    return candidates[:6]
+
+
+def _semantic_claims_with_llm(chunk: dict) -> list[dict]:
+    text = (chunk.get("raw_text") or chunk.get("text") or "").strip()
+    cartridge = load_cartridge()
+    params = get_llm_params("fast")
+    prompt = f"""このチャンクから理論コンポーネントを直接作らない。
+まず、論理形成に使えるClaimだけを抽出する。
+
+Claimは単なる文ではなく、理論・定義・式・仮定・近似・補正・不確実性・制限・観測量に関する意味ある主張である。
+出版情報、著者情報、所属、ジャーナル情報、受理日、ページ番号、参考文献、謝辞、単なる見出しはClaimにしない。
+
+claim_type候補:
+{", ".join(sorted(_CLAIM_TYPES))}
+
+concept_type候補:
+{", ".join(cartridge.ontology.concept_type_ids)}
+
+support_status候補:
+{", ".join(cartridge.support_status_ids)}
+
+チャンク情報:
+document_id={chunk.get("document_id") or chunk.get("material_id") or ""}
+chunk_id={chunk.get("id")}
+page={chunk.get("page_start")}
+section_id={_section_id_for_chunk(chunk)}
+section_title={_section_title_for_chunk(chunk)}
+
+本文:
+{text[:6000]}
+
+JSONのみ:
+{{
+  "claims": [
+    {{
+      "claim_type": "relation",
+      "text": "logical claim",
+      "normalized_text": "self-contained logical claim",
+      "concepts": [{{"name": "concept", "concept_type": "Relation"}}],
+      "support_status": "source_backed",
+      "evidence_text": "short source quote"
+    }}
+  ]
+}}
+"""
+    raw = generate_text(
+        [{"role": "system", "content": "You extract source-grounded scientific claims as strict JSON."},
+         {"role": "user", "content": prompt}],
+        model=params.get("model"),
+        reasoning_effort=params.get("reasoning_effort"),
+        max_tokens=1800,
+    )
+    parsed = _parse_json_object(raw)
+    items = parsed.get("claims") if isinstance(parsed.get("claims"), list) else []
+    return [payload for item in items if (payload := _normalize_claim_payload(item, chunk))]
+
+
+def _fallback_semantic_claims(chunk: dict) -> list[dict]:
     text = (chunk.get("raw_text") or chunk.get("text") or "").strip()
     if not text:
         return []
     pieces = [p.strip() for p in re.split(r"(?<=[。.!?])\s+|\n+", text) if p.strip()]
     candidates: list[dict] = []
-    for idx, sentence in enumerate(pieces[:8]):
+    useful_terms = re.compile(
+        r"sum rule|relation|derive|assum|limit|approx|correction|uncertain|form factor|observable|decay|rate|operator|coefficient|hamiltonian|constraint|prediction|result",
+        re.IGNORECASE,
+    )
+    for sentence in pieces[:20]:
+        if not useful_terms.search(sentence) or _is_low_value_claim_text(sentence):
+            continue
         lower = sentence.lower()
         claim_type = "diagnostic_claim"
         if any(token in lower for token in ("define", "definition", "denote", "is called")):
@@ -519,33 +734,31 @@ def _extract_claim_candidates(chunk: dict) -> list[dict]:
             claim_type = "uncertainty"
         elif any(token in lower for token in ("result", "therefore", "we find", "結果")):
             claim_type = "result"
-        candidates.append({
+        payload = _normalize_claim_payload({
             "claim_type": claim_type,
             "text": sentence[:1200],
             "normalized_text": sentence[:1200],
-            "concepts": [],
+            "concepts": _fallback_concepts(sentence),
             "support_status": "source_backed",
             "evidence_text": sentence[:360],
             "review_status": "teacher_review_required",
             "source_scope": _source_scope_for_chunk(chunk, "chunk"),
-        })
-    variables = _json_value(chunk.get("variables"), [])
-    if isinstance(variables, dict):
-        variables = list(variables.values())
-    for item in variables[:6] if isinstance(variables, list) else []:
-        label = item.get("name") or item.get("label") if isinstance(item, dict) else str(item)
-        if label:
-            candidates.append({
-                "claim_type": "definition",
-                "text": f"{label} is defined or used in this chunk.",
-                "normalized_text": f"{label} is defined or used in this chunk.",
-                "concepts": [{"name": str(label), "concept_type": "Concept"}],
-                "support_status": "source_backed",
-                "evidence_text": text[:240],
-                "review_status": "teacher_review_required",
-                "source_scope": _source_scope_for_chunk(chunk, "chunk"),
-            })
-    return candidates[:12]
+        }, chunk)
+        if payload:
+            candidates.append(payload)
+    return candidates[:8]
+
+
+def _extract_claim_candidates(chunk: dict) -> list[dict]:
+    role = _classify_chunk_role(chunk)
+    if role in _CLAIM_SKIP_ROLES:
+        return []
+    try:
+        claims = _semantic_claims_with_llm(chunk)
+    except Exception:
+        logger.warning("LLM claim extraction failed; using semantic fallback", exc_info=True)
+        claims = _fallback_semantic_claims(chunk)
+    return claims
 
 
 def _insert_claim(document_id: str, chunk_id: str, payload: dict, user_id: str) -> ClaimOut:
@@ -579,7 +792,7 @@ def _insert_claim(document_id: str, chunk_id: str, payload: dict, user_id: str) 
                 "support_status": payload.get("support_status") or "source_backed",
                 "evidence_text": payload.get("evidence_text") or "",
                 "review_status": payload.get("review_status") or "teacher_review_required",
-                "created_by": user_id,
+                "created_by": user_id or None,
             },
         ).fetchone()
         session.commit()
@@ -630,8 +843,9 @@ def _validate_for_review(payload: dict) -> None:
 
 def _normalize_payload(body: TheoryComponentUpsertRequest, chunk: dict | None = None) -> dict:
     payload = _dump_model(body)
-    if payload.get("component_type") not in {"theory", "concept", "law", "mechanism", "operator", "observation"}:
-        raise HTTPException(status_code=422, detail="Invalid component_type")
+    component_type = str(payload.get("component_type") or "theory").strip()
+    payload["component_type_text"] = component_type
+    payload["component_type"] = component_type if component_type in _LEGACY_COMPONENT_TYPES else "theory"
     if chunk and not payload.get("source_chunks"):
         payload["source_chunks"] = [_source_ref_for_chunk(chunk)]
     if chunk and not payload.get("source_scope"):
@@ -646,6 +860,7 @@ def _normalize_payload(body: TheoryComponentUpsertRequest, chunk: dict | None = 
         "can_output_to": [],
         "may_conflict_with": [],
     }
+    payload["internal_flow"] = payload.get("internal_flow") or []
     payload["maturity_level"] = payload.get("maturity_level") or "paper_claim"
     payload["maturity_source"] = payload.get("maturity_source") or "llm_proposed"
     if payload.get("status") == "teacher_reviewed":
@@ -690,10 +905,7 @@ def _raw_items_with_chunk_refs(items: Any, chunk: dict) -> list[dict]:
 
 
 def _raw_component_to_request(raw: dict, chunk: dict) -> TheoryComponentUpsertRequest:
-    allowed_types = {"theory", "concept", "law", "mechanism", "operator", "observation"}
     component_type = str(raw.get("component_type") or "theory").strip()
-    if component_type not in allowed_types:
-        component_type = "theory"
     source_chunks = raw.get("source_chunks") if isinstance(raw.get("source_chunks"), list) else []
     fixed_source_chunks = []
     for ref in source_chunks:
@@ -723,6 +935,7 @@ def _raw_component_to_request(raw: dict, chunk: dict) -> TheoryComponentUpsertRe
         "invalid_conditions": _raw_items_with_chunk_refs(raw.get("invalid_conditions"), chunk),
         "dependencies": _raw_items_with_chunk_refs(raw.get("dependencies"), chunk),
         "connectors": raw.get("connectors") if isinstance(raw.get("connectors"), dict) else {},
+        "internal_flow": raw.get("internal_flow") if isinstance(raw.get("internal_flow"), list) else [],
         "blackbox_policy": raw.get("blackbox_policy") or {"default_level": "summary", "expand_if_unlearned": True},
     })
 
@@ -760,7 +973,7 @@ def _insert_component(course_id: str, primary_chunk_id: str | None, payload: dic
                     source_chunks, inputs, outputs, preconditions, constraints,
                     invalid_conditions, dependencies, blackbox_policy, validation_warnings,
                     teacher_notes, source_scope, evidence_claims, maturity_level, maturity_source,
-                    review_status, cautions, connectors, created_by
+                    review_status, cautions, connectors, component_type_text, internal_flow, created_by
                 )
                 VALUES (
                     :course_id, CAST(:primary_chunk_id AS uuid), :name, :component_type, :summary, :status,
@@ -770,7 +983,8 @@ def _insert_component(course_id: str, primary_chunk_id: str | None, payload: dic
                     CAST(:blackbox_policy AS jsonb), CAST(:validation_warnings AS jsonb),
                     :teacher_notes, CAST(:source_scope AS jsonb), CAST(:evidence_claims AS jsonb),
                     :maturity_level, :maturity_source, :review_status, CAST(:cautions AS jsonb),
-                    CAST(:connectors AS jsonb), CAST(:created_by AS uuid)
+                    CAST(:connectors AS jsonb), :component_type_text, CAST(:internal_flow AS jsonb),
+                    CAST(:created_by AS uuid)
                 )
                 RETURNING id
             """),
@@ -798,6 +1012,8 @@ def _insert_component(course_id: str, primary_chunk_id: str | None, payload: dic
                 "review_status": payload.get("review_status") or "teacher_review_required",
                 "cautions": json.dumps(payload.get("cautions") or [], ensure_ascii=False),
                 "connectors": json.dumps(payload.get("connectors") or {}, ensure_ascii=False),
+                "component_type_text": payload.get("component_type_text") or payload.get("component_type") or "",
+                "internal_flow": json.dumps(payload.get("internal_flow") or [], ensure_ascii=False),
                 "created_by": user_id,
             },
         ).fetchone()
@@ -840,6 +1056,8 @@ def _update_component(component_id: str, payload: dict) -> TheoryComponentOut:
                     review_status = :review_status,
                     cautions = CAST(:cautions AS jsonb),
                     connectors = CAST(:connectors AS jsonb),
+                    component_type_text = :component_type_text,
+                    internal_flow = CAST(:internal_flow AS jsonb),
                     updated_at = now()
                 WHERE id = CAST(:id AS uuid)
             """),
@@ -866,6 +1084,8 @@ def _update_component(component_id: str, payload: dict) -> TheoryComponentOut:
                 "review_status": payload.get("review_status") or "teacher_review_required",
                 "cautions": json.dumps(payload.get("cautions") or [], ensure_ascii=False),
                 "connectors": json.dumps(payload.get("connectors") or {}, ensure_ascii=False),
+                "component_type_text": payload.get("component_type_text") or payload.get("component_type") or "",
+                "internal_flow": json.dumps(payload.get("internal_flow") or [], ensure_ascii=False),
             },
         )
         session.commit()
@@ -976,15 +1196,134 @@ def _group_sections(chunks: list[dict]) -> dict[tuple[str, str], list[dict]]:
     return grouped
 
 
-def _run_claim_extraction(course_id: str, course_data: dict, user_id: str | None, task_id: str | None = None) -> dict:
+def _in_params(prefix: str, values: list[str], cast: str | None = None) -> tuple[str, dict[str, str]]:
+    params: dict[str, str] = {}
+    placeholders = []
+    for idx, value in enumerate(values):
+        key = f"{prefix}_{idx}"
+        params[key] = value
+        token = f":{key}"
+        placeholders.append(f"CAST({token} AS {cast})" if cast else token)
+    return ", ".join(placeholders), params
+
+
+def _delete_claims_for_chunks(chunk_ids: list[str]) -> None:
+    if not chunk_ids:
+        return
+    placeholders, params = _in_params("chunk_id", chunk_ids, "uuid")
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text(f"""
+                DELETE FROM theory_claims
+                WHERE chunk_id IN ({placeholders})
+            """),
+            params,
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _delete_components_for_sections(course_id: str, section_ids: list[str]) -> None:
+    if not section_ids:
+        return
+    placeholders, params = _in_params("section_id", section_ids)
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text(f"""
+                DELETE FROM theory_components
+                WHERE course_id = :course_id
+                  AND source_scope->>'section_id' IN ({placeholders})
+            """),
+            {"course_id": course_id, **params},
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _analysis_status(course_id: str, course_data: dict) -> dict:
+    chunks = _course_chunks(course_data)
+    claim_target_chunks = [chunk for chunk in chunks if _classify_chunk_role(chunk) not in _CLAIM_SKIP_ROLES]
+    chunk_ids = [chunk["id"] for chunk in claim_target_chunks]
+    grouped = _group_sections(chunks)
+    section_ids = [section_id for (_document_id, section_id) in grouped.keys()]
+    document_ids = sorted({c.get("document_id") or c.get("material_id") for c in chunks if c.get("document_id") or c.get("material_id")})
+    session = _pg_session()
+    try:
+        claim_chunks = 0
+        component_sections = 0
+        graph_documents = 0
+        if chunk_ids:
+            placeholders, params = _in_params("chunk_id", chunk_ids, "uuid")
+            claim_chunks = int(session.execute(
+                sa_text(f"SELECT COUNT(DISTINCT chunk_id) FROM theory_claims WHERE chunk_id IN ({placeholders})"),
+                params,
+            ).scalar() or 0)
+        if section_ids:
+            placeholders, params = _in_params("section_id", section_ids)
+            component_sections = int(session.execute(
+                sa_text(f"""
+                    SELECT COUNT(DISTINCT source_scope->>'section_id')
+                    FROM theory_components
+                    WHERE course_id = :course_id
+                      AND source_scope->>'section_id' IN ({placeholders})
+                """),
+                {"course_id": course_id, **params},
+            ).scalar() or 0)
+        if document_ids:
+            placeholders, params = _in_params("document_id", document_ids)
+            graph_documents = int(session.execute(
+                sa_text(f"""
+                    SELECT COUNT(DISTINCT document_id)
+                    FROM theory_component_graphs
+                    WHERE course_id = :course_id
+                      AND document_id IN ({placeholders})
+                """),
+                {"course_id": course_id, **params},
+            ).scalar() or 0)
+    finally:
+        session.close()
+    return {
+        "course_id": course_id,
+        "claims": {
+            "total": len(chunk_ids),
+            "completed": claim_chunks,
+            "complete": bool(chunk_ids) and claim_chunks >= len(chunk_ids),
+        },
+        "components": {
+            "total": len(section_ids),
+            "completed": component_sections,
+            "complete": bool(section_ids) and component_sections >= len(section_ids),
+        },
+        "graph": {
+            "total": len(document_ids),
+            "completed": graph_documents,
+            "complete": bool(document_ids) and graph_documents >= len(document_ids),
+        },
+    }
+
+
+def _run_claim_extraction(course_id: str, course_data: dict, user_id: str | None, task_id: str | None = None, force: bool = False) -> dict:
     chunks = _course_chunks(course_data)
     total = len(chunks)
     created = 0
     skipped = 0
+    if force:
+        _delete_claims_for_chunks([chunk["id"] for chunk in chunks])
     if task_id:
         update_background_task(task_id, "processing", result_data={
             "course_id": course_id, "total_chunks": total, "generated": 0,
             "skipped": 0, "progress": 0, "stage": "claims",
+            "force": force,
         })
     for idx, chunk in enumerate(chunks):
         document_id = chunk.get("document_id") or chunk.get("material_id") or ""
@@ -993,16 +1332,216 @@ def _run_claim_extraction(course_id: str, course_data: dict, user_id: str | None
         elif _claim_rows_for_chunk(chunk["id"]):
             skipped += 1
         else:
-            for payload in _extract_claim_candidates(chunk):
+            payloads = _extract_claim_candidates(chunk)
+            if not payloads:
+                skipped += 1
+            for payload in payloads:
                 _insert_claim(document_id, chunk["id"], payload, user_id or "")
                 created += 1
         if task_id:
             update_background_task(task_id, "processing", result_data={
                 "course_id": course_id, "total_chunks": total, "generated": created,
                 "skipped": skipped, "progress": int((idx + 1) * 100 / total) if total else 100,
-                "stage": "claims",
+                "stage": "claims", "force": force,
             })
-    return {"total_chunks": total, "generated": created, "skipped": skipped, "progress": 100}
+    return {"total_chunks": total, "generated": created, "skipped": skipped, "progress": 100, "force": force}
+
+
+def _claim_item(name: str, support_status: str, evidence_claims: list[str], description: str = "", concept_type: str = "Concept") -> dict:
+    return {
+        "label": name,
+        "name": name,
+        "type": concept_type,
+        "concept_type": concept_type,
+        "description": description,
+        "support_status": support_status or "source_backed",
+        "evidence_claims": evidence_claims,
+        "source_refs": [],
+        "needs_source": support_status in {"domain_inferred", "design_inferred"},
+    }
+
+
+def _condition_item(name: str, support_status: str, evidence_claims: list[str], description: str = "") -> dict:
+    return {
+        "label": name,
+        "condition": name,
+        "description": description,
+        "support_status": support_status or "source_backed",
+        "evidence_claims": evidence_claims,
+        "source_refs": [],
+        "needs_source": support_status in {"domain_inferred", "design_inferred"},
+    }
+
+
+def _normalize_component_candidate(raw: dict, document_id: str, section_id: str, section_chunks: list[dict], claims: list[ClaimOut]) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    name = str(raw.get("name") or "").strip()
+    if not name or re.search(r"component for (page|section|chunk_group)", name, re.IGNORECASE):
+        return None
+    evidence_claims = [str(cid) for cid in raw.get("evidence_claims", []) if str(cid)]
+    valid_claim_ids = {claim.claim_id for claim in claims}
+    evidence_claims = [cid for cid in evidence_claims if cid in valid_claim_ids]
+    if not evidence_claims:
+        evidence_claims = [claim.claim_id for claim in claims[:3]]
+    source_scope = {
+        "level": "section" if _section_title_for_chunk(section_chunks[0]) else "chunk_group",
+        "document_id": document_id,
+        "section_id": section_id,
+        "section_title": _section_title_for_chunk(section_chunks[0]) if section_chunks else "",
+        "chunks": [c["id"] for c in section_chunks],
+        "pages": sorted({p for c in section_chunks for p in (c.get("page_start"), c.get("page_end")) if p is not None}),
+        "equations": [str(eq) for eq in raw.get("equations", []) if str(eq)] if isinstance(raw.get("equations"), list) else [],
+        "claims": evidence_claims,
+    }
+
+    def normalize_items(field: str) -> list[dict]:
+        items = raw.get(field) if isinstance(raw.get(field), list) else []
+        normalized = []
+        for item in items[:8]:
+            if not isinstance(item, dict):
+                continue
+            item_claims = [str(cid) for cid in item.get("evidence_claims", []) if str(cid) in valid_claim_ids]
+            name_value = str(item.get("name") or item.get("label") or item.get("condition") or "").strip()
+            if not name_value:
+                continue
+            support = str(item.get("support_status") or "source_backed")
+            if field in ("preconditions", "cautions"):
+                normalized.append(_condition_item(name_value, support, item_claims or evidence_claims[:1], str(item.get("description") or "")))
+            else:
+                normalized.append(_claim_item(
+                    name_value,
+                    support,
+                    item_claims or evidence_claims[:1],
+                    str(item.get("description") or ""),
+                    str(item.get("concept_type") or item.get("type") or "Concept"),
+                ))
+        return normalized
+
+    return {
+        "name": name,
+        "component_type": str(raw.get("component_type") or "PaperClaimComponent").strip(),
+        "summary": str(raw.get("summary") or ""),
+        "status": "candidate",
+        "source_scope": source_scope,
+        "evidence_claims": evidence_claims,
+        "maturity_level": str(raw.get("maturity_level") or "paper_claim"),
+        "maturity_source": "llm_proposed",
+        "review_status": "teacher_review_required",
+        "source_chunks": [_source_ref_for_chunk(c) for c in section_chunks],
+        "inputs": normalize_items("inputs"),
+        "outputs": normalize_items("outputs"),
+        "preconditions": normalize_items("preconditions"),
+        "cautions": normalize_items("cautions"),
+        "constraints": [],
+        "invalid_conditions": normalize_items("cautions"),
+        "dependencies": normalize_items("dependencies"),
+        "internal_flow": raw.get("internal_flow") if isinstance(raw.get("internal_flow"), list) else [],
+        "connectors": raw.get("connectors") if isinstance(raw.get("connectors"), dict) else {
+            "requires_before_use": [], "can_accept": [], "can_output_to": [], "may_conflict_with": [],
+        },
+        "blackbox_policy": {
+            "default_level": "summary",
+            "expand_if_unlearned": True,
+            "requires_source_display": True,
+            "io_summary": str(raw.get("io_summary") or ""),
+        },
+    }
+
+
+def _semantic_components_with_llm(document_id: str, section_id: str, section_chunks: list[dict], claims: list[ClaimOut]) -> list[dict]:
+    cartridge = load_cartridge()
+    params = get_llm_params("fast")
+    claim_lines = "\n".join(
+        f"- {claim.claim_id} [{claim.claim_type}] {claim.normalized_text or claim.text}"
+        for claim in claims
+    )
+    section_title = _section_title_for_chunk(section_chunks[0]) if section_chunks else ""
+    prompt = f"""Claim群から意味のある理論Component候補を組み立てる。
+1節から必ず1つのComponentを作る必要はない。0個、1個、複数個のいずれでもよい。
+Component名は内容に基づいて付ける。"Component for page N" や "Component for section" は禁止。
+内容ベースで名前を付けられない場合は components=[] を返す。
+Claimにない情報を補完する場合は support_status を domain_inferred または design_inferred にする。
+teacher_approved は付けてはいけない。
+
+component_type候補:
+{", ".join(cartridge.component_type_ids)}
+
+maturity_level候補:
+{", ".join(cartridge.maturity_level_ids)}
+
+section_id={section_id}
+section_title={section_title}
+document_id={document_id}
+
+Claims:
+{claim_lines}
+
+JSONのみ:
+{{
+  "components": [
+    {{
+      "name": "Total Decay Rate Sum Rule Component",
+      "component_type": "PaperRelationComponent",
+      "summary": "what this component does",
+      "maturity_level": "paper_claim",
+      "evidence_claims": ["claim id"],
+      "inputs": [{{"name": "input", "concept_type": "Relation", "support_status": "source_backed", "evidence_claims": ["claim id"]}}],
+      "outputs": [],
+      "preconditions": [],
+      "cautions": [],
+      "dependencies": [],
+      "internal_flow": [],
+      "connectors": {{"requires_before_use": [], "can_accept": [], "can_output_to": [], "may_conflict_with": []}}
+    }}
+  ]
+}}
+"""
+    raw = generate_text(
+        [{"role": "system", "content": "You assemble source-grounded theory components as strict JSON."},
+         {"role": "user", "content": prompt}],
+        model=params.get("model"),
+        reasoning_effort=params.get("reasoning_effort"),
+        max_tokens=2200,
+    )
+    parsed = _parse_json_object(raw)
+    items = parsed.get("components") if isinstance(parsed.get("components"), list) else []
+    return [
+        payload for item in items
+        if (payload := _normalize_component_candidate(item, document_id, section_id, section_chunks, claims))
+    ]
+
+
+def _fallback_component_candidates(document_id: str, section_id: str, section_chunks: list[dict], claims: list[ClaimOut]) -> list[dict]:
+    if not claims:
+        return []
+    relation_claims = [c for c in claims if c.claim_type in {"relation", "equation", "result", "derivation_step"}]
+    assumption_claims = [c for c in claims if c.claim_type in {"assumption", "approximation"}]
+    caution_claims = [c for c in claims if c.claim_type in {"uncertainty", "limitation", "correction"}]
+    if not relation_claims and not assumption_claims and not caution_claims:
+        return []
+    concept_counts: dict[str, tuple[str, int]] = {}
+    for claim in claims:
+        for concept in claim.concepts:
+            key = concept.name.lower()
+            concept_counts[key] = (concept.name, concept_counts.get(key, (concept.name, 0))[1] + 1)
+    title = sorted(concept_counts.values(), key=lambda x: x[1], reverse=True)[0][0] if concept_counts else "Theory Claim"
+    if len(title) < 4:
+        return []
+    evidence = [c.claim_id for c in (relation_claims + assumption_claims + caution_claims)[:6]]
+    raw = {
+        "name": f"{title[:80]} Component",
+        "component_type": "PaperRelationComponent" if relation_claims else "PaperClaimComponent",
+        "summary": "Claim群から組み立てた内容ベースの理論コンポーネント候補です。",
+        "maturity_level": "paper_claim",
+        "evidence_claims": evidence,
+        "inputs": [{"name": c.normalized_text or c.text, "concept_type": "Concept", "support_status": c.support_status, "evidence_claims": [c.claim_id]} for c in assumption_claims[:4]],
+        "outputs": [{"name": c.normalized_text or c.text, "concept_type": "Relation", "support_status": c.support_status, "evidence_claims": [c.claim_id]} for c in relation_claims[:4]],
+        "preconditions": [{"name": c.normalized_text or c.text, "support_status": c.support_status, "evidence_claims": [c.claim_id]} for c in assumption_claims[:4]],
+        "cautions": [{"name": c.normalized_text or c.text, "support_status": c.support_status, "evidence_claims": [c.claim_id]} for c in caution_claims[:4]],
+    }
+    payload = _normalize_component_candidate(raw, document_id, section_id, section_chunks, claims)
+    return [payload] if payload else []
 
 
 def _assemble_section(
@@ -1012,69 +1551,27 @@ def _assemble_section(
     section_chunks: list[dict],
     user_id: str | None,
     force: bool = False,
-) -> TheoryComponentOut | None:
+) -> list[TheoryComponentOut]:
     existing = list_section_components(document_id, section_id, {"role": ROLE_SYSTEM_ADMIN, "id": user_id or ""})
     if existing and not force:
-        return existing[0]
+        return existing
     claims = _claim_rows_for_section(document_id, section_id)
     if not claims:
         for chunk in section_chunks:
             for payload in _extract_claim_candidates(chunk):
                 claims.append(_insert_claim(document_id, chunk["id"], payload, user_id or ""))
     if not claims:
-        return None
-    evidence_claims = [claim.claim_id for claim in claims]
-    source_scope = {
-        "level": "section",
-        "document_id": document_id,
-        "section_id": section_id,
-        "chunks": [c["id"] for c in section_chunks],
-        "pages": sorted({p for c in section_chunks for p in (c.get("page_start"), c.get("page_end")) if p is not None}),
-        "equations": [],
-        "claims": evidence_claims,
-    }
-    def item_for_claim(claim: ClaimOut) -> dict:
-        return {
-            "label": claim.normalized_text or claim.text,
-            "name": claim.normalized_text or claim.text,
-            "type": "Concept",
-            "concept_type": "Relation" if claim.claim_type in ("relation", "equation") else "Concept",
-            "description": claim.text,
-            "support_status": claim.support_status,
-            "evidence_claims": [claim.claim_id],
-            "source_refs": [{"chunk_id": claim.source_scope.chunk_id, "quote": claim.evidence_text}],
-            "needs_source": False,
-        }
-    inputs = [item_for_claim(c) for c in claims if c.claim_type in ("definition", "assumption", "approximation", "observable_definition")][:6]
-    outputs = [item_for_claim(c) for c in claims if c.claim_type in ("equation", "relation", "result", "derivation_step")][:6]
-    cautions = [{
-        "label": c.normalized_text or c.text,
-        "condition": c.normalized_text or c.text,
-        "description": c.text,
-        "support_status": c.support_status,
-        "evidence_claims": [c.claim_id],
-        "source_refs": [{"chunk_id": c.source_scope.chunk_id, "quote": c.evidence_text}],
-        "needs_source": False,
-    } for c in claims if c.claim_type in ("uncertainty", "limitation", "correction")][:4]
-    payload = _normalize_payload(TheoryComponentUpsertRequest(**{
-        "name": f"Component for {section_id.rsplit(':', 1)[-1].replace('_', ' ')}",
-        "component_type": "theory",
-        "summary": "複数Claimを束ねた節単位の理論コンポーネント候補です。",
-        "status": "candidate",
-        "source_scope": source_scope,
-        "evidence_claims": evidence_claims,
-        "maturity_level": "paper_claim",
-        "maturity_source": "llm_proposed",
-        "review_status": "teacher_review_required",
-        "source_chunks": [_source_ref_for_chunk(c) for c in section_chunks],
-        "inputs": inputs or outputs[:1],
-        "outputs": outputs or inputs[:1],
-        "preconditions": [],
-        "cautions": cautions,
-        "invalid_conditions": cautions,
-        "connectors": {"requires_before_use": [], "can_accept": [], "can_output_to": [], "may_conflict_with": []},
-    }))
-    return _insert_component(course_id, section_chunks[0]["id"] if section_chunks else None, payload, user_id or "")
+        return []
+    try:
+        candidates = _semantic_components_with_llm(document_id, section_id, section_chunks, claims)
+    except Exception:
+        logger.warning("LLM component assembly failed; using semantic fallback", exc_info=True)
+        candidates = _fallback_component_candidates(document_id, section_id, section_chunks, claims)
+    saved: list[TheoryComponentOut] = []
+    for candidate in candidates:
+        payload = _normalize_payload(TheoryComponentUpsertRequest(**candidate))
+        saved.append(_insert_component(course_id, section_chunks[0]["id"] if section_chunks else None, payload, user_id or ""))
+    return saved
 
 
 def _run_component_assembly(course_id: str, course_data: dict, user_id: str | None, task_id: str | None = None, force: bool = False) -> dict:
@@ -1082,24 +1579,26 @@ def _run_component_assembly(course_id: str, course_data: dict, user_id: str | No
     total = len(grouped)
     generated = 0
     skipped = 0
+    if force:
+        _delete_components_for_sections(course_id, [section_id for (_document_id, section_id) in grouped.keys()])
     if task_id:
         update_background_task(task_id, "processing", result_data={
             "course_id": course_id, "total_sections": total, "generated": 0,
-            "skipped": 0, "progress": 0, "stage": "components",
+            "skipped": 0, "progress": 0, "stage": "components", "force": force,
         })
     for idx, ((document_id, section_id), chunks) in enumerate(grouped.items()):
-        component = _assemble_section(course_id, document_id, section_id, chunks, user_id, force=force)
-        if component:
-            generated += 1
+        components = _assemble_section(course_id, document_id, section_id, chunks, user_id, force=force)
+        if components:
+            generated += len(components)
         else:
             skipped += 1
         if task_id:
             update_background_task(task_id, "processing", result_data={
                 "course_id": course_id, "total_sections": total, "generated": generated,
                 "skipped": skipped, "progress": int((idx + 1) * 100 / total) if total else 100,
-                "stage": "components",
+                "stage": "components", "force": force,
             })
-    return {"total_sections": total, "generated": generated, "skipped": skipped, "progress": 100}
+    return {"total_sections": total, "generated": generated, "skipped": skipped, "progress": 100, "force": force}
 
 
 def _run_graph_update(course_id: str, course_data: dict, user_id: str | None, task_id: str | None = None) -> dict:
@@ -1124,9 +1623,9 @@ def _run_graph_update(course_id: str, course_data: dict, user_id: str | None, ta
     return {"total_documents": total, "generated": generated, "progress": 100}
 
 
-def _worker_wrapper(task_id: str, fn, *args) -> None:
+def _worker_wrapper(task_id: str, fn, *args, **kwargs) -> None:
     try:
-        result = fn(*args, task_id)
+        result = fn(*args, task_id=task_id, **kwargs)
         update_background_task(task_id, "completed", result_data={**result, "course_id": args[0], "progress": 100})
     except Exception as exc:
         logger.exception("Background theory task failed: %s", task_id)
@@ -1164,14 +1663,27 @@ def extract_chunk_claims(
     chunks = _ensure_document_editable(document_id, current_user)
     if not any(c["id"] == chunk_id for c in chunks):
         raise HTTPException(status_code=404, detail="Chunk not found")
+    chunk_role = _classify_chunk_role(chunk)
+    if chunk_role in _CLAIM_SKIP_ROLES:
+        return ClaimExtractResponse(
+            chunk_id=chunk_id,
+            claims=[],
+            chunk_role=chunk_role,
+            skip_reason=f"{chunk_role}_not_claim_extractable",
+        )
     existing = _claim_rows_for_chunk(chunk_id)
     if existing:
-        return ClaimExtractResponse(chunk_id=chunk_id, claims=existing)
+        return ClaimExtractResponse(chunk_id=chunk_id, claims=existing, chunk_role=chunk_role)
     saved = [
         _insert_claim(document_id, chunk_id, payload, current_user["id"])
         for payload in _extract_claim_candidates(chunk)
     ]
-    return ClaimExtractResponse(chunk_id=chunk_id, claims=saved)
+    return ClaimExtractResponse(
+        chunk_id=chunk_id,
+        claims=saved,
+        chunk_role=chunk_role,
+        skip_reason="" if saved else "no_logical_claims_found",
+    )
 
 
 @router.patch("/claims/{claim_id}", response_model=ClaimOut)
@@ -1270,101 +1782,12 @@ def assemble_section_components(
             break
     if not course_id:
         raise HTTPException(status_code=404, detail="Course not found")
-    claims = _claim_rows_for_section(document_id, section_id)
     section_chunks = [c for c in chunks if _section_id_for_chunk(c) == section_id]
-    if not claims:
-        for chunk in section_chunks:
-            for payload in _extract_claim_candidates(chunk):
-                claims.append(_insert_claim(document_id, chunk["id"], payload, current_user["id"]))
     existing = list_section_components(document_id, section_id, current_user)
     if existing and not body.force:
         return ComponentAssembleResponse(section_id=section_id, components=existing)
-    evidence_claims = [claim.claim_id for claim in claims]
-    component_name = "Section Component"
-    if section_id:
-        component_name = f"Component for {section_id.rsplit(':', 1)[-1].replace('_', ' ')}"
-    source_scope = {
-        "level": "section",
-        "document_id": document_id,
-        "section_id": section_id,
-        "chunks": [c["id"] for c in section_chunks],
-        "pages": sorted({p for c in section_chunks for p in (c.get("page_start"), c.get("page_end")) if p is not None}),
-        "equations": [],
-        "claims": evidence_claims,
-    }
-    inputs = [{
-        "label": claim.normalized_text or claim.text,
-        "name": claim.normalized_text or claim.text,
-        "type": "Concept",
-        "concept_type": "Concept",
-        "description": claim.text,
-        "support_status": claim.support_status,
-        "evidence_claims": [claim.claim_id],
-        "source_refs": [{"chunk_id": claim.source_scope.chunk_id, "quote": claim.evidence_text}],
-        "needs_source": False,
-    } for claim in claims if claim.claim_type in ("definition", "assumption", "approximation", "observable_definition")][:6]
-    outputs = [{
-        "label": claim.normalized_text or claim.text,
-        "name": claim.normalized_text or claim.text,
-        "type": "Concept",
-        "concept_type": "Relation" if claim.claim_type in ("relation", "equation") else "Concept",
-        "description": claim.text,
-        "support_status": claim.support_status,
-        "evidence_claims": [claim.claim_id],
-        "source_refs": [{"chunk_id": claim.source_scope.chunk_id, "quote": claim.evidence_text}],
-        "needs_source": False,
-    } for claim in claims if claim.claim_type in ("equation", "relation", "result", "derivation_step")][:6]
-    preconditions = [{
-        "label": claim.normalized_text or claim.text,
-        "condition": claim.normalized_text or claim.text,
-        "description": claim.text,
-        "support_status": claim.support_status,
-        "evidence_claims": [claim.claim_id],
-        "source_refs": [{"chunk_id": claim.source_scope.chunk_id, "quote": claim.evidence_text}],
-        "needs_source": False,
-    } for claim in claims if claim.claim_type in ("assumption", "approximation")][:4]
-    cautions = [{
-        "label": claim.normalized_text or claim.text,
-        "condition": claim.normalized_text or claim.text,
-        "description": claim.text,
-        "support_status": claim.support_status,
-        "evidence_claims": [claim.claim_id],
-        "source_refs": [{"chunk_id": claim.source_scope.chunk_id, "quote": claim.evidence_text}],
-        "needs_source": False,
-    } for claim in claims if claim.claim_type in ("uncertainty", "limitation", "correction")][:4]
-    payload = _normalize_payload(TheoryComponentUpsertRequest(**{
-        "name": component_name,
-        "component_type": "theory",
-        "summary": "複数Claimを束ねた節単位の理論コンポーネント候補です。",
-        "status": "candidate",
-        "source_scope": source_scope,
-        "evidence_claims": evidence_claims,
-        "maturity_level": "paper_claim",
-        "maturity_source": "llm_proposed",
-        "review_status": "teacher_review_required",
-        "source_chunks": [_source_ref_for_chunk(c) for c in section_chunks],
-        "inputs": inputs or outputs[:1],
-        "outputs": outputs or inputs[:1],
-        "preconditions": preconditions,
-        "cautions": cautions,
-        "constraints": [],
-        "invalid_conditions": cautions,
-        "dependencies": [],
-        "connectors": {
-            "requires_before_use": [],
-            "can_accept": [],
-            "can_output_to": [],
-            "may_conflict_with": [],
-        },
-        "blackbox_policy": {
-            "default_level": "summary",
-            "expand_if_unlearned": True,
-            "requires_source_display": True,
-            "io_summary": "section claims -> component candidate",
-        },
-    }))
-    saved = _insert_component(course_id, section_chunks[0]["id"] if section_chunks else None, payload, current_user["id"])
-    return ComponentAssembleResponse(section_id=section_id, components=[saved])
+    saved = _assemble_section(course_id, document_id, section_id, section_chunks, current_user["id"], force=body.force)
+    return ComponentAssembleResponse(section_id=section_id, components=saved)
 
 
 @router.get("/documents/{document_id}/component-graph", response_model=ComponentGraphResponse)
@@ -1379,14 +1802,17 @@ def get_component_graph(
 @router.post("/courses/{course_id}/claims/extract-all", status_code=202)
 def extract_all_claims(
     course_id: str,
+    body: dict | None = Body(default=None),
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     course_data = _editable_course_data(course_id, current_user)
+    force = bool((body or {}).get("force"))
     task_id = str(uuid.uuid4())[:12]
     create_background_task(task_id, "claim_extraction", current_user["id"])
     threading.Thread(
         target=_worker_wrapper,
         args=(task_id, _run_claim_extraction, course_id, course_data, current_user["id"]),
+        kwargs={"force": force},
         daemon=True,
     ).start()
     return {"task_id": task_id, "course_id": course_id, "status": "pending"}
@@ -1412,6 +1838,7 @@ def assemble_all_components(
 @router.post("/courses/{course_id}/component-graph/update", status_code=202)
 def update_course_component_graph(
     course_id: str,
+    body: dict | None = Body(default=None),
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     course_data = _editable_course_data(course_id, current_user)
@@ -1423,6 +1850,15 @@ def update_course_component_graph(
         daemon=True,
     ).start()
     return {"task_id": task_id, "course_id": course_id, "status": "pending"}
+
+
+@router.get("/courses/{course_id}/analysis-status")
+def get_course_analysis_status(
+    course_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    course_data = _editable_course_data(course_id, current_user)
+    return _analysis_status(course_id, course_data)
 
 
 def _analysis_pipeline_worker(task_id: str, course_id: str, course_data: dict, user_id: str) -> None:
