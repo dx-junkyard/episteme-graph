@@ -1028,11 +1028,11 @@
   }
 
   // ── Auto Pipeline (Issue #139) ─────────────────────────────────────
-  // コース登録直後に原稿→音声を連鎖的に自動生成し、進捗をチャットに通知する。
+  // コース登録直後に原稿→音声と、DSL→Claim→Component→Graphの解析チェーンを自動実行する。
   function kickAutoPipeline(courseId, courseTitle) {
     var pipelineMsg = {
       role: "assistant",
-      content: "コース登録完了。引き続き原稿と音声の自動生成を開始しました。（進捗: 0%）",
+      content: "コース登録完了。原稿・音声生成と解析パイプラインを開始しました。（進捗: 0%）",
     };
     state.chatMessages.push(pipelineMsg);
     renderCourseChat();
@@ -1072,6 +1072,69 @@
           "\n\n「Lecture Studio」タブから手動で実行してください。"
         );
       });
+
+    apiFetch("/admin/courses/" + courseId + "/analysis/run-all", {
+      method: "POST",
+      body: "{}",
+    })
+      .then(function (res) {
+        if (!res.ok) {
+          return res.json().then(function (errBody) {
+            throw new Error((errBody && errBody.detail) || "解析パイプラインを開始できませんでした");
+          }, function () {
+            throw new Error("解析パイプラインを開始できませんでした");
+          });
+        }
+        return res.json();
+      })
+      .then(function (data) {
+        _pollAnalysisPipelineTask(data.task_id, setPipelineStatus);
+      })
+      .catch(function (err) {
+        setPipelineStatus(
+          "コース登録は完了しましたが、解析パイプラインの開始に失敗しました: " +
+          (err.message || "不明なエラー") +
+          "\n\n原稿スタジオまたはシステム統計から手動で実行してください。"
+        );
+      });
+  }
+
+  function _pollAnalysisPipelineTask(taskId, setStatus) {
+    var retryCount = 0;
+    var maxRetries = 5;
+    var intervalMs = 3000;
+    var labels = { structure: "DSL解析", claims: "Claim抽出", components: "節Component組み立て", graph: "Graph更新", completed: "完了" };
+    function poll() {
+      apiFetch("/admin/tasks/" + taskId)
+        .then(function (res) {
+          if (!res.ok) throw new Error("Status check failed");
+          return res.json();
+        })
+        .then(function (task) {
+          retryCount = 0;
+          var rd = task.result_data || {};
+          var stage = rd.stage || "structure";
+          var progress = rd.progress || 0;
+          if (task.status === "completed") {
+            clearInterval(timer);
+            setStatus("解析パイプラインが完了しました。DSL、Claim、節Component、Graphを更新済みです。");
+          } else if (task.status === "failed") {
+            clearInterval(timer);
+            setStatus("解析パイプラインに失敗しました: " + (task.error_message || "不明なエラー"));
+          } else {
+            setStatus("解析パイプライン実行中: " + (labels[stage] || stage) + " — " + progress + "%");
+          }
+        })
+        .catch(function () {
+          retryCount++;
+          if (retryCount >= maxRetries) {
+            clearInterval(timer);
+            setStatus("解析パイプラインの進捗確認に失敗しました。システム統計で最新状態を確認してください。");
+          }
+        });
+    }
+    var timer = setInterval(poll, intervalMs);
+    poll();
   }
 
   function _pollPipelineTask(courseId, taskId, phase, totalChunks, setStatus) {
@@ -2416,8 +2479,14 @@
       response_persona: "",
     },
     componentsByChunk: {},
+    claimsByChunk: {},
+    componentsBySection: {},
+    graphByDocument: {},
+    selectedScope: null,
     selectedTheoryComponentId: null,
     theoryLoading: false,
+    claimsLoading: false,
+    graphLoading: false,
   };
 
   var lsPersonaOptions = [
@@ -2434,6 +2503,9 @@
     var generateAllBtn = document.getElementById("ls-generate-all-btn");
     var audioAllBtn = document.getElementById("ls-audio-all-btn");
     var settingsBtn = document.getElementById("ls-settings-btn");
+    var claimsAllBtn = document.getElementById("ls-claims-all-btn");
+    var componentsAllBtn = document.getElementById("ls-components-all-btn");
+    var graphAllBtn = document.getElementById("ls-graph-all-btn");
     var saveBtn = document.getElementById("ls-save-btn");
     var rewriteBtn = document.getElementById("ls-rewrite-btn");
 
@@ -2447,6 +2519,9 @@
         generateAllBtn.disabled = true;
         audioAllBtn.disabled = true;
         settingsBtn.disabled = false;
+        claimsAllBtn.disabled = true;
+        componentsAllBtn.disabled = true;
+        graphAllBtn.disabled = true;
         lsLoadSettings(courseId);
         lsLoadScripts(courseId);
       } else {
@@ -2454,12 +2529,19 @@
         lsState.chunks = [];
         lsState.selectedChunkId = null;
         lsState.componentsByChunk = {};
+        lsState.claimsByChunk = {};
+        lsState.componentsBySection = {};
+        lsState.graphByDocument = {};
+        lsState.selectedScope = null;
         lsState.selectedTheoryComponentId = null;
         lsState.settings = { narration_persona: "", response_persona: "" };
         reanalyzeBtn.disabled = true;
         generateAllBtn.disabled = true;
         audioAllBtn.disabled = true;
         settingsBtn.disabled = true;
+        claimsAllBtn.disabled = true;
+        componentsAllBtn.disabled = true;
+        graphAllBtn.disabled = true;
         lsRenderChunkList();
         lsClearEditor();
       }
@@ -2478,6 +2560,21 @@
     audioAllBtn.addEventListener("click", function () {
       if (!lsState.courseId || lsState.generating) return;
       lsBatchAudio();
+    });
+
+    claimsAllBtn.addEventListener("click", function () {
+      if (!lsState.courseId || lsState.generating) return;
+      lsRunCourseStep("claims", "/admin/courses/" + lsState.courseId + "/claims/extract-all", "全Claim抽出");
+    });
+
+    componentsAllBtn.addEventListener("click", function () {
+      if (!lsState.courseId || lsState.generating) return;
+      lsRunCourseStep("components", "/admin/courses/" + lsState.courseId + "/components/assemble-all", "全節Component組み立て", JSON.stringify({ force: false }));
+    });
+
+    graphAllBtn.addEventListener("click", function () {
+      if (!lsState.courseId || lsState.generating) return;
+      lsRunCourseStep("graph", "/admin/courses/" + lsState.courseId + "/component-graph/update", "Graph更新");
     });
 
     settingsBtn.addEventListener("click", function () {
@@ -2646,6 +2743,10 @@
         lsState.chunks = chunks;
         lsState.selectedChunkId = null;
         lsState.componentsByChunk = {};
+        lsState.claimsByChunk = {};
+        lsState.componentsBySection = {};
+        lsState.graphByDocument = {};
+        lsState.selectedScope = null;
         lsState.selectedTheoryComponentId = null;
         lsRenderChunkList();
         lsClearEditor();
@@ -2702,9 +2803,72 @@
             "info"
           );
           _lsPollStructureTask(task.task_id, rd.total_materials || 0);
+        } else if (
+          task.task_type === "claim_extraction" ||
+          task.task_type === "component_assembly" ||
+          task.task_type === "component_graph_update" ||
+          task.task_type === "analysis_pipeline"
+        ) {
+          lsSetCourseTaskBusy(true);
+          var label = task.task_type === "claim_extraction" ? "全Claim抽出" :
+            task.task_type === "component_assembly" ? "全節Component組み立て" :
+            task.task_type === "component_graph_update" ? "Graph更新" : "解析パイプライン";
+          lsShowProgress(label + "が進行中です... (進捗: " + (rd.progress || 0) + "%)", "info");
+          lsPollGenericCourseTask(task.task_id, label);
         }
       })
       .catch(function () { /* ignore */ });
+  }
+
+  function lsCurrentDocumentId() {
+    var chunk = lsGetSelectedChunk();
+    if (chunk && (chunk.document_id || chunk.material_id)) return chunk.document_id || chunk.material_id;
+    if (lsState.chunks && lsState.chunks.length) return lsState.chunks[0].document_id || lsState.chunks[0].material_id || "";
+    return "";
+  }
+
+  function lsSectionIdForChunk(chunk) {
+    var docId = (chunk && (chunk.document_id || chunk.material_id)) || "document";
+    if (chunk && chunk.page_start) return docId + ":page_" + chunk.page_start;
+    var idx = chunk && chunk.chunk_index ? Number(chunk.chunk_index) : 0;
+    return docId + ":section_" + (Math.floor(idx / 4) + 1);
+  }
+
+  function lsDocumentStructure() {
+    var docs = {};
+    (lsState.chunks || []).forEach(function (chunk, i) {
+      var docId = chunk.document_id || chunk.material_id || "document";
+      if (!docs[docId]) docs[docId] = { id: docId, label: chunk.material_id || "論文", sections: {} };
+      var sid = lsSectionIdForChunk(chunk);
+      if (!docs[docId].sections[sid]) {
+        docs[docId].sections[sid] = {
+          id: sid,
+          label: chunk.page_start ? "p." + chunk.page_start : "section " + (Object.keys(docs[docId].sections).length + 1),
+          chunks: [],
+        };
+      }
+      docs[docId].sections[sid].chunks.push(Object.assign({ _position: i }, chunk));
+    });
+    return docs;
+  }
+
+  function lsSectionState(section) {
+    var key = section.id;
+    var components = lsState.componentsBySection[key] || [];
+    var warnings = components.filter(function (c) {
+      return c.validation_warnings && c.validation_warnings.length;
+    }).length;
+    if (!components.length) return "components: 0";
+    return "components: " + components.length + (warnings ? " / warnings: " + warnings : "");
+  }
+
+  function lsClaimState(chunkId) {
+    var claims = lsState.claimsByChunk[chunkId] || [];
+    if (!claims.length) return "";
+    var unreviewed = claims.filter(function (claim) {
+      return claim.review_status !== "teacher_approved";
+    }).length;
+    return ' <span class="ls-chunk-theory-state">claims: ' + claims.length + " / unreviewed: " + unreviewed + "</span>";
   }
 
   function lsRenderChunkList() {
@@ -2713,6 +2877,9 @@
     var generateAllBtn = document.getElementById("ls-generate-all-btn");
     var audioAllBtn = document.getElementById("ls-audio-all-btn");
     var settingsBtn = document.getElementById("ls-settings-btn");
+    var claimsAllBtn = document.getElementById("ls-claims-all-btn");
+    var componentsAllBtn = document.getElementById("ls-components-all-btn");
+    var graphAllBtn = document.getElementById("ls-graph-all-btn");
 
     if (!lsState.chunks || lsState.chunks.length === 0) {
       listEl.innerHTML = '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">' +
@@ -2722,6 +2889,9 @@
       generateAllBtn.disabled = true;
       audioAllBtn.disabled = true;
       settingsBtn.disabled = !lsState.courseId;
+      claimsAllBtn.disabled = true;
+      componentsAllBtn.disabled = true;
+      graphAllBtn.disabled = true;
       return;
     }
 
@@ -2731,22 +2901,53 @@
       generateAllBtn.disabled = false;
       audioAllBtn.disabled = false;
       settingsBtn.disabled = false;
+      claimsAllBtn.disabled = false;
+      componentsAllBtn.disabled = false;
+      graphAllBtn.disabled = false;
     }
     var html = "";
-    lsState.chunks.forEach(function (c, i) {
-      var active = c.chunk_id === lsState.selectedChunkId ? " active" : "";
-      var preview = (c.text || "").substring(0, 40).replace(/\n/g, " ");
-      if (c.text && c.text.length > 40) preview += "...";
-      var theoryState = lsChunkTheoryState(c.chunk_id);
-      html +=
-        '<div class="ls-chunk-item' + active + '" data-chunk-id="' + escHtml(c.chunk_id) + '">' +
-          '<span class="ls-chunk-status ' + escHtml(c.status) + '"></span>' +
-          '<span class="ls-chunk-label">#' + (c.chunk_index || i) + " " + escHtml(preview) + theoryState + '</span>' +
+    var docs = lsDocumentStructure();
+    Object.keys(docs).forEach(function (docId) {
+      var docActive = lsState.selectedScope && lsState.selectedScope.type === "paper" && lsState.selectedScope.documentId === docId ? " active" : "";
+      var graph = lsState.graphByDocument[docId];
+      var graphState = graph && graph.validation_results ? "graph warnings: " + graph.validation_results.length : "graph warnings: -";
+      html += '<div class="ls-doc-node' + docActive + '" data-doc-id="' + escHtml(docId) + '">' +
+        '<span class="ls-doc-title">' + escHtml(docs[docId].label || "論文") + '</span>' +
+        '<span class="ls-doc-meta">' + escHtml(graphState) + '</span>' +
         '</div>';
+      Object.keys(docs[docId].sections).forEach(function (sid) {
+        var section = docs[docId].sections[sid];
+        var sectionActive = lsState.selectedScope && lsState.selectedScope.type === "section" && lsState.selectedScope.sectionId === sid ? " active" : "";
+        html += '<div class="ls-section-node' + sectionActive + '" data-section-id="' + escHtml(sid) + '" data-doc-id="' + escHtml(docId) + '">' +
+          '<span class="ls-doc-title">' + escHtml(section.label) + '</span>' +
+          '<span class="ls-doc-meta">' + escHtml(lsSectionState(section)) + '</span>' +
+          '</div>';
+        section.chunks.forEach(function (c, i) {
+          var active = c.chunk_id === lsState.selectedChunkId && (!lsState.selectedScope || lsState.selectedScope.type === "chunk") ? " active" : "";
+          var preview = (c.text || "").substring(0, 40).replace(/\n/g, " ");
+          if (c.text && c.text.length > 40) preview += "...";
+          var theoryState = lsChunkTheoryState(c.chunk_id) + lsClaimState(c.chunk_id);
+          html +=
+            '<div class="ls-chunk-item ls-chunk-child' + active + '" data-chunk-id="' + escHtml(c.chunk_id) + '">' +
+              '<span class="ls-chunk-status ' + escHtml(c.status) + '"></span>' +
+              '<span class="ls-chunk-label">chunk ' + (c.chunk_index || i) + " " + escHtml(preview) + theoryState + '</span>' +
+            '</div>';
+        });
+      });
     });
     listEl.innerHTML = html;
 
     // Bind click handlers
+    listEl.querySelectorAll(".ls-doc-node").forEach(function (item) {
+      item.addEventListener("click", function () {
+        lsSelectPaper(this.getAttribute("data-doc-id"));
+      });
+    });
+    listEl.querySelectorAll(".ls-section-node").forEach(function (item) {
+      item.addEventListener("click", function () {
+        lsSelectSection(this.getAttribute("data-doc-id"), this.getAttribute("data-section-id"));
+      });
+    });
     listEl.querySelectorAll(".ls-chunk-item").forEach(function (item) {
       item.addEventListener("click", function () {
         var chunkId = this.getAttribute("data-chunk-id");
@@ -2757,6 +2958,7 @@
 
   function lsSelectChunk(chunkId) {
     lsState.selectedChunkId = chunkId;
+    lsState.selectedScope = { type: "chunk", chunkId: chunkId };
     var chunk = lsGetSelectedChunk();
     if (!chunk) return;
 
@@ -2769,6 +2971,7 @@
     lsState.displayView = "preview";
     lsRenderWorkspace();
     lsLoadTheoryComponentsForChunk(chunkId);
+    lsLoadClaimsForChunk(chunk);
 
     document.getElementById("ls-rewrite-prompt").disabled = false;
     document.getElementById("ls-rewrite-btn").disabled = false;
@@ -2776,6 +2979,41 @@
 
     // Show formulas
     lsRenderFormulas(chunk.formulas || []);
+  }
+
+  function lsSelectSection(documentId, sectionId) {
+    var first = null;
+    (lsState.chunks || []).some(function (chunk) {
+      if ((chunk.document_id || chunk.material_id) === documentId && lsSectionIdForChunk(chunk) === sectionId) {
+        first = chunk;
+        return true;
+      }
+      return false;
+    });
+    if (first) lsState.selectedChunkId = first.chunk_id;
+    lsState.selectedScope = { type: "section", documentId: documentId, sectionId: sectionId };
+    lsState.view = "theory";
+    document.querySelectorAll("#ls-work-tabs .ls-work-tab").forEach(function (b) {
+      b.classList.toggle("active", b.getAttribute("data-ls-view") === "theory");
+    });
+    lsLoadSectionComponents(documentId, sectionId);
+    lsRenderChunkList();
+    lsRenderWorkspace();
+  }
+
+  function lsSelectPaper(documentId) {
+    var first = (lsState.chunks || []).find(function (chunk) {
+      return (chunk.document_id || chunk.material_id) === documentId;
+    });
+    if (first) lsState.selectedChunkId = first.chunk_id;
+    lsState.selectedScope = { type: "paper", documentId: documentId };
+    lsState.view = "graph";
+    document.querySelectorAll("#ls-work-tabs .ls-work-tab").forEach(function (b) {
+      b.classList.toggle("active", b.getAttribute("data-ls-view") === "graph");
+    });
+    lsLoadComponentGraph(documentId, false);
+    lsRenderChunkList();
+    lsRenderWorkspace();
   }
 
   function lsGetSelectedChunk() {
@@ -2832,7 +3070,27 @@
       extractBtn.addEventListener("click", function () {
         var chunk = lsGetSelectedChunk();
         if (!chunk || lsState.theoryLoading) return;
-        lsExtractTheoryComponents(chunk.chunk_id);
+        if (lsState.selectedScope && lsState.selectedScope.type === "section") {
+          lsAssembleSectionComponents(lsState.selectedScope.documentId, lsState.selectedScope.sectionId);
+        } else {
+          lsExtractTheoryComponents(chunk.chunk_id);
+        }
+      });
+    }
+    var claimsBtn = document.getElementById("ls-extract-claims-btn");
+    if (claimsBtn) {
+      claimsBtn.addEventListener("click", function () {
+        var chunk = lsGetSelectedChunk();
+        if (!chunk || lsState.claimsLoading) return;
+        lsExtractClaims(chunk);
+      });
+    }
+    var graphBtn = document.getElementById("ls-refresh-graph-btn");
+    if (graphBtn) {
+      graphBtn.addEventListener("click", function () {
+        var docId = lsCurrentDocumentId();
+        if (!docId || lsState.graphLoading) return;
+        lsLoadComponentGraph(docId, true);
       });
     }
     return workspace;
@@ -2866,15 +3124,19 @@
     var isAudio = lsState.view === "audio";
     var isCompare = lsState.view === "compare";
     var isTheory = lsState.view === "theory";
+    var isClaims = lsState.view === "claims";
+    var isGraph = lsState.view === "graph";
     var splitEl = document.querySelector("#ls-workspace .ls-split");
-    if (splitEl) splitEl.hidden = isStructure || isTheory;
+    if (splitEl) splitEl.hidden = isStructure || isTheory || isClaims || isGraph;
     document.getElementById("ls-structure-panel").hidden = !isStructure;
     document.getElementById("ls-theory-panel").hidden = !isTheory;
+    document.getElementById("ls-claims-panel").hidden = !isClaims;
+    document.getElementById("ls-graph-panel").hidden = !isGraph;
     document.getElementById("ls-sync-row").hidden = !isAudio;
     document.getElementById("ls-sync-spoken").checked = lsState.syncSpoken;
 
-    document.getElementById("ls-left-pane").hidden = isStructure || isAudio || isTheory;
-    document.getElementById("ls-right-pane").hidden = isStructure || isTheory;
+    document.getElementById("ls-left-pane").hidden = isStructure || isAudio || isTheory || isClaims || isGraph;
+    document.getElementById("ls-right-pane").hidden = isStructure || isTheory || isClaims || isGraph;
 
     document.getElementById("ls-evidence-tabs").querySelectorAll(".ls-mini-tab").forEach(function (b) {
       b.classList.toggle("active", b.getAttribute("data-ls-evidence") === lsState.evidenceView);
@@ -2889,6 +3151,18 @@
       displayEl.hidden = true;
       document.getElementById("ls-display-preview").hidden = true;
       lsRenderTheoryPanel(chunk);
+    } else if (isClaims) {
+      document.getElementById("ls-display-tabs").hidden = true;
+      spokenEl.hidden = true;
+      displayEl.hidden = true;
+      document.getElementById("ls-display-preview").hidden = true;
+      lsRenderClaimsPanel(chunk);
+    } else if (isGraph) {
+      document.getElementById("ls-display-tabs").hidden = true;
+      spokenEl.hidden = true;
+      displayEl.hidden = true;
+      document.getElementById("ls-display-preview").hidden = true;
+      lsRenderGraphPanel(lsCurrentDocumentId());
     } else if (isAudio) {
       document.getElementById("ls-right-title").textContent = "読み上げテキスト";
       document.getElementById("ls-display-tabs").hidden = true;
@@ -2907,7 +3181,7 @@
 
     sourceEl.hidden = lsState.evidenceView !== "extract";
     document.getElementById("ls-pdf-view").hidden = lsState.evidenceView !== "pdf";
-    if (!isStructure && !isAudio && !isTheory && lsState.evidenceView === "pdf") lsLoadPdfForChunk(chunk);
+    if (!isStructure && !isAudio && !isTheory && !isClaims && !isGraph && lsState.evidenceView === "pdf") lsLoadPdfForChunk(chunk);
     if (isCompare) {
       lsState.displayView = "preview";
       document.getElementById("ls-display-tabs").querySelectorAll(".ls-mini-tab").forEach(function (b) {
@@ -2946,6 +3220,16 @@
         label: "理論コンポーネントへの提案:",
         placeholder: "例: 成立条件、制約、禁止条件、依存概念を一般知識も使って補って",
         button: "理論要素を提案",
+      },
+      claims: {
+        label: "Claimへの提案:",
+        placeholder: "例: 原文に基づく主張、仮定、式、注意条件を見直して",
+        button: "Claimを提案",
+      },
+      graph: {
+        label: "構造グラフへの提案:",
+        placeholder: "例: Component間の接続不足や未レビュー箇所を指摘して",
+        button: "グラフを提案",
       },
       audio: {
         label: "読み上げ文言への提案:",
@@ -2987,6 +3271,13 @@
         if (String(list[j].id) === String(componentId)) return list[j];
       }
     }
+    keys = Object.keys(lsState.componentsBySection || {});
+    for (i = 0; i < keys.length; i++) {
+      list = lsState.componentsBySection[keys[i]] || [];
+      for (j = 0; j < list.length; j++) {
+        if (String(list[j].id) === String(componentId)) return list[j];
+      }
+    }
     return null;
   }
 
@@ -2995,6 +3286,94 @@
     if (!el) return;
     el.textContent = message || "";
     el.className = "ls-theory-status " + (type ? "upload-status-" + type : "");
+  }
+
+  function lsSetPanelStatus(id, message, type) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = message || "";
+    el.className = "ls-theory-status " + (type ? "upload-status-" + type : "");
+  }
+
+  function lsClaimCardHtml(claim) {
+    var scope = claim.source_scope || {};
+    var source = (scope.page_start || (scope.pages && scope.pages[0])) ? "p." + (scope.page_start || scope.pages[0]) : (scope.chunk_id || "");
+    var review = claim.review_status === "teacher_approved" ? "承認済み" : claim.review_status || "teacher_review_required";
+    return '' +
+      '<div class="ls-theory-card" data-claim-id="' + escHtml(claim.claim_id) + '">' +
+        '<div class="ls-theory-card-head">' +
+          '<div><strong>' + escHtml(claim.claim_id || "claim") + '</strong><div class="ls-theory-type">type: ' + escHtml(claim.claim_type || "") + '</div></div>' +
+          '<span class="ls-theory-badge">' + escHtml(review) + '</span>' +
+        '</div>' +
+        '<div class="ls-theory-summary">' + escHtml(claim.text || "") + '</div>' +
+        '<div class="ls-theory-section"><b>support</b> ' + escHtml(claim.support_status || "source_backed") + '</div>' +
+        '<div class="ls-theory-section"><b>source</b> <span class="ls-theory-ref">' + escHtml(source) + '</span></div>' +
+        '<div class="ls-theory-section"><b>evidence</b><div class="ls-theory-muted">' + escHtml(claim.evidence_text || "") + '</div></div>' +
+      '</div>';
+  }
+
+  function lsRenderClaimsPanel(chunk) {
+    var container = document.getElementById("ls-claims-list");
+    var btn = document.getElementById("ls-extract-claims-btn");
+    if (!container) return;
+    if (btn) btn.disabled = !chunk || lsState.claimsLoading;
+    if (!chunk) {
+      container.innerHTML = '<div class="ls-empty-state">チャンクを選択するとClaim一覧が表示されます。</div>';
+      return;
+    }
+    var claims = lsState.claimsByChunk[chunk.chunk_id] || [];
+    if (!claims.length) {
+      container.innerHTML = '<div class="ls-empty-state">Claimはまだありません。Claimを抽出してください。</div>';
+      return;
+    }
+    container.innerHTML =
+      '<div class="ls-theory-current">Chunk #' + escHtml(chunk.chunk_index || "") + ' / Claim View</div>' +
+      claims.map(lsClaimCardHtml).join("");
+  }
+
+  function lsLoadClaimsForChunk(chunk) {
+    var docId = chunk && (chunk.document_id || chunk.material_id);
+    if (!chunk || !docId || !chunk.chunk_id) return;
+    apiFetch("/admin/documents/" + encodeURIComponent(docId) + "/chunks/" + encodeURIComponent(chunk.chunk_id) + "/claims")
+      .then(function (res) {
+        if (!res.ok) throw new Error("Failed to load claims");
+        return res.json();
+      })
+      .then(function (claims) {
+        lsState.claimsByChunk[chunk.chunk_id] = claims || [];
+        if (lsState.view === "claims") lsRenderWorkspace();
+        lsRenderChunkList();
+      })
+      .catch(function () {});
+  }
+
+  function lsExtractClaims(chunk) {
+    var docId = chunk && (chunk.document_id || chunk.material_id);
+    if (!chunk || !docId) return;
+    lsState.claimsLoading = true;
+    lsSetPanelStatus("ls-claims-status", "抽出中...", "info");
+    lsRenderClaimsPanel(chunk);
+    apiFetch("/admin/documents/" + encodeURIComponent(docId) + "/chunks/" + encodeURIComponent(chunk.chunk_id) + "/claims/extract", {
+      method: "POST",
+      body: "{}",
+    })
+      .then(function (res) {
+        if (!res.ok) throw new Error("Claim抽出に失敗しました");
+        return res.json();
+      })
+      .then(function (data) {
+        lsState.claimsByChunk[chunk.chunk_id] = data.claims || [];
+        lsSetPanelStatus("ls-claims-status", (data.claims && data.claims.length) ? "抽出しました" : "Claimは見つかりませんでした", "success");
+        lsRenderWorkspace();
+        lsRenderChunkList();
+      })
+      .catch(function (err) {
+        lsSetPanelStatus("ls-claims-status", err.message || "抽出に失敗しました", "error");
+      })
+      .finally(function () {
+        lsState.claimsLoading = false;
+        lsRenderClaimsPanel(lsGetSelectedChunk());
+      });
   }
 
   function lsTheoryItemsHtml(items) {
@@ -3065,6 +3444,31 @@
     var extractBtn = document.getElementById("ls-extract-theory-btn");
     if (!container) return;
     if (extractBtn) extractBtn.disabled = !chunk || lsState.theoryLoading;
+    if (lsState.selectedScope && lsState.selectedScope.type === "section") {
+      var sectionComponents = lsState.componentsBySection[lsState.selectedScope.sectionId] || [];
+      if (extractBtn) extractBtn.textContent = "節コンポーネントを組み立て";
+      if (!sectionComponents.length) {
+        container.innerHTML = '<div class="ls-empty-state">Section ' + escHtml(lsState.selectedScope.sectionId) + '<br><br>Component候補はまだありません。</div>';
+        return;
+      }
+      container.innerHTML =
+        '<div class="ls-theory-current">Section Component View: ' + escHtml(lsState.selectedScope.sectionId) + '</div>' +
+        sectionComponents.map(lsTheoryCardHtml).join("");
+      container.querySelectorAll("[data-theory-action]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var card = this.closest(".ls-theory-card");
+          var component = lsFindTheoryComponent(card.getAttribute("data-component-id"));
+          var action = this.getAttribute("data-theory-action");
+          if (!component) return;
+          if (action === "open") lsOpenTheoryDetail(component);
+          if (action === "insert") lsInsertTheoryChip(component);
+          if (action === "approve") lsSaveTheoryComponent(component, { status: "teacher_reviewed" });
+          if (action === "reject") lsRejectTheoryComponent(component);
+        });
+      });
+      return;
+    }
+    if (extractBtn) extractBtn.textContent = "理論コンポーネント候補を抽出";
     if (!chunk) {
       container.innerHTML = '<div class="ls-empty-state">チャンクを選択すると、理論コンポーネント候補が表示されます。</div>';
       return;
@@ -3109,6 +3513,117 @@
         lsRenderChunkList();
       })
       .catch(function () {});
+  }
+
+  function lsLoadSectionComponents(documentId, sectionId) {
+    if (!documentId || !sectionId) return;
+    apiFetch("/admin/documents/" + encodeURIComponent(documentId) + "/sections/" + encodeURIComponent(sectionId) + "/components")
+      .then(function (res) {
+        if (!res.ok) throw new Error("Failed to load section components");
+        return res.json();
+      })
+      .then(function (components) {
+        lsState.componentsBySection[sectionId] = components || [];
+        (components || []).forEach(function (component) {
+          lsUpdateTheoryInState(component);
+        });
+        if (lsState.view === "theory") lsRenderWorkspace();
+        lsRenderChunkList();
+      })
+      .catch(function () {});
+  }
+
+  function lsAssembleSectionComponents(documentId, sectionId) {
+    if (!documentId || !sectionId) return;
+    lsState.theoryLoading = true;
+    lsSetTheoryStatus("組み立て中...", "info");
+    lsRenderTheoryPanel(lsGetSelectedChunk());
+    apiFetch("/admin/documents/" + encodeURIComponent(documentId) + "/sections/" + encodeURIComponent(sectionId) + "/components/assemble", {
+      method: "POST",
+      body: JSON.stringify({ force: true }),
+    })
+      .then(function (res) {
+        if (!res.ok) throw new Error("節コンポーネントの組み立てに失敗しました");
+        return res.json();
+      })
+      .then(function (data) {
+        lsState.componentsBySection[sectionId] = data.components || [];
+        (data.components || []).forEach(function (component) {
+          lsUpdateTheoryInState(component);
+        });
+        lsSetTheoryStatus((data.components && data.components.length) ? "組み立てました" : "候補は見つかりませんでした", "success");
+        lsRenderWorkspace();
+        lsRenderChunkList();
+      })
+      .catch(function (err) {
+        lsSetTheoryStatus(err.message || "組み立てに失敗しました", "error");
+      })
+      .finally(function () {
+        lsState.theoryLoading = false;
+        lsRenderTheoryPanel(lsGetSelectedChunk());
+      });
+  }
+
+  function lsRenderGraphPanel(documentId) {
+    var container = document.getElementById("ls-component-graph");
+    if (!container) return;
+    if (!documentId) {
+      container.innerHTML = '<div class="ls-empty-state">論文を選択するとComponent Graphが表示されます。</div>';
+      return;
+    }
+    var graph = lsState.graphByDocument[documentId];
+    if (!graph) {
+      container.innerHTML = '<div class="ls-empty-state">Graphを読み込み中、または未作成です。</div>';
+      return;
+    }
+    var nodes = graph.nodes || [];
+    var validations = graph.validation_results || [];
+    var html = '<div class="ls-theory-current">Paper-level Component Graph</div>';
+    if (!nodes.length) {
+      html += '<div class="ls-empty-state">Componentがまだありません。節ビューでComponentを組み立ててください。</div>';
+    } else {
+      html += '<div class="ls-graph-flow">';
+      nodes.forEach(function (node, idx) {
+        html += '<div class="ls-graph-node">' + escHtml(node.label || node.component_id) + '</div>';
+        if (idx < nodes.length - 1) html += '<div class="ls-graph-arrow">↓</div>';
+      });
+      html += '</div>';
+    }
+    html += '<div class="ls-theory-section"><b>検証結果</b>';
+    if (!validations.length) {
+      html += '<div class="ls-theory-source-ok">警告はありません</div>';
+    } else {
+      html += '<ul class="ls-theory-items">';
+      validations.forEach(function (v) {
+        html += '<li><span class="ls-theory-source-warn">' + escHtml(v.severity || "warning") + '</span> ' + escHtml(v.message || "") + '</li>';
+      });
+      html += '</ul>';
+    }
+    html += '</div>';
+    container.innerHTML = html;
+  }
+
+  function lsLoadComponentGraph(documentId, forceRender) {
+    if (!documentId) return;
+    lsState.graphLoading = true;
+    lsSetPanelStatus("ls-graph-status", "読み込み中...", "info");
+    apiFetch("/admin/documents/" + encodeURIComponent(documentId) + "/component-graph")
+      .then(function (res) {
+        if (!res.ok) throw new Error("Graphの読み込みに失敗しました");
+        return res.json();
+      })
+      .then(function (graph) {
+        lsState.graphByDocument[documentId] = graph;
+        lsSetPanelStatus("ls-graph-status", "更新しました", "success");
+        if (forceRender || lsState.view === "graph") lsRenderWorkspace();
+        lsRenderChunkList();
+      })
+      .catch(function (err) {
+        lsSetPanelStatus("ls-graph-status", err.message || "読み込みに失敗しました", "error");
+      })
+      .finally(function () {
+        lsState.graphLoading = false;
+      });
   }
 
   function lsExtractTheoryComponents(chunkId) {
@@ -3583,9 +4098,81 @@
   function lsSetCourseTaskBusy(isBusy) {
     lsState.generating = isBusy;
     document.getElementById("ls-reanalyze-structure-btn").disabled = isBusy || !lsState.courseId || !lsState.chunks.length;
+    document.getElementById("ls-claims-all-btn").disabled = isBusy || !lsState.courseId || !lsState.chunks.length;
+    document.getElementById("ls-components-all-btn").disabled = isBusy || !lsState.courseId || !lsState.chunks.length;
+    document.getElementById("ls-graph-all-btn").disabled = isBusy || !lsState.courseId || !lsState.chunks.length;
     document.getElementById("ls-generate-all-btn").disabled = isBusy || !lsState.courseId || !lsState.chunks.length;
     document.getElementById("ls-audio-all-btn").disabled = isBusy || !lsState.courseId || !lsState.chunks.length;
     document.getElementById("ls-settings-btn").disabled = !lsState.courseId;
+  }
+
+  function lsRunCourseStep(kind, endpoint, label, body) {
+    lsSetCourseTaskBusy(true);
+    lsShowProgress(label + "を開始しています...", "info");
+    apiFetch(endpoint, {
+      method: "POST",
+      body: body || "{}",
+    })
+      .then(function (res) {
+        if (!res.ok) {
+          return res.json().then(function (errBody) {
+            throw new Error((errBody && errBody.detail) || label + "を開始できませんでした");
+          }, function () {
+            throw new Error(label + "を開始できませんでした");
+          });
+        }
+        return res.json();
+      })
+      .then(function (data) {
+        lsPollGenericCourseTask(data.task_id, label);
+      })
+      .catch(function (err) {
+        lsShowProgress(label + "に失敗しました: " + (err.message || "不明なエラー"), "error");
+        lsSetCourseTaskBusy(false);
+      });
+  }
+
+  function lsPollGenericCourseTask(taskId, label) {
+    var retryCount = 0;
+    var maxRetries = 5;
+    var intervalMs = 3000;
+    function poll() {
+      apiFetch("/admin/tasks/" + taskId)
+        .then(function (res) {
+          if (!res.ok) throw new Error("Status check failed");
+          return res.json();
+        })
+        .then(function (task) {
+          retryCount = 0;
+          var rd = task.result_data || {};
+          var progress = rd.progress || 0;
+          var generated = rd.generated || 0;
+          var skipped = rd.skipped || 0;
+          var total = rd.total_chunks || rd.total_sections || rd.total_documents || 0;
+          if (task.status === "completed") {
+            clearInterval(timer);
+            lsShowProgress(label + "が完了しました: " + generated + "件処理 / " + skipped + "件スキップ", "success");
+            lsSetCourseTaskBusy(false);
+            lsLoadScripts(lsState.courseId);
+          } else if (task.status === "failed") {
+            clearInterval(timer);
+            lsShowProgress(label + "に失敗しました: " + (task.error_message || "不明なエラー"), "error");
+            lsSetCourseTaskBusy(false);
+          } else {
+            lsShowProgress(label + "中... (" + generated + " / " + total + " — " + progress + "%)", "info");
+          }
+        })
+        .catch(function () {
+          retryCount++;
+          if (retryCount >= maxRetries) {
+            clearInterval(timer);
+            lsShowProgress(label + "の進捗確認に失敗しました。", "error");
+            lsSetCourseTaskBusy(false);
+          }
+        });
+    }
+    var timer = setInterval(poll, intervalMs);
+    poll();
   }
 
   function lsReanalyzeStructure() {
@@ -4715,7 +5302,7 @@
         "<td>" + escHtml(s.uploaded_by || "") + "</td>" +
         "<td style='font-size:11px'>" + escHtml(createdAt) + "</td>" +
         "<td style='text-align:center'>" + (s.chunk_count || 0) + "</td>" +
-        "<td>" + ssGenerationCell(s, "structure") + "</td>" +
+        "<td>" + ssAnalysisCell(s) + "</td>" +
         "<td>" + ssGenerationCell(s, "script") + "</td>" +
         "<td>" + ssGenerationCell(s, "audio") + "</td>" +
         "<td style='text-align:center'>" + s.enrolled_students + "</td>" +
@@ -4773,8 +5360,43 @@
     return html;
   }
 
+  function ssAnalysisCell(row) {
+    var runningKind = _ssRunningTasks[row.course_id || ""] || ssTaskKind(row.active_task_type);
+    var html = '<div class="ss-analysis-steps">' +
+      ssMiniStep("DSL", row.structure_progress, runningKind === "structure" || runningKind === "analysis") +
+      ssMiniStep("Claim", row.claim_progress, runningKind === "claims" || runningKind === "analysis") +
+      ssMiniStep("Component", row.component_progress, runningKind === "components" || runningKind === "analysis") +
+      ssMiniStep("Graph", row.graph_progress, runningKind === "graph" || runningKind === "analysis") +
+      '</div>';
+    if (runningKind) return html + '<div style="font-size:11px;color:var(--color-text-info);margin-top:4px">実行中...</div>';
+    if ((row.chunk_count || 0) <= 0) {
+      return html + '<div style="font-size:11px;color:var(--color-text-tertiary);margin-top:4px">チャンクなし</div>';
+    }
+    return html +
+      '<div class="ss-analysis-actions">' +
+        ssGenerateButton(row.course_id, "structure", "DSL") +
+        ssGenerateButton(row.course_id, "claims", "Claim") +
+        ssGenerateButton(row.course_id, "components", "Component") +
+        ssGenerateButton(row.course_id, "graph", "Graph") +
+        ssGenerateButton(row.course_id, "analysis", "全解析") +
+      '</div>';
+  }
+
+  function ssMiniStep(label, pct, isRunning) {
+    var p = Math.round(pct || 0);
+    var cls = p >= 100 ? "done" : isRunning ? "running" : p > 0 ? "partial" : "";
+    return '<div class="ss-analysis-step ' + cls + '">' +
+      '<span>' + escHtml(label) + '</span>' +
+      '<div><i style="width:' + p + '%"></i></div>' +
+      '</div>';
+  }
+
   function ssTaskKind(taskType) {
     if (taskType === "structure_reanalysis") return "structure";
+    if (taskType === "claim_extraction") return "claims";
+    if (taskType === "component_assembly") return "components";
+    if (taskType === "component_graph_update") return "graph";
+    if (taskType === "analysis_pipeline") return "analysis";
     if (taskType === "script_generation") return "script";
     if (taskType === "audio_generation") return "audio";
     return "";
@@ -4802,7 +5424,23 @@
     if (kind === "structure") {
       endpoint = "/admin/courses/" + encodeURIComponent(courseId) + "/structure/reanalyze";
       body = "{}";
-      label = "構造解析";
+      label = "DSL解析";
+    } else if (kind === "claims") {
+      endpoint = "/admin/courses/" + encodeURIComponent(courseId) + "/claims/extract-all";
+      body = "{}";
+      label = "Claim抽出";
+    } else if (kind === "components") {
+      endpoint = "/admin/courses/" + encodeURIComponent(courseId) + "/components/assemble-all";
+      body = JSON.stringify({ force: false });
+      label = "節Component組み立て";
+    } else if (kind === "graph") {
+      endpoint = "/admin/courses/" + encodeURIComponent(courseId) + "/component-graph/update";
+      body = "{}";
+      label = "Graph更新";
+    } else if (kind === "analysis") {
+      endpoint = "/admin/courses/" + encodeURIComponent(courseId) + "/analysis/run-all";
+      body = "{}";
+      label = "全解析";
     } else if (kind === "audio") {
       endpoint = "/admin/courses/" + encodeURIComponent(courseId) + "/lecture-audio/generate";
       body = "{}";

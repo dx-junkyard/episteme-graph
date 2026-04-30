@@ -196,7 +196,10 @@
           </div>
           <div class="ls-topbar-right">
             <button id="ls-settings-btn" class="admin-action-btn" disabled>設定</button>
-            <button id="ls-reanalyze-structure-btn" class="admin-action-btn" disabled>構造を再解析</button>
+            <button id="ls-reanalyze-structure-btn" class="admin-action-btn" disabled>DSLを再解析</button>
+            <button id="ls-claims-all-btn" class="admin-action-btn" disabled>全Claim抽出</button>
+            <button id="ls-components-all-btn" class="admin-action-btn" disabled>全節Component</button>
+            <button id="ls-graph-all-btn" class="admin-action-btn" disabled>Graph更新</button>
             <button id="ls-generate-all-btn" class="admin-action-btn" disabled>全スクリプト生成</button>
             <button id="ls-audio-all-btn" class="admin-action-btn" disabled style="background:var(--color-text-info);color:#fff">音声を一括生成</button>
           </div>
@@ -205,9 +208,9 @@
 
         <!-- Three-panel layout -->
         <div class="ls-panels">
-          <!-- Left: chunk navigation -->
+          <!-- Left: document structure navigation -->
           <div class="ls-nav-panel">
-            <div class="ls-nav-header">チャンク一覧</div>
+            <div class="ls-nav-header">文書構造</div>
             <div id="ls-chunk-list" class="ls-chunk-list">
               <div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">コースを選択してください</div>
             </div>
@@ -220,7 +223,9 @@
                 <button class="ls-work-tab" data-ls-view="compare">照合</button>
                 <button class="ls-work-tab active" data-ls-view="edit">編集</button>
                 <button class="ls-work-tab" data-ls-view="structure">構造</button>
+                <button class="ls-work-tab" data-ls-view="claims">主張</button>
                 <button class="ls-work-tab" data-ls-view="theory">理論</button>
+                <button class="ls-work-tab" data-ls-view="graph">グラフ</button>
                 <button class="ls-work-tab" data-ls-view="audio">音声</button>
               </div>
               <div id="ls-chunk-meta" class="ls-chunk-meta">チャンクを選択してください</div>
@@ -283,6 +288,22 @@
                   <span id="ls-theory-status" class="ls-theory-status"></span>
                 </div>
                 <div id="ls-theory-components" class="ls-theory-components"></div>
+              </section>
+
+              <section id="ls-claims-panel" class="ls-theory-panel" hidden>
+                <div class="ls-theory-toolbar">
+                  <button id="ls-extract-claims-btn" class="admin-action-btn">Claimを抽出</button>
+                  <span id="ls-claims-status" class="ls-theory-status"></span>
+                </div>
+                <div id="ls-claims-list" class="ls-theory-components"></div>
+              </section>
+
+              <section id="ls-graph-panel" class="ls-theory-panel" hidden>
+                <div class="ls-theory-toolbar">
+                  <button id="ls-refresh-graph-btn" class="admin-action-btn">グラフを更新</button>
+                  <span id="ls-graph-status" class="ls-theory-status"></span>
+                </div>
+                <div id="ls-component-graph" class="ls-theory-components"></div>
               </section>
 
               <label id="ls-sync-row" class="ls-sync-row" hidden>
@@ -425,7 +446,7 @@
           </div>
         </div>
         <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:16px">
-          全コースの構造解析・原稿・音声生成進捗と学生利用状況を一覧できます。
+          全コースの解析・原稿・音声生成進捗と学生利用状況を一覧できます。
         </p>
         <div id="ss-status" class="upload-status" style="display:none"></div>
         <table class="admin-table" id="ss-table">
@@ -435,7 +456,7 @@
               <th class="ss-sortable" data-sort="uploaded_by" style="cursor:pointer">アップロード者 &#9651;</th>
               <th class="ss-sortable" data-sort="created_at" style="cursor:pointer">日時 &#9651;</th>
               <th class="ss-sortable" data-sort="chunk_count" style="cursor:pointer">チャンク数 &#9651;</th>
-              <th>構造解析</th>
+              <th>解析</th>
               <th>原稿生成</th>
               <th>音声生成</th>
               <th class="ss-sortable" data-sort="enrolled_students" style="cursor:pointer">受講者数 &#9651;</th>

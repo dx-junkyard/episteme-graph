@@ -446,6 +446,43 @@ def _run_migrations() -> None:
         session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_theory_components_chunk ON theory_components(primary_chunk_id)"))
         session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_theory_components_status ON theory_components(status)"))
         session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS theory_claims (
+                id                 UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                document_id        TEXT NOT NULL DEFAULT '',
+                chunk_id           UUID REFERENCES chunks(id) ON DELETE CASCADE,
+                source_scope       JSONB NOT NULL DEFAULT '{}'::jsonb,
+                claim_type         TEXT NOT NULL DEFAULT 'diagnostic_claim'
+                                       CHECK (claim_type IN (
+                                           'definition', 'assumption', 'approximation', 'equation', 'relation',
+                                           'derivation_step', 'observable_definition', 'correction',
+                                           'uncertainty', 'limitation', 'result', 'diagnostic_claim'
+                                       )),
+                text               TEXT NOT NULL,
+                normalized_text    TEXT NOT NULL DEFAULT '',
+                concepts           JSONB NOT NULL DEFAULT '[]'::jsonb,
+                support_status     TEXT NOT NULL DEFAULT 'source_backed',
+                evidence_text      TEXT NOT NULL DEFAULT '',
+                review_status      TEXT NOT NULL DEFAULT 'teacher_review_required',
+                created_by         UUID REFERENCES users(id),
+                created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_theory_claims_document ON theory_claims(document_id)"))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_theory_claims_chunk ON theory_claims(chunk_id)"))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_theory_claims_review ON theory_claims(review_status)"))
+        for ddl in [
+            "ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS source_scope JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS evidence_claims JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS maturity_level TEXT NOT NULL DEFAULT 'paper_claim'",
+            "ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS maturity_source TEXT NOT NULL DEFAULT 'llm_proposed'",
+            "ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS review_status TEXT NOT NULL DEFAULT 'teacher_review_required'",
+            "ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS cautions JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS connectors JSONB NOT NULL DEFAULT '{}'::jsonb",
+        ]:
+            session.execute(sa_text(ddl))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_theory_components_review ON theory_components(review_status)"))
+        session.execute(sa_text("""
             CREATE TABLE IF NOT EXISTS theory_component_links (
                 id                    UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 course_id             TEXT NOT NULL REFERENCES learning_courses(id) ON DELETE CASCADE,
@@ -464,6 +501,22 @@ def _run_migrations() -> None:
         session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_theory_component_links_course ON theory_component_links(course_id)"))
         session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_theory_component_links_source ON theory_component_links(source_component_id)"))
         session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_theory_component_links_target ON theory_component_links(target_component_id)"))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS theory_component_graphs (
+                id                 UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                course_id          TEXT NOT NULL REFERENCES learning_courses(id) ON DELETE CASCADE,
+                document_id        TEXT NOT NULL,
+                scope              JSONB NOT NULL DEFAULT jsonb_build_object('level', 'paper'),
+                graph_json         JSONB NOT NULL DEFAULT '{}'::jsonb,
+                validation_results JSONB NOT NULL DEFAULT '[]'::jsonb,
+                updated_by         UUID REFERENCES users(id),
+                created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE(course_id, document_id)
+            )
+        """))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_theory_component_graphs_course ON theory_component_graphs(course_id)"))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_theory_component_graphs_document ON theory_component_graphs(document_id)"))
         # 既存の cloned_from カラムがあれば、クローンコースとその履歴をハードリセット後にカラム廃止
         session.execute(sa_text("""
             DO $$

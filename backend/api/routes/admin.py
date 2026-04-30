@@ -1733,6 +1733,54 @@ def get_materials_stats(
                     WHERE c.text IS NOT NULL AND c.text != ''
                     GROUP BY cs.course_id
                 ),
+                SectionStats AS (
+                    SELECT
+                        cs.course_id,
+                        COUNT(DISTINCT (
+                            COALESCE(c.document_id::text, c.material_id, '') || ':' ||
+                            CASE
+                                WHEN c.page_start IS NOT NULL THEN 'page_' || c.page_start::text
+                                ELSE 'section_' || (floor(COALESCE(c.chunk_index, 0) / 4.0)::int + 1)::text
+                            END
+                        )) AS total_sections
+                    FROM CourseSources cs
+                    JOIN chunks c ON c.material_id = cs.material_id
+                    WHERE c.text IS NOT NULL AND c.text != ''
+                    GROUP BY cs.course_id
+                ),
+                ClaimStats AS (
+                    SELECT
+                        cs.course_id,
+                        COUNT(DISTINCT tc.chunk_id) AS claim_chunks
+                    FROM CourseSources cs
+                    JOIN chunks c ON c.material_id = cs.material_id
+                    JOIN theory_claims tc ON tc.chunk_id = c.id
+                    GROUP BY cs.course_id
+                ),
+                ComponentStats AS (
+                    SELECT
+                        course_id,
+                        COUNT(DISTINCT source_scope->>'section_id') AS component_sections
+                    FROM theory_components
+                    WHERE source_scope->>'level' = 'section'
+                    GROUP BY course_id
+                ),
+                GraphStats AS (
+                    SELECT
+                        course_id,
+                        COUNT(DISTINCT document_id) AS graph_documents
+                    FROM theory_component_graphs
+                    GROUP BY course_id
+                ),
+                DocumentStats AS (
+                    SELECT
+                        cs.course_id,
+                        COUNT(DISTINCT COALESCE(c.document_id::text, c.material_id)) AS total_documents
+                    FROM CourseSources cs
+                    JOIN chunks c ON c.material_id = cs.material_id
+                    WHERE c.text IS NOT NULL AND c.text != ''
+                    GROUP BY cs.course_id
+                ),
                 EnrolledStats AS (
                     SELECT
                         ls.course_id,
@@ -1769,6 +1817,18 @@ def get_materials_stats(
                     END AS structure_progress,
                     CASE
                         WHEN COALESCE(cs.total_chunks, 0) = 0 THEN 0.0
+                        ELSE ROUND(COALESCE(claims.claim_chunks, 0)::numeric / cs.total_chunks * 100, 1)
+                    END AS claim_progress,
+                    CASE
+                        WHEN COALESCE(sections.total_sections, 0) = 0 THEN 0.0
+                        ELSE ROUND(COALESCE(components.component_sections, 0)::numeric / sections.total_sections * 100, 1)
+                    END AS component_progress,
+                    CASE
+                        WHEN COALESCE(docs.total_documents, 0) = 0 THEN 0.0
+                        ELSE ROUND(COALESCE(graphs.graph_documents, 0)::numeric / docs.total_documents * 100, 1)
+                    END AS graph_progress,
+                    CASE
+                        WHEN COALESCE(cs.total_chunks, 0) = 0 THEN 0.0
                         ELSE ROUND(cs.script_chunks::numeric / cs.total_chunks * 100, 1)
                     END AS script_progress,
                     CASE
@@ -1781,6 +1841,11 @@ def get_materials_stats(
                 FROM learning_courses lc
                 LEFT JOIN users u ON u.id = lc.user_id
                 LEFT JOIN ChunkStats cs ON cs.course_id = lc.id::text
+                LEFT JOIN SectionStats sections ON sections.course_id = lc.id::text
+                LEFT JOIN ClaimStats claims ON claims.course_id = lc.id::text
+                LEFT JOIN ComponentStats components ON components.course_id = lc.id::text
+                LEFT JOIN GraphStats graphs ON graphs.course_id = lc.id::text
+                LEFT JOIN DocumentStats docs ON docs.course_id = lc.id::text
                 LEFT JOIN EnrolledStats es ON es.course_id = lc.id
                 LEFT JOIN ChatStats chats ON chats.course_id = lc.id
                 LEFT JOIN ActiveTasks active ON active.course_id = lc.id::text
@@ -1798,11 +1863,14 @@ def get_materials_stats(
             "created_at": r[3].isoformat() if r[3] else "",
             "chunk_count": int(r[4]) if r[4] else 0,
             "structure_progress": float(r[5]) if r[5] is not None else 0.0,
-            "script_progress": float(r[6]) if r[6] is not None else 0.0,
-            "audio_progress": float(r[7]) if r[7] is not None else 0.0,
-            "enrolled_students": int(r[8]) if r[8] else 0,
-            "chat_count": int(r[9]) if r[9] else 0,
-            "active_task_type": r[10] or "",
+            "claim_progress": float(r[6]) if r[6] is not None else 0.0,
+            "component_progress": float(r[7]) if r[7] is not None else 0.0,
+            "graph_progress": float(r[8]) if r[8] is not None else 0.0,
+            "script_progress": float(r[9]) if r[9] is not None else 0.0,
+            "audio_progress": float(r[10]) if r[10] is not None else 0.0,
+            "enrolled_students": int(r[11]) if r[11] else 0,
+            "chat_count": int(r[12]) if r[12] else 0,
+            "active_task_type": r[13] or "",
         }
         for r in rows
     ]

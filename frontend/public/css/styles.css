@@ -2012,6 +2012,48 @@ body {
   border-left: 3px solid var(--color-text-info);
 }
 
+.ls-doc-node,
+.ls-section-node {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+  cursor: pointer;
+  display: grid;
+  gap: 2px;
+}
+
+.ls-doc-node {
+  background: var(--color-bg-secondary);
+}
+
+.ls-section-node {
+  padding-left: 22px;
+}
+
+.ls-doc-node:hover,
+.ls-section-node:hover,
+.ls-doc-node.active,
+.ls-section-node.active {
+  background: var(--color-bg-tertiary);
+}
+
+.ls-doc-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ls-doc-meta {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.ls-chunk-child {
+  padding-left: 34px;
+}
+
 .ls-chunk-status {
   width: 8px;
   height: 8px;
@@ -2364,6 +2406,76 @@ body {
   margin: 0 2px;
   font-size: 0.9em;
   background: var(--color-bg-tertiary);
+}
+
+.ls-graph-flow {
+  display: grid;
+  gap: 8px;
+  max-width: 520px;
+}
+
+.ls-graph-node {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+  font-size: 13px;
+}
+
+.ls-graph-arrow {
+  padding-left: 22px;
+  color: var(--color-text-tertiary);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.ss-analysis-steps {
+  display: grid;
+  gap: 4px;
+  min-width: 150px;
+}
+
+.ss-analysis-step {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.ss-analysis-step > div {
+  height: 5px;
+  background: var(--color-bg-tertiary);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.ss-analysis-step i {
+  display: block;
+  height: 100%;
+  background: var(--color-border);
+}
+
+.ss-analysis-step.partial i,
+.ss-analysis-step.running i {
+  background: var(--color-text-info);
+}
+
+.ss-analysis-step.done i {
+  background: var(--color-text-success);
+}
+
+.ss-analysis-step.running span {
+  color: var(--color-text-info);
+}
+
+.ss-analysis-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
 }
 
 .ls-chunk-theory-state {

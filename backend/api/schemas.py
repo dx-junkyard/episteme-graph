@@ -576,18 +576,73 @@ class TheorySourceRef(BaseModel):
     quote: str = ""
 
 
+class TheorySourceScope(BaseModel):
+    level: str = "chunk"  # chunk | section | paper
+    document_id: str = ""
+    section_id: str = ""
+    chunk_id: str = ""
+    chunks: list[str] = Field(default_factory=list)
+    pages: list[int] = Field(default_factory=list)
+    equations: list[str] = Field(default_factory=list)
+    claims: list[str] = Field(default_factory=list)
+
+
+class TheoryConceptItem(BaseModel):
+    name: str
+    concept_type: str = "Concept"
+
+
+class ClaimOut(BaseModel):
+    claim_id: str
+    document_id: str = ""
+    source_scope: TheorySourceScope = Field(default_factory=TheorySourceScope)
+    claim_type: str = "diagnostic_claim"
+    text: str
+    normalized_text: str = ""
+    concepts: list[TheoryConceptItem] = Field(default_factory=list)
+    support_status: str = "source_backed"
+    evidence_text: str = ""
+    review_status: str = "teacher_review_required"
+    created_by: str | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class ClaimUpsertRequest(BaseModel):
+    claim_type: str = "diagnostic_claim"
+    text: str
+    normalized_text: str = ""
+    concepts: list[TheoryConceptItem] = Field(default_factory=list)
+    support_status: str = "source_backed"
+    evidence_text: str = ""
+    review_status: str = "teacher_review_required"
+    source_scope: TheorySourceScope | None = None
+
+
+class ClaimExtractResponse(BaseModel):
+    chunk_id: str
+    claims: list[ClaimOut] = Field(default_factory=list)
+
+
 class TheoryIOItem(BaseModel):
     label: str
+    name: str = ""
     type: str = "Concept"
+    concept_type: str = ""
     required: bool = True
     description: str = ""
+    support_status: str = "source_backed"
+    evidence_claims: list[str] = Field(default_factory=list)
     source_refs: list[TheorySourceRef] = Field(default_factory=list)
     needs_source: bool = False
 
 
 class TheoryConditionItem(BaseModel):
     label: str
+    condition: str = ""
     description: str = ""
+    support_status: str = "source_backed"
+    evidence_claims: list[str] = Field(default_factory=list)
     source_refs: list[TheorySourceRef] = Field(default_factory=list)
     needs_source: bool = False
 
@@ -595,6 +650,8 @@ class TheoryConditionItem(BaseModel):
 class TheoryBlackboxPolicy(BaseModel):
     default_level: str = "summary"
     expand_if_unlearned: bool = True
+    io_summary: str = ""
+    requires_source_display: bool = True
 
 
 class TheoryComponentOut(BaseModel):
@@ -603,15 +660,24 @@ class TheoryComponentOut(BaseModel):
     primary_chunk_id: str | None = None
     name: str
     component_type: str = "theory"
+    domain: str = "particle_physics"
+    origin: str = "paper"
     summary: str = ""
     status: str = "candidate"
+    source_scope: TheorySourceScope = Field(default_factory=TheorySourceScope)
+    evidence_claims: list[str] = Field(default_factory=list)
+    maturity_level: str = "paper_claim"
+    maturity_source: str = "llm_proposed"
+    review_status: str = "teacher_review_required"
     source_chunks: list[TheorySourceRef] = Field(default_factory=list)
     inputs: list[TheoryIOItem] = Field(default_factory=list)
     outputs: list[TheoryIOItem] = Field(default_factory=list)
     preconditions: list[TheoryConditionItem] = Field(default_factory=list)
+    cautions: list[TheoryConditionItem] = Field(default_factory=list)
     constraints: list[TheoryConditionItem] = Field(default_factory=list)
     invalid_conditions: list[TheoryConditionItem] = Field(default_factory=list)
     dependencies: list[TheoryConditionItem] = Field(default_factory=list)
+    connectors: dict = Field(default_factory=dict)
     blackbox_policy: TheoryBlackboxPolicy = Field(default_factory=TheoryBlackboxPolicy)
     validation_warnings: list[dict] = Field(default_factory=list)
     teacher_notes: str = ""
@@ -622,15 +688,24 @@ class TheoryComponentOut(BaseModel):
 class TheoryComponentUpsertRequest(BaseModel):
     name: str
     component_type: str = "theory"
+    domain: str = "particle_physics"
+    origin: str = "paper"
     summary: str = ""
     status: str = "candidate"
+    source_scope: TheorySourceScope = Field(default_factory=TheorySourceScope)
+    evidence_claims: list[str] = Field(default_factory=list)
+    maturity_level: str = "paper_claim"
+    maturity_source: str = "llm_proposed"
+    review_status: str = "teacher_review_required"
     source_chunks: list[TheorySourceRef] = Field(default_factory=list)
     inputs: list[TheoryIOItem] = Field(default_factory=list)
     outputs: list[TheoryIOItem] = Field(default_factory=list)
     preconditions: list[TheoryConditionItem] = Field(default_factory=list)
+    cautions: list[TheoryConditionItem] = Field(default_factory=list)
     constraints: list[TheoryConditionItem] = Field(default_factory=list)
     invalid_conditions: list[TheoryConditionItem] = Field(default_factory=list)
     dependencies: list[TheoryConditionItem] = Field(default_factory=list)
+    connectors: dict = Field(default_factory=dict)
     blackbox_policy: TheoryBlackboxPolicy = Field(default_factory=TheoryBlackboxPolicy)
     teacher_notes: str = ""
 
@@ -648,6 +723,38 @@ class TheoryComponentExtractResponse(BaseModel):
 class TheoryConnectionValidateRequest(BaseModel):
     source_component_id: str
     target_component_id: str
+
+
+class ComponentAssembleRequest(BaseModel):
+    force: bool = False
+
+
+class ComponentAssembleResponse(BaseModel):
+    section_id: str
+    components: list[TheoryComponentOut] = Field(default_factory=list)
+
+
+class ComponentGraphNode(BaseModel):
+    component_id: str
+    label: str
+    review_status: str = "teacher_review_required"
+
+
+class ComponentGraphEdge(BaseModel):
+    source_component_id: str
+    target_component_id: str
+    relation: str = "SUPPORTS"
+    support_status: str = "design_inferred"
+    review_status: str = "teacher_review_required"
+
+
+class ComponentGraphResponse(BaseModel):
+    graph_id: str
+    document_id: str
+    scope: dict = Field(default_factory=lambda: {"level": "paper"})
+    nodes: list[ComponentGraphNode] = Field(default_factory=list)
+    edges: list[ComponentGraphEdge] = Field(default_factory=list)
+    validation_results: list[dict] = Field(default_factory=list)
 
 
 class LectureStudioSettings(BaseModel):
