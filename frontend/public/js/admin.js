@@ -2480,6 +2480,7 @@
     },
     componentsByChunk: {},
     claimsByChunk: {},
+    claimMetaByChunk: {},
     componentsBySection: {},
     graphByDocument: {},
     selectedScope: null,
@@ -2530,6 +2531,7 @@
         lsState.selectedChunkId = null;
         lsState.componentsByChunk = {};
         lsState.claimsByChunk = {};
+        lsState.claimMetaByChunk = {};
         lsState.componentsBySection = {};
         lsState.graphByDocument = {};
         lsState.selectedScope = null;
@@ -2564,17 +2566,17 @@
 
     claimsAllBtn.addEventListener("click", function () {
       if (!lsState.courseId || lsState.generating) return;
-      lsRunCourseStep("claims", "/admin/courses/" + lsState.courseId + "/claims/extract-all", "全Claim抽出");
+      lsRunCourseStepWithRetryConfirm("claims", "/admin/courses/" + lsState.courseId + "/claims/extract-all", "全Claim抽出");
     });
 
     componentsAllBtn.addEventListener("click", function () {
       if (!lsState.courseId || lsState.generating) return;
-      lsRunCourseStep("components", "/admin/courses/" + lsState.courseId + "/components/assemble-all", "全節Component組み立て", JSON.stringify({ force: false }));
+      lsRunCourseStepWithRetryConfirm("components", "/admin/courses/" + lsState.courseId + "/components/assemble-all", "全節Component組み立て");
     });
 
     graphAllBtn.addEventListener("click", function () {
       if (!lsState.courseId || lsState.generating) return;
-      lsRunCourseStep("graph", "/admin/courses/" + lsState.courseId + "/component-graph/update", "Graph更新");
+      lsRunCourseStepWithRetryConfirm("graph", "/admin/courses/" + lsState.courseId + "/component-graph/update", "Graph更新");
     });
 
     settingsBtn.addEventListener("click", function () {
@@ -2744,6 +2746,7 @@
         lsState.selectedChunkId = null;
         lsState.componentsByChunk = {};
         lsState.claimsByChunk = {};
+        lsState.claimMetaByChunk = {};
         lsState.componentsBySection = {};
         lsState.graphByDocument = {};
         lsState.selectedScope = null;
@@ -3299,6 +3302,14 @@
     var scope = claim.source_scope || {};
     var source = (scope.page_start || (scope.pages && scope.pages[0])) ? "p." + (scope.page_start || scope.pages[0]) : (scope.chunk_id || "");
     var review = claim.review_status === "teacher_approved" ? "承認済み" : claim.review_status || "teacher_review_required";
+    var concepts = (claim.concepts || []).map(function (concept) {
+      return '<span class="ls-theory-ref">' + escHtml(concept.name || "") + ': ' + escHtml(concept.concept_type || "Concept") + '</span>';
+    }).join(" ");
+    var scopeText = [
+      scope.level || "",
+      scope.section_title || scope.section_id || "",
+      source,
+    ].filter(Boolean).join(" / ");
     return '' +
       '<div class="ls-theory-card" data-claim-id="' + escHtml(claim.claim_id) + '">' +
         '<div class="ls-theory-card-head">' +
@@ -3306,8 +3317,10 @@
           '<span class="ls-theory-badge">' + escHtml(review) + '</span>' +
         '</div>' +
         '<div class="ls-theory-summary">' + escHtml(claim.text || "") + '</div>' +
+        (claim.normalized_text && claim.normalized_text !== claim.text ? '<div class="ls-theory-section"><b>normalized</b><div class="ls-theory-muted">' + escHtml(claim.normalized_text) + '</div></div>' : '') +
+        '<div class="ls-theory-section"><b>concepts</b><div>' + (concepts || '<span class="ls-theory-source-warn">未抽出</span>') + '</div></div>' +
         '<div class="ls-theory-section"><b>support</b> ' + escHtml(claim.support_status || "source_backed") + '</div>' +
-        '<div class="ls-theory-section"><b>source</b> <span class="ls-theory-ref">' + escHtml(source) + '</span></div>' +
+        '<div class="ls-theory-section"><b>source_scope</b> <span class="ls-theory-ref">' + escHtml(scopeText) + '</span></div>' +
         '<div class="ls-theory-section"><b>evidence</b><div class="ls-theory-muted">' + escHtml(claim.evidence_text || "") + '</div></div>' +
       '</div>';
   }
@@ -3322,8 +3335,13 @@
       return;
     }
     var claims = lsState.claimsByChunk[chunk.chunk_id] || [];
+    var meta = lsState.claimMetaByChunk[chunk.chunk_id] || {};
     if (!claims.length) {
-      container.innerHTML = '<div class="ls-empty-state">Claimはまだありません。Claimを抽出してください。</div>';
+      var reason = meta.skip_reason || "";
+      var role = meta.chunk_role || "";
+      container.innerHTML = '<div class="ls-empty-state">' +
+        (reason ? 'このチャンクは ' + escHtml(role || "metadata") + ' のため、Claim抽出対象外です。' : 'Claimはまだありません。Claimを抽出してください。') +
+        '</div>';
       return;
     }
     container.innerHTML =
@@ -3363,6 +3381,7 @@
       })
       .then(function (data) {
         lsState.claimsByChunk[chunk.chunk_id] = data.claims || [];
+        lsState.claimMetaByChunk[chunk.chunk_id] = { chunk_role: data.chunk_role || "", skip_reason: data.skip_reason || "" };
         lsSetPanelStatus("ls-claims-status", (data.claims && data.claims.length) ? "抽出しました" : "Claimは見つかりませんでした", "success");
         lsRenderWorkspace();
         lsRenderChunkList();
@@ -3380,9 +3399,11 @@
     if (!items || !items.length) return '<div class="ls-theory-muted">未設定</div>';
     var html = '<ul class="ls-theory-items">';
     items.forEach(function (item) {
-      var hasSource = item.source_refs && item.source_refs.length;
-      html += '<li>' + escHtml(item.label || "") +
-        (hasSource ? ' <span class="ls-theory-source-ok">出典あり</span>' : ' <span class="ls-theory-source-warn">要出典</span>') +
+      var evidenceClaims = item.evidence_claims || [];
+      var hasSource = evidenceClaims.length || (item.source_refs && item.source_refs.length);
+      html += '<li>' + escHtml(item.name || item.label || item.condition || "") +
+        (hasSource ? ' <span class="ls-theory-source-ok">根拠あり</span>' : ' <span class="ls-theory-source-warn">要根拠</span>') +
+        (evidenceClaims.length ? '<div>' + evidenceClaims.map(function (id) { return '<span class="ls-theory-ref">' + escHtml(id) + '</span>'; }).join(" ") + '</div>' : '') +
         '</li>';
     });
     html += '</ul>';
@@ -3406,7 +3427,7 @@
       var items = component[fields[i]] || [];
       for (var j = 0; j < items.length; j++) {
         if (items[j].needs_source) return false;
-        if (!items[j].source_refs || !items[j].source_refs.length) return false;
+        if ((!items[j].source_refs || !items[j].source_refs.length) && (!items[j].evidence_claims || !items[j].evidence_claims.length)) return false;
       }
     }
     return true;
@@ -3416,6 +3437,10 @@
     var statusLabel = c.status === "teacher_reviewed" ? "承認済み" : c.status === "rejected" ? "却下" : c.status === "draft" ? "下書き" : "候補";
     var warning = c.validation_warnings && c.validation_warnings.length ? " ⚠" : "";
     var level = c.blackbox_policy && c.blackbox_policy.default_level ? c.blackbox_policy.default_level : "summary";
+    var evidence = (c.evidence_claims || []).map(function (id) { return '<span class="ls-theory-ref">' + escHtml(id) + '</span>'; }).join(" ");
+    var flow = (c.internal_flow || []).map(function (f) {
+      return '<li>' + escHtml((f.from || "") + " → " + (f.to || "")) + '</li>';
+    }).join("");
     var approveDisabled = lsTheoryCanApprove(c) ? "" : " disabled";
     return '' +
       '<div class="ls-theory-card" data-component-id="' + escHtml(c.id) + '">' +
@@ -3424,10 +3449,14 @@
           '<span class="ls-theory-badge">' + escHtml(statusLabel) + warning + '</span>' +
         '</div>' +
         '<div class="ls-theory-summary">' + escHtml(c.summary || "") + '</div>' +
+        '<div class="ls-theory-section"><b>maturity</b> ' + escHtml(c.maturity_level || "") + ' / ' + escHtml(c.maturity_source || "") + '</div>' +
+        '<div class="ls-theory-section"><b>review</b> ' + escHtml(c.review_status || "") + '</div>' +
         '<div class="ls-theory-section"><b>入力</b>' + lsTheoryItemsHtml(c.inputs) + '</div>' +
         '<div class="ls-theory-section"><b>出力</b>' + lsTheoryItemsHtml(c.outputs) + '</div>' +
         '<div class="ls-theory-section"><b>成立条件</b>' + lsTheoryItemsHtml(c.preconditions) + '</div>' +
-        '<div class="ls-theory-section"><b>禁止・注意条件</b>' + lsTheoryItemsHtml(c.invalid_conditions) + '</div>' +
+        '<div class="ls-theory-section"><b>注意条件</b>' + lsTheoryItemsHtml(c.cautions || c.invalid_conditions) + '</div>' +
+        '<div class="ls-theory-section"><b>internal_flow</b>' + (flow ? '<ul class="ls-theory-items">' + flow + '</ul>' : '<div class="ls-theory-muted">未設定</div>') + '</div>' +
+        '<div class="ls-theory-section"><b>evidence_claims</b><div>' + (evidence || '<span class="ls-theory-source-warn">未設定</span>') + '</div></div>' +
         '<div class="ls-theory-section"><b>出典</b><div>' + lsTheorySourceHtml(c) + '</div></div>' +
         '<div class="ls-theory-section"><b>表示</b> ' + escHtml(level) + '</div>' +
         '<div class="ls-theory-actions">' +
@@ -4129,6 +4158,31 @@
       .catch(function (err) {
         lsShowProgress(label + "に失敗しました: " + (err.message || "不明なエラー"), "error");
         lsSetCourseTaskBusy(false);
+      });
+  }
+
+  function lsRunCourseStepWithRetryConfirm(kind, endpoint, label) {
+    lsShowProgress(label + "の状態を確認しています...", "info");
+    apiFetch("/admin/courses/" + lsState.courseId + "/analysis-status")
+      .then(function (res) {
+        if (!res.ok) throw new Error("解析状態を確認できませんでした");
+        return res.json();
+      })
+      .then(function (status) {
+        var step = status[kind] || {};
+        var force = false;
+        if (step.complete) {
+          var ok = window.confirm(label + "は解析済です。解析済のデータも含めてすべて再度実行しますか？");
+          if (!ok) {
+            lsHideProgress();
+            return;
+          }
+          force = true;
+        }
+        lsRunCourseStep(kind, endpoint, label, JSON.stringify({ force: force }));
+      })
+      .catch(function (err) {
+        lsShowProgress((err && err.message) || "解析状態を確認できませんでした", "error");
       });
   }
 
