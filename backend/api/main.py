@@ -479,6 +479,8 @@ def _run_migrations() -> None:
             "ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS review_status TEXT NOT NULL DEFAULT 'teacher_review_required'",
             "ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS cautions JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS connectors JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS component_type_text TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS internal_flow JSONB NOT NULL DEFAULT '[]'::jsonb",
         ]:
             session.execute(sa_text(ddl))
         session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_theory_components_review ON theory_components(review_status)"))

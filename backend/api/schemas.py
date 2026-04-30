@@ -580,6 +580,7 @@ class TheorySourceScope(BaseModel):
     level: str = "chunk"  # chunk | section | paper
     document_id: str = ""
     section_id: str = ""
+    section_title: str = ""
     chunk_id: str = ""
     chunks: list[str] = Field(default_factory=list)
     pages: list[int] = Field(default_factory=list)
@@ -622,6 +623,8 @@ class ClaimUpsertRequest(BaseModel):
 class ClaimExtractResponse(BaseModel):
     chunk_id: str
     claims: list[ClaimOut] = Field(default_factory=list)
+    chunk_role: str = "unknown"
+    skip_reason: str = ""
 
 
 class TheoryIOItem(BaseModel):
@@ -678,6 +681,7 @@ class TheoryComponentOut(BaseModel):
     invalid_conditions: list[TheoryConditionItem] = Field(default_factory=list)
     dependencies: list[TheoryConditionItem] = Field(default_factory=list)
     connectors: dict = Field(default_factory=dict)
+    internal_flow: list[dict] = Field(default_factory=list)
     blackbox_policy: TheoryBlackboxPolicy = Field(default_factory=TheoryBlackboxPolicy)
     validation_warnings: list[dict] = Field(default_factory=list)
     teacher_notes: str = ""
@@ -706,6 +710,7 @@ class TheoryComponentUpsertRequest(BaseModel):
     invalid_conditions: list[TheoryConditionItem] = Field(default_factory=list)
     dependencies: list[TheoryConditionItem] = Field(default_factory=list)
     connectors: dict = Field(default_factory=dict)
+    internal_flow: list[dict] = Field(default_factory=list)
     blackbox_policy: TheoryBlackboxPolicy = Field(default_factory=TheoryBlackboxPolicy)
     teacher_notes: str = ""
 

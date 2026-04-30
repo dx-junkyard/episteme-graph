@@ -82,3 +82,40 @@ def test_lecture_studio_chunk_list_declares_analysis_buttons():
     assert 'var claimsAllBtn = document.getElementById("ls-claims-all-btn")' in chunk_list_source
     assert 'var componentsAllBtn = document.getElementById("ls-components-all-btn")' in chunk_list_source
     assert 'var graphAllBtn = document.getElementById("ls-graph-all-btn")' in chunk_list_source
+
+
+def test_all_analysis_buttons_confirm_before_full_retry():
+    routes = _read(ROUTES)
+    js = _read(ADMIN_JS)
+    assert '"/courses/{course_id}/analysis-status"' in routes
+    assert "def _analysis_status" in routes
+    assert "force = bool((body or {}).get(\"force\"))" in routes
+    assert "_delete_claims_for_chunks" in routes
+    assert "_delete_components_for_sections" in routes
+    assert "lsRunCourseStepWithRetryConfirm" in js
+    assert "window.confirm" in js
+    assert "は解析済です。解析済のデータも含めてすべて再度実行しますか？" in js
+    assert 'JSON.stringify({ force: force })' in js
+
+
+def test_issue_181_semantic_claim_and_component_guards_exist():
+    source = _read(ROUTES)
+    assert "def _classify_chunk_role" in source
+    assert "_CLAIM_SKIP_ROLES" in source
+    assert "front_matter" in source
+    assert "references" in source
+    assert "def _semantic_claims_with_llm" in source
+    assert "出版情報、著者情報、所属、ジャーナル情報、受理日" in source
+    assert "def _semantic_components_with_llm" in source
+    assert "Component名は内容に基づいて付ける" in source
+    assert "Component for page N" in source
+    assert "component_type_text" in source
+    assert "internal_flow" in source
+
+
+def test_issue_181_no_page_component_name_fallback():
+    source = _read(ROUTES)
+    assert 'f"Component for {section_id' not in source
+    candidate_source = source[source.index("def _normalize_component_candidate"):source.index("def _semantic_components_with_llm")]
+    assert "component for (page|section|chunk_group)" in candidate_source
+    assert "return None" in candidate_source
