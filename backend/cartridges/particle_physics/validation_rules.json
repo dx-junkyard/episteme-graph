@@ -1,0 +1,36 @@
+{
+  "validation_rules": [
+    {
+      "id": "component_type_must_be_known",
+      "description": "component_type は component_types.json の id に含まれていなければならない。"
+    },
+    {
+      "id": "maturity_level_must_be_known",
+      "description": "maturity_level は maturity_levels.json の id に含まれていなければならない。"
+    },
+    {
+      "id": "maturity_source_required",
+      "description": "maturity_level が設定されている場合、maturity_source も必ず付ける。"
+    },
+    {
+      "id": "support_status_required",
+      "description": "description.support_status は support_statuses.json の id に含まれていなければならない。"
+    },
+    {
+      "id": "origin_consistency",
+      "description": "origin = paper の場合は Paper*Component、domain の場合は Domain*Component を使う。"
+    },
+    {
+      "id": "llm_proposed_requires_review",
+      "description": "maturity_source = llm_proposed の場合、review_status は teacher_review_required でなければならない。"
+    },
+    {
+      "id": "input_output_types_known",
+      "description": "inputs/outputs の type は ontology.concept_types に含まれることが望ましい (warning レベル)。"
+    },
+    {
+      "id": "source_backed_requires_quote",
+      "description": "support_status = source_backed の場合、source_refs に quote が必要。"
+    }
+  ]
+}

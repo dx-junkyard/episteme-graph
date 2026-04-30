@@ -1,0 +1,63 @@
+{
+  "component_id": "paper.b_to_c_sum_rule.r_d_consistency",
+  "name": "b → c τν 過程における R_D / R_D* / R_Λc の整合性チェック",
+  "component_type": "PaperRelationComponent",
+  "domain": "particle_physics",
+  "origin": "paper",
+  "maturity_level": "paper_claim",
+  "maturity_source": "cartridge_default",
+  "maturity_rationale": "JHEP 論文中で提示された関係式に基づき、PaperRelationComponent の default を採用。",
+  "review_status": "teacher_review_required",
+  "source": {
+    "document_id": "jhep_b_to_c_sum_rule_2024",
+    "pages": [3, 4, 5],
+    "sections": ["Section 3", "Section 4"],
+    "equations": ["Eq. (3.4)", "Eq. (4.7)"],
+    "chunks": []
+  },
+  "description": {
+    "value": "B → D τν, B → D* τν, Λb → Λc τν の各崩壊比 (R_D, R_D*, R_Λc) を、新物理 Wilson 係数 (C_VL, C_SL, C_T) を媒介変数として整合的に表現する関係式。",
+    "support_status": "source_backed",
+    "review_status": "teacher_review_required"
+  },
+  "inputs": [
+    {"label": "C_VL", "type": "Parameter", "required": true, "description": "ベクトル左巻き Wilson 係数"},
+    {"label": "C_SL", "type": "Parameter", "required": false, "description": "スカラー左巻き Wilson 係数"},
+    {"label": "C_T", "type": "Parameter", "required": false, "description": "テンソル Wilson 係数"},
+    {"label": "form factors", "type": "Parameter", "required": true, "description": "B → D, B → D*, Λb → Λc の遷移形状因子"}
+  ],
+  "outputs": [
+    {"label": "R_D", "type": "Observable", "description": "Br(B → Dτν)/Br(B → Dℓν)"},
+    {"label": "R_D*", "type": "Observable", "description": "Br(B → D*τν)/Br(B → D*ℓν)"},
+    {"label": "R_Λc", "type": "Observable", "description": "Br(Λb → Λcτν)/Br(Λb → Λcℓν)"}
+  ],
+  "preconditions": [
+    {"label": "標準模型を出発点とする", "support_status": "source_backed"},
+    {"label": "新物理は (V-A) 構造の演算子を主として含む", "support_status": "source_inferred"}
+  ],
+  "constraints": [
+    {"label": "form factor の不確実性を別途扱う", "support_status": "source_backed"}
+  ],
+  "cautions": [
+    {"label": "form factor のパラメータ化に依存する", "support_status": "domain_inferred"}
+  ],
+  "dependencies": [
+    {"component_id": "domain.hqet", "relation": "REQUIRES"},
+    {"component_id": "domain.standard_model", "relation": "ASSUMES"}
+  ],
+  "internal_flow": [],
+  "connectors": {
+    "requires_before_use": ["domain.hqet"],
+    "can_accept": ["Parameter"],
+    "can_output_to": ["Observable"],
+    "may_conflict_with": ["paper.alternative_rd_explanation"]
+  },
+  "blackbox_policy": {
+    "io_summary": "Wilson係数と形状因子を入力として R_D / R_D* / R_Λc の整合関係を返す。",
+    "expand_when_unlearned": true,
+    "requires_source_display": true
+  },
+  "unit_test_targets": ["R_D の値域チェック", "R_D* の値域チェック"],
+  "integration_test_targets": ["R_Λc を含む 3 観測量の同時フィット"],
+  "review_notes": []
+}

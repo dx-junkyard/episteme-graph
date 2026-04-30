@@ -1,0 +1,19 @@
+{
+  "relation_types": [
+    {"id": "REQUIRES", "label_ja": "必要とする"},
+    {"id": "ASSUMES", "label_ja": "仮定する"},
+    {"id": "PRODUCES", "label_ja": "出力する"},
+    {"id": "APPROXIMATES", "label_ja": "近似する"},
+    {"id": "CORRECTS", "label_ja": "補正する"},
+    {"id": "RELATES", "label_ja": "関係づける"},
+    {"id": "CHECKS_CONSISTENCY_OF", "label_ja": "整合性を検査する"},
+    {"id": "UNCERTAIN_DUE_TO", "label_ja": "不確実性の原因を持つ"},
+    {"id": "CONFLICTS_WITH", "label_ja": "矛盾する"},
+    {"id": "REFINES", "label_ja": "精緻化する"},
+    {"id": "CHALLENGES", "label_ja": "異議を唱える"},
+    {"id": "SUPPORTS", "label_ja": "支持する"},
+    {"id": "CONTRADICTS", "label_ja": "反証・矛盾する"},
+    {"id": "EXTENDS", "label_ja": "拡張する"},
+    {"id": "LIMITS", "label_ja": "適用範囲を制限する"}
+  ]
+}

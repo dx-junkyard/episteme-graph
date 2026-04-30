@@ -1,0 +1,39 @@
+{
+  "support_statuses": [
+    {
+      "id": "source_backed",
+      "label_ja": "出典明示",
+      "description": "対象ソースに明示されている。"
+    },
+    {
+      "id": "source_inferred",
+      "label_ja": "出典から推論",
+      "description": "対象ソースから自然に推論できる。"
+    },
+    {
+      "id": "domain_inferred",
+      "label_ja": "ドメイン知識で補完",
+      "description": "一般的な分野知識に基づき補完した。"
+    },
+    {
+      "id": "design_inferred",
+      "label_ja": "仕様設計で補完",
+      "description": "接続・検証可能なコンポーネント仕様にするため補完した。"
+    },
+    {
+      "id": "teacher_review_required",
+      "label_ja": "教員確認待ち",
+      "description": "教育・研究利用の前に専門家確認が必要。"
+    },
+    {
+      "id": "teacher_approved",
+      "label_ja": "教員承認済み",
+      "description": "教員または専門家が承認済み。"
+    },
+    {
+      "id": "rejected",
+      "label_ja": "却下",
+      "description": "レビューにより却下された。"
+    }
+  ]
+}

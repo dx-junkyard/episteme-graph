@@ -1,0 +1,58 @@
+{
+  "component_id": "domain.hqet",
+  "name": "Heavy Quark Effective Theory (HQET)",
+  "component_type": "DomainTheoryComponent",
+  "domain": "particle_physics",
+  "origin": "domain",
+  "maturity_level": "canonical",
+  "maturity_source": "curated_registry",
+  "maturity_rationale": "教科書・標準理論レベルで定着している重クォーク有効理論。",
+  "review_status": "teacher_approved",
+  "source": {
+    "document_id": "",
+    "pages": [],
+    "sections": [],
+    "equations": [],
+    "chunks": []
+  },
+  "description": {
+    "value": "重クォーク質量 m_Q → ∞ の極限で QCD を展開する有効場理論。重い b/c クォークを含むハドロン物理の解析で標準的に用いられる。",
+    "support_status": "domain_inferred",
+    "review_status": "teacher_approved"
+  },
+  "inputs": [
+    {"label": "QCD Lagrangian", "type": "Theory", "required": true},
+    {"label": "heavy quark limit", "type": "Approximation", "required": true}
+  ],
+  "outputs": [
+    {"label": "Isgur-Wise function", "type": "Parameter"},
+    {"label": "1/m_Q expansion", "type": "Approximation"}
+  ],
+  "preconditions": [
+    {"label": "重クォーク質量が ΛQCD より十分大きい", "support_status": "domain_inferred"}
+  ],
+  "constraints": [
+    {"label": "1/m_Q^2 以上の補正は別途評価する", "support_status": "domain_inferred"}
+  ],
+  "cautions": [
+    {"label": "軽いクォーク系 (u, d, s) には適用できない", "support_status": "domain_inferred"}
+  ],
+  "dependencies": [
+    {"component_id": "domain.qcd", "relation": "REQUIRES"}
+  ],
+  "internal_flow": [],
+  "connectors": {
+    "requires_before_use": ["domain.qcd"],
+    "can_accept": ["Theory", "Approximation"],
+    "can_output_to": ["Parameter", "Theory"],
+    "may_conflict_with": []
+  },
+  "blackbox_policy": {
+    "io_summary": "QCD と heavy quark limit から Isgur-Wise 関数と 1/m_Q 展開を導く。",
+    "expand_when_unlearned": true,
+    "requires_source_display": false
+  },
+  "unit_test_targets": [],
+  "integration_test_targets": [],
+  "review_notes": []
+}

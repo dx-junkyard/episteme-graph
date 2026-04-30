@@ -155,6 +155,18 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("GOOGLE_CLOUD_LOCATION"),
     )
 
+    # --- Domain Cartridge ---
+    # 使用するデフォルトカートリッジID。未指定時は particle_physics。
+    default_cartridge_id: str = Field(
+        default="particle_physics",
+        validation_alias=AliasChoices("EPISTEME_DEFAULT_CARTRIDGE_ID"),
+    )
+    # カートリッジ定義ディレクトリを上書きしたい場合のみ指定。未指定時は backend/cartridges。
+    cartridges_dir: str = Field(
+        default="",
+        validation_alias=AliasChoices("EPISTEME_CARTRIDGES_DIR"),
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

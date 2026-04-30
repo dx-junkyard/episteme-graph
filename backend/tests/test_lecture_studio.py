@@ -314,6 +314,50 @@ class TestRewritePromptTemplate:
 
 
 # ---------------------------------------------------------------------------
+# Rewrite result normalization (regression for theory-tab AttributeError)
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeRewriteResult:
+    """`_normalize_rewrite_result` の挙動を検証する。
+
+    LLM が JSON オブジェクトではなくトップレベル配列を返すケースで
+    `AttributeError: 'list' object has no attribute 'get'` が出ていた回帰を防ぐ。
+    """
+
+    def _normalize(self, parsed, studio_view):
+        from routes.lecture_studio import _normalize_rewrite_result
+
+        return _normalize_rewrite_result(parsed, studio_view)
+
+    def test_dict_input_returned_as_is(self):
+        payload = {"theory_components": [{"id": "c1"}], "spoken_text": "x"}
+        assert self._normalize(payload, "theory") == payload
+
+    def test_list_in_theory_view_wrapped_as_theory_components(self):
+        payload = [{"id": "c1", "summary": "a"}, {"id": "c2"}]
+        result = self._normalize(payload, "theory")
+        assert result == {"theory_components": payload}
+
+    def test_list_in_non_theory_view_returns_empty(self):
+        result = self._normalize([{"id": "c1"}], "edit")
+        assert result == {}
+
+    def test_invalid_input_returns_empty(self):
+        assert self._normalize("string", "theory") == {}
+        assert self._normalize(None, "edit") == {}
+        assert self._normalize(42, "audio") == {}
+
+    def test_normalized_dict_supports_get(self):
+        """正規化後は必ず .get() できる(本番のリグレッション再現テスト)。"""
+        result = self._normalize([{"id": "c1"}], "theory")
+        # 以下が AttributeError なく動くことが本テストの主旨
+        assert result.get("theory_components") == [{"id": "c1"}]
+        assert result.get("display_text") is None
+        assert result.get("spoken_text", "fallback") == "fallback"
+
+
+# ---------------------------------------------------------------------------
 # Chunk status logic tests
 # ---------------------------------------------------------------------------
 
