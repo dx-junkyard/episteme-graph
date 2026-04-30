@@ -2012,6 +2012,48 @@ body {
   border-left: 3px solid var(--color-text-info);
 }
 
+.ls-doc-node,
+.ls-section-node {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+  cursor: pointer;
+  display: grid;
+  gap: 2px;
+}
+
+.ls-doc-node {
+  background: var(--color-bg-secondary);
+}
+
+.ls-section-node {
+  padding-left: 22px;
+}
+
+.ls-doc-node:hover,
+.ls-section-node:hover,
+.ls-doc-node.active,
+.ls-section-node.active {
+  background: var(--color-bg-tertiary);
+}
+
+.ls-doc-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ls-doc-meta {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.ls-chunk-child {
+  padding-left: 34px;
+}
+
 .ls-chunk-status {
   width: 8px;
   height: 8px;
@@ -2116,6 +2158,10 @@ body {
   display: flex;
   gap: 10px;
   min-width: 1450px;
+}
+
+.ls-split[hidden] {
+  display: none;
 }
 
 .ls-pane {
@@ -2237,6 +2283,237 @@ body {
 
 .ls-display-preview p {
   margin: 0 0 12px;
+}
+
+.ls-theory-panel {
+  flex: 1;
+  min-height: 0;
+  padding: 16px;
+  overflow: auto;
+  height: 100%;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-background-primary);
+}
+
+.ls-theory-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.ls-theory-status {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.ls-theory-current {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  margin-bottom: 10px;
+}
+
+.ls-theory-components {
+  display: grid;
+  gap: 12px;
+}
+
+.ls-theory-card {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--color-bg-secondary);
+}
+
+.ls-theory-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.ls-theory-type,
+.ls-theory-muted {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-top: 2px;
+}
+
+.ls-theory-badge {
+  flex: 0 0 auto;
+  font-size: 11px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: var(--color-text-secondary);
+  background: var(--color-background-primary);
+}
+
+.ls-theory-summary {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  margin-bottom: 8px;
+}
+
+.ls-theory-section {
+  font-size: 12px;
+  margin-top: 8px;
+}
+
+.ls-theory-items {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+.ls-theory-source-ok {
+  color: var(--color-text-success);
+  font-size: 11px;
+}
+
+.ls-theory-source-warn,
+.ls-theory-warning {
+  color: var(--color-text-warning);
+  font-size: 11px;
+}
+
+.ls-theory-ref {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 1px 7px;
+  margin: 3px 3px 0 0;
+  color: var(--color-text-secondary);
+  background: var(--color-background-primary);
+  font-size: 11px;
+}
+
+.ls-theory-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.ls-theory-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 1px 8px;
+  margin: 0 2px;
+  font-size: 0.9em;
+  background: var(--color-bg-tertiary);
+}
+
+.ls-graph-flow {
+  display: grid;
+  gap: 8px;
+  max-width: 520px;
+}
+
+.ls-graph-node {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+  font-size: 13px;
+}
+
+.ls-graph-arrow {
+  padding-left: 22px;
+  color: var(--color-text-tertiary);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.ss-analysis-steps {
+  display: grid;
+  gap: 4px;
+  min-width: 150px;
+}
+
+.ss-analysis-step {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.ss-analysis-step > div {
+  height: 5px;
+  background: var(--color-bg-tertiary);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.ss-analysis-step i {
+  display: block;
+  height: 100%;
+  background: var(--color-border);
+}
+
+.ss-analysis-step.partial i,
+.ss-analysis-step.running i {
+  background: var(--color-text-info);
+}
+
+.ss-analysis-step.done i {
+  background: var(--color-text-success);
+}
+
+.ss-analysis-step.running span {
+  color: var(--color-text-info);
+}
+
+.ss-analysis-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.ls-chunk-theory-state {
+  display: inline-block;
+  margin-left: 6px;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.ls-theory-dialog {
+  width: min(900px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  background: var(--color-background-primary);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 16px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.24);
+}
+
+.ls-theory-jsonarea {
+  width: 100%;
+  min-height: 82px;
+  padding: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.ls-theory-levels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
 }
 
 .ls-display-preview .katex {
