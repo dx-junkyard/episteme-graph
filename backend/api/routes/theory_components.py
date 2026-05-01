@@ -6,6 +6,7 @@ import json
 import logging
 from collections import Counter
 from pathlib import Path
+import random
 import re
 import threading
 import time
@@ -247,6 +248,29 @@ class LLMStructuredOutputError(RuntimeError):
 def _llm_retry_policy() -> tuple[int, float]:
     settings = get_settings()
     return max(1, int(settings.llm_max_retries)), max(0.0, float(settings.llm_retry_backoff_seconds))
+
+
+def _is_resource_exhausted(exc: Exception) -> bool:
+    """Return True if the exception indicates a 429 / resource exhausted error."""
+    msg = str(exc).lower()
+    class_name = type(exc).__name__.lower()
+    return (
+        "429" in msg
+        or "resource exhausted" in msg
+        or "resourceexhausted" in class_name
+        or "rate limit" in msg
+        or "ratelimit" in class_name
+        or "quota" in msg
+    )
+
+
+def _backoff_seconds(attempt: int, base: float, is_rate_limited: bool) -> float:
+    """Compute wait time: exponential for 429, linear otherwise, always with jitter."""
+    if is_rate_limited:
+        wait = min(60.0, base * (2 ** (attempt - 1)))
+    else:
+        wait = base * attempt
+    return wait + random.random()
 
 
 def _row_to_out(row: Any) -> TheoryComponentOut:
@@ -835,14 +859,16 @@ def _normalize_claim_payload(raw: dict, chunk: dict, strict: bool = True) -> dic
     if _is_low_value_claim_text(text):
         return None
     evidence = _clean_pg_text(raw.get("evidence_text") or "").strip()
+    if not evidence and strict:
+        raise ValueError("claim missing required field: evidence_text")
     if not evidence and not strict:
         evidence = text[:360]
     support_status = str(raw.get("support_status") or "").strip()
     if support_status not in _SUPPORT_STATUS_VALUES:
         raise ValueError(f"invalid support_status: {support_status}")
     review_status = str(raw.get("review_status") or "teacher_review_required").strip()
-    if review_status == "teacher_approved":
-        raise ValueError("LLM-created claims cannot be teacher_approved")
+    if review_status not in ("teacher_review_required", "needs_revision", "rejected"):
+        review_status = "teacher_review_required"
     concepts = raw.get("concepts") if isinstance(raw.get("concepts"), list) else []
     normalized_concepts = []
     for concept in concepts[:8]:
@@ -911,8 +937,11 @@ Claimは論理形成に使える最小単位に分割する。1つのClaimには
 単なる論文要約、トピック名、「Xについて議論する」のような薄い文はClaimにしない。
 数式が中心のClaimは equation_definition / equation_relation / equation_transformation / equation_approximation / equation_constraint を優先し、式番号・LaTeX・定義記号を equation に含める。
 
-claim_type候補:
+claim_type must be exactly one of (do not invent new values):
 {", ".join(sorted(_CLAIM_TYPES))}
+
+For all claims, review_status must be "teacher_review_required". Never output "teacher_approved".
+evidence_text is required: include a short verbatim or paraphrased quote from the source text.
 
 concept_type候補:
 {", ".join(cartridge.ontology.concept_type_ids)}
@@ -985,8 +1014,9 @@ JSONのみ:
             return payloads
         except Exception as exc:
             last_error = str(exc)
+            is_429 = _is_resource_exhausted(exc)
             logger.warning(
-                "Claim LLM attempt %s/%s failed for chunk %s (doc=%s, section=%s, page=%s, chars=%s): %s",
+                "Claim LLM attempt %s/%s failed for chunk %s (doc=%s, section=%s, page=%s, chars=%s, rate_limited=%s): %s",
                 attempt,
                 max_retries,
                 chunk.get("id"),
@@ -994,10 +1024,13 @@ JSONのみ:
                 _section_id_for_chunk(chunk),
                 chunk.get("page_start"),
                 len(text),
+                is_429,
                 exc,
             )
             if attempt < max_retries and backoff:
-                time.sleep(backoff * attempt)
+                wait = _backoff_seconds(attempt, backoff, is_429)
+                logger.info("Claim LLM retry backoff: attempt=%s wait=%.1fs rate_limited=%s", attempt, wait, is_429)
+                time.sleep(wait)
     raise LLMStructuredOutputError(
         "claim_extraction_failed",
         "LLM failed to produce valid claim JSON after retries.",
@@ -2204,9 +2237,15 @@ def _normalize_component_candidate(
         raise ValueError("component missing required fields: name")
     if _PROHIBITED_COMPONENT_NAME_RE.search(name):
         raise ValueError(f"prohibited component name: {name}")
-    evidence_claims = [str(cid) for cid in raw.get("evidence_claims", []) if str(cid)]
+    evidence_claims_raw = [str(cid) for cid in raw.get("evidence_claims", []) if str(cid)]
     valid_claim_ids = {claim.claim_id for claim in claims}
-    evidence_claims = [cid for cid in evidence_claims if cid in valid_claim_ids]
+    unknown_evidence = set(evidence_claims_raw) - valid_claim_ids
+    if unknown_evidence:
+        msg = f"component '{name}' references unknown evidence_claims: {sorted(unknown_evidence)[:10]}"
+        if strict:
+            raise ValueError(msg)
+        logger.warning("Component validation: %s (filtering unknown claims)", msg)
+    evidence_claims = [cid for cid in evidence_claims_raw if cid in valid_claim_ids]
     if not evidence_claims and not strict:
         evidence_claims = [claim.claim_id for claim in claims[:3]]
     if not evidence_claims:
@@ -2228,7 +2267,16 @@ def _normalize_component_candidate(
         for item in items[:8]:
             if not isinstance(item, dict):
                 continue
-            item_claims = [str(cid) for cid in item.get("evidence_claims", []) if str(cid) in valid_claim_ids]
+            item_claims_raw = [str(cid) for cid in item.get("evidence_claims", []) if str(cid)]
+            unknown_item = set(item_claims_raw) - valid_claim_ids
+            if unknown_item:
+                logger.warning(
+                    "Component validation: item '%s' in field '%s' references unknown evidence_claims: %s",
+                    str(item.get("name") or "")[:60],
+                    field,
+                    sorted(unknown_item)[:5],
+                )
+            item_claims = [cid for cid in item_claims_raw if cid in valid_claim_ids]
             name_value = str(item.get("name") or item.get("label") or item.get("condition") or "").strip()
             if not name_value:
                 continue
@@ -2346,8 +2394,20 @@ def _semantic_components_with_llm(document_id: str, section_id: str, section_chu
 1節から必ず1つのComponentを作る必要はない。0個、1個、複数個のいずれでもよい。
 Return at most {_MAX_COMPONENTS_PER_SECTION} components for this section.
 Prefer fewer, high-quality reusable components.
-Do not create broad textbook-level overview components unless the section itself is an overview.
-Every component must be grounded in the provided section claims.
+
+You are assembling components ONLY for the given section (section_id={section_id}).
+
+Do not create:
+- components summarizing the entire textbook or document
+- components based on preface, table of contents, references, or unrelated chapters
+- broad overview components unless the current section itself is explicitly an overview section
+- components whose name contains "Textbook", "Overview", "Pedagogical Framework", "Introduction to the Book", or similar global-scope terms (unless section_title itself contains such terms)
+
+Every component must:
+- be grounded in claims from the provided claim list for this section
+- cite evidence_claims only from the provided claim IDs below
+- represent reusable logical knowledge, not a general summary
+
 Component名は内容に基づいて付ける。"Component for page N" や "Component for section" は禁止。
 内容ベースで名前を付けられない場合は components=[] を返す。
 Claimにない情報を補完する場合は support_status を domain_inferred または design_inferred にする。
@@ -2430,8 +2490,9 @@ JSONのみ:
             return payloads
         except Exception as exc:
             last_error = str(exc)
+            is_429 = _is_resource_exhausted(exc)
             logger.warning(
-                "Component LLM attempt %s/%s failed: section=%s document=%s exc_type=%s error=%s input_claims=%s",
+                "Component LLM attempt %s/%s failed: section=%s document=%s exc_type=%s error=%s input_claims=%s rate_limited=%s",
                 attempt,
                 max_retries,
                 section_id,
@@ -2439,9 +2500,12 @@ JSONのみ:
                 type(exc).__name__,
                 exc,
                 len(ranked_claims),
+                is_429,
             )
             if attempt < max_retries and backoff:
-                time.sleep(backoff * attempt)
+                wait = _backoff_seconds(attempt, backoff, is_429)
+                logger.info("Component LLM retry backoff: attempt=%s wait=%.1fs rate_limited=%s section=%s", attempt, wait, is_429, section_id)
+                time.sleep(wait)
     raise LLMStructuredOutputError(
         "component_assembly_failed",
         "LLM failed to produce valid component JSON after retries.",
@@ -2546,6 +2610,79 @@ def _assemble_section(
     return saved
 
 
+def _upsert_section_assembly_status(
+    course_id: str,
+    document_id: str,
+    section_id: str,
+    status: str,
+    error_type: str = "",
+    error_message: str = "",
+    components_generated: int = 0,
+) -> None:
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO section_assembly_status
+                    (course_id, document_id, section_id, component_assembly_status,
+                     error_type, error_message, components_generated, updated_at)
+                VALUES
+                    (:course_id, :document_id, :section_id, :status,
+                     :error_type, :error_message, :components_generated, now())
+                ON CONFLICT (course_id, document_id, section_id) DO UPDATE SET
+                    component_assembly_status = EXCLUDED.component_assembly_status,
+                    error_type = EXCLUDED.error_type,
+                    error_message = EXCLUDED.error_message,
+                    components_generated = EXCLUDED.components_generated,
+                    updated_at = now()
+            """),
+            {
+                "course_id": course_id,
+                "document_id": document_id,
+                "section_id": section_id,
+                "status": status,
+                "error_type": error_type[:255],
+                "error_message": error_message[:2000],
+                "components_generated": components_generated,
+            },
+        )
+        session.commit()
+    except Exception as exc:
+        logger.warning("Failed to upsert section_assembly_status: %s", exc)
+    finally:
+        session.close()
+
+
+def _get_failed_section_statuses(course_id: str) -> list[dict]:
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT document_id, section_id, component_assembly_status,
+                       error_type, error_message, components_generated, updated_at
+                FROM section_assembly_status
+                WHERE course_id = :course_id
+                  AND component_assembly_status = 'failed'
+                ORDER BY updated_at DESC
+            """),
+            {"course_id": course_id},
+        ).fetchall()
+        return [
+            {
+                "document_id": row[0],
+                "section_id": row[1],
+                "component_assembly_status": row[2],
+                "error_type": row[3],
+                "error_message": row[4],
+                "components_generated": row[5],
+                "updated_at": row[6].isoformat() if row[6] else None,
+            }
+            for row in rows
+        ]
+    finally:
+        session.close()
+
+
 def _run_component_assembly(course_id: str, course_data: dict, user_id: str | None, task_id: str | None = None, force: bool = False) -> dict:
     grouped = _group_sections(_course_chunks(course_data))
     total = len(grouped)
@@ -2564,8 +2701,10 @@ def _run_component_assembly(course_id: str, course_data: dict, user_id: str | No
             components = _assemble_section(course_id, document_id, section_id, chunks, user_id, force=force)
             if components:
                 generated += len(components)
+                _upsert_section_assembly_status(course_id, document_id, section_id, "success", components_generated=len(components))
             else:
                 skipped += 1
+                _upsert_section_assembly_status(course_id, document_id, section_id, "skipped")
         except Exception as exc:
             logger.warning(
                 "Component assembly failed for section=%s document=%s course=%s: %s",
@@ -2576,12 +2715,18 @@ def _run_component_assembly(course_id: str, course_data: dict, user_id: str | No
                 exc_info=True,
             )
             skipped += 1
-            section_errors.append({
+            error_info = {
                 "section_id": section_id,
                 "document_id": document_id,
                 "error_type": type(exc).__name__,
                 "error_message": str(exc),
-            })
+            }
+            section_errors.append(error_info)
+            _upsert_section_assembly_status(
+                course_id, document_id, section_id, "failed",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
         if task_id:
             update_background_task(task_id, "processing", result_data={
                 "course_id": course_id, "total_sections": total, "generated": generated,
@@ -2850,6 +2995,123 @@ def assemble_all_components(
         daemon=True,
     ).start()
     return {"task_id": task_id, "course_id": course_id, "status": "pending"}
+
+
+@router.get("/courses/{course_id}/components/assembly-status")
+def get_course_assembly_status(
+    course_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    _editable_course_data(course_id, current_user)
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT document_id, section_id, component_assembly_status,
+                       error_type, error_message, components_generated, updated_at
+                FROM section_assembly_status
+                WHERE course_id = :course_id
+                ORDER BY updated_at DESC
+            """),
+            {"course_id": course_id},
+        ).fetchall()
+        statuses = [
+            {
+                "document_id": row[0],
+                "section_id": row[1],
+                "component_assembly_status": row[2],
+                "error_type": row[3],
+                "error_message": row[4],
+                "components_generated": row[5],
+                "updated_at": row[6].isoformat() if row[6] else None,
+            }
+            for row in rows
+        ]
+    finally:
+        session.close()
+    counts: dict[str, int] = {}
+    for s in statuses:
+        counts[s["component_assembly_status"]] = counts.get(s["component_assembly_status"], 0) + 1
+    return {"course_id": course_id, "sections": statuses, "summary": counts}
+
+
+def _retry_failed_sections_worker(task_id: str, course_id: str, course_data: dict, user_id: str, force: bool) -> None:
+    try:
+        failed = _get_failed_section_statuses(course_id)
+        if not failed:
+            update_background_task(task_id, "completed", result_data={
+                "course_id": course_id, "retried": 0, "generated": 0, "still_failed": 0,
+            })
+            return
+        grouped = _group_sections(_course_chunks(course_data))
+        total = len(failed)
+        generated = 0
+        still_failed = 0
+        update_background_task(task_id, "processing", result_data={
+            "course_id": course_id, "total_failed": total, "retried": 0, "generated": 0,
+            "still_failed": 0, "progress": 0,
+        })
+        for idx, entry in enumerate(failed):
+            document_id = entry["document_id"]
+            section_id = entry["section_id"]
+            chunks = grouped.get((document_id, section_id), [])
+            if not chunks:
+                logger.warning("retry-failed: no chunks found for section=%s document=%s", section_id, document_id)
+                still_failed += 1
+                continue
+            if force:
+                _delete_components_for_sections(course_id, [section_id])
+            try:
+                components = _assemble_section(course_id, document_id, section_id, chunks, user_id, force=True)
+                if components:
+                    generated += len(components)
+                    _upsert_section_assembly_status(course_id, document_id, section_id, "success", components_generated=len(components))
+                else:
+                    still_failed += 1
+                    _upsert_section_assembly_status(course_id, document_id, section_id, "skipped")
+            except Exception as exc:
+                logger.warning("retry-failed: section=%s document=%s failed again: %s", section_id, document_id, exc)
+                still_failed += 1
+                _upsert_section_assembly_status(
+                    course_id, document_id, section_id, "failed",
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                )
+            update_background_task(task_id, "processing", result_data={
+                "course_id": course_id, "total_failed": total,
+                "retried": idx + 1, "generated": generated,
+                "still_failed": still_failed,
+                "progress": int((idx + 1) * 100 / total) if total else 100,
+            })
+        update_background_task(task_id, "completed", result_data={
+            "course_id": course_id, "total_failed": total,
+            "retried": total, "generated": generated,
+            "still_failed": still_failed, "progress": 100,
+        })
+    except Exception as exc:
+        logger.exception("retry-failed-sections task failed: %s", task_id)
+        update_background_task(task_id, "failed", error_message=str(exc))
+
+
+@router.post("/courses/{course_id}/components/retry-failed", status_code=202)
+def retry_failed_sections(
+    course_id: str,
+    body: ComponentAssembleRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """Retry Component Assembly for sections that previously failed."""
+    course_data = _editable_course_data(course_id, current_user)
+    failed = _get_failed_section_statuses(course_id)
+    if not failed:
+        return {"course_id": course_id, "status": "no_failed_sections", "failed_count": 0}
+    task_id = str(uuid.uuid4())[:12]
+    create_background_task(task_id, "component_assembly_retry", current_user["id"])
+    threading.Thread(
+        target=_retry_failed_sections_worker,
+        args=(task_id, course_id, course_data, current_user["id"], body.force),
+        daemon=True,
+    ).start()
+    return {"task_id": task_id, "course_id": course_id, "status": "pending", "failed_count": len(failed)}
 
 
 @router.post("/courses/{course_id}/component-graph/update", status_code=202)
