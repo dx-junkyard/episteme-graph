@@ -189,6 +189,28 @@ _GRAPH_RELATIONS = {
     "CONFLICTS_WITH",
     "RELATED_TO",
 }
+_MAX_COMPONENT_ASSEMBLY_CLAIMS = 40
+_MAX_COMPONENTS_PER_SECTION = 3
+_CLAIM_PRIORITY_TYPES = (
+    "equation_relation",
+    "equation_definition",
+    "derivation_step",
+    "assumption",
+    "approximation",
+    "correction",
+    "limitation",
+    "diagnostic_claim",
+    "result",
+)
+_MEANINGFUL_REQUIREMENTS_BY_TYPE: dict[str, list[str]] = {
+    "DomainConceptComponent": ["outputs", "preconditions", "cautions", "internal_flow"],
+    "DomainAssumptionComponent": ["preconditions", "outputs", "cautions"],
+    "DomainMethodComponent": ["inputs", "outputs", "preconditions", "internal_flow"],
+    "DomainTheoryComponent": ["inputs", "outputs", "preconditions", "dependencies", "internal_flow"],
+    "PaperRelationComponent": ["inputs", "outputs", "internal_flow"],
+    "PaperCorrectionComponent": ["inputs", "outputs", "cautions"],
+    "PaperDiagnosticComponent": ["inputs", "outputs", "cautions"],
+}
 
 
 def _dump_model(value: Any) -> dict:
@@ -2213,14 +2235,16 @@ def _normalize_component_candidate(
             support = str(item.get("support_status") or "source_backed")
             if support not in _SUPPORT_STATUS_VALUES:
                 raise ValueError(f"invalid support_status: {support}")
+            # description is optional — empty string is accepted (#198)
+            description = str(item.get("description") or "")
             if field in ("preconditions", "cautions"):
-                normalized.append(_condition_item(name_value, support, item_claims or evidence_claims[:1], str(item.get("description") or "")))
+                normalized.append(_condition_item(name_value, support, item_claims or evidence_claims[:1], description))
             else:
                 normalized.append(_claim_item(
                     name_value,
                     support,
                     item_claims or evidence_claims[:1],
-                    str(item.get("description") or ""),
+                    description,
                     str(item.get("concept_type") or item.get("type") or "Concept"),
                 ))
         return normalized
@@ -2230,11 +2254,30 @@ def _normalize_component_candidate(
     preconditions = normalize_items("preconditions")
     cautions = normalize_items("cautions")
     dependencies = normalize_items("dependencies")
-    if not any((inputs, outputs, preconditions, cautions, dependencies)):
-        raise ValueError("component has no meaningful inputs, outputs, preconditions, cautions, or dependencies")
+    internal_flow = _normalize_internal_flow(raw.get("internal_flow"))
+
     component_type = str(raw.get("component_type") or "").strip()
     if not component_type:
         raise ValueError("component missing required fields: component_type")
+
+    # Type-specific meaningful field check (#197)
+    required_any = _MEANINGFUL_REQUIREMENTS_BY_TYPE.get(
+        component_type,
+        ["inputs", "outputs", "preconditions", "cautions", "dependencies"],
+    )
+    field_values: dict[str, list] = {
+        "inputs": inputs,
+        "outputs": outputs,
+        "preconditions": preconditions,
+        "cautions": cautions,
+        "dependencies": dependencies,
+        "internal_flow": internal_flow,
+    }
+    if not any(field_values.get(f) for f in required_any):
+        raise ValueError(
+            f"component type {component_type!r} has none of the required fields: {required_any!r}"
+        )
+
     maturity_level = str(raw.get("maturity_level") or "").strip()
     if not maturity_level:
         raise ValueError("component missing required fields: maturity_level")
@@ -2260,7 +2303,7 @@ def _normalize_component_candidate(
         "constraints": [],
         "invalid_conditions": cautions,
         "dependencies": dependencies,
-        "internal_flow": _normalize_internal_flow(raw.get("internal_flow")),
+        "internal_flow": internal_flow,
         "connectors": raw.get("connectors") if isinstance(raw.get("connectors"), dict) else {
             "requires_before_use": [], "can_accept": [], "can_output_to": [], "may_conflict_with": [],
         },
@@ -2273,17 +2316,38 @@ def _normalize_component_candidate(
     }
 
 
+def _rank_claims_for_component_assembly(claims: list[ClaimOut]) -> list[ClaimOut]:
+    priority_index = {t: i for i, t in enumerate(_CLAIM_PRIORITY_TYPES)}
+    default_priority = len(_CLAIM_PRIORITY_TYPES)
+    return sorted(claims, key=lambda c: priority_index.get(c.claim_type, default_priority))
+
+
 def _semantic_components_with_llm(document_id: str, section_id: str, section_chunks: list[dict], claims: list[ClaimOut]) -> list[dict]:
     cartridge = load_cartridge()
     params = get_llm_params("fast")
     max_retries, backoff = _llm_retry_policy()
+    # Rank and cap claims to prevent oversized LLM input
+    ranked_claims = _rank_claims_for_component_assembly(claims)
+    if len(ranked_claims) > _MAX_COMPONENT_ASSEMBLY_CLAIMS:
+        logger.info(
+            "Component assembly: truncating claims from %s to %s for section=%s document=%s",
+            len(ranked_claims),
+            _MAX_COMPONENT_ASSEMBLY_CLAIMS,
+            section_id,
+            document_id,
+        )
+        ranked_claims = ranked_claims[:_MAX_COMPONENT_ASSEMBLY_CLAIMS]
     claim_lines = "\n".join(
         f"- {claim.claim_id} [{claim.claim_type}] {claim.normalized_text or claim.text}"
-        for claim in claims
+        for claim in ranked_claims
     )
     section_title = _section_title_for_chunk(section_chunks[0]) if section_chunks else ""
     prompt = f"""Claim群から意味のある理論Component候補を組み立てる。
 1節から必ず1つのComponentを作る必要はない。0個、1個、複数個のいずれでもよい。
+Return at most {_MAX_COMPONENTS_PER_SECTION} components for this section.
+Prefer fewer, high-quality reusable components.
+Do not create broad textbook-level overview components unless the section itself is an overview.
+Every component must be grounded in the provided section claims.
 Component名は内容に基づいて付ける。"Component for page N" や "Component for section" は禁止。
 内容ベースで名前を付けられない場合は components=[] を返す。
 Claimにない情報を補完する場合は support_status を domain_inferred または design_inferred にする。
@@ -2349,15 +2413,33 @@ JSONのみ:
                     json.dumps(debug, ensure_ascii=False),
                 )
                 raise ValueError("components must be an array")
+            raw_components = parsed["components"]
+            if len(raw_components) > _MAX_COMPONENTS_PER_SECTION:
+                logger.warning(
+                    "Component LLM returned too many components: section=%s count=%s max=%s — truncating",
+                    section_id,
+                    len(raw_components),
+                    _MAX_COMPONENTS_PER_SECTION,
+                )
+                raw_components = raw_components[:_MAX_COMPONENTS_PER_SECTION]
             payloads = []
-            for item in parsed["components"]:
-                payload = _normalize_component_candidate(item, document_id, section_id, section_chunks, claims, strict=True)
+            for item in raw_components:
+                payload = _normalize_component_candidate(item, document_id, section_id, section_chunks, ranked_claims, strict=True)
                 if payload:
                     payloads.append(payload)
             return payloads
         except Exception as exc:
             last_error = str(exc)
-            logger.warning("Component LLM attempt %s/%s failed for section %s: %s", attempt, max_retries, section_id, exc)
+            logger.warning(
+                "Component LLM attempt %s/%s failed: section=%s document=%s exc_type=%s error=%s input_claims=%s",
+                attempt,
+                max_retries,
+                section_id,
+                document_id,
+                type(exc).__name__,
+                exc,
+                len(ranked_claims),
+            )
             if attempt < max_retries and backoff:
                 time.sleep(backoff * attempt)
     raise LLMStructuredOutputError(
@@ -2420,6 +2502,18 @@ def _assemble_section(
                 claims.append(_insert_claim(document_id, chunk["id"], payload, user_id or ""))
     if not claims:
         return []
+    # Defensive filter: pass only claims that belong to this section
+    section_claims = [c for c in claims if c.source_scope.section_id == section_id]
+    external_count = len(claims) - len(section_claims)
+    if external_count > 0:
+        logger.warning(
+            "Component assembly: %s out-of-section claims excluded section=%s document=%s",
+            external_count,
+            section_id,
+            document_id,
+        )
+    if section_claims:
+        claims = section_claims
     section_title = _section_title_for_chunk(section_chunks[0]) if section_chunks else ""
     pages = sorted({c.get("page") for c in section_chunks if c.get("page") is not None})
     claim_section_dist = Counter(
@@ -2464,19 +2558,44 @@ def _run_component_assembly(course_id: str, course_data: dict, user_id: str | No
             "course_id": course_id, "total_sections": total, "generated": 0,
             "skipped": 0, "progress": 0, "stage": "components", "force": force,
         })
+    section_errors: list[dict] = []
     for idx, ((document_id, section_id), chunks) in enumerate(grouped.items()):
-        components = _assemble_section(course_id, document_id, section_id, chunks, user_id, force=force)
-        if components:
-            generated += len(components)
-        else:
+        try:
+            components = _assemble_section(course_id, document_id, section_id, chunks, user_id, force=force)
+            if components:
+                generated += len(components)
+            else:
+                skipped += 1
+        except Exception as exc:
+            logger.warning(
+                "Component assembly failed for section=%s document=%s course=%s: %s",
+                section_id,
+                document_id,
+                course_id,
+                exc,
+                exc_info=True,
+            )
             skipped += 1
+            section_errors.append({
+                "section_id": section_id,
+                "document_id": document_id,
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            })
         if task_id:
             update_background_task(task_id, "processing", result_data={
                 "course_id": course_id, "total_sections": total, "generated": generated,
                 "skipped": skipped, "progress": int((idx + 1) * 100 / total) if total else 100,
                 "stage": "components", "force": force,
             })
-    return {"total_sections": total, "generated": generated, "skipped": skipped, "progress": 100, "force": force}
+    return {
+        "total_sections": total,
+        "generated": generated,
+        "skipped": skipped,
+        "progress": 100,
+        "force": force,
+        "section_errors": section_errors,
+    }
 
 
 def _run_graph_update(course_id: str, course_data: dict, user_id: str | None, task_id: str | None = None) -> dict:
