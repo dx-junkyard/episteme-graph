@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import Counter
 from pathlib import Path
 import re
 import threading
@@ -2419,6 +2420,30 @@ def _assemble_section(
                 claims.append(_insert_claim(document_id, chunk["id"], payload, user_id or ""))
     if not claims:
         return []
+    section_title = _section_title_for_chunk(section_chunks[0]) if section_chunks else ""
+    pages = sorted({c.get("page") for c in section_chunks if c.get("page") is not None})
+    claim_section_dist = Counter(
+        (claim.get("source_scope") or {}).get("section_id")
+        for claim in claims
+    ).most_common(10)
+    total_chars = sum(len(c.get("text") or "") for c in section_chunks)
+    logger.info(
+        "Component assembly input: course=%s document=%s section=%s title=%r"
+        " chunks=%s claims=%s pages=%s"
+        " chunk_ids=%s claim_ids=%s"
+        " claim_sections=%s chars=%s",
+        course_id,
+        document_id,
+        section_id,
+        section_title,
+        len(section_chunks),
+        len(claims),
+        pages,
+        [c.get("id") for c in section_chunks[:5]],
+        [claim.get("id") for claim in claims[:5]],
+        claim_section_dist,
+        total_chars,
+    )
     candidates = _semantic_components_with_llm(document_id, section_id, section_chunks, claims)
     saved: list[TheoryComponentOut] = []
     for candidate in candidates:
