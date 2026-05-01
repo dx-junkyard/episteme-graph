@@ -2831,6 +2831,7 @@
   }
 
   function lsSectionIdForChunk(chunk) {
+    if (chunk && chunk.section_id) return chunk.section_id;
     var docId = (chunk && (chunk.document_id || chunk.material_id)) || "document";
     if (chunk && chunk.page_start) return docId + ":page_" + chunk.page_start;
     var idx = chunk && chunk.chunk_index ? Number(chunk.chunk_index) : 0;
@@ -2846,7 +2847,9 @@
       if (!docs[docId].sections[sid]) {
         docs[docId].sections[sid] = {
           id: sid,
-          label: chunk.page_start ? "p." + chunk.page_start : "section " + (Object.keys(docs[docId].sections).length + 1),
+          label: chunk.section_title || (chunk.page_start ? "p." + chunk.page_start : "section " + (Object.keys(docs[docId].sections).length + 1)),
+          level: chunk.section_level || 0,
+          order: chunk.section_order || Object.keys(docs[docId].sections).length + 1,
           chunks: [],
         };
       }
@@ -3303,7 +3306,8 @@
     var source = (scope.page_start || (scope.pages && scope.pages[0])) ? "p." + (scope.page_start || scope.pages[0]) : (scope.chunk_id || "");
     var review = claim.review_status === "teacher_approved" ? "承認済み" : claim.review_status || "teacher_review_required";
     var concepts = (claim.concepts || []).map(function (concept) {
-      return '<span class="ls-theory-ref">' + escHtml(concept.name || "") + ': ' + escHtml(concept.concept_type || "Concept") + '</span>';
+      var normalized = concept.normalized ? ' → ' + concept.normalized : "";
+      return '<span class="ls-theory-ref">' + escHtml(concept.raw || concept.name || "") + normalized + ': ' + escHtml(concept.concept_type || "Concept") + '</span>';
     }).join(" ");
     var scopeText = [
       scope.level || "",
@@ -3319,6 +3323,7 @@
         '<div class="ls-theory-summary">' + escHtml(claim.text || "") + '</div>' +
         (claim.normalized_text && claim.normalized_text !== claim.text ? '<div class="ls-theory-section"><b>normalized</b><div class="ls-theory-muted">' + escHtml(claim.normalized_text) + '</div></div>' : '') +
         '<div class="ls-theory-section"><b>concepts</b><div>' + (concepts || '<span class="ls-theory-source-warn">未抽出</span>') + '</div></div>' +
+        (claim.equation && Object.keys(claim.equation).length ? '<div class="ls-theory-section"><b>equation</b><div class="ls-theory-muted">' + escHtml((claim.equation.label || claim.equation.equation_id || "") + " " + (claim.equation.latex || "")) + '</div></div>' : '') +
         '<div class="ls-theory-section"><b>support</b> ' + escHtml(claim.support_status || "source_backed") + '</div>' +
         '<div class="ls-theory-section"><b>source_scope</b> <span class="ls-theory-ref">' + escHtml(scopeText) + '</span></div>' +
         '<div class="ls-theory-section"><b>evidence</b><div class="ls-theory-muted">' + escHtml(claim.evidence_text || "") + '</div></div>' +
@@ -3376,7 +3381,13 @@
       body: "{}",
     })
       .then(function (res) {
-        if (!res.ok) throw new Error("Claim抽出に失敗しました");
+        if (!res.ok) {
+          return res.json().then(function (body) {
+            throw new Error(lsApiErrorMessage(body, "Claim抽出に失敗しました"));
+          }, function () {
+            throw new Error("Claim抽出に失敗しました");
+          });
+        }
         return res.json();
       })
       .then(function (data) {
@@ -3438,6 +3449,9 @@
     var warning = c.validation_warnings && c.validation_warnings.length ? " ⚠" : "";
     var level = c.blackbox_policy && c.blackbox_policy.default_level ? c.blackbox_policy.default_level : "summary";
     var evidence = (c.evidence_claims || []).map(function (id) { return '<span class="ls-theory-ref">' + escHtml(id) + '</span>'; }).join(" ");
+    var duplicates = (c.duplicate_candidates || []).map(function (d) {
+      return '<li>' + escHtml(d.possible_duplicate_of || "") + ' <span class="ls-theory-badge">score ' + escHtml(String(d.score || "")) + '</span><div class="ls-theory-muted">' + escHtml((d.reasons || []).join(" / ")) + '</div></li>';
+    }).join("");
     var flow = (c.internal_flow || []).map(function (f) {
       return '<li>' + escHtml((f.from || "") + " → " + (f.to || "")) + '</li>';
     }).join("");
@@ -3445,7 +3459,7 @@
     return '' +
       '<div class="ls-theory-card" data-component-id="' + escHtml(c.id) + '">' +
         '<div class="ls-theory-card-head">' +
-          '<div><strong>' + escHtml(c.name || "無題の理論") + '</strong><div class="ls-theory-type">type: ' + escHtml(c.component_type || "theory") + '</div></div>' +
+          '<div><strong>' + escHtml(c.name || "無題の理論") + '</strong><div class="ls-theory-type">type: ' + escHtml(c.component_type || "theory") + ' / origin: ' + escHtml(c.origin || "paper") + '</div></div>' +
           '<span class="ls-theory-badge">' + escHtml(statusLabel) + warning + '</span>' +
         '</div>' +
         '<div class="ls-theory-summary">' + escHtml(c.summary || "") + '</div>' +
@@ -3457,6 +3471,7 @@
         '<div class="ls-theory-section"><b>注意条件</b>' + lsTheoryItemsHtml(c.cautions || c.invalid_conditions) + '</div>' +
         '<div class="ls-theory-section"><b>internal_flow</b>' + (flow ? '<ul class="ls-theory-items">' + flow + '</ul>' : '<div class="ls-theory-muted">未設定</div>') + '</div>' +
         '<div class="ls-theory-section"><b>evidence_claims</b><div>' + (evidence || '<span class="ls-theory-source-warn">未設定</span>') + '</div></div>' +
+        '<div class="ls-theory-section"><b>duplicate candidates</b>' + (duplicates ? '<ul class="ls-theory-items">' + duplicates + '</ul>' : '<div class="ls-theory-muted">候補なし</div>') + '</div>' +
         '<div class="ls-theory-section"><b>出典</b><div>' + lsTheorySourceHtml(c) + '</div></div>' +
         '<div class="ls-theory-section"><b>表示</b> ' + escHtml(level) + '</div>' +
         '<div class="ls-theory-actions">' +
@@ -3572,7 +3587,13 @@
       body: JSON.stringify({ force: true }),
     })
       .then(function (res) {
-        if (!res.ok) throw new Error("節コンポーネントの組み立てに失敗しました");
+        if (!res.ok) {
+          return res.json().then(function (body) {
+            throw new Error(lsApiErrorMessage(body, "節コンポーネントの組み立てに失敗しました"));
+          }, function () {
+            throw new Error("節コンポーネントの組み立てに失敗しました");
+          });
+        }
         return res.json();
       })
       .then(function (data) {
@@ -3606,15 +3627,37 @@
       return;
     }
     var nodes = graph.nodes || [];
+    var edges = graph.edges || [];
     var validations = graph.validation_results || [];
     var html = '<div class="ls-theory-current">Paper-level Component Graph</div>';
     if (!nodes.length) {
       html += '<div class="ls-empty-state">Componentがまだありません。節ビューでComponentを組み立ててください。</div>';
     } else {
+      var nodeById = {};
+      nodes.forEach(function (node) { nodeById[node.component_id] = node; });
       html += '<div class="ls-graph-flow">';
-      nodes.forEach(function (node, idx) {
-        html += '<div class="ls-graph-node">' + escHtml(node.label || node.component_id) + '</div>';
-        if (idx < nodes.length - 1) html += '<div class="ls-graph-arrow">↓</div>';
+      if (!edges.length) {
+        nodes.forEach(function (node) {
+          html += '<div class="ls-graph-node">' + escHtml(node.label || node.component_id) + '<div class="ls-theory-muted">' + escHtml(node.origin || "paper") + ' / ' + escHtml(node.component_type || "") + '</div></div>';
+        });
+      }
+      edges.forEach(function (edge) {
+        var source = nodeById[edge.source_component_id] || {};
+        var target = nodeById[edge.target_component_id] || {};
+        var evidence = edge.evidence || {};
+        html += '<details class="ls-graph-edge">' +
+          '<summary>' +
+            '<span class="ls-graph-node-inline">' + escHtml(source.label || edge.source_component_id || "") + '</span>' +
+            '<span class="ls-graph-edge-label"> -- ' + escHtml(edge.relation || "RELATED_TO") + ' / ' + escHtml(edge.edge_type || "") + ' → </span>' +
+            '<span class="ls-graph-node-inline">' + escHtml(target.label || edge.target_component_id || "") + '</span>' +
+          '</summary>' +
+          '<div class="ls-theory-muted">' + escHtml(source.origin || "paper") + ' → ' + escHtml(target.origin || "paper") + '</div>' +
+          '<div class="ls-theory-muted">support_status: ' + escHtml(edge.support_status || "") + ' / review_status: ' + escHtml(edge.review_status || "") + ' / confidence: ' + escHtml(String(edge.confidence || "")) + '</div>' +
+          '<ul class="ls-theory-items">';
+        Object.keys(evidence).forEach(function (key) {
+          html += '<li><b>' + escHtml(key) + '</b>: ' + escHtml(Array.isArray(evidence[key]) ? evidence[key].join(", ") : String(evidence[key] || "")) + '</li>';
+        });
+        html += '</ul></details>';
       });
       html += '</div>';
     }
@@ -4124,6 +4167,19 @@
     el.style.display = "none";
   }
 
+  function lsApiErrorMessage(body, fallback) {
+    var detail = body && body.detail;
+    if (!detail) return fallback;
+    if (typeof detail === "string") return detail;
+    if (detail.code === "claim_extraction_failed") {
+      return "Claim抽出に失敗しました。LLM応答が有効なClaim JSONとして解釈できませんでした。再実行してください。";
+    }
+    if (detail.code === "component_assembly_failed") {
+      return "Component組み立てに失敗しました。意味のあるComponent候補を生成できなかったため、保存しませんでした。";
+    }
+    return detail.message || fallback;
+  }
+
   function lsSetCourseTaskBusy(isBusy) {
     lsState.generating = isBusy;
     document.getElementById("ls-reanalyze-structure-btn").disabled = isBusy || !lsState.courseId || !lsState.chunks.length;
@@ -4202,10 +4258,13 @@
           var progress = rd.progress || 0;
           var generated = rd.generated || 0;
           var skipped = rd.skipped || 0;
+          var failed = rd.failed || 0;
           var total = rd.total_chunks || rd.total_sections || rd.total_documents || 0;
           if (task.status === "completed") {
             clearInterval(timer);
-            lsShowProgress(label + "が完了しました: " + generated + "件処理 / " + skipped + "件スキップ", "success");
+            var doneMessage = label + "が完了しました: " + generated + "件処理 / " + skipped + "件スキップ";
+            if (failed) doneMessage += " / " + failed + "件エラー（該当箇所はスキップ）";
+            lsShowProgress(doneMessage, failed ? "warning" : "success");
             lsSetCourseTaskBusy(false);
             lsLoadScripts(lsState.courseId);
           } else if (task.status === "failed") {
@@ -4213,7 +4272,9 @@
             lsShowProgress(label + "に失敗しました: " + (task.error_message || "不明なエラー"), "error");
             lsSetCourseTaskBusy(false);
           } else {
-            lsShowProgress(label + "中... (" + generated + " / " + total + " — " + progress + "%)", "info");
+            var progressMessage = label + "中... (" + generated + " / " + total + " — " + progress + "%)";
+            if (failed) progressMessage += " / エラー " + failed + "件はスキップ";
+            lsShowProgress(progressMessage, "info");
           }
         })
         .catch(function () {

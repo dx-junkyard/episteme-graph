@@ -11,6 +11,8 @@ ROUTES = ROOT / "backend" / "api" / "routes" / "theory_components.py"
 MIGRATION = ROOT / "backend" / "db" / "013_theory_components.sql"
 ADMIN_HTML = ROOT / "frontend" / "public" / "admin.html"
 ADMIN_JS = ROOT / "frontend" / "public" / "js" / "admin.js"
+DOCUMENT_SECTIONS = ROOT / "backend" / "core" / "document_sections.py"
+CONCEPT_NORMALIZER = ROOT / "backend" / "core" / "concept_normalizer.py"
 
 
 def _read(path: Path) -> str:
@@ -117,5 +119,133 @@ def test_issue_181_no_page_component_name_fallback():
     source = _read(ROUTES)
     assert 'f"Component for {section_id' not in source
     candidate_source = source[source.index("def _normalize_component_candidate"):source.index("def _semantic_components_with_llm")]
-    assert "component for (page|section|chunk_group)" in candidate_source
-    assert "return None" in candidate_source
+    assert "_PROHIBITED_COMPONENT_NAME_RE" in source
+    assert "component for (page|section|chunk_group)" in source
+    assert "raise ValueError" in candidate_source
+
+
+def test_issue_184_llm_retry_and_no_low_quality_fallback_in_normal_path():
+    source = _read(ROUTES)
+    config = _read(ROOT / "backend" / "core" / "config.py")
+    assert "llm_max_retries" in config
+    assert "llm_retry_backoff_seconds" in config
+    assert "LLMStructuredOutputError" in source
+    assert "claim_extraction_failed" in source
+    assert "component_assembly_failed" in source
+    claim_path = source[source.index("def _extract_claim_candidates"):source.index("def _insert_claim")]
+    assert "_fallback_semantic_claims" not in claim_path
+    assemble_path = source[source.index("def _assemble_section"):source.index("def _run_component_assembly")]
+    assert "_fallback_component_candidates" not in assemble_path
+
+
+def test_claim_llm_metadata_is_server_enriched_not_retry_blocking():
+    source = _read(ROUTES)
+    normalize_source = source[source.index("def _normalize_claim_payload"):source.index("def _fallback_concepts")]
+    assert 'required = ("claim_type", "text", "support_status", "evidence_text")' in normalize_source
+    assert 'review_status = str(raw.get("review_status") or "teacher_review_required").strip()' in normalize_source
+    assert "scope = _source_scope_for_chunk(chunk, \"chunk\")" in normalize_source
+    assert "claim missing required fields: source_scope" not in normalize_source
+
+
+def test_claim_all_extraction_skips_failed_chunks_and_keeps_progress():
+    source = _read(ROUTES)
+    run_source = source[source.index("def _run_claim_extraction"):source.index("def _claim_item")]
+    assert "existing += 1" in run_source
+    assert "except LLMStructuredOutputError as exc" in run_source
+    assert "Skipping claim extraction for chunk" in run_source
+    assert '"failed_chunks": failed_chunks[-50:]' in run_source
+    assert '"failed": failed' in run_source
+    js = _read(ADMIN_JS)
+    assert "件エラー（該当箇所はスキップ）" in js
+
+
+def test_llm_response_shape_debug_logging_exists():
+    source = _read(ROUTES)
+    assert "def _llm_response_debug" in source
+    assert "raw_preview" in source
+    assert "parsed_keys" in source
+    assert "claims_type" in source
+    assert "Claim LLM response did not contain claims array" in source
+    assert "doc=%s, section=%s, page=%s, chars=%s" in source
+
+
+def test_claim_extraction_uses_structured_json_output():
+    source = _read(ROUTES)
+    claim_source = source[source.index("def _semantic_claims_with_llm"):source.index("def _fallback_semantic_claims")]
+    assert "generate_text_with_structured_output" in claim_source
+    assert "_LLMClaimExtractionResult" in claim_source
+    assert "generate_text(" not in claim_source
+
+
+def test_issue_184_meaningful_graph_edges_replace_sequential_supports():
+    source = _read(ROUTES)
+    schemas = _read(SCHEMAS)
+    js = _read(ADMIN_JS)
+    graph_source = source[source.index("def _build_component_graph_payload"):source.index("def _save_component_graph")]
+    assert '"relation": "SUPPORTS"' not in graph_source
+    assert "input_output_match" in graph_source
+    assert "dependency_match" in graph_source
+    assert "uncertainty_affects_prediction" in graph_source
+    assert "diagnostic_uses_output" in graph_source
+    assert "isolated_component" in graph_source
+    assert "edge_type: str" in schemas
+    assert "confidence: float" in schemas
+    assert "evidence: dict" in schemas
+    assert "ls-graph-edge" in js
+    assert "support_status:" in js
+
+
+def test_issue_184_ui_displays_llm_failure_messages():
+    js = _read(ADMIN_JS)
+    assert "lsApiErrorMessage" in js
+    assert "LLM応答が有効なClaim JSONとして解釈できませんでした" in js
+    assert "意味のあるComponent候補を生成できなかったため、保存しませんでした" in js
+
+
+def test_issue_185_section_reconstruction_and_ui_section_metadata():
+    routes = _read(ROUTES)
+    lecture = _read(ROOT / "backend" / "api" / "routes" / "lecture_studio.py")
+    schemas = _read(SCHEMAS)
+    js = _read(ADMIN_JS)
+    section_source = _read(DOCUMENT_SECTIONS)
+    assert "def enrich_chunks_with_sections" in section_source
+    assert "Appendix" in section_source
+    assert '"/documents/{document_id}/structure"' in routes
+    assert "build_document_structure" in routes
+    assert "enrich_chunks_with_sections(chunks)" in lecture
+    assert "section_id: str" in schemas
+    assert "section_level: int" in schemas
+    assert "chunk.section_title" in js
+    assert "chunk.section_id" in js
+
+
+def test_issue_185_equation_claim_and_concept_normalizer():
+    routes = _read(ROUTES)
+    schemas = _read(SCHEMAS)
+    migration = _read(MIGRATION)
+    normalizer = _read(CONCEPT_NORMALIZER)
+    assert "equation_relation" in routes
+    assert "equation_transformation" in routes
+    assert "def _equation_payload_from_claim" in routes
+    assert "equation: dict" in schemas
+    assert "ALTER TABLE theory_claims ADD COLUMN IF NOT EXISTS equation" in migration
+    assert "def normalize_concept" in normalizer
+    assert "ontology_alias" in normalizer
+    assert "R_{\\\\Lambda_c}" in normalizer or "lambda" in normalizer
+
+
+def test_issue_185_domain_edges_duplicates_and_review_propagation():
+    routes = _read(ROUTES)
+    schemas = _read(SCHEMAS)
+    migration = _read(MIGRATION)
+    js = _read(ADMIN_JS)
+    assert "def _domain_components_from_cartridge" in routes
+    assert "domain_prerequisite_match" in routes
+    assert "support_status\": \"domain_inferred\"" in routes
+    assert "def _duplicate_candidates_for_component" in routes
+    assert "duplicate_candidates" in schemas
+    assert "duplicate candidates" in js
+    assert "theory_review_events" in migration
+    assert "def _propagate_rejected_claim" in routes
+    assert "def _propagate_rejected_component" in routes
+    assert "needs_revision" in routes
