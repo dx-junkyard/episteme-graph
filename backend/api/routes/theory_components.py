@@ -1310,7 +1310,7 @@ def _raw_component_to_request(raw: dict, chunk: dict) -> TheoryComponentUpsertRe
         "invalid_conditions": _raw_items_with_chunk_refs(raw.get("invalid_conditions"), chunk),
         "dependencies": _raw_items_with_chunk_refs(raw.get("dependencies"), chunk),
         "connectors": raw.get("connectors") if isinstance(raw.get("connectors"), dict) else {},
-        "internal_flow": raw.get("internal_flow") if isinstance(raw.get("internal_flow"), list) else [],
+        "internal_flow": _normalize_internal_flow(raw.get("internal_flow")),
         "blackbox_policy": raw.get("blackbox_policy") or {"default_level": "summary", "expand_if_unlearned": True},
     })
 
@@ -2101,6 +2101,28 @@ def _condition_item(name: str, support_status: str, evidence_claims: list[str], 
     }
 
 
+def _normalize_internal_flow(value: Any) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict] = []
+    for item in value:
+        if isinstance(item, dict):
+            step = {
+                "from": str(item.get("from") or item.get("source") or ""),
+                "to": str(item.get("to") or item.get("target") or ""),
+            }
+            description = str(item.get("description") or item.get("step") or "").strip()
+            if description:
+                step["description"] = description
+            if step["from"] or step["to"] or step.get("description"):
+                normalized.append(step)
+        elif isinstance(item, str):
+            text = item.strip()
+            if text:
+                normalized.append({"from": "", "to": "", "description": text})
+    return normalized
+
+
 def _normalize_component_candidate(
     raw: dict,
     document_id: str,
@@ -2194,7 +2216,7 @@ def _normalize_component_candidate(
         "constraints": [],
         "invalid_conditions": cautions,
         "dependencies": dependencies,
-        "internal_flow": raw.get("internal_flow") if isinstance(raw.get("internal_flow"), list) else [],
+        "internal_flow": _normalize_internal_flow(raw.get("internal_flow")),
         "connectors": raw.get("connectors") if isinstance(raw.get("connectors"), dict) else {
             "requires_before_use": [], "can_accept": [], "can_output_to": [], "may_conflict_with": [],
         },
