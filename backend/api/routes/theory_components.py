@@ -88,6 +88,50 @@ class _LLMClaimExtractionResult(BaseModel):
     claims: list[_LLMClaimItem] = Field(default_factory=list)
 
 
+class _LLMComponentItemRef(BaseModel):
+    name: str = ""
+    concept_type: str = "Concept"
+    support_status: str = "source_backed"
+    evidence_claims: list[str] = Field(default_factory=list)
+    description: str = ""
+
+
+class _LLMComponentConditionRef(BaseModel):
+    name: str = ""
+    support_status: str = "source_backed"
+    evidence_claims: list[str] = Field(default_factory=list)
+    description: str = ""
+
+
+class _LLMComponentConnectors(BaseModel):
+    requires_before_use: list[str] = Field(default_factory=list)
+    can_accept: list[str] = Field(default_factory=list)
+    can_output_to: list[str] = Field(default_factory=list)
+    may_conflict_with: list[str] = Field(default_factory=list)
+
+
+class _LLMComponentItem(BaseModel):
+    name: str = ""
+    component_type: str = ""
+    summary: str = ""
+    maturity_level: str = ""
+    maturity_source: str = "llm_proposed"
+    review_status: str = "teacher_review_required"
+    evidence_claims: list[str] = Field(default_factory=list)
+    inputs: list[_LLMComponentItemRef] = Field(default_factory=list)
+    outputs: list[_LLMComponentItemRef] = Field(default_factory=list)
+    preconditions: list[_LLMComponentConditionRef] = Field(default_factory=list)
+    cautions: list[_LLMComponentConditionRef] = Field(default_factory=list)
+    dependencies: list[_LLMComponentItemRef] = Field(default_factory=list)
+    internal_flow: list[str] = Field(default_factory=list)
+    connectors: _LLMComponentConnectors | None = None
+    io_summary: str = ""
+
+
+class _LLMComponentAssembleResult(BaseModel):
+    components: list[_LLMComponentItem] = Field(default_factory=list)
+
+
 _JSON_FIELDS = (
     "source_scope",
     "evidence_claims",
@@ -2217,18 +2261,15 @@ JSONのみ:
     last_error = "unknown error"
     for attempt in range(1, max_retries + 1):
         try:
-            raw = generate_text(
+            result = generate_text_with_structured_output(
                 [{"role": "system", "content": "You assemble source-grounded theory components as strict JSON."},
                  {"role": "user", "content": prompt}],
+                _LLMComponentAssembleResult,
                 model=params.get("model"),
-                reasoning_effort=params.get("reasoning_effort"),
-                max_tokens=2200,
             )
-            if not raw or not raw.strip():
-                raise ValueError("empty LLM response")
-            parsed = _parse_json_object(raw)
-            debug = _llm_response_debug(raw, parsed)
-            if not parsed or "components" not in parsed:
+            parsed = result.model_dump()
+            debug = _llm_response_debug(json.dumps(parsed, ensure_ascii=False), parsed)
+            if "components" not in parsed:
                 logger.warning(
                     "Component LLM response did not contain components array for section %s: %s",
                     section_id,
