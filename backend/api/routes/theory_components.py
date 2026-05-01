@@ -702,6 +702,40 @@ def _redact_for_log(value: str, limit: int = 700) -> str:
     return text[:limit] + ("..." if len(text) > limit else "")
 
 
+def _strip_nul(value: Any) -> Any:
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, list):
+        return [_strip_nul(item) for item in value]
+    if isinstance(value, dict):
+        return {str(_strip_nul(key)): _strip_nul(val) for key, val in value.items()}
+    return value
+
+
+def _clean_pg_text(value: Any, default: str = "") -> str:
+    return str(value if value is not None else default).replace("\x00", "")
+
+
+def _json_dumps_pg_safe(value: Any, default: Any) -> str:
+    cleaned = _strip_nul(value if value is not None else default)
+    dumped = json.dumps(cleaned, ensure_ascii=False)
+    return dumped.replace("\\u0000", "")
+
+
+def _contains_nul(value: Any) -> bool:
+    if isinstance(value, str):
+        return "\x00" in value
+    if isinstance(value, list):
+        return any(_contains_nul(item) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_nul(k) or _contains_nul(v) for k, v in value.items())
+    return False
+
+
+def _nul_fields(payload: dict) -> list[str]:
+    return [key for key, value in payload.items() if _contains_nul(value)]
+
+
 def _llm_response_debug(raw: str, parsed: dict | None = None) -> dict[str, Any]:
     parsed = parsed if isinstance(parsed, dict) else {}
     return {
@@ -774,10 +808,10 @@ def _normalize_claim_payload(raw: dict, chunk: dict, strict: bool = True) -> dic
     claim_type = str(raw.get("claim_type") or "").strip()
     if claim_type not in _CLAIM_TYPES:
         raise ValueError(f"invalid claim_type: {claim_type}")
-    text = str(raw.get("text") or raw.get("normalized_text") or "").strip()
+    text = _clean_pg_text(raw.get("text") or raw.get("normalized_text") or "").strip()
     if _is_low_value_claim_text(text):
         return None
-    evidence = str(raw.get("evidence_text") or "").strip()
+    evidence = _clean_pg_text(raw.get("evidence_text") or "").strip()
     if not evidence and not strict:
         evidence = text[:360]
     support_status = str(raw.get("support_status") or "").strip()
@@ -791,7 +825,7 @@ def _normalize_claim_payload(raw: dict, chunk: dict, strict: bool = True) -> dic
     for concept in concepts[:8]:
         if not isinstance(concept, dict):
             continue
-        name = str(concept.get("name") or "").strip()
+        name = _clean_pg_text(concept.get("name") or "").strip()
         if not name:
             continue
         normalized_concepts.append({
@@ -807,17 +841,17 @@ def _normalize_claim_payload(raw: dict, chunk: dict, strict: bool = True) -> dic
     scope = _source_scope_for_chunk(chunk, "chunk")
     if isinstance(raw.get("source_scope"), dict):
         scope.update({k: v for k, v in raw["source_scope"].items() if v not in (None, "", [])})
-    return {
+    return _strip_nul({
         "claim_type": claim_type,
         "text": text[:1200],
-        "normalized_text": str(raw.get("normalized_text") or text).strip()[:1200],
+        "normalized_text": _clean_pg_text(raw.get("normalized_text") or text).strip()[:1200],
         "concepts": normalized_concepts,
         "equation": equation,
         "support_status": support_status,
         "evidence_text": evidence[:500],
         "review_status": review_status or "teacher_review_required",
         "source_scope": scope,
-    }
+    })
 
 
 def _fallback_concepts(text: str) -> list[dict]:
@@ -1003,8 +1037,30 @@ def _extract_claim_candidates(chunk: dict) -> list[dict]:
 def _insert_claim(document_id: str, chunk_id: str, payload: dict, user_id: str) -> ClaimOut:
     if payload.get("claim_type") not in _CLAIM_TYPES:
         raise HTTPException(status_code=422, detail="Invalid claim_type")
+    nul_fields = _nul_fields(payload)
+    if nul_fields:
+        logger.warning(
+            "NUL characters detected in claim payload before insert: fields=%s document_id=%s chunk_id=%s",
+            nul_fields,
+            _clean_pg_text(document_id),
+            chunk_id,
+        )
     session = _pg_session()
     try:
+        params = {
+            "document_id": _clean_pg_text(document_id),
+            "chunk_id": chunk_id,
+            "source_scope": _json_dumps_pg_safe(payload.get("source_scope"), {}),
+            "claim_type": _clean_pg_text(payload.get("claim_type") or "diagnostic_claim"),
+            "text": _clean_pg_text(payload.get("text")),
+            "normalized_text": _clean_pg_text(payload.get("normalized_text") or payload.get("text")),
+            "concepts": _json_dumps_pg_safe(payload.get("concepts"), []),
+            "equation": _json_dumps_pg_safe(payload.get("equation"), {}),
+            "support_status": _clean_pg_text(payload.get("support_status") or "source_backed"),
+            "evidence_text": _clean_pg_text(payload.get("evidence_text")),
+            "review_status": _clean_pg_text(payload.get("review_status") or "teacher_review_required"),
+            "created_by": user_id or None,
+        }
         row = session.execute(
             sa_text("""
                 INSERT INTO theory_claims (
@@ -1020,20 +1076,7 @@ def _insert_claim(document_id: str, chunk_id: str, payload: dict, user_id: str) 
                           normalized_text, concepts, equation, support_status, evidence_text,
                           review_status, created_by, created_at, updated_at
             """),
-            {
-                "document_id": document_id,
-                "chunk_id": chunk_id,
-                "source_scope": json.dumps(payload.get("source_scope") or {}, ensure_ascii=False),
-                "claim_type": payload.get("claim_type") or "diagnostic_claim",
-                "text": payload.get("text") or "",
-                "normalized_text": payload.get("normalized_text") or payload.get("text") or "",
-                "concepts": json.dumps(payload.get("concepts") or [], ensure_ascii=False),
-                "equation": json.dumps(payload.get("equation") or {}, ensure_ascii=False),
-                "support_status": payload.get("support_status") or "source_backed",
-                "evidence_text": payload.get("evidence_text") or "",
-                "review_status": payload.get("review_status") or "teacher_review_required",
-                "created_by": user_id or None,
-            },
+            params,
         ).fetchone()
         session.commit()
         return _row_to_claim(row)

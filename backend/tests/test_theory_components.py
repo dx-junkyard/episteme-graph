@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 import types
 from pathlib import Path
@@ -169,3 +170,102 @@ class TestTheoryComponentFrontend:
         assert ".ls-theory-card" in css
         assert ".ls-theory-chip" in css
         assert ".ls-chunk-theory-state" in css
+
+
+class TestNulCharacterSanitization:
+    """Tests for NUL character removal utilities in theory_components route."""
+
+    def _load_helpers(self):
+        source = (ROOT / "backend" / "api" / "routes" / "theory_components.py").read_text(encoding="utf-8")
+        # exec only the utility functions, not the full module (avoids import of FastAPI deps)
+        ns: dict = {"__builtins__": __builtins__, "json": json}
+        # Extract and exec the four helpers via exec of isolated blocks
+        import re as _re
+        for name in ("_strip_nul", "_clean_pg_text", "_json_dumps_pg_safe", "_contains_nul", "_nul_fields"):
+            pattern = rf"(^def {name}\(.*?)(?=^def |\Z)"
+            match = _re.search(pattern, source, _re.MULTILINE | _re.DOTALL)
+            assert match, f"{name} not found in source"
+            exec(match.group(1), ns)  # noqa: S102
+        return ns
+
+    def test_strip_nul_removes_from_string(self):
+        ns = self._load_helpers()
+        assert ns["_strip_nul"]("hello\x00world") == "helloworld"
+
+    def test_strip_nul_removes_from_nested_list(self):
+        ns = self._load_helpers()
+        result = ns["_strip_nul"]([{"name": "mass\x00"}, {"name": "energy"}])
+        assert result == [{"name": "mass"}, {"name": "energy"}]
+
+    def test_strip_nul_removes_from_nested_dict(self):
+        ns = self._load_helpers()
+        result = ns["_strip_nul"]({"section": "Intro\x00", "page": 1})
+        assert result == {"section": "Intro", "page": 1}
+
+    def test_strip_nul_passthrough_non_string(self):
+        ns = self._load_helpers()
+        assert ns["_strip_nul"](42) == 42
+        assert ns["_strip_nul"](None) is None
+
+    def test_clean_pg_text_removes_nul(self):
+        ns = self._load_helpers()
+        assert ns["_clean_pg_text"]("This is a claim\x00 with nul") == "This is a claim with nul"
+
+    def test_clean_pg_text_handles_none(self):
+        ns = self._load_helpers()
+        assert ns["_clean_pg_text"](None) == ""
+
+    def test_json_dumps_pg_safe_removes_nul_in_string(self):
+        ns = self._load_helpers()
+        result = ns["_json_dumps_pg_safe"]({"latex": "E=mc^2\x00"}, {})
+        parsed = json.loads(result)
+        assert parsed["latex"] == "E=mc^2"
+
+    def test_json_dumps_pg_safe_removes_nul_in_list(self):
+        ns = self._load_helpers()
+        result = ns["_json_dumps_pg_safe"]([{"name": "mass\x00", "role": "variable"}], [])
+        parsed = json.loads(result)
+        assert parsed[0]["name"] == "mass"
+
+    def test_json_dumps_pg_safe_uses_default_on_none(self):
+        ns = self._load_helpers()
+        result = ns["_json_dumps_pg_safe"](None, {})
+        assert json.loads(result) == {}
+
+    def test_contains_nul_detects_in_string(self):
+        ns = self._load_helpers()
+        assert ns["_contains_nul"]("hello\x00") is True
+        assert ns["_contains_nul"]("hello") is False
+
+    def test_contains_nul_detects_in_nested_structures(self):
+        ns = self._load_helpers()
+        assert ns["_contains_nul"]([{"name": "mass\x00"}]) is True
+        assert ns["_contains_nul"]({"section": "clean"}) is False
+
+    def test_nul_fields_returns_affected_field_names(self):
+        ns = self._load_helpers()
+        payload = {
+            "text": "This is a claim\x00 with nul",
+            "normalized_text": "clean",
+            "evidence_text": "Evidence\x00 text",
+            "concepts": [],
+        }
+        fields = ns["_nul_fields"](payload)
+        assert set(fields) == {"text", "evidence_text"}
+
+    def test_nul_fields_empty_when_no_nul(self):
+        ns = self._load_helpers()
+        payload = {"text": "clean", "evidence_text": "also clean", "concepts": []}
+        assert ns["_nul_fields"](payload) == []
+
+    def test_route_source_uses_nul_helpers_in_insert_claim(self):
+        source = _read(ROUTES)
+        assert "_nul_fields(payload)" in source
+        assert "_clean_pg_text(document_id)" in source
+        assert "_json_dumps_pg_safe(payload.get" in source
+
+    def test_route_source_uses_nul_helpers_in_normalize_claim(self):
+        source = _read(ROUTES)
+        assert "_clean_pg_text(raw.get(\"text\")" in source or "_clean_pg_text(raw.get('text')" in source
+        assert "_clean_pg_text(raw.get(\"evidence_text\")" in source or "_clean_pg_text(raw.get('evidence_text')" in source
+        assert "return _strip_nul({" in source
