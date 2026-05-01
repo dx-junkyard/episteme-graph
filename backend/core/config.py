@@ -63,6 +63,14 @@ class Settings(BaseSettings):
         default=3072,
         validation_alias=AliasChoices("LLM_EMBEDDING_DIM"),
     )
+    llm_max_retries: int = Field(
+        default=3,
+        validation_alias=AliasChoices("LLM_MAX_RETRIES", "EPISTEME_LLM_MAX_RETRIES"),
+    )
+    llm_retry_backoff_seconds: float = Field(
+        default=1.5,
+        validation_alias=AliasChoices("LLM_RETRY_BACKOFF_SECONDS", "EPISTEME_LLM_RETRY_BACKOFF_SECONDS"),
+    )
 
     # --- LLM マルチモード設定 ---
     # Fast: 意図分類、フォーマット整形など軽量タスク

@@ -45,6 +45,7 @@ from services import (
     user_can_edit_course,
 )
 from core.lecture import generate_spoken_text_and_formulas, normalize_to_placeholder_format
+from core.document_sections import enrich_chunks_with_sections
 from core.llm import generate_text, get_llm_params
 from core.personas import course_persona_settings, normalize_persona_id, persona_prompt
 from core.postgres import get_session as _pg_session
@@ -200,7 +201,7 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
                 "neo4j_node_id": row[13] or row[15] or "",
                 "graph_elements": graph_elements,
             })
-        return chunks
+        return enrich_chunks_with_sections(chunks)
     finally:
         session.close()
 
@@ -660,6 +661,10 @@ def get_course_scripts(
             document_id=c.get("document_id", ""),
             page_start=c.get("page_start"),
             page_end=c.get("page_end"),
+            section_id=c.get("section_id", ""),
+            section_title=c.get("section_title", ""),
+            section_level=c.get("section_level", 0),
+            section_order=c.get("section_order", 0),
             pdf_url=c.get("pdf_url"),
             smiles_dsl=c.get("smiles_dsl", ""),
             variables=c.get("variables"),

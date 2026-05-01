@@ -258,6 +258,15 @@ def test_load_cartridge_falls_back_when_env_empty(monkeypatch):
     assert cart.cartridge_id == "particle_physics"
 
 
+def test_default_cartridges_root_exists(monkeypatch):
+    """Default root must resolve directly to the source-packaged cartridges directory."""
+    monkeypatch.delenv("EPISTEME_CARTRIDGES_DIR", raising=False)
+    get_settings.cache_clear()
+    clear_cache()
+    root = cartridge_loader._cartridges_root()
+    assert (root / "particle_physics" / "cartridge.json").exists()
+
+
 def test_cartridges_dir_from_settings(tmp_path, monkeypatch):
     """EPISTEME_CARTRIDGES_DIR を Settings 経由で設定できること。"""
     # particle_physics カートリッジを tmp_path にコピーして読み込めることを確認

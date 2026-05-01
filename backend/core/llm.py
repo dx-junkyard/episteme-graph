@@ -347,31 +347,43 @@ def _sanitize_vertex_response_schema(schema: Any) -> Any:
     ParseError になる。nullable は「requiredに含めない」ことで表現し、
     null 型は response_schema から除去する。
     """
-    if isinstance(schema, list):
-        return [_sanitize_vertex_response_schema(item) for item in schema]
-    if not isinstance(schema, dict):
-        return schema
+    definitions = schema.get("$defs", {}) if isinstance(schema, dict) else {}
 
-    cleaned: dict[str, Any] = {}
-    for key, value in schema.items():
-        if key == "default":
-            continue
-        if key == "anyOf" and isinstance(value, list):
-            options = [
-                _sanitize_vertex_response_schema(item)
-                for item in value
-                if not (isinstance(item, dict) and str(item.get("type", "")).lower() == "null")
-            ]
-            if len(options) == 1 and isinstance(options[0], dict):
-                cleaned.update(options[0])
-            elif options:
-                cleaned[key] = options
-            continue
-        cleaned[key] = _sanitize_vertex_response_schema(value)
+    def clean(value: Any) -> Any:
+        if isinstance(value, list):
+            return [clean(item) for item in value]
+        if not isinstance(value, dict):
+            return value
 
-    if str(cleaned.get("type", "")).lower() == "null":
-        cleaned.pop("type", None)
-    return cleaned
+        ref = value.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/$defs/"):
+            name = ref.rsplit("/", 1)[-1]
+            target = definitions.get(name)
+            if isinstance(target, dict):
+                return clean(target)
+
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in {"$defs", "$ref", "default"}:
+                continue
+            if key == "anyOf" and isinstance(item, list):
+                options = [
+                    clean(option)
+                    for option in item
+                    if not (isinstance(option, dict) and str(option.get("type", "")).lower() == "null")
+                ]
+                if len(options) == 1 and isinstance(options[0], dict):
+                    cleaned.update(options[0])
+                elif options:
+                    cleaned[key] = options
+                continue
+            cleaned[key] = clean(item)
+
+        if str(cleaned.get("type", "")).lower() == "null":
+            cleaned.pop("type", None)
+        return cleaned
+
+    return clean(schema)
 
 
 def _vertex_ai_generate_embeddings(

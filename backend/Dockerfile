@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy core engine and API
 COPY core/ /app/core/
+COPY cartridges/ /app/cartridges/
 COPY api/ /app/
 
 EXPOSE 8001
