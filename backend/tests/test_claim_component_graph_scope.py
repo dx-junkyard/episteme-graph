@@ -8,9 +8,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMAS = ROOT / "backend" / "api" / "schemas.py"
 ROUTES = ROOT / "backend" / "api" / "routes" / "theory_components.py"
+API_MAIN = ROOT / "backend" / "api" / "main.py"
 MIGRATION = ROOT / "backend" / "db" / "013_theory_components.sql"
 ADMIN_HTML = ROOT / "frontend" / "public" / "admin.html"
 ADMIN_JS = ROOT / "frontend" / "public" / "js" / "admin.js"
+ADMIN_CSS = ROOT / "frontend" / "public" / "css" / "styles.css"
 DOCUMENT_SECTIONS = ROOT / "backend" / "core" / "document_sections.py"
 CONCEPT_NORMALIZER = ROOT / "backend" / "core" / "concept_normalizer.py"
 
@@ -61,6 +63,7 @@ def test_scope_api_routes_exist():
 def test_lecture_studio_scope_ui_exists():
     html = _read(ADMIN_HTML)
     js = _read(ADMIN_JS)
+    css = _read(ADMIN_CSS)
     assert 'data-ls-view="claims"' in html
     assert 'data-ls-view="graph"' in html
     assert 'id="ls-claims-panel"' in html
@@ -72,6 +75,12 @@ def test_lecture_studio_scope_ui_exists():
     assert "ls-claims-all-btn" in html
     assert "ls-components-all-btn" in html
     assert "ls-graph-all-btn" in html
+    assert "ls-menu-item-done" in css
+    assert "ls-menu-item-running" in css
+    assert "ls-menu-item-error" in css
+    assert "lsHasAudio" in js
+    assert "pipelineTask" in js
+    assert ".ls-chunk-status.audio_ready::before" in css
     assert "/analysis/run-all" in js
     assert "ssAnalysisCell" in js
 
@@ -88,12 +97,19 @@ def test_lecture_studio_chunk_list_declares_analysis_buttons():
 
 def test_all_analysis_buttons_confirm_before_full_retry():
     routes = _read(ROUTES)
+    main_source = _read(API_MAIN)
     js = _read(ADMIN_JS)
     assert '"/courses/{course_id}/analysis-status"' in routes
     assert "def _analysis_status" in routes
     assert "force = bool((body or {}).get(\"force\"))" in routes
     assert "_delete_claims_for_chunks" in routes
     assert "_delete_components_for_sections" in routes
+    analysis_status_source = routes[routes.index("def _analysis_status"):routes.index("def _run_claim_extraction")]
+    assert "CREATE TABLE IF NOT EXISTS section_assembly_status" in main_source
+    assert '_table_exists(session, "section_assembly_status")' in analysis_status_source
+    assert "section_assembly_status" in analysis_status_source
+    assert "component_assembly_status IN ('success', 'skipped')" in analysis_status_source
+    assert "task_type = 'component_assembly'" in analysis_status_source
     assert "lsRunCourseStepWithRetryConfirm" in js
     assert "window.confirm" in js
     assert "は解析済です。解析済のデータも含めてすべて再度実行しますか？" in js
@@ -198,8 +214,8 @@ def test_issue_184_meaningful_graph_edges_replace_sequential_supports():
 def test_issue_184_ui_displays_llm_failure_messages():
     js = _read(ADMIN_JS)
     assert "lsApiErrorMessage" in js
-    assert "LLM応答が有効なClaim JSONとして解釈できませんでした" in js
-    assert "意味のあるComponent候補を生成できなかったため、保存しませんでした" in js
+    assert "LLM応答が有効な主張JSONとして解釈できませんでした" in js
+    assert "意味のある論理要素候補を生成できなかったため、保存しませんでした" in js
 
 
 def test_issue_185_section_reconstruction_and_ui_section_metadata():
