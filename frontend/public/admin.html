@@ -202,6 +202,7 @@
             <button id="ls-graph-all-btn" class="admin-action-btn" disabled>Graph更新</button>
             <button id="ls-generate-all-btn" class="admin-action-btn" disabled>全スクリプト生成</button>
             <button id="ls-audio-all-btn" class="admin-action-btn" disabled style="background:var(--color-text-info);color:#fff">音声を一括生成</button>
+            <button id="ls-export-btn" class="admin-action-btn" disabled style="background:var(--color-text-success);color:#fff">Export for external review</button>
           </div>
         </div>
         <div id="ls-progress" class="upload-status" style="display:none;margin:8px 16px"></div>
@@ -467,6 +468,38 @@
             <tr><td colspan="9" style="text-align:center;color:var(--color-text-tertiary)">読み込み中...</td></tr>
           </tbody>
         </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Export bundle modal -->
+  <div id="export-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center">
+    <div style="background:#fff;border-radius:8px;padding:28px;min-width:380px;max-width:480px;box-shadow:0 8px 32px rgba(0,0,0,0.18)">
+      <h3 style="margin:0 0 16px;font-size:16px">Export for external review</h3>
+
+      <div style="margin-bottom:12px">
+        <label style="font-size:13px;font-weight:600;display:block;margin-bottom:6px">Export scope</label>
+        <label style="display:block;margin-bottom:4px;font-size:13px">
+          <input type="radio" name="export-scope" value="course" checked> Current course
+        </label>
+        <label style="display:block;font-size:13px">
+          <input type="radio" name="export-scope" value="document"> Current material
+        </label>
+      </div>
+
+      <div style="margin-bottom:12px">
+        <label style="font-size:13px;font-weight:600;display:block;margin-bottom:6px">Included data</label>
+        <label style="display:block;margin-bottom:4px;font-size:13px"><input type="checkbox" id="export-opt-snippets" checked> Evidence snippets</label>
+        <label style="display:block;margin-bottom:4px;font-size:13px"><input type="checkbox" id="export-opt-review" checked> Review fields</label>
+        <label style="display:block;margin-bottom:4px;font-size:13px"><input type="checkbox" id="export-opt-ndjson"> NDJSON files</label>
+        <label style="display:block;font-size:13px"><input type="checkbox" id="export-opt-debug"> Debug data</label>
+      </div>
+
+      <p id="export-status" style="font-size:12px;color:var(--color-text-tertiary);min-height:18px;margin:0 0 12px"></p>
+
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button id="export-cancel-btn" class="admin-action-btn">キャンセル</button>
+        <button id="export-run-btn" class="admin-action-btn" style="background:var(--color-text-success);color:#fff">ダウンロード</button>
       </div>
     </div>
   </div>
