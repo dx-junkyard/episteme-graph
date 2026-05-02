@@ -2507,6 +2507,7 @@
     var claimsAllBtn = document.getElementById("ls-claims-all-btn");
     var componentsAllBtn = document.getElementById("ls-components-all-btn");
     var graphAllBtn = document.getElementById("ls-graph-all-btn");
+    var exportBtn = document.getElementById("ls-export-btn");
     var saveBtn = document.getElementById("ls-save-btn");
     var rewriteBtn = document.getElementById("ls-rewrite-btn");
 
@@ -2523,6 +2524,7 @@
         claimsAllBtn.disabled = true;
         componentsAllBtn.disabled = true;
         graphAllBtn.disabled = true;
+        exportBtn.disabled = false;
         lsLoadSettings(courseId);
         lsLoadScripts(courseId);
       } else {
@@ -2544,6 +2546,7 @@
         claimsAllBtn.disabled = true;
         componentsAllBtn.disabled = true;
         graphAllBtn.disabled = true;
+        exportBtn.disabled = true;
         lsRenderChunkList();
         lsClearEditor();
       }
@@ -2582,6 +2585,23 @@
     settingsBtn.addEventListener("click", function () {
       if (!lsState.courseId) return;
       lsOpenSettingsModal();
+    });
+
+    exportBtn.addEventListener("click", function () {
+      if (!lsState.courseId) return;
+      lsOpenExportModal();
+    });
+
+    document.getElementById("export-cancel-btn").addEventListener("click", function () {
+      lsCloseExportModal();
+    });
+
+    document.getElementById("export-modal-overlay").addEventListener("click", function (e) {
+      if (e.target === this) lsCloseExportModal();
+    });
+
+    document.getElementById("export-run-btn").addEventListener("click", function () {
+      lsRunExport();
     });
 
     saveBtn.addEventListener("click", function () {
@@ -2635,6 +2655,78 @@
     });
     html += '</select>';
     return html;
+  }
+
+  function lsOpenExportModal() {
+    var overlay = document.getElementById("export-modal-overlay");
+    document.getElementById("export-status").textContent = "";
+    overlay.style.display = "flex";
+  }
+
+  function lsCloseExportModal() {
+    document.getElementById("export-modal-overlay").style.display = "none";
+  }
+
+  function lsRunExport() {
+    var scope = document.querySelector('input[name="export-scope"]:checked');
+    var scopeVal = scope ? scope.value : "course";
+    var includeSnippets = document.getElementById("export-opt-snippets").checked;
+    var includeReview = document.getElementById("export-opt-review").checked;
+    var includeNdjson = document.getElementById("export-opt-ndjson").checked;
+    var includeDebug = document.getElementById("export-opt-debug").checked;
+
+    var endpoint, scopeId;
+    if (scopeVal === "course") {
+      scopeId = lsState.courseId;
+      endpoint = "/courses/" + scopeId + "/export-bundle";
+    } else {
+      var sel = lsState.selectedScope;
+      scopeId = sel && sel.documentId ? sel.documentId : lsState.courseId;
+      endpoint = scopeId && scopeVal === "document"
+        ? "/documents/" + scopeId + "/export-bundle"
+        : "/courses/" + lsState.courseId + "/export-bundle";
+    }
+
+    var statusEl = document.getElementById("export-status");
+    var runBtn = document.getElementById("export-run-btn");
+    statusEl.textContent = "生成中...";
+    runBtn.disabled = true;
+
+    var body = JSON.stringify({
+      scope: scopeVal,
+      include_source_snippets: includeSnippets,
+      include_review_fields: includeReview,
+      include_ndjson: includeNdjson,
+      include_debug_data: includeDebug,
+      include_llm_raw_outputs: false,
+    });
+
+    apiFetch(endpoint, { method: "POST", body: body })
+      .then(function (res) {
+        if (!res.ok) {
+          return res.json().then(function (d) { throw new Error(d.detail || "エラーが発生しました"); });
+        }
+        var cd = res.headers.get("Content-Disposition") || "";
+        var match = cd.match(/filename="?([^";\n]+)"?/);
+        var filename = match ? match[1] : "episteme_export.zip";
+        return res.blob().then(function (blob) {
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement("a");
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1000);
+        });
+      })
+      .then(function () {
+        statusEl.textContent = "ダウンロードを開始しました";
+        runBtn.disabled = false;
+      })
+      .catch(function (err) {
+        statusEl.textContent = "エラー: " + (err.message || "不明なエラー");
+        runBtn.disabled = false;
+      });
   }
 
   function lsOpenSettingsModal() {
@@ -4188,6 +4280,7 @@
     document.getElementById("ls-graph-all-btn").disabled = isBusy || !lsState.courseId || !lsState.chunks.length;
     document.getElementById("ls-generate-all-btn").disabled = isBusy || !lsState.courseId || !lsState.chunks.length;
     document.getElementById("ls-audio-all-btn").disabled = isBusy || !lsState.courseId || !lsState.chunks.length;
+    document.getElementById("ls-export-btn").disabled = !lsState.courseId;
     document.getElementById("ls-settings-btn").disabled = !lsState.courseId;
   }
 
