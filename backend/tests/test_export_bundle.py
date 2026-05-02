@@ -25,19 +25,32 @@ def _read(path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 def _import_export_module():
+    """Export モジュールをロードして純粋関数ヘルパーを返す。
+
+    CI では全依存関係がインストール済みのため直接インポートを試みる。
+    未インストール環境ではスタブを使い、sys.modules を汚染しないよう必ずリストアする。
+    """
+    import importlib
     import importlib.util
     import types
 
-    spec = importlib.util.spec_from_file_location("export_route", str(EXPORT_ROUTE))
+    spec = importlib.util.spec_from_file_location("export_route_for_test", str(EXPORT_ROUTE))
     mod = importlib.util.module_from_spec(spec)
 
-    # Stub heavy framework deps before exec so the module loads without a live DB/server
+    # sys.modules のスナップショットを保存 — ロード後に復元してグローバル汚染を防ぐ
+    snapshot: dict[str, object] = {}
+
     def _ensure_stub(name: str) -> types.ModuleType:
+        """name が sys.modules に無ければスタブを作成し、元の状態を記録する。"""
         if name not in sys.modules:
+            snapshot.setdefault(name, None)  # None = 元々存在しなかった
             m = types.ModuleType(name)
             sys.modules[name] = m
+        else:
+            snapshot.setdefault(name, sys.modules[name])  # 元のモジュールを保存
         return sys.modules[name]
 
+    # --- 依存モジュールを準備（インストール済みなら実物、未インストールならスタブ）---
     for dep in ("fastapi", "fastapi.responses", "sqlalchemy", "sqlalchemy.dialects",
                 "dependencies", "core", "core.postgres"):
         parts = dep.split(".")
@@ -45,24 +58,27 @@ def _import_export_module():
             full = ".".join(parts[:i + 1])
             m = _ensure_stub(full)
             if i > 0:
-                setattr(sys.modules[".".join(parts[:i])], parts[i], m)
+                parent = sys.modules[".".join(parts[:i])]
+                if not hasattr(parent, parts[i]):
+                    setattr(parent, parts[i], m)
 
     fa = sys.modules["fastapi"]
-    fa.APIRouter = lambda **kw: type("Router", (), {
-        "post": lambda s, *a, **kw: (lambda f: f),
-        "get": lambda s, *a, **kw: (lambda f: f),
-    })()
-    fa.Depends = lambda f: None
-    fa.HTTPException = Exception
+    if not callable(getattr(fa, "APIRouter", None)):
+        fa.APIRouter = lambda **kw: type("Router", (), {
+            "post": lambda s, *a, **kw: (lambda f: f),
+            "get": lambda s, *a, **kw: (lambda f: f),
+        })()
+        fa.Depends = lambda f: None
+        fa.HTTPException = Exception
 
     fr = sys.modules["fastapi.responses"]
-    fr.StreamingResponse = lambda *a, **kw: None
+    if not hasattr(fr, "StreamingResponse"):
+        fr.StreamingResponse = lambda *a, **kw: None
 
-    # Stub sqlalchemy.text
     sa = sys.modules["sqlalchemy"]
-    sa.text = lambda s: s
+    if not hasattr(sa, "text"):
+        sa.text = lambda s: s
 
-    # Stub pydantic if needed (should be installed in CI)
     try:
         import pydantic as _pyd  # noqa: F401
     except ImportError:
@@ -75,12 +91,23 @@ def _import_export_module():
         _pyd_mod.Field = lambda *a, **kw: None
 
     deps = sys.modules["dependencies"]
-    deps._require_teacher = lambda: None
+    if not hasattr(deps, "_require_teacher"):
+        deps._require_teacher = lambda: None
 
     pg = sys.modules["core.postgres"]
-    pg.get_session = lambda: None
+    if not hasattr(pg, "get_session"):
+        pg.get_session = lambda: None
 
-    spec.loader.exec_module(mod)
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        # sys.modules を元の状態に復元（スタブが後続テストを壊さないように）
+        for name, original in snapshot.items():
+            if original is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
+
     return mod
 
 
