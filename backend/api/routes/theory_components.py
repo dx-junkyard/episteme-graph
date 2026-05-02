@@ -2044,7 +2044,11 @@ def _analysis_status(course_id: str, course_data: dict) -> dict:
     try:
         claim_chunks = 0
         component_sections = 0
+        component_failed_sections = 0
+        component_status_counts: dict[str, int] = {}
+        component_completed_sections = 0
         graph_documents = 0
+        has_section_assembly_status = _table_exists(session, "section_assembly_status")
         if chunk_ids:
             placeholders, params = _in_params("chunk_id", chunk_ids, "uuid")
             claim_chunks = int(session.execute(
@@ -2062,6 +2066,61 @@ def _analysis_status(course_id: str, course_data: dict) -> dict:
                 """),
                 {"course_id": course_id, **params},
             ).scalar() or 0)
+            if has_section_assembly_status:
+                component_status_rows = session.execute(
+                    sa_text(f"""
+                        SELECT component_assembly_status, COUNT(DISTINCT section_id)
+                        FROM section_assembly_status
+                        WHERE course_id = :course_id
+                          AND section_id IN ({placeholders})
+                        GROUP BY component_assembly_status
+                    """),
+                    {"course_id": course_id, **params},
+                ).fetchall()
+                component_status_counts = {str(row[0]): int(row[1] or 0) for row in component_status_rows}
+                component_failed_sections = component_status_counts.get("failed", 0)
+                component_completed_sections = int(session.execute(
+                    sa_text(f"""
+                        SELECT COUNT(DISTINCT section_id)
+                        FROM (
+                            SELECT source_scope->>'section_id' AS section_id
+                            FROM theory_components
+                            WHERE course_id = :course_id
+                              AND source_scope->>'section_id' IN ({placeholders})
+                            UNION
+                            SELECT section_id
+                            FROM section_assembly_status
+                            WHERE course_id = :course_id
+                              AND section_id IN ({placeholders})
+                              AND component_assembly_status IN ('success', 'skipped')
+                        ) completed_sections
+                    """),
+                    {"course_id": course_id, **params},
+                ).scalar() or 0)
+            else:
+                component_completed_sections = component_sections
+            if component_completed_sections < len(section_ids) and _table_exists(session, "background_tasks"):
+                latest_component_task = session.execute(
+                    sa_text("""
+                        SELECT result_data
+                        FROM background_tasks
+                        WHERE task_type = 'component_assembly'
+                          AND status = 'completed'
+                          AND result_data IS NOT NULL
+                          AND result_data->>'course_id' = :course_id
+                        ORDER BY updated_at DESC
+                        LIMIT 1
+                    """),
+                    {"course_id": course_id},
+                ).scalar()
+                if latest_component_task:
+                    total_sections = int(latest_component_task.get("total_sections") or 0)
+                    section_errors = latest_component_task.get("section_errors") or []
+                    if total_sections >= len(section_ids) and not section_errors:
+                        component_completed_sections = len(section_ids)
+                        component_status_counts.setdefault("skipped", int(latest_component_task.get("skipped") or 0))
+        else:
+            component_completed_sections = 0
         if document_ids:
             placeholders, params = _in_params("document_id", document_ids)
             graph_documents = int(session.execute(
@@ -2084,8 +2143,11 @@ def _analysis_status(course_id: str, course_data: dict) -> dict:
         },
         "components": {
             "total": len(section_ids),
-            "completed": component_sections,
-            "complete": bool(section_ids) and component_sections >= len(section_ids),
+            "completed": component_completed_sections,
+            "generated": component_sections,
+            "skipped": component_status_counts.get("skipped", 0) if section_ids else 0,
+            "failed": component_failed_sections,
+            "complete": bool(section_ids) and component_completed_sections >= len(section_ids),
         },
         "graph": {
             "total": len(document_ids),
@@ -2093,6 +2155,10 @@ def _analysis_status(course_id: str, course_data: dict) -> dict:
             "complete": bool(document_ids) and graph_documents >= len(document_ids),
         },
     }
+
+
+def _table_exists(session: Any, table_name: str) -> bool:
+    return bool(session.execute(sa_text("SELECT to_regclass(:table_name)"), {"table_name": table_name}).scalar())
 
 
 def _run_claim_extraction(course_id: str, course_data: dict, user_id: str | None, task_id: str | None = None, force: bool = False) -> dict:
@@ -2656,6 +2722,8 @@ def _upsert_section_assembly_status(
 def _get_failed_section_statuses(course_id: str) -> list[dict]:
     session = _pg_session()
     try:
+        if not _table_exists(session, "section_assembly_status"):
+            return []
         rows = session.execute(
             sa_text("""
                 SELECT document_id, section_id, component_assembly_status,
@@ -3005,6 +3073,8 @@ def get_course_assembly_status(
     _editable_course_data(course_id, current_user)
     session = _pg_session()
     try:
+        if not _table_exists(session, "section_assembly_status"):
+            return {"course_id": course_id, "sections": [], "summary": {}}
         rows = session.execute(
             sa_text("""
                 SELECT document_id, section_id, component_assembly_status,

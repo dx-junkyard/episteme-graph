@@ -195,14 +195,25 @@
             </select>
           </div>
           <div class="ls-topbar-right">
-            <button id="ls-settings-btn" class="admin-action-btn" disabled>設定</button>
-            <button id="ls-reanalyze-structure-btn" class="admin-action-btn" disabled>DSLを再解析</button>
-            <button id="ls-claims-all-btn" class="admin-action-btn" disabled>全Claim抽出</button>
-            <button id="ls-components-all-btn" class="admin-action-btn" disabled>全節Component</button>
-            <button id="ls-graph-all-btn" class="admin-action-btn" disabled>Graph更新</button>
-            <button id="ls-generate-all-btn" class="admin-action-btn" disabled>全スクリプト生成</button>
-            <button id="ls-audio-all-btn" class="admin-action-btn" disabled style="background:var(--color-text-info);color:#fff">音声を一括生成</button>
-            <button id="ls-export-btn" class="admin-action-btn" disabled style="background:var(--color-text-success);color:#fff">Export for external review</button>
+            <div class="ls-action-menu">
+              <button id="ls-pipeline-menu-btn" class="admin-action-btn ls-menu-trigger" type="button" disabled>パイプラインを実行 ▼</button>
+              <div id="ls-pipeline-menu" class="ls-menu" hidden>
+                <button id="ls-reanalyze-structure-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>DSLを再解析</span></button>
+                <button id="ls-claims-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>構成要素を抽出（主張など）</span></button>
+                <button id="ls-components-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>論理要素を抽出</span></button>
+                <button id="ls-graph-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>グラフを更新</span></button>
+                <div class="ls-menu-divider"></div>
+                <button id="ls-generate-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>スクリプトを生成</span></button>
+                <button id="ls-audio-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>音声を生成</span></button>
+              </div>
+            </div>
+            <div class="ls-action-menu">
+              <button id="ls-more-menu-btn" class="admin-action-btn ls-menu-trigger" type="button" disabled>その他 ▼</button>
+              <div id="ls-more-menu" class="ls-menu" hidden>
+                <button id="ls-settings-btn" class="ls-menu-item" type="button" disabled><span>設定</span></button>
+                <button id="ls-export-btn" class="ls-menu-item" type="button" disabled><span>外部レビュー用に書き出し</span></button>
+              </div>
+            </div>
           </div>
         </div>
         <div id="ls-progress" class="upload-status" style="display:none;margin:8px 16px"></div>
@@ -221,13 +232,15 @@
           <div class="ls-editor-panel">
             <div class="ls-workbar">
               <div class="ls-work-tabs" id="ls-work-tabs">
-                <button class="ls-work-tab" data-ls-view="compare">照合</button>
-                <button class="ls-work-tab active" data-ls-view="edit">編集</button>
+                <button class="ls-work-tab active" data-ls-view="edit">原稿</button>
                 <button class="ls-work-tab" data-ls-view="structure">構造</button>
-                <button class="ls-work-tab" data-ls-view="claims">主張</button>
-                <button class="ls-work-tab" data-ls-view="theory">理論</button>
-                <button class="ls-work-tab" data-ls-view="graph">グラフ</button>
+                <button class="ls-work-tab" data-ls-view="claims">理論グラフ</button>
                 <button class="ls-work-tab" data-ls-view="audio">音声</button>
+              </div>
+              <div class="ls-work-tabs ls-theory-graph-tabs" id="ls-theory-graph-tabs" hidden>
+                <button class="ls-work-tab active" data-ls-view="claims">主張</button>
+                <button class="ls-work-tab" data-ls-view="theory">論理要素</button>
+                <button class="ls-work-tab" data-ls-view="graph">グラフ</button>
               </div>
               <div id="ls-chunk-meta" class="ls-chunk-meta">チャンクを選択してください</div>
             </div>
@@ -285,7 +298,7 @@
 
               <section id="ls-theory-panel" class="ls-theory-panel" hidden>
                 <div class="ls-theory-toolbar">
-                  <button id="ls-extract-theory-btn" class="admin-action-btn">理論コンポーネント候補を抽出</button>
+                  <button id="ls-extract-theory-btn" class="admin-action-btn">論理要素候補を抽出</button>
                   <span id="ls-theory-status" class="ls-theory-status"></span>
                 </div>
                 <div id="ls-theory-components" class="ls-theory-components"></div>
@@ -293,7 +306,7 @@
 
               <section id="ls-claims-panel" class="ls-theory-panel" hidden>
                 <div class="ls-theory-toolbar">
-                  <button id="ls-extract-claims-btn" class="admin-action-btn">Claimを抽出</button>
+                  <button id="ls-extract-claims-btn" class="admin-action-btn">主張を抽出</button>
                   <span id="ls-claims-status" class="ls-theory-status"></span>
                 </div>
                 <div id="ls-claims-list" class="ls-theory-components"></div>
@@ -475,24 +488,24 @@
   <!-- Export bundle modal -->
   <div id="export-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center">
     <div style="background:#fff;border-radius:8px;padding:28px;min-width:380px;max-width:480px;box-shadow:0 8px 32px rgba(0,0,0,0.18)">
-      <h3 style="margin:0 0 16px;font-size:16px">Export for external review</h3>
+      <h3 style="margin:0 0 16px;font-size:16px">外部レビュー用に書き出し</h3>
 
       <div style="margin-bottom:12px">
-        <label style="font-size:13px;font-weight:600;display:block;margin-bottom:6px">Export scope</label>
+        <label style="font-size:13px;font-weight:600;display:block;margin-bottom:6px">書き出し範囲</label>
         <label style="display:block;margin-bottom:4px;font-size:13px">
-          <input type="radio" name="export-scope" value="course" checked> Current course
+          <input type="radio" name="export-scope" value="course" checked> 現在のコース
         </label>
         <label style="display:block;font-size:13px">
-          <input type="radio" name="export-scope" value="document"> Current material
+          <input type="radio" name="export-scope" value="document"> 現在の教材
         </label>
       </div>
 
       <div style="margin-bottom:12px">
-        <label style="font-size:13px;font-weight:600;display:block;margin-bottom:6px">Included data</label>
-        <label style="display:block;margin-bottom:4px;font-size:13px"><input type="checkbox" id="export-opt-snippets" checked> Evidence snippets</label>
-        <label style="display:block;margin-bottom:4px;font-size:13px"><input type="checkbox" id="export-opt-review" checked> Review fields</label>
-        <label style="display:block;margin-bottom:4px;font-size:13px"><input type="checkbox" id="export-opt-ndjson"> NDJSON files</label>
-        <label style="display:block;font-size:13px"><input type="checkbox" id="export-opt-debug"> Debug data</label>
+        <label style="font-size:13px;font-weight:600;display:block;margin-bottom:6px">含めるデータ</label>
+        <label style="display:block;margin-bottom:4px;font-size:13px"><input type="checkbox" id="export-opt-snippets" checked> 根拠スニペット</label>
+        <label style="display:block;margin-bottom:4px;font-size:13px"><input type="checkbox" id="export-opt-review" checked> レビュー項目</label>
+        <label style="display:block;margin-bottom:4px;font-size:13px"><input type="checkbox" id="export-opt-ndjson"> NDJSONファイル</label>
+        <label style="display:block;font-size:13px"><input type="checkbox" id="export-opt-debug"> デバッグデータ</label>
       </div>
 
       <p id="export-status" style="font-size:12px;color:var(--color-text-tertiary);min-height:18px;margin:0 0 12px"></p>
