@@ -53,7 +53,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text as sa_text
 
 from dependencies import _hash_password
-from routes import auth, learning, admin, lecture, groups, error_logs
+from routes import auth, learning, admin, lecture, groups, error_logs, export as export_routes
 from core.config import get_settings as _get_settings
 from core.postgres import get_session as _pg_session, check_connection as _pg_check
 
@@ -563,7 +563,7 @@ def _run_migrations() -> None:
         """))
 
         session.commit()
-        logger.info("Migrations (002-013) applied successfully.")
+        logger.info("Migrations (002-014) applied successfully.")
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema
@@ -649,6 +649,7 @@ app.include_router(admin.router)
 app.include_router(error_logs.router)
 app.include_router(lecture.router)
 app.include_router(groups.router)
+app.include_router(export_routes.router)
 
 
 @app.get("/healthz")
