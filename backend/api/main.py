@@ -563,7 +563,7 @@ def _run_migrations() -> None:
         """))
 
         session.commit()
-        logger.info("Migrations (002-014) applied successfully.")
+        logger.info("Migrations (002-013) applied successfully.")
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema
