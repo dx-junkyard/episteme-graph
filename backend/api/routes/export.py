@@ -117,7 +117,7 @@ def _load_course_documents(session: Any, course_id: str) -> list[dict]:
         sa_text("""
             SELECT DISTINCT d.id, d.title, d.status, d.created_at
             FROM documents d
-            JOIN chunks c ON c.document_id = d.id::text
+            JOIN chunks c ON c.document_id = d.id
             JOIN theory_claims tc ON tc.chunk_id = c.id
             WHERE tc.document_id IN (
                 SELECT id::text FROM documents
@@ -129,7 +129,7 @@ def _load_course_documents(session: Any, course_id: str) -> list[dict]:
             SELECT DISTINCT d.id, d.title, d.status, d.created_at
             FROM documents d
             JOIN theory_components tc ON tc.course_id = :course_id
-            JOIN chunks c ON c.document_id = d.id::text
+            JOIN chunks c ON c.document_id = d.id
             WHERE tc.primary_chunk_id = c.id
         """),
         {"course_id": course_id},
@@ -156,7 +156,7 @@ def _load_claims_for_course(session: Any, course_id: str) -> list[dict]:
             FROM theory_claims tc
             JOIN chunks c ON c.id = tc.chunk_id
             WHERE c.document_id IN (
-                SELECT DISTINCT c2.document_id::text
+                SELECT DISTINCT c2.document_id
                 FROM chunks c2
                 JOIN theory_components tcomp2 ON tcomp2.primary_chunk_id = c2.id
                 WHERE tcomp2.course_id = :course_id
