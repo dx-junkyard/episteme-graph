@@ -563,6 +563,66 @@ def _run_migrations() -> None:
         """))
         session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_section_assembly_status_course ON section_assembly_status(course_id)"))
         session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_section_assembly_status_status ON section_assembly_status(component_assembly_status)"))
+        # Migration 015: Document-first analysis pipeline (issue #226)
+        session.execute(sa_text("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS section_id      TEXT"))
+        session.execute(sa_text("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS block_ids       JSONB NOT NULL DEFAULT '[]'::jsonb"))
+        session.execute(sa_text("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS source_metadata JSONB NOT NULL DEFAULT '{}'::jsonb"))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_chunks_section ON chunks(section_id)"))
+        session.execute(sa_text("ALTER TABLE theory_components ALTER COLUMN course_id DROP NOT NULL"))
+        session.execute(sa_text("ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS document_id TEXT NOT NULL DEFAULT ''"))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_theory_components_document ON theory_components(document_id)"))
+        session.execute(sa_text("ALTER TABLE theory_component_links ALTER COLUMN course_id DROP NOT NULL"))
+        session.execute(sa_text("ALTER TABLE theory_component_links ADD COLUMN IF NOT EXISTS document_id TEXT NOT NULL DEFAULT ''"))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_theory_component_links_document ON theory_component_links(document_id)"))
+        session.execute(sa_text("ALTER TABLE theory_component_graphs ALTER COLUMN course_id DROP NOT NULL"))
+        session.execute(sa_text("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'theory_component_graphs_document_uq'
+                ) THEN
+                    ALTER TABLE theory_component_graphs
+                        ADD CONSTRAINT theory_component_graphs_document_uq UNIQUE (document_id);
+                END IF;
+            END $$
+        """))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS document_embeddings (
+                id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                document_id     TEXT NOT NULL,
+                material_id     TEXT,
+                embedding_type  TEXT NOT NULL,
+                source_version  TEXT NOT NULL DEFAULT 'v1',
+                text            TEXT NOT NULL,
+                embedding       vector(768),
+                metadata        JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE(document_id, embedding_type, source_version)
+            )
+        """))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_document_embeddings_document ON document_embeddings(document_id)"))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_document_embeddings_type     ON document_embeddings(embedding_type)"))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS document_analysis_runs (
+                id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                document_id     TEXT NOT NULL,
+                material_id     TEXT,
+                cartridge_id    TEXT,
+                status          TEXT NOT NULL DEFAULT 'pending'
+                                    CHECK (status IN ('pending', 'running', 'completed', 'failed')),
+                current_stage   TEXT,
+                error_message   TEXT NOT NULL DEFAULT '',
+                stage_outputs   JSONB NOT NULL DEFAULT '{}'::jsonb,
+                started_at      TIMESTAMPTZ,
+                completed_at    TIMESTAMPTZ,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_document_analysis_runs_document ON document_analysis_runs(document_id)"))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_document_analysis_runs_status   ON document_analysis_runs(status)"))
         # 既存の cloned_from カラムがあれば、クローンコースとその履歴をハードリセット後にカラム廃止
         session.execute(sa_text("""
             DO $$
