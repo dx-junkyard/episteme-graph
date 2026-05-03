@@ -56,6 +56,10 @@ description: >
 | `backend/api/routes/*.py` | `backend/tests/api/test_<router>.py` |
 | `backend/api/dependencies.py` | `backend/tests/api/test_dependencies.py` |
 | `backend/api/main.py` | `backend/tests/api/test_main.py` |
+| `src/episteme_graph/agents/<name>/agent.py` | `src/tests/agents/<name>/test_agent.py` |
+| `src/episteme_graph/agents/<name>/validator.py` | `src/tests/agents/<name>/test_validator.py` |
+| `src/episteme_graph/agents/<name>/schema.py` | `src/tests/agents/<name>/test_schema.py` |
+| `src/episteme_graph/agents/<name>/input_builder.py` | `src/tests/agents/<name>/test_input_builder.py` |
 
 #### テストコードの規約
 
@@ -149,6 +153,44 @@ cd backend && python -m pytest tests/core/test_<module>.py -v
 - [ ] 変更前の動作が維持されるリグレッションテスト
 - [ ] 新しいロジックパスのテスト
 - [ ] LLM 呼び出しがある場合は mock でレスポンスを固定
+
+### Agent実装のテストパターン（src/episteme_graph/agents/）
+
+Agent追加・変更時は最低限以下をカバーすること:
+
+- [ ] `agent.run()` の正常系: 有効な入力でResultが返る（LLMはmock）
+- [ ] `agent.run()` のcartridge=None: cartridgeなしでも動作する
+- [ ] `validator.validate()`: 正常出力でissuesが空になる
+- [ ] `validator.validate()`: 必須フィールド欠損でissueが出る
+- [ ] `schema.py` のシリアライズ: dataclassがJSONシリアライズ可能
+- [ ] `input_builder.build()`: 前段agentの出力からLLM入力が構築される
+- [ ] repair/retry: validation失敗時にrepairerが呼ばれ再試行が走る
+
+```python
+# agents テストのひな型
+from unittest.mock import patch, MagicMock
+
+class TestDocumentStructureAgent:
+    def test_run_returns_result(self):
+        from episteme_graph.agents.document_structure.agent import DocumentStructureAgent
+        agent = DocumentStructureAgent()
+        with patch.object(agent, '_extract_blocks', return_value=[]):
+            result = agent.run("dummy.pdf")
+        assert result.document_id is not None
+
+    def test_run_without_cartridge(self):
+        from episteme_graph.agents.document_structure.agent import DocumentStructureAgent
+        agent = DocumentStructureAgent()
+        result = agent.run("dummy.pdf", cartridge_id=None)
+        assert result is not None
+```
+
+agentsのテスト実行コマンド:
+```bash
+cd src && python -m pytest tests/ -v
+# または特定agent
+cd src && python -m pytest tests/agents/document_structure/ -v
+```
 
 ## CI ワークフローとの連携
 

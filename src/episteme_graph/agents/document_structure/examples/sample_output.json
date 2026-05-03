@@ -1,0 +1,102 @@
+{
+  "document_id": "doc_sample_paper",
+  "source_file": "/data/pdfs/sample_paper.pdf",
+  "cartridge_id": "particle_physics",
+  "metadata": {
+    "title": null,
+    "authors": [],
+    "pages": 10
+  },
+  "sections": [
+    {
+      "section_id": "doc_sample_paper:sec_1",
+      "title": "Introduction",
+      "level": 1,
+      "order": 1,
+      "page_start": 1,
+      "page_end": 3,
+      "parent_section_id": null
+    },
+    {
+      "section_id": "doc_sample_paper:sec_2",
+      "title": "Related Work",
+      "level": 1,
+      "order": 2,
+      "page_start": 3,
+      "page_end": 5,
+      "parent_section_id": null
+    },
+    {
+      "section_id": "doc_sample_paper:sec_3",
+      "title": "2.1 Dataset",
+      "level": 2,
+      "order": 3,
+      "page_start": 4,
+      "page_end": 5,
+      "parent_section_id": "doc_sample_paper:sec_2"
+    }
+  ],
+  "blocks": [
+    {
+      "block_id": "blk_001_0000",
+      "page": 1,
+      "order": 0,
+      "text": "Introduction",
+      "block_type": "section_heading",
+      "bbox": [72.0, 100.0, 300.0, 115.0],
+      "confidence": 0.88,
+      "equation_label": null,
+      "section_id": "doc_sample_paper:sec_1",
+      "raw": {"parser_source": "pymupdf"}
+    },
+    {
+      "block_id": "blk_001_0001",
+      "page": 1,
+      "order": 1,
+      "text": "This paper presents a novel approach to knowledge graph construction.",
+      "block_type": "body_paragraph",
+      "bbox": [72.0, 125.0, 540.0, 200.0],
+      "confidence": 0.8,
+      "equation_label": null,
+      "section_id": "doc_sample_paper:sec_1",
+      "raw": {"parser_source": "pymupdf"}
+    },
+    {
+      "block_id": "blk_002_0002",
+      "page": 2,
+      "order": 2,
+      "text": "Figure 1. Overview of the proposed pipeline.",
+      "block_type": "figure_caption",
+      "bbox": [180.0, 450.0, 432.0, 463.0],
+      "confidence": 0.95,
+      "equation_label": null,
+      "section_id": "doc_sample_paper:sec_1",
+      "raw": {"parser_source": "pymupdf"}
+    },
+    {
+      "block_id": "blk_003_0003",
+      "page": 3,
+      "order": 3,
+      "text": "E = mc\\u00b2 (1)",
+      "block_type": "equation_block",
+      "bbox": [200.0, 300.0, 400.0, 320.0],
+      "confidence": 0.85,
+      "equation_label": "1",
+      "section_id": "doc_sample_paper:sec_2",
+      "raw": {"parser_source": "pymupdf"}
+    },
+    {
+      "block_id": "blk_010_0020",
+      "page": 10,
+      "order": 20,
+      "text": "[1] Smith, J. et al. (2020). Nature, 580, 1-10.",
+      "block_type": "reference_entry",
+      "bbox": [72.0, 200.0, 540.0, 215.0],
+      "confidence": 0.92,
+      "equation_label": null,
+      "section_id": null,
+      "raw": {"parser_source": "pymupdf"}
+    }
+  ],
+  "validation_issues": []
+}
