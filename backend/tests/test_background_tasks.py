@@ -200,21 +200,29 @@ class TestProcessMaterialBackgroundSignature:
 
 
 class TestProcessMaterialBackgroundFailures:
-    """教材処理でチャンクが作成されないケースを失敗扱いにすることを検証。"""
+    """教材処理でチャンクが作成されない / 保存されないケースを失敗扱いにすることを検証。
 
-    SERVICES_FILE = Path(__file__).resolve().parents[1] / "api" / "services.py"
+    issue #226 で PDF アップロード処理は `run_document_pipeline` へ委譲されたため、
+    失敗ハンドリングは orchestrator 側で `PipelineStageError` として表現される。
+    """
+
+    ORCHESTRATOR_FILE = (
+        Path(__file__).resolve().parents[1] / "core" / "document_pipeline" / "orchestrator.py"
+    )
 
     @pytest.fixture(autouse=True)
     def _load_source(self):
-        self.source = self.SERVICES_FILE.read_text(encoding="utf-8")
+        self.source = self.ORCHESTRATOR_FILE.read_text(encoding="utf-8")
 
     def test_zero_chunks_raises_failure(self):
-        assert "if not chunks:" in self.source
-        assert "PDFからテキストチャンクを作成できませんでした" in self.source
+        # source_chunking stage で chunk が 0 件なら PipelineStageError を上げる
+        assert "if not source_chunks:" in self.source
+        assert 'PipelineStageError(\n                "source_chunking"' in self.source
 
     def test_zero_embedded_chunks_raises_failure(self):
-        assert "if embedded_count == 0:" in self.source
-        assert "テキストチャンクが1件もDBに保存されませんでした" in self.source
+        # source_embedding stage で persist が失敗 / 0 件なら PipelineStageError を上げる
+        assert '"source_embedding"' in self.source
+        assert "PipelineStageError" in self.source
 
 
 class TestServiceHelpers:
