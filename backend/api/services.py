@@ -2186,19 +2186,21 @@ def process_material_background(
     filename: str,
     pdf_bytes: bytes,
     task_id: str | None = None,
+    cartridge_id: str | None = None,
 ) -> None:
-    """バックグラウンドでPDF処理パイプラインを実行する。
+    """バックグラウンドで新Agent Pipelineを実行する (issue #226)。
 
-    各ステージで background_tasks.result_data["stage"] を更新するため、
-    失敗時にどのフェーズで止まったか GET /api/admin/tasks/{task_id} で確認できる。
+    Stages:
+        save_pdf → document_structure → source_chunking → source_embedding
+        → paper_skeleton → rhetorical_role → claim_qualification
+        → equation_semantics → thesis_reconstruction → dsl_linking
+        → dsl_embedding → component_assembly
+        → persist_claims_components_graph → completed
 
-    Stages: extracting → chunking → embedding → building_graph → finalizing
+    各ステージ完了時に background_tasks.result_data["stage"] を更新する。
+    旧 build_knowledge_graph / chunk_pdf_pages ベースの導線は廃止。
     """
-
-    def _update_stage(stage: str) -> None:
-        """現在の処理ステージを background_tasks に記録する。"""
-        if task_id:
-            update_background_task(task_id, "processing", result_data={"stage": stage})
+    from core.document_pipeline import PipelineStageError, run_document_pipeline
 
     with _material_lock:
         _material_status[material_id] = {
@@ -2209,89 +2211,43 @@ def process_material_background(
     if task_id:
         update_background_task(task_id, "processing", result_data={"stage": "started"})
 
-    # PDF を MinIO に保存（upload_material が古いバージョンで未保存だった場合の補完）
+    # PDF を MinIO に保存（pipeline は一時ファイルに書き出すが正本は MinIO）
     try:
         _get_storage().upload_pdf("raw-papers", f"uploads/{material_id}.pdf", pdf_bytes)
         logger.info("PDF saved to MinIO for material=%s", material_id)
     except Exception as _storage_exc:
-        logger.warning("Failed to save PDF to MinIO for material=%s: %s", material_id, _storage_exc)
+        logger.warning(
+            "Failed to save PDF to MinIO for material=%s: %s", material_id, _storage_exc,
+        )
 
-    embedded_count = 0
+    def _on_stage(stage: str, info: dict) -> None:
+        if task_id:
+            payload = {"stage": stage}
+            payload.update(info or {})
+            update_background_task(task_id, "processing", result_data=payload)
 
     try:
-        # ── Stage 1: テキスト抽出 ──────────────────────────────────────────
-        _update_stage("extracting")
-        pages = extract_pdf_pages(pdf_bytes)
-        extracted_text = "\n".join(str(p.get("text") or "") for p in pages).replace("\x00", "")
-        logger.info(
-            "Stage[extracting] completed: material=%s doc=%s chars=%d",
-            material_id, doc_id, len(extracted_text),
+        result = run_document_pipeline(
+            pdf_bytes=pdf_bytes,
+            document_id=doc_id,
+            material_id=material_id,
+            filename=filename,
+            cartridge_id=cartridge_id,
+            progress_callback=_on_stage,
         )
 
-        # ── Stage 2: チャンク分割 ──────────────────────────────────────────
-        _update_stage("chunking")
-        chunks = chunk_pdf_pages(pages, chunk_size=1000, overlap=100)
-        logger.info(
-            "Stage[chunking] completed: material=%s doc=%s chunks=%d",
-            material_id, doc_id, len(chunks),
-        )
-
-        if not chunks:
-            logger.warning(
-                "Stage[chunking] produced 0 chunks for material=%s doc=%s filename=%s. "
-                "PDFが空か、テキスト抽出に失敗している可能性があります。",
-                material_id, doc_id, filename,
-            )
-            raise RuntimeError("PDFからテキストチャンクを作成できませんでした")
-
-        # ── Stage 3: ナレッジグラフ構築 ───────────────────────────────────
-        _update_stage("building_graph")
-        title = os.path.splitext(filename)[0]
-        knowledge_graph = build_knowledge_graph(extracted_text, title)
-        logger.info(
-            "Stage[building_graph] completed: material=%s concepts=%d",
-            material_id, len(knowledge_graph.get("concepts", [])),
-        )
-
-        # ── Stage 4: Embedding & DB保存 ───────────────────────────────────
-        _update_stage("embedding")
-        try:
-            embedded_count = embed_chunks(material_id, doc_id, chunks, knowledge_graph)
-        except Exception as embed_exc:
-            # embed_chunks が失敗するとチャンクが1件も登録されない致命的エラー
-            raise RuntimeError(
-                f"チャンクのEmbedding/DB保存に失敗しました "
-                f"(material={material_id}, doc={doc_id}, "
-                f"text_chunks={len(chunks)}): {embed_exc}"
-            ) from embed_exc
-        logger.info(
-            "Stage[embedding] completed: material=%s doc=%s embedded=%d",
-            material_id, doc_id, embedded_count,
-        )
-
-        if embedded_count == 0:
-            raise RuntimeError("テキストチャンクが1件もDBに保存されませんでした")
-
-        # ── Stage 5: documents テーブル更新 ───────────────────────────────
-        _update_stage("finalizing")
+        # documents テーブルの最終ステータスを更新
         session = _pg_session()
         try:
             session.execute(
                 sa_text("""
                     UPDATE documents
                     SET status = 'completed',
-                        knowledge_graph = CAST(:kg AS jsonb),
-                        text_length = :text_length,
                         chunk_count = :chunk_count,
                         updated_at = now()
                     WHERE id = CAST(:doc_id AS uuid)
                 """),
-                {
-                    "doc_id": doc_id,
-                    "kg": json.dumps(knowledge_graph, ensure_ascii=False),
-                    "text_length": len(extracted_text),
-                    "chunk_count": embedded_count,  # 実際にDBに保存されたチャンク数
-                },
+                {"doc_id": doc_id, "chunk_count": result.chunk_count},
             )
             session.commit()
         except Exception:
@@ -2307,27 +2263,38 @@ def process_material_background(
             update_background_task(task_id, "completed", result_data={
                 "material_id": material_id,
                 "doc_id": doc_id,
-                "text_length": len(extracted_text),
-                "chunk_count": embedded_count,
+                "chunk_count": result.chunk_count,
+                "claim_count": result.claim_count,
+                "component_count": result.component_count,
+                "dsl_node_count": result.dsl_node_count,
+                "dsl_edge_count": result.dsl_edge_count,
                 "stage": "completed",
             })
 
         logger.info(
-            "Material processing completed: material=%s doc=%s filename=%s embedded_chunks=%d",
-            material_id, doc_id, filename, embedded_count,
+            "Material processing completed: material=%s doc=%s filename=%s "
+            "chunks=%d claims=%d components=%d",
+            material_id, doc_id, filename,
+            result.chunk_count, result.claim_count, result.component_count,
         )
 
     except Exception as exc:
+        stage = getattr(exc, "stage", "unknown") if isinstance(exc, PipelineStageError) else "unknown"
         logger.exception(
-            "Material processing FAILED: material=%s doc=%s filename=%s: %s",
-            material_id, doc_id, filename, exc,
+            "Material processing FAILED at stage=%s: material=%s doc=%s filename=%s: %s",
+            stage, material_id, doc_id, filename, exc,
         )
         with _material_lock:
             _material_status[material_id]["status"] = "failed"
 
-        error_msg = str(exc)
+        error_msg = f"[{stage}] {exc}" if stage != "unknown" else str(exc)
         if task_id:
-            update_background_task(task_id, "failed", error_message=error_msg)
+            update_background_task(
+                task_id,
+                "failed",
+                error_message=error_msg,
+                result_data={"stage": stage},
+            )
 
         # documents.status を 'failed' に更新する（ここでの失敗も明示的にログする）
         try:

@@ -299,6 +299,92 @@ def upload_material(
     }
 
 
+@router.post("/documents/{document_id}/reanalyze", status_code=202)
+def reanalyze_document(
+    document_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """新Agent Pipeline (issue #226) で document を再解析する。
+
+    保存済み PDF を MinIO から取り出し、process_material_background と同じ
+    pipeline をバックグラウンド起動する。旧 course/section/chunk 単位の解析
+    エンドポイントの後継。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text(
+                "SELECT id, title, filename, source_path FROM documents "
+                "WHERE id = CAST(:id AS uuid) LIMIT 1"
+            ),
+            {"id": document_id},
+        ).fetchone()
+    finally:
+        session.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    material_id = row[3]
+    filename = row[2] or row[1] or "document.pdf"
+
+    if not material_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Document has no material_id; cannot fetch PDF for reanalysis",
+        )
+
+    object_candidates = [f"uploads/{material_id}.pdf", filename, material_id]
+    storage = get_storage_client()
+    pdf_bytes: bytes | None = None
+    for object_name in object_candidates:
+        if not object_name:
+            continue
+        try:
+            pdf_bytes = storage.get_object("raw-papers", object_name)
+            break
+        except Exception:
+            continue
+    if pdf_bytes is None:
+        raise HTTPException(status_code=404, detail="PDF object not found in MinIO")
+
+    task_id = str(uuid.uuid4())[:12]
+    create_background_task(task_id, "document_reanalysis", current_user["id"])
+
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text(
+                "UPDATE documents SET status = 'processing', updated_at = now() "
+                "WHERE id = CAST(:id AS uuid)"
+            ),
+            {"id": document_id},
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+    finally:
+        session.close()
+
+    thread = threading.Thread(
+        target=process_material_background,
+        args=(material_id, document_id, filename, pdf_bytes, task_id),
+        daemon=True,
+    )
+    thread.start()
+
+    logger.info(
+        "Document reanalysis accepted: doc=%s material=%s task=%s by user=%s",
+        document_id, material_id, task_id, current_user["id"],
+    )
+    return {
+        "task_id": task_id,
+        "document_id": document_id,
+        "material_id": material_id,
+        "status": "pending",
+    }
+
+
 @router.get("/materials", response_model=list[MaterialOut])
 def list_materials(
     current_user: dict = Depends(_require_teacher),

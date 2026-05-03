@@ -25,8 +25,8 @@ services:
   # ── Application ───────────────────────────────────────────────────
   api-server:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     environment:
       JWT_SECRET: ${JWT_SECRET:-episteme-dev-secret-change-in-prod}
       LLM_PROVIDER: ${LLM_PROVIDER:-openai}
