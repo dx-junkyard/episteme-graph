@@ -1,0 +1,39 @@
+{
+  "document_id": "sample_paper",
+  "cartridge_id": "particle_physics",
+  "qualified_spans": [
+    {
+      "span_id": "span_001",
+      "block_id": "blk_003_0012",
+      "section_id": "sample_paper:sec_3",
+      "text": "The correction arises because the decay rates are evaluated using physical hadron mass spectrum.",
+      "role_labels": ["correction"],
+      "qualification": {
+        "status": "accepted",
+        "claim_tier": "paper_core",
+        "claim_type_candidate": "correction",
+        "granularity": "good",
+        "evidence_adequacy": "sufficient",
+        "reviewability": "good"
+      },
+      "edit_suggestions": {
+        "should_split": false,
+        "should_merge_with_prev": false,
+        "should_merge_with_next": false,
+        "normalized_text_hint": "The correction originates from use of the physical hadron mass spectrum."
+      },
+      "reason": "Reusable source-backed correction statement with explicit causal content.",
+      "confidence": 0.92
+    }
+  ],
+  "rejected_spans": [],
+  "deferred_spans": [],
+  "summary_stats": {
+    "accepted": 1,
+    "rejected": 0,
+    "deferred": 0,
+    "split_suggested": 0,
+    "merge_suggested": 0
+  },
+  "validation_issues": []
+}
