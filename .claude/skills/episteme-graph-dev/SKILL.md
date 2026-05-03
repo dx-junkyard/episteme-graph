@@ -14,6 +14,8 @@ PDF教材からの知識抽出、RAGベースの対話型学習、コース管�
 
 ## アーキテクチャ
 
+### FastAPI バックエンド（backend/）
+
 | モジュール | 役割 | 主要ファイル |
 |---|---|---|
 | `backend/api/main.py` | FastAPI アプリ本体 (lifespan, CORS, ルーター統合) | エントリポイント |
@@ -32,6 +34,26 @@ PDF教材からの知識抽出、RAGベースの対話型学習、コース管�
 | `backend/core/storage.py` | MinIO ストレージ | S3互換ファイル管理 |
 | `frontend/public/js/app.js` | 学習 UI | ES6+ SPA |
 | `frontend/public/js/admin.js` | 管理 UI | ES5互換 Vanilla JS |
+
+### PDF解析Agentパイプライン（src/episteme_graph/）
+
+ドキュメントアップロード後の処理をコース作成と切り離して実行するagent群。
+FastAPIバックエンドとは**独立したPythonパッケージ**として実装する。
+
+| モジュール | 役割 |
+|---|---|
+| `src/episteme_graph/agents/document_structure/` | DocumentStructureAgent (#216) |
+| `src/episteme_graph/agents/paper_skeleton/` | PaperSkeletonAgent (#217) |
+| `src/episteme_graph/agents/rhetorical_role/` | RhetoricalRoleAgent (#218) |
+| `src/episteme_graph/agents/claim_qualification/` | ClaimQualificationAgent (#219) |
+| `src/episteme_graph/agents/equation_semantics/` | EquationSemanticsAgent (#220) |
+| `src/episteme_graph/agents/thesis_reconstruction/` | ThesisReconstructionAgent (#221) |
+| `src/episteme_graph/agents/dsl_linking/` | DSLLinkingAgent (#222) |
+| `src/episteme_graph/agents/component_assembly/` | ComponentAssemblyAgent (#223) |
+| `backend/cartridges/<cartridge_id>/` | ドメインカートリッジ定義（全Agent共有） |
+
+**重要**: agentの実装は `src/episteme_graph/` に置き、`backend/` には置かない。
+ただしカートリッジファイル（`backend/cartridges/`）は両方から参照される。
 
 ## 技術スタックの現状
 
