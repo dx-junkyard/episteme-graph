@@ -1,0 +1,41 @@
+{
+  "document_id": "sample_paper",
+  "components_version": "v1",
+  "cartridge_id": "particle_physics",
+  "components": [
+    {
+      "component_id": "comp_001",
+      "component_type": "PaperRelationComponent",
+      "label": "total-rate sum rule derivation",
+      "summary": "Derives the normalized total decay-rate sum rule under heavy quark and zero-recoil assumptions.",
+      "inputs": [
+        {"name": "differential_decay_rate_relation", "node_refs": ["n2"], "claim_ids": ["claim:b2:s2"], "equation_ids": ["eq_1_2"]}
+      ],
+      "outputs": [
+        {"name": "total_decay_rate_sum_rule", "node_refs": ["n3"], "claim_ids": ["claim:b4:s4"], "equation_ids": ["eq_3_14"]}
+      ],
+      "preconditions": [
+        {"text": "heavy quark limit", "claim_ids": ["claim:b1:s1"], "equation_ids": []}
+      ],
+      "cautions": [
+        {"text": "form-factor uncertainties qualify the result", "claim_ids": ["claim:b5:s5"], "equation_ids": []}
+      ],
+      "dependencies": [],
+      "evidence_refs": {
+        "claim_ids": ["claim:b1:s1", "claim:b2:s2", "claim:b4:s4"],
+        "equation_ids": ["eq_1_2", "eq_3_14"],
+        "thesis_refs": ["support:derivation_core:0"],
+        "dsl_refs": {"node_ids": ["n2", "n3"], "edge_ids": ["e1"]}
+      },
+      "reason": "Reusable derivation unit with explicit prerequisites and output relation.",
+      "confidence": 0.9,
+      "review_notes": []
+    }
+  ],
+  "assembly_hints": [
+    {"hint_type": "candidate_core_component", "component_ids": ["comp_001"], "reason": "Central derivation component."}
+  ],
+  "review_notes": [],
+  "confidence": 0.9,
+  "validation_issues": []
+}

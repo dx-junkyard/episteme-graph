@@ -1,0 +1,43 @@
+{
+  "document_id": "sample_paper",
+  "cartridge_id": "particle_physics",
+  "equations": [
+    {
+      "equation_id": "eq_3_14",
+      "block_id": "blk_203",
+      "section_id": "sample_paper:sec_3_1",
+      "section_title": "3.1 Formulation",
+      "label": "3.14",
+      "text": "RΛc / RΛcSM = 1/4 RD / RDSM + 3/4 RD* / RD*SM (3.14)",
+      "latex": null,
+      "plain_text": "RLambdac / RLambdacSM = 1/4 RD / RDSM + 3/4 RD* / RD*SM (3.14)",
+      "equation_role": {
+        "primary": "equation_relation",
+        "secondary": ["equation_result"],
+        "confidence": 0.94,
+        "reason": "Normalized sum-rule relation in the formulation section."
+      },
+      "defined_symbols": [
+        {"symbol": "RΛc", "definition_status": "used", "evidence_text": null},
+        {"symbol": "RD", "definition_status": "used", "evidence_text": null},
+        {"symbol": "RD*", "definition_status": "used", "evidence_text": null}
+      ],
+      "local_assumptions": [
+        {
+          "text": "The relation holds in the heavy quark and zero-recoil limits.",
+          "source_block_ids": ["blk_198", "blk_199"]
+        }
+      ],
+      "derivation_links": {
+        "from_equations": ["eq_1_2"],
+        "to_equations": [],
+        "linked_text_spans": [
+          {"span_id": "span_301", "relation": "introduced_by"}
+        ]
+      },
+      "summary": "Normalized total decay-rate sum rule relating RΛc, RD, and RD*.",
+      "review_flags": []
+    }
+  ],
+  "validation_issues": []
+}
