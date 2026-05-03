@@ -1,0 +1,123 @@
+{
+  "document_id": "doc_sample_theory_paper",
+  "skeleton_version": "v1",
+  "cartridge_id": "particle_physics",
+  "paper_goal": {
+    "text": "Derive a quantum correction to classical Rutherford scattering cross-section under the Born approximation and quantify its dependence on the momentum transfer.",
+    "evidence_block_ids": ["blk_001_0001", "blk_001_0003"],
+    "reason": "Abstract and introduction both state the derivation goal explicitly.",
+    "confidence": 0.88
+  },
+  "central_question": {
+    "text": "How does the quantum mechanical scattering amplitude differ from the classical prediction for Coulomb potential, and what is the leading-order correction?",
+    "evidence_block_ids": ["blk_001_0003", "blk_002_0010"],
+    "reason": "Introduction formulates this as the primary open question.",
+    "confidence": 0.85
+  },
+  "headline_claim": {
+    "text": "The Born approximation yields a differential cross-section that coincides with the classical Rutherford formula to leading order, with quantum corrections suppressed by factors of ℏ/pa where a is the range of the potential.",
+    "evidence_block_ids": ["blk_005_0042", "blk_005_0045"],
+    "reason": "This is stated as the main result in the derivation section and echoed in the conclusion.",
+    "confidence": 0.82
+  },
+  "supporting_subclaims": [
+    {
+      "subclaim_id": "subclaim_1",
+      "text": "The transition matrix element T_fi is dominated by the Fourier transform of the Coulomb potential at the relevant momentum transfer q.",
+      "role": "supporting_claim",
+      "evidence_block_ids": ["blk_003_0022", "blk_003_0025"],
+      "reason": "Derivation section introduces T_fi and shows the Coulomb dominance explicitly.",
+      "confidence": 0.80
+    },
+    {
+      "subclaim_id": "subclaim_2",
+      "text": "At low energies, higher-order Born corrections become significant and the approximation breaks down.",
+      "role": "limitation",
+      "evidence_block_ids": ["blk_006_0051"],
+      "reason": "Uncertainty/correction section discusses validity bounds.",
+      "confidence": 0.75
+    }
+  ],
+  "logical_blocks": [
+    {
+      "block_id": "logic_1",
+      "block_type": "problem_setting",
+      "label": "Classical vs. quantum scattering",
+      "section_ids": ["doc_sample_theory_paper:sec_1"],
+      "evidence_block_ids": ["blk_001_0003", "blk_002_0008"],
+      "summary": "Establishes why classical Rutherford scattering is insufficient and motivates a quantum treatment via the Schrödinger equation.",
+      "reason": "Introduction framing makes this the entry problem.",
+      "confidence": 0.90
+    },
+    {
+      "block_id": "logic_2",
+      "block_type": "assumptions",
+      "label": "Born approximation validity conditions",
+      "section_ids": ["doc_sample_theory_paper:sec_2"],
+      "evidence_block_ids": ["blk_002_0012", "blk_002_0015"],
+      "summary": "Assumes weak potential V(r) ≪ E, single-scattering regime, and plane-wave asymptotic states.",
+      "reason": "Methods section explicitly lists the approximation conditions before the derivation.",
+      "confidence": 0.87
+    },
+    {
+      "block_id": "logic_3",
+      "block_type": "derivation",
+      "label": "Born amplitude and cross-section",
+      "section_ids": ["doc_sample_theory_paper:sec_3"],
+      "evidence_block_ids": ["blk_003_0020", "blk_003_0025", "blk_004_0033"],
+      "summary": "Derives the first-order Born amplitude ⟨k'|T|k⟩ and converts to differential cross-section dσ/dΩ via the optical theorem.",
+      "reason": "Core computation section labeled 'Derivation' with explicit equation chain.",
+      "confidence": 0.92
+    },
+    {
+      "block_id": "logic_4",
+      "block_type": "core_relation",
+      "label": "Rutherford cross-section recovery",
+      "section_ids": ["doc_sample_theory_paper:sec_3"],
+      "evidence_block_ids": ["blk_005_0042", "blk_005_0045"],
+      "summary": "Shows that dσ/dΩ = (Ze²/4E)² · sin⁻⁴(θ/2), reproducing the classical Rutherford formula.",
+      "reason": "This is the central quantitative result presented as the main derivation outcome.",
+      "confidence": 0.91
+    },
+    {
+      "block_id": "logic_5",
+      "block_type": "correction",
+      "label": "Higher-order corrections and validity bounds",
+      "section_ids": ["doc_sample_theory_paper:sec_4"],
+      "evidence_block_ids": ["blk_006_0051", "blk_006_0054"],
+      "summary": "Quantifies when second-order Born terms become non-negligible; introduces the Sommerfeld parameter η = Ze²/ℏv as the expansion parameter.",
+      "reason": "Dedicated section on corrections explicitly introduces η and its role.",
+      "confidence": 0.80
+    },
+    {
+      "block_id": "logic_6",
+      "block_type": "conclusion",
+      "label": "Summary and physical interpretation",
+      "section_ids": ["doc_sample_theory_paper:sec_5"],
+      "evidence_block_ids": ["blk_008_0070"],
+      "summary": "Summarizes the equivalence of classical and quantum results at leading order and identifies the physical reason (long-range Coulomb potential).",
+      "reason": "Conclusion section restates the main result and provides the physical picture.",
+      "confidence": 0.88
+    }
+  ],
+  "excluded_regions": [
+    {
+      "region_type": "prior_work",
+      "section_ids": ["doc_sample_theory_paper:sec_1"],
+      "block_ids": ["blk_001_0005", "blk_001_0007"],
+      "reason": "References to Rutherford's original 1911 experiment and subsequent measurements; these are historical context, not part of the logical backbone."
+    },
+    {
+      "region_type": "meta",
+      "section_ids": [],
+      "block_ids": ["blk_002_0009"],
+      "reason": "Section transition sentence ('In the following we derive...') is structural meta-text."
+    }
+  ],
+  "review_notes": [
+    "Appendix not included in backbone; contains only worked integral examples.",
+    "Confidence on correction block is provisional — teacher review recommended for η threshold values."
+  ],
+  "confidence": 0.86,
+  "validation_issues": []
+}
