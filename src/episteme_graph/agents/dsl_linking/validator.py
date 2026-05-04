@@ -1,14 +1,25 @@
 """Validation for DSLLinkingAgent outputs."""
 from __future__ import annotations
 
+import re
+
 from .schema import (
+    CONCRETE_NODE_TYPES,
     CORE_PREDICATES,
     GRAPH_HINT_TYPES,
     NODE_TYPES,
     POLARITIES,
+    PREDICATE_PREFERRED_SOURCES,
+    PREDICATE_PREFERRED_TARGETS,
+    PROXY_NODE_TYPES,
     SOURCE_KINDS,
     DSLLinkingResult,
     ValidationIssue,
+)
+
+_EVAL_VALUE_PATTERNS = (
+    re.compile(r"\b(small|large|negligible|significant|sufficient|adequate)\b", re.IGNORECASE),
+    re.compile(r"\b(is|are|was|were)\s+(small|large|negligible|good|bad)\b", re.IGNORECASE),
 )
 
 
@@ -18,11 +29,13 @@ class DSLLinkingValidator:
         if not result.nodes:
             return [ValidationIssue("no_nodes", "error", "nodes is empty", "nodes")]
         node_ids = {n.node_id for n in result.nodes}
+        node_types = {n.node_id: n.node_type for n in result.nodes}
         issues += self._check_nodes(result)
-        issues += self._check_edges(result, node_ids)
+        issues += self._check_edges(result, node_ids, node_types)
         issues += self._check_graph_hints(result, node_ids)
         issues += self._check_confidence(result)
         issues += self._check_graph_shape(result)
+        issues += self._check_concrete_node_coverage(result)
         return issues
 
     def _check_nodes(self, result: DSLLinkingResult) -> list[ValidationIssue]:
@@ -66,6 +79,7 @@ class DSLLinkingValidator:
         self,
         result: DSLLinkingResult,
         node_ids: set[str],
+        node_types: dict[str, str],
     ) -> list[ValidationIssue]:
         issues = []
         seen_edges: dict[tuple[str, str, str], int] = {}
@@ -112,6 +126,14 @@ class DSLLinkingValidator:
                     f"{edge.edge_id} is high-confidence but lacks evidence_refs",
                     f"edges[{edge.edge_id}].evidence_refs",
                 ))
+            if not _has_refs(edge.evidence_refs):
+                issues.append(ValidationIssue(
+                    "edge_missing_evidence_refs",
+                    "warning",
+                    f"{edge.edge_id} has no claim/equation/thesis evidence_refs",
+                    f"edges[{edge.edge_id}].evidence_refs",
+                ))
+            issues += self._check_predicate_semantics(edge, node_types)
             if not (0.0 <= edge.confidence <= 1.0):
                 issues.append(ValidationIssue(
                     "confidence_out_of_range",
@@ -185,6 +207,75 @@ class DSLLinkingValidator:
                 "warning",
                 "meta/prior-work-like nodes dominate the graph",
                 "nodes",
+            ))
+        proxy_count = sum(1 for n in result.nodes if n.node_type in PROXY_NODE_TYPES)
+        if result.nodes and proxy_count / len(result.nodes) > 0.5:
+            issues.append(ValidationIssue(
+                "proxy_node_dominance",
+                "warning",
+                f"proxy nodes are {proxy_count}/{len(result.nodes)}; favor concrete typed nodes",
+                "nodes",
+            ))
+        return issues
+
+    def _check_concrete_node_coverage(
+        self, result: DSLLinkingResult
+    ) -> list[ValidationIssue]:
+        if len(result.nodes) < 4:
+            return []
+        concrete = {n.node_type for n in result.nodes if n.node_type in CONCRETE_NODE_TYPES}
+        focus = {
+            "EquationRelation",
+            "Observable",
+            "Approximation",
+            "CorrectionSource",
+            "UncertaintySource",
+        }
+        if concrete.isdisjoint(focus):
+            return [ValidationIssue(
+                "missing_concrete_node_types",
+                "warning",
+                "graph lacks any of EquationRelation/Observable/Approximation/CorrectionSource/UncertaintySource",
+                "nodes",
+            )]
+        return []
+
+    def _check_predicate_semantics(
+        self,
+        edge,
+        node_types: dict[str, str],
+    ) -> list[ValidationIssue]:
+        issues: list[ValidationIssue] = []
+        from_type = node_types.get(edge.from_node_id)
+        to_type = node_types.get(edge.to_node_id)
+        if edge.core_predicate == "EQUIVALENT":
+            if from_type and to_type and from_type != to_type:
+                issues.append(ValidationIssue(
+                    "equivalent_predicate_misuse",
+                    "warning",
+                    f"{edge.edge_id} uses EQUIVALENT across different node_types "
+                    f"({from_type} -> {to_type}); reserve EQUIVALENT for genuine equivalence",
+                    f"edges[{edge.edge_id}].core_predicate",
+                ))
+        preferred_targets = PREDICATE_PREFERRED_TARGETS.get(edge.core_predicate)
+        if preferred_targets and to_type and to_type in CONCRETE_NODE_TYPES \
+                and to_type not in preferred_targets:
+            issues.append(ValidationIssue(
+                "predicate_target_mismatch",
+                "info",
+                f"{edge.edge_id} {edge.core_predicate} -> {to_type} is unusual; "
+                f"expected target in {sorted(preferred_targets)}",
+                f"edges[{edge.edge_id}].core_predicate",
+            ))
+        preferred_sources = PREDICATE_PREFERRED_SOURCES.get(edge.core_predicate)
+        if preferred_sources and from_type and from_type in CONCRETE_NODE_TYPES \
+                and from_type not in preferred_sources:
+            issues.append(ValidationIssue(
+                "predicate_source_mismatch",
+                "info",
+                f"{edge.edge_id} {from_type} -{edge.core_predicate}-> is unusual; "
+                f"expected source in {sorted(preferred_sources)}",
+                f"edges[{edge.edge_id}].core_predicate",
             ))
         return issues
 
