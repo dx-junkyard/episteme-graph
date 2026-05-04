@@ -168,7 +168,7 @@ def _get_document_ids_for_course(session: Any, course_id: str) -> list[str]:
     placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
     params = {f"mid_{i}": mid for i, mid in enumerate(material_ids)}
     doc_rows = session.execute(
-        sa_text(f"SELECT DISTINCT id::text FROM documents WHERE material_id IN ({placeholders})"),
+        sa_text(f"SELECT DISTINCT document_id::text FROM chunks WHERE material_id IN ({placeholders})"),
         params,
     ).fetchall()
     return [str(r[0]) for r in doc_rows if r[0]]
