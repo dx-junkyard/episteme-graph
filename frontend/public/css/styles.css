@@ -2079,6 +2079,167 @@ body {
   background: var(--color-bg-secondary);
 }
 
+/* Issue #232: 左ペインタブ */
+.ls-nav-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-secondary);
+  flex-shrink: 0;
+}
+
+.ls-nav-tab {
+  flex: 1;
+  padding: 7px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--color-border);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ls-nav-tab:last-child {
+  border-right: none;
+}
+
+.ls-nav-tab:hover {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-primary);
+}
+
+.ls-nav-tab.active {
+  background: var(--color-text-info);
+  color: #fff;
+}
+
+/* コースタブ */
+.ls-course-header {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-secondary);
+  display: grid;
+  gap: 2px;
+}
+
+.ls-course-chapter {
+  padding: 7px 12px 5px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.ls-course-topic {
+  padding: 6px 12px 6px 24px;
+  border-bottom: 1px solid var(--color-border);
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  transition: background 0.12s;
+}
+
+.ls-course-topic:hover,
+.ls-course-topic.active {
+  background: var(--color-bg-tertiary);
+}
+
+.ls-course-topic.active {
+  border-left: 3px solid var(--color-text-info);
+}
+
+.ls-topic-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--color-text-tertiary);
+}
+
+.ls-topic-status-generated .ls-topic-dot,
+.ls-topic-dot.ls-topic-status-generated { background: var(--color-text-success); }
+.ls-topic-status-edited .ls-topic-dot,
+.ls-topic-dot.ls-topic-status-edited { background: var(--color-text-info); }
+.ls-topic-status-audio_generated .ls-topic-dot,
+.ls-topic-dot.ls-topic-status-audio_generated { background: #9f7aea; }
+.ls-topic-status-needs_review .ls-topic-dot,
+.ls-topic-dot.ls-topic-status-needs_review { background: var(--color-text-warning); }
+
+.ls-topic-label {
+  font-size: 12px;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* コンポーネントタブ */
+.ls-component-item {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.ls-component-item:hover,
+.ls-component-item.active {
+  background: var(--color-bg-tertiary);
+}
+
+.ls-component-item.active {
+  border-left: 3px solid var(--color-text-info);
+}
+
+.ls-component-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+
+.ls-component-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.ls-component-type {
+  font-size: 11px;
+  color: var(--color-text-info);
+  margin-bottom: 2px;
+}
+
+.ls-component-summary {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  margin-bottom: 3px;
+  line-height: 1.4;
+}
+
+.ls-component-meta {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.ls-component-edge {
+  padding: 4px 12px;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  border-bottom: 1px solid var(--color-border);
+}
+
 .ls-chunk-list {
   overflow-y: auto;
   flex: 1;

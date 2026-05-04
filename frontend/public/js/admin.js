@@ -2533,6 +2533,10 @@
     theoryLoading: false,
     claimsLoading: false,
     graphLoading: false,
+    // Issue #232: 左ペインタブ
+    leftTab: "course",
+    courseStructure: null,
+    courseComponents: null,
   };
 
   var lsPersonaOptions = [
@@ -2634,6 +2638,8 @@
         lsState.analysisStatus = null;
         lsState.pipelineTask = null;
         lsState.settings = { narration_persona: "", response_persona: "" };
+        lsState.courseStructure = null;
+        lsState.courseComponents = null;
         reanalyzeBtn.disabled = true;
         generateAllBtn.disabled = true;
         audioAllBtn.disabled = true;
@@ -2645,6 +2651,7 @@
         pipelineMenuBtn.disabled = true;
         moreMenuBtn.disabled = true;
         lsRenderChunkList();
+        lsRenderLeftPanel();
         lsClearEditor();
       }
     });
@@ -2715,6 +2722,14 @@
 
     rewriteBtn.addEventListener("click", function () {
       lsRewriteScript();
+    });
+
+    // Issue #232: 左ペインタブ切り替え
+    document.querySelectorAll(".ls-nav-tab").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var tab = btn.getAttribute("data-ls-nav");
+        if (tab) lsSwitchNavTab(tab);
+      });
     });
 
     document.getElementById("ls-work-tabs").addEventListener("click", function (e) {
@@ -2957,15 +2972,222 @@
         lsState.analysisStatus = null;
         lsState.pipelineTask = null;
         lsRenderChunkList();
+        lsRenderLeftPanel();
         lsClearEditor();
         lsRefreshAnalysisStatus(courseId);
         // Issue #139: 進行中タスクがあればポーリング状態に復帰
         lsCheckActiveTask(courseId);
+        // Issue #232: コース構造とコンポーネントを非同期ロード
+        lsLoadCourseStructure(courseId);
+        lsLoadCourseComponents(courseId);
       })
       .catch(function () {
         listEl.innerHTML = '<div style="padding:16px;color:var(--color-text-danger);font-size:13px">読み込みに失敗しました</div>';
       });
   }
+
+  // ── Issue #232: 左ペインタブ管理 ───────────────────────────────────────
+
+  function lsSwitchNavTab(tab) {
+    lsState.leftTab = tab;
+    document.querySelectorAll(".ls-nav-tab").forEach(function (btn) {
+      btn.classList.toggle("active", btn.getAttribute("data-ls-nav") === tab);
+    });
+    var courseList = document.getElementById("ls-course-list");
+    var chunkList = document.getElementById("ls-chunk-list");
+    var componentsList = document.getElementById("ls-components-list");
+    if (courseList) courseList.hidden = tab !== "course";
+    if (chunkList) chunkList.hidden = tab !== "document";
+    if (componentsList) componentsList.hidden = tab !== "components";
+    if (tab === "course") lsRenderCourseStructure();
+    if (tab === "document") lsRenderChunkList();
+    if (tab === "components") lsRenderComponentsTab();
+  }
+
+  function lsRenderLeftPanel() {
+    lsSwitchNavTab(lsState.leftTab || "course");
+  }
+
+  function lsLoadCourseStructure(courseId) {
+    var el = document.getElementById("ls-course-list");
+    if (!el) return;
+    if (lsState.leftTab === "course") {
+      el.innerHTML = '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">読み込み中...</div>';
+    }
+    apiFetch("/admin/courses/" + courseId + "/lecture-studio/course-structure")
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        if (!data || lsState.courseId !== courseId) return;
+        lsState.courseStructure = data;
+        if (lsState.leftTab === "course") lsRenderCourseStructure();
+      })
+      .catch(function () {
+        lsState.courseStructure = null;
+        if (lsState.leftTab === "course") lsRenderCourseStructure();
+      });
+  }
+
+  function lsLoadCourseComponents(courseId) {
+    var el = document.getElementById("ls-components-list");
+    if (!el) return;
+    if (lsState.leftTab === "components") {
+      el.innerHTML = '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">読み込み中...</div>';
+    }
+    apiFetch("/admin/courses/" + courseId + "/lecture-studio/components")
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        if (!data || lsState.courseId !== courseId) return;
+        lsState.courseComponents = data;
+        if (lsState.leftTab === "components") lsRenderComponentsTab();
+      })
+      .catch(function () {
+        lsState.courseComponents = null;
+        if (lsState.leftTab === "components") lsRenderComponentsTab();
+      });
+  }
+
+  function lsRenderCourseStructure() {
+    var el = document.getElementById("ls-course-list");
+    if (!el) return;
+    if (!lsState.courseId) {
+      el.innerHTML = '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">コースを選択してください</div>';
+      return;
+    }
+    if (!lsState.courseStructure) {
+      el.innerHTML = '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">読み込み中...</div>';
+      return;
+    }
+    var s = lsState.courseStructure;
+    var statusLabel = { draft: "未着手", partial: "一部生成", generated: "生成済み", audio_generated: "音声生成済み", no_chunks: "チャンクなし" };
+    var html = '<div class="ls-course-header">' +
+      '<div class="ls-doc-title">' + escHtml(s.title || "コース") + '</div>' +
+      '<div class="ls-doc-meta">' + escHtml(statusLabel[s.course_status] || s.course_status || "") +
+      (s.total_chunks > 0 ? ' (' + (s.generated_chunks || 0) + '/' + s.total_chunks + ')' : '') + '</div>' +
+      '</div>';
+
+    if (!s.chapters || !s.chapters.length) {
+      html += '<div style="padding:12px 16px;color:var(--color-text-tertiary);font-size:12px">章構造がありません。<br>コースビルダーでコース設計を完了してください。</div>';
+      el.innerHTML = html;
+      return;
+    }
+
+    s.chapters.forEach(function (chapter, ci) {
+      html += '<div class="ls-course-chapter">' +
+        '<span class="ls-doc-title">第' + (ci + 1) + '章: ' + escHtml(chapter.title || "") + '</span>' +
+        '</div>';
+      (chapter.topics || []).forEach(function (topic, ti) {
+        var statusCls = "ls-topic-status-" + (topic.status || "draft");
+        html += '<div class="ls-course-topic" data-chapter="' + ci + '" data-topic="' + ti + '">' +
+          '<span class="ls-topic-dot ' + statusCls + '"></span>' +
+          '<span class="ls-topic-label">' + (ci + 1) + '.' + (ti + 1) + ' ' + escHtml(topic.title || "") + '</span>' +
+          '</div>';
+      });
+    });
+
+    el.innerHTML = html;
+
+    el.querySelectorAll(".ls-course-topic").forEach(function (item) {
+      item.addEventListener("click", function () {
+        el.querySelectorAll(".ls-course-topic").forEach(function (t) { t.classList.remove("active"); });
+        item.classList.add("active");
+      });
+    });
+  }
+
+  function lsRenderComponentsTab() {
+    var el = document.getElementById("ls-components-list");
+    if (!el) return;
+    if (!lsState.courseId) {
+      el.innerHTML = '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">コースを選択してください</div>';
+      return;
+    }
+    var data = lsState.courseComponents;
+    if (!data) {
+      el.innerHTML = '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">読み込み中...</div>';
+      return;
+    }
+    var analysisLabel = {
+      not_started: "未解析",
+      pending: "解析待ち",
+      running: "解析中",
+      completed: "解析済み",
+      failed: "解析失敗",
+    };
+    var html = '<div class="ls-course-header">' +
+      '<div class="ls-doc-title">理論コンポーネント</div>' +
+      '<div class="ls-doc-meta">' + escHtml(analysisLabel[data.analysis_status] || data.analysis_status || "") +
+      ' / ' + (data.components ? data.components.length : 0) + '件</div>' +
+      '</div>';
+
+    if (data.analysis_status !== "completed" && (!data.components || !data.components.length)) {
+      html += '<div style="padding:12px 16px;color:var(--color-text-tertiary);font-size:12px">' +
+        (data.analysis_status === "running" ? "Agent解析実行中です..." :
+         data.analysis_status === "pending" ? "Agent解析待ちです..." :
+         "Agent解析が未完了です。<br>パイプラインを実行してコンポーネントを生成してください。") +
+        '</div>';
+      el.innerHTML = html;
+      return;
+    }
+
+    var statusLabel = { teacher_reviewed: "承認済み", rejected: "却下", draft: "下書き", candidate: "候補" };
+    var reviewLabel = { teacher_review_required: "要確認", approved: "承認済み", rejected: "却下" };
+
+    (data.components || []).forEach(function (c) {
+      var depEdges = (data.all_edges || []).filter(function (e) {
+        return e.target === c.id || e.from === c.id;
+      });
+      var depCount = depEdges.length;
+      html +=
+        '<div class="ls-component-item" data-component-id="' + escHtml(c.id) + '">' +
+          '<div class="ls-component-head">' +
+            '<span class="ls-component-name">' + escHtml(c.name || "無題") + '</span>' +
+            '<span class="ls-theory-badge">' + escHtml(statusLabel[c.status] || c.status || "") + '</span>' +
+          '</div>' +
+          '<div class="ls-component-type">' + escHtml(c.component_type || "") + '</div>' +
+          '<div class="ls-component-summary">' + escHtml((c.summary || "").substring(0, 80) + (c.summary && c.summary.length > 80 ? "..." : "")) + '</div>' +
+          '<div class="ls-component-meta">' +
+            'inputs: ' + (c.inputs ? c.inputs.length : 0) +
+            ' / outputs: ' + (c.outputs ? c.outputs.length : 0) +
+            ' / precond: ' + (c.preconditions ? c.preconditions.length : 0) +
+            (depCount > 0 ? ' / 依存: ' + depCount : '') +
+          '</div>' +
+          '<div class="ls-component-meta">' +
+            escHtml(reviewLabel[c.review_status] || c.review_status || "") +
+            ' / ' + escHtml(c.maturity_level || "") +
+          '</div>' +
+        '</div>';
+    });
+
+    if (data.all_edges && data.all_edges.length) {
+      html += '<div class="ls-course-header" style="margin-top:8px">' +
+        '<div class="ls-doc-title">依存関係</div>' +
+        '<div class="ls-doc-meta">' + data.all_edges.length + '件</div>' +
+        '</div>';
+      (data.all_edges || []).forEach(function (edge) {
+        var rel = edge.relation_type || edge.edge_type || edge.type || "depends_on";
+        var src = edge.source_name || edge.from || (edge.source || "").substring(0, 8);
+        var tgt = edge.target_name || edge.to || (edge.target || "").substring(0, 8);
+        html += '<div class="ls-component-edge">' +
+          '<span class="ls-theory-ref">' + escHtml(rel) + '</span>' +
+          ' ' + escHtml(src) + ' → ' + escHtml(tgt) +
+          '</div>';
+      });
+    }
+
+    el.innerHTML = html;
+
+    el.querySelectorAll(".ls-component-item").forEach(function (item) {
+      item.addEventListener("click", function () {
+        el.querySelectorAll(".ls-component-item").forEach(function (t) { t.classList.remove("active"); });
+        item.classList.add("active");
+        var componentId = item.getAttribute("data-component-id");
+        var component = (lsState.courseComponents && lsState.courseComponents.components || []).find(function (c) { return c.id === componentId; });
+        if (component) lsState.selectedTheoryComponentId = componentId;
+      });
+    });
+  }
+
+  // ────────────────────────────────────────────────────────────────────────────
 
   function lsRefreshAnalysisStatus(courseId) {
     if (!courseId) return;

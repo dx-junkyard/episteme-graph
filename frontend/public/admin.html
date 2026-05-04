@@ -220,10 +220,23 @@
 
         <!-- Three-panel layout -->
         <div class="ls-panels">
-          <!-- Left: document structure navigation -->
+          <!-- Left: navigation panel with 3 tabs (Issue #232) -->
           <div class="ls-nav-panel">
-            <div class="ls-nav-header">文書構造</div>
-            <div id="ls-chunk-list" class="ls-chunk-list">
+            <div class="ls-nav-tabs">
+              <button class="ls-nav-tab active" data-ls-nav="course">コース</button>
+              <button class="ls-nav-tab" data-ls-nav="document">文書構造</button>
+              <button class="ls-nav-tab" data-ls-nav="components">コンポーネント</button>
+            </div>
+            <!-- コースタブ -->
+            <div id="ls-course-list" class="ls-chunk-list">
+              <div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">コースを選択してください</div>
+            </div>
+            <!-- 文書構造タブ -->
+            <div id="ls-chunk-list" class="ls-chunk-list" hidden>
+              <div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">コースを選択してください</div>
+            </div>
+            <!-- コンポーネントタブ -->
+            <div id="ls-components-list" class="ls-chunk-list" hidden>
               <div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">コースを選択してください</div>
             </div>
           </div>
