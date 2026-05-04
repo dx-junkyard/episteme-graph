@@ -142,6 +142,62 @@ class EquationSemanticsResult:
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
 
+    def to_equations_export(
+        self,
+        *,
+        evidence_index: dict | None = None,
+        claim_index: dict | None = None,
+    ) -> list[dict]:
+        """Return equations.json first-class export shape.
+
+        各 record を Issue #237 で定義された equations.json の形式に変換する。
+
+        Parameters
+        ----------
+        evidence_index:
+            block_id -> [evidence_id, ...] のマップ（オプション）。
+            指定があれば source_evidence_ids に展開する。
+        claim_index:
+            equation_id -> [claim_id, ...] のマップ（オプション）。
+            指定があれば linked_claim_ids に展開する。
+        """
+        evidence_index = evidence_index or {}
+        claim_index = claim_index or {}
+        out: list[dict] = []
+        for r in self.equations:
+            primary_role = r.equation_role.primary if r.equation_role else "unknown"
+            secondary = list(r.equation_role.secondary) if r.equation_role else []
+            used = [s.symbol for s in r.defined_symbols if s.definition_status == "used"]
+            defined = [s.symbol for s in r.defined_symbols if s.definition_status in ("defined", "redefined")]
+            introduced = [s.symbol for s in r.defined_symbols if s.definition_status == "defined"]
+            local_assumptions = [a.text for a in r.local_assumptions]
+            derivation_links = {
+                "from_equations": list(r.derivation_links.from_equations) if r.derivation_links else [],
+                "to_equations": list(r.derivation_links.to_equations) if r.derivation_links else [],
+            }
+            out.append({
+                "equation_id": r.equation_id,
+                "document_id": self.document_id,
+                "label": r.label,
+                "latex": r.latex,
+                "plain_text": r.plain_text or r.text,
+                "equation_role": {
+                    "primary": primary_role,
+                    "secondary": secondary,
+                },
+                "semantic_kind": r.summary or None,
+                "introduced_symbols": introduced,
+                "used_symbols": used,
+                "defined_symbols": defined,
+                "local_assumptions": local_assumptions,
+                "derivation_links": derivation_links,
+                "linked_claim_ids": list(claim_index.get(r.equation_id, [])),
+                "source_evidence_ids": list(evidence_index.get(r.block_id, [])),
+                "review_flags": list(r.review_flags),
+                "section_id": r.section_id,
+            })
+        return out
+
     @classmethod
     def from_dict(cls, d: dict) -> "EquationSemanticsResult":
         records = []
