@@ -165,6 +165,7 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
         ).fetchall()
 
         chunks = []
+        graph_structure_cache: dict[str, dict] = {}
         for row in rows:
             raw_text = row[2] or ""
             display_text = row[3] or raw_text
@@ -179,8 +180,23 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
                 formulas,
             )
             material_id = row[6] or ""
-            variables = row[11] if row[11] is not None else _extract_document_variables(knowledge_graph)
-            ancestors = row[12] if isinstance(row[12], list) else _extract_document_edges(knowledge_graph)
+            document_id = str(row[7]) if row[7] else ""
+            graph_structure = {}
+            if document_id:
+                if document_id not in graph_structure_cache:
+                    graph_structure_cache[document_id] = _extract_component_graph_structure(document_id)
+                graph_structure = graph_structure_cache.get(document_id) or {}
+            variables = (
+                row[11]
+                if row[11] is not None
+                else _extract_document_variables(knowledge_graph) or graph_structure.get("variables")
+            )
+            ancestors = (
+                row[12]
+                if isinstance(row[12], list)
+                else _extract_document_edges(knowledge_graph) or graph_structure.get("ancestors") or []
+            )
+            smiles_dsl = row[10] or _extract_document_dsl(knowledge_graph) or graph_structure.get("smiles_dsl", "")
             chunks.append({
                 "id": str(row[0]),
                 "chunk_index": row[1],
@@ -191,11 +207,11 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
                 "stored_spoken_text": row[4] or "",
                 "formulas": formulas,
                 "material_id": material_id,
-                "document_id": str(row[7]) if row[7] else "",
+                "document_id": document_id,
                 "page_start": row[8],
                 "page_end": row[9],
                 "pdf_url": f"/admin/materials/{material_id}/pdf" if material_id else None,
-                "smiles_dsl": row[10] or _extract_document_dsl(knowledge_graph),
+                "smiles_dsl": smiles_dsl,
                 "variables": variables,
                 "ancestors": ancestors,
                 "neo4j_node_id": row[13] or row[15] or "",
@@ -239,6 +255,72 @@ def _extract_document_dsl(knowledge_graph: dict) -> str:
         if dsl:
             return dsl
     return str(knowledge_graph.get("smiles_dsl") or "").strip()
+
+
+def _extract_component_graph_structure(document_id: str) -> dict:
+    """Return document-level DSL saved by the agent pipeline for structure views."""
+    if not document_id:
+        return {}
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT graph_json
+                FROM theory_component_graphs
+                WHERE document_id = :document_id
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """),
+            {"document_id": document_id},
+        ).fetchone()
+    finally:
+        session.close()
+    graph = _json_obj(row[0]) if row else {}
+    dsl = graph.get("dsl") if isinstance(graph.get("dsl"), dict) else {}
+    nodes = dsl.get("nodes") if isinstance(dsl.get("nodes"), list) else []
+    edges = dsl.get("edges") if isinstance(dsl.get("edges"), list) else []
+    if not nodes and not edges:
+        return {}
+    node_lines = []
+    variables = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        node_id = str(node.get("id") or "").strip()
+        value = str(node.get("value") or "").strip()
+        node_type = str(node.get("node_type") or "Node").strip()
+        if not node_id and not value:
+            continue
+        node_lines.append(f"{node_id}:{node_type}({value})")
+        variables.append({
+            "id": node_id or value,
+            "name": value or node_id,
+            "type": node_type,
+            "description": "",
+        })
+    edge_lines = []
+    ancestors = []
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        source = str(edge.get("from") or edge.get("source") or "").strip()
+        target = str(edge.get("to") or edge.get("target") or "").strip()
+        predicate = str(edge.get("predicate") or edge.get("relation") or "RELATED_TO").strip()
+        verb = str(edge.get("verb") or "").strip()
+        polarity = str(edge.get("polarity") or "").strip()
+        if not source or not target:
+            continue
+        label = "/".join(part for part in (predicate, verb, polarity) if part)
+        edge_lines.append(f"{source} -[{label}]-> {target}")
+        ancestors.append({
+            "source": source,
+            "target": target,
+            "relation": predicate,
+            "verb": verb,
+            "polarity": polarity,
+        })
+    smiles_dsl = "\n".join([*node_lines, *edge_lines]).strip()
+    return {"smiles_dsl": smiles_dsl, "variables": variables or None, "ancestors": ancestors}
 
 
 def _extract_document_variables(knowledge_graph: dict) -> dict | list | None:

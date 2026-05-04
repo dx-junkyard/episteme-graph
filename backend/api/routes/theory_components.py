@@ -233,6 +233,68 @@ def _json_value(value: Any, default: Any) -> Any:
     return default
 
 
+def _normalize_io_items(value: Any) -> list[dict]:
+    items = _json_value(value, [])
+    if not isinstance(items, list):
+        return []
+    normalized = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or item.get("name") or item.get("text") or item.get("condition") or "").strip()
+        if not label:
+            continue
+        copied = dict(item)
+        copied["label"] = label
+        copied["name"] = str(copied.get("name") or label)
+        copied["type"] = str(copied.get("type") or copied.get("concept_type") or "Concept")
+        copied["concept_type"] = str(copied.get("concept_type") or copied.get("type") or "Concept")
+        copied["required"] = bool(copied.get("required", True))
+        copied["description"] = str(copied.get("description") or copied.get("evidence_text") or "")
+        copied["support_status"] = str(copied.get("support_status") or "source_backed")
+        copied["evidence_claims"] = copied.get("evidence_claims") if isinstance(copied.get("evidence_claims"), list) else []
+        copied["source_refs"] = copied.get("source_refs") if isinstance(copied.get("source_refs"), list) else []
+        copied["needs_source"] = bool(copied.get("needs_source", False))
+        normalized.append(copied)
+    return normalized
+
+
+def _normalize_condition_items(value: Any) -> list[dict]:
+    items = _json_value(value, [])
+    if not isinstance(items, list):
+        return []
+    normalized = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or item.get("condition") or item.get("text") or item.get("name") or "").strip()
+        if not label:
+            continue
+        copied = dict(item)
+        copied["label"] = label
+        copied["condition"] = str(copied.get("condition") or copied.get("text") or label)
+        copied["description"] = str(copied.get("description") or copied.get("evidence_text") or "")
+        copied["support_status"] = str(copied.get("support_status") or "source_backed")
+        copied["evidence_claims"] = copied.get("evidence_claims") if isinstance(copied.get("evidence_claims"), list) else []
+        copied["source_refs"] = copied.get("source_refs") if isinstance(copied.get("source_refs"), list) else []
+        copied["needs_source"] = bool(copied.get("needs_source", False))
+        normalized.append(copied)
+    return normalized
+
+
+def _normalize_internal_flow_items(value: Any) -> list[dict]:
+    items = _json_value(value, [])
+    if not isinstance(items, list):
+        return []
+    normalized = []
+    for item in items:
+        if isinstance(item, dict):
+            normalized.append(item)
+        elif isinstance(item, str) and item.strip():
+            normalized.append({"description": item.strip()})
+    return normalized
+
+
 class LLMStructuredOutputError(RuntimeError):
     def __init__(self, code: str, message: str, attempts: int, **context: Any) -> None:
         super().__init__(message)
@@ -276,19 +338,19 @@ def _backoff_seconds(attempt: int, base: float, is_rate_limited: bool) -> float:
 def _row_to_out(row: Any) -> TheoryComponentOut:
     data = {
         "id": str(row[0]),
-        "course_id": row[1],
+        "course_id": row[1] or "",
         "primary_chunk_id": str(row[2]) if row[2] else None,
         "name": row[3],
         "component_type": row[26] or row[4],
         "summary": row[5] or "",
         "status": row[6],
         "source_chunks": _json_value(row[7], []),
-        "inputs": _json_value(row[8], []),
-        "outputs": _json_value(row[9], []),
-        "preconditions": _json_value(row[10], []),
-        "constraints": _json_value(row[11], []),
-        "invalid_conditions": _json_value(row[12], []),
-        "dependencies": _json_value(row[13], []),
+        "inputs": _normalize_io_items(row[8]),
+        "outputs": _normalize_io_items(row[9]),
+        "preconditions": _normalize_condition_items(row[10]),
+        "constraints": _normalize_condition_items(row[11]),
+        "invalid_conditions": _normalize_condition_items(row[12]),
+        "dependencies": _normalize_condition_items(row[13]),
         "blackbox_policy": _json_value(row[14], {}),
         "validation_warnings": _json_value(row[15], []),
         "teacher_notes": row[16] or "",
@@ -297,9 +359,9 @@ def _row_to_out(row: Any) -> TheoryComponentOut:
         "maturity_level": row[19] or "paper_claim",
         "maturity_source": row[20] or "llm_proposed",
         "review_status": row[21] or "teacher_review_required",
-        "cautions": _json_value(row[22], []),
+        "cautions": _normalize_condition_items(row[22]),
         "connectors": _json_value(row[23], {}),
-        "internal_flow": _json_value(row[27], []),
+        "internal_flow": _normalize_internal_flow_items(row[27]),
         "duplicate_candidates": _json_value(row[28], []),
         "created_at": row[24].isoformat() if row[24] else "",
         "updated_at": row[25].isoformat() if row[25] else "",
@@ -702,6 +764,25 @@ def _claim_rows_for_chunk(chunk_id: str) -> list[ClaimOut]:
                 ORDER BY created_at ASC
             """),
             {"chunk_id": chunk_id},
+        ).fetchall()
+        return [_row_to_claim(row) for row in rows]
+    finally:
+        session.close()
+
+
+def _claim_rows_for_document(document_id: str) -> list[ClaimOut]:
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT id, document_id, chunk_id, source_scope, claim_type, text,
+                       normalized_text, concepts, equation, support_status, evidence_text,
+                       review_status, created_by, created_at, updated_at
+                FROM theory_claims
+                WHERE document_id = :document_id
+                ORDER BY created_at ASC
+            """),
+            {"document_id": document_id},
         ).fetchall()
         return [_row_to_claim(row) for row in rows]
     finally:
@@ -1433,6 +1514,18 @@ def _components_for_document(document_id: str) -> list[TheoryComponentOut]:
         session.close()
 
 
+def _document_id_for_chunk_id(chunk_id: str) -> str:
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT document_id FROM chunks WHERE id = CAST(:chunk_id AS uuid) LIMIT 1"),
+            {"chunk_id": chunk_id},
+        ).fetchone()
+        return str(row[0]) if row and row[0] else ""
+    finally:
+        session.close()
+
+
 def _domain_components_from_cartridge() -> list[TheoryComponentOut]:
     examples_dir = Path(__file__).resolve().parents[2] / "cartridges" / "particle_physics" / "examples"
     components: list[TheoryComponentOut] = []
@@ -1764,6 +1857,94 @@ def _build_component_graph_payload(document_id: str, components: list[TheoryComp
     }
 
 
+def _stored_component_graph(document_id: str) -> dict:
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT graph_json, validation_results
+                FROM theory_component_graphs
+                WHERE document_id = :document_id
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """),
+            {"document_id": document_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not row:
+        return {}
+    graph = _json_value(row[0], {})
+    if isinstance(graph, dict) and "validation_results" not in graph:
+        graph["validation_results"] = _json_value(row[1], [])
+    return graph if isinstance(graph, dict) else {}
+
+
+def _normalize_stored_component_graph(document_id: str, graph: dict, components: list[TheoryComponentOut]) -> dict:
+    if not graph:
+        return {}
+    component_by_id = {component.id: component for component in components}
+    normalized_nodes = []
+    seen_nodes: set[str] = set()
+    for idx, node in enumerate(graph.get("nodes") if isinstance(graph.get("nodes"), list) else []):
+        if not isinstance(node, dict):
+            continue
+        component_id = str(node.get("component_id") or node.get("id") or "").strip()
+        if not component_id or component_id in seen_nodes:
+            continue
+        component = component_by_id.get(component_id)
+        normalized_nodes.append({
+            "component_id": component_id,
+            "label": component.name if component else str(node.get("label") or node.get("agent_component_id") or component_id),
+            "review_status": component.review_status if component else str(node.get("review_status") or "teacher_review_required"),
+            "display_order": int(node.get("display_order") or idx),
+            "origin": component.origin if component else str(node.get("origin") or "paper"),
+            "component_type": component.component_type if component else str(node.get("component_type") or node.get("type") or ""),
+        })
+        seen_nodes.add(component_id)
+    normalized_edges = []
+    relation_map = {
+        "depends_on": "REQUIRES",
+        "supports": "ENABLES",
+        "corrects": "QUALIFIES",
+        "requires": "REQUIRES",
+        "produces": "PRODUCES_FOR",
+        "related_to": "RELATED_TO",
+        "conflicts_with": "CONFLICTS_WITH",
+    }
+    for edge in graph.get("edges") if isinstance(graph.get("edges"), list) else []:
+        if not isinstance(edge, dict):
+            continue
+        source = str(edge.get("source_component_id") or edge.get("from") or "").strip()
+        target = str(edge.get("target_component_id") or edge.get("to") or "").strip()
+        if not source or not target:
+            continue
+        raw_relation = str(edge.get("relation") or edge.get("type") or "RELATED_TO").strip()
+        relation = relation_map.get(raw_relation.lower(), raw_relation.upper())
+        if relation not in _GRAPH_RELATIONS:
+            relation = "RELATED_TO"
+        normalized_edges.append({
+            "source_component_id": source,
+            "target_component_id": target,
+            "relation": relation,
+            "edge_type": str(edge.get("edge_type") or raw_relation or "stored_pipeline_edge"),
+            "confidence": float(edge.get("confidence") or 0.8),
+            "support_status": str(edge.get("support_status") or "source_inferred"),
+            "review_status": str(edge.get("review_status") or "teacher_review_required"),
+            "evidence": edge.get("evidence") if isinstance(edge.get("evidence"), dict) else {"reason": edge.get("reason") or ""},
+        })
+    if not normalized_nodes and not normalized_edges:
+        return {}
+    return {
+        "graph_id": str(graph.get("graph_id") or f"graph_{document_id}"),
+        "document_id": str(graph.get("document_id") or document_id),
+        "scope": graph.get("scope") if isinstance(graph.get("scope"), dict) else {"level": "paper"},
+        "nodes": normalized_nodes,
+        "edges": normalized_edges,
+        "validation_results": graph.get("validation_results") if isinstance(graph.get("validation_results"), list) else [],
+    }
+
+
 def _save_component_graph(course_id: str, document_id: str, graph: dict, user_id: str | None) -> None:
     session = _pg_session()
     try:
@@ -2003,7 +2184,10 @@ def list_chunk_claims(
     current_user: dict = Depends(_require_teacher),
 ) -> list[ClaimOut]:
     _ensure_document_viewable(document_id, current_user)
-    return _claim_rows_for_chunk(chunk_id)
+    claims = _claim_rows_for_chunk(chunk_id)
+    if claims:
+        return claims
+    return _claim_rows_for_document(document_id)
 
 
 @router.get("/documents/{document_id}/structure")
@@ -2098,7 +2282,8 @@ def list_section_components(
             )),
             {"document_id": document_id, "section_id": section_id},
         ).fetchall()
-        return [_row_to_out(row) for row in rows]
+        components = [_row_to_out(row) for row in rows]
+        return components if components else _components_for_document(document_id)
     finally:
         session.close()
 
@@ -2110,7 +2295,11 @@ def get_component_graph(
     current_user: dict = Depends(_require_teacher),
 ) -> ComponentGraphResponse:
     _ensure_document_viewable(document_id, current_user)
-    return ComponentGraphResponse(**_build_component_graph_payload(document_id, _components_for_document(document_id)))
+    components = _components_for_document(document_id)
+    stored_graph = _normalize_stored_component_graph(document_id, _stored_component_graph(document_id), components)
+    if stored_graph:
+        return ComponentGraphResponse(**stored_graph)
+    return ComponentGraphResponse(**_build_component_graph_payload(document_id, components))
 
 
 
@@ -2136,7 +2325,42 @@ def list_theory_components(
         else:
             where = "course_id = :course_id"
         rows = session.execute(sa_text(_select_components_sql(where)), params).fetchall()
-        return [_row_to_out(row) for row in rows]
+        components = [_row_to_out(row) for row in rows]
+        if components:
+            return components
+        if chunk_id:
+            document_id = _document_id_for_chunk_id(chunk_id)
+            if document_id:
+                return _components_for_document(document_id)
+        course_data = get_viewable_course_data(current_user["id"], course_id) or _system_admin_course_data(course_id) or {}
+        document_ids = []
+        material_ids = []
+        for source in course_data.get("sources", []) if isinstance(course_data, dict) else []:
+            if isinstance(source, dict) and source.get("document_id"):
+                document_ids.append(str(source["document_id"]))
+            if isinstance(source, dict) and source.get("material_id"):
+                material_ids.append(str(source["material_id"]))
+        if material_ids:
+            mid_placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
+            mid_rows = session.execute(
+                sa_text(f"""
+                    SELECT DISTINCT document_id
+                    FROM chunks
+                    WHERE material_id IN ({mid_placeholders}) AND document_id IS NOT NULL
+                """),
+                {f"mid_{i}": material_id for i, material_id in enumerate(material_ids)},
+            ).fetchall()
+            document_ids.extend(str(row[0]) for row in mid_rows if row[0])
+        document_ids = list(dict.fromkeys(document_ids))
+        if document_ids:
+            placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
+            doc_params = {f"doc_{i}": doc_id for i, doc_id in enumerate(document_ids)}
+            doc_rows = session.execute(
+                sa_text(_select_components_sql(f"source_scope->>'document_id' IN ({placeholders})")),
+                doc_params,
+            ).fetchall()
+            return [_row_to_out(row) for row in doc_rows]
+        return []
     finally:
         session.close()
 

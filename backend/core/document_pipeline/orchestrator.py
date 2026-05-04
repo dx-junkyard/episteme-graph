@@ -207,7 +207,7 @@ def run_document_pipeline(
             cartridge_id=cartridge_id,
             status="running",
             current_stage=stage,
-            stage_outputs={ARTIFACTS_KEY: {stage: previous_artifacts[stage]}},
+            stage_outputs={ARTIFACTS_KEY: previous_artifacts},
         )
 
     def artifact(stage: str) -> Any | None:
