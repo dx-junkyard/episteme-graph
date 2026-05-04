@@ -595,7 +595,7 @@ def _run_migrations() -> None:
                 embedding_type  TEXT NOT NULL,
                 source_version  TEXT NOT NULL DEFAULT 'v1',
                 text            TEXT NOT NULL,
-                embedding       vector(768),
+                embedding       vector(3072),
                 metadata        JSONB NOT NULL DEFAULT '{}'::jsonb,
                 created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -641,8 +641,48 @@ def _run_migrations() -> None:
             END $$
         """))
 
+        # Migration 016: chunks.embedding / document_embeddings.embedding を 768 → 3072 次元に変更
+        # text-embedding-3-large は 3072 次元を返すが init.sql が vector(768) で作成されていたため
+        # INSERT 時に "expected 768 dimensions, not 3072" が発生していた。
+        # 既存の 768 次元 embedding は 3072 次元モデルと互換性がないため NULL にリセットする。
+        session.execute(sa_text("""
+            DO $$
+            DECLARE
+                col_type TEXT;
+            BEGIN
+                SELECT format_type(atttypid, atttypmod) INTO col_type
+                FROM pg_attribute
+                WHERE attrelid = 'chunks'::regclass
+                  AND attname = 'embedding'
+                  AND attnum > 0;
+
+                IF col_type IS NOT NULL AND col_type != 'vector(3072)' THEN
+                    DROP INDEX IF EXISTS idx_chunks_embedding;
+                    ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(3072) USING NULL;
+                    CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks
+                        USING hnsw ((embedding::halfvec(3072)) halfvec_cosine_ops);
+                END IF;
+            END $$
+        """))
+        session.execute(sa_text("""
+            DO $$
+            DECLARE
+                col_type TEXT;
+            BEGIN
+                SELECT format_type(atttypid, atttypmod) INTO col_type
+                FROM pg_attribute
+                WHERE attrelid = 'document_embeddings'::regclass
+                  AND attname = 'embedding'
+                  AND attnum > 0;
+
+                IF col_type IS NOT NULL AND col_type != 'vector(3072)' THEN
+                    ALTER TABLE document_embeddings ALTER COLUMN embedding TYPE vector(3072) USING NULL;
+                END IF;
+            END $$
+        """))
+
         session.commit()
-        logger.info("Migrations (002-013) applied successfully.")
+        logger.info("Migrations (002-016) applied successfully.")
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema
