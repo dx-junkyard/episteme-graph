@@ -82,11 +82,48 @@ def _load_json_field(value: Any, default: Any) -> Any:
 
 def _load_course(session: Any, course_id: str) -> dict | None:
     row = session.execute(
-        sa_text("SELECT id, title, description, is_template, is_published, created_at FROM learning_courses WHERE id = :id"),
+        sa_text(
+            "SELECT id, title, description, is_template, is_published, created_at, data"
+            " FROM learning_courses WHERE id = :id"
+        ),
         {"id": course_id},
     ).fetchone()
     if not row:
         return None
+    course_data = _load_json_field(row[6], {})
+    topics_raw = course_data.get("topics", [])
+    chapters_raw = course_data.get("chapters", [])
+    sources_raw = course_data.get("sources", [])
+
+    topics_out = []
+    for t in (topics_raw if isinstance(topics_raw, list) else []):
+        if not isinstance(t, dict):
+            continue
+        topics_out.append({
+            "title": t.get("title", ""),
+            "description": t.get("description", ""),
+            "prerequisites": t.get("prerequisites", []),
+            "linked_component_ids": t.get("linked_component_ids", []),
+        })
+
+    chapters_out = []
+    for ch in (chapters_raw if isinstance(chapters_raw, list) else []):
+        if not isinstance(ch, dict):
+            continue
+        chapters_out.append({
+            "title": ch.get("title", ""),
+            "topics": ch.get("topics", []),
+        })
+
+    sources_out = []
+    for s in (sources_raw if isinstance(sources_raw, list) else []):
+        if not isinstance(s, dict):
+            continue
+        sources_out.append({
+            "material_id": s.get("material_id", ""),
+            "title": s.get("title", ""),
+        })
+
     return {
         "course_id": str(row[0]),
         "title": row[1] or "",
@@ -94,6 +131,9 @@ def _load_course(session: Any, course_id: str) -> dict | None:
         "is_template": bool(row[3]),
         "is_published": bool(row[4]),
         "created_at": row[5].isoformat() if row[5] else "",
+        "topics": topics_out,
+        "chapters": chapters_out,
+        "sources": sources_out,
     }
 
 
@@ -112,35 +152,46 @@ def _load_document(session: Any, document_id: str) -> dict | None:
     }
 
 
-def _load_course_documents(session: Any, course_id: str) -> list[dict]:
-    rows = session.execute(
-        sa_text("""
-            SELECT DISTINCT d.id, d.title, d.status, d.created_at
-            FROM documents d
-            JOIN chunks c ON c.document_id = d.id
-            JOIN theory_claims tc ON tc.chunk_id = c.id
-            WHERE tc.document_id IN (
-                SELECT id::text FROM documents
-            )
-            AND EXISTS (
-                SELECT 1 FROM learning_courses lc WHERE lc.id = :course_id
-            )
-            UNION
-            SELECT DISTINCT d.id, d.title, d.status, d.created_at
-            FROM documents d
-            JOIN theory_components tc ON tc.course_id = :course_id
-            JOIN chunks c ON c.document_id = d.id
-            WHERE tc.primary_chunk_id = c.id
-        """),
+def _get_document_ids_for_course(session: Any, course_id: str) -> list[str]:
+    """コースに紐づく全document_idを返す。"""
+    row = session.execute(
+        sa_text("SELECT data FROM learning_courses WHERE id = :course_id LIMIT 1"),
         {"course_id": course_id},
+    ).fetchone()
+    if not row or not row[0]:
+        return []
+    course_data = _load_json_field(row[0], {})
+    sources = course_data.get("sources", [])
+    material_ids = [s.get("material_id") for s in sources if isinstance(s, dict) and s.get("material_id")]
+    if not material_ids:
+        return []
+    placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
+    params = {f"mid_{i}": mid for i, mid in enumerate(material_ids)}
+    doc_rows = session.execute(
+        sa_text(f"SELECT DISTINCT id::text FROM documents WHERE material_id IN ({placeholders})"),
+        params,
+    ).fetchall()
+    return [str(r[0]) for r in doc_rows if r[0]]
+
+
+def _load_course_documents(session: Any, course_id: str, document_ids: list[str]) -> list[dict]:
+    if not document_ids:
+        return []
+    placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
+    params = {f"doc_{i}": did for i, did in enumerate(document_ids)}
+    rows = session.execute(
+        sa_text(f"SELECT id, title, status, created_at FROM documents WHERE id::text IN ({placeholders})"),
+        params,
     ).fetchall()
     return [{"document_id": str(r[0]), "title": r[1] or "", "status": r[2] or ""} for r in rows]
 
 
-def _load_claims_for_course(session: Any, course_id: str) -> list[dict]:
-    rows = session.execute(
+def _load_claims_for_course(session: Any, course_id: str, document_ids: list[str]) -> list[dict]:
+    rows_by_course: list = []
+    # course_idに紐づくcomponentsのchunk経由で取得
+    rows_by_course = session.execute(
         sa_text("""
-            SELECT tc.id, tc.document_id, tc.source_scope, tc.claim_type,
+            SELECT DISTINCT tc.id, tc.document_id, tc.source_scope, tc.claim_type,
                    tc.text, tc.normalized_text, tc.concepts, tc.equation,
                    tc.support_status, tc.evidence_text, tc.review_status,
                    tc.created_at
@@ -148,23 +199,30 @@ def _load_claims_for_course(session: Any, course_id: str) -> list[dict]:
             JOIN chunks c ON c.id = tc.chunk_id
             JOIN theory_components tcomp ON tcomp.primary_chunk_id = c.id
             WHERE tcomp.course_id = :course_id
-            UNION
-            SELECT DISTINCT tc.id, tc.document_id, tc.source_scope, tc.claim_type,
-                   tc.text, tc.normalized_text, tc.concepts, tc.equation,
-                   tc.support_status, tc.evidence_text, tc.review_status,
-                   tc.created_at
-            FROM theory_claims tc
-            JOIN chunks c ON c.id = tc.chunk_id
-            WHERE c.document_id IN (
-                SELECT DISTINCT c2.document_id
-                FROM chunks c2
-                JOIN theory_components tcomp2 ON tcomp2.primary_chunk_id = c2.id
-                WHERE tcomp2.course_id = :course_id
-            )
         """),
         {"course_id": course_id},
     ).fetchall()
-    return _rows_to_claims(rows)
+
+    rows_by_doc: list = []
+    if document_ids:
+        placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
+        params: dict = {f"doc_{i}": did for i, did in enumerate(document_ids)}
+        rows_by_doc = session.execute(
+            sa_text(f"""
+                SELECT DISTINCT tc.id, tc.document_id, tc.source_scope, tc.claim_type,
+                       tc.text, tc.normalized_text, tc.concepts, tc.equation,
+                       tc.support_status, tc.evidence_text, tc.review_status,
+                       tc.created_at
+                FROM theory_claims tc
+                WHERE tc.document_id IN ({placeholders})
+                   OR tc.chunk_id IN (
+                       SELECT id FROM chunks WHERE document_id::text IN ({placeholders})
+                   )
+            """),
+            params,
+        ).fetchall()
+
+    return _rows_to_claims(list(rows_by_course) + list(rows_by_doc))
 
 
 def _load_claims_for_document(session: Any, document_id: str) -> list[dict]:
@@ -176,6 +234,7 @@ def _load_claims_for_document(session: Any, document_id: str) -> list[dict]:
                    tc.created_at
             FROM theory_claims tc
             WHERE tc.document_id = :document_id
+               OR tc.chunk_id IN (SELECT id FROM chunks WHERE document_id::text = :document_id)
             ORDER BY tc.created_at
         """),
         {"document_id": document_id},
@@ -186,7 +245,7 @@ def _load_claims_for_document(session: Any, document_id: str) -> list[dict]:
 def _rows_to_claims(rows: list) -> list[dict]:
     claims = []
     seen = set()
-    for i, r in enumerate(rows):
+    for r in rows:
         claim_id = str(r[0])
         if claim_id in seen:
             continue
@@ -207,31 +266,135 @@ def _rows_to_claims(rows: list) -> list[dict]:
     return claims
 
 
-def _load_dsl_graph_for_course(session: Any, course_id: str) -> dict:
+def _load_dsl_graph_for_course(session: Any, course_id: str, document_ids: list[str]) -> dict:
+    # 1. theory_component_graphs.graph_json.dsl から取得（主ルート）
+    graph = _load_dsl_from_component_graphs(session, course_id=course_id, document_ids=document_ids)
+    if graph["nodes"] or graph["edges"]:
+        return graph
+
+    # 2. chunks.smiles_dsl から取得（フォールバック）
+    where_parts = ["tc.course_id = :course_id"]
+    params: dict = {"course_id": course_id}
+    if document_ids:
+        placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
+        params.update({f"doc_{i}": did for i, did in enumerate(document_ids)})
+        where_parts.append(f"(tc.document_id IN ({placeholders}) OR c.document_id::text IN ({placeholders}))")
+    where_clause = " OR ".join(f"({p})" for p in where_parts)
+
     rows = session.execute(
-        sa_text("""
-            SELECT c.id::text, c.smiles_dsl, c.variables, c.ancestors, c.document_id
+        sa_text(f"""
+            SELECT DISTINCT c.id::text, c.smiles_dsl, c.variables, c.ancestors, c.document_id
             FROM chunks c
             JOIN theory_components tc ON tc.primary_chunk_id = c.id
-            WHERE tc.course_id = :course_id
+            WHERE ({where_clause})
               AND c.smiles_dsl IS NOT NULL AND c.smiles_dsl != ''
         """),
-        {"course_id": course_id},
+        params,
     ).fetchall()
     return _rows_to_dsl_graph(rows)
 
 
 def _load_dsl_graph_for_document(session: Any, document_id: str) -> dict:
+    # 1. theory_component_graphs.graph_json.dsl から取得
+    graph = _load_dsl_from_component_graphs(session, document_ids=[document_id])
+    if graph["nodes"] or graph["edges"]:
+        return graph
+
+    # 2. chunks.smiles_dsl から取得（フォールバック）
     rows = session.execute(
         sa_text("""
             SELECT c.id::text, c.smiles_dsl, c.variables, c.ancestors, c.document_id
             FROM chunks c
-            WHERE c.document_id = :document_id
+            WHERE c.document_id::text = :document_id
               AND c.smiles_dsl IS NOT NULL AND c.smiles_dsl != ''
         """),
         {"document_id": document_id},
     ).fetchall()
     return _rows_to_dsl_graph(rows)
+
+
+def _load_dsl_from_component_graphs(
+    session: Any,
+    course_id: str | None = None,
+    document_ids: list[str] | None = None,
+) -> dict:
+    """theory_component_graphs.graph_json.dsl からDSLグラフを構築する。"""
+    where_parts: list[str] = []
+    params: dict = {}
+    if course_id:
+        where_parts.append("course_id = :course_id")
+        params["course_id"] = course_id
+    if document_ids:
+        placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
+        params.update({f"doc_{i}": did for i, did in enumerate(document_ids)})
+        where_parts.append(f"document_id IN ({placeholders})")
+    if not where_parts:
+        return {"dsl_schema_version": "0.1.0", "nodes": [], "edges": []}
+
+    where_clause = " OR ".join(f"({p})" for p in where_parts)
+    rows = session.execute(
+        sa_text(f"SELECT document_id, graph_json FROM theory_component_graphs WHERE {where_clause}"),
+        params,
+    ).fetchall()
+
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    node_set: set[str] = set()
+    edge_counter = 0
+
+    for row in rows:
+        doc_id = str(row[0]) if row[0] else ""
+        gj = _load_json_field(row[1], {})
+        dsl = gj.get("dsl") if isinstance(gj, dict) else {}
+        if not isinstance(dsl, dict):
+            dsl = {}
+
+        raw_nodes = dsl.get("nodes", []) if isinstance(dsl.get("nodes"), list) else []
+        raw_edges = dsl.get("edges", []) if isinstance(dsl.get("edges"), list) else []
+
+        for n in raw_nodes:
+            if not isinstance(n, dict):
+                continue
+            node_id = str(n.get("id") or n.get("node_id") or "").strip()
+            value = str(n.get("value") or n.get("label") or node_id).strip()
+            node_type = str(n.get("node_type") or n.get("type") or "Node").strip()
+            if not node_id:
+                continue
+            key = f"{doc_id}:{node_id}"
+            if key not in node_set:
+                node_set.add(key)
+                nodes.append({
+                    "node_id": key,
+                    "var_id": node_id,
+                    "node_type": node_type,
+                    "value": value,
+                    "chunk_id": "",
+                    "document_id": doc_id,
+                    "smiles_dsl": "",
+                })
+
+        for edge in raw_edges:
+            if not isinstance(edge, dict):
+                continue
+            source = str(edge.get("from") or edge.get("source") or "").strip()
+            target = str(edge.get("to") or edge.get("target") or "").strip()
+            predicate = str(edge.get("predicate") or edge.get("relation") or "RELATED_TO").strip()
+            verb = str(edge.get("verb") or "").strip()
+            polarity = str(edge.get("polarity") or "+").strip()
+            if not source or not target:
+                continue
+            edge_counter += 1
+            edges.append({
+                "edge_id": f"edge_{doc_id[:8]}_{edge_counter:04d}",
+                "source": f"{doc_id}:{source}",
+                "target": f"{doc_id}:{target}",
+                "core_predicate": predicate,
+                "domain_verb": verb,
+                "polarity": polarity,
+                "chunk_id": "",
+            })
+
+    return {"dsl_schema_version": "0.1.0", "nodes": nodes, "edges": edges}
 
 
 def _rows_to_dsl_graph(rows: list) -> dict:
@@ -280,19 +443,30 @@ def _rows_to_dsl_graph(rows: list) -> dict:
     return {"dsl_schema_version": "0.1.0", "nodes": nodes, "edges": edges}
 
 
-def _load_components_for_course(session: Any, course_id: str) -> list[dict]:
+def _load_components_for_course(session: Any, course_id: str, document_ids: list[str]) -> list[dict]:
+    where_parts = ["tc.course_id = :course_id"]
+    params: dict = {"course_id": course_id}
+    if document_ids:
+        placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
+        params.update({f"doc_{i}": did for i, did in enumerate(document_ids)})
+        where_parts.append(f"tc.document_id IN ({placeholders})")
+    where_clause = " OR ".join(f"({p})" for p in where_parts)
+
     rows = session.execute(
-        sa_text("""
-            SELECT id, course_id, name, component_type, component_type_text,
-                   summary, status, source_scope, evidence_claims, maturity_level,
-                   maturity_source, review_status, inputs, outputs, preconditions,
-                   cautions, constraints, invalid_conditions, dependencies,
-                   connectors, internal_flow, teacher_notes, created_at
-            FROM theory_components
-            WHERE course_id = :course_id
-            ORDER BY created_at
+        sa_text(f"""
+            SELECT tc.id, tc.course_id, tc.name, tc.component_type, tc.component_type_text,
+                   tc.summary, tc.status, tc.source_scope, tc.evidence_claims, tc.maturity_level,
+                   tc.maturity_source, tc.review_status, tc.inputs, tc.outputs, tc.preconditions,
+                   tc.cautions, tc.constraints, tc.invalid_conditions, tc.dependencies,
+                   tc.connectors, tc.internal_flow, tc.teacher_notes, tc.created_at,
+                   tc.document_id,
+                   ch.smiles_dsl
+            FROM theory_components tc
+            LEFT JOIN chunks ch ON ch.id = tc.primary_chunk_id
+            WHERE {where_clause}
+            ORDER BY tc.created_at
         """),
-        {"course_id": course_id},
+        params,
     ).fetchall()
     return _rows_to_components(rows)
 
@@ -304,10 +478,13 @@ def _load_components_for_document(session: Any, document_id: str) -> list[dict]:
                    tc.summary, tc.status, tc.source_scope, tc.evidence_claims, tc.maturity_level,
                    tc.maturity_source, tc.review_status, tc.inputs, tc.outputs, tc.preconditions,
                    tc.cautions, tc.constraints, tc.invalid_conditions, tc.dependencies,
-                   tc.connectors, tc.internal_flow, tc.teacher_notes, tc.created_at
+                   tc.connectors, tc.internal_flow, tc.teacher_notes, tc.created_at,
+                   tc.document_id,
+                   ch.smiles_dsl
             FROM theory_components tc
-            JOIN chunks c ON c.id = tc.primary_chunk_id
-            WHERE c.document_id = :document_id
+            LEFT JOIN chunks ch ON ch.id = tc.primary_chunk_id
+            WHERE tc.document_id = :document_id
+               OR ch.document_id::text = :document_id
             ORDER BY tc.created_at
         """),
         {"document_id": document_id},
@@ -317,14 +494,20 @@ def _load_components_for_document(session: Any, document_id: str) -> list[dict]:
 
 def _rows_to_components(rows: list) -> list[dict]:
     components = []
+    seen: set[str] = set()
     for r in rows:
         comp_id = str(r[0])
+        if comp_id in seen:
+            continue
+        seen.add(comp_id)
         source_scope = _load_json_field(r[7], {})
         evidence_claims = _load_json_field(r[8], [])
-        source_scope["document_id"] = source_scope.get("document_id", "")
+        source_scope["document_id"] = source_scope.get("document_id", "") or r[23] or ""
+        smiles_dsl = r[24] or ""
         components.append({
             "component_id": comp_id,
-            "course_id": str(r[1]),
+            "course_id": str(r[1]) if r[1] else "",
+            "document_id": r[23] or "",
             "name": r[2] or "",
             "component_type": r[4] or r[3] or "theory",
             "origin": "paper",
@@ -344,20 +527,29 @@ def _rows_to_components(rows: list) -> list[dict]:
             "connectors": _load_json_field(r[19], {}),
             "internal_flow": _load_json_field(r[20], []),
             "teacher_notes": r[21] or "",
+            "smiles_dsl": smiles_dsl,
         })
     return components
 
 
-def _load_component_graph_for_course(session: Any, course_id: str) -> dict:
+def _load_component_graph_for_course(session: Any, course_id: str, document_ids: list[str]) -> dict:
+    where_parts = ["course_id = :course_id"]
+    params: dict = {"course_id": course_id}
+    if document_ids:
+        placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
+        params.update({f"doc_{i}": did for i, did in enumerate(document_ids)})
+        where_parts.append(f"document_id IN ({placeholders})")
+    where_clause = " OR ".join(f"({p})" for p in where_parts)
+
     row = session.execute(
-        sa_text("""
+        sa_text(f"""
             SELECT id, document_id, scope, graph_json
             FROM theory_component_graphs
-            WHERE course_id = :course_id
+            WHERE {where_clause}
             ORDER BY updated_at DESC
             LIMIT 1
         """),
-        {"course_id": course_id},
+        params,
     ).fetchone()
     if not row:
         return {"graph_schema_version": "0.1.0", "nodes": [], "edges": []}
@@ -457,6 +649,7 @@ def _build_manifest(
             "document_ids": document_ids,
         },
         "files": {
+            "course_info": "course_info.json",
             "claims": "claims/claims.json",
             "dsl_graph": "dsl/dsl_graph.json",
             "components": "components/components.json",
@@ -483,6 +676,7 @@ This ZIP contains machine-readable outputs generated by episteme-graph.
 ## Contents
 
 - `manifest.json`: index of this export bundle
+- `course_info.json`: course metadata, topics, chapters, and source materials
 - `claims/claims.json`: extracted claims from source documents
 - `dsl/dsl_graph.json`: lightweight logical graph representation (DSL)
 - `components/components.json`: reusable logical/theory components (Component)
@@ -540,6 +734,7 @@ Return your review as JSON with:
 
 def _build_zip(
     manifest: dict,
+    course_info: dict,
     claims: list[dict],
     dsl_graph: dict,
     components: list[dict],
@@ -553,6 +748,7 @@ def _build_zip(
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("README.md", _README_TEMPLATE)
         zf.writestr("manifest.json", _json_bytes(manifest))
+        zf.writestr("course_info.json", _json_bytes(course_info))
         zf.writestr("claims/claims.json", _json_bytes({"claims": claims}))
         zf.writestr(
             "dsl/dsl_graph.json",
@@ -599,14 +795,15 @@ def export_course_bundle(
         if not course:
             raise HTTPException(status_code=404, detail="Course not found")
 
-        claims = _load_claims_for_course(session, course_id)
-        dsl_graph = _load_dsl_graph_for_course(session, course_id)
-        components = _load_components_for_course(session, course_id)
-        component_graph = _load_component_graph_for_course(session, course_id)
+        document_ids = _get_document_ids_for_course(session, course_id)
+
+        claims = _load_claims_for_course(session, course_id, document_ids)
+        dsl_graph = _load_dsl_graph_for_course(session, course_id, document_ids)
+        components = _load_components_for_course(session, course_id, document_ids)
+        component_graph = _load_component_graph_for_course(session, course_id, document_ids)
         evidence_snippets = _build_evidence_snippets(claims) if req.include_source_snippets else []
 
-        docs = _load_course_documents(session, course_id)
-        document_ids = [d["document_id"] for d in docs]
+        docs = _load_course_documents(session, course_id, document_ids)
 
         eid = _export_id("course", course_id)
         options = {
@@ -620,7 +817,7 @@ def export_course_bundle(
             export_id=eid,
             scope_type="course",
             scope_id=course_id,
-            material_ids=[],
+            material_ids=[s.get("material_id", "") for s in course.get("sources", [])],
             document_ids=document_ids,
             claims=claims,
             dsl_graph=dsl_graph,
@@ -632,6 +829,7 @@ def export_course_bundle(
 
         zip_bytes = _build_zip(
             manifest=manifest,
+            course_info=course,
             claims=claims,
             dsl_graph=dsl_graph,
             components=components,
@@ -695,6 +893,7 @@ def export_document_bundle(
 
         zip_bytes = _build_zip(
             manifest=manifest,
+            course_info=document,
             claims=claims,
             dsl_graph=dsl_graph,
             components=components,
