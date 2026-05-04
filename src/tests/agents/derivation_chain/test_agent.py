@@ -94,3 +94,55 @@ def test_required_claim_ids_propagated():
     agent = DerivationChainAgent()
     result = agent.run(equations, claim_link_index={"eq_2": ["claim_xyz"]})
     assert result.chains[0].steps[0].required_claim_ids == ["claim_xyz"]
+
+
+def test_teaching_takeaway_is_generated():
+    equations = EquationSemanticsResult(
+        document_id="doc_test",
+        cartridge_id=None,
+        equations=[
+            _make_eq("eq_1"),
+            _make_eq("eq_2", from_eqs=["eq_1"], role="equation_result"),
+        ],
+    )
+    agent = DerivationChainAgent()
+    result = agent.run(equations)
+    assert result.chains[0].teaching_takeaway
+    assert "eq_2" in result.chains[0].teaching_takeaway
+    assert "eq_1" in result.chains[0].teaching_takeaway
+
+
+def test_chain_missing_assumptions_emits_warning():
+    def _no_assumption(eq_id, **kw):
+        rec = _make_eq(eq_id, **kw)
+        rec.local_assumptions = []
+        return rec
+
+    equations = EquationSemanticsResult(
+        document_id="doc_test",
+        cartridge_id=None,
+        equations=[
+            _no_assumption("eq_1"),
+            _no_assumption("eq_2", from_eqs=["eq_1"], role="equation_result"),
+        ],
+    )
+    agent = DerivationChainAgent()
+    result = agent.run(equations)
+    rules = {i.rule_id for i in result.validation_issues}
+    assert "derivation_chain_missing_assumptions" in rules
+
+
+def test_missing_claim_links_emits_warning_when_index_supplied():
+    equations = EquationSemanticsResult(
+        document_id="doc_test",
+        cartridge_id=None,
+        equations=[
+            _make_eq("eq_a"),
+            _make_eq("eq_b", from_eqs=["eq_a"], role="equation_result"),
+        ],
+    )
+    agent = DerivationChainAgent()
+    # claim_link_index supplied but no matching keys -> empty required_claim_ids
+    result = agent.run(equations, claim_link_index={"eq_xxx": ["c1"]})
+    rules = {i.rule_id for i in result.validation_issues}
+    assert "derivation_chain_missing_claim_links" in rules

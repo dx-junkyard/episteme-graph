@@ -6,6 +6,7 @@ from .schema import (
     ASSEMBLY_HINT_TYPES,
     CORE_COMPONENT_TYPES,
     CORE_DEPENDENCY_TYPES,
+    INTERNAL_FLOW_REQUIRED_TYPES,
     CartridgeContext,
     ComponentAssemblyResult,
     ComponentRecord,
@@ -51,14 +52,15 @@ class ComponentAssemblyValidator:
                 f"{component.component_id} has invalid component_type={component.component_type!r}",
                 f"components[{component.component_id}].component_type",
             ))
-        for field in ("inputs", "outputs", "preconditions", "cautions", "dependencies"):
-            if not isinstance(getattr(component, field), list):
+        for field in ("inputs", "outputs", "preconditions", "cautions", "dependencies", "internal_flow"):
+            if not isinstance(getattr(component, field, None), list):
                 issues.append(ValidationIssue(
                     "invalid_component_field",
                     "error",
                     f"{component.component_id}.{field} must be a list",
                     f"components[{component.component_id}].{field}",
                 ))
+        issues += self._check_internal_flow(component)
         if not (0.0 <= component.confidence <= 1.0):
             issues.append(ValidationIssue(
                 "confidence_out_of_range",
@@ -96,6 +98,51 @@ class ComponentAssemblyValidator:
                 "warning",
                 f"{component.component_id} appears dominated by meta/prior-work evidence",
                 f"components[{component.component_id}].evidence_refs",
+            ))
+        return issues
+
+    def _check_internal_flow(
+        self,
+        component: ComponentRecord,
+    ) -> list[ValidationIssue]:
+        issues: list[ValidationIssue] = []
+        flow = component.internal_flow or []
+        if component.component_type in INTERNAL_FLOW_REQUIRED_TYPES and not flow:
+            issues.append(ValidationIssue(
+                "component_missing_internal_flow",
+                "warning",
+                f"{component.component_id} ({component.component_type}) "
+                "has no internal_flow; reusable components of this type must "
+                "expose how inputs are combined into outputs.",
+                f"components[{component.component_id}].internal_flow",
+            ))
+        for idx, step in enumerate(flow):
+            if not isinstance(step, dict):
+                issues.append(ValidationIssue(
+                    "internal_flow_invalid_entry",
+                    "error",
+                    f"{component.component_id}.internal_flow[{idx}] is not an object",
+                    f"components[{component.component_id}].internal_flow[{idx}]",
+                ))
+                continue
+            missing = [k for k in ("from", "relation", "to") if not step.get(k)]
+            if missing:
+                issues.append(ValidationIssue(
+                    "internal_flow_incomplete_step",
+                    "error",
+                    f"{component.component_id}.internal_flow[{idx}] is missing {missing}",
+                    f"components[{component.component_id}].internal_flow[{idx}]",
+                ))
+        # If component has multi-input or multi-output, internal_flow should be present
+        # to explain how they relate.
+        if not flow and (
+            len(component.inputs) >= 2 or len(component.outputs) >= 2
+        ) and component.component_type not in ("ClaimBundleComponent",):
+            issues.append(ValidationIssue(
+                "component_multi_io_without_flow",
+                "warning",
+                f"{component.component_id} has multiple inputs/outputs but no internal_flow",
+                f"components[{component.component_id}].internal_flow",
             ))
         return issues
 

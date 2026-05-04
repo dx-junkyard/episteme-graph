@@ -46,8 +46,10 @@ class FigureTableSemanticsAgent:
         *,
         cartridge_id: str | None = None,
         evidence_index: dict[str, list[str]] | None = None,
+        claim_link_index: dict[str, list[str]] | None = None,
     ) -> FigureTableSemanticsResult:
         evidence_index = evidence_index or {}
+        claim_link_index = claim_link_index or {}
         figures: list[FigureRecord] = []
         tables: list[TableRecord] = []
         issues: list[ValidationIssue] = []
@@ -62,6 +64,7 @@ class FigureTableSemanticsAgent:
                     structure.document_id,
                     self._gather_neighbors(ordered, idx, block_index),
                     evidence_index,
+                    claim_link_index,
                 )
                 if self._figure_enricher:
                     try:
@@ -80,6 +83,7 @@ class FigureTableSemanticsAgent:
                     structure.document_id,
                     self._gather_neighbors(ordered, idx, block_index),
                     evidence_index,
+                    claim_link_index,
                 )
                 if self._table_enricher:
                     try:
@@ -101,12 +105,68 @@ class FigureTableSemanticsAgent:
                     message=f"figure {fig.figure_id} has empty caption",
                     field=fig.figure_id,
                 ))
+            if fig.source_location.page is None and not fig.source_location.caption_block_id:
+                issues.append(ValidationIssue(
+                    rule_id="figure_missing_source_location",
+                    severity="warning",
+                    message=f"figure {fig.figure_id} has no caption_block_id or page",
+                    field=fig.figure_id,
+                ))
+            if not fig.inputs and not fig.outputs and not fig.comparison_axes:
+                issues.append(ValidationIssue(
+                    rule_id="figure_missing_inputs_outputs_axes",
+                    severity="warning",
+                    message=f"figure {fig.figure_id} has no inputs, outputs, or comparison_axes",
+                    field=fig.figure_id,
+                ))
+            if not fig.linked_claim_ids:
+                issues.append(ValidationIssue(
+                    rule_id="figure_missing_linked_claim_ids",
+                    severity="info",
+                    message=f"figure {fig.figure_id} has no linked_claim_ids",
+                    field=fig.figure_id,
+                ))
+            if not fig.teaching_takeaway:
+                issues.append(ValidationIssue(
+                    rule_id="figure_missing_teaching_takeaway",
+                    severity="info",
+                    message=f"figure {fig.figure_id} has no teaching_takeaway",
+                    field=fig.figure_id,
+                ))
         for tbl in tables:
             if not tbl.caption:
                 issues.append(ValidationIssue(
                     rule_id="table_caption_empty",
                     severity="warning",
                     message=f"table {tbl.table_id} has empty caption",
+                    field=tbl.table_id,
+                ))
+            if tbl.source_location.page is None and not tbl.source_location.caption_block_id:
+                issues.append(ValidationIssue(
+                    rule_id="table_missing_source_location",
+                    severity="warning",
+                    message=f"table {tbl.table_id} has no caption_block_id or page",
+                    field=tbl.table_id,
+                ))
+            if not tbl.columns and not tbl.comparison_axes and not tbl.rows_summary:
+                issues.append(ValidationIssue(
+                    rule_id="table_missing_columns_or_axes",
+                    severity="warning",
+                    message=f"table {tbl.table_id} has no columns, comparison_axes, or rows_summary",
+                    field=tbl.table_id,
+                ))
+            if not tbl.linked_claim_ids:
+                issues.append(ValidationIssue(
+                    rule_id="table_missing_linked_claim_ids",
+                    severity="info",
+                    message=f"table {tbl.table_id} has no linked_claim_ids",
+                    field=tbl.table_id,
+                ))
+            if not tbl.teaching_takeaway:
+                issues.append(ValidationIssue(
+                    rule_id="table_missing_teaching_takeaway",
+                    severity="info",
+                    message=f"table {tbl.table_id} has no teaching_takeaway",
                     field=tbl.table_id,
                 ))
 
@@ -139,10 +199,14 @@ class FigureTableSemanticsAgent:
         document_id: str,
         neighbors: list[TypedBlock],
         evidence_index: dict[str, list[str]],
+        claim_link_index: dict[str, list[str]],
     ) -> FigureRecord:
         label, caption_text = self._split_label(block.text, _FIG_LABEL_RE)
         figure_id = f"fig_{label}" if label else block.block_id
         figure_type = self._infer_figure_type(caption_text)
+        comparison_axes = self._infer_comparison_axes(
+            caption_text + " " + " ".join(b.text for b in neighbors)
+        )
         return FigureRecord(
             figure_id=figure_id,
             document_id=document_id,
@@ -155,12 +219,12 @@ class FigureTableSemanticsAgent:
             caption=caption_text,
             inputs=[],
             outputs=[],
-            comparison_axes=self._infer_comparison_axes(caption_text + " " + " ".join(b.text for b in neighbors)),
+            comparison_axes=comparison_axes,
             visual_elements=[],
-            linked_claim_ids=[],
+            linked_claim_ids=list(claim_link_index.get(block.block_id, [])),
             linked_component_candidates=[],
             interpretation="",
-            teaching_takeaway="",
+            teaching_takeaway=self._figure_takeaway(figure_type, caption_text, comparison_axes),
             source_evidence_ids=list(evidence_index.get(block.block_id, [])),
         )
 
@@ -170,13 +234,18 @@ class FigureTableSemanticsAgent:
         document_id: str,
         neighbors: list[TypedBlock],
         evidence_index: dict[str, list[str]],
+        claim_link_index: dict[str, list[str]],
     ) -> TableRecord:
         label, caption_text = self._split_label(block.text, _TBL_LABEL_RE)
         table_id = f"table_{label}" if label else block.block_id
+        table_type = self._infer_table_type(caption_text)
+        comparison_axes = self._infer_comparison_axes(
+            caption_text + " " + " ".join(b.text for b in neighbors)
+        )
         return TableRecord(
             table_id=table_id,
             document_id=document_id,
-            table_type=self._infer_table_type(caption_text),
+            table_type=table_type,
             source_location=FigureSourceLocation(
                 page=block.page,
                 caption_block_id=block.block_id,
@@ -185,12 +254,36 @@ class FigureTableSemanticsAgent:
             caption=caption_text,
             columns=[],
             rows_summary="",
-            comparison_axes=self._infer_comparison_axes(caption_text + " " + " ".join(b.text for b in neighbors)),
-            linked_claim_ids=[],
+            comparison_axes=comparison_axes,
+            linked_claim_ids=list(claim_link_index.get(block.block_id, [])),
             interpretation="",
-            teaching_takeaway="",
+            teaching_takeaway=self._table_takeaway(table_type, caption_text, comparison_axes),
             source_evidence_ids=list(evidence_index.get(block.block_id, [])),
         )
+
+    @staticmethod
+    def _figure_takeaway(
+        figure_type: str, caption: str, comparison_axes: list[str]
+    ) -> str:
+        if not caption:
+            return ""
+        if figure_type == "unknown" and not comparison_axes:
+            return ""
+        if comparison_axes:
+            return f"Use this {figure_type} to discuss {', '.join(comparison_axes)}."
+        return f"Use this {figure_type} to support: {caption[:80]}".rstrip()
+
+    @staticmethod
+    def _table_takeaway(
+        table_type: str, caption: str, comparison_axes: list[str]
+    ) -> str:
+        if not caption:
+            return ""
+        if table_type == "unknown" and not comparison_axes:
+            return ""
+        if comparison_axes:
+            return f"Use this {table_type} to compare {', '.join(comparison_axes)}."
+        return f"Use this {table_type} to support: {caption[:80]}".rstrip()
 
     @staticmethod
     def _split_label(text: str, label_re: re.Pattern) -> tuple[str | None, str]:

@@ -10,17 +10,39 @@ NODE_TYPES = [
     "TheoreticalFramework",
     "Approximation",
     "Relation",
+    "EquationRelation",
     "Observable",
     "Parameter",
     "UncertaintySource",
+    "CorrectionSource",
     "CorrectionTerm",
     "Method",
+    "Experiment",
     "Constraint",
     "Diagnostic",
     "Result",
     "ClaimProxy",
     "ThesisProxy",
 ]
+
+CONCRETE_NODE_TYPES = {
+    "EquationRelation",
+    "Observable",
+    "Approximation",
+    "TheoreticalFramework",
+    "CorrectionSource",
+    "CorrectionTerm",
+    "UncertaintySource",
+    "Method",
+    "Experiment",
+    "Result",
+    "Diagnostic",
+    "Parameter",
+    "Constraint",
+    "Relation",
+}
+
+PROXY_NODE_TYPES = {"ClaimProxy", "ThesisProxy"}
 
 SOURCE_KINDS = ["claim", "equation", "thesis", "mixed"]
 
@@ -47,6 +69,8 @@ DOMAIN_VERBS = [
     "qualifies",
     "checks_consistency_of",
     "contributes_to_uncertainty",
+    "contributes_to_correction",
+    "takes_specific_limit",
     "integrates_to",
     "motivates",
     "depends_on",
@@ -54,6 +78,22 @@ DOMAIN_VERBS = [
     "summarizes",
     "enables_derivation",
 ]
+
+PREDICATE_PREFERRED_TARGETS = {
+    "TRANSFORMS": {"EquationRelation", "Relation", "Result"},
+    "REQUIRES": {"Approximation", "TheoreticalFramework", "Constraint", "Parameter"},
+    "DEFINES": {"Observable", "Parameter", "EquationRelation"},
+    "CAUSES": {"CorrectionTerm", "CorrectionSource", "Result"},
+    "CORRELATES": {"UncertaintySource", "Result", "Parameter"},
+    "MEASURES": {"Observable", "Diagnostic", "Result"},
+    "INHIBITS": {"UncertaintySource", "CorrectionTerm", "Result"},
+}
+
+PREDICATE_PREFERRED_SOURCES = {
+    "TRANSFORMS": {"EquationRelation", "Relation", "Method"},
+    "CAUSES": {"CorrectionSource", "Approximation", "TheoreticalFramework", "Parameter"},
+    "MEASURES": {"Diagnostic", "Experiment", "Method", "Observable"},
+}
 
 POLARITIES = ["+", "-", "+/-", "?"]
 
