@@ -502,12 +502,13 @@ def _rows_to_components(rows: list) -> list[dict]:
         seen.add(comp_id)
         source_scope = _load_json_field(r[7], {})
         evidence_claims = _load_json_field(r[8], [])
-        source_scope["document_id"] = source_scope.get("document_id", "") or r[23] or ""
-        smiles_dsl = r[24] or ""
+        document_id = r[23] if len(r) > 23 and r[23] is not None else ""
+        smiles_dsl = r[24] if len(r) > 24 and r[24] is not None else ""
+        source_scope["document_id"] = source_scope.get("document_id", "") or document_id
         components.append({
             "component_id": comp_id,
             "course_id": str(r[1]) if r[1] else "",
-            "document_id": r[23] or "",
+            "document_id": document_id,
             "name": r[2] or "",
             "component_type": r[4] or r[3] or "theory",
             "origin": "paper",
@@ -734,12 +735,12 @@ Return your review as JSON with:
 
 def _build_zip(
     manifest: dict,
-    course_info: dict,
     claims: list[dict],
     dsl_graph: dict,
     components: list[dict],
     component_graph: dict,
     evidence_snippets: list[dict],
+    course_info: dict | None = None,
     include_ndjson: bool = False,
     include_debug: bool = False,
     debug_data: dict | None = None,
@@ -748,7 +749,7 @@ def _build_zip(
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("README.md", _README_TEMPLATE)
         zf.writestr("manifest.json", _json_bytes(manifest))
-        zf.writestr("course_info.json", _json_bytes(course_info))
+        zf.writestr("course_info.json", _json_bytes(course_info if course_info is not None else {}))
         zf.writestr("claims/claims.json", _json_bytes({"claims": claims}))
         zf.writestr(
             "dsl/dsl_graph.json",
