@@ -3178,11 +3178,9 @@
 
     el.querySelectorAll(".ls-component-item").forEach(function (item) {
       item.addEventListener("click", function () {
-        el.querySelectorAll(".ls-component-item").forEach(function (t) { t.classList.remove("active"); });
-        item.classList.add("active");
         var componentId = item.getAttribute("data-component-id");
         var component = (lsState.courseComponents && lsState.courseComponents.components || []).find(function (c) { return c.id === componentId; });
-        if (component) lsState.selectedTheoryComponentId = componentId;
+        if (component) lsSelectCourseComponent(component);
       });
     });
   }
@@ -3454,6 +3452,26 @@
     lsRenderWorkspace();
   }
 
+  function lsGetSelectedCourseComponent() {
+    var componentId = lsState.selectedTheoryComponentId;
+    if (!componentId || !lsState.courseComponents || !lsState.courseComponents.components) return null;
+    return lsState.courseComponents.components.find(function (component) {
+      return component.id === componentId;
+    }) || null;
+  }
+
+  function lsSelectCourseComponent(component) {
+    if (!component) return;
+    lsState.selectedTheoryComponentId = component.id;
+    lsState.selectedScope = { type: "component", componentId: component.id };
+    lsState.view = "theory";
+    lsUpdateWorkTabActive();
+    document.querySelectorAll(".ls-component-item").forEach(function (el) {
+      el.classList.toggle("active", el.getAttribute("data-component-id") === component.id);
+    });
+    lsRenderWorkspace();
+  }
+
   function lsGetSelectedChunk() {
     for (var i = 0; i < lsState.chunks.length; i++) {
       if (lsState.chunks[i].chunk_id === lsState.selectedChunkId) return lsState.chunks[i];
@@ -3534,10 +3552,81 @@
     return workspace;
   }
 
+  function lsBindTheoryCardActions(container) {
+    if (!container) return;
+    container.querySelectorAll("[data-theory-action]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var card = this.closest(".ls-theory-card");
+        var component = lsFindTheoryComponent(card.getAttribute("data-component-id")) || lsGetSelectedCourseComponent();
+        var action = this.getAttribute("data-theory-action");
+        if (!component) return;
+        if (action === "open") lsOpenTheoryDetail(component);
+        if (action === "insert") lsInsertTheoryChip(component);
+        if (action === "approve") lsSaveTheoryComponent(component, { status: "teacher_reviewed" });
+        if (action === "reject") lsRejectTheoryComponent(component);
+      });
+    });
+  }
+
+  function lsRenderSelectedCourseComponent(component) {
+    lsEnsureWorkspace();
+    var metaEl = document.getElementById("ls-chunk-meta");
+    if (metaEl) metaEl.textContent = "論理コンポーネント: " + (component.name || "無題");
+
+    var sourceEl = document.getElementById("ls-source-text");
+    var displayEl = document.getElementById("ls-display-text");
+    var spokenEl = document.getElementById("ls-spoken-text");
+    if (sourceEl) sourceEl.textContent = "";
+    if (displayEl) {
+      displayEl.value = "";
+      displayEl.disabled = true;
+      displayEl.hidden = true;
+    }
+    if (spokenEl) {
+      spokenEl.value = "";
+      spokenEl.disabled = true;
+      spokenEl.hidden = true;
+    }
+
+    document.getElementById("ls-display-tabs").hidden = true;
+    document.getElementById("ls-evidence-tabs").hidden = true;
+    document.getElementById("ls-left-pane").hidden = true;
+    document.getElementById("ls-right-pane").hidden = true;
+    var splitEl = document.querySelector("#ls-workspace .ls-split");
+    if (splitEl) splitEl.hidden = true;
+    document.getElementById("ls-structure-panel").hidden = true;
+    document.getElementById("ls-theory-panel").hidden = false;
+    document.getElementById("ls-claims-panel").hidden = true;
+    document.getElementById("ls-graph-panel").hidden = true;
+    document.getElementById("ls-sync-row").hidden = true;
+    document.getElementById("ls-display-preview").hidden = true;
+    document.getElementById("ls-pdf-view").hidden = true;
+
+    var extractBtn = document.getElementById("ls-extract-theory-btn");
+    if (extractBtn) {
+      extractBtn.textContent = "論理要素候補を抽出";
+      extractBtn.disabled = true;
+    }
+    var container = document.getElementById("ls-theory-components");
+    if (!container) return;
+    container.innerHTML =
+      '<div class="ls-theory-current">選択中コンポーネント</div>' +
+      lsTheoryCardHtml(component);
+    lsBindTheoryCardActions(container);
+  }
+
   function lsRenderWorkspace() {
     var chunk = lsGetSelectedChunk();
     var metaEl = document.getElementById("ls-chunk-meta");
     lsUpdateWorkTabActive();
+    if (lsState.selectedScope && lsState.selectedScope.type === "component") {
+      var selectedComponent = lsGetSelectedCourseComponent();
+      if (selectedComponent) {
+        lsRenderSelectedCourseComponent(selectedComponent);
+        lsUpdateAssistantContext();
+        return;
+      }
+    }
     if (!chunk) {
       document.getElementById("ls-workspace").innerHTML = '<div class="ls-empty-state">チャンクを選択すると編集ワークベンチが表示されます</div>';
       metaEl.textContent = "チャンクを選択してください";
@@ -4566,9 +4655,11 @@
     }
     var html = '<div style="font-size:11px;font-weight:600;color:var(--color-text-secondary);margin-bottom:6px">数式一覧</div>';
     formulas.forEach(function (f) {
+      var label = f.label || f.equation_label || "";
       html +=
         '<div class="ls-formula-item">' +
           '<div class="ls-formula-rendered">' + lsRenderKatex(f.latex || f.id || "", f.is_display === true) + '</div>' +
+          (label ? '<span class="ls-theory-badge">(' + escHtml(label) + ')</span><br>' : '') +
           '<span class="ls-formula-latex">' + escHtml(f.latex || f.id || "") + '</span><br>' +
           '<span class="ls-formula-spoken">' + escHtml(f.spoken || "") + '</span>' +
         '</div>';

@@ -419,6 +419,8 @@ class LectureFormulaItem(BaseModel):
     latex: str
     spoken: str  # 音声読み上げ用テキスト
     is_display: bool = False  # True: ブロック数式（独立行）, False: インライン数式
+    label: str | None = None  # 論文中の式番号（例: 1.1）
+    block_id: str | None = None
 
 
 class LectureSegment(BaseModel):

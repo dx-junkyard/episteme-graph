@@ -572,6 +572,7 @@ def _from_source_chunks(value: list[dict]) -> list:
             page_end=int(v.get("page_end") or v.get("page_start") or 1),
             text=v.get("text") or "",
             metadata=dict(v.get("metadata") or {}),
+            formulas=list(v.get("formulas") or []),
         )
         for i, v in enumerate(value or [])
     ]

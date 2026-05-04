@@ -73,11 +73,14 @@ def persist_source_chunks(
                     """
                     INSERT INTO chunks (
                         id, document_id, chunk_index, text, embedding,
+                        display_text, spoken_text, formulas, latex_formulas,
                         material_id, page_start, page_end,
                         section_id, block_ids, source_metadata
                     )
                     VALUES (
                         :id, CAST(:doc_id AS uuid), :idx, :text, :embedding,
+                        :display_text, :spoken_text, CAST(:formulas AS jsonb),
+                        :latex_formulas,
                         :material_id, :page_start, :page_end,
                         :section_id, CAST(:block_ids AS jsonb),
                         CAST(:metadata AS jsonb)
@@ -90,6 +93,14 @@ def persist_source_chunks(
                     "idx": chunk.chunk_index,
                     "text": _strip_nuls(chunk.text or ""),
                     "embedding": str(list(embedding)),
+                    "display_text": _strip_nuls(chunk.text or ""),
+                    "spoken_text": _strip_nuls(_spoken_text_from_formulas(chunk.text or "", getattr(chunk, "formulas", []) or [])),
+                    "formulas": _json_dumps(getattr(chunk, "formulas", []) or []),
+                    "latex_formulas": [
+                        _strip_nuls(str(f.get("latex") or ""))
+                        for f in (getattr(chunk, "formulas", []) or [])
+                        if isinstance(f, dict) and f.get("latex")
+                    ],
                     "material_id": material_id,
                     "page_start": chunk.page_start,
                     "page_end": chunk.page_end,
@@ -106,6 +117,7 @@ def persist_source_chunks(
                 "page_start": chunk.page_start,
                 "page_end": chunk.page_end,
                 "text": chunk.text,
+                "formulas": list(getattr(chunk, "formulas", []) or []),
             })
         session.commit()
         logger.info(
@@ -117,6 +129,20 @@ def persist_source_chunks(
         raise
     finally:
         session.close()
+
+
+def _spoken_text_from_formulas(text: str, formulas: list[dict]) -> str:
+    spoken = text or ""
+    for idx, formula in enumerate(formulas or []):
+        if not isinstance(formula, dict):
+            continue
+        placeholder = str(formula.get("id") or f"[[FORMULA_{idx}]]")
+        replacement = str(formula.get("spoken") or "")
+        if not replacement:
+            label = str(formula.get("label") or "").strip()
+            replacement = f"equation {label}" if label else f"equation {idx + 1}"
+        spoken = spoken.replace(placeholder, replacement)
+    return spoken
 
 
 # ---------------------------------------------------------------------------
