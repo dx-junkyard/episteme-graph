@@ -1578,19 +1578,19 @@ def get_lecture_studio_components(
     course_data = _course_data_for_studio(course_id, current_user)
     sources = course_data.get("sources", [])
     source_document_ids: list[str] = []
-    if sources:
-        mid_placeholders = ", ".join(f":mid_{i}" for i in range(len(sources)))
-        params_mid: dict = {f"mid_{i}": s.get("material_id", "") for i, s in enumerate(sources) if s.get("material_id")}
-        if params_mid:
-            session = _pg_session()
-            try:
-                doc_rows = session.execute(
-                    sa_text(f"SELECT id FROM documents WHERE material_id IN ({mid_placeholders})"),
-                    params_mid,
-                ).fetchall()
-                source_document_ids = [str(r[0]) for r in doc_rows]
-            finally:
-                session.close()
+    material_ids = [s.get("material_id", "") for s in sources if s.get("material_id")]
+    if material_ids:
+        mid_placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
+        params_mid: dict = {f"mid_{i}": mid for i, mid in enumerate(material_ids)}
+        session = _pg_session()
+        try:
+            doc_rows = session.execute(
+                sa_text(f"SELECT DISTINCT document_id FROM chunks WHERE material_id IN ({mid_placeholders})"),
+                params_mid,
+            ).fetchall()
+            source_document_ids = [str(r[0]) for r in doc_rows if r[0]]
+        finally:
+            session.close()
 
     # --- theory_components ---
     session = _pg_session()
