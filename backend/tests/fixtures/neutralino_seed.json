@@ -2,6 +2,7 @@
   "documents": [
     {
       "material_id": "mat-neutralino-001",
+      "doc_uuid": "a1b2c3d4-0000-0000-0000-000000000001",
       "title": "Unitarity and Higher-Order Corrections in Neutralino Dark Matter Annihilation into Two Photons",
       "filename": "0212022v2.pdf",
       "status": "completed",
@@ -22,6 +23,210 @@
           {"name": "Radiative Correction", "type": "TECHNIQUE", "description": "Higher-order perturbative corrections arising from virtual particle loops in quantum field theory."},
           {"name": "Gamma-Ray Line", "type": "OBSERVABLE", "description": "A monochromatic photon signal at E_gamma = m_chi, a distinctive spectral feature for indirect dark matter detection."}
         ]
+      }
+    }
+  ],
+  "theory_components": [
+    {
+      "id": "comp-uuid-0001",
+      "document_id": "a1b2c3d4-0000-0000-0000-000000000001",
+      "name": "Neutralino Dark Matter Candidate",
+      "component_type": "concept",
+      "component_type_text": "fundamental particle concept",
+      "summary": "The lightest neutralino chi^0_1 as a stable, electrically neutral Majorana fermion forming the leading dark matter candidate in the MSSM under R-parity conservation.",
+      "inputs": ["MSSM parameter space", "R-parity conservation"],
+      "outputs": ["stable dark matter particle"],
+      "preconditions": ["MSSM framework", "R-parity conservation"],
+      "cautions": ["Mass bounds from LEP/LHC constraints"],
+      "source_chunks": [],
+      "evidence_claims": ["claim-uuid-0001"],
+      "review_status": "teacher_reviewed",
+      "maturity_level": "paper_claim"
+    },
+    {
+      "id": "comp-uuid-0002",
+      "document_id": "a1b2c3d4-0000-0000-0000-000000000001",
+      "name": "Loop-Induced Annihilation Amplitude",
+      "component_type": "mechanism",
+      "component_type_text": "loop process mechanism",
+      "summary": "The process chi chi -> gamma gamma is loop-induced at leading order because neutralinos have no tree-level photon coupling. Contributions arise from chargino loops, sfermion loops, and mixed diagrams.",
+      "inputs": ["neutralino pair", "MSSM loop particles"],
+      "outputs": ["two-photon amplitude M"],
+      "preconditions": ["Neutralino Dark Matter Candidate", "One-loop perturbation theory"],
+      "cautions": ["Triangle and box topologies must all be included"],
+      "source_chunks": [],
+      "evidence_claims": ["claim-uuid-0002"],
+      "review_status": "teacher_review_required",
+      "maturity_level": "paper_claim"
+    },
+    {
+      "id": "comp-uuid-0003",
+      "document_id": "a1b2c3d4-0000-0000-0000-000000000001",
+      "name": "Partial-Wave Unitarity Constraint",
+      "component_type": "law",
+      "component_type_text": "unitarity principle",
+      "summary": "The partial-wave unitarity condition |a_J| <= 1 must be satisfied for every partial wave. Naive one-loop calculations violate this for m_chi > 500 GeV in certain MSSM parameter regions.",
+      "inputs": ["partial-wave amplitude a_J", "neutralino mass"],
+      "outputs": ["unitarity bound check"],
+      "preconditions": ["Loop-Induced Annihilation Amplitude"],
+      "cautions": ["Violation signals missing higher-order contributions"],
+      "source_chunks": [],
+      "evidence_claims": ["claim-uuid-0003"],
+      "review_status": "teacher_review_required",
+      "maturity_level": "paper_claim"
+    },
+    {
+      "id": "comp-uuid-0004",
+      "document_id": "a1b2c3d4-0000-0000-0000-000000000001",
+      "name": "Box Diagram Unitarity Restoration",
+      "component_type": "mechanism",
+      "component_type_text": "higher-order correction mechanism",
+      "summary": "Including the complete set of box diagrams (gamma-gamma, Z-gamma, W-W topologies) restores partial-wave unitarity and reduces the cross section by 15-30% for m_chi ~ 200-800 GeV.",
+      "inputs": ["box diagram topologies", "chargino-sfermion exchange"],
+      "outputs": ["unitarity-restored cross section"],
+      "preconditions": ["Partial-Wave Unitarity Constraint"],
+      "cautions": ["All three box topologies must be included simultaneously"],
+      "source_chunks": [],
+      "evidence_claims": ["claim-uuid-0004"],
+      "review_status": "teacher_review_required",
+      "maturity_level": "paper_claim"
+    },
+    {
+      "id": "comp-uuid-0005",
+      "document_id": "a1b2c3d4-0000-0000-0000-000000000001",
+      "name": "Corrected Annihilation Cross Section",
+      "component_type": "observation",
+      "component_type_text": "phenomenological result",
+      "summary": "The unitarity-restored sigma(chi chi -> gamma gamma) is ~25% smaller than uncorrected one-loop value for a 200 GeV wino-like neutralino, directly impacting Fermi-LAT, MAGIC, and CTA predictions.",
+      "inputs": ["Box Diagram Unitarity Restoration", "MSSM parameters"],
+      "outputs": ["corrected sigma v ~ 2.3e-28 cm^3/s", "gamma-ray line prediction"],
+      "preconditions": ["Box Diagram Unitarity Restoration"],
+      "cautions": ["Correction comparable to astrophysical density profile uncertainties"],
+      "source_chunks": [],
+      "evidence_claims": ["claim-uuid-0005"],
+      "review_status": "teacher_review_required",
+      "maturity_level": "paper_claim"
+    }
+  ],
+  "theory_component_graphs": [
+    {
+      "document_id": "a1b2c3d4-0000-0000-0000-000000000001",
+      "graph_json": {
+        "nodes": [
+          {"id": "comp-uuid-0001", "label": "Neutralino Dark Matter Candidate"},
+          {"id": "comp-uuid-0002", "label": "Loop-Induced Annihilation Amplitude"},
+          {"id": "comp-uuid-0003", "label": "Partial-Wave Unitarity Constraint"},
+          {"id": "comp-uuid-0004", "label": "Box Diagram Unitarity Restoration"},
+          {"id": "comp-uuid-0005", "label": "Corrected Annihilation Cross Section"}
+        ],
+        "edges": [
+          {
+            "source": "comp-uuid-0001",
+            "target": "comp-uuid-0002",
+            "type": "requires",
+            "reason": "Loop amplitude requires neutralino as initial state particle"
+          },
+          {
+            "source": "comp-uuid-0002",
+            "target": "comp-uuid-0003",
+            "type": "output_to_input",
+            "reason": "Amplitude feeds into partial-wave unitarity analysis"
+          },
+          {
+            "source": "comp-uuid-0003",
+            "target": "comp-uuid-0004",
+            "type": "output_to_input",
+            "reason": "Unitarity violation motivates box diagram inclusion"
+          },
+          {
+            "source": "comp-uuid-0004",
+            "target": "comp-uuid-0005",
+            "type": "output_to_input",
+            "reason": "Box diagrams produce the corrected cross section"
+          }
+        ],
+        "dsl": "(comp-uuid-0001:concept) ==[requires]==> (comp-uuid-0002:mechanism) ==[output_to_input]==> (comp-uuid-0003:law)"
+      }
+    }
+  ],
+  "theory_claims": [
+    {
+      "id": "claim-uuid-0001",
+      "document_id": "a1b2c3d4-0000-0000-0000-000000000001",
+      "claim_type": "definition",
+      "text": "The lightest neutralino chi^0_1 is a Majorana fermion and the leading MSSM dark matter candidate, stable under R-parity conservation.",
+      "normalized_text": "neutralino chi^0_1 is Majorana fermion, stable dark matter candidate under R-parity",
+      "source_scope": {"section": "1.1 Motivation"},
+      "evidence_text": "In the MSSM, the lightest neutralino chi^0_1 is a leading dark matter candidate, being stable (under R-parity conservation), electrically neutral, and weakly interacting.",
+      "support_status": "source_backed",
+      "review_status": "teacher_reviewed"
+    },
+    {
+      "id": "claim-uuid-0002",
+      "document_id": "a1b2c3d4-0000-0000-0000-000000000001",
+      "claim_type": "relation",
+      "text": "chi chi -> gamma gamma is loop-induced because neutralinos have no tree-level photon coupling.",
+      "normalized_text": "neutralino annihilation to photons is loop-induced at leading order",
+      "source_scope": {"section": "2.1 One-Loop Amplitudes"},
+      "evidence_text": "Since neutralinos are Majorana fermions with no tree-level coupling to photons, the process chi chi -> gamma gamma is loop-induced at leading order.",
+      "support_status": "source_backed",
+      "review_status": "teacher_review_required"
+    },
+    {
+      "id": "claim-uuid-0003",
+      "document_id": "a1b2c3d4-0000-0000-0000-000000000001",
+      "claim_type": "result",
+      "text": "Naive one-loop calculation violates partial-wave unitarity for m_chi > 500 GeV in certain MSSM parameter regions.",
+      "normalized_text": "one-loop unitarity violation above 500 GeV neutralino mass",
+      "source_scope": {"section": "2.2 Partial-Wave Decomposition"},
+      "evidence_text": "We find that the naive one-loop calculation violates this bound for neutralino masses m_chi > 500 GeV in certain MSSM parameter regions, particularly when mu is small and tan(beta) is large.",
+      "support_status": "source_backed",
+      "review_status": "teacher_review_required"
+    },
+    {
+      "id": "claim-uuid-0004",
+      "document_id": "a1b2c3d4-0000-0000-0000-000000000001",
+      "claim_type": "result",
+      "text": "Box diagrams reduce the cross section by 15-30% relative to naive one-loop for m_chi ~ 200-800 GeV.",
+      "normalized_text": "box diagram contribution reduces cross section 15-30 percent",
+      "source_scope": {"section": "3.1 Box Diagram Contributions"},
+      "evidence_text": "Numerically, the box diagrams reduce the total cross section by 15-30% relative to the naive one-loop result for m_chi ~ 200-800 GeV, depending on the MSSM parameters.",
+      "support_status": "source_backed",
+      "review_status": "teacher_review_required"
+    },
+    {
+      "id": "claim-uuid-0005",
+      "document_id": "a1b2c3d4-0000-0000-0000-000000000001",
+      "claim_type": "result",
+      "text": "Corrected sigma v ~ 2.3e-28 cm^3/s for 200 GeV wino-like neutralino, ~25% smaller than uncorrected one-loop value.",
+      "normalized_text": "corrected annihilation cross section 25 percent smaller than one-loop prediction",
+      "source_scope": {"section": "4.1 Phenomenological Implications"},
+      "evidence_text": "For a 200 GeV neutralino with wino-like composition, the corrected cross section is sigma v ~ 2.3 x 10^{-28} cm^3/s, approximately 25% smaller than the uncorrected one-loop value.",
+      "support_status": "source_backed",
+      "review_status": "teacher_review_required"
+    }
+  ],
+  "analysis_runs": [
+    {
+      "document_id": "a1b2c3d4-0000-0000-0000-000000000001",
+      "material_id": "mat-neutralino-001",
+      "status": "completed",
+      "stage_outputs": {
+        "_artifacts": {
+          "document_structure": {
+            "sections": [
+              {"title": "1. Introduction"},
+              {"title": "1.1 Motivation"},
+              {"title": "2. Framework"},
+              {"title": "2.1 One-Loop Amplitudes"},
+              {"title": "2.2 Partial-Wave Decomposition"},
+              {"title": "3. Higher-Order Corrections"},
+              {"title": "3.1 Box Diagram Contributions"},
+              {"title": "4. Results and Discussion"},
+              {"title": "4.1 Phenomenological Implications"}
+            ]
+          }
+        }
       }
     }
   ],
