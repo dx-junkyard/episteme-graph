@@ -44,6 +44,7 @@ class ClaimQualificationAgent:
         roles: RhetoricalRoleResult,
         cartridge_id: str | None = None,
         config: dict | None = None,
+        progress_callback=None,
     ) -> ClaimQualificationResult:
         cartridge = self._load_cartridge(cartridge_id)
         llm_inputs = self._input_builder.build(
@@ -55,13 +56,22 @@ class ClaimQualificationAgent:
             )
 
         records: list[QualifiedSpanRecord] = []
-        for llm_input in llm_inputs:
+        total = len(llm_inputs)
+        for idx, llm_input in enumerate(llm_inputs, start=1):
             messages = self._prompt_factory.build_messages(llm_input, cartridge)
             try:
                 raw_output = self._llm_client.generate(messages)
             except Exception as exc:
-                logger.error("Claim qualification failed for %s: %s", llm_input.span_id, exc)
+                logger.exception(
+                    "Claim qualification failed for document=%s span_id=%s block_id=%s cartridge=%s",
+                    roles.document_id,
+                    llm_input.span_id,
+                    llm_input.block_id,
+                    llm_input.cartridge_id,
+                )
                 records.append(_fallback_record(llm_input, str(exc)))
+                if progress_callback:
+                    progress_callback(idx, total)
                 continue
 
             record = _parse_record(raw_output, llm_input)
@@ -73,6 +83,12 @@ class ClaimQualificationAgent:
             issues = self._validator.validate(partial, cartridge)
             errors = [i for i in issues if i.severity == "error"]
             if errors:
+                logger.warning(
+                    "Claim qualification validation repair required for document=%s span_id=%s errors=%d",
+                    roles.document_id,
+                    llm_input.span_id,
+                    len(errors),
+                )
                 record = self._repairer.repair(
                     llm_input=llm_input,
                     raw_output=raw_output,
@@ -83,6 +99,8 @@ class ClaimQualificationAgent:
                     validator=self._validator,
                 )
             records.append(record)
+            if progress_callback:
+                progress_callback(idx, total)
 
         result = self._build_result(
             document_id=roles.document_id,

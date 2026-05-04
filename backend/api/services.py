@@ -117,12 +117,39 @@ def get_background_task(task_id: str) -> dict | None:
         ).fetchone()
         if not row:
             return None
+        result_data = row[3] or {}
+        if isinstance(result_data, dict) and result_data.get("document_id"):
+            run = session.execute(
+                sa_text(
+                    """
+                    SELECT status, current_stage, error_message, stage_outputs
+                    FROM document_analysis_runs
+                    WHERE document_id = :document_id
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """
+                ),
+                {"document_id": result_data["document_id"]},
+            ).fetchone()
+            if run:
+                stage = run[1] or result_data.get("stage")
+                stage_outputs = run[3] or {}
+                stage_info = stage_outputs.get(stage) if isinstance(stage_outputs, dict) else {}
+                if not isinstance(stage_info, dict):
+                    stage_info = {}
+                enriched = dict(result_data)
+                enriched.update({
+                    "stage": stage,
+                    "analysis_status": run[0],
+                })
+                enriched.update(stage_info)
+                result_data = enriched
         return {
             "task_id": row[0],
             "task_type": row[1],
             "status": row[2],
-            "result_data": row[3],
-            "error_message": row[4],
+            "result_data": result_data,
+            "error_message": row[4] or (run[2] if 'run' in locals() and run else None),
             "created_at": row[5].isoformat() if row[5] else "",
             "updated_at": row[6].isoformat() if row[6] else "",
         }

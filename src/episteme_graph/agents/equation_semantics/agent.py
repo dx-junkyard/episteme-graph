@@ -38,6 +38,7 @@ class EquationSemanticsAgent:
         roles: RhetoricalRoleResult | None = None,
         cartridge_id: str | None = None,
         config: dict | None = None,
+        progress_callback=None,
     ) -> EquationSemanticsResult:
         cartridge = self._load_cartridge(cartridge_id)
         llm_inputs = self._input_builder.build(
@@ -49,13 +50,21 @@ class EquationSemanticsAgent:
             )
 
         records: list[EquationSemanticsRecord] = []
-        for llm_input in llm_inputs:
+        total = len(llm_inputs)
+        for idx, llm_input in enumerate(llm_inputs, start=1):
             messages = self._prompt_factory.build_messages(llm_input, cartridge)
             try:
                 raw_output = self._llm_client.generate(messages)
             except Exception as exc:
-                logger.error("Equation semantics failed for %s: %s", llm_input.block_id, exc)
+                logger.exception(
+                    "Equation semantics failed for document=%s block_id=%s cartridge=%s",
+                    structure.document_id,
+                    llm_input.block_id,
+                    llm_input.cartridge_id,
+                )
                 records.append(_fallback_record(llm_input, str(exc)))
+                if progress_callback:
+                    progress_callback(idx, total)
                 continue
 
             record = _parse_record(raw_output, llm_input)
@@ -66,6 +75,12 @@ class EquationSemanticsAgent:
             )
             issues = self._validator.validate(partial, cartridge)
             if [i for i in issues if i.severity == "error"]:
+                logger.warning(
+                    "Equation semantics validation repair required for document=%s block_id=%s errors=%d",
+                    structure.document_id,
+                    llm_input.block_id,
+                    len([i for i in issues if i.severity == "error"]),
+                )
                 record = self._repairer.repair(
                     llm_input=llm_input,
                     raw_output=raw_output,
@@ -76,6 +91,8 @@ class EquationSemanticsAgent:
                     validator=self._validator,
                 )
             records.append(record)
+            if progress_callback:
+                progress_callback(idx, total)
 
         result = EquationSemanticsResult(
             document_id=structure.document_id,

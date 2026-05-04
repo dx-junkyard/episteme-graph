@@ -48,6 +48,7 @@ class CreateUserRequest(BaseModel):
 
 class MaterialOut(BaseModel):
     material_id: str
+    document_id: str | None = None
     filename: str
     title: str
     status: str  # uploaded | processing | completed | failed
@@ -57,6 +58,11 @@ class MaterialOut(BaseModel):
     visibility: str = "private"  # public | group | private
     group_id: str | None = None
     has_pdf: bool = False
+    analysis_stage: str | None = None
+    analysis_progress: int | None = None
+    analysis_processed: int | None = None
+    analysis_total: int | None = None
+    analysis_error: str | None = None
 
 
 class VisibilityUpdateRequest(BaseModel):

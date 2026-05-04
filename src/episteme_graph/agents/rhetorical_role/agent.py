@@ -47,6 +47,7 @@ class RhetoricalRoleAgent:
         skeleton: PaperSkeletonResult,
         cartridge_id: str | None = None,
         config: dict | None = None,
+        progress_callback=None,
     ) -> RhetoricalRoleResult:
         cartridge = self._load_cartridge(cartridge_id)
         llm_inputs = self._input_builder.build(
@@ -60,13 +61,21 @@ class RhetoricalRoleAgent:
         annotations: list[BlockRoleAnnotation] = []
         block_text_by_id = {i.block_id: i.block_text for i in llm_inputs}
 
-        for llm_input in llm_inputs:
+        total = len(llm_inputs)
+        for idx, llm_input in enumerate(llm_inputs, start=1):
             messages = self._prompt_factory.build_messages(llm_input, cartridge)
             try:
                 raw_output = self._llm_client.generate(messages)
             except Exception as exc:
-                logger.error("LLM role labeling failed for %s: %s", llm_input.block_id, exc)
+                logger.exception(
+                    "LLM role labeling failed for document=%s block_id=%s cartridge=%s",
+                    structure.document_id,
+                    llm_input.block_id,
+                    llm_input.cartridge_id,
+                )
                 annotations.append(_fallback_annotation(llm_input, str(exc)))
+                if progress_callback:
+                    progress_callback(idx, total)
                 continue
 
             annotation = _parse_block_annotation(raw_output, llm_input)
@@ -80,6 +89,12 @@ class RhetoricalRoleAgent:
             )
             errors = [i for i in issues if i.severity == "error"]
             if errors:
+                logger.warning(
+                    "Rhetorical role validation repair required for document=%s block_id=%s errors=%d",
+                    structure.document_id,
+                    llm_input.block_id,
+                    len(errors),
+                )
                 annotation = self._repairer.repair(
                     llm_input=llm_input,
                     raw_output=raw_output,
@@ -90,6 +105,8 @@ class RhetoricalRoleAgent:
                     validator=self._validator,
                 )
             annotations.append(annotation)
+            if progress_callback:
+                progress_callback(idx, total)
 
         result = self._build_result(
             document_id=structure.document_id,

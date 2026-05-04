@@ -233,6 +233,18 @@
         completed: "完了",
         failed: "失敗",
       }[m.status] || m.status;
+      if (m.status === "processing" && m.analysis_stage) {
+        var progressText = "";
+        if (typeof m.analysis_progress === "number") {
+          progressText = " " + m.analysis_progress + "%";
+        } else if (typeof m.analysis_processed === "number" && typeof m.analysis_total === "number") {
+          progressText = " " + m.analysis_processed + "/" + m.analysis_total;
+        }
+        statusLabel = "処理中: " + m.analysis_stage + progressText;
+      }
+      if (m.status === "failed" && m.analysis_stage) {
+        statusLabel = "失敗: " + m.analysis_stage;
+      }
 
       var uploadedAt = m.uploaded_at || "";
       if (uploadedAt) {
@@ -256,8 +268,13 @@
       var pdfBtnTitle = pdfRegistrationFailed
         ? "教材処理に失敗、またはチャンクが作成されませんでした。PDFを再登録してください"
         : "PDFのみ再登録";
+      var resumeBtn = "";
+      if ((m.status === "processing" || m.status === "failed") && m.document_id) {
+        resumeBtn = '<button class="admin-resume-analysis-btn" data-document-id="' + escHtml(m.document_id) + '" data-filename="' + escHtml(m.filename || m.title || "教材") + '" title="保存済みPDFから解析を再開">解析再開</button>';
+      }
       html += '<td style="display:flex;gap:6px">' +
         '<button class="admin-pdf-reupload-btn' + pdfBtnClass + '" data-material-id="' + escHtml(m.material_id) + '" title="' + escHtml(pdfBtnTitle) + '">' + pdfBtnLabel + '</button>' +
+        resumeBtn +
         '<button class="admin-delete-btn" data-material-id="' + escHtml(m.material_id) + '" data-material-title="' + escHtml(m.title) + '" style="background:none;border:1px solid var(--color-text-danger);color:var(--color-text-danger);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">削除</button>' +
         '</td>';
       html += "</tr>";
@@ -311,6 +328,31 @@
             });
         };
         input.click();
+      });
+    });
+
+    tbody.querySelectorAll(".admin-resume-analysis-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var docId = this.getAttribute("data-document-id");
+        var filename = this.getAttribute("data-filename") || "教材";
+        if (!docId) return;
+        btn.disabled = true;
+        btn.textContent = "再開中...";
+        apiFetch("/admin/documents/" + docId + "/reanalyze", { method: "POST" })
+          .then(function (res) {
+            if (!res.ok) throw new Error("status " + res.status);
+            return res.json();
+          })
+          .then(function (data) {
+            btn.textContent = "処理中";
+            if (data.task_id) startTaskPolling(data.task_id, filename);
+            loadMaterials();
+          })
+          .catch(function () {
+            btn.disabled = false;
+            btn.textContent = "解析再開";
+            showUploadStatus("解析の再開に失敗しました。", "error");
+          });
       });
     });
   }
@@ -539,6 +581,7 @@
               "error"
             );
             disableUploadUI(false);
+            loadMaterials();
           }
           // else: retry on next interval
         });

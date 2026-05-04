@@ -644,3 +644,52 @@ def upsert_analysis_run(
         raise
     finally:
         session.close()
+
+
+def get_latest_analysis_run(
+    *,
+    document_id: str,
+    material_id: str | None = None,
+) -> dict | None:
+    """Return the latest analysis run for resume/status inspection."""
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text(
+                """
+                SELECT id::text, document_id::text, material_id, cartridge_id, status,
+                       current_stage, error_message, stage_outputs, started_at,
+                       completed_at, created_at, updated_at
+                FROM document_analysis_runs
+                WHERE document_id = :document_id
+                  AND (:material_id IS NULL OR material_id = :material_id)
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+            ),
+            {"document_id": document_id, "material_id": material_id},
+        ).mappings().fetchone()
+        return dict(row) if row else None
+    finally:
+        session.close()
+
+
+def load_source_chunk_index(*, document_id: str) -> list[dict]:
+    """Load persisted source chunk metadata for downstream evidence resolution."""
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                """
+                SELECT id::text AS chunk_id, chunk_index, section_id, block_ids,
+                       page_start, page_end, text
+                FROM chunks
+                WHERE document_id = CAST(:document_id AS uuid)
+                ORDER BY chunk_index ASC
+                """
+            ),
+            {"document_id": document_id},
+        ).mappings().all()
+        return [dict(row) for row in rows]
+    finally:
+        session.close()

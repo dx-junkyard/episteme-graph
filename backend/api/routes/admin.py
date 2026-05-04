@@ -428,7 +428,8 @@ def list_materials(
             sa_text(f"""
                 SELECT d.source_path, d.filename, d.title, d.status, d.created_at, d.knowledge_graph,
                        COALESCE(d.visibility, 'private'), d.group_id,
-                       COALESCE(d.chunk_count, cs.chunk_count, 0) AS chunk_count
+                       COALESCE(d.chunk_count, cs.chunk_count, 0) AS chunk_count,
+                       d.id::text AS document_id
                 FROM documents d
                 LEFT JOIN (
                     SELECT material_id, COUNT(*) AS chunk_count
@@ -446,6 +447,26 @@ def list_materials(
             """),
             params,
         ).fetchall()
+
+        material_ids = [r[0] for r in records if r[0]]
+        latest_runs: dict[str, dict] = {}
+        if material_ids:
+            run_params = {f"mid_{i}": mid for i, mid in enumerate(material_ids)}
+            run_placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
+            run_rows = session.execute(
+                sa_text(
+                    f"""
+                    SELECT DISTINCT ON (material_id)
+                           material_id, status, current_stage, error_message,
+                           stage_outputs, updated_at
+                    FROM document_analysis_runs
+                    WHERE material_id IN ({run_placeholders})
+                    ORDER BY material_id, created_at DESC
+                    """
+                ),
+                run_params,
+            ).mappings().all()
+            latest_runs = {row["material_id"]: dict(row) for row in run_rows}
     finally:
         session.close()
 
@@ -468,9 +489,23 @@ def list_materials(
             if mid in _material_status:
                 status = _material_status[mid].get("status", status)
 
+        run = latest_runs.get(mid) or {}
+        stage_outputs = run.get("stage_outputs") or {}
+        current_stage = run.get("current_stage")
+        stage_info = stage_outputs.get(current_stage) if current_stage else None
+        if not isinstance(stage_info, dict):
+            stage_info = {}
+        if run.get("status") == "running":
+            status = "processing"
+        elif run.get("status") == "failed":
+            status = "failed"
+        elif run.get("status") == "completed":
+            status = "completed"
+
         uploaded_at = r[4].isoformat() if r[4] else ""
         materials.append(MaterialOut(
             material_id=mid,
+            document_id=r[9],
             filename=r[1] or "",
             title=r[2] or "",
             status=status,
@@ -480,6 +515,11 @@ def list_materials(
             visibility=r[6] or "private",
             group_id=str(r[7]) if r[7] else None,
             has_pdf=mid in existing_pdf_ids,
+            analysis_stage=current_stage,
+            analysis_progress=stage_info.get("progress"),
+            analysis_processed=stage_info.get("processed"),
+            analysis_total=stage_info.get("total"),
+            analysis_error=run.get("error_message") or None,
         ))
 
     return materials

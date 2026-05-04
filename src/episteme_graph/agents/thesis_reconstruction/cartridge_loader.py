@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import os
 
+from episteme_graph.agents.cartridge_paths import resolve_cartridge_base_dir
+
 from .schema import CartridgeContext
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -14,7 +16,7 @@ _DEFAULT_CARTRIDGE_BASE = os.path.abspath(
 
 class CartridgeLoader:
     def __init__(self, cartridge_base_dir: str | None = None) -> None:
-        self._base_dir = cartridge_base_dir or _DEFAULT_CARTRIDGE_BASE
+        self._base_dir = cartridge_base_dir or resolve_cartridge_base_dir(_DEFAULT_CARTRIDGE_BASE)
 
     def load(self, cartridge_id: str) -> CartridgeContext:
         cartridge_dir = os.path.join(self._base_dir, cartridge_id)
