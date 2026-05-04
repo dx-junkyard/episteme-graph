@@ -9,7 +9,8 @@ _SYSTEM_CONTENT = """\
 You are assembling reusable knowledge components from scientific paper analysis outputs.
 
 Your task is NOT to summarize sections.
-Your task is to construct reusable components with explicit inputs, outputs, preconditions, cautions, and dependencies.
+Your task is to construct reusable components with explicit inputs, outputs,
+preconditions, cautions, dependencies, and an INTERNAL FLOW that connects them.
 
 Important constraints:
 - Use only component types allowed by the active cartridge or explicit core fallbacks.
@@ -18,6 +19,17 @@ Important constraints:
 - Components must be reusable units, not topical or section summaries.
 - Use accepted claims, equation semantics, thesis structure, and DSL graph evidence.
 - Do not let prior work or meta discourse dominate component cores.
+
+internal_flow requirement:
+- For RelationComponent / PaperRelationComponent / CorrectionComponent /
+  DiagnosticComponent / MethodComponent, internal_flow MUST NOT be empty.
+- Each internal_flow step is {"from": "<symbol/equation/claim id>",
+  "relation": "<short verb such as combine_with / normalize / take_limit /
+  apply_correction / measure>", "to": "<symbol/equation/claim id>"}.
+- internal_flow should explain how the inputs are processed/combined into the
+  outputs. Avoid restating the summary; describe the actual operations.
+- For components with multiple inputs or outputs, internal_flow is required
+  to make the wiring explicit.
 
 Return ONLY valid JSON matching the schema.
 """
@@ -37,6 +49,9 @@ _OUTPUT_SCHEMA = {
             "preconditions": [{"text": "string", "claim_ids": [], "equation_ids": []}],
             "cautions": [{"text": "string", "claim_ids": [], "equation_ids": []}],
             "dependencies": [{"dependency_type": "allowed dependency type", "component_refs": [], "reason": "string"}],
+            "internal_flow": [
+                {"from": "string", "relation": "string", "to": "string"}
+            ],
             "evidence_refs": {
                 "claim_ids": [],
                 "equation_ids": [],
@@ -113,5 +128,7 @@ class ComponentAssemblyPromptFactory:
             "- Each strong component should include evidence_refs\n"
             "- Derivation-like components need outputs and usually preconditions\n"
             "- Correction/uncertainty/diagnostic components should remain distinct when evidence supports separation\n"
+            "- Relation/Correction/Diagnostic/Method components MUST include internal_flow\n"
+            "- internal_flow explains how inputs are combined/transformed into outputs\n"
             "- Return ONLY valid JSON, no markdown fences",
         ])
