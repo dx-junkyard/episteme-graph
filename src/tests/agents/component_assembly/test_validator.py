@@ -30,6 +30,9 @@ def _component(**kwargs):
         reason="Relation is explicitly supported by claims and equations.",
         confidence=0.84,
         review_notes=[],
+        internal_flow=[
+            {"from": "eq_1", "relation": "combine_with", "to": "eq_2"},
+        ],
     )
     defaults.update(kwargs)
     return ComponentRecord(**defaults)
@@ -88,6 +91,44 @@ def test_relation_component_without_output_is_warning():
 def test_invalid_assembly_hint_is_error():
     result = _result(assembly_hints=[{"hint_type": "bad", "component_ids": ["comp_1"], "reason": "bad"}])
     assert any(i.rule_id == "invalid_assembly_hint_type" for i in VALIDATOR.validate(result))
+
+
+def test_relation_component_missing_internal_flow_is_warning():
+    component = _component(internal_flow=[])
+    issues = VALIDATOR.validate(_result(components=[component]))
+    assert any(i.rule_id == "component_missing_internal_flow" for i in issues)
+
+
+def test_claim_bundle_does_not_require_internal_flow():
+    component = _component(
+        component_type="ClaimBundleComponent",
+        internal_flow=[],
+        outputs=[{"text": "summary"}],
+    )
+    issues = VALIDATOR.validate(_result(components=[component]))
+    assert not any(i.rule_id == "component_missing_internal_flow" for i in issues)
+
+
+def test_internal_flow_incomplete_step_is_error():
+    component = _component(
+        internal_flow=[{"from": "eq_1", "to": "eq_2"}],  # missing relation
+    )
+    issues = VALIDATOR.validate(_result(components=[component]))
+    assert any(i.rule_id == "internal_flow_incomplete_step" for i in issues)
+
+
+def test_multi_input_without_internal_flow_emits_warning():
+    component = _component(
+        component_type="TheoryComponent",
+        inputs=[
+            {"text": "premise A"},
+            {"text": "premise B"},
+            {"text": "premise C"},
+        ],
+        internal_flow=[],
+    )
+    issues = VALIDATOR.validate(_result(components=[component]))
+    assert any(i.rule_id == "component_multi_io_without_flow" for i in issues)
 
 
 def test_cartridge_component_and_relation_types_are_allowed():

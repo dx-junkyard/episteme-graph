@@ -77,6 +77,15 @@ class ComponentDependency:
     reason: str
 
 
+INTERNAL_FLOW_REQUIRED_TYPES = {
+    "RelationComponent",
+    "PaperRelationComponent",
+    "CorrectionComponent",
+    "DiagnosticComponent",
+    "MethodComponent",
+}
+
+
 @dataclass
 class ComponentRecord:
     component_id: str
@@ -92,6 +101,7 @@ class ComponentRecord:
     reason: str
     confidence: float
     review_notes: list[str]
+    internal_flow: list[dict] = field(default_factory=list)
 
 
 @dataclass

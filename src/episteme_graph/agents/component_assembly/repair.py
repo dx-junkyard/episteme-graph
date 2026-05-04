@@ -78,6 +78,7 @@ def _parse_raw(
             reason=str(item.get("reason", "")),
             confidence=_confidence(item.get("confidence", 0.5)),
             review_notes=list(item.get("review_notes", [])),
+            internal_flow=_internal_flow(item.get("internal_flow", [])),
         ))
     return ComponentAssemblyResult(
         document_id=raw.get("document_id", document_id),
@@ -103,6 +104,21 @@ def _evidence_refs(raw: dict) -> dict:
             "edge_ids": list(dsl_refs.get("edge_ids", [])),
         },
     }
+
+
+def _internal_flow(raw: object) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+    flow: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        flow.append({
+            "from": str(item.get("from", "")),
+            "relation": str(item.get("relation", "")),
+            "to": str(item.get("to", "")),
+        })
+    return flow
 
 
 def _confidence(value: object) -> float:
