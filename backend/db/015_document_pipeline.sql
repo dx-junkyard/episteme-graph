@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS document_embeddings (
     embedding_type  TEXT NOT NULL,
     source_version  TEXT NOT NULL DEFAULT 'v1',
     text            TEXT NOT NULL,
-    embedding       vector(768),
+    embedding       vector(3072),
     metadata        JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
