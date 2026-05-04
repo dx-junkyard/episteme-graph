@@ -99,32 +99,47 @@ PDF ファイル
     ↓
 [#216] DocumentStructureAgent   — 文書構造復元（structure-first, parser-driven）
     ↓  DocumentStructureResult (JSON)
+[#237] EvidenceRegistryBuilder  — PDF 原文由来 evidence の一元管理（非LLM）
+    ↓  EvidenceRegistryResult (JSON)
 [#217] PaperSkeletonAgent       — 論文backbone仮説化（LLM-first）
     ↓  PaperSkeletonResult (JSON)
 [#218] RhetoricalRoleAgent      — chunk/span の論理役割判定（LLM-first）
     ↓  RhetoricalRoleResult (JSON)
- ┌──────────────────────────────────────┐
- │  [#219] ClaimQualificationAgent      │ — Claim採否・区分・粒度（LLM-first）
- │  [#220] EquationSemanticsAgent       │ — 数式ブロック意味役割復元（LLM-first）
- └──────────────────────────────────────┘
-    ↓  ClaimQualificationResult + EquationSemanticsResult
+[#219] ClaimQualificationAgent  — Claim採否・区分・粒度（LLM-first）
+    ↓  ClaimQualificationResult (JSON)
+[#237] ClaimObjectBuilder       — 最終 claims.json の決定論的組立（非LLM）
+    ↓  ClaimObjectBuildResult (JSON)
+[#220] EquationSemanticsAgent   — 数式ブロック意味役割復元（LLM-first）
+                                  + to_equations_export() で equations.json 化
+    ↓  EquationSemanticsResult (JSON)
+[#237] DerivationChainAgent     — 式間導出チェーン構築（非LLM）
+    ↓  DerivationChainResult (JSON)
+[#237] FigureTableSemanticsAgent — 図表の意味復元（caption-first, LLM enricher 任意）
+    ↓  FigureTableSemanticsResult (JSON)
 [#221] ThesisReconstructionAgent — 中心命題・支持構造の再構成（LLM-first）
     ↓  ThesisReconstructionResult (JSON)
 [#222] DSLLinkingAgent          — Claim/Equation/Thesis → DSL グラフ接続（LLM-first）
     ↓  DSLLinkingResult (JSON)
 [#223] ComponentAssemblyAgent   — 再利用可能コンポーネント生成（LLM-first + cartridge-aware）
     ↓  ComponentAssemblyResult (JSON)
+[#237] CourseMappingAgent       — Component → Course topic 接続（決定論的マッピング）
+    ↓  CourseMappingResult (course_info.json)
 ```
 
 #### 各Agentの実装場所
 
 ```
 src/episteme_graph/agents/
-  document_structure/   → DocumentStructureAgent (#216)
-  paper_skeleton/       → PaperSkeletonAgent (#217)
-  rhetorical_role/      → RhetoricalRoleAgent (#218)
-  claim_qualification/  → ClaimQualificationAgent (#219)
-  equation_semantics/   → EquationSemanticsAgent (#220)
+  document_structure/      → DocumentStructureAgent (#216)
+  evidence_registry/       → EvidenceRegistryBuilder (#237)
+  paper_skeleton/          → PaperSkeletonAgent (#217)
+  rhetorical_role/         → RhetoricalRoleAgent (#218)
+  claim_qualification/     → ClaimQualificationAgent (#219)
+  claim_object_builder/    → ClaimObjectBuilder (#237)
+  equation_semantics/      → EquationSemanticsAgent (#220)
+  derivation_chain/        → DerivationChainAgent (#237)
+  figure_table_semantics/  → FigureTableSemanticsAgent (#237)
+  course_mapping/          → CourseMappingAgent (#237)
   thesis_reconstruction/ → ThesisReconstructionAgent (#221)
   dsl_linking/          → DSLLinkingAgent (#222)
   component_assembly/   → ComponentAssemblyAgent (#223)
