@@ -106,15 +106,17 @@ class DerivationChainAgent:
                 document_id=equations.document_id,
                 source_section_ids=sorted(sections),
                 steps=steps,
-                teaching_takeaway="",
+                teaching_takeaway=self._generate_takeaway(steps, eq_by_id),
                 blackbox_policy_suggestion={
                     "expand_steps": [s.step_id for s in steps[-2:]],
                     "blackbox_steps": [s.step_id for s in steps[:-2]] if len(steps) > 2 else [],
                 },
             ))
 
-        # Quality checks
+        # Quality checks (issue #237 acceptance criteria)
         for chain in chains:
+            chain_has_any_assumption = any(s.assumption_refs for s in chain.steps)
+            chain_has_any_claim = any(s.required_claim_ids for s in chain.steps)
             for s in chain.steps:
                 if not s.input_equation_ids:
                     issues.append(ValidationIssue(
@@ -130,6 +132,34 @@ class DerivationChainAgent:
                         message=f"step {s.step_id} has no output_equation_ids",
                         field=chain.derivation_id,
                     ))
+                if not s.operation or s.operation == DEFAULT_OPERATION:
+                    issues.append(ValidationIssue(
+                        rule_id="derivation_step_generic_operation",
+                        severity="info",
+                        message=f"step {s.step_id} uses generic operation {s.operation!r}",
+                        field=chain.derivation_id,
+                    ))
+            if not chain_has_any_assumption:
+                issues.append(ValidationIssue(
+                    rule_id="derivation_chain_missing_assumptions",
+                    severity="warning",
+                    message=f"chain {chain.derivation_id} has no assumption_refs on any step",
+                    field=chain.derivation_id,
+                ))
+            if not chain_has_any_claim and claim_link_index:
+                issues.append(ValidationIssue(
+                    rule_id="derivation_chain_missing_claim_links",
+                    severity="warning",
+                    message=f"chain {chain.derivation_id} has no required_claim_ids on any step",
+                    field=chain.derivation_id,
+                ))
+            if not chain.teaching_takeaway:
+                issues.append(ValidationIssue(
+                    rule_id="derivation_chain_missing_teaching_takeaway",
+                    severity="warning",
+                    message=f"chain {chain.derivation_id} has no teaching_takeaway",
+                    field=chain.derivation_id,
+                ))
 
         return DerivationChainResult(
             document_id=equations.document_id,
@@ -194,6 +224,24 @@ class DerivationChainAgent:
         for idx, s in enumerate(steps, start=1):
             s.step_id = f"step_{idx:03d}"
         return steps, sections
+
+    @staticmethod
+    def _generate_takeaway(
+        steps: list[DerivationStep],
+        eq_by_id: dict[str, EquationSemanticsRecord],
+    ) -> str:
+        if not steps:
+            return ""
+        first_inputs = steps[0].input_equation_ids
+        last_output = steps[-1].output_equation_ids
+        if not first_inputs or not last_output:
+            return ""
+        ops = [s.operation for s in steps if s.operation]
+        op_summary = " -> ".join(ops) if ops else "transform"
+        return (
+            f"Derive {', '.join(last_output)} from {', '.join(first_inputs)} "
+            f"via {op_summary}"
+        )
 
     @staticmethod
     def _infer_operation(record: Optional[EquationSemanticsRecord]) -> str:
