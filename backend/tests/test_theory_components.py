@@ -18,6 +18,7 @@ MIGRATION = ROOT / "backend" / "db" / "013_theory_components.sql"
 ADMIN_HTML = ROOT / "frontend" / "public" / "admin.html"
 ADMIN_JS = ROOT / "frontend" / "public" / "js" / "admin.js"
 STYLES = ROOT / "frontend" / "public" / "css" / "styles.css"
+LECTURE_STUDIO = ROOT / "backend" / "api" / "routes" / "lecture_studio.py"
 
 
 def _read(path: Path) -> str:
@@ -91,6 +92,13 @@ class TestTheoryComponentRoutes:
         source = _read(ROOT / "backend" / "api" / "routes" / "admin.py")
         assert "routes.theory_components" in source
         assert "router.include_router(_theory_components_router)" in source
+
+    def test_lecture_studio_components_reads_document_scoped_pipeline_results(self):
+        source = _read(LECTURE_STUDIO)
+        assert "source_document_ids" in source
+        assert "OR document_id IN" in source
+        assert "FROM theory_components" in source
+        assert "FROM theory_component_graphs" in source
 
 
 class TestTheoryExtractionPrompt:

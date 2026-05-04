@@ -1592,11 +1592,18 @@ def get_lecture_studio_components(
         finally:
             session.close()
 
+    component_filter = "course_id = :course_id"
+    component_params: dict = {"course_id": course_id}
+    if source_document_ids:
+        doc_placeholders = ", ".join(f":doc_{i}" for i in range(len(source_document_ids)))
+        component_filter = f"({component_filter} OR document_id IN ({doc_placeholders}))"
+        component_params.update({f"doc_{i}": doc_id for i, doc_id in enumerate(source_document_ids)})
+
     # --- theory_components ---
     session = _pg_session()
     try:
         comp_rows = session.execute(
-            sa_text("""
+            sa_text(f"""
                 SELECT id, course_id, primary_chunk_id, name, component_type, summary, status,
                        source_chunks, inputs, outputs, preconditions, constraints,
                        invalid_conditions, dependencies, blackbox_policy, validation_warnings,
@@ -1604,10 +1611,10 @@ def get_lecture_studio_components(
                        review_status, cautions, connectors, created_at, updated_at,
                        component_type_text, internal_flow, duplicate_candidates
                 FROM theory_components
-                WHERE course_id = :course_id
+                WHERE {component_filter}
                 ORDER BY updated_at DESC, created_at DESC
             """),
-            {"course_id": course_id},
+            component_params,
         ).fetchall()
     finally:
         session.close()
@@ -1651,13 +1658,13 @@ def get_lecture_studio_components(
     session = _pg_session()
     try:
         graph_rows = session.execute(
-            sa_text("""
+            sa_text(f"""
                 SELECT document_id, graph_json, validation_results
                 FROM theory_component_graphs
-                WHERE course_id = :course_id
+                WHERE {component_filter}
                 ORDER BY updated_at DESC
             """),
-            {"course_id": course_id},
+            component_params,
         ).fetchall()
     finally:
         session.close()
