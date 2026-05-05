@@ -145,7 +145,7 @@ class TestExportManifest:
         )
 
         assert "export_schema_version" in manifest
-        assert manifest["export_schema_version"] == "0.1.0"
+        assert manifest["export_schema_version"] == "0.2.0"
         assert "exported_at" in manifest
         assert "scope" in manifest
         assert manifest["scope"]["type"] == "course"
