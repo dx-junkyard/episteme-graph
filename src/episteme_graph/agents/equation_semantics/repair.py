@@ -1,4 +1,7 @@
-"""Repair helpers for EquationSemanticsAgent."""
+"""Repair helpers for EquationSemanticsAgent.
+
+Issue #245: EquationRecord (新スキーマ) に対応。
+"""
 from __future__ import annotations
 
 import logging
@@ -8,12 +11,14 @@ from .prompt import EquationSemanticsPromptFactory
 from .schema import (
     CartridgeContext,
     DefinedSymbol,
-    DerivationLinks,
+    EquationCandidate,
+    EquationConfidencePolicy,
     EquationLLMInput,
-    EquationRolePrediction,
-    EquationSemanticsRecord,
+    EquationRecord,
+    EquationReconstruction,
+    EquationSemantics,
     EquationSemanticsResult,
-    LocalAssumption,
+    EquationSourceExtraction,
     ValidationIssue,
 )
 
@@ -26,13 +31,14 @@ class EquationSemanticsRepairer:
     def repair(
         self,
         llm_input: EquationLLMInput,
+        candidate: EquationCandidate | None,
         raw_output: dict,
         validation_issues: list[ValidationIssue],
         cartridge: CartridgeContext | None,
         llm_client: EquationSemanticsLLMClient,
         prompt_factory: EquationSemanticsPromptFactory,
         validator: object,
-    ) -> EquationSemanticsRecord:
+    ) -> EquationRecord:
         for attempt in range(1, _MAX_REPAIR_ATTEMPTS + 1):
             logger.info("Equation semantics repair attempt %d/%d", attempt, _MAX_REPAIR_ATTEMPTS)
             messages = prompt_factory.build_repair_messages(
@@ -44,113 +50,192 @@ class EquationSemanticsRepairer:
                 logger.warning("Repair LLM call failed: %s", exc)
                 break
 
-            record = _parse_record(raw_output, llm_input)
-            partial = _single_result(llm_input, record)
+            record = _parse_record(raw_output, llm_input, candidate)
+            partial = EquationSemanticsResult(
+                document_id=llm_input.document_id,
+                cartridge_id=llm_input.cartridge_id,
+                equation_candidates=[],
+                equations=[record],
+            )
             remaining = validator.validate(partial, cartridge)  # type: ignore[attr-defined]
             if not [i for i in remaining if i.severity == "error"]:
                 return record
             validation_issues = remaining
 
-        return _fallback_record(llm_input, "Repair failed after max attempts")
+        return _fallback_record(llm_input, candidate, "Repair failed after max attempts")
 
 
-def _parse_record(raw: dict, llm_input: EquationLLMInput) -> EquationSemanticsRecord:
-    role_raw = raw.get("equation_role", {})
-    if not isinstance(role_raw, dict):
-        role_raw = {}
-    confidence = role_raw.get("confidence", 0.5)
-    try:
-        confidence = float(confidence)
-    except (TypeError, ValueError):
-        confidence = 0.5
-    equation_role = EquationRolePrediction(
-        primary=role_raw.get("primary", "unknown"),
-        secondary=list(role_raw.get("secondary", [])),
-        confidence=max(0.0, min(1.0, confidence)),
-        reason=str(role_raw.get("reason", "")),
+def _parse_record(
+    raw: dict,
+    llm_input: EquationLLMInput,
+    candidate: EquationCandidate | None,
+) -> EquationRecord:
+    """LLM 生出力 + llm_input + candidate から EquationRecord を構築する。"""
+    # --- source_extraction ---
+    extraction_status = llm_input.extraction_status if candidate else "complete"
+    needs_review = candidate.needs_math_review if candidate else False
+    review_reason = list(candidate.review_reason) if candidate else []
+    bbox: list[float] = []
+    page = 0
+    if candidate:
+        bbox = list(candidate.source_location.get("bbox", []))
+        page = candidate.source_location.get("page", 0)
+
+    source_extraction = EquationSourceExtraction(
+        raw_text=llm_input.equation_text,
+        latex=llm_input.latex,
+        plain_text=llm_input.plain_text,
+        source_location={
+            "page": page,
+            "section_id": llm_input.section_id,
+            "block_id": llm_input.block_id,
+            "bbox": bbox,
+        },
+        extraction_source="pdf_text_layer",
+        extraction_status=extraction_status,
+        needs_math_review=needs_review,
+        review_reason=review_reason,
     )
 
-    symbols = []
+    # --- reconstruction ---
+    rec_raw = raw.get("reconstruction") or {}
+    if rec_raw and rec_raw.get("status") not in (None, "none", ""):
+        reconstruction = EquationReconstruction(
+            latex=rec_raw.get("latex"),
+            plain_text=rec_raw.get("plain_text"),
+            status=rec_raw.get("status", "inferred_from_context"),
+            method=list(rec_raw.get("method", [])),
+            supporting_refs=list(rec_raw.get("supporting_refs", [])),
+            confidence=_safe_float(rec_raw.get("confidence", 0.5)),
+            review_required=bool(rec_raw.get("review_required", True)),
+            review_reason=list(rec_raw.get("review_reason", [])),
+        )
+    else:
+        reconstruction = EquationReconstruction.make_none()
+
+    # --- semantics ---
+    confidence = _safe_float(raw.get("confidence", 0.5))
+    defined_symbols = []
     for raw_symbol in raw.get("defined_symbols", []):
         if not isinstance(raw_symbol, dict):
             continue
-        symbols.append(DefinedSymbol(
+        defined_symbols.append(DefinedSymbol(
             symbol=str(raw_symbol.get("symbol", "")),
             definition_status=raw_symbol.get("definition_status", "unknown"),
             evidence_text=raw_symbol.get("evidence_text"),
         ))
 
-    assumptions = []
-    for raw_assumption in raw.get("local_assumptions", []):
-        if not isinstance(raw_assumption, dict):
-            continue
-        assumptions.append(LocalAssumption(
-            text=str(raw_assumption.get("text", "")),
-            source_block_ids=list(raw_assumption.get("source_block_ids", [])),
-        ))
+    links_raw = raw.get("linked_text_spans", [])
+    if not isinstance(links_raw, list):
+        links_raw = []
 
-    links_raw = raw.get("derivation_links", {})
-    if not isinstance(links_raw, dict):
-        links_raw = {}
-    links = DerivationLinks(
-        from_equations=list(links_raw.get("from_equations", [])),
-        to_equations=list(links_raw.get("to_equations", [])),
-        linked_text_spans=list(links_raw.get("linked_text_spans", [])),
-    )
-
-    return EquationSemanticsRecord(
-        equation_id=raw.get("equation_id", llm_input.equation_id),
-        block_id=raw.get("block_id", llm_input.block_id),
-        section_id=raw.get("section_id", llm_input.section_id),
-        section_title=raw.get("section_title", llm_input.section_title),
-        label=raw.get("label", llm_input.label),
-        text=raw.get("text", llm_input.equation_text),
-        latex=raw.get("latex", llm_input.latex),
-        plain_text=raw.get("plain_text", llm_input.plain_text),
-        equation_role=equation_role,
-        defined_symbols=symbols,
-        local_assumptions=assumptions,
-        derivation_links=links,
+    semantics = EquationSemantics(
+        equation_type=raw.get("equation_type", "unknown"),
+        secondary_types=list(raw.get("secondary_types", [])),
+        semantic_status=raw.get("semantic_status", "unknown"),
+        confidence=confidence,
+        reason=str(raw.get("reason", "")),
+        defined_symbols=defined_symbols,
+        used_symbols=list(raw.get("used_symbols", [])),
+        assumptions=list(raw.get("assumptions", [])),
+        input_equation_ids=list(raw.get("input_equation_ids", [])),
+        output_equation_ids=list(raw.get("output_equation_ids", [])),
+        linked_text_spans=links_raw,
+        source_evidence_ids=[],
+        linked_claim_ids=[],
         summary=str(raw.get("summary", "")),
         review_flags=list(raw.get("review_flags", [])),
     )
 
+    # --- confidence_policy (deterministic) ---
+    confidence_policy = EquationConfidencePolicy.derive(source_extraction, reconstruction, semantics)
 
-def _fallback_record(llm_input: EquationLLMInput, reason: str) -> EquationSemanticsRecord:
-    flags = ["ambiguous_role", "low_confidence"]
+    # --- candidate_trace_ids ---
+    candidate_trace_ids: list[str] = []
+    if candidate:
+        candidate_trace_ids = [candidate.candidate_id]
+
+    return EquationRecord(
+        equation_id=raw.get("equation_id", llm_input.equation_id),
+        document_id=llm_input.document_id,
+        label=raw.get("label", llm_input.label),
+        candidate_trace_ids=candidate_trace_ids,
+        source_extraction=source_extraction,
+        reconstruction=reconstruction,
+        semantics=semantics,
+        confidence_policy=confidence_policy,
+    )
+
+
+def _fallback_record(
+    llm_input: EquationLLMInput,
+    candidate: EquationCandidate | None,
+    reason: str,
+) -> EquationRecord:
+    flags: list[str] = ["ambiguous_role", "low_confidence"]
     if not llm_input.label:
         flags.append("missing_label")
     if not llm_input.prev_texts and not llm_input.next_texts:
         flags.append("broken_context")
-    return EquationSemanticsRecord(
-        equation_id=llm_input.equation_id,
-        block_id=llm_input.block_id,
-        section_id=llm_input.section_id,
-        section_title=llm_input.section_title,
-        label=llm_input.label,
-        text=llm_input.equation_text,
+
+    extraction_status = llm_input.extraction_status if candidate else "complete"
+    needs_review = candidate.needs_math_review if candidate else False
+    review_reason = list(candidate.review_reason) if candidate else []
+    bbox: list[float] = []
+    page = 0
+    if candidate:
+        bbox = list(candidate.source_location.get("bbox", []))
+        page = candidate.source_location.get("page", 0)
+
+    source_extraction = EquationSourceExtraction(
+        raw_text=llm_input.equation_text,
         latex=llm_input.latex,
         plain_text=llm_input.plain_text,
-        equation_role=EquationRolePrediction(
-            primary="unknown",
-            secondary=[],
-            confidence=0.0,
-            reason=reason,
-        ),
+        source_location={
+            "page": page,
+            "section_id": llm_input.section_id,
+            "block_id": llm_input.block_id,
+            "bbox": bbox,
+        },
+        extraction_source="pdf_text_layer",
+        extraction_status=extraction_status,
+        needs_math_review=needs_review,
+        review_reason=review_reason,
+    )
+    reconstruction = EquationReconstruction.make_none()
+    semantics = EquationSemantics(
+        equation_type="unknown",
+        secondary_types=[],
+        semantic_status="unknown",
+        confidence=0.0,
+        reason=reason,
         defined_symbols=[],
-        local_assumptions=[],
-        derivation_links=DerivationLinks([], [], []),
+        used_symbols=[],
+        assumptions=[],
+        input_equation_ids=[],
+        output_equation_ids=[],
+        linked_text_spans=[],
+        source_evidence_ids=[],
+        linked_claim_ids=[],
         summary="Equation semantics could not be inferred.",
         review_flags=flags,
     )
+    confidence_policy = EquationConfidencePolicy.derive(source_extraction, reconstruction, semantics)
 
-
-def _single_result(
-    llm_input: EquationLLMInput,
-    record: EquationSemanticsRecord,
-) -> EquationSemanticsResult:
-    return EquationSemanticsResult(
+    return EquationRecord(
+        equation_id=llm_input.equation_id,
         document_id=llm_input.document_id,
-        cartridge_id=llm_input.cartridge_id,
-        equations=[record],
+        label=llm_input.label,
+        candidate_trace_ids=[candidate.candidate_id] if candidate else [],
+        source_extraction=source_extraction,
+        reconstruction=reconstruction,
+        semantics=semantics,
+        confidence_policy=confidence_policy,
     )
+
+
+def _safe_float(value: object, default: float = 0.5) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default

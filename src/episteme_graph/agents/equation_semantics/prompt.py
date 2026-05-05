@@ -1,13 +1,19 @@
-"""Prompt construction for EquationSemanticsAgent."""
+"""Prompt construction for EquationSemanticsAgent.
+
+Issue #245: 新スキーマ (EquationRecord) の LLM 出力形式に合わせて更新。
+reconstruction が必要な場合は reconstruction ブロックを出力するよう指示。
+"""
 from __future__ import annotations
 
 import json
 
 from .schema import (
     DEFINITION_STATUSES,
-    EQUATION_ROLES,
+    EQUATION_TYPES,
     LINKED_TEXT_RELATIONS,
+    RECONSTRUCTION_STATUSES,
     REVIEW_FLAGS,
+    SEMANTIC_STATUSES,
     CartridgeContext,
     EquationLLMInput,
 )
@@ -19,32 +25,26 @@ Your task is NOT to prove the equation.
 Your task is to reconstruct the equation's local semantic role in the paper.
 
 Focus on:
-1. whether the equation is a definition, relation, transformation, approximation, result, or constraint
-2. which symbols are newly defined versus merely used
-3. which local assumptions or limits the equation depends on
-4. whether the equation is derived from nearby equations or explanatory text
-5. producing a short reusable semantic summary
-6. preferring cartridge-normalized terminology when available
+1. The equation type (definition, relation, transformation, approximation, result, constraint)
+2. Which symbols are newly defined versus merely used
+3. Which local assumptions or limits the equation depends on
+4. Whether the equation is derived from or leads to nearby equations
+5. The semantic status: source_backed (good extraction), context_inferred, reconstruction_based
+6. Producing a short reusable semantic summary
+7. When source extraction is insufficient (partial/missing/unparsed), provide a reconstruction block
 
-Be conservative. If unsure whether a symbol is newly defined, mark it as unknown.
-Return ONLY valid JSON matching the schema.
+Be conservative. If unsure, mark as unknown and set low confidence.
+Return ONLY valid JSON matching the output schema.
 """
 
 _OUTPUT_SCHEMA = {
     "equation_id": "string",
-    "block_id": "string",
-    "section_id": "string or null",
-    "section_title": "string or null",
     "label": "string or null",
-    "text": "equation text",
-    "latex": "string or null",
-    "plain_text": "string or null",
-    "equation_role": {
-        "primary": "one allowed equation role",
-        "secondary": ["allowed equation roles"],
-        "confidence": 0.0,
-        "reason": "string",
-    },
+    "equation_type": "one of the allowed equation types",
+    "secondary_types": ["additional allowed equation types"],
+    "semantic_status": "source_backed | context_inferred | reconstruction_based | unknown",
+    "confidence": 0.0,
+    "reason": "string",
     "defined_symbols": [
         {
             "symbol": "string",
@@ -52,18 +52,26 @@ _OUTPUT_SCHEMA = {
             "evidence_text": "string or null",
         }
     ],
-    "local_assumptions": [
-        {"text": "string", "source_block_ids": ["block ids"]}
+    "used_symbols": ["symbol strings that are used but not defined here"],
+    "assumptions": ["local assumption text"],
+    "input_equation_ids": ["eq_id of equations this derives from"],
+    "output_equation_ids": ["eq_id of equations derived from this"],
+    "linked_text_spans": [
+        {"span_id": "span id", "relation": "introduced_by | explained_by | derived_from_text | qualified_by | normalized_by_text"}
     ],
-    "derivation_links": {
-        "from_equations": ["eq_1_2"],
-        "to_equations": [],
-        "linked_text_spans": [
-            {"span_id": "span id", "relation": "introduced_by | explained_by | derived_from_text | qualified_by | normalized_by_text"}
-        ],
-    },
     "summary": "short semantic summary",
     "review_flags": ["optional allowed review flags"],
+    "reconstruction": {
+        "__note__": "Include ONLY when needs_reconstruction=true or source extraction is insufficient",
+        "latex": "string or null",
+        "plain_text": "string or null",
+        "status": "inferred_from_context | reconstructed_from_neighbors | manually_supplied",
+        "method": ["nearby_text", "section_heading", "claim_reference", "etc"],
+        "supporting_refs": ["block_id or section_id used as evidence"],
+        "confidence": 0.0,
+        "review_required": True,
+        "review_reason": ["reason strings"],
+    },
 }
 
 
@@ -123,6 +131,18 @@ class EquationSemanticsPromptFactory:
         if llm_input.backbone_block_type:
             parts.append(f"backbone_block_type: {llm_input.backbone_block_type}")
         parts.append(f"label: {llm_input.label}")
+        parts.append(f"extraction_status: {llm_input.extraction_status}")
+        if llm_input.needs_reconstruction:
+            parts.append(
+                "\n** Source extraction is INSUFFICIENT for this equation "
+                f"(extraction_status={llm_input.extraction_status}). "
+                "You MUST include a 'reconstruction' block in your output. "
+                "Reconstruct from surrounding context. "
+                "Set reconstruction.status to 'inferred_from_context' or 'reconstructed_from_neighbors'. "
+                "Set reconstruction.method and supporting_refs from the context blocks below. "
+                "Set confidence based on how confident you are. "
+                "Do NOT store the reconstructed content in top-level source fields. **"
+            )
 
         if llm_input.prev_texts:
             parts.append("\n## Previous Text Blocks")
@@ -156,17 +176,21 @@ class EquationSemanticsPromptFactory:
         parts.append("\n## Output Schema")
         parts.append(json.dumps(_OUTPUT_SCHEMA, ensure_ascii=False, indent=2))
         parts.append("\n## Allowed Values")
-        parts.append(f"equation roles: {', '.join(EQUATION_ROLES)}")
-        parts.append(f"definition statuses: {', '.join(DEFINITION_STATUSES)}")
+        parts.append(f"equation_type: {', '.join(EQUATION_TYPES)}")
+        parts.append(f"semantic_status: {', '.join(SEMANTIC_STATUSES)}")
+        parts.append(f"definition_statuses: {', '.join(DEFINITION_STATUSES)}")
         parts.append(f"linked text relations: {', '.join(LINKED_TEXT_RELATIONS)}")
         parts.append(f"review flags: {', '.join(REVIEW_FLAGS)}")
+        parts.append(f"reconstruction statuses: {', '.join(RECONSTRUCTION_STATUSES)} (exclude 'none')")
         parts.append("\n## Constraints")
         parts.append(
             "- Use local context; do not infer a role from equation shape alone\n"
-            "- equation_transformation should include from_equations when context supports it\n"
-            "- equation_definition should include defined_symbols when context supports it\n"
+            "- equation_type=transformation → include input_equation_ids when context supports it\n"
+            "- equation_type=definition → include defined_symbols when context supports it\n"
             "- If context is missing, add broken_context or ambiguous_role review flag\n"
             "- confidence must be between 0.0 and 1.0\n"
+            "- reconstruction block: method and supporting_refs MUST be non-empty\n"
+            "- Do NOT set semantic_status=source_backed if extraction_status is not 'complete'\n"
             "- Return ONLY valid JSON, no markdown fences"
         )
         return "\n".join(parts)
