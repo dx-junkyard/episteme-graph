@@ -238,10 +238,16 @@ def test_orchestrator_runs_all_stages_in_order():
         "rhetorical_role",
         "claim_qualification",
         "equation_semantics",
+        "evidence_registry",
+        "claim_object_builder",
+        "derivation_chain",
+        "figure_table_semantics",
         "thesis_reconstruction",
         "dsl_linking",
         "dsl_embedding",
         "component_assembly",
+        "course_mapping",
+        "blueprint",
         "persist_claims_components_graph",
         "completed",
     ]
@@ -298,6 +304,207 @@ def test_issue_226_migration_adds_document_pipeline_artifacts():
     assert "CREATE TABLE IF NOT EXISTS document_analysis_runs" in sql
     assert "ALTER TABLE theory_components ALTER COLUMN course_id DROP NOT NULL" in sql
     assert "embedding_type" in sql
+
+
+def test_orchestrator_runs_newly_integrated_agents_and_saves_artifacts():
+    """Regression: evidence_registry / claim_object_builder / derivation_chain /
+    figure_table_semantics / course_mapping / blueprint must each run and emit
+    an artifact entry in `_artifacts`."""
+    from core.document_pipeline import orchestrator
+
+    @dataclass
+    class _QualifiedSpan:
+        span_id: str
+        block_id: str
+        section_id: str | None
+        text: str
+        role_labels: list = field(default_factory=list)
+        qualification: dict = field(default_factory=lambda: {"status": "accepted", "claim_type_candidate": "result"})
+        edit_suggestions: dict = field(default_factory=dict)
+        reason: str = ""
+        confidence: float = 0.8
+
+    @dataclass
+    class _DefinedSymbol:
+        symbol: str = "E"
+        definition_status: str = "defined"
+        evidence_text: str = "energy"
+
+    @dataclass
+    class _EquationRole:
+        primary: str = "equation_definition"
+        confidence: float = 0.9
+
+    @dataclass
+    class _DerivationLinks:
+        from_equations: list = field(default_factory=list)
+        to_equations: list = field(default_factory=list)
+
+    @dataclass
+    class _LocalAssumption:
+        text: str = "local frame"
+        source_block_ids: list = field(default_factory=list)
+
+    @dataclass
+    class _EquationRecord:
+        equation_id: str
+        block_id: str
+        section_id: str | None
+        label: str | None = None
+        latex: str | None = None
+        text: str = ""
+        plain_text: str = ""
+        equation_role: _EquationRole = field(default_factory=_EquationRole)
+        defined_symbols: list = field(default_factory=lambda: [_DefinedSymbol()])
+        local_assumptions: list = field(default_factory=lambda: [_LocalAssumption()])
+        derivation_links: _DerivationLinks = field(default_factory=_DerivationLinks)
+        review_flags: list = field(default_factory=list)
+        summary: str = ""
+
+    @dataclass
+    class _Component:
+        component_id: str
+        component_type: str = "RelationComponent"
+        label: str = "Energy Relation"
+        summary: str = "Connects E to mc^2"
+        inputs: list = field(default_factory=list)
+        outputs: list = field(default_factory=list)
+        preconditions: list = field(default_factory=list)
+        cautions: list = field(default_factory=list)
+        dependencies: list = field(default_factory=list)
+        evidence_refs: dict = field(default_factory=dict)
+        reason: str = ""
+        confidence: float = 0.8
+        review_notes: list = field(default_factory=list)
+        internal_flow: list = field(default_factory=list)
+        equation_ids: list = field(default_factory=list)
+
+    structure_blocks = [
+        _Block("blk_1", 1, 0, "Section content body.", section_id="s1"),
+        _Block("blk_eq_1", 1, 1, "E = mc^2", block_type="equation_block", section_id="s1"),
+        _Block("blk_fig_1", 1, 2, "Figure 1: schematic of the apparatus.", block_type="figure_caption", section_id="s1"),
+    ]
+
+    structure = _Structure(
+        document_id="doc-int",
+        sections=[_Section("s1", "Intro", order=1, page_start=1)],
+        blocks=structure_blocks,
+    )
+
+    qualified = type("Q", (), {
+        "qualified_spans": [_QualifiedSpan(
+            span_id="span_1", block_id="blk_1", section_id="s1", text="A claim text.",
+        )],
+    })()
+
+    eq_record_1 = _EquationRecord(equation_id="eq_1", block_id="blk_eq_1", section_id="s1", label="1")
+    eq_record_2 = _EquationRecord(
+        equation_id="eq_2", block_id="blk_eq_1", section_id="s1", label="2",
+        equation_role=_EquationRole(primary="equation_result", confidence=0.9),
+        derivation_links=_DerivationLinks(from_equations=["eq_1"]),
+    )
+    equations = type("E", (), {
+        "document_id": "doc-int",
+        "equations": [eq_record_1, eq_record_2],
+    })()
+
+    component_result = type("C", (), {
+        "components": [_Component(component_id="comp_1", equation_ids=["eq_1", "eq_2"])],
+    })()
+
+    structure_agent = _MockAgent(structure)
+    qualified_agent = _MockAgent(qualified)
+    equations_agent = _MockAgent(equations)
+    components_agent = _MockAgent(component_result)
+    skeleton_agent = _MockAgent(type("S", (), {"document_id": "doc-int"})())
+    roles_agent = _MockAgent(type("R", (), {"document_id": "doc-int", "summary_stats": {}})())
+
+    @dataclass
+    class _DSLResult:
+        nodes: list = field(default_factory=list)
+        edges: list = field(default_factory=list)
+        review_notes: list = field(default_factory=list)
+        document_id: str = "doc-int"
+
+    agents = {
+        "DocumentStructureAgent": structure_agent,
+        "PaperSkeletonAgent": skeleton_agent,
+        "RhetoricalRoleAgent": roles_agent,
+        "ClaimQualificationAgent": qualified_agent,
+        "EquationSemanticsAgent": equations_agent,
+        "ThesisReconstructionAgent": _MockAgent(type("T", (), {"document_id": "doc-int"})()),
+        "DSLLinkingAgent": _MockAgent(_DSLResult()),
+        "ComponentAssemblyAgent": components_agent,
+    }
+
+    saved_artifacts: dict[str, dict] = {}
+
+    def fake_upsert(*, run_id=None, document_id, material_id, cartridge_id=None,
+                    status="running", current_stage="save_pdf", stage_outputs=None,
+                    error_message=None):
+        if stage_outputs and "_artifacts" in stage_outputs:
+            saved_artifacts.update(stage_outputs["_artifacts"])
+        return run_id or "run-int"
+
+    fake_persistence = {
+        "persist_source_chunks": MagicMock(return_value=[
+            {"chunk_id": "c1", "chunk_index": 0, "section_id": "s1",
+             "block_ids": ["blk_1"], "page_start": 1, "page_end": 1, "text": "Hello"}
+        ]),
+        "persist_qualified_claims": MagicMock(return_value=[]),
+        "persist_components": MagicMock(return_value={}),
+        "persist_component_graph": MagicMock(return_value="graph-1"),
+        "persist_document_embedding": MagicMock(return_value="emb-1"),
+        "upsert_analysis_run": MagicMock(side_effect=fake_upsert),
+    }
+
+    with patch.multiple(orchestrator, **fake_persistence):
+        result = orchestrator.run_document_pipeline(
+            pdf_bytes=b"%PDF-1.4 fake bytes",
+            document_id="doc-int",
+            material_id="mat-int",
+            cartridge_id=None,
+            agents=agents,
+        )
+
+    assert result.final_stage == "completed"
+
+    # Each newly-integrated agent must have produced an artifact.
+    for stage in ("evidence_registry", "claim_object_builder", "derivation_chain",
+                  "figure_table_semantics", "course_mapping", "blueprint"):
+        assert stage in saved_artifacts, (
+            f"stage {stage} did not save an artifact; saved={sorted(saved_artifacts)}"
+        )
+
+    # evidence_registry must register the accepted claim block, equation block,
+    # and figure caption block.
+    ev_records = saved_artifacts["evidence_registry"]["records"]
+    block_ids = {r["source"]["block_id"] for r in ev_records}
+    assert {"blk_1", "blk_eq_1", "blk_fig_1"}.issubset(block_ids)
+
+    # claim_object_builder must produce one claim per accepted span.
+    claims = saved_artifacts["claim_object_builder"]["claims"]
+    assert len(claims) == 1
+    assert claims[0]["source_evidence_ids"], "claim must be source-backed"
+
+    # derivation_chain must build at least one chain from eq_1 -> eq_2.
+    chains = saved_artifacts["derivation_chain"]["chains"]
+    assert chains, "derivation_chain produced no chains"
+    assert any("eq_1" in step["input_equation_ids"]
+               for chain in chains for step in chain["steps"])
+
+    # figure_table_semantics should detect the figure caption.
+    figures = saved_artifacts["figure_table_semantics"]["figures"]
+    assert figures, "figure_table_semantics produced no figures"
+
+    # course_mapping must produce one topic linked to the component.
+    topics = saved_artifacts["course_mapping"]["topics"]
+    assert topics
+    assert "comp_1" in topics[0]["linked_component_ids"]
+
+    # blueprint must produce a non-empty narrative arc.
+    arc = saved_artifacts["blueprint"]["narrative_arc"]
+    assert arc
 
 
 def test_orchestrator_records_failed_stage():
