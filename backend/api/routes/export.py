@@ -15,6 +15,15 @@ from sqlalchemy import text as sa_text
 
 from dependencies import _require_teacher
 from core.postgres import get_session as _pg_session
+from routes.export_artifacts import (
+    build_derivation_chains_export,
+    build_document_boundary,
+    build_equation_candidates_export,
+    build_equations_export,
+    build_evidence_export,
+    enrich_course_topics,
+    get_artifacts,
+)
 
 router = APIRouter(tags=["Export"])
 
@@ -172,6 +181,137 @@ def _get_document_ids_for_course(session: Any, course_id: str) -> list[str]:
         params,
     ).fetchall()
     return [str(r[0]) for r in doc_rows if r[0]]
+
+
+def _load_analysis_artifacts(session: Any, document_ids: list[str]) -> dict[str, dict]:
+    """Load `_artifacts` payload from document_analysis_runs for each document.
+
+    Returns: {document_id: {stage_name: artifact_dict, ...}, ...}.
+    Picks the most recent run per document so resumed runs surface the
+    latest artifacts. Defensive: never raises on malformed JSONB.
+    """
+    if not document_ids:
+        return {}
+    placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
+    params = {f"doc_{i}": did for i, did in enumerate(document_ids)}
+    rows = session.execute(
+        sa_text(f"""
+            SELECT DISTINCT ON (document_id)
+                   document_id, stage_outputs, status, created_at
+            FROM document_analysis_runs
+            WHERE document_id IN ({placeholders})
+            ORDER BY document_id, created_at DESC
+        """),
+        params,
+    ).fetchall()
+    out: dict[str, dict] = {}
+    for r in rows:
+        doc_id = str(r[0]) if r[0] else ""
+        if not doc_id:
+            continue
+        artifacts = get_artifacts(r[1])
+        if artifacts:
+            out[doc_id] = artifacts
+    return out
+
+
+def _build_evidence_for_documents(
+    artifacts_by_doc: dict[str, dict],
+    document_ids: list[str],
+    fallback_claims: list[dict],
+) -> list[dict]:
+    out: list[dict] = []
+    for doc_id in document_ids:
+        artifacts = artifacts_by_doc.get(doc_id, {})
+        evidence_artifact = artifacts.get("evidence_registry")
+        doc_claims = [c for c in fallback_claims if c.get("document_id") == doc_id]
+        out.extend(build_evidence_export(
+            evidence_artifact,
+            document_id=doc_id,
+            fallback_claims=doc_claims,
+        ))
+    return out
+
+
+def _build_equations_for_documents(
+    artifacts_by_doc: dict[str, dict],
+    document_ids: list[str],
+) -> list[dict]:
+    out: list[dict] = []
+    for doc_id in document_ids:
+        artifacts = artifacts_by_doc.get(doc_id, {})
+        out.extend(build_equations_export(
+            artifacts.get("equation_semantics"),
+            document_id=doc_id,
+            structure_artifact=artifacts.get("document_structure"),
+        ))
+    return out
+
+
+def _build_equation_candidates_for_documents(
+    artifacts_by_doc: dict[str, dict],
+    document_ids: list[str],
+) -> list[dict]:
+    out: list[dict] = []
+    for doc_id in document_ids:
+        artifacts = artifacts_by_doc.get(doc_id, {})
+        out.extend(build_equation_candidates_export(
+            artifacts.get("equation_semantics"),
+            document_id=doc_id,
+            structure_artifact=artifacts.get("document_structure"),
+        ))
+    return out
+
+
+def _build_derivations_for_documents(
+    artifacts_by_doc: dict[str, dict],
+    document_ids: list[str],
+) -> list[dict]:
+    out: list[dict] = []
+    for doc_id in document_ids:
+        artifacts = artifacts_by_doc.get(doc_id, {})
+        out.extend(build_derivation_chains_export(
+            artifacts.get("derivation_chain"),
+            document_id=doc_id,
+            equation_artifact=artifacts.get("equation_semantics"),
+        ))
+    return out
+
+
+def _build_document_boundaries(
+    artifacts_by_doc: dict[str, dict],
+    document_ids: list[str],
+) -> list[dict]:
+    out: list[dict] = []
+    for doc_id in document_ids:
+        artifacts = artifacts_by_doc.get(doc_id, {})
+        structure = artifacts.get("document_structure")
+        if not structure:
+            continue
+        out.append(build_document_boundary(structure, document_id=doc_id))
+    return out
+
+
+def _enrich_course_for_export(
+    course: dict,
+    artifacts_by_doc: dict[str, dict],
+    document_ids: list[str],
+) -> dict:
+    # Pick the first document's artifacts (single-paper scoped courses are the
+    # common case). Multi-document course mapping is a pipeline concern.
+    course_mapping = None
+    blueprint = None
+    for doc_id in document_ids:
+        artifacts = artifacts_by_doc.get(doc_id, {})
+        if course_mapping is None:
+            course_mapping = artifacts.get("course_mapping")
+        if blueprint is None:
+            blueprint = artifacts.get("blueprint")
+    return enrich_course_topics(
+        course,
+        course_mapping_artifact=course_mapping,
+        blueprint_artifact=blueprint,
+    )
 
 
 def _load_course_documents(session: Any, course_id: str, document_ids: list[str]) -> list[dict]:
@@ -637,9 +777,17 @@ def _build_manifest(
     component_graph: dict,
     evidence_snippets: list[dict],
     options: dict,
+    equations: list[dict] | None = None,
+    equation_candidates: list[dict] | None = None,
+    derivation_chains: list[dict] | None = None,
+    document_boundaries: list[dict] | None = None,
 ) -> dict:
+    equations = equations or []
+    equation_candidates = equation_candidates or []
+    derivation_chains = derivation_chains or []
+    document_boundaries = document_boundaries or []
     return {
-        "export_schema_version": "0.1.0",
+        "export_schema_version": "0.2.0",
         "exported_at": _now_iso(),
         "export_id": export_id,
         "app": {"name": "episteme-graph", "version": "unknown", "git_commit": "unknown"},
@@ -656,6 +804,10 @@ def _build_manifest(
             "components": "components/components.json",
             "component_graph": "graph/component_graph.json",
             "evidence_snippets": "evidence/evidence_snippets.json",
+            "equations": "equations/equations.json",
+            "equation_candidates": "equations/equation_candidates.json",
+            "derivation_chains": "derivations/derivation_chains.json",
+            "document_boundary": "document_boundary.json",
         },
         "counts": {
             "claims": len(claims),
@@ -664,6 +816,10 @@ def _build_manifest(
             "components": len(components),
             "component_edges": len(component_graph.get("edges", [])),
             "evidence_snippets": len(evidence_snippets),
+            "equations": len(equations),
+            "equation_candidates": len(equation_candidates),
+            "derivation_chains": len(derivation_chains),
+            "document_boundaries": len(document_boundaries),
         },
         "options": options,
     }
@@ -677,12 +833,16 @@ This ZIP contains machine-readable outputs generated by episteme-graph.
 ## Contents
 
 - `manifest.json`: index of this export bundle
-- `course_info.json`: course metadata, topics, chapters, and source materials
+- `course_info.json`: course metadata, topics (with learning_objectives, prerequisite_concepts, blackbox_policy, expected_misconceptions, assessment_prompts, visualization_plan), chapters, and source materials
 - `claims/claims.json`: extracted claims from source documents
 - `dsl/dsl_graph.json`: lightweight logical graph representation (DSL)
 - `components/components.json`: reusable logical/theory components (Component)
 - `graph/component_graph.json`: graph connections between components (Component Graph)
-- `evidence/evidence_snippets.json`: source snippets supporting claims (Evidence)
+- `evidence/evidence_snippets.json`: source-backed Evidence (PDF spans). `evidence_text` is PDF-derived text; LLM commentary is kept in `analysis_note` / `review_note`. `extraction_source`, `extraction_status`, `needs_review`, `review_reason` audit the provenance.
+- `equations/equations.json`: first-class equation registry. Each entry has `latex`, `plain_text`, `source_location`, `equation_type`, `defined_symbols`, `used_symbols`, `input_equation_ids`, `output_equation_ids`, `extraction_source`, `extraction_status`, `needs_math_review`, `review_reason`, `candidate_trace_ids`.
+- `equations/equation_candidates.json`: audit trail for equation candidate detection. Each entry records `raw_text`, `source_location`, `detection_method`, `matched_label`, `acceptance_status`, `accepted_equation_id`, `rejection_reason`.
+- `derivations/derivation_chains.json`: derivation steps linking equations / claims with `operation`, `input_equation_ids`, `output_equation_ids`, `assumption_refs`.
+- `document_boundary.json`: per-document active article boundary (page_start, page_end, confidence, needs_review). Useful for multi-article PDFs (journal scans, conference proceedings).
 
 ## Data Model Summary
 
@@ -744,7 +904,15 @@ def _build_zip(
     include_ndjson: bool = False,
     include_debug: bool = False,
     debug_data: dict | None = None,
+    equations: list[dict] | None = None,
+    equation_candidates: list[dict] | None = None,
+    derivation_chains: list[dict] | None = None,
+    document_boundaries: list[dict] | None = None,
 ) -> bytes:
+    equations = equations or []
+    equation_candidates = equation_candidates or []
+    derivation_chains = derivation_chains or []
+    document_boundaries = document_boundaries or []
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("README.md", _README_TEMPLATE)
@@ -760,7 +928,26 @@ def _build_zip(
             "graph/component_graph.json",
             _json_bytes({**component_graph, "graph_schema_version": component_graph.get("graph_schema_version", "0.1.0")}),
         )
-        zf.writestr("evidence/evidence_snippets.json", _json_bytes({"snippets": evidence_snippets}))
+        zf.writestr("evidence/evidence_snippets.json", _json_bytes({
+            "evidence_schema_version": "0.2.0",
+            "snippets": evidence_snippets,
+        }))
+        zf.writestr("equations/equations.json", _json_bytes({
+            "equation_schema_version": "0.1.0",
+            "equations": equations,
+        }))
+        zf.writestr("equations/equation_candidates.json", _json_bytes({
+            "candidate_schema_version": "0.1.0",
+            "candidates": equation_candidates,
+        }))
+        zf.writestr("derivations/derivation_chains.json", _json_bytes({
+            "derivation_schema_version": "0.1.0",
+            "chains": derivation_chains,
+        }))
+        zf.writestr("document_boundary.json", _json_bytes({
+            "boundary_schema_version": "0.1.0",
+            "boundaries": document_boundaries,
+        }))
 
         if include_ndjson:
             zf.writestr("claims/claims.ndjson", _ndjson_bytes(claims))
@@ -802,7 +989,17 @@ def export_course_bundle(
         dsl_graph = _load_dsl_graph_for_course(session, course_id, document_ids)
         components = _load_components_for_course(session, course_id, document_ids)
         component_graph = _load_component_graph_for_course(session, course_id, document_ids)
-        evidence_snippets = _build_evidence_snippets(claims) if req.include_source_snippets else []
+
+        artifacts_by_doc = _load_analysis_artifacts(session, document_ids)
+        evidence_snippets = (
+            _build_evidence_for_documents(artifacts_by_doc, document_ids, claims)
+            if req.include_source_snippets else []
+        )
+        equations = _build_equations_for_documents(artifacts_by_doc, document_ids)
+        equation_candidates = _build_equation_candidates_for_documents(artifacts_by_doc, document_ids)
+        derivation_chains = _build_derivations_for_documents(artifacts_by_doc, document_ids)
+        document_boundaries = _build_document_boundaries(artifacts_by_doc, document_ids)
+        course = _enrich_course_for_export(course, artifacts_by_doc, document_ids)
 
         docs = _load_course_documents(session, course_id, document_ids)
 
@@ -825,6 +1022,10 @@ def export_course_bundle(
             components=components,
             component_graph=component_graph,
             evidence_snippets=evidence_snippets,
+            equations=equations,
+            equation_candidates=equation_candidates,
+            derivation_chains=derivation_chains,
+            document_boundaries=document_boundaries,
             options=options,
         )
 
@@ -836,6 +1037,10 @@ def export_course_bundle(
             components=components,
             component_graph=component_graph,
             evidence_snippets=evidence_snippets,
+            equations=equations,
+            equation_candidates=equation_candidates,
+            derivation_chains=derivation_chains,
+            document_boundaries=document_boundaries,
             include_ndjson=req.include_ndjson,
             include_debug=req.include_debug_data,
             debug_data={"validation_errors": [], "pipeline_logs": []} if req.include_debug_data else None,
@@ -868,7 +1073,18 @@ def export_document_bundle(
         dsl_graph = _load_dsl_graph_for_document(session, document_id)
         components = _load_components_for_document(session, document_id)
         component_graph = _load_component_graph_for_document(session, document_id)
-        evidence_snippets = _build_evidence_snippets(claims) if req.include_source_snippets else []
+
+        document_ids = [document_id]
+        artifacts_by_doc = _load_analysis_artifacts(session, document_ids)
+        evidence_snippets = (
+            _build_evidence_for_documents(artifacts_by_doc, document_ids, claims)
+            if req.include_source_snippets else []
+        )
+        equations = _build_equations_for_documents(artifacts_by_doc, document_ids)
+        equation_candidates = _build_equation_candidates_for_documents(artifacts_by_doc, document_ids)
+        derivation_chains = _build_derivations_for_documents(artifacts_by_doc, document_ids)
+        document_boundaries = _build_document_boundaries(artifacts_by_doc, document_ids)
+        document = _enrich_course_for_export(document, artifacts_by_doc, document_ids)
 
         eid = _export_id("document", document_id)
         options = {
@@ -883,12 +1099,16 @@ def export_document_bundle(
             scope_type="document",
             scope_id=document_id,
             material_ids=[],
-            document_ids=[document_id],
+            document_ids=document_ids,
             claims=claims,
             dsl_graph=dsl_graph,
             components=components,
             component_graph=component_graph,
             evidence_snippets=evidence_snippets,
+            equations=equations,
+            equation_candidates=equation_candidates,
+            derivation_chains=derivation_chains,
+            document_boundaries=document_boundaries,
             options=options,
         )
 
@@ -900,6 +1120,10 @@ def export_document_bundle(
             components=components,
             component_graph=component_graph,
             evidence_snippets=evidence_snippets,
+            equations=equations,
+            equation_candidates=equation_candidates,
+            derivation_chains=derivation_chains,
+            document_boundaries=document_boundaries,
             include_ndjson=req.include_ndjson,
             include_debug=req.include_debug_data,
             debug_data={"validation_errors": [], "pipeline_logs": []} if req.include_debug_data else None,
