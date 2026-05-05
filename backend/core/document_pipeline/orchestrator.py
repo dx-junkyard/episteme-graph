@@ -39,10 +39,16 @@ PIPELINE_STAGES = [
     "rhetorical_role",
     "claim_qualification",
     "equation_semantics",
+    "evidence_registry",
+    "claim_object_builder",
+    "derivation_chain",
+    "figure_table_semantics",
     "thesis_reconstruction",
     "dsl_linking",
     "dsl_embedding",
     "component_assembly",
+    "course_mapping",
+    "blueprint",
     "persist_claims_components_graph",
     "completed",
 ]
@@ -74,11 +80,17 @@ class DocumentPipelineResult:
 
 def _import_agents() -> dict:
     """Lazy import. PYTHONPATH に src/ が入っていることを前提とする。"""
+    from episteme_graph.agents.blueprint.agent import BlueprintAgent
+    from episteme_graph.agents.claim_object_builder.builder import ClaimObjectBuilder
     from episteme_graph.agents.claim_qualification.agent import ClaimQualificationAgent
     from episteme_graph.agents.component_assembly.agent import ComponentAssemblyAgent
+    from episteme_graph.agents.course_mapping.agent import CourseMappingAgent
+    from episteme_graph.agents.derivation_chain.agent import DerivationChainAgent
     from episteme_graph.agents.document_structure.agent import DocumentStructureAgent
     from episteme_graph.agents.dsl_linking.agent import DSLLinkingAgent
     from episteme_graph.agents.equation_semantics.agent import EquationSemanticsAgent
+    from episteme_graph.agents.evidence_registry.builder import EvidenceRegistryBuilder
+    from episteme_graph.agents.figure_table_semantics.agent import FigureTableSemanticsAgent
     from episteme_graph.agents.paper_skeleton.agent import PaperSkeletonAgent
     from episteme_graph.agents.rhetorical_role.agent import RhetoricalRoleAgent
     from episteme_graph.agents.thesis_reconstruction.agent import ThesisReconstructionAgent
@@ -92,6 +104,12 @@ def _import_agents() -> dict:
         "ThesisReconstructionAgent": ThesisReconstructionAgent,
         "DSLLinkingAgent": DSLLinkingAgent,
         "ComponentAssemblyAgent": ComponentAssemblyAgent,
+        "EvidenceRegistryBuilder": EvidenceRegistryBuilder,
+        "ClaimObjectBuilder": ClaimObjectBuilder,
+        "DerivationChainAgent": DerivationChainAgent,
+        "FigureTableSemanticsAgent": FigureTableSemanticsAgent,
+        "CourseMappingAgent": CourseMappingAgent,
+        "BlueprintAgent": BlueprintAgent,
     }
 
 
@@ -220,7 +238,16 @@ def run_document_pipeline(
         run_id=run_id,
     )
 
-    agent_classes = agents or _import_agents()
+    if agents is None:
+        agent_classes = _import_agents()
+    else:
+        # Tests may override only a subset; fall back to default imports for the rest.
+        try:
+            default_agents = _import_agents()
+        except Exception:
+            default_agents = {}
+        default_agents.update(agents)
+        agent_classes = default_agents
 
     pdf_path: str | None = None
     try:
@@ -369,6 +396,120 @@ def run_document_pipeline(
             save_artifact("equation_semantics", equations)
         report_done("equation_semantics", {"equations": len(getattr(equations, "equations", []) or [])})
 
+        # ── Stage 8b: evidence_registry (deterministic, source-backed) ─────
+        evidence_artifact = artifact("evidence_registry")
+        if evidence_artifact:
+            evidence = _from_agent_dict("evidence_registry", evidence_artifact)
+            logger.info("Resuming document pipeline: loaded evidence_registry artifact for document %s", document_id)
+        else:
+            report_start("evidence_registry", total=1, unit="builder")
+            try:
+                evidence = _build_evidence_registry(
+                    agent_classes=agent_classes,
+                    document_id=document_id,
+                    cartridge_id=cartridge_id,
+                    structure=structure,
+                    qualified=qualified,
+                    equations=equations,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "evidence_registry stage failed (non-fatal): document=%s material=%s error=%s",
+                    document_id, material_id, exc,
+                )
+                evidence = _empty_evidence_registry(document_id, cartridge_id)
+            save_artifact("evidence_registry", evidence)
+        report_done("evidence_registry", {
+            "records": len(getattr(evidence, "records", []) or []),
+            "total": 1,
+            "processed": 1,
+        })
+
+        # ── Stage 8c: claim_object_builder (deterministic claims.json) ─────
+        claim_object_artifact = artifact("claim_object_builder")
+        if claim_object_artifact:
+            claim_objects = _from_agent_dict("claim_object_builder", claim_object_artifact)
+            logger.info("Resuming document pipeline: loaded claim_object_builder artifact for document %s", document_id)
+        else:
+            report_start("claim_object_builder", total=1, unit="builder")
+            try:
+                claim_objects = _build_claim_objects(
+                    agent_classes=agent_classes,
+                    document_id=document_id,
+                    cartridge_id=cartridge_id,
+                    qualified=qualified,
+                    equations=equations,
+                    evidence=evidence,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "claim_object_builder stage failed (non-fatal): document=%s material=%s error=%s",
+                    document_id, material_id, exc,
+                )
+                claim_objects = _empty_claim_object_result(document_id, cartridge_id)
+            save_artifact("claim_object_builder", claim_objects)
+        report_done("claim_object_builder", {
+            "claims": len(getattr(claim_objects, "claims", []) or []),
+            "total": 1,
+            "processed": 1,
+        })
+
+        # ── Stage 8d: derivation_chain (deterministic from equation links) ─
+        derivation_artifact = artifact("derivation_chain")
+        if derivation_artifact:
+            derivations = _from_agent_dict("derivation_chain", derivation_artifact)
+            logger.info("Resuming document pipeline: loaded derivation_chain artifact for document %s", document_id)
+        else:
+            report_start("derivation_chain", total=1, unit="builder")
+            try:
+                derivations = _build_derivation_chains(
+                    agent_classes=agent_classes,
+                    cartridge_id=cartridge_id,
+                    equations=equations,
+                    claim_objects=claim_objects,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "derivation_chain stage failed (non-fatal): document=%s material=%s error=%s",
+                    document_id, material_id, exc,
+                )
+                derivations = _empty_derivation_chain_result(document_id, cartridge_id)
+            save_artifact("derivation_chain", derivations)
+        report_done("derivation_chain", {
+            "chains": len(getattr(derivations, "chains", []) or []),
+            "total": 1,
+            "processed": 1,
+        })
+
+        # ── Stage 8e: figure_table_semantics (caption-first deterministic) ─
+        fig_tbl_artifact = artifact("figure_table_semantics")
+        if fig_tbl_artifact:
+            fig_tbl = _from_agent_dict("figure_table_semantics", fig_tbl_artifact)
+            logger.info("Resuming document pipeline: loaded figure_table_semantics artifact for document %s", document_id)
+        else:
+            report_start("figure_table_semantics", total=1, unit="builder")
+            try:
+                fig_tbl = _build_figure_table_semantics(
+                    agent_classes=agent_classes,
+                    cartridge_id=cartridge_id,
+                    structure=structure,
+                    evidence=evidence,
+                    claim_objects=claim_objects,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "figure_table_semantics stage failed (non-fatal): document=%s material=%s error=%s",
+                    document_id, material_id, exc,
+                )
+                fig_tbl = _empty_figure_table_result(document_id, cartridge_id)
+            save_artifact("figure_table_semantics", fig_tbl)
+        report_done("figure_table_semantics", {
+            "figures": len(getattr(fig_tbl, "figures", []) or []),
+            "tables": len(getattr(fig_tbl, "tables", []) or []),
+            "total": 1,
+            "processed": 1,
+        })
+
         # ── Stage 9: thesis_reconstruction ─────────────────────────────────
         thesis_artifact = artifact("thesis_reconstruction")
         if thesis_artifact:
@@ -451,6 +592,61 @@ def run_document_pipeline(
         result.component_count = len(component_result.components)
         report_done("component_assembly", {
             "components": len(component_result.components), "total": 1, "processed": 1,
+        })
+
+        # ── Stage 12b: course_mapping (deterministic component → topic map) ─
+        course_mapping_artifact = artifact("course_mapping")
+        if course_mapping_artifact:
+            course_mapping = _from_agent_dict("course_mapping", course_mapping_artifact)
+            logger.info("Resuming document pipeline: loaded course_mapping artifact for document %s", document_id)
+        else:
+            report_start("course_mapping", total=1, unit="builder")
+            try:
+                course_mapping = _build_course_mapping(
+                    agent_classes=agent_classes,
+                    document_id=document_id,
+                    cartridge_id=cartridge_id,
+                    component_result=component_result,
+                    claim_objects=claim_objects,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "course_mapping stage failed (non-fatal): document=%s material=%s error=%s",
+                    document_id, material_id, exc,
+                )
+                course_mapping = _empty_course_mapping_result(document_id, cartridge_id)
+            save_artifact("course_mapping", course_mapping)
+        report_done("course_mapping", {
+            "topics": len(getattr(course_mapping, "topics", []) or []),
+            "total": 1,
+            "processed": 1,
+        })
+
+        # ── Stage 12c: blueprint (narrative arc) ───────────────────────────
+        blueprint_artifact_data = artifact("blueprint")
+        if blueprint_artifact_data:
+            blueprint = _from_agent_dict("blueprint", blueprint_artifact_data)
+            logger.info("Resuming document pipeline: loaded blueprint artifact for document %s", document_id)
+        else:
+            report_start("blueprint", total=1, unit="builder")
+            try:
+                blueprint = _build_blueprint(
+                    agent_classes=agent_classes,
+                    course_mapping=course_mapping,
+                    component_result=component_result,
+                    course_id=course_id,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "blueprint stage failed (non-fatal): document=%s material=%s error=%s",
+                    document_id, material_id, exc,
+                )
+                blueprint = _empty_blueprint_result(document_id, course_id)
+            save_artifact("blueprint", blueprint)
+        report_done("blueprint", {
+            "steps": len(getattr(blueprint, "narrative_arc", []) or []),
+            "total": 1,
+            "processed": 1,
         })
 
         # ── Stage 13: persist_claims_components_graph ──────────────────────
@@ -603,7 +799,307 @@ def _from_agent_dict(stage: str, value: dict) -> Any:
     if stage == "component_assembly":
         from episteme_graph.agents.component_assembly.schema import ComponentAssemblyResult
         return ComponentAssemblyResult.from_dict(value)
+    if stage == "evidence_registry":
+        from episteme_graph.agents.evidence_registry.schema import EvidenceRegistryResult
+        return EvidenceRegistryResult.from_dict(value)
+    if stage == "claim_object_builder":
+        from episteme_graph.agents.claim_object_builder.schema import ClaimObjectBuildResult
+        return ClaimObjectBuildResult.from_dict(value)
+    if stage == "derivation_chain":
+        from episteme_graph.agents.derivation_chain.schema import DerivationChainResult
+        return DerivationChainResult.from_dict(value)
+    if stage == "figure_table_semantics":
+        # FigureTableSemanticsResult lacks from_dict; use raw dict for resume.
+        return value
+    if stage == "course_mapping":
+        # CourseMappingResult lacks from_dict; use raw dict for resume.
+        return value
+    if stage == "blueprint":
+        from episteme_graph.agents.blueprint.schema import BlueprintResult
+        return BlueprintResult.from_dict(value)
     return value
+
+
+# ---------------------------------------------------------------------------
+# Helpers for the deterministic / cross-link agents
+# ---------------------------------------------------------------------------
+
+
+def _resolve_agent_factory(agent_classes: dict, key: str, default_factory):
+    """Pick agent class from the merged dict, or fall back to default_factory().
+
+    Tests may inject a partial ``agents`` dict that omits the deterministic
+    builders; we still want them to run so artifacts are populated.
+    """
+    cls = agent_classes.get(key)
+    if cls is None:
+        return default_factory()
+    return _instantiate(cls)
+
+
+def _build_evidence_registry(
+    *,
+    agent_classes: dict,
+    document_id: str,
+    cartridge_id: str | None,
+    structure: Any,
+    qualified: Any,
+    equations: Any,
+):
+    from episteme_graph.agents.evidence_registry.builder import EvidenceRegistryBuilder
+
+    builder_cls = agent_classes.get("EvidenceRegistryBuilder") or EvidenceRegistryBuilder
+    builder = builder_cls(structure)
+
+    seen_block_ids: set[str] = set()
+
+    # Register evidence for each accepted qualified span.
+    for span in getattr(qualified, "qualified_spans", []) or []:
+        block_id = getattr(span, "block_id", None)
+        if not block_id or block_id in seen_block_ids:
+            continue
+        qual = getattr(span, "qualification", {}) or {}
+        if isinstance(qual, dict) and qual.get("status") not in (None, "accepted"):
+            continue
+        builder.add_for_block(
+            block_id,
+            evidence_role="source_quote",
+            review_note=getattr(span, "reason", "") or "",
+        )
+        seen_block_ids.add(block_id)
+
+    # Register evidence for each equation block.
+    for record in getattr(equations, "equations", []) or []:
+        block_id = getattr(record, "block_id", None)
+        if not block_id or block_id in seen_block_ids:
+            continue
+        builder.add_for_block(block_id, evidence_role="equation_quote")
+        seen_block_ids.add(block_id)
+
+    # Register evidence for figure/table caption blocks from structure.
+    for block in getattr(structure, "blocks", []) or []:
+        block_type = getattr(block, "block_type", None)
+        block_id = getattr(block, "block_id", None)
+        if not block_id or block_id in seen_block_ids:
+            continue
+        if block_type == "figure_caption":
+            builder.add_for_block(block_id, evidence_role="figure_caption_quote")
+            seen_block_ids.add(block_id)
+        elif block_type == "table_caption":
+            builder.add_for_block(block_id, evidence_role="table_caption_quote")
+            seen_block_ids.add(block_id)
+
+    return builder.build(document_id=document_id, cartridge_id=cartridge_id)
+
+
+def _empty_evidence_registry(document_id: str, cartridge_id: str | None):
+    from episteme_graph.agents.evidence_registry.schema import EvidenceRegistryResult
+
+    return EvidenceRegistryResult(
+        document_id=document_id,
+        cartridge_id=cartridge_id,
+        records=[],
+        validation_issues=[],
+    )
+
+
+def _build_claim_objects(
+    *,
+    agent_classes: dict,
+    document_id: str,
+    cartridge_id: str | None,
+    qualified: Any,
+    equations: Any,
+    evidence: Any,
+):
+    from episteme_graph.agents.claim_object_builder.builder import ClaimObjectBuilder
+
+    builder_cls = agent_classes.get("ClaimObjectBuilder") or ClaimObjectBuilder
+    equation_index: dict[str, Any] = {}
+    for record in getattr(equations, "equations", []) or []:
+        eq_id = getattr(record, "equation_id", None)
+        if eq_id:
+            equation_index[eq_id] = record
+
+    builder = builder_cls(
+        evidence_registry=evidence,
+        equation_index=equation_index,
+        cartridge_ontology=None,
+    )
+    spans = list(getattr(qualified, "qualified_spans", []) or [])
+    return builder.build(
+        document_id=document_id,
+        qualified_spans=spans,
+        cartridge_id=cartridge_id,
+    )
+
+
+def _empty_claim_object_result(document_id: str, cartridge_id: str | None):
+    from episteme_graph.agents.claim_object_builder.schema import ClaimObjectBuildResult
+
+    return ClaimObjectBuildResult(
+        document_id=document_id,
+        cartridge_id=cartridge_id,
+        claims=[],
+        validation_issues=[],
+    )
+
+
+def _build_derivation_chains(
+    *,
+    agent_classes: dict,
+    cartridge_id: str | None,
+    equations: Any,
+    claim_objects: Any,
+):
+    from episteme_graph.agents.derivation_chain.agent import DerivationChainAgent
+
+    agent = _resolve_agent_factory(
+        agent_classes, "DerivationChainAgent", DerivationChainAgent
+    )
+
+    # equation_id -> [claim_id, ...] from claim_object_builder.
+    claim_link_index: dict[str, list[str]] = {}
+    for claim in getattr(claim_objects, "claims", []) or []:
+        cid = getattr(claim, "claim_id", None)
+        if not cid:
+            continue
+        for eq_id in getattr(claim, "equation_ids", []) or []:
+            claim_link_index.setdefault(eq_id, []).append(cid)
+
+    return agent.run(
+        equations=equations,
+        cartridge_id=cartridge_id,
+        claim_link_index=claim_link_index,
+    )
+
+
+def _empty_derivation_chain_result(document_id: str, cartridge_id: str | None):
+    from episteme_graph.agents.derivation_chain.schema import DerivationChainResult
+
+    return DerivationChainResult(
+        document_id=document_id,
+        cartridge_id=cartridge_id,
+        chains=[],
+        validation_issues=[],
+    )
+
+
+def _build_figure_table_semantics(
+    *,
+    agent_classes: dict,
+    cartridge_id: str | None,
+    structure: Any,
+    evidence: Any,
+    claim_objects: Any,
+):
+    from episteme_graph.agents.figure_table_semantics.agent import (
+        FigureTableSemanticsAgent,
+    )
+
+    agent = _resolve_agent_factory(
+        agent_classes, "FigureTableSemanticsAgent", FigureTableSemanticsAgent
+    )
+
+    # block_id -> [evidence_id, ...] for caption blocks.
+    evidence_index: dict[str, list[str]] = {}
+    for record in getattr(evidence, "records", []) or []:
+        block_id = getattr(getattr(record, "source", None), "block_id", None)
+        ev_id = getattr(record, "evidence_id", None)
+        if block_id and ev_id:
+            evidence_index.setdefault(block_id, []).append(ev_id)
+
+    # block_id -> [claim_id, ...] from claim_objects (claim's source span block).
+    claim_link_index: dict[str, list[str]] = {}
+    for claim in getattr(claim_objects, "claims", []) or []:
+        for span_id in getattr(claim, "source_span_ids", []) or []:
+            claim_link_index.setdefault(span_id, []).append(claim.claim_id)
+
+    return agent.run(
+        structure,
+        cartridge_id=cartridge_id,
+        evidence_index=evidence_index,
+        claim_link_index=claim_link_index,
+    )
+
+
+def _empty_figure_table_result(document_id: str, cartridge_id: str | None):
+    from episteme_graph.agents.figure_table_semantics.schema import (
+        FigureTableSemanticsResult,
+    )
+
+    return FigureTableSemanticsResult(
+        document_id=document_id,
+        cartridge_id=cartridge_id,
+        figures=[],
+        tables=[],
+        validation_issues=[],
+    )
+
+
+def _build_course_mapping(
+    *,
+    agent_classes: dict,
+    document_id: str,
+    cartridge_id: str | None,
+    component_result: Any,
+    claim_objects: Any,
+):
+    from episteme_graph.agents.course_mapping.agent import CourseMappingAgent
+
+    agent = _resolve_agent_factory(
+        agent_classes, "CourseMappingAgent", CourseMappingAgent
+    )
+    components = list(getattr(component_result, "components", []) or [])
+    claims = list(getattr(claim_objects, "claims", []) or [])
+    return agent.run(
+        document_id=document_id,
+        components=components,
+        claims=claims,
+        cartridge_id=cartridge_id,
+    )
+
+
+def _empty_course_mapping_result(document_id: str, cartridge_id: str | None):
+    from episteme_graph.agents.course_mapping.schema import CourseMappingResult
+
+    return CourseMappingResult(
+        document_id=document_id,
+        cartridge_id=cartridge_id,
+        topics=[],
+        validation_issues=[],
+    )
+
+
+def _build_blueprint(
+    *,
+    agent_classes: dict,
+    course_mapping: Any,
+    component_result: Any,
+    course_id: str | None,
+):
+    from episteme_graph.agents.blueprint.agent import BlueprintAgent
+
+    agent = _resolve_agent_factory(agent_classes, "BlueprintAgent", BlueprintAgent)
+    return agent.run(
+        course_mapping,
+        component_result,
+        course_id=course_id,
+    )
+
+
+def _empty_blueprint_result(document_id: str, course_id: str | None):
+    from episteme_graph.agents.blueprint.schema import BlueprintResult
+
+    return BlueprintResult(
+        blueprint_id=f"blueprint_{document_id}",
+        document_id=document_id,
+        source_course_id=course_id or document_id,
+        audience_level="graduate_seminar",
+        narrative_arc=[],
+        review_notes=[],
+        validation_issues=[],
+    )
 
 
 def _agent_input_count(

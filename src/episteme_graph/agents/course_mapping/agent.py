@@ -126,13 +126,18 @@ class CourseMappingAgent:
         component: object,
         claim_index: dict[str, object],
     ) -> CourseTopicMapping:
-        comp_id = getattr(component, "component_id", None) or component.get("component_id")
-        label = getattr(component, "label", None) or component.get("label", "")
-        summary = getattr(component, "summary", None) or component.get("summary", "")
-        comp_type = getattr(component, "component_type", None) or component.get("component_type", "")
+        def _attr(obj, name, default=None):
+            if isinstance(obj, dict):
+                return obj.get(name, default)
+            return getattr(obj, name, default)
+
+        comp_id = _attr(component, "component_id") or ""
+        label = _attr(component, "label") or ""
+        summary = _attr(component, "summary") or ""
+        comp_type = _attr(component, "component_type") or ""
 
         # Extract preconditions as prerequisite concepts
-        preconditions = getattr(component, "preconditions", None) or component.get("preconditions", []) or []
+        preconditions = _attr(component, "preconditions") or []
         prerequisite_concepts: list[str] = []
         for p in preconditions:
             if isinstance(p, dict):
@@ -143,16 +148,16 @@ class CourseMappingAgent:
                 prerequisite_concepts.append(p)
 
         # Extract evidence claims for assessment material
-        evidence_refs = getattr(component, "evidence_refs", None) or component.get("evidence_refs", {}) or {}
+        evidence_refs = _attr(component, "evidence_refs") or {}
         evidence_claim_ids: list[str] = []
         if isinstance(evidence_refs, dict):
             evidence_claim_ids = list(evidence_refs.get("claim_ids", []) or [])
-        evidence_claims_attr = getattr(component, "evidence_claims", None)
+        evidence_claims_attr = _attr(component, "evidence_claims")
         if evidence_claims_attr:
             evidence_claim_ids.extend(list(evidence_claims_attr))
 
         # Build learning objectives based on component summary and outputs
-        outputs = getattr(component, "outputs", None) or component.get("outputs", []) or []
+        outputs = _attr(component, "outputs") or []
         objectives: list[str] = []
         if summary:
             objectives.append(f"{label}の概要を説明できる" if label else "このコンポーネントの概要を説明できる")
@@ -182,11 +187,10 @@ class CourseMappingAgent:
 
     @staticmethod
     def _default_blackbox_policy(component_type: str, component: object) -> dict:
-        equation_ids = (
-            getattr(component, "equation_ids", None)
-            or (component.get("equation_ids") if isinstance(component, dict) else None)
-            or []
-        )
+        if isinstance(component, dict):
+            equation_ids = component.get("equation_ids") or []
+        else:
+            equation_ids = getattr(component, "equation_ids", None) or []
         # Heuristic: theory-style components show derivations; method/diagnostic blackbox most steps.
         if component_type in {"TheoryComponent", "RelationComponent", "PaperRelationComponent"}:
             depth = "medium"
