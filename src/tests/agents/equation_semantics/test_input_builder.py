@@ -1,4 +1,4 @@
-"""Tests for EquationSemanticsInputBuilder."""
+"""Tests for EquationSemanticsInputBuilder (Issue #245 refactor)."""
 from episteme_graph.agents.document_structure.schema import (
     DocumentMetadata,
     DocumentStructureResult,
@@ -74,8 +74,44 @@ def _roles():
     )
 
 
-def test_build_extracts_equation_block_context():
-    inputs = BUILDER.build(_structure(), skeleton=_skeleton(), roles=_roles())
+# ------------------------------------------------------------------
+# build_candidates
+# ------------------------------------------------------------------
+
+def test_build_candidates_returns_candidate_for_each_equation_block():
+    candidates = BUILDER.build_candidates(_structure())
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c.document_id == "doc"
+    assert c.source_location["block_id"] == "e1"
+    assert c.raw_text == "N = a + b (1.1)"
+    assert "document_structure_equation_block" in c.detection_method
+    assert "equation_number_pattern" in c.detection_method  # label found
+    assert c.matched_label == "1.1"
+
+
+def test_build_candidates_max_limit():
+    structure = _structure()
+    structure.blocks.append(_typed("e2", "M = c + d (1.2)", "equation_block", 3))
+    candidates = BUILDER.build_candidates(structure, config={"max_equations": 1})
+    assert len(candidates) == 1
+    assert candidates[0].source_location["block_id"] == "e1"
+
+
+# ------------------------------------------------------------------
+# build_llm_inputs
+# ------------------------------------------------------------------
+
+def test_build_llm_inputs_only_for_accepted():
+    from episteme_graph.agents.equation_semantics.schema import EquationCandidate
+
+    candidates = BUILDER.build_candidates(_structure())
+    # Mark as accepted manually (gate would do this)
+    for c in candidates:
+        c.acceptance_status = "accepted"
+        c.extraction_status = "complete"
+
+    inputs = BUILDER.build_llm_inputs(_structure(), candidates, skeleton=_skeleton(), roles=_roles())
     assert len(inputs) == 1
     inp = inputs[0]
     assert inp.equation_id == "eq_1_1"
@@ -85,22 +121,47 @@ def test_build_extracts_equation_block_context():
     assert "prefactor" in inp.prev_texts[0]
     assert "Starting from" in inp.next_texts[0]
     assert inp.nearby_span_annotations[0]["span_id"] == "s1"
+    assert inp.extraction_status == "complete"
+    assert inp.acceptance_status == "accepted"
+    assert inp.needs_reconstruction is False
 
 
-def test_build_with_cartridge_terms():
+def test_build_llm_inputs_empty_when_no_accepted():
+    candidates = BUILDER.build_candidates(_structure())
+    # Mark all as rejected
+    for c in candidates:
+        c.acceptance_status = "rejected"
+    inputs = BUILDER.build_llm_inputs(_structure(), candidates)
+    assert inputs == []
+
+
+def test_needs_reconstruction_flag_for_partial():
+    from episteme_graph.agents.equation_semantics.schema import EquationCandidate
+
+    candidates = BUILDER.build_candidates(_structure())
+    for c in candidates:
+        c.acceptance_status = "accepted"
+        c.extraction_status = "partial"  # triggers needs_reconstruction
+
+    inputs = BUILDER.build_llm_inputs(_structure(), candidates)
+    assert inputs[0].needs_reconstruction is True
+
+
+# ------------------------------------------------------------------
+# Cartridge terms
+# ------------------------------------------------------------------
+
+def test_build_llm_inputs_with_cartridge_terms():
     cartridge = CartridgeContext(
         cartridge_id="test",
         ontology={},
         validation_rules={},
         aliases={"R Lambda c": ["RΛc"]},
     )
-    inputs = BUILDER.build(_structure(), cartridge=cartridge)
+    candidates = BUILDER.build_candidates(_structure(), cartridge=cartridge)
+    for c in candidates:
+        c.acceptance_status = "accepted"
+        c.extraction_status = "complete"
+    inputs = BUILDER.build_llm_inputs(_structure(), candidates, cartridge=cartridge)
     assert inputs[0].cartridge_id == "test"
     assert inputs[0].normalized_terms[0]["canonical"] == "R Lambda c"
-
-
-def test_max_equations_limit():
-    structure = _structure()
-    structure.blocks.append(_typed("e2", "M = c + d (1.2)", "equation_block", 3))
-    inputs = BUILDER.build(structure, config={"max_equations": 1})
-    assert [i.block_id for i in inputs] == ["e1"]

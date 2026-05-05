@@ -1,4 +1,4 @@
-"""Integration tests for EquationSemanticsAgent with mocked LLM."""
+"""Integration tests for EquationSemanticsAgent with mocked LLM (Issue #245 refactor)."""
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -54,29 +54,21 @@ def _skeleton():
     )
 
 
-def _response(equation_id, block_id, label, text, primary, summary, symbols=None, assumptions=None, from_equations=None):
+def _response(equation_id, block_id, label, text, eq_type, summary, symbols=None, assumptions=None, from_equations=None, sem_status="source_backed"):
     return {
         "equation_id": equation_id,
-        "block_id": block_id,
-        "section_id": "sec_1",
-        "section_title": "Formulation",
         "label": label,
-        "text": text,
-        "latex": None,
-        "plain_text": text,
-        "equation_role": {
-            "primary": primary,
-            "secondary": [],
-            "confidence": 0.9,
-            "reason": "mocked",
-        },
+        "equation_type": eq_type,
+        "secondary_types": [],
+        "semantic_status": sem_status,
+        "confidence": 0.9,
+        "reason": "mocked",
         "defined_symbols": symbols or [],
-        "local_assumptions": assumptions or [],
-        "derivation_links": {
-            "from_equations": from_equations or [],
-            "to_equations": [],
-            "linked_text_spans": [],
-        },
+        "used_symbols": [],
+        "assumptions": assumptions or [],
+        "input_equation_ids": from_equations or [],
+        "output_equation_ids": [],
+        "linked_text_spans": [],
         "summary": summary,
         "review_flags": [],
     }
@@ -86,45 +78,105 @@ def test_run_recovers_definition_transformation_and_approximation():
     agent = EquationSemanticsAgent()
     responses = [
         _response(
-            "eq_1_1",
-            "e1",
-            "1.1",
-            "N = a + b (1.1)",
-            "equation_definition",
+            "eq_1_1", "e1", "1.1", "N = a + b (1.1)", "definition",
             "Prefactor definition for N.",
             symbols=[{"symbol": "N", "definition_status": "defined", "evidence_text": "where the prefactor is defined as"}],
         ),
         _response(
-            "eq_1_2",
-            "e2",
-            "1.2",
-            "∫ f dx = F (1.2)",
-            "equation_transformation",
+            "eq_1_2", "e2", "1.2", "∫ f dx = F (1.2)", "transformation",
             "Integral transformation derived from eq. (1.1).",
             from_equations=["eq_1_1"],
         ),
         _response(
-            "eq_1_3",
-            "e3",
-            "1.3",
-            "Gamma_Lambdac = Gamma_D + Gamma_Dstar (1.3)",
-            "equation_approximation",
+            "eq_1_3", "e3", "1.3", "Gamma_Lambdac = Gamma_D + Gamma_Dstar (1.3)", "approximation",
             "Zero-recoil approximation for decay rates.",
-            assumptions=[{"text": "In the zero-recoil limit", "source_block_ids": ["b4"]}],
+            assumptions=["In the zero-recoil limit"],
         ),
     ]
     with patch.object(agent._llm_client, "generate", side_effect=responses):
         result = agent.run(_structure(), skeleton=_skeleton())
 
     assert isinstance(result, EquationSemanticsResult)
-    assert [e.equation_role.primary for e in result.equations] == [
-        "equation_definition",
-        "equation_transformation",
-        "equation_approximation",
+    assert [e.semantics.equation_type for e in result.equations] == [
+        "definition", "transformation", "approximation",
     ]
-    assert result.equations[0].defined_symbols[0].symbol == "N"
-    assert result.equations[1].derivation_links.from_equations == ["eq_1_1"]
-    assert "zero-recoil" in result.equations[2].local_assumptions[0].text
+    assert result.equations[0].semantics.defined_symbols[0].symbol == "N"
+    assert result.equations[1].semantics.input_equation_ids == ["eq_1_1"]
+    assert "zero-recoil" in result.equations[2].semantics.assumptions[0].lower()
+
+
+def test_result_includes_equation_candidates():
+    agent = EquationSemanticsAgent()
+    response = _response("eq_1_1", "e1", "1.1", "N = a + b (1.1)", "definition", "Prefactor definition for N.")
+    with patch.object(agent._llm_client, "generate", return_value=response):
+        result = agent.run(_structure(), config={"max_equations": 1})
+
+    # candidates should include all blocks that were processed by the gate
+    assert len(result.equation_candidates) >= 1
+    accepted = [c for c in result.equation_candidates if c.acceptance_status == "accepted"]
+    assert len(accepted) >= 1
+
+
+def test_candidate_trace_ids_in_record():
+    agent = EquationSemanticsAgent()
+    response = _response("eq_1_1", "e1", "1.1", "N = a + b (1.1)", "definition", "Prefactor definition.")
+    with patch.object(agent._llm_client, "generate", return_value=response):
+        result = agent.run(_structure(), config={"max_equations": 1})
+
+    assert result.equations
+    assert result.equations[0].candidate_trace_ids  # must not be empty
+
+
+def test_fragment_only_blocks_are_not_processed_by_llm():
+    """Fragment-only equation blocks should be gated out before LLM call."""
+    structure = DocumentStructureResult(
+        document_id="doc_test",
+        source_file="/tmp/test.pdf",
+        cartridge_id=None,
+        metadata=DocumentMetadata(title="Test", pages=1),
+        sections=[Section("sec_1", "Results", 1, 1, 1)],
+        blocks=[
+            _typed("b0", "the term is", "body_paragraph", 0),
+            _typed("e1", "+", "equation_block", 1),  # fragment-only
+            _typed("e2", "N = a + b (1.1)", "equation_block", 2),  # valid
+        ],
+    )
+    response = _response("eq_1_1", "e2", "1.1", "N = a + b (1.1)", "definition", "Prefactor definition.")
+    with patch.object(agent := EquationSemanticsAgent(), "_llm_client") as mock_llm:
+        mock_llm.generate.return_value = response
+        result = agent.run(structure)
+
+    # fragment should be in candidates but rejected
+    fragment_candidates = [c for c in result.equation_candidates if c.source_location["block_id"] == "e1"]
+    assert fragment_candidates
+    assert fragment_candidates[0].acceptance_status == "needs_merge"
+
+    # LLM should only be called for the valid equation
+    assert mock_llm.generate.call_count == 1
+
+
+def test_label_only_blocks_are_rejected():
+    """Label-only equation blocks should be rejected by acceptance gate."""
+    structure = DocumentStructureResult(
+        document_id="doc_test",
+        source_file="/tmp/test.pdf",
+        cartridge_id=None,
+        metadata=DocumentMetadata(title="Test", pages=1),
+        sections=[Section("sec_1", "Results", 1, 1, 1)],
+        blocks=[
+            _typed("e_label", "(3.14)", "equation_block", 0),
+            _typed("e_valid", "N = a + b (1.1)", "equation_block", 1),
+        ],
+    )
+    response = _response("eq_1_1", "e_valid", "1.1", "N = a + b", "definition", "Definition.")
+    with patch.object(agent := EquationSemanticsAgent(), "_llm_client") as mock_llm:
+        mock_llm.generate.return_value = response
+        result = agent.run(structure)
+
+    label_candidates = [c for c in result.equation_candidates if c.source_location["block_id"] == "e_label"]
+    assert label_candidates[0].acceptance_status == "rejected"
+    assert label_candidates[0].extraction_status == "label_only"
+    assert mock_llm.generate.call_count == 1
 
 
 def test_relation_or_result_summary_is_preserved():
@@ -141,12 +193,8 @@ def test_relation_or_result_summary_is_preserved():
         ],
     )
     response = _response(
-        "eq_3_14",
-        "e1",
-        "3.14",
-        "RΛc / RΛcSM = 1/4 RD / RDSM + 3/4 RD* / RD*SM (3.14)",
-        "equation_relation",
-        "Sum rule relation between RΛc, RD, and RD*.",
+        "eq_3_14", "e1", "3.14", "RΛc / RΛcSM = 1/4 RD / RDSM + 3/4 RD* / RD*SM (3.14)",
+        "relation", "Sum rule relation between RΛc, RD, and RD*.",
         symbols=[
             {"symbol": "RΛc", "definition_status": "used", "evidence_text": None},
             {"symbol": "RD", "definition_status": "used", "evidence_text": None},
@@ -155,29 +203,25 @@ def test_relation_or_result_summary_is_preserved():
     with patch.object(agent._llm_client, "generate", return_value=response):
         result = agent.run(structure)
 
-    assert result.equations[0].equation_role.primary == "equation_relation"
-    assert "Sum rule" in result.equations[0].summary
+    assert result.equations[0].semantics.equation_type == "relation"
+    assert "Sum rule" in result.equations[0].semantics.summary
 
 
-def test_repair_called_on_invalid_role():
+def test_repair_called_on_invalid_type():
     agent = EquationSemanticsAgent()
-    bad = _response("eq_1_1", "e1", "1.1", "N = a + b (1.1)", "bad", "Bad summary")
+    bad = _response("eq_1_1", "e1", "1.1", "N = a + b (1.1)", "bad_type", "Bad summary")
     fixed = _response(
-        "eq_1_1",
-        "e1",
-        "1.1",
-        "N = a + b (1.1)",
-        "equation_definition",
+        "eq_1_1", "e1", "1.1", "N = a + b (1.1)", "definition",
         "Prefactor definition for N.",
         symbols=[{"symbol": "N", "definition_status": "defined", "evidence_text": "where the prefactor is defined as"}],
     )
-    second = _response("eq_1_2", "e2", "1.2", "∫ f dx = F (1.2)", "equation_transformation", "Integral transformation.", from_equations=["eq_1_1"])
-    third = _response("eq_1_3", "e3", "1.3", "Gamma_Lambdac = Gamma_D + Gamma_Dstar (1.3)", "equation_approximation", "Zero-recoil approximation.", assumptions=[{"text": "zero-recoil limit", "source_block_ids": ["b4"]}])
+    second = _response("eq_1_2", "e2", "1.2", "∫ f dx = F (1.2)", "transformation", "Integral.", from_equations=["eq_1_1"])
+    third = _response("eq_1_3", "e3", "1.3", "Gamma_Lambdac = Gamma_D + Gamma_Dstar (1.3)", "approximation", "Zero-recoil.", assumptions=["zero-recoil limit"])
     with patch.object(agent._llm_client, "generate", side_effect=[bad, fixed, second, third]) as mocked:
         result = agent.run(_structure())
 
     assert mocked.call_count >= 4
-    assert result.equations[0].equation_role.primary == "equation_definition"
+    assert result.equations[0].semantics.equation_type == "definition"
 
 
 def test_llm_failure_returns_unknown_fallback_record():
@@ -185,5 +229,28 @@ def test_llm_failure_returns_unknown_fallback_record():
     with patch.object(agent._llm_client, "generate", side_effect=RuntimeError("LLM error")):
         result = agent.run(_structure(), config={"max_equations": 1})
 
-    assert result.equations[0].equation_role.primary == "unknown"
-    assert result.equations[0].equation_role.confidence == 0.0
+    assert result.equations[0].semantics.equation_type == "unknown"
+    assert result.equations[0].semantics.confidence == 0.0
+    assert result.equations[0].confidence_policy.can_support_claim is False
+
+
+def test_all_rejected_returns_empty_equations():
+    """全候補が rejection gate で落とされた場合、equations は空。"""
+    structure = DocumentStructureResult(
+        document_id="doc_test",
+        source_file="/tmp/test.pdf",
+        cartridge_id=None,
+        metadata=DocumentMetadata(title="Test", pages=1),
+        sections=[Section("sec_1", "Results", 1, 1, 1)],
+        blocks=[
+            _typed("e1", "(3.14)", "equation_block", 0),   # label_only → rejected
+            _typed("e2", "+", "equation_block", 1),         # fragment → needs_merge
+        ],
+    )
+    agent = EquationSemanticsAgent()
+    with patch.object(agent._llm_client, "generate") as mock_llm:
+        result = agent.run(structure)
+
+    assert result.equations == []
+    assert len(result.equation_candidates) == 2
+    mock_llm.assert_not_called()
