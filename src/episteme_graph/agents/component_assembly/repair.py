@@ -43,7 +43,7 @@ class ComponentAssemblyRepairer:
                 logger.warning("Repair LLM call failed: %s", exc)
                 break
             result = self._cleanup.cleanup(_parse_raw(raw_output, llm_input.document_id, llm_input.cartridge_id))
-            remaining = validator.validate(result, cartridge)  # type: ignore[attr-defined]
+            remaining = validator.validate(result, cartridge, llm_input=llm_input)  # type: ignore[attr-defined]
             if not [i for i in remaining if i.severity == "error"]:
                 result.validation_issues = remaining
                 return result

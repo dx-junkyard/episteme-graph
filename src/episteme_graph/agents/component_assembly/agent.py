@@ -42,6 +42,9 @@ class ComponentAssemblyAgent:
         dsl: DSLLinkingResult | None = None,
         cartridge_id: str | None = None,
         config: dict | None = None,
+        claim_objects=None,
+        evidence_registry=None,
+        derivations=None,
     ) -> ComponentAssemblyResult:
         cartridge = self._load_cartridge(cartridge_id)
         llm_input = self._input_builder.build(
@@ -51,6 +54,9 @@ class ComponentAssemblyAgent:
             dsl=dsl,
             cartridge=cartridge,
             config=config,
+            claim_objects=claim_objects,
+            evidence_registry=evidence_registry,
+            derivations=derivations,
         )
         messages = self._prompt_factory.build_messages(llm_input)
         try:
@@ -63,7 +69,7 @@ class ComponentAssemblyAgent:
         result = self._cleanup.cleanup(
             _parse_raw(raw_output, qualified_claims.document_id, llm_input.cartridge_id)
         )
-        issues = self._validator.validate(result, cartridge)
+        issues = self._validator.validate(result, cartridge, llm_input=llm_input)
         if [i for i in issues if i.severity == "error"]:
             result = self._repairer.repair(
                 llm_input=llm_input,
