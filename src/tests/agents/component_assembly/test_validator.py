@@ -144,3 +144,165 @@ def test_cartridge_component_and_relation_types_are_allowed():
         dependencies=[{"dependency_type": "requires", "component_refs": [], "reason": "cartridge relation"}],
     )
     assert not [i for i in VALIDATOR.validate(_result(components=[component]), cartridge) if i.severity == "error"]
+
+
+# ---------------------------------------------------------------------------
+# Tests for cross-reference ID validation (issue #249)
+# ---------------------------------------------------------------------------
+
+from episteme_graph.agents.component_assembly.schema import ComponentAssemblyLLMInput
+from episteme_graph.agents.component_assembly.validator import _build_available_id_index
+
+
+def _make_llm_input(
+    available_claims=None,
+    available_evidence=None,
+    available_equations=None,
+    available_dsl_nodes=None,
+    available_dsl_edges=None,
+):
+    return ComponentAssemblyLLMInput(
+        document_id="doc",
+        cartridge_id=None,
+        accepted_claims=[],
+        equations=[],
+        thesis_nodes=[],
+        dsl_nodes=[],
+        dsl_edges=[],
+        allowed_component_types=["RelationComponent"],
+        allowed_dependency_types=["requires"],
+        available_claims=available_claims or [],
+        available_evidence=available_evidence or [],
+        available_equations=available_equations or [],
+        available_dsl_nodes=available_dsl_nodes or [],
+        available_dsl_edges=available_dsl_edges or [],
+    )
+
+
+def test_valid_linkage_no_errors():
+    """Component referencing real IDs → no cross-reference errors."""
+    llm_input = _make_llm_input(
+        available_claims=[{"claim_id": "claim_span_001"}],
+        available_evidence=[{"evidence_id": "ev_0001"}],
+        available_equations=[{"equation_id": "eq_001"}],
+    )
+    component = _component(
+        evidence_refs={
+            "claim_ids": ["claim_span_001"],
+            "evidence_ids": ["ev_0001"],
+            "equation_ids": ["eq_001"],
+            "dsl_refs": {"node_ids": [], "edge_ids": []},
+        }
+    )
+    issues = VALIDATOR.validate(_result(components=[component]), llm_input=llm_input)
+    cross_errors = [i for i in issues if i.rule_id in (
+        "unresolved_claim_id", "unresolved_evidence_id", "unresolved_equation_id"
+    )]
+    assert cross_errors == []
+
+
+def test_unresolved_claim_id_is_error():
+    """Component referencing a non-existent claim ID → unresolved_claim_id error."""
+    llm_input = _make_llm_input(
+        available_claims=[{"claim_id": "claim_real"}],
+    )
+    component = _component(
+        evidence_refs={
+            "claim_ids": ["claim_MISSING"],
+            "evidence_ids": [],
+            "equation_ids": [],
+            "dsl_refs": {"node_ids": [], "edge_ids": []},
+        }
+    )
+    issues = VALIDATOR.validate(_result(components=[component]), llm_input=llm_input)
+    error_ids = [i.rule_id for i in issues if i.severity == "error"]
+    assert "unresolved_claim_id" in error_ids
+
+
+def test_unresolved_evidence_id_is_error():
+    """Component referencing a non-existent evidence ID → unresolved_evidence_id error."""
+    llm_input = _make_llm_input(
+        available_evidence=[{"evidence_id": "ev_real"}],
+    )
+    component = _component(
+        evidence_refs={
+            "claim_ids": [],
+            "evidence_ids": ["ev_MISSING"],
+            "equation_ids": [],
+            "dsl_refs": {"node_ids": [], "edge_ids": []},
+        }
+    )
+    issues = VALIDATOR.validate(_result(components=[component]), llm_input=llm_input)
+    error_ids = [i.rule_id for i in issues if i.severity == "error"]
+    assert "unresolved_evidence_id" in error_ids
+
+
+def test_unresolved_equation_id_is_error():
+    """Component referencing a non-existent equation ID → unresolved_equation_id error."""
+    llm_input = _make_llm_input(
+        available_equations=[{"equation_id": "eq_real"}],
+    )
+    component = _component(
+        evidence_refs={
+            "claim_ids": [],
+            "evidence_ids": [],
+            "equation_ids": ["eq_MISSING"],
+            "dsl_refs": {"node_ids": [], "edge_ids": []},
+        }
+    )
+    issues = VALIDATOR.validate(_result(components=[component]), llm_input=llm_input)
+    error_ids = [i.rule_id for i in issues if i.severity == "error"]
+    assert "unresolved_equation_id" in error_ids
+
+
+def test_summary_only_component_is_warning():
+    """Component with no claim_ids and no evidence_ids → summary_only_component warning."""
+    llm_input = _make_llm_input(
+        available_claims=[{"claim_id": "claim_real"}],
+        available_evidence=[{"evidence_id": "ev_real"}],
+    )
+    component = _component(
+        evidence_refs={
+            "claim_ids": [],
+            "evidence_ids": [],
+            "equation_ids": [],
+            "dsl_refs": {"node_ids": [], "edge_ids": []},
+        }
+    )
+    issues = VALIDATOR.validate(_result(components=[component]), llm_input=llm_input)
+    warning_ids = [i.rule_id for i in issues if i.severity == "warning"]
+    assert "summary_only_component" in warning_ids
+
+
+def test_no_cross_ref_validation_without_llm_input():
+    """Without llm_input, no cross-reference errors are raised."""
+    component = _component(
+        evidence_refs={
+            "claim_ids": ["any_claim"],
+            "evidence_ids": ["any_ev"],
+            "equation_ids": [],
+            "dsl_refs": {"node_ids": [], "edge_ids": []},
+        }
+    )
+    issues = VALIDATOR.validate(_result(components=[component]))
+    cross_errors = [i for i in issues if i.rule_id in (
+        "unresolved_claim_id", "unresolved_evidence_id"
+    )]
+    assert cross_errors == []
+
+
+def test_build_available_id_index():
+    """_build_available_id_index extracts the correct sets."""
+    llm_input = _make_llm_input(
+        available_claims=[{"claim_id": "c1"}, {"claim_id": "c2"}],
+        available_evidence=[{"evidence_id": "ev1"}],
+        available_equations=[{"equation_id": "eq1"}],
+        available_dsl_nodes=[{"node_id": "n1"}],
+        available_dsl_edges=[{"edge_id": "e1"}],
+    )
+    idx = _build_available_id_index(llm_input)
+    assert idx["claim_ids"] == {"c1", "c2"}
+    assert idx["evidence_ids"] == {"ev1"}
+    assert idx["equation_ids"] == {"eq1"}
+    assert idx["dsl_node_ids"] == {"n1"}
+    assert idx["dsl_edge_ids"] == {"e1"}

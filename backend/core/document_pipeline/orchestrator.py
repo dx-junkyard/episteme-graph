@@ -49,6 +49,7 @@ PIPELINE_STAGES = [
     "component_assembly",
     "course_mapping",
     "blueprint",
+    "export_validation",
     "persist_claims_components_graph",
     "completed",
 ]
@@ -584,6 +585,9 @@ def run_document_pipeline(
                 component_result = ca_agent.run(
                     qualified_claims=qualified, equations=equations,
                     thesis=thesis, dsl=dsl, cartridge_id=cartridge_id,
+                    claim_objects=claim_objects,
+                    evidence_registry=evidence,
+                    derivations=derivations,
                 )
             except Exception as exc:
                 logger.exception("component_assembly stage failed for document=%s material=%s", document_id, material_id)
@@ -648,6 +652,71 @@ def run_document_pipeline(
             "total": 1,
             "processed": 1,
         })
+
+        # ── Stage 12d: export_validation ───────────────────────────────────
+        export_validation_artifact = artifact("export_validation")
+        if export_validation_artifact:
+            validation_result_dict = export_validation_artifact
+            logger.info("Resuming document pipeline: loaded export_validation artifact for document %s", document_id)
+        else:
+            report_start("export_validation", total=1, unit="gate")
+            try:
+                from .export_validation_gate import ExportValidationGate
+
+                gate = ExportValidationGate()
+                validation_result = gate.run(
+                    artifacts=dict(previous_artifacts),
+                    component_result=component_result,
+                    course_mapping=course_mapping,
+                    claim_objects=claim_objects,
+                    evidence=evidence,
+                    dsl=dsl,
+                )
+                validation_result_dict = validation_result.to_dict()
+            except Exception as exc:
+                logger.exception(
+                    "export_validation stage failed (non-fatal): document=%s material=%s error=%s",
+                    document_id, material_id, exc,
+                )
+                validation_result_dict = {
+                    "status": "passed_with_warnings",
+                    "exportable": True,
+                    "publish_ready": False,
+                    "errors": [],
+                    "warnings": [{"code": "GATE_ERROR", "message": str(exc), "artifact": "export_validation"}],
+                    "review_items": [],
+                    "summary": {"error_count": 0, "warning_count": 1, "review_required_count": 0},
+                }
+            save_artifact("export_validation", validation_result_dict)
+        report_done("export_validation", {
+            "status": validation_result_dict.get("status"),
+            "error_count": (validation_result_dict.get("summary") or {}).get("error_count", 0),
+            "warning_count": (validation_result_dict.get("summary") or {}).get("warning_count", 0),
+            "total": 1,
+            "processed": 1,
+        })
+
+        # Block persist / completed if validation failed
+        if validation_result_dict.get("status") == "failed_validation":
+            error_count = (validation_result_dict.get("summary") or {}).get("error_count", 0)
+            upsert_analysis_run(
+                run_id=run_id,
+                document_id=document_id,
+                material_id=material_id,
+                cartridge_id=cartridge_id,
+                status="failed",
+                current_stage="export_validation",
+                error_message=f"ExportValidationGate: {error_count} hard error(s) found; persist blocked",
+            )
+            result.final_stage = "export_validation"
+            logger.warning(
+                "ExportValidationGate blocked persist for document=%s: %d error(s)",
+                document_id, error_count,
+            )
+            raise PipelineStageError(
+                "export_validation",
+                f"Validation failed with {error_count} hard error(s); see export_validation artifact",
+            )
 
         # ── Stage 13: persist_claims_components_graph ──────────────────────
         report_start("persist_claims_components_graph", total=3, unit="tables")

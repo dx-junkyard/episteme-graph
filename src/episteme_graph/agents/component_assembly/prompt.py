@@ -20,6 +20,15 @@ Important constraints:
 - Use accepted claims, equation semantics, thesis structure, and DSL graph evidence.
 - Do not let prior work or meta discourse dominate component cores.
 
+ID constraints (CRITICAL):
+- For evidence_refs.claim_ids: use ONLY IDs from available_claims list.
+- For evidence_refs.evidence_ids: use ONLY IDs from available_evidence list.
+- For evidence_refs.equation_ids: use ONLY IDs from available_equations list.
+- For evidence_refs.dsl_refs.node_ids: use ONLY IDs from available_dsl_nodes list.
+- For evidence_refs.dsl_refs.edge_ids: use ONLY IDs from available_dsl_edges list.
+- Do NOT generate, invent, or guess IDs not present in the available_* lists.
+- A source-backed component MUST have at least one claim_id or evidence_id in evidence_refs.
+
 internal_flow requirement:
 - For RelationComponent / PaperRelationComponent / CorrectionComponent /
   DiagnosticComponent / MethodComponent, internal_flow MUST NOT be empty.
@@ -110,11 +119,26 @@ class ComponentAssemblyPromptFactory:
             "dsl_edges": llm_input.dsl_edges,
             "normalized_terms": llm_input.normalized_terms,
         }
-        return "\n".join([
+        available = {
+            "available_claims": llm_input.available_claims,
+            "available_evidence": llm_input.available_evidence,
+            "available_equations": llm_input.available_equations,
+            "available_dsl_nodes": llm_input.available_dsl_nodes,
+            "available_dsl_edges": llm_input.available_dsl_edges,
+            "available_derivation_ids": llm_input.available_derivation_ids,
+        }
+        parts = [
             "## Task",
             "Assemble reusable knowledge components. Return ONLY JSON.",
             "\n## Input Materials",
             json.dumps(payload, ensure_ascii=False, indent=2),
+        ]
+        if any(v for v in available.values()):
+            parts += [
+                "\n## Available Artifact IDs (use ONLY these IDs in evidence_refs)",
+                json.dumps(available, ensure_ascii=False, indent=2),
+            ]
+        parts += [
             "\n## Allowed Component Types",
             ", ".join(llm_input.allowed_component_types),
             "\n## Allowed Dependency Types",
@@ -126,9 +150,12 @@ class ComponentAssemblyPromptFactory:
             "\n## Constraints",
             "- Avoid section-summary components\n"
             "- Each strong component should include evidence_refs\n"
+            "- Use ONLY IDs from the available_* lists above in evidence_refs\n"
+            "- Do NOT invent or guess IDs not present in available_* lists\n"
             "- Derivation-like components need outputs and usually preconditions\n"
             "- Correction/uncertainty/diagnostic components should remain distinct when evidence supports separation\n"
             "- Relation/Correction/Diagnostic/Method components MUST include internal_flow\n"
             "- internal_flow explains how inputs are combined/transformed into outputs\n"
             "- Return ONLY valid JSON, no markdown fences",
-        ])
+        ]
+        return "\n".join(parts)

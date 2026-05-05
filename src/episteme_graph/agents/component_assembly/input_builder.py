@@ -29,6 +29,9 @@ class ComponentAssemblyInputBuilder:
         dsl: DSLLinkingResult | None = None,
         cartridge: CartridgeContext | None = None,
         config: dict | None = None,
+        claim_objects=None,
+        evidence_registry=None,
+        derivations=None,
     ) -> ComponentAssemblyLLMInput:
         cfg = config or {}
         return ComponentAssemblyLLMInput(
@@ -46,6 +49,12 @@ class ComponentAssemblyInputBuilder:
             allowed_component_types=self.allowed_component_types(cartridge),
             allowed_dependency_types=self.allowed_dependency_types(cartridge),
             normalized_terms=self._normalized_terms(cartridge) if cartridge else None,
+            available_claims=self._available_claims(claim_objects),
+            available_evidence=self._available_evidence(evidence_registry),
+            available_equations=self._available_equations_index(equations),
+            available_dsl_nodes=self._available_dsl_nodes(dsl),
+            available_dsl_edges=self._available_dsl_edges(dsl),
+            available_derivation_ids=self._available_derivation_ids(derivations),
         )
 
     @staticmethod
@@ -179,3 +188,78 @@ class ComponentAssemblyInputBuilder:
             for canonical, aliases in cartridge.aliases.items():
                 terms.append({"canonical": canonical, "aliases": aliases})
         return terms
+
+    @staticmethod
+    def _available_claims(claim_objects) -> list[dict]:
+        """Build available claim ID list from ClaimObjectBuildResult."""
+        if not claim_objects:
+            return []
+        result = []
+        for claim in getattr(claim_objects, "claims", []) or []:
+            result.append({
+                "claim_id": claim.claim_id,
+                "claim_type": claim.claim_type,
+                "text": claim.text[:200],
+                "source_evidence_ids": list(claim.source_evidence_ids or []),
+                "equation_ids": list(claim.equation_ids or []),
+                "support_status": claim.support_status,
+                "review_status": claim.review_status,
+            })
+        return result
+
+    @staticmethod
+    def _available_evidence(evidence_registry) -> list[dict]:
+        """Build available evidence ID list from EvidenceRegistryResult."""
+        if not evidence_registry:
+            return []
+        result = []
+        for record in getattr(evidence_registry, "records", []) or []:
+            src = getattr(record, "source", None)
+            result.append({
+                "evidence_id": record.evidence_id,
+                "block_id": src.block_id if src else None,
+                "evidence_role": record.evidence_role,
+            })
+        return result
+
+    @staticmethod
+    def _available_equations_index(equations) -> list[dict]:
+        """Build available equation ID list from EquationSemanticsResult."""
+        if not equations:
+            return []
+        result = []
+        for record in getattr(equations, "equations", []) or []:
+            result.append({
+                "equation_id": record.equation_id,
+                "block_id": record.block_id,
+                "role": record.equation_role.primary,
+                "confidence": record.equation_role.confidence,
+            })
+        return result
+
+    @staticmethod
+    def _available_dsl_nodes(dsl) -> list[dict]:
+        if not dsl:
+            return []
+        return [{"node_id": n.node_id} for n in dsl.nodes]
+
+    @staticmethod
+    def _available_dsl_edges(dsl) -> list[dict]:
+        if not dsl:
+            return []
+        return [{"edge_id": e.edge_id} for e in dsl.edges]
+
+    @staticmethod
+    def _available_derivation_ids(derivations) -> list[str]:
+        if not derivations:
+            return []
+        ids = []
+        for chain in getattr(derivations, "chains", []) or []:
+            chain_id = getattr(chain, "chain_id", None)
+            if chain_id:
+                ids.append(chain_id)
+            for step in getattr(chain, "steps", []) or []:
+                step_id = getattr(step, "step_id", None)
+                if step_id:
+                    ids.append(step_id)
+        return ids

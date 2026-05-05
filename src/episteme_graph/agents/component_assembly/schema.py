@@ -60,6 +60,13 @@ class ComponentAssemblyLLMInput:
     allowed_component_types: list[str]
     allowed_dependency_types: list[str]
     normalized_terms: list[dict] | None = None
+    # Deterministic artifact ID lists for cross-reference validation
+    available_claims: list[dict] = field(default_factory=list)
+    available_evidence: list[dict] = field(default_factory=list)
+    available_equations: list[dict] = field(default_factory=list)
+    available_dsl_nodes: list[dict] = field(default_factory=list)
+    available_dsl_edges: list[dict] = field(default_factory=list)
+    available_derivation_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
