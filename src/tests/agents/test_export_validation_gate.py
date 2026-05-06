@@ -55,8 +55,15 @@ class _ComponentResult:
 
 
 class _ClaimObject:
-    def __init__(self, claim_id: str):
+    def __init__(
+        self,
+        claim_id: str,
+        support_status: str = "source_backed",
+        source_evidence_ids: list | None = None,
+    ):
         self.claim_id = claim_id
+        self.support_status = support_status
+        self.source_evidence_ids = source_evidence_ids or []
 
 
 class _ClaimObjectResult:
@@ -345,3 +352,59 @@ def test_result_to_dict():
     assert "errors" in d
     assert "warnings" in d
     assert "summary" in d
+
+
+# ---------------------------------------------------------------------------
+# Tests: source-backed claim ↔ EvidenceRegistry validation (issue #257)
+# ---------------------------------------------------------------------------
+
+def test_source_backed_claim_with_evidence_ids_no_warning():
+    """source_backed claim that has source_evidence_ids → no SOURCE_BACKED warning."""
+    claims = _ClaimObjectResult([
+        _ClaimObject("claim_001", support_status="source_backed",
+                     source_evidence_ids=["ev_001"]),
+    ])
+    evidence = _EvidenceResult([_EvidenceRecord("ev_001")])
+
+    result = _run_gate(claim_objects=claims, evidence=evidence)
+    codes = [w.code for w in result.warnings]
+    assert "SOURCE_BACKED_CLAIM_NO_EVIDENCE_IDS" not in codes
+
+
+def test_source_backed_claim_without_evidence_ids_warns():
+    """source_backed claim with empty source_evidence_ids → SOURCE_BACKED_CLAIM_NO_EVIDENCE_IDS warning."""
+    claims = _ClaimObjectResult([
+        _ClaimObject("claim_002", support_status="source_backed",
+                     source_evidence_ids=[]),
+    ])
+    evidence = _EvidenceResult([_EvidenceRecord("ev_001")])
+
+    result = _run_gate(claim_objects=claims, evidence=evidence)
+    codes = [w.code for w in result.warnings]
+    assert "SOURCE_BACKED_CLAIM_NO_EVIDENCE_IDS" in codes
+
+
+def test_source_backed_claim_with_unresolved_evidence_id_warns():
+    """source_backed claim referencing a missing evidence_id → SOURCE_BACKED_CLAIM_UNRESOLVED_EVIDENCE_ID warning."""
+    claims = _ClaimObjectResult([
+        _ClaimObject("claim_003", support_status="source_backed",
+                     source_evidence_ids=["ev_MISSING"]),
+    ])
+    evidence = _EvidenceResult([_EvidenceRecord("ev_real")])
+
+    result = _run_gate(claim_objects=claims, evidence=evidence)
+    codes = [w.code for w in result.warnings]
+    assert "SOURCE_BACKED_CLAIM_UNRESOLVED_EVIDENCE_ID" in codes
+
+
+def test_non_source_backed_claim_no_evidence_ids_is_silent():
+    """inferred / domain_inferred claims are not required to have evidence_ids."""
+    claims = _ClaimObjectResult([
+        _ClaimObject("claim_004", support_status="inferred",
+                     source_evidence_ids=[]),
+    ])
+    evidence = _EvidenceResult([])
+
+    result = _run_gate(claim_objects=claims, evidence=evidence)
+    codes = [w.code for w in result.warnings]
+    assert "SOURCE_BACKED_CLAIM_NO_EVIDENCE_IDS" not in codes

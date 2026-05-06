@@ -323,14 +323,18 @@ def build_evidence_export(
             })
         return out
 
-    # Fallback: synthesise evidence rows from claim.evidence_text. The text
-    # may be LLM commentary, so we mark needs_review=true and surface it as
-    # analysis_note to keep the source-backed contract honest.
+    # Fallback: synthesise evidence rows from claim.evidence_text.
+    # Legacy DB rows may store LLM commentary (qualification reason) in evidence_text
+    # rather than PDF-derived text (#257). To preserve the source-backed contract,
+    # we move the text to analysis_note and leave evidence_text empty.
+    # Consumers must check extraction_status=reconstructed and needs_review=true.
     for i, claim in enumerate(fallback_claims or []):
         text = claim.get("evidence_text") or ""
         if not text:
             continue
         scope = claim.get("source_scope") or {}
+        # qualification_reason stored in source_scope by persist_theory_claims (#257)
+        qualification_reason = scope.get("qualification_reason", "") if isinstance(scope, dict) else ""
         out.append({
             "evidence_id": f"evidence_{i+1:04d}",
             "document_id": claim.get("document_id") or document_id,
@@ -338,16 +342,18 @@ def build_evidence_export(
             "section_id": scope.get("section_id", ""),
             "block_id": scope.get("chunk_id", ""),
             "span_start": 0,
-            "span_end": len(text),
-            "evidence_text": text,
+            "span_end": 0,
+            # evidence_text is intentionally empty: text from legacy claim.evidence_text
+            # is not verified as PDF-derived and is surfaced in analysis_note instead.
+            "evidence_text": "",
             "evidence_role": "section_summary",
-            "analysis_note": "",
-            "review_note": "",
+            "analysis_note": text,
+            "review_note": qualification_reason,
             "extraction_source": "reconstructed",
             "extraction_status": "reconstructed",
             "public_export_policy": "location_only",
             "needs_review": True,
-            "review_reason": ["evidence_not_source_verified"],
+            "review_reason": ["evidence_not_source_verified", "legacy_evidence_text_in_analysis_note"],
             "claim_id": claim.get("claim_id") or "",
         })
     return out

@@ -214,6 +214,9 @@ def persist_qualified_claims(
                     "section_id": getattr(span, "section_id", None),
                     "block_id": getattr(span, "block_id", None),
                     "span_id": getattr(span, "span_id", None),
+                    # span.reason は LLM 判定理由 (review note) であり PDF 原文根拠ではない。
+                    # source-backed 判定の根拠として evidence_text に保存しない (#257)。
+                    "qualification_reason": _strip_nuls(getattr(span, "reason", "") or ""),
                 }),
                 "claim_type": _normalize_claim_type(qualification),
                 "text": _strip_nuls(getattr(span, "text", "") or ""),
@@ -221,7 +224,10 @@ def persist_qualified_claims(
                 "concepts": _json_dumps([]),
                 "equation": _json_dumps({}),
                 "support_status": "source_backed",
-                "evidence_text": _strip_nuls(getattr(span, "reason", "") or ""),
+                # PDF 原文根拠は EvidenceRegistry artifact に委任する (#257)。
+                # span.reason を evidence_text に保存すると LLM 判定理由が
+                # source-backed evidence として扱われるため空文字に変更。
+                "evidence_text": "",
                 "review_status": "teacher_review_required",
             }
             row = session.execute(
