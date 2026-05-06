@@ -1,0 +1,56 @@
+{
+  "document_id": "sample_paper",
+  "graph_schema_version": "0.1.0",
+  "cartridge_id": "particle_physics",
+  "nodes": [
+    {
+      "component_id": "comp_001",
+      "label": "total-rate sum rule derivation",
+      "component_type": "PaperRelationComponent",
+      "review_status": "teacher_review_required",
+      "display_order": 0,
+      "origin": "paper"
+    },
+    {
+      "component_id": "comp_002",
+      "label": "form-factor uncertainty qualification",
+      "component_type": "UncertaintyComponent",
+      "review_status": "teacher_review_required",
+      "display_order": 1,
+      "origin": "paper"
+    },
+    {
+      "component_id": "comp_003",
+      "label": "experimental consistency diagnostic",
+      "component_type": "DiagnosticComponent",
+      "review_status": "teacher_review_required",
+      "display_order": 2,
+      "origin": "paper"
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "component_edge_0001",
+      "source": "comp_001",
+      "target": "comp_002",
+      "edge_type": "QUALIFIES",
+      "support_status": "llm_inferred",
+      "evidence_claims": ["claim:b4:s4", "claim:b5:s5"],
+      "reasoning": "Form-factor uncertainties qualify the sum rule result.",
+      "confidence": 0.85
+    },
+    {
+      "edge_id": "component_edge_0002",
+      "source": "comp_001",
+      "target": "comp_003",
+      "edge_type": "CHECKED_BY",
+      "support_status": "dsl_cross_edge",
+      "evidence_claims": ["claim:b4:s4"],
+      "reasoning": "The sum rule result is used by the diagnostic to check experimental consistency.",
+      "confidence": 0.78
+    }
+  ],
+  "review_notes": [],
+  "confidence": 0.82,
+  "validation_issues": []
+}
