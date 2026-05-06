@@ -9,10 +9,12 @@ from episteme_graph.agents.component_assembly.schema import ComponentAssemblyRes
 from episteme_graph.agents.dsl_linking.schema import DSLEdge, DSLLinkingResult, DSLNode, DSL_VERSION
 from episteme_graph.agents.equation_semantics.schema import (
     DefinedSymbol,
-    DerivationLinks,
-    EquationRolePrediction,
-    EquationSemanticsRecord,
+    EquationConfidencePolicy,
+    EquationRecord,
+    EquationReconstruction,
+    EquationSemantics,
     EquationSemanticsResult,
+    EquationSourceExtraction,
 )
 from episteme_graph.agents.thesis_reconstruction.schema import ThesisReconstructionResult, THESIS_VERSION
 
@@ -54,29 +56,53 @@ def _qualified():
     )
 
 
-def _equations():
-    return EquationSemanticsResult(
-        "doc_test",
-        None,
-        [
-            EquationSemanticsRecord(
-                equation_id="eq_3_14",
-                block_id="e1",
-                section_id="sec_1",
-                section_title="Derivation",
-                label="3.14",
-                text="R Lambda c = RD + RD*",
-                latex=None,
-                plain_text="R Lambda c = RD + RD*",
-                equation_role=EquationRolePrediction("equation_relation", ["equation_result"], 0.9, "relation"),
-                defined_symbols=[DefinedSymbol("R Lambda c", "used", None)],
-                local_assumptions=[],
-                derivation_links=DerivationLinks(["eq_1_2"], [], []),
-                summary="Total-rate sum rule relation.",
-                review_flags=[],
-            )
-        ],
+def _make_equation_record(equation_id, block_id, label, text, equation_type, summary, defined_symbol, input_eq_ids):
+    source_extraction = EquationSourceExtraction(
+        raw_text=text,
+        latex=None,
+        plain_text=text,
+        source_location={"page": 1, "section_id": "sec_1", "block_id": block_id, "bbox": None},
+        extraction_source="pdf_text_layer",
+        extraction_status="complete",
     )
+    reconstruction = EquationReconstruction.make_none()
+    semantics = EquationSemantics(
+        equation_type=equation_type,
+        secondary_types=[],
+        semantic_status="source_backed",
+        confidence=0.9,
+        reason=summary,
+        defined_symbols=[DefinedSymbol(defined_symbol, "used", None)] if defined_symbol else [],
+        used_symbols=[],
+        assumptions=[],
+        input_equation_ids=input_eq_ids,
+        output_equation_ids=[],
+        linked_text_spans=[],
+        source_evidence_ids=[],
+        linked_claim_ids=[],
+        summary=summary,
+        review_flags=[],
+    )
+    confidence_policy = EquationConfidencePolicy.derive(source_extraction, reconstruction, semantics)
+    return EquationRecord(
+        equation_id=equation_id,
+        document_id="doc_test",
+        label=label,
+        candidate_trace_ids=[],
+        source_extraction=source_extraction,
+        reconstruction=reconstruction,
+        semantics=semantics,
+        confidence_policy=confidence_policy,
+    )
+
+
+def _equations():
+    record = _make_equation_record(
+        "eq_3_14", "e1", "3.14", "R Lambda c = RD + RD*",
+        "relation", "Total-rate sum rule relation.",
+        "R Lambda c", ["eq_1_2"],
+    )
+    return EquationSemanticsResult("doc_test", None, [], [record])
 
 
 def _thesis():
