@@ -33,6 +33,8 @@ Rules:
 - Prior-work statements may be preserved, but must not be paper_core.
 - If uncertain, prefer deferred over an overconfident rejected/accepted decision.
 - Prefer cartridge-normalized terminology when available.
+- If a span contains multiple reusable propositions, set should_split=true and
+  provide split_claims as atomic claim objects with text and claim_type.
 - Return ONLY valid JSON matching the provided schema.
 """
 
@@ -52,6 +54,9 @@ _OUTPUT_SCHEMA = {
     },
     "edit_suggestions": {
         "should_split": False,
+        "split_claims": [
+            {"text": "atomic claim text", "claim_type": "definition"}
+        ],
         "should_merge_with_prev": False,
         "should_merge_with_next": False,
         "normalized_text_hint": "string or empty",

@@ -62,7 +62,7 @@ def _make_provisional_record(candidate: EquationCandidate) -> EquationRecord:
         linked_text_spans=[],
         source_evidence_ids=[],
         linked_claim_ids=[],
-        summary="",
+        summary="Reviewable provisional equation candidate; source extraction is incomplete and requires math review.",
         review_flags=["needs_reconstruction", "partial_extraction"],
     )
     confidence_policy = EquationConfidencePolicy(

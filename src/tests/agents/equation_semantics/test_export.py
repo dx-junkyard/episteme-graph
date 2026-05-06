@@ -97,7 +97,15 @@ def test_export_shape_matches_spec():
     assert e["equation_id"] == "eq_3_14"
     assert e["document_id"] == "doc_test"
     assert e["label"] == "3.14"
+    assert e["raw_text"] == "LaTeX placeholder"
     assert e["latex"].startswith(r"\Gamma")
+    assert e["source_location"]["block_id"] == "blk_eq_3_14"
+    assert e["extraction_source"] == "pdf_text_layer"
+    assert e["extraction_status"] == "complete"
+    assert e["candidate_trace_ids"] == ["eqcand_blk_eq_3_14_abc"]
+    assert e["reconstruction"]["status"] == "none"
+    assert e["equation_type"] == "result"
+    assert e["semantic_status"] == "source_backed"
     assert e["equation_role"] == {"primary": "result", "secondary": ["relation"]}
     assert e["semantic_kind"] == "normalized_total_decay_rate_sum_rule"
     # "B" is listed in both used_symbols and defined_symbols (used) — export shows used_symbols from sem

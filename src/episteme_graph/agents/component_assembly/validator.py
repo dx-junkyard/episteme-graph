@@ -88,7 +88,12 @@ class ComponentAssemblyValidator:
                 f"{component.component_id} confidence out of range",
                 f"components[{component.component_id}].confidence",
             ))
-        if component.confidence >= 0.75 and not _has_evidence(component.evidence_refs):
+        if component.confidence >= 0.75 and not (
+            _has_evidence(component.evidence_refs)
+            or component.linked_claim_ids
+            or component.linked_evidence_ids
+            or component.linked_equation_ids
+        ):
             issues.append(ValidationIssue(
                 "strong_component_without_evidence",
                 "warning",
@@ -405,7 +410,7 @@ def _required_fields_for_type(
 
 def _has_evidence(refs: dict) -> bool:
     dsl_refs = (refs or {}).get("dsl_refs", {}) or {}
-    return any((refs or {}).get(key) for key in ("claim_ids", "equation_ids", "thesis_refs")) or any(
+    return any((refs or {}).get(key) for key in ("claim_ids", "evidence_ids", "equation_ids", "thesis_refs")) or any(
         dsl_refs.get(key) for key in ("node_ids", "edge_ids")
     )
 

@@ -169,6 +169,17 @@ def _valid_response():
                 "cautions": [{"text": "uncertainty must be propagated"}],
                 "dependencies": [{"dependency_type": "requires", "component_refs": ["comp_assumption"], "reason": "requires the approximation"}],
                 "evidence_refs": _evidence(["claim:b2:s2"], ["eq_3_14"], ["central_thesis"], ["n2"], ["e1"]),
+                "linked_claim_ids": ["claim:b2:s2"],
+                "linked_equation_ids": ["eq_3_14"],
+                "linked_evidence_ids": ["ev_0001"],
+                "linked_derivation_ids": ["derivation_eq_3_14"],
+                "linked_dsl_node_ids": ["n2"],
+                "linked_dsl_edge_ids": ["e1"],
+                "review_status": "teacher_review_required",
+                "teaching_takeaway": "Use the relation as a reusable derivation unit.",
+                "source_scope": {"section_id": "sec_1"},
+                "assumptions": ["heavy quark limit"],
+                "approximations": [],
                 "reason": "Relation and thesis support the reusable component.",
                 "confidence": 0.9,
                 "review_notes": [],
@@ -234,6 +245,11 @@ def test_run_returns_components():
     assert any(c.component_type == "RelationComponent" for c in result.components)
     assert any(c.component_type == "UncertaintyComponent" for c in result.components)
     assert result.components[0].evidence_refs["dsl_refs"]["node_ids"] == ["n2"]
+    assert result.components[0].linked_claim_ids == ["claim:b2:s2"]
+    assert result.components[0].linked_equation_ids == ["eq_3_14"]
+    assert result.components[0].linked_derivation_ids == ["derivation_eq_3_14"]
+    assert result.components[0].review_status == "teacher_review_required"
+    assert result.components[0].source_scope == {"section_id": "sec_1"}
     assert not [i for i in result.validation_issues if i.severity == "error"]
 
 

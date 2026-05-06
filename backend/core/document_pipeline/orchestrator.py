@@ -468,6 +468,7 @@ def run_document_pipeline(
                     cartridge_id=cartridge_id,
                     equations=equations,
                     claim_objects=claim_objects,
+                    evidence=evidence,
                 )
             except Exception as exc:
                 logger.exception(
@@ -996,6 +997,7 @@ def _build_claim_objects(
         evidence_registry=evidence,
         equation_index=equation_index,
         cartridge_ontology=None,
+        equation_semantics_result=equations,
     )
     spans = list(getattr(qualified, "qualified_spans", []) or [])
     return builder.build(
@@ -1022,6 +1024,7 @@ def _build_derivation_chains(
     cartridge_id: str | None,
     equations: Any,
     claim_objects: Any,
+    evidence: Any = None,
 ):
     from episteme_graph.agents.derivation_chain.agent import DerivationChainAgent
 
@@ -1042,6 +1045,8 @@ def _build_derivation_chains(
         equations=equations,
         cartridge_id=cartridge_id,
         claim_link_index=claim_link_index,
+        claim_build_result=claim_objects,
+        evidence_registry=evidence,
     )
 
 

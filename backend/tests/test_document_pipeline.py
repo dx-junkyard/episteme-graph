@@ -517,12 +517,16 @@ def test_orchestrator_runs_newly_integrated_agents_and_saves_artifacts():
     claims = saved_artifacts["claim_object_builder"]["claims"]
     assert len(claims) == 1
     assert claims[0]["source_evidence_ids"], "claim must be source-backed"
+    orchestrator_source = Path(orchestrator.__file__).read_text(encoding="utf-8")
+    assert "equation_semantics_result=equations" in orchestrator_source
 
     # derivation_chain must build at least one chain from eq_1 -> eq_2.
     chains = saved_artifacts["derivation_chain"]["chains"]
     assert chains, "derivation_chain produced no chains"
     assert any("eq_1" in step["input_equation_ids"]
                for chain in chains for step in chain["steps"])
+    assert "claim_build_result=claim_objects" in orchestrator_source
+    assert "evidence_registry=evidence" in orchestrator_source
 
     # figure_table_semantics should detect the figure caption.
     figures = saved_artifacts["figure_table_semantics"]["figures"]

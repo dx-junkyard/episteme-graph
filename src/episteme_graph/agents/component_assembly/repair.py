@@ -79,6 +79,17 @@ def _parse_raw(
             confidence=_confidence(item.get("confidence", 0.5)),
             review_notes=list(item.get("review_notes", [])),
             internal_flow=_internal_flow(item.get("internal_flow", [])),
+            linked_claim_ids=list(item.get("linked_claim_ids", [])),
+            linked_equation_ids=list(item.get("linked_equation_ids", [])),
+            linked_evidence_ids=list(item.get("linked_evidence_ids", [])),
+            linked_derivation_ids=list(item.get("linked_derivation_ids", [])),
+            linked_dsl_node_ids=list(item.get("linked_dsl_node_ids", [])),
+            linked_dsl_edge_ids=list(item.get("linked_dsl_edge_ids", [])),
+            review_status=str(item.get("review_status", "teacher_review_required")),
+            teaching_takeaway=str(item.get("teaching_takeaway", "")),
+            source_scope=item.get("source_scope", {}) if isinstance(item.get("source_scope", {}), dict) else {},
+            assumptions=list(item.get("assumptions", [])),
+            approximations=list(item.get("approximations", [])),
         ))
     return ComponentAssemblyResult(
         document_id=raw.get("document_id", document_id),
@@ -97,6 +108,7 @@ def _evidence_refs(raw: dict) -> dict:
     dsl_refs = raw.get("dsl_refs", {}) if isinstance(raw.get("dsl_refs", {}), dict) else {}
     return {
         "claim_ids": list(raw.get("claim_ids", [])),
+        "evidence_ids": list(raw.get("evidence_ids", [])),
         "equation_ids": list(raw.get("equation_ids", [])),
         "thesis_refs": list(raw.get("thesis_refs", [])),
         "dsl_refs": {

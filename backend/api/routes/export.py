@@ -240,10 +240,35 @@ def _build_equations_for_documents(
     out: list[dict] = []
     for doc_id in document_ids:
         artifacts = artifacts_by_doc.get(doc_id, {})
+        evidence_index: dict[str, list[str]] = {}
+        evidence_records = (artifacts.get("evidence_registry") or {}).get("records") or []
+        for ev in evidence_records if isinstance(evidence_records, list) else []:
+            if not isinstance(ev, dict):
+                continue
+            src = ev.get("source") or {}
+            block_id = src.get("block_id") if isinstance(src, dict) else None
+            evidence_id = ev.get("evidence_id")
+            if block_id and evidence_id:
+                evidence_index.setdefault(block_id, []).append(evidence_id)
+
+        claim_index: dict[str, list[str]] = {}
+        claim_records = (artifacts.get("claim_object_builder") or {}).get("claims") or []
+        for claim in claim_records if isinstance(claim_records, list) else []:
+            if not isinstance(claim, dict):
+                continue
+            claim_id = claim.get("claim_id")
+            if not claim_id:
+                continue
+            for eq_id in claim.get("equation_ids") or []:
+                if eq_id:
+                    claim_index.setdefault(str(eq_id), []).append(str(claim_id))
+
         out.extend(build_equations_export(
             artifacts.get("equation_semantics"),
             document_id=doc_id,
             structure_artifact=artifacts.get("document_structure"),
+            evidence_index=evidence_index,
+            claim_index=claim_index,
         ))
     return out
 

@@ -174,3 +174,27 @@ def test_validation_flags_missing_concepts():
 
     rules = {i.rule_id for i in result.validation_issues}
     assert "claim_concepts_empty" in rules
+
+
+def test_split_claims_create_compound_parent_and_atomic_children():
+    structure = _make_structure_with("blk_x", "Definition and conclusion in one span.")
+    ev_builder = EvidenceRegistryBuilder(structure)
+    ev_builder.add_for_block("blk_x")
+    registry = ev_builder.build("doc_test")
+
+    span = _make_qualified("span_001", "blk_x", "A is defined, therefore B follows.")
+    span.edit_suggestions = {
+        "split_claims": [
+            {"text": "A is defined.", "claim_type": "definition"},
+            {"text": "B follows.", "claim_type": "conclusion"},
+        ]
+    }
+    builder = ClaimObjectBuilder(evidence_registry=registry)
+    result = builder.build("doc_test", [span])
+
+    children = [c for c in result.claims if c.parent_claim_id == "claim_span_001"]
+    parent = [c for c in result.claims if c.claim_id == "claim_span_001"][0]
+    assert parent.atomicity == "compound"
+    assert parent.subclaim_ids == ["claim_span_001_sub01", "claim_span_001_sub02"]
+    assert [c.atomicity for c in children] == ["atomic", "atomic"]
+    assert [c.claim_type for c in children] == ["definition", "conclusion"]

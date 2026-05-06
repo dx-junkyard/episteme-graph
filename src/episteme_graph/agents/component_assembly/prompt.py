@@ -63,10 +63,22 @@ _OUTPUT_SCHEMA = {
             ],
             "evidence_refs": {
                 "claim_ids": [],
+                "evidence_ids": [],
                 "equation_ids": [],
                 "thesis_refs": [],
                 "dsl_refs": {"node_ids": [], "edge_ids": []}
             },
+            "linked_claim_ids": [],
+            "linked_equation_ids": [],
+            "linked_evidence_ids": [],
+            "linked_derivation_ids": [],
+            "linked_dsl_node_ids": [],
+            "linked_dsl_edge_ids": [],
+            "review_status": "teacher_review_required",
+            "teaching_takeaway": "string",
+            "source_scope": {},
+            "assumptions": [],
+            "approximations": [],
             "reason": "string",
             "confidence": 0.0,
             "review_notes": []
