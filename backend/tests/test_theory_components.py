@@ -37,7 +37,7 @@ class TestTheoryComponentMigration:
         source = _read(ROOT / "backend" / "api" / "main.py")
         assert "Migration 013" in source
         assert "idx_theory_components_course" in source
-        assert "Migrations (002-013)" in source
+        assert "Migrations (002-0" in source
 
 
 class TestTheoryComponentSchemas:

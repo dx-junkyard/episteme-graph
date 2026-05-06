@@ -6,9 +6,11 @@ from unittest.mock import patch
 from episteme_graph.agents.claim_qualification.schema import ClaimQualificationResult, QualifiedSpanRecord
 from episteme_graph.agents.equation_semantics.schema import (
     DefinedSymbol,
-    DerivationLinks,
-    EquationRolePrediction,
-    EquationSemanticsRecord,
+    EquationRecord,
+    EquationSourceExtraction,
+    EquationReconstruction,
+    EquationSemantics,
+    EquationConfidencePolicy,
     EquationSemanticsResult,
 )
 from episteme_graph.agents.paper_skeleton.schema import LogicalBlock, PaperSkeletonResult, SKELETON_VERSION
@@ -79,24 +81,48 @@ def _qualified():
     )
 
 
-def _equations():
-    record = EquationSemanticsRecord(
-        equation_id="eq_3_14",
-        block_id="e1",
-        section_id="sec_1",
-        section_title="Derivation",
-        label="3.14",
-        text="R Lambda c = RD + RD*",
+def _make_equation_record():
+    src = EquationSourceExtraction(
+        raw_text="R Lambda c = RD + RD*",
         latex=None,
         plain_text="R Lambda c = RD + RD*",
-        equation_role=EquationRolePrediction("equation_relation", ["equation_result"], 0.9, "sum rule"),
+        source_location={"page": 1, "section_id": "sec_1", "block_id": "e1", "bbox": None},
+        extraction_source="pdf_text_layer",
+        extraction_status="complete",
+    )
+    rec = EquationReconstruction.make_none()
+    sem = EquationSemantics(
+        equation_type="relation",
+        secondary_types=["result"],
+        semantic_status="source_backed",
+        confidence=0.9,
+        reason="sum rule",
         defined_symbols=[DefinedSymbol("R Lambda c", "used", None)],
-        local_assumptions=[],
-        derivation_links=DerivationLinks(["eq_1_2"], [], []),
+        used_symbols=[],
+        assumptions=[],
+        input_equation_ids=["eq_1_2"],
+        output_equation_ids=[],
+        linked_text_spans=[],
+        source_evidence_ids=[],
+        linked_claim_ids=[],
         summary="Core sum rule relation between R Lambda c, RD, and RD*.",
         review_flags=[],
     )
-    return EquationSemanticsResult("doc_test", None, [record])
+    policy = EquationConfidencePolicy.derive(src, rec, sem)
+    return EquationRecord(
+        equation_id="eq_3_14",
+        document_id="doc_test",
+        label="3.14",
+        candidate_trace_ids=[],
+        source_extraction=src,
+        reconstruction=rec,
+        semantics=sem,
+        confidence_policy=policy,
+    )
+
+
+def _equations():
+    return EquationSemanticsResult("doc_test", None, [], [_make_equation_record()])
 
 
 def _valid_response():
