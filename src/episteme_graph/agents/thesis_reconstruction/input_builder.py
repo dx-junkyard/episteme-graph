@@ -97,23 +97,26 @@ class ThesisReconstructionInputBuilder:
             return []
         result = []
         for record in equations.equations[:limit]:
+            src = record.source_extraction
+            sem = record.semantics
+            loc = src.source_location if src.source_location else {}
             result.append({
                 "equation_id": record.equation_id,
-                "block_id": record.block_id,
-                "section_id": record.section_id,
+                "block_id": loc.get("block_id"),
+                "section_id": loc.get("section_id"),
                 "label": record.label,
-                "role": record.equation_role.primary,
-                "summary": record.summary,
+                "role": sem.equation_type,
+                "summary": sem.summary,
                 "defined_symbols": [
                     {
                         "symbol": s.symbol,
                         "definition_status": s.definition_status,
                     }
-                    for s in record.defined_symbols
+                    for s in sem.defined_symbols
                 ],
-                "local_assumptions": [a.text for a in record.local_assumptions],
-                "from_equations": record.derivation_links.from_equations,
-                "confidence": record.equation_role.confidence,
+                "local_assumptions": list(sem.assumptions),
+                "from_equations": list(sem.input_equation_ids),
+                "confidence": sem.confidence,
             })
         return result
 
