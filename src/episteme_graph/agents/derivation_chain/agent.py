@@ -14,7 +14,7 @@ from collections import defaultdict
 from typing import Iterable, Optional
 
 from episteme_graph.agents.equation_semantics.schema import (
-    EquationSemanticsRecord,
+    EquationRecord,
     EquationSemanticsResult,
 )
 
@@ -40,7 +40,7 @@ class DerivationChainAgent:
         cartridge_id: str | None = None,
         claim_link_index: dict[str, list[str]] | None = None,
     ) -> DerivationChainResult:
-        records: list[EquationSemanticsRecord] = list(equations.equations)
+        records: list[EquationRecord] = list(equations.equations)
         if not records:
             return DerivationChainResult(
                 document_id=equations.document_id,
@@ -53,13 +53,13 @@ class DerivationChainAgent:
                 )],
             )
 
-        eq_by_id: dict[str, EquationSemanticsRecord] = {r.equation_id: r for r in records}
+        eq_by_id: dict[str, EquationRecord] = {r.equation_id: r for r in records}
         # Adjacency: from -> to (the local link "this eq is derived from those")
         from_map: dict[str, list[str]] = defaultdict(list)
         # Reverse: to -> from (which downstream equations cite this one as input)
         children: dict[str, list[str]] = defaultdict(list)
         for r in records:
-            srcs = list(r.derivation_links.from_equations or [])
+            srcs = list(r.semantics.input_equation_ids or [])
             for s in srcs:
                 if s in eq_by_id:
                     from_map[r.equation_id].append(s)
@@ -69,10 +69,10 @@ class DerivationChainAgent:
         # or are tagged as equation_result.
         leaf_ids: list[str] = []
         for r in records:
-            primary = r.equation_role.primary if r.equation_role else None
+            primary = r.semantics.equation_type
             has_inputs = bool(from_map.get(r.equation_id))
             has_consumers = bool(children.get(r.equation_id))
-            if primary == "equation_result" and has_inputs:
+            if primary == "result" and has_inputs:
                 leaf_ids.append(r.equation_id)
             elif has_inputs and not has_consumers:
                 leaf_ids.append(r.equation_id)
@@ -173,7 +173,7 @@ class DerivationChainAgent:
         self,
         leaf_id: str,
         from_map: dict[str, list[str]],
-        eq_by_id: dict[str, EquationSemanticsRecord],
+        eq_by_id: dict[str, EquationRecord],
         claim_link_index: dict[str, list[str]],
     ) -> tuple[list[DerivationStep], set[str]]:
         steps: list[DerivationStep] = []
@@ -195,12 +195,16 @@ class DerivationChainAgent:
             step_counter += 1
 
             current_record = eq_by_id.get(current)
-            if current_record and current_record.section_id:
-                sections.add(current_record.section_id)
+            section_id = (
+                current_record.source_extraction.source_location.get("section_id")
+                if current_record else None
+            )
+            if section_id:
+                sections.add(section_id)
 
             assumptions: list[str] = []
             if current_record:
-                assumptions = [a.text for a in current_record.local_assumptions]
+                assumptions = list(current_record.semantics.assumptions)
 
             operation = self._infer_operation(current_record)
             step = DerivationStep(
@@ -210,8 +214,8 @@ class DerivationChainAgent:
                 output_equation_ids=[current],
                 required_claim_ids=list(claim_link_index.get(current, [])),
                 assumption_refs=assumptions,
-                reason=current_record.summary if current_record else "",
-                confidence=current_record.equation_role.confidence if current_record and current_record.equation_role else 0.0,
+                reason=current_record.semantics.summary if current_record else "",
+                confidence=current_record.semantics.confidence if current_record else 0.0,
             )
             steps.append(step)
             for s in sources:
@@ -228,7 +232,7 @@ class DerivationChainAgent:
     @staticmethod
     def _generate_takeaway(
         steps: list[DerivationStep],
-        eq_by_id: dict[str, EquationSemanticsRecord],
+        eq_by_id: dict[str, EquationRecord],
     ) -> str:
         if not steps:
             return ""
@@ -244,16 +248,16 @@ class DerivationChainAgent:
         )
 
     @staticmethod
-    def _infer_operation(record: Optional[EquationSemanticsRecord]) -> str:
-        if record is None or record.equation_role is None:
+    def _infer_operation(record: Optional[EquationRecord]) -> str:
+        if record is None:
             return DEFAULT_OPERATION
-        primary = record.equation_role.primary
+        primary = record.semantics.equation_type
         mapping = {
-            "equation_definition": "define",
-            "equation_relation": "relate",
-            "equation_transformation": "transform",
-            "equation_approximation": "approximate",
-            "equation_result": "derive_result",
-            "equation_constraint": "apply_constraint",
+            "definition": "define",
+            "relation": "relate",
+            "transformation": "transform",
+            "approximation": "approximate",
+            "result": "derive_result",
+            "constraint": "apply_constraint",
         }
         return mapping.get(primary, DEFAULT_OPERATION)
