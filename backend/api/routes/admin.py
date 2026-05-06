@@ -1038,6 +1038,47 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
 - sources フィールドは常に空配列 [] のままにすること（教材はシステムが自動的に設定する）"""
 
 
+_COURSE_DRAFT_MARKER_RE = re.compile(
+    r"(?:-{3,}\s*)?COURSE_DRAFT_JSON(?:\s*-{3,})?\s*:?\s*",
+    re.IGNORECASE,
+)
+
+
+def _extract_course_draft_from_answer(raw_answer: str) -> tuple[str, dict | None]:
+    """LLM応答から course_draft JSON を分離する。
+
+    モデルが指示通りの `---COURSE_DRAFT_JSON---` だけでなく、ダッシュなしの
+    `COURSE_DRAFT_JSON` や fenced code block を返した場合もプレビューへ渡せるよう
+    にする。パースに失敗した場合も、会話本文からマーカー以降は除去する。
+    """
+    marker = _COURSE_DRAFT_MARKER_RE.search(raw_answer or "")
+    if not marker:
+        return raw_answer, None
+
+    answer = raw_answer[: marker.start()].strip()
+    json_part = raw_answer[marker.end() :].strip()
+
+    if json_part.startswith("```"):
+        json_part = json_part.split("\n", 1)[1] if "\n" in json_part else json_part[3:]
+        if "```" in json_part:
+            json_part = json_part.split("```", 1)[0]
+
+    json_part = json_part.strip()
+    if json_part.lower().startswith("json"):
+        json_part = json_part[4:].strip()
+
+    try:
+        course_draft, _ = json.JSONDecoder().raw_decode(json_part)
+    except Exception:
+        logger.warning("Failed to parse course_draft JSON: %s", json_part[:200])
+        return answer, None
+
+    if not isinstance(course_draft, dict):
+        logger.warning("Parsed course_draft JSON is not an object: %s", type(course_draft).__name__)
+        return answer, None
+    return answer, course_draft
+
+
 # ---------------------------------------------------------------------------
 # Course Builder: Material Context Builder
 # ---------------------------------------------------------------------------
@@ -1390,24 +1431,7 @@ def course_builder_chat(
         logger.exception("Course builder chat LLM call failed")
         raise HTTPException(status_code=500, detail=f"Chat failed: {exc}") from exc
 
-    answer = raw_answer
-    course_draft = None
-
-    if "---COURSE_DRAFT_JSON---" in raw_answer:
-        parts = raw_answer.split("---COURSE_DRAFT_JSON---", 1)
-        answer = parts[0].strip()
-        json_part = parts[1].strip()
-        if json_part.startswith("```"):
-            json_part = json_part.split("\n", 1)[1] if "\n" in json_part else json_part[3:]
-        if json_part.endswith("```"):
-            json_part = json_part[:-3]
-        json_part = json_part.strip()
-        if json_part.startswith("json"):
-            json_part = json_part[4:].strip()
-        try:
-            course_draft = json.loads(json_part)
-        except Exception:
-            logger.warning("Failed to parse course_draft JSON: %s", json_part[:200])
+    answer, course_draft = _extract_course_draft_from_answer(raw_answer)
 
     # 選択教材の正しい material_id を確定的に course_draft["sources"] に注入する
     if course_draft is not None and body.selected_material_ids:

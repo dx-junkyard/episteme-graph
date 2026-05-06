@@ -826,12 +826,16 @@
         return res.json();
       })
       .then(function (data) {
-        state.chatMessages.push({ role: "assistant", content: data.answer });
-        state.chatHistory.push({ role: "user", content: text });
-        state.chatHistory.push({ role: "assistant", content: data.answer });
+        var parsed = extractCourseDraftFromAnswer(data.answer);
+        var assistantAnswer = parsed.answer;
+        var courseDraft = data.course_draft || parsed.courseDraft;
 
-        if (data.course_draft) {
-          state.courseDraft = data.course_draft;
+        state.chatMessages.push({ role: "assistant", content: assistantAnswer });
+        state.chatHistory.push({ role: "user", content: text });
+        state.chatHistory.push({ role: "assistant", content: assistantAnswer });
+
+        if (courseDraft) {
+          state.courseDraft = courseDraft;
           renderCoursePreview();
         }
       })
@@ -842,6 +846,36 @@
         state.sending = false;
         renderCourseChat();
       });
+  }
+
+  function extractCourseDraftFromAnswer(answer) {
+    var text = answer || "";
+    var markerRe = /(?:-{3,}\s*)?COURSE_DRAFT_JSON(?:\s*-{3,})?\s*:?\s*/i;
+    var marker = markerRe.exec(text);
+    if (!marker) {
+      return { answer: text, courseDraft: null };
+    }
+
+    var cleanAnswer = text.slice(0, marker.index).trim();
+    var jsonText = text.slice(marker.index + marker[0].length).trim();
+
+    if (jsonText.indexOf("```") === 0) {
+      var firstNewline = jsonText.indexOf("\n");
+      jsonText = firstNewline >= 0 ? jsonText.slice(firstNewline + 1) : jsonText.slice(3);
+      var fenceEnd = jsonText.indexOf("```");
+      if (fenceEnd >= 0) jsonText = jsonText.slice(0, fenceEnd);
+    }
+
+    jsonText = jsonText.trim();
+    if (jsonText.slice(0, 4).toLowerCase() === "json") {
+      jsonText = jsonText.slice(4).trim();
+    }
+
+    try {
+      return { answer: cleanAnswer, courseDraft: JSON.parse(jsonText) };
+    } catch (err) {
+      return { answer: cleanAnswer, courseDraft: null };
+    }
   }
 
   function renderCourseChat() {

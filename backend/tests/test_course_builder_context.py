@@ -711,6 +711,41 @@ class TestCourseBuilderChatContextInjection:
         data = resp.json()
         assert data["course_draft"] is not None
         assert data["course_draft"]["title"] == "ニュートラリーノ暗黒物質入門"
+        assert "COURSE_DRAFT_JSON" not in data["answer"]
+
+    @patch("routes.admin.save_cb_session")
+    @patch("routes.admin.generate_text")
+    def test_course_draft_json_parsing_accepts_bare_marker(
+        self, mock_gen, mock_save, client, auth_headers,
+    ):
+        """ダッシュなしのCOURSE_DRAFT_JSONも会話本文ではなくdraftとして扱うこと。"""
+        draft = {
+            "title": "教材ベースの概論",
+            "chapters": [{"title": "導入", "topics": [{"title": "主題"}]}],
+            "sources": [],
+        }
+        mock_gen.return_value = (
+            "以下の構成案です。\n\n"
+            "COURSE_DRAFT_JSON:\n"
+            "```json\n"
+            + json.dumps(draft, ensure_ascii=False)
+            + "\n```"
+        )
+
+        resp = client.post(
+            "/api/admin/course-builder/chat",
+            json={
+                "message": "コースを作ってください",
+                "selected_material_ids": [],
+            },
+            headers=auth_headers,
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["answer"] == "以下の構成案です。"
+        assert "COURSE_DRAFT_JSON" not in data["answer"]
+        assert data["course_draft"]["title"] == "教材ベースの概論"
 
 
 # ===========================================================================
