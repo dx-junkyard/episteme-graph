@@ -65,24 +65,26 @@ class DSLLinkingInputBuilder:
             return []
         result = []
         for record in equations.equations[:limit]:
+            loc = record.source_extraction.source_location
+            sem = record.semantics
             result.append({
                 "equation_id": record.equation_id,
-                "block_id": record.block_id,
-                "section_id": record.section_id,
+                "block_id": loc.get("block_id", ""),
+                "section_id": loc.get("section_id", ""),
                 "label": record.label,
-                "role": record.equation_role.primary,
-                "secondary_roles": record.equation_role.secondary,
-                "summary": record.summary,
+                "role": sem.equation_type,
+                "secondary_roles": sem.secondary_types,
+                "summary": sem.summary,
                 "defined_symbols": [
                     {
                         "symbol": s.symbol,
                         "definition_status": s.definition_status,
                     }
-                    for s in record.defined_symbols
+                    for s in sem.defined_symbols
                 ],
-                "local_assumptions": [a.text for a in record.local_assumptions],
-                "from_equations": record.derivation_links.from_equations,
-                "confidence": record.equation_role.confidence,
+                "local_assumptions": sem.assumptions,
+                "from_equations": sem.input_equation_ids,
+                "confidence": sem.confidence,
             })
         return result
 

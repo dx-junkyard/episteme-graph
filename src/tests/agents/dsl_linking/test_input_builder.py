@@ -3,10 +3,12 @@ from episteme_graph.agents.claim_qualification.schema import ClaimQualificationR
 from episteme_graph.agents.dsl_linking.input_builder import DSLLinkingInputBuilder
 from episteme_graph.agents.equation_semantics.schema import (
     DefinedSymbol,
-    DerivationLinks,
-    EquationRolePrediction,
-    EquationSemanticsRecord,
+    EquationConfidencePolicy,
+    EquationRecord,
+    EquationReconstruction,
+    EquationSemantics,
     EquationSemanticsResult,
+    EquationSourceExtraction,
 )
 from episteme_graph.agents.thesis_reconstruction.schema import ThesisReconstructionResult, THESIS_VERSION
 
@@ -49,23 +51,50 @@ def _qualified():
 
 
 def _equations():
-    record = EquationSemanticsRecord(
-        equation_id="eq_3_14",
-        block_id="e1",
-        section_id="sec_1",
-        section_title="Derivation",
-        label="3.14",
-        text="R Lambda c = RD + RD*",
+    src = EquationSourceExtraction(
+        raw_text="R Lambda c = RD + RD*",
         latex=None,
         plain_text="R Lambda c = RD + RD*",
-        equation_role=EquationRolePrediction("equation_relation", [], 0.9, "relation"),
+        source_location={"page": 3, "section_id": "sec_1", "block_id": "e1", "bbox": []},
+        extraction_source="pdf_text_layer",
+        extraction_status="complete",
+    )
+    rec = EquationReconstruction.make_none()
+    sem = EquationSemantics(
+        equation_type="equation_relation",
+        secondary_types=[],
+        semantic_status="source_extracted",
+        confidence=0.9,
+        reason="relation",
         defined_symbols=[DefinedSymbol("R Lambda c", "used", None)],
-        local_assumptions=[],
-        derivation_links=DerivationLinks(["eq_1_2"], [], []),
+        used_symbols=["R Lambda c", "RD"],
+        assumptions=[],
+        input_equation_ids=["eq_1_2"],
+        output_equation_ids=[],
+        linked_text_spans=[],
+        source_evidence_ids=[],
+        linked_claim_ids=[],
         summary="Sum rule relation.",
         review_flags=[],
     )
-    return EquationSemanticsResult("doc", None, [record])
+    policy = EquationConfidencePolicy(
+        can_support_claim=True,
+        can_be_used_in_derivation=True,
+        can_be_displayed_in_course=True,
+        display_requires_note=False,
+        must_not_treat_as_source_extracted=False,
+    )
+    record = EquationRecord(
+        equation_id="eq_3_14",
+        document_id="doc",
+        label="3.14",
+        candidate_trace_ids=[],
+        source_extraction=src,
+        reconstruction=rec,
+        semantics=sem,
+        confidence_policy=policy,
+    )
+    return EquationSemanticsResult("doc", None, [], [record])
 
 
 def _thesis():
@@ -93,6 +122,17 @@ def test_build_packages_claim_equation_and_thesis_materials():
     assert llm_input.equations[0]["equation_id"] == "eq_3_14"
     assert any(n["thesis_ref"] == "central_thesis" for n in llm_input.thesis_nodes)
     assert llm_input.excluded_from_core[0]["category"] == "prior_work"
+
+
+def test_equation_fields_map_to_nested_schema():
+    llm_input = BUILDER.build(_qualified(), equations=_equations())
+    eq = llm_input.equations[0]
+    assert eq["block_id"] == "e1"
+    assert eq["section_id"] == "sec_1"
+    assert eq["role"] == "equation_relation"
+    assert eq["summary"] == "Sum rule relation."
+    assert eq["from_equations"] == ["eq_1_2"]
+    assert eq["confidence"] == 0.9
 
 
 def test_limits_claims():
