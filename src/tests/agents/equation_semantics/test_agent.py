@@ -155,8 +155,13 @@ def test_fragment_only_blocks_are_not_processed_by_llm():
     assert mock_llm.generate.call_count == 1
 
 
-def test_label_only_blocks_are_rejected():
-    """Label-only equation blocks should be rejected by acceptance gate."""
+def test_label_only_blocks_with_matched_label_become_provisional():
+    """Label-only blocks with a matched label → provisional (issue #259).
+
+    The input_builder extracts the label "3.14" from "(3.14)" and sets
+    matched_label, making this a high-signal provisional candidate instead
+    of a rejected one.
+    """
     structure = DocumentStructureResult(
         document_id="doc_test",
         source_file="/tmp/test.pdf",
@@ -174,9 +179,16 @@ def test_label_only_blocks_are_rejected():
         result = agent.run(structure)
 
     label_candidates = [c for c in result.equation_candidates if c.source_location["block_id"] == "e_label"]
-    assert label_candidates[0].acceptance_status == "rejected"
     assert label_candidates[0].extraction_status == "label_only"
+    # matched_label present → provisional (high-signal, not outright rejected)
+    assert label_candidates[0].acceptance_status == "provisional"
+    # LLM is called only for accepted block, not for provisional
     assert mock_llm.generate.call_count == 1
+    # Provisional EquationRecord is generated with can_support_claim=False
+    provisional_records = [r for r in result.equations if r.confidence_policy.can_support_claim is False
+                           and r.equation_id.startswith("eq_provisional")]
+    assert len(provisional_records) == 1
+    assert provisional_records[0].label == "3.14"
 
 
 def test_relation_or_result_summary_is_preserved():
@@ -234,8 +246,12 @@ def test_llm_failure_returns_unknown_fallback_record():
     assert result.equations[0].confidence_policy.can_support_claim is False
 
 
-def test_all_rejected_returns_empty_equations():
-    """全候補が rejection gate で落とされた場合、equations は空。"""
+def test_no_accepted_returns_provisional_only_no_llm():
+    """全候補が accepted でない場合、LLM は呼ばれず provisional のみが返る (issue #259).
+
+    "(3.14)" → matched_label あり → provisional EquationRecord が生成される
+    "+"     → fragment, no matched_label → needs_merge (no EquationRecord)
+    """
     structure = DocumentStructureResult(
         document_id="doc_test",
         source_file="/tmp/test.pdf",
@@ -243,14 +259,17 @@ def test_all_rejected_returns_empty_equations():
         metadata=DocumentMetadata(title="Test", pages=1),
         sections=[Section("sec_1", "Results", 1, 1, 1)],
         blocks=[
-            _typed("e1", "(3.14)", "equation_block", 0),   # label_only → rejected
-            _typed("e2", "+", "equation_block", 1),         # fragment → needs_merge
+            _typed("e1", "(3.14)", "equation_block", 0),   # label_only + matched_label → provisional
+            _typed("e2", "+", "equation_block", 1),         # fragment → needs_merge (no record)
         ],
     )
     agent = EquationSemanticsAgent()
     with patch.object(agent._llm_client, "generate") as mock_llm:
         result = agent.run(structure)
 
-    assert result.equations == []
-    assert len(result.equation_candidates) == 2
     mock_llm.assert_not_called()
+    assert len(result.equation_candidates) == 2
+    # "(3.14)" gets a provisional EquationRecord; "+" does not
+    provisional_eq = [e for e in result.equations if e.confidence_policy.can_support_claim is False]
+    assert len(provisional_eq) == 1
+    assert provisional_eq[0].confidence_policy.must_not_treat_as_source_extracted is True

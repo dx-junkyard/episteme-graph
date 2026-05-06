@@ -1,6 +1,7 @@
 """EquationAcceptanceGate: candidate acceptance / rejection / merge classification.
 
 Issue #245 で定義された受け入れ基準に従い、EquationCandidate を決定論的に分類する。
+Issue #259: high-signal 候補を provisional として保持する。
 LLM を使用しない。
 """
 from __future__ import annotations
@@ -67,13 +68,23 @@ class EquationAcceptanceGate:
             return self._mark(candidate, "missing", "context_only", True, ["equation_body_missing"])
 
         if _LABEL_ONLY_RE.match(text):
+            # High-signal: has a matched_label or display math → provisional (issue #259)
+            if self._is_high_signal(candidate):
+                return self._mark(candidate, "label_only", "provisional", True,
+                                  ["label_only_candidate", "needs_math_review"])
             return self._mark(candidate, "label_only", "rejected", True, ["label_only_candidate"])
 
         if self._is_operator_only(text):
+            if self._is_high_signal(candidate):
+                return self._mark(candidate, "fragment_only", "provisional", True,
+                                  ["fragment_only_candidate", "needs_merge"])
             return self._mark(candidate, "fragment_only", "needs_merge", True,
                               ["fragment_only_candidate", "needs_merge"])
 
         if self._is_too_short_without_relation(text):
+            if self._is_high_signal(candidate):
+                return self._mark(candidate, "fragment_only", "provisional", True,
+                                  ["fragment_only_candidate", "needs_merge"])
             return self._mark(candidate, "fragment_only", "needs_merge", True,
                               ["fragment_only_candidate", "needs_merge"])
 
@@ -88,8 +99,28 @@ class EquationAcceptanceGate:
             candidate.needs_math_review = False
             return candidate
 
-        # 何も合致しない → unparsed
+        # 何も合致しない → unparsed; high-signal candidates get provisional
+        if self._is_high_signal(candidate):
+            return self._mark(candidate, "unparsed", "provisional", True, ["ambiguous_math_text"])
         return self._mark(candidate, "unparsed", "context_only", True, ["ambiguous_math_text"])
+
+    @staticmethod
+    def _is_high_signal(candidate: EquationCandidate) -> bool:
+        """High-signal 判定: 以下のいずれかを満たす候補は provisional として保持する (issue #259).
+
+        - matched_label が non-empty (式番号参照あり) — 最も強い信号
+        - detection_method に equation_number_pattern が含まれる (label pattern-matched)
+
+        注意: document_structure_equation_block は全 equation block のデフォルト検出法のため、
+        これ単体では high-signal とみなさない。candidate_score はブロック検出信頼度であり
+        式本体の完全性とは独立しているため、high-signal 判定には使わない。
+        """
+        if candidate.matched_label:
+            return True
+        dm = candidate.detection_method or []
+        if "equation_number_pattern" in dm:
+            return True
+        return False
 
     @staticmethod
     def _is_operator_only(text: str) -> bool:

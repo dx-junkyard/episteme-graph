@@ -21,7 +21,7 @@ EXTRACTION_STATUSES = [
     "unparsed",
 ]
 
-ACCEPTANCE_STATUSES = ["accepted", "rejected", "needs_merge", "context_only"]
+ACCEPTANCE_STATUSES = ["accepted", "rejected", "needs_merge", "context_only", "provisional"]
 
 RECONSTRUCTION_STATUSES = [
     "none",

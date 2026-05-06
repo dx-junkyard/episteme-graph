@@ -77,26 +77,59 @@ def build_equations_export(
 ) -> list[dict]:
     """Convert the equation_semantics artifact into equations/equations.json shape.
 
-    Each output entry follows the schema defined in issue #242 §3:
-    equation_id, label, latex, plain_text, source_location, equation_type,
-    defined_symbols, used_symbols, derivation_links, source_evidence_ids,
-    extraction_source, extraction_status, needs_math_review, review_reason,
-    candidate_trace_ids.
+    Reads from the current nested EquationRecord schema (issue #258):
+    source_extraction.*, reconstruction.*, semantics.*, confidence_policy.*
+
+    Falls back to legacy flat format for compatibility.
     """
+    from episteme_graph.agents.equation_semantics.schema import EquationSemanticsResult
+
     eq = _coerce_dict(equation_artifact)
-    records = eq.get("equations") if isinstance(eq.get("equations"), list) else []
-    structure = _coerce_dict(structure_artifact)
-    block_lookup = _section_id_to_block_lookup(structure)
     evidence_index = evidence_index or {}
     claim_index = claim_index or {}
 
+    # Prefer structured deserialization via EquationSemanticsResult when the artifact
+    # has the nested schema (equations[].source_extraction present).
+    records_raw = eq.get("equations") if isinstance(eq.get("equations"), list) else []
+    first = records_raw[0] if records_raw else {}
+    has_nested = isinstance(first, dict) and "source_extraction" in first
+
+    if has_nested:
+        try:
+            sem_result = EquationSemanticsResult.from_dict({
+                "document_id": eq.get("document_id", document_id),
+                "cartridge_id": eq.get("cartridge_id"),
+                "equation_candidates": eq.get("equation_candidates", []),
+                "equations": records_raw,
+                "validation_issues": eq.get("validation_issues", []),
+            })
+            exported = sem_result.to_equations_export(
+                evidence_index=evidence_index,
+                claim_index=claim_index,
+            )
+            # Validate and annotate
+            _validate_equations_export(exported)
+            return exported
+        except Exception:
+            pass  # fall through to legacy path
+
+    # Legacy flat format (older artifacts)
+    structure = _coerce_dict(structure_artifact)
+    block_lookup = _section_id_to_block_lookup(structure)
+
     out: list[dict] = []
-    for r in records:
+    seen_ids: set[str] = set()
+
+    for r in records_raw:
         if not isinstance(r, dict):
             continue
         equation_id = str(r.get("equation_id") or "").strip()
         if not equation_id:
             continue
+        if equation_id in seen_ids:
+            continue
+        seen_ids.add(equation_id)
+
         block_id = str(r.get("block_id") or "")
         section_id = r.get("section_id")
         block = block_lookup.get(block_id, {})
@@ -136,8 +169,6 @@ def build_equations_export(
         review_flags = list(r.get("review_flags") or [])
         needs_math_review = bool(review_flags) or not bool(latex) or "low_confidence" in review_flags
 
-        # extraction_source: heuristic — prefer pdf_text_layer when block text is
-        # present, else flag llm_reconstruction (e.g. agent fallback).
         if block.get("text"):
             extraction_source = "pdf_text_layer"
             extraction_status = "parsed" if latex else "partially_parsed"
@@ -145,10 +176,13 @@ def build_equations_export(
             extraction_source = "llm_reconstruction"
             extraction_status = "reconstructed" if latex or plain_text else "unparsed"
 
+        candidate_trace_ids = list(r.get("candidate_trace_ids") or [f"eqcand_{equation_id}"])
+
         out.append({
             "equation_id": equation_id,
             "document_id": document_id,
             "label": r.get("label"),
+            "raw_text": r.get("raw_text") or text,
             "latex": latex,
             "plain_text": plain_text,
             "source_location": {
@@ -159,25 +193,75 @@ def build_equations_export(
                 "span_end": len(text or ""),
                 "bbox": list(bbox) if isinstance(bbox, (list, tuple)) else [],
             },
-            "equation_type": primary_role,
-            "defined_symbols": defined_symbols,
-            "used_symbols": used_symbols,
-            "symbol_definitions": symbol_definitions,
-            "assumptions": [
-                a.get("text", "") for a in (r.get("local_assumptions") or [])
-                if isinstance(a, dict) and a.get("text")
-            ],
-            "input_equation_ids": from_eqs,
-            "output_equation_ids": to_eqs,
-            "source_evidence_ids": list(evidence_index.get(block_id, [])),
-            "linked_claim_ids": list(claim_index.get(equation_id, [])),
             "extraction_source": extraction_source,
             "extraction_status": extraction_status,
             "needs_math_review": needs_math_review,
             "review_reason": review_flags,
-            "candidate_trace_ids": [f"eqcand_{equation_id}"],
+            "candidate_trace_ids": candidate_trace_ids,
+            "reconstruction": {"status": "none"},
+            "equation_role": {"primary": primary_role, "secondary": []},
+            "semantic_kind": None,
+            "equation_type": primary_role,
+            "secondary_types": [],
+            "semantic_status": "unknown",
+            "defined_symbols": defined_symbols,
+            "used_symbols": used_symbols,
+            "introduced_symbols": defined_symbols,
+            "symbol_definitions": symbol_definitions,
+            "local_assumptions": [
+                a.get("text", "") for a in (r.get("local_assumptions") or [])
+                if isinstance(a, dict) and a.get("text")
+            ],
+            "derivation_links": {"from_equations": from_eqs, "to_equations": to_eqs},
+            "input_equation_ids": from_eqs,
+            "output_equation_ids": to_eqs,
+            "source_evidence_ids": list(evidence_index.get(block_id, [])),
+            "linked_claim_ids": list(claim_index.get(equation_id, [])),
+            "confidence_policy": {},
         })
     return out
+
+
+def _validate_equations_export(records: list[dict]) -> None:
+    """In-place annotation of validation issues on exported equation records.
+
+    Checks issue #258 criteria:
+    - duplicate equation_id → mark error
+    - source-backed equation with empty block_id → mark error
+    - empty candidate_trace_ids → mark warning
+    - reconstruction-based equation not flagged as such → mark error
+    """
+    seen_ids: set[str] = set()
+    for r in records:
+        eq_id = r.get("equation_id", "")
+        validation = r.setdefault("_export_validation", [])
+
+        if not eq_id:
+            validation.append({"severity": "error", "rule": "eq_id_empty"})
+        elif eq_id in seen_ids:
+            validation.append({"severity": "error", "rule": "eq_id_duplicate", "equation_id": eq_id})
+        seen_ids.add(eq_id)
+
+        src_loc = r.get("source_location") or {}
+        block_id = src_loc.get("block_id", "")
+        extraction_status = r.get("extraction_status") or r.get("source_extraction", {}).get("extraction_status", "")
+        if extraction_status not in ("missing", "label_only", "fragment_only") and not block_id:
+            validation.append({"severity": "error", "rule": "source_backed_missing_block_id"})
+
+        candidate_trace_ids = r.get("candidate_trace_ids") or []
+        if not candidate_trace_ids:
+            validation.append({"severity": "warning", "rule": "candidate_trace_ids_empty"})
+
+        cp = r.get("confidence_policy") or {}
+        must_not = cp.get("must_not_treat_as_source_extracted", False)
+        rec = r.get("reconstruction") or {}
+        rec_status = rec.get("status", "none")
+        if rec_status != "none" and not must_not:
+            validation.append({
+                "severity": "warning",
+                "rule": "reconstruction_based_not_flagged",
+                "reconstruction_status": rec_status,
+            })
 
 
 # ---------------------------------------------------------------------------
@@ -191,58 +275,95 @@ def build_equation_candidates_export(
     document_id: str,
     structure_artifact: Any = None,
 ) -> list[dict]:
-    """Build equations/equation_candidates.json from available signals.
+    """Build equations/equation_candidates.json.
 
-    The current pipeline doesn't run a dedicated candidate detector, so we
-    reconstruct a minimal trace from the equation_semantics records and the
-    document_structure equation_blocks. Both produce auditable rows so the
-    downstream `eq_*` references can be traced back to a PDF span.
+    Prefers the EquationSemanticsResult.equation_candidates list (issue #258/#259).
+    Falls back to reconstructing from equation_semantics records and
+    document_structure equation_blocks.
+
+    rejection_reason is always populated on rejected candidates.
     """
+    eq = _coerce_dict(equation_artifact)
     structure = _coerce_dict(structure_artifact)
     block_lookup = _section_id_to_block_lookup(structure)
 
+    # Prefer first-class candidate list from the agent (issue #258)
+    agent_candidates = eq.get("equation_candidates")
+    if isinstance(agent_candidates, list) and agent_candidates:
+        out: list[dict] = []
+        for c in agent_candidates:
+            if not isinstance(c, dict):
+                continue
+            candidate_id = str(c.get("candidate_id") or "").strip()
+            if not candidate_id:
+                continue
+            rejection_reason = c.get("rejection_reason") or c.get("review_reason")
+            if isinstance(rejection_reason, list):
+                rejection_reason = "; ".join(rejection_reason) if rejection_reason else None
+            acceptance = c.get("acceptance_status", "rejected")
+            if acceptance in ("rejected", "context_only") and not rejection_reason:
+                rejection_reason = "candidate_not_accepted"
+            out.append({
+                "candidate_id": candidate_id,
+                "document_id": c.get("document_id") or document_id,
+                "source_location": c.get("source_location") or {},
+                "raw_text": c.get("raw_text") or "",
+                "matched_label": c.get("matched_label"),
+                "detection_method": list(c.get("detection_method") or []),
+                "candidate_score": c.get("candidate_score"),
+                "extraction_status": c.get("extraction_status", "unparsed"),
+                "acceptance_status": acceptance,
+                "accepted_equation_id": c.get("accepted_equation_id"),
+                "merge_target_hint": c.get("merge_target_hint"),
+                "rejection_reason": rejection_reason,
+                "needs_math_review": bool(c.get("needs_math_review", True)),
+                "review_reason": list(c.get("review_reason") or []),
+            })
+        return out
+
+    # Fallback: reconstruct from equation records + document_structure blocks
     candidates: list[dict] = []
     accepted_block_ids: set[str] = set()
 
-    eq = _coerce_dict(equation_artifact)
     for r in eq.get("equations") or []:
         if not isinstance(r, dict):
             continue
         equation_id = str(r.get("equation_id") or "")
         if not equation_id:
             continue
-        block_id = str(r.get("block_id") or "")
+
+        # Support nested schema
+        src = r.get("source_extraction") or {}
+        src_loc = src.get("source_location") or {}
+        block_id = str(src_loc.get("block_id") or r.get("block_id") or "")
         accepted_block_ids.add(block_id)
+
+        raw_text = src.get("raw_text") or r.get("raw_text") or ""
+        review_flags = list((src.get("review_reason") or r.get("review_flags") or []))
+        needs_review = bool(src.get("needs_math_review") or review_flags or not src.get("latex"))
+
         block = block_lookup.get(block_id, {})
-        text = block.get("text") if isinstance(block, dict) else ""
-        text = text or r.get("text") or ""
-        page = block.get("page") if isinstance(block, dict) else None
-        bbox = block.get("bbox") if isinstance(block, dict) else None
-        review_flags = list(r.get("review_flags") or [])
         candidates.append({
             "candidate_id": f"eqcand_{equation_id}",
             "document_id": document_id,
-            "source_location": {
-                "page": page,
+            "source_location": src_loc or {
+                "page": block.get("page") if isinstance(block, dict) else None,
                 "section_id": r.get("section_id"),
                 "block_id": block_id,
-                "span_start": 0,
-                "span_end": len(text or ""),
-                "bbox": list(bbox) if isinstance(bbox, (list, tuple)) else [],
             },
-            "raw_text": text or "",
+            "raw_text": raw_text or (block.get("text") if isinstance(block, dict) else "") or "",
             "detection_method": ["document_structure_equation_block", "llm_semantic_classification"],
             "matched_label": r.get("label"),
             "candidate_score": None,
+            "extraction_status": src.get("extraction_status") or "complete",
             "acceptance_status": "accepted",
             "accepted_equation_id": equation_id,
+            "merge_target_hint": None,
             "rejection_reason": None,
-            "needs_math_review": bool(review_flags) or not bool(r.get("latex")),
+            "needs_math_review": needs_review,
             "review_reason": review_flags,
         })
 
-    # Also surface document_structure equation_blocks that did not become
-    # first-class equations — these are rejected candidates worth auditing.
     for block in structure.get("blocks", []) or []:
         if not isinstance(block, dict):
             continue
@@ -266,8 +387,10 @@ def build_equation_candidates_export(
             "detection_method": ["document_structure_equation_block"],
             "matched_label": block.get("equation_label"),
             "candidate_score": float(block.get("confidence") or 0.0),
+            "extraction_status": "unparsed",
             "acceptance_status": "rejected",
             "accepted_equation_id": None,
+            "merge_target_hint": None,
             "rejection_reason": "not_promoted_by_equation_semantics_agent",
             "needs_math_review": True,
             "review_reason": ["not_promoted"],

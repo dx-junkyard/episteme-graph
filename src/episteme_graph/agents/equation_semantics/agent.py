@@ -19,12 +19,71 @@ from .repair import EquationSemanticsRepairer, _fallback_record, _parse_record
 from .schema import (
     CartridgeContext,
     EquationCandidate,
+    EquationConfidencePolicy,
     EquationRecord,
+    EquationReconstruction,
+    EquationSemantics,
     EquationSemanticsResult,
+    EquationSourceExtraction,
 )
 from .validator import EquationSemanticsValidator
 
 logger = logging.getLogger(__name__)
+
+
+def _make_provisional_record(candidate: EquationCandidate) -> EquationRecord:
+    """Create a minimal reviewable EquationRecord for a provisional candidate (issue #259).
+
+    confidence_policy.can_support_claim is always False for provisional records.
+    """
+    src_loc = dict(candidate.source_location) if candidate.source_location else {}
+    source_extraction = EquationSourceExtraction(
+        raw_text=candidate.raw_text,
+        latex=None,
+        plain_text=candidate.raw_text or None,
+        source_location=src_loc,
+        extraction_source="pdf_text_layer",
+        extraction_status=candidate.extraction_status,
+        needs_math_review=True,
+        review_reason=list(candidate.review_reason),
+    )
+    reconstruction = EquationReconstruction.make_none()
+    semantics = EquationSemantics(
+        equation_type="unknown",
+        secondary_types=[],
+        semantic_status="unknown",
+        confidence=0.0,
+        reason="provisional_candidate_no_llm_analysis",
+        defined_symbols=[],
+        used_symbols=[],
+        assumptions=[],
+        input_equation_ids=[],
+        output_equation_ids=[],
+        linked_text_spans=[],
+        source_evidence_ids=[],
+        linked_claim_ids=[],
+        summary="",
+        review_flags=["needs_reconstruction", "partial_extraction"],
+    )
+    confidence_policy = EquationConfidencePolicy(
+        can_support_claim=False,
+        can_be_used_in_derivation=False,
+        can_be_displayed_in_course=True,
+        display_requires_note=True,
+        must_not_treat_as_source_extracted=True,
+    )
+    eq_id = f"eq_provisional_{candidate.candidate_id}"
+    candidate.accepted_equation_id = eq_id
+    return EquationRecord(
+        equation_id=eq_id,
+        document_id=candidate.document_id,
+        label=candidate.matched_label,
+        candidate_trace_ids=[candidate.candidate_id],
+        source_extraction=source_extraction,
+        reconstruction=reconstruction,
+        semantics=semantics,
+        confidence_policy=confidence_policy,
+    )
 
 
 class EquationSemanticsAgent:
@@ -61,13 +120,19 @@ class EquationSemanticsAgent:
                 structure.document_id, cartridge_id, None, "No equation blocks for semantics"
             )
 
-        # Step 2: Acceptance gate (accepted / rejected / needs_merge / context_only を分類)
+        # Step 2: Acceptance gate (accepted / rejected / needs_merge / context_only / provisional を分類)
         classified_candidates = self._acceptance_gate.process(candidates)
         accepted = [c for c in classified_candidates if c.acceptance_status == "accepted"]
+        provisional = [c for c in classified_candidates if c.acceptance_status == "provisional"]
+
+        # Provisional candidates → minimal EquationRecord without LLM (issue #259)
+        provisional_records: list[EquationRecord] = [
+            _make_provisional_record(c) for c in provisional
+        ]
 
         if not accepted:
             logger.info(
-                "document=%s: all %d equation candidates were rejected by acceptance gate",
+                "document=%s: all %d equation candidates were rejected/provisional by acceptance gate",
                 structure.document_id,
                 len(classified_candidates),
             )
@@ -75,7 +140,7 @@ class EquationSemanticsAgent:
                 document_id=structure.document_id,
                 cartridge_id=cartridge.cartridge_id if cartridge else cartridge_id,
                 equation_candidates=classified_candidates,
-                equations=[],
+                equations=provisional_records,
             )
             result.validation_issues = self._validator.validate(result, cartridge)
             return result
@@ -142,7 +207,7 @@ class EquationSemanticsAgent:
             document_id=structure.document_id,
             cartridge_id=cartridge.cartridge_id if cartridge else cartridge_id,
             equation_candidates=classified_candidates,
-            equations=records,
+            equations=provisional_records + records,
         )
         result.validation_issues = self._validator.validate(result, cartridge)
         return result
