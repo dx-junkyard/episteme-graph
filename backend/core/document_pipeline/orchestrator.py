@@ -939,7 +939,9 @@ def _build_evidence_registry(
 
     # Register evidence for each equation block.
     for record in getattr(equations, "equations", []) or []:
-        block_id = getattr(record, "block_id", None)
+        src = getattr(record, "source_extraction", None)
+        loc = getattr(src, "source_location", None) if src else None
+        block_id = (loc.get("block_id") if isinstance(loc, dict) else None) or getattr(record, "block_id", None)
         if not block_id or block_id in seen_block_ids:
             continue
         builder.add_for_block(block_id, evidence_role="equation_quote")

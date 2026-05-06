@@ -183,9 +183,17 @@ def test_orchestrator_runs_all_stages_in_order():
         edges: list = field(default_factory=list)
         components: list = field(default_factory=list)
         qualified_spans: list = field(default_factory=list)
+        equations: list = field(default_factory=list)
         sections: list = field(default_factory=lambda: [_Section("s1", "Intro", order=1, page_start=1)])
         blocks: list = field(default_factory=lambda: [_Block("b1", 1, 0, "Hello world body.", section_id="s1")])
         review_notes: list = field(default_factory=list)
+
+    @dataclass
+    class _CourseMappingResult:
+        document_id: str = "doc"
+        cartridge_id: str | None = None
+        topics: list = field(default_factory=list)
+        validation_issues: list = field(default_factory=list)
 
     structure_result = _Result()
 
@@ -198,6 +206,7 @@ def test_orchestrator_runs_all_stages_in_order():
         "ThesisReconstructionAgent": _MockAgent(_Result()),
         "DSLLinkingAgent": _MockAgent(_Result()),
         "ComponentAssemblyAgent": _MockAgent(_Result()),
+        "CourseMappingAgent": _MockAgent(_CourseMappingResult()),
     }
 
     visited: list[str] = []
@@ -331,35 +340,44 @@ def test_orchestrator_runs_newly_integrated_agents_and_saves_artifacts():
         evidence_text: str = "energy"
 
     @dataclass
-    class _EquationRole:
-        primary: str = "equation_definition"
+    class _EquationSemantics:
+        equation_type: str = "definition"
+        secondary_types: list = field(default_factory=list)
+        semantic_status: str = "source_backed"
         confidence: float = 0.9
+        reason: str = ""
+        defined_symbols: list = field(default_factory=lambda: [_DefinedSymbol()])
+        used_symbols: list = field(default_factory=list)
+        assumptions: list = field(default_factory=list)
+        input_equation_ids: list = field(default_factory=list)
+        output_equation_ids: list = field(default_factory=list)
+        linked_text_spans: list = field(default_factory=list)
+        source_evidence_ids: list = field(default_factory=list)
+        linked_claim_ids: list = field(default_factory=list)
+        summary: str = ""
+        review_flags: list = field(default_factory=list)
 
     @dataclass
-    class _DerivationLinks:
-        from_equations: list = field(default_factory=list)
-        to_equations: list = field(default_factory=list)
-
-    @dataclass
-    class _LocalAssumption:
-        text: str = "local frame"
-        source_block_ids: list = field(default_factory=list)
+    class _EquationSourceExtraction:
+        raw_text: str = ""
+        latex: str | None = None
+        plain_text: str | None = None
+        source_location: dict = field(default_factory=dict)
+        extraction_source: str = "pdf_text_layer"
+        extraction_status: str = "complete"
+        needs_math_review: bool = False
+        review_reason: list = field(default_factory=list)
 
     @dataclass
     class _EquationRecord:
         equation_id: str
-        block_id: str
-        section_id: str | None
+        document_id: str = "doc-int"
         label: str | None = None
-        latex: str | None = None
-        text: str = ""
-        plain_text: str = ""
-        equation_role: _EquationRole = field(default_factory=_EquationRole)
-        defined_symbols: list = field(default_factory=lambda: [_DefinedSymbol()])
-        local_assumptions: list = field(default_factory=lambda: [_LocalAssumption()])
-        derivation_links: _DerivationLinks = field(default_factory=_DerivationLinks)
-        review_flags: list = field(default_factory=list)
-        summary: str = ""
+        candidate_trace_ids: list = field(default_factory=list)
+        source_extraction: _EquationSourceExtraction = field(default_factory=_EquationSourceExtraction)
+        reconstruction: object = None
+        semantics: _EquationSemantics = field(default_factory=_EquationSemantics)
+        confidence_policy: object = None
 
     @dataclass
     class _Component:
@@ -397,11 +415,24 @@ def test_orchestrator_runs_newly_integrated_agents_and_saves_artifacts():
         )],
     })()
 
-    eq_record_1 = _EquationRecord(equation_id="eq_1", block_id="blk_eq_1", section_id="s1", label="1")
+    eq_record_1 = _EquationRecord(
+        equation_id="eq_1",
+        label="1",
+        source_extraction=_EquationSourceExtraction(
+            source_location={"block_id": "blk_eq_1", "section_id": "s1"},
+        ),
+        semantics=_EquationSemantics(equation_type="definition"),
+    )
     eq_record_2 = _EquationRecord(
-        equation_id="eq_2", block_id="blk_eq_1", section_id="s1", label="2",
-        equation_role=_EquationRole(primary="equation_result", confidence=0.9),
-        derivation_links=_DerivationLinks(from_equations=["eq_1"]),
+        equation_id="eq_2",
+        label="2",
+        source_extraction=_EquationSourceExtraction(
+            source_location={"block_id": "blk_eq_1", "section_id": "s1"},
+        ),
+        semantics=_EquationSemantics(
+            equation_type="result",
+            input_equation_ids=["eq_1"],
+        ),
     )
     equations = type("E", (), {
         "document_id": "doc-int",
