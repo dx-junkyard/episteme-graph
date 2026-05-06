@@ -3,6 +3,9 @@
 EquationSemanticsResult の derivation_links を統合し、終端式（leaf result equation）
 から逆方向に traversal して導出 chain を構築する。
 
+Issue #261: equation-only chain を Claim/Evidence/Assumption を含む推論チェーンへ拡張。
+- claim_build_result を受け取り、equation リンクがない場合は claim order / claim_type から chain を生成する。
+
 design:
 - LLM-first ではなく、equation_semantics の局所リンクから決定論的に組み立てる
 - LLM 補助は operation 名の正規化や teaching_takeaway 生成のために
@@ -11,7 +14,7 @@ design:
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Iterable, Optional
+from typing import Optional
 
 from episteme_graph.agents.equation_semantics.schema import (
     EquationRecord,
@@ -20,15 +23,35 @@ from episteme_graph.agents.equation_semantics.schema import (
 
 from .schema import (
     DEFAULT_OPERATION,
+    OPERATION_ONTOLOGY,
     DerivationChainRecord,
     DerivationChainResult,
     DerivationStep,
     ValidationIssue,
 )
 
+# Mapping from claim_type → preferred operation (issue #261)
+_CLAIM_TYPE_TO_OPERATION: dict[str, str] = {
+    "assumption": "state_assumption",
+    "definition": "apply_definition",
+    "equation_definition": "apply_definition",
+    "criterion": "apply_criterion",
+    "observable_definition": "introduce_observable",
+    "equation_relation": "apply_equation",
+    "operator_relation": "apply_equation",
+    "equation_transformation": "substitute",
+    "measurement_or_update": "apply_measurement_or_update",
+    "incompatibility_or_constraint": "apply_non_disturbance_or_independence",
+    "comparison": "compare",
+    "result": "infer_conclusion",
+    "conclusion": "infer_conclusion",
+    "causal_or_dependency_claim": "infer_intermediate_claim",
+    "limitation": "flag_limitation",
+}
+
 
 class DerivationChainAgent:
-    """EquationSemanticsResult から DerivationChain を組み立てる。"""
+    """EquationSemanticsResult (and optionally ClaimObjectBuildResult) から DerivationChain を組み立てる。"""
 
     def __init__(self) -> None:
         pass
@@ -39,9 +62,30 @@ class DerivationChainAgent:
         *,
         cartridge_id: str | None = None,
         claim_link_index: dict[str, list[str]] | None = None,
+        claim_build_result: object | None = None,
+        evidence_registry: object | None = None,
     ) -> DerivationChainResult:
         records: list[EquationRecord] = list(equations.equations)
+
+        # When no equations available, fall back to claim-based chain (issue #261)
         if not records:
+            claim_chains = self._build_claim_chains(
+                equations.document_id,
+                claim_build_result,
+                evidence_registry,
+                cartridge_id,
+            )
+            if claim_chains:
+                return DerivationChainResult(
+                    document_id=equations.document_id,
+                    cartridge_id=cartridge_id,
+                    chains=claim_chains,
+                    validation_issues=[ValidationIssue(
+                        rule_id="derivation_equation_only_fallback",
+                        severity="info",
+                        message="No equations; derivation chains built from claim source order.",
+                    )],
+                )
             return DerivationChainResult(
                 document_id=equations.document_id,
                 cartridge_id=cartridge_id,
@@ -113,23 +157,32 @@ class DerivationChainAgent:
                 },
             ))
 
-        # Quality checks (issue #237 acceptance criteria)
+        # Quality checks (issue #237 / #261 acceptance criteria)
         for chain in chains:
-            chain_has_any_assumption = any(s.assumption_refs for s in chain.steps)
-            chain_has_any_claim = any(s.required_claim_ids for s in chain.steps)
+            chain_has_any_assumption = any(
+                s.assumption_refs or s.assumption_ids for s in chain.steps
+            )
+            chain_has_any_claim = any(
+                s.required_claim_ids or s.input_claim_ids or s.output_claim_ids
+                for s in chain.steps
+            )
             for s in chain.steps:
-                if not s.input_equation_ids:
+                has_eq_input = bool(s.input_equation_ids)
+                has_claim_input = bool(s.input_claim_ids or s.required_claim_ids)
+                if not has_eq_input and not has_claim_input:
                     issues.append(ValidationIssue(
                         rule_id="derivation_step_missing_input",
                         severity="warning",
-                        message=f"step {s.step_id} has no input_equation_ids",
+                        message=f"step {s.step_id} has no input_equation_ids or input_claim_ids",
                         field=chain.derivation_id,
                     ))
-                if not s.output_equation_ids:
+                has_eq_output = bool(s.output_equation_ids)
+                has_claim_output = bool(s.output_claim_ids)
+                if not has_eq_output and not has_claim_output:
                     issues.append(ValidationIssue(
                         rule_id="derivation_step_missing_output",
                         severity="warning",
-                        message=f"step {s.step_id} has no output_equation_ids",
+                        message=f"step {s.step_id} has no output_equation_ids or output_claim_ids",
                         field=chain.derivation_id,
                     ))
                 if not s.operation or s.operation == DEFAULT_OPERATION:
@@ -139,6 +192,15 @@ class DerivationChainAgent:
                         message=f"step {s.step_id} uses generic operation {s.operation!r}",
                         field=chain.derivation_id,
                     ))
+                # Unresolved step references (issue #261)
+                for ref in (s.input_equation_ids + s.output_equation_ids):
+                    if ref and ref not in eq_by_id:
+                        issues.append(ValidationIssue(
+                            rule_id="derivation_step_unresolved_eq_ref",
+                            severity="warning",
+                            message=f"step {s.step_id} references unknown equation {ref!r}",
+                            field=chain.derivation_id,
+                        ))
             if not chain_has_any_assumption:
                 issues.append(ValidationIssue(
                     rule_id="derivation_chain_missing_assumptions",
@@ -146,11 +208,11 @@ class DerivationChainAgent:
                     message=f"chain {chain.derivation_id} has no assumption_refs on any step",
                     field=chain.derivation_id,
                 ))
-            if not chain_has_any_claim and claim_link_index:
+            if not chain_has_any_claim and (claim_link_index or claim_build_result):
                 issues.append(ValidationIssue(
                     rule_id="derivation_chain_missing_claim_links",
                     severity="warning",
-                    message=f"chain {chain.derivation_id} has no required_claim_ids on any step",
+                    message=f"chain {chain.derivation_id} has no claim links on any step",
                     field=chain.derivation_id,
                 ))
             if not chain.teaching_takeaway:
@@ -207,15 +269,24 @@ class DerivationChainAgent:
                 assumptions = list(current_record.semantics.assumptions)
 
             operation = self._infer_operation(current_record)
+            linked_claims = list(claim_link_index.get(current, []))
+            sem_claims = list(current_record.semantics.linked_claim_ids) if current_record else []
+            all_claim_ids = sorted(set(linked_claims + sem_claims))
+            ev_ids = list(current_record.semantics.source_evidence_ids) if current_record else []
             step = DerivationStep(
                 step_id=f"step_{step_counter:03d}",
                 input_equation_ids=list(sources),
                 operation=operation,
                 output_equation_ids=[current],
-                required_claim_ids=list(claim_link_index.get(current, [])),
+                required_claim_ids=all_claim_ids,
                 assumption_refs=assumptions,
                 reason=current_record.semantics.summary if current_record else "",
                 confidence=current_record.semantics.confidence if current_record else 0.0,
+                input_claim_ids=[],
+                output_claim_ids=[],
+                assumption_ids=assumptions,
+                source_evidence_ids=ev_ids,
+                review_status="teacher_review_required",
             )
             steps.append(step)
             for s in sources:
@@ -228,6 +299,90 @@ class DerivationChainAgent:
         for idx, s in enumerate(steps, start=1):
             s.step_id = f"step_{idx:03d}"
         return steps, sections
+
+    def _build_claim_chains(
+        self,
+        document_id: str,
+        claim_build_result: object | None,
+        evidence_registry: object | None,
+        cartridge_id: str | None,
+    ) -> list[DerivationChainRecord]:
+        """Claim type/source order ベースで軽量な chain を生成する (issue #261)."""
+        if not claim_build_result:
+            return []
+        claims = getattr(claim_build_result, "claims", []) or []
+        if not claims:
+            return []
+
+        # Build evidence lookup: evidence_id → evidence record
+        ev_by_block: dict[str, list[str]] = {}
+        for ev_rec in getattr(evidence_registry, "records", []) or []:
+            src = getattr(ev_rec, "source", None)
+            bid = getattr(src, "block_id", None) if src else None
+            ev_id = getattr(ev_rec, "evidence_id", None)
+            if bid and ev_id:
+                ev_by_block.setdefault(bid, []).append(ev_id)
+
+        # Group claims by section, preserve order
+        section_groups: dict[str, list] = {}
+        no_section: list = []
+        for c in claims:
+            sid = getattr(c, "section_id", None) or ""
+            if sid:
+                section_groups.setdefault(sid, []).append(c)
+            else:
+                no_section.append(c)
+
+        chains: list[DerivationChainRecord] = []
+        chain_counter = 0
+
+        for section_id, section_claims in section_groups.items():
+            if len(section_claims) < 2:
+                continue
+            chain_counter += 1
+            steps: list[DerivationStep] = []
+            prev_claim_id: str | None = None
+
+            for step_idx, claim in enumerate(section_claims, start=1):
+                claim_id = getattr(claim, "claim_id", None) or f"claim_{step_idx}"
+                claim_type = getattr(claim, "claim_type", "unknown") or "unknown"
+                operation = _CLAIM_TYPE_TO_OPERATION.get(claim_type, "infer_intermediate_claim")
+
+                # Evidence IDs for this claim
+                source_ev_ids: list[str] = list(getattr(claim, "source_evidence_ids", []) or [])
+
+                steps.append(DerivationStep(
+                    step_id=f"step_{step_idx:03d}",
+                    input_equation_ids=[],
+                    operation=operation,
+                    output_equation_ids=[],
+                    required_claim_ids=[prev_claim_id] if prev_claim_id else [],
+                    assumption_refs=list(claim_id for c2 in section_claims[:step_idx - 1]
+                                        if getattr(c2, "claim_type", "") == "assumption"
+                                        for claim_id in [getattr(c2, "claim_id", "")]),
+                    reason=getattr(claim, "review_note", "") or "",
+                    confidence=float(getattr(claim, "confidence", 0.5) or 0.5),
+                    input_claim_ids=[prev_claim_id] if prev_claim_id else [],
+                    output_claim_ids=[claim_id],
+                    assumption_ids=[],
+                    source_evidence_ids=source_ev_ids,
+                    review_status="teacher_review_required",
+                ))
+                prev_claim_id = claim_id
+
+            chains.append(DerivationChainRecord(
+                derivation_id=f"derivation_claim_{chain_counter:04d}",
+                document_id=document_id,
+                source_section_ids=[section_id],
+                steps=steps,
+                teaching_takeaway=f"Logical progression through {len(steps)} claims in section {section_id}",
+                blackbox_policy_suggestion={},
+                source_scope={"section_id": section_id},
+                linked_component_ids=[],
+                chain_type="claim_chain",
+            ))
+
+        return chains
 
     @staticmethod
     def _generate_takeaway(

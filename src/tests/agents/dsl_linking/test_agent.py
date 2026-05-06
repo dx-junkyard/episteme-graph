@@ -8,10 +8,13 @@ from episteme_graph.agents.dsl_linking.agent import DSLLinkingAgent
 from episteme_graph.agents.dsl_linking.schema import DSLLinkingResult
 from episteme_graph.agents.equation_semantics.schema import (
     DefinedSymbol,
-    DerivationLinks,
-    EquationRolePrediction,
-    EquationSemanticsRecord,
+    EquationCandidate,
+    EquationConfidencePolicy,
+    EquationRecord,
+    EquationReconstruction,
+    EquationSemantics,
     EquationSemanticsResult,
+    EquationSourceExtraction,
 )
 from episteme_graph.agents.thesis_reconstruction.schema import ThesisReconstructionResult, THESIS_VERSION
 
@@ -53,27 +56,60 @@ def _qualified():
     )
 
 
+def _make_eq_record(eq_id: str, label: str, block_id: str, section_id: str, from_eqs: list[str] | None = None) -> EquationRecord:
+    src = EquationSourceExtraction(
+        raw_text="R Lambda c = RD + RD*",
+        latex=None,
+        plain_text="R Lambda c = RD + RD*",
+        source_location={
+            "page": 1,
+            "section_id": section_id,
+            "block_id": block_id,
+            "bbox": [],
+        },
+        extraction_source="pdf_text_layer",
+        extraction_status="complete",
+        needs_math_review=False,
+        review_reason=[],
+    )
+    rec = EquationReconstruction.make_none()
+    sem = EquationSemantics(
+        equation_type="equation_relation",
+        secondary_types=["equation_result"],
+        semantic_status="source_backed",
+        confidence=0.9,
+        reason="relation",
+        defined_symbols=[DefinedSymbol("R Lambda c", "used", None)],
+        used_symbols=[],
+        assumptions=[],
+        input_equation_ids=list(from_eqs or []),
+        output_equation_ids=[],
+        linked_text_spans=[],
+        source_evidence_ids=[],
+        linked_claim_ids=[],
+        summary="Total-rate sum rule relation.",
+        review_flags=[],
+    )
+    cp = EquationConfidencePolicy.derive(src, rec, sem)
+    return EquationRecord(
+        equation_id=eq_id,
+        document_id="doc_test",
+        label=label,
+        candidate_trace_ids=[f"eqcand_{block_id}"],
+        source_extraction=src,
+        reconstruction=rec,
+        semantics=sem,
+        confidence_policy=cp,
+    )
+
+
 def _equations():
     return EquationSemanticsResult(
-        "doc_test",
-        None,
-        [
-            EquationSemanticsRecord(
-                equation_id="eq_3_14",
-                block_id="e1",
-                section_id="sec_1",
-                section_title="Derivation",
-                label="3.14",
-                text="R Lambda c = RD + RD*",
-                latex=None,
-                plain_text="R Lambda c = RD + RD*",
-                equation_role=EquationRolePrediction("equation_relation", ["equation_result"], 0.9, "relation"),
-                defined_symbols=[DefinedSymbol("R Lambda c", "used", None)],
-                local_assumptions=[],
-                derivation_links=DerivationLinks(["eq_1_2"], [], []),
-                summary="Total-rate sum rule relation.",
-                review_flags=[],
-            )
+        document_id="doc_test",
+        cartridge_id=None,
+        equation_candidates=[],
+        equations=[
+            _make_eq_record("eq_3_14", "3.14", "e1", "sec_1", from_eqs=["eq_1_2"]),
         ],
     )
 

@@ -13,9 +13,11 @@ import re
 from typing import Callable, Iterable, Optional
 
 from .schema import (
+    CLAIM_TYPE_ONTOLOGY,
     ClaimConcept,
     ClaimObjectBuildResult,
     ClaimObjectRecord,
+    EQUATION_CLAIM_TYPES,
     REVIEW_STATUSES,
     SUPPORT_STATUSES,
     ValidationIssue,
@@ -39,6 +41,8 @@ class ClaimObjectBuilder:
         指定がない場合は cartridge ontology から alias マッチで抽出する。
     cartridge_ontology:
         cartridge の ontology dict（オプション）。
+    equation_semantics_result:
+        EquationSemanticsResult（オプション）。source_location proximity で equation を link する (issue #260)。
     """
 
     def __init__(
@@ -47,6 +51,7 @@ class ClaimObjectBuilder:
         equation_index: dict[str, object] | None = None,
         concept_resolver: Optional[Callable] = None,
         cartridge_ontology: dict | None = None,
+        equation_semantics_result: object | None = None,
     ) -> None:
         self._evidence_registry = evidence_registry
         self._equation_index = equation_index or {}
@@ -58,6 +63,22 @@ class ClaimObjectBuilder:
                 bid = getattr(r.source, "block_id", None)
                 if bid:
                     self._span_to_evidence.setdefault(bid, []).append(r.evidence_id)
+
+        # Build proximity index: block_id → [equation_id], section_id → [equation_id]
+        self._block_to_equations: dict[str, list[str]] = {}
+        self._section_to_equations: dict[str, list[str]] = {}
+        for eq_record in getattr(equation_semantics_result, "equations", []) or []:
+            eq_id = getattr(eq_record, "equation_id", None)
+            if not eq_id:
+                continue
+            src = getattr(eq_record, "source_extraction", None)
+            loc = getattr(src, "source_location", {}) or {} if src else {}
+            bid = loc.get("block_id")
+            sid = loc.get("section_id")
+            if bid:
+                self._block_to_equations.setdefault(bid, []).append(eq_id)
+            if sid:
+                self._section_to_equations.setdefault(sid, []).append(eq_id)
 
     # ------------------------------------------------------------------
     def build(
@@ -77,18 +98,93 @@ class ClaimObjectBuilder:
                 continue
 
             counter += 1
-            claim_id = self._make_claim_id(document_id, counter, span)
+            base_claim_id = self._make_claim_id(document_id, counter, span)
+            text = self._extract_normalized_text(span)
+            claim_type = self._normalize_claim_type(qual.get("claim_type_candidate"))
+            block_id = getattr(span, "block_id", None)
+            section_id = getattr(span, "section_id", None)
+            role_labels = list(getattr(span, "role_labels", []) or [])
+            span_id = getattr(span, "span_id", None)
+            confidence = float(getattr(span, "confidence", 0.0) or 0.0)
+
+            evidence_ids = self._resolve_evidence_ids(block_id)
+            review_note = self._extract_review_note(span)
+            review_status = self._derive_review_status(qual)
+
+            # Handle split claims (atomicity — issue #260)
+            edits = getattr(span, "edit_suggestions", {}) or {}
+            split_candidates = edits.get("split_claims") or []
+            if split_candidates and isinstance(split_candidates, list):
+                parent_id = base_claim_id
+                if parent_id in seen_claim_ids:
+                    parent_id = f"{parent_id}_{counter}"
+                seen_claim_ids.add(parent_id)
+                subclaim_ids: list[str] = []
+                for sub_idx, sub in enumerate(split_candidates, start=1):
+                    sub_text = str(sub.get("text", "")).strip() if isinstance(sub, dict) else text
+                    if not sub_text:
+                        continue
+                    sub_type = self._normalize_claim_type(
+                        (sub.get("claim_type") if isinstance(sub, dict) else None)
+                        or claim_type
+                    )
+                    sub_id = f"{parent_id}_sub{sub_idx:02d}"
+                    if sub_id in seen_claim_ids:
+                        sub_id = f"{sub_id}_{counter}"
+                    seen_claim_ids.add(sub_id)
+                    subclaim_ids.append(sub_id)
+                    sub_concepts = self._resolve_concepts(sub_text, role_labels)
+                    sub_eqs = self._link_equations(sub_text, sub_type, role_labels, block_id, section_id)
+                    claims.append(ClaimObjectRecord(
+                        claim_id=sub_id,
+                        document_id=document_id,
+                        claim_type=sub_type,
+                        text=sub_text,
+                        source_evidence_ids=evidence_ids,
+                        source_span_ids=[span_id] if span_id else [],
+                        concepts=sub_concepts,
+                        equation_ids=sub_eqs,
+                        figure_ids=[],
+                        table_ids=[],
+                        support_status="source_backed" if evidence_ids else "inferred",
+                        review_status=review_status,
+                        review_note=review_note,
+                        section_id=section_id,
+                        confidence=confidence,
+                        atomicity="atomic",
+                        parent_claim_id=parent_id,
+                        subclaim_ids=[],
+                    ))
+                # Compound parent record (no text of its own, just tracks subclaims)
+                claims.append(ClaimObjectRecord(
+                    claim_id=parent_id,
+                    document_id=document_id,
+                    claim_type=claim_type,
+                    text=text,
+                    source_evidence_ids=evidence_ids,
+                    source_span_ids=[span_id] if span_id else [],
+                    concepts=self._resolve_concepts(text, role_labels),
+                    equation_ids=self._link_equations(text, claim_type, role_labels, block_id, section_id),
+                    figure_ids=[],
+                    table_ids=[],
+                    support_status="source_backed" if evidence_ids else "inferred",
+                    review_status=review_status,
+                    review_note=review_note,
+                    section_id=section_id,
+                    confidence=confidence,
+                    atomicity="compound",
+                    parent_claim_id=None,
+                    subclaim_ids=subclaim_ids,
+                ))
+                self._add_issues_for_record(parent_id, evidence_ids, self._resolve_concepts(text, role_labels), claim_type, self._link_equations(text, claim_type, role_labels, block_id, section_id), issues)
+                continue
+
+            # Single atomic claim
+            claim_id = base_claim_id
             if claim_id in seen_claim_ids:
                 claim_id = f"{claim_id}_{counter}"
             seen_claim_ids.add(claim_id)
 
-            text = self._extract_normalized_text(span)
-            claim_type = qual.get("claim_type_candidate") or _DEFAULT_CLAIM_TYPE
-            block_id = getattr(span, "block_id", None)
-            section_id = getattr(span, "section_id", None)
-            role_labels = list(getattr(span, "role_labels", []) or [])
-
-            evidence_ids = self._resolve_evidence_ids(block_id)
             if not evidence_ids:
                 issues.append(ValidationIssue(
                     rule_id="claim_missing_evidence",
@@ -106,21 +202,16 @@ class ClaimObjectBuilder:
                     field=claim_id,
                 ))
 
-            equation_ids = self._link_equations(text, claim_type, role_labels)
+            equation_ids = self._link_equations(text, claim_type, role_labels, block_id, section_id)
             if self._claim_type_implies_equation(claim_type) and not equation_ids:
                 issues.append(ValidationIssue(
                     rule_id="claim_missing_equation_ref",
                     severity="warning",
-                    message=(
-                        f"claim {claim_id} of type {claim_type} should reference equations"
-                    ),
+                    message=f"claim {claim_id} of type {claim_type} should reference equations",
                     field=claim_id,
                 ))
 
             figure_ids, table_ids = self._link_figures_tables(role_labels, claim_type)
-
-            review_note = self._extract_review_note(span)
-            review_status = self._derive_review_status(qual)
 
             record = ClaimObjectRecord(
                 claim_id=claim_id,
@@ -128,7 +219,7 @@ class ClaimObjectBuilder:
                 claim_type=claim_type,
                 text=text,
                 source_evidence_ids=evidence_ids,
-                source_span_ids=[getattr(span, "span_id", "")] if getattr(span, "span_id", None) else [],
+                source_span_ids=[span_id] if span_id else [],
                 concepts=concepts,
                 equation_ids=equation_ids,
                 figure_ids=figure_ids,
@@ -137,7 +228,10 @@ class ClaimObjectBuilder:
                 review_status=review_status,
                 review_note=review_note,
                 section_id=section_id,
-                confidence=float(getattr(span, "confidence", 0.0) or 0.0),
+                confidence=confidence,
+                atomicity="atomic",
+                parent_claim_id=None,
+                subclaim_ids=[],
             )
             claims.append(record)
 
@@ -147,6 +241,37 @@ class ClaimObjectBuilder:
             claims=claims,
             validation_issues=issues,
         )
+
+    def _add_issues_for_record(
+        self,
+        claim_id: str,
+        evidence_ids: list[str],
+        concepts: list,
+        claim_type: str,
+        equation_ids: list[str],
+        issues: list[ValidationIssue],
+    ) -> None:
+        if not evidence_ids:
+            issues.append(ValidationIssue(
+                rule_id="claim_missing_evidence",
+                severity="warning",
+                message=f"claim {claim_id} has no source evidence",
+                field=claim_id,
+            ))
+        if not concepts:
+            issues.append(ValidationIssue(
+                rule_id="claim_concepts_empty",
+                severity="warning",
+                message=f"claim {claim_id} has no concepts",
+                field=claim_id,
+            ))
+        if self._claim_type_implies_equation(claim_type) and not equation_ids:
+            issues.append(ValidationIssue(
+                rule_id="claim_missing_equation_ref",
+                severity="warning",
+                message=f"claim {claim_id} of type {claim_type} should reference equations",
+                field=claim_id,
+            ))
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -199,32 +324,69 @@ class ClaimObjectBuilder:
                     break
         return found
 
-    def _link_equations(self, text: str, claim_type: str, role_labels: list[str]) -> list[str]:
-        if not self._equation_index:
-            return []
-        # Match by equation label e.g. "(3.14)" or "Eq. 3.14"
+    @staticmethod
+    def _normalize_claim_type(raw: str | None) -> str:
+        """Map raw claim type candidate to ontology value (issue #260)."""
+        if not raw:
+            return _DEFAULT_CLAIM_TYPE
+        canonical = raw.strip().lower()
+        if canonical in CLAIM_TYPE_ONTOLOGY:
+            return canonical
+        # Fuzzy match common variants (approximation has its own ontology entry)
+        _ALIASES: dict[str, str] = {
+            "constraint": "incompatibility_or_constraint",
+            "equation": "equation_relation",
+            "derivation_step": "equation_transformation",
+            "update": "measurement_or_update",
+            "observation": "observable_definition",
+        }
+        return _ALIASES.get(canonical, _DEFAULT_CLAIM_TYPE)
+
+    def _link_equations(
+        self,
+        text: str,
+        claim_type: str,
+        role_labels: list[str],
+        block_id: str | None = None,
+        section_id: str | None = None,
+    ) -> list[str]:
         ids: list[str] = []
+        seen: set[str] = set()
+
+        # 1. Label-based matching (primary)
         for eq_id, eq in self._equation_index.items():
             label = getattr(eq, "label", None) or (eq.get("label") if isinstance(eq, dict) else None)
             if not label:
                 continue
-            if label and (
+            if (
                 f"({label})" in text
                 or f"Eq. {label}" in text
                 or f"eq. {label}" in text
                 or f"equation {label}" in text.lower()
             ):
-                ids.append(eq_id)
+                if eq_id not in seen:
+                    ids.append(eq_id)
+                    seen.add(eq_id)
+
+        # 2. Source proximity: same block (issue #260)
+        if block_id and self._claim_type_implies_equation(claim_type):
+            for eq_id in self._block_to_equations.get(block_id, []):
+                if eq_id not in seen:
+                    ids.append(eq_id)
+                    seen.add(eq_id)
+
+        # 3. Source proximity: same section (only for equation claim types when no block match)
+        if not ids and section_id and self._claim_type_implies_equation(claim_type):
+            for eq_id in self._section_to_equations.get(section_id, [])[:3]:
+                if eq_id not in seen:
+                    ids.append(eq_id)
+                    seen.add(eq_id)
+
         return ids
 
     @staticmethod
     def _claim_type_implies_equation(claim_type: str) -> bool:
-        return claim_type in {
-            "equation_definition",
-            "equation_relation",
-            "equation_transformation",
-            "derivation_step",
-        }
+        return claim_type in EQUATION_CLAIM_TYPES
 
     @staticmethod
     def _link_figures_tables(role_labels: list[str], claim_type: str) -> tuple[list[str], list[str]]:

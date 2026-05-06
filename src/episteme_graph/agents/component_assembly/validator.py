@@ -46,7 +46,7 @@ class ComponentAssemblyValidator:
         available = _build_available_id_index(llm_input)
 
         for component in result.components:
-            issues += self._check_component(component, allowed_components, allowed_dependencies, component_ids)
+            issues += self._check_component(component, allowed_components, allowed_dependencies, component_ids, available)
             issues += self._check_required_fields(component, cartridge)
             if available:
                 issues += self._check_id_references(component, available)
@@ -62,6 +62,7 @@ class ComponentAssemblyValidator:
         allowed_components: set[str],
         allowed_dependencies: set[str],
         component_ids: set[str],
+        available: dict[str, set[str]] | None = None,
     ) -> list[ValidationIssue]:
         issues = []
         if component.component_type not in allowed_components:
@@ -79,7 +80,7 @@ class ComponentAssemblyValidator:
                     f"{component.component_id}.{field} must be a list",
                     f"components[{component.component_id}].{field}",
                 ))
-        issues += self._check_internal_flow(component)
+        issues += self._check_internal_flow(component, available)
         if not (0.0 <= component.confidence <= 1.0):
             issues.append(ValidationIssue(
                 "confidence_out_of_range",
@@ -123,6 +124,7 @@ class ComponentAssemblyValidator:
     def _check_internal_flow(
         self,
         component: ComponentRecord,
+        available: dict[str, set[str]] | None = None,
     ) -> list[ValidationIssue]:
         issues: list[ValidationIssue] = []
         flow = component.internal_flow or []
@@ -135,6 +137,14 @@ class ComponentAssemblyValidator:
                 "expose how inputs are combined into outputs.",
                 f"components[{component.component_id}].internal_flow",
             ))
+
+        # Build a union of all known artifact IDs for from/to validation (issue #262)
+        all_known_ids: set[str] = set()
+        if available:
+            for id_set in available.values():
+                if isinstance(id_set, set):
+                    all_known_ids.update(id_set)
+
         for idx, step in enumerate(flow):
             if not isinstance(step, dict):
                 issues.append(ValidationIssue(
@@ -152,8 +162,23 @@ class ComponentAssemblyValidator:
                     f"{component.component_id}.internal_flow[{idx}] is missing {missing}",
                     f"components[{component.component_id}].internal_flow[{idx}]",
                 ))
+            # Check from/to against known artifact IDs (issue #262)
+            if all_known_ids:
+                for field_name in ("from", "to"):
+                    ref_val = step.get(field_name, "")
+                    if ref_val and ref_val not in all_known_ids:
+                        # Only warn if it looks like an artifact ID (not a human-readable label)
+                        if any(ref_val.startswith(pfx) for pfx in
+                               ("claim_", "eq_", "ev_", "node_", "edge_", "step_", "deriv")):
+                            issues.append(ValidationIssue(
+                                "internal_flow_unresolved_ref",
+                                "warning",
+                                f"{component.component_id}.internal_flow[{idx}].{field_name}={ref_val!r} "
+                                "not found in available artifact IDs",
+                                f"components[{component.component_id}].internal_flow[{idx}].{field_name}",
+                            ))
+
         # If component has multi-input or multi-output, internal_flow should be present
-        # to explain how they relate.
         if not flow and (
             len(component.inputs) >= 2 or len(component.outputs) >= 2
         ) and component.component_type not in ("ClaimBundleComponent",):
@@ -170,95 +195,134 @@ class ComponentAssemblyValidator:
         component: ComponentRecord,
         available: dict[str, set[str]],
     ) -> list[ValidationIssue]:
-        """Cross-reference evidence_refs against known artifact IDs."""
+        """Cross-reference evidence_refs and typed linked IDs against known artifact IDs (issue #262)."""
         issues: list[ValidationIssue] = []
         refs = component.evidence_refs or {}
 
-        # Check claim_ids
+        # Check legacy evidence_refs.claim_ids
         known_claims = available.get("claim_ids", set())
         if known_claims:
-            unknown = [cid for cid in (refs.get("claim_ids") or []) if cid not in known_claims]
+            all_claim_ids = list(refs.get("claim_ids") or []) + list(component.linked_claim_ids or [])
+            unknown = [cid for cid in all_claim_ids if cid not in known_claims]
             for cid in unknown:
                 issues.append(ValidationIssue(
                     "unresolved_claim_id",
                     "error",
-                    f"{component.component_id}.evidence_refs.claim_ids contains unresolved ID: {cid!r}",
-                    f"components[{component.component_id}].evidence_refs.claim_ids",
+                    f"{component.component_id} contains unresolved claim ID: {cid!r}",
+                    f"components[{component.component_id}].linked_claim_ids",
                 ))
 
         # Check evidence_ids
         known_evidence = available.get("evidence_ids", set())
         if known_evidence:
-            unknown = [eid for eid in (refs.get("evidence_ids") or []) if eid not in known_evidence]
+            all_ev_ids = list(refs.get("evidence_ids") or []) + list(component.linked_evidence_ids or [])
+            unknown = [eid for eid in all_ev_ids if eid not in known_evidence]
             for eid in unknown:
                 issues.append(ValidationIssue(
                     "unresolved_evidence_id",
                     "error",
-                    f"{component.component_id}.evidence_refs.evidence_ids contains unresolved ID: {eid!r}",
-                    f"components[{component.component_id}].evidence_refs.evidence_ids",
+                    f"{component.component_id} contains unresolved evidence ID: {eid!r}",
+                    f"components[{component.component_id}].linked_evidence_ids",
                 ))
 
-        # Check equation_ids
+        # Check equation_ids (typed field takes priority)
         known_equations = available.get("equation_ids", set())
         if known_equations:
-            unknown = [eqid for eqid in (refs.get("equation_ids") or []) if eqid not in known_equations]
+            all_eq_ids = list(refs.get("equation_ids") or []) + list(component.linked_equation_ids or [])
+            unknown = [eqid for eqid in all_eq_ids if eqid not in known_equations]
             for eqid in unknown:
                 issues.append(ValidationIssue(
                     "unresolved_equation_id",
                     "error",
-                    f"{component.component_id}.evidence_refs.equation_ids contains unresolved ID: {eqid!r}",
-                    f"components[{component.component_id}].evidence_refs.equation_ids",
+                    f"{component.component_id} contains unresolved equation ID: {eqid!r}",
+                    f"components[{component.component_id}].linked_equation_ids",
+                ))
+
+        # Check derivation IDs (issue #262)
+        known_derivations = available.get("derivation_ids", set())
+        if known_derivations and component.linked_derivation_ids:
+            unknown = [did for did in component.linked_derivation_ids if did not in known_derivations]
+            for did in unknown:
+                issues.append(ValidationIssue(
+                    "unresolved_derivation_id",
+                    "error",
+                    f"{component.component_id} contains unresolved derivation ID: {did!r}",
+                    f"components[{component.component_id}].linked_derivation_ids",
                 ))
 
         # Check DSL node/edge refs
         dsl_refs = refs.get("dsl_refs") or {}
         known_dsl_nodes = available.get("dsl_node_ids", set())
         if known_dsl_nodes:
-            unknown = [nid for nid in (dsl_refs.get("node_ids") or []) if nid not in known_dsl_nodes]
+            all_node_ids = list(dsl_refs.get("node_ids") or []) + list(component.linked_dsl_node_ids or [])
+            unknown = [nid for nid in all_node_ids if nid not in known_dsl_nodes]
             for nid in unknown:
                 issues.append(ValidationIssue(
                     "unresolved_dsl_node_id",
                     "error",
-                    f"{component.component_id}.evidence_refs.dsl_refs.node_ids contains unresolved ID: {nid!r}",
-                    f"components[{component.component_id}].evidence_refs.dsl_refs.node_ids",
+                    f"{component.component_id} contains unresolved DSL node ID: {nid!r}",
+                    f"components[{component.component_id}].linked_dsl_node_ids",
                 ))
         known_dsl_edges = available.get("dsl_edge_ids", set())
         if known_dsl_edges:
-            unknown = [eid for eid in (dsl_refs.get("edge_ids") or []) if eid not in known_dsl_edges]
+            all_edge_ids = list(dsl_refs.get("edge_ids") or []) + list(component.linked_dsl_edge_ids or [])
+            unknown = [eid for eid in all_edge_ids if eid not in known_dsl_edges]
             for eid in unknown:
                 issues.append(ValidationIssue(
                     "unresolved_dsl_edge_id",
                     "error",
-                    f"{component.component_id}.evidence_refs.dsl_refs.edge_ids contains unresolved ID: {eid!r}",
-                    f"components[{component.component_id}].evidence_refs.dsl_refs.edge_ids",
+                    f"{component.component_id} contains unresolved DSL edge ID: {eid!r}",
+                    f"components[{component.component_id}].linked_dsl_edge_ids",
                 ))
 
-        # Detect summary-only component: no claim_ids and no evidence_ids
-        has_claim_link = bool(refs.get("claim_ids"))
-        has_evidence_link = bool(refs.get("evidence_ids"))
+        # Detect summary-only: no typed claim/evidence links in either legacy or new fields
+        has_claim_link = bool(refs.get("claim_ids")) or bool(component.linked_claim_ids)
+        has_evidence_link = bool(refs.get("evidence_ids")) or bool(component.linked_evidence_ids)
         if not has_claim_link and not has_evidence_link:
             issues.append(ValidationIssue(
                 "summary_only_component",
                 "warning",
-                f"{component.component_id} has no claim_ids or evidence_ids in evidence_refs (summary-only)",
+                f"{component.component_id} has no claim_ids or evidence_ids (summary-only)",
                 f"components[{component.component_id}].evidence_refs",
             ))
 
-        # Propagate review_status: if any referenced claim has non-auto review, flag component
-        known_claim_reviews = available.get("_claim_review_map", {})
+        # Component type-specific: equation/derivation dependency without linked IDs (issue #262)
+        eq_heavy_types = {"RelationComponent", "PaperRelationComponent", "DiagnosticComponent"}
+        deriv_types = {"RelationComponent", "MethodComponent"}
+        if component.component_type in eq_heavy_types and known_equations:
+            all_eq = list(refs.get("equation_ids") or []) + list(component.linked_equation_ids or [])
+            if not all_eq:
+                issues.append(ValidationIssue(
+                    "equation_dependent_component_missing_eq_ids",
+                    "warning",
+                    f"{component.component_id} ({component.component_type}) has no equation links",
+                    f"components[{component.component_id}].linked_equation_ids",
+                ))
+        if component.component_type in deriv_types and known_derivations:
+            if not component.linked_derivation_ids:
+                issues.append(ValidationIssue(
+                    "derivation_component_missing_derivation_ids",
+                    "warning",
+                    f"{component.component_id} ({component.component_type}) has no derivation links",
+                    f"components[{component.component_id}].linked_derivation_ids",
+                ))
+
+        # Propagate review_status from referenced claims to component (issue #262)
+        known_claim_reviews = available.get("_claim_review_map", {}) or {}
         if known_claim_reviews:
-            for cid in refs.get("claim_ids") or []:
+            all_claim_refs = list(refs.get("claim_ids") or []) + list(component.linked_claim_ids or [])
+            for cid in all_claim_refs:
                 review = known_claim_reviews.get(cid)
                 if review and review != "auto_accepted":
-                    comp_review = getattr(component, "review_notes", []) or []
-                    if not any("teacher_review" in n for n in comp_review):
+                    if component.review_status == "auto_accepted":
                         issues.append(ValidationIssue(
                             "review_required_claim_in_component",
                             "warning",
-                            f"{component.component_id} references claim {cid!r} with review_status={review!r}",
-                            f"components[{component.component_id}].evidence_refs.claim_ids",
+                            f"{component.component_id} references claim {cid!r} with review_status={review!r}"
+                            " but component.review_status is auto_accepted",
+                            f"components[{component.component_id}].review_status",
                         ))
-                        break
+                    break
 
         return issues
 

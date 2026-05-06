@@ -260,7 +260,8 @@ class ComponentAssemblyInputBuilder:
             return []
         ids = []
         for chain in getattr(derivations, "chains", []) or []:
-            chain_id = getattr(chain, "chain_id", None)
+            # DerivationChainRecord uses derivation_id, not chain_id (issue #262)
+            chain_id = getattr(chain, "derivation_id", None) or getattr(chain, "chain_id", None)
             if chain_id:
                 ids.append(chain_id)
             for step in getattr(chain, "steps", []) or []:

@@ -109,6 +109,18 @@ class ComponentRecord:
     confidence: float
     review_notes: list[str]
     internal_flow: list[dict] = field(default_factory=list)
+    # Typed linked IDs (issue #262)
+    linked_claim_ids: list[str] = field(default_factory=list)
+    linked_equation_ids: list[str] = field(default_factory=list)
+    linked_evidence_ids: list[str] = field(default_factory=list)
+    linked_derivation_ids: list[str] = field(default_factory=list)
+    linked_dsl_node_ids: list[str] = field(default_factory=list)
+    linked_dsl_edge_ids: list[str] = field(default_factory=list)
+    review_status: str = "teacher_review_required"
+    teaching_takeaway: str = ""
+    source_scope: dict = field(default_factory=dict)
+    assumptions: list[str] = field(default_factory=list)
+    approximations: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -138,7 +150,35 @@ class ComponentAssemblyResult:
 
     @classmethod
     def from_dict(cls, d: dict) -> "ComponentAssemblyResult":
-        components = [ComponentRecord(**c) for c in d.get("components", [])]
+        components = []
+        for c in d.get("components", []):
+            components.append(ComponentRecord(
+                component_id=c.get("component_id", ""),
+                component_type=c.get("component_type", ""),
+                label=c.get("label", ""),
+                summary=c.get("summary", ""),
+                inputs=list(c.get("inputs") or []),
+                outputs=list(c.get("outputs") or []),
+                preconditions=list(c.get("preconditions") or []),
+                cautions=list(c.get("cautions") or []),
+                dependencies=list(c.get("dependencies") or []),
+                evidence_refs=c.get("evidence_refs") or {},
+                reason=c.get("reason", ""),
+                confidence=float(c.get("confidence", 0.0)),
+                review_notes=list(c.get("review_notes") or []),
+                internal_flow=list(c.get("internal_flow") or []),
+                linked_claim_ids=list(c.get("linked_claim_ids") or []),
+                linked_equation_ids=list(c.get("linked_equation_ids") or []),
+                linked_evidence_ids=list(c.get("linked_evidence_ids") or []),
+                linked_derivation_ids=list(c.get("linked_derivation_ids") or []),
+                linked_dsl_node_ids=list(c.get("linked_dsl_node_ids") or []),
+                linked_dsl_edge_ids=list(c.get("linked_dsl_edge_ids") or []),
+                review_status=c.get("review_status", "teacher_review_required"),
+                teaching_takeaway=c.get("teaching_takeaway", ""),
+                source_scope=c.get("source_scope") or {},
+                assumptions=list(c.get("assumptions") or []),
+                approximations=list(c.get("approximations") or []),
+            ))
         issues = [ValidationIssue(**i) for i in d.get("validation_issues", [])]
         return cls(
             document_id=d["document_id"],
