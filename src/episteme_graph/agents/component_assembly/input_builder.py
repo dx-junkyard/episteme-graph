@@ -105,18 +105,21 @@ class ComponentAssemblyInputBuilder:
             return []
         result = []
         for record in equations.equations[:limit]:
+            src = record.source_extraction
+            sem = record.semantics
+            block_id = src.source_location.get("block_id", "")
             result.append({
                 "equation_id": record.equation_id,
-                "block_id": record.block_id,
-                "role": record.equation_role.primary,
-                "summary": record.summary,
+                "block_id": block_id,
+                "role": sem.equation_type,
+                "summary": sem.summary,
                 "defined_symbols": [
                     {"symbol": s.symbol, "definition_status": s.definition_status}
-                    for s in record.defined_symbols
+                    for s in sem.defined_symbols
                 ],
-                "local_assumptions": [a.text for a in record.local_assumptions],
-                "from_equations": record.derivation_links.from_equations,
-                "confidence": record.equation_role.confidence,
+                "local_assumptions": list(sem.assumptions),
+                "from_equations": list(sem.input_equation_ids),
+                "confidence": sem.confidence,
             })
         return result
 
@@ -229,11 +232,13 @@ class ComponentAssemblyInputBuilder:
             return []
         result = []
         for record in getattr(equations, "equations", []) or []:
+            src = record.source_extraction
+            sem = record.semantics
             result.append({
                 "equation_id": record.equation_id,
-                "block_id": record.block_id,
-                "role": record.equation_role.primary,
-                "confidence": record.equation_role.confidence,
+                "block_id": src.source_location.get("block_id", ""),
+                "role": sem.equation_type,
+                "confidence": sem.confidence,
             })
         return result
 

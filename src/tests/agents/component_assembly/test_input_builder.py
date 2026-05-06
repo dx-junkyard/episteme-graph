@@ -3,7 +3,15 @@ from episteme_graph.agents.claim_qualification.schema import ClaimQualificationR
 from episteme_graph.agents.component_assembly.input_builder import ComponentAssemblyInputBuilder
 from episteme_graph.agents.component_assembly.schema import CartridgeContext
 from episteme_graph.agents.dsl_linking.schema import DSLEdge, DSLLinkingResult, DSLNode, DSL_VERSION
-from episteme_graph.agents.equation_semantics.schema import DefinedSymbol, DerivationLinks, EquationRolePrediction, EquationSemanticsRecord, EquationSemanticsResult
+from episteme_graph.agents.equation_semantics.schema import (
+    DefinedSymbol,
+    EquationConfidencePolicy,
+    EquationRecord,
+    EquationReconstruction,
+    EquationSemantics,
+    EquationSemanticsResult,
+    EquationSourceExtraction,
+)
 from episteme_graph.agents.thesis_reconstruction.schema import ThesisReconstructionResult, THESIS_VERSION
 
 BUILDER = ComponentAssemblyInputBuilder()
@@ -22,13 +30,44 @@ def _qualified():
 
 
 def _equations():
-    record = EquationSemanticsRecord(
-        "eq_1_1", "e1", "sec_1", "Derivation", "1.1", "R = A", None, "R = A",
-        EquationRolePrediction("equation_relation", [], 0.9, "relation"),
-        [DefinedSymbol("R", "used", None)], [], DerivationLinks([], [], []),
-        "Relation for R.", []
+    source_extraction = EquationSourceExtraction(
+        raw_text="R = A",
+        latex=None,
+        plain_text="R = A",
+        source_location={"page": 1, "section_id": "sec_1", "block_id": "e1", "bbox": None},
+        extraction_source="pdf_text_layer",
+        extraction_status="complete",
     )
-    return EquationSemanticsResult("doc", None, [record])
+    reconstruction = EquationReconstruction.make_none()
+    semantics = EquationSemantics(
+        equation_type="relation",
+        secondary_types=[],
+        semantic_status="source_backed",
+        confidence=0.9,
+        reason="Relation for R.",
+        defined_symbols=[DefinedSymbol("R", "used", None)],
+        used_symbols=[],
+        assumptions=[],
+        input_equation_ids=[],
+        output_equation_ids=[],
+        linked_text_spans=[],
+        source_evidence_ids=[],
+        linked_claim_ids=[],
+        summary="Relation for R.",
+        review_flags=[],
+    )
+    confidence_policy = EquationConfidencePolicy.derive(source_extraction, reconstruction, semantics)
+    record = EquationRecord(
+        equation_id="eq_1_1",
+        document_id="doc",
+        label="1.1",
+        candidate_trace_ids=[],
+        source_extraction=source_extraction,
+        reconstruction=reconstruction,
+        semantics=semantics,
+        confidence_policy=confidence_policy,
+    )
+    return EquationSemanticsResult("doc", None, [], [record])
 
 
 def _thesis():
@@ -57,6 +96,8 @@ def test_build_packages_inputs_and_allowed_vocabularies():
     llm_input = BUILDER.build(_qualified(), _equations(), _thesis(), _dsl(), cartridge)
     assert llm_input.accepted_claims[0]["claim_id"] == "claim:b1:s1"
     assert llm_input.equations[0]["equation_id"] == "eq_1_1"
+    assert llm_input.equations[0]["block_id"] == "e1"
+    assert llm_input.equations[0]["role"] == "relation"
     assert llm_input.dsl_nodes[0]["node_id"] == "n1"
     assert "PaperRelationComponent" in llm_input.allowed_component_types
     assert "requires" in llm_input.allowed_dependency_types
