@@ -153,6 +153,10 @@ class ExportValidationGate:
         # 5. Required artifact presence
         self._check_required_artifacts(artifacts, errors)
 
+        # 6. source-backed claim must reference EvidenceRegistry (#257)
+        if claim_objects and evidence:
+            self._check_source_backed_claims(claim_objects, evidence, warnings)
+
         # 6. Determine status
         summary = ValidationSummary(
             error_count=len(errors),
@@ -382,6 +386,53 @@ class ExportValidationGate:
                     path=f"$.edges[{edge.edge_id}].to_node_id",
                     source_stage="export_validation",
                 ))
+
+    def _check_source_backed_claims(
+        self,
+        claim_objects,
+        evidence,
+        warnings: list,
+    ) -> None:
+        """Warn on source_backed claims that have no source_evidence_ids (#257).
+
+        A source_backed claim without source_evidence_ids means the claim cannot
+        be traced back to a PDF-derived Evidence record. This breaks the assumption
+        that source_backed ↔ EvidenceRegistry linkage is verified.
+        """
+        known_evidence_ids: set[str] = {
+            r.evidence_id
+            for r in (getattr(evidence, "records", []) or [])
+        }
+        for claim in getattr(claim_objects, "claims", []) or []:
+            support = getattr(claim, "support_status", "") or ""
+            if support != "source_backed":
+                continue
+            ev_ids = list(getattr(claim, "source_evidence_ids", []) or [])
+            if not ev_ids:
+                warnings.append(ValidationEntry(
+                    code="SOURCE_BACKED_CLAIM_NO_EVIDENCE_IDS",
+                    message=(
+                        f"source_backed claim {getattr(claim, 'claim_id', '?')!r} "
+                        "has no source_evidence_ids; PDF evidence cannot be verified"
+                    ),
+                    artifact="claim_object_builder",
+                    path=f"$.claims[{getattr(claim, 'claim_id', '?')}].source_evidence_ids",
+                    source_stage="export_validation",
+                ))
+            else:
+                # Warn if any referenced evidence_id is not in the registry
+                for eid in ev_ids:
+                    if known_evidence_ids and eid not in known_evidence_ids:
+                        warnings.append(ValidationEntry(
+                            code="SOURCE_BACKED_CLAIM_UNRESOLVED_EVIDENCE_ID",
+                            message=(
+                                f"source_backed claim {getattr(claim, 'claim_id', '?')!r} "
+                                f"references evidence {eid!r} not in EvidenceRegistry"
+                            ),
+                            artifact="claim_object_builder",
+                            path=f"$.claims[{getattr(claim, 'claim_id', '?')}].source_evidence_ids",
+                            source_stage="export_validation",
+                        ))
 
     def _check_required_artifacts(
         self,

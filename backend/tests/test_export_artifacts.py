@@ -217,6 +217,55 @@ class TestEvidenceExport:
         # LLM-style commentary should not be silently treated as a source quote.
         assert "evidence_not_source_verified" in evs[0]["review_reason"]
 
+    def test_fallback_evidence_moves_text_to_analysis_note_not_evidence_text(self):
+        """Issue #257: legacy claim.evidence_text (may be span.reason) must not
+        pollute evidence_text in the export bundle. It goes to analysis_note."""
+        ea = _import_artifacts()
+        llm_reason = "This claim is an approximation valid in the heavy-quark limit."
+        evs = ea.build_evidence_export(None, document_id="doc_001", fallback_claims=[
+            {"claim_id": "c2", "evidence_text": llm_reason,
+             "document_id": "doc_001", "source_scope": {"section_id": "sec_1"}},
+        ])
+        assert len(evs) == 1
+        ev = evs[0]
+        # evidence_text must be empty — the text is NOT PDF-derived (#257)
+        assert ev["evidence_text"] == ""
+        # text is preserved in analysis_note for audit purposes
+        assert ev["analysis_note"] == llm_reason
+        assert ev["needs_review"] is True
+        assert ev["extraction_source"] == "reconstructed"
+        assert "legacy_evidence_text_in_analysis_note" in ev["review_reason"]
+
+    def test_fallback_evidence_qualification_reason_in_review_note(self):
+        """Issue #257: qualification_reason stored in source_scope by persist_theory_claims
+        should appear in review_note of the fallback evidence row."""
+        ea = _import_artifacts()
+        q_reason = "LLM classified this as an approximation with confidence 0.9"
+        evs = ea.build_evidence_export(None, document_id="doc_001", fallback_claims=[
+            {
+                "claim_id": "c3",
+                "evidence_text": "some evidence text",
+                "document_id": "doc_001",
+                "source_scope": {
+                    "section_id": "sec_2",
+                    "block_id": "blk_007",
+                    "qualification_reason": q_reason,
+                },
+            },
+        ])
+        assert len(evs) == 1
+        assert evs[0]["review_note"] == q_reason
+
+    def test_fallback_skips_claims_with_empty_evidence_text(self):
+        """Issue #257: after persist_theory_claims fix, new DB rows have empty
+        evidence_text. Fallback should produce no evidence rows for those."""
+        ea = _import_artifacts()
+        evs = ea.build_evidence_export(None, document_id="doc_001", fallback_claims=[
+            {"claim_id": "c4", "evidence_text": "",
+             "document_id": "doc_001", "source_scope": {}},
+        ])
+        assert evs == []
+
 
 # ---------------------------------------------------------------------------
 # Derivation chains

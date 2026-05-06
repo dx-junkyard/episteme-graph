@@ -929,7 +929,9 @@ def _is_low_value_claim_text(text: str) -> bool:
 def _normalize_claim_payload(raw: dict, chunk: dict, strict: bool = True) -> dict | None:
     if not isinstance(raw, dict):
         raise ValueError("claim item must be an object")
-    required = ("claim_type", "text", "support_status", "evidence_text")
+    # evidence_text は不要フィールド化 (#257)。
+    # source_evidence_ids / source_scope を source-backed 判定の正規参照とする。
+    required = ("claim_type", "text", "support_status")
     missing = [field for field in required if raw.get(field) in (None, "")]
     if strict and missing:
         raise ValueError(f"claim missing required fields: {', '.join(missing)}")
@@ -939,14 +941,17 @@ def _normalize_claim_payload(raw: dict, chunk: dict, strict: bool = True) -> dic
     text = _clean_pg_text(raw.get("text") or raw.get("normalized_text") or "").strip()
     if _is_low_value_claim_text(text):
         return None
+    # evidence_text はオプション。空文字は許容する (#257)。
     evidence = _clean_pg_text(raw.get("evidence_text") or "").strip()
-    if not evidence and strict:
-        raise ValueError("claim missing required field: evidence_text")
-    if not evidence and not strict:
-        evidence = text[:360]
     support_status = str(raw.get("support_status") or "").strip()
     if support_status not in _SUPPORT_STATUS_VALUES:
         raise ValueError(f"invalid support_status: {support_status}")
+    # source_backed だが evidence_text も source_evidence_ids も両方空の場合は警告 (#257)
+    source_evidence_ids = [str(i) for i in (raw.get("source_evidence_ids") or []) if i]
+    if support_status == "source_backed" and not evidence and not source_evidence_ids:
+        logger.warning(
+            "source_backed claim has neither evidence_text nor source_evidence_ids: %.60s", text
+        )
     review_status = str(raw.get("review_status") or "teacher_review_required").strip()
     if review_status not in ("teacher_review_required", "needs_revision", "rejected"):
         review_status = "teacher_review_required"
