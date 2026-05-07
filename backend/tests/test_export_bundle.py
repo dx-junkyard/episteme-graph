@@ -365,6 +365,35 @@ class TestExportClaimsAndComponents:
         assert "evidence_claims" in e
         assert "review_status" in e
 
+    def test_row_to_component_graph_backward_compat_from_to_keys(self):
+        """Issue #266: _row_to_component_graph must read edges saved with from/to/type keys."""
+        mod = _get_export_helpers()
+        raw_row = (
+            "uuid-graph-002",
+            "doc_002",
+            json.dumps({"level": "paper"}),
+            json.dumps({
+                "nodes": [
+                    {"id": "db-uuid-001", "agent_component_id": "comp_A", "type": "component"},
+                    {"id": "db-uuid-002", "agent_component_id": "comp_B", "type": "component"},
+                ],
+                "edges": [
+                    {
+                        "from": "db-uuid-001",
+                        "to": "db-uuid-002",
+                        "type": "depends_on",
+                        "reason": "B depends on A",
+                    }
+                ],
+            }),
+        )
+        graph = mod._row_to_component_graph(raw_row)
+        assert len(graph["edges"]) == 1
+        e = graph["edges"][0]
+        assert e["source"] == "db-uuid-001", f"source should be 'db-uuid-001', got '{e['source']}'"
+        assert e["target"] == "db-uuid-002", f"target should be 'db-uuid-002', got '{e['target']}'"
+        assert e["edge_type"] == "depends_on"
+
     def test_build_evidence_snippets_from_claims(self):
         mod = _get_export_helpers()
         claims = [

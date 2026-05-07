@@ -197,6 +197,28 @@ def test_orchestrator_runs_all_stages_in_order():
 
     structure_result = _Result()
 
+    @dataclass
+    class _ComponentGraphResult:
+        document_id: str = "doc"
+        graph_schema_version: str = "0.1.0"
+        cartridge_id: str | None = None
+        nodes: list = field(default_factory=list)
+        edges: list = field(default_factory=list)
+        review_notes: list = field(default_factory=list)
+        confidence: float = 0.9
+        validation_issues: list = field(default_factory=list)
+
+        def to_dict(self):
+            return {"nodes": [], "edges": [], "document_id": self.document_id,
+                    "graph_schema_version": self.graph_schema_version,
+                    "cartridge_id": self.cartridge_id,
+                    "review_notes": self.review_notes,
+                    "confidence": self.confidence,
+                    "validation_issues": []}
+
+        def to_graph_payload(self):
+            return {"graph_schema_version": "0.1.0", "nodes": [], "edges": []}
+
     agents = {
         "DocumentStructureAgent": _MockAgent(structure_result),
         "PaperSkeletonAgent": _MockAgent(_Result()),
@@ -206,6 +228,7 @@ def test_orchestrator_runs_all_stages_in_order():
         "ThesisReconstructionAgent": _MockAgent(_Result()),
         "DSLLinkingAgent": _MockAgent(_Result()),
         "ComponentAssemblyAgent": _MockAgent(_Result()),
+        "ComponentGraphAgent": _MockAgent(_ComponentGraphResult()),
         "CourseMappingAgent": _MockAgent(_CourseMappingResult()),
     }
 
@@ -255,6 +278,7 @@ def test_orchestrator_runs_all_stages_in_order():
         "dsl_linking",
         "dsl_embedding",
         "component_assembly",
+        "component_graph",
         "course_mapping",
         "blueprint",
         "persist_claims_components_graph",
@@ -268,6 +292,207 @@ def test_orchestrator_runs_all_stages_in_order():
     fake_persistence["persist_components"].assert_called_once()
     fake_persistence["persist_component_graph"].assert_called_once()
     fake_persistence["persist_document_embedding"].assert_called_once()
+
+
+# --- issue #266: ComponentGraphAgent pipeline integration ----------------
+
+
+def test_issue_266_component_graph_stage_in_pipeline_stages():
+    """PIPELINE_STAGES must include 'component_graph' between component_assembly and course_mapping."""
+    from core.document_pipeline.orchestrator import PIPELINE_STAGES
+
+    assert "component_graph" in PIPELINE_STAGES
+    ca_idx = PIPELINE_STAGES.index("component_assembly")
+    cg_idx = PIPELINE_STAGES.index("component_graph")
+    cm_idx = PIPELINE_STAGES.index("course_mapping")
+    assert ca_idx < cg_idx < cm_idx, (
+        "component_graph must come after component_assembly and before course_mapping"
+    )
+
+
+def test_issue_266_orchestrator_passes_component_graph_result_to_persist():
+    """persist_component_graph must be called with component_graph_result kwarg."""
+    from core.document_pipeline import orchestrator
+
+    @dataclass
+    class _R:
+        document_id: str = "doc"
+        nodes: list = field(default_factory=list)
+        edges: list = field(default_factory=list)
+        components: list = field(default_factory=list)
+        qualified_spans: list = field(default_factory=list)
+        equations: list = field(default_factory=list)
+        sections: list = field(default_factory=lambda: [_Section("s1", "Intro", order=1, page_start=1)])
+        blocks: list = field(default_factory=lambda: [_Block("b1", 1, 0, "Hello.", section_id="s1")])
+        review_notes: list = field(default_factory=list)
+
+    @dataclass
+    class _CGR:
+        document_id: str = "doc"
+        graph_schema_version: str = "0.1.0"
+        cartridge_id: str | None = None
+        nodes: list = field(default_factory=list)
+        edges: list = field(default_factory=list)
+        review_notes: list = field(default_factory=list)
+        confidence: float = 0.9
+        validation_issues: list = field(default_factory=list)
+
+        def to_dict(self):
+            return {"nodes": [], "edges": [], "document_id": self.document_id,
+                    "graph_schema_version": self.graph_schema_version,
+                    "cartridge_id": self.cartridge_id,
+                    "review_notes": self.review_notes,
+                    "confidence": self.confidence,
+                    "validation_issues": []}
+
+        def to_graph_payload(self):
+            return {"graph_schema_version": "0.1.0", "nodes": [], "edges": []}
+
+    @dataclass
+    class _CMR:
+        document_id: str = "doc"
+        cartridge_id: str | None = None
+        topics: list = field(default_factory=list)
+        validation_issues: list = field(default_factory=list)
+
+    component_graph_instance = _CGR()
+
+    agents = {
+        "DocumentStructureAgent": _MockAgent(_R()),
+        "PaperSkeletonAgent": _MockAgent(_R()),
+        "RhetoricalRoleAgent": _MockAgent(_R()),
+        "ClaimQualificationAgent": _MockAgent(_R()),
+        "EquationSemanticsAgent": _MockAgent(_R()),
+        "ThesisReconstructionAgent": _MockAgent(_R()),
+        "DSLLinkingAgent": _MockAgent(_R()),
+        "ComponentAssemblyAgent": _MockAgent(_R()),
+        "ComponentGraphAgent": _MockAgent(component_graph_instance),
+        "CourseMappingAgent": _MockAgent(_CMR()),
+    }
+
+    persist_mock = MagicMock(return_value="graph-1")
+    fake_persistence = {
+        "persist_source_chunks": MagicMock(return_value=[
+            {"chunk_id": "c1", "chunk_index": 0, "section_id": "s1",
+             "block_ids": ["b1"], "page_start": 1, "page_end": 1, "text": "Hello"}
+        ]),
+        "persist_qualified_claims": MagicMock(return_value=[]),
+        "persist_components": MagicMock(return_value={}),
+        "persist_component_graph": persist_mock,
+        "persist_document_embedding": MagicMock(return_value="emb-1"),
+        "upsert_analysis_run": MagicMock(return_value="run-1"),
+    }
+
+    with patch.multiple(orchestrator, **fake_persistence):
+        result = orchestrator.run_document_pipeline(
+            pdf_bytes=b"%PDF-1.4 fake",
+            document_id="doc-266",
+            material_id="mat-1",
+            agents=agents,
+        )
+
+    assert result.final_stage == "completed"
+    # persist_component_graph must be called with component_graph_result
+    call_kwargs = persist_mock.call_args.kwargs
+    assert "component_graph_result" in call_kwargs, (
+        "persist_component_graph must receive component_graph_result kwarg"
+    )
+    assert call_kwargs["component_graph_result"] is component_graph_instance
+
+
+def test_issue_266_persist_component_graph_new_schema():
+    """persist_component_graph with ComponentGraphResult produces source_component_id/target_component_id edges."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    from episteme_graph.agents.component_graph.schema import (
+        ComponentGraphEdge,
+        ComponentGraphNode,
+        ComponentGraphResult,
+        GRAPH_SCHEMA_VERSION,
+    )
+    from core.document_pipeline.persistence import persist_component_graph
+
+    cg_result = ComponentGraphResult(
+        document_id="doc-266",
+        graph_schema_version=GRAPH_SCHEMA_VERSION,
+        cartridge_id=None,
+        nodes=[
+            ComponentGraphNode("comp_A", "Component A", "TheoryComponent"),
+            ComponentGraphNode("comp_B", "Component B", "TheoryComponent"),
+        ],
+        edges=[
+            ComponentGraphEdge(
+                edge_id="e1",
+                source="comp_A",
+                target="comp_B",
+                edge_type="REQUIRES",
+                support_status="dependency_declared",
+                evidence_claims=["claim_001"],
+                reasoning="B requires A",
+                confidence=1.0,
+            )
+        ],
+        review_notes=[],
+        confidence=0.9,
+    )
+
+    id_map = {"comp_A": "db-uuid-A", "comp_B": "db-uuid-B"}
+
+    @dataclass
+    class _FakeDSL:
+        nodes: list = field(default_factory=list)
+        edges: list = field(default_factory=list)
+
+    saved_graph = {}
+
+    def fake_session():
+        class _Row:
+            def __getitem__(self, idx):
+                return "graph-id-001"
+
+        class _Exec:
+            def fetchone(self):
+                return _Row()
+
+        class _Session:
+            def execute(self, *a, **kw):
+                params = kw or {}
+                # Capture graph_json from the last positional params dict
+                if a and len(a) >= 2 and isinstance(a[1], dict):
+                    import json
+                    saved_graph.update(json.loads(a[1].get("graph_json", "{}")))
+                return _Exec()
+
+            def commit(self):
+                pass
+
+            def rollback(self):
+                pass
+
+            def close(self):
+                pass
+
+        return _Session()
+
+    with patch("core.document_pipeline.persistence._pg_session", fake_session):
+        persist_component_graph(
+            document_id="doc-266",
+            component_id_map=id_map,
+            component_result=None,
+            dsl_result=_FakeDSL(),
+            component_graph_result=cg_result,
+        )
+
+    # Verify that if the session captured graph_json, it has new schema edges
+    if saved_graph.get("edges"):
+        e = saved_graph["edges"][0]
+        assert "source_component_id" in e, "Edge must use source_component_id, not 'from'"
+        assert "target_component_id" in e, "Edge must use target_component_id, not 'to'"
+        assert e.get("relation") == "REQUIRES"
+        assert e.get("edge_type") == "REQUIRES"
+        assert e["source_component_id"] == "db-uuid-A"
+        assert e["target_component_id"] == "db-uuid-B"
 
 
 # --- regression-style structural assertions (issue #226) ----------------

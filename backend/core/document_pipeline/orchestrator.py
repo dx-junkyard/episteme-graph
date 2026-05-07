@@ -1,8 +1,9 @@
-"""8 agent pipeline orchestrator (issue #226).
+"""8 agent pipeline orchestrator (issue #226, #266).
 
 PDF → DocumentStructure → SourceChunking → SourceEmbedding → PaperSkeleton →
 RhetoricalRole → ClaimQualification → EquationSemantics → ThesisReconstruction →
-DSLLinking → DSLEmbedding → ComponentAssembly → Persist → Completed
+DSLLinking → DSLEmbedding → ComponentAssembly → ComponentGraph →
+CoursMapping → Blueprint → ExportValidation → Persist → Completed
 """
 from __future__ import annotations
 
@@ -47,6 +48,7 @@ PIPELINE_STAGES = [
     "dsl_linking",
     "dsl_embedding",
     "component_assembly",
+    "component_graph",
     "course_mapping",
     "blueprint",
     "export_validation",
@@ -85,6 +87,7 @@ def _import_agents() -> dict:
     from episteme_graph.agents.claim_object_builder.builder import ClaimObjectBuilder
     from episteme_graph.agents.claim_qualification.agent import ClaimQualificationAgent
     from episteme_graph.agents.component_assembly.agent import ComponentAssemblyAgent
+    from episteme_graph.agents.component_graph.agent import ComponentGraphAgent
     from episteme_graph.agents.course_mapping.agent import CourseMappingAgent
     from episteme_graph.agents.derivation_chain.agent import DerivationChainAgent
     from episteme_graph.agents.document_structure.agent import DocumentStructureAgent
@@ -105,6 +108,7 @@ def _import_agents() -> dict:
         "ThesisReconstructionAgent": ThesisReconstructionAgent,
         "DSLLinkingAgent": DSLLinkingAgent,
         "ComponentAssemblyAgent": ComponentAssemblyAgent,
+        "ComponentGraphAgent": ComponentGraphAgent,
         "EvidenceRegistryBuilder": EvidenceRegistryBuilder,
         "ClaimObjectBuilder": ClaimObjectBuilder,
         "DerivationChainAgent": DerivationChainAgent,
@@ -599,6 +603,45 @@ def run_document_pipeline(
             "components": len(component_result.components), "total": 1, "processed": 1,
         })
 
+        # ── Stage 12a: component_graph (hybrid deterministic/LLM edge builder) ─
+        component_graph_artifact = artifact("component_graph")
+        if component_graph_artifact:
+            component_graph_result = _from_agent_dict("component_graph", component_graph_artifact)
+            logger.info("Resuming document pipeline: loaded component_graph artifact for document %s", document_id)
+        else:
+            report_start("component_graph", total=1, unit="llm_call")
+            try:
+                cg_agent = _instantiate(agent_classes["ComponentGraphAgent"])
+                # Flatten claims for Material 4 context
+                flat_claims = [
+                    {"claim_id": c.claim_id, "text": c.text}
+                    for c in (getattr(claim_objects, "claims", []) or [])
+                ]
+                component_graph_result = cg_agent.run(
+                    components=component_result,
+                    dsl=dsl,
+                    derivations=derivations,
+                    claims=flat_claims,
+                    cartridge_id=cartridge_id,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "component_graph stage failed (non-fatal): document=%s material=%s error=%s",
+                    document_id, material_id, exc,
+                )
+                # フォールバック: ノードのみ、エッジなし
+                from episteme_graph.agents.component_graph.schema import ComponentGraphResult
+                component_graph_result = ComponentGraphResult.make_fallback(
+                    document_id, cartridge_id, str(exc)
+                )
+            save_artifact("component_graph", component_graph_result)
+        report_done("component_graph", {
+            "nodes": len(getattr(component_graph_result, "nodes", []) or []),
+            "edges": len(getattr(component_graph_result, "edges", []) or []),
+            "total": 1,
+            "processed": 1,
+        })
+
         # ── Stage 12b: course_mapping (deterministic component → topic map) ─
         course_mapping_artifact = artifact("course_mapping")
         if course_mapping_artifact:
@@ -746,6 +789,7 @@ def run_document_pipeline(
                     component_result=component_result,
                     dsl_result=dsl,
                     course_id=course_id,
+                    component_graph_result=component_graph_result,
                 )
                 save_artifact("persist_claims_components_graph", {
                     "claims": result.claim_count,
@@ -869,6 +913,9 @@ def _from_agent_dict(stage: str, value: dict) -> Any:
     if stage == "component_assembly":
         from episteme_graph.agents.component_assembly.schema import ComponentAssemblyResult
         return ComponentAssemblyResult.from_dict(value)
+    if stage == "component_graph":
+        from episteme_graph.agents.component_graph.schema import ComponentGraphResult
+        return ComponentGraphResult.from_dict(value)
     if stage == "evidence_registry":
         from episteme_graph.agents.evidence_registry.schema import EvidenceRegistryResult
         return EvidenceRegistryResult.from_dict(value)
