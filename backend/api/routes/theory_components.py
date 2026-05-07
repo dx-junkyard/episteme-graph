@@ -732,11 +732,31 @@ def _source_scope_for_chunk(chunk: dict, level: str = "chunk") -> dict:
     }
 
 
+def _normalize_source_scope(value: Any, *, document_id: str = "", chunk_id: str = "") -> dict:
+    scope = _json_value(value, {})
+    if not isinstance(scope, dict):
+        scope = {}
+    normalized = {
+        "level": str(scope.get("level") or "chunk"),
+        "document_id": str(scope.get("document_id") or document_id or ""),
+        "section_id": str(scope.get("section_id") or ""),
+        "section_title": str(scope.get("section_title") or ""),
+        "section_level": int(scope.get("section_level") or 0),
+        "section_order": int(scope.get("section_order") or 0),
+        "chunk_id": str(scope.get("chunk_id") or chunk_id or ""),
+        "chunks": [str(c) for c in (scope.get("chunks") or ([chunk_id] if chunk_id else [])) if str(c).strip()],
+        "pages": [int(p) for p in (scope.get("pages") or []) if p is not None],
+        "equations": [str(e) for e in (scope.get("equations") or []) if str(e).strip()],
+        "claims": [str(c) for c in (scope.get("claims") or []) if str(c).strip()],
+    }
+    return normalized
+
+
 def _row_to_claim(row: Any) -> ClaimOut:
     return ClaimOut(**{
         "claim_id": str(row[0]),
         "document_id": row[1] or "",
-        "source_scope": _json_value(row[3], {}),
+        "source_scope": _normalize_source_scope(row[3], document_id=row[1] or "", chunk_id=str(row[2] or "")),
         "claim_type": row[4] or "diagnostic_claim",
         "text": row[5] or "",
         "normalized_text": row[6] or "",

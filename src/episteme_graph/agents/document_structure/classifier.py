@@ -49,6 +49,12 @@ _MATH_SYMBOLS = frozenset(
 # Footnote-number prefix: "1 ", "* ", "† "
 _FOOTNOTE_PREFIX_RE = re.compile(r"^[\d\*†‡§¶]+\s")
 
+# Latin words that are likely prose. OCR-broken math often has one or zero
+# readable words mixed with many digits, brackets, and operators.
+_PROSE_WORD_RE = re.compile(r"[A-Za-z]{3,}")
+_LATIN_TOKEN_RE = re.compile(r"[A-Za-z]+")
+_JAPANESE_TEXT_RE = re.compile(r"[ぁ-んァ-ヶ一-鿿]{2,}")
+
 
 class BlockClassifier:
     """RawBlock のリストを受け取り TypedBlock のリストを返す。"""
@@ -264,6 +270,14 @@ class BlockClassifier:
             if ratio > self.MIN_MATH_SYMBOL_RATIO:
                 return True
 
+        # OCR-damaged display math often loses labels/operators but remains
+        # mostly non-prose: many digits/brackets/punctuation and few readable
+        # Latin words. Treat these short blocks as equations so the vision
+        # reconstruction layer can inspect their bbox instead of letting broken
+        # math leak into body text.
+        if self._looks_like_symbolic_non_prose_block(text):
+            return True
+
         # Centered, contains "=" or math, few words
         words = text.split()
         if (
@@ -282,6 +296,52 @@ class BlockClassifier:
                     return True
 
         return False
+
+    @staticmethod
+    def _looks_like_symbolic_non_prose_block(text: str) -> bool:
+        compact = "".join(text.split())
+        if len(compact) < 6 or len(compact) > 120:
+            return False
+
+        prose_words = _PROSE_WORD_RE.findall(text)
+        japanese_runs = _JAPANESE_TEXT_RE.findall(text)
+        japanese_chars = sum(len(run) for run in japanese_runs)
+
+        symbolic_chars = sum(
+            1
+            for c in compact
+            if c.isdigit() or c in _MATH_SYMBOLS or c in "()[]{}.,;:'\"+-*/\\_^&|=<>"
+        )
+        symbolic_ratio = symbolic_chars / len(compact)
+        latin_tokens = _LATIN_TOKEN_RE.findall(text)
+        latin_chars = sum(len(token) for token in latin_tokens)
+        single_letter_latin_chars = sum(1 for token in latin_tokens if len(token) == 1)
+        short_latin_chars = sum(len(token) for token in latin_tokens if len(token) <= 2)
+        letter_like_math_ratio = (
+            (single_letter_latin_chars + short_latin_chars * 0.5) / latin_chars
+            if latin_chars
+            else 0.0
+        )
+        has_math_hint = (
+            any(c.isdigit() for c in compact)
+            or any(c in _MATH_SYMBOLS for c in compact)
+            or any(c in compact for c in "=<>+-*/^_∫∑∞")
+        )
+        if not has_math_hint:
+            return False
+
+        # Clear prose guardrails. They can be overridden only by very symbolic
+        # OCR output, because damaged equations may contain bogus tokens such as
+        # "ndp" or "yes" while still being mostly brackets/operators/variables.
+        if len(prose_words) >= 2 and symbolic_ratio < 0.50 and letter_like_math_ratio < 0.45:
+            return False
+        if (len(japanese_runs) >= 2 or japanese_chars >= 6) and symbolic_ratio < 0.55:
+            return False
+
+        return (
+            symbolic_ratio >= 0.35
+            or (symbolic_ratio >= 0.25 and letter_like_math_ratio >= 0.45)
+        )
 
     # ------------------------------------------------------------------
     # Footnote detection

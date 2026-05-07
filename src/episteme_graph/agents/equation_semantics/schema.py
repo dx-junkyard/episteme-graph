@@ -77,6 +77,8 @@ CANDIDATE_REVIEW_REASONS = [
     "equation_body_missing",
     "unparsed_math",
     "ambiguous_math_text",
+    "pdf_text_layer_untrusted",
+    "inline_pdf_math_untrusted",
 ]
 
 DETECTION_METHODS = [
@@ -182,6 +184,7 @@ class EquationSourceExtraction:
     extraction_status: str  # one of EXTRACTION_STATUSES
     needs_math_review: bool = False
     review_reason: list[str] = field(default_factory=list)
+    source_image: dict | None = None  # cropped equation image for UI/OCR audit
 
 
 # ---------------------------------------------------------------------------
@@ -273,9 +276,7 @@ class EquationConfidencePolicy:
         is_reconstruction_based = (
             semantics.semantic_status == "reconstruction_based"
             or reconstruction.status != "none"
-            and source_extraction.extraction_status in (
-                "missing", "label_only", "fragment_only"
-            )
+            or source_extraction.needs_math_review
         )
         must_not = is_reconstruction_based
         can_claim = (
@@ -284,7 +285,14 @@ class EquationConfidencePolicy:
             and not source_extraction.needs_math_review
             and semantics.semantic_status not in ("unknown", "reconstruction_based")
         )
-        can_derivation = not must_not
+        can_derivation = (
+            not must_not
+            or (
+                reconstruction.status != "none"
+                and reconstruction.confidence >= 0.7
+                and semantics.semantic_status in ("reconstruction_based", "context_inferred")
+            )
+        )
         display_note = must_not or source_extraction.needs_math_review
         return cls(
             can_support_claim=can_claim,
@@ -365,12 +373,13 @@ class EquationSemanticsResult:
             src = r.source_extraction
             rec = r.reconstruction
 
-            # latex / plain_text: source_extraction 優先、なければ reconstruction から
-            latex = src.latex
-            plain_text = src.plain_text or src.raw_text
-            if not latex and rec.status != "none":
+            # latex / plain_text: trusted source_extraction only when available.
+            # PDF-derived math marked needs_math_review is audit text, not display math;
+            # expose reconstructed math separately and never fall back to raw_text.
+            latex = None if src.needs_math_review else src.latex
+            plain_text = None if src.needs_math_review else src.plain_text
+            if rec.status != "none":
                 latex = rec.latex
-            if not plain_text and rec.status != "none":
                 plain_text = rec.plain_text
 
             # defined / used / introduced symbols
@@ -389,6 +398,7 @@ class EquationSemanticsResult:
                 "latex": latex,
                 "plain_text": plain_text,
                 "source_location": dict(src.source_location or {}),
+                "source_image": dict(src.source_image or {}) if src.source_image else None,
                 "extraction_source": src.extraction_source,
                 "extraction_status": src.extraction_status,
                 "review_reason": list(src.review_reason),
@@ -496,6 +506,7 @@ def _record_from_dict(d: dict) -> EquationRecord:
         extraction_status=src_raw.get("extraction_status", "unparsed"),
         needs_math_review=bool(src_raw.get("needs_math_review", False)),
         review_reason=list(src_raw.get("review_reason", [])),
+        source_image=src_raw.get("source_image") if isinstance(src_raw.get("source_image"), dict) else None,
     )
     rec_raw = d.get("reconstruction", {})
     reconstruction = EquationReconstruction(

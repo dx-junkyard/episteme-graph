@@ -421,6 +421,10 @@ class LectureFormulaItem(BaseModel):
     is_display: bool = False  # True: ブロック数式（独立行）, False: インライン数式
     label: str | None = None  # 論文中の式番号（例: 1.1）
     block_id: str | None = None
+    source_image: dict | None = None  # EquationSemanticAgent の bbox crop 表示用
+    source_location: dict | None = None
+    needs_math_review: bool = False
+    review_reason: list[str] = Field(default_factory=list)
 
 
 class LectureSegment(BaseModel):

@@ -16,7 +16,7 @@ import threading
 import time
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy import text as sa_text
 
 from dependencies import ROLE_SYSTEM_ADMIN, _require_teacher
@@ -49,11 +49,32 @@ from core.document_sections import enrich_chunks_with_sections
 from core.llm import generate_text, get_llm_params
 from core.personas import course_persona_settings, normalize_persona_id, persona_prompt
 from core.postgres import get_session as _pg_session
+from core.storage import get_storage_client
 from core.tts import TtsFatalError, generate_tts_audio
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Lecture Script Studio"])
+
+
+DOCUMENT_PIPELINE_STAGE_LABELS: dict[str, str] = {
+    "document_structure": "DocumentStructureAgent",
+    "paper_skeleton": "PaperSkeletonAgent",
+    "rhetorical_role": "RhetoricalRoleAgent",
+    "claim_qualification": "ClaimQualificationAgent",
+    "equation_semantics": "EquationSemanticsAgent",
+    "evidence_registry": "EvidenceRegistryBuilder",
+    "claim_object_builder": "ClaimObjectBuilder",
+    "derivation_chain": "DerivationChainAgent",
+    "figure_table_semantics": "FigureTableSemanticsAgent",
+    "thesis_reconstruction": "ThesisReconstructionAgent",
+    "dsl_linking": "DSLLinkingAgent",
+    "component_assembly": "ComponentAssemblyAgent",
+    "component_graph": "ComponentGraphAgent",
+    "course_mapping": "CourseMappingAgent",
+    "blueprint": "BlueprintAgent",
+    "export_validation": "ExportValidationGate",
+}
 
 
 def _save_lecture_studio_settings(course_id: str, course_data: dict, settings: dict[str, str]) -> None:
@@ -166,6 +187,8 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
 
         chunks = []
         graph_structure_cache: dict[str, dict] = {}
+        document_ids = sorted({str(row[7]) for row in rows if row[7]})
+        equation_previews = _load_equation_formula_previews(session, document_ids)
         for row in rows:
             raw_text = row[2] or ""
             display_text = row[3] or raw_text
@@ -173,14 +196,22 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
             formulas = row[5] if row[5] else []
             # 旧フォーマット（$...$）のデータをプレースホルダー方式に正規化
             display_text, formulas = normalize_to_placeholder_format(display_text, formulas)
+            material_id = row[6] or ""
+            document_id = str(row[7]) if row[7] else ""
+            formulas = _merge_equation_formula_previews(
+                formulas,
+                document_id=document_id,
+                page_start=row[8],
+                page_end=row[9],
+                equation_previews=equation_previews,
+            )
+            display_text = _replace_equation_preview_text(display_text, formulas)
             knowledge_graph = _json_obj(row[14])
             graph_elements = _derive_chunk_graph_elements(
                 f"{raw_text}\n{display_text}",
                 knowledge_graph,
                 formulas,
             )
-            material_id = row[6] or ""
-            document_id = str(row[7]) if row[7] else ""
             graph_structure = {}
             if document_id:
                 if document_id not in graph_structure_cache:
@@ -220,6 +251,167 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
         return enrich_chunks_with_sections(chunks)
     finally:
         session.close()
+
+
+def _load_equation_formula_previews(session, document_ids: list[str]) -> dict[str, list[dict]]:
+    """Load EquationSemanticAgent crop previews from the latest artifacts."""
+    if not document_ids:
+        return {}
+    placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
+    params = {f"doc_{i}": doc_id for i, doc_id in enumerate(document_ids)}
+    rows = session.execute(
+        sa_text(f"""
+            SELECT DISTINCT ON (document_id)
+                   document_id, stage_outputs
+            FROM document_analysis_runs
+            WHERE document_id IN ({placeholders})
+            ORDER BY document_id, created_at DESC
+        """),
+        params,
+    ).fetchall()
+    out: dict[str, list[dict]] = {}
+    for row in rows:
+        doc_id = str(row[0]) if row[0] else ""
+        stage_outputs = _json_obj(row[1])
+        artifacts = stage_outputs.get("_artifacts") if isinstance(stage_outputs.get("_artifacts"), dict) else {}
+        eq_artifact = artifacts.get("equation_semantics") if isinstance(artifacts, dict) else None
+        if not isinstance(eq_artifact, dict):
+            continue
+        previews: list[dict] = []
+        for record in eq_artifact.get("equations") or []:
+            if not isinstance(record, dict):
+                continue
+            src = record.get("source_extraction") or {}
+            if not isinstance(src, dict):
+                continue
+            source_image = src.get("source_image")
+            if not isinstance(source_image, dict) or not source_image.get("data_base64"):
+                continue
+            rec = record.get("reconstruction") or {}
+            if not isinstance(rec, dict):
+                rec = {}
+            source_location = src.get("source_location") if isinstance(src.get("source_location"), dict) else {}
+            previews.append({
+                "id": record.get("equation_id") or f"eq_{len(previews)}",
+                "latex": rec.get("latex") or src.get("latex") or src.get("plain_text") or "",
+                "spoken": rec.get("plain_text") or src.get("plain_text") or "",
+                "is_display": True,
+                "label": record.get("label"),
+                "block_id": source_location.get("block_id"),
+                "source_location": source_location,
+                "source_image": source_image,
+                "raw_text": src.get("raw_text") or "",
+                "needs_math_review": bool(src.get("needs_math_review", False)),
+                "review_reason": list(src.get("review_reason", [])) if isinstance(src.get("review_reason"), list) else [],
+            })
+        if previews:
+            out[doc_id] = previews
+    return out
+
+
+def _merge_equation_formula_previews(
+    formulas: list[dict],
+    *,
+    document_id: str,
+    page_start: int | None,
+    page_end: int | None,
+    equation_previews: dict[str, list[dict]],
+) -> list[dict]:
+    if not document_id:
+        return formulas
+    previews = equation_previews.get(document_id) or []
+    if not previews:
+        return formulas
+    merged = [dict(f) for f in formulas if isinstance(f, dict)]
+    by_block = {str(f.get("block_id")): f for f in merged if f.get("block_id")}
+    by_id = {str(f.get("id")): f for f in merged if f.get("id")}
+    by_label = {str(f.get("label")): f for f in merged if f.get("label")}
+    for preview in previews:
+        if not _equation_preview_matches_chunk(preview, page_start, page_end, by_block):
+            continue
+        target = None
+        block_id = str(preview.get("block_id") or "")
+        label = str(preview.get("label") or "")
+        eq_id = str(preview.get("id") or "")
+        if block_id:
+            target = by_block.get(block_id)
+        if target is None and eq_id:
+            target = by_id.get(eq_id)
+        if target is None and label:
+            target = by_label.get(label)
+        if target is None:
+            merged.append(dict(preview))
+            continue
+        target["source_image"] = preview.get("source_image")
+        target["source_location"] = preview.get("source_location")
+        target["needs_math_review"] = preview.get("needs_math_review", False)
+        target["review_reason"] = preview.get("review_reason") or []
+        if not target.get("latex") and preview.get("latex"):
+            target["latex"] = preview.get("latex")
+        if not target.get("spoken") and preview.get("spoken"):
+            target["spoken"] = preview.get("spoken")
+    return merged
+
+
+def _equation_preview_matches_chunk(
+    preview: dict,
+    page_start: int | None,
+    page_end: int | None,
+    formulas_by_block: dict[str, dict],
+) -> bool:
+    block_id = str(preview.get("block_id") or "")
+    if block_id and block_id in formulas_by_block:
+        return True
+    loc = preview.get("source_location") if isinstance(preview.get("source_location"), dict) else {}
+    page = loc.get("page")
+    try:
+        page_num = int(page)
+    except Exception:
+        return False
+    if page_start is None and page_end is None:
+        return False
+    start = page_start if page_start is not None else page_num
+    end = page_end if page_end is not None else start
+    return int(start) <= page_num <= int(end)
+
+
+def _replace_equation_preview_text(display_text: str, formulas: list[dict]) -> str:
+    """Replace broken PDF math snippets in display text with formula placeholders."""
+    if not display_text or not formulas:
+        return display_text
+    updated = display_text
+    for formula in formulas:
+        if not isinstance(formula, dict):
+            continue
+        raw_text = str(formula.get("raw_text") or "").strip()
+        formula_id = str(formula.get("id") or "").strip()
+        if not raw_text or not formula_id:
+            continue
+        placeholder = formula_id if formula_id.startswith("[[") else f"[[{formula_id}]]"
+        variants = _equation_text_variants(raw_text)
+        # Replace longer variants first so multi-line equations collapse before
+        # shorter subfragments can leave broken residue in the text.
+        for variant in sorted(variants, key=len, reverse=True):
+            if len(variant.strip()) < 4:
+                continue
+            updated = updated.replace(variant, placeholder)
+    return updated
+
+
+def _equation_text_variants(raw_text: str) -> list[str]:
+    text = str(raw_text or "").strip()
+    if not text:
+        return []
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    variants = {
+        text,
+        "\n".join(lines),
+        "\n\n".join(lines),
+        " ".join(lines),
+    }
+    # PyMuPDF block text is sometimes persisted after chunk joining with blank
+    # lines around each block; keep variants intentionally small and exact.
+    return [v for v in variants if v]
 
 
 def _json_obj(value: object) -> dict:
@@ -1381,6 +1573,241 @@ def reanalyze_course_structure(
         "task_id": task_id,
         "course_id": course_id,
         "total_materials": len(material_ids),
+        "status": "pending",
+    }
+
+
+# ---------------------------------------------------------------------------
+# 5b. 新 Agent Pipeline のコース単位実行
+# ---------------------------------------------------------------------------
+
+
+def _course_pipeline_documents(course_data: dict) -> list[dict]:
+    sources = course_data.get("sources", []) if isinstance(course_data, dict) else []
+    material_ids = [
+        str(s.get("material_id")).strip()
+        for s in sources
+        if isinstance(s, dict) and s.get("material_id")
+    ]
+    material_ids = list(dict.fromkeys(mid for mid in material_ids if mid))
+    if not material_ids:
+        return []
+
+    params = {f"mid_{i}": mid for i, mid in enumerate(material_ids)}
+    placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                f"""
+                SELECT id::text, COALESCE(source_path, ''), COALESCE(filename, title, 'document.pdf')
+                FROM documents
+                WHERE source_path IN ({placeholders})
+                ORDER BY created_at ASC
+                """
+            ),
+            params,
+        ).fetchall()
+    finally:
+        session.close()
+    return [
+        {"document_id": row[0], "material_id": row[1], "filename": row[2] or "document.pdf"}
+        for row in rows
+        if row[0] and row[1]
+    ]
+
+
+def _load_pipeline_pdf(material_id: str, filename: str) -> bytes:
+    storage = get_storage_client()
+    for object_name in (f"uploads/{material_id}.pdf", filename, material_id):
+        if not object_name:
+            continue
+        try:
+            return storage.get_object("raw-papers", object_name)
+        except Exception:
+            continue
+    raise FileNotFoundError(f"PDF object not found for material {material_id}")
+
+
+def _set_document_pipeline_status(document_id: str, status: str) -> None:
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text(
+                "UPDATE documents SET status = :status, updated_at = now() "
+                "WHERE id = CAST(:document_id AS uuid)"
+            ),
+            {"document_id": document_id, "status": status},
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.warning("Failed to update document status: document=%s status=%s", document_id, status, exc_info=True)
+    finally:
+        session.close()
+
+
+def _course_document_pipeline_worker(
+    *,
+    task_id: str,
+    course_id: str,
+    documents: list[dict],
+    target_stage: str | None,
+) -> None:
+    from core.document_pipeline import PipelineStageError, run_document_pipeline
+
+    total = len(documents)
+    label = DOCUMENT_PIPELINE_STAGE_LABELS.get(target_stage or "", "Agent Pipeline")
+    generated = 0
+    failed = 0
+    current_document = ""
+    current_stage = target_stage or "started"
+
+    def publish(status: str = "processing", error_message: str | None = None) -> None:
+        progress = int((generated + failed) / total * 100) if total else 100
+        update_background_task(
+            task_id,
+            status,
+            result_data={
+                "course_id": course_id,
+                "stage": current_stage,
+                "target_stage": target_stage or "",
+                "label": label,
+                "current_document_id": current_document,
+                "generated": generated,
+                "failed": failed,
+                "skipped": 0,
+                "total_documents": total,
+                "total_chunks": total,
+                "progress": progress,
+            },
+            error_message=error_message,
+        )
+
+    publish("processing")
+    try:
+        for index, doc in enumerate(documents, start=1):
+            current_document = doc["document_id"]
+            current_stage = target_stage or "document_pipeline"
+            publish("processing")
+            pdf_bytes = _load_pipeline_pdf(doc["material_id"], doc["filename"])
+            if target_stage is None:
+                _set_document_pipeline_status(doc["document_id"], "processing")
+
+            def on_stage(stage: str, info: dict) -> None:
+                nonlocal current_stage
+                current_stage = stage
+                stage_progress = int(info.get("progress") or 0) if isinstance(info, dict) else 0
+                overall = int(((index - 1) + (stage_progress / 100)) / total * 100) if total else 100
+                update_background_task(
+                    task_id,
+                    "processing",
+                    result_data={
+                        "course_id": course_id,
+                        "stage": stage,
+                        "target_stage": target_stage or "",
+                        "label": label,
+                        "current_document_id": current_document,
+                        "generated": generated,
+                        "failed": failed,
+                        "skipped": 0,
+                        "total_documents": total,
+                        "total_chunks": total,
+                        "progress": overall,
+                    },
+                )
+
+            run_document_pipeline(
+                pdf_bytes=pdf_bytes,
+                document_id=doc["document_id"],
+                material_id=doc["material_id"],
+                filename=doc["filename"],
+                course_id=course_id,
+                progress_callback=on_stage,
+                target_stage=target_stage,
+            )
+            if target_stage is None:
+                _set_document_pipeline_status(doc["document_id"], "completed")
+            generated += 1
+            publish("processing")
+    except Exception as exc:
+        failed += 1
+        stage = getattr(exc, "stage", current_stage) if isinstance(exc, PipelineStageError) else current_stage
+        logger.exception("Course document pipeline failed: task=%s course=%s stage=%s", task_id, course_id, stage)
+        current_stage = stage or "failed"
+        if target_stage is None and current_document:
+            _set_document_pipeline_status(current_document, "failed")
+        publish("failed", str(exc))
+        return
+
+    current_stage = target_stage or "completed"
+    publish("completed")
+
+
+@router.post("/courses/{course_id}/document-pipeline/run")
+def run_course_document_pipeline(
+    course_id: str,
+    body: dict | None = Body(default=None),
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """コース配下の document-first Agent Pipeline を起動する。
+
+    ``target_stage`` 指定時は、その stage だけを単独再実行してそこで終了する。
+    """
+    course_data = get_editable_course_data(current_user["id"], course_id)
+    if not course_data and current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        course_data = _get_system_admin_course_data(course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    target_stage = str((body or {}).get("target_stage") or "").strip() or None
+    if target_stage and target_stage not in DOCUMENT_PIPELINE_STAGE_LABELS:
+        raise HTTPException(status_code=400, detail="Unknown pipeline stage")
+
+    documents = _course_pipeline_documents(course_data)
+    if not documents:
+        raise HTTPException(status_code=400, detail="No source documents linked to this course")
+
+    active = get_active_task_for_course(course_id)
+    if active:
+        raise HTTPException(status_code=409, detail="Another course task is already running")
+
+    task_id = str(uuid.uuid4())[:12]
+    create_background_task(task_id, "document_pipeline", current_user["id"])
+    update_background_task(task_id, "pending", result_data={
+        "course_id": course_id,
+        "stage": target_stage or "queued",
+        "target_stage": target_stage or "",
+        "label": DOCUMENT_PIPELINE_STAGE_LABELS.get(target_stage or "", "Agent Pipeline"),
+        "generated": 0,
+        "failed": 0,
+        "skipped": 0,
+        "total_documents": len(documents),
+        "total_chunks": len(documents),
+        "progress": 0,
+    })
+
+    thread = threading.Thread(
+        target=_course_document_pipeline_worker,
+        kwargs={
+            "task_id": task_id,
+            "course_id": course_id,
+            "documents": documents,
+            "target_stage": target_stage,
+        },
+        daemon=True,
+    )
+    thread.start()
+
+    logger.info(
+        "course document pipeline accepted: task=%s course=%s docs=%d target_stage=%s by user=%s",
+        task_id, course_id, len(documents), target_stage or "full", current_user["id"],
+    )
+    return {
+        "task_id": task_id,
+        "course_id": course_id,
+        "total_documents": len(documents),
+        "target_stage": target_stage or "",
         "status": "pending",
     }
 

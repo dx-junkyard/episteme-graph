@@ -130,6 +130,7 @@ def run_document_pipeline(
     progress_callback: Callable[[str, dict], None] | None = None,
     agents: dict | None = None,
     resume: bool = True,
+    target_stage: str | None = None,
 ) -> DocumentPipelineResult:
     """新 pipeline 本体。同期実行。
 
@@ -152,11 +153,14 @@ def run_document_pipeline(
     if cartridge_id is None:
         cartridge_id = os.getenv("EPISTEME_DEFAULT_CARTRIDGE_ID") or None
 
+    if target_stage is not None and target_stage not in PIPELINE_STAGES:
+        raise ValueError(f"unknown pipeline stage: {target_stage}")
+
     previous_run = (
         get_latest_analysis_run(document_id=document_id, material_id=material_id)
         if resume and agents is None else None
     )
-    if previous_run and previous_run.get("status") == "completed":
+    if previous_run and previous_run.get("status") == "completed" and target_stage is None:
         previous_run = None
     previous_outputs = dict((previous_run or {}).get("stage_outputs") or {})
     previous_artifacts = dict(previous_outputs.get(ARTIFACTS_KEY) or {})
@@ -237,6 +241,30 @@ def run_document_pipeline(
     def artifact(stage: str) -> Any | None:
         return previous_artifacts.get(stage)
 
+    def should_use_artifact(stage: str) -> bool:
+        has_artifact = artifact(stage) is not None
+        if target_stage is not None and target_stage != stage and not has_artifact:
+            raise PipelineStageError(
+                stage,
+                f"required artifact '{stage}' is missing for single-stage run '{target_stage}'",
+            )
+        return target_stage != stage and has_artifact
+
+    def finish_target_stage(stage: str, payload: dict | None = None) -> bool:
+        if target_stage != stage:
+            return False
+        result.final_stage = stage
+        upsert_analysis_run(
+            run_id=run_id,
+            document_id=document_id,
+            material_id=material_id,
+            cartridge_id=cartridge_id,
+            status="completed",
+            current_stage=stage,
+            stage_outputs={stage: payload or {"status": "completed", "progress": 100}},
+        )
+        return True
+
     result = DocumentPipelineResult(
         document_id=document_id,
         material_id=material_id,
@@ -267,7 +295,7 @@ def run_document_pipeline(
 
         # ── Stage 2: document_structure ────────────────────────────────────
         structure_artifact = artifact("document_structure")
-        if structure_artifact:
+        if should_use_artifact("document_structure"):
             structure = _from_agent_dict("document_structure", structure_artifact)
             logger.info("Resuming document pipeline: loaded document_structure artifact for document %s", document_id)
         else:
@@ -285,10 +313,14 @@ def run_document_pipeline(
             "block_count": len(structure.blocks),
             "section_count": len(structure.sections),
         })
+        structure.document_id = document_id
+        structure.source_file = pdf_path
+        if finish_target_stage("document_structure", {"block_count": len(structure.blocks), "section_count": len(structure.sections)}):
+            return result
 
         # ── Stage 3: source_chunking ───────────────────────────────────────
         source_chunks_artifact = artifact("source_chunking")
-        if source_chunks_artifact:
+        if should_use_artifact("source_chunking"):
             source_chunks = _from_source_chunks(source_chunks_artifact)
             logger.info("Resuming document pipeline: loaded %d source chunks for document %s", len(source_chunks), document_id)
         else:
@@ -304,9 +336,11 @@ def run_document_pipeline(
                 "no source chunks produced from document structure",
             )
         report_done("source_chunking", {"chunk_count": len(source_chunks)})
+        if finish_target_stage("source_chunking", {"chunk_count": len(source_chunks)}):
+            return result
 
         # ── Stage 4: source_embedding ──────────────────────────────────────
-        if artifact("source_embedding"):
+        if should_use_artifact("source_embedding"):
             chunk_index = load_source_chunk_index(document_id=document_id)
             logger.info("Resuming document pipeline: loaded %d persisted chunks for document %s", len(chunk_index), document_id)
         else:
@@ -322,10 +356,12 @@ def run_document_pipeline(
             save_artifact("source_embedding", {"saved_chunks": len(chunk_index)})
         result.chunk_count = len(chunk_index)
         report_done("source_embedding", {"saved_chunks": len(chunk_index), "total": len(source_chunks), "processed": len(source_chunks)})
+        if finish_target_stage("source_embedding", {"saved_chunks": len(chunk_index), "total": len(source_chunks), "processed": len(source_chunks)}):
+            return result
 
         # ── Stage 5: paper_skeleton ────────────────────────────────────────
         skeleton_artifact = artifact("paper_skeleton")
-        if skeleton_artifact:
+        if should_use_artifact("paper_skeleton"):
             skeleton = _from_agent_dict("paper_skeleton", skeleton_artifact)
             logger.info("Resuming document pipeline: loaded paper_skeleton artifact for document %s", document_id)
         else:
@@ -338,10 +374,12 @@ def run_document_pipeline(
                 raise PipelineStageError("paper_skeleton", str(exc), cause=exc) from exc
             save_artifact("paper_skeleton", skeleton)
         report_done("paper_skeleton", {"document_id": document_id, "total": 1, "processed": 1})
+        if finish_target_stage("paper_skeleton", {"document_id": document_id, "total": 1, "processed": 1}):
+            return result
 
         # ── Stage 6: rhetorical_role ───────────────────────────────────────
         roles_artifact = artifact("rhetorical_role")
-        if roles_artifact:
+        if should_use_artifact("rhetorical_role"):
             roles = _from_agent_dict("rhetorical_role", roles_artifact)
             logger.info("Resuming document pipeline: loaded rhetorical_role artifact for document %s", document_id)
         else:
@@ -359,10 +397,12 @@ def run_document_pipeline(
                 raise PipelineStageError("rhetorical_role", str(exc), cause=exc) from exc
             save_artifact("rhetorical_role", roles)
         report_done("rhetorical_role", getattr(roles, "summary_stats", {}) or {})
+        if finish_target_stage("rhetorical_role", getattr(roles, "summary_stats", {}) or {}):
+            return result
 
         # ── Stage 7: claim_qualification ───────────────────────────────────
         qualified_artifact = artifact("claim_qualification")
-        if qualified_artifact:
+        if should_use_artifact("claim_qualification"):
             qualified = _from_agent_dict("claim_qualification", qualified_artifact)
             logger.info("Resuming document pipeline: loaded claim_qualification artifact for document %s", document_id)
         else:
@@ -381,10 +421,12 @@ def run_document_pipeline(
         report_done("claim_qualification", {
             "qualified_count": len(qualified.qualified_spans),
         })
+        if finish_target_stage("claim_qualification", {"qualified_count": len(qualified.qualified_spans)}):
+            return result
 
         # ── Stage 8: equation_semantics ────────────────────────────────────
         equations_artifact = artifact("equation_semantics")
-        if equations_artifact:
+        if should_use_artifact("equation_semantics"):
             equations = _from_agent_dict("equation_semantics", equations_artifact)
             logger.info("Resuming document pipeline: loaded equation_semantics artifact for document %s", document_id)
         else:
@@ -401,10 +443,12 @@ def run_document_pipeline(
                 raise PipelineStageError("equation_semantics", str(exc), cause=exc) from exc
             save_artifact("equation_semantics", equations)
         report_done("equation_semantics", {"equations": len(getattr(equations, "equations", []) or [])})
+        if finish_target_stage("equation_semantics", {"equations": len(getattr(equations, "equations", []) or [])}):
+            return result
 
         # ── Stage 8b: evidence_registry (deterministic, source-backed) ─────
         evidence_artifact = artifact("evidence_registry")
-        if evidence_artifact:
+        if should_use_artifact("evidence_registry"):
             evidence = _from_agent_dict("evidence_registry", evidence_artifact)
             logger.info("Resuming document pipeline: loaded evidence_registry artifact for document %s", document_id)
         else:
@@ -430,10 +474,12 @@ def run_document_pipeline(
             "total": 1,
             "processed": 1,
         })
+        if finish_target_stage("evidence_registry", {"records": len(getattr(evidence, "records", []) or []), "total": 1, "processed": 1}):
+            return result
 
         # ── Stage 8c: claim_object_builder (deterministic claims.json) ─────
         claim_object_artifact = artifact("claim_object_builder")
-        if claim_object_artifact:
+        if should_use_artifact("claim_object_builder"):
             claim_objects = _from_agent_dict("claim_object_builder", claim_object_artifact)
             logger.info("Resuming document pipeline: loaded claim_object_builder artifact for document %s", document_id)
         else:
@@ -459,10 +505,12 @@ def run_document_pipeline(
             "total": 1,
             "processed": 1,
         })
+        if finish_target_stage("claim_object_builder", {"claims": len(getattr(claim_objects, "claims", []) or []), "total": 1, "processed": 1}):
+            return result
 
         # ── Stage 8d: derivation_chain (deterministic from equation links) ─
         derivation_artifact = artifact("derivation_chain")
-        if derivation_artifact:
+        if should_use_artifact("derivation_chain"):
             derivations = _from_agent_dict("derivation_chain", derivation_artifact)
             logger.info("Resuming document pipeline: loaded derivation_chain artifact for document %s", document_id)
         else:
@@ -487,10 +535,12 @@ def run_document_pipeline(
             "total": 1,
             "processed": 1,
         })
+        if finish_target_stage("derivation_chain", {"chains": len(getattr(derivations, "chains", []) or []), "total": 1, "processed": 1}):
+            return result
 
         # ── Stage 8e: figure_table_semantics (caption-first deterministic) ─
         fig_tbl_artifact = artifact("figure_table_semantics")
-        if fig_tbl_artifact:
+        if should_use_artifact("figure_table_semantics"):
             fig_tbl = _from_agent_dict("figure_table_semantics", fig_tbl_artifact)
             logger.info("Resuming document pipeline: loaded figure_table_semantics artifact for document %s", document_id)
         else:
@@ -516,10 +566,12 @@ def run_document_pipeline(
             "total": 1,
             "processed": 1,
         })
+        if finish_target_stage("figure_table_semantics", {"figures": len(getattr(fig_tbl, "figures", []) or []), "tables": len(getattr(fig_tbl, "tables", []) or []), "total": 1, "processed": 1}):
+            return result
 
         # ── Stage 9: thesis_reconstruction ─────────────────────────────────
         thesis_artifact = artifact("thesis_reconstruction")
-        if thesis_artifact:
+        if should_use_artifact("thesis_reconstruction"):
             thesis = _from_agent_dict("thesis_reconstruction", thesis_artifact)
             logger.info("Resuming document pipeline: loaded thesis_reconstruction artifact for document %s", document_id)
         else:
@@ -535,10 +587,12 @@ def run_document_pipeline(
                 raise PipelineStageError("thesis_reconstruction", str(exc), cause=exc) from exc
             save_artifact("thesis_reconstruction", thesis)
         report_done("thesis_reconstruction", {"total": 1, "processed": 1})
+        if finish_target_stage("thesis_reconstruction", {"total": 1, "processed": 1}):
+            return result
 
         # ── Stage 10: dsl_linking ──────────────────────────────────────────
         dsl_artifact = artifact("dsl_linking")
-        if dsl_artifact:
+        if should_use_artifact("dsl_linking"):
             dsl = _from_agent_dict("dsl_linking", dsl_artifact)
             logger.info("Resuming document pipeline: loaded dsl_linking artifact for document %s", document_id)
         else:
@@ -557,10 +611,12 @@ def run_document_pipeline(
         report_done("dsl_linking", {
             "nodes": len(dsl.nodes), "edges": len(dsl.edges), "total": 1, "processed": 1,
         })
+        if finish_target_stage("dsl_linking", {"nodes": len(dsl.nodes), "edges": len(dsl.edges), "total": 1, "processed": 1}):
+            return result
 
         # ── Stage 11: dsl_embedding ────────────────────────────────────────
         report_start("dsl_embedding", total=1, unit="embedding")
-        if not artifact("dsl_embedding"):
+        if not should_use_artifact("dsl_embedding"):
             try:
                 dsl_text = dsl_result_to_search_text(dsl, document_id=document_id)
                 persist_document_embedding(
@@ -578,10 +634,12 @@ def run_document_pipeline(
                 # embedding は best-effort（agent pipeline 全体の致命傷にはしない）
                 logger.exception("dsl_embedding stage failed (non-fatal): document=%s material=%s error=%s", document_id, material_id, exc)
         report_done("dsl_embedding", {"total": 1, "processed": 1})
+        if finish_target_stage("dsl_embedding", {"total": 1, "processed": 1}):
+            return result
 
         # ── Stage 12: component_assembly ───────────────────────────────────
         component_artifact = artifact("component_assembly")
-        if component_artifact:
+        if should_use_artifact("component_assembly"):
             component_result = _from_agent_dict("component_assembly", component_artifact)
             logger.info("Resuming document pipeline: loaded component_assembly artifact for document %s", document_id)
         else:
@@ -603,10 +661,12 @@ def run_document_pipeline(
         report_done("component_assembly", {
             "components": len(component_result.components), "total": 1, "processed": 1,
         })
+        if finish_target_stage("component_assembly", {"components": len(component_result.components), "total": 1, "processed": 1}):
+            return result
 
         # ── Stage 12a: component_graph (hybrid deterministic/LLM edge builder) ─
         component_graph_artifact = artifact("component_graph")
-        if component_graph_artifact:
+        if should_use_artifact("component_graph"):
             component_graph_result = _from_agent_dict("component_graph", component_graph_artifact)
             logger.info("Resuming document pipeline: loaded component_graph artifact for document %s", document_id)
         else:
@@ -648,10 +708,12 @@ def run_document_pipeline(
             "total": 1,
             "processed": 1,
         })
+        if finish_target_stage("component_graph", {"nodes": len(getattr(component_graph_result, "nodes", []) or []), "edges": len(getattr(component_graph_result, "edges", []) or []), "total": 1, "processed": 1}):
+            return result
 
         # ── Stage 12b: course_mapping (deterministic component → topic map) ─
         course_mapping_artifact = artifact("course_mapping")
-        if course_mapping_artifact:
+        if should_use_artifact("course_mapping"):
             course_mapping = _from_agent_dict("course_mapping", course_mapping_artifact)
             logger.info("Resuming document pipeline: loaded course_mapping artifact for document %s", document_id)
         else:
@@ -676,10 +738,12 @@ def run_document_pipeline(
             "total": 1,
             "processed": 1,
         })
+        if finish_target_stage("course_mapping", {"topics": len(getattr(course_mapping, "topics", []) or []), "total": 1, "processed": 1}):
+            return result
 
         # ── Stage 12c: blueprint (narrative arc) ───────────────────────────
         blueprint_artifact_data = artifact("blueprint")
-        if blueprint_artifact_data:
+        if should_use_artifact("blueprint"):
             blueprint = _from_agent_dict("blueprint", blueprint_artifact_data)
             logger.info("Resuming document pipeline: loaded blueprint artifact for document %s", document_id)
         else:
@@ -703,10 +767,12 @@ def run_document_pipeline(
             "total": 1,
             "processed": 1,
         })
+        if finish_target_stage("blueprint", {"steps": len(getattr(blueprint, "narrative_arc", []) or []), "total": 1, "processed": 1}):
+            return result
 
         # ── Stage 12d: export_validation ───────────────────────────────────
         export_validation_artifact = artifact("export_validation")
-        if export_validation_artifact:
+        if should_use_artifact("export_validation"):
             validation_result_dict = export_validation_artifact
             logger.info("Resuming document pipeline: loaded export_validation artifact for document %s", document_id)
         else:
@@ -746,6 +812,8 @@ def run_document_pipeline(
             "total": 1,
             "processed": 1,
         })
+        if finish_target_stage("export_validation", {"status": validation_result_dict.get("status"), "error_count": (validation_result_dict.get("summary") or {}).get("error_count", 0), "warning_count": (validation_result_dict.get("summary") or {}).get("warning_count", 0), "total": 1, "processed": 1}):
+            return result
 
         # Block persist / completed if validation failed
         if validation_result_dict.get("status") == "failed_validation":
@@ -771,7 +839,7 @@ def run_document_pipeline(
 
         # ── Stage 13: persist_claims_components_graph ──────────────────────
         report_start("persist_claims_components_graph", total=3, unit="tables")
-        if artifact("persist_claims_components_graph"):
+        if should_use_artifact("persist_claims_components_graph"):
             persisted = artifact("persist_claims_components_graph") or {}
             result.claim_count = int(persisted.get("claims") or 0)
         else:
@@ -819,6 +887,8 @@ def run_document_pipeline(
             "total": 3,
             "processed": 3,
         })
+        if finish_target_stage("persist_claims_components_graph", {"claims": result.claim_count, "components": result.component_count, "total": 3, "processed": 3}):
+            return result
 
         # ── Stage 14: completed ────────────────────────────────────────────
         upsert_analysis_run(

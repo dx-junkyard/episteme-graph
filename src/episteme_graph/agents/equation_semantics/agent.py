@@ -12,9 +12,11 @@ from episteme_graph.agents.rhetorical_role.schema import RhetoricalRoleResult
 
 from .acceptance_gate import EquationAcceptanceGate
 from .cartridge_loader import CartridgeLoader
+from .image_extractor import EquationImageExtractor
 from .input_builder import EquationSemanticsInputBuilder
 from .llm_client import EquationSemanticsLLMClient
 from .prompt import EquationSemanticsPromptFactory
+from .reconstruction_layer import EquationReconstructionLayer
 from .repair import EquationSemanticsRepairer, _fallback_record, _parse_record
 from .schema import (
     CartridgeContext,
@@ -95,6 +97,8 @@ class EquationSemanticsAgent:
         self._cartridge_loader = CartridgeLoader(cartridge_base_dir)
         self._input_builder = EquationSemanticsInputBuilder()
         self._acceptance_gate = EquationAcceptanceGate()
+        self._reconstruction_layer = EquationReconstructionLayer()
+        self._image_extractor = EquationImageExtractor()
         self._prompt_factory = EquationSemanticsPromptFactory()
         self._llm_client = EquationSemanticsLLMClient(model=llm_model)
         self._validator = EquationSemanticsValidator()
@@ -122,17 +126,12 @@ class EquationSemanticsAgent:
 
         # Step 2: Acceptance gate (accepted / rejected / needs_merge / context_only / provisional を分類)
         classified_candidates = self._acceptance_gate.process(candidates)
-        accepted = [c for c in classified_candidates if c.acceptance_status == "accepted"]
-        provisional = [c for c in classified_candidates if c.acceptance_status == "provisional"]
+        classified_candidates = self._reconstruction_layer.prepare_candidates(classified_candidates)
+        reconstructable = self._reconstruction_layer.reconstructable_candidates(classified_candidates)
 
-        # Provisional candidates → minimal EquationRecord without LLM (issue #259)
-        provisional_records: list[EquationRecord] = [
-            _make_provisional_record(c) for c in provisional
-        ]
-
-        if not accepted:
+        if not reconstructable:
             logger.info(
-                "document=%s: all %d equation candidates were rejected/provisional by acceptance gate",
+                "document=%s: all %d equation candidates were rejected/context-only by acceptance gate",
                 structure.document_id,
                 len(classified_candidates),
             )
@@ -140,38 +139,71 @@ class EquationSemanticsAgent:
                 document_id=structure.document_id,
                 cartridge_id=cartridge.cartridge_id if cartridge else cartridge_id,
                 equation_candidates=classified_candidates,
-                equations=provisional_records,
+                equations=[],
             )
             result.validation_issues = self._validator.validate(result, cartridge)
             return result
 
-        # Step 3: LLM 入力構築 (accepted candidates のみ)
+        # Step 3: LLM 入力構築
+        # PDF 数式テキストは inline/display を問わず信用しない。accepted/provisional
+        # すべてを復元対象にし、source text は監査用にだけ保持する。
         llm_inputs = self._input_builder.build_llm_inputs(
-            structure, accepted, skeleton=skeleton, roles=roles, cartridge=cartridge
+            structure,
+            reconstructable,
+            skeleton=skeleton,
+            roles=roles,
+            cartridge=cartridge,
+            accepted_statuses={"accepted", "provisional"},
+            force_reconstruction=True,
         )
 
         # Step 4: LLM semantics analysis
-        candidate_by_block_id = {c.source_location.get("block_id"): c for c in accepted}
+        candidate_by_id = {c.candidate_id: c for c in reconstructable}
         records: list[EquationRecord] = []
         total = len(llm_inputs)
 
         for idx, llm_input in enumerate(llm_inputs, start=1):
-            candidate = candidate_by_block_id.get(llm_input.block_id)
+            candidate = candidate_by_id.get(llm_input.candidate_id)
+            image = self._image_extractor.crop_candidate(
+                getattr(structure, "source_file", None),
+                candidate.source_location if candidate else None,
+            )
             messages = self._prompt_factory.build_messages(llm_input, cartridge)
+            if image:
+                messages[-1]["content"] += (
+                    "\n\n## Equation Image\n"
+                    "A cropped image of the equation candidate is attached. "
+                    "Use the image as the primary source for LaTeX reconstruction; "
+                    "use surrounding text only for disambiguation."
+                )
             try:
-                raw_output = self._llm_client.generate(messages)
+                raw_output = self._llm_client.generate(
+                    messages,
+                    image=image.__dict__ if image else None,
+                )
+                if not image and llm_input.needs_reconstruction:
+                    raw_output["_vision_ocr"] = {
+                        "attempted": False,
+                        "used": False,
+                        "provider": None,
+                        "model": None,
+                        "reason": "equation_image_unavailable",
+                    }
             except Exception as exc:
                 logger.exception(
                     "Equation semantics failed for document=%s block_id=%s",
                     structure.document_id,
                     llm_input.block_id,
                 )
-                records.append(_fallback_record(llm_input, candidate, str(exc)))
+                fallback = _fallback_record(llm_input, candidate, str(exc))
+                _attach_source_image(fallback, image)
+                records.append(fallback)
                 if progress_callback:
                     progress_callback(idx, total)
                 continue
 
             record = _parse_record(raw_output, llm_input, candidate)
+            _attach_source_image(record, image)
             partial = EquationSemanticsResult(
                 document_id=structure.document_id,
                 cartridge_id=llm_input.cartridge_id,
@@ -195,7 +227,9 @@ class EquationSemanticsAgent:
                     llm_client=self._llm_client,
                     prompt_factory=self._prompt_factory,
                     validator=self._validator,
+                    image=image.__dict__ if image else None,
                 )
+                _attach_source_image(record, image)
             # accepted_equation_id を candidate に書き込む
             if candidate:
                 candidate.accepted_equation_id = record.equation_id
@@ -207,7 +241,7 @@ class EquationSemanticsAgent:
             document_id=structure.document_id,
             cartridge_id=cartridge.cartridge_id if cartridge else cartridge_id,
             equation_candidates=classified_candidates,
-            equations=provisional_records + records,
+            equations=records,
         )
         result.validation_issues = self._validator.validate(result, cartridge)
         return result
@@ -222,3 +256,18 @@ class EquationSemanticsAgent:
                 "Cartridge '%s' not found; proceeding without cartridge", cartridge_id
             )
             return None
+
+
+def _attach_source_image(record: EquationRecord, image: object | None) -> None:
+    if not image:
+        return
+    try:
+        record.source_extraction.source_image = {
+            "mime_type": getattr(image, "mime_type"),
+            "data_base64": getattr(image, "data_base64"),
+            "page": getattr(image, "page"),
+            "bbox": list(getattr(image, "bbox")),
+            "source": "equation_semantics_bbox_crop",
+        }
+    except Exception:
+        logger.warning("Failed to attach equation source image for %s", record.equation_id, exc_info=True)

@@ -199,12 +199,25 @@
             <div class="ls-action-menu">
               <button id="ls-pipeline-menu-btn" class="admin-action-btn ls-menu-trigger" type="button" disabled>パイプラインを実行 ▼</button>
               <div id="ls-pipeline-menu" class="ls-menu" hidden>
-                <button id="ls-reanalyze-structure-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>DSLを再解析</span></button>
-                <button id="ls-claims-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>構成要素を抽出（主張など）</span></button>
-                <button id="ls-components-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>論理要素を抽出</span></button>
-                <button id="ls-graph-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>グラフを更新</span></button>
+                <button id="ls-pipeline-full-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>パイプライン全実行</span></button>
+                <div class="ls-menu-group-label">個々のAgentを単独実行</div>
+                <button class="ls-menu-item ls-menu-item-indent ls-agent-stage-btn" type="button" data-stage="document_structure" disabled><span class="ls-step-mark"></span><span>DocumentStructureAgent</span></button>
+                <button class="ls-menu-item ls-menu-item-indent ls-agent-stage-btn" type="button" data-stage="paper_skeleton" disabled><span class="ls-step-mark"></span><span>PaperSkeletonAgent</span></button>
+                <button class="ls-menu-item ls-menu-item-indent ls-agent-stage-btn" type="button" data-stage="rhetorical_role" disabled><span class="ls-step-mark"></span><span>RhetoricalRoleAgent</span></button>
+                <button class="ls-menu-item ls-menu-item-indent ls-agent-stage-btn" type="button" data-stage="claim_qualification" disabled><span class="ls-step-mark"></span><span>ClaimQualificationAgent</span></button>
+                <button class="ls-menu-item ls-menu-item-indent ls-agent-stage-btn" type="button" data-stage="equation_semantics" disabled><span class="ls-step-mark"></span><span>EquationSemanticsAgent</span></button>
+                <button class="ls-menu-item ls-menu-item-indent ls-agent-stage-btn" type="button" data-stage="evidence_registry" disabled><span class="ls-step-mark"></span><span>EvidenceRegistryBuilder</span></button>
+                <button class="ls-menu-item ls-menu-item-indent ls-agent-stage-btn" type="button" data-stage="claim_object_builder" disabled><span class="ls-step-mark"></span><span>ClaimObjectBuilder</span></button>
+                <button class="ls-menu-item ls-menu-item-indent ls-agent-stage-btn" type="button" data-stage="derivation_chain" disabled><span class="ls-step-mark"></span><span>DerivationChainAgent</span></button>
+                <button class="ls-menu-item ls-menu-item-indent ls-agent-stage-btn" type="button" data-stage="figure_table_semantics" disabled><span class="ls-step-mark"></span><span>FigureTableSemanticsAgent</span></button>
+                <button class="ls-menu-item ls-menu-item-indent ls-agent-stage-btn" type="button" data-stage="thesis_reconstruction" disabled><span class="ls-step-mark"></span><span>ThesisReconstructionAgent</span></button>
+                <button class="ls-menu-item ls-menu-item-indent ls-agent-stage-btn" type="button" data-stage="dsl_linking" disabled><span class="ls-step-mark"></span><span>DSLLinkingAgent</span></button>
+                <button class="ls-menu-item ls-menu-item-indent ls-agent-stage-btn" type="button" data-stage="component_assembly" disabled><span class="ls-step-mark"></span><span>ComponentAssemblyAgent</span></button>
+                <button class="ls-menu-item ls-menu-item-indent ls-agent-stage-btn" type="button" data-stage="component_graph" disabled><span class="ls-step-mark"></span><span>ComponentGraphAgent</span></button>
+                <button class="ls-menu-item ls-menu-item-indent ls-agent-stage-btn" type="button" data-stage="course_mapping" disabled><span class="ls-step-mark"></span><span>CourseMappingAgent</span></button>
+                <button class="ls-menu-item ls-menu-item-indent ls-agent-stage-btn" type="button" data-stage="blueprint" disabled><span class="ls-step-mark"></span><span>BlueprintAgent</span></button>
+                <button class="ls-menu-item ls-menu-item-indent ls-agent-stage-btn" type="button" data-stage="export_validation" disabled><span class="ls-step-mark"></span><span>ExportValidationGate</span></button>
                 <div class="ls-menu-divider"></div>
-                <button id="ls-generate-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>スクリプトを生成</span></button>
                 <button id="ls-audio-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>音声を生成</span></button>
               </div>
             </div>
