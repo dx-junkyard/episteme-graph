@@ -166,6 +166,169 @@ def persist_source_chunks(
         session.close()
 
 
+def persist_equation_previews_to_chunks(document_id: str, equations: Any) -> int:
+    """Persist reconstructed equation previews into chunk display_text/formulas.
+
+    ``chunks.text`` remains the raw source chunk for auditability. This updates
+    display-oriented fields so other UI/API consumers that use chunks directly
+    see formula placeholders instead of broken PDF math fragments.
+    """
+    previews = _equation_previews(equations)
+    if not previews:
+        return 0
+
+    session = _pg_session()
+    updated = 0
+    try:
+        rows = session.execute(
+            sa_text(
+                """
+                SELECT id, display_text, spoken_text, formulas, page_start, page_end
+                FROM chunks
+                WHERE document_id = CAST(:doc_id AS uuid)
+                ORDER BY chunk_index
+                """
+            ),
+            {"doc_id": document_id},
+        ).fetchall()
+        for row in rows:
+            chunk_id = str(row[0])
+            display_text = row[1] or ""
+            spoken_text = row[2] or display_text
+            formulas = row[3] if isinstance(row[3], list) else []
+            page_start = row[4]
+            page_end = row[5]
+
+            merged = _merge_equation_previews_for_chunk(formulas, previews, page_start, page_end)
+            patched_display = _replace_equation_preview_text(display_text, merged)
+            patched_spoken = _spoken_text_from_formulas(patched_display, merged)
+            if patched_display == display_text and _json_dumps(merged) == _json_dumps(formulas):
+                continue
+
+            session.execute(
+                sa_text(
+                    """
+                    UPDATE chunks
+                    SET display_text = :display_text,
+                        spoken_text = :spoken_text,
+                        formulas = CAST(:formulas AS jsonb),
+                        latex_formulas = :latex_formulas
+                    WHERE id = CAST(:chunk_id AS uuid)
+                    """
+                ),
+                {
+                    "chunk_id": chunk_id,
+                    "display_text": _strip_nuls(patched_display),
+                    "spoken_text": _strip_nuls(patched_spoken),
+                    "formulas": _json_dumps(merged),
+                    "latex_formulas": [
+                        _strip_nuls(str(f.get("latex") or ""))
+                        for f in merged
+                        if isinstance(f, dict) and f.get("latex")
+                    ],
+                },
+            )
+            updated += 1
+        session.commit()
+        if updated:
+            logger.info("Persisted equation previews into %d chunks for document %s", updated, document_id)
+        return updated
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _equation_previews(equations: Any) -> list[dict]:
+    records = getattr(equations, "equations", []) or []
+    previews: list[dict] = []
+    for record in records:
+        src = getattr(record, "source_extraction", None)
+        rec = getattr(record, "reconstruction", None)
+        if not src:
+            continue
+        source_location = dict(getattr(src, "source_location", {}) or {})
+        source_image = getattr(src, "source_image", None)
+        latex = getattr(rec, "latex", None) if rec and getattr(rec, "status", "none") != "none" else getattr(src, "latex", None)
+        plain_text = getattr(rec, "plain_text", None) if rec and getattr(rec, "status", "none") != "none" else getattr(src, "plain_text", None)
+        previews.append({
+            "id": getattr(record, "equation_id", "") or f"eq_{len(previews)}",
+            "latex": latex or "",
+            "spoken": plain_text or "",
+            "is_display": True,
+            "label": getattr(record, "label", None),
+            "block_id": source_location.get("block_id"),
+            "source_location": source_location,
+            "source_image": source_image if isinstance(source_image, dict) else None,
+            "raw_text": getattr(src, "raw_text", "") or "",
+            "needs_math_review": bool(getattr(src, "needs_math_review", False)),
+            "review_reason": list(getattr(src, "review_reason", []) or []),
+        })
+    return previews
+
+
+def _merge_equation_previews_for_chunk(
+    formulas: list[dict],
+    previews: list[dict],
+    page_start: int | None,
+    page_end: int | None,
+) -> list[dict]:
+    merged = [dict(f) for f in formulas if isinstance(f, dict)]
+    by_block = {str(f.get("block_id")): f for f in merged if f.get("block_id")}
+    by_id = {str(f.get("id")): f for f in merged if f.get("id")}
+    for preview in previews:
+        if not _preview_matches_page(preview, page_start, page_end):
+            continue
+        target = by_block.get(str(preview.get("block_id") or "")) or by_id.get(str(preview.get("id") or ""))
+        if target is None:
+            merged.append(dict(preview))
+        else:
+            target.update({k: v for k, v in preview.items() if v not in (None, "", [])})
+    return merged
+
+
+def _preview_matches_page(preview: dict, page_start: int | None, page_end: int | None) -> bool:
+    loc = preview.get("source_location") if isinstance(preview.get("source_location"), dict) else {}
+    try:
+        page = int(loc.get("page"))
+    except Exception:
+        return False
+    if page_start is None and page_end is None:
+        return False
+    start = page_start if page_start is not None else page
+    end = page_end if page_end is not None else start
+    return int(start) <= page <= int(end)
+
+
+def _replace_equation_preview_text(display_text: str, formulas: list[dict]) -> str:
+    updated = display_text or ""
+    for formula in formulas or []:
+        if not isinstance(formula, dict):
+            continue
+        raw_text = str(formula.get("raw_text") or "").strip()
+        formula_id = str(formula.get("id") or "").strip()
+        if not raw_text or not formula_id:
+            continue
+        placeholder = formula_id if formula_id.startswith("[[") else f"[[{formula_id}]]"
+        for variant in sorted(_equation_text_variants(raw_text), key=len, reverse=True):
+            if len(variant.strip()) >= 4:
+                updated = updated.replace(variant, placeholder)
+    return updated
+
+
+def _equation_text_variants(raw_text: str) -> list[str]:
+    lines = [ln.strip() for ln in str(raw_text or "").strip().splitlines() if ln.strip()]
+    if not lines:
+        return []
+    return list({
+        str(raw_text).strip(),
+        "\n".join(lines),
+        "\n\n".join(lines),
+        " ".join(lines),
+    })
+
+
 def _spoken_text_from_formulas(text: str, formulas: list[dict]) -> str:
     spoken = text or ""
     for idx, formula in enumerate(formulas or []):

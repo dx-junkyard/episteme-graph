@@ -22,6 +22,7 @@ from .persistence import (
     persist_component_graph,
     persist_components,
     persist_document_embedding,
+    persist_equation_previews_to_chunks,
     persist_qualified_claims,
     persist_source_chunks,
     upsert_analysis_run,
@@ -442,6 +443,14 @@ def run_document_pipeline(
                 logger.exception("equation_semantics stage failed for document=%s material=%s", document_id, material_id)
                 raise PipelineStageError("equation_semantics", str(exc), cause=exc) from exc
             save_artifact("equation_semantics", equations)
+            try:
+                persist_equation_previews_to_chunks(document_id, equations)
+            except Exception:
+                logger.warning(
+                    "Failed to persist equation previews into chunks for document %s",
+                    document_id,
+                    exc_info=True,
+                )
         report_done("equation_semantics", {"equations": len(getattr(equations, "equations", []) or [])})
         if finish_target_stage("equation_semantics", {"equations": len(getattr(equations, "equations", []) or [])}):
             return result
