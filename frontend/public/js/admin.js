@@ -4265,6 +4265,8 @@
 
     var nodes = graph.nodes || [];
     var edges = graph.edges || [];
+    var graphEdges = lsGraphDisplayEdges(edges);
+    var layoutPositions = lsGraphLayoutPositions(nodes, graphEdges);
     var nodeById = {};
     nodes.forEach(function (node) {
       var id = lsGraphNodeId(node);
@@ -4273,16 +4275,23 @@
 
     var visNodes = new window.vis.DataSet(nodes.map(function (node, index) {
       var id = lsGraphNodeId(node) || ("node-" + index);
-      return {
+      var group = lsGraphNodeGroup(node);
+      var pos = layoutPositions[id] || { x: 0, y: index * 160 };
+      var visNode = {
         id: id,
         label: lsWrapGraphLabel(node.label || node.name || id),
-        level: Number.isFinite(Number(node.display_order)) ? Number(node.display_order) : index,
-        group: lsGraphNodeGroup(node),
-        title: node.component_type || node.review_status || "",
+        x: pos.x,
+        y: pos.y,
+        group: group,
+        title: node.component_type_text || node.component_type || node.review_status || "",
       };
+      if (lsGraphNodeDashed(node, group)) {
+        visNode.shapeProperties = { borderDashes: [6, 5] };
+      }
+      return visNode;
     }));
 
-    var visEdges = new window.vis.DataSet(edges.map(function (edge, index) {
+    var visEdges = new window.vis.DataSet(graphEdges.map(function (edge, index) {
       var from = edge.source_component_id || edge.source || edge.from;
       var to = edge.target_component_id || edge.target || edge.to;
       var relation = edge.relation || edge.edge_type || edge.type || "RELATED_TO";
@@ -4290,7 +4299,7 @@
         id: edge.edge_id || ("edge-" + index),
         from: from,
         to: to,
-        label: relation,
+        label: lsGraphEdgeLabel(relation),
         arrows: "to",
         dashes: lsGraphEdgeDashed(edge),
         width: Math.max(1, Math.min(4, Number(edge.confidence || 0.7) * 4)),
@@ -4302,13 +4311,7 @@
 
     var network = new window.vis.Network(networkEl, { nodes: visNodes, edges: visEdges }, {
       layout: {
-        hierarchical: {
-          enabled: true,
-          direction: "UD",
-          sortMethod: "directed",
-          nodeSpacing: 220,
-          levelSeparation: 140,
-        },
+        hierarchical: false,
       },
       physics: false,
       nodes: {
@@ -4320,8 +4323,8 @@
         shadow: { enabled: true, color: "rgba(15, 23, 42, 0.08)", size: 10, x: 0, y: 4 },
       },
       edges: {
-        font: { size: 10, align: "horizontal", color: "#64748b", strokeWidth: 4, strokeColor: "#ffffff" },
-        smooth: { type: "cubicBezier", forceDirection: "vertical", roundness: 0.45 },
+        font: { size: 12, align: "middle", color: "#64748b", strokeWidth: 5, strokeColor: "#ffffff" },
+        smooth: { type: "cubicBezier", forceDirection: "vertical", roundness: 0.42 },
       },
       groups: {
         assumption: { color: { background: "#f0fdf4", border: "#22c55e", highlight: { background: "#dcfce7", border: "#16a34a" } } },
@@ -4363,7 +4366,7 @@
       return source === nodeId || target === nodeId;
     });
     var html =
-      '<div class="ls-graph-detail-badge ' + escHtml(lsGraphNodeGroup(node)) + '">' + escHtml(node.component_type || node.typeName || "component") + '</div>' +
+      '<div class="ls-graph-detail-badge ' + escHtml(lsGraphNodeGroup(node)) + '">' + escHtml(node.component_type_text || node.component_type || node.typeName || "component") + '</div>' +
       '<h4>' + escHtml(node.label || node.name || nodeId || "無題") + '</h4>' +
       '<p class="ls-graph-detail-meta">' + escHtml(node.review_status || node.origin || "paper") + '</p>';
     if (node.summary) {
@@ -4414,7 +4417,17 @@
 
   function lsWrapGraphLabel(label) {
     var text = String(label || "");
-    if (text.length <= 18) return text;
+    text = text
+      .replace(/^Completeness condition$/i, "完全性条件\n(Completeness)")
+      .replace(/^Reality criterion$/i, "実在性の基準\n(Reality criterion)")
+      .replace(/^No-real-change after separation$/i, "分離後の無影響\n(No-real-change)")
+      .replace(/^Remote alternative-measurement assignment$/i, "遠隔の代替測定\n(Remote assignment)")
+      .replace(/^Reality attribution for noncommuting observables$/i, "非可換量の同時実在\n(ルートB)")
+      .replace(/^Alternative-to-incompleteness inference$/i, "波動関数の不完全性\n(最終結論)")
+      .replace(/^Argument uncertainty from criterion scope and degraded equations$/i, "論証の不確実性")
+      .replace(/^Uniform-coordinate unpredictability from interval probability$/i, "単一粒子座標の\n予測不可能性")
+      .replace(/^Incompleteness diagnosis from many-to-one wave-function assignment$/i, "不完全性の診断\n(ルートA)");
+    if (text.indexOf("\n") >= 0 || text.length <= 18) return text;
     if (!/\s/.test(text)) {
       var chunks = [];
       for (var i = 0; i < text.length; i += 14) chunks.push(text.slice(i, i + 14));
@@ -4429,23 +4442,158 @@
   }
 
   function lsGraphNodeGroup(node) {
-    var type = String((node && (node.component_type || node.type || node.component_type_text)) || "").toLowerCase();
-    if (/assumption|premise|definition|axiom|前提|定義/.test(type)) return "assumption";
-    if (/method|setup|experiment|procedure|手法|構成|実験/.test(type)) return "method";
-    if (/diagnostic|constraint|law|check|検証|制約|診断/.test(type)) return "diagnostic";
-    if (/conclusion|result|output|claim|結論|出力|主張/.test(type)) return "conclusion";
-    if (/uncertain|risk|caution|注意|不確実/.test(type)) return "uncertainty";
+    var type = String((node && (node.component_type_text || node.component_type || node.type)) || "").toLowerCase();
+    var label = String((node && (node.label || node.name)) || "").toLowerCase();
+    var haystack = type + " " + label;
+    if (/uncertain|risk|caution|注意|不確実/.test(haystack)) return "uncertainty";
+    if (/assumption|premise|definition|axiom|criterion|no-real-change|completeness|前提|定義|基準|無影響/.test(haystack)) return "assumption";
+    if (/method|setup|experiment|procedure|assignment|unpredictability|手法|構成|実験|代替測定|予測不可能/.test(haystack)) return "method";
+    if (/diagnostic|constraint|law|check|diagnosis|検証|制約|診断/.test(haystack)) return "diagnostic";
+    if (/conclusion|result|output|claim|incompleteness inference|final|結論|出力|主張|最終/.test(haystack)) return "conclusion";
     return "relation";
+  }
+
+  function lsGraphNodeLevel(node, fallbackIndex) {
+    var group = lsGraphNodeGroup(node);
+    var label = String((node && (node.label || node.name)) || "").toLowerCase();
+    if (/uniform-coordinate|単一粒子/.test(label)) return 0;
+    if (group === "assumption") return 0;
+    if (group === "method" || group === "uncertainty") return 1;
+    if (group === "relation" || group === "diagnostic") return 2;
+    if (group === "conclusion") return 3;
+    return Math.min(3, Math.max(0, Number(fallbackIndex || 0)));
+  }
+
+  function lsGraphNodeDashed(node, group) {
+    var label = String((node && (node.label || node.name)) || "").toLowerCase();
+    return /uniform-coordinate|単一粒子/.test(label) || (group === "method" && /unpredictability/.test(label));
+  }
+
+  function lsGraphDisplayEdges(edges) {
+    var byPair = {};
+    (edges || []).forEach(function (edge, index) {
+      var source = edge.source_component_id || edge.source || edge.from;
+      var target = edge.target_component_id || edge.target || edge.to;
+      if (!source || !target) return;
+      var key = source + "->" + target;
+      var current = byPair[key];
+      if (!current || lsGraphRelationPriority(edge) > lsGraphRelationPriority(current)) {
+        byPair[key] = Object.assign({}, edge, { edge_id: edge.edge_id || ("edge-" + index) });
+      }
+    });
+    return Object.keys(byPair).map(function (key) { return byPair[key]; });
+  }
+
+  function lsGraphLayoutPositions(nodes, edges) {
+    var nodeById = {};
+    var levels = {};
+    (nodes || []).forEach(function (node, index) {
+      var id = lsGraphNodeId(node) || ("node-" + index);
+      nodeById[id] = node;
+      levels[id] = lsGraphNodeLevel(node, index);
+    });
+
+    for (var pass = 0; pass < 12; pass += 1) {
+      var changed = false;
+      (edges || []).forEach(function (edge) {
+        var relation = String(edge.relation || edge.edge_type || edge.type || "").toUpperCase();
+        if (relation === "UNCERTAIN_DUE_TO" || relation === "RELATED_TO") return;
+        var source = edge.source_component_id || edge.source || edge.from;
+        var target = edge.target_component_id || edge.target || edge.to;
+        if (!nodeById[source] || !nodeById[target]) return;
+        var nextLevel = Math.min(4, (levels[source] || 0) + 1);
+        if ((levels[target] || 0) < nextLevel) {
+          levels[target] = nextLevel;
+          changed = true;
+        }
+      });
+      if (!changed) break;
+    }
+
+    (nodes || []).forEach(function (node, index) {
+      var id = lsGraphNodeId(node) || ("node-" + index);
+      var group = lsGraphNodeGroup(node);
+      if (group === "uncertainty") levels[id] = Math.min(2, Math.max(1, levels[id] || 1));
+      if (group === "conclusion") levels[id] = Math.max(4, levels[id] || 4);
+      if (lsGraphNodeDashed(node, group)) levels[id] = 0;
+    });
+
+    var buckets = {};
+    (nodes || []).forEach(function (node, index) {
+      var id = lsGraphNodeId(node) || ("node-" + index);
+      var level = levels[id] || 0;
+      if (!buckets[level]) buckets[level] = [];
+      buckets[level].push(node);
+    });
+
+    var positions = {};
+    Object.keys(buckets).forEach(function (levelKey) {
+      var level = Number(levelKey);
+      var bucket = buckets[levelKey].sort(function (a, b) {
+        return lsGraphNodeSortKey(a) - lsGraphNodeSortKey(b);
+      });
+      var spacing = bucket.length > 3 ? 280 : 340;
+      var totalWidth = (bucket.length - 1) * spacing;
+      bucket.forEach(function (node, index) {
+        var id = lsGraphNodeId(node);
+        positions[id] = {
+          x: (index * spacing) - (totalWidth / 2),
+          y: level * 185,
+        };
+      });
+    });
+    return positions;
+  }
+
+  function lsGraphNodeSortKey(node) {
+    var label = String((node && (node.label || node.name)) || "").toLowerCase();
+    if (/completeness|完全性/.test(label)) return 10;
+    if (/reality criterion|実在.*基準/.test(label)) return 20;
+    if (/no-disturbance|no-real-change|分離/.test(label)) return 30;
+    if (/uniform|coordinate|単一粒子|座標/.test(label)) return 40;
+    if (/remote|遠隔/.test(label)) return 50;
+    if (/criterion-of-reality|scope|limitation|uncertain|射程|不確実/.test(label)) return 60;
+    if (/wave function|diagnos|診断/.test(label)) return 70;
+    if (/disjunctive|incompleteness|結論/.test(label)) return 80;
+    return Number(node && node.display_order) || 99;
+  }
+
+  function lsGraphRelationPriority(edge) {
+    var relation = String((edge && (edge.relation || edge.edge_type || edge.type)) || "").toUpperCase();
+    if (relation === "REQUIRES") return 5;
+    if (relation === "PRODUCES_FOR" || relation === "ENABLES" || relation === "SUPPORTS") return 4;
+    if (relation === "UNCERTAIN_DUE_TO") return 3;
+    if (relation === "QUALIFIES" || relation === "CHECKED_BY") return 2;
+    return 1;
+  }
+
+  function lsGraphEdgeLabel(relation) {
+    var key = String(relation || "").toUpperCase();
+    var labels = {
+      REQUIRES: "依存",
+      PRODUCES_FOR: "生成",
+      ENABLES: "支持",
+      SUPPORTS: "支持",
+      UNCERTAIN_DUE_TO: "不確実性",
+      RELATED_TO: "関連",
+      QUALIFIES: "限定",
+      CHECKED_BY: "検証",
+      CONFLICTS_WITH: "矛盾",
+      INHIBITS: "抑制",
+      DEFINES: "定義",
+    };
+    return labels[key] || key;
   }
 
   function lsGraphEdgeDashed(edge) {
     var status = String((edge && edge.support_status) || "").toLowerCase();
     var relation = String((edge && (edge.relation || edge.edge_type || edge.type)) || "").toLowerCase();
-    return /llm|related|qualifies|conflicts|inhibits/.test(status + " " + relation);
+    return /llm|related|qualifies|conflicts|inhibits|uncertain/.test(status + " " + relation);
   }
 
   function lsGraphEdgeColor(edge) {
     var relation = String((edge && (edge.relation || edge.edge_type || edge.type)) || "").toUpperCase();
+    if (relation === "UNCERTAIN_DUE_TO") return "#f97316";
     if (relation === "CONFLICTS_WITH" || relation === "INHIBITS") return "#ef4444";
     if (relation === "CHECKED_BY" || relation === "QUALIFIES") return "#84cc16";
     if (relation === "DEFINES") return "#22c55e";

@@ -1695,6 +1695,8 @@ def _build_component_graph_payload(document_id: str, components: list[TheoryComp
             "display_order": idx,
             "origin": component.origin,
             "component_type": component.component_type,
+            "component_type_text": component.component_type_text,
+            "summary": component.summary,
         }
         for idx, component in enumerate(components)
     ]
@@ -1905,6 +1907,8 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
             "display_order": int(node.get("display_order") or idx),
             "origin": component.origin if component else str(node.get("origin") or "paper"),
             "component_type": component.component_type if component else str(node.get("component_type") or node.get("type") or ""),
+            "component_type_text": component.component_type_text if component else str(node.get("component_type_text") or ""),
+            "summary": component.summary if component else str(node.get("summary") or ""),
         })
         seen_nodes.add(component_id)
     normalized_edges = []
