@@ -195,12 +195,15 @@ class EquationSemanticsAgent:
                     structure.document_id,
                     llm_input.block_id,
                 )
-                records.append(_fallback_record(llm_input, candidate, str(exc)))
+                fallback = _fallback_record(llm_input, candidate, str(exc))
+                _attach_source_image(fallback, image)
+                records.append(fallback)
                 if progress_callback:
                     progress_callback(idx, total)
                 continue
 
             record = _parse_record(raw_output, llm_input, candidate)
+            _attach_source_image(record, image)
             partial = EquationSemanticsResult(
                 document_id=structure.document_id,
                 cartridge_id=llm_input.cartridge_id,
@@ -226,6 +229,7 @@ class EquationSemanticsAgent:
                     validator=self._validator,
                     image=image.__dict__ if image else None,
                 )
+                _attach_source_image(record, image)
             # accepted_equation_id を candidate に書き込む
             if candidate:
                 candidate.accepted_equation_id = record.equation_id
@@ -252,3 +256,18 @@ class EquationSemanticsAgent:
                 "Cartridge '%s' not found; proceeding without cartridge", cartridge_id
             )
             return None
+
+
+def _attach_source_image(record: EquationRecord, image: object | None) -> None:
+    if not image:
+        return
+    try:
+        record.source_extraction.source_image = {
+            "mime_type": getattr(image, "mime_type"),
+            "data_base64": getattr(image, "data_base64"),
+            "page": getattr(image, "page"),
+            "bbox": list(getattr(image, "bbox")),
+            "source": "equation_semantics_bbox_crop",
+        }
+    except Exception:
+        logger.warning("Failed to attach equation source image for %s", record.equation_id, exc_info=True)

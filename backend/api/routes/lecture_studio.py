@@ -187,6 +187,8 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
 
         chunks = []
         graph_structure_cache: dict[str, dict] = {}
+        document_ids = sorted({str(row[7]) for row in rows if row[7]})
+        equation_previews = _load_equation_formula_previews(session, document_ids)
         for row in rows:
             raw_text = row[2] or ""
             display_text = row[3] or raw_text
@@ -194,14 +196,21 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
             formulas = row[5] if row[5] else []
             # 旧フォーマット（$...$）のデータをプレースホルダー方式に正規化
             display_text, formulas = normalize_to_placeholder_format(display_text, formulas)
+            material_id = row[6] or ""
+            document_id = str(row[7]) if row[7] else ""
+            formulas = _merge_equation_formula_previews(
+                formulas,
+                document_id=document_id,
+                page_start=row[8],
+                page_end=row[9],
+                equation_previews=equation_previews,
+            )
             knowledge_graph = _json_obj(row[14])
             graph_elements = _derive_chunk_graph_elements(
                 f"{raw_text}\n{display_text}",
                 knowledge_graph,
                 formulas,
             )
-            material_id = row[6] or ""
-            document_id = str(row[7]) if row[7] else ""
             graph_structure = {}
             if document_id:
                 if document_id not in graph_structure_cache:
@@ -241,6 +250,127 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
         return enrich_chunks_with_sections(chunks)
     finally:
         session.close()
+
+
+def _load_equation_formula_previews(session, document_ids: list[str]) -> dict[str, list[dict]]:
+    """Load EquationSemanticAgent crop previews from the latest artifacts."""
+    if not document_ids:
+        return {}
+    placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
+    params = {f"doc_{i}": doc_id for i, doc_id in enumerate(document_ids)}
+    rows = session.execute(
+        sa_text(f"""
+            SELECT DISTINCT ON (document_id)
+                   document_id, stage_outputs
+            FROM document_analysis_runs
+            WHERE document_id IN ({placeholders})
+            ORDER BY document_id, created_at DESC
+        """),
+        params,
+    ).fetchall()
+    out: dict[str, list[dict]] = {}
+    for row in rows:
+        doc_id = str(row[0]) if row[0] else ""
+        stage_outputs = _json_obj(row[1])
+        artifacts = stage_outputs.get("_artifacts") if isinstance(stage_outputs.get("_artifacts"), dict) else {}
+        eq_artifact = artifacts.get("equation_semantics") if isinstance(artifacts, dict) else None
+        if not isinstance(eq_artifact, dict):
+            continue
+        previews: list[dict] = []
+        for record in eq_artifact.get("equations") or []:
+            if not isinstance(record, dict):
+                continue
+            src = record.get("source_extraction") or {}
+            if not isinstance(src, dict):
+                continue
+            source_image = src.get("source_image")
+            if not isinstance(source_image, dict) or not source_image.get("data_base64"):
+                continue
+            rec = record.get("reconstruction") or {}
+            if not isinstance(rec, dict):
+                rec = {}
+            source_location = src.get("source_location") if isinstance(src.get("source_location"), dict) else {}
+            previews.append({
+                "id": record.get("equation_id") or f"eq_{len(previews)}",
+                "latex": rec.get("latex") or src.get("latex") or src.get("plain_text") or "",
+                "spoken": rec.get("plain_text") or src.get("plain_text") or "",
+                "is_display": True,
+                "label": record.get("label"),
+                "block_id": source_location.get("block_id"),
+                "source_location": source_location,
+                "source_image": source_image,
+                "needs_math_review": bool(src.get("needs_math_review", False)),
+                "review_reason": list(src.get("review_reason", [])) if isinstance(src.get("review_reason"), list) else [],
+            })
+        if previews:
+            out[doc_id] = previews
+    return out
+
+
+def _merge_equation_formula_previews(
+    formulas: list[dict],
+    *,
+    document_id: str,
+    page_start: int | None,
+    page_end: int | None,
+    equation_previews: dict[str, list[dict]],
+) -> list[dict]:
+    if not document_id:
+        return formulas
+    previews = equation_previews.get(document_id) or []
+    if not previews:
+        return formulas
+    merged = [dict(f) for f in formulas if isinstance(f, dict)]
+    by_block = {str(f.get("block_id")): f for f in merged if f.get("block_id")}
+    by_id = {str(f.get("id")): f for f in merged if f.get("id")}
+    by_label = {str(f.get("label")): f for f in merged if f.get("label")}
+    for preview in previews:
+        if not _equation_preview_matches_chunk(preview, page_start, page_end, by_block):
+            continue
+        target = None
+        block_id = str(preview.get("block_id") or "")
+        label = str(preview.get("label") or "")
+        eq_id = str(preview.get("id") or "")
+        if block_id:
+            target = by_block.get(block_id)
+        if target is None and eq_id:
+            target = by_id.get(eq_id)
+        if target is None and label:
+            target = by_label.get(label)
+        if target is None:
+            merged.append(dict(preview))
+            continue
+        target["source_image"] = preview.get("source_image")
+        target["source_location"] = preview.get("source_location")
+        target["needs_math_review"] = preview.get("needs_math_review", False)
+        target["review_reason"] = preview.get("review_reason") or []
+        if not target.get("latex") and preview.get("latex"):
+            target["latex"] = preview.get("latex")
+        if not target.get("spoken") and preview.get("spoken"):
+            target["spoken"] = preview.get("spoken")
+    return merged
+
+
+def _equation_preview_matches_chunk(
+    preview: dict,
+    page_start: int | None,
+    page_end: int | None,
+    formulas_by_block: dict[str, dict],
+) -> bool:
+    block_id = str(preview.get("block_id") or "")
+    if block_id and block_id in formulas_by_block:
+        return True
+    loc = preview.get("source_location") if isinstance(preview.get("source_location"), dict) else {}
+    page = loc.get("page")
+    try:
+        page_num = int(page)
+    except Exception:
+        return False
+    if page_start is None and page_end is None:
+        return False
+    start = page_start if page_start is not None else page_num
+    end = page_end if page_end is not None else start
+    return int(start) <= page_num <= int(end)
 
 
 def _json_obj(value: object) -> dict:

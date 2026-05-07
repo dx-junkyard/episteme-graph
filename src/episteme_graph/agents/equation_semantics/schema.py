@@ -184,6 +184,7 @@ class EquationSourceExtraction:
     extraction_status: str  # one of EXTRACTION_STATUSES
     needs_math_review: bool = False
     review_reason: list[str] = field(default_factory=list)
+    source_image: dict | None = None  # cropped equation image for UI/OCR audit
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +398,7 @@ class EquationSemanticsResult:
                 "latex": latex,
                 "plain_text": plain_text,
                 "source_location": dict(src.source_location or {}),
+                "source_image": dict(src.source_image or {}) if src.source_image else None,
                 "extraction_source": src.extraction_source,
                 "extraction_status": src.extraction_status,
                 "review_reason": list(src.review_reason),
@@ -504,6 +506,7 @@ def _record_from_dict(d: dict) -> EquationRecord:
         extraction_status=src_raw.get("extraction_status", "unparsed"),
         needs_math_review=bool(src_raw.get("needs_math_review", False)),
         review_reason=list(src_raw.get("review_reason", [])),
+        source_image=src_raw.get("source_image") if isinstance(src_raw.get("source_image"), dict) else None,
     )
     rec_raw = d.get("reconstruction", {})
     reconstruction = EquationReconstruction(

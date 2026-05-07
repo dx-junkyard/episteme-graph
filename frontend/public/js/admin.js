@@ -5034,15 +5034,37 @@
     var html = '<div style="font-size:11px;font-weight:600;color:var(--color-text-secondary);margin-bottom:6px">数式一覧</div>';
     formulas.forEach(function (f) {
       var label = f.label || f.equation_label || "";
+      var sourceImage = lsFormulaSourceImageHtml(f);
+      var review = (f.needs_math_review || (f.review_reason && f.review_reason.length))
+        ? '<div class="ls-formula-review">要確認: ' + escHtml((f.review_reason || []).slice(0, 2).join(", ") || "復元式") + '</div>'
+        : "";
       html +=
         '<div class="ls-formula-item">' +
+          sourceImage +
           '<div class="ls-formula-rendered">' + lsRenderKatex(f.latex || f.id || "", f.is_display === true) + '</div>' +
           (label ? '<span class="ls-theory-badge">(' + escHtml(label) + ')</span><br>' : '') +
           '<span class="ls-formula-latex">' + escHtml(f.latex || f.id || "") + '</span><br>' +
           '<span class="ls-formula-spoken">' + escHtml(f.spoken || "") + '</span>' +
+          review +
         '</div>';
     });
     el.innerHTML = html;
+  }
+
+  function lsFormulaSourceImageHtml(f) {
+    var img = f && f.source_image;
+    if (!img || !img.data_base64) return "";
+    var mime = img.mime_type || "image/png";
+    var page = img.page || (f.source_location && f.source_location.page) || "";
+    var bbox = img.bbox || (f.source_location && f.source_location.bbox) || [];
+    var meta = page ? "p." + page : "";
+    if (bbox && bbox.length === 4) {
+      meta += (meta ? " " : "") + "bbox " + bbox.map(function (v) { return Math.round(Number(v) || 0); }).join(",");
+    }
+    return '<div class="ls-formula-source-image-wrap">' +
+      '<img class="ls-formula-source-image" src="data:' + escHtml(mime) + ';base64,' + escHtml(img.data_base64) + '" alt="PDFから切り出した数式画像">' +
+      (meta ? '<div class="ls-formula-source-meta">' + escHtml(meta) + '</div>' : '') +
+      '</div>';
   }
 
   function lsShowProgress(msg, type) {
