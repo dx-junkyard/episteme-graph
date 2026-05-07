@@ -16,7 +16,7 @@ import threading
 import time
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy import text as sa_text
 
 from dependencies import ROLE_SYSTEM_ADMIN, _require_teacher
@@ -49,11 +49,32 @@ from core.document_sections import enrich_chunks_with_sections
 from core.llm import generate_text, get_llm_params
 from core.personas import course_persona_settings, normalize_persona_id, persona_prompt
 from core.postgres import get_session as _pg_session
+from core.storage import get_storage_client
 from core.tts import TtsFatalError, generate_tts_audio
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Lecture Script Studio"])
+
+
+DOCUMENT_PIPELINE_STAGE_LABELS: dict[str, str] = {
+    "document_structure": "DocumentStructureAgent",
+    "paper_skeleton": "PaperSkeletonAgent",
+    "rhetorical_role": "RhetoricalRoleAgent",
+    "claim_qualification": "ClaimQualificationAgent",
+    "equation_semantics": "EquationSemanticsAgent",
+    "evidence_registry": "EvidenceRegistryBuilder",
+    "claim_object_builder": "ClaimObjectBuilder",
+    "derivation_chain": "DerivationChainAgent",
+    "figure_table_semantics": "FigureTableSemanticsAgent",
+    "thesis_reconstruction": "ThesisReconstructionAgent",
+    "dsl_linking": "DSLLinkingAgent",
+    "component_assembly": "ComponentAssemblyAgent",
+    "component_graph": "ComponentGraphAgent",
+    "course_mapping": "CourseMappingAgent",
+    "blueprint": "BlueprintAgent",
+    "export_validation": "ExportValidationGate",
+}
 
 
 def _save_lecture_studio_settings(course_id: str, course_data: dict, settings: dict[str, str]) -> None:
@@ -1381,6 +1402,241 @@ def reanalyze_course_structure(
         "task_id": task_id,
         "course_id": course_id,
         "total_materials": len(material_ids),
+        "status": "pending",
+    }
+
+
+# ---------------------------------------------------------------------------
+# 5b. 新 Agent Pipeline のコース単位実行
+# ---------------------------------------------------------------------------
+
+
+def _course_pipeline_documents(course_data: dict) -> list[dict]:
+    sources = course_data.get("sources", []) if isinstance(course_data, dict) else []
+    material_ids = [
+        str(s.get("material_id")).strip()
+        for s in sources
+        if isinstance(s, dict) and s.get("material_id")
+    ]
+    material_ids = list(dict.fromkeys(mid for mid in material_ids if mid))
+    if not material_ids:
+        return []
+
+    params = {f"mid_{i}": mid for i, mid in enumerate(material_ids)}
+    placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                f"""
+                SELECT id::text, COALESCE(source_path, ''), COALESCE(filename, title, 'document.pdf')
+                FROM documents
+                WHERE source_path IN ({placeholders})
+                ORDER BY created_at ASC
+                """
+            ),
+            params,
+        ).fetchall()
+    finally:
+        session.close()
+    return [
+        {"document_id": row[0], "material_id": row[1], "filename": row[2] or "document.pdf"}
+        for row in rows
+        if row[0] and row[1]
+    ]
+
+
+def _load_pipeline_pdf(material_id: str, filename: str) -> bytes:
+    storage = get_storage_client()
+    for object_name in (f"uploads/{material_id}.pdf", filename, material_id):
+        if not object_name:
+            continue
+        try:
+            return storage.get_object("raw-papers", object_name)
+        except Exception:
+            continue
+    raise FileNotFoundError(f"PDF object not found for material {material_id}")
+
+
+def _set_document_pipeline_status(document_id: str, status: str) -> None:
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text(
+                "UPDATE documents SET status = :status, updated_at = now() "
+                "WHERE id = CAST(:document_id AS uuid)"
+            ),
+            {"document_id": document_id, "status": status},
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.warning("Failed to update document status: document=%s status=%s", document_id, status, exc_info=True)
+    finally:
+        session.close()
+
+
+def _course_document_pipeline_worker(
+    *,
+    task_id: str,
+    course_id: str,
+    documents: list[dict],
+    target_stage: str | None,
+) -> None:
+    from core.document_pipeline import PipelineStageError, run_document_pipeline
+
+    total = len(documents)
+    label = DOCUMENT_PIPELINE_STAGE_LABELS.get(target_stage or "", "Agent Pipeline")
+    generated = 0
+    failed = 0
+    current_document = ""
+    current_stage = target_stage or "started"
+
+    def publish(status: str = "processing", error_message: str | None = None) -> None:
+        progress = int((generated + failed) / total * 100) if total else 100
+        update_background_task(
+            task_id,
+            status,
+            result_data={
+                "course_id": course_id,
+                "stage": current_stage,
+                "target_stage": target_stage or "",
+                "label": label,
+                "current_document_id": current_document,
+                "generated": generated,
+                "failed": failed,
+                "skipped": 0,
+                "total_documents": total,
+                "total_chunks": total,
+                "progress": progress,
+            },
+            error_message=error_message,
+        )
+
+    publish("processing")
+    try:
+        for index, doc in enumerate(documents, start=1):
+            current_document = doc["document_id"]
+            current_stage = target_stage or "document_pipeline"
+            publish("processing")
+            pdf_bytes = _load_pipeline_pdf(doc["material_id"], doc["filename"])
+            if target_stage is None:
+                _set_document_pipeline_status(doc["document_id"], "processing")
+
+            def on_stage(stage: str, info: dict) -> None:
+                nonlocal current_stage
+                current_stage = stage
+                stage_progress = int(info.get("progress") or 0) if isinstance(info, dict) else 0
+                overall = int(((index - 1) + (stage_progress / 100)) / total * 100) if total else 100
+                update_background_task(
+                    task_id,
+                    "processing",
+                    result_data={
+                        "course_id": course_id,
+                        "stage": stage,
+                        "target_stage": target_stage or "",
+                        "label": label,
+                        "current_document_id": current_document,
+                        "generated": generated,
+                        "failed": failed,
+                        "skipped": 0,
+                        "total_documents": total,
+                        "total_chunks": total,
+                        "progress": overall,
+                    },
+                )
+
+            run_document_pipeline(
+                pdf_bytes=pdf_bytes,
+                document_id=doc["document_id"],
+                material_id=doc["material_id"],
+                filename=doc["filename"],
+                course_id=course_id,
+                progress_callback=on_stage,
+                target_stage=target_stage,
+            )
+            if target_stage is None:
+                _set_document_pipeline_status(doc["document_id"], "completed")
+            generated += 1
+            publish("processing")
+    except Exception as exc:
+        failed += 1
+        stage = getattr(exc, "stage", current_stage) if isinstance(exc, PipelineStageError) else current_stage
+        logger.exception("Course document pipeline failed: task=%s course=%s stage=%s", task_id, course_id, stage)
+        current_stage = stage or "failed"
+        if target_stage is None and current_document:
+            _set_document_pipeline_status(current_document, "failed")
+        publish("failed", str(exc))
+        return
+
+    current_stage = target_stage or "completed"
+    publish("completed")
+
+
+@router.post("/courses/{course_id}/document-pipeline/run")
+def run_course_document_pipeline(
+    course_id: str,
+    body: dict | None = Body(default=None),
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """コース配下の document-first Agent Pipeline を起動する。
+
+    ``target_stage`` 指定時は、その stage だけを単独再実行してそこで終了する。
+    """
+    course_data = get_editable_course_data(current_user["id"], course_id)
+    if not course_data and current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        course_data = _get_system_admin_course_data(course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    target_stage = str((body or {}).get("target_stage") or "").strip() or None
+    if target_stage and target_stage not in DOCUMENT_PIPELINE_STAGE_LABELS:
+        raise HTTPException(status_code=400, detail="Unknown pipeline stage")
+
+    documents = _course_pipeline_documents(course_data)
+    if not documents:
+        raise HTTPException(status_code=400, detail="No source documents linked to this course")
+
+    active = get_active_task_for_course(course_id)
+    if active:
+        raise HTTPException(status_code=409, detail="Another course task is already running")
+
+    task_id = str(uuid.uuid4())[:12]
+    create_background_task(task_id, "document_pipeline", current_user["id"])
+    update_background_task(task_id, "pending", result_data={
+        "course_id": course_id,
+        "stage": target_stage or "queued",
+        "target_stage": target_stage or "",
+        "label": DOCUMENT_PIPELINE_STAGE_LABELS.get(target_stage or "", "Agent Pipeline"),
+        "generated": 0,
+        "failed": 0,
+        "skipped": 0,
+        "total_documents": len(documents),
+        "total_chunks": len(documents),
+        "progress": 0,
+    })
+
+    thread = threading.Thread(
+        target=_course_document_pipeline_worker,
+        kwargs={
+            "task_id": task_id,
+            "course_id": course_id,
+            "documents": documents,
+            "target_stage": target_stage,
+        },
+        daemon=True,
+    )
+    thread.start()
+
+    logger.info(
+        "course document pipeline accepted: task=%s course=%s docs=%d target_stage=%s by user=%s",
+        task_id, course_id, len(documents), target_stage or "full", current_user["id"],
+    )
+    return {
+        "task_id": task_id,
+        "course_id": course_id,
+        "total_documents": len(documents),
+        "target_stage": target_stage or "",
         "status": "pending",
     }
 

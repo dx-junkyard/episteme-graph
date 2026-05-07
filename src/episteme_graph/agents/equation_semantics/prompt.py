@@ -31,7 +31,9 @@ Focus on:
 4. Whether the equation is derived from or leads to nearby equations
 5. The semantic status: source_backed (good extraction), context_inferred, reconstruction_based
 6. Producing a short reusable semantic summary
-7. When source extraction is insufficient (partial/missing/unparsed), provide a reconstruction block
+7. Always provide a reconstruction block. Treat all PDF-extracted math text,
+   including inline math, as untrusted/corrupted unless a trusted non-PDF
+   LaTeX source is explicitly supplied.
 
 Be conservative. If unsure, mark as unknown and set low confidence.
 Return ONLY valid JSON matching the output schema.
@@ -62,7 +64,7 @@ _OUTPUT_SCHEMA = {
     "summary": "short semantic summary",
     "review_flags": ["optional allowed review flags"],
     "reconstruction": {
-        "__note__": "Include ONLY when needs_reconstruction=true or source extraction is insufficient",
+        "__note__": "Required for every PDF-derived equation candidate",
         "latex": "string or null",
         "plain_text": "string or null",
         "status": "inferred_from_context | reconstructed_from_neighbors | manually_supplied",
@@ -117,7 +119,8 @@ class EquationSemanticsPromptFactory:
         parts: list[str] = []
         parts.append("## Task")
         parts.append(
-            "Infer the local semantic role and dependencies of this equation.\n"
+            "Reconstruct the equation first, then infer its local semantic role and dependencies.\n"
+            "Assume all math obtained from the PDF text layer is corrupted, including inline formulas.\n"
             "Return ONLY JSON matching the output schema."
         )
 
@@ -132,31 +135,23 @@ class EquationSemanticsPromptFactory:
             parts.append(f"backbone_block_type: {llm_input.backbone_block_type}")
         parts.append(f"label: {llm_input.label}")
         parts.append(f"extraction_status: {llm_input.extraction_status}")
-        if llm_input.needs_reconstruction:
-            parts.append(
-                "\n** Source extraction is INSUFFICIENT for this equation "
-                f"(extraction_status={llm_input.extraction_status}). "
-                "You MUST include a 'reconstruction' block in your output. "
-                "The original broken text has been hidden to avoid confusing you. "
-                "Instead, reconstruct the LaTeX purely from the logical flow, variables defined in the surrounding text, and neighboring blocks. "
-                "Set reconstruction.status to 'inferred_from_context' or 'reconstructed_from_neighbors'. "
-                "Set reconstruction.method and supporting_refs from the context blocks below. "
-                "Set confidence based on how confident you are. "
-                "Do NOT store the reconstructed content in top-level source fields. **"
-            )
+        parts.append(
+            "\n** Mandatory reconstruction policy: the PDF text layer is untrusted for math. "
+            f"extraction_status={llm_input.extraction_status}. "
+            "You MUST include a 'reconstruction' block in your output for every equation. "
+            "The original broken equation text is hidden to avoid copying corrupted glyphs. "
+            "Reconstruct LaTeX from the logical flow, variable definitions, equation label, surrounding prose, and neighboring equation references. "
+            "If the exact equation cannot be reconstructed, return latex=null/plain_text=null, set semantic_status='unknown', confidence<=0.3, and add review flags. "
+            "Never mark semantic_status='source_backed' for PDF-derived math. "
+            "Do NOT store reconstructed content in top-level source fields. **"
+        )
 
         if llm_input.prev_texts:
             parts.append("\n## Previous Text Blocks")
             parts.extend(llm_input.prev_texts)
 
         parts.append("\n## Equation Text")
-        if llm_input.needs_reconstruction:
-            parts.append("[OMITTED - The original text is broken/insufficient. Reconstruct entirely from context]")
-        else:
-            parts.append(llm_input.equation_text)
-            if llm_input.plain_text:
-                parts.append("\n## Plain Text")
-                parts.append(llm_input.plain_text)
+        parts.append("[OMITTED - PDF math text is treated as corrupted. Reconstruct from context only.]")
 
         if llm_input.next_texts:
             parts.append("\n## Next Text Blocks")
@@ -190,13 +185,13 @@ class EquationSemanticsPromptFactory:
         parts.append(f"reconstruction statuses: {', '.join(RECONSTRUCTION_STATUSES)} (exclude 'none')")
         parts.append("\n## Constraints")
         parts.append(
-            "- Use local context; do not infer a role from equation shape alone\n"
+            "- Use local context; do not infer a role from corrupted equation text alone\n"
             "- equation_type=transformation → include input_equation_ids when context supports it\n"
             "- equation_type=definition → include defined_symbols when context supports it\n"
             "- If context is missing, add broken_context or ambiguous_role review flag\n"
             "- confidence must be between 0.0 and 1.0\n"
             "- reconstruction block: method and supporting_refs MUST be non-empty\n"
-            "- Do NOT set semantic_status=source_backed if extraction_status is not 'complete'\n"
+            "- Do NOT set semantic_status=source_backed for PDF-derived equations\n"
             "- Return ONLY valid JSON, no markdown fences"
         )
         return "\n".join(parts)

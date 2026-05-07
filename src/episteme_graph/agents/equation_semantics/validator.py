@@ -239,6 +239,14 @@ class EquationSemanticsValidator:
                 field=f"{eid}.reconstruction.status",
             ))
 
+        if record.source_extraction.needs_math_review and rec.status == "none":
+            issues.append(ValidationIssue(
+                rule_id="missing_mandatory_reconstruction",
+                severity="error",
+                message=f"{eid} PDF-derived math must pass through reconstruction",
+                field=f"{eid}.reconstruction.status",
+            ))
+
         if rec.status != "none":
             # method / supporting_refs must not be empty when reconstructing
             if not rec.method:
