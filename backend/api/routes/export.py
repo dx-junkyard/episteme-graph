@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import zipfile
 from datetime import datetime, timezone
 from typing import Any
@@ -747,25 +748,33 @@ def _row_to_component_graph(row: Any) -> dict:
     for n in raw_nodes:
         if not isinstance(n, dict):
             continue
+        node_id = n.get("component_id", n.get("id", ""))
+        legacy_ids = []
+        for key in ("agent_component_id", "legacy_component_id"):
+            value = n.get(key)
+            if value and str(value) != str(node_id):
+                legacy_ids.append(str(value))
         nodes.append({
-            "node_id": n.get("component_id", n.get("id", "")),
+            "node_id": node_id,
             "node_type": "component",
             "label": n.get("label", n.get("name", "")),
             "component_type": n.get("component_type", ""),
             "review_status": n.get("review_status", "teacher_review_required"),
+            "legacy_ids": legacy_ids,
         })
 
     edges = []
     for i, e in enumerate(raw_edges):
         if not isinstance(e, dict):
             continue
+        evidence = e.get("evidence", {}) if isinstance(e.get("evidence"), dict) else {}
         edges.append({
             "edge_id": e.get("edge_id", f"component_edge_{i+1:04d}"),
             "source": e.get("source_component_id", e.get("source", e.get("from", ""))),
             "target": e.get("target_component_id", e.get("target", e.get("to", ""))),
             "edge_type": e.get("relation", e.get("edge_type", e.get("type", "RELATED_TO"))),
             "support_status": e.get("support_status", "source_inferred"),
-            "evidence_claims": _load_json_field(e.get("evidence", {}).get("evidence_claims", []), []),
+            "evidence_claims": _load_json_field(e.get("evidence_claims", evidence.get("evidence_claims", [])), []),
             "review_status": e.get("review_status", "teacher_review_required"),
         })
 
@@ -788,6 +797,204 @@ def _build_evidence_snippets(claims: list[dict]) -> list[dict]:
             "text": claim["evidence_text"],
         })
     return snippets
+
+
+_LEGACY_REF_PATTERNS = [
+    re.compile(r"^claim_span_"),
+    re.compile(r"^claim:[^:]+:[^:]+$"),
+    re.compile(r"^comp_\d+$"),
+]
+
+
+def _is_legacy_export_ref(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    return any(pattern.match(value) for pattern in _LEGACY_REF_PATTERNS)
+
+
+def _claim_ref_map(claims: list[dict]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for claim in claims:
+        claim_id = str(claim.get("claim_id") or "")
+        if not claim_id:
+            continue
+        mapping[claim_id] = claim_id
+        scope = claim.get("source_scope") or {}
+        if not isinstance(scope, dict):
+            continue
+        span_id = scope.get("span_id")
+        block_id = scope.get("block_id")
+        if span_id:
+            safe = re.sub(r"[^A-Za-z0-9_]+", "_", str(span_id))
+            mapping[str(span_id)] = claim_id
+            mapping[f"claim_{safe}"] = claim_id
+        if block_id and span_id:
+            mapping[f"claim:{block_id}:{span_id}"] = claim_id
+    return mapping
+
+
+def _component_ref_map(components: list[dict], component_graph: dict) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for comp in components:
+        component_id = str(comp.get("component_id") or "")
+        if not component_id:
+            continue
+        mapping[component_id] = component_id
+        source_scope = comp.get("source_scope") or {}
+        legacy_ids = source_scope.get("legacy_ids", []) if isinstance(source_scope, dict) else []
+        for legacy_id in legacy_ids if isinstance(legacy_ids, list) else []:
+            if legacy_id:
+                mapping[str(legacy_id)] = component_id
+    for node in component_graph.get("nodes", []) or []:
+        if not isinstance(node, dict):
+            continue
+        node_id = str(node.get("node_id") or "")
+        if not node_id:
+            continue
+        mapping[node_id] = node_id
+        for legacy_id in node.get("legacy_ids") or []:
+            if legacy_id:
+                mapping[str(legacy_id)] = node_id
+    return mapping
+
+
+def _map_ref_list(values: Any, id_map: dict[str, str]) -> list[str]:
+    out: list[str] = []
+    for value in values or []:
+        mapped = id_map.get(str(value), str(value))
+        if mapped not in out:
+            out.append(mapped)
+    return out
+
+
+def _normalize_claim_refs_in_items(items: Any, claim_map: dict[str, str]) -> Any:
+    if isinstance(items, list):
+        return [_normalize_claim_refs_in_items(item, claim_map) for item in items]
+    if not isinstance(items, dict):
+        return items
+    out = dict(items)
+    for key in ("claim_ids", "evidence_claims", "linked_claim_ids"):
+        if isinstance(out.get(key), list):
+            out[key] = _map_ref_list(out[key], claim_map)
+    return out
+
+
+def _normalize_export_references(
+    *,
+    claims: list[dict],
+    equations: list[dict],
+    components: list[dict],
+    component_graph: dict,
+    course_info: dict | None,
+) -> None:
+    claim_map = _claim_ref_map(claims)
+    component_map = _component_ref_map(components, component_graph)
+
+    for eq in equations:
+        if isinstance(eq, dict) and isinstance(eq.get("linked_claim_ids"), list):
+            eq["linked_claim_ids"] = _map_ref_list(eq["linked_claim_ids"], claim_map)
+
+    for comp in components:
+        if not isinstance(comp, dict):
+            continue
+        if isinstance(comp.get("evidence_claims"), list):
+            comp["evidence_claims"] = _map_ref_list(comp["evidence_claims"], claim_map)
+        for key in ("inputs", "outputs", "preconditions", "cautions", "constraints", "invalid_conditions"):
+            if key in comp:
+                comp[key] = _normalize_claim_refs_in_items(comp[key], claim_map)
+        for dep in comp.get("dependencies") or []:
+            if isinstance(dep, dict) and isinstance(dep.get("component_refs"), list):
+                dep["component_refs"] = _map_ref_list(dep["component_refs"], component_map)
+
+    for edge in component_graph.get("edges", []) or []:
+        if not isinstance(edge, dict):
+            continue
+        for key in ("source", "target"):
+            if edge.get(key) is not None:
+                edge[key] = component_map.get(str(edge[key]), str(edge[key]))
+        if isinstance(edge.get("evidence_claims"), list):
+            edge["evidence_claims"] = _map_ref_list(edge["evidence_claims"], claim_map)
+
+    if not isinstance(course_info, dict):
+        return
+    for topic in course_info.get("topics") or []:
+        if not isinstance(topic, dict):
+            continue
+        if isinstance(topic.get("linked_component_ids"), list):
+            topic["linked_component_ids"] = _map_ref_list(topic["linked_component_ids"], component_map)
+        for step in topic.get("visualization_plan") or []:
+            if isinstance(step, dict) and isinstance(step.get("linked_component_ids"), list):
+                step["linked_component_ids"] = _map_ref_list(step["linked_component_ids"], component_map)
+
+
+def _validate_export_references(
+    *,
+    claims: list[dict],
+    equations: list[dict],
+    components: list[dict],
+    component_graph: dict,
+    course_info: dict | None,
+    evidence_snippets: list[dict],
+) -> dict:
+    errors: list[dict] = []
+    claim_ids = {str(c.get("claim_id")) for c in claims if c.get("claim_id")}
+    component_ids = {str(c.get("component_id")) for c in components if c.get("component_id")}
+    evidence_ids = {str(e.get("evidence_id")) for e in evidence_snippets if e.get("evidence_id")}
+
+    def add(code: str, message: str, artifact: str, path: str, ref_id: str) -> None:
+        errors.append({"code": code, "message": message, "artifact": artifact, "path": path, "ref_id": ref_id})
+
+    def check_refs(values: Any, known: set[str], artifact: str, path: str, target: str) -> None:
+        for ref in values or []:
+            ref_id = str(ref)
+            if _is_legacy_export_ref(ref_id):
+                add("LEGACY_EXPORT_REF", f"{path} contains provisional ID {ref_id!r}", artifact, path, ref_id)
+            if ref_id not in known:
+                add("UNRESOLVED_EXPORT_REF", f"{path} references missing {target} {ref_id!r}", artifact, path, ref_id)
+
+    for idx, eq in enumerate(equations):
+        if isinstance(eq, dict):
+            check_refs(eq.get("linked_claim_ids"), claim_ids, "equations/equations.json", f"$.equations[{idx}].linked_claim_ids", "claim")
+            check_refs(eq.get("source_evidence_ids"), evidence_ids, "equations/equations.json", f"$.equations[{idx}].source_evidence_ids", "evidence")
+
+    for idx, comp in enumerate(components):
+        if not isinstance(comp, dict):
+            continue
+        check_refs(comp.get("evidence_claims"), claim_ids, "components/components.json", f"$.components[{idx}].evidence_claims", "claim")
+        for dep_idx, dep in enumerate(comp.get("dependencies") or []):
+            if isinstance(dep, dict):
+                check_refs(dep.get("component_refs"), component_ids, "components/components.json", f"$.components[{idx}].dependencies[{dep_idx}].component_refs", "component")
+
+    for idx, edge in enumerate(component_graph.get("edges", []) or []):
+        if not isinstance(edge, dict):
+            continue
+        for key in ("source", "target"):
+            ref_id = str(edge.get(key) or "")
+            if not ref_id:
+                add("EMPTY_COMPONENT_GRAPH_ENDPOINT", f"$.edges[{idx}].{key} is empty", "graph/component_graph.json", f"$.edges[{idx}].{key}", ref_id)
+            elif _is_legacy_export_ref(ref_id):
+                add("LEGACY_EXPORT_REF", f"$.edges[{idx}].{key} contains provisional ID {ref_id!r}", "graph/component_graph.json", f"$.edges[{idx}].{key}", ref_id)
+            elif ref_id not in component_ids:
+                add("UNRESOLVED_EXPORT_REF", f"$.edges[{idx}].{key} references missing component {ref_id!r}", "graph/component_graph.json", f"$.edges[{idx}].{key}", ref_id)
+        check_refs(edge.get("evidence_claims"), claim_ids, "graph/component_graph.json", f"$.edges[{idx}].evidence_claims", "claim")
+
+    if isinstance(course_info, dict):
+        for idx, topic in enumerate(course_info.get("topics") or []):
+            if not isinstance(topic, dict):
+                continue
+            check_refs(topic.get("linked_component_ids"), component_ids, "course_info.json", f"$.topics[{idx}].linked_component_ids", "component")
+            for step_idx, step in enumerate(topic.get("visualization_plan") or []):
+                if isinstance(step, dict):
+                    check_refs(step.get("linked_component_ids"), component_ids, "course_info.json", f"$.topics[{idx}].visualization_plan[{step_idx}].linked_component_ids", "component")
+
+    return {
+        "status": "failed_validation" if errors else "passed",
+        "exportable": not errors,
+        "publish_ready": not errors,
+        "errors": errors,
+        "warnings": [],
+        "summary": {"error_count": len(errors), "warning_count": 0, "unresolved_reference_count": len(errors)},
+    }
 
 
 def _build_manifest(
@@ -824,6 +1031,7 @@ def _build_manifest(
         },
         "files": {
             "course_info": "course_info.json",
+            "export_validation": "export_validation.json",
             "claims": "claims/claims.json",
             "dsl_graph": "dsl/dsl_graph.json",
             "components": "components/components.json",
@@ -933,6 +1141,7 @@ def _build_zip(
     equation_candidates: list[dict] | None = None,
     derivation_chains: list[dict] | None = None,
     document_boundaries: list[dict] | None = None,
+    export_validation: dict | None = None,
 ) -> bytes:
     equations = equations or []
     equation_candidates = equation_candidates or []
@@ -942,6 +1151,7 @@ def _build_zip(
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("README.md", _README_TEMPLATE)
         zf.writestr("manifest.json", _json_bytes(manifest))
+        zf.writestr("export_validation.json", _json_bytes(export_validation if export_validation is not None else {}))
         zf.writestr("course_info.json", _json_bytes(course_info if course_info is not None else {}))
         zf.writestr("claims/claims.json", _json_bytes({"claims": claims}))
         zf.writestr(
@@ -1025,6 +1235,21 @@ def export_course_bundle(
         derivation_chains = _build_derivations_for_documents(artifacts_by_doc, document_ids)
         document_boundaries = _build_document_boundaries(artifacts_by_doc, document_ids)
         course = _enrich_course_for_export(course, artifacts_by_doc, document_ids)
+        _normalize_export_references(
+            claims=claims,
+            equations=equations,
+            components=components,
+            component_graph=component_graph,
+            course_info=course,
+        )
+        export_validation = _validate_export_references(
+            claims=claims,
+            equations=equations,
+            components=components,
+            component_graph=component_graph,
+            course_info=course,
+            evidence_snippets=evidence_snippets,
+        )
 
         docs = _load_course_documents(session, course_id, document_ids)
 
@@ -1069,6 +1294,7 @@ def export_course_bundle(
             include_ndjson=req.include_ndjson,
             include_debug=req.include_debug_data,
             debug_data={"validation_errors": [], "pipeline_logs": []} if req.include_debug_data else None,
+            export_validation=export_validation,
         )
 
         filename = _zip_filename("course", course_id)
@@ -1110,6 +1336,21 @@ def export_document_bundle(
         derivation_chains = _build_derivations_for_documents(artifacts_by_doc, document_ids)
         document_boundaries = _build_document_boundaries(artifacts_by_doc, document_ids)
         document = _enrich_course_for_export(document, artifacts_by_doc, document_ids)
+        _normalize_export_references(
+            claims=claims,
+            equations=equations,
+            components=components,
+            component_graph=component_graph,
+            course_info=document,
+        )
+        export_validation = _validate_export_references(
+            claims=claims,
+            equations=equations,
+            components=components,
+            component_graph=component_graph,
+            course_info=document,
+            evidence_snippets=evidence_snippets,
+        )
 
         eid = _export_id("document", document_id)
         options = {
@@ -1152,6 +1393,7 @@ def export_document_bundle(
             include_ndjson=req.include_ndjson,
             include_debug=req.include_debug_data,
             debug_data={"validation_errors": [], "pipeline_logs": []} if req.include_debug_data else None,
+            export_validation=export_validation,
         )
 
         filename = _zip_filename("document", document_id)
