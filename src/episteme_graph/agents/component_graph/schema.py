@@ -134,7 +134,7 @@ class ComponentGraphResult:
                     "source_component_id": e.source,
                     "target_component_id": e.target,
                     "relation": e.edge_type,
-                    "edge_type": e.support_status,
+                    "edge_type": e.edge_type,
                     "support_status": e.support_status,
                     "confidence": e.confidence,
                     "review_status": "teacher_review_required",

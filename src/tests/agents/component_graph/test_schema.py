@@ -135,3 +135,26 @@ class TestComponentGraphResult:
         nodes = [_make_node("comp_001")]
         fallback = ComponentGraphResult.make_fallback("doc_x", None, "fail", nodes=nodes)
         assert len(fallback.nodes) == 1
+
+    def test_to_graph_payload_edge_type_is_semantic_not_support_status(self):
+        # Issue #266: edge_type should be the semantic relation (REQUIRES, TRANSFORMS…)
+        # not the support_status (llm_inferred, dependency_declared…)
+        result = _make_result(edges=[
+            ComponentGraphEdge(
+                edge_id="e1",
+                source="comp_001",
+                target="comp_002",
+                edge_type="TRANSFORMS",
+                support_status="llm_inferred",
+                evidence_claims=[],
+                reasoning="test",
+                confidence=0.9,
+            )
+        ])
+        payload = result.to_graph_payload()
+        edge = payload["edges"][0]
+        assert edge["edge_type"] == "TRANSFORMS", (
+            "edge_type in payload must be the semantic relation type, not support_status"
+        )
+        assert edge["support_status"] == "llm_inferred"
+        assert edge["relation"] == "TRANSFORMS"

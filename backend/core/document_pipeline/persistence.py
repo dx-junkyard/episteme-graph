@@ -441,34 +441,84 @@ def persist_component_graph(
     component_result,
     dsl_result,
     course_id: str | None = None,
+    component_graph_result=None,
 ) -> str | None:
-    """document scope の component graph を `theory_component_graphs` に保存。"""
+    """document scope の component graph を `theory_component_graphs` に保存。
+
+    component_graph_result が指定された場合（ComponentGraphAgent の出力）は
+    そのエッジ情報を優先し、source_component_id/target_component_id/relation/
+    edge_type/evidence スキーマで保存する。
+    指定されない場合は component_result.components[].dependencies から
+    フォールバックエッジを生成する。
+    """
     nodes = []
     for agent_id, db_id in component_id_map.items():
         nodes.append({
             "id": db_id,
             "agent_component_id": agent_id,
+            "component_id": db_id,
             "type": "component",
         })
 
-    edges = []
-    for comp in getattr(component_result, "components", []) or []:
-        src_db = component_id_map.get(getattr(comp, "component_id", ""))
-        if not src_db:
-            continue
-        for dep in getattr(comp, "dependencies", []) or []:
-            if not isinstance(dep, dict):
+    if component_graph_result is not None:
+        # ComponentGraphAgent の結果を使い、エージェントIDをDB IDに変換してエッジ化
+        payload = component_graph_result.to_graph_payload()
+        edges = []
+        for e in payload.get("edges", []):
+            src_agent_id = e.get("source_component_id", "")
+            dst_agent_id = e.get("target_component_id", "")
+            src_db = component_id_map.get(src_agent_id, src_agent_id)
+            dst_db = component_id_map.get(dst_agent_id, dst_agent_id)
+            edges.append({
+                "source_component_id": src_db,
+                "target_component_id": dst_db,
+                "relation": e.get("relation", "RELATED_TO"),
+                "edge_type": e.get("edge_type", e.get("relation", "RELATED_TO")),
+                "support_status": e.get("support_status", "llm_inferred"),
+                "confidence": e.get("confidence", 0.0),
+                "review_status": e.get("review_status", "teacher_review_required"),
+                "evidence": e.get("evidence", {"evidence_claims": [], "reason": ""}),
+                "edge_id": e.get("edge_id", ""),
+            })
+        validation_issues = [
+            {"rule_id": v.rule_id, "severity": v.severity, "message": v.message}
+            for v in getattr(component_graph_result, "validation_issues", [])
+        ]
+    else:
+        # フォールバック: dependencies ベースの確定的エッジ生成
+        edges = []
+        for comp in getattr(component_result, "components", []) or []:
+            src_db = component_id_map.get(getattr(comp, "component_id", ""))
+            if not src_db:
                 continue
-            for ref in dep.get("component_refs") or []:
-                dst_db = component_id_map.get(ref)
-                if not dst_db:
+            for dep in getattr(comp, "dependencies", []) or []:
+                if not isinstance(dep, dict):
                     continue
-                edges.append({
-                    "from": src_db,
-                    "to": dst_db,
-                    "type": dep.get("dependency_type") or "depends_on",
-                    "reason": dep.get("reason") or "",
-                })
+                dep_type = dep.get("dependency_type") or "depends_on"
+                relation = (
+                    "REQUIRES" if dep_type in ("requires", "depends_on")
+                    else "TRANSFORMS" if dep_type == "transforms"
+                    else "ENABLES" if dep_type in ("enables", "supports")
+                    else "RELATED_TO"
+                )
+                for ref in dep.get("component_refs") or []:
+                    dst_db = component_id_map.get(ref)
+                    if not dst_db:
+                        continue
+                    edges.append({
+                        "source_component_id": src_db,
+                        "target_component_id": dst_db,
+                        "relation": relation,
+                        "edge_type": relation,
+                        "support_status": "dependency_declared",
+                        "confidence": 1.0,
+                        "review_status": "teacher_review_required",
+                        "evidence": {
+                            "evidence_claims": [],
+                            "reason": dep.get("reason") or "",
+                        },
+                    })
+        validation_issues = []
 
     dsl_nodes = [
         {
@@ -492,11 +542,12 @@ def persist_component_graph(
     graph = {
         "graph_id": f"graph_{document_id}",
         "document_id": document_id,
+        "graph_schema_version": "0.1.0",
         "scope": {"level": "paper"},
         "nodes": nodes,
         "edges": edges,
         "dsl": {"nodes": dsl_nodes, "edges": dsl_edges},
-        "validation_results": [],
+        "validation_results": validation_issues,
     }
 
     session = _pg_session()

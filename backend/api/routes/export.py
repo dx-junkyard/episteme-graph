@@ -761,9 +761,9 @@ def _row_to_component_graph(row: Any) -> dict:
             continue
         edges.append({
             "edge_id": e.get("edge_id", f"component_edge_{i+1:04d}"),
-            "source": e.get("source_component_id", e.get("source", "")),
-            "target": e.get("target_component_id", e.get("target", "")),
-            "edge_type": e.get("relation", e.get("edge_type", "RELATED_TO")),
+            "source": e.get("source_component_id", e.get("source", e.get("from", ""))),
+            "target": e.get("target_component_id", e.get("target", e.get("to", ""))),
+            "edge_type": e.get("relation", e.get("edge_type", e.get("type", "RELATED_TO"))),
             "support_status": e.get("support_status", "source_inferred"),
             "evidence_claims": _load_json_field(e.get("evidence", {}).get("evidence_claims", []), []),
             "review_status": e.get("review_status", "teacher_review_required"),
