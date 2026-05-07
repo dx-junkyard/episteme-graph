@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from typing import Any
 
@@ -26,6 +27,40 @@ def _strip_nuls(value: Any) -> Any:
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(_strip_nuls(value), ensure_ascii=False)
+
+
+def _claim_legacy_keys(claim: dict) -> set[str]:
+    keys: set[str] = set()
+    claim_id = claim.get("claim_id")
+    span_id = claim.get("span_id")
+    if claim_id:
+        keys.add(str(claim_id))
+    if span_id:
+        safe = re.sub(r"[^A-Za-z0-9_]+", "_", str(span_id))
+        keys.add(str(span_id))
+        keys.add(f"claim_{safe}")
+    return keys
+
+
+def _remap_string_list(values: Any, id_map: dict[str, str]) -> list[str]:
+    out: list[str] = []
+    for value in values or []:
+        mapped = id_map.get(str(value), str(value))
+        if mapped not in out:
+            out.append(mapped)
+    return out
+
+
+def _remap_nested_claim_refs(value: Any, id_map: dict[str, str]) -> Any:
+    if isinstance(value, list):
+        return [_remap_nested_claim_refs(item, id_map) for item in value]
+    if not isinstance(value, dict):
+        return value
+    out = dict(value)
+    for key in ("claim_ids", "evidence_claims", "linked_claim_ids"):
+        if isinstance(out.get(key), list):
+            out[key] = _remap_string_list(out[key], id_map)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +311,7 @@ def persist_components(
     document_id: str,
     component_result,
     course_id: str | None = None,
+    claim_id_map: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """ComponentAssemblyResult.components を `theory_components` に保存する。
 
@@ -287,6 +323,7 @@ def persist_components(
         return {}
 
     id_map: dict[str, str] = {}
+    claim_id_map = claim_id_map or {}
     session = _pg_session()
     try:
         # 同 document の既存 component と link を削除
@@ -299,6 +336,13 @@ def persist_components(
             {"doc_id": document_id},
         )
         for comp in components:
+            evidence_refs = dict(getattr(comp, "evidence_refs", {}) or {})
+            if isinstance(evidence_refs.get("claim_ids"), list):
+                evidence_refs["claim_ids"] = _remap_string_list(evidence_refs["claim_ids"], claim_id_map)
+            inputs = _remap_nested_claim_refs(getattr(comp, "inputs", []) or [], claim_id_map)
+            outputs = _remap_nested_claim_refs(getattr(comp, "outputs", []) or [], claim_id_map)
+            preconditions = _remap_nested_claim_refs(getattr(comp, "preconditions", []) or [], claim_id_map)
+            cautions = _remap_nested_claim_refs(getattr(comp, "cautions", []) or [], claim_id_map)
             params = {
                 "course_id": course_id,
                 "document_id": document_id,
@@ -310,11 +354,11 @@ def persist_components(
                 "summary": _strip_nuls(getattr(comp, "summary", "") or ""),
                 "status": "candidate",
                 "source_chunks": _json_dumps(
-                    (getattr(comp, "evidence_refs", {}) or {}).get("source_chunks") or []
+                    evidence_refs.get("source_chunks") or []
                 ),
-                "inputs": _json_dumps(getattr(comp, "inputs", []) or []),
-                "outputs": _json_dumps(getattr(comp, "outputs", []) or []),
-                "preconditions": _json_dumps(getattr(comp, "preconditions", []) or []),
+                "inputs": _json_dumps(inputs),
+                "outputs": _json_dumps(outputs),
+                "preconditions": _json_dumps(preconditions),
                 "constraints": _json_dumps([]),
                 "invalid_conditions": _json_dumps([]),
                 "dependencies": _json_dumps(getattr(comp, "dependencies", []) or []),
@@ -324,14 +368,17 @@ def persist_components(
                 }),
                 "validation_warnings": _json_dumps([]),
                 "teacher_notes": "",
-                "source_scope": _json_dumps({"document_id": document_id}),
+                "source_scope": _json_dumps({
+                    "document_id": document_id,
+                    "legacy_ids": [getattr(comp, "component_id", "")],
+                }),
                 "evidence_claims": _json_dumps(
-                    (getattr(comp, "evidence_refs", {}) or {}).get("claim_ids") or []
+                    evidence_refs.get("claim_ids") or []
                 ),
                 "maturity_level": "paper_claim",
                 "maturity_source": "llm_proposed",
                 "review_status": "teacher_review_required",
-                "cautions": _json_dumps(getattr(comp, "cautions", []) or []),
+                "cautions": _json_dumps(cautions),
                 "connectors": _json_dumps({}),
                 "internal_flow": _json_dumps([]),
                 "duplicate_candidates": _json_dumps([]),
@@ -442,6 +489,7 @@ def persist_component_graph(
     dsl_result,
     course_id: str | None = None,
     component_graph_result=None,
+    claim_id_map: dict[str, str] | None = None,
 ) -> str | None:
     """document scope の component graph を `theory_component_graphs` に保存。
 
@@ -451,6 +499,7 @@ def persist_component_graph(
     指定されない場合は component_result.components[].dependencies から
     フォールバックエッジを生成する。
     """
+    claim_id_map = claim_id_map or {}
     nodes = []
     for agent_id, db_id in component_id_map.items():
         nodes.append({
@@ -469,6 +518,10 @@ def persist_component_graph(
             dst_agent_id = e.get("target_component_id", "")
             src_db = component_id_map.get(src_agent_id, src_agent_id)
             dst_db = component_id_map.get(dst_agent_id, dst_agent_id)
+            evidence = _remap_nested_claim_refs(
+                e.get("evidence", {"evidence_claims": [], "reason": ""}),
+                claim_id_map,
+            )
             edges.append({
                 "source_component_id": src_db,
                 "target_component_id": dst_db,
@@ -477,7 +530,7 @@ def persist_component_graph(
                 "support_status": e.get("support_status", "llm_inferred"),
                 "confidence": e.get("confidence", 0.0),
                 "review_status": e.get("review_status", "teacher_review_required"),
-                "evidence": e.get("evidence", {"evidence_claims": [], "reason": ""}),
+                "evidence": evidence,
                 "edge_id": e.get("edge_id", ""),
             })
         validation_issues = [

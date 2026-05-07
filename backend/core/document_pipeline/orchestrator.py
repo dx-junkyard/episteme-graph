@@ -16,6 +16,7 @@ from typing import Any, Callable
 from .chunker import build_source_chunks
 from .dsl_text import dsl_result_to_search_text
 from .persistence import (
+    _claim_legacy_keys,
     get_latest_analysis_run,
     load_source_chunk_index,
     persist_component_graph,
@@ -780,6 +781,10 @@ def run_document_pipeline(
                     qualified_result=qualified,
                     chunk_index=chunk_index,
                 )
+                claim_id_map: dict[str, str] = {}
+                for saved in saved_claims:
+                    for key in _claim_legacy_keys(saved):
+                        claim_id_map[key] = saved["claim_id"]
                 result.claim_count = len(saved_claims)
                 report_item("persist_claims_components_graph", 1, 3, "tables")
 
@@ -787,6 +792,7 @@ def run_document_pipeline(
                     document_id=document_id,
                     component_result=component_result,
                     course_id=course_id,
+                    claim_id_map=claim_id_map,
                 )
                 report_item("persist_claims_components_graph", 2, 3, "tables")
                 persist_component_graph(
@@ -796,6 +802,7 @@ def run_document_pipeline(
                     dsl_result=dsl,
                     course_id=course_id,
                     component_graph_result=component_graph_result,
+                    claim_id_map=claim_id_map,
                 )
                 save_artifact("persist_claims_components_graph", {
                     "claims": result.claim_count,

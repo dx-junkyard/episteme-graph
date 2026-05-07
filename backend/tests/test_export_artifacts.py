@@ -285,7 +285,9 @@ class TestDerivationChains:
                     "input_equation_ids": ["eq_001"],
                     "operation": "substitute",
                     "output_equation_ids": ["eq_002"],
+                    "claim_ids": ["claim_007"],
                     "required_claim_ids": ["claim_007"],
+                    "source_evidence_ids": ["ev_001"],
                     "assumption_refs": ["small_x"],
                     "reason": "Substituting eq_001 into ...",
                     "confidence": 0.8,
@@ -300,6 +302,8 @@ class TestDerivationChains:
         assert s["operation"] == "substitute"
         assert s["input_equation_ids"] == ["eq_001"]
         assert s["output_equation_ids"] == ["eq_002"]
+        assert s["claim_ids"] == ["claim_007"]
+        assert s["source_evidence_ids"] == ["ev_001"]
         assert s["assumption_refs"] == ["small_x"]
 
     def test_derivation_fallback_uses_equation_links(self):
@@ -312,6 +316,45 @@ class TestDerivationChains:
         step = chains[0]["steps"][0]
         assert step["input_equation_ids"] == ["eq_001"]
         assert step["output_equation_ids"] == ["eq_002"]
+
+    def test_derivation_fallback_builds_source_order_chain_when_links_missing(self):
+        ea = _import_artifacts()
+        artifact = {
+            "document_id": "doc_001",
+            "equations": [
+                {
+                    "equation_id": "eq_001",
+                    "block_id": "blk_5",
+                    "section_id": "sec_1",
+                    "equation_role": {"primary": "equation_definition"},
+                    "derivation_links": {"from_equations": [], "to_equations": []},
+                },
+                {
+                    "equation_id": "eq_002",
+                    "block_id": "blk_6",
+                    "section_id": "sec_1",
+                    "equation_role": {"primary": "equation_relation"},
+                    "derivation_links": {"from_equations": [], "to_equations": []},
+                },
+            ],
+        }
+        evidence = {
+            "records": [
+                {"evidence_id": "ev_001", "source": {"block_id": "blk_5"}},
+                {"evidence_id": "ev_002", "source": {"block_id": "blk_6"}},
+            ]
+        }
+        chains = ea.build_derivation_chains_export(
+            None,
+            document_id="doc_001",
+            equation_artifact=artifact,
+            evidence_artifact=evidence,
+        )
+        assert len(chains) == 1
+        steps = chains[0]["steps"]
+        assert [s["output_equation_ids"] for s in steps] == [["eq_001"], ["eq_002"]]
+        assert steps[0]["source_evidence_ids"] == ["ev_001"]
+        assert steps[1]["source_evidence_ids"] == ["ev_002"]
 
 
 # ---------------------------------------------------------------------------

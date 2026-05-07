@@ -701,6 +701,7 @@ class TheoryComponentOut(BaseModel):
     invalid_conditions: list[TheoryConditionItem] = Field(default_factory=list)
     dependencies: list[TheoryConditionItem] = Field(default_factory=list)
     connectors: dict = Field(default_factory=dict)
+    component_type_text: str = ""
     internal_flow: list[dict] = Field(default_factory=list)
     blackbox_policy: TheoryBlackboxPolicy = Field(default_factory=TheoryBlackboxPolicy)
     validation_warnings: list[dict] = Field(default_factory=list)
@@ -768,6 +769,8 @@ class ComponentGraphNode(BaseModel):
     display_order: int = 0
     origin: str = "paper"
     component_type: str = ""
+    component_type_text: str = ""
+    summary: str = ""
 
 
 class ComponentGraphEdge(BaseModel):

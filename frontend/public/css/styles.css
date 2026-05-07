@@ -2729,6 +2729,243 @@ body {
   line-height: 1;
 }
 
+.ls-component-graph-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  min-height: 540px;
+  border: 1px solid var(--color-border-tertiary);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--color-background-primary);
+}
+
+.ls-component-graph-main {
+  position: relative;
+  min-width: 0;
+  min-height: 540px;
+  border-right: 1px solid var(--color-border-tertiary);
+  background: #f8fafc;
+}
+
+.ls-component-network {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background-color: #f8fafc;
+  background-image: radial-gradient(#e2e8f0 1px, transparent 1px);
+  background-size: 20px 20px;
+  outline: none;
+}
+
+.ls-component-network canvas {
+  outline: none;
+}
+
+.ls-component-legend {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  display: grid;
+  gap: 7px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border-tertiary);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.07);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  z-index: 5;
+}
+
+.ls-component-legend-title {
+  color: var(--color-text-primary);
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+
+.ls-legend-swatch {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  margin-right: 7px;
+  border: 2px solid;
+  border-radius: 4px;
+  vertical-align: -2px;
+}
+
+.ls-legend-assumption { background: #dcfce7; border-color: #22c55e; }
+.ls-legend-method { background: #dbeafe; border-color: #3b82f6; }
+.ls-legend-relation { background: #f3e8ff; border-color: #a855f7; }
+.ls-legend-diagnostic { background: #ecfccb; border-color: #84cc16; }
+.ls-legend-conclusion { background: #fee2e2; border-color: #ef4444; }
+.ls-legend-uncertainty { background: #ffedd5; border-color: #f97316; border-radius: 50%; }
+
+.ls-component-graph-fit {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--color-border-tertiary);
+  border-radius: 50%;
+  background: #ffffff;
+  color: var(--color-text-secondary);
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.1);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  z-index: 5;
+}
+
+.ls-component-graph-fit:hover {
+  background: var(--color-background-secondary);
+}
+
+.ls-component-graph-detail {
+  min-width: 0;
+  padding: 18px;
+  overflow-y: auto;
+  background: #ffffff;
+}
+
+.ls-graph-detail-empty {
+  height: 100%;
+  min-height: 320px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  text-align: center;
+  color: var(--color-text-tertiary);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.ls-graph-detail-icon {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--color-border-tertiary);
+  border-radius: 50%;
+  color: var(--color-text-tertiary);
+  font-size: 24px;
+}
+
+.ls-graph-detail-counts {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.ls-graph-detail-counts span,
+.ls-graph-detail-badge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--color-border-tertiary);
+  border-radius: 999px;
+  padding: 3px 9px;
+  background: var(--color-background-secondary);
+  font-size: 11px;
+}
+
+.ls-graph-detail-badge {
+  margin-bottom: 12px;
+  font-weight: 700;
+}
+
+.ls-graph-detail-badge.assumption { background: #dcfce7; color: #166534; border-color: #86efac; }
+.ls-graph-detail-badge.method { background: #dbeafe; color: #1e40af; border-color: #93c5fd; }
+.ls-graph-detail-badge.relation { background: #f3e8ff; color: #6b21a8; border-color: #d8b4fe; }
+.ls-graph-detail-badge.diagnostic { background: #ecfccb; color: #3f6212; border-color: #bef264; }
+.ls-graph-detail-badge.conclusion { background: #fee2e2; color: #991b1b; border-color: #fca5a5; }
+.ls-graph-detail-badge.uncertainty { background: #ffedd5; color: #9a3412; border-color: #fdba74; }
+
+.ls-component-graph-detail h4 {
+  margin: 0 0 4px;
+  color: var(--color-text-primary);
+  font-size: 20px;
+  line-height: 1.35;
+}
+
+.ls-graph-detail-meta {
+  margin: 0 0 18px;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.ls-graph-detail-section {
+  padding-top: 14px;
+  margin-top: 14px;
+  border-top: 1px solid var(--color-border-tertiary);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.ls-graph-detail-section p {
+  margin-top: 7px;
+  line-height: 1.7;
+}
+
+.ls-graph-detail-section code {
+  display: block;
+  margin-top: 7px;
+  color: var(--color-text-tertiary);
+  font-size: 10px;
+  word-break: break-all;
+}
+
+.ls-graph-detail-edges {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ls-graph-detail-edges li {
+  padding: 8px 9px;
+  border: 1px solid var(--color-border-tertiary);
+  border-radius: 8px;
+  background: var(--color-background-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.ls-graph-detail-edges span {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--color-text-primary);
+  font-weight: 700;
+}
+
+.ls-graph-validation {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--color-border-tertiary);
+  border-radius: 8px;
+  background: var(--color-background-primary);
+}
+
+@media (max-width: 960px) {
+  .ls-component-graph-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .ls-component-graph-main {
+    min-height: 420px;
+    border-right: 0;
+    border-bottom: 1px solid var(--color-border-tertiary);
+  }
+
+  .ls-component-graph-detail {
+    max-height: 300px;
+  }
+}
+
 .ss-analysis-steps {
   display: grid;
   gap: 4px;

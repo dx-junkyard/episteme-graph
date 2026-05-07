@@ -3661,6 +3661,16 @@
         return;
       }
     }
+    if (!chunk && lsState.view === "graph" && lsState.chunks && lsState.chunks.length) {
+      chunk = lsState.chunks[0];
+      lsState.selectedChunkId = chunk.chunk_id;
+      if (!lsState.selectedScope) {
+        lsState.selectedScope = {
+          type: "paper",
+          documentId: chunk.document_id || chunk.material_id || "",
+        };
+      }
+    }
     if (!chunk) {
       document.getElementById("ls-workspace").innerHTML = '<div class="ls-empty-state">チャンクを選択すると編集ワークベンチが表示されます</div>';
       metaEl.textContent = "チャンクを選択してください";
@@ -3724,7 +3734,11 @@
       spokenEl.hidden = true;
       displayEl.hidden = true;
       document.getElementById("ls-display-preview").hidden = true;
-      lsRenderGraphPanel(lsCurrentDocumentId());
+      var graphDocumentId = lsCurrentDocumentId();
+      if (graphDocumentId && !lsState.graphByDocument[graphDocumentId] && !lsState.graphLoading) {
+        lsLoadComponentGraph(graphDocumentId, false);
+      }
+      lsRenderGraphPanel(graphDocumentId);
     } else if (isAudio) {
       document.getElementById("ls-right-title").textContent = "読み上げテキスト";
       document.getElementById("ls-display-tabs").hidden = true;
@@ -4185,40 +4199,55 @@
     var nodes = graph.nodes || [];
     var edges = graph.edges || [];
     var validations = graph.validation_results || [];
-    var html = '<div class="ls-theory-current">論文レベルの論理グラフ</div>';
     if (!nodes.length) {
-      html += '<div class="ls-empty-state">論理要素がまだありません。節ビューで論理要素を抽出してください。</div>';
-    } else {
-      var nodeById = {};
-      nodes.forEach(function (node) { nodeById[node.component_id] = node; });
-      html += '<div class="ls-graph-flow">';
-      if (!edges.length) {
-        nodes.forEach(function (node) {
-          html += '<div class="ls-graph-node">' + escHtml(node.label || node.component_id) + '<div class="ls-theory-muted">' + escHtml(node.origin || "paper") + ' / ' + escHtml(node.component_type || "") + '</div></div>';
-        });
-      }
-      edges.forEach(function (edge) {
-        var source = nodeById[edge.source_component_id] || {};
-        var target = nodeById[edge.target_component_id] || {};
-        var evidence = edge.evidence || {};
-        html += '<details class="ls-graph-edge">' +
-          '<summary>' +
-            '<span class="ls-graph-node-inline">' + escHtml(source.label || edge.source_component_id || "") + '</span>' +
-            '<span class="ls-graph-edge-label"> -- ' + escHtml(edge.relation || "RELATED_TO") + ' / ' + escHtml(edge.edge_type || "") + ' → </span>' +
-            '<span class="ls-graph-node-inline">' + escHtml(target.label || edge.target_component_id || "") + '</span>' +
-          '</summary>' +
-          '<div class="ls-theory-muted">' + escHtml(source.origin || "paper") + ' → ' + escHtml(target.origin || "paper") + '</div>' +
-          '<div class="ls-theory-muted">support_status: ' + escHtml(edge.support_status || "") + ' / review_status: ' + escHtml(edge.review_status || "") + ' / confidence: ' + escHtml(String(edge.confidence || "")) + '</div>' +
-          '<ul class="ls-theory-items">';
-        Object.keys(evidence).forEach(function (key) {
-          html += '<li><b>' + escHtml(key) + '</b>: ' + escHtml(Array.isArray(evidence[key]) ? evidence[key].join(", ") : String(evidence[key] || "")) + '</li>';
-        });
-        html += '</ul></details>';
-      });
-      html += '</div>';
+      container.innerHTML = '<div class="ls-empty-state">論理要素がまだありません。節ビューで論理要素を抽出してください。</div>';
+      return;
     }
-    html += '<div class="ls-theory-section"><b>検証結果</b>';
-    if (!validations.length) {
+
+    var html =
+      '<div class="ls-component-graph-shell">' +
+        '<div class="ls-component-graph-main">' +
+          '<div id="ls-component-network" class="ls-component-network" tabindex="0"></div>' +
+          '<div class="ls-component-legend">' +
+            '<div class="ls-component-legend-title">論理コンポーネント</div>' +
+            '<div><span class="ls-legend-swatch ls-legend-assumption"></span>前提・定義</div>' +
+            '<div><span class="ls-legend-swatch ls-legend-method"></span>手法・構成</div>' +
+            '<div><span class="ls-legend-swatch ls-legend-relation"></span>推論・関係</div>' +
+            '<div><span class="ls-legend-swatch ls-legend-diagnostic"></span>検証・制約</div>' +
+            '<div><span class="ls-legend-swatch ls-legend-conclusion"></span>結論・出力</div>' +
+            '<div><span class="ls-legend-swatch ls-legend-uncertainty"></span>注意・不確実性</div>' +
+          '</div>' +
+          '<button id="ls-component-graph-fit" class="ls-component-graph-fit" type="button" title="全体を表示">⤢</button>' +
+        '</div>' +
+        '<aside id="ls-component-graph-detail" class="ls-component-graph-detail">' +
+          lsGraphEmptyDetailHtml(nodes.length, edges.length) +
+        '</aside>' +
+      '</div>' +
+      lsGraphValidationHtml(validations);
+    container.innerHTML = html;
+
+    if (!window.vis || !window.vis.Network) {
+      lsRenderGraphFallback(container, graph);
+      return;
+    }
+
+    lsInitComponentGraphNetwork(graph);
+  }
+
+  function lsGraphEmptyDetailHtml(nodeCount, edgeCount) {
+    return '<div class="ls-graph-detail-empty">' +
+      '<div class="ls-graph-detail-icon">⌖</div>' +
+      '<p>ノードを選択すると、論理ステップの詳細が表示されます。</p>' +
+      '<div class="ls-graph-detail-counts">' +
+        '<span>' + escHtml(String(nodeCount)) + ' nodes</span>' +
+        '<span>' + escHtml(String(edgeCount)) + ' edges</span>' +
+      '</div>' +
+    '</div>';
+  }
+
+  function lsGraphValidationHtml(validations) {
+    var html = '<div class="ls-theory-section ls-graph-validation"><b>検証結果</b>';
+    if (!validations || !validations.length) {
       html += '<div class="ls-theory-source-ok">警告はありません</div>';
     } else {
       html += '<ul class="ls-theory-items">';
@@ -4227,8 +4256,349 @@
       });
       html += '</ul>';
     }
-    html += '</div>';
+    return html + '</div>';
+  }
+
+  function lsInitComponentGraphNetwork(graph) {
+    var networkEl = document.getElementById("ls-component-network");
+    if (!networkEl) return;
+
+    var nodes = graph.nodes || [];
+    var edges = graph.edges || [];
+    var graphEdges = lsGraphDisplayEdges(edges);
+    var layoutPositions = lsGraphLayoutPositions(nodes, graphEdges);
+    var nodeById = {};
+    nodes.forEach(function (node) {
+      var id = lsGraphNodeId(node);
+      if (id) nodeById[id] = node;
+    });
+
+    var visNodes = new window.vis.DataSet(nodes.map(function (node, index) {
+      var id = lsGraphNodeId(node) || ("node-" + index);
+      var group = lsGraphNodeGroup(node);
+      var pos = layoutPositions[id] || { x: 0, y: index * 160 };
+      var visNode = {
+        id: id,
+        label: lsWrapGraphLabel(node.label || node.name || id),
+        x: pos.x,
+        y: pos.y,
+        group: group,
+        title: node.component_type_text || node.component_type || node.review_status || "",
+      };
+      if (lsGraphNodeDashed(node, group)) {
+        visNode.shapeProperties = { borderDashes: [6, 5] };
+      }
+      return visNode;
+    }));
+
+    var visEdges = new window.vis.DataSet(graphEdges.map(function (edge, index) {
+      var from = edge.source_component_id || edge.source || edge.from;
+      var to = edge.target_component_id || edge.target || edge.to;
+      var relation = edge.relation || edge.edge_type || edge.type || "RELATED_TO";
+      return {
+        id: edge.edge_id || ("edge-" + index),
+        from: from,
+        to: to,
+        label: lsGraphEdgeLabel(relation),
+        arrows: "to",
+        dashes: lsGraphEdgeDashed(edge),
+        width: Math.max(1, Math.min(4, Number(edge.confidence || 0.7) * 4)),
+        color: { color: lsGraphEdgeColor(edge) },
+      };
+    }).filter(function (edge) {
+      return edge.from && edge.to;
+    }));
+
+    var network = new window.vis.Network(networkEl, { nodes: visNodes, edges: visEdges }, {
+      layout: {
+        hierarchical: false,
+      },
+      physics: false,
+      nodes: {
+        shape: "box",
+        margin: { top: 11, right: 14, bottom: 11, left: 14 },
+        borderWidth: 2,
+        borderWidthSelected: 3,
+        font: { size: 13, face: "-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif", multi: true },
+        shadow: { enabled: true, color: "rgba(15, 23, 42, 0.08)", size: 10, x: 0, y: 4 },
+      },
+      edges: {
+        font: { size: 12, align: "middle", color: "#64748b", strokeWidth: 5, strokeColor: "#ffffff" },
+        smooth: { type: "cubicBezier", forceDirection: "vertical", roundness: 0.42 },
+      },
+      groups: {
+        assumption: { color: { background: "#f0fdf4", border: "#22c55e", highlight: { background: "#dcfce7", border: "#16a34a" } } },
+        method: { color: { background: "#eff6ff", border: "#3b82f6", highlight: { background: "#dbeafe", border: "#2563eb" } } },
+        relation: { color: { background: "#faf5ff", border: "#a855f7", highlight: { background: "#f3e8ff", border: "#9333ea" } } },
+        diagnostic: { color: { background: "#f7fee7", border: "#84cc16", highlight: { background: "#ecfccb", border: "#65a30d" } } },
+        conclusion: { color: { background: "#fef2f2", border: "#ef4444", highlight: { background: "#fee2e2", border: "#dc2626" } } },
+        uncertainty: { color: { background: "#fff7ed", border: "#f97316", highlight: { background: "#ffedd5", border: "#ea580c" } }, shape: "ellipse" },
+      },
+      interaction: { hover: true, tooltipDelay: 180 },
+    });
+
+    var fitBtn = document.getElementById("ls-component-graph-fit");
+    if (fitBtn) {
+      fitBtn.addEventListener("click", function () {
+        network.fit({ animation: { duration: 450, easingFunction: "easeInOutQuad" } });
+      });
+    }
+    network.once("afterDrawing", function () {
+      network.fit({ animation: false });
+    });
+    network.on("selectNode", function (params) {
+      var node = nodeById[params.nodes[0]];
+      if (node) lsRenderGraphNodeDetail(node, graph);
+    });
+    network.on("deselectNode", function () {
+      var detail = document.getElementById("ls-component-graph-detail");
+      if (detail) detail.innerHTML = lsGraphEmptyDetailHtml(nodes.length, edges.length);
+    });
+  }
+
+  function lsRenderGraphNodeDetail(node, graph) {
+    var detail = document.getElementById("ls-component-graph-detail");
+    if (!detail) return;
+    var nodeId = lsGraphNodeId(node);
+    var connected = (graph.edges || []).filter(function (edge) {
+      var source = edge.source_component_id || edge.source || edge.from;
+      var target = edge.target_component_id || edge.target || edge.to;
+      return source === nodeId || target === nodeId;
+    });
+    var html =
+      '<div class="ls-graph-detail-badge ' + escHtml(lsGraphNodeGroup(node)) + '">' + escHtml(node.component_type_text || node.component_type || node.typeName || "component") + '</div>' +
+      '<h4>' + escHtml(node.label || node.name || nodeId || "無題") + '</h4>' +
+      '<p class="ls-graph-detail-meta">' + escHtml(node.review_status || node.origin || "paper") + '</p>';
+    if (node.summary) {
+      html += '<div class="ls-graph-detail-section"><b>Summary</b><p>' + escHtml(node.summary) + '</p></div>';
+    }
+    html += '<div class="ls-graph-detail-section"><b>Connections</b>';
+    if (!connected.length) {
+      html += '<p class="ls-theory-muted">接続エッジはありません。</p>';
+    } else {
+      html += '<ul class="ls-graph-detail-edges">';
+      connected.forEach(function (edge) {
+        var source = edge.source_component_id || edge.source || edge.from;
+        var target = edge.target_component_id || edge.target || edge.to;
+        var direction = source === nodeId ? "→ " + target : "← " + source;
+        html += '<li><span>' + escHtml(edge.relation || edge.edge_type || edge.type || "RELATED_TO") + '</span>' + escHtml(direction) + '</li>';
+      });
+      html += '</ul>';
+    }
+    html += '</div><div class="ls-graph-detail-section"><b>System ID</b><code>' + escHtml(nodeId || "") + '</code></div>';
+    detail.innerHTML = html;
+  }
+
+  function lsRenderGraphFallback(container, graph) {
+    var nodes = graph.nodes || [];
+    var edges = graph.edges || [];
+    var nodeById = {};
+    nodes.forEach(function (node) { nodeById[lsGraphNodeId(node)] = node; });
+    var html = '<div class="ls-empty-state">ネットワーク描画ライブラリを読み込めませんでした。テキスト表示に切り替えます。</div><div class="ls-graph-flow">';
+    nodes.forEach(function (node) {
+      html += '<div class="ls-graph-node">' + escHtml(node.label || lsGraphNodeId(node)) + '<div class="ls-theory-muted">' + escHtml(node.origin || "paper") + ' / ' + escHtml(node.component_type || "") + '</div></div>';
+    });
+    edges.forEach(function (edge) {
+      var sourceId = edge.source_component_id || edge.source || edge.from;
+      var targetId = edge.target_component_id || edge.target || edge.to;
+      var source = nodeById[sourceId] || {};
+      var target = nodeById[targetId] || {};
+      html += '<details class="ls-graph-edge"><summary><span class="ls-graph-node-inline">' + escHtml(source.label || sourceId || "") + '</span>' +
+        '<span class="ls-graph-edge-label"> -- ' + escHtml(edge.relation || edge.edge_type || edge.type || "RELATED_TO") + ' → </span>' +
+        '<span class="ls-graph-node-inline">' + escHtml(target.label || targetId || "") + '</span></summary></details>';
+    });
+    html += '</div>' + lsGraphValidationHtml(graph.validation_results || []);
     container.innerHTML = html;
+  }
+
+  function lsGraphNodeId(node) {
+    return node && (node.component_id || node.id || node.node_id);
+  }
+
+  function lsWrapGraphLabel(label) {
+    var text = String(label || "");
+    text = text
+      .replace(/^Completeness condition$/i, "完全性条件\n(Completeness)")
+      .replace(/^Reality criterion$/i, "実在性の基準\n(Reality criterion)")
+      .replace(/^No-real-change after separation$/i, "分離後の無影響\n(No-real-change)")
+      .replace(/^Remote alternative-measurement assignment$/i, "遠隔の代替測定\n(Remote assignment)")
+      .replace(/^Reality attribution for noncommuting observables$/i, "非可換量の同時実在\n(ルートB)")
+      .replace(/^Alternative-to-incompleteness inference$/i, "波動関数の不完全性\n(最終結論)")
+      .replace(/^Argument uncertainty from criterion scope and degraded equations$/i, "論証の不確実性")
+      .replace(/^Uniform-coordinate unpredictability from interval probability$/i, "単一粒子座標の\n予測不可能性")
+      .replace(/^Incompleteness diagnosis from many-to-one wave-function assignment$/i, "不完全性の診断\n(ルートA)");
+    if (text.indexOf("\n") >= 0 || text.length <= 18) return text;
+    if (!/\s/.test(text)) {
+      var chunks = [];
+      for (var i = 0; i < text.length; i += 14) chunks.push(text.slice(i, i + 14));
+      return chunks.join("\n");
+    }
+    return text.split(/\s+/).reduce(function (lines, word) {
+      var current = lines[lines.length - 1] || "";
+      if ((current + " " + word).trim().length > 18) lines.push(word);
+      else lines[lines.length - 1] = (current + " " + word).trim();
+      return lines;
+    }, [""]).join("\n");
+  }
+
+  function lsGraphNodeGroup(node) {
+    var type = String((node && (node.component_type_text || node.component_type || node.type)) || "").toLowerCase();
+    var label = String((node && (node.label || node.name)) || "").toLowerCase();
+    var haystack = type + " " + label;
+    if (/uncertain|risk|caution|注意|不確実/.test(haystack)) return "uncertainty";
+    if (/assumption|premise|definition|axiom|criterion|no-real-change|completeness|前提|定義|基準|無影響/.test(haystack)) return "assumption";
+    if (/method|setup|experiment|procedure|assignment|unpredictability|手法|構成|実験|代替測定|予測不可能/.test(haystack)) return "method";
+    if (/diagnostic|constraint|law|check|diagnosis|検証|制約|診断/.test(haystack)) return "diagnostic";
+    if (/conclusion|result|output|claim|incompleteness inference|final|結論|出力|主張|最終/.test(haystack)) return "conclusion";
+    return "relation";
+  }
+
+  function lsGraphNodeLevel(node, fallbackIndex) {
+    var group = lsGraphNodeGroup(node);
+    var label = String((node && (node.label || node.name)) || "").toLowerCase();
+    if (/uniform-coordinate|単一粒子/.test(label)) return 0;
+    if (group === "assumption") return 0;
+    if (group === "method" || group === "uncertainty") return 1;
+    if (group === "relation" || group === "diagnostic") return 2;
+    if (group === "conclusion") return 3;
+    return Math.min(3, Math.max(0, Number(fallbackIndex || 0)));
+  }
+
+  function lsGraphNodeDashed(node, group) {
+    var label = String((node && (node.label || node.name)) || "").toLowerCase();
+    return /uniform-coordinate|単一粒子/.test(label) || (group === "method" && /unpredictability/.test(label));
+  }
+
+  function lsGraphDisplayEdges(edges) {
+    var byPair = {};
+    (edges || []).forEach(function (edge, index) {
+      var source = edge.source_component_id || edge.source || edge.from;
+      var target = edge.target_component_id || edge.target || edge.to;
+      if (!source || !target) return;
+      var key = source + "->" + target;
+      var current = byPair[key];
+      if (!current || lsGraphRelationPriority(edge) > lsGraphRelationPriority(current)) {
+        byPair[key] = Object.assign({}, edge, { edge_id: edge.edge_id || ("edge-" + index) });
+      }
+    });
+    return Object.keys(byPair).map(function (key) { return byPair[key]; });
+  }
+
+  function lsGraphLayoutPositions(nodes, edges) {
+    var nodeById = {};
+    var levels = {};
+    (nodes || []).forEach(function (node, index) {
+      var id = lsGraphNodeId(node) || ("node-" + index);
+      nodeById[id] = node;
+      levels[id] = lsGraphNodeLevel(node, index);
+    });
+
+    for (var pass = 0; pass < 12; pass += 1) {
+      var changed = false;
+      (edges || []).forEach(function (edge) {
+        var relation = String(edge.relation || edge.edge_type || edge.type || "").toUpperCase();
+        if (relation === "UNCERTAIN_DUE_TO" || relation === "RELATED_TO") return;
+        var source = edge.source_component_id || edge.source || edge.from;
+        var target = edge.target_component_id || edge.target || edge.to;
+        if (!nodeById[source] || !nodeById[target]) return;
+        var nextLevel = Math.min(4, (levels[source] || 0) + 1);
+        if ((levels[target] || 0) < nextLevel) {
+          levels[target] = nextLevel;
+          changed = true;
+        }
+      });
+      if (!changed) break;
+    }
+
+    (nodes || []).forEach(function (node, index) {
+      var id = lsGraphNodeId(node) || ("node-" + index);
+      var group = lsGraphNodeGroup(node);
+      if (group === "uncertainty") levels[id] = Math.min(2, Math.max(1, levels[id] || 1));
+      if (group === "conclusion") levels[id] = Math.max(4, levels[id] || 4);
+      if (lsGraphNodeDashed(node, group)) levels[id] = 0;
+    });
+
+    var buckets = {};
+    (nodes || []).forEach(function (node, index) {
+      var id = lsGraphNodeId(node) || ("node-" + index);
+      var level = levels[id] || 0;
+      if (!buckets[level]) buckets[level] = [];
+      buckets[level].push(node);
+    });
+
+    var positions = {};
+    Object.keys(buckets).forEach(function (levelKey) {
+      var level = Number(levelKey);
+      var bucket = buckets[levelKey].sort(function (a, b) {
+        return lsGraphNodeSortKey(a) - lsGraphNodeSortKey(b);
+      });
+      var spacing = bucket.length > 3 ? 280 : 340;
+      var totalWidth = (bucket.length - 1) * spacing;
+      bucket.forEach(function (node, index) {
+        var id = lsGraphNodeId(node);
+        positions[id] = {
+          x: (index * spacing) - (totalWidth / 2),
+          y: level * 185,
+        };
+      });
+    });
+    return positions;
+  }
+
+  function lsGraphNodeSortKey(node) {
+    var label = String((node && (node.label || node.name)) || "").toLowerCase();
+    if (/completeness|完全性/.test(label)) return 10;
+    if (/reality criterion|実在.*基準/.test(label)) return 20;
+    if (/no-disturbance|no-real-change|分離/.test(label)) return 30;
+    if (/uniform|coordinate|単一粒子|座標/.test(label)) return 40;
+    if (/remote|遠隔/.test(label)) return 50;
+    if (/criterion-of-reality|scope|limitation|uncertain|射程|不確実/.test(label)) return 60;
+    if (/wave function|diagnos|診断/.test(label)) return 70;
+    if (/disjunctive|incompleteness|結論/.test(label)) return 80;
+    return Number(node && node.display_order) || 99;
+  }
+
+  function lsGraphRelationPriority(edge) {
+    var relation = String((edge && (edge.relation || edge.edge_type || edge.type)) || "").toUpperCase();
+    if (relation === "REQUIRES") return 5;
+    if (relation === "PRODUCES_FOR" || relation === "ENABLES" || relation === "SUPPORTS") return 4;
+    if (relation === "UNCERTAIN_DUE_TO") return 3;
+    if (relation === "QUALIFIES" || relation === "CHECKED_BY") return 2;
+    return 1;
+  }
+
+  function lsGraphEdgeLabel(relation) {
+    var key = String(relation || "").toUpperCase();
+    var labels = {
+      REQUIRES: "依存",
+      PRODUCES_FOR: "生成",
+      ENABLES: "支持",
+      SUPPORTS: "支持",
+      UNCERTAIN_DUE_TO: "不確実性",
+      RELATED_TO: "関連",
+      QUALIFIES: "限定",
+      CHECKED_BY: "検証",
+      CONFLICTS_WITH: "矛盾",
+      INHIBITS: "抑制",
+      DEFINES: "定義",
+    };
+    return labels[key] || key;
+  }
+
+  function lsGraphEdgeDashed(edge) {
+    var status = String((edge && edge.support_status) || "").toLowerCase();
+    var relation = String((edge && (edge.relation || edge.edge_type || edge.type)) || "").toLowerCase();
+    return /llm|related|qualifies|conflicts|inhibits|uncertain/.test(status + " " + relation);
+  }
+
+  function lsGraphEdgeColor(edge) {
+    var relation = String((edge && (edge.relation || edge.edge_type || edge.type)) || "").toUpperCase();
+    if (relation === "UNCERTAIN_DUE_TO") return "#f97316";
+    if (relation === "CONFLICTS_WITH" || relation === "INHIBITS") return "#ef4444";
+    if (relation === "CHECKED_BY" || relation === "QUALIFIES") return "#84cc16";
+    if (relation === "DEFINES") return "#22c55e";
+    if (relation === "RELATED_TO") return "#f97316";
+    return "#94a3b8";
   }
 
   function lsLoadComponentGraph(documentId, forceRender) {
