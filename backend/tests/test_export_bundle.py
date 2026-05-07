@@ -510,6 +510,60 @@ class TestExportReferenceIntegrity:
         assert "LEGACY_EXPORT_REF" in codes
         assert "UNRESOLVED_EXPORT_REF" in codes
 
+    def test_derivation_validation_requires_chains_for_derivation_topics(self):
+        mod = _get_export_helpers()
+        validation = mod._validate_export_references(
+            claims=[],
+            equations=[{"equation_id": "eq_001"}],
+            components=[],
+            component_graph={"nodes": [], "edges": []},
+            course_info={"topics": [{"title": "Derivation of the result"}]},
+            evidence_snippets=[],
+            derivation_chains=[],
+        )
+        assert validation["publish_ready"] is False
+        assert any(e["code"] == "EMPTY_DERIVATION_CHAINS" for e in validation["errors"])
+
+    def test_derivation_validation_checks_step_equation_and_evidence_refs(self):
+        mod = _get_export_helpers()
+        validation = mod._validate_export_references(
+            claims=[{"claim_id": "claim_001"}],
+            equations=[{"equation_id": "eq_001"}, {"equation_id": "eq_002"}],
+            components=[],
+            component_graph={"nodes": [], "edges": []},
+            course_info={"topics": [{"title": "Derivation", "linked_derivation_ids": ["deriv_001"]}]},
+            evidence_snippets=[{"evidence_id": "ev_001"}],
+            derivation_chains=[{
+                "derivation_id": "deriv_001",
+                "steps": [{
+                    "operation": "derive_from",
+                    "input_equation_ids": ["eq_001"],
+                    "output_equation_ids": ["eq_002"],
+                    "claim_ids": ["claim_001"],
+                    "source_evidence_ids": ["ev_001"],
+                    "assumption_refs": [],
+                }],
+            }],
+        )
+        assert validation["publish_ready"] is True
+        assert validation["summary"]["unresolved_reference_count"] == 0
+
+    def test_derivation_topics_receive_derivation_ids(self):
+        mod = _get_export_helpers()
+        components = [{"component_id": "comp_001", "evidence_claims": ["claim_001"]}]
+        course_info = {"topics": [{"title": "Derivation of Eq. 2", "linked_component_ids": ["comp_001"]}]}
+        derivations = [{
+            "derivation_id": "deriv_001",
+            "steps": [{"claim_ids": ["claim_001"], "source_evidence_ids": ["ev_001"]}],
+        }]
+        mod._link_derivations_to_export_context(
+            components=components,
+            course_info=course_info,
+            derivation_chains=derivations,
+        )
+        assert components[0]["linked_derivation_ids"] == ["deriv_001"]
+        assert course_info["topics"][0]["linked_derivation_ids"] == ["deriv_001"]
+
     def test_export_bundle_preserves_references_between_claims_components_and_graph(self):
         mod = _get_export_helpers()
 

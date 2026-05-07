@@ -492,6 +492,7 @@ def build_derivation_chains_export(
     *,
     document_id: str,
     equation_artifact: Any = None,
+    evidence_artifact: Any = None,
 ) -> list[dict]:
     """Build derivations/derivation_chains.json.
 
@@ -500,6 +501,17 @@ def build_derivation_chains_export(
     derivation_links so component.internal_flow can still be cross-checked.
     """
     out: list[dict] = []
+    ev_by_block: dict[str, list[str]] = {}
+    evidence_records = (_coerce_dict(evidence_artifact).get("records") or [])
+    for ev in evidence_records if isinstance(evidence_records, list) else []:
+        if not isinstance(ev, dict):
+            continue
+        source = ev.get("source") or {}
+        block_id = source.get("block_id") if isinstance(source, dict) else None
+        evidence_id = ev.get("evidence_id")
+        if block_id and evidence_id:
+            ev_by_block.setdefault(str(block_id), []).append(str(evidence_id))
+
     dc = _coerce_dict(derivation_artifact)
     chains = dc.get("chains") if isinstance(dc.get("chains"), list) else []
     if chains:
@@ -510,12 +522,17 @@ def build_derivation_chains_export(
             for s in c.get("steps") or []:
                 if not isinstance(s, dict):
                     continue
+                claim_ids = []
+                for key in ("claim_ids", "required_claim_ids", "input_claim_ids", "output_claim_ids"):
+                    claim_ids.extend(str(v) for v in (s.get(key) or []) if v)
                 steps.append({
                     "step_id": s.get("step_id") or "",
                     "operation": s.get("operation") or "transform",
                     "input_equation_ids": list(s.get("input_equation_ids") or []),
                     "output_equation_ids": list(s.get("output_equation_ids") or []),
+                    "claim_ids": sorted(set(claim_ids)),
                     "required_claim_ids": list(s.get("required_claim_ids") or []),
+                    "source_evidence_ids": list(s.get("source_evidence_ids") or []),
                     "assumption_refs": list(s.get("assumption_refs") or []),
                     "reason": s.get("reason") or "",
                     "confidence": float(s.get("confidence") or 0.0),
@@ -532,15 +549,17 @@ def build_derivation_chains_export(
 
     eq = _coerce_dict(equation_artifact)
     eq_records = eq.get("equations") or []
+    normalized_records: list[dict] = [r for r in eq_records if isinstance(r, dict)] if isinstance(eq_records, list) else []
     chain_id = 1
-    for r in eq_records if isinstance(eq_records, list) else []:
-        if not isinstance(r, dict):
-            continue
+    for r in normalized_records:
         derivation_links = r.get("derivation_links") or {}
         from_eqs = list(derivation_links.get("from_equations") or []) if isinstance(derivation_links, dict) else []
         if not from_eqs:
             continue
         eq_id = r.get("equation_id") or ""
+        block_id = str(r.get("block_id") or (r.get("source_location") or {}).get("block_id") or "")
+        source_evidence_ids = list(r.get("source_evidence_ids") or ev_by_block.get(block_id, []))
+        claim_ids = list(r.get("linked_claim_ids") or [])
         out.append({
             "derivation_id": f"deriv_{chain_id:04d}",
             "document_id": document_id,
@@ -550,7 +569,9 @@ def build_derivation_chains_export(
                 "operation": "derive_from",
                 "input_equation_ids": from_eqs,
                 "output_equation_ids": [eq_id] if eq_id else [],
+                "claim_ids": claim_ids,
                 "required_claim_ids": [],
+                "source_evidence_ids": source_evidence_ids,
                 "assumption_refs": [
                     a.get("text", "") for a in (r.get("local_assumptions") or [])
                     if isinstance(a, dict) and a.get("text")
@@ -562,6 +583,58 @@ def build_derivation_chains_export(
             "blackbox_policy_suggestion": {},
         })
         chain_id += 1
+    if out or not normalized_records:
+        return out
+
+    ordered = sorted(
+        normalized_records,
+        key=lambda r: (
+            ((r.get("source_location") or {}).get("page") if isinstance(r.get("source_location"), dict) else None) or 10**9,
+            str((r.get("source_location") or {}).get("section_id") if isinstance(r.get("source_location"), dict) else r.get("section_id") or ""),
+            str(r.get("equation_id") or ""),
+        ),
+    )
+    steps = []
+    section_ids: list[str] = []
+    for idx, r in enumerate(ordered, start=1):
+        eq_id = str(r.get("equation_id") or "")
+        if not eq_id:
+            continue
+        source_location = r.get("source_location") or {}
+        block_id = str(r.get("block_id") or (source_location.get("block_id") if isinstance(source_location, dict) else "") or "")
+        section_id = r.get("section_id") or (source_location.get("section_id") if isinstance(source_location, dict) else "")
+        if section_id and section_id not in section_ids:
+            section_ids.append(section_id)
+        eq_role = r.get("equation_role") or {}
+        primary_role = (eq_role.get("primary") if isinstance(eq_role, dict) else None) or r.get("equation_type") or "apply_equation"
+        operation = {
+            "equation_definition": "state_assumption",
+            "definition": "state_assumption",
+            "equation_relation": "apply_equation",
+            "relation": "apply_equation",
+            "result": "infer_conclusion",
+        }.get(str(primary_role), "apply_equation")
+        steps.append({
+            "step_id": f"deriv_{chain_id:04d}_step_{idx}",
+            "operation": operation,
+            "input_equation_ids": [],
+            "output_equation_ids": [eq_id],
+            "claim_ids": list(r.get("linked_claim_ids") or []),
+            "required_claim_ids": list(r.get("linked_claim_ids") or []),
+            "source_evidence_ids": list(r.get("source_evidence_ids") or ev_by_block.get(block_id, [])),
+            "assumption_refs": list(r.get("local_assumptions") or []),
+            "reason": "Reconstructed as a source-order derivation step from equation registry",
+            "confidence": 0.4,
+        })
+    if steps:
+        out.append({
+            "derivation_id": f"deriv_{chain_id:04d}",
+            "document_id": document_id,
+            "source_section_ids": section_ids,
+            "steps": steps,
+            "teaching_takeaway": "Source-order equation chain reconstructed from first-class equation registry.",
+            "blackbox_policy_suggestion": {},
+        })
     return out
 
 

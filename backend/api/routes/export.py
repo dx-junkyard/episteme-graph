@@ -300,6 +300,7 @@ def _build_derivations_for_documents(
             artifacts.get("derivation_chain"),
             document_id=doc_id,
             equation_artifact=artifacts.get("equation_semantics"),
+            evidence_artifact=artifacts.get("evidence_registry"),
         ))
     return out
 
@@ -927,6 +928,80 @@ def _normalize_export_references(
                 step["linked_component_ids"] = _map_ref_list(step["linked_component_ids"], component_map)
 
 
+def _normalize_derivation_references(
+    *,
+    claims: list[dict],
+    equations: list[dict],
+    derivation_chains: list[dict],
+) -> None:
+    claim_map = _claim_ref_map(claims)
+    equation_ids = {str(e.get("equation_id")) for e in equations if e.get("equation_id")}
+    for chain in derivation_chains:
+        if not isinstance(chain, dict):
+            continue
+        for step in chain.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            for key in ("claim_ids", "required_claim_ids", "input_claim_ids", "output_claim_ids"):
+                if isinstance(step.get(key), list):
+                    step[key] = _map_ref_list(step[key], claim_map)
+            for key in ("input_equation_ids", "output_equation_ids"):
+                if isinstance(step.get(key), list):
+                    step[key] = [str(v) for v in step[key] if str(v) in equation_ids or str(v)]
+
+
+def _chain_claim_ids(chain: dict) -> set[str]:
+    ids: set[str] = set()
+    for step in chain.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        for key in ("claim_ids", "required_claim_ids", "input_claim_ids", "output_claim_ids"):
+            ids.update(str(v) for v in (step.get(key) or []) if v)
+    return ids
+
+
+def _topic_mentions_derivation(topic: dict) -> bool:
+    text = " ".join(str(topic.get(k) or "") for k in ("title", "description"))
+    if re.search(r"deriv|導出|導く|derive", text, re.IGNORECASE):
+        return True
+    policy = topic.get("blackbox_policy") or {}
+    if isinstance(policy, dict):
+        return bool(policy.get("show_derivation") or policy.get("show_derivation_depth"))
+    return False
+
+
+def _link_derivations_to_export_context(
+    *,
+    components: list[dict],
+    course_info: dict | None,
+    derivation_chains: list[dict],
+) -> None:
+    if not derivation_chains:
+        return
+    chain_ids = [str(c.get("derivation_id")) for c in derivation_chains if c.get("derivation_id")]
+    if not chain_ids:
+        return
+    for comp in components:
+        if not isinstance(comp, dict):
+            continue
+        comp_claims = {str(v) for v in comp.get("evidence_claims") or [] if v}
+        linked = list(comp.get("linked_derivation_ids") or [])
+        for chain in derivation_chains:
+            derivation_id = str(chain.get("derivation_id") or "")
+            if derivation_id and comp_claims and comp_claims.intersection(_chain_claim_ids(chain)):
+                linked.append(derivation_id)
+        if linked:
+            comp["linked_derivation_ids"] = sorted(set(linked))
+
+    if not isinstance(course_info, dict):
+        return
+    for topic in course_info.get("topics") or []:
+        if not isinstance(topic, dict) or not _topic_mentions_derivation(topic):
+            continue
+        existing = [str(v) for v in topic.get("linked_derivation_ids") or [] if v]
+        topic["linked_derivation_ids"] = sorted(set(existing + chain_ids))
+
+
 def _validate_export_references(
     *,
     claims: list[dict],
@@ -935,11 +1010,15 @@ def _validate_export_references(
     component_graph: dict,
     course_info: dict | None,
     evidence_snippets: list[dict],
+    derivation_chains: list[dict] | None = None,
 ) -> dict:
     errors: list[dict] = []
+    derivation_chains = derivation_chains or []
     claim_ids = {str(c.get("claim_id")) for c in claims if c.get("claim_id")}
     component_ids = {str(c.get("component_id")) for c in components if c.get("component_id")}
     evidence_ids = {str(e.get("evidence_id")) for e in evidence_snippets if e.get("evidence_id")}
+    equation_ids = {str(e.get("equation_id")) for e in equations if e.get("equation_id")}
+    derivation_ids = {str(c.get("derivation_id")) for c in derivation_chains if c.get("derivation_id")}
 
     def add(code: str, message: str, artifact: str, path: str, ref_id: str) -> None:
         errors.append({"code": code, "message": message, "artifact": artifact, "path": path, "ref_id": ref_id})
@@ -979,13 +1058,42 @@ def _validate_export_references(
         check_refs(edge.get("evidence_claims"), claim_ids, "graph/component_graph.json", f"$.edges[{idx}].evidence_claims", "claim")
 
     if isinstance(course_info, dict):
+        has_derivation_topic = False
         for idx, topic in enumerate(course_info.get("topics") or []):
             if not isinstance(topic, dict):
                 continue
+            has_derivation_topic = has_derivation_topic or _topic_mentions_derivation(topic)
             check_refs(topic.get("linked_component_ids"), component_ids, "course_info.json", f"$.topics[{idx}].linked_component_ids", "component")
+            check_refs(topic.get("linked_derivation_ids"), derivation_ids, "course_info.json", f"$.topics[{idx}].linked_derivation_ids", "derivation")
             for step_idx, step in enumerate(topic.get("visualization_plan") or []):
                 if isinstance(step, dict):
                     check_refs(step.get("linked_component_ids"), component_ids, "course_info.json", f"$.topics[{idx}].visualization_plan[{step_idx}].linked_component_ids", "component")
+        if equation_ids and has_derivation_topic and not derivation_chains:
+            add("EMPTY_DERIVATION_CHAINS", "course has derivation topic and equations, but derivation chains are empty", "derivations/derivation_chains.json", "$.chains", "")
+
+    for chain_idx, chain in enumerate(derivation_chains):
+        if not isinstance(chain, dict):
+            continue
+        steps = chain.get("steps") or []
+        if not steps:
+            add("EMPTY_DERIVATION_STEPS", f"derivation {chain.get('derivation_id')!r} has no steps", "derivations/derivation_chains.json", f"$.chains[{chain_idx}].steps", str(chain.get("derivation_id") or ""))
+            continue
+        for step_idx, step in enumerate(steps):
+            if not isinstance(step, dict):
+                continue
+            path = f"$.chains[{chain_idx}].steps[{step_idx}]"
+            input_eqs = step.get("input_equation_ids") or []
+            output_eqs = step.get("output_equation_ids") or []
+            step_claims = []
+            for key in ("claim_ids", "required_claim_ids", "input_claim_ids", "output_claim_ids"):
+                step_claims.extend(step.get(key) or [])
+            step_evidence = step.get("source_evidence_ids") or []
+            if not (input_eqs or output_eqs or step_claims or step_evidence):
+                add("DERIVATION_STEP_UNLINKED", f"{path} has no equation, claim, or evidence links", "derivations/derivation_chains.json", path, "")
+            check_refs(input_eqs, equation_ids, "derivations/derivation_chains.json", f"{path}.input_equation_ids", "equation")
+            check_refs(output_eqs, equation_ids, "derivations/derivation_chains.json", f"{path}.output_equation_ids", "equation")
+            check_refs(step_claims, claim_ids, "derivations/derivation_chains.json", f"{path}.claim_ids", "claim")
+            check_refs(step_evidence, evidence_ids, "derivations/derivation_chains.json", f"{path}.source_evidence_ids", "evidence")
 
     return {
         "status": "failed_validation" if errors else "passed",
@@ -1242,6 +1350,16 @@ def export_course_bundle(
             component_graph=component_graph,
             course_info=course,
         )
+        _normalize_derivation_references(
+            claims=claims,
+            equations=equations,
+            derivation_chains=derivation_chains,
+        )
+        _link_derivations_to_export_context(
+            components=components,
+            course_info=course,
+            derivation_chains=derivation_chains,
+        )
         export_validation = _validate_export_references(
             claims=claims,
             equations=equations,
@@ -1249,6 +1367,7 @@ def export_course_bundle(
             component_graph=component_graph,
             course_info=course,
             evidence_snippets=evidence_snippets,
+            derivation_chains=derivation_chains,
         )
 
         docs = _load_course_documents(session, course_id, document_ids)
@@ -1343,6 +1462,16 @@ def export_document_bundle(
             component_graph=component_graph,
             course_info=document,
         )
+        _normalize_derivation_references(
+            claims=claims,
+            equations=equations,
+            derivation_chains=derivation_chains,
+        )
+        _link_derivations_to_export_context(
+            components=components,
+            course_info=document,
+            derivation_chains=derivation_chains,
+        )
         export_validation = _validate_export_references(
             claims=claims,
             equations=equations,
@@ -1350,6 +1479,7 @@ def export_document_bundle(
             component_graph=component_graph,
             course_info=document,
             evidence_snippets=evidence_snippets,
+            derivation_chains=derivation_chains,
         )
 
         eid = _export_id("document", document_id)
