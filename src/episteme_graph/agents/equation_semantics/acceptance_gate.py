@@ -110,15 +110,18 @@ class EquationAcceptanceGate:
 
         - matched_label が non-empty (式番号参照あり) — 最も強い信号
         - detection_method に equation_number_pattern が含まれる (label pattern-matched)
+        - document_structure_equation_block 由来で分類信頼度が高い
 
-        注意: document_structure_equation_block は全 equation block のデフォルト検出法のため、
-        これ単体では high-signal とみなさない。candidate_score はブロック検出信頼度であり
-        式本体の完全性とは独立しているため、high-signal 判定には使わない。
+        注意: 古いPDFでは式番号や演算子が壊れ、式本体が unparsed になることがある。
+        DocumentStructureAgent 側で equation_block として高信頼に分類済みなら、
+        vision/reconstruction 層へ渡すため provisional として保持する。
         """
         if candidate.matched_label:
             return True
         dm = candidate.detection_method or []
         if "equation_number_pattern" in dm:
+            return True
+        if "document_structure_equation_block" in dm and candidate.candidate_score >= 0.75:
             return True
         return False
 

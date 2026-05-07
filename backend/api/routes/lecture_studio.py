@@ -205,6 +205,7 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
                 page_end=row[9],
                 equation_previews=equation_previews,
             )
+            display_text = _replace_equation_preview_text(display_text, formulas)
             knowledge_graph = _json_obj(row[14])
             graph_elements = _derive_chunk_graph_elements(
                 f"{raw_text}\n{display_text}",
@@ -299,6 +300,7 @@ def _load_equation_formula_previews(session, document_ids: list[str]) -> dict[st
                 "block_id": source_location.get("block_id"),
                 "source_location": source_location,
                 "source_image": source_image,
+                "raw_text": src.get("raw_text") or "",
                 "needs_math_review": bool(src.get("needs_math_review", False)),
                 "review_reason": list(src.get("review_reason", [])) if isinstance(src.get("review_reason"), list) else [],
             })
@@ -371,6 +373,45 @@ def _equation_preview_matches_chunk(
     start = page_start if page_start is not None else page_num
     end = page_end if page_end is not None else start
     return int(start) <= page_num <= int(end)
+
+
+def _replace_equation_preview_text(display_text: str, formulas: list[dict]) -> str:
+    """Replace broken PDF math snippets in display text with formula placeholders."""
+    if not display_text or not formulas:
+        return display_text
+    updated = display_text
+    for formula in formulas:
+        if not isinstance(formula, dict):
+            continue
+        raw_text = str(formula.get("raw_text") or "").strip()
+        formula_id = str(formula.get("id") or "").strip()
+        if not raw_text or not formula_id:
+            continue
+        placeholder = formula_id if formula_id.startswith("[[") else f"[[{formula_id}]]"
+        variants = _equation_text_variants(raw_text)
+        # Replace longer variants first so multi-line equations collapse before
+        # shorter subfragments can leave broken residue in the text.
+        for variant in sorted(variants, key=len, reverse=True):
+            if len(variant.strip()) < 4:
+                continue
+            updated = updated.replace(variant, placeholder)
+    return updated
+
+
+def _equation_text_variants(raw_text: str) -> list[str]:
+    text = str(raw_text or "").strip()
+    if not text:
+        return []
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    variants = {
+        text,
+        "\n".join(lines),
+        "\n\n".join(lines),
+        " ".join(lines),
+    }
+    # PyMuPDF block text is sometimes persisted after chunk joining with blank
+    # lines around each block; keep variants intentionally small and exact.
+    return [v for v in variants if v]
 
 
 def _json_obj(value: object) -> dict:

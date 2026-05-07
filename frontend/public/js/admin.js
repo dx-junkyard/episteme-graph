@@ -4864,8 +4864,9 @@
     var chunk = lsGetSelectedChunk();
     var preview = document.getElementById("ls-display-preview");
     if (!preview || !chunk) return;
-    var text = document.getElementById("ls-display-text").value || "";
+    var text = lsNormalizePreviewLineBreaks(document.getElementById("ls-display-text").value || "");
     var formulaById = {};
+    var usedFormulas = new Set();
     (chunk.formulas || []).forEach(function (f, idx) {
       var fallbackId = "FORMULA_" + idx;
       var legacyMathId = "LS_MATH_" + idx;
@@ -4894,11 +4895,13 @@
     preserved = preserved.replace(/\[\[([^\[\]]+)\]\]/g, function (m, id) {
       var formula = formulaById[m] || formulaById[id];
       if (!formula) return m;
+      usedFormulas.add(formula);
       return preserveMath(formula.latex || formula.id || m, formula.is_display === true);
     });
     preserved = preserved.replace(/\bLS_MATH_(\d+)\b/g, function (m) {
       var formula = formulaById[m];
       if (!formula) return m;
+      usedFormulas.add(formula);
       return preserveMath(formula.latex || formula.id || m, formula.is_display === true);
     });
     preserved = preserved.replace(/\$\$([\s\S]+?)\$\$/g, function (_m, expr) {
@@ -4929,6 +4932,30 @@
       var block = mathBlocks[parseInt(idx, 10)];
       return lsRenderKatex(block.expr, block.display);
     });
+    var extractedHtml = lsRenderUnplacedExtractedFormulas(chunk.formulas || [], usedFormulas);
+    if (extractedHtml) preview.insertAdjacentHTML("beforeend", extractedHtml);
+  }
+
+  function lsNormalizePreviewLineBreaks(text) {
+    return String(text || "").replace(/([A-Za-z0-9,;:)\]])\n(?=[A-Za-z0-9([“"'])/g, "$1 ");
+  }
+
+  function lsRenderUnplacedExtractedFormulas(formulas, usedFormulas) {
+    var items = [];
+    (formulas || []).forEach(function (f) {
+      if (!f || usedFormulas.has(f)) return;
+      if (!f.source_image && !f.needs_math_review && !f.source_location) return;
+      var expr = f.latex || f.id || "";
+      if (!expr) return;
+      items.push(
+        '<div class="ls-extracted-formula-in-preview">' +
+          (f.label ? '<div class="ls-extracted-formula-label">(' + escHtml(f.label) + ')</div>' : '') +
+          lsRenderKatex(expr, true) +
+        '</div>'
+      );
+    });
+    if (!items.length) return "";
+    return '<div class="ls-extracted-formulas-block">' + items.join("") + '</div>';
   }
 
   function lsRenderKatex(expr, display) {

@@ -2569,7 +2569,8 @@ body {
   font-size: 14px;
   line-height: 1.7;
   white-space: pre-wrap;
-  word-break: break-word;
+  word-break: normal;
+  overflow-wrap: break-word;
 }
 
 .ls-display-preview p {
@@ -3074,6 +3075,22 @@ body {
   overflow-x: auto;
   overflow-y: hidden;
   padding: 2px 0 6px;
+}
+
+.ls-extracted-formulas-block {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--color-border);
+}
+
+.ls-extracted-formula-in-preview {
+  margin: 10px 0;
+}
+
+.ls-extracted-formula-label {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  text-align: center;
 }
 
 .ls-formula-chip {
