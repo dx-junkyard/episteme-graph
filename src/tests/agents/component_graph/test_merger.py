@@ -140,3 +140,43 @@ class TestComponentGraphMerger:
         llm_result = _result([_node("c1"), _node("c2")], [_edge("c1", "c2")])
         merged = self.merger.merge(existing, llm_result)
         assert len(merged.edges) == 1
+
+    def test_parse_from_to_legacy_format(self):
+        """Merger reads old 'from'/'to'/'type' edge format."""
+        existing = {
+            "edges": [
+                {
+                    "from": "c1",
+                    "to": "c2",
+                    "type": "ENABLES",
+                    "support_status": "io_matched",
+                    "confidence": 0.7,
+                }
+            ]
+        }
+        llm_result = _result([_node("c1"), _node("c2"), _node("c3")], [_edge("c2", "c3")])
+        merged = self.merger.merge(existing, llm_result)
+        assert len(merged.edges) == 2
+        keys = {(e.source, e.target, e.edge_type) for e in merged.edges}
+        assert ("c1", "c2", "ENABLES") in keys
+
+    def test_from_to_type_dedup_with_llm_edge(self):
+        """from/to legacy edge deduplicates correctly against LLM edge with same key."""
+        existing = {
+            "edges": [
+                {
+                    "from": "c1",
+                    "to": "c2",
+                    "type": "REQUIRES",
+                    "support_status": "io_matched",
+                    "confidence": 0.6,
+                }
+            ]
+        }
+        llm_result = _result(
+            [_node("c1"), _node("c2")],
+            [_edge("c1", "c2", edge_type="REQUIRES", confidence=0.85)],
+        )
+        merged = self.merger.merge(existing, llm_result)
+        assert len(merged.edges) == 1
+        assert merged.edges[0].confidence == 0.85
