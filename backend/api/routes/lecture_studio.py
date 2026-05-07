@@ -603,7 +603,8 @@ def _batch_generate_worker(
 
     # 自動パイプライン: 完了時に音声生成タスクをチェイン (Issue #139)
     next_task_id: str | None = None
-    if auto_audio:
+    #if auto_audio:
+    if False:
         try:
             fresh_chunks = _get_course_chunks(course_data)
             audio_task_id = str(uuid.uuid4())[:12]
