@@ -617,11 +617,17 @@ def run_document_pipeline(
                     {"claim_id": c.claim_id, "text": c.text}
                     for c in (getattr(claim_objects, "claims", []) or [])
                 ]
+                # Flatten evidence records for Material 4 context
+                flat_evidence = [
+                    {"evidence_id": r.evidence_id, "evidence_text": r.evidence_text}
+                    for r in (getattr(evidence, "records", []) or [])
+                ]
                 component_graph_result = cg_agent.run(
                     components=component_result,
                     dsl=dsl,
                     derivations=derivations,
                     claims=flat_claims,
+                    evidence_snippets=flat_evidence,
                     cartridge_id=cartridge_id,
                 )
             except Exception as exc:

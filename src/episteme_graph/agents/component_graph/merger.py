@@ -59,11 +59,17 @@ class ComponentGraphMerger:
         for idx, e in enumerate(graph.get("edges") or []):
             if not isinstance(e, dict):
                 continue
-            source = str(e.get("source") or e.get("source_component_id") or "").strip()
-            target = str(e.get("target") or e.get("target_component_id") or "").strip()
+            source = str(
+                e.get("source") or e.get("source_component_id") or e.get("from") or ""
+            ).strip()
+            target = str(
+                e.get("target") or e.get("target_component_id") or e.get("to") or ""
+            ).strip()
             if not source or not target:
                 continue
-            edge_type = str(e.get("edge_type") or e.get("relation") or "RELATED_TO").strip().upper()
+            edge_type = str(
+                e.get("edge_type") or e.get("relation") or e.get("type") or "RELATED_TO"
+            ).strip().upper()
             support_status = str(e.get("support_status") or "io_matched")
             evidence_obj = e.get("evidence") or {}
             evidence_claims: list[str] = []

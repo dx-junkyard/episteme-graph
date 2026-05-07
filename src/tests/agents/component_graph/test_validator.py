@@ -127,3 +127,43 @@ class TestComponentGraphValidator:
         issues = self.validator.validate(_result(nodes, edges))
         errors = [i for i in issues if i.severity == "error"]
         assert errors == []
+
+    def test_llm_inferred_empty_evidence_claims_warns(self):
+        """llm_inferred edge with no evidence_claims emits a warning."""
+        nodes = [_node("c1"), _node("c2")]
+        edge = ComponentGraphEdge(
+            edge_id="component_edge_0001",
+            source="c1",
+            target="c2",
+            edge_type="REQUIRES",
+            support_status="llm_inferred",
+            evidence_claims=[],
+            reasoning="",
+            confidence=0.8,
+        )
+        issues = self.validator.validate(_result(nodes, [edge]))
+        assert any(i.rule_id == "llm_inferred_no_evidence" for i in issues)
+        assert all(i.severity != "error" for i in issues if i.rule_id == "llm_inferred_no_evidence")
+
+    def test_non_llm_inferred_empty_evidence_claims_no_warn(self):
+        """io_matched edge with empty evidence_claims does NOT trigger the warning."""
+        nodes = [_node("c1"), _node("c2")]
+        edge = ComponentGraphEdge(
+            edge_id="component_edge_0001",
+            source="c1",
+            target="c2",
+            edge_type="REQUIRES",
+            support_status="io_matched",
+            evidence_claims=[],
+            reasoning="",
+            confidence=0.8,
+        )
+        issues = self.validator.validate(_result(nodes, [edge]))
+        assert not any(i.rule_id == "llm_inferred_no_evidence" for i in issues)
+
+    def test_llm_inferred_with_evidence_claims_no_warn(self):
+        """llm_inferred edge that has evidence_claims does NOT trigger the warning."""
+        nodes = [_node("c1"), _node("c2")]
+        edges = [_edge("c1", "c2")]  # _edge has evidence_claims=["claim:b1:s1"]
+        issues = self.validator.validate(_result(nodes, edges))
+        assert not any(i.rule_id == "llm_inferred_no_evidence" for i in issues)
