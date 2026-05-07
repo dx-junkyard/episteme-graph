@@ -137,7 +137,8 @@ class EquationSemanticsPromptFactory:
                 "\n** Source extraction is INSUFFICIENT for this equation "
                 f"(extraction_status={llm_input.extraction_status}). "
                 "You MUST include a 'reconstruction' block in your output. "
-                "Reconstruct from surrounding context. "
+                "The original broken text has been hidden to avoid confusing you. "
+                "Instead, reconstruct the LaTeX purely from the logical flow, variables defined in the surrounding text, and neighboring blocks. "
                 "Set reconstruction.status to 'inferred_from_context' or 'reconstructed_from_neighbors'. "
                 "Set reconstruction.method and supporting_refs from the context blocks below. "
                 "Set confidence based on how confident you are. "
@@ -147,11 +148,16 @@ class EquationSemanticsPromptFactory:
         if llm_input.prev_texts:
             parts.append("\n## Previous Text Blocks")
             parts.extend(llm_input.prev_texts)
+
         parts.append("\n## Equation Text")
-        parts.append(llm_input.equation_text)
-        if llm_input.plain_text:
-            parts.append("\n## Plain Text")
-            parts.append(llm_input.plain_text)
+        if llm_input.needs_reconstruction:
+            parts.append("[OMITTED - The original text is broken/insufficient. Reconstruct entirely from context]")
+        else:
+            parts.append(llm_input.equation_text)
+            if llm_input.plain_text:
+                parts.append("\n## Plain Text")
+                parts.append(llm_input.plain_text)
+
         if llm_input.next_texts:
             parts.append("\n## Next Text Blocks")
             parts.extend(llm_input.next_texts)
