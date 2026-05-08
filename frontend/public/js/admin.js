@@ -1092,10 +1092,8 @@
         });
         renderCourseChat();
 
-        // Issue #139: 登録成功後、自動で原稿・音声生成パイプラインをキックする
-        if (data && data.id) {
-          kickAutoPipeline(data.id, data.title || draft.title);
-        }
+        // コース本文はバックエンド側で、既存のAgent成果物とアウトラインを対応付けて作成する。
+        // 教材解析のAgentパイプラインは教材アップロード後または原稿スタジオから明示実行する。
       })
       .catch(function () {
         btn.disabled = false;
@@ -1150,16 +1148,16 @@
         );
       });
 
-    apiFetch("/admin/courses/" + courseId + "/analysis/run-all", {
+    apiFetch("/admin/courses/" + courseId + "/document-pipeline/run", {
       method: "POST",
-      body: "{}",
+      body: JSON.stringify({}),
     })
       .then(function (res) {
         if (!res.ok) {
           return res.json().then(function (errBody) {
-            throw new Error((errBody && errBody.detail) || "解析パイプラインを開始できませんでした");
+            throw new Error((errBody && errBody.detail) || "Agentパイプラインを開始できませんでした");
           }, function () {
-            throw new Error("解析パイプラインを開始できませんでした");
+            throw new Error("Agentパイプラインを開始できませんでした");
           });
         }
         return res.json();
@@ -1169,9 +1167,9 @@
       })
       .catch(function (err) {
         setPipelineStatus(
-          "コース登録は完了しましたが、解析パイプラインの開始に失敗しました: " +
+          "コース登録は完了しましたが、Agentパイプラインの開始に失敗しました: " +
           (err.message || "不明なエラー") +
-          "\n\n原稿スタジオまたはシステム統計から手動で実行してください。"
+          "\n\n原稿スタジオから手動でパイプライン全実行を実行してください。"
         );
       });
   }
@@ -1180,7 +1178,7 @@
     var retryCount = 0;
     var maxRetries = 5;
     var intervalMs = 3000;
-    var labels = { structure: "DSL解析", claims: "構成要素抽出", components: "論理要素抽出", graph: "グラフ更新", completed: "完了" };
+    var labels = { document_pipeline: "Agent Pipeline", course_content: "コース本文生成", completed: "完了" };
     function poll() {
       apiFetch("/admin/tasks/" + taskId)
         .then(function (res) {
@@ -1194,12 +1192,12 @@
           var progress = rd.progress || 0;
           if (task.status === "completed") {
             clearInterval(timer);
-            setStatus("解析パイプラインが完了しました。DSL、構成要素、論理要素、グラフを更新済みです。");
+            setStatus("Agentパイプラインが完了しました。構造化情報をコース本文へ反映済みです。");
           } else if (task.status === "failed") {
             clearInterval(timer);
-            setStatus("解析パイプラインに失敗しました: " + (task.error_message || "不明なエラー"));
+            setStatus("Agentパイプラインに失敗しました: " + (task.error_message || "不明なエラー"));
           } else {
-            setStatus("解析パイプライン実行中: " + (labels[stage] || stage) + " — " + progress + "%");
+            setStatus("Agentパイプライン実行中: " + (rd.label || labels[stage] || stage) + " — " + progress + "%");
           }
         })
         .catch(function () {

@@ -91,8 +91,22 @@ class LearningTopic(BaseModel):
     title: str
     chapter_index: int
     status: str = "locked"  # completed | in_progress | locked
-    prerequisites: list[LearningPrerequisite] = []
-    misconceptions: list[LearningMisconception] = []
+    prerequisites: list[LearningPrerequisite] = Field(default_factory=list)
+    misconceptions: list[LearningMisconception] = Field(default_factory=list)
+    summary: str = ""
+    content: str = ""
+    content_blocks: list[dict] = Field(default_factory=list)
+    learning_objectives: list[str] = Field(default_factory=list)
+    prerequisite_concepts: list[str] = Field(default_factory=list)
+    blackbox_policy: dict = Field(default_factory=dict)
+    assessment_prompts: list[str] = Field(default_factory=list)
+    expected_misconceptions: list[str] = Field(default_factory=list)
+    linked_component_ids: list[str] = Field(default_factory=list)
+    linked_equation_ids: list[str] = Field(default_factory=list)
+    source_evidence_ids: list[str] = Field(default_factory=list)
+    teaching_takeaways: list[str] = Field(default_factory=list)
+    material_chunk_ids: list[str] = Field(default_factory=list)
+    source_excerpt: str = ""
 
 
 class GraphMention(BaseModel):
@@ -193,6 +207,7 @@ class LearningCourseDetail(BaseModel):
     concepts: list[LearningConcept] = []
     sources: list[LearningSource] = []
     referenced_sections: list[LearningReferencedSection] = []
+    course_content_status: dict = Field(default_factory=dict)
     progress: dict | None = None
 
 

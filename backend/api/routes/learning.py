@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -46,6 +47,7 @@ from services import (
 from core.llm import generate_text, get_llm_params
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
+from core.course_content_builder import build_course_content_background
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +100,12 @@ def create_course(
         group_id=body.group_id if body.visibility == "group" else None,
         description=body.description,
     )
+
+    threading.Thread(
+        target=build_course_content_background,
+        args=(current_user["id"], course_id),
+        daemon=True,
+    ).start()
 
     logger.info("Created course '%s' (id=%s) for user=%s", body.title, course_id, current_user["id"])
     return LearningCourseOut(
