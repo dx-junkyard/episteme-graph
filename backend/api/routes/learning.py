@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -46,6 +47,7 @@ from services import (
 from core.llm import generate_text, get_llm_params
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
+from core.course_content_builder import build_course_content_background
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +100,12 @@ def create_course(
         group_id=body.group_id if body.visibility == "group" else None,
         description=body.description,
     )
+
+    threading.Thread(
+        target=build_course_content_background,
+        args=(current_user["id"], course_id),
+        daemon=True,
+    ).start()
 
     logger.info("Created course '%s' (id=%s) for user=%s", body.title, course_id, current_user["id"])
     return LearningCourseOut(
@@ -748,25 +756,58 @@ def get_topic_material(
     topic_id: str,
     current_user: dict = Depends(_get_current_user),
 ) -> TopicMaterialResponse:
-    """N番目のトピックにN番目のチャンクを返す（ベクトル検索なし）。
+    """トピック本文を受講画面用の教材として返す。
 
-    lecture_studio._get_course_chunks と同じロジックでコース教材を chunk_index 順に全取得し、
-    トピックの配列インデックスと同じ位置のチャンクを返す。データ移行不要。
+    受講体験の主ソースは ``learning_courses.data.topics[].content``。
+    PDF復元チャンクは、topic content が未生成の場合だけ後方互換のフォールバックに使う。
     """
     course_data = get_course_data(current_user["id"], course_id)
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
 
     topics = course_data.get("topics", [])
-    topic_index = next(
-        (i for i, t in enumerate(topics) if t.get("id") == topic_id),
-        None,
-    )
+    topic_index = None
+    topic = None
+    for i, t in enumerate(topics):
+        if t.get("id") == topic_id:
+            topic_index = i
+            topic = t
+            break
     if topic_index is None:
         raise HTTPException(status_code=404, detail="Topic not found")
 
-    all_chunks = get_course_chunks_ordered(course_data)
+    topic_text = (topic or {}).get("content") or (topic or {}).get("summary") or ""
+    if topic_text.strip():
+        formulas: list[dict] = []
+        for block in (topic or {}).get("content_blocks") or []:
+            if not isinstance(block, dict) or block.get("type") != "equations":
+                continue
+            for item in block.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                latex = item.get("latex") or ""
+                if not latex:
+                    continue
+                formulas.append({
+                    "id": item.get("equation_id") or f"TOPIC_FORMULA_{len(formulas)}",
+                    "latex": latex,
+                    "label": item.get("label") or "",
+                    "plain_text": item.get("plain_text") or "",
+                    "is_display": True,
+                })
+        chunks = [ChunkContent(
+            id=f"topic:{topic_id}",
+            text=topic_text,
+            chunk_index=topic_index,
+            formulas=formulas,
+            chapter=None,
+            section=(topic or {}).get("title"),
+            material_id=None,
+            graph_mentions=[],
+        )]
+        return TopicMaterialResponse(topic_id=topic_id, chunks=chunks)
 
+    all_chunks = get_course_chunks_ordered(course_data)
     if topic_index < len(all_chunks):
         raw = all_chunks[topic_index]
         chunks = [ChunkContent(

@@ -1651,9 +1651,11 @@ def _course_document_pipeline_worker(
     *,
     task_id: str,
     course_id: str,
+    user_id: str,
     documents: list[dict],
     target_stage: str | None,
 ) -> None:
+    from core.course_content_builder import build_course_content
     from core.document_pipeline import PipelineStageError, run_document_pipeline
 
     total = len(documents)
@@ -1740,6 +1742,14 @@ def _course_document_pipeline_worker(
         publish("failed", str(exc))
         return
 
+    if target_stage in (None, "equation_semantics", "component_assembly", "course_mapping"):
+        current_stage = "course_content"
+        publish("processing")
+        try:
+            build_course_content(user_id, course_id)
+        except Exception:
+            logger.warning("Course content build after pipeline failed: course=%s task=%s", course_id, task_id, exc_info=True)
+
     current_stage = target_stage or "completed"
     publish("completed")
 
@@ -1792,6 +1802,7 @@ def run_course_document_pipeline(
         kwargs={
             "task_id": task_id,
             "course_id": course_id,
+            "user_id": current_user["id"],
             "documents": documents,
             "target_stage": target_stage,
         },
@@ -1929,12 +1940,20 @@ def get_lecture_studio_course_structure(
                 if name:
                     prereqs.append(name)
             topics_out.append({
+                "id": t.get("id", f"topic_{ci}_{ti}"),
                 "topic_index": ti,
                 "title": t.get("title", ""),
                 "prerequisites": prereqs,
+                "summary": t.get("summary", ""),
+                "content": t.get("content", ""),
+                "content_blocks": t.get("content_blocks", []),
+                "content_source": t.get("content_source", ""),
+                "content_confidence": t.get("content_confidence", ""),
                 "linked_component_ids": t.get("linked_component_ids", []),
-                "linked_chunk_ids": t.get("linked_chunk_ids", []),
-                "status": "draft",
+                "linked_equation_ids": t.get("linked_equation_ids", []),
+                "source_evidence_ids": t.get("source_evidence_ids", []),
+                "linked_chunk_ids": t.get("linked_chunk_ids", []) or t.get("material_chunk_ids", []),
+                "status": "generated" if (t.get("content") or t.get("summary")) else "draft",
             })
         chapters_out.append({
             "chapter_index": ci,
