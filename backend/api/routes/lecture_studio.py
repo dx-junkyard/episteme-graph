@@ -12,11 +12,13 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 import threading
 import time
 import uuid
 
 from fastapi import APIRouter, Body, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
 from dependencies import ROLE_SYSTEM_ADMIN, _require_teacher
@@ -46,7 +48,7 @@ from services import (
 )
 from core.lecture import generate_spoken_text_and_formulas, normalize_to_placeholder_format
 from core.document_sections import enrich_chunks_with_sections
-from core.llm import generate_text, get_llm_params
+from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
 from core.personas import course_persona_settings, normalize_persona_id, persona_prompt
 from core.postgres import get_session as _pg_session
 from core.storage import get_storage_client
@@ -1943,6 +1945,13 @@ def get_lecture_studio_course_structure(
                 "id": t.get("id", f"topic_{ci}_{ti}"),
                 "topic_index": ti,
                 "title": t.get("title", ""),
+                "key_concepts": t.get("key_concepts", []),
+                "student_material": t.get("student_material", {}),
+                "spoken_script": t.get("spoken_script", ""),
+                "cautions": t.get("cautions", []),
+                "check_questions": t.get("check_questions", []),
+                "evidence_links": t.get("evidence_links", []),
+                "coverage": t.get("coverage", {}),
                 "prerequisites": prereqs,
                 "summary": t.get("summary", ""),
                 "content": t.get("content", ""),
@@ -1970,6 +1979,274 @@ def get_lecture_studio_course_structure(
         "audio_chunks": audio_chunks,
         "chapters": chapters_out,
     }
+
+
+def _find_course_topic(course_data: dict, topic_id: str, chapter_index: object = None, topic_index: object = None) -> dict | None:
+    topics = course_data.get("topics") or []
+    for topic in topics:
+        if isinstance(topic, dict) and str(topic.get("id", "")) == str(topic_id):
+            return topic
+    for idx, topic in enumerate(topics):
+        if not isinstance(topic, dict):
+            continue
+        if topic.get("chapter_index") == chapter_index and topic.get("topic_index", idx) == topic_index:
+            return topic
+    return None
+
+
+def _clean_str_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [line.strip() for line in value.splitlines() if line.strip()]
+    return []
+
+
+@router.put("/courses/{course_id}/lecture-studio/course-topics/{topic_id}")
+def save_lecture_studio_course_topic(
+    course_id: str,
+    topic_id: str,
+    body: dict,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """原稿スタジオで編集したコーストピックの授業用ドラフトを保存する。"""
+    course_data = _course_data_for_studio(course_id, current_user)
+    target = _find_course_topic(course_data, topic_id, body.get("chapter_index"), body.get("topic_index"))
+    if target is None:
+        raise HTTPException(status_code=404, detail="Topic not found")
+
+    student_material = body.get("student_material")
+    if isinstance(student_material, dict):
+        source_text = str(student_material.get("source_text") or "")
+        target["student_material"] = {
+            "source_format": student_material.get("source_format") or "eg-markdown-v1",
+            "source_text": source_text,
+        }
+    target["key_concepts"] = _clean_str_list(body.get("key_concepts"))
+    target["spoken_script"] = str(body.get("spoken_script") or "")
+    target["cautions"] = _clean_str_list(body.get("cautions"))
+    target["check_questions"] = _clean_str_list(body.get("check_questions"))
+
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT user_id
+                FROM learning_courses
+                WHERE id = :course_id
+                LIMIT 1
+            """),
+            {"course_id": course_id},
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Course not found")
+        if str(row[0]) != str(current_user["id"]) and current_user.get("role") != ROLE_SYSTEM_ADMIN:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        session.execute(
+            sa_text("""
+                UPDATE learning_courses
+                SET data = CAST(:data AS jsonb),
+                    updated_at = now()
+                WHERE id = :course_id
+            """),
+            {
+                "course_id": course_id,
+                "data": json.dumps(course_data, ensure_ascii=False),
+            },
+        )
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to save course topic draft: course_id=%s topic_id=%s", course_id, topic_id)
+        raise HTTPException(status_code=500, detail="Failed to save topic draft")
+    finally:
+        session.close()
+
+    return {"course_id": course_id, "topic_id": topic_id, "status": "edited"}
+
+
+_COURSE_TOPIC_DRAFT_PROMPT = """あなたは大学教員の授業用ドラフト作成を支援するアシスタントです。
+
+目的:
+- 教員が設定したコースの説明順序と想定受講者の理解を優先する
+- Claim / コンポーネント / 数式 / 原文抜粋は、本文の主役ではなく根拠材料として使う
+- 教材欄と本文説明を分離する
+
+教材欄の表記:
+- Markdown風の軽量表記を使う
+- インライン数式は `$...$`
+- ブロック数式は `$$...$$`
+- 埋め込みは `![[equation:id]]`, `![[figure:id]]`, `![[source:id]]`, `![[claim:id]]`, `![[component:id]]`
+
+必ずJSONのみを返してください。
+JSON文字列内のLaTeXバックスラッシュは必ず `\\Lambda` のように二重化してください。
+形式:
+{{
+  "key_concepts": ["重要概念"],
+  "student_material": {{"source_format": "eg-markdown-v1", "source_text": "学生に見せる教材"}},
+  "spoken_script": "教員が話せる自然文。音声読み上げ対象。",
+  "cautions": ["注意点"],
+  "check_questions": ["確認問題"]
+}}
+
+コーストピック:
+{topic_json}
+
+根拠候補:
+{evidence_json}
+
+現在の授業用ドラフト:
+{draft_json}
+
+教員の指示:
+{instructor_prompt}
+"""
+
+
+class CourseTopicStudentMaterialDraft(BaseModel):
+    source_format: str = "eg-markdown-v1"
+    source_text: str = ""
+
+
+class CourseTopicDraftLLMResponse(BaseModel):
+    key_concepts: list[str] = Field(default_factory=list)
+    student_material: CourseTopicStudentMaterialDraft = Field(default_factory=CourseTopicStudentMaterialDraft)
+    spoken_script: str = ""
+    cautions: list[str] = Field(default_factory=list)
+    check_questions: list[str] = Field(default_factory=list)
+
+
+def _parse_course_topic_draft_json(raw: str) -> dict:
+    cleaned = (raw or "").strip()
+    if cleaned.startswith("```"):
+      lines = cleaned.split("\n")
+      lines = [ln for ln in lines if not ln.strip().startswith("```")]
+      cleaned = "\n".join(lines).strip()
+
+    candidates = [cleaned]
+    match = re.search(r"\{[\s\S]*\}", cleaned)
+    if match and match.group() != cleaned:
+        candidates.append(match.group())
+
+    for candidate in list(candidates):
+        # LLMs often emit LaTeX like \Lambda inside JSON strings. JSON only
+        # allows a small set of backslash escapes, so preserve those and
+        # double every other single backslash before a second parse attempt.
+        repaired = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", candidate)
+        if repaired != candidate:
+            candidates.append(repaired)
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate, strict=False)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            continue
+    return {}
+
+
+def _normalize_course_topic_draft_response(parsed: object) -> dict:
+    if isinstance(parsed, BaseModel):
+        parsed = parsed.model_dump()
+    if not isinstance(parsed, dict):
+        parsed = {}
+    student_material = parsed.get("student_material")
+    if isinstance(student_material, BaseModel):
+        student_material = student_material.model_dump()
+    if not isinstance(student_material, dict):
+        student_material = {"source_format": "eg-markdown-v1", "source_text": str(student_material or "")}
+    return {
+        "key_concepts": _clean_str_list(parsed.get("key_concepts")),
+        "student_material": {
+            "source_format": student_material.get("source_format") or "eg-markdown-v1",
+            "source_text": str(student_material.get("source_text") or ""),
+        },
+        "spoken_script": str(parsed.get("spoken_script") or ""),
+        "cautions": _clean_str_list(parsed.get("cautions")),
+        "check_questions": _clean_str_list(parsed.get("check_questions")),
+    }
+
+
+@router.post("/courses/{course_id}/lecture-studio/course-topics/{topic_id}/draft/rewrite")
+def rewrite_lecture_studio_course_topic(
+    course_id: str,
+    topic_id: str,
+    body: dict,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """教員の指示に基づいてコーストピックの授業用ドラフトを生成する。"""
+    course_data = _course_data_for_studio(course_id, current_user)
+    topic = _find_course_topic(course_data, topic_id, body.get("chapter_index"), body.get("topic_index"))
+    if topic is None:
+        raise HTTPException(status_code=404, detail="Topic not found")
+
+    draft = {
+        "key_concepts": body.get("key_concepts") if body.get("key_concepts") is not None else topic.get("key_concepts", []),
+        "student_material": body.get("student_material") if body.get("student_material") is not None else topic.get("student_material", {}),
+        "spoken_script": body.get("spoken_script") if body.get("spoken_script") is not None else topic.get("spoken_script", ""),
+        "cautions": body.get("cautions") if body.get("cautions") is not None else topic.get("cautions", []),
+        "check_questions": body.get("check_questions") if body.get("check_questions") is not None else topic.get("check_questions", []),
+    }
+    evidence = {
+        "summary": topic.get("summary", ""),
+        "source_excerpt": topic.get("source_excerpt", ""),
+        "linked_component_ids": topic.get("linked_component_ids", []),
+        "linked_equation_ids": topic.get("linked_equation_ids", []),
+        "source_evidence_ids": topic.get("source_evidence_ids", []),
+        "evidence_links": topic.get("evidence_links", []),
+        "content_blocks": topic.get("content_blocks", []),
+        "coverage": topic.get("coverage", {}),
+        "content_confidence": topic.get("content_confidence", ""),
+    }
+    prompt = _COURSE_TOPIC_DRAFT_PROMPT.format(
+        topic_json=json.dumps({
+            "id": topic.get("id", ""),
+            "title": topic.get("title", ""),
+            "prerequisites": topic.get("prerequisites", []),
+        }, ensure_ascii=False, indent=2)[:3000],
+        evidence_json=json.dumps(evidence, ensure_ascii=False, indent=2)[:8000],
+        draft_json=json.dumps(draft, ensure_ascii=False, indent=2)[:6000],
+        instructor_prompt=str(body.get("prompt") or "")[:2000],
+    )
+
+    params = get_llm_params("fast")
+    parsed: object = {}
+    try:
+        parsed = generate_text_with_structured_output(
+            messages=[{"role": "user", "content": prompt}],
+            response_format=CourseTopicDraftLLMResponse,
+            model=params["model"],
+        )
+    except Exception as structured_exc:
+        logger.warning(
+            "Structured course topic draft failed; retrying text JSON parse course_id=%s topic_id=%s error=%s",
+            course_id,
+            topic_id,
+            structured_exc,
+        )
+        try:
+            raw = generate_text(
+                messages=[{"role": "user", "content": prompt}],
+                model=params["model"],
+                reasoning_effort=params["reasoning_effort"],
+            )
+            parsed = _parse_course_topic_draft_json(raw)
+        except Exception:
+            logger.exception("AI course topic draft retry failed for course_id=%s topic_id=%s", course_id, topic_id)
+            raise HTTPException(status_code=502, detail="AI draft generation failed")
+    result = _normalize_course_topic_draft_response(parsed)
+    if not any([
+        result["key_concepts"],
+        result["student_material"]["source_text"].strip(),
+        result["spoken_script"].strip(),
+        result["cautions"],
+        result["check_questions"],
+    ]):
+        logger.error("AI course topic draft returned empty result for course_id=%s topic_id=%s", course_id, topic_id)
+        raise HTTPException(status_code=502, detail="AI draft response was empty")
+    return result
 
 
 @router.get("/courses/{course_id}/lecture-studio/document-structure")
