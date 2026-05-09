@@ -18,6 +18,9 @@
     importedFromCourseId: null,
     availableMaterials: [],
     selectedMaterialIds: [],
+    materialPipelineStatus: {},
+    materialPipelineTimers: {},
+    exportContext: null,
     errorLogs: [],
     selectedErrorLogIds: new Set(),
     lastSelectedErrorLogIndex: null,
@@ -217,6 +220,25 @@
       });
   }
 
+  var materialPipelineStages = [
+    ["document_structure", "DocumentStructureAgent"],
+    ["paper_skeleton", "PaperSkeletonAgent"],
+    ["rhetorical_role", "RhetoricalRoleAgent"],
+    ["claim_qualification", "ClaimQualificationAgent"],
+    ["equation_semantics", "EquationSemanticsAgent"],
+    ["evidence_registry", "EvidenceRegistryBuilder"],
+    ["claim_object_builder", "ClaimObjectBuilder"],
+    ["derivation_chain", "DerivationChainAgent"],
+    ["figure_table_semantics", "FigureTableSemanticsAgent"],
+    ["thesis_reconstruction", "ThesisReconstructionAgent"],
+    ["dsl_linking", "DSLLinkingAgent"],
+    ["component_assembly", "ComponentAssemblyAgent"],
+    ["component_graph", "ComponentGraphAgent"],
+    ["course_mapping", "CourseMappingAgent"],
+    ["blueprint", "BlueprintAgent"],
+    ["export_validation", "ExportValidationGate"],
+  ];
+
   function renderMaterials(materials) {
     var tbody = document.getElementById("materials-tbody");
     if (!materials || materials.length === 0) {
@@ -272,14 +294,20 @@
       if ((m.status === "processing" || m.status === "failed") && m.document_id) {
         resumeBtn = '<button class="admin-resume-analysis-btn" data-document-id="' + escHtml(m.document_id) + '" data-filename="' + escHtml(m.filename || m.title || "教材") + '" title="保存済みPDFから解析を再開">解析再開</button>';
       }
-      html += '<td style="display:flex;gap:6px">' +
+      html += '<td><div class="materials-action-cell">' +
+        materialPipelineMenuHtml(m) +
         '<button class="admin-pdf-reupload-btn' + pdfBtnClass + '" data-material-id="' + escHtml(m.material_id) + '" title="' + escHtml(pdfBtnTitle) + '">' + pdfBtnLabel + '</button>' +
         resumeBtn +
         '<button class="admin-delete-btn" data-material-id="' + escHtml(m.material_id) + '" data-material-title="' + escHtml(m.title) + '" style="background:none;border:1px solid var(--color-text-danger);color:var(--color-text-danger);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">削除</button>' +
-        '</td>';
+        '</div></td>';
       html += "</tr>";
     });
     tbody.innerHTML = html;
+    materials.forEach(function (m) {
+      var mid = m.material_id || "";
+      if (mid) loadMaterialPipelineStatus(mid);
+    });
+    bindMaterialPipelineMenus(tbody);
 
     // Attach delete handlers
     tbody.querySelectorAll(".admin-delete-btn").forEach(function (btn) {
@@ -355,6 +383,199 @@
           });
       });
     });
+  }
+
+  function materialPipelineMenuHtml(material) {
+    var mid = escHtml(material.material_id || "");
+    var disabled = material.document_id ? "" : " disabled";
+    var html =
+      '<div class="material-pipeline-menu ls-action-menu" data-material-id="' + mid + '">' +
+        '<button class="admin-action-btn ls-menu-trigger material-pipeline-trigger" type="button" data-material-id="' + mid + '"' + disabled + '>' +
+          '<span class="ls-step-mark"></span><span>パイプラインを実行 ▼</span>' +
+        '</button>' +
+        '<div class="ls-menu material-pipeline-panel" hidden>' +
+          '<button class="ls-menu-item material-pipeline-item" type="button" data-stage=""><span class="ls-step-mark"></span><span>パイプライン全実行</span></button>' +
+          '<div class="ls-menu-group-label">個々のAgentを単独実行</div>';
+    materialPipelineStages.forEach(function (entry) {
+      html += '<button class="ls-menu-item ls-menu-item-indent material-pipeline-item" type="button" data-stage="' + escHtml(entry[0]) + '">' +
+        '<span class="ls-step-mark"></span><span>' + escHtml(entry[1]) + '</span></button>';
+    });
+    html +=
+          '<div class="ls-menu-divider"></div>' +
+          '<button class="ls-menu-item material-export-item" type="button"><span class="ls-step-mark"></span><span>外部レビュー用に書き出し</span></button>' +
+        '</div>' +
+      '</div>';
+    return html;
+  }
+
+  function bindMaterialPipelineMenus(root) {
+    root.querySelectorAll(".material-pipeline-trigger").forEach(function (btn) {
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var menu = this.closest(".material-pipeline-menu");
+        var panel = menu && menu.querySelector(".material-pipeline-panel");
+        if (!panel) return;
+        var willOpen = panel.hidden;
+        document.querySelectorAll(".ls-menu").forEach(function (m) { m.hidden = true; });
+        panel.hidden = !willOpen;
+      });
+    });
+    root.querySelectorAll(".material-pipeline-panel").forEach(function (panel) {
+      panel.addEventListener("click", function (e) { e.stopPropagation(); });
+    });
+    root.querySelectorAll(".material-pipeline-item").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var menu = this.closest(".material-pipeline-menu");
+        if (!menu) return;
+        runMaterialPipeline(menu.getAttribute("data-material-id"), this.getAttribute("data-stage") || "");
+        var panel = menu.querySelector(".material-pipeline-panel");
+        if (panel) panel.hidden = true;
+      });
+    });
+    root.querySelectorAll(".material-export-item").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var menu = this.closest(".material-pipeline-menu");
+        if (!menu) return;
+        var mid = menu.getAttribute("data-material-id");
+        var status = state.materialPipelineStatus[mid] || {};
+        state.exportContext = { scope: "document", documentId: status.document_id || "", materialId: mid };
+        lsOpenExportModal(state.exportContext);
+        var panel = menu.querySelector(".material-pipeline-panel");
+        if (panel) panel.hidden = true;
+      });
+    });
+  }
+
+  function loadMaterialPipelineStatus(materialId) {
+    apiFetch("/admin/materials/" + encodeURIComponent(materialId) + "/document-pipeline/status")
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (status) {
+        if (!status) return;
+        state.materialPipelineStatus[materialId] = status;
+        updateMaterialPipelineMarks(materialId);
+        if (status.active_task_id) {
+          pollMaterialPipelineTask(materialId, status.active_task_id);
+        }
+      })
+      .catch(function () {});
+  }
+
+  function pipelineVisual(status) {
+    if (status === "completed") return "done";
+    if (status === "running" || status === "pending" || status === "processing") return "running";
+    if (status === "failed") return "error";
+    return "pending";
+  }
+
+  function applyPipelineVisual(el, visual) {
+    if (!el) return;
+    ["done", "next", "running", "error", "pending"].forEach(function (name) {
+      el.classList.toggle("ls-menu-item-" + name, visual === name);
+    });
+  }
+
+  function updateMaterialPipelineMarks(materialId) {
+    var status = state.materialPipelineStatus[materialId] || {};
+    document.querySelectorAll('.material-pipeline-menu[data-material-id="' + CSS.escape(materialId) + '"]').forEach(function (menu) {
+      applyPipelineVisual(menu.querySelector(".material-pipeline-trigger"), pipelineVisual(status.status));
+      menu.querySelectorAll(".material-pipeline-item").forEach(function (btn) {
+        var stage = btn.getAttribute("data-stage") || "";
+        var visual = stage ? pipelineVisual((status.stages || {})[stage]) : pipelineVisual(status.status);
+        applyPipelineVisual(btn, visual);
+      });
+      var exportBtn = menu.querySelector(".material-export-item");
+      applyPipelineVisual(exportBtn, pipelineVisual(status.status));
+      if (exportBtn) exportBtn.disabled = !status.document_id;
+    });
+  }
+
+  function runMaterialPipeline(materialId, stage) {
+    if (!materialId) return;
+    var label = stage ? (materialPipelineStages.find(function (s) { return s[0] === stage; }) || ["", stage])[1] : "パイプライン全実行";
+    showUploadStatus(label + "を開始しています...", "info");
+    apiFetch("/admin/materials/" + encodeURIComponent(materialId) + "/document-pipeline/run", {
+      method: "POST",
+      body: JSON.stringify({ target_stage: stage || "" }),
+    })
+      .then(function (res) {
+        if (!res.ok) {
+          return res.json().then(function (body) {
+            throw new Error((body && body.detail) || label + "を開始できませんでした");
+          }, function () {
+            throw new Error(label + "を開始できませんでした");
+          });
+        }
+        return res.json();
+      })
+      .then(function (data) {
+        state.materialPipelineStatus[materialId] = Object.assign({}, state.materialPipelineStatus[materialId] || {}, {
+          status: "running",
+          active_task_id: data.task_id,
+          active_target_stage: stage || "",
+        });
+        if (stage) {
+          state.materialPipelineStatus[materialId].stages = state.materialPipelineStatus[materialId].stages || {};
+          state.materialPipelineStatus[materialId].stages[stage] = "running";
+        }
+        updateMaterialPipelineMarks(materialId);
+        showUploadStatus(label + "を開始しました。進捗を確認しています...", "info");
+        pollMaterialPipelineTask(materialId, data.task_id);
+      })
+      .catch(function (err) {
+        showUploadStatus((err && err.message) || label + "を開始できませんでした", "error");
+        loadMaterialPipelineStatus(materialId);
+      });
+  }
+
+  function pollMaterialPipelineTask(materialId, taskId) {
+    if (!taskId) return;
+    if (state.materialPipelineTimers[materialId]) return;
+    var retryCount = 0;
+    var timer = setInterval(function () {
+      apiFetch("/admin/tasks/" + encodeURIComponent(taskId))
+        .then(function (res) {
+          if (!res.ok) throw new Error("Status check failed");
+          return res.json();
+        })
+        .then(function (task) {
+          retryCount = 0;
+          var rd = task.result_data || {};
+          var status = state.materialPipelineStatus[materialId] || {};
+          status.status = task.status === "failed" ? "failed" : task.status === "completed" ? "completed" : "running";
+          status.current_stage = rd.stage || status.current_stage || "";
+          status.document_id = rd.document_id || status.document_id || "";
+          status.stages = status.stages || {};
+          if (rd.target_stage) status.stages[rd.target_stage] = status.status === "completed" ? "completed" : status.status === "failed" ? "failed" : "running";
+          if (status.current_stage && status.stages[status.current_stage] !== "completed") {
+            status.stages[status.current_stage] = status.status === "failed" ? "failed" : "running";
+          }
+          state.materialPipelineStatus[materialId] = status;
+          updateMaterialPipelineMarks(materialId);
+
+          if (task.status === "completed" || task.status === "failed") {
+            clearInterval(timer);
+            delete state.materialPipelineTimers[materialId];
+            showUploadStatus(
+              (rd.label || "パイプライン") + (task.status === "completed" ? "が完了しました" : "に失敗しました: " + (task.error_message || "不明なエラー")),
+              task.status === "completed" ? "success" : "error"
+            );
+            loadMaterialPipelineStatus(materialId);
+            loadMaterials();
+          } else {
+            showUploadStatus((rd.label || "パイプライン") + "中... (" + (rd.progress || 0) + "%)", "info");
+          }
+        })
+        .catch(function () {
+          retryCount++;
+          if (retryCount >= 5) {
+            clearInterval(timer);
+            delete state.materialPipelineTimers[materialId];
+            showUploadStatus("パイプラインの進捗確認に失敗しました。更新ボタンで状況を確認してください。", "error");
+            loadMaterialPipelineStatus(materialId);
+          }
+        });
+    }, 3000);
+    state.materialPipelineTimers[materialId] = timer;
   }
 
   // ── Delete Confirmation Modal ──────────────────────────────────────
@@ -2650,16 +2871,13 @@
 
   function initLectureStudio() {
     var courseSelect = document.getElementById("ls-course-select");
-    var pipelineFullBtn = document.getElementById("ls-pipeline-full-btn");
     var audioAllBtn = document.getElementById("ls-audio-all-btn");
     var settingsBtn = document.getElementById("ls-settings-btn");
-    var exportBtn = document.getElementById("ls-export-btn");
-    var pipelineMenuBtn = document.getElementById("ls-pipeline-menu-btn");
+    var courseContentBtn = document.getElementById("ls-course-content-btn");
     var moreMenuBtn = document.getElementById("ls-more-menu-btn");
     var saveBtn = document.getElementById("ls-save-btn");
     var rewriteBtn = document.getElementById("ls-rewrite-btn");
 
-    lsBindMenu("ls-pipeline-menu-btn", "ls-pipeline-menu");
     lsBindMenu("ls-more-menu-btn", "ls-more-menu");
 
     courseSelect.addEventListener("change", function () {
@@ -2668,11 +2886,9 @@
         lsState.courseId = courseId;
         // ボタンはチャンク読み込み完了後に lsRenderChunkList で制御するため
         // ここでは一旦無効化して読み込みを待つ
-        pipelineFullBtn.disabled = true;
-        audioAllBtn.disabled = true;
+        if (audioAllBtn) audioAllBtn.disabled = true;
         settingsBtn.disabled = false;
-        exportBtn.disabled = false;
-        pipelineMenuBtn.disabled = true;
+        if (courseContentBtn) courseContentBtn.disabled = false;
         moreMenuBtn.disabled = false;
         lsLoadSettings(courseId);
         lsLoadScripts(courseId);
@@ -2692,11 +2908,9 @@
         lsState.settings = { narration_persona: "", response_persona: "" };
         lsState.courseStructure = null;
         lsState.courseComponents = null;
-        pipelineFullBtn.disabled = true;
-        audioAllBtn.disabled = true;
+        if (audioAllBtn) audioAllBtn.disabled = true;
         settingsBtn.disabled = true;
-        exportBtn.disabled = true;
-        pipelineMenuBtn.disabled = true;
+        if (courseContentBtn) courseContentBtn.disabled = true;
         moreMenuBtn.disabled = true;
         lsRenderChunkList();
         lsRenderLeftPanel();
@@ -2704,24 +2918,11 @@
       }
     });
 
-    pipelineFullBtn.addEventListener("click", function () {
+    if (audioAllBtn) audioAllBtn.addEventListener("click", function () {
       if (!lsState.courseId || lsState.generating) return;
-      lsCloseMenus();
-      lsRunDocumentPipeline();
-    });
-
-    audioAllBtn.addEventListener("click", function () {
-      if (!lsState.courseId || lsState.generating) return;
+      if (!lsIsCourseContentComplete()) return;
       lsCloseMenus();
       lsBatchAudio();
-    });
-
-    document.querySelectorAll(".ls-agent-stage-btn").forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        if (!lsState.courseId || lsState.generating) return;
-        lsCloseMenus();
-        lsRunDocumentPipeline(btn.getAttribute("data-stage") || "");
-      });
     });
 
     settingsBtn.addEventListener("click", function () {
@@ -2730,10 +2931,10 @@
       lsOpenSettingsModal();
     });
 
-    exportBtn.addEventListener("click", function () {
+    if (courseContentBtn) courseContentBtn.addEventListener("click", function () {
       if (!lsState.courseId) return;
       lsCloseMenus();
-      lsOpenExportModal();
+      lsConfirmCourseContentGeneration();
     });
 
     document.getElementById("export-cancel-btn").addEventListener("click", function () {
@@ -2816,13 +3017,25 @@
     return html;
   }
 
-  function lsOpenExportModal() {
+  function lsOpenExportModal(context) {
+    state.exportContext = context || null;
     var overlay = document.getElementById("export-modal-overlay");
     document.getElementById("export-status").textContent = "";
+    var courseOpt = document.querySelector('input[name="export-scope"][value="course"]');
+    var docOpt = document.querySelector('input[name="export-scope"][value="document"]');
+    if (courseOpt && docOpt) {
+      if (state.exportContext && state.exportContext.scope === "document") {
+        docOpt.checked = true;
+        courseOpt.disabled = true;
+      } else {
+        courseOpt.disabled = false;
+      }
+    }
     overlay.style.display = "flex";
   }
 
   function lsCloseExportModal() {
+    state.exportContext = null;
     document.getElementById("export-modal-overlay").style.display = "none";
   }
 
@@ -2835,7 +3048,11 @@
     var includeDebug = document.getElementById("export-opt-debug").checked;
 
     var endpoint, scopeId;
-    if (scopeVal === "course") {
+    if (state.exportContext && state.exportContext.scope === "document") {
+      scopeVal = "document";
+      scopeId = state.exportContext.documentId || state.exportContext.materialId || "";
+      endpoint = "/documents/" + scopeId + "/export-bundle";
+    } else if (scopeVal === "course") {
       scopeId = lsState.courseId;
       endpoint = "/courses/" + scopeId + "/export-bundle";
     } else {
@@ -3073,10 +3290,12 @@
       .then(function (data) {
         if (!data || lsState.courseId !== courseId) return;
         lsState.courseStructure = data;
+        lsUpdateCourseControls();
         if (lsState.leftTab === "course") lsRenderCourseStructure();
       })
       .catch(function () {
         lsState.courseStructure = null;
+        lsUpdateCourseControls();
         if (lsState.leftTab === "course") lsRenderCourseStructure();
       });
   }
@@ -3318,6 +3537,11 @@
           lsSetCourseTaskBusy(true);
           lsShowProgress(label + "が進行中です... (進捗: " + (rd.progress || 0) + "%)", "info");
           lsPollGenericCourseTask(task.task_id, label, "document_pipeline", targetStage);
+        } else if (task.task_type === "course_content_generation") {
+          lsState.pipelineTask = { step: "course_content", status: "running" };
+          lsSetCourseTaskBusy(true);
+          lsShowProgress("コース内容生成が進行中です... (進捗: " + (rd.progress || 0) + "%)", "info");
+          lsPollCourseContentTask(task.task_id);
         } else if (
           task.task_type === "claim_extraction" ||
           task.task_type === "component_assembly" ||
@@ -3395,7 +3619,6 @@
 
   function lsRenderChunkList() {
     var listEl = document.getElementById("ls-chunk-list");
-    var pipelineFullBtn = document.getElementById("ls-pipeline-full-btn");
     var audioAllBtn = document.getElementById("ls-audio-all-btn");
     var settingsBtn = document.getElementById("ls-settings-btn");
 
@@ -3403,10 +3626,8 @@
       listEl.innerHTML = '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">' +
         '教材のチャンクが見つかりません。<br>' +
         '教材がコースに紐づけられているか、PDF解析が完了しているかを確認してください。</div>';
-      if (pipelineFullBtn) pipelineFullBtn.disabled = true;
       if (audioAllBtn) audioAllBtn.disabled = true;
       if (settingsBtn) settingsBtn.disabled = !lsState.courseId;
-      document.querySelectorAll(".ls-agent-stage-btn").forEach(function (btn) { btn.disabled = true; });
       lsUpdateCourseControls();
       return;
     }
@@ -5799,6 +6020,11 @@
     };
   }
 
+  function lsIsCourseContentComplete() {
+    var status = lsState.courseStructure && lsState.courseStructure.course_content_status;
+    return Boolean(status && status.status === "completed");
+  }
+
   function lsPipelineStepVisual(step, state) {
     var task = lsState.pipelineTask || {};
     if (task.step === step && task.status === "running") return "running";
@@ -5846,22 +6072,18 @@
     var ready = hasCourse && !busy;
     var state = lsCoursePipelineState();
 
-    var pipelineMenuBtn = document.getElementById("ls-pipeline-menu-btn");
     var moreMenuBtn = document.getElementById("ls-more-menu-btn");
-    if (pipelineMenuBtn) {
-      pipelineMenuBtn.disabled = !hasCourse;
-      pipelineMenuBtn.classList.toggle("ls-menu-trigger-busy", busy);
+    if (moreMenuBtn) {
+      moreMenuBtn.disabled = !hasCourse;
+      moreMenuBtn.classList.toggle("ls-menu-trigger-busy", busy);
     }
-    if (moreMenuBtn) moreMenuBtn.disabled = !hasCourse;
 
-    lsSetMenuItemState("ls-pipeline-full-btn", ready, lsState.pipelineTask && lsState.pipelineTask.step === "document_pipeline" ? lsState.pipelineTask.status === "failed" ? "error" : "running" : "pending");
-    lsSetAgentStageItemState(ready);
-    lsSetMenuItemState("ls-audio-all-btn", ready && hasChunks && state.scriptsDone, lsPipelineStepVisual("audio", state));
+    lsSetMenuItemState("ls-audio-all-btn", ready && hasChunks && lsIsCourseContentComplete(), lsPipelineStepVisual("audio", state));
 
-    var exportBtn = document.getElementById("ls-export-btn");
     var settingsBtn = document.getElementById("ls-settings-btn");
-    if (exportBtn) exportBtn.disabled = !hasCourse;
+    var courseContentBtn = document.getElementById("ls-course-content-btn");
     if (settingsBtn) settingsBtn.disabled = !hasCourse;
+    if (courseContentBtn) courseContentBtn.disabled = !ready;
   }
 
   function lsSetCourseTaskBusy(isBusy) {
@@ -6223,6 +6445,116 @@
             clearInterval(timer);
             lsShowProgress("進捗確認に失敗しました。ページをリロードして状況を確認してください。", "error");
             lsState.pipelineTask = { step: "script", status: "failed" };
+            lsSetCourseTaskBusy(false);
+          }
+        });
+    }
+
+    var timer = setInterval(poll, intervalMs);
+    poll();
+  }
+
+  function lsConfirmCourseContentGeneration() {
+    var existing = document.getElementById("ls-course-content-confirm");
+    if (existing) existing.remove();
+    var overlay = document.createElement("div");
+    overlay.id = "ls-course-content-confirm";
+    overlay.className = "ls-settings-modal";
+    overlay.innerHTML =
+      '<div class="ls-settings-dialog" style="max-width:420px">' +
+        '<div class="ls-settings-head">' +
+          '<h3>コース内容生成</h3>' +
+          '<button id="ls-course-content-confirm-close" class="lecture-chat-close" type="button">&times;</button>' +
+        '</div>' +
+        '<p style="font-size:13px;line-height:1.7;color:var(--color-text-secondary);margin:0 0 16px">コース内容を再作成します。既に作成済の内容は上書きされます。</p>' +
+        '<div class="ls-settings-actions">' +
+          '<button id="ls-course-content-cancel" class="admin-action-btn" type="button">キャンセル</button>' +
+          '<button id="ls-course-content-run" class="admin-action-btn" type="button" style="background:var(--color-text-success);color:#fff">実行</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    function close() { overlay.remove(); }
+    document.getElementById("ls-course-content-confirm-close").addEventListener("click", close);
+    document.getElementById("ls-course-content-cancel").addEventListener("click", close);
+    overlay.addEventListener("click", function (e) {
+      if (e.target === overlay) close();
+    });
+    document.getElementById("ls-course-content-run").addEventListener("click", function () {
+      close();
+      lsGenerateCourseContent();
+    });
+  }
+
+  function lsGenerateCourseContent() {
+    lsState.pipelineTask = { step: "course_content", status: "running" };
+    lsSetCourseTaskBusy(true);
+    lsShowProgress("コース内容生成を開始しています...", "info");
+
+    apiFetch("/admin/courses/" + lsState.courseId + "/course-content/generate", {
+      method: "POST",
+      body: "{}",
+    })
+      .then(function (res) {
+        if (!res.ok) {
+          return res.json().then(function (errBody) {
+            throw new Error((errBody && errBody.detail) || "コース内容生成を開始できませんでした");
+          }, function () {
+            throw new Error("コース内容生成を開始できませんでした");
+          });
+        }
+        return res.json();
+      })
+      .then(function (data) {
+        lsShowProgress("コース内容生成中... (0%)", "info");
+        lsPollCourseContentTask(data.task_id);
+      })
+      .catch(function (err) {
+        lsState.pipelineTask = { step: "course_content", status: "failed" };
+        lsShowProgress("コース内容生成に失敗しました: " + (err.message || "不明なエラー"), "error");
+        lsSetCourseTaskBusy(false);
+      });
+  }
+
+  function lsPollCourseContentTask(taskId) {
+    var retryCount = 0;
+    var maxRetries = 5;
+    var intervalMs = 3000;
+
+    function poll() {
+      apiFetch("/admin/tasks/" + taskId)
+        .then(function (res) {
+          if (!res.ok) throw new Error("Status check failed");
+          return res.json();
+        })
+        .then(function (task) {
+          retryCount = 0;
+          var rd = task.result_data || {};
+          var progress = rd.progress || 0;
+          if (task.status === "completed") {
+            clearInterval(timer);
+            lsState.pipelineTask = null;
+            lsShowProgress("コース内容生成が完了しました", "success");
+            lsSetCourseTaskBusy(false);
+            if (lsState.courseId) {
+              lsLoadScripts(lsState.courseId);
+              lsLoadCourseStructure(lsState.courseId);
+            }
+          } else if (task.status === "failed") {
+            clearInterval(timer);
+            lsState.pipelineTask = { step: "course_content", status: "failed" };
+            lsShowProgress("コース内容生成に失敗しました: " + (task.error_message || "不明なエラー"), "error");
+            lsSetCourseTaskBusy(false);
+            if (lsState.courseId) lsLoadCourseStructure(lsState.courseId);
+          } else {
+            lsShowProgress("コース内容生成中... (" + progress + "%)", "info");
+          }
+        })
+        .catch(function () {
+          retryCount++;
+          if (retryCount >= maxRetries) {
+            clearInterval(timer);
+            lsShowProgress("コース内容生成の進捗確認に失敗しました。", "error");
+            lsState.pipelineTask = { step: "course_content", status: "failed" };
             lsSetCourseTaskBusy(false);
           }
         });
