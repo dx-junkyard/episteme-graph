@@ -1079,6 +1079,21 @@ body {
   border-bottom: none;
 }
 
+.materials-action-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  overflow: visible;
+}
+
+.material-pipeline-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+
 .admin-status {
   display: inline-block;
   padding: 2px 10px;

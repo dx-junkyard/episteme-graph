@@ -9,8 +9,10 @@ import re
 from collections import defaultdict
 from typing import Any
 
+from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
+from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
 from core.postgres import get_session as _pg_session
 
 logger = logging.getLogger(__name__)
@@ -74,6 +76,7 @@ def build_course_content(user_id: str, course_id: str) -> dict:
 
         chunks_by_material = _load_chunks(session, material_ids)
         enriched_topics = _enrich_topics(course.get("topics") or [], bundle, chunks_by_material)
+        draft_result = _generate_course_topic_drafts(course, enriched_topics)
         course["topics"] = enriched_topics
         course["referenced_sections"] = _referenced_sections_from_topics(enriched_topics)
         _set_content_status(
@@ -86,10 +89,17 @@ def build_course_content(user_id: str, course_id: str) -> dict:
                 "mapping_topics": len(bundle["mapping_topics"]),
                 "components": len(bundle["components"]),
                 "equations": len(bundle["equations"]),
+                "drafted_topics": draft_result["drafted_topics"],
+                "draft_errors": draft_result["draft_errors"],
             },
         )
         _save_course(session, course_id, course)
-        return {"status": "completed", "updated_topics": len(enriched_topics)}
+        return {
+            "status": "completed",
+            "updated_topics": len(enriched_topics),
+            "drafted_topics": draft_result["drafted_topics"],
+            "draft_errors": draft_result["draft_errors"],
+        }
     except Exception:
         session.rollback()
         raise
@@ -448,6 +458,303 @@ def _referenced_sections_from_topics(topics: list[dict]) -> list[dict]:
                 "note": "CourseMappingAgent / ComponentAssemblyAgent から対応付け",
             })
     return refs[:100]
+
+
+_COURSE_CONTENT_DRAFT_PROMPT = """あなたは大学教員の授業用ドラフト作成を支援するアシスタントです。
+
+目的:
+- コース全体の章立て、前後の説明順序、現在セクションが果たす教育上の役割を考慮する
+- 現在セクションだけで閉じた説明にせず、前のセクションから何を受け取り、次へ何を渡すかを明確にする
+- Claim / コンポーネント / 数式 / 原文抜粋は、本文の主役ではなく根拠材料として使う
+- 教材欄と本文説明を分離する
+
+教材欄の表記:
+- Markdown風の軽量表記を使う
+- インライン数式は `$...$`
+- ブロック数式は `$$...$$`
+- 埋め込みは `![[equation:id]]`, `![[figure:id]]`, `![[source:id]]`, `![[claim:id]]`, `![[component:id]]`
+
+出力は必ずJSONのみ。
+JSON文字列内のLaTeXバックスラッシュは必ず `\\Lambda` のように二重化してください。
+形式:
+{{
+  "key_concepts": ["重要概念"],
+  "student_material": {{"source_format": "eg-markdown-v1", "source_text": "学生に見せる教材"}},
+  "spoken_script": "教員が話せる自然文。音声読み上げ対象。",
+  "cautions": ["注意点"],
+  "check_questions": ["確認問題"]
+}}
+
+コース全体:
+{course_json}
+
+現在のセクション:
+{topic_json}
+
+前後関係:
+{sequence_json}
+
+根拠候補:
+{evidence_json}
+
+現在の下書き:
+{draft_json}
+
+依頼:
+授業用ドラフトを作成してください。
+"""
+
+
+class _CourseContentStudentMaterialDraft(BaseModel):
+    source_format: str = "eg-markdown-v1"
+    source_text: str = ""
+
+
+class _CourseContentDraftResponse(BaseModel):
+    key_concepts: list[str] = Field(default_factory=list)
+    student_material: _CourseContentStudentMaterialDraft = Field(default_factory=_CourseContentStudentMaterialDraft)
+    spoken_script: str = ""
+    cautions: list[str] = Field(default_factory=list)
+    check_questions: list[str] = Field(default_factory=list)
+
+
+def _generate_course_topic_drafts(course: dict, topics: list[dict]) -> dict:
+    if not topics:
+        return {"drafted_topics": 0, "draft_errors": 0}
+    course_context = _course_context_for_prompt(course, topics)
+    params = get_llm_params("fast")
+    drafted = 0
+    errors = 0
+    for index, topic in enumerate(topics):
+        try:
+            result = _generate_single_topic_draft(
+                course_context=course_context,
+                topics=topics,
+                topic=topic,
+                index=index,
+                model=params["model"],
+                reasoning_effort=params["reasoning_effort"],
+            )
+            topic["key_concepts"] = result["key_concepts"]
+            topic["student_material"] = result["student_material"]
+            topic["spoken_script"] = result["spoken_script"]
+            topic["cautions"] = result["cautions"]
+            topic["check_questions"] = result["check_questions"]
+            topic["draft_source"] = "course_content_generation"
+            drafted += 1
+        except Exception:
+            errors += 1
+            logger.exception(
+                "Failed to generate course topic draft: course=%s topic=%s",
+                course.get("id") or course.get("title"),
+                topic.get("id") or topic.get("title"),
+            )
+            _apply_deterministic_topic_draft_fallback(topic)
+    return {"drafted_topics": drafted, "draft_errors": errors}
+
+
+def _generate_single_topic_draft(
+    *,
+    course_context: dict,
+    topics: list[dict],
+    topic: dict,
+    index: int,
+    model: str,
+    reasoning_effort: str | None,
+) -> dict:
+    prompt = _COURSE_CONTENT_DRAFT_PROMPT.format(
+        course_json=json.dumps(course_context, ensure_ascii=False, indent=2)[:8000],
+        topic_json=json.dumps(_topic_context_for_prompt(topic), ensure_ascii=False, indent=2)[:4000],
+        sequence_json=json.dumps(_topic_sequence_context(topics, index), ensure_ascii=False, indent=2)[:3000],
+        evidence_json=json.dumps(_topic_evidence_for_prompt(topic), ensure_ascii=False, indent=2)[:8000],
+        draft_json=json.dumps(_topic_existing_draft(topic), ensure_ascii=False, indent=2)[:6000],
+    )
+    parsed: object
+    try:
+        parsed = generate_text_with_structured_output(
+            messages=[{"role": "user", "content": prompt}],
+            response_format=_CourseContentDraftResponse,
+            model=model,
+        )
+    except Exception:
+        raw = generate_text(
+            messages=[{"role": "user", "content": prompt}],
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+        parsed = _parse_topic_draft_json(raw)
+    result = _normalize_topic_draft_response(parsed)
+    if not any([
+        result["key_concepts"],
+        result["student_material"]["source_text"].strip(),
+        result["spoken_script"].strip(),
+        result["cautions"],
+        result["check_questions"],
+    ]):
+        raise ValueError("empty draft response")
+    return result
+
+
+def _course_context_for_prompt(course: dict, topics: list[dict]) -> dict:
+    chapters = course.get("chapters") or []
+    grouped: dict[int, list[dict]] = defaultdict(list)
+    for idx, topic in enumerate(topics):
+        grouped[int(topic.get("chapter_index") or 0)].append({
+            "order": idx + 1,
+            "id": topic.get("id") or "",
+            "title": topic.get("title") or "",
+            "summary": topic.get("summary") or "",
+            "prerequisites": topic.get("prerequisites") or [],
+        })
+    return {
+        "title": course.get("title") or "",
+        "goal": course.get("goal") or course.get("description") or "",
+        "target_audience": course.get("target_audience") or "",
+        "chapters": [
+            {
+                "chapter_index": idx,
+                "title": ch.get("title") if isinstance(ch, dict) else str(ch),
+                "topics": grouped.get(idx, []),
+            }
+            for idx, ch in enumerate(chapters)
+        ] or [{"chapter_index": 0, "title": "コース", "topics": grouped.get(0, [])}],
+    }
+
+
+def _topic_context_for_prompt(topic: dict) -> dict:
+    return {
+        "id": topic.get("id") or "",
+        "title": topic.get("title") or "",
+        "chapter_index": topic.get("chapter_index", 0),
+        "prerequisites": topic.get("prerequisites") or [],
+        "learning_objectives": topic.get("learning_objectives") or [],
+        "expected_misconceptions": topic.get("expected_misconceptions") or [],
+        "content_confidence": topic.get("content_confidence") or "",
+    }
+
+
+def _topic_sequence_context(topics: list[dict], index: int) -> dict:
+    def compact(topic: dict | None) -> dict | None:
+        if not topic:
+            return None
+        return {
+            "id": topic.get("id") or "",
+            "title": topic.get("title") or "",
+            "summary": topic.get("summary") or "",
+            "key_concepts": topic.get("key_concepts") or [],
+        }
+
+    return {
+        "current_order": index + 1,
+        "total_sections": len(topics),
+        "previous": compact(topics[index - 1] if index > 0 else None),
+        "current": compact(topics[index]),
+        "next": compact(topics[index + 1] if index + 1 < len(topics) else None),
+    }
+
+
+def _topic_evidence_for_prompt(topic: dict) -> dict:
+    return {
+        "summary": topic.get("summary") or "",
+        "content": topic.get("content") or "",
+        "content_blocks": topic.get("content_blocks") or [],
+        "source_excerpt": topic.get("source_excerpt") or "",
+        "linked_component_ids": topic.get("linked_component_ids") or [],
+        "linked_equation_ids": topic.get("linked_equation_ids") or [],
+        "source_evidence_ids": topic.get("source_evidence_ids") or [],
+        "assessment_prompts": topic.get("assessment_prompts") or [],
+        "teaching_takeaways": topic.get("teaching_takeaways") or [],
+    }
+
+
+def _topic_existing_draft(topic: dict) -> dict:
+    return {
+        "key_concepts": topic.get("key_concepts") or [],
+        "student_material": topic.get("student_material") or {},
+        "spoken_script": topic.get("spoken_script") or topic.get("content") or "",
+        "cautions": topic.get("cautions") or [],
+        "check_questions": topic.get("check_questions") or topic.get("assessment_prompts") or [],
+    }
+
+
+def _apply_deterministic_topic_draft_fallback(topic: dict) -> None:
+    topic["key_concepts"] = _as_str_list(topic.get("learning_objectives"))[:6] or _tokens_as_list(topic.get("title") or "")
+    topic["student_material"] = {
+        "source_format": "eg-markdown-v1",
+        "source_text": _fallback_student_material(topic),
+    }
+    topic["spoken_script"] = topic.get("content") or topic.get("summary") or ""
+    topic["cautions"] = _as_str_list(topic.get("expected_misconceptions"))[:4]
+    topic["check_questions"] = _as_str_list(topic.get("assessment_prompts"))[:4]
+    topic["draft_source"] = "course_content_generation_fallback"
+
+
+def _fallback_student_material(topic: dict) -> str:
+    lines = []
+    if topic.get("title"):
+        lines.append("## " + str(topic["title"]))
+    if topic.get("summary"):
+        lines.extend(["", str(topic["summary"])])
+    for eq_id in topic.get("linked_equation_ids") or []:
+        lines.extend(["", f"![[equation:{eq_id}]]"])
+    return "\n".join(lines).strip()
+
+
+def _tokens_as_list(text: str) -> list[str]:
+    return list(_tokens(text))[:6]
+
+
+def _parse_topic_draft_json(raw: str) -> dict:
+    cleaned = (raw or "").strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.split("\n")
+        lines = [ln for ln in lines if not ln.strip().startswith("```")]
+        cleaned = "\n".join(lines).strip()
+    candidates = [cleaned]
+    match = re.search(r"\{[\s\S]*\}", cleaned)
+    if match and match.group() != cleaned:
+        candidates.append(match.group())
+    for candidate in list(candidates):
+        repaired = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", candidate)
+        if repaired != candidate:
+            candidates.append(repaired)
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate, strict=False)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            continue
+    return {}
+
+
+def _normalize_topic_draft_response(parsed: object) -> dict:
+    if isinstance(parsed, BaseModel):
+        parsed = parsed.model_dump()
+    if not isinstance(parsed, dict):
+        parsed = {}
+    student_material = parsed.get("student_material")
+    if isinstance(student_material, BaseModel):
+        student_material = student_material.model_dump()
+    if not isinstance(student_material, dict):
+        student_material = {"source_format": "eg-markdown-v1", "source_text": str(student_material or "")}
+    return {
+        "key_concepts": _clean_str_list(parsed.get("key_concepts")),
+        "student_material": {
+            "source_format": student_material.get("source_format") or "eg-markdown-v1",
+            "source_text": str(student_material.get("source_text") or ""),
+        },
+        "spoken_script": str(parsed.get("spoken_script") or ""),
+        "cautions": _clean_str_list(parsed.get("cautions")),
+        "check_questions": _clean_str_list(parsed.get("check_questions")),
+    }
+
+
+def _clean_str_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, str):
+        return [line.strip("- ・\t ") for line in value.splitlines() if line.strip("- ・\t ")]
+    return []
 
 
 def _set_content_status(course: dict, status: str, message: str = "", extra: dict | None = None) -> None:

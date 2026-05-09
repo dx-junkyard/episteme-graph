@@ -1649,6 +1649,197 @@ def _set_document_pipeline_status(document_id: str, status: str) -> None:
         session.close()
 
 
+def _get_editable_material_document(material_id: str, current_user: dict) -> dict:
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text(
+                """
+                SELECT id::text, source_path, COALESCE(filename, title, 'document.pdf'), uploaded_by::text
+                FROM documents
+                WHERE source_path = :material_id
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+            ),
+            {"material_id": material_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Material not found")
+    if current_user.get("role") != ROLE_SYSTEM_ADMIN and str(row[3]) != str(current_user.get("id")):
+        raise HTTPException(status_code=403, detail="Material is not editable")
+    return {
+        "document_id": row[0],
+        "material_id": row[1] or material_id,
+        "filename": row[2] or "document.pdf",
+    }
+
+
+def _get_active_task_for_material(material_id: str) -> dict | None:
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text(
+                """
+                SELECT id, task_type, status, result_data, error_message, created_at, updated_at
+                FROM background_tasks
+                WHERE status IN ('pending', 'processing')
+                  AND result_data IS NOT NULL
+                  AND result_data->>'material_id' = :material_id
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+            ),
+            {"material_id": material_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not row:
+        return None
+    return {
+        "task_id": row[0],
+        "task_type": row[1],
+        "status": row[2],
+        "result_data": row[3] or {},
+        "error_message": row[4],
+        "created_at": row[5].isoformat() if row[5] else "",
+        "updated_at": row[6].isoformat() if row[6] else "",
+    }
+
+
+def _material_pipeline_status(material_id: str, document_id: str) -> dict:
+    stages = {stage: "not_started" for stage in DOCUMENT_PIPELINE_STAGE_LABELS}
+    status = "not_started"
+    current_stage = ""
+    error_message = ""
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text(
+                """
+                SELECT status, current_stage, error_message, stage_outputs
+                FROM document_analysis_runs
+                WHERE document_id = :document_id OR material_id = :material_id
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+            ),
+            {"document_id": document_id, "material_id": material_id},
+        ).fetchone()
+    finally:
+        session.close()
+
+    if row:
+        status = row[0] or "not_started"
+        current_stage = row[1] or ""
+        error_message = row[2] or ""
+        stage_outputs = row[3] or {}
+        if isinstance(stage_outputs, str):
+            try:
+                stage_outputs = json.loads(stage_outputs)
+            except Exception:
+                stage_outputs = {}
+        if isinstance(stage_outputs, dict):
+            for stage in stages:
+                info = stage_outputs.get(stage)
+                if isinstance(info, dict):
+                    stages[stage] = info.get("status") or ("completed" if info.get("progress") == 100 else "not_started")
+
+    active = _get_active_task_for_material(material_id)
+    if active:
+        result_data = active.get("result_data") or {}
+        status = "running"
+        current_stage = result_data.get("stage") or current_stage
+        target_stage = result_data.get("target_stage") or ""
+        if target_stage:
+            stages[target_stage] = "running"
+        elif current_stage in stages:
+            stages[current_stage] = "running"
+
+    if status == "failed" and current_stage in stages:
+        stages[current_stage] = "failed"
+
+    return {
+        "material_id": material_id,
+        "document_id": document_id,
+        "status": status,
+        "current_stage": current_stage,
+        "error_message": error_message,
+        "stages": stages,
+        "active_task_id": active["task_id"] if active else "",
+        "active_target_stage": ((active.get("result_data") or {}).get("target_stage") if active else "") or "",
+    }
+
+
+def _material_document_pipeline_worker(
+    *,
+    task_id: str,
+    user_id: str,
+    document: dict,
+    target_stage: str | None,
+) -> None:
+    from core.document_pipeline import PipelineStageError, run_document_pipeline
+
+    material_id = document["material_id"]
+    document_id = document["document_id"]
+    label = DOCUMENT_PIPELINE_STAGE_LABELS.get(target_stage or "", "Agent Pipeline")
+    current_stage = target_stage or "document_pipeline"
+
+    def publish(status: str = "processing", progress: int = 0, error_message: str | None = None) -> None:
+        update_background_task(
+            task_id,
+            status,
+            result_data={
+                "document_id": document_id,
+                "material_id": material_id,
+                "stage": current_stage,
+                "target_stage": target_stage or "",
+                "label": label,
+                "generated": 1 if status == "completed" else 0,
+                "failed": 1 if status == "failed" else 0,
+                "skipped": 0,
+                "total_documents": 1,
+                "total_chunks": 1,
+                "progress": progress,
+            },
+            error_message=error_message,
+        )
+
+    publish("processing", 0)
+    try:
+        pdf_bytes = _load_pipeline_pdf(material_id, document["filename"])
+        if target_stage is None:
+            _set_document_pipeline_status(document_id, "processing")
+
+        def on_stage(stage: str, info: dict) -> None:
+            nonlocal current_stage
+            current_stage = stage
+            publish("processing", int((info or {}).get("progress") or 0))
+
+        run_document_pipeline(
+            pdf_bytes=pdf_bytes,
+            document_id=document_id,
+            material_id=material_id,
+            filename=document["filename"],
+            course_id=None,
+            progress_callback=on_stage,
+            target_stage=target_stage,
+        )
+        if target_stage is None:
+            _set_document_pipeline_status(document_id, "completed")
+        current_stage = target_stage or "completed"
+        publish("completed", 100)
+    except Exception as exc:
+        stage = getattr(exc, "stage", current_stage) if isinstance(exc, PipelineStageError) else current_stage
+        current_stage = stage or "failed"
+        logger.exception("Material document pipeline failed: task=%s material=%s stage=%s", task_id, material_id, current_stage)
+        if target_stage is None:
+            _set_document_pipeline_status(document_id, "failed")
+        publish("failed", 100, str(exc))
+
+
 def _course_document_pipeline_worker(
     *,
     task_id: str,
@@ -1825,6 +2016,144 @@ def run_course_document_pipeline(
     }
 
 
+@router.get("/materials/{material_id}/document-pipeline/status")
+def get_material_document_pipeline_status(
+    material_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """教材単位の document-first Agent Pipeline 状態を返す。"""
+    document = _get_editable_material_document(material_id, current_user)
+    return _material_pipeline_status(document["material_id"], document["document_id"])
+
+
+@router.post("/materials/{material_id}/document-pipeline/run")
+def run_material_document_pipeline(
+    material_id: str,
+    body: dict | None = Body(default=None),
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """教材単位の document-first Agent Pipeline を起動する。"""
+    target_stage = str((body or {}).get("target_stage") or "").strip() or None
+    if target_stage and target_stage not in DOCUMENT_PIPELINE_STAGE_LABELS:
+        raise HTTPException(status_code=400, detail="Unknown pipeline stage")
+
+    document = _get_editable_material_document(material_id, current_user)
+    active = _get_active_task_for_material(document["material_id"])
+    if active:
+        raise HTTPException(status_code=409, detail="Another material task is already running")
+
+    task_id = str(uuid.uuid4())[:12]
+    create_background_task(task_id, "material_document_pipeline", current_user["id"])
+    update_background_task(task_id, "pending", result_data={
+        "document_id": document["document_id"],
+        "material_id": document["material_id"],
+        "stage": target_stage or "queued",
+        "target_stage": target_stage or "",
+        "label": DOCUMENT_PIPELINE_STAGE_LABELS.get(target_stage or "", "Agent Pipeline"),
+        "generated": 0,
+        "failed": 0,
+        "skipped": 0,
+        "total_documents": 1,
+        "total_chunks": 1,
+        "progress": 0,
+    })
+
+    thread = threading.Thread(
+        target=_material_document_pipeline_worker,
+        kwargs={
+            "task_id": task_id,
+            "user_id": current_user["id"],
+            "document": document,
+            "target_stage": target_stage,
+        },
+        daemon=True,
+    )
+    thread.start()
+
+    return {
+        "task_id": task_id,
+        "material_id": document["material_id"],
+        "document_id": document["document_id"],
+        "target_stage": target_stage or "",
+        "status": "pending",
+    }
+
+
+def _course_owner_id(course_id: str) -> str:
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT user_id::text FROM learning_courses WHERE id = :course_id LIMIT 1"),
+            {"course_id": course_id},
+        ).fetchone()
+    finally:
+        session.close()
+    return str(row[0]) if row and row[0] else ""
+
+
+def _course_content_generation_worker(task_id: str, course_id: str, owner_id: str) -> None:
+    from core.course_content_builder import build_course_content
+
+    update_background_task(task_id, "processing", result_data={
+        "course_id": course_id,
+        "stage": "course_content",
+        "progress": 0,
+    })
+    try:
+        result = build_course_content(owner_id, course_id)
+        status = result.get("status") if isinstance(result, dict) else ""
+        progress_status = "completed" if status == "completed" else "failed"
+        update_background_task(task_id, progress_status, result_data={
+            "course_id": course_id,
+            "stage": "course_content",
+            "progress": 100,
+            "result": result,
+        }, error_message="" if progress_status == "completed" else (result or {}).get("message", "コース内容生成に失敗しました"))
+    except Exception as exc:
+        logger.exception("Course content generation failed: task=%s course=%s", task_id, course_id)
+        update_background_task(task_id, "failed", result_data={
+            "course_id": course_id,
+            "stage": "course_content",
+            "progress": 100,
+        }, error_message=str(exc))
+
+
+@router.post("/courses/{course_id}/course-content/generate")
+def generate_course_content(
+    course_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """CourseMapping/ComponentAssembly 成果物からコース内容を再生成する。"""
+    course_data = get_editable_course_data(current_user["id"], course_id)
+    if not course_data and current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        course_data = _get_system_admin_course_data(course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    active = get_active_task_for_course(course_id)
+    if active:
+        raise HTTPException(status_code=409, detail="Another course task is already running")
+
+    owner_id = _course_owner_id(course_id)
+    if not owner_id:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    task_id = str(uuid.uuid4())[:12]
+    create_background_task(task_id, "course_content_generation", current_user["id"])
+    update_background_task(task_id, "pending", result_data={
+        "course_id": course_id,
+        "stage": "course_content",
+        "progress": 0,
+    })
+    thread = threading.Thread(
+        target=_course_content_generation_worker,
+        args=(task_id, course_id, owner_id),
+        daemon=True,
+    )
+    thread.start()
+    return {"task_id": task_id, "course_id": course_id, "status": "pending"}
+
+
 # ---------------------------------------------------------------------------
 # 6. コース単位のアクティブタスク照会 (Issue #139)
 # ---------------------------------------------------------------------------
@@ -1974,6 +2303,7 @@ def get_lecture_studio_course_structure(
         "course_id": course_id,
         "title": course_title,
         "course_status": course_status,
+        "course_content_status": course_data.get("course_content_status") or {},
         "total_chunks": total_chunks,
         "generated_chunks": generated_chunks,
         "audio_chunks": audio_chunks,
