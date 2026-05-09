@@ -204,6 +204,15 @@ class TestLectureStudioModeUI:
         assert "サイエンス・コミュニケーター" in js
         assert "学会発表／査読者" in js
 
+    def test_course_topic_selection_does_not_mask_graph_view(self):
+        """Course topic detail rendering must not preempt the theory graph tabs."""
+        from pathlib import Path
+
+        js = (Path(__file__).resolve().parents[2] / "frontend" / "public" / "js" / "admin.js").read_text(encoding="utf-8")
+        assert 'selectedScope.type === "course_topic" && !lsIsTheoryGraphView(currentView)' in js
+        assert "lsScopeHasDocumentContext" in js
+        assert 'lsState.view === "graph"' in js
+
 
 class TestPersonaPromptHelpers:
     """解説モードプロンプトのヘルパーテスト。"""

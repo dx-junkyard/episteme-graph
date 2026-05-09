@@ -219,7 +219,7 @@ def _enrich_topics(topics: list[dict], bundle: dict, chunks_by_material: dict[st
         component_ids = _component_ids_for_topic(topic, mapping, bundle["components"])
         components = [bundle["components"][cid] for cid in component_ids if cid in bundle["components"]]
         equations = _equations_for_components(components, bundle["equations"])
-        fallback_chunk = all_chunks[index] if index < len(all_chunks) else None
+        fallback_chunk = _fallback_chunk_for_topic(all_chunks, index, len(topics))
 
         summary = _topic_summary(mapping, components, fallback_chunk)
         learning_objectives = _as_str_list(mapping.get("learning_objectives") if mapping else [])
@@ -227,6 +227,8 @@ def _enrich_topics(topics: list[dict], bundle: dict, chunks_by_material: dict[st
         prerequisite_concepts = _as_str_list(mapping.get("prerequisite_concepts") if mapping else [])
         teaching_takeaways = _as_str_list([c.get("teaching_takeaway") for c in components if c.get("teaching_takeaway")])
         evidence_ids = _linked_ids(components, "linked_evidence_ids")
+
+        fallback_formulas = _fallback_formulas(fallback_chunk)
 
         topic.update({
             "summary": summary,
@@ -237,7 +239,14 @@ def _enrich_topics(topics: list[dict], bundle: dict, chunks_by_material: dict[st
                 equations,
                 assessment_prompts,
             ),
-            "content_blocks": _content_blocks(summary, learning_objectives, components, equations, assessment_prompts),
+            "content_blocks": _content_blocks(
+                summary,
+                learning_objectives,
+                components,
+                equations,
+                assessment_prompts,
+                fallback_formulas,
+            ),
             "learning_objectives": learning_objectives,
             "prerequisite_concepts": prerequisite_concepts,
             "blackbox_policy": mapping.get("blackbox_policy") if isinstance(mapping, dict) else {},
@@ -315,6 +324,22 @@ def _topic_summary(mapping: dict, components: list[dict], fallback_chunk: dict |
     return ""
 
 
+def _fallback_chunk_for_topic(chunks: list[dict], topic_index: int, topic_count: int) -> dict | None:
+    if not chunks:
+        return None
+    if topic_index < len(chunks):
+        return chunks[topic_index]
+    mapped_index = min(int(topic_index * len(chunks) / max(topic_count, 1)), len(chunks) - 1)
+    return chunks[mapped_index] if mapped_index >= 0 else None
+
+
+def _fallback_formulas(fallback_chunk: dict | None) -> list[dict]:
+    if not fallback_chunk:
+        return []
+    formulas = fallback_chunk.get("formulas")
+    return [dict(f) for f in formulas if isinstance(f, dict)] if isinstance(formulas, list) else []
+
+
 def _compose_topic_content(
     summary: str,
     learning_objectives: list[str],
@@ -355,6 +380,7 @@ def _content_blocks(
     components: list[dict],
     equations: list[dict],
     assessment_prompts: list[str],
+    fallback_formulas: list[dict] | None = None,
 ) -> list[dict]:
     blocks: list[dict] = []
     if summary:
@@ -374,18 +400,32 @@ def _content_blocks(
                 for c in components[:5]
             ],
         })
-    if equations:
+    equation_items = [
+        {
+            "equation_id": e.get("equation_id") or e.get("id"),
+            "label": e.get("label"),
+            "latex": e.get("latex") or e.get("latex_canonical") or e.get("normalized_latex"),
+            "plain_text": e.get("plain_text") or e.get("reading"),
+        }
+        for e in equations
+    ]
+    existing_ids = {str(item.get("equation_id") or "") for item in equation_items if item.get("equation_id")}
+    for f in fallback_formulas or []:
+        formula_id = str(f.get("id") or f.get("equation_id") or "")
+        latex = f.get("latex") or f.get("latex_canonical") or f.get("normalized_latex") or ""
+        if not formula_id or not latex or formula_id in existing_ids:
+            continue
+        existing_ids.add(formula_id)
+        equation_items.append({
+            "equation_id": formula_id,
+            "label": f.get("label") or "",
+            "latex": latex,
+            "plain_text": f.get("plain_text") or f.get("spoken") or f.get("reading") or "",
+        })
+    if equation_items:
         blocks.append({
             "type": "equations",
-            "items": [
-                {
-                    "equation_id": e.get("equation_id") or e.get("id"),
-                    "label": e.get("label"),
-                    "latex": e.get("latex") or e.get("latex_canonical") or e.get("normalized_latex"),
-                    "plain_text": e.get("plain_text") or e.get("reading"),
-                }
-                for e in equations
-            ],
+            "items": equation_items,
         })
     if assessment_prompts:
         blocks.append({"type": "assessment_prompts", "items": assessment_prompts})

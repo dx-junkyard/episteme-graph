@@ -3094,6 +3094,15 @@
       item.addEventListener("click", function () {
         el.querySelectorAll(".ls-course-topic").forEach(function (t) { t.classList.remove("active"); });
         item.classList.add("active");
+        var ci = parseInt(item.getAttribute("data-chapter") || "0", 10);
+        var ti = parseInt(item.getAttribute("data-topic") || "0", 10);
+        var chapter = (lsState.courseStructure && lsState.courseStructure.chapters || [])[ci];
+        var topic = chapter && (chapter.topics || [])[ti];
+        if (topic) {
+          lsState.selectedScope = { type: "course_topic", chapterIndex: ci, topicIndex: ti, topicId: topic.id || "" };
+          lsState.selectedChunkId = null;
+          lsRenderWorkspace();
+        }
       });
     });
   }
@@ -3485,6 +3494,18 @@
     return null;
   }
 
+  function lsGetSelectedCourseTopic() {
+    if (!lsState.selectedScope || lsState.selectedScope.type !== "course_topic") return null;
+    var chapter = (lsState.courseStructure && lsState.courseStructure.chapters || [])[lsState.selectedScope.chapterIndex];
+    if (!chapter) return null;
+    return (chapter.topics || [])[lsState.selectedScope.topicIndex] || null;
+  }
+
+  function lsScopeHasDocumentContext(scope) {
+    if (!scope) return false;
+    return scope.type === "paper" || scope.type === "section" || scope.type === "chunk";
+  }
+
   function lsEnsureWorkspace() {
     var workspace = document.getElementById("ls-workspace");
     if (document.getElementById("ls-display-text")) return workspace;
@@ -3621,11 +3642,83 @@
     lsBindTheoryCardActions(container);
   }
 
+  function lsRenderSelectedCourseTopic(topic) {
+    lsEnsureWorkspace();
+    var metaEl = document.getElementById("ls-chunk-meta");
+    if (metaEl) {
+      var confidence = topic.content_confidence && topic.content_confidence !== "none"
+        ? " / " + topic.content_confidence
+        : "";
+      metaEl.textContent = "コーストピック: " + (topic.title || "無題") + confidence;
+    }
+
+    var sourceEl = document.getElementById("ls-source-text");
+    var displayEl = document.getElementById("ls-display-text");
+    var spokenEl = document.getElementById("ls-spoken-text");
+    var leftTitle = document.getElementById("ls-left-title");
+    var rightTitle = document.getElementById("ls-right-title");
+    if (leftTitle) leftTitle.textContent = "根拠";
+    if (rightTitle) rightTitle.textContent = "コース本文";
+    if (sourceEl) {
+      var sourceText = "";
+      if (topic.summary) sourceText += "概要\n" + topic.summary + "\n\n";
+      if (topic.source_excerpt) sourceText += "参照抜粋\n" + topic.source_excerpt + "\n\n";
+      if (topic.linked_component_ids && topic.linked_component_ids.length) {
+        sourceText += "論理要素\n" + topic.linked_component_ids.join(", ");
+      }
+      sourceEl.innerHTML = lsRenderTextWithFormulas(
+        sourceText || "このトピックに対応する根拠情報はまだありません。",
+        lsTopicFormulas(topic)
+      );
+      sourceEl.hidden = false;
+    }
+    if (displayEl) {
+      var bodyText = topic.content || topic.summary || "";
+      if (topic.content_source === "source_excerpt" && topic.content_confidence === "none") {
+        bodyText = "このトピックのコース本文はまだAgent成果物と十分に対応付けられていません。左の根拠抜粋を確認し、必要に応じてCourseMappingAgentまたはコース本文生成を再実行してください。";
+      }
+      displayEl.value = bodyText;
+      displayEl.disabled = true;
+      displayEl.hidden = true;
+    }
+    if (spokenEl) {
+      spokenEl.value = displayEl ? displayEl.value : (topic.content || topic.summary || "");
+      spokenEl.disabled = true;
+      spokenEl.hidden = true;
+    }
+
+    document.getElementById("ls-display-tabs").hidden = false;
+    document.getElementById("ls-evidence-tabs").hidden = true;
+    document.getElementById("ls-left-pane").hidden = false;
+    document.getElementById("ls-right-pane").hidden = false;
+    var splitEl = document.querySelector("#ls-workspace .ls-split");
+    if (splitEl) splitEl.hidden = false;
+    document.getElementById("ls-structure-panel").hidden = true;
+    document.getElementById("ls-theory-panel").hidden = true;
+    document.getElementById("ls-claims-panel").hidden = true;
+    document.getElementById("ls-graph-panel").hidden = true;
+    document.getElementById("ls-sync-row").hidden = true;
+    document.getElementById("ls-pdf-view").hidden = true;
+    document.getElementById("ls-source-text").hidden = false;
+    document.getElementById("ls-display-preview").hidden = false;
+
+    lsRenderDisplayPreview();
+  }
+
   function lsRenderWorkspace() {
     var chunk = lsGetSelectedChunk();
     var metaEl = document.getElementById("ls-chunk-meta");
     lsUpdateWorkTabActive();
-    if (lsState.selectedScope && lsState.selectedScope.type === "component") {
+    var currentView = lsState.view || "edit";
+    if (lsState.selectedScope && lsState.selectedScope.type === "course_topic" && !lsIsTheoryGraphView(currentView)) {
+      var selectedTopic = lsGetSelectedCourseTopic();
+      if (selectedTopic) {
+        lsRenderSelectedCourseTopic(selectedTopic);
+        lsUpdateAssistantContext();
+        return;
+      }
+    }
+    if (lsState.selectedScope && lsState.selectedScope.type === "component" && currentView === "theory") {
       var selectedComponent = lsGetSelectedCourseComponent();
       if (selectedComponent) {
         lsRenderSelectedCourseComponent(selectedComponent);
@@ -3636,7 +3729,7 @@
     if (!chunk && lsState.view === "graph" && lsState.chunks && lsState.chunks.length) {
       chunk = lsState.chunks[0];
       lsState.selectedChunkId = chunk.chunk_id;
-      if (!lsState.selectedScope) {
+      if (!lsScopeHasDocumentContext(lsState.selectedScope)) {
         lsState.selectedScope = {
           type: "paper",
           documentId: chunk.document_id || chunk.material_id || "",
@@ -4860,12 +4953,14 @@
 
   function lsRenderDisplayPreview() {
     var chunk = lsGetSelectedChunk();
+    var selectedTopic = lsGetSelectedCourseTopic();
     var preview = document.getElementById("ls-display-preview");
-    if (!preview || !chunk) return;
+    if (!preview || (!chunk && !selectedTopic)) return;
     var text = lsNormalizePreviewLineBreaks(document.getElementById("ls-display-text").value || "");
+    var formulasSource = chunk ? (chunk.formulas || []) : lsTopicFormulas(selectedTopic);
     var formulaById = {};
     var usedFormulas = new Set();
-    (chunk.formulas || []).forEach(function (f, idx) {
+    formulasSource.forEach(function (f, idx) {
       var fallbackId = "FORMULA_" + idx;
       var legacyMathId = "LS_MATH_" + idx;
       var id = f.id || fallbackId;
@@ -4930,8 +5025,71 @@
       var block = mathBlocks[parseInt(idx, 10)];
       return lsRenderKatex(block.expr, block.display);
     });
-    var extractedHtml = lsRenderUnplacedExtractedFormulas(chunk.formulas || [], usedFormulas);
+    var extractedHtml = lsRenderUnplacedExtractedFormulas(formulasSource, usedFormulas);
     if (extractedHtml) preview.insertAdjacentHTML("beforeend", extractedHtml);
+  }
+
+  function lsRenderTextWithFormulas(text, formulas) {
+    var formulaById = {};
+    (formulas || []).forEach(function (f, idx) {
+      var fallbackId = "FORMULA_" + idx;
+      var id = f.id || fallbackId;
+      var bareId = String(id).replace(/^\[\[/, "").replace(/\]\]$/, "");
+      formulaById[id] = f;
+      formulaById[bareId] = f;
+      formulaById[("[[" + bareId + "]]")] = f;
+      formulaById[fallbackId] = f;
+      formulaById[("[[" + fallbackId + "]]")] = f;
+    });
+    var mathBlocks = [];
+    function preserveMath(expr, display) {
+      var idx = mathBlocks.length;
+      mathBlocks.push({ expr: expr, display: display });
+      return "@@EG_TOPIC_MATH_" + idx + "@@";
+    }
+    var preserved = lsNormalizePreviewLineBreaks(text || "");
+    preserved = preserved.replace(/\[\[([^\[\]]+)\]\]/g, function (m, id) {
+      var formula = formulaById[m] || formulaById[id];
+      if (!formula) return m;
+      return preserveMath(formula.latex || formula.id || m, formula.is_display === true);
+    });
+    preserved = preserved.replace(/\$\$([\s\S]+?)\$\$/g, function (_m, expr) {
+      return preserveMath(expr, true);
+    });
+    preserved = preserved.replace(/\\\[([\s\S]+?)\\\]/g, function (_m, expr) {
+      return preserveMath(expr, true);
+    });
+    preserved = preserved.replace(/\\\(([\s\S]+?)\\\)/g, function (_m, expr) {
+      return preserveMath(expr, false);
+    });
+    preserved = preserved.replace(/\$([^\$\n]+?)\$/g, function (_m, expr) {
+      return preserveMath(expr, false);
+    });
+    var html = escHtml(preserved).split("\n\n").map(function (p) {
+      return "<p>" + p.replace(/\n/g, "<br>") + "</p>";
+    }).join("");
+    return html.replace(/@@EG_TOPIC_MATH_(\d+)@@/g, function (_m, idx) {
+      var block = mathBlocks[parseInt(idx, 10)];
+      return block ? lsRenderKatex(block.expr, block.display) : "";
+    });
+  }
+
+  function lsTopicFormulas(topic) {
+    var formulas = [];
+    ((topic && topic.content_blocks) || []).forEach(function (block) {
+      if (!block || block.type !== "equations") return;
+      (block.items || []).forEach(function (item) {
+        if (!item || !item.latex) return;
+        formulas.push({
+          id: item.equation_id || ("TOPIC_FORMULA_" + formulas.length),
+          label: item.label || "",
+          latex: item.latex,
+          plain_text: item.plain_text || "",
+          is_display: true,
+        });
+      });
+    });
+    return formulas;
   }
 
   function lsNormalizePreviewLineBreaks(text) {

@@ -1940,12 +1940,20 @@ def get_lecture_studio_course_structure(
                 if name:
                     prereqs.append(name)
             topics_out.append({
+                "id": t.get("id", f"topic_{ci}_{ti}"),
                 "topic_index": ti,
                 "title": t.get("title", ""),
                 "prerequisites": prereqs,
+                "summary": t.get("summary", ""),
+                "content": t.get("content", ""),
+                "content_blocks": t.get("content_blocks", []),
+                "content_source": t.get("content_source", ""),
+                "content_confidence": t.get("content_confidence", ""),
                 "linked_component_ids": t.get("linked_component_ids", []),
-                "linked_chunk_ids": t.get("linked_chunk_ids", []),
-                "status": "draft",
+                "linked_equation_ids": t.get("linked_equation_ids", []),
+                "source_evidence_ids": t.get("source_evidence_ids", []),
+                "linked_chunk_ids": t.get("linked_chunk_ids", []) or t.get("material_chunk_ids", []),
+                "status": "generated" if (t.get("content") or t.get("summary")) else "draft",
             })
         chapters_out.append({
             "chapter_index": ci,
