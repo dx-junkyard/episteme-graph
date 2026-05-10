@@ -17,6 +17,8 @@ from schemas import (
     LearningChatHistoryResponse,
     LearningChatRequest,
     LearningChatResponse,
+    LearningCheckQuestionRequest,
+    LearningCheckQuestionResponse,
     LearningCourseDetail,
     LearningCourseLayeredResponse,
     LearningCourseOut,
@@ -747,6 +749,15 @@ def _generate_graph_element_explanation(
     return LearningChatResponse(answer=answer, course_update=None)
 
 
+def _topic_student_material(topic: dict) -> str:
+    material = topic.get("student_material")
+    if isinstance(material, dict):
+        text = str(material.get("source_text") or "").strip()
+        if text:
+            return text
+    return str(topic.get("content") or topic.get("summary") or "").strip()
+
+
 @router.get(
     "/courses/{course_id}/topics/{topic_id}/material",
     response_model=TopicMaterialResponse,
@@ -776,7 +787,7 @@ def get_topic_material(
     if topic_index is None:
         raise HTTPException(status_code=404, detail="Topic not found")
 
-    topic_text = (topic or {}).get("content") or (topic or {}).get("summary") or ""
+    topic_text = _topic_student_material(topic or {})
     if topic_text.strip():
         formulas: list[dict] = []
         for block in (topic or {}).get("content_blocks") or []:
@@ -824,6 +835,100 @@ def get_topic_material(
         chunks = []
 
     return TopicMaterialResponse(topic_id=topic_id, chunks=chunks)
+
+
+@router.post(
+    "/courses/{course_id}/topics/{topic_id}/check",
+    response_model=LearningCheckQuestionResponse,
+)
+def check_topic_understanding(
+    course_id: str,
+    topic_id: str,
+    body: LearningCheckQuestionRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> LearningCheckQuestionResponse:
+    """次セクションへ進む前の確認問題を採点し、未理解ならつまづきとして記録する。"""
+    course_data = get_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    topic = next((t for t in course_data.get("topics", []) if t.get("id") == topic_id), None)
+    if not topic:
+        raise HTTPException(status_code=404, detail="Topic not found")
+
+    question = (body.question or "").strip()
+    if not question:
+        questions = topic.get("check_questions") or topic.get("assessment_prompts") or []
+        question = str(questions[0]) if questions else "このセクションの要点を説明してください。"
+
+    material_text = _topic_student_material(topic)
+    params = get_llm_params("fast")
+    prompt = (
+        "あなたは確認問題を採点する大学教員です。JSONのみを返してください。\n"
+        "形式: {\"passed\": true/false, \"feedback\": \"短い講評\", \"model_answer\": \"模範解答\"}\n\n"
+        f"コース: {course_data.get('title', course_id)}\n"
+        f"セクション: {topic.get('title', topic_id)}\n"
+        f"教材:\n{material_text[:5000]}\n\n"
+        f"確認問題: {question}\n"
+        f"受講者の回答: {body.answer}\n\n"
+        "判定基準: 主要概念を自分の言葉で概ね説明できていれば passed=true。"
+        "核心が抜けている、逆に理解している、空欄に近い場合は false。"
+    )
+
+    parsed: dict = {}
+    try:
+        raw = generate_text(
+            messages=[{"role": "user", "content": prompt}],
+            model=params["model"],
+            reasoning_effort=params["reasoning_effort"],
+            temperature=0.1,
+        )
+        import json
+        import re
+        match = re.search(r"\{[\s\S]*\}", raw or "")
+        parsed = json.loads(match.group(0) if match else raw)
+    except Exception:
+        logger.warning("Check question grading failed; using conservative fallback", exc_info=True)
+        passed = len((body.answer or "").strip()) >= 40
+        parsed = {
+            "passed": passed,
+            "feedback": "回答の具体性をもとに暫定判定しました。",
+            "model_answer": material_text[:800],
+        }
+
+    passed = bool(parsed.get("passed"))
+    feedback = str(parsed.get("feedback") or "")
+    model_answer = str(parsed.get("model_answer") or material_text[:800])
+
+    if not passed:
+        instructor_id = None
+        session = _pg_session()
+        try:
+            row = session.execute(
+                sa_text("SELECT user_id FROM learning_courses WHERE id = :course_id LIMIT 1"),
+                {"course_id": course_id},
+            ).fetchone()
+            instructor_id = str(row[0]) if row and row[0] else None
+        finally:
+            session.close()
+        record_student_stumble_event(
+            instructor_id=instructor_id,
+            student_id=current_user["id"],
+            course_id=course_id,
+            material_id=None,
+            chunk_id=None,
+            element_id=topic_id,
+            element_label=topic.get("title", topic_id),
+            event_type="misconception",
+            user_message=f"確認問題: {question}\n回答: {body.answer}",
+            generated_explanation=model_answer[:4000],
+        )
+
+    return LearningCheckQuestionResponse(
+        passed=passed,
+        feedback=feedback,
+        model_answer=model_answer,
+    )
 
 
 @router.get(
@@ -975,6 +1080,10 @@ def learning_chat(
     # 4. RAG: システム全域のチャンクを検索し、コンテキストを構築
     chunk_results = search_chunks_with_metadata(body.message, top_k=8)
     cited_chunks = []
+    if topic_info:
+        topic_material = _topic_student_material(topic_info)
+        if topic_material:
+            cited_chunks.append(f"[現在表示中の教材]\n{topic_material[:5000]}")
     for r in chunk_results:
         if r["score"] >= 0.30:
             cited_chunks.append(f"[出典: 『{r['source_title']}』]\n{r['text']}")
