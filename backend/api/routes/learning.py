@@ -47,6 +47,7 @@ from services import (
     user_can_view_course,
 )
 from core.llm import generate_text, get_llm_params
+from core.learning_support_agent import LearningSupportAgent
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
 from core.course_content_builder import build_course_content_background
@@ -568,7 +569,9 @@ def _generate_learning_advice_response(
         "1. 【歓迎と目標】このトピックで学ぶことの全体像と、最終的な学習目標を簡潔に説明する。\n"
         "2. 【構成要素】習得すべき主要な概念をリストアップする。\n"
         "3. 【前提知識の確認】このトピックを学ぶために必要な前提知識を提示する。\n"
-        "4. 【ネクストアクション】「まずは前提知識の復習から始めますか？ それとも最初の概念の説明に進みますか？」と、学生に次の行動を選ばせる質問で締めくくる。\n\n"
+        "4. 【ネクストアクション】本文の自然文だけで選択肢を書かず、必ず次の形式でクリック用候補を2つ出す:\n"
+        "   [ACTION_BUTTON: 前提知識を復習する]\n"
+        "   [ACTION_BUTTON: 最初の概念の説明に進む]\n\n"
         "※注意: ここでは具体的な解説（数式展開など）はまだ行わないこと。"
     )
 
@@ -585,7 +588,8 @@ def _generate_learning_advice_response(
             f"これから「{topic_title}」の学習を始めます。\n\n"
             + (f"**習得すべき主要概念:** {', '.join(concepts)}\n\n" if concepts else "")
             + (f"**必要な前提知識:** {', '.join(prerequisites)}\n\n" if prerequisites else "")
-            + "まずは前提知識の復習から始めますか？ それとも最初の概念の説明に進みますか？"
+            + "[ACTION_BUTTON: 前提知識を復習する]\n"
+            + "[ACTION_BUTTON: 最初の概念の説明に進む]"
         )
 
 
@@ -1025,10 +1029,20 @@ def learning_chat(
     # domain が未設定の場合は course_title にフォールバック
     domain = course_data.get("domain") or course_title
     response_persona = course_persona_settings(course_data)["response_persona"]
+    support_agent = LearningSupportAgent(course_id, course_data)
+    support_origin = support_agent.origin_for_topic(topic_id, topic_info)
+
+    if body.support_action == "return_to_learning_path":
+        result = support_agent.return_to_path_result((body.support_context or {}).get("origin"))
+        persist_chat_history(
+            current_user["id"], course_id, topic_id,
+            body.history, body.message, result.answer,
+        )
+        return LearningChatResponse(**result.model_dump(), course_update=None)
 
     # UIサジェスト由来の明示アクションは自然文の意図分類より優先する。
     if body.action == "EXPLAIN_GRAPH_ELEMENT":
-        return _generate_graph_element_explanation(
+        graph_response = _generate_graph_element_explanation(
             user_id=current_user["id"],
             course_id=course_id,
             topic_id=topic_id,
@@ -1037,6 +1051,14 @@ def learning_chat(
             course_data=course_data,
             body=body,
         )
+        if body.support_context:
+            result = support_agent.with_learning_actions(
+                answer=graph_response.answer,
+                mode="detail_explanation",
+                origin=support_origin,
+            )
+            return LearningChatResponse(**result.model_dump(), course_update=graph_response.course_update)
+        return graph_response
 
     # 2. 意図分類（Intent Routing）
     intent = _classify_intent(body.message, course_title)
@@ -1060,6 +1082,17 @@ def learning_chat(
             course_title, topic_title, body.message,
             topic_info=topic_info, course_data=course_data,
         )
+        if body.support_action == "check_prerequisites" or LearningSupportAgent.is_prerequisite_request(body.message):
+            result = support_agent.with_learning_actions(
+                answer=advice_answer,
+                mode="prerequisite_review",
+                origin=support_origin,
+            )
+            persist_chat_history(
+                current_user["id"], course_id, topic_id,
+                body.history, body.message, result.answer,
+            )
+            return LearningChatResponse(**result.model_dump(), course_update=None)
         persist_chat_history(
             current_user["id"], course_id, topic_id,
             body.history, body.message, advice_answer,
@@ -1071,11 +1104,16 @@ def learning_chat(
         current_user["id"], course_id, course_data, topic_title, body.message
     )
     if prerequisite_intervention:
+        result = support_agent.with_learning_actions(
+            answer=prerequisite_intervention,
+            mode="prerequisite_review",
+            origin=support_origin,
+        )
         persist_chat_history(
             current_user["id"], course_id, topic_id,
-            body.history, body.message, prerequisite_intervention,
+            body.history, body.message, result.answer,
         )
-        return LearningChatResponse(answer=prerequisite_intervention, course_update=None)
+        return LearningChatResponse(**result.model_dump(), course_update=None)
 
     # 4. RAG: システム全域のチャンクを検索し、コンテキストを構築
     chunk_results = search_chunks_with_metadata(body.message, top_k=8)
@@ -1128,4 +1166,11 @@ def learning_chat(
         current_user["id"], course_id, topic_id,
         body.history, body.message, answer,
     )
+    if body.support_context:
+        result = support_agent.with_learning_actions(
+            answer=answer,
+            mode="detail_explanation",
+            origin=support_origin,
+        )
+        return LearningChatResponse(**result.model_dump(), course_update=course_update)
     return LearningChatResponse(answer=answer, course_update=course_update)

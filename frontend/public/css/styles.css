@@ -327,6 +327,41 @@ body {
   border-color: var(--color-border-info);
 }
 
+.learning-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.learning-action-btn:first-child {
+  border-color: var(--color-text-success);
+  color: var(--color-text-success);
+  background: var(--color-background-primary);
+}
+
+.learning-support-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: #eefbf5;
+  color: var(--color-text-success);
+  font-size: 9px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+
+.learning-support-panel .cc {
+  border-color: var(--color-border-success, #8ed8be);
+  background: #f7fffb;
+}
+
+.learning-support-inline-actions {
+  margin-top: 8px;
+}
+
 /* Initial suggestion buttons */
 .initial-suggestions {
   display: flex;
