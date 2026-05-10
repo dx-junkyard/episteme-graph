@@ -1320,6 +1320,16 @@ body {
   font-weight: 600;
 }
 
+.ls-menu-stage-group {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--color-border-tertiary);
+}
+
+.ls-menu-stage-heading {
+  color: var(--color-text-secondary);
+}
+
 .ls-menu[hidden] {
   display: none;
 }

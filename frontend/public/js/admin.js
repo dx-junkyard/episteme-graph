@@ -220,24 +220,52 @@
       });
   }
 
-  var materialPipelineStages = [
-    ["document_structure", "DocumentStructureAgent"],
-    ["paper_skeleton", "PaperSkeletonAgent"],
-    ["rhetorical_role", "RhetoricalRoleAgent"],
-    ["claim_qualification", "ClaimQualificationAgent"],
-    ["equation_semantics", "EquationSemanticsAgent"],
-    ["evidence_registry", "EvidenceRegistryBuilder"],
-    ["claim_object_builder", "ClaimObjectBuilder"],
-    ["derivation_chain", "DerivationChainAgent"],
-    ["figure_table_semantics", "FigureTableSemanticsAgent"],
-    ["thesis_reconstruction", "ThesisReconstructionAgent"],
-    ["dsl_linking", "DSLLinkingAgent"],
-    ["component_assembly", "ComponentAssemblyAgent"],
-    ["component_graph", "ComponentGraphAgent"],
-    ["course_mapping", "CourseMappingAgent"],
-    ["blueprint", "BlueprintAgent"],
-    ["export_validation", "ExportValidationGate"],
+  var materialPipelineStageGroups = [
+    {
+      label: "文書構造を読む",
+      stages: [
+        ["document_structure", "DocumentStructureAgent"],
+        ["paper_skeleton", "PaperSkeletonAgent"],
+      ],
+    },
+    {
+      label: "論述・主張を抽出する",
+      stages: [
+        ["rhetorical_role", "RhetoricalRoleAgent"],
+        ["claim_qualification", "ClaimQualificationAgent"],
+        ["equation_semantics", "EquationSemanticsAgent"],
+      ],
+    },
+    {
+      label: "根拠・派生関係を整理する",
+      stages: [
+        ["evidence_registry", "EvidenceRegistryBuilder"],
+        ["claim_object_builder", "ClaimObjectBuilder"],
+        ["derivation_chain", "DerivationChainAgent"],
+        ["figure_table_semantics", "FigureTableSemanticsAgent"],
+      ],
+    },
+    {
+      label: "理論コンポーネントを組み立てる",
+      stages: [
+        ["thesis_reconstruction", "ThesisReconstructionAgent"],
+        ["dsl_linking", "DSLLinkingAgent"],
+        ["component_assembly", "ComponentAssemblyAgent"],
+        ["component_graph", "ComponentGraphAgent"],
+      ],
+    },
+    {
+      label: "コース化・出力を準備する",
+      stages: [
+        ["course_mapping", "CourseMappingAgent"],
+        ["blueprint", "BlueprintAgent"],
+        ["export_validation", "ExportValidationGate"],
+      ],
+    },
   ];
+  var materialPipelineStages = materialPipelineStageGroups.reduce(function (stages, group) {
+    return stages.concat(group.stages);
+  }, []);
 
   function renderMaterials(materials) {
     var tbody = document.getElementById("materials-tbody");
@@ -395,10 +423,15 @@
         '</button>' +
         '<div class="ls-menu material-pipeline-panel" hidden>' +
           '<button class="ls-menu-item material-pipeline-item" type="button" data-stage=""><span class="ls-step-mark"></span><span>パイプライン全実行</span></button>' +
-          '<div class="ls-menu-group-label">個々のAgentを単独実行</div>';
-    materialPipelineStages.forEach(function (entry) {
-      html += '<button class="ls-menu-item ls-menu-item-indent material-pipeline-item" type="button" data-stage="' + escHtml(entry[0]) + '">' +
-        '<span class="ls-step-mark"></span><span>' + escHtml(entry[1]) + '</span></button>';
+          '<div class="ls-menu-group-label">個別ステージを実行</div>';
+    materialPipelineStageGroups.forEach(function (group) {
+      html += '<div class="ls-menu-stage-group">' +
+        '<div class="ls-menu-group-label ls-menu-stage-heading">' + escHtml(group.label) + '</div>';
+      group.stages.forEach(function (entry) {
+        html += '<button class="ls-menu-item ls-menu-item-indent material-pipeline-item" type="button" data-stage="' + escHtml(entry[0]) + '">' +
+          '<span class="ls-step-mark"></span><span>' + escHtml(entry[1]) + '</span></button>';
+      });
+      html += '</div>';
     });
     html +=
           '<div class="ls-menu-divider"></div>' +
