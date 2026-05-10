@@ -98,7 +98,7 @@ class LearningTopic(BaseModel):
     content_blocks: list[dict] = Field(default_factory=list)
     learning_objectives: list[str] = Field(default_factory=list)
     prerequisite_concepts: list[str] = Field(default_factory=list)
-    blackbox_policy: dict = Field(default_factory=dict)
+    blackbox_policy: dict | None = Field(default_factory=dict)
     assessment_prompts: list[str] = Field(default_factory=list)
     expected_misconceptions: list[str] = Field(default_factory=list)
     linked_component_ids: list[str] = Field(default_factory=list)
@@ -107,6 +107,11 @@ class LearningTopic(BaseModel):
     teaching_takeaways: list[str] = Field(default_factory=list)
     material_chunk_ids: list[str] = Field(default_factory=list)
     source_excerpt: str = ""
+    key_concepts: list[str] | None = Field(default_factory=list)
+    student_material: dict | None = Field(default_factory=dict)
+    spoken_script: str | None = ""
+    cautions: list[str] | None = Field(default_factory=list)
+    check_questions: list[str] | None = Field(default_factory=list)
 
 
 class GraphMention(BaseModel):
@@ -265,6 +270,18 @@ class LearningChatResponse(BaseModel):
 
 class LearningChatHistoryResponse(BaseModel):
     history: list[dict]
+
+
+class LearningCheckQuestionRequest(BaseModel):
+    """次セクションへ進む前の確認問題への回答。"""
+    answer: str
+    question: str = ""
+
+
+class LearningCheckQuestionResponse(BaseModel):
+    passed: bool
+    feedback: str
+    model_answer: str = ""
 
 
 # ---------------------------------------------------------------------------

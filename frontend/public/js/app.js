@@ -17,6 +17,7 @@
     chatMessages: [], // {role, content}
     topicMaterial: [], // {id, text, chunk_index, chapter, section}
     sending: false,
+    checkingUnderstanding: false,
   };
 
   function parseJwtPayload(token) {
@@ -200,7 +201,8 @@
       return;
     }
     const course = state.course;
-    let html = '<div class="sb-hd">学習パス</div>';
+    let html = '<div class="sb-hd">コースツリー</div>';
+    html += '<div class="course-tree-title">' + escHtml(course.title || "コース") + '</div>';
 
     (course.chapters || []).forEach(function (ch, ci) {
       const chNum = ci + 1;
@@ -270,6 +272,11 @@
     return topic ? topic.title : null;
   }
 
+  function getCurrentTopic() {
+    if (!state.course || !state.currentTopicId) return null;
+    return (state.course.topics || []).find(function (t) { return t.id === state.currentTopicId; }) || null;
+  }
+
   function _renderInitialSuggestions() {
     var courseTitle = state.course ? escHtml(state.course.title || "") : "";
     var topicTitle = _getFirstTopicTitle();
@@ -300,7 +307,7 @@
     // 教材チャンクをチャット上部に静的表示（RAG検索不使用、数式KaTeXレンダリング）
     if (state.topicMaterial && state.topicMaterial.length > 0) {
       html += '<div class="material-block">';
-      html += '<div class="material-block-header">📖 教材</div>';
+      html += '<div class="material-block-header">教材</div>';
       state.topicMaterial.forEach(function (chunk) {
         html += '<div class="material-chunk">';
         if (chunk.chapter || chunk.section) {
@@ -648,7 +655,8 @@
     var next = getNextTopic();
     if (next) {
       btn.style.display = "";
-      btn.title = "次のトピック: " + (next.title || "");
+      btn.textContent = "確認して次へ";
+      btn.title = "確認問題に回答して次のセクションへ進む: " + (next.title || "");
     } else {
       btn.style.display = "none";
     }
@@ -687,6 +695,117 @@
       state.topicMaterial = material;
       state.chatMessages = history;
       renderChat();
+    }
+  }
+
+  function getCheckQuestionForCurrentTopic() {
+    var topic = getCurrentTopic();
+    if (!topic) return "このセクションの要点を自分の言葉で説明してください。";
+    var questions = topic.check_questions || topic.assessment_prompts || [];
+    if (questions.length > 0) return questions[0];
+    if (topic.learning_objectives && topic.learning_objectives.length > 0) {
+      return "次の学習目標を説明してください: " + topic.learning_objectives[0];
+    }
+    return "このセクションの要点を自分の言葉で説明してください。";
+  }
+
+  function openCheckModal() {
+    if (!state.currentTopicId || state.checkingUnderstanding) return;
+    var next = getNextTopic();
+    if (!next) return;
+    var existing = document.getElementById("check-overlay");
+    if (existing) existing.remove();
+
+    var topic = getCurrentTopic();
+    var question = getCheckQuestionForCurrentTopic();
+    var overlay = document.createElement("div");
+    overlay.id = "check-overlay";
+    overlay.className = "check-overlay";
+    overlay.innerHTML =
+      '<div class="check-box">' +
+        '<div class="check-title">確認問題</div>' +
+        '<div class="check-section">' + escHtml(topic ? topic.title : "") + '</div>' +
+        '<div class="check-question">' + escHtml(question) + '</div>' +
+        '<textarea id="check-answer" rows="5" placeholder="回答を入力してください"></textarea>' +
+        '<div id="check-feedback" class="check-feedback"></div>' +
+        '<div class="check-actions">' +
+          '<button id="check-cancel" class="check-secondary">戻る</button>' +
+          '<button id="check-submit" class="check-primary">回答する</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    document.getElementById("check-cancel").addEventListener("click", function () {
+      overlay.remove();
+    });
+    document.getElementById("check-submit").addEventListener("click", submitCheckAnswer);
+    var answer = document.getElementById("check-answer");
+    if (answer) answer.focus();
+  }
+
+  async function submitCheckAnswer() {
+    if (state.checkingUnderstanding) return;
+    var answerEl = document.getElementById("check-answer");
+    var feedbackEl = document.getElementById("check-feedback");
+    var submitBtn = document.getElementById("check-submit");
+    if (submitBtn && submitBtn.getAttribute("data-advance") === "true") {
+      var directNext = getNextTopic();
+      var directOverlay = document.getElementById("check-overlay");
+      if (directOverlay) directOverlay.remove();
+      if (directNext) selectTopic(directNext.id);
+      return;
+    }
+    var answer = answerEl ? answerEl.value.trim() : "";
+    var question = getCheckQuestionForCurrentTopic();
+    if (!answer) {
+      if (feedbackEl) {
+        feedbackEl.textContent = "回答を入力してください。";
+        feedbackEl.className = "check-feedback fail";
+      }
+      return;
+    }
+
+    state.checkingUnderstanding = true;
+    if (submitBtn) submitBtn.disabled = true;
+    if (feedbackEl) {
+      feedbackEl.textContent = "確認しています...";
+      feedbackEl.className = "check-feedback";
+    }
+    try {
+      var res = await apiFetch(
+        "/learning/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/check",
+        {
+          method: "POST",
+          body: JSON.stringify({ question: question, answer: answer }),
+        }
+      );
+      if (!res.ok) throw new Error("check failed");
+      var data = await res.json();
+      if (data.passed) {
+        var next = getNextTopic();
+        var overlay = document.getElementById("check-overlay");
+        if (overlay) overlay.remove();
+        if (next) selectTopic(next.id);
+      } else {
+        if (feedbackEl) {
+          feedbackEl.innerHTML = '<strong>もう一度確認しましょう。</strong><br>' +
+            escHtml(data.feedback || "") +
+            (data.model_answer ? '<div class="check-model-answer"><span>解答例</span>' + escHtml(data.model_answer) + '</div>' : "");
+          feedbackEl.className = "check-feedback fail";
+        }
+        if (submitBtn) {
+          submitBtn.textContent = "理解したので次へ";
+          submitBtn.disabled = false;
+          submitBtn.setAttribute("data-advance", "true");
+        }
+      }
+    } catch (err) {
+      if (feedbackEl) {
+        feedbackEl.textContent = "確認に失敗しました。もう一度お試しください。";
+        feedbackEl.className = "check-feedback fail";
+      }
+      if (submitBtn) submitBtn.disabled = false;
+    } finally {
+      state.checkingUnderstanding = false;
     }
   }
 
@@ -964,7 +1083,12 @@
 
     renderSidebar();
     if (state.currentTopicId) {
-      state.chatMessages = await loadChatHistory(state.courseId, state.currentTopicId);
+      const [material, history] = await Promise.all([
+        fetchTopicMaterial(state.courseId, state.currentTopicId),
+        loadChatHistory(state.courseId, state.currentTopicId),
+      ]);
+      state.topicMaterial = material;
+      state.chatMessages = history;
     }
     renderChat();
     renderRightPanel();
@@ -1265,10 +1389,7 @@
     if (chatSendBtn) chatSendBtn.addEventListener("click", sendInterruptMessage);
     if (chatMicBtn) chatMicBtn.addEventListener("click", toggleVoiceInput);
     if (resumeBtn) resumeBtn.addEventListener("click", resumeLecture);
-    if (nextTopicBtn) nextTopicBtn.addEventListener("click", function () {
-      var next = getNextTopic();
-      if (next) selectTopic(next.id);
-    });
+    if (nextTopicBtn) nextTopicBtn.addEventListener("click", openCheckModal);
 
     if (chatInput) {
       chatInput.addEventListener("keydown", function (e) {

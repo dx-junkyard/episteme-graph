@@ -101,6 +101,14 @@ body {
   margin: 12px 0 6px;
 }
 
+.course-tree-title {
+  padding: 0 14px 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  line-height: 1.35;
+}
+
 .ni {
   display: flex;
   align-items: center;
@@ -862,6 +870,117 @@ body {
   color: var(--color-text-primary, #e8eaf0);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.check-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.32);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.check-box {
+  width: min(560px, 100%);
+  background: var(--color-background-primary);
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 8px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.22);
+  padding: 18px;
+}
+
+.check-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.check-section {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.check-question {
+  margin-top: 14px;
+  padding: 12px;
+  background: var(--color-background-secondary);
+  border: 1px solid var(--color-border-tertiary);
+  border-radius: 8px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.check-box textarea {
+  width: 100%;
+  margin-top: 12px;
+  resize: vertical;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 8px;
+  padding: 10px;
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--color-text-primary);
+  background: var(--color-background-primary);
+}
+
+.check-feedback {
+  min-height: 18px;
+  margin-top: 10px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--color-text-secondary);
+}
+
+.check-feedback.fail {
+  color: var(--color-text-danger);
+}
+
+.check-model-answer {
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--color-background-secondary);
+  color: var(--color-text-primary);
+  white-space: pre-wrap;
+}
+
+.check-model-answer span {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.check-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.check-secondary,
+.check-primary {
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.check-secondary {
+  border: 1px solid var(--color-border-secondary);
+  background: transparent;
+  color: var(--color-text-secondary);
+}
+
+.check-primary {
+  border: 1px solid var(--color-text-info);
+  background: var(--color-text-info);
+  color: #fff;
 }
 
 .graph-suggestions {
