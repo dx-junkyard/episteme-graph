@@ -127,6 +127,13 @@ def _chunk_section_blocks(
         if not text:
             return None
         text, formulas = _replace_inline_math_notation(text, pending_formulas)
+        extraction_source = _extraction_source_from_blocks(pending_block_ids, blocks)
+        tei_section_id = _tei_section_id_from_blocks(pending_block_ids, blocks)
+        meta: dict = {"section_title": section_title}
+        if extraction_source:
+            meta["extraction_source"] = extraction_source
+        if tei_section_id:
+            meta["tei_section_id"] = tei_section_id
         return SourceChunk(
             chunk_index=0,  # 後で全体採番
             text=text,
@@ -134,9 +141,7 @@ def _chunk_section_blocks(
             block_ids=list(pending_block_ids),
             page_start=min(pending_pages) if pending_pages else None,
             page_end=max(pending_pages) if pending_pages else None,
-            metadata={
-                "section_title": section_title,
-            },
+            metadata=meta,
             formulas=formulas,
         )
 
@@ -163,6 +168,17 @@ def _chunk_section_blocks(
                 pending_pages.clear()
                 pending_formulas.clear()
                 pending_chars = 0
+            block_extraction_source = (getattr(block, "raw", None) or {}).get("parser_source")
+            block_tei_section_id = (getattr(block, "raw", None) or {}).get("tei_section_id")
+            long_meta: dict = {
+                "section_title": section_title,
+                "block_type": block.block_type,
+                "split_long_block": True,
+            }
+            if block_extraction_source:
+                long_meta["extraction_source"] = block_extraction_source
+            if block_tei_section_id:
+                long_meta["tei_section_id"] = block_tei_section_id
             for sub in _split_long_text(text, max_chars):
                 yield SourceChunk(
                     chunk_index=0,
@@ -171,11 +187,7 @@ def _chunk_section_blocks(
                     block_ids=[block.block_id],
                     page_start=block.page,
                     page_end=block.page,
-                    metadata={
-                        "section_title": section_title,
-                        "block_type": block.block_type,
-                        "split_long_block": True,
-                    },
+                    metadata=long_meta,
                     formulas=list(block_formulas),
                 )
             continue
@@ -428,6 +440,39 @@ def _renumber_formulas(formulas: list[dict], start: int) -> list[dict]:
             updated["latex"] = str(updated.get("latex") or "").replace(old_id, new_id)
         renumbered.append(updated)
     return renumbered
+
+
+def _block_by_id(block_ids: list[str], blocks: list) -> list:
+    """block_ids に対応する block オブジェクトを blocks から検索して返す。"""
+    id_to_block = {getattr(b, "block_id", None): b for b in blocks}
+    return [id_to_block[bid] for bid in block_ids if bid in id_to_block]
+
+
+def _extraction_source_from_blocks(block_ids: list[str], blocks: list) -> str | None:
+    """ブロック群の parser_source を代表値として返す。"""
+    matched = _block_by_id(block_ids, blocks)
+    sources = {
+        (getattr(b, "raw", None) or {}).get("parser_source")
+        for b in matched
+    } - {None}
+    if not sources:
+        return None
+    # 複数混在の場合は最初に出現したものを返す
+    for b in matched:
+        src = (getattr(b, "raw", None) or {}).get("parser_source")
+        if src:
+            return src
+    return None
+
+
+def _tei_section_id_from_blocks(block_ids: list[str], blocks: list) -> str | None:
+    """ブロック群の tei_section_id を代表値として返す。"""
+    matched = _block_by_id(block_ids, blocks)
+    for b in matched:
+        tsi = (getattr(b, "raw", None) or {}).get("tei_section_id")
+        if tsi:
+            return tsi
+    return None
 
 
 _INLINE_NOTATION_PATTERNS = (
