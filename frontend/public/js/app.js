@@ -16,9 +16,47 @@
     currentTopicId: null,
     chatMessages: [], // {role, content}
     topicMaterial: [], // {id, text, chunk_index, chapter, section}
+    learningSupport: null, // {mode, status_label, origin}
     sending: false,
     checkingUnderstanding: false,
   };
+
+  function learningSupportStorageKey() {
+    return "eg_learning_support:" + (state.courseId || "");
+  }
+
+  function saveLearningSupportContext() {
+    if (!state.courseId) return;
+    if (state.learningSupport && state.learningSupport.origin) {
+      localStorage.setItem(learningSupportStorageKey(), JSON.stringify(state.learningSupport));
+    } else {
+      localStorage.removeItem(learningSupportStorageKey());
+    }
+  }
+
+  function loadLearningSupportContext() {
+    state.learningSupport = null;
+    if (!state.courseId) return;
+    try {
+      var raw = localStorage.getItem(learningSupportStorageKey());
+      state.learningSupport = raw ? JSON.parse(raw) : null;
+    } catch (_) {
+      state.learningSupport = null;
+    }
+  }
+
+  function setLearningSupportFromResponse(data) {
+    if (data && data.origin && data.status_label) {
+      state.learningSupport = {
+        mode: data.support_mode || "detail_explanation",
+        status_label: data.status_label,
+        origin: data.origin,
+      };
+    } else if (data && data.support_mode === "return_to_learning_path") {
+      state.learningSupport = null;
+    }
+    saveLearningSupportContext();
+  }
 
   function parseJwtPayload(token) {
     try {
@@ -231,9 +269,15 @@
         const annotationBadge = misconsCount > 0
           ? '<span class="mc-badge" title="' + misconsCount + '件の誤解が記録されています">⚑ ' + misconsCount + '</span>'
           : "";
+        const support = state.learningSupport;
+        const supportOrigin = support && support.origin;
+        const supportBadge = supportOrigin && supportOrigin.topic_id === t.id
+          ? '<span class="learning-support-badge" title="' + escHtml(supportOrigin.topic_title || t.title) + ' から派生した説明です">' +
+              escHtml(support.status_label || "詳細説明中") + '</span>'
+          : "";
 
         html += '<div class="' + cls + '" data-topic="' + t.id + '" style="padding-left:36px">';
-        html += escHtml(t.title) + annotationBadge;
+        html += escHtml(t.title) + annotationBadge + supportBadge;
         html += '<span class="dot ' + dotCls + '" style="margin-left:auto"></span></div>';
       });
     });
@@ -289,7 +333,7 @@
     html += '<div class="initial-suggestions">';
     html += '<button class="suggest-btn initial-suggest-btn" data-suggest="' + topicLabel + 'の学習を開始する">';
     html += topicLabel + "の学習を開始する</button>";
-    html += '<button class="suggest-btn initial-suggest-btn" data-suggest="このコースに必要な前提知識を確認する">';
+    html += '<button class="suggest-btn initial-suggest-btn" data-suggest="このコースに必要な前提知識を確認する" data-support-action="check_prerequisites">';
     html += "このコースに必要な前提知識を確認する</button>";
     html += "</div>";
     return html;
@@ -343,7 +387,7 @@
       if (msg.role === "user") {
         html += '<div class="mg usr">' + escHtml(msg.content) + "</div>";
       } else {
-        html += '<div class="mg ai">' + renderAiContent(msg.content) + "</div>";
+        html += '<div class="mg ai">' + renderAiContent(msg.content, msg) + "</div>";
       }
     });
 
@@ -360,20 +404,36 @@
     ca.querySelectorAll(".suggest-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
         var suggest = this.getAttribute("data-suggest") || this.textContent.replace(/\s*↗$/, "");
-        sendMessage(suggest);
+        var payload = {};
+        var supportAction = this.getAttribute("data-support-action") || "";
+        if (supportAction === "return_to_learning_path") {
+          var targetTopicId = this.getAttribute("data-target-topic-id") ||
+            (state.learningSupport && state.learningSupport.origin && state.learningSupport.origin.topic_id);
+          state.learningSupport = null;
+          saveLearningSupportContext();
+          renderSidebar();
+          renderRightPanel();
+          if (targetTopicId) selectTopic(targetTopicId);
+          return;
+        }
+        if (supportAction) payload.support_action = supportAction;
+        if (state.learningSupport) payload.support_context = state.learningSupport;
+        sendMessage(suggest, payload);
       });
     });
 
     ca.querySelectorAll(".graph-suggest-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
         var label = this.getAttribute("data-element-label") || this.textContent.replace(/\s*を説明$/, "");
-        sendMessage(label + "を説明", {
+        var payload = {
           action: "EXPLAIN_GRAPH_ELEMENT",
           chunk_id: this.getAttribute("data-chunk-id") || "",
           element_id: this.getAttribute("data-element-id") || "",
           element_type: this.getAttribute("data-element-type") || "concept",
           element_label: label,
-        });
+        };
+        if (state.learningSupport) payload.support_context = state.learningSupport;
+        sendMessage(label + "を説明", payload);
       });
     });
 
@@ -393,10 +453,11 @@
     }
   }
 
-  function renderAiContent(text) {
+  function renderAiContent(text, msg) {
     // Preserve LaTeX expressions before HTML escaping
     var latexBlocks = [];
     var preserved = text;
+    var fallbackActions = [];
 
     // Preserve display math $$...$$ first
     preserved = preserved.replace(/\$\$([\s\S]+?)\$\$/g, function (m, expr) {
@@ -441,6 +502,45 @@
       return "\x00SUGGEST_" + (suggestions.length - 1) + "\x00";
     });
 
+    // Some LLM responses describe next actions in prose instead of structured
+    // next_actions. Convert that trailing section into click targets, including
+    // the return-to-path action first when a support detour is active.
+    preserved = preserved.replace(/(?:^|\n)(?:\d+[.．]\s*)?【ネクストアクション】([\s\S]*)$/m, function (_, actionText) {
+      var seen = {};
+      function addAction(type, label, message, targetTopicId) {
+        if (!label || seen[label]) return;
+        seen[label] = true;
+        fallbackActions.push({
+          type: type || "",
+          label: label,
+          message: message || label,
+          target_topic_id: targetTopicId || "",
+        });
+      }
+      if (state.learningSupport && state.learningSupport.origin) {
+        addAction(
+          "return_to_learning_path",
+          "学習パスに戻る",
+          "学習パスに戻る",
+          state.learningSupport.origin.topic_id
+        );
+      }
+      if (/前提知識/.test(actionText) && /復習|確認/.test(actionText)) {
+        addAction("continue_detail", "前提知識を復習する", "前提知識を復習したい");
+      }
+      var conceptMatch = actionText.match(/最初の概念\s*[「『]([^」』]+)[」』]/);
+      if (conceptMatch && conceptMatch[1]) {
+        addAction("continue_detail", "「" + conceptMatch[1].trim() + "」の説明に進む", conceptMatch[1].trim() + "について説明して");
+      }
+      if (fallbackActions.length === 0) {
+        actionText.split(/それとも|または|、|。|\?|？|\n/).forEach(function (part) {
+          var label = part.replace(/^[\s-]+/, "").replace(/ですか$/, "").trim();
+          if (label.length >= 4 && label.length <= 48) addAction("continue_detail", label, label);
+        });
+      }
+      return "\n\x00FALLBACK_ACTIONS\x00";
+    });
+
     // Escape HTML
     var html = escHtml(preserved);
     // Bold
@@ -475,6 +575,33 @@
       html += "</div>";
     }
 
+    if (msg && msg.next_actions && msg.next_actions.length > 0) {
+      html += '<div class="learning-actions">';
+      msg.next_actions.forEach(function (action) {
+        html += '<button class="suggest-btn learning-action-btn"'
+          + ' data-suggest="' + escHtml(action.message || action.label || "") + '"'
+          + ' data-support-action="' + escHtml(action.type || "") + '"'
+          + (action.target_topic_id ? ' data-target-topic-id="' + escHtml(action.target_topic_id) + '"' : "")
+          + '>' + escHtml(action.label || action.message || "次へ") + '</button>';
+      });
+      html += "</div>";
+    }
+
+    if (fallbackActions.length > 0 && !(msg && msg.next_actions && msg.next_actions.length > 0)) {
+      html = html.replace(/\x00FALLBACK_ACTIONS\x00/g, "");
+      html += '<div class="learning-actions">';
+      fallbackActions.forEach(function (action) {
+        html += '<button class="suggest-btn learning-action-btn"'
+          + ' data-suggest="' + escHtml(action.message || action.label || "") + '"'
+          + ' data-support-action="' + escHtml(action.type || "") + '"'
+          + (action.target_topic_id ? ' data-target-topic-id="' + escHtml(action.target_topic_id) + '"' : "")
+          + '>' + escHtml(action.label || action.message || "次へ") + '</button>';
+      });
+      html += "</div>";
+    } else {
+      html = html.replace(/\x00FALLBACK_ACTIONS\x00/g, "");
+    }
+
     return html;
   }
 
@@ -496,6 +623,17 @@
     const chapter = (state.course.chapters || [])[topic ? topic.chapter_index : 0];
 
     let html = "";
+
+    if (state.learningSupport && state.learningSupport.origin) {
+      var origin = state.learningSupport.origin;
+      html += '<div class="ps learning-support-panel"><h4>' + escHtml(state.learningSupport.status_label || "詳細説明中") + '</h4>';
+      html += '<div class="cc"><div class="lb">元の学習パス</div>';
+      html += '<strong>' + escHtml(origin.topic_title || "") + '</strong>';
+      if (origin.chapter_title) html += '<br>' + escHtml(origin.chapter_title);
+      html += '<div class="learning-support-inline-actions">';
+      html += '<button class="suggest-btn" data-suggest="学習パスに戻る" data-support-action="return_to_learning_path" data-target-topic-id="' + escHtml(origin.topic_id || "") + '">学習パスに戻る</button>';
+      html += '</div></div></div>';
+    }
 
     // Current topic
     html += '<div class="ps"><h4>現在のトピック</h4>';
@@ -540,7 +678,20 @@
     // Bind prerequisite clicks
     el.querySelectorAll("[data-prereq]").forEach(function (pEl) {
       pEl.addEventListener("click", function () {
-        sendMessage(this.getAttribute("data-prereq") + "について教えてください");
+        var payload = {};
+        if (state.learningSupport) payload.support_context = state.learningSupport;
+        sendMessage(this.getAttribute("data-prereq") + "について教えてください", payload);
+      });
+    });
+    el.querySelectorAll('[data-support-action="return_to_learning_path"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var targetTopicId = this.getAttribute("data-target-topic-id") ||
+          (state.learningSupport && state.learningSupport.origin && state.learningSupport.origin.topic_id);
+        state.learningSupport = null;
+        saveLearningSupportContext();
+        renderSidebar();
+        renderRightPanel();
+        if (targetTopicId) selectTopic(targetTopicId);
       });
     });
   }
@@ -832,7 +983,15 @@
       });
       if (res.ok) {
         const data = await res.json();
-        state.chatMessages.push({ role: "assistant", content: data.answer });
+        setLearningSupportFromResponse(data);
+        state.chatMessages.push({
+          role: "assistant",
+          content: data.answer,
+          next_actions: data.next_actions || [],
+          support_mode: data.support_mode || "",
+          status_label: data.status_label || "",
+          origin: data.origin || null,
+        });
         // Issue #145: 個人レイヤーの更新を反映する
         if (data.course_update) {
           if (data.course_update.personal_layer) {
@@ -990,6 +1149,7 @@
     state.chatMessages = [];
     state.course = null;
     state.personalLayer = null;
+    state.learningSupport = null;
 
     // Re-render with clean state
     renderSidebar();
@@ -1063,6 +1223,7 @@
     // Issue #145: マスターデータと個人レイヤーを分離して管理する
     state.course = courseData.master;
     state.personalLayer = courseData.personal;
+    loadLearningSupportContext();
     if (progress) state.course.progress = progress;
 
     const course = state.course;

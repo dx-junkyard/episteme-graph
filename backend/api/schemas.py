@@ -257,15 +257,35 @@ class LearningChatRequest(BaseModel):
     message: str
     history: list[dict] = []
     action: str | None = None
+    support_action: str | None = None
+    support_context: dict | None = None
     chunk_id: str | None = None
     element_id: str | None = None
     element_type: str | None = None
     element_label: str | None = None
 
 
+class LearningSupportNextAction(BaseModel):
+    type: str
+    label: str
+    message: str = ""
+    target_topic_id: str | None = None
+
+
+class LearningSupportOriginOut(BaseModel):
+    course_id: str
+    topic_id: str
+    topic_title: str
+    chapter_title: str = ""
+
+
 class LearningChatResponse(BaseModel):
     answer: str
     course_update: dict | None = None
+    support_mode: str | None = None
+    status_label: str | None = None
+    origin: LearningSupportOriginOut | None = None
+    next_actions: list[LearningSupportNextAction] = []
 
 
 class LearningChatHistoryResponse(BaseModel):
