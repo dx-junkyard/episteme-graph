@@ -263,6 +263,7 @@ def test_orchestrator_runs_all_stages_in_order():
     assert result.final_stage == "completed"
     expected_stages = [
         "save_pdf",
+        "grobid_parse",
         "document_structure",
         "source_chunking",
         "source_embedding",
@@ -800,3 +801,257 @@ def test_orchestrator_records_failed_stage():
                 agents=agents,
             )
     assert exc_info.value.stage == "document_structure"
+
+
+# --- issue #282: GROBID integration ----------------------------------------
+
+
+def test_grobid_parse_stage_in_pipeline_stages():
+    """grobid_parse must be in PIPELINE_STAGES immediately before document_structure."""
+    from core.document_pipeline.orchestrator import PIPELINE_STAGES
+
+    assert "grobid_parse" in PIPELINE_STAGES
+    grobid_idx = PIPELINE_STAGES.index("grobid_parse")
+    ds_idx = PIPELINE_STAGES.index("document_structure")
+    assert grobid_idx == ds_idx - 1, (
+        "grobid_parse must be immediately before document_structure"
+    )
+
+
+def test_orchestrator_grobid_fallback_when_unavailable():
+    """When GROBID is unavailable, pipeline continues with tei_xml=None (PyMuPDF fallback)."""
+    from core.document_pipeline import orchestrator
+
+    @dataclass
+    class _Result:
+        document_id: str = "doc"
+        nodes: list = field(default_factory=list)
+        edges: list = field(default_factory=list)
+        components: list = field(default_factory=list)
+        qualified_spans: list = field(default_factory=list)
+        equations: list = field(default_factory=list)
+        sections: list = field(default_factory=lambda: [_Section("s1", "Intro", order=1, page_start=1)])
+        blocks: list = field(default_factory=lambda: [_Block("b1", 1, 0, "Hello.", section_id="s1")])
+        review_notes: list = field(default_factory=list)
+
+    @dataclass
+    class _CGR:
+        document_id: str = "doc"
+        graph_schema_version: str = "0.1.0"
+        cartridge_id: str | None = None
+        nodes: list = field(default_factory=list)
+        edges: list = field(default_factory=list)
+        review_notes: list = field(default_factory=list)
+        confidence: float = 0.9
+        validation_issues: list = field(default_factory=list)
+
+        def to_dict(self):
+            return {"nodes": [], "edges": [], "document_id": self.document_id,
+                    "graph_schema_version": self.graph_schema_version,
+                    "cartridge_id": None, "review_notes": [], "confidence": 0.9,
+                    "validation_issues": []}
+
+        def to_graph_payload(self):
+            return {"graph_schema_version": "0.1.0", "nodes": [], "edges": []}
+
+    @dataclass
+    class _CMR:
+        document_id: str = "doc"
+        cartridge_id: str | None = None
+        topics: list = field(default_factory=list)
+        validation_issues: list = field(default_factory=list)
+
+    structure_result = _Result()
+    received_tei_xml: list[str | None] = []
+
+    class _CapturingDSAgent:
+        def run(self, pdf_path, cartridge_id=None, config=None, tei_xml=None):
+            received_tei_xml.append(tei_xml)
+            return structure_result
+
+    agents = {
+        "DocumentStructureAgent": _CapturingDSAgent(),
+        "PaperSkeletonAgent": _MockAgent(_Result()),
+        "RhetoricalRoleAgent": _MockAgent(_Result()),
+        "ClaimQualificationAgent": _MockAgent(_Result()),
+        "EquationSemanticsAgent": _MockAgent(_Result()),
+        "ThesisReconstructionAgent": _MockAgent(_Result()),
+        "DSLLinkingAgent": _MockAgent(_Result()),
+        "ComponentAssemblyAgent": _MockAgent(_Result()),
+        "ComponentGraphAgent": _MockAgent(_CGR()),
+        "CourseMappingAgent": _MockAgent(_CMR()),
+    }
+
+    fake_persistence = {
+        "persist_source_chunks": MagicMock(return_value=[
+            {"chunk_id": "c1", "chunk_index": 0, "section_id": "s1",
+             "block_ids": ["b1"], "page_start": 1, "page_end": 1, "text": "Hello"}
+        ]),
+        "persist_qualified_claims": MagicMock(return_value=[]),
+        "persist_components": MagicMock(return_value={}),
+        "persist_component_graph": MagicMock(return_value="graph-1"),
+        "persist_document_embedding": MagicMock(return_value="emb-1"),
+        "upsert_analysis_run": MagicMock(return_value="run-fallback"),
+    }
+
+    # _run_grobid_parse を失敗させて PyMuPDF フォールバックを強制する
+    def _grobid_raises(pdf_bytes):
+        raise ConnectionError("GROBID not available")
+
+    with patch.multiple(orchestrator, **fake_persistence):
+        with patch.object(orchestrator, "_run_grobid_parse", side_effect=_grobid_raises):
+            result = orchestrator.run_document_pipeline(
+                pdf_bytes=b"%PDF-1.4 fake bytes",
+                document_id="doc-grobid-fallback",
+                material_id="mat-1",
+                agents=agents,
+            )
+
+    assert result.final_stage == "completed"
+    # DocumentStructureAgent は tei_xml=None で呼ばれるはず
+    assert received_tei_xml, "DocumentStructureAgent was not called"
+    assert received_tei_xml[0] is None, (
+        f"Expected tei_xml=None on GROBID failure, got {received_tei_xml[0]!r}"
+    )
+
+
+def test_orchestrator_passes_tei_xml_to_document_structure_agent():
+    """When GROBID succeeds, DocumentStructureAgent receives tei_xml."""
+    from core.document_pipeline import orchestrator
+
+    @dataclass
+    class _Result:
+        document_id: str = "doc"
+        nodes: list = field(default_factory=list)
+        edges: list = field(default_factory=list)
+        components: list = field(default_factory=list)
+        qualified_spans: list = field(default_factory=list)
+        equations: list = field(default_factory=list)
+        sections: list = field(default_factory=lambda: [_Section("s1", "Intro", order=1, page_start=1)])
+        blocks: list = field(default_factory=lambda: [_Block("b1", 1, 0, "Hello.", section_id="s1")])
+        review_notes: list = field(default_factory=list)
+
+    @dataclass
+    class _CGR:
+        document_id: str = "doc"
+        graph_schema_version: str = "0.1.0"
+        cartridge_id: str | None = None
+        nodes: list = field(default_factory=list)
+        edges: list = field(default_factory=list)
+        review_notes: list = field(default_factory=list)
+        confidence: float = 0.9
+        validation_issues: list = field(default_factory=list)
+
+        def to_dict(self):
+            return {"nodes": [], "edges": [], "document_id": self.document_id,
+                    "graph_schema_version": self.graph_schema_version,
+                    "cartridge_id": None, "review_notes": [], "confidence": 0.9,
+                    "validation_issues": []}
+
+        def to_graph_payload(self):
+            return {"graph_schema_version": "0.1.0", "nodes": [], "edges": []}
+
+    @dataclass
+    class _CMR:
+        document_id: str = "doc"
+        cartridge_id: str | None = None
+        topics: list = field(default_factory=list)
+        validation_issues: list = field(default_factory=list)
+
+    FAKE_TEI = "<TEI>fake tei xml</TEI>"
+    structure_result = _Result()
+    received_tei_xml: list[str | None] = []
+
+    class _CapturingDSAgent:
+        def run(self, pdf_path, cartridge_id=None, config=None, tei_xml=None):
+            received_tei_xml.append(tei_xml)
+            return structure_result
+
+    agents = {
+        "DocumentStructureAgent": _CapturingDSAgent(),
+        "PaperSkeletonAgent": _MockAgent(_Result()),
+        "RhetoricalRoleAgent": _MockAgent(_Result()),
+        "ClaimQualificationAgent": _MockAgent(_Result()),
+        "EquationSemanticsAgent": _MockAgent(_Result()),
+        "ThesisReconstructionAgent": _MockAgent(_Result()),
+        "DSLLinkingAgent": _MockAgent(_Result()),
+        "ComponentAssemblyAgent": _MockAgent(_Result()),
+        "ComponentGraphAgent": _MockAgent(_CGR()),
+        "CourseMappingAgent": _MockAgent(_CMR()),
+    }
+
+    fake_persistence = {
+        "persist_source_chunks": MagicMock(return_value=[
+            {"chunk_id": "c1", "chunk_index": 0, "section_id": "s1",
+             "block_ids": ["b1"], "page_start": 1, "page_end": 1, "text": "Hello"}
+        ]),
+        "persist_qualified_claims": MagicMock(return_value=[]),
+        "persist_components": MagicMock(return_value={}),
+        "persist_component_graph": MagicMock(return_value="graph-1"),
+        "persist_document_embedding": MagicMock(return_value="emb-1"),
+        "upsert_analysis_run": MagicMock(return_value="run-tei"),
+    }
+
+    with patch.multiple(orchestrator, **fake_persistence):
+        with patch.object(orchestrator, "_run_grobid_parse", return_value=FAKE_TEI):
+            result = orchestrator.run_document_pipeline(
+                pdf_bytes=b"%PDF-1.4 fake bytes",
+                document_id="doc-tei-pass",
+                material_id="mat-2",
+                agents=agents,
+            )
+
+    assert result.final_stage == "completed"
+    assert received_tei_xml, "DocumentStructureAgent was not called"
+    assert received_tei_xml[0] == FAKE_TEI, (
+        f"Expected tei_xml=FAKE_TEI, got {received_tei_xml[0]!r}"
+    )
+
+
+def test_chunker_metadata_includes_extraction_source_from_grobid_blocks():
+    """SourceChunk.metadata includes extraction_source and tei_section_id for GROBID blocks."""
+    from core.document_pipeline.chunker import build_source_chunks
+
+    @dataclass
+    class _GROBIDBlock:
+        block_id: str
+        page: int
+        order: int
+        text: str
+        block_type: str = "body_paragraph"
+        section_id: str | None = "s1"
+        raw: dict = field(default_factory=lambda: {
+            "parser_source": "grobid_hybrid",
+            "tei_section_id": "div_1",
+        })
+
+    @dataclass
+    class _GSection:
+        section_id: str = "s1"
+        title: str = "Introduction"
+        level: int = 1
+        order: int = 0
+        page_start: int = 1
+        page_end: int | None = None
+
+    @dataclass
+    class _GStructure:
+        document_id: str = "doc"
+        blocks: list = field(default_factory=list)
+        sections: list = field(default_factory=list)
+
+    structure = _GStructure(
+        blocks=[
+            _GROBIDBlock("g1", 1, 0, "GROBID paragraph one."),
+            _GROBIDBlock("g2", 1, 1, "GROBID paragraph two."),
+        ],
+        sections=[_GSection()],
+    )
+
+    chunks = build_source_chunks(structure)
+    assert chunks, "No chunks produced"
+    for chunk in chunks:
+        assert chunk.metadata.get("extraction_source") == "grobid_hybrid", (
+            f"Expected extraction_source='grobid_hybrid', got {chunk.metadata}"
+        )
+        assert chunk.metadata.get("tei_section_id") == "div_1"

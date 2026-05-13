@@ -35,6 +35,7 @@ ARTIFACTS_KEY = "_artifacts"
 
 PIPELINE_STAGES = [
     "save_pdf",
+    "grobid_parse",
     "document_structure",
     "source_chunking",
     "source_embedding",
@@ -294,7 +295,36 @@ def run_document_pipeline(
             f.write(pdf_bytes)
             pdf_path = f.name
 
-        # ── Stage 2: document_structure ────────────────────────────────────
+        # ── Stage 2: grobid_parse ──────────────────────────────────────────
+        tei_xml: str | None = None
+        grobid_artifact = artifact("grobid_parse")
+        if should_use_artifact("grobid_parse"):
+            tei_xml = (grobid_artifact or {}).get("tei_xml") or None
+            logger.info("Resuming document pipeline: loaded grobid_parse artifact for document %s", document_id)
+        else:
+            report_start("grobid_parse", total=1, unit="document")
+            try:
+                tei_xml = _run_grobid_parse(pdf_bytes)
+            except Exception:
+                logger.warning(
+                    "grobid_parse failed (non-fatal); will use PyMuPDF fallback: document=%s",
+                    document_id,
+                    exc_info=True,
+                )
+                tei_xml = None
+            save_artifact("grobid_parse", {
+                "status": "ok" if tei_xml else "fallback",
+                "tei_bytes": len(tei_xml.encode()) if tei_xml else 0,
+                "tei_xml": tei_xml,
+            })
+        report_done("grobid_parse", {
+            "status": "ok" if tei_xml else "fallback",
+            "tei_bytes": len(tei_xml.encode()) if tei_xml else 0,
+        })
+        if finish_target_stage("grobid_parse", {"status": "ok" if tei_xml else "fallback"}):
+            return result
+
+        # ── Stage 3: document_structure ────────────────────────────────────
         structure_artifact = artifact("document_structure")
         if should_use_artifact("document_structure"):
             structure = _from_agent_dict("document_structure", structure_artifact)
@@ -305,7 +335,11 @@ def run_document_pipeline(
                 ds_agent = agent_classes["DocumentStructureAgent"]() if isinstance(
                     agent_classes["DocumentStructureAgent"], type
                 ) else agent_classes["DocumentStructureAgent"]
-                structure = ds_agent.run(pdf_path=pdf_path, cartridge_id=cartridge_id)
+                structure = ds_agent.run(
+                    pdf_path=pdf_path,
+                    cartridge_id=cartridge_id,
+                    tei_xml=tei_xml,
+                )
                 structure.document_id = document_id  # 強制的に上書きして後段一貫
             except Exception as exc:
                 raise PipelineStageError("document_structure", str(exc), cause=exc) from exc
@@ -1315,6 +1349,12 @@ def _empty_blueprint_result(document_id: str, course_id: str | None):
         review_notes=[],
         validation_issues=[],
     )
+
+
+def _run_grobid_parse(pdf_bytes: bytes) -> str | None:
+    """PDF bytes を GROBID に送信して TEI XML を返す。失敗時は None を返す。"""
+    from core.extractor import extract_tei_xml_from_pdf_bytes
+    return extract_tei_xml_from_pdf_bytes(pdf_bytes)
 
 
 def _agent_input_count(

@@ -124,7 +124,10 @@ class Settings(BaseSettings):
     )
 
     # --- GROBID ---
-    grobid_url: str = "http://localhost:8070"
+    grobid_url: str = Field(
+        default="http://localhost:8070",
+        validation_alias=AliasChoices("GROBID_URL"),
+    )
 
     # --- ISOM ---
     isom_output_dir: str = "output/incoming"

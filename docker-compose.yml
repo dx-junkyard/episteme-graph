@@ -2,6 +2,13 @@ version: "3.9"
 
 services:
   # ── Infrastructure ────────────────────────────────────────────────
+  grobid:
+    image: lfoppiano/grobid:0.8.1
+    ports:
+      - "8070:8070"
+    networks:
+      - episteme
+
   neo4j:
     image: neo4j:5-community
     environment:
@@ -58,6 +65,7 @@ services:
       # Domain cartridge
       EPISTEME_DEFAULT_CARTRIDGE_ID: ${EPISTEME_DEFAULT_CARTRIDGE_ID:-particle_physics}
       EPISTEME_CARTRIDGES_DIR: ${EPISTEME_CARTRIDGES_DIR:-}
+      GROBID_URL: ${GROBID_URL:-http://grobid:8070}
     # ローカルの .gcp/ をコンテナに読み取り専用でマウントする。
     # ファイルが存在しない場合は空ディレクトリとしてマウントされる（エラーにはならない）。
     # サービスアカウントキーを使う場合: .gcp/credentials.json に配置する。
@@ -71,6 +79,8 @@ services:
       neo4j:
         condition: service_started
       minio:
+        condition: service_started
+      grobid:
         condition: service_started
     networks:
       - episteme
