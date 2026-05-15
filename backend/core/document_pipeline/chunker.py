@@ -53,12 +53,13 @@ def build_source_chunks(
     """`DocumentStructureResult` から source chunk を生成する。
 
     Strategy:
-        1. blocks を section_id でグループ化。section 順は section.order、
-           無セクションの block は document 末尾扱い。
-        2. block を順に積み、累計 max_chars を超えたら chunk を確定する。
-        3. 1 つの block 単独で max_chars を超える場合は文字数で機械分割するが、
+        1. blocks を section_id でグループ化し、section 内は PDF 上の出現順で並べる。
+        2. section 自体も先頭 block の出現順で並べ、section.order の誤りで
+           chunk 列が原典順からずれないようにする。
+        3. block を順に積み、累計 max_chars を超えたら chunk を確定する。
+        4. 1 つの block 単独で max_chars を超える場合は文字数で機械分割するが、
            block_ids にはその block のみを記録する。
-        4. 末尾の極小 chunk は前の chunk へ吸収する。
+        5. 末尾の極小 chunk は前の chunk へ吸収する。
     """
     blocks = list(structure.blocks)
     sections_by_id = {s.section_id: s for s in structure.sections}
@@ -66,23 +67,21 @@ def build_source_chunks(
         s.section_id: (s.order, s.page_start) for s in structure.sections
     }
 
-    # section_id -> [TypedBlock] （section 内では block.order 昇順）
+    # section_id -> [TypedBlock] （section 内では PDF 上の出現順を優先）
     grouped: dict[str | None, list] = {}
     for b in blocks:
         key = b.section_id
         grouped.setdefault(key, []).append(b)
     for key in grouped:
-        grouped[key].sort(key=lambda b: (b.page, b.order))
+        grouped[key].sort(key=_block_position)
 
-    # section_id 順を確定。None セクションは末尾に。
-    section_keys: list[str | None] = []
-    for sid in sorted(
-        (k for k in grouped if k is not None),
-        key=lambda k: section_order.get(k, (10**9, 10**9)),
-    ):
-        section_keys.append(sid)
-    if None in grouped:
-        section_keys.append(None)
+    # section_id 順を確定。section.order は GROBID/LLM 由来でずれる場合があるため、
+    # 実際の先頭 block の出現位置を第一キーにする。これにより、front matter や
+    # 誤った section_order が chunk 列を原典順から動かすことを防ぐ。
+    section_keys: list[str | None] = sorted(
+        grouped.keys(),
+        key=lambda sid: _section_position_key(sid, grouped, section_order),
+    )
 
     chunks: list[SourceChunk] = []
     chunk_index = 0
@@ -102,6 +101,35 @@ def build_source_chunks(
     for i, c in enumerate(chunks):
         c.chunk_index = i
     return chunks
+
+
+def _block_position(block) -> tuple[int, int]:
+    """Return a stable source-order key for a parser block."""
+    page = getattr(block, "page", None)
+    order = getattr(block, "order", None)
+    return (
+        int(page) if page is not None else 10**9,
+        int(order) if order is not None else 10**9,
+    )
+
+
+def _section_position_key(
+    section_id: str | None,
+    grouped: dict[str | None, list],
+    section_order: dict[str, tuple],
+) -> tuple[int, int, int, str]:
+    """Sort sections by their first concrete block, with metadata as fallback."""
+    blocks = grouped.get(section_id) or []
+    if blocks:
+        page, order = _block_position(blocks[0])
+        return (page, order, 0, section_id or "")
+    meta_order, meta_page = section_order.get(section_id, (10**9, 10**9))
+    return (
+        int(meta_page or 10**9),
+        10**9,
+        int(meta_order or 10**9),
+        section_id or "",
+    )
 
 
 def _chunk_section_blocks(
@@ -127,6 +155,13 @@ def _chunk_section_blocks(
         if not text:
             return None
         text, formulas = _replace_inline_math_notation(text, pending_formulas)
+        extraction_source = _extraction_source_from_blocks(pending_block_ids, blocks)
+        tei_section_id = _tei_section_id_from_blocks(pending_block_ids, blocks)
+        meta: dict = {"section_title": section_title}
+        if extraction_source:
+            meta["extraction_source"] = extraction_source
+        if tei_section_id:
+            meta["tei_section_id"] = tei_section_id
         return SourceChunk(
             chunk_index=0,  # 後で全体採番
             text=text,
@@ -134,9 +169,7 @@ def _chunk_section_blocks(
             block_ids=list(pending_block_ids),
             page_start=min(pending_pages) if pending_pages else None,
             page_end=max(pending_pages) if pending_pages else None,
-            metadata={
-                "section_title": section_title,
-            },
+            metadata=meta,
             formulas=formulas,
         )
 
@@ -163,6 +196,17 @@ def _chunk_section_blocks(
                 pending_pages.clear()
                 pending_formulas.clear()
                 pending_chars = 0
+            block_extraction_source = (getattr(block, "raw", None) or {}).get("parser_source")
+            block_tei_section_id = (getattr(block, "raw", None) or {}).get("tei_section_id")
+            long_meta: dict = {
+                "section_title": section_title,
+                "block_type": block.block_type,
+                "split_long_block": True,
+            }
+            if block_extraction_source:
+                long_meta["extraction_source"] = block_extraction_source
+            if block_tei_section_id:
+                long_meta["tei_section_id"] = block_tei_section_id
             for sub in _split_long_text(text, max_chars):
                 yield SourceChunk(
                     chunk_index=0,
@@ -171,11 +215,7 @@ def _chunk_section_blocks(
                     block_ids=[block.block_id],
                     page_start=block.page,
                     page_end=block.page,
-                    metadata={
-                        "section_title": section_title,
-                        "block_type": block.block_type,
-                        "split_long_block": True,
-                    },
+                    metadata=long_meta,
                     formulas=list(block_formulas),
                 )
             continue
@@ -428,6 +468,39 @@ def _renumber_formulas(formulas: list[dict], start: int) -> list[dict]:
             updated["latex"] = str(updated.get("latex") or "").replace(old_id, new_id)
         renumbered.append(updated)
     return renumbered
+
+
+def _block_by_id(block_ids: list[str], blocks: list) -> list:
+    """block_ids に対応する block オブジェクトを blocks から検索して返す。"""
+    id_to_block = {getattr(b, "block_id", None): b for b in blocks}
+    return [id_to_block[bid] for bid in block_ids if bid in id_to_block]
+
+
+def _extraction_source_from_blocks(block_ids: list[str], blocks: list) -> str | None:
+    """ブロック群の parser_source を代表値として返す。"""
+    matched = _block_by_id(block_ids, blocks)
+    sources = {
+        (getattr(b, "raw", None) or {}).get("parser_source")
+        for b in matched
+    } - {None}
+    if not sources:
+        return None
+    # 複数混在の場合は最初に出現したものを返す
+    for b in matched:
+        src = (getattr(b, "raw", None) or {}).get("parser_source")
+        if src:
+            return src
+    return None
+
+
+def _tei_section_id_from_blocks(block_ids: list[str], blocks: list) -> str | None:
+    """ブロック群の tei_section_id を代表値として返す。"""
+    matched = _block_by_id(block_ids, blocks)
+    for b in matched:
+        tsi = (getattr(b, "raw", None) or {}).get("tei_section_id")
+        if tsi:
+            return tsi
+    return None
 
 
 _INLINE_NOTATION_PATTERNS = (

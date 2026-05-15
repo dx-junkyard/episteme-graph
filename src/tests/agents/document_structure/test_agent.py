@@ -111,3 +111,35 @@ def test_to_json_round_trip(agent, fake_pdf):
     d = json.loads(json_str)
     assert d["document_id"] == result.document_id
     assert len(d["blocks"]) == len(result.blocks)
+
+
+def test_grobid_hybrid_alignment_updates_block_and_section_pages():
+    from episteme_graph.agents.document_structure.agent import DocumentStructureAgent
+    from episteme_graph.agents.document_structure.schema import Section, TypedBlock
+    from episteme_graph.agents.document_structure.parser import RawBlock
+
+    agent = DocumentStructureAgent()
+    typed_blocks = [
+        TypedBlock(
+            block_id="b1",
+            page=1,
+            order=0,
+            text="This paragraph begins on the second physical page.",
+            block_type="body_paragraph",
+            section_id="s1",
+            raw={"parser_source": "grobid_tei"},
+        )
+    ]
+    pymupdf_blocks = [
+        RawBlock(page=1, order=0, text="Title page text"),
+        RawBlock(page=2, order=1, text="This paragraph begins on the second physical page."),
+    ]
+    sections = [Section(section_id="s1", title="Intro", level=1, order=1, page_start=1)]
+
+    agent._align_grobid_blocks_to_pdf_blocks(typed_blocks, pymupdf_blocks)
+    agent._refresh_section_pages_from_blocks(sections, typed_blocks, total_pages=2)
+
+    assert typed_blocks[0].page == 2
+    assert typed_blocks[0].raw["pdf_alignment"]["page"] == 2
+    assert sections[0].page_start == 2
+    assert sections[0].page_end == 2
