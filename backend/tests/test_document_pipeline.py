@@ -94,6 +94,27 @@ def test_chunker_splits_oversized_block():
     assert all(c.metadata.get("split_long_block") for c in chunks)
 
 
+def test_chunker_orders_sections_by_first_source_block_not_section_metadata():
+    from core.document_pipeline.chunker import build_source_chunks
+
+    structure = _Structure(
+        document_id="doc-order",
+        sections=[
+            _Section(section_id="late", title="Late", order=1, page_start=1),
+            _Section(section_id="early", title="Early", order=2, page_start=1),
+        ],
+        blocks=[
+            _Block("early-b", 1, 0, "Early paragraph." * 20, section_id="early"),
+            _Block("late-b", 2, 0, "Late paragraph." * 20, section_id="late"),
+        ],
+    )
+
+    chunks = build_source_chunks(structure, max_chars=1000)
+
+    assert [c.section_id for c in chunks] == ["early", "late"]
+    assert chunks[0].block_ids == ["early-b"]
+
+
 def test_chunker_handles_blocks_without_section():
     from core.document_pipeline.chunker import build_source_chunks
 

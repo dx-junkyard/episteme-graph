@@ -5,10 +5,13 @@ design: structure-first / parser-driven / cartridge-aware (not cartridge-depende
 - parser_backend="pymupdf": PyMuPDF のみ（MVPデフォルト）
 - parser_backend="grobid_hybrid": GROBID TEI XML 優先 + PyMuPDF でページ/bbox を補完
 """
+
 from __future__ import annotations
 
 import logging
 import os
+import re
+from difflib import SequenceMatcher
 
 from .cartridge_loader import CartridgeLoader
 from .classifier import BlockClassifier
@@ -81,10 +84,7 @@ class DocumentStructureAgent:
         document_id = self._make_document_id(pdf_path)
 
         # Step 2: バックエンド選択
-        use_grobid = (
-            tei_xml is not None
-            or self._parser_backend == "grobid_hybrid"
-        )
+        use_grobid = tei_xml is not None or self._parser_backend == "grobid_hybrid"
 
         if use_grobid and tei_xml:
             typed_blocks, sections, metadata = self._extract_grobid_hybrid(
@@ -190,8 +190,14 @@ class DocumentStructureAgent:
 
         # PyMuPDF でページ情報・bbox を補完する
         try:
-            pymupdf_blocks = self._extractor.extract_blocks(pdf_path, max_pages=max_pages)
-            total_pages = max((b.page for b in pymupdf_blocks), default=0) if pymupdf_blocks else 0
+            pymupdf_blocks = self._extractor.extract_blocks(
+                pdf_path, max_pages=max_pages
+            )
+            total_pages = (
+                max((b.page for b in pymupdf_blocks), default=0)
+                if pymupdf_blocks
+                else 0
+            )
         except Exception:
             logger.warning(
                 "PyMuPDF supplemental extraction failed for %s; page numbers will default to 1",
@@ -206,12 +212,123 @@ class DocumentStructureAgent:
         metadata = grobid_result.metadata
         metadata.pages = total_pages or metadata.pages
 
+        if pymupdf_blocks:
+            self._align_grobid_blocks_to_pdf_blocks(typed_blocks, pymupdf_blocks)
+            self._refresh_section_pages_from_blocks(
+                sections, typed_blocks, total_pages or metadata.pages or 1
+            )
+
         # grobid_hybrid provenance（既に grobid_tei がセットされているが統一表記を追加）
         for b in typed_blocks:
             if b.raw.get("parser_source") == "grobid_tei" and pymupdf_blocks:
                 b.raw["parser_source"] = "grobid_hybrid"
 
         return typed_blocks, sections, metadata
+
+    @staticmethod
+    def _align_grobid_blocks_to_pdf_blocks(typed_blocks, pymupdf_blocks) -> None:
+        """Attach best-effort PDF page/bbox data to GROBID TEI blocks.
+
+        GROBID's TEI output preserves logical order but normally lacks physical page
+        numbers.  Without this pass all chunks point at page 1, so the studio's
+        PDF pane and the displayed source text drift apart.  Matching is monotonic
+        and fuzzy: it first looks for normalized containment, then falls back to a
+        similarity score against nearby PyMuPDF text blocks.
+        """
+        if not typed_blocks or not pymupdf_blocks:
+            return
+
+        pdf_records = []
+        for idx, raw in enumerate(pymupdf_blocks):
+            text = getattr(raw, "text", "") or ""
+            norm = DocumentStructureAgent._normalize_match_text(text)
+            if not norm:
+                continue
+            pdf_records.append((idx, raw, norm))
+
+        last_idx = 0
+        for block in typed_blocks:
+            target = DocumentStructureAgent._normalize_match_text(
+                getattr(block, "text", "") or ""
+            )
+            if not target:
+                continue
+            best = DocumentStructureAgent._find_best_pdf_match(
+                target, pdf_records, last_idx
+            )
+            if best is None:
+                continue
+            rec_idx, raw, score = best
+            last_idx = max(last_idx, rec_idx)
+            block.page = getattr(raw, "page", block.page)
+            block.bbox = getattr(raw, "bbox", block.bbox)
+            block.raw.setdefault("pdf_alignment", {})
+            block.raw["pdf_alignment"].update(
+                {
+                    "page": block.page,
+                    "pdf_order": getattr(raw, "order", None),
+                    "score": round(float(score), 3),
+                }
+            )
+
+    @staticmethod
+    def _find_best_pdf_match(
+        target: str,
+        pdf_records: list[tuple[int, object, str]],
+        start_idx: int,
+    ):
+        best: tuple[int, object, float] | None = None
+        # Keep the search monotonic but allow a small look-behind for headers or
+        # short blocks that PyMuPDF split differently.
+        scan_start = max(0, start_idx - 3)
+        for rec_idx, raw, candidate in pdf_records[scan_start:]:
+            if rec_idx < scan_start:
+                continue
+            score = 0.0
+            short, long = (
+                (target, candidate)
+                if len(target) <= len(candidate)
+                else (candidate, target)
+            )
+            if short and short in long:
+                score = min(1.0, len(short) / max(1, len(long)))
+                if len(short) >= 80 or score >= 0.35:
+                    score = max(score, 0.92)
+            if score == 0.0:
+                score = SequenceMatcher(None, target[:900], candidate[:900]).ratio()
+            if best is None or score > best[2]:
+                best = (rec_idx, raw, score)
+            if score >= 0.98:
+                break
+        if best and best[2] >= 0.42:
+            return best
+        return None
+
+    @staticmethod
+    def _refresh_section_pages_from_blocks(
+        sections, typed_blocks, total_pages: int
+    ) -> None:
+        by_section: dict[str, list[int]] = {}
+        for block in typed_blocks:
+            sid = getattr(block, "section_id", None)
+            page = getattr(block, "page", None)
+            if sid and page:
+                by_section.setdefault(sid, []).append(int(page))
+        for section in sections:
+            pages = by_section.get(getattr(section, "section_id", ""))
+            if pages:
+                section.page_start = min(pages)
+                section.page_end = max(pages)
+            elif not getattr(section, "page_start", None):
+                section.page_start = 1
+                section.page_end = total_pages or 1
+
+    @staticmethod
+    def _normalize_match_text(text: str) -> str:
+        text = (text or "").lower()
+        text = re.sub(r"\s+", " ", text)
+        text = re.sub(r"[^a-z0-9α-ωΑ-Ω一-龯ぁ-んァ-ン]+", "", text)
+        return text
 
     @staticmethod
     def _make_document_id(pdf_path: str) -> str:
