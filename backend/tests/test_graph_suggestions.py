@@ -56,6 +56,34 @@ def test_derive_graph_mentions_includes_formulas():
     assert mentions[0]["label"] == "この数式"
 
 
+def test_derive_graph_mentions_includes_tex_refs_and_citations():
+    from api.services import _derive_graph_mentions
+
+    mentions = _derive_graph_mentions(
+        "Eq. eq:main follows from prior work Maldacena:2002vr.",
+        {"concepts": [], "relationships": []},
+        [],
+        {
+            "tex_refs": [{"key": "eq:main", "kind": "ref"}],
+            "tex_citations": [
+                {
+                    "key": "Maldacena:2002vr",
+                    "bib": {
+                        "author": "Maldacena, Juan Martin",
+                        "title": "Non-Gaussian features of primordial fluctuations",
+                        "year": "2003",
+                    },
+                }
+            ],
+        },
+    )
+
+    by_type = {m["element_type"]: m for m in mentions}
+    assert by_type["reference"]["element_id"] == "ref:eq:main"
+    assert by_type["citation"]["element_id"] == "bib:Maldacena:2002vr"
+    assert by_type["citation"]["label"] == "Maldacena, Juan Martin (2003)"
+
+
 def test_learning_chat_request_accepts_graph_action_payload():
     from schemas import LearningChatRequest
 

@@ -78,6 +78,39 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin", tags=["Admin"])
 
+_TEX_ARCHIVE_SUFFIXES = (".tar.gz", ".tgz")
+
+
+def _uploaded_source_kind(filename: str | None) -> str | None:
+    lower = (filename or "").lower()
+    if lower.endswith(".pdf"):
+        return "pdf"
+    if lower.endswith(_TEX_ARCHIVE_SUFFIXES):
+        return "tex_archive"
+    return None
+
+
+def _source_object_suffix(filename: str | None, source_kind: str) -> str:
+    lower = (filename or "").lower()
+    if source_kind == "tex_archive":
+        return ".tgz" if lower.endswith(".tgz") else ".tar.gz"
+    return ".pdf"
+
+
+def _source_content_type(source_kind: str) -> str:
+    if source_kind == "tex_archive":
+        return "application/gzip"
+    return "application/pdf"
+
+
+def _source_title(filename: str | None) -> str:
+    name = filename or "document"
+    lower = name.lower()
+    for suffix in (".tar.gz", ".tgz", ".pdf"):
+        if lower.endswith(suffix):
+            return name[: -len(suffix)]
+    return os.path.splitext(name)[0]
+
 
 def _word_set(text: str) -> set[str]:
     """テキストを正規化して3文字以上の単語セットを返す。"""
@@ -228,30 +261,37 @@ def upload_material(
     file: UploadFile = File(...),
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """PDF教材をアップロードし、バックグラウンドでグラフ化処理を開始する。
+    """PDF/TeX教材をアップロードし、バックグラウンドでグラフ化処理を開始する。
 
     即座に task_id を返却し、処理完了はポーリングで確認する。
     """
     import datetime
 
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are accepted")
+    source_kind = _uploaded_source_kind(file.filename)
+    if source_kind is None:
+        raise HTTPException(status_code=400, detail="Only PDF files or TeX .tar.gz archives are accepted")
 
-    pdf_bytes = file.file.read()
-    if len(pdf_bytes) == 0:
+    source_bytes = file.file.read()
+    if len(source_bytes) == 0:
         raise HTTPException(status_code=400, detail="Empty file")
 
     material_id = str(uuid.uuid4())[:12]
-    pdf_object_name = f"uploads/{material_id}.pdf"
+    object_suffix = _source_object_suffix(file.filename, source_kind)
+    source_object_name = f"uploads/{material_id}{object_suffix}"
     doc_id = uuid.uuid4()
     task_id = str(uuid.uuid4())[:12]
     now = datetime.datetime.utcnow().isoformat()
 
     try:
-        get_storage_client().upload_pdf("raw-papers", pdf_object_name, pdf_bytes)
+        get_storage_client().upload_bytes(
+            "raw-papers",
+            source_object_name,
+            source_bytes,
+            content_type=_source_content_type(source_kind),
+        )
     except Exception:
-        logger.exception("Failed to store uploaded PDF for material %s", material_id)
-        raise HTTPException(status_code=500, detail="PDF storage failed")
+        logger.exception("Failed to store uploaded source for material %s", material_id)
+        raise HTTPException(status_code=500, detail="Source storage failed")
 
     session = _pg_session()
     try:
@@ -262,7 +302,7 @@ def upload_material(
             """),
             {
                 "id": doc_id,
-                "title": os.path.splitext(file.filename)[0],
+                "title": _source_title(file.filename),
                 "filename": file.filename,
                 "uploaded_by": current_user["id"],
                 "material_id": material_id,
@@ -279,7 +319,7 @@ def upload_material(
 
     thread = threading.Thread(
         target=process_material_background,
-        args=(material_id, str(doc_id), file.filename, pdf_bytes, task_id),
+        args=(material_id, str(doc_id), file.filename, source_bytes, task_id, None, source_kind),
         daemon=True,
     )
     thread.start()
@@ -293,9 +333,109 @@ def upload_material(
         "task_id": task_id,
         "material_id": material_id,
         "filename": file.filename,
-        "title": os.path.splitext(file.filename)[0],
+        "title": _source_title(file.filename),
+        "source_kind": source_kind,
         "status": "pending",
         "uploaded_at": now,
+    }
+
+
+@router.post("/documents/{document_id}/reanalyze", status_code=202)
+def reanalyze_document(
+    document_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """新Agent Pipeline (issue #226) で document を再解析する。
+
+    保存済み PDF を MinIO から取り出し、process_material_background と同じ
+    pipeline をバックグラウンド起動する。旧 course/section/chunk 単位の解析
+    エンドポイントの後継。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text(
+                "SELECT id, title, filename, source_path FROM documents "
+                "WHERE id = CAST(:id AS uuid) LIMIT 1"
+            ),
+            {"id": document_id},
+        ).fetchone()
+    finally:
+        session.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    material_id = row[3]
+    filename = row[2] or row[1] or "document.pdf"
+
+    if not material_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Document has no material_id; cannot fetch PDF for reanalysis",
+        )
+
+    filename_kind = _uploaded_source_kind(filename)
+    object_candidates = []
+    if filename_kind:
+        object_candidates.append(f"uploads/{material_id}{_source_object_suffix(filename, filename_kind)}")
+    object_candidates.extend([
+        f"uploads/{material_id}.pdf",
+        f"uploads/{material_id}.tar.gz",
+        f"uploads/{material_id}.tgz",
+        filename,
+        material_id,
+    ])
+    storage = get_storage_client()
+    source_bytes: bytes | None = None
+    source_kind: str | None = filename_kind
+    for object_name in object_candidates:
+        if not object_name:
+            continue
+        try:
+            source_bytes = storage.get_object("raw-papers", object_name)
+            if source_kind is None:
+                source_kind = _uploaded_source_kind(object_name) or "pdf"
+            break
+        except Exception:
+            continue
+    if source_bytes is None:
+        raise HTTPException(status_code=404, detail="Source object not found in MinIO")
+
+    task_id = str(uuid.uuid4())[:12]
+    create_background_task(task_id, "document_reanalysis", current_user["id"])
+
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text(
+                "UPDATE documents SET status = 'processing', updated_at = now() "
+                "WHERE id = CAST(:id AS uuid)"
+            ),
+            {"id": document_id},
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+    finally:
+        session.close()
+
+    thread = threading.Thread(
+        target=process_material_background,
+        args=(material_id, document_id, filename, source_bytes, task_id, None, source_kind or "pdf"),
+        daemon=True,
+    )
+    thread.start()
+
+    logger.info(
+        "Document reanalysis accepted: doc=%s material=%s task=%s by user=%s",
+        document_id, material_id, task_id, current_user["id"],
+    )
+    return {
+        "task_id": task_id,
+        "document_id": document_id,
+        "material_id": material_id,
+        "status": "pending",
     }
 
 
@@ -342,7 +482,8 @@ def list_materials(
             sa_text(f"""
                 SELECT d.source_path, d.filename, d.title, d.status, d.created_at, d.knowledge_graph,
                        COALESCE(d.visibility, 'private'), d.group_id,
-                       COALESCE(d.chunk_count, cs.chunk_count, 0) AS chunk_count
+                       COALESCE(d.chunk_count, cs.chunk_count, 0) AS chunk_count,
+                       d.id::text AS document_id
                 FROM documents d
                 LEFT JOIN (
                     SELECT material_id, COUNT(*) AS chunk_count
@@ -360,15 +501,39 @@ def list_materials(
             """),
             params,
         ).fetchall()
+
+        material_ids = [r[0] for r in records if r[0]]
+        latest_runs: dict[str, dict] = {}
+        if material_ids:
+            run_params = {f"mid_{i}": mid for i, mid in enumerate(material_ids)}
+            run_placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
+            run_rows = session.execute(
+                sa_text(
+                    f"""
+                    SELECT DISTINCT ON (material_id)
+                           material_id, status, current_stage, error_message,
+                           stage_outputs, updated_at
+                    FROM document_analysis_runs
+                    WHERE material_id IN ({run_placeholders})
+                    ORDER BY material_id, created_at DESC
+                    """
+                ),
+                run_params,
+            ).mappings().all()
+            latest_runs = {row["material_id"]: dict(row) for row in run_rows}
     finally:
         session.close()
 
-    # MinIO にPDFが存在する教材のIDセットを一括取得
+    # MinIO に元ソースが存在する教材のIDセットを一括取得
     existing_pdf_ids: set[str] = set()
     try:
         for obj_name in get_storage_client().list_objects("raw-papers", "uploads/"):
             if obj_name.endswith(".pdf"):
                 existing_pdf_ids.add(obj_name[len("uploads/"):-len(".pdf")])
+            elif obj_name.endswith(".tar.gz"):
+                existing_pdf_ids.add(obj_name[len("uploads/"):-len(".tar.gz")])
+            elif obj_name.endswith(".tgz"):
+                existing_pdf_ids.add(obj_name[len("uploads/"):-len(".tgz")])
     except Exception:
         pass  # MinIO 不達の場合は全件 has_pdf=False のまま
 
@@ -382,9 +547,23 @@ def list_materials(
             if mid in _material_status:
                 status = _material_status[mid].get("status", status)
 
+        run = latest_runs.get(mid) or {}
+        stage_outputs = run.get("stage_outputs") or {}
+        current_stage = run.get("current_stage")
+        stage_info = stage_outputs.get(current_stage) if current_stage else None
+        if not isinstance(stage_info, dict):
+            stage_info = {}
+        if run.get("status") == "running":
+            status = "processing"
+        elif run.get("status") == "failed":
+            status = "failed"
+        elif run.get("status") == "completed":
+            status = "completed"
+
         uploaded_at = r[4].isoformat() if r[4] else ""
         materials.append(MaterialOut(
             material_id=mid,
+            document_id=r[9],
             filename=r[1] or "",
             title=r[2] or "",
             status=status,
@@ -394,6 +573,11 @@ def list_materials(
             visibility=r[6] or "private",
             group_id=str(r[7]) if r[7] else None,
             has_pdf=mid in existing_pdf_ids,
+            analysis_stage=current_stage,
+            analysis_progress=stage_info.get("progress"),
+            analysis_processed=stage_info.get("processed"),
+            analysis_total=stage_info.get("total"),
+            analysis_error=run.get("error_message") or None,
         ))
 
     return materials
@@ -854,12 +1038,19 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
 - 提案するすべての章・トピック・概念は、提供された教材の記述内容に基づかなければならない
 - 教材に記載されていないトピックを「一般的だから」「基礎的だから」という理由で追加してはならない
 - 教材の内容を超えた一般知識に基づく補足は、明示的に「教材外の補足」として区別すること
-- 教材のチャンク（テキスト断片）やナレッジグラフが提供された場合、それらの情報を最大限活用してコースを設計すること
+- 提供された理論コンポーネント・依存関係グラフ・根拠Claimを最大限活用してコースを設計すること
 
 **【重要】段階的構造化の原則:**
-- チャンクの並び順（chunk_index）は教材内の論理的な流れを反映しているため、この順序を尊重してコースの章立てを構成する
+- コースの章・トピック候補は `theory_components` を主に使用する（各コンポーネントの name / summary / inputs / outputs / preconditions を参照）
+- 学習順序は `theory_component_graphs` の依存関係（edges）を優先する（PDFの出現順よりも依存関係を重視）
+- `theory_claims` は各コンポーネントの根拠確認・evidence検証に使う
+- `chunks`（原文抜粋）は説明補助として使い、コース設計の主判断材料にしない
 - 前提知識が必要な概念は、その前提となる概念より後の章・トピックに配置する（依存関係に基づいたシラバス）
 - 初学者がその分野に初めて触れることを想定し、専門用語は最初に出現する章で定義・説明するよう構成する
+
+**【注意】ナレッジグラフの扱い:**
+- `documents.knowledge_graph` はAgentパイプライン未実行の旧教材のみに利用するfallbackである
+- Agent解析済み教材では `theory_components` / `theory_component_graphs` を優先し、ナレッジグラフは参照しない
 
 **コース構成のJSONスキーマ (course_draft):**
 生成するコース構成案は以下の形式に従ってください:
@@ -886,8 +1077,8 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
 
 **対話の進め方:**
 1. まず教員の要望（テーマ、対象者、使用教材等）をヒアリングする
-2. 提供された教材の内容（ナレッジグラフ、テキストチャンク）を精査し、教材の範囲と構成を把握する
-3. 教材の内容に基づいた初期のコース構成案を提示する
+2. 提供された理論コンポーネントと依存関係グラフを精査し、教材の範囲と構成を把握する
+3. theory_components を章・トピック候補として使い、theory_component_graphs の依存関係で順序を決定する
 4. 教員のフィードバックに基づいて構成案を改善する
 5. 前提知識の不足や学習順序の問題があれば指摘する
 
@@ -900,24 +1091,72 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
 - topics[].prerequisites には、そのトピックを学ぶ前に習得しておくべき**同コース内の**トピックのタイトルを列挙する
   - 例: 第2章のトピックは第1章のトピックタイトルを prerequisites に入れる
   - 最初のトピックや前提知識不要なトピックは prerequisites を空配列 [] にする
-- domain フィールドは教材のナレッジグラフに記載されている「**分野:**」から引き継ぐこと
+- domain フィールドは教材の分野情報（コンポーネントや旧ナレッジグラフの「**分野:**」）から引き継ぐこと
   - 教材の分野情報がなければ、コースの内容を踏まえて適切な専門分野名を設定する
 - sources フィールドは常に空配列 [] のままにすること（教材はシステムが自動的に設定する）"""
+
+
+_COURSE_DRAFT_MARKER_RE = re.compile(
+    r"(?:-{3,}\s*)?COURSE_DRAFT_JSON(?:\s*-{3,})?\s*:?\s*",
+    re.IGNORECASE,
+)
+
+
+def _extract_course_draft_from_answer(raw_answer: str) -> tuple[str, dict | None]:
+    """LLM応答から course_draft JSON を分離する。
+
+    モデルが指示通りの `---COURSE_DRAFT_JSON---` だけでなく、ダッシュなしの
+    `COURSE_DRAFT_JSON` や fenced code block を返した場合もプレビューへ渡せるよう
+    にする。パースに失敗した場合も、会話本文からマーカー以降は除去する。
+    """
+    marker = _COURSE_DRAFT_MARKER_RE.search(raw_answer or "")
+    if not marker:
+        return raw_answer, None
+
+    answer = raw_answer[: marker.start()].strip()
+    json_part = raw_answer[marker.end() :].strip()
+
+    if json_part.startswith("```"):
+        json_part = json_part.split("\n", 1)[1] if "\n" in json_part else json_part[3:]
+        if "```" in json_part:
+            json_part = json_part.split("```", 1)[0]
+
+    json_part = json_part.strip()
+    if json_part.lower().startswith("json"):
+        json_part = json_part[4:].strip()
+
+    try:
+        course_draft, _ = json.JSONDecoder().raw_decode(json_part)
+    except Exception:
+        logger.warning("Failed to parse course_draft JSON: %s", json_part[:200])
+        return answer, None
+
+    if not isinstance(course_draft, dict):
+        logger.warning("Parsed course_draft JSON is not an object: %s", type(course_draft).__name__)
+        return answer, None
+    return answer, course_draft
 
 
 # ---------------------------------------------------------------------------
 # Course Builder: Material Context Builder
 # ---------------------------------------------------------------------------
 
-# チャンクテキストのサンプリング上限（1教材あたり）
+# サイズ制限（1教材あたり）
 _MAX_CHUNK_CHARS_PER_MATERIAL = 4000
+_MAX_COMPONENTS_PER_MATERIAL = 40
+_MAX_CLAIMS_PER_MATERIAL = 80
+_MAX_GRAPH_EDGES_PER_MATERIAL = 80
 
 
 def _build_material_context(
     material_ids: list[str],
     pg_session_factory=None,
 ) -> str | None:
-    """選択された教材のナレッジグラフとチャンクテキストからコンテキスト文字列を構築する。
+    """選択された教材のAgent解析済み理論コンポーネントを主入力としてコンテキスト文字列を構築する。
+
+    主入力: theory_components / theory_component_graphs / theory_claims
+    補助入力: chunks (原文抜粋) / document_analysis_runs._artifacts.document_structure
+    fallback: documents.knowledge_graph (Agent未実行の旧教材のみ)
 
     Returns None if no usable context could be built.
     """
@@ -927,17 +1166,16 @@ def _build_material_context(
     _get_pg = pg_session_factory or _pg_session
     session = _get_pg()
     try:
-        # --- 1) ドキュメントメタデータ + knowledge_graph を取得 ---
         placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
-        params: dict = {}
-        for i, mid in enumerate(material_ids):
-            params[f"mid_{i}"] = mid
+        params: dict = {f"mid_{i}": mid for i, mid in enumerate(material_ids)}
 
+        # --- 1) ドキュメントメタデータ取得（UUID と source_path の対応も取得）---
         doc_rows = session.execute(
             sa_text(f"""
-                SELECT source_path, title, filename, knowledge_graph
+                SELECT source_path, title, filename, id::text AS doc_uuid,
+                       status, knowledge_graph
                 FROM documents
-                WHERE source_path IN ({placeholders}) AND status = 'completed'
+                WHERE source_path IN ({placeholders})
             """),
             params,
         ).fetchall()
@@ -945,77 +1183,264 @@ def _build_material_context(
         if not doc_rows:
             return None
 
-        # --- 2) チャンクテキストを取得 (chunk_index 順) ---
+        # doc_uuid → source_path マッピング
+        uuid_to_mid: dict[str, str] = {row[3]: row[0] for row in doc_rows}
+        doc_uuids = list(uuid_to_mid.keys())
+        uuid_placeholders = ", ".join(f":uuid_{i}" for i in range(len(doc_uuids)))
+        uuid_params: dict = {f"uuid_{i}": uid for i, uid in enumerate(doc_uuids)}
+
+        # --- 2) theory_components (主入力) ---
+        component_rows = session.execute(
+            sa_text(f"""
+                SELECT id::text, document_id, name, component_type, component_type_text,
+                       summary, inputs, outputs, preconditions, cautions,
+                       source_chunks, evidence_claims, review_status, maturity_level
+                FROM theory_components
+                WHERE document_id IN ({uuid_placeholders})
+                ORDER BY
+                    CASE review_status WHEN 'teacher_reviewed' THEN 0 ELSE 1 END,
+                    CASE maturity_level
+                        WHEN 'peer_reviewed' THEN 0
+                        WHEN 'textbook' THEN 1
+                        WHEN 'paper_claim' THEN 2
+                        ELSE 3
+                    END
+            """),
+            uuid_params,
+        ).fetchall() if doc_uuids else []
+
+        # --- 3) theory_component_graphs (主入力) ---
+        graph_rows = session.execute(
+            sa_text(f"""
+                SELECT document_id, graph_json
+                FROM theory_component_graphs
+                WHERE document_id IN ({uuid_placeholders})
+            """),
+            uuid_params,
+        ).fetchall() if doc_uuids else []
+
+        # --- 4) theory_claims (補助入力) ---
+        claim_rows = session.execute(
+            sa_text(f"""
+                SELECT id::text, document_id, claim_type, text, normalized_text,
+                       source_scope, evidence_text, support_status, review_status
+                FROM theory_claims
+                WHERE document_id IN ({uuid_placeholders})
+                ORDER BY
+                    CASE review_status WHEN 'teacher_reviewed' THEN 0 ELSE 1 END,
+                    CASE support_status WHEN 'source_backed' THEN 0 ELSE 1 END
+            """),
+            uuid_params,
+        ).fetchall() if doc_uuids else []
+
+        # --- 5) chunks (補助入力: 原文抜粋) ---
         chunk_rows = session.execute(
             sa_text(f"""
-                SELECT material_id, chunk_index, chapter, section, text
+                SELECT material_id, chunk_index, section_id, text, page_start, page_end
                 FROM chunks
                 WHERE material_id IN ({placeholders})
                 ORDER BY material_id, chunk_index
             """),
             params,
         ).fetchall()
+
+        # --- 6) document_analysis_runs: 完了状態確認 + document_structure ---
+        analysis_rows = session.execute(
+            sa_text(f"""
+                SELECT document_id, status, stage_outputs
+                FROM document_analysis_runs
+                WHERE document_id IN ({uuid_placeholders})
+                ORDER BY updated_at DESC
+            """),
+            uuid_params,
+        ).fetchall() if doc_uuids else []
+
     finally:
         session.close()
 
-    # --- 3) コンテキスト文字列を組み立て ---
+    # 完了済み analysis run のマップ (doc_uuid → row)
+    analysis_by_uuid: dict[str, object] = {}
+    for row in analysis_rows:
+        uid = row[0]
+        if uid not in analysis_by_uuid:
+            analysis_by_uuid[uid] = row
+
+    # --- 7) コンテキスト文字列を組み立て ---
     sections: list[str] = []
-    sections.append("## 教材の内容詳細\n以下は選択された教材から抽出された詳細情報です。"
-                     "コース設計はこの内容に基づいて行ってください。\n")
+    sections.append(
+        "## Agent解析済み教材コンテキスト\n"
+        "以下は選択された教材からAgentパイプラインが生成した理論コンポーネント情報です。"
+        "コース設計はこの内容に基づいて行ってください。\n"
+    )
 
     for doc in doc_rows:
         mid = doc[0] or ""
         title = doc[1] or doc[2] or ""
-        kg = doc[3] if doc[3] and isinstance(doc[3], dict) else {}
+        doc_uuid = doc[3] or ""
+        kg = doc[5] if doc[5] and isinstance(doc[5], dict) else {}
 
         sections.append(f"### 教材: {title}")
 
-        # ナレッジグラフの概要
-        if kg.get("summary"):
-            sections.append(f"**概要:** {kg['summary']}")
+        # Agent完了状態チェック
+        analysis_run = analysis_by_uuid.get(doc_uuid)
+        pipeline_complete = analysis_run is not None and analysis_run[1] == "completed"
 
-        if kg.get("domain"):
-            sections.append(f"**分野:** {kg['domain']}")
+        doc_components = [r for r in component_rows if r[1] == doc_uuid]
+        doc_graphs = [r for r in graph_rows if r[0] == doc_uuid]
+        has_agent_data = bool(doc_components or doc_graphs)
 
-        # 主要概念
-        concepts = kg.get("concepts", [])
-        if concepts:
-            concept_lines = []
-            for c in concepts:
-                name = c.get("name", "") if isinstance(c, dict) else str(c)
-                desc = c.get("description", "") if isinstance(c, dict) else ""
-                ctype = c.get("type", "") if isinstance(c, dict) else ""
-                line = f"- {name}"
+        if not has_agent_data and not pipeline_complete:
+            sections.append(
+                "> **警告:** この教材はAgentパイプラインが未完了のため、"
+                "コース構築に十分な解析情報がありません。"
+                "教材のアップロード後しばらく待ってから再試行してください。"
+            )
+
+        # ---- 主入力: 理論コンポーネント ----
+        if doc_components:
+            sections.append("#### 理論コンポーネント")
+            for comp in doc_components[:_MAX_COMPONENTS_PER_MATERIAL]:
+                comp_id = comp[0]
+                name = comp[2] or ""
+                ctype = comp[4] or comp[3] or ""
+                summary = comp[5] or ""
+                inputs = comp[6] if isinstance(comp[6], list) else []
+                outputs = comp[7] if isinstance(comp[7], list) else []
+                preconditions = comp[8] if isinstance(comp[8], list) else []
+                cautions = comp[9] if isinstance(comp[9], list) else []
+                review = comp[12] or ""
+                maturity = comp[13] or ""
+
+                lines = [f"- Component ID: {comp_id}"]
+                lines.append(f"  Name: {name}")
                 if ctype:
-                    line += f" ({ctype})"
-                if desc:
-                    line += f": {desc}"
-                concept_lines.append(line)
-            sections.append("**主要概念:**\n" + "\n".join(concept_lines))
+                    lines.append(f"  Type: {ctype}")
+                if summary:
+                    lines.append(f"  Summary: {summary}")
+                if inputs:
+                    lines.append(f"  Inputs: {', '.join(str(x) for x in inputs[:5])}")
+                if outputs:
+                    lines.append(f"  Outputs: {', '.join(str(x) for x in outputs[:5])}")
+                if preconditions:
+                    lines.append(f"  Preconditions: {', '.join(str(x) for x in preconditions[:5])}")
+                if cautions:
+                    lines.append(f"  Cautions: {', '.join(str(x) for x in cautions[:3])}")
+                if review:
+                    lines.append(f"  Review: {review}")
+                if maturity:
+                    lines.append(f"  Maturity: {maturity}")
+                sections.append("\n".join(lines))
 
-        # チャンクテキストのサンプリング
+        # ---- 主入力: コンポーネント依存関係グラフ ----
+        if doc_graphs:
+            graph_json = doc_graphs[0][1] if isinstance(doc_graphs[0][1], dict) else {}
+            edges = graph_json.get("edges", [])
+            if edges:
+                sections.append("#### コンポーネント依存関係")
+                for edge in edges[:_MAX_GRAPH_EDGES_PER_MATERIAL]:
+                    if not isinstance(edge, dict):
+                        continue
+                    src = edge.get("source", edge.get("from", ""))
+                    tgt = edge.get("target", edge.get("to", ""))
+                    etype = edge.get("type", edge.get("relation", ""))
+                    reason = edge.get("reason", edge.get("label", ""))
+                    line = f"- {src} -> {tgt}"
+                    if etype:
+                        line += f"  (Type: {etype})"
+                    if reason:
+                        line += f"  Reason: {reason}"
+                    sections.append(line)
+
+        # ---- 補助入力: 根拠Claim ----
+        doc_claims = [r for r in claim_rows if r[1] == doc_uuid]
+        if doc_claims:
+            sections.append("#### 根拠Claim")
+            for claim in doc_claims[:_MAX_CLAIMS_PER_MATERIAL]:
+                claim_id = claim[0]
+                ctype = claim[2] or ""
+                text = claim[3] or ""
+                evidence = claim[6] or ""
+                support = claim[7] or ""
+                lines = [f"- Claim ID: {claim_id}"]
+                if ctype:
+                    lines.append(f"  Type: {ctype}")
+                if text:
+                    lines.append(f"  Text: {text[:200]}")
+                if evidence:
+                    lines.append(f"  Evidence: {evidence[:150]}")
+                if support:
+                    lines.append(f"  Support: {support}")
+                sections.append("\n".join(lines))
+
+        # ---- 補助入力: 原文抜粋 ----
         material_chunks = [r for r in chunk_rows if r[0] == mid]
         if material_chunks:
-            sections.append("**教材テキスト（抜粋）:**")
+            sections.append("#### 原文抜粋")
             char_budget = _MAX_CHUNK_CHARS_PER_MATERIAL
             for chunk in material_chunks:
                 if char_budget <= 0:
                     sections.append("... (以降省略)")
                     break
                 idx = chunk[1]
-                chapter = chunk[2] or ""
-                section_ = chunk[3] or ""
-                text = chunk[4] or ""
-                header = f"[チャンク {idx}]"
-                if chapter:
-                    header += f" {chapter}"
-                if section_:
-                    header += f" / {section_}"
+                section_id = chunk[2] or ""
+                text = chunk[3] or ""
+                page_start = chunk[4]
+                page_end = chunk[5]
+                header = f"[Chunk {idx}"
+                if section_id:
+                    header += f" / section {section_id}"
+                if page_start is not None:
+                    page_info = f"page {page_start}"
+                    if page_end is not None and page_end != page_start:
+                        page_info += f"-{page_end}"
+                    header += f" / {page_info}"
+                header += "]"
                 snippet = text[:char_budget]
                 if len(text) > char_budget:
                     snippet += "..."
                 sections.append(f"{header}\n{snippet}")
                 char_budget -= len(snippet)
+
+        # ---- 補助入力: 文書構造 (document_structure) ----
+        if analysis_run:
+            stage_outputs = analysis_run[2] if isinstance(analysis_run[2], dict) else {}
+            doc_structure = (stage_outputs.get("_artifacts") or {}).get("document_structure")
+            if doc_structure and isinstance(doc_structure, dict):
+                struct_sections = doc_structure.get("sections") or doc_structure.get("blocks") or []
+                if struct_sections:
+                    sections.append("#### 文書構造（セクション一覧）")
+                    for sec in struct_sections[:20]:
+                        if not isinstance(sec, dict):
+                            continue
+                        sec_title = sec.get("title") or sec.get("heading") or sec.get("label") or ""
+                        if sec_title:
+                            sections.append(f"- {sec_title}")
+
+        # ---- fallback: 旧 knowledge_graph (Agent未実行の場合のみ) ----
+        if not has_agent_data:
+            logger.warning(
+                "Course builder falling back to legacy documents.knowledge_graph "
+                "because no agent components were found for material %s",
+                mid,
+            )
+            if kg.get("summary"):
+                sections.append(f"**概要 (legacy):** {kg['summary']}")
+            if kg.get("domain"):
+                sections.append(f"**分野:** {kg['domain']}")
+            concepts = kg.get("concepts", [])
+            if concepts:
+                concept_lines = []
+                for c in concepts:
+                    name = c.get("name", "") if isinstance(c, dict) else str(c)
+                    desc = c.get("description", "") if isinstance(c, dict) else ""
+                    ctype = c.get("type", "") if isinstance(c, dict) else ""
+                    line = f"- {name}"
+                    if ctype:
+                        line += f" ({ctype})"
+                    if desc:
+                        line += f": {desc}"
+                    concept_lines.append(line)
+                sections.append("**主要概念 (legacy):**\n" + "\n".join(concept_lines))
 
         sections.append("")  # blank line separator
 
@@ -1064,24 +1489,7 @@ def course_builder_chat(
         logger.exception("Course builder chat LLM call failed")
         raise HTTPException(status_code=500, detail=f"Chat failed: {exc}") from exc
 
-    answer = raw_answer
-    course_draft = None
-
-    if "---COURSE_DRAFT_JSON---" in raw_answer:
-        parts = raw_answer.split("---COURSE_DRAFT_JSON---", 1)
-        answer = parts[0].strip()
-        json_part = parts[1].strip()
-        if json_part.startswith("```"):
-            json_part = json_part.split("\n", 1)[1] if "\n" in json_part else json_part[3:]
-        if json_part.endswith("```"):
-            json_part = json_part[:-3]
-        json_part = json_part.strip()
-        if json_part.startswith("json"):
-            json_part = json_part[4:].strip()
-        try:
-            course_draft = json.loads(json_part)
-        except Exception:
-            logger.warning("Failed to parse course_draft JSON: %s", json_part[:200])
+    answer, course_draft = _extract_course_draft_from_answer(raw_answer)
 
     # 選択教材の正しい material_id を確定的に course_draft["sources"] に注入する
     if course_draft is not None and body.selected_material_ids:

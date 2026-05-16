@@ -365,7 +365,7 @@ def _run_migrations() -> None:
                 material_id TEXT,
                 element_id TEXT NOT NULL,
                 element_type TEXT NOT NULL
-                    CHECK (element_type IN ('concept', 'relationship', 'formula', 'keyword')),
+                    CHECK (element_type IN ('concept', 'relationship', 'formula', 'keyword', 'reference', 'citation')),
                 surface_text TEXT NOT NULL DEFAULT '',
                 importance_score REAL NOT NULL DEFAULT 0.5,
                 offsets JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -381,6 +381,15 @@ def _run_migrations() -> None:
             "CREATE INDEX IF NOT EXISTS idx_chunk_graph_mentions_material "
             "ON chunk_graph_mentions(material_id)"
         ))
+        session.execute(sa_text(
+            "ALTER TABLE chunk_graph_mentions "
+            "DROP CONSTRAINT IF EXISTS chunk_graph_mentions_element_type_check"
+        ))
+        session.execute(sa_text("""
+            ALTER TABLE chunk_graph_mentions
+            ADD CONSTRAINT chunk_graph_mentions_element_type_check
+            CHECK (element_type IN ('concept', 'relationship', 'formula', 'keyword', 'reference', 'citation'))
+        """))
         session.execute(sa_text("""
             CREATE TABLE IF NOT EXISTS student_stumble_events (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -563,6 +572,66 @@ def _run_migrations() -> None:
         """))
         session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_section_assembly_status_course ON section_assembly_status(course_id)"))
         session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_section_assembly_status_status ON section_assembly_status(component_assembly_status)"))
+        # Migration 015: Document-first analysis pipeline (issue #226)
+        session.execute(sa_text("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS section_id      TEXT"))
+        session.execute(sa_text("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS block_ids       JSONB NOT NULL DEFAULT '[]'::jsonb"))
+        session.execute(sa_text("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS source_metadata JSONB NOT NULL DEFAULT '{}'::jsonb"))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_chunks_section ON chunks(section_id)"))
+        session.execute(sa_text("ALTER TABLE theory_components ALTER COLUMN course_id DROP NOT NULL"))
+        session.execute(sa_text("ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS document_id TEXT NOT NULL DEFAULT ''"))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_theory_components_document ON theory_components(document_id)"))
+        session.execute(sa_text("ALTER TABLE theory_component_links ALTER COLUMN course_id DROP NOT NULL"))
+        session.execute(sa_text("ALTER TABLE theory_component_links ADD COLUMN IF NOT EXISTS document_id TEXT NOT NULL DEFAULT ''"))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_theory_component_links_document ON theory_component_links(document_id)"))
+        session.execute(sa_text("ALTER TABLE theory_component_graphs ALTER COLUMN course_id DROP NOT NULL"))
+        session.execute(sa_text("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'theory_component_graphs_document_uq'
+                ) THEN
+                    ALTER TABLE theory_component_graphs
+                        ADD CONSTRAINT theory_component_graphs_document_uq UNIQUE (document_id);
+                END IF;
+            END $$
+        """))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS document_embeddings (
+                id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                document_id     TEXT NOT NULL,
+                material_id     TEXT,
+                embedding_type  TEXT NOT NULL,
+                source_version  TEXT NOT NULL DEFAULT 'v1',
+                text            TEXT NOT NULL,
+                embedding       vector(3072),
+                metadata        JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE(document_id, embedding_type, source_version)
+            )
+        """))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_document_embeddings_document ON document_embeddings(document_id)"))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_document_embeddings_type     ON document_embeddings(embedding_type)"))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS document_analysis_runs (
+                id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                document_id     TEXT NOT NULL,
+                material_id     TEXT,
+                cartridge_id    TEXT,
+                status          TEXT NOT NULL DEFAULT 'pending'
+                                    CHECK (status IN ('pending', 'running', 'completed', 'failed')),
+                current_stage   TEXT,
+                error_message   TEXT NOT NULL DEFAULT '',
+                stage_outputs   JSONB NOT NULL DEFAULT '{}'::jsonb,
+                started_at      TIMESTAMPTZ,
+                completed_at    TIMESTAMPTZ,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_document_analysis_runs_document ON document_analysis_runs(document_id)"))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_document_analysis_runs_status   ON document_analysis_runs(status)"))
         # 既存の cloned_from カラムがあれば、クローンコースとその履歴をハードリセット後にカラム廃止
         session.execute(sa_text("""
             DO $$
@@ -581,8 +650,48 @@ def _run_migrations() -> None:
             END $$
         """))
 
+        # Migration 016: chunks.embedding / document_embeddings.embedding を 768 → 3072 次元に変更
+        # text-embedding-3-large は 3072 次元を返すが init.sql が vector(768) で作成されていたため
+        # INSERT 時に "expected 768 dimensions, not 3072" が発生していた。
+        # 既存の 768 次元 embedding は 3072 次元モデルと互換性がないため NULL にリセットする。
+        session.execute(sa_text("""
+            DO $$
+            DECLARE
+                col_type TEXT;
+            BEGIN
+                SELECT format_type(atttypid, atttypmod) INTO col_type
+                FROM pg_attribute
+                WHERE attrelid = 'chunks'::regclass
+                  AND attname = 'embedding'
+                  AND attnum > 0;
+
+                IF col_type IS NOT NULL AND col_type != 'vector(3072)' THEN
+                    DROP INDEX IF EXISTS idx_chunks_embedding;
+                    ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(3072) USING NULL;
+                    CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks
+                        USING hnsw ((embedding::halfvec(3072)) halfvec_cosine_ops);
+                END IF;
+            END $$
+        """))
+        session.execute(sa_text("""
+            DO $$
+            DECLARE
+                col_type TEXT;
+            BEGIN
+                SELECT format_type(atttypid, atttypmod) INTO col_type
+                FROM pg_attribute
+                WHERE attrelid = 'document_embeddings'::regclass
+                  AND attname = 'embedding'
+                  AND attnum > 0;
+
+                IF col_type IS NOT NULL AND col_type != 'vector(3072)' THEN
+                    ALTER TABLE document_embeddings ALTER COLUMN embedding TYPE vector(3072) USING NULL;
+                END IF;
+            END $$
+        """))
+
         session.commit()
-        logger.info("Migrations (002-013) applied successfully.")
+        logger.info("Migrations (002-016) applied successfully.")
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema

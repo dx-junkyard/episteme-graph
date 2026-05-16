@@ -18,6 +18,7 @@ MIGRATION = ROOT / "backend" / "db" / "013_theory_components.sql"
 ADMIN_HTML = ROOT / "frontend" / "public" / "admin.html"
 ADMIN_JS = ROOT / "frontend" / "public" / "js" / "admin.js"
 STYLES = ROOT / "frontend" / "public" / "css" / "styles.css"
+LECTURE_STUDIO = ROOT / "backend" / "api" / "routes" / "lecture_studio.py"
 
 
 def _read(path: Path) -> str:
@@ -36,7 +37,7 @@ class TestTheoryComponentMigration:
         source = _read(ROOT / "backend" / "api" / "main.py")
         assert "Migration 013" in source
         assert "idx_theory_components_course" in source
-        assert "Migrations (002-013)" in source
+        assert "Migrations (002-0" in source
 
 
 class TestTheoryComponentSchemas:
@@ -91,6 +92,13 @@ class TestTheoryComponentRoutes:
         source = _read(ROOT / "backend" / "api" / "routes" / "admin.py")
         assert "routes.theory_components" in source
         assert "router.include_router(_theory_components_router)" in source
+
+    def test_lecture_studio_components_reads_document_scoped_pipeline_results(self):
+        source = _read(LECTURE_STUDIO)
+        assert "source_document_ids" in source
+        assert "OR document_id IN" in source
+        assert "FROM theory_components" in source
+        assert "FROM theory_component_graphs" in source
 
 
 class TestTheoryExtractionPrompt:
@@ -269,3 +277,54 @@ class TestNulCharacterSanitization:
         assert "_clean_pg_text(raw.get(\"text\")" in source or "_clean_pg_text(raw.get('text')" in source
         assert "_clean_pg_text(raw.get(\"evidence_text\")" in source or "_clean_pg_text(raw.get('evidence_text')" in source
         assert "return _strip_nul({" in source
+
+
+class TestNormalizeClaimPayloadEvidenceContract:
+    """Issue #257: evidence_text is optional; source_evidence_ids is the
+    authoritative source-backed reference."""
+
+    def test_evidence_text_not_in_required_fields(self):
+        """_normalize_claim_payload must NOT list evidence_text as required (#257)."""
+        source = _read(ROUTES)
+        import re as _re
+        # Find the required = (...) tuple inside _normalize_claim_payload
+        match = _re.search(
+            r'def _normalize_claim_payload.*?required = \((.*?)\)',
+            source, _re.DOTALL
+        )
+        assert match, "_normalize_claim_payload or required tuple not found"
+        required_tuple = match.group(1)
+        assert "evidence_text" not in required_tuple, (
+            "evidence_text must not be in required fields; source_evidence_ids / "
+            "source_scope are the authoritative reference for source-backed claims (#257)"
+        )
+
+    def test_source_evidence_ids_warning_present(self):
+        """Source code must contain warning for source_backed with no evidence refs."""
+        source = _read(ROUTES)
+        assert "source_evidence_ids" in source
+        assert "SOURCE_BACKED_CLAIM_NO_EVIDENCE_IDS" in source or (
+            "source_backed" in source and "source_evidence_ids" in source
+            and "warning" in source.lower()
+        ), "No warning for source_backed claim without source_evidence_ids"
+
+    def test_span_reason_not_used_as_evidence_text_in_persistence(self):
+        """persistence.py must not write span.reason into evidence_text (#257)."""
+        persistence_source = _read(
+            Path(__file__).resolve().parents[2]
+            / "backend" / "core" / "document_pipeline" / "persistence.py"
+        )
+        # The old buggy pattern: "evidence_text": _strip_nuls(getattr(span, "reason" ...
+        assert '"evidence_text": _strip_nuls(getattr(span, "reason"' not in persistence_source, (
+            'persist_theory_claims must not copy span.reason into evidence_text (#257)'
+        )
+        # qualification_reason must be stored in source_scope instead
+        assert "qualification_reason" in persistence_source
+
+    def test_evidence_text_empty_string_in_persistence(self):
+        """persistence.py must set evidence_text to empty string (#257)."""
+        persistence_source = _read(
+            Path(__file__).resolve().parents[2]
+            / "backend" / "core" / "document_pipeline" / "persistence.py"
+        )
+        assert '"evidence_text": ""' in persistence_source

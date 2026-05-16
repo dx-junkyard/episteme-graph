@@ -78,6 +78,16 @@ def get_lecture_sequence(
     if not topic_info:
         raise HTTPException(status_code=404, detail="Topic not found")
 
+    topic_segment = _build_topic_draft_segment(topic_id, topic_info, course_data)
+    if topic_segment:
+        return LectureSequenceResponse(
+            course_id=course_id,
+            topic_id=topic_id,
+            segments=[topic_segment],
+            total_segments=1,
+            total_duration_ms=0,
+        )
+
     # コースのソース教材 (material_id) を収集
     sources = course_data.get("sources", [])
     material_ids = [s.get("material_id") for s in sources if s.get("material_id")]
@@ -285,6 +295,18 @@ def generate_tts(
     """チャンクの spoken_text から TTS 音声を生成する。キャッシュがあればそれを返す。"""
     chunk_id = body.chunk_id
 
+    if chunk_id.startswith("topic:"):
+        course_data = get_course_data(current_user["id"], course_id)
+        if not course_data:
+            raise HTTPException(status_code=404, detail="Course not found")
+        topic = next((t for t in course_data.get("topics", []) if t.get("id") == topic_id), None)
+        if not topic:
+            raise HTTPException(status_code=404, detail="Topic not found")
+        spoken_text = _topic_spoken_script(topic)
+        if not spoken_text:
+            raise HTTPException(status_code=404, detail="Topic has no spoken script")
+        return _generate_tts_response(chunk_id, body.voice, spoken_text)
+
     # キャッシュ確認
     cached = _get_audio_cache(chunk_id, body.voice)
     if cached:
@@ -300,7 +322,15 @@ def generate_tts(
     if not spoken_text:
         raise HTTPException(status_code=404, detail="Chunk not found or has no spoken text")
 
-    # OpenAI TTS API で音声生成
+    response = _generate_tts_response(chunk_id, body.voice, spoken_text)
+    if _is_valid_uuid(chunk_id):
+        audio_bytes = base64.b64decode(response.audio_base64)
+        _save_audio_cache(chunk_id, body.voice, audio_bytes, response.duration_ms, [])
+    return response
+
+
+def _generate_tts_response(chunk_id: str, voice: str, spoken_text: str) -> LectureTTSResponse:
+    """OpenAI TTS API で音声生成する。"""
     try:
         from core.config import get_settings
         import openai
@@ -310,7 +340,7 @@ def generate_tts(
 
         response = client.audio.speech.create(
             model="tts-1",
-            voice=body.voice,
+            voice=voice,
             input=spoken_text[:4096],
             response_format="mp3",
         )
@@ -320,12 +350,6 @@ def generate_tts(
 
         # 簡易的な再生時間推定（MP3: ~128kbps → bytes / 16000 * 1000 ms）
         estimated_duration_ms = max(1000, len(audio_bytes) * 8 // 128)
-
-        # キャッシュに保存
-        _save_audio_cache(
-            chunk_id, body.voice, audio_bytes,
-            estimated_duration_ms, [],
-        )
 
         return LectureTTSResponse(
             chunk_id=chunk_id,
@@ -462,6 +486,58 @@ def _is_valid_uuid(value: str) -> bool:
         return True
     except (ValueError, AttributeError, TypeError):
         return False
+
+
+def _topic_student_material(topic: dict) -> str:
+    material = topic.get("student_material")
+    if isinstance(material, dict):
+        text = str(material.get("source_text") or "").strip()
+        if text:
+            return text
+    return str(topic.get("content") or topic.get("summary") or "").strip()
+
+
+def _topic_spoken_script(topic: dict) -> str:
+    return str(topic.get("spoken_script") or topic.get("content") or topic.get("summary") or "").strip()
+
+
+def _build_topic_draft_segment(
+    topic_id: str,
+    topic: dict,
+    course_data: dict,
+) -> LectureSegment | None:
+    """原稿スタジオの授業用ドラフトをレクチャー用セグメントに変換する。"""
+    display_text = _topic_student_material(topic)
+    spoken_text = _topic_spoken_script(topic)
+    if not display_text and not spoken_text:
+        return None
+
+    narration_persona = course_persona_settings(course_data)["narration_persona"]
+    if not spoken_text:
+        result = generate_spoken_text_and_formulas(
+            display_text,
+            chunk_index=0,
+            course_data=course_data,
+            persona_id=narration_persona,
+        )
+        spoken_text = result["spoken_text"]
+        display_text = result.get("display_text") or display_text
+        formulas = result.get("formulas") or []
+    else:
+        normalized, formulas = normalize_to_placeholder_format(display_text or spoken_text, [])
+        display_text = normalized
+
+    display_text, formulas = normalize_to_placeholder_format(display_text or spoken_text, formulas)
+    return LectureSegment(
+        chunk_id=f"topic:{topic_id}",
+        chunk_index=int(topic.get("topic_index") or 0),
+        text=display_text,
+        spoken_text=spoken_text,
+        formulas=[LectureFormulaItem(**f) for f in formulas],
+        has_audio=False,
+        duration_ms=0,
+        segment_mode="full",
+    )
 
 
 def _check_audio_cache(chunk_id: str) -> bool:

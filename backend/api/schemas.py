@@ -48,6 +48,7 @@ class CreateUserRequest(BaseModel):
 
 class MaterialOut(BaseModel):
     material_id: str
+    document_id: str | None = None
     filename: str
     title: str
     status: str  # uploaded | processing | completed | failed
@@ -57,6 +58,11 @@ class MaterialOut(BaseModel):
     visibility: str = "private"  # public | group | private
     group_id: str | None = None
     has_pdf: bool = False
+    analysis_stage: str | None = None
+    analysis_progress: int | None = None
+    analysis_processed: int | None = None
+    analysis_total: int | None = None
+    analysis_error: str | None = None
 
 
 class VisibilityUpdateRequest(BaseModel):
@@ -85,14 +91,33 @@ class LearningTopic(BaseModel):
     title: str
     chapter_index: int
     status: str = "locked"  # completed | in_progress | locked
-    prerequisites: list[LearningPrerequisite] = []
-    misconceptions: list[LearningMisconception] = []
+    prerequisites: list[LearningPrerequisite] = Field(default_factory=list)
+    misconceptions: list[LearningMisconception] = Field(default_factory=list)
+    summary: str = ""
+    content: str = ""
+    content_blocks: list[dict] = Field(default_factory=list)
+    learning_objectives: list[str] = Field(default_factory=list)
+    prerequisite_concepts: list[str] = Field(default_factory=list)
+    blackbox_policy: dict | None = Field(default_factory=dict)
+    assessment_prompts: list[str] = Field(default_factory=list)
+    expected_misconceptions: list[str] = Field(default_factory=list)
+    linked_component_ids: list[str] = Field(default_factory=list)
+    linked_equation_ids: list[str] = Field(default_factory=list)
+    source_evidence_ids: list[str] = Field(default_factory=list)
+    teaching_takeaways: list[str] = Field(default_factory=list)
+    material_chunk_ids: list[str] = Field(default_factory=list)
+    source_excerpt: str = ""
+    key_concepts: list[str] | None = Field(default_factory=list)
+    student_material: dict | None = Field(default_factory=dict)
+    spoken_script: str | None = ""
+    cautions: list[str] | None = Field(default_factory=list)
+    check_questions: list[dict | str] | None = Field(default_factory=list)
 
 
 class GraphMention(BaseModel):
     element_id: str
     label: str
-    element_type: str = "concept"  # concept | relationship | formula | keyword
+    element_type: str = "concept"  # concept | relationship | formula | keyword | reference | citation
     surface_text: str = ""
     importance_score: float = 0.5
 
@@ -187,6 +212,7 @@ class LearningCourseDetail(BaseModel):
     concepts: list[LearningConcept] = []
     sources: list[LearningSource] = []
     referenced_sections: list[LearningReferencedSection] = []
+    course_content_status: dict = Field(default_factory=dict)
     progress: dict | None = None
 
 
@@ -231,19 +257,54 @@ class LearningChatRequest(BaseModel):
     message: str
     history: list[dict] = []
     action: str | None = None
+    support_action: str | None = None
+    support_context: dict | None = None
     chunk_id: str | None = None
     element_id: str | None = None
     element_type: str | None = None
     element_label: str | None = None
 
 
+class LearningSupportNextAction(BaseModel):
+    type: str
+    label: str
+    message: str = ""
+    target_topic_id: str | None = None
+
+
+class LearningSupportOriginOut(BaseModel):
+    course_id: str
+    topic_id: str
+    topic_title: str
+    chapter_title: str = ""
+
+
 class LearningChatResponse(BaseModel):
     answer: str
     course_update: dict | None = None
+    support_mode: str | None = None
+    status_label: str | None = None
+    origin: LearningSupportOriginOut | None = None
+    next_actions: list[LearningSupportNextAction] = []
 
 
 class LearningChatHistoryResponse(BaseModel):
     history: list[dict]
+
+
+class LearningCheckQuestionRequest(BaseModel):
+    """次セクションへ進む前の確認問題への回答。"""
+    answer: str
+    question: str = ""
+    check_question: dict | None = None
+
+
+class LearningCheckQuestionResponse(BaseModel):
+    passed: bool
+    feedback: str
+    model_answer: str = ""
+    answer_requirements: list[str] = Field(default_factory=list)
+    explanation: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +474,12 @@ class LectureFormulaItem(BaseModel):
     latex: str
     spoken: str  # 音声読み上げ用テキスト
     is_display: bool = False  # True: ブロック数式（独立行）, False: インライン数式
+    label: str | None = None  # 論文中の式番号（例: 1.1）
+    block_id: str | None = None
+    source_image: dict | None = None  # EquationSemanticAgent の bbox crop 表示用
+    source_location: dict | None = None
+    needs_math_review: bool = False
+    review_reason: list[str] = Field(default_factory=list)
 
 
 class LectureSegment(BaseModel):
@@ -693,6 +760,7 @@ class TheoryComponentOut(BaseModel):
     invalid_conditions: list[TheoryConditionItem] = Field(default_factory=list)
     dependencies: list[TheoryConditionItem] = Field(default_factory=list)
     connectors: dict = Field(default_factory=dict)
+    component_type_text: str = ""
     internal_flow: list[dict] = Field(default_factory=list)
     blackbox_policy: TheoryBlackboxPolicy = Field(default_factory=TheoryBlackboxPolicy)
     validation_warnings: list[dict] = Field(default_factory=list)
@@ -760,6 +828,8 @@ class ComponentGraphNode(BaseModel):
     display_order: int = 0
     origin: str = "paper"
     component_type: str = ""
+    component_type_text: str = ""
+    summary: str = ""
 
 
 class ComponentGraphEdge(BaseModel):

@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Episteme Graph — 管理画面</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-  <link rel="stylesheet" href="/css/styles.css">
+  <link rel="stylesheet" href="/css/styles.css?v=component-graph-20260507-5">
+  <script defer src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
 </head>
 <body>
   <div class="admin-app">
@@ -83,11 +84,11 @@
         <h3 class="admin-section-title">教材アップロード</h3>
         <div class="upload-zone" id="upload-zone">
           <div class="upload-icon">&#128196;</div>
-          <p>PDFファイルをドラッグ＆ドロップ</p>
+          <p>PDF または TeX .tar.gz をドラッグ＆ドロップ</p>
           <p style="font-size:12px;color:var(--color-text-tertiary)">または</p>
           <label class="upload-btn">
             ファイルを選択
-            <input type="file" id="file-input" accept=".pdf" hidden>
+            <input type="file" id="file-input" accept=".pdf,.tar.gz,.tgz,application/pdf,application/gzip" hidden>
           </label>
         </div>
         <div id="upload-status" class="upload-status"></div>
@@ -196,22 +197,11 @@
           </div>
           <div class="ls-topbar-right">
             <div class="ls-action-menu">
-              <button id="ls-pipeline-menu-btn" class="admin-action-btn ls-menu-trigger" type="button" disabled>パイプラインを実行 ▼</button>
-              <div id="ls-pipeline-menu" class="ls-menu" hidden>
-                <button id="ls-reanalyze-structure-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>DSLを再解析</span></button>
-                <button id="ls-claims-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>構成要素を抽出（主張など）</span></button>
-                <button id="ls-components-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>論理要素を抽出</span></button>
-                <button id="ls-graph-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>グラフを更新</span></button>
-                <div class="ls-menu-divider"></div>
-                <button id="ls-generate-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>スクリプトを生成</span></button>
-                <button id="ls-audio-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>音声を生成</span></button>
-              </div>
-            </div>
-            <div class="ls-action-menu">
-              <button id="ls-more-menu-btn" class="admin-action-btn ls-menu-trigger" type="button" disabled>その他 ▼</button>
+              <button id="ls-more-menu-btn" class="admin-action-btn ls-menu-trigger" type="button" disabled>コース設定 ▼</button>
               <div id="ls-more-menu" class="ls-menu" hidden>
                 <button id="ls-settings-btn" class="ls-menu-item" type="button" disabled><span>設定</span></button>
-                <button id="ls-export-btn" class="ls-menu-item" type="button" disabled><span>外部レビュー用に書き出し</span></button>
+                <button id="ls-course-content-btn" class="ls-menu-item" type="button" disabled><span>コース内容生成</span></button>
+                <button id="ls-audio-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>音声生成</span></button>
               </div>
             </div>
           </div>
@@ -220,10 +210,23 @@
 
         <!-- Three-panel layout -->
         <div class="ls-panels">
-          <!-- Left: document structure navigation -->
+          <!-- Left: navigation panel with 3 tabs (Issue #232) -->
           <div class="ls-nav-panel">
-            <div class="ls-nav-header">文書構造</div>
-            <div id="ls-chunk-list" class="ls-chunk-list">
+            <div class="ls-nav-tabs">
+              <button class="ls-nav-tab active" data-ls-nav="course">コース</button>
+              <button class="ls-nav-tab" data-ls-nav="document">文書構造</button>
+              <button class="ls-nav-tab" data-ls-nav="components">コンポーネント</button>
+            </div>
+            <!-- コースタブ -->
+            <div id="ls-course-list" class="ls-chunk-list">
+              <div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">コースを選択してください</div>
+            </div>
+            <!-- 文書構造タブ -->
+            <div id="ls-chunk-list" class="ls-chunk-list" hidden>
+              <div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">コースを選択してください</div>
+            </div>
+            <!-- コンポーネントタブ -->
+            <div id="ls-components-list" class="ls-chunk-list" hidden>
               <div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">コースを選択してください</div>
             </div>
           </div>
@@ -233,9 +236,8 @@
             <div class="ls-workbar">
               <div class="ls-work-tabs" id="ls-work-tabs">
                 <button class="ls-work-tab active" data-ls-view="edit">原稿</button>
-                <button class="ls-work-tab" data-ls-view="structure">構造</button>
-                <button class="ls-work-tab" data-ls-view="claims">理論グラフ</button>
-                <button class="ls-work-tab" data-ls-view="audio">音声</button>
+                <button class="ls-work-tab" data-ls-view="structure" hidden>構造</button>
+                <button class="ls-work-tab" data-ls-view="claims" hidden>理論グラフ</button>
               </div>
               <div class="ls-work-tabs ls-theory-graph-tabs" id="ls-theory-graph-tabs" hidden>
                 <button class="ls-work-tab active" data-ls-view="claims">主張</button>
@@ -518,6 +520,6 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-  <script src="/js/admin.js"></script>
+  <script src="/js/admin.js?v=lecture-studio-tabs-20260509-1"></script>
 </body>
 </html>

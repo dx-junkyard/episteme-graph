@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS chunk_graph_mentions (
     material_id      TEXT,
     element_id       TEXT NOT NULL,
     element_type     TEXT NOT NULL
-                         CHECK (element_type IN ('concept', 'relationship', 'formula', 'keyword')),
+                         CHECK (element_type IN ('concept', 'relationship', 'formula', 'keyword', 'reference', 'citation')),
     surface_text     TEXT NOT NULL DEFAULT '',
     importance_score REAL NOT NULL DEFAULT 0.5,
     offsets          JSONB NOT NULL DEFAULT '[]'::jsonb,

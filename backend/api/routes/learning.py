@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,6 +17,8 @@ from schemas import (
     LearningChatHistoryResponse,
     LearningChatRequest,
     LearningChatResponse,
+    LearningCheckQuestionRequest,
+    LearningCheckQuestionResponse,
     LearningCourseDetail,
     LearningCourseLayeredResponse,
     LearningCourseOut,
@@ -44,8 +47,10 @@ from services import (
     user_can_view_course,
 )
 from core.llm import generate_text, get_llm_params
+from core.learning_support_agent import LearningSupportAgent
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
+from core.course_content_builder import build_course_content_background
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +103,12 @@ def create_course(
         group_id=body.group_id if body.visibility == "group" else None,
         description=body.description,
     )
+
+    threading.Thread(
+        target=build_course_content_background,
+        args=(current_user["id"], course_id),
+        daemon=True,
+    ).start()
 
     logger.info("Created course '%s' (id=%s) for user=%s", body.title, course_id, current_user["id"])
     return LearningCourseOut(
@@ -558,7 +569,9 @@ def _generate_learning_advice_response(
         "1. 【歓迎と目標】このトピックで学ぶことの全体像と、最終的な学習目標を簡潔に説明する。\n"
         "2. 【構成要素】習得すべき主要な概念をリストアップする。\n"
         "3. 【前提知識の確認】このトピックを学ぶために必要な前提知識を提示する。\n"
-        "4. 【ネクストアクション】「まずは前提知識の復習から始めますか？ それとも最初の概念の説明に進みますか？」と、学生に次の行動を選ばせる質問で締めくくる。\n\n"
+        "4. 【ネクストアクション】本文の自然文だけで選択肢を書かず、必ず次の形式でクリック用候補を2つ出す:\n"
+        "   [ACTION_BUTTON: 前提知識を復習する]\n"
+        "   [ACTION_BUTTON: 最初の概念の説明に進む]\n\n"
         "※注意: ここでは具体的な解説（数式展開など）はまだ行わないこと。"
     )
 
@@ -575,7 +588,8 @@ def _generate_learning_advice_response(
             f"これから「{topic_title}」の学習を始めます。\n\n"
             + (f"**習得すべき主要概念:** {', '.join(concepts)}\n\n" if concepts else "")
             + (f"**必要な前提知識:** {', '.join(prerequisites)}\n\n" if prerequisites else "")
-            + "まずは前提知識の復習から始めますか？ それとも最初の概念の説明に進みますか？"
+            + "[ACTION_BUTTON: 前提知識を復習する]\n"
+            + "[ACTION_BUTTON: 最初の概念の説明に進む]"
         )
 
 
@@ -739,6 +753,58 @@ def _generate_graph_element_explanation(
     return LearningChatResponse(answer=answer, course_update=None)
 
 
+def _topic_student_material(topic: dict) -> str:
+    material = topic.get("student_material")
+    if isinstance(material, dict):
+        text = str(material.get("source_text") or "").strip()
+        if text:
+            return text
+    return str(topic.get("content") or topic.get("summary") or "").strip()
+
+
+def _normalize_check_question_item(item: object) -> dict:
+    if isinstance(item, dict):
+        question = str(item.get("question") or item.get("text") or "").strip()
+        requirements = item.get("answer_requirements") or item.get("required_elements") or []
+        if isinstance(requirements, str):
+            requirements = [line.strip() for line in requirements.splitlines() if line.strip()]
+        elif isinstance(requirements, list):
+            requirements = [str(v).strip() for v in requirements if str(v).strip()]
+        else:
+            requirements = []
+        return {
+            "question": question,
+            "model_answer": str(item.get("model_answer") or item.get("answer") or "").strip(),
+            "answer_requirements": requirements,
+            "explanation": str(item.get("explanation") or item.get("rationale") or "").strip(),
+        }
+    return {
+        "question": str(item or "").strip(),
+        "model_answer": "",
+        "answer_requirements": [],
+        "explanation": "",
+    }
+
+
+def _select_check_question(topic: dict, requested_question: str = "", request_item: dict | None = None) -> dict:
+    if request_item:
+        normalized = _normalize_check_question_item(request_item)
+        if normalized.get("question"):
+            return normalized
+    questions = topic.get("check_questions") or topic.get("assessment_prompts") or []
+    normalized_questions = [_normalize_check_question_item(item) for item in questions]
+    requested = (requested_question or "").strip()
+    if requested:
+        for item in normalized_questions:
+            if item.get("question") == requested:
+                return item
+        return _normalize_check_question_item(requested)
+    for item in normalized_questions:
+        if item.get("question"):
+            return item
+    return _normalize_check_question_item("このセクションの要点を説明してください。")
+
+
 @router.get(
     "/courses/{course_id}/topics/{topic_id}/material",
     response_model=TopicMaterialResponse,
@@ -748,25 +814,58 @@ def get_topic_material(
     topic_id: str,
     current_user: dict = Depends(_get_current_user),
 ) -> TopicMaterialResponse:
-    """N番目のトピックにN番目のチャンクを返す（ベクトル検索なし）。
+    """トピック本文を受講画面用の教材として返す。
 
-    lecture_studio._get_course_chunks と同じロジックでコース教材を chunk_index 順に全取得し、
-    トピックの配列インデックスと同じ位置のチャンクを返す。データ移行不要。
+    受講体験の主ソースは ``learning_courses.data.topics[].content``。
+    PDF復元チャンクは、topic content が未生成の場合だけ後方互換のフォールバックに使う。
     """
     course_data = get_course_data(current_user["id"], course_id)
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
 
     topics = course_data.get("topics", [])
-    topic_index = next(
-        (i for i, t in enumerate(topics) if t.get("id") == topic_id),
-        None,
-    )
+    topic_index = None
+    topic = None
+    for i, t in enumerate(topics):
+        if t.get("id") == topic_id:
+            topic_index = i
+            topic = t
+            break
     if topic_index is None:
         raise HTTPException(status_code=404, detail="Topic not found")
 
-    all_chunks = get_course_chunks_ordered(course_data)
+    topic_text = _topic_student_material(topic or {})
+    if topic_text.strip():
+        formulas: list[dict] = []
+        for block in (topic or {}).get("content_blocks") or []:
+            if not isinstance(block, dict) or block.get("type") != "equations":
+                continue
+            for item in block.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                latex = item.get("latex") or ""
+                if not latex:
+                    continue
+                formulas.append({
+                    "id": item.get("equation_id") or f"TOPIC_FORMULA_{len(formulas)}",
+                    "latex": latex,
+                    "label": item.get("label") or "",
+                    "plain_text": item.get("plain_text") or "",
+                    "is_display": True,
+                })
+        chunks = [ChunkContent(
+            id=f"topic:{topic_id}",
+            text=topic_text,
+            chunk_index=topic_index,
+            formulas=formulas,
+            chapter=None,
+            section=(topic or {}).get("title"),
+            material_id=None,
+            graph_mentions=[],
+        )]
+        return TopicMaterialResponse(topic_id=topic_id, chunks=chunks)
 
+    all_chunks = get_course_chunks_ordered(course_data)
     if topic_index < len(all_chunks):
         raw = all_chunks[topic_index]
         chunks = [ChunkContent(
@@ -783,6 +882,112 @@ def get_topic_material(
         chunks = []
 
     return TopicMaterialResponse(topic_id=topic_id, chunks=chunks)
+
+
+@router.post(
+    "/courses/{course_id}/topics/{topic_id}/check",
+    response_model=LearningCheckQuestionResponse,
+)
+def check_topic_understanding(
+    course_id: str,
+    topic_id: str,
+    body: LearningCheckQuestionRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> LearningCheckQuestionResponse:
+    """次セクションへ進む前の確認問題を採点し、未理解ならつまづきとして記録する。"""
+    course_data = get_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    topic = next((t for t in course_data.get("topics", []) if t.get("id") == topic_id), None)
+    if not topic:
+        raise HTTPException(status_code=404, detail="Topic not found")
+
+    check_item = _select_check_question(topic, body.question, body.check_question)
+    question = check_item.get("question") or "このセクションの要点を説明してください。"
+    expected_model_answer = str(check_item.get("model_answer") or "").strip()
+    answer_requirements = [
+        str(v).strip() for v in (check_item.get("answer_requirements") or [])
+        if str(v).strip()
+    ]
+    explanation = str(check_item.get("explanation") or "").strip()
+
+    material_text = _topic_student_material(topic)
+    requirements_text = "\n".join(f"- {r}" for r in answer_requirements) or "(未設定)"
+    params = get_llm_params("fast")
+    prompt = (
+        "あなたは確認問題を採点する大学教員です。JSONのみを返してください。\n"
+        "形式: {\"passed\": true/false, \"feedback\": \"短い講評\", \"model_answer\": \"模範解答\", \"explanation\": \"必要なら解説\"}\n\n"
+        f"コース: {course_data.get('title', course_id)}\n"
+        f"セクション: {topic.get('title', topic_id)}\n"
+        f"教材:\n{material_text[:5000]}\n\n"
+        f"確認問題: {question}\n"
+        f"模範解答（設定済みの場合はこれを基準にする）:\n{expected_model_answer or '(未設定)'}\n\n"
+        f"回答に必要な要素:\n{requirements_text}\n\n"
+        f"解説（設定済みの場合はフィードバックに反映する）:\n{explanation or '(未設定)'}\n\n"
+        f"受講者の回答: {body.answer}\n\n"
+        "判定基準: 回答に必要な要素を概ね満たし、自分の言葉で説明できていれば passed=true。"
+        "核心が抜けている、逆に理解している、空欄に近い場合は false。"
+    )
+
+    parsed: dict = {}
+    try:
+        raw = generate_text(
+            messages=[{"role": "user", "content": prompt}],
+            model=params["model"],
+            reasoning_effort=params["reasoning_effort"],
+            temperature=0.1,
+        )
+        import json
+        import re
+        match = re.search(r"\{[\s\S]*\}", raw or "")
+        parsed = json.loads(match.group(0) if match else raw)
+    except Exception:
+        logger.warning("Check question grading failed; using conservative fallback", exc_info=True)
+        passed = len((body.answer or "").strip()) >= 40
+        parsed = {
+            "passed": passed,
+            "feedback": "回答の具体性をもとに暫定判定しました。",
+            "model_answer": expected_model_answer or material_text[:800],
+            "explanation": explanation,
+        }
+
+    passed = bool(parsed.get("passed"))
+    feedback = str(parsed.get("feedback") or "")
+    model_answer = str(parsed.get("model_answer") or expected_model_answer or material_text[:800])
+    response_explanation = str(parsed.get("explanation") or explanation or "")
+
+    if not passed:
+        instructor_id = None
+        session = _pg_session()
+        try:
+            row = session.execute(
+                sa_text("SELECT user_id FROM learning_courses WHERE id = :course_id LIMIT 1"),
+                {"course_id": course_id},
+            ).fetchone()
+            instructor_id = str(row[0]) if row and row[0] else None
+        finally:
+            session.close()
+        record_student_stumble_event(
+            instructor_id=instructor_id,
+            student_id=current_user["id"],
+            course_id=course_id,
+            material_id=None,
+            chunk_id=None,
+            element_id=topic_id,
+            element_label=topic.get("title", topic_id),
+            event_type="misconception",
+            user_message=f"確認問題: {question}\n回答: {body.answer}",
+            generated_explanation=model_answer[:4000],
+        )
+
+    return LearningCheckQuestionResponse(
+        passed=passed,
+        feedback=feedback,
+        model_answer=model_answer,
+        answer_requirements=answer_requirements,
+        explanation=response_explanation,
+    )
 
 
 @router.get(
@@ -879,10 +1084,20 @@ def learning_chat(
     # domain が未設定の場合は course_title にフォールバック
     domain = course_data.get("domain") or course_title
     response_persona = course_persona_settings(course_data)["response_persona"]
+    support_agent = LearningSupportAgent(course_id, course_data)
+    support_origin = support_agent.origin_for_topic(topic_id, topic_info)
+
+    if body.support_action == "return_to_learning_path":
+        result = support_agent.return_to_path_result((body.support_context or {}).get("origin"))
+        persist_chat_history(
+            current_user["id"], course_id, topic_id,
+            body.history, body.message, result.answer,
+        )
+        return LearningChatResponse(**result.model_dump(), course_update=None)
 
     # UIサジェスト由来の明示アクションは自然文の意図分類より優先する。
     if body.action == "EXPLAIN_GRAPH_ELEMENT":
-        return _generate_graph_element_explanation(
+        graph_response = _generate_graph_element_explanation(
             user_id=current_user["id"],
             course_id=course_id,
             topic_id=topic_id,
@@ -891,6 +1106,14 @@ def learning_chat(
             course_data=course_data,
             body=body,
         )
+        if body.support_context:
+            result = support_agent.with_learning_actions(
+                answer=graph_response.answer,
+                mode="detail_explanation",
+                origin=support_origin,
+            )
+            return LearningChatResponse(**result.model_dump(), course_update=graph_response.course_update)
+        return graph_response
 
     # 2. 意図分類（Intent Routing）
     intent = _classify_intent(body.message, course_title)
@@ -914,6 +1137,17 @@ def learning_chat(
             course_title, topic_title, body.message,
             topic_info=topic_info, course_data=course_data,
         )
+        if body.support_action == "check_prerequisites" or LearningSupportAgent.is_prerequisite_request(body.message):
+            result = support_agent.with_learning_actions(
+                answer=advice_answer,
+                mode="prerequisite_review",
+                origin=support_origin,
+            )
+            persist_chat_history(
+                current_user["id"], course_id, topic_id,
+                body.history, body.message, result.answer,
+            )
+            return LearningChatResponse(**result.model_dump(), course_update=None)
         persist_chat_history(
             current_user["id"], course_id, topic_id,
             body.history, body.message, advice_answer,
@@ -925,15 +1159,24 @@ def learning_chat(
         current_user["id"], course_id, course_data, topic_title, body.message
     )
     if prerequisite_intervention:
+        result = support_agent.with_learning_actions(
+            answer=prerequisite_intervention,
+            mode="prerequisite_review",
+            origin=support_origin,
+        )
         persist_chat_history(
             current_user["id"], course_id, topic_id,
-            body.history, body.message, prerequisite_intervention,
+            body.history, body.message, result.answer,
         )
-        return LearningChatResponse(answer=prerequisite_intervention, course_update=None)
+        return LearningChatResponse(**result.model_dump(), course_update=None)
 
     # 4. RAG: システム全域のチャンクを検索し、コンテキストを構築
     chunk_results = search_chunks_with_metadata(body.message, top_k=8)
     cited_chunks = []
+    if topic_info:
+        topic_material = _topic_student_material(topic_info)
+        if topic_material:
+            cited_chunks.append(f"[現在表示中の教材]\n{topic_material[:5000]}")
     for r in chunk_results:
         if r["score"] >= 0.30:
             cited_chunks.append(f"[出典: 『{r['source_title']}』]\n{r['text']}")
@@ -978,4 +1221,11 @@ def learning_chat(
         current_user["id"], course_id, topic_id,
         body.history, body.message, answer,
     )
+    if body.support_context:
+        result = support_agent.with_learning_actions(
+            answer=answer,
+            mode="detail_explanation",
+            origin=support_origin,
+        )
+        return LearningChatResponse(**result.model_dump(), course_update=course_update)
     return LearningChatResponse(answer=answer, course_update=course_update)

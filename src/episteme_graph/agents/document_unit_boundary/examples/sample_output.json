@@ -1,0 +1,79 @@
+{
+  "document_id": "doc_sample_paper",
+  "source_file": "/path/to/sample_paper.pdf",
+  "unit_detection_confidence": 0.72,
+  "needs_review": true,
+  "review_reasons": [
+    "multiple_candidate_units_detected"
+  ],
+  "target_unit_id": "unit_001",
+  "units": [
+    {
+      "unit_id": "unit_001",
+      "unit_type": "article",
+      "title": "Quantum Error Correction in Topological Systems",
+      "title_block_id": "blk_001_0000",
+      "authors": ["Alice Smith", "Bob Johnson"],
+      "start_page": 1,
+      "start_block_id": "blk_001_0000",
+      "end_page": 4,
+      "end_block_id": "blk_004_0023",
+      "confidence": 0.82,
+      "needs_review": false,
+      "review_reasons": [],
+      "included_block_ids": [
+        "blk_001_0000",
+        "blk_001_0001",
+        "blk_001_0002",
+        "blk_002_0003",
+        "blk_002_0004",
+        "blk_003_0015",
+        "blk_004_0022",
+        "blk_004_0023"
+      ]
+    },
+    {
+      "unit_id": "unit_002",
+      "unit_type": "article",
+      "title": "Decoherence in Superconducting Qubits",
+      "title_block_id": "blk_005_0024",
+      "authors": ["Carol Davis"],
+      "start_page": 5,
+      "start_block_id": "blk_005_0024",
+      "end_page": 8,
+      "end_block_id": "blk_008_0047",
+      "confidence": 0.68,
+      "needs_review": true,
+      "review_reasons": [
+        "start_boundary_inside_page"
+      ],
+      "included_block_ids": [
+        "blk_005_0024",
+        "blk_005_0025",
+        "blk_006_0030",
+        "blk_008_0047"
+      ]
+    }
+  ],
+  "excluded_blocks": [
+    {
+      "block_id": "blk_000_0000",
+      "page": 0,
+      "reason": "front_matter"
+    },
+    {
+      "block_id": "blk_004_0024",
+      "page": 4,
+      "reason": "back_matter"
+    }
+  ],
+  "validation_issues": [
+    {
+      "rule_id": "multiple_units_auto_selected_target",
+      "severity": "warning",
+      "message": "2 units detected; target auto-selected as 'unit_001'",
+      "unit_id": null,
+      "block_id": null
+    }
+  ]
+}

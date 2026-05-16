@@ -49,11 +49,14 @@ cd backend && pytest backend/tests/test_diff_merge.py -v
 ### ディレクトリ構成
 
 ```
-frontend/          → SPA (HTML/CSS/JS) + nginx リバースプロキシ
-backend/api/       → FastAPI サーバー（認証・学習・Admin エンドポイント）
-backend/core/      → コアエンジン（スキーマ・抽出・埋め込み・検索）
-backend/tests/     → pytest テスト
-backend/scripts/   → 初期化スクリプト
+frontend/                      → SPA (HTML/CSS/JS) + nginx リバースプロキシ
+backend/api/                   → FastAPI サーバー（認証・学習・Admin エンドポイント）
+backend/core/                  → コアエンジン（スキーマ・抽出・埋め込み・検索）
+backend/cartridges/            → ドメインカートリッジ定義（particle_physics など）
+backend/tests/                 → pytest テスト（FastAPI / core 用）
+backend/scripts/               → 初期化スクリプト
+src/episteme_graph/agents/     → PDF解析エージェント群（アップロード後処理）
+src/tests/                     → agents 用 pytest テスト
 ```
 
 ### バックエンド主要ファイル
@@ -84,6 +87,117 @@ backend/scripts/   → 初期化スクリプト
 4. テキストチャンク → PostgreSQL pgvector に埋め込み（3072次元）
 5. 概念ノード・エッジ → Neo4j 保存（グラフ走査用）
 6. 抽出構造 → MinIO (`extracted-structures` バケット)
+
+### PDF解析エージェント パイプライン（ドキュメントアップロード後処理）
+
+ドキュメントがアップロードされた後、コース作成とは切り離した形で以下のagent群が順番に実行され、最終的に再利用可能な理論コンポーネントを生成する。各agentは独立したモジュールとして `src/episteme_graph/agents/` に実装する。
+
+#### パイプライン概要
+
+```
+PDF ファイル
+    ↓
+[#216] DocumentStructureAgent   — 文書構造復元（structure-first, parser-driven）
+    ↓  DocumentStructureResult (JSON)
+[#237] EvidenceRegistryBuilder  — PDF 原文由来 evidence の一元管理（非LLM）
+    ↓  EvidenceRegistryResult (JSON)
+[#217] PaperSkeletonAgent       — 論文backbone仮説化（LLM-first）
+    ↓  PaperSkeletonResult (JSON)
+[#218] RhetoricalRoleAgent      — chunk/span の論理役割判定（LLM-first）
+    ↓  RhetoricalRoleResult (JSON)
+[#219] ClaimQualificationAgent  — Claim採否・区分・粒度（LLM-first）
+    ↓  ClaimQualificationResult (JSON)
+[#237] ClaimObjectBuilder       — 最終 claims.json の決定論的組立（非LLM）
+    ↓  ClaimObjectBuildResult (JSON)
+[#220] EquationSemanticsAgent   — 数式ブロック意味役割復元（LLM-first）
+                                  + to_equations_export() で equations.json 化
+    ↓  EquationSemanticsResult (JSON)
+[#237] DerivationChainAgent     — 式間導出チェーン構築（非LLM）
+    ↓  DerivationChainResult (JSON)
+[#237] FigureTableSemanticsAgent — 図表の意味復元（caption-first, LLM enricher 任意）
+    ↓  FigureTableSemanticsResult (JSON)
+[#221] ThesisReconstructionAgent — 中心命題・支持構造の再構成（LLM-first）
+    ↓  ThesisReconstructionResult (JSON)
+[#222] DSLLinkingAgent          — Claim/Equation/Thesis → DSL グラフ接続（LLM-first）
+    ↓  DSLLinkingResult (JSON)
+[#223] ComponentAssemblyAgent   — 再利用可能コンポーネント生成（LLM-first + cartridge-aware）
+    ↓  ComponentAssemblyResult (JSON)
+[#237] CourseMappingAgent       — Component → Course topic 接続（決定論的マッピング）
+    ↓  CourseMappingResult (course_info.json)
+```
+
+#### 各Agentの実装場所
+
+```
+src/episteme_graph/agents/
+  document_structure/      → DocumentStructureAgent (#216)
+  evidence_registry/       → EvidenceRegistryBuilder (#237)
+  paper_skeleton/          → PaperSkeletonAgent (#217)
+  rhetorical_role/         → RhetoricalRoleAgent (#218)
+  claim_qualification/     → ClaimQualificationAgent (#219)
+  claim_object_builder/    → ClaimObjectBuilder (#237)
+  equation_semantics/      → EquationSemanticsAgent (#220)
+  derivation_chain/        → DerivationChainAgent (#237)
+  figure_table_semantics/  → FigureTableSemanticsAgent (#237)
+  course_mapping/          → CourseMappingAgent (#237)
+  thesis_reconstruction/ → ThesisReconstructionAgent (#221)
+  dsl_linking/          → DSLLinkingAgent (#222)
+  component_assembly/   → ComponentAssemblyAgent (#223)
+```
+
+各Agentディレクトリは最低限以下のファイルを持つ:
+```
+__init__.py
+agent.py           → Agent本体クラス
+cartridge_loader.py → CartridgeLoader（各agentで実装、共通インターフェース）
+input_builder.py   → LLM入力の構築
+prompt.py          → プロンプト定義
+llm_client.py      → LLM API呼び出し（structured output）
+schema.py          → dataclass/Pydanticモデル定義
+validator.py       → 出力スキーマ検証
+repair.py          → validation失敗時の再試行ロジック
+examples/          → サンプル入出力JSON
+```
+
+#### 設計原則
+
+**DocumentStructureAgent (#216)**: structure-first（パーサ・レイアウト優先）。意味解釈は行わない。曖昧なblockのみLLM補助。
+
+**PaperSkeletonAgent (#217) 以降**: LLM-first。生成・採否・関係付けの高次判断はLLMに委ねる。入力整形・validation・repairは非LLMで処理する。
+
+**全Agent共通ルール**:
+1. **cartridge-aware**: active cartridgeが指定されていれば語彙・検証ルールに使う。cartridgeがなくても単独動作すること
+2. **structured output**: LLM出力は必ずJSONスキーマ検証し、失敗時はrepair/retryを実行
+3. **evidence-based**: 各出力フィールドに `reason` と `confidence` (0.0〜1.0) を付与
+4. **情報を落とさない**: 不明は `unknown` / `deferred` で保持し、削除しない
+5. **maturity・review情報の最終確定禁止**: LLMが提案しても provisional に留める
+
+#### カートリッジシステム
+
+ドメイン固有の語彙・ルール・検証定義を持つJSONファイル群。`backend/cartridges/<cartridge_id>/` に配置する。
+
+```
+backend/cartridges/particle_physics/
+  ontology.json         → concept types / aliases / notation_patterns / normalization_hints
+  validation_rules.json → block typing / claim field / component field の妥当性チェック
+  component_types.json  → 許可されるcomponent type語彙
+  relation_types.json   → dependency / connector 語彙
+  support_statuses.json → サポートステータス定義
+  maturity_levels.json  → 成熟度レベル定義
+```
+
+`CartridgeContext` は各agentの `CartridgeLoader` がロードし、prompt builder / validator に渡す:
+```python
+@dataclass
+class CartridgeContext:
+    cartridge_id: str
+    ontology: dict
+    validation_rules: dict
+    aliases: dict | None = None
+    notation_patterns: dict | None = None
+    normalization_rules: dict | None = None
+    extraction_hints: dict | None = None
+```
 
 ### RAG チャットフロー
 
@@ -137,8 +251,18 @@ backend/scripts/   → 初期化スクリプト
 
 ### 6. テスト
 - `pytest` を使用
-- テストファイルは `backend/tests/` に配置
+- FastAPI / core 用テストは `backend/tests/` に配置
+- agents 用テストは `src/tests/agents/<agent_name>/` に配置
 - 既存の `test_diff_merge.py` が `metaweave.extractor` を参照しているのは既知の問題（モジュールパスは実際は `core.extractor`）
+
+### 7. PDF解析Agentの実装ルール
+- 実装場所は `src/episteme_graph/agents/<agent_name>/` とする（`backend/` には置かない）
+- 各Agentは `agent.py` の `run()` メソッドを公開インターフェースとする
+- LLM呼び出しは `llm_client.py` に分離し、`agent.py` から直接LLM SDKを呼ばない
+- `CartridgeLoader` は各agentディレクトリに実装する（共通インターフェースを維持）
+- agentの出力は `schema.py` の dataclass に型付けし、必ずJSONシリアライズ可能にする
+- cartridgeがない場合でもagentが単独動作できるよう、すべてのcartridge参照は `Optional` とする
+- domain-specific なロジックをagent内にハードコードしない（cartridgeから読む）
 
 ## 優先タスク（Priority A）— 実装完了 (2026-03-26)
 

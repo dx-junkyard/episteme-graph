@@ -83,6 +83,12 @@ class TestAdminJSCourseImport:
         """インポートされた draft のコンテキストがAIに送られること。"""
         assert "現在のコース構成（JSON）" in self.js
 
+    def test_chat_strips_inline_course_draft_json(self):
+        """会話応答に混入したCOURSE_DRAFT_JSONをプレビュー用draftへ分離すること。"""
+        assert "function extractCourseDraftFromAnswer" in self.js
+        assert "var parsed = extractCourseDraftFromAnswer(data.answer)" in self.js
+        assert "var courseDraft = data.course_draft || parsed.courseDraft" in self.js
+
     def test_import_button_click_handler(self):
         """インポートボタンにクリックハンドラが設定されること。"""
         assert "openImportCourseModal()" in self.js

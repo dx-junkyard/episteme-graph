@@ -1,0 +1,29 @@
+{
+  "document_id": "sample_paper",
+  "cartridge_id": "particle_physics",
+  "role_annotations": [
+    {
+      "block_id": "blk_003_0012",
+      "section_id": "sample_paper:sec_3",
+      "backbone_block_type": "derivation",
+      "span_annotations": [
+        {
+          "span_id": "span_001",
+          "text": "Starting from eq. (1.2), we derive the sum rule for the total decay rate.",
+          "char_start": 0,
+          "char_end": 75,
+          "role_labels": ["derivation_step", "equation_relation"],
+          "is_claim_candidate": true,
+          "is_reject_candidate": false,
+          "confidence": 0.9,
+          "reason": "The span explicitly describes a derivation from an equation to a reusable relation."
+        }
+      ]
+    }
+  ],
+  "summary_stats": {
+    "claim_candidate_spans": 1,
+    "reject_candidate_spans": 0
+  },
+  "validation_issues": []
+}

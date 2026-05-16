@@ -1,0 +1,42 @@
+{
+  "document_id": "sample_paper",
+  "thesis_version": "v1",
+  "cartridge_id": "particle_physics",
+  "central_thesis": {
+    "text": "The paper establishes a normalized total decay-rate sum rule relating RΛc, RD, and RD* once corrections and form-factor uncertainties are accounted for.",
+    "claim_ids": ["claim:blk_10:span_001"],
+    "equation_ids": ["eq_3_14"],
+    "evidence_block_ids": ["blk_10", "blk_203"],
+    "reason": "The accepted claims and main equation summary jointly identify the paper's argument center.",
+    "confidence": 0.9
+  },
+  "alternative_theses": [],
+  "support_structure": {
+    "direct_supports": [
+      {
+        "support_id": "sup_1",
+        "text": "The derivation core supplies the sum-rule relation.",
+        "claim_ids": ["claim:blk_10:span_001"],
+        "equation_ids": ["eq_3_14"],
+        "support_type": "derivation_support",
+        "reason": "The equation is classified as the main relation/result.",
+        "confidence": 0.88
+      }
+    ],
+    "assumptions": [],
+    "derivation_core": [],
+    "correction_sources": [],
+    "uncertainty_sources": [],
+    "diagnostic_consequences": [],
+    "future_requirements": []
+  },
+  "excluded_from_core": [
+    {"category": "prior_work", "claim_ids": ["claim:blk_2:span_001"], "reason": "Background literature context."}
+  ],
+  "thesis_graph_hints": [
+    {"from": "central_thesis", "to": "support:direct_supports:0", "relation": "supported_by"}
+  ],
+  "review_notes": [],
+  "confidence": 0.88,
+  "validation_issues": []
+}

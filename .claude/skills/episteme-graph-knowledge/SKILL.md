@@ -1,10 +1,14 @@
 ---
 name: episteme-graph-knowledge
 description: >
-  Episteme Graphのナレッジグラフ、PDF教材処理パイプライン、DSL定義、パターンマッチングに
+  Episteme Graphのナレッジグラフ、PDF教材処理パイプライン、DSL定義、パターンマッチング、
+  およびPDF解析Agentパイプライン（DocumentStructureAgent / PaperSkeletonAgent /
+  RhetoricalRoleAgent / ClaimQualificationAgent / EquationSemanticsAgent /
+  ThesisReconstructionAgent / DSLLinkingAgent / ComponentAssemblyAgent）に
   関する実装や修正を行う際に使用します。ユーザーから「抽出ロジックを変更して」
   「ナレッジグラフの構造を修正して」「パイプラインを改善して」「DSLを拡張して」
-  「パターンマッチングを調整して」などの依頼があった場合に自動的に発動してください。
+  「パターンマッチングを調整して」「Agentを実装して」「カートリッジを更新して」
+  などの依頼があった場合に自動的に発動してください。
 ---
 # Episteme Graph — ナレッジグラフ開発スキル
 
@@ -153,6 +157,115 @@ OpenAI 形式                      → Gemini への変換
 
 ※ 上記のプロンプトを設計する際は、出力フォーマット（JSON）が崩れないよう、構造化出力（`generate_text_with_structured_output` または JSONモード）を積極的に活用すること。
 
+
+## PDF解析エージェントパイプライン（src/episteme_graph/agents/）
+
+ドキュメントアップロード後、コース作成と切り離した形で実行されるagent群。
+実装場所は `src/episteme_graph/agents/<agent_name>/`（`backend/` には置かない）。
+
+### パイプライン構成と依存関係
+
+| Agent | Issue | 入力 | 出力 | 設計方針 |
+|---|---|---|---|---|
+| DocumentStructureAgent | #216 | PDF | DocumentStructureResult | structure-first, parser-driven |
+| PaperSkeletonAgent | #217 | DocumentStructureResult | PaperSkeletonResult | LLM-first |
+| RhetoricalRoleAgent | #218 | Structure + Skeleton | RhetoricalRoleResult | LLM-first |
+| ClaimQualificationAgent | #219 | Structure + Skeleton + Roles | ClaimQualificationResult | LLM-first |
+| EquationSemanticsAgent | #220 | Structure + Skeleton + Roles | EquationSemanticsResult | LLM-first |
+| ThesisReconstructionAgent | #221 | Skeleton + Claims + Equations | ThesisReconstructionResult | LLM-first |
+| DSLLinkingAgent | #222 | Claims + Equations + Thesis | DSLLinkingResult | LLM-first |
+| ComponentAssemblyAgent | #223 | Claims + Equations + Thesis + DSL | ComponentAssemblyResult | LLM-first + cartridge-aware |
+
+### 各Agentの標準ファイル構成
+
+```
+src/episteme_graph/agents/<agent_name>/
+  __init__.py
+  agent.py           → クラス定義と run() メソッド
+  cartridge_loader.py → CartridgeLoader（cartridge_id → CartridgeContext）
+  input_builder.py   → 前段agentの出力 → LLM入力への変換
+  prompt.py          → system/user promptの構築
+  llm_client.py      → OpenAI structured output呼び出し
+  schema.py          → 入出力dataclass定義（JSONシリアライズ可能）
+  validator.py       → 出力スキーマ検証・consistency check
+  repair.py          → validation失敗時の再試行ロジック
+  examples/          → サンプル入出力JSON
+```
+
+### CartridgeLoader 共通パターン
+
+各agentは独自の `CartridgeLoader` を持つが、同一インターフェースを維持する:
+
+```python
+@dataclass
+class CartridgeContext:
+    cartridge_id: str
+    ontology: dict
+    validation_rules: dict
+    aliases: dict | None = None
+    notation_patterns: dict | None = None
+    normalization_rules: dict | None = None
+    extraction_hints: dict | None = None
+
+class CartridgeLoader:
+    def load(self, cartridge_id: str) -> CartridgeContext:
+        # backend/cartridges/<cartridge_id>/ から JSON を読み込む
+        ...
+```
+
+カートリッジファイルは `backend/cartridges/<cartridge_id>/` に配置:
+- `ontology.json` — concept types / aliases / notation_patterns / normalization_hints
+- `validation_rules.json` — フィールド妥当性チェック
+- `component_types.json` — 許可component type語彙（ComponentAssemblyAgentが使用）
+- `relation_types.json` — dependency / connector 語彙
+
+### Agent実装ルール
+
+1. **cartridge-aware だが cartridge-dependent ではない**
+   - cartridge_id が None でも単独動作すること
+   - cartridge の hints は補助信号として使い、主軸のロジックはcartridgeに依存しない
+
+2. **LLM-first agents（#217〜#223）の必須パターン**
+   ```python
+   # Step 1: input packaging（非LLM）
+   llm_input = input_builder.build(structure, skeleton, cartridge, config)
+   # Step 2: LLM structured output
+   raw_output = llm_client.generate(prompt_factory.build_messages(llm_input, cartridge), schema)
+   # Step 3: validation
+   issues = validator.validate(raw_output, cartridge)
+   # Step 4: repair/retry if needed
+   if issues:
+       result = repairer.repair(llm_input, raw_output, issues, cartridge)
+   ```
+
+3. **domain-specific ロジックのハードコード禁止**
+   - 概念名・記号名・validation ルールを agent 内に直書きしない
+   - 必要な hints は active cartridge から読む
+
+4. **出力フィールドの必須要件**
+   - `reason`: なぜその判断をしたかの根拠
+   - `confidence`: 0.0〜1.0 の確信度
+   - maturity / review_status の最終確定禁止（provisional のみ）
+
+5. **DocumentStructureAgent (#216) の特別ルール**
+   - structure-first（parser / layout signal 優先）
+   - 意味解釈・claim解釈は行わない
+   - 曖昧blockのみLLM補助判定に回す
+   - 不明blockは `unknown` で保持し削除しない
+
+### テスト配置（agents用）
+
+```
+src/tests/agents/<agent_name>/
+  test_agent.py      → agent.run() の統合テスト（LLMはmock）
+  test_validator.py  → validator の単体テスト
+  test_schema.py     → schemaのserialize/deserializeテスト
+```
+
+実行コマンド:
+```bash
+cd src && python -m pytest tests/ -v
+```
 
 ## 開発ガイドライン
 

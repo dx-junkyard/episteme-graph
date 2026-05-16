@@ -16,8 +16,47 @@
     currentTopicId: null,
     chatMessages: [], // {role, content}
     topicMaterial: [], // {id, text, chunk_index, chapter, section}
+    learningSupport: null, // {mode, status_label, origin}
     sending: false,
+    checkingUnderstanding: false,
   };
+
+  function learningSupportStorageKey() {
+    return "eg_learning_support:" + (state.courseId || "");
+  }
+
+  function saveLearningSupportContext() {
+    if (!state.courseId) return;
+    if (state.learningSupport && state.learningSupport.origin) {
+      localStorage.setItem(learningSupportStorageKey(), JSON.stringify(state.learningSupport));
+    } else {
+      localStorage.removeItem(learningSupportStorageKey());
+    }
+  }
+
+  function loadLearningSupportContext() {
+    state.learningSupport = null;
+    if (!state.courseId) return;
+    try {
+      var raw = localStorage.getItem(learningSupportStorageKey());
+      state.learningSupport = raw ? JSON.parse(raw) : null;
+    } catch (_) {
+      state.learningSupport = null;
+    }
+  }
+
+  function setLearningSupportFromResponse(data) {
+    if (data && data.origin && data.status_label) {
+      state.learningSupport = {
+        mode: data.support_mode || "detail_explanation",
+        status_label: data.status_label,
+        origin: data.origin,
+      };
+    } else if (data && data.support_mode === "return_to_learning_path") {
+      state.learningSupport = null;
+    }
+    saveLearningSupportContext();
+  }
 
   function parseJwtPayload(token) {
     try {
@@ -200,7 +239,8 @@
       return;
     }
     const course = state.course;
-    let html = '<div class="sb-hd">学習パス</div>';
+    let html = '<div class="sb-hd">コースツリー</div>';
+    html += '<div class="course-tree-title">' + escHtml(course.title || "コース") + '</div>';
 
     (course.chapters || []).forEach(function (ch, ci) {
       const chNum = ci + 1;
@@ -229,9 +269,15 @@
         const annotationBadge = misconsCount > 0
           ? '<span class="mc-badge" title="' + misconsCount + '件の誤解が記録されています">⚑ ' + misconsCount + '</span>'
           : "";
+        const support = state.learningSupport;
+        const supportOrigin = support && support.origin;
+        const supportBadge = supportOrigin && supportOrigin.topic_id === t.id
+          ? '<span class="learning-support-badge" title="' + escHtml(supportOrigin.topic_title || t.title) + ' から派生した説明です">' +
+              escHtml(support.status_label || "詳細説明中") + '</span>'
+          : "";
 
         html += '<div class="' + cls + '" data-topic="' + t.id + '" style="padding-left:36px">';
-        html += escHtml(t.title) + annotationBadge;
+        html += escHtml(t.title) + annotationBadge + supportBadge;
         html += '<span class="dot ' + dotCls + '" style="margin-left:auto"></span></div>';
       });
     });
@@ -270,6 +316,11 @@
     return topic ? topic.title : null;
   }
 
+  function getCurrentTopic() {
+    if (!state.course || !state.currentTopicId) return null;
+    return (state.course.topics || []).find(function (t) { return t.id === state.currentTopicId; }) || null;
+  }
+
   function _renderInitialSuggestions() {
     var courseTitle = state.course ? escHtml(state.course.title || "") : "";
     var topicTitle = _getFirstTopicTitle();
@@ -282,7 +333,7 @@
     html += '<div class="initial-suggestions">';
     html += '<button class="suggest-btn initial-suggest-btn" data-suggest="' + topicLabel + 'の学習を開始する">';
     html += topicLabel + "の学習を開始する</button>";
-    html += '<button class="suggest-btn initial-suggest-btn" data-suggest="このコースに必要な前提知識を確認する">';
+    html += '<button class="suggest-btn initial-suggest-btn" data-suggest="このコースに必要な前提知識を確認する" data-support-action="check_prerequisites">';
     html += "このコースに必要な前提知識を確認する</button>";
     html += "</div>";
     return html;
@@ -300,7 +351,7 @@
     // 教材チャンクをチャット上部に静的表示（RAG検索不使用、数式KaTeXレンダリング）
     if (state.topicMaterial && state.topicMaterial.length > 0) {
       html += '<div class="material-block">';
-      html += '<div class="material-block-header">📖 教材</div>';
+      html += '<div class="material-block-header">教材</div>';
       state.topicMaterial.forEach(function (chunk) {
         html += '<div class="material-chunk">';
         if (chunk.chapter || chunk.section) {
@@ -312,13 +363,15 @@
           html += '<div class="graph-suggestions">';
           chunk.graph_mentions.slice(0, 4).forEach(function (m) {
             var label = m.label || m.surface_text || m.element_id || "この要素";
+            var actionText = (m.element_type === "citation") ? "引用情報" :
+              (m.element_type === "reference") ? "参照先" : "説明";
             html += '<button class="graph-suggest-btn"'
               + ' data-chunk-id="' + escHtml(chunk.id || "") + '"'
               + ' data-element-id="' + escHtml(m.element_id || "") + '"'
               + ' data-element-type="' + escHtml(m.element_type || "concept") + '"'
               + ' data-element-label="' + escHtml(label) + '"'
               + ' title="' + escHtml(label) + '">';
-            html += escHtml(label + "を説明") + '</button>';
+            html += escHtml(label + "の" + actionText) + '</button>';
           });
           html += '</div>';
         }
@@ -336,7 +389,7 @@
       if (msg.role === "user") {
         html += '<div class="mg usr">' + escHtml(msg.content) + "</div>";
       } else {
-        html += '<div class="mg ai">' + renderAiContent(msg.content) + "</div>";
+        html += '<div class="mg ai">' + renderAiContent(msg.content, msg) + "</div>";
       }
     });
 
@@ -353,20 +406,39 @@
     ca.querySelectorAll(".suggest-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
         var suggest = this.getAttribute("data-suggest") || this.textContent.replace(/\s*↗$/, "");
-        sendMessage(suggest);
+        var payload = {};
+        var supportAction = this.getAttribute("data-support-action") || "";
+        if (supportAction === "return_to_learning_path") {
+          var targetTopicId = this.getAttribute("data-target-topic-id") ||
+            (state.learningSupport && state.learningSupport.origin && state.learningSupport.origin.topic_id);
+          state.learningSupport = null;
+          saveLearningSupportContext();
+          renderSidebar();
+          renderRightPanel();
+          if (targetTopicId) selectTopic(targetTopicId);
+          return;
+        }
+        if (supportAction) payload.support_action = supportAction;
+        if (state.learningSupport) payload.support_context = state.learningSupport;
+        sendMessage(suggest, payload);
       });
     });
 
     ca.querySelectorAll(".graph-suggest-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
-        var label = this.getAttribute("data-element-label") || this.textContent.replace(/\s*を説明$/, "");
-        sendMessage(label + "を説明", {
+        var label = this.getAttribute("data-element-label") ||
+          this.textContent.replace(/\s*の(?:説明|引用情報|参照先)$/, "");
+        var type = this.getAttribute("data-element-type") || "concept";
+        var payload = {
           action: "EXPLAIN_GRAPH_ELEMENT",
           chunk_id: this.getAttribute("data-chunk-id") || "",
           element_id: this.getAttribute("data-element-id") || "",
-          element_type: this.getAttribute("data-element-type") || "concept",
+          element_type: type,
           element_label: label,
-        });
+        };
+        if (state.learningSupport) payload.support_context = state.learningSupport;
+        var suffix = type === "citation" ? "の引用情報" : type === "reference" ? "の参照先" : "を説明";
+        sendMessage(label + suffix, payload);
       });
     });
 
@@ -386,10 +458,11 @@
     }
   }
 
-  function renderAiContent(text) {
+  function renderAiContent(text, msg) {
     // Preserve LaTeX expressions before HTML escaping
     var latexBlocks = [];
     var preserved = text;
+    var fallbackActions = [];
 
     // Preserve display math $$...$$ first
     preserved = preserved.replace(/\$\$([\s\S]+?)\$\$/g, function (m, expr) {
@@ -434,6 +507,45 @@
       return "\x00SUGGEST_" + (suggestions.length - 1) + "\x00";
     });
 
+    // Some LLM responses describe next actions in prose instead of structured
+    // next_actions. Convert that trailing section into click targets, including
+    // the return-to-path action first when a support detour is active.
+    preserved = preserved.replace(/(?:^|\n)(?:\d+[.．]\s*)?【ネクストアクション】([\s\S]*)$/m, function (_, actionText) {
+      var seen = {};
+      function addAction(type, label, message, targetTopicId) {
+        if (!label || seen[label]) return;
+        seen[label] = true;
+        fallbackActions.push({
+          type: type || "",
+          label: label,
+          message: message || label,
+          target_topic_id: targetTopicId || "",
+        });
+      }
+      if (state.learningSupport && state.learningSupport.origin) {
+        addAction(
+          "return_to_learning_path",
+          "学習パスに戻る",
+          "学習パスに戻る",
+          state.learningSupport.origin.topic_id
+        );
+      }
+      if (/前提知識/.test(actionText) && /復習|確認/.test(actionText)) {
+        addAction("continue_detail", "前提知識を復習する", "前提知識を復習したい");
+      }
+      var conceptMatch = actionText.match(/最初の概念\s*[「『]([^」』]+)[」』]/);
+      if (conceptMatch && conceptMatch[1]) {
+        addAction("continue_detail", "「" + conceptMatch[1].trim() + "」の説明に進む", conceptMatch[1].trim() + "について説明して");
+      }
+      if (fallbackActions.length === 0) {
+        actionText.split(/それとも|または|、|。|\?|？|\n/).forEach(function (part) {
+          var label = part.replace(/^[\s-]+/, "").replace(/ですか$/, "").trim();
+          if (label.length >= 4 && label.length <= 48) addAction("continue_detail", label, label);
+        });
+      }
+      return "\n\x00FALLBACK_ACTIONS\x00";
+    });
+
     // Escape HTML
     var html = escHtml(preserved);
     // Bold
@@ -449,7 +561,7 @@
       var block = latexBlocks[parseInt(idx)];
       try {
         return window.katex
-          ? window.katex.renderToString(block.expr, { displayMode: block.display, throwOnError: false })
+          ? window.katex.renderToString(normalizeKatexFormula(block.expr, block.display), { displayMode: block.display, throwOnError: false })
           : (block.display ? "$$" + block.expr + "$$" : "$" + block.expr + "$");
       } catch (e) {
         return block.display ? "$$" + escHtml(block.expr) + "$$" : "$" + escHtml(block.expr) + "$";
@@ -466,6 +578,33 @@
         html += '<button class="suggest-btn" data-suggest="' + escHtml(s) + '">' + escHtml(s) + ' ↗</button>';
       });
       html += "</div>";
+    }
+
+    if (msg && msg.next_actions && msg.next_actions.length > 0) {
+      html += '<div class="learning-actions">';
+      msg.next_actions.forEach(function (action) {
+        html += '<button class="suggest-btn learning-action-btn"'
+          + ' data-suggest="' + escHtml(action.message || action.label || "") + '"'
+          + ' data-support-action="' + escHtml(action.type || "") + '"'
+          + (action.target_topic_id ? ' data-target-topic-id="' + escHtml(action.target_topic_id) + '"' : "")
+          + '>' + escHtml(action.label || action.message || "次へ") + '</button>';
+      });
+      html += "</div>";
+    }
+
+    if (fallbackActions.length > 0 && !(msg && msg.next_actions && msg.next_actions.length > 0)) {
+      html = html.replace(/\x00FALLBACK_ACTIONS\x00/g, "");
+      html += '<div class="learning-actions">';
+      fallbackActions.forEach(function (action) {
+        html += '<button class="suggest-btn learning-action-btn"'
+          + ' data-suggest="' + escHtml(action.message || action.label || "") + '"'
+          + ' data-support-action="' + escHtml(action.type || "") + '"'
+          + (action.target_topic_id ? ' data-target-topic-id="' + escHtml(action.target_topic_id) + '"' : "")
+          + '>' + escHtml(action.label || action.message || "次へ") + '</button>';
+      });
+      html += "</div>";
+    } else {
+      html = html.replace(/\x00FALLBACK_ACTIONS\x00/g, "");
     }
 
     return html;
@@ -489,6 +628,17 @@
     const chapter = (state.course.chapters || [])[topic ? topic.chapter_index : 0];
 
     let html = "";
+
+    if (state.learningSupport && state.learningSupport.origin) {
+      var origin = state.learningSupport.origin;
+      html += '<div class="ps learning-support-panel"><h4>' + escHtml(state.learningSupport.status_label || "詳細説明中") + '</h4>';
+      html += '<div class="cc"><div class="lb">元の学習パス</div>';
+      html += '<strong>' + escHtml(origin.topic_title || "") + '</strong>';
+      if (origin.chapter_title) html += '<br>' + escHtml(origin.chapter_title);
+      html += '<div class="learning-support-inline-actions">';
+      html += '<button class="suggest-btn" data-suggest="学習パスに戻る" data-support-action="return_to_learning_path" data-target-topic-id="' + escHtml(origin.topic_id || "") + '">学習パスに戻る</button>';
+      html += '</div></div></div>';
+    }
 
     // Current topic
     html += '<div class="ps"><h4>現在のトピック</h4>';
@@ -533,7 +683,20 @@
     // Bind prerequisite clicks
     el.querySelectorAll("[data-prereq]").forEach(function (pEl) {
       pEl.addEventListener("click", function () {
-        sendMessage(this.getAttribute("data-prereq") + "について教えてください");
+        var payload = {};
+        if (state.learningSupport) payload.support_context = state.learningSupport;
+        sendMessage(this.getAttribute("data-prereq") + "について教えてください", payload);
+      });
+    });
+    el.querySelectorAll('[data-support-action="return_to_learning_path"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var targetTopicId = this.getAttribute("data-target-topic-id") ||
+          (state.learningSupport && state.learningSupport.origin && state.learningSupport.origin.topic_id);
+        state.learningSupport = null;
+        saveLearningSupportContext();
+        renderSidebar();
+        renderRightPanel();
+        if (targetTopicId) selectTopic(targetTopicId);
       });
     });
   }
@@ -648,7 +811,8 @@
     var next = getNextTopic();
     if (next) {
       btn.style.display = "";
-      btn.title = "次のトピック: " + (next.title || "");
+      btn.textContent = "確認して次へ";
+      btn.title = "確認問題に回答して次のセクションへ進む: " + (next.title || "");
     } else {
       btn.style.display = "none";
     }
@@ -690,6 +854,137 @@
     }
   }
 
+  function getCheckQuestionForCurrentTopic() {
+    var topic = getCurrentTopic();
+    var fallback = { question: "このセクションの要点を自分の言葉で説明してください。", model_answer: "", answer_requirements: [], explanation: "" };
+    if (!topic) return fallback;
+    var questions = topic.check_questions || topic.assessment_prompts || [];
+    if (questions.length > 0) return normalizeCheckQuestion(questions[0]);
+    if (topic.learning_objectives && topic.learning_objectives.length > 0) {
+      return { question: "次の学習目標を説明してください: " + topic.learning_objectives[0], model_answer: "", answer_requirements: [], explanation: "" };
+    }
+    return fallback;
+  }
+
+  function normalizeCheckQuestion(item) {
+    if (typeof item === "string") {
+      return { question: item, model_answer: "", answer_requirements: [], explanation: "" };
+    }
+    item = item || {};
+    return {
+      question: item.question || item.text || "このセクションの要点を自分の言葉で説明してください。",
+      model_answer: item.model_answer || item.answer || "",
+      answer_requirements: Array.isArray(item.answer_requirements || item.required_elements)
+        ? (item.answer_requirements || item.required_elements)
+        : [],
+      explanation: item.explanation || item.rationale || "",
+    };
+  }
+
+  function openCheckModal() {
+    if (!state.currentTopicId || state.checkingUnderstanding) return;
+    var next = getNextTopic();
+    if (!next) return;
+    var existing = document.getElementById("check-overlay");
+    if (existing) existing.remove();
+
+    var topic = getCurrentTopic();
+    var question = getCheckQuestionForCurrentTopic();
+    var overlay = document.createElement("div");
+    overlay.id = "check-overlay";
+    overlay.className = "check-overlay";
+    overlay.innerHTML =
+      '<div class="check-box">' +
+        '<div class="check-title">確認問題</div>' +
+        '<div class="check-section">' + escHtml(topic ? topic.title : "") + '</div>' +
+        '<div class="check-question">' + escHtml(question.question || "") + '</div>' +
+        '<textarea id="check-answer" rows="5" placeholder="回答を入力してください"></textarea>' +
+        '<div id="check-feedback" class="check-feedback"></div>' +
+        '<div class="check-actions">' +
+          '<button id="check-cancel" class="check-secondary">戻る</button>' +
+          '<button id="check-submit" class="check-primary">回答する</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    document.getElementById("check-cancel").addEventListener("click", function () {
+      overlay.remove();
+    });
+    document.getElementById("check-submit").addEventListener("click", submitCheckAnswer);
+    var answer = document.getElementById("check-answer");
+    if (answer) answer.focus();
+  }
+
+  async function submitCheckAnswer() {
+    if (state.checkingUnderstanding) return;
+    var answerEl = document.getElementById("check-answer");
+    var feedbackEl = document.getElementById("check-feedback");
+    var submitBtn = document.getElementById("check-submit");
+    if (submitBtn && submitBtn.getAttribute("data-advance") === "true") {
+      var directNext = getNextTopic();
+      var directOverlay = document.getElementById("check-overlay");
+      if (directOverlay) directOverlay.remove();
+      if (directNext) selectTopic(directNext.id);
+      return;
+    }
+    var answer = answerEl ? answerEl.value.trim() : "";
+    var question = getCheckQuestionForCurrentTopic();
+    if (!answer) {
+      if (feedbackEl) {
+        feedbackEl.textContent = "回答を入力してください。";
+        feedbackEl.className = "check-feedback fail";
+      }
+      return;
+    }
+
+    state.checkingUnderstanding = true;
+    if (submitBtn) submitBtn.disabled = true;
+    if (feedbackEl) {
+      feedbackEl.textContent = "確認しています...";
+      feedbackEl.className = "check-feedback";
+    }
+    try {
+      var res = await apiFetch(
+        "/learning/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/check",
+        {
+          method: "POST",
+          body: JSON.stringify({ question: question.question || "", check_question: question, answer: answer }),
+        }
+      );
+      if (!res.ok) throw new Error("check failed");
+      var data = await res.json();
+      if (data.passed) {
+        var next = getNextTopic();
+        var overlay = document.getElementById("check-overlay");
+        if (overlay) overlay.remove();
+        if (next) selectTopic(next.id);
+      } else {
+        if (feedbackEl) {
+          feedbackEl.innerHTML = '<strong>もう一度確認しましょう。</strong><br>' +
+            escHtml(data.feedback || "") +
+            (data.answer_requirements && data.answer_requirements.length
+              ? '<div class="check-model-answer"><span>回答に必要な要素</span><ul>' + data.answer_requirements.map(function (r) { return '<li>' + escHtml(r) + '</li>'; }).join("") + '</ul></div>'
+              : "") +
+            (data.model_answer ? '<div class="check-model-answer"><span>解答例</span>' + escHtml(data.model_answer) + '</div>' : "") +
+            (data.explanation ? '<div class="check-model-answer"><span>解説</span>' + escHtml(data.explanation) + '</div>' : "");
+          feedbackEl.className = "check-feedback fail";
+        }
+        if (submitBtn) {
+          submitBtn.textContent = "理解したので次へ";
+          submitBtn.disabled = false;
+          submitBtn.setAttribute("data-advance", "true");
+        }
+      }
+    } catch (err) {
+      if (feedbackEl) {
+        feedbackEl.textContent = "確認に失敗しました。もう一度お試しください。";
+        feedbackEl.className = "check-feedback fail";
+      }
+      if (submitBtn) submitBtn.disabled = false;
+    } finally {
+      state.checkingUnderstanding = false;
+    }
+  }
+
   // ── Send Message ───────────────────────────────────────────────────
   async function sendMessage(text, actionPayload) {
     if (!text || state.sending || !state.currentTopicId) return;
@@ -713,7 +1008,15 @@
       });
       if (res.ok) {
         const data = await res.json();
-        state.chatMessages.push({ role: "assistant", content: data.answer });
+        setLearningSupportFromResponse(data);
+        state.chatMessages.push({
+          role: "assistant",
+          content: data.answer,
+          next_actions: data.next_actions || [],
+          support_mode: data.support_mode || "",
+          status_label: data.status_label || "",
+          origin: data.origin || null,
+        });
         // Issue #145: 個人レイヤーの更新を反映する
         if (data.course_update) {
           if (data.course_update.personal_layer) {
@@ -871,6 +1174,7 @@
     state.chatMessages = [];
     state.course = null;
     state.personalLayer = null;
+    state.learningSupport = null;
 
     // Re-render with clean state
     renderSidebar();
@@ -944,6 +1248,7 @@
     // Issue #145: マスターデータと個人レイヤーを分離して管理する
     state.course = courseData.master;
     state.personalLayer = courseData.personal;
+    loadLearningSupportContext();
     if (progress) state.course.progress = progress;
 
     const course = state.course;
@@ -964,7 +1269,12 @@
 
     renderSidebar();
     if (state.currentTopicId) {
-      state.chatMessages = await loadChatHistory(state.courseId, state.currentTopicId);
+      const [material, history] = await Promise.all([
+        fetchTopicMaterial(state.courseId, state.currentTopicId),
+        loadChatHistory(state.courseId, state.currentTopicId),
+      ]);
+      state.topicMaterial = material;
+      state.chatMessages = history;
     }
     renderChat();
     renderRightPanel();
@@ -1265,10 +1575,7 @@
     if (chatSendBtn) chatSendBtn.addEventListener("click", sendInterruptMessage);
     if (chatMicBtn) chatMicBtn.addEventListener("click", toggleVoiceInput);
     if (resumeBtn) resumeBtn.addEventListener("click", resumeLecture);
-    if (nextTopicBtn) nextTopicBtn.addEventListener("click", function () {
-      var next = getNextTopic();
-      if (next) selectTopic(next.id);
-    });
+    if (nextTopicBtn) nextTopicBtn.addEventListener("click", openCheckModal);
 
     if (chatInput) {
       chatInput.addEventListener("keydown", function (e) {
@@ -1468,7 +1775,7 @@
         var rendered = "";
         try {
           if (window.katex) {
-            rendered = window.katex.renderToString(f.latex.trim(), {
+            rendered = window.katex.renderToString(normalizeKatexFormula(f.latex, f.is_display === true), {
               displayMode: f.is_display === true,
               throwOnError: false,
             });
@@ -1504,7 +1811,7 @@
         var rendered = "";
         try {
           if (window.katex) {
-            rendered = window.katex.renderToString(f.latex.trim(), {
+            rendered = window.katex.renderToString(normalizeKatexFormula(f.latex, f.is_display === true), {
               displayMode: f.is_display === true,
               throwOnError: false,
             });
@@ -1523,6 +1830,18 @@
     }
 
     return text;
+  }
+
+  function normalizeKatexFormula(expr, display) {
+    var formula = String(expr || "").trim();
+    if (!formula) return "";
+    formula = formula.replace(/\\(?:nonumber|notag)\b/g, "").trim();
+    var hasEnv = /\\begin\{[^{}]+\}/.test(formula);
+    var hasAlignment = /(^|[^\\])&/.test(formula) || /\\\\/.test(formula);
+    if (display && hasAlignment && !hasEnv) {
+      formula = "\\begin{aligned} " + formula + " \\end{aligned}";
+    }
+    return formula;
   }
 
   function updateLectureControls() {

@@ -1,0 +1,43 @@
+{
+  "document_id": "sample_paper",
+  "dsl_version": "v1",
+  "nodes": [
+    {
+      "node_id": "n1",
+      "node_type": "Approximation",
+      "node_value": "heavy_quark_limit",
+      "source_kind": "claim",
+      "source_refs": {"claim_ids": ["claim:b1:s1"], "equation_ids": [], "thesis_refs": ["support:assumptions:0"]},
+      "reason": "Core approximation used as a prerequisite in the derivation.",
+      "confidence": 0.9
+    },
+    {
+      "node_id": "n2",
+      "node_type": "Relation",
+      "node_value": "total_decay_rate_sum_rule",
+      "source_kind": "mixed",
+      "source_refs": {"claim_ids": ["claim:b2:s2"], "equation_ids": ["eq_3_14"], "thesis_refs": ["support:derivation_core:0"]},
+      "reason": "Equation-level relation identified as a derivation core element.",
+      "confidence": 0.94
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "e1",
+      "from_node_id": "n1",
+      "to_node_id": "n2",
+      "core_predicate": "REQUIRES",
+      "domain_verb": "assumes",
+      "polarity": "+",
+      "evidence_refs": {"claim_ids": ["claim:b1:s1"], "equation_ids": ["eq_3_14"], "thesis_refs": ["support:assumptions:0"]},
+      "reason": "The relation is stated to hold under the heavy quark limit.",
+      "confidence": 0.92
+    }
+  ],
+  "graph_hints": [
+    {"hint_type": "component_seed", "node_ids": ["n1", "n2"], "reason": "Shared derivation component seed."}
+  ],
+  "review_notes": [],
+  "confidence": 0.9,
+  "validation_issues": []
+}
