@@ -336,7 +336,21 @@ def _clean_equation(text: str) -> str:
     cleaned = re.sub(r"^\$\$|\$\$$", "", cleaned)
     cleaned = re.sub(r"^\\\[|\\\]$", "", cleaned)
     cleaned = _LABEL_RE.sub("", cleaned)
-    return re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return _renderable_equation_latex(cleaned)
+
+
+def _renderable_equation_latex(latex: str) -> str:
+    """Keep TeX source-backed equations renderable after stripping env wrappers."""
+    cleaned = (latex or "").strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"\\(?:nonumber|notag)\b", "", cleaned).strip()
+    has_environment = bool(re.search(r"\\begin\{[^{}]+\}", cleaned))
+    has_alignment = bool(re.search(r"(?<!\\)&", cleaned) or re.search(r"\\\\", cleaned))
+    if has_alignment and not has_environment:
+        return rf"\begin{{aligned}} {cleaned} \end{{aligned}}"
+    return cleaned
 
 
 def _extract_equation_label(text: str) -> str | None:

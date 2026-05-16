@@ -261,6 +261,36 @@ def test_tex_archive_builds_document_structure_with_sections_and_equations():
     assert all(b.raw.get("parser_source") == "tex_archive" for b in structure.blocks)
 
 
+def test_tex_archive_wraps_alignment_equations_for_rendering():
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    archive = _make_tex_archive({
+        "main.tex": r"""
+            \documentclass{article}
+            \begin{document}
+            \section{Operators}
+            \begin{align}
+            &O_{V_L} = (\overline{c}\gamma^\mu P_L b)(\overline{\tau}\gamma_\mu P_L\nu_\tau) \nonumber \\
+            &O_T = (\overline{c}\sigma^{\mu\nu}P_L b)(\overline{\tau}\sigma_{\mu\nu}P_L\nu_\tau)
+            \label{eq:operator}
+            \end{align}
+            \end{document}
+        """,
+    })
+
+    structure = build_structure_from_tex_archive(
+        archive,
+        document_id="doc-tex-align",
+        source_file="paper.tar.gz",
+    )
+
+    equation = next(b for b in structure.blocks if b.block_type == "equation_block")
+    assert equation.raw["latex"].startswith(r"\begin{aligned}")
+    assert equation.raw["latex"].endswith(r"\end{aligned}")
+    assert r"\nonumber" not in equation.raw["latex"]
+    assert equation.equation_label == "eq:operator"
+
+
 def test_orchestrator_accepts_tex_archive_source_kind():
     from core.document_pipeline import orchestrator
 

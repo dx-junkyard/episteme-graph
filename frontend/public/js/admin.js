@@ -5884,7 +5884,7 @@
   }
 
   function lsRenderKatex(expr, display) {
-    var formula = String(expr || "").trim();
+    var formula = lsNormalizeKatexFormula(expr, display);
     if (!formula) return "";
     var cls = display ? "lecture-formula-block visible" : "lecture-formula visible";
     if (window.katex) {
@@ -5901,6 +5901,18 @@
       }
     }
     return '<span class="' + cls + '"><code class="ls-formula-chip">' + escHtml(formula) + '</code></span>';
+  }
+
+  function lsNormalizeKatexFormula(expr, display) {
+    var formula = String(expr || "").trim();
+    if (!formula) return "";
+    formula = formula.replace(/\\(?:nonumber|notag)\b/g, "").trim();
+    var hasEnv = /\\begin\{[^{}]+\}/.test(formula);
+    var hasAlignment = /(^|[^\\])&/.test(formula) || /\\\\/.test(formula);
+    if (display && hasAlignment && !hasEnv) {
+      formula = "\\begin{aligned} " + formula + " \\end{aligned}";
+    }
+    return formula;
   }
 
   function lsLoadPdfForChunk(chunk) {

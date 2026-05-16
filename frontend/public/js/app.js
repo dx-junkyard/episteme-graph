@@ -561,7 +561,7 @@
       var block = latexBlocks[parseInt(idx)];
       try {
         return window.katex
-          ? window.katex.renderToString(block.expr, { displayMode: block.display, throwOnError: false })
+          ? window.katex.renderToString(normalizeKatexFormula(block.expr, block.display), { displayMode: block.display, throwOnError: false })
           : (block.display ? "$$" + block.expr + "$$" : "$" + block.expr + "$");
       } catch (e) {
         return block.display ? "$$" + escHtml(block.expr) + "$$" : "$" + escHtml(block.expr) + "$";
@@ -1775,7 +1775,7 @@
         var rendered = "";
         try {
           if (window.katex) {
-            rendered = window.katex.renderToString(f.latex.trim(), {
+            rendered = window.katex.renderToString(normalizeKatexFormula(f.latex, f.is_display === true), {
               displayMode: f.is_display === true,
               throwOnError: false,
             });
@@ -1811,7 +1811,7 @@
         var rendered = "";
         try {
           if (window.katex) {
-            rendered = window.katex.renderToString(f.latex.trim(), {
+            rendered = window.katex.renderToString(normalizeKatexFormula(f.latex, f.is_display === true), {
               displayMode: f.is_display === true,
               throwOnError: false,
             });
@@ -1830,6 +1830,18 @@
     }
 
     return text;
+  }
+
+  function normalizeKatexFormula(expr, display) {
+    var formula = String(expr || "").trim();
+    if (!formula) return "";
+    formula = formula.replace(/\\(?:nonumber|notag)\b/g, "").trim();
+    var hasEnv = /\\begin\{[^{}]+\}/.test(formula);
+    var hasAlignment = /(^|[^\\])&/.test(formula) || /\\\\/.test(formula);
+    if (display && hasAlignment && !hasEnv) {
+      formula = "\\begin{aligned} " + formula + " \\end{aligned}";
+    }
+    return formula;
   }
 
   function updateLectureControls() {
