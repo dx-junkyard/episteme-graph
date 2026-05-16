@@ -246,6 +246,46 @@ def test_llm_failure_returns_unknown_fallback_record():
     assert result.equations[0].confidence_policy.can_support_claim is False
 
 
+def test_tex_source_equation_is_source_backed():
+    block = _typed("e_tex", r"E = mc^2", "equation_block", 0)
+    block.raw = {
+        "parser_source": "tex_archive",
+        "extraction_source": "tex_source",
+        "latex": r"E = mc^2",
+    }
+    structure = DocumentStructureResult(
+        document_id="doc_test",
+        source_file="paper.tar.gz:main.tex",
+        cartridge_id=None,
+        metadata=DocumentMetadata(title="Test", pages=0),
+        sections=[Section("sec_1", "Results", 1, 1, 1)],
+        blocks=[block],
+    )
+    response = _response(
+        "eq_e_tex",
+        "e_tex",
+        None,
+        r"E = mc^2",
+        "relation",
+        "Mass-energy relation.",
+        sem_status="context_inferred",
+    )
+    with patch.object(agent := EquationSemanticsAgent(), "_llm_client") as mock_llm:
+        mock_llm.generate.return_value = response
+        result = agent.run(structure)
+
+    prompt = mock_llm.generate.call_args.args[0][-1]["content"]
+    assert r"E = mc^2" in prompt
+    assert "Source-backed TeX policy" in prompt
+    record = result.equations[0]
+    assert record.source_extraction.extraction_source == "tex_source"
+    assert record.source_extraction.latex == r"E = mc^2"
+    assert record.source_extraction.needs_math_review is False
+    assert record.reconstruction.status == "none"
+    assert record.semantics.semantic_status == "source_backed"
+    assert record.confidence_policy.can_support_claim is True
+
+
 def test_no_accepted_returns_provisional_only_no_llm():
     """全候補が accepted でない場合、LLM は呼ばれず provisional のみが返る (issue #259).
 

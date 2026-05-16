@@ -1,6 +1,6 @@
 """8 agent pipeline orchestrator (issue #226, #266).
 
-PDF → DocumentStructure → SourceChunking → SourceEmbedding → PaperSkeleton →
+PDF/TeX archive → DocumentStructure → SourceChunking → SourceEmbedding → PaperSkeleton →
 RhetoricalRole → ClaimQualification → EquationSemantics → ThesisReconstruction →
 DSLLinking → DSLEmbedding → ComponentAssembly → ComponentGraph →
 CoursMapping → Blueprint → ExportValidation → Persist → Completed
@@ -27,6 +27,7 @@ from .persistence import (
     persist_source_chunks,
     upsert_analysis_run,
 )
+from .tex_archive import build_structure_from_tex_archive
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,7 @@ def run_document_pipeline(
     document_id: str,
     material_id: str,
     filename: str | None = None,
+    source_kind: str = "pdf",
     cartridge_id: str | None = None,
     course_id: str | None = None,
     progress_callback: Callable[[str, dict], None] | None = None,
@@ -137,8 +139,8 @@ def run_document_pipeline(
     """新 pipeline 本体。同期実行。
 
     Args:
-        pdf_bytes: PDF バイナリ。一時ファイルに書き出して DocumentStructureAgent
-            に渡す。
+        pdf_bytes: 入力バイナリ。source_kind="pdf" では PDF、source_kind="tex_archive"
+            では .tar.gz TeX source archive。
         document_id: documents.id。後続で chunks/claims 等の document_id に使う。
         material_id: 教材 ID（chunks.material_id）。
         filename: 元ファイル名（任意・ログ用）。
@@ -287,10 +289,15 @@ def run_document_pipeline(
 
     pdf_path: str | None = None
     try:
+        if source_kind not in {"pdf", "tex_archive"}:
+            raise ValueError(f"unsupported source_kind: {source_kind}")
+
+        source_suffix = ".pdf" if source_kind == "pdf" else ".tar.gz"
+
         # ── Stage 1: save_pdf (一時ファイル化。MinIO への保存は呼び出し側担当) ─
-        report_done("save_pdf", {"size_bytes": len(pdf_bytes)})
+        report_done("save_pdf", {"size_bytes": len(pdf_bytes), "source_kind": source_kind})
         with tempfile.NamedTemporaryFile(
-            mode="wb", suffix=".pdf", delete=False
+            mode="wb", suffix=source_suffix, delete=False
         ) as f:
             f.write(pdf_bytes)
             pdf_path = f.name
@@ -301,6 +308,13 @@ def run_document_pipeline(
         if should_use_artifact("grobid_parse"):
             tei_xml = (grobid_artifact or {}).get("tei_xml") or None
             logger.info("Resuming document pipeline: loaded grobid_parse artifact for document %s", document_id)
+        elif source_kind == "tex_archive":
+            save_artifact("grobid_parse", {
+                "status": "skipped",
+                "reason": "tex_archive",
+                "tei_bytes": 0,
+                "tei_xml": None,
+            })
         else:
             report_start("grobid_parse", total=1, unit="document")
             try:
@@ -317,11 +331,12 @@ def run_document_pipeline(
                 "tei_bytes": len(tei_xml.encode()) if tei_xml else 0,
                 "tei_xml": tei_xml,
             })
+        grobid_status = "skipped" if source_kind == "tex_archive" else ("ok" if tei_xml else "fallback")
         report_done("grobid_parse", {
-            "status": "ok" if tei_xml else "fallback",
+            "status": grobid_status,
             "tei_bytes": len(tei_xml.encode()) if tei_xml else 0,
         })
-        if finish_target_stage("grobid_parse", {"status": "ok" if tei_xml else "fallback"}):
+        if finish_target_stage("grobid_parse", {"status": grobid_status}):
             return result
 
         # ── Stage 3: document_structure ────────────────────────────────────
@@ -332,14 +347,22 @@ def run_document_pipeline(
         else:
             report_start("document_structure", total=1, unit="document")
             try:
-                ds_agent = agent_classes["DocumentStructureAgent"]() if isinstance(
-                    agent_classes["DocumentStructureAgent"], type
-                ) else agent_classes["DocumentStructureAgent"]
-                structure = ds_agent.run(
-                    pdf_path=pdf_path,
-                    cartridge_id=cartridge_id,
-                    tei_xml=tei_xml,
-                )
+                if source_kind == "tex_archive":
+                    structure = build_structure_from_tex_archive(
+                        pdf_bytes,
+                        document_id=document_id,
+                        source_file=filename or pdf_path,
+                        cartridge_id=cartridge_id,
+                    )
+                else:
+                    ds_agent = agent_classes["DocumentStructureAgent"]() if isinstance(
+                        agent_classes["DocumentStructureAgent"], type
+                    ) else agent_classes["DocumentStructureAgent"]
+                    structure = ds_agent.run(
+                        pdf_path=pdf_path,
+                        cartridge_id=cartridge_id,
+                        tei_xml=tei_xml,
+                    )
                 structure.document_id = document_id  # 強制的に上書きして後段一貫
             except Exception as exc:
                 raise PipelineStageError("document_structure", str(exc), cause=exc) from exc
@@ -349,7 +372,8 @@ def run_document_pipeline(
             "section_count": len(structure.sections),
         })
         structure.document_id = document_id
-        structure.source_file = pdf_path
+        if source_kind == "pdf":
+            structure.source_file = pdf_path
         if finish_target_stage("document_structure", {"block_count": len(structure.blocks), "section_count": len(structure.sections)}):
             return result
 

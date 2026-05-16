@@ -846,7 +846,12 @@ def _find_text_offsets(text: str, needle: str) -> list[dict]:
     return offsets
 
 
-def _derive_graph_mentions(text: str, knowledge_graph: object, formulas: list[dict]) -> list[dict]:
+def _derive_graph_mentions(
+    text: str,
+    knowledge_graph: object,
+    formulas: list[dict],
+    source_metadata: object | None = None,
+) -> list[dict]:
     """チャンク本文に現れる knowledge_graph 要素からサジェスト候補を作る。"""
     graph = _json_obj(knowledge_graph)
     concepts = graph.get("concepts", []) if isinstance(graph.get("concepts", []), list) else []
@@ -918,6 +923,39 @@ def _derive_graph_mentions(text: str, knowledge_graph: object, formulas: list[di
             "offsets": _find_text_offsets(text, formula_id) if formula_id else [],
         })
 
+    meta = _json_obj(source_metadata)
+    for ref in meta.get("tex_refs", []) if isinstance(meta.get("tex_refs"), list) else []:
+        if not isinstance(ref, dict):
+            continue
+        key = str(ref.get("key") or "").strip()
+        if not key:
+            continue
+        mentions.append({
+            "element_id": f"ref:{key}",
+            "element_type": "reference",
+            "label": f"参照 {key}",
+            "surface_text": key,
+            "importance_score": 0.68,
+            "offsets": _find_text_offsets(text, key),
+        })
+
+    for citation in meta.get("tex_citations", []) if isinstance(meta.get("tex_citations"), list) else []:
+        if not isinstance(citation, dict):
+            continue
+        key = str(citation.get("key") or "").strip()
+        if not key:
+            continue
+        bib = citation.get("bib") if isinstance(citation.get("bib"), dict) else {}
+        label = _citation_label(key, bib)
+        mentions.append({
+            "element_id": f"bib:{key}",
+            "element_type": "citation",
+            "label": label,
+            "surface_text": key,
+            "importance_score": 0.66,
+            "offsets": _find_text_offsets(text, key),
+        })
+
     mentions.sort(key=lambda m: m.get("importance_score", 0), reverse=True)
     deduped: list[dict] = []
     seen: set[tuple[str, str]] = set()
@@ -939,6 +977,7 @@ def _get_or_create_chunk_graph_mentions(
     text: str,
     knowledge_graph: object,
     formulas: list[dict],
+    source_metadata: object | None = None,
 ) -> list[dict]:
     rows = session.execute(
         sa_text("""
@@ -963,7 +1002,7 @@ def _get_or_create_chunk_graph_mentions(
             for row in rows
         ]
 
-    mentions = _derive_graph_mentions(text, knowledge_graph, formulas)
+    mentions = _derive_graph_mentions(text, knowledge_graph, formulas, source_metadata)
     for mention in mentions:
         session.execute(
             sa_text("""
@@ -992,6 +1031,44 @@ def _get_or_create_chunk_graph_mentions(
     return mentions
 
 
+def _citation_label(key: str, bib: dict) -> str:
+    title = str(bib.get("title") or "").strip()
+    author = str(bib.get("author") or "").strip()
+    year = str(bib.get("year") or "").strip()
+    if author and year:
+        first_author = author.split(" and ")[0].strip()
+        return f"{first_author} ({year})"
+    if title:
+        return title[:80]
+    return f"引用 {key}"
+
+
+def _format_citation_description(key: str, bib: dict) -> str:
+    if not bib:
+        return f"TeX ソース内の引用です。BibTeX キー: {key}"
+    parts = []
+    title = str(bib.get("title") or "").strip()
+    author = str(bib.get("author") or "").strip()
+    year = str(bib.get("year") or "").strip()
+    journal = str(bib.get("journal") or bib.get("booktitle") or "").strip()
+    doi = str(bib.get("doi") or "").strip()
+    arxiv = str(bib.get("eprint") or bib.get("archiveprefix") or "").strip()
+    if title:
+        parts.append(f"題名: {title}")
+    if author:
+        parts.append(f"著者: {author}")
+    if year:
+        parts.append(f"年: {year}")
+    if journal:
+        parts.append(f"掲載先: {journal}")
+    if doi:
+        parts.append(f"DOI: {doi}")
+    if arxiv:
+        parts.append(f"arXiv/eprint: {arxiv}")
+    parts.append(f"BibTeX キー: {key}")
+    return "\n".join(parts)
+
+
 def get_course_chunks_ordered(course_data: dict) -> list[dict]:
     """コースのソース教材からチャンクをchunk_index順に全件取得する。
 
@@ -1014,7 +1091,8 @@ def get_course_chunks_ordered(course_data: dict) -> list[dict]:
             rows = session.execute(
                 sa_text(f"""
                     SELECT c.id, c.chunk_index, c.text, c.display_text, c.formulas,
-                           c.chapter, c.section, c.material_id, d.knowledge_graph
+                           c.chapter, c.section, c.material_id, d.knowledge_graph,
+                           c.source_metadata
                     FROM chunks c
                     LEFT JOIN documents d ON c.document_id = d.id
                     WHERE c.material_id IN ({placeholders})
@@ -1039,7 +1117,7 @@ def get_course_chunks_ordered(course_data: dict) -> list[dict]:
                     "section": row[6],
                     "material_id": material_id,
                     "graph_mentions": _get_or_create_chunk_graph_mentions(
-                        session, chunk_id, material_id, text, row[8], formulas,
+                        session, chunk_id, material_id, text, row[8], formulas, row[9],
                     ),
                 })
             return result
@@ -1399,7 +1477,7 @@ def get_graph_element_context(
             sa_text("""
                 SELECT c.id, c.text, c.display_text, c.formulas, c.material_id,
                        COALESCE(d.title, d.filename, '') AS source_title,
-                       d.knowledge_graph, d.uploaded_by
+                       d.knowledge_graph, d.uploaded_by, c.source_metadata
                 FROM chunks c
                 LEFT JOIN documents d ON c.document_id = d.id
                 WHERE c.id = CAST(:chunk_id AS uuid)
@@ -1414,9 +1492,33 @@ def get_graph_element_context(
         raw_formulas = row[3] if row[3] else []
         normalized_text, formulas = _normalize_formulas(raw_text, raw_formulas)
         graph = _json_obj(row[6])
+        source_metadata = _json_obj(row[8])
         graph_description = ""
         resolved_label = element_label or element_id
         target_formula = None
+        target_citation = None
+        target_reference = None
+
+        if element_type == "citation":
+            key = element_id.removeprefix("bib:")
+            for citation in source_metadata.get("tex_citations", []) if isinstance(source_metadata.get("tex_citations"), list) else []:
+                if not isinstance(citation, dict) or str(citation.get("key") or "") != key:
+                    continue
+                target_citation = citation
+                bib = citation.get("bib") if isinstance(citation.get("bib"), dict) else {}
+                resolved_label = _citation_label(key, bib)
+                graph_description = _format_citation_description(key, bib)
+                break
+
+        if element_type == "reference":
+            key = element_id.removeprefix("ref:")
+            for ref in source_metadata.get("tex_refs", []) if isinstance(source_metadata.get("tex_refs"), list) else []:
+                if not isinstance(ref, dict) or str(ref.get("key") or "") != key:
+                    continue
+                target_reference = ref
+                resolved_label = f"参照 {key}"
+                graph_description = f"TeX ソース内の \\\\ref / \\\\eqref 参照です。参照キー: {key}"
+                break
 
         if element_type == "formula":
             for formula in formulas:
@@ -1504,6 +1606,8 @@ def get_graph_element_context(
             "element_type": element_type or "concept",
             "element_label": resolved_label,
             "target_formula": target_formula,
+            "target_citation": target_citation,
+            "target_reference": target_reference,
             "graph_description": graph_description,
             "related_chunks": related_chunks,
         }
@@ -2214,6 +2318,7 @@ def process_material_background(
     pdf_bytes: bytes,
     task_id: str | None = None,
     cartridge_id: str | None = None,
+    source_kind: str = "pdf",
 ) -> None:
     """バックグラウンドで新Agent Pipelineを実行する (issue #226)。
 
@@ -2238,13 +2343,22 @@ def process_material_background(
     if task_id:
         update_background_task(task_id, "processing", result_data={"stage": "started"})
 
-    # PDF を MinIO に保存（pipeline は一時ファイルに書き出すが正本は MinIO）
+    # 元ソースを MinIO に保存（pipeline は一時ファイルに書き出すが正本は MinIO）
     try:
-        _get_storage().upload_pdf("raw-papers", f"uploads/{material_id}.pdf", pdf_bytes)
-        logger.info("PDF saved to MinIO for material=%s", material_id)
+        if source_kind == "tex_archive":
+            suffix = ".tgz" if filename.lower().endswith(".tgz") else ".tar.gz"
+            _get_storage().upload_bytes(
+                "raw-papers",
+                f"uploads/{material_id}{suffix}",
+                pdf_bytes,
+                content_type="application/gzip",
+            )
+        else:
+            _get_storage().upload_pdf("raw-papers", f"uploads/{material_id}.pdf", pdf_bytes)
+        logger.info("Source saved to MinIO for material=%s kind=%s", material_id, source_kind)
     except Exception as _storage_exc:
         logger.warning(
-            "Failed to save PDF to MinIO for material=%s: %s", material_id, _storage_exc,
+            "Failed to save source to MinIO for material=%s: %s", material_id, _storage_exc,
         )
 
     def _on_stage(stage: str, info: dict) -> None:
@@ -2259,6 +2373,7 @@ def process_material_background(
             document_id=doc_id,
             material_id=material_id,
             filename=filename,
+            source_kind=source_kind,
             cartridge_id=cartridge_id,
             progress_callback=_on_stage,
         )

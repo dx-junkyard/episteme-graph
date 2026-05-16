@@ -741,8 +741,9 @@
   var _activePollingTimers = {};
 
   function uploadFile(file) {
-    if (!file.name.toLowerCase().endsWith(".pdf")) {
-      showUploadStatus("PDFファイルのみアップロードできます。", "error");
+    var lowerName = file.name.toLowerCase();
+    if (!(lowerName.endsWith(".pdf") || lowerName.endsWith(".tar.gz") || lowerName.endsWith(".tgz"))) {
+      showUploadStatus("PDF または TeX .tar.gz ファイルのみアップロードできます。", "error");
       return;
     }
 
@@ -4042,7 +4043,9 @@
   }
 
   function lsListText(value) {
-    if (Array.isArray(value)) return value.join("\n");
+    if (Array.isArray(value)) return value.map(function (item) {
+      return typeof item === "object" && item ? (item.question || item.text || "") : item;
+    }).filter(Boolean).join("\n");
     if (typeof value === "string") return value;
     return "";
   }
@@ -4053,6 +4056,40 @@
     }).filter(Boolean);
   }
 
+  function lsNormalizeCheckQuestions(value) {
+    var items = Array.isArray(value) ? value : (value ? [value] : []);
+    return items.map(function (item) {
+      if (typeof item === "string") {
+        return { question: item, model_answer: "", answer_requirements: [], explanation: "" };
+      }
+      item = item || {};
+      return {
+        question: item.question || item.text || "",
+        model_answer: item.model_answer || item.answer || "",
+        answer_requirements: Array.isArray(item.answer_requirements || item.required_elements)
+          ? (item.answer_requirements || item.required_elements)
+          : lsSplitLines(item.answer_requirements || item.required_elements || ""),
+        explanation: item.explanation || item.rationale || "",
+      };
+    }).filter(function (item) { return String(item.question || "").trim(); });
+  }
+
+  function lsPrimaryCheckQuestion(topic) {
+    var questions = lsNormalizeCheckQuestions(topic.check_questions || topic.assessment_prompts || []);
+    return questions[0] || { question: "", model_answer: "", answer_requirements: [], explanation: "" };
+  }
+
+  function lsCollectCheckQuestions() {
+    var question = ((document.getElementById("ls-course-check-question") || {}).value || "").trim();
+    if (!question) return [];
+    return [{
+      question: question,
+      model_answer: ((document.getElementById("ls-course-check-model-answer") || {}).value || "").trim(),
+      answer_requirements: lsSplitLines((document.getElementById("ls-course-check-requirements") || {}).value),
+      explanation: ((document.getElementById("ls-course-check-explanation") || {}).value || "").trim(),
+    }];
+  }
+
   function lsCourseDraftHtml(topic) {
     var materialText = lsTopicStudentMaterialSource(topic);
     var isPreview = lsState.courseDraftView !== "edit";
@@ -4060,7 +4097,8 @@
     var editHidden = isPreview ? " hidden" : "";
     var spokenText = topic.spoken_script || topic.content || "";
     var cautionsText = lsListText(topic.cautions);
-    var questionsText = lsListText(topic.check_questions || topic.assessment_prompts);
+    var checkQuestion = lsPrimaryCheckQuestion(topic);
+    var requirementsText = lsListText(checkQuestion.answer_requirements);
     var conceptsText = lsListText(topic.key_concepts);
     var status = lsTopicCoverageStatus(topic);
     return '' +
@@ -4088,8 +4126,11 @@
         '</section>' +
         '<section class="ls-course-draft-section">' +
           '<div class="ls-course-draft-label">確認問題</div>' +
-          '<textarea id="ls-course-check-questions" class="ls-course-small-textarea"' + editHidden + ' placeholder="確認問題を1行ずつ入力">' + escHtml(questionsText) + '</textarea>' +
-          '<div id="ls-course-check-questions-preview" class="ls-course-field-preview"' + previewHidden + '>' + lsRenderCourseListPreview(questionsText, topic, "確認問題はまだ入力されていません。") + '</div>' +
+          '<textarea id="ls-course-check-question" class="ls-course-small-textarea"' + editHidden + ' placeholder="確認問題">' + escHtml(checkQuestion.question || "") + '</textarea>' +
+          '<textarea id="ls-course-check-model-answer" class="ls-course-small-textarea"' + editHidden + ' placeholder="模範解答">' + escHtml(checkQuestion.model_answer || "") + '</textarea>' +
+          '<textarea id="ls-course-check-requirements" class="ls-course-small-textarea"' + editHidden + ' placeholder="回答に含めるべき要素を1行ずつ入力">' + escHtml(requirementsText) + '</textarea>' +
+          '<textarea id="ls-course-check-explanation" class="ls-course-small-textarea"' + editHidden + ' placeholder="難しい問題の場合、なぜそうなるかの解説">' + escHtml(checkQuestion.explanation || "") + '</textarea>' +
+          '<div id="ls-course-check-questions-preview" class="ls-course-field-preview"' + previewHidden + '>' + lsRenderCheckQuestionPreview(checkQuestion, topic) + '</div>' +
         '</section>' +
         '<section class="ls-course-draft-section">' +
           '<div class="ls-course-draft-label">根拠リンク</div>' +
@@ -4125,7 +4166,7 @@
       };
       topic.spoken_script = (document.getElementById("ls-course-spoken-script") || {}).value || "";
       topic.cautions = lsSplitLines((document.getElementById("ls-course-cautions") || {}).value);
-      topic.check_questions = lsSplitLines((document.getElementById("ls-course-check-questions") || {}).value);
+      topic.check_questions = lsCollectCheckQuestions();
     }
     root.querySelectorAll("textarea").forEach(function (area) {
       area.addEventListener("input", updateTopic);
@@ -4297,6 +4338,27 @@
     return '<ul class="ls-course-preview-list">' + items.map(function (item) {
       return '<li>' + lsRenderCourseMaterialPreview(item, topic) + '</li>';
     }).join("") + '</ul>';
+  }
+
+  function lsRenderCheckQuestionPreview(item, topic) {
+    item = item || {};
+    if (!item.question) return '<div class="ls-course-muted">確認問題はまだ入力されていません。</div>';
+    var html = '<div class="ls-course-check-preview">';
+    html += '<div><strong>問題</strong><br>' + lsRenderCourseMaterialPreview(item.question, topic) + '</div>';
+    if (item.model_answer) {
+      html += '<div><strong>模範解答</strong><br>' + lsRenderCourseMaterialPreview(item.model_answer, topic) + '</div>';
+    }
+    if (item.answer_requirements && item.answer_requirements.length) {
+      html += '<div><strong>回答に必要な要素</strong>' +
+        '<ul class="ls-course-preview-list">' + item.answer_requirements.map(function (req) {
+          return '<li>' + escHtml(req) + '</li>';
+        }).join("") + '</ul></div>';
+    }
+    if (item.explanation) {
+      html += '<div><strong>解説</strong><br>' + lsRenderCourseMaterialPreview(item.explanation, topic) + '</div>';
+    }
+    html += '</div>';
+    return html;
   }
 
   function lsRenderCourseMaterialPreview(text, topic) {
@@ -5822,7 +5884,7 @@
   }
 
   function lsRenderKatex(expr, display) {
-    var formula = String(expr || "").trim();
+    var formula = lsNormalizeKatexFormula(expr, display);
     if (!formula) return "";
     var cls = display ? "lecture-formula-block visible" : "lecture-formula visible";
     if (window.katex) {
@@ -5839,6 +5901,18 @@
       }
     }
     return '<span class="' + cls + '"><code class="ls-formula-chip">' + escHtml(formula) + '</code></span>';
+  }
+
+  function lsNormalizeKatexFormula(expr, display) {
+    var formula = String(expr || "").trim();
+    if (!formula) return "";
+    formula = formula.replace(/\\(?:nonumber|notag)\b/g, "").trim();
+    var hasEnv = /\\begin\{[^{}]+\}/.test(formula);
+    var hasAlignment = /(^|[^\\])&/.test(formula) || /\\\\/.test(formula);
+    if (display && hasAlignment && !hasEnv) {
+      formula = "\\begin{aligned} " + formula + " \\end{aligned}";
+    }
+    return formula;
   }
 
   function lsLoadPdfForChunk(chunk) {
@@ -6749,7 +6823,7 @@
       },
       spoken_script: (document.getElementById("ls-course-spoken-script") || {}).value || "",
       cautions: lsSplitLines((document.getElementById("ls-course-cautions") || {}).value),
-      check_questions: lsSplitLines((document.getElementById("ls-course-check-questions") || {}).value),
+      check_questions: lsCollectCheckQuestions(),
     };
     document.getElementById("ls-save-btn").disabled = true;
     lsShowActionStatus("保存中...", "info");
@@ -6870,7 +6944,7 @@
       },
       spoken_script: (document.getElementById("ls-course-spoken-script") || {}).value || "",
       cautions: lsSplitLines((document.getElementById("ls-course-cautions") || {}).value),
-      check_questions: lsSplitLines((document.getElementById("ls-course-check-questions") || {}).value),
+      check_questions: lsCollectCheckQuestions(),
     };
     document.getElementById("ls-rewrite-btn").disabled = true;
     lsShowActionStatus("AIで提案中...", "info");
@@ -6888,7 +6962,7 @@
         topic.student_material = data.student_material || { source_format: "eg-markdown-v1", source_text: "" };
         topic.spoken_script = data.spoken_script || "";
         topic.cautions = data.cautions || [];
-        topic.check_questions = data.check_questions || [];
+        topic.check_questions = lsNormalizeCheckQuestions(data.check_questions || []);
         lsShowActionStatus("提案を反映しました。保存すると確定します。", "success");
         lsRenderSelectedCourseTopic(topic);
       })

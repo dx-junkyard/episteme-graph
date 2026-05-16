@@ -118,14 +118,20 @@ class EquationSemanticsInputBuilder:
                 latex = equation.latex
                 plain_text = equation.plain_text
                 label = equation.label
+                extraction_source = self._extraction_source(block)
             else:
                 label = candidate.matched_label
                 equation_id = candidate.accepted_equation_id or f"eq_{candidate.candidate_id}"
                 equation_text = candidate.raw_text
                 latex = None
                 plain_text = candidate.raw_text
+                extraction_source = "inline_pdf_text_layer"
+            source_is_trusted = extraction_source == "tex_source"
             section = sections_by_id.get(block.section_id or "")
-            needs_reconstruction = force_reconstruction or candidate.extraction_status in _NEEDS_RECONSTRUCTION_STATUSES
+            needs_reconstruction = (
+                not source_is_trusted
+                and (force_reconstruction or candidate.extraction_status in _NEEDS_RECONSTRUCTION_STATUSES)
+            )
             prev_texts = self._neighbor_texts(ordered_blocks, idx, -1, _MAX_CONTEXT_BLOCKS)
             next_texts = self._neighbor_texts(ordered_blocks, idx, 1, _MAX_CONTEXT_BLOCKS)
             if block.block_type != "equation_block":
@@ -158,6 +164,8 @@ class EquationSemanticsInputBuilder:
                 extraction_status=candidate.extraction_status,
                 acceptance_status=candidate.acceptance_status,
                 needs_reconstruction=needs_reconstruction,
+                extraction_source=extraction_source,
+                source_is_trusted=source_is_trusted,
             ))
         return inputs
 
@@ -197,6 +205,9 @@ class EquationSemanticsInputBuilder:
         detection: list[str] = ["document_structure_equation_block"]
         if equation.label:
             detection.append("equation_number_pattern")
+        extraction_source = self._extraction_source(block)
+        if extraction_source == "tex_source":
+            detection.append("tex_source")
 
         bbox_list: list[float] = []
         if block.bbox:
@@ -212,6 +223,7 @@ class EquationSemanticsInputBuilder:
                 "span_start": 0,
                 "span_end": len(block.text),
                 "bbox": bbox_list,
+                "extraction_source": extraction_source,
             },
             raw_text=block.text.strip(),
             matched_label=equation.label,
@@ -300,15 +312,32 @@ class EquationSemanticsInputBuilder:
                 if block.block_type == "equation_block":
                     label = EquationNormalizer.extract_label(block.text) or getattr(block, "equation_label", None) or ""
                     label_part = f" label={label}" if label else ""
-                    texts.append(
-                        f"[{block.block_id}]{label_part} [EQUATION_TEXT_FROM_PDF_OMITTED_AS_UNTRUSTED]"
-                    )
+                    if EquationSemanticsInputBuilder._is_trusted_tex_block(block):
+                        texts.append(f"[{block.block_id}]{label_part} {block.text[:_MAX_CONTEXT_CHARS]}")
+                    else:
+                        texts.append(
+                            f"[{block.block_id}]{label_part} [EQUATION_TEXT_FROM_PDF_OMITTED_AS_UNTRUSTED]"
+                        )
                 else:
                     texts.append(f"[{block.block_id}] {block.text[:_MAX_CONTEXT_CHARS]}")
             i += direction
         if direction < 0:
             texts.reverse()
         return texts
+
+    @staticmethod
+    def _extraction_source(block: TypedBlock) -> str:
+        raw = block.raw if isinstance(block.raw, dict) else {}
+        source = str(raw.get("extraction_source") or "")
+        if source:
+            return source
+        if raw.get("parser_source") == "tex_archive":
+            return "tex_source"
+        return "pdf_text_layer"
+
+    @staticmethod
+    def _is_trusted_tex_block(block: TypedBlock) -> bool:
+        return EquationSemanticsInputBuilder._extraction_source(block) == "tex_source"
 
     @staticmethod
     def _build_normalized_terms(cartridge: CartridgeContext) -> list[dict]:

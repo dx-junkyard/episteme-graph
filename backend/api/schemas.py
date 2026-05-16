@@ -111,13 +111,13 @@ class LearningTopic(BaseModel):
     student_material: dict | None = Field(default_factory=dict)
     spoken_script: str | None = ""
     cautions: list[str] | None = Field(default_factory=list)
-    check_questions: list[str] | None = Field(default_factory=list)
+    check_questions: list[dict | str] | None = Field(default_factory=list)
 
 
 class GraphMention(BaseModel):
     element_id: str
     label: str
-    element_type: str = "concept"  # concept | relationship | formula | keyword
+    element_type: str = "concept"  # concept | relationship | formula | keyword | reference | citation
     surface_text: str = ""
     importance_score: float = 0.5
 
@@ -296,12 +296,15 @@ class LearningCheckQuestionRequest(BaseModel):
     """次セクションへ進む前の確認問題への回答。"""
     answer: str
     question: str = ""
+    check_question: dict | None = None
 
 
 class LearningCheckQuestionResponse(BaseModel):
     passed: bool
     feedback: str
     model_answer: str = ""
+    answer_requirements: list[str] = Field(default_factory=list)
+    explanation: str = ""
 
 
 # ---------------------------------------------------------------------------

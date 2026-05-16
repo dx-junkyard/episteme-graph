@@ -98,7 +98,7 @@ def _parse_record(
             "block_id": llm_input.block_id,
             "bbox": bbox,
         },
-        extraction_source="pdf_text_layer",
+        extraction_source=llm_input.extraction_source,
         extraction_status=extraction_status,
         needs_math_review=needs_review,
         review_reason=review_reason,
@@ -106,7 +106,9 @@ def _parse_record(
 
     # --- reconstruction ---
     rec_raw = raw.get("reconstruction") or {}
-    if rec_raw and rec_raw.get("status") not in (None, "none", ""):
+    if llm_input.source_is_trusted:
+        reconstruction = EquationReconstruction.make_none()
+    elif rec_raw and rec_raw.get("status") not in (None, "none", ""):
         rec_method = list(rec_raw.get("method", []))
         rec_review_reason = list(rec_raw.get("review_reason", []))
         if llm_input.needs_reconstruction:
@@ -146,11 +148,18 @@ def _parse_record(
     semantic_status = raw.get("semantic_status", "unknown")
     if llm_input.needs_reconstruction and semantic_status == "source_backed":
         semantic_status = "reconstruction_based" if reconstruction.status != "none" else "unknown"
+    if llm_input.source_is_trusted and semantic_status != "unknown":
+        semantic_status = "source_backed"
     review_flags = list(raw.get("review_flags", []))
     if llm_input.needs_reconstruction:
         for flag in ("needs_reconstruction", "reconstruction_only"):
             if flag not in review_flags:
                 review_flags.append(flag)
+    if llm_input.source_is_trusted:
+        review_flags = [
+            flag for flag in review_flags
+            if flag not in ("needs_reconstruction", "reconstruction_only", "partial_extraction")
+        ]
 
     semantics = EquationSemantics(
         equation_type=raw.get("equation_type", "unknown"),
@@ -222,7 +231,7 @@ def _fallback_record(
             "block_id": llm_input.block_id,
             "bbox": bbox,
         },
-        extraction_source="pdf_text_layer",
+        extraction_source=llm_input.extraction_source,
         extraction_status=extraction_status,
         needs_math_review=needs_review,
         review_reason=review_reason,

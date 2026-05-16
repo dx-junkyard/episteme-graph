@@ -22,6 +22,10 @@ class EquationReconstructionLayer:
         prepared: list[EquationCandidate] = []
         for candidate in candidates:
             c = candidate
+            if c.source_location.get("extraction_source") == "tex_source":
+                c.needs_math_review = False
+                prepared.append(c)
+                continue
             c.needs_math_review = True
             if UNTRUSTED_PDF_REASON not in c.review_reason:
                 c.review_reason.append(UNTRUSTED_PDF_REASON)

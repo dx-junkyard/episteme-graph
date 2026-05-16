@@ -185,6 +185,19 @@ class TestLectureStudioSchemas:
         assert settings.narration_persona == "expert_friendly"
         assert settings.response_persona == "general_formal"
 
+    def test_learning_check_question_response_details(self):
+        from schemas import LearningCheckQuestionResponse
+
+        resp = LearningCheckQuestionResponse(
+            passed=False,
+            feedback="不足があります。",
+            model_answer="模範解答",
+            answer_requirements=["要素A"],
+            explanation="要素Aが必要な理由。",
+        )
+        assert resp.answer_requirements == ["要素A"]
+        assert resp.explanation == "要素Aが必要な理由。"
+
 
 class TestLectureStudioModeUI:
     """原稿スタジオの解説モード設定UIの静的テスト。"""
@@ -212,6 +225,45 @@ class TestLectureStudioModeUI:
         assert 'selectedScope.type === "course_topic" && !lsIsTheoryGraphView(currentView)' in js
         assert "lsScopeHasDocumentContext" in js
         assert 'lsState.view === "graph"' in js
+
+    def test_course_draft_check_question_detail_fields_exist(self):
+        from pathlib import Path
+
+        js = (Path(__file__).resolve().parents[2] / "frontend" / "public" / "js" / "admin.js").read_text(encoding="utf-8")
+        assert "ls-course-check-model-answer" in js
+        assert "ls-course-check-requirements" in js
+        assert "ls-course-check-explanation" in js
+        assert "lsCollectCheckQuestions" in js
+
+
+class TestCourseTopicCheckQuestions:
+    def test_normalize_check_questions_accepts_detailed_objects(self):
+        from routes.lecture_studio import _normalize_check_questions
+
+        result = _normalize_check_questions([
+            {
+                "question": "なぜ A か？",
+                "model_answer": "B だから。",
+                "answer_requirements": ["Bに言及", "因果関係"],
+                "explanation": "前提 C から従う。",
+            }
+        ])
+
+        assert result == [{
+            "question": "なぜ A か？",
+            "model_answer": "B だから。",
+            "answer_requirements": ["Bに言及", "因果関係"],
+            "explanation": "前提 C から従う。",
+        }]
+
+    def test_normalize_check_questions_preserves_legacy_strings(self):
+        from routes.lecture_studio import _normalize_check_questions
+
+        result = _normalize_check_questions(["要点を説明してください。"])
+
+        assert result[0]["question"] == "要点を説明してください。"
+        assert result[0]["model_answer"] == ""
+        assert result[0]["answer_requirements"] == []
 
 
 class TestPersonaPromptHelpers:

@@ -18,6 +18,21 @@ from core.postgres import get_session as _pg_session
 logger = logging.getLogger(__name__)
 
 
+def _strip_nuls(value: Any) -> Any:
+    """Postgres jsonb cannot store \u0000; remove NULs from generated content."""
+    if isinstance(value, str):
+        return value.replace("\x00", "").replace("\\u0000", "")
+    if isinstance(value, list):
+        return [_strip_nuls(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key).replace("\x00", "").replace("\\u0000", ""): _strip_nuls(item) for key, item in value.items()}
+    return value
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(_strip_nuls(value), ensure_ascii=False)
+
+
 def build_course_content_background(user_id: str, course_id: str) -> None:
     """Best-effort background entrypoint for course registration."""
     try:
@@ -768,6 +783,7 @@ def _set_content_status(course: dict, status: str, message: str = "", extra: dic
 
 
 def _save_course(session, course_id: str, course: dict) -> None:
+    clean_course = _strip_nuls(course)
     session.execute(
         sa_text("""
             UPDATE learning_courses
@@ -778,8 +794,8 @@ def _save_course(session, course_id: str, course: dict) -> None:
         """),
         {
             "course_id": course_id,
-            "title": course.get("title") or course_id,
-            "data": json.dumps(course, ensure_ascii=False),
+            "title": str(clean_course.get("title") or course_id).replace("\x00", "").replace("\\u0000", ""),
+            "data": _json_dumps(clean_course),
         },
     )
     session.commit()

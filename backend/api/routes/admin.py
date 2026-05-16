@@ -78,6 +78,39 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin", tags=["Admin"])
 
+_TEX_ARCHIVE_SUFFIXES = (".tar.gz", ".tgz")
+
+
+def _uploaded_source_kind(filename: str | None) -> str | None:
+    lower = (filename or "").lower()
+    if lower.endswith(".pdf"):
+        return "pdf"
+    if lower.endswith(_TEX_ARCHIVE_SUFFIXES):
+        return "tex_archive"
+    return None
+
+
+def _source_object_suffix(filename: str | None, source_kind: str) -> str:
+    lower = (filename or "").lower()
+    if source_kind == "tex_archive":
+        return ".tgz" if lower.endswith(".tgz") else ".tar.gz"
+    return ".pdf"
+
+
+def _source_content_type(source_kind: str) -> str:
+    if source_kind == "tex_archive":
+        return "application/gzip"
+    return "application/pdf"
+
+
+def _source_title(filename: str | None) -> str:
+    name = filename or "document"
+    lower = name.lower()
+    for suffix in (".tar.gz", ".tgz", ".pdf"):
+        if lower.endswith(suffix):
+            return name[: -len(suffix)]
+    return os.path.splitext(name)[0]
+
 
 def _word_set(text: str) -> set[str]:
     """テキストを正規化して3文字以上の単語セットを返す。"""
@@ -228,30 +261,37 @@ def upload_material(
     file: UploadFile = File(...),
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """PDF教材をアップロードし、バックグラウンドでグラフ化処理を開始する。
+    """PDF/TeX教材をアップロードし、バックグラウンドでグラフ化処理を開始する。
 
     即座に task_id を返却し、処理完了はポーリングで確認する。
     """
     import datetime
 
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are accepted")
+    source_kind = _uploaded_source_kind(file.filename)
+    if source_kind is None:
+        raise HTTPException(status_code=400, detail="Only PDF files or TeX .tar.gz archives are accepted")
 
-    pdf_bytes = file.file.read()
-    if len(pdf_bytes) == 0:
+    source_bytes = file.file.read()
+    if len(source_bytes) == 0:
         raise HTTPException(status_code=400, detail="Empty file")
 
     material_id = str(uuid.uuid4())[:12]
-    pdf_object_name = f"uploads/{material_id}.pdf"
+    object_suffix = _source_object_suffix(file.filename, source_kind)
+    source_object_name = f"uploads/{material_id}{object_suffix}"
     doc_id = uuid.uuid4()
     task_id = str(uuid.uuid4())[:12]
     now = datetime.datetime.utcnow().isoformat()
 
     try:
-        get_storage_client().upload_pdf("raw-papers", pdf_object_name, pdf_bytes)
+        get_storage_client().upload_bytes(
+            "raw-papers",
+            source_object_name,
+            source_bytes,
+            content_type=_source_content_type(source_kind),
+        )
     except Exception:
-        logger.exception("Failed to store uploaded PDF for material %s", material_id)
-        raise HTTPException(status_code=500, detail="PDF storage failed")
+        logger.exception("Failed to store uploaded source for material %s", material_id)
+        raise HTTPException(status_code=500, detail="Source storage failed")
 
     session = _pg_session()
     try:
@@ -262,7 +302,7 @@ def upload_material(
             """),
             {
                 "id": doc_id,
-                "title": os.path.splitext(file.filename)[0],
+                "title": _source_title(file.filename),
                 "filename": file.filename,
                 "uploaded_by": current_user["id"],
                 "material_id": material_id,
@@ -279,7 +319,7 @@ def upload_material(
 
     thread = threading.Thread(
         target=process_material_background,
-        args=(material_id, str(doc_id), file.filename, pdf_bytes, task_id),
+        args=(material_id, str(doc_id), file.filename, source_bytes, task_id, None, source_kind),
         daemon=True,
     )
     thread.start()
@@ -293,7 +333,8 @@ def upload_material(
         "task_id": task_id,
         "material_id": material_id,
         "filename": file.filename,
-        "title": os.path.splitext(file.filename)[0],
+        "title": _source_title(file.filename),
+        "source_kind": source_kind,
         "status": "pending",
         "uploaded_at": now,
     }
@@ -334,19 +375,32 @@ def reanalyze_document(
             detail="Document has no material_id; cannot fetch PDF for reanalysis",
         )
 
-    object_candidates = [f"uploads/{material_id}.pdf", filename, material_id]
+    filename_kind = _uploaded_source_kind(filename)
+    object_candidates = []
+    if filename_kind:
+        object_candidates.append(f"uploads/{material_id}{_source_object_suffix(filename, filename_kind)}")
+    object_candidates.extend([
+        f"uploads/{material_id}.pdf",
+        f"uploads/{material_id}.tar.gz",
+        f"uploads/{material_id}.tgz",
+        filename,
+        material_id,
+    ])
     storage = get_storage_client()
-    pdf_bytes: bytes | None = None
+    source_bytes: bytes | None = None
+    source_kind: str | None = filename_kind
     for object_name in object_candidates:
         if not object_name:
             continue
         try:
-            pdf_bytes = storage.get_object("raw-papers", object_name)
+            source_bytes = storage.get_object("raw-papers", object_name)
+            if source_kind is None:
+                source_kind = _uploaded_source_kind(object_name) or "pdf"
             break
         except Exception:
             continue
-    if pdf_bytes is None:
-        raise HTTPException(status_code=404, detail="PDF object not found in MinIO")
+    if source_bytes is None:
+        raise HTTPException(status_code=404, detail="Source object not found in MinIO")
 
     task_id = str(uuid.uuid4())[:12]
     create_background_task(task_id, "document_reanalysis", current_user["id"])
@@ -368,7 +422,7 @@ def reanalyze_document(
 
     thread = threading.Thread(
         target=process_material_background,
-        args=(material_id, document_id, filename, pdf_bytes, task_id),
+        args=(material_id, document_id, filename, source_bytes, task_id, None, source_kind or "pdf"),
         daemon=True,
     )
     thread.start()
@@ -470,12 +524,16 @@ def list_materials(
     finally:
         session.close()
 
-    # MinIO にPDFが存在する教材のIDセットを一括取得
+    # MinIO に元ソースが存在する教材のIDセットを一括取得
     existing_pdf_ids: set[str] = set()
     try:
         for obj_name in get_storage_client().list_objects("raw-papers", "uploads/"):
             if obj_name.endswith(".pdf"):
                 existing_pdf_ids.add(obj_name[len("uploads/"):-len(".pdf")])
+            elif obj_name.endswith(".tar.gz"):
+                existing_pdf_ids.add(obj_name[len("uploads/"):-len(".tar.gz")])
+            elif obj_name.endswith(".tgz"):
+                existing_pdf_ids.add(obj_name[len("uploads/"):-len(".tgz")])
     except Exception:
         pass  # MinIO 不達の場合は全件 has_pdf=False のまま
 

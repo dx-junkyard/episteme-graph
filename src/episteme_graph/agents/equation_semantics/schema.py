@@ -86,6 +86,7 @@ DETECTION_METHODS = [
     "equation_number_pattern",
     "math_symbol_density",
     "inline_equation_heuristic",
+    "tex_source",
 ]
 
 
@@ -167,6 +168,8 @@ class EquationLLMInput:
     extraction_status: str = "complete"
     acceptance_status: str = "accepted"
     needs_reconstruction: bool = False
+    extraction_source: str = "pdf_text_layer"
+    source_is_trusted: bool = False
 
 
 # ---------------------------------------------------------------------------

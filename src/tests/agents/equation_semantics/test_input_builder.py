@@ -165,3 +165,33 @@ def test_build_llm_inputs_with_cartridge_terms():
     inputs = BUILDER.build_llm_inputs(_structure(), candidates, cartridge=cartridge)
     assert inputs[0].cartridge_id == "test"
     assert inputs[0].normalized_terms[0]["canonical"] == "R Lambda c"
+
+
+def test_tex_source_equation_is_trusted_and_not_reconstructed():
+    structure = DocumentStructureResult(
+        document_id="doc",
+        source_file="paper.tar.gz:main.tex",
+        cartridge_id=None,
+        metadata=DocumentMetadata(title="Test", pages=0),
+        sections=[Section("sec_1", "Formulation", 1, 1, 1)],
+        blocks=[
+            _typed("b0", "The source defines the energy relation.", "body_paragraph", 0),
+            _typed("e1", r"E = mc^2", "equation_block", 1),
+        ],
+    )
+    structure.blocks[1].raw = {
+        "parser_source": "tex_archive",
+        "extraction_source": "tex_source",
+        "latex": r"E = mc^2",
+    }
+    candidates = BUILDER.build_candidates(structure)
+    for c in candidates:
+        c.acceptance_status = "accepted"
+        c.extraction_status = "complete"
+
+    inputs = BUILDER.build_llm_inputs(structure, candidates, force_reconstruction=True)
+
+    assert inputs[0].latex == r"E = mc^2"
+    assert inputs[0].extraction_source == "tex_source"
+    assert inputs[0].source_is_trusted is True
+    assert inputs[0].needs_reconstruction is False

@@ -44,7 +44,7 @@ def _make_provisional_record(candidate: EquationCandidate) -> EquationRecord:
         latex=None,
         plain_text=candidate.raw_text or None,
         source_location=src_loc,
-        extraction_source="pdf_text_layer",
+        extraction_source=str(src_loc.get("extraction_source") or "pdf_text_layer"),
         extraction_status=candidate.extraction_status,
         needs_math_review=True,
         review_reason=list(candidate.review_reason),
@@ -164,7 +164,7 @@ class EquationSemanticsAgent:
 
         for idx, llm_input in enumerate(llm_inputs, start=1):
             candidate = candidate_by_id.get(llm_input.candidate_id)
-            image = self._image_extractor.crop_candidate(
+            image = None if llm_input.source_is_trusted else self._image_extractor.crop_candidate(
                 getattr(structure, "source_file", None),
                 candidate.source_location if candidate else None,
             )
