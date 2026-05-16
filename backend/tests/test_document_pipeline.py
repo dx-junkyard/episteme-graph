@@ -7,7 +7,9 @@ Covers:
 """
 from __future__ import annotations
 
+import io
 import sys
+import tarfile
 import types
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -182,6 +184,151 @@ def test_dsl_result_to_search_text_includes_nodes_and_edges():
     assert "n1 Relation total_rate_sum_rule" in text
     assert "n1 REQUIRES(depends_on, +) n2" in text
     assert "uncertain edge" in text
+
+
+# --- TeX archive input ----------------------------------------------------
+
+def _make_tex_archive(files: dict[str, str]) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, text in files.items():
+            data = text.encode("utf-8")
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def test_tex_archive_builds_document_structure_with_sections_and_equations():
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    archive = _make_tex_archive({
+        "main.tex": r"""
+            \documentclass{article}
+            \title{Consistency Relations}
+            \author{A. Author and B. Writer}
+            \begin{document}
+            \maketitle
+            \section{Introduction}
+            We derive a consistency relation for scalar perturbations.
+
+            \begin{equation}
+            R = H^2 / \dot{\phi}^2
+            \end{equation}
+
+            \subsection{Result}
+            The squeezed limit fixes the observable.
+            \end{document}
+        """,
+    })
+
+    structure = build_structure_from_tex_archive(
+        archive,
+        document_id="doc-tex",
+        source_file="paper.tar.gz",
+        cartridge_id="particle_physics",
+    )
+
+    assert structure.document_id == "doc-tex"
+    assert structure.metadata.title == "Consistency Relations"
+    assert structure.metadata.authors == ["A. Author", "B. Writer"]
+    assert [s.title for s in structure.sections] == ["Introduction", "Result"]
+    assert any(b.block_type == "equation_block" and "R = H^2" in b.text for b in structure.blocks)
+    assert all(b.raw.get("parser_source") == "tex_archive" for b in structure.blocks)
+
+
+def test_orchestrator_accepts_tex_archive_source_kind():
+    from core.document_pipeline import orchestrator
+
+    archive = _make_tex_archive({
+        "main.tex": r"""
+            \documentclass{article}
+            \begin{document}
+            \section{Intro}
+            TeX source can enter the same agent pipeline.
+            \end{document}
+        """,
+    })
+
+    @dataclass
+    class _Result:
+        document_id: str = "doc-tex"
+        nodes: list = field(default_factory=list)
+        edges: list = field(default_factory=list)
+        components: list = field(default_factory=list)
+        qualified_spans: list = field(default_factory=list)
+        equations: list = field(default_factory=list)
+        review_notes: list = field(default_factory=list)
+
+    @dataclass
+    class _CourseMappingResult:
+        document_id: str = "doc-tex"
+        cartridge_id: str | None = None
+        topics: list = field(default_factory=list)
+        validation_issues: list = field(default_factory=list)
+
+    @dataclass
+    class _ComponentGraphResult:
+        document_id: str = "doc-tex"
+        graph_schema_version: str = "0.1.0"
+        cartridge_id: str | None = None
+        nodes: list = field(default_factory=list)
+        edges: list = field(default_factory=list)
+        review_notes: list = field(default_factory=list)
+        confidence: float = 0.9
+        validation_issues: list = field(default_factory=list)
+
+        def to_dict(self):
+            return {"nodes": [], "edges": [], "document_id": self.document_id,
+                    "graph_schema_version": self.graph_schema_version,
+                    "cartridge_id": self.cartridge_id,
+                    "review_notes": self.review_notes,
+                    "confidence": self.confidence,
+                    "validation_issues": []}
+
+        def to_graph_payload(self):
+            return {"graph_schema_version": "0.1.0", "nodes": [], "edges": []}
+
+    agents = {
+        "PaperSkeletonAgent": _MockAgent(_Result()),
+        "RhetoricalRoleAgent": _MockAgent(_Result()),
+        "ClaimQualificationAgent": _MockAgent(_Result()),
+        "EquationSemanticsAgent": _MockAgent(_Result()),
+        "ThesisReconstructionAgent": _MockAgent(_Result()),
+        "DSLLinkingAgent": _MockAgent(_Result()),
+        "ComponentAssemblyAgent": _MockAgent(_Result()),
+        "ComponentGraphAgent": _MockAgent(_ComponentGraphResult()),
+        "CourseMappingAgent": _MockAgent(_CourseMappingResult()),
+    }
+
+    visited: list[str] = []
+    fake_persistence = {
+        "persist_source_chunks": MagicMock(return_value=[
+            {"chunk_id": "c1", "chunk_index": 0, "section_id": "sec_1",
+             "block_ids": ["tex_b1"], "page_start": 1, "page_end": 1, "text": "Hello"}
+        ]),
+        "persist_qualified_claims": MagicMock(return_value=[]),
+        "persist_components": MagicMock(return_value={}),
+        "persist_component_graph": MagicMock(return_value="graph-tex"),
+        "persist_document_embedding": MagicMock(return_value="emb-tex"),
+        "upsert_analysis_run": MagicMock(return_value="run-tex"),
+    }
+
+    with patch.multiple(orchestrator, **fake_persistence):
+        result = orchestrator.run_document_pipeline(
+            pdf_bytes=archive,
+            document_id="doc-tex",
+            material_id="mat-tex",
+            filename="paper.tar.gz",
+            source_kind="tex_archive",
+            agents=agents,
+            progress_callback=lambda stage, info: visited.append(stage),
+        )
+
+    assert result.final_stage == "completed"
+    assert "grobid_parse" in visited
+    assert "document_structure" in visited
+    assert "source_chunking" in visited
 
 
 # --- orchestrator stage flow ---------------------------------------------

@@ -84,11 +84,11 @@
         <h3 class="admin-section-title">教材アップロード</h3>
         <div class="upload-zone" id="upload-zone">
           <div class="upload-icon">&#128196;</div>
-          <p>PDFファイルをドラッグ＆ドロップ</p>
+          <p>PDF または TeX .tar.gz をドラッグ＆ドロップ</p>
           <p style="font-size:12px;color:var(--color-text-tertiary)">または</p>
           <label class="upload-btn">
             ファイルを選択
-            <input type="file" id="file-input" accept=".pdf" hidden>
+            <input type="file" id="file-input" accept=".pdf,.tar.gz,.tgz,application/pdf,application/gzip" hidden>
           </label>
         </div>
         <div id="upload-status" class="upload-status"></div>

@@ -2214,6 +2214,7 @@ def process_material_background(
     pdf_bytes: bytes,
     task_id: str | None = None,
     cartridge_id: str | None = None,
+    source_kind: str = "pdf",
 ) -> None:
     """バックグラウンドで新Agent Pipelineを実行する (issue #226)。
 
@@ -2238,13 +2239,22 @@ def process_material_background(
     if task_id:
         update_background_task(task_id, "processing", result_data={"stage": "started"})
 
-    # PDF を MinIO に保存（pipeline は一時ファイルに書き出すが正本は MinIO）
+    # 元ソースを MinIO に保存（pipeline は一時ファイルに書き出すが正本は MinIO）
     try:
-        _get_storage().upload_pdf("raw-papers", f"uploads/{material_id}.pdf", pdf_bytes)
-        logger.info("PDF saved to MinIO for material=%s", material_id)
+        if source_kind == "tex_archive":
+            suffix = ".tgz" if filename.lower().endswith(".tgz") else ".tar.gz"
+            _get_storage().upload_bytes(
+                "raw-papers",
+                f"uploads/{material_id}{suffix}",
+                pdf_bytes,
+                content_type="application/gzip",
+            )
+        else:
+            _get_storage().upload_pdf("raw-papers", f"uploads/{material_id}.pdf", pdf_bytes)
+        logger.info("Source saved to MinIO for material=%s kind=%s", material_id, source_kind)
     except Exception as _storage_exc:
         logger.warning(
-            "Failed to save PDF to MinIO for material=%s: %s", material_id, _storage_exc,
+            "Failed to save source to MinIO for material=%s: %s", material_id, _storage_exc,
         )
 
     def _on_stage(stage: str, info: dict) -> None:
@@ -2259,6 +2269,7 @@ def process_material_background(
             document_id=doc_id,
             material_id=material_id,
             filename=filename,
+            source_kind=source_kind,
             cartridge_id=cartridge_id,
             progress_callback=_on_stage,
         )

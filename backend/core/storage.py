@@ -51,6 +51,24 @@ class StorageManager:
         )
         return object_name
 
+    def upload_bytes(
+        self,
+        bucket: str,
+        object_name: str,
+        data: bytes,
+        *,
+        content_type: str = "application/octet-stream",
+    ) -> str:
+        """Upload arbitrary bytes to MinIO and return the object name."""
+        self.client.put_object(
+            bucket,
+            object_name,
+            io.BytesIO(data),
+            length=len(data),
+            content_type=content_type,
+        )
+        return object_name
+
     def get_object(self, bucket: str, object_name: str) -> bytes:
         """Download an object from MinIO and return its bytes."""
         response = self.client.get_object(bucket, object_name)

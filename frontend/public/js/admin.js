@@ -741,8 +741,9 @@
   var _activePollingTimers = {};
 
   function uploadFile(file) {
-    if (!file.name.toLowerCase().endsWith(".pdf")) {
-      showUploadStatus("PDFファイルのみアップロードできます。", "error");
+    var lowerName = file.name.toLowerCase();
+    if (!(lowerName.endsWith(".pdf") || lowerName.endsWith(".tar.gz") || lowerName.endsWith(".tgz"))) {
+      showUploadStatus("PDF または TeX .tar.gz ファイルのみアップロードできます。", "error");
       return;
     }
 

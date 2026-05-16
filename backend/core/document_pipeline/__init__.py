@@ -1,6 +1,6 @@
 """Document-first analysis pipeline (issue #226).
 
-PDFアップロード後の解析を `src/episteme_graph/agents/` の8 agent群で実行する
+PDF/TeXアップロード後の解析を `src/episteme_graph/agents/` の8 agent群で実行する
 オーケストレータと、結果を既存の Postgres スキーマに保存する adapter 群を提供する。
 
 公開 API:
