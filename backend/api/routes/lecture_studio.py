@@ -2332,6 +2332,41 @@ def _clean_str_list(value: object) -> list[str]:
     return []
 
 
+def _normalize_check_questions(value: object) -> list[dict]:
+    """Normalize legacy string questions and detailed check-question objects."""
+    if value is None:
+        return []
+    items = value if isinstance(value, list) else [value]
+    normalized: list[dict] = []
+    for item in items:
+        if isinstance(item, str):
+            question = item.strip()
+            if question:
+                normalized.append({
+                    "question": question,
+                    "model_answer": "",
+                    "answer_requirements": [],
+                    "explanation": "",
+                })
+            continue
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question") or item.get("text") or "").strip()
+        if not question:
+            continue
+        normalized.append({
+            "question": question,
+            "model_answer": str(item.get("model_answer") or item.get("answer") or "").strip(),
+            "answer_requirements": _clean_str_list(
+                item.get("answer_requirements")
+                or item.get("required_elements")
+                or item.get("requirements")
+            ),
+            "explanation": str(item.get("explanation") or item.get("rationale") or "").strip(),
+        })
+    return normalized
+
+
 @router.put("/courses/{course_id}/lecture-studio/course-topics/{topic_id}")
 def save_lecture_studio_course_topic(
     course_id: str,
@@ -2355,7 +2390,7 @@ def save_lecture_studio_course_topic(
     target["key_concepts"] = _clean_str_list(body.get("key_concepts"))
     target["spoken_script"] = str(body.get("spoken_script") or "")
     target["cautions"] = _clean_str_list(body.get("cautions"))
-    target["check_questions"] = _clean_str_list(body.get("check_questions"))
+    target["check_questions"] = _normalize_check_questions(body.get("check_questions"))
 
     session = _pg_session()
     try:
@@ -2418,7 +2453,14 @@ JSON文字列内のLaTeXバックスラッシュは必ず `\\Lambda` のよう�
   "student_material": {{"source_format": "eg-markdown-v1", "source_text": "学生に見せる教材"}},
   "spoken_script": "教員が話せる自然文。音声読み上げ対象。",
   "cautions": ["注意点"],
-  "check_questions": ["確認問題"]
+  "check_questions": [
+    {{
+      "question": "確認問題",
+      "model_answer": "模範解答",
+      "answer_requirements": ["回答に含めるべき要素"],
+      "explanation": "難しい問題では、なぜそうなるかの解説"
+    }}
+  ]
 }}
 
 コーストピック:
@@ -2445,7 +2487,7 @@ class CourseTopicDraftLLMResponse(BaseModel):
     student_material: CourseTopicStudentMaterialDraft = Field(default_factory=CourseTopicStudentMaterialDraft)
     spoken_script: str = ""
     cautions: list[str] = Field(default_factory=list)
-    check_questions: list[str] = Field(default_factory=list)
+    check_questions: list[dict] = Field(default_factory=list)
 
 
 def _parse_course_topic_draft_json(raw: str) -> dict:
@@ -2495,7 +2537,7 @@ def _normalize_course_topic_draft_response(parsed: object) -> dict:
         },
         "spoken_script": str(parsed.get("spoken_script") or ""),
         "cautions": _clean_str_list(parsed.get("cautions")),
-        "check_questions": _clean_str_list(parsed.get("check_questions")),
+        "check_questions": _normalize_check_questions(parsed.get("check_questions")),
     }
 
 

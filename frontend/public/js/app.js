@@ -363,13 +363,15 @@
           html += '<div class="graph-suggestions">';
           chunk.graph_mentions.slice(0, 4).forEach(function (m) {
             var label = m.label || m.surface_text || m.element_id || "この要素";
+            var actionText = (m.element_type === "citation") ? "引用情報" :
+              (m.element_type === "reference") ? "参照先" : "説明";
             html += '<button class="graph-suggest-btn"'
               + ' data-chunk-id="' + escHtml(chunk.id || "") + '"'
               + ' data-element-id="' + escHtml(m.element_id || "") + '"'
               + ' data-element-type="' + escHtml(m.element_type || "concept") + '"'
               + ' data-element-label="' + escHtml(label) + '"'
               + ' title="' + escHtml(label) + '">';
-            html += escHtml(label + "を説明") + '</button>';
+            html += escHtml(label + "の" + actionText) + '</button>';
           });
           html += '</div>';
         }
@@ -424,16 +426,19 @@
 
     ca.querySelectorAll(".graph-suggest-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
-        var label = this.getAttribute("data-element-label") || this.textContent.replace(/\s*を説明$/, "");
+        var label = this.getAttribute("data-element-label") ||
+          this.textContent.replace(/\s*の(?:説明|引用情報|参照先)$/, "");
+        var type = this.getAttribute("data-element-type") || "concept";
         var payload = {
           action: "EXPLAIN_GRAPH_ELEMENT",
           chunk_id: this.getAttribute("data-chunk-id") || "",
           element_id: this.getAttribute("data-element-id") || "",
-          element_type: this.getAttribute("data-element-type") || "concept",
+          element_type: type,
           element_label: label,
         };
         if (state.learningSupport) payload.support_context = state.learningSupport;
-        sendMessage(label + "を説明", payload);
+        var suffix = type === "citation" ? "の引用情報" : type === "reference" ? "の参照先" : "を説明";
+        sendMessage(label + suffix, payload);
       });
     });
 
@@ -851,13 +856,29 @@
 
   function getCheckQuestionForCurrentTopic() {
     var topic = getCurrentTopic();
-    if (!topic) return "このセクションの要点を自分の言葉で説明してください。";
+    var fallback = { question: "このセクションの要点を自分の言葉で説明してください。", model_answer: "", answer_requirements: [], explanation: "" };
+    if (!topic) return fallback;
     var questions = topic.check_questions || topic.assessment_prompts || [];
-    if (questions.length > 0) return questions[0];
+    if (questions.length > 0) return normalizeCheckQuestion(questions[0]);
     if (topic.learning_objectives && topic.learning_objectives.length > 0) {
-      return "次の学習目標を説明してください: " + topic.learning_objectives[0];
+      return { question: "次の学習目標を説明してください: " + topic.learning_objectives[0], model_answer: "", answer_requirements: [], explanation: "" };
     }
-    return "このセクションの要点を自分の言葉で説明してください。";
+    return fallback;
+  }
+
+  function normalizeCheckQuestion(item) {
+    if (typeof item === "string") {
+      return { question: item, model_answer: "", answer_requirements: [], explanation: "" };
+    }
+    item = item || {};
+    return {
+      question: item.question || item.text || "このセクションの要点を自分の言葉で説明してください。",
+      model_answer: item.model_answer || item.answer || "",
+      answer_requirements: Array.isArray(item.answer_requirements || item.required_elements)
+        ? (item.answer_requirements || item.required_elements)
+        : [],
+      explanation: item.explanation || item.rationale || "",
+    };
   }
 
   function openCheckModal() {
@@ -876,7 +897,7 @@
       '<div class="check-box">' +
         '<div class="check-title">確認問題</div>' +
         '<div class="check-section">' + escHtml(topic ? topic.title : "") + '</div>' +
-        '<div class="check-question">' + escHtml(question) + '</div>' +
+        '<div class="check-question">' + escHtml(question.question || "") + '</div>' +
         '<textarea id="check-answer" rows="5" placeholder="回答を入力してください"></textarea>' +
         '<div id="check-feedback" class="check-feedback"></div>' +
         '<div class="check-actions">' +
@@ -926,7 +947,7 @@
         "/learning/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/check",
         {
           method: "POST",
-          body: JSON.stringify({ question: question, answer: answer }),
+          body: JSON.stringify({ question: question.question || "", check_question: question, answer: answer }),
         }
       );
       if (!res.ok) throw new Error("check failed");
@@ -940,7 +961,11 @@
         if (feedbackEl) {
           feedbackEl.innerHTML = '<strong>もう一度確認しましょう。</strong><br>' +
             escHtml(data.feedback || "") +
-            (data.model_answer ? '<div class="check-model-answer"><span>解答例</span>' + escHtml(data.model_answer) + '</div>' : "");
+            (data.answer_requirements && data.answer_requirements.length
+              ? '<div class="check-model-answer"><span>回答に必要な要素</span><ul>' + data.answer_requirements.map(function (r) { return '<li>' + escHtml(r) + '</li>'; }).join("") + '</ul></div>'
+              : "") +
+            (data.model_answer ? '<div class="check-model-answer"><span>解答例</span>' + escHtml(data.model_answer) + '</div>' : "") +
+            (data.explanation ? '<div class="check-model-answer"><span>解説</span>' + escHtml(data.explanation) + '</div>' : "");
           feedbackEl.className = "check-feedback fail";
         }
         if (submitBtn) {

@@ -210,15 +210,25 @@ def test_tex_archive_builds_document_structure_with_sections_and_equations():
             \begin{document}
             \maketitle
             \section{Introduction}
-            We derive a consistency relation for scalar perturbations.
+            We derive a consistency relation for scalar perturbations \cite{Maldacena:2002vr}.
 
             \begin{equation}
             R = H^2 / \dot{\phi}^2
+            \label{eq:scalar_relation}
             \end{equation}
 
             \subsection{Result}
-            The squeezed limit fixes the observable.
+            The squeezed limit fixes the observable in Eq.~\eqref{eq:scalar_relation}.
             \end{document}
+        """,
+        "refs.bib": r"""
+            @article{Maldacena:2002vr,
+              author = {Maldacena, Juan Martin},
+              title = {Non-Gaussian features of primordial fluctuations},
+              journal = {JHEP},
+              year = {2003},
+              doi = {10.1088/1126-6708/2003/05/013}
+            }
         """,
     })
 
@@ -233,7 +243,21 @@ def test_tex_archive_builds_document_structure_with_sections_and_equations():
     assert structure.metadata.title == "Consistency Relations"
     assert structure.metadata.authors == ["A. Author", "B. Writer"]
     assert [s.title for s in structure.sections] == ["Introduction", "Result"]
-    assert any(b.block_type == "equation_block" and "R = H^2" in b.text for b in structure.blocks)
+    equation_blocks = [b for b in structure.blocks if b.block_type == "equation_block"]
+    assert any("R = H^2" in b.text for b in equation_blocks)
+    assert equation_blocks[0].equation_label == "eq:scalar_relation"
+    assert equation_blocks[0].raw["latex"] == r"R = H^2 / \dot{\phi}^2"
+    assert equation_blocks[0].raw["extraction_source"] == "tex_source"
+    assert any(
+        b.raw.get("citations", [{}])[0].get("bib", {}).get("title") == "Non-Gaussian features of primordial fluctuations"
+        for b in structure.blocks
+        if b.raw.get("citations")
+    )
+    assert any(
+        b.raw.get("refs", [{}])[0].get("key") == "eq:scalar_relation"
+        for b in structure.blocks
+        if b.raw.get("refs")
+    )
     assert all(b.raw.get("parser_source") == "tex_archive" for b in structure.blocks)
 
 

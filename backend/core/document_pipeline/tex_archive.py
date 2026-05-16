@@ -22,6 +22,7 @@ from episteme_graph.agents.document_structure.schema import (
 )
 
 _TEX_EXT = ".tex"
+_BIB_EXT = ".bib"
 _MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
 _MAX_MEMBER_BYTES = 10 * 1024 * 1024
 _MAX_EXPANDED_CHARS = 2_000_000
@@ -40,6 +41,11 @@ _BLOCK_ENV_RE = re.compile(
 )
 _DISPLAY_MATH_RE = re.compile(r"(?P<display_math>\$\$.*?\$\$|\\\[.*?\\\])", re.DOTALL)
 _CAPTION_RE = re.compile(r"\\caption(?:\[[^\]]*\])?\{([^{}]+)\}", re.DOTALL)
+_LABEL_RE = re.compile(r"\\label\s*\{([^{}]+)\}")
+_REF_RE = re.compile(r"\\(?:ref|eqref|autoref|cref|Cref)\s*\{([^{}]+)\}")
+_CITE_RE = re.compile(r"\\(?:cite|citep|citet|citealp|citealt|citeauthor|citeyear)\*?(?:\[[^\]]*\]){0,2}\s*\{([^{}]+)\}")
+_BIB_ENTRY_RE = re.compile(r"@(?P<entry_type>[A-Za-z]+)\s*\{\s*(?P<key>[^,\s]+)\s*,(?P<body>.*?)(?=^@\w+\s*\{|\Z)", re.DOTALL | re.MULTILINE)
+_BIB_FIELD_RE = re.compile(r"(?P<field>[A-Za-z][A-Za-z0-9_-]*)\s*=\s*(?P<value>\{(?:[^{}]|\{[^{}]*\})*\}|\"[^\"]*\"|[^,\n]+)", re.DOTALL)
 _ABSTRACT_RE = re.compile(r"\\begin\{abstract\}(.*?)\\end\{abstract\}", re.DOTALL)
 _TITLEPAGE_RE = re.compile(r"\\begin\{titlepage\}(.*?)\\end\{titlepage\}", re.DOTALL)
 _COMMAND_WITH_ARG_RE = re.compile(r"\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?\{([^{}]*)\}")
@@ -52,6 +58,7 @@ class TexArchiveSource:
     expanded_tex: str
     title: str | None
     authors: list[str]
+    bibliography: dict[str, dict]
 
 
 def build_structure_from_tex_archive(
@@ -63,7 +70,9 @@ def build_structure_from_tex_archive(
 ) -> DocumentStructureResult:
     """Build a pipeline document structure from a gzipped tar TeX bundle."""
     source = load_tex_archive(archive_bytes, source_file=source_file)
-    blocks, sections = _tex_to_blocks_and_sections(source.expanded_tex, document_id)
+    blocks, sections = _tex_to_blocks_and_sections(
+        source.expanded_tex, document_id, bibliography=source.bibliography
+    )
     metadata = DocumentMetadata(title=source.title, authors=source.authors, pages=0)
     result = DocumentStructureResult(
         document_id=document_id,
@@ -82,7 +91,7 @@ def load_tex_archive(archive_bytes: bytes, *, source_file: str) -> TexArchiveSou
     if len(archive_bytes) > _MAX_ARCHIVE_BYTES:
         raise ValueError("TeX archive is too large")
 
-    members = _read_tex_members(archive_bytes)
+    members, bib_members = _read_archive_members(archive_bytes)
     if not members:
         raise ValueError("TeX archive contains no .tex files")
 
@@ -92,20 +101,26 @@ def load_tex_archive(archive_bytes: bytes, *, source_file: str) -> TexArchiveSou
     title = _clean_text(_first_match(_TITLE_RE, expanded)) or _infer_title(expanded)
     authors_raw = _clean_text(_first_match(_AUTHOR_RE, expanded)) or _infer_authors(expanded)
     authors = _split_authors(authors_raw)
+    bibliography = _parse_bibliography(bib_members)
     return TexArchiveSource(
         source_file=f"{source_file}:{main_name}",
         expanded_tex=expanded,
         title=title or None,
         authors=authors,
+        bibliography=bibliography,
     )
 
 
-def _read_tex_members(archive_bytes: bytes) -> dict[str, str]:
-    members: dict[str, str] = {}
+def _read_archive_members(archive_bytes: bytes) -> tuple[dict[str, str], dict[str, str]]:
+    tex_members: dict[str, str] = {}
+    bib_members: dict[str, str] = {}
     try:
         with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tf:
             for member in tf.getmembers():
-                if not member.isfile() or not member.name.lower().endswith(_TEX_EXT):
+                if not member.isfile():
+                    continue
+                lower_name = member.name.lower()
+                if not (lower_name.endswith(_TEX_EXT) or lower_name.endswith(_BIB_EXT)):
                     continue
                 safe_name = _safe_member_name(member.name)
                 if safe_name is None:
@@ -118,10 +133,13 @@ def _read_tex_members(archive_bytes: bytes) -> dict[str, str]:
                 raw = extracted.read(_MAX_MEMBER_BYTES + 1)
                 if len(raw) > _MAX_MEMBER_BYTES:
                     continue
-                members[safe_name] = _decode_tex(raw)
+                if lower_name.endswith(_TEX_EXT):
+                    tex_members[safe_name] = _decode_tex(raw)
+                else:
+                    bib_members[safe_name] = _decode_tex(raw)
     except tarfile.TarError as exc:
         raise ValueError("invalid .tar.gz TeX archive") from exc
-    return members
+    return tex_members, bib_members
 
 
 def _safe_member_name(name: str) -> str | None:
@@ -185,14 +203,26 @@ def _strip_comments(text: str) -> str:
     return "\n".join(lines)
 
 
-def _tex_to_blocks_and_sections(tex: str, document_id: str) -> tuple[list[TypedBlock], list[Section]]:
+def _tex_to_blocks_and_sections(
+    tex: str,
+    document_id: str,
+    *,
+    bibliography: dict[str, dict] | None = None,
+) -> tuple[list[TypedBlock], list[Section]]:
     body = _document_body(tex)
     blocks: list[TypedBlock] = []
     sections: list[Section] = []
     current_section_id: str | None = None
     order = 0
 
-    def add_block(text: str, block_type: str, *, section_id: str | None = None, raw: dict | None = None) -> None:
+    def add_block(
+        text: str,
+        block_type: str,
+        *,
+        section_id: str | None = None,
+        raw: dict | None = None,
+        equation_label: str | None = None,
+    ) -> None:
         nonlocal order
         cleaned = text.strip()
         if not cleaned:
@@ -205,6 +235,7 @@ def _tex_to_blocks_and_sections(tex: str, document_id: str) -> tuple[list[TypedB
                 text=cleaned,
                 block_type=block_type,
                 confidence=0.85,
+                equation_label=equation_label,
                 section_id=section_id,
                 raw={"parser_source": "tex_archive", **(raw or {})},
             )
@@ -230,7 +261,17 @@ def _tex_to_blocks_and_sections(tex: str, document_id: str) -> tuple[list[TypedB
             current_section_id = section_id
             add_block(title, "section_heading" if level == 1 else "subsection_heading", section_id=section_id)
         elif segment[0] == "equation":
-            add_block(_clean_equation(segment[1]), "equation_block", section_id=current_section_id)
+            raw_equation = segment[1]
+            label = _extract_equation_label(raw_equation)
+            latex = _clean_equation(raw_equation)
+            metadata = _tex_reference_metadata(raw_equation, bibliography)
+            add_block(
+                latex,
+                "equation_block",
+                section_id=current_section_id,
+                raw={"latex": latex, "extraction_source": "tex_source", **metadata},
+                equation_label=label,
+            )
         elif segment[0] in {"figure", "table"}:
             caption = _clean_text(_first_match(_CAPTION_RE, segment[1]))
             block_type = "figure_caption" if segment[0] == "figure" else "table_caption"
@@ -238,7 +279,12 @@ def _tex_to_blocks_and_sections(tex: str, document_id: str) -> tuple[list[TypedB
                 add_block(caption, block_type, section_id=current_section_id)
         else:
             for paragraph in _paragraphs(segment[1]):
-                add_block(_clean_text(paragraph), "body_paragraph", section_id=current_section_id)
+                add_block(
+                    _clean_text(paragraph),
+                    "body_paragraph",
+                    section_id=current_section_id,
+                    raw=_tex_reference_metadata(paragraph, bibliography),
+                )
 
     if sections and blocks:
         _refresh_section_ranges(sections, blocks)
@@ -289,7 +335,72 @@ def _clean_equation(text: str) -> str:
     cleaned = text.strip()
     cleaned = re.sub(r"^\$\$|\$\$$", "", cleaned)
     cleaned = re.sub(r"^\\\[|\\\]$", "", cleaned)
+    cleaned = _LABEL_RE.sub("", cleaned)
     return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _extract_equation_label(text: str) -> str | None:
+    match = _LABEL_RE.search(text)
+    return match.group(1).strip() if match else None
+
+
+def _split_tex_keys(value: str) -> list[str]:
+    return [part.strip() for part in (value or "").split(",") if part.strip()]
+
+
+def _tex_reference_metadata(text: str, bibliography: dict[str, dict] | None = None) -> dict:
+    labels = [m.group(1).strip() for m in _LABEL_RE.finditer(text or "") if m.group(1).strip()]
+    refs = [
+        {"key": key, "kind": "ref"}
+        for match in _REF_RE.finditer(text or "")
+        for key in _split_tex_keys(match.group(1))
+    ]
+    citations = []
+    bibliography = bibliography or {}
+    for match in _CITE_RE.finditer(text or ""):
+        for key in _split_tex_keys(match.group(1)):
+            item = {"key": key}
+            if key in bibliography:
+                item["bib"] = bibliography[key]
+            citations.append(item)
+    metadata: dict = {}
+    if labels:
+        metadata["labels"] = labels
+    if refs:
+        metadata["refs"] = refs
+    if citations:
+        metadata["citations"] = citations
+    return metadata
+
+
+def _parse_bibliography(bib_members: dict[str, str]) -> dict[str, dict]:
+    entries: dict[str, dict] = {}
+    for source_file, text in bib_members.items():
+        for match in _BIB_ENTRY_RE.finditer(text or ""):
+            key = match.group("key").strip()
+            if not key:
+                continue
+            fields: dict[str, str] = {}
+            for field_match in _BIB_FIELD_RE.finditer(match.group("body") or ""):
+                field = field_match.group("field").strip().lower()
+                value = _clean_bib_value(field_match.group("value"))
+                if field and value:
+                    fields[field] = value
+            entries[key] = {
+                "key": key,
+                "entry_type": match.group("entry_type").strip().lower(),
+                "source_file": source_file,
+                **fields,
+            }
+    return entries
+
+
+def _clean_bib_value(value: str) -> str:
+    value = (value or "").strip().rstrip(",").strip()
+    if (value.startswith("{") and value.endswith("}")) or (value.startswith('"') and value.endswith('"')):
+        value = value[1:-1]
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
 
 
 def _clean_text(text: str | None) -> str:

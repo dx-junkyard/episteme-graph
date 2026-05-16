@@ -762,6 +762,49 @@ def _topic_student_material(topic: dict) -> str:
     return str(topic.get("content") or topic.get("summary") or "").strip()
 
 
+def _normalize_check_question_item(item: object) -> dict:
+    if isinstance(item, dict):
+        question = str(item.get("question") or item.get("text") or "").strip()
+        requirements = item.get("answer_requirements") or item.get("required_elements") or []
+        if isinstance(requirements, str):
+            requirements = [line.strip() for line in requirements.splitlines() if line.strip()]
+        elif isinstance(requirements, list):
+            requirements = [str(v).strip() for v in requirements if str(v).strip()]
+        else:
+            requirements = []
+        return {
+            "question": question,
+            "model_answer": str(item.get("model_answer") or item.get("answer") or "").strip(),
+            "answer_requirements": requirements,
+            "explanation": str(item.get("explanation") or item.get("rationale") or "").strip(),
+        }
+    return {
+        "question": str(item or "").strip(),
+        "model_answer": "",
+        "answer_requirements": [],
+        "explanation": "",
+    }
+
+
+def _select_check_question(topic: dict, requested_question: str = "", request_item: dict | None = None) -> dict:
+    if request_item:
+        normalized = _normalize_check_question_item(request_item)
+        if normalized.get("question"):
+            return normalized
+    questions = topic.get("check_questions") or topic.get("assessment_prompts") or []
+    normalized_questions = [_normalize_check_question_item(item) for item in questions]
+    requested = (requested_question or "").strip()
+    if requested:
+        for item in normalized_questions:
+            if item.get("question") == requested:
+                return item
+        return _normalize_check_question_item(requested)
+    for item in normalized_questions:
+        if item.get("question"):
+            return item
+    return _normalize_check_question_item("このセクションの要点を説明してください。")
+
+
 @router.get(
     "/courses/{course_id}/topics/{topic_id}/material",
     response_model=TopicMaterialResponse,
@@ -860,22 +903,30 @@ def check_topic_understanding(
     if not topic:
         raise HTTPException(status_code=404, detail="Topic not found")
 
-    question = (body.question or "").strip()
-    if not question:
-        questions = topic.get("check_questions") or topic.get("assessment_prompts") or []
-        question = str(questions[0]) if questions else "このセクションの要点を説明してください。"
+    check_item = _select_check_question(topic, body.question, body.check_question)
+    question = check_item.get("question") or "このセクションの要点を説明してください。"
+    expected_model_answer = str(check_item.get("model_answer") or "").strip()
+    answer_requirements = [
+        str(v).strip() for v in (check_item.get("answer_requirements") or [])
+        if str(v).strip()
+    ]
+    explanation = str(check_item.get("explanation") or "").strip()
 
     material_text = _topic_student_material(topic)
+    requirements_text = "\n".join(f"- {r}" for r in answer_requirements) or "(未設定)"
     params = get_llm_params("fast")
     prompt = (
         "あなたは確認問題を採点する大学教員です。JSONのみを返してください。\n"
-        "形式: {\"passed\": true/false, \"feedback\": \"短い講評\", \"model_answer\": \"模範解答\"}\n\n"
+        "形式: {\"passed\": true/false, \"feedback\": \"短い講評\", \"model_answer\": \"模範解答\", \"explanation\": \"必要なら解説\"}\n\n"
         f"コース: {course_data.get('title', course_id)}\n"
         f"セクション: {topic.get('title', topic_id)}\n"
         f"教材:\n{material_text[:5000]}\n\n"
         f"確認問題: {question}\n"
+        f"模範解答（設定済みの場合はこれを基準にする）:\n{expected_model_answer or '(未設定)'}\n\n"
+        f"回答に必要な要素:\n{requirements_text}\n\n"
+        f"解説（設定済みの場合はフィードバックに反映する）:\n{explanation or '(未設定)'}\n\n"
         f"受講者の回答: {body.answer}\n\n"
-        "判定基準: 主要概念を自分の言葉で概ね説明できていれば passed=true。"
+        "判定基準: 回答に必要な要素を概ね満たし、自分の言葉で説明できていれば passed=true。"
         "核心が抜けている、逆に理解している、空欄に近い場合は false。"
     )
 
@@ -897,12 +948,14 @@ def check_topic_understanding(
         parsed = {
             "passed": passed,
             "feedback": "回答の具体性をもとに暫定判定しました。",
-            "model_answer": material_text[:800],
+            "model_answer": expected_model_answer or material_text[:800],
+            "explanation": explanation,
         }
 
     passed = bool(parsed.get("passed"))
     feedback = str(parsed.get("feedback") or "")
-    model_answer = str(parsed.get("model_answer") or material_text[:800])
+    model_answer = str(parsed.get("model_answer") or expected_model_answer or material_text[:800])
+    response_explanation = str(parsed.get("explanation") or explanation or "")
 
     if not passed:
         instructor_id = None
@@ -932,6 +985,8 @@ def check_topic_understanding(
         passed=passed,
         feedback=feedback,
         model_answer=model_answer,
+        answer_requirements=answer_requirements,
+        explanation=response_explanation,
     )
 
 

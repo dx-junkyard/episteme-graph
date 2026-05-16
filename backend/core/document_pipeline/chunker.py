@@ -162,6 +162,7 @@ def _chunk_section_blocks(
             meta["extraction_source"] = extraction_source
         if tei_section_id:
             meta["tei_section_id"] = tei_section_id
+        meta.update(_tex_reference_metadata_from_blocks(pending_block_ids, blocks))
         return SourceChunk(
             chunk_index=0,  # 後で全体採番
             text=text,
@@ -207,6 +208,7 @@ def _chunk_section_blocks(
                 long_meta["extraction_source"] = block_extraction_source
             if block_tei_section_id:
                 long_meta["tei_section_id"] = block_tei_section_id
+            long_meta.update(_tex_reference_metadata_from_blocks([block.block_id], blocks))
             for sub in _split_long_text(text, max_chars):
                 yield SourceChunk(
                     chunk_index=0,
@@ -501,6 +503,39 @@ def _tei_section_id_from_blocks(block_ids: list[str], blocks: list) -> str | Non
         if tsi:
             return tsi
     return None
+
+
+def _tex_reference_metadata_from_blocks(block_ids: list[str], blocks: list) -> dict:
+    matched = _block_by_id(block_ids, blocks)
+    labels: list[str] = []
+    refs: list[dict] = []
+    citations: list[dict] = []
+    for block in matched:
+        raw = getattr(block, "raw", None) or {}
+        for label in raw.get("labels") or []:
+            label = str(label).strip()
+            if label and label not in labels:
+                labels.append(label)
+        for ref in raw.get("refs") or []:
+            if not isinstance(ref, dict):
+                continue
+            key = str(ref.get("key") or "").strip()
+            if key and not any(existing.get("key") == key for existing in refs):
+                refs.append(dict(ref))
+        for citation in raw.get("citations") or []:
+            if not isinstance(citation, dict):
+                continue
+            key = str(citation.get("key") or "").strip()
+            if key and not any(existing.get("key") == key for existing in citations):
+                citations.append(dict(citation))
+    metadata: dict = {}
+    if labels:
+        metadata["tex_labels"] = labels
+    if refs:
+        metadata["tex_refs"] = refs
+    if citations:
+        metadata["tex_citations"] = citations
+    return metadata
 
 
 _INLINE_NOTATION_PATTERNS = (

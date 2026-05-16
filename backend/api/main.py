@@ -365,7 +365,7 @@ def _run_migrations() -> None:
                 material_id TEXT,
                 element_id TEXT NOT NULL,
                 element_type TEXT NOT NULL
-                    CHECK (element_type IN ('concept', 'relationship', 'formula', 'keyword')),
+                    CHECK (element_type IN ('concept', 'relationship', 'formula', 'keyword', 'reference', 'citation')),
                 surface_text TEXT NOT NULL DEFAULT '',
                 importance_score REAL NOT NULL DEFAULT 0.5,
                 offsets JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -381,6 +381,15 @@ def _run_migrations() -> None:
             "CREATE INDEX IF NOT EXISTS idx_chunk_graph_mentions_material "
             "ON chunk_graph_mentions(material_id)"
         ))
+        session.execute(sa_text(
+            "ALTER TABLE chunk_graph_mentions "
+            "DROP CONSTRAINT IF EXISTS chunk_graph_mentions_element_type_check"
+        ))
+        session.execute(sa_text("""
+            ALTER TABLE chunk_graph_mentions
+            ADD CONSTRAINT chunk_graph_mentions_element_type_check
+            CHECK (element_type IN ('concept', 'relationship', 'formula', 'keyword', 'reference', 'citation'))
+        """))
         session.execute(sa_text("""
             CREATE TABLE IF NOT EXISTS student_stumble_events (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
