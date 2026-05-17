@@ -50,6 +50,11 @@ _ABSTRACT_RE = re.compile(r"\\begin\{abstract\}(.*?)\\end\{abstract\}", re.DOTAL
 _TITLEPAGE_RE = re.compile(r"\\begin\{titlepage\}(.*?)\\end\{titlepage\}", re.DOTALL)
 _COMMAND_WITH_ARG_RE = re.compile(r"\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?\{([^{}]*)\}")
 _COMMAND_RE = re.compile(r"\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?")
+_CONTROL_SEQUENCE_RE = re.compile(r"\\(?:[A-Za-z@]+|.)")
+_MACRO_DEF_COMMANDS = ("def", "gdef", "edef", "xdef")
+_NEWCOMMAND_NAMES = ("newcommand", "renewcommand", "providecommand")
+_MAX_ZERO_ARG_MACROS = 200
+_MAX_MACRO_EXPANSION_PASSES = 8
 
 
 @dataclass(frozen=True)
@@ -209,6 +214,7 @@ def _tex_to_blocks_and_sections(
     *,
     bibliography: dict[str, dict] | None = None,
 ) -> tuple[list[TypedBlock], list[Section]]:
+    macros = _extract_zero_arg_macros(tex)
     body = _document_body(tex)
     blocks: list[TypedBlock] = []
     sections: list[Section] = []
@@ -263,7 +269,7 @@ def _tex_to_blocks_and_sections(
         elif segment[0] == "equation":
             raw_equation = segment[1]
             label = _extract_equation_label(raw_equation)
-            latex = _clean_equation(raw_equation)
+            latex = _clean_equation(raw_equation, macros=macros)
             metadata = _tex_reference_metadata(raw_equation, bibliography)
             add_block(
                 latex,
@@ -331,13 +337,175 @@ def _paragraphs(text: str) -> list[str]:
     return [part for part in re.split(r"\n\s*\n+", text) if part.strip()]
 
 
-def _clean_equation(text: str) -> str:
+def _clean_equation(text: str, *, macros: dict[str, str] | None = None) -> str:
     cleaned = text.strip()
     cleaned = re.sub(r"^\$\$|\$\$$", "", cleaned)
     cleaned = re.sub(r"^\\\[|\\\]$", "", cleaned)
     cleaned = _LABEL_RE.sub("", cleaned)
+    cleaned = _expand_zero_arg_macros(cleaned, macros or {})
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return _renderable_equation_latex(cleaned)
+
+
+def _extract_zero_arg_macros(tex: str) -> dict[str, str]:
+    """Collect simple TeX macros that can be expanded without argument parsing.
+
+    This intentionally handles only zero-argument definitions. Expanding
+    argument-taking TeX macros with regex is error-prone and can corrupt source
+    math, so those definitions are skipped.
+    """
+    macros: dict[str, str] = {}
+    pos = 0
+    while len(macros) < _MAX_ZERO_ARG_MACROS:
+        idx = tex.find("\\", pos)
+        if idx == -1:
+            break
+        command, after = _read_control_sequence(tex, idx)
+        if not command:
+            pos = idx + 1
+            continue
+        name = command[1:]
+        if name in _MACRO_DEF_COMMANDS:
+            parsed = _parse_def_macro(tex, after)
+        elif name in _NEWCOMMAND_NAMES:
+            parsed = _parse_newcommand_macro(tex, after)
+        else:
+            parsed = None
+        if parsed:
+            macro_name, replacement, end = parsed
+            if _is_safe_zero_arg_macro(macro_name, replacement):
+                macros[macro_name] = replacement.strip()
+            pos = end
+        else:
+            pos = after
+    return macros
+
+
+def _expand_zero_arg_macros(latex: str, macros: dict[str, str]) -> str:
+    if not latex or not macros:
+        return latex
+    expanded = latex
+    for _ in range(_MAX_MACRO_EXPANSION_PASSES):
+        changed = False
+        parts: list[str] = []
+        pos = 0
+        for match in _CONTROL_SEQUENCE_RE.finditer(expanded):
+            macro_name = match.group(0)
+            replacement = macros.get(macro_name)
+            if replacement is None:
+                continue
+            parts.append(expanded[pos:match.start()])
+            parts.append(replacement)
+            pos = match.end()
+            changed = True
+        if not changed:
+            break
+        parts.append(expanded[pos:])
+        expanded = "".join(parts)
+    return expanded
+
+
+def _parse_def_macro(text: str, pos: int) -> tuple[str, str, int] | None:
+    pos = _skip_ws(text, pos)
+    macro_name, pos = _read_control_sequence(text, pos)
+    if not macro_name:
+        return None
+    pos = _skip_ws(text, pos)
+    if pos < len(text) and text[pos] == "#":
+        return None
+    if pos >= len(text) or text[pos] != "{":
+        return None
+    replacement, end = _read_balanced_braced(text, pos)
+    if replacement is None:
+        return None
+    return macro_name, replacement, end
+
+
+def _parse_newcommand_macro(text: str, pos: int) -> tuple[str, str, int] | None:
+    pos = _skip_ws(text, pos)
+    if pos < len(text) and text[pos] == "*":
+        pos = _skip_ws(text, pos + 1)
+    if pos < len(text) and text[pos] == "{":
+        macro_token, pos = _read_balanced_braced(text, pos)
+        if macro_token is None:
+            return None
+        macro_name = macro_token.strip()
+    else:
+        macro_name, pos = _read_control_sequence(text, pos)
+    if not macro_name:
+        return None
+    pos = _skip_ws(text, pos)
+    if pos < len(text) and text[pos] == "[":
+        arg_count, pos = _read_bracket_arg(text, pos)
+        if arg_count is None or arg_count.strip() not in ("", "0"):
+            return None
+        pos = _skip_ws(text, pos)
+    if pos < len(text) and text[pos] == "[":
+        return None
+    if pos >= len(text) or text[pos] != "{":
+        return None
+    replacement, end = _read_balanced_braced(text, pos)
+    if replacement is None:
+        return None
+    return macro_name, replacement, end
+
+
+def _read_control_sequence(text: str, pos: int) -> tuple[str | None, int]:
+    if pos >= len(text) or text[pos] != "\\":
+        return None, pos
+    match = _CONTROL_SEQUENCE_RE.match(text, pos)
+    if not match:
+        return None, pos
+    return match.group(0), match.end()
+
+
+def _read_balanced_braced(text: str, pos: int) -> tuple[str | None, int]:
+    if pos >= len(text) or text[pos] != "{":
+        return None, pos
+    depth = 0
+    escaped = False
+    for idx in range(pos, len(text)):
+        char = text[idx]
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[pos + 1:idx], idx + 1
+    return None, pos
+
+
+def _read_bracket_arg(text: str, pos: int) -> tuple[str | None, int]:
+    if pos >= len(text) or text[pos] != "[":
+        return None, pos
+    end = text.find("]", pos + 1)
+    if end == -1:
+        return None, pos
+    return text[pos + 1:end], end + 1
+
+
+def _skip_ws(text: str, pos: int) -> int:
+    while pos < len(text) and text[pos].isspace():
+        pos += 1
+    return pos
+
+
+def _is_safe_zero_arg_macro(name: str, replacement: str) -> bool:
+    if not name.startswith("\\"):
+        return False
+    if "#" in replacement:
+        return False
+    if len(name) > 80 or len(replacement) > 500:
+        return False
+    if re.search(r"\\(?:def|gdef|edef|xdef|newcommand|renewcommand|providecommand)\b", replacement):
+        return False
+    return True
 
 
 def _renderable_equation_latex(latex: str) -> str:
