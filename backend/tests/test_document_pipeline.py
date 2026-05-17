@@ -760,6 +760,9 @@ def test_issue_226_migration_adds_document_pipeline_artifacts():
     assert "CREATE TABLE IF NOT EXISTS document_embeddings" in sql
     assert "CREATE TABLE IF NOT EXISTS document_analysis_runs" in sql
     assert "ALTER TABLE theory_components ALTER COLUMN course_id DROP NOT NULL" in sql
+    assert "DELETE FROM theory_component_graphs" in sql
+    assert "PARTITION BY document_id" in sql
+    assert "ADD CONSTRAINT theory_component_graphs_document_uq UNIQUE (document_id)" in sql
     assert "embedding_type" in sql
 
 
