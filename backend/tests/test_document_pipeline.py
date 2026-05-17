@@ -291,6 +291,41 @@ def test_tex_archive_wraps_alignment_equations_for_rendering():
     assert equation.equation_label == "eq:operator"
 
 
+def test_tex_archive_wraps_eqnarray_with_inner_aligned_for_rendering():
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    archive = _make_tex_archive({
+        "main.tex": r"""
+            \documentclass{article}
+            \begin{document}
+            \section{Kernels}
+            \begin{eqnarray}
+            &\begin{aligned}
+            &\alpha({\bm{k}}_1,{\bm{k}}_2) := 1+\frac{{\bm{k}}_1\cdot{\bm{k}}_2}{k_1^2},\\
+            &\gamma({\bm{k}}_1,{\bm{k}}_2) := 1 - (\hat{\bm{k}}_1\cdot\hat{\bm{k}}_2)^2
+            \end{aligned}&
+            &\begin{aligned}
+            &\xi({\bm{k}}_1,{\bm{k}}_2,{\bm{k}}_3) := 1-3(\hat{\bm{k}}_1\cdot\hat{\bm{k}}_2)^2
+            \end{aligned}\hspace{-50em}
+            \label{eq:functions}
+            \end{eqnarray}
+            \end{document}
+        """,
+    })
+
+    structure = build_structure_from_tex_archive(
+        archive,
+        document_id="doc-tex-eqnarray",
+        source_file="paper.tar.gz",
+    )
+
+    equation = next(b for b in structure.blocks if b.block_type == "equation_block")
+    assert equation.raw["latex"].startswith(r"\begin{aligned} &\begin{aligned}")
+    assert equation.raw["latex"].endswith(r"\end{aligned}")
+    assert r"\hspace" not in equation.raw["latex"]
+    assert equation.equation_label == "eq:functions"
+
+
 def test_tex_archive_expands_zero_arg_equation_macros():
     from core.document_pipeline.tex_archive import build_structure_from_tex_archive
 
@@ -328,16 +363,19 @@ def test_tex_archive_expands_zero_arg_equation_macros():
     assert all(r"\tdelta" not in latex for latex in equations)
 
 
-def test_tex_archive_does_not_expand_argument_macros():
+def test_tex_archive_expands_simple_one_arg_equation_macros():
     from core.document_pipeline.tex_archive import build_structure_from_tex_archive
 
     archive = _make_tex_archive({
         "main.tex": r"""
             \documentclass{article}
-            \newcommand{\vect}[1]{\mathbf{#1}}
+            \newcommand{\ev}[1]{\left\langle #1 \right\rangle}
+            \def\sq#1{[#1]^2}
             \begin{document}
             \begin{equation}
-            \vect{x} = \vect{y}
+            \sigma_0^2(R) := \ev{\delta_{gs}^2({\bm{x}};R)}
+            \,,\quad
+            \sigma_1^2(R) := \ev{\sq{\nabla\delta_{gs}({\bm{x}};R)}}.
             \end{equation}
             \end{document}
         """,
@@ -350,7 +388,72 @@ def test_tex_archive_does_not_expand_argument_macros():
     )
 
     equation = next(b for b in structure.blocks if b.block_type == "equation_block")
-    assert equation.raw["latex"] == r"\vect{x} = \vect{y}"
+    assert equation.raw["latex"] == (
+        r"\sigma_0^2(R) := \left\langle \delta_{gs}^2({\bm{x}};R) \right\rangle"
+        r" \,,\quad \sigma_1^2(R) := \left\langle [\nabla\delta_{gs}({\bm{x}};R)]^2 \right\rangle."
+    )
+    assert r"\ev" not in equation.raw["latex"]
+    assert r"\sq" not in equation.raw["latex"]
+
+
+def test_tex_archive_replaces_refs_inside_equations_for_rendering():
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    archive = _make_tex_archive({
+        "main.tex": r"""
+            \documentclass{article}
+            \begin{document}
+            \begin{equation}
+            \begin{aligned}
+            \mathcal S &= \textrm{RHS of \eqref{skewness-consistency}},\\
+            \mathcal K_1 &= \textrm{RHS of \ref{kurtosis-consistency-1}},\\
+            \mathcal K_2 &= \textrm{RHS of \Cref{kurtosis-consistency-2}}.
+            \end{aligned}
+            \end{equation}
+            \end{document}
+        """,
+    })
+
+    structure = build_structure_from_tex_archive(
+        archive,
+        document_id="doc-tex-equation-refs",
+        source_file="paper.tar.gz",
+    )
+
+    equation = next(b for b in structure.blocks if b.block_type == "equation_block")
+    assert equation.raw["latex"] == (
+        r"\begin{aligned} \mathcal S &= \textrm{RHS of (skewness-consistency)},\\ "
+        r"\mathcal K_1 &= \textrm{RHS of kurtosis-consistency-1},\\ "
+        r"\mathcal K_2 &= \textrm{RHS of kurtosis-consistency-2}. \end{aligned}"
+    )
+    assert r"\eqref" not in equation.raw["latex"]
+    assert r"\ref" not in equation.raw["latex"]
+    assert r"\Cref" not in equation.raw["latex"]
+
+
+def test_tex_archive_does_not_expand_multi_arg_macros():
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    archive = _make_tex_archive({
+        "main.tex": r"""
+            \documentclass{article}
+            \newcommand{\pair}[2]{\left(#1,#2\right)}
+            \begin{document}
+            \begin{equation}
+            \pair{x}{y} = z
+            \end{equation}
+            \end{document}
+        """,
+    })
+
+    structure = build_structure_from_tex_archive(
+        archive,
+        document_id="doc-tex-multi-arg-macro",
+        source_file="paper.tar.gz",
+    )
+
+    equation = next(b for b in structure.blocks if b.block_type == "equation_block")
+    assert equation.raw["latex"] == r"\pair{x}{y} = z"
 
 
 def test_orchestrator_accepts_tex_archive_source_kind():

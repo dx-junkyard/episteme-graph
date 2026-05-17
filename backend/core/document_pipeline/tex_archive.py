@@ -51,10 +51,20 @@ _TITLEPAGE_RE = re.compile(r"\\begin\{titlepage\}(.*?)\\end\{titlepage\}", re.DO
 _COMMAND_WITH_ARG_RE = re.compile(r"\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?\{([^{}]*)\}")
 _COMMAND_RE = re.compile(r"\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?")
 _CONTROL_SEQUENCE_RE = re.compile(r"\\(?:[A-Za-z@]+|.)")
+_MATH_LAYOUT_COMMAND_RE = re.compile(r"\\hspace\*?\s*\{[^{}]*\}")
+_MATH_REF_COMMAND_RE = re.compile(r"\\(?P<cmd>eqref|ref|autoref|cref|Cref)\s*\{(?P<key>[^{}]+)\}")
 _MACRO_DEF_COMMANDS = ("def", "gdef", "edef", "xdef")
 _NEWCOMMAND_NAMES = ("newcommand", "renewcommand", "providecommand")
-_MAX_ZERO_ARG_MACROS = 200
+_MAX_SIMPLE_MACROS = 200
 _MAX_MACRO_EXPANSION_PASSES = 8
+_ALIGNMENT_ENVS = {"align", "eqnarray", "gather", "multline"}
+
+
+@dataclass(frozen=True)
+class TexMacro:
+    name: str
+    replacement: str
+    arg_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -214,7 +224,7 @@ def _tex_to_blocks_and_sections(
     *,
     bibliography: dict[str, dict] | None = None,
 ) -> tuple[list[TypedBlock], list[Section]]:
-    macros = _extract_zero_arg_macros(tex)
+    macros = _extract_simple_macros(tex)
     body = _document_body(tex)
     blocks: list[TypedBlock] = []
     sections: list[Section] = []
@@ -268,8 +278,9 @@ def _tex_to_blocks_and_sections(
             add_block(title, "section_heading" if level == 1 else "subsection_heading", section_id=section_id)
         elif segment[0] == "equation":
             raw_equation = segment[1]
+            env = segment[2] if len(segment) > 2 else None
             label = _extract_equation_label(raw_equation)
-            latex = _clean_equation(raw_equation, macros=macros)
+            latex = _clean_equation(raw_equation, macros=macros, env=env)
             metadata = _tex_reference_metadata(raw_equation, bibliography)
             add_block(
                 latex,
@@ -323,7 +334,7 @@ def _segment_tex(body: str) -> list[tuple]:
         elif match.group("env"):
             env = match.group("env").rstrip("*")
             kind = "figure" if env == "figure" else "table" if env == "table" else "equation"
-            segments.append((kind, match.group("env_body")))
+            segments.append((kind, match.group("env_body"), env))
         else:
             segments.append(("equation", match.group("display_math")))
         pos = match.end()
@@ -337,26 +348,40 @@ def _paragraphs(text: str) -> list[str]:
     return [part for part in re.split(r"\n\s*\n+", text) if part.strip()]
 
 
-def _clean_equation(text: str, *, macros: dict[str, str] | None = None) -> str:
+def _clean_equation(text: str, *, macros: dict[str, TexMacro] | None = None, env: str | None = None) -> str:
     cleaned = text.strip()
     cleaned = re.sub(r"^\$\$|\$\$$", "", cleaned)
     cleaned = re.sub(r"^\\\[|\\\]$", "", cleaned)
     cleaned = _LABEL_RE.sub("", cleaned)
-    cleaned = _expand_zero_arg_macros(cleaned, macros or {})
+    cleaned = _expand_simple_macros(cleaned, macros or {})
+    cleaned = _replace_math_refs(cleaned)
+    cleaned = _MATH_LAYOUT_COMMAND_RE.sub("", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return _renderable_equation_latex(cleaned)
+    return _renderable_equation_latex(cleaned, env=env)
 
 
-def _extract_zero_arg_macros(tex: str) -> dict[str, str]:
-    """Collect simple TeX macros that can be expanded without argument parsing.
+def _replace_math_refs(latex: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        key = match.group("key").strip()
+        if not key:
+            return ""
+        if match.group("cmd") == "eqref":
+            return f"({key})"
+        return key
 
-    This intentionally handles only zero-argument definitions. Expanding
-    argument-taking TeX macros with regex is error-prone and can corrupt source
-    math, so those definitions are skipped.
+    return _MATH_REF_COMMAND_RE.sub(replace, latex or "")
+
+
+def _extract_simple_macros(tex: str) -> dict[str, TexMacro]:
+    """Collect simple TeX macros that can be expanded with bounded parsing.
+
+    This intentionally handles only zero-argument and one-required-argument
+    definitions. More complex TeX macros are skipped to avoid corrupting source
+    math.
     """
-    macros: dict[str, str] = {}
+    macros: dict[str, TexMacro] = {}
     pos = 0
-    while len(macros) < _MAX_ZERO_ARG_MACROS:
+    while len(macros) < _MAX_SIMPLE_MACROS:
         idx = tex.find("\\", pos)
         if idx == -1:
             break
@@ -372,16 +397,16 @@ def _extract_zero_arg_macros(tex: str) -> dict[str, str]:
         else:
             parsed = None
         if parsed:
-            macro_name, replacement, end = parsed
-            if _is_safe_zero_arg_macro(macro_name, replacement):
-                macros[macro_name] = replacement.strip()
+            macro, end = parsed
+            if _is_safe_simple_macro(macro):
+                macros[macro.name] = macro
             pos = end
         else:
             pos = after
     return macros
 
 
-def _expand_zero_arg_macros(latex: str, macros: dict[str, str]) -> str:
+def _expand_simple_macros(latex: str, macros: dict[str, TexMacro]) -> str:
     if not latex or not macros:
         return latex
     expanded = latex
@@ -390,13 +415,23 @@ def _expand_zero_arg_macros(latex: str, macros: dict[str, str]) -> str:
         parts: list[str] = []
         pos = 0
         for match in _CONTROL_SEQUENCE_RE.finditer(expanded):
-            macro_name = match.group(0)
-            replacement = macros.get(macro_name)
-            if replacement is None:
+            macro = macros.get(match.group(0))
+            if macro is None or match.start() < pos:
                 continue
+            replacement = macro.replacement
+            end = match.end()
+            if macro.arg_count == 1:
+                arg_start = _skip_ws(expanded, end)
+                if arg_start >= len(expanded) or expanded[arg_start] != "{":
+                    continue
+                arg, arg_end = _read_balanced_braced(expanded, arg_start)
+                if arg is None:
+                    continue
+                replacement = replacement.replace("#1", arg)
+                end = arg_end
             parts.append(expanded[pos:match.start()])
             parts.append(replacement)
-            pos = match.end()
+            pos = end
             changed = True
         if not changed:
             break
@@ -405,23 +440,29 @@ def _expand_zero_arg_macros(latex: str, macros: dict[str, str]) -> str:
     return expanded
 
 
-def _parse_def_macro(text: str, pos: int) -> tuple[str, str, int] | None:
+def _parse_def_macro(text: str, pos: int) -> tuple[TexMacro, int] | None:
     pos = _skip_ws(text, pos)
     macro_name, pos = _read_control_sequence(text, pos)
     if not macro_name:
         return None
     pos = _skip_ws(text, pos)
+    arg_count = 0
     if pos < len(text) and text[pos] == "#":
-        return None
+        if pos + 1 >= len(text) or text[pos + 1] != "1":
+            return None
+        arg_count = 1
+        pos = _skip_ws(text, pos + 2)
+        if pos < len(text) and text[pos] == "#":
+            return None
     if pos >= len(text) or text[pos] != "{":
         return None
     replacement, end = _read_balanced_braced(text, pos)
     if replacement is None:
         return None
-    return macro_name, replacement, end
+    return TexMacro(macro_name, replacement.strip(), arg_count), end
 
 
-def _parse_newcommand_macro(text: str, pos: int) -> tuple[str, str, int] | None:
+def _parse_newcommand_macro(text: str, pos: int) -> tuple[TexMacro, int] | None:
     pos = _skip_ws(text, pos)
     if pos < len(text) and text[pos] == "*":
         pos = _skip_ws(text, pos + 1)
@@ -435,10 +476,15 @@ def _parse_newcommand_macro(text: str, pos: int) -> tuple[str, str, int] | None:
     if not macro_name:
         return None
     pos = _skip_ws(text, pos)
+    arg_count = 0
     if pos < len(text) and text[pos] == "[":
-        arg_count, pos = _read_bracket_arg(text, pos)
-        if arg_count is None or arg_count.strip() not in ("", "0"):
+        arg_text, pos = _read_bracket_arg(text, pos)
+        if arg_text is None:
             return None
+        arg_text = arg_text.strip()
+        if arg_text not in ("", "0", "1"):
+            return None
+        arg_count = int(arg_text or "0")
         pos = _skip_ws(text, pos)
     if pos < len(text) and text[pos] == "[":
         return None
@@ -447,7 +493,7 @@ def _parse_newcommand_macro(text: str, pos: int) -> tuple[str, str, int] | None:
     replacement, end = _read_balanced_braced(text, pos)
     if replacement is None:
         return None
-    return macro_name, replacement, end
+    return TexMacro(macro_name, replacement.strip(), arg_count), end
 
 
 def _read_control_sequence(text: str, pos: int) -> tuple[str | None, int]:
@@ -496,19 +542,24 @@ def _skip_ws(text: str, pos: int) -> int:
     return pos
 
 
-def _is_safe_zero_arg_macro(name: str, replacement: str) -> bool:
-    if not name.startswith("\\"):
+def _is_safe_simple_macro(macro: TexMacro) -> bool:
+    if not macro.name.startswith("\\"):
         return False
-    if "#" in replacement:
+    if macro.arg_count not in (0, 1):
         return False
-    if len(name) > 80 or len(replacement) > 500:
+    invalid_arg_refs = re.sub(r"#1", "", macro.replacement)
+    if "#" in invalid_arg_refs:
         return False
-    if re.search(r"\\(?:def|gdef|edef|xdef|newcommand|renewcommand|providecommand)\b", replacement):
+    if macro.arg_count == 0 and "#1" in macro.replacement:
+        return False
+    if len(macro.name) > 80 or len(macro.replacement) > 500:
+        return False
+    if re.search(r"\\(?:def|gdef|edef|xdef|newcommand|renewcommand|providecommand)\b", macro.replacement):
         return False
     return True
 
 
-def _renderable_equation_latex(latex: str) -> str:
+def _renderable_equation_latex(latex: str, *, env: str | None = None) -> str:
     """Keep TeX source-backed equations renderable after stripping env wrappers."""
     cleaned = (latex or "").strip()
     if not cleaned:
@@ -516,6 +567,8 @@ def _renderable_equation_latex(latex: str) -> str:
     cleaned = re.sub(r"\\(?:nonumber|notag)\b", "", cleaned).strip()
     has_environment = bool(re.search(r"\\begin\{[^{}]+\}", cleaned))
     has_alignment = bool(re.search(r"(?<!\\)&", cleaned) or re.search(r"\\\\", cleaned))
+    if env in _ALIGNMENT_ENVS:
+        return rf"\begin{{aligned}} {cleaned} \end{{aligned}}"
     if has_alignment and not has_environment:
         return rf"\begin{{aligned}} {cleaned} \end{{aligned}}"
     return cleaned
