@@ -480,7 +480,7 @@ _COURSE_CONTENT_DRAFT_PROMPT = """あなたは大学教員の授業用ドラフ�
 目的:
 - コース全体の章立て、前後の説明順序、現在セクションが果たす教育上の役割を考慮する
 - 現在セクションだけで閉じた説明にせず、前のセクションから何を受け取り、次へ何を渡すかを明確にする
-- Claim / コンポーネント / 数式 / 原文抜粋は、本文の主役ではなく根拠材料として使う
+- Claim / コンポーネント / 数式 / 原文抜粋は根拠として扱いつつ、理解に必須の数式は教材欄で明示的に使う
 - 教材欄と本文説明を分離する
 
 教材欄の表記:
@@ -488,6 +488,9 @@ _COURSE_CONTENT_DRAFT_PROMPT = """あなたは大学教員の授業用ドラフ�
 - インライン数式は `$...$`
 - ブロック数式は `$$...$$`
 - 埋め込みは `![[equation:id]]`, `![[figure:id]]`, `![[source:id]]`, `![[claim:id]]`, `![[component:id]]`
+- 根拠候補の `content_blocks` に equations がある場合、トピック理解に必須の式を `![[equation:id]]` で教材欄に埋め込む
+- 数式を埋め込む前後には、その式が何を定義・変換・制約しているかを短く説明する
+- 数式を単に列挙せず、授業の流れの中で使う
 
 出力は必ずJSONのみ。
 JSON文字列内のLaTeXバックスラッシュは必ず `\\Lambda` のように二重化してください。
@@ -497,7 +500,14 @@ JSON文字列内のLaTeXバックスラッシュは必ず `\\Lambda` のよう�
   "student_material": {{"source_format": "eg-markdown-v1", "source_text": "学生に見せる教材"}},
   "spoken_script": "教員が話せる自然文。音声読み上げ対象。",
   "cautions": ["注意点"],
-  "check_questions": ["確認問題"]
+  "check_questions": [
+    {{
+      "question": "確認問題",
+      "model_answer": "模範解答",
+      "answer_requirements": ["回答に含めるべき要素"],
+      "explanation": "難しい問題では、なぜそうなるかの解説"
+    }}
+  ]
 }}
 
 コース全体:
@@ -525,12 +535,19 @@ class _CourseContentStudentMaterialDraft(BaseModel):
     source_text: str = ""
 
 
+class _CourseContentCheckQuestionDraft(BaseModel):
+    question: str = ""
+    model_answer: str = ""
+    answer_requirements: list[str] = Field(default_factory=list)
+    explanation: str = ""
+
+
 class _CourseContentDraftResponse(BaseModel):
     key_concepts: list[str] = Field(default_factory=list)
     student_material: _CourseContentStudentMaterialDraft = Field(default_factory=_CourseContentStudentMaterialDraft)
     spoken_script: str = ""
     cautions: list[str] = Field(default_factory=list)
-    check_questions: list[str] = Field(default_factory=list)
+    check_questions: list[_CourseContentCheckQuestionDraft] = Field(default_factory=list)
 
 
 def _generate_course_topic_drafts(course: dict, topics: list[dict]) -> dict:
@@ -599,6 +616,8 @@ def _generate_single_topic_draft(
         )
         parsed = _parse_topic_draft_json(raw)
     result = _normalize_topic_draft_response(parsed)
+    _ensure_required_equations_in_material(result, topic)
+    _ensure_check_question_details(result, topic)
     if not any([
         result["key_concepts"],
         result["student_material"]["source_text"].strip(),
@@ -700,7 +719,7 @@ def _apply_deterministic_topic_draft_fallback(topic: dict) -> None:
     }
     topic["spoken_script"] = topic.get("content") or topic.get("summary") or ""
     topic["cautions"] = _as_str_list(topic.get("expected_misconceptions"))[:4]
-    topic["check_questions"] = _as_str_list(topic.get("assessment_prompts"))[:4]
+    topic["check_questions"] = _detailed_check_questions(topic.get("assessment_prompts"), topic)
     topic["draft_source"] = "course_content_generation_fallback"
 
 
@@ -760,8 +779,154 @@ def _normalize_topic_draft_response(parsed: object) -> dict:
         },
         "spoken_script": str(parsed.get("spoken_script") or ""),
         "cautions": _clean_str_list(parsed.get("cautions")),
-        "check_questions": _clean_str_list(parsed.get("check_questions")),
+        "check_questions": _normalize_check_question_items(parsed.get("check_questions")),
     }
+
+
+def _ensure_required_equations_in_material(result: dict, topic: dict) -> None:
+    material = result.setdefault("student_material", {})
+    if not isinstance(material, dict):
+        material = {"source_format": "eg-markdown-v1", "source_text": str(material or "")}
+        result["student_material"] = material
+    material["source_format"] = material.get("source_format") or "eg-markdown-v1"
+    source_text = str(material.get("source_text") or "").strip()
+    required = _required_equation_items(topic)
+    missing = [
+        item for item in required
+        if item.get("equation_id") and f"![[equation:{item['equation_id']}]]" not in source_text
+    ]
+    if not missing:
+        material["source_text"] = source_text
+        return
+    lines = [source_text] if source_text else []
+    lines.extend(["", "### この節で使う数式"])
+    for item in missing:
+        eq_id = str(item.get("equation_id") or "")
+        label = str(item.get("label") or eq_id)
+        plain = str(item.get("plain_text") or "").strip()
+        if plain:
+            lines.append(f"- {label}: {plain}")
+        else:
+            lines.append(f"- {label}: この節の中心となる関係式です。")
+        lines.append(f"![[equation:{eq_id}]]")
+    material["source_text"] = "\n".join(line for line in lines if line is not None).strip()
+
+
+def _required_equation_items(topic: dict, limit: int = 5) -> list[dict]:
+    by_id: dict[str, dict] = {}
+    for block in topic.get("content_blocks") or []:
+        if not isinstance(block, dict) or block.get("type") != "equations":
+            continue
+        for item in block.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            eq_id = str(item.get("equation_id") or item.get("id") or "").strip()
+            if eq_id and eq_id not in by_id:
+                normalized = dict(item)
+                normalized["equation_id"] = eq_id
+                by_id[eq_id] = normalized
+    ordered_ids = [str(eq_id) for eq_id in topic.get("linked_equation_ids") or [] if str(eq_id)]
+    for eq_id in ordered_ids:
+        by_id.setdefault(eq_id, {"equation_id": eq_id, "label": eq_id})
+    ordered_ids.extend(eq_id for eq_id in by_id if eq_id not in ordered_ids)
+    required = [by_id[eq_id] for eq_id in ordered_ids if eq_id in by_id]
+    return required[:limit]
+
+
+def _ensure_check_question_details(result: dict, topic: dict) -> None:
+    result["check_questions"] = _detailed_check_questions(result.get("check_questions"), topic)
+
+
+def _detailed_check_questions(value: object, topic: dict) -> list[dict]:
+    questions = _normalize_check_question_items(value)
+    for item in questions:
+        _fill_check_question_detail(item, topic)
+    if not questions:
+        fallback_question = _fallback_check_question(topic)
+        if fallback_question:
+            item = {
+                "question": fallback_question,
+                "model_answer": "",
+                "answer_requirements": [],
+                "explanation": "",
+            }
+            _fill_check_question_detail(item, topic)
+            questions.append(item)
+    return questions[:4]
+
+
+def _normalize_check_question_items(value: object) -> list[dict]:
+    raw_items = value if isinstance(value, list) else ([value] if value else [])
+    questions: list[dict] = []
+    for raw in raw_items:
+        if isinstance(raw, BaseModel):
+            raw = raw.model_dump()
+        if isinstance(raw, str):
+            item = {
+                "question": raw,
+                "model_answer": "",
+                "answer_requirements": [],
+                "explanation": "",
+            }
+        elif isinstance(raw, dict):
+            item = {
+                "question": str(raw.get("question") or raw.get("text") or "").strip(),
+                "model_answer": str(raw.get("model_answer") or raw.get("answer") or "").strip(),
+                "answer_requirements": _clean_str_list(raw.get("answer_requirements") or raw.get("requirements")),
+                "explanation": str(raw.get("explanation") or raw.get("reason") or "").strip(),
+            }
+        else:
+            continue
+        if not item["question"]:
+            continue
+        questions.append(item)
+    return questions[:4]
+
+
+def _fill_check_question_detail(item: dict, topic: dict) -> None:
+    summary = str(topic.get("summary") or topic.get("content") or "").strip()
+    objectives = _as_str_list(topic.get("learning_objectives"))[:3]
+    concepts = _as_str_list(topic.get("key_concepts"))[:3]
+    equation_items = _required_equation_items(topic, limit=3)
+    equation_labels = [
+        str(eq.get("label") or eq.get("equation_id") or "").strip()
+        for eq in equation_items
+        if eq.get("label") or eq.get("equation_id")
+    ]
+    requirements = item.get("answer_requirements") or []
+    for value in concepts + objectives:
+        if value and value not in requirements:
+            requirements.append(value)
+    for label in equation_labels:
+        req = f"数式 {label} の意味または役割に触れる"
+        if req not in requirements:
+            requirements.append(req)
+    if not requirements:
+        requirements.append("この節の中心概念を自分の言葉で説明する")
+    item["answer_requirements"] = requirements[:5]
+    if not item.get("model_answer"):
+        if summary:
+            item["model_answer"] = _short_excerpt(summary, limit=260)
+        elif objectives:
+            item["model_answer"] = "、".join(objectives)
+        else:
+            item["model_answer"] = "この節で扱った定義・関係式・前提を結び付けて説明する。"
+    if not item.get("explanation"):
+        if equation_labels:
+            item["explanation"] = (
+                "根拠となる数式を単独で読むのではなく、各記号が何を表し、"
+                "その式が次の議論にどのように使われるかを確認する。"
+            )
+        else:
+            item["explanation"] = "用語の暗記ではなく、前提、中心概念、結論のつながりを確認する。"
+
+
+def _fallback_check_question(topic: dict) -> str:
+    prompts = _as_str_list(topic.get("assessment_prompts"))
+    if prompts:
+        return prompts[0]
+    title = str(topic.get("title") or "この節").strip()
+    return f"{title}で扱った中心概念と数式の役割を説明してください。"
 
 
 def _clean_str_list(value: object) -> list[str]:
