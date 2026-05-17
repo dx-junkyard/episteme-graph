@@ -45,7 +45,8 @@ def test_ensure_required_equations_adds_missing_embeds():
                     {
                         "id": "eq_from_id",
                         "label": "式A",
-                        "plain_text": "物理量の関係を定義する式",
+                        "plain_text": r"\begin{aligned} a &= b \end{aligned}",
+                        "summary": "物理量の関係を定義する式",
                     },
                 ],
             },
@@ -58,6 +59,7 @@ def test_ensure_required_equations_adds_missing_embeds():
     assert source_text.count("![[equation:eq_existing]]") == 1
     assert "### この節で使う数式" in source_text
     assert "- 式A: 物理量の関係を定義する式" in source_text
+    assert r"\begin{aligned}" not in source_text
     assert "![[equation:eq_from_id]]" in source_text
     assert "![[equation:eq_link_only]]" in source_text
 

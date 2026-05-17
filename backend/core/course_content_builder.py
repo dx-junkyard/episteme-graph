@@ -803,13 +803,45 @@ def _ensure_required_equations_in_material(result: dict, topic: dict) -> None:
     for item in missing:
         eq_id = str(item.get("equation_id") or "")
         label = str(item.get("label") or eq_id)
-        plain = str(item.get("plain_text") or "").strip()
-        if plain:
-            lines.append(f"- {label}: {plain}")
-        else:
-            lines.append(f"- {label}: この節の中心となる関係式です。")
+        description = _equation_material_description(item)
+        lines.append(f"- {label}: {description}")
         lines.append(f"![[equation:{eq_id}]]")
     material["source_text"] = "\n".join(line for line in lines if line is not None).strip()
+
+
+def _equation_material_description(item: dict) -> str:
+    for key in ("summary", "description", "semantic_summary", "role", "meaning"):
+        text = str(item.get(key) or "").strip()
+        if text and not _looks_like_tex_source(text):
+            return _short_excerpt(text, limit=120)
+    return "この節の説明で参照する中心的な関係式です。"
+
+
+def _looks_like_tex_source(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    tex_markers = (
+        "\\begin",
+        "\\end",
+        "\\frac",
+        "\\sum",
+        "\\int",
+        "\\left",
+        "\\right",
+        "\\bm",
+        "\\mathbf",
+        "\\tilde",
+        "\\delta",
+        "\\rho",
+        "\\alpha",
+        "\\gamma",
+        "\\sigma",
+        "\\overset",
+        "_{",
+        "^{",
+    )
+    return any(marker in stripped for marker in tex_markers)
 
 
 def _required_equation_items(topic: dict, limit: int = 5) -> list[dict]:
