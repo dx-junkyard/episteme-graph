@@ -4398,8 +4398,14 @@
       if (!formula) return m;
       return preserveMath(formula.latex || formula.summary || id, true);
     });
+    preserved = preserved.replace(/\\\[([\s\S]+?)\\\]/g, function (_m, expr) {
+      return preserveMath(expr, true);
+    });
     preserved = preserved.replace(/\$\$([\s\S]+?)\$\$/g, function (_m, expr) {
       return preserveMath(expr, true);
+    });
+    preserved = preserved.replace(/\\\(([\s\S]+?)\\\)/g, function (_m, expr) {
+      return preserveMath(expr, false);
     });
     preserved = preserved.replace(/\$([^\$\n]+?)\$/g, function (_m, expr) {
       return preserveMath(expr, false);
