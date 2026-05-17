@@ -291,6 +291,68 @@ def test_tex_archive_wraps_alignment_equations_for_rendering():
     assert equation.equation_label == "eq:operator"
 
 
+def test_tex_archive_expands_zero_arg_equation_macros():
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    archive = _make_tex_archive({
+        "main.tex": r"""
+            \documentclass{article}
+            \def\x{{\bf x}}
+            \def\ldef{\equiv}
+            \newcommand{\tdelta}{\tilde{\delta}}
+            \begin{document}
+            \section{Density}
+            \begin{equation}
+            \delta(t,\x)\ldef
+            \frac{\rho(t,\x)-\bar{\rho}(t)}{\bar{\rho}(t)}.
+            \label{eq:density}
+            \end{equation}
+            \[
+            \tdelta(t) = \delta(t,\x)
+            \]
+            \end{document}
+        """,
+    })
+
+    structure = build_structure_from_tex_archive(
+        archive,
+        document_id="doc-tex-macros",
+        source_file="paper.tar.gz",
+    )
+
+    equations = [b.raw["latex"] for b in structure.blocks if b.block_type == "equation_block"]
+    assert equations[0] == r"\delta(t,{\bf x})\equiv \frac{\rho(t,{\bf x})-\bar{\rho}(t)}{\bar{\rho}(t)}."
+    assert equations[1] == r"\tilde{\delta}(t) = \delta(t,{\bf x})"
+    assert all("\\x" not in latex for latex in equations)
+    assert all(r"\ldef" not in latex for latex in equations)
+    assert all(r"\tdelta" not in latex for latex in equations)
+
+
+def test_tex_archive_does_not_expand_argument_macros():
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    archive = _make_tex_archive({
+        "main.tex": r"""
+            \documentclass{article}
+            \newcommand{\vect}[1]{\mathbf{#1}}
+            \begin{document}
+            \begin{equation}
+            \vect{x} = \vect{y}
+            \end{equation}
+            \end{document}
+        """,
+    })
+
+    structure = build_structure_from_tex_archive(
+        archive,
+        document_id="doc-tex-arg-macro",
+        source_file="paper.tar.gz",
+    )
+
+    equation = next(b for b in structure.blocks if b.block_type == "equation_block")
+    assert equation.raw["latex"] == r"\vect{x} = \vect{y}"
+
+
 def test_orchestrator_accepts_tex_archive_source_kind():
     from core.document_pipeline import orchestrator
 
