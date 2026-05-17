@@ -1793,43 +1793,134 @@
     return text;
   }
 
-  // ── Material chunk renderer（音声原稿スクリプト + KaTeX数式）───────────
+  // ── Material chunk renderer（教材スタジオプレビュー互換）───────────
   function renderMaterialChunk(chunk) {
     var rawText = chunk.text || "";
+    var formulas = chunk.formulas || [];
+    var formulaById = {};
+    formulas.forEach(function (formula, idx) {
+      var id = formula.id || ("FORMULA_" + idx);
+      var normalizedId = normalizeMaterialEvidenceId(id);
+      formulaById[String(id)] = formula;
+      formulaById[normalizedId] = formula;
+      formulaById["[[" + normalizedId + "]]"] = formula;
+      formulaById["FORMULA_" + idx] = formula;
+      formulaById["[[" + "FORMULA_" + idx + "]]"] = formula;
+    });
 
-    // 本文をエスケープ（[[FORMULA_N]] プレースホルダーは壊れない）
-    var text = escHtml(rawText);
-
-    // Markdown 簡易変換
-    text = text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-    text = text.split("\n\n").map(function (p) { return "<p>" + p + "</p>"; }).join("");
-    text = text.replace(/\n/g, "<br>");
-
-    // [[FORMULA_N]] を KaTeX でレンダリング（renderSegmentContent と同一ロジック）
-    if (chunk.formulas && chunk.formulas.length > 0) {
-      chunk.formulas.forEach(function (f) {
-        var rendered = "";
-        try {
-          if (window.katex) {
-            rendered = window.katex.renderToString(normalizeKatexFormula(f.latex, f.is_display === true), {
-              displayMode: f.is_display === true,
-              throwOnError: false,
-            });
-            var cls = f.is_display ? "lecture-formula-block visible" : "lecture-formula visible";
-            rendered = '<span class="' + cls + '">' + rendered + '</span>';
-          } else {
-            rendered = f.is_display
-              ? '<span class="lecture-formula-block">$$' + escHtml(f.latex) + '$$</span>'
-              : '<span class="lecture-formula">$' + escHtml(f.latex) + '$</span>';
-          }
-        } catch (e) {
-          rendered = "<span>" + escHtml(f.latex) + "</span>";
-        }
-        text = text.split(escHtml(f.id)).join(rendered);
-      });
+    var embedBlocks = [];
+    var mathBlocks = [];
+    function preserveMath(expr, display) {
+      var idx = mathBlocks.length;
+      mathBlocks.push({ expr: expr, display: display });
+      return "\x00MATERIAL_MATH_" + idx + "\x00";
+    }
+    function preserveEmbed(kind, id, inline) {
+      var idx = embedBlocks.length;
+      embedBlocks.push({ kind: kind, id: id, inline: inline });
+      return "\x00MATERIAL_EMBED_" + idx + "\x00";
     }
 
-    return text;
+    var preserved = normalizeMaterialLineBreaks(rawText);
+    preserved = preserved.replace(/!\[\[equation:\s*\[\[([^\]]+)\]\]\s*\]\]/g, "![[equation:$1]]");
+    preserved = preserved.replace(/\[\[equation:\s*\[\[([^\]]+)\]\]\s*\]\]/g, "[[equation:$1]]");
+    preserved = preserved.replace(/!\[\[([a-z_]+):([^\]]+)\]\]/g, function (_m, kind, id) {
+      return preserveEmbed(kind, id, false);
+    });
+    preserved = preserved.replace(/\[\[([a-z_]+):([^\]]+)\]\]/g, function (_m, kind, id) {
+      return preserveEmbed(kind, id, true);
+    });
+    preserved = preserved.replace(/\[\[([^\[\]:]+)\]\]/g, function (m, id) {
+      var formula = formulaById[m] || formulaById[id] || formulaById[normalizeMaterialEvidenceId(id)];
+      if (!formula) return m;
+      return preserveMath(formula.latex || formula.summary || id, true);
+    });
+    preserved = preserved.replace(/\\\[([\s\S]+?)\\\]/g, function (_m, expr) {
+      return preserveMath(expr, true);
+    });
+    preserved = preserved.replace(/\$\$([\s\S]+?)\$\$/g, function (_m, expr) {
+      return preserveMath(expr, true);
+    });
+    preserved = preserved.replace(/\\\(([\s\S]+?)\\\)/g, function (_m, expr) {
+      return preserveMath(expr, false);
+    });
+    preserved = preserved.replace(/\$([^\$\n]+?)\$/g, function (_m, expr) {
+      return preserveMath(expr, false);
+    });
+
+    var html = escHtml(preserved);
+    html = html.replace(/^### (.+)$/gm, "<h4>$1</h4>");
+    html = html.replace(/^## (.+)$/gm, "<h3>$1</h3>");
+    html = html.replace(/^# (.+)$/gm, "<h2>$1</h2>");
+    html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    html = html.split("\n\n").map(function (p) {
+      return "<p>" + p.replace(/\n/g, "<br>") + "</p>";
+    }).join("");
+
+    html = html.replace(/\x00MATERIAL_MATH_(\d+)\x00/g, function (_m, idx) {
+      var block = mathBlocks[parseInt(idx, 10)];
+      return block ? renderMaterialKatex(block.expr, block.display) : "";
+    });
+    html = html.replace(/\x00MATERIAL_EMBED_(\d+)\x00/g, function (_m, idx) {
+      var embed = embedBlocks[parseInt(idx, 10)];
+      if (!embed) return "";
+      var embedId = normalizeMaterialEvidenceId(embed.id);
+      if (embed.kind === "equation") {
+        var formula = formulaById[String(embed.id)] || formulaById[embedId];
+        if (formula && (formula.latex || formula.summary)) {
+          return '<span class="ls-material-embed ls-material-formula-only" data-evidence-ref="equation:' + escHtml(embedId) + '">' +
+            renderMaterialKatex(formula.latex || formula.summary || "", true) +
+          '</span>';
+        }
+        return '<span class="ls-material-embed ls-material-missing" data-evidence-ref="equation:' + escHtml(embedId) + '">' +
+          '<span class="ls-material-embed-kind">未解決の数式</span>' +
+          '<strong>' + escHtml(embedId || "数式") + '</strong>' +
+          '<span class="ls-material-embed-summary">この数式IDに対応するLaTeXを取得できませんでした。</span>' +
+        '</span>';
+      }
+      return '<span class="ls-material-embed ls-material-evidence-card ls-material-missing" data-evidence-ref="' + escHtml(embed.kind + ":" + embedId) + '">' +
+        '<span class="ls-material-embed-kind">未解決</span>' +
+        '<strong>' + escHtml(embed.kind + ":" + embed.id) + '</strong>' +
+        '<span class="ls-material-embed-summary">このIDに対応する教材要素を取得できませんでした。</span>' +
+      '</span>';
+    });
+
+    return html || "";
+  }
+
+  function renderMaterialKatex(expr, display) {
+    var formula = normalizeKatexFormula(expr, display);
+    if (!formula) return "";
+    var cls = display ? "lecture-formula-block visible" : "lecture-formula visible";
+    if (window.katex) {
+      try {
+        return '<span class="' + cls + '">' + window.katex.renderToString(formula, {
+          displayMode: !!display,
+          throwOnError: false,
+          strict: "ignore",
+          trust: false,
+        }) + '</span>';
+      } catch (e) {
+        // Fall through to escaped fallback.
+      }
+    }
+    return '<span class="' + cls + '"><code>' + escHtml(formula) + '</code></span>';
+  }
+
+  function normalizeMaterialEvidenceId(value) {
+    return String(value || "")
+      .trim()
+      .replace(/^\[\[/, "")
+      .replace(/\]\]$/, "")
+      .replace(/^equation:/, "")
+      .trim();
+  }
+
+  function normalizeMaterialLineBreaks(text) {
+    return String(text || "")
+      .replace(/\r\n/g, "\n")
+      .replace(/\r/g, "\n")
+      .replace(/<br\s*\/?>/gi, "\n");
   }
 
   function normalizeKatexFormula(expr, display) {
