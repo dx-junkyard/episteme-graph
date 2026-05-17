@@ -1986,8 +1986,9 @@ def _save_component_graph(course_id: str, document_id: str, graph: dict, user_id
                     :course_id, :document_id, CAST(:scope AS jsonb), CAST(:graph_json AS jsonb),
                     CAST(:validation_results AS jsonb), CAST(:updated_by AS uuid)
                 )
-                ON CONFLICT (course_id, document_id)
+                ON CONFLICT (document_id)
                 DO UPDATE SET
+                    course_id = EXCLUDED.course_id,
                     scope = EXCLUDED.scope,
                     graph_json = EXCLUDED.graph_json,
                     validation_results = EXCLUDED.validation_results,

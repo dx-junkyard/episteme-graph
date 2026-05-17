@@ -585,6 +585,20 @@ def _run_migrations() -> None:
         session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_theory_component_links_document ON theory_component_links(document_id)"))
         session.execute(sa_text("ALTER TABLE theory_component_graphs ALTER COLUMN course_id DROP NOT NULL"))
         session.execute(sa_text("""
+            DELETE FROM theory_component_graphs t
+            USING (
+                SELECT
+                    id,
+                    row_number() OVER (
+                        PARTITION BY document_id
+                        ORDER BY updated_at DESC, created_at DESC, id DESC
+                    ) AS rn
+                FROM theory_component_graphs
+            ) d
+            WHERE t.id = d.id
+              AND d.rn > 1
+        """))
+        session.execute(sa_text("""
             DO $$
             BEGIN
                 IF NOT EXISTS (

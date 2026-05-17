@@ -36,6 +36,21 @@ CREATE INDEX IF NOT EXISTS idx_theory_component_links_document ON theory_compone
 ALTER TABLE theory_component_graphs ALTER COLUMN course_id DROP NOT NULL;
 -- 既存の UNIQUE(course_id, document_id) は course_id が NULL になる行で
 -- 重複保存できなくなるため、document_id 単独の UNIQUE 制約を追加する。
+-- 既存環境には同一 document_id の graph が複数残っている場合があるため、
+-- 制約追加前に最新の updated_at / created_at を持つ 1 行へ畳む。
+DELETE FROM theory_component_graphs t
+USING (
+    SELECT
+        id,
+        row_number() OVER (
+            PARTITION BY document_id
+            ORDER BY updated_at DESC, created_at DESC, id DESC
+        ) AS rn
+    FROM theory_component_graphs
+) d
+WHERE t.id = d.id
+  AND d.rn > 1;
+
 DO $$
 BEGIN
     IF NOT EXISTS (

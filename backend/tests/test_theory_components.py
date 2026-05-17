@@ -58,6 +58,11 @@ class TestTheoryComponentRoutes:
         assert '"/chunks/{chunk_id}/theory-components/extract"' in source
         assert '"/theory-components/{component_id}"' in source
         assert '"/theory-components/{component_id}/reject"' in source
+
+    def test_component_graph_save_uses_document_conflict_target(self):
+        source = _read(ROUTES)
+        assert "ON CONFLICT (document_id)" in source
+        assert "ON CONFLICT (course_id, document_id)" not in source
         assert '"/courses/{course_id}/theory-components/validate-connection"' in source
 
     def test_permissions_follow_course_visibility_and_editability(self):
