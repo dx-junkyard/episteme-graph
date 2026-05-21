@@ -10,8 +10,6 @@
   --color-background-tertiary: #eeeef0;
   --color-background-info: #eef4fb;
   --color-background-success: rgba(93, 202, 165, 0.12);
-  --color-bg-secondary: var(--color-background-secondary);
-  --color-bg-tertiary: var(--color-background-tertiary);
   --color-text-primary: #1d1d1f;
   --color-text-secondary: #6e6e73;
   --color-text-tertiary: #aeaeb2;
@@ -1456,7 +1454,7 @@ body {
   font-size: 13px;
   border: 1px solid var(--color-border);
   border-radius: 6px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   color: var(--color-text-primary);
 }
 
@@ -1465,7 +1463,7 @@ body {
   font-size: 13px;
   border: 1px solid var(--color-border);
   border-radius: 6px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   color: var(--color-text-primary);
 }
 
@@ -1624,7 +1622,7 @@ body {
 .cb-material-select {
   border-bottom: 0.5px solid var(--color-border-tertiary);
   padding: 8px 12px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
 }
 
 .cb-material-select-header {
@@ -1652,7 +1650,7 @@ body {
   padding: 3px 8px;
   border-radius: 4px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-tertiary);
+  background: var(--color-background-tertiary);
   transition: border-color 0.1s;
 }
 
@@ -2377,7 +2375,7 @@ body {
   font-weight: 600;
   color: var(--color-text-secondary);
   border-bottom: 1px solid var(--color-border);
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
 }
 
 /* Issue #232: 左ペインタブ */
@@ -2405,7 +2403,7 @@ body {
 }
 
 .ls-nav-tab:hover {
-  background: var(--color-bg-tertiary);
+  background: var(--color-background-tertiary);
   color: var(--color-text-primary);
 }
 
@@ -2442,7 +2440,7 @@ body {
 
 .ls-course-topic:hover,
 .ls-course-topic.active {
-  background: var(--color-bg-tertiary);
+  background: var(--color-background-tertiary);
 }
 
 .ls-course-topic.active {
@@ -2484,7 +2482,7 @@ body {
 
 .ls-component-item:hover,
 .ls-component-item.active {
-  background: var(--color-bg-tertiary);
+  background: var(--color-background-tertiary);
 }
 
 .ls-component-item.active {
@@ -2551,11 +2549,11 @@ body {
 }
 
 .ls-chunk-item:hover {
-  background: var(--color-bg-tertiary);
+  background: var(--color-background-tertiary);
 }
 
 .ls-chunk-item.active {
-  background: var(--color-bg-tertiary);
+  background: var(--color-background-tertiary);
   border-left: 3px solid var(--color-text-info);
 }
 
@@ -2579,7 +2577,7 @@ body {
 .ls-section-node:hover,
 .ls-doc-node.active,
 .ls-section-node.active {
-  background: var(--color-bg-tertiary);
+  background: var(--color-background-tertiary);
 }
 
 .ls-doc-title {
@@ -2704,7 +2702,7 @@ body {
 .ls-work-tab,
 .ls-mini-tab {
   border: 1px solid var(--color-border);
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   color: var(--color-text-secondary);
   cursor: pointer;
   font-size: 12px;
@@ -2838,7 +2836,7 @@ body {
   font-size: 11px;
   font-weight: 600;
   color: var(--color-text-secondary);
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   border-bottom: 1px solid var(--color-border);
 }
 
@@ -2875,7 +2873,7 @@ body {
 
 .ls-script-textarea:disabled {
   color: var(--color-text-secondary);
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
 }
 
 .ls-display-preview {
@@ -3070,7 +3068,7 @@ body {
 .ls-evidence-chip {
   border: 1px solid var(--color-border);
   border-radius: 999px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   color: var(--color-text-primary);
   padding: 4px 8px;
   font-size: 12px;
@@ -3140,7 +3138,7 @@ body {
 .ls-evidence-kind {
   border-radius: 999px;
   padding: 2px 7px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   color: var(--color-text-secondary);
   font-size: 11px;
   font-weight: 700;
@@ -3179,7 +3177,7 @@ body {
   padding: 10px;
   border: 1px solid var(--color-border);
   border-radius: 6px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   color: var(--color-text-primary);
   text-align: left;
   cursor: pointer;
@@ -3280,7 +3278,7 @@ body {
   border: 1px solid var(--color-border);
   border-radius: 8px;
   padding: 12px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
 }
 
 .ls-theory-card-head {
@@ -3362,7 +3360,7 @@ body {
   padding: 1px 8px;
   margin: 0 2px;
   font-size: 0.9em;
-  background: var(--color-bg-tertiary);
+  background: var(--color-background-tertiary);
 }
 
 .ls-graph-flow {
@@ -3375,7 +3373,7 @@ body {
   border: 1px solid var(--color-border);
   border-radius: 8px;
   padding: 10px 12px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   color: var(--color-text-primary);
   font-size: 13px;
 }
@@ -3384,7 +3382,7 @@ body {
   border: 1px solid var(--color-border);
   border-radius: 8px;
   padding: 10px 12px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
 }
 
 .ls-graph-edge summary {
@@ -3662,7 +3660,7 @@ body {
 
 .ss-analysis-step > div {
   height: 5px;
-  background: var(--color-bg-tertiary);
+  background: var(--color-background-tertiary);
   border-radius: 3px;
   overflow: hidden;
 }
@@ -3717,7 +3715,7 @@ body {
   padding: 8px;
   border: 1px solid var(--color-border);
   border-radius: 6px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   color: var(--color-text-primary);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
@@ -3765,7 +3763,7 @@ body {
   border: 1px solid var(--color-border);
   border-radius: 4px;
   color: var(--color-text-info);
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   white-space: normal;
 }
 
@@ -3807,7 +3805,7 @@ body {
   margin-bottom: 6px;
   border: 1px solid var(--color-border);
   border-radius: 6px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   font-size: 12px;
 }
 
@@ -3945,7 +3943,7 @@ body {
   padding: 8px 10px;
   border: 1px solid var(--color-border);
   border-radius: 4px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   color: var(--color-text-primary);
   font-family: inherit;
   font-size: 13px;
@@ -3967,7 +3965,7 @@ body {
   border: 1px solid var(--color-border);
   border-radius: 4px;
   resize: vertical;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   color: var(--color-text-primary);
   font-family: inherit;
 }
@@ -3981,7 +3979,7 @@ body {
   padding: 6px 8px;
   margin-bottom: 4px;
   font-size: 11px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   border-radius: 4px;
   border: 1px solid var(--color-border);
 }
