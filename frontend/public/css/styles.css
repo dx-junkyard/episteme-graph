@@ -2234,7 +2234,7 @@ body {
   border: 1px solid var(--color-border);
   border-radius: 10px;
   background: var(--color-background-primary);
-  padding: 14px;
+  padding: 14px 14px 0;
 }
 
 .ls-topbar {
@@ -2242,8 +2242,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 0 0 10px;
-  border-bottom: 1px solid var(--color-border);
+  padding: 0;
   margin-bottom: 10px;
   flex-wrap: wrap;
 }
@@ -2287,7 +2286,7 @@ body {
   justify-content: center;
   border: 1px dashed var(--color-border-secondary);
   border-radius: 8px;
-  background: var(--color-background-primary);
+  background: var(--color-background-secondary);
 }
 
 .ls-studio-workarea {
@@ -2295,9 +2294,10 @@ body {
   flex-direction: column;
   min-height: 0;
   flex: 1;
-  padding: 12px;
+  gap: 4px;
   border-radius: 8px;
   background: var(--color-background-secondary);
+  border: 1px dashed var(--color-border-secondary);
 }
 
 .ls-studio-workarea[hidden],
@@ -2310,7 +2310,8 @@ body {
   align-items: center;
   gap: 8px;
   min-height: 38px;
-  margin-bottom: 8px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-background-primary);
   flex-wrap: wrap;
 }
 
@@ -2339,8 +2340,8 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  min-height: 30px;
-  margin-bottom: 8px;
+  min-height: 28px;
+  padding: 0 8px;
 }
 
 .ls-work-meta-row .upload-status {
@@ -2382,11 +2383,9 @@ body {
 /* Issue #232: 左ペインタブ */
 .ls-nav-tabs {
   display: flex;
-  background: var(--color-background-primary);
   flex-shrink: 0;
   gap: 4px;
   padding: 3px;
-  border: 1px solid var(--color-border-tertiary);
   border-radius: 8px;
 }
 
@@ -2395,7 +2394,7 @@ body {
   font-size: 12px;
   font-weight: 600;
   color: var(--color-text-secondary);
-  background: var(--color-bg-secondary);
+  background: var(--color-bg-primary);
   border: 1px solid var(--color-border);
   border-radius: 6px;
   cursor: pointer;
@@ -2418,7 +2417,6 @@ body {
 /* コースタブ */
 .ls-course-header {
   padding: 8px 12px;
-  border-bottom: 1px solid var(--color-border);
   background: var(--color-background-primary);
   display: grid;
   gap: 2px;
@@ -2426,7 +2424,6 @@ body {
 
 .ls-course-chapter {
   padding: 7px 12px 5px;
-  border-bottom: 1px solid var(--color-border);
   background: var(--color-background-primary);
   font-size: 12px;
   font-weight: 700;
@@ -2435,7 +2432,6 @@ body {
 
 .ls-course-topic {
   padding: 6px 12px 6px 24px;
-  border-bottom: 1px solid var(--color-border);
   font-size: 12px;
   cursor: pointer;
   display: flex;
@@ -2548,7 +2544,6 @@ body {
   padding: 8px 12px;
   font-size: 12px;
   cursor: pointer;
-  border-bottom: 1px solid var(--color-border);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2567,7 +2562,6 @@ body {
 .ls-doc-node,
 .ls-section-node {
   padding: 8px 12px;
-  border-bottom: 1px solid var(--color-border);
   cursor: pointer;
   display: grid;
   gap: 2px;
@@ -2688,9 +2682,7 @@ body {
 .ls-work-tabs {
   position: relative;
   padding: 3px;
-  border: 1px solid var(--color-border-tertiary);
   border-radius: 8px;
-  background: var(--color-background-primary);
   flex-shrink: 0;
 }
 
@@ -2793,20 +2785,20 @@ body {
 }
 
 .ls-pane-head {
-  min-height: 38px;
-  padding: 6px 8px 6px 12px;
+  min-height: 22px;
+  padding: 0px 12px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  background: var(--color-bg-secondary);
+  background: var(--color-bg-primary);
   border-bottom: 1px solid var(--color-border);
 }
 
 .ls-pane-title {
-  font-size: 12px;
+  font-size: 10px;
   font-weight: 700;
-  color: var(--color-text-primary);
+  color: var(--color-text-secondary);
 }
 
 .ls-pane-body {
@@ -2851,7 +2843,6 @@ body {
 }
 
 .ls-source-text {
-  padding: 12px;
   font-size: 13px;
   line-height: 1.6;
   height: 100%;
@@ -2864,10 +2855,10 @@ body {
 .ls-spoken-textarea,
 .ls-script-textarea {
   flex: 1;
+  padding: 12px;
   width: 100%;
   height: 100%;
   min-height: 360px;
-  padding: 12px;
   font-size: 13px;
   line-height: 1.6;
   border: none;
@@ -2889,8 +2880,8 @@ body {
 
 .ls-display-preview {
   height: 100%;
+  padding: 12px;
   min-height: 360px;
-  padding: 14px 16px;
   overflow-y: auto;
   color: var(--color-text-primary);
   font-size: 14px;
@@ -2984,13 +2975,17 @@ body {
   width: 100%;
   border: 1px solid var(--color-border);
   border-radius: 6px;
-  background: var(--color-bg-secondary);
+  background: var(--color-bg-primary);
   color: var(--color-text-primary);
   font-family: inherit;
   font-size: 13px;
   line-height: 1.55;
   padding: 8px;
   resize: vertical;
+
+  /* 一部のブラウザでは `field-sizing` はまだ非対応 */
+  field-sizing: content;
+  min-height: min-content !important;
 }
 
 .ls-course-small-textarea {
