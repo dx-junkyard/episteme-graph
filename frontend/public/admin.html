@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Episteme Graph — 管理画面</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-  <link rel="stylesheet" href="/css/styles.css?v=component-graph-20260507-5">
+  <link rel="stylesheet" href="/css/styles.css?v=lecture-studio-wire-20260521-1">
   <script defer src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
 </head>
 <body>
@@ -187,10 +187,13 @@
     <!-- Lecture Script Studio tab (Issue #70) -->
     <div class="admin-panel" id="tab-lecture-studio">
       <div class="ls-container">
+        <div class="ls-studio-frame">
         <!-- Top bar: course selector + global actions -->
         <div class="ls-topbar">
           <div class="ls-topbar-left">
-            <label style="font-size:13px;color:var(--color-text-secondary)">コース:</label>
+            <button id="ls-course-reset-btn" class="ls-course-reset-btn" type="button" hidden>[選び直す]</button>
+            <span id="ls-course-current" class="ls-course-current" hidden>コース: -</span>
+            <label id="ls-course-select-label" style="font-size:13px;color:var(--color-text-secondary)">コース:</label>
             <select id="ls-course-select" style="flex:1;max-width:400px;padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
               <option value="">コースを選択...</option>
             </select>
@@ -208,15 +211,42 @@
         </div>
         <div id="ls-progress" class="upload-status" style="display:none;margin:8px 16px"></div>
 
-        <!-- Three-panel layout -->
-        <div class="ls-panels">
-          <!-- Left: navigation panel with 3 tabs (Issue #232) -->
-          <div class="ls-nav-panel">
+        <div id="ls-empty-course" class="ls-empty-course">
+          <div class="ls-empty-state">コースを選択すると表示されます</div>
+        </div>
+
+        <div id="ls-studio-workarea" class="ls-studio-workarea" hidden>
+          <div class="ls-studio-toolbar">
             <div class="ls-nav-tabs">
               <button class="ls-nav-tab active" data-ls-nav="course">コース</button>
               <button class="ls-nav-tab" data-ls-nav="document">文書構造</button>
               <button class="ls-nav-tab" data-ls-nav="components">コンポーネント</button>
             </div>
+            <div class="ls-toolbar-divider"></div>
+            <div class="ls-work-tabs" id="ls-work-tabs">
+              <button class="ls-work-tab active" data-ls-view="edit">原稿</button>
+              <button class="ls-work-tab" data-ls-view="structure" hidden>構造</button>
+              <button class="ls-work-tab" data-ls-view="claims" hidden>理論グラフ</button>
+            </div>
+            <div class="ls-work-tabs ls-theory-graph-tabs" id="ls-theory-graph-tabs" hidden>
+              <button class="ls-work-tab active" data-ls-view="claims">主張</button>
+              <button class="ls-work-tab" data-ls-view="theory">論理要素</button>
+              <button class="ls-work-tab" data-ls-view="graph">グラフ</button>
+            </div>
+            <div class="ls-toolbar-spacer"></div>
+            <button id="ls-right-pane-toggle" class="admin-action-btn ls-toolbar-btn" type="button" disabled>右ペインを隠す</button>
+            <button id="ls-ai-assistant-btn" class="admin-action-btn ls-toolbar-btn" type="button" disabled>AI アシスタント</button>
+            <button id="ls-save-btn" class="admin-action-btn ls-toolbar-btn ls-save-toolbar-btn" type="button" disabled>原稿を保存</button>
+          </div>
+          <div class="ls-work-meta-row">
+            <div id="ls-chunk-meta" class="ls-chunk-meta">トピックを選択してください</div>
+            <div id="ls-action-status" class="upload-status" style="display:none"></div>
+          </div>
+
+        <!-- Three-panel layout -->
+        <div class="ls-panels">
+          <!-- Left: navigation panel with 3 tabs (Issue #232) -->
+          <div class="ls-nav-panel">
             <!-- コースタブ -->
             <div id="ls-course-list" class="ls-chunk-list">
               <div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">コースを選択してください</div>
@@ -233,20 +263,6 @@
 
           <!-- Center: editor -->
           <div class="ls-editor-panel">
-            <div class="ls-workbar">
-              <div class="ls-work-tabs" id="ls-work-tabs">
-                <button class="ls-work-tab active" data-ls-view="edit">原稿</button>
-                <button class="ls-work-tab" data-ls-view="structure" hidden>構造</button>
-                <button class="ls-work-tab" data-ls-view="claims" hidden>理論グラフ</button>
-              </div>
-              <div class="ls-work-tabs ls-theory-graph-tabs" id="ls-theory-graph-tabs" hidden>
-                <button class="ls-work-tab active" data-ls-view="claims">主張</button>
-                <button class="ls-work-tab" data-ls-view="theory">論理要素</button>
-                <button class="ls-work-tab" data-ls-view="graph">グラフ</button>
-              </div>
-              <div id="ls-chunk-meta" class="ls-chunk-meta">チャンクを選択してください</div>
-            </div>
-
             <div id="ls-workspace" class="ls-workspace">
               <div class="ls-empty-state">チャンクを選択すると編集ワークベンチが表示されます</div>
             </div>
@@ -275,12 +291,14 @@
                     <div class="ls-mini-tabs" id="ls-display-tabs">
                       <button class="ls-mini-tab active" data-ls-display="preview">プレビュー</button>
                       <button class="ls-mini-tab" data-ls-display="script">原稿</button>
+                      <button class="ls-mini-tab" data-ls-display="formulas">数式一覧</button>
                     </div>
                   </div>
                   <div class="ls-pane-body">
                     <div id="ls-display-preview" class="ls-display-preview"></div>
                     <textarea id="ls-display-text" class="ls-script-textarea" placeholder="表示テキスト" hidden></textarea>
                     <textarea id="ls-spoken-text" class="ls-script-textarea" placeholder="読み上げテキスト" hidden></textarea>
+                    <div id="ls-formulas" class="ls-formulas-panel" hidden></div>
                   </div>
                 </section>
               </div>
@@ -328,20 +346,20 @@
               </label>
             </template>
           </div>
+        </div>
+        </div>
+        </div>
 
-          <!-- Right: AI assistant + actions -->
-          <div class="ls-action-panel">
-            <div class="ls-action-header">AI アシスタント</div>
-            <div class="ls-action-body">
-              <div style="margin-bottom:12px">
-                <label id="ls-assistant-label" style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:4px">書き換え指示:</label>
-                <textarea id="ls-rewrite-prompt" class="ls-rewrite-textarea" placeholder="例: 前提知識の説明を1文追加して" disabled></textarea>
-              </div>
-              <button id="ls-rewrite-btn" class="admin-action-btn" disabled style="width:100%;margin-bottom:12px">AIで提案</button>
-              <hr style="border:none;border-top:1px solid var(--color-border);margin:12px 0">
-              <button id="ls-save-btn" class="admin-action-btn" disabled style="width:100%;background:var(--color-text-success);color:#fff">原稿を保存</button>
-              <div id="ls-action-status" class="upload-status" style="display:none;margin-top:8px"></div>
-              <div id="ls-formulas" style="margin-top:16px"></div>
+        <div id="ls-assistant-modal" class="ls-assistant-modal" hidden>
+          <div class="ls-assistant-dialog">
+            <div class="ls-assistant-head">
+              <h3>AI アシスタント</h3>
+              <button id="ls-assistant-close" class="lecture-chat-close" type="button">&times;</button>
+            </div>
+            <div class="ls-assistant-body">
+              <label id="ls-assistant-label" class="ls-assistant-label">書き換え指示:</label>
+              <textarea id="ls-rewrite-prompt" class="ls-rewrite-textarea" placeholder="例: 前提知識の説明を1文追加して" disabled></textarea>
+              <button id="ls-rewrite-btn" class="admin-action-btn" disabled>AIで提案</button>
             </div>
           </div>
         </div>
@@ -520,6 +538,6 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-  <script src="/js/admin.js?v=lecture-studio-tabs-20260509-1"></script>
+  <script src="/js/admin.js?v=lecture-studio-wire-20260521-1"></script>
 </body>
 </html>
