@@ -9,6 +9,7 @@
   --color-background-secondary: #f5f5f7;
   --color-background-tertiary: #eeeef0;
   --color-background-info: #eef4fb;
+  --color-background-success: rgba(93, 202, 165, 0.12);
   --color-text-primary: #1d1d1f;
   --color-text-secondary: #6e6e73;
   --color-text-tertiary: #aeaeb2;
@@ -16,9 +17,12 @@
   --color-text-success: #5dcaa5;
   --color-text-warning: #ef9f27;
   --color-text-danger: #e24b4a;
+  --color-border-primary: #c6c6cc;
   --color-border-secondary: #d2d2d7;
   --color-border-tertiary: #e5e5ea;
   --color-border-info: #378add;
+  --color-border-success: #8ed8be;
+  --color-border: var(--color-border-tertiary);
 }
 
 * {
@@ -1122,8 +1126,9 @@ body {
   max-width: none;
   width: 100%;
   margin: 0;
-  padding: 20px 24px;
-  overflow-x: auto;
+  padding: 20px 24px 0px;
+  overflow-x: hidden;
+  background: #f3f4f6;
 }
 
 .admin-section {
@@ -1449,7 +1454,7 @@ body {
   font-size: 13px;
   border: 1px solid var(--color-border);
   border-radius: 6px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   color: var(--color-text-primary);
 }
 
@@ -1458,7 +1463,7 @@ body {
   font-size: 13px;
   border: 1px solid var(--color-border);
   border-radius: 6px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   color: var(--color-text-primary);
 }
 
@@ -1617,7 +1622,7 @@ body {
 .cb-material-select {
   border-bottom: 0.5px solid var(--color-border-tertiary);
   padding: 8px 12px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
 }
 
 .cb-material-select-header {
@@ -1645,7 +1650,7 @@ body {
   padding: 3px 8px;
   border-radius: 4px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-tertiary);
+  background: var(--color-background-tertiary);
   transition: border-color 0.1s;
 }
 
@@ -2216,7 +2221,18 @@ body {
 .ls-container {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 140px);
+  height: calc(100vh - 100px);
+}
+
+.ls-studio-frame {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-background-primary);
+  padding: 14px 14px 0;
 }
 
 .ls-topbar {
@@ -2224,9 +2240,8 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 0 0 12px;
-  border-bottom: 1px solid var(--color-border);
-  margin-bottom: 12px;
+  padding: 0;
+  margin-bottom: 10px;
   flex-wrap: wrap;
 }
 
@@ -2242,13 +2257,104 @@ body {
   gap: 8px;
 }
 
+.ls-course-reset-btn {
+  border: none;
+  background: transparent;
+  color: var(--color-text-info);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0;
+}
+
+.ls-course-reset-btn:hover {
+  text-decoration: underline;
+}
+
+.ls-course-current {
+  color: var(--color-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ls-empty-course {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--color-border-secondary);
+  border-radius: 8px;
+  background: var(--color-background-secondary);
+}
+
+.ls-studio-workarea {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  gap: 4px;
+  border-radius: 8px;
+  background: var(--color-background-secondary);
+  border: 1px dashed var(--color-border-secondary);
+}
+
+.ls-studio-workarea[hidden],
+.ls-empty-course[hidden] {
+  display: none !important;
+}
+
+.ls-studio-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-background-primary);
+  flex-wrap: wrap;
+}
+
+.ls-toolbar-divider {
+  width: 1px;
+  height: 26px;
+  background: var(--color-border-tertiary);
+}
+
+.ls-toolbar-spacer {
+  flex: 1;
+  min-width: 12px;
+}
+
+.ls-toolbar-btn {
+  white-space: nowrap;
+}
+
+.ls-save-toolbar-btn {
+  background: var(--color-text-success);
+  color: #fff;
+}
+
+.ls-work-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 28px;
+  padding: 0 8px;
+}
+
+.ls-work-meta-row .upload-status {
+  margin: 0;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
 .ls-panels {
   display: flex;
   gap: 12px;
   flex: 1;
   min-height: 0;
-  overflow-x: auto;
-  padding-bottom: 4px;
+  overflow: hidden;
+  padding-bottom: 0;
 }
 
 .ls-nav-panel {
@@ -2260,6 +2366,7 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  background: var(--color-background-primary);
 }
 
 .ls-nav-header {
@@ -2268,26 +2375,26 @@ body {
   font-weight: 600;
   color: var(--color-text-secondary);
   border-bottom: 1px solid var(--color-border);
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
 }
 
 /* Issue #232: 左ペインタブ */
 .ls-nav-tabs {
   display: flex;
-  border-bottom: 1px solid var(--color-border);
-  background: var(--color-bg-secondary);
   flex-shrink: 0;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 8px;
 }
 
 .ls-nav-tab {
-  flex: 1;
-  padding: 7px 4px;
-  font-size: 11px;
+  padding: 8px 10px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--color-text-secondary);
-  background: transparent;
-  border: none;
-  border-right: 1px solid var(--color-border);
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
   cursor: pointer;
   transition: background 0.12s, color 0.12s;
   white-space: nowrap;
@@ -2295,12 +2402,8 @@ body {
   text-overflow: ellipsis;
 }
 
-.ls-nav-tab:last-child {
-  border-right: none;
-}
-
 .ls-nav-tab:hover {
-  background: var(--color-bg-tertiary);
+  background: var(--color-background-tertiary);
   color: var(--color-text-primary);
 }
 
@@ -2312,16 +2415,14 @@ body {
 /* コースタブ */
 .ls-course-header {
   padding: 8px 12px;
-  border-bottom: 1px solid var(--color-border);
-  background: var(--color-bg-secondary);
+  background: var(--color-background-primary);
   display: grid;
   gap: 2px;
 }
 
 .ls-course-chapter {
   padding: 7px 12px 5px;
-  border-bottom: 1px solid var(--color-border);
-  background: var(--color-bg-secondary);
+  background: var(--color-background-primary);
   font-size: 12px;
   font-weight: 700;
   color: var(--color-text-primary);
@@ -2329,7 +2430,6 @@ body {
 
 .ls-course-topic {
   padding: 6px 12px 6px 24px;
-  border-bottom: 1px solid var(--color-border);
   font-size: 12px;
   cursor: pointer;
   display: flex;
@@ -2340,7 +2440,7 @@ body {
 
 .ls-course-topic:hover,
 .ls-course-topic.active {
-  background: var(--color-bg-tertiary);
+  background: var(--color-background-tertiary);
 }
 
 .ls-course-topic.active {
@@ -2382,7 +2482,7 @@ body {
 
 .ls-component-item:hover,
 .ls-component-item.active {
-  background: var(--color-bg-tertiary);
+  background: var(--color-background-tertiary);
 }
 
 .ls-component-item.active {
@@ -2435,13 +2535,13 @@ body {
 .ls-chunk-list {
   overflow-y: auto;
   flex: 1;
+  background: var(--color-background-primary);
 }
 
 .ls-chunk-item {
   padding: 8px 12px;
   font-size: 12px;
   cursor: pointer;
-  border-bottom: 1px solid var(--color-border);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2449,25 +2549,24 @@ body {
 }
 
 .ls-chunk-item:hover {
-  background: var(--color-bg-tertiary);
+  background: var(--color-background-tertiary);
 }
 
 .ls-chunk-item.active {
-  background: var(--color-bg-tertiary);
+  background: var(--color-background-tertiary);
   border-left: 3px solid var(--color-text-info);
 }
 
 .ls-doc-node,
 .ls-section-node {
   padding: 8px 12px;
-  border-bottom: 1px solid var(--color-border);
   cursor: pointer;
   display: grid;
   gap: 2px;
 }
 
 .ls-doc-node {
-  background: var(--color-bg-secondary);
+  background: var(--color-background-primary);
 }
 
 .ls-section-node {
@@ -2478,7 +2577,7 @@ body {
 .ls-section-node:hover,
 .ls-doc-node.active,
 .ls-section-node.active {
-  background: var(--color-bg-tertiary);
+  background: var(--color-background-tertiary);
 }
 
 .ls-doc-title {
@@ -2556,11 +2655,11 @@ body {
 }
 
 .ls-editor-panel {
-  flex: 1 0 1460px;
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  min-width: 1460px;
+  min-width: 0;
 }
 
 .ls-workbar {
@@ -2578,10 +2677,32 @@ body {
   gap: 4px;
 }
 
+.ls-work-tabs {
+  position: relative;
+  padding: 3px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.ls-work-tabs + .ls-work-tabs {
+  margin-left: 4px;
+  padding-left: 14px;
+}
+
+.ls-work-tabs + .ls-work-tabs::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  bottom: 6px;
+  width: 1px;
+  background: var(--color-border-tertiary);
+}
+
 .ls-work-tab,
 .ls-mini-tab {
   border: 1px solid var(--color-border);
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   color: var(--color-text-secondary);
   cursor: pointer;
   font-size: 12px;
@@ -2635,7 +2756,7 @@ body {
   min-height: 0;
   display: flex;
   gap: 10px;
-  min-width: 1450px;
+  min-width: 0;
 }
 
 .ls-split[hidden] {
@@ -2643,30 +2764,39 @@ body {
 }
 
 .ls-pane {
-  flex: 1 0 720px;
-  min-width: 720px;
+  flex: 1 1 0;
+  min-width: 0;
   border: 1px solid var(--color-border);
   border-radius: 8px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  background: var(--color-background-primary);
+}
+
+.ls-split.ls-right-pane-collapsed #ls-left-pane {
+  flex-basis: 100%;
+}
+
+.ls-split.ls-right-pane-collapsed #ls-right-pane {
+  display: none;
 }
 
 .ls-pane-head {
-  min-height: 38px;
-  padding: 6px 8px 6px 12px;
+  min-height: 22px;
+  padding: 0px 12px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  background: var(--color-bg-secondary);
+  background: var(--color-bg-primary);
   border-bottom: 1px solid var(--color-border);
 }
 
 .ls-pane-title {
-  font-size: 12px;
+  font-size: 10px;
   font-weight: 700;
-  color: var(--color-text-primary);
+  color: var(--color-text-secondary);
 }
 
 .ls-pane-body {
@@ -2706,12 +2836,11 @@ body {
   font-size: 11px;
   font-weight: 600;
   color: var(--color-text-secondary);
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   border-bottom: 1px solid var(--color-border);
 }
 
 .ls-source-text {
-  padding: 12px;
   font-size: 13px;
   line-height: 1.6;
   height: 100%;
@@ -2724,10 +2853,10 @@ body {
 .ls-spoken-textarea,
 .ls-script-textarea {
   flex: 1;
+  padding: 12px;
   width: 100%;
   height: 100%;
   min-height: 360px;
-  padding: 12px;
   font-size: 13px;
   line-height: 1.6;
   border: none;
@@ -2744,13 +2873,13 @@ body {
 
 .ls-script-textarea:disabled {
   color: var(--color-text-secondary);
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
 }
 
 .ls-display-preview {
   height: 100%;
+  padding: 12px;
   min-height: 360px;
-  padding: 14px 16px;
   overflow-y: auto;
   color: var(--color-text-primary);
   font-size: 14px;
@@ -2758,6 +2887,18 @@ body {
   white-space: pre-wrap;
   word-break: normal;
   overflow-wrap: break-word;
+}
+
+.ls-formulas-panel {
+  height: 100%;
+  min-height: 360px;
+  padding: 12px;
+  overflow-y: auto;
+  background: var(--color-background-primary);
+}
+
+.ls-formulas-panel[hidden] {
+  display: none !important;
 }
 
 .ls-display-preview p {
@@ -2832,13 +2973,17 @@ body {
   width: 100%;
   border: 1px solid var(--color-border);
   border-radius: 6px;
-  background: var(--color-bg-secondary);
+  background: var(--color-bg-primary);
   color: var(--color-text-primary);
   font-family: inherit;
   font-size: 13px;
   line-height: 1.55;
   padding: 8px;
   resize: vertical;
+
+  /* 一部のブラウザでは `field-sizing` はまだ非対応 */
+  field-sizing: content;
+  min-height: min-content !important;
 }
 
 .ls-course-small-textarea {
@@ -2923,7 +3068,7 @@ body {
 .ls-evidence-chip {
   border: 1px solid var(--color-border);
   border-radius: 999px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   color: var(--color-text-primary);
   padding: 4px 8px;
   font-size: 12px;
@@ -2993,7 +3138,7 @@ body {
 .ls-evidence-kind {
   border-radius: 999px;
   padding: 2px 7px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   color: var(--color-text-secondary);
   font-size: 11px;
   font-weight: 700;
@@ -3032,7 +3177,7 @@ body {
   padding: 10px;
   border: 1px solid var(--color-border);
   border-radius: 6px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   color: var(--color-text-primary);
   text-align: left;
   cursor: pointer;
@@ -3133,7 +3278,7 @@ body {
   border: 1px solid var(--color-border);
   border-radius: 8px;
   padding: 12px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
 }
 
 .ls-theory-card-head {
@@ -3215,7 +3360,7 @@ body {
   padding: 1px 8px;
   margin: 0 2px;
   font-size: 0.9em;
-  background: var(--color-bg-tertiary);
+  background: var(--color-background-tertiary);
 }
 
 .ls-graph-flow {
@@ -3228,7 +3373,7 @@ body {
   border: 1px solid var(--color-border);
   border-radius: 8px;
   padding: 10px 12px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   color: var(--color-text-primary);
   font-size: 13px;
 }
@@ -3237,7 +3382,7 @@ body {
   border: 1px solid var(--color-border);
   border-radius: 8px;
   padding: 10px 12px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
 }
 
 .ls-graph-edge summary {
@@ -3515,7 +3660,7 @@ body {
 
 .ss-analysis-step > div {
   height: 5px;
-  background: var(--color-bg-tertiary);
+  background: var(--color-background-tertiary);
   border-radius: 3px;
   overflow: hidden;
 }
@@ -3570,7 +3715,7 @@ body {
   padding: 8px;
   border: 1px solid var(--color-border);
   border-radius: 6px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   color: var(--color-text-primary);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
@@ -3618,7 +3763,7 @@ body {
   border: 1px solid var(--color-border);
   border-radius: 4px;
   color: var(--color-text-info);
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   white-space: normal;
 }
 
@@ -3660,7 +3805,7 @@ body {
   margin-bottom: 6px;
   border: 1px solid var(--color-border);
   border-radius: 6px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   font-size: 12px;
 }
 
@@ -3696,30 +3841,56 @@ body {
   color: var(--color-text-secondary);
 }
 
-.ls-action-panel {
-  width: 280px;
-  min-width: 240px;
-  flex: 0 0 280px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
+.ls-assistant-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
   display: flex;
-  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.ls-assistant-modal[hidden] {
+  display: none !important;
+}
+
+.ls-assistant-dialog {
+  width: min(560px, calc(100vw - 32px));
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 8px;
+  background: var(--color-background-primary);
+  box-shadow: 0 24px 50px rgba(0, 0, 0, 0.22);
   overflow: hidden;
 }
 
-.ls-action-header {
-  padding: 8px 12px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--color-text-secondary);
+.ls-assistant-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
   border-bottom: 1px solid var(--color-border);
-  background: var(--color-bg-secondary);
 }
 
-.ls-action-body {
-  padding: 12px;
-  overflow-y: auto;
-  flex: 1;
+.ls-assistant-head h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.ls-assistant-body {
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.ls-assistant-label {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.ls-assistant-body #ls-rewrite-btn {
+  width: 100%;
 }
 
 .ls-settings-modal {
@@ -3772,7 +3943,7 @@ body {
   padding: 8px 10px;
   border: 1px solid var(--color-border);
   border-radius: 4px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   color: var(--color-text-primary);
   font-family: inherit;
   font-size: 13px;
@@ -3794,7 +3965,7 @@ body {
   border: 1px solid var(--color-border);
   border-radius: 4px;
   resize: vertical;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   color: var(--color-text-primary);
   font-family: inherit;
 }
@@ -3808,7 +3979,7 @@ body {
   padding: 6px 8px;
   margin-bottom: 4px;
   font-size: 11px;
-  background: var(--color-bg-secondary);
+  background: var(--color-background-secondary);
   border-radius: 4px;
   border: 1px solid var(--color-border);
 }

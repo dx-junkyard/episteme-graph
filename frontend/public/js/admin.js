@@ -2823,6 +2823,7 @@
     graphLoading: false,
     // Issue #232: 左ペインタブ
     leftTab: "course",
+    rightPaneVisible: true,
     courseStructure: null,
     courseComponents: null,
   };
@@ -2855,6 +2856,73 @@
     document.querySelectorAll(".ls-menu").forEach(function (menu) {
       menu.hidden = true;
     });
+  }
+
+  function lsSelectedCourseTitle() {
+    var select = document.getElementById("ls-course-select");
+    if (!select || !lsState.courseId) return "";
+    var opt = select.options[select.selectedIndex];
+    return opt ? opt.textContent : "";
+  }
+
+  function lsUpdateCourseShell() {
+    var selected = Boolean(lsState.courseId);
+    var select = document.getElementById("ls-course-select");
+    var label = document.getElementById("ls-course-select-label");
+    var current = document.getElementById("ls-course-current");
+    var resetBtn = document.getElementById("ls-course-reset-btn");
+    var empty = document.getElementById("ls-empty-course");
+    var workarea = document.getElementById("ls-studio-workarea");
+    if (select) select.hidden = selected;
+    if (label) label.hidden = selected;
+    if (resetBtn) resetBtn.hidden = !selected;
+    if (current) {
+      current.hidden = !selected;
+      current.textContent = selected ? "コース: " + (lsSelectedCourseTitle() || lsState.courseId) : "コース: -";
+    }
+    if (empty) empty.hidden = selected;
+    if (workarea) workarea.hidden = !selected;
+    lsUpdateRightPaneToggle();
+    lsUpdateAssistantOpenButton();
+  }
+
+  function lsUpdateAssistantOpenButton() {
+    var btn = document.getElementById("ls-ai-assistant-btn");
+    var promptEl = document.getElementById("ls-rewrite-prompt");
+    if (!btn) return;
+    btn.disabled = !lsState.courseId || !promptEl || promptEl.disabled;
+  }
+
+  function lsOpenAssistantModal() {
+    var modal = document.getElementById("ls-assistant-modal");
+    var promptEl = document.getElementById("ls-rewrite-prompt");
+    if (!modal || !promptEl || promptEl.disabled) return;
+    lsUpdateAssistantContext();
+    modal.hidden = false;
+    setTimeout(function () { promptEl.focus(); }, 0);
+  }
+
+  function lsCloseAssistantModal() {
+    var modal = document.getElementById("ls-assistant-modal");
+    if (modal) modal.hidden = true;
+  }
+
+  function lsUpdateRightPaneToggle() {
+    var btn = document.getElementById("ls-right-pane-toggle");
+    if (!btn) return;
+    btn.disabled = !lsState.courseId || !document.getElementById("ls-right-pane");
+    btn.textContent = lsState.rightPaneVisible ? "右ペインを隠す" : "右ペインを表示";
+  }
+
+  function lsApplyRightPaneVisibility() {
+    var splitEl = document.querySelector("#ls-workspace .ls-split");
+    if (splitEl) splitEl.classList.toggle("ls-right-pane-collapsed", !lsState.rightPaneVisible);
+    lsUpdateRightPaneToggle();
+  }
+
+  function lsSetRightPaneVisible(visible) {
+    lsState.rightPaneVisible = visible !== false;
+    lsApplyRightPaneVisibility();
   }
 
   function lsIsTheoryGraphView(view) {
@@ -2911,6 +2979,11 @@
     var moreMenuBtn = document.getElementById("ls-more-menu-btn");
     var saveBtn = document.getElementById("ls-save-btn");
     var rewriteBtn = document.getElementById("ls-rewrite-btn");
+    var resetCourseBtn = document.getElementById("ls-course-reset-btn");
+    var assistantBtn = document.getElementById("ls-ai-assistant-btn");
+    var assistantCloseBtn = document.getElementById("ls-assistant-close");
+    var assistantModal = document.getElementById("ls-assistant-modal");
+    var rightPaneToggle = document.getElementById("ls-right-pane-toggle");
 
     lsBindMenu("ls-more-menu-btn", "ls-more-menu");
 
@@ -2924,6 +2997,8 @@
         settingsBtn.disabled = false;
         if (courseContentBtn) courseContentBtn.disabled = false;
         moreMenuBtn.disabled = false;
+        lsState.rightPaneVisible = true;
+        lsUpdateCourseShell();
         lsLoadSettings(courseId);
         lsLoadScripts(courseId);
       } else {
@@ -2949,7 +3024,30 @@
         lsRenderChunkList();
         lsRenderLeftPanel();
         lsClearEditor();
+        lsCloseAssistantModal();
+        lsUpdateCourseShell();
       }
+    });
+
+    if (resetCourseBtn) resetCourseBtn.addEventListener("click", function () {
+      courseSelect.value = "";
+      courseSelect.dispatchEvent(new Event("change"));
+    });
+
+    if (assistantBtn) assistantBtn.addEventListener("click", function () {
+      lsOpenAssistantModal();
+    });
+
+    if (assistantCloseBtn) assistantCloseBtn.addEventListener("click", function () {
+      lsCloseAssistantModal();
+    });
+
+    if (assistantModal) assistantModal.addEventListener("click", function (e) {
+      if (e.target === assistantModal) lsCloseAssistantModal();
+    });
+
+    if (rightPaneToggle) rightPaneToggle.addEventListener("click", function () {
+      lsSetRightPaneVisible(!lsState.rightPaneVisible);
     });
 
     if (audioAllBtn) audioAllBtn.addEventListener("click", function () {
@@ -3021,6 +3119,7 @@
     });
 
     lsUpdateWorkTabActive();
+    lsUpdateCourseShell();
     lsLoadCourses();
   }
 
@@ -3230,6 +3329,7 @@
           select.appendChild(opt);
         });
         if (currentVal) select.value = currentVal;
+        lsUpdateCourseShell();
       })
       .catch(function () {});
   }
@@ -3886,6 +3986,7 @@
         lsLoadComponentGraph(docId, true);
       });
     }
+    lsApplyRightPaneVisibility();
     return workspace;
   }
 
@@ -3913,6 +4014,7 @@
     var sourceEl = document.getElementById("ls-source-text");
     var displayEl = document.getElementById("ls-display-text");
     var spokenEl = document.getElementById("ls-spoken-text");
+    var formulasEl = document.getElementById("ls-formulas");
     if (sourceEl) sourceEl.textContent = "";
     if (displayEl) {
       displayEl.value = "";
@@ -3938,6 +4040,7 @@
     document.getElementById("ls-sync-row").hidden = true;
     document.getElementById("ls-display-preview").hidden = true;
     document.getElementById("ls-pdf-view").hidden = true;
+    if (formulasEl) formulasEl.hidden = true;
 
     var extractBtn = document.getElementById("ls-extract-theory-btn");
     if (extractBtn) {
@@ -4008,6 +4111,7 @@
     if (saveBtn) saveBtn.disabled = false;
     var rewriteBtn = document.getElementById("ls-rewrite-btn");
     if (rewriteBtn) rewriteBtn.disabled = true;
+    lsApplyRightPaneVisibility();
     lsUpdateAssistantContext();
   }
 
@@ -4518,6 +4622,7 @@
     var sourceEl = document.getElementById("ls-source-text");
     var displayEl = document.getElementById("ls-display-text");
     var spokenEl = document.getElementById("ls-spoken-text");
+    var formulasEl = document.getElementById("ls-formulas");
     sourceEl.textContent = chunk.raw_text || chunk.text || "(抽出テキストなし)";
     if (displayEl.value !== (chunk.display_text || chunk.text || "")) displayEl.value = chunk.display_text || chunk.text || "";
     if (spokenEl.value !== (chunk.spoken_text || displayEl.value || "")) spokenEl.value = chunk.spoken_text || displayEl.value || "";
@@ -4553,18 +4658,21 @@
       document.getElementById("ls-display-tabs").hidden = true;
       spokenEl.hidden = true;
       displayEl.hidden = true;
+      if (formulasEl) formulasEl.hidden = true;
       document.getElementById("ls-display-preview").hidden = true;
       lsRenderTheoryPanel(chunk);
     } else if (isClaims) {
       document.getElementById("ls-display-tabs").hidden = true;
       spokenEl.hidden = true;
       displayEl.hidden = true;
+      if (formulasEl) formulasEl.hidden = true;
       document.getElementById("ls-display-preview").hidden = true;
       lsRenderClaimsPanel(chunk);
     } else if (isGraph) {
       document.getElementById("ls-display-tabs").hidden = true;
       spokenEl.hidden = true;
       displayEl.hidden = true;
+      if (formulasEl) formulasEl.hidden = true;
       document.getElementById("ls-display-preview").hidden = true;
       var graphDocumentId = lsCurrentDocumentId();
       if (graphDocumentId && !lsState.graphByDocument[graphDocumentId] && !lsState.graphLoading) {
@@ -4576,14 +4684,19 @@
       document.getElementById("ls-display-tabs").hidden = true;
       document.getElementById("ls-display-preview").hidden = true;
       displayEl.hidden = true;
+      if (formulasEl) formulasEl.hidden = true;
       spokenEl.hidden = false;
       spokenEl.disabled = lsState.syncSpoken;
     } else {
-      document.getElementById("ls-right-title").textContent = "表示テキスト";
+      document.getElementById("ls-right-title").textContent = lsState.displayView === "formulas" ? "数式一覧" : "表示テキスト";
       document.getElementById("ls-display-tabs").hidden = false;
       spokenEl.hidden = true;
       displayEl.hidden = lsState.displayView !== "script";
       document.getElementById("ls-display-preview").hidden = lsState.displayView !== "preview";
+      if (formulasEl) {
+        formulasEl.hidden = lsState.displayView !== "formulas";
+        if (lsState.displayView === "formulas") lsRenderFormulas(chunk.formulas || []);
+      }
       lsRenderDisplayPreview();
     }
 
@@ -4597,8 +4710,10 @@
       });
       displayEl.hidden = true;
       document.getElementById("ls-display-preview").hidden = false;
+      if (formulasEl) formulasEl.hidden = true;
     }
     if (isStructure) lsRenderStructure(chunk);
+    lsApplyRightPaneVisibility();
     lsUpdateAssistantContext();
   }
 
@@ -4613,6 +4728,7 @@
       promptEl.disabled = false;
       btn.textContent = "AIで提案";
       btn.disabled = false;
+      lsUpdateAssistantOpenButton();
       return;
     }
     var view = lsState.view || "edit";
@@ -4660,6 +4776,9 @@
     label.textContent = config.label;
     promptEl.placeholder = config.placeholder;
     btn.textContent = config.button;
+    btn.disabled = !lsState.courseId || !lsState.selectedChunkId;
+    promptEl.disabled = btn.disabled;
+    lsUpdateAssistantOpenButton();
   }
 
   function lsChunkTheoryState(chunkId) {
@@ -5991,15 +6110,19 @@
     document.getElementById("ls-rewrite-prompt").disabled = true;
     document.getElementById("ls-rewrite-btn").disabled = true;
     document.getElementById("ls-save-btn").disabled = true;
-    document.getElementById("ls-formulas").innerHTML = "";
+    var formulasEl = document.getElementById("ls-formulas");
+    if (formulasEl) formulasEl.innerHTML = "";
     lsUpdateWorkTabActive();
     lsHideActionStatus();
+    lsUpdateAssistantOpenButton();
+    lsUpdateRightPaneToggle();
   }
 
   function lsRenderFormulas(formulas) {
     var el = document.getElementById("ls-formulas");
+    if (!el) return;
     if (!formulas || formulas.length === 0) {
-      el.innerHTML = "";
+      el.innerHTML = '<div class="ls-empty-state">この表示対象の数式一覧はありません。</div>';
       return;
     }
     var html = '<div style="font-size:11px;font-weight:600;color:var(--color-text-secondary);margin-bottom:6px">数式一覧</div>';
