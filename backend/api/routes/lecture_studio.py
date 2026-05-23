@@ -1631,6 +1631,35 @@ def _load_pipeline_pdf(material_id: str, filename: str) -> bytes:
     raise FileNotFoundError(f"PDF object not found for material {material_id}")
 
 
+def _load_pipeline_source(material_id: str, filename: str) -> tuple[bytes, str]:
+    """教材ファイルをストレージからロードし、(bytes, source_kind) を返す。
+
+    filename 拡張子から source_kind を判定し、対応するオブジェクト名を試みる。
+    """
+    lower = (filename or "").lower()
+    if lower.endswith(".tar.gz") or lower.endswith(".tgz"):
+        source_kind = "tex_archive"
+        candidates = (
+            f"uploads/{material_id}.tar.gz",
+            f"uploads/{material_id}.tgz",
+            filename,
+            material_id,
+        )
+    else:
+        source_kind = "pdf"
+        candidates = (f"uploads/{material_id}.pdf", filename, material_id)
+
+    storage = get_storage_client()
+    for object_name in candidates:
+        if not object_name:
+            continue
+        try:
+            return storage.get_object("raw-papers", object_name), source_kind
+        except Exception:
+            continue
+    raise FileNotFoundError(f"Source object not found for material {material_id} (source_kind={source_kind})")
+
+
 def _set_document_pipeline_status(document_id: str, status: str) -> None:
     session = _pg_session()
     try:
@@ -1809,7 +1838,7 @@ def _material_document_pipeline_worker(
 
     publish("processing", 0)
     try:
-        pdf_bytes = _load_pipeline_pdf(material_id, document["filename"])
+        source_bytes, source_kind = _load_pipeline_source(material_id, document["filename"])
         if target_stage is None:
             _set_document_pipeline_status(document_id, "processing")
 
@@ -1819,10 +1848,11 @@ def _material_document_pipeline_worker(
             publish("processing", int((info or {}).get("progress") or 0))
 
         run_document_pipeline(
-            pdf_bytes=pdf_bytes,
+            pdf_bytes=source_bytes,
             document_id=document_id,
             material_id=material_id,
             filename=document["filename"],
+            source_kind=source_kind,
             course_id=None,
             progress_callback=on_stage,
             target_stage=target_stage,
@@ -1885,7 +1915,7 @@ def _course_document_pipeline_worker(
             current_document = doc["document_id"]
             current_stage = target_stage or "document_pipeline"
             publish("processing")
-            pdf_bytes = _load_pipeline_pdf(doc["material_id"], doc["filename"])
+            source_bytes, source_kind = _load_pipeline_source(doc["material_id"], doc["filename"])
             if target_stage is None:
                 _set_document_pipeline_status(doc["document_id"], "processing")
 
@@ -1913,10 +1943,11 @@ def _course_document_pipeline_worker(
                 )
 
             run_document_pipeline(
-                pdf_bytes=pdf_bytes,
+                pdf_bytes=source_bytes,
                 document_id=doc["document_id"],
                 material_id=doc["material_id"],
                 filename=doc["filename"],
+                source_kind=source_kind,
                 course_id=course_id,
                 progress_callback=on_stage,
                 target_stage=target_stage,
