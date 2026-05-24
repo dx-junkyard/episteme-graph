@@ -460,9 +460,10 @@
       btn.addEventListener("click", function () {
         var menu = this.closest(".material-pipeline-menu");
         if (!menu) return;
-        runMaterialPipeline(menu.getAttribute("data-material-id"), this.getAttribute("data-stage") || "");
         var panel = menu.querySelector(".material-pipeline-panel");
         if (panel) panel.hidden = true;
+        if (!confirm("既存の実行結果を上書きします。本当に実行しますか？")) return;
+        runMaterialPipeline(menu.getAttribute("data-material-id"), this.getAttribute("data-stage") || "");
       });
     });
     root.querySelectorAll(".material-export-item").forEach(function (btn) {
@@ -8132,6 +8133,12 @@
   function initApp() {
     // Role-based access control
     if (!setupRoleBasedUI()) return;
+
+    document.addEventListener("click", function () {
+      document.querySelectorAll(".material-pipeline-panel").forEach(function (panel) {
+        panel.hidden = true;
+      });
+    });
 
     var usernameEl = document.getElementById("admin-username");
     if (usernameEl) usernameEl.textContent = state.username || "";
