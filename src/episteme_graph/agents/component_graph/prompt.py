@@ -37,6 +37,10 @@ Output constraints (CRITICAL):
 - edge_type MUST be one of valid_edge_types.
 - No self-loops (source != target).
 - evidence_claims MUST reference claim_ids that appear in Materials 1–4.
+- evidence_equation_ids should reference equation IDs when the edge is justified
+  by equation inputs/outputs or a derivation chain.
+- Review-required or reconstructed equations should make the edge review_status
+  teacher_review_required.
 - Do NOT add duplicate edges with the same (source, target, edge_type).
 - Assign a sequential edge_id like "component_edge_0001".
 - support_status: use "dependency_declared" for explicit dependency edges,
@@ -55,6 +59,8 @@ _OUTPUT_SCHEMA = {
             "edge_type": "<one of valid_edge_types>",
             "support_status": "<dependency_declared|io_matched|dsl_cross_edge|derivation_linked|llm_inferred>",
             "evidence_claims": ["<claim_id or empty list>"],
+            "evidence_equation_ids": ["<equation_id or empty list>"],
+            "review_status": "teacher_review_required",
             "reasoning": "<concise explanation of why this edge exists (debug only)>",
             "confidence": 0.8,
         }

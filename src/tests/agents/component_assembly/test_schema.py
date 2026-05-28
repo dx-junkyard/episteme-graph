@@ -13,3 +13,22 @@ def test_to_json_round_trip():
     result = ComponentAssemblyResult("doc", COMPONENTS_VERSION, None, [component], [], [], 0.8)
     restored = ComponentAssemblyResult.from_dict(json.loads(result.to_json()))
     assert restored.components[0].component_type == "RelationComponent"
+
+
+def test_equation_role_fields_round_trip():
+    component = ComponentRecord(
+        "comp_001", "RelationComponent", "bias elimination", "summary", [], [], [], [], [],
+        {"claim_ids": [], "equation_ids": ["eq_in", "eq_out"], "thesis_refs": [], "dsl_refs": {"node_ids": [], "edge_ids": []}},
+        "reason", 0.8, [],
+        input_equation_ids=["eq_in"],
+        output_equation_ids=["eq_out"],
+        eliminated_symbols=["b_2"],
+        retained_symbols=["S_3"],
+        equation_confidence_summary={"all_source_backed": True},
+    )
+    result = ComponentAssemblyResult("doc", COMPONENTS_VERSION, None, [component], [], [], 0.8)
+    restored = ComponentAssemblyResult.from_dict(json.loads(result.to_json()))
+    restored_component = restored.components[0]
+    assert restored_component.input_equation_ids == ["eq_in"]
+    assert restored_component.output_equation_ids == ["eq_out"]
+    assert restored_component.eliminated_symbols == ["b_2"]

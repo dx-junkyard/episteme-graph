@@ -139,6 +139,15 @@ class ExportValidationGate:
                 component_result, claim_objects, evidence, dsl,
                 errors, warnings,
             )
+            self._cross_validate_component_equation_confidence(
+                component_result,
+                artifacts,
+                errors,
+                warnings,
+            )
+
+        if component_result:
+            self._check_component_internal_flow(component_result, errors)
 
         # 3. Course mapping → component ID resolution
         if course_mapping and component_result:
@@ -315,6 +324,111 @@ class ExportValidationGate:
                     source_stage="export_validation",
                 ))
 
+    def _cross_validate_component_equation_confidence(
+        self,
+        component_result,
+        artifacts: dict,
+        errors: list,
+        warnings: list,
+    ) -> None:
+        """Propagate equation confidence/review flags into Component validation."""
+        equation_index = self._equation_index_from_artifacts(artifacts)
+        if not equation_index:
+            return
+
+        for component in getattr(component_result, "components", []) or []:
+            comp_id = getattr(component, "component_id", "?")
+            refs = getattr(component, "evidence_refs", {}) or {}
+            claim_linked = bool(refs.get("claim_ids") or getattr(component, "linked_claim_ids", []) or [])
+            output_eqs = [str(e) for e in (getattr(component, "output_equation_ids", []) or []) if str(e)]
+            review_required_eqs = {
+                str(e) for e in (getattr(component, "review_required_equation_ids", []) or []) if str(e)
+            }
+            all_eqs = self._component_equation_refs(component, refs)
+
+            for eq_id in all_eqs:
+                eq = equation_index.get(eq_id)
+                if not eq:
+                    continue
+                policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
+                if claim_linked and policy.get("can_support_claim") is False:
+                    errors.append(ValidationEntry(
+                        code="NON_SUPPORTING_EQUATION_USED_FOR_CLAIM_SUPPORT",
+                        message=(
+                            f"component {comp_id!r} links claim evidence to equation {eq_id!r}, "
+                            "but equation.confidence_policy.can_support_claim is false"
+                        ),
+                        artifact="component_assembly",
+                        path=f"$.components[{comp_id}].linked_equation_ids",
+                        source_stage="export_validation",
+                    ))
+                if self._equation_requires_review(eq) and eq_id not in review_required_eqs:
+                    warnings.append(ValidationEntry(
+                        code="REVIEW_REQUIRED_EQUATION_NOT_MARKED_ON_COMPONENT",
+                        message=(
+                            f"component {comp_id!r} references review-required equation {eq_id!r} "
+                            "without listing it in review_required_equation_ids"
+                        ),
+                        artifact="component_assembly",
+                        path=f"$.components[{comp_id}].review_required_equation_ids",
+                        source_stage="export_validation",
+                    ))
+
+            for eq_id in output_eqs:
+                eq = equation_index.get(eq_id)
+                if not eq:
+                    continue
+                policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
+                if policy.get("can_support_claim") is False:
+                    errors.append(ValidationEntry(
+                        code="NON_SUPPORTING_EQUATION_USED_AS_COMPONENT_OUTPUT",
+                        message=(
+                            f"component {comp_id!r} uses equation {eq_id!r} as output, "
+                            "but equation.confidence_policy.can_support_claim is false"
+                        ),
+                        artifact="component_assembly",
+                        path=f"$.components[{comp_id}].output_equation_ids",
+                        source_stage="export_validation",
+                    ))
+                if self._equation_requires_review(eq) and getattr(component, "review_status", "") == "auto_accepted":
+                    errors.append(ValidationEntry(
+                        code="REVIEW_REQUIRED_OUTPUT_COMPONENT_AUTO_ACCEPTED",
+                        message=(
+                            f"component {comp_id!r} has review-required output equation {eq_id!r} "
+                            "but component.review_status is auto_accepted"
+                        ),
+                        artifact="component_assembly",
+                        path=f"$.components[{comp_id}].review_status",
+                        source_stage="export_validation",
+                    ))
+
+    def _check_component_internal_flow(self, component_result, errors: list) -> None:
+        """Derivation-like components must expose their internal flow before export."""
+        required_types = {
+            "RelationComponent",
+            "PaperRelationComponent",
+            "CorrectionComponent",
+            "DiagnosticComponent",
+            "MethodComponent",
+        }
+        for component in getattr(component_result, "components", []) or []:
+            comp_type = getattr(component, "component_type", "")
+            if comp_type not in required_types:
+                continue
+            if getattr(component, "internal_flow", []) or []:
+                continue
+            comp_id = getattr(component, "component_id", "?")
+            errors.append(ValidationEntry(
+                code="COMPONENT_MISSING_INTERNAL_FLOW",
+                message=(
+                    f"component {comp_id!r} ({comp_type}) has no internal_flow; "
+                    "publish-ready exports require explicit component wiring"
+                ),
+                artifact="component_assembly",
+                path=f"$.components[{comp_id}].internal_flow",
+                source_stage="export_validation",
+            ))
+
     def _cross_validate_course_mapping(
         self,
         course_mapping,
@@ -343,7 +457,60 @@ class ExportValidationGate:
                             artifact="course_mapping",
                             path=f"$.topics[{idx}].linked_component_ids",
                             source_stage="export_validation",
-                        ))
+                    ))
+
+    @staticmethod
+    def _component_equation_refs(component, refs: dict) -> list[str]:
+        values: list[str] = []
+        values.extend(refs.get("equation_ids") or [])
+        for field_name in (
+            "linked_equation_ids",
+            "input_equation_ids",
+            "intermediate_equation_ids",
+            "output_equation_ids",
+            "constraint_equation_ids",
+            "definition_equation_ids",
+            "review_required_equation_ids",
+        ):
+            values.extend(getattr(component, field_name, []) or [])
+        result: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            eq_id = str(value)
+            if eq_id and eq_id not in seen:
+                seen.add(eq_id)
+                result.append(eq_id)
+        return result
+
+    @staticmethod
+    def _equation_index_from_artifacts(artifacts: dict) -> dict[str, dict]:
+        raw = artifacts.get("equation_semantics") or {}
+        if not isinstance(raw, dict):
+            return {}
+        records = raw.get("equations") or []
+        if not isinstance(records, list):
+            return {}
+        index: dict[str, dict] = {}
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            eq_id = str(record.get("equation_id") or "")
+            if eq_id:
+                index[eq_id] = record
+        return index
+
+    @staticmethod
+    def _equation_requires_review(eq: dict) -> bool:
+        policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
+        reconstruction = eq.get("reconstruction") if isinstance(eq.get("reconstruction"), dict) else {}
+        return (
+            bool(eq.get("needs_math_review"))
+            or bool(eq.get("review_flags"))
+            or eq.get("semantic_status") == "reconstruction_based"
+            or reconstruction.get("status") not in (None, "", "none")
+            or bool(policy.get("must_not_treat_as_source_extracted"))
+            or policy.get("can_support_claim") is False
+        )
 
     def _check_dsl_edges(
         self,

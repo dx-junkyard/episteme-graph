@@ -98,6 +98,9 @@ def test_build_packages_inputs_and_allowed_vocabularies():
     assert llm_input.equations[0]["equation_id"] == "eq_1_1"
     assert llm_input.equations[0]["block_id"] == "e1"
     assert llm_input.equations[0]["role"] == "relation"
+    assert llm_input.equations[0]["plain_text"] == "R = A"
+    assert llm_input.equations[0]["confidence_policy"]["can_support_claim"] is True
+    assert llm_input.available_equations[0]["confidence_policy"]["must_not_treat_as_source_extracted"] is False
     assert llm_input.dsl_nodes[0]["node_id"] == "n1"
     assert "PaperRelationComponent" in llm_input.allowed_component_types
     assert "requires" in llm_input.allowed_dependency_types

@@ -85,6 +85,19 @@ def _parse_raw(
             linked_derivation_ids=list(item.get("linked_derivation_ids", [])),
             linked_dsl_node_ids=list(item.get("linked_dsl_node_ids", [])),
             linked_dsl_edge_ids=list(item.get("linked_dsl_edge_ids", [])),
+            input_equation_ids=list(item.get("input_equation_ids", [])),
+            intermediate_equation_ids=list(item.get("intermediate_equation_ids", [])),
+            output_equation_ids=list(item.get("output_equation_ids", [])),
+            constraint_equation_ids=list(item.get("constraint_equation_ids", [])),
+            definition_equation_ids=list(item.get("definition_equation_ids", [])),
+            review_required_equation_ids=list(item.get("review_required_equation_ids", [])),
+            eliminated_symbols=list(item.get("eliminated_symbols", [])),
+            retained_symbols=list(item.get("retained_symbols", [])),
+            equation_confidence_summary=(
+                item.get("equation_confidence_summary", {})
+                if isinstance(item.get("equation_confidence_summary", {}), dict)
+                else {}
+            ),
             review_status=str(item.get("review_status", "teacher_review_required")),
             teaching_takeaway=str(item.get("teaching_takeaway", "")),
             source_scope=item.get("source_scope", {}) if isinstance(item.get("source_scope", {}), dict) else {},

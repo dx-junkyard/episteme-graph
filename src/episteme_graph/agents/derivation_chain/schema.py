@@ -18,6 +18,8 @@ OPERATION_ONTOLOGY = [
     "introduce_observable",
     "apply_equation",
     "substitute",
+    "solve_linear_system",
+    "eliminate_parameter",
     "normalize",
     "approximate",
     "compare",
@@ -33,6 +35,16 @@ OPERATION_ONTOLOGY = [
     "transform",
     "derive_result",
     "apply_constraint",
+    # Domain-specific names used by math-heavy cartridges.
+    "linearize_skewness_bias_dependence",
+    "linearize_kurtosis_bias_dependence",
+    "solve_second_order_bias",
+    "substitute_second_order_bias",
+    "solve_third_order_bias",
+    "substitute_third_order_bias",
+    "derive_skewness_consistency_relation",
+    "derive_first_kurtosis_consistency_relation",
+    "derive_second_kurtosis_consistency_relation",
 ]
 
 STEP_REVIEW_STATUSES = [
@@ -58,6 +70,8 @@ class DerivationStep:
     assumption_ids: list[str] = field(default_factory=list)
     source_evidence_ids: list[str] = field(default_factory=list)
     review_status: str = "teacher_review_required"
+    eliminated_symbols: list[str] = field(default_factory=list)
+    retained_symbols: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -115,6 +129,8 @@ class DerivationChainResult:
                     assumption_ids=list(s.get("assumption_ids") or []),
                     source_evidence_ids=list(s.get("source_evidence_ids") or []),
                     review_status=s.get("review_status", "teacher_review_required"),
+                    eliminated_symbols=list(s.get("eliminated_symbols") or []),
+                    retained_symbols=list(s.get("retained_symbols") or []),
                 ))
             chains.append(DerivationChainRecord(
                 derivation_id=c["derivation_id"],

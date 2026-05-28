@@ -115,12 +115,19 @@ class ComponentGraphValidator:
                 f"{eid}: evidence_claims must be a list",
                 f"edges[{eid}].evidence_claims",
             ))
-        elif edge.support_status == "llm_inferred" and len(edge.evidence_claims) == 0:
+        elif edge.support_status == "llm_inferred" and len(edge.evidence_claims) == 0 and len(edge.evidence_equation_ids) == 0:
             issues.append(ValidationIssue(
                 "llm_inferred_no_evidence",
                 "warning",
-                f"{eid}: llm_inferred edge has no evidence_claims; teacher_review_required",
+                f"{eid}: llm_inferred edge has no claim or equation evidence; teacher_review_required",
                 f"edges[{eid}].evidence_claims",
+            ))
+        if not isinstance(edge.evidence_equation_ids, list):
+            issues.append(ValidationIssue(
+                "invalid_evidence_equation_ids",
+                "warning",
+                f"{eid}: evidence_equation_ids must be a list",
+                f"edges[{eid}].evidence_equation_ids",
             ))
 
         if edge.confidence < 0.0 or edge.confidence > 1.0:

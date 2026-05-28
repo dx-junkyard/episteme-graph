@@ -160,6 +160,7 @@ def _make_llm_input(
     available_equations=None,
     available_dsl_nodes=None,
     available_dsl_edges=None,
+    available_derivation_ids=None,
 ):
     return ComponentAssemblyLLMInput(
         document_id="doc",
@@ -176,6 +177,7 @@ def _make_llm_input(
         available_equations=available_equations or [],
         available_dsl_nodes=available_dsl_nodes or [],
         available_dsl_edges=available_dsl_edges or [],
+        available_derivation_ids=available_derivation_ids or [],
     )
 
 
@@ -199,6 +201,81 @@ def test_valid_linkage_no_errors():
         "unresolved_claim_id", "unresolved_evidence_id", "unresolved_equation_id"
     )]
     assert cross_errors == []
+
+
+def test_derivation_component_with_unclassified_equations_warns():
+    llm_input = _make_llm_input(
+        available_claims=[{"claim_id": "claim_span_001"}],
+        available_equations=[{
+            "equation_id": "eq_001",
+            "confidence_policy": {"can_support_claim": True},
+        }],
+    )
+    component = _component(
+        evidence_refs={
+            "claim_ids": ["claim_span_001"],
+            "evidence_ids": [],
+            "equation_ids": ["eq_001"],
+            "dsl_refs": {"node_ids": [], "edge_ids": []},
+        },
+        linked_equation_ids=["eq_001"],
+    )
+    issues = VALIDATOR.validate(_result(components=[component]), llm_input=llm_input)
+    assert any(i.rule_id == "component_equations_not_role_classified" for i in issues)
+
+
+def test_non_supporting_equation_cannot_support_claim():
+    llm_input = _make_llm_input(
+        available_claims=[{"claim_id": "claim_span_001"}],
+        available_equations=[{
+            "equation_id": "eq_review",
+            "confidence_policy": {
+                "can_support_claim": False,
+                "must_not_treat_as_source_extracted": True,
+            },
+        }],
+    )
+    component = _component(
+        evidence_refs={
+            "claim_ids": ["claim_span_001"],
+            "evidence_ids": [],
+            "equation_ids": ["eq_review"],
+            "dsl_refs": {"node_ids": [], "edge_ids": []},
+        },
+        linked_equation_ids=["eq_review"],
+        input_equation_ids=["eq_review"],
+        output_equation_ids=[],
+    )
+    issues = VALIDATOR.validate(_result(components=[component]), llm_input=llm_input)
+    assert any(i.rule_id == "claim_support_uses_non_supporting_equation" for i in issues)
+
+
+def test_review_required_output_cannot_be_auto_accepted():
+    llm_input = _make_llm_input(
+        available_equations=[{
+            "equation_id": "eq_review",
+            "needs_math_review": True,
+            "confidence_policy": {
+                "can_support_claim": False,
+                "must_not_treat_as_source_extracted": True,
+            },
+        }],
+    )
+    component = _component(
+        evidence_refs={
+            "claim_ids": [],
+            "evidence_ids": [],
+            "equation_ids": ["eq_review"],
+            "dsl_refs": {"node_ids": [], "edge_ids": []},
+        },
+        linked_equation_ids=["eq_review"],
+        input_equation_ids=[],
+        output_equation_ids=["eq_review"],
+        review_status="auto_accepted",
+    )
+    issues = VALIDATOR.validate(_result(components=[component]), llm_input=llm_input)
+    assert any(i.rule_id == "component_output_uses_non_supporting_equation" for i in issues)
+    assert any(i.rule_id == "review_required_output_component_auto_accepted" for i in issues)
 
 
 def test_unresolved_claim_id_is_error():

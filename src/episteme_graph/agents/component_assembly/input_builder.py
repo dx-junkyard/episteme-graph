@@ -107,18 +107,40 @@ class ComponentAssemblyInputBuilder:
         for record in equations.equations[:limit]:
             src = record.source_extraction
             sem = record.semantics
+            cp = getattr(record, "confidence_policy", None)
             block_id = src.source_location.get("block_id", "")
             result.append({
                 "equation_id": record.equation_id,
                 "block_id": block_id,
+                "section_id": src.source_location.get("section_id"),
+                "label": record.label,
+                "latex": src.latex,
+                "plain_text": src.plain_text,
                 "role": sem.equation_type,
+                "secondary_types": list(sem.secondary_types),
+                "semantic_status": sem.semantic_status,
                 "summary": sem.summary,
                 "defined_symbols": [
                     {"symbol": s.symbol, "definition_status": s.definition_status}
                     for s in sem.defined_symbols
                 ],
+                "used_symbols": list(sem.used_symbols),
                 "local_assumptions": list(sem.assumptions),
                 "from_equations": list(sem.input_equation_ids),
+                "to_equations": list(sem.output_equation_ids),
+                "source_evidence_ids": list(sem.source_evidence_ids),
+                "linked_claim_ids": list(sem.linked_claim_ids),
+                "review_flags": list(sem.review_flags),
+                "needs_math_review": bool(src.needs_math_review),
+                "extraction_status": src.extraction_status,
+                "reconstruction_status": getattr(record.reconstruction, "status", "none"),
+                "confidence_policy": {
+                    "can_support_claim": bool(getattr(cp, "can_support_claim", False)),
+                    "can_be_used_in_derivation": bool(getattr(cp, "can_be_used_in_derivation", False)),
+                    "can_be_displayed_in_course": bool(getattr(cp, "can_be_displayed_in_course", True)),
+                    "display_requires_note": bool(getattr(cp, "display_requires_note", True)),
+                    "must_not_treat_as_source_extracted": bool(getattr(cp, "must_not_treat_as_source_extracted", True)),
+                },
                 "confidence": sem.confidence,
             })
         return result
@@ -234,10 +256,22 @@ class ComponentAssemblyInputBuilder:
         for record in getattr(equations, "equations", []) or []:
             src = record.source_extraction
             sem = record.semantics
+            cp = getattr(record, "confidence_policy", None)
             result.append({
                 "equation_id": record.equation_id,
                 "block_id": src.source_location.get("block_id", ""),
                 "role": sem.equation_type,
+                "semantic_status": sem.semantic_status,
+                "needs_math_review": bool(src.needs_math_review),
+                "review_flags": list(sem.review_flags),
+                "reconstruction_status": getattr(record.reconstruction, "status", "none"),
+                "confidence_policy": {
+                    "can_support_claim": bool(getattr(cp, "can_support_claim", False)),
+                    "can_be_used_in_derivation": bool(getattr(cp, "can_be_used_in_derivation", False)),
+                    "can_be_displayed_in_course": bool(getattr(cp, "can_be_displayed_in_course", True)),
+                    "display_requires_note": bool(getattr(cp, "display_requires_note", True)),
+                    "must_not_treat_as_source_extracted": bool(getattr(cp, "must_not_treat_as_source_extracted", True)),
+                },
                 "confidence": sem.confidence,
             })
         return result
