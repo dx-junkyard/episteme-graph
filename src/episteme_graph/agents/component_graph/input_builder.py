@@ -74,10 +74,14 @@ class ComponentGraphInputBuilder:
     def build_nodes(self, components: ComponentAssemblyResult) -> list[ComponentGraphNode]:
         nodes = []
         for idx, comp in enumerate(components.components):
+            label = str(getattr(comp, "label", "") or "").strip()
+            if not label:
+                label = str(getattr(comp, "summary", "") or "").strip()[:80] or comp.component_id
+            component_type = str(getattr(comp, "component_type", "") or "").strip() or "UnknownComponent"
             nodes.append(ComponentGraphNode(
                 component_id=comp.component_id,
-                label=comp.label,
-                component_type=comp.component_type,
+                label=label,
+                component_type=component_type,
                 review_status=getattr(comp, "review_status", "teacher_review_required"),
                 display_order=idx,
                 origin="paper",

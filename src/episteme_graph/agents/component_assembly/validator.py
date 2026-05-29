@@ -12,6 +12,7 @@ from .schema import (
     ComponentAssemblyResult,
     ComponentRecord,
     ValidationIssue,
+    normalize_dependency_type,
 )
 
 
@@ -120,7 +121,8 @@ class ComponentAssemblyValidator:
                 f"components[{component.component_id}].evidence_refs",
             ))
         for idx, dep in enumerate(component.dependencies):
-            dep_type = dep.get("dependency_type")
+            dep_type = normalize_dependency_type(dep.get("dependency_type"))
+            dep["dependency_type"] = dep_type
             if dep_type not in allowed_dependencies:
                 issues.append(ValidationIssue(
                     "invalid_dependency_type",
@@ -153,9 +155,14 @@ class ComponentAssemblyValidator:
         issues: list[ValidationIssue] = []
         flow = component.internal_flow or []
         if component.component_type in INTERNAL_FLOW_REQUIRED_TYPES and not flow:
+            severity = "error" if component.component_type in {
+                "RelationComponent",
+                "PaperRelationComponent",
+                "MethodComponent",
+            } else "warning"
             issues.append(ValidationIssue(
                 "component_missing_internal_flow",
-                "warning",
+                severity,
                 f"{component.component_id} ({component.component_type}) "
                 "has no internal_flow; reusable components of this type must "
                 "expose how inputs are combined into outputs.",
@@ -454,6 +461,23 @@ class ComponentAssemblyValidator:
                     f"{component.component_id} appears to describe elimination but has no retained_symbols",
                     f"components[{component.component_id}].retained_symbols",
                 ))
+            if (
+                ("second" in text or "second-order" in text or "2nd" in text)
+                and ("third" in text or "third-order" in text or "3rd" in text)
+            ):
+                issues.append(ValidationIssue(
+                    "bias_elimination_mixes_second_and_third_order",
+                    "warning",
+                    f"{component.component_id} appears to combine second- and third-order bias elimination; split it",
+                    f"components[{component.component_id}]",
+                ))
+        if "consistency relation" in text and not component.output_equation_ids:
+            issues.append(ValidationIssue(
+                "consistency_relation_without_output_equations",
+                "error",
+                f"{component.component_id} outputs a consistency relation but has no output_equation_ids",
+                f"components[{component.component_id}].output_equation_ids",
+            ))
         return issues
 
     def _check_required_fields(

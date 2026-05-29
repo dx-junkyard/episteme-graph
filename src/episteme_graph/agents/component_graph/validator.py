@@ -24,6 +24,22 @@ class ComponentGraphValidator:
         if llm_input:
             component_ids = set(llm_input.component_ids)
 
+        for node in result.nodes:
+            if not node.label:
+                issues.append(ValidationIssue(
+                    "component_graph_node_missing_label",
+                    "error",
+                    f"node {node.component_id!r} has empty label",
+                    f"nodes[{node.component_id}].label",
+                ))
+            if not node.component_type:
+                issues.append(ValidationIssue(
+                    "component_graph_node_missing_component_type",
+                    "warning",
+                    f"node {node.component_id!r} has empty component_type",
+                    f"nodes[{node.component_id}].component_type",
+                ))
+
         valid_types = set(VALID_EDGE_TYPES)
         if cartridge:
             raw = cartridge.relation_types.get("relation_types") or []
@@ -34,8 +50,9 @@ class ComponentGraphValidator:
                     valid_types.add(item.upper())
 
         seen_keys: set[tuple[str, str, str]] = set()
+        seen_pairs: set[tuple[str, str]] = set()
         for edge in result.edges:
-            issues += self._check_edge(edge, component_ids, valid_types, seen_keys)
+            issues += self._check_edge(edge, component_ids, valid_types, seen_keys, seen_pairs)
 
         if result.confidence < 0.0 or result.confidence > 1.0:
             issues.append(ValidationIssue(
@@ -53,6 +70,7 @@ class ComponentGraphValidator:
         component_ids: set[str],
         valid_types: set[str],
         seen_keys: set[tuple[str, str, str]],
+        seen_pairs: set[tuple[str, str]],
     ) -> list[ValidationIssue]:
         issues: list[ValidationIssue] = []
         eid = edge.edge_id
@@ -108,6 +126,25 @@ class ComponentGraphValidator:
         else:
             seen_keys.add(key)
 
+        pair = (edge.source, edge.target)
+        reverse_pair = (edge.target, edge.source)
+        if edge.source and edge.target and reverse_pair in seen_pairs:
+            issues.append(ValidationIssue(
+                "bidirectional_component_edge_pair",
+                "warning",
+                f"{eid}: reverse edge already exists for {edge.source} <-> {edge.target}",
+                f"edges[{eid}]",
+            ))
+        seen_pairs.add(pair)
+
+        if edge.edge_type == "RELATED_TO":
+            issues.append(ValidationIssue(
+                "component_graph_related_to_edge",
+                "warning",
+                f"{eid}: RELATED_TO is too generic for publish-ready graph structure",
+                f"edges[{eid}].edge_type",
+            ))
+
         if not isinstance(edge.evidence_claims, list):
             issues.append(ValidationIssue(
                 "invalid_evidence_claims",
@@ -128,6 +165,13 @@ class ComponentGraphValidator:
                 "warning",
                 f"{eid}: evidence_equation_ids must be a list",
                 f"edges[{eid}].evidence_equation_ids",
+            ))
+        elif len(edge.evidence_claims or []) == 0 and len(edge.evidence_equation_ids or []) == 0:
+            issues.append(ValidationIssue(
+                "component_graph_edge_no_evidence",
+                "warning",
+                f"{eid}: edge has no claim or equation evidence",
+                f"edges[{eid}].evidence_claims",
             ))
 
         if edge.confidence < 0.0 or edge.confidence > 1.0:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 
 from .llm_client import ComponentAssemblyLLMClient
+from .enrichment import enrich_component_assembly
 from .overlap_cleanup import ComponentOverlapCleanup
 from .prompt import ComponentAssemblyPromptFactory
 from .schema import (
@@ -12,6 +13,7 @@ from .schema import (
     ComponentAssemblyResult,
     ComponentRecord,
     ValidationIssue,
+    normalize_dependencies,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,7 @@ class ComponentAssemblyRepairer:
                 logger.warning("Repair LLM call failed: %s", exc)
                 break
             result = self._cleanup.cleanup(_parse_raw(raw_output, llm_input.document_id, llm_input.cartridge_id))
+            result = enrich_component_assembly(result, llm_input)
             remaining = validator.validate(result, cartridge, llm_input=llm_input)  # type: ignore[attr-defined]
             if not [i for i in remaining if i.severity == "error"]:
                 result.validation_issues = remaining
@@ -73,7 +76,7 @@ def _parse_raw(
             outputs=list(item.get("outputs", [])),
             preconditions=list(item.get("preconditions", [])),
             cautions=list(item.get("cautions", [])),
-            dependencies=list(item.get("dependencies", [])),
+            dependencies=normalize_dependencies(item.get("dependencies", [])),
             evidence_refs=_evidence_refs(item.get("evidence_refs", {})),
             reason=str(item.get("reason", "")),
             confidence=_confidence(item.get("confidence", 0.5)),

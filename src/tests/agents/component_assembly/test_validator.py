@@ -68,6 +68,13 @@ def test_invalid_dependency_type_is_error():
     assert any(i.rule_id == "invalid_dependency_type" for i in VALIDATOR.validate(_result(components=[component])))
 
 
+def test_qualified_dependency_type_is_normalized_to_qualifies():
+    component = _component(dependencies=[{"dependency_type": "qualified", "component_refs": [], "reason": "qualifies relation"}])
+    issues = VALIDATOR.validate(_result(components=[component]))
+    assert not any(i.rule_id == "invalid_dependency_type" for i in issues)
+    assert component.dependencies[0]["dependency_type"] == "qualifies"
+
+
 def test_missing_dependency_component_is_warning():
     component = _component(dependencies=[{"dependency_type": "requires", "component_refs": ["missing"], "reason": "missing"}])
     assert any(i.rule_id == "dependency_missing_component" for i in VALIDATOR.validate(_result(components=[component])))

@@ -159,10 +159,13 @@ class ExportValidationGate:
         if dsl:
             self._check_dsl_edges(dsl, errors, warnings)
 
-        # 5. Required artifact presence
+        # 5. Component graph export structure
+        self._check_component_graph_artifact(artifacts, errors, warnings)
+
+        # 6. Required artifact presence
         self._check_required_artifacts(artifacts, errors)
 
-        # 6. source-backed claim must reference EvidenceRegistry (#257)
+        # 7. source-backed claim must reference EvidenceRegistry (#257)
         if claim_objects and evidence:
             self._check_source_backed_claims(claim_objects, evidence, warnings)
 
@@ -553,6 +556,97 @@ class ExportValidationGate:
                     path=f"$.edges[{edge.edge_id}].to_node_id",
                     source_stage="export_validation",
                 ))
+
+    def _check_component_graph_artifact(
+        self,
+        artifacts: dict,
+        errors: list,
+        warnings: list,
+    ) -> None:
+        graph = artifacts.get("component_graph") or {}
+        if not isinstance(graph, dict):
+            return
+        nodes = graph.get("nodes") or []
+        edges = graph.get("edges") or []
+        if not isinstance(nodes, list) or not isinstance(edges, list):
+            return
+
+        node_ids: set[str] = set()
+        for idx, node in enumerate(nodes):
+            if not isinstance(node, dict):
+                continue
+            comp_id = str(node.get("component_id") or "")
+            if comp_id:
+                node_ids.add(comp_id)
+            if not str(node.get("label") or "").strip():
+                errors.append(ValidationEntry(
+                    code="COMPONENT_GRAPH_NODE_MISSING_LABEL",
+                    message=f"component graph node at index {idx} has empty label",
+                    artifact="component_graph",
+                    path=f"$.nodes[{idx}].label",
+                    source_stage="export_validation",
+                ))
+            if not str(node.get("component_type") or "").strip():
+                warnings.append(ValidationEntry(
+                    code="COMPONENT_GRAPH_NODE_MISSING_COMPONENT_TYPE",
+                    message=f"component graph node {comp_id or idx!r} has empty component_type",
+                    artifact="component_graph",
+                    path=f"$.nodes[{idx}].component_type",
+                    source_stage="export_validation",
+                ))
+
+        seen_pairs: set[tuple[str, str]] = set()
+        for idx, edge in enumerate(edges):
+            if not isinstance(edge, dict):
+                continue
+            source = str(edge.get("source") or edge.get("source_component_id") or "")
+            target = str(edge.get("target") or edge.get("target_component_id") or "")
+            edge_type = str(edge.get("edge_type") or edge.get("relation") or "")
+            if not source or source not in node_ids:
+                errors.append(ValidationEntry(
+                    code="COMPONENT_GRAPH_EDGE_SOURCE_INVALID",
+                    message=f"component graph edge at index {idx} has missing source {source!r}",
+                    artifact="component_graph",
+                    path=f"$.edges[{idx}].source",
+                    source_stage="export_validation",
+                ))
+            if not target or target not in node_ids:
+                errors.append(ValidationEntry(
+                    code="COMPONENT_GRAPH_EDGE_TARGET_INVALID",
+                    message=f"component graph edge at index {idx} has missing target {target!r}",
+                    artifact="component_graph",
+                    path=f"$.edges[{idx}].target",
+                    source_stage="export_validation",
+                ))
+            evidence = edge.get("evidence") if isinstance(edge.get("evidence"), dict) else {}
+            evidence_claims = edge.get("evidence_claims") or evidence.get("evidence_claims") or []
+            evidence_equations = edge.get("evidence_equation_ids") or evidence.get("evidence_equation_ids") or []
+            if not evidence_claims and not evidence_equations:
+                warnings.append(ValidationEntry(
+                    code="COMPONENT_GRAPH_EDGE_NO_EVIDENCE",
+                    message=f"component graph edge {edge.get('edge_id') or idx!r} has no claim/equation evidence",
+                    artifact="component_graph",
+                    path=f"$.edges[{idx}].evidence",
+                    source_stage="export_validation",
+                ))
+            if edge_type == "RELATED_TO":
+                warnings.append(ValidationEntry(
+                    code="COMPONENT_GRAPH_RELATED_TO_EDGE",
+                    message=f"component graph edge {edge.get('edge_id') or idx!r} uses generic RELATED_TO",
+                    artifact="component_graph",
+                    path=f"$.edges[{idx}].edge_type",
+                    source_stage="export_validation",
+                ))
+            if source and target:
+                if (target, source) in seen_pairs:
+                    warnings.append(ValidationEntry(
+                        code="COMPONENT_GRAPH_BIDIRECTIONAL_EDGE_PAIR",
+                        message=f"component graph has bidirectional edge pair {source!r} <-> {target!r}",
+                        artifact="component_graph",
+                        path=f"$.edges[{idx}]",
+                        source_stage="export_validation",
+                    ))
+                seen_pairs.add((source, target))
 
     def _check_source_backed_claims(
         self,

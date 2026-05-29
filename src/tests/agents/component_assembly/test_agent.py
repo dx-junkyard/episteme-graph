@@ -263,6 +263,36 @@ def test_repair_called_on_invalid_component_type():
     assert result.components[0].component_type == "RelationComponent"
 
 
+def test_run_normalizes_qualified_dependency_without_repair():
+    agent = ComponentAssemblyAgent()
+    response = _valid_response()
+    response["components"][2]["dependencies"] = [
+        {"dependency_type": "qualified", "component_refs": ["comp_relation"], "reason": "qualifies relation"}
+    ]
+
+    with patch.object(agent._llm_client, "generate", return_value=response) as mocked:
+        result = agent.run(_qualified(), equations=_equations(), thesis=_thesis(), dsl=_dsl())
+
+    assert mocked.call_count == 1
+    assert result.components[2].dependencies[0]["dependency_type"] == "qualifies"
+    assert not [i for i in result.validation_issues if i.rule_id == "invalid_dependency_type"]
+
+
+def test_run_enriches_component_equation_roles_and_internal_flow():
+    agent = ComponentAssemblyAgent()
+    response = _valid_response()
+    response["components"][0]["input_equation_ids"] = []
+    response["components"][0]["output_equation_ids"] = []
+    response["components"][0]["internal_flow"] = []
+
+    with patch.object(agent._llm_client, "generate", return_value=response):
+        result = agent.run(_qualified(), equations=_equations(), thesis=_thesis(), dsl=_dsl())
+
+    component = result.components[0]
+    assert component.output_equation_ids == ["eq_3_14"]
+    assert component.internal_flow
+
+
 def test_llm_failure_returns_fallback():
     agent = ComponentAssemblyAgent()
     with patch.object(agent._llm_client, "generate", side_effect=RuntimeError("LLM error")):

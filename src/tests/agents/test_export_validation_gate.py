@@ -394,6 +394,33 @@ def test_dsl_edge_unresolved_target():
     assert "UNRESOLVED_GRAPH_EDGE_TARGET" in codes
 
 
+def test_component_graph_node_missing_label_is_hard_error():
+    artifacts = _make_artifacts(component_graph={
+        "nodes": [{"component_id": "comp_1", "label": "", "component_type": "RelationComponent"}],
+        "edges": [],
+    })
+    result = _run_gate(artifacts=artifacts)
+    assert "COMPONENT_GRAPH_NODE_MISSING_LABEL" in [e.code for e in result.errors]
+
+
+def test_component_graph_edge_quality_warnings():
+    artifacts = _make_artifacts(component_graph={
+        "nodes": [
+            {"component_id": "comp_1", "label": "A", "component_type": "RelationComponent"},
+            {"component_id": "comp_2", "label": "B", "component_type": "RelationComponent"},
+        ],
+        "edges": [
+            {"edge_id": "e1", "source": "comp_1", "target": "comp_2", "edge_type": "RELATED_TO"},
+            {"edge_id": "e2", "source": "comp_2", "target": "comp_1", "edge_type": "REQUIRES"},
+        ],
+    })
+    result = _run_gate(artifacts=artifacts)
+    codes = {w.code for w in result.warnings}
+    assert "COMPONENT_GRAPH_RELATED_TO_EDGE" in codes
+    assert "COMPONENT_GRAPH_EDGE_NO_EVIDENCE" in codes
+    assert "COMPONENT_GRAPH_BIDIRECTIONAL_EDGE_PAIR" in codes
+
+
 # ---------------------------------------------------------------------------
 # Tests: course mapping validation
 # ---------------------------------------------------------------------------
