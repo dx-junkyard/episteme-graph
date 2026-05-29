@@ -48,7 +48,7 @@ class ComponentGraphInputBuilder:
         # Reverse map: dsl_node_id → component_id (for cross-edge detection)
         node_to_comp: dict[str, str] = {}
         for comp in comp_list:
-            for nid in comp.linked_dsl_node_ids or []:
+            for nid in getattr(comp, "linked_dsl_node_ids", []) or []:
                 node_to_comp[nid] = comp.component_id
 
         material1 = self._build_material1(comp_list)
@@ -74,11 +74,15 @@ class ComponentGraphInputBuilder:
     def build_nodes(self, components: ComponentAssemblyResult) -> list[ComponentGraphNode]:
         nodes = []
         for idx, comp in enumerate(components.components):
+            label = str(getattr(comp, "label", "") or "").strip()
+            if not label:
+                label = str(getattr(comp, "summary", "") or "").strip()[:80] or comp.component_id
+            component_type = str(getattr(comp, "component_type", "") or "").strip() or "UnknownComponent"
             nodes.append(ComponentGraphNode(
                 component_id=comp.component_id,
-                label=comp.label,
-                component_type=comp.component_type,
-                review_status=comp.review_status,
+                label=label,
+                component_type=component_type,
+                review_status=getattr(comp, "review_status", "teacher_review_required"),
                 display_order=idx,
                 origin="paper",
             ))
@@ -98,6 +102,15 @@ class ComponentGraphInputBuilder:
                 "summary": comp.summary,
                 "inputs": list(comp.inputs or []),
                 "outputs": list(comp.outputs or []),
+                "input_equation_ids": list(getattr(comp, "input_equation_ids", []) or []),
+                "intermediate_equation_ids": list(getattr(comp, "intermediate_equation_ids", []) or []),
+                "output_equation_ids": list(getattr(comp, "output_equation_ids", []) or []),
+                "constraint_equation_ids": list(getattr(comp, "constraint_equation_ids", []) or []),
+                "definition_equation_ids": list(getattr(comp, "definition_equation_ids", []) or []),
+                "review_required_equation_ids": list(getattr(comp, "review_required_equation_ids", []) or []),
+                "eliminated_symbols": list(getattr(comp, "eliminated_symbols", []) or []),
+                "retained_symbols": list(getattr(comp, "retained_symbols", []) or []),
+                "equation_confidence_summary": dict(getattr(comp, "equation_confidence_summary", {}) or {}),
                 "dependencies": [
                     {
                         "dependency_type": d.get("dependency_type") if isinstance(d, dict) else "",
@@ -106,11 +119,11 @@ class ComponentGraphInputBuilder:
                     }
                     for d in (comp.dependencies or [])
                 ],
-                "linked_claim_ids": list(comp.linked_claim_ids or []),
-                "linked_equation_ids": list(comp.linked_equation_ids or []),
-                "linked_dsl_node_ids": list(comp.linked_dsl_node_ids or []),
-                "linked_dsl_edge_ids": list(comp.linked_dsl_edge_ids or []),
-                "linked_derivation_ids": list(comp.linked_derivation_ids or []),
+                "linked_claim_ids": list(getattr(comp, "linked_claim_ids", []) or []),
+                "linked_equation_ids": list(getattr(comp, "linked_equation_ids", []) or []),
+                "linked_dsl_node_ids": list(getattr(comp, "linked_dsl_node_ids", []) or []),
+                "linked_dsl_edge_ids": list(getattr(comp, "linked_dsl_edge_ids", []) or []),
+                "linked_derivation_ids": list(getattr(comp, "linked_derivation_ids", []) or []),
             })
         return result
 

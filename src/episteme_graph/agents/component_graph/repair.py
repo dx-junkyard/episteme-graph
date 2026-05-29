@@ -77,6 +77,9 @@ def _parse_raw(
         evidence_claims = item.get("evidence_claims") or []
         if not isinstance(evidence_claims, list):
             evidence_claims = []
+        evidence_equation_ids = item.get("evidence_equation_ids") or []
+        if not isinstance(evidence_equation_ids, list):
+            evidence_equation_ids = []
         edges.append(ComponentGraphEdge(
             edge_id=str(item.get("edge_id") or f"component_edge_{idx + 1:04d}"),
             source=source,
@@ -86,6 +89,8 @@ def _parse_raw(
             evidence_claims=[str(c) for c in evidence_claims],
             reasoning=str(item.get("reasoning") or ""),
             confidence=_confidence(item.get("confidence", 0.75)),
+            evidence_equation_ids=[str(e) for e in evidence_equation_ids],
+            review_status=str(item.get("review_status") or "teacher_review_required"),
         ))
 
     confidence_raw = raw.get("confidence")

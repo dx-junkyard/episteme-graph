@@ -44,9 +44,30 @@ class _DslResult:
 
 
 class _ComponentRecord:
-    def __init__(self, component_id: str, evidence_refs: dict | None = None):
+    def __init__(
+        self,
+        component_id: str,
+        evidence_refs: dict | None = None,
+        *,
+        linked_claim_ids=None,
+        linked_equation_ids=None,
+        input_equation_ids=None,
+        output_equation_ids=None,
+        review_required_equation_ids=None,
+        review_status: str = "teacher_review_required",
+        component_type: str = "ClaimBundleComponent",
+        internal_flow=None,
+    ):
         self.component_id = component_id
+        self.component_type = component_type
         self.evidence_refs = evidence_refs or {}
+        self.linked_claim_ids = linked_claim_ids or []
+        self.linked_equation_ids = linked_equation_ids or []
+        self.input_equation_ids = input_equation_ids or []
+        self.output_equation_ids = output_equation_ids or []
+        self.review_required_equation_ids = review_required_equation_ids or []
+        self.review_status = review_status
+        self.internal_flow = internal_flow or []
 
 
 class _ComponentResult:
@@ -275,6 +296,67 @@ def test_summary_only_component_cross_validation():
     assert "SUMMARY_ONLY_COMPONENT" in codes
 
 
+def test_relation_component_without_internal_flow_blocks_export():
+    comp = _ComponentRecord("comp_001", component_type="RelationComponent", internal_flow=[])
+    result = _run_gate(component_result=_ComponentResult([comp]))
+    codes = [e.code for e in result.errors]
+    assert "COMPONENT_MISSING_INTERNAL_FLOW" in codes
+
+
+def test_component_claim_support_rejects_non_supporting_equation():
+    artifacts = _make_artifacts(equation_semantics={
+        "equations": [{
+            "equation_id": "eq_review",
+            "needs_math_review": True,
+            "confidence_policy": {
+                "can_support_claim": False,
+                "must_not_treat_as_source_extracted": True,
+            },
+        }],
+    })
+    comp = _ComponentRecord(
+        "comp_001",
+        {"claim_ids": ["claim_abc"], "evidence_ids": ["ev_001"], "equation_ids": ["eq_review"]},
+        linked_equation_ids=["eq_review"],
+    )
+    result = _run_gate(
+        artifacts=artifacts,
+        component_result=_ComponentResult([comp]),
+        claim_objects=_ClaimObjectResult([_ClaimObject("claim_abc")]),
+        evidence=_EvidenceResult([_EvidenceRecord("ev_001")]),
+    )
+    codes = [e.code for e in result.errors]
+    assert "NON_SUPPORTING_EQUATION_USED_FOR_CLAIM_SUPPORT" in codes
+
+
+def test_component_output_rejects_review_required_auto_accepted_equation():
+    artifacts = _make_artifacts(equation_semantics={
+        "equations": [{
+            "equation_id": "eq_review",
+            "needs_math_review": True,
+            "confidence_policy": {
+                "can_support_claim": False,
+                "must_not_treat_as_source_extracted": True,
+            },
+        }],
+    })
+    comp = _ComponentRecord(
+        "comp_001",
+        {"claim_ids": [], "evidence_ids": ["ev_001"], "equation_ids": ["eq_review"]},
+        output_equation_ids=["eq_review"],
+        review_status="auto_accepted",
+    )
+    result = _run_gate(
+        artifacts=artifacts,
+        component_result=_ComponentResult([comp]),
+        claim_objects=_ClaimObjectResult([]),
+        evidence=_EvidenceResult([_EvidenceRecord("ev_001")]),
+    )
+    codes = [e.code for e in result.errors]
+    assert "NON_SUPPORTING_EQUATION_USED_AS_COMPONENT_OUTPUT" in codes
+    assert "REVIEW_REQUIRED_OUTPUT_COMPONENT_AUTO_ACCEPTED" in codes
+
+
 # ---------------------------------------------------------------------------
 # Tests: DSL edge validation
 # ---------------------------------------------------------------------------
@@ -310,6 +392,33 @@ def test_dsl_edge_unresolved_target():
     result = _run_gate(dsl=dsl)
     codes = [e.code for e in result.errors]
     assert "UNRESOLVED_GRAPH_EDGE_TARGET" in codes
+
+
+def test_component_graph_node_missing_label_is_hard_error():
+    artifacts = _make_artifacts(component_graph={
+        "nodes": [{"component_id": "comp_1", "label": "", "component_type": "RelationComponent"}],
+        "edges": [],
+    })
+    result = _run_gate(artifacts=artifacts)
+    assert "COMPONENT_GRAPH_NODE_MISSING_LABEL" in [e.code for e in result.errors]
+
+
+def test_component_graph_edge_quality_warnings():
+    artifacts = _make_artifacts(component_graph={
+        "nodes": [
+            {"component_id": "comp_1", "label": "A", "component_type": "RelationComponent"},
+            {"component_id": "comp_2", "label": "B", "component_type": "RelationComponent"},
+        ],
+        "edges": [
+            {"edge_id": "e1", "source": "comp_1", "target": "comp_2", "edge_type": "RELATED_TO"},
+            {"edge_id": "e2", "source": "comp_2", "target": "comp_1", "edge_type": "REQUIRES"},
+        ],
+    })
+    result = _run_gate(artifacts=artifacts)
+    codes = {w.code for w in result.warnings}
+    assert "COMPONENT_GRAPH_RELATED_TO_EDGE" in codes
+    assert "COMPONENT_GRAPH_EDGE_NO_EVIDENCE" in codes
+    assert "COMPONENT_GRAPH_BIDIRECTIONAL_EDGE_PAIR" in codes
 
 
 # ---------------------------------------------------------------------------

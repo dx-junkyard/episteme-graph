@@ -167,3 +167,35 @@ class TestComponentGraphValidator:
         edges = [_edge("c1", "c2")]  # _edge has evidence_claims=["claim:b1:s1"]
         issues = self.validator.validate(_result(nodes, edges))
         assert not any(i.rule_id == "llm_inferred_no_evidence" for i in issues)
+
+    def test_llm_inferred_with_evidence_equations_no_warn(self):
+        nodes = [_node("c1"), _node("c2")]
+        edge = ComponentGraphEdge(
+            edge_id="component_edge_0001",
+            source="c1",
+            target="c2",
+            edge_type="TRANSFORMS",
+            support_status="llm_inferred",
+            evidence_claims=[],
+            evidence_equation_ids=["eq_1"],
+            reasoning="equation flow",
+            confidence=0.8,
+        )
+        issues = self.validator.validate(_result(nodes, [edge]))
+        assert not any(i.rule_id == "llm_inferred_no_evidence" for i in issues)
+
+    def test_node_missing_label_is_error(self):
+        nodes = [ComponentGraphNode("c1", "", "TheoryComponent"), _node("c2")]
+        issues = self.validator.validate(_result(nodes, [_edge("c1", "c2")]))
+        assert any(i.rule_id == "component_graph_node_missing_label" for i in issues)
+
+    def test_bidirectional_edges_warn(self):
+        nodes = [_node("c1"), _node("c2")]
+        edges = [_edge("c1", "c2", edge_id="e1"), _edge("c2", "c1", edge_id="e2")]
+        issues = self.validator.validate(_result(nodes, edges))
+        assert any(i.rule_id == "bidirectional_component_edge_pair" for i in issues)
+
+    def test_related_to_warns_as_generic(self):
+        nodes = [_node("c1"), _node("c2")]
+        issues = self.validator.validate(_result(nodes, [_edge("c1", "c2", edge_type="RELATED_TO")]))
+        assert any(i.rule_id == "component_graph_related_to_edge" for i in issues)

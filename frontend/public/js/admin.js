@@ -480,6 +480,21 @@
     });
   }
 
+  function closeMaterialPipelineMenus() {
+    document.querySelectorAll(".material-pipeline-panel").forEach(function (panel) {
+      panel.hidden = true;
+    });
+  }
+
+  function initMaterialPipelineOutsideClick() {
+    if (state.materialPipelineOutsideClickBound) return;
+    state.materialPipelineOutsideClickBound = true;
+    document.addEventListener("click", function (e) {
+      if (e.target && e.target.closest && e.target.closest(".material-pipeline-menu")) return;
+      closeMaterialPipelineMenus();
+    }, true);
+  }
+
   function loadMaterialPipelineStatus(materialId) {
     apiFetch("/admin/materials/" + encodeURIComponent(materialId) + "/document-pipeline/status")
       .then(function (res) { return res.ok ? res.json() : null; })
@@ -8134,11 +8149,7 @@
     // Role-based access control
     if (!setupRoleBasedUI()) return;
 
-    document.addEventListener("click", function () {
-      document.querySelectorAll(".material-pipeline-panel").forEach(function (panel) {
-        panel.hidden = true;
-      });
-    });
+    initMaterialPipelineOutsideClick();
 
     var usernameEl = document.getElementById("admin-username");
     if (usernameEl) usernameEl.textContent = state.username || "";

@@ -116,6 +116,7 @@ class TestComponentGraphResult:
         assert edge["source_component_id"] == "comp_001"
         assert edge["relation"] == "REQUIRES"
         assert "evidence_claims" in edge["evidence"]
+        assert "evidence_equation_ids" in edge["evidence"]
 
     def test_from_dict(self):
         original = _make_result()

@@ -9,6 +9,7 @@ from episteme_graph.agents.equation_semantics.schema import EquationSemanticsRes
 from episteme_graph.agents.thesis_reconstruction.schema import ThesisReconstructionResult
 
 from .cartridge_loader import CartridgeLoader
+from .enrichment import enrich_component_assembly
 from .input_builder import ComponentAssemblyInputBuilder
 from .llm_client import ComponentAssemblyLLMClient
 from .overlap_cleanup import ComponentOverlapCleanup
@@ -69,6 +70,7 @@ class ComponentAssemblyAgent:
         result = self._cleanup.cleanup(
             _parse_raw(raw_output, qualified_claims.document_id, llm_input.cartridge_id)
         )
+        result = enrich_component_assembly(result, llm_input)
         issues = self._validator.validate(result, cartridge, llm_input=llm_input)
         if [i for i in issues if i.severity == "error"]:
             result = self._repairer.repair(
@@ -80,6 +82,7 @@ class ComponentAssemblyAgent:
                 prompt_factory=self._prompt_factory,
                 validator=self._validator,
             )
+            result = enrich_component_assembly(result, llm_input)
         else:
             result.validation_issues = issues
         return result

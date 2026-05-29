@@ -66,6 +66,8 @@ class ComponentGraphEdge:
     evidence_claims: list[str]
     reasoning: str
     confidence: float = 0.75
+    evidence_equation_ids: list[str] = field(default_factory=list)
+    review_status: str = "teacher_review_required"
 
 
 @dataclass
@@ -140,6 +142,7 @@ class ComponentGraphResult:
                     "review_status": "teacher_review_required",
                     "evidence": {
                         "evidence_claims": e.evidence_claims,
+                        "evidence_equation_ids": e.evidence_equation_ids,
                         "reason": e.reasoning,
                     },
                 }

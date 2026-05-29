@@ -1010,7 +1010,7 @@ def test_orchestrator_runs_newly_integrated_agents_and_saves_artifacts():
         reason: str = ""
         confidence: float = 0.8
         review_notes: list = field(default_factory=list)
-        internal_flow: list = field(default_factory=list)
+        internal_flow: list = field(default_factory=lambda: [{"from": "eq_1", "relation": "derive", "to": "eq_2"}])
         equation_ids: list = field(default_factory=list)
 
     structure_blocks = [

@@ -40,6 +40,20 @@ internal_flow requirement:
 - For components with multiple inputs or outputs, internal_flow is required
   to make the wiring explicit.
 
+equation role requirement:
+- Classify equations by component role. Do not put every related equation into
+  one undifferentiated linked_equation_ids list.
+- For derivation-like RelationComponent / PaperRelationComponent / MethodComponent,
+  include input_equation_ids and output_equation_ids whenever equations are available.
+- Use intermediate_equation_ids for solved/substituted forms that are not the final
+  reusable result, constraint_equation_ids for restrictions/consistency checks, and
+  definition_equation_ids for definitions used by the component.
+- If an equation is review_required, reconstructed, or cannot support claims, include
+  it in review_required_equation_ids and set component review_status to
+  teacher_review_required unless the component is merely cautionary.
+- Bias-elimination components should include eliminated_symbols, retained_symbols,
+  and internal_flow steps with concrete solve/substitute/eliminate operations.
+
 Return ONLY valid JSON matching the schema.
 """
 
@@ -74,6 +88,19 @@ _OUTPUT_SCHEMA = {
             "linked_derivation_ids": [],
             "linked_dsl_node_ids": [],
             "linked_dsl_edge_ids": [],
+            "input_equation_ids": [],
+            "intermediate_equation_ids": [],
+            "output_equation_ids": [],
+            "constraint_equation_ids": [],
+            "definition_equation_ids": [],
+            "review_required_equation_ids": [],
+            "eliminated_symbols": [],
+            "retained_symbols": [],
+            "equation_confidence_summary": {
+                "all_source_backed": True,
+                "has_review_required": False,
+                "has_reconstructed_equations": False
+            },
             "review_status": "teacher_review_required",
             "teaching_takeaway": "string",
             "source_scope": {},
@@ -165,6 +192,9 @@ class ComponentAssemblyPromptFactory:
             "- Use ONLY IDs from the available_* lists above in evidence_refs\n"
             "- Do NOT invent or guess IDs not present in available_* lists\n"
             "- Derivation-like components need outputs and usually preconditions\n"
+            "- Derivation-like components with equations must classify equations into input/intermediate/output/constraint/definition roles\n"
+            "- Bias-elimination components must name eliminated_symbols and retained_symbols\n"
+            "- Do not use can_support_claim=false or review_required equations as source-backed component outputs\n"
             "- Correction/uncertainty/diagnostic components should remain distinct when evidence supports separation\n"
             "- Relation/Correction/Diagnostic/Method components MUST include internal_flow\n"
             "- internal_flow explains how inputs are combined/transformed into outputs\n"

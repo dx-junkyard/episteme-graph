@@ -12,13 +12,31 @@ from .schema import (
     ComponentAssemblyResult,
     ComponentRecord,
     ValidationIssue,
+    normalize_dependency_type,
 )
 
 
-def _build_available_id_index(llm_input: ComponentAssemblyLLMInput | None) -> dict[str, set[str]]:
+def _build_available_id_index(llm_input: ComponentAssemblyLLMInput | None) -> dict:
     """Build a dict of available ID sets from the LLM input for cross-reference validation."""
     if not llm_input:
         return {}
+    equation_policy_map = {}
+    equation_review_map = {}
+    for e in llm_input.available_equations or []:
+        eq_id = e.get("equation_id")
+        if not eq_id:
+            continue
+        policy = e.get("confidence_policy") if isinstance(e.get("confidence_policy"), dict) else {}
+        equation_policy_map[eq_id] = policy
+        review_required = (
+            bool(e.get("needs_math_review"))
+            or bool(e.get("review_flags"))
+            or e.get("semantic_status") == "reconstruction_based"
+            or e.get("reconstruction_status") not in (None, "", "none")
+            or bool(policy.get("must_not_treat_as_source_extracted"))
+            or policy.get("can_support_claim") is False
+        )
+        equation_review_map[eq_id] = review_required
     return {
         "claim_ids": {c["claim_id"] for c in (llm_input.available_claims or []) if c.get("claim_id")},
         "evidence_ids": {e["evidence_id"] for e in (llm_input.available_evidence or []) if e.get("evidence_id")},
@@ -26,6 +44,8 @@ def _build_available_id_index(llm_input: ComponentAssemblyLLMInput | None) -> di
         "dsl_node_ids": {n["node_id"] for n in (llm_input.available_dsl_nodes or []) if n.get("node_id")},
         "dsl_edge_ids": {e["edge_id"] for e in (llm_input.available_dsl_edges or []) if e.get("edge_id")},
         "derivation_ids": set(llm_input.available_derivation_ids or []),
+        "_equation_policy_map": equation_policy_map,
+        "_equation_review_map": equation_review_map,
     }
 
 
@@ -62,7 +82,7 @@ class ComponentAssemblyValidator:
         allowed_components: set[str],
         allowed_dependencies: set[str],
         component_ids: set[str],
-        available: dict[str, set[str]] | None = None,
+        available: dict | None = None,
     ) -> list[ValidationIssue]:
         issues = []
         if component.component_type not in allowed_components:
@@ -92,7 +112,7 @@ class ComponentAssemblyValidator:
             _has_evidence(component.evidence_refs)
             or component.linked_claim_ids
             or component.linked_evidence_ids
-            or component.linked_equation_ids
+            or _component_equation_refs(component, component.evidence_refs or {})
         ):
             issues.append(ValidationIssue(
                 "strong_component_without_evidence",
@@ -101,7 +121,8 @@ class ComponentAssemblyValidator:
                 f"components[{component.component_id}].evidence_refs",
             ))
         for idx, dep in enumerate(component.dependencies):
-            dep_type = dep.get("dependency_type")
+            dep_type = normalize_dependency_type(dep.get("dependency_type"))
+            dep["dependency_type"] = dep_type
             if dep_type not in allowed_dependencies:
                 issues.append(ValidationIssue(
                     "invalid_dependency_type",
@@ -129,14 +150,19 @@ class ComponentAssemblyValidator:
     def _check_internal_flow(
         self,
         component: ComponentRecord,
-        available: dict[str, set[str]] | None = None,
+        available: dict | None = None,
     ) -> list[ValidationIssue]:
         issues: list[ValidationIssue] = []
         flow = component.internal_flow or []
         if component.component_type in INTERNAL_FLOW_REQUIRED_TYPES and not flow:
+            severity = "error" if component.component_type in {
+                "RelationComponent",
+                "PaperRelationComponent",
+                "MethodComponent",
+            } else "warning"
             issues.append(ValidationIssue(
                 "component_missing_internal_flow",
-                "warning",
+                severity,
                 f"{component.component_id} ({component.component_type}) "
                 "has no internal_flow; reusable components of this type must "
                 "expose how inputs are combined into outputs.",
@@ -198,7 +224,7 @@ class ComponentAssemblyValidator:
     def _check_id_references(
         self,
         component: ComponentRecord,
-        available: dict[str, set[str]],
+        available: dict,
     ) -> list[ValidationIssue]:
         """Cross-reference evidence_refs and typed linked IDs against known artifact IDs (issue #262)."""
         issues: list[ValidationIssue] = []
@@ -233,7 +259,7 @@ class ComponentAssemblyValidator:
         # Check equation_ids (typed field takes priority)
         known_equations = available.get("equation_ids", set())
         if known_equations:
-            all_eq_ids = list(refs.get("equation_ids") or []) + list(component.linked_equation_ids or [])
+            all_eq_ids = _component_equation_refs(component, refs)
             unknown = [eqid for eqid in all_eq_ids if eqid not in known_equations]
             for eqid in unknown:
                 issues.append(ValidationIssue(
@@ -295,7 +321,7 @@ class ComponentAssemblyValidator:
         eq_heavy_types = {"RelationComponent", "PaperRelationComponent", "DiagnosticComponent"}
         deriv_types = {"RelationComponent", "MethodComponent"}
         if component.component_type in eq_heavy_types and known_equations:
-            all_eq = list(refs.get("equation_ids") or []) + list(component.linked_equation_ids or [])
+            all_eq = _component_equation_refs(component, refs)
             if not all_eq:
                 issues.append(ValidationIssue(
                     "equation_dependent_component_missing_eq_ids",
@@ -311,6 +337,8 @@ class ComponentAssemblyValidator:
                     f"{component.component_id} ({component.component_type}) has no derivation links",
                     f"components[{component.component_id}].linked_derivation_ids",
                 ))
+
+        issues += self._check_equation_role_classification(component, refs, available)
 
         # Propagate review_status from referenced claims to component (issue #262)
         known_claim_reviews = available.get("_claim_review_map", {}) or {}
@@ -329,6 +357,127 @@ class ComponentAssemblyValidator:
                         ))
                     break
 
+        return issues
+
+    def _check_equation_role_classification(
+        self,
+        component: ComponentRecord,
+        refs: dict,
+        available: dict,
+    ) -> list[ValidationIssue]:
+        issues: list[ValidationIssue] = []
+        known_equations = available.get("equation_ids", set())
+        if not known_equations:
+            return issues
+
+        all_eq_refs = _component_equation_refs(component, refs)
+        has_classified = any((
+            component.input_equation_ids,
+            component.intermediate_equation_ids,
+            component.output_equation_ids,
+            component.constraint_equation_ids,
+            component.definition_equation_ids,
+            component.review_required_equation_ids,
+        ))
+        deriv_like = component.component_type in {"RelationComponent", "PaperRelationComponent", "MethodComponent"}
+        if deriv_like and all_eq_refs and not has_classified:
+            issues.append(ValidationIssue(
+                "component_equations_not_role_classified",
+                "warning",
+                f"{component.component_id} links equations but does not classify their component roles",
+                f"components[{component.component_id}].input_equation_ids",
+            ))
+        if deriv_like and all_eq_refs and not component.output_equation_ids:
+            issues.append(ValidationIssue(
+                "derivation_component_without_output_equations",
+                "warning",
+                f"{component.component_id} is derivation-like but has no output_equation_ids",
+                f"components[{component.component_id}].output_equation_ids",
+            ))
+        if deriv_like and all_eq_refs and not component.input_equation_ids:
+            issues.append(ValidationIssue(
+                "derivation_component_without_input_equations",
+                "warning",
+                f"{component.component_id} is derivation-like but has no input_equation_ids",
+                f"components[{component.component_id}].input_equation_ids",
+            ))
+
+        policy_map = available.get("_equation_policy_map", {}) or {}
+        review_map = available.get("_equation_review_map", {}) or {}
+        claim_linked = bool(refs.get("claim_ids") or component.linked_claim_ids)
+        for eq_id in all_eq_refs:
+            policy = policy_map.get(eq_id, {}) if isinstance(policy_map, dict) else {}
+            if claim_linked and policy.get("can_support_claim") is False:
+                issues.append(ValidationIssue(
+                    "claim_support_uses_non_supporting_equation",
+                    "error",
+                    f"{component.component_id} links claim evidence to non-claim-supporting equation {eq_id!r}",
+                    f"components[{component.component_id}].linked_equation_ids",
+                ))
+            if review_map.get(eq_id) and eq_id not in component.review_required_equation_ids:
+                issues.append(ValidationIssue(
+                    "review_required_equation_not_marked_on_component",
+                    "warning",
+                    f"{component.component_id} references review-required equation {eq_id!r} "
+                    "but does not list it in review_required_equation_ids",
+                    f"components[{component.component_id}].review_required_equation_ids",
+                ))
+
+        for eq_id in component.output_equation_ids:
+            policy = policy_map.get(eq_id, {}) if isinstance(policy_map, dict) else {}
+            if policy.get("can_support_claim") is False:
+                issues.append(ValidationIssue(
+                    "component_output_uses_non_supporting_equation",
+                    "error",
+                    f"{component.component_id} uses non-claim-supporting equation {eq_id!r} as an output",
+                    f"components[{component.component_id}].output_equation_ids",
+                ))
+            if review_map.get(eq_id) and component.review_status == "auto_accepted":
+                issues.append(ValidationIssue(
+                    "review_required_output_component_auto_accepted",
+                    "error",
+                    f"{component.component_id} has review-required output equation {eq_id!r} "
+                    "but component.review_status is auto_accepted",
+                    f"components[{component.component_id}].review_status",
+                ))
+
+        text = " ".join([
+            component.label.lower(),
+            component.summary.lower(),
+            component.reason.lower(),
+        ])
+        if "eliminat" in text or "bias" in text:
+            if not component.eliminated_symbols:
+                issues.append(ValidationIssue(
+                    "bias_elimination_missing_eliminated_symbols",
+                    "warning",
+                    f"{component.component_id} appears to describe elimination but has no eliminated_symbols",
+                    f"components[{component.component_id}].eliminated_symbols",
+                ))
+            if not component.retained_symbols:
+                issues.append(ValidationIssue(
+                    "bias_elimination_missing_retained_symbols",
+                    "warning",
+                    f"{component.component_id} appears to describe elimination but has no retained_symbols",
+                    f"components[{component.component_id}].retained_symbols",
+                ))
+            if (
+                ("second" in text or "second-order" in text or "2nd" in text)
+                and ("third" in text or "third-order" in text or "3rd" in text)
+            ):
+                issues.append(ValidationIssue(
+                    "bias_elimination_mixes_second_and_third_order",
+                    "warning",
+                    f"{component.component_id} appears to combine second- and third-order bias elimination; split it",
+                    f"components[{component.component_id}]",
+                ))
+        if "consistency relation" in text and not component.output_equation_ids:
+            issues.append(ValidationIssue(
+                "consistency_relation_without_output_equations",
+                "error",
+                f"{component.component_id} outputs a consistency relation but has no output_equation_ids",
+                f"components[{component.component_id}].output_equation_ids",
+            ))
         return issues
 
     def _check_required_fields(
@@ -413,6 +562,29 @@ def _has_evidence(refs: dict) -> bool:
     return any((refs or {}).get(key) for key in ("claim_ids", "evidence_ids", "equation_ids", "thesis_refs")) or any(
         dsl_refs.get(key) for key in ("node_ids", "edge_ids")
     )
+
+
+def _component_equation_refs(component: ComponentRecord, refs: dict) -> list[str]:
+    values: list[str] = []
+    values.extend(refs.get("equation_ids") or [])
+    for field_name in (
+        "linked_equation_ids",
+        "input_equation_ids",
+        "intermediate_equation_ids",
+        "output_equation_ids",
+        "constraint_equation_ids",
+        "definition_equation_ids",
+        "review_required_equation_ids",
+    ):
+        values.extend(getattr(component, field_name, []) or [])
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        eq_id = str(value)
+        if eq_id and eq_id not in seen:
+            seen.add(eq_id)
+            result.append(eq_id)
+    return result
 
 
 def _meta_prior_evidence_ratio(component: ComponentRecord) -> float:
