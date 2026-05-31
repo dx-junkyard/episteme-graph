@@ -77,6 +77,11 @@ class ComponentGraphMerger:
                 raw = evidence_obj.get("evidence_claims") or []
                 if isinstance(raw, list):
                     evidence_claims = [str(c) for c in raw]
+            evidence_equation_ids: list[str] = []
+            if isinstance(evidence_obj, dict):
+                raw_eqs = evidence_obj.get("evidence_equation_ids") or []
+                if isinstance(raw_eqs, list):
+                    evidence_equation_ids = [str(eid) for eid in raw_eqs]
             reasoning = ""
             if isinstance(evidence_obj, dict):
                 reasoning = str(evidence_obj.get("reason") or "")
@@ -89,6 +94,8 @@ class ComponentGraphMerger:
                 evidence_claims=evidence_claims,
                 reasoning=reasoning,
                 confidence=float(e.get("confidence") or 0.7),
+                evidence_equation_ids=evidence_equation_ids,
+                review_status=str(e.get("review_status") or "teacher_review_required"),
             ))
         return edges
 
@@ -133,5 +140,7 @@ class ComponentGraphMerger:
                 evidence_claims=edge.evidence_claims,
                 reasoning=edge.reasoning,
                 confidence=edge.confidence,
+                evidence_equation_ids=edge.evidence_equation_ids,
+                review_status=edge.review_status,
             ))
         return result

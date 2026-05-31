@@ -26,6 +26,24 @@ from .schema import (
 
 _DEFAULT_CLAIM_TYPE = "unknown"
 
+_DOMAIN_CONCEPT_FALLBACKS: dict[str, tuple[str, str]] = {
+    "nonlinear galaxy bias": ("nonlinear galaxy bias", "domain_concept"),
+    "skewness": ("skewness", "observable"),
+    "kurtosis": ("kurtosis", "observable"),
+    "consistency relation": ("consistency relation", "result"),
+    "matter density perturbation": ("matter density perturbation", "quantity"),
+    "dhost": ("DHOST", "theory_family"),
+    "horndeski": ("Horndeski", "theory_family"),
+    "kernel coefficient": ("kernel coefficient", "parameter"),
+    "smoothing scale": ("smoothing scale", "parameter"),
+    "tree-level approximation": ("tree-level approximation", "approximation"),
+    "local bias": ("local bias", "model"),
+    "linear bias": ("linear bias", "parameter"),
+    "bias elimination": ("bias elimination", "method"),
+    "higher-order moment": ("higher-order moment", "observable"),
+    "gravity diagnostic": ("gravity diagnostic", "diagnostic"),
+}
+
 
 class ClaimObjectBuilder:
     """Build final claims.json from QualifiedSpanRecord + EvidenceRegistry.
@@ -322,6 +340,14 @@ class ClaimObjectBuilder:
                     ))
                     seen.add(concept_name)
                     break
+        for needle, (normalized, concept_type) in _DOMAIN_CONCEPT_FALLBACKS.items():
+            if needle in text_lower and normalized not in seen:
+                found.append(ClaimConcept(
+                    name=normalized,
+                    normalized=normalized,
+                    concept_type=concept_type,
+                ))
+                seen.add(normalized)
         return found
 
     @staticmethod

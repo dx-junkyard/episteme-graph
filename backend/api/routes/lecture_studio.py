@@ -1619,16 +1619,81 @@ def _course_pipeline_documents(course_data: dict) -> list[dict]:
     ]
 
 
+def _pipeline_source_kind_from_name(name: str | None) -> str | None:
+    lower = (name or "").lower()
+    if lower.endswith(".tar.gz") or lower.endswith(".tgz"):
+        return "tex_archive"
+    if lower.endswith(".pdf"):
+        return "pdf"
+    return None
+
+
+def _pipeline_source_candidates(material_id: str, filename: str) -> list[tuple[str, str]]:
+    """Return storage object candidates paired with the source_kind they imply.
+
+    Older rows may have a title-like filename without the original extension, so
+    probing only by filename can incorrectly fall back to PDF. Always include the
+    canonical upload object names and infer source_kind from the object found.
+    """
+    result: list[tuple[str, str]] = []
+
+    def add(object_name: str | None, source_kind: str | None = None) -> None:
+        if not object_name:
+            return
+        kind = source_kind or _pipeline_source_kind_from_name(object_name) or "pdf"
+        pair = (object_name, kind)
+        if pair not in result:
+            result.append(pair)
+
+    filename_kind = _pipeline_source_kind_from_name(filename)
+    if filename_kind == "tex_archive":
+        add(f"uploads/{material_id}.tar.gz", "tex_archive")
+        add(f"uploads/{material_id}.tgz", "tex_archive")
+        add(filename, "tex_archive")
+        add(f"uploads/{material_id}.pdf", "pdf")
+    elif filename_kind == "pdf":
+        add(f"uploads/{material_id}.pdf", "pdf")
+        add(filename, "pdf")
+        add(f"uploads/{material_id}.tar.gz", "tex_archive")
+        add(f"uploads/{material_id}.tgz", "tex_archive")
+    else:
+        add(f"uploads/{material_id}.tar.gz", "tex_archive")
+        add(f"uploads/{material_id}.tgz", "tex_archive")
+        add(f"uploads/{material_id}.pdf", "pdf")
+        add(filename, None)
+    add(material_id, filename_kind or "pdf")
+    return result
+
+
 def _load_pipeline_pdf(material_id: str, filename: str) -> bytes:
     storage = get_storage_client()
-    for object_name in (f"uploads/{material_id}.pdf", filename, material_id):
-        if not object_name:
+    for object_name, source_kind in _pipeline_source_candidates(material_id, filename):
+        if source_kind != "pdf":
             continue
         try:
             return storage.get_object("raw-papers", object_name)
         except Exception:
             continue
     raise FileNotFoundError(f"PDF object not found for material {material_id}")
+
+
+def _load_pipeline_source(material_id: str, filename: str) -> tuple[bytes, str]:
+    """教材ファイルをストレージからロードし、(bytes, source_kind) を返す。
+
+    filename 拡張子と canonical upload object 名から source_kind を判定する。
+    """
+    storage = get_storage_client()
+    attempted: list[str] = []
+    for object_name, source_kind in _pipeline_source_candidates(material_id, filename):
+        attempted.append(f"{object_name}:{source_kind}")
+        try:
+            return storage.get_object("raw-papers", object_name), source_kind
+        except Exception:
+            continue
+    raise FileNotFoundError(
+        f"Source object not found for material {material_id} "
+        f"(tried={', '.join(attempted)})"
+    )
 
 
 def _set_document_pipeline_status(document_id: str, status: str) -> None:
@@ -1809,7 +1874,7 @@ def _material_document_pipeline_worker(
 
     publish("processing", 0)
     try:
-        pdf_bytes = _load_pipeline_pdf(material_id, document["filename"])
+        source_bytes, source_kind = _load_pipeline_source(material_id, document["filename"])
         if target_stage is None:
             _set_document_pipeline_status(document_id, "processing")
 
@@ -1819,13 +1884,15 @@ def _material_document_pipeline_worker(
             publish("processing", int((info or {}).get("progress") or 0))
 
         run_document_pipeline(
-            pdf_bytes=pdf_bytes,
+            pdf_bytes=source_bytes,
             document_id=document_id,
             material_id=material_id,
             filename=document["filename"],
+            source_kind=source_kind,
             course_id=None,
             progress_callback=on_stage,
             target_stage=target_stage,
+            resume=target_stage is not None,
         )
         if target_stage is None:
             _set_document_pipeline_status(document_id, "completed")
@@ -1885,7 +1952,7 @@ def _course_document_pipeline_worker(
             current_document = doc["document_id"]
             current_stage = target_stage or "document_pipeline"
             publish("processing")
-            pdf_bytes = _load_pipeline_pdf(doc["material_id"], doc["filename"])
+            source_bytes, source_kind = _load_pipeline_source(doc["material_id"], doc["filename"])
             if target_stage is None:
                 _set_document_pipeline_status(doc["document_id"], "processing")
 
@@ -1913,13 +1980,15 @@ def _course_document_pipeline_worker(
                 )
 
             run_document_pipeline(
-                pdf_bytes=pdf_bytes,
+                pdf_bytes=source_bytes,
                 document_id=doc["document_id"],
                 material_id=doc["material_id"],
                 filename=doc["filename"],
+                source_kind=source_kind,
                 course_id=course_id,
                 progress_callback=on_stage,
                 target_stage=target_stage,
+                resume=target_stage is not None,
             )
             if target_stage is None:
                 _set_document_pipeline_status(doc["document_id"], "completed")

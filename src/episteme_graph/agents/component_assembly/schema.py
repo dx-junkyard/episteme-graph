@@ -27,6 +27,12 @@ CORE_DEPENDENCY_TYPES = [
     "propagates_uncertainty_to",
 ]
 
+DEPENDENCY_TYPE_ALIASES = {
+    # LLMs often emit the past-participle wording when describing a relation
+    # that qualifies another component. The schema uses the verb form.
+    "qualified": "qualifies",
+}
+
 ASSEMBLY_HINT_TYPES = [
     "candidate_bridge_component",
     "candidate_uncertainty_hub",
@@ -34,6 +40,26 @@ ASSEMBLY_HINT_TYPES = [
     "candidate_correction_cluster",
     "candidate_diagnostic_cluster",
 ]
+
+
+def normalize_dependency_type(value: object) -> str:
+    raw = str(value or "").strip().lower()
+    return DEPENDENCY_TYPE_ALIASES.get(raw, raw)
+
+
+def normalize_dependencies(raw: object) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+    dependencies: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        dep = dict(item)
+        dep["dependency_type"] = normalize_dependency_type(dep.get("dependency_type"))
+        dep["component_refs"] = list(dep.get("component_refs") or [])
+        dep["reason"] = str(dep.get("reason", ""))
+        dependencies.append(dep)
+    return dependencies
 
 
 @dataclass
@@ -116,6 +142,15 @@ class ComponentRecord:
     linked_derivation_ids: list[str] = field(default_factory=list)
     linked_dsl_node_ids: list[str] = field(default_factory=list)
     linked_dsl_edge_ids: list[str] = field(default_factory=list)
+    input_equation_ids: list[str] = field(default_factory=list)
+    intermediate_equation_ids: list[str] = field(default_factory=list)
+    output_equation_ids: list[str] = field(default_factory=list)
+    constraint_equation_ids: list[str] = field(default_factory=list)
+    definition_equation_ids: list[str] = field(default_factory=list)
+    review_required_equation_ids: list[str] = field(default_factory=list)
+    eliminated_symbols: list[str] = field(default_factory=list)
+    retained_symbols: list[str] = field(default_factory=list)
+    equation_confidence_summary: dict = field(default_factory=dict)
     review_status: str = "teacher_review_required"
     teaching_takeaway: str = ""
     source_scope: dict = field(default_factory=dict)
@@ -161,7 +196,7 @@ class ComponentAssemblyResult:
                 outputs=list(c.get("outputs") or []),
                 preconditions=list(c.get("preconditions") or []),
                 cautions=list(c.get("cautions") or []),
-                dependencies=list(c.get("dependencies") or []),
+                dependencies=normalize_dependencies(c.get("dependencies")),
                 evidence_refs=c.get("evidence_refs") or {},
                 reason=c.get("reason", ""),
                 confidence=float(c.get("confidence", 0.0)),
@@ -173,6 +208,15 @@ class ComponentAssemblyResult:
                 linked_derivation_ids=list(c.get("linked_derivation_ids") or []),
                 linked_dsl_node_ids=list(c.get("linked_dsl_node_ids") or []),
                 linked_dsl_edge_ids=list(c.get("linked_dsl_edge_ids") or []),
+                input_equation_ids=list(c.get("input_equation_ids") or []),
+                intermediate_equation_ids=list(c.get("intermediate_equation_ids") or []),
+                output_equation_ids=list(c.get("output_equation_ids") or []),
+                constraint_equation_ids=list(c.get("constraint_equation_ids") or []),
+                definition_equation_ids=list(c.get("definition_equation_ids") or []),
+                review_required_equation_ids=list(c.get("review_required_equation_ids") or []),
+                eliminated_symbols=list(c.get("eliminated_symbols") or []),
+                retained_symbols=list(c.get("retained_symbols") or []),
+                equation_confidence_summary=c.get("equation_confidence_summary") or {},
                 review_status=c.get("review_status", "teacher_review_required"),
                 teaching_takeaway=c.get("teaching_takeaway", ""),
                 source_scope=c.get("source_scope") or {},

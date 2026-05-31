@@ -534,6 +534,9 @@ def build_derivation_chains_export(
                     "required_claim_ids": list(s.get("required_claim_ids") or []),
                     "source_evidence_ids": list(s.get("source_evidence_ids") or []),
                     "assumption_refs": list(s.get("assumption_refs") or []),
+                    "eliminated_symbols": list(s.get("eliminated_symbols") or []),
+                    "retained_symbols": list(s.get("retained_symbols") or []),
+                    "review_status": s.get("review_status") or "teacher_review_required",
                     "reason": s.get("reason") or "",
                     "confidence": float(s.get("confidence") or 0.0),
                 })

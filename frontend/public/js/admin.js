@@ -460,9 +460,10 @@
       btn.addEventListener("click", function () {
         var menu = this.closest(".material-pipeline-menu");
         if (!menu) return;
-        runMaterialPipeline(menu.getAttribute("data-material-id"), this.getAttribute("data-stage") || "");
         var panel = menu.querySelector(".material-pipeline-panel");
         if (panel) panel.hidden = true;
+        if (!confirm("既存の実行結果を上書きします。本当に実行しますか？")) return;
+        runMaterialPipeline(menu.getAttribute("data-material-id"), this.getAttribute("data-stage") || "");
       });
     });
     root.querySelectorAll(".material-export-item").forEach(function (btn) {
@@ -477,6 +478,21 @@
         if (panel) panel.hidden = true;
       });
     });
+  }
+
+  function closeMaterialPipelineMenus() {
+    document.querySelectorAll(".material-pipeline-panel").forEach(function (panel) {
+      panel.hidden = true;
+    });
+  }
+
+  function initMaterialPipelineOutsideClick() {
+    if (state.materialPipelineOutsideClickBound) return;
+    state.materialPipelineOutsideClickBound = true;
+    document.addEventListener("click", function (e) {
+      if (e.target && e.target.closest && e.target.closest(".material-pipeline-menu")) return;
+      closeMaterialPipelineMenus();
+    }, true);
   }
 
   function loadMaterialPipelineStatus(materialId) {
@@ -1340,15 +1356,30 @@
         btn.textContent = "登録完了!";
         btn.style.background = "var(--color-text-success)";
 
-        // Show success message in chat
-        state.chatMessages.push({
+        var newCourseId = data.id;
+        var successMsg = {
           role: "assistant",
-          content: "コース「" + (data.title || draft.title) + "」が正常に登録されました。（ID: " + data.id + "）\n\n「コース管理」タブからグループ単位で受講可／編集可の権限を設定できます。",
-        });
+          content: "コース「" + (data.title || draft.title) + "」が正常に登録されました。（ID: " + newCourseId + "）\n\n「コース管理」タブからグループ単位で受講可／編集可の権限を設定できます。\n\nコース内容を自動生成中...",
+        };
+        state.chatMessages.push(successMsg);
         renderCourseChat();
 
-        // コース本文はバックエンド側で、既存のAgent成果物とアウトラインを対応付けて作成する。
-        // 教材解析のAgentパイプラインは教材アップロード後または原稿スタジオから明示実行する。
+        apiFetch("/admin/courses/" + newCourseId + "/course-content/generate", {
+          method: "POST",
+          body: "{}",
+        })
+          .then(function (genRes) {
+            if (genRes.ok) {
+              successMsg.content = "コース「" + (data.title || draft.title) + "」が正常に登録されました。（ID: " + newCourseId + "）\n\n「コース管理」タブからグループ単位で受講可／編集可の権限を設定できます。\n\nコース内容の自動生成を開始しました。完了後は原稿スタジオで確認できます。";
+            } else {
+              successMsg.content = "コース「" + (data.title || draft.title) + "」が正常に登録されました。（ID: " + newCourseId + "）\n\n「コース管理」タブからグループ単位で受講可／編集可の権限を設定できます。\n\n（コース内容の自動生成を開始できませんでした。原稿スタジオから手動で実行してください。）";
+            }
+            renderCourseChat();
+          })
+          .catch(function () {
+            successMsg.content = "コース「" + (data.title || draft.title) + "」が正常に登録されました。（ID: " + newCourseId + "）\n\n「コース管理」タブからグループ単位で受講可／編集可の権限を設定できます。\n\n（コース内容の自動生成を開始できませんでした。原稿スタジオから手動で実行してください。）";
+            renderCourseChat();
+          });
       })
       .catch(function () {
         btn.disabled = false;
@@ -8117,6 +8148,8 @@
   function initApp() {
     // Role-based access control
     if (!setupRoleBasedUI()) return;
+
+    initMaterialPipelineOutsideClick();
 
     var usernameEl = document.getElementById("admin-username");
     if (usernameEl) usernameEl.textContent = state.username || "";

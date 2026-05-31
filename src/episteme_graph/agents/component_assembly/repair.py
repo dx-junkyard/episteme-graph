@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 
 from .llm_client import ComponentAssemblyLLMClient
+from .enrichment import enrich_component_assembly
 from .overlap_cleanup import ComponentOverlapCleanup
 from .prompt import ComponentAssemblyPromptFactory
 from .schema import (
@@ -12,6 +13,7 @@ from .schema import (
     ComponentAssemblyResult,
     ComponentRecord,
     ValidationIssue,
+    normalize_dependencies,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,7 @@ class ComponentAssemblyRepairer:
                 logger.warning("Repair LLM call failed: %s", exc)
                 break
             result = self._cleanup.cleanup(_parse_raw(raw_output, llm_input.document_id, llm_input.cartridge_id))
+            result = enrich_component_assembly(result, llm_input)
             remaining = validator.validate(result, cartridge, llm_input=llm_input)  # type: ignore[attr-defined]
             if not [i for i in remaining if i.severity == "error"]:
                 result.validation_issues = remaining
@@ -73,7 +76,7 @@ def _parse_raw(
             outputs=list(item.get("outputs", [])),
             preconditions=list(item.get("preconditions", [])),
             cautions=list(item.get("cautions", [])),
-            dependencies=list(item.get("dependencies", [])),
+            dependencies=normalize_dependencies(item.get("dependencies", [])),
             evidence_refs=_evidence_refs(item.get("evidence_refs", {})),
             reason=str(item.get("reason", "")),
             confidence=_confidence(item.get("confidence", 0.5)),
@@ -85,6 +88,19 @@ def _parse_raw(
             linked_derivation_ids=list(item.get("linked_derivation_ids", [])),
             linked_dsl_node_ids=list(item.get("linked_dsl_node_ids", [])),
             linked_dsl_edge_ids=list(item.get("linked_dsl_edge_ids", [])),
+            input_equation_ids=list(item.get("input_equation_ids", [])),
+            intermediate_equation_ids=list(item.get("intermediate_equation_ids", [])),
+            output_equation_ids=list(item.get("output_equation_ids", [])),
+            constraint_equation_ids=list(item.get("constraint_equation_ids", [])),
+            definition_equation_ids=list(item.get("definition_equation_ids", [])),
+            review_required_equation_ids=list(item.get("review_required_equation_ids", [])),
+            eliminated_symbols=list(item.get("eliminated_symbols", [])),
+            retained_symbols=list(item.get("retained_symbols", [])),
+            equation_confidence_summary=(
+                item.get("equation_confidence_summary", {})
+                if isinstance(item.get("equation_confidence_summary", {}), dict)
+                else {}
+            ),
             review_status=str(item.get("review_status", "teacher_review_required")),
             teaching_takeaway=str(item.get("teaching_takeaway", "")),
             source_scope=item.get("source_scope", {}) if isinstance(item.get("source_scope", {}), dict) else {},

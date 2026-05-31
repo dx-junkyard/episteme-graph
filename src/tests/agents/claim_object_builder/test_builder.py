@@ -176,6 +176,23 @@ def test_validation_flags_missing_concepts():
     assert "claim_concepts_empty" in rules
 
 
+def test_domain_concept_fallback_for_bias_elimination_paper():
+    spans = [
+        _make_qualified(
+            "span_001",
+            "blk_x",
+            "Skewness and kurtosis consistency relations eliminate nonlinear galaxy bias.",
+            claim_type="result",
+        )
+    ]
+    builder = ClaimObjectBuilder()
+    result = builder.build("doc_test", spans)
+
+    concepts = {c.normalized for c in result.claims[0].concepts}
+    assert {"skewness", "kurtosis", "consistency relation", "nonlinear galaxy bias"} <= concepts
+    assert "claim_concepts_empty" not in {i.rule_id for i in result.validation_issues}
+
+
 def test_split_claims_create_compound_parent_and_atomic_children():
     structure = _make_structure_with("blk_x", "Definition and conclusion in one span.")
     ev_builder = EvidenceRegistryBuilder(structure)

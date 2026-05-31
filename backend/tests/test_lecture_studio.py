@@ -235,6 +235,58 @@ class TestLectureStudioModeUI:
         assert "ls-course-check-explanation" in js
         assert "lsCollectCheckQuestions" in js
 
+    def test_material_pipeline_menu_closes_on_outside_click(self):
+        from pathlib import Path
+
+        js = (Path(__file__).resolve().parents[2] / "frontend" / "public" / "js" / "admin.js").read_text(encoding="utf-8")
+        assert "initMaterialPipelineOutsideClick" in js
+        assert 'closest(".material-pipeline-menu")' in js
+        assert "closeMaterialPipelineMenus();" in js
+
+    def test_full_document_pipeline_run_does_not_resume_failed_artifacts(self):
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parents[1] / "api" / "routes" / "lecture_studio.py").read_text(encoding="utf-8")
+        assert "resume=target_stage is not None" in source
+
+
+class TestMaterialPipelineSourceLoading:
+    def test_load_pipeline_source_detects_tex_archive_without_filename_suffix(self, monkeypatch):
+        from routes import lecture_studio
+
+        calls = []
+
+        class FakeStorage:
+            def get_object(self, bucket, object_name):
+                calls.append((bucket, object_name))
+                if object_name == "uploads/mat-1.tar.gz":
+                    return b"tex-archive"
+                raise FileNotFoundError(object_name)
+
+        monkeypatch.setattr(lecture_studio, "get_storage_client", lambda: FakeStorage())
+
+        data, source_kind = lecture_studio._load_pipeline_source("mat-1", "arXiv-2407.01221v2")
+
+        assert data == b"tex-archive"
+        assert source_kind == "tex_archive"
+        assert calls[0] == ("raw-papers", "uploads/mat-1.tar.gz")
+
+    def test_load_pipeline_source_keeps_pdf_when_pdf_exists(self, monkeypatch):
+        from routes import lecture_studio
+
+        class FakeStorage:
+            def get_object(self, bucket, object_name):
+                if object_name == "uploads/mat-2.pdf":
+                    return b"pdf"
+                raise FileNotFoundError(object_name)
+
+        monkeypatch.setattr(lecture_studio, "get_storage_client", lambda: FakeStorage())
+
+        data, source_kind = lecture_studio._load_pipeline_source("mat-2", "paper.pdf")
+
+        assert data == b"pdf"
+        assert source_kind == "pdf"
+
 
 class TestCourseTopicCheckQuestions:
     def test_normalize_check_questions_accepts_detailed_objects(self):

@@ -185,7 +185,7 @@ class DerivationChainAgent:
                         message=f"step {s.step_id} has no output_equation_ids or output_claim_ids",
                         field=chain.derivation_id,
                     ))
-                if not s.operation or s.operation == DEFAULT_OPERATION:
+                if not s.operation or s.operation in {DEFAULT_OPERATION, "relate"}:
                     issues.append(ValidationIssue(
                         rule_id="derivation_step_generic_operation",
                         severity="info",
@@ -406,6 +406,29 @@ class DerivationChainAgent:
     def _infer_operation(record: Optional[EquationRecord]) -> str:
         if record is None:
             return DEFAULT_OPERATION
+        text = " ".join([
+            str(getattr(record, "label", "") or ""),
+            record.semantics.summary or "",
+            record.semantics.reason or "",
+            " ".join(record.semantics.used_symbols or []),
+            " ".join(s.symbol for s in (record.semantics.defined_symbols or [])),
+        ]).lower()
+        if "skewness" in text and "linear" in text and "bias" in text:
+            return "linearize_skewness_bias_dependence"
+        if "kurtosis" in text and "linear" in text and "bias" in text:
+            return "linearize_kurtosis_bias_dependence"
+        if ("second" in text or "2nd" in text) and "bias" in text and ("solve" in text or "eliminat" in text):
+            return "solve_second_order_bias"
+        if ("third" in text or "3rd" in text) and "bias" in text and ("solve" in text or "eliminat" in text):
+            return "solve_third_order_bias"
+        if "substitut" in text and ("second" in text or "2nd" in text):
+            return "substitute_second_order_bias"
+        if "substitut" in text and ("third" in text or "3rd" in text):
+            return "substitute_third_order_bias"
+        if "skewness" in text and "consistency relation" in text:
+            return "derive_skewness_consistency_relation"
+        if "kurtosis" in text and "consistency relation" in text:
+            return "derive_first_kurtosis_consistency_relation"
         primary = record.semantics.equation_type
         mapping = {
             "definition": "define",
