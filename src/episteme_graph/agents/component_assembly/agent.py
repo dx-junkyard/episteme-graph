@@ -9,6 +9,7 @@ from episteme_graph.agents.equation_semantics.schema import EquationSemanticsRes
 from episteme_graph.agents.thesis_reconstruction.schema import ThesisReconstructionResult
 
 from .cartridge_loader import CartridgeLoader
+from .component_refiner import ComponentRefiner
 from .enrichment import enrich_component_assembly
 from .input_builder import ComponentAssemblyInputBuilder
 from .llm_client import ComponentAssemblyLLMClient
@@ -34,6 +35,7 @@ class ComponentAssemblyAgent:
         self._cleanup = ComponentOverlapCleanup()
         self._validator = ComponentAssemblyValidator()
         self._repairer = ComponentAssemblyRepairer(cleanup=self._cleanup)
+        self._refiner = ComponentRefiner()
 
     def run(
         self,
@@ -85,6 +87,15 @@ class ComponentAssemblyAgent:
             result = enrich_component_assembly(result, llm_input)
         else:
             result.validation_issues = issues
+
+        # Deterministic theory-operation refinement (issue #300): split coarse,
+        # summary-level components into one-operation-per-component units using
+        # the derivation chains, then re-validate the refined output.
+        if (config or {}).get("enable_component_refiner", True):
+            result = self._refiner.refine(result, llm_input, derivations)
+            result.validation_issues = self._validator.validate(
+                result, cartridge, llm_input=llm_input
+            )
         return result
 
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:

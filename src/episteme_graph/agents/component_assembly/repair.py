@@ -106,6 +106,7 @@ def _parse_raw(
             source_scope=item.get("source_scope", {}) if isinstance(item.get("source_scope", {}), dict) else {},
             assumptions=list(item.get("assumptions", [])),
             approximations=list(item.get("approximations", [])),
+            operation=str(item.get("operation", "")),
         ))
     return ComponentAssemblyResult(
         document_id=raw.get("document_id", document_id),

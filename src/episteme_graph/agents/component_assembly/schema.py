@@ -156,6 +156,10 @@ class ComponentRecord:
     source_scope: dict = field(default_factory=dict)
     assumptions: list[str] = field(default_factory=list)
     approximations: list[str] = field(default_factory=list)
+    # Single main theoretical operation for this component (issue #300).
+    # Populated by ComponentRefiner; one of the theory-operation families
+    # (define, linearize, eliminate, substitute, solve, derive, constrain, ...).
+    operation: str = ""
 
 
 @dataclass
@@ -176,6 +180,8 @@ class ComponentAssemblyResult:
     review_notes: list[str]
     confidence: float
     validation_issues: list[ValidationIssue] = field(default_factory=list)
+    # ComponentRefiner output: record of summary→theory-operation splits (issue #300).
+    refinement_report: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -222,6 +228,7 @@ class ComponentAssemblyResult:
                 source_scope=c.get("source_scope") or {},
                 assumptions=list(c.get("assumptions") or []),
                 approximations=list(c.get("approximations") or []),
+                operation=c.get("operation", ""),
             ))
         issues = [ValidationIssue(**i) for i in d.get("validation_issues", [])]
         return cls(
@@ -233,6 +240,7 @@ class ComponentAssemblyResult:
             review_notes=d.get("review_notes", []),
             confidence=float(d.get("confidence", 0.0)),
             validation_issues=issues,
+            refinement_report=d.get("refinement_report") or {},
         )
 
     @classmethod

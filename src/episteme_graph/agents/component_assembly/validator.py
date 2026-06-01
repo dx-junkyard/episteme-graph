@@ -68,6 +68,7 @@ class ComponentAssemblyValidator:
         for component in result.components:
             issues += self._check_component(component, allowed_components, allowed_dependencies, component_ids, available)
             issues += self._check_required_fields(component, cartridge)
+            issues += self._check_operation(component)
             if available:
                 issues += self._check_id_references(component, available)
         issues += self._check_hints(result, component_ids)
@@ -479,6 +480,27 @@ class ComponentAssemblyValidator:
                 f"components[{component.component_id}].output_equation_ids",
             ))
         return issues
+
+    def _check_operation(self, component: ComponentRecord) -> list[ValidationIssue]:
+        """Derivation-path components should declare a single main operation (issue #300)."""
+        deriv_like = component.component_type in {
+            "RelationComponent",
+            "PaperRelationComponent",
+            "MethodComponent",
+            "CorrectionComponent",
+        }
+        if not deriv_like:
+            return []
+        has_equations = bool(_component_equation_refs(component, component.evidence_refs or {}))
+        if has_equations and not (component.operation or "").strip():
+            return [ValidationIssue(
+                "derivation_component_missing_operation",
+                "warning",
+                f"{component.component_id} ({component.component_type}) has equations "
+                "but no declared main operation; theory components should expose one operation",
+                f"components[{component.component_id}].operation",
+            )]
+        return []
 
     def _check_required_fields(
         self,

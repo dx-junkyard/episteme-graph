@@ -95,6 +95,23 @@ def test_relation_component_without_output_is_warning():
     assert any(i.rule_id == "relation_component_without_output" for i in VALIDATOR.validate(_result(components=[_component(outputs=[])])))
 
 
+def test_derivation_component_without_operation_is_warning():
+    """issue #300: derivation-path components with equations should declare an operation."""
+    component = _component(operation="")
+    assert any(
+        i.rule_id == "derivation_component_missing_operation"
+        for i in VALIDATOR.validate(_result(components=[component]))
+    )
+
+
+def test_derivation_component_with_operation_has_no_operation_warning():
+    component = _component(operation="derive")
+    assert not any(
+        i.rule_id == "derivation_component_missing_operation"
+        for i in VALIDATOR.validate(_result(components=[component]))
+    )
+
+
 def test_invalid_assembly_hint_is_error():
     result = _result(assembly_hints=[{"hint_type": "bad", "component_ids": ["comp_1"], "reason": "bad"}])
     assert any(i.rule_id == "invalid_assembly_hint_type" for i in VALIDATOR.validate(result))

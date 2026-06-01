@@ -12,11 +12,22 @@ Your task is NOT to summarize sections.
 Your task is to construct reusable components with explicit inputs, outputs,
 preconditions, cautions, dependencies, and an INTERNAL FLOW that connects them.
 
+Component boundaries follow THEORY STRUCTURE, not explanation structure.
+1 component = 1 main theoretical operation.
+Decide boundaries by: inputs change, outputs change, the operation changes,
+assumptions change, the eliminated target changes, the derivation result changes,
+the equation role changes, or the review status changes.
+Split a component when it contains two or more of:
+define, parameterize, linearize, solve, substitute, eliminate, derive, compare,
+diagnose, forecast, limit. Do NOT keep a bias-parameter solution, a consistency
+relation, a forecast constraint, and a validity caveat inside one component.
+Each component should set "operation" to its single main operation.
+
 Important constraints:
 - Use only component types allowed by the active cartridge or explicit core fallbacks.
 - Use only dependency labels from the allowed vocabulary.
 - Do not invent new component taxonomies.
-- Components must be reusable units, not topical or section summaries.
+- Components must be reusable theory operations, not topical or section summaries.
 - Use accepted claims, equation semantics, thesis structure, and DSL graph evidence.
 - Do not let prior work or meta discourse dominate component cores.
 
@@ -65,6 +76,7 @@ _OUTPUT_SCHEMA = {
         {
             "component_id": "comp_001",
             "component_type": "allowed component type",
+            "operation": "single main theoretical operation (define/linearize/eliminate/substitute/solve/derive/constrain/diagnose/forecast/compare/...)",
             "label": "short label",
             "summary": "reusable component summary",
             "inputs": [{"name": "string", "node_refs": [], "claim_ids": [], "equation_ids": []}],
