@@ -28,9 +28,11 @@ from .schema import (
 
 _GENERIC_LABELS = {"define", "transform", "relate", "result"}
 # Minimum number of theory-operation nodes required before we publish the
-# derivation-derived graph as the main graph (smaller chains fall back to the
-# component view).
-_MIN_THEORY_NODES = 3
+# derivation-derived graph as the main graph. Whenever a DerivationChain yields
+# at least one theory-operation node we adopt it (issue #304): even a 1–2 step
+# chain carries operation-derived node/edge types that must reach the graph.
+# Only an empty derivation set falls back to the component view.
+_MIN_THEORY_NODES = 1
 
 
 class ComponentGraphNormalizer:
@@ -185,6 +187,7 @@ class ComponentGraphNormalizer:
                 review_status, review_reasons = _edge_backing(
                     evidence_equation_ids=overlap,
                     is_generic=target["is_generic"],
+                    evidence_derivation_ids=[source["step_id"], target["step_id"]],
                 )
                 edges.append(ComponentGraphEdge(
                     edge_id=f"theory_edge_{len(edges) + 1:04d}",
@@ -272,6 +275,7 @@ class ComponentGraphNormalizer:
                 evidence_equation_ids=edge.evidence_equation_ids,
                 is_generic=edge_type.lower() in ("requires_review", "transforms", "related_to"),
                 evidence_claims=edge.evidence_claims,
+                evidence_derivation_ids=edge.evidence_derivation_ids,
             )
             result.append(replace(
                 edge,
@@ -345,8 +349,16 @@ def _edge_backing(
     evidence_equation_ids: list[str],
     is_generic: bool,
     evidence_claims: list[str] | None = None,
+    evidence_derivation_ids: list[str] | None = None,
 ) -> tuple[str, list[str]]:
-    has_evidence = bool(evidence_equation_ids) or bool(evidence_claims)
+    # A derivation-backed edge is just as source-backed as an equation- or
+    # claim-backed one (issue #304): equation OR claim OR derivation evidence
+    # all count as backing.
+    has_evidence = (
+        bool(evidence_equation_ids)
+        or bool(evidence_claims)
+        or bool(evidence_derivation_ids)
+    )
     if is_generic:
         return "review_required", ["edge_not_source_backed", "fallback_or_inferred_node"]
     if has_evidence:

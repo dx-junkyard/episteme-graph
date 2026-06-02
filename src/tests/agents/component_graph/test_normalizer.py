@@ -1,5 +1,8 @@
 from episteme_graph.agents.component_assembly.schema import ComponentAssemblyResult
-from episteme_graph.agents.component_graph.normalizer import ComponentGraphNormalizer
+from episteme_graph.agents.component_graph.normalizer import (
+    ComponentGraphNormalizer,
+    _edge_backing,
+)
 from episteme_graph.agents.component_graph.schema import GRAPH_SCHEMA_VERSION, ComponentGraphResult
 from episteme_graph.agents.derivation_chain.schema import (
     DerivationChainRecord,
@@ -156,3 +159,75 @@ def test_normalizer_diagnostic_backed_by_upstream_results():
     # The diagnostic node is fed by the upstream derivation node (acceptance #7).
     derive_node = next(n for n in result.nodes if n.operation == "derive_consistency_relation")
     assert derive_node.component_id in incoming
+
+
+# --- issue #304 regression tests --------------------------------------------
+
+
+def test_edge_backing_treats_derivation_evidence_as_source_backed():
+    """An edge with only evidence_derivation_ids is source-backed (issue #304)."""
+    status, reasons = _edge_backing(
+        evidence_equation_ids=[],
+        is_generic=False,
+        evidence_claims=[],
+        evidence_derivation_ids=["step_1", "step_2"],
+    )
+    assert status == "source_backed"
+    assert reasons == []
+
+    # No backing at all is still review_required with a reason.
+    status, reasons = _edge_backing(
+        evidence_equation_ids=[],
+        is_generic=False,
+        evidence_claims=[],
+        evidence_derivation_ids=[],
+    )
+    assert status == "review_required"
+    assert reasons
+
+
+def _short_derivations(steps):
+    return DerivationChainResult(
+        document_id="doc",
+        cartridge_id=None,
+        chains=[
+            DerivationChainRecord(
+                derivation_id="deriv",
+                document_id="doc",
+                source_section_ids=[],
+                steps=steps,
+            )
+        ],
+    )
+
+
+def test_normalizer_reflects_two_step_derivation_chain():
+    """A 1–2 step chain still produces operation-derived nodes/edges (issue #304)."""
+    derivations = _short_derivations([
+        _step("define", ["eq_a"], ["eq_b"]),
+        _step("linearize_moment_equations", ["eq_b"], ["eq_c"]),
+    ])
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    main_nodes = [n for n in result.nodes if n.graph_layer == "main"]
+    # Both derivation steps surface as main theory-operation nodes.
+    assert len(main_nodes) == 2
+    assert all(n.component_type == "TheoryOperationNode" for n in main_nodes)
+
+    # The operation-derived edge type reaches the graph instead of being
+    # dropped back to the component fallback view.
+    edge_types = {edge.edge_type for edge in result.edges}
+    assert "linearizes" in edge_types
+
+
+def test_normalizer_reflects_single_step_derivation_chain():
+    derivations = _short_derivations([
+        _step("derive_consistency_relation", ["eq_a"], ["eq_b"]),
+    ])
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    main_nodes = [n for n in result.nodes if n.graph_layer == "main"]
+    assert len(main_nodes) == 1
+    assert main_nodes[0].operation == "derive_consistency_relation"

@@ -706,6 +706,9 @@ def persist_component_graph(
                 "support_status": e.get("support_status", "llm_inferred"),
                 "confidence": e.get("confidence", 0.0),
                 "review_status": e.get("review_status", "teacher_review_required"),
+                # review_required edge の理由 (issue #302/#304) を保存する。
+                # 落とすと API/UI 側で review 理由を表示・検証できなくなる。
+                "review_reasons": list(e.get("review_reasons") or []),
                 "evidence": evidence,
                 "edge_id": e.get("edge_id", ""),
             })
