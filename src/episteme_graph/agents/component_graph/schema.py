@@ -76,6 +76,34 @@ GENERIC_EDGE_TYPES = {"related_to", "correlates", "supports", "transforms", "rel
 # flagged for review instead of being published as confirmed structure.
 GENERIC_OPERATIONS = {"transform", "relate", "connect", "support", "associate", ""}
 
+# Graph layers (issue #306). The main graph carries aggregated, high-level
+# theory-operation nodes; the equation_detail graph keeps one node per
+# derivation step; the debug layer holds fallback / inferred nodes.
+GRAPH_LAYER_MAIN = "main"
+GRAPH_LAYER_EQUATION_DETAIL = "equation_detail"
+GRAPH_LAYER_DEBUG = "debug"
+GRAPH_LAYERS = [GRAPH_LAYER_MAIN, GRAPH_LAYER_EQUATION_DETAIL, GRAPH_LAYER_DEBUG]
+
+# Component-type vocabulary for the two graph layers (issue #306).
+THEORY_OPERATION_NODE = "TheoryOperationNode"  # aggregated, main graph
+EQUATION_OPERATION_NODE = "EquationOperationNode"  # per-step, detail graph
+
+# Map a node's source-backing status to a review_status (issue #306). A
+# source-backed node should not stay ``teacher_review_required`` by default;
+# inferred / review_required nodes must surface as review_required.
+REVIEW_STATUS_BY_BACKING = {
+    "source_backed": "source_backed",
+    "partially_source_backed": "teacher_review_required",
+    "inferred": "review_required",
+    "review_required": "review_required",
+}
+
+
+def review_status_for_backing(source_backing_status: str) -> str:
+    """Return the review_status implied by a node's source-backing status."""
+    key = str(source_backing_status or "").strip().lower()
+    return REVIEW_STATUS_BY_BACKING.get(key, "review_required")
+
 # Full operation name → (verb, edge_type) for ontology operations that do not
 # follow the simple ``<prefix>_<object>`` shape.
 _OPERATION_FULL_MAP = {
@@ -191,6 +219,11 @@ class ComponentGraphNode:
     # Set explicitly by the normalizer; "" means not yet classified.
     source_backing_status: str = ""
     review_reasons: list[str] = field(default_factory=list)
+    # Layer linkage (issue #306). A main TheoryOperationNode lists the
+    # equation_detail nodes it aggregates in ``member_component_ids``; each
+    # equation_detail node points back at its main node via ``parent_component_id``.
+    parent_component_id: str = ""
+    member_component_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -291,6 +324,8 @@ class ComponentGraphResult:
                     "linked_evidence_ids": n.linked_evidence_ids,
                     "source_backing_status": n.source_backing_status,
                     "review_reasons": n.review_reasons,
+                    "parent_component_id": n.parent_component_id,
+                    "member_component_ids": n.member_component_ids,
                 }
                 for n in self.nodes
             ],

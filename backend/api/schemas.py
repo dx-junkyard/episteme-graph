@@ -861,6 +861,9 @@ class ComponentGraphNode(BaseModel):
     linked_evidence_ids: list[str] = Field(default_factory=list)
     source_backing_status: str = ""
     review_reasons: list[str] = Field(default_factory=list)
+    # Layer linkage between main TheoryOperationNode and equation_detail nodes (issue #306).
+    parent_component_id: str = ""
+    member_component_ids: list[str] = Field(default_factory=list)
 
 
 class ComponentGraphEdge(BaseModel):

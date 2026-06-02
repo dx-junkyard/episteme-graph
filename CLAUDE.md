@@ -195,8 +195,23 @@ examples/          → サンプル入出力JSON
   `fallback_or_inferred_node` / `source_span_missing` から選ぶ）。
 - **fallback / inferred node を main graph で確定扱いしない**: `deterministic_fallback` や
   `inferred` の node は `graph_layer = "debug"` に分離し、`source_backed` にしてはならない（hard error）。
+- **graph を 2 層に分離する (#306)**: main graph は上位理論構成を表す少数の集約 node
+  (`graph_layer = "main"`, `component_type = "TheoryOperationNode"`)、式単位の step は
+  (`graph_layer = "equation_detail"`, `component_type = "EquationOperationNode"`) に保持する。
+  式 step は `(derivation_id, operation family)` で集約して main node を作り、各 detail node は
+  `parent_component_id`、各 main node は `member_component_ids` で相互参照する。
+  generic operation は main node にしない（detail / debug に置き `inferred`）。
+- **review_status は source_backing_status から導出する (#306)**: `schema.review_status_for_backing()`
+  が `source_backed → source_backed` / `partially_source_backed → teacher_review_required` /
+  `inferred・review_required → review_required` にマップする。全 node を一律
+  `teacher_review_required` にしない。
+- **atomic claim を優先する (#306)**: node の主たる backing は atomic claim（短く、evidence_text が
+  非空、paper-level でない）を優先する。atomic claim が無ければ `review_reasons=["missing_atomic_claim"]`
+  を付け、equation ID だけの label は `partially_source_backed` に留める。空の evidence_text を
+  強い source backing として扱わない。
 - **UI (`admin.js`)** は `source_backing_status` で表示を区別する
   （source_backed=通常 / partially=細線 / review_required=点線枠 / inferred・fallback=薄色+⚠）。
+  グラフ層トグル（主グラフ / 式の詳細 / すべて）で `graph_layer` を切り替え、既定は main を優先表示する。
 
 #### カートリッジシステム
 

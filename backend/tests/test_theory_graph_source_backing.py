@@ -57,6 +57,29 @@ class TestRoutePropagatesSourceBacking:
             assert f'"{relation}"' in source, f"_GRAPH_RELATIONS missing {relation}"
 
 
+class TestGraphLayering:
+    """Issue #306: main / equation_detail layering plumbing."""
+
+    def test_node_schema_has_layer_linkage(self):
+        source = _read(SCHEMAS)
+        assert "parent_component_id" in source
+        assert "member_component_ids" in source
+
+    def test_route_passes_through_layer_linkage(self):
+        source = _read(ROUTES)
+        for field in ('"parent_component_id"', '"member_component_ids"'):
+            assert field in source, f"route does not propagate node field {field}"
+
+    def test_admin_js_supports_layer_toggle(self):
+        source = _read(ADMIN_JS)
+        assert "graphLayerFilter" in source
+        assert "lsGraphForCurrentLayer" in source
+        assert "lsGraphLayerToolbarHtml" in source
+        # Default view prioritizes the main graph.
+        assert 'graphLayerFilter: "main"' in source
+        assert "equation_detail" in source
+
+
 class TestFrontendDistinguishesSourceBacking:
     def test_admin_js_renders_source_backing(self):
         source = _read(ADMIN_JS)

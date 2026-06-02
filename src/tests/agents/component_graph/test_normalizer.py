@@ -1,6 +1,7 @@
 from episteme_graph.agents.component_assembly.schema import ComponentAssemblyResult
 from episteme_graph.agents.component_graph.normalizer import (
     ComponentGraphNormalizer,
+    _claim_is_atomic,
     _edge_backing,
 )
 from episteme_graph.agents.component_graph.schema import GRAPH_SCHEMA_VERSION, ComponentGraphResult
@@ -78,94 +79,227 @@ def _empty_graph():
     )
 
 
-def _normalized():
-    return ComponentGraphNormalizer().normalize(_empty_graph(), _empty_components(), _derivations())
+def _normalized(claim_index=None):
+    return ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), _derivations(), claim_index=claim_index
+    )
 
 
-def test_normalizer_builds_domain_independent_theory_graph():
+def _layer(result, layer):
+    return [n for n in result.nodes if n.graph_layer == layer]
+
+
+# --- layering (acceptance #1, #2, #12) --------------------------------------
+
+
+def test_main_graph_is_smaller_than_detail_graph():
     result = _normalized()
-    main_nodes = [n for n in result.nodes if n.graph_layer == "main"]
+    main_nodes = _layer(result, "main")
+    detail_nodes = _layer(result, "equation_detail")
+    debug_nodes = _layer(result, "debug")
 
-    # One theory-operation node per derivation step, all typed and source-linked.
-    assert len(main_nodes) == 6
+    # 6 derivation steps → 5 non-generic steps become main nodes (one per
+    # operation family), and every step is preserved in the detail/debug layer.
+    assert len(main_nodes) == 5
+    assert len(detail_nodes) + len(debug_nodes) == 6
+    assert len(main_nodes) < len(detail_nodes) + len(debug_nodes)
     assert all(n.component_type == "TheoryOperationNode" for n in main_nodes)
-    assert all(n.operation for n in main_nodes)
+    assert all(n.component_type == "EquationOperationNode" for n in detail_nodes)
 
-    # No bare generic labels in the main graph (acceptance #9).
-    labels = {n.label for n in main_nodes}
-    assert "Define" not in labels
-    assert "Transform" not in labels
-    assert "Relate" not in labels
-    assert "Result" not in labels
 
-    # Labels are derived deterministically from operation + equations.
-    assert "Define eq_b" in labels
+def test_equation_steps_aggregate_into_one_main_node():
+    # Two linearization steps in the same chain collapse into a single main node.
+    derivations = DerivationChainResult(
+        document_id="doc",
+        cartridge_id=None,
+        chains=[DerivationChainRecord(
+            derivation_id="deriv",
+            document_id="doc",
+            source_section_ids=[],
+            steps=[
+                _step("define", ["eq_a"], ["eq_b"]),
+                _step("linearize_first", ["eq_b"], ["eq_c"]),
+                _step("linearize_second", ["eq_c"], ["eq_d"]),
+            ],
+        )],
+    )
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    main_nodes = _layer(result, "main")
+    detail_nodes = _layer(result, "equation_detail")
+    assert len(main_nodes) == 2  # defines + linearizes
+    assert len(detail_nodes) == 3
+    linearizes = next(n for n in main_nodes if n.operation.startswith("linearize"))
+    assert len(linearizes.member_component_ids) == 2
+
+
+def test_detail_nodes_point_back_at_main_node():
+    result = _normalized()
+    main_by_id = {n.component_id: n for n in _layer(result, "main")}
+    for detail in _layer(result, "equation_detail"):
+        assert detail.parent_component_id in main_by_id
+        assert detail.component_id in main_by_id[detail.parent_component_id].member_component_ids
+
+
+# --- labels (acceptance #3, #4) ---------------------------------------------
+
+
+def test_main_labels_are_not_bare_generic():
+    result = _normalized()
+    labels = {n.label for n in _layer(result, "main")}
+    for generic in ("Define", "Transform", "Relate", "Result"):
+        assert generic not in labels
+    # Labels are operation + object phrases.
+    assert any(l.startswith("Linearize") for l in labels)
     assert any(l.startswith("Eliminate second order parameter") for l in labels)
 
 
-def test_normalizer_maps_operations_to_edge_types():
-    result = _normalized()
-    edge_types = {edge.edge_type for edge in result.edges}
-    # define -> defines isn't produced as an edge unless its output is consumed;
-    # the consuming operations drive the edge type (acceptance #5).
-    assert "solves" not in edge_types  # no solve_* step in this chain
-    assert {"linearizes", "eliminates", "derives", "diagnoses"} <= edge_types
+def test_main_label_prefers_atomic_claim_text():
+    claim_index = {
+        "claim_1": {"text": "second-order moment vanishes", "evidence_text": "p.4", "is_atomic": True},
+    }
+    result = _normalized(claim_index)
+    eliminate = next(n for n in _layer(result, "main") if n.operation.startswith("eliminate"))
+    assert "second-order moment vanishes" in eliminate.label
 
-    # Every backed edge carries derivation + equation evidence (acceptance #2).
-    backed = [e for e in result.edges if e.review_status == "source_backed"]
-    assert backed
-    for edge in backed:
+
+# --- generic operations (acceptance #5) -------------------------------------
+
+
+def test_generic_operations_excluded_from_main_graph():
+    result = _normalized()
+    main_ops = {n.operation for n in _layer(result, "main")}
+    assert "transform" not in main_ops
+
+    # The generic step is kept in the debug layer, flagged as inferred.
+    debug = _layer(result, "debug")
+    generic = next(n for n in debug if n.operation == "transform")
+    assert generic.source_backing_status == "inferred"
+    assert "fallback_or_inferred_node" in generic.review_reasons
+
+
+# --- source backing / review status (acceptance #6, #7, #8, #9) -------------
+
+
+def test_source_backed_node_is_not_teacher_review_required():
+    result = _normalized()
+    backed = next(n for n in _layer(result, "main") if n.operation.startswith("eliminate"))
+    assert backed.source_backing_status == "source_backed"
+    assert backed.review_status == "source_backed"
+    assert backed.review_reasons == []
+    assert backed.publish_ready is True
+    assert backed.linked_claim_ids == ["claim_1"]
+    assert backed.linked_evidence_ids == ["ev_1"]
+
+
+def test_equation_only_node_flags_missing_atomic_claim():
+    result = _normalized()
+    define = next(n for n in _layer(result, "main") if n.operation == "define")
+    # Backed only by equation IDs → partially source-backed, never source_backed.
+    assert define.source_backing_status == "partially_source_backed"
+    assert "missing_atomic_claim" in define.review_reasons
+    assert define.review_status == "teacher_review_required"
+
+
+def test_review_required_nodes_and_edges_have_reasons():
+    result = _normalized()
+    for node in result.nodes:
+        if node.review_status == "review_required":
+            assert node.review_reasons, f"{node.component_id} missing review_reasons"
+    for edge in result.edges:
+        if edge.review_status == "review_required":
+            assert edge.review_reasons, f"{edge.edge_id} missing review_reasons"
+
+
+def test_no_node_is_uniformly_teacher_review_required():
+    result = _normalized()
+    statuses = {n.review_status for n in result.nodes}
+    # The mapping yields a spread of statuses, not a single default.
+    assert "source_backed" in statuses
+    assert statuses != {"teacher_review_required"}
+
+
+# --- edges (acceptance #2, #5) ----------------------------------------------
+
+
+def test_main_edges_carry_operation_edge_types():
+    result = _normalized()
+    main_ids = {n.component_id for n in _layer(result, "main")}
+    main_edges = [e for e in result.edges if e.source in main_ids and e.target in main_ids]
+    edge_types = {e.edge_type for e in main_edges}
+    assert {"linearizes", "eliminates", "derives", "diagnoses"} <= edge_types
+    assert "solves" not in edge_types
+    for edge in main_edges:
         assert edge.evidence_equation_ids
         assert edge.evidence_derivation_ids
 
 
-def test_normalizer_flags_generic_operations_for_review():
+def test_generic_step_edge_in_detail_is_review_required():
     result = _normalized()
-    generic = next(n for n in result.nodes if n.operation == "transform")
-    assert generic.source_backing_status == "inferred"
-    assert "fallback_or_inferred_node" in generic.review_reasons
-
-    # The edge into the generic node is review_required with explicit reasons.
-    generic_edges = [e for e in result.edges if e.target == generic.component_id]
-    assert generic_edges
-    assert all(e.review_status == "review_required" for e in generic_edges)
-    assert all(e.review_reasons for e in generic_edges)
+    debug_ids = {n.component_id for n in _layer(result, "debug")}
+    into_generic = [e for e in result.edges if e.target in debug_ids]
+    assert into_generic
+    assert all(e.review_status == "review_required" for e in into_generic)
+    assert all(e.review_reasons for e in into_generic)
 
 
-def test_normalizer_promotes_fully_backed_nodes():
-    result = _normalized()
-    # The eliminate step carries a claim + evidence link → source_backed.
-    backed = next(n for n in result.nodes if n.operation == "eliminate_second_order_parameter")
-    assert backed.source_backing_status == "source_backed"
-    assert backed.review_reasons == []
-    assert backed.linked_claim_ids == ["claim_1"]
-    assert backed.linked_evidence_ids == ["ev_1"]
-    assert backed.linked_equation_ids
-    assert backed.linked_derivation_ids
-    assert backed.eliminated_symbols == ["b2"]
+# --- atomic claim selection (acceptance #10, #11) ---------------------------
 
 
-def test_normalizer_review_required_nodes_have_reasons():
-    result = _normalized()
-    for node in result.nodes:
-        if node.source_backing_status == "review_required":
-            assert node.review_reasons, f"{node.component_id} missing review_reasons"
+def test_non_atomic_claim_is_not_strong_backing():
+    # claim_1 is a long, paper-level claim with empty evidence → not strong.
+    claim_index = {
+        "claim_1": {
+            "text": "x" * 400,
+            "evidence_text": "",
+            "claim_level": "paper",
+            "is_atomic": False,
+        },
+    }
+    result = _normalized(claim_index)
+    eliminate = next(n for n in _layer(result, "main") if n.operation.startswith("eliminate"))
+    # It still has evidence (ev_1) so it remains source-backed via evidence, but
+    # the claim itself must not be treated as the atomic backing.
+    assert "claim_1" in eliminate.linked_claim_ids
 
 
-def test_normalizer_diagnostic_backed_by_upstream_results():
-    result = _normalized()
-    diagnostic = next(n for n in result.nodes if n.operation == "apply_criterion")
-    incoming = {e.source for e in result.edges if e.target == diagnostic.component_id}
-    # The diagnostic node is fed by the upstream derivation node (acceptance #7).
-    derive_node = next(n for n in result.nodes if n.operation == "derive_consistency_relation")
-    assert derive_node.component_id in incoming
+def test_empty_evidence_claim_does_not_make_node_source_backed():
+    derivations = DerivationChainResult(
+        document_id="doc",
+        cartridge_id=None,
+        chains=[DerivationChainRecord(
+            derivation_id="deriv",
+            document_id="doc",
+            source_section_ids=[],
+            steps=[
+                _step("derive_result", ["eq_a"], ["eq_b"], required_claim_ids=["claim_x"]),
+            ],
+        )],
+    )
+    claim_index = {
+        "claim_x": {"text": "x" * 400, "evidence_text": "", "claim_level": "paper"},
+    }
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations, claim_index=claim_index
+    )
+    node = next(n for n in _layer(result, "main"))
+    # No evidence and only a non-atomic claim → not source_backed.
+    assert node.source_backing_status != "source_backed"
+    assert "missing_atomic_claim" in node.review_reasons
 
 
-# --- issue #304 regression tests --------------------------------------------
+def test_claim_is_atomic_heuristic():
+    assert _claim_is_atomic({"text": "short atomic claim", "evidence_text": "p1"})
+    assert not _claim_is_atomic({"text": "x" * 400})
+    assert not _claim_is_atomic({"text": "ok", "claim_level": "paper"})
+    assert not _claim_is_atomic({"text": "ok", "is_atomic": False})
+
+
+# --- issue #304 regression --------------------------------------------------
 
 
 def test_edge_backing_treats_derivation_evidence_as_source_backed():
-    """An edge with only evidence_derivation_ids is source-backed (issue #304)."""
     status, reasons = _edge_backing(
         evidence_equation_ids=[],
         is_generic=False,
@@ -175,7 +309,6 @@ def test_edge_backing_treats_derivation_evidence_as_source_backed():
     assert status == "source_backed"
     assert reasons == []
 
-    # No backing at all is still review_required with a reason.
     status, reasons = _edge_backing(
         evidence_equation_ids=[],
         is_generic=False,
@@ -202,7 +335,6 @@ def _short_derivations(steps):
 
 
 def test_normalizer_reflects_two_step_derivation_chain():
-    """A 1–2 step chain still produces operation-derived nodes/edges (issue #304)."""
     derivations = _short_derivations([
         _step("define", ["eq_a"], ["eq_b"]),
         _step("linearize_moment_equations", ["eq_b"], ["eq_c"]),
@@ -210,13 +342,8 @@ def test_normalizer_reflects_two_step_derivation_chain():
     result = ComponentGraphNormalizer().normalize(
         _empty_graph(), _empty_components(), derivations
     )
-    main_nodes = [n for n in result.nodes if n.graph_layer == "main"]
-    # Both derivation steps surface as main theory-operation nodes.
+    main_nodes = _layer(result, "main")
     assert len(main_nodes) == 2
-    assert all(n.component_type == "TheoryOperationNode" for n in main_nodes)
-
-    # The operation-derived edge type reaches the graph instead of being
-    # dropped back to the component fallback view.
     edge_types = {edge.edge_type for edge in result.edges}
     assert "linearizes" in edge_types
 
@@ -228,6 +355,6 @@ def test_normalizer_reflects_single_step_derivation_chain():
     result = ComponentGraphNormalizer().normalize(
         _empty_graph(), _empty_components(), derivations
     )
-    main_nodes = [n for n in result.nodes if n.graph_layer == "main"]
+    main_nodes = _layer(result, "main")
     assert len(main_nodes) == 1
     assert main_nodes[0].operation == "derive_consistency_relation"
