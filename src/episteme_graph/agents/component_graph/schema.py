@@ -26,15 +26,121 @@ VALID_EDGE_TYPES = [
     "INHIBITS",
     "DERIVES_FROM",
     # Theory-structure graph relations used by GraphNormalizer.
+    # Domain-neutral operation-derived edge types (issue #302).
     "defines",
-    "feeds_equation_system",
+    "constructs",
     "linearizes",
-    "eliminates_bias",
+    "solves",
+    "substitutes",
+    "eliminates",
     "derives",
     "constrains",
     "diagnoses",
+    "compares",
+    "normalizes",
+    "approximates",
+    "transforms",
+    "feeds",
     "requires_review",
+    # Retained for backward compatibility with previously stored graphs.
+    "feeds_equation_system",
+    "eliminates_bias",
 ]
+
+# Source-backing classification for theory-operation nodes (issue #302).
+SOURCE_BACKING_STATUSES = [
+    "source_backed",
+    "partially_source_backed",
+    "inferred",
+    "review_required",
+]
+
+# Structured review-reason vocabulary (issue #302). review_required nodes/edges
+# must always carry at least one of these so the UI can explain *why*.
+REVIEW_REASONS = [
+    "missing_atomic_claim",
+    "missing_evidence_link",
+    "missing_equation_link",
+    "missing_derivation_link",
+    "equation_needs_math_review",
+    "edge_not_source_backed",
+    "fallback_or_inferred_node",
+    "source_span_missing",
+]
+
+# Edge types that are too generic to publish as confirmed theory structure.
+GENERIC_EDGE_TYPES = {"related_to", "correlates", "supports", "transforms", "relate"}
+
+# Operations that do not name a concrete theory operation. When a derivation
+# step carries one of these, the resulting node/edge is treated as inferred and
+# flagged for review instead of being published as confirmed structure.
+GENERIC_OPERATIONS = {"transform", "relate", "connect", "support", "associate", ""}
+
+# Full operation name → (verb, edge_type) for ontology operations that do not
+# follow the simple ``<prefix>_<object>`` shape.
+_OPERATION_FULL_MAP = {
+    "apply_definition": ("Apply definition", "defines"),
+    "apply_criterion": ("Apply criterion", "diagnoses"),
+    "apply_constraint": ("Apply constraint", "constrains"),
+    "apply_equation": ("Apply equation", "transforms"),
+    "apply_measurement_or_update": ("Apply measurement", "transforms"),
+    "apply_non_disturbance_or_independence": ("Apply independence", "constrains"),
+    "introduce_observable": ("Introduce observable", "defines"),
+    "solve_linear_system": ("Solve linear system", "solves"),
+    "eliminate_parameter": ("Eliminate parameter", "eliminates"),
+    "derive_result": ("Derive result", "derives"),
+    "infer_conclusion": ("Infer conclusion", "derives"),
+    "infer_intermediate_claim": ("Infer intermediate claim", "derives"),
+    "state_assumption": ("State assumption", "defines"),
+    "branch_on_condition": ("Branch on condition", "constrains"),
+    "flag_limitation": ("Flag limitation", "constrains"),
+}
+
+# First token of an operation → (verb, edge_type). Domain-neutral; the object
+# part of the operation name is appended to keep the label specific.
+_OPERATION_PREFIX_MAP = {
+    "define": ("Define", "defines"),
+    "construct": ("Construct", "constructs"),
+    "linearize": ("Linearize", "linearizes"),
+    "solve": ("Solve", "solves"),
+    "substitute": ("Substitute", "substitutes"),
+    "eliminate": ("Eliminate", "eliminates"),
+    "derive": ("Derive", "derives"),
+    "constrain": ("Constrain", "constrains"),
+    "diagnose": ("Diagnose", "diagnoses"),
+    "compare": ("Compare", "compares"),
+    "normalize": ("Normalize", "normalizes"),
+    "approximate": ("Approximate", "approximates"),
+    "introduce": ("Introduce", "defines"),
+    "state": ("State", "defines"),
+    "infer": ("Infer", "derives"),
+    "flag": ("Flag", "constrains"),
+}
+
+
+def classify_operation(operation: str) -> tuple[str, str, bool]:
+    """Map a derivation operation to a (verb, edge_type, is_generic) triple.
+
+    Domain-neutral: no paper- or field-specific terms. ``is_generic`` is True
+    when the operation does not name a concrete theory operation, in which case
+    the resulting node/edge should be flagged for review rather than published.
+    """
+    op = str(operation or "").strip().lower()
+    if op in GENERIC_OPERATIONS:
+        verb = op.replace("_", " ").capitalize() if op else "Operation"
+        return verb, "requires_review", True
+    if op in _OPERATION_FULL_MAP:
+        verb, edge_type = _OPERATION_FULL_MAP[op]
+        return verb, edge_type, False
+    prefix = op.split("_", 1)[0]
+    if prefix in _OPERATION_PREFIX_MAP:
+        verb, edge_type = _OPERATION_PREFIX_MAP[prefix]
+        rest = op.split("_")[1:]
+        label = (verb + " " + " ".join(rest)).strip() if rest else verb
+        return label, edge_type, False
+    # Unknown operation: keep it but treat as a generic transform pending review.
+    return op.replace("_", " ").capitalize(), "transforms", True
+
 
 SUPPORT_STATUSES = [
     "llm_inferred",
@@ -77,6 +183,14 @@ class ComponentGraphNode:
     eliminated_symbols: list[str] = field(default_factory=list)
     retained_symbols: list[str] = field(default_factory=list)
     derivation_operations: list[str] = field(default_factory=list)
+    # Source-backing links and status (issue #302).
+    linked_equation_ids: list[str] = field(default_factory=list)
+    linked_derivation_ids: list[str] = field(default_factory=list)
+    linked_claim_ids: list[str] = field(default_factory=list)
+    linked_evidence_ids: list[str] = field(default_factory=list)
+    # Set explicitly by the normalizer; "" means not yet classified.
+    source_backing_status: str = ""
+    review_reasons: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -90,7 +204,14 @@ class ComponentGraphEdge:
     reasoning: str
     confidence: float = 0.75
     evidence_equation_ids: list[str] = field(default_factory=list)
-    review_status: str = "teacher_review_required"
+    # review_status here records evidence backing (issue #302):
+    # "source_backed" | "review_required". "" means not yet classified.
+    review_status: str = ""
+    # Source-backing links (issue #302).
+    evidence_derivation_ids: list[str] = field(default_factory=list)
+    evidence_claim_ids: list[str] = field(default_factory=list)
+    source_evidence_ids: list[str] = field(default_factory=list)
+    review_reasons: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -164,6 +285,12 @@ class ComponentGraphResult:
                     "eliminated_symbols": n.eliminated_symbols,
                     "retained_symbols": n.retained_symbols,
                     "derivation_operations": n.derivation_operations,
+                    "linked_equation_ids": n.linked_equation_ids,
+                    "linked_derivation_ids": n.linked_derivation_ids,
+                    "linked_claim_ids": n.linked_claim_ids,
+                    "linked_evidence_ids": n.linked_evidence_ids,
+                    "source_backing_status": n.source_backing_status,
+                    "review_reasons": n.review_reasons,
                 }
                 for n in self.nodes
             ],
@@ -176,10 +303,14 @@ class ComponentGraphResult:
                     "edge_type": e.edge_type,
                     "support_status": e.support_status,
                     "confidence": e.confidence,
-                    "review_status": "teacher_review_required",
+                    "review_status": e.review_status,
+                    "review_reasons": e.review_reasons,
                     "evidence": {
                         "evidence_claims": e.evidence_claims,
                         "evidence_equation_ids": e.evidence_equation_ids,
+                        "evidence_derivation_ids": e.evidence_derivation_ids,
+                        "evidence_claim_ids": e.evidence_claim_ids,
+                        "source_evidence_ids": e.source_evidence_ids,
                         "reason": e.reasoning,
                     },
                 }

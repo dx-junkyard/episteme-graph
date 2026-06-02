@@ -854,6 +854,13 @@ class ComponentGraphNode(BaseModel):
     eliminated_symbols: list[str] = Field(default_factory=list)
     retained_symbols: list[str] = Field(default_factory=list)
     derivation_operations: list[str] = Field(default_factory=list)
+    # Source-backing links and status (issue #302).
+    linked_equation_ids: list[str] = Field(default_factory=list)
+    linked_derivation_ids: list[str] = Field(default_factory=list)
+    linked_claim_ids: list[str] = Field(default_factory=list)
+    linked_evidence_ids: list[str] = Field(default_factory=list)
+    source_backing_status: str = ""
+    review_reasons: list[str] = Field(default_factory=list)
 
 
 class ComponentGraphEdge(BaseModel):
@@ -863,7 +870,8 @@ class ComponentGraphEdge(BaseModel):
     edge_type: str = "explicit_connector"
     confidence: float = 0.5
     support_status: str = "design_inferred"
-    review_status: str = "teacher_review_required"
+    review_status: str = "review_required"
+    review_reasons: list[str] = Field(default_factory=list)
     evidence: dict = Field(default_factory=dict)
 
 

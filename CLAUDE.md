@@ -143,6 +143,7 @@ src/episteme_graph/agents/
   thesis_reconstruction/ → ThesisReconstructionAgent (#221)
   dsl_linking/          → DSLLinkingAgent (#222)
   component_assembly/   → ComponentAssemblyAgent (#223)
+  component_graph/      → ComponentGraphAgent (#266) — TheoryOperationGraph 構築
 ```
 
 各Agentディレクトリは最低限以下のファイルを持つ:
@@ -171,6 +172,31 @@ examples/          → サンプル入出力JSON
 3. **evidence-based**: 各出力フィールドに `reason` と `confidence` (0.0〜1.0) を付与
 4. **情報を落とさない**: 不明は `unknown` / `deferred` で保持し、削除しない
 5. **maturity・review情報の最終確定禁止**: LLMが提案しても provisional に留める
+
+#### TheoryOperationGraph (ComponentGraphAgent #266 / #302)
+
+`component_graph/normalizer.py` が DerivationChain から **理論操作グラフ (TheoryOperationGraph)** を
+決定論的に構築する。**特定分野・特定論文の用語をハードコードしない**（domain-independent）。
+
+- **node / edge の語彙は `operation` から導出する**: `schema.classify_operation()` が
+  `define_* → defines` / `linearize_* → linearizes` / `solve_* → solves` /
+  `eliminate_* → eliminates` / `derive_* → derives` / `constrain_* → constrains` /
+  `diagnose_* → diagnoses` / `compare_* → compares` のように prefix で edge_type を決める。
+  `transform` / `relate` / `connect` / `support` / `associate` など抽象的な operation は
+  generic 扱いとし、`inferred` / `requires_review` にして warning を出す。
+- **source-backing を必ず明示する**: 各 node は
+  `linked_equation_ids` / `linked_derivation_ids` / `linked_claim_ids` / `linked_evidence_ids` と
+  `source_backing_status`（`source_backed` / `partially_source_backed` / `inferred` / `review_required`）を持つ。
+  各 edge は `evidence_equation_ids` / `evidence_derivation_ids` / `evidence_claim_ids` /
+  `source_evidence_ids` と `review_status`（`source_backed` / `review_required`）を持つ。
+- **review の理由を必ず付与する**: `review_required` の node / edge は `review_reasons` を空にしない
+  （`missing_atomic_claim` / `missing_evidence_link` / `missing_equation_link` /
+  `missing_derivation_link` / `equation_needs_math_review` / `edge_not_source_backed` /
+  `fallback_or_inferred_node` / `source_span_missing` から選ぶ）。
+- **fallback / inferred node を main graph で確定扱いしない**: `deterministic_fallback` や
+  `inferred` の node は `graph_layer = "debug"` に分離し、`source_backed` にしてはならない（hard error）。
+- **UI (`admin.js`)** は `source_backing_status` で表示を区別する
+  （source_backed=通常 / partially=細線 / review_required=点線枠 / inferred・fallback=薄色+⚠）。
 
 #### カートリッジシステム
 

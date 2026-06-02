@@ -2,17 +2,23 @@
 from __future__ import annotations
 
 from .schema import (
+    GENERIC_EDGE_TYPES,
+    GENERIC_OPERATIONS,
     VALID_EDGE_TYPES,
     CartridgeContext,
     ComponentGraphEdge,
     ComponentGraphLLMInput,
+    ComponentGraphNode,
     ComponentGraphResult,
     ValidationIssue,
+    classify_operation,
 )
 
 _GENERIC_LABELS = {"define", "transform", "relate", "result"}
-_GENERIC_EDGE_TYPES = {"RELATED_TO", "CORRELATES", "supports"}
+_GENERIC_EDGE_TYPES = {"RELATED_TO", "CORRELATES", "supports", "related_to", "correlates"}
 _BIAS_ELIMINATION_NEEDLES = ("bias elimination", "eliminate second", "eliminate third", "second-order bias", "third-order bias")
+# Operation edge types whose nodes must expose their output/constraint equations.
+_OUTPUT_BEARING_EDGE_TYPES = {"constrains", "derives", "diagnoses"}
 
 
 class ComponentGraphValidator:
@@ -36,10 +42,11 @@ class ComponentGraphValidator:
                     f"node {node.component_id!r} has empty label",
                     f"nodes[{node.component_id}].label",
                 ))
+            is_main = str(getattr(node, "graph_layer", "main") or "main") == "main"
             if not node.component_type:
                 issues.append(ValidationIssue(
                     "component_graph_node_missing_component_type",
-                    "warning",
+                    "error" if is_main else "warning",
                     f"node {node.component_id!r} has empty component_type",
                     f"nodes[{node.component_id}].component_type",
                 ))
@@ -91,16 +98,7 @@ class ComponentGraphValidator:
                     f"bias elimination node {node.component_id!r} has no eliminated_symbols",
                     f"nodes[{node.component_id}].eliminated_symbols",
                 ))
-            if (
-                str(getattr(node, "review_status", "") or "") == "teacher_review_required"
-                and str(getattr(node, "graph_layer", "main") or "main") == "main"
-            ):
-                issues.append(ValidationIssue(
-                    "review_required_component_in_main_graph",
-                    "warning",
-                    f"review-required component {node.component_id!r} appears in main graph",
-                    f"nodes[{node.component_id}]",
-                ))
+            issues += self._check_node_source_backing(node, is_main)
 
         valid_types = set(VALID_EDGE_TYPES)
         if cartridge:
@@ -122,6 +120,93 @@ class ComponentGraphValidator:
                 "error",
                 "result confidence out of [0, 1]",
                 "confidence",
+            ))
+
+        return issues
+
+    @staticmethod
+    def _check_node_source_backing(node: ComponentGraphNode, is_main: bool) -> list[ValidationIssue]:
+        issues: list[ValidationIssue] = []
+        cid = node.component_id
+        backing = str(getattr(node, "source_backing_status", "") or "")
+        reasons = list(getattr(node, "review_reasons", []) or [])
+        maturity = str(getattr(node, "maturity_source", "") or "")
+        operation = str(getattr(node, "operation", "") or "")
+        _verb, edge_type, is_generic_op = classify_operation(operation) if operation else ("", "", False)
+
+        linked = _collect_source_links(node)
+        is_theory_op = str(getattr(node, "component_type", "") or "") == "TheoryOperationNode"
+
+        # Hard error: every theory-operation node must carry a source link
+        # (acceptance criterion #1).
+        if is_main and is_theory_op and not linked:
+            issues.append(ValidationIssue(
+                "theory_node_missing_source_link",
+                "error",
+                f"node {cid!r} has no equation/derivation/claim/evidence link",
+                f"nodes[{cid}]",
+            ))
+
+        # Hard error: review_required node must explain why.
+        if backing == "review_required" and not reasons:
+            issues.append(ValidationIssue(
+                "review_required_node_missing_reasons",
+                "error",
+                f"node {cid!r} is review_required but has empty review_reasons",
+                f"nodes[{cid}].review_reasons",
+            ))
+
+        # Hard error: fallback/inferred nodes must not be marked source_backed.
+        if backing == "source_backed" and maturity == "deterministic_fallback":
+            issues.append(ValidationIssue(
+                "fallback_node_marked_source_backed",
+                "error",
+                f"fallback node {cid!r} is marked source_backed",
+                f"nodes[{cid}].source_backing_status",
+            ))
+
+        # Hard error: result/constraint/derive nodes must expose equation links.
+        if operation and edge_type in _OUTPUT_BEARING_EDGE_TYPES and is_main:
+            if not getattr(node, "linked_equation_ids", []):
+                issues.append(ValidationIssue(
+                    "output_node_missing_linked_equations",
+                    "error",
+                    f"{edge_type} node {cid!r} has no linked_equation_ids",
+                    f"nodes[{cid}].linked_equation_ids",
+                ))
+            if edge_type == "derives" and not getattr(node, "linked_derivation_ids", []):
+                issues.append(ValidationIssue(
+                    "derive_node_missing_derivation_link",
+                    "error",
+                    f"derive node {cid!r} has no linked_derivation_ids",
+                    f"nodes[{cid}].linked_derivation_ids",
+                ))
+
+        # Warning: review_required node visible in the main graph.
+        if is_main and backing == "review_required":
+            issues.append(ValidationIssue(
+                "review_required_node_in_main_graph",
+                "warning",
+                f"review_required node {cid!r} appears in main graph ({', '.join(reasons)})",
+                f"nodes[{cid}]",
+            ))
+
+        # Warning: node has no claim backing.
+        if not getattr(node, "linked_claim_ids", []):
+            issues.append(ValidationIssue(
+                "theory_node_missing_claim_link",
+                "warning",
+                f"node {cid!r} has no linked_claim_ids (prefer atomic claims)",
+                f"nodes[{cid}].linked_claim_ids",
+            ))
+
+        # Warning: generic operation cannot be published as a concrete operation.
+        if operation and (operation.strip().lower() in GENERIC_OPERATIONS or is_generic_op):
+            issues.append(ValidationIssue(
+                "theory_node_generic_operation",
+                "warning",
+                f"node {cid!r} operation {operation!r} is too generic for the main graph",
+                f"nodes[{cid}].operation",
             ))
 
         return issues
@@ -228,12 +313,27 @@ class ComponentGraphValidator:
                 f"{eid}: evidence_equation_ids must be a list",
                 f"edges[{eid}].evidence_equation_ids",
             ))
-        elif len(edge.evidence_claims or []) == 0 and len(edge.evidence_equation_ids or []) == 0:
+        elif (
+            len(edge.evidence_claims or []) == 0
+            and len(edge.evidence_equation_ids or []) == 0
+            and len(getattr(edge, "evidence_derivation_ids", []) or []) == 0
+        ):
             issues.append(ValidationIssue(
                 "component_graph_edge_no_evidence",
                 "warning",
-                f"{eid}: edge has no claim or equation evidence",
-                f"edges[{eid}].evidence_claims",
+                f"{eid}: edge has no equation or derivation evidence",
+                f"edges[{eid}].evidence_equation_ids",
+            ))
+
+        if (
+            str(getattr(edge, "review_status", "") or "") == "review_required"
+            and not list(getattr(edge, "review_reasons", []) or [])
+        ):
+            issues.append(ValidationIssue(
+                "review_required_edge_missing_reasons",
+                "warning",
+                f"{eid}: review_required edge has empty review_reasons",
+                f"edges[{eid}].review_reasons",
             ))
 
         if edge.confidence < 0.0 or edge.confidence > 1.0:
@@ -245,6 +345,18 @@ class ComponentGraphValidator:
             ))
 
         return issues
+
+
+def _collect_source_links(node: ComponentGraphNode) -> list[str]:
+    links: list[str] = []
+    for field_name in (
+        "linked_equation_ids",
+        "linked_derivation_ids",
+        "linked_claim_ids",
+        "linked_evidence_ids",
+    ):
+        links.extend(getattr(node, field_name, []) or [])
+    return links
 
 
 def _has_equation_roles(node: ComponentGraphNode) -> bool:
