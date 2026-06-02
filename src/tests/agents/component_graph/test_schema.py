@@ -162,3 +162,80 @@ class TestComponentGraphResult:
         )
         assert edge["support_status"] == "llm_inferred"
         assert edge["relation"] == "TRANSFORMS"
+
+
+class TestClassifyOperation:
+    """Domain-independent operation → (verb, edge_type, is_generic) mapping (#302)."""
+
+    @pytest.mark.parametrize("operation,edge_type", [
+        ("define_kernel", "defines"),
+        ("construct_system", "constructs"),
+        ("linearize_moment_equations", "linearizes"),
+        ("solve_second_order_bias", "solves"),
+        ("substitute_parameter", "substitutes"),
+        ("eliminate_bias", "eliminates"),
+        ("derive_consistency_relation", "derives"),
+        ("constrain_gravity", "constrains"),
+        ("diagnose_modified_gravity", "diagnoses"),
+        ("compare_models", "compares"),
+        ("apply_criterion", "diagnoses"),
+        ("introduce_observable", "defines"),
+    ])
+    def test_concrete_operations_map_to_edge_types(self, operation, edge_type):
+        from episteme_graph.agents.component_graph.schema import classify_operation
+        verb, mapped, is_generic = classify_operation(operation)
+        assert mapped == edge_type
+        assert is_generic is False
+        assert verb and verb.lower() not in {"define", "transform", "relate", "result"}
+
+    @pytest.mark.parametrize("operation", ["transform", "relate", "connect", "support", "associate", ""])
+    def test_generic_operations_flagged(self, operation):
+        from episteme_graph.agents.component_graph.schema import classify_operation
+        _verb, edge_type, is_generic = classify_operation(operation)
+        assert is_generic is True
+        assert edge_type == "requires_review"
+
+
+class TestSourceBackingSerialization:
+    """New source-backing fields round-trip through (de)serialization (#302)."""
+
+    def test_node_source_links_in_payload(self):
+        node = _make_node("comp_001")
+        node.linked_equation_ids = ["eq_1"]
+        node.linked_derivation_ids = ["step_1"]
+        node.linked_claim_ids = ["claim_1"]
+        node.linked_evidence_ids = ["ev_1"]
+        node.source_backing_status = "source_backed"
+        node.component_type = "TheoryOperationNode"
+        payload = _make_result(nodes=[node]).to_graph_payload()
+        n = payload["nodes"][0]
+        assert n["linked_equation_ids"] == ["eq_1"]
+        assert n["linked_derivation_ids"] == ["step_1"]
+        assert n["linked_claim_ids"] == ["claim_1"]
+        assert n["linked_evidence_ids"] == ["ev_1"]
+        assert n["source_backing_status"] == "source_backed"
+
+    def test_edge_evidence_links_in_payload(self):
+        edge = ComponentGraphEdge(
+            edge_id="e1", source="comp_001", target="comp_002", edge_type="derives",
+            support_status="derivation_linked", evidence_claims=[], reasoning="",
+            confidence=0.9, evidence_equation_ids=["eq_1"], review_status="source_backed",
+            evidence_derivation_ids=["step_1"], evidence_claim_ids=["claim_1"],
+            source_evidence_ids=["ev_1"], review_reasons=[],
+        )
+        payload = _make_result(edges=[edge]).to_graph_payload()
+        e = payload["edges"][0]
+        assert e["review_status"] == "source_backed"
+        assert e["evidence"]["evidence_derivation_ids"] == ["step_1"]
+        assert e["evidence"]["evidence_claim_ids"] == ["claim_1"]
+        assert e["evidence"]["source_evidence_ids"] == ["ev_1"]
+
+    def test_from_dict_restores_source_backing(self):
+        node = _make_node("comp_001")
+        node.source_backing_status = "partially_source_backed"
+        node.review_reasons = ["missing_evidence_link"]
+        node.linked_equation_ids = ["eq_1"]
+        restored = ComponentGraphResult.from_dict(_make_result(nodes=[node]).to_dict())
+        assert restored.nodes[0].source_backing_status == "partially_source_backed"
+        assert restored.nodes[0].review_reasons == ["missing_evidence_link"]
+        assert restored.nodes[0].linked_equation_ids == ["eq_1"]

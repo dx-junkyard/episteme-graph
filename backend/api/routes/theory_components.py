@@ -189,14 +189,25 @@ _GRAPH_RELATIONS = {
     "CHECKED_BY",
     "CONFLICTS_WITH",
     "RELATED_TO",
+    # Domain-neutral operation-derived relations (issue #302).
     "defines",
-    "feeds_equation_system",
+    "constructs",
     "linearizes",
-    "eliminates_bias",
+    "solves",
+    "substitutes",
+    "eliminates",
     "derives",
     "constrains",
     "diagnoses",
+    "compares",
+    "normalizes",
+    "approximates",
+    "transforms",
+    "feeds",
     "requires_review",
+    # Retained for backward compatibility with previously stored graphs.
+    "feeds_equation_system",
+    "eliminates_bias",
 }
 _MAX_COMPONENT_ASSEMBLY_CLAIMS = 40
 _MAX_COMPONENTS_PER_SECTION = 3
@@ -1952,6 +1963,12 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
             "eliminated_symbols": node.get("eliminated_symbols") if isinstance(node.get("eliminated_symbols"), list) else [],
             "retained_symbols": node.get("retained_symbols") if isinstance(node.get("retained_symbols"), list) else [],
             "derivation_operations": node.get("derivation_operations") if isinstance(node.get("derivation_operations"), list) else [],
+            "linked_equation_ids": node.get("linked_equation_ids") if isinstance(node.get("linked_equation_ids"), list) else [],
+            "linked_derivation_ids": node.get("linked_derivation_ids") if isinstance(node.get("linked_derivation_ids"), list) else [],
+            "linked_claim_ids": node.get("linked_claim_ids") if isinstance(node.get("linked_claim_ids"), list) else [],
+            "linked_evidence_ids": node.get("linked_evidence_ids") if isinstance(node.get("linked_evidence_ids"), list) else [],
+            "source_backing_status": str(node.get("source_backing_status") or ""),
+            "review_reasons": node.get("review_reasons") if isinstance(node.get("review_reasons"), list) else [],
         })
         seen_nodes.add(component_id)
     normalized_edges = []
@@ -1964,13 +1981,22 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
         "related_to": "RELATED_TO",
         "conflicts_with": "CONFLICTS_WITH",
         "defines": "defines",
-        "feeds_equation_system": "feeds_equation_system",
+        "constructs": "constructs",
         "linearizes": "linearizes",
-        "eliminates_bias": "eliminates_bias",
+        "solves": "solves",
+        "substitutes": "substitutes",
+        "eliminates": "eliminates",
         "derives": "derives",
         "constrains": "constrains",
         "diagnoses": "diagnoses",
+        "compares": "compares",
+        "normalizes": "normalizes",
+        "approximates": "approximates",
+        "transforms": "transforms",
+        "feeds": "feeds",
         "requires_review": "requires_review",
+        "feeds_equation_system": "feeds_equation_system",
+        "eliminates_bias": "eliminates_bias",
     }
     for edge in graph.get("edges") if isinstance(graph.get("edges"), list) else []:
         if not isinstance(edge, dict):
@@ -1990,7 +2016,8 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
             "edge_type": str(edge.get("edge_type") or raw_relation or "stored_pipeline_edge"),
             "confidence": float(edge.get("confidence") or 0.8),
             "support_status": str(edge.get("support_status") or "source_inferred"),
-            "review_status": str(edge.get("review_status") or "teacher_review_required"),
+            "review_status": str(edge.get("review_status") or "review_required"),
+            "review_reasons": edge.get("review_reasons") if isinstance(edge.get("review_reasons"), list) else [],
             "evidence": edge.get("evidence") if isinstance(edge.get("evidence"), dict) else {"reason": edge.get("reason") or ""},
         })
     if not normalized_nodes and not normalized_edges:

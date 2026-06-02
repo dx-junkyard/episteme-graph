@@ -4,7 +4,8 @@ description: >
   Episteme Graphのナレッジグラフ、PDF教材処理パイプライン、DSL定義、パターンマッチング、
   およびPDF解析Agentパイプライン（DocumentStructureAgent / PaperSkeletonAgent /
   RhetoricalRoleAgent / ClaimQualificationAgent / EquationSemanticsAgent /
-  ThesisReconstructionAgent / DSLLinkingAgent / ComponentAssemblyAgent）に
+  ThesisReconstructionAgent / DSLLinkingAgent / ComponentAssemblyAgent /
+  ComponentAssemblyAgentが生成する理論操作グラフ TheoryOperationGraph (ComponentGraphAgent)）に
   関する実装や修正を行う際に使用します。ユーザーから「抽出ロジックを変更して」
   「ナレッジグラフの構造を修正して」「パイプラインを改善して」「DSLを拡張して」
   「パターンマッチングを調整して」「Agentを実装して」「カートリッジを更新して」

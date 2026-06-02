@@ -5269,16 +5269,23 @@
       var id = lsGraphNodeId(node) || ("node-" + index);
       var group = lsGraphNodeGroup(node);
       var pos = layoutPositions[id] || { x: 0, y: index * 160 };
+      var backing = String((node && node.source_backing_status) || "").toLowerCase();
       var visNode = {
         id: id,
-        label: lsWrapGraphLabel(node.label || node.name || id),
+        label: lsGraphNodeDisplayLabel(node, id),
         x: pos.x,
         y: pos.y,
         group: group,
-        title: node.component_type_text || node.component_type || node.review_status || "",
+        title: lsGraphNodeTooltip(node),
       };
-      if (lsGraphNodeDashed(node, group)) {
+      if (lsGraphNodeDashed(node, group) || backing === "review_required") {
         visNode.shapeProperties = { borderDashes: [6, 5] };
+      }
+      if (backing === "partially_source_backed") {
+        visNode.borderWidth = 1;
+      }
+      if (lsGraphNodeFaded(node, backing)) {
+        visNode.opacity = 0.55;
       }
       return visNode;
     }));
@@ -5357,10 +5364,27 @@
       var target = edge.target_component_id || edge.target || edge.to;
       return source === nodeId || target === nodeId;
     });
+    var backing = String(node.source_backing_status || "").toLowerCase();
     var html =
       '<div class="ls-graph-detail-badge ' + escHtml(lsGraphNodeGroup(node)) + '">' + escHtml(node.component_type_text || node.component_type || node.typeName || "component") + '</div>' +
       '<h4>' + escHtml(node.label || node.name || nodeId || "無題") + '</h4>' +
       '<p class="ls-graph-detail-meta">' + escHtml(node.review_status || node.origin || "paper") + '</p>';
+    if (backing) {
+      html += '<div class="ls-graph-detail-section"><b>出典の裏付け</b>' +
+        '<p class="ls-graph-backing ls-graph-backing-' + escHtml(backing) + '">' +
+        escHtml(lsGraphSourceBackingLabel(backing)) + '</p></div>';
+    }
+    if ((node.review_reasons || []).length) {
+      html += '<div class="ls-graph-detail-section"><b>要確認の理由</b><ul class="ls-graph-detail-reasons">';
+      node.review_reasons.forEach(function (reason) {
+        html += '<li>' + escHtml(lsGraphReviewReasonLabel(reason)) + '</li>';
+      });
+      html += '</ul></div>';
+    }
+    var links = lsGraphSourceLinksHtml(node);
+    if (links) {
+      html += '<div class="ls-graph-detail-section"><b>出典リンク</b>' + links + '</div>';
+    }
     if (node.summary) {
       html += '<div class="ls-graph-detail-section"><b>Summary</b><p>' + escHtml(node.summary) + '</p></div>';
     }
@@ -5405,6 +5429,23 @@
 
   function lsGraphNodeId(node) {
     return node && (node.component_id || node.id || node.node_id);
+  }
+
+  function lsGraphSourceLinksHtml(node) {
+    var rows = [
+      ["equation", node.linked_equation_ids],
+      ["derivation", node.linked_derivation_ids],
+      ["claim", node.linked_claim_ids],
+      ["evidence", node.linked_evidence_ids],
+    ];
+    var html = "";
+    rows.forEach(function (row) {
+      var ids = row[1] || [];
+      if (!ids.length) return;
+      html += '<div class="ls-graph-detail-link"><span>' + escHtml(row[0]) + '</span> ' +
+        escHtml(ids.join(", ")) + '</div>';
+    });
+    return html;
   }
 
   function lsWrapGraphLabel(label) {
@@ -5462,6 +5503,60 @@
     var maturity = String((node && node.maturity_source) || "").toLowerCase();
     return layer === "debug" || maturity === "deterministic_fallback" ||
       /uniform-coordinate|単一粒子/.test(label) || (group === "method" && /unpredictability/.test(label));
+  }
+
+  function lsGraphNodeFaded(node, backing) {
+    var layer = String((node && node.graph_layer) || "").toLowerCase();
+    var maturity = String((node && node.maturity_source) || "").toLowerCase();
+    return backing === "inferred" || layer === "debug" || maturity === "deterministic_fallback";
+  }
+
+  function lsGraphNodeIsFallback(node) {
+    var maturity = String((node && node.maturity_source) || "").toLowerCase();
+    var backing = String((node && node.source_backing_status) || "").toLowerCase();
+    return maturity === "deterministic_fallback" || backing === "inferred";
+  }
+
+  // Prefix a warning icon for fallback / inferred nodes so they are not mistaken
+  // for confirmed, source-backed theory operations (issue #302).
+  function lsGraphNodeDisplayLabel(node, id) {
+    var label = lsWrapGraphLabel((node && (node.label || node.name)) || id);
+    return lsGraphNodeIsFallback(node) ? "⚠ " + label : label;
+  }
+
+  function lsGraphSourceBackingLabel(status) {
+    var labels = {
+      source_backed: "出典あり",
+      partially_source_backed: "部分的に出典あり",
+      inferred: "推論",
+      review_required: "要確認",
+    };
+    return labels[String(status || "").toLowerCase()] || status || "";
+  }
+
+  function lsGraphReviewReasonLabel(reason) {
+    var labels = {
+      missing_atomic_claim: "atomicなclaim未紐付け",
+      missing_evidence_link: "evidence未紐付け",
+      missing_equation_link: "equation未紐付け",
+      missing_derivation_link: "derivation未紐付け",
+      equation_needs_math_review: "数式の確認が必要",
+      edge_not_source_backed: "edgeに出典がない",
+      fallback_or_inferred_node: "fallback / 推論ノード",
+      source_span_missing: "原文spanがない",
+    };
+    return labels[String(reason || "")] || reason || "";
+  }
+
+  function lsGraphNodeTooltip(node) {
+    var parts = [];
+    var type = node.component_type_text || node.component_type || node.review_status || "";
+    if (type) parts.push(type);
+    var backing = lsGraphSourceBackingLabel(node.source_backing_status);
+    if (backing) parts.push(backing);
+    var reasons = (node.review_reasons || []).map(lsGraphReviewReasonLabel);
+    if (reasons.length) parts.push(reasons.join(" / "));
+    return parts.join("\n");
   }
 
   function lsGraphDisplayEdges(edges) {
@@ -5593,6 +5688,8 @@
   function lsGraphEdgeDashed(edge) {
     var status = String((edge && edge.support_status) || "").toLowerCase();
     var relation = String((edge && (edge.relation || edge.edge_type || edge.type)) || "").toLowerCase();
+    var review = String((edge && edge.review_status) || "").toLowerCase();
+    if (review === "review_required") return true;
     return /llm|related|qualifies|conflicts|inhibits|uncertain/.test(status + " " + relation);
   }
 
