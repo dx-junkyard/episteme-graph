@@ -883,6 +883,99 @@ def test_issue_266_persist_component_graph_new_schema():
         assert e["target_component_id"] == "db-uuid-B"
 
 
+def test_issue_304_persist_component_graph_keeps_edge_review_reasons():
+    """persist_component_graph must keep edge review_reasons (issue #304)."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    from episteme_graph.agents.component_graph.schema import (
+        ComponentGraphEdge,
+        ComponentGraphNode,
+        ComponentGraphResult,
+        GRAPH_SCHEMA_VERSION,
+    )
+    from core.document_pipeline.persistence import persist_component_graph
+
+    cg_result = ComponentGraphResult(
+        document_id="doc-304",
+        graph_schema_version=GRAPH_SCHEMA_VERSION,
+        cartridge_id=None,
+        nodes=[
+            ComponentGraphNode("comp_A", "Component A", "TheoryComponent"),
+            ComponentGraphNode("comp_B", "Component B", "TheoryComponent"),
+        ],
+        edges=[
+            ComponentGraphEdge(
+                edge_id="e1",
+                source="comp_A",
+                target="comp_B",
+                edge_type="requires_review",
+                support_status="llm_inferred",
+                evidence_claims=[],
+                reasoning="no backing",
+                confidence=0.5,
+                review_status="review_required",
+                review_reasons=["edge_not_source_backed", "fallback_or_inferred_node"],
+            )
+        ],
+        review_notes=[],
+        confidence=0.9,
+    )
+
+    id_map = {"comp_A": "db-uuid-A", "comp_B": "db-uuid-B"}
+
+    @dataclass
+    class _FakeDSL:
+        nodes: list = field(default_factory=list)
+        edges: list = field(default_factory=list)
+
+    saved_graph = {}
+
+    def fake_session():
+        class _Row:
+            def __getitem__(self, idx):
+                return "graph-id-304"
+
+        class _Exec:
+            def fetchone(self):
+                return _Row()
+
+        class _Session:
+            def execute(self, *a, **kw):
+                if a and len(a) >= 2 and isinstance(a[1], dict):
+                    import json
+                    saved_graph.update(json.loads(a[1].get("graph_json", "{}")))
+                return _Exec()
+
+            def commit(self):
+                pass
+
+            def rollback(self):
+                pass
+
+            def close(self):
+                pass
+
+        return _Session()
+
+    with patch("core.document_pipeline.persistence._pg_session", fake_session):
+        persist_component_graph(
+            document_id="doc-304",
+            component_id_map=id_map,
+            component_result=None,
+            dsl_result=_FakeDSL(),
+            component_graph_result=cg_result,
+        )
+
+    assert saved_graph.get("edges"), "graph_json must contain edges"
+    e = saved_graph["edges"][0]
+    assert e.get("review_status") == "review_required"
+    assert e.get("review_reasons") == [
+        "edge_not_source_backed",
+        "fallback_or_inferred_node",
+    ], "edge review_reasons must survive persistence (issue #304)"
+
+
 # --- regression-style structural assertions (issue #226) ----------------
 
 def test_issue_226_pipeline_files_exist():
