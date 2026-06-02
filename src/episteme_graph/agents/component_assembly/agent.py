@@ -7,6 +7,10 @@ from episteme_graph.agents.claim_qualification.schema import ClaimQualificationR
 from episteme_graph.agents.dsl_linking.schema import DSLLinkingResult
 from episteme_graph.agents.equation_semantics.schema import EquationSemanticsResult
 from episteme_graph.agents.thesis_reconstruction.schema import ThesisReconstructionResult
+from episteme_graph.agents.id_canonicalization import (
+    canonicalize_claim_refs,
+    claim_aliases_from_accepted_claims,
+)
 
 from .cartridge_loader import CartridgeLoader
 from .component_refiner import ComponentRefiner
@@ -15,8 +19,8 @@ from .input_builder import ComponentAssemblyInputBuilder
 from .llm_client import ComponentAssemblyLLMClient
 from .overlap_cleanup import ComponentOverlapCleanup
 from .prompt import ComponentAssemblyPromptFactory
-from .repair import ComponentAssemblyRepairer, _parse_raw
-from .schema import CartridgeContext, ComponentAssemblyResult
+from .repair import ComponentAssemblyRepairer, _parse_raw, make_deterministic_fallback
+from .schema import CartridgeContext, ComponentAssemblyLLMInput, ComponentAssemblyResult, ValidationIssue
 from .validator import ComponentAssemblyValidator
 
 logger = logging.getLogger(__name__)
@@ -61,19 +65,53 @@ class ComponentAssemblyAgent:
             evidence_registry=evidence_registry,
             derivations=derivations,
         )
+        diagnostics = {
+            "component_assembly_input_validation": _preflight_check(llm_input),
+        }
+        if diagnostics["component_assembly_input_validation"]["status"] == "failed":
+            result = make_deterministic_fallback(
+                llm_input,
+                "component_assembly_input_validation failed",
+                [
+                    ValidationIssue(
+                        issue["code"],
+                        "error",
+                        issue["message"],
+                        issue.get("field"),
+                    )
+                    for issue in diagnostics["component_assembly_input_validation"]["issues"]
+                ],
+            )
+            diagnostics["fallback_reason"] = "component_assembly_input_validation failed"
+            diagnostics["original_failure_codes"] = [
+                issue["code"] for issue in diagnostics["component_assembly_input_validation"]["issues"]
+            ]
+            result.diagnostics = diagnostics
+            return result
+
         messages = self._prompt_factory.build_messages(llm_input)
         try:
             raw_output = self._llm_client.generate(messages)
         except Exception as exc:
             logger.error("Component assembly failed: %s", exc)
-            return ComponentAssemblyResult.make_fallback(
-                qualified_claims.document_id, cartridge_id, str(exc)
-            )
+            result = make_deterministic_fallback(llm_input, str(exc))
+            diagnostics["initial_llm_exception"] = str(exc)
+            diagnostics["fallback_reason"] = str(exc)
+            diagnostics["original_failure_codes"] = ["initial_llm_exception"]
+            result.diagnostics = diagnostics
+            return result
+        diagnostics["initial_llm_raw_output"] = _llm_capture(self._llm_client, raw_output)
+        raw_output = canonicalize_claim_refs(
+            raw_output,
+            claim_objects,
+            claim_aliases_from_accepted_claims(llm_input.accepted_claims),
+        )
         result = self._cleanup.cleanup(
             _parse_raw(raw_output, qualified_claims.document_id, llm_input.cartridge_id)
         )
         result = enrich_component_assembly(result, llm_input)
         issues = self._validator.validate(result, cartridge, llm_input=llm_input)
+        diagnostics["initial_validation_issues"] = _issue_dicts(issues, llm_input=llm_input)
         if [i for i in issues if i.severity == "error"]:
             result = self._repairer.repair(
                 llm_input=llm_input,
@@ -83,6 +121,7 @@ class ComponentAssemblyAgent:
                 llm_client=self._llm_client,
                 prompt_factory=self._prompt_factory,
                 validator=self._validator,
+                diagnostics=diagnostics,
             )
             result = enrich_component_assembly(result, llm_input)
         else:
@@ -96,6 +135,7 @@ class ComponentAssemblyAgent:
             result.validation_issues = self._validator.validate(
                 result, cartridge, llm_input=llm_input
             )
+        result.diagnostics = diagnostics
         return result
 
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:
@@ -108,3 +148,134 @@ class ComponentAssemblyAgent:
                 "Cartridge '%s' not found; proceeding without cartridge", cartridge_id
             )
             return None
+
+
+def _preflight_check(llm_input: ComponentAssemblyLLMInput) -> dict:
+    issues: list[dict] = []
+    accepted_claim_ids = _ids(llm_input.accepted_claims, "claim_id")
+    available_claim_ids = _ids(llm_input.available_claims, "claim_id")
+    if available_claim_ids:
+        missing = sorted(accepted_claim_ids - available_claim_ids)
+        if missing:
+            issues.append(_preflight_issue(
+                "accepted_claim_ids_not_available",
+                "accepted_claims.claim_id",
+                missing,
+                available_claim_ids,
+            ))
+
+    available_evidence_ids = _ids(llm_input.available_evidence, "evidence_id")
+    referenced_evidence_ids = set()
+    for claim in llm_input.available_claims or []:
+        referenced_evidence_ids.update(str(v) for v in claim.get("source_evidence_ids") or [] if str(v))
+    if available_evidence_ids:
+        missing = sorted(referenced_evidence_ids - available_evidence_ids)
+        if missing:
+            issues.append(_preflight_issue(
+                "accepted_evidence_ids_not_available",
+                "available_claims.source_evidence_ids",
+                missing,
+                available_evidence_ids,
+            ))
+
+    available_equation_ids = _ids(llm_input.available_equations, "equation_id")
+    referenced_equation_ids = set()
+    for claim in llm_input.available_claims or []:
+        referenced_equation_ids.update(str(v) for v in claim.get("equation_ids") or [] if str(v))
+    for node in llm_input.thesis_nodes or []:
+        referenced_equation_ids.update(str(v) for v in node.get("equation_ids") or [] if str(v))
+    for node in llm_input.dsl_nodes or []:
+        refs = node.get("source_refs") or {}
+        referenced_equation_ids.update(str(v) for v in refs.get("equation_ids") or [] if str(v))
+    for edge in llm_input.dsl_edges or []:
+        refs = edge.get("evidence_refs") or {}
+        referenced_equation_ids.update(str(v) for v in refs.get("equation_ids") or [] if str(v))
+    if available_equation_ids:
+        missing = sorted(referenced_equation_ids - available_equation_ids)
+        if missing:
+            issues.append(_preflight_issue(
+                "accepted_equation_ids_not_available",
+                "input.equation_ids",
+                missing,
+                available_equation_ids,
+            ))
+
+    return {
+        "status": "failed" if issues else "passed",
+        "accepted_claim_count": len(accepted_claim_ids),
+        "available_claim_count": len(available_claim_ids),
+        "available_evidence_count": len(available_evidence_ids),
+        "available_equation_count": len(available_equation_ids),
+        "available_derivation_count": len(llm_input.available_derivation_ids or []),
+        "issues": issues,
+    }
+
+
+def _preflight_issue(code: str, field: str, invalid_values: list[str], allowed_values: set[str]) -> dict:
+    return {
+        "code": code,
+        "field": field,
+        "invalid_values": invalid_values,
+        "allowed_values": sorted(allowed_values),
+        "message": f"{field} contains values not present in available IDs: {invalid_values}",
+    }
+
+
+def _ids(items: list[dict], key: str) -> set[str]:
+    return {str(item.get(key)) for item in items or [] if item.get(key)}
+
+
+def _llm_capture(llm_client: ComponentAssemblyLLMClient, parsed: dict) -> dict:
+    return {
+        "parsed": parsed,
+        "component_count": len(parsed.get("components", [])) if isinstance(parsed.get("components"), list) else 0,
+        "raw_text": getattr(llm_client, "last_raw_text", None),
+        "parse_error": getattr(llm_client, "last_parse_error", None),
+    }
+
+
+def _issue_dicts(
+    issues: list[ValidationIssue],
+    *,
+    llm_input: ComponentAssemblyLLMInput,
+) -> list[dict]:
+    return [_issue_dict(issue, llm_input=llm_input) for issue in issues]
+
+
+def _issue_dict(issue: ValidationIssue, *, llm_input: ComponentAssemblyLLMInput) -> dict:
+    data = {
+        "code": issue.rule_id,
+        "severity": issue.severity,
+        "message": issue.message,
+        "field": issue.field,
+    }
+    allowed = _allowed_values_for_issue(issue.rule_id, llm_input)
+    invalid = _invalid_value_from_message(issue.message)
+    if invalid:
+        data["invalid_value"] = invalid
+    if allowed:
+        data["allowed_values"] = sorted(allowed)
+    return data
+
+
+def _allowed_values_for_issue(rule_id: str, llm_input: ComponentAssemblyLLMInput) -> set[str]:
+    if rule_id == "unresolved_claim_id":
+        return _ids(llm_input.available_claims, "claim_id")
+    if rule_id == "unresolved_evidence_id":
+        return _ids(llm_input.available_evidence, "evidence_id")
+    if rule_id == "unresolved_equation_id":
+        return _ids(llm_input.available_equations, "equation_id")
+    if rule_id == "unresolved_derivation_id":
+        return {str(v) for v in llm_input.available_derivation_ids or [] if str(v)}
+    if rule_id == "unresolved_dsl_node_id":
+        return _ids(llm_input.available_dsl_nodes, "node_id")
+    if rule_id == "unresolved_dsl_edge_id":
+        return _ids(llm_input.available_dsl_edges, "edge_id")
+    return set()
+
+
+def _invalid_value_from_message(message: str) -> str | None:
+    if "'" not in message:
+        return None
+    parts = message.split("'")
+    return parts[1] if len(parts) >= 3 else None

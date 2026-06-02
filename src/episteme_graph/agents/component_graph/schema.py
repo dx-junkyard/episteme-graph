@@ -25,6 +25,15 @@ VALID_EDGE_TYPES = [
     "RELATED_TO",
     "INHIBITS",
     "DERIVES_FROM",
+    # Theory-structure graph relations used by GraphNormalizer.
+    "defines",
+    "feeds_equation_system",
+    "linearizes",
+    "eliminates_bias",
+    "derives",
+    "constrains",
+    "diagnoses",
+    "requires_review",
 ]
 
 SUPPORT_STATUSES = [
@@ -54,6 +63,20 @@ class ComponentGraphNode:
     review_status: str = "teacher_review_required"
     display_order: int = 0
     origin: str = "paper"
+    operation: str = ""
+    theory_object: str = ""
+    graph_layer: str = "main"
+    maturity_source: str = ""
+    publish_ready: bool = False
+    input_equation_ids: list[str] = field(default_factory=list)
+    intermediate_equation_ids: list[str] = field(default_factory=list)
+    output_equation_ids: list[str] = field(default_factory=list)
+    definition_equation_ids: list[str] = field(default_factory=list)
+    constraint_equation_ids: list[str] = field(default_factory=list)
+    review_required_equation_ids: list[str] = field(default_factory=list)
+    eliminated_symbols: list[str] = field(default_factory=list)
+    retained_symbols: list[str] = field(default_factory=list)
+    derivation_operations: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -127,6 +150,20 @@ class ComponentGraphResult:
                     "review_status": n.review_status,
                     "display_order": n.display_order,
                     "origin": n.origin,
+                    "operation": n.operation,
+                    "theory_object": n.theory_object,
+                    "graph_layer": n.graph_layer,
+                    "maturity_source": n.maturity_source,
+                    "publish_ready": n.publish_ready,
+                    "input_equation_ids": n.input_equation_ids,
+                    "intermediate_equation_ids": n.intermediate_equation_ids,
+                    "output_equation_ids": n.output_equation_ids,
+                    "definition_equation_ids": n.definition_equation_ids,
+                    "constraint_equation_ids": n.constraint_equation_ids,
+                    "review_required_equation_ids": n.review_required_equation_ids,
+                    "eliminated_symbols": n.eliminated_symbols,
+                    "retained_symbols": n.retained_symbols,
+                    "derivation_operations": n.derivation_operations,
                 }
                 for n in self.nodes
             ],

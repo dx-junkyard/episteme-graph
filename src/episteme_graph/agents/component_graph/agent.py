@@ -25,6 +25,7 @@ from .cartridge_loader import CartridgeLoader
 from .input_builder import ComponentGraphInputBuilder
 from .llm_client import ComponentGraphLLMClient
 from .merger import ComponentGraphMerger
+from .normalizer import ComponentGraphNormalizer
 from .prompt import ComponentGraphPromptFactory
 from .repair import ComponentGraphRepairer, _parse_raw
 from .schema import CartridgeContext, ComponentGraphResult
@@ -48,6 +49,7 @@ class ComponentGraphAgent:
         self._validator = ComponentGraphValidator()
         self._repairer = ComponentGraphRepairer()
         self._merger = ComponentGraphMerger()
+        self._normalizer = ComponentGraphNormalizer()
 
     def run(
         self,
@@ -124,6 +126,8 @@ class ComponentGraphAgent:
         if existing_graph:
             result = self._merger.merge(existing_graph, result)
 
+        result = self._normalizer.normalize(result, components, derivations)
+        result.validation_issues = self._validator.validate(result, cartridge)
         return result
 
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:

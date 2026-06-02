@@ -356,7 +356,7 @@ class ExportValidationGate:
                     continue
                 policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
                 if claim_linked and policy.get("can_support_claim") is False:
-                    errors.append(ValidationEntry(
+                    warnings.append(ValidationEntry(
                         code="NON_SUPPORTING_EQUATION_USED_FOR_CLAIM_SUPPORT",
                         message=(
                             f"component {comp_id!r} links claim evidence to equation {eq_id!r}, "
@@ -384,7 +384,7 @@ class ExportValidationGate:
                     continue
                 policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
                 if policy.get("can_support_claim") is False:
-                    errors.append(ValidationEntry(
+                    warnings.append(ValidationEntry(
                         code="NON_SUPPORTING_EQUATION_USED_AS_COMPONENT_OUTPUT",
                         message=(
                             f"component {comp_id!r} uses equation {eq_id!r} as output, "

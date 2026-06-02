@@ -10,6 +10,10 @@ from .schema import (
     ValidationIssue,
 )
 
+_GENERIC_LABELS = {"define", "transform", "relate", "result"}
+_GENERIC_EDGE_TYPES = {"RELATED_TO", "CORRELATES", "supports"}
+_BIAS_ELIMINATION_NEEDLES = ("bias elimination", "eliminate second", "eliminate third", "second-order bias", "third-order bias")
+
 
 class ComponentGraphValidator:
     def validate(
@@ -38,6 +42,64 @@ class ComponentGraphValidator:
                     "warning",
                     f"node {node.component_id!r} has empty component_type",
                     f"nodes[{node.component_id}].component_type",
+                ))
+            label = str(node.label or "").strip()
+            if str(getattr(node, "graph_layer", "main") or "main") == "main" and label.lower() in _GENERIC_LABELS:
+                issues.append(ValidationIssue(
+                    "component_graph_node_label_generic",
+                    "error",
+                    f"main graph node {node.component_id!r} has generic label {label!r}",
+                    f"nodes[{node.component_id}].label",
+                ))
+            if (
+                str(getattr(node, "graph_layer", "main") or "main") == "main"
+                and getattr(node, "maturity_source", "") == "deterministic_fallback"
+            ):
+                issues.append(ValidationIssue(
+                    "main_graph_contains_fallback_component",
+                    "error",
+                    f"main graph contains fallback component {node.component_id!r}",
+                    f"nodes[{node.component_id}]",
+                ))
+            if getattr(node, "linked_equation_ids", []) and not _has_equation_roles(node):
+                issues.append(ValidationIssue(
+                    "component_graph_node_missing_equation_roles",
+                    "warning",
+                    f"node {node.component_id!r} has linked equations but no equation role classification",
+                    f"nodes[{node.component_id}]",
+                ))
+            operation = str(getattr(node, "operation", "") or "").strip()
+            if not operation and _looks_like_theory_operation_node(node):
+                issues.append(ValidationIssue(
+                    "component_graph_node_missing_operation",
+                    "error",
+                    f"node {node.component_id!r} has no operation",
+                    f"nodes[{node.component_id}].operation",
+                ))
+            if operation == "constrain" and not getattr(node, "output_equation_ids", []):
+                issues.append(ValidationIssue(
+                    "constraint_component_missing_output_equations",
+                    "error",
+                    f"constraint node {node.component_id!r} has no output_equation_ids",
+                    f"nodes[{node.component_id}].output_equation_ids",
+                ))
+            label_text = label.lower()
+            if any(needle in label_text for needle in _BIAS_ELIMINATION_NEEDLES) and not getattr(node, "eliminated_symbols", []):
+                issues.append(ValidationIssue(
+                    "bias_elimination_missing_eliminated_symbols",
+                    "error",
+                    f"bias elimination node {node.component_id!r} has no eliminated_symbols",
+                    f"nodes[{node.component_id}].eliminated_symbols",
+                ))
+            if (
+                str(getattr(node, "review_status", "") or "") == "teacher_review_required"
+                and str(getattr(node, "graph_layer", "main") or "main") == "main"
+            ):
+                issues.append(ValidationIssue(
+                    "review_required_component_in_main_graph",
+                    "warning",
+                    f"review-required component {node.component_id!r} appears in main graph",
+                    f"nodes[{node.component_id}]",
                 ))
 
         valid_types = set(VALID_EDGE_TYPES)
@@ -137,11 +199,11 @@ class ComponentGraphValidator:
             ))
         seen_pairs.add(pair)
 
-        if edge.edge_type == "RELATED_TO":
+        if edge.edge_type in _GENERIC_EDGE_TYPES:
             issues.append(ValidationIssue(
                 "component_graph_related_to_edge",
                 "warning",
-                f"{eid}: RELATED_TO is too generic for publish-ready graph structure",
+                f"{eid}: {edge.edge_type} is too generic for publish-ready graph structure",
                 f"edges[{eid}].edge_type",
             ))
 
@@ -183,3 +245,37 @@ class ComponentGraphValidator:
             ))
 
         return issues
+
+
+def _has_equation_roles(node: ComponentGraphNode) -> bool:
+    return any(
+        getattr(node, field_name, []) for field_name in (
+            "input_equation_ids",
+            "intermediate_equation_ids",
+            "output_equation_ids",
+            "definition_equation_ids",
+            "constraint_equation_ids",
+            "review_required_equation_ids",
+        )
+    )
+
+
+def _looks_like_theory_operation_node(node: ComponentGraphNode) -> bool:
+    text = " ".join([
+        str(node.label or ""),
+        str(node.component_type or ""),
+        str(getattr(node, "theory_object", "") or ""),
+    ]).lower()
+    return any(
+        needle in text for needle in (
+            "equation",
+            "relation",
+            "bias",
+            "diagnostic",
+            "observable",
+            "kernel",
+            "constraint",
+            "derive",
+            "eliminate",
+        )
+    )

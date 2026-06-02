@@ -6,6 +6,10 @@ import logging
 from episteme_graph.agents.claim_qualification.schema import ClaimQualificationResult
 from episteme_graph.agents.equation_semantics.schema import EquationSemanticsResult
 from episteme_graph.agents.paper_skeleton.schema import PaperSkeletonResult
+from episteme_graph.agents.id_canonicalization import (
+    canonicalize_claim_refs,
+    claim_aliases_from_accepted_claims,
+)
 
 from .cartridge_loader import CartridgeLoader
 from .input_builder import ThesisReconstructionInputBuilder
@@ -38,6 +42,7 @@ class ThesisReconstructionAgent:
         equations: EquationSemanticsResult | None = None,
         cartridge_id: str | None = None,
         config: dict | None = None,
+        claim_objects=None,
     ) -> ThesisReconstructionResult:
         cartridge = self._load_cartridge(cartridge_id)
         llm_input = self._input_builder.build(
@@ -46,6 +51,7 @@ class ThesisReconstructionAgent:
             equations=equations,
             cartridge=cartridge,
             config=config,
+            claim_objects=claim_objects,
         )
         messages = self._prompt_factory.build_messages(llm_input, cartridge)
         try:
@@ -56,6 +62,11 @@ class ThesisReconstructionAgent:
                 skeleton.document_id, cartridge_id, str(exc)
             )
 
+        raw_output = canonicalize_claim_refs(
+            raw_output,
+            claim_objects,
+            claim_aliases_from_accepted_claims(llm_input.accepted_claims),
+        )
         result = _parse_raw(raw_output, skeleton.document_id, llm_input.cartridge_id)
         issues = self._validator.validate(result, cartridge)
         if [i for i in issues if i.severity == "error"]:

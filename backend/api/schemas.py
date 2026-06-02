@@ -840,6 +840,20 @@ class ComponentGraphNode(BaseModel):
     component_type: str = ""
     component_type_text: str = ""
     summary: str = ""
+    operation: str = ""
+    theory_object: str = ""
+    graph_layer: str = "main"
+    maturity_source: str = ""
+    publish_ready: bool = False
+    input_equation_ids: list[str] = Field(default_factory=list)
+    intermediate_equation_ids: list[str] = Field(default_factory=list)
+    output_equation_ids: list[str] = Field(default_factory=list)
+    definition_equation_ids: list[str] = Field(default_factory=list)
+    constraint_equation_ids: list[str] = Field(default_factory=list)
+    review_required_equation_ids: list[str] = Field(default_factory=list)
+    eliminated_symbols: list[str] = Field(default_factory=list)
+    retained_symbols: list[str] = Field(default_factory=list)
+    derivation_operations: list[str] = Field(default_factory=list)
 
 
 class ComponentGraphEdge(BaseModel):

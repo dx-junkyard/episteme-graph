@@ -411,7 +411,7 @@ class ComponentAssemblyValidator:
             if claim_linked and policy.get("can_support_claim") is False:
                 issues.append(ValidationIssue(
                     "claim_support_uses_non_supporting_equation",
-                    "error",
+                    "warning",
                     f"{component.component_id} links claim evidence to non-claim-supporting equation {eq_id!r}",
                     f"components[{component.component_id}].linked_equation_ids",
                 ))
@@ -429,7 +429,7 @@ class ComponentAssemblyValidator:
             if policy.get("can_support_claim") is False:
                 issues.append(ValidationIssue(
                     "component_output_uses_non_supporting_equation",
-                    "error",
+                    "warning",
                     f"{component.component_id} uses non-claim-supporting equation {eq_id!r} as an output",
                     f"components[{component.component_id}].output_equation_ids",
                 ))

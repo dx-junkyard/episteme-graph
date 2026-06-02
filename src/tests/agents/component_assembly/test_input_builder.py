@@ -2,6 +2,14 @@
 from episteme_graph.agents.claim_qualification.schema import ClaimQualificationResult, QualifiedSpanRecord
 from episteme_graph.agents.component_assembly.input_builder import ComponentAssemblyInputBuilder
 from episteme_graph.agents.component_assembly.schema import CartridgeContext
+from episteme_graph.agents.id_canonicalization import (
+    canonicalize_claim_refs,
+    claim_aliases_from_accepted_claims,
+)
+from episteme_graph.agents.claim_object_builder.schema import (
+    ClaimObjectBuildResult,
+    ClaimObjectRecord,
+)
 from episteme_graph.agents.dsl_linking.schema import DSLEdge, DSLLinkingResult, DSLNode, DSL_VERSION
 from episteme_graph.agents.equation_semantics.schema import (
     DefinedSymbol,
@@ -105,6 +113,63 @@ def test_build_packages_inputs_and_allowed_vocabularies():
     assert "PaperRelationComponent" in llm_input.allowed_component_types
     assert "requires" in llm_input.allowed_dependency_types
     assert llm_input.normalized_terms[0]["canonical"] == "HQET"
+
+
+def test_build_uses_canonical_claim_ids_from_claim_objects():
+    qualified = ClaimQualificationResult(
+        "doc",
+        None,
+        [
+            _claim("span_001", "blk_a", "First claim.", "result"),
+            _claim("span_001", "blk_b", "Second claim.", "result"),
+        ],
+        [],
+        [],
+        {},
+    )
+    claim_objects = ClaimObjectBuildResult(
+        "doc",
+        None,
+        claims=[
+            ClaimObjectRecord(
+                claim_id="claim_span_001",
+                document_id="doc",
+                claim_type="result",
+                text="First claim.",
+                source_evidence_ids=["ev_0001"],
+                source_span_ids=["span_001"],
+                concepts=[],
+                section_id="sec_1",
+            ),
+            ClaimObjectRecord(
+                claim_id="claim_span_001_2",
+                document_id="doc",
+                claim_type="result",
+                text="Second claim.",
+                source_evidence_ids=["ev_0002"],
+                source_span_ids=["span_001"],
+                concepts=[],
+                section_id="sec_1",
+            ),
+        ],
+    )
+
+    qualified.qualified_spans[1].section_id = "sec_2"
+    claim_objects.claims[1].section_id = "sec_2"
+    llm_input = BUILDER.build(qualified, claim_objects=claim_objects)
+
+    assert [c["claim_id"] for c in llm_input.accepted_claims] == [
+        "claim_span_001",
+        "claim_span_001_2",
+    ]
+    assert llm_input.accepted_claims[0]["legacy_claim_id"] == "claim:blk_a:span_001"
+    raw_refs = {"evidence_refs": {"claim_ids": ["claim:blk_b:span_001"]}}
+    normalized = canonicalize_claim_refs(
+        raw_refs,
+        claim_objects,
+        claim_aliases_from_accepted_claims(llm_input.accepted_claims),
+    )
+    assert normalized["evidence_refs"]["claim_ids"] == ["claim_span_001_2"]
 
 
 def test_limits_claims():

@@ -539,11 +539,15 @@ def persist_components(
                     evidence_refs.get("claim_ids") or []
                 ),
                 "maturity_level": "paper_claim",
-                "maturity_source": "llm_proposed",
-                "review_status": "teacher_review_required",
+                "maturity_source": _strip_nuls(
+                    getattr(comp, "maturity_source", "") or "llm_proposed"
+                ),
+                "review_status": _strip_nuls(
+                    getattr(comp, "review_status", "") or "teacher_review_required"
+                ),
                 "cautions": _json_dumps(cautions),
                 "connectors": _json_dumps({}),
-                "internal_flow": _json_dumps([]),
+                "internal_flow": _json_dumps(getattr(comp, "internal_flow", []) or []),
                 "duplicate_candidates": _json_dumps([]),
             }
             row = session.execute(
@@ -663,18 +667,27 @@ def persist_component_graph(
     フォールバックエッジを生成する。
     """
     claim_id_map = claim_id_map or {}
-    nodes = []
-    for agent_id, db_id in component_id_map.items():
-        nodes.append({
-            "id": db_id,
-            "agent_component_id": agent_id,
-            "component_id": db_id,
-            "type": "component",
-        })
-
     if component_graph_result is not None:
         # ComponentGraphAgent の結果を使い、エージェントIDをDB IDに変換してエッジ化
         payload = component_graph_result.to_graph_payload()
+        nodes = []
+        seen_node_ids: set[str] = set()
+        for node in payload.get("nodes", []):
+            if not isinstance(node, dict):
+                continue
+            agent_id = str(node.get("component_id") or node.get("id") or "").strip()
+            if not agent_id:
+                continue
+            db_id = component_id_map.get(agent_id, agent_id)
+            if db_id in seen_node_ids:
+                continue
+            seen_node_ids.add(db_id)
+            stored_node = dict(node)
+            stored_node["id"] = db_id
+            stored_node["component_id"] = db_id
+            stored_node["agent_component_id"] = agent_id
+            stored_node.setdefault("type", "component")
+            nodes.append(stored_node)
         edges = []
         for e in payload.get("edges", []):
             src_agent_id = e.get("source_component_id", "")
@@ -701,6 +714,14 @@ def persist_component_graph(
             for v in getattr(component_graph_result, "validation_issues", [])
         ]
     else:
+        nodes = []
+        for agent_id, db_id in component_id_map.items():
+            nodes.append({
+                "id": db_id,
+                "agent_component_id": agent_id,
+                "component_id": db_id,
+                "type": "component",
+            })
         # フォールバック: dependencies ベースの確定的エッジ生成
         edges = []
         for comp in getattr(component_result, "components", []) or []:
