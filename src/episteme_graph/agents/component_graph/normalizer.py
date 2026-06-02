@@ -581,8 +581,11 @@ def _node_backing(
         status = "review_required"
 
     if status == "source_backed":
-        # Confirmed structure: do not surface informational gaps as reasons.
-        reasons = []
+        # Confirmed structure: drop informational gaps. Keep only the
+        # missing_atomic_claim warning (issue #306): equations / evidence back
+        # the node, but no minimal atomic claim directly supports its meaning,
+        # so reviewers should still be told the atomic backing is absent.
+        reasons = [] if atomic_claim_ids else ["missing_atomic_claim"]
     return status, _ordered_unique(reasons)
 
 

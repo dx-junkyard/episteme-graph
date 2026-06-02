@@ -193,6 +193,34 @@ def test_source_backed_node_is_not_teacher_review_required():
     assert backed.linked_evidence_ids == ["ev_1"]
 
 
+def test_evidence_backed_node_without_atomic_claim_keeps_warning():
+    # A step backed by an equation + evidence link but no atomic claim is
+    # source_backed (acceptance: backing exists) yet must still warn that no
+    # minimal atomic claim supports the node's meaning (issue #306).
+    derivations = DerivationChainResult(
+        document_id="doc",
+        cartridge_id=None,
+        chains=[DerivationChainRecord(
+            derivation_id="deriv",
+            document_id="doc",
+            source_section_ids=[],
+            steps=[
+                _step("derive_result", ["eq_a"], ["eq_b"], source_evidence_ids=["ev_1"]),
+            ],
+        )],
+    )
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    node = next(n for n in _layer(result, "main"))
+    assert node.linked_evidence_ids == ["ev_1"]
+    assert node.linked_claim_ids == []
+    # Backed by evidence → source_backed, but the atomic-claim gap is retained.
+    assert node.source_backing_status == "source_backed"
+    assert node.review_status == "source_backed"
+    assert node.review_reasons == ["missing_atomic_claim"]
+
+
 def test_equation_only_node_flags_missing_atomic_claim():
     result = _normalized()
     define = next(n for n in _layer(result, "main") if n.operation == "define")

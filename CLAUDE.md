@@ -208,7 +208,9 @@ examples/          → サンプル入出力JSON
 - **atomic claim を優先する (#306)**: node の主たる backing は atomic claim（短く、evidence_text が
   非空、paper-level でない）を優先する。atomic claim が無ければ `review_reasons=["missing_atomic_claim"]`
   を付け、equation ID だけの label は `partially_source_backed` に留める。空の evidence_text を
-  強い source backing として扱わない。
+  強い source backing として扱わない。evidence link により `source_backed` になった node でも
+  atomic claim が無ければ `missing_atomic_claim` を warning として残す（`review_status` は
+  `source_backed` のまま）。
 - **UI (`admin.js`)** は `source_backing_status` で表示を区別する
   （source_backed=通常 / partially=細線 / review_required=点線枠 / inferred・fallback=薄色+⚠）。
   グラフ層トグル（主グラフ / 式の詳細 / すべて）で `graph_layer` を切り替え、既定は main を優先表示する。

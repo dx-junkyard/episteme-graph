@@ -289,7 +289,8 @@ prefix から導出し、特定分野・特定論文の用語をハードコー�
   `linked_claim_ids` / `linked_evidence_ids` と `source_backing_status` を持つ。
 - **atomic claim を優先**: 主たる backing は atomic claim（短く evidence_text が非空、paper-level
   でない）を優先。無ければ `review_reasons=["missing_atomic_claim"]`、equation ID だけの label は
-  `partially_source_backed`。空 evidence を強い backing にしない。
+  `partially_source_backed`。空 evidence を強い backing にしない。evidence link で `source_backed`
+  になった node でも atomic claim が無ければ `missing_atomic_claim` warning を残す。
 - **review_status は backing から導出**: `schema.review_status_for_backing()` を使い、全 node を
   一律 `teacher_review_required` にしない。`review_required` の node/edge は `review_reasons` を
   空にしない。
