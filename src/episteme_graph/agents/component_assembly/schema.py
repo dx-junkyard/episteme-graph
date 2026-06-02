@@ -156,6 +156,14 @@ class ComponentRecord:
     source_scope: dict = field(default_factory=dict)
     assumptions: list[str] = field(default_factory=list)
     approximations: list[str] = field(default_factory=list)
+    # Single main theoretical operation for this component (issue #300).
+    # Populated by ComponentRefiner; one of the theory-operation families
+    # (define, linearize, eliminate, substitute, solve, derive, constrain, ...).
+    operation: str = ""
+    maturity_source: str = "llm_proposed"
+    publish_ready: bool = False
+    fallback_reason: str = ""
+    original_failure_codes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -176,6 +184,9 @@ class ComponentAssemblyResult:
     review_notes: list[str]
     confidence: float
     validation_issues: list[ValidationIssue] = field(default_factory=list)
+    # ComponentRefiner output: record of summary→theory-operation splits (issue #300).
+    refinement_report: dict = field(default_factory=dict)
+    diagnostics: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -222,6 +233,11 @@ class ComponentAssemblyResult:
                 source_scope=c.get("source_scope") or {},
                 assumptions=list(c.get("assumptions") or []),
                 approximations=list(c.get("approximations") or []),
+                operation=c.get("operation", ""),
+                maturity_source=c.get("maturity_source", "llm_proposed"),
+                publish_ready=bool(c.get("publish_ready", False)),
+                fallback_reason=c.get("fallback_reason", ""),
+                original_failure_codes=list(c.get("original_failure_codes") or []),
             ))
         issues = [ValidationIssue(**i) for i in d.get("validation_issues", [])]
         return cls(
@@ -233,6 +249,8 @@ class ComponentAssemblyResult:
             review_notes=d.get("review_notes", []),
             confidence=float(d.get("confidence", 0.0)),
             validation_issues=issues,
+            refinement_report=d.get("refinement_report") or {},
+            diagnostics=d.get("diagnostics") or {},
         )
 
     @classmethod

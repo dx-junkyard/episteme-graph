@@ -12,13 +12,29 @@ Your task is NOT to summarize sections.
 Your task is to construct reusable components with explicit inputs, outputs,
 preconditions, cautions, dependencies, and an INTERNAL FLOW that connects them.
 
+Component boundaries follow THEORY STRUCTURE, not explanation structure.
+1 component = 1 main theoretical operation.
+Decide boundaries by: inputs change, outputs change, the operation changes,
+assumptions change, the eliminated target changes, the derivation result changes,
+the equation role changes, or the review status changes.
+Split a component when it contains two or more of:
+define, parameterize, linearize, solve, substitute, eliminate, derive, compare,
+diagnose, forecast, limit. Do NOT keep a bias-parameter solution, a consistency
+relation, a forecast constraint, and a validity caveat inside one component.
+Each component should set "operation" to its single main operation.
+
 Important constraints:
 - Use only component types allowed by the active cartridge or explicit core fallbacks.
 - Use only dependency labels from the allowed vocabulary.
 - Do not invent new component taxonomies.
-- Components must be reusable units, not topical or section summaries.
+- Components must be reusable theory operations, not topical or section summaries.
 - Use accepted claims, equation semantics, thesis structure, and DSL graph evidence.
 - Do not let prior work or meta discourse dominate component cores.
+- Return AT MOST 3 components. Prefer the highest-value core theory operations.
+- Keep label <= 10 words, summary <= 40 words, reason <= 30 words,
+  teaching_takeaway <= 30 words, and each review_note <= 20 words.
+- Keep inputs/outputs/preconditions/cautions/internal_flow to the minimum needed
+  for validation. Do not include long explanatory prose.
 
 ID constraints (CRITICAL):
 - For evidence_refs.claim_ids: use ONLY IDs from available_claims list.
@@ -65,6 +81,7 @@ _OUTPUT_SCHEMA = {
         {
             "component_id": "comp_001",
             "component_type": "allowed component type",
+            "operation": "single main theoretical operation (define/linearize/eliminate/substitute/solve/derive/constrain/diagnose/forecast/compare/...)",
             "label": "short label",
             "summary": "reusable component summary",
             "inputs": [{"name": "string", "node_refs": [], "claim_ids": [], "equation_ids": []}],
@@ -132,6 +149,7 @@ class ComponentAssemblyPromptFactory:
         previous_output: dict,
         issues: list,
     ) -> list[dict]:
+        issue_payload = [_issue_payload(i, llm_input) for i in issues]
         issue_text = "\n".join(
             f"- [{i.severity}] {i.rule_id}: {i.message}" for i in issues
         )
@@ -141,6 +159,8 @@ class ComponentAssemblyPromptFactory:
             + json.dumps(previous_output, ensure_ascii=False, indent=2)
             + "\n\n## Validation Issues\n"
             + issue_text
+            + "\n\n## Validation Issues JSON\n"
+            + json.dumps(issue_payload, ensure_ascii=False, indent=2)
             + "\nReturn corrected JSON."
         )
         return [
@@ -188,6 +208,8 @@ class ComponentAssemblyPromptFactory:
             ", ".join(ASSEMBLY_HINT_TYPES),
             "\n## Constraints",
             "- Avoid section-summary components\n"
+            "- Return AT MOST 3 components\n"
+            "- Keep summaries/reasons concise; avoid long explanatory prose\n"
             "- Each strong component should include evidence_refs\n"
             "- Use ONLY IDs from the available_* lists above in evidence_refs\n"
             "- Do NOT invent or guess IDs not present in available_* lists\n"
@@ -201,3 +223,46 @@ class ComponentAssemblyPromptFactory:
             "- Return ONLY valid JSON, no markdown fences",
         ]
         return "\n".join(parts)
+
+
+def _issue_payload(issue, llm_input: ComponentAssemblyLLMInput) -> dict:
+    payload = {
+        "code": getattr(issue, "rule_id", ""),
+        "severity": getattr(issue, "severity", ""),
+        "message": getattr(issue, "message", ""),
+        "field": getattr(issue, "field", None),
+    }
+    invalid_value = _invalid_value_from_message(payload["message"])
+    allowed_values = _allowed_values_for_issue(payload["code"], llm_input)
+    if invalid_value:
+        payload["invalid_value"] = invalid_value
+    if allowed_values:
+        payload["allowed_values"] = sorted(allowed_values)
+    return payload
+
+
+def _allowed_values_for_issue(rule_id: str, llm_input: ComponentAssemblyLLMInput) -> set[str]:
+    if rule_id == "unresolved_claim_id":
+        return _ids(llm_input.available_claims, "claim_id")
+    if rule_id == "unresolved_evidence_id":
+        return _ids(llm_input.available_evidence, "evidence_id")
+    if rule_id == "unresolved_equation_id":
+        return _ids(llm_input.available_equations, "equation_id")
+    if rule_id == "unresolved_derivation_id":
+        return {str(v) for v in llm_input.available_derivation_ids or [] if str(v)}
+    if rule_id == "unresolved_dsl_node_id":
+        return _ids(llm_input.available_dsl_nodes, "node_id")
+    if rule_id == "unresolved_dsl_edge_id":
+        return _ids(llm_input.available_dsl_edges, "edge_id")
+    return set()
+
+
+def _ids(items: list[dict], key: str) -> set[str]:
+    return {str(item.get(key)) for item in items or [] if item.get(key)}
+
+
+def _invalid_value_from_message(message: str) -> str | None:
+    if "'" not in message:
+        return None
+    parts = message.split("'")
+    return parts[1] if len(parts) >= 3 else None

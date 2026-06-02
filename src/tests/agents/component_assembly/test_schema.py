@@ -32,3 +32,21 @@ def test_equation_role_fields_round_trip():
     assert restored_component.input_equation_ids == ["eq_in"]
     assert restored_component.output_equation_ids == ["eq_out"]
     assert restored_component.eliminated_symbols == ["b_2"]
+
+
+def test_operation_and_refinement_report_round_trip():
+    """issue #300: operation field and refinement_report survive serialization."""
+    component = ComponentRecord(
+        "comp_001", "RelationComponent", "skewness consistency", "summary",
+        [], [], [], [], [],
+        {"claim_ids": [], "equation_ids": [], "thesis_refs": [], "dsl_refs": {"node_ids": [], "edge_ids": []}},
+        "reason", 0.8, [],
+        operation="derive",
+    )
+    result = ComponentAssemblyResult(
+        "doc", COMPONENTS_VERSION, None, [component], [], [], 0.8,
+        refinement_report={"split_count": 1, "split_actions": [], "warnings": []},
+    )
+    restored = ComponentAssemblyResult.from_dict(json.loads(result.to_json()))
+    assert restored.components[0].operation == "derive"
+    assert restored.refinement_report["split_count"] == 1

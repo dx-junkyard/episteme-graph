@@ -544,7 +544,7 @@
     showUploadStatus(label + "を開始しています...", "info");
     apiFetch("/admin/materials/" + encodeURIComponent(materialId) + "/document-pipeline/run", {
       method: "POST",
-      body: JSON.stringify({ target_stage: stage || "" }),
+      body: JSON.stringify({ start_stage: stage || "" }),
     })
       .then(function (res) {
         if (!res.ok) {
@@ -560,7 +560,8 @@
         state.materialPipelineStatus[materialId] = Object.assign({}, state.materialPipelineStatus[materialId] || {}, {
           status: "running",
           active_task_id: data.task_id,
-          active_target_stage: stage || "",
+          active_target_stage: "",
+          active_start_stage: stage || "",
         });
         if (stage) {
           state.materialPipelineStatus[materialId].stages = state.materialPipelineStatus[materialId].stages || {};
@@ -595,6 +596,7 @@
           status.document_id = rd.document_id || status.document_id || "";
           status.stages = status.stages || {};
           if (rd.target_stage) status.stages[rd.target_stage] = status.status === "completed" ? "completed" : status.status === "failed" ? "failed" : "running";
+          if (rd.start_stage) status.stages[rd.start_stage] = status.status === "completed" ? "completed" : status.status === "failed" ? "failed" : "running";
           if (status.current_stage && status.stages[status.current_stage] !== "completed") {
             status.stages[status.current_stage] = status.status === "failed" ? "failed" : "running";
           }
@@ -3694,7 +3696,7 @@
           );
           _lsPollStructureTask(task.task_id, rd.total_materials || 0);
         } else if (task.task_type === "document_pipeline") {
-          var targetStage = rd.target_stage || "";
+          var targetStage = rd.start_stage || rd.target_stage || "";
           var label = targetStage ? lsAgentStageLabels[targetStage] || targetStage : "パイプライン全実行";
           lsState.pipelineTask = targetStage
             ? { step: "document_pipeline", stage: targetStage, status: "running" }
@@ -5456,7 +5458,10 @@
 
   function lsGraphNodeDashed(node, group) {
     var label = String((node && (node.label || node.name)) || "").toLowerCase();
-    return /uniform-coordinate|単一粒子/.test(label) || (group === "method" && /unpredictability/.test(label));
+    var layer = String((node && node.graph_layer) || "").toLowerCase();
+    var maturity = String((node && node.maturity_source) || "").toLowerCase();
+    return layer === "debug" || maturity === "deterministic_fallback" ||
+      /uniform-coordinate|単一粒子/.test(label) || (group === "method" && /unpredictability/.test(label));
   }
 
   function lsGraphDisplayEdges(edges) {
@@ -5550,6 +5555,9 @@
 
   function lsGraphRelationPriority(edge) {
     var relation = String((edge && (edge.relation || edge.edge_type || edge.type)) || "").toUpperCase();
+    if (relation === "DIAGNOSES") return 6;
+    if (relation === "DERIVES" || relation === "ELIMINATES_BIAS") return 5;
+    if (relation === "FEEDS_EQUATION_SYSTEM" || relation === "LINEARIZES" || relation === "DEFINES") return 4;
     if (relation === "REQUIRES") return 5;
     if (relation === "PRODUCES_FOR" || relation === "ENABLES" || relation === "SUPPORTS") return 4;
     if (relation === "UNCERTAIN_DUE_TO") return 3;
@@ -5571,6 +5579,13 @@
       CONFLICTS_WITH: "矛盾",
       INHIBITS: "抑制",
       DEFINES: "定義",
+      FEEDS_EQUATION_SYSTEM: "式系へ",
+      LINEARIZES: "線形化",
+      ELIMINATES_BIAS: "バイアス消去",
+      DERIVES: "導出",
+      CONSTRAINS: "制約",
+      DIAGNOSES: "診断",
+      REQUIRES_REVIEW: "要確認",
     };
     return labels[key] || key;
   }
@@ -5583,6 +5598,9 @@
 
   function lsGraphEdgeColor(edge) {
     var relation = String((edge && (edge.relation || edge.edge_type || edge.type)) || "").toUpperCase();
+    if (relation === "DIAGNOSES") return "#7c3aed";
+    if (relation === "DERIVES" || relation === "ELIMINATES_BIAS") return "#2563eb";
+    if (relation === "FEEDS_EQUATION_SYSTEM" || relation === "LINEARIZES") return "#0891b2";
     if (relation === "UNCERTAIN_DUE_TO") return "#f97316";
     if (relation === "CONFLICTS_WITH" || relation === "INHIBITS") return "#ef4444";
     if (relation === "CHECKED_BY" || relation === "QUALIFIES") return "#84cc16";
@@ -6387,7 +6405,7 @@
     lsShowProgress(label + "を開始しています...", "info");
     apiFetch("/admin/courses/" + lsState.courseId + "/document-pipeline/run", {
       method: "POST",
-      body: JSON.stringify({ target_stage: targetStage }),
+      body: JSON.stringify({ start_stage: targetStage }),
     })
       .then(function (res) {
         if (!res.ok) {

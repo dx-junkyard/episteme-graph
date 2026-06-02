@@ -5,6 +5,11 @@ from episteme_graph.agents.claim_qualification.schema import ClaimQualificationR
 from episteme_graph.agents.dsl_linking.schema import DSLLinkingResult
 from episteme_graph.agents.equation_semantics.schema import EquationSemanticsResult
 from episteme_graph.agents.thesis_reconstruction.schema import ThesisReconstructionResult
+from episteme_graph.agents.id_canonicalization import (
+    canonical_claim_id_for_span,
+    canonicalize_claim_refs,
+    legacy_claim_id_for_span,
+)
 
 from .schema import (
     CORE_COMPONENT_TYPES,
@@ -34,18 +39,39 @@ class ComponentAssemblyInputBuilder:
         derivations=None,
     ) -> ComponentAssemblyLLMInput:
         cfg = config or {}
+        accepted_claims = self._accepted_claims(
+            qualified_claims,
+            int(cfg.get("max_claims", _MAX_CLAIMS)),
+            claim_objects=claim_objects,
+        )
+        claim_aliases = {
+            c["legacy_claim_id"]: c["claim_id"]
+            for c in accepted_claims
+            if c.get("legacy_claim_id") and c.get("claim_id") != c.get("legacy_claim_id")
+        }
         return ComponentAssemblyLLMInput(
             document_id=qualified_claims.document_id,
             cartridge_id=cartridge.cartridge_id if cartridge else qualified_claims.cartridge_id,
-            accepted_claims=self._accepted_claims(
-                qualified_claims, int(cfg.get("max_claims", _MAX_CLAIMS))
-            ),
+            accepted_claims=accepted_claims,
             equations=self._equations(equations, int(cfg.get("max_equations", _MAX_EQUATIONS))),
             thesis_nodes=self._thesis_nodes(
-                thesis, int(cfg.get("max_thesis_nodes", _MAX_THESIS_NODES))
+                thesis,
+                int(cfg.get("max_thesis_nodes", _MAX_THESIS_NODES)),
+                claim_objects=claim_objects,
+                claim_aliases=claim_aliases,
             ),
-            dsl_nodes=self._dsl_nodes(dsl, int(cfg.get("max_dsl_nodes", _MAX_DSL_NODES))),
-            dsl_edges=self._dsl_edges(dsl, int(cfg.get("max_dsl_edges", _MAX_DSL_EDGES))),
+            dsl_nodes=self._dsl_nodes(
+                dsl,
+                int(cfg.get("max_dsl_nodes", _MAX_DSL_NODES)),
+                claim_objects=claim_objects,
+                claim_aliases=claim_aliases,
+            ),
+            dsl_edges=self._dsl_edges(
+                dsl,
+                int(cfg.get("max_dsl_edges", _MAX_DSL_EDGES)),
+                claim_objects=claim_objects,
+                claim_aliases=claim_aliases,
+            ),
             allowed_component_types=self.allowed_component_types(cartridge),
             allowed_dependency_types=self.allowed_dependency_types(cartridge),
             normalized_terms=self._normalized_terms(cartridge) if cartridge else None,
@@ -82,11 +108,16 @@ class ComponentAssemblyInputBuilder:
         return sorted(set(values))
 
     @staticmethod
-    def _accepted_claims(result: ClaimQualificationResult, limit: int) -> list[dict]:
+    def _accepted_claims(
+        result: ClaimQualificationResult,
+        limit: int,
+        claim_objects=None,
+    ) -> list[dict]:
         claims = []
         for record in result.qualified_spans[:limit]:
             claims.append({
-                "claim_id": f"claim:{record.block_id}:{record.span_id}",
+                "claim_id": canonical_claim_id_for_span(record, claim_objects),
+                "legacy_claim_id": legacy_claim_id_for_span(record),
                 "span_id": record.span_id,
                 "block_id": record.block_id,
                 "section_id": record.section_id,
@@ -146,13 +177,22 @@ class ComponentAssemblyInputBuilder:
         return result
 
     @staticmethod
-    def _thesis_nodes(thesis: ThesisReconstructionResult | None, limit: int) -> list[dict]:
+    def _thesis_nodes(
+        thesis: ThesisReconstructionResult | None,
+        limit: int,
+        claim_objects=None,
+        claim_aliases: dict[str, str] | None = None,
+    ) -> list[dict]:
         if not thesis:
             return []
         nodes = [{
             "thesis_ref": "central_thesis",
             "text": thesis.central_thesis.get("text", ""),
-            "claim_ids": thesis.central_thesis.get("claim_ids", []),
+            "claim_ids": canonicalize_claim_refs(
+                {"claim_ids": thesis.central_thesis.get("claim_ids", [])},
+                claim_objects,
+                claim_aliases,
+            ).get("claim_ids", []),
             "equation_ids": thesis.central_thesis.get("equation_ids", []),
             "kind": "central_thesis",
         }]
@@ -163,7 +203,11 @@ class ComponentAssemblyInputBuilder:
                 nodes.append({
                     "thesis_ref": f"support:{section}:{idx}",
                     "text": entry.get("text", ""),
-                    "claim_ids": entry.get("claim_ids", []),
+                    "claim_ids": canonicalize_claim_refs(
+                        {"claim_ids": entry.get("claim_ids", [])},
+                        claim_objects,
+                        claim_aliases,
+                    ).get("claim_ids", []),
                     "equation_ids": entry.get("equation_ids", []),
                     "kind": section,
                     "support_type": entry.get("support_type"),
@@ -173,7 +217,12 @@ class ComponentAssemblyInputBuilder:
         return nodes[:limit]
 
     @staticmethod
-    def _dsl_nodes(dsl: DSLLinkingResult | None, limit: int) -> list[dict]:
+    def _dsl_nodes(
+        dsl: DSLLinkingResult | None,
+        limit: int,
+        claim_objects=None,
+        claim_aliases: dict[str, str] | None = None,
+    ) -> list[dict]:
         if not dsl:
             return []
         return [
@@ -182,14 +231,23 @@ class ComponentAssemblyInputBuilder:
                 "node_type": node.node_type,
                 "node_value": node.node_value,
                 "source_kind": node.source_kind,
-                "source_refs": node.source_refs,
+                "source_refs": canonicalize_claim_refs(
+                    node.source_refs,
+                    claim_objects,
+                    claim_aliases,
+                ),
                 "confidence": node.confidence,
             }
             for node in dsl.nodes[:limit]
         ]
 
     @staticmethod
-    def _dsl_edges(dsl: DSLLinkingResult | None, limit: int) -> list[dict]:
+    def _dsl_edges(
+        dsl: DSLLinkingResult | None,
+        limit: int,
+        claim_objects=None,
+        claim_aliases: dict[str, str] | None = None,
+    ) -> list[dict]:
         if not dsl:
             return []
         return [
@@ -200,7 +258,11 @@ class ComponentAssemblyInputBuilder:
                 "core_predicate": edge.core_predicate,
                 "domain_verb": edge.domain_verb,
                 "polarity": edge.polarity,
-                "evidence_refs": edge.evidence_refs,
+                "evidence_refs": canonicalize_claim_refs(
+                    edge.evidence_refs,
+                    claim_objects,
+                    claim_aliases,
+                ),
                 "confidence": edge.confidence,
             }
             for edge in dsl.edges[:limit]

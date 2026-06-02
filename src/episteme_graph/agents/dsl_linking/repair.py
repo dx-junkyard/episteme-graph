@@ -32,6 +32,12 @@ class DSLLinkingRepairer:
         prompt_factory: DSLLinkingPromptFactory,
         validator: object,
     ) -> DSLLinkingResult:
+        if _has_no_nodes_error(validation_issues):
+            return make_deterministic_fallback(
+                llm_input,
+                "LLM DSL linking returned no nodes",
+            )
+
         for attempt in range(1, _MAX_REPAIR_ATTEMPTS + 1):
             logger.info("DSL linking repair attempt %d/%d", attempt, _MAX_REPAIR_ATTEMPTS)
             messages = prompt_factory.build_repair_messages(
@@ -48,11 +54,95 @@ class DSLLinkingRepairer:
                 result.validation_issues = remaining
                 return result
             validation_issues = remaining
-        fallback = DSLLinkingResult.make_fallback(
-            llm_input.document_id, "Repair failed after max attempts"
-        )
-        fallback.validation_issues = validation_issues
-        return fallback
+        return make_deterministic_fallback(llm_input, "Repair failed after max attempts")
+
+
+def _has_no_nodes_error(validation_issues: list[ValidationIssue]) -> bool:
+    return any(
+        issue.severity == "error" and issue.rule_id == "no_nodes"
+        for issue in validation_issues
+    )
+
+
+def make_deterministic_fallback(llm_input: DSLLLMInput, reason: str) -> DSLLinkingResult:
+    nodes: list[DSLNode] = []
+    for idx, claim in enumerate(llm_input.accepted_claims[:12], start=1):
+        claim_id = str(claim.get("claim_id") or "")
+        text = str(claim.get("text") or claim_id)
+        claim_type = str(claim.get("claim_type_candidate") or "")
+        nodes.append(DSLNode(
+            node_id=f"n_fallback_{idx:03d}",
+            node_type=_node_type_for_claim(claim_type),
+            node_value=_short_value(text, idx),
+            source_kind="claim",
+            source_refs={"claim_ids": [claim_id] if claim_id else [], "equation_ids": [], "thesis_refs": []},
+            reason=f"Deterministic fallback node from canonical claim {claim_id}: {reason}",
+            confidence=0.45,
+        ))
+
+    edges: list[DSLEdge] = []
+    for idx in range(1, len(nodes)):
+        edges.append(DSLEdge(
+            edge_id=f"e_fallback_{idx:03d}",
+            from_node_id=nodes[idx - 1].node_id,
+            to_node_id=nodes[idx].node_id,
+            core_predicate="CORRELATES",
+            domain_verb="supports",
+            polarity="?",
+            evidence_refs={
+                "claim_ids": (
+                    nodes[idx - 1].source_refs.get("claim_ids", [])
+                    + nodes[idx].source_refs.get("claim_ids", [])
+                ),
+                "equation_ids": [],
+                "thesis_refs": [],
+            },
+            reason="Conservative fallback edge preserving source-backed graph connectivity.",
+            confidence=0.35,
+        ))
+
+    if not nodes:
+        return DSLLinkingResult.make_fallback(llm_input.document_id, reason)
+    result = DSLLinkingResult(
+        document_id=llm_input.document_id,
+        dsl_version=DSL_VERSION,
+        nodes=nodes,
+        edges=edges,
+        graph_hints=[],
+        review_notes=[f"DSL linking used deterministic fallback: {reason}"],
+        confidence=0.45,
+    )
+    result.validation_issues = [ValidationIssue(
+        "dsl_linking_deterministic_fallback",
+        "warning",
+        f"LLM DSL linking failed; emitted {len(nodes)} fallback node(s)",
+        "nodes",
+    )]
+    return result
+
+
+def _node_type_for_claim(claim_type: str) -> str:
+    normalized = claim_type.lower()
+    if "assumption" in normalized:
+        return "Approximation"
+    if "uncertainty" in normalized:
+        return "UncertaintySource"
+    if "diagnostic" in normalized:
+        return "Diagnostic"
+    if "definition" in normalized:
+        return "Parameter"
+    if "result" in normalized:
+        return "Result"
+    if "derivation" in normalized:
+        return "Relation"
+    return "ClaimProxy"
+
+
+def _short_value(text: str, idx: int) -> str:
+    compact = " ".join(text.split())
+    if not compact:
+        return f"fallback_claim_{idx}"
+    return compact[:77] + "..." if len(compact) > 80 else compact
 
 
 def _parse_raw(raw: dict, document_id: str) -> DSLLinkingResult:

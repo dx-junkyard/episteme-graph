@@ -303,6 +303,28 @@ def test_relation_component_without_internal_flow_blocks_export():
     assert "COMPONENT_MISSING_INTERNAL_FLOW" in codes
 
 
+def test_summary_only_component_in_derivation_path_blocks_export():
+    """issue #300 criterion #10: summary-only derivation-path component → hard error."""
+    comp = _ComponentRecord("comp_sum", component_type="RelationComponent", internal_flow=[])
+    result = _run_gate(component_result=_ComponentResult([comp]))
+    codes = [e.code for e in result.errors]
+    assert "SUMMARY_ONLY_COMPONENT_IN_DERIVATION_PATH" in codes
+    assert result.status == "failed_validation"
+
+
+def test_derivation_component_with_equations_not_summary_only():
+    """A derivation-path component carrying equations is not summary-only."""
+    comp = _ComponentRecord(
+        "comp_ok",
+        component_type="RelationComponent",
+        linked_equation_ids=["eq_1"],
+        internal_flow=[{"from": "eq_1", "relation": "derive", "to": "eq_2"}],
+    )
+    result = _run_gate(component_result=_ComponentResult([comp]))
+    codes = [e.code for e in result.errors]
+    assert "SUMMARY_ONLY_COMPONENT_IN_DERIVATION_PATH" not in codes
+
+
 def test_component_claim_support_rejects_non_supporting_equation():
     artifacts = _make_artifacts(equation_semantics={
         "equations": [{

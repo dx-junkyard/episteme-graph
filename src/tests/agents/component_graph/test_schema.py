@@ -72,6 +72,8 @@ class TestComponentGraphNode:
         assert node.review_status == "teacher_review_required"
         assert node.display_order == 0
         assert node.origin == "paper"
+        assert node.graph_layer == "main"
+        assert node.output_equation_ids == []
 
 
 class TestComponentGraphEdge:
@@ -112,6 +114,7 @@ class TestComponentGraphResult:
         assert payload["graph_schema_version"] == GRAPH_SCHEMA_VERSION
         assert len(payload["nodes"]) == 2
         assert payload["nodes"][0]["component_id"] == "comp_001"
+        assert "output_equation_ids" in payload["nodes"][0]
         edge = payload["edges"][0]
         assert edge["source_component_id"] == "comp_001"
         assert edge["relation"] == "REQUIRES"

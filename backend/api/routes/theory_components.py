@@ -189,6 +189,14 @@ _GRAPH_RELATIONS = {
     "CHECKED_BY",
     "CONFLICTS_WITH",
     "RELATED_TO",
+    "defines",
+    "feeds_equation_system",
+    "linearizes",
+    "eliminates_bias",
+    "derives",
+    "constrains",
+    "diagnoses",
+    "requires_review",
 }
 _MAX_COMPONENT_ASSEMBLY_CLAIMS = 40
 _MAX_COMPONENTS_PER_SECTION = 3
@@ -1920,15 +1928,30 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
         if not component_id or component_id in seen_nodes:
             continue
         component = component_by_id.get(component_id)
+        graph_label = str(node.get("label") or node.get("name") or "").strip()
         normalized_nodes.append({
             "component_id": component_id,
-            "label": component.name if component else str(node.get("label") or node.get("agent_component_id") or component_id),
-            "review_status": component.review_status if component else str(node.get("review_status") or "teacher_review_required"),
+            "label": graph_label or (component.name if component else str(node.get("agent_component_id") or component_id)),
+            "review_status": str(node.get("review_status") or (component.review_status if component else "teacher_review_required")),
             "display_order": int(node.get("display_order") or idx),
-            "origin": component.origin if component else str(node.get("origin") or "paper"),
-            "component_type": component.component_type if component else str(node.get("component_type") or node.get("type") or ""),
-            "component_type_text": component.component_type_text if component else str(node.get("component_type_text") or ""),
-            "summary": component.summary if component else str(node.get("summary") or ""),
+            "origin": str(node.get("origin") or (component.origin if component else "paper")),
+            "component_type": str(node.get("component_type") or (component.component_type if component else node.get("type") or "")),
+            "component_type_text": str(node.get("component_type_text") or (component.component_type_text if component else "")),
+            "summary": str(node.get("summary") or (component.summary if component else "")),
+            "operation": str(node.get("operation") or ""),
+            "theory_object": str(node.get("theory_object") or ""),
+            "graph_layer": str(node.get("graph_layer") or "main"),
+            "maturity_source": str(node.get("maturity_source") or ""),
+            "publish_ready": bool(node.get("publish_ready", False)),
+            "input_equation_ids": node.get("input_equation_ids") if isinstance(node.get("input_equation_ids"), list) else [],
+            "intermediate_equation_ids": node.get("intermediate_equation_ids") if isinstance(node.get("intermediate_equation_ids"), list) else [],
+            "output_equation_ids": node.get("output_equation_ids") if isinstance(node.get("output_equation_ids"), list) else [],
+            "definition_equation_ids": node.get("definition_equation_ids") if isinstance(node.get("definition_equation_ids"), list) else [],
+            "constraint_equation_ids": node.get("constraint_equation_ids") if isinstance(node.get("constraint_equation_ids"), list) else [],
+            "review_required_equation_ids": node.get("review_required_equation_ids") if isinstance(node.get("review_required_equation_ids"), list) else [],
+            "eliminated_symbols": node.get("eliminated_symbols") if isinstance(node.get("eliminated_symbols"), list) else [],
+            "retained_symbols": node.get("retained_symbols") if isinstance(node.get("retained_symbols"), list) else [],
+            "derivation_operations": node.get("derivation_operations") if isinstance(node.get("derivation_operations"), list) else [],
         })
         seen_nodes.add(component_id)
     normalized_edges = []
@@ -1940,6 +1963,14 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
         "produces": "PRODUCES_FOR",
         "related_to": "RELATED_TO",
         "conflicts_with": "CONFLICTS_WITH",
+        "defines": "defines",
+        "feeds_equation_system": "feeds_equation_system",
+        "linearizes": "linearizes",
+        "eliminates_bias": "eliminates_bias",
+        "derives": "derives",
+        "constrains": "constrains",
+        "diagnoses": "diagnoses",
+        "requires_review": "requires_review",
     }
     for edge in graph.get("edges") if isinstance(graph.get("edges"), list) else []:
         if not isinstance(edge, dict):

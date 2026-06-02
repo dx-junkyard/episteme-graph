@@ -148,6 +148,7 @@ class ExportValidationGate:
 
         if component_result:
             self._check_component_internal_flow(component_result, errors)
+            self._check_summary_only_derivation_components(component_result, errors)
 
         # 3. Course mapping → component ID resolution
         if course_mapping and component_result:
@@ -355,7 +356,7 @@ class ExportValidationGate:
                     continue
                 policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
                 if claim_linked and policy.get("can_support_claim") is False:
-                    errors.append(ValidationEntry(
+                    warnings.append(ValidationEntry(
                         code="NON_SUPPORTING_EQUATION_USED_FOR_CLAIM_SUPPORT",
                         message=(
                             f"component {comp_id!r} links claim evidence to equation {eq_id!r}, "
@@ -383,7 +384,7 @@ class ExportValidationGate:
                     continue
                 policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
                 if policy.get("can_support_claim") is False:
-                    errors.append(ValidationEntry(
+                    warnings.append(ValidationEntry(
                         code="NON_SUPPORTING_EQUATION_USED_AS_COMPONENT_OUTPUT",
                         message=(
                             f"component {comp_id!r} uses equation {eq_id!r} as output, "
@@ -431,6 +432,44 @@ class ExportValidationGate:
                 path=f"$.components[{comp_id}].internal_flow",
                 source_stage="export_validation",
             ))
+
+    def _check_summary_only_derivation_components(
+        self, component_result, errors: list
+    ) -> None:
+        """Block export when summary-only components remain on the main derivation path.
+
+        Issue #300, acceptance criterion #10: a component on the main derivation
+        path (Relation/PaperRelation/Method) that carries no equations, no
+        internal_flow, and no declared operation is an explanation-level summary,
+        not a reusable theory operation, and must not be exported.
+        """
+        derivation_path_types = {
+            "RelationComponent",
+            "PaperRelationComponent",
+            "MethodComponent",
+        }
+        for component in getattr(component_result, "components", []) or []:
+            comp_type = getattr(component, "component_type", "")
+            if comp_type not in derivation_path_types:
+                continue
+            has_equations = bool(self._component_equation_refs(
+                component, getattr(component, "evidence_refs", {}) or {}
+            ))
+            has_flow = bool(getattr(component, "internal_flow", []) or [])
+            has_operation = bool(str(getattr(component, "operation", "") or "").strip())
+            if not has_equations and not has_flow and not has_operation:
+                comp_id = getattr(component, "component_id", "?")
+                errors.append(ValidationEntry(
+                    code="SUMMARY_ONLY_COMPONENT_IN_DERIVATION_PATH",
+                    message=(
+                        f"component {comp_id!r} ({comp_type}) is on the main derivation "
+                        "path but is summary-only (no equations, internal_flow, or operation); "
+                        "split it into theory-operation components before export"
+                    ),
+                    artifact="component_assembly",
+                    path=f"$.components[{comp_id}]",
+                    source_stage="export_validation",
+                ))
 
     def _cross_validate_course_mapping(
         self,
