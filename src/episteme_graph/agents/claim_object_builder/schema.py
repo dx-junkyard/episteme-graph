@@ -27,7 +27,10 @@ REVIEW_STATUSES = [
     "rejected",
 ]
 
-# Domain-neutral claim type ontology (issue #260)
+# Domain-neutral claim type ontology (issue #260, extended for #312).
+# The #312 required vocabulary (problem_statement / method / structural_property /
+# derivation_result / main_result / interpretation / limitation) is included so
+# those candidates normalize to themselves instead of collapsing to "unknown".
 CLAIM_TYPE_ONTOLOGY = [
     "definition",
     "criterion",
@@ -50,6 +53,13 @@ CLAIM_TYPE_ONTOLOGY = [
     "background",
     "prior_work",
     "meta",
+    # issue #312 required claim types
+    "problem_statement",
+    "method",
+    "structural_property",
+    "derivation_result",
+    "main_result",
+    "interpretation",
     "unknown",
 ]
 

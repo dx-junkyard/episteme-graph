@@ -1699,7 +1699,9 @@ def _add_graph_edge(edges: dict[tuple[str, str, str, str], dict], edge: dict) ->
         "edge_type": edge_type,
         "confidence": float(edge.get("confidence") or 0.5),
         "support_status": edge.get("support_status") or "design_inferred",
+        "source_backing_status": edge.get("source_backing_status") or "",
         "review_status": edge.get("review_status") or "teacher_review_required",
+        "review_reasons": edge.get("review_reasons") or [],
         "evidence": edge.get("evidence") or {},
     }
 

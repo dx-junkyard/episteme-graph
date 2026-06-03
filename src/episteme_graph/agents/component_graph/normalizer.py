@@ -221,7 +221,7 @@ class ComponentGraphNormalizer:
             if key in seen:
                 continue
             seen.add(key)
-            review_status, review_reasons = _edge_backing(
+            source_backing_status, review_status, review_reasons = _edge_backing(
                 evidence_equation_ids=edge.evidence_equation_ids,
                 is_generic=edge_type.lower() in ("requires_review", "transforms", "related_to"),
                 evidence_claims=edge.evidence_claims,
@@ -230,6 +230,7 @@ class ComponentGraphNormalizer:
             result.append(replace(
                 edge,
                 edge_type=edge_type,
+                source_backing_status=source_backing_status,
                 review_status=review_status,
                 review_reasons=review_reasons,
             ))
@@ -420,7 +421,7 @@ def _main_edges_from_groups(groups: list[dict]) -> list[ComponentGraphEdge]:
                 continue
             seen.add(key)
             evidence_derivation_ids = _ordered_unique(src["step_ids"] + tgt["step_ids"])
-            review_status, review_reasons = _edge_backing(
+            source_backing_status, review_status, review_reasons = _edge_backing(
                 evidence_equation_ids=overlap,
                 is_generic=False,
                 evidence_claims=tgt["claim_ids"],
@@ -439,6 +440,7 @@ def _main_edges_from_groups(groups: list[dict]) -> list[ComponentGraphEdge]:
                 ),
                 confidence=0.9,
                 evidence_equation_ids=overlap,
+                source_backing_status=source_backing_status,
                 review_status=review_status,
                 evidence_derivation_ids=evidence_derivation_ids,
                 evidence_claim_ids=tgt["claim_ids"],
@@ -533,7 +535,7 @@ def _detail_edges_from_records(
                 continue
             seen.add(key)
             step = target["step"]
-            review_status, review_reasons = _edge_backing(
+            source_backing_status, review_status, review_reasons = _edge_backing(
                 evidence_equation_ids=overlap,
                 is_generic=target["is_generic"],
                 evidence_derivation_ids=[source["step_id"], target["step_id"]],
@@ -551,6 +553,7 @@ def _detail_edges_from_records(
                 ),
                 confidence=0.9,
                 evidence_equation_ids=_ordered_unique(overlap),
+                source_backing_status=source_backing_status,
                 review_status=review_status,
                 evidence_derivation_ids=_ordered_unique([
                     source["step_id"], target["step_id"]
@@ -618,7 +621,13 @@ def _edge_backing(
     is_generic: bool,
     evidence_claims: list[str] | None = None,
     evidence_derivation_ids: list[str] | None = None,
-) -> tuple[str, list[str]]:
+) -> tuple[str, str, list[str]]:
+    """Return ``(source_backing_status, review_status, review_reasons)`` for an edge.
+
+    ``source_backing_status`` uses the same vocabulary as nodes (issue #311
+    criterion 6); ``review_status`` is derived from it via
+    ``review_status_for_backing`` so the two fields never disagree.
+    """
     # A derivation-backed edge is just as source-backed as an equation- or
     # claim-backed one (issue #304): equation OR claim OR derivation evidence
     # all count as backing.
@@ -628,10 +637,15 @@ def _edge_backing(
         or bool(evidence_derivation_ids)
     )
     if is_generic:
-        return "review_required", ["edge_not_source_backed", "fallback_or_inferred_node"]
-    if has_evidence:
-        return "source_backed", []
-    return "review_required", ["edge_not_source_backed"]
+        status = "inferred"
+        reasons = ["edge_not_source_backed", "fallback_or_inferred_node"]
+    elif has_evidence:
+        status = "source_backed"
+        reasons = []
+    else:
+        status = "review_required"
+        reasons = ["edge_not_source_backed"]
+    return status, review_status_for_backing(status), reasons
 
 
 # ---------------------------------------------------------------------- #

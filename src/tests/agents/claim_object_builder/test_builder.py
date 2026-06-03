@@ -223,29 +223,42 @@ def test_atomic_claim_marks_is_atomic_and_normalized_text():
     assert claim.qualification_reason is None
 
 
-def test_non_atomic_claim_is_review_required_not_confirmed():
+def test_non_atomic_claim_is_split_into_atomic_children():
+    # The core of #312: a long undivided claim is deterministically split into
+    # atomic child claims (compound parent + atomic children), not just flagged.
     registry = _make_registry("blk_x", _NON_ATOMIC_TEXT)
     spans = [_make_qualified("span_001", "blk_x", _NON_ATOMIC_TEXT, claim_type="method_choice")]
     builder = ClaimObjectBuilder(evidence_registry=registry)
     result = builder.build("doc_test", spans)
 
-    claim = result.claims[0]
-    assert claim.atomicity == "non_atomic"
-    assert claim.is_atomic is False
-    assert claim.support_status == "review_required"
-    assert claim.qualification_reason
+    parent = [c for c in result.claims if c.atomicity == "compound"]
+    children = [c for c in result.claims if c.parent_claim_id and c.atomicity == "atomic"]
+    assert len(parent) == 1
+    assert parent[0].is_atomic is False
+    assert len(children) >= 2
+    assert all(c.is_atomic for c in children)
     rules = {i.rule_id for i in result.validation_issues}
-    assert "claim_text_multiple_propositions" in rules
+    assert "claim_auto_split" in rules
 
 
-def test_main_result_non_atomic_is_hard_error():
+def test_main_result_long_claim_is_split_not_paper_summary():
+    # Criterion #3: a main-result claim must not remain a paper-level summary;
+    # it is split into atomic propositions and produces no non-atomic hard error.
     registry = _make_registry("blk_x", _NON_ATOMIC_TEXT)
     spans = [_make_qualified("span_001", "blk_x", _NON_ATOMIC_TEXT, claim_type="result")]
     builder = ClaimObjectBuilder(evidence_registry=registry)
     result = builder.build("doc_test", spans)
 
-    errors = [i for i in result.validation_issues if i.severity == "error"]
-    assert "main_result_claim_non_atomic" in {i.rule_id for i in errors}
+    children = [c for c in result.claims if c.parent_claim_id and c.atomicity == "atomic"]
+    assert len(children) >= 2
+    assert "main_result_claim_non_atomic" not in {i.rule_id for i in result.validation_issues}
+
+
+def test_main_result_normalizes_to_itself():
+    # #312 required vocabulary: 'main_result' must not collapse to 'unknown'.
+    assert ClaimObjectBuilder._normalize_claim_type("main_result") == "main_result"
+    assert ClaimObjectBuilder._normalize_claim_type("structural_property") == "structural_property"
+    assert ClaimObjectBuilder._normalize_claim_type("problem_statement") == "problem_statement"
 
 
 def test_single_proposition_with_and_stays_atomic():

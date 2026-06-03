@@ -316,6 +316,10 @@ class ComponentGraphEdge:
     # review_status here records evidence backing (issue #302):
     # "source_backed" | "review_required". "" means not yet classified.
     review_status: str = ""
+    # source_backing_status mirrors the node field so node *and* edge expose the
+    # same backing vocabulary (issue #311 criterion 6): "source_backed" |
+    # "partially_source_backed" | "review_required" | "inferred". "" = unclassified.
+    source_backing_status: str = ""
     # Source-backing links (issue #302).
     evidence_derivation_ids: list[str] = field(default_factory=list)
     evidence_claim_ids: list[str] = field(default_factory=list)
@@ -415,6 +419,7 @@ class ComponentGraphResult:
                     "edge_type": e.edge_type,
                     "support_status": e.support_status,
                     "confidence": e.confidence,
+                    "source_backing_status": e.source_backing_status,
                     "review_status": e.review_status,
                     "review_reasons": e.review_reasons,
                     "evidence": {

@@ -506,8 +506,8 @@ def test_source_backed_claim_with_evidence_ids_no_warning():
     assert "SOURCE_BACKED_CLAIM_NO_EVIDENCE_IDS" not in codes
 
 
-def test_source_backed_claim_without_evidence_ids_warns():
-    """source_backed claim with empty source_evidence_ids → SOURCE_BACKED_CLAIM_NO_EVIDENCE_IDS warning."""
+def test_source_backed_claim_without_evidence_ids_is_hard_error():
+    """source_backed claim with empty source_evidence_ids → hard error (#312)."""
     claims = _ClaimObjectResult([
         _ClaimObject("claim_002", support_status="source_backed",
                      source_evidence_ids=[]),
@@ -515,12 +515,13 @@ def test_source_backed_claim_without_evidence_ids_warns():
     evidence = _EvidenceResult([_EvidenceRecord("ev_001")])
 
     result = _run_gate(claim_objects=claims, evidence=evidence)
-    codes = [w.code for w in result.warnings]
+    codes = [e.code for e in result.errors]
     assert "SOURCE_BACKED_CLAIM_NO_EVIDENCE_IDS" in codes
+    assert result.status == "failed_validation"
 
 
-def test_source_backed_claim_with_unresolved_evidence_id_warns():
-    """source_backed claim referencing a missing evidence_id → SOURCE_BACKED_CLAIM_UNRESOLVED_EVIDENCE_ID warning."""
+def test_source_backed_claim_with_unresolved_evidence_id_is_hard_error():
+    """source_backed claim referencing a missing evidence_id → hard error (#312)."""
     claims = _ClaimObjectResult([
         _ClaimObject("claim_003", support_status="source_backed",
                      source_evidence_ids=["ev_MISSING"]),
@@ -528,8 +529,9 @@ def test_source_backed_claim_with_unresolved_evidence_id_warns():
     evidence = _EvidenceResult([_EvidenceRecord("ev_real")])
 
     result = _run_gate(claim_objects=claims, evidence=evidence)
-    codes = [w.code for w in result.warnings]
+    codes = [e.code for e in result.errors]
     assert "SOURCE_BACKED_CLAIM_UNRESOLVED_EVIDENCE_ID" in codes
+    assert result.status == "failed_validation"
 
 
 def test_non_source_backed_claim_no_evidence_ids_is_silent():

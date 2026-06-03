@@ -179,6 +179,8 @@ def test_every_node_and_edge_has_source_backing_status():
     for node in payload["nodes"]:
         assert node["source_backing_status"] in SOURCE_BACKING_STATUSES
     for edge in payload["edges"]:
+        # Criterion 6: edges expose the same backing vocabulary as nodes.
+        assert edge["source_backing_status"] in SOURCE_BACKING_STATUSES
         assert edge["review_status"] in ("source_backed", "review_required")
 
 

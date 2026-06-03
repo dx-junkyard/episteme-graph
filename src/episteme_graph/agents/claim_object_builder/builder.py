@@ -134,9 +134,23 @@ class ClaimObjectBuilder:
             review_note = self._extract_review_note(span)
             review_status = self._derive_review_status(qual)
 
-            # Handle split claims (atomicity — issue #260)
+            # Split into atomic claims (issue #312). Prefer upstream split_claims
+            # (LLM-proposed by ClaimQualificationAgent); otherwise deterministically
+            # split a detected non-atomic claim into atomic propositions so that the
+            # final claims are minimal single propositions usable as component /
+            # graph-node backing (criteria #1 / #2 / #7).
             edits = getattr(span, "edit_suggestions", {}) or {}
             split_candidates = edits.get("split_claims") or []
+            auto_split = False
+            text_atomicity, text_qual_reason = self._analyze_atomicity(text)
+            if not (split_candidates and isinstance(split_candidates, list)):
+                if text_atomicity == "non_atomic":
+                    auto_parts = self._split_into_atomic(text)
+                    if len(auto_parts) >= 2:
+                        split_candidates = [
+                            {"text": p, "claim_type": claim_type} for p in auto_parts
+                        ]
+                        auto_split = True
             if split_candidates and isinstance(split_candidates, list):
                 parent_id = base_claim_id
                 if parent_id in seen_claim_ids:
@@ -205,11 +219,25 @@ class ClaimObjectBuilder:
                     normalized_text=text,
                     atomicity="compound",
                     is_atomic=False,
-                    qualification_reason="split into atomic child claims",
+                    qualification_reason=(
+                        "deterministically split into atomic child claims; verify split"
+                        if auto_split
+                        else "split into atomic child claims"
+                    ),
                     parent_claim_id=None,
                     subclaim_ids=subclaim_ids,
                 ))
                 self._add_issues_for_record(parent_id, evidence_ids, parent_concepts, claim_type, parent_eqs, issues)
+                if auto_split and subclaim_ids:
+                    issues.append(ValidationIssue(
+                        rule_id="claim_auto_split",
+                        severity="warning",
+                        message=(
+                            f"claim {parent_id} was deterministically split into "
+                            f"{len(subclaim_ids)} atomic claims; review the split"
+                        ),
+                        field=parent_id,
+                    ))
                 if not subclaim_ids:
                     issues.append(ValidationIssue(
                         rule_id="split_required_but_no_children",
@@ -266,11 +294,11 @@ class ClaimObjectBuilder:
 
             figure_ids, table_ids = self._link_figures_tables(role_labels, claim_type)
 
-            # Atomicity analysis (issue #312): a long, multi-proposition claim that
-            # was not split upstream is not a confirmed atomic claim. Keep the
-            # information (never drop it) but mark it review_required so graph nodes
-            # do not treat it as strong source-backed atomic backing.
-            atomicity, qualification_reason = self._analyze_atomicity(text)
+            # Atomicity (issue #312): a multi-proposition claim that could neither
+            # be split upstream nor deterministically split here is not a confirmed
+            # atomic claim. Keep the information (never drop it) but mark it
+            # review_required so graph nodes do not treat it as strong atomic backing.
+            atomicity, qualification_reason = text_atomicity, text_qual_reason
             if atomicity == "non_atomic":
                 support_status = "review_required"
                 is_atomic = False
@@ -450,6 +478,17 @@ class ClaimObjectBuilder:
             "derivation_step": "equation_transformation",
             "update": "measurement_or_update",
             "observation": "observable_definition",
+            # issue #312 required-vocabulary synonyms
+            "problem": "problem_statement",
+            "problem_setup": "problem_statement",
+            "method_choice": "method_choice",
+            "structural": "structural_property",
+            "structure": "structural_property",
+            "derivation": "derivation_result",
+            "main_conclusion": "main_result",
+            "central_result": "main_result",
+            "key_result": "main_result",
+            "interpret": "interpretation",
         }
         return _ALIASES.get(canonical, _DEFAULT_CLAIM_TYPE)
 
@@ -561,6 +600,64 @@ class ClaimObjectBuilder:
             if clauses_with_verb >= 2:
                 return "non_atomic", "contains multiple propositions; split required"
         return "atomic", None
+
+    @classmethod
+    def _split_into_atomic(cls, text: str) -> list[str]:
+        """Deterministically split a non-atomic claim into atomic propositions.
+
+        Domain-independent: splits on sentence boundaries, semicolons, and
+        coordinating conjunctions, keeping only fragments that are full
+        propositions (contain a finite verb). A leading verb-less fragment is
+        merged into the following proposition so no source text is dropped
+        (principle #4). Returns ``[]`` when no confident split is possible.
+        """
+        t = (text or "").strip()
+        if not t:
+            return []
+
+        # 1. Sentence + semicolon segmentation.
+        segments: list[str] = []
+        for sent in re.split(r"(?<=[.!?])\s+", t):
+            sent = sent.strip()
+            if not sent:
+                continue
+            for semi in sent.split(";"):
+                semi = semi.strip()
+                if semi:
+                    segments.append(semi)
+
+        # 2. Split each segment on coordinating connectors into finite clauses.
+        clauses: list[str] = []
+        for seg in segments:
+            parts = [p.strip() for p in cls._CLAUSE_CONNECTORS.split(seg) if p.strip()]
+            if len(parts) <= 1:
+                clauses.append(seg)
+                continue
+            buffer = ""
+            for p in parts:
+                if cls._clause_has_verb(p):
+                    clauses.append(f"{buffer} {p}".strip() if buffer else p)
+                    buffer = ""
+                else:
+                    buffer = f"{buffer} {p}".strip() if buffer else p
+            if buffer:
+                if clauses:
+                    clauses[-1] = f"{clauses[-1].rstrip('.')} {buffer}".strip()
+                else:
+                    clauses.append(buffer)
+
+        # 3. Normalize: drop tiny fragments, ensure terminal punctuation + capital.
+        result: list[str] = []
+        for c in clauses:
+            c = c.strip().strip(",;").strip()
+            if len(c.split()) < 2:
+                if result:
+                    result[-1] = f"{result[-1].rstrip('.')} {c}."
+                continue
+            if not c.endswith((".", "!", "?")):
+                c = c + "."
+            result.append(c[0].upper() + c[1:] if c else c)
+        return result
 
     @classmethod
     def _clause_has_verb(cls, clause: str) -> bool:

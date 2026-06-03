@@ -170,9 +170,11 @@ class ExportValidationGate:
         # 6. Required artifact presence
         self._check_required_artifacts(artifacts, errors)
 
-        # 7. source-backed claim must reference EvidenceRegistry (#257)
+        # 7. source-backed claim must reference EvidenceRegistry (#257 / #312).
+        # Per #312 these are hard errors regardless of the code path (freshly
+        # built or reloaded artifact), so the gate enforces them itself.
         if claim_objects and evidence:
-            self._check_source_backed_claims(claim_objects, evidence, warnings)
+            self._check_source_backed_claims(claim_objects, evidence, errors)
 
         # 7b. claim atomicity reporting (#312): non-atomic claims cannot back
         # components / graph nodes; a non-atomic main result is a hard error.
@@ -700,13 +702,15 @@ class ExportValidationGate:
         self,
         claim_objects,
         evidence,
-        warnings: list,
+        errors: list,
     ) -> None:
-        """Warn on source_backed claims that have no source_evidence_ids (#257).
+        """Hard-fail source_backed claims with broken evidence links (#257 / #312).
 
-        A source_backed claim without source_evidence_ids means the claim cannot
-        be traced back to a PDF-derived Evidence record. This breaks the assumption
-        that source_backed ↔ EvidenceRegistry linkage is verified.
+        A source_backed claim without source_evidence_ids — or referencing an
+        evidence_id absent from the EvidenceRegistry — cannot be traced back to a
+        PDF-derived Evidence record. Issue #312 requires these to be hard errors so
+        the guarantee holds on every code path (freshly built or reloaded claims),
+        not only when the builder happens to re-run its own validation.
         """
         known_evidence_ids: set[str] = {
             r.evidence_id
@@ -718,7 +722,7 @@ class ExportValidationGate:
                 continue
             ev_ids = list(getattr(claim, "source_evidence_ids", []) or [])
             if not ev_ids:
-                warnings.append(ValidationEntry(
+                errors.append(ValidationEntry(
                     code="SOURCE_BACKED_CLAIM_NO_EVIDENCE_IDS",
                     message=(
                         f"source_backed claim {getattr(claim, 'claim_id', '?')!r} "
@@ -729,10 +733,10 @@ class ExportValidationGate:
                     source_stage="export_validation",
                 ))
             else:
-                # Warn if any referenced evidence_id is not in the registry
+                # Error if any referenced evidence_id is not in the registry
                 for eid in ev_ids:
                     if known_evidence_ids and eid not in known_evidence_ids:
-                        warnings.append(ValidationEntry(
+                        errors.append(ValidationEntry(
                             code="SOURCE_BACKED_CLAIM_UNRESOLVED_EVIDENCE_ID",
                             message=(
                                 f"source_backed claim {getattr(claim, 'claim_id', '?')!r} "

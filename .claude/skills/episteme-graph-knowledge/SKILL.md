@@ -303,7 +303,9 @@ prefix から導出し、特定分野・特定論文の用語をハードコー�
 その他の必須ルール:
 
 - **source-backing を明示**: 各 node は `linked_equation_ids` / `linked_derivation_ids` /
-  `linked_claim_ids` / `linked_evidence_ids` と `source_backing_status` を持つ。
+  `linked_claim_ids` / `linked_evidence_ids` と `source_backing_status` を持つ。各 edge も node と
+  同じ語彙の `source_backing_status`（`source_backed` / `partially_source_backed` / `inferred` /
+  `review_required`）を持ち、`review_status` はそこから `review_status_for_backing()` で導出する (#311)。
 - **atomic claim を優先**: 主たる backing は atomic claim（短く evidence_text が非空、paper-level
   でない）を優先。無ければ `review_reasons=["missing_atomic_claim"]`、equation ID だけの label は
   `partially_source_backed`。空 evidence を強い backing にしない。evidence link で `source_backed`

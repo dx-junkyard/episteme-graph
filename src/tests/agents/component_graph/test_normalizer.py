@@ -381,22 +381,24 @@ def test_claim_is_atomic_heuristic():
 
 
 def test_edge_backing_treats_derivation_evidence_as_source_backed():
-    status, reasons = _edge_backing(
+    status, review_status, reasons = _edge_backing(
         evidence_equation_ids=[],
         is_generic=False,
         evidence_claims=[],
         evidence_derivation_ids=["step_1", "step_2"],
     )
     assert status == "source_backed"
+    assert review_status == "source_backed"
     assert reasons == []
 
-    status, reasons = _edge_backing(
+    status, review_status, reasons = _edge_backing(
         evidence_equation_ids=[],
         is_generic=False,
         evidence_claims=[],
         evidence_derivation_ids=[],
     )
     assert status == "review_required"
+    assert review_status == "review_required"
     assert reasons
 
 
