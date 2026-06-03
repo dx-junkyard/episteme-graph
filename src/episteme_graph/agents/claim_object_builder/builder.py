@@ -18,6 +18,7 @@ from .schema import (
     ClaimObjectBuildResult,
     ClaimObjectRecord,
     EQUATION_CLAIM_TYPES,
+    MAIN_RESULT_CLAIM_TYPES,
     REVIEW_STATUSES,
     SUPPORT_STATUSES,
     ValidationIssue,
@@ -76,8 +77,12 @@ class ClaimObjectBuilder:
         self._concept_resolver = concept_resolver
         self._cartridge_ontology = cartridge_ontology or {}
         self._span_to_evidence: dict[str, list[str]] = {}
+        self._known_evidence_ids: set[str] = set()
         if evidence_registry is not None:
             for r in getattr(evidence_registry, "records", []) or []:
+                eid = getattr(r, "evidence_id", None)
+                if eid:
+                    self._known_evidence_ids.add(eid)
                 bid = getattr(r.source, "block_id", None)
                 if bid:
                     self._span_to_evidence.setdefault(bid, []).append(r.evidence_id)
@@ -151,7 +156,7 @@ class ClaimObjectBuilder:
                         sub_id = f"{sub_id}_{counter}"
                     seen_claim_ids.add(sub_id)
                     subclaim_ids.append(sub_id)
-                    sub_concepts = self._resolve_concepts(sub_text, role_labels)
+                    sub_concepts = self._resolve_concepts(sub_text, role_labels, span)
                     sub_eqs = self._link_equations(sub_text, sub_type, role_labels, block_id, section_id)
                     claims.append(ClaimObjectRecord(
                         claim_id=sub_id,
@@ -169,11 +174,18 @@ class ClaimObjectBuilder:
                         review_note=review_note,
                         section_id=section_id,
                         confidence=confidence,
+                        normalized_text=sub_text,
                         atomicity="atomic",
+                        is_atomic=True,
+                        qualification_reason=None,
                         parent_claim_id=parent_id,
                         subclaim_ids=[],
                     ))
-                # Compound parent record (no text of its own, just tracks subclaims)
+                # Compound parent record (no text of its own, just tracks subclaims).
+                # The parent is split into atomic children, so it is itself not
+                # atomic backing (is_atomic=False) — graph nodes prefer the children.
+                parent_concepts = self._resolve_concepts(text, role_labels, span)
+                parent_eqs = self._link_equations(text, claim_type, role_labels, block_id, section_id)
                 claims.append(ClaimObjectRecord(
                     claim_id=parent_id,
                     document_id=document_id,
@@ -181,8 +193,8 @@ class ClaimObjectBuilder:
                     text=text,
                     source_evidence_ids=evidence_ids,
                     source_span_ids=[span_id] if span_id else [],
-                    concepts=self._resolve_concepts(text, role_labels),
-                    equation_ids=self._link_equations(text, claim_type, role_labels, block_id, section_id),
+                    concepts=parent_concepts,
+                    equation_ids=parent_eqs,
                     figure_ids=[],
                     table_ids=[],
                     support_status="source_backed" if evidence_ids else "inferred",
@@ -190,11 +202,24 @@ class ClaimObjectBuilder:
                     review_note=review_note,
                     section_id=section_id,
                     confidence=confidence,
+                    normalized_text=text,
                     atomicity="compound",
+                    is_atomic=False,
+                    qualification_reason="split into atomic child claims",
                     parent_claim_id=None,
                     subclaim_ids=subclaim_ids,
                 ))
-                self._add_issues_for_record(parent_id, evidence_ids, self._resolve_concepts(text, role_labels), claim_type, self._link_equations(text, claim_type, role_labels, block_id, section_id), issues)
+                self._add_issues_for_record(parent_id, evidence_ids, parent_concepts, claim_type, parent_eqs, issues)
+                if not subclaim_ids:
+                    issues.append(ValidationIssue(
+                        rule_id="split_required_but_no_children",
+                        severity="warning",
+                        message=(
+                            f"claim {parent_id} was marked for splitting but no child "
+                            "claims were produced"
+                        ),
+                        field=parent_id,
+                    ))
                 continue
 
             # Single atomic claim
@@ -211,7 +236,7 @@ class ClaimObjectBuilder:
                     field=claim_id,
                 ))
 
-            concepts = self._resolve_concepts(text, role_labels)
+            concepts = self._resolve_concepts(text, role_labels, span)
             if not concepts:
                 issues.append(ValidationIssue(
                     rule_id="claim_concepts_empty",
@@ -219,6 +244,16 @@ class ClaimObjectBuilder:
                     message=f"claim {claim_id} has no concepts",
                     field=claim_id,
                 ))
+                if claim_type in MAIN_RESULT_CLAIM_TYPES:
+                    issues.append(ValidationIssue(
+                        rule_id="main_result_claim_concepts_empty",
+                        severity="warning",
+                        message=(
+                            f"main-result claim {claim_id} ({claim_type}) has no concepts; "
+                            "it cannot back a component or graph node"
+                        ),
+                        field=claim_id,
+                    ))
 
             equation_ids = self._link_equations(text, claim_type, role_labels, block_id, section_id)
             if self._claim_type_implies_equation(claim_type) and not equation_ids:
@@ -231,6 +266,38 @@ class ClaimObjectBuilder:
 
             figure_ids, table_ids = self._link_figures_tables(role_labels, claim_type)
 
+            # Atomicity analysis (issue #312): a long, multi-proposition claim that
+            # was not split upstream is not a confirmed atomic claim. Keep the
+            # information (never drop it) but mark it review_required so graph nodes
+            # do not treat it as strong source-backed atomic backing.
+            atomicity, qualification_reason = self._analyze_atomicity(text)
+            if atomicity == "non_atomic":
+                support_status = "review_required"
+                is_atomic = False
+                issues.append(ValidationIssue(
+                    rule_id="claim_text_multiple_propositions",
+                    severity="warning",
+                    message=(
+                        f"claim {claim_id} contains multiple propositions; "
+                        "split into atomic claims required"
+                    ),
+                    field=claim_id,
+                ))
+                if claim_type in MAIN_RESULT_CLAIM_TYPES:
+                    issues.append(ValidationIssue(
+                        rule_id="main_result_claim_non_atomic",
+                        severity="error",
+                        message=(
+                            f"main-result claim {claim_id} ({claim_type}) is non_atomic; "
+                            "a main result must be a single minimal proposition"
+                        ),
+                        field=claim_id,
+                    ))
+            else:
+                support_status = "source_backed" if evidence_ids else "inferred"
+                is_atomic = True
+                qualification_reason = None
+
             record = ClaimObjectRecord(
                 claim_id=claim_id,
                 document_id=document_id,
@@ -242,16 +309,21 @@ class ClaimObjectBuilder:
                 equation_ids=equation_ids,
                 figure_ids=figure_ids,
                 table_ids=table_ids,
-                support_status="source_backed" if evidence_ids else "inferred",
+                support_status=support_status,
                 review_status=review_status,
                 review_note=review_note,
                 section_id=section_id,
                 confidence=confidence,
-                atomicity="atomic",
+                normalized_text=text,
+                atomicity=atomicity,
+                is_atomic=is_atomic,
+                qualification_reason=qualification_reason,
                 parent_claim_id=None,
                 subclaim_ids=[],
             )
             claims.append(record)
+
+        self._validate_claim_set(claims, issues)
 
         return ClaimObjectBuildResult(
             document_id=document_id,
@@ -313,20 +385,33 @@ class ClaimObjectBuilder:
             return []
         return list(self._span_to_evidence.get(block_id, []))
 
-    def _resolve_concepts(self, text: str, role_labels: list[str]) -> list[ClaimConcept]:
+    def _resolve_concepts(
+        self,
+        text: str,
+        role_labels: list[str],
+        span: object | None = None,
+    ) -> list[ClaimConcept]:
         if self._concept_resolver is not None:
             try:
                 resolved = self._concept_resolver(text, role_labels, self._cartridge_ontology)
                 return [c for c in resolved if isinstance(c, ClaimConcept)]
             except Exception:
                 pass
+        # Concept completion (issue #312): scan the claim text *and* the raw
+        # evidence-span text so concepts that only appear in the source span
+        # (not the normalized claim) are still recovered.
+        match_text = text
+        if span is not None:
+            raw = (getattr(span, "text", "") or "").strip()
+            if raw and raw not in match_text:
+                match_text = f"{match_text} {raw}"
         # Fallback: match aliases from cartridge ontology
         ontology = self._cartridge_ontology or {}
         aliases = ontology.get("aliases", {}) or {}
         concept_types = ontology.get("concept_types", {}) or {}
         found: list[ClaimConcept] = []
         seen = set()
-        text_lower = text.lower()
+        text_lower = match_text.lower()
         for concept_name, alias_list in aliases.items():
             candidates = [concept_name] + list(alias_list or [])
             for cand in candidates:
@@ -419,6 +504,110 @@ class ClaimObjectBuilder:
         # Linking requires figure/table semantics input; default to empty.
         # Downstream FigureTableSemanticsAgent populates this via cross-link pass.
         return [], []
+
+    # ------------------------------------------------------------------
+    # Atomicity analysis (issue #312) — deterministic, domain-neutral.
+    # ------------------------------------------------------------------
+
+    # Coordinating conjunctions / discourse markers that frequently join
+    # independent propositions.
+    _CLAUSE_CONNECTORS = re.compile(
+        r"\b(?:and|but|whereas|while|then|therefore|moreover|furthermore|however|thus|hence)\b",
+        re.IGNORECASE,
+    )
+
+    # Domain-neutral finite-verb / predicate hints. Deliberately broad: used only
+    # to decide whether a coordinated fragment is itself a full proposition.
+    _VERB_HINTS = {
+        "is", "are", "was", "were", "be", "been", "being", "has", "have", "had",
+        "can", "cannot", "may", "must", "will", "would", "should",
+        "show", "shows", "showed", "demonstrate", "demonstrates",
+        "derive", "derives", "derived", "eliminate", "eliminates",
+        "use", "uses", "test", "tests", "yield", "yields", "give", "gives",
+        "provide", "provides", "obtain", "obtains", "reduce", "reduces",
+        "appear", "appears", "find", "finds", "present", "presents",
+        "propose", "proposes", "construct", "constructs", "define", "defines",
+        "relate", "relates", "imply", "implies", "require", "requires",
+        "measure", "measures", "compare", "compares", "constrain", "constrains",
+        "solve", "solves", "satisfy", "satisfies", "hold", "holds", "follow",
+        "follows", "depend", "depends", "describe", "describes", "explain",
+        "explains", "predict", "predicts", "assume", "assumes", "allow", "allows",
+    }
+
+    @classmethod
+    def _analyze_atomicity(cls, text: str) -> tuple[str, str | None]:
+        """Classify a claim as atomic / non_atomic (issue #312).
+
+        Returns ``("atomic", None)`` for single-proposition claims and
+        ``("non_atomic", reason)`` for claims that mix multiple propositions and
+        were not split upstream. Domain-independent: relies only on sentence
+        structure, clause connectors, and generic finite-verb hints.
+        """
+        t = (text or "").strip()
+        if not t:
+            return "atomic", None
+        # 1. Multiple full sentences.
+        sentences = [s for s in re.split(r"[.!?]+\s+", t) if len(s.split()) >= 3]
+        if len(sentences) >= 2:
+            return "non_atomic", "contains multiple sentences; split required"
+        # 2. Semicolon-joined clauses.
+        semi_clauses = [c for c in t.split(";") if len(c.split()) >= 3]
+        if len(semi_clauses) >= 2:
+            return "non_atomic", "contains multiple propositions; split required"
+        # 3. Coordinated finite clauses (e.g. "X derives Y and shows Z").
+        parts = cls._CLAUSE_CONNECTORS.split(t)
+        if len(parts) >= 2:
+            clauses_with_verb = sum(1 for p in parts if cls._clause_has_verb(p))
+            if clauses_with_verb >= 2:
+                return "non_atomic", "contains multiple propositions; split required"
+        return "atomic", None
+
+    @classmethod
+    def _clause_has_verb(cls, clause: str) -> bool:
+        for w in re.findall(r"[A-Za-z]+", clause.lower()):
+            if w in cls._VERB_HINTS:
+                return True
+            # Gerund / past-participle inflection of a multi-character word.
+            if len(w) >= 5 and (w.endswith("ing") or w.endswith("ed")):
+                return True
+        return False
+
+    def _validate_claim_set(
+        self,
+        claims: list[ClaimObjectRecord],
+        issues: list[ValidationIssue],
+    ) -> None:
+        """Final cross-claim validation (issue #312 hard errors)."""
+        seen: set[str] = set()
+        for c in claims:
+            if c.claim_id in seen:
+                issues.append(ValidationIssue(
+                    rule_id="claim_id_duplicated",
+                    severity="error",
+                    message=f"duplicate claim_id {c.claim_id}",
+                    field=c.claim_id,
+                ))
+            seen.add(c.claim_id)
+
+            if c.support_status == "source_backed" and not c.source_evidence_ids:
+                issues.append(ValidationIssue(
+                    rule_id="source_backed_claim_no_evidence_ids",
+                    severity="error",
+                    message=(
+                        f"source_backed claim {c.claim_id} has no source_evidence_ids; "
+                        "PDF evidence cannot be traced"
+                    ),
+                    field=c.claim_id,
+                ))
+
+            for eid in c.source_evidence_ids:
+                if self._known_evidence_ids and eid not in self._known_evidence_ids:
+                    issues.append(ValidationIssue(
+                        rule_id="claim_references_missing_evidence",
+                        severity="error",
+                        message=f"claim {c.claim_id} references missing evidence {eid}",
+                        field=c.claim_id,
+                    ))
 
     @staticmethod
     def _extract_review_note(span: object) -> str:

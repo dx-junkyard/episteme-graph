@@ -81,10 +81,14 @@ class _ClaimObject:
         claim_id: str,
         support_status: str = "source_backed",
         source_evidence_ids: list | None = None,
+        atomicity: str = "atomic",
+        claim_type: str = "definition",
     ):
         self.claim_id = claim_id
         self.support_status = support_status
         self.source_evidence_ids = source_evidence_ids or []
+        self.atomicity = atomicity
+        self.claim_type = claim_type
 
 
 class _ClaimObjectResult:
@@ -539,3 +543,40 @@ def test_non_source_backed_claim_no_evidence_ids_is_silent():
     result = _run_gate(claim_objects=claims, evidence=evidence)
     codes = [w.code for w in result.warnings]
     assert "SOURCE_BACKED_CLAIM_NO_EVIDENCE_IDS" not in codes
+
+
+# ---------------------------------------------------------------------------
+# Tests: claim atomicity reporting (issue #312)
+# ---------------------------------------------------------------------------
+
+def test_non_atomic_main_result_claim_is_hard_error():
+    """A non-atomic main-result claim blocks export."""
+    claims = _ClaimObjectResult([
+        _ClaimObject("claim_001", atomicity="non_atomic", claim_type="result"),
+    ])
+    result = _run_gate(claim_objects=claims)
+    codes = [e.code for e in result.errors]
+    assert "NON_ATOMIC_MAIN_RESULT_CLAIM" in codes
+    assert result.status == "failed_validation"
+
+
+def test_non_atomic_non_main_claim_needs_review():
+    """A non-atomic non-main claim is flagged for review, not a hard error."""
+    claims = _ClaimObjectResult([
+        _ClaimObject("claim_001", atomicity="non_atomic", claim_type="method_choice"),
+    ])
+    result = _run_gate(claim_objects=claims)
+    review_codes = [r.code for r in result.review_items]
+    assert "NON_ATOMIC_CLAIM_NEEDS_SPLIT" in review_codes
+    assert result.status == "needs_review"
+
+
+def test_atomic_claim_produces_no_atomicity_issue():
+    """Atomic claims do not trigger atomicity reporting."""
+    claims = _ClaimObjectResult([
+        _ClaimObject("claim_001", atomicity="atomic", claim_type="result"),
+    ])
+    result = _run_gate(claim_objects=claims)
+    all_codes = [e.code for e in result.errors] + [r.code for r in result.review_items]
+    assert "NON_ATOMIC_MAIN_RESULT_CLAIM" not in all_codes
+    assert "NON_ATOMIC_CLAIM_NEEDS_SPLIT" not in all_codes
