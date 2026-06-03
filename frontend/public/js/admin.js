@@ -15,8 +15,11 @@
     courseDraft: null,
     sending: false,
     currentSessionId: null,
+    currentSessionStatus: "draft",
+    currentSessionPublishedCourseId: null,
     importedFromCourseId: null,
     availableMaterials: [],
+    availableSessions: [],
     selectedMaterialIds: [],
     materialPipelineStatus: {},
     materialPipelineTimers: {},
@@ -964,14 +967,14 @@
     apiFetch("/admin/course-builder/sessions")
       .then(function (res) { return res.json(); })
       .then(function (sessions) {
-        if (!sessions || sessions.length === 0) {
-          createNewSession();
-        } else {
-          renderSessionBar(sessions);
-          selectSession(sessions[0].session_id);
-        }
+        state.availableSessions = sessions || [];
+        renderSessionBar(sessions);
+        // 初期表示は常に新規作成状態（前回セッションは自動復元しない）
+        renderCourseChat();
+        renderCoursePreview();
       })
       .catch(function () {
+        state.availableSessions = [];
         var bar = document.getElementById("cb-session-bar");
         if (bar) bar.style.display = "none";
       });
@@ -982,8 +985,11 @@
     if (!bar) return;
 
     var selectHtml = '<select id="session-select" style="flex:1;padding:4px 6px;background:var(--color-bg-secondary);border:1px solid var(--color-border);border-radius:4px;color:var(--color-text-primary);font-size:12px">';
-    sessions.forEach(function (s) {
-      selectHtml += '<option value="' + escHtml(s.session_id) + '">' + escHtml(s.title) + "</option>";
+    selectHtml += '<option value="">― 過去のセッションを選択 ―</option>';
+    (sessions || []).forEach(function (s) {
+      var label = s.display_name || s.title || s.session_id;
+      if (s.status === "published") label += " [登録済]";
+      selectHtml += '<option value="' + escHtml(s.session_id) + '">' + escHtml(label) + "</option>";
     });
     selectHtml += "</select>";
 
@@ -994,40 +1000,58 @@
       '<button id="import-course-btn" style="padding:4px 10px;font-size:12px;background:var(--color-bg-tertiary);border:1px solid var(--color-border);border-radius:4px;color:var(--color-text-info);cursor:pointer;white-space:nowrap">既存コースを読込</button>' +
       "</div>";
 
-    if (state.currentSessionId) {
-      var sel = document.getElementById("session-select");
-      if (sel) sel.value = state.currentSessionId;
+    // 現在選択中のセッションがあれば反映（なければ空欄のまま）
+    var sel = document.getElementById("session-select");
+    if (sel && state.currentSessionId) {
+      sel.value = state.currentSessionId;
     }
 
-    document.getElementById("session-select").addEventListener("change", function () {
-      selectSession(this.value);
+    sel.addEventListener("change", function () {
+      if (this.value) {
+        selectSession(this.value);
+      } else {
+        // 未選択に戻した場合は新規作成状態にリセット
+        resetToNewSession();
+      }
     });
     document.getElementById("new-session-btn").addEventListener("click", function () {
-      createNewSession();
+      resetToNewSession();
+      sel.value = "";
     });
     document.getElementById("import-course-btn").addEventListener("click", function () {
       openImportCourseModal();
     });
   }
 
+  function resetToNewSession() {
+    state.currentSessionId = null;
+    state.currentSessionStatus = "draft";
+    state.currentSessionPublishedCourseId = null;
+    state.chatHistory = [];
+    state.chatMessages = [];
+    state.courseDraft = null;
+    state.importedFromCourseId = null;
+    renderCourseChat();
+    renderCoursePreview();
+  }
+
   function createNewSession() {
-    apiFetch("/admin/course-builder/sessions", {
+    // 後方互換: importCourse等から呼ばれた場合のみ即時作成
+    return _createSessionNow("", null);
+  }
+
+  function _createSessionNow(title, sourceFileName) {
+    return apiFetch("/admin/course-builder/sessions", {
       method: "POST",
-      body: JSON.stringify({ title: "新しいセッション" }),
+      body: JSON.stringify({ title: title || "", source_file_name: sourceFileName || null }),
     })
       .then(function (res) { return res.json(); })
       .then(function (data) {
         state.currentSessionId = data.session_id;
-        state.chatHistory = [];
-        state.chatMessages = [];
-        state.courseDraft = null;
-        state.importedFromCourseId = null;
-        renderCourseChat();
-        renderCoursePreview();
+        state.currentSessionStatus = data.status || "draft";
+        state.currentSessionPublishedCourseId = data.published_course_id || null;
         reloadSessionBar(data.session_id);
-      })
-      .catch(function () {
-        // セッション作成失敗時は session_id なしで動作継続
+        return data;
       });
   }
 
@@ -1035,6 +1059,7 @@
     apiFetch("/admin/course-builder/sessions")
       .then(function (res) { return res.json(); })
       .then(function (sessions) {
+        state.availableSessions = sessions || [];
         renderSessionBar(sessions);
         if (selectId) {
           var sel = document.getElementById("session-select");
@@ -1050,6 +1075,8 @@
       .then(function (res) { return res.json(); })
       .then(function (data) {
         state.currentSessionId = data.session_id;
+        state.currentSessionStatus = data.status || "draft";
+        state.currentSessionPublishedCourseId = data.published_course_id || null;
         state.chatHistory = data.history || [];
         state.chatMessages = data.history || [];
         state.courseDraft = data.course_draft || null;
@@ -1062,8 +1089,29 @@
       .catch(function () {});
   }
 
+  function _getSrcFileNameFromSelection() {
+    if (!state.selectedMaterialIds || state.selectedMaterialIds.length === 0) return null;
+    for (var i = 0; i < state.availableMaterials.length; i++) {
+      var m = state.availableMaterials[i];
+      if ((m.material_id || m.id) === state.selectedMaterialIds[0]) {
+        var fn = m.filename || m.title || "";
+        return fn.replace(/\.pdf$/i, "").replace(/\s+/g, "_") || null;
+      }
+    }
+    return null;
+  }
+
   function sendCourseChat(text) {
     if (!text || state.sending) return;
+
+    // 遅延セッション作成: 初回送信時にセッションを作成する
+    if (!state.currentSessionId) {
+      var srcFileName = _getSrcFileNameFromSelection();
+      _createSessionNow("", srcFileName)
+        .then(function () { sendCourseChat(text); })
+        .catch(function () { sendCourseChat(text); });
+      return;
+    }
 
     state.chatMessages.push({ role: "user", content: text });
     state.sending = true;
@@ -1251,6 +1299,27 @@
 
     area.innerHTML = html;
     approveArea.style.display = "block";
+
+    // 登録済みセッションは承認ボタンを無効化
+    var approveBtn = document.getElementById("cb-approve-btn");
+    if (approveBtn) {
+      var isPublished = state.currentSessionStatus === "published" || !!state.currentSessionPublishedCourseId;
+      if (isPublished) {
+        approveBtn.disabled = true;
+        approveBtn.textContent = "登録済み";
+        approveBtn.style.background = "var(--color-bg-tertiary)";
+        approveBtn.style.color = "var(--color-text-tertiary)";
+        approveBtn.style.cursor = "not-allowed";
+        approveBtn.style.opacity = "0.7";
+      } else {
+        approveBtn.disabled = false;
+        approveBtn.textContent = "承認してコースを登録";
+        approveBtn.style.background = "";
+        approveBtn.style.color = "";
+        approveBtn.style.cursor = "";
+        approveBtn.style.opacity = "";
+      }
+    }
   }
 
   // ── Course Approval ────────────────────────────────────────────────
@@ -1359,6 +1428,24 @@
         btn.style.background = "var(--color-text-success)";
 
         var newCourseId = data.id;
+
+        // セッションの status を published に更新
+        state.currentSessionStatus = "published";
+        state.currentSessionPublishedCourseId = newCourseId;
+        renderCoursePreview();
+        if (state.currentSessionId) {
+          apiFetch("/admin/course-builder/sessions/" + state.currentSessionId, {
+            method: "PUT",
+            body: JSON.stringify({
+              status: "published",
+              published_course_id: newCourseId,
+              title: draft.title || "",
+            }),
+          }).then(function () {
+            reloadSessionBar(state.currentSessionId);
+          }).catch(function () {});
+        }
+
         var successMsg = {
           role: "assistant",
           content: "コース「" + (data.title || draft.title) + "」が正常に登録されました。（ID: " + newCourseId + "）\n\n「コース管理」タブからグループ単位で受講可／編集可の権限を設定できます。\n\nコース内容を自動生成中...",
@@ -1681,11 +1768,13 @@
         // 2. Create a new session for the import
         return apiFetch("/admin/course-builder/sessions", {
           method: "POST",
-          body: JSON.stringify({ title: "再編集: " + courseTitle }),
+          body: JSON.stringify({ title: "再編集: " + courseTitle, source_file_name: null }),
         })
           .then(function (res) { return res.json(); })
           .then(function (sessionData) {
             var sessionId = sessionData.session_id;
+            state.currentSessionStatus = sessionData.status || "draft";
+            state.currentSessionPublishedCourseId = sessionData.published_course_id || null;
 
             // 3. Set state with imported data
             var initMessage = "コース「" + courseTitle + "」のデータを読み込みました。どのように変更・アップデートしますか？\n\n現在のコース構成はプレビューに表示されています。例えば以下のような指示ができます：\n- 「第3章に新しいトピックを追加して」\n- 「この概念をもう少し細かく分割して」\n- 「前提知識の順序を見直して」";
