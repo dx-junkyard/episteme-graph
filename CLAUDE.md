@@ -208,13 +208,14 @@ examples/          → サンプル入出力JSON
   consistency_relation` / `diagnoses・compares → diagnostic_application`）。stage は全 derivation
   を跨いで集約されるため、main graph は理論構成 5–8 個程度のバックボーンになる。stage の候補語彙は
   `schema.THEORY_STAGES` / 表示名は `schema.THEORY_STAGE_LABELS`。特定分野・特定論文の用語は使わない。
-- **main label は theory stage label にする (#308)**: main node の label は stage label
+- **main label は短い theory stage label にする (#308)**: main node の label は stage label
   （`Theory basis` / `Observation model` / `Observable construction` / `Equation system` /
-  `Elimination` / `Consistency relation` / `Diagnostic / application`）を基本とし、atomic claim /
-  meaningful reason があれば `Stage: phrase` で補助する。**equation ID fallback は使わない**ので
-  `Define eq_2_7` / `Derive result eq_...` のような label は main に出ない。validator は main node の
-  equation-id label (`main_graph_node_equation_id_label`) と generic operation
-  (`main_graph_generic_operation`) を hard error として検出する。
+  `Elimination` / `Consistency relation` / `Diagnostic / application`）**そのもの**を使い、短く保つ。
+  atomic claim text や step reason のような長い説明は label に詰め込まず、node の `description`
+  フィールドに入れて UI 詳細ペインで表示する（`Stage: 長い説明文` のような label は作らない）。
+  **equation ID fallback は使わない**ので `Define eq_2_7` / `Derive result eq_...` のような label は
+  main に出ない。validator は main node の equation-id label (`main_graph_node_equation_id_label`) と
+  generic operation (`main_graph_generic_operation`) を hard error として検出する。
 - **review_status は source_backing_status から導出する (#306)**: `schema.review_status_for_backing()`
   が `source_backed → source_backed` / `partially_source_backed → teacher_review_required` /
   `inferred・review_required → review_required` にマップする。全 node を一律

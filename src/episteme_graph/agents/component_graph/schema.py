@@ -271,6 +271,10 @@ class ComponentGraphNode:
     origin: str = "paper"
     operation: str = ""
     theory_object: str = ""
+    # Longer, human-readable explanation (atomic-claim text / step reason). The
+    # ``label`` stays short (a theory-stage name for main nodes); the descriptive
+    # sentence lives here and is shown in the UI's detail pane (issue #308).
+    description: str = ""
     graph_layer: str = "main"
     maturity_source: str = ""
     publish_ready: bool = False
@@ -378,6 +382,7 @@ class ComponentGraphResult:
                     "origin": n.origin,
                     "operation": n.operation,
                     "theory_object": n.theory_object,
+                    "description": n.description,
                     "graph_layer": n.graph_layer,
                     "maturity_source": n.maturity_source,
                     "publish_ready": n.publish_ready,

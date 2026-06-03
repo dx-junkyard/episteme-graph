@@ -283,8 +283,9 @@ prefix から導出し、特定分野・特定論文の用語をハードコー�
   `linearizes・approximates・substitutes→equation_system` / `solves・eliminates→elimination` /
   `derives・constrains→consistency_relation` / `diagnoses・compares→diagnostic_application`)、
   全 derivation を跨いで集約する。stage 語彙は `schema.THEORY_STAGES`、表示名は
-  `schema.THEORY_STAGE_LABELS`。main label は stage label を基本とし、atomic claim/reason があれば
-  `Stage: phrase` で補助する。**equation ID fallback は使わない**ので `Define eq_...` /
+  `schema.THEORY_STAGE_LABELS`。main label は短い stage label **そのもの**を使い、atomic claim/reason
+  のような長い説明は label に詰めず node の `description` フィールドへ入れて UI 詳細ペインで表示する
+  （`Stage: 長い説明` の形にはしない）。**equation ID fallback は使わない**ので `Define eq_...` /
   `Derive result eq_...` は main に出ない。generic operation
   (`transform`/`relate`/`connect`/`support`/`associate`) も main にしない。validator は main node の
   equation-id label・generic operation を hard error として検出する (#308)。

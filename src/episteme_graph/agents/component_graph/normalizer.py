@@ -20,9 +20,11 @@ Two layers are produced (issue #306):
     … → ``diagnostic_application``, issue #308) so the main graph stays small
     (5–8 nodes) and shows the theory backbone rather than one node per equation
     or operation. The stage is derived domain-neutrally from each step's
-    operation edge_type family; main labels are stage labels (optionally enriched
-    by an atomic claim) and never bare equation IDs. Generic operations
-    (``transform`` / ``relate`` / …) never become confirmed main nodes.
+    operation edge_type family. Main labels are short stage names and never bare
+    equation IDs; any longer atomic-claim / reason phrase is kept in the node's
+    ``description`` (shown in the UI detail pane) rather than crammed into the
+    label. Generic operations (``transform`` / ``relate`` / …) never become
+    confirmed main nodes.
 
 ``equation_detail`` (EquationOperationNode)
     One node per derivation step, preserving the full equation-by-equation
@@ -335,10 +337,13 @@ def _main_node_from_group(group: dict, claim_index: dict[str, dict]) -> Componen
     )
 
     rep = group.get("rep") or _representative_record(records)
-    # Main labels are theory-stage labels (issue #308), optionally enriched by an
-    # atomic claim / meaningful reason. They are never equation-id fallbacks, so
-    # ``eq_...`` can no longer leak into the main graph.
-    label = _build_main_label(stage, records, atomic_claim_ids, claim_index)
+    # Main labels are SHORT theory-stage labels (issue #308): ``Theory basis`` …
+    # ``Diagnostic / application``. They are never equation-id fallbacks, so
+    # ``eq_...`` can no longer leak into the main graph. The longer atomic-claim /
+    # reason phrase that used to be appended to the label now lives in
+    # ``description`` and is shown in the UI's detail pane instead.
+    label = theory_stage_label(stage)
+    description = _build_main_description(records, atomic_claim_ids, claim_index)
 
     definitions = outputs if edge_type == "defines" else []
     constraints = outputs if edge_type in ("constrains", "derives", "diagnoses") else []
@@ -352,6 +357,7 @@ def _main_node_from_group(group: dict, claim_index: dict[str, dict]) -> Componen
         origin="derivation_chain",
         operation=rep["operation"],
         theory_object=_theory_object(rep, atomic_claim_ids, claim_index),
+        description=description,
         graph_layer=GRAPH_LAYER_MAIN,
         maturity_source="derivation_aggregated",
         publish_ready=status == "source_backed",
@@ -692,32 +698,29 @@ def _representative_record(records: list[dict]) -> dict:
     return max(records, key=lambda r: (len(str(r["operation"] or "")), -r["order"]))
 
 
-def _build_main_label(
-    stage: str,
+def _build_main_description(
     records: list[dict],
     atomic_claim_ids: list[str],
     claim_index: dict[str, dict],
 ) -> str:
-    """Theory-stage label for a main node (issue #308).
+    """Longer explanation for a main node, shown in the UI detail pane (issue #308).
 
-    The base label is the stage's human-readable name (``Theory basis`` …
-    ``Diagnostic / application``). When an atomic claim or a meaningful step
-    reason is available it enriches the label as ``Stage: phrase``. Equation IDs
-    are never used, so a main node can never be labelled ``Define eq_...`` /
-    ``Derive result eq_...``.
+    The main node's *label* stays short (the theory-stage name). This description
+    carries the human-readable detail: the atomic-claim text if one backs the
+    node, otherwise the first meaningful step reason. Equation-id-only reasons are
+    skipped so the description never degenerates into an equation reference.
+    Returns ``""`` when no meaningful phrase is available.
     """
-    stage_label = theory_stage_label(stage)
-    # 1. atomic claim text (preferred enrichment)
-    claim_phrase = _atomic_claim_phrase(atomic_claim_ids, claim_index)
+    # 1. atomic claim text (preferred)
+    claim_phrase = _atomic_claim_phrase(atomic_claim_ids, claim_index, limit=240)
     if claim_phrase:
-        return f"{stage_label}: {claim_phrase}"
+        return claim_phrase
     # 2. meaningful step reason (skip bare generic words / equation-id-only text)
     for rec in records:
         reason = str(getattr(rec["step"], "reason", "") or "").strip()
         if reason and reason.lower() not in _GENERIC_LABELS and not _looks_like_equation_id(reason):
-            return f"{stage_label}: {reason[:80]}"
-    # 3. stage label alone — always a readable, non-equation backbone label
-    return stage_label
+            return reason[:240]
+    return ""
 
 
 def _looks_like_equation_id(text: str) -> bool:
@@ -732,14 +735,18 @@ def _looks_like_equation_id(text: str) -> bool:
     return bool(re.fullmatch(r"(eq[_\.\s]*\(?\s*[\dA-Za-z\.\)]+\s*[, ]*)+", stripped, re.IGNORECASE))
 
 
-def _atomic_claim_phrase(atomic_claim_ids: list[str], claim_index: dict[str, dict]) -> str:
+def _atomic_claim_phrase(
+    atomic_claim_ids: list[str],
+    claim_index: dict[str, dict],
+    limit: int = 80,
+) -> str:
     for cid in atomic_claim_ids:
         meta = claim_index.get(cid)
         if not meta:
             continue
         text = str(meta.get("text") or meta.get("predicate") or "").strip()
         if text:
-            return text[:80]
+            return text[:limit]
     return ""
 
 

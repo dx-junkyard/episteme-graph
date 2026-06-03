@@ -1951,6 +1951,7 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
             "summary": str(node.get("summary") or (component.summary if component else "")),
             "operation": str(node.get("operation") or ""),
             "theory_object": str(node.get("theory_object") or ""),
+            "description": str(node.get("description") or ""),
             "graph_layer": str(node.get("graph_layer") or "main"),
             "maturity_source": str(node.get("maturity_source") or ""),
             "publish_ready": bool(node.get("publish_ready", False)),
