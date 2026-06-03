@@ -188,7 +188,10 @@ examples/          → サンプル入出力JSON
   `linked_equation_ids` / `linked_derivation_ids` / `linked_claim_ids` / `linked_evidence_ids` と
   `source_backing_status`（`source_backed` / `partially_source_backed` / `inferred` / `review_required`）を持つ。
   各 edge は `evidence_equation_ids` / `evidence_derivation_ids` / `evidence_claim_ids` /
-  `source_evidence_ids` と `review_status`（`source_backed` / `review_required`）を持つ。
+  `source_evidence_ids` を持ち、node と同じ語彙の `source_backing_status`
+  （`source_backed` / `partially_source_backed` / `inferred` / `review_required`）と、
+  そこから `review_status_for_backing()` で導出される `review_status`
+  （`source_backed` / `review_required`）を持つ (#311)。
 - **review の理由を必ず付与する**: `review_required` の node / edge は `review_reasons` を空にしない
   （`missing_atomic_claim` / `missing_evidence_link` / `missing_equation_link` /
   `missing_derivation_link` / `equation_needs_math_review` / `edge_not_source_backed` /

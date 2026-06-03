@@ -101,6 +101,10 @@ _HARD_ERROR_STAGES = {
     "evidence_registry",
 }
 
+# Claim types representing the paper's main result / central conclusion (#312).
+# A non-atomic main-result claim is a paper-level summary, not a usable claim.
+_MAIN_RESULT_CLAIM_TYPES = {"result", "conclusion", "main_result"}
+
 # Stage names where validation_issues are always warnings/review
 _SOFT_STAGES = {
     "equation_semantics",
@@ -166,9 +170,16 @@ class ExportValidationGate:
         # 6. Required artifact presence
         self._check_required_artifacts(artifacts, errors)
 
-        # 7. source-backed claim must reference EvidenceRegistry (#257)
+        # 7. source-backed claim must reference EvidenceRegistry (#257 / #312).
+        # Per #312 these are hard errors regardless of the code path (freshly
+        # built or reloaded artifact), so the gate enforces them itself.
         if claim_objects and evidence:
-            self._check_source_backed_claims(claim_objects, evidence, warnings)
+            self._check_source_backed_claims(claim_objects, evidence, errors)
+
+        # 7b. claim atomicity reporting (#312): non-atomic claims cannot back
+        # components / graph nodes; a non-atomic main result is a hard error.
+        if claim_objects:
+            self._check_claim_atomicity(claim_objects, errors, review_items)
 
         # 6. Determine status
         summary = ValidationSummary(
@@ -691,13 +702,15 @@ class ExportValidationGate:
         self,
         claim_objects,
         evidence,
-        warnings: list,
+        errors: list,
     ) -> None:
-        """Warn on source_backed claims that have no source_evidence_ids (#257).
+        """Hard-fail source_backed claims with broken evidence links (#257 / #312).
 
-        A source_backed claim without source_evidence_ids means the claim cannot
-        be traced back to a PDF-derived Evidence record. This breaks the assumption
-        that source_backed ↔ EvidenceRegistry linkage is verified.
+        A source_backed claim without source_evidence_ids — or referencing an
+        evidence_id absent from the EvidenceRegistry — cannot be traced back to a
+        PDF-derived Evidence record. Issue #312 requires these to be hard errors so
+        the guarantee holds on every code path (freshly built or reloaded claims),
+        not only when the builder happens to re-run its own validation.
         """
         known_evidence_ids: set[str] = {
             r.evidence_id
@@ -709,7 +722,7 @@ class ExportValidationGate:
                 continue
             ev_ids = list(getattr(claim, "source_evidence_ids", []) or [])
             if not ev_ids:
-                warnings.append(ValidationEntry(
+                errors.append(ValidationEntry(
                     code="SOURCE_BACKED_CLAIM_NO_EVIDENCE_IDS",
                     message=(
                         f"source_backed claim {getattr(claim, 'claim_id', '?')!r} "
@@ -720,10 +733,10 @@ class ExportValidationGate:
                     source_stage="export_validation",
                 ))
             else:
-                # Warn if any referenced evidence_id is not in the registry
+                # Error if any referenced evidence_id is not in the registry
                 for eid in ev_ids:
                     if known_evidence_ids and eid not in known_evidence_ids:
-                        warnings.append(ValidationEntry(
+                        errors.append(ValidationEntry(
                             code="SOURCE_BACKED_CLAIM_UNRESOLVED_EVIDENCE_ID",
                             message=(
                                 f"source_backed claim {getattr(claim, 'claim_id', '?')!r} "
@@ -733,6 +746,48 @@ class ExportValidationGate:
                             path=f"$.claims[{getattr(claim, 'claim_id', '?')}].source_evidence_ids",
                             source_stage="export_validation",
                         ))
+
+    def _check_claim_atomicity(
+        self,
+        claim_objects,
+        errors: list,
+        review_items: list,
+    ) -> None:
+        """Report non-atomic claims clearly (#312, criteria #6 / #8).
+
+        A non-atomic claim mixes multiple propositions and must not be treated as
+        confirmed atomic backing. A non-atomic *main-result* claim is a hard error
+        (it is a paper-level summary); other non-atomic claims are flagged for
+        review so they are split before being used by components / graph nodes.
+        """
+        for claim in getattr(claim_objects, "claims", []) or []:
+            atomicity = str(getattr(claim, "atomicity", "atomic") or "atomic")
+            if atomicity != "non_atomic":
+                continue
+            claim_id = getattr(claim, "claim_id", "?")
+            claim_type = str(getattr(claim, "claim_type", "") or "")
+            if claim_type in _MAIN_RESULT_CLAIM_TYPES:
+                errors.append(ValidationEntry(
+                    code="NON_ATOMIC_MAIN_RESULT_CLAIM",
+                    message=(
+                        f"main-result claim {claim_id!r} ({claim_type}) is non_atomic; "
+                        "a main result must be a single minimal proposition"
+                    ),
+                    artifact="claim_object_builder",
+                    path=f"$.claims[{claim_id}].atomicity",
+                    source_stage="export_validation",
+                ))
+            else:
+                review_items.append(ValidationEntry(
+                    code="NON_ATOMIC_CLAIM_NEEDS_SPLIT",
+                    message=(
+                        f"claim {claim_id!r} is non_atomic; split into atomic claims "
+                        "before using it to back a component or graph node"
+                    ),
+                    artifact="claim_object_builder",
+                    path=f"$.claims[{claim_id}].atomicity",
+                    source_stage="export_validation",
+                ))
 
     def _check_required_artifacts(
         self,

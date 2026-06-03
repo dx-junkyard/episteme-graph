@@ -5,12 +5,21 @@ import json
 from dataclasses import asdict, dataclass, field
 
 SUPPORT_STATUSES = [
-    "source_backed",     # PDF 原文に裏付けがある
-    "derived",           # 確定済みの他 Claim / Equation から導出された
-    "inferred",          # LLM 推論ベース、teacher review 必須
-    "external",          # 引用文献からの主張
+    "source_backed",            # PDF 原文に裏付けがある
+    "partially_source_backed",  # 一部のみ裏付けがある (issue #312)
+    "derived",                  # 確定済みの他 Claim / Equation から導出された
+    "inferred",                 # LLM 推論ベース、teacher review 必須
+    "review_required",          # 確定不能。teacher review 必須 (issue #312)
+    "external",                 # 引用文献からの主張
     "unknown",
 ]
+
+# Atomicity vocabulary (issue #312 extends #260):
+#   atomic        — 単一の最小命題
+#   compound      — split_claims により atomic 子に分割済みの親
+#   non_atomic    — 複数命題を含むが分割されていない（確定 claim にしない）
+#   split_pending — 分割予定
+ATOMICITY_VALUES = ["atomic", "compound", "non_atomic", "split_pending"]
 
 REVIEW_STATUSES = [
     "auto_accepted",
@@ -18,7 +27,10 @@ REVIEW_STATUSES = [
     "rejected",
 ]
 
-# Domain-neutral claim type ontology (issue #260)
+# Domain-neutral claim type ontology (issue #260, extended for #312).
+# The #312 required vocabulary (problem_statement / method / structural_property /
+# derivation_result / main_result / interpretation / limitation) is included so
+# those candidates normalize to themselves instead of collapsing to "unknown".
 CLAIM_TYPE_ONTOLOGY = [
     "definition",
     "criterion",
@@ -41,6 +53,13 @@ CLAIM_TYPE_ONTOLOGY = [
     "background",
     "prior_work",
     "meta",
+    # issue #312 required claim types
+    "problem_statement",
+    "method",
+    "structural_property",
+    "derivation_result",
+    "main_result",
+    "interpretation",
     "unknown",
 ]
 
@@ -51,6 +70,15 @@ EQUATION_CLAIM_TYPES = {
     "derivation_step",
     "operator_relation",
     "measurement_or_update",
+}
+
+# Claim types that represent the paper's main result / central conclusion.
+# These must be atomic single propositions (issue #312): a non-atomic
+# main-result claim is a paper-level summary and is a hard error downstream.
+MAIN_RESULT_CLAIM_TYPES = {
+    "result",
+    "conclusion",
+    "main_result",
 }
 
 
@@ -79,8 +107,17 @@ class ClaimObjectRecord:
     review_note: str = ""
     section_id: str | None = None
     confidence: float = 0.0
-    # Atomicity support (issue #260)
-    atomicity: str = "atomic"  # "atomic" | "compound" | "split_pending"
+    # Normalized single-proposition phrasing (issue #312). Mirrors `text` when no
+    # separate normalization is available.
+    normalized_text: str = ""
+    # Atomicity support (issue #260 / #312)
+    atomicity: str = "atomic"  # see ATOMICITY_VALUES
+    # True only for confirmed single-proposition claims. Non-atomic / compound
+    # parents are False so downstream graph nodes do not treat them as strong
+    # atomic backing (issue #312, criterion #7).
+    is_atomic: bool = True
+    # Why a claim is not yet a confirmed atomic claim (issue #312).
+    qualification_reason: str | None = None
     parent_claim_id: str | None = None
     subclaim_ids: list[str] = field(default_factory=list)
 
@@ -138,7 +175,10 @@ class ClaimObjectBuildResult:
                 review_note=raw.get("review_note", ""),
                 section_id=raw.get("section_id"),
                 confidence=float(raw.get("confidence", 0.0)),
+                normalized_text=raw.get("normalized_text", "") or raw.get("text", ""),
                 atomicity=raw.get("atomicity", "atomic"),
+                is_atomic=bool(raw.get("is_atomic", raw.get("atomicity", "atomic") == "atomic")),
+                qualification_reason=raw.get("qualification_reason"),
                 parent_claim_id=raw.get("parent_claim_id"),
                 subclaim_ids=list(raw.get("subclaim_ids", [])),
             ))

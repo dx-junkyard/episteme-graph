@@ -883,6 +883,8 @@ class ComponentGraphEdge(BaseModel):
     edge_type: str = "explicit_connector"
     confidence: float = 0.5
     support_status: str = "design_inferred"
+    # Same backing vocabulary as nodes (issue #311 criterion 6).
+    source_backing_status: str = ""
     review_status: str = "review_required"
     review_reasons: list[str] = Field(default_factory=list)
     evidence: dict = Field(default_factory=dict)

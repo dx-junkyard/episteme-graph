@@ -193,6 +193,108 @@ def test_domain_concept_fallback_for_bias_elimination_paper():
     assert "claim_concepts_empty" not in {i.rule_id for i in result.validation_issues}
 
 
+def _make_registry(block_id: str, text: str):
+    structure = _make_structure_with(block_id, text)
+    ev_builder = EvidenceRegistryBuilder(structure)
+    ev_builder.add_for_block(block_id)
+    return ev_builder.build("doc_test", "particle_physics")
+
+
+# ---------------------------------------------------------------------------
+# issue #312: atomic claim 化 / concept 補完 / evidence link
+# ---------------------------------------------------------------------------
+
+_NON_ATOMIC_TEXT = (
+    "The paper derives consistency relations by eliminating nuisance parameters "
+    "and shows they can be used to test a target theory."
+)
+
+
+def test_atomic_claim_marks_is_atomic_and_normalized_text():
+    registry = _make_registry("blk_x", "Nuisance parameters appear in the equations.")
+    spans = [_make_qualified("span_001", "blk_x", "Nuisance parameters appear in the equations.")]
+    builder = ClaimObjectBuilder(evidence_registry=registry)
+    claim = builder.build("doc_test", spans).claims[0]
+
+    assert claim.atomicity == "atomic"
+    assert claim.is_atomic is True
+    assert claim.support_status == "source_backed"
+    assert claim.normalized_text == "Nuisance parameters appear in the equations."
+    assert claim.qualification_reason is None
+
+
+def test_non_atomic_claim_is_split_into_atomic_children():
+    # The core of #312: a long undivided claim is deterministically split into
+    # atomic child claims (compound parent + atomic children), not just flagged.
+    registry = _make_registry("blk_x", _NON_ATOMIC_TEXT)
+    spans = [_make_qualified("span_001", "blk_x", _NON_ATOMIC_TEXT, claim_type="method_choice")]
+    builder = ClaimObjectBuilder(evidence_registry=registry)
+    result = builder.build("doc_test", spans)
+
+    parent = [c for c in result.claims if c.atomicity == "compound"]
+    children = [c for c in result.claims if c.parent_claim_id and c.atomicity == "atomic"]
+    assert len(parent) == 1
+    assert parent[0].is_atomic is False
+    assert len(children) >= 2
+    assert all(c.is_atomic for c in children)
+    rules = {i.rule_id for i in result.validation_issues}
+    assert "claim_auto_split" in rules
+
+
+def test_main_result_long_claim_is_split_not_paper_summary():
+    # Criterion #3: a main-result claim must not remain a paper-level summary;
+    # it is split into atomic propositions and produces no non-atomic hard error.
+    registry = _make_registry("blk_x", _NON_ATOMIC_TEXT)
+    spans = [_make_qualified("span_001", "blk_x", _NON_ATOMIC_TEXT, claim_type="result")]
+    builder = ClaimObjectBuilder(evidence_registry=registry)
+    result = builder.build("doc_test", spans)
+
+    children = [c for c in result.claims if c.parent_claim_id and c.atomicity == "atomic"]
+    assert len(children) >= 2
+    assert "main_result_claim_non_atomic" not in {i.rule_id for i in result.validation_issues}
+
+
+def test_main_result_normalizes_to_itself():
+    # #312 required vocabulary: 'main_result' must not collapse to 'unknown'.
+    assert ClaimObjectBuilder._normalize_claim_type("main_result") == "main_result"
+    assert ClaimObjectBuilder._normalize_claim_type("structural_property") == "structural_property"
+    assert ClaimObjectBuilder._normalize_claim_type("problem_statement") == "problem_statement"
+
+
+def test_single_proposition_with_and_stays_atomic():
+    # "X and Y eliminate Z" is one proposition (coordinated subject), not two.
+    text = "Skewness and kurtosis consistency relations eliminate nonlinear galaxy bias."
+    registry = _make_registry("blk_x", text)
+    spans = [_make_qualified("span_001", "blk_x", text, claim_type="result")]
+    builder = ClaimObjectBuilder(evidence_registry=registry)
+    claim = builder.build("doc_test", spans).claims[0]
+    assert claim.atomicity == "atomic"
+
+
+def test_concept_completion_from_evidence_span_text():
+    # Concept appears only in the raw evidence span, not the normalized claim text.
+    span = _make_qualified("span_001", "blk_x", "Skewness consistency relations hold.")
+    span.edit_suggestions = {"normalized_text": "The relation holds."}
+    builder = ClaimObjectBuilder()
+    claim = builder.build("doc_test", [span]).claims[0]
+    names = {c.normalized for c in claim.concepts}
+    assert "skewness" in names
+
+
+def test_source_backed_claim_has_valid_evidence_ids():
+    registry = _make_registry("blk_004_0065", "Take the zero-recoil limit.")
+    spans = [_make_qualified("span_001", "blk_004_0065", "Take the zero-recoil limit.")]
+    builder = ClaimObjectBuilder(evidence_registry=registry)
+    result = builder.build("doc_test", spans)
+
+    claim = result.claims[0]
+    assert claim.support_status == "source_backed"
+    assert claim.source_evidence_ids
+    rules = {i.rule_id for i in result.validation_issues}
+    assert "source_backed_claim_no_evidence_ids" not in rules
+    assert "claim_references_missing_evidence" not in rules
+
+
 def test_split_claims_create_compound_parent_and_atomic_children():
     structure = _make_structure_with("blk_x", "Definition and conclusion in one span.")
     ev_builder = EvidenceRegistryBuilder(structure)
@@ -212,6 +314,8 @@ def test_split_claims_create_compound_parent_and_atomic_children():
     children = [c for c in result.claims if c.parent_claim_id == "claim_span_001"]
     parent = [c for c in result.claims if c.claim_id == "claim_span_001"][0]
     assert parent.atomicity == "compound"
+    assert parent.is_atomic is False
     assert parent.subclaim_ids == ["claim_span_001_sub01", "claim_span_001_sub02"]
     assert [c.atomicity for c in children] == ["atomic", "atomic"]
+    assert [c.is_atomic for c in children] == [True, True]
     assert [c.claim_type for c in children] == ["definition", "conclusion"]

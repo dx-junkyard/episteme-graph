@@ -5888,7 +5888,9 @@
     var status = String((edge && edge.support_status) || "").toLowerCase();
     var relation = String((edge && (edge.relation || edge.edge_type || edge.type)) || "").toLowerCase();
     var review = String((edge && edge.review_status) || "").toLowerCase();
+    var backing = String((edge && edge.source_backing_status) || "").toLowerCase();
     if (review === "review_required") return true;
+    if (backing === "review_required" || backing === "inferred") return true;
     return /llm|related|qualifies|conflicts|inhibits|uncertain/.test(status + " " + relation);
   }
 
