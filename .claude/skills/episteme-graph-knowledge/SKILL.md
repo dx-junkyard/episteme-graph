@@ -268,6 +268,35 @@ src/tests/agents/<agent_name>/
 cd src && python -m pytest tests/ -v
 ```
 
+### TheoryOperationGraph の層構造 (ComponentGraphAgent / #266・#302・#306)
+
+`component_graph/normalizer.py` は DerivationChain から **domain-independent** な理論操作グラフを
+決定論的に構築する。node label / edge type は `schema.classify_operation()` が `operation` の
+prefix から導出し、特定分野・特定論文の用語をハードコードしない。
+
+グラフは 2 層に分離する (#306):
+
+- **main 層** (`graph_layer="main"`, `component_type="TheoryOperationNode"`): 上位理論構成。
+  式 step を `(derivation_id, operation family)` で集約した少数 node。generic operation
+  (`transform`/`relate`/`connect`/`support`/`associate`) は main にしない。
+- **equation_detail 層** (`graph_layer="equation_detail"`, `component_type="EquationOperationNode"`):
+  derivation step ごとの式単位 node。`parent_component_id` で main node を、main node は
+  `member_component_ids` で detail node を相互参照する。generic step は `debug` 層へ。
+
+その他の必須ルール:
+
+- **source-backing を明示**: 各 node は `linked_equation_ids` / `linked_derivation_ids` /
+  `linked_claim_ids` / `linked_evidence_ids` と `source_backing_status` を持つ。
+- **atomic claim を優先**: 主たる backing は atomic claim（短く evidence_text が非空、paper-level
+  でない）を優先。無ければ `review_reasons=["missing_atomic_claim"]`、equation ID だけの label は
+  `partially_source_backed`。空 evidence を強い backing にしない。evidence link で `source_backed`
+  になった node でも atomic claim が無ければ `missing_atomic_claim` warning を残す。
+- **review_status は backing から導出**: `schema.review_status_for_backing()` を使い、全 node を
+  一律 `teacher_review_required` にしない。`review_required` の node/edge は `review_reasons` を
+  空にしない。
+- **UI (`admin.js`)**: 層トグル（主グラフ / 式の詳細 / すべて）で `graph_layer` を切り替え、既定は
+  main を優先表示する。
+
 ## 開発ガイドライン
 
 1. **スキーマ変更**: `backend/core/schema.py` の Pydantic モデルを先に更新し、`backend/core/models.py` の ORM モデルも同期する

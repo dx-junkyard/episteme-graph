@@ -1969,6 +1969,8 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
             "linked_evidence_ids": node.get("linked_evidence_ids") if isinstance(node.get("linked_evidence_ids"), list) else [],
             "source_backing_status": str(node.get("source_backing_status") or ""),
             "review_reasons": node.get("review_reasons") if isinstance(node.get("review_reasons"), list) else [],
+            "parent_component_id": str(node.get("parent_component_id") or ""),
+            "member_component_ids": node.get("member_component_ids") if isinstance(node.get("member_component_ids"), list) else [],
         })
         seen_nodes.add(component_id)
     normalized_edges = []

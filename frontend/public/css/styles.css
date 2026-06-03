@@ -3498,6 +3498,46 @@ body {
   background: var(--color-background-secondary);
 }
 
+/* Issue #306: グラフ層トグル (main / equation_detail / all) */
+.ls-graph-layer-toolbar {
+  position: absolute;
+  left: 14px;
+  top: 14px;
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08);
+  z-index: 5;
+}
+
+.ls-graph-layer-btn {
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 5px 10px;
+  line-height: 1;
+}
+
+.ls-graph-layer-btn:hover {
+  background: var(--color-background-secondary);
+}
+
+.ls-graph-layer-btn.is-active {
+  background: var(--color-accent, #2563eb);
+  border-color: var(--color-accent, #2563eb);
+  color: #ffffff;
+}
+
+.ls-graph-layer-count {
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+
 .ls-component-graph-detail {
   min-width: 0;
   padding: 18px;

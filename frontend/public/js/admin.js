@@ -2847,6 +2847,8 @@
     claimMetaByChunk: {},
     componentsBySection: {},
     graphByDocument: {},
+    // Issue #306: 表示するグラフ層 ("main" | "equation_detail" | "all")。
+    graphLayerFilter: "main",
     selectedScope: null,
     selectedTheoryComponentId: null,
     analysisStatus: null,
@@ -5196,9 +5198,11 @@
       return;
     }
 
+    var view = lsGraphForCurrentLayer(graph);
     var html =
       '<div class="ls-component-graph-shell">' +
         '<div class="ls-component-graph-main">' +
+          lsGraphLayerToolbarHtml(nodes) +
           '<div id="ls-component-network" class="ls-component-network" tabindex="0"></div>' +
           '<div class="ls-component-legend">' +
             '<div class="ls-component-legend-title">論理コンポーネント</div>' +
@@ -5212,18 +5216,94 @@
           '<button id="ls-component-graph-fit" class="ls-component-graph-fit" type="button" title="全体を表示">⤢</button>' +
         '</div>' +
         '<aside id="ls-component-graph-detail" class="ls-component-graph-detail">' +
-          lsGraphEmptyDetailHtml(nodes.length, edges.length) +
+          lsGraphEmptyDetailHtml(view.nodes.length, view.edges.length) +
         '</aside>' +
       '</div>' +
       lsGraphValidationHtml(validations);
     container.innerHTML = html;
 
+    lsBindGraphLayerToolbar(documentId);
+
     if (!window.vis || !window.vis.Network) {
-      lsRenderGraphFallback(container, graph);
+      lsRenderGraphFallback(container, view);
       return;
     }
 
-    lsInitComponentGraphNetwork(graph);
+    lsInitComponentGraphNetwork(view);
+  }
+
+  // Issue #306: グラフは main（上位理論構成）と equation_detail（式単位）の
+  // 2層を持つ。デフォルトは main を優先表示し、トグルで詳細層を展開できる。
+  function lsGraphLayerOptions(nodes) {
+    var counts = { main: 0, equation_detail: 0, debug: 0, other: 0 };
+    (nodes || []).forEach(function (node) {
+      var layer = String((node && node.graph_layer) || "main").toLowerCase();
+      if (counts[layer] === undefined) counts.other += 1;
+      else counts[layer] += 1;
+    });
+    // Only a layered graph (with equation_detail / debug nodes) needs a toggle.
+    if (!counts.equation_detail && !counts.debug && !counts.other) return [];
+    var options = [{ value: "main", label: "主グラフ", count: counts.main }];
+    if (counts.equation_detail) {
+      options.push({ value: "equation_detail", label: "式の詳細", count: counts.equation_detail });
+    }
+    options.push({
+      value: "all",
+      label: "すべて",
+      count: counts.main + counts.equation_detail + counts.debug + counts.other,
+    });
+    return options;
+  }
+
+  function lsGraphLayerToolbarHtml(nodes) {
+    var options = lsGraphLayerOptions(nodes);
+    if (options.length <= 1) return "";
+    var current = lsState.graphLayerFilter || "main";
+    var buttons = options.map(function (opt) {
+      var active = opt.value === current ? " is-active" : "";
+      return '<button type="button" class="ls-graph-layer-btn' + active + '" data-graph-layer="' +
+        escHtml(opt.value) + '">' + escHtml(opt.label) +
+        ' <span class="ls-graph-layer-count">' + escHtml(String(opt.count)) + '</span></button>';
+    }).join("");
+    return '<div class="ls-graph-layer-toolbar" role="group" aria-label="グラフ層の切り替え">' +
+      buttons + '</div>';
+  }
+
+  function lsBindGraphLayerToolbar(documentId) {
+    var buttons = document.querySelectorAll(".ls-graph-layer-btn");
+    Array.prototype.forEach.call(buttons, function (btn) {
+      btn.addEventListener("click", function () {
+        var layer = btn.getAttribute("data-graph-layer") || "main";
+        if (layer === lsState.graphLayerFilter) return;
+        lsState.graphLayerFilter = layer;
+        lsRenderGraphPanel(documentId);
+      });
+    });
+  }
+
+  // Return a graph filtered to the currently selected layer. Edges are kept
+  // only when both endpoints remain visible.
+  function lsGraphForCurrentLayer(graph) {
+    var filter = lsState.graphLayerFilter || "main";
+    var nodes = graph.nodes || [];
+    var edges = graph.edges || [];
+    if (filter === "all") return graph;
+    var visible = nodes.filter(function (node) {
+      var layer = String((node && node.graph_layer) || "main").toLowerCase();
+      if (filter === "main") return layer === "main";
+      // equation_detail view shows the detailed trace plus its debug steps.
+      return layer === "equation_detail" || layer === "debug";
+    });
+    // Never show an empty canvas: fall back to all nodes if the filter is empty.
+    if (!visible.length) visible = nodes;
+    var visibleIds = {};
+    visible.forEach(function (node) { visibleIds[lsGraphNodeId(node)] = true; });
+    var visibleEdges = edges.filter(function (edge) {
+      var source = edge.source_component_id || edge.source || edge.from;
+      var target = edge.target_component_id || edge.target || edge.to;
+      return visibleIds[source] && visibleIds[target];
+    });
+    return Object.assign({}, graph, { nodes: visible, edges: visibleEdges });
   }
 
   function lsGraphEmptyDetailHtml(nodeCount, edgeCount) {
@@ -5368,7 +5448,11 @@
     var html =
       '<div class="ls-graph-detail-badge ' + escHtml(lsGraphNodeGroup(node)) + '">' + escHtml(node.component_type_text || node.component_type || node.typeName || "component") + '</div>' +
       '<h4>' + escHtml(node.label || node.name || nodeId || "無題") + '</h4>' +
-      '<p class="ls-graph-detail-meta">' + escHtml(node.review_status || node.origin || "paper") + '</p>';
+      '<p class="ls-graph-detail-meta">' + escHtml(lsGraphLayerLabel(node.graph_layer)) + ' ・ ' + escHtml(node.review_status || node.origin || "paper") + '</p>';
+    var linkage = lsGraphLayerLinkageHtml(node);
+    if (linkage) {
+      html += '<div class="ls-graph-detail-section"><b>グラフ層</b>' + linkage + '</div>';
+    }
     if (backing) {
       html += '<div class="ls-graph-detail-section"><b>出典の裏付け</b>' +
         '<p class="ls-graph-backing ls-graph-backing-' + escHtml(backing) + '">' +
@@ -5522,6 +5606,29 @@
   function lsGraphNodeDisplayLabel(node, id) {
     var label = lsWrapGraphLabel((node && (node.label || node.name)) || id);
     return lsGraphNodeIsFallback(node) ? "⚠ " + label : label;
+  }
+
+  function lsGraphLayerLabel(layer) {
+    var labels = {
+      main: "主グラフ（上位理論構成）",
+      equation_detail: "式の詳細",
+      debug: "要確認 / 推論層",
+    };
+    return labels[String(layer || "main").toLowerCase()] || layer || "主グラフ";
+  }
+
+  function lsGraphLayerLinkageHtml(node) {
+    var html = "";
+    var members = node.member_component_ids || [];
+    if (members.length) {
+      html += '<div class="ls-graph-detail-link"><span>式ステップ</span> ' +
+        escHtml(String(members.length)) + ' 件を集約</div>';
+    }
+    if (node.parent_component_id) {
+      html += '<div class="ls-graph-detail-link"><span>所属</span> ' +
+        escHtml(node.parent_component_id) + '</div>';
+    }
+    return html;
   }
 
   function lsGraphSourceBackingLabel(status) {
