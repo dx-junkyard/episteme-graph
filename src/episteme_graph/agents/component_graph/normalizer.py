@@ -15,10 +15,15 @@ domain-independent: node labels and edge types are derived from each step's
 Two layers are produced (issue #306):
 
 ``main`` (TheoryOperationNode)
-    Aggregated, high-level theory operations. Equation-level steps that share a
-    derivation and an operation family collapse into a single node so the main
-    graph stays small and shows the theory backbone rather than one node per
-    equation. Generic operations (``transform`` / ``relate`` / …) never become
+    Aggregated, high-level theory operations. Equation-level steps collapse into
+    a single node per *theory stage* (``theory_basis`` → ``observation_model`` →
+    … → ``diagnostic_application``, issue #308) so the main graph stays small
+    (5–8 nodes) and shows the theory backbone rather than one node per equation
+    or operation. The stage is derived domain-neutrally from each step's
+    operation edge_type family. Main labels are short stage names and never bare
+    equation IDs; any longer atomic-claim / reason phrase is kept in the node's
+    ``description`` (shown in the UI detail pane) rather than crammed into the
+    label. Generic operations (``transform`` / ``relate`` / …) never become
     confirmed main nodes.
 
 ``equation_detail`` (EquationOperationNode)
@@ -28,6 +33,7 @@ Two layers are produced (issue #306):
 """
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 
 from episteme_graph.agents.component_assembly.schema import ComponentAssemblyResult
@@ -39,11 +45,14 @@ from .schema import (
     GRAPH_LAYER_EQUATION_DETAIL,
     GRAPH_LAYER_MAIN,
     THEORY_OPERATION_NODE,
+    THEORY_STAGES,
     ComponentGraphEdge,
     ComponentGraphNode,
     ComponentGraphResult,
     classify_operation,
     review_status_for_backing,
+    stage_for_edge_type,
+    theory_stage_label,
 )
 
 _GENERIC_LABELS = {"define", "transform", "relate", "result", "operation"}
@@ -249,44 +258,59 @@ class ComponentGraphNormalizer:
 # ---------------------------------------------------------------------- #
 
 def _group_records(records: list[dict]) -> list[dict]:
-    """Aggregate non-generic step records into main theory-operation groups.
+    """Aggregate non-generic step records into main theory-stage groups.
 
-    Grouping key: ``(derivation_id, operation family)``. Consecutive equation
-    steps that share a derivation and an operation family collapse into one
-    high-level node; generic operations never form a main node (issue #306).
+    Grouping key: the *theory stage* derived from each step's operation edge_type
+    family (issue #308). Steps from every derivation that share a stage collapse
+    into one high-level node, so the main graph reads as a backbone of 5–8 stages
+    rather than one node per equation/operation. Generic operations never form a
+    main node (issue #306/#308); unmapped non-generic edge types fall back to the
+    edge type itself as a pseudo-stage so no concrete operation is dropped.
     """
+    index: dict[str, dict] = {}
     groups: list[dict] = []
-    index: dict[tuple[str, str], dict] = {}
-    order = 0
     for rec in records:
         if rec["is_generic"]:
             continue
-        key = (rec["derivation_id"], rec["edge_type"])
-        group = index.get(key)
+        stage = stage_for_edge_type(rec["edge_type"]) or rec["edge_type"]
+        group = index.get(stage)
         if group is None:
-            order += 1
-            group = {
-                "node_id": f"theory_op_{order:04d}",
-                "order": order,
-                "derivation_id": rec["derivation_id"],
-                "edge_type": rec["edge_type"],
-                "records": [],
-            }
-            index[key] = group
+            group = {"stage": stage, "records": []}
+            index[stage] = group
             groups.append(group)
         group["records"].append(rec)
+
+    # Order groups by the canonical theory-stage progression so the main graph
+    # reads top-to-bottom (basis → … → diagnostic). Unknown stages sort last but
+    # keep first-seen order among themselves.
+    def _stage_rank(group: dict) -> tuple[int, int]:
+        stage = group["stage"]
+        canonical = THEORY_STAGES.index(stage) if stage in THEORY_STAGES else len(THEORY_STAGES)
+        first_order = min(rec["order"] for rec in group["records"])
+        return (canonical, first_order)
+
+    groups.sort(key=_stage_rank)
+    for order, group in enumerate(groups, start=1):
+        group["order"] = order
+        group["node_id"] = f"theory_op_{order:04d}"
+        # Representative record drives the node's operation and the edge_type used
+        # for definition/constraint roles and main edges.
+        rep = _representative_record(group["records"])
+        group["rep"] = rep
+        group["edge_type"] = rep["edge_type"]
     return groups
 
 
 def _main_node_from_group(group: dict, claim_index: dict[str, dict]) -> ComponentGraphNode:
     records = group["records"]
     edge_type = group["edge_type"]
+    stage = group["stage"]
 
     inputs = _ordered_unique([eq for rec in records for eq in rec["inputs"]])
     outputs = _ordered_unique([eq for rec in records for eq in rec["outputs"]])
     linked_equation_ids = _ordered_unique(inputs + outputs)
     linked_derivation_ids = _ordered_unique(
-        [group["derivation_id"]] + [rec["step_id"] for rec in records]
+        [rec["derivation_id"] for rec in records] + [rec["step_id"] for rec in records]
     )
     linked_claim_ids = _ordered_unique(
         [cid for rec in records for cid in _step_claim_ids(rec["step"])]
@@ -312,16 +336,14 @@ def _main_node_from_group(group: dict, claim_index: dict[str, dict]) -> Componen
         is_generic=False,
     )
 
-    rep = _representative_record(records)
-    label, label_from_eq_only = _build_main_label(
-        rep, records, inputs, outputs, eliminated, retained, atomic_claim_ids, claim_index
-    )
-    # A node whose label could only be built from an equation ID is, by
-    # definition, not backed by an atomic claim (acceptance #3 / #9). A
-    # source-backed node (it has evidence) keeps its status; only the
-    # remaining cases gain the missing_atomic_claim reason.
-    if label_from_eq_only and status != "source_backed":
-        reasons = _ordered_unique(reasons + ["missing_atomic_claim"])
+    rep = group.get("rep") or _representative_record(records)
+    # Main labels are SHORT theory-stage labels (issue #308): ``Theory basis`` …
+    # ``Diagnostic / application``. They are never equation-id fallbacks, so
+    # ``eq_...`` can no longer leak into the main graph. The longer atomic-claim /
+    # reason phrase that used to be appended to the label now lives in
+    # ``description`` and is shown in the UI's detail pane instead.
+    label = theory_stage_label(stage)
+    description = _build_main_description(records, atomic_claim_ids, claim_index)
 
     definitions = outputs if edge_type == "defines" else []
     constraints = outputs if edge_type in ("constrains", "derives", "diagnoses") else []
@@ -335,6 +357,7 @@ def _main_node_from_group(group: dict, claim_index: dict[str, dict]) -> Componen
         origin="derivation_chain",
         operation=rep["operation"],
         theory_object=_theory_object(rep, atomic_claim_ids, claim_index),
+        description=description,
         graph_layer=GRAPH_LAYER_MAIN,
         maturity_source="derivation_aggregated",
         publish_ready=status == "source_backed",
@@ -411,8 +434,8 @@ def _main_edges_from_groups(groups: list[dict]) -> list[ComponentGraphEdge]:
                 support_status="derivation_linked",
                 evidence_claims=[],
                 reasoning=(
-                    f"Theory flow: {src['group']['edge_type']} output feeds "
-                    f"{tgt['group']['edge_type']} ({', '.join(overlap)})."
+                    f"Theory flow: {theory_stage_label(src['group']['stage'])} output feeds "
+                    f"{theory_stage_label(tgt['group']['stage'])} ({', '.join(overlap)})."
                 ),
                 confidence=0.9,
                 evidence_equation_ids=overlap,
@@ -675,67 +698,55 @@ def _representative_record(records: list[dict]) -> dict:
     return max(records, key=lambda r: (len(str(r["operation"] or "")), -r["order"]))
 
 
-def _build_main_label(
-    rep: dict,
+def _build_main_description(
     records: list[dict],
-    inputs: list[str],
-    outputs: list[str],
-    eliminated: list[str],
-    retained: list[str],
     atomic_claim_ids: list[str],
     claim_index: dict[str, dict],
-) -> tuple[str, bool]:
-    """Domain-neutral ``operation + theory object`` label for a main node.
+) -> str:
+    """Longer explanation for a main node, shown in the UI detail pane (issue #308).
 
-    Returns ``(label, from_equation_id_only)``. The object phrase is taken, in
-    order, from: atomic claim text → step reason → eliminated/retained symbols →
-    equation ID (last resort, which flags the node, acceptance #3).
+    The main node's *label* stays short (the theory-stage name). This description
+    carries the human-readable detail: the atomic-claim text if one backs the
+    node, otherwise the first meaningful step reason. Equation-id-only reasons are
+    skipped so the description never degenerates into an equation reference.
+    Returns ``""`` when no meaningful phrase is available.
     """
-    verb = str(rep["verb"] or "").strip()
-    # 1. atomic claim text
-    claim_phrase = _atomic_claim_phrase(atomic_claim_ids, claim_index)
+    # 1. atomic claim text (preferred)
+    claim_phrase = _atomic_claim_phrase(atomic_claim_ids, claim_index, limit=240)
     if claim_phrase:
-        return _compose_label(verb, claim_phrase), False
-    # 2. step reason (skip bare generic words)
-    for rec in [rep] + records:
+        return claim_phrase
+    # 2. meaningful step reason (skip bare generic words / equation-id-only text)
+    for rec in records:
         reason = str(getattr(rec["step"], "reason", "") or "").strip()
-        if reason and reason.lower() not in _GENERIC_LABELS:
-            return _compose_label(verb, reason[:80]), False
-    # 3. eliminated / retained symbols
-    symbols = eliminated or retained
-    if symbols:
-        return _compose_label(verb, ", ".join(symbols[:3])), False
-    # 4. the verb already names a specific operation (multi-word from operation)
-    if " " in verb:
-        return verb, False
-    # 5. equation ID fallback only — flags the node as not atomically backed
-    obj = (outputs[:1] or inputs[:1] or [""])[0]
-    if obj:
-        return f"{verb} {obj}".strip(), True
-    return verb, True
+        if reason and reason.lower() not in _GENERIC_LABELS and not _looks_like_equation_id(reason):
+            return reason[:240]
+    return ""
 
 
-def _compose_label(verb: str, phrase: str) -> str:
-    verb = verb.strip()
-    phrase = phrase.strip()
-    if not phrase:
-        return verb
-    if not verb:
-        return phrase
-    # Avoid duplicating the verb if the phrase already starts with it.
-    if phrase.lower().startswith(verb.lower()):
-        return phrase
-    return f"{verb} {phrase}"
+def _looks_like_equation_id(text: str) -> bool:
+    """True if a phrase is dominated by equation-id tokens (e.g. ``eq_2_7``).
+
+    Used to avoid enriching a main label with text that is really just an
+    equation reference (acceptance: main labels are never equation-id based).
+    """
+    stripped = str(text or "").strip()
+    if not stripped:
+        return False
+    return bool(re.fullmatch(r"(eq[_\.\s]*\(?\s*[\dA-Za-z\.\)]+\s*[, ]*)+", stripped, re.IGNORECASE))
 
 
-def _atomic_claim_phrase(atomic_claim_ids: list[str], claim_index: dict[str, dict]) -> str:
+def _atomic_claim_phrase(
+    atomic_claim_ids: list[str],
+    claim_index: dict[str, dict],
+    limit: int = 80,
+) -> str:
     for cid in atomic_claim_ids:
         meta = claim_index.get(cid)
         if not meta:
             continue
         text = str(meta.get("text") or meta.get("predicate") or "").strip()
         if text:
-            return text[:80]
+            return text[:limit]
     return ""
 
 

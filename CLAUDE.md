@@ -195,12 +195,27 @@ examples/          → サンプル入出力JSON
   `fallback_or_inferred_node` / `source_span_missing` から選ぶ）。
 - **fallback / inferred node を main graph で確定扱いしない**: `deterministic_fallback` や
   `inferred` の node は `graph_layer = "debug"` に分離し、`source_backed` にしてはならない（hard error）。
-- **graph を 2 層に分離する (#306)**: main graph は上位理論構成を表す少数の集約 node
+- **graph を 2 層に分離する (#306 / #308)**: main graph は上位理論構成を表す少数の集約 node
   (`graph_layer = "main"`, `component_type = "TheoryOperationNode"`)、式単位の step は
   (`graph_layer = "equation_detail"`, `component_type = "EquationOperationNode"`) に保持する。
-  式 step は `(derivation_id, operation family)` で集約して main node を作り、各 detail node は
-  `parent_component_id`、各 main node は `member_component_ids` で相互参照する。
+  各 detail node は `parent_component_id`、各 main node は `member_component_ids` で相互参照する。
   generic operation は main node にしない（detail / debug に置き `inferred`）。
+- **main graph は theory stage 単位で集約する (#308)**: 式 step は `(derivation_id, operation family)`
+  ではなく **theory stage** で集約する。stage は `schema.stage_for_edge_type()` が operation の
+  edge_type family から domain-neutral に導出する（`defines → theory_basis` /
+  `constructs・normalizes → observable_construction` / `linearizes・approximates・substitutes →
+  equation_system` / `solves・eliminates → elimination` / `derives・constrains →
+  consistency_relation` / `diagnoses・compares → diagnostic_application`）。stage は全 derivation
+  を跨いで集約されるため、main graph は理論構成 5–8 個程度のバックボーンになる。stage の候補語彙は
+  `schema.THEORY_STAGES` / 表示名は `schema.THEORY_STAGE_LABELS`。特定分野・特定論文の用語は使わない。
+- **main label は短い theory stage label にする (#308)**: main node の label は stage label
+  （`Theory basis` / `Observation model` / `Observable construction` / `Equation system` /
+  `Elimination` / `Consistency relation` / `Diagnostic / application`）**そのもの**を使い、短く保つ。
+  atomic claim text や step reason のような長い説明は label に詰め込まず、node の `description`
+  フィールドに入れて UI 詳細ペインで表示する（`Stage: 長い説明文` のような label は作らない）。
+  **equation ID fallback は使わない**ので `Define eq_2_7` / `Derive result eq_...` のような label は
+  main に出ない。validator は main node の equation-id label (`main_graph_node_equation_id_label`) と
+  generic operation (`main_graph_generic_operation`) を hard error として検出する。
 - **review_status は source_backing_status から導出する (#306)**: `schema.review_status_for_backing()`
   が `source_backed → source_backed` / `partially_source_backed → teacher_review_required` /
   `inferred・review_required → review_required` にマップする。全 node を一律

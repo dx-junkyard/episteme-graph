@@ -80,21 +80,26 @@ def _bias_derivation():
     return DerivationChainResult(document_id="doc", cartridge_id=None, chains=[chain])
 
 
-def test_coarse_component_split_into_theory_operations():
+def test_coarse_component_split_into_reusable_theory_units():
     result = _result([_coarse_component()])
     refined = REFINER.refine(result, llm_input=None, derivations=_bias_derivation())
 
     # Acceptance criterion #1: the coarse component is gone, replaced by children.
     ids = [c.component_id for c in refined.components]
     assert "comp_bias" not in ids
-    # 7 distinct operations -> 7 children.
-    assert len(refined.components) == 7
+    # Issue #308: split by reusable theory-unit family, not per equation step.
+    # 7 operations across {linearize, solve, derive} -> 3 reusable units.
+    assert len(refined.components) == 3
+    assert {c.operation for c in refined.components} == {"linearize", "solve", "derive"}
 
     for child in refined.components:
-        # criterion #2/#3: one main operation, non-empty inputs/operation/outputs.
+        # criterion #2/#3: a reusable unit with non-empty inputs/operation/outputs.
         assert child.operation
         assert child.inputs
         assert child.outputs
+        # Labels/summaries are theory-object centric, never a bare generic op.
+        assert child.label.lower() not in ("transform", "relate", "")
+        assert "refined theory operation" not in child.summary.lower()
         # criterion #4: derivation children have internal_flow.
         assert child.internal_flow
         # criterion #5: equation roles populated.
@@ -105,14 +110,25 @@ def test_coarse_component_split_into_theory_operations():
         }
 
 
-def test_consistency_relation_children_expose_output_equations():
+def test_multiple_equation_steps_collapse_into_one_unit():
+    # Issue #308: the derive family bundles 3 consistency-relation steps into a
+    # single reusable unit whose internal_flow keeps every step.
     result = _result([_coarse_component()])
     refined = REFINER.refine(result, llm_input=None, derivations=_bias_derivation())
-    consistency = [c for c in refined.components if "consistency" in c.label.lower()]
-    assert consistency
-    for child in consistency:
-        # criterion #7: consistency relation components expose output equation IDs.
-        assert child.output_equation_ids
+    derive_unit = next(c for c in refined.components if c.operation == "derive")
+    assert len(derive_unit.internal_flow) >= 3
+    # It carries the consistency-relation outputs from all three steps.
+    assert "eq_cons_skew" in derive_unit.output_equation_ids
+    assert "eq_cons_kurt1" in derive_unit.output_equation_ids
+    assert "eq_cons_kurt2" in derive_unit.output_equation_ids
+
+
+def test_derive_unit_exposes_output_equations():
+    result = _result([_coarse_component()])
+    refined = REFINER.refine(result, llm_input=None, derivations=_bias_derivation())
+    derive_unit = next(c for c in refined.components if c.operation == "derive")
+    # criterion #7: consistency-relation (derive) unit exposes output equation IDs.
+    assert derive_unit.output_equation_ids
 
 
 def test_refinement_report_records_split():
@@ -122,7 +138,7 @@ def test_refinement_report_records_split():
     assert report["split_count"] == 1
     action = report["split_actions"][0]
     assert action["parent_component_id"] == "comp_bias"
-    assert len(action["child_component_ids"]) == 7
+    assert len(action["child_component_ids"]) == 3
 
 
 def test_review_required_equation_propagates_to_child_status():
@@ -138,6 +154,34 @@ def test_review_required_equation_propagates_to_child_status():
     for child in solving:
         assert child.review_status == "teacher_review_required"
         assert "eq_b2" in child.review_required_equation_ids
+
+
+def test_generic_operation_does_not_form_its_own_unit():
+    # Issue #308: a generic "transform"/"relate" step must not become a standalone
+    # reusable component; it is folded into a real unit's internal_flow.
+    operations = [
+        ("linearize_skewness_bias_dependence", ["eq_skew"], ["eq_skew_lin"]),
+        ("transform", ["eq_skew_lin"], ["eq_mid"]),
+        ("solve_second_order_bias", ["eq_mid"], ["eq_b2"]),
+        ("derive_skewness_consistency_relation", ["eq_b2"], ["eq_cons"]),
+    ]
+    steps = [
+        DerivationStep(step_id=f"step_{i}", input_equation_ids=inp, operation=op, output_equation_ids=out)
+        for i, (op, inp, out) in enumerate(operations)
+    ]
+    chain = DerivationChainRecord(
+        derivation_id="deriv_bias", document_id="doc", source_section_ids=["s3"],
+        steps=steps, linked_component_ids=["comp_bias"],
+    )
+    derivations = DerivationChainResult(document_id="doc", cartridge_id=None, chains=[chain])
+    refined = REFINER.refine(_result([_coarse_component()]), llm_input=None, derivations=derivations)
+
+    # 3 non-generic families -> 3 units; no unit is named for the generic op.
+    assert {c.operation for c in refined.components} == {"linearize", "solve", "derive"}
+    assert "transform" not in {c.operation for c in refined.components}
+    # The generic step's equations survive inside some unit's internal_flow.
+    flows = [f for c in refined.components for f in c.internal_flow]
+    assert any(f.get("relation") == "transform" for f in flows)
 
 
 def test_single_operation_component_not_split():

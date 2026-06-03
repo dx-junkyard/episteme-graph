@@ -13,10 +13,19 @@ the real theory structure (one step = one operation, with input/output equations
 eliminated/retained symbols) — to detect over-large components and split them so
 that:
 
-    1 component = 1 main theoretical operation
+    1 component = 1 reusable theory unit
+
+A *reusable theory unit* is a theory-operation **family** (linearize / solve /
+eliminate / derive / …), not a single equation step (issue #308). Several
+equation steps of the same family collapse into one component and are preserved
+in its ``internal_flow``. Generic operations (``transform`` / ``relate`` /
+``connect`` / ``support`` / empty) never spawn a standalone child — they are kept
+inside the nearest unit's ``internal_flow`` so the catalogue of reusable
+components stays at the theory-unit altitude. Component labels/summaries describe
+the theory object, not a bare operation name.
 
 The boundary is decided by *theory structure*, not explanation style:
-inputs change, outputs change, the operation changes, eliminated symbols change.
+inputs change, outputs change, the operation family changes, symbols change.
 """
 from __future__ import annotations
 
@@ -38,6 +47,11 @@ _DERIVATION_TYPES = {
     "MethodComponent",
     "CorrectionComponent",
 }
+
+# Generic operations that do not name a reusable theory unit (issue #308). Steps
+# carrying these never form a standalone child component; they are folded into
+# the nearest unit's internal_flow instead.
+_GENERIC_OPERATIONS = {"transform", "relate", "connect", "support", "associate", ""}
 
 
 @dataclass
@@ -136,7 +150,7 @@ class ComponentRefiner:
         chains: list,
         report: RefinementReport,
     ) -> list[ComponentRecord]:
-        groups = self._operation_groups(component, chains)
+        groups, generic_steps = self._operation_groups(component, chains)
 
         if component.component_type not in _DERIVATION_TYPES or len(groups) < 2:
             # Nothing to split: make sure the component still has a single
@@ -144,9 +158,15 @@ class ComponentRefiner:
             self._finalize_single(component, eq_index, groups)
             return [component]
 
+        # Generic steps never form their own component; fold them into the unit
+        # whose equations they touch (else the last unit) so they survive in the
+        # internal_flow without polluting the reusable-component catalogue.
+        family_steps = {family: list(steps) for family, steps in groups.items()}
+        self._absorb_generic_steps(family_steps, generic_steps)
+
         children: list[ComponentRecord] = []
-        for idx, (op_key, steps) in enumerate(groups.items(), start=1):
-            child = self._build_child(component, idx, op_key, steps, eq_index)
+        for idx, (family, steps) in enumerate(family_steps.items(), start=1):
+            child = self._build_child(component, idx, family, steps, eq_index)
             children.append(child)
 
         # Chain the children sequentially so the derivation order is preserved.
@@ -154,7 +174,7 @@ class ComponentRefiner:
             nxt.dependencies.append({
                 "dependency_type": "depends_on",
                 "component_refs": [prev.component_id],
-                "reason": "Sequential theory-operation dependency from ComponentRefiner.",
+                "reason": "Sequential theory-unit dependency from ComponentRefiner.",
             })
 
         report.split_actions.append(RefinementAction(
@@ -163,21 +183,26 @@ class ComponentRefiner:
             child_component_ids=[c.component_id for c in children],
             operations=[c.operation for c in children],
             reason=(
-                f"Component bundled {len(groups)} distinct theoretical operations; "
-                "split into one component per operation (issue #300)."
+                f"Component bundled {len(family_steps)} distinct reusable theory "
+                "units; split into one component per theory-operation family "
+                "(issue #308)."
             ),
         ))
         return children
 
-    def _operation_groups(self, component: ComponentRecord, chains: list) -> dict:
-        """Group derivation steps relevant to the component by their operation.
+    def _operation_groups(self, component: ComponentRecord, chains: list) -> tuple[dict, list]:
+        """Group derivation steps relevant to the component by theory-unit family.
 
-        Order is preserved (first-seen operation first) so children keep the
-        natural derivation order.
+        Returns ``(family_groups, generic_steps)``. Steps are bucketed by their
+        operation *family* (issue #308) so several equation steps of the same
+        family form one reusable unit; order is preserved (first-seen family
+        first). Generic-operation steps are collected separately and never become
+        their own family.
         """
         component_eqs = set(_all_equation_ids(component))
         linked_ids = set(component.linked_derivation_ids or [])
         groups: dict[str, list] = {}
+        generic_steps: list = []
         for chain in chains:
             chain_id = getattr(chain, "derivation_id", None)
             linked_components = set(getattr(chain, "linked_component_ids", []) or [])
@@ -194,8 +219,37 @@ class ComponentRefiner:
                 operation = str(getattr(step, "operation", "") or "").strip()
                 if not operation:
                     continue
-                groups.setdefault(operation, []).append(step)
-        return groups
+                if _is_generic_operation(operation):
+                    generic_steps.append(step)
+                    continue
+                family = _operation_family(operation)
+                groups.setdefault(family, []).append(step)
+        return groups, generic_steps
+
+    @staticmethod
+    def _absorb_generic_steps(family_steps: dict, generic_steps: list) -> None:
+        """Fold generic steps into the family unit they share equations with."""
+        if not generic_steps or not family_steps:
+            return
+        family_eqs = {
+            family: {
+                eid
+                for step in steps
+                for eid in _step_field(step, "input_equation_ids") + _step_field(step, "output_equation_ids")
+            }
+            for family, steps in family_steps.items()
+        }
+        families = list(family_steps.keys())
+        for step in generic_steps:
+            eqs = set(
+                _step_field(step, "input_equation_ids")
+                + _step_field(step, "output_equation_ids")
+            )
+            target = next(
+                (family for family in families if eqs & family_eqs[family]),
+                families[-1],
+            )
+            family_steps[target].append(step)
 
     def _build_child(
         self,
@@ -227,7 +281,11 @@ class ComponentRefiner:
         )
 
         family = _operation_family(operation)
-        label = _humanize_operation(operation, parent.label)
+        # Label / summary describe the theory object (the parent's theoretical
+        # subject) qualified by the reusable unit's family — not a bare operation
+        # name like "Transform" / "Relate" (issue #308).
+        label = _theory_unit_label(family, parent, eliminated or retained)
+        summary = _theory_unit_summary(label, family, parent, len(steps))
 
         internal_flow = _build_internal_flow(steps, family)
         review_required = bool(classification.review_required_equation_ids) or any(
@@ -242,7 +300,7 @@ class ComponentRefiner:
             component_id=f"{parent.component_id}__op{idx}",
             component_type=parent.component_type,
             label=label,
-            summary=f"{label} (refined theory operation derived from {parent.label}).",
+            summary=summary,
             inputs=[{"name": eid, "equation_ids": [eid]} for eid in input_eqs] or list(parent.inputs),
             outputs=[{"name": eid, "equation_ids": [eid]} for eid in output_eqs] or list(parent.outputs),
             preconditions=list(parent.preconditions),
@@ -375,6 +433,36 @@ def _humanize_operation(operation: str, parent_label: str) -> str:
     if not words:
         return parent_label
     return words[:1].upper() + words[1:]
+
+
+def _is_generic_operation(operation: str) -> bool:
+    """True if an operation is too generic to name a reusable theory unit."""
+    return str(operation or "").strip().lower() in _GENERIC_OPERATIONS
+
+
+def _theory_unit_label(family: str, parent: ComponentRecord, symbols: list[str]) -> str:
+    """Theory-object-centric label for a refined reusable unit (issue #308).
+
+    The label leads with the parent's theoretical subject (its label) and
+    qualifies it with the reusable unit's family, so it never collapses to a bare
+    operation name. When the unit carries distinguishing symbols they are used as
+    the more specific theory object.
+    """
+    verb = _humanize_operation(family, "")
+    object_phrase = ", ".join(symbols[:3]) if symbols else str(parent.label or "").strip()
+    if not object_phrase:
+        return verb or "Theory unit"
+    if not verb:
+        return object_phrase
+    return f"{verb}: {object_phrase}"
+
+
+def _theory_unit_summary(label: str, family: str, parent: ComponentRecord, step_count: int) -> str:
+    subject = str(parent.label or "").strip() or "the parent theory unit"
+    return (
+        f"Reusable theory unit ({family}) within {subject}; "
+        f"covers {step_count} equation step(s)."
+    )
 
 
 def _build_internal_flow(steps: list, family: str) -> list[dict]:

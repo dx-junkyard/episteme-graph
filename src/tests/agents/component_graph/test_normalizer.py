@@ -134,6 +134,35 @@ def test_equation_steps_aggregate_into_one_main_node():
     assert len(linearizes.member_component_ids) == 2
 
 
+def test_steps_from_multiple_derivations_share_a_stage_node():
+    # Issue #308: stage aggregation is global — define steps from two different
+    # derivations collapse into a single "Theory basis" main node.
+    derivations = DerivationChainResult(
+        document_id="doc",
+        cartridge_id=None,
+        chains=[
+            DerivationChainRecord(
+                derivation_id="deriv_a",
+                document_id="doc",
+                source_section_ids=[],
+                steps=[_step("define_kernel", ["eq_a"], ["eq_b"])],
+            ),
+            DerivationChainRecord(
+                derivation_id="deriv_b",
+                document_id="doc",
+                source_section_ids=[],
+                steps=[_step("define_observable", ["eq_x"], ["eq_y"])],
+            ),
+        ],
+    )
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    basis_nodes = [n for n in _layer(result, "main") if n.label == "Theory basis"]
+    assert len(basis_nodes) == 1
+    assert len(basis_nodes[0].member_component_ids) == 2
+
+
 def test_detail_nodes_point_back_at_main_node():
     result = _normalized()
     main_by_id = {n.component_id: n for n in _layer(result, "main")}
@@ -145,23 +174,47 @@ def test_detail_nodes_point_back_at_main_node():
 # --- labels (acceptance #3, #4) ---------------------------------------------
 
 
-def test_main_labels_are_not_bare_generic():
+def test_main_labels_are_theory_stages_not_equation_ids():
+    # Issue #308: main labels are high-level theory stages, never bare generic
+    # operations and never equation-id fallbacks ("Define eq_...", etc.).
     result = _normalized()
     labels = {n.label for n in _layer(result, "main")}
     for generic in ("Define", "Transform", "Relate", "Result"):
         assert generic not in labels
-    # Labels are operation + object phrases.
-    assert any(l.startswith("Linearize") for l in labels)
-    assert any(l.startswith("Eliminate second order parameter") for l in labels)
+    # No main label contains an equation id.
+    for label in labels:
+        assert "eq_" not in label.lower()
+        assert not label.lower().startswith("define eq")
+        assert not label.lower().startswith("derive result eq")
+    # Labels are the canonical theory-stage backbone.
+    assert "Theory basis" in labels  # define step
+    assert "Equation system" in labels  # linearize step
+    assert "Elimination" in labels  # eliminate step
+    assert "Consistency relation" in labels  # derive step
+    assert "Diagnostic / application" in labels  # apply_criterion step
+    # Labels stay short: the stage name only, never a "Stage: long phrase" form.
+    for label in labels:
+        assert ":" not in label.replace("Diagnostic / application", "")
+        assert len(label) <= 40
 
 
-def test_main_label_prefers_atomic_claim_text():
+def test_main_graph_has_five_to_eight_stage_nodes():
+    # Acceptance: the main graph collapses to a handful of theory stages.
+    result = _normalized()
+    main_nodes = _layer(result, "main")
+    assert 1 <= len(main_nodes) <= 8
+
+
+def test_main_label_stays_short_and_description_holds_claim_text():
+    # Issue #308: the atomic-claim phrase enriches the node's *description*, not
+    # its label. The label stays a short theory-stage name.
     claim_index = {
         "claim_1": {"text": "second-order moment vanishes", "evidence_text": "p.4", "is_atomic": True},
     }
     result = _normalized(claim_index)
     eliminate = next(n for n in _layer(result, "main") if n.operation.startswith("eliminate"))
-    assert "second-order moment vanishes" in eliminate.label
+    assert eliminate.label == "Elimination"
+    assert "second-order moment vanishes" in eliminate.description
 
 
 # --- generic operations (acceptance #5) -------------------------------------

@@ -274,14 +274,31 @@ cd src && python -m pytest tests/ -v
 決定論的に構築する。node label / edge type は `schema.classify_operation()` が `operation` の
 prefix から導出し、特定分野・特定論文の用語をハードコードしない。
 
-グラフは 2 層に分離する (#306):
+グラフは 2 層に分離する (#306 / #308):
 
 - **main 層** (`graph_layer="main"`, `component_type="TheoryOperationNode"`): 上位理論構成。
-  式 step を `(derivation_id, operation family)` で集約した少数 node。generic operation
-  (`transform`/`relate`/`connect`/`support`/`associate`) は main にしない。
+  式 step を **theory stage** で集約した少数 node（5–8 個程度のバックボーン）。stage は
+  `schema.stage_for_edge_type()` が operation の edge_type family から domain-neutral に導出し
+  (`defines→theory_basis` / `constructs・normalizes→observable_construction` /
+  `linearizes・approximates・substitutes→equation_system` / `solves・eliminates→elimination` /
+  `derives・constrains→consistency_relation` / `diagnoses・compares→diagnostic_application`)、
+  全 derivation を跨いで集約する。stage 語彙は `schema.THEORY_STAGES`、表示名は
+  `schema.THEORY_STAGE_LABELS`。main label は短い stage label **そのもの**を使い、atomic claim/reason
+  のような長い説明は label に詰めず node の `description` フィールドへ入れて UI 詳細ペインで表示する
+  （`Stage: 長い説明` の形にはしない）。**equation ID fallback は使わない**ので `Define eq_...` /
+  `Derive result eq_...` は main に出ない。generic operation
+  (`transform`/`relate`/`connect`/`support`/`associate`) も main にしない。validator は main node の
+  equation-id label・generic operation を hard error として検出する (#308)。
 - **equation_detail 層** (`graph_layer="equation_detail"`, `component_type="EquationOperationNode"`):
-  derivation step ごとの式単位 node。`parent_component_id` で main node を、main node は
-  `member_component_ids` で detail node を相互参照する。generic step は `debug` 層へ。
+  derivation step ごとの式単位 node（ここでは equation ID 入り label を許容）。`parent_component_id` で
+  main node を、main node は `member_component_ids` で detail node を相互参照する。generic step は
+  `debug` 層へ。
+- **ComponentRefiner は「1 component = 1 reusable theory unit」(#308)**:
+  `component_assembly/component_refiner.py` は derivation step を **operation family** 単位の
+  再利用可能な理論ユニットに分割する（式 step 1 個 = 1 component ではない）。同 family の複数 step は
+  1 component に集約し `internal_flow` に保持する。generic operation だけでは child component を作らず、
+  近接ユニットの `internal_flow` に畳み込む。component の label/summary は generic 操作名ではなく
+  理論対象を表す。
 
 その他の必須ルール:
 

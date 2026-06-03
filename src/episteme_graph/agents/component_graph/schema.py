@@ -88,6 +88,78 @@ GRAPH_LAYERS = [GRAPH_LAYER_MAIN, GRAPH_LAYER_EQUATION_DETAIL, GRAPH_LAYER_DEBUG
 THEORY_OPERATION_NODE = "TheoryOperationNode"  # aggregated, main graph
 EQUATION_OPERATION_NODE = "EquationOperationNode"  # per-step, detail graph
 
+# Theory stages (issue #308). The main graph aggregates equation-level steps into
+# a handful of high-level theory-construction stages so it reads as a backbone
+# (5–8 nodes) rather than one node per equation/operation. The vocabulary is
+# domain-neutral; a stage is assigned from an operation's *edge_type family*
+# (see classify_operation), never from paper- or field-specific terms.
+THEORY_STAGE_BASIS = "theory_basis"
+THEORY_STAGE_OBSERVATION_MODEL = "observation_model"
+THEORY_STAGE_OBSERVABLE_CONSTRUCTION = "observable_construction"
+THEORY_STAGE_EQUATION_SYSTEM = "equation_system"
+THEORY_STAGE_ELIMINATION = "elimination"
+THEORY_STAGE_CONSISTENCY_RELATION = "consistency_relation"
+THEORY_STAGE_DIAGNOSTIC_APPLICATION = "diagnostic_application"
+
+# Canonical ordering used for the main graph's top-to-bottom theory flow.
+THEORY_STAGES = [
+    THEORY_STAGE_BASIS,
+    THEORY_STAGE_OBSERVATION_MODEL,
+    THEORY_STAGE_OBSERVABLE_CONSTRUCTION,
+    THEORY_STAGE_EQUATION_SYSTEM,
+    THEORY_STAGE_ELIMINATION,
+    THEORY_STAGE_CONSISTENCY_RELATION,
+    THEORY_STAGE_DIAGNOSTIC_APPLICATION,
+]
+
+# Human-readable, UI-facing stage labels (issue #308). Used as the *base* label
+# of a main TheoryOperationNode; an atomic-claim / reason phrase may enrich it but
+# the equation-id fallback is never used for a main label.
+THEORY_STAGE_LABELS = {
+    THEORY_STAGE_BASIS: "Theory basis",
+    THEORY_STAGE_OBSERVATION_MODEL: "Observation model",
+    THEORY_STAGE_OBSERVABLE_CONSTRUCTION: "Observable construction",
+    THEORY_STAGE_EQUATION_SYSTEM: "Equation system",
+    THEORY_STAGE_ELIMINATION: "Elimination",
+    THEORY_STAGE_CONSISTENCY_RELATION: "Consistency relation",
+    THEORY_STAGE_DIAGNOSTIC_APPLICATION: "Diagnostic / application",
+}
+
+# Domain-neutral mapping from an operation edge_type family to a theory stage.
+# Every non-generic edge_type produced by classify_operation is covered so a main
+# node always has a stage (hence a non-equation label).
+_EDGE_TYPE_TO_STAGE = {
+    "defines": THEORY_STAGE_BASIS,
+    "constructs": THEORY_STAGE_OBSERVABLE_CONSTRUCTION,
+    "normalizes": THEORY_STAGE_OBSERVABLE_CONSTRUCTION,
+    "linearizes": THEORY_STAGE_EQUATION_SYSTEM,
+    "approximates": THEORY_STAGE_EQUATION_SYSTEM,
+    "substitutes": THEORY_STAGE_EQUATION_SYSTEM,
+    "solves": THEORY_STAGE_ELIMINATION,
+    "eliminates": THEORY_STAGE_ELIMINATION,
+    "derives": THEORY_STAGE_CONSISTENCY_RELATION,
+    "constrains": THEORY_STAGE_CONSISTENCY_RELATION,
+    "diagnoses": THEORY_STAGE_DIAGNOSTIC_APPLICATION,
+    "compares": THEORY_STAGE_DIAGNOSTIC_APPLICATION,
+}
+
+
+def stage_for_edge_type(edge_type: str) -> str:
+    """Map an operation edge_type family to a theory stage (domain-neutral).
+
+    Returns ``""`` for generic / unmapped edge types; callers keep such steps in
+    the equation_detail / debug layer rather than promoting them to a main node.
+    """
+    return _EDGE_TYPE_TO_STAGE.get(str(edge_type or "").strip().lower(), "")
+
+
+def theory_stage_label(stage: str) -> str:
+    """Human-readable label for a theory stage (falls back to a humanized form)."""
+    key = str(stage or "").strip().lower()
+    if key in THEORY_STAGE_LABELS:
+        return THEORY_STAGE_LABELS[key]
+    return key.replace("_", " ").capitalize() if key else "Theory stage"
+
 # Map a node's source-backing status to a review_status (issue #306). A
 # source-backed node should not stay ``teacher_review_required`` by default;
 # inferred / review_required nodes must surface as review_required.
@@ -199,6 +271,10 @@ class ComponentGraphNode:
     origin: str = "paper"
     operation: str = ""
     theory_object: str = ""
+    # Longer, human-readable explanation (atomic-claim text / step reason). The
+    # ``label`` stays short (a theory-stage name for main nodes); the descriptive
+    # sentence lives here and is shown in the UI's detail pane (issue #308).
+    description: str = ""
     graph_layer: str = "main"
     maturity_source: str = ""
     publish_ready: bool = False
@@ -306,6 +382,7 @@ class ComponentGraphResult:
                     "origin": n.origin,
                     "operation": n.operation,
                     "theory_object": n.theory_object,
+                    "description": n.description,
                     "graph_layer": n.graph_layer,
                     "maturity_source": n.maturity_source,
                     "publish_ready": n.publish_ready,

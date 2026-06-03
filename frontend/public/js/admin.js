@@ -5465,6 +5465,9 @@
       });
       html += '</ul></div>';
     }
+    if (node.description) {
+      html += '<div class="ls-graph-detail-section"><b>説明</b><p>' + escHtml(node.description) + '</p></div>';
+    }
     var links = lsGraphSourceLinksHtml(node);
     if (links) {
       html += '<div class="ls-graph-detail-section"><b>出典リンク</b>' + links + '</div>';

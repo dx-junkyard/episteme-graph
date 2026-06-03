@@ -255,6 +255,62 @@ class TestSourceBackingRules:
         issues = self.validator.validate(_result([node], []))
         assert any(i.rule_id == "theory_node_generic_operation" for i in issues)
 
+    def test_main_graph_generic_operation_is_error(self):
+        # Issue #308: a generic operation must never reach the main graph.
+        node = _theory_node("c1", operation="transform", label="Theory basis")
+        issues = self.validator.validate(_result([node], []))
+        assert any(
+            i.rule_id == "main_graph_generic_operation" and i.severity == "error"
+            for i in issues
+        )
+
+    def test_detail_layer_generic_operation_is_not_error(self):
+        # The same generic operation in the equation_detail layer is allowed.
+        node = _theory_node(
+            "c1",
+            operation="transform",
+            label="Transform eq_1",
+            graph_layer="equation_detail",
+            component_type="EquationOperationNode",
+        )
+        issues = self.validator.validate(_result([node], []))
+        assert not any(i.rule_id == "main_graph_generic_operation" for i in issues)
+
+    def test_main_graph_equation_id_label_is_error(self):
+        # Issue #308: main labels must be theory stages, not "Define eq_2_7".
+        node = _theory_node("c1", label="Define eq_2_7")
+        issues = self.validator.validate(_result([node], []))
+        assert any(
+            i.rule_id == "main_graph_node_equation_id_label" and i.severity == "error"
+            for i in issues
+        )
+
+    def test_main_graph_derive_result_equation_label_is_error(self):
+        node = _theory_node("c1", operation="derive_result", label="Derive result eq_2_10")
+        issues = self.validator.validate(_result([node], []))
+        assert any(i.rule_id == "main_graph_node_equation_id_label" for i in issues)
+
+    def test_theory_stage_label_is_accepted(self):
+        # A clean theory-stage label produces no label/operation errors.
+        node = _theory_node("c1", label="Equation system", operation="linearize_moment_equations")
+        issues = self.validator.validate(_result([node], []))
+        label_errors = [
+            i for i in issues
+            if i.rule_id in ("main_graph_node_equation_id_label", "main_graph_generic_operation")
+        ]
+        assert label_errors == []
+
+    def test_equation_detail_label_with_equation_id_is_allowed(self):
+        # Equation ids are fine in the detail layer (traceability).
+        node = _theory_node(
+            "c1",
+            label="Define eq_2_7",
+            graph_layer="equation_detail",
+            component_type="EquationOperationNode",
+        )
+        issues = self.validator.validate(_result([node], []))
+        assert not any(i.rule_id == "main_graph_node_equation_id_label" for i in issues)
+
     def test_edge_without_evidence_warns(self):
         nodes = [_theory_node("c1"), _theory_node("c2")]
         edge = ComponentGraphEdge(
