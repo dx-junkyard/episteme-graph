@@ -334,18 +334,28 @@ class CourseBuilderSessionOut(BaseModel):
     """コース構築セッション情報。"""
     session_id: str
     title: str
+    display_name: str | None = None
+    source_file_name: str | None = None
+    status: str = "draft"
+    published_course_id: str | None = None
     created_at: str
     updated_at: str
 
 
 class CourseBuilderSessionCreate(BaseModel):
-    title: str = "新しいセッション"
+    title: str = ""
+    source_file_name: str | None = None
+    display_name: str | None = None
 
 
 class CourseBuilderSessionUpdate(BaseModel):
     title: str | None = None
     history: list[dict] | None = None
     course_draft: dict | None = None
+    source_file_name: str | None = None
+    display_name: str | None = None
+    status: str | None = None
+    published_course_id: str | None = None
 
 
 # ---------------------------------------------------------------------------

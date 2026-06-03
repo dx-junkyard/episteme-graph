@@ -8,6 +8,7 @@ import os
 import re
 import threading
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response
@@ -1542,6 +1543,24 @@ def course_builder_chat(
 # Course Builder Sessions
 # ---------------------------------------------------------------------------
 
+_FORBIDDEN_CHARS_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+
+def _generate_session_display_name(source_file_name: str | None, title: str) -> str:
+    """セッション表示名を <source_file>_<YYYYMMDD_HHMM>_<title_short> 形式で生成する。"""
+    now_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+    title_str = (title or "").strip()
+    if not title_str:
+        title_str = "新規コース設計"
+    title_short = title_str[:20] if len(title_str) > 20 else title_str
+    title_short = _FORBIDDEN_CHARS_RE.sub("_", title_short).strip("_")
+
+    if source_file_name:
+        src = _FORBIDDEN_CHARS_RE.sub("_", source_file_name.strip()).strip("_")
+        src = src[:40] if len(src) > 40 else src
+        return f"{src}_{now_str}_{title_short}"
+    return f"{now_str}_{title_short}"
+
 
 @router.post("/course-builder/sessions", response_model=CourseBuilderSessionOut, status_code=201)
 def create_cb_session(
@@ -1550,14 +1569,25 @@ def create_cb_session(
 ) -> CourseBuilderSessionOut:
     """コース構築セッションを新規作成する。"""
     session_id = str(uuid.uuid4())[:12]
+    title = body.title or ""
+    display_name = body.display_name or _generate_session_display_name(body.source_file_name, title)
     session = _pg_session()
     try:
         session.execute(
             sa_text("""
-                INSERT INTO course_builder_sessions (id, user_id, title, history, course_draft)
-                VALUES (:session_id, CAST(:user_id AS uuid), :title, '[]', null)
+                INSERT INTO course_builder_sessions
+                    (id, user_id, title, history, course_draft,
+                     source_file_name, display_name, status)
+                VALUES (:session_id, CAST(:user_id AS uuid), :title, '[]', null,
+                        :source_file_name, :display_name, 'draft')
             """),
-            {"session_id": session_id, "user_id": current_user["id"], "title": body.title},
+            {
+                "session_id": session_id,
+                "user_id": current_user["id"],
+                "title": title,
+                "source_file_name": body.source_file_name,
+                "display_name": display_name,
+            },
         )
         row = session.execute(
             sa_text("SELECT created_at, updated_at FROM course_builder_sessions WHERE id = :id"),
@@ -1573,7 +1603,9 @@ def create_cb_session(
     updated_at = row[1].isoformat() if row and row[1] else ""
     logger.info("Created course builder session %s for user=%s", session_id, current_user["id"])
     return CourseBuilderSessionOut(
-        session_id=session_id, title=body.title,
+        session_id=session_id, title=title,
+        display_name=display_name, source_file_name=body.source_file_name,
+        status="draft", published_course_id=None,
         created_at=created_at, updated_at=updated_at,
     )
 
@@ -1587,7 +1619,9 @@ def list_cb_sessions(
     try:
         records = session.execute(
             sa_text("""
-                SELECT id, title, created_at, updated_at
+                SELECT id, title, created_at, updated_at,
+                       source_file_name, display_name,
+                       COALESCE(status, 'draft'), published_course_id
                 FROM course_builder_sessions
                 WHERE user_id = CAST(:user_id AS uuid)
                 ORDER BY updated_at DESC
@@ -1599,9 +1633,13 @@ def list_cb_sessions(
     return [
         CourseBuilderSessionOut(
             session_id=r[0],
-            title=r[1] or "新しいセッション",
+            title=r[1] or "",
             created_at=r[2].isoformat() if r[2] else "",
             updated_at=r[3].isoformat() if r[3] else "",
+            source_file_name=r[4],
+            display_name=r[5],
+            status=r[6] or "draft",
+            published_course_id=r[7],
         )
         for r in records
     ]
@@ -1617,7 +1655,9 @@ def get_cb_session(
     try:
         record = session.execute(
             sa_text("""
-                SELECT id, title, history, course_draft, created_at, updated_at
+                SELECT id, title, history, course_draft, created_at, updated_at,
+                       source_file_name, display_name,
+                       COALESCE(status, 'draft'), published_course_id
                 FROM course_builder_sessions
                 WHERE id = :session_id AND user_id = CAST(:user_id AS uuid)
             """),
@@ -1638,11 +1678,15 @@ def get_cb_session(
 
     return {
         "session_id": record[0],
-        "title": record[1] or "新しいセッション",
+        "title": record[1] or "",
         "history": history,
         "course_draft": course_draft,
         "created_at": record[4].isoformat() if record[4] else "",
         "updated_at": record[5].isoformat() if record[5] else "",
+        "source_file_name": record[6],
+        "display_name": record[7],
+        "status": record[8] or "draft",
+        "published_course_id": record[9],
     }
 
 
@@ -1657,7 +1701,9 @@ def update_cb_session(
     try:
         record = session.execute(
             sa_text("""
-                SELECT title, history, course_draft, created_at
+                SELECT title, history, course_draft, created_at,
+                       source_file_name, display_name,
+                       COALESCE(status, 'draft'), published_course_id
                 FROM course_builder_sessions
                 WHERE id = :session_id AND user_id = CAST(:user_id AS uuid)
             """),
@@ -1666,7 +1712,7 @@ def update_cb_session(
         if not record:
             raise HTTPException(status_code=404, detail="Session not found")
 
-        new_title = body.title if body.title is not None else (record[0] or "新しいセッション")
+        new_title = body.title if body.title is not None else (record[0] or "")
         new_history = (
             json.dumps(body.history, ensure_ascii=False)
             if body.history is not None
@@ -1680,6 +1726,12 @@ def update_cb_session(
             if body.course_draft is not None
             else (json.dumps(record[2]) if record[2] else None)
         )
+        new_source_file_name = body.source_file_name if body.source_file_name is not None else record[4]
+        new_display_name = body.display_name if body.display_name is not None else record[5]
+        new_status = body.status if body.status is not None else (record[6] or "draft")
+        new_published_course_id = (
+            body.published_course_id if body.published_course_id is not None else record[7]
+        )
 
         updated = session.execute(
             sa_text("""
@@ -1687,6 +1739,10 @@ def update_cb_session(
                 SET title = :title,
                     history = CAST(:history AS jsonb),
                     course_draft = CAST(:draft AS jsonb),
+                    source_file_name = :source_file_name,
+                    display_name = :display_name,
+                    status = :status,
+                    published_course_id = :published_course_id,
                     updated_at = now()
                 WHERE id = :session_id AND user_id = CAST(:user_id AS uuid)
                 RETURNING updated_at
@@ -1697,6 +1753,10 @@ def update_cb_session(
                 "title": new_title,
                 "history": new_history,
                 "draft": new_draft,
+                "source_file_name": new_source_file_name,
+                "display_name": new_display_name,
+                "status": new_status,
+                "published_course_id": new_published_course_id,
             },
         ).fetchone()
         session.commit()
@@ -1712,6 +1772,8 @@ def update_cb_session(
     updated_at = updated[0].isoformat() if updated and updated[0] else ""
     return CourseBuilderSessionOut(
         session_id=session_id, title=new_title,
+        display_name=new_display_name, source_file_name=new_source_file_name,
+        status=new_status, published_course_id=new_published_course_id,
         created_at=created_at, updated_at=updated_at,
     )
 
