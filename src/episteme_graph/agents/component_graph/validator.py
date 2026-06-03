@@ -1,6 +1,8 @@
 """Validation for ComponentGraphAgent outputs (Issue #266)."""
 from __future__ import annotations
 
+import re
+
 from .schema import (
     GENERIC_EDGE_TYPES,
     GENERIC_OPERATIONS,
@@ -19,6 +21,11 @@ _GENERIC_EDGE_TYPES = {"RELATED_TO", "CORRELATES", "supports", "related_to", "co
 _BIAS_ELIMINATION_NEEDLES = ("bias elimination", "eliminate second", "eliminate third", "second-order bias", "third-order bias")
 # Operation edge types whose nodes must expose their output/constraint equations.
 _OUTPUT_BEARING_EDGE_TYPES = {"constrains", "derives", "diagnoses"}
+# Equation-id-based main labels are not allowed (issue #308): a main node must
+# show a theory stage / construction, not "Define eq_2_7" / "Derive result eq_...".
+_EQUATION_ID_LABEL_RE = re.compile(
+    r"(?:\beq_\w+)|(?:\beq\.?\s*\(?\s*\d)", re.IGNORECASE
+)
 
 
 class ComponentGraphValidator:
@@ -56,6 +63,15 @@ class ComponentGraphValidator:
                     "component_graph_node_label_generic",
                     "error",
                     f"main graph node {node.component_id!r} has generic label {label!r}",
+                    f"nodes[{node.component_id}].label",
+                ))
+            # Issue #308: a main node label must be a theory stage / construction,
+            # never an equation-id fallback ("Define eq_2_7", "Derive result eq_...").
+            if is_main and _EQUATION_ID_LABEL_RE.search(label):
+                issues.append(ValidationIssue(
+                    "main_graph_node_equation_id_label",
+                    "error",
+                    f"main graph node {node.component_id!r} has equation-id label {label!r}",
                     f"nodes[{node.component_id}].label",
                 ))
             if (
@@ -208,6 +224,16 @@ class ComponentGraphValidator:
                 f"node {cid!r} operation {operation!r} is too generic for the main graph",
                 f"nodes[{cid}].operation",
             ))
+            # Issue #308: generic operations must never reach the main graph —
+            # they belong in the equation_detail / debug layer. A main-layer
+            # TheoryOperationNode carrying one is a hard error.
+            if is_main:
+                issues.append(ValidationIssue(
+                    "main_graph_generic_operation",
+                    "error",
+                    f"main graph node {cid!r} has generic operation {operation!r}",
+                    f"nodes[{cid}].operation",
+                ))
 
         return issues
 
