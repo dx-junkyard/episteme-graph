@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 
 from .schema import (
+    ATOMIC_CLAIM_ATOMICITY,
+    ATOMIC_CLAIM_STATUSES,
     CLAIM_TIERS,
     CORE_CLAIM_TYPE_FALLBACKS,
     EVIDENCE_ADEQUACY,
@@ -15,17 +17,20 @@ from .schema import (
 )
 
 _SYSTEM_CONTENT = """\
-You are evaluating whether a span from a scientific paper should become a reusable claim.
+You are evaluating whether a span from a scientific paper should become a reusable claim,
+and—when the span mixes several statements—rewriting it into atomic claims.
 
 Your task is NOT to summarize the paper.
-Your task is to judge whether the span is a reusable minimal claim suitable for \
-downstream knowledge structuring.
+Your task is to (a) judge whether the span is a reusable minimal claim and
+(b) perform atomic rewrite: turn a long / paper-level / multi-proposition span into
+a list of atomic claims, each a single minimal proposition.
 
-A good claim should be:
+A good (atomic) claim should be:
 1. content-bearing
-2. minimally scoped
-3. reviewable against source text
-4. reusable in downstream components as input/output/precondition/caution
+2. one minimal proposition (1 claim = 1 fact / relation / step)
+3. a standalone sentence — full subject, no unresolved pronoun/anaphora
+4. reviewable against the source text
+5. reusable in downstream components as input/output/precondition/caution
 
 Rules:
 - role_labels are context, not final adoption decisions.
@@ -33,8 +38,24 @@ Rules:
 - Prior-work statements may be preserved, but must not be paper_core.
 - If uncertain, prefer deferred over an overconfident rejected/accepted decision.
 - Prefer cartridge-normalized terminology when available.
-- If a span contains multiple reusable propositions, set should_split=true and
-  provide split_claims as atomic claim objects with text and claim_type.
+
+Atomic rewrite (the formal responsibility of this step):
+- If the span contains multiple propositions (long sentence, several sentences,
+  coordinated clauses, or a paper-level summary), set should_split=true and emit
+  one entry per minimal proposition in `atomic_claims`.
+- Each atomic claim MUST be a complete standalone sentence:
+  * supply the omitted subject (do NOT start with "Shows ...", "And yields ...").
+  * resolve pronouns / "this result" into the concrete referent.
+  * never begin with a connector (and / but / therefore / then / thus / hence / moreover ...).
+- Preserve the full meaning of the original span across the atomic claims; drop nothing.
+- For each atomic claim set atomicity="atomic" and status="accepted".
+- If you CANNOT confidently atomize part of the span, keep that piece as an
+  atomic_claims entry with atomicity="non_atomic", status="review_required" and a
+  qualification_reason such as "contains multiple propositions; split required".
+- If the span is already a single minimal proposition, leave `atomic_claims` empty
+  and set should_split=false.
+- Each atomic claim must stay traceable: set source_span_id to the input span_id and
+  copy the supporting source phrase into evidence_quote.
 - Return ONLY valid JSON matching the provided schema.
 """
 
@@ -54,13 +75,23 @@ _OUTPUT_SCHEMA = {
     },
     "edit_suggestions": {
         "should_split": False,
-        "split_claims": [
-            {"text": "atomic claim text", "claim_type": "definition"}
-        ],
         "should_merge_with_prev": False,
         "should_merge_with_next": False,
         "normalized_text_hint": "string or empty",
     },
+    "atomic_claims": [
+        {
+            "text": "a single standalone minimal proposition",
+            "normalized_text": "normalized phrasing (cartridge terms when available)",
+            "claim_type_candidate": "core fallback type or cartridge-defined type",
+            "atomicity": "atomic | non_atomic",
+            "status": "accepted | review_required",
+            "source_span_id": "span_id this claim came from",
+            "evidence_quote": "supporting phrase copied from the source span",
+            "qualification_reason": "why this is (or is not) a confirmed atomic claim",
+            "confidence": 0.0,
+        }
+    ],
     "reason": "short reason grounded in the span and context",
     "confidence": 0.0,
 }
@@ -168,13 +199,18 @@ class ClaimQualificationPromptFactory:
             "claim_type_candidate core fallbacks: "
             + ", ".join(CORE_CLAIM_TYPE_FALLBACKS)
         )
+        parts.append(f"atomic_claims[].atomicity: {', '.join(ATOMIC_CLAIM_ATOMICITY)}")
+        parts.append(f"atomic_claims[].status: {', '.join(ATOMIC_CLAIM_STATUSES)}")
 
         parts.append("\n## Constraints")
         parts.append(
             "- accepted spans should be content-bearing and reviewable\n"
             "- prior_work may be accepted as prior_work tier, but must not be paper_core\n"
             "- figure_narration / section_meta / meta_discourse should usually be rejected as meta\n"
-            "- too_broad spans should normally set should_split=true\n"
+            "- too_broad / multi-proposition spans MUST set should_split=true and fill atomic_claims\n"
+            "- every atomic claim must be a standalone sentence (full subject, no leading connector)\n"
+            "- atomic claims together must preserve the full meaning of the span (drop nothing)\n"
+            "- if a piece cannot be atomized set its atomicity=non_atomic, status=review_required\n"
             "- too_narrow spans should normally be deferred/rejected or suggest merge\n"
             "- confidence must be between 0.0 and 1.0\n"
             "- Return ONLY valid JSON, no markdown fences"

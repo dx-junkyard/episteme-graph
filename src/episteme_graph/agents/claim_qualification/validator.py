@@ -1,7 +1,12 @@
 """Validation for ClaimQualificationAgent outputs."""
 from __future__ import annotations
 
+import re
+
 from .schema import (
+    ATOMIC_CLAIM_ATOMICITY,
+    ATOMIC_CLAIM_LEADING_CONNECTORS,
+    ATOMIC_CLAIM_STATUSES,
     CLAIM_TIERS,
     CORE_CLAIM_TYPE_FALLBACKS,
     EVIDENCE_ADEQUACY,
@@ -37,6 +42,7 @@ class ClaimQualificationValidator:
         issues += self._check_confidence(records)
         issues += self._check_consistency(records)
         issues += self._check_claim_type_candidates(records, cartridge)
+        issues += self._check_atomic_claims(records)
         return issues
 
     def _all_records(self, result: ClaimQualificationResult) -> list[QualifiedSpanRecord]:
@@ -67,6 +73,7 @@ class ClaimQualificationValidator:
             edit_suggestions=raw.get("edit_suggestions", {}),
             reason=raw.get("reason", ""),
             confidence=float(raw.get("confidence", 0.0)),
+            atomic_claims=list(raw.get("atomic_claims", []) or []),
         )
 
     def _check_required_vocabularies(
@@ -186,6 +193,102 @@ class ClaimQualificationValidator:
                     message=f"{record.span_id} has unsupported claim_type_candidate={value!r}",
                     field=f"{record.span_id}.qualification.claim_type_candidate",
                 ))
+        return issues
+
+    def _check_atomic_claims(
+        self, records: list[QualifiedSpanRecord]
+    ) -> list[ValidationIssue]:
+        """Validate LLM atomic-rewrite output (issue #317, criteria #2 / #3 / #9)."""
+        issues: list[ValidationIssue] = []
+        for record in records:
+            atomic_claims = getattr(record, "atomic_claims", None) or []
+            suggestions = record.edit_suggestions or {}
+            granularity = record.qualification.get("granularity")
+
+            # too_broad / should_split spans should carry atomic claims (criterion #1).
+            if (
+                record.qualification.get("status") == "accepted"
+                and (granularity == "too_broad" or suggestions.get("should_split"))
+                and not atomic_claims
+            ):
+                issues.append(ValidationIssue(
+                    rule_id="split_required_without_atomic_claims",
+                    severity="warning",
+                    message=(
+                        f"{record.span_id} is marked for splitting but has no atomic_claims"
+                    ),
+                    field=f"{record.span_id}.atomic_claims",
+                ))
+
+            for idx, claim in enumerate(atomic_claims):
+                path = f"{record.span_id}.atomic_claims[{idx}]"
+                if not isinstance(claim, dict):
+                    issues.append(ValidationIssue(
+                        rule_id="atomic_claim_not_object",
+                        severity="error",
+                        message=f"{path} is not an object",
+                        field=path,
+                    ))
+                    continue
+                text = str(claim.get("text", "")).strip()
+                if not text:
+                    issues.append(ValidationIssue(
+                        rule_id="atomic_claim_empty_text",
+                        severity="error",
+                        message=f"{path} has empty text",
+                        field=path,
+                    ))
+                    continue
+                atomicity = str(claim.get("atomicity", "atomic"))
+                if atomicity not in ATOMIC_CLAIM_ATOMICITY:
+                    issues.append(ValidationIssue(
+                        rule_id="invalid_atomic_claim_atomicity",
+                        severity="error",
+                        message=f"{path} has invalid atomicity={atomicity!r}",
+                        field=f"{path}.atomicity",
+                    ))
+                status = str(claim.get("status", "accepted"))
+                if status not in ATOMIC_CLAIM_STATUSES:
+                    issues.append(ValidationIssue(
+                        rule_id="invalid_atomic_claim_status",
+                        severity="error",
+                        message=f"{path} has invalid status={status!r}",
+                        field=f"{path}.status",
+                    ))
+                # criterion #3: a confirmed atomic claim must be a standalone
+                # proposition — no leading connector and not a bare fragment.
+                if atomicity == "atomic" and status == "accepted":
+                    first = re.findall(r"[A-Za-z]+", text)
+                    if first and first[0].lower() in ATOMIC_CLAIM_LEADING_CONNECTORS:
+                        issues.append(ValidationIssue(
+                            rule_id="atomic_claim_starts_with_connector",
+                            severity="error",
+                            message=(
+                                f"{path} starts with connector {first[0]!r}; "
+                                "an atomic claim must be a standalone proposition"
+                            ),
+                            field=f"{path}.text",
+                        ))
+                    if len(text.split()) < 3:
+                        issues.append(ValidationIssue(
+                            rule_id="atomic_claim_too_short",
+                            severity="warning",
+                            message=f"{path} is too short to be a full proposition",
+                            field=f"{path}.text",
+                        ))
+                    # criterion #5: confirmed atomic claims must stay traceable.
+                    if not str(claim.get("source_span_id", "")).strip() and not str(
+                        claim.get("evidence_quote", "")
+                    ).strip():
+                        issues.append(ValidationIssue(
+                            rule_id="atomic_claim_missing_source",
+                            severity="warning",
+                            message=(
+                                f"{path} has no source_span_id or evidence_quote; "
+                                "it cannot be traced back to the source"
+                            ),
+                            field=path,
+                        ))
         return issues
 
     @staticmethod

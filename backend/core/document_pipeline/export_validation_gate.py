@@ -762,9 +762,24 @@ class ExportValidationGate:
         """
         for claim in getattr(claim_objects, "claims", []) or []:
             atomicity = str(getattr(claim, "atomicity", "atomic") or "atomic")
+            claim_id = getattr(claim, "claim_id", "?")
+            # Deterministic-split suggestions (issue #317) are never confirmed atomic
+            # backing; surface them so a teacher confirms the split before reuse.
+            if atomicity == "split_pending":
+                review_items.append(ValidationEntry(
+                    code="SPLIT_PENDING_CLAIM_NEEDS_CONFIRMATION",
+                    message=(
+                        f"claim {claim_id!r} is a deterministic-split suggestion "
+                        "(split_pending); confirm via ClaimQualificationAgent atomic "
+                        "rewrite before using it to back a component or graph node"
+                    ),
+                    artifact="claim_object_builder",
+                    path=f"$.claims[{claim_id}].atomicity",
+                    source_stage="export_validation",
+                ))
+                continue
             if atomicity != "non_atomic":
                 continue
-            claim_id = getattr(claim, "claim_id", "?")
             claim_type = str(getattr(claim, "claim_type", "") or "")
             if claim_type in _MAIN_RESULT_CLAIM_TYPES:
                 errors.append(ValidationEntry(

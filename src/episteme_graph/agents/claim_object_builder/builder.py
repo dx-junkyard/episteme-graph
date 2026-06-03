@@ -3,13 +3,20 @@
 QualifiedSpanRecord（ClaimQualificationAgent の出力）と EvidenceRegistry を入力に
 最終 ClaimObjectRecord を組み立てる。
 
-このモジュールは LLM を使わない。1 span = 1 claim を厳守する。
+このモジュールは LLM を使わない。atomic rewrite（複数命題 claim の分割）は
+ClaimQualificationAgent の正式ステップが担当し (issue #317)、builder は
+その atomic candidates を ClaimObjectRecord に変換・リンク・検証するだけに責務を
+限定する。LLM の atomic rewrite が無い場合のみ、deterministic split を
+``split_pending`` / ``review_required`` の review suggestion として保持する
+（確定 source_backed atomic claim にはしない）。
+
 concepts / equation_ids は外部から渡される concept resolver / equation index に
 基づいて付与する。
 """
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field as _dc_field
 from typing import Callable, Iterable, Optional
 
 from .schema import (
@@ -44,6 +51,23 @@ _DOMAIN_CONCEPT_FALLBACKS: dict[str, tuple[str, str]] = {
     "higher-order moment": ("higher-order moment", "observable"),
     "gravity diagnostic": ("gravity diagnostic", "diagnostic"),
 }
+
+
+@dataclass
+class _BuildCtx:
+    """Per-span context shared between the build paths (issue #317)."""
+    document_id: str
+    span: object
+    block_id: str | None
+    section_id: str | None
+    role_labels: list = _dc_field(default_factory=list)
+    span_id: str | None = None
+    confidence: float = 0.0
+    evidence_ids: list = _dc_field(default_factory=list)
+    review_note: str = ""
+    review_status: str = "teacher_review_required"
+    claim_type: str = "unknown"
+    text: str = ""
 
 
 class ClaimObjectBuilder:
@@ -134,120 +158,44 @@ class ClaimObjectBuilder:
             review_note = self._extract_review_note(span)
             review_status = self._derive_review_status(qual)
 
-            # Split into atomic claims (issue #312). Prefer upstream split_claims
-            # (LLM-proposed by ClaimQualificationAgent); otherwise deterministically
-            # split a detected non-atomic claim into atomic propositions so that the
-            # final claims are minimal single propositions usable as component /
-            # graph-node backing (criteria #1 / #2 / #7).
-            edits = getattr(span, "edit_suggestions", {}) or {}
-            split_candidates = edits.get("split_claims") or []
-            auto_split = False
+            ctx = _BuildCtx(
+                document_id=document_id,
+                span=span,
+                block_id=block_id,
+                section_id=section_id,
+                role_labels=role_labels,
+                span_id=span_id,
+                confidence=confidence,
+                evidence_ids=evidence_ids,
+                review_note=review_note,
+                review_status=review_status,
+                claim_type=claim_type,
+                text=text,
+            )
+
+            # Atomic rewrite responsibility (issue #317): the LLM atomic rewrite is
+            # performed by ClaimQualificationAgent. The builder no longer rewrites;
+            # it consumes the agent's atomic candidates and only constructs / links /
+            # validates ClaimObjectRecords.
+            llm_atomic = self._gather_llm_atomic_candidates(span, claim_type)
+            if llm_atomic:
+                self._emit_llm_atomic_claims(
+                    claims, issues, seen_claim_ids, counter, base_claim_id, ctx, llm_atomic
+                )
+                continue
+
+            # No LLM rewrite available. Classify the span text deterministically.
             text_atomicity, text_qual_reason = self._analyze_atomicity(text)
-            if not (split_candidates and isinstance(split_candidates, list)):
-                if text_atomicity == "non_atomic":
-                    auto_parts = self._split_into_atomic(text)
-                    if len(auto_parts) >= 2:
-                        split_candidates = [
-                            {"text": p, "claim_type": claim_type} for p in auto_parts
-                        ]
-                        auto_split = True
-            if split_candidates and isinstance(split_candidates, list):
-                parent_id = base_claim_id
-                if parent_id in seen_claim_ids:
-                    parent_id = f"{parent_id}_{counter}"
-                seen_claim_ids.add(parent_id)
-                subclaim_ids: list[str] = []
-                for sub_idx, sub in enumerate(split_candidates, start=1):
-                    sub_text = str(sub.get("text", "")).strip() if isinstance(sub, dict) else text
-                    if not sub_text:
-                        continue
-                    sub_type = self._normalize_claim_type(
-                        (sub.get("claim_type") if isinstance(sub, dict) else None)
-                        or claim_type
-                    )
-                    sub_id = f"{parent_id}_sub{sub_idx:02d}"
-                    if sub_id in seen_claim_ids:
-                        sub_id = f"{sub_id}_{counter}"
-                    seen_claim_ids.add(sub_id)
-                    subclaim_ids.append(sub_id)
-                    sub_concepts = self._resolve_concepts(sub_text, role_labels, span)
-                    sub_eqs = self._link_equations(sub_text, sub_type, role_labels, block_id, section_id)
-                    claims.append(ClaimObjectRecord(
-                        claim_id=sub_id,
-                        document_id=document_id,
-                        claim_type=sub_type,
-                        text=sub_text,
-                        source_evidence_ids=evidence_ids,
-                        source_span_ids=[span_id] if span_id else [],
-                        concepts=sub_concepts,
-                        equation_ids=sub_eqs,
-                        figure_ids=[],
-                        table_ids=[],
-                        support_status="source_backed" if evidence_ids else "inferred",
-                        review_status=review_status,
-                        review_note=review_note,
-                        section_id=section_id,
-                        confidence=confidence,
-                        normalized_text=sub_text,
-                        atomicity="atomic",
-                        is_atomic=True,
-                        qualification_reason=None,
-                        parent_claim_id=parent_id,
-                        subclaim_ids=[],
-                    ))
-                # Compound parent record (no text of its own, just tracks subclaims).
-                # The parent is split into atomic children, so it is itself not
-                # atomic backing (is_atomic=False) — graph nodes prefer the children.
-                parent_concepts = self._resolve_concepts(text, role_labels, span)
-                parent_eqs = self._link_equations(text, claim_type, role_labels, block_id, section_id)
-                claims.append(ClaimObjectRecord(
-                    claim_id=parent_id,
-                    document_id=document_id,
-                    claim_type=claim_type,
-                    text=text,
-                    source_evidence_ids=evidence_ids,
-                    source_span_ids=[span_id] if span_id else [],
-                    concepts=parent_concepts,
-                    equation_ids=parent_eqs,
-                    figure_ids=[],
-                    table_ids=[],
-                    support_status="source_backed" if evidence_ids else "inferred",
-                    review_status=review_status,
-                    review_note=review_note,
-                    section_id=section_id,
-                    confidence=confidence,
-                    normalized_text=text,
-                    atomicity="compound",
-                    is_atomic=False,
-                    qualification_reason=(
-                        "deterministically split into atomic child claims; verify split"
-                        if auto_split
-                        else "split into atomic child claims"
-                    ),
-                    parent_claim_id=None,
-                    subclaim_ids=subclaim_ids,
-                ))
-                self._add_issues_for_record(parent_id, evidence_ids, parent_concepts, claim_type, parent_eqs, issues)
-                if auto_split and subclaim_ids:
-                    issues.append(ValidationIssue(
-                        rule_id="claim_auto_split",
-                        severity="warning",
-                        message=(
-                            f"claim {parent_id} was deterministically split into "
-                            f"{len(subclaim_ids)} atomic claims; review the split"
-                        ),
-                        field=parent_id,
-                    ))
-                if not subclaim_ids:
-                    issues.append(ValidationIssue(
-                        rule_id="split_required_but_no_children",
-                        severity="warning",
-                        message=(
-                            f"claim {parent_id} was marked for splitting but no child "
-                            "claims were produced"
-                        ),
-                        field=parent_id,
-                    ))
+
+            # Non-atomic span with no LLM rewrite: the deterministic split is kept
+            # only as a review suggestion (issue #317 criteria #4 / #6). Neither the
+            # parent nor the suggested children are confirmed source_backed atomic
+            # claims, so they are not used as strong graph backing.
+            if text_atomicity == "non_atomic":
+                self._emit_fallback_split(
+                    claims, issues, seen_claim_ids, counter, base_claim_id, ctx,
+                    text_qual_reason,
+                )
                 continue
 
             # Single atomic claim
@@ -294,38 +242,8 @@ class ClaimObjectBuilder:
 
             figure_ids, table_ids = self._link_figures_tables(role_labels, claim_type)
 
-            # Atomicity (issue #312): a multi-proposition claim that could neither
-            # be split upstream nor deterministically split here is not a confirmed
-            # atomic claim. Keep the information (never drop it) but mark it
-            # review_required so graph nodes do not treat it as strong atomic backing.
-            atomicity, qualification_reason = text_atomicity, text_qual_reason
-            if atomicity == "non_atomic":
-                support_status = "review_required"
-                is_atomic = False
-                issues.append(ValidationIssue(
-                    rule_id="claim_text_multiple_propositions",
-                    severity="warning",
-                    message=(
-                        f"claim {claim_id} contains multiple propositions; "
-                        "split into atomic claims required"
-                    ),
-                    field=claim_id,
-                ))
-                if claim_type in MAIN_RESULT_CLAIM_TYPES:
-                    issues.append(ValidationIssue(
-                        rule_id="main_result_claim_non_atomic",
-                        severity="error",
-                        message=(
-                            f"main-result claim {claim_id} ({claim_type}) is non_atomic; "
-                            "a main result must be a single minimal proposition"
-                        ),
-                        field=claim_id,
-                    ))
-            else:
-                support_status = "source_backed" if evidence_ids else "inferred"
-                is_atomic = True
-                qualification_reason = None
-
+            # Single, already-atomic claim (non-atomic spans were routed to the
+            # LLM-atomic or deterministic-fallback paths above, issue #317).
             record = ClaimObjectRecord(
                 claim_id=claim_id,
                 document_id=document_id,
@@ -337,15 +255,15 @@ class ClaimObjectBuilder:
                 equation_ids=equation_ids,
                 figure_ids=figure_ids,
                 table_ids=table_ids,
-                support_status=support_status,
+                support_status="source_backed" if evidence_ids else "inferred",
                 review_status=review_status,
                 review_note=review_note,
                 section_id=section_id,
                 confidence=confidence,
                 normalized_text=text,
-                atomicity=atomicity,
-                is_atomic=is_atomic,
-                qualification_reason=qualification_reason,
+                atomicity="atomic",
+                is_atomic=True,
+                qualification_reason=None,
                 parent_claim_id=None,
                 subclaim_ids=[],
             )
@@ -389,6 +307,320 @@ class ClaimObjectBuilder:
                 severity="warning",
                 message=f"claim {claim_id} of type {claim_type} should reference equations",
                 field=claim_id,
+            ))
+
+    # ------------------------------------------------------------------
+    # Atomic-claim sourcing (issue #317).
+    # ------------------------------------------------------------------
+    def _gather_llm_atomic_candidates(
+        self, span: object, default_claim_type: str
+    ) -> list[dict]:
+        """Collect LLM-rewritten atomic claim candidates from the span.
+
+        Primary source is ``span.atomic_claims`` (produced by ClaimQualificationAgent,
+        issue #317). For backward compatibility, falls back to the legacy
+        ``edit_suggestions.split_claims`` ({text, claim_type}) list. Returns an empty
+        list when the agent provided no atomic rewrite — in that case the builder
+        only keeps a deterministic split as a review suggestion.
+        """
+        normalized: list[dict] = []
+        for cand in getattr(span, "atomic_claims", None) or []:
+            if not isinstance(cand, dict):
+                continue
+            text = str(cand.get("text", "")).strip()
+            if not text:
+                continue
+            atomicity = str(cand.get("atomicity", "atomic")).strip().lower()
+            if atomicity not in ("atomic", "non_atomic"):
+                atomicity = "atomic"
+            status = str(cand.get("status", "")).strip().lower()
+            if status not in ("accepted", "review_required"):
+                status = "review_required" if atomicity == "non_atomic" else "accepted"
+            normalized.append({
+                "text": text,
+                "normalized_text": str(cand.get("normalized_text") or text).strip(),
+                "claim_type": self._normalize_claim_type(
+                    cand.get("claim_type_candidate")
+                    or cand.get("claim_type")
+                    or default_claim_type
+                ),
+                "atomicity": atomicity,
+                "status": status,
+                "qualification_reason": str(cand.get("qualification_reason", "") or ""),
+                "source_span_id": str(cand.get("source_span_id", "") or ""),
+            })
+        if normalized:
+            return normalized
+
+        # Legacy: edit_suggestions.split_claims (LLM-proposed atomic objects).
+        edits = getattr(span, "edit_suggestions", {}) or {}
+        for cand in edits.get("split_claims") or []:
+            if not isinstance(cand, dict):
+                continue
+            text = str(cand.get("text", "")).strip()
+            if not text:
+                continue
+            normalized.append({
+                "text": text,
+                "normalized_text": text,
+                "claim_type": self._normalize_claim_type(
+                    cand.get("claim_type") or default_claim_type
+                ),
+                "atomicity": "atomic",
+                "status": "accepted",
+                "qualification_reason": "",
+                "source_span_id": "",
+            })
+        return normalized
+
+    @staticmethod
+    def _dedup_id(base: str, counter: int, seen: set[str]) -> str:
+        cid = base
+        if cid in seen:
+            cid = f"{cid}_{counter}"
+        while cid in seen:
+            cid = f"{cid}_x"
+        seen.add(cid)
+        return cid
+
+    def _emit_llm_atomic_claims(
+        self,
+        claims: list[ClaimObjectRecord],
+        issues: list[ValidationIssue],
+        seen: set[str],
+        counter: int,
+        base_claim_id: str,
+        ctx: _BuildCtx,
+        candidates: list[dict],
+    ) -> None:
+        """Build ClaimObjectRecords from LLM atomic candidates (issue #317).
+
+        The builder performs no rewrite — it only constructs / links / validates.
+        A single accepted atomic candidate becomes one atomic claim; multiple
+        candidates become a compound parent (not atomic backing) with atomic
+        children.
+        """
+        accepted = [
+            c for c in candidates if c["atomicity"] == "atomic" and c["status"] == "accepted"
+        ]
+        if len(candidates) == 1 and len(accepted) == 1:
+            claim_id = self._dedup_id(base_claim_id, counter, seen)
+            self._append_atomic_child(claims, issues, ctx, claim_id, candidates[0], parent_id=None)
+            return
+
+        parent_id = self._dedup_id(base_claim_id, counter, seen)
+        subclaim_ids: list[str] = []
+        for idx, cand in enumerate(candidates, start=1):
+            sub_id = self._dedup_id(f"{parent_id}_sub{idx:02d}", counter, seen)
+            subclaim_ids.append(sub_id)
+            self._append_atomic_child(claims, issues, ctx, sub_id, cand, parent_id=parent_id)
+
+        # Compound parent: tracks the original span but is not atomic backing.
+        parent_concepts = self._resolve_concepts(ctx.text, ctx.role_labels, ctx.span)
+        parent_eqs = self._link_equations(
+            ctx.text, ctx.claim_type, ctx.role_labels, ctx.block_id, ctx.section_id
+        )
+        claims.append(ClaimObjectRecord(
+            claim_id=parent_id,
+            document_id=ctx.document_id,
+            claim_type=ctx.claim_type,
+            text=ctx.text,
+            source_evidence_ids=ctx.evidence_ids,
+            source_span_ids=[ctx.span_id] if ctx.span_id else [],
+            concepts=parent_concepts,
+            equation_ids=parent_eqs,
+            figure_ids=[],
+            table_ids=[],
+            support_status="source_backed" if ctx.evidence_ids else "inferred",
+            review_status=ctx.review_status,
+            review_note=ctx.review_note,
+            section_id=ctx.section_id,
+            confidence=ctx.confidence,
+            normalized_text=ctx.text,
+            atomicity="compound",
+            is_atomic=False,
+            qualification_reason="atomic rewrite by ClaimQualificationAgent",
+            parent_claim_id=None,
+            subclaim_ids=subclaim_ids,
+        ))
+        self._add_issues_for_record(
+            parent_id, ctx.evidence_ids, parent_concepts, ctx.claim_type, parent_eqs, issues
+        )
+
+    def _append_atomic_child(
+        self,
+        claims: list[ClaimObjectRecord],
+        issues: list[ValidationIssue],
+        ctx: _BuildCtx,
+        claim_id: str,
+        cand: dict,
+        parent_id: str | None,
+    ) -> None:
+        text = cand.get("normalized_text") or cand["text"]
+        claim_type = cand["claim_type"]
+        concepts = self._resolve_concepts(text, ctx.role_labels, ctx.span)
+        equation_ids = self._link_equations(
+            text, claim_type, ctx.role_labels, ctx.block_id, ctx.section_id
+        )
+        source_span_id = cand.get("source_span_id") or ctx.span_id
+
+        if cand["atomicity"] == "atomic" and cand["status"] == "accepted":
+            atomicity = "atomic"
+            is_atomic = True
+            support_status = "source_backed" if ctx.evidence_ids else "inferred"
+            qualification_reason = None
+        else:
+            # The agent flagged this piece as not confidently atomized.
+            atomicity = "non_atomic"
+            is_atomic = False
+            support_status = "review_required"
+            qualification_reason = (
+                cand.get("qualification_reason")
+                or "atomic rewrite incomplete; review required"
+            )
+            issues.append(ValidationIssue(
+                rule_id="atomic_claim_needs_review",
+                severity="warning",
+                message=(
+                    f"atomic claim {claim_id} was flagged non_atomic by "
+                    "ClaimQualificationAgent; review required"
+                ),
+                field=claim_id,
+            ))
+
+        claims.append(ClaimObjectRecord(
+            claim_id=claim_id,
+            document_id=ctx.document_id,
+            claim_type=claim_type,
+            text=text,
+            source_evidence_ids=ctx.evidence_ids,
+            source_span_ids=[source_span_id] if source_span_id else [],
+            concepts=concepts,
+            equation_ids=equation_ids,
+            figure_ids=[],
+            table_ids=[],
+            support_status=support_status,
+            review_status=ctx.review_status,
+            review_note=ctx.review_note,
+            section_id=ctx.section_id,
+            confidence=ctx.confidence,
+            normalized_text=text,
+            atomicity=atomicity,
+            is_atomic=is_atomic,
+            qualification_reason=qualification_reason,
+            parent_claim_id=parent_id,
+            subclaim_ids=[],
+        ))
+        self._add_issues_for_record(
+            claim_id, ctx.evidence_ids, concepts, claim_type, equation_ids, issues
+        )
+
+    def _emit_fallback_split(
+        self,
+        claims: list[ClaimObjectRecord],
+        issues: list[ValidationIssue],
+        seen: set[str],
+        counter: int,
+        base_claim_id: str,
+        ctx: _BuildCtx,
+        text_qual_reason: str | None,
+    ) -> None:
+        """Deterministic split kept as a review suggestion only (issue #317 #4/#6).
+
+        The builder does NOT confirm a deterministic split as atomic / source_backed.
+        The original span is kept as a non_atomic parent (review_required) and the
+        mechanical split is attached as ``split_pending`` children (review_required).
+        Neither is used as strong graph backing (is_atomic=False).
+        """
+        parent_id = self._dedup_id(base_claim_id, counter, seen)
+        parts = self._split_into_atomic(ctx.text)
+        subclaim_ids: list[str] = []
+        for idx, part in enumerate(parts, start=1):
+            part = (part or "").strip()
+            if not part:
+                continue
+            sub_id = self._dedup_id(f"{parent_id}_sub{idx:02d}", counter, seen)
+            subclaim_ids.append(sub_id)
+            sub_concepts = self._resolve_concepts(part, ctx.role_labels, ctx.span)
+            sub_eqs = self._link_equations(
+                part, ctx.claim_type, ctx.role_labels, ctx.block_id, ctx.section_id
+            )
+            claims.append(ClaimObjectRecord(
+                claim_id=sub_id,
+                document_id=ctx.document_id,
+                claim_type=ctx.claim_type,
+                text=part,
+                source_evidence_ids=ctx.evidence_ids,
+                source_span_ids=[ctx.span_id] if ctx.span_id else [],
+                concepts=sub_concepts,
+                equation_ids=sub_eqs,
+                figure_ids=[],
+                table_ids=[],
+                support_status="review_required",
+                review_status=ctx.review_status,
+                review_note=ctx.review_note,
+                section_id=ctx.section_id,
+                confidence=ctx.confidence,
+                normalized_text=part,
+                atomicity="split_pending",
+                is_atomic=False,
+                qualification_reason="deterministic split requires review",
+                parent_claim_id=parent_id,
+                subclaim_ids=[],
+            ))
+
+        parent_concepts = self._resolve_concepts(ctx.text, ctx.role_labels, ctx.span)
+        parent_eqs = self._link_equations(
+            ctx.text, ctx.claim_type, ctx.role_labels, ctx.block_id, ctx.section_id
+        )
+        claims.append(ClaimObjectRecord(
+            claim_id=parent_id,
+            document_id=ctx.document_id,
+            claim_type=ctx.claim_type,
+            text=ctx.text,
+            source_evidence_ids=ctx.evidence_ids,
+            source_span_ids=[ctx.span_id] if ctx.span_id else [],
+            concepts=parent_concepts,
+            equation_ids=parent_eqs,
+            figure_ids=[],
+            table_ids=[],
+            support_status="review_required",
+            review_status=ctx.review_status,
+            review_note=ctx.review_note,
+            section_id=ctx.section_id,
+            confidence=ctx.confidence,
+            normalized_text=ctx.text,
+            atomicity="non_atomic",
+            is_atomic=False,
+            qualification_reason=(
+                text_qual_reason
+                or "contains multiple propositions; LLM atomic rewrite required"
+            ),
+            parent_claim_id=None,
+            subclaim_ids=subclaim_ids,
+        ))
+        self._add_issues_for_record(
+            parent_id, ctx.evidence_ids, parent_concepts, ctx.claim_type, parent_eqs, issues
+        )
+        issues.append(ValidationIssue(
+            rule_id="claim_split_pending_review",
+            severity="warning",
+            message=(
+                f"claim {parent_id} contains multiple propositions; the deterministic "
+                f"split ({len(subclaim_ids)} parts) is kept as a review suggestion and "
+                "must be confirmed by ClaimQualificationAgent before use as backing"
+            ),
+            field=parent_id,
+        ))
+        if ctx.claim_type in MAIN_RESULT_CLAIM_TYPES:
+            issues.append(ValidationIssue(
+                rule_id="main_result_claim_non_atomic",
+                severity="error",
+                message=(
+                    f"main-result claim {parent_id} ({ctx.claim_type}) is non_atomic; "
+                    "a main result must be a single minimal proposition"
+                ),
+                field=parent_id,
             ))
 
     # ------------------------------------------------------------------
