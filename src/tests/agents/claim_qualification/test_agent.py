@@ -261,6 +261,59 @@ def test_repair_called_on_invalid_status():
     assert result.qualified_spans[0].qualification["status"] == "accepted"
 
 
+def test_atomic_claims_flow_through_to_qualified_span():
+    # issue #317: the agent's atomic rewrite output is preserved on the record and
+    # counted in summary_stats.
+    agent = ClaimQualificationAgent()
+    text = "The paper derives consistency relations and shows they test a theory."
+    structure = DocumentStructureResult(
+        document_id="doc_test",
+        source_file="/tmp/test.pdf",
+        cartridge_id=None,
+        metadata=DocumentMetadata(title="Test", pages=1),
+        sections=[Section("sec_1", "Results", 1, 1, 1)],
+        blocks=[_typed("b1", text)],
+    )
+    roles = RhetoricalRoleResult(
+        document_id="doc_test",
+        cartridge_id=None,
+        role_annotations=[
+            BlockRoleAnnotation("b1", "sec_1", "result", [_span("s1", text, ["result"])])
+        ],
+        summary_stats={},
+    )
+    response = _response(
+        "s1", "b1", text, ["result"], "accepted", "paper_core", "main_result",
+        granularity="too_broad", split=True,
+    )
+    response["atomic_claims"] = [
+        {
+            "text": "The paper derives consistency relations.",
+            "claim_type_candidate": "derivation_result",
+            "atomicity": "atomic",
+            "status": "accepted",
+            "source_span_id": "s1",
+            "evidence_quote": "derives consistency relations",
+        },
+        {
+            "text": "The consistency relations can test a theory.",
+            "claim_type_candidate": "main_result",
+            "atomicity": "atomic",
+            "status": "accepted",
+            "source_span_id": "s1",
+            "evidence_quote": "shows they test a theory",
+        },
+    ]
+    with patch.object(agent._llm_client, "generate", return_value=response):
+        result = agent.run(structure, _skeleton(), roles)
+
+    span = result.qualified_spans[0]
+    assert len(span.atomic_claims) == 2
+    assert span.atomic_claims[0]["atomicity"] == "atomic"
+    assert span.atomic_claims[0]["source_span_id"] == "s1"
+    assert result.summary_stats["atomic_claims"] == 2
+
+
 def test_llm_failure_returns_deferred_fallback_record():
     agent = ClaimQualificationAgent()
     with patch.object(agent._llm_client, "generate", side_effect=RuntimeError("LLM error")):

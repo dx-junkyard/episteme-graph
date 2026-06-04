@@ -132,6 +132,7 @@ class ClaimQualificationAgent:
         deferred: list[dict] = []
         split_suggested = 0
         merge_suggested = 0
+        atomic_claims_total = 0
 
         for record in records:
             status = record.qualification.get("status")
@@ -149,6 +150,7 @@ class ClaimQualificationAgent:
                 or record.edit_suggestions.get("should_merge_with_next")
             ):
                 merge_suggested += 1
+            atomic_claims_total += len(getattr(record, "atomic_claims", None) or [])
 
         return ClaimQualificationResult(
             document_id=document_id,
@@ -162,5 +164,6 @@ class ClaimQualificationAgent:
                 "deferred": len(deferred),
                 "split_suggested": split_suggested,
                 "merge_suggested": merge_suggested,
+                "atomic_claims": atomic_claims_total,
             },
         )

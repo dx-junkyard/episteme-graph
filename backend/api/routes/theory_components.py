@@ -2021,6 +2021,7 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
             "edge_type": str(edge.get("edge_type") or raw_relation or "stored_pipeline_edge"),
             "confidence": float(edge.get("confidence") or 0.8),
             "support_status": str(edge.get("support_status") or "source_inferred"),
+            "source_backing_status": str(edge.get("source_backing_status") or ""),
             "review_status": str(edge.get("review_status") or "review_required"),
             "review_reasons": edge.get("review_reasons") if isinstance(edge.get("review_reasons"), list) else [],
             "evidence": edge.get("evidence") if isinstance(edge.get("evidence"), dict) else {"reason": edge.get("reason") or ""},

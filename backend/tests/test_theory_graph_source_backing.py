@@ -56,6 +56,23 @@ class TestRoutePropagatesSourceBacking:
         for relation in ("solves", "substitutes", "eliminates", "compares", "constructs"):
             assert f'"{relation}"' in source, f"_GRAPH_RELATIONS missing {relation}"
 
+    def test_stored_graph_normalization_propagates_edge_source_backing(self):
+        """Issue #311: stored-graph edges must also carry source_backing_status.
+
+        The live-generated edge path (_add_graph_edge) and the stored-graph node
+        path already expose source_backing_status; the stored-graph edge path must
+        not drop it. Within _normalize_stored_component_graph the field appears for
+        both the node dict and the edge dict (>= 2 occurrences).
+        """
+        source = _read(ROUTES)
+        start = source.index("def _normalize_stored_component_graph")
+        end = source.index("\ndef ", start)
+        body = source[start:end]
+        assert body.count('"source_backing_status"') >= 2, (
+            "_normalize_stored_component_graph must propagate source_backing_status "
+            "on both nodes and edges"
+        )
+
 
 class TestGraphLayering:
     """Issue #306: main / equation_detail layering plumbing."""

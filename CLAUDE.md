@@ -105,9 +105,9 @@ PDF ファイル
     ↓  PaperSkeletonResult (JSON)
 [#218] RhetoricalRoleAgent      — chunk/span の論理役割判定（LLM-first）
     ↓  RhetoricalRoleResult (JSON)
-[#219] ClaimQualificationAgent  — Claim採否・区分・粒度（LLM-first）
-    ↓  ClaimQualificationResult (JSON)
-[#237] ClaimObjectBuilder       — 最終 claims.json の決定論的組立（非LLM）
+[#219] ClaimQualificationAgent  — Claim採否・区分・粒度 + atomic rewrite（LLM-first, #317）
+    ↓  ClaimQualificationResult (JSON; atomic_claims を含む)
+[#237] ClaimObjectBuilder       — 最終 claims.json の決定論的組立（非LLM, #317）
     ↓  ClaimObjectBuildResult (JSON)
 [#220] EquationSemanticsAgent   — 数式ブロック意味役割復元（LLM-first）
                                   + to_equations_export() で equations.json 化
@@ -165,6 +165,19 @@ examples/          → サンプル入出力JSON
 **DocumentStructureAgent (#216)**: structure-first（パーサ・レイアウト優先）。意味解釈は行わない。曖昧なblockのみLLM補助。
 
 **PaperSkeletonAgent (#217) 以降**: LLM-first。生成・採否・関係付けの高次判断はLLMに委ねる。入力整形・validation・repairは非LLMで処理する。
+
+**Claim atomic rewrite の責務分担 (#317)**: 長い / paper-level / 複数命題の claim を
+1 claim = 1 minimal proposition に再構成する atomic rewrite は **ClaimQualificationAgent**
+の正式ステップ（LLM-first）が担当し、結果を `QualifiedSpanRecord.atomic_claims`
+（`text` / `normalized_text` / `claim_type_candidate` / `atomicity` / `status` /
+`source_span_id` / `evidence_quote` / `qualification_reason` / `confidence`）に出力する。
+atomic 化できない箇所は `atomicity="non_atomic"` / `status="review_required"` で保持する
+（情報を落とさない）。**ClaimObjectBuilder** は atomic rewrite を行わず、その候補を
+ClaimObjectRecord に変換・リンク・検証するだけに責務を限定する。LLM 候補が無い場合の
+deterministic split は `atomicity="split_pending"` / `support_status="review_required"`
+の review suggestion に留め、確定 `source_backed` atomic claim にはしない。非 atomic /
+split_pending claim（`is_atomic=False`）は ComponentGraph / TheoryOperationGraph の
+強い backing に使わない。ExportValidationGate は非 atomic / split_pending を明示 report する。
 
 **全Agent共通ルール**:
 1. **cartridge-aware**: active cartridgeが指定されていれば語彙・検証ルールに使う。cartridgeがなくても単独動作すること

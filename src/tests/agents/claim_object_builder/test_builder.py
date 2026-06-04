@@ -223,35 +223,112 @@ def test_atomic_claim_marks_is_atomic_and_normalized_text():
     assert claim.qualification_reason is None
 
 
-def test_non_atomic_claim_is_split_into_atomic_children():
-    # The core of #312: a long undivided claim is deterministically split into
-    # atomic child claims (compound parent + atomic children), not just flagged.
+def test_non_atomic_claim_without_llm_rewrite_is_split_pending():
+    # Issue #317 criteria #4 / #6: with no LLM atomic rewrite, the builder keeps the
+    # deterministic split only as a review suggestion. Neither the non_atomic parent
+    # nor the split_pending children are confirmed source_backed atomic claims.
     registry = _make_registry("blk_x", _NON_ATOMIC_TEXT)
     spans = [_make_qualified("span_001", "blk_x", _NON_ATOMIC_TEXT, claim_type="method_choice")]
     builder = ClaimObjectBuilder(evidence_registry=registry)
     result = builder.build("doc_test", spans)
 
-    parent = [c for c in result.claims if c.atomicity == "compound"]
-    children = [c for c in result.claims if c.parent_claim_id and c.atomicity == "atomic"]
+    parent = [c for c in result.claims if c.atomicity == "non_atomic"]
+    children = [c for c in result.claims if c.parent_claim_id and c.atomicity == "split_pending"]
     assert len(parent) == 1
     assert parent[0].is_atomic is False
+    assert parent[0].support_status == "review_required"
     assert len(children) >= 2
-    assert all(c.is_atomic for c in children)
+    assert all(not c.is_atomic for c in children)
+    assert all(c.support_status == "review_required" for c in children)
+    assert all(c.qualification_reason == "deterministic split requires review" for c in children)
     rules = {i.rule_id for i in result.validation_issues}
-    assert "claim_auto_split" in rules
+    assert "claim_split_pending_review" in rules
 
 
-def test_main_result_long_claim_is_split_not_paper_summary():
-    # Criterion #3: a main-result claim must not remain a paper-level summary;
-    # it is split into atomic propositions and produces no non-atomic hard error.
+def test_main_result_long_claim_is_not_confirmed_without_llm_rewrite():
+    # Criterion #4: a long main-result claim must NOT be confirmed as a paper-level
+    # summary. Without an LLM atomic rewrite it stays non_atomic and is flagged.
     registry = _make_registry("blk_x", _NON_ATOMIC_TEXT)
     spans = [_make_qualified("span_001", "blk_x", _NON_ATOMIC_TEXT, claim_type="result")]
     builder = ClaimObjectBuilder(evidence_registry=registry)
     result = builder.build("doc_test", spans)
 
-    children = [c for c in result.claims if c.parent_claim_id and c.atomicity == "atomic"]
-    assert len(children) >= 2
+    parent = [c for c in result.claims if c.atomicity == "non_atomic"][0]
+    assert parent.is_atomic is False
+    assert parent.support_status != "source_backed"
+    assert "main_result_claim_non_atomic" in {i.rule_id for i in result.validation_issues}
+
+
+# ---------------------------------------------------------------------------
+# issue #317: LLM atomic rewrite consumed from ClaimQualificationAgent
+# ---------------------------------------------------------------------------
+
+def test_llm_atomic_claims_become_confirmed_atomic_children():
+    # Criteria #1 / #5 / #7: LLM-provided atomic claims are converted into a
+    # compound parent + confirmed atomic children that are source_backed and
+    # traceable to evidence.
+    registry = _make_registry("blk_x", _NON_ATOMIC_TEXT)
+    span = _make_qualified("span_001", "blk_x", _NON_ATOMIC_TEXT, claim_type="result")
+    span.atomic_claims = [
+        {"text": "Nuisance parameters appear in the observable equations.",
+         "atomicity": "atomic", "status": "accepted", "claim_type_candidate": "result"},
+        {"text": "The nuisance parameters can be eliminated algebraically.",
+         "atomicity": "atomic", "status": "accepted", "claim_type_candidate": "result"},
+        {"text": "The elimination yields consistency relations.",
+         "atomicity": "atomic", "status": "accepted", "claim_type_candidate": "result"},
+    ]
+    builder = ClaimObjectBuilder(evidence_registry=registry)
+    result = builder.build("doc_test", [span])
+
+    parent = [c for c in result.claims if c.atomicity == "compound"][0]
+    children = [c for c in result.claims if c.parent_claim_id == parent.claim_id]
+    assert parent.is_atomic is False
+    assert len(children) == 3
+    assert all(c.is_atomic and c.atomicity == "atomic" for c in children)
+    assert all(c.support_status == "source_backed" for c in children)
+    assert all(c.source_evidence_ids for c in children)
+    assert all(c.source_span_ids == ["span_001"] for c in children)
     assert "main_result_claim_non_atomic" not in {i.rule_id for i in result.validation_issues}
+
+
+def test_single_llm_atomic_claim_has_no_compound_wrapper():
+    registry = _make_registry("blk_x", "The relation reduces in the limit.")
+    span = _make_qualified("span_001", "blk_x", "The relation reduces in the limit.")
+    span.atomic_claims = [
+        {"text": "The relation reduces in the zero-recoil limit.",
+         "atomicity": "atomic", "status": "accepted"},
+    ]
+    builder = ClaimObjectBuilder(evidence_registry=registry)
+    result = builder.build("doc_test", [span])
+
+    assert len(result.claims) == 1
+    claim = result.claims[0]
+    assert claim.atomicity == "atomic"
+    assert claim.is_atomic is True
+    assert claim.text == "The relation reduces in the zero-recoil limit."
+    assert claim.support_status == "source_backed"
+
+
+def test_llm_non_atomic_candidate_is_marked_review_required():
+    registry = _make_registry("blk_x", _NON_ATOMIC_TEXT)
+    span = _make_qualified("span_001", "blk_x", _NON_ATOMIC_TEXT)
+    span.atomic_claims = [
+        {"text": "Nuisance parameters appear in the equations.",
+         "atomicity": "atomic", "status": "accepted"},
+        {"text": "The remaining clause could not be atomized cleanly here.",
+         "atomicity": "non_atomic", "status": "review_required",
+         "qualification_reason": "contains multiple propositions; split required"},
+    ]
+    builder = ClaimObjectBuilder(evidence_registry=registry)
+    result = builder.build("doc_test", [span])
+
+    review_children = [
+        c for c in result.claims if c.parent_claim_id and c.atomicity == "non_atomic"
+    ]
+    assert len(review_children) == 1
+    assert review_children[0].is_atomic is False
+    assert review_children[0].support_status == "review_required"
+    assert "atomic_claim_needs_review" in {i.rule_id for i in result.validation_issues}
 
 
 def test_main_result_normalizes_to_itself():

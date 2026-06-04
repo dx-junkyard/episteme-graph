@@ -22,18 +22,89 @@
         "should_merge_with_next": false,
         "normalized_text_hint": "The correction originates from use of the physical hadron mass spectrum."
       },
+      "atomic_claims": [],
       "reason": "Reusable source-backed correction statement with explicit causal content.",
       "confidence": 0.92
+    },
+    {
+      "span_id": "span_002",
+      "block_id": "blk_007_0031",
+      "section_id": "sample_paper:sec_5",
+      "text": "The paper derives consistency relations by eliminating nuisance parameters and shows they can be used to test a target theory.",
+      "role_labels": ["result"],
+      "qualification": {
+        "status": "accepted",
+        "claim_tier": "paper_core",
+        "claim_type_candidate": "main_result",
+        "granularity": "too_broad",
+        "evidence_adequacy": "sufficient",
+        "reviewability": "good"
+      },
+      "edit_suggestions": {
+        "should_split": true,
+        "should_merge_with_prev": false,
+        "should_merge_with_next": false,
+        "normalized_text_hint": ""
+      },
+      "atomic_claims": [
+        {
+          "text": "Nuisance parameters appear in the observable equations.",
+          "normalized_text": "Nuisance parameters appear in the observable equations.",
+          "claim_type_candidate": "structural_property",
+          "atomicity": "atomic",
+          "status": "accepted",
+          "source_span_id": "span_002",
+          "evidence_quote": "eliminating nuisance parameters",
+          "qualification_reason": "single minimal proposition extracted from the paper-level summary.",
+          "confidence": 0.88
+        },
+        {
+          "text": "The nuisance parameters can be eliminated algebraically.",
+          "normalized_text": "The nuisance parameters can be eliminated algebraically.",
+          "claim_type_candidate": "derivation_result",
+          "atomicity": "atomic",
+          "status": "accepted",
+          "source_span_id": "span_002",
+          "evidence_quote": "eliminating nuisance parameters",
+          "qualification_reason": "single minimal proposition extracted from the paper-level summary.",
+          "confidence": 0.88
+        },
+        {
+          "text": "The elimination yields consistency relations.",
+          "normalized_text": "The elimination yields consistency relations.",
+          "claim_type_candidate": "derivation_result",
+          "atomicity": "atomic",
+          "status": "accepted",
+          "source_span_id": "span_002",
+          "evidence_quote": "derives consistency relations",
+          "qualification_reason": "single minimal proposition extracted from the paper-level summary.",
+          "confidence": 0.9
+        },
+        {
+          "text": "The consistency relations can be used to test the target theory.",
+          "normalized_text": "The consistency relations can be used to test the target theory.",
+          "claim_type_candidate": "main_result",
+          "atomicity": "atomic",
+          "status": "accepted",
+          "source_span_id": "span_002",
+          "evidence_quote": "can be used to test a target theory",
+          "qualification_reason": "single minimal proposition extracted from the paper-level summary.",
+          "confidence": 0.9
+        }
+      ],
+      "reason": "Paper-level summary; rewritten into atomic claims so each is a single minimal proposition.",
+      "confidence": 0.85
     }
   ],
   "rejected_spans": [],
   "deferred_spans": [],
   "summary_stats": {
-    "accepted": 1,
+    "accepted": 2,
     "rejected": 0,
     "deferred": 0,
-    "split_suggested": 0,
-    "merge_suggested": 0
+    "split_suggested": 1,
+    "merge_suggested": 0,
+    "atomic_claims": 4
   },
   "validation_issues": []
 }

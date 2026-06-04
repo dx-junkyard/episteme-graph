@@ -582,3 +582,15 @@ def test_atomic_claim_produces_no_atomicity_issue():
     all_codes = [e.code for e in result.errors] + [r.code for r in result.review_items]
     assert "NON_ATOMIC_MAIN_RESULT_CLAIM" not in all_codes
     assert "NON_ATOMIC_CLAIM_NEEDS_SPLIT" not in all_codes
+
+
+def test_split_pending_claim_needs_confirmation():
+    """Deterministic-split suggestions are surfaced for review (issue #317)."""
+    claims = _ClaimObjectResult([
+        _ClaimObject("claim_001_sub01", atomicity="split_pending", claim_type="result"),
+    ])
+    result = _run_gate(claim_objects=claims)
+    review_codes = [r.code for r in result.review_items]
+    assert "SPLIT_PENDING_CLAIM_NEEDS_CONFIRMATION" in review_codes
+    # split_pending must not be treated as a non-atomic hard error
+    assert "NON_ATOMIC_MAIN_RESULT_CLAIM" not in [e.code for e in result.errors]
