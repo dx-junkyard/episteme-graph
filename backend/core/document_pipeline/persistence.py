@@ -648,6 +648,60 @@ def persist_components(
 # ---------------------------------------------------------------------------
 
 
+def _split_main_label(label: str) -> tuple[str, str]:
+    """Lazy wrapper around the shared stage-label splitter (issue #319)."""
+    try:
+        from episteme_graph.agents.component_graph.schema import split_main_label
+    except Exception:  # pragma: no cover - agents package optional in some contexts
+        return str(label or "").strip(), ""
+    return split_main_label(label)
+
+
+def _normalize_graph_payload_for_persist(graph: dict) -> dict:
+    """Guarantee the persisted graph satisfies the stored-graph invariants (issue #319).
+
+    Before save we enforce, deterministically:
+      * main ``TheoryOperationNode`` labels are short stage names only;
+      * the long label remainder is preserved in ``description``;
+      * every node / edge carries a ``source_backing_status`` key;
+      * ``review_required`` / ``inferred`` nodes & edges have non-empty
+        ``review_reasons``.
+    """
+    for node in graph.get("nodes", []) or []:
+        if not isinstance(node, dict):
+            continue
+        layer = str(node.get("graph_layer") or "main")
+        ctype = str(node.get("component_type") or node.get("type") or "")
+        if layer == "main" and ctype == "TheoryOperationNode":
+            short_label, remainder = _split_main_label(str(node.get("label") or ""))
+            if short_label:
+                node["label"] = short_label
+            if not str(node.get("description") or "") and remainder:
+                node["description"] = remainder
+        backing = str(node.get("source_backing_status") or "")
+        node["source_backing_status"] = backing
+        reasons = node.get("review_reasons") if isinstance(node.get("review_reasons"), list) else []
+        review_status = str(node.get("review_status") or "")
+        if not reasons and (backing in ("review_required", "inferred") or review_status == "review_required"):
+            node["review_reasons"] = [
+                "fallback_or_inferred_node" if backing == "inferred" else "missing_evidence_link"
+            ]
+        else:
+            node["review_reasons"] = reasons
+    for edge in graph.get("edges", []) or []:
+        if not isinstance(edge, dict):
+            continue
+        backing = str(edge.get("source_backing_status") or "")
+        edge["source_backing_status"] = backing
+        reasons = edge.get("review_reasons") if isinstance(edge.get("review_reasons"), list) else []
+        review_status = str(edge.get("review_status") or "")
+        if not reasons and (backing in ("review_required", "inferred") or review_status == "review_required"):
+            edge["review_reasons"] = ["edge_not_source_backed"]
+        else:
+            edge["review_reasons"] = reasons
+    return graph
+
+
 def persist_component_graph(
     *,
     document_id: str,
@@ -705,6 +759,9 @@ def persist_component_graph(
                 "edge_type": e.get("edge_type", e.get("relation", "RELATED_TO")),
                 "support_status": e.get("support_status", "llm_inferred"),
                 "confidence": e.get("confidence", 0.0),
+                # node と同じ source-backing 語彙を edge にも保存する (issue #311/#319)。
+                # 落とすと API/UI 側で source_backing_status を表示・検証できなくなる。
+                "source_backing_status": e.get("source_backing_status", ""),
                 "review_status": e.get("review_status", "teacher_review_required"),
                 # review_required edge の理由 (issue #302/#304) を保存する。
                 # 落とすと API/UI 側で review 理由を表示・検証できなくなる。
@@ -779,7 +836,7 @@ def persist_component_graph(
         for e in (getattr(dsl_result, "edges", []) or [])
     ]
 
-    graph = {
+    graph = _normalize_graph_payload_for_persist({
         "graph_id": f"graph_{document_id}",
         "document_id": document_id,
         "graph_schema_version": "0.1.0",
@@ -788,7 +845,7 @@ def persist_component_graph(
         "edges": edges,
         "dsl": {"nodes": dsl_nodes, "edges": dsl_edges},
         "validation_results": validation_issues,
-    }
+    })
 
     session = _pg_session()
     try:
