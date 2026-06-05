@@ -22,6 +22,7 @@ def _build_available_id_index(llm_input: ComponentAssemblyLLMInput | None) -> di
         return {}
     equation_policy_map = {}
     equation_review_map = {}
+    equation_blocked_map = {}
     for e in llm_input.available_equations or []:
         eq_id = e.get("equation_id")
         if not eq_id:
@@ -31,12 +32,21 @@ def _build_available_id_index(llm_input: ComponentAssemblyLLMInput | None) -> di
         review_required = (
             bool(e.get("needs_math_review"))
             or bool(e.get("review_flags"))
+            or _equation_consistency_requires_review(e)
             or e.get("semantic_status") == "reconstruction_based"
             or e.get("reconstruction_status") not in (None, "", "none")
             or bool(policy.get("must_not_treat_as_source_extracted"))
             or policy.get("can_support_claim") is False
         )
         equation_review_map[eq_id] = review_required
+        equation_blocked_map[eq_id] = (
+            policy.get("can_support_claim") is False
+            and policy.get("can_be_used_in_derivation") is False
+        ) or (
+            e.get("latex") is None
+            and e.get("plain_text") is None
+            and e.get("extraction_status") in ("partial", "fragment_only", "label_only", "missing", "unparsed")
+        )
     return {
         "claim_ids": {c["claim_id"] for c in (llm_input.available_claims or []) if c.get("claim_id")},
         "evidence_ids": {e["evidence_id"] for e in (llm_input.available_evidence or []) if e.get("evidence_id")},
@@ -46,6 +56,7 @@ def _build_available_id_index(llm_input: ComponentAssemblyLLMInput | None) -> di
         "derivation_ids": set(llm_input.available_derivation_ids or []),
         "_equation_policy_map": equation_policy_map,
         "_equation_review_map": equation_review_map,
+        "_equation_blocked_map": equation_blocked_map,
     }
 
 
@@ -442,14 +453,29 @@ class ComponentAssemblyValidator:
 
         policy_map = available.get("_equation_policy_map", {}) or {}
         review_map = available.get("_equation_review_map", {}) or {}
+        blocked_map = available.get("_equation_blocked_map", {}) or {}
         claim_linked = bool(refs.get("claim_ids") or component.linked_claim_ids)
         for eq_id in all_eq_refs:
             policy = policy_map.get(eq_id, {}) if isinstance(policy_map, dict) else {}
+            if blocked_map.get(eq_id) and component.review_status in ("source_backed", "auto_accepted", "teacher_reviewed"):
+                issues.append(ValidationIssue(
+                    "source_backed_component_uses_blocked_equation",
+                    "error",
+                    f"{component.component_id} cannot be source-backed or auto-accepted because equation {eq_id!r} cannot support claims or derivations",
+                    f"components[{component.component_id}].review_status",
+                ))
             if claim_linked and policy.get("can_support_claim") is False:
                 issues.append(ValidationIssue(
                     "claim_support_uses_non_supporting_equation",
                     "warning",
                     f"{component.component_id} links claim evidence to non-claim-supporting equation {eq_id!r}",
+                    f"components[{component.component_id}].linked_equation_ids",
+                ))
+            if claim_linked and review_map.get(eq_id):
+                issues.append(ValidationIssue(
+                    "claim_support_uses_review_required_equation",
+                    "warning",
+                    f"{component.component_id} links claim evidence to review-required equation {eq_id!r}",
                     f"components[{component.component_id}].linked_equation_ids",
                 ))
             if review_map.get(eq_id) and eq_id not in component.review_required_equation_ids:
@@ -460,7 +486,6 @@ class ComponentAssemblyValidator:
                     "but does not list it in review_required_equation_ids",
                     f"components[{component.component_id}].review_required_equation_ids",
                 ))
-
         for eq_id in component.output_equation_ids:
             policy = policy_map.get(eq_id, {}) if isinstance(policy_map, dict) else {}
             if policy.get("can_support_claim") is False:
@@ -674,6 +699,16 @@ def _item_is_equation_like(item: object) -> bool:
         return True
     text = str(item.get("name") or item.get("label") or item.get("text") or "")
     return text.startswith("eq_") or text.lower().startswith("equation ")
+
+
+def _equation_consistency_requires_review(eq: dict) -> bool:
+    consistency = eq.get("equation_consistency") if isinstance(eq.get("equation_consistency"), dict) else {}
+    return (
+        bool(consistency.get("review_required"))
+        or consistency.get("raw_text_latex_match") == "mismatch"
+        or consistency.get("label_location_match") == "mismatch"
+        or consistency.get("source_span_quality") == "corrupted"
+    )
 
 
 def _meta_prior_evidence_ratio(component: ComponentRecord) -> float:

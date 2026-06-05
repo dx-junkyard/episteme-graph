@@ -4,6 +4,7 @@ import json
 from episteme_graph.agents.equation_semantics.schema import (
     DefinedSymbol,
     EquationCandidate,
+    EquationConsistency,
     EquationConfidencePolicy,
     EquationRecord,
     EquationReconstruction,
@@ -161,3 +162,22 @@ def test_reconstruction_none_does_not_affect_policy():
     sem = _make_semantics()
     cp = EquationConfidencePolicy.derive(src, rec, sem)
     assert cp.must_not_treat_as_source_extracted is False
+
+
+def test_equation_consistency_mismatch_blocks_claim_and_derivation_use():
+    src = _make_source_extraction(status="complete")
+    src.raw_text = "bias model: S_3 = b_1 + b_2 (11)"
+    src.latex = r"R_{\Lambda_c} = R_D"
+    rec = EquationReconstruction.make_none()
+    sem = _make_semantics("relation")
+    consistency = EquationConsistency.derive(
+        source_extraction=src,
+        reconstruction=rec,
+        label="11",
+        semantics=sem,
+    )
+    cp = EquationConfidencePolicy.derive(src, rec, sem, consistency)
+    assert consistency.raw_text_latex_match == "mismatch"
+    assert consistency.review_required is True
+    assert cp.can_support_claim is False
+    assert cp.can_be_used_in_derivation is False

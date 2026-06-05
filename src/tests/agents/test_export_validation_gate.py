@@ -383,6 +383,30 @@ def test_component_output_rejects_review_required_auto_accepted_equation():
     assert "REVIEW_REQUIRED_OUTPUT_COMPONENT_AUTO_ACCEPTED" in codes
 
 
+def test_export_validation_lists_equation_consistency_mismatch_candidates():
+    artifacts = _make_artifacts(equation_semantics={
+        "equations": [{
+            "equation_id": "eq_bad",
+            "confidence_policy": {
+                "can_support_claim": False,
+                "can_be_used_in_derivation": False,
+                "must_not_treat_as_source_extracted": True,
+            },
+            "equation_consistency": {
+                "raw_text_latex_match": "mismatch",
+                "label_location_match": "match",
+                "symbol_overlap_score": 0.0,
+                "source_span_quality": "clean",
+                "review_required": True,
+            },
+        }],
+    })
+    result = _run_gate(artifacts=artifacts)
+    codes = [e.code for e in result.review_items]
+    assert "EQUATION_CONSISTENCY_MISMATCH" in codes
+    assert result.status == "needs_review"
+
+
 # ---------------------------------------------------------------------------
 # Tests: DSL edge validation
 # ---------------------------------------------------------------------------

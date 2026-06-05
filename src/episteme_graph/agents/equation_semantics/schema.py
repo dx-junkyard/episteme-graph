@@ -6,6 +6,7 @@ Issue #245: EquationCandidate / EquationExtraction / EquationReconstruction を�
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 
 # ---------------------------------------------------------------------------
@@ -221,6 +222,106 @@ class EquationReconstruction:
 
 
 # ---------------------------------------------------------------------------
+# EquationConsistency — raw/source ↔ reconstructed math consistency
+# ---------------------------------------------------------------------------
+
+@dataclass
+class EquationConsistency:
+    raw_text_latex_match: str
+    label_location_match: str
+    symbol_overlap_score: float
+    source_span_quality: str
+    review_required: bool
+    review_reason: list[str] = field(default_factory=list)
+
+    @classmethod
+    def derive(
+        cls,
+        *,
+        source_extraction: EquationSourceExtraction,
+        reconstruction: EquationReconstruction,
+        label: str | None,
+        semantics: "EquationSemantics",
+    ) -> "EquationConsistency":
+        raw_text = source_extraction.raw_text or ""
+        latex = (
+            reconstruction.latex
+            if reconstruction.status != "none" and reconstruction.latex
+            else source_extraction.latex
+        ) or ""
+
+        raw_symbols = _math_symbol_set(raw_text)
+        latex_symbols = _math_symbol_set(latex)
+        if raw_symbols and latex_symbols:
+            overlap = len(raw_symbols & latex_symbols) / max(len(raw_symbols | latex_symbols), 1)
+            raw_latex_match = "mismatch" if overlap < 0.2 else "match"
+        else:
+            overlap = 0.0
+            raw_latex_match = "uncertain"
+
+        review_reason: list[str] = []
+        if raw_latex_match == "mismatch":
+            review_reason.append("raw_text_latex_symbol_mismatch")
+        elif raw_latex_match == "uncertain":
+            review_reason.append("raw_text_latex_symbol_overlap_uncertain")
+
+        raw_numbers = set(re.findall(r"\((\d+[A-Za-z]?)\)", raw_text))
+        label_text = str(label or "").strip()
+        label_number = label_text.strip("()") if label_text else ""
+        if raw_numbers and label_number:
+            label_match = "match" if label_number in raw_numbers else "mismatch"
+        elif raw_numbers or label_number:
+            label_match = "uncertain"
+        else:
+            label_match = "uncertain"
+        if label_match == "mismatch":
+            review_reason.append("equation_number_conflicts_with_label")
+
+        if _theory_family_conflict(raw_text, latex):
+            raw_latex_match = "mismatch"
+            review_reason.append("raw_text_latex_theory_family_conflict")
+
+        src_loc = source_extraction.source_location or {}
+        has_block = bool(src_loc.get("block_id"))
+        if not raw_text.strip() or not has_block:
+            source_span_quality = "corrupted"
+            review_reason.append("source_span_missing_or_empty")
+        elif (
+            source_extraction.extraction_status in ("partial", "fragment_only", "label_only", "unparsed", "missing")
+            or source_extraction.needs_math_review
+            or raw_latex_match == "uncertain"
+        ):
+            source_span_quality = "partial"
+        else:
+            source_span_quality = "clean"
+
+        section_id = str(src_loc.get("section_id") or "").lower()
+        semantic_text = " ".join([
+            semantics.equation_type or "",
+            semantics.summary or "",
+            semantics.reason or "",
+        ]).lower()
+        if section_id and semantic_text:
+            if "appendix" in section_id and any(t in semantic_text for t in ("main result", "central result")):
+                review_reason.append("source_location_section_semantic_kind_conflict")
+                label_match = "mismatch" if label_match == "match" else label_match
+
+        review_required = (
+            raw_latex_match != "match"
+            or label_match == "mismatch"
+            or source_span_quality != "clean"
+        )
+        return cls(
+            raw_text_latex_match=raw_latex_match,
+            label_location_match=label_match,
+            symbol_overlap_score=round(overlap, 3),
+            source_span_quality=source_span_quality,
+            review_required=review_required,
+            review_reason=_dedupe_text(review_reason),
+        )
+
+
+# ---------------------------------------------------------------------------
 # DefinedSymbol — reused in EquationSemantics
 # ---------------------------------------------------------------------------
 
@@ -274,16 +375,28 @@ class EquationConfidencePolicy:
         source_extraction: EquationSourceExtraction,
         reconstruction: EquationReconstruction,
         semantics: EquationSemantics,
+        equation_consistency: EquationConsistency | None = None,
     ) -> "EquationConfidencePolicy":
         """extraction / reconstruction / semantics から決定論的に生成する。"""
+        consistency_review = bool(equation_consistency and equation_consistency.review_required)
+        consistency_mismatch = bool(
+            equation_consistency
+            and (
+                equation_consistency.raw_text_latex_match == "mismatch"
+                or equation_consistency.label_location_match == "mismatch"
+                or equation_consistency.source_span_quality == "corrupted"
+            )
+        )
         is_reconstruction_based = (
             semantics.semantic_status == "reconstruction_based"
             or reconstruction.status != "none"
             or source_extraction.needs_math_review
+            or consistency_review
         )
         must_not = is_reconstruction_based
         can_claim = (
             not must_not
+            and not consistency_mismatch
             and source_extraction.extraction_status == "complete"
             and not source_extraction.needs_math_review
             and semantics.semantic_status not in ("unknown", "reconstruction_based")
@@ -291,11 +404,14 @@ class EquationConfidencePolicy:
         can_derivation = (
             not must_not
             or (
-                reconstruction.status != "none"
+                not consistency_mismatch
+                and reconstruction.status != "none"
                 and reconstruction.confidence >= 0.7
                 and semantics.semantic_status in ("reconstruction_based", "context_inferred")
             )
         )
+        if consistency_review:
+            can_derivation = False
         display_note = must_not or source_extraction.needs_math_review
         return cls(
             can_support_claim=can_claim,
@@ -321,6 +437,14 @@ class EquationRecord:
     reconstruction: EquationReconstruction
     semantics: EquationSemantics
     confidence_policy: EquationConfidencePolicy
+    equation_consistency: EquationConsistency = field(default_factory=lambda: EquationConsistency(
+        raw_text_latex_match="match",
+        label_location_match="match",
+        symbol_overlap_score=1.0,
+        source_span_quality="clean",
+        review_required=False,
+        review_reason=["equation_consistency_not_computed"],
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +562,14 @@ class EquationSemanticsResult:
                 "section_id": section_id,
                 "needs_math_review": src.needs_math_review,
                 "confidence_policy": asdict(r.confidence_policy),
+                "equation_consistency": asdict(r.equation_consistency),
+                "confidence_gate": _confidence_gate_for_equation(
+                    r.equation_id,
+                    r.confidence_policy,
+                    latex=latex,
+                    plain_text=plain_text,
+                    extraction_status=src.extraction_status,
+                ),
             })
         return out
 
@@ -550,6 +682,25 @@ def _record_from_dict(d: dict) -> EquationRecord:
         display_requires_note=bool(cp_raw.get("display_requires_note", True)),
         must_not_treat_as_source_extracted=bool(cp_raw.get("must_not_treat_as_source_extracted", True)),
     )
+    consistency_raw = d.get("equation_consistency")
+    if isinstance(consistency_raw, dict):
+        equation_consistency = EquationConsistency(
+            raw_text_latex_match=consistency_raw.get("raw_text_latex_match", "uncertain"),
+            label_location_match=consistency_raw.get("label_location_match", "uncertain"),
+            symbol_overlap_score=float(consistency_raw.get("symbol_overlap_score", 0.0) or 0.0),
+            source_span_quality=consistency_raw.get("source_span_quality", "partial"),
+            review_required=bool(consistency_raw.get("review_required", True)),
+            review_reason=list(consistency_raw.get("review_reason", [])),
+        )
+    else:
+        equation_consistency = EquationConsistency(
+            raw_text_latex_match="match",
+            label_location_match="match",
+            symbol_overlap_score=1.0,
+            source_span_quality="clean",
+            review_required=False,
+            review_reason=["equation_consistency_not_computed"],
+        )
     return EquationRecord(
         equation_id=d["equation_id"],
         document_id=d["document_id"],
@@ -559,4 +710,74 @@ def _record_from_dict(d: dict) -> EquationRecord:
         reconstruction=reconstruction,
         semantics=semantics,
         confidence_policy=confidence_policy,
+        equation_consistency=equation_consistency,
     )
+
+
+def _math_symbol_set(text: str) -> set[str]:
+    if not text:
+        return set()
+    normalized = text.replace("\\", " ")
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9_]*|[α-ωΑ-Ω]+|[=+\-*/^<>≤≥≈≃∝∑∫]", normalized)
+    stop = {
+        "left", "right", "frac", "sqrt", "sum", "int", "mathrm", "text",
+        "begin", "end", "label", "equation", "eqnarray", "align",
+    }
+    return {t.lower() for t in tokens if t.lower() not in stop and len(t.strip()) > 0}
+
+
+def _theory_family_conflict(raw_text: str, latex: str) -> bool:
+    raw = raw_text.lower()
+    tex = latex.lower()
+    bias_terms = ("bias", "skewness", "kurtosis", "b_1", "b2", "b_2", "b3", "b_3")
+    benchmark_terms = ("r_d", "r_{d", "lambda_c", "hqet", "sum rule", "isgur", "wilson")
+    return (
+        any(t in raw for t in bias_terms) and any(t in tex for t in benchmark_terms)
+    ) or (
+        any(t in raw for t in benchmark_terms) and any(t in tex for t in bias_terms)
+    )
+
+
+def _dedupe_text(values: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _confidence_gate_for_equation(
+    equation_id: str,
+    policy: EquationConfidencePolicy,
+    *,
+    latex: str | None,
+    plain_text: str | None,
+    extraction_status: str,
+) -> dict:
+    blocked = (
+        policy.can_support_claim is False
+        and policy.can_be_used_in_derivation is False
+    ) or (
+        latex is None
+        and plain_text is None
+        and extraction_status in ("partial", "fragment_only", "label_only", "missing", "unparsed")
+    )
+    if blocked:
+        return {
+            "blocked_by_equation_ids": [equation_id],
+            "blocked_reason": "linked equation cannot support claim or derivation",
+            "downstream_allowed_use": "semantic_hint_only",
+        }
+    if policy.display_requires_note:
+        return {
+            "blocked_by_equation_ids": [],
+            "blocked_reason": "",
+            "downstream_allowed_use": "display_with_warning",
+        }
+    return {
+        "blocked_by_equation_ids": [],
+        "blocked_reason": "",
+        "downstream_allowed_use": "display_with_warning",
+    }

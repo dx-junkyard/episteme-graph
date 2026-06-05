@@ -151,6 +151,7 @@ class ComponentRecord:
     eliminated_symbols: list[str] = field(default_factory=list)
     retained_symbols: list[str] = field(default_factory=list)
     equation_confidence_summary: dict = field(default_factory=dict)
+    confidence_gate: dict = field(default_factory=dict)
     review_status: str = "teacher_review_required"
     teaching_takeaway: str = ""
     source_scope: dict = field(default_factory=dict)
@@ -228,6 +229,7 @@ class ComponentAssemblyResult:
                 eliminated_symbols=list(c.get("eliminated_symbols") or []),
                 retained_symbols=list(c.get("retained_symbols") or []),
                 equation_confidence_summary=c.get("equation_confidence_summary") or {},
+                confidence_gate=c.get("confidence_gate") or {},
                 review_status=c.get("review_status", "teacher_review_required"),
                 teaching_takeaway=c.get("teaching_takeaway", ""),
                 source_scope=c.get("source_scope") or {},

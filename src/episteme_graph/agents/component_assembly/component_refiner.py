@@ -361,9 +361,16 @@ class ComponentRefiner:
             str(getattr(s, "review_status", "")) not in ("", "auto_accepted") for s in steps
         )
         review_status = "teacher_review_required" if review_required else parent.review_status
+        blocked_eqs = _blocked_equation_ids(all_eqs, eq_index)
+        confidence_gate = _confidence_gate(blocked_eqs)
+        if blocked_eqs:
+            review_status = "review_required"
 
         evidence_refs = copy.deepcopy(parent.evidence_refs or {})
         evidence_refs["equation_ids"] = list(all_eqs)
+        review_notes = list(parent.review_notes)
+        if blocked_eqs and confidence_gate["blocked_reason"] not in review_notes:
+            review_notes.append(confidence_gate["blocked_reason"])
 
         return ComponentRecord(
             component_id=component_id,
@@ -378,7 +385,7 @@ class ComponentRefiner:
             evidence_refs=evidence_refs,
             reason=reason,
             confidence=parent.confidence,
-            review_notes=list(parent.review_notes),
+            review_notes=review_notes,
             internal_flow=internal_flow,
             linked_claim_ids=list(parent.linked_claim_ids),
             linked_equation_ids=list(all_eqs),
@@ -391,10 +398,13 @@ class ComponentRefiner:
             output_equation_ids=classification.output_equation_ids,
             constraint_equation_ids=classification.constraint_equation_ids,
             definition_equation_ids=classification.definition_equation_ids,
-            review_required_equation_ids=classification.review_required_equation_ids,
+            review_required_equation_ids=_ordered_unique(
+                classification.review_required_equation_ids + blocked_eqs
+            ),
             eliminated_symbols=eliminated,
             retained_symbols=retained,
             equation_confidence_summary=dict(parent.equation_confidence_summary or {}),
+            confidence_gate=confidence_gate,
             review_status=review_status,
             teaching_takeaway=parent.teaching_takeaway,
             source_scope=copy.deepcopy(parent.source_scope or {}),
@@ -443,7 +453,18 @@ class ComponentRefiner:
         component.review_required_equation_ids = _ordered_unique(
             list(component.review_required_equation_ids) + classification.review_required_equation_ids
         )
-        if component.review_required_equation_ids and component.review_status == "auto_accepted":
+        blocked_eqs = _blocked_equation_ids(all_eqs, eq_index)
+        component.confidence_gate = _confidence_gate(blocked_eqs)
+        if blocked_eqs:
+            component.review_required_equation_ids = _ordered_unique(
+                list(component.review_required_equation_ids) + blocked_eqs
+            )
+            reason = component.confidence_gate["blocked_reason"]
+            if reason and reason not in component.review_notes:
+                component.review_notes.append(reason)
+            component.review_status = "review_required"
+            component.publish_ready = False
+        elif component.review_required_equation_ids and component.review_status == "auto_accepted":
             component.review_status = "teacher_review_required"
 
 
@@ -595,6 +616,37 @@ def _all_equation_ids(component: ComponentRecord) -> list[str]:
     ):
         values.extend(getattr(component, field_name, []) or [])
     return _ordered_unique(values)
+
+
+def _blocked_equation_ids(equation_ids: list[str], eq_index: dict[str, dict]) -> list[str]:
+    blocked: list[str] = []
+    for eq_id in equation_ids:
+        eq = eq_index.get(eq_id) or {}
+        policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
+        if policy.get("can_support_claim") is False and policy.get("can_be_used_in_derivation") is False:
+            blocked.append(eq_id)
+            continue
+        if (
+            eq.get("latex") is None
+            and eq.get("plain_text") is None
+            and eq.get("extraction_status") in ("partial", "fragment_only", "label_only", "missing", "unparsed")
+        ):
+            blocked.append(eq_id)
+    return _ordered_unique(blocked)
+
+
+def _confidence_gate(blocked_eqs: list[str]) -> dict:
+    if not blocked_eqs:
+        return {
+            "blocked_by_equation_ids": [],
+            "blocked_reason": "",
+            "downstream_allowed_use": "display_with_warning",
+        }
+    return {
+        "blocked_by_equation_ids": list(blocked_eqs),
+        "blocked_reason": "linked equation cannot support claim or derivation",
+        "downstream_allowed_use": "semantic_hint_only",
+    }
 
 
 def _is_equation_dependency_bundle(component: ComponentRecord) -> bool:

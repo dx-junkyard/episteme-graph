@@ -218,8 +218,65 @@ def build_equations_export(
             "source_evidence_ids": list(evidence_index.get(block_id, [])),
             "linked_claim_ids": list(claim_index.get(equation_id, [])),
             "confidence_policy": {},
+            "confidence_gate": _confidence_gate_for_equation(
+                equation_id,
+                {},
+                latex=latex,
+                plain_text=plain_text,
+                extraction_status=extraction_status,
+            ),
+            "equation_consistency": _legacy_equation_consistency(
+                raw_text=r.get("raw_text") or text,
+                latex=latex,
+                label=r.get("label"),
+                source_location={
+                    "page": page,
+                    "section_id": section_id,
+                    "block_id": block_id,
+                    "span_start": 0,
+                    "span_end": len(text or ""),
+                    "bbox": list(bbox) if isinstance(bbox, (list, tuple)) else [],
+                },
+                extraction_status=extraction_status,
+                needs_math_review=needs_math_review,
+            ),
         })
     return out
+
+
+def _confidence_gate_for_equation(
+    equation_id: str,
+    policy: dict,
+    *,
+    latex: str | None,
+    plain_text: str | None,
+    extraction_status: str,
+) -> dict:
+    blocked = (
+        policy.get("can_support_claim") is False
+        and policy.get("can_be_used_in_derivation") is False
+    ) or (
+        latex is None
+        and plain_text is None
+        and extraction_status in ("partial", "fragment_only", "label_only", "missing", "unparsed")
+    )
+    if blocked:
+        return {
+            "blocked_by_equation_ids": [equation_id],
+            "blocked_reason": "linked equation cannot support claim or derivation",
+            "downstream_allowed_use": "semantic_hint_only",
+        }
+    if policy.get("display_requires_note"):
+        return {
+            "blocked_by_equation_ids": [],
+            "blocked_reason": "",
+            "downstream_allowed_use": "display_with_warning",
+        }
+    return {
+        "blocked_by_equation_ids": [],
+        "blocked_reason": "",
+        "downstream_allowed_use": "display_with_warning",
+    }
 
 
 def _validate_equations_export(records: list[dict]) -> None:
@@ -262,6 +319,70 @@ def _validate_equations_export(records: list[dict]) -> None:
                 "rule": "reconstruction_based_not_flagged",
                 "reconstruction_status": rec_status,
             })
+        consistency = r.get("equation_consistency") if isinstance(r.get("equation_consistency"), dict) else {}
+        if (
+            consistency.get("raw_text_latex_match") == "mismatch"
+            or consistency.get("label_location_match") == "mismatch"
+            or consistency.get("source_span_quality") == "corrupted"
+        ):
+            validation.append({
+                "severity": "warning",
+                "rule": "equation_consistency_mismatch",
+                "equation_id": eq_id,
+            })
+
+
+def _legacy_equation_consistency(
+    *,
+    raw_text: str,
+    latex: str | None,
+    label: str | None,
+    source_location: dict,
+    extraction_status: str,
+    needs_math_review: bool,
+) -> dict:
+    """Best-effort consistency metadata for legacy flat equation artifacts."""
+    import re
+
+    def symbols(text: str) -> set[str]:
+        normalized = (text or "").replace("\\", " ")
+        tokens = re.findall(r"[A-Za-z][A-Za-z0-9_]*|[=+\-*/^<>≤≥≈≃∝∑∫]", normalized)
+        stop = {"left", "right", "frac", "sqrt", "sum", "int", "mathrm", "text", "label", "equation"}
+        return {t.lower() for t in tokens if t.lower() not in stop}
+
+    raw_symbols = symbols(raw_text or "")
+    latex_symbols = symbols(latex or "")
+    if raw_symbols and latex_symbols:
+        score = len(raw_symbols & latex_symbols) / max(len(raw_symbols | latex_symbols), 1)
+        raw_match = "mismatch" if score < 0.2 else "match"
+    else:
+        score = 0.0
+        raw_match = "uncertain"
+
+    raw_numbers = set(re.findall(r"\((\d+[A-Za-z]?)\)", raw_text or ""))
+    label_number = str(label or "").strip().strip("()")
+    if raw_numbers and label_number:
+        label_match = "match" if label_number in raw_numbers else "mismatch"
+    elif raw_numbers or label_number:
+        label_match = "uncertain"
+    else:
+        label_match = "uncertain"
+
+    if not (raw_text or "").strip() or not (source_location or {}).get("block_id"):
+        source_quality = "corrupted"
+    elif extraction_status in ("partial", "fragment_only", "label_only", "unparsed", "missing") or needs_math_review:
+        source_quality = "partial"
+    else:
+        source_quality = "clean"
+
+    review_required = raw_match != "match" or label_match == "mismatch" or source_quality != "clean"
+    return {
+        "raw_text_latex_match": raw_match,
+        "label_location_match": label_match,
+        "symbol_overlap_score": round(score, 3),
+        "source_span_quality": source_quality,
+        "review_required": review_required,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +412,11 @@ def build_equation_candidates_export(
     agent_candidates = eq.get("equation_candidates")
     if isinstance(agent_candidates, list) and agent_candidates:
         out: list[dict] = []
+        eq_consistency_by_id = {
+            str(r.get("equation_id")): r.get("equation_consistency")
+            for r in (eq.get("equations") or [])
+            if isinstance(r, dict) and isinstance(r.get("equation_consistency"), dict)
+        }
         for c in agent_candidates:
             if not isinstance(c, dict):
                 continue
@@ -318,6 +444,7 @@ def build_equation_candidates_export(
                 "rejection_reason": rejection_reason,
                 "needs_math_review": bool(c.get("needs_math_review", True)),
                 "review_reason": list(c.get("review_reason") or []),
+                "equation_consistency": eq_consistency_by_id.get(str(c.get("accepted_equation_id") or "")),
             })
         return out
 
@@ -362,6 +489,18 @@ def build_equation_candidates_export(
             "rejection_reason": None,
             "needs_math_review": needs_review,
             "review_reason": review_flags,
+            "equation_consistency": (
+                r.get("equation_consistency")
+                if isinstance(r.get("equation_consistency"), dict)
+                else _legacy_equation_consistency(
+                    raw_text=raw_text or (block.get("text") if isinstance(block, dict) else "") or "",
+                    latex=src.get("latex") or r.get("latex"),
+                    label=r.get("label"),
+                    source_location=src_loc,
+                    extraction_status=src.get("extraction_status") or "complete",
+                    needs_math_review=needs_review,
+                )
+            ),
         })
 
     for block in structure.get("blocks", []) or []:
@@ -501,6 +640,7 @@ def build_derivation_chains_export(
     derivation_links so component.internal_flow can still be cross-checked.
     """
     out: list[dict] = []
+    equation_gate_index = _equation_gate_index(equation_artifact)
     ev_by_block: dict[str, list[str]] = {}
     evidence_records = (_coerce_dict(evidence_artifact).get("records") or [])
     for ev in evidence_records if isinstance(evidence_records, list) else []:
@@ -525,6 +665,8 @@ def build_derivation_chains_export(
                 claim_ids = []
                 for key in ("claim_ids", "required_claim_ids", "input_claim_ids", "output_claim_ids"):
                     claim_ids.extend(str(v) for v in (s.get(key) or []) if v)
+                step_eq_ids = list(s.get("input_equation_ids") or []) + list(s.get("output_equation_ids") or [])
+                gate = _gate_for_step(step_eq_ids, equation_gate_index)
                 steps.append({
                     "step_id": s.get("step_id") or "",
                     "operation": s.get("operation") or "transform",
@@ -537,9 +679,13 @@ def build_derivation_chains_export(
                     "eliminated_symbols": list(s.get("eliminated_symbols") or []),
                     "retained_symbols": list(s.get("retained_symbols") or []),
                     "review_status": s.get("review_status") or "teacher_review_required",
+                    "review_reason": s.get("review_reason") or _gate_review_reason(gate),
+                    "confidence_gate": gate,
                     "reason": s.get("reason") or "",
                     "confidence": float(s.get("confidence") or 0.0),
                 })
+                if gate.get("blocked_by_equation_ids"):
+                    steps[-1]["review_status"] = "teacher_review_required"
             out.append({
                 "derivation_id": c.get("derivation_id") or "",
                 "document_id": c.get("document_id") or document_id,
@@ -547,6 +693,9 @@ def build_derivation_chains_export(
                 "steps": steps,
                 "teaching_takeaway": c.get("teaching_takeaway") or "",
                 "blackbox_policy_suggestion": c.get("blackbox_policy_suggestion") or {},
+                "review_status": c.get("review_status") or _chain_review_status_from_steps(steps),
+                "review_reason": c.get("review_reason") or _chain_review_reason_from_steps(steps),
+                "confidence_gate": _chain_confidence_gate_from_steps(steps),
             })
         return out
 
@@ -563,6 +712,7 @@ def build_derivation_chains_export(
         block_id = str(r.get("block_id") or (r.get("source_location") or {}).get("block_id") or "")
         source_evidence_ids = list(r.get("source_evidence_ids") or ev_by_block.get(block_id, []))
         claim_ids = list(r.get("linked_claim_ids") or [])
+        step_gate = _gate_for_step(from_eqs + ([eq_id] if eq_id else []), equation_gate_index)
         out.append({
             "derivation_id": f"deriv_{chain_id:04d}",
             "document_id": document_id,
@@ -581,9 +731,15 @@ def build_derivation_chains_export(
                 ],
                 "reason": "Reconstructed from equation_semantics.derivation_links",
                 "confidence": 0.5,
+                "review_status": _step_review_status_from_gate(step_gate),
+                "review_reason": _gate_review_reason(step_gate),
+                "confidence_gate": step_gate,
             }],
             "teaching_takeaway": "",
             "blackbox_policy_suggestion": {},
+            "review_status": _step_review_status_from_gate(step_gate),
+            "review_reason": _gate_review_reason(step_gate),
+            "confidence_gate": step_gate,
         })
         chain_id += 1
     if out or not normalized_records:
@@ -617,6 +773,7 @@ def build_derivation_chains_export(
             "relation": "apply_equation",
             "result": "infer_conclusion",
         }.get(str(primary_role), "apply_equation")
+        step_gate = _gate_for_step([eq_id], equation_gate_index)
         steps.append({
             "step_id": f"deriv_{chain_id:04d}_step_{idx}",
             "operation": operation,
@@ -628,6 +785,9 @@ def build_derivation_chains_export(
             "assumption_refs": list(r.get("local_assumptions") or []),
             "reason": "Reconstructed as a source-order derivation step from equation registry",
             "confidence": 0.4,
+            "review_status": _step_review_status_from_gate(step_gate),
+            "review_reason": _gate_review_reason(step_gate),
+            "confidence_gate": step_gate,
         })
     if steps:
         out.append({
@@ -637,8 +797,90 @@ def build_derivation_chains_export(
             "steps": steps,
             "teaching_takeaway": "Source-order equation chain reconstructed from first-class equation registry.",
             "blackbox_policy_suggestion": {},
+            "review_status": _chain_review_status_from_steps(steps),
+            "review_reason": _chain_review_reason_from_steps(steps),
+            "confidence_gate": _chain_confidence_gate_from_steps(steps),
         })
     return out
+
+
+def _equation_gate_index(equation_artifact: Any) -> dict[str, dict]:
+    eq = _coerce_dict(equation_artifact)
+    records = eq.get("equations") if isinstance(eq.get("equations"), list) else []
+    index: dict[str, dict] = {}
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        eq_id = str(r.get("equation_id") or "")
+        if not eq_id:
+            continue
+        src = r.get("source_extraction") if isinstance(r.get("source_extraction"), dict) else {}
+        rec = r.get("reconstruction") if isinstance(r.get("reconstruction"), dict) else {}
+        policy = r.get("confidence_policy") if isinstance(r.get("confidence_policy"), dict) else {}
+        latex = r.get("latex")
+        plain_text = r.get("plain_text")
+        if latex is None:
+            latex = rec.get("latex") if rec.get("status") not in (None, "", "none") else src.get("latex")
+        if plain_text is None:
+            plain_text = rec.get("plain_text") if rec.get("status") not in (None, "", "none") else src.get("plain_text")
+        extraction_status = r.get("extraction_status") or src.get("extraction_status") or "unparsed"
+        index[eq_id] = _confidence_gate_for_equation(
+            eq_id,
+            policy,
+            latex=latex,
+            plain_text=plain_text,
+            extraction_status=extraction_status,
+        )
+    return index
+
+
+def _gate_for_step(equation_ids: list[str], equation_gate_index: dict[str, dict]) -> dict:
+    blocked: list[str] = []
+    for eq_id in equation_ids:
+        gate = equation_gate_index.get(str(eq_id)) or {}
+        blocked.extend(str(v) for v in gate.get("blocked_by_equation_ids") or [] if v)
+    seen: set[str] = set()
+    unique = [v for v in blocked if not (v in seen or seen.add(v))]
+    if not unique:
+        return {
+            "blocked_by_equation_ids": [],
+            "blocked_reason": "",
+            "downstream_allowed_use": "display_with_warning",
+        }
+    return {
+        "blocked_by_equation_ids": unique,
+        "blocked_reason": "linked equation cannot support claim or derivation",
+        "downstream_allowed_use": "blocked",
+    }
+
+
+def _gate_review_reason(gate: dict) -> str:
+    return str((gate or {}).get("blocked_reason") or "")
+
+
+def _step_review_status_from_gate(gate: dict) -> str:
+    return "teacher_review_required" if (gate or {}).get("blocked_by_equation_ids") else "teacher_review_required"
+
+
+def _chain_confidence_gate_from_steps(steps: list[dict]) -> dict:
+    blocked: list[str] = []
+    for step in steps:
+        gate = step.get("confidence_gate") if isinstance(step.get("confidence_gate"), dict) else {}
+        blocked.extend(str(v) for v in gate.get("blocked_by_equation_ids") or [] if v)
+    return _gate_for_step(blocked, {eq_id: {
+        "blocked_by_equation_ids": [eq_id],
+        "blocked_reason": "linked equation cannot support claim or derivation",
+        "downstream_allowed_use": "blocked",
+    } for eq_id in blocked})
+
+
+def _chain_review_status_from_steps(steps: list[dict]) -> str:
+    return "teacher_review_required"
+
+
+def _chain_review_reason_from_steps(steps: list[dict]) -> str:
+    gate = _chain_confidence_gate_from_steps(steps)
+    return _gate_review_reason(gate)
 
 
 # ---------------------------------------------------------------------------

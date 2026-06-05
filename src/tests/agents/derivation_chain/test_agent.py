@@ -6,6 +6,7 @@ from episteme_graph.agents.derivation_chain.schema import OPERATION_ONTOLOGY
 from episteme_graph.agents.equation_semantics.schema import (
     DefinedSymbol,
     EquationCandidate,
+    EquationConsistency,
     EquationConfidencePolicy,
     EquationRecord,
     EquationReconstruction,
@@ -72,6 +73,24 @@ def _make_eq(
     )
 
 
+def _block_derivation_use(record: EquationRecord) -> EquationRecord:
+    consistency = EquationConsistency(
+        raw_text_latex_match="mismatch",
+        label_location_match="match",
+        symbol_overlap_score=0.0,
+        source_span_quality="clean",
+        review_required=True,
+    )
+    record.equation_consistency = consistency
+    record.confidence_policy = EquationConfidencePolicy.derive(
+        record.source_extraction,
+        record.reconstruction,
+        record.semantics,
+        consistency,
+    )
+    return record
+
+
 def _make_result(eqs: list[EquationRecord]) -> EquationSemanticsResult:
     return EquationSemanticsResult(
         document_id="doc_test",
@@ -109,6 +128,19 @@ def test_no_chains_when_no_links():
     agent = DerivationChainAgent()
     chain_result = agent.run(result)
     assert chain_result.chains == []
+
+
+def test_inconsistent_equation_is_excluded_from_derivation_chain():
+    result = _make_result([
+        _make_eq("eq_1"),
+        _block_derivation_use(_make_eq("eq_2", from_eqs=["eq_1"], role="result")),
+    ])
+    chain_result = DerivationChainAgent().run(result)
+    assert chain_result.chains == []
+    assert any(
+        i.rule_id == "derivation_excludes_inconsistent_equation"
+        for i in chain_result.validation_issues
+    )
 
 
 def test_required_claim_ids_propagated():

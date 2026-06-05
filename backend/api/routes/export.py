@@ -1002,6 +1002,188 @@ def _link_derivations_to_export_context(
         topic["linked_derivation_ids"] = sorted(set(existing + chain_ids))
 
 
+def _apply_confidence_gates_to_export(
+    *,
+    claims: list[dict],
+    components: list[dict],
+    component_graph: dict,
+    course_info: dict | None,
+    derivation_chains: list[dict],
+    equations: list[dict],
+) -> None:
+    equation_gate_index = _blocked_equation_gate_index(equations)
+    if not equation_gate_index:
+        return
+
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        gate = _confidence_gate_for_refs(_claim_equation_refs(claim), equation_gate_index, semantic_hint=True)
+        claim["confidence_gate"] = gate
+        if gate["blocked_by_equation_ids"]:
+            claim["review_status"] = "teacher_review_required"
+
+    component_gate_by_id: dict[str, dict] = {}
+    for comp in components:
+        if not isinstance(comp, dict):
+            continue
+        gate = _confidence_gate_for_refs(_component_equation_refs_export(comp), equation_gate_index, semantic_hint=True)
+        comp["confidence_gate"] = gate
+        component_gate_by_id[str(comp.get("component_id") or "")] = gate
+        if gate["blocked_by_equation_ids"]:
+            comp["review_status"] = "review_required"
+            comp["publish_ready"] = False
+            reasons = comp.get("review_reason") or comp.get("review_reasons") or []
+            if isinstance(reasons, str):
+                reasons = [reasons]
+            if gate["blocked_reason"] not in reasons:
+                reasons.append(gate["blocked_reason"])
+            comp["review_reason"] = reasons
+            existing = [str(v) for v in comp.get("review_required_equation_ids") or [] if v]
+            comp["review_required_equation_ids"] = sorted(set(existing + gate["blocked_by_equation_ids"]))
+
+    for chain in derivation_chains:
+        if not isinstance(chain, dict):
+            continue
+        step_gates: list[dict] = []
+        for step in chain.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            refs = list(step.get("input_equation_ids") or []) + list(step.get("output_equation_ids") or [])
+            gate = _confidence_gate_for_refs(refs, equation_gate_index, semantic_hint=False)
+            step["confidence_gate"] = gate
+            step_gates.append(gate)
+            if gate["blocked_by_equation_ids"]:
+                step["review_status"] = "teacher_review_required"
+                step["review_reason"] = gate["blocked_reason"]
+        chain_gate = _merge_confidence_gates(step_gates, semantic_hint=False)
+        chain["confidence_gate"] = chain_gate
+        if chain_gate["blocked_by_equation_ids"]:
+            chain["review_status"] = "teacher_review_required"
+            chain["review_reason"] = chain_gate["blocked_reason"]
+
+    if isinstance(component_graph, dict):
+        for node in component_graph.get("nodes") or []:
+            if not isinstance(node, dict):
+                continue
+            comp_id = str(node.get("component_id") or node.get("node_id") or node.get("id") or "")
+            gate = component_gate_by_id.get(comp_id)
+            if gate:
+                node["confidence_gate"] = gate
+                if gate["blocked_by_equation_ids"]:
+                    node["review_status"] = "review_required"
+        for edge in component_graph.get("edges") or []:
+            if not isinstance(edge, dict):
+                continue
+            source_gate = component_gate_by_id.get(str(edge.get("source") or ""))
+            target_gate = component_gate_by_id.get(str(edge.get("target") or ""))
+            gate = _merge_confidence_gates([g for g in (source_gate, target_gate) if g], semantic_hint=True)
+            if gate["blocked_by_equation_ids"]:
+                edge["confidence_gate"] = gate
+                edge["review_status"] = "review_required"
+
+    if isinstance(course_info, dict):
+        for topic in course_info.get("topics") or []:
+            if not isinstance(topic, dict):
+                continue
+            gates = [component_gate_by_id.get(str(cid)) for cid in topic.get("linked_component_ids") or []]
+            for derivation_id in topic.get("linked_derivation_ids") or []:
+                for chain in derivation_chains:
+                    if str(chain.get("derivation_id") or "") == str(derivation_id):
+                        gates.append(chain.get("confidence_gate") if isinstance(chain.get("confidence_gate"), dict) else None)
+            gate = _merge_confidence_gates([g for g in gates if g], semantic_hint=True)
+            topic["confidence_gate"] = gate
+            if gate["blocked_by_equation_ids"]:
+                topic["final_formula_rendering_allowed"] = False
+            for step in topic.get("visualization_plan") or []:
+                if not isinstance(step, dict):
+                    continue
+                step_gates = [component_gate_by_id.get(str(cid)) for cid in step.get("linked_component_ids") or []]
+                step_gate = _merge_confidence_gates([g for g in step_gates if g], semantic_hint=True)
+                step["confidence_gate"] = step_gate
+                if step_gate["blocked_by_equation_ids"]:
+                    step["final_formula_rendering_allowed"] = False
+
+
+def _blocked_equation_gate_index(equations: list[dict]) -> dict[str, dict]:
+    index: dict[str, dict] = {}
+    for eq in equations:
+        if not isinstance(eq, dict):
+            continue
+        eq_id = str(eq.get("equation_id") or "")
+        if not eq_id:
+            continue
+        gate = eq.get("confidence_gate") if isinstance(eq.get("confidence_gate"), dict) else {}
+        blocked = list(gate.get("blocked_by_equation_ids") or [])
+        policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
+        if not blocked and policy.get("can_support_claim") is False and policy.get("can_be_used_in_derivation") is False:
+            blocked = [eq_id]
+        if not blocked and eq.get("latex") is None and eq.get("plain_text") is None and eq.get("extraction_status") in ("partial", "fragment_only", "label_only", "missing", "unparsed"):
+            blocked = [eq_id]
+        if blocked:
+            index[eq_id] = {
+                "blocked_by_equation_ids": [str(v) for v in blocked],
+                "blocked_reason": gate.get("blocked_reason") or "linked equation cannot support claim or derivation",
+                "downstream_allowed_use": gate.get("downstream_allowed_use") or "semantic_hint_only",
+            }
+    return index
+
+
+def _confidence_gate_for_refs(refs: list[str], equation_gate_index: dict[str, dict], *, semantic_hint: bool) -> dict:
+    gates = [equation_gate_index.get(str(ref)) for ref in refs if equation_gate_index.get(str(ref))]
+    return _merge_confidence_gates(gates, semantic_hint=semantic_hint)
+
+
+def _merge_confidence_gates(gates: list[dict], *, semantic_hint: bool) -> dict:
+    blocked: list[str] = []
+    for gate in gates:
+        blocked.extend(str(v) for v in (gate or {}).get("blocked_by_equation_ids") or [] if v)
+    seen: set[str] = set()
+    unique = [v for v in blocked if not (v in seen or seen.add(v))]
+    if not unique:
+        return {"blocked_by_equation_ids": [], "blocked_reason": "", "downstream_allowed_use": "display_with_warning"}
+    return {
+        "blocked_by_equation_ids": unique,
+        "blocked_reason": "linked equation cannot support claim or derivation",
+        "downstream_allowed_use": "semantic_hint_only" if semantic_hint else "blocked",
+    }
+
+
+def _claim_equation_refs(claim: dict) -> list[str]:
+    equation = claim.get("equation") if isinstance(claim.get("equation"), dict) else {}
+    values: list[str] = []
+    for key in ("equation_id", "id"):
+        if equation.get(key):
+            values.append(str(equation[key]))
+    for key in ("equation_ids", "linked_equation_ids"):
+        values.extend(str(v) for v in equation.get(key) or [] if v)
+        values.extend(str(v) for v in claim.get(key) or [] if v)
+    return sorted(set(values))
+
+
+def _component_equation_refs_export(comp: dict) -> list[str]:
+    values: list[str] = []
+    refs = comp.get("evidence_refs") if isinstance(comp.get("evidence_refs"), dict) else {}
+    values.extend(str(v) for v in refs.get("equation_ids") or [] if v)
+    for key in (
+        "linked_equation_ids", "input_equation_ids", "intermediate_equation_ids",
+        "output_equation_ids", "constraint_equation_ids", "definition_equation_ids",
+        "review_required_equation_ids",
+    ):
+        values.extend(str(v) for v in comp.get(key) or [] if v)
+    for key in ("inputs", "outputs", "preconditions", "cautions", "constraints"):
+        for item in comp.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            for item_key in ("equation_ids", "equations"):
+                raw = item.get(item_key) or []
+                if isinstance(raw, str):
+                    values.append(raw)
+                else:
+                    values.extend(str(v) for v in raw if v)
+    return sorted(set(values))
+
+
 def _validate_export_references(
     *,
     claims: list[dict],
@@ -1013,15 +1195,20 @@ def _validate_export_references(
     derivation_chains: list[dict] | None = None,
 ) -> dict:
     errors: list[dict] = []
+    warnings: list[dict] = []
     derivation_chains = derivation_chains or []
     claim_ids = {str(c.get("claim_id")) for c in claims if c.get("claim_id")}
     component_ids = {str(c.get("component_id")) for c in components if c.get("component_id")}
     evidence_ids = {str(e.get("evidence_id")) for e in evidence_snippets if e.get("evidence_id")}
     equation_ids = {str(e.get("equation_id")) for e in equations if e.get("equation_id")}
+    equation_index = {str(e.get("equation_id")): e for e in equations if isinstance(e, dict) and e.get("equation_id")}
     derivation_ids = {str(c.get("derivation_id")) for c in derivation_chains if c.get("derivation_id")}
 
     def add(code: str, message: str, artifact: str, path: str, ref_id: str) -> None:
         errors.append({"code": code, "message": message, "artifact": artifact, "path": path, "ref_id": ref_id})
+
+    def warn(code: str, message: str, artifact: str, path: str, ref_id: str) -> None:
+        warnings.append({"code": code, "message": message, "artifact": artifact, "path": path, "ref_id": ref_id})
 
     def check_refs(values: Any, known: set[str], artifact: str, path: str, target: str) -> None:
         for ref in values or []:
@@ -1040,6 +1227,36 @@ def _validate_export_references(
         if not isinstance(comp, dict):
             continue
         check_refs(comp.get("evidence_claims"), claim_ids, "components/components.json", f"$.components[{idx}].evidence_claims", "claim")
+        comp_gate = comp.get("confidence_gate") if isinstance(comp.get("confidence_gate"), dict) else {}
+        if comp_gate.get("blocked_by_equation_ids"):
+            warn(
+                "COMPONENT_CONFIDENCE_GATE_BLOCKED",
+                f"component {comp.get('component_id')!r} is downgraded by low-confidence equations",
+                "components/components.json",
+                f"$.components[{idx}].confidence_gate",
+                str(comp.get("component_id") or ""),
+            )
+            if comp.get("review_status") in ("source_backed", "auto_accepted", "teacher_reviewed"):
+                add(
+                    "SOURCE_BACKED_COMPONENT_USES_BLOCKED_EQUATION",
+                    f"component {comp.get('component_id')!r} cannot be source_backed with blocked equations",
+                    "components/components.json",
+                    f"$.components[{idx}].review_status",
+                    str(comp.get("component_id") or ""),
+                )
+        output_eqs = [str(v) for v in comp.get("output_equation_ids") or [] if v]
+        if comp.get("component_type") in ("RelationComponent", "PaperRelationComponent") and comp.get("publish_ready"):
+            for eq_id in output_eqs:
+                eq = equation_index.get(eq_id) or {}
+                src_loc = eq.get("source_location") if isinstance(eq.get("source_location"), dict) else {}
+                if not eq.get("latex") or not src_loc.get("block_id"):
+                    add(
+                        "FINAL_RELATION_COMPONENT_UNCONFIRMED_EQUATION",
+                        f"publish-ready relation component {comp.get('component_id')!r} has output equation {eq_id!r} without confirmed LaTeX/source location",
+                        "components/components.json",
+                        f"$.components[{idx}].output_equation_ids",
+                        eq_id,
+                    )
         for dep_idx, dep in enumerate(comp.get("dependencies") or []):
             if isinstance(dep, dict):
                 check_refs(dep.get("component_refs"), component_ids, "components/components.json", f"$.components[{idx}].dependencies[{dep_idx}].component_refs", "component")
@@ -1063,6 +1280,15 @@ def _validate_export_references(
             if not isinstance(topic, dict):
                 continue
             has_derivation_topic = has_derivation_topic or _topic_mentions_derivation(topic)
+            topic_gate = topic.get("confidence_gate") if isinstance(topic.get("confidence_gate"), dict) else {}
+            if topic_gate.get("blocked_by_equation_ids"):
+                warn(
+                    "COURSE_TOPIC_CONFIDENCE_GATE_BLOCKED",
+                    f"course topic {idx} references low-confidence equations; final formula rendering is not allowed",
+                    "course_info.json",
+                    f"$.topics[{idx}].confidence_gate",
+                    str(topic_gate.get("blocked_by_equation_ids")),
+                )
             check_refs(topic.get("linked_component_ids"), component_ids, "course_info.json", f"$.topics[{idx}].linked_component_ids", "component")
             check_refs(topic.get("linked_derivation_ids"), derivation_ids, "course_info.json", f"$.topics[{idx}].linked_derivation_ids", "derivation")
             for step_idx, step in enumerate(topic.get("visualization_plan") or []):
@@ -1084,6 +1310,23 @@ def _validate_export_references(
             path = f"$.chains[{chain_idx}].steps[{step_idx}]"
             input_eqs = step.get("input_equation_ids") or []
             output_eqs = step.get("output_equation_ids") or []
+            step_gate = step.get("confidence_gate") if isinstance(step.get("confidence_gate"), dict) else {}
+            if step_gate.get("blocked_by_equation_ids"):
+                warn(
+                    "DERIVATION_STEP_CONFIDENCE_GATE_BLOCKED",
+                    f"{path} uses equations that cannot support derivation",
+                    "derivations/derivation_chains.json",
+                    f"{path}.confidence_gate",
+                    str(step_gate.get("blocked_by_equation_ids")),
+                )
+                if step.get("review_status") in ("auto_accepted", "source_backed"):
+                    add(
+                        "PUBLISH_READY_DERIVATION_STEP_USES_BLOCKED_EQUATION",
+                        f"{path} is publish-ready/source-backed but uses blocked equations",
+                        "derivations/derivation_chains.json",
+                        f"{path}.review_status",
+                        str(step_gate.get("blocked_by_equation_ids")),
+                    )
             step_claims = []
             for key in ("claim_ids", "required_claim_ids", "input_claim_ids", "output_claim_ids"):
                 step_claims.extend(step.get(key) or [])
@@ -1098,10 +1341,10 @@ def _validate_export_references(
     return {
         "status": "failed_validation" if errors else "passed",
         "exportable": not errors,
-        "publish_ready": not errors,
+        "publish_ready": not errors and not warnings,
         "errors": errors,
-        "warnings": [],
-        "summary": {"error_count": len(errors), "warning_count": 0, "unresolved_reference_count": len(errors)},
+        "warnings": warnings,
+        "summary": {"error_count": len(errors), "warning_count": len(warnings), "unresolved_reference_count": len(errors)},
     }
 
 
@@ -1360,6 +1603,14 @@ def export_course_bundle(
             course_info=course,
             derivation_chains=derivation_chains,
         )
+        _apply_confidence_gates_to_export(
+            claims=claims,
+            components=components,
+            component_graph=component_graph,
+            course_info=course,
+            derivation_chains=derivation_chains,
+            equations=equations,
+        )
         export_validation = _validate_export_references(
             claims=claims,
             equations=equations,
@@ -1471,6 +1722,14 @@ def export_document_bundle(
             components=components,
             course_info=document,
             derivation_chains=derivation_chains,
+        )
+        _apply_confidence_gates_to_export(
+            claims=claims,
+            components=components,
+            component_graph=component_graph,
+            course_info=document,
+            derivation_chains=derivation_chains,
+            equations=equations,
         )
         export_validation = _validate_export_references(
             claims=claims,

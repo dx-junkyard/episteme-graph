@@ -21,6 +21,7 @@ from .repair import EquationSemanticsRepairer, _fallback_record, _parse_record
 from .schema import (
     CartridgeContext,
     EquationCandidate,
+    EquationConsistency,
     EquationConfidencePolicy,
     EquationRecord,
     EquationReconstruction,
@@ -67,6 +68,12 @@ def _make_provisional_record(candidate: EquationCandidate) -> EquationRecord:
         summary="Reviewable provisional equation candidate; source extraction is incomplete and requires math review.",
         review_flags=["needs_reconstruction", "partial_extraction"],
     )
+    equation_consistency = EquationConsistency.derive(
+        source_extraction=source_extraction,
+        reconstruction=reconstruction,
+        label=candidate.matched_label,
+        semantics=semantics,
+    )
     confidence_policy = EquationConfidencePolicy(
         can_support_claim=False,
         can_be_used_in_derivation=False,
@@ -85,6 +92,7 @@ def _make_provisional_record(candidate: EquationCandidate) -> EquationRecord:
         reconstruction=reconstruction,
         semantics=semantics,
         confidence_policy=confidence_policy,
+        equation_consistency=equation_consistency,
     )
 
 

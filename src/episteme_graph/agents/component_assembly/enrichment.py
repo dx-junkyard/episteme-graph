@@ -34,6 +34,7 @@ def enrich_component_assembly(
         _normalize_component_lists(component)
         _fill_equation_roles(component, eq_index, review_required)
         _fill_equation_confidence_summary(component, eq_index, review_required)
+        _fill_confidence_gate(component, eq_index)
         _propagate_review_status(component)
         _fill_internal_flow(component)
 
@@ -126,6 +127,37 @@ def _fill_equation_confidence_summary(
     }
 
 
+def _fill_confidence_gate(
+    component: ComponentRecord,
+    eq_index: dict[str, dict],
+) -> None:
+    refs = _all_component_equation_ids(component)
+    blocked = [
+        eq_id for eq_id in refs
+        if _equation_blocks_claim_and_derivation(eq_index.get(eq_id) or {})
+    ]
+    if not blocked:
+        component.confidence_gate = {
+            "blocked_by_equation_ids": [],
+            "blocked_reason": "",
+            "downstream_allowed_use": "display_with_warning",
+        }
+        return
+    reason = "linked equation cannot support claim or derivation"
+    component.confidence_gate = {
+        "blocked_by_equation_ids": blocked,
+        "blocked_reason": reason,
+        "downstream_allowed_use": "semantic_hint_only",
+    }
+    component.review_required_equation_ids = _unique(
+        list(component.review_required_equation_ids or []) + blocked
+    )
+    if reason not in component.review_notes:
+        component.review_notes.append(reason)
+    component.review_status = "review_required"
+    component.publish_ready = False
+
+
 def _propagate_review_status(component: ComponentRecord) -> None:
     if component.review_required_equation_ids and component.review_status == "auto_accepted":
         component.review_status = "teacher_review_required"
@@ -178,10 +210,32 @@ def _requires_review(eq: dict) -> bool:
     return (
         bool(eq.get("needs_math_review"))
         or bool(eq.get("review_flags"))
+        or _equation_consistency_requires_review(eq)
         or eq.get("semantic_status") == "reconstruction_based"
         or eq.get("reconstruction_status") not in (None, "", "none")
         or bool(policy.get("must_not_treat_as_source_extracted"))
         or policy.get("can_support_claim") is False
+    )
+
+
+def _equation_blocks_claim_and_derivation(eq: dict) -> bool:
+    policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
+    if policy.get("can_support_claim") is False and policy.get("can_be_used_in_derivation") is False:
+        return True
+    return (
+        eq.get("latex") is None
+        and eq.get("plain_text") is None
+        and eq.get("extraction_status") in ("partial", "fragment_only", "label_only", "missing", "unparsed")
+    )
+
+
+def _equation_consistency_requires_review(eq: dict) -> bool:
+    consistency = eq.get("equation_consistency") if isinstance(eq.get("equation_consistency"), dict) else {}
+    return (
+        bool(consistency.get("review_required"))
+        or consistency.get("raw_text_latex_match") == "mismatch"
+        or consistency.get("label_location_match") == "mismatch"
+        or consistency.get("source_span_quality") == "corrupted"
     )
 
 

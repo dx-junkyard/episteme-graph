@@ -66,9 +66,25 @@ class DerivationChainAgent:
         evidence_registry: object | None = None,
     ) -> DerivationChainResult:
         records: list[EquationRecord] = list(equations.equations)
+        all_records_by_id: dict[str, EquationRecord] = {r.equation_id: r for r in records}
+        blocked_equation_ids = {
+            r.equation_id
+            for r in records
+            if not getattr(r.confidence_policy, "can_be_used_in_derivation", False)
+        }
+        records = [r for r in records if r.equation_id not in blocked_equation_ids]
 
         # When no equations available, fall back to claim-based chain (issue #261)
         if not records:
+            blocked_issues = [
+                ValidationIssue(
+                    rule_id="derivation_excludes_inconsistent_equation",
+                    severity="warning",
+                    message=f"equation {eq_id!r} cannot be used in derivations due to confidence/consistency policy",
+                    field=eq_id,
+                )
+                for eq_id in sorted(blocked_equation_ids)
+            ]
             claim_chains = self._build_claim_chains(
                 equations.document_id,
                 claim_build_result,
@@ -80,7 +96,7 @@ class DerivationChainAgent:
                     document_id=equations.document_id,
                     cartridge_id=cartridge_id,
                     chains=claim_chains,
-                    validation_issues=[ValidationIssue(
+                    validation_issues=blocked_issues + [ValidationIssue(
                         rule_id="derivation_equation_only_fallback",
                         severity="info",
                         message="No equations; derivation chains built from claim source order.",
@@ -90,7 +106,7 @@ class DerivationChainAgent:
                 document_id=equations.document_id,
                 cartridge_id=cartridge_id,
                 chains=[],
-                validation_issues=[ValidationIssue(
+                validation_issues=blocked_issues + [ValidationIssue(
                     rule_id="derivation_no_equations",
                     severity="warning",
                     message="No equations in input; nothing to chain.",
@@ -108,6 +124,8 @@ class DerivationChainAgent:
                 if s in eq_by_id:
                     from_map[r.equation_id].append(s)
                     children[s].append(r.equation_id)
+                elif s in blocked_equation_ids:
+                    continue
 
         # Identify "leaf result" equations: have inbound links but no outbound usage,
         # or are tagged as equation_result.
@@ -126,7 +144,15 @@ class DerivationChainAgent:
             leaf_ids = [r.equation_id for r in records if from_map.get(r.equation_id)]
 
         chains: list[DerivationChainRecord] = []
-        issues: list[ValidationIssue] = []
+        issues: list[ValidationIssue] = [
+            ValidationIssue(
+                rule_id="derivation_excludes_inconsistent_equation",
+                severity="warning",
+                message=f"equation {eq_id!r} cannot be used in derivations due to confidence/consistency policy",
+                field=eq_id,
+            )
+            for eq_id in sorted(blocked_equation_ids)
+        ]
         seen_pairs: set[tuple[str, str]] = set()
         chain_counter = 0
 
@@ -155,6 +181,9 @@ class DerivationChainAgent:
                     "expand_steps": [s.step_id for s in steps[-2:]],
                     "blackbox_steps": [s.step_id for s in steps[:-2]] if len(steps) > 2 else [],
                 },
+                review_status=_chain_review_status(steps),
+                review_reason=_chain_review_reason(steps),
+                confidence_gate=_merge_step_confidence_gates(steps),
             ))
 
         # Quality checks (issue #237 / #261 acceptance criteria)
@@ -195,6 +224,14 @@ class DerivationChainAgent:
                 # Unresolved step references (issue #261)
                 for ref in (s.input_equation_ids + s.output_equation_ids):
                     if ref and ref not in eq_by_id:
+                        if ref in all_records_by_id:
+                            issues.append(ValidationIssue(
+                                rule_id="derivation_step_references_blocked_eq",
+                                severity="warning",
+                                message=f"step {s.step_id} references blocked equation {ref!r}",
+                                field=chain.derivation_id,
+                            ))
+                            continue
                         issues.append(ValidationIssue(
                             rule_id="derivation_step_unresolved_eq_ref",
                             severity="warning",
@@ -287,6 +324,8 @@ class DerivationChainAgent:
                 assumption_ids=assumptions,
                 source_evidence_ids=ev_ids,
                 review_status="teacher_review_required",
+                review_reason="",
+                confidence_gate=_confidence_gate([]),
             )
             steps.append(step)
             for s in sources:
@@ -380,6 +419,9 @@ class DerivationChainAgent:
                 source_scope={"section_id": section_id},
                 linked_component_ids=[],
                 chain_type="claim_chain",
+                review_status=_chain_review_status(steps),
+                review_reason=_chain_review_reason(steps),
+                confidence_gate=_merge_step_confidence_gates(steps),
             ))
 
         return chains
@@ -439,3 +481,38 @@ class DerivationChainAgent:
             "constraint": "apply_constraint",
         }
         return mapping.get(primary, DEFAULT_OPERATION)
+
+
+def _confidence_gate(blocked_eqs: list[str]) -> dict:
+    if not blocked_eqs:
+        return {
+            "blocked_by_equation_ids": [],
+            "blocked_reason": "",
+            "downstream_allowed_use": "display_with_warning",
+        }
+    return {
+        "blocked_by_equation_ids": list(blocked_eqs),
+        "blocked_reason": "linked equation cannot support claim or derivation",
+        "downstream_allowed_use": "blocked",
+    }
+
+
+def _merge_step_confidence_gates(steps: list[DerivationStep]) -> dict:
+    blocked: list[str] = []
+    for step in steps:
+        gate = step.confidence_gate or {}
+        blocked.extend(str(v) for v in gate.get("blocked_by_equation_ids") or [] if v)
+    seen: set[str] = set()
+    uniq = [v for v in blocked if not (v in seen or seen.add(v))]
+    return _confidence_gate(uniq)
+
+
+def _chain_review_status(steps: list[DerivationStep]) -> str:
+    if any((s.confidence_gate or {}).get("blocked_by_equation_ids") for s in steps):
+        return "teacher_review_required"
+    return "teacher_review_required"
+
+
+def _chain_review_reason(steps: list[DerivationStep]) -> str:
+    gate = _merge_step_confidence_gates(steps)
+    return gate.get("blocked_reason") or ""
