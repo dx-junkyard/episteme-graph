@@ -85,6 +85,23 @@ class RefinementReport:
         }
 
 
+@dataclass
+class TheoryOperationCandidate:
+    """Derivation-backed operation unit before it becomes a component.
+
+    Equations stay here as supporting detail. ComponentAssembly should expose
+    the operation as the reusable unit, not a long list of equation-to-equation
+    dependencies.
+    """
+
+    operation: str
+    steps: list
+    input_equation_ids: list[str]
+    output_equation_ids: list[str]
+    eliminated_symbols: list[str]
+    retained_symbols: list[str]
+
+
 class ComponentRefiner:
     def __init__(self) -> None:
         self._classifier = EquationRoleClassifier()
@@ -152,7 +169,7 @@ class ComponentRefiner:
     ) -> list[ComponentRecord]:
         groups, generic_steps = self._operation_groups(component, chains)
 
-        if component.component_type not in _DERIVATION_TYPES or len(groups) < 2:
+        if component.component_type not in _DERIVATION_TYPES:
             # Nothing to split: make sure the component still has a single
             # main operation recorded and role-classified equations.
             self._finalize_single(component, eq_index, groups)
@@ -163,10 +180,42 @@ class ComponentRefiner:
         # internal_flow without polluting the reusable-component catalogue.
         family_steps = {family: list(steps) for family, steps in groups.items()}
         self._absorb_generic_steps(family_steps, generic_steps)
+        candidates = self._operation_candidates(family_steps)
+
+        if len(candidates) < 2:
+            self._finalize_single(component, eq_index, groups)
+            if candidates and _is_equation_dependency_bundle(component):
+                rebuilt = self._build_component_from_candidate(
+                    parent=component,
+                    component_id=component.component_id,
+                    candidate=candidates[0],
+                    eq_index=eq_index,
+                    dependencies=list(component.dependencies),
+                    reason=(
+                        "Rebuilt equation-heavy component around one theory-operation "
+                        "candidate; equations are retained as supporting detail."
+                    ),
+                )
+                report.warnings.append(
+                    f"{component.component_id} was normalized from an equation dependency "
+                    "bundle into a single theory-operation component."
+                )
+                return [rebuilt]
+            return [component]
 
         children: list[ComponentRecord] = []
-        for idx, (family, steps) in enumerate(family_steps.items(), start=1):
-            child = self._build_child(component, idx, family, steps, eq_index)
+        for idx, candidate in enumerate(candidates, start=1):
+            child = self._build_component_from_candidate(
+                parent=component,
+                component_id=f"{component.component_id}__op{idx}",
+                candidate=candidate,
+                eq_index=eq_index,
+                dependencies=[],
+                reason=(
+                    f"Isolated single theoretical operation '{candidate.operation}' "
+                    f"from parent component {component.component_id}."
+                ),
+            )
             children.append(child)
 
         # Chain the children sequentially so the derivation order is preserved.
@@ -185,10 +234,36 @@ class ComponentRefiner:
             reason=(
                 f"Component bundled {len(family_steps)} distinct reusable theory "
                 "units; split into one component per theory-operation family "
-                "(issue #308)."
+                "(issue #308/#319)."
             ),
         ))
         return children
+
+    @staticmethod
+    def _operation_candidates(family_steps: dict) -> list[TheoryOperationCandidate]:
+        candidates: list[TheoryOperationCandidate] = []
+        for family, steps in family_steps.items():
+            input_eqs = _ordered_unique(
+                eid for step in steps for eid in _step_field(step, "input_equation_ids")
+            )
+            output_eqs = _ordered_unique(
+                eid for step in steps for eid in _step_field(step, "output_equation_ids")
+            )
+            eliminated = _ordered_unique(
+                s for step in steps for s in _step_field(step, "eliminated_symbols")
+            )
+            retained = _ordered_unique(
+                s for step in steps for s in _step_field(step, "retained_symbols")
+            )
+            candidates.append(TheoryOperationCandidate(
+                operation=_operation_family(family),
+                steps=list(steps),
+                input_equation_ids=input_eqs,
+                output_equation_ids=output_eqs,
+                eliminated_symbols=eliminated,
+                retained_symbols=retained,
+            ))
+        return candidates
 
     def _operation_groups(self, component: ComponentRecord, chains: list) -> tuple[dict, list]:
         """Group derivation steps relevant to the component by theory-unit family.
@@ -251,26 +326,20 @@ class ComponentRefiner:
             )
             family_steps[target].append(step)
 
-    def _build_child(
+    def _build_component_from_candidate(
         self,
         parent: ComponentRecord,
-        idx: int,
-        operation: str,
-        steps: list,
+        component_id: str,
+        candidate: TheoryOperationCandidate,
         eq_index: dict[str, dict],
+        dependencies: list[dict],
+        reason: str,
     ) -> ComponentRecord:
-        input_eqs = _ordered_unique(
-            eid for step in steps for eid in _step_field(step, "input_equation_ids")
-        )
-        output_eqs = _ordered_unique(
-            eid for step in steps for eid in _step_field(step, "output_equation_ids")
-        )
-        eliminated = _ordered_unique(
-            s for step in steps for s in _step_field(step, "eliminated_symbols")
-        )
-        retained = _ordered_unique(
-            s for step in steps for s in _step_field(step, "retained_symbols")
-        )
+        steps = candidate.steps
+        input_eqs = list(candidate.input_equation_ids)
+        output_eqs = list(candidate.output_equation_ids)
+        eliminated = list(candidate.eliminated_symbols)
+        retained = list(candidate.retained_symbols)
         all_eqs = _ordered_unique(input_eqs + output_eqs)
 
         classification = self._classifier.classify(
@@ -280,7 +349,7 @@ class ComponentRefiner:
             declared_output_ids=output_eqs,
         )
 
-        family = _operation_family(operation)
+        family = _operation_family(candidate.operation)
         # Label / summary describe the theory object (the parent's theoretical
         # subject) qualified by the reusable unit's family — not a bare operation
         # name like "Transform" / "Relate" (issue #308).
@@ -297,20 +366,17 @@ class ComponentRefiner:
         evidence_refs["equation_ids"] = list(all_eqs)
 
         return ComponentRecord(
-            component_id=f"{parent.component_id}__op{idx}",
+            component_id=component_id,
             component_type=parent.component_type,
             label=label,
             summary=summary,
-            inputs=[{"name": eid, "equation_ids": [eid]} for eid in input_eqs] or list(parent.inputs),
-            outputs=[{"name": eid, "equation_ids": [eid]} for eid in output_eqs] or list(parent.outputs),
+            inputs=_operation_io_items("input", family, input_eqs, parent.inputs),
+            outputs=_operation_io_items("output", family, output_eqs, parent.outputs),
             preconditions=list(parent.preconditions),
             cautions=list(parent.cautions),
-            dependencies=[],
+            dependencies=copy.deepcopy(dependencies or []),
             evidence_refs=evidence_refs,
-            reason=(
-                f"Isolated single theoretical operation '{operation}' from parent "
-                f"component {parent.component_id} (issue #300)."
-            ),
+            reason=reason,
             confidence=parent.confidence,
             review_notes=list(parent.review_notes),
             internal_flow=internal_flow,
@@ -484,6 +550,23 @@ def _build_internal_flow(steps: list, family: str) -> list[dict]:
     return flow
 
 
+def _operation_io_items(
+    direction: str,
+    family: str,
+    equation_ids: list[str],
+    fallback: list[dict],
+) -> list[dict]:
+    """Return conceptual component I/O with equations as supporting detail."""
+    if equation_ids:
+        noun = "inputs" if direction == "input" else "outputs"
+        return [{
+            "name": f"{_humanize_operation(family, '')} {noun}".strip(),
+            "role": f"operation_{direction}",
+            "equation_ids": list(equation_ids),
+        }]
+    return list(fallback or [])
+
+
 def _equation_index(llm_input: ComponentAssemblyLLMInput | None) -> dict[str, dict]:
     index: dict[str, dict] = {}
     if not llm_input:
@@ -512,6 +595,46 @@ def _all_equation_ids(component: ComponentRecord) -> list[str]:
     ):
         values.extend(getattr(component, field_name, []) or [])
     return _ordered_unique(values)
+
+
+def _is_equation_dependency_bundle(component: ComponentRecord) -> bool:
+    """Detect components whose public I/O is mostly raw equation references."""
+    equation_refs = set(_all_equation_ids(component))
+    io_equations = set(_field_equation_ids(component.inputs) + _field_equation_ids(component.outputs))
+    equation_like_items = sum(
+        1
+        for item in list(component.inputs or []) + list(component.outputs or [])
+        if _item_is_equation_like(item)
+    )
+    return (
+        len(equation_refs) >= 6
+        or len(io_equations) >= 4
+        or equation_like_items >= 4
+        or len(component.outputs or []) >= 4
+    )
+
+
+def _field_equation_ids(items: list[dict]) -> list[str]:
+    ids: list[str] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        for key in ("equation_ids", "equations"):
+            raw = item.get(key) or []
+            if isinstance(raw, str):
+                ids.append(raw)
+            elif isinstance(raw, list):
+                ids.extend(str(v) for v in raw if v)
+    return _ordered_unique(ids)
+
+
+def _item_is_equation_like(item: object) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if item.get("equation_ids") or item.get("equations"):
+        return True
+    text = str(item.get("name") or item.get("label") or item.get("text") or "")
+    return text.startswith("eq_") or text.lower().startswith("equation ")
 
 
 def _step_field(step, name: str) -> list[str]:

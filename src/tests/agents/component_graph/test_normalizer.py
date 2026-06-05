@@ -1,4 +1,4 @@
-from episteme_graph.agents.component_assembly.schema import ComponentAssemblyResult
+from episteme_graph.agents.component_assembly.schema import ComponentAssemblyResult, ComponentRecord
 from episteme_graph.agents.component_graph.normalizer import (
     ComponentGraphNormalizer,
     _claim_is_atomic,
@@ -65,6 +65,41 @@ def _empty_components():
         review_notes=[],
         confidence=0.8,
     )
+
+
+def _components(*records):
+    return ComponentAssemblyResult(
+        document_id="doc",
+        components_version="v1",
+        cartridge_id=None,
+        components=list(records),
+        assembly_hints=[],
+        review_notes=[],
+        confidence=0.8,
+    )
+
+
+def _component(component_id="comp_eliminate", **kwargs):
+    defaults = dict(
+        component_id=component_id,
+        component_type="RelationComponent",
+        label="Eliminate bias parameters",
+        summary="Eliminates nuisance bias parameters.",
+        inputs=[{"name": "equation system"}],
+        outputs=[{"name": "bias-free relation"}],
+        preconditions=[],
+        cautions=[],
+        dependencies=[],
+        evidence_refs={"equation_ids": ["eq_c", "eq_d"]},
+        reason="component",
+        confidence=0.8,
+        review_notes=[],
+        linked_equation_ids=["eq_c", "eq_d"],
+        linked_derivation_ids=["deriv"],
+        operation="eliminate",
+    )
+    defaults.update(kwargs)
+    return ComponentRecord(**defaults)
 
 
 def _empty_graph():
@@ -215,6 +250,31 @@ def test_main_label_stays_short_and_description_holds_claim_text():
     eliminate = next(n for n in _layer(result, "main") if n.operation.startswith("eliminate"))
     assert eliminate.label == "Elimination"
     assert "second-order moment vanishes" in eliminate.description
+
+
+def test_main_node_separates_stage_object_and_component_links():
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(),
+        _components(_component()),
+        _derivations(),
+        claim_index={
+            "claim_1": {
+                "text": "bias parameters are eliminated",
+                "evidence_text": "p.4",
+                "is_atomic": True,
+            },
+        },
+    )
+    eliminate = next(n for n in _layer(result, "main") if n.label == "Elimination")
+
+    assert eliminate.label == "Elimination"
+    assert eliminate.theory_object == "bias parameters are eliminated"
+    assert eliminate.display_label == "Elimination: bias parameters are eliminated"
+    assert eliminate.representative_component_id == "comp_eliminate"
+    assert eliminate.linked_component_ids == ["comp_eliminate"]
+    assert eliminate.detail_node_ids
+    assert eliminate.detail_node_ids == eliminate.member_component_ids
+    assert "deriv" in eliminate.supporting_derivation_ids
 
 
 # --- generic operations (acceptance #5) -------------------------------------

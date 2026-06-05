@@ -104,6 +104,10 @@ def test_coarse_component_split_into_reusable_theory_units():
         assert child.internal_flow
         # criterion #5: equation roles populated.
         assert child.input_equation_ids or child.output_equation_ids
+        # Component public I/O is the theory operation; equations are supporting detail.
+        assert len(child.inputs) <= 1
+        assert len(child.outputs) <= 1
+        assert child.linked_equation_ids
         # source_scope inherited from parent (refiner responsibility #5).
         assert child.source_scope == {
             "section_ids": ["s3"], "block_ids": ["b10"], "page_ranges": [[4, 6]],
@@ -210,6 +214,53 @@ def test_single_operation_component_not_split():
     assert refined.components[0].component_id == "comp_single"
     # Single-operation components still get their operation recorded.
     assert refined.components[0].operation == "linearize"
+
+
+def test_single_family_equation_bundle_rebuilt_as_operation_component():
+    component = _coarse_component(
+        component_id="comp_derive_many",
+        label="Consistency relation derivation bundle",
+        outputs=[
+            {"name": "eq_cons_1", "equation_ids": ["eq_cons_1"]},
+            {"name": "eq_cons_2", "equation_ids": ["eq_cons_2"]},
+            {"name": "eq_cons_3", "equation_ids": ["eq_cons_3"]},
+            {"name": "eq_cons_4", "equation_ids": ["eq_cons_4"]},
+        ],
+        linked_derivation_ids=["deriv_many"],
+    )
+    steps = [
+        DerivationStep(
+            step_id=f"step_{idx}",
+            input_equation_ids=[f"eq_in_{idx}"],
+            operation="derive_result",
+            output_equation_ids=[f"eq_cons_{idx}"],
+        )
+        for idx in range(1, 5)
+    ]
+    chain = DerivationChainRecord(
+        derivation_id="deriv_many",
+        document_id="doc",
+        source_section_ids=["s3"],
+        steps=steps,
+        linked_component_ids=["comp_derive_many"],
+    )
+    derivations = DerivationChainResult(document_id="doc", cartridge_id=None, chains=[chain])
+
+    refined = REFINER.refine(_result([component]), llm_input=None, derivations=derivations)
+
+    assert len(refined.components) == 1
+    rebuilt = refined.components[0]
+    assert rebuilt.component_id == "comp_derive_many"
+    assert rebuilt.operation == "derive"
+    assert len(rebuilt.outputs) == 1
+    assert rebuilt.outputs[0]["role"] == "operation_output"
+    assert set(rebuilt.output_equation_ids) == {
+        "eq_cons_1",
+        "eq_cons_2",
+        "eq_cons_3",
+        "eq_cons_4",
+    }
+    assert "equation dependency bundle" in refined.refinement_report["warnings"][0]
 
 
 def test_dependencies_remapped_to_first_child_after_split():

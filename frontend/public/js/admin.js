@@ -5536,7 +5536,7 @@
     var backing = String(node.source_backing_status || "").toLowerCase();
     var html =
       '<div class="ls-graph-detail-badge ' + escHtml(lsGraphNodeGroup(node)) + '">' + escHtml(node.component_type_text || node.component_type || node.typeName || "component") + '</div>' +
-      '<h4>' + escHtml(lsGraphMainStageLabel(node) || node.label || node.name || nodeId || "無題") + '</h4>' +
+      '<h4>' + escHtml(lsGraphFullDisplayLabel(node) || nodeId || "無題") + '</h4>' +
       '<p class="ls-graph-detail-meta">' + escHtml(lsGraphLayerLabel(node.graph_layer)) + ' ・ ' + escHtml(node.review_status || node.origin || "paper") + '</p>';
     var linkage = lsGraphLayerLinkageHtml(node);
     if (linkage) {
@@ -5696,7 +5696,7 @@
   // Prefix a warning icon for fallback / inferred nodes so they are not mistaken
   // for confirmed, source-backed theory operations (issue #302).
   function lsGraphNodeDisplayLabel(node, id) {
-    var label = lsWrapGraphLabel(lsGraphMainStageLabel(node) || (node && (node.label || node.name)) || id);
+    var label = lsWrapGraphLabel(lsGraphFullDisplayLabel(node) || id);
     return lsGraphNodeIsFallback(node) ? "⚠ " + label : label;
   }
 
@@ -5711,6 +5711,15 @@
 
   function lsGraphLayerLinkageHtml(node) {
     var html = "";
+    if (node.representative_component_id) {
+      html += '<div class="ls-graph-detail-link"><span>代表Component</span> ' +
+        escHtml(node.representative_component_id) + '</div>';
+    }
+    var linkedComponents = node.linked_component_ids || [];
+    if (linkedComponents.length) {
+      html += '<div class="ls-graph-detail-link"><span>関連Component</span> ' +
+        escHtml(String(linkedComponents.length)) + ' 件</div>';
+    }
     var members = node.member_component_ids || [];
     if (members.length) {
       html += '<div class="ls-graph-detail-link"><span>式ステップ</span> ' +
@@ -5777,6 +5786,17 @@
       if (label.toLowerCase() === LS_MAIN_STAGE_LABELS[j].toLowerCase()) return LS_MAIN_STAGE_LABELS[j];
     }
     return label;
+  }
+
+  function lsGraphFullDisplayLabel(node) {
+    if (!node) return "";
+    var explicit = String(node.display_label || "").trim();
+    if (explicit) return explicit;
+    var stage = lsGraphMainStageLabel(node);
+    var object = String(node.theory_object || "").trim();
+    if (!object) return stage || node.label || node.name || "";
+    if (!stage || object.toLowerCase() === String(stage).toLowerCase()) return object;
+    return stage + ": " + object;
   }
 
   function lsGraphNodeTooltip(node) {

@@ -1964,6 +1964,10 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
             # Existing description wins; the label-derived remainder is the fallback.
             if not final_description and label_description:
                 final_description = label_description
+        theory_object = str(node.get("theory_object") or "")
+        display_label = str(node.get("display_label") or "")
+        if not display_label:
+            display_label = f"{final_label}: {theory_object}" if theory_object else final_label
         node_review_status = str(node.get("review_status") or (component.review_status if component else "teacher_review_required"))
         node_backing = str(node.get("source_backing_status") or "")
         node_reasons = node.get("review_reasons") if isinstance(node.get("review_reasons"), list) else []
@@ -1980,7 +1984,12 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
             "component_type_text": str(node.get("component_type_text") or (component.component_type_text if component else "")),
             "summary": str(node.get("summary") or (component.summary if component else "")),
             "operation": str(node.get("operation") or ""),
-            "theory_object": str(node.get("theory_object") or ""),
+            "theory_object": theory_object,
+            "display_label": display_label,
+            "representative_component_id": str(node.get("representative_component_id") or ""),
+            "linked_component_ids": node.get("linked_component_ids") if isinstance(node.get("linked_component_ids"), list) else [],
+            "detail_node_ids": node.get("detail_node_ids") if isinstance(node.get("detail_node_ids"), list) else [],
+            "supporting_derivation_ids": node.get("supporting_derivation_ids") if isinstance(node.get("supporting_derivation_ids"), list) else [],
             "description": final_description,
             "graph_layer": graph_layer,
             "maturity_source": str(node.get("maturity_source") or ""),

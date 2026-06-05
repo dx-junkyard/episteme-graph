@@ -78,6 +78,7 @@ class ComponentGraphInputBuilder:
             if not label:
                 label = str(getattr(comp, "summary", "") or "").strip()[:80] or comp.component_id
             component_type = str(getattr(comp, "component_type", "") or "").strip() or "UnknownComponent"
+            theory_object = _infer_theory_object(comp)
             nodes.append(ComponentGraphNode(
                 component_id=comp.component_id,
                 label=label,
@@ -86,7 +87,11 @@ class ComponentGraphInputBuilder:
                 display_order=idx,
                 origin="paper",
                 operation=str(getattr(comp, "operation", "") or ""),
-                theory_object=_infer_theory_object(comp),
+                theory_object=theory_object,
+                display_label=f"{label}: {theory_object}" if theory_object else label,
+                representative_component_id=comp.component_id,
+                linked_component_ids=[comp.component_id],
+                supporting_derivation_ids=list(getattr(comp, "linked_derivation_ids", []) or []),
                 graph_layer=_graph_layer(comp),
                 maturity_source=str(getattr(comp, "maturity_source", "") or ""),
                 publish_ready=bool(getattr(comp, "publish_ready", False)),

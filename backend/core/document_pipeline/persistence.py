@@ -678,6 +678,18 @@ def _normalize_graph_payload_for_persist(graph: dict) -> dict:
                 node["label"] = short_label
             if not str(node.get("description") or "") and remainder:
                 node["description"] = remainder
+        label = str(node.get("label") or "")
+        theory_object = str(node.get("theory_object") or "")
+        if not str(node.get("display_label") or ""):
+            node["display_label"] = f"{label}: {theory_object}" if theory_object else label
+        for key in (
+            "linked_component_ids",
+            "detail_node_ids",
+            "supporting_derivation_ids",
+        ):
+            if not isinstance(node.get(key), list):
+                node[key] = []
+        node["representative_component_id"] = str(node.get("representative_component_id") or "")
         backing = str(node.get("source_backing_status") or "")
         node["source_backing_status"] = backing
         reasons = node.get("review_reasons") if isinstance(node.get("review_reasons"), list) else []

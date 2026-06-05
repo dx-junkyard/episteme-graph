@@ -83,7 +83,7 @@ class ComponentGraphNormalizer:
         """
         claim_index = claim_index or {}
         main_nodes, detail_nodes, edges = self._build_theory_graph(
-            derivations, claim_index
+            derivations, claim_index, components
         )
         theory_nodes = main_nodes + detail_nodes
         if len(theory_nodes) >= _MIN_THEORY_NODES:
@@ -116,8 +116,10 @@ class ComponentGraphNormalizer:
         self,
         derivations: DerivationChainResult | None,
         claim_index: dict[str, dict],
+        components: ComponentAssemblyResult | None,
     ) -> tuple[list[ComponentGraphNode], list[ComponentGraphNode], list[ComponentGraphEdge]]:
-        records = self._collect_step_records(derivations)
+        component_records = _component_support_records(components)
+        records = self._collect_step_records(derivations, component_records)
         if not records:
             return [], [], []
 
@@ -139,11 +141,15 @@ class ComponentGraphNormalizer:
         return main_nodes, detail_nodes, main_edges + detail_edges
 
     @staticmethod
-    def _collect_step_records(derivations: DerivationChainResult | None) -> list[dict]:
+    def _collect_step_records(
+        derivations: DerivationChainResult | None,
+        component_records: list[dict],
+    ) -> list[dict]:
         records: list[dict] = []
         counter = 0
         for chain in getattr(derivations, "chains", []) or []:
             derivation_id = str(getattr(chain, "derivation_id", "") or "")
+            chain_component_ids = _ordered_unique(getattr(chain, "linked_component_ids", []) or [])
             for step in getattr(chain, "steps", []) or []:
                 counter += 1
                 operation = str(getattr(step, "operation", "") or "")
@@ -155,6 +161,12 @@ class ComponentGraphNormalizer:
                     "step": step,
                     "step_id": step_id,
                     "derivation_id": derivation_id,
+                    "linked_component_ids": _linked_components_for_step(
+                        step=step,
+                        derivation_id=derivation_id,
+                        chain_component_ids=chain_component_ids,
+                        component_records=component_records,
+                    ),
                     "operation": operation,
                     "verb": verb,
                     "edge_type": edge_type,
@@ -195,6 +207,13 @@ class ComponentGraphNormalizer:
             label=label,
             operation=node.operation or str(getattr(comp, "operation", "") or ""),
             theory_object=node.theory_object or str(getattr(comp, "summary", "") or "")[:120],
+            display_label=node.display_label or _display_label(
+                label,
+                node.theory_object or str(getattr(comp, "summary", "") or "")[:120],
+            ),
+            representative_component_id=node.representative_component_id or node.component_id,
+            linked_component_ids=node.linked_component_ids or [node.component_id],
+            supporting_derivation_ids=node.supporting_derivation_ids or list(node.linked_derivation_ids),
             graph_layer=GRAPH_LAYER_DEBUG if is_fallback else node.graph_layer,
             review_status=review_status_for_backing(status),
             linked_equation_ids=linked_equation_ids,
@@ -326,6 +345,10 @@ def _main_node_from_group(group: dict, claim_index: dict[str, dict]) -> Componen
         [s for rec in records for s in (getattr(rec["step"], "retained_symbols", []) or [])]
     )
     operations = _ordered_unique([rec["operation"] for rec in records if rec["operation"]])
+    linked_component_ids = _ordered_unique(
+        cid for rec in records for cid in rec.get("linked_component_ids", [])
+    )
+    detail_node_ids = [rec["detail_id"] for rec in records]
 
     atomic_claim_ids = _atomic_claim_ids(linked_claim_ids, claim_index)
     status, reasons = _node_backing(
@@ -344,6 +367,7 @@ def _main_node_from_group(group: dict, claim_index: dict[str, dict]) -> Componen
     # reason phrase that used to be appended to the label now lives in
     # ``description`` and is shown in the UI's detail pane instead.
     label = theory_stage_label(stage)
+    theory_object = _theory_object(rep, atomic_claim_ids, claim_index, records)
     description = _build_main_description(records, atomic_claim_ids, claim_index)
 
     definitions = outputs if edge_type == "defines" else []
@@ -357,7 +381,12 @@ def _main_node_from_group(group: dict, claim_index: dict[str, dict]) -> Componen
         display_order=group["order"],
         origin="derivation_chain",
         operation=rep["operation"],
-        theory_object=_theory_object(rep, atomic_claim_ids, claim_index),
+        theory_object=theory_object,
+        display_label=_display_label(label, theory_object),
+        representative_component_id=linked_component_ids[0] if linked_component_ids else "",
+        linked_component_ids=linked_component_ids,
+        detail_node_ids=detail_node_ids,
+        supporting_derivation_ids=linked_derivation_ids,
         description=description,
         graph_layer=GRAPH_LAYER_MAIN,
         maturity_source="derivation_aggregated",
@@ -377,7 +406,7 @@ def _main_node_from_group(group: dict, claim_index: dict[str, dict]) -> Componen
         linked_evidence_ids=linked_evidence_ids,
         source_backing_status=status,
         review_reasons=reasons,
-        member_component_ids=[rec["detail_id"] for rec in records],
+        member_component_ids=detail_node_ids,
     )
 
 
@@ -493,6 +522,9 @@ def _detail_node_from_record(
         origin="derivation_chain",
         operation=rec["operation"],
         theory_object=str(getattr(step, "reason", "") or "").strip()[:120] or rec["verb"],
+        display_label=_build_detail_label(rec["verb"], step, inputs, outputs),
+        linked_component_ids=list(rec.get("linked_component_ids", [])),
+        supporting_derivation_ids=linked_derivation_ids,
         graph_layer=layer,
         maturity_source="derivation_step",
         publish_ready=False,
@@ -764,12 +796,95 @@ def _atomic_claim_phrase(
     return ""
 
 
-def _theory_object(rep: dict, atomic_claim_ids: list[str], claim_index: dict[str, dict]) -> str:
+def _theory_object(
+    rep: dict,
+    atomic_claim_ids: list[str],
+    claim_index: dict[str, dict],
+    records: list[dict] | None = None,
+) -> str:
     phrase = _atomic_claim_phrase(atomic_claim_ids, claim_index)
-    if phrase:
+    if phrase and not _looks_like_equation_id(phrase):
         return phrase[:120]
+    records = records or [rep]
+    symbols = _ordered_unique(
+        s
+        for rec in records
+        for s in (
+            list(getattr(rec["step"], "eliminated_symbols", []) or [])
+            + list(getattr(rec["step"], "retained_symbols", []) or [])
+        )
+    )
+    if symbols:
+        return ", ".join(symbols[:3])[:120]
     reason = str(getattr(rep["step"], "reason", "") or "").strip()
-    return reason[:120] or str(rep["verb"] or "")
+    if reason and not _looks_like_equation_id(reason):
+        return reason[:120]
+    operation = str(rep.get("operation") or rep.get("verb") or "")
+    return operation.replace("_", " ")[:120]
+
+
+def _display_label(label: str, theory_object: str) -> str:
+    stage = str(label or "").strip()
+    obj = str(theory_object or "").strip()
+    if not stage:
+        return obj
+    if not obj or _looks_like_equation_id(obj):
+        return stage
+    if obj.lower() == stage.lower():
+        return stage
+    return f"{stage}: {obj}"
+
+
+def _component_support_records(components: ComponentAssemblyResult | None) -> list[dict]:
+    records: list[dict] = []
+    for comp in getattr(components, "components", []) or []:
+        component_id = str(getattr(comp, "component_id", "") or "")
+        if not component_id:
+            continue
+        eq_ids = _ordered_unique(
+            list(getattr(comp, "linked_equation_ids", []) or [])
+            + list(getattr(comp, "input_equation_ids", []) or [])
+            + list(getattr(comp, "intermediate_equation_ids", []) or [])
+            + list(getattr(comp, "output_equation_ids", []) or [])
+            + list(getattr(comp, "definition_equation_ids", []) or [])
+            + list(getattr(comp, "constraint_equation_ids", []) or [])
+        )
+        records.append({
+            "component_id": component_id,
+            "linked_derivation_ids": _ordered_unique(
+                getattr(comp, "linked_derivation_ids", []) or []
+            ),
+            "linked_equation_ids": eq_ids,
+            "operation": str(getattr(comp, "operation", "") or ""),
+        })
+    return records
+
+
+def _linked_components_for_step(
+    *,
+    step,
+    derivation_id: str,
+    chain_component_ids: list[str],
+    component_records: list[dict],
+) -> list[str]:
+    step_id = str(getattr(step, "step_id", "") or "")
+    step_eqs = set(
+        _ordered_unique(
+            list(getattr(step, "input_equation_ids", []) or [])
+            + list(getattr(step, "output_equation_ids", []) or [])
+        )
+    )
+    linked = list(chain_component_ids)
+    for rec in component_records:
+        derivation_ids = set(rec["linked_derivation_ids"])
+        equation_ids = set(rec["linked_equation_ids"])
+        if (
+            derivation_id in derivation_ids
+            or step_id in derivation_ids
+            or bool(step_eqs & equation_ids)
+        ):
+            linked.append(rec["component_id"])
+    return _ordered_unique(linked)
 
 
 def _join_nodes_to_components(

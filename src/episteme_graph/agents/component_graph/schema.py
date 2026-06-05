@@ -342,6 +342,11 @@ class ComponentGraphNode:
     origin: str = "paper"
     operation: str = ""
     theory_object: str = ""
+    display_label: str = ""
+    representative_component_id: str = ""
+    linked_component_ids: list[str] = field(default_factory=list)
+    detail_node_ids: list[str] = field(default_factory=list)
+    supporting_derivation_ids: list[str] = field(default_factory=list)
     # Longer, human-readable explanation (atomic-claim text / step reason). The
     # ``label`` stays short (a theory-stage name for main nodes); the descriptive
     # sentence lives here and is shown in the UI's detail pane (issue #308).
@@ -457,6 +462,11 @@ class ComponentGraphResult:
                     "origin": n.origin,
                     "operation": n.operation,
                     "theory_object": n.theory_object,
+                    "display_label": n.display_label,
+                    "representative_component_id": n.representative_component_id,
+                    "linked_component_ids": n.linked_component_ids,
+                    "detail_node_ids": n.detail_node_ids,
+                    "supporting_derivation_ids": n.supporting_derivation_ids,
                     "description": n.description,
                     "graph_layer": n.graph_layer,
                     "maturity_source": n.maturity_source,
