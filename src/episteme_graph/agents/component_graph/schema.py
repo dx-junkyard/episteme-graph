@@ -160,6 +160,77 @@ def theory_stage_label(stage: str) -> str:
         return THEORY_STAGE_LABELS[key]
     return key.replace("_", " ").capitalize() if key else "Theory stage"
 
+
+# Lower-cased canonical stage label → canonical display label, used to recognise
+# a main node label that already starts with a stage name (issue #319).
+_STAGE_LABEL_LOOKUP = {label.lower(): label for label in THEORY_STAGE_LABELS.values()}
+
+# Domain-neutral keyword → stage label for legacy / long main labels that do not
+# already begin with a canonical stage name (issue #319). Keyed by the operation
+# family words classify_operation derives stages from — never paper-specific
+# terms. Order matters: more specific multi-word phrases come first.
+_STAGE_KEYWORD_LABELS: list[tuple[tuple[str, ...], str]] = [
+    (("theory basis", "theory_basis", "definition", "define", "basis"), "Theory basis"),
+    (("observation model", "observation_model"), "Observation model"),
+    (
+        ("observable construction", "observable_construction", "construct", "normalize"),
+        "Observable construction",
+    ),
+    (
+        ("equation system", "equation_system", "linearize", "solve", "approximate", "substitute", "system"),
+        "Equation system",
+    ),
+    (("elimination", "eliminate"), "Elimination"),
+    (
+        ("consistency relation", "consistency_relation", "constraint", "constrain", "derive", "diagnose"),
+        "Consistency relation",
+    ),
+    (("diagnostic", "application", "compare", "test"), "Diagnostic / application"),
+]
+
+
+def split_main_label(label: str) -> tuple[str, str]:
+    """Split a (possibly long) main TheoryOperationNode label (issue #319).
+
+    Returns ``(short_label, description_remainder)`` where ``short_label`` is a
+    canonical, short theory-stage name (never an equation id, claim sentence or
+    reason sentence) and ``description_remainder`` is the longer explanatory text
+    that should be preserved in the node's ``description`` instead of its label.
+
+    Behaviour:
+      * ``"Theory basis: Eq. (2.7) ..."`` -> ``("Theory basis", "Eq. (2.7) ...")``
+        (a label that already starts with a canonical stage name followed by
+        ``:`` is split at the first colon).
+      * A bare canonical stage name -> ``(stage, "")`` (no description added).
+      * Otherwise the stage is inferred from domain-neutral keywords and the full
+        original text is kept as the description remainder so nothing is lost.
+      * An unmappable label is returned unchanged with an empty remainder.
+
+    This helper is shared by the stored-graph normaliser
+    (``_normalize_stored_component_graph``) so the API response, and by extension
+    the UI, always show short main labels.
+    """
+    text = str(label or "").strip()
+    if not text:
+        return "", ""
+    # "<Stage>: <long description>" -> split at the first colon.
+    if ":" in text:
+        head, _, tail = text.partition(":")
+        head_key = head.strip().lower()
+        if head_key in _STAGE_LABEL_LOOKUP:
+            return _STAGE_LABEL_LOOKUP[head_key], tail.strip()
+    # Already a bare canonical stage label.
+    if text.lower() in _STAGE_LABEL_LOOKUP:
+        return _STAGE_LABEL_LOOKUP[text.lower()], ""
+    # Infer the stage from domain-neutral keywords; keep the full text as the
+    # description remainder so the long explanation is preserved.
+    lowered = text.lower()
+    for keywords, stage_label in _STAGE_KEYWORD_LABELS:
+        if any(kw in lowered for kw in keywords):
+            return stage_label, text
+    # Unmappable: leave the label untouched and add no description remainder.
+    return text, ""
+
 # Map a node's source-backing status to a review_status (issue #306). A
 # source-backed node should not stay ``teacher_review_required`` by default;
 # inferred / review_required nodes must surface as review_required.
@@ -271,6 +342,11 @@ class ComponentGraphNode:
     origin: str = "paper"
     operation: str = ""
     theory_object: str = ""
+    display_label: str = ""
+    representative_component_id: str = ""
+    linked_component_ids: list[str] = field(default_factory=list)
+    detail_node_ids: list[str] = field(default_factory=list)
+    supporting_derivation_ids: list[str] = field(default_factory=list)
     # Longer, human-readable explanation (atomic-claim text / step reason). The
     # ``label`` stays short (a theory-stage name for main nodes); the descriptive
     # sentence lives here and is shown in the UI's detail pane (issue #308).
@@ -386,6 +462,11 @@ class ComponentGraphResult:
                     "origin": n.origin,
                     "operation": n.operation,
                     "theory_object": n.theory_object,
+                    "display_label": n.display_label,
+                    "representative_component_id": n.representative_component_id,
+                    "linked_component_ids": n.linked_component_ids,
+                    "detail_node_ids": n.detail_node_ids,
+                    "supporting_derivation_ids": n.supporting_derivation_ids,
                     "description": n.description,
                     "graph_layer": n.graph_layer,
                     "maturity_source": n.maturity_source,

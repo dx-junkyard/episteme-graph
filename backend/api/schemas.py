@@ -852,6 +852,15 @@ class ComponentGraphNode(BaseModel):
     summary: str = ""
     operation: str = ""
     theory_object: str = ""
+    display_label: str = ""
+    representative_component_id: str = ""
+    linked_component_ids: list[str] = Field(default_factory=list)
+    detail_node_ids: list[str] = Field(default_factory=list)
+    supporting_derivation_ids: list[str] = Field(default_factory=list)
+    # Longer, human-readable explanation (atomic-claim text / step reason). The
+    # ``label`` stays a short theory-stage name for main nodes; the descriptive
+    # sentence lives here and is shown in the UI detail pane (issue #308/#319).
+    description: str = ""
     graph_layer: str = "main"
     maturity_source: str = ""
     publish_ready: bool = False

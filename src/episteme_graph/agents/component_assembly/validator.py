@@ -102,6 +102,7 @@ class ComponentAssemblyValidator:
                     f"components[{component.component_id}].{field}",
                 ))
         issues += self._check_internal_flow(component, available)
+        issues += self._check_theory_operation_granularity(component)
         if not (0.0 <= component.confidence <= 1.0):
             issues.append(ValidationIssue(
                 "confidence_out_of_range",
@@ -147,6 +148,42 @@ class ComponentAssemblyValidator:
                 f"components[{component.component_id}].evidence_refs",
             ))
         return issues
+
+    def _check_theory_operation_granularity(
+        self,
+        component: ComponentRecord,
+    ) -> list[ValidationIssue]:
+        deriv_like = component.component_type in {
+            "RelationComponent",
+            "PaperRelationComponent",
+            "MethodComponent",
+            "CorrectionComponent",
+        }
+        if not deriv_like:
+            return []
+
+        input_eqs = _field_equation_ids(component.inputs)
+        output_eqs = _field_equation_ids(component.outputs)
+        all_eqs = _component_equation_refs(component, component.evidence_refs or {})
+        equation_like_io = sum(
+            1
+            for item in list(component.inputs or []) + list(component.outputs or [])
+            if _item_is_equation_like(item)
+        )
+        if (
+            len(output_eqs) >= 4
+            or len(input_eqs) + len(output_eqs) >= 6
+            or len(all_eqs) >= 10
+            or equation_like_io >= 4
+        ):
+            return [ValidationIssue(
+                "component_equation_dependency_bundle",
+                "warning",
+                f"{component.component_id} exposes too many raw equations as component I/O; "
+                "component should represent one theory operation and keep equations as supporting detail",
+                f"components[{component.component_id}].outputs",
+            )]
+        return []
 
     def _check_internal_flow(
         self,
@@ -607,6 +644,36 @@ def _component_equation_refs(component: ComponentRecord, refs: dict) -> list[str
             seen.add(eq_id)
             result.append(eq_id)
     return result
+
+
+def _field_equation_ids(items: list[dict]) -> list[str]:
+    ids: list[str] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        for key in ("equation_ids", "equations"):
+            raw = item.get(key) or []
+            if isinstance(raw, str):
+                ids.append(raw)
+            elif isinstance(raw, list):
+                ids.extend(str(v) for v in raw if v)
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in ids:
+        eq_id = str(value)
+        if eq_id and eq_id not in seen:
+            seen.add(eq_id)
+            result.append(eq_id)
+    return result
+
+
+def _item_is_equation_like(item: object) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if item.get("equation_ids") or item.get("equations"):
+        return True
+    text = str(item.get("name") or item.get("label") or item.get("text") or "")
+    return text.startswith("eq_") or text.lower().startswith("equation ")
 
 
 def _meta_prior_evidence_ratio(component: ComponentRecord) -> float:

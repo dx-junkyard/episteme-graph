@@ -155,6 +155,21 @@ def test_multi_input_without_internal_flow_emits_warning():
     assert any(i.rule_id == "component_multi_io_without_flow" for i in issues)
 
 
+def test_equation_dependency_bundle_emits_granularity_warning():
+    component = _component(
+        outputs=[
+            {"name": "eq_1", "equation_ids": ["eq_1"]},
+            {"name": "eq_2", "equation_ids": ["eq_2"]},
+            {"name": "eq_3", "equation_ids": ["eq_3"]},
+            {"name": "eq_4", "equation_ids": ["eq_4"]},
+        ],
+        linked_equation_ids=["eq_1", "eq_2", "eq_3", "eq_4"],
+        output_equation_ids=["eq_1", "eq_2", "eq_3", "eq_4"],
+    )
+    issues = VALIDATOR.validate(_result(components=[component]))
+    assert any(i.rule_id == "component_equation_dependency_bundle" for i in issues)
+
+
 def test_cartridge_component_and_relation_types_are_allowed():
     cartridge = CartridgeContext(
         "test",

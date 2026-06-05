@@ -5536,7 +5536,7 @@
     var backing = String(node.source_backing_status || "").toLowerCase();
     var html =
       '<div class="ls-graph-detail-badge ' + escHtml(lsGraphNodeGroup(node)) + '">' + escHtml(node.component_type_text || node.component_type || node.typeName || "component") + '</div>' +
-      '<h4>' + escHtml(node.label || node.name || nodeId || "無題") + '</h4>' +
+      '<h4>' + escHtml(lsGraphFullDisplayLabel(node) || nodeId || "無題") + '</h4>' +
       '<p class="ls-graph-detail-meta">' + escHtml(lsGraphLayerLabel(node.graph_layer)) + ' ・ ' + escHtml(node.review_status || node.origin || "paper") + '</p>';
     var linkage = lsGraphLayerLinkageHtml(node);
     if (linkage) {
@@ -5588,7 +5588,7 @@
     nodes.forEach(function (node) { nodeById[lsGraphNodeId(node)] = node; });
     var html = '<div class="ls-empty-state">ネットワーク描画ライブラリを読み込めませんでした。テキスト表示に切り替えます。</div><div class="ls-graph-flow">';
     nodes.forEach(function (node) {
-      html += '<div class="ls-graph-node">' + escHtml(node.label || lsGraphNodeId(node)) + '<div class="ls-theory-muted">' + escHtml(node.origin || "paper") + ' / ' + escHtml(node.component_type || "") + '</div></div>';
+      html += '<div class="ls-graph-node">' + escHtml(lsGraphMainStageLabel(node) || node.label || lsGraphNodeId(node)) + '<div class="ls-theory-muted">' + escHtml(node.origin || "paper") + ' / ' + escHtml(node.component_type || "") + '</div></div>';
     });
     edges.forEach(function (edge) {
       var sourceId = edge.source_component_id || edge.source || edge.from;
@@ -5696,7 +5696,7 @@
   // Prefix a warning icon for fallback / inferred nodes so they are not mistaken
   // for confirmed, source-backed theory operations (issue #302).
   function lsGraphNodeDisplayLabel(node, id) {
-    var label = lsWrapGraphLabel((node && (node.label || node.name)) || id);
+    var label = lsWrapGraphLabel(lsGraphFullDisplayLabel(node) || id);
     return lsGraphNodeIsFallback(node) ? "⚠ " + label : label;
   }
 
@@ -5711,6 +5711,15 @@
 
   function lsGraphLayerLinkageHtml(node) {
     var html = "";
+    if (node.representative_component_id) {
+      html += '<div class="ls-graph-detail-link"><span>代表Component</span> ' +
+        escHtml(node.representative_component_id) + '</div>';
+    }
+    var linkedComponents = node.linked_component_ids || [];
+    if (linkedComponents.length) {
+      html += '<div class="ls-graph-detail-link"><span>関連Component</span> ' +
+        escHtml(String(linkedComponents.length)) + ' 件</div>';
+    }
     var members = node.member_component_ids || [];
     if (members.length) {
       html += '<div class="ls-graph-detail-link"><span>式ステップ</span> ' +
@@ -5745,6 +5754,49 @@
       source_span_missing: "原文spanがない",
     };
     return labels[String(reason || "")] || reason || "";
+  }
+
+  // Issue #319: main-layer TheoryOperationNode labels must be short stage names
+  // only. Backend re-normalizes stored graphs, but guard client-side too so a
+  // stale graph never shows "Theory basis: Eq. (2.7) ..." as a visual label.
+  var LS_MAIN_STAGE_LABELS = [
+    "Theory basis",
+    "Observation model",
+    "Observable construction",
+    "Equation system",
+    "Elimination",
+    "Consistency relation",
+    "Diagnostic / application",
+  ];
+
+  function lsGraphMainStageLabel(node) {
+    var label = String((node && (node.label || node.name)) || "");
+    var layer = String((node && node.graph_layer) || "main").toLowerCase();
+    var ctype = String((node && (node.component_type || node.type)) || "");
+    if (layer !== "main" || ctype !== "TheoryOperationNode") return label;
+    // "<Stage>: <long text>" -> "<Stage>".
+    var colon = label.indexOf(":");
+    if (colon >= 0) {
+      var head = label.slice(0, colon).trim();
+      for (var i = 0; i < LS_MAIN_STAGE_LABELS.length; i++) {
+        if (head.toLowerCase() === LS_MAIN_STAGE_LABELS[i].toLowerCase()) return LS_MAIN_STAGE_LABELS[i];
+      }
+    }
+    for (var j = 0; j < LS_MAIN_STAGE_LABELS.length; j++) {
+      if (label.toLowerCase() === LS_MAIN_STAGE_LABELS[j].toLowerCase()) return LS_MAIN_STAGE_LABELS[j];
+    }
+    return label;
+  }
+
+  function lsGraphFullDisplayLabel(node) {
+    if (!node) return "";
+    var explicit = String(node.display_label || "").trim();
+    if (explicit) return explicit;
+    var stage = lsGraphMainStageLabel(node);
+    var object = String(node.theory_object || "").trim();
+    if (!object) return stage || node.label || node.name || "";
+    if (!stage || object.toLowerCase() === String(stage).toLowerCase()) return object;
+    return stage + ": " + object;
   }
 
   function lsGraphNodeTooltip(node) {
