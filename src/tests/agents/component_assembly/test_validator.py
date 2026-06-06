@@ -168,6 +168,58 @@ def test_responsibility_alias_is_normalized_to_canonical_type():
     assert component.responsibility_type == "observation_model"
 
 
+def test_non_background_component_without_supported_claim_warns():
+    component = _component(
+        support_role="result",
+        support_kind="direct",
+        evidence_refs={"claim_ids": [], "equation_ids": ["eq_1"], "dsl_refs": {"node_ids": [], "edge_ids": []}},
+        linked_claim_ids=[],
+        supports_claim_ids=[],
+    )
+    issues = VALIDATOR.validate(_result(components=[component]))
+    assert any(i.rule_id == "component_missing_supported_claim" for i in issues)
+
+
+def test_result_component_must_link_headline_claim_directly_or_derivationally():
+    llm_input = _make_llm_input(
+        available_claims=[{"claim_id": "claim_head"}, {"claim_id": "claim_other"}],
+        headline_claim_ids=["claim_head"],
+    )
+    component = _component(
+        support_role="result",
+        support_kind="indirect",
+        supports_claim_ids=["claim_other"],
+        linked_claim_ids=["claim_other"],
+        evidence_refs={"claim_ids": ["claim_other"], "equation_ids": ["eq_1"], "dsl_refs": {"node_ids": [], "edge_ids": []}},
+    )
+    issues = VALIDATOR.validate(_result(components=[component]), llm_input=llm_input)
+    assert any(i.rule_id == "main_result_component_not_direct_or_derivational" for i in issues)
+    assert any(i.rule_id == "main_result_component_not_linked_to_headline_claim" for i in issues)
+
+
+def test_derivation_core_requires_input_and_output_equations():
+    component = _component(
+        support_role="derivation_core",
+        support_kind="derivational",
+        supports_claim_ids=["claim_1"],
+        input_equation_ids=["eq_in"],
+        output_equation_ids=[],
+    )
+    issues = VALIDATOR.validate(_result(components=[component]))
+    assert any(i.rule_id == "derivation_core_missing_input_or_output_equations" for i in issues)
+
+
+def test_application_component_must_not_be_derivation_responsibility():
+    component = _component(
+        support_role="application",
+        support_kind="application",
+        responsibility_type="derivation",
+        supports_claim_ids=["claim_1"],
+    )
+    issues = VALIDATOR.validate(_result(components=[component]))
+    assert any(i.rule_id == "application_component_treated_as_derivation" for i in issues)
+
+
 def test_cartridge_component_and_relation_types_are_allowed():
     cartridge = CartridgeContext(
         "test",
@@ -198,6 +250,7 @@ def _make_llm_input(
     available_dsl_nodes=None,
     available_dsl_edges=None,
     available_derivation_ids=None,
+    headline_claim_ids=None,
 ):
     return ComponentAssemblyLLMInput(
         document_id="doc",
@@ -215,6 +268,11 @@ def _make_llm_input(
         available_dsl_nodes=available_dsl_nodes or [],
         available_dsl_edges=available_dsl_edges or [],
         available_derivation_ids=available_derivation_ids or [],
+        claim_centered_plan={
+            "headline_claim": "Headline claim",
+            "headline_claim_ids": headline_claim_ids or [],
+            "support_layers": [],
+        },
     )
 
 
@@ -238,6 +296,30 @@ def test_valid_linkage_no_errors():
         "unresolved_claim_id", "unresolved_evidence_id", "unresolved_equation_id"
     )]
     assert cross_errors == []
+
+
+def test_component_support_cannot_use_split_required_claim():
+    llm_input = _make_llm_input(
+        available_claims=[
+            {
+                "claim_id": "claim_split",
+                "atomicity": "split_required",
+                "is_atomic": False,
+            }
+        ],
+    )
+    component = _component(
+        evidence_refs={
+            "claim_ids": ["claim_split"],
+            "evidence_ids": [],
+            "equation_ids": [],
+            "dsl_refs": {"node_ids": [], "edge_ids": []},
+        },
+        linked_claim_ids=["claim_split"],
+        supports_claim_ids=["claim_split"],
+    )
+    issues = VALIDATOR.validate(_result(components=[component]), llm_input=llm_input)
+    assert any(i.rule_id == "component_support_uses_non_atomic_claim" for i in issues)
 
 
 def test_derivation_component_with_unclassified_equations_warns():
@@ -420,3 +502,72 @@ def test_build_available_id_index():
     assert idx["equation_ids"] == {"eq1"}
     assert idx["dsl_node_ids"] == {"n1"}
     assert idx["dsl_edge_ids"] == {"e1"}
+
+
+# ---------------------------------------------------------------------------
+# issue #8: concept validation
+# ---------------------------------------------------------------------------
+
+def test_component_with_too_few_concepts_warns():
+    component = _component(concepts=["Skewness"])
+    issues = VALIDATOR.validate(_result(components=[component]))
+    assert any(i.rule_id == "component_insufficient_concepts" for i in issues)
+
+
+def test_component_with_two_named_concepts_has_no_insufficient_warning():
+    component = _component(concepts=["Skewness", "Kurtosis"])
+    issues = VALIDATOR.validate(_result(components=[component]))
+    assert not any(i.rule_id == "component_insufficient_concepts" for i in issues)
+
+
+def test_derivation_component_without_math_concept_warns():
+    component = _component(
+        support_role="derivation_core",
+        operation="eliminate_bias",
+        concepts=["Galaxy survey", "Gravity model"],
+    )
+    issues = VALIDATOR.validate(_result(components=[component]))
+    assert any(i.rule_id == "derivation_component_missing_math_concept" for i in issues)
+
+
+def test_derivation_component_with_symbol_concept_passes():
+    component = _component(
+        support_role="derivation_core",
+        operation="eliminate_bias",
+        concepts=["b_1", "consistency relation"],
+    )
+    issues = VALIDATOR.validate(_result(components=[component]))
+    assert not any(i.rule_id == "derivation_component_missing_math_concept" for i in issues)
+
+
+def test_observable_component_without_named_concept_warns():
+    component = _component(
+        support_role="observable_bridge",
+        concepts=["b_1", "derive"],
+    )
+    issues = VALIDATOR.validate(_result(components=[component]))
+    assert any(i.rule_id == "observable_component_missing_observable_concept" for i in issues)
+
+
+def test_theory_comparison_without_theory_class_warns():
+    component = _component(
+        operation="compare_theories",
+        concepts=["b_1", "solve"],
+    )
+    issues = VALIDATOR.validate(_result(components=[component]))
+    assert any(i.rule_id == "theory_comparison_missing_theory_class" for i in issues)
+
+
+def test_component_concept_from_low_confidence_source_warns():
+    llm_input = _make_llm_input(
+        available_claims=[{
+            "claim_id": "claim_low",
+            "concept_assignment_status": "review_required",
+        }],
+    )
+    component = _component(
+        concepts=["Skewness", "Kurtosis"],
+        supports_claim_ids=["claim_low"],
+    )
+    issues = VALIDATOR.validate(_result(components=[component]), llm_input=llm_input)
+    assert any(i.rule_id == "component_concept_from_low_confidence_source" for i in issues)

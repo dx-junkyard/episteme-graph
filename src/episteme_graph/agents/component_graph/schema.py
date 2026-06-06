@@ -376,6 +376,13 @@ class ComponentGraphNode:
     # equation_detail node points back at its main node via ``parent_component_id``.
     parent_component_id: str = ""
     member_component_ids: list[str] = field(default_factory=list)
+    support_role: str = ""
+    supports_claim_ids: list[str] = field(default_factory=list)
+    support_distance_to_headline_claim: int = 0
+    support_kind: str = ""
+    # Concept tags carried from component assembly (issue #8).
+    concepts: list[str] = field(default_factory=list)
+    prerequisite_concepts: list[str] = field(default_factory=list)
 
 
 @dataclass

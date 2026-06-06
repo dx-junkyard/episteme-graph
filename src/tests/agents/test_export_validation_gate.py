@@ -772,11 +772,21 @@ def test_non_source_backed_claim_no_evidence_ids_is_silent():
 def test_non_atomic_main_result_claim_is_hard_error():
     """A non-atomic main-result claim blocks export."""
     claims = _ClaimObjectResult([
+        _ClaimObject("claim_001", atomicity="split_required", claim_type="result"),
+    ])
+    result = _run_gate(claim_objects=claims)
+    review_codes = [r.code for r in result.review_items]
+    assert "SPLIT_PENDING_CLAIM_NEEDS_CONFIRMATION" in review_codes
+    assert "NON_ATOMIC_MAIN_RESULT_CLAIM" not in [e.code for e in result.errors]
+    assert result.status == "needs_review"
+
+
+def test_legacy_non_atomic_main_result_claim_is_hard_error():
+    claims = _ClaimObjectResult([
         _ClaimObject("claim_001", atomicity="non_atomic", claim_type="result"),
     ])
     result = _run_gate(claim_objects=claims)
-    codes = [e.code for e in result.errors]
-    assert "NON_ATOMIC_MAIN_RESULT_CLAIM" in codes
+    assert "NON_ATOMIC_MAIN_RESULT_CLAIM" in [e.code for e in result.errors]
     assert result.status == "failed_validation"
 
 
@@ -805,10 +815,78 @@ def test_atomic_claim_produces_no_atomicity_issue():
 def test_split_pending_claim_needs_confirmation():
     """Deterministic-split suggestions are surfaced for review (issue #317)."""
     claims = _ClaimObjectResult([
-        _ClaimObject("claim_001_sub01", atomicity="split_pending", claim_type="result"),
+        _ClaimObject("claim_001_sub01", atomicity="split_required", claim_type="result"),
     ])
     result = _run_gate(claim_objects=claims)
     review_codes = [r.code for r in result.review_items]
     assert "SPLIT_PENDING_CLAIM_NEEDS_CONFIRMATION" in review_codes
     # split_pending must not be treated as a non-atomic hard error
     assert "NON_ATOMIC_MAIN_RESULT_CLAIM" not in [e.code for e in result.errors]
+
+
+def test_component_using_split_required_claim_as_support_blocks_publish():
+    comp = _ComponentRecord(
+        "comp_bad_claim",
+        {"claim_ids": ["claim_split"], "evidence_ids": [], "equation_ids": []},
+        linked_claim_ids=["claim_split"],
+    )
+    claims = _ClaimObjectResult([
+        _ClaimObject("claim_split", atomicity="split_required", claim_type="main_result"),
+    ])
+    result = _run_gate(component_result=_ComponentResult([comp]), claim_objects=claims, evidence=_EvidenceResult([]))
+    assert "NON_ATOMIC_CLAIM_USED_AS_COMPONENT_SUPPORT" in [e.code for e in result.errors]
+
+
+# ---------------------------------------------------------------------------
+# Tests: concept coverage reporting (issue #8)
+# ---------------------------------------------------------------------------
+
+def test_concept_validation_block_always_present():
+    result = _run_gate()
+    block = result.concept_validation
+    for key in (
+        "missing_concepts",
+        "empty_concepts_on_main_claims",
+        "empty_concepts_on_main_components",
+        "concepts_on_composite_claims",
+        "concept_role_mismatch",
+        "concepts_from_low_confidence_sources",
+    ):
+        assert key in block
+        assert block[key] == []
+
+
+def test_main_claim_with_empty_concepts_is_reported():
+    claim = _ClaimObject("claim_main", claim_type="result")
+    claim.concepts = []
+    claim.concept_assignment_status = "review_required"
+    result = _run_gate(claim_objects=_ClaimObjectResult([claim]))
+    assert "claim_main" in result.concept_validation["empty_concepts_on_main_claims"]
+    assert "claim_main" in result.concept_validation["missing_concepts"]
+    assert "MAIN_CLAIM_INSUFFICIENT_CONCEPTS" in [w.code for w in result.warnings]
+
+
+def test_main_component_with_too_few_concepts_is_reported():
+    comp = _ComponentRecord("comp_thin", {"claim_ids": [], "evidence_ids": []})
+    comp.concepts = ["Skewness"]
+    result = _run_gate(component_result=_ComponentResult([comp]))
+    assert "comp_thin" in result.concept_validation["empty_concepts_on_main_components"]
+    assert "MAIN_COMPONENT_INSUFFICIENT_CONCEPTS" in [w.code for w in result.warnings]
+
+
+def test_source_backed_concepts_on_composite_claim_flagged_for_review():
+    claim = _ClaimObject("claim_comp", atomicity="composite", claim_type="definition")
+    claim.concepts = ["Skewness", "Kurtosis"]
+    claim.concept_assignment_status = "source_backed"
+    result = _run_gate(claim_objects=_ClaimObjectResult([claim]))
+    assert "claim_comp" in result.concept_validation["concepts_on_composite_claims"]
+    assert "CONCEPTS_ON_COMPOSITE_CLAIM" in [r.code for r in result.review_items]
+
+
+def test_low_confidence_source_concepts_flagged_for_review():
+    claim = _ClaimObject("claim_low", atomicity="atomic", claim_type="definition")
+    claim.concepts = ["Skewness", "Kurtosis"]
+    claim.concept_assignment_status = "review_required"
+    result = _run_gate(claim_objects=_ClaimObjectResult([claim]))
+    assert "claim_low" in result.concept_validation["concepts_from_low_confidence_sources"]
+    assert "CONCEPTS_FROM_LOW_CONFIDENCE_SOURCE" in [r.code for r in result.review_items]

@@ -1,5 +1,9 @@
 """Tests for DSLLinkingInputBuilder."""
 from episteme_graph.agents.claim_qualification.schema import ClaimQualificationResult, QualifiedSpanRecord
+from episteme_graph.agents.claim_object_builder.schema import (
+    ClaimObjectBuildResult,
+    ClaimObjectRecord,
+)
 from episteme_graph.agents.dsl_linking.input_builder import DSLLinkingInputBuilder
 from episteme_graph.agents.equation_semantics.schema import (
     DefinedSymbol,
@@ -140,3 +144,67 @@ def test_equation_fields_map_to_nested_schema():
 def test_limits_claims():
     llm_input = BUILDER.build(_qualified(), config={"max_claims": 1})
     assert len(llm_input.accepted_claims) == 1
+
+
+def test_build_uses_atomic_claim_objects_for_dsl_materials():
+    qualified = ClaimQualificationResult(
+        "doc",
+        None,
+        [_claim("span_001", "blk_a", "Broad claim with multiple propositions.", "result")],
+        [],
+        [],
+        {},
+    )
+    claim_objects = ClaimObjectBuildResult(
+        "doc",
+        None,
+        claims=[
+            ClaimObjectRecord(
+                claim_id="claim_parent",
+                document_id="doc",
+                claim_type="main_result",
+                text="Broad claim with multiple propositions.",
+                source_evidence_ids=["ev_parent"],
+                source_span_ids=["span_001"],
+                concepts=[],
+                section_id="sec_1",
+                atomicity="split_required",
+                is_atomic=False,
+                split_suggestions=[
+                    {"text": "Nonlinear galaxy bias obstructs direct gravity tests."},
+                    {"text": "Bias parameters can be eliminated algebraically."},
+                ],
+            ),
+            ClaimObjectRecord(
+                claim_id="claim_atomic_1",
+                document_id="doc",
+                claim_type="problem_statement",
+                text="Nonlinear galaxy bias obstructs direct gravity tests.",
+                source_evidence_ids=["ev_001"],
+                source_span_ids=["span_001"],
+                concepts=[],
+                section_id="sec_1",
+                atomicity="atomic",
+                is_atomic=True,
+            ),
+            ClaimObjectRecord(
+                claim_id="claim_atomic_2",
+                document_id="doc",
+                claim_type="derivation_result",
+                text="Bias parameters can be eliminated algebraically.",
+                source_evidence_ids=["ev_002"],
+                source_span_ids=["span_001"],
+                concepts=[],
+                section_id="sec_1",
+                atomicity="atomic",
+                is_atomic=True,
+            ),
+        ],
+    )
+
+    llm_input = BUILDER.build(qualified, claim_objects=claim_objects)
+
+    claim_ids = [c["claim_id"] for c in llm_input.accepted_claims]
+    assert "claim_parent" not in claim_ids
+    assert claim_ids == ["claim_atomic_2", "claim_atomic_1"]
+    assert all(c["atomicity"] == "atomic" and c["is_atomic"] for c in llm_input.accepted_claims)

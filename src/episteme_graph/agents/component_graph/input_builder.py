@@ -103,6 +103,12 @@ class ComponentGraphInputBuilder:
                 review_required_equation_ids=list(getattr(comp, "review_required_equation_ids", []) or []),
                 eliminated_symbols=list(getattr(comp, "eliminated_symbols", []) or []),
                 retained_symbols=list(getattr(comp, "retained_symbols", []) or []),
+                support_role=str(getattr(comp, "support_role", "") or ""),
+                supports_claim_ids=list(getattr(comp, "supports_claim_ids", []) or []),
+                support_distance_to_headline_claim=int(getattr(comp, "support_distance_to_headline_claim", 0) or 0),
+                support_kind=str(getattr(comp, "support_kind", "") or ""),
+                concepts=list(getattr(comp, "concepts", []) or []),
+                prerequisite_concepts=list(getattr(comp, "prerequisite_concepts", []) or []),
             ))
         return nodes
 

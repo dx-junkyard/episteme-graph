@@ -230,6 +230,16 @@ class ClaimObjectBuilder:
                         ),
                         field=claim_id,
                     ))
+            elif claim_type in MAIN_RESULT_CLAIM_TYPES and len(concepts) < 2:
+                issues.append(ValidationIssue(
+                    rule_id="main_claim_insufficient_concepts",
+                    severity="warning",
+                    message=(
+                        f"main-result claim {claim_id} ({claim_type}) has only "
+                        f"{len(concepts)} concept(s); main claims need at least 2"
+                    ),
+                    field=claim_id,
+                ))
 
             equation_ids = self._link_equations(text, claim_type, role_labels, block_id, section_id)
             if self._claim_type_implies_equation(claim_type) and not equation_ids:
@@ -244,6 +254,7 @@ class ClaimObjectBuilder:
 
             # Single, already-atomic claim (non-atomic spans were routed to the
             # LLM-atomic or deterministic-fallback paths above, issue #317).
+            single_support_status = "source_backed" if evidence_ids else "inferred"
             record = ClaimObjectRecord(
                 claim_id=claim_id,
                 document_id=document_id,
@@ -255,7 +266,7 @@ class ClaimObjectBuilder:
                 equation_ids=equation_ids,
                 figure_ids=figure_ids,
                 table_ids=table_ids,
-                support_status="source_backed" if evidence_ids else "inferred",
+                support_status=single_support_status,
                 review_status=review_status,
                 review_note=review_note,
                 section_id=section_id,
@@ -266,6 +277,11 @@ class ClaimObjectBuilder:
                 qualification_reason=None,
                 parent_claim_id=None,
                 subclaim_ids=[],
+                concept_assignment_status=self._concept_assignment_status(
+                    is_atomic=True,
+                    support_status=single_support_status,
+                    concepts=concepts,
+                ),
             )
             claims.append(record)
 
@@ -301,6 +317,26 @@ class ClaimObjectBuilder:
                 message=f"claim {claim_id} has no concepts",
                 field=claim_id,
             ))
+            if claim_type in MAIN_RESULT_CLAIM_TYPES:
+                issues.append(ValidationIssue(
+                    rule_id="main_result_claim_concepts_empty",
+                    severity="warning",
+                    message=(
+                        f"main-result claim {claim_id} ({claim_type}) has no concepts; "
+                        "it cannot back a component or graph node"
+                    ),
+                    field=claim_id,
+                ))
+        elif claim_type in MAIN_RESULT_CLAIM_TYPES and len(concepts) < 2:
+            issues.append(ValidationIssue(
+                rule_id="main_claim_insufficient_concepts",
+                severity="warning",
+                message=(
+                    f"main-result claim {claim_id} ({claim_type}) has only "
+                    f"{len(concepts)} concept(s); main claims need at least 2"
+                ),
+                field=claim_id,
+            ))
         if self._claim_type_implies_equation(claim_type) and not equation_ids:
             issues.append(ValidationIssue(
                 rule_id="claim_missing_equation_ref",
@@ -331,11 +367,13 @@ class ClaimObjectBuilder:
             if not text:
                 continue
             atomicity = str(cand.get("atomicity", "atomic")).strip().lower()
-            if atomicity not in ("atomic", "non_atomic"):
+            if atomicity in {"non_atomic", "split_pending"}:
+                atomicity = "split_required"
+            if atomicity not in ("atomic", "split_required"):
                 atomicity = "atomic"
             status = str(cand.get("status", "")).strip().lower()
             if status not in ("accepted", "review_required"):
-                status = "review_required" if atomicity == "non_atomic" else "accepted"
+                status = "review_required" if atomicity == "split_required" else "accepted"
             normalized.append({
                 "text": text,
                 "normalized_text": str(cand.get("normalized_text") or text).strip(),
@@ -410,9 +448,11 @@ class ClaimObjectBuilder:
 
         parent_id = self._dedup_id(base_claim_id, counter, seen)
         subclaim_ids: list[str] = []
+        split_suggestions: list[dict] = []
         for idx, cand in enumerate(candidates, start=1):
             sub_id = self._dedup_id(f"{parent_id}_sub{idx:02d}", counter, seen)
             subclaim_ids.append(sub_id)
+            split_suggestions.append({"claim_id": sub_id, "text": cand.get("text", "")})
             self._append_atomic_child(claims, issues, ctx, sub_id, cand, parent_id=parent_id)
 
         # Compound parent: tracks the original span but is not atomic backing.
@@ -437,11 +477,17 @@ class ClaimObjectBuilder:
             section_id=ctx.section_id,
             confidence=ctx.confidence,
             normalized_text=ctx.text,
-            atomicity="compound",
+            atomicity="composite",
             is_atomic=False,
             qualification_reason="atomic rewrite by ClaimQualificationAgent",
             parent_claim_id=None,
             subclaim_ids=subclaim_ids,
+            split_suggestions=split_suggestions,
+            concept_assignment_status=self._concept_assignment_status(
+                is_atomic=False,
+                support_status="source_backed" if ctx.evidence_ids else "inferred",
+                concepts=parent_concepts,
+            ),
         ))
         self._add_issues_for_record(
             parent_id, ctx.evidence_ids, parent_concepts, ctx.claim_type, parent_eqs, issues
@@ -471,7 +517,7 @@ class ClaimObjectBuilder:
             qualification_reason = None
         else:
             # The agent flagged this piece as not confidently atomized.
-            atomicity = "non_atomic"
+            atomicity = "split_required"
             is_atomic = False
             support_status = "review_required"
             qualification_reason = (
@@ -482,7 +528,7 @@ class ClaimObjectBuilder:
                 rule_id="atomic_claim_needs_review",
                 severity="warning",
                 message=(
-                    f"atomic claim {claim_id} was flagged non_atomic by "
+                    f"atomic claim {claim_id} was flagged split_required by "
                     "ClaimQualificationAgent; review required"
                 ),
                 field=claim_id,
@@ -510,6 +556,11 @@ class ClaimObjectBuilder:
             qualification_reason=qualification_reason,
             parent_claim_id=parent_id,
             subclaim_ids=[],
+            concept_assignment_status=self._concept_assignment_status(
+                is_atomic=is_atomic,
+                support_status=support_status,
+                concepts=concepts,
+            ),
         ))
         self._add_issues_for_record(
             claim_id, ctx.evidence_ids, concepts, claim_type, equation_ids, issues
@@ -535,12 +586,14 @@ class ClaimObjectBuilder:
         parent_id = self._dedup_id(base_claim_id, counter, seen)
         parts = self._split_into_atomic(ctx.text)
         subclaim_ids: list[str] = []
+        split_suggestions: list[dict] = []
         for idx, part in enumerate(parts, start=1):
             part = (part or "").strip()
             if not part:
                 continue
             sub_id = self._dedup_id(f"{parent_id}_sub{idx:02d}", counter, seen)
             subclaim_ids.append(sub_id)
+            split_suggestions.append({"claim_id": sub_id, "text": part})
             sub_concepts = self._resolve_concepts(part, ctx.role_labels, ctx.span)
             sub_eqs = self._link_equations(
                 part, ctx.claim_type, ctx.role_labels, ctx.block_id, ctx.section_id
@@ -562,11 +615,16 @@ class ClaimObjectBuilder:
                 section_id=ctx.section_id,
                 confidence=ctx.confidence,
                 normalized_text=part,
-                atomicity="split_pending",
+                atomicity="split_required",
                 is_atomic=False,
                 qualification_reason="deterministic split requires review",
                 parent_claim_id=parent_id,
                 subclaim_ids=[],
+                concept_assignment_status=self._concept_assignment_status(
+                    is_atomic=False,
+                    support_status="review_required",
+                    concepts=sub_concepts,
+                ),
             ))
 
         parent_concepts = self._resolve_concepts(ctx.text, ctx.role_labels, ctx.span)
@@ -590,7 +648,7 @@ class ClaimObjectBuilder:
             section_id=ctx.section_id,
             confidence=ctx.confidence,
             normalized_text=ctx.text,
-            atomicity="non_atomic",
+            atomicity="split_required",
             is_atomic=False,
             qualification_reason=(
                 text_qual_reason
@@ -598,6 +656,12 @@ class ClaimObjectBuilder:
             ),
             parent_claim_id=None,
             subclaim_ids=subclaim_ids,
+            split_suggestions=split_suggestions,
+            concept_assignment_status=self._concept_assignment_status(
+                is_atomic=False,
+                support_status="review_required",
+                concepts=parent_concepts,
+            ),
         ))
         self._add_issues_for_record(
             parent_id, ctx.evidence_ids, parent_concepts, ctx.claim_type, parent_eqs, issues
@@ -695,6 +759,44 @@ class ClaimObjectBuilder:
                 seen.add(normalized)
         return found
 
+    def _concept_assignment_status(
+        self,
+        *,
+        is_atomic: bool,
+        support_status: str,
+        concepts: list,
+    ) -> str:
+        """Derive how confidently a claim's concepts may be used downstream (issue #8).
+
+        Concepts from low-confidence / review_required sources are never confirmed,
+        composite / split_required (non-atomic) claims stay ``tentative``, and atomic
+        source-backed claims are only ``source_backed`` when their concepts come from
+        the cartridge ontology (otherwise ``inferred``).
+        """
+        if not concepts:
+            return "review_required"
+        if support_status == "review_required":
+            return "review_required"
+        if not is_atomic:
+            return "tentative"
+        if support_status == "source_backed" and self._concepts_are_cartridge_backed(concepts):
+            return "source_backed"
+        return "inferred"
+
+    def _concepts_are_cartridge_backed(self, concepts: list) -> bool:
+        ontology = self._cartridge_ontology or {}
+        if not ontology:
+            # A custom concept resolver with no ontology: trust the resolved concepts.
+            return self._concept_resolver is not None
+        aliases = ontology.get("aliases", {}) or {}
+        concept_types = ontology.get("concept_types", {}) or {}
+        known = set(aliases.keys()) | set(concept_types.keys())
+        for c in concepts:
+            normalized = getattr(c, "normalized", "") or getattr(c, "name", "")
+            if normalized in known:
+                return True
+        return False
+
     @staticmethod
     def _normalize_claim_type(raw: str | None) -> str:
         """Map raw claim type candidate to ontology value (issue #260)."""
@@ -713,6 +815,10 @@ class ClaimObjectBuilder:
             # issue #312 required-vocabulary synonyms
             "problem": "problem_statement",
             "problem_setup": "problem_statement",
+            "motivation": "method_motivation",
+            "method_motivation": "method_motivation",
+            "theory": "theory_encoding",
+            "theory_encoding": "theory_encoding",
             "method_choice": "method_choice",
             "structural": "structural_property",
             "structure": "structural_property",
@@ -817,6 +923,14 @@ class ClaimObjectBuilder:
         t = (text or "").strip()
         if not t:
             return "atomic", None
+        roles = cls._rhetorical_roles(t)
+        if len(roles) >= 2:
+            if {"background", "result"} <= roles:
+                return "non_atomic", "contains both background and result; split required"
+            if {"method", "conclusion"} <= roles:
+                return "non_atomic", "contains both method and conclusion; split required"
+            if len(roles) >= 3:
+                return "non_atomic", "contains multiple rhetorical roles; split required"
         # 1. Multiple full sentences.
         sentences = [s for s in re.split(r"[.!?]+\s+", t) if len(s.split()) >= 3]
         if len(sentences) >= 2:
@@ -832,6 +946,22 @@ class ClaimObjectBuilder:
             if clauses_with_verb >= 2:
                 return "non_atomic", "contains multiple propositions; split required"
         return "atomic", None
+
+    @classmethod
+    def _rhetorical_roles(cls, text: str) -> set[str]:
+        t = text.lower()
+        roles: set[str] = set()
+        if any(k in t for k in ("dhost", "horndeski", "background", "theory class", "modified gravity")):
+            roles.add("background")
+        if any(k in t for k in ("motivat", "constrain", "parameter", "test", "useful", "probe")):
+            roles.add("conclusion")
+        if any(k in t for k in ("construct", "derive", "eliminat", "solve", "relation", "consistency")):
+            roles.add("method")
+        if any(k in t for k in ("newly derived", "reproduced", "result", "yield", "obtain")):
+            roles.add("result")
+        if any(k in t for k in ("observable", "skewness", "kurtosis", "spectrum", "statistics")):
+            roles.add("observable")
+        return roles
 
     @classmethod
     def _split_into_atomic(cls, text: str) -> list[str]:

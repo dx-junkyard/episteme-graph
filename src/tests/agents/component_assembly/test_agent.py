@@ -248,6 +248,9 @@ def test_run_returns_components():
     assert result.components[0].linked_claim_ids == ["claim:b2:s2"]
     assert result.components[0].linked_equation_ids == ["eq_3_14"]
     assert result.components[0].linked_derivation_ids == ["derivation_eq_3_14"]
+    assert result.components[0].supports_claim_ids == ["claim:b2:s2"]
+    assert result.components[0].support_role
+    assert result.diagnostics["component_granularity"]
     assert result.components[0].review_status == "teacher_review_required"
     assert result.components[0].source_scope == {"section_id": "sec_1"}
     assert not [i for i in result.validation_issues if i.severity == "error"]

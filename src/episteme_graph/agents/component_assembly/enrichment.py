@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .schema import ComponentAssemblyLLMInput, ComponentAssemblyResult, ComponentRecord
+from .claim_centered_planner import infer_support_metadata
 
 
 _DERIVATION_TYPES = {"RelationComponent", "PaperRelationComponent", "MethodComponent"}
@@ -29,14 +30,22 @@ def enrich_component_assembly(
         eq_id for eq_id, eq in eq_index.items()
         if _requires_review(eq)
     }
+    claim_index = _claim_concept_index(llm_input)
+    eq_symbol_index = _equation_symbol_index(eq_index)
+    concept_vocab = _concept_vocab(llm_input, claim_index)
 
     for component in result.components:
         _normalize_component_lists(component)
         _fill_equation_roles(component, eq_index, review_required)
         _fill_equation_confidence_summary(component, eq_index, review_required)
         _fill_confidence_gate(component, eq_index)
+        _fill_claim_support_metadata(component, llm_input)
+        _fill_concepts(component, claim_index, eq_symbol_index, concept_vocab)
         _propagate_review_status(component)
         _fill_internal_flow(component)
+
+    # introduced vs reused depends on cross-component ordering (issue #8).
+    _assign_introduced_reused(result.components)
 
     return result
 
@@ -158,6 +167,179 @@ def _fill_confidence_gate(
         component.review_notes.append(reason)
     component.review_status = "review_required"
     component.publish_ready = False
+
+
+def _fill_claim_support_metadata(
+    component: ComponentRecord,
+    llm_input: ComponentAssemblyLLMInput,
+) -> None:
+    metadata = infer_support_metadata(component, llm_input.claim_centered_plan)
+    component.support_role = metadata["support_role"]
+    component.support_kind = metadata["support_kind"]
+    component.supports_claim_ids = _unique(metadata["supports_claim_ids"])
+    component.support_distance_to_headline_claim = metadata["support_distance_to_headline_claim"]
+    if component.supports_claim_ids:
+        component.linked_claim_ids = _unique(list(component.linked_claim_ids or []) + component.supports_claim_ids)
+
+
+def _fill_concepts(
+    component: ComponentRecord,
+    claim_index: dict[str, dict],
+    eq_symbol_index: dict[str, list[str]],
+    concept_vocab: dict[str, list[str]],
+) -> None:
+    """Derive component concepts deterministically (issue #8).
+
+    Concepts come from linked atomic-claim concepts, equation symbols, and
+    cartridge / claim concept terms mentioned in the component text. Concepts from
+    non-atomic claims are not used as confirmed concept backing.
+    """
+    concepts: list[str] = []
+    for cid in _component_claim_ids(component):
+        info = claim_index.get(cid)
+        if not info:
+            continue
+        if info.get("is_atomic") and str(info.get("atomicity", "atomic")) == "atomic":
+            concepts.extend(info.get("concepts") or [])
+
+    for eq_id in _all_component_equation_ids(component):
+        concepts.extend(eq_symbol_index.get(eq_id, []))
+
+    body = _component_text(component)
+    for canonical, needles in concept_vocab.items():
+        if any(needle in body for needle in needles):
+            concepts.append(canonical)
+    component.concepts = _unique(concepts)
+
+    prereq_text = _precondition_text(component)
+    prerequisites = [
+        canonical for canonical, needles in concept_vocab.items()
+        if any(needle in prereq_text for needle in needles)
+    ]
+    component.prerequisite_concepts = _unique(prerequisites)
+
+
+def _assign_introduced_reused(components: list[ComponentRecord]) -> None:
+    """Split each component's concepts into newly introduced vs reused (issue #8).
+
+    Components are walked in support order (closest to the headline claim first,
+    then original order); a concept is "introduced" the first time it appears and
+    "reused" thereafter.
+    """
+    order = sorted(
+        range(len(components)),
+        key=lambda i: (
+            int(getattr(components[i], "support_distance_to_headline_claim", 0) or 0),
+            i,
+        ),
+    )
+    seen: set[str] = set()
+    for i in order:
+        component = components[i]
+        introduced: list[str] = []
+        reused: list[str] = []
+        for concept in component.concepts or []:
+            if concept in seen:
+                reused.append(concept)
+            else:
+                introduced.append(concept)
+                seen.add(concept)
+        component.introduced_concepts = introduced
+        component.reused_concepts = reused
+
+
+def _component_claim_ids(component: ComponentRecord) -> list[str]:
+    refs = component.evidence_refs or {}
+    return _unique(
+        list(component.supports_claim_ids or [])
+        + list(component.linked_claim_ids or [])
+        + list(refs.get("claim_ids") or [])
+    )
+
+
+def _component_text(component: ComponentRecord) -> str:
+    return " ".join(
+        str(part or "")
+        for part in (
+            component.label,
+            component.summary,
+            component.reason,
+            getattr(component, "teaching_takeaway", ""),
+        )
+    ).lower()
+
+
+def _precondition_text(component: ComponentRecord) -> str:
+    parts: list[str] = []
+    for item in list(component.preconditions or []) + list(component.inputs or []):
+        if isinstance(item, dict):
+            parts.append(str(item.get("condition") or item.get("name") or item.get("text") or ""))
+        elif isinstance(item, str):
+            parts.append(item)
+    return " ".join(parts).lower()
+
+
+def _claim_concept_index(llm_input: ComponentAssemblyLLMInput) -> dict[str, dict]:
+    index: dict[str, dict] = {}
+    rows = list(llm_input.available_claims or []) + list(llm_input.accepted_claims or [])
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        cid = str(row.get("claim_id") or "")
+        if not cid:
+            continue
+        concepts = [str(c) for c in (row.get("concepts") or []) if c]
+        atomicity = str(row.get("atomicity", "atomic") or "atomic")
+        entry = index.setdefault(cid, {
+            "concepts": [],
+            "atomicity": atomicity,
+            "is_atomic": bool(row.get("is_atomic", atomicity == "atomic")),
+            "concept_assignment_status": str(
+                row.get("concept_assignment_status", "review_required") or "review_required"
+            ),
+        })
+        if concepts and not entry["concepts"]:
+            entry["concepts"] = concepts
+    return index
+
+
+def _equation_symbol_index(eq_index: dict[str, dict]) -> dict[str, list[str]]:
+    index: dict[str, list[str]] = {}
+    for eq_id, eq in eq_index.items():
+        symbols: list[str] = []
+        for sym in eq.get("defined_symbols") or []:
+            if isinstance(sym, dict):
+                name = str(sym.get("symbol") or "").strip()
+            else:
+                name = str(sym or "").strip()
+            if name:
+                symbols.append(name)
+        symbols.extend(str(s).strip() for s in (eq.get("used_symbols") or []) if str(s).strip())
+        if symbols:
+            index[eq_id] = _unique(symbols)
+    return index
+
+
+def _concept_vocab(
+    llm_input: ComponentAssemblyLLMInput,
+    claim_index: dict[str, dict],
+) -> dict[str, list[str]]:
+    """Map a canonical concept name to the lowercased needles that imply it."""
+    vocab: dict[str, list[str]] = {}
+    for term in llm_input.normalized_terms or []:
+        if not isinstance(term, dict):
+            continue
+        canonical = str(term.get("canonical") or "").strip()
+        if not canonical:
+            continue
+        needles = [canonical.lower()] + [str(a).lower() for a in (term.get("aliases") or []) if a]
+        vocab[canonical] = _unique(needles)
+    for info in claim_index.values():
+        for name in info.get("concepts") or []:
+            canonical = str(name).strip()
+            if canonical and canonical not in vocab:
+                vocab[canonical] = [canonical.lower()]
+    return vocab
 
 
 def _propagate_review_status(component: ComponentRecord) -> None:

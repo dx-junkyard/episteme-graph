@@ -60,6 +60,17 @@ class ComponentQualityEntry:
     suggested_split: list[dict] = field(default_factory=list)
 
 
+def _empty_concept_validation() -> dict:
+    return {
+        "missing_concepts": [],
+        "empty_concepts_on_main_claims": [],
+        "empty_concepts_on_main_components": [],
+        "concepts_on_composite_claims": [],
+        "concept_role_mismatch": [],
+        "concepts_from_low_confidence_sources": [],
+    }
+
+
 @dataclass
 class ExportValidationResult:
     status: str                          # one of EXPORT_STATUSES
@@ -70,6 +81,8 @@ class ExportValidationResult:
     review_items: list[ValidationEntry] = field(default_factory=list)
     component_quality: list[ComponentQualityEntry] = field(default_factory=list)
     summary: ValidationSummary = field(default_factory=ValidationSummary)
+    # Concept coverage report for claims / components (issue #8).
+    concept_validation: dict = field(default_factory=_empty_concept_validation)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -119,6 +132,89 @@ _HARD_ERROR_STAGES = {
 # Claim types representing the paper's main result / central conclusion (#312).
 # A non-atomic main-result claim is a paper-level summary, not a usable claim.
 _MAIN_RESULT_CLAIM_TYPES = {"result", "conclusion", "main_result"}
+
+
+def _ordered_unique(values) -> list:
+    result = []
+    seen = set()
+    for value in values or []:
+        text = str(value or "")
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
+
+
+def _claim_is_non_atomic(claim) -> bool:
+    atomicity = str(getattr(claim, "atomicity", "atomic") or "atomic")
+    is_atomic = bool(getattr(claim, "is_atomic", atomicity == "atomic"))
+    return atomicity in {
+        "composite",
+        "split_required",
+        "compound",
+        "non_atomic",
+        "split_pending",
+    } or not is_atomic
+
+# Domain-neutral operation / procedure words for concept role checks (issue #8).
+_PROCEDURAL_CONCEPT_TERMS = {
+    "derive", "derivation", "eliminate", "elimination", "solve", "substitute",
+    "substitution", "linearize", "linearization", "transform", "transformation",
+    "constrain", "constraint", "define", "definition", "normalize", "normalization",
+    "approximate", "approximation", "expand", "expansion", "integrate", "integration",
+    "differentiate", "reconstruct", "reconstruction",
+}
+
+
+def _looks_like_symbol(name: str) -> bool:
+    token = str(name or "").strip()
+    if not token or " " in token:
+        return False
+    if any(ch in token for ch in "_^{}\\=+/*()|<>"):
+        return True
+    return len(token) <= 3
+
+
+def _has_math_or_procedural_concept(concepts) -> bool:
+    for concept in concepts or []:
+        text = str(concept or "")
+        if text.lower() in _PROCEDURAL_CONCEPT_TERMS or _looks_like_symbol(text):
+            return True
+    return False
+
+
+def _has_named_concept(concepts) -> bool:
+    for concept in concepts or []:
+        text = str(concept or "")
+        if text.lower() in _PROCEDURAL_CONCEPT_TERMS or _looks_like_symbol(text):
+            continue
+        return True
+    return False
+
+
+def _component_concept_role_mismatch(component, concepts) -> str:
+    """Return a reason string when concepts contradict the support_role (issue #8)."""
+    role = str(getattr(component, "support_role", "") or "")
+    operation = str(getattr(component, "operation", "") or "").lower()
+    responsibility = str(getattr(component, "responsibility_type", "") or "")
+    component_type = str(getattr(component, "component_type", "") or "")
+
+    is_derivation = (
+        role == "derivation_core"
+        or responsibility == "derivation"
+        or any(operation.startswith(p) for p in ("derive", "eliminate", "solve", "substitute", "linearize"))
+    )
+    if is_derivation and concepts and not _has_math_or_procedural_concept(concepts):
+        return "derivation component lacks a mathematical or procedural concept"
+
+    if (role == "observable_bridge" or component_type == "ObservableComponent") and concepts and not _has_named_concept(concepts):
+        return "observable component lacks an observable-name concept"
+
+    is_comparison = operation.startswith("compare") or component_type in {"ComparisonComponent", "TheoryComparisonComponent"}
+    if is_comparison and concepts and not _has_named_concept(concepts):
+        return "theory-comparison component lacks a theory-class concept"
+    return ""
+
 
 # Stage names where validation_issues are always warnings/review
 _SOFT_STAGES = {
@@ -207,6 +303,12 @@ class ExportValidationGate:
         if claim_objects:
             self._check_claim_atomicity(claim_objects, errors, review_items)
 
+        # 7c. concept coverage reporting (#8): claims / components used in the
+        # graph or course mapping must carry non-empty, role-consistent concepts.
+        concept_validation = self._check_concepts(
+            claim_objects, component_result, warnings, review_items
+        )
+
         # 6. Determine status
         summary = ValidationSummary(
             error_count=len(errors),
@@ -240,6 +342,7 @@ class ExportValidationGate:
             review_items=review_items,
             component_quality=component_quality,
             summary=summary,
+            concept_validation=concept_validation,
         )
 
     # ------------------------------------------------------------------
@@ -298,6 +401,10 @@ class ExportValidationGate:
             c.claim_id
             for c in (getattr(claim_objects, "claims", []) or [])
         }
+        claim_by_id = {
+            c.claim_id: c
+            for c in (getattr(claim_objects, "claims", []) or [])
+        }
         known_evidence_ids: set[str] = {
             r.evidence_id
             for r in (getattr(evidence, "records", []) or [])
@@ -313,11 +420,28 @@ class ExportValidationGate:
             comp_id = component.component_id
             refs = component.evidence_refs or {}
 
-            for cid in refs.get("claim_ids") or []:
+            primary_claim_ids = _ordered_unique(
+                list(refs.get("claim_ids") or [])
+                + list(getattr(component, "linked_claim_ids", []) or [])
+                + list(getattr(component, "supports_claim_ids", []) or [])
+            )
+            for cid in primary_claim_ids:
                 if known_claim_ids and cid not in known_claim_ids:
                     errors.append(ValidationEntry(
                         code="UNRESOLVED_COMPONENT_CLAIM_ID",
                         message=f"component {comp_id!r} references missing claim {cid!r}",
+                        artifact="component_assembly",
+                        path=f"$.components[{comp_id}].evidence_refs.claim_ids",
+                        source_stage="export_validation",
+                    ))
+                claim = claim_by_id.get(cid)
+                if claim and _claim_is_non_atomic(claim):
+                    errors.append(ValidationEntry(
+                        code="NON_ATOMIC_CLAIM_USED_AS_COMPONENT_SUPPORT",
+                        message=(
+                            f"component {comp_id!r} uses non-atomic claim {cid!r} "
+                            f"({getattr(claim, 'atomicity', '')}) as primary claim support"
+                        ),
                         artifact="component_assembly",
                         path=f"$.components[{comp_id}].evidence_refs.claim_ids",
                         source_stage="export_validation",
@@ -1009,20 +1133,22 @@ class ExportValidationGate:
         for claim in getattr(claim_objects, "claims", []) or []:
             atomicity = str(getattr(claim, "atomicity", "atomic") or "atomic")
             claim_id = getattr(claim, "claim_id", "?")
-            # Deterministic-split suggestions (issue #317) are never confirmed atomic
+            # Deterministic-split suggestions are never confirmed atomic
             # backing; surface them so a teacher confirms the split before reuse.
-            if atomicity == "split_pending":
+            if atomicity in {"split_pending", "split_required"}:
                 review_items.append(ValidationEntry(
                     code="SPLIT_PENDING_CLAIM_NEEDS_CONFIRMATION",
                     message=(
-                        f"claim {claim_id!r} is a deterministic-split suggestion "
-                        "(split_pending); confirm via ClaimQualificationAgent atomic "
+                        f"claim {claim_id!r} is a split suggestion "
+                        f"({atomicity}); confirm via ClaimQualificationAgent atomic "
                         "rewrite before using it to back a component or graph node"
                     ),
                     artifact="claim_object_builder",
                     path=f"$.claims[{claim_id}].atomicity",
                     source_stage="export_validation",
                 ))
+                continue
+            if atomicity in {"composite", "compound"}:
                 continue
             if atomicity != "non_atomic":
                 continue
@@ -1049,6 +1175,104 @@ class ExportValidationGate:
                     path=f"$.claims[{claim_id}].atomicity",
                     source_stage="export_validation",
                 ))
+
+    def _check_concepts(
+        self,
+        claim_objects,
+        component_result,
+        warnings: list,
+        review_items: list,
+    ) -> dict:
+        """Report concept coverage for claims / components (issue #8).
+
+        Builds the structured ``concept_validation`` block and surfaces the
+        actionable gaps: main claims / components without enough concepts
+        (warnings), confirmed concepts on composite claims, and concepts drawn
+        from low-confidence sources (review). Artifacts that predate concept
+        support (no ``concepts`` attribute) are skipped.
+        """
+        block = _empty_concept_validation()
+
+        for claim in getattr(claim_objects, "claims", []) or []:
+            if not hasattr(claim, "concepts") and not hasattr(claim, "concept_assignment_status"):
+                continue
+            claim_id = getattr(claim, "claim_id", "?")
+            concepts = list(getattr(claim, "concepts", []) or [])
+            claim_type = str(getattr(claim, "claim_type", "") or "")
+            status = str(getattr(claim, "concept_assignment_status", "") or "")
+            if not concepts:
+                block["missing_concepts"].append(claim_id)
+            if claim_type in _MAIN_RESULT_CLAIM_TYPES and len(concepts) < 2:
+                block["empty_concepts_on_main_claims"].append(claim_id)
+                warnings.append(ValidationEntry(
+                    code="MAIN_CLAIM_INSUFFICIENT_CONCEPTS",
+                    message=(
+                        f"main claim {claim_id!r} has {len(concepts)} concept(s); "
+                        "main claims need at least 2 for graph / course mapping"
+                    ),
+                    artifact="claim_object_builder",
+                    path=f"$.claims[{claim_id}].concepts",
+                    source_stage="export_validation",
+                ))
+            if _claim_is_non_atomic(claim) and status == "source_backed":
+                block["concepts_on_composite_claims"].append(claim_id)
+                review_items.append(ValidationEntry(
+                    code="CONCEPTS_ON_COMPOSITE_CLAIM",
+                    message=(
+                        f"composite claim {claim_id!r} has source_backed concepts; "
+                        "non-atomic claims must keep concepts tentative"
+                    ),
+                    artifact="claim_object_builder",
+                    path=f"$.claims[{claim_id}].concept_assignment_status",
+                    source_stage="export_validation",
+                ))
+            if concepts and status == "review_required":
+                block["concepts_from_low_confidence_sources"].append(claim_id)
+                review_items.append(ValidationEntry(
+                    code="CONCEPTS_FROM_LOW_CONFIDENCE_SOURCE",
+                    message=(
+                        f"claim {claim_id!r} draws concepts from a low-confidence "
+                        "source; teacher review required before downstream use"
+                    ),
+                    artifact="claim_object_builder",
+                    path=f"$.claims[{claim_id}].concept_assignment_status",
+                    source_stage="export_validation",
+                ))
+
+        for component in getattr(component_result, "components", []) or []:
+            if not hasattr(component, "concepts"):
+                continue
+            comp_id = getattr(component, "component_id", "?")
+            concepts = list(getattr(component, "concepts", []) or [])
+            if not concepts:
+                block["missing_concepts"].append(comp_id)
+            if len(concepts) < 2:
+                block["empty_concepts_on_main_components"].append(comp_id)
+                warnings.append(ValidationEntry(
+                    code="MAIN_COMPONENT_INSUFFICIENT_CONCEPTS",
+                    message=(
+                        f"component {comp_id!r} has {len(concepts)} concept(s); "
+                        "components need at least 2 for graph / course mapping"
+                    ),
+                    artifact="component_assembly",
+                    path=f"$.components[{comp_id}].concepts",
+                    source_stage="export_validation",
+                ))
+            mismatch = _component_concept_role_mismatch(component, concepts)
+            if mismatch:
+                block["concept_role_mismatch"].append({
+                    "component_id": comp_id,
+                    "reason": mismatch,
+                })
+                warnings.append(ValidationEntry(
+                    code="COMPONENT_CONCEPT_ROLE_MISMATCH",
+                    message=f"component {comp_id!r} concept role mismatch: {mismatch}",
+                    artifact="component_assembly",
+                    path=f"$.components[{comp_id}].concepts",
+                    source_stage="export_validation",
+                ))
+
+        return block
 
     def _check_required_artifacts(
         self,

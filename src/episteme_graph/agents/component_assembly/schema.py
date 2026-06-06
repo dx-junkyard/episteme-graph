@@ -93,6 +93,7 @@ class ComponentAssemblyLLMInput:
     available_dsl_nodes: list[dict] = field(default_factory=list)
     available_dsl_edges: list[dict] = field(default_factory=list)
     available_derivation_ids: list[str] = field(default_factory=list)
+    claim_centered_plan: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -167,6 +168,17 @@ class ComponentRecord:
     secondary_operations: list[str] = field(default_factory=list)
     split_recommendation: dict = field(default_factory=dict)
     component_quality: dict = field(default_factory=dict)
+    support_role: str = ""
+    supports_claim_ids: list[str] = field(default_factory=list)
+    support_distance_to_headline_claim: int = 0
+    support_kind: str = ""
+    # Concept tags required for component graph / course mapping (issue #8).
+    # Derived deterministically from linked atomic-claim concepts, equation
+    # symbols, and cartridge normalized terms.
+    concepts: list[str] = field(default_factory=list)
+    prerequisite_concepts: list[str] = field(default_factory=list)
+    introduced_concepts: list[str] = field(default_factory=list)
+    reused_concepts: list[str] = field(default_factory=list)
     # Single main theoretical operation for this component (issue #300).
     # One of the theory-operation families
     # (define, linearize, eliminate, substitute, solve, derive, constrain, ...).
@@ -257,6 +269,14 @@ class ComponentAssemblyResult:
                 secondary_operations=list(c.get("secondary_operations") or []),
                 split_recommendation=c.get("split_recommendation") or {},
                 component_quality=c.get("component_quality") or {},
+                support_role=c.get("support_role", ""),
+                supports_claim_ids=list(c.get("supports_claim_ids") or []),
+                support_distance_to_headline_claim=int(c.get("support_distance_to_headline_claim", 0) or 0),
+                support_kind=c.get("support_kind", ""),
+                concepts=list(c.get("concepts") or []),
+                prerequisite_concepts=list(c.get("prerequisite_concepts") or []),
+                introduced_concepts=list(c.get("introduced_concepts") or []),
+                reused_concepts=list(c.get("reused_concepts") or []),
                 operation=c.get("operation", ""),
                 maturity_source=c.get("maturity_source", "llm_proposed"),
                 publish_ready=bool(c.get("publish_ready", False)),
