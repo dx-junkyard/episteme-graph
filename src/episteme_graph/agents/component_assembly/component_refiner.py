@@ -118,6 +118,9 @@ class TheoryOperationCandidate:
 class ComponentRefiner:
     def __init__(self) -> None:
         self._classifier = EquationRoleClassifier()
+        # Per-component refinement trace populated during a single refine() call
+        # (issue #324). Reset at the start of refine().
+        self._traces: dict[str, dict] = {}
 
     def refine(
         self,
@@ -126,15 +129,25 @@ class ComponentRefiner:
         derivations=None,
     ) -> ComponentAssemblyResult:
         eq_index = _equation_index(llm_input)
+        claim_index = _claim_index(llm_input)
         chains = list(getattr(derivations, "chains", []) or [])
         report = RefinementReport()
+        self._traces = {}
+
+        originals = {c.component_id: c for c in result.components}
+        original_order = [c.component_id for c in result.components]
 
         refined: list[ComponentRecord] = []
         # Map each split parent id → the id of its first child so that references
         # held elsewhere (dependencies, assembly hints) keep resolving.
         remap: dict[str, str] = {}
+        # original_id → ordered list of child component ids (issue #324).
+        child_map: dict[str, list[str]] = {}
         for component in result.components:
-            children = self._refine_component(component, eq_index, chains, report)
+            children = self._refine_component(
+                component, eq_index, chains, report, claim_index
+            )
+            child_map[component.component_id] = [c.component_id for c in children]
             if children and children[0].component_id != component.component_id:
                 remap[component.component_id] = children[0].component_id
             refined.extend(children)
@@ -143,11 +156,169 @@ class ComponentRefiner:
             self._remap_references(refined, result, remap)
 
         result.components = refined
+
+        # Step 3 (#324): recompute teaching granularity for every refined component.
+        for component in refined:
+            component.teaching_granularity = _teaching_granularity(component, eq_index)
+
         existing = result.refinement_report if isinstance(result.refinement_report, dict) else {}
         merged = dict(existing)
         merged.update(report.to_dict())
         result.refinement_report = merged
+
+        result.component_refinement = self._build_refinement_outputs(
+            original_order=original_order,
+            originals=originals,
+            child_map=child_map,
+            refined=refined,
+            remap=remap,
+        )
         return result
+
+    # ------------------------------------------------------------------
+    # Step 3 formal output contract (issue #324)
+    # ------------------------------------------------------------------
+
+    def _build_refinement_outputs(
+        self,
+        *,
+        original_order: list[str],
+        originals: dict[str, ComponentRecord],
+        child_map: dict[str, list[str]],
+        refined: list[ComponentRecord],
+        remap: dict[str, str],
+    ) -> dict:
+        refined_by_id = {c.component_id: c for c in refined}
+        records: list[dict] = []
+        id_mapping: list[dict] = []
+        split_components: list[str] = []
+        unchanged_components: list[str] = []
+        failed_refinements: list[str] = []
+        review_required_refinements: list[str] = []
+        unassigned_links: list[dict] = []
+        teaching_warnings: list[dict] = []
+
+        for original_id in original_order:
+            parent = originals[original_id]
+            child_ids = child_map.get(original_id, [])
+            trace = self._traces.get(original_id, {})
+            children = [refined_by_id[cid] for cid in child_ids if cid in refined_by_id]
+
+            is_split = len(child_ids) > 1
+            is_unchanged = len(child_ids) == 1 and child_ids[0] == original_id
+            could_not_split = bool(trace.get("could_not_split"))
+
+            child_review_required = any(
+                _is_review_required_status(c.review_status) for c in children
+            )
+            review_reasons = list(trace.get("review_reasons") or [])
+            if child_review_required and "child_requires_review" not in review_reasons:
+                review_reasons.append("child_requires_review")
+
+            if not child_ids:
+                refinement_status = "failed"
+                mapping_type = "failed"
+                failed_refinements.append(original_id)
+            elif is_split:
+                refinement_status = "split"
+                mapping_type = "one_to_many"
+                split_components.append(original_id)
+            elif could_not_split:
+                refinement_status = "review_required"
+                mapping_type = "unchanged"
+                if not review_reasons:
+                    review_reasons.append("insufficient_split_plan")
+                review_required_refinements.append(original_id)
+            elif is_unchanged:
+                refinement_status = "unchanged"
+                mapping_type = "unchanged"
+                unchanged_components.append(original_id)
+            else:
+                # Single rebuilt child with a new id (e.g. equation bundle).
+                refinement_status = "split"
+                mapping_type = "one_to_one"
+                split_components.append(original_id)
+
+            if child_review_required and original_id not in review_required_refinements:
+                review_required_refinements.append(original_id)
+
+            provenance = trace.get("provenance") or {
+                "source_claim_ids": list(parent.linked_claim_ids or []),
+                "source_equation_ids": _all_equation_ids(parent),
+                "source_evidence_ids": list(parent.linked_evidence_ids or []),
+                "source_derivation_ids": list(parent.linked_derivation_ids or []),
+            }
+
+            records.append({
+                "original_component_id": original_id,
+                "refinement_status": refinement_status,
+                "split_required": bool(
+                    (parent.split_recommendation or {}).get("required")
+                ),
+                "split_into": list(child_ids),
+                "split_reason": list(
+                    trace.get("split_reasons")
+                    or (parent.split_recommendation or {}).get("reasons")
+                    or []
+                ),
+                "split_method": str(trace.get("method") or "rule_based"),
+                "split_candidate_mapping": list(trace.get("split_candidate_mapping") or []),
+                "provenance": provenance,
+                "review_reasons": review_reasons,
+            })
+            id_mapping.append({
+                "original_component_id": original_id,
+                "new_component_ids": list(child_ids),
+                "mapping_type": mapping_type,
+            })
+
+            for entry in trace.get("unassigned") or []:
+                unassigned_links.append({"original_component_id": original_id, **entry})
+
+        for component in refined:
+            granularity = component.teaching_granularity or {}
+            if granularity.get("split_if_too_dense") or not granularity.get(
+                "teachable_as_single_unit", True
+            ):
+                teaching_warnings.append({
+                    "component_id": component.component_id,
+                    "estimated_slide_count": granularity.get("estimated_slide_count"),
+                    "teaching_takeaway_quality": granularity.get("teaching_takeaway_quality"),
+                    "reason": "refined component is still too dense to teach as a single unit",
+                })
+
+        graph_updates = _component_graph_updates(
+            originals=originals,
+            refined_by_id=refined_by_id,
+            child_map=child_map,
+            remap=remap,
+        )
+
+        refinement_validation = {
+            "split_components": split_components,
+            "unchanged_components": unchanged_components,
+            "failed_refinements": failed_refinements,
+            "review_required_refinements": _ordered_unique(review_required_refinements),
+            "unassigned_links": unassigned_links,
+            "dangling_component_refs": graph_updates["unresolved_edges"],
+            "teaching_granularity_warnings": teaching_warnings,
+        }
+
+        return {
+            "refined_components": [
+                {
+                    "component_id": c.component_id,
+                    "responsibility_type": c.responsibility_type or c.operation,
+                    "review_status": c.review_status,
+                    "teaching_granularity": dict(c.teaching_granularity or {}),
+                }
+                for c in refined
+            ],
+            "component_refinement_records": records,
+            "component_id_mapping": id_mapping,
+            "component_graph_updates": graph_updates,
+            "refinement_validation": refinement_validation,
+        }
 
     def _remap_references(
         self,
@@ -179,7 +350,9 @@ class ComponentRefiner:
         eq_index: dict[str, dict],
         chains: list,
         report: RefinementReport,
+        claim_index: dict[str, dict] | None = None,
     ) -> list[ComponentRecord]:
+        claim_index = claim_index or {}
         split = component.split_recommendation if isinstance(component.split_recommendation, dict) else {}
         if split.get("required"):
             report.oversized_components.append({
@@ -199,12 +372,21 @@ class ComponentRefiner:
         if responsibility_children:
             return responsibility_children
 
+        # Step 3 priority order (#324): consume Step 1 ``suggested_split`` as the
+        # primary split plan before falling back to derivation-driven splitting.
+        suggested_children = self._suggested_split_children(
+            component, split, eq_index, claim_index, report
+        )
+        if suggested_children:
+            return suggested_children
+
         groups, generic_steps = self._operation_groups(component, chains)
 
         if component.component_type not in _DERIVATION_TYPES:
             # Nothing to split: make sure the component still has a single
             # main operation recorded and role-classified equations.
             self._finalize_single(component, eq_index, groups)
+            self._mark_could_not_split(component, split)
             return [component]
 
         # Generic steps never form their own component; fold them into the unit
@@ -233,6 +415,7 @@ class ComponentRefiner:
                     "bundle into a single theory-operation component."
                 )
                 return [rebuilt]
+            self._mark_could_not_split(component, split)
             return [component]
 
         children: list[ComponentRecord] = []
@@ -267,6 +450,120 @@ class ComponentRefiner:
                 f"Component bundled {len(family_steps)} distinct reusable theory "
                 "units; split into one component per theory-operation family "
                 "(issue #308/#319)."
+            ),
+        ))
+        return children
+
+    def _mark_could_not_split(self, component: ComponentRecord, split: dict) -> None:
+        """Record that a ``split_required`` component could not be decomposed.
+
+        Step 3 (#324) rule 3: when the suggested plan is insufficient and no
+        deterministic split is possible, the component is kept unchanged but the
+        refinement is flagged ``review_required`` rather than silently accepted.
+        """
+        if not (split or {}).get("required"):
+            return
+        trace = self._traces.setdefault(component.component_id, {})
+        trace["could_not_split"] = True
+        trace.setdefault("method", "rule_based")
+        reasons = trace.setdefault("review_reasons", [])
+        if "insufficient_split_plan" not in reasons:
+            reasons.append("insufficient_split_plan")
+
+    def _suggested_split_children(
+        self,
+        component: ComponentRecord,
+        split: dict,
+        eq_index: dict[str, dict],
+        claim_index: dict[str, dict],
+        report: RefinementReport,
+    ) -> list[ComponentRecord]:
+        """Split a component using Step 1's ``suggested_split`` plan (#324).
+
+        Links (claims / equations / evidence / derivations) are *reassigned* to
+        the most relevant child rather than copied wholesale; concepts are
+        recomputed per child; low-confidence equations and composite claims
+        downgrade the affected child to ``review_required``. Anything that cannot
+        be assigned confidently is recorded as an unassigned link instead of being
+        dropped.
+        """
+        if not split.get("required"):
+            return []
+        suggested = [s for s in (split.get("suggested_components") or []) if isinstance(s, dict)]
+        # Distinct primary responsibilities are required to justify a split.
+        responsibilities = _ordered_unique(
+            canonical_responsibility_type(s.get("responsibility_type"))
+            for s in suggested
+            if canonical_responsibility_type(s.get("responsibility_type")) in RESPONSIBILITY_TYPES
+        )
+        if len(suggested) < 2 or len(responsibilities) < 2:
+            return []
+
+        plan, unassigned = _redistribute_links(component, suggested, eq_index, claim_index)
+        assignable = [spec for spec in plan if _spec_has_payload(spec)]
+        if len(assignable) < 2:
+            return []
+
+        children: list[ComponentRecord] = []
+        candidate_mapping: list[dict] = []
+        for idx, spec in enumerate(plan, start=1):
+            child_id = f"{component.component_id}__r{idx}"
+            child = _build_suggested_component(
+                component, child_id, spec, eq_index, claim_index
+            )
+            children.append(child)
+            candidate_mapping.append({
+                "suggested_component_name": spec.get("name") or child.label,
+                "new_component_id": child_id,
+                "responsibility_type": spec.get("responsibility_type"),
+                "assigned_claim_ids": list(spec.get("claim_ids") or []),
+                "assigned_equation_ids": list(spec.get("equation_ids") or []),
+                "assigned_evidence_ids": list(spec.get("evidence_ids") or []),
+                "assigned_derivation_ids": list(spec.get("derivation_ids") or []),
+                "assigned_concepts": list(child.concepts or []),
+            })
+
+        # introduced vs reused depends on cross-child ordering (issue #8 / #324).
+        _assign_introduced_reused_children(children, component)
+
+        # Sequential dependency so the original derivation/explanation order is kept.
+        for prev, nxt in zip(children, children[1:]):
+            nxt.dependencies.append({
+                "dependency_type": "depends_on",
+                "component_refs": [prev.component_id],
+                "reason": "Sequential responsibility dependency from ComponentRefiner (#324).",
+            })
+
+        review_reasons: list[str] = []
+        for child in children:
+            if _is_review_required_status(child.review_status):
+                for note in child.review_notes:
+                    if note not in review_reasons:
+                        review_reasons.append(note)
+
+        self._traces[component.component_id] = {
+            "method": "rule_based",
+            "split_reasons": list(split.get("reasons") or []),
+            "split_candidate_mapping": candidate_mapping,
+            "unassigned": unassigned,
+            "review_reasons": review_reasons,
+            "provenance": {
+                "source_claim_ids": list(component.linked_claim_ids or []),
+                "source_equation_ids": _all_equation_ids(component),
+                "source_evidence_ids": list(component.linked_evidence_ids or []),
+                "source_derivation_ids": list(component.linked_derivation_ids or []),
+            },
+        }
+
+        report.split_actions.append(RefinementAction(
+            parent_component_id=component.component_id,
+            parent_label=component.label,
+            child_component_ids=[c.component_id for c in children],
+            operations=[c.responsibility_type or c.operation for c in children],
+            reason=(
+                "Consumed Step 1 suggested_split plan; reassigned links and "
+                "recomputed concepts into one single-responsibility component "
+                "per suggested child (#324)."
             ),
         ))
         return children
@@ -1231,3 +1528,490 @@ def _ordered_unique(values) -> list[str]:
             seen.add(text)
             result.append(text)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Step 3 suggested_split helpers (issue #324)
+# ---------------------------------------------------------------------------
+
+# Responsibility groupings used to reassign equations to suggested children.
+_DEFINITION_RESPONSIBILITIES = {"definition", "model", "observation_model", "observable_basis"}
+_EQUATION_SYSTEM_RESPONSIBILITIES = {"equation_system"}
+_DERIVATION_RESPONSIBILITIES = {"derivation"}
+_RESULT_RESPONSIBILITIES = {"constraint", "application", "limitation"}
+
+_CATEGORY_TO_RESPONSIBILITIES = {
+    "definition": _DEFINITION_RESPONSIBILITIES,
+    "equation_system": _EQUATION_SYSTEM_RESPONSIBILITIES | _DERIVATION_RESPONSIBILITIES,
+    "derivation": _DERIVATION_RESPONSIBILITIES | _EQUATION_SYSTEM_RESPONSIBILITIES,
+    "result": _RESULT_RESPONSIBILITIES,
+}
+
+_RESPONSIBILITY_OPERATIONS = {
+    "definition": "define",
+    "model": "parameterize",
+    "observation_model": "parameterize",
+    "observable_basis": "observable_definition",
+    "equation_system": "linearize",
+    "derivation": "derive",
+    "constraint": "constrain",
+    "application": "diagnose",
+    "limitation": "constrain",
+}
+
+
+def _operation_for_responsibility(responsibility: str) -> str:
+    return _RESPONSIBILITY_OPERATIONS.get(str(responsibility or ""), str(responsibility or ""))
+
+
+def _equation_category(eq: dict) -> str:
+    role = str(eq.get("role") or eq.get("equation_type") or "").lower()
+    if role in {"definition", "equation_definition"}:
+        return "definition"
+    if role in {"constraint", "condition", "consistency_relation", "result"}:
+        return "result"
+    if role in {"transformation", "relation"}:
+        return "equation_system"
+    return ""
+
+
+def _claim_index(llm_input) -> dict[str, dict]:
+    index: dict[str, dict] = {}
+    if not llm_input:
+        return index
+    rows = list(getattr(llm_input, "available_claims", []) or []) + list(
+        getattr(llm_input, "accepted_claims", []) or []
+    )
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        cid = str(row.get("claim_id") or "")
+        if not cid:
+            continue
+        atomicity = str(row.get("atomicity", "atomic") or "atomic")
+        entry = index.setdefault(cid, {
+            "concepts": [str(c) for c in (row.get("concepts") or []) if c],
+            "atomicity": atomicity,
+            "is_atomic": bool(row.get("is_atomic", atomicity == "atomic")),
+            "equation_ids": [str(e) for e in (row.get("equation_ids") or []) if e],
+            "evidence_ids": [str(e) for e in (row.get("source_evidence_ids") or []) if e],
+        })
+    return index
+
+
+def _claim_is_atomic(cid: str, claim_index: dict[str, dict]) -> bool:
+    info = claim_index.get(cid)
+    if not info:
+        # Unknown claims are treated as atomic so we do not over-flag review.
+        return True
+    return bool(info.get("is_atomic", True)) and str(info.get("atomicity", "atomic")) == "atomic"
+
+
+def _equation_symbols(eq: dict) -> list[str]:
+    symbols: list[str] = []
+    for sym in eq.get("defined_symbols") or []:
+        name = sym.get("symbol") if isinstance(sym, dict) else sym
+        if name:
+            symbols.append(str(name).strip())
+    symbols.extend(str(s).strip() for s in (eq.get("used_symbols") or []) if str(s).strip())
+    return _ordered_unique(symbols)
+
+
+def _is_review_required_status(status: object) -> bool:
+    return str(status or "") in {"review_required", "teacher_review_required"}
+
+
+def _match_spec_by_category(specs: list[dict], category: str) -> dict | None:
+    if not category:
+        return None
+    allowed = _CATEGORY_TO_RESPONSIBILITIES.get(category, set())
+    for spec in specs:
+        if spec["responsibility_type"] in allowed:
+            return spec
+    return None
+
+
+def _match_spec_by_equation_overlap(specs: list[dict], claim_eqs: set) -> dict | None:
+    if not claim_eqs:
+        return None
+    best: dict | None = None
+    best_n = 0
+    for spec in specs:
+        overlap = len(set(spec["equation_ids"]) & claim_eqs)
+        if overlap > best_n:
+            best_n = overlap
+            best = spec
+    return best
+
+
+def _spec_has_payload(spec: dict) -> bool:
+    return bool(
+        spec.get("equation_ids")
+        or spec.get("claim_ids")
+        or spec.get("evidence_ids")
+        or spec.get("derivation_ids")
+    )
+
+
+def _redistribute_links(
+    component: ComponentRecord,
+    suggested: list[dict],
+    eq_index: dict[str, dict],
+    claim_index: dict[str, dict],
+) -> tuple[list[dict], list[dict]]:
+    """Reassign the parent's links across the suggested children (#324 rule 4).
+
+    Returns ``(child_specs, unassigned_links)``. Links that cannot be assigned
+    confidently are recorded in ``unassigned_links`` rather than dropped.
+    """
+    specs: list[dict] = []
+    for s in suggested:
+        resp = canonical_responsibility_type(s.get("responsibility_type"))
+        specs.append({
+            "name": s.get("name") or resp.replace("_", " ").title(),
+            "responsibility_type": resp,
+            "operation": s.get("operation") or _operation_for_responsibility(resp),
+            "equation_ids": [],
+            "claim_ids": [],
+            "evidence_ids": [],
+            "derivation_ids": [],
+            "review_required": False,
+            "review_notes": [],
+        })
+    unassigned: list[dict] = []
+
+    # Equations → responsibility category.
+    for eq_id in _all_equation_ids(component):
+        target = _match_spec_by_category(specs, _equation_category(eq_index.get(eq_id) or {}))
+        if target is None:
+            unassigned.append({
+                "link_type": "equation",
+                "link_id": eq_id,
+                "reason": "no responsibility category match",
+            })
+            continue
+        target["equation_ids"].append(eq_id)
+
+    # Claims → the child sharing the most equations; atomic fall back to first.
+    claim_ids = _ordered_unique(
+        list(component.linked_claim_ids or [])
+        + list((component.evidence_refs or {}).get("claim_ids") or [])
+        + list(component.supports_claim_ids or [])
+    )
+    claim_evidence: dict[str, set] = {}
+    for cid in claim_ids:
+        info = claim_index.get(cid, {})
+        claim_evidence[cid] = set(info.get("evidence_ids") or [])
+        target = _match_spec_by_equation_overlap(specs, set(info.get("equation_ids") or []))
+        if target is None:
+            if _claim_is_atomic(cid, claim_index):
+                target = specs[0]
+            else:
+                unassigned.append({
+                    "link_type": "claim",
+                    "link_id": cid,
+                    "reason": "composite claim without confident target",
+                })
+                continue
+        target["claim_ids"].append(cid)
+
+    # Evidence → the child whose assigned claims reference it.
+    evidence_ids = _ordered_unique(
+        list(component.linked_evidence_ids or [])
+        + list((component.evidence_refs or {}).get("evidence_ids") or [])
+    )
+    for ev_id in evidence_ids:
+        target = next(
+            (
+                spec
+                for spec in specs
+                if any(ev_id in claim_evidence.get(cid, set()) for cid in spec["claim_ids"])
+            ),
+            None,
+        )
+        if target is None:
+            unassigned.append({
+                "link_type": "evidence",
+                "link_id": ev_id,
+                "reason": "no child claim references this evidence",
+            })
+            continue
+        target["evidence_ids"].append(ev_id)
+
+    # Derivations → the first derivational child.
+    derivational = [
+        spec
+        for spec in specs
+        if spec["responsibility_type"]
+        in (_DERIVATION_RESPONSIBILITIES | _EQUATION_SYSTEM_RESPONSIBILITIES | {"constraint"})
+    ]
+    for d_id in _ordered_unique(component.linked_derivation_ids or []):
+        if derivational:
+            derivational[0]["derivation_ids"].append(d_id)
+        else:
+            unassigned.append({
+                "link_type": "derivation",
+                "link_id": d_id,
+                "reason": "no derivational child to receive derivation",
+            })
+
+    # Children supported only by composite claims are downgraded.
+    for spec in specs:
+        if spec["claim_ids"] and not any(
+            _claim_is_atomic(c, claim_index) for c in spec["claim_ids"]
+        ):
+            spec["review_required"] = True
+            note = "supported primarily by composite/non-atomic claim"
+            if note not in spec["review_notes"]:
+                spec["review_notes"].append(note)
+
+    return specs, unassigned
+
+
+def _recompute_concepts(
+    claim_ids: list[str],
+    eq_ids: list[str],
+    eq_index: dict[str, dict],
+    claim_index: dict[str, dict],
+) -> list[str]:
+    concepts: list[str] = []
+    for cid in claim_ids:
+        if _claim_is_atomic(cid, claim_index):
+            concepts.extend(claim_index.get(cid, {}).get("concepts") or [])
+    for eq_id in eq_ids:
+        concepts.extend(_equation_symbols(eq_index.get(eq_id) or {}))
+    return _ordered_unique(concepts)
+
+
+def _assign_introduced_reused_children(
+    children: list[ComponentRecord],
+    parent: ComponentRecord,
+) -> None:
+    seen: set[str] = set()
+    for child in children:
+        introduced: list[str] = []
+        reused: list[str] = []
+        for concept in child.concepts or []:
+            if concept in seen:
+                reused.append(concept)
+            else:
+                introduced.append(concept)
+                seen.add(concept)
+        child.introduced_concepts = introduced
+        child.reused_concepts = reused
+        child.prerequisite_concepts = _ordered_unique(
+            [c for c in (parent.prerequisite_concepts or []) if c in (child.concepts or [])]
+            + reused
+        )
+
+
+def _suggested_io(direction: str, spec: dict, eq_ids: list[str], parent: ComponentRecord) -> list[dict]:
+    name = str(spec.get("name") or "")
+    if eq_ids:
+        return [{
+            "name": f"{name} {'inputs' if direction == 'input' else 'outputs'}".strip(),
+            "role": f"responsibility_{direction}",
+            "equation_ids": list(eq_ids) if direction == "output" else eq_ids[:1],
+        }]
+    fallback = list(parent.inputs if direction == "input" else parent.outputs)
+    if fallback:
+        return fallback[:1]
+    return [{"name": f"{name} {direction}".strip(), "role": f"responsibility_{direction}"}]
+
+
+def _suggested_summary(spec: dict, parent: ComponentRecord) -> str:
+    return (
+        f"{spec.get('name') or parent.label} isolated as a reusable "
+        f"{spec.get('responsibility_type')} component (#324)."
+    )
+
+
+def _suggested_takeaway(spec: dict, equation_count: int) -> str:
+    name = spec.get("name") or "Component"
+    return (
+        f"{name}: a single {spec.get('responsibility_type')} responsibility "
+        f"covering {equation_count} equation(s)."
+    )
+
+
+def _add_note(notes: list[str], note: str) -> None:
+    if note and note not in notes:
+        notes.append(note)
+
+
+def _build_suggested_component(
+    parent: ComponentRecord,
+    component_id: str,
+    spec: dict,
+    eq_index: dict[str, dict],
+    claim_index: dict[str, dict],
+) -> ComponentRecord:
+    resp = str(spec.get("responsibility_type") or "")
+    operation = str(spec.get("operation") or _operation_for_responsibility(resp))
+    eq_ids = list(spec.get("equation_ids") or [])
+    claim_ids = list(spec.get("claim_ids") or [])
+    evidence_ids = list(spec.get("evidence_ids") or [])
+    derivation_ids = list(spec.get("derivation_ids") or [])
+
+    concepts = _recompute_concepts(claim_ids, eq_ids, eq_index, claim_index)
+
+    blocked = _blocked_equation_ids(eq_ids, eq_index)
+    review_eqs = _review_required_equation_ids(eq_ids, eq_index)
+    atomic_claims = [c for c in claim_ids if _claim_is_atomic(c, claim_index)]
+    composite_only = bool(claim_ids) and not atomic_claims
+    empty_payload = not (claim_ids or evidence_ids or eq_ids)
+
+    review_notes = list(parent.review_notes)
+    review_required = False
+    if blocked:
+        review_required = True
+        _add_note(review_notes, "linked equation cannot support claim or derivation")
+    if review_eqs:
+        review_required = True
+        _add_note(review_notes, "linked equation needs math review")
+    if composite_only:
+        review_required = True
+        _add_note(review_notes, "supported primarily by composite/non-atomic claim")
+    if spec.get("review_required"):
+        review_required = True
+        for note in spec.get("review_notes") or []:
+            _add_note(review_notes, note)
+    if empty_payload and resp not in {"application", "limitation"}:
+        review_required = True
+        _add_note(review_notes, "missing primary claim/equation/evidence support")
+
+    # A successfully split child is source_backed unless its own payload (blocked
+    # equations, composite-only claims, missing support) triggers review. It does
+    # not inherit the parent's review_required, which was set only to flag that the
+    # coarse parent needed splitting (#324).
+    review_status = "review_required" if review_required else "source_backed"
+
+    evidence_refs = copy.deepcopy(parent.evidence_refs or {})
+    evidence_refs["equation_ids"] = eq_ids
+    evidence_refs["claim_ids"] = claim_ids
+
+    eqsys_like = {"equation_system", "derivation", "constraint"}
+    return ComponentRecord(
+        component_id=component_id,
+        component_type=parent.component_type,
+        label=str(spec.get("name") or parent.label),
+        summary=_suggested_summary(spec, parent),
+        inputs=_suggested_io("input", spec, eq_ids, parent),
+        outputs=_suggested_io("output", spec, eq_ids, parent),
+        preconditions=list(parent.preconditions),
+        cautions=list(parent.cautions),
+        dependencies=[],
+        evidence_refs=evidence_refs,
+        reason=(
+            f"Split from oversized component {parent.component_id} via Step 1 "
+            "suggested_split (#324)."
+        ),
+        confidence=parent.confidence,
+        review_notes=review_notes,
+        internal_flow=_responsibility_flow(eq_ids, operation),
+        linked_claim_ids=claim_ids,
+        linked_equation_ids=eq_ids,
+        linked_evidence_ids=evidence_ids,
+        linked_derivation_ids=derivation_ids,
+        linked_dsl_node_ids=list(parent.linked_dsl_node_ids),
+        linked_dsl_edge_ids=list(parent.linked_dsl_edge_ids),
+        input_equation_ids=eq_ids[:-1] if len(eq_ids) > 1 and resp in eqsys_like else [],
+        intermediate_equation_ids=[],
+        output_equation_ids=(
+            eq_ids[-1:] if eq_ids and resp in (eqsys_like | {"observable_basis"}) else []
+        ),
+        constraint_equation_ids=[],
+        definition_equation_ids=eq_ids if resp in _DEFINITION_RESPONSIBILITIES else [],
+        review_required_equation_ids=_ordered_unique(review_eqs + blocked),
+        eliminated_symbols=[],
+        retained_symbols=[],
+        equation_confidence_summary=dict(parent.equation_confidence_summary or {}),
+        confidence_gate=_confidence_gate(blocked),
+        review_status=review_status,
+        teaching_takeaway=_suggested_takeaway(spec, len(eq_ids)),
+        source_scope=copy.deepcopy(parent.source_scope or {}),
+        assumptions=list(parent.assumptions),
+        approximations=list(parent.approximations),
+        constraints=list(parent.constraints),
+        invalid_conditions=list(parent.invalid_conditions),
+        responsibility_type=resp,
+        primary_operation=_operation_family(operation),
+        secondary_operations=[],
+        split_recommendation=_no_split_recommendation(),
+        concepts=concepts,
+        prerequisite_concepts=[],
+        introduced_concepts=[],
+        reused_concepts=[],
+        **_child_support_fields(parent, resp),
+        operation=operation,
+    )
+
+
+def _teaching_granularity(component: ComponentRecord, eq_index: dict[str, dict]) -> dict:
+    """Issue 10-style teaching granularity check, run after splitting (#324)."""
+    equation_count = len(_all_equation_ids(component))
+    concept_count = len(component.concepts or [])
+    flow_count = len(component.internal_flow or [])
+    secondary_count = len(component.secondary_operations or [])
+
+    too_dense = (
+        equation_count > 5
+        or concept_count > 6
+        or flow_count > 6
+        or secondary_count > 2
+    )
+    estimated = 1
+    if equation_count > 3 or concept_count > 4 or flow_count > 4:
+        estimated = 2
+    if too_dense:
+        estimated = max(estimated, 3)
+
+    takeaway = str(component.teaching_takeaway or "").strip()
+    if not takeaway or len(takeaway) < 8:
+        quality = "weak"
+    elif too_dense:
+        quality = "too_broad"
+    else:
+        quality = "good"
+
+    return {
+        "estimated_slide_count": estimated,
+        "teachable_as_single_unit": not too_dense,
+        "split_if_too_dense": too_dense,
+        "teaching_takeaway_quality": quality,
+    }
+
+
+def _component_graph_updates(
+    *,
+    originals: dict[str, ComponentRecord],
+    refined_by_id: dict[str, ComponentRecord],
+    child_map: dict[str, list[str]],
+    remap: dict[str, str],
+) -> dict:
+    original_ids = set(originals)
+    refined_ids = set(refined_by_id)
+    removed_nodes: list[str] = []
+    added_nodes: list[str] = []
+    for original_id, child_ids in child_map.items():
+        if original_id not in refined_ids:
+            removed_nodes.append(original_id)
+        for cid in child_ids:
+            if cid not in original_ids:
+                added_nodes.append(cid)
+    rewired_edges = [{"from": old, "to": new} for old, new in remap.items()]
+    unresolved_edges: list[dict] = []
+    for component in refined_by_id.values():
+        for dep in component.dependencies or []:
+            for ref in dep.get("component_refs") or []:
+                if ref not in refined_ids:
+                    unresolved_edges.append({
+                        "component_id": component.component_id,
+                        "missing_ref": ref,
+                    })
+    return {
+        "removed_nodes": _ordered_unique(removed_nodes),
+        "added_nodes": _ordered_unique(added_nodes),
+        "rewired_edges": rewired_edges,
+        "unresolved_edges": unresolved_edges,
+    }
