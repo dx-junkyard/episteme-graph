@@ -890,3 +890,59 @@ def test_low_confidence_source_concepts_flagged_for_review():
     result = _run_gate(claim_objects=_ClaimObjectResult([claim]))
     assert "claim_low" in result.concept_validation["concepts_from_low_confidence_sources"]
     assert "CONCEPTS_FROM_LOW_CONFIDENCE_SOURCE" in [r.code for r in result.review_items]
+
+
+def _role_mismatch_reasons(result, comp_id):
+    return [
+        e["reason"]
+        for e in result.concept_validation["concept_role_mismatch"]
+        if e["component_id"] == comp_id
+    ]
+
+
+def test_derivation_component_without_math_concept_is_role_mismatch():
+    comp = _ComponentRecord(
+        "comp_deriv",
+        {"claim_ids": [], "evidence_ids": []},
+        primary_operation="eliminate_bias",
+    )
+    comp.concepts = ["Galaxy survey", "Gravity model"]  # named, but no math/procedural
+    result = _run_gate(component_result=_ComponentResult([comp]))
+    reasons = _role_mismatch_reasons(result, "comp_deriv")
+    assert any("mathematical or procedural" in r for r in reasons)
+    assert "COMPONENT_CONCEPT_ROLE_MISMATCH" in [w.code for w in result.warnings]
+
+
+def test_observable_component_without_named_concept_is_role_mismatch():
+    comp = _ComponentRecord(
+        "comp_obs",
+        {"claim_ids": [], "evidence_ids": []},
+        component_type="ObservableComponent",
+    )
+    comp.concepts = ["b_1", "derive"]  # only symbol + procedural
+    result = _run_gate(component_result=_ComponentResult([comp]))
+    reasons = _role_mismatch_reasons(result, "comp_obs")
+    assert any("observable-name" in r for r in reasons)
+
+
+def test_comparison_component_without_theory_class_is_role_mismatch():
+    comp = _ComponentRecord(
+        "comp_cmp",
+        {"claim_ids": [], "evidence_ids": []},
+        component_type="ComparisonComponent",
+    )
+    comp.concepts = ["b_1", "solve"]  # only symbol + procedural
+    result = _run_gate(component_result=_ComponentResult([comp]))
+    reasons = _role_mismatch_reasons(result, "comp_cmp")
+    assert any("theory-class" in r for r in reasons)
+
+
+def test_well_tagged_components_have_no_role_mismatch():
+    comp = _ComponentRecord(
+        "comp_ok",
+        {"claim_ids": [], "evidence_ids": []},
+        primary_operation="eliminate_bias",
+    )
+    comp.concepts = ["b_1", "consistency relation"]  # symbol + named
+    result = _run_gate(component_result=_ComponentResult([comp]))
+    assert result.concept_validation["concept_role_mismatch"] == []
