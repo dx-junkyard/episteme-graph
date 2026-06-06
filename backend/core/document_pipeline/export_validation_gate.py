@@ -94,6 +94,29 @@ def _empty_derivation_graph_alignment() -> dict:
     }
 
 
+def _empty_theory_bundle_validation() -> dict:
+    return {
+        "errors": [],
+        "warnings": [],
+        "review_items": [],
+        "bundle_created": False,
+        "headline_claim_linked": False,
+        "component_refs_valid": True,
+        "support_map_linked": False,
+    }
+
+
+def _empty_teaching_output_validation() -> dict:
+    return {
+        "errors": [],
+        "warnings": [],
+        "review_items": [],
+        "course_topics_link_components": True,
+        "blueprint_refs_valid": True,
+        "blackbox_policy_respects_confidence": True,
+    }
+
+
 @dataclass
 class ExportValidationResult:
     status: str                          # one of EXPORT_STATUSES
@@ -110,6 +133,10 @@ class ExportValidationResult:
     component_refinement_validation: dict = field(default_factory=_empty_refinement_validation)
     # DerivationGraphAligner Step 4 reporting (issue #325).
     derivation_graph_alignment: dict = field(default_factory=_empty_derivation_graph_alignment)
+    # TheoryBundleBuilder Step 5 reporting (issue #326).
+    theory_bundle_validation: dict = field(default_factory=_empty_theory_bundle_validation)
+    # TeachingOutputMapper Step 5 reporting (issue #326).
+    teaching_output_validation: dict = field(default_factory=_empty_teaching_output_validation)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -170,6 +197,18 @@ def _ordered_unique(values) -> list:
             seen.add(text)
             result.append(text)
     return result
+
+
+def _component_low_confidence_equation_ids(component) -> list:
+    """Low-confidence equation ids a component carries (Step 3 fields, #326).
+
+    Used by the teaching-output check to verify a topic's blackbox_policy covers
+    every low-confidence equation of its linked components.
+    """
+    ids = list(getattr(component, "review_required_equation_ids", []) or [])
+    gate = getattr(component, "confidence_gate", {}) or {}
+    ids.extend(gate.get("blocked_by_equation_ids") or [])
+    return _ordered_unique(ids)
 
 
 def _alignment_code(entry) -> str:
@@ -362,6 +401,17 @@ class ExportValidationGate:
             component_result, errors, warnings, review_items
         )
 
+        # 7f. theory bundle + teaching output reporting (#326): Step 5 represents
+        # the whole paper as a TheoryBundle and maps refined components into a
+        # teaching output. The gate re-validates the bundle / topic / blueprint
+        # references against the refined components so dangling refs surface here.
+        theory_bundle_validation = self._check_theory_bundle(
+            component_result, errors, warnings, review_items
+        )
+        teaching_output_validation = self._check_teaching_output(
+            component_result, errors, warnings, review_items
+        )
+
         # 6. Determine status
         summary = ValidationSummary(
             error_count=len(errors),
@@ -398,6 +448,8 @@ class ExportValidationGate:
             concept_validation=concept_validation,
             component_refinement_validation=component_refinement_validation,
             derivation_graph_alignment=derivation_graph_alignment,
+            theory_bundle_validation=theory_bundle_validation,
+            teaching_output_validation=teaching_output_validation,
         )
 
     # ------------------------------------------------------------------
@@ -930,6 +982,191 @@ class ExportValidationGate:
                 source_stage="export_validation",
             ))
 
+        return result
+
+    def _check_theory_bundle(
+        self,
+        component_result,
+        errors: list,
+        warnings: list,
+        review_items: list,
+    ) -> dict:
+        """Validate the TheoryBundle Step 5 container (issue #326).
+
+        Reads ``component_result.theory_bundle.theory_bundle`` and re-validates
+        its component references against the refined components so dangling refs
+        surface here regardless of what the stage pre-computed. Aggregates the
+        stage's own errors/warnings/review items as well.
+        """
+        bundle_block = getattr(component_result, "theory_bundle", {}) or {}
+        if not isinstance(bundle_block, dict) or not bundle_block:
+            return _empty_theory_bundle_validation()
+        bundle = bundle_block.get("theory_bundle")
+        if not isinstance(bundle, dict) or not bundle:
+            return _empty_theory_bundle_validation()
+
+        known_ids = {
+            c.component_id for c in (getattr(component_result, "components", []) or [])
+        }
+
+        result = _empty_theory_bundle_validation()
+        stage_block = bundle_block.get("theory_bundle_validation")
+        if isinstance(stage_block, dict):
+            for key in ("bundle_created", "headline_claim_linked", "support_map_linked"):
+                if key in stage_block:
+                    result[key] = stage_block[key]
+
+        # Authoritative ref re-validation (independent of stage booleans).
+        dangling = [
+            cid for cid in bundle.get("component_ids", []) or [] if cid not in known_ids
+        ]
+        result["component_refs_valid"] = not dangling
+        for cid in dangling:
+            errors.append(ValidationEntry(
+                code="THEORY_BUNDLE_DANGLING_COMPONENT_REF",
+                message=f"theory bundle references missing component {cid!r}",
+                artifact="component_assembly",
+                path="$.theory_bundle.theory_bundle.component_ids",
+                source_stage="export_validation",
+            ))
+
+        if not result["headline_claim_linked"]:
+            warnings.append(ValidationEntry(
+                code="THEORY_BUNDLE_HEADLINE_CLAIM_MISSING",
+                message="theory bundle is not linked to a headline claim",
+                artifact="component_assembly",
+                path="$.theory_bundle.theory_bundle.headline_claim_id",
+                source_stage="export_validation",
+            ))
+        if not result["support_map_linked"]:
+            warnings.append(ValidationEntry(
+                code="THEORY_BUNDLE_SUPPORT_MAP_MISSING",
+                message="theory bundle is not linked to a renderable support map",
+                artifact="component_assembly",
+                path="$.theory_bundle.theory_bundle.support_map_id",
+                source_stage="export_validation",
+            ))
+        if str(bundle.get("review_status")) == "review_required":
+            review_items.append(ValidationEntry(
+                code="THEORY_BUNDLE_REVIEW_REQUIRED",
+                message="theory bundle requires review before publish-ready export",
+                artifact="component_assembly",
+                path="$.theory_bundle.theory_bundle.review_status",
+                source_stage="export_validation",
+            ))
+        return result
+
+    def _check_teaching_output(
+        self,
+        component_result,
+        errors: list,
+        warnings: list,
+        review_items: list,
+    ) -> dict:
+        """Validate the TeachingOutput Step 5 mapping (issue #326).
+
+        Re-validates course topic / blueprint component references against the
+        refined components and verifies each topic's ``blackbox_policy`` covers
+        the low-confidence equations of its linked components (equation
+        confidence must be respected before teaching).
+        """
+        bundle_block = getattr(component_result, "theory_bundle", {}) or {}
+        if not isinstance(bundle_block, dict) or not bundle_block:
+            return _empty_teaching_output_validation()
+        teaching = bundle_block.get("course_mapping")
+        blueprint = bundle_block.get("blueprint_updates") or {}
+        if not isinstance(teaching, dict) or not teaching:
+            return _empty_teaching_output_validation()
+
+        components = getattr(component_result, "components", []) or []
+        known_ids = {c.component_id for c in components}
+        component_by_id = {c.component_id: c for c in components}
+
+        result = _empty_teaching_output_validation()
+        topics_link = True
+        blackbox_ok = True
+
+        for topic in teaching.get("topics", []) or []:
+            if not isinstance(topic, dict):
+                continue
+            topic_id = topic.get("topic_id")
+            linked = topic.get("linked_component_ids") or []
+            resolved = [cid for cid in linked if cid in known_ids]
+            if not resolved:
+                topics_link = False
+                errors.append(ValidationEntry(
+                    code="TEACHING_OUTPUT_TOPIC_LINKS_NO_COMPONENT",
+                    message=f"course topic {topic_id!r} links no refined component",
+                    artifact="course_mapping",
+                    path="$.theory_bundle.course_mapping.topics",
+                    source_stage="export_validation",
+                ))
+            for cid in linked:
+                if cid not in known_ids:
+                    topics_link = False
+                    errors.append(ValidationEntry(
+                        code="TEACHING_OUTPUT_DANGLING_COMPONENT_REF",
+                        message=(
+                            f"course topic {topic_id!r} references missing component {cid!r}"
+                        ),
+                        artifact="course_mapping",
+                        path="$.theory_bundle.course_mapping.topics",
+                        source_stage="export_validation",
+                    ))
+
+            policy_eq_ids = {
+                str(p.get("equation_id"))
+                for p in topic.get("blackbox_policy") or []
+                if isinstance(p, dict) and p.get("equation_id")
+            }
+            for cid in resolved:
+                for eq_id in _component_low_confidence_equation_ids(component_by_id[cid]):
+                    if eq_id not in policy_eq_ids:
+                        blackbox_ok = False
+                        errors.append(ValidationEntry(
+                            code="TEACHING_OUTPUT_BLACKBOX_POLICY_IGNORES_CONFIDENCE",
+                            message=(
+                                f"course topic {topic_id!r} does not blackbox "
+                                f"low-confidence equation {eq_id!r}"
+                            ),
+                            artifact="course_mapping",
+                            path="$.theory_bundle.course_mapping.topics",
+                            source_stage="export_validation",
+                        ))
+
+            if str(topic.get("review_status")) == "review_required":
+                review_items.append(ValidationEntry(
+                    code="TEACHING_OUTPUT_TOPIC_REVIEW_REQUIRED",
+                    message=f"course topic {topic_id!r} contains a review_required component",
+                    artifact="course_mapping",
+                    path="$.theory_bundle.course_mapping.topics",
+                    source_stage="export_validation",
+                ))
+
+        blueprint_refs_valid = True
+        for cid in blueprint.get("linked_component_ids", []) or []:
+            if cid not in known_ids:
+                blueprint_refs_valid = False
+                errors.append(ValidationEntry(
+                    code="TEACHING_OUTPUT_BLUEPRINT_DANGLING_REF",
+                    message=f"blueprint references missing component {cid!r}",
+                    artifact="blueprint",
+                    path="$.theory_bundle.blueprint_updates.linked_component_ids",
+                    source_stage="export_validation",
+                ))
+
+        # Combine the gate's own (component-field) checks with the stage's
+        # equation-policy-aware booleans: a property holds only if both agree.
+        stage_block = bundle_block.get("teaching_output_validation") or {}
+        result["course_topics_link_components"] = topics_link and bool(
+            stage_block.get("course_topics_link_components", True)
+        )
+        result["blackbox_policy_respects_confidence"] = blackbox_ok and bool(
+            stage_block.get("blackbox_policy_respects_confidence", True)
+        )
+        result["blueprint_refs_valid"] = blueprint_refs_valid and bool(
+            stage_block.get("blueprint_refs_valid", True)
+        )
         return result
 
     def _cross_validate_course_mapping(
