@@ -323,6 +323,57 @@ def test_summary_only_component_cross_validation():
     assert "SUMMARY_ONLY_COMPONENT" in codes
 
 
+class _ComponentResultWithAlignment:
+    def __init__(self, components, derivation_graph_alignment):
+        self.components = components
+        self.derivation_graph_alignment = derivation_graph_alignment
+
+
+def test_derivation_graph_alignment_aggregated_into_export(monkeypatch=None):
+    """issue #325: Step 4 alignment results are aggregated into export buckets."""
+    alignment = {
+        "export_validation": {
+            "errors": [
+                {"code": "dangling_equation_ref", "message": "op references missing eq"}
+            ],
+            "warnings": [
+                {"code": "generic_edge", "message": "RELATED_TO edge"}
+            ],
+            "review_items": [
+                {"code": "review_required_derivation_path", "message": "low confidence eq"}
+            ],
+            "component_graph_clean": True,
+            "operation_graph_clean": False,
+            "support_map_renderable": True,
+        }
+    }
+    comp = _ComponentRecord("comp_001")
+    result = _run_gate(
+        component_result=_ComponentResultWithAlignment([comp], alignment)
+    )
+    error_codes = [e.code for e in result.errors]
+    warning_codes = [w.code for w in result.warnings]
+    review_codes = [r.code for r in result.review_items]
+    assert "DERIVATION_GRAPH_ALIGNMENT_DANGLING_EQUATION_REF" in error_codes
+    assert "DERIVATION_GRAPH_ALIGNMENT_GENERIC_EDGE" in warning_codes
+    assert "DERIVATION_GRAPH_ALIGNMENT_REVIEW_REQUIRED_DERIVATION_PATH" in review_codes
+    assert result.derivation_graph_alignment["operation_graph_clean"] is False
+    assert result.status == "failed_validation"
+
+
+def test_derivation_graph_alignment_absent_is_clean_default():
+    comp = _ComponentRecord("comp_001")
+    result = _run_gate(component_result=_ComponentResult([comp]))
+    assert result.derivation_graph_alignment == {
+        "errors": [],
+        "warnings": [],
+        "review_items": [],
+        "component_graph_clean": True,
+        "operation_graph_clean": True,
+        "support_map_renderable": True,
+    }
+
+
 def test_relation_component_without_internal_flow_blocks_export():
     comp = _ComponentRecord("comp_001", component_type="RelationComponent", internal_flow=[])
     result = _run_gate(component_result=_ComponentResult([comp]))

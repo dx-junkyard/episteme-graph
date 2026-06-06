@@ -14,6 +14,7 @@ from episteme_graph.agents.id_canonicalization import (
 
 from .cartridge_loader import CartridgeLoader
 from .component_refiner import ComponentRefiner
+from .derivation_graph_aligner import DerivationGraphAligner
 from .enrichment import enrich_component_assembly
 from .granularity_analyzer import ComponentGranularityAnalyzer
 from .input_builder import ComponentAssemblyInputBuilder
@@ -42,6 +43,7 @@ class ComponentAssemblyAgent:
         self._repairer = ComponentAssemblyRepairer(cleanup=self._cleanup)
         self._refiner = ComponentRefiner()
         self._granularity_analyzer = ComponentGranularityAnalyzer()
+        self._derivation_graph_aligner = DerivationGraphAligner()
 
     def run(
         self,
@@ -144,6 +146,16 @@ class ComponentAssemblyAgent:
             result.validation_issues = self._validator.validate(
                 result, cartridge, llm_input=llm_input
             )
+
+        # Step 4: align refined components with derivation chains, equation
+        # operations, the theory component graph, and the support map. Disabled
+        # by default so the upstream contract stays stable until opted in.
+        if (config or {}).get("enable_derivation_graph_aligner", False):
+            alignment = self._derivation_graph_aligner.align(
+                result, llm_input=llm_input, derivations=derivations
+            )
+            result.derivation_graph_alignment = alignment.to_dict()
+
         merged_diagnostics = dict(diagnostics)
         merged_diagnostics.update(result.diagnostics or {})
         result.diagnostics = merged_diagnostics

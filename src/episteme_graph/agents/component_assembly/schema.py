@@ -217,6 +217,11 @@ class ComponentAssemblyResult:
     # {refined_components, component_refinement_records, component_id_mapping,
     #  component_graph_updates, refinement_validation}.
     component_refinement: dict = field(default_factory=dict)
+    # DerivationGraphAligner Step 4 output contract (issue #325):
+    # {theory_component_graph, equation_operation_graph, component_operation_links,
+    #  aligned_derivation_chains, support_map, graph_alignment_validation,
+    #  export_validation}.
+    derivation_graph_alignment: dict = field(default_factory=dict)
     diagnostics: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -304,6 +309,7 @@ class ComponentAssemblyResult:
             validation_issues=issues,
             refinement_report=d.get("refinement_report") or {},
             component_refinement=d.get("component_refinement") or {},
+            derivation_graph_alignment=d.get("derivation_graph_alignment") or {},
             diagnostics=d.get("diagnostics") or {},
         )
 
