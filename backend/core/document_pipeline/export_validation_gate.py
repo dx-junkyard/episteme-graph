@@ -71,6 +71,18 @@ def _empty_concept_validation() -> dict:
     }
 
 
+def _empty_refinement_validation() -> dict:
+    return {
+        "split_components": [],
+        "unchanged_components": [],
+        "failed_refinements": [],
+        "review_required_refinements": [],
+        "unassigned_links": [],
+        "dangling_component_refs": [],
+        "teaching_granularity_warnings": [],
+    }
+
+
 @dataclass
 class ExportValidationResult:
     status: str                          # one of EXPORT_STATUSES
@@ -83,6 +95,8 @@ class ExportValidationResult:
     summary: ValidationSummary = field(default_factory=ValidationSummary)
     # Concept coverage report for claims / components (issue #8).
     concept_validation: dict = field(default_factory=_empty_concept_validation)
+    # ComponentRefiner Step 3 reporting (issue #324).
+    component_refinement_validation: dict = field(default_factory=_empty_refinement_validation)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -309,6 +323,13 @@ class ExportValidationGate:
             claim_objects, component_result, warnings, review_items
         )
 
+        # 7d. component refinement reporting (#324): ComponentRefiner Step 3
+        # results — unassigned links, dangling refs, review-required refinements,
+        # and teaching granularity warnings.
+        component_refinement_validation = self._check_component_refinement(
+            component_result, errors, warnings, review_items
+        )
+
         # 6. Determine status
         summary = ValidationSummary(
             error_count=len(errors),
@@ -343,6 +364,7 @@ class ExportValidationGate:
             component_quality=component_quality,
             summary=summary,
             concept_validation=concept_validation,
+            component_refinement_validation=component_refinement_validation,
         )
 
     # ------------------------------------------------------------------
@@ -745,6 +767,86 @@ class ExportValidationGate:
                     source_stage="export_validation",
                 ))
         return quality
+
+    def _check_component_refinement(
+        self,
+        component_result,
+        errors: list,
+        warnings: list,
+        review_items: list,
+    ) -> dict:
+        """Report ComponentRefiner Step 3 results (issue #324).
+
+        Reads the ``component_refinement`` contract emitted by ComponentRefiner
+        and surfaces unassigned links / teaching warnings as warnings,
+        review-required refinements as review items, and dangling component refs
+        / failed refinements as hard errors (the graph must not silently
+        reference removed component IDs).
+        """
+        refinement = getattr(component_result, "component_refinement", {}) or {}
+        if not isinstance(refinement, dict):
+            return _empty_refinement_validation()
+        validation = refinement.get("refinement_validation")
+        if not isinstance(validation, dict):
+            return _empty_refinement_validation()
+
+        result = _empty_refinement_validation()
+        result.update({k: validation.get(k, v) for k, v in result.items()})
+
+        for original_id in result["failed_refinements"]:
+            errors.append(ValidationEntry(
+                code="COMPONENT_REFINEMENT_FAILED",
+                message=f"component {original_id!r} refinement failed; no child components produced",
+                artifact="component_assembly",
+                path=f"$.component_refinement[{original_id}]",
+                source_stage="export_validation",
+            ))
+
+        for entry in result["dangling_component_refs"]:
+            ref = entry.get("missing_ref") if isinstance(entry, dict) else entry
+            owner = entry.get("component_id") if isinstance(entry, dict) else "?"
+            errors.append(ValidationEntry(
+                code="COMPONENT_REFINEMENT_DANGLING_REF",
+                message=(
+                    f"refined component {owner!r} references missing component {ref!r} "
+                    "after refinement"
+                ),
+                artifact="component_assembly",
+                path=f"$.component_refinement.component_graph_updates.unresolved_edges",
+                source_stage="export_validation",
+            ))
+
+        for entry in result["unassigned_links"]:
+            link_id = entry.get("link_id") if isinstance(entry, dict) else entry
+            link_type = entry.get("link_type") if isinstance(entry, dict) else "link"
+            warnings.append(ValidationEntry(
+                code="COMPONENT_REFINEMENT_UNASSIGNED_LINK",
+                message=f"refinement could not assign {link_type} {link_id!r} to a child component",
+                artifact="component_assembly",
+                path="$.component_refinement.refinement_validation.unassigned_links",
+                source_stage="export_validation",
+            ))
+
+        for entry in result["teaching_granularity_warnings"]:
+            comp_id = entry.get("component_id") if isinstance(entry, dict) else entry
+            warnings.append(ValidationEntry(
+                code="COMPONENT_REFINEMENT_TEACHING_GRANULARITY",
+                message=f"refined component {comp_id!r} is still too dense to teach as a single unit",
+                artifact="component_assembly",
+                path="$.component_refinement.refinement_validation.teaching_granularity_warnings",
+                source_stage="export_validation",
+            ))
+
+        for original_id in result["review_required_refinements"]:
+            review_items.append(ValidationEntry(
+                code="COMPONENT_REFINEMENT_REVIEW_REQUIRED",
+                message=f"component {original_id!r} refinement requires review before publish-ready export",
+                artifact="component_assembly",
+                path=f"$.component_refinement[{original_id}]",
+                source_stage="export_validation",
+            ))
+
+        return result
 
     def _cross_validate_course_mapping(
         self,

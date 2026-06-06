@@ -183,6 +183,10 @@ class ComponentRecord:
     # One of the theory-operation families
     # (define, linearize, eliminate, substitute, solve, derive, constrain, ...).
     operation: str = ""
+    # Teaching granularity metadata recomputed by ComponentRefiner Step 3 (#324):
+    # {estimated_slide_count, teachable_as_single_unit, split_if_too_dense,
+    #  teaching_takeaway_quality}.
+    teaching_granularity: dict = field(default_factory=dict)
     maturity_source: str = "llm_proposed"
     publish_ready: bool = False
     fallback_reason: str = ""
@@ -209,6 +213,10 @@ class ComponentAssemblyResult:
     validation_issues: list[ValidationIssue] = field(default_factory=list)
     # ComponentRefiner output: record of summary→theory-operation splits (issue #300).
     refinement_report: dict = field(default_factory=dict)
+    # ComponentRefiner Step 3 formal output contract (issue #324):
+    # {refined_components, component_refinement_records, component_id_mapping,
+    #  component_graph_updates, refinement_validation}.
+    component_refinement: dict = field(default_factory=dict)
     diagnostics: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -278,6 +286,7 @@ class ComponentAssemblyResult:
                 introduced_concepts=list(c.get("introduced_concepts") or []),
                 reused_concepts=list(c.get("reused_concepts") or []),
                 operation=c.get("operation", ""),
+                teaching_granularity=c.get("teaching_granularity") or {},
                 maturity_source=c.get("maturity_source", "llm_proposed"),
                 publish_ready=bool(c.get("publish_ready", False)),
                 fallback_reason=c.get("fallback_reason", ""),
@@ -294,6 +303,7 @@ class ComponentAssemblyResult:
             confidence=float(d.get("confidence", 0.0)),
             validation_issues=issues,
             refinement_report=d.get("refinement_report") or {},
+            component_refinement=d.get("component_refinement") or {},
             diagnostics=d.get("diagnostics") or {},
         )
 

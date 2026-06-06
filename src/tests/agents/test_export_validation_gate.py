@@ -946,3 +946,64 @@ def test_well_tagged_components_have_no_role_mismatch():
     comp.concepts = ["b_1", "consistency relation"]  # symbol + named
     result = _run_gate(component_result=_ComponentResult([comp]))
     assert result.concept_validation["concept_role_mismatch"] == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: component refinement reporting (issue #324)
+# ---------------------------------------------------------------------------
+
+class _RefinedComponentResult:
+    def __init__(self, refinement_validation):
+        self.components = []
+        self.component_refinement = {"refinement_validation": refinement_validation}
+
+
+def test_component_refinement_absent_is_empty_report():
+    result = _run_gate(component_result=_ComponentResult([]))
+    assert result.component_refinement_validation["split_components"] == []
+    assert result.component_refinement_validation["unassigned_links"] == []
+
+
+def test_component_refinement_unassigned_link_warns():
+    comp_result = _RefinedComponentResult({
+        "split_components": ["comp_a"],
+        "unchanged_components": [],
+        "failed_refinements": [],
+        "review_required_refinements": [],
+        "unassigned_links": [{"original_component_id": "comp_a", "link_type": "equation", "link_id": "eq_x"}],
+        "dangling_component_refs": [],
+        "teaching_granularity_warnings": [],
+    })
+    result = _run_gate(component_result=comp_result)
+    assert result.component_refinement_validation["split_components"] == ["comp_a"]
+    assert any(w.code == "COMPONENT_REFINEMENT_UNASSIGNED_LINK" for w in result.warnings)
+
+
+def test_component_refinement_dangling_ref_is_hard_error():
+    comp_result = _RefinedComponentResult({
+        "split_components": [],
+        "unchanged_components": [],
+        "failed_refinements": [],
+        "review_required_refinements": [],
+        "unassigned_links": [],
+        "dangling_component_refs": [{"component_id": "comp_b", "missing_ref": "comp_gone"}],
+        "teaching_granularity_warnings": [],
+    })
+    result = _run_gate(component_result=comp_result)
+    assert result.status == "failed_validation"
+    assert any(e.code == "COMPONENT_REFINEMENT_DANGLING_REF" for e in result.errors)
+
+
+def test_component_refinement_review_required_and_teaching_warning():
+    comp_result = _RefinedComponentResult({
+        "split_components": [],
+        "unchanged_components": [],
+        "failed_refinements": [],
+        "review_required_refinements": ["comp_c"],
+        "unassigned_links": [],
+        "dangling_component_refs": [],
+        "teaching_granularity_warnings": [{"component_id": "comp_c__r1"}],
+    })
+    result = _run_gate(component_result=comp_result)
+    assert any(r.code == "COMPONENT_REFINEMENT_REVIEW_REQUIRED" for r in result.review_items)
+    assert any(w.code == "COMPONENT_REFINEMENT_TEACHING_GRANULARITY" for w in result.warnings)
