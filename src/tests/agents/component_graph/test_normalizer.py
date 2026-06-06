@@ -277,6 +277,40 @@ def test_main_node_separates_stage_object_and_component_links():
     assert "deriv" in eliminate.supporting_derivation_ids
 
 
+# --- concept rollup (issue #8) ----------------------------------------------
+
+
+def test_main_node_rolls_up_component_concepts():
+    # The eliminate component links derivation "deriv" (eq_c/eq_d), which lands in
+    # the Elimination main node; its concepts/prerequisite_concepts roll up.
+    comp = _component(
+        concepts=["Bias parameter", "Consistency relation"],
+        prerequisite_concepts=["Galaxy bias"],
+    )
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _components(comp), _derivations()
+    )
+    eliminate = next(n for n in _layer(result, "main") if n.label == "Elimination")
+    assert "Bias parameter" in eliminate.concepts
+    assert "Consistency relation" in eliminate.concepts
+    assert "Galaxy bias" in eliminate.prerequisite_concepts
+
+
+def test_graph_builds_when_components_have_no_concepts():
+    # Components without concept tags must not break graph generation; concept
+    # fields default to empty lists on every node.
+    comp = _component()  # no concepts / prerequisite_concepts
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _components(comp), _derivations()
+    )
+    assert result.nodes
+    for node in result.nodes:
+        assert isinstance(node.concepts, list)
+        assert isinstance(node.prerequisite_concepts, list)
+    eliminate = next(n for n in _layer(result, "main") if n.label == "Elimination")
+    assert eliminate.concepts == []
+
+
 # --- generic operations (acceptance #5) -------------------------------------
 
 

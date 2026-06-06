@@ -522,3 +522,39 @@ def test_main_claim_with_single_concept_warns_insufficient():
     claim = result.claims[0]
     assert len(claim.concepts) == 1
     assert "main_claim_insufficient_concepts" in {i.rule_id for i in result.validation_issues}
+
+
+def test_atomic_claim_without_any_concept_is_review_required():
+    # No domain fallbacks / no cartridge aliases match -> no concepts resolved.
+    # An atomic claim with zero concepts must not be confirmed source_backed; its
+    # concept assignment is review_required (and claim_concepts_empty is flagged).
+    text = "An untyped statement with no recognizable terms."
+    registry = _make_registry("blk_x", text)
+    span = _make_qualified("span_001", "blk_x", text)
+    builder = ClaimObjectBuilder(evidence_registry=registry)
+    claim = builder.build("doc_test", [span]).claims[0]
+
+    assert claim.atomicity == "atomic"
+    assert claim.concepts == []
+    assert claim.concept_assignment_status == "review_required"
+
+
+def test_claim_concept_fields_round_trip_through_serialization():
+    # issue #8: concepts + concept_assignment_status must survive to_dict/from_dict.
+    from episteme_graph.agents.claim_object_builder.schema import ClaimObjectBuildResult
+
+    text = "Skewness and kurtosis are observables."
+    registry = _make_registry("blk_x", text)
+    span = _make_qualified("span_001", "blk_x", text)
+    builder = ClaimObjectBuilder(evidence_registry=registry, cartridge_ontology=_ONTOLOGY)
+    result = builder.build("doc_test", [span])
+
+    original = result.claims[0]
+    assert original.concepts
+    assert original.concept_assignment_status == "source_backed"
+
+    restored = ClaimObjectBuildResult.from_dict(result.to_dict()).claims[0]
+    assert restored.concept_assignment_status == original.concept_assignment_status
+    assert [(c.name, c.normalized, c.concept_type, c.role) for c in restored.concepts] == [
+        (c.name, c.normalized, c.concept_type, c.role) for c in original.concepts
+    ]

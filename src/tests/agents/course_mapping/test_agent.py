@@ -117,3 +117,41 @@ def test_prerequisite_concepts_extracted_from_preconditions():
     topic = agent.run("doc_test", [comp]).topics[0]
     assert "branching ratio definition" in topic.prerequisite_concepts
     assert "Standard Model prediction" in topic.prerequisite_concepts
+
+
+def test_introduced_concepts_fall_back_to_concepts_when_absent():
+    # issue #8: when a component has concepts but no explicit introduced_concepts,
+    # the topic's introduced_concepts fall back to the component concepts.
+    comp = _make_component("comp_a")
+    comp.concepts = ["Skewness", "Kurtosis"]  # type: ignore[attr-defined]
+    # introduced_concepts intentionally left empty
+    agent = CourseMappingAgent()
+    topic = agent.run("doc_test", [comp]).topics[0]
+    assert topic.introduced_concepts == ["Skewness", "Kurtosis"]
+
+
+def test_prerequisite_concepts_grounded_in_component_not_preconditions():
+    # When component.prerequisite_concepts exist, they are authoritative and the
+    # precondition text is NOT mixed in (no phantom prerequisites).
+    comp = _make_component(
+        "comp_a",
+        preconditions=[{"condition": "heavy quark limit"}],
+    )
+    comp.prerequisite_concepts = ["Galaxy bias"]  # type: ignore[attr-defined]
+    agent = CourseMappingAgent()
+    topic = agent.run("doc_test", [comp]).topics[0]
+    assert topic.prerequisite_concepts == ["Galaxy bias"]
+    assert "heavy quark limit" not in topic.prerequisite_concepts
+
+
+def test_empty_component_concepts_safe_fallback():
+    # No concepts at all on the component: introduced_concepts stays empty and the
+    # topic still builds (prerequisites fall back to precondition text).
+    comp = _make_component(
+        "comp_a",
+        preconditions=[{"condition": "zero-recoil limit"}],
+    )
+    agent = CourseMappingAgent()
+    topic = agent.run("doc_test", [comp]).topics[0]
+    assert topic.introduced_concepts == []
+    assert "zero-recoil limit" in topic.prerequisite_concepts
