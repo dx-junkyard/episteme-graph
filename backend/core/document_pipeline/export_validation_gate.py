@@ -83,6 +83,17 @@ def _empty_refinement_validation() -> dict:
     }
 
 
+def _empty_derivation_graph_alignment() -> dict:
+    return {
+        "errors": [],
+        "warnings": [],
+        "review_items": [],
+        "component_graph_clean": True,
+        "operation_graph_clean": True,
+        "support_map_renderable": True,
+    }
+
+
 @dataclass
 class ExportValidationResult:
     status: str                          # one of EXPORT_STATUSES
@@ -97,6 +108,8 @@ class ExportValidationResult:
     concept_validation: dict = field(default_factory=_empty_concept_validation)
     # ComponentRefiner Step 3 reporting (issue #324).
     component_refinement_validation: dict = field(default_factory=_empty_refinement_validation)
+    # DerivationGraphAligner Step 4 reporting (issue #325).
+    derivation_graph_alignment: dict = field(default_factory=_empty_derivation_graph_alignment)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -157,6 +170,17 @@ def _ordered_unique(values) -> list:
             seen.add(text)
             result.append(text)
     return result
+
+
+def _alignment_code(entry) -> str:
+    code = str(entry.get("code") if isinstance(entry, dict) else entry or "issue")
+    return code.upper()
+
+
+def _alignment_message(entry) -> str:
+    if isinstance(entry, dict):
+        return str(entry.get("message") or entry.get("code") or "")
+    return str(entry or "")
 
 
 def _claim_is_non_atomic(claim) -> bool:
@@ -330,6 +354,14 @@ class ExportValidationGate:
             component_result, errors, warnings, review_items
         )
 
+        # 7e. derivation graph alignment reporting (#325): aggregate the
+        # DerivationGraphAligner Step 4 results (dangling refs / operation graph
+        # equation refs / support map renderability) into the export buckets.
+        # The gate aggregates results here; it does not re-run alignment.
+        derivation_graph_alignment = self._check_derivation_graph_alignment(
+            component_result, errors, warnings, review_items
+        )
+
         # 6. Determine status
         summary = ValidationSummary(
             error_count=len(errors),
@@ -365,6 +397,7 @@ class ExportValidationGate:
             summary=summary,
             concept_validation=concept_validation,
             component_refinement_validation=component_refinement_validation,
+            derivation_graph_alignment=derivation_graph_alignment,
         )
 
     # ------------------------------------------------------------------
@@ -843,6 +876,57 @@ class ExportValidationGate:
                 message=f"component {original_id!r} refinement requires review before publish-ready export",
                 artifact="component_assembly",
                 path=f"$.component_refinement[{original_id}]",
+                source_stage="export_validation",
+            ))
+
+        return result
+
+    def _check_derivation_graph_alignment(
+        self,
+        component_result,
+        errors: list,
+        warnings: list,
+        review_items: list,
+    ) -> dict:
+        """Aggregate DerivationGraphAligner Step 4 results (issue #325).
+
+        Reads the ``derivation_graph_alignment`` contract emitted by
+        DerivationGraphAligner and folds its pre-computed errors / warnings /
+        review items into the export buckets. The alignment logic lives in the
+        aligner; this method only aggregates and re-codes the entries.
+        """
+        alignment = getattr(component_result, "derivation_graph_alignment", {}) or {}
+        if not isinstance(alignment, dict):
+            return _empty_derivation_graph_alignment()
+        block = alignment.get("export_validation")
+        if not isinstance(block, dict):
+            return _empty_derivation_graph_alignment()
+
+        result = _empty_derivation_graph_alignment()
+        result.update({k: block.get(k, v) for k, v in result.items()})
+
+        for entry in result["errors"]:
+            errors.append(ValidationEntry(
+                code=f"DERIVATION_GRAPH_ALIGNMENT_{_alignment_code(entry)}",
+                message=_alignment_message(entry),
+                artifact="component_assembly",
+                path="$.derivation_graph_alignment",
+                source_stage="export_validation",
+            ))
+        for entry in result["warnings"]:
+            warnings.append(ValidationEntry(
+                code=f"DERIVATION_GRAPH_ALIGNMENT_{_alignment_code(entry)}",
+                message=_alignment_message(entry),
+                artifact="component_assembly",
+                path="$.derivation_graph_alignment",
+                source_stage="export_validation",
+            ))
+        for entry in result["review_items"]:
+            review_items.append(ValidationEntry(
+                code=f"DERIVATION_GRAPH_ALIGNMENT_{_alignment_code(entry)}",
+                message=_alignment_message(entry),
+                artifact="component_assembly",
+                path="$.derivation_graph_alignment",
                 source_stage="export_validation",
             ))
 
