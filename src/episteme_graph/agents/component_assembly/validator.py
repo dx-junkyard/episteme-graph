@@ -15,6 +15,7 @@ from .schema import (
     normalize_dependency_type,
 )
 from .responsibility import CANONICAL_RESPONSIBILITY_TYPES, canonical_responsibility_type
+from .claim_centered_planner import SUPPORT_KINDS, SUPPORT_ROLES
 
 
 def _build_available_id_index(llm_input: ComponentAssemblyLLMInput | None) -> dict:
@@ -50,11 +51,27 @@ def _build_available_id_index(llm_input: ComponentAssemblyLLMInput | None) -> di
         )
     return {
         "claim_ids": {c["claim_id"] for c in (llm_input.available_claims or []) if c.get("claim_id")},
+        "_claim_atomicity_map": {
+            c["claim_id"]: str(c.get("atomicity", "atomic") or "atomic")
+            for c in (llm_input.available_claims or [])
+            if c.get("claim_id")
+        },
+        "_claim_is_atomic_map": {
+            c["claim_id"]: bool(c.get("is_atomic", c.get("atomicity", "atomic") == "atomic"))
+            for c in (llm_input.available_claims or [])
+            if c.get("claim_id")
+        },
+        "_claim_concept_status_map": {
+            c["claim_id"]: str(c.get("concept_assignment_status", "") or "")
+            for c in (llm_input.available_claims or [])
+            if c.get("claim_id")
+        },
         "evidence_ids": {e["evidence_id"] for e in (llm_input.available_evidence or []) if e.get("evidence_id")},
         "equation_ids": {e["equation_id"] for e in (llm_input.available_equations or []) if e.get("equation_id")},
         "dsl_node_ids": {n["node_id"] for n in (llm_input.available_dsl_nodes or []) if n.get("node_id")},
         "dsl_edge_ids": {e["edge_id"] for e in (llm_input.available_dsl_edges or []) if e.get("edge_id")},
         "derivation_ids": set(llm_input.available_derivation_ids or []),
+        "headline_claim_ids": set((llm_input.claim_centered_plan or {}).get("headline_claim_ids") or []),
         "_equation_policy_map": equation_policy_map,
         "_equation_review_map": equation_review_map,
         "_equation_blocked_map": equation_blocked_map,
@@ -115,6 +132,8 @@ class ComponentAssemblyValidator:
                 ))
         issues += self._check_internal_flow(component, available)
         issues += self._check_responsibility_separation(component)
+        issues += self._check_claim_support_contract(component, available or {})
+        issues += self._check_concepts(component, available or {})
         if not (0.0 <= component.confidence <= 1.0):
             issues.append(ValidationIssue(
                 "confidence_out_of_range",
@@ -173,6 +192,161 @@ class ComponentAssemblyValidator:
                 f"{component.component_id} has invalid responsibility_type={responsibility!r}",
                 f"components[{component.component_id}].responsibility_type",
             ))
+        return issues
+
+    def _check_claim_support_contract(
+        self,
+        component: ComponentRecord,
+        available: dict,
+    ) -> list[ValidationIssue]:
+        issues: list[ValidationIssue] = []
+        role = str(component.support_role or "")
+        kind = str(component.support_kind or "")
+        if role and role not in SUPPORT_ROLES:
+            issues.append(ValidationIssue(
+                "invalid_support_role",
+                "error",
+                f"{component.component_id} has invalid support_role={role!r}",
+                f"components[{component.component_id}].support_role",
+            ))
+        if kind and kind not in SUPPORT_KINDS:
+            issues.append(ValidationIssue(
+                "invalid_support_kind",
+                "error",
+                f"{component.component_id} has invalid support_kind={kind!r}",
+                f"components[{component.component_id}].support_kind",
+            ))
+
+        claim_ids = _ordered_unique(
+            list(component.supports_claim_ids or [])
+            + list(component.linked_claim_ids or [])
+            + list((component.evidence_refs or {}).get("claim_ids") or [])
+        )
+        is_background = (role == "theory_base" and kind == "prerequisite")
+        if not is_background and not claim_ids:
+            issues.append(ValidationIssue(
+                "component_missing_supported_claim",
+                "warning",
+                f"{component.component_id} is not background-only but supports no claim",
+                f"components[{component.component_id}].supports_claim_ids",
+            ))
+
+        headline_claim_ids = set(available.get("headline_claim_ids") or [])
+        if role == "result":
+            if kind not in {"direct", "derivational"}:
+                issues.append(ValidationIssue(
+                    "main_result_component_not_direct_or_derivational",
+                    "warning",
+                    f"{component.component_id} is a result component but support_kind is {kind!r}",
+                    f"components[{component.component_id}].support_kind",
+                ))
+            if headline_claim_ids and not (set(claim_ids) & headline_claim_ids):
+                issues.append(ValidationIssue(
+                    "main_result_component_not_linked_to_headline_claim",
+                    "warning",
+                    f"{component.component_id} is a result component but does not support the headline claim",
+                    f"components[{component.component_id}].supports_claim_ids",
+                ))
+
+        if role == "theory_base" and kind != "prerequisite":
+            issues.append(ValidationIssue(
+                "background_component_not_prerequisite",
+                "warning",
+                f"{component.component_id} is theory_base/background but support_kind is not prerequisite",
+                f"components[{component.component_id}].support_kind",
+            ))
+
+        if role == "derivation_core" and (not component.input_equation_ids or not component.output_equation_ids):
+            issues.append(ValidationIssue(
+                "derivation_core_missing_input_or_output_equations",
+                "warning",
+                f"{component.component_id} is derivation_core but lacks input or output equations",
+                f"components[{component.component_id}].input_equation_ids",
+            ))
+
+        if role == "application" and component.responsibility_type == "derivation":
+            issues.append(ValidationIssue(
+                "application_component_treated_as_derivation",
+                "warning",
+                f"{component.component_id} is application support but has derivation responsibility_type",
+                f"components[{component.component_id}].responsibility_type",
+            ))
+        return issues
+
+    def _check_concepts(
+        self,
+        component: ComponentRecord,
+        available: dict,
+    ) -> list[ValidationIssue]:
+        """Validate concept tags required for graph / course mapping (issue #8)."""
+        issues: list[ValidationIssue] = []
+        concepts = list(component.concepts or [])
+        if len(concepts) < 2:
+            issues.append(ValidationIssue(
+                "component_insufficient_concepts",
+                "warning",
+                f"{component.component_id} has {len(concepts)} concept(s); components need at least 2",
+                f"components[{component.component_id}].concepts",
+            ))
+
+        role = str(component.support_role or "")
+        operation = str(component.operation or "").lower()
+        responsibility = str(component.responsibility_type or "")
+        component_type = str(component.component_type or "")
+
+        is_derivation = (
+            role == "derivation_core"
+            or responsibility == "derivation"
+            or any(operation.startswith(p) for p in (
+                "derive", "eliminate", "solve", "substitute", "linearize"
+            ))
+        )
+        if is_derivation and not _has_math_or_procedural_concept(concepts):
+            issues.append(ValidationIssue(
+                "derivation_component_missing_math_concept",
+                "warning",
+                f"{component.component_id} is a derivation component but has no "
+                "mathematical or procedural concept",
+                f"components[{component.component_id}].concepts",
+            ))
+
+        is_observable = role == "observable_bridge" or component_type == "ObservableComponent"
+        if is_observable and not _has_named_concept(concepts):
+            issues.append(ValidationIssue(
+                "observable_component_missing_observable_concept",
+                "warning",
+                f"{component.component_id} is an observable component but has no "
+                "observable-name concept",
+                f"components[{component.component_id}].concepts",
+            ))
+
+        is_comparison = (
+            operation.startswith("compare")
+            or component_type in {"ComparisonComponent", "TheoryComparisonComponent"}
+        )
+        if is_comparison and not _has_named_concept(concepts):
+            issues.append(ValidationIssue(
+                "theory_comparison_missing_theory_class",
+                "warning",
+                f"{component.component_id} is a theory-comparison component but has no "
+                "theory-class concept",
+                f"components[{component.component_id}].concepts",
+            ))
+
+        status_map = available.get("_claim_concept_status_map", {}) or {}
+        claim_ids = _ordered_unique(
+            list(component.supports_claim_ids or [])
+            + list(component.linked_claim_ids or [])
+            + list((component.evidence_refs or {}).get("claim_ids") or [])
+        )
+        for cid in claim_ids:
+            if status_map.get(cid) == "review_required":
+                issues.append(ValidationIssue(
+                    "component_concept_from_low_confidence_source",
+                    "warning",
+                    f"{component.component_id} draws concepts from low-confidence claim {cid!r}",
+                    f"components[{component.component_id}].concepts",
+                ))
         return issues
 
     def _check_internal_flow(
@@ -261,7 +435,11 @@ class ComponentAssemblyValidator:
         # Check legacy evidence_refs.claim_ids
         known_claims = available.get("claim_ids", set())
         if known_claims:
-            all_claim_ids = list(refs.get("claim_ids") or []) + list(component.linked_claim_ids or [])
+            all_claim_ids = (
+                list(refs.get("claim_ids") or [])
+                + list(component.linked_claim_ids or [])
+                + list(component.supports_claim_ids or [])
+            )
             unknown = [cid for cid in all_claim_ids if cid not in known_claims]
             for cid in unknown:
                 issues.append(ValidationIssue(
@@ -269,6 +447,23 @@ class ComponentAssemblyValidator:
                     "error",
                     f"{component.component_id} contains unresolved claim ID: {cid!r}",
                     f"components[{component.component_id}].linked_claim_ids",
+                ))
+        atomicity_map = available.get("_claim_atomicity_map", {}) or {}
+        is_atomic_map = available.get("_claim_is_atomic_map", {}) or {}
+        primary_claim_ids = _ordered_unique(
+            list(refs.get("claim_ids") or [])
+            + list(component.linked_claim_ids or [])
+            + list(component.supports_claim_ids or [])
+        )
+        for cid in primary_claim_ids:
+            atomicity = str(atomicity_map.get(cid, "atomic") or "atomic")
+            is_atomic = bool(is_atomic_map.get(cid, atomicity == "atomic"))
+            if atomicity in {"composite", "split_required", "compound", "non_atomic", "split_pending"} or not is_atomic:
+                issues.append(ValidationIssue(
+                    "component_support_uses_non_atomic_claim",
+                    "warning",
+                    f"{component.component_id} uses non-atomic claim {cid!r} ({atomicity}) as component support",
+                    f"components[{component.component_id}].supports_claim_ids",
                 ))
 
         # Check evidence_ids
@@ -669,6 +864,55 @@ def _field_equation_ids(items: list[dict]) -> list[str]:
             seen.add(eq_id)
             result.append(eq_id)
     return result
+
+
+def _ordered_unique(values) -> list:
+    result = []
+    seen = set()
+    for value in values or []:
+        text = str(value or "")
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
+
+
+# Domain-neutral operation / procedure words (issue #8). Used to recognise a
+# concept as "mathematical or procedural" without hardcoding any field's terms.
+_PROCEDURAL_TERMS = {
+    "derive", "derivation", "eliminate", "elimination", "solve", "substitute",
+    "substitution", "linearize", "linearization", "transform", "transformation",
+    "constrain", "constraint", "define", "definition", "normalize", "normalization",
+    "approximate", "approximation", "expand", "expansion", "integrate", "integration",
+    "differentiate", "reconstruct", "reconstruction",
+}
+
+
+def _looks_like_symbol(name: str) -> bool:
+    token = str(name or "").strip()
+    if not token or " " in token:
+        return False
+    if any(ch in token for ch in "_^{}\\=+/*()|<>"):
+        return True
+    return len(token) <= 3
+
+
+def _has_math_or_procedural_concept(concepts: list) -> bool:
+    for concept in concepts or []:
+        text = str(concept or "")
+        if text.lower() in _PROCEDURAL_TERMS or _looks_like_symbol(text):
+            return True
+    return False
+
+
+def _has_named_concept(concepts: list) -> bool:
+    """A substantive named concept (not a bare symbol / procedure word)."""
+    for concept in concepts or []:
+        text = str(concept or "")
+        if text.lower() in _PROCEDURAL_TERMS or _looks_like_symbol(text):
+            continue
+        return True
+    return False
 
 
 def _equation_consistency_requires_review(eq: dict) -> bool:

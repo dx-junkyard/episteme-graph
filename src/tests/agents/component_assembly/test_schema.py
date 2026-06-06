@@ -99,3 +99,43 @@ def test_component_quality_round_trip():
     restored = ComponentAssemblyResult.from_dict(json.loads(result.to_json()))
     assert restored.components[0].component_quality["granularity_status"] == "too_coarse"
     assert restored.components[0].component_quality["suggested_split"][0]["responsibility_type"] == "constraint"
+
+
+def test_claim_support_fields_round_trip():
+    component = ComponentRecord(
+        "comp_001", "RelationComponent", "bias elimination", "summary",
+        [], [], [], [], [],
+        {"claim_ids": ["claim_1"], "equation_ids": ["eq_1"], "thesis_refs": [], "dsl_refs": {"node_ids": [], "edge_ids": []}},
+        "reason", 0.8, [],
+        support_role="derivation_core",
+        supports_claim_ids=["claim_1"],
+        support_distance_to_headline_claim=0,
+        support_kind="derivational",
+    )
+    result = ComponentAssemblyResult("doc", COMPONENTS_VERSION, None, [component], [], [], 0.8)
+    restored = ComponentAssemblyResult.from_dict(json.loads(result.to_json()))
+    restored_component = restored.components[0]
+    assert restored_component.support_role == "derivation_core"
+    assert restored_component.supports_claim_ids == ["claim_1"]
+    assert restored_component.support_distance_to_headline_claim == 0
+    assert restored_component.support_kind == "derivational"
+
+
+def test_concept_fields_round_trip():
+    component = ComponentRecord(
+        "comp_001", "RelationComponent", "bias elimination", "summary",
+        [], [], [], [], [],
+        {"claim_ids": ["claim_1"], "equation_ids": ["eq_1"], "thesis_refs": [], "dsl_refs": {"node_ids": [], "edge_ids": []}},
+        "reason", 0.8, [],
+        concepts=["Skewness", "Kurtosis"],
+        prerequisite_concepts=["Galaxy bias"],
+        introduced_concepts=["Skewness"],
+        reused_concepts=["Kurtosis"],
+    )
+    result = ComponentAssemblyResult("doc", COMPONENTS_VERSION, None, [component], [], [], 0.8)
+    restored = ComponentAssemblyResult.from_dict(json.loads(result.to_json()))
+    restored_component = restored.components[0]
+    assert restored_component.concepts == ["Skewness", "Kurtosis"]
+    assert restored_component.prerequisite_concepts == ["Galaxy bias"]
+    assert restored_component.introduced_concepts == ["Skewness"]
+    assert restored_component.reused_concepts == ["Kurtosis"]

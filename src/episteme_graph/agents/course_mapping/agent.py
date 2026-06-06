@@ -136,16 +136,28 @@ class CourseMappingAgent:
         summary = _attr(component, "summary") or ""
         comp_type = _attr(component, "component_type") or ""
 
-        # Extract preconditions as prerequisite concepts
-        preconditions = _attr(component, "preconditions") or []
-        prerequisite_concepts: list[str] = []
-        for p in preconditions:
-            if isinstance(p, dict):
-                cond = p.get("condition") or p.get("text")
-                if cond:
-                    prerequisite_concepts.append(str(cond))
-            elif isinstance(p, str):
-                prerequisite_concepts.append(p)
+        # Prefer concept tags grounded in the component (issue #8); fall back to
+        # precondition text when no concept tags are available.
+        prerequisite_concepts: list[str] = [
+            str(c) for c in (_attr(component, "prerequisite_concepts") or []) if c
+        ]
+        if not prerequisite_concepts:
+            preconditions = _attr(component, "preconditions") or []
+            for p in preconditions:
+                if isinstance(p, dict):
+                    cond = p.get("condition") or p.get("text")
+                    if cond:
+                        prerequisite_concepts.append(str(cond))
+                elif isinstance(p, str):
+                    prerequisite_concepts.append(p)
+
+        introduced_concepts: list[str] = [
+            str(c) for c in (_attr(component, "introduced_concepts") or []) if c
+        ]
+        if not introduced_concepts:
+            introduced_concepts = [
+                str(c) for c in (_attr(component, "concepts") or []) if c
+            ]
 
         # Extract evidence claims for assessment material
         evidence_refs = _attr(component, "evidence_refs") or {}
@@ -181,6 +193,7 @@ class CourseMappingAgent:
             linked_component_ids=[comp_id] if comp_id else [],
             learning_objectives=objectives,
             prerequisite_concepts=prerequisite_concepts,
+            introduced_concepts=introduced_concepts,
             blackbox_policy=blackbox_policy,
             assessment_prompts=assessment_prompts,
         )

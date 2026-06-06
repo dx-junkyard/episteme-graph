@@ -56,6 +56,20 @@ def test_each_component_becomes_topic_with_links():
         assert topic.blackbox_policy
 
 
+def test_topic_concepts_grounded_in_component_concepts():
+    comp = _make_component("component_concepts")
+    comp.concepts = ["Skewness", "Kurtosis"]  # type: ignore[attr-defined]
+    comp.prerequisite_concepts = ["Galaxy bias"]  # type: ignore[attr-defined]
+    comp.introduced_concepts = ["Skewness"]  # type: ignore[attr-defined]
+
+    agent = CourseMappingAgent()
+    result = agent.run("doc_test", [comp], cartridge_id="particle_physics")
+
+    topic = result.topics[0]
+    assert topic.prerequisite_concepts == ["Galaxy bias"]
+    assert topic.introduced_concepts == ["Skewness"]
+
+
 def test_no_components_returns_validation_error():
     agent = CourseMappingAgent()
     result = agent.run("doc_test", [], cartridge_id=None)

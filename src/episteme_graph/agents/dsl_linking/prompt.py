@@ -155,6 +155,9 @@ class DSLLinkingPromptFactory:
             f"graph_hints[].hint_type: {', '.join(GRAPH_HINT_TYPES)}",
             "\n## Constraints",
             "- Do not assume one claim equals one node; compress or split when appropriate\n"
+            "- Use only atomic claims as claim-backed graph evidence; never use"
+            " accepted_claims with atomicity=composite/split_required/non_atomic/split_pending"
+            " or is_atomic=false as primary source_refs/evidence_refs\n"
             "- Prefer concrete node_types (EquationRelation, Observable, Approximation,"
             " CorrectionSource, CorrectionTerm, UncertaintySource, Method, Experiment,"
             " Diagnostic, Result) over ClaimProxy/ThesisProxy\n"

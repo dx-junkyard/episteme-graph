@@ -449,6 +449,7 @@ class ComponentRefiner:
             primary_operation=family,
             secondary_operations=_secondary_operations(steps, family),
             split_recommendation=_no_split_recommendation(),
+            **_child_support_fields(parent, _responsibility_for_operation(raw_operation)),
             operation=family,
         )
 
@@ -801,6 +802,7 @@ def _build_responsibility_component(
         primary_operation=_operation_family(operation),
         secondary_operations=[],
         split_recommendation=_no_split_recommendation(),
+        **_child_support_fields(parent, responsibility_type),
         operation=operation,
     )
 
@@ -838,6 +840,45 @@ def _derivation_responsibility_slices(component: ComponentRecord, chains: list) 
 def _responsibility_summary(spec: dict, parent: ComponentRecord) -> str:
     label = str(spec.get("label") or parent.label)
     return f"{label} isolated as a reusable {spec.get('responsibility_type')} component."
+
+
+def _child_support_fields(parent: ComponentRecord, responsibility_type: str) -> dict:
+    role = _support_role_for_responsibility(responsibility_type)
+    kind = {
+        "derivation_core": "derivational",
+        "result": "direct",
+        "application": "application",
+        "limitation": "caveat",
+        "theory_base": "prerequisite",
+    }.get(role, "indirect")
+    distance = {
+        "derivation_core": 0,
+        "result": 0,
+        "observable_bridge": 1,
+        "application": 1,
+        "limitation": 1,
+        "theory_base": 2,
+    }.get(role, getattr(parent, "support_distance_to_headline_claim", 1))
+    return {
+        "support_role": role or getattr(parent, "support_role", ""),
+        "supports_claim_ids": list(getattr(parent, "supports_claim_ids", []) or getattr(parent, "linked_claim_ids", []) or []),
+        "support_distance_to_headline_claim": distance,
+        "support_kind": kind or getattr(parent, "support_kind", ""),
+    }
+
+
+def _support_role_for_responsibility(responsibility_type: str) -> str:
+    if responsibility_type == "derivation":
+        return "derivation_core"
+    if responsibility_type == "constraint":
+        return "result"
+    if responsibility_type == "application":
+        return "application"
+    if responsibility_type == "limitation":
+        return "limitation"
+    if responsibility_type in {"observation_model", "observable_basis", "equation_system"}:
+        return "observable_bridge"
+    return "theory_base"
 
 
 def _no_split_recommendation() -> dict:

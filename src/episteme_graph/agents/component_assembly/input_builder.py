@@ -17,6 +17,7 @@ from .schema import (
     CartridgeContext,
     ComponentAssemblyLLMInput,
 )
+from .claim_centered_planner import ClaimCenteredComponentPlanner
 
 _MAX_CLAIMS = 48
 _MAX_EQUATIONS = 24
@@ -26,6 +27,9 @@ _MAX_THESIS_NODES = 24
 
 
 class ComponentAssemblyInputBuilder:
+    def __init__(self) -> None:
+        self._claim_planner = ClaimCenteredComponentPlanner()
+
     def build(
         self,
         qualified_claims: ClaimQualificationResult,
@@ -49,17 +53,22 @@ class ComponentAssemblyInputBuilder:
             for c in accepted_claims
             if c.get("legacy_claim_id") and c.get("claim_id") != c.get("legacy_claim_id")
         }
+        thesis_nodes = self._thesis_nodes(
+            thesis,
+            int(cfg.get("max_thesis_nodes", _MAX_THESIS_NODES)),
+            claim_objects=claim_objects,
+            claim_aliases=claim_aliases,
+        )
+        claim_centered_plan = self._claim_planner.build(
+            accepted_claims=accepted_claims,
+            thesis_nodes=thesis_nodes,
+        ).to_dict()
         return ComponentAssemblyLLMInput(
             document_id=qualified_claims.document_id,
             cartridge_id=cartridge.cartridge_id if cartridge else qualified_claims.cartridge_id,
             accepted_claims=accepted_claims,
             equations=self._equations(equations, int(cfg.get("max_equations", _MAX_EQUATIONS))),
-            thesis_nodes=self._thesis_nodes(
-                thesis,
-                int(cfg.get("max_thesis_nodes", _MAX_THESIS_NODES)),
-                claim_objects=claim_objects,
-                claim_aliases=claim_aliases,
-            ),
+            thesis_nodes=thesis_nodes,
             dsl_nodes=self._dsl_nodes(
                 dsl,
                 int(cfg.get("max_dsl_nodes", _MAX_DSL_NODES)),
@@ -81,6 +90,7 @@ class ComponentAssemblyInputBuilder:
             available_dsl_nodes=self._available_dsl_nodes(dsl),
             available_dsl_edges=self._available_dsl_edges(dsl),
             available_derivation_ids=self._available_derivation_ids(derivations),
+            claim_centered_plan=claim_centered_plan,
         )
 
     @staticmethod
@@ -114,9 +124,16 @@ class ComponentAssemblyInputBuilder:
         claim_objects=None,
     ) -> list[dict]:
         claims = []
-        for record in result.qualified_spans[:limit]:
-            claims.append({
-                "claim_id": canonical_claim_id_for_span(record, claim_objects),
+        seen_claim_ids: set[str] = set()
+        claim_index = _claim_object_index(claim_objects)
+        has_claim_objects = bool(claim_index)
+        for record in result.qualified_spans:
+            claim_id = canonical_claim_id_for_span(record, claim_objects)
+            claim_obj = claim_index.get(claim_id)
+            if has_claim_objects and claim_obj and _claim_is_non_atomic(claim_obj):
+                continue
+            row = {
+                "claim_id": claim_id,
                 "legacy_claim_id": legacy_claim_id_for_span(record),
                 "span_id": record.span_id,
                 "block_id": record.block_id,
@@ -127,7 +144,22 @@ class ComponentAssemblyInputBuilder:
                 "claim_type_candidate": record.qualification.get("claim_type_candidate"),
                 "reason": record.reason,
                 "confidence": record.confidence,
-            })
+            }
+            if claim_obj:
+                _attach_claim_object_metadata(row, claim_obj)
+            claims.append(row)
+            if claim_id:
+                seen_claim_ids.add(claim_id)
+            if len(claims) >= limit:
+                return claims
+        for claim_obj in list(getattr(claim_objects, "claims", []) or []):
+            claim_id = str(getattr(claim_obj, "claim_id", "") or "")
+            if not claim_id or claim_id in seen_claim_ids or _claim_is_non_atomic(claim_obj):
+                continue
+            claims.append(_claim_object_row(claim_obj))
+            seen_claim_ids.add(claim_id)
+            if len(claims) >= limit:
+                break
         return claims
 
     @staticmethod
@@ -293,6 +325,13 @@ class ComponentAssemblyInputBuilder:
                 "equation_ids": list(claim.equation_ids or []),
                 "support_status": claim.support_status,
                 "review_status": claim.review_status,
+                "atomicity": getattr(claim, "atomicity", "atomic"),
+                "is_atomic": bool(getattr(claim, "is_atomic", True)),
+                "split_suggestions": list(getattr(claim, "split_suggestions", []) or []),
+                "concepts": _concept_names(claim),
+                "concept_assignment_status": str(
+                    getattr(claim, "concept_assignment_status", "review_required") or "review_required"
+                ),
             })
         return result
 
@@ -369,3 +408,81 @@ class ComponentAssemblyInputBuilder:
                 if step_id:
                     ids.append(step_id)
         return ids
+
+
+def _concept_names(claim: object) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for concept in getattr(claim, "concepts", []) or []:
+        name = str(
+            getattr(concept, "normalized", "")
+            or getattr(concept, "name", "")
+            or (concept.get("normalized") or concept.get("name") if isinstance(concept, dict) else "")
+        ).strip()
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def _claim_object_index(claim_objects) -> dict[str, object]:
+    return {
+        str(getattr(claim, "claim_id", "") or ""): claim
+        for claim in list(getattr(claim_objects, "claims", []) or [])
+        if getattr(claim, "claim_id", None)
+    }
+
+
+def _claim_is_non_atomic(claim: object) -> bool:
+    atomicity = str(getattr(claim, "atomicity", "atomic") or "atomic").lower()
+    is_atomic = bool(getattr(claim, "is_atomic", atomicity == "atomic"))
+    return atomicity in {
+        "composite",
+        "split_required",
+        "compound",
+        "non_atomic",
+        "split_pending",
+    } or not is_atomic
+
+
+def _attach_claim_object_metadata(row: dict, claim: object) -> None:
+    row.update({
+        "text": str(getattr(claim, "text", row.get("text", "")) or row.get("text", "")),
+        "claim_type_candidate": str(
+            getattr(claim, "claim_type", row.get("claim_type_candidate", "unknown"))
+            or row.get("claim_type_candidate", "unknown")
+        ),
+        "atomicity": str(getattr(claim, "atomicity", "atomic") or "atomic"),
+        "is_atomic": bool(getattr(claim, "is_atomic", True)),
+        "split_suggestions": list(getattr(claim, "split_suggestions", []) or []),
+        "source_evidence_ids": list(getattr(claim, "source_evidence_ids", []) or []),
+        "concepts": _concept_names(claim),
+        "concept_assignment_status": str(
+            getattr(claim, "concept_assignment_status", "review_required") or "review_required"
+        ),
+    })
+    if getattr(claim, "qualification_reason", None):
+        row["reason"] = str(getattr(claim, "qualification_reason"))
+    if getattr(claim, "confidence", None) is not None:
+        row["confidence"] = float(
+            getattr(claim, "confidence", row.get("confidence", 0.0)) or 0.0
+        )
+
+
+def _claim_object_row(claim: object) -> dict:
+    source_span_ids = list(getattr(claim, "source_span_ids", []) or [])
+    row = {
+        "claim_id": str(getattr(claim, "claim_id", "") or ""),
+        "legacy_claim_id": "",
+        "span_id": str(source_span_ids[0]) if source_span_ids else "",
+        "block_id": "",
+        "section_id": getattr(claim, "section_id", None),
+        "text": str(getattr(claim, "text", "") or ""),
+        "role_labels": [str(getattr(claim, "claim_type", "unknown") or "unknown")],
+        "claim_tier": None,
+        "claim_type_candidate": str(getattr(claim, "claim_type", "unknown") or "unknown"),
+        "reason": str(getattr(claim, "qualification_reason", "") or ""),
+        "confidence": float(getattr(claim, "confidence", 0.0) or 0.0),
+    }
+    _attach_claim_object_metadata(row, claim)
+    return row

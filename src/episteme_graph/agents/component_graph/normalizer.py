@@ -167,6 +167,7 @@ class ComponentGraphNormalizer:
                         chain_component_ids=chain_component_ids,
                         component_records=component_records,
                     ),
+                    "component_records": component_records,
                     "operation": operation,
                     "verb": verb,
                     "edge_type": edge_type,
@@ -348,6 +349,8 @@ def _main_node_from_group(group: dict, claim_index: dict[str, dict]) -> Componen
     linked_component_ids = _ordered_unique(
         cid for rec in records for cid in rec.get("linked_component_ids", [])
     )
+    support = _support_metadata_for_components(linked_component_ids, records)
+    concept_meta = _concepts_for_components(linked_component_ids, records)
     detail_node_ids = [rec["detail_id"] for rec in records]
 
     atomic_claim_ids = _atomic_claim_ids(linked_claim_ids, claim_index)
@@ -407,6 +410,12 @@ def _main_node_from_group(group: dict, claim_index: dict[str, dict]) -> Componen
         source_backing_status=status,
         review_reasons=reasons,
         member_component_ids=detail_node_ids,
+        support_role=support["support_role"],
+        supports_claim_ids=support["supports_claim_ids"],
+        support_distance_to_headline_claim=support["support_distance_to_headline_claim"],
+        support_kind=support["support_kind"],
+        concepts=concept_meta["concepts"],
+        prerequisite_concepts=concept_meta["prerequisite_concepts"],
     )
 
 
@@ -544,6 +553,8 @@ def _detail_node_from_record(
         source_backing_status=status,
         review_reasons=reasons,
         parent_component_id=parent_id,
+        **_support_metadata_for_components(list(rec.get("linked_component_ids", [])), [rec]),
+        **_concepts_for_components(list(rec.get("linked_component_ids", [])), [rec]),
     )
 
 
@@ -856,8 +867,76 @@ def _component_support_records(components: ComponentAssemblyResult | None) -> li
             ),
             "linked_equation_ids": eq_ids,
             "operation": str(getattr(comp, "operation", "") or ""),
+            "support_role": str(getattr(comp, "support_role", "") or ""),
+            "supports_claim_ids": list(getattr(comp, "supports_claim_ids", []) or []),
+            "support_distance_to_headline_claim": int(getattr(comp, "support_distance_to_headline_claim", 0) or 0),
+            "support_kind": str(getattr(comp, "support_kind", "") or ""),
+            "concepts": list(getattr(comp, "concepts", []) or []),
+            "prerequisite_concepts": list(getattr(comp, "prerequisite_concepts", []) or []),
         })
     return records
+
+
+def _support_metadata_for_components(component_ids: list[str], records: list[dict]) -> dict:
+    support_records = []
+    wanted = set(component_ids or [])
+    for rec in records or []:
+        for comp in rec.get("component_records", []) or []:
+            if not wanted or comp.get("component_id") in wanted:
+                support_records.append(comp)
+    if not support_records:
+        support_records = [
+            rec for rec in records or []
+            if rec.get("support_role") or rec.get("supports_claim_ids") or rec.get("support_kind")
+        ]
+    role_order = ["derivation_core", "result", "observable_bridge", "application", "limitation", "theory_base"]
+    selected = ""
+    for role in role_order:
+        if any(rec.get("support_role") == role for rec in support_records):
+            selected = role
+            break
+    if not selected:
+        selected = ""
+    claim_ids = _ordered_unique(
+        cid for rec in support_records for cid in (rec.get("supports_claim_ids") or [])
+    )
+    distances = [
+        int(rec.get("support_distance_to_headline_claim") or 0)
+        for rec in support_records
+        if rec.get("support_distance_to_headline_claim") is not None
+    ]
+    kind = next((rec.get("support_kind") for rec in support_records if rec.get("support_role") == selected and rec.get("support_kind")), "")
+    return {
+        "support_role": selected,
+        "supports_claim_ids": claim_ids,
+        "support_distance_to_headline_claim": min(distances or [0]),
+        "support_kind": kind,
+    }
+
+
+def _concepts_for_components(component_ids: list[str], records: list[dict]) -> dict:
+    """Roll up component concepts onto a graph node (issue #8)."""
+    support_records = []
+    wanted = set(component_ids or [])
+    for rec in records or []:
+        for comp in rec.get("component_records", []) or []:
+            if not wanted or comp.get("component_id") in wanted:
+                support_records.append(comp)
+    if not support_records:
+        support_records = [
+            rec for rec in records or []
+            if rec.get("concepts") or rec.get("prerequisite_concepts")
+        ]
+    concepts = _ordered_unique(
+        c for rec in support_records for c in (rec.get("concepts") or [])
+    )
+    prerequisite_concepts = _ordered_unique(
+        c for rec in support_records for c in (rec.get("prerequisite_concepts") or [])
+    )
+    return {
+        "concepts": concepts,
+        "prerequisite_concepts": prerequisite_concepts,
+    }
 
 
 def _linked_components_for_step(

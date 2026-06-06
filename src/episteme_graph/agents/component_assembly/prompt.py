@@ -14,9 +14,12 @@ preconditions, cautions, dependencies, and an INTERNAL FLOW that connects them.
 
 Component boundaries follow THEORY STRUCTURE, not explanation structure.
 1 component = 1 main theoretical operation and 1 responsibility type.
-Decide boundaries by: inputs change, outputs change, the operation changes,
+Decide boundaries from the headline claim support plan first, then by:
+inputs change, outputs change, the operation changes,
 assumptions change, the eliminated target changes, the derivation result changes,
 the equation role changes, or the review status changes.
+Components are reusable theory parts that support the paper's main claim, not
+section summaries or contiguous equation sequences.
 Split a component when it contains two or more of:
 define, parameterize, linearize, solve, substitute, eliminate, derive, compare,
 diagnose, forecast, limit. Do NOT keep a bias-parameter solution, a consistency
@@ -28,12 +31,21 @@ derivation, constraint, application, limitation.
 Each component should also set primary_operation, secondary_operations, and
 split_recommendation. If multiple responsibility types are present,
 split_recommendation.required must be true.
+Each component must set support_role, supports_claim_ids,
+support_distance_to_headline_claim, and support_kind from the claim-centered plan.
 
 Important constraints:
 - Use only component types allowed by the active cartridge or explicit core fallbacks.
 - Use only dependency labels from the allowed vocabulary.
 - Do not invent new component taxonomies.
 - Components must be reusable theory operations, not topical or section summaries.
+- Build components around how they support the headline claim. Separate
+  theory_base, observable_bridge, derivation_core, result, application, and
+  limitation components even when they appear in the same section.
+- Background-only components must use support_kind=prerequisite.
+- Bias-elimination or solve/eliminate components belong in support_role=derivation_core.
+- Consistency-relation outputs belong in support_role=result.
+- Forecast/diagnostic use belongs in support_role=application, not derivation_core.
 - Split oversized map components into definition / model /
   observation_model / observable_basis / equation_system /
   derivation / constraint units. For example, a
@@ -41,8 +53,14 @@ Important constraints:
   skewness/kurtosis observable bases, bias-linearized equations, bias
   elimination, and final consistency relations.
 - Use accepted claims, equation semantics, thesis structure, and DSL graph evidence.
+- Use only atomic claims as primary support. Do not use claims with
+  atomicity=composite, split_required, non_atomic, split_pending, or is_atomic=false
+  in evidence_refs.claim_ids, linked_claim_ids, or supports_claim_ids.
 - Do not let prior work or meta discourse dominate component cores.
-- Return AT MOST 3 components. Prefer the highest-value core theory operations.
+- Set concepts (>= 2), prerequisite_concepts, introduced_concepts, and reused_concepts
+  per component. Derivation components must include a mathematical/procedural concept,
+  observable components an observable name, and comparison components a theory-class name.
+- Return AT MOST 6 components. Prefer the headline-claim support components.
 - Keep label <= 10 words, summary <= 40 words, reason <= 30 words,
   teaching_takeaway <= 30 words, and each review_note <= 20 words.
 - Keep inputs/outputs/preconditions/cautions/internal_flow to the minimum needed
@@ -97,6 +115,14 @@ _OUTPUT_SCHEMA = {
             "operation": "single main theoretical operation (define/linearize/eliminate/substitute/solve/derive/constrain/diagnose/forecast/compare/...)",
             "primary_operation": "string",
             "secondary_operations": [],
+            "support_role": "theory_base | observable_bridge | derivation_core | result | application | limitation",
+            "supports_claim_ids": [],
+            "support_distance_to_headline_claim": 0,
+            "support_kind": "direct | indirect | prerequisite | derivational | application | caveat",
+            "concepts": [],
+            "prerequisite_concepts": [],
+            "introduced_concepts": [],
+            "reused_concepts": [],
             "split_recommendation": {
                 "required": False,
                 "suggested_components": []
@@ -198,6 +224,7 @@ class ComponentAssemblyPromptFactory:
             "dsl_nodes": llm_input.dsl_nodes,
             "dsl_edges": llm_input.dsl_edges,
             "normalized_terms": llm_input.normalized_terms,
+            "claim_centered_plan": llm_input.claim_centered_plan,
         }
         available = {
             "available_claims": llm_input.available_claims,
