@@ -94,6 +94,8 @@ def test_to_json_round_trip():
     assert eq.semantics.equation_type == "definition"
     assert eq.semantics.defined_symbols[0].symbol == "N"
     assert eq.candidate_trace_ids == ["eqcand_blk_e1_abc123"]
+    assert eq.confidence_policy.can_be_rendered_as_final_formula is True
+    assert eq.confidence_policy.allowed_downstream_use == "unrestricted"
 
 
 def test_candidate_round_trip():
@@ -118,6 +120,8 @@ def test_confidence_policy_complete_source_backed():
     cp = EquationConfidencePolicy.derive(src, rec, sem)
     assert cp.can_support_claim is True
     assert cp.can_be_used_in_derivation is True
+    assert cp.can_be_rendered_as_final_formula is True
+    assert cp.allowed_downstream_use == "unrestricted"
     assert cp.must_not_treat_as_source_extracted is False
     assert cp.display_requires_note is False
 
@@ -152,6 +156,8 @@ def test_confidence_policy_reconstruction_based():
     )
     cp = EquationConfidencePolicy.derive(src, rec, sem)
     assert cp.can_support_claim is False
+    assert cp.can_be_rendered_as_final_formula is False
+    assert cp.allowed_downstream_use in {"semantic_hint_only", "display_with_warning"}
     assert cp.must_not_treat_as_source_extracted is True
     assert cp.display_requires_note is True
 
@@ -181,3 +187,5 @@ def test_equation_consistency_mismatch_blocks_claim_and_derivation_use():
     assert consistency.review_required is True
     assert cp.can_support_claim is False
     assert cp.can_be_used_in_derivation is False
+    assert cp.can_be_rendered_as_final_formula is False
+    assert cp.allowed_downstream_use == "semantic_hint_only"

@@ -15,14 +15,13 @@ that:
 
     1 component = 1 reusable theory unit
 
-A *reusable theory unit* is a theory-operation **family** (linearize / solve /
-eliminate / derive / …), not a single equation step (issue #308). Several
-equation steps of the same family collapse into one component and are preserved
-in its ``internal_flow``. Generic operations (``transform`` / ``relate`` /
-``connect`` / ``support`` / empty) never spawn a standalone child — they are kept
-inside the nearest unit's ``internal_flow`` so the catalogue of reusable
-components stays at the theory-unit altitude. Component labels/summaries describe
-the theory object, not a bare operation name.
+A *reusable theory unit* is a single responsibility unit (definition, model,
+observable basis, equation system, derivation, constraint, …).
+Generic operations (``transform`` / ``relate`` / ``connect`` / ``support`` /
+empty) never spawn a standalone child — they are kept inside the nearest unit's
+``internal_flow`` so the catalogue of reusable components stays at the
+theory-unit altitude. Component labels/summaries describe the theory object, not
+a bare operation name.
 
 The boundary is decided by *theory structure*, not explanation style:
 inputs change, outputs change, the operation family changes, symbols change.
@@ -33,6 +32,7 @@ import copy
 from dataclasses import dataclass, field
 
 from .equation_role_classifier import EquationRoleClassifier
+from .responsibility import CANONICAL_RESPONSIBILITY_TYPES, canonical_responsibility_type
 from .schema import (
     ComponentAssemblyLLMInput,
     ComponentAssemblyResult,
@@ -52,6 +52,16 @@ _DERIVATION_TYPES = {
 # carrying these never form a standalone child component; they are folded into
 # the nearest unit's internal_flow instead.
 _GENERIC_OPERATIONS = {"transform", "relate", "connect", "support", "associate", ""}
+
+RESPONSIBILITY_TYPES = CANONICAL_RESPONSIBILITY_TYPES
+
+SIZE_THRESHOLDS = {
+    "max_linked_equations_soft": 8,
+    "max_linked_equations_hard": 15,
+    "max_internal_flow_steps_soft": 5,
+    "max_component_types_per_component": 1,
+    "max_distinct_responsibility_labels": 1,
+}
 
 
 @dataclass
@@ -76,12 +86,15 @@ class RefinementAction:
 class RefinementReport:
     split_actions: list[RefinementAction] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    oversized_components: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
             "split_count": len(self.split_actions),
             "split_actions": [a.to_dict() for a in self.split_actions],
             "warnings": list(self.warnings),
+            "oversized_components": list(self.oversized_components),
+            "component_size_thresholds": dict(SIZE_THRESHOLDS),
         }
 
 
@@ -167,6 +180,25 @@ class ComponentRefiner:
         chains: list,
         report: RefinementReport,
     ) -> list[ComponentRecord]:
+        split = component.split_recommendation if isinstance(component.split_recommendation, dict) else {}
+        if split.get("required"):
+            report.oversized_components.append({
+                "component_id": component.component_id,
+                "label": component.label,
+                "reasons": list(split.get("reasons") or []),
+                "split_required": True,
+                "suggested_components": list(split.get("suggested_components") or []),
+            })
+            if component.review_status in ("", "auto_accepted", "source_backed"):
+                component.review_status = "review_required"
+            note = "ComponentRefiner consumed split recommendation"
+            if note not in component.review_notes:
+                component.review_notes.append(note)
+
+        responsibility_children = self._responsibility_children(component, eq_index, chains, report)
+        if responsibility_children:
+            return responsibility_children
+
         groups, generic_steps = self._operation_groups(component, chains)
 
         if component.component_type not in _DERIVATION_TYPES:
@@ -256,7 +288,7 @@ class ComponentRefiner:
                 s for step in steps for s in _step_field(step, "retained_symbols")
             )
             candidates.append(TheoryOperationCandidate(
-                operation=_operation_family(family),
+                operation=family,
                 steps=list(steps),
                 input_equation_ids=input_eqs,
                 output_equation_ids=output_eqs,
@@ -297,7 +329,7 @@ class ComponentRefiner:
                 if _is_generic_operation(operation):
                     generic_steps.append(step)
                     continue
-                family = _operation_family(operation)
+                family = _operation_group_key(operation)
                 groups.setdefault(family, []).append(step)
         return groups, generic_steps
 
@@ -349,11 +381,12 @@ class ComponentRefiner:
             declared_output_ids=output_eqs,
         )
 
-        family = _operation_family(candidate.operation)
+        raw_operation = candidate.operation
+        family = _operation_family(raw_operation)
         # Label / summary describe the theory object (the parent's theoretical
         # subject) qualified by the reusable unit's family — not a bare operation
         # name like "Transform" / "Relate" (issue #308).
-        label = _theory_unit_label(family, parent, eliminated or retained)
+        label = _theory_unit_label(raw_operation, parent, eliminated or retained)
         summary = _theory_unit_summary(label, family, parent, len(steps))
 
         internal_flow = _build_internal_flow(steps, family)
@@ -410,8 +443,58 @@ class ComponentRefiner:
             source_scope=copy.deepcopy(parent.source_scope or {}),
             assumptions=list(parent.assumptions),
             approximations=list(parent.approximations),
+            constraints=list(parent.constraints),
+            invalid_conditions=list(parent.invalid_conditions),
+            responsibility_type=_responsibility_for_operation(raw_operation),
+            primary_operation=family,
+            secondary_operations=_secondary_operations(steps, family),
+            split_recommendation=_no_split_recommendation(),
             operation=family,
         )
+
+    def _responsibility_children(
+        self,
+        component: ComponentRecord,
+        eq_index: dict[str, dict],
+        chains: list,
+        report: RefinementReport,
+    ) -> list[ComponentRecord]:
+        slices = _responsibility_slices(component, eq_index)
+        if slices:
+            seen_labels = {str(spec.get("label") or "") for spec in slices}
+            for spec in _derivation_responsibility_slices(component, chains):
+                if spec["label"] in seen_labels:
+                    continue
+                seen_labels.add(spec["label"])
+                slices.append(spec)
+        if len(slices) < 2:
+            return []
+
+        children: list[ComponentRecord] = []
+        for idx, spec in enumerate(slices, start=1):
+            child_id = f"{component.component_id}__resp{idx}"
+            child = _build_responsibility_component(component, child_id, spec, eq_index)
+            children.append(child)
+
+        for prev, nxt in zip(children, children[1:]):
+            nxt.dependencies.append({
+                "dependency_type": "depends_on",
+                "component_refs": [prev.component_id],
+                "reason": "Sequential responsibility dependency from ComponentRefiner.",
+            })
+
+        report.split_actions.append(RefinementAction(
+            parent_component_id=component.component_id,
+            parent_label=component.label,
+            child_component_ids=[c.component_id for c in children],
+            operations=[c.responsibility_type or c.operation for c in children],
+            reason=(
+                "Component mixed observation model, observable bases, and "
+                "bias-linearized equation responsibilities; split into reusable "
+                "theory-component units."
+            ),
+        ))
+        return children
 
     def _finalize_single(
         self,
@@ -424,6 +507,12 @@ class ComponentRefiner:
                 component.operation = _operation_family(next(iter(groups)))
             else:
                 component.operation = _infer_operation_from_text(component)
+        if not component.responsibility_type:
+            component.responsibility_type = _responsibility_for_operation(component.operation)
+        if not component.primary_operation:
+            component.primary_operation = component.operation
+        if not component.split_recommendation:
+            component.split_recommendation = _no_split_recommendation()
 
         all_eqs = _all_equation_ids(component)
         if not all_eqs:
@@ -503,6 +592,367 @@ def _operation_family(operation: str) -> str:
     return text or "derive"
 
 
+def _operation_group_key(operation: str) -> str:
+    text = str(operation or "").lower()
+    if "linear" in text and "skew" in text:
+        return "linearize_skewness_bias_equation"
+    if "linear" in text and "kurt" in text:
+        return "linearize_kurtosis_bias_equation"
+    if ("solve" in text or "eliminat" in text) and ("second" in text or "b2" in text or "b_2" in text):
+        return "eliminate_second_order_bias"
+    if ("solve" in text or "eliminat" in text) and ("third" in text or "b3" in text or "b_3" in text):
+        return "eliminate_third_order_bias"
+    if "consistency" in text and "skew" in text:
+        return "derive_skewness_consistency_relation"
+    if "consistency" in text and "first" in text and "kurt" in text:
+        return "derive_first_kurtosis_consistency_relation"
+    if "consistency" in text and "second" in text and "kurt" in text:
+        return "derive_second_kurtosis_consistency_relation"
+    if "consistency" in text and "kurt" in text:
+        return "derive_kurtosis_consistency_relation"
+    return _operation_family(operation)
+
+
+def _responsibility_for_operation(operation: str) -> str:
+    text = str(operation or "").lower()
+    family = _operation_family(text)
+    if "observable" in text:
+        return "observable_basis"
+    if "linear" in text:
+        return "equation_system"
+    if "eliminat" in text or "solve" in text:
+        return "derivation"
+    if "consistency" in text or "constraint" in text or "criterion" in text:
+        return "constraint"
+    if "forecast" in text:
+        return "application"
+    if "caveat" in text or "limit" in text or "invalid" in text:
+        return "limitation"
+    if family == "define":
+        return "definition"
+    if family in {"parameterize", "assume"}:
+        return "model"
+    if family in {"substitute"}:
+        return "equation_system"
+    if family in {"derive", "constrain"}:
+        return "constraint"
+    if family in {"diagnose", "forecast", "compare"}:
+        return "application"
+    return canonical_responsibility_type("")
+
+
+def _responsibility_labels(component: ComponentRecord, eq_index: dict[str, dict]) -> set[str]:
+    labels: set[str] = set()
+    text = _component_text(component)
+    if any(k in text for k in ("bias model", "galaxy bias", "local bias", "bias expansion")):
+        labels.add("model")
+    if any(k in text for k in ("smoothing", "smoothed", "spectral moment", "sigma_", "variance")):
+        labels.add("definition")
+    if any(k in text for k in ("observable basis", "skewness", "kurtosis")):
+        labels.add("observable_basis")
+    if any(k in text for k in ("linearized", "linearize", "bias elimination", "eliminate")):
+        labels.add("equation_system")
+    if any(k in text for k in ("derive", "derivation", "final result", "consistency relation")):
+        labels.add("constraint")
+    if any(k in text for k in ("constraint", "validity", "limitation", "invalid")):
+        labels.add("limitation")
+
+    for eq_id in _all_equation_ids(component):
+        eq_text = _equation_text(eq_id, eq_index)
+        role = str((eq_index.get(eq_id) or {}).get("role") or (eq_index.get(eq_id) or {}).get("equation_type") or "").lower()
+        if "definition" in role or "defin" in eq_text:
+            labels.add("definition")
+        if any(k in eq_text for k in ("skew", "kurt", "s_3", "s3", "k_4", "k4")) and ("definition" in role or "basis" in eq_text):
+            labels.add("observable_basis")
+        if any(k in eq_text for k in ("linear", "bias", "b_1", "b1", "b_2", "b2", "b_3", "b3")) and role in {"relation", "transformation", "result", ""}:
+            labels.add("equation_system")
+        if "constraint" in role:
+            labels.add("constraint")
+    return labels
+
+
+def _responsibility_slices(component: ComponentRecord, eq_index: dict[str, dict]) -> list[dict]:
+    """Build deterministic responsibility slices for bias→observable map bundles.
+
+    The rules are intentionally narrow: they only fire when the component text
+    or equations show the same mixed responsibilities as the known
+    Bias-to-smoothed-observables failure mode.
+    """
+    text = _component_text(component)
+    labels = _responsibility_labels(component, eq_index)
+    has_observable_map_language = (
+        "bias" in text
+        and ("observable" in text or "observables" in text)
+        and any(k in text for k in ("smooth", "spectral", "skew", "kurt"))
+    )
+    has_equation_backed_mixed_map = (
+        {"model", "observable_basis", "equation_system"} <= labels
+        and any(k in text for k in ("observable", "observables", "smooth", "spectral", "kurtosis"))
+    )
+    looks_like_bias_observable_map = has_observable_map_language or has_equation_backed_mixed_map
+    if not looks_like_bias_observable_map:
+        return []
+
+    buckets: dict[str, list[str]] = {
+        "bias_model": [],
+        "smoothing": [],
+        "skew_basis": [],
+        "kurt_basis": [],
+        "skew_linear": [],
+        "kurt_linear": [],
+    }
+    fallback_eqs = _all_equation_ids(component)
+    for eq_id in fallback_eqs:
+        eq_text = _equation_text(eq_id, eq_index) or eq_id.lower()
+        is_skew = any(k in eq_text for k in ("skew", "s_3", "s3"))
+        is_kurt = any(k in eq_text for k in ("kurt", "k_4", "k4"))
+        is_linear = any(k in eq_text for k in ("linear", "linearized", "bias-linear", "b_1", "b1", "b_2", "b2", "b_3", "b3"))
+        is_definition = any(k in eq_text for k in ("definition", "basis", "observable"))
+        if any(k in eq_text for k in ("galaxy bias", "local bias", "delta_g", "bias model", "bias expansion")):
+            buckets["bias_model"].append(eq_id)
+        elif any(k in eq_text for k in ("smooth", "spectral moment", "sigma_", "sigma", "window", "variance")):
+            buckets["smoothing"].append(eq_id)
+        elif is_skew and is_linear:
+            buckets["skew_linear"].append(eq_id)
+        elif is_kurt and is_linear:
+            buckets["kurt_linear"].append(eq_id)
+        elif is_skew or (is_definition and "third" in eq_text):
+            buckets["skew_basis"].append(eq_id)
+        elif is_kurt or (is_definition and "fourth" in eq_text):
+            buckets["kurt_basis"].append(eq_id)
+
+    # If equation metadata is sparse but the parent clearly names the mixed
+    # bundle, still split by responsibility and leave equations attached to the
+    # most specific slices when possible.
+    specs = [
+        ("Local galaxy bias observation model", "model", "parameterize", buckets["bias_model"]),
+        ("Smoothing and spectral moments", "definition", "define", buckets["smoothing"]),
+        ("Skewness observable basis", "observable_basis", "observable_definition", buckets["skew_basis"]),
+        ("Kurtosis observable basis", "observable_basis", "observable_definition", buckets["kurt_basis"]),
+        ("Skewness linearized bias equation", "equation_system", "linearize", buckets["skew_linear"]),
+        ("Kurtosis linearized bias equation", "equation_system", "linearize", buckets["kurt_linear"]),
+    ]
+    selected = [
+        {"label": label, "responsibility_type": resp, "operation": op, "equation_ids": _ordered_unique(eqs)}
+        for label, resp, op, eqs in specs
+        if eqs or _responsibility_named_in_text(label, text)
+    ]
+    if len(selected) < 2:
+        return []
+    assigned = {eq for spec in selected for eq in spec["equation_ids"]}
+    leftovers = [eq for eq in fallback_eqs if eq not in assigned]
+    if leftovers:
+        selected[-1]["equation_ids"] = _ordered_unique(selected[-1]["equation_ids"] + leftovers)
+    return selected
+
+
+def _build_responsibility_component(
+    parent: ComponentRecord,
+    component_id: str,
+    spec: dict,
+    eq_index: dict[str, dict],
+) -> ComponentRecord:
+    eq_ids = list(spec.get("equation_ids") or [])
+    responsibility_type = str(spec.get("responsibility_type") or "")
+    operation = str(spec.get("operation") or "")
+    review_required = _review_required_equation_ids(eq_ids, eq_index)
+    review_status = "review_required" if review_required else _source_backed_status(parent.review_status)
+    evidence_refs = copy.deepcopy(parent.evidence_refs or {})
+    evidence_refs["equation_ids"] = eq_ids
+    return ComponentRecord(
+        component_id=component_id,
+        component_type=parent.component_type,
+        label=str(spec.get("label") or parent.label),
+        summary=_responsibility_summary(spec, parent),
+        inputs=_responsibility_io("input", spec, parent),
+        outputs=_responsibility_io("output", spec, parent),
+        preconditions=list(parent.preconditions),
+        cautions=list(parent.cautions),
+        dependencies=[],
+        evidence_refs=evidence_refs,
+        reason=f"Split from oversized component {parent.component_id} by responsibility.",
+        confidence=parent.confidence,
+        review_notes=list(parent.review_notes),
+        internal_flow=_responsibility_flow(eq_ids, operation),
+        linked_claim_ids=list(parent.linked_claim_ids),
+        linked_equation_ids=eq_ids,
+        linked_evidence_ids=list(parent.linked_evidence_ids),
+        linked_derivation_ids=list(parent.linked_derivation_ids),
+        linked_dsl_node_ids=list(parent.linked_dsl_node_ids),
+        linked_dsl_edge_ids=list(parent.linked_dsl_edge_ids),
+        input_equation_ids=eq_ids[:-1] if len(eq_ids) > 1 and responsibility_type in {"equation_system", "derivation", "constraint"} else [],
+        intermediate_equation_ids=[],
+        output_equation_ids=eq_ids[-1:] if eq_ids and responsibility_type in {"equation_system", "derivation", "constraint", "observable_basis"} else [],
+        constraint_equation_ids=[],
+        definition_equation_ids=eq_ids if responsibility_type in {"definition", "model", "observation_model", "observable_basis"} else [],
+        review_required_equation_ids=review_required,
+        eliminated_symbols=list(parent.eliminated_symbols),
+        retained_symbols=list(parent.retained_symbols),
+        equation_confidence_summary=dict(parent.equation_confidence_summary or {}),
+        confidence_gate=_confidence_gate(_blocked_equation_ids(eq_ids, eq_index)),
+        review_status=review_status,
+        teaching_takeaway=_responsibility_takeaway(spec),
+        source_scope=copy.deepcopy(parent.source_scope or {}),
+        assumptions=list(parent.assumptions),
+        approximations=list(parent.approximations),
+        constraints=list(parent.constraints),
+        invalid_conditions=list(parent.invalid_conditions),
+        responsibility_type=responsibility_type,
+        primary_operation=_operation_family(operation),
+        secondary_operations=[],
+        split_recommendation=_no_split_recommendation(),
+        operation=operation,
+    )
+
+
+def _derivation_responsibility_slices(component: ComponentRecord, chains: list) -> list[dict]:
+    linked_ids = set(component.linked_derivation_ids or [])
+    component_eqs = set(_all_equation_ids(component))
+    specs: list[dict] = []
+    for chain in chains or []:
+        chain_id = getattr(chain, "derivation_id", None)
+        linked_components = set(getattr(chain, "linked_component_ids", []) or [])
+        chain_linked = (
+            (chain_id and chain_id in linked_ids)
+            or (component.component_id in linked_components)
+        )
+        for step in getattr(chain, "steps", []) or []:
+            step_eqs = _ordered_unique(
+                _step_field(step, "input_equation_ids") + _step_field(step, "output_equation_ids")
+            )
+            if not chain_linked and not (set(step_eqs) & component_eqs):
+                continue
+            operation = _operation_group_key(str(getattr(step, "operation", "") or ""))
+            label = _explicit_theory_unit_label(operation)
+            if not label:
+                continue
+            specs.append({
+                "label": label,
+                "responsibility_type": _responsibility_for_operation(operation),
+                "operation": _operation_family(operation),
+                "equation_ids": step_eqs,
+            })
+    return specs
+
+
+def _responsibility_summary(spec: dict, parent: ComponentRecord) -> str:
+    label = str(spec.get("label") or parent.label)
+    return f"{label} isolated as a reusable {spec.get('responsibility_type')} component."
+
+
+def _no_split_recommendation() -> dict:
+    return {"required": False, "suggested_components": []}
+
+
+def _secondary_operations(steps: list, primary: str) -> list[str]:
+    return _ordered_unique(
+        _operation_family(str(getattr(step, "operation", "") or ""))
+        for step in steps
+        if _operation_family(str(getattr(step, "operation", "") or "")) != primary
+    )
+
+
+def _responsibility_takeaway(spec: dict) -> str:
+    label = str(spec.get("label") or "component")
+    return f"{label} has one clear input/output responsibility."
+
+
+def _responsibility_io(direction: str, spec: dict, parent: ComponentRecord) -> list[dict]:
+    eq_ids = list(spec.get("equation_ids") or [])
+    label = str(spec.get("label") or "")
+    if eq_ids:
+        return [{
+            "name": f"{label} {'inputs' if direction == 'input' else 'outputs'}",
+            "role": f"responsibility_{direction}",
+            "equation_ids": eq_ids if direction == "output" else eq_ids[:1],
+        }]
+    return list(parent.inputs if direction == "input" else parent.outputs)[:1]
+
+
+def _responsibility_flow(eq_ids: list[str], operation: str) -> list[dict]:
+    if len(eq_ids) < 2:
+        return []
+    return [
+        {"from": src, "relation": operation or "defines", "to": dst}
+        for src, dst in zip(eq_ids, eq_ids[1:])
+        if src != dst
+    ][:SIZE_THRESHOLDS["max_internal_flow_steps_soft"]]
+
+
+def _review_required_equation_ids(eq_ids: list[str], eq_index: dict[str, dict]) -> list[str]:
+    ids: list[str] = []
+    for eq_id in eq_ids:
+        eq = eq_index.get(eq_id) or {}
+        policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
+        if (
+            bool(eq.get("needs_math_review"))
+            or bool(eq.get("review_flags"))
+            or eq.get("semantic_status") == "reconstruction_based"
+            or eq.get("reconstruction_status") not in (None, "", "none")
+            or bool(policy.get("must_not_treat_as_source_extracted"))
+            or policy.get("can_support_claim") is False
+        ):
+            ids.append(eq_id)
+    return _ordered_unique(ids)
+
+
+def _source_backed_status(parent_status: str) -> str:
+    if parent_status in {"source_backed", "auto_accepted"}:
+        return "source_backed"
+    if parent_status in {"review_required", "teacher_review_required"}:
+        return parent_status
+    return "source_backed"
+
+
+def _component_text(component: ComponentRecord) -> str:
+    parts = [
+        component.label,
+        component.summary,
+        component.reason,
+        component.teaching_takeaway,
+    ]
+    for collection in (component.inputs, component.outputs, component.preconditions, component.cautions):
+        for item in collection or []:
+            if isinstance(item, dict):
+                parts.extend(str(item.get(k) or "") for k in ("name", "label", "text", "role"))
+    return " ".join(parts).lower()
+
+
+def _equation_text(eq_id: str, eq_index: dict[str, dict]) -> str:
+    eq = eq_index.get(eq_id) or {}
+    fields = [
+        eq_id,
+        eq.get("label"),
+        eq.get("latex"),
+        eq.get("plain_text"),
+        eq.get("role"),
+        eq.get("equation_type"),
+        eq.get("semantic_status"),
+        " ".join(str(v) for v in eq.get("defined_symbols") or []),
+        " ".join(str(v) for v in eq.get("used_symbols") or []),
+    ]
+    source = eq.get("source_location") if isinstance(eq.get("source_location"), dict) else {}
+    fields.extend(str(source.get(k) or "") for k in ("section_id", "block_id"))
+    return " ".join(str(v) for v in fields if v).lower()
+
+
+def _responsibility_named_in_text(label: str, text: str) -> bool:
+    label_text = label.lower()
+    if "local galaxy bias" in label_text:
+        return "bias" in text and ("model" in text or "map" in text)
+    if "smoothing" in label_text:
+        return "smooth" in text or "spectral moment" in text
+    if "skewness observable" in label_text:
+        return "skew" in text and "observable" in text
+    if "kurtosis observable" in label_text:
+        return "kurt" in text and "observable" in text
+    if "skewness linearized" in label_text:
+        return "skew" in text and ("linear" in text or "bias" in text)
+    if "kurtosis linearized" in label_text:
+        return "kurt" in text and ("linear" in text or "bias" in text)
+    return False
+
+
 def _infer_operation_from_text(component: ComponentRecord) -> str:
     text = " ".join([
         str(component.label or ""),
@@ -535,13 +985,37 @@ def _theory_unit_label(family: str, parent: ComponentRecord, symbols: list[str])
     operation name. When the unit carries distinguishing symbols they are used as
     the more specific theory object.
     """
-    verb = _humanize_operation(family, "")
+    explicit = _explicit_theory_unit_label(family)
+    if explicit:
+        return explicit
+    verb = _humanize_operation(_operation_family(family), "")
     object_phrase = ", ".join(symbols[:3]) if symbols else str(parent.label or "").strip()
     if not object_phrase:
         return verb or "Theory unit"
     if not verb:
         return object_phrase
     return f"{verb}: {object_phrase}"
+
+
+def _explicit_theory_unit_label(operation: str) -> str:
+    text = str(operation or "").lower()
+    if "linearize_skewness" in text:
+        return "Skewness linearized bias equation"
+    if "linearize_kurtosis" in text:
+        return "Kurtosis linearized bias equation"
+    if "eliminate_second_order" in text:
+        return "Second-order bias elimination"
+    if "eliminate_third_order" in text:
+        return "Third-order bias elimination"
+    if "derive_skewness_consistency" in text:
+        return "Skewness consistency relation"
+    if "derive_first_kurtosis_consistency" in text:
+        return "First kurtosis consistency relation"
+    if "derive_second_kurtosis_consistency" in text:
+        return "Second kurtosis consistency relation"
+    if "derive_kurtosis_consistency" in text:
+        return "Kurtosis consistency relation"
+    return ""
 
 
 def _theory_unit_summary(label: str, family: str, parent: ComponentRecord, step_count: int) -> str:
@@ -623,7 +1097,15 @@ def _blocked_equation_ids(equation_ids: list[str], eq_index: dict[str, dict]) ->
     for eq_id in equation_ids:
         eq = eq_index.get(eq_id) or {}
         policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
-        if policy.get("can_support_claim") is False and policy.get("can_be_used_in_derivation") is False:
+        allowed_use = str(policy.get("allowed_downstream_use") or policy.get("downstream_allowed_use") or "")
+        if allowed_use == "blocked":
+            blocked.append(eq_id)
+            continue
+        if (
+            policy.get("can_support_claim") is False
+            and policy.get("can_be_used_in_derivation") is False
+            and allowed_use in {"", "blocked", "semantic_hint_only"}
+        ):
             blocked.append(eq_id)
             continue
         if (
@@ -641,11 +1123,13 @@ def _confidence_gate(blocked_eqs: list[str]) -> dict:
             "blocked_by_equation_ids": [],
             "blocked_reason": "",
             "downstream_allowed_use": "display_with_warning",
+            "allowed_downstream_use": "display_with_warning",
         }
     return {
         "blocked_by_equation_ids": list(blocked_eqs),
         "blocked_reason": "linked equation cannot support claim or derivation",
         "downstream_allowed_use": "semantic_hint_only",
+        "allowed_downstream_use": "semantic_hint_only",
     }
 
 

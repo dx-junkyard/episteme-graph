@@ -141,6 +141,7 @@ def _fill_confidence_gate(
             "blocked_by_equation_ids": [],
             "blocked_reason": "",
             "downstream_allowed_use": "display_with_warning",
+            "allowed_downstream_use": "display_with_warning",
         }
         return
     reason = "linked equation cannot support claim or derivation"
@@ -148,6 +149,7 @@ def _fill_confidence_gate(
         "blocked_by_equation_ids": blocked,
         "blocked_reason": reason,
         "downstream_allowed_use": "semantic_hint_only",
+        "allowed_downstream_use": "semantic_hint_only",
     }
     component.review_required_equation_ids = _unique(
         list(component.review_required_equation_ids or []) + blocked
@@ -220,7 +222,14 @@ def _requires_review(eq: dict) -> bool:
 
 def _equation_blocks_claim_and_derivation(eq: dict) -> bool:
     policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
-    if policy.get("can_support_claim") is False and policy.get("can_be_used_in_derivation") is False:
+    allowed_use = str(policy.get("allowed_downstream_use") or policy.get("downstream_allowed_use") or "")
+    if allowed_use == "blocked":
+        return True
+    if (
+        policy.get("can_support_claim") is False
+        and policy.get("can_be_used_in_derivation") is False
+        and allowed_use in {"", "blocked", "semantic_hint_only"}
+    ):
         return True
     return (
         eq.get("latex") is None

@@ -48,6 +48,13 @@ EQUATION_TYPES = [
     "unknown",
 ]
 
+ALLOWED_DOWNSTREAM_USES = [
+    "blocked",
+    "semantic_hint_only",
+    "display_with_warning",
+    "unrestricted",
+]
+
 DEFINITION_STATUSES = ["defined", "used", "redefined", "unknown"]
 
 LINKED_TEXT_RELATIONS = [
@@ -365,6 +372,8 @@ class EquationConfidencePolicy:
     """Claim / Derivation / Component / Course で使用可能かの方針。"""
     can_support_claim: bool
     can_be_used_in_derivation: bool
+    can_be_rendered_as_final_formula: bool
+    allowed_downstream_use: str
     can_be_displayed_in_course: bool
     display_requires_note: bool
     must_not_treat_as_source_extracted: bool
@@ -413,9 +422,25 @@ class EquationConfidencePolicy:
         if consistency_review:
             can_derivation = False
         display_note = must_not or source_extraction.needs_math_review
+        can_render_final = (
+            can_claim
+            and source_extraction.extraction_status == "complete"
+            and not consistency_mismatch
+            and not display_note
+        )
+        if can_claim and can_derivation and can_render_final:
+            allowed_use = "unrestricted"
+        elif can_render_final or can_claim or can_derivation:
+            allowed_use = "display_with_warning"
+        elif source_extraction.raw_text or source_extraction.latex or reconstruction.latex:
+            allowed_use = "semantic_hint_only"
+        else:
+            allowed_use = "blocked"
         return cls(
             can_support_claim=can_claim,
             can_be_used_in_derivation=can_derivation,
+            can_be_rendered_as_final_formula=can_render_final,
+            allowed_downstream_use=allowed_use,
             can_be_displayed_in_course=True,
             display_requires_note=display_note,
             must_not_treat_as_source_extracted=must_not,
@@ -678,6 +703,20 @@ def _record_from_dict(d: dict) -> EquationRecord:
     confidence_policy = EquationConfidencePolicy(
         can_support_claim=bool(cp_raw.get("can_support_claim", False)),
         can_be_used_in_derivation=bool(cp_raw.get("can_be_used_in_derivation", False)),
+        can_be_rendered_as_final_formula=bool(
+            cp_raw.get(
+                "can_be_rendered_as_final_formula",
+                cp_raw.get("can_support_claim", False),
+            )
+        ),
+        allowed_downstream_use=str(
+            _normalize_allowed_downstream_use(
+                cp_raw.get(
+                    "allowed_downstream_use",
+                    _legacy_allowed_downstream_use(cp_raw),
+                )
+            )
+        ),
         can_be_displayed_in_course=bool(cp_raw.get("can_be_displayed_in_course", True)),
         display_requires_note=bool(cp_raw.get("display_requires_note", True)),
         must_not_treat_as_source_extracted=bool(cp_raw.get("must_not_treat_as_source_extracted", True)),
@@ -726,6 +765,19 @@ def _math_symbol_set(text: str) -> set[str]:
     return {t.lower() for t in tokens if t.lower() not in stop and len(t.strip()) > 0}
 
 
+def _legacy_allowed_downstream_use(policy: dict) -> str:
+    if not bool(policy.get("can_support_claim", False)) and not bool(policy.get("can_be_used_in_derivation", False)):
+        return "semantic_hint_only" if bool(policy.get("can_be_displayed_in_course", True)) else "blocked"
+    if bool(policy.get("display_requires_note", False)):
+        return "display_with_warning"
+    return "unrestricted"
+
+
+def _normalize_allowed_downstream_use(value: object) -> str:
+    raw = str(value or "").strip()
+    return raw if raw in ALLOWED_DOWNSTREAM_USES else "semantic_hint_only"
+
+
 def _theory_family_conflict(raw_text: str, latex: str) -> bool:
     raw = raw_text.lower()
     tex = latex.lower()
@@ -756,9 +808,18 @@ def _confidence_gate_for_equation(
     plain_text: str | None,
     extraction_status: str,
 ) -> dict:
+    allowed_use = (
+        policy.allowed_downstream_use
+        if policy.allowed_downstream_use in ALLOWED_DOWNSTREAM_USES
+        else _legacy_allowed_downstream_use(asdict(policy))
+    )
     blocked = (
-        policy.can_support_claim is False
-        and policy.can_be_used_in_derivation is False
+        allowed_use == "blocked"
+        or (
+            policy.can_support_claim is False
+            and policy.can_be_used_in_derivation is False
+            and allowed_use in {"blocked", "semantic_hint_only"}
+        )
     ) or (
         latex is None
         and plain_text is None
@@ -768,16 +829,19 @@ def _confidence_gate_for_equation(
         return {
             "blocked_by_equation_ids": [equation_id],
             "blocked_reason": "linked equation cannot support claim or derivation",
-            "downstream_allowed_use": "semantic_hint_only",
+            "downstream_allowed_use": allowed_use if allowed_use != "unrestricted" else "display_with_warning",
+            "allowed_downstream_use": allowed_use if allowed_use != "unrestricted" else "display_with_warning",
         }
-    if policy.display_requires_note:
+    if policy.display_requires_note or allowed_use == "display_with_warning":
         return {
             "blocked_by_equation_ids": [],
             "blocked_reason": "",
             "downstream_allowed_use": "display_with_warning",
+            "allowed_downstream_use": "display_with_warning",
         }
     return {
         "blocked_by_equation_ids": [],
         "blocked_reason": "",
-        "downstream_allowed_use": "display_with_warning",
+        "downstream_allowed_use": allowed_use,
+        "allowed_downstream_use": allowed_use,
     }

@@ -168,6 +168,8 @@ class ComponentAssemblyInputBuilder:
                 "confidence_policy": {
                     "can_support_claim": bool(getattr(cp, "can_support_claim", False)),
                     "can_be_used_in_derivation": bool(getattr(cp, "can_be_used_in_derivation", False)),
+                    "can_be_rendered_as_final_formula": bool(getattr(cp, "can_be_rendered_as_final_formula", False)),
+                    "allowed_downstream_use": str(getattr(cp, "allowed_downstream_use", "semantic_hint_only")),
                     "can_be_displayed_in_course": bool(getattr(cp, "can_be_displayed_in_course", True)),
                     "display_requires_note": bool(getattr(cp, "display_requires_note", True)),
                     "must_not_treat_as_source_extracted": bool(getattr(cp, "must_not_treat_as_source_extracted", True)),
@@ -330,6 +332,8 @@ class ComponentAssemblyInputBuilder:
                 "confidence_policy": {
                     "can_support_claim": bool(getattr(cp, "can_support_claim", False)),
                     "can_be_used_in_derivation": bool(getattr(cp, "can_be_used_in_derivation", False)),
+                    "can_be_rendered_as_final_formula": bool(getattr(cp, "can_be_rendered_as_final_formula", False)),
+                    "allowed_downstream_use": str(getattr(cp, "allowed_downstream_use", "semantic_hint_only")),
                     "can_be_displayed_in_course": bool(getattr(cp, "can_be_displayed_in_course", True)),
                     "display_requires_note": bool(getattr(cp, "display_requires_note", True)),
                     "must_not_treat_as_source_extracted": bool(getattr(cp, "must_not_treat_as_source_extracted", True)),
