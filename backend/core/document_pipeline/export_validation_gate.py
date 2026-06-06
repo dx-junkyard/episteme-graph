@@ -47,6 +47,20 @@ class ValidationSummary:
 
 
 @dataclass
+class ComponentQualityEntry:
+    component_id: str
+    granularity_status: str
+    equation_count: int = 0
+    claim_count: int = 0
+    derivation_step_count: int = 0
+    responsibility_count: int = 0
+    source_scope_width: int = 0
+    split_required: bool = False
+    split_reasons: list[str] = field(default_factory=list)
+    suggested_split: list[dict] = field(default_factory=list)
+
+
+@dataclass
 class ExportValidationResult:
     status: str                          # one of EXPORT_STATUSES
     exportable: bool
@@ -54,6 +68,7 @@ class ExportValidationResult:
     errors: list[ValidationEntry] = field(default_factory=list)
     warnings: list[ValidationEntry] = field(default_factory=list)
     review_items: list[ValidationEntry] = field(default_factory=list)
+    component_quality: list[ComponentQualityEntry] = field(default_factory=list)
     summary: ValidationSummary = field(default_factory=ValidationSummary)
 
     def to_dict(self) -> dict:
@@ -131,13 +146,18 @@ class ExportValidationGate:
         errors: list[ValidationEntry] = []
         warnings: list[ValidationEntry] = []
         review_items: list[ValidationEntry] = []
+        component_quality: list[ComponentQualityEntry] = []
 
         # 1. Aggregate validation_issues from all stage artifacts
         self._aggregate_artifact_issues(
             artifacts, errors, warnings, review_items
         )
 
-        # 2. Cross-artifact ID validation
+        # 2. Equation consistency reporting
+        self._check_equation_consistency_mismatches(artifacts, review_items, warnings)
+        self._check_derivation_equation_confidence(artifacts, warnings, errors)
+
+        # 3. Cross-artifact ID validation
         if component_result and claim_objects and evidence:
             self._cross_validate_component_ids(
                 component_result, claim_objects, evidence, dsl,
@@ -153,6 +173,12 @@ class ExportValidationGate:
         if component_result:
             self._check_component_internal_flow(component_result, errors)
             self._check_summary_only_derivation_components(component_result, errors)
+            component_quality = self._check_component_quality(
+                component_result,
+                artifacts,
+                warnings,
+                review_items,
+            )
 
         # 3. Course mapping → component ID resolution
         if course_mapping and component_result:
@@ -212,6 +238,7 @@ class ExportValidationGate:
             errors=errors,
             warnings=warnings,
             review_items=review_items,
+            component_quality=component_quality,
             summary=summary,
         )
 
@@ -366,12 +393,55 @@ class ExportValidationGate:
                 if not eq:
                     continue
                 policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
+                if self._equation_blocks_claim_and_derivation(eq):
+                    warnings.append(ValidationEntry(
+                        code="DOWNSTREAM_BLOCKED_EQUATION_IN_COMPONENT",
+                        message=(
+                            f"component {comp_id!r} references equation {eq_id!r}, "
+                            "but the equation cannot support claims or derivations"
+                        ),
+                        artifact="component_assembly",
+                        path=f"$.components[{comp_id}].confidence_gate",
+                        source_stage="export_validation",
+                    ))
+                    if getattr(component, "review_status", "") in ("source_backed", "auto_accepted", "teacher_reviewed"):
+                        errors.append(ValidationEntry(
+                            code="SOURCE_BACKED_COMPONENT_USES_BLOCKED_EQUATION",
+                            message=(
+                                f"component {comp_id!r} cannot be source_backed/publish-ready "
+                                f"because equation {eq_id!r} is blocked by confidence policy"
+                            ),
+                            artifact="component_assembly",
+                            path=f"$.components[{comp_id}].review_status",
+                            source_stage="export_validation",
+                        ))
                 if claim_linked and policy.get("can_support_claim") is False:
                     warnings.append(ValidationEntry(
                         code="NON_SUPPORTING_EQUATION_USED_FOR_CLAIM_SUPPORT",
                         message=(
                             f"component {comp_id!r} links claim evidence to equation {eq_id!r}, "
                             "but equation.confidence_policy.can_support_claim is false"
+                        ),
+                        artifact="component_assembly",
+                        path=f"$.components[{comp_id}].linked_equation_ids",
+                        source_stage="export_validation",
+                    ))
+                    errors.append(ValidationEntry(
+                        code="NON_SUPPORTING_EQUATION_USED_FOR_CLAIM_SUPPORT",
+                        message=(
+                            f"component {comp_id!r} cannot use equation {eq_id!r} "
+                            "as claim support because equation.confidence_policy.can_support_claim is false"
+                        ),
+                        artifact="component_assembly",
+                        path=f"$.components[{comp_id}].linked_equation_ids",
+                        source_stage="export_validation",
+                    ))
+                if claim_linked and self._equation_requires_review(eq):
+                    warnings.append(ValidationEntry(
+                        code="REVIEW_REQUIRED_EQUATION_USED_FOR_CLAIM_SUPPORT",
+                        message=(
+                            f"component {comp_id!r} links claim evidence to equation {eq_id!r}, "
+                            "but equation requires review and cannot be accepted as claim support"
                         ),
                         artifact="component_assembly",
                         path=f"$.components[{comp_id}].linked_equation_ids",
@@ -400,6 +470,16 @@ class ExportValidationGate:
                         message=(
                             f"component {comp_id!r} uses equation {eq_id!r} as output, "
                             "but equation.confidence_policy.can_support_claim is false"
+                        ),
+                        artifact="component_assembly",
+                        path=f"$.components[{comp_id}].output_equation_ids",
+                        source_stage="export_validation",
+                    ))
+                    errors.append(ValidationEntry(
+                        code="NON_SUPPORTING_EQUATION_USED_AS_COMPONENT_OUTPUT",
+                        message=(
+                            f"component {comp_id!r} cannot publish equation {eq_id!r} as an output "
+                            "because equation.confidence_policy.can_support_claim is false"
                         ),
                         artifact="component_assembly",
                         path=f"$.components[{comp_id}].output_equation_ids",
@@ -482,6 +562,66 @@ class ExportValidationGate:
                     source_stage="export_validation",
                 ))
 
+    def _check_component_quality(
+        self,
+        component_result,
+        artifacts: dict,
+        warnings: list,
+        review_items: list,
+    ) -> list[ComponentQualityEntry]:
+        quality: list[ComponentQualityEntry] = []
+        for component in getattr(component_result, "components", []) or []:
+            comp_id = getattr(component, "component_id", "?")
+            raw = getattr(component, "component_quality", {}) or {}
+            if not isinstance(raw, dict):
+                raw = {}
+            split = getattr(component, "split_recommendation", {}) or {}
+            status = str(raw.get("granularity_status") or "good")
+            split_reasons = list(raw.get("split_reasons") or split.get("reasons") or [])
+            suggested = list(raw.get("suggested_split") or split.get("suggested_components") or [])
+            entry = ComponentQualityEntry(
+                component_id=str(comp_id),
+                granularity_status=status,
+                equation_count=int(raw.get("equation_count") or 0),
+                claim_count=int(raw.get("claim_count") or 0),
+                derivation_step_count=int(raw.get("derivation_step_count") or 0),
+                responsibility_count=int(raw.get("responsibility_count") or 0),
+                source_scope_width=int(raw.get("source_scope_width") or 0),
+                split_required=bool(raw.get("split_required") or split.get("required")),
+                split_reasons=split_reasons,
+                suggested_split=suggested,
+            )
+            quality.append(entry)
+
+            if status in {"too_coarse", "mixed_responsibility"}:
+                warnings.append(ValidationEntry(
+                    code="COMPONENT_GRANULARITY_ISSUE",
+                    message=(
+                        f"component {comp_id!r} is {status}; ID links may be valid "
+                        "but the component is structurally too broad"
+                    ),
+                    artifact="component_assembly",
+                    path=f"$.components[{comp_id}].component_quality",
+                    source_stage="export_validation",
+                ))
+            elif status == "too_fine":
+                warnings.append(ValidationEntry(
+                    code="COMPONENT_TOO_FINE",
+                    message=f"component {comp_id!r} has too little evidence or structure to stand alone",
+                    artifact="component_assembly",
+                    path=f"$.components[{comp_id}].component_quality",
+                    source_stage="export_validation",
+                ))
+            elif status == "review_required":
+                review_items.append(ValidationEntry(
+                    code="COMPONENT_QUALITY_REVIEW_REQUIRED",
+                    message=f"component {comp_id!r} requires review before publish-ready export",
+                    artifact="component_assembly",
+                    path=f"$.components[{comp_id}].component_quality",
+                    source_stage="export_validation",
+                ))
+        return quality
+
     def _cross_validate_course_mapping(
         self,
         course_mapping,
@@ -556,14 +696,120 @@ class ExportValidationGate:
     def _equation_requires_review(eq: dict) -> bool:
         policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
         reconstruction = eq.get("reconstruction") if isinstance(eq.get("reconstruction"), dict) else {}
+        consistency = eq.get("equation_consistency") if isinstance(eq.get("equation_consistency"), dict) else {}
         return (
             bool(eq.get("needs_math_review"))
             or bool(eq.get("review_flags"))
+            or bool(consistency.get("review_required"))
+            or consistency.get("raw_text_latex_match") == "mismatch"
+            or consistency.get("label_location_match") == "mismatch"
+            or consistency.get("source_span_quality") == "corrupted"
             or eq.get("semantic_status") == "reconstruction_based"
             or reconstruction.get("status") not in (None, "", "none")
             or bool(policy.get("must_not_treat_as_source_extracted"))
             or policy.get("can_support_claim") is False
         )
+
+    @staticmethod
+    def _equation_blocks_claim_and_derivation(eq: dict) -> bool:
+        policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
+        if policy.get("can_support_claim") is False and policy.get("can_be_used_in_derivation") is False:
+            return True
+        src = eq.get("source_extraction") if isinstance(eq.get("source_extraction"), dict) else {}
+        rec = eq.get("reconstruction") if isinstance(eq.get("reconstruction"), dict) else {}
+        latex = eq.get("latex")
+        plain_text = eq.get("plain_text")
+        if latex is None:
+            latex = rec.get("latex") if rec.get("status") not in (None, "", "none") else src.get("latex")
+        if plain_text is None:
+            plain_text = rec.get("plain_text") if rec.get("status") not in (None, "", "none") else src.get("plain_text")
+        extraction_status = eq.get("extraction_status") or src.get("extraction_status")
+        return (
+            latex is None
+            and plain_text is None
+            and extraction_status in ("partial", "fragment_only", "label_only", "missing", "unparsed")
+        )
+
+    def _check_derivation_equation_confidence(
+        self,
+        artifacts: dict,
+        warnings: list,
+        errors: list,
+    ) -> None:
+        equation_index = self._equation_index_from_artifacts(artifacts)
+        derivations = artifacts.get("derivation_chain") or {}
+        chains = derivations.get("chains") if isinstance(derivations, dict) else []
+        if not isinstance(chains, list):
+            return
+        for chain_idx, chain in enumerate(chains):
+            if not isinstance(chain, dict):
+                continue
+            for step_idx, step in enumerate(chain.get("steps") or []):
+                if not isinstance(step, dict):
+                    continue
+                refs = list(step.get("input_equation_ids") or []) + list(step.get("output_equation_ids") or [])
+                blocked = [
+                    str(eq_id) for eq_id in refs
+                    if self._equation_blocks_claim_and_derivation(equation_index.get(str(eq_id), {}))
+                ]
+                if not blocked:
+                    continue
+                path = f"$.chains[{chain_idx}].steps[{step_idx}].confidence_gate"
+                warnings.append(ValidationEntry(
+                    code="DOWNSTREAM_BLOCKED_EQUATION_IN_DERIVATION",
+                    message=(
+                        f"derivation step {step.get('step_id') or step_idx!r} references "
+                        f"blocked equations {blocked}"
+                    ),
+                    artifact="derivation_chain",
+                    path=path,
+                    source_stage="export_validation",
+                ))
+                if step.get("review_status") in ("auto_accepted", "source_backed"):
+                    errors.append(ValidationEntry(
+                        code="PUBLISH_READY_DERIVATION_STEP_USES_BLOCKED_EQUATION",
+                        message="derivation step cannot be publish-ready with blocked equation inputs/outputs",
+                        artifact="derivation_chain",
+                        path=f"$.chains[{chain_idx}].steps[{step_idx}].review_status",
+                        source_stage="export_validation",
+                    ))
+
+    def _check_equation_consistency_mismatches(
+        self,
+        artifacts: dict,
+        review_items: list,
+        warnings: list,
+    ) -> None:
+        """List equation raw/latex/source consistency candidates in export_validation."""
+        equation_index = self._equation_index_from_artifacts(artifacts)
+        for eq_id, eq in sorted(equation_index.items()):
+            consistency = eq.get("equation_consistency") if isinstance(eq.get("equation_consistency"), dict) else {}
+            if not consistency:
+                continue
+            is_mismatch = (
+                consistency.get("raw_text_latex_match") == "mismatch"
+                or consistency.get("label_location_match") == "mismatch"
+                or consistency.get("source_span_quality") == "corrupted"
+            )
+            is_review = bool(consistency.get("review_required"))
+            if not is_mismatch and not is_review:
+                continue
+            entry = ValidationEntry(
+                code="EQUATION_CONSISTENCY_MISMATCH" if is_mismatch else "EQUATION_CONSISTENCY_REVIEW_REQUIRED",
+                message=(
+                    f"equation {eq_id!r} has raw_text/latex/source consistency status "
+                    f"{consistency.get('raw_text_latex_match')!r}, "
+                    f"label_location={consistency.get('label_location_match')!r}, "
+                    f"source_span={consistency.get('source_span_quality')!r}"
+                ),
+                artifact="equation_semantics",
+                path=f"$.equations[{eq_id}].equation_consistency",
+                source_stage="export_validation",
+            )
+            if is_mismatch:
+                review_items.append(entry)
+            else:
+                warnings.append(entry)
 
     def _check_dsl_edges(
         self,

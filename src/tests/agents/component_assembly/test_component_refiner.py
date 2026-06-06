@@ -87,10 +87,27 @@ def test_coarse_component_split_into_reusable_theory_units():
     # Acceptance criterion #1: the coarse component is gone, replaced by children.
     ids = [c.component_id for c in refined.components]
     assert "comp_bias" not in ids
-    # Issue #308: split by reusable theory-unit family, not per equation step.
-    # 7 operations across {linearize, solve, derive} -> 3 reusable units.
-    assert len(refined.components) == 3
-    assert {c.operation for c in refined.components} == {"linearize", "solve", "derive"}
+    # Issue 3: strict responsibility separation keeps skew/kurtosis,
+    # second/third-order elimination, and final relations separate.
+    assert len(refined.components) == 7
+    assert [c.label for c in refined.components] == [
+        "Skewness linearized bias equation",
+        "Kurtosis linearized bias equation",
+        "Second-order bias elimination",
+        "Third-order bias elimination",
+        "Skewness consistency relation",
+        "First kurtosis consistency relation",
+        "Second kurtosis consistency relation",
+    ]
+    assert [c.responsibility_type for c in refined.components] == [
+        "equation_system",
+        "equation_system",
+        "derivation",
+        "derivation",
+        "constraint",
+        "constraint",
+        "constraint",
+    ]
 
     for child in refined.components:
         # criterion #2/#3: a reusable unit with non-empty inputs/operation/outputs.
@@ -108,29 +125,35 @@ def test_coarse_component_split_into_reusable_theory_units():
         assert len(child.inputs) <= 1
         assert len(child.outputs) <= 1
         assert child.linked_equation_ids
+        assert child.primary_operation
+        assert child.split_recommendation == {"required": False, "suggested_components": []}
         # source_scope inherited from parent (refiner responsibility #5).
         assert child.source_scope == {
             "section_ids": ["s3"], "block_ids": ["b10"], "page_ranges": [[4, 6]],
         }
 
 
-def test_multiple_equation_steps_collapse_into_one_unit():
-    # Issue #308: the derive family bundles 3 consistency-relation steps into a
-    # single reusable unit whose internal_flow keeps every step.
+def test_consistency_relation_steps_remain_separate_constraints():
+    # Issue 3: final relations are separate teachable result components.
     result = _result([_coarse_component()])
     refined = REFINER.refine(result, llm_input=None, derivations=_bias_derivation())
-    derive_unit = next(c for c in refined.components if c.operation == "derive")
-    assert len(derive_unit.internal_flow) >= 3
-    # It carries the consistency-relation outputs from all three steps.
-    assert "eq_cons_skew" in derive_unit.output_equation_ids
-    assert "eq_cons_kurt1" in derive_unit.output_equation_ids
-    assert "eq_cons_kurt2" in derive_unit.output_equation_ids
+    final_units = [c for c in refined.components if c.responsibility_type == "constraint"]
+    assert [c.label for c in final_units] == [
+        "Skewness consistency relation",
+        "First kurtosis consistency relation",
+        "Second kurtosis consistency relation",
+    ]
+    assert [c.output_equation_ids for c in final_units] == [
+        ["eq_cons_skew"],
+        ["eq_cons_kurt1"],
+        ["eq_cons_kurt2"],
+    ]
 
 
 def test_derive_unit_exposes_output_equations():
     result = _result([_coarse_component()])
     refined = REFINER.refine(result, llm_input=None, derivations=_bias_derivation())
-    derive_unit = next(c for c in refined.components if c.operation == "derive")
+    derive_unit = next(c for c in refined.components if c.label == "Skewness consistency relation")
     # criterion #7: consistency-relation (derive) unit exposes output equation IDs.
     assert derive_unit.output_equation_ids
 
@@ -142,7 +165,7 @@ def test_refinement_report_records_split():
     assert report["split_count"] == 1
     action = report["split_actions"][0]
     assert action["parent_component_id"] == "comp_bias"
-    assert len(action["child_component_ids"]) == 3
+    assert len(action["child_component_ids"]) == 7
 
 
 def test_review_required_equation_propagates_to_child_status():
@@ -180,8 +203,10 @@ def test_generic_operation_does_not_form_its_own_unit():
     derivations = DerivationChainResult(document_id="doc", cartridge_id=None, chains=[chain])
     refined = REFINER.refine(_result([_coarse_component()]), llm_input=None, derivations=derivations)
 
-    # 3 non-generic families -> 3 units; no unit is named for the generic op.
-    assert {c.operation for c in refined.components} == {"linearize", "solve", "derive"}
+    # Generic transform is folded into a strict responsibility unit.
+    assert {c.responsibility_type for c in refined.components} == {
+        "equation_system", "derivation", "constraint"
+    }
     assert "transform" not in {c.operation for c in refined.components}
     # The generic step's equations survive inside some unit's internal_flow.
     flows = [f for c in refined.components for f in c.internal_flow]
@@ -296,3 +321,175 @@ def test_non_derivation_component_left_untouched():
     refined = REFINER.refine(result, llm_input=None, derivations=_bias_derivation())
     assert len(refined.components) == 1
     assert refined.components[0].component_id == "comp_claim"
+
+
+def test_bias_to_smoothed_observables_map_splits_by_responsibility():
+    component = _coarse_component(
+        component_id="comp_bias_observables",
+        label="Bias-to-smoothed observables map",
+        summary=(
+            "Local galaxy bias model, smoothing and spectral moments, "
+            "skewness observable basis, kurtosis observable basis, and "
+            "linearized bias equations for skewness and kurtosis."
+        ),
+        linked_equation_ids=[
+            "eq_bias_model",
+            "eq_smoothing",
+            "eq_skew_basis",
+            "eq_kurt_basis",
+            "eq_skew_linear",
+            "eq_kurt_linear",
+        ],
+        evidence_refs={
+            "claim_ids": ["claim_1"],
+            "equation_ids": [
+                "eq_bias_model",
+                "eq_smoothing",
+                "eq_skew_basis",
+                "eq_kurt_basis",
+                "eq_skew_linear",
+                "eq_kurt_linear",
+            ],
+        },
+    )
+    llm_input = type("LLMInput", (), {
+        "equations": [
+            {
+                "equation_id": "eq_bias_model",
+                "plain_text": "local galaxy bias model delta_g = b1 delta + b2 delta^2",
+                "equation_type": "definition",
+            },
+            {
+                "equation_id": "eq_smoothing",
+                "plain_text": "smoothing window and spectral moment sigma_j",
+                "equation_type": "definition",
+            },
+            {
+                "equation_id": "eq_skew_basis",
+                "plain_text": "skewness observable basis S3 definitions",
+                "equation_type": "definition",
+            },
+            {
+                "equation_id": "eq_kurt_basis",
+                "plain_text": "kurtosis observable basis K4 definitions",
+                "equation_type": "definition",
+            },
+            {
+                "equation_id": "eq_skew_linear",
+                "plain_text": "skewness linearized bias equation in b1 b2",
+                "equation_type": "relation",
+            },
+            {
+                "equation_id": "eq_kurt_linear",
+                "plain_text": "kurtosis linearized bias equation in b1 b2 b3",
+                "equation_type": "relation",
+            },
+        ],
+        "available_equations": [],
+    })()
+
+    refined = REFINER.refine(_result([component]), llm_input=llm_input, derivations=None)
+
+    assert [c.label for c in refined.components] == [
+        "Local galaxy bias observation model",
+        "Smoothing and spectral moments",
+        "Skewness observable basis",
+        "Kurtosis observable basis",
+        "Skewness linearized bias equation",
+        "Kurtosis linearized bias equation",
+    ]
+    assert [c.responsibility_type for c in refined.components] == [
+        "model",
+        "definition",
+        "observable_basis",
+        "observable_basis",
+        "equation_system",
+        "equation_system",
+    ]
+    assert [c.primary_operation for c in refined.components] == [
+        "parameterize",
+        "define",
+        "observable_definition",
+        "observable_definition",
+        "linearize",
+        "linearize",
+    ]
+    assert all(c.split_recommendation == {"required": False, "suggested_components": []} for c in refined.components)
+    assert all(c.inputs for c in refined.components)
+    assert all(c.outputs for c in refined.components)
+    report = refined.refinement_report
+    assert report["split_count"] == 1
+    assert report["split_actions"]
+
+
+def test_full_bias_observable_derivation_acceptance_components_are_separate():
+    component = _coarse_component(
+        component_id="comp_full_bias_observables",
+        label="Bias-to-smoothed observables map",
+        summary=(
+            "Local galaxy bias model, smoothing and spectral moments, "
+            "skewness and kurtosis observable basis, linearized equations, "
+            "second and third order bias elimination, and final consistency relations."
+        ),
+        linked_equation_ids=[
+            "eq_bias_model",
+            "eq_smoothing",
+            "eq_skew_basis",
+            "eq_kurt_basis",
+            "eq_skew_linear",
+            "eq_kurt_linear",
+        ],
+        evidence_refs={
+            "claim_ids": ["claim_1"],
+            "equation_ids": [
+                "eq_bias_model",
+                "eq_smoothing",
+                "eq_skew_basis",
+                "eq_kurt_basis",
+                "eq_skew_linear",
+                "eq_kurt_linear",
+            ],
+        },
+    )
+    llm_input = type("LLMInput", (), {
+        "equations": [
+            {"equation_id": "eq_bias_model", "plain_text": "local galaxy bias model", "equation_type": "definition"},
+            {"equation_id": "eq_smoothing", "plain_text": "smoothing and spectral moment sigma", "equation_type": "definition"},
+            {"equation_id": "eq_skew_basis", "plain_text": "skewness observable basis S3", "equation_type": "definition"},
+            {"equation_id": "eq_kurt_basis", "plain_text": "kurtosis observable basis K4", "equation_type": "definition"},
+            {"equation_id": "eq_skew_linear", "plain_text": "skewness linearized bias equation b1 b2", "equation_type": "relation"},
+            {"equation_id": "eq_kurt_linear", "plain_text": "kurtosis linearized bias equation b1 b2 b3", "equation_type": "relation"},
+        ],
+        "available_equations": [],
+    })()
+    derivations = _bias_derivation()
+    derivations.chains[0].linked_component_ids = ["comp_full_bias_observables"]
+    result = _result([component])
+    refined = REFINER.refine(result, llm_input=llm_input, derivations=derivations)
+
+    assert [c.label for c in refined.components] == [
+        "Local galaxy bias observation model",
+        "Smoothing and spectral moments",
+        "Skewness observable basis",
+        "Kurtosis observable basis",
+        "Skewness linearized bias equation",
+        "Kurtosis linearized bias equation",
+        "Second-order bias elimination",
+        "Third-order bias elimination",
+        "Skewness consistency relation",
+        "First kurtosis consistency relation",
+        "Second kurtosis consistency relation",
+    ]
+    assert [c.responsibility_type for c in refined.components] == [
+        "model",
+        "definition",
+        "observable_basis",
+        "observable_basis",
+        "equation_system",
+        "equation_system",
+        "derivation",
+        "derivation",
+        "constraint",
+        "constraint",
+        "constraint",
+    ]

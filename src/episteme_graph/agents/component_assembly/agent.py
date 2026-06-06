@@ -15,6 +15,7 @@ from episteme_graph.agents.id_canonicalization import (
 from .cartridge_loader import CartridgeLoader
 from .component_refiner import ComponentRefiner
 from .enrichment import enrich_component_assembly
+from .granularity_analyzer import ComponentGranularityAnalyzer
 from .input_builder import ComponentAssemblyInputBuilder
 from .llm_client import ComponentAssemblyLLMClient
 from .overlap_cleanup import ComponentOverlapCleanup
@@ -40,6 +41,7 @@ class ComponentAssemblyAgent:
         self._validator = ComponentAssemblyValidator()
         self._repairer = ComponentAssemblyRepairer(cleanup=self._cleanup)
         self._refiner = ComponentRefiner()
+        self._granularity_analyzer = ComponentGranularityAnalyzer()
 
     def run(
         self,
@@ -127,15 +129,24 @@ class ComponentAssemblyAgent:
         else:
             result.validation_issues = issues
 
-        # Deterministic theory-operation refinement (issue #300): split coarse,
-        # summary-level components into one-operation-per-component units using
-        # the derivation chains, then re-validate the refined output.
-        if (config or {}).get("enable_component_refiner", True):
+        # Step 1: detect component granularity issues before graph/mapping.
+        # This pass annotates components only; it never changes component count.
+        if (config or {}).get("enable_component_granularity_analyzer", True):
+            result = self._granularity_analyzer.analyze(result, derivations=derivations)
+            result.validation_issues = self._validator.validate(
+                result, cartridge, llm_input=llm_input
+            )
+
+        # Step 3: optional actual refinement/splitting. Disabled by default so
+        # Step 1 remains detection/proposal only.
+        if (config or {}).get("enable_component_refiner", False):
             result = self._refiner.refine(result, llm_input, derivations)
             result.validation_issues = self._validator.validate(
                 result, cartridge, llm_input=llm_input
             )
-        result.diagnostics = diagnostics
+        merged_diagnostics = dict(diagnostics)
+        merged_diagnostics.update(result.diagnostics or {})
+        result.diagnostics = merged_diagnostics
         return result
 
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:

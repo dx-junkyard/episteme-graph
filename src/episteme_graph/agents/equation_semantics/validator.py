@@ -46,6 +46,7 @@ class EquationSemanticsValidator:
         for record in result.equations:
             issues += self._check_record(record)
             issues += self._check_reconstruction(record)
+            issues += self._check_equation_consistency(record)
             issues += self._check_cartridge_terms(record, cartridge)
 
         return issues
@@ -221,9 +222,77 @@ class EquationSemanticsValidator:
                 field=f"{eid}.confidence_policy",
             ))
 
+        if getattr(record, "equation_consistency", None) and record.equation_consistency.review_required:
+            if record.confidence_policy.can_support_claim:
+                issues.append(ValidationIssue(
+                    rule_id="inconsistent_equation_supporting_claim",
+                    severity="error",
+                    message=f"{eid} has equation_consistency.review_required but can_support_claim is true",
+                    field=f"{eid}.confidence_policy.can_support_claim",
+                ))
+            if record.confidence_policy.can_be_used_in_derivation:
+                issues.append(ValidationIssue(
+                    rule_id="inconsistent_equation_used_in_derivation",
+                    severity="error",
+                    message=f"{eid} has equation_consistency.review_required but can_be_used_in_derivation is true",
+                    field=f"{eid}.confidence_policy.can_be_used_in_derivation",
+                ))
+
         # Consistency warnings
         issues += self._check_semantics_consistency(record)
 
+        return issues
+
+    def _check_equation_consistency(self, record: EquationRecord) -> list[ValidationIssue]:
+        issues: list[ValidationIssue] = []
+        eid = record.equation_id
+        consistency = getattr(record, "equation_consistency", None)
+        if consistency is None:
+            return [ValidationIssue(
+                rule_id="equation_consistency_missing",
+                severity="warning",
+                message=f"{eid} has no equation_consistency metadata",
+                field=f"{eid}.equation_consistency",
+            )]
+        if consistency.raw_text_latex_match not in ("match", "mismatch", "uncertain"):
+            issues.append(ValidationIssue(
+                rule_id="invalid_equation_consistency_status",
+                severity="error",
+                message=f"{eid} has invalid raw_text_latex_match={consistency.raw_text_latex_match!r}",
+                field=f"{eid}.equation_consistency.raw_text_latex_match",
+            ))
+        if consistency.label_location_match not in ("match", "mismatch", "uncertain"):
+            issues.append(ValidationIssue(
+                rule_id="invalid_equation_consistency_status",
+                severity="error",
+                message=f"{eid} has invalid label_location_match={consistency.label_location_match!r}",
+                field=f"{eid}.equation_consistency.label_location_match",
+            ))
+        if consistency.source_span_quality not in ("clean", "partial", "corrupted"):
+            issues.append(ValidationIssue(
+                rule_id="invalid_source_span_quality",
+                severity="error",
+                message=f"{eid} has invalid source_span_quality={consistency.source_span_quality!r}",
+                field=f"{eid}.equation_consistency.source_span_quality",
+            ))
+        if not (0.0 <= consistency.symbol_overlap_score <= 1.0):
+            issues.append(ValidationIssue(
+                rule_id="symbol_overlap_score_out_of_range",
+                severity="error",
+                message=f"{eid} symbol_overlap_score is out of range",
+                field=f"{eid}.equation_consistency.symbol_overlap_score",
+            ))
+        if (
+            consistency.raw_text_latex_match == "mismatch"
+            or consistency.label_location_match == "mismatch"
+            or consistency.source_span_quality == "corrupted"
+        ):
+            issues.append(ValidationIssue(
+                rule_id="equation_consistency_mismatch",
+                severity="warning",
+                message=f"{eid} raw/source equation data is inconsistent and requires review",
+                field=f"{eid}.equation_consistency",
+            ))
         return issues
 
     def _check_reconstruction(self, record: EquationRecord) -> list[ValidationIssue]:

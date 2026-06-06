@@ -80,6 +80,8 @@ def _equations():
     policy = EquationConfidencePolicy(
         can_support_claim=True,
         can_be_used_in_derivation=True,
+        can_be_rendered_as_final_formula=True,
+        allowed_downstream_use="unrestricted",
         can_be_displayed_in_course=True,
         display_requires_note=False,
         must_not_treat_as_source_extracted=False,

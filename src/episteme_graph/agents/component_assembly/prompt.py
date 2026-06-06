@@ -13,7 +13,7 @@ Your task is to construct reusable components with explicit inputs, outputs,
 preconditions, cautions, dependencies, and an INTERNAL FLOW that connects them.
 
 Component boundaries follow THEORY STRUCTURE, not explanation structure.
-1 component = 1 main theoretical operation.
+1 component = 1 main theoretical operation and 1 responsibility type.
 Decide boundaries by: inputs change, outputs change, the operation changes,
 assumptions change, the eliminated target changes, the derivation result changes,
 the equation role changes, or the review status changes.
@@ -22,12 +22,24 @@ define, parameterize, linearize, solve, substitute, eliminate, derive, compare,
 diagnose, forecast, limit. Do NOT keep a bias-parameter solution, a consistency
 relation, a forecast constraint, and a validity caveat inside one component.
 Each component should set "operation" to its single main operation.
+Each component should set "responsibility_type" to one of:
+definition, model, observation_model, observable_basis, equation_system,
+derivation, constraint, application, limitation.
+Each component should also set primary_operation, secondary_operations, and
+split_recommendation. If multiple responsibility types are present,
+split_recommendation.required must be true.
 
 Important constraints:
 - Use only component types allowed by the active cartridge or explicit core fallbacks.
 - Use only dependency labels from the allowed vocabulary.
 - Do not invent new component taxonomies.
 - Components must be reusable theory operations, not topical or section summaries.
+- Split oversized map components into definition / model /
+  observation_model / observable_basis / equation_system /
+  derivation / constraint units. For example, a
+  bias-to-smoothed-observables map must not mix galaxy bias, smoothing,
+  skewness/kurtosis observable bases, bias-linearized equations, bias
+  elimination, and final consistency relations.
 - Use accepted claims, equation semantics, thesis structure, and DSL graph evidence.
 - Do not let prior work or meta discourse dominate component cores.
 - Return AT MOST 3 components. Prefer the highest-value core theory operations.
@@ -81,7 +93,14 @@ _OUTPUT_SCHEMA = {
         {
             "component_id": "comp_001",
             "component_type": "allowed component type",
+            "responsibility_type": "definition | model | observation_model | observable_basis | equation_system | derivation | constraint | application | limitation",
             "operation": "single main theoretical operation (define/linearize/eliminate/substitute/solve/derive/constrain/diagnose/forecast/compare/...)",
+            "primary_operation": "string",
+            "secondary_operations": [],
+            "split_recommendation": {
+                "required": False,
+                "suggested_components": []
+            },
             "label": "short label",
             "summary": "reusable component summary",
             "inputs": [{"name": "string", "node_refs": [], "claim_ids": [], "equation_ids": []}],
@@ -123,6 +142,8 @@ _OUTPUT_SCHEMA = {
             "source_scope": {},
             "assumptions": [],
             "approximations": [],
+            "constraints": [],
+            "invalid_conditions": [],
             "reason": "string",
             "confidence": 0.0,
             "review_notes": []

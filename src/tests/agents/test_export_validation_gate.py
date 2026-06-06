@@ -57,9 +57,20 @@ class _ComponentRecord:
         review_status: str = "teacher_review_required",
         component_type: str = "ClaimBundleComponent",
         internal_flow=None,
+        label: str = "",
+        summary: str = "",
+        responsibility_type: str = "",
+        primary_operation: str = "",
+        teaching_takeaway: str = "",
+        source_scope=None,
+        assumptions=None,
+        split_recommendation=None,
+        component_quality=None,
     ):
         self.component_id = component_id
         self.component_type = component_type
+        self.label = label
+        self.summary = summary
         self.evidence_refs = evidence_refs or {}
         self.linked_claim_ids = linked_claim_ids or []
         self.linked_equation_ids = linked_equation_ids or []
@@ -68,6 +79,18 @@ class _ComponentRecord:
         self.review_required_equation_ids = review_required_equation_ids or []
         self.review_status = review_status
         self.internal_flow = internal_flow or []
+        self.responsibility_type = responsibility_type
+        self.primary_operation = primary_operation
+        self.operation = primary_operation
+        self.teaching_takeaway = teaching_takeaway
+        self.source_scope = source_scope or {}
+        self.assumptions = assumptions or []
+        self.split_recommendation = split_recommendation or {}
+        self.component_quality = component_quality or {}
+        self.inputs = []
+        self.outputs = []
+        self.preconditions = []
+        self.cautions = []
 
 
 class _ComponentResult:
@@ -383,6 +406,30 @@ def test_component_output_rejects_review_required_auto_accepted_equation():
     assert "REVIEW_REQUIRED_OUTPUT_COMPONENT_AUTO_ACCEPTED" in codes
 
 
+def test_export_validation_lists_equation_consistency_mismatch_candidates():
+    artifacts = _make_artifacts(equation_semantics={
+        "equations": [{
+            "equation_id": "eq_bad",
+            "confidence_policy": {
+                "can_support_claim": False,
+                "can_be_used_in_derivation": False,
+                "must_not_treat_as_source_extracted": True,
+            },
+            "equation_consistency": {
+                "raw_text_latex_match": "mismatch",
+                "label_location_match": "match",
+                "symbol_overlap_score": 0.0,
+                "source_span_quality": "clean",
+                "review_required": True,
+            },
+        }],
+    })
+    result = _run_gate(artifacts=artifacts)
+    codes = [e.code for e in result.review_items]
+    assert "EQUATION_CONSISTENCY_MISMATCH" in codes
+    assert result.status == "needs_review"
+
+
 # ---------------------------------------------------------------------------
 # Tests: DSL edge validation
 # ---------------------------------------------------------------------------
@@ -445,6 +492,177 @@ def test_component_graph_edge_quality_warnings():
     assert "COMPONENT_GRAPH_RELATED_TO_EDGE" in codes
     assert "COMPONENT_GRAPH_EDGE_NO_EVIDENCE" in codes
     assert "COMPONENT_GRAPH_BIDIRECTIONAL_EDGE_PAIR" in codes
+
+
+# ---------------------------------------------------------------------------
+# Tests: component granularity quality (issue #4)
+# ---------------------------------------------------------------------------
+
+def test_component_quality_good_component_is_reported():
+    comp = _ComponentRecord(
+        "comp_good",
+        {"claim_ids": ["claim_abc"], "evidence_ids": ["ev_001"], "equation_ids": ["eq_1"]},
+        linked_claim_ids=["claim_abc"],
+        linked_equation_ids=["eq_1"],
+        review_status="source_backed",
+        responsibility_type="equation_system",
+        primary_operation="linearize",
+        internal_flow=[{"from": "eq_0", "relation": "linearize", "to": "eq_1"}],
+        component_quality={
+            "component_id": "comp_good",
+            "granularity_status": "good",
+            "equation_count": 1,
+            "claim_count": 1,
+            "derivation_step_count": 0,
+            "responsibility_count": 1,
+            "source_scope_width": 0,
+            "split_required": False,
+            "split_reasons": [],
+            "suggested_split": [],
+        },
+    )
+    result = _run_gate(
+        component_result=_ComponentResult([comp]),
+        claim_objects=_ClaimObjectResult([_ClaimObject("claim_abc", source_evidence_ids=["ev_001"])]),
+        evidence=_EvidenceResult([_EvidenceRecord("ev_001")]),
+    )
+
+    assert result.component_quality[0].granularity_status == "good"
+    assert result.component_quality[0].equation_count == 1
+    assert result.publish_ready is True
+
+
+def test_oversized_component_quality_warns_and_blocks_publish_ready():
+    comp = _ComponentRecord(
+        "comp_big",
+        {"claim_ids": ["claim_abc"], "evidence_ids": ["ev_001"], "equation_ids": [f"eq_{i}" for i in range(10)]},
+        linked_claim_ids=["claim_abc"],
+        linked_equation_ids=[f"eq_{i}" for i in range(10)],
+        review_status="source_backed",
+        responsibility_type="equation_system",
+        primary_operation="linearize",
+        internal_flow=[{"from": f"eq_{i}", "relation": "step", "to": f"eq_{i+1}"} for i in range(6)],
+        source_scope={"section_ids": ["s1", "s2", "s3"]},
+        teaching_takeaway="This is a broad, multi-clause takeaway that covers too many operations.",
+        component_quality={
+            "component_id": "comp_big",
+            "granularity_status": "too_coarse",
+            "equation_count": 10,
+            "claim_count": 1,
+            "derivation_step_count": 0,
+            "responsibility_count": 1,
+            "source_scope_width": 3,
+            "split_required": True,
+            "split_reasons": [
+                "linked equation count exceeds threshold",
+                "source scope spans multiple conceptual sections",
+            ],
+            "suggested_split": [
+                {"name": "Equation System", "responsibility_type": "equation_system"},
+            ],
+        },
+    )
+    result = _run_gate(
+        component_result=_ComponentResult([comp]),
+        claim_objects=_ClaimObjectResult([_ClaimObject("claim_abc", source_evidence_ids=["ev_001"])]),
+        evidence=_EvidenceResult([_EvidenceRecord("ev_001")]),
+    )
+
+    q = result.component_quality[0]
+    assert q.granularity_status == "too_coarse"
+    assert q.split_required is True
+    assert "linked equation count exceeds threshold" in q.split_reasons
+    assert "source scope spans multiple conceptual sections" in q.split_reasons
+    assert "COMPONENT_GRANULARITY_ISSUE" in [w.code for w in result.warnings]
+    assert result.publish_ready is False
+
+
+def test_mixed_responsibility_component_quality_emits_suggested_split():
+    comp = _ComponentRecord(
+        "comp_mixed",
+        {"claim_ids": ["claim_abc"], "evidence_ids": ["ev_001"], "equation_ids": ["eq_model", "eq_final"]},
+        linked_claim_ids=["claim_abc"],
+        linked_equation_ids=["eq_model", "eq_final"],
+        review_status="source_backed",
+        label="Bias model and consistency relation",
+        summary="Defines a local bias model and derives a final consistency relation.",
+        responsibility_type="model",
+        primary_operation="parameterize",
+        component_quality={
+            "component_id": "comp_mixed",
+            "granularity_status": "mixed_responsibility",
+            "equation_count": 2,
+            "claim_count": 1,
+            "derivation_step_count": 0,
+            "responsibility_count": 2,
+            "source_scope_width": 0,
+            "split_required": True,
+            "split_reasons": ["responsibility type has more than one primary value"],
+            "suggested_split": [
+                {"name": "Model", "responsibility_type": "model"},
+                {"name": "Constraint", "responsibility_type": "constraint"},
+            ],
+        },
+    )
+    result = _run_gate(
+        component_result=_ComponentResult([comp]),
+        claim_objects=_ClaimObjectResult([_ClaimObject("claim_abc", source_evidence_ids=["ev_001"])]),
+        evidence=_EvidenceResult([_EvidenceRecord("ev_001")]),
+    )
+
+    q = result.component_quality[0]
+    assert q.granularity_status == "mixed_responsibility"
+    assert q.responsibility_count >= 2
+    assert q.split_required is True
+    assert q.suggested_split
+    assert "COMPONENT_GRANULARITY_ISSUE" in [w.code for w in result.warnings]
+    assert result.publish_ready is False
+
+
+def test_component_quality_uses_existing_split_recommendation():
+    comp = _ComponentRecord(
+        "comp_split",
+        {"claim_ids": ["claim_abc"], "evidence_ids": ["ev_001"], "equation_ids": ["eq_1", "eq_2"]},
+        linked_claim_ids=["claim_abc"],
+        linked_equation_ids=["eq_1", "eq_2"],
+        review_status="source_backed",
+        responsibility_type="equation_system",
+        split_recommendation={
+            "required": True,
+            "reasons": ["component includes both derivation and final result"],
+            "suggested_components": [
+                {"name": "Linear equation", "responsibility_type": "equation_system"},
+                {"name": "Final relation", "responsibility_type": "constraint"},
+            ],
+        },
+        component_quality={
+            "component_id": "comp_split",
+            "granularity_status": "too_coarse",
+            "equation_count": 2,
+            "claim_count": 1,
+            "derivation_step_count": 0,
+            "responsibility_count": 1,
+            "source_scope_width": 0,
+            "split_required": True,
+            "split_reasons": ["component includes both derivation and final result"],
+            "suggested_split": [
+                {"name": "Linear equation", "responsibility_type": "equation_system"},
+                {"name": "Final relation", "responsibility_type": "constraint"},
+            ],
+        },
+    )
+    result = _run_gate(
+        component_result=_ComponentResult([comp]),
+        claim_objects=_ClaimObjectResult([_ClaimObject("claim_abc", source_evidence_ids=["ev_001"])]),
+        evidence=_EvidenceResult([_EvidenceRecord("ev_001")]),
+    )
+
+    q = result.component_quality[0]
+    assert q.granularity_status == "too_coarse"
+    assert q.suggested_split == [
+        {"name": "Linear equation", "responsibility_type": "equation_system"},
+        {"name": "Final relation", "responsibility_type": "constraint"},
+    ]
 
 
 # ---------------------------------------------------------------------------
