@@ -235,3 +235,58 @@ def test_low_confidence_equation_propagates_refiner_to_aligner_path():
         if n["component_id"] == derivation_child.component_id
     )
     assert der_node["review_status"] == "review_required"
+
+
+def test_cannot_render_as_final_formula_downgrades_in_step4_not_step3():
+    """Agreed contract (amends #324 rule 6).
+
+    ``can_be_rendered_as_final_formula: false`` is about whether an equation may
+    be shown/used as the final formula -- a display/result concern. Step 3
+    (component split) only *preserves and propagates* the flag (it keeps the
+    equation linked) and does NOT downgrade a child on this flag alone. The
+    downgrade of a final result/constraint component belongs to Step 4, where
+    derivation / result alignment happens.
+    """
+    cx = _component(
+        component_id="cx",
+        linked_equation_ids=["eq_def", "eq_final"],
+        split_recommendation=_split_rec(
+            ("Definition", "definition"),
+            ("Result", "constraint"),
+        ),
+    )
+    llm_input = _LLMInput(equations=[
+        {"equation_id": "eq_def", "role": "definition"},
+        {
+            "equation_id": "eq_final",
+            "role": "result",
+            "confidence_policy": {
+                # otherwise healthy: only the final-formula flag is false.
+                "can_support_claim": True,
+                "can_be_used_in_derivation": True,
+                "can_be_rendered_as_final_formula": False,
+                "allowed_downstream_use": "display_with_warning",
+            },
+        },
+    ])
+
+    # --- Step 3: preserve + propagate, but do NOT downgrade on this flag alone ---
+    refined = REFINER.refine(_result([cx]), llm_input=llm_input, derivations=None)
+    result_child = next(
+        c for c in refined.components if c.responsibility_type == "constraint"
+    )
+    assert result_child.review_status == "source_backed"
+    # The equation (and therefore its policy) is propagated, not dropped, so Step 4
+    # can re-evaluate it.
+    assert "eq_final" in result_child.linked_equation_ids
+    # The flag alone did not put eq_final into the Step 3 review list.
+    assert "eq_final" not in result_child.review_required_equation_ids
+
+    # --- Step 4: final result rendering a non-final-formula equation -> review ---
+    alignment = ALIGNER.align(refined, llm_input=llm_input, derivations=_derivations())
+    result_node = next(
+        n
+        for n in alignment.theory_component_graph["nodes"]
+        if n["component_id"] == result_child.component_id
+    )
+    assert result_node["review_status"] == "review_required"
