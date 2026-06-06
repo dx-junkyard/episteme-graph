@@ -157,8 +157,18 @@ class ComponentRecord:
     source_scope: dict = field(default_factory=dict)
     assumptions: list[str] = field(default_factory=list)
     approximations: list[str] = field(default_factory=list)
+    constraints: list[str] = field(default_factory=list)
+    invalid_conditions: list[str] = field(default_factory=list)
+    # Reusable theory responsibility type used by analyzer/refiner stages.
+    # Kept separate from cartridge-backed component_type for backward
+    # compatibility with persistence, graph, and course-mapping code.
+    responsibility_type: str = ""
+    primary_operation: str = ""
+    secondary_operations: list[str] = field(default_factory=list)
+    split_recommendation: dict = field(default_factory=dict)
+    component_quality: dict = field(default_factory=dict)
     # Single main theoretical operation for this component (issue #300).
-    # Populated by ComponentRefiner; one of the theory-operation families
+    # One of the theory-operation families
     # (define, linearize, eliminate, substitute, solve, derive, constrain, ...).
     operation: str = ""
     maturity_source: str = "llm_proposed"
@@ -190,7 +200,12 @@ class ComponentAssemblyResult:
     diagnostics: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        for component in data.get("components", []) or []:
+            responsibility = component.get("responsibility_type") or ""
+            if responsibility:
+                component.setdefault("type", responsibility)
+        return data
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
@@ -235,6 +250,13 @@ class ComponentAssemblyResult:
                 source_scope=c.get("source_scope") or {},
                 assumptions=list(c.get("assumptions") or []),
                 approximations=list(c.get("approximations") or []),
+                constraints=list(c.get("constraints") or []),
+                invalid_conditions=list(c.get("invalid_conditions") or []),
+                responsibility_type=c.get("responsibility_type", c.get("type", "")),
+                primary_operation=c.get("primary_operation", c.get("operation", "")),
+                secondary_operations=list(c.get("secondary_operations") or []),
+                split_recommendation=c.get("split_recommendation") or {},
+                component_quality=c.get("component_quality") or {},
                 operation=c.get("operation", ""),
                 maturity_source=c.get("maturity_source", "llm_proposed"),
                 publish_ready=bool(c.get("publish_ready", False)),

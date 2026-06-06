@@ -14,6 +14,7 @@ from .schema import (
     ValidationIssue,
     normalize_dependency_type,
 )
+from .responsibility import CANONICAL_RESPONSIBILITY_TYPES, canonical_responsibility_type
 
 
 def _build_available_id_index(llm_input: ComponentAssemblyLLMInput | None) -> dict:
@@ -113,7 +114,7 @@ class ComponentAssemblyValidator:
                     f"components[{component.component_id}].{field}",
                 ))
         issues += self._check_internal_flow(component, available)
-        issues += self._check_theory_operation_granularity(component)
+        issues += self._check_responsibility_separation(component)
         if not (0.0 <= component.confidence <= 1.0):
             issues.append(ValidationIssue(
                 "confidence_out_of_range",
@@ -160,41 +161,19 @@ class ComponentAssemblyValidator:
             ))
         return issues
 
-    def _check_theory_operation_granularity(
-        self,
-        component: ComponentRecord,
-    ) -> list[ValidationIssue]:
-        deriv_like = component.component_type in {
-            "RelationComponent",
-            "PaperRelationComponent",
-            "MethodComponent",
-            "CorrectionComponent",
-        }
-        if not deriv_like:
-            return []
-
-        input_eqs = _field_equation_ids(component.inputs)
-        output_eqs = _field_equation_ids(component.outputs)
-        all_eqs = _component_equation_refs(component, component.evidence_refs or {})
-        equation_like_io = sum(
-            1
-            for item in list(component.inputs or []) + list(component.outputs or [])
-            if _item_is_equation_like(item)
-        )
-        if (
-            len(output_eqs) >= 4
-            or len(input_eqs) + len(output_eqs) >= 6
-            or len(all_eqs) >= 10
-            or equation_like_io >= 4
-        ):
-            return [ValidationIssue(
-                "component_equation_dependency_bundle",
-                "warning",
-                f"{component.component_id} exposes too many raw equations as component I/O; "
-                "component should represent one theory operation and keep equations as supporting detail",
-                f"components[{component.component_id}].outputs",
-            )]
-        return []
+    def _check_responsibility_separation(self, component: ComponentRecord) -> list[ValidationIssue]:
+        issues: list[ValidationIssue] = []
+        responsibility = canonical_responsibility_type(component.responsibility_type)
+        if component.responsibility_type and responsibility != component.responsibility_type:
+            component.responsibility_type = responsibility
+        if responsibility and responsibility not in CANONICAL_RESPONSIBILITY_TYPES:
+            issues.append(ValidationIssue(
+                "invalid_responsibility_type",
+                "error",
+                f"{component.component_id} has invalid responsibility_type={responsibility!r}",
+                f"components[{component.component_id}].responsibility_type",
+            ))
+        return issues
 
     def _check_internal_flow(
         self,
@@ -690,15 +669,6 @@ def _field_equation_ids(items: list[dict]) -> list[str]:
             seen.add(eq_id)
             result.append(eq_id)
     return result
-
-
-def _item_is_equation_like(item: object) -> bool:
-    if not isinstance(item, dict):
-        return False
-    if item.get("equation_ids") or item.get("equations"):
-        return True
-    text = str(item.get("name") or item.get("label") or item.get("text") or "")
-    return text.startswith("eq_") or text.lower().startswith("equation ")
 
 
 def _equation_consistency_requires_review(eq: dict) -> bool:

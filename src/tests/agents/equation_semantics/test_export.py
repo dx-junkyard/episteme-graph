@@ -119,6 +119,8 @@ def test_export_shape_matches_spec():
     assert e["section_id"] == "doc_test:sec_3_1"
     assert "confidence_policy" in e
     assert e["confidence_policy"]["can_support_claim"] is True
+    assert e["confidence_policy"]["can_be_rendered_as_final_formula"] is True
+    assert e["confidence_policy"]["allowed_downstream_use"] == "unrestricted"
 
 
 def test_export_handles_missing_indexes():
@@ -190,3 +192,5 @@ def test_export_reconstruction_fallback_for_latex():
     assert e["plain_text"] == "N approx a"
     # confidence_policy reflects reconstruction
     assert e["confidence_policy"]["display_requires_note"] is True
+    assert e["confidence_policy"]["can_be_rendered_as_final_formula"] is False
+    assert e["confidence_policy"]["allowed_downstream_use"] == "display_with_warning"

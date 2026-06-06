@@ -211,6 +211,8 @@ def test_reconstruction_only_supporting_claim_is_error():
     cp = EquationConfidencePolicy(
         can_support_claim=True,
         can_be_used_in_derivation=False,
+        can_be_rendered_as_final_formula=False,
+        allowed_downstream_use="display_with_warning",
         can_be_displayed_in_course=True,
         display_requires_note=True,
         must_not_treat_as_source_extracted=True,

@@ -77,6 +77,8 @@ def _make_provisional_record(candidate: EquationCandidate) -> EquationRecord:
     confidence_policy = EquationConfidencePolicy(
         can_support_claim=False,
         can_be_used_in_derivation=False,
+        can_be_rendered_as_final_formula=False,
+        allowed_downstream_use="semantic_hint_only",
         can_be_displayed_in_course=True,
         display_requires_note=True,
         must_not_treat_as_source_extracted=True,

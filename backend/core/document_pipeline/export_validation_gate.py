@@ -47,6 +47,20 @@ class ValidationSummary:
 
 
 @dataclass
+class ComponentQualityEntry:
+    component_id: str
+    granularity_status: str
+    equation_count: int = 0
+    claim_count: int = 0
+    derivation_step_count: int = 0
+    responsibility_count: int = 0
+    source_scope_width: int = 0
+    split_required: bool = False
+    split_reasons: list[str] = field(default_factory=list)
+    suggested_split: list[dict] = field(default_factory=list)
+
+
+@dataclass
 class ExportValidationResult:
     status: str                          # one of EXPORT_STATUSES
     exportable: bool
@@ -54,6 +68,7 @@ class ExportValidationResult:
     errors: list[ValidationEntry] = field(default_factory=list)
     warnings: list[ValidationEntry] = field(default_factory=list)
     review_items: list[ValidationEntry] = field(default_factory=list)
+    component_quality: list[ComponentQualityEntry] = field(default_factory=list)
     summary: ValidationSummary = field(default_factory=ValidationSummary)
 
     def to_dict(self) -> dict:
@@ -131,6 +146,7 @@ class ExportValidationGate:
         errors: list[ValidationEntry] = []
         warnings: list[ValidationEntry] = []
         review_items: list[ValidationEntry] = []
+        component_quality: list[ComponentQualityEntry] = []
 
         # 1. Aggregate validation_issues from all stage artifacts
         self._aggregate_artifact_issues(
@@ -157,6 +173,12 @@ class ExportValidationGate:
         if component_result:
             self._check_component_internal_flow(component_result, errors)
             self._check_summary_only_derivation_components(component_result, errors)
+            component_quality = self._check_component_quality(
+                component_result,
+                artifacts,
+                warnings,
+                review_items,
+            )
 
         # 3. Course mapping → component ID resolution
         if course_mapping and component_result:
@@ -216,6 +238,7 @@ class ExportValidationGate:
             errors=errors,
             warnings=warnings,
             review_items=review_items,
+            component_quality=component_quality,
             summary=summary,
         )
 
@@ -403,6 +426,16 @@ class ExportValidationGate:
                         path=f"$.components[{comp_id}].linked_equation_ids",
                         source_stage="export_validation",
                     ))
+                    errors.append(ValidationEntry(
+                        code="NON_SUPPORTING_EQUATION_USED_FOR_CLAIM_SUPPORT",
+                        message=(
+                            f"component {comp_id!r} cannot use equation {eq_id!r} "
+                            "as claim support because equation.confidence_policy.can_support_claim is false"
+                        ),
+                        artifact="component_assembly",
+                        path=f"$.components[{comp_id}].linked_equation_ids",
+                        source_stage="export_validation",
+                    ))
                 if claim_linked and self._equation_requires_review(eq):
                     warnings.append(ValidationEntry(
                         code="REVIEW_REQUIRED_EQUATION_USED_FOR_CLAIM_SUPPORT",
@@ -437,6 +470,16 @@ class ExportValidationGate:
                         message=(
                             f"component {comp_id!r} uses equation {eq_id!r} as output, "
                             "but equation.confidence_policy.can_support_claim is false"
+                        ),
+                        artifact="component_assembly",
+                        path=f"$.components[{comp_id}].output_equation_ids",
+                        source_stage="export_validation",
+                    ))
+                    errors.append(ValidationEntry(
+                        code="NON_SUPPORTING_EQUATION_USED_AS_COMPONENT_OUTPUT",
+                        message=(
+                            f"component {comp_id!r} cannot publish equation {eq_id!r} as an output "
+                            "because equation.confidence_policy.can_support_claim is false"
                         ),
                         artifact="component_assembly",
                         path=f"$.components[{comp_id}].output_equation_ids",
@@ -518,6 +561,66 @@ class ExportValidationGate:
                     path=f"$.components[{comp_id}]",
                     source_stage="export_validation",
                 ))
+
+    def _check_component_quality(
+        self,
+        component_result,
+        artifacts: dict,
+        warnings: list,
+        review_items: list,
+    ) -> list[ComponentQualityEntry]:
+        quality: list[ComponentQualityEntry] = []
+        for component in getattr(component_result, "components", []) or []:
+            comp_id = getattr(component, "component_id", "?")
+            raw = getattr(component, "component_quality", {}) or {}
+            if not isinstance(raw, dict):
+                raw = {}
+            split = getattr(component, "split_recommendation", {}) or {}
+            status = str(raw.get("granularity_status") or "good")
+            split_reasons = list(raw.get("split_reasons") or split.get("reasons") or [])
+            suggested = list(raw.get("suggested_split") or split.get("suggested_components") or [])
+            entry = ComponentQualityEntry(
+                component_id=str(comp_id),
+                granularity_status=status,
+                equation_count=int(raw.get("equation_count") or 0),
+                claim_count=int(raw.get("claim_count") or 0),
+                derivation_step_count=int(raw.get("derivation_step_count") or 0),
+                responsibility_count=int(raw.get("responsibility_count") or 0),
+                source_scope_width=int(raw.get("source_scope_width") or 0),
+                split_required=bool(raw.get("split_required") or split.get("required")),
+                split_reasons=split_reasons,
+                suggested_split=suggested,
+            )
+            quality.append(entry)
+
+            if status in {"too_coarse", "mixed_responsibility"}:
+                warnings.append(ValidationEntry(
+                    code="COMPONENT_GRANULARITY_ISSUE",
+                    message=(
+                        f"component {comp_id!r} is {status}; ID links may be valid "
+                        "but the component is structurally too broad"
+                    ),
+                    artifact="component_assembly",
+                    path=f"$.components[{comp_id}].component_quality",
+                    source_stage="export_validation",
+                ))
+            elif status == "too_fine":
+                warnings.append(ValidationEntry(
+                    code="COMPONENT_TOO_FINE",
+                    message=f"component {comp_id!r} has too little evidence or structure to stand alone",
+                    artifact="component_assembly",
+                    path=f"$.components[{comp_id}].component_quality",
+                    source_stage="export_validation",
+                ))
+            elif status == "review_required":
+                review_items.append(ValidationEntry(
+                    code="COMPONENT_QUALITY_REVIEW_REQUIRED",
+                    message=f"component {comp_id!r} requires review before publish-ready export",
+                    artifact="component_assembly",
+                    path=f"$.components[{comp_id}].component_quality",
+                    source_stage="export_validation",
+                ))
+        return quality
 
     def _cross_validate_course_mapping(
         self,

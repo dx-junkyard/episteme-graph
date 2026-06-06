@@ -108,6 +108,8 @@ def test_build_packages_inputs_and_allowed_vocabularies():
     assert llm_input.equations[0]["role"] == "relation"
     assert llm_input.equations[0]["plain_text"] == "R = A"
     assert llm_input.equations[0]["confidence_policy"]["can_support_claim"] is True
+    assert llm_input.equations[0]["confidence_policy"]["can_be_rendered_as_final_formula"] is True
+    assert llm_input.equations[0]["confidence_policy"]["allowed_downstream_use"] == "unrestricted"
     assert llm_input.available_equations[0]["confidence_policy"]["must_not_treat_as_source_extracted"] is False
     assert llm_input.dsl_nodes[0]["node_id"] == "n1"
     assert "PaperRelationComponent" in llm_input.allowed_component_types
