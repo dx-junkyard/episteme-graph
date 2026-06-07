@@ -138,6 +138,14 @@ def test_basic_split_into_two_single_responsibility_children():
     assert set(graph["added_nodes"]) == {"comp_mix__r1", "comp_mix__r2"}
     assert graph["unresolved_edges"] == []
 
+    # split_method / split_reason / candidate mapping provenance are recorded.
+    assert record["split_method"] == "rule_based"
+    assert record["split_reason"]  # non-empty: carries the Step 1 reasons
+    candidate_names = {
+        m["new_component_id"] for m in record["split_candidate_mapping"]
+    }
+    assert candidate_names == {"comp_mix__r1", "comp_mix__r2"}
+
 
 # ---------------------------------------------------------------------------
 # 3. Link redistribution
@@ -182,6 +190,63 @@ def test_links_redistributed_not_duplicated_and_unassigned_reported():
 
     unassigned = refined.component_refinement["refinement_validation"]["unassigned_links"]
     assert any(u["link_id"] == "eq_orphan" and u["link_type"] == "equation" for u in unassigned)
+
+
+# ---------------------------------------------------------------------------
+# 3b. Derivation link redistribution (#324 rule 4)
+# ---------------------------------------------------------------------------
+
+def test_derivation_links_redistributed_to_derivational_child():
+    component = _component(
+        component_id="comp_derlinks",
+        linked_equation_ids=["eq_def", "eq_der"],
+        linked_derivation_ids=["d_a", "d_b"],
+        split_recommendation=_split_rec(
+            _suggested("Definition", "definition"),
+            _suggested("Derivation", "derivation"),
+        ),
+    )
+    llm_input = _LLMInput(equations=[
+        {"equation_id": "eq_def", "role": "definition"},
+        {"equation_id": "eq_der", "role": "transformation"},
+    ])
+    refined = REFINER.refine(_result([component]), llm_input=llm_input, derivations=None)
+
+    definition = next(c for c in refined.components if c.responsibility_type == "definition")
+    derivation = next(c for c in refined.components if c.responsibility_type == "derivation")
+    # Derivation links go to the derivational child only, not copied to both.
+    assert derivation.linked_derivation_ids == ["d_a", "d_b"]
+    assert definition.linked_derivation_ids == []
+
+
+def test_unassigned_derivation_link_reported_not_dropped():
+    # definition + application: the split happens (both children carry equations),
+    # but neither child is derivational, so the derivation link has no home and
+    # must be reported instead of silently dropped.
+    component = _component(
+        component_id="comp_unassign_der",
+        linked_equation_ids=["eq_def", "eq_app"],
+        linked_derivation_ids=["d_orphan"],
+        split_recommendation=_split_rec(
+            _suggested("Definition", "definition"),
+            _suggested("Application", "application"),
+        ),
+    )
+    llm_input = _LLMInput(equations=[
+        {"equation_id": "eq_def", "role": "definition"},
+        {"equation_id": "eq_app", "role": "result"},
+    ])
+    refined = REFINER.refine(_result([component]), llm_input=llm_input, derivations=None)
+
+    # The split still produced two single-responsibility children.
+    assert [c.responsibility_type for c in refined.components] == ["definition", "application"]
+    # The derivation link was not assigned to any child.
+    for child in refined.components:
+        assert "d_orphan" not in child.linked_derivation_ids
+    unassigned = refined.component_refinement["refinement_validation"]["unassigned_links"]
+    assert any(
+        u["link_id"] == "d_orphan" and u["link_type"] == "derivation" for u in unassigned
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +358,68 @@ def test_concepts_recomputed_per_child_not_copied_wholesale():
     assert derivation.introduced_concepts == ["beta"]
     # prerequisite recomputed: alpha is a parent prerequisite present in the definition child.
     assert definition.prerequisite_concepts == ["alpha"]
+
+
+def test_concepts_recomputed_from_equation_symbols():
+    # No claims at all: child concepts must be derived from the equations'
+    # defined/used symbols, redistributed per responsibility.
+    component = _component(
+        component_id="comp_eqsym",
+        linked_equation_ids=["eq_def", "eq_der"],
+        concepts=["broad_parent_concept"],
+        split_recommendation=_split_rec(
+            _suggested("Definition", "definition"),
+            _suggested("Derivation", "derivation"),
+        ),
+    )
+    llm_input = _LLMInput(equations=[
+        {"equation_id": "eq_def", "role": "definition", "defined_symbols": [{"symbol": "sigma"}]},
+        {"equation_id": "eq_der", "role": "transformation", "defined_symbols": [{"symbol": "b_2"}],
+         "used_symbols": ["delta"]},
+    ])
+    refined = REFINER.refine(_result([component]), llm_input=llm_input, derivations=None)
+
+    definition = next(c for c in refined.components if c.responsibility_type == "definition")
+    derivation = next(c for c in refined.components if c.responsibility_type == "derivation")
+    assert definition.concepts == ["sigma"]
+    assert set(derivation.concepts) == {"b_2", "delta"}
+    # The broad parent-only concept is not copied onto either child.
+    assert "broad_parent_concept" not in definition.concepts + derivation.concepts
+
+
+def test_non_atomic_claim_concepts_not_treated_as_confirmed():
+    # A composite (non-atomic) claim's concepts must NOT become a child's
+    # confirmed concepts; only atomic-claim and equation-symbol concepts do.
+    component = _component(
+        component_id="comp_lowconf_concept",
+        linked_equation_ids=["eq_def", "eq_der"],
+        linked_claim_ids=["claim_atomic", "claim_composite"],
+        split_recommendation=_split_rec(
+            _suggested("Definition", "definition"),
+            _suggested("Derivation", "derivation"),
+        ),
+    )
+    llm_input = _LLMInput(
+        equations=[
+            {"equation_id": "eq_def", "role": "definition"},
+            {"equation_id": "eq_der", "role": "transformation"},
+        ],
+        claims=[
+            {"claim_id": "claim_atomic", "is_atomic": True, "atomicity": "atomic",
+             "equation_ids": ["eq_def"], "concepts": ["confirmed_concept"]},
+            {"claim_id": "claim_composite", "is_atomic": False, "atomicity": "split_pending",
+             "equation_ids": ["eq_der"], "concepts": ["unconfirmed_concept"]},
+        ],
+    )
+    refined = REFINER.refine(_result([component]), llm_input=llm_input, derivations=None)
+
+    definition = next(c for c in refined.components if c.responsibility_type == "definition")
+    derivation = next(c for c in refined.components if c.responsibility_type == "derivation")
+    assert "confirmed_concept" in definition.concepts
+    # The composite claim was assigned to the derivation child, but its concept
+    # is not promoted to a confirmed concept there.
+    assert "claim_composite" in derivation.linked_claim_ids
+    assert "unconfirmed_concept" not in derivation.concepts
 
 
 # ---------------------------------------------------------------------------

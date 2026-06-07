@@ -1058,3 +1058,149 @@ def test_component_refinement_review_required_and_teaching_warning():
     result = _run_gate(component_result=comp_result)
     assert any(r.code == "COMPONENT_REFINEMENT_REVIEW_REQUIRED" for r in result.review_items)
     assert any(w.code == "COMPONENT_REFINEMENT_TEACHING_GRANULARITY" for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# Step 5: theory bundle + teaching output (issue #326)
+# ---------------------------------------------------------------------------
+
+
+class _BundleComponentResult:
+    """component_result carrying a Step 5 theory_bundle artifact block."""
+
+    def __init__(self, components, theory_bundle):
+        self.components = components
+        self.theory_bundle = theory_bundle
+
+
+def _bundle_block(*, bundle=None, course_mapping=None, blueprint_updates=None,
+                  theory_bundle_validation=None, teaching_output_validation=None):
+    return {
+        "theory_bundle": bundle or {},
+        "course_mapping": course_mapping or {"topics": []},
+        "blueprint_updates": blueprint_updates or {"linked_component_ids": [], "review_required_items": []},
+        "theory_bundle_validation": theory_bundle_validation or {},
+        "teaching_output_validation": teaching_output_validation or {},
+    }
+
+
+def test_theory_bundle_absent_is_empty_default():
+    result = _run_gate(component_result=_ComponentResult([]))
+    assert result.theory_bundle_validation["bundle_created"] is False
+    assert result.teaching_output_validation["course_topics_link_components"] is True
+
+
+def test_theory_bundle_clean_passes_and_reports_booleans():
+    comp = _ComponentRecord("c1", review_status="source_backed")
+    block = _bundle_block(
+        bundle={
+            "component_ids": ["c1"],
+            "headline_claim_id": "claim_head",
+            "support_map_id": "doc:support_map",
+            "review_status": "source_backed",
+        },
+        course_mapping={"topics": [{
+            "topic_id": "topic:c1",
+            "linked_component_ids": ["c1"],
+            "blackbox_policy": [],
+            "review_status": "source_backed",
+        }]},
+        blueprint_updates={"linked_component_ids": ["c1"], "review_required_items": []},
+        theory_bundle_validation={
+            "bundle_created": True, "headline_claim_linked": True, "support_map_linked": True,
+        },
+        teaching_output_validation={
+            "course_topics_link_components": True, "blueprint_refs_valid": True,
+            "blackbox_policy_respects_confidence": True,
+        },
+    )
+    result = _run_gate(component_result=_BundleComponentResult([comp], block))
+    assert result.theory_bundle_validation["component_refs_valid"] is True
+    assert result.theory_bundle_validation["headline_claim_linked"] is True
+    assert result.theory_bundle_validation["support_map_linked"] is True
+    assert result.teaching_output_validation["course_topics_link_components"] is True
+    assert result.teaching_output_validation["blackbox_policy_respects_confidence"] is True
+    assert not any(e.code.startswith("THEORY_BUNDLE") for e in result.errors)
+
+
+def test_theory_bundle_dangling_component_ref_is_hard_error():
+    comp = _ComponentRecord("c1")
+    block = _bundle_block(bundle={
+        "component_ids": ["c1", "ghost"],
+        "headline_claim_id": "claim_head",
+        "support_map_id": "doc:support_map",
+        "review_status": "source_backed",
+    })
+    result = _run_gate(component_result=_BundleComponentResult([comp], block))
+    assert result.status == "failed_validation"
+    assert result.theory_bundle_validation["component_refs_valid"] is False
+    assert any(e.code == "THEORY_BUNDLE_DANGLING_COMPONENT_REF" for e in result.errors)
+
+
+def test_teaching_output_dangling_topic_ref_is_hard_error():
+    comp = _ComponentRecord("c1")
+    block = _bundle_block(
+        bundle={"component_ids": ["c1"], "headline_claim_id": "h",
+                "support_map_id": "s", "review_status": "source_backed"},
+        course_mapping={"topics": [{
+            "topic_id": "topic:ghost",
+            "linked_component_ids": ["ghost"],
+            "blackbox_policy": [],
+        }]},
+    )
+    result = _run_gate(component_result=_BundleComponentResult([comp], block))
+    assert result.status == "failed_validation"
+    assert result.teaching_output_validation["course_topics_link_components"] is False
+    assert any(e.code == "TEACHING_OUTPUT_DANGLING_COMPONENT_REF" for e in result.errors)
+
+
+def test_teaching_output_blackbox_policy_must_respect_equation_confidence():
+    # c1 carries a low-confidence equation but the topic does not blackbox it.
+    comp = _ComponentRecord("c1", review_required_equation_ids=["eq_bad"])
+    block = _bundle_block(
+        bundle={"component_ids": ["c1"], "headline_claim_id": "h",
+                "support_map_id": "s", "review_status": "review_required"},
+        course_mapping={"topics": [{
+            "topic_id": "topic:c1",
+            "linked_component_ids": ["c1"],
+            "blackbox_policy": [],  # missing eq_bad
+            "review_status": "review_required",
+        }]},
+        teaching_output_validation={"blackbox_policy_respects_confidence": True},
+    )
+    result = _run_gate(component_result=_BundleComponentResult([comp], block))
+    assert result.teaching_output_validation["blackbox_policy_respects_confidence"] is False
+    assert any(
+        e.code == "TEACHING_OUTPUT_BLACKBOX_POLICY_IGNORES_CONFIDENCE" for e in result.errors
+    )
+
+
+def test_theory_bundle_review_required_blocks_publish_ready():
+    comp = _ComponentRecord("c1")
+    block = _bundle_block(
+        bundle={"component_ids": ["c1"], "headline_claim_id": "h",
+                "support_map_id": "s", "review_status": "review_required"},
+        course_mapping={"topics": [{
+            "topic_id": "topic:c1", "linked_component_ids": ["c1"],
+            "blackbox_policy": [], "review_status": "review_required",
+        }]},
+    )
+    result = _run_gate(component_result=_BundleComponentResult([comp], block))
+    assert result.publish_ready is False
+    assert any(r.code == "THEORY_BUNDLE_REVIEW_REQUIRED" for r in result.review_items)
+    assert any(r.code == "TEACHING_OUTPUT_TOPIC_REVIEW_REQUIRED" for r in result.review_items)
+
+
+def test_teaching_output_blueprint_dangling_ref_is_hard_error():
+    comp = _ComponentRecord("c1")
+    block = _bundle_block(
+        bundle={"component_ids": ["c1"], "headline_claim_id": "h",
+                "support_map_id": "s", "review_status": "source_backed"},
+        course_mapping={"topics": [{
+            "topic_id": "topic:c1", "linked_component_ids": ["c1"], "blackbox_policy": [],
+        }]},
+        blueprint_updates={"linked_component_ids": ["ghost"], "review_required_items": []},
+    )
+    result = _run_gate(component_result=_BundleComponentResult([comp], block))
+    assert result.teaching_output_validation["blueprint_refs_valid"] is False
+    assert any(e.code == "TEACHING_OUTPUT_BLUEPRINT_DANGLING_REF" for e in result.errors)

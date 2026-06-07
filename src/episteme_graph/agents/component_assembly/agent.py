@@ -23,6 +23,7 @@ from .overlap_cleanup import ComponentOverlapCleanup
 from .prompt import ComponentAssemblyPromptFactory
 from .repair import ComponentAssemblyRepairer, _parse_raw, make_deterministic_fallback
 from .schema import CartridgeContext, ComponentAssemblyLLMInput, ComponentAssemblyResult, ValidationIssue
+from .theory_bundle import TheoryBundleStage
 from .validator import ComponentAssemblyValidator
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ class ComponentAssemblyAgent:
         self._refiner = ComponentRefiner()
         self._granularity_analyzer = ComponentGranularityAnalyzer()
         self._derivation_graph_aligner = DerivationGraphAligner()
+        self._theory_bundle_stage = TheoryBundleStage()
 
     def run(
         self,
@@ -155,6 +157,16 @@ class ComponentAssemblyAgent:
                 result, llm_input=llm_input, derivations=derivations
             )
             result.derivation_graph_alignment = alignment.to_dict()
+
+        # Step 5: represent the whole paper as a TheoryBundle and map refined
+        # components into a teaching output (course topics + minimal blueprint
+        # reflection). Disabled by default; depends on Step 3/4 output being
+        # present, so it stays additive until opted in.
+        if (config or {}).get("enable_theory_bundle_builder", False):
+            bundle = self._theory_bundle_stage.run(
+                result, llm_input=llm_input, derivations=derivations
+            )
+            result.theory_bundle = bundle.to_dict()
 
         merged_diagnostics = dict(diagnostics)
         merged_diagnostics.update(result.diagnostics or {})

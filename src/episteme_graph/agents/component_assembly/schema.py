@@ -222,6 +222,10 @@ class ComponentAssemblyResult:
     #  aligned_derivation_chains, support_map, graph_alignment_validation,
     #  export_validation}.
     derivation_graph_alignment: dict = field(default_factory=dict)
+    # TheoryBundleBuilder + TeachingOutputMapper Step 5 output contract (issue #326):
+    # {theory_bundle, course_mapping, blueprint_updates, theory_bundle_validation,
+    #  teaching_output_validation}.
+    theory_bundle: dict = field(default_factory=dict)
     diagnostics: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -310,6 +314,7 @@ class ComponentAssemblyResult:
             refinement_report=d.get("refinement_report") or {},
             component_refinement=d.get("component_refinement") or {},
             derivation_graph_alignment=d.get("derivation_graph_alignment") or {},
+            theory_bundle=d.get("theory_bundle") or {},
             diagnostics=d.get("diagnostics") or {},
         )
 

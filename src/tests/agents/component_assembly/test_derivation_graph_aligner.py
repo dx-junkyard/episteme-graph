@@ -502,6 +502,112 @@ def test_derivation_order_validation():
     assert broken.graph_alignment_validation["derivation_order_valid"] is False
 
 
+def test_unmapped_operations_and_steps_reported():
+    # A derivation chain that is not linked to any component (and whose equations
+    # match no component) leaves its operation/step unattributed. These must be
+    # surfaced, not silently dropped.
+    comp = _component(component_id="c_unrelated", responsibility_type="definition")
+    chain = _chain("d_floating", [_step("s1", "derive", ["eq_a"], ["eq_b"])])
+    alignment = ALIGNER.align(
+        _result([comp]),
+        llm_input=_LLMInput(equations=[_eq("eq_a"), _eq("eq_b")]),
+        derivations=_derivations(chain),
+    )
+    gv = alignment.graph_alignment_validation
+    assert gv["unmapped_operations"] == ["s1"]
+    assert gv["unmapped_derivation_steps"] == ["s1"]
+    # The unattributed step carries an empty component_id rather than a wrong one.
+    assert alignment.aligned_derivation_chains[0]["steps"][0]["component_id"] == ""
+
+
+def test_chain_linked_component_ids_remapped_through_step3_mapping():
+    # A derivation chain still references the pre-split (old) component id; Step 4
+    # must resolve it to the refined id via the Step 3 mapping.
+    comp = _component(
+        component_id="c_new",
+        responsibility_type="derivation",
+        linked_derivation_ids=[],
+        input_equation_ids=["eq_a"],
+        output_equation_ids=["eq_b"],
+    )
+    chain = _chain(
+        "d1",
+        [_step("s1", "derive", ["eq_a"], ["eq_b"])],
+        linked_component_ids=["c_old"],
+    )
+    refinement = {
+        "component_id_mapping": [
+            {
+                "original_component_id": "c_old",
+                "new_component_ids": ["c_new"],
+                "mapping_type": "one_to_one",
+            }
+        ]
+    }
+    alignment = ALIGNER.align(
+        _result([comp], component_refinement=refinement),
+        llm_input=_LLMInput(equations=[_eq("eq_a"), _eq("eq_b")]),
+        derivations=_derivations(chain),
+    )
+    aligned = alignment.aligned_derivation_chains[0]
+    assert aligned["linked_component_ids"] == ["c_new"]
+    assert all(s["component_id"] == "c_new" for s in aligned["steps"])
+    assert alignment.unresolved_component_refs == []
+
+
+def test_review_required_component_in_support_emphasis_and_role_layers():
+    comps = [
+        _component(
+            component_id="c_rev",
+            responsibility_type="model",
+            support_role="theory_base",
+            review_status="review_required",
+        ),
+        _component(component_id="c_app", responsibility_type="application", support_role="application"),
+        _component(component_id="c_lim", responsibility_type="limitation", support_role="limitation"),
+    ]
+    alignment = ALIGNER.align(
+        _result(comps),
+        llm_input=_LLMInput(claim_centered_plan={"headline_claim_ids": ["claim_head"]}),
+        derivations=_derivations(),
+    )
+    support = alignment.support_map
+    layer_map = {l["layer_id"]: l["component_ids"] for l in support["layers"]}
+    # support_role drives both standard and generated layer ids.
+    assert layer_map["theory_base"] == ["c_rev"]
+    assert layer_map["application_layer"] == ["c_app"]
+    assert layer_map["limitation_layer"] == ["c_lim"]
+    # A review_required component lands in the review emphasis bucket, not primary.
+    assert support["emphasis"]["review_required_component_ids"] == ["c_rev"]
+    assert "c_rev" not in support["emphasis"]["primary_novelty_component_ids"]
+
+
+def test_theory_edge_carries_claim_evidence_and_derivation_refs():
+    comp_a = _component(
+        component_id="c_a",
+        responsibility_type="derivation",
+        linked_claim_ids=["claim_x"],
+        linked_evidence_ids=["ev_x"],
+        linked_derivation_ids=["der_x"],
+        dependencies=[{"dependency_type": "depends_on", "component_refs": ["c_b"], "reason": ""}],
+    )
+    comp_b = _component(
+        component_id="c_b",
+        responsibility_type="definition",
+        linked_claim_ids=["claim_x"],
+        linked_evidence_ids=["ev_x"],
+        linked_derivation_ids=["der_x"],
+    )
+    alignment = ALIGNER.align(
+        _result([comp_a, comp_b]), llm_input=_LLMInput(), derivations=_derivations()
+    )
+    edge = next(e for e in alignment.theory_component_graph["edges"] if e["source"] == "c_a")
+    assert edge["edge_type"] == "depends_on"
+    assert edge["claim_refs"] == ["claim_x"]
+    assert edge["evidence_refs"] == ["ev_x"]
+    assert edge["derivation_refs"] == ["der_x"]
+
+
 def test_derivation_component_missing_io_equations_warns():
     comp = _component(
         component_id="c_der",
