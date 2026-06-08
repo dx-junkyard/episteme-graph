@@ -805,7 +805,7 @@ def test_detail_node_theory_object_is_verb_not_reason():
 
 
 def test_detail_node_has_visual_label():
-    """Issue #337: detail nodes carry a short visual_label (operation verb)."""
+    """Issue #337: detail nodes carry a visual_label with verb and I/O flow."""
     steps = [
         _claim_step("infer_conclusion", ["claim_a"], ["claim_b"]),
     ]
@@ -815,7 +815,9 @@ def test_detail_node_has_visual_label():
     )
     detail_nodes = _layer(result, "equation_detail")
     assert len(detail_nodes) >= 1
-    assert detail_nodes[0].visual_label == "Infer conclusion"
+    vl = detail_nodes[0].visual_label
+    assert vl.startswith("Infer conclusion"), f"visual_label should start with verb: {vl}"
+    assert "claim_a" in vl, f"visual_label should show input claim: {vl}"
 
 
 def test_main_node_visual_label_is_stage_name():
@@ -844,7 +846,7 @@ def test_detail_node_has_claim_io():
     assert len(detail_nodes) >= 1
     node = detail_nodes[0]
     assert "claim_a" in node.input_claim_ids
-    assert "claim_pre" in node.input_claim_ids
+    assert "claim_pre" in node.required_claim_ids
     assert "claim_b" in node.output_claim_ids
 
 
@@ -885,3 +887,154 @@ def test_main_node_description_excludes_extraction_reason():
         assert reason not in (node.display_label or ""), (
             f"main display_label should not contain extraction reason"
         )
+
+
+# --- required_claim_ids separation (issue #337 round 3) ----------------------
+
+
+def test_detail_node_separates_required_claim_ids():
+    """Issue #337: required_claim_ids are stored separately from input_claim_ids."""
+    steps = [
+        _claim_step("apply_definition", ["claim_in"], ["claim_out"],
+                     required_claim_ids=["claim_req"]),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    detail_nodes = _layer(result, "equation_detail")
+    assert len(detail_nodes) >= 1
+    node = detail_nodes[0]
+    assert "claim_in" in node.input_claim_ids
+    assert "claim_req" not in node.input_claim_ids, (
+        "required_claim_ids should not be merged into input_claim_ids"
+    )
+    assert "claim_req" in node.required_claim_ids
+    assert "claim_out" in node.output_claim_ids
+
+
+def test_main_node_aggregates_required_claim_ids():
+    """Issue #337: main nodes aggregate required_claim_ids from group records."""
+    steps = [
+        _claim_step("define_framework", [], ["claim_a"],
+                     required_claim_ids=["claim_pre"]),
+        _claim_step("derive_result", ["claim_a"], ["claim_b"]),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    main_nodes = _layer(result, "main")
+    has_required = any(node.required_claim_ids for node in main_nodes)
+    assert has_required, "at least one main node should have required_claim_ids"
+
+
+# --- visual_label never contains reason (regression, issue #337 round 3) ------
+
+
+def test_visual_label_never_contains_reason():
+    """Regression: visual_label must not contain step.reason text."""
+    reason = "Long extraction reason that must not leak into visual_label"
+    steps = [
+        DerivationStep(
+            step_id="step_def",
+            input_equation_ids=["eq_a"],
+            output_equation_ids=["eq_b"],
+            operation="define",
+            reason=reason,
+            review_status="teacher_review_required",
+        ),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    for node in result.nodes:
+        assert reason not in (node.visual_label or ""), (
+            f"visual_label should never contain extraction reason: {node.visual_label}"
+        )
+
+
+# --- detail visual_label shows I/O flow (issue #337 round 3) -----------------
+
+
+def test_detail_visual_label_shows_equation_flow():
+    """Issue #337: detail visual_label includes equation I/O flow."""
+    steps = [
+        _step("define", ["eq_a"], ["eq_b"]),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    detail_nodes = _layer(result, "equation_detail")
+    assert len(detail_nodes) >= 1
+    vl = detail_nodes[0].visual_label
+    assert "eq_a" in vl, f"visual_label should reference input equation: {vl}"
+    assert "eq_b" in vl, f"visual_label should reference output equation: {vl}"
+    assert "→" in vl, f"visual_label should contain arrow for flow: {vl}"
+
+
+def test_detail_visual_label_shows_claim_flow():
+    """Issue #337: claim-only detail visual_label includes claim I/O flow."""
+    steps = [
+        _claim_step("infer_conclusion", ["claim_x"], ["claim_y"]),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    detail_nodes = _layer(result, "equation_detail")
+    assert len(detail_nodes) >= 1
+    vl = detail_nodes[0].visual_label
+    assert "claim_x" in vl, f"visual_label should reference input claim: {vl}"
+    assert "claim_y" in vl, f"visual_label should reference output claim: {vl}"
+
+
+# --- to_graph_payload includes new fields (issue #337 round 3) ----------------
+
+
+def test_graph_payload_includes_required_claim_ids():
+    """Issue #337: to_graph_payload() includes required_claim_ids for each node."""
+    steps = [
+        _claim_step("apply_definition", ["claim_in"], ["claim_out"],
+                     required_claim_ids=["claim_req"]),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    payload = result.to_graph_payload()
+    for node_dict in payload["nodes"]:
+        assert "required_claim_ids" in node_dict, (
+            f"payload node missing required_claim_ids: {node_dict['component_id']}"
+        )
+    detail_nodes = [n for n in payload["nodes"] if n.get("graph_layer") == "equation_detail"]
+    assert len(detail_nodes) >= 1
+    node_with_req = [n for n in detail_nodes if "claim_req" in n.get("required_claim_ids", [])]
+    assert node_with_req, "payload should contain detail node with claim_req in required_claim_ids"
+
+
+def test_graph_payload_includes_visual_label_and_review_reason():
+    """Issue #337: to_graph_payload() includes visual_label and review_reason."""
+    reason = "Some extraction note"
+    steps = [
+        DerivationStep(
+            step_id="step_def",
+            input_equation_ids=["eq_a"],
+            output_equation_ids=["eq_b"],
+            operation="define",
+            reason=reason,
+            review_status="teacher_review_required",
+        ),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    payload = result.to_graph_payload()
+    for node_dict in payload["nodes"]:
+        assert "visual_label" in node_dict
+        assert "review_reason" in node_dict
+    detail_nodes = [n for n in payload["nodes"] if n.get("graph_layer") == "equation_detail"]
+    assert any(n["review_reason"] == reason for n in detail_nodes)

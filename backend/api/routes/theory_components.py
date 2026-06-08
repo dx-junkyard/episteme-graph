@@ -2014,6 +2014,7 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
             "visual_label": str(node.get("visual_label") or ""),
             "input_claim_ids": node.get("input_claim_ids") if isinstance(node.get("input_claim_ids"), list) else [],
             "output_claim_ids": node.get("output_claim_ids") if isinstance(node.get("output_claim_ids"), list) else [],
+            "required_claim_ids": node.get("required_claim_ids") if isinstance(node.get("required_claim_ids"), list) else [],
             "review_reason": str(node.get("review_reason") or ""),
         })
         seen_nodes.add(component_id)

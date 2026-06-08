@@ -5544,7 +5544,7 @@
     var html =
       '<div class="ls-graph-detail-badge ' + escHtml(lsGraphNodeGroup(node)) + '">' +
       escHtml(node.component_type_text || node.component_type || node.typeName || "component") + '</div>' +
-      '<h4>' + escHtml(lsGraphFullDisplayLabel(node) || nodeId || "無題") + '</h4>';
+      '<h4>' + escHtml((lsGraphNodeDisplayLabel(node, nodeId) || nodeId || "無題").replace(/\n/g, " — ")) + '</h4>';
 
     // 1. このノードの意味
     if (node.description) {
@@ -5564,6 +5564,9 @@
     }
     if ((node.input_claim_ids || []).length) {
       inputParts += '<div class="ls-graph-detail-link"><span>claim</span> ' + escHtml((node.input_claim_ids).join(", ")) + '</div>';
+    }
+    if ((node.required_claim_ids || []).length) {
+      inputParts += '<div class="ls-graph-detail-link"><span>前提claim</span> ' + escHtml((node.required_claim_ids).join(", ")) + '</div>';
     }
     if (inputParts) {
       html += '<div class="ls-graph-detail-section"><b>入力</b>' + inputParts + '</div>';
@@ -5592,7 +5595,7 @@
         var target = edge.target_component_id || edge.target || edge.to;
         var otherId = source === nodeId ? target : source;
         var otherNode = nodeById[otherId];
-        var otherLabel = otherNode ? (lsGraphFullDisplayLabel(otherNode) || otherId) : otherId;
+        var otherLabel = otherNode ? ((lsGraphNodeDisplayLabel(otherNode, otherId) || otherId).replace(/\n/g, " ")) : otherId;
         var arrow = source === nodeId ? "→" : "←";
         var relation = edge.relation || edge.edge_type || edge.type || "RELATED_TO";
         var edgeLabel = lsGraphEdgeLabel(relation);

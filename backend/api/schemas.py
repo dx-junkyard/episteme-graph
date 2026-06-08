@@ -888,6 +888,8 @@ class ComponentGraphNode(BaseModel):
     # Claim I/O from derivation step (issue #337).
     input_claim_ids: list[str] = Field(default_factory=list)
     output_claim_ids: list[str] = Field(default_factory=list)
+    # Precondition claims required but not consumed (issue #337).
+    required_claim_ids: list[str] = Field(default_factory=list)
     # Extraction/review note text (issue #337).
     review_reason: str = ""
 

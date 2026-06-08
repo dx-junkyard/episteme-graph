@@ -176,10 +176,8 @@ class ComponentGraphNormalizer:
                     "is_generic": is_generic,
                     "inputs": _ordered_unique(getattr(step, "input_equation_ids", []) or []),
                     "outputs": _ordered_unique(getattr(step, "output_equation_ids", []) or []),
-                    "input_claims": _ordered_unique(
-                        list(getattr(step, "input_claim_ids", []) or [])
-                        + list(getattr(step, "required_claim_ids", []) or [])
-                    ),
+                    "input_claims": _ordered_unique(getattr(step, "input_claim_ids", []) or []),
+                    "required_claims": _ordered_unique(getattr(step, "required_claim_ids", []) or []),
                     "output_claims": _ordered_unique(getattr(step, "output_claim_ids", []) or []),
                 })
         return records
@@ -374,6 +372,9 @@ def _main_node_from_group(group: dict, claim_index: dict[str, dict]) -> Componen
     group_input_claim_ids = _ordered_unique(
         cid for rec in records for cid in rec.get("input_claims", [])
     )
+    group_required_claim_ids = _ordered_unique(
+        cid for rec in records for cid in rec.get("required_claims", [])
+    )
     group_output_claim_ids = _ordered_unique(
         cid for rec in records for cid in rec.get("output_claims", [])
     )
@@ -435,6 +436,7 @@ def _main_node_from_group(group: dict, claim_index: dict[str, dict]) -> Componen
         visual_label=label,
         input_claim_ids=group_input_claim_ids,
         output_claim_ids=group_output_claim_ids,
+        required_claim_ids=group_required_claim_ids,
         review_reason=group_review_reason,
     )
 
@@ -453,6 +455,7 @@ def _main_edges_from_groups(groups: list[dict]) -> list[ComponentGraphEdge]:
         inputs = {eq for rec in group["records"] for eq in rec["inputs"]}
         output_claims = {cid for rec in group["records"] for cid in rec.get("output_claims", [])}
         input_claims = {cid for rec in group["records"] for cid in rec.get("input_claims", [])}
+        input_claims.update(cid for rec in group["records"] for cid in rec.get("required_claims", []))
         step_ids = [rec["step_id"] for rec in group["records"]]
         claim_ids = _ordered_unique(
             [cid for rec in group["records"] for cid in _step_claim_ids(rec["step"])]
@@ -609,11 +612,11 @@ def _detail_node_from_record(
 
     detail_label = _build_detail_label(rec["verb"], step, inputs, outputs)
     step_reason = str(getattr(step, "reason", "") or "").strip()
-    step_input_claims = _ordered_unique(
-        list(getattr(step, "input_claim_ids", []) or [])
-        + list(getattr(step, "required_claim_ids", []) or [])
-    )
+    step_input_claims = _ordered_unique(getattr(step, "input_claim_ids", []) or [])
+    step_required_claims = _ordered_unique(getattr(step, "required_claim_ids", []) or [])
     step_output_claims = _ordered_unique(getattr(step, "output_claim_ids", []) or [])
+    visual = _build_detail_visual_label(rec["verb"], inputs, outputs,
+                                        step_input_claims, step_output_claims)
 
     return ComponentGraphNode(
         component_id=rec["detail_id"],
@@ -647,9 +650,10 @@ def _detail_node_from_record(
         source_backing_status=status,
         review_reasons=reasons,
         parent_component_id=parent_id,
-        visual_label=rec["verb"],
+        visual_label=visual,
         input_claim_ids=step_input_claims,
         output_claim_ids=step_output_claims,
+        required_claim_ids=step_required_claims,
         review_reason=step_reason[:240],
         **_support_metadata_for_components(list(rec.get("linked_component_ids", [])), [rec]),
         **_concepts_for_components(list(rec.get("linked_component_ids", [])), [rec]),
@@ -665,6 +669,7 @@ def _detail_edges_from_records(
     for j, target in enumerate(records):
         target_inputs = set(target["inputs"])
         target_input_claims = set(target.get("input_claims", []))
+        target_input_claims.update(target.get("required_claims", []))
         if not target_inputs and not target_input_claims:
             continue
         for source in records[:j]:
@@ -858,6 +863,28 @@ def _build_detail_label(verb: str, step, inputs: list[str], outputs: list[str]) 
     obj = (outputs[:1] or inputs[:1] or [""])[0]
     if obj:
         return f"{verb} {obj}".strip()
+    return verb
+
+
+def _build_detail_visual_label(
+    verb: str,
+    inputs: list[str],
+    outputs: list[str],
+    input_claims: list[str],
+    output_claims: list[str],
+) -> str:
+    """Short graph-canvas label for detail nodes, showing I/O flow (#337).
+
+    Format: ``"verb\\ninput → output"`` (capped at 30 chars per line).
+    Falls back to verb only when no I/O identifiers are available.
+    """
+    src = (inputs[:1] or input_claims[:1] or [""])[0]
+    dst = (outputs[:1] or output_claims[:1] or [""])[0]
+    if src and dst:
+        flow = f"{src} → {dst}"
+        return f"{verb}\n{flow[:30]}"
+    if src or dst:
+        return f"{verb}\n{(src or dst)[:30]}"
     return verb
 
 

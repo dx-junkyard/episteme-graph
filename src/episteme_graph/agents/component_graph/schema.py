@@ -391,6 +391,9 @@ class ComponentGraphNode:
     # derivation step so the right panel can display them.
     input_claim_ids: list[str] = field(default_factory=list)
     output_claim_ids: list[str] = field(default_factory=list)
+    # Precondition claims required (but not consumed) by this step (issue #337).
+    # Distinct from ``input_claim_ids`` (data-flow inputs).
+    required_claim_ids: list[str] = field(default_factory=list)
     # Extraction/review note (issue #337). Free-text step.reason from the
     # derivation pipeline; distinct from ``review_reasons`` (structured codes)
     # and ``description`` (reader-facing explanation).
@@ -510,6 +513,7 @@ class ComponentGraphResult:
                     "visual_label": n.visual_label,
                     "input_claim_ids": n.input_claim_ids,
                     "output_claim_ids": n.output_claim_ids,
+                    "required_claim_ids": n.required_claim_ids,
                     "review_reason": n.review_reason,
                 }
                 for n in self.nodes
