@@ -2011,6 +2011,10 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
             "review_reasons": node_reasons,
             "parent_component_id": str(node.get("parent_component_id") or ""),
             "member_component_ids": node.get("member_component_ids") if isinstance(node.get("member_component_ids"), list) else [],
+            "visual_label": str(node.get("visual_label") or ""),
+            "input_claim_ids": node.get("input_claim_ids") if isinstance(node.get("input_claim_ids"), list) else [],
+            "output_claim_ids": node.get("output_claim_ids") if isinstance(node.get("output_claim_ids"), list) else [],
+            "review_reason": str(node.get("review_reason") or ""),
         })
         seen_nodes.add(component_id)
     normalized_edges = []

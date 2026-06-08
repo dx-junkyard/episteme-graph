@@ -883,6 +883,13 @@ class ComponentGraphNode(BaseModel):
     # Layer linkage between main TheoryOperationNode and equation_detail nodes (issue #306).
     parent_component_id: str = ""
     member_component_ids: list[str] = Field(default_factory=list)
+    # Short graph-display label (issue #337).
+    visual_label: str = ""
+    # Claim I/O from derivation step (issue #337).
+    input_claim_ids: list[str] = Field(default_factory=list)
+    output_claim_ids: list[str] = Field(default_factory=list)
+    # Extraction/review note text (issue #337).
+    review_reason: str = ""
 
 
 class ComponentGraphEdge(BaseModel):

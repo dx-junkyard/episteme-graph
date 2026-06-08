@@ -5551,10 +5551,19 @@
       html += '<div class="ls-graph-detail-section"><b>このノードの意味</b><p>' + escHtml(node.description) + '</p></div>';
     }
 
+    // 1b. 抽出メモ（review_reason — step.reason からの抽出/検証メモ）
+    var reviewReason = String(node.review_reason || "").trim();
+    if (reviewReason) {
+      html += '<div class="ls-graph-detail-section"><b>抽出メモ</b><p class="ls-graph-detail-memo">' + escHtml(reviewReason) + '</p></div>';
+    }
+
     // 2. 入力
     var inputParts = "";
     if ((node.input_equation_ids || []).length) {
       inputParts += '<div class="ls-graph-detail-link"><span>式</span> ' + escHtml((node.input_equation_ids).join(", ")) + '</div>';
+    }
+    if ((node.input_claim_ids || []).length) {
+      inputParts += '<div class="ls-graph-detail-link"><span>claim</span> ' + escHtml((node.input_claim_ids).join(", ")) + '</div>';
     }
     if (inputParts) {
       html += '<div class="ls-graph-detail-section"><b>入力</b>' + inputParts + '</div>';
@@ -5564,6 +5573,9 @@
     var outputParts = "";
     if ((node.output_equation_ids || []).length) {
       outputParts += '<div class="ls-graph-detail-link"><span>式</span> ' + escHtml((node.output_equation_ids).join(", ")) + '</div>';
+    }
+    if ((node.output_claim_ids || []).length) {
+      outputParts += '<div class="ls-graph-detail-link"><span>claim</span> ' + escHtml((node.output_claim_ids).join(", ")) + '</div>';
     }
     if (outputParts) {
       html += '<div class="ls-graph-detail-section"><b>出力</b>' + outputParts + '</div>';
@@ -5745,10 +5757,77 @@
     return maturity === "deterministic_fallback" || backing === "inferred";
   }
 
+  // Issue #337: Japanese operation verb mapping for graph node display.
+  var LS_OPERATION_VERB_JA = {
+    "Apply definition": "定義を適用",
+    "Apply criterion": "基準を適用",
+    "Apply constraint": "制約を適用",
+    "Apply equation": "式を適用",
+    "Apply measurement": "測定を適用",
+    "Apply independence": "独立性を適用",
+    "Infer conclusion": "結論を導出",
+    "Infer intermediate claim": "中間主張を導出",
+    "Derive result": "結果を導出",
+    "Derive consistency relation": "整合関係を導出",
+    "Compare": "比較・検証",
+    "Flag limitation": "制約を確認",
+    "Eliminate parameter": "パラメータを消去",
+    "Solve linear system": "連立方程式を求解",
+    "State assumption": "仮定を提示",
+    "Branch on condition": "条件分岐",
+    "Introduce observable": "観測量を導入",
+    "Define": "定義",
+    "Construct": "構成",
+    "Linearize": "線形化",
+    "Normalize": "正規化",
+    "Approximate": "近似",
+    "Substitute": "代入",
+    "Eliminate": "消去",
+    "Derive": "導出",
+    "Constrain": "制約",
+    "Diagnose": "診断",
+    "Solve": "求解",
+    "Infer": "推論",
+    "Apply": "適用",
+    "Flag": "確認",
+    "State": "提示",
+    "Introduce": "導入",
+  };
+
+  // Issue #337: Japanese stage labels for main graph nodes.
+  var LS_STAGE_LABELS_JA = {
+    "Theory basis": "理論の前提",
+    "Observation model": "観測モデル",
+    "Observable construction": "観測量の構成",
+    "Equation system": "方程式系",
+    "Elimination": "消去",
+    "Consistency relation": "整合条件",
+    "Diagnostic / application": "診断・応用",
+  };
+
+  function lsGraphOperationLabelJa(verb) {
+    var label = String(verb || "").trim();
+    if (LS_OPERATION_VERB_JA[label]) return LS_OPERATION_VERB_JA[label];
+    if (LS_STAGE_LABELS_JA[label]) return LS_STAGE_LABELS_JA[label];
+    var parts = label.split(" ");
+    if (parts.length >= 2 && LS_OPERATION_VERB_JA[parts[0]]) {
+      return LS_OPERATION_VERB_JA[parts[0]] + ": " + parts.slice(1).join(" ");
+    }
+    return label;
+  }
+
   // Prefix a warning icon for fallback / inferred nodes so they are not mistaken
   // for confirmed, source-backed theory operations (issue #302).
+  // Issue #337: prefer visual_label (short), translate to Japanese.
   function lsGraphNodeDisplayLabel(node, id) {
-    var label = lsWrapGraphLabel(lsGraphFullDisplayLabel(node) || id);
+    var visualLabel = String((node && node.visual_label) || "").trim();
+    var raw;
+    if (visualLabel) {
+      raw = lsGraphOperationLabelJa(visualLabel);
+    } else {
+      raw = lsGraphFullDisplayLabel(node) || id;
+    }
+    var label = lsWrapGraphLabel(raw);
     return lsGraphNodeIsFallback(node) ? "⚠ " + label : label;
   }
 

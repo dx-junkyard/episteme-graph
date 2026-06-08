@@ -703,8 +703,8 @@ def test_detail_node_label_never_uses_reason():
         )
 
 
-def test_detail_node_reason_goes_to_description():
-    """Issue #337: step.reason is stored in description, not label/theory_object."""
+def test_detail_node_reason_goes_to_review_reason():
+    """Issue #337: step.reason is stored in review_reason, not label/description."""
     reason_text = "Applies the EPR definition of physical reality"
     steps = [
         DerivationStep(
@@ -725,7 +725,8 @@ def test_detail_node_reason_goes_to_description():
     detail_nodes = _layer(result, "equation_detail")
     assert len(detail_nodes) >= 1
     node = detail_nodes[0]
-    assert node.description == reason_text
+    assert node.review_reason == reason_text
+    assert node.description == ""
     assert reason_text not in node.theory_object
 
 
@@ -760,8 +761,8 @@ def test_equation_detail_label_still_uses_equation_id():
         )
 
 
-def test_detail_node_empty_reason_gives_empty_description():
-    """Issue #337 edge case: empty/None reason produces empty description."""
+def test_detail_node_empty_reason_gives_empty_review_reason():
+    """Issue #337 edge case: empty reason produces empty review_reason."""
     steps = [
         DerivationStep(
             step_id="step_no_reason",
@@ -780,6 +781,7 @@ def test_detail_node_empty_reason_gives_empty_description():
     )
     detail_nodes = _layer(result, "equation_detail")
     assert len(detail_nodes) >= 1
+    assert detail_nodes[0].review_reason == ""
     assert detail_nodes[0].description == ""
     assert detail_nodes[0].label == "Define framework"
 
@@ -800,3 +802,86 @@ def test_detail_node_theory_object_is_verb_not_reason():
     node = detail_nodes[0]
     assert node.theory_object == "Flag limitation"
     assert reason not in node.theory_object
+
+
+def test_detail_node_has_visual_label():
+    """Issue #337: detail nodes carry a short visual_label (operation verb)."""
+    steps = [
+        _claim_step("infer_conclusion", ["claim_a"], ["claim_b"]),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    detail_nodes = _layer(result, "equation_detail")
+    assert len(detail_nodes) >= 1
+    assert detail_nodes[0].visual_label == "Infer conclusion"
+
+
+def test_main_node_visual_label_is_stage_name():
+    """Issue #337: main nodes carry a short visual_label (theory stage name)."""
+    result = _normalized()
+    main_nodes = _layer(result, "main")
+    assert len(main_nodes) >= 1
+    for node in main_nodes:
+        assert node.visual_label, f"{node.component_id} missing visual_label"
+        assert len(node.visual_label) <= 30, (
+            f"visual_label too long: {node.visual_label}"
+        )
+
+
+def test_detail_node_has_claim_io():
+    """Issue #337: detail nodes store input/output claim IDs separately."""
+    steps = [
+        _claim_step("apply_definition", ["claim_a"], ["claim_b"],
+                     required_claim_ids=["claim_pre"]),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    detail_nodes = _layer(result, "equation_detail")
+    assert len(detail_nodes) >= 1
+    node = detail_nodes[0]
+    assert "claim_a" in node.input_claim_ids
+    assert "claim_pre" in node.input_claim_ids
+    assert "claim_b" in node.output_claim_ids
+
+
+def test_main_node_has_aggregated_claim_io():
+    """Issue #337: main nodes aggregate claim I/O from group records."""
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), _claim_only_derivations()
+    )
+    main_nodes = _layer(result, "main")
+    assert len(main_nodes) >= 1
+    has_output = any(node.output_claim_ids for node in main_nodes)
+    assert has_output, "at least one main node should have output_claim_ids"
+
+
+def test_main_node_description_excludes_extraction_reason():
+    """Issue #337: main node description never contains step extraction reasons."""
+    reason = "The span is content-bearing and reviewable, but it is not minimal"
+    steps = [
+        DerivationStep(
+            step_id="step_def",
+            input_equation_ids=["eq_a"],
+            output_equation_ids=["eq_b"],
+            operation="define",
+            reason=reason,
+            review_status="teacher_review_required",
+        ),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    main_nodes = _layer(result, "main")
+    assert len(main_nodes) >= 1
+    for node in main_nodes:
+        assert reason not in (node.description or ""), (
+            f"main description should not contain extraction reason"
+        )
+        assert reason not in (node.display_label or ""), (
+            f"main display_label should not contain extraction reason"
+        )
