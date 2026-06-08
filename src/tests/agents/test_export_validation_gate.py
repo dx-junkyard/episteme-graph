@@ -422,11 +422,45 @@ def test_component_claim_support_rejects_non_supporting_equation():
     result = _run_gate(
         artifacts=artifacts,
         component_result=_ComponentResult([comp]),
-        claim_objects=_ClaimObjectResult([_ClaimObject("claim_abc")]),
+        claim_objects=_ClaimObjectResult([_ClaimObject("claim_abc", source_evidence_ids=["ev_001"])]),
         evidence=_EvidenceResult([_EvidenceRecord("ev_001")]),
     )
     codes = [e.code for e in result.errors]
     assert "NON_SUPPORTING_EQUATION_USED_FOR_CLAIM_SUPPORT" in codes
+
+
+def test_review_required_component_allows_marked_non_supporting_equation():
+    artifacts = _make_artifacts(equation_semantics={
+        "equations": [{
+            "equation_id": "eq_review",
+            "needs_math_review": True,
+            "confidence_policy": {
+                "can_support_claim": False,
+                "must_not_treat_as_source_extracted": True,
+            },
+        }],
+    })
+    comp = _ComponentRecord(
+        "comp_001",
+        {"claim_ids": ["claim_abc"], "evidence_ids": ["ev_001"], "equation_ids": ["eq_review"]},
+        linked_equation_ids=["eq_review"],
+        output_equation_ids=["eq_review"],
+        review_required_equation_ids=["eq_review"],
+        review_status="review_required",
+    )
+    result = _run_gate(
+        artifacts=artifacts,
+        component_result=_ComponentResult([comp]),
+        claim_objects=_ClaimObjectResult([_ClaimObject("claim_abc", source_evidence_ids=["ev_001"])]),
+        evidence=_EvidenceResult([_EvidenceRecord("ev_001")]),
+    )
+    error_codes = [e.code for e in result.errors]
+    warning_codes = [w.code for w in result.warnings]
+    assert "NON_SUPPORTING_EQUATION_USED_FOR_CLAIM_SUPPORT" not in error_codes
+    assert "NON_SUPPORTING_EQUATION_USED_AS_COMPONENT_OUTPUT" not in error_codes
+    assert "NON_SUPPORTING_EQUATION_USED_FOR_CLAIM_SUPPORT" in warning_codes
+    assert "NON_SUPPORTING_EQUATION_USED_AS_COMPONENT_OUTPUT" in warning_codes
+    assert result.status != "failed_validation"
 
 
 def test_component_output_rejects_review_required_auto_accepted_equation():

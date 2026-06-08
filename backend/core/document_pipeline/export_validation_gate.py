@@ -617,6 +617,7 @@ class ExportValidationGate:
             review_required_eqs = {
                 str(e) for e in (getattr(component, "review_required_equation_ids", []) or []) if str(e)
             }
+            review_status = str(getattr(component, "review_status", "") or "")
             all_eqs = self._component_equation_refs(component, refs)
 
             for eq_id in all_eqs:
@@ -657,16 +658,17 @@ class ExportValidationGate:
                         path=f"$.components[{comp_id}].linked_equation_ids",
                         source_stage="export_validation",
                     ))
-                    errors.append(ValidationEntry(
-                        code="NON_SUPPORTING_EQUATION_USED_FOR_CLAIM_SUPPORT",
-                        message=(
-                            f"component {comp_id!r} cannot use equation {eq_id!r} "
-                            "as claim support because equation.confidence_policy.can_support_claim is false"
-                        ),
-                        artifact="component_assembly",
-                        path=f"$.components[{comp_id}].linked_equation_ids",
-                        source_stage="export_validation",
-                    ))
+                    if self._component_equation_violation_is_hard(review_status, eq_id, review_required_eqs):
+                        errors.append(ValidationEntry(
+                            code="NON_SUPPORTING_EQUATION_USED_FOR_CLAIM_SUPPORT",
+                            message=(
+                                f"component {comp_id!r} cannot use equation {eq_id!r} "
+                                "as claim support because equation.confidence_policy.can_support_claim is false"
+                            ),
+                            artifact="component_assembly",
+                            path=f"$.components[{comp_id}].linked_equation_ids",
+                            source_stage="export_validation",
+                        ))
                 if claim_linked and self._equation_requires_review(eq):
                     warnings.append(ValidationEntry(
                         code="REVIEW_REQUIRED_EQUATION_USED_FOR_CLAIM_SUPPORT",
@@ -706,16 +708,17 @@ class ExportValidationGate:
                         path=f"$.components[{comp_id}].output_equation_ids",
                         source_stage="export_validation",
                     ))
-                    errors.append(ValidationEntry(
-                        code="NON_SUPPORTING_EQUATION_USED_AS_COMPONENT_OUTPUT",
-                        message=(
-                            f"component {comp_id!r} cannot publish equation {eq_id!r} as an output "
-                            "because equation.confidence_policy.can_support_claim is false"
-                        ),
-                        artifact="component_assembly",
-                        path=f"$.components[{comp_id}].output_equation_ids",
-                        source_stage="export_validation",
-                    ))
+                    if self._component_equation_violation_is_hard(review_status, eq_id, review_required_eqs):
+                        errors.append(ValidationEntry(
+                            code="NON_SUPPORTING_EQUATION_USED_AS_COMPONENT_OUTPUT",
+                            message=(
+                                f"component {comp_id!r} cannot publish equation {eq_id!r} as an output "
+                                "because equation.confidence_policy.can_support_claim is false"
+                            ),
+                            artifact="component_assembly",
+                            path=f"$.components[{comp_id}].output_equation_ids",
+                            source_stage="export_validation",
+                        ))
                 if self._equation_requires_review(eq) and getattr(component, "review_status", "") == "auto_accepted":
                     errors.append(ValidationEntry(
                         code="REVIEW_REQUIRED_OUTPUT_COMPONENT_AUTO_ACCEPTED",
@@ -1256,6 +1259,17 @@ class ExportValidationGate:
             or bool(policy.get("must_not_treat_as_source_extracted"))
             or policy.get("can_support_claim") is False
         )
+
+    @staticmethod
+    def _component_equation_violation_is_hard(
+        review_status: str,
+        eq_id: str,
+        review_required_eqs: set[str],
+    ) -> bool:
+        """Only review-marked components may carry non-supporting equations past the gate."""
+        if review_status in {"source_backed", "auto_accepted", "teacher_reviewed"}:
+            return True
+        return eq_id not in review_required_eqs
 
     @staticmethod
     def _equation_blocks_claim_and_derivation(eq: dict) -> bool:

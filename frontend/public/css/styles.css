@@ -3440,7 +3440,7 @@ body {
 
 .ls-component-legend {
   position: absolute;
-  top: 14px;
+  top: 58px;
   left: 14px;
   display: grid;
   gap: 7px;
@@ -3509,7 +3509,7 @@ body {
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.92);
   box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08);
-  z-index: 5;
+  z-index: 6;
 }
 
 .ls-graph-layer-btn {
