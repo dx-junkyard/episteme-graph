@@ -602,8 +602,9 @@ def _detail_node_from_record(
         display_order=1000 + rec["order"],
         origin="derivation_chain",
         operation=rec["operation"],
-        theory_object=str(getattr(step, "reason", "") or "").strip()[:120] or rec["verb"],
+        theory_object=rec["verb"],
         display_label=_build_detail_label(rec["verb"], step, inputs, outputs),
+        description=str(getattr(step, "reason", "") or "").strip()[:240],
         linked_component_ids=list(rec.get("linked_component_ids", [])),
         supporting_derivation_ids=linked_derivation_ids,
         graph_layer=layer,
@@ -824,13 +825,14 @@ def _claim_is_atomic(meta: dict) -> bool:
 # ---------------------------------------------------------------------- #
 
 def _build_detail_label(verb: str, step, inputs: list[str], outputs: list[str]) -> str:
-    """Equation-level label: equation IDs are acceptable here (traceability)."""
+    """Detail-level label: equation IDs are acceptable here (traceability).
+
+    Never uses step.reason as a label — reason is review/extraction metadata
+    and belongs in the node's ``description``, not in its graph label (#337).
+    """
     obj = (outputs[:1] or inputs[:1] or [""])[0]
     if obj:
         return f"{verb} {obj}".strip()
-    reason = str(getattr(step, "reason", "") or "").strip()
-    if reason and reason.lower() not in _GENERIC_LABELS:
-        return reason[:80]
     return verb
 
 

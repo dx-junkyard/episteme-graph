@@ -665,3 +665,138 @@ def test_mixed_equation_and_claim_chain_prefers_equations():
     assert len(main_edges) >= 1
     for edge in main_edges:
         assert edge.evidence_equation_ids, "equation evidence should be preferred when available"
+
+
+# --- detail node labels never use step.reason (issue #337) --------------------
+
+
+def test_detail_node_label_never_uses_reason():
+    """Issue #337: detail node labels must never be step.reason text."""
+    reason_text = (
+        "The span is content-bearing and reviewable, but it is not a minimal "
+        "reusable claim for the theory operation graph"
+    )
+    steps = [
+        DerivationStep(
+            step_id="step_with_reason",
+            input_equation_ids=[],
+            output_equation_ids=[],
+            operation="apply_definition",
+            input_claim_ids=["claim_a"],
+            output_claim_ids=["claim_b"],
+            reason=reason_text,
+            review_status="teacher_review_required",
+        ),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    detail_nodes = _layer(result, "equation_detail")
+    assert len(detail_nodes) >= 1
+    for node in detail_nodes:
+        assert reason_text[:40] not in node.label, (
+            f"detail node label must not contain reason text: {node.label}"
+        )
+        assert reason_text[:40] not in node.display_label, (
+            f"detail node display_label must not contain reason text: {node.display_label}"
+        )
+
+
+def test_detail_node_reason_goes_to_description():
+    """Issue #337: step.reason is stored in description, not label/theory_object."""
+    reason_text = "Applies the EPR definition of physical reality"
+    steps = [
+        DerivationStep(
+            step_id="step_apply",
+            input_equation_ids=[],
+            output_equation_ids=[],
+            operation="apply_definition",
+            input_claim_ids=["claim_a"],
+            output_claim_ids=["claim_b"],
+            reason=reason_text,
+            review_status="teacher_review_required",
+        ),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    detail_nodes = _layer(result, "equation_detail")
+    assert len(detail_nodes) >= 1
+    node = detail_nodes[0]
+    assert node.description == reason_text
+    assert reason_text not in node.theory_object
+
+
+def test_claim_only_detail_label_uses_verb():
+    """Issue #337: claim-only steps use the operation verb as label."""
+    steps = [
+        _claim_step("infer_conclusion", ["claim_a"], ["claim_b"]),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    detail_nodes = _layer(result, "equation_detail")
+    assert len(detail_nodes) >= 1
+    node = detail_nodes[0]
+    assert node.label == "Infer conclusion"
+    assert node.display_label == "Infer conclusion"
+
+
+def test_equation_detail_label_still_uses_equation_id():
+    """Issue #337: equation steps still use equation IDs in detail labels."""
+    result = _normalized()
+    detail_nodes = _layer(result, "equation_detail")
+    eq_nodes = [n for n in detail_nodes if n.input_equation_ids or n.output_equation_ids]
+    assert len(eq_nodes) >= 1
+    for node in eq_nodes:
+        has_eq_ref = any(
+            eq_id in node.label for eq_id in node.input_equation_ids + node.output_equation_ids
+        )
+        assert has_eq_ref, (
+            f"equation detail node should reference equation IDs in label: {node.label}"
+        )
+
+
+def test_detail_node_empty_reason_gives_empty_description():
+    """Issue #337 edge case: empty/None reason produces empty description."""
+    steps = [
+        DerivationStep(
+            step_id="step_no_reason",
+            input_equation_ids=[],
+            output_equation_ids=[],
+            operation="define_framework",
+            input_claim_ids=[],
+            output_claim_ids=["claim_x"],
+            reason="",
+            review_status="teacher_review_required",
+        ),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    detail_nodes = _layer(result, "equation_detail")
+    assert len(detail_nodes) >= 1
+    assert detail_nodes[0].description == ""
+    assert detail_nodes[0].label == "Define framework"
+
+
+def test_detail_node_theory_object_is_verb_not_reason():
+    """Issue #337: theory_object should be the verb, not step.reason."""
+    reason = "Long extraction reason that should not appear in theory_object"
+    steps = [
+        _claim_step("flag_limitation", ["claim_a"], ["claim_b"],
+                     reason=reason),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    detail_nodes = _layer(result, "equation_detail")
+    assert len(detail_nodes) >= 1
+    node = detail_nodes[0]
+    assert node.theory_object == "Flag limitation"
+    assert reason not in node.theory_object
