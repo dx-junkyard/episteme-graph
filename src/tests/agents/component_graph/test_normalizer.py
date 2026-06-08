@@ -535,3 +535,133 @@ def test_normalizer_reflects_single_step_derivation_chain():
     main_nodes = _layer(result, "main")
     assert len(main_nodes) == 1
     assert main_nodes[0].operation == "derive_consistency_relation"
+
+
+# --- claim-only derivation chains (issue #334) --------------------------------
+
+
+def _claim_step(operation, input_claims, output_claims, **kwargs):
+    """DerivationStep with claim flow but no equation I/O."""
+    return DerivationStep(
+        step_id=f"step_{operation}",
+        input_equation_ids=[],
+        output_equation_ids=[],
+        operation=operation,
+        input_claim_ids=input_claims,
+        output_claim_ids=output_claims,
+        review_status="teacher_review_required",
+        **kwargs,
+    )
+
+
+def _claim_only_derivations():
+    return DerivationChainResult(
+        document_id="doc",
+        cartridge_id=None,
+        chains=[DerivationChainRecord(
+            derivation_id="deriv_claim",
+            document_id="doc",
+            source_section_ids=[],
+            steps=[
+                _claim_step("define_framework", [], ["claim_a"],
+                            required_claim_ids=[]),
+                _claim_step("linearize_model", ["claim_a"], ["claim_b"],
+                            required_claim_ids=["claim_a"]),
+                _claim_step("derive_result", ["claim_b"], ["claim_c"],
+                            required_claim_ids=["claim_b"],
+                            source_evidence_ids=["ev_1"]),
+            ],
+        )],
+    )
+
+
+def test_claim_only_chain_produces_main_edges():
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), _claim_only_derivations()
+    )
+    main_nodes = _layer(result, "main")
+    main_ids = {n.component_id for n in main_nodes}
+    main_edges = [e for e in result.edges if e.source in main_ids and e.target in main_ids]
+    assert len(main_nodes) >= 2
+    assert len(main_edges) >= 1, "claim-only chain must produce at least one main edge"
+
+
+def test_claim_only_chain_produces_detail_edges():
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), _claim_only_derivations()
+    )
+    detail_ids = {n.component_id for n in _layer(result, "equation_detail")}
+    detail_edges = [e for e in result.edges if e.source in detail_ids and e.target in detail_ids]
+    assert len(detail_edges) >= 1, "claim-only chain must produce detail edges"
+
+
+def test_claim_only_chain_edges_carry_evidence():
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), _claim_only_derivations()
+    )
+    main_ids = {n.component_id for n in _layer(result, "main")}
+    main_edges = [e for e in result.edges if e.source in main_ids and e.target in main_ids]
+    for edge in main_edges:
+        assert edge.evidence_derivation_ids, f"{edge.edge_id} missing derivation evidence"
+        assert edge.evidence_claim_ids, f"{edge.edge_id} missing claim evidence"
+
+
+def test_claim_only_chain_nodes_have_linked_claims():
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), _claim_only_derivations()
+    )
+    for node in _layer(result, "main"):
+        assert node.linked_claim_ids, f"{node.component_id} missing linked_claim_ids"
+        assert node.linked_derivation_ids, f"{node.component_id} missing linked_derivation_ids"
+
+
+def test_claim_only_chain_node_not_review_required():
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), _claim_only_derivations()
+    )
+    for node in _layer(result, "main"):
+        assert node.source_backing_status != "review_required", (
+            f"claim-only node {node.component_id} should be partially_source_backed "
+            f"(has derivation_ids), not review_required"
+        )
+
+
+def test_fallback_sequential_edges_when_no_overlap():
+    steps = [
+        _claim_step("define_framework", [], ["claim_x"]),
+        _claim_step("derive_result", ["claim_y"], ["claim_z"]),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    main_ids = {n.component_id for n in _layer(result, "main")}
+    main_edges = [e for e in result.edges if e.source in main_ids and e.target in main_ids]
+    assert len(main_edges) >= 1, "fallback sequential edges should connect main nodes"
+    for edge in main_edges:
+        assert edge.review_status == "review_required"
+        assert edge.review_reasons
+
+
+def test_mixed_equation_and_claim_chain_prefers_equations():
+    steps = [
+        _step("define", ["eq_a"], ["eq_b"]),
+        DerivationStep(
+            step_id="step_derive",
+            input_equation_ids=["eq_b"],
+            output_equation_ids=["eq_c"],
+            operation="derive_result",
+            input_claim_ids=["claim_a"],
+            output_claim_ids=["claim_b"],
+            review_status="teacher_review_required",
+        ),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    main_ids = {n.component_id for n in _layer(result, "main")}
+    main_edges = [e for e in result.edges if e.source in main_ids and e.target in main_ids]
+    assert len(main_edges) >= 1
+    for edge in main_edges:
+        assert edge.evidence_equation_ids, "equation evidence should be preferred when available"

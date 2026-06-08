@@ -181,12 +181,20 @@ class ComponentGraphValidator:
                 f"nodes[{cid}].source_backing_status",
             ))
 
-        # Hard error: result/constraint/derive nodes must expose equation links.
+        # Result/constraint/derive nodes should expose equation links.  For
+        # claim-only derivation chains the node may legitimately have no
+        # equations; downgrade to warning when claims or evidence back it
+        # (issue #334).
         if operation and edge_type in _OUTPUT_BEARING_EDGE_TYPES and is_main:
             if not getattr(node, "linked_equation_ids", []):
+                has_claim_backing = bool(
+                    getattr(node, "linked_claim_ids", [])
+                    or getattr(node, "linked_evidence_ids", [])
+                )
+                severity = "warning" if has_claim_backing else "error"
                 issues.append(ValidationIssue(
                     "output_node_missing_linked_equations",
-                    "error",
+                    severity,
                     f"{edge_type} node {cid!r} has no linked_equation_ids",
                     f"nodes[{cid}].linked_equation_ids",
                 ))

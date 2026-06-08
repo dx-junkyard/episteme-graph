@@ -137,6 +137,8 @@ class ComponentGraphNormalizer:
             for rec in records
         ]
         main_edges = _main_edges_from_groups(groups)
+        if not main_edges and len(groups) >= 2:
+            main_edges = _fallback_sequential_edges(groups)
         detail_edges = _detail_edges_from_records(records, claim_index)
         return main_nodes, detail_nodes, main_edges + detail_edges
 
@@ -174,6 +176,11 @@ class ComponentGraphNormalizer:
                     "is_generic": is_generic,
                     "inputs": _ordered_unique(getattr(step, "input_equation_ids", []) or []),
                     "outputs": _ordered_unique(getattr(step, "output_equation_ids", []) or []),
+                    "input_claims": _ordered_unique(
+                        list(getattr(step, "input_claim_ids", []) or [])
+                        + list(getattr(step, "required_claim_ids", []) or [])
+                    ),
+                    "output_claims": _ordered_unique(getattr(step, "output_claim_ids", []) or []),
                 })
         return records
 
@@ -420,11 +427,19 @@ def _main_node_from_group(group: dict, claim_index: dict[str, dict]) -> Componen
 
 
 def _main_edges_from_groups(groups: list[dict]) -> list[ComponentGraphEdge]:
-    """High-level theory flow: group output equation feeds another group's input."""
+    """High-level theory flow: group output feeds another group's input.
+
+    Edges are created from equation overlap (output equations matching input
+    equations) or, when no equation overlap exists, from claim overlap (output
+    claims matching input/required claims).  This ensures claim-only derivation
+    chains still produce a connected graph (issue #334).
+    """
     summaries = []
     for group in groups:
         outputs = {eq for rec in group["records"] for eq in rec["outputs"]}
         inputs = {eq for rec in group["records"] for eq in rec["inputs"]}
+        output_claims = {cid for rec in group["records"] for cid in rec.get("output_claims", [])}
+        input_claims = {cid for rec in group["records"] for cid in rec.get("input_claims", [])}
         step_ids = [rec["step_id"] for rec in group["records"]]
         claim_ids = _ordered_unique(
             [cid for rec in group["records"] for cid in _step_claim_ids(rec["step"])]
@@ -437,6 +452,8 @@ def _main_edges_from_groups(groups: list[dict]) -> list[ComponentGraphEdge]:
             "group": group,
             "outputs": outputs,
             "inputs": inputs,
+            "output_claims": output_claims,
+            "input_claims": input_claims,
             "step_ids": step_ids,
             "claim_ids": claim_ids,
             "evidence_ids": evidence_ids,
@@ -445,13 +462,16 @@ def _main_edges_from_groups(groups: list[dict]) -> list[ComponentGraphEdge]:
     edges: list[ComponentGraphEdge] = []
     seen: set[tuple[str, str, str]] = set()
     for tgt in summaries:
-        if not tgt["inputs"]:
+        if not tgt["inputs"] and not tgt["input_claims"]:
             continue
         for src in summaries:
             if src["group"]["node_id"] == tgt["group"]["node_id"]:
                 continue
-            overlap = _ordered_unique([eq for eq in src["outputs"] if eq in tgt["inputs"]])
-            if not overlap:
+            eq_overlap = _ordered_unique([eq for eq in src["outputs"] if eq in tgt["inputs"]])
+            claim_overlap = _ordered_unique(
+                [cid for cid in src["output_claims"] if cid in tgt["input_claims"]]
+            )
+            if not eq_overlap and not claim_overlap:
                 continue
             edge_type = tgt["group"]["edge_type"]
             key = (src["group"]["node_id"], tgt["group"]["node_id"], edge_type)
@@ -460,11 +480,21 @@ def _main_edges_from_groups(groups: list[dict]) -> list[ComponentGraphEdge]:
             seen.add(key)
             evidence_derivation_ids = _ordered_unique(src["step_ids"] + tgt["step_ids"])
             source_backing_status, review_status, review_reasons = _edge_backing(
-                evidence_equation_ids=overlap,
+                evidence_equation_ids=eq_overlap,
                 is_generic=False,
                 evidence_claims=tgt["claim_ids"],
                 evidence_derivation_ids=evidence_derivation_ids,
             )
+            if eq_overlap:
+                reasoning = (
+                    f"Theory flow: {theory_stage_label(src['group']['stage'])} output feeds "
+                    f"{theory_stage_label(tgt['group']['stage'])} ({', '.join(eq_overlap)})."
+                )
+            else:
+                reasoning = (
+                    f"Claim flow: {theory_stage_label(src['group']['stage'])} output feeds "
+                    f"{theory_stage_label(tgt['group']['stage'])} ({', '.join(claim_overlap[:3])})."
+                )
             edges.append(ComponentGraphEdge(
                 edge_id=f"theory_edge_{len(edges) + 1:04d}",
                 source=src["group"]["node_id"],
@@ -472,19 +502,61 @@ def _main_edges_from_groups(groups: list[dict]) -> list[ComponentGraphEdge]:
                 edge_type=edge_type,
                 support_status="derivation_linked",
                 evidence_claims=[],
-                reasoning=(
-                    f"Theory flow: {theory_stage_label(src['group']['stage'])} output feeds "
-                    f"{theory_stage_label(tgt['group']['stage'])} ({', '.join(overlap)})."
-                ),
+                reasoning=reasoning,
                 confidence=0.9,
-                evidence_equation_ids=overlap,
+                evidence_equation_ids=eq_overlap,
                 source_backing_status=source_backing_status,
                 review_status=review_status,
                 evidence_derivation_ids=evidence_derivation_ids,
-                evidence_claim_ids=tgt["claim_ids"],
+                evidence_claim_ids=_ordered_unique(claim_overlap + tgt["claim_ids"]),
                 source_evidence_ids=tgt["evidence_ids"],
                 review_reasons=review_reasons,
             ))
+    return edges
+
+
+def _fallback_sequential_edges(groups: list[dict]) -> list[ComponentGraphEdge]:
+    """Sequential stage edges when neither equation nor claim flow produces edges.
+
+    Connects consecutive main nodes in stage order.  Marked ``review_required``
+    because the connection is inferred from ordering, not from data overlap.
+    """
+    edges: list[ComponentGraphEdge] = []
+    for i in range(len(groups) - 1):
+        src = groups[i]
+        tgt = groups[i + 1]
+        edge_type = tgt["edge_type"]
+        evidence_derivation_ids = _ordered_unique(
+            [rec["step_id"] for rec in src["records"]]
+            + [rec["step_id"] for rec in tgt["records"]]
+        )
+        claim_ids = _ordered_unique(
+            [cid for rec in tgt["records"] for cid in _step_claim_ids(rec["step"])]
+        )
+        evidence_ids = _ordered_unique(
+            [eid for rec in tgt["records"]
+             for eid in (getattr(rec["step"], "source_evidence_ids", []) or [])]
+        )
+        edges.append(ComponentGraphEdge(
+            edge_id=f"theory_edge_{len(edges) + 1:04d}",
+            source=src["node_id"],
+            target=tgt["node_id"],
+            edge_type=edge_type,
+            support_status="derivation_linked",
+            evidence_claims=[],
+            reasoning=(
+                f"Sequential stage flow: {theory_stage_label(src['stage'])} → "
+                f"{theory_stage_label(tgt['stage'])}."
+            ),
+            confidence=0.7,
+            evidence_equation_ids=[],
+            source_backing_status="review_required",
+            review_status="review_required",
+            evidence_derivation_ids=evidence_derivation_ids,
+            evidence_claim_ids=claim_ids,
+            source_evidence_ids=evidence_ids,
+            review_reasons=["edge_not_source_backed"],
+        ))
     return edges
 
 
@@ -566,11 +638,16 @@ def _detail_edges_from_records(
     seen: set[tuple[str, str, str]] = set()
     for j, target in enumerate(records):
         target_inputs = set(target["inputs"])
-        if not target_inputs:
+        target_input_claims = set(target.get("input_claims", []))
+        if not target_inputs and not target_input_claims:
             continue
         for source in records[:j]:
-            overlap = [eq for eq in source["outputs"] if eq in target_inputs]
-            if not overlap:
+            eq_overlap = [eq for eq in source["outputs"] if eq in target_inputs]
+            claim_overlap = [
+                cid for cid in source.get("output_claims", [])
+                if cid in target_input_claims
+            ]
+            if not eq_overlap and not claim_overlap:
                 continue
             edge_type = target["edge_type"]
             key = (source["detail_id"], target["detail_id"], edge_type)
@@ -579,10 +656,20 @@ def _detail_edges_from_records(
             seen.add(key)
             step = target["step"]
             source_backing_status, review_status, review_reasons = _edge_backing(
-                evidence_equation_ids=overlap,
+                evidence_equation_ids=eq_overlap,
                 is_generic=target["is_generic"],
                 evidence_derivation_ids=[source["step_id"], target["step_id"]],
             )
+            if eq_overlap:
+                reasoning = (
+                    f"Derivation data flow: {source['operation'] or 'step'} output "
+                    f"feeds {target['operation'] or 'step'} ({', '.join(eq_overlap)})."
+                )
+            else:
+                reasoning = (
+                    f"Claim flow: {source['operation'] or 'step'} output "
+                    f"feeds {target['operation'] or 'step'} ({', '.join(claim_overlap[:3])})."
+                )
             edges.append(ComponentGraphEdge(
                 edge_id=f"eq_edge_{len(edges) + 1:04d}",
                 source=source["detail_id"],
@@ -590,18 +677,15 @@ def _detail_edges_from_records(
                 edge_type=edge_type,
                 support_status="derivation_linked",
                 evidence_claims=[],
-                reasoning=(
-                    f"Derivation data flow: {source['operation'] or 'step'} output "
-                    f"feeds {target['operation'] or 'step'} ({', '.join(overlap)})."
-                ),
+                reasoning=reasoning,
                 confidence=0.9,
-                evidence_equation_ids=_ordered_unique(overlap),
+                evidence_equation_ids=_ordered_unique(eq_overlap),
                 source_backing_status=source_backing_status,
                 review_status=review_status,
                 evidence_derivation_ids=_ordered_unique([
                     source["step_id"], target["step_id"]
                 ]),
-                evidence_claim_ids=_ordered_unique(_step_claim_ids(step)),
+                evidence_claim_ids=_ordered_unique(claim_overlap + _step_claim_ids(step)),
                 source_evidence_ids=_ordered_unique(
                     getattr(step, "source_evidence_ids", []) or []
                 ),
