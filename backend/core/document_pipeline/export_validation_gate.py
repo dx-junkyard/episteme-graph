@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import asdict, dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -368,6 +369,13 @@ class ExportValidationGate:
 
         # 6. Required artifact presence
         self._check_required_artifacts(artifacts, errors)
+
+        # 6b. provisional claim ref leakage (#340): equation_semantics /
+        # derivation_chain must not carry claim refs that are absent from the
+        # final claims.json. Reported as warnings (review metadata), never a
+        # hard block — the root-cause canonicalization happens upstream.
+        if claim_objects is not None:
+            self._check_unresolved_claim_refs(artifacts, claim_objects, warnings)
 
         # 7. source-backed claim must reference EvidenceRegistry (#257 / #312).
         # Per #312 these are hard errors regardless of the code path (freshly
@@ -1290,6 +1298,92 @@ class ExportValidationGate:
             and plain_text is None
             and extraction_status in ("partial", "fragment_only", "label_only", "missing", "unparsed")
         )
+
+    # Provisional / pre-canonical claim ID patterns (issue #340). Mirrors the
+    # export-side _LEGACY_REF_PATTERNS so the pipeline catches the same leaks.
+    _PROVISIONAL_CLAIM_REF_PATTERNS = (
+        re.compile(r"^claim_span_"),
+        re.compile(r"^claim:[^:]+:[^:]+$"),
+        re.compile(r"^claim::"),
+    )
+
+    @classmethod
+    def _looks_provisional_claim_ref(cls, ref: str) -> bool:
+        return any(p.match(ref) for p in cls._PROVISIONAL_CLAIM_REF_PATTERNS)
+
+    def _check_unresolved_claim_refs(
+        self,
+        artifacts: dict,
+        claim_objects,
+        warnings: list,
+    ) -> None:
+        """Report claim refs in equations / derivations absent from claims.json (#340).
+
+        The claim_object_builder stage is the source of truth for claim IDs. Any
+        claim ref carried by equation_semantics or derivation_chain that is not in
+        the final claim set (or that still looks provisional) indicates a broken
+        artifact ID contract. These are surfaced as warnings so they show up in
+        export_validation review metadata without blocking persist.
+        """
+        final_claim_ids = {
+            str(getattr(c, "claim_id", "") or "")
+            for c in (getattr(claim_objects, "claims", []) or [])
+            if getattr(c, "claim_id", None)
+        }
+
+        def report(refs, artifact: str, path: str) -> None:
+            for ref in refs or []:
+                ref_id = str(ref)
+                if not ref_id:
+                    continue
+                if ref_id in final_claim_ids:
+                    continue
+                provisional = self._looks_provisional_claim_ref(ref_id)
+                warnings.append(ValidationEntry(
+                    code=(
+                        "PROVISIONAL_CLAIM_REF_IN_ARTIFACT"
+                        if provisional
+                        else "UNRESOLVED_CLAIM_REF_IN_ARTIFACT"
+                    ),
+                    message=(
+                        f"{path} references claim {ref_id!r} which is not in the final "
+                        "claims.json claim set"
+                    ),
+                    artifact=artifact,
+                    path=path,
+                    source_stage="export_validation",
+                ))
+
+        equations = artifacts.get("equation_semantics") or {}
+        if isinstance(equations, dict):
+            for idx, eq in enumerate(equations.get("equations") or []):
+                if not isinstance(eq, dict):
+                    continue
+                report(
+                    eq.get("linked_claim_ids"),
+                    "equation_semantics",
+                    f"$.equations[{idx}].linked_claim_ids",
+                )
+
+        derivations = artifacts.get("derivation_chain") or {}
+        if isinstance(derivations, dict):
+            for chain_idx, chain in enumerate(derivations.get("chains") or []):
+                if not isinstance(chain, dict):
+                    continue
+                for step_idx, step in enumerate(chain.get("steps") or []):
+                    if not isinstance(step, dict):
+                        continue
+                    for key in (
+                        "required_claim_ids",
+                        "input_claim_ids",
+                        "output_claim_ids",
+                        "claim_ids",
+                    ):
+                        report(
+                            step.get(key),
+                            "derivation_chain",
+                            f"$.chains[{chain_idx}].steps[{step_idx}].{key}",
+                        )
 
     def _check_derivation_equation_confidence(
         self,
