@@ -959,6 +959,19 @@ def run_document_pipeline(
                 ),
             )
             result.final_stage = "export_validation"
+            # Log every hard error with its rule code, artifact, and JSON path so
+            # the exact failing rule can be identified from logs alone, without
+            # querying document_analysis_runs.stage_outputs._artifacts (#343).
+            for entry in _iter_export_validation_errors(validation_result_dict):
+                logger.warning(
+                    "ExportValidationGate hard error document=%s material=%s "
+                    "code=%s artifact=%s path=%s message=%s",
+                    document_id, material_id,
+                    entry.get("code") or "UNKNOWN",
+                    entry.get("artifact") or "-",
+                    entry.get("path") or "-",
+                    (entry.get("message") or "").strip(),
+                )
             logger.warning(
                 "ExportValidationGate blocked persist for document=%s: %d error(s)%s",
                 document_id, error_count, error_details,
@@ -1072,17 +1085,31 @@ def _instantiate(agent_class_or_instance):
     return agent_class_or_instance
 
 
-def _summarize_export_validation_errors(validation_result_dict: dict, limit: int = 3) -> str:
+def _iter_export_validation_errors(validation_result_dict: dict) -> list[dict]:
+    """Return the hard-error entries (dicts) from an export_validation result."""
     errors = validation_result_dict.get("errors") or []
-    if not isinstance(errors, list) or not errors:
+    if not isinstance(errors, list):
+        return []
+    return [error for error in errors if isinstance(error, dict)]
+
+
+def _summarize_export_validation_errors(validation_result_dict: dict, limit: int = 3) -> str:
+    errors = _iter_export_validation_errors(validation_result_dict)
+    if not errors:
         return ""
     parts: list[str] = []
     for error in errors[:limit]:
-        if not isinstance(error, dict):
-            continue
         code = str(error.get("code") or "UNKNOWN")
         message = str(error.get("message") or "").strip()
-        parts.append(f"{code}: {message}" if message else code)
+        # Include the owning artifact + JSON path so the failing rule can be
+        # traced to a concrete ID without opening the stored artifact (#343).
+        location = " ".join(
+            str(value)
+            for value in (error.get("artifact"), error.get("path"))
+            if value
+        ).strip()
+        head = f"{code}: {message}" if message else code
+        parts.append(f"{head} [{location}]" if location else head)
     if not parts:
         return ""
     suffix = f"; first_errors={parts}"

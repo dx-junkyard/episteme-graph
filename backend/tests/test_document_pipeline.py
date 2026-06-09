@@ -1313,6 +1313,42 @@ def test_export_validation_error_summary_includes_first_errors():
     assert "(+1 more)" in summary
 
 
+def test_export_validation_error_summary_includes_artifact_and_path():
+    """#343: the failing rule must be traceable to a concrete artifact + JSON path."""
+    from core.document_pipeline.orchestrator import _summarize_export_validation_errors
+
+    summary = _summarize_export_validation_errors({
+        "errors": [
+            {
+                "code": "COMPONENT_MISSING_INTERNAL_FLOW",
+                "message": "component 'c1' has no internal_flow",
+                "artifact": "component_assembly",
+                "path": "$.components[c1].internal_flow",
+            },
+        ]
+    })
+
+    assert "COMPONENT_MISSING_INTERNAL_FLOW: component 'c1' has no internal_flow" in summary
+    assert "component_assembly $.components[c1].internal_flow" in summary
+
+
+def test_iter_export_validation_errors_skips_non_dict_entries():
+    from core.document_pipeline.orchestrator import _iter_export_validation_errors
+
+    entries = _iter_export_validation_errors({
+        "errors": [
+            {"code": "A"},
+            "not-a-dict",
+            None,
+            {"code": "B"},
+        ]
+    })
+
+    assert [e.get("code") for e in entries] == ["A", "B"]
+    assert _iter_export_validation_errors({}) == []
+    assert _iter_export_validation_errors({"errors": None}) == []
+
+
 # --- issue #282: GROBID integration ----------------------------------------
 
 
