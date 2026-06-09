@@ -945,6 +945,7 @@ def run_document_pipeline(
         # Block persist / completed if validation failed
         if validation_result_dict.get("status") == "failed_validation":
             error_count = (validation_result_dict.get("summary") or {}).get("error_count", 0)
+            error_details = _summarize_export_validation_errors(validation_result_dict)
             upsert_analysis_run(
                 run_id=run_id,
                 document_id=document_id,
@@ -952,16 +953,19 @@ def run_document_pipeline(
                 cartridge_id=cartridge_id,
                 status="failed",
                 current_stage="export_validation",
-                error_message=f"ExportValidationGate: {error_count} hard error(s) found; persist blocked",
+                error_message=(
+                    f"ExportValidationGate: {error_count} hard error(s) found; "
+                    f"persist blocked{error_details}"
+                ),
             )
             result.final_stage = "export_validation"
             logger.warning(
-                "ExportValidationGate blocked persist for document=%s: %d error(s)",
-                document_id, error_count,
+                "ExportValidationGate blocked persist for document=%s: %d error(s)%s",
+                document_id, error_count, error_details,
             )
             raise PipelineStageError(
                 "export_validation",
-                f"Validation failed with {error_count} hard error(s); see export_validation artifact",
+                f"Validation failed with {error_count} hard error(s){error_details}; see export_validation artifact",
             )
 
         # ── Stage 13: persist_claims_components_graph ──────────────────────
@@ -1066,6 +1070,25 @@ def _instantiate(agent_class_or_instance):
     if isinstance(agent_class_or_instance, type):
         return agent_class_or_instance()
     return agent_class_or_instance
+
+
+def _summarize_export_validation_errors(validation_result_dict: dict, limit: int = 3) -> str:
+    errors = validation_result_dict.get("errors") or []
+    if not isinstance(errors, list) or not errors:
+        return ""
+    parts: list[str] = []
+    for error in errors[:limit]:
+        if not isinstance(error, dict):
+            continue
+        code = str(error.get("code") or "UNKNOWN")
+        message = str(error.get("message") or "").strip()
+        parts.append(f"{code}: {message}" if message else code)
+    if not parts:
+        return ""
+    suffix = f"; first_errors={parts}"
+    if len(errors) > limit:
+        suffix += f" (+{len(errors) - limit} more)"
+    return suffix
 
 
 def _to_plain_data(value: Any) -> Any:

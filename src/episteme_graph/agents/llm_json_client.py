@@ -55,10 +55,16 @@ class ProviderJSONLLMClient:
                 self._model or "<settings-default>",
                 len(messages),
             )
-            timeout = float(os.getenv("AGENT_LLM_TIMEOUT_SECONDS", "180"))
+            timeout = float(os.getenv("AGENT_LLM_TIMEOUT_SECONDS", "300"))
+            wall_timeout = float(
+                os.getenv(
+                    "AGENT_LLM_WALL_TIMEOUT_SECONDS",
+                    str(max(timeout + 30.0, timeout * 1.1)),
+                )
+            )
             raw_text = _call_with_wall_timeout(
                 generate_text,
-                timeout,
+                wall_timeout,
                 messages=messages,
                 model=self._model,
                 temperature=0.0,

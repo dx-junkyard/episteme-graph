@@ -1296,6 +1296,23 @@ def test_orchestrator_records_failed_stage():
     assert exc_info.value.stage == "document_structure"
 
 
+def test_export_validation_error_summary_includes_first_errors():
+    from core.document_pipeline.orchestrator import _summarize_export_validation_errors
+
+    summary = _summarize_export_validation_errors({
+        "errors": [
+            {"code": "COMPONENT_MISSING_INTERNAL_FLOW", "message": "component 'c1' has no internal_flow"},
+            {"code": "UNRESOLVED_COMPONENT_ID", "message": "topic references missing component"},
+            {"code": "SOURCE_BACKED_CLAIM_NO_EVIDENCE_IDS", "message": "claim has no evidence"},
+            {"code": "EXTRA", "message": "extra"},
+        ]
+    })
+
+    assert "COMPONENT_MISSING_INTERNAL_FLOW: component 'c1' has no internal_flow" in summary
+    assert "UNRESOLVED_COMPONENT_ID: topic references missing component" in summary
+    assert "(+1 more)" in summary
+
+
 # --- issue #282: GROBID integration ----------------------------------------
 
 

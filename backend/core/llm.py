@@ -285,6 +285,7 @@ def _vertex_ai_generate_text(
     *,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    timeout: float | None = None,
 ) -> str:
     from vertexai.generative_models import GenerativeModel, GenerationConfig  # type: ignore[import]
 
@@ -301,10 +302,10 @@ def _vertex_ai_generate_text(
         system_instruction=system_instruction,
     )
     # Vertex AI の contents は {"role": ..., "parts": [...]} 形式でそのまま使用可
-    response = model.generate_content(
-        contents,
-        generation_config=generation_config,
-    )
+    kwargs: dict[str, Any] = {"generation_config": generation_config}
+    if timeout is not None:
+        kwargs["request_options"] = {"timeout": timeout}
+    response = model.generate_content(contents, **kwargs)
     return _extract_vertex_ai_text(response)
 
 
@@ -481,6 +482,7 @@ def _gemini_generate_text(
     genai_module: Any,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    timeout: float | None = None,
 ) -> str:
     genai = genai_module
     system_instruction, contents = _messages_to_gemini(messages)
@@ -494,10 +496,10 @@ def _gemini_generate_text(
         model_name=model_name,
         system_instruction=system_instruction,
     )
-    response = model.generate_content(
-        contents,
-        generation_config=generation_config or None,
-    )
+    kwargs: dict[str, Any] = {"generation_config": generation_config or None}
+    if timeout is not None:
+        kwargs["request_options"] = {"timeout": timeout}
+    response = model.generate_content(contents, **kwargs)
     return (getattr(response, "text", "") or "").strip()
 
 
@@ -593,6 +595,7 @@ def generate_text(
             genai_module=_get_gemini_module(),
             temperature=temperature,
             max_tokens=max_tokens,
+            timeout=timeout,
         )
 
     if settings.llm_provider == "google":
@@ -602,6 +605,7 @@ def generate_text(
             model_name,
             temperature=temperature,
             max_tokens=max_tokens,
+            timeout=timeout,
         )
 
     if settings.llm_provider == "gemini-vertex":  # 廃止予定
@@ -611,6 +615,7 @@ def generate_text(
             genai_module=_get_gemini_vertex_module(),
             temperature=temperature,
             max_tokens=max_tokens,
+            timeout=timeout,
         )
 
     client = _get_openai_client()

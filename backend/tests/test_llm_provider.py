@@ -138,6 +138,52 @@ class TestProviderBranching:
             assert gen_kwargs["generation_config"]["temperature"] == 0.5
             assert gen_kwargs["generation_config"]["max_output_tokens"] == 128
 
+    def test_generate_text_passes_timeout_to_gemini_request_options(self):
+        from core import llm
+
+        fake_resp = types.SimpleNamespace(text="gemini-response")
+        fake_model = MagicMock()
+        fake_model.generate_content.return_value = fake_resp
+        fake_genai = MagicMock()
+        fake_genai.GenerativeModel.return_value = fake_model
+
+        with patch.object(llm, "get_settings", return_value=_make_settings("gemini")), \
+             patch.object(llm, "_get_gemini_module", return_value=fake_genai):
+            out = llm.generate_text([{"role": "user", "content": "u"}], timeout=42)
+
+        assert out == "gemini-response"
+        gen_kwargs = fake_model.generate_content.call_args.kwargs
+        assert gen_kwargs["request_options"] == {"timeout": 42}
+
+    def test_generate_text_passes_timeout_to_vertex_request_options(self):
+        from core import llm
+
+        fake_resp = types.SimpleNamespace(
+            candidates=[
+                types.SimpleNamespace(
+                    content=types.SimpleNamespace(
+                        parts=[types.SimpleNamespace(text="vertex-response")]
+                    )
+                )
+            ]
+        )
+        fake_model = MagicMock()
+        fake_model.generate_content.return_value = fake_resp
+        fake_generation_config = MagicMock()
+        fake_vertex_module = types.SimpleNamespace(
+            GenerativeModel=MagicMock(return_value=fake_model),
+            GenerationConfig=fake_generation_config,
+        )
+
+        with patch.dict(sys.modules, {"vertexai.generative_models": fake_vertex_module}), \
+             patch.object(llm, "get_settings", return_value=_make_settings("google")), \
+             patch.object(llm, "_get_vertex_ai_client"):
+            out = llm.generate_text([{"role": "user", "content": "u"}], timeout=42)
+
+        assert out == "vertex-response"
+        gen_kwargs = fake_model.generate_content.call_args.kwargs
+        assert gen_kwargs["request_options"] == {"timeout": 42}
+
     def test_generate_text_uses_openai_when_provider_openai(self):
         from core import llm
 
