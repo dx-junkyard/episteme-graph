@@ -859,24 +859,41 @@ def _component_ref_map(components: list[dict], component_graph: dict) -> dict[st
     return mapping
 
 
-def _map_ref_list(values: Any, id_map: dict[str, str]) -> list[str]:
+def _map_ref_list(
+    values: Any,
+    id_map: dict[str, str],
+    *,
+    known_ids: set[str] | None = None,
+    drop_unresolved: bool = False,
+) -> list[str]:
     out: list[str] = []
     for value in values or []:
         mapped = id_map.get(str(value), str(value))
+        if drop_unresolved and known_ids is not None and mapped not in known_ids:
+            continue
         if mapped not in out:
             out.append(mapped)
     return out
 
 
-def _normalize_claim_refs_in_items(items: Any, claim_map: dict[str, str]) -> Any:
+def _normalize_claim_refs_in_items(
+    items: Any,
+    claim_map: dict[str, str],
+    known_claim_ids: set[str],
+) -> Any:
     if isinstance(items, list):
-        return [_normalize_claim_refs_in_items(item, claim_map) for item in items]
+        return [_normalize_claim_refs_in_items(item, claim_map, known_claim_ids) for item in items]
     if not isinstance(items, dict):
         return items
     out = dict(items)
     for key in ("claim_ids", "evidence_claims", "linked_claim_ids"):
         if isinstance(out.get(key), list):
-            out[key] = _map_ref_list(out[key], claim_map)
+            out[key] = _map_ref_list(
+                out[key],
+                claim_map,
+                known_ids=known_claim_ids,
+                drop_unresolved=True,
+            )
     return out
 
 
@@ -890,22 +907,41 @@ def _normalize_export_references(
 ) -> None:
     claim_map = _claim_ref_map(claims)
     component_map = _component_ref_map(components, component_graph)
+    known_claim_ids = {str(c.get("claim_id")) for c in claims if c.get("claim_id")}
+    known_component_ids = {
+        str(c.get("component_id")) for c in components if c.get("component_id")
+    }
 
     for eq in equations:
         if isinstance(eq, dict) and isinstance(eq.get("linked_claim_ids"), list):
-            eq["linked_claim_ids"] = _map_ref_list(eq["linked_claim_ids"], claim_map)
+            eq["linked_claim_ids"] = _map_ref_list(
+                eq["linked_claim_ids"],
+                claim_map,
+                known_ids=known_claim_ids,
+                drop_unresolved=True,
+            )
 
     for comp in components:
         if not isinstance(comp, dict):
             continue
         if isinstance(comp.get("evidence_claims"), list):
-            comp["evidence_claims"] = _map_ref_list(comp["evidence_claims"], claim_map)
+            comp["evidence_claims"] = _map_ref_list(
+                comp["evidence_claims"],
+                claim_map,
+                known_ids=known_claim_ids,
+                drop_unresolved=True,
+            )
         for key in ("inputs", "outputs", "preconditions", "cautions", "constraints", "invalid_conditions"):
             if key in comp:
-                comp[key] = _normalize_claim_refs_in_items(comp[key], claim_map)
+                comp[key] = _normalize_claim_refs_in_items(comp[key], claim_map, known_claim_ids)
         for dep in comp.get("dependencies") or []:
             if isinstance(dep, dict) and isinstance(dep.get("component_refs"), list):
-                dep["component_refs"] = _map_ref_list(dep["component_refs"], component_map)
+                dep["component_refs"] = _map_ref_list(
+                    dep["component_refs"],
+                    component_map,
+                    known_ids=known_component_ids,
+                    drop_unresolved=True,
+                )
 
     for edge in component_graph.get("edges", []) or []:
         if not isinstance(edge, dict):
@@ -914,7 +950,12 @@ def _normalize_export_references(
             if edge.get(key) is not None:
                 edge[key] = component_map.get(str(edge[key]), str(edge[key]))
         if isinstance(edge.get("evidence_claims"), list):
-            edge["evidence_claims"] = _map_ref_list(edge["evidence_claims"], claim_map)
+            edge["evidence_claims"] = _map_ref_list(
+                edge["evidence_claims"],
+                claim_map,
+                known_ids=known_claim_ids,
+                drop_unresolved=True,
+            )
 
     if not isinstance(course_info, dict):
         return
@@ -922,10 +963,20 @@ def _normalize_export_references(
         if not isinstance(topic, dict):
             continue
         if isinstance(topic.get("linked_component_ids"), list):
-            topic["linked_component_ids"] = _map_ref_list(topic["linked_component_ids"], component_map)
+            topic["linked_component_ids"] = _map_ref_list(
+                topic["linked_component_ids"],
+                component_map,
+                known_ids=known_component_ids,
+                drop_unresolved=True,
+            )
         for step in topic.get("visualization_plan") or []:
             if isinstance(step, dict) and isinstance(step.get("linked_component_ids"), list):
-                step["linked_component_ids"] = _map_ref_list(step["linked_component_ids"], component_map)
+                step["linked_component_ids"] = _map_ref_list(
+                    step["linked_component_ids"],
+                    component_map,
+                    known_ids=known_component_ids,
+                    drop_unresolved=True,
+                )
 
 
 def _normalize_derivation_references(
@@ -935,6 +986,7 @@ def _normalize_derivation_references(
     derivation_chains: list[dict],
 ) -> None:
     claim_map = _claim_ref_map(claims)
+    known_claim_ids = {str(c.get("claim_id")) for c in claims if c.get("claim_id")}
     equation_ids = {str(e.get("equation_id")) for e in equations if e.get("equation_id")}
     for chain in derivation_chains:
         if not isinstance(chain, dict):
@@ -944,10 +996,15 @@ def _normalize_derivation_references(
                 continue
             for key in ("claim_ids", "required_claim_ids", "input_claim_ids", "output_claim_ids"):
                 if isinstance(step.get(key), list):
-                    step[key] = _map_ref_list(step[key], claim_map)
+                    step[key] = _map_ref_list(
+                        step[key],
+                        claim_map,
+                        known_ids=known_claim_ids,
+                        drop_unresolved=True,
+                    )
             for key in ("input_equation_ids", "output_equation_ids"):
                 if isinstance(step.get(key), list):
-                    step[key] = [str(v) for v in step[key] if str(v) in equation_ids or str(v)]
+                    step[key] = [str(v) for v in step[key] if str(v) in equation_ids]
 
 
 def _chain_claim_ids(chain: dict) -> set[str]:

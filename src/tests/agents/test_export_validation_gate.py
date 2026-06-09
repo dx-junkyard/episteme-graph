@@ -1238,3 +1238,65 @@ def test_teaching_output_blueprint_dangling_ref_is_hard_error():
     result = _run_gate(component_result=_BundleComponentResult([comp], block))
     assert result.teaching_output_validation["blueprint_refs_valid"] is False
     assert any(e.code == "TEACHING_OUTPUT_BLUEPRINT_DANGLING_REF" for e in result.errors)
+
+
+# ---------------------------------------------------------------------------
+# Tests: provisional claim ref leakage in pipeline artifacts (issue #340)
+# ---------------------------------------------------------------------------
+
+def test_provisional_claim_ref_in_equation_is_warned():
+    """equation linked_claim_ids not in claims.json → warning, not a hard error."""
+    artifacts = _make_artifacts(
+        equation_semantics={
+            "equations": [
+                {"equation_id": "eq_tex_b62",
+                 "linked_claim_ids": ["claim_span_001_5_sub07"]},
+            ],
+            "validation_issues": [],
+        },
+    )
+    result = _run_gate(artifacts=artifacts, claim_objects=_ClaimObjectResult([]))
+    assert any(
+        w.code == "PROVISIONAL_CLAIM_REF_IN_ARTIFACT"
+        and w.artifact == "equation_semantics"
+        for w in result.warnings
+    )
+    # Reported, but never a hard block.
+    assert all(e.code != "PROVISIONAL_CLAIM_REF_IN_ARTIFACT" for e in result.errors)
+
+
+def test_provisional_claim_ref_in_derivation_is_warned():
+    artifacts = _make_artifacts(
+        derivation_chain={
+            "chains": [
+                {"derivation_id": "derivation_eq_2", "steps": [
+                    {"step_id": "step_001",
+                     "required_claim_ids": ["claim_span_001_5_sub07"],
+                     "output_claim_ids": ["claim_span_001_5_sub08"]},
+                ]},
+            ],
+            "validation_issues": [],
+        },
+    )
+    result = _run_gate(artifacts=artifacts, claim_objects=_ClaimObjectResult([]))
+    codes = {w.code for w in result.warnings if w.artifact == "derivation_chain"}
+    assert "PROVISIONAL_CLAIM_REF_IN_ARTIFACT" in codes
+
+
+def test_resolved_claim_refs_produce_no_leak_warning():
+    artifacts = _make_artifacts(
+        equation_semantics={
+            "equations": [
+                {"equation_id": "eq_1", "linked_claim_ids": ["claim_abc"]},
+            ],
+            "validation_issues": [],
+        },
+    )
+    result = _run_gate(
+        artifacts=artifacts,
+        claim_objects=_ClaimObjectResult([_ClaimObject("claim_abc")]),
+    )
+    assert all(
+        w.code not in ("PROVISIONAL_CLAIM_REF_IN_ARTIFACT", "UNRESOLVED_CLAIM_REF_IN_ARTIFACT")
+        for w in result.warnings
+    )

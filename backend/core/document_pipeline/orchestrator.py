@@ -597,6 +597,26 @@ def run_document_pipeline(
         if finish_target_stage("claim_object_builder", {"claims": len(getattr(claim_objects, "claims", []) or []), "total": 1, "processed": 1}):
             return result
 
+        # ── Stage 8c.1: claim ID canonicalization contract (issue #340) ────
+        # claim_object_builder is the source of truth for claim IDs. Re-map or
+        # drop any provisional claim refs still carried by equation_semantics so
+        # the downstream derivation_chain / component / graph / export artifacts
+        # only ever reference final claim IDs (or nothing). Dropped refs are kept
+        # as review warnings — we never silently retain an unresolved ref.
+        try:
+            eq_dropped = _canonicalize_equation_claim_links(equations, claim_objects)
+            if eq_dropped:
+                save_artifact("equation_semantics", equations)
+                logger.info(
+                    "Canonicalized equation claim links for document %s: dropped provisional refs on %d equation(s)",
+                    document_id, len(eq_dropped),
+                )
+        except Exception:
+            logger.warning(
+                "equation claim-link canonicalization failed (non-fatal): document=%s",
+                document_id, exc_info=True,
+            )
+
         # ── Stage 8d: derivation_chain (deterministic from equation links) ─
         derivation_artifact = artifact("derivation_chain")
         if should_use_artifact("derivation_chain"):
@@ -619,6 +639,23 @@ def run_document_pipeline(
                 )
                 derivations = _empty_derivation_chain_result(document_id, cartridge_id)
             save_artifact("derivation_chain", derivations)
+        # Defensive canonicalization (issue #340): even though equations were
+        # canonicalized before this stage, re-resolve every derivation step's
+        # claim refs against the final claim set so no provisional claim ID can
+        # reach component / graph / export from a resumed or stale artifact.
+        try:
+            deriv_dropped = _canonicalize_derivation_claim_refs(derivations, claim_objects)
+            if deriv_dropped:
+                save_artifact("derivation_chain", derivations)
+                logger.info(
+                    "Canonicalized derivation claim refs for document %s: dropped provisional refs on %d step(s)",
+                    document_id, len(deriv_dropped),
+                )
+        except Exception:
+            logger.warning(
+                "derivation claim-ref canonicalization failed (non-fatal): document=%s",
+                document_id, exc_info=True,
+            )
         report_done("derivation_chain", {
             "chains": len(getattr(derivations, "chains", []) or []),
             "total": 1,
@@ -1268,6 +1305,64 @@ def _build_derivation_chains(
         claim_build_result=claim_objects,
         evidence_registry=evidence,
     )
+
+
+def _canonicalize_equation_claim_links(equations: Any, claim_objects: Any) -> list[dict]:
+    """Strip provisional claim refs from equation_semantics (issue #340).
+
+    Resolves each equation's ``linked_claim_ids`` against the final claim set
+    produced by claim_object_builder, dropping any that don't resolve and
+    recording them as warning-level validation issues on the equations result.
+    Returns the dropped-ref report (empty when nothing changed).
+    """
+    from episteme_graph.agents.equation_semantics.schema import (
+        ValidationIssue as EqValidationIssue,
+    )
+    from episteme_graph.agents.id_canonicalization import (
+        canonicalize_equation_claim_links,
+    )
+
+    dropped = canonicalize_equation_claim_links(equations, claim_objects)
+    for entry in dropped:
+        equations.validation_issues.append(EqValidationIssue(
+            rule_id="unresolved_claim_ref_dropped",
+            severity="warning",
+            message=(
+                f"equation {entry['equation_id']!r} dropped provisional claim ref(s) "
+                f"not present in claims.json: {entry['dropped_claim_ids']}"
+            ),
+            field=entry["equation_id"],
+        ))
+    return dropped
+
+
+def _canonicalize_derivation_claim_refs(derivations: Any, claim_objects: Any) -> list[dict]:
+    """Strip provisional claim refs from derivation_chain steps (issue #340).
+
+    Resolves every step's claim reference fields against the final claim set,
+    dropping unresolved refs and recording them as warning-level validation
+    issues on the derivation result. Returns the dropped-ref report.
+    """
+    from episteme_graph.agents.derivation_chain.schema import (
+        ValidationIssue as DerivValidationIssue,
+    )
+    from episteme_graph.agents.id_canonicalization import (
+        canonicalize_derivation_claim_refs,
+    )
+
+    dropped = canonicalize_derivation_claim_refs(derivations, claim_objects)
+    for entry in dropped:
+        derivations.validation_issues.append(DerivValidationIssue(
+            rule_id="unresolved_claim_ref_dropped",
+            severity="warning",
+            message=(
+                f"derivation {entry['derivation_id']!r} step {entry['step_id']!r} "
+                f"dropped provisional claim ref(s) not present in claims.json: "
+                f"{entry['dropped_claim_ids']}"
+            ),
+            field=entry["derivation_id"],
+        ))
+    return dropped
 
 
 def _empty_derivation_chain_result(document_id: str, cartridge_id: str | None):

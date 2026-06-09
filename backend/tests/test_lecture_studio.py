@@ -226,6 +226,17 @@ class TestLectureStudioModeUI:
         assert "lsScopeHasDocumentContext" in js
         assert 'lsState.view === "graph"' in js
 
+    def test_theory_graph_top_tab_opens_graph_view(self):
+        """The document-structure theory graph entry should open the graph, not an empty claims view."""
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        html = (root / "frontend" / "public" / "admin.html").read_text(encoding="utf-8")
+        js = (root / "frontend" / "public" / "js" / "admin.js").read_text(encoding="utf-8")
+        assert '<button class="ls-work-tab" data-ls-view="graph" hidden>理論グラフ</button>' in html
+        assert 'if (lsState.leftTab === "document") return ["edit", "structure", "graph"];' in js
+        assert 'var topView = lsIsTheoryGraphView(view) ? "graph" : view;' in js
+
     def test_course_draft_check_question_detail_fields_exist(self):
         from pathlib import Path
 
