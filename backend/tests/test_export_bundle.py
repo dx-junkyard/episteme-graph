@@ -510,6 +510,66 @@ class TestExportReferenceIntegrity:
         assert "LEGACY_EXPORT_REF" in codes
         assert "UNRESOLVED_EXPORT_REF" in codes
 
+    def test_export_normalization_drops_claim_refs_when_claims_are_absent(self):
+        mod = _get_export_helpers()
+        claims = []
+        equations = [
+            {
+                "equation_id": "eq_tex_b62",
+                "linked_claim_ids": ["claim_span_001_5_sub07", "claim_span_001_5_sub08"],
+            }
+        ]
+        components = []
+        component_graph = {"nodes": [], "edges": []}
+        derivation_chains = [
+            {
+                "derivation_id": "derivation_001",
+                "steps": [
+                    {
+                        "step_id": "step_001",
+                        "input_equation_ids": ["eq_tex_b62"],
+                        "output_equation_ids": ["eq_tex_b62"],
+                        "claim_ids": ["claim_span_001_5_sub07", "claim_span_001_5_sub08"],
+                        "required_claim_ids": ["claim_span_001_5_sub07"],
+                        "input_claim_ids": [],
+                        "output_claim_ids": ["claim_span_001_5_sub08"],
+                    }
+                ],
+            }
+        ]
+
+        mod._normalize_export_references(
+            claims=claims,
+            equations=equations,
+            components=components,
+            component_graph=component_graph,
+            course_info={},
+        )
+        mod._normalize_derivation_references(
+            claims=claims,
+            equations=equations,
+            derivation_chains=derivation_chains,
+        )
+        validation = mod._validate_export_references(
+            claims=claims,
+            equations=equations,
+            components=components,
+            component_graph=component_graph,
+            course_info={},
+            evidence_snippets=[],
+            derivation_chains=derivation_chains,
+        )
+
+        assert equations[0]["linked_claim_ids"] == []
+        step = derivation_chains[0]["steps"][0]
+        assert step["claim_ids"] == []
+        assert step["required_claim_ids"] == []
+        assert step["input_claim_ids"] == []
+        assert step["output_claim_ids"] == []
+        codes = {e["code"] for e in validation["errors"]}
+        assert "LEGACY_EXPORT_REF" not in codes
+        assert "UNRESOLVED_EXPORT_REF" not in codes
+
     def test_derivation_validation_requires_chains_for_derivation_topics(self):
         mod = _get_export_helpers()
         validation = mod._validate_export_references(
