@@ -3658,6 +3658,31 @@ body {
   color: var(--color-text-primary);
   font-weight: 700;
 }
+.ls-graph-detail-memo {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  font-style: italic;
+  line-height: 1.5;
+}
+.ls-graph-detail-edge-reason {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--color-border-tertiary);
+  font-size: 10px;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+}
+.ls-graph-detail-system {
+  margin-top: 8px;
+}
+.ls-graph-detail-system summary {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+.ls-graph-detail-system details[open] summary {
+  margin-bottom: 6px;
+}
 
 /* Source-backing status & review reasons (issue #302) */
 .ls-graph-backing {

@@ -176,10 +176,8 @@ class ComponentGraphNormalizer:
                     "is_generic": is_generic,
                     "inputs": _ordered_unique(getattr(step, "input_equation_ids", []) or []),
                     "outputs": _ordered_unique(getattr(step, "output_equation_ids", []) or []),
-                    "input_claims": _ordered_unique(
-                        list(getattr(step, "input_claim_ids", []) or [])
-                        + list(getattr(step, "required_claim_ids", []) or [])
-                    ),
+                    "input_claims": _ordered_unique(getattr(step, "input_claim_ids", []) or []),
+                    "required_claims": _ordered_unique(getattr(step, "required_claim_ids", []) or []),
                     "output_claims": _ordered_unique(getattr(step, "output_claim_ids", []) or []),
                 })
         return records
@@ -370,12 +368,24 @@ def _main_node_from_group(group: dict, claim_index: dict[str, dict]) -> Componen
         is_generic=False,
     )
 
+    # Claim I/O: aggregate from group records (issue #337).
+    group_input_claim_ids = _ordered_unique(
+        cid for rec in records for cid in rec.get("input_claims", [])
+    )
+    group_required_claim_ids = _ordered_unique(
+        cid for rec in records for cid in rec.get("required_claims", [])
+    )
+    group_output_claim_ids = _ordered_unique(
+        cid for rec in records for cid in rec.get("output_claims", [])
+    )
+    # Collect step reasons as review notes (not for node label/description).
+    group_review_reasons = [
+        str(getattr(rec["step"], "reason", "") or "").strip()
+        for rec in records
+    ]
+    group_review_reason = "; ".join(filter(None, group_review_reasons))[:240]
+
     rep = group.get("rep") or _representative_record(records)
-    # Main labels are SHORT theory-stage labels (issue #308): ``Theory basis`` …
-    # ``Diagnostic / application``. They are never equation-id fallbacks, so
-    # ``eq_...`` can no longer leak into the main graph. The longer atomic-claim /
-    # reason phrase that used to be appended to the label now lives in
-    # ``description`` and is shown in the UI's detail pane instead.
     label = theory_stage_label(stage)
     theory_object = _theory_object(rep, atomic_claim_ids, claim_index, records)
     description = _build_main_description(records, atomic_claim_ids, claim_index)
@@ -423,6 +433,11 @@ def _main_node_from_group(group: dict, claim_index: dict[str, dict]) -> Componen
         support_kind=support["support_kind"],
         concepts=concept_meta["concepts"],
         prerequisite_concepts=concept_meta["prerequisite_concepts"],
+        visual_label=label,
+        input_claim_ids=group_input_claim_ids,
+        output_claim_ids=group_output_claim_ids,
+        required_claim_ids=group_required_claim_ids,
+        review_reason=group_review_reason,
     )
 
 
@@ -440,6 +455,7 @@ def _main_edges_from_groups(groups: list[dict]) -> list[ComponentGraphEdge]:
         inputs = {eq for rec in group["records"] for eq in rec["inputs"]}
         output_claims = {cid for rec in group["records"] for cid in rec.get("output_claims", [])}
         input_claims = {cid for rec in group["records"] for cid in rec.get("input_claims", [])}
+        input_claims.update(cid for rec in group["records"] for cid in rec.get("required_claims", []))
         step_ids = [rec["step_id"] for rec in group["records"]]
         claim_ids = _ordered_unique(
             [cid for rec in group["records"] for cid in _step_claim_ids(rec["step"])]
@@ -594,16 +610,25 @@ def _detail_node_from_record(
     # Generic / inferred steps are kept for traceability but never confirmed.
     layer = GRAPH_LAYER_DEBUG if rec["is_generic"] else GRAPH_LAYER_EQUATION_DETAIL
 
+    detail_label = _build_detail_label(rec["verb"], step, inputs, outputs)
+    step_reason = str(getattr(step, "reason", "") or "").strip()
+    step_input_claims = _ordered_unique(getattr(step, "input_claim_ids", []) or [])
+    step_required_claims = _ordered_unique(getattr(step, "required_claim_ids", []) or [])
+    step_output_claims = _ordered_unique(getattr(step, "output_claim_ids", []) or [])
+    visual = _build_detail_visual_label(rec["verb"], inputs, outputs,
+                                        step_input_claims, step_output_claims)
+
     return ComponentGraphNode(
         component_id=rec["detail_id"],
-        label=_build_detail_label(rec["verb"], step, inputs, outputs),
+        label=detail_label,
         component_type=EQUATION_OPERATION_NODE,
         review_status=review_status_for_backing(status),
         display_order=1000 + rec["order"],
         origin="derivation_chain",
         operation=rec["operation"],
-        theory_object=str(getattr(step, "reason", "") or "").strip()[:120] or rec["verb"],
-        display_label=_build_detail_label(rec["verb"], step, inputs, outputs),
+        theory_object=rec["verb"],
+        display_label=detail_label,
+        description="",
         linked_component_ids=list(rec.get("linked_component_ids", [])),
         supporting_derivation_ids=linked_derivation_ids,
         graph_layer=layer,
@@ -625,6 +650,11 @@ def _detail_node_from_record(
         source_backing_status=status,
         review_reasons=reasons,
         parent_component_id=parent_id,
+        visual_label=visual,
+        input_claim_ids=step_input_claims,
+        output_claim_ids=step_output_claims,
+        required_claim_ids=step_required_claims,
+        review_reason=step_reason[:240],
         **_support_metadata_for_components(list(rec.get("linked_component_ids", [])), [rec]),
         **_concepts_for_components(list(rec.get("linked_component_ids", [])), [rec]),
     )
@@ -639,6 +669,7 @@ def _detail_edges_from_records(
     for j, target in enumerate(records):
         target_inputs = set(target["inputs"])
         target_input_claims = set(target.get("input_claims", []))
+        target_input_claims.update(target.get("required_claims", []))
         if not target_inputs and not target_input_claims:
             continue
         for source in records[:j]:
@@ -824,13 +855,36 @@ def _claim_is_atomic(meta: dict) -> bool:
 # ---------------------------------------------------------------------- #
 
 def _build_detail_label(verb: str, step, inputs: list[str], outputs: list[str]) -> str:
-    """Equation-level label: equation IDs are acceptable here (traceability)."""
+    """Detail-level label: equation IDs are acceptable here (traceability).
+
+    Never uses step.reason as a label — reason is review/extraction metadata
+    and belongs in the node's ``description``, not in its graph label (#337).
+    """
     obj = (outputs[:1] or inputs[:1] or [""])[0]
     if obj:
         return f"{verb} {obj}".strip()
-    reason = str(getattr(step, "reason", "") or "").strip()
-    if reason and reason.lower() not in _GENERIC_LABELS:
-        return reason[:80]
+    return verb
+
+
+def _build_detail_visual_label(
+    verb: str,
+    inputs: list[str],
+    outputs: list[str],
+    input_claims: list[str],
+    output_claims: list[str],
+) -> str:
+    """Short graph-canvas label for detail nodes, showing I/O flow (#337).
+
+    Format: ``"verb\\ninput → output"`` (capped at 30 chars per line).
+    Falls back to verb only when no I/O identifiers are available.
+    """
+    src = (inputs[:1] or input_claims[:1] or [""])[0]
+    dst = (outputs[:1] or output_claims[:1] or [""])[0]
+    if src and dst:
+        flow = f"{src} → {dst}"
+        return f"{verb}\n{flow[:30]}"
+    if src or dst:
+        return f"{verb}\n{(src or dst)[:30]}"
     return verb
 
 
@@ -844,23 +898,16 @@ def _build_main_description(
     atomic_claim_ids: list[str],
     claim_index: dict[str, dict],
 ) -> str:
-    """Longer explanation for a main node, shown in the UI detail pane (issue #308).
+    """Reader-facing explanation for a main node (issue #308, #337).
 
-    The main node's *label* stays short (the theory-stage name). This description
-    carries the human-readable detail: the atomic-claim text if one backs the
-    node, otherwise the first meaningful step reason. Equation-id-only reasons are
-    skipped so the description never degenerates into an equation reference.
-    Returns ``""`` when no meaningful phrase is available.
+    Returns only genuinely reader-friendly content: the atomic-claim text that
+    backs the node. Step reasons (extraction/review metadata) are NOT included
+    here — they live in ``review_reason`` and are shown separately in the UI.
+    Returns ``""`` when no reader-friendly phrase is available.
     """
-    # 1. atomic claim text (preferred)
     claim_phrase = _atomic_claim_phrase(atomic_claim_ids, claim_index, limit=240)
     if claim_phrase:
         return claim_phrase
-    # 2. meaningful step reason (skip bare generic words / equation-id-only text)
-    for rec in records:
-        reason = str(getattr(rec["step"], "reason", "") or "").strip()
-        if reason and reason.lower() not in _GENERIC_LABELS and not _looks_like_equation_id(reason):
-            return reason[:240]
     return ""
 
 
@@ -911,9 +958,8 @@ def _theory_object(
     )
     if symbols:
         return ", ".join(symbols[:3])[:120]
-    reason = str(getattr(rep["step"], "reason", "") or "").strip()
-    if reason and not _looks_like_equation_id(reason):
-        return reason[:120]
+    # Never fall back to step.reason here (#337) — reason is extraction metadata,
+    # not a theory-object phrase. It lives in review_reason instead.
     operation = str(rep.get("operation") or rep.get("verb") or "")
     return operation.replace("_", " ")[:120]
 
