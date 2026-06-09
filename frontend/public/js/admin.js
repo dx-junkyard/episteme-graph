@@ -3055,7 +3055,7 @@
 
   function lsTopWorkViewsForCurrentMode() {
     if (lsState.leftTab === "course") return ["edit"];
-    if (lsState.leftTab === "document") return ["edit", "structure", "claims"];
+    if (lsState.leftTab === "document") return ["edit", "structure", "graph"];
     return [];
   }
 
@@ -3075,7 +3075,7 @@
       view = "edit";
       lsState.view = view;
     }
-    var topView = lsIsTheoryGraphView(view) ? "claims" : view;
+    var topView = lsIsTheoryGraphView(view) ? "graph" : view;
     var topTabs = document.getElementById("ls-work-tabs");
     var topViews = lsTopWorkViewsForCurrentMode();
     if (topTabs) {
