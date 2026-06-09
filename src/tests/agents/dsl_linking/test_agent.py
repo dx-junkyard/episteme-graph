@@ -179,5 +179,6 @@ def test_llm_failure_returns_fallback():
     agent = DSLLinkingAgent()
     with patch.object(agent._llm_client, "generate", side_effect=RuntimeError("LLM error")):
         result = agent.run(_qualified(), equations=_equations(), thesis=_thesis())
-    assert result.confidence == 0.0
-    assert result.validation_issues[0].rule_id == "dsl_linking_failed"
+    assert result.confidence == 0.45
+    assert result.nodes
+    assert result.validation_issues[0].rule_id == "dsl_linking_deterministic_fallback"

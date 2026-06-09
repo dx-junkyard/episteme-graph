@@ -103,3 +103,71 @@ def test_cartridge_claim_type_is_allowed():
     q = {**_record().qualification, "claim_type_candidate": "domain_relation"}
     issues = VALIDATOR.validate(_result(_record(qualification=q)), cartridge)
     assert not any(i.rule_id == "invalid_claim_type_candidate" for i in issues)
+
+
+# ---------------------------------------------------------------------------
+# issue #317: atomic rewrite validation
+# ---------------------------------------------------------------------------
+
+def _atomic(**kwargs):
+    base = {
+        "text": "The nuisance parameters can be eliminated algebraically.",
+        "normalized_text": "The nuisance parameters can be eliminated algebraically.",
+        "claim_type_candidate": "result",
+        "atomicity": "atomic",
+        "status": "accepted",
+        "source_span_id": "s1",
+        "evidence_quote": "eliminating nuisance parameters",
+        "qualification_reason": "single proposition",
+        "confidence": 0.9,
+    }
+    base.update(kwargs)
+    return base
+
+
+def test_valid_atomic_claims_have_no_errors():
+    r = _record(atomic_claims=[_atomic(), _atomic(text="The elimination yields consistency relations.")])
+    issues = VALIDATOR.validate(_result(r))
+    assert not [i for i in issues if i.severity == "error"]
+
+
+def test_atomic_claim_starting_with_connector_is_error():
+    r = _record(atomic_claims=[_atomic(text="And yields consistency relations.")])
+    issues = VALIDATOR.validate(_result(r))
+    assert any(i.rule_id == "atomic_claim_starts_with_connector" for i in issues)
+
+
+def test_atomic_claim_empty_text_is_error():
+    r = _record(atomic_claims=[_atomic(text="   ")])
+    issues = VALIDATOR.validate(_result(r))
+    assert any(i.rule_id == "atomic_claim_empty_text" for i in issues)
+
+
+def test_invalid_atomic_claim_atomicity_is_error():
+    r = _record(atomic_claims=[_atomic(atomicity="maybe")])
+    issues = VALIDATOR.validate(_result(r))
+    assert any(i.rule_id == "invalid_atomic_claim_atomicity" for i in issues)
+
+
+def test_atomic_claim_missing_source_is_warning():
+    r = _record(atomic_claims=[_atomic(source_span_id="", evidence_quote="")])
+    issues = VALIDATOR.validate(_result(r))
+    assert any(i.rule_id == "atomic_claim_missing_source" for i in issues)
+
+
+def test_too_broad_without_atomic_claims_is_warning():
+    q = {**_record().qualification, "granularity": "too_broad"}
+    r = _record(qualification=q, edit_suggestions={"should_split": True})
+    issues = VALIDATOR.validate(_result(r))
+    assert any(i.rule_id == "split_required_without_atomic_claims" for i in issues)
+
+
+def test_non_atomic_review_claim_skips_connector_check():
+    # A non_atomic/review_required candidate is allowed to remain a fragment.
+    r = _record(atomic_claims=[_atomic(
+        text="And could not be atomized.",
+        atomicity="non_atomic",
+        status="review_required",
+    )])
+    issues = VALIDATOR.validate(_result(r))
+    assert not any(i.rule_id == "atomic_claim_starts_with_connector" for i in issues)

@@ -93,6 +93,7 @@ class ComponentAssemblyLLMInput:
     available_dsl_nodes: list[dict] = field(default_factory=list)
     available_dsl_edges: list[dict] = field(default_factory=list)
     available_derivation_ids: list[str] = field(default_factory=list)
+    claim_centered_plan: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -151,11 +152,45 @@ class ComponentRecord:
     eliminated_symbols: list[str] = field(default_factory=list)
     retained_symbols: list[str] = field(default_factory=list)
     equation_confidence_summary: dict = field(default_factory=dict)
+    confidence_gate: dict = field(default_factory=dict)
     review_status: str = "teacher_review_required"
     teaching_takeaway: str = ""
     source_scope: dict = field(default_factory=dict)
     assumptions: list[str] = field(default_factory=list)
     approximations: list[str] = field(default_factory=list)
+    constraints: list[str] = field(default_factory=list)
+    invalid_conditions: list[str] = field(default_factory=list)
+    # Reusable theory responsibility type used by analyzer/refiner stages.
+    # Kept separate from cartridge-backed component_type for backward
+    # compatibility with persistence, graph, and course-mapping code.
+    responsibility_type: str = ""
+    primary_operation: str = ""
+    secondary_operations: list[str] = field(default_factory=list)
+    split_recommendation: dict = field(default_factory=dict)
+    component_quality: dict = field(default_factory=dict)
+    support_role: str = ""
+    supports_claim_ids: list[str] = field(default_factory=list)
+    support_distance_to_headline_claim: int = 0
+    support_kind: str = ""
+    # Concept tags required for component graph / course mapping (issue #8).
+    # Derived deterministically from linked atomic-claim concepts, equation
+    # symbols, and cartridge normalized terms.
+    concepts: list[str] = field(default_factory=list)
+    prerequisite_concepts: list[str] = field(default_factory=list)
+    introduced_concepts: list[str] = field(default_factory=list)
+    reused_concepts: list[str] = field(default_factory=list)
+    # Single main theoretical operation for this component (issue #300).
+    # One of the theory-operation families
+    # (define, linearize, eliminate, substitute, solve, derive, constrain, ...).
+    operation: str = ""
+    # Teaching granularity metadata recomputed by ComponentRefiner Step 3 (#324):
+    # {estimated_slide_count, teachable_as_single_unit, split_if_too_dense,
+    #  teaching_takeaway_quality}.
+    teaching_granularity: dict = field(default_factory=dict)
+    maturity_source: str = "llm_proposed"
+    publish_ready: bool = False
+    fallback_reason: str = ""
+    original_failure_codes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -176,9 +211,30 @@ class ComponentAssemblyResult:
     review_notes: list[str]
     confidence: float
     validation_issues: list[ValidationIssue] = field(default_factory=list)
+    # ComponentRefiner output: record of summary→theory-operation splits (issue #300).
+    refinement_report: dict = field(default_factory=dict)
+    # ComponentRefiner Step 3 formal output contract (issue #324):
+    # {refined_components, component_refinement_records, component_id_mapping,
+    #  component_graph_updates, refinement_validation}.
+    component_refinement: dict = field(default_factory=dict)
+    # DerivationGraphAligner Step 4 output contract (issue #325):
+    # {theory_component_graph, equation_operation_graph, component_operation_links,
+    #  aligned_derivation_chains, support_map, graph_alignment_validation,
+    #  export_validation}.
+    derivation_graph_alignment: dict = field(default_factory=dict)
+    # TheoryBundleBuilder + TeachingOutputMapper Step 5 output contract (issue #326):
+    # {theory_bundle, course_mapping, blueprint_updates, theory_bundle_validation,
+    #  teaching_output_validation}.
+    theory_bundle: dict = field(default_factory=dict)
+    diagnostics: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        for component in data.get("components", []) or []:
+            responsibility = component.get("responsibility_type") or ""
+            if responsibility:
+                component.setdefault("type", responsibility)
+        return data
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
@@ -217,11 +273,33 @@ class ComponentAssemblyResult:
                 eliminated_symbols=list(c.get("eliminated_symbols") or []),
                 retained_symbols=list(c.get("retained_symbols") or []),
                 equation_confidence_summary=c.get("equation_confidence_summary") or {},
+                confidence_gate=c.get("confidence_gate") or {},
                 review_status=c.get("review_status", "teacher_review_required"),
                 teaching_takeaway=c.get("teaching_takeaway", ""),
                 source_scope=c.get("source_scope") or {},
                 assumptions=list(c.get("assumptions") or []),
                 approximations=list(c.get("approximations") or []),
+                constraints=list(c.get("constraints") or []),
+                invalid_conditions=list(c.get("invalid_conditions") or []),
+                responsibility_type=c.get("responsibility_type", c.get("type", "")),
+                primary_operation=c.get("primary_operation", c.get("operation", "")),
+                secondary_operations=list(c.get("secondary_operations") or []),
+                split_recommendation=c.get("split_recommendation") or {},
+                component_quality=c.get("component_quality") or {},
+                support_role=c.get("support_role", ""),
+                supports_claim_ids=list(c.get("supports_claim_ids") or []),
+                support_distance_to_headline_claim=int(c.get("support_distance_to_headline_claim", 0) or 0),
+                support_kind=c.get("support_kind", ""),
+                concepts=list(c.get("concepts") or []),
+                prerequisite_concepts=list(c.get("prerequisite_concepts") or []),
+                introduced_concepts=list(c.get("introduced_concepts") or []),
+                reused_concepts=list(c.get("reused_concepts") or []),
+                operation=c.get("operation", ""),
+                teaching_granularity=c.get("teaching_granularity") or {},
+                maturity_source=c.get("maturity_source", "llm_proposed"),
+                publish_ready=bool(c.get("publish_ready", False)),
+                fallback_reason=c.get("fallback_reason", ""),
+                original_failure_codes=list(c.get("original_failure_codes") or []),
             ))
         issues = [ValidationIssue(**i) for i in d.get("validation_issues", [])]
         return cls(
@@ -233,6 +311,11 @@ class ComponentAssemblyResult:
             review_notes=d.get("review_notes", []),
             confidence=float(d.get("confidence", 0.0)),
             validation_issues=issues,
+            refinement_report=d.get("refinement_report") or {},
+            component_refinement=d.get("component_refinement") or {},
+            derivation_graph_alignment=d.get("derivation_graph_alignment") or {},
+            theory_bundle=d.get("theory_bundle") or {},
+            diagnostics=d.get("diagnostics") or {},
         )
 
     @classmethod

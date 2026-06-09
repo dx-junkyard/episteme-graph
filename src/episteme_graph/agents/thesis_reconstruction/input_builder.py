@@ -4,6 +4,10 @@ from __future__ import annotations
 from episteme_graph.agents.claim_qualification.schema import ClaimQualificationResult
 from episteme_graph.agents.equation_semantics.schema import EquationSemanticsResult
 from episteme_graph.agents.paper_skeleton.schema import PaperSkeletonResult
+from episteme_graph.agents.id_canonicalization import (
+    canonical_claim_id_for_span,
+    legacy_claim_id_for_span,
+)
 
 from .schema import CartridgeContext, ThesisLLMInput
 
@@ -20,10 +24,13 @@ class ThesisReconstructionInputBuilder:
         equations: EquationSemanticsResult | None = None,
         cartridge: CartridgeContext | None = None,
         config: dict | None = None,
+        claim_objects=None,
     ) -> ThesisLLMInput:
         cfg = config or {}
         accepted_claims = self._accepted_claims(
-            qualified_claims, int(cfg.get("max_claims", _MAX_CLAIMS))
+            qualified_claims,
+            int(cfg.get("max_claims", _MAX_CLAIMS)),
+            claim_objects=claim_objects,
         )
         major_equations = self._major_equations(
             equations, int(cfg.get("max_equations", _MAX_EQUATIONS))
@@ -70,11 +77,16 @@ class ThesisReconstructionInputBuilder:
         return result
 
     @staticmethod
-    def _accepted_claims(result: ClaimQualificationResult, limit: int) -> list[dict]:
+    def _accepted_claims(
+        result: ClaimQualificationResult,
+        limit: int,
+        claim_objects=None,
+    ) -> list[dict]:
         claims = []
         for record in result.qualified_spans[:limit]:
             claims.append({
-                "claim_id": f"claim:{record.block_id}:{record.span_id}",
+                "claim_id": canonical_claim_id_for_span(record, claim_objects),
+                "legacy_claim_id": legacy_claim_id_for_span(record),
                 "span_id": record.span_id,
                 "block_id": record.block_id,
                 "section_id": record.section_id,

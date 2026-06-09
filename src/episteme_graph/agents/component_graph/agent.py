@@ -25,12 +25,50 @@ from .cartridge_loader import CartridgeLoader
 from .input_builder import ComponentGraphInputBuilder
 from .llm_client import ComponentGraphLLMClient
 from .merger import ComponentGraphMerger
+from .normalizer import ComponentGraphNormalizer
 from .prompt import ComponentGraphPromptFactory
 from .repair import ComponentGraphRepairer, _parse_raw
 from .schema import CartridgeContext, ComponentGraphResult
 from .validator import ComponentGraphValidator
 
 logger = logging.getLogger(__name__)
+
+
+def _first_text(*values) -> str:
+    """Return the first value that is a non-empty string (ignore lists/dicts)."""
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def _build_claim_index(claims: list[dict] | None) -> dict[str, dict]:
+    """Build ``claim_id -> metadata`` for atomic-claim preference (issue #306).
+
+    The normalizer uses ``text`` / ``evidence_text`` / ``is_atomic`` / level to
+    decide whether a claim is strong (atomic) backing for a theory operation.
+    """
+    index: dict[str, dict] = {}
+    for claim in claims or []:
+        if not isinstance(claim, dict):
+            continue
+        cid = str(claim.get("claim_id") or claim.get("id") or "").strip()
+        if not cid:
+            continue
+        index[cid] = {
+            "text": str(claim.get("text") or claim.get("claim_text") or ""),
+            "predicate": str(claim.get("predicate") or ""),
+            "evidence_text": _first_text(
+                claim.get("evidence_text"),
+                claim.get("source_span"),
+                claim.get("source_text"),
+            ),
+            "claim_level": str(
+                claim.get("claim_level") or claim.get("level") or claim.get("granularity") or ""
+            ),
+            "is_atomic": claim.get("is_atomic"),
+        }
+    return index
 
 
 class ComponentGraphAgent:
@@ -48,6 +86,7 @@ class ComponentGraphAgent:
         self._validator = ComponentGraphValidator()
         self._repairer = ComponentGraphRepairer()
         self._merger = ComponentGraphMerger()
+        self._normalizer = ComponentGraphNormalizer()
 
     def run(
         self,
@@ -124,6 +163,10 @@ class ComponentGraphAgent:
         if existing_graph:
             result = self._merger.merge(existing_graph, result)
 
+        result = self._normalizer.normalize(
+            result, components, derivations, claim_index=_build_claim_index(claims)
+        )
+        result.validation_issues = self._validator.validate(result, cartridge)
         return result
 
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:

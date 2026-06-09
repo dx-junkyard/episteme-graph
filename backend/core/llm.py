@@ -560,6 +560,7 @@ def generate_text(
     temperature: float | None = None,
     max_tokens: int | None = None,
     reasoning_effort: str | None = None,
+    timeout: float | None = None,
 ) -> str:
     """チャット補完でテキストを生成する。
 
@@ -625,6 +626,7 @@ def generate_text(
     response = client.chat.completions.create(
         model=model_name,
         messages=adapted_messages,
+        timeout=timeout,
         **api_kwargs,
     )
     return response.choices[0].message.content or ""

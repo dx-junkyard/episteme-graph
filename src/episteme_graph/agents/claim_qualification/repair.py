@@ -78,6 +78,8 @@ def _parse_record(raw: dict, llm_input: QualificationLLMInput) -> QualifiedSpanR
     except (TypeError, ValueError):
         confidence = 0.5
 
+    atomic_claims = _normalize_atomic_claims(raw, edit_suggestions, llm_input)
+
     return QualifiedSpanRecord(
         span_id=raw.get("span_id", llm_input.span_id),
         block_id=raw.get("block_id", llm_input.block_id),
@@ -88,7 +90,67 @@ def _parse_record(raw: dict, llm_input: QualificationLLMInput) -> QualifiedSpanR
         edit_suggestions=edit_suggestions,
         reason=str(raw.get("reason", "")),
         confidence=max(0.0, min(1.0, confidence)),
+        atomic_claims=atomic_claims,
     )
+
+
+def _normalize_atomic_claims(
+    raw: dict,
+    edit_suggestions: dict,
+    llm_input: QualificationLLMInput,
+) -> list[dict]:
+    """Normalize LLM atomic-rewrite output (issue #317).
+
+    Reads the rich ``atomic_claims`` field; for backward compatibility, falls back
+    to legacy ``edit_suggestions.split_claims`` ({text, claim_type}) entries.
+    Every entry is coerced to the full atomic-claim shape so the downstream
+    ClaimObjectBuilder can treat them as confirmed LLM-rewritten candidates.
+    """
+    entries = raw.get("atomic_claims")
+    legacy = False
+    if not isinstance(entries, list) or not entries:
+        # Backward compat: older prompt emitted edit_suggestions.split_claims.
+        entries = (raw.get("edit_suggestions") or {}).get("split_claims")
+        legacy = True
+    if not isinstance(entries, list):
+        return []
+
+    normalized: list[dict] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        text = str(entry.get("text", "")).strip()
+        if not text:
+            continue
+        atomicity = str(entry.get("atomicity", "atomic")).strip().lower()
+        if atomicity not in ("atomic", "non_atomic"):
+            atomicity = "atomic"
+        status = str(entry.get("status", "")).strip().lower()
+        if status not in ("accepted", "review_required"):
+            status = "review_required" if atomicity == "non_atomic" else "accepted"
+        try:
+            conf = float(entry.get("confidence", llm_input and 0.0))
+        except (TypeError, ValueError):
+            conf = 0.0
+        normalized.append({
+            "text": text,
+            "normalized_text": str(entry.get("normalized_text", "") or text).strip(),
+            "claim_type_candidate": str(
+                entry.get("claim_type_candidate")
+                or entry.get("claim_type")
+                or ""
+            ).strip(),
+            "atomicity": atomicity,
+            "status": status,
+            "source_span_id": str(entry.get("source_span_id") or llm_input.span_id),
+            "evidence_quote": str(entry.get("evidence_quote", "") or ""),
+            "qualification_reason": str(
+                entry.get("qualification_reason", "")
+                or ("legacy split_claims candidate" if legacy else "")
+            ),
+            "confidence": max(0.0, min(1.0, conf)),
+        })
+    return normalized
 
 
 def _fallback_record(llm_input: QualificationLLMInput, reason: str) -> QualifiedSpanRecord:

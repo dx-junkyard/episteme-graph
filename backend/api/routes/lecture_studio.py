@@ -1818,8 +1818,11 @@ def _material_pipeline_status(material_id: str, document_id: str) -> dict:
         status = "running"
         current_stage = result_data.get("stage") or current_stage
         target_stage = result_data.get("target_stage") or ""
+        start_stage = result_data.get("start_stage") or ""
         if target_stage:
             stages[target_stage] = "running"
+        elif start_stage:
+            stages[start_stage] = "running"
         elif current_stage in stages:
             stages[current_stage] = "running"
 
@@ -1835,6 +1838,7 @@ def _material_pipeline_status(material_id: str, document_id: str) -> dict:
         "stages": stages,
         "active_task_id": active["task_id"] if active else "",
         "active_target_stage": ((active.get("result_data") or {}).get("target_stage") if active else "") or "",
+        "active_start_stage": ((active.get("result_data") or {}).get("start_stage") if active else "") or "",
     }
 
 
@@ -1844,13 +1848,15 @@ def _material_document_pipeline_worker(
     user_id: str,
     document: dict,
     target_stage: str | None,
+    start_stage: str | None = None,
 ) -> None:
     from core.document_pipeline import PipelineStageError, run_document_pipeline
 
     material_id = document["material_id"]
     document_id = document["document_id"]
-    label = DOCUMENT_PIPELINE_STAGE_LABELS.get(target_stage or "", "Agent Pipeline")
-    current_stage = target_stage or "document_pipeline"
+    label_stage = start_stage or target_stage or ""
+    label = DOCUMENT_PIPELINE_STAGE_LABELS.get(label_stage, "Agent Pipeline")
+    current_stage = start_stage or target_stage or "document_pipeline"
 
     def publish(status: str = "processing", progress: int = 0, error_message: str | None = None) -> None:
         update_background_task(
@@ -1861,6 +1867,7 @@ def _material_document_pipeline_worker(
                 "material_id": material_id,
                 "stage": current_stage,
                 "target_stage": target_stage or "",
+                "start_stage": start_stage or "",
                 "label": label,
                 "generated": 1 if status == "completed" else 0,
                 "failed": 1 if status == "failed" else 0,
@@ -1892,7 +1899,8 @@ def _material_document_pipeline_worker(
             course_id=None,
             progress_callback=on_stage,
             target_stage=target_stage,
-            resume=target_stage is not None,
+            start_stage=start_stage,
+            resume=target_stage is not None or start_stage is not None,
         )
         if target_stage is None:
             _set_document_pipeline_status(document_id, "completed")
@@ -1914,16 +1922,18 @@ def _course_document_pipeline_worker(
     user_id: str,
     documents: list[dict],
     target_stage: str | None,
+    start_stage: str | None = None,
 ) -> None:
     from core.course_content_builder import build_course_content
     from core.document_pipeline import PipelineStageError, run_document_pipeline
 
     total = len(documents)
-    label = DOCUMENT_PIPELINE_STAGE_LABELS.get(target_stage or "", "Agent Pipeline")
+    label_stage = start_stage or target_stage or ""
+    label = DOCUMENT_PIPELINE_STAGE_LABELS.get(label_stage, "Agent Pipeline")
     generated = 0
     failed = 0
     current_document = ""
-    current_stage = target_stage or "started"
+    current_stage = start_stage or target_stage or "started"
 
     def publish(status: str = "processing", error_message: str | None = None) -> None:
         progress = int((generated + failed) / total * 100) if total else 100
@@ -1934,6 +1944,7 @@ def _course_document_pipeline_worker(
                 "course_id": course_id,
                 "stage": current_stage,
                 "target_stage": target_stage or "",
+                "start_stage": start_stage or "",
                 "label": label,
                 "current_document_id": current_document,
                 "generated": generated,
@@ -1950,7 +1961,7 @@ def _course_document_pipeline_worker(
     try:
         for index, doc in enumerate(documents, start=1):
             current_document = doc["document_id"]
-            current_stage = target_stage or "document_pipeline"
+            current_stage = start_stage or target_stage or "document_pipeline"
             publish("processing")
             source_bytes, source_kind = _load_pipeline_source(doc["material_id"], doc["filename"])
             if target_stage is None:
@@ -1968,6 +1979,7 @@ def _course_document_pipeline_worker(
                         "course_id": course_id,
                         "stage": stage,
                         "target_stage": target_stage or "",
+                        "start_stage": start_stage or "",
                         "label": label,
                         "current_document_id": current_document,
                         "generated": generated,
@@ -1988,7 +2000,8 @@ def _course_document_pipeline_worker(
                 course_id=course_id,
                 progress_callback=on_stage,
                 target_stage=target_stage,
-                resume=target_stage is not None,
+                start_stage=start_stage,
+                resume=target_stage is not None or start_stage is not None,
             )
             if target_stage is None:
                 _set_document_pipeline_status(doc["document_id"], "completed")
@@ -2033,8 +2046,11 @@ def run_course_document_pipeline(
         raise HTTPException(status_code=404, detail="Course not found")
 
     target_stage = str((body or {}).get("target_stage") or "").strip() or None
+    start_stage = str((body or {}).get("start_stage") or "").strip() or None
     if target_stage and target_stage not in DOCUMENT_PIPELINE_STAGE_LABELS:
         raise HTTPException(status_code=400, detail="Unknown pipeline stage")
+    if start_stage and start_stage not in DOCUMENT_PIPELINE_STAGE_LABELS:
+        raise HTTPException(status_code=400, detail="Unknown pipeline start stage")
 
     documents = _course_pipeline_documents(course_data)
     if not documents:
@@ -2048,9 +2064,10 @@ def run_course_document_pipeline(
     create_background_task(task_id, "document_pipeline", current_user["id"])
     update_background_task(task_id, "pending", result_data={
         "course_id": course_id,
-        "stage": target_stage or "queued",
+        "stage": start_stage or target_stage or "queued",
         "target_stage": target_stage or "",
-        "label": DOCUMENT_PIPELINE_STAGE_LABELS.get(target_stage or "", "Agent Pipeline"),
+        "start_stage": start_stage or "",
+        "label": DOCUMENT_PIPELINE_STAGE_LABELS.get(start_stage or target_stage or "", "Agent Pipeline"),
         "generated": 0,
         "failed": 0,
         "skipped": 0,
@@ -2067,20 +2084,22 @@ def run_course_document_pipeline(
             "user_id": current_user["id"],
             "documents": documents,
             "target_stage": target_stage,
+            "start_stage": start_stage,
         },
         daemon=True,
     )
     thread.start()
 
     logger.info(
-        "course document pipeline accepted: task=%s course=%s docs=%d target_stage=%s by user=%s",
-        task_id, course_id, len(documents), target_stage or "full", current_user["id"],
+        "course document pipeline accepted: task=%s course=%s docs=%d stage=%s by user=%s",
+        task_id, course_id, len(documents), start_stage or target_stage or "full", current_user["id"],
     )
     return {
         "task_id": task_id,
         "course_id": course_id,
         "total_documents": len(documents),
         "target_stage": target_stage or "",
+        "start_stage": start_stage or "",
         "status": "pending",
     }
 
@@ -2103,8 +2122,11 @@ def run_material_document_pipeline(
 ) -> dict:
     """教材単位の document-first Agent Pipeline を起動する。"""
     target_stage = str((body or {}).get("target_stage") or "").strip() or None
+    start_stage = str((body or {}).get("start_stage") or "").strip() or None
     if target_stage and target_stage not in DOCUMENT_PIPELINE_STAGE_LABELS:
         raise HTTPException(status_code=400, detail="Unknown pipeline stage")
+    if start_stage and start_stage not in DOCUMENT_PIPELINE_STAGE_LABELS:
+        raise HTTPException(status_code=400, detail="Unknown pipeline start stage")
 
     document = _get_editable_material_document(material_id, current_user)
     active = _get_active_task_for_material(document["material_id"])
@@ -2116,9 +2138,10 @@ def run_material_document_pipeline(
     update_background_task(task_id, "pending", result_data={
         "document_id": document["document_id"],
         "material_id": document["material_id"],
-        "stage": target_stage or "queued",
+        "stage": start_stage or target_stage or "queued",
         "target_stage": target_stage or "",
-        "label": DOCUMENT_PIPELINE_STAGE_LABELS.get(target_stage or "", "Agent Pipeline"),
+        "start_stage": start_stage or "",
+        "label": DOCUMENT_PIPELINE_STAGE_LABELS.get(start_stage or target_stage or "", "Agent Pipeline"),
         "generated": 0,
         "failed": 0,
         "skipped": 0,
@@ -2134,6 +2157,7 @@ def run_material_document_pipeline(
             "user_id": current_user["id"],
             "document": document,
             "target_stage": target_stage,
+            "start_stage": start_stage,
         },
         daemon=True,
     )
@@ -2144,6 +2168,7 @@ def run_material_document_pipeline(
         "material_id": document["material_id"],
         "document_id": document["document_id"],
         "target_stage": target_stage or "",
+        "start_stage": start_stage or "",
         "status": "pending",
     }
 

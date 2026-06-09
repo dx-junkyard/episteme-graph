@@ -57,9 +57,20 @@ class _ComponentRecord:
         review_status: str = "teacher_review_required",
         component_type: str = "ClaimBundleComponent",
         internal_flow=None,
+        label: str = "",
+        summary: str = "",
+        responsibility_type: str = "",
+        primary_operation: str = "",
+        teaching_takeaway: str = "",
+        source_scope=None,
+        assumptions=None,
+        split_recommendation=None,
+        component_quality=None,
     ):
         self.component_id = component_id
         self.component_type = component_type
+        self.label = label
+        self.summary = summary
         self.evidence_refs = evidence_refs or {}
         self.linked_claim_ids = linked_claim_ids or []
         self.linked_equation_ids = linked_equation_ids or []
@@ -68,6 +79,18 @@ class _ComponentRecord:
         self.review_required_equation_ids = review_required_equation_ids or []
         self.review_status = review_status
         self.internal_flow = internal_flow or []
+        self.responsibility_type = responsibility_type
+        self.primary_operation = primary_operation
+        self.operation = primary_operation
+        self.teaching_takeaway = teaching_takeaway
+        self.source_scope = source_scope or {}
+        self.assumptions = assumptions or []
+        self.split_recommendation = split_recommendation or {}
+        self.component_quality = component_quality or {}
+        self.inputs = []
+        self.outputs = []
+        self.preconditions = []
+        self.cautions = []
 
 
 class _ComponentResult:
@@ -81,10 +104,14 @@ class _ClaimObject:
         claim_id: str,
         support_status: str = "source_backed",
         source_evidence_ids: list | None = None,
+        atomicity: str = "atomic",
+        claim_type: str = "definition",
     ):
         self.claim_id = claim_id
         self.support_status = support_status
         self.source_evidence_ids = source_evidence_ids or []
+        self.atomicity = atomicity
+        self.claim_type = claim_type
 
 
 class _ClaimObjectResult:
@@ -296,11 +323,84 @@ def test_summary_only_component_cross_validation():
     assert "SUMMARY_ONLY_COMPONENT" in codes
 
 
+class _ComponentResultWithAlignment:
+    def __init__(self, components, derivation_graph_alignment):
+        self.components = components
+        self.derivation_graph_alignment = derivation_graph_alignment
+
+
+def test_derivation_graph_alignment_aggregated_into_export(monkeypatch=None):
+    """issue #325: Step 4 alignment results are aggregated into export buckets."""
+    alignment = {
+        "export_validation": {
+            "errors": [
+                {"code": "dangling_equation_ref", "message": "op references missing eq"}
+            ],
+            "warnings": [
+                {"code": "generic_edge", "message": "RELATED_TO edge"}
+            ],
+            "review_items": [
+                {"code": "review_required_derivation_path", "message": "low confidence eq"}
+            ],
+            "component_graph_clean": True,
+            "operation_graph_clean": False,
+            "support_map_renderable": True,
+        }
+    }
+    comp = _ComponentRecord("comp_001")
+    result = _run_gate(
+        component_result=_ComponentResultWithAlignment([comp], alignment)
+    )
+    error_codes = [e.code for e in result.errors]
+    warning_codes = [w.code for w in result.warnings]
+    review_codes = [r.code for r in result.review_items]
+    assert "DERIVATION_GRAPH_ALIGNMENT_DANGLING_EQUATION_REF" in error_codes
+    assert "DERIVATION_GRAPH_ALIGNMENT_GENERIC_EDGE" in warning_codes
+    assert "DERIVATION_GRAPH_ALIGNMENT_REVIEW_REQUIRED_DERIVATION_PATH" in review_codes
+    assert result.derivation_graph_alignment["operation_graph_clean"] is False
+    assert result.status == "failed_validation"
+
+
+def test_derivation_graph_alignment_absent_is_clean_default():
+    comp = _ComponentRecord("comp_001")
+    result = _run_gate(component_result=_ComponentResult([comp]))
+    assert result.derivation_graph_alignment == {
+        "errors": [],
+        "warnings": [],
+        "review_items": [],
+        "component_graph_clean": True,
+        "operation_graph_clean": True,
+        "support_map_renderable": True,
+    }
+
+
 def test_relation_component_without_internal_flow_blocks_export():
     comp = _ComponentRecord("comp_001", component_type="RelationComponent", internal_flow=[])
     result = _run_gate(component_result=_ComponentResult([comp]))
     codes = [e.code for e in result.errors]
     assert "COMPONENT_MISSING_INTERNAL_FLOW" in codes
+
+
+def test_summary_only_component_in_derivation_path_blocks_export():
+    """issue #300 criterion #10: summary-only derivation-path component → hard error."""
+    comp = _ComponentRecord("comp_sum", component_type="RelationComponent", internal_flow=[])
+    result = _run_gate(component_result=_ComponentResult([comp]))
+    codes = [e.code for e in result.errors]
+    assert "SUMMARY_ONLY_COMPONENT_IN_DERIVATION_PATH" in codes
+    assert result.status == "failed_validation"
+
+
+def test_derivation_component_with_equations_not_summary_only():
+    """A derivation-path component carrying equations is not summary-only."""
+    comp = _ComponentRecord(
+        "comp_ok",
+        component_type="RelationComponent",
+        linked_equation_ids=["eq_1"],
+        internal_flow=[{"from": "eq_1", "relation": "derive", "to": "eq_2"}],
+    )
+    result = _run_gate(component_result=_ComponentResult([comp]))
+    codes = [e.code for e in result.errors]
+    assert "SUMMARY_ONLY_COMPONENT_IN_DERIVATION_PATH" not in codes
 
 
 def test_component_claim_support_rejects_non_supporting_equation():
@@ -322,11 +422,45 @@ def test_component_claim_support_rejects_non_supporting_equation():
     result = _run_gate(
         artifacts=artifacts,
         component_result=_ComponentResult([comp]),
-        claim_objects=_ClaimObjectResult([_ClaimObject("claim_abc")]),
+        claim_objects=_ClaimObjectResult([_ClaimObject("claim_abc", source_evidence_ids=["ev_001"])]),
         evidence=_EvidenceResult([_EvidenceRecord("ev_001")]),
     )
     codes = [e.code for e in result.errors]
     assert "NON_SUPPORTING_EQUATION_USED_FOR_CLAIM_SUPPORT" in codes
+
+
+def test_review_required_component_allows_marked_non_supporting_equation():
+    artifacts = _make_artifacts(equation_semantics={
+        "equations": [{
+            "equation_id": "eq_review",
+            "needs_math_review": True,
+            "confidence_policy": {
+                "can_support_claim": False,
+                "must_not_treat_as_source_extracted": True,
+            },
+        }],
+    })
+    comp = _ComponentRecord(
+        "comp_001",
+        {"claim_ids": ["claim_abc"], "evidence_ids": ["ev_001"], "equation_ids": ["eq_review"]},
+        linked_equation_ids=["eq_review"],
+        output_equation_ids=["eq_review"],
+        review_required_equation_ids=["eq_review"],
+        review_status="review_required",
+    )
+    result = _run_gate(
+        artifacts=artifacts,
+        component_result=_ComponentResult([comp]),
+        claim_objects=_ClaimObjectResult([_ClaimObject("claim_abc", source_evidence_ids=["ev_001"])]),
+        evidence=_EvidenceResult([_EvidenceRecord("ev_001")]),
+    )
+    error_codes = [e.code for e in result.errors]
+    warning_codes = [w.code for w in result.warnings]
+    assert "NON_SUPPORTING_EQUATION_USED_FOR_CLAIM_SUPPORT" not in error_codes
+    assert "NON_SUPPORTING_EQUATION_USED_AS_COMPONENT_OUTPUT" not in error_codes
+    assert "NON_SUPPORTING_EQUATION_USED_FOR_CLAIM_SUPPORT" in warning_codes
+    assert "NON_SUPPORTING_EQUATION_USED_AS_COMPONENT_OUTPUT" in warning_codes
+    assert result.status != "failed_validation"
 
 
 def test_component_output_rejects_review_required_auto_accepted_equation():
@@ -355,6 +489,30 @@ def test_component_output_rejects_review_required_auto_accepted_equation():
     codes = [e.code for e in result.errors]
     assert "NON_SUPPORTING_EQUATION_USED_AS_COMPONENT_OUTPUT" in codes
     assert "REVIEW_REQUIRED_OUTPUT_COMPONENT_AUTO_ACCEPTED" in codes
+
+
+def test_export_validation_lists_equation_consistency_mismatch_candidates():
+    artifacts = _make_artifacts(equation_semantics={
+        "equations": [{
+            "equation_id": "eq_bad",
+            "confidence_policy": {
+                "can_support_claim": False,
+                "can_be_used_in_derivation": False,
+                "must_not_treat_as_source_extracted": True,
+            },
+            "equation_consistency": {
+                "raw_text_latex_match": "mismatch",
+                "label_location_match": "match",
+                "symbol_overlap_score": 0.0,
+                "source_span_quality": "clean",
+                "review_required": True,
+            },
+        }],
+    })
+    result = _run_gate(artifacts=artifacts)
+    codes = [e.code for e in result.review_items]
+    assert "EQUATION_CONSISTENCY_MISMATCH" in codes
+    assert result.status == "needs_review"
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +580,177 @@ def test_component_graph_edge_quality_warnings():
 
 
 # ---------------------------------------------------------------------------
+# Tests: component granularity quality (issue #4)
+# ---------------------------------------------------------------------------
+
+def test_component_quality_good_component_is_reported():
+    comp = _ComponentRecord(
+        "comp_good",
+        {"claim_ids": ["claim_abc"], "evidence_ids": ["ev_001"], "equation_ids": ["eq_1"]},
+        linked_claim_ids=["claim_abc"],
+        linked_equation_ids=["eq_1"],
+        review_status="source_backed",
+        responsibility_type="equation_system",
+        primary_operation="linearize",
+        internal_flow=[{"from": "eq_0", "relation": "linearize", "to": "eq_1"}],
+        component_quality={
+            "component_id": "comp_good",
+            "granularity_status": "good",
+            "equation_count": 1,
+            "claim_count": 1,
+            "derivation_step_count": 0,
+            "responsibility_count": 1,
+            "source_scope_width": 0,
+            "split_required": False,
+            "split_reasons": [],
+            "suggested_split": [],
+        },
+    )
+    result = _run_gate(
+        component_result=_ComponentResult([comp]),
+        claim_objects=_ClaimObjectResult([_ClaimObject("claim_abc", source_evidence_ids=["ev_001"])]),
+        evidence=_EvidenceResult([_EvidenceRecord("ev_001")]),
+    )
+
+    assert result.component_quality[0].granularity_status == "good"
+    assert result.component_quality[0].equation_count == 1
+    assert result.publish_ready is True
+
+
+def test_oversized_component_quality_warns_and_blocks_publish_ready():
+    comp = _ComponentRecord(
+        "comp_big",
+        {"claim_ids": ["claim_abc"], "evidence_ids": ["ev_001"], "equation_ids": [f"eq_{i}" for i in range(10)]},
+        linked_claim_ids=["claim_abc"],
+        linked_equation_ids=[f"eq_{i}" for i in range(10)],
+        review_status="source_backed",
+        responsibility_type="equation_system",
+        primary_operation="linearize",
+        internal_flow=[{"from": f"eq_{i}", "relation": "step", "to": f"eq_{i+1}"} for i in range(6)],
+        source_scope={"section_ids": ["s1", "s2", "s3"]},
+        teaching_takeaway="This is a broad, multi-clause takeaway that covers too many operations.",
+        component_quality={
+            "component_id": "comp_big",
+            "granularity_status": "too_coarse",
+            "equation_count": 10,
+            "claim_count": 1,
+            "derivation_step_count": 0,
+            "responsibility_count": 1,
+            "source_scope_width": 3,
+            "split_required": True,
+            "split_reasons": [
+                "linked equation count exceeds threshold",
+                "source scope spans multiple conceptual sections",
+            ],
+            "suggested_split": [
+                {"name": "Equation System", "responsibility_type": "equation_system"},
+            ],
+        },
+    )
+    result = _run_gate(
+        component_result=_ComponentResult([comp]),
+        claim_objects=_ClaimObjectResult([_ClaimObject("claim_abc", source_evidence_ids=["ev_001"])]),
+        evidence=_EvidenceResult([_EvidenceRecord("ev_001")]),
+    )
+
+    q = result.component_quality[0]
+    assert q.granularity_status == "too_coarse"
+    assert q.split_required is True
+    assert "linked equation count exceeds threshold" in q.split_reasons
+    assert "source scope spans multiple conceptual sections" in q.split_reasons
+    assert "COMPONENT_GRANULARITY_ISSUE" in [w.code for w in result.warnings]
+    assert result.publish_ready is False
+
+
+def test_mixed_responsibility_component_quality_emits_suggested_split():
+    comp = _ComponentRecord(
+        "comp_mixed",
+        {"claim_ids": ["claim_abc"], "evidence_ids": ["ev_001"], "equation_ids": ["eq_model", "eq_final"]},
+        linked_claim_ids=["claim_abc"],
+        linked_equation_ids=["eq_model", "eq_final"],
+        review_status="source_backed",
+        label="Bias model and consistency relation",
+        summary="Defines a local bias model and derives a final consistency relation.",
+        responsibility_type="model",
+        primary_operation="parameterize",
+        component_quality={
+            "component_id": "comp_mixed",
+            "granularity_status": "mixed_responsibility",
+            "equation_count": 2,
+            "claim_count": 1,
+            "derivation_step_count": 0,
+            "responsibility_count": 2,
+            "source_scope_width": 0,
+            "split_required": True,
+            "split_reasons": ["responsibility type has more than one primary value"],
+            "suggested_split": [
+                {"name": "Model", "responsibility_type": "model"},
+                {"name": "Constraint", "responsibility_type": "constraint"},
+            ],
+        },
+    )
+    result = _run_gate(
+        component_result=_ComponentResult([comp]),
+        claim_objects=_ClaimObjectResult([_ClaimObject("claim_abc", source_evidence_ids=["ev_001"])]),
+        evidence=_EvidenceResult([_EvidenceRecord("ev_001")]),
+    )
+
+    q = result.component_quality[0]
+    assert q.granularity_status == "mixed_responsibility"
+    assert q.responsibility_count >= 2
+    assert q.split_required is True
+    assert q.suggested_split
+    assert "COMPONENT_GRANULARITY_ISSUE" in [w.code for w in result.warnings]
+    assert result.publish_ready is False
+
+
+def test_component_quality_uses_existing_split_recommendation():
+    comp = _ComponentRecord(
+        "comp_split",
+        {"claim_ids": ["claim_abc"], "evidence_ids": ["ev_001"], "equation_ids": ["eq_1", "eq_2"]},
+        linked_claim_ids=["claim_abc"],
+        linked_equation_ids=["eq_1", "eq_2"],
+        review_status="source_backed",
+        responsibility_type="equation_system",
+        split_recommendation={
+            "required": True,
+            "reasons": ["component includes both derivation and final result"],
+            "suggested_components": [
+                {"name": "Linear equation", "responsibility_type": "equation_system"},
+                {"name": "Final relation", "responsibility_type": "constraint"},
+            ],
+        },
+        component_quality={
+            "component_id": "comp_split",
+            "granularity_status": "too_coarse",
+            "equation_count": 2,
+            "claim_count": 1,
+            "derivation_step_count": 0,
+            "responsibility_count": 1,
+            "source_scope_width": 0,
+            "split_required": True,
+            "split_reasons": ["component includes both derivation and final result"],
+            "suggested_split": [
+                {"name": "Linear equation", "responsibility_type": "equation_system"},
+                {"name": "Final relation", "responsibility_type": "constraint"},
+            ],
+        },
+    )
+    result = _run_gate(
+        component_result=_ComponentResult([comp]),
+        claim_objects=_ClaimObjectResult([_ClaimObject("claim_abc", source_evidence_ids=["ev_001"])]),
+        evidence=_EvidenceResult([_EvidenceRecord("ev_001")]),
+    )
+
+    q = result.component_quality[0]
+    assert q.granularity_status == "too_coarse"
+    assert q.suggested_split == [
+        {"name": "Linear equation", "responsibility_type": "equation_system"},
+        {"name": "Final relation", "responsibility_type": "constraint"},
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Tests: course mapping validation
 # ---------------------------------------------------------------------------
 
@@ -480,8 +809,8 @@ def test_source_backed_claim_with_evidence_ids_no_warning():
     assert "SOURCE_BACKED_CLAIM_NO_EVIDENCE_IDS" not in codes
 
 
-def test_source_backed_claim_without_evidence_ids_warns():
-    """source_backed claim with empty source_evidence_ids → SOURCE_BACKED_CLAIM_NO_EVIDENCE_IDS warning."""
+def test_source_backed_claim_without_evidence_ids_is_hard_error():
+    """source_backed claim with empty source_evidence_ids → hard error (#312)."""
     claims = _ClaimObjectResult([
         _ClaimObject("claim_002", support_status="source_backed",
                      source_evidence_ids=[]),
@@ -489,12 +818,13 @@ def test_source_backed_claim_without_evidence_ids_warns():
     evidence = _EvidenceResult([_EvidenceRecord("ev_001")])
 
     result = _run_gate(claim_objects=claims, evidence=evidence)
-    codes = [w.code for w in result.warnings]
+    codes = [e.code for e in result.errors]
     assert "SOURCE_BACKED_CLAIM_NO_EVIDENCE_IDS" in codes
+    assert result.status == "failed_validation"
 
 
-def test_source_backed_claim_with_unresolved_evidence_id_warns():
-    """source_backed claim referencing a missing evidence_id → SOURCE_BACKED_CLAIM_UNRESOLVED_EVIDENCE_ID warning."""
+def test_source_backed_claim_with_unresolved_evidence_id_is_hard_error():
+    """source_backed claim referencing a missing evidence_id → hard error (#312)."""
     claims = _ClaimObjectResult([
         _ClaimObject("claim_003", support_status="source_backed",
                      source_evidence_ids=["ev_MISSING"]),
@@ -502,8 +832,9 @@ def test_source_backed_claim_with_unresolved_evidence_id_warns():
     evidence = _EvidenceResult([_EvidenceRecord("ev_real")])
 
     result = _run_gate(claim_objects=claims, evidence=evidence)
-    codes = [w.code for w in result.warnings]
+    codes = [e.code for e in result.errors]
     assert "SOURCE_BACKED_CLAIM_UNRESOLVED_EVIDENCE_ID" in codes
+    assert result.status == "failed_validation"
 
 
 def test_non_source_backed_claim_no_evidence_ids_is_silent():
@@ -517,3 +848,393 @@ def test_non_source_backed_claim_no_evidence_ids_is_silent():
     result = _run_gate(claim_objects=claims, evidence=evidence)
     codes = [w.code for w in result.warnings]
     assert "SOURCE_BACKED_CLAIM_NO_EVIDENCE_IDS" not in codes
+
+
+# ---------------------------------------------------------------------------
+# Tests: claim atomicity reporting (issue #312)
+# ---------------------------------------------------------------------------
+
+def test_non_atomic_main_result_claim_is_hard_error():
+    """A non-atomic main-result claim blocks export."""
+    claims = _ClaimObjectResult([
+        _ClaimObject("claim_001", atomicity="split_required", claim_type="result"),
+    ])
+    result = _run_gate(claim_objects=claims)
+    review_codes = [r.code for r in result.review_items]
+    assert "SPLIT_PENDING_CLAIM_NEEDS_CONFIRMATION" in review_codes
+    assert "NON_ATOMIC_MAIN_RESULT_CLAIM" not in [e.code for e in result.errors]
+    assert result.status == "needs_review"
+
+
+def test_legacy_non_atomic_main_result_claim_is_hard_error():
+    claims = _ClaimObjectResult([
+        _ClaimObject("claim_001", atomicity="non_atomic", claim_type="result"),
+    ])
+    result = _run_gate(claim_objects=claims)
+    assert "NON_ATOMIC_MAIN_RESULT_CLAIM" in [e.code for e in result.errors]
+    assert result.status == "failed_validation"
+
+
+def test_non_atomic_non_main_claim_needs_review():
+    """A non-atomic non-main claim is flagged for review, not a hard error."""
+    claims = _ClaimObjectResult([
+        _ClaimObject("claim_001", atomicity="non_atomic", claim_type="method_choice"),
+    ])
+    result = _run_gate(claim_objects=claims)
+    review_codes = [r.code for r in result.review_items]
+    assert "NON_ATOMIC_CLAIM_NEEDS_SPLIT" in review_codes
+    assert result.status == "needs_review"
+
+
+def test_atomic_claim_produces_no_atomicity_issue():
+    """Atomic claims do not trigger atomicity reporting."""
+    claims = _ClaimObjectResult([
+        _ClaimObject("claim_001", atomicity="atomic", claim_type="result"),
+    ])
+    result = _run_gate(claim_objects=claims)
+    all_codes = [e.code for e in result.errors] + [r.code for r in result.review_items]
+    assert "NON_ATOMIC_MAIN_RESULT_CLAIM" not in all_codes
+    assert "NON_ATOMIC_CLAIM_NEEDS_SPLIT" not in all_codes
+
+
+def test_split_pending_claim_needs_confirmation():
+    """Deterministic-split suggestions are surfaced for review (issue #317)."""
+    claims = _ClaimObjectResult([
+        _ClaimObject("claim_001_sub01", atomicity="split_required", claim_type="result"),
+    ])
+    result = _run_gate(claim_objects=claims)
+    review_codes = [r.code for r in result.review_items]
+    assert "SPLIT_PENDING_CLAIM_NEEDS_CONFIRMATION" in review_codes
+    # split_pending must not be treated as a non-atomic hard error
+    assert "NON_ATOMIC_MAIN_RESULT_CLAIM" not in [e.code for e in result.errors]
+
+
+def test_component_using_split_required_claim_as_support_blocks_publish():
+    comp = _ComponentRecord(
+        "comp_bad_claim",
+        {"claim_ids": ["claim_split"], "evidence_ids": [], "equation_ids": []},
+        linked_claim_ids=["claim_split"],
+    )
+    claims = _ClaimObjectResult([
+        _ClaimObject("claim_split", atomicity="split_required", claim_type="main_result"),
+    ])
+    result = _run_gate(component_result=_ComponentResult([comp]), claim_objects=claims, evidence=_EvidenceResult([]))
+    assert "NON_ATOMIC_CLAIM_USED_AS_COMPONENT_SUPPORT" in [e.code for e in result.errors]
+
+
+# ---------------------------------------------------------------------------
+# Tests: concept coverage reporting (issue #8)
+# ---------------------------------------------------------------------------
+
+def test_concept_validation_block_always_present():
+    result = _run_gate()
+    block = result.concept_validation
+    for key in (
+        "missing_concepts",
+        "empty_concepts_on_main_claims",
+        "empty_concepts_on_main_components",
+        "concepts_on_composite_claims",
+        "concept_role_mismatch",
+        "concepts_from_low_confidence_sources",
+    ):
+        assert key in block
+        assert block[key] == []
+
+
+def test_main_claim_with_empty_concepts_is_reported():
+    claim = _ClaimObject("claim_main", claim_type="result")
+    claim.concepts = []
+    claim.concept_assignment_status = "review_required"
+    result = _run_gate(claim_objects=_ClaimObjectResult([claim]))
+    assert "claim_main" in result.concept_validation["empty_concepts_on_main_claims"]
+    assert "claim_main" in result.concept_validation["missing_concepts"]
+    assert "MAIN_CLAIM_INSUFFICIENT_CONCEPTS" in [w.code for w in result.warnings]
+
+
+def test_main_component_with_too_few_concepts_is_reported():
+    comp = _ComponentRecord("comp_thin", {"claim_ids": [], "evidence_ids": []})
+    comp.concepts = ["Skewness"]
+    result = _run_gate(component_result=_ComponentResult([comp]))
+    assert "comp_thin" in result.concept_validation["empty_concepts_on_main_components"]
+    assert "MAIN_COMPONENT_INSUFFICIENT_CONCEPTS" in [w.code for w in result.warnings]
+
+
+def test_source_backed_concepts_on_composite_claim_flagged_for_review():
+    claim = _ClaimObject("claim_comp", atomicity="composite", claim_type="definition")
+    claim.concepts = ["Skewness", "Kurtosis"]
+    claim.concept_assignment_status = "source_backed"
+    result = _run_gate(claim_objects=_ClaimObjectResult([claim]))
+    assert "claim_comp" in result.concept_validation["concepts_on_composite_claims"]
+    assert "CONCEPTS_ON_COMPOSITE_CLAIM" in [r.code for r in result.review_items]
+
+
+def test_low_confidence_source_concepts_flagged_for_review():
+    claim = _ClaimObject("claim_low", atomicity="atomic", claim_type="definition")
+    claim.concepts = ["Skewness", "Kurtosis"]
+    claim.concept_assignment_status = "review_required"
+    result = _run_gate(claim_objects=_ClaimObjectResult([claim]))
+    assert "claim_low" in result.concept_validation["concepts_from_low_confidence_sources"]
+    assert "CONCEPTS_FROM_LOW_CONFIDENCE_SOURCE" in [r.code for r in result.review_items]
+
+
+def _role_mismatch_reasons(result, comp_id):
+    return [
+        e["reason"]
+        for e in result.concept_validation["concept_role_mismatch"]
+        if e["component_id"] == comp_id
+    ]
+
+
+def test_derivation_component_without_math_concept_is_role_mismatch():
+    comp = _ComponentRecord(
+        "comp_deriv",
+        {"claim_ids": [], "evidence_ids": []},
+        primary_operation="eliminate_bias",
+    )
+    comp.concepts = ["Galaxy survey", "Gravity model"]  # named, but no math/procedural
+    result = _run_gate(component_result=_ComponentResult([comp]))
+    reasons = _role_mismatch_reasons(result, "comp_deriv")
+    assert any("mathematical or procedural" in r for r in reasons)
+    assert "COMPONENT_CONCEPT_ROLE_MISMATCH" in [w.code for w in result.warnings]
+
+
+def test_observable_component_without_named_concept_is_role_mismatch():
+    comp = _ComponentRecord(
+        "comp_obs",
+        {"claim_ids": [], "evidence_ids": []},
+        component_type="ObservableComponent",
+    )
+    comp.concepts = ["b_1", "derive"]  # only symbol + procedural
+    result = _run_gate(component_result=_ComponentResult([comp]))
+    reasons = _role_mismatch_reasons(result, "comp_obs")
+    assert any("observable-name" in r for r in reasons)
+
+
+def test_comparison_component_without_theory_class_is_role_mismatch():
+    comp = _ComponentRecord(
+        "comp_cmp",
+        {"claim_ids": [], "evidence_ids": []},
+        component_type="ComparisonComponent",
+    )
+    comp.concepts = ["b_1", "solve"]  # only symbol + procedural
+    result = _run_gate(component_result=_ComponentResult([comp]))
+    reasons = _role_mismatch_reasons(result, "comp_cmp")
+    assert any("theory-class" in r for r in reasons)
+
+
+def test_well_tagged_components_have_no_role_mismatch():
+    comp = _ComponentRecord(
+        "comp_ok",
+        {"claim_ids": [], "evidence_ids": []},
+        primary_operation="eliminate_bias",
+    )
+    comp.concepts = ["b_1", "consistency relation"]  # symbol + named
+    result = _run_gate(component_result=_ComponentResult([comp]))
+    assert result.concept_validation["concept_role_mismatch"] == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: component refinement reporting (issue #324)
+# ---------------------------------------------------------------------------
+
+class _RefinedComponentResult:
+    def __init__(self, refinement_validation):
+        self.components = []
+        self.component_refinement = {"refinement_validation": refinement_validation}
+
+
+def test_component_refinement_absent_is_empty_report():
+    result = _run_gate(component_result=_ComponentResult([]))
+    assert result.component_refinement_validation["split_components"] == []
+    assert result.component_refinement_validation["unassigned_links"] == []
+
+
+def test_component_refinement_unassigned_link_warns():
+    comp_result = _RefinedComponentResult({
+        "split_components": ["comp_a"],
+        "unchanged_components": [],
+        "failed_refinements": [],
+        "review_required_refinements": [],
+        "unassigned_links": [{"original_component_id": "comp_a", "link_type": "equation", "link_id": "eq_x"}],
+        "dangling_component_refs": [],
+        "teaching_granularity_warnings": [],
+    })
+    result = _run_gate(component_result=comp_result)
+    assert result.component_refinement_validation["split_components"] == ["comp_a"]
+    assert any(w.code == "COMPONENT_REFINEMENT_UNASSIGNED_LINK" for w in result.warnings)
+
+
+def test_component_refinement_dangling_ref_is_hard_error():
+    comp_result = _RefinedComponentResult({
+        "split_components": [],
+        "unchanged_components": [],
+        "failed_refinements": [],
+        "review_required_refinements": [],
+        "unassigned_links": [],
+        "dangling_component_refs": [{"component_id": "comp_b", "missing_ref": "comp_gone"}],
+        "teaching_granularity_warnings": [],
+    })
+    result = _run_gate(component_result=comp_result)
+    assert result.status == "failed_validation"
+    assert any(e.code == "COMPONENT_REFINEMENT_DANGLING_REF" for e in result.errors)
+
+
+def test_component_refinement_review_required_and_teaching_warning():
+    comp_result = _RefinedComponentResult({
+        "split_components": [],
+        "unchanged_components": [],
+        "failed_refinements": [],
+        "review_required_refinements": ["comp_c"],
+        "unassigned_links": [],
+        "dangling_component_refs": [],
+        "teaching_granularity_warnings": [{"component_id": "comp_c__r1"}],
+    })
+    result = _run_gate(component_result=comp_result)
+    assert any(r.code == "COMPONENT_REFINEMENT_REVIEW_REQUIRED" for r in result.review_items)
+    assert any(w.code == "COMPONENT_REFINEMENT_TEACHING_GRANULARITY" for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# Step 5: theory bundle + teaching output (issue #326)
+# ---------------------------------------------------------------------------
+
+
+class _BundleComponentResult:
+    """component_result carrying a Step 5 theory_bundle artifact block."""
+
+    def __init__(self, components, theory_bundle):
+        self.components = components
+        self.theory_bundle = theory_bundle
+
+
+def _bundle_block(*, bundle=None, course_mapping=None, blueprint_updates=None,
+                  theory_bundle_validation=None, teaching_output_validation=None):
+    return {
+        "theory_bundle": bundle or {},
+        "course_mapping": course_mapping or {"topics": []},
+        "blueprint_updates": blueprint_updates or {"linked_component_ids": [], "review_required_items": []},
+        "theory_bundle_validation": theory_bundle_validation or {},
+        "teaching_output_validation": teaching_output_validation or {},
+    }
+
+
+def test_theory_bundle_absent_is_empty_default():
+    result = _run_gate(component_result=_ComponentResult([]))
+    assert result.theory_bundle_validation["bundle_created"] is False
+    assert result.teaching_output_validation["course_topics_link_components"] is True
+
+
+def test_theory_bundle_clean_passes_and_reports_booleans():
+    comp = _ComponentRecord("c1", review_status="source_backed")
+    block = _bundle_block(
+        bundle={
+            "component_ids": ["c1"],
+            "headline_claim_id": "claim_head",
+            "support_map_id": "doc:support_map",
+            "review_status": "source_backed",
+        },
+        course_mapping={"topics": [{
+            "topic_id": "topic:c1",
+            "linked_component_ids": ["c1"],
+            "blackbox_policy": [],
+            "review_status": "source_backed",
+        }]},
+        blueprint_updates={"linked_component_ids": ["c1"], "review_required_items": []},
+        theory_bundle_validation={
+            "bundle_created": True, "headline_claim_linked": True, "support_map_linked": True,
+        },
+        teaching_output_validation={
+            "course_topics_link_components": True, "blueprint_refs_valid": True,
+            "blackbox_policy_respects_confidence": True,
+        },
+    )
+    result = _run_gate(component_result=_BundleComponentResult([comp], block))
+    assert result.theory_bundle_validation["component_refs_valid"] is True
+    assert result.theory_bundle_validation["headline_claim_linked"] is True
+    assert result.theory_bundle_validation["support_map_linked"] is True
+    assert result.teaching_output_validation["course_topics_link_components"] is True
+    assert result.teaching_output_validation["blackbox_policy_respects_confidence"] is True
+    assert not any(e.code.startswith("THEORY_BUNDLE") for e in result.errors)
+
+
+def test_theory_bundle_dangling_component_ref_is_hard_error():
+    comp = _ComponentRecord("c1")
+    block = _bundle_block(bundle={
+        "component_ids": ["c1", "ghost"],
+        "headline_claim_id": "claim_head",
+        "support_map_id": "doc:support_map",
+        "review_status": "source_backed",
+    })
+    result = _run_gate(component_result=_BundleComponentResult([comp], block))
+    assert result.status == "failed_validation"
+    assert result.theory_bundle_validation["component_refs_valid"] is False
+    assert any(e.code == "THEORY_BUNDLE_DANGLING_COMPONENT_REF" for e in result.errors)
+
+
+def test_teaching_output_dangling_topic_ref_is_hard_error():
+    comp = _ComponentRecord("c1")
+    block = _bundle_block(
+        bundle={"component_ids": ["c1"], "headline_claim_id": "h",
+                "support_map_id": "s", "review_status": "source_backed"},
+        course_mapping={"topics": [{
+            "topic_id": "topic:ghost",
+            "linked_component_ids": ["ghost"],
+            "blackbox_policy": [],
+        }]},
+    )
+    result = _run_gate(component_result=_BundleComponentResult([comp], block))
+    assert result.status == "failed_validation"
+    assert result.teaching_output_validation["course_topics_link_components"] is False
+    assert any(e.code == "TEACHING_OUTPUT_DANGLING_COMPONENT_REF" for e in result.errors)
+
+
+def test_teaching_output_blackbox_policy_must_respect_equation_confidence():
+    # c1 carries a low-confidence equation but the topic does not blackbox it.
+    comp = _ComponentRecord("c1", review_required_equation_ids=["eq_bad"])
+    block = _bundle_block(
+        bundle={"component_ids": ["c1"], "headline_claim_id": "h",
+                "support_map_id": "s", "review_status": "review_required"},
+        course_mapping={"topics": [{
+            "topic_id": "topic:c1",
+            "linked_component_ids": ["c1"],
+            "blackbox_policy": [],  # missing eq_bad
+            "review_status": "review_required",
+        }]},
+        teaching_output_validation={"blackbox_policy_respects_confidence": True},
+    )
+    result = _run_gate(component_result=_BundleComponentResult([comp], block))
+    assert result.teaching_output_validation["blackbox_policy_respects_confidence"] is False
+    assert any(
+        e.code == "TEACHING_OUTPUT_BLACKBOX_POLICY_IGNORES_CONFIDENCE" for e in result.errors
+    )
+
+
+def test_theory_bundle_review_required_blocks_publish_ready():
+    comp = _ComponentRecord("c1")
+    block = _bundle_block(
+        bundle={"component_ids": ["c1"], "headline_claim_id": "h",
+                "support_map_id": "s", "review_status": "review_required"},
+        course_mapping={"topics": [{
+            "topic_id": "topic:c1", "linked_component_ids": ["c1"],
+            "blackbox_policy": [], "review_status": "review_required",
+        }]},
+    )
+    result = _run_gate(component_result=_BundleComponentResult([comp], block))
+    assert result.publish_ready is False
+    assert any(r.code == "THEORY_BUNDLE_REVIEW_REQUIRED" for r in result.review_items)
+    assert any(r.code == "TEACHING_OUTPUT_TOPIC_REVIEW_REQUIRED" for r in result.review_items)
+
+
+def test_teaching_output_blueprint_dangling_ref_is_hard_error():
+    comp = _ComponentRecord("c1")
+    block = _bundle_block(
+        bundle={"component_ids": ["c1"], "headline_claim_id": "h",
+                "support_map_id": "s", "review_status": "source_backed"},
+        course_mapping={"topics": [{
+            "topic_id": "topic:c1", "linked_component_ids": ["c1"], "blackbox_policy": [],
+        }]},
+        blueprint_updates={"linked_component_ids": ["ghost"], "review_required_items": []},
+    )
+    result = _run_gate(component_result=_BundleComponentResult([comp], block))
+    assert result.teaching_output_validation["blueprint_refs_valid"] is False
+    assert any(e.code == "TEACHING_OUTPUT_BLUEPRINT_DANGLING_REF" for e in result.errors)

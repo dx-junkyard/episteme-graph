@@ -3440,7 +3440,7 @@ body {
 
 .ls-component-legend {
   position: absolute;
-  top: 14px;
+  top: 58px;
   left: 14px;
   display: grid;
   gap: 7px;
@@ -3496,6 +3496,46 @@ body {
 
 .ls-component-graph-fit:hover {
   background: var(--color-background-secondary);
+}
+
+/* Issue #306: グラフ層トグル (main / equation_detail / all) */
+.ls-graph-layer-toolbar {
+  position: absolute;
+  left: 14px;
+  top: 14px;
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08);
+  z-index: 6;
+}
+
+.ls-graph-layer-btn {
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 5px 10px;
+  line-height: 1;
+}
+
+.ls-graph-layer-btn:hover {
+  background: var(--color-background-secondary);
+}
+
+.ls-graph-layer-btn.is-active {
+  background: var(--color-accent, #2563eb);
+  border-color: var(--color-accent, #2563eb);
+  color: #ffffff;
+}
+
+.ls-graph-layer-count {
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
 }
 
 .ls-component-graph-detail {
@@ -3617,6 +3657,78 @@ body {
   margin-bottom: 3px;
   color: var(--color-text-primary);
   font-weight: 700;
+}
+.ls-graph-detail-memo {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  font-style: italic;
+  line-height: 1.5;
+}
+.ls-graph-detail-edge-reason {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--color-border-tertiary);
+  font-size: 10px;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+}
+.ls-graph-detail-system {
+  margin-top: 8px;
+}
+.ls-graph-detail-system summary {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+.ls-graph-detail-system details[open] summary {
+  margin-bottom: 6px;
+}
+
+/* Source-backing status & review reasons (issue #302) */
+.ls-graph-backing {
+  display: inline-block;
+  margin: 6px 0 0;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.ls-graph-backing-source_backed {
+  background: #dcfce7;
+  color: #166534;
+}
+.ls-graph-backing-partially_source_backed {
+  background: #fef9c3;
+  color: #854d0e;
+}
+.ls-graph-backing-inferred {
+  background: #f1f5f9;
+  color: #64748b;
+}
+.ls-graph-backing-review_required {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.ls-graph-detail-reasons {
+  display: grid;
+  gap: 4px;
+  margin: 6px 0 0;
+  padding-left: 16px;
+  font-size: 11px;
+  color: #b91c1c;
+}
+
+.ls-graph-detail-link {
+  font-size: 11px;
+  line-height: 1.5;
+  word-break: break-word;
+  margin-top: 4px;
+}
+.ls-graph-detail-link span {
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin-right: 4px;
 }
 
 .ls-graph-validation {

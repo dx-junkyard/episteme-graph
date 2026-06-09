@@ -193,6 +193,238 @@ def test_domain_concept_fallback_for_bias_elimination_paper():
     assert "claim_concepts_empty" not in {i.rule_id for i in result.validation_issues}
 
 
+def _make_registry(block_id: str, text: str):
+    structure = _make_structure_with(block_id, text)
+    ev_builder = EvidenceRegistryBuilder(structure)
+    ev_builder.add_for_block(block_id)
+    return ev_builder.build("doc_test", "particle_physics")
+
+
+# ---------------------------------------------------------------------------
+# issue #312: atomic claim 化 / concept 補完 / evidence link
+# ---------------------------------------------------------------------------
+
+_NON_ATOMIC_TEXT = (
+    "The paper derives consistency relations by eliminating nuisance parameters "
+    "and shows they can be used to test a target theory."
+)
+
+
+def test_atomic_claim_marks_is_atomic_and_normalized_text():
+    registry = _make_registry("blk_x", "Nuisance parameters appear in the equations.")
+    spans = [_make_qualified("span_001", "blk_x", "Nuisance parameters appear in the equations.")]
+    builder = ClaimObjectBuilder(evidence_registry=registry)
+    claim = builder.build("doc_test", spans).claims[0]
+
+    assert claim.atomicity == "atomic"
+    assert claim.is_atomic is True
+    assert claim.support_status == "source_backed"
+    assert claim.normalized_text == "Nuisance parameters appear in the equations."
+    assert claim.qualification_reason is None
+
+
+def test_non_atomic_claim_without_llm_rewrite_is_split_required():
+    # Issue #317 criteria #4 / #6: with no LLM atomic rewrite, the builder keeps the
+    # deterministic split only as a review suggestion. Neither the split_required
+    # parent nor the split_required children are confirmed source_backed atomic claims.
+    registry = _make_registry("blk_x", _NON_ATOMIC_TEXT)
+    spans = [_make_qualified("span_001", "blk_x", _NON_ATOMIC_TEXT, claim_type="method_choice")]
+    builder = ClaimObjectBuilder(evidence_registry=registry)
+    result = builder.build("doc_test", spans)
+
+    parent = [c for c in result.claims if c.atomicity == "split_required" and not c.parent_claim_id]
+    children = [c for c in result.claims if c.parent_claim_id and c.atomicity == "split_required"]
+    assert len(parent) == 1
+    assert parent[0].is_atomic is False
+    assert parent[0].support_status == "review_required"
+    assert len(children) >= 2
+    assert parent[0].split_suggestions
+    assert all(not c.is_atomic for c in children)
+    assert all(c.support_status == "review_required" for c in children)
+    assert all(c.qualification_reason == "deterministic split requires review" for c in children)
+    rules = {i.rule_id for i in result.validation_issues}
+    assert "claim_split_pending_review" in rules
+
+
+def test_main_result_long_claim_is_not_confirmed_without_llm_rewrite():
+    # Criterion #4: a long main-result claim must NOT be confirmed as a paper-level
+    # summary. Without an LLM atomic rewrite it stays split_required and is flagged.
+    registry = _make_registry("blk_x", _NON_ATOMIC_TEXT)
+    spans = [_make_qualified("span_001", "blk_x", _NON_ATOMIC_TEXT, claim_type="result")]
+    builder = ClaimObjectBuilder(evidence_registry=registry)
+    result = builder.build("doc_test", spans)
+
+    parent = [c for c in result.claims if c.atomicity == "split_required" and not c.parent_claim_id][0]
+    assert parent.is_atomic is False
+    assert parent.support_status != "source_backed"
+    assert "main_result_claim_non_atomic" in {i.rule_id for i in result.validation_issues}
+
+
+# ---------------------------------------------------------------------------
+# issue #317: LLM atomic rewrite consumed from ClaimQualificationAgent
+# ---------------------------------------------------------------------------
+
+def test_llm_atomic_claims_become_confirmed_atomic_children():
+    # Criteria #1 / #5 / #7: LLM-provided atomic claims are converted into a
+    # compound parent + confirmed atomic children that are source_backed and
+    # traceable to evidence.
+    registry = _make_registry("blk_x", _NON_ATOMIC_TEXT)
+    span = _make_qualified("span_001", "blk_x", _NON_ATOMIC_TEXT, claim_type="result")
+    span.atomic_claims = [
+        {"text": "Nuisance parameters appear in the observable equations.",
+         "atomicity": "atomic", "status": "accepted", "claim_type_candidate": "result"},
+        {"text": "The nuisance parameters can be eliminated algebraically.",
+         "atomicity": "atomic", "status": "accepted", "claim_type_candidate": "result"},
+        {"text": "The elimination yields consistency relations.",
+         "atomicity": "atomic", "status": "accepted", "claim_type_candidate": "result"},
+    ]
+    builder = ClaimObjectBuilder(evidence_registry=registry)
+    result = builder.build("doc_test", [span])
+
+    parent = [c for c in result.claims if c.atomicity == "composite"][0]
+    children = [c for c in result.claims if c.parent_claim_id == parent.claim_id]
+    assert parent.is_atomic is False
+    assert len(children) == 3
+    assert all(c.is_atomic and c.atomicity == "atomic" for c in children)
+    assert all(c.support_status == "source_backed" for c in children)
+    assert all(c.source_evidence_ids for c in children)
+    assert all(c.source_span_ids == ["span_001"] for c in children)
+    assert parent.split_suggestions
+    assert "main_result_claim_non_atomic" not in {i.rule_id for i in result.validation_issues}
+
+
+def test_single_llm_atomic_claim_has_no_compound_wrapper():
+    registry = _make_registry("blk_x", "The relation reduces in the limit.")
+    span = _make_qualified("span_001", "blk_x", "The relation reduces in the limit.")
+    span.atomic_claims = [
+        {"text": "The relation reduces in the zero-recoil limit.",
+         "atomicity": "atomic", "status": "accepted"},
+    ]
+    builder = ClaimObjectBuilder(evidence_registry=registry)
+    result = builder.build("doc_test", [span])
+
+    assert len(result.claims) == 1
+    claim = result.claims[0]
+    assert claim.atomicity == "atomic"
+    assert claim.is_atomic is True
+    assert claim.text == "The relation reduces in the zero-recoil limit."
+    assert claim.support_status == "source_backed"
+
+
+def test_llm_non_atomic_candidate_is_marked_review_required():
+    registry = _make_registry("blk_x", _NON_ATOMIC_TEXT)
+    span = _make_qualified("span_001", "blk_x", _NON_ATOMIC_TEXT)
+    span.atomic_claims = [
+        {"text": "Nuisance parameters appear in the equations.",
+         "atomicity": "atomic", "status": "accepted"},
+        {"text": "The remaining clause could not be atomized cleanly here.",
+         "atomicity": "non_atomic", "status": "review_required",
+         "qualification_reason": "contains multiple propositions; split required"},
+    ]
+    builder = ClaimObjectBuilder(evidence_registry=registry)
+    result = builder.build("doc_test", [span])
+
+    review_children = [
+        c for c in result.claims if c.parent_claim_id and c.atomicity == "split_required"
+    ]
+    assert len(review_children) == 1
+    assert review_children[0].is_atomic is False
+    assert review_children[0].support_status == "review_required"
+    assert "atomic_claim_needs_review" in {i.rule_id for i in result.validation_issues}
+
+
+def test_main_result_normalizes_to_itself():
+    # #312 required vocabulary: 'main_result' must not collapse to 'unknown'.
+    assert ClaimObjectBuilder._normalize_claim_type("main_result") == "main_result"
+    assert ClaimObjectBuilder._normalize_claim_type("structural_property") == "structural_property"
+    assert ClaimObjectBuilder._normalize_claim_type("problem_statement") == "problem_statement"
+    assert ClaimObjectBuilder._normalize_claim_type("method_motivation") == "method_motivation"
+    assert ClaimObjectBuilder._normalize_claim_type("theory_encoding") == "theory_encoding"
+
+
+def test_broad_abstract_claim_requires_atomic_split():
+    text = (
+        "DHOST and Horndeski theories are target classes, nonlinear galaxy bias "
+        "obstructs gravity tests, bias parameters can be eliminated algebraically, "
+        "and two kurtosis consistency relations are newly derived for gravity tests."
+    )
+    registry = _make_registry("blk_x", text)
+    span = _make_qualified("span_001", "blk_x", text, claim_type="main_result")
+    result = ClaimObjectBuilder(evidence_registry=registry).build("doc_test", [span])
+
+    parent = [c for c in result.claims if not c.parent_claim_id][0]
+    children = [c for c in result.claims if c.parent_claim_id == parent.claim_id]
+    assert parent.atomicity == "split_required"
+    assert parent.is_atomic is False
+    assert len(children) >= 2
+    assert parent.split_suggestions
+    assert "main_result_claim_non_atomic" in {i.rule_id for i in result.validation_issues}
+
+
+def test_acceptance_atomic_claims_from_rewrite_are_confirmed():
+    text = "The abstract summarizes the gravity-test construction."
+    registry = _make_registry("blk_x", text)
+    span = _make_qualified("span_001", "blk_x", text, claim_type="main_result")
+    span.atomic_claims = [
+        {"text": "DHOST and Horndeski are target theory classes.", "atomicity": "atomic", "status": "accepted", "claim_type_candidate": "theory_encoding"},
+        {"text": "Matter fluctuation statistics can constrain gravity-sector parameters.", "atomicity": "atomic", "status": "accepted", "claim_type_candidate": "method_motivation"},
+        {"text": "Skewness and kurtosis are simpler observables than bi- and tri-spectrum.", "atomicity": "atomic", "status": "accepted", "claim_type_candidate": "observable_definition"},
+        {"text": "Nonlinear galaxy bias obstructs direct gravity tests.", "atomicity": "atomic", "status": "accepted", "claim_type_candidate": "problem_statement"},
+        {"text": "Bias parameters can be eliminated algebraically.", "atomicity": "atomic", "status": "accepted", "claim_type_candidate": "derivation_result"},
+        {"text": "One skewness consistency relation is reproduced.", "atomicity": "atomic", "status": "accepted", "claim_type_candidate": "derivation_result"},
+        {"text": "Two kurtosis consistency relations are newly derived.", "atomicity": "atomic", "status": "accepted", "claim_type_candidate": "main_result"},
+        {"text": "The resulting relations are useful for gravity tests.", "atomicity": "atomic", "status": "accepted", "claim_type_candidate": "main_result"},
+    ]
+    result = ClaimObjectBuilder(evidence_registry=registry).build("doc_test", [span])
+
+    parent = [c for c in result.claims if c.atomicity == "composite"][0]
+    children = [c for c in result.claims if c.parent_claim_id == parent.claim_id]
+    assert len(children) == 8
+    assert all(c.atomicity == "atomic" and c.is_atomic for c in children)
+    assert {
+        "theory_encoding",
+        "method_motivation",
+        "observable_definition",
+        "problem_statement",
+        "derivation_result",
+        "main_result",
+    } <= {c.claim_type for c in children}
+
+
+def test_single_proposition_with_and_stays_atomic():
+    # "X and Y eliminate Z" is one proposition (coordinated subject), not two.
+    text = "Skewness and kurtosis consistency relations eliminate nonlinear galaxy bias."
+    registry = _make_registry("blk_x", text)
+    spans = [_make_qualified("span_001", "blk_x", text, claim_type="result")]
+    builder = ClaimObjectBuilder(evidence_registry=registry)
+    claim = builder.build("doc_test", spans).claims[0]
+    assert claim.atomicity == "atomic"
+
+
+def test_concept_completion_from_evidence_span_text():
+    # Concept appears only in the raw evidence span, not the normalized claim text.
+    span = _make_qualified("span_001", "blk_x", "Skewness consistency relations hold.")
+    span.edit_suggestions = {"normalized_text": "The relation holds."}
+    builder = ClaimObjectBuilder()
+    claim = builder.build("doc_test", [span]).claims[0]
+    names = {c.normalized for c in claim.concepts}
+    assert "skewness" in names
+
+
+def test_source_backed_claim_has_valid_evidence_ids():
+    registry = _make_registry("blk_004_0065", "Take the zero-recoil limit.")
+    spans = [_make_qualified("span_001", "blk_004_0065", "Take the zero-recoil limit.")]
+    builder = ClaimObjectBuilder(evidence_registry=registry)
+    result = builder.build("doc_test", spans)
+
+    claim = result.claims[0]
+    assert claim.support_status == "source_backed"
+    assert claim.source_evidence_ids
+    rules = {i.rule_id for i in result.validation_issues}
+    assert "source_backed_claim_no_evidence_ids" not in rules
+    assert "claim_references_missing_evidence" not in rules
+
+
 def test_split_claims_create_compound_parent_and_atomic_children():
     structure = _make_structure_with("blk_x", "Definition and conclusion in one span.")
     ev_builder = EvidenceRegistryBuilder(structure)
@@ -211,7 +443,118 @@ def test_split_claims_create_compound_parent_and_atomic_children():
 
     children = [c for c in result.claims if c.parent_claim_id == "claim_span_001"]
     parent = [c for c in result.claims if c.claim_id == "claim_span_001"][0]
-    assert parent.atomicity == "compound"
+    assert parent.atomicity == "composite"
+    assert parent.is_atomic is False
     assert parent.subclaim_ids == ["claim_span_001_sub01", "claim_span_001_sub02"]
     assert [c.atomicity for c in children] == ["atomic", "atomic"]
+    assert [c.is_atomic for c in children] == [True, True]
     assert [c.claim_type for c in children] == ["definition", "conclusion"]
+
+
+# ---------------------------------------------------------------------------
+# issue #8: concept_assignment_status + main-claim concept count
+# ---------------------------------------------------------------------------
+
+_ONTOLOGY = {
+    "aliases": {"Skewness": ["skewness"], "Kurtosis": ["kurtosis"]},
+    "concept_types": {"Skewness": "observable", "Kurtosis": "observable"},
+}
+
+
+def test_atomic_cartridge_backed_concept_is_source_backed():
+    text = "Skewness and kurtosis are observables."
+    registry = _make_registry("blk_x", text)
+    span = _make_qualified("span_001", "blk_x", text)
+    builder = ClaimObjectBuilder(evidence_registry=registry, cartridge_ontology=_ONTOLOGY)
+    claim = builder.build("doc_test", [span]).claims[0]
+
+    assert claim.atomicity == "atomic"
+    assert claim.concepts
+    assert claim.concept_assignment_status == "source_backed"
+
+
+def test_atomic_fallback_only_concept_is_inferred():
+    # No cartridge ontology: concepts come only from domain fallbacks.
+    text = "Skewness is computed in the analysis."
+    registry = _make_registry("blk_x", text)
+    span = _make_qualified("span_001", "blk_x", text)
+    builder = ClaimObjectBuilder(evidence_registry=registry)
+    claim = builder.build("doc_test", [span]).claims[0]
+
+    assert claim.concepts
+    assert claim.concept_assignment_status == "inferred"
+
+
+def test_composite_claim_concepts_are_tentative():
+    registry = _make_registry("blk_x", _NON_ATOMIC_TEXT)
+    span = _make_qualified("span_001", "blk_x", _NON_ATOMIC_TEXT, claim_type="result")
+    span.atomic_claims = [
+        {"text": "Nuisance parameters appear in the observable equations.",
+         "atomicity": "atomic", "status": "accepted", "claim_type_candidate": "result"},
+        {"text": "The nuisance parameters can be eliminated algebraically.",
+         "atomicity": "atomic", "status": "accepted", "claim_type_candidate": "result"},
+    ]
+    builder = ClaimObjectBuilder(evidence_registry=registry, cartridge_ontology=_ONTOLOGY)
+    result = builder.build("doc_test", [span])
+
+    parent = [c for c in result.claims if c.atomicity == "composite"][0]
+    assert parent.concept_assignment_status == "tentative"
+
+
+def test_split_required_claim_concepts_are_review_required():
+    registry = _make_registry("blk_x", _NON_ATOMIC_TEXT)
+    span = _make_qualified("span_001", "blk_x", _NON_ATOMIC_TEXT, claim_type="method_choice")
+    builder = ClaimObjectBuilder(evidence_registry=registry, cartridge_ontology=_ONTOLOGY)
+    result = builder.build("doc_test", [span])
+
+    split = [c for c in result.claims if c.atomicity == "split_required"]
+    assert split
+    assert all(c.concept_assignment_status == "review_required" for c in split)
+
+
+def test_main_claim_with_single_concept_warns_insufficient():
+    text = "Skewness is computed."
+    registry = _make_registry("blk_x", text)
+    span = _make_qualified("span_001", "blk_x", text, claim_type="result")
+    builder = ClaimObjectBuilder(evidence_registry=registry)
+    result = builder.build("doc_test", [span])
+
+    claim = result.claims[0]
+    assert len(claim.concepts) == 1
+    assert "main_claim_insufficient_concepts" in {i.rule_id for i in result.validation_issues}
+
+
+def test_atomic_claim_without_any_concept_is_review_required():
+    # No domain fallbacks / no cartridge aliases match -> no concepts resolved.
+    # An atomic claim with zero concepts must not be confirmed source_backed; its
+    # concept assignment is review_required (and claim_concepts_empty is flagged).
+    text = "An untyped statement with no recognizable terms."
+    registry = _make_registry("blk_x", text)
+    span = _make_qualified("span_001", "blk_x", text)
+    builder = ClaimObjectBuilder(evidence_registry=registry)
+    claim = builder.build("doc_test", [span]).claims[0]
+
+    assert claim.atomicity == "atomic"
+    assert claim.concepts == []
+    assert claim.concept_assignment_status == "review_required"
+
+
+def test_claim_concept_fields_round_trip_through_serialization():
+    # issue #8: concepts + concept_assignment_status must survive to_dict/from_dict.
+    from episteme_graph.agents.claim_object_builder.schema import ClaimObjectBuildResult
+
+    text = "Skewness and kurtosis are observables."
+    registry = _make_registry("blk_x", text)
+    span = _make_qualified("span_001", "blk_x", text)
+    builder = ClaimObjectBuilder(evidence_registry=registry, cartridge_ontology=_ONTOLOGY)
+    result = builder.build("doc_test", [span])
+
+    original = result.claims[0]
+    assert original.concepts
+    assert original.concept_assignment_status == "source_backed"
+
+    restored = ClaimObjectBuildResult.from_dict(result.to_dict()).claims[0]
+    assert restored.concept_assignment_status == original.concept_assignment_status
+    assert [(c.name, c.normalized, c.concept_type, c.role) for c in restored.concepts] == [
+        (c.name, c.normalized, c.concept_type, c.role) for c in original.concepts
+    ]

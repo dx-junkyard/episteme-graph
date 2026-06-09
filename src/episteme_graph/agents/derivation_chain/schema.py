@@ -70,6 +70,8 @@ class DerivationStep:
     assumption_ids: list[str] = field(default_factory=list)
     source_evidence_ids: list[str] = field(default_factory=list)
     review_status: str = "teacher_review_required"
+    review_reason: str = ""
+    confidence_gate: dict = field(default_factory=dict)
     eliminated_symbols: list[str] = field(default_factory=list)
     retained_symbols: list[str] = field(default_factory=list)
 
@@ -86,6 +88,9 @@ class DerivationChainRecord:
     source_scope: dict = field(default_factory=dict)
     linked_component_ids: list[str] = field(default_factory=list)
     chain_type: str = "equation_chain"  # "equation_chain" | "claim_chain" | "mixed_chain"
+    review_status: str = "teacher_review_required"
+    review_reason: str = ""
+    confidence_gate: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -129,6 +134,8 @@ class DerivationChainResult:
                     assumption_ids=list(s.get("assumption_ids") or []),
                     source_evidence_ids=list(s.get("source_evidence_ids") or []),
                     review_status=s.get("review_status", "teacher_review_required"),
+                    review_reason=s.get("review_reason", ""),
+                    confidence_gate=s.get("confidence_gate") or {},
                     eliminated_symbols=list(s.get("eliminated_symbols") or []),
                     retained_symbols=list(s.get("retained_symbols") or []),
                 ))
@@ -142,6 +149,9 @@ class DerivationChainResult:
                 source_scope=c.get("source_scope", {}),
                 linked_component_ids=list(c.get("linked_component_ids") or []),
                 chain_type=c.get("chain_type", "equation_chain"),
+                review_status=c.get("review_status", "teacher_review_required"),
+                review_reason=c.get("review_reason", ""),
+                confidence_gate=c.get("confidence_gate") or {},
             ))
         issues = [ValidationIssue(**i) for i in d.get("validation_issues", [])]
         return cls(

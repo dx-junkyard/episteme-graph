@@ -49,6 +49,14 @@ from core.theory_components import (
     extract_theory_components_from_dsl,
 )
 
+try:
+    # Shared deterministic helper so stored-graph normalization and the
+    # ComponentGraph normalizer agree on short main labels (issue #319).
+    from episteme_graph.agents.component_graph.schema import split_main_label
+except Exception:  # pragma: no cover - agents package optional in some contexts
+    def split_main_label(label: str) -> tuple[str, str]:  # type: ignore[misc]
+        return str(label or "").strip(), ""
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Theory Components"])
@@ -189,6 +197,25 @@ _GRAPH_RELATIONS = {
     "CHECKED_BY",
     "CONFLICTS_WITH",
     "RELATED_TO",
+    # Domain-neutral operation-derived relations (issue #302).
+    "defines",
+    "constructs",
+    "linearizes",
+    "solves",
+    "substitutes",
+    "eliminates",
+    "derives",
+    "constrains",
+    "diagnoses",
+    "compares",
+    "normalizes",
+    "approximates",
+    "transforms",
+    "feeds",
+    "requires_review",
+    # Retained for backward compatibility with previously stored graphs.
+    "feeds_equation_system",
+    "eliminates_bias",
 }
 _MAX_COMPONENT_ASSEMBLY_CLAIMS = 40
 _MAX_COMPONENTS_PER_SECTION = 3
@@ -1680,7 +1707,9 @@ def _add_graph_edge(edges: dict[tuple[str, str, str, str], dict], edge: dict) ->
         "edge_type": edge_type,
         "confidence": float(edge.get("confidence") or 0.5),
         "support_status": edge.get("support_status") or "design_inferred",
+        "source_backing_status": edge.get("source_backing_status") or "",
         "review_status": edge.get("review_status") or "teacher_review_required",
+        "review_reasons": edge.get("review_reasons") or [],
         "evidence": edge.get("evidence") or {},
     }
 
@@ -1920,15 +1949,73 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
         if not component_id or component_id in seen_nodes:
             continue
         component = component_by_id.get(component_id)
+        graph_label = str(node.get("label") or node.get("name") or "").strip()
+        component_type = str(node.get("component_type") or (component.component_type if component else node.get("type") or ""))
+        graph_layer = str(node.get("graph_layer") or "main")
+        final_label = graph_label or (component.name if component else str(node.get("agent_component_id") or component_id))
+        final_description = str(node.get("description") or "")
+        # Issue #319: stored main TheoryOperationNode labels must be short theory-stage
+        # names. Re-normalize here so legacy graphs (with "Theory basis: <long reason>"
+        # labels) are corrected on read, and preserve the long text in description.
+        if graph_layer == "main" and component_type == "TheoryOperationNode":
+            short_label, label_description = split_main_label(final_label)
+            if short_label:
+                final_label = short_label
+            # Existing description wins; the label-derived remainder is the fallback.
+            if not final_description and label_description:
+                final_description = label_description
+        theory_object = str(node.get("theory_object") or "")
+        display_label = str(node.get("display_label") or "")
+        if not display_label:
+            display_label = f"{final_label}: {theory_object}" if theory_object else final_label
+        node_review_status = str(node.get("review_status") or (component.review_status if component else "teacher_review_required"))
+        node_backing = str(node.get("source_backing_status") or "")
+        node_reasons = node.get("review_reasons") if isinstance(node.get("review_reasons"), list) else []
+        # Issue #319 criterion 9: review_required / inferred nodes must explain why.
+        if not node_reasons and (node_backing in ("review_required", "inferred") or node_review_status == "review_required"):
+            node_reasons = ["fallback_or_inferred_node" if node_backing == "inferred" else "missing_evidence_link"]
         normalized_nodes.append({
             "component_id": component_id,
-            "label": component.name if component else str(node.get("label") or node.get("agent_component_id") or component_id),
-            "review_status": component.review_status if component else str(node.get("review_status") or "teacher_review_required"),
+            "label": final_label,
+            "review_status": node_review_status,
             "display_order": int(node.get("display_order") or idx),
-            "origin": component.origin if component else str(node.get("origin") or "paper"),
-            "component_type": component.component_type if component else str(node.get("component_type") or node.get("type") or ""),
-            "component_type_text": component.component_type_text if component else str(node.get("component_type_text") or ""),
-            "summary": component.summary if component else str(node.get("summary") or ""),
+            "origin": str(node.get("origin") or (component.origin if component else "paper")),
+            "component_type": component_type,
+            "component_type_text": str(node.get("component_type_text") or (component.component_type_text if component else "")),
+            "summary": str(node.get("summary") or (component.summary if component else "")),
+            "operation": str(node.get("operation") or ""),
+            "theory_object": theory_object,
+            "display_label": display_label,
+            "representative_component_id": str(node.get("representative_component_id") or ""),
+            "linked_component_ids": node.get("linked_component_ids") if isinstance(node.get("linked_component_ids"), list) else [],
+            "detail_node_ids": node.get("detail_node_ids") if isinstance(node.get("detail_node_ids"), list) else [],
+            "supporting_derivation_ids": node.get("supporting_derivation_ids") if isinstance(node.get("supporting_derivation_ids"), list) else [],
+            "description": final_description,
+            "graph_layer": graph_layer,
+            "maturity_source": str(node.get("maturity_source") or ""),
+            "publish_ready": bool(node.get("publish_ready", False)),
+            "input_equation_ids": node.get("input_equation_ids") if isinstance(node.get("input_equation_ids"), list) else [],
+            "intermediate_equation_ids": node.get("intermediate_equation_ids") if isinstance(node.get("intermediate_equation_ids"), list) else [],
+            "output_equation_ids": node.get("output_equation_ids") if isinstance(node.get("output_equation_ids"), list) else [],
+            "definition_equation_ids": node.get("definition_equation_ids") if isinstance(node.get("definition_equation_ids"), list) else [],
+            "constraint_equation_ids": node.get("constraint_equation_ids") if isinstance(node.get("constraint_equation_ids"), list) else [],
+            "review_required_equation_ids": node.get("review_required_equation_ids") if isinstance(node.get("review_required_equation_ids"), list) else [],
+            "eliminated_symbols": node.get("eliminated_symbols") if isinstance(node.get("eliminated_symbols"), list) else [],
+            "retained_symbols": node.get("retained_symbols") if isinstance(node.get("retained_symbols"), list) else [],
+            "derivation_operations": node.get("derivation_operations") if isinstance(node.get("derivation_operations"), list) else [],
+            "linked_equation_ids": node.get("linked_equation_ids") if isinstance(node.get("linked_equation_ids"), list) else [],
+            "linked_derivation_ids": node.get("linked_derivation_ids") if isinstance(node.get("linked_derivation_ids"), list) else [],
+            "linked_claim_ids": node.get("linked_claim_ids") if isinstance(node.get("linked_claim_ids"), list) else [],
+            "linked_evidence_ids": node.get("linked_evidence_ids") if isinstance(node.get("linked_evidence_ids"), list) else [],
+            "source_backing_status": node_backing,
+            "review_reasons": node_reasons,
+            "parent_component_id": str(node.get("parent_component_id") or ""),
+            "member_component_ids": node.get("member_component_ids") if isinstance(node.get("member_component_ids"), list) else [],
+            "visual_label": str(node.get("visual_label") or ""),
+            "input_claim_ids": node.get("input_claim_ids") if isinstance(node.get("input_claim_ids"), list) else [],
+            "output_claim_ids": node.get("output_claim_ids") if isinstance(node.get("output_claim_ids"), list) else [],
+            "required_claim_ids": node.get("required_claim_ids") if isinstance(node.get("required_claim_ids"), list) else [],
+            "review_reason": str(node.get("review_reason") or ""),
         })
         seen_nodes.add(component_id)
     normalized_edges = []
@@ -1940,6 +2027,23 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
         "produces": "PRODUCES_FOR",
         "related_to": "RELATED_TO",
         "conflicts_with": "CONFLICTS_WITH",
+        "defines": "defines",
+        "constructs": "constructs",
+        "linearizes": "linearizes",
+        "solves": "solves",
+        "substitutes": "substitutes",
+        "eliminates": "eliminates",
+        "derives": "derives",
+        "constrains": "constrains",
+        "diagnoses": "diagnoses",
+        "compares": "compares",
+        "normalizes": "normalizes",
+        "approximates": "approximates",
+        "transforms": "transforms",
+        "feeds": "feeds",
+        "requires_review": "requires_review",
+        "feeds_equation_system": "feeds_equation_system",
+        "eliminates_bias": "eliminates_bias",
     }
     for edge in graph.get("edges") if isinstance(graph.get("edges"), list) else []:
         if not isinstance(edge, dict):
@@ -1952,14 +2056,36 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
         relation = relation_map.get(raw_relation.lower(), raw_relation.upper())
         if relation not in _GRAPH_RELATIONS:
             relation = "RELATED_TO"
+        edge_support = str(edge.get("support_status") or "source_inferred")
+        raw_review = str(edge.get("review_status") or "")
+        edge_review = raw_review or "review_required"
+        # Issue #319 criterion 7/8: stored edges must carry source_backing_status.
+        # Legacy graphs may lack it, so infer it back-compatibly from the raw
+        # review_status, then support_status, before defaulting to review_required.
+        edge_backing = str(edge.get("source_backing_status") or "").strip()
+        if not edge_backing:
+            if raw_review == "source_backed":
+                edge_backing = "source_backed"
+            elif raw_review == "review_required":
+                edge_backing = "review_required"
+            elif "inferred" in edge_support or "design" in edge_support:
+                edge_backing = "inferred"
+            else:
+                edge_backing = "review_required"
+        edge_reasons = edge.get("review_reasons") if isinstance(edge.get("review_reasons"), list) else []
+        # Issue #319 criterion 9: review_required / inferred edges must explain why.
+        if not edge_reasons and (edge_backing in ("review_required", "inferred") or edge_review == "review_required"):
+            edge_reasons = ["edge_not_source_backed"]
         normalized_edges.append({
             "source_component_id": source,
             "target_component_id": target,
             "relation": relation,
             "edge_type": str(edge.get("edge_type") or raw_relation or "stored_pipeline_edge"),
             "confidence": float(edge.get("confidence") or 0.8),
-            "support_status": str(edge.get("support_status") or "source_inferred"),
-            "review_status": str(edge.get("review_status") or "teacher_review_required"),
+            "support_status": edge_support,
+            "source_backing_status": edge_backing,
+            "review_status": edge_review,
+            "review_reasons": edge_reasons,
             "evidence": edge.get("evidence") if isinstance(edge.get("evidence"), dict) else {"reason": edge.get("reason") or ""},
         })
     if not normalized_nodes and not normalized_edges:

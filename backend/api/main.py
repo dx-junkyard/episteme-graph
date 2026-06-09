@@ -704,8 +704,17 @@ def _run_migrations() -> None:
             END $$
         """))
 
+        # Migration 018: course_builder_sessions ステータス・命名改善 (Issue #310)
+        session.execute(sa_text("""
+            ALTER TABLE course_builder_sessions
+                ADD COLUMN IF NOT EXISTS source_file_name   TEXT,
+                ADD COLUMN IF NOT EXISTS display_name       TEXT,
+                ADD COLUMN IF NOT EXISTS status             TEXT NOT NULL DEFAULT 'draft',
+                ADD COLUMN IF NOT EXISTS published_course_id TEXT
+        """))
+
         session.commit()
-        logger.info("Migrations (002-016) applied successfully.")
+        logger.info("Migrations (002-018) applied successfully.")
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema

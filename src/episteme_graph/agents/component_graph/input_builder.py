@@ -78,6 +78,7 @@ class ComponentGraphInputBuilder:
             if not label:
                 label = str(getattr(comp, "summary", "") or "").strip()[:80] or comp.component_id
             component_type = str(getattr(comp, "component_type", "") or "").strip() or "UnknownComponent"
+            theory_object = _infer_theory_object(comp)
             nodes.append(ComponentGraphNode(
                 component_id=comp.component_id,
                 label=label,
@@ -85,6 +86,29 @@ class ComponentGraphInputBuilder:
                 review_status=getattr(comp, "review_status", "teacher_review_required"),
                 display_order=idx,
                 origin="paper",
+                operation=str(getattr(comp, "operation", "") or ""),
+                theory_object=theory_object,
+                display_label=f"{label}: {theory_object}" if theory_object else label,
+                representative_component_id=comp.component_id,
+                linked_component_ids=[comp.component_id],
+                supporting_derivation_ids=list(getattr(comp, "linked_derivation_ids", []) or []),
+                graph_layer=_graph_layer(comp),
+                maturity_source=str(getattr(comp, "maturity_source", "") or ""),
+                publish_ready=bool(getattr(comp, "publish_ready", False)),
+                input_equation_ids=list(getattr(comp, "input_equation_ids", []) or []),
+                intermediate_equation_ids=list(getattr(comp, "intermediate_equation_ids", []) or []),
+                output_equation_ids=list(getattr(comp, "output_equation_ids", []) or []),
+                definition_equation_ids=list(getattr(comp, "definition_equation_ids", []) or []),
+                constraint_equation_ids=list(getattr(comp, "constraint_equation_ids", []) or []),
+                review_required_equation_ids=list(getattr(comp, "review_required_equation_ids", []) or []),
+                eliminated_symbols=list(getattr(comp, "eliminated_symbols", []) or []),
+                retained_symbols=list(getattr(comp, "retained_symbols", []) or []),
+                support_role=str(getattr(comp, "support_role", "") or ""),
+                supports_claim_ids=list(getattr(comp, "supports_claim_ids", []) or []),
+                support_distance_to_headline_claim=int(getattr(comp, "support_distance_to_headline_claim", 0) or 0),
+                support_kind=str(getattr(comp, "support_kind", "") or ""),
+                concepts=list(getattr(comp, "concepts", []) or []),
+                prerequisite_concepts=list(getattr(comp, "prerequisite_concepts", []) or []),
             ))
         return nodes
 
@@ -251,3 +275,32 @@ class ComponentGraphInputBuilder:
                 elif isinstance(item, str):
                     types.append(item.upper())
         return sorted(set(types))
+
+
+def _graph_layer(component) -> str:
+    if str(getattr(component, "maturity_source", "") or "") == "deterministic_fallback":
+        return "debug"
+    return "main"
+
+
+def _infer_theory_object(component) -> str:
+    text = " ".join([
+        str(getattr(component, "label", "") or ""),
+        str(getattr(component, "summary", "") or ""),
+        str(getattr(component, "reason", "") or ""),
+        " ".join(getattr(component, "linked_equation_ids", []) or []),
+        " ".join(getattr(component, "output_equation_ids", []) or []),
+    ]).lower()
+    if "horndeski" in text or "dhost" in text:
+        return "Horndeski / DHOST gravity"
+    if "skewness" in text or "eq_3_34" in text:
+        return "skewness consistency relation"
+    if "kurtosis" in text or "eq_3_35" in text or "eq_3_36" in text:
+        return "kurtosis consistency relation"
+    if "bias" in text:
+        return "galaxy bias model"
+    if "observable" in text or "eq_2_17" in text or "eq_2_18" in text:
+        return "smoothed observables"
+    if "kernel" in text or "eq_2_5" in text:
+        return "matter perturbation kernels"
+    return ""

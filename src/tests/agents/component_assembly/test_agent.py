@@ -248,6 +248,9 @@ def test_run_returns_components():
     assert result.components[0].linked_claim_ids == ["claim:b2:s2"]
     assert result.components[0].linked_equation_ids == ["eq_3_14"]
     assert result.components[0].linked_derivation_ids == ["derivation_eq_3_14"]
+    assert result.components[0].supports_claim_ids == ["claim:b2:s2"]
+    assert result.components[0].support_role
+    assert result.diagnostics["component_granularity"]
     assert result.components[0].review_status == "teacher_review_required"
     assert result.components[0].source_scope == {"section_id": "sec_1"}
     assert not [i for i in result.validation_issues if i.severity == "error"]
@@ -297,5 +300,36 @@ def test_llm_failure_returns_fallback():
     agent = ComponentAssemblyAgent()
     with patch.object(agent._llm_client, "generate", side_effect=RuntimeError("LLM error")):
         result = agent.run(_qualified(), equations=_equations(), thesis=_thesis(), dsl=_dsl())
-    assert result.confidence == 0.0
-    assert result.validation_issues[0].rule_id == "component_assembly_failed"
+    assert result.confidence == 0.45
+    assert result.components
+    assert result.components[0].component_type == "ClaimBundleComponent"
+    assert result.components[0].maturity_source == "deterministic_fallback"
+    assert result.components[0].publish_ready is False
+    assert result.components[0].fallback_reason == "LLM error"
+    assert result.diagnostics["fallback_reason"] == "LLM error"
+    assert result.diagnostics["original_failure_codes"] == ["initial_llm_exception"]
+    assert result.validation_issues[0].rule_id == "component_assembly_deterministic_fallback"
+
+
+def test_empty_llm_components_falls_back_to_claim_components_without_repair():
+    agent = ComponentAssemblyAgent()
+    empty = {
+        "document_id": "doc_test",
+        "components_version": "v1",
+        "components": [],
+        "assembly_hints": [],
+        "review_notes": [],
+        "confidence": 0.0,
+    }
+
+    with patch.object(agent._llm_client, "generate", return_value=empty) as mocked:
+        result = agent.run(_qualified(), equations=_equations(), thesis=_thesis(), dsl=_dsl())
+
+    assert mocked.call_count == 1
+    assert len(result.components) == 4
+    assert {c.component_type for c in result.components} == {"ClaimBundleComponent"}
+    assert result.components[0].evidence_refs["claim_ids"] == ["claim:b1:s1"]
+    assert result.diagnostics["initial_llm_raw_output"]["component_count"] == 0
+    assert result.diagnostics["initial_validation_issues"][0]["code"] == "no_components"
+    assert result.diagnostics["fallback_reason"] == "LLM component assembly returned no components"
+    assert not [i for i in result.validation_issues if i.severity == "error"]

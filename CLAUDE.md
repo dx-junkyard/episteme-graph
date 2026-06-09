@@ -105,9 +105,9 @@ PDF ファイル
     ↓  PaperSkeletonResult (JSON)
 [#218] RhetoricalRoleAgent      — chunk/span の論理役割判定（LLM-first）
     ↓  RhetoricalRoleResult (JSON)
-[#219] ClaimQualificationAgent  — Claim採否・区分・粒度（LLM-first）
-    ↓  ClaimQualificationResult (JSON)
-[#237] ClaimObjectBuilder       — 最終 claims.json の決定論的組立（非LLM）
+[#219] ClaimQualificationAgent  — Claim採否・区分・粒度 + atomic rewrite（LLM-first, #317）
+    ↓  ClaimQualificationResult (JSON; atomic_claims を含む)
+[#237] ClaimObjectBuilder       — 最終 claims.json の決定論的組立（非LLM, #317）
     ↓  ClaimObjectBuildResult (JSON)
 [#220] EquationSemanticsAgent   — 数式ブロック意味役割復元（LLM-first）
                                   + to_equations_export() で equations.json 化
@@ -143,6 +143,7 @@ src/episteme_graph/agents/
   thesis_reconstruction/ → ThesisReconstructionAgent (#221)
   dsl_linking/          → DSLLinkingAgent (#222)
   component_assembly/   → ComponentAssemblyAgent (#223)
+  component_graph/      → ComponentGraphAgent (#266) — TheoryOperationGraph 構築
 ```
 
 各Agentディレクトリは最低限以下のファイルを持つ:
@@ -165,12 +166,85 @@ examples/          → サンプル入出力JSON
 
 **PaperSkeletonAgent (#217) 以降**: LLM-first。生成・採否・関係付けの高次判断はLLMに委ねる。入力整形・validation・repairは非LLMで処理する。
 
+**Claim atomic rewrite の責務分担 (#317)**: 長い / paper-level / 複数命題の claim を
+1 claim = 1 minimal proposition に再構成する atomic rewrite は **ClaimQualificationAgent**
+の正式ステップ（LLM-first）が担当し、結果を `QualifiedSpanRecord.atomic_claims`
+（`text` / `normalized_text` / `claim_type_candidate` / `atomicity` / `status` /
+`source_span_id` / `evidence_quote` / `qualification_reason` / `confidence`）に出力する。
+atomic 化できない箇所は `atomicity="non_atomic"` / `status="review_required"` で保持する
+（情報を落とさない）。**ClaimObjectBuilder** は atomic rewrite を行わず、その候補を
+ClaimObjectRecord に変換・リンク・検証するだけに責務を限定する。LLM 候補が無い場合の
+deterministic split は `atomicity="split_pending"` / `support_status="review_required"`
+の review suggestion に留め、確定 `source_backed` atomic claim にはしない。非 atomic /
+split_pending claim（`is_atomic=False`）は ComponentGraph / TheoryOperationGraph の
+強い backing に使わない。ExportValidationGate は非 atomic / split_pending を明示 report する。
+
 **全Agent共通ルール**:
 1. **cartridge-aware**: active cartridgeが指定されていれば語彙・検証ルールに使う。cartridgeがなくても単独動作すること
 2. **structured output**: LLM出力は必ずJSONスキーマ検証し、失敗時はrepair/retryを実行
 3. **evidence-based**: 各出力フィールドに `reason` と `confidence` (0.0〜1.0) を付与
 4. **情報を落とさない**: 不明は `unknown` / `deferred` で保持し、削除しない
 5. **maturity・review情報の最終確定禁止**: LLMが提案しても provisional に留める
+
+#### TheoryOperationGraph (ComponentGraphAgent #266 / #302)
+
+`component_graph/normalizer.py` が DerivationChain から **理論操作グラフ (TheoryOperationGraph)** を
+決定論的に構築する。**特定分野・特定論文の用語をハードコードしない**（domain-independent）。
+
+- **node / edge の語彙は `operation` から導出する**: `schema.classify_operation()` が
+  `define_* → defines` / `linearize_* → linearizes` / `solve_* → solves` /
+  `eliminate_* → eliminates` / `derive_* → derives` / `constrain_* → constrains` /
+  `diagnose_* → diagnoses` / `compare_* → compares` のように prefix で edge_type を決める。
+  `transform` / `relate` / `connect` / `support` / `associate` など抽象的な operation は
+  generic 扱いとし、`inferred` / `requires_review` にして warning を出す。
+- **source-backing を必ず明示する**: 各 node は
+  `linked_equation_ids` / `linked_derivation_ids` / `linked_claim_ids` / `linked_evidence_ids` と
+  `source_backing_status`（`source_backed` / `partially_source_backed` / `inferred` / `review_required`）を持つ。
+  各 edge は `evidence_equation_ids` / `evidence_derivation_ids` / `evidence_claim_ids` /
+  `source_evidence_ids` を持ち、node と同じ語彙の `source_backing_status`
+  （`source_backed` / `partially_source_backed` / `inferred` / `review_required`）と、
+  そこから `review_status_for_backing()` で導出される `review_status`
+  （`source_backed` / `review_required`）を持つ (#311)。
+- **review の理由を必ず付与する**: `review_required` の node / edge は `review_reasons` を空にしない
+  （`missing_atomic_claim` / `missing_evidence_link` / `missing_equation_link` /
+  `missing_derivation_link` / `equation_needs_math_review` / `edge_not_source_backed` /
+  `fallback_or_inferred_node` / `source_span_missing` から選ぶ）。
+- **fallback / inferred node を main graph で確定扱いしない**: `deterministic_fallback` や
+  `inferred` の node は `graph_layer = "debug"` に分離し、`source_backed` にしてはならない（hard error）。
+- **graph を 2 層に分離する (#306 / #308)**: main graph は上位理論構成を表す少数の集約 node
+  (`graph_layer = "main"`, `component_type = "TheoryOperationNode"`)、式単位の step は
+  (`graph_layer = "equation_detail"`, `component_type = "EquationOperationNode"`) に保持する。
+  各 detail node は `parent_component_id`、各 main node は `member_component_ids` で相互参照する。
+  generic operation は main node にしない（detail / debug に置き `inferred`）。
+- **main graph は theory stage 単位で集約する (#308)**: 式 step は `(derivation_id, operation family)`
+  ではなく **theory stage** で集約する。stage は `schema.stage_for_edge_type()` が operation の
+  edge_type family から domain-neutral に導出する（`defines → theory_basis` /
+  `constructs・normalizes → observable_construction` / `linearizes・approximates・substitutes →
+  equation_system` / `solves・eliminates → elimination` / `derives・constrains →
+  consistency_relation` / `diagnoses・compares → diagnostic_application`）。stage は全 derivation
+  を跨いで集約されるため、main graph は理論構成 5–8 個程度のバックボーンになる。stage の候補語彙は
+  `schema.THEORY_STAGES` / 表示名は `schema.THEORY_STAGE_LABELS`。特定分野・特定論文の用語は使わない。
+- **main label は短い theory stage label にする (#308)**: main node の label は stage label
+  （`Theory basis` / `Observation model` / `Observable construction` / `Equation system` /
+  `Elimination` / `Consistency relation` / `Diagnostic / application`）**そのもの**を使い、短く保つ。
+  atomic claim text や step reason のような長い説明は label に詰め込まず、node の `description`
+  フィールドに入れて UI 詳細ペインで表示する（`Stage: 長い説明文` のような label は作らない）。
+  **equation ID fallback は使わない**ので `Define eq_2_7` / `Derive result eq_...` のような label は
+  main に出ない。validator は main node の equation-id label (`main_graph_node_equation_id_label`) と
+  generic operation (`main_graph_generic_operation`) を hard error として検出する。
+- **review_status は source_backing_status から導出する (#306)**: `schema.review_status_for_backing()`
+  が `source_backed → source_backed` / `partially_source_backed → teacher_review_required` /
+  `inferred・review_required → review_required` にマップする。全 node を一律
+  `teacher_review_required` にしない。
+- **atomic claim を優先する (#306)**: node の主たる backing は atomic claim（短く、evidence_text が
+  非空、paper-level でない）を優先する。atomic claim が無ければ `review_reasons=["missing_atomic_claim"]`
+  を付け、equation ID だけの label は `partially_source_backed` に留める。空の evidence_text を
+  強い source backing として扱わない。evidence link により `source_backed` になった node でも
+  atomic claim が無ければ `missing_atomic_claim` を warning として残す（`review_status` は
+  `source_backed` のまま）。
+- **UI (`admin.js`)** は `source_backing_status` で表示を区別する
+  （source_backed=通常 / partially=細線 / review_required=点線枠 / inferred・fallback=薄色+⚠）。
+  グラフ層トグル（主グラフ / 式の詳細 / すべて）で `graph_layer` を切り替え、既定は main を優先表示する。
 
 #### カートリッジシステム
 

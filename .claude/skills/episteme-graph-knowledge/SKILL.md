@@ -4,7 +4,8 @@ description: >
   Episteme Graphのナレッジグラフ、PDF教材処理パイプライン、DSL定義、パターンマッチング、
   およびPDF解析Agentパイプライン（DocumentStructureAgent / PaperSkeletonAgent /
   RhetoricalRoleAgent / ClaimQualificationAgent / EquationSemanticsAgent /
-  ThesisReconstructionAgent / DSLLinkingAgent / ComponentAssemblyAgent）に
+  ThesisReconstructionAgent / DSLLinkingAgent / ComponentAssemblyAgent /
+  ComponentAssemblyAgentが生成する理論操作グラフ TheoryOperationGraph (ComponentGraphAgent)）に
   関する実装や修正を行う際に使用します。ユーザーから「抽出ロジックを変更して」
   「ナレッジグラフの構造を修正して」「パイプラインを改善して」「DSLを拡張して」
   「パターンマッチングを調整して」「Agentを実装して」「カートリッジを更新して」
@@ -267,6 +268,54 @@ src/tests/agents/<agent_name>/
 cd src && python -m pytest tests/ -v
 ```
 
+### TheoryOperationGraph の層構造 (ComponentGraphAgent / #266・#302・#306)
+
+`component_graph/normalizer.py` は DerivationChain から **domain-independent** な理論操作グラフを
+決定論的に構築する。node label / edge type は `schema.classify_operation()` が `operation` の
+prefix から導出し、特定分野・特定論文の用語をハードコードしない。
+
+グラフは 2 層に分離する (#306 / #308):
+
+- **main 層** (`graph_layer="main"`, `component_type="TheoryOperationNode"`): 上位理論構成。
+  式 step を **theory stage** で集約した少数 node（5–8 個程度のバックボーン）。stage は
+  `schema.stage_for_edge_type()` が operation の edge_type family から domain-neutral に導出し
+  (`defines→theory_basis` / `constructs・normalizes→observable_construction` /
+  `linearizes・approximates・substitutes→equation_system` / `solves・eliminates→elimination` /
+  `derives・constrains→consistency_relation` / `diagnoses・compares→diagnostic_application`)、
+  全 derivation を跨いで集約する。stage 語彙は `schema.THEORY_STAGES`、表示名は
+  `schema.THEORY_STAGE_LABELS`。main label は短い stage label **そのもの**を使い、atomic claim/reason
+  のような長い説明は label に詰めず node の `description` フィールドへ入れて UI 詳細ペインで表示する
+  （`Stage: 長い説明` の形にはしない）。**equation ID fallback は使わない**ので `Define eq_...` /
+  `Derive result eq_...` は main に出ない。generic operation
+  (`transform`/`relate`/`connect`/`support`/`associate`) も main にしない。validator は main node の
+  equation-id label・generic operation を hard error として検出する (#308)。
+- **equation_detail 層** (`graph_layer="equation_detail"`, `component_type="EquationOperationNode"`):
+  derivation step ごとの式単位 node（ここでは equation ID 入り label を許容）。`parent_component_id` で
+  main node を、main node は `member_component_ids` で detail node を相互参照する。generic step は
+  `debug` 層へ。
+- **ComponentRefiner は「1 component = 1 reusable theory unit」(#308)**:
+  `component_assembly/component_refiner.py` は derivation step を **operation family** 単位の
+  再利用可能な理論ユニットに分割する（式 step 1 個 = 1 component ではない）。同 family の複数 step は
+  1 component に集約し `internal_flow` に保持する。generic operation だけでは child component を作らず、
+  近接ユニットの `internal_flow` に畳み込む。component の label/summary は generic 操作名ではなく
+  理論対象を表す。
+
+その他の必須ルール:
+
+- **source-backing を明示**: 各 node は `linked_equation_ids` / `linked_derivation_ids` /
+  `linked_claim_ids` / `linked_evidence_ids` と `source_backing_status` を持つ。各 edge も node と
+  同じ語彙の `source_backing_status`（`source_backed` / `partially_source_backed` / `inferred` /
+  `review_required`）を持ち、`review_status` はそこから `review_status_for_backing()` で導出する (#311)。
+- **atomic claim を優先**: 主たる backing は atomic claim（短く evidence_text が非空、paper-level
+  でない）を優先。無ければ `review_reasons=["missing_atomic_claim"]`、equation ID だけの label は
+  `partially_source_backed`。空 evidence を強い backing にしない。evidence link で `source_backed`
+  になった node でも atomic claim が無ければ `missing_atomic_claim` warning を残す。
+- **review_status は backing から導出**: `schema.review_status_for_backing()` を使い、全 node を
+  一律 `teacher_review_required` にしない。`review_required` の node/edge は `review_reasons` を
+  空にしない。
+- **UI (`admin.js`)**: 層トグル（主グラフ / 式の詳細 / すべて）で `graph_layer` を切り替え、既定は
+  main を優先表示する。
+
 ## 開発ガイドライン
 
 1. **スキーマ変更**: `backend/core/schema.py` の Pydantic モデルを先に更新し、`backend/core/models.py` の ORM モデルも同期する
@@ -276,6 +325,35 @@ cd src && python -m pytest tests/ -v
 5. **LLM 呼び出し**: 必ず `core/llm.py` の公開 API (`generate_text`, `generate_embeddings`, `generate_text_with_structured_output`) を経由する。`openai` / `google.generativeai` SDK を直接使用しない
 6. **設定値**: `core/config.py` の `get_settings()` を経由する。`os.environ` を直接使用しない
 7. **Embedding 次元数**: `get_embedding_dim()` または `settings.llm_embedding_dim` を使用し、絶対にハードコードしない
+
+## 実装前のドキュメント更新（条件付き必須）
+
+以下に該当する変更を行う場合、**実装を開始する前に** 対応する CLAUDE.md または SKILL.md を更新すること。
+AI アシスタントは各セッション開始時にこれらのファイルを設計書として読むため、実装前に更新することで
+設計意図と実装が一致し、手戻りを防ぐ。
+
+### 更新が必須のケース
+
+| 変更の種類 | 更新対象 |
+|---|---|
+| 新しい Agent の追加 | CLAUDE.md のパイプライン構成表 + 本 SKILL.md の Agent 一覧 |
+| DSL / CorePredicate の変更 | 本 SKILL.md の SMILES DSL セクション |
+| パイプラインの依存関係・順序の変更 | CLAUDE.md のパイプライン概要 + 本 SKILL.md のパイプライン構成表 |
+| TheoryOperationGraph の設計ルール変更 | CLAUDE.md の該当セクション + 本 SKILL.md の層構造セクション |
+| 新しい cartridge ファイル構成の変更 | CLAUDE.md のカートリッジシステムセクション |
+
+### 更新が任意のケース
+
+- 既存 Agent の内部ロジック修正（インターフェース変更なし）
+- バグ修正・パフォーマンス改善のみ
+- テストの追加・修正のみ
+
+### 更新手順
+
+1. 実装予定の変更内容を把握する
+2. 影響する SKILL.md のセクション（パイプライン構成表・Agent 一覧・層構造ルール等）を特定する
+3. 実装内容を反映した形でドキュメントを更新する
+4. 更新後に実装を開始する
 
 ## CI テストパターンの更新（必須）
 

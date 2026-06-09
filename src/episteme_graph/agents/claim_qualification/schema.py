@@ -10,6 +10,24 @@ GRANULARITIES = ["good", "too_broad", "too_narrow"]
 EVIDENCE_ADEQUACY = ["sufficient", "weak", "broken"]
 REVIEWABILITY = ["good", "moderate", "poor"]
 
+# Atomic rewrite vocabulary (issue #317). The ClaimQualificationAgent is the
+# formal step that turns a long / paper-level / multi-proposition span into
+# atomic claim candidates. Each candidate carries its own atomicity verdict:
+#   atomic        — single minimal proposition (usable as confirmed backing)
+#   non_atomic    — still mixes propositions; could not be atomized (review only)
+ATOMIC_CLAIM_ATOMICITY = ["atomic", "non_atomic"]
+# Per-atomic-claim status. ``review_required`` is used when the agent could not
+# produce a confident single proposition and the candidate must be reviewed.
+ATOMIC_CLAIM_STATUSES = ["accepted", "review_required"]
+
+# Connectors / discourse markers that an atomic claim must NOT begin with
+# (criterion #3): a fragment starting with these is not a standalone proposition.
+ATOMIC_CLAIM_LEADING_CONNECTORS = {
+    "and", "but", "or", "so", "then", "thus", "hence", "therefore",
+    "moreover", "furthermore", "however", "whereas", "while", "also",
+    "additionally", "besides", "nor", "yet", "because", "since",
+}
+
 CORE_CLAIM_TYPE_FALLBACKS = [
     "definition",
     "observable_definition",
@@ -29,6 +47,17 @@ CORE_CLAIM_TYPE_FALLBACKS = [
     "background",
     "prior_work",
     "meta",
+    # issue #312 / #317 required vocabulary (kept compatible with the builder's
+    # CLAIM_TYPE_ONTOLOGY) so atomic claims can be typed without collapsing to
+    # "unknown".
+    "problem_statement",
+    "method",
+    "structural_property",
+    "derivation_result",
+    "main_result",
+    "interpretation",
+    "conclusion",
+    "comparison",
     "unknown",
 ]
 
@@ -83,6 +112,11 @@ class QualifiedSpanRecord:
     edit_suggestions: dict
     reason: str
     confidence: float
+    # Atomic claim candidates produced by the LLM atomic-rewrite step (issue #317).
+    # Each entry is a dict with: text, normalized_text, claim_type_candidate,
+    # atomicity, status, source_span_id, evidence_quote, qualification_reason,
+    # confidence. Empty when the span is already atomic or no rewrite was needed.
+    atomic_claims: list[dict] = field(default_factory=list)
 
 
 @dataclass

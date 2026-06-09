@@ -135,6 +135,7 @@ def run_document_pipeline(
     agents: dict | None = None,
     resume: bool = True,
     target_stage: str | None = None,
+    start_stage: str | None = None,
 ) -> DocumentPipelineResult:
     """新 pipeline 本体。同期実行。
 
@@ -159,15 +160,27 @@ def run_document_pipeline(
 
     if target_stage is not None and target_stage not in PIPELINE_STAGES:
         raise ValueError(f"unknown pipeline stage: {target_stage}")
+    if start_stage is not None and start_stage not in PIPELINE_STAGES:
+        raise ValueError(f"unknown pipeline start stage: {start_stage}")
+    stage_order = {stage: idx for idx, stage in enumerate(PIPELINE_STAGES)}
+    start_index = stage_order[start_stage] if start_stage else None
+    if start_stage and target_stage and stage_order[start_stage] > stage_order[target_stage]:
+        raise ValueError(f"start_stage {start_stage!r} is after target_stage {target_stage!r}")
 
     previous_run = (
         get_latest_analysis_run(document_id=document_id, material_id=material_id)
         if resume and agents is None else None
     )
-    if previous_run and previous_run.get("status") == "completed" and target_stage is None:
+    if previous_run and previous_run.get("status") == "completed" and target_stage is None and start_stage is None:
         previous_run = None
     previous_outputs = dict((previous_run or {}).get("stage_outputs") or {})
     previous_artifacts = dict(previous_outputs.get(ARTIFACTS_KEY) or {})
+    if start_index is not None:
+        previous_artifacts = {
+            stage: value
+            for stage, value in previous_artifacts.items()
+            if stage_order.get(stage, 10_000) < start_index
+        }
     run_id = (previous_run or {}).get("id")
     if run_id:
         upsert_analysis_run(
@@ -247,6 +260,15 @@ def run_document_pipeline(
 
     def should_use_artifact(stage: str) -> bool:
         has_artifact = artifact(stage) is not None
+        if start_index is not None:
+            if stage_order[stage] < start_index:
+                if not has_artifact:
+                    raise PipelineStageError(
+                        stage,
+                        f"required artifact '{stage}' is missing for restart from '{start_stage}'",
+                    )
+                return True
+            return False
         if target_stage is not None and target_stage != stage and not has_artifact:
             raise PipelineStageError(
                 stage,
@@ -647,7 +669,7 @@ def run_document_pipeline(
                 th_agent = _instantiate(agent_classes["ThesisReconstructionAgent"])
                 thesis = th_agent.run(
                     skeleton=skeleton, qualified_claims=qualified, equations=equations,
-                    cartridge_id=cartridge_id,
+                    cartridge_id=cartridge_id, claim_objects=claim_objects,
                 )
             except Exception as exc:
                 logger.exception("thesis_reconstruction stage failed for document=%s material=%s", document_id, material_id)
@@ -668,6 +690,7 @@ def run_document_pipeline(
                 dsl_agent = _instantiate(agent_classes["DSLLinkingAgent"])
                 dsl = dsl_agent.run(
                     qualified_claims=qualified, equations=equations, thesis=thesis,
+                    claim_objects=claim_objects,
                 )
             except Exception as exc:
                 logger.exception("dsl_linking stage failed for document=%s material=%s", document_id, material_id)

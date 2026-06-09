@@ -15,8 +15,11 @@
     courseDraft: null,
     sending: false,
     currentSessionId: null,
+    currentSessionStatus: "draft",
+    currentSessionPublishedCourseId: null,
     importedFromCourseId: null,
     availableMaterials: [],
+    availableSessions: [],
     selectedMaterialIds: [],
     materialPipelineStatus: {},
     materialPipelineTimers: {},
@@ -544,7 +547,7 @@
     showUploadStatus(label + "を開始しています...", "info");
     apiFetch("/admin/materials/" + encodeURIComponent(materialId) + "/document-pipeline/run", {
       method: "POST",
-      body: JSON.stringify({ target_stage: stage || "" }),
+      body: JSON.stringify({ start_stage: stage || "" }),
     })
       .then(function (res) {
         if (!res.ok) {
@@ -560,7 +563,8 @@
         state.materialPipelineStatus[materialId] = Object.assign({}, state.materialPipelineStatus[materialId] || {}, {
           status: "running",
           active_task_id: data.task_id,
-          active_target_stage: stage || "",
+          active_target_stage: "",
+          active_start_stage: stage || "",
         });
         if (stage) {
           state.materialPipelineStatus[materialId].stages = state.materialPipelineStatus[materialId].stages || {};
@@ -595,6 +599,7 @@
           status.document_id = rd.document_id || status.document_id || "";
           status.stages = status.stages || {};
           if (rd.target_stage) status.stages[rd.target_stage] = status.status === "completed" ? "completed" : status.status === "failed" ? "failed" : "running";
+          if (rd.start_stage) status.stages[rd.start_stage] = status.status === "completed" ? "completed" : status.status === "failed" ? "failed" : "running";
           if (status.current_stage && status.stages[status.current_stage] !== "completed") {
             status.stages[status.current_stage] = status.status === "failed" ? "failed" : "running";
           }
@@ -962,14 +967,14 @@
     apiFetch("/admin/course-builder/sessions")
       .then(function (res) { return res.json(); })
       .then(function (sessions) {
-        if (!sessions || sessions.length === 0) {
-          createNewSession();
-        } else {
-          renderSessionBar(sessions);
-          selectSession(sessions[0].session_id);
-        }
+        state.availableSessions = sessions || [];
+        renderSessionBar(sessions);
+        // 初期表示は常に新規作成状態（前回セッションは自動復元しない）
+        renderCourseChat();
+        renderCoursePreview();
       })
       .catch(function () {
+        state.availableSessions = [];
         var bar = document.getElementById("cb-session-bar");
         if (bar) bar.style.display = "none";
       });
@@ -980,8 +985,11 @@
     if (!bar) return;
 
     var selectHtml = '<select id="session-select" style="flex:1;padding:4px 6px;background:var(--color-bg-secondary);border:1px solid var(--color-border);border-radius:4px;color:var(--color-text-primary);font-size:12px">';
-    sessions.forEach(function (s) {
-      selectHtml += '<option value="' + escHtml(s.session_id) + '">' + escHtml(s.title) + "</option>";
+    selectHtml += '<option value="">― 過去のセッションを選択 ―</option>';
+    (sessions || []).forEach(function (s) {
+      var label = s.display_name || s.title || s.session_id;
+      if (s.status === "published") label += " [登録済]";
+      selectHtml += '<option value="' + escHtml(s.session_id) + '">' + escHtml(label) + "</option>";
     });
     selectHtml += "</select>";
 
@@ -992,40 +1000,58 @@
       '<button id="import-course-btn" style="padding:4px 10px;font-size:12px;background:var(--color-bg-tertiary);border:1px solid var(--color-border);border-radius:4px;color:var(--color-text-info);cursor:pointer;white-space:nowrap">既存コースを読込</button>' +
       "</div>";
 
-    if (state.currentSessionId) {
-      var sel = document.getElementById("session-select");
-      if (sel) sel.value = state.currentSessionId;
+    // 現在選択中のセッションがあれば反映（なければ空欄のまま）
+    var sel = document.getElementById("session-select");
+    if (sel && state.currentSessionId) {
+      sel.value = state.currentSessionId;
     }
 
-    document.getElementById("session-select").addEventListener("change", function () {
-      selectSession(this.value);
+    sel.addEventListener("change", function () {
+      if (this.value) {
+        selectSession(this.value);
+      } else {
+        // 未選択に戻した場合は新規作成状態にリセット
+        resetToNewSession();
+      }
     });
     document.getElementById("new-session-btn").addEventListener("click", function () {
-      createNewSession();
+      resetToNewSession();
+      sel.value = "";
     });
     document.getElementById("import-course-btn").addEventListener("click", function () {
       openImportCourseModal();
     });
   }
 
+  function resetToNewSession() {
+    state.currentSessionId = null;
+    state.currentSessionStatus = "draft";
+    state.currentSessionPublishedCourseId = null;
+    state.chatHistory = [];
+    state.chatMessages = [];
+    state.courseDraft = null;
+    state.importedFromCourseId = null;
+    renderCourseChat();
+    renderCoursePreview();
+  }
+
   function createNewSession() {
-    apiFetch("/admin/course-builder/sessions", {
+    // 後方互換: importCourse等から呼ばれた場合のみ即時作成
+    return _createSessionNow("", null);
+  }
+
+  function _createSessionNow(title, sourceFileName) {
+    return apiFetch("/admin/course-builder/sessions", {
       method: "POST",
-      body: JSON.stringify({ title: "新しいセッション" }),
+      body: JSON.stringify({ title: title || "", source_file_name: sourceFileName || null }),
     })
       .then(function (res) { return res.json(); })
       .then(function (data) {
         state.currentSessionId = data.session_id;
-        state.chatHistory = [];
-        state.chatMessages = [];
-        state.courseDraft = null;
-        state.importedFromCourseId = null;
-        renderCourseChat();
-        renderCoursePreview();
+        state.currentSessionStatus = data.status || "draft";
+        state.currentSessionPublishedCourseId = data.published_course_id || null;
         reloadSessionBar(data.session_id);
-      })
-      .catch(function () {
-        // セッション作成失敗時は session_id なしで動作継続
+        return data;
       });
   }
 
@@ -1033,6 +1059,7 @@
     apiFetch("/admin/course-builder/sessions")
       .then(function (res) { return res.json(); })
       .then(function (sessions) {
+        state.availableSessions = sessions || [];
         renderSessionBar(sessions);
         if (selectId) {
           var sel = document.getElementById("session-select");
@@ -1048,6 +1075,8 @@
       .then(function (res) { return res.json(); })
       .then(function (data) {
         state.currentSessionId = data.session_id;
+        state.currentSessionStatus = data.status || "draft";
+        state.currentSessionPublishedCourseId = data.published_course_id || null;
         state.chatHistory = data.history || [];
         state.chatMessages = data.history || [];
         state.courseDraft = data.course_draft || null;
@@ -1060,8 +1089,29 @@
       .catch(function () {});
   }
 
+  function _getSrcFileNameFromSelection() {
+    if (!state.selectedMaterialIds || state.selectedMaterialIds.length === 0) return null;
+    for (var i = 0; i < state.availableMaterials.length; i++) {
+      var m = state.availableMaterials[i];
+      if ((m.material_id || m.id) === state.selectedMaterialIds[0]) {
+        var fn = m.filename || m.title || "";
+        return fn.replace(/\.pdf$/i, "").replace(/\s+/g, "_") || null;
+      }
+    }
+    return null;
+  }
+
   function sendCourseChat(text) {
     if (!text || state.sending) return;
+
+    // 遅延セッション作成: 初回送信時にセッションを作成する
+    if (!state.currentSessionId) {
+      var srcFileName = _getSrcFileNameFromSelection();
+      _createSessionNow("", srcFileName)
+        .then(function () { sendCourseChat(text); })
+        .catch(function () { sendCourseChat(text); });
+      return;
+    }
 
     state.chatMessages.push({ role: "user", content: text });
     state.sending = true;
@@ -1249,6 +1299,27 @@
 
     area.innerHTML = html;
     approveArea.style.display = "block";
+
+    // 登録済みセッションは承認ボタンを無効化
+    var approveBtn = document.getElementById("cb-approve-btn");
+    if (approveBtn) {
+      var isPublished = state.currentSessionStatus === "published" || !!state.currentSessionPublishedCourseId;
+      if (isPublished) {
+        approveBtn.disabled = true;
+        approveBtn.textContent = "登録済み";
+        approveBtn.style.background = "var(--color-bg-tertiary)";
+        approveBtn.style.color = "var(--color-text-tertiary)";
+        approveBtn.style.cursor = "not-allowed";
+        approveBtn.style.opacity = "0.7";
+      } else {
+        approveBtn.disabled = false;
+        approveBtn.textContent = "承認してコースを登録";
+        approveBtn.style.background = "";
+        approveBtn.style.color = "";
+        approveBtn.style.cursor = "";
+        approveBtn.style.opacity = "";
+      }
+    }
   }
 
   // ── Course Approval ────────────────────────────────────────────────
@@ -1357,6 +1428,24 @@
         btn.style.background = "var(--color-text-success)";
 
         var newCourseId = data.id;
+
+        // セッションの status を published に更新
+        state.currentSessionStatus = "published";
+        state.currentSessionPublishedCourseId = newCourseId;
+        renderCoursePreview();
+        if (state.currentSessionId) {
+          apiFetch("/admin/course-builder/sessions/" + state.currentSessionId, {
+            method: "PUT",
+            body: JSON.stringify({
+              status: "published",
+              published_course_id: newCourseId,
+              title: draft.title || "",
+            }),
+          }).then(function () {
+            reloadSessionBar(state.currentSessionId);
+          }).catch(function () {});
+        }
+
         var successMsg = {
           role: "assistant",
           content: "コース「" + (data.title || draft.title) + "」が正常に登録されました。（ID: " + newCourseId + "）\n\n「コース管理」タブからグループ単位で受講可／編集可の権限を設定できます。\n\nコース内容を自動生成中...",
@@ -1679,11 +1768,13 @@
         // 2. Create a new session for the import
         return apiFetch("/admin/course-builder/sessions", {
           method: "POST",
-          body: JSON.stringify({ title: "再編集: " + courseTitle }),
+          body: JSON.stringify({ title: "再編集: " + courseTitle, source_file_name: null }),
         })
           .then(function (res) { return res.json(); })
           .then(function (sessionData) {
             var sessionId = sessionData.session_id;
+            state.currentSessionStatus = sessionData.status || "draft";
+            state.currentSessionPublishedCourseId = sessionData.published_course_id || null;
 
             // 3. Set state with imported data
             var initMessage = "コース「" + courseTitle + "」のデータを読み込みました。どのように変更・アップデートしますか？\n\n現在のコース構成はプレビューに表示されています。例えば以下のような指示ができます：\n- 「第3章に新しいトピックを追加して」\n- 「この概念をもう少し細かく分割して」\n- 「前提知識の順序を見直して」";
@@ -2845,6 +2936,8 @@
     claimMetaByChunk: {},
     componentsBySection: {},
     graphByDocument: {},
+    // Issue #306: 表示するグラフ層 ("main" | "equation_detail" | "all")。
+    graphLayerFilter: "main",
     selectedScope: null,
     selectedTheoryComponentId: null,
     analysisStatus: null,
@@ -3694,7 +3787,7 @@
           );
           _lsPollStructureTask(task.task_id, rd.total_materials || 0);
         } else if (task.task_type === "document_pipeline") {
-          var targetStage = rd.target_stage || "";
+          var targetStage = rd.start_stage || rd.target_stage || "";
           var label = targetStage ? lsAgentStageLabels[targetStage] || targetStage : "パイプライン全実行";
           lsState.pipelineTask = targetStage
             ? { step: "document_pipeline", stage: targetStage, status: "running" }
@@ -5194,9 +5287,11 @@
       return;
     }
 
+    var view = lsGraphForCurrentLayer(graph);
     var html =
       '<div class="ls-component-graph-shell">' +
         '<div class="ls-component-graph-main">' +
+          lsGraphLayerToolbarHtml(nodes) +
           '<div id="ls-component-network" class="ls-component-network" tabindex="0"></div>' +
           '<div class="ls-component-legend">' +
             '<div class="ls-component-legend-title">論理コンポーネント</div>' +
@@ -5210,18 +5305,94 @@
           '<button id="ls-component-graph-fit" class="ls-component-graph-fit" type="button" title="全体を表示">⤢</button>' +
         '</div>' +
         '<aside id="ls-component-graph-detail" class="ls-component-graph-detail">' +
-          lsGraphEmptyDetailHtml(nodes.length, edges.length) +
+          lsGraphEmptyDetailHtml(view.nodes.length, view.edges.length) +
         '</aside>' +
       '</div>' +
       lsGraphValidationHtml(validations);
     container.innerHTML = html;
 
+    lsBindGraphLayerToolbar(documentId);
+
     if (!window.vis || !window.vis.Network) {
-      lsRenderGraphFallback(container, graph);
+      lsRenderGraphFallback(container, view);
       return;
     }
 
-    lsInitComponentGraphNetwork(graph);
+    lsInitComponentGraphNetwork(view);
+  }
+
+  // Issue #306: グラフは main（上位理論構成）と equation_detail（式単位）の
+  // 2層を持つ。デフォルトは main を優先表示し、トグルで詳細層を展開できる。
+  function lsGraphLayerOptions(nodes) {
+    var counts = { main: 0, equation_detail: 0, debug: 0, other: 0 };
+    (nodes || []).forEach(function (node) {
+      var layer = String((node && node.graph_layer) || "main").toLowerCase();
+      if (counts[layer] === undefined) counts.other += 1;
+      else counts[layer] += 1;
+    });
+    // Only a layered graph (with equation_detail / debug nodes) needs a toggle.
+    if (!counts.equation_detail && !counts.debug && !counts.other) return [];
+    var options = [{ value: "main", label: "主グラフ", count: counts.main }];
+    if (counts.equation_detail) {
+      options.push({ value: "equation_detail", label: "式の詳細", count: counts.equation_detail });
+    }
+    options.push({
+      value: "all",
+      label: "すべて（デバッグ）",
+      count: counts.main + counts.equation_detail + counts.debug + counts.other,
+    });
+    return options;
+  }
+
+  function lsGraphLayerToolbarHtml(nodes) {
+    var options = lsGraphLayerOptions(nodes);
+    if (options.length <= 1) return "";
+    var current = lsState.graphLayerFilter || "main";
+    var buttons = options.map(function (opt) {
+      var active = opt.value === current ? " is-active" : "";
+      return '<button type="button" class="ls-graph-layer-btn' + active + '" data-graph-layer="' +
+        escHtml(opt.value) + '">' + escHtml(opt.label) +
+        ' <span class="ls-graph-layer-count">' + escHtml(String(opt.count)) + '</span></button>';
+    }).join("");
+    return '<div class="ls-graph-layer-toolbar" role="group" aria-label="グラフ層の切り替え">' +
+      buttons + '</div>';
+  }
+
+  function lsBindGraphLayerToolbar(documentId) {
+    var buttons = document.querySelectorAll(".ls-graph-layer-btn");
+    Array.prototype.forEach.call(buttons, function (btn) {
+      btn.addEventListener("click", function () {
+        var layer = btn.getAttribute("data-graph-layer") || "main";
+        if (layer === lsState.graphLayerFilter) return;
+        lsState.graphLayerFilter = layer;
+        lsRenderGraphPanel(documentId);
+      });
+    });
+  }
+
+  // Return a graph filtered to the currently selected layer. Edges are kept
+  // only when both endpoints remain visible.
+  function lsGraphForCurrentLayer(graph) {
+    var filter = lsState.graphLayerFilter || "main";
+    var nodes = graph.nodes || [];
+    var edges = graph.edges || [];
+    if (filter === "all") return graph;
+    var visible = nodes.filter(function (node) {
+      var layer = String((node && node.graph_layer) || "main").toLowerCase();
+      if (filter === "main") return layer === "main";
+      // equation_detail view shows the detailed trace plus its debug steps.
+      return layer === "equation_detail" || layer === "debug";
+    });
+    // Never show an empty canvas: fall back to all nodes if the filter is empty.
+    if (!visible.length) visible = nodes;
+    var visibleIds = {};
+    visible.forEach(function (node) { visibleIds[lsGraphNodeId(node)] = true; });
+    var visibleEdges = edges.filter(function (edge) {
+      var source = edge.source_component_id || edge.source || edge.from;
+      var target = edge.target_component_id || edge.target || edge.to;
+      return visibleIds[source] && visibleIds[target];
+    });
+    return Object.assign({}, graph, { nodes: visible, edges: visibleEdges });
   }
 
   function lsGraphEmptyDetailHtml(nodeCount, edgeCount) {
@@ -5267,16 +5438,23 @@
       var id = lsGraphNodeId(node) || ("node-" + index);
       var group = lsGraphNodeGroup(node);
       var pos = layoutPositions[id] || { x: 0, y: index * 160 };
+      var backing = String((node && node.source_backing_status) || "").toLowerCase();
       var visNode = {
         id: id,
-        label: lsWrapGraphLabel(node.label || node.name || id),
+        label: lsGraphNodeDisplayLabel(node, id),
         x: pos.x,
         y: pos.y,
         group: group,
-        title: node.component_type_text || node.component_type || node.review_status || "",
+        title: lsGraphNodeTooltip(node),
       };
-      if (lsGraphNodeDashed(node, group)) {
+      if (lsGraphNodeDashed(node, group) || backing === "review_required") {
         visNode.shapeProperties = { borderDashes: [6, 5] };
+      }
+      if (backing === "partially_source_backed") {
+        visNode.borderWidth = 1;
+      }
+      if (lsGraphNodeFaded(node, backing)) {
+        visNode.opacity = 0.55;
       }
       return visNode;
     }));
@@ -5350,19 +5528,64 @@
     var detail = document.getElementById("ls-component-graph-detail");
     if (!detail) return;
     var nodeId = lsGraphNodeId(node);
+    var nodeById = {};
+    (graph.nodes || []).forEach(function (n) {
+      var id = lsGraphNodeId(n);
+      if (id) nodeById[id] = n;
+    });
     var connected = (graph.edges || []).filter(function (edge) {
       var source = edge.source_component_id || edge.source || edge.from;
       var target = edge.target_component_id || edge.target || edge.to;
       return source === nodeId || target === nodeId;
     });
+    var backing = String(node.source_backing_status || "").toLowerCase();
+
+    // Header: badge + title
     var html =
-      '<div class="ls-graph-detail-badge ' + escHtml(lsGraphNodeGroup(node)) + '">' + escHtml(node.component_type_text || node.component_type || node.typeName || "component") + '</div>' +
-      '<h4>' + escHtml(node.label || node.name || nodeId || "無題") + '</h4>' +
-      '<p class="ls-graph-detail-meta">' + escHtml(node.review_status || node.origin || "paper") + '</p>';
-    if (node.summary) {
-      html += '<div class="ls-graph-detail-section"><b>Summary</b><p>' + escHtml(node.summary) + '</p></div>';
+      '<div class="ls-graph-detail-badge ' + escHtml(lsGraphNodeGroup(node)) + '">' +
+      escHtml(node.component_type_text || node.component_type || node.typeName || "component") + '</div>' +
+      '<h4>' + escHtml((lsGraphNodeDisplayLabel(node, nodeId) || nodeId || "無題").replace(/\n/g, " — ")) + '</h4>';
+
+    // 1. このノードの意味
+    if (node.description) {
+      html += '<div class="ls-graph-detail-section"><b>このノードの意味</b><p>' + escHtml(node.description) + '</p></div>';
     }
-    html += '<div class="ls-graph-detail-section"><b>Connections</b>';
+
+    // 1b. 抽出メモ（review_reason — step.reason からの抽出/検証メモ）
+    var reviewReason = String(node.review_reason || "").trim();
+    if (reviewReason) {
+      html += '<div class="ls-graph-detail-section"><b>抽出メモ</b><p class="ls-graph-detail-memo">' + escHtml(reviewReason) + '</p></div>';
+    }
+
+    // 2. 入力
+    var inputParts = "";
+    if ((node.input_equation_ids || []).length) {
+      inputParts += '<div class="ls-graph-detail-link"><span>式</span> ' + escHtml((node.input_equation_ids).join(", ")) + '</div>';
+    }
+    if ((node.input_claim_ids || []).length) {
+      inputParts += '<div class="ls-graph-detail-link"><span>claim</span> ' + escHtml((node.input_claim_ids).join(", ")) + '</div>';
+    }
+    if ((node.required_claim_ids || []).length) {
+      inputParts += '<div class="ls-graph-detail-link"><span>前提claim</span> ' + escHtml((node.required_claim_ids).join(", ")) + '</div>';
+    }
+    if (inputParts) {
+      html += '<div class="ls-graph-detail-section"><b>入力</b>' + inputParts + '</div>';
+    }
+
+    // 3. 出力
+    var outputParts = "";
+    if ((node.output_equation_ids || []).length) {
+      outputParts += '<div class="ls-graph-detail-link"><span>式</span> ' + escHtml((node.output_equation_ids).join(", ")) + '</div>';
+    }
+    if ((node.output_claim_ids || []).length) {
+      outputParts += '<div class="ls-graph-detail-link"><span>claim</span> ' + escHtml((node.output_claim_ids).join(", ")) + '</div>';
+    }
+    if (outputParts) {
+      html += '<div class="ls-graph-detail-section"><b>出力</b>' + outputParts + '</div>';
+    }
+
+    // 4. 接続（接続先ノードのラベルと接続理由を表示）
+    html += '<div class="ls-graph-detail-section"><b>接続</b>';
     if (!connected.length) {
       html += '<p class="ls-theory-muted">接続エッジはありません。</p>';
     } else {
@@ -5370,12 +5593,58 @@
       connected.forEach(function (edge) {
         var source = edge.source_component_id || edge.source || edge.from;
         var target = edge.target_component_id || edge.target || edge.to;
-        var direction = source === nodeId ? "→ " + target : "← " + source;
-        html += '<li><span>' + escHtml(edge.relation || edge.edge_type || edge.type || "RELATED_TO") + '</span>' + escHtml(direction) + '</li>';
+        var otherId = source === nodeId ? target : source;
+        var otherNode = nodeById[otherId];
+        var otherLabel = otherNode ? ((lsGraphNodeDisplayLabel(otherNode, otherId) || otherId).replace(/\n/g, " ")) : otherId;
+        var arrow = source === nodeId ? "→" : "←";
+        var relation = edge.relation || edge.edge_type || edge.type || "RELATED_TO";
+        var edgeLabel = lsGraphEdgeLabel(relation);
+        html += '<li><span>' + escHtml(edgeLabel) + '</span>' + escHtml(arrow + " " + otherLabel);
+        var evidence = edge.evidence || {};
+        var reason = String(evidence.reason || "").trim();
+        if (reason) {
+          html += '<div class="ls-graph-detail-edge-reason">' + escHtml(reason) + '</div>';
+        }
+        html += '</li>';
       });
       html += '</ul>';
     }
-    html += '</div><div class="ls-graph-detail-section"><b>System ID</b><code>' + escHtml(nodeId || "") + '</code></div>';
+    html += '</div>';
+
+    // 5. 根拠
+    var links = lsGraphSourceLinksHtml(node);
+    if (links) {
+      html += '<div class="ls-graph-detail-section"><b>根拠</b>' + links + '</div>';
+    }
+
+    // 6. 要確認事項
+    var hasReview = backing || (node.review_reasons || []).length;
+    if (hasReview) {
+      html += '<div class="ls-graph-detail-section"><b>要確認事項</b>';
+      if (backing) {
+        html += '<p class="ls-graph-backing ls-graph-backing-' + escHtml(backing) + '">' +
+          escHtml(lsGraphSourceBackingLabel(backing)) + '</p>';
+      }
+      if ((node.review_reasons || []).length) {
+        html += '<ul class="ls-graph-detail-reasons">';
+        node.review_reasons.forEach(function (reason) {
+          html += '<li>' + escHtml(lsGraphReviewReasonLabel(reason)) + '</li>';
+        });
+        html += '</ul>';
+      }
+      html += '</div>';
+    }
+
+    // 7. システム情報（折りたたみ）
+    html += '<div class="ls-graph-detail-section ls-graph-detail-system">' +
+      '<details><summary>システム情報</summary>' +
+      '<div class="ls-graph-detail-link"><b>ID</b> <code>' + escHtml(nodeId || "") + '</code></div>' +
+      '<div class="ls-graph-detail-link"><b>レイヤー</b> ' + escHtml(lsGraphLayerLabel(node.graph_layer)) + '</div>' +
+      '<div class="ls-graph-detail-link"><b>ステータス</b> ' + escHtml(node.review_status || node.origin || "paper") + '</div>';
+    var linkage = lsGraphLayerLinkageHtml(node);
+    if (linkage) html += linkage;
+    html += '</details></div>';
+
     detail.innerHTML = html;
   }
 
@@ -5386,7 +5655,7 @@
     nodes.forEach(function (node) { nodeById[lsGraphNodeId(node)] = node; });
     var html = '<div class="ls-empty-state">ネットワーク描画ライブラリを読み込めませんでした。テキスト表示に切り替えます。</div><div class="ls-graph-flow">';
     nodes.forEach(function (node) {
-      html += '<div class="ls-graph-node">' + escHtml(node.label || lsGraphNodeId(node)) + '<div class="ls-theory-muted">' + escHtml(node.origin || "paper") + ' / ' + escHtml(node.component_type || "") + '</div></div>';
+      html += '<div class="ls-graph-node">' + escHtml(lsGraphMainStageLabel(node) || node.label || lsGraphNodeId(node)) + '<div class="ls-theory-muted">' + escHtml(node.origin || "paper") + ' / ' + escHtml(node.component_type || "") + '</div></div>';
     });
     edges.forEach(function (edge) {
       var sourceId = edge.source_component_id || edge.source || edge.from;
@@ -5403,6 +5672,23 @@
 
   function lsGraphNodeId(node) {
     return node && (node.component_id || node.id || node.node_id);
+  }
+
+  function lsGraphSourceLinksHtml(node) {
+    var rows = [
+      ["equation", node.linked_equation_ids],
+      ["derivation", node.linked_derivation_ids],
+      ["claim", node.linked_claim_ids],
+      ["evidence", node.linked_evidence_ids],
+    ];
+    var html = "";
+    rows.forEach(function (row) {
+      var ids = row[1] || [];
+      if (!ids.length) return;
+      html += '<div class="ls-graph-detail-link"><span>' + escHtml(row[0]) + '</span> ' +
+        escHtml(ids.join(", ")) + '</div>';
+    });
+    return html;
   }
 
   function lsWrapGraphLabel(label) {
@@ -5456,7 +5742,206 @@
 
   function lsGraphNodeDashed(node, group) {
     var label = String((node && (node.label || node.name)) || "").toLowerCase();
-    return /uniform-coordinate|単一粒子/.test(label) || (group === "method" && /unpredictability/.test(label));
+    var layer = String((node && node.graph_layer) || "").toLowerCase();
+    var maturity = String((node && node.maturity_source) || "").toLowerCase();
+    return layer === "debug" || maturity === "deterministic_fallback" ||
+      /uniform-coordinate|単一粒子/.test(label) || (group === "method" && /unpredictability/.test(label));
+  }
+
+  function lsGraphNodeFaded(node, backing) {
+    var layer = String((node && node.graph_layer) || "").toLowerCase();
+    var maturity = String((node && node.maturity_source) || "").toLowerCase();
+    return backing === "inferred" || layer === "debug" || maturity === "deterministic_fallback";
+  }
+
+  function lsGraphNodeIsFallback(node) {
+    var maturity = String((node && node.maturity_source) || "").toLowerCase();
+    var backing = String((node && node.source_backing_status) || "").toLowerCase();
+    return maturity === "deterministic_fallback" || backing === "inferred";
+  }
+
+  // Issue #337: Japanese operation verb mapping for graph node display.
+  var LS_OPERATION_VERB_JA = {
+    "Apply definition": "定義を適用",
+    "Apply criterion": "基準を適用",
+    "Apply constraint": "制約を適用",
+    "Apply equation": "式を適用",
+    "Apply measurement": "測定を適用",
+    "Apply independence": "独立性を適用",
+    "Infer conclusion": "結論を導出",
+    "Infer intermediate claim": "中間主張を導出",
+    "Derive result": "結果を導出",
+    "Derive consistency relation": "整合関係を導出",
+    "Compare": "比較・検証",
+    "Flag limitation": "制約を確認",
+    "Eliminate parameter": "パラメータを消去",
+    "Solve linear system": "連立方程式を求解",
+    "State assumption": "仮定を提示",
+    "Branch on condition": "条件分岐",
+    "Introduce observable": "観測量を導入",
+    "Define": "定義",
+    "Construct": "構成",
+    "Linearize": "線形化",
+    "Normalize": "正規化",
+    "Approximate": "近似",
+    "Substitute": "代入",
+    "Eliminate": "消去",
+    "Derive": "導出",
+    "Constrain": "制約",
+    "Diagnose": "診断",
+    "Solve": "求解",
+    "Infer": "推論",
+    "Apply": "適用",
+    "Flag": "確認",
+    "State": "提示",
+    "Introduce": "導入",
+  };
+
+  // Issue #337: Japanese stage labels for main graph nodes.
+  var LS_STAGE_LABELS_JA = {
+    "Theory basis": "理論の前提",
+    "Observation model": "観測モデル",
+    "Observable construction": "観測量の構成",
+    "Equation system": "方程式系",
+    "Elimination": "消去",
+    "Consistency relation": "整合条件",
+    "Diagnostic / application": "診断・応用",
+  };
+
+  function lsGraphOperationLabelJa(verb) {
+    var label = String(verb || "").trim();
+    if (LS_OPERATION_VERB_JA[label]) return LS_OPERATION_VERB_JA[label];
+    if (LS_STAGE_LABELS_JA[label]) return LS_STAGE_LABELS_JA[label];
+    var parts = label.split(" ");
+    if (parts.length >= 2 && LS_OPERATION_VERB_JA[parts[0]]) {
+      return LS_OPERATION_VERB_JA[parts[0]] + ": " + parts.slice(1).join(" ");
+    }
+    return label;
+  }
+
+  // Prefix a warning icon for fallback / inferred nodes so they are not mistaken
+  // for confirmed, source-backed theory operations (issue #302).
+  // Issue #337: prefer visual_label (short), translate to Japanese.
+  function lsGraphNodeDisplayLabel(node, id) {
+    var visualLabel = String((node && node.visual_label) || "").trim();
+    var raw;
+    if (visualLabel) {
+      raw = lsGraphOperationLabelJa(visualLabel);
+    } else {
+      raw = lsGraphFullDisplayLabel(node) || id;
+    }
+    var label = lsWrapGraphLabel(raw);
+    return lsGraphNodeIsFallback(node) ? "⚠ " + label : label;
+  }
+
+  function lsGraphLayerLabel(layer) {
+    var labels = {
+      main: "主グラフ（上位理論構成）",
+      equation_detail: "式の詳細",
+      debug: "要確認 / 推論層",
+    };
+    return labels[String(layer || "main").toLowerCase()] || layer || "主グラフ";
+  }
+
+  function lsGraphLayerLinkageHtml(node) {
+    var html = "";
+    if (node.representative_component_id) {
+      html += '<div class="ls-graph-detail-link"><span>代表Component</span> ' +
+        escHtml(node.representative_component_id) + '</div>';
+    }
+    var linkedComponents = node.linked_component_ids || [];
+    if (linkedComponents.length) {
+      html += '<div class="ls-graph-detail-link"><span>関連Component</span> ' +
+        escHtml(String(linkedComponents.length)) + ' 件</div>';
+    }
+    var members = node.member_component_ids || [];
+    if (members.length) {
+      html += '<div class="ls-graph-detail-link"><span>式ステップ</span> ' +
+        escHtml(String(members.length)) + ' 件を集約</div>';
+    }
+    if (node.parent_component_id) {
+      html += '<div class="ls-graph-detail-link"><span>所属</span> ' +
+        escHtml(node.parent_component_id) + '</div>';
+    }
+    return html;
+  }
+
+  function lsGraphSourceBackingLabel(status) {
+    var labels = {
+      source_backed: "出典あり",
+      partially_source_backed: "部分的に出典あり",
+      inferred: "推論",
+      review_required: "要確認",
+    };
+    return labels[String(status || "").toLowerCase()] || status || "";
+  }
+
+  function lsGraphReviewReasonLabel(reason) {
+    var labels = {
+      missing_atomic_claim: "atomicなclaim未紐付け",
+      missing_evidence_link: "evidence未紐付け",
+      missing_equation_link: "equation未紐付け",
+      missing_derivation_link: "derivation未紐付け",
+      equation_needs_math_review: "数式の確認が必要",
+      edge_not_source_backed: "edgeに出典がない",
+      fallback_or_inferred_node: "fallback / 推論ノード",
+      source_span_missing: "原文spanがない",
+    };
+    return labels[String(reason || "")] || reason || "";
+  }
+
+  // Issue #319: main-layer TheoryOperationNode labels must be short stage names
+  // only. Backend re-normalizes stored graphs, but guard client-side too so a
+  // stale graph never shows "Theory basis: Eq. (2.7) ..." as a visual label.
+  var LS_MAIN_STAGE_LABELS = [
+    "Theory basis",
+    "Observation model",
+    "Observable construction",
+    "Equation system",
+    "Elimination",
+    "Consistency relation",
+    "Diagnostic / application",
+  ];
+
+  function lsGraphMainStageLabel(node) {
+    var label = String((node && (node.label || node.name)) || "");
+    var layer = String((node && node.graph_layer) || "main").toLowerCase();
+    var ctype = String((node && (node.component_type || node.type)) || "");
+    if (layer !== "main" || ctype !== "TheoryOperationNode") return label;
+    // "<Stage>: <long text>" -> "<Stage>".
+    var colon = label.indexOf(":");
+    if (colon >= 0) {
+      var head = label.slice(0, colon).trim();
+      for (var i = 0; i < LS_MAIN_STAGE_LABELS.length; i++) {
+        if (head.toLowerCase() === LS_MAIN_STAGE_LABELS[i].toLowerCase()) return LS_MAIN_STAGE_LABELS[i];
+      }
+    }
+    for (var j = 0; j < LS_MAIN_STAGE_LABELS.length; j++) {
+      if (label.toLowerCase() === LS_MAIN_STAGE_LABELS[j].toLowerCase()) return LS_MAIN_STAGE_LABELS[j];
+    }
+    return label;
+  }
+
+  function lsGraphFullDisplayLabel(node) {
+    if (!node) return "";
+    var explicit = String(node.display_label || "").trim();
+    if (explicit) return explicit;
+    var stage = lsGraphMainStageLabel(node);
+    var object = String(node.theory_object || "").trim();
+    if (!object) return stage || node.label || node.name || "";
+    if (!stage || object.toLowerCase() === String(stage).toLowerCase()) return object;
+    return stage + ": " + object;
+  }
+
+  function lsGraphNodeTooltip(node) {
+    var parts = [];
+    var type = node.component_type_text || node.component_type || node.review_status || "";
+    if (type) parts.push(type);
+    var backing = lsGraphSourceBackingLabel(node.source_backing_status);
+    if (backing) parts.push(backing);
+    var reasons = (node.review_reasons || []).map(lsGraphReviewReasonLabel);
+    if (reasons.length) parts.push(reasons.join(" / "));
+    return parts.join("\n");
   }
 
   function lsGraphDisplayEdges(edges) {
@@ -5550,10 +6035,14 @@
 
   function lsGraphRelationPriority(edge) {
     var relation = String((edge && (edge.relation || edge.edge_type || edge.type)) || "").toUpperCase();
+    if (relation === "DIAGNOSES" || relation === "COMPARES") return 6;
+    if (relation === "DERIVES" || relation === "ELIMINATES_BIAS" || relation === "ELIMINATES" || relation === "SOLVES") return 5;
+    if (relation === "FEEDS_EQUATION_SYSTEM" || relation === "LINEARIZES" || relation === "DEFINES" || relation === "CONSTRUCTS" || relation === "NORMALIZES") return 4;
     if (relation === "REQUIRES") return 5;
-    if (relation === "PRODUCES_FOR" || relation === "ENABLES" || relation === "SUPPORTS") return 4;
+    if (relation === "PRODUCES_FOR" || relation === "ENABLES" || relation === "SUPPORTS" || relation === "SUBSTITUTES" || relation === "APPROXIMATES") return 4;
     if (relation === "UNCERTAIN_DUE_TO") return 3;
-    if (relation === "QUALIFIES" || relation === "CHECKED_BY") return 2;
+    if (relation === "QUALIFIES" || relation === "CHECKED_BY" || relation === "CONSTRAINS") return 2;
+    if (relation === "TRANSFORMS" || relation === "FEEDS" || relation === "REQUIRES_REVIEW") return 1;
     return 1;
   }
 
@@ -5571,6 +6060,22 @@
       CONFLICTS_WITH: "矛盾",
       INHIBITS: "抑制",
       DEFINES: "定義",
+      FEEDS_EQUATION_SYSTEM: "式系へ",
+      LINEARIZES: "線形化",
+      ELIMINATES_BIAS: "バイアス消去",
+      DERIVES: "導出",
+      CONSTRAINS: "制約",
+      DIAGNOSES: "診断",
+      REQUIRES_REVIEW: "要確認",
+      CONSTRUCTS: "構成",
+      NORMALIZES: "正規化",
+      SOLVES: "求解",
+      SUBSTITUTES: "代入",
+      ELIMINATES: "消去",
+      APPROXIMATES: "近似",
+      TRANSFORMS: "変換",
+      COMPARES: "比較",
+      FEEDS: "入力",
     };
     return labels[key] || key;
   }
@@ -5578,16 +6083,24 @@
   function lsGraphEdgeDashed(edge) {
     var status = String((edge && edge.support_status) || "").toLowerCase();
     var relation = String((edge && (edge.relation || edge.edge_type || edge.type)) || "").toLowerCase();
+    var review = String((edge && edge.review_status) || "").toLowerCase();
+    var backing = String((edge && edge.source_backing_status) || "").toLowerCase();
+    if (review === "review_required") return true;
+    if (backing === "review_required" || backing === "inferred") return true;
     return /llm|related|qualifies|conflicts|inhibits|uncertain/.test(status + " " + relation);
   }
 
   function lsGraphEdgeColor(edge) {
     var relation = String((edge && (edge.relation || edge.edge_type || edge.type)) || "").toUpperCase();
+    if (relation === "DIAGNOSES" || relation === "COMPARES") return "#7c3aed";
+    if (relation === "DERIVES" || relation === "ELIMINATES_BIAS" || relation === "ELIMINATES" || relation === "SOLVES") return "#2563eb";
+    if (relation === "FEEDS_EQUATION_SYSTEM" || relation === "LINEARIZES" || relation === "CONSTRUCTS" || relation === "NORMALIZES" || relation === "SUBSTITUTES" || relation === "APPROXIMATES") return "#0891b2";
     if (relation === "UNCERTAIN_DUE_TO") return "#f97316";
     if (relation === "CONFLICTS_WITH" || relation === "INHIBITS") return "#ef4444";
-    if (relation === "CHECKED_BY" || relation === "QUALIFIES") return "#84cc16";
+    if (relation === "CHECKED_BY" || relation === "QUALIFIES" || relation === "CONSTRAINS") return "#84cc16";
     if (relation === "DEFINES") return "#22c55e";
     if (relation === "RELATED_TO") return "#f97316";
+    if (relation === "TRANSFORMS" || relation === "FEEDS" || relation === "REQUIRES_REVIEW") return "#94a3b8";
     return "#94a3b8";
   }
 
@@ -6387,7 +6900,7 @@
     lsShowProgress(label + "を開始しています...", "info");
     apiFetch("/admin/courses/" + lsState.courseId + "/document-pipeline/run", {
       method: "POST",
-      body: JSON.stringify({ target_stage: targetStage }),
+      body: JSON.stringify({ start_stage: targetStage }),
     })
       .then(function (res) {
         if (!res.ok) {

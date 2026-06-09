@@ -334,18 +334,28 @@ class CourseBuilderSessionOut(BaseModel):
     """コース構築セッション情報。"""
     session_id: str
     title: str
+    display_name: str | None = None
+    source_file_name: str | None = None
+    status: str = "draft"
+    published_course_id: str | None = None
     created_at: str
     updated_at: str
 
 
 class CourseBuilderSessionCreate(BaseModel):
-    title: str = "新しいセッション"
+    title: str = ""
+    source_file_name: str | None = None
+    display_name: str | None = None
 
 
 class CourseBuilderSessionUpdate(BaseModel):
     title: str | None = None
     history: list[dict] | None = None
     course_draft: dict | None = None
+    source_file_name: str | None = None
+    display_name: str | None = None
+    status: str | None = None
+    published_course_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -840,6 +850,48 @@ class ComponentGraphNode(BaseModel):
     component_type: str = ""
     component_type_text: str = ""
     summary: str = ""
+    operation: str = ""
+    theory_object: str = ""
+    display_label: str = ""
+    representative_component_id: str = ""
+    linked_component_ids: list[str] = Field(default_factory=list)
+    detail_node_ids: list[str] = Field(default_factory=list)
+    supporting_derivation_ids: list[str] = Field(default_factory=list)
+    # Longer, human-readable explanation (atomic-claim text / step reason). The
+    # ``label`` stays a short theory-stage name for main nodes; the descriptive
+    # sentence lives here and is shown in the UI detail pane (issue #308/#319).
+    description: str = ""
+    graph_layer: str = "main"
+    maturity_source: str = ""
+    publish_ready: bool = False
+    input_equation_ids: list[str] = Field(default_factory=list)
+    intermediate_equation_ids: list[str] = Field(default_factory=list)
+    output_equation_ids: list[str] = Field(default_factory=list)
+    definition_equation_ids: list[str] = Field(default_factory=list)
+    constraint_equation_ids: list[str] = Field(default_factory=list)
+    review_required_equation_ids: list[str] = Field(default_factory=list)
+    eliminated_symbols: list[str] = Field(default_factory=list)
+    retained_symbols: list[str] = Field(default_factory=list)
+    derivation_operations: list[str] = Field(default_factory=list)
+    # Source-backing links and status (issue #302).
+    linked_equation_ids: list[str] = Field(default_factory=list)
+    linked_derivation_ids: list[str] = Field(default_factory=list)
+    linked_claim_ids: list[str] = Field(default_factory=list)
+    linked_evidence_ids: list[str] = Field(default_factory=list)
+    source_backing_status: str = ""
+    review_reasons: list[str] = Field(default_factory=list)
+    # Layer linkage between main TheoryOperationNode and equation_detail nodes (issue #306).
+    parent_component_id: str = ""
+    member_component_ids: list[str] = Field(default_factory=list)
+    # Short graph-display label (issue #337).
+    visual_label: str = ""
+    # Claim I/O from derivation step (issue #337).
+    input_claim_ids: list[str] = Field(default_factory=list)
+    output_claim_ids: list[str] = Field(default_factory=list)
+    # Precondition claims required but not consumed (issue #337).
+    required_claim_ids: list[str] = Field(default_factory=list)
+    # Extraction/review note text (issue #337).
+    review_reason: str = ""
 
 
 class ComponentGraphEdge(BaseModel):
@@ -849,7 +901,10 @@ class ComponentGraphEdge(BaseModel):
     edge_type: str = "explicit_connector"
     confidence: float = 0.5
     support_status: str = "design_inferred"
-    review_status: str = "teacher_review_required"
+    # Same backing vocabulary as nodes (issue #311 criterion 6).
+    source_backing_status: str = ""
+    review_status: str = "review_required"
+    review_reasons: list[str] = Field(default_factory=list)
     evidence: dict = Field(default_factory=dict)
 
 

@@ -17,6 +17,10 @@ def _make_component(
     linked_dsl_node_ids: list[str] | None = None,
     linked_claim_ids: list[str] | None = None,
     dependencies: list[dict] | None = None,
+    support_role: str = "",
+    support_kind: str = "",
+    concepts: list[str] | None = None,
+    prerequisite_concepts: list[str] | None = None,
 ) -> ComponentRecord:
     return ComponentRecord(
         component_id=cid,
@@ -34,6 +38,12 @@ def _make_component(
         review_notes=[],
         linked_dsl_node_ids=linked_dsl_node_ids or [],
         linked_claim_ids=linked_claim_ids or [],
+        support_role=support_role,
+        supports_claim_ids=linked_claim_ids or [],
+        support_distance_to_headline_claim=0 if support_role in {"result", "derivation_core"} else 1,
+        support_kind=support_kind,
+        concepts=concepts or [],
+        prerequisite_concepts=prerequisite_concepts or [],
     )
 
 
@@ -224,3 +234,28 @@ class TestBuildNodes:
         assert [n.component_id for n in nodes] == ["c1", "c2", "c3"]
         assert nodes[0].display_order == 0
         assert nodes[2].display_order == 2
+
+    def test_nodes_include_claim_support_metadata(self):
+        comp = _make_component(
+            "c1",
+            "Bias elimination",
+            linked_claim_ids=["claim_head"],
+            support_role="derivation_core",
+            support_kind="derivational",
+        )
+        nodes = ComponentGraphInputBuilder().build_nodes(_make_assembly([comp]))
+        assert nodes[0].support_role == "derivation_core"
+        assert nodes[0].supports_claim_ids == ["claim_head"]
+        assert nodes[0].support_kind == "derivational"
+
+    def test_nodes_include_concepts(self):
+        comp = _make_component(
+            "c1",
+            "Bias elimination",
+            linked_claim_ids=["claim_head"],
+            concepts=["Skewness", "Kurtosis"],
+            prerequisite_concepts=["Galaxy bias"],
+        )
+        nodes = ComponentGraphInputBuilder().build_nodes(_make_assembly([comp]))
+        assert nodes[0].concepts == ["Skewness", "Kurtosis"]
+        assert nodes[0].prerequisite_concepts == ["Galaxy bias"]

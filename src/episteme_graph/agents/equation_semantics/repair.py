@@ -12,6 +12,7 @@ from .schema import (
     CartridgeContext,
     DefinedSymbol,
     EquationCandidate,
+    EquationConsistency,
     EquationConfidencePolicy,
     EquationLLMInput,
     EquationRecord,
@@ -179,8 +180,19 @@ def _parse_record(
         review_flags=review_flags,
     )
 
-    # --- confidence_policy (deterministic) ---
-    confidence_policy = EquationConfidencePolicy.derive(source_extraction, reconstruction, semantics)
+    # --- consistency / confidence_policy (deterministic) ---
+    equation_consistency = EquationConsistency.derive(
+        source_extraction=source_extraction,
+        reconstruction=reconstruction,
+        label=raw.get("label", llm_input.label),
+        semantics=semantics,
+    )
+    confidence_policy = EquationConfidencePolicy.derive(
+        source_extraction,
+        reconstruction,
+        semantics,
+        equation_consistency,
+    )
 
     # --- candidate_trace_ids ---
     candidate_trace_ids: list[str] = []
@@ -196,6 +208,7 @@ def _parse_record(
         reconstruction=reconstruction,
         semantics=semantics,
         confidence_policy=confidence_policy,
+        equation_consistency=equation_consistency,
     )
 
 
@@ -266,7 +279,18 @@ def _fallback_record(
         summary="Equation semantics could not be inferred.",
         review_flags=flags + (["needs_reconstruction", "reconstruction_only"] if llm_input.needs_reconstruction else []),
     )
-    confidence_policy = EquationConfidencePolicy.derive(source_extraction, reconstruction, semantics)
+    equation_consistency = EquationConsistency.derive(
+        source_extraction=source_extraction,
+        reconstruction=reconstruction,
+        label=llm_input.label,
+        semantics=semantics,
+    )
+    confidence_policy = EquationConfidencePolicy.derive(
+        source_extraction,
+        reconstruction,
+        semantics,
+        equation_consistency,
+    )
 
     return EquationRecord(
         equation_id=llm_input.equation_id,
@@ -277,6 +301,7 @@ def _fallback_record(
         reconstruction=reconstruction,
         semantics=semantics,
         confidence_policy=confidence_policy,
+        equation_consistency=equation_consistency,
     )
 
 
