@@ -1078,6 +1078,16 @@ def test_orchestrator_runs_newly_integrated_agents_and_saves_artifacts():
         review_reason: list = field(default_factory=list)
 
     @dataclass
+    class _ConfidencePolicy:
+        can_be_used_in_derivation: bool = True
+        can_support_claim: bool = True
+        can_be_rendered_as_final_formula: bool = True
+        allowed_downstream_use: str = "unrestricted"
+        can_be_displayed_in_course: bool = True
+        display_requires_note: bool = False
+        must_not_treat_as_source_extracted: bool = False
+
+    @dataclass
     class _EquationRecord:
         equation_id: str
         document_id: str = "doc-int"
@@ -1086,7 +1096,7 @@ def test_orchestrator_runs_newly_integrated_agents_and_saves_artifacts():
         source_extraction: _EquationSourceExtraction = field(default_factory=_EquationSourceExtraction)
         reconstruction: object = None
         semantics: _EquationSemantics = field(default_factory=_EquationSemantics)
-        confidence_policy: object = None
+        confidence_policy: object = field(default_factory=_ConfidencePolicy)
 
     @dataclass
     class _Component:
