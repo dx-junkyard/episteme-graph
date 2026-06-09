@@ -14,17 +14,36 @@ SUPPORT_STATUSES = [
     "unknown",
 ]
 
-# Atomicity vocabulary (issue #312 extends #260):
-#   atomic        — 単一の最小命題
-#   compound      — split_claims により atomic 子に分割済みの親
-#   non_atomic    — 複数命題を含むが分割されていない（確定 claim にしない）
-#   split_pending — 分割予定
-ATOMICITY_VALUES = ["atomic", "compound", "non_atomic", "split_pending"]
+# Atomicity vocabulary:
+#   atomic         — single minimal proposition
+#   composite      — parent claim split into atomic children
+#   split_required — multiple propositions, not usable as component backing
+# Legacy aliases accepted on read/export validation: compound, non_atomic, split_pending.
+ATOMICITY_VALUES = [
+    "atomic",
+    "composite",
+    "split_required",
+    "compound",
+    "non_atomic",
+    "split_pending",
+]
 
 REVIEW_STATUSES = [
     "auto_accepted",
     "teacher_review_required",
     "rejected",
+]
+
+# Concept assignment status vocabulary (issue #8):
+#   source_backed    — atomic, source-backed claim with concepts from the cartridge
+#   inferred         — concepts only from domain fallbacks, not cartridge ontology
+#   tentative        — composite / split_required (non-atomic) claim; do not confirm
+#   review_required  — low-confidence / review_required source; teacher review needed
+CONCEPT_ASSIGNMENT_STATUSES = [
+    "source_backed",
+    "inferred",
+    "tentative",
+    "review_required",
 ]
 
 # Domain-neutral claim type ontology (issue #260, extended for #312).
@@ -55,6 +74,8 @@ CLAIM_TYPE_ONTOLOGY = [
     "meta",
     # issue #312 required claim types
     "problem_statement",
+    "method_motivation",
+    "theory_encoding",
     "method",
     "structural_property",
     "derivation_result",
@@ -120,6 +141,13 @@ class ClaimObjectRecord:
     qualification_reason: str | None = None
     parent_claim_id: str | None = None
     subclaim_ids: list[str] = field(default_factory=list)
+    split_suggestions: list[dict] = field(default_factory=list)
+    linked_component_ids: list[str] = field(default_factory=list)
+    # How confidently the concepts on this claim may be used downstream (issue #8).
+    # See CONCEPT_ASSIGNMENT_STATUSES. Non-atomic / low-confidence claims are never
+    # confirmed source_backed so the graph / course mapping do not treat their
+    # concepts as strong backing.
+    concept_assignment_status: str = "review_required"
 
 
 @dataclass
@@ -181,6 +209,11 @@ class ClaimObjectBuildResult:
                 qualification_reason=raw.get("qualification_reason"),
                 parent_claim_id=raw.get("parent_claim_id"),
                 subclaim_ids=list(raw.get("subclaim_ids", [])),
+                split_suggestions=list(raw.get("split_suggestions", [])),
+                linked_component_ids=list(raw.get("linked_component_ids", [])),
+                concept_assignment_status=raw.get(
+                    "concept_assignment_status", "review_required"
+                ),
             ))
         issues = [ValidationIssue(**i) for i in d.get("validation_issues", [])]
         return cls(

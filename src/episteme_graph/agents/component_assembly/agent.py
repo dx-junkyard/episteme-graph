@@ -14,13 +14,16 @@ from episteme_graph.agents.id_canonicalization import (
 
 from .cartridge_loader import CartridgeLoader
 from .component_refiner import ComponentRefiner
+from .derivation_graph_aligner import DerivationGraphAligner
 from .enrichment import enrich_component_assembly
+from .granularity_analyzer import ComponentGranularityAnalyzer
 from .input_builder import ComponentAssemblyInputBuilder
 from .llm_client import ComponentAssemblyLLMClient
 from .overlap_cleanup import ComponentOverlapCleanup
 from .prompt import ComponentAssemblyPromptFactory
 from .repair import ComponentAssemblyRepairer, _parse_raw, make_deterministic_fallback
 from .schema import CartridgeContext, ComponentAssemblyLLMInput, ComponentAssemblyResult, ValidationIssue
+from .theory_bundle import TheoryBundleStage
 from .validator import ComponentAssemblyValidator
 
 logger = logging.getLogger(__name__)
@@ -40,6 +43,9 @@ class ComponentAssemblyAgent:
         self._validator = ComponentAssemblyValidator()
         self._repairer = ComponentAssemblyRepairer(cleanup=self._cleanup)
         self._refiner = ComponentRefiner()
+        self._granularity_analyzer = ComponentGranularityAnalyzer()
+        self._derivation_graph_aligner = DerivationGraphAligner()
+        self._theory_bundle_stage = TheoryBundleStage()
 
     def run(
         self,
@@ -127,15 +133,44 @@ class ComponentAssemblyAgent:
         else:
             result.validation_issues = issues
 
-        # Deterministic theory-operation refinement (issue #300): split coarse,
-        # summary-level components into one-operation-per-component units using
-        # the derivation chains, then re-validate the refined output.
-        if (config or {}).get("enable_component_refiner", True):
+        # Step 1: detect component granularity issues before graph/mapping.
+        # This pass annotates components only; it never changes component count.
+        if (config or {}).get("enable_component_granularity_analyzer", True):
+            result = self._granularity_analyzer.analyze(result, derivations=derivations)
+            result.validation_issues = self._validator.validate(
+                result, cartridge, llm_input=llm_input
+            )
+
+        # Step 3: optional actual refinement/splitting. Disabled by default so
+        # Step 1 remains detection/proposal only.
+        if (config or {}).get("enable_component_refiner", False):
             result = self._refiner.refine(result, llm_input, derivations)
             result.validation_issues = self._validator.validate(
                 result, cartridge, llm_input=llm_input
             )
-        result.diagnostics = diagnostics
+
+        # Step 4: align refined components with derivation chains, equation
+        # operations, the theory component graph, and the support map. Disabled
+        # by default so the upstream contract stays stable until opted in.
+        if (config or {}).get("enable_derivation_graph_aligner", False):
+            alignment = self._derivation_graph_aligner.align(
+                result, llm_input=llm_input, derivations=derivations
+            )
+            result.derivation_graph_alignment = alignment.to_dict()
+
+        # Step 5: represent the whole paper as a TheoryBundle and map refined
+        # components into a teaching output (course topics + minimal blueprint
+        # reflection). Disabled by default; depends on Step 3/4 output being
+        # present, so it stays additive until opted in.
+        if (config or {}).get("enable_theory_bundle_builder", False):
+            bundle = self._theory_bundle_stage.run(
+                result, llm_input=llm_input, derivations=derivations
+            )
+            result.theory_bundle = bundle.to_dict()
+
+        merged_diagnostics = dict(diagnostics)
+        merged_diagnostics.update(result.diagnostics or {})
+        result.diagnostics = merged_diagnostics
         return result
 
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:

@@ -376,6 +376,28 @@ class ComponentGraphNode:
     # equation_detail node points back at its main node via ``parent_component_id``.
     parent_component_id: str = ""
     member_component_ids: list[str] = field(default_factory=list)
+    support_role: str = ""
+    supports_claim_ids: list[str] = field(default_factory=list)
+    support_distance_to_headline_claim: int = 0
+    support_kind: str = ""
+    # Concept tags carried from component assembly (issue #8).
+    concepts: list[str] = field(default_factory=list)
+    prerequisite_concepts: list[str] = field(default_factory=list)
+    # Short graph-display label, guaranteed ≤ 30 chars (issue #337). The primary
+    # label shown on graph nodes. For main nodes: theory-stage name; for detail
+    # nodes: operation verb. Frontend translates to Japanese.
+    visual_label: str = ""
+    # Claim I/O (issue #337): separate input/output claims carried from the
+    # derivation step so the right panel can display them.
+    input_claim_ids: list[str] = field(default_factory=list)
+    output_claim_ids: list[str] = field(default_factory=list)
+    # Precondition claims required (but not consumed) by this step (issue #337).
+    # Distinct from ``input_claim_ids`` (data-flow inputs).
+    required_claim_ids: list[str] = field(default_factory=list)
+    # Extraction/review note (issue #337). Free-text step.reason from the
+    # derivation pipeline; distinct from ``review_reasons`` (structured codes)
+    # and ``description`` (reader-facing explanation).
+    review_reason: str = ""
 
 
 @dataclass
@@ -488,6 +510,11 @@ class ComponentGraphResult:
                     "review_reasons": n.review_reasons,
                     "parent_component_id": n.parent_component_id,
                     "member_component_ids": n.member_component_ids,
+                    "visual_label": n.visual_label,
+                    "input_claim_ids": n.input_claim_ids,
+                    "output_claim_ids": n.output_claim_ids,
+                    "required_claim_ids": n.required_claim_ids,
+                    "review_reason": n.review_reason,
                 }
                 for n in self.nodes
             ],

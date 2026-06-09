@@ -277,6 +277,40 @@ def test_main_node_separates_stage_object_and_component_links():
     assert "deriv" in eliminate.supporting_derivation_ids
 
 
+# --- concept rollup (issue #8) ----------------------------------------------
+
+
+def test_main_node_rolls_up_component_concepts():
+    # The eliminate component links derivation "deriv" (eq_c/eq_d), which lands in
+    # the Elimination main node; its concepts/prerequisite_concepts roll up.
+    comp = _component(
+        concepts=["Bias parameter", "Consistency relation"],
+        prerequisite_concepts=["Galaxy bias"],
+    )
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _components(comp), _derivations()
+    )
+    eliminate = next(n for n in _layer(result, "main") if n.label == "Elimination")
+    assert "Bias parameter" in eliminate.concepts
+    assert "Consistency relation" in eliminate.concepts
+    assert "Galaxy bias" in eliminate.prerequisite_concepts
+
+
+def test_graph_builds_when_components_have_no_concepts():
+    # Components without concept tags must not break graph generation; concept
+    # fields default to empty lists on every node.
+    comp = _component()  # no concepts / prerequisite_concepts
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _components(comp), _derivations()
+    )
+    assert result.nodes
+    for node in result.nodes:
+        assert isinstance(node.concepts, list)
+        assert isinstance(node.prerequisite_concepts, list)
+    eliminate = next(n for n in _layer(result, "main") if n.label == "Elimination")
+    assert eliminate.concepts == []
+
+
 # --- generic operations (acceptance #5) -------------------------------------
 
 
@@ -501,3 +535,506 @@ def test_normalizer_reflects_single_step_derivation_chain():
     main_nodes = _layer(result, "main")
     assert len(main_nodes) == 1
     assert main_nodes[0].operation == "derive_consistency_relation"
+
+
+# --- claim-only derivation chains (issue #334) --------------------------------
+
+
+def _claim_step(operation, input_claims, output_claims, **kwargs):
+    """DerivationStep with claim flow but no equation I/O."""
+    return DerivationStep(
+        step_id=f"step_{operation}",
+        input_equation_ids=[],
+        output_equation_ids=[],
+        operation=operation,
+        input_claim_ids=input_claims,
+        output_claim_ids=output_claims,
+        review_status="teacher_review_required",
+        **kwargs,
+    )
+
+
+def _claim_only_derivations():
+    return DerivationChainResult(
+        document_id="doc",
+        cartridge_id=None,
+        chains=[DerivationChainRecord(
+            derivation_id="deriv_claim",
+            document_id="doc",
+            source_section_ids=[],
+            steps=[
+                _claim_step("define_framework", [], ["claim_a"],
+                            required_claim_ids=[]),
+                _claim_step("linearize_model", ["claim_a"], ["claim_b"],
+                            required_claim_ids=["claim_a"]),
+                _claim_step("derive_result", ["claim_b"], ["claim_c"],
+                            required_claim_ids=["claim_b"],
+                            source_evidence_ids=["ev_1"]),
+            ],
+        )],
+    )
+
+
+def test_claim_only_chain_produces_main_edges():
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), _claim_only_derivations()
+    )
+    main_nodes = _layer(result, "main")
+    main_ids = {n.component_id for n in main_nodes}
+    main_edges = [e for e in result.edges if e.source in main_ids and e.target in main_ids]
+    assert len(main_nodes) >= 2
+    assert len(main_edges) >= 1, "claim-only chain must produce at least one main edge"
+
+
+def test_claim_only_chain_produces_detail_edges():
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), _claim_only_derivations()
+    )
+    detail_ids = {n.component_id for n in _layer(result, "equation_detail")}
+    detail_edges = [e for e in result.edges if e.source in detail_ids and e.target in detail_ids]
+    assert len(detail_edges) >= 1, "claim-only chain must produce detail edges"
+
+
+def test_claim_only_chain_edges_carry_evidence():
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), _claim_only_derivations()
+    )
+    main_ids = {n.component_id for n in _layer(result, "main")}
+    main_edges = [e for e in result.edges if e.source in main_ids and e.target in main_ids]
+    for edge in main_edges:
+        assert edge.evidence_derivation_ids, f"{edge.edge_id} missing derivation evidence"
+        assert edge.evidence_claim_ids, f"{edge.edge_id} missing claim evidence"
+
+
+def test_claim_only_chain_nodes_have_linked_claims():
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), _claim_only_derivations()
+    )
+    for node in _layer(result, "main"):
+        assert node.linked_claim_ids, f"{node.component_id} missing linked_claim_ids"
+        assert node.linked_derivation_ids, f"{node.component_id} missing linked_derivation_ids"
+
+
+def test_claim_only_chain_node_not_review_required():
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), _claim_only_derivations()
+    )
+    for node in _layer(result, "main"):
+        assert node.source_backing_status != "review_required", (
+            f"claim-only node {node.component_id} should be partially_source_backed "
+            f"(has derivation_ids), not review_required"
+        )
+
+
+def test_fallback_sequential_edges_when_no_overlap():
+    steps = [
+        _claim_step("define_framework", [], ["claim_x"]),
+        _claim_step("derive_result", ["claim_y"], ["claim_z"]),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    main_ids = {n.component_id for n in _layer(result, "main")}
+    main_edges = [e for e in result.edges if e.source in main_ids and e.target in main_ids]
+    assert len(main_edges) >= 1, "fallback sequential edges should connect main nodes"
+    for edge in main_edges:
+        assert edge.review_status == "review_required"
+        assert edge.review_reasons
+
+
+def test_mixed_equation_and_claim_chain_prefers_equations():
+    steps = [
+        _step("define", ["eq_a"], ["eq_b"]),
+        DerivationStep(
+            step_id="step_derive",
+            input_equation_ids=["eq_b"],
+            output_equation_ids=["eq_c"],
+            operation="derive_result",
+            input_claim_ids=["claim_a"],
+            output_claim_ids=["claim_b"],
+            review_status="teacher_review_required",
+        ),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    main_ids = {n.component_id for n in _layer(result, "main")}
+    main_edges = [e for e in result.edges if e.source in main_ids and e.target in main_ids]
+    assert len(main_edges) >= 1
+    for edge in main_edges:
+        assert edge.evidence_equation_ids, "equation evidence should be preferred when available"
+
+
+# --- detail node labels never use step.reason (issue #337) --------------------
+
+
+def test_detail_node_label_never_uses_reason():
+    """Issue #337: detail node labels must never be step.reason text."""
+    reason_text = (
+        "The span is content-bearing and reviewable, but it is not a minimal "
+        "reusable claim for the theory operation graph"
+    )
+    steps = [
+        DerivationStep(
+            step_id="step_with_reason",
+            input_equation_ids=[],
+            output_equation_ids=[],
+            operation="apply_definition",
+            input_claim_ids=["claim_a"],
+            output_claim_ids=["claim_b"],
+            reason=reason_text,
+            review_status="teacher_review_required",
+        ),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    detail_nodes = _layer(result, "equation_detail")
+    assert len(detail_nodes) >= 1
+    for node in detail_nodes:
+        assert reason_text[:40] not in node.label, (
+            f"detail node label must not contain reason text: {node.label}"
+        )
+        assert reason_text[:40] not in node.display_label, (
+            f"detail node display_label must not contain reason text: {node.display_label}"
+        )
+
+
+def test_detail_node_reason_goes_to_review_reason():
+    """Issue #337: step.reason is stored in review_reason, not label/description."""
+    reason_text = "Applies the EPR definition of physical reality"
+    steps = [
+        DerivationStep(
+            step_id="step_apply",
+            input_equation_ids=[],
+            output_equation_ids=[],
+            operation="apply_definition",
+            input_claim_ids=["claim_a"],
+            output_claim_ids=["claim_b"],
+            reason=reason_text,
+            review_status="teacher_review_required",
+        ),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    detail_nodes = _layer(result, "equation_detail")
+    assert len(detail_nodes) >= 1
+    node = detail_nodes[0]
+    assert node.review_reason == reason_text
+    assert node.description == ""
+    assert reason_text not in node.theory_object
+
+
+def test_claim_only_detail_label_uses_verb():
+    """Issue #337: claim-only steps use the operation verb as label."""
+    steps = [
+        _claim_step("infer_conclusion", ["claim_a"], ["claim_b"]),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    detail_nodes = _layer(result, "equation_detail")
+    assert len(detail_nodes) >= 1
+    node = detail_nodes[0]
+    assert node.label == "Infer conclusion"
+    assert node.display_label == "Infer conclusion"
+
+
+def test_equation_detail_label_still_uses_equation_id():
+    """Issue #337: equation steps still use equation IDs in detail labels."""
+    result = _normalized()
+    detail_nodes = _layer(result, "equation_detail")
+    eq_nodes = [n for n in detail_nodes if n.input_equation_ids or n.output_equation_ids]
+    assert len(eq_nodes) >= 1
+    for node in eq_nodes:
+        has_eq_ref = any(
+            eq_id in node.label for eq_id in node.input_equation_ids + node.output_equation_ids
+        )
+        assert has_eq_ref, (
+            f"equation detail node should reference equation IDs in label: {node.label}"
+        )
+
+
+def test_detail_node_empty_reason_gives_empty_review_reason():
+    """Issue #337 edge case: empty reason produces empty review_reason."""
+    steps = [
+        DerivationStep(
+            step_id="step_no_reason",
+            input_equation_ids=[],
+            output_equation_ids=[],
+            operation="define_framework",
+            input_claim_ids=[],
+            output_claim_ids=["claim_x"],
+            reason="",
+            review_status="teacher_review_required",
+        ),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    detail_nodes = _layer(result, "equation_detail")
+    assert len(detail_nodes) >= 1
+    assert detail_nodes[0].review_reason == ""
+    assert detail_nodes[0].description == ""
+    assert detail_nodes[0].label == "Define framework"
+
+
+def test_detail_node_theory_object_is_verb_not_reason():
+    """Issue #337: theory_object should be the verb, not step.reason."""
+    reason = "Long extraction reason that should not appear in theory_object"
+    steps = [
+        _claim_step("flag_limitation", ["claim_a"], ["claim_b"],
+                     reason=reason),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    detail_nodes = _layer(result, "equation_detail")
+    assert len(detail_nodes) >= 1
+    node = detail_nodes[0]
+    assert node.theory_object == "Flag limitation"
+    assert reason not in node.theory_object
+
+
+def test_detail_node_has_visual_label():
+    """Issue #337: detail nodes carry a visual_label with verb and I/O flow."""
+    steps = [
+        _claim_step("infer_conclusion", ["claim_a"], ["claim_b"]),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    detail_nodes = _layer(result, "equation_detail")
+    assert len(detail_nodes) >= 1
+    vl = detail_nodes[0].visual_label
+    assert vl.startswith("Infer conclusion"), f"visual_label should start with verb: {vl}"
+    assert "claim_a" in vl, f"visual_label should show input claim: {vl}"
+
+
+def test_main_node_visual_label_is_stage_name():
+    """Issue #337: main nodes carry a short visual_label (theory stage name)."""
+    result = _normalized()
+    main_nodes = _layer(result, "main")
+    assert len(main_nodes) >= 1
+    for node in main_nodes:
+        assert node.visual_label, f"{node.component_id} missing visual_label"
+        assert len(node.visual_label) <= 30, (
+            f"visual_label too long: {node.visual_label}"
+        )
+
+
+def test_detail_node_has_claim_io():
+    """Issue #337: detail nodes store input/output claim IDs separately."""
+    steps = [
+        _claim_step("apply_definition", ["claim_a"], ["claim_b"],
+                     required_claim_ids=["claim_pre"]),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    detail_nodes = _layer(result, "equation_detail")
+    assert len(detail_nodes) >= 1
+    node = detail_nodes[0]
+    assert "claim_a" in node.input_claim_ids
+    assert "claim_pre" in node.required_claim_ids
+    assert "claim_b" in node.output_claim_ids
+
+
+def test_main_node_has_aggregated_claim_io():
+    """Issue #337: main nodes aggregate claim I/O from group records."""
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), _claim_only_derivations()
+    )
+    main_nodes = _layer(result, "main")
+    assert len(main_nodes) >= 1
+    has_output = any(node.output_claim_ids for node in main_nodes)
+    assert has_output, "at least one main node should have output_claim_ids"
+
+
+def test_main_node_description_excludes_extraction_reason():
+    """Issue #337: main node description never contains step extraction reasons."""
+    reason = "The span is content-bearing and reviewable, but it is not minimal"
+    steps = [
+        DerivationStep(
+            step_id="step_def",
+            input_equation_ids=["eq_a"],
+            output_equation_ids=["eq_b"],
+            operation="define",
+            reason=reason,
+            review_status="teacher_review_required",
+        ),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    main_nodes = _layer(result, "main")
+    assert len(main_nodes) >= 1
+    for node in main_nodes:
+        assert reason not in (node.description or ""), (
+            f"main description should not contain extraction reason"
+        )
+        assert reason not in (node.display_label or ""), (
+            f"main display_label should not contain extraction reason"
+        )
+
+
+# --- required_claim_ids separation (issue #337 round 3) ----------------------
+
+
+def test_detail_node_separates_required_claim_ids():
+    """Issue #337: required_claim_ids are stored separately from input_claim_ids."""
+    steps = [
+        _claim_step("apply_definition", ["claim_in"], ["claim_out"],
+                     required_claim_ids=["claim_req"]),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    detail_nodes = _layer(result, "equation_detail")
+    assert len(detail_nodes) >= 1
+    node = detail_nodes[0]
+    assert "claim_in" in node.input_claim_ids
+    assert "claim_req" not in node.input_claim_ids, (
+        "required_claim_ids should not be merged into input_claim_ids"
+    )
+    assert "claim_req" in node.required_claim_ids
+    assert "claim_out" in node.output_claim_ids
+
+
+def test_main_node_aggregates_required_claim_ids():
+    """Issue #337: main nodes aggregate required_claim_ids from group records."""
+    steps = [
+        _claim_step("define_framework", [], ["claim_a"],
+                     required_claim_ids=["claim_pre"]),
+        _claim_step("derive_result", ["claim_a"], ["claim_b"]),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    main_nodes = _layer(result, "main")
+    has_required = any(node.required_claim_ids for node in main_nodes)
+    assert has_required, "at least one main node should have required_claim_ids"
+
+
+# --- visual_label never contains reason (regression, issue #337 round 3) ------
+
+
+def test_visual_label_never_contains_reason():
+    """Regression: visual_label must not contain step.reason text."""
+    reason = "Long extraction reason that must not leak into visual_label"
+    steps = [
+        DerivationStep(
+            step_id="step_def",
+            input_equation_ids=["eq_a"],
+            output_equation_ids=["eq_b"],
+            operation="define",
+            reason=reason,
+            review_status="teacher_review_required",
+        ),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    for node in result.nodes:
+        assert reason not in (node.visual_label or ""), (
+            f"visual_label should never contain extraction reason: {node.visual_label}"
+        )
+
+
+# --- detail visual_label shows I/O flow (issue #337 round 3) -----------------
+
+
+def test_detail_visual_label_shows_equation_flow():
+    """Issue #337: detail visual_label includes equation I/O flow."""
+    steps = [
+        _step("define", ["eq_a"], ["eq_b"]),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    detail_nodes = _layer(result, "equation_detail")
+    assert len(detail_nodes) >= 1
+    vl = detail_nodes[0].visual_label
+    assert "eq_a" in vl, f"visual_label should reference input equation: {vl}"
+    assert "eq_b" in vl, f"visual_label should reference output equation: {vl}"
+    assert "→" in vl, f"visual_label should contain arrow for flow: {vl}"
+
+
+def test_detail_visual_label_shows_claim_flow():
+    """Issue #337: claim-only detail visual_label includes claim I/O flow."""
+    steps = [
+        _claim_step("infer_conclusion", ["claim_x"], ["claim_y"]),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    detail_nodes = _layer(result, "equation_detail")
+    assert len(detail_nodes) >= 1
+    vl = detail_nodes[0].visual_label
+    assert "claim_x" in vl, f"visual_label should reference input claim: {vl}"
+    assert "claim_y" in vl, f"visual_label should reference output claim: {vl}"
+
+
+# --- to_graph_payload includes new fields (issue #337 round 3) ----------------
+
+
+def test_graph_payload_includes_required_claim_ids():
+    """Issue #337: to_graph_payload() includes required_claim_ids for each node."""
+    steps = [
+        _claim_step("apply_definition", ["claim_in"], ["claim_out"],
+                     required_claim_ids=["claim_req"]),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    payload = result.to_graph_payload()
+    for node_dict in payload["nodes"]:
+        assert "required_claim_ids" in node_dict, (
+            f"payload node missing required_claim_ids: {node_dict['component_id']}"
+        )
+    detail_nodes = [n for n in payload["nodes"] if n.get("graph_layer") == "equation_detail"]
+    assert len(detail_nodes) >= 1
+    node_with_req = [n for n in detail_nodes if "claim_req" in n.get("required_claim_ids", [])]
+    assert node_with_req, "payload should contain detail node with claim_req in required_claim_ids"
+
+
+def test_graph_payload_includes_visual_label_and_review_reason():
+    """Issue #337: to_graph_payload() includes visual_label and review_reason."""
+    reason = "Some extraction note"
+    steps = [
+        DerivationStep(
+            step_id="step_def",
+            input_equation_ids=["eq_a"],
+            output_equation_ids=["eq_b"],
+            operation="define",
+            reason=reason,
+            review_status="teacher_review_required",
+        ),
+    ]
+    derivations = _short_derivations(steps)
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), derivations
+    )
+    payload = result.to_graph_payload()
+    for node_dict in payload["nodes"]:
+        assert "visual_label" in node_dict
+        assert "review_reason" in node_dict
+    detail_nodes = [n for n in payload["nodes"] if n.get("graph_layer") == "equation_detail"]
+    assert any(n["review_reason"] == reason for n in detail_nodes)

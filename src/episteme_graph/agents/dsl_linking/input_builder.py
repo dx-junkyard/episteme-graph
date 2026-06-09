@@ -63,9 +63,16 @@ class DSLLinkingInputBuilder:
         claim_objects=None,
     ) -> list[dict]:
         result = []
-        for record in qualified_claims.qualified_spans[:limit]:
-            result.append({
-                "claim_id": canonical_claim_id_for_span(record, claim_objects),
+        seen_claim_ids: set[str] = set()
+        claim_index = _claim_object_index(claim_objects)
+        has_claim_objects = bool(claim_index)
+        for record in qualified_claims.qualified_spans:
+            claim_id = canonical_claim_id_for_span(record, claim_objects)
+            claim_obj = claim_index.get(claim_id)
+            if has_claim_objects and claim_obj and _claim_is_non_atomic(claim_obj):
+                continue
+            row = {
+                "claim_id": claim_id,
                 "legacy_claim_id": legacy_claim_id_for_span(record),
                 "span_id": record.span_id,
                 "block_id": record.block_id,
@@ -76,7 +83,22 @@ class DSLLinkingInputBuilder:
                 "claim_type_candidate": record.qualification.get("claim_type_candidate"),
                 "reason": record.reason,
                 "confidence": record.confidence,
-            })
+            }
+            if claim_obj:
+                _attach_claim_object_metadata(row, claim_obj)
+            result.append(row)
+            if claim_id:
+                seen_claim_ids.add(claim_id)
+            if len(result) >= limit:
+                return result
+        for claim_obj in list(getattr(claim_objects, "claims", []) or []):
+            claim_id = str(getattr(claim_obj, "claim_id", "") or "")
+            if not claim_id or claim_id in seen_claim_ids or _claim_is_non_atomic(claim_obj):
+                continue
+            result.append(_claim_object_row(claim_obj))
+            seen_claim_ids.add(claim_id)
+            if len(result) >= limit:
+                break
         return result
 
     @staticmethod
@@ -153,3 +175,62 @@ class DSLLinkingInputBuilder:
                 if len(nodes) >= limit:
                     return nodes
         return nodes[:limit]
+
+
+def _claim_object_index(claim_objects) -> dict[str, object]:
+    return {
+        str(getattr(claim, "claim_id", "") or ""): claim
+        for claim in list(getattr(claim_objects, "claims", []) or [])
+        if getattr(claim, "claim_id", None)
+    }
+
+
+def _claim_is_non_atomic(claim: object) -> bool:
+    atomicity = str(getattr(claim, "atomicity", "atomic") or "atomic").lower()
+    is_atomic = bool(getattr(claim, "is_atomic", atomicity == "atomic"))
+    return atomicity in {
+        "composite",
+        "split_required",
+        "compound",
+        "non_atomic",
+        "split_pending",
+    } or not is_atomic
+
+
+def _attach_claim_object_metadata(row: dict, claim: object) -> None:
+    row.update({
+        "text": str(getattr(claim, "text", row.get("text", "")) or row.get("text", "")),
+        "claim_type_candidate": str(
+            getattr(claim, "claim_type", row.get("claim_type_candidate", "unknown"))
+            or row.get("claim_type_candidate", "unknown")
+        ),
+        "atomicity": str(getattr(claim, "atomicity", "atomic") or "atomic"),
+        "is_atomic": bool(getattr(claim, "is_atomic", True)),
+        "split_suggestions": list(getattr(claim, "split_suggestions", []) or []),
+        "source_evidence_ids": list(getattr(claim, "source_evidence_ids", []) or []),
+    })
+    if getattr(claim, "qualification_reason", None):
+        row["reason"] = str(getattr(claim, "qualification_reason"))
+    if getattr(claim, "confidence", None) is not None:
+        row["confidence"] = float(
+            getattr(claim, "confidence", row.get("confidence", 0.0)) or 0.0
+        )
+
+
+def _claim_object_row(claim: object) -> dict:
+    source_span_ids = list(getattr(claim, "source_span_ids", []) or [])
+    row = {
+        "claim_id": str(getattr(claim, "claim_id", "") or ""),
+        "legacy_claim_id": "",
+        "span_id": str(source_span_ids[0]) if source_span_ids else "",
+        "block_id": "",
+        "section_id": getattr(claim, "section_id", None),
+        "text": str(getattr(claim, "text", "") or ""),
+        "role_labels": [str(getattr(claim, "claim_type", "unknown") or "unknown")],
+        "claim_tier": None,
+        "claim_type_candidate": str(getattr(claim, "claim_type", "unknown") or "unknown"),
+        "reason": str(getattr(claim, "qualification_reason", "") or ""),
+        "confidence": float(getattr(claim, "confidence", 0.0) or 0.0),
+    }
+    _attach_claim_object_metadata(row, claim)
+    return row

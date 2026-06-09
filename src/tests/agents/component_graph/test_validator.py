@@ -331,3 +331,37 @@ class TestSourceBackingRules:
         )
         issues = self.validator.validate(_result(nodes, [edge]))
         assert [i for i in issues if i.severity == "error"] == []
+
+    # --- issue #334: claim-only nodes relax equation checks --------------------
+
+    def test_claim_only_derive_node_missing_equations_is_warning(self):
+        """A derives node backed by claims should produce a warning, not error."""
+        node = _theory_node(
+            "c1",
+            operation="derive_result",
+            linked_equation_ids=[],
+            linked_claim_ids=["claim_1"],
+            linked_evidence_ids=["ev_1"],
+            source_backing_status="partially_source_backed",
+            review_reasons=["missing_equation_link"],
+        )
+        issues = self.validator.validate(_result([node], []))
+        eq_issues = [i for i in issues if i.rule_id == "output_node_missing_linked_equations"]
+        assert len(eq_issues) == 1
+        assert eq_issues[0].severity == "warning"
+
+    def test_claim_only_derive_node_without_claims_is_error(self):
+        """A derives node with no equations AND no claims stays an error."""
+        node = _theory_node(
+            "c1",
+            operation="derive_result",
+            linked_equation_ids=[],
+            linked_claim_ids=[],
+            linked_evidence_ids=[],
+            source_backing_status="review_required",
+            review_reasons=["missing_equation_link", "missing_atomic_claim"],
+        )
+        issues = self.validator.validate(_result([node], []))
+        eq_issues = [i for i in issues if i.rule_id == "output_node_missing_linked_equations"]
+        assert len(eq_issues) == 1
+        assert eq_issues[0].severity == "error"

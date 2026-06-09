@@ -146,10 +146,21 @@ def _requires_review(eq: dict) -> bool:
     return (
         bool(eq.get("needs_math_review"))
         or bool(eq.get("review_flags"))
+        or _equation_consistency_requires_review(eq)
         or eq.get("semantic_status") == "reconstruction_based"
         or (recon_status not in (None, "", "none"))
         or bool(policy.get("must_not_treat_as_source_extracted"))
         or policy.get("can_support_claim") is False
+    )
+
+
+def _equation_consistency_requires_review(eq: dict) -> bool:
+    consistency = eq.get("equation_consistency") if isinstance(eq.get("equation_consistency"), dict) else {}
+    return (
+        bool(consistency.get("review_required"))
+        or consistency.get("raw_text_latex_match") == "mismatch"
+        or consistency.get("label_location_match") == "mismatch"
+        or consistency.get("source_span_quality") == "corrupted"
     )
 
 

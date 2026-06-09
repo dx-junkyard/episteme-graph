@@ -12,6 +12,7 @@ class CourseTopicMapping:
     linked_component_ids: list[str] = field(default_factory=list)
     learning_objectives: list[str] = field(default_factory=list)
     prerequisite_concepts: list[str] = field(default_factory=list)
+    introduced_concepts: list[str] = field(default_factory=list)
     blackbox_policy: dict = field(default_factory=dict)
     assessment_prompts: list[str] = field(default_factory=list)
 

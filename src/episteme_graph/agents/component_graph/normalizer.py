@@ -137,6 +137,8 @@ class ComponentGraphNormalizer:
             for rec in records
         ]
         main_edges = _main_edges_from_groups(groups)
+        if not main_edges and len(groups) >= 2:
+            main_edges = _fallback_sequential_edges(groups)
         detail_edges = _detail_edges_from_records(records, claim_index)
         return main_nodes, detail_nodes, main_edges + detail_edges
 
@@ -167,12 +169,16 @@ class ComponentGraphNormalizer:
                         chain_component_ids=chain_component_ids,
                         component_records=component_records,
                     ),
+                    "component_records": component_records,
                     "operation": operation,
                     "verb": verb,
                     "edge_type": edge_type,
                     "is_generic": is_generic,
                     "inputs": _ordered_unique(getattr(step, "input_equation_ids", []) or []),
                     "outputs": _ordered_unique(getattr(step, "output_equation_ids", []) or []),
+                    "input_claims": _ordered_unique(getattr(step, "input_claim_ids", []) or []),
+                    "required_claims": _ordered_unique(getattr(step, "required_claim_ids", []) or []),
+                    "output_claims": _ordered_unique(getattr(step, "output_claim_ids", []) or []),
                 })
         return records
 
@@ -348,6 +354,8 @@ def _main_node_from_group(group: dict, claim_index: dict[str, dict]) -> Componen
     linked_component_ids = _ordered_unique(
         cid for rec in records for cid in rec.get("linked_component_ids", [])
     )
+    support = _support_metadata_for_components(linked_component_ids, records)
+    concept_meta = _concepts_for_components(linked_component_ids, records)
     detail_node_ids = [rec["detail_id"] for rec in records]
 
     atomic_claim_ids = _atomic_claim_ids(linked_claim_ids, claim_index)
@@ -360,12 +368,24 @@ def _main_node_from_group(group: dict, claim_index: dict[str, dict]) -> Componen
         is_generic=False,
     )
 
+    # Claim I/O: aggregate from group records (issue #337).
+    group_input_claim_ids = _ordered_unique(
+        cid for rec in records for cid in rec.get("input_claims", [])
+    )
+    group_required_claim_ids = _ordered_unique(
+        cid for rec in records for cid in rec.get("required_claims", [])
+    )
+    group_output_claim_ids = _ordered_unique(
+        cid for rec in records for cid in rec.get("output_claims", [])
+    )
+    # Collect step reasons as review notes (not for node label/description).
+    group_review_reasons = [
+        str(getattr(rec["step"], "reason", "") or "").strip()
+        for rec in records
+    ]
+    group_review_reason = "; ".join(filter(None, group_review_reasons))[:240]
+
     rep = group.get("rep") or _representative_record(records)
-    # Main labels are SHORT theory-stage labels (issue #308): ``Theory basis`` …
-    # ``Diagnostic / application``. They are never equation-id fallbacks, so
-    # ``eq_...`` can no longer leak into the main graph. The longer atomic-claim /
-    # reason phrase that used to be appended to the label now lives in
-    # ``description`` and is shown in the UI's detail pane instead.
     label = theory_stage_label(stage)
     theory_object = _theory_object(rep, atomic_claim_ids, claim_index, records)
     description = _build_main_description(records, atomic_claim_ids, claim_index)
@@ -407,15 +427,35 @@ def _main_node_from_group(group: dict, claim_index: dict[str, dict]) -> Componen
         source_backing_status=status,
         review_reasons=reasons,
         member_component_ids=detail_node_ids,
+        support_role=support["support_role"],
+        supports_claim_ids=support["supports_claim_ids"],
+        support_distance_to_headline_claim=support["support_distance_to_headline_claim"],
+        support_kind=support["support_kind"],
+        concepts=concept_meta["concepts"],
+        prerequisite_concepts=concept_meta["prerequisite_concepts"],
+        visual_label=label,
+        input_claim_ids=group_input_claim_ids,
+        output_claim_ids=group_output_claim_ids,
+        required_claim_ids=group_required_claim_ids,
+        review_reason=group_review_reason,
     )
 
 
 def _main_edges_from_groups(groups: list[dict]) -> list[ComponentGraphEdge]:
-    """High-level theory flow: group output equation feeds another group's input."""
+    """High-level theory flow: group output feeds another group's input.
+
+    Edges are created from equation overlap (output equations matching input
+    equations) or, when no equation overlap exists, from claim overlap (output
+    claims matching input/required claims).  This ensures claim-only derivation
+    chains still produce a connected graph (issue #334).
+    """
     summaries = []
     for group in groups:
         outputs = {eq for rec in group["records"] for eq in rec["outputs"]}
         inputs = {eq for rec in group["records"] for eq in rec["inputs"]}
+        output_claims = {cid for rec in group["records"] for cid in rec.get("output_claims", [])}
+        input_claims = {cid for rec in group["records"] for cid in rec.get("input_claims", [])}
+        input_claims.update(cid for rec in group["records"] for cid in rec.get("required_claims", []))
         step_ids = [rec["step_id"] for rec in group["records"]]
         claim_ids = _ordered_unique(
             [cid for rec in group["records"] for cid in _step_claim_ids(rec["step"])]
@@ -428,6 +468,8 @@ def _main_edges_from_groups(groups: list[dict]) -> list[ComponentGraphEdge]:
             "group": group,
             "outputs": outputs,
             "inputs": inputs,
+            "output_claims": output_claims,
+            "input_claims": input_claims,
             "step_ids": step_ids,
             "claim_ids": claim_ids,
             "evidence_ids": evidence_ids,
@@ -436,13 +478,16 @@ def _main_edges_from_groups(groups: list[dict]) -> list[ComponentGraphEdge]:
     edges: list[ComponentGraphEdge] = []
     seen: set[tuple[str, str, str]] = set()
     for tgt in summaries:
-        if not tgt["inputs"]:
+        if not tgt["inputs"] and not tgt["input_claims"]:
             continue
         for src in summaries:
             if src["group"]["node_id"] == tgt["group"]["node_id"]:
                 continue
-            overlap = _ordered_unique([eq for eq in src["outputs"] if eq in tgt["inputs"]])
-            if not overlap:
+            eq_overlap = _ordered_unique([eq for eq in src["outputs"] if eq in tgt["inputs"]])
+            claim_overlap = _ordered_unique(
+                [cid for cid in src["output_claims"] if cid in tgt["input_claims"]]
+            )
+            if not eq_overlap and not claim_overlap:
                 continue
             edge_type = tgt["group"]["edge_type"]
             key = (src["group"]["node_id"], tgt["group"]["node_id"], edge_type)
@@ -451,11 +496,21 @@ def _main_edges_from_groups(groups: list[dict]) -> list[ComponentGraphEdge]:
             seen.add(key)
             evidence_derivation_ids = _ordered_unique(src["step_ids"] + tgt["step_ids"])
             source_backing_status, review_status, review_reasons = _edge_backing(
-                evidence_equation_ids=overlap,
+                evidence_equation_ids=eq_overlap,
                 is_generic=False,
                 evidence_claims=tgt["claim_ids"],
                 evidence_derivation_ids=evidence_derivation_ids,
             )
+            if eq_overlap:
+                reasoning = (
+                    f"Theory flow: {theory_stage_label(src['group']['stage'])} output feeds "
+                    f"{theory_stage_label(tgt['group']['stage'])} ({', '.join(eq_overlap)})."
+                )
+            else:
+                reasoning = (
+                    f"Claim flow: {theory_stage_label(src['group']['stage'])} output feeds "
+                    f"{theory_stage_label(tgt['group']['stage'])} ({', '.join(claim_overlap[:3])})."
+                )
             edges.append(ComponentGraphEdge(
                 edge_id=f"theory_edge_{len(edges) + 1:04d}",
                 source=src["group"]["node_id"],
@@ -463,19 +518,61 @@ def _main_edges_from_groups(groups: list[dict]) -> list[ComponentGraphEdge]:
                 edge_type=edge_type,
                 support_status="derivation_linked",
                 evidence_claims=[],
-                reasoning=(
-                    f"Theory flow: {theory_stage_label(src['group']['stage'])} output feeds "
-                    f"{theory_stage_label(tgt['group']['stage'])} ({', '.join(overlap)})."
-                ),
+                reasoning=reasoning,
                 confidence=0.9,
-                evidence_equation_ids=overlap,
+                evidence_equation_ids=eq_overlap,
                 source_backing_status=source_backing_status,
                 review_status=review_status,
                 evidence_derivation_ids=evidence_derivation_ids,
-                evidence_claim_ids=tgt["claim_ids"],
+                evidence_claim_ids=_ordered_unique(claim_overlap + tgt["claim_ids"]),
                 source_evidence_ids=tgt["evidence_ids"],
                 review_reasons=review_reasons,
             ))
+    return edges
+
+
+def _fallback_sequential_edges(groups: list[dict]) -> list[ComponentGraphEdge]:
+    """Sequential stage edges when neither equation nor claim flow produces edges.
+
+    Connects consecutive main nodes in stage order.  Marked ``review_required``
+    because the connection is inferred from ordering, not from data overlap.
+    """
+    edges: list[ComponentGraphEdge] = []
+    for i in range(len(groups) - 1):
+        src = groups[i]
+        tgt = groups[i + 1]
+        edge_type = tgt["edge_type"]
+        evidence_derivation_ids = _ordered_unique(
+            [rec["step_id"] for rec in src["records"]]
+            + [rec["step_id"] for rec in tgt["records"]]
+        )
+        claim_ids = _ordered_unique(
+            [cid for rec in tgt["records"] for cid in _step_claim_ids(rec["step"])]
+        )
+        evidence_ids = _ordered_unique(
+            [eid for rec in tgt["records"]
+             for eid in (getattr(rec["step"], "source_evidence_ids", []) or [])]
+        )
+        edges.append(ComponentGraphEdge(
+            edge_id=f"theory_edge_{len(edges) + 1:04d}",
+            source=src["node_id"],
+            target=tgt["node_id"],
+            edge_type=edge_type,
+            support_status="derivation_linked",
+            evidence_claims=[],
+            reasoning=(
+                f"Sequential stage flow: {theory_stage_label(src['stage'])} → "
+                f"{theory_stage_label(tgt['stage'])}."
+            ),
+            confidence=0.7,
+            evidence_equation_ids=[],
+            source_backing_status="review_required",
+            review_status="review_required",
+            evidence_derivation_ids=evidence_derivation_ids,
+            evidence_claim_ids=claim_ids,
+            source_evidence_ids=evidence_ids,
+            review_reasons=["edge_not_source_backed"],
+        ))
     return edges
 
 
@@ -513,16 +610,25 @@ def _detail_node_from_record(
     # Generic / inferred steps are kept for traceability but never confirmed.
     layer = GRAPH_LAYER_DEBUG if rec["is_generic"] else GRAPH_LAYER_EQUATION_DETAIL
 
+    detail_label = _build_detail_label(rec["verb"], step, inputs, outputs)
+    step_reason = str(getattr(step, "reason", "") or "").strip()
+    step_input_claims = _ordered_unique(getattr(step, "input_claim_ids", []) or [])
+    step_required_claims = _ordered_unique(getattr(step, "required_claim_ids", []) or [])
+    step_output_claims = _ordered_unique(getattr(step, "output_claim_ids", []) or [])
+    visual = _build_detail_visual_label(rec["verb"], inputs, outputs,
+                                        step_input_claims, step_output_claims)
+
     return ComponentGraphNode(
         component_id=rec["detail_id"],
-        label=_build_detail_label(rec["verb"], step, inputs, outputs),
+        label=detail_label,
         component_type=EQUATION_OPERATION_NODE,
         review_status=review_status_for_backing(status),
         display_order=1000 + rec["order"],
         origin="derivation_chain",
         operation=rec["operation"],
-        theory_object=str(getattr(step, "reason", "") or "").strip()[:120] or rec["verb"],
-        display_label=_build_detail_label(rec["verb"], step, inputs, outputs),
+        theory_object=rec["verb"],
+        display_label=detail_label,
+        description="",
         linked_component_ids=list(rec.get("linked_component_ids", [])),
         supporting_derivation_ids=linked_derivation_ids,
         graph_layer=layer,
@@ -544,6 +650,13 @@ def _detail_node_from_record(
         source_backing_status=status,
         review_reasons=reasons,
         parent_component_id=parent_id,
+        visual_label=visual,
+        input_claim_ids=step_input_claims,
+        output_claim_ids=step_output_claims,
+        required_claim_ids=step_required_claims,
+        review_reason=step_reason[:240],
+        **_support_metadata_for_components(list(rec.get("linked_component_ids", [])), [rec]),
+        **_concepts_for_components(list(rec.get("linked_component_ids", [])), [rec]),
     )
 
 
@@ -555,11 +668,17 @@ def _detail_edges_from_records(
     seen: set[tuple[str, str, str]] = set()
     for j, target in enumerate(records):
         target_inputs = set(target["inputs"])
-        if not target_inputs:
+        target_input_claims = set(target.get("input_claims", []))
+        target_input_claims.update(target.get("required_claims", []))
+        if not target_inputs and not target_input_claims:
             continue
         for source in records[:j]:
-            overlap = [eq for eq in source["outputs"] if eq in target_inputs]
-            if not overlap:
+            eq_overlap = [eq for eq in source["outputs"] if eq in target_inputs]
+            claim_overlap = [
+                cid for cid in source.get("output_claims", [])
+                if cid in target_input_claims
+            ]
+            if not eq_overlap and not claim_overlap:
                 continue
             edge_type = target["edge_type"]
             key = (source["detail_id"], target["detail_id"], edge_type)
@@ -568,10 +687,20 @@ def _detail_edges_from_records(
             seen.add(key)
             step = target["step"]
             source_backing_status, review_status, review_reasons = _edge_backing(
-                evidence_equation_ids=overlap,
+                evidence_equation_ids=eq_overlap,
                 is_generic=target["is_generic"],
                 evidence_derivation_ids=[source["step_id"], target["step_id"]],
             )
+            if eq_overlap:
+                reasoning = (
+                    f"Derivation data flow: {source['operation'] or 'step'} output "
+                    f"feeds {target['operation'] or 'step'} ({', '.join(eq_overlap)})."
+                )
+            else:
+                reasoning = (
+                    f"Claim flow: {source['operation'] or 'step'} output "
+                    f"feeds {target['operation'] or 'step'} ({', '.join(claim_overlap[:3])})."
+                )
             edges.append(ComponentGraphEdge(
                 edge_id=f"eq_edge_{len(edges) + 1:04d}",
                 source=source["detail_id"],
@@ -579,18 +708,15 @@ def _detail_edges_from_records(
                 edge_type=edge_type,
                 support_status="derivation_linked",
                 evidence_claims=[],
-                reasoning=(
-                    f"Derivation data flow: {source['operation'] or 'step'} output "
-                    f"feeds {target['operation'] or 'step'} ({', '.join(overlap)})."
-                ),
+                reasoning=reasoning,
                 confidence=0.9,
-                evidence_equation_ids=_ordered_unique(overlap),
+                evidence_equation_ids=_ordered_unique(eq_overlap),
                 source_backing_status=source_backing_status,
                 review_status=review_status,
                 evidence_derivation_ids=_ordered_unique([
                     source["step_id"], target["step_id"]
                 ]),
-                evidence_claim_ids=_ordered_unique(_step_claim_ids(step)),
+                evidence_claim_ids=_ordered_unique(claim_overlap + _step_claim_ids(step)),
                 source_evidence_ids=_ordered_unique(
                     getattr(step, "source_evidence_ids", []) or []
                 ),
@@ -729,13 +855,36 @@ def _claim_is_atomic(meta: dict) -> bool:
 # ---------------------------------------------------------------------- #
 
 def _build_detail_label(verb: str, step, inputs: list[str], outputs: list[str]) -> str:
-    """Equation-level label: equation IDs are acceptable here (traceability)."""
+    """Detail-level label: equation IDs are acceptable here (traceability).
+
+    Never uses step.reason as a label — reason is review/extraction metadata
+    and belongs in the node's ``description``, not in its graph label (#337).
+    """
     obj = (outputs[:1] or inputs[:1] or [""])[0]
     if obj:
         return f"{verb} {obj}".strip()
-    reason = str(getattr(step, "reason", "") or "").strip()
-    if reason and reason.lower() not in _GENERIC_LABELS:
-        return reason[:80]
+    return verb
+
+
+def _build_detail_visual_label(
+    verb: str,
+    inputs: list[str],
+    outputs: list[str],
+    input_claims: list[str],
+    output_claims: list[str],
+) -> str:
+    """Short graph-canvas label for detail nodes, showing I/O flow (#337).
+
+    Format: ``"verb\\ninput → output"`` (capped at 30 chars per line).
+    Falls back to verb only when no I/O identifiers are available.
+    """
+    src = (inputs[:1] or input_claims[:1] or [""])[0]
+    dst = (outputs[:1] or output_claims[:1] or [""])[0]
+    if src and dst:
+        flow = f"{src} → {dst}"
+        return f"{verb}\n{flow[:30]}"
+    if src or dst:
+        return f"{verb}\n{(src or dst)[:30]}"
     return verb
 
 
@@ -749,23 +898,16 @@ def _build_main_description(
     atomic_claim_ids: list[str],
     claim_index: dict[str, dict],
 ) -> str:
-    """Longer explanation for a main node, shown in the UI detail pane (issue #308).
+    """Reader-facing explanation for a main node (issue #308, #337).
 
-    The main node's *label* stays short (the theory-stage name). This description
-    carries the human-readable detail: the atomic-claim text if one backs the
-    node, otherwise the first meaningful step reason. Equation-id-only reasons are
-    skipped so the description never degenerates into an equation reference.
-    Returns ``""`` when no meaningful phrase is available.
+    Returns only genuinely reader-friendly content: the atomic-claim text that
+    backs the node. Step reasons (extraction/review metadata) are NOT included
+    here — they live in ``review_reason`` and are shown separately in the UI.
+    Returns ``""`` when no reader-friendly phrase is available.
     """
-    # 1. atomic claim text (preferred)
     claim_phrase = _atomic_claim_phrase(atomic_claim_ids, claim_index, limit=240)
     if claim_phrase:
         return claim_phrase
-    # 2. meaningful step reason (skip bare generic words / equation-id-only text)
-    for rec in records:
-        reason = str(getattr(rec["step"], "reason", "") or "").strip()
-        if reason and reason.lower() not in _GENERIC_LABELS and not _looks_like_equation_id(reason):
-            return reason[:240]
     return ""
 
 
@@ -816,9 +958,8 @@ def _theory_object(
     )
     if symbols:
         return ", ".join(symbols[:3])[:120]
-    reason = str(getattr(rep["step"], "reason", "") or "").strip()
-    if reason and not _looks_like_equation_id(reason):
-        return reason[:120]
+    # Never fall back to step.reason here (#337) — reason is extraction metadata,
+    # not a theory-object phrase. It lives in review_reason instead.
     operation = str(rep.get("operation") or rep.get("verb") or "")
     return operation.replace("_", " ")[:120]
 
@@ -856,8 +997,76 @@ def _component_support_records(components: ComponentAssemblyResult | None) -> li
             ),
             "linked_equation_ids": eq_ids,
             "operation": str(getattr(comp, "operation", "") or ""),
+            "support_role": str(getattr(comp, "support_role", "") or ""),
+            "supports_claim_ids": list(getattr(comp, "supports_claim_ids", []) or []),
+            "support_distance_to_headline_claim": int(getattr(comp, "support_distance_to_headline_claim", 0) or 0),
+            "support_kind": str(getattr(comp, "support_kind", "") or ""),
+            "concepts": list(getattr(comp, "concepts", []) or []),
+            "prerequisite_concepts": list(getattr(comp, "prerequisite_concepts", []) or []),
         })
     return records
+
+
+def _support_metadata_for_components(component_ids: list[str], records: list[dict]) -> dict:
+    support_records = []
+    wanted = set(component_ids or [])
+    for rec in records or []:
+        for comp in rec.get("component_records", []) or []:
+            if not wanted or comp.get("component_id") in wanted:
+                support_records.append(comp)
+    if not support_records:
+        support_records = [
+            rec for rec in records or []
+            if rec.get("support_role") or rec.get("supports_claim_ids") or rec.get("support_kind")
+        ]
+    role_order = ["derivation_core", "result", "observable_bridge", "application", "limitation", "theory_base"]
+    selected = ""
+    for role in role_order:
+        if any(rec.get("support_role") == role for rec in support_records):
+            selected = role
+            break
+    if not selected:
+        selected = ""
+    claim_ids = _ordered_unique(
+        cid for rec in support_records for cid in (rec.get("supports_claim_ids") or [])
+    )
+    distances = [
+        int(rec.get("support_distance_to_headline_claim") or 0)
+        for rec in support_records
+        if rec.get("support_distance_to_headline_claim") is not None
+    ]
+    kind = next((rec.get("support_kind") for rec in support_records if rec.get("support_role") == selected and rec.get("support_kind")), "")
+    return {
+        "support_role": selected,
+        "supports_claim_ids": claim_ids,
+        "support_distance_to_headline_claim": min(distances or [0]),
+        "support_kind": kind,
+    }
+
+
+def _concepts_for_components(component_ids: list[str], records: list[dict]) -> dict:
+    """Roll up component concepts onto a graph node (issue #8)."""
+    support_records = []
+    wanted = set(component_ids or [])
+    for rec in records or []:
+        for comp in rec.get("component_records", []) or []:
+            if not wanted or comp.get("component_id") in wanted:
+                support_records.append(comp)
+    if not support_records:
+        support_records = [
+            rec for rec in records or []
+            if rec.get("concepts") or rec.get("prerequisite_concepts")
+        ]
+    concepts = _ordered_unique(
+        c for rec in support_records for c in (rec.get("concepts") or [])
+    )
+    prerequisite_concepts = _ordered_unique(
+        c for rec in support_records for c in (rec.get("prerequisite_concepts") or [])
+    )
+    return {
+        "concepts": concepts,
+        "prerequisite_concepts": prerequisite_concepts,
+    }
 
 
 def _linked_components_for_step(

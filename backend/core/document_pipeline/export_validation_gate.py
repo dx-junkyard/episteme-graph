@@ -47,6 +47,77 @@ class ValidationSummary:
 
 
 @dataclass
+class ComponentQualityEntry:
+    component_id: str
+    granularity_status: str
+    equation_count: int = 0
+    claim_count: int = 0
+    derivation_step_count: int = 0
+    responsibility_count: int = 0
+    source_scope_width: int = 0
+    split_required: bool = False
+    split_reasons: list[str] = field(default_factory=list)
+    suggested_split: list[dict] = field(default_factory=list)
+
+
+def _empty_concept_validation() -> dict:
+    return {
+        "missing_concepts": [],
+        "empty_concepts_on_main_claims": [],
+        "empty_concepts_on_main_components": [],
+        "concepts_on_composite_claims": [],
+        "concept_role_mismatch": [],
+        "concepts_from_low_confidence_sources": [],
+    }
+
+
+def _empty_refinement_validation() -> dict:
+    return {
+        "split_components": [],
+        "unchanged_components": [],
+        "failed_refinements": [],
+        "review_required_refinements": [],
+        "unassigned_links": [],
+        "dangling_component_refs": [],
+        "teaching_granularity_warnings": [],
+    }
+
+
+def _empty_derivation_graph_alignment() -> dict:
+    return {
+        "errors": [],
+        "warnings": [],
+        "review_items": [],
+        "component_graph_clean": True,
+        "operation_graph_clean": True,
+        "support_map_renderable": True,
+    }
+
+
+def _empty_theory_bundle_validation() -> dict:
+    return {
+        "errors": [],
+        "warnings": [],
+        "review_items": [],
+        "bundle_created": False,
+        "headline_claim_linked": False,
+        "component_refs_valid": True,
+        "support_map_linked": False,
+    }
+
+
+def _empty_teaching_output_validation() -> dict:
+    return {
+        "errors": [],
+        "warnings": [],
+        "review_items": [],
+        "course_topics_link_components": True,
+        "blueprint_refs_valid": True,
+        "blackbox_policy_respects_confidence": True,
+    }
+
+
+@dataclass
 class ExportValidationResult:
     status: str                          # one of EXPORT_STATUSES
     exportable: bool
@@ -54,7 +125,18 @@ class ExportValidationResult:
     errors: list[ValidationEntry] = field(default_factory=list)
     warnings: list[ValidationEntry] = field(default_factory=list)
     review_items: list[ValidationEntry] = field(default_factory=list)
+    component_quality: list[ComponentQualityEntry] = field(default_factory=list)
     summary: ValidationSummary = field(default_factory=ValidationSummary)
+    # Concept coverage report for claims / components (issue #8).
+    concept_validation: dict = field(default_factory=_empty_concept_validation)
+    # ComponentRefiner Step 3 reporting (issue #324).
+    component_refinement_validation: dict = field(default_factory=_empty_refinement_validation)
+    # DerivationGraphAligner Step 4 reporting (issue #325).
+    derivation_graph_alignment: dict = field(default_factory=_empty_derivation_graph_alignment)
+    # TheoryBundleBuilder Step 5 reporting (issue #326).
+    theory_bundle_validation: dict = field(default_factory=_empty_theory_bundle_validation)
+    # TeachingOutputMapper Step 5 reporting (issue #326).
+    teaching_output_validation: dict = field(default_factory=_empty_teaching_output_validation)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -105,6 +187,112 @@ _HARD_ERROR_STAGES = {
 # A non-atomic main-result claim is a paper-level summary, not a usable claim.
 _MAIN_RESULT_CLAIM_TYPES = {"result", "conclusion", "main_result"}
 
+
+def _ordered_unique(values) -> list:
+    result = []
+    seen = set()
+    for value in values or []:
+        text = str(value or "")
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
+
+
+def _component_low_confidence_equation_ids(component) -> list:
+    """Low-confidence equation ids a component carries (Step 3 fields, #326).
+
+    Used by the teaching-output check to verify a topic's blackbox_policy covers
+    every low-confidence equation of its linked components.
+    """
+    ids = list(getattr(component, "review_required_equation_ids", []) or [])
+    gate = getattr(component, "confidence_gate", {}) or {}
+    ids.extend(gate.get("blocked_by_equation_ids") or [])
+    return _ordered_unique(ids)
+
+
+def _alignment_code(entry) -> str:
+    code = str(entry.get("code") if isinstance(entry, dict) else entry or "issue")
+    return code.upper()
+
+
+def _alignment_message(entry) -> str:
+    if isinstance(entry, dict):
+        return str(entry.get("message") or entry.get("code") or "")
+    return str(entry or "")
+
+
+def _claim_is_non_atomic(claim) -> bool:
+    atomicity = str(getattr(claim, "atomicity", "atomic") or "atomic")
+    is_atomic = bool(getattr(claim, "is_atomic", atomicity == "atomic"))
+    return atomicity in {
+        "composite",
+        "split_required",
+        "compound",
+        "non_atomic",
+        "split_pending",
+    } or not is_atomic
+
+# Domain-neutral operation / procedure words for concept role checks (issue #8).
+_PROCEDURAL_CONCEPT_TERMS = {
+    "derive", "derivation", "eliminate", "elimination", "solve", "substitute",
+    "substitution", "linearize", "linearization", "transform", "transformation",
+    "constrain", "constraint", "define", "definition", "normalize", "normalization",
+    "approximate", "approximation", "expand", "expansion", "integrate", "integration",
+    "differentiate", "reconstruct", "reconstruction",
+}
+
+
+def _looks_like_symbol(name: str) -> bool:
+    token = str(name or "").strip()
+    if not token or " " in token:
+        return False
+    if any(ch in token for ch in "_^{}\\=+/*()|<>"):
+        return True
+    return len(token) <= 3
+
+
+def _has_math_or_procedural_concept(concepts) -> bool:
+    for concept in concepts or []:
+        text = str(concept or "")
+        if text.lower() in _PROCEDURAL_CONCEPT_TERMS or _looks_like_symbol(text):
+            return True
+    return False
+
+
+def _has_named_concept(concepts) -> bool:
+    for concept in concepts or []:
+        text = str(concept or "")
+        if text.lower() in _PROCEDURAL_CONCEPT_TERMS or _looks_like_symbol(text):
+            continue
+        return True
+    return False
+
+
+def _component_concept_role_mismatch(component, concepts) -> str:
+    """Return a reason string when concepts contradict the support_role (issue #8)."""
+    role = str(getattr(component, "support_role", "") or "")
+    operation = str(getattr(component, "operation", "") or "").lower()
+    responsibility = str(getattr(component, "responsibility_type", "") or "")
+    component_type = str(getattr(component, "component_type", "") or "")
+
+    is_derivation = (
+        role == "derivation_core"
+        or responsibility == "derivation"
+        or any(operation.startswith(p) for p in ("derive", "eliminate", "solve", "substitute", "linearize"))
+    )
+    if is_derivation and concepts and not _has_math_or_procedural_concept(concepts):
+        return "derivation component lacks a mathematical or procedural concept"
+
+    if (role == "observable_bridge" or component_type == "ObservableComponent") and concepts and not _has_named_concept(concepts):
+        return "observable component lacks an observable-name concept"
+
+    is_comparison = operation.startswith("compare") or component_type in {"ComparisonComponent", "TheoryComparisonComponent"}
+    if is_comparison and concepts and not _has_named_concept(concepts):
+        return "theory-comparison component lacks a theory-class concept"
+    return ""
+
+
 # Stage names where validation_issues are always warnings/review
 _SOFT_STAGES = {
     "equation_semantics",
@@ -131,13 +319,18 @@ class ExportValidationGate:
         errors: list[ValidationEntry] = []
         warnings: list[ValidationEntry] = []
         review_items: list[ValidationEntry] = []
+        component_quality: list[ComponentQualityEntry] = []
 
         # 1. Aggregate validation_issues from all stage artifacts
         self._aggregate_artifact_issues(
             artifacts, errors, warnings, review_items
         )
 
-        # 2. Cross-artifact ID validation
+        # 2. Equation consistency reporting
+        self._check_equation_consistency_mismatches(artifacts, review_items, warnings)
+        self._check_derivation_equation_confidence(artifacts, warnings, errors)
+
+        # 3. Cross-artifact ID validation
         if component_result and claim_objects and evidence:
             self._cross_validate_component_ids(
                 component_result, claim_objects, evidence, dsl,
@@ -153,6 +346,12 @@ class ExportValidationGate:
         if component_result:
             self._check_component_internal_flow(component_result, errors)
             self._check_summary_only_derivation_components(component_result, errors)
+            component_quality = self._check_component_quality(
+                component_result,
+                artifacts,
+                warnings,
+                review_items,
+            )
 
         # 3. Course mapping → component ID resolution
         if course_mapping and component_result:
@@ -180,6 +379,38 @@ class ExportValidationGate:
         # components / graph nodes; a non-atomic main result is a hard error.
         if claim_objects:
             self._check_claim_atomicity(claim_objects, errors, review_items)
+
+        # 7c. concept coverage reporting (#8): claims / components used in the
+        # graph or course mapping must carry non-empty, role-consistent concepts.
+        concept_validation = self._check_concepts(
+            claim_objects, component_result, warnings, review_items
+        )
+
+        # 7d. component refinement reporting (#324): ComponentRefiner Step 3
+        # results — unassigned links, dangling refs, review-required refinements,
+        # and teaching granularity warnings.
+        component_refinement_validation = self._check_component_refinement(
+            component_result, errors, warnings, review_items
+        )
+
+        # 7e. derivation graph alignment reporting (#325): aggregate the
+        # DerivationGraphAligner Step 4 results (dangling refs / operation graph
+        # equation refs / support map renderability) into the export buckets.
+        # The gate aggregates results here; it does not re-run alignment.
+        derivation_graph_alignment = self._check_derivation_graph_alignment(
+            component_result, errors, warnings, review_items
+        )
+
+        # 7f. theory bundle + teaching output reporting (#326): Step 5 represents
+        # the whole paper as a TheoryBundle and maps refined components into a
+        # teaching output. The gate re-validates the bundle / topic / blueprint
+        # references against the refined components so dangling refs surface here.
+        theory_bundle_validation = self._check_theory_bundle(
+            component_result, errors, warnings, review_items
+        )
+        teaching_output_validation = self._check_teaching_output(
+            component_result, errors, warnings, review_items
+        )
 
         # 6. Determine status
         summary = ValidationSummary(
@@ -212,7 +443,13 @@ class ExportValidationGate:
             errors=errors,
             warnings=warnings,
             review_items=review_items,
+            component_quality=component_quality,
             summary=summary,
+            concept_validation=concept_validation,
+            component_refinement_validation=component_refinement_validation,
+            derivation_graph_alignment=derivation_graph_alignment,
+            theory_bundle_validation=theory_bundle_validation,
+            teaching_output_validation=teaching_output_validation,
         )
 
     # ------------------------------------------------------------------
@@ -271,6 +508,10 @@ class ExportValidationGate:
             c.claim_id
             for c in (getattr(claim_objects, "claims", []) or [])
         }
+        claim_by_id = {
+            c.claim_id: c
+            for c in (getattr(claim_objects, "claims", []) or [])
+        }
         known_evidence_ids: set[str] = {
             r.evidence_id
             for r in (getattr(evidence, "records", []) or [])
@@ -286,11 +527,28 @@ class ExportValidationGate:
             comp_id = component.component_id
             refs = component.evidence_refs or {}
 
-            for cid in refs.get("claim_ids") or []:
+            primary_claim_ids = _ordered_unique(
+                list(refs.get("claim_ids") or [])
+                + list(getattr(component, "linked_claim_ids", []) or [])
+                + list(getattr(component, "supports_claim_ids", []) or [])
+            )
+            for cid in primary_claim_ids:
                 if known_claim_ids and cid not in known_claim_ids:
                     errors.append(ValidationEntry(
                         code="UNRESOLVED_COMPONENT_CLAIM_ID",
                         message=f"component {comp_id!r} references missing claim {cid!r}",
+                        artifact="component_assembly",
+                        path=f"$.components[{comp_id}].evidence_refs.claim_ids",
+                        source_stage="export_validation",
+                    ))
+                claim = claim_by_id.get(cid)
+                if claim and _claim_is_non_atomic(claim):
+                    errors.append(ValidationEntry(
+                        code="NON_ATOMIC_CLAIM_USED_AS_COMPONENT_SUPPORT",
+                        message=(
+                            f"component {comp_id!r} uses non-atomic claim {cid!r} "
+                            f"({getattr(claim, 'atomicity', '')}) as primary claim support"
+                        ),
                         artifact="component_assembly",
                         path=f"$.components[{comp_id}].evidence_refs.claim_ids",
                         source_stage="export_validation",
@@ -359,6 +617,7 @@ class ExportValidationGate:
             review_required_eqs = {
                 str(e) for e in (getattr(component, "review_required_equation_ids", []) or []) if str(e)
             }
+            review_status = str(getattr(component, "review_status", "") or "")
             all_eqs = self._component_equation_refs(component, refs)
 
             for eq_id in all_eqs:
@@ -366,12 +625,56 @@ class ExportValidationGate:
                 if not eq:
                     continue
                 policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
+                if self._equation_blocks_claim_and_derivation(eq):
+                    warnings.append(ValidationEntry(
+                        code="DOWNSTREAM_BLOCKED_EQUATION_IN_COMPONENT",
+                        message=(
+                            f"component {comp_id!r} references equation {eq_id!r}, "
+                            "but the equation cannot support claims or derivations"
+                        ),
+                        artifact="component_assembly",
+                        path=f"$.components[{comp_id}].confidence_gate",
+                        source_stage="export_validation",
+                    ))
+                    if getattr(component, "review_status", "") in ("source_backed", "auto_accepted", "teacher_reviewed"):
+                        errors.append(ValidationEntry(
+                            code="SOURCE_BACKED_COMPONENT_USES_BLOCKED_EQUATION",
+                            message=(
+                                f"component {comp_id!r} cannot be source_backed/publish-ready "
+                                f"because equation {eq_id!r} is blocked by confidence policy"
+                            ),
+                            artifact="component_assembly",
+                            path=f"$.components[{comp_id}].review_status",
+                            source_stage="export_validation",
+                        ))
                 if claim_linked and policy.get("can_support_claim") is False:
                     warnings.append(ValidationEntry(
                         code="NON_SUPPORTING_EQUATION_USED_FOR_CLAIM_SUPPORT",
                         message=(
                             f"component {comp_id!r} links claim evidence to equation {eq_id!r}, "
                             "but equation.confidence_policy.can_support_claim is false"
+                        ),
+                        artifact="component_assembly",
+                        path=f"$.components[{comp_id}].linked_equation_ids",
+                        source_stage="export_validation",
+                    ))
+                    if self._component_equation_violation_is_hard(review_status, eq_id, review_required_eqs):
+                        errors.append(ValidationEntry(
+                            code="NON_SUPPORTING_EQUATION_USED_FOR_CLAIM_SUPPORT",
+                            message=(
+                                f"component {comp_id!r} cannot use equation {eq_id!r} "
+                                "as claim support because equation.confidence_policy.can_support_claim is false"
+                            ),
+                            artifact="component_assembly",
+                            path=f"$.components[{comp_id}].linked_equation_ids",
+                            source_stage="export_validation",
+                        ))
+                if claim_linked and self._equation_requires_review(eq):
+                    warnings.append(ValidationEntry(
+                        code="REVIEW_REQUIRED_EQUATION_USED_FOR_CLAIM_SUPPORT",
+                        message=(
+                            f"component {comp_id!r} links claim evidence to equation {eq_id!r}, "
+                            "but equation requires review and cannot be accepted as claim support"
                         ),
                         artifact="component_assembly",
                         path=f"$.components[{comp_id}].linked_equation_ids",
@@ -405,6 +708,17 @@ class ExportValidationGate:
                         path=f"$.components[{comp_id}].output_equation_ids",
                         source_stage="export_validation",
                     ))
+                    if self._component_equation_violation_is_hard(review_status, eq_id, review_required_eqs):
+                        errors.append(ValidationEntry(
+                            code="NON_SUPPORTING_EQUATION_USED_AS_COMPONENT_OUTPUT",
+                            message=(
+                                f"component {comp_id!r} cannot publish equation {eq_id!r} as an output "
+                                "because equation.confidence_policy.can_support_claim is false"
+                            ),
+                            artifact="component_assembly",
+                            path=f"$.components[{comp_id}].output_equation_ids",
+                            source_stage="export_validation",
+                        ))
                 if self._equation_requires_review(eq) and getattr(component, "review_status", "") == "auto_accepted":
                     errors.append(ValidationEntry(
                         code="REVIEW_REQUIRED_OUTPUT_COMPONENT_AUTO_ACCEPTED",
@@ -482,6 +796,382 @@ class ExportValidationGate:
                     source_stage="export_validation",
                 ))
 
+    def _check_component_quality(
+        self,
+        component_result,
+        artifacts: dict,
+        warnings: list,
+        review_items: list,
+    ) -> list[ComponentQualityEntry]:
+        quality: list[ComponentQualityEntry] = []
+        for component in getattr(component_result, "components", []) or []:
+            comp_id = getattr(component, "component_id", "?")
+            raw = getattr(component, "component_quality", {}) or {}
+            if not isinstance(raw, dict):
+                raw = {}
+            split = getattr(component, "split_recommendation", {}) or {}
+            status = str(raw.get("granularity_status") or "good")
+            split_reasons = list(raw.get("split_reasons") or split.get("reasons") or [])
+            suggested = list(raw.get("suggested_split") or split.get("suggested_components") or [])
+            entry = ComponentQualityEntry(
+                component_id=str(comp_id),
+                granularity_status=status,
+                equation_count=int(raw.get("equation_count") or 0),
+                claim_count=int(raw.get("claim_count") or 0),
+                derivation_step_count=int(raw.get("derivation_step_count") or 0),
+                responsibility_count=int(raw.get("responsibility_count") or 0),
+                source_scope_width=int(raw.get("source_scope_width") or 0),
+                split_required=bool(raw.get("split_required") or split.get("required")),
+                split_reasons=split_reasons,
+                suggested_split=suggested,
+            )
+            quality.append(entry)
+
+            if status in {"too_coarse", "mixed_responsibility"}:
+                warnings.append(ValidationEntry(
+                    code="COMPONENT_GRANULARITY_ISSUE",
+                    message=(
+                        f"component {comp_id!r} is {status}; ID links may be valid "
+                        "but the component is structurally too broad"
+                    ),
+                    artifact="component_assembly",
+                    path=f"$.components[{comp_id}].component_quality",
+                    source_stage="export_validation",
+                ))
+            elif status == "too_fine":
+                warnings.append(ValidationEntry(
+                    code="COMPONENT_TOO_FINE",
+                    message=f"component {comp_id!r} has too little evidence or structure to stand alone",
+                    artifact="component_assembly",
+                    path=f"$.components[{comp_id}].component_quality",
+                    source_stage="export_validation",
+                ))
+            elif status == "review_required":
+                review_items.append(ValidationEntry(
+                    code="COMPONENT_QUALITY_REVIEW_REQUIRED",
+                    message=f"component {comp_id!r} requires review before publish-ready export",
+                    artifact="component_assembly",
+                    path=f"$.components[{comp_id}].component_quality",
+                    source_stage="export_validation",
+                ))
+        return quality
+
+    def _check_component_refinement(
+        self,
+        component_result,
+        errors: list,
+        warnings: list,
+        review_items: list,
+    ) -> dict:
+        """Report ComponentRefiner Step 3 results (issue #324).
+
+        Reads the ``component_refinement`` contract emitted by ComponentRefiner
+        and surfaces unassigned links / teaching warnings as warnings,
+        review-required refinements as review items, and dangling component refs
+        / failed refinements as hard errors (the graph must not silently
+        reference removed component IDs).
+        """
+        refinement = getattr(component_result, "component_refinement", {}) or {}
+        if not isinstance(refinement, dict):
+            return _empty_refinement_validation()
+        validation = refinement.get("refinement_validation")
+        if not isinstance(validation, dict):
+            return _empty_refinement_validation()
+
+        result = _empty_refinement_validation()
+        result.update({k: validation.get(k, v) for k, v in result.items()})
+
+        for original_id in result["failed_refinements"]:
+            errors.append(ValidationEntry(
+                code="COMPONENT_REFINEMENT_FAILED",
+                message=f"component {original_id!r} refinement failed; no child components produced",
+                artifact="component_assembly",
+                path=f"$.component_refinement[{original_id}]",
+                source_stage="export_validation",
+            ))
+
+        for entry in result["dangling_component_refs"]:
+            ref = entry.get("missing_ref") if isinstance(entry, dict) else entry
+            owner = entry.get("component_id") if isinstance(entry, dict) else "?"
+            errors.append(ValidationEntry(
+                code="COMPONENT_REFINEMENT_DANGLING_REF",
+                message=(
+                    f"refined component {owner!r} references missing component {ref!r} "
+                    "after refinement"
+                ),
+                artifact="component_assembly",
+                path=f"$.component_refinement.component_graph_updates.unresolved_edges",
+                source_stage="export_validation",
+            ))
+
+        for entry in result["unassigned_links"]:
+            link_id = entry.get("link_id") if isinstance(entry, dict) else entry
+            link_type = entry.get("link_type") if isinstance(entry, dict) else "link"
+            warnings.append(ValidationEntry(
+                code="COMPONENT_REFINEMENT_UNASSIGNED_LINK",
+                message=f"refinement could not assign {link_type} {link_id!r} to a child component",
+                artifact="component_assembly",
+                path="$.component_refinement.refinement_validation.unassigned_links",
+                source_stage="export_validation",
+            ))
+
+        for entry in result["teaching_granularity_warnings"]:
+            comp_id = entry.get("component_id") if isinstance(entry, dict) else entry
+            warnings.append(ValidationEntry(
+                code="COMPONENT_REFINEMENT_TEACHING_GRANULARITY",
+                message=f"refined component {comp_id!r} is still too dense to teach as a single unit",
+                artifact="component_assembly",
+                path="$.component_refinement.refinement_validation.teaching_granularity_warnings",
+                source_stage="export_validation",
+            ))
+
+        for original_id in result["review_required_refinements"]:
+            review_items.append(ValidationEntry(
+                code="COMPONENT_REFINEMENT_REVIEW_REQUIRED",
+                message=f"component {original_id!r} refinement requires review before publish-ready export",
+                artifact="component_assembly",
+                path=f"$.component_refinement[{original_id}]",
+                source_stage="export_validation",
+            ))
+
+        return result
+
+    def _check_derivation_graph_alignment(
+        self,
+        component_result,
+        errors: list,
+        warnings: list,
+        review_items: list,
+    ) -> dict:
+        """Aggregate DerivationGraphAligner Step 4 results (issue #325).
+
+        Reads the ``derivation_graph_alignment`` contract emitted by
+        DerivationGraphAligner and folds its pre-computed errors / warnings /
+        review items into the export buckets. The alignment logic lives in the
+        aligner; this method only aggregates and re-codes the entries.
+        """
+        alignment = getattr(component_result, "derivation_graph_alignment", {}) or {}
+        if not isinstance(alignment, dict):
+            return _empty_derivation_graph_alignment()
+        block = alignment.get("export_validation")
+        if not isinstance(block, dict):
+            return _empty_derivation_graph_alignment()
+
+        result = _empty_derivation_graph_alignment()
+        result.update({k: block.get(k, v) for k, v in result.items()})
+
+        for entry in result["errors"]:
+            errors.append(ValidationEntry(
+                code=f"DERIVATION_GRAPH_ALIGNMENT_{_alignment_code(entry)}",
+                message=_alignment_message(entry),
+                artifact="component_assembly",
+                path="$.derivation_graph_alignment",
+                source_stage="export_validation",
+            ))
+        for entry in result["warnings"]:
+            warnings.append(ValidationEntry(
+                code=f"DERIVATION_GRAPH_ALIGNMENT_{_alignment_code(entry)}",
+                message=_alignment_message(entry),
+                artifact="component_assembly",
+                path="$.derivation_graph_alignment",
+                source_stage="export_validation",
+            ))
+        for entry in result["review_items"]:
+            review_items.append(ValidationEntry(
+                code=f"DERIVATION_GRAPH_ALIGNMENT_{_alignment_code(entry)}",
+                message=_alignment_message(entry),
+                artifact="component_assembly",
+                path="$.derivation_graph_alignment",
+                source_stage="export_validation",
+            ))
+
+        return result
+
+    def _check_theory_bundle(
+        self,
+        component_result,
+        errors: list,
+        warnings: list,
+        review_items: list,
+    ) -> dict:
+        """Validate the TheoryBundle Step 5 container (issue #326).
+
+        Reads ``component_result.theory_bundle.theory_bundle`` and re-validates
+        its component references against the refined components so dangling refs
+        surface here regardless of what the stage pre-computed. Aggregates the
+        stage's own errors/warnings/review items as well.
+        """
+        bundle_block = getattr(component_result, "theory_bundle", {}) or {}
+        if not isinstance(bundle_block, dict) or not bundle_block:
+            return _empty_theory_bundle_validation()
+        bundle = bundle_block.get("theory_bundle")
+        if not isinstance(bundle, dict) or not bundle:
+            return _empty_theory_bundle_validation()
+
+        known_ids = {
+            c.component_id for c in (getattr(component_result, "components", []) or [])
+        }
+
+        result = _empty_theory_bundle_validation()
+        stage_block = bundle_block.get("theory_bundle_validation")
+        if isinstance(stage_block, dict):
+            for key in ("bundle_created", "headline_claim_linked", "support_map_linked"):
+                if key in stage_block:
+                    result[key] = stage_block[key]
+
+        # Authoritative ref re-validation (independent of stage booleans).
+        dangling = [
+            cid for cid in bundle.get("component_ids", []) or [] if cid not in known_ids
+        ]
+        result["component_refs_valid"] = not dangling
+        for cid in dangling:
+            errors.append(ValidationEntry(
+                code="THEORY_BUNDLE_DANGLING_COMPONENT_REF",
+                message=f"theory bundle references missing component {cid!r}",
+                artifact="component_assembly",
+                path="$.theory_bundle.theory_bundle.component_ids",
+                source_stage="export_validation",
+            ))
+
+        if not result["headline_claim_linked"]:
+            warnings.append(ValidationEntry(
+                code="THEORY_BUNDLE_HEADLINE_CLAIM_MISSING",
+                message="theory bundle is not linked to a headline claim",
+                artifact="component_assembly",
+                path="$.theory_bundle.theory_bundle.headline_claim_id",
+                source_stage="export_validation",
+            ))
+        if not result["support_map_linked"]:
+            warnings.append(ValidationEntry(
+                code="THEORY_BUNDLE_SUPPORT_MAP_MISSING",
+                message="theory bundle is not linked to a renderable support map",
+                artifact="component_assembly",
+                path="$.theory_bundle.theory_bundle.support_map_id",
+                source_stage="export_validation",
+            ))
+        if str(bundle.get("review_status")) == "review_required":
+            review_items.append(ValidationEntry(
+                code="THEORY_BUNDLE_REVIEW_REQUIRED",
+                message="theory bundle requires review before publish-ready export",
+                artifact="component_assembly",
+                path="$.theory_bundle.theory_bundle.review_status",
+                source_stage="export_validation",
+            ))
+        return result
+
+    def _check_teaching_output(
+        self,
+        component_result,
+        errors: list,
+        warnings: list,
+        review_items: list,
+    ) -> dict:
+        """Validate the TeachingOutput Step 5 mapping (issue #326).
+
+        Re-validates course topic / blueprint component references against the
+        refined components and verifies each topic's ``blackbox_policy`` covers
+        the low-confidence equations of its linked components (equation
+        confidence must be respected before teaching).
+        """
+        bundle_block = getattr(component_result, "theory_bundle", {}) or {}
+        if not isinstance(bundle_block, dict) or not bundle_block:
+            return _empty_teaching_output_validation()
+        teaching = bundle_block.get("course_mapping")
+        blueprint = bundle_block.get("blueprint_updates") or {}
+        if not isinstance(teaching, dict) or not teaching:
+            return _empty_teaching_output_validation()
+
+        components = getattr(component_result, "components", []) or []
+        known_ids = {c.component_id for c in components}
+        component_by_id = {c.component_id: c for c in components}
+
+        result = _empty_teaching_output_validation()
+        topics_link = True
+        blackbox_ok = True
+
+        for topic in teaching.get("topics", []) or []:
+            if not isinstance(topic, dict):
+                continue
+            topic_id = topic.get("topic_id")
+            linked = topic.get("linked_component_ids") or []
+            resolved = [cid for cid in linked if cid in known_ids]
+            if not resolved:
+                topics_link = False
+                errors.append(ValidationEntry(
+                    code="TEACHING_OUTPUT_TOPIC_LINKS_NO_COMPONENT",
+                    message=f"course topic {topic_id!r} links no refined component",
+                    artifact="course_mapping",
+                    path="$.theory_bundle.course_mapping.topics",
+                    source_stage="export_validation",
+                ))
+            for cid in linked:
+                if cid not in known_ids:
+                    topics_link = False
+                    errors.append(ValidationEntry(
+                        code="TEACHING_OUTPUT_DANGLING_COMPONENT_REF",
+                        message=(
+                            f"course topic {topic_id!r} references missing component {cid!r}"
+                        ),
+                        artifact="course_mapping",
+                        path="$.theory_bundle.course_mapping.topics",
+                        source_stage="export_validation",
+                    ))
+
+            policy_eq_ids = {
+                str(p.get("equation_id"))
+                for p in topic.get("blackbox_policy") or []
+                if isinstance(p, dict) and p.get("equation_id")
+            }
+            for cid in resolved:
+                for eq_id in _component_low_confidence_equation_ids(component_by_id[cid]):
+                    if eq_id not in policy_eq_ids:
+                        blackbox_ok = False
+                        errors.append(ValidationEntry(
+                            code="TEACHING_OUTPUT_BLACKBOX_POLICY_IGNORES_CONFIDENCE",
+                            message=(
+                                f"course topic {topic_id!r} does not blackbox "
+                                f"low-confidence equation {eq_id!r}"
+                            ),
+                            artifact="course_mapping",
+                            path="$.theory_bundle.course_mapping.topics",
+                            source_stage="export_validation",
+                        ))
+
+            if str(topic.get("review_status")) == "review_required":
+                review_items.append(ValidationEntry(
+                    code="TEACHING_OUTPUT_TOPIC_REVIEW_REQUIRED",
+                    message=f"course topic {topic_id!r} contains a review_required component",
+                    artifact="course_mapping",
+                    path="$.theory_bundle.course_mapping.topics",
+                    source_stage="export_validation",
+                ))
+
+        blueprint_refs_valid = True
+        for cid in blueprint.get("linked_component_ids", []) or []:
+            if cid not in known_ids:
+                blueprint_refs_valid = False
+                errors.append(ValidationEntry(
+                    code="TEACHING_OUTPUT_BLUEPRINT_DANGLING_REF",
+                    message=f"blueprint references missing component {cid!r}",
+                    artifact="blueprint",
+                    path="$.theory_bundle.blueprint_updates.linked_component_ids",
+                    source_stage="export_validation",
+                ))
+
+        # Combine the gate's own (component-field) checks with the stage's
+        # equation-policy-aware booleans: a property holds only if both agree.
+        stage_block = bundle_block.get("teaching_output_validation") or {}
+        result["course_topics_link_components"] = topics_link and bool(
+            stage_block.get("course_topics_link_components", True)
+        )
+        result["blackbox_policy_respects_confidence"] = blackbox_ok and bool(
+            stage_block.get("blackbox_policy_respects_confidence", True)
+        )
+        result["blueprint_refs_valid"] = blueprint_refs_valid and bool(
+            stage_block.get("blueprint_refs_valid", True)
+        )
+        return result
+
     def _cross_validate_course_mapping(
         self,
         course_mapping,
@@ -556,14 +1246,131 @@ class ExportValidationGate:
     def _equation_requires_review(eq: dict) -> bool:
         policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
         reconstruction = eq.get("reconstruction") if isinstance(eq.get("reconstruction"), dict) else {}
+        consistency = eq.get("equation_consistency") if isinstance(eq.get("equation_consistency"), dict) else {}
         return (
             bool(eq.get("needs_math_review"))
             or bool(eq.get("review_flags"))
+            or bool(consistency.get("review_required"))
+            or consistency.get("raw_text_latex_match") == "mismatch"
+            or consistency.get("label_location_match") == "mismatch"
+            or consistency.get("source_span_quality") == "corrupted"
             or eq.get("semantic_status") == "reconstruction_based"
             or reconstruction.get("status") not in (None, "", "none")
             or bool(policy.get("must_not_treat_as_source_extracted"))
             or policy.get("can_support_claim") is False
         )
+
+    @staticmethod
+    def _component_equation_violation_is_hard(
+        review_status: str,
+        eq_id: str,
+        review_required_eqs: set[str],
+    ) -> bool:
+        """Only review-marked components may carry non-supporting equations past the gate."""
+        if review_status in {"source_backed", "auto_accepted", "teacher_reviewed"}:
+            return True
+        return eq_id not in review_required_eqs
+
+    @staticmethod
+    def _equation_blocks_claim_and_derivation(eq: dict) -> bool:
+        policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
+        if policy.get("can_support_claim") is False and policy.get("can_be_used_in_derivation") is False:
+            return True
+        src = eq.get("source_extraction") if isinstance(eq.get("source_extraction"), dict) else {}
+        rec = eq.get("reconstruction") if isinstance(eq.get("reconstruction"), dict) else {}
+        latex = eq.get("latex")
+        plain_text = eq.get("plain_text")
+        if latex is None:
+            latex = rec.get("latex") if rec.get("status") not in (None, "", "none") else src.get("latex")
+        if plain_text is None:
+            plain_text = rec.get("plain_text") if rec.get("status") not in (None, "", "none") else src.get("plain_text")
+        extraction_status = eq.get("extraction_status") or src.get("extraction_status")
+        return (
+            latex is None
+            and plain_text is None
+            and extraction_status in ("partial", "fragment_only", "label_only", "missing", "unparsed")
+        )
+
+    def _check_derivation_equation_confidence(
+        self,
+        artifacts: dict,
+        warnings: list,
+        errors: list,
+    ) -> None:
+        equation_index = self._equation_index_from_artifacts(artifacts)
+        derivations = artifacts.get("derivation_chain") or {}
+        chains = derivations.get("chains") if isinstance(derivations, dict) else []
+        if not isinstance(chains, list):
+            return
+        for chain_idx, chain in enumerate(chains):
+            if not isinstance(chain, dict):
+                continue
+            for step_idx, step in enumerate(chain.get("steps") or []):
+                if not isinstance(step, dict):
+                    continue
+                refs = list(step.get("input_equation_ids") or []) + list(step.get("output_equation_ids") or [])
+                blocked = [
+                    str(eq_id) for eq_id in refs
+                    if self._equation_blocks_claim_and_derivation(equation_index.get(str(eq_id), {}))
+                ]
+                if not blocked:
+                    continue
+                path = f"$.chains[{chain_idx}].steps[{step_idx}].confidence_gate"
+                warnings.append(ValidationEntry(
+                    code="DOWNSTREAM_BLOCKED_EQUATION_IN_DERIVATION",
+                    message=(
+                        f"derivation step {step.get('step_id') or step_idx!r} references "
+                        f"blocked equations {blocked}"
+                    ),
+                    artifact="derivation_chain",
+                    path=path,
+                    source_stage="export_validation",
+                ))
+                if step.get("review_status") in ("auto_accepted", "source_backed"):
+                    errors.append(ValidationEntry(
+                        code="PUBLISH_READY_DERIVATION_STEP_USES_BLOCKED_EQUATION",
+                        message="derivation step cannot be publish-ready with blocked equation inputs/outputs",
+                        artifact="derivation_chain",
+                        path=f"$.chains[{chain_idx}].steps[{step_idx}].review_status",
+                        source_stage="export_validation",
+                    ))
+
+    def _check_equation_consistency_mismatches(
+        self,
+        artifacts: dict,
+        review_items: list,
+        warnings: list,
+    ) -> None:
+        """List equation raw/latex/source consistency candidates in export_validation."""
+        equation_index = self._equation_index_from_artifacts(artifacts)
+        for eq_id, eq in sorted(equation_index.items()):
+            consistency = eq.get("equation_consistency") if isinstance(eq.get("equation_consistency"), dict) else {}
+            if not consistency:
+                continue
+            is_mismatch = (
+                consistency.get("raw_text_latex_match") == "mismatch"
+                or consistency.get("label_location_match") == "mismatch"
+                or consistency.get("source_span_quality") == "corrupted"
+            )
+            is_review = bool(consistency.get("review_required"))
+            if not is_mismatch and not is_review:
+                continue
+            entry = ValidationEntry(
+                code="EQUATION_CONSISTENCY_MISMATCH" if is_mismatch else "EQUATION_CONSISTENCY_REVIEW_REQUIRED",
+                message=(
+                    f"equation {eq_id!r} has raw_text/latex/source consistency status "
+                    f"{consistency.get('raw_text_latex_match')!r}, "
+                    f"label_location={consistency.get('label_location_match')!r}, "
+                    f"source_span={consistency.get('source_span_quality')!r}"
+                ),
+                artifact="equation_semantics",
+                path=f"$.equations[{eq_id}].equation_consistency",
+                source_stage="export_validation",
+            )
+            if is_mismatch:
+                review_items.append(entry)
+            else:
+                warnings.append(entry)
 
     def _check_dsl_edges(
         self,
@@ -763,20 +1570,22 @@ class ExportValidationGate:
         for claim in getattr(claim_objects, "claims", []) or []:
             atomicity = str(getattr(claim, "atomicity", "atomic") or "atomic")
             claim_id = getattr(claim, "claim_id", "?")
-            # Deterministic-split suggestions (issue #317) are never confirmed atomic
+            # Deterministic-split suggestions are never confirmed atomic
             # backing; surface them so a teacher confirms the split before reuse.
-            if atomicity == "split_pending":
+            if atomicity in {"split_pending", "split_required"}:
                 review_items.append(ValidationEntry(
                     code="SPLIT_PENDING_CLAIM_NEEDS_CONFIRMATION",
                     message=(
-                        f"claim {claim_id!r} is a deterministic-split suggestion "
-                        "(split_pending); confirm via ClaimQualificationAgent atomic "
+                        f"claim {claim_id!r} is a split suggestion "
+                        f"({atomicity}); confirm via ClaimQualificationAgent atomic "
                         "rewrite before using it to back a component or graph node"
                     ),
                     artifact="claim_object_builder",
                     path=f"$.claims[{claim_id}].atomicity",
                     source_stage="export_validation",
                 ))
+                continue
+            if atomicity in {"composite", "compound"}:
                 continue
             if atomicity != "non_atomic":
                 continue
@@ -803,6 +1612,104 @@ class ExportValidationGate:
                     path=f"$.claims[{claim_id}].atomicity",
                     source_stage="export_validation",
                 ))
+
+    def _check_concepts(
+        self,
+        claim_objects,
+        component_result,
+        warnings: list,
+        review_items: list,
+    ) -> dict:
+        """Report concept coverage for claims / components (issue #8).
+
+        Builds the structured ``concept_validation`` block and surfaces the
+        actionable gaps: main claims / components without enough concepts
+        (warnings), confirmed concepts on composite claims, and concepts drawn
+        from low-confidence sources (review). Artifacts that predate concept
+        support (no ``concepts`` attribute) are skipped.
+        """
+        block = _empty_concept_validation()
+
+        for claim in getattr(claim_objects, "claims", []) or []:
+            if not hasattr(claim, "concepts") and not hasattr(claim, "concept_assignment_status"):
+                continue
+            claim_id = getattr(claim, "claim_id", "?")
+            concepts = list(getattr(claim, "concepts", []) or [])
+            claim_type = str(getattr(claim, "claim_type", "") or "")
+            status = str(getattr(claim, "concept_assignment_status", "") or "")
+            if not concepts:
+                block["missing_concepts"].append(claim_id)
+            if claim_type in _MAIN_RESULT_CLAIM_TYPES and len(concepts) < 2:
+                block["empty_concepts_on_main_claims"].append(claim_id)
+                warnings.append(ValidationEntry(
+                    code="MAIN_CLAIM_INSUFFICIENT_CONCEPTS",
+                    message=(
+                        f"main claim {claim_id!r} has {len(concepts)} concept(s); "
+                        "main claims need at least 2 for graph / course mapping"
+                    ),
+                    artifact="claim_object_builder",
+                    path=f"$.claims[{claim_id}].concepts",
+                    source_stage="export_validation",
+                ))
+            if _claim_is_non_atomic(claim) and status == "source_backed":
+                block["concepts_on_composite_claims"].append(claim_id)
+                review_items.append(ValidationEntry(
+                    code="CONCEPTS_ON_COMPOSITE_CLAIM",
+                    message=(
+                        f"composite claim {claim_id!r} has source_backed concepts; "
+                        "non-atomic claims must keep concepts tentative"
+                    ),
+                    artifact="claim_object_builder",
+                    path=f"$.claims[{claim_id}].concept_assignment_status",
+                    source_stage="export_validation",
+                ))
+            if concepts and status == "review_required":
+                block["concepts_from_low_confidence_sources"].append(claim_id)
+                review_items.append(ValidationEntry(
+                    code="CONCEPTS_FROM_LOW_CONFIDENCE_SOURCE",
+                    message=(
+                        f"claim {claim_id!r} draws concepts from a low-confidence "
+                        "source; teacher review required before downstream use"
+                    ),
+                    artifact="claim_object_builder",
+                    path=f"$.claims[{claim_id}].concept_assignment_status",
+                    source_stage="export_validation",
+                ))
+
+        for component in getattr(component_result, "components", []) or []:
+            if not hasattr(component, "concepts"):
+                continue
+            comp_id = getattr(component, "component_id", "?")
+            concepts = list(getattr(component, "concepts", []) or [])
+            if not concepts:
+                block["missing_concepts"].append(comp_id)
+            if len(concepts) < 2:
+                block["empty_concepts_on_main_components"].append(comp_id)
+                warnings.append(ValidationEntry(
+                    code="MAIN_COMPONENT_INSUFFICIENT_CONCEPTS",
+                    message=(
+                        f"component {comp_id!r} has {len(concepts)} concept(s); "
+                        "components need at least 2 for graph / course mapping"
+                    ),
+                    artifact="component_assembly",
+                    path=f"$.components[{comp_id}].concepts",
+                    source_stage="export_validation",
+                ))
+            mismatch = _component_concept_role_mismatch(component, concepts)
+            if mismatch:
+                block["concept_role_mismatch"].append({
+                    "component_id": comp_id,
+                    "reason": mismatch,
+                })
+                warnings.append(ValidationEntry(
+                    code="COMPONENT_CONCEPT_ROLE_MISMATCH",
+                    message=f"component {comp_id!r} concept role mismatch: {mismatch}",
+                    artifact="component_assembly",
+                    path=f"$.components[{comp_id}].concepts",
+                    source_stage="export_validation",
+                ))
+
+        return block
 
     def _check_required_artifacts(
         self,

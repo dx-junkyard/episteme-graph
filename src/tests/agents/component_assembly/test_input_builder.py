@@ -7,6 +7,7 @@ from episteme_graph.agents.id_canonicalization import (
     claim_aliases_from_accepted_claims,
 )
 from episteme_graph.agents.claim_object_builder.schema import (
+    ClaimConcept,
     ClaimObjectBuildResult,
     ClaimObjectRecord,
 )
@@ -108,11 +109,21 @@ def test_build_packages_inputs_and_allowed_vocabularies():
     assert llm_input.equations[0]["role"] == "relation"
     assert llm_input.equations[0]["plain_text"] == "R = A"
     assert llm_input.equations[0]["confidence_policy"]["can_support_claim"] is True
+    assert llm_input.equations[0]["confidence_policy"]["can_be_rendered_as_final_formula"] is True
+    assert llm_input.equations[0]["confidence_policy"]["allowed_downstream_use"] == "unrestricted"
     assert llm_input.available_equations[0]["confidence_policy"]["must_not_treat_as_source_extracted"] is False
     assert llm_input.dsl_nodes[0]["node_id"] == "n1"
     assert "PaperRelationComponent" in llm_input.allowed_component_types
     assert "requires" in llm_input.allowed_dependency_types
     assert llm_input.normalized_terms[0]["canonical"] == "HQET"
+    assert llm_input.claim_centered_plan["headline_claim"] == "Central thesis."
+    assert llm_input.claim_centered_plan["headline_claim_ids"] == ["claim:b1:s1"]
+    assert [layer["layer"] for layer in llm_input.claim_centered_plan["support_layers"]] == [
+        "theory_base",
+        "observable_bridge",
+        "derivation_core",
+        "result_and_application",
+    ]
 
 
 def test_build_uses_canonical_claim_ids_from_claim_objects():
@@ -170,6 +181,109 @@ def test_build_uses_canonical_claim_ids_from_claim_objects():
         claim_aliases_from_accepted_claims(llm_input.accepted_claims),
     )
     assert normalized["evidence_refs"]["claim_ids"] == ["claim_span_001_2"]
+
+
+def test_build_uses_atomic_claim_objects_before_component_construction():
+    qualified = ClaimQualificationResult(
+        "doc",
+        None,
+        [_claim("span_001", "blk_a", "Broad claim with multiple propositions.", "result")],
+        [],
+        [],
+        {},
+    )
+    claim_objects = ClaimObjectBuildResult(
+        "doc",
+        None,
+        claims=[
+            ClaimObjectRecord(
+                claim_id="claim_parent",
+                document_id="doc",
+                claim_type="main_result",
+                text="Broad claim with multiple propositions.",
+                source_evidence_ids=["ev_parent"],
+                source_span_ids=["span_001"],
+                concepts=[],
+                section_id="sec_1",
+                atomicity="composite",
+                is_atomic=False,
+                subclaim_ids=["claim_atomic_1", "claim_atomic_2"],
+            ),
+            ClaimObjectRecord(
+                claim_id="claim_atomic_1",
+                document_id="doc",
+                claim_type="problem_statement",
+                text="Nonlinear galaxy bias obstructs direct gravity tests.",
+                source_evidence_ids=["ev_001"],
+                source_span_ids=["span_001"],
+                concepts=[],
+                section_id="sec_1",
+                atomicity="atomic",
+                is_atomic=True,
+            ),
+            ClaimObjectRecord(
+                claim_id="claim_atomic_2",
+                document_id="doc",
+                claim_type="derivation_result",
+                text="Bias parameters can be eliminated algebraically.",
+                source_evidence_ids=["ev_002"],
+                source_span_ids=["span_001"],
+                concepts=[],
+                section_id="sec_1",
+                atomicity="atomic",
+                is_atomic=True,
+            ),
+        ],
+    )
+
+    llm_input = BUILDER.build(qualified, claim_objects=claim_objects)
+
+    claim_ids = [c["claim_id"] for c in llm_input.accepted_claims]
+    assert "claim_parent" not in claim_ids
+    assert claim_ids == ["claim_atomic_2", "claim_atomic_1"]
+    assert all(c["atomicity"] == "atomic" and c["is_atomic"] for c in llm_input.accepted_claims)
+
+
+def test_build_carries_claim_concepts_into_available_claims():
+    qualified = ClaimQualificationResult(
+        "doc",
+        None,
+        [_claim("span_001", "blk_a", "Skewness constrains gravity.", "result")],
+        [],
+        [],
+        {},
+    )
+    claim_objects = ClaimObjectBuildResult(
+        "doc",
+        None,
+        claims=[
+            ClaimObjectRecord(
+                claim_id="claim_atomic_1",
+                document_id="doc",
+                claim_type="result",
+                text="Skewness constrains gravity.",
+                source_evidence_ids=["ev_001"],
+                source_span_ids=["span_001"],
+                concepts=[
+                    ClaimConcept(name="skewness", normalized="Skewness", concept_type="observable"),
+                    ClaimConcept(name="gravity", normalized="Gravity", concept_type="theory"),
+                ],
+                section_id="sec_1",
+                atomicity="atomic",
+                is_atomic=True,
+                concept_assignment_status="source_backed",
+            ),
+        ],
+    )
+
+    llm_input = BUILDER.build(qualified, claim_objects=claim_objects)
+
+    available = {c["claim_id"]: c for c in llm_input.available_claims}
+    row = available["claim_atomic_1"]
+    assert row["concepts"] == ["Skewness", "Gravity"]
+    assert row["concept_assignment_status"] == "source_backed"
+    accepted = {c["claim_id"]: c for c in llm_input.accepted_claims}
+    assert accepted["claim_atomic_1"]["concepts"] == ["Skewness", "Gravity"]
 
 
 def test_limits_claims():
