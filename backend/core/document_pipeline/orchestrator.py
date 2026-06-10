@@ -785,10 +785,22 @@ def run_document_pipeline(
                 raise PipelineStageError("component_assembly", str(exc), cause=exc) from exc
             save_artifact("component_assembly", component_result)
         result.component_count = len(component_result.components)
-        report_done("component_assembly", {
+        component_done_payload: dict[str, Any] = {
             "components": len(component_result.components), "total": 1, "processed": 1,
-        })
-        if finish_target_stage("component_assembly", {"components": len(component_result.components), "total": 1, "processed": 1}):
+        }
+        fallback_info = _component_assembly_fallback_info(component_result)
+        if fallback_info:
+            logger.warning(
+                "component_assembly used deterministic fallback: document=%s material=%s "
+                "fallback_reason=%r original_failure_codes=%s fallback_components=%d",
+                document_id, material_id,
+                fallback_info["fallback_reason"],
+                fallback_info["original_failure_codes"],
+                fallback_info["fallback_component_count"],
+            )
+            component_done_payload.update(fallback_info)
+        report_done("component_assembly", component_done_payload)
+        if finish_target_stage("component_assembly", component_done_payload):
             return result
 
         # ── Stage 12a: component_graph (hybrid deterministic/LLM edge builder) ─
@@ -1070,6 +1082,31 @@ def _instantiate(agent_class_or_instance):
     if isinstance(agent_class_or_instance, type):
         return agent_class_or_instance()
     return agent_class_or_instance
+
+
+def _component_assembly_fallback_info(component_result: Any) -> dict | None:
+    """Detect a deterministic-fallback component_assembly result (#347).
+
+    Works for both freshly built results and results reloaded from a stage
+    artifact: the diagnostics carry fallback_reason, and each fallback
+    component carries maturity_source="deterministic_fallback".
+    """
+    diagnostics = getattr(component_result, "diagnostics", {}) or {}
+    fallback_components = [
+        c for c in (getattr(component_result, "components", []) or [])
+        if str(getattr(c, "maturity_source", "") or "") == "deterministic_fallback"
+    ]
+    fallback_reason = str(diagnostics.get("fallback_reason") or "")
+    if not fallback_reason and not fallback_components:
+        return None
+    if not fallback_reason and fallback_components:
+        fallback_reason = str(getattr(fallback_components[0], "fallback_reason", "") or "unknown")
+    return {
+        "fallback": True,
+        "fallback_reason": fallback_reason,
+        "original_failure_codes": list(diagnostics.get("original_failure_codes") or []),
+        "fallback_component_count": len(fallback_components),
+    }
 
 
 def _summarize_export_validation_errors(validation_result_dict: dict, limit: int = 3) -> str:

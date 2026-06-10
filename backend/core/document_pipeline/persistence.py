@@ -482,6 +482,24 @@ def persist_components(
         agent component_id → DB UUID のマッピング（dependency 解決用）。
     """
     components = list(getattr(component_result, "components", []) or [])
+
+    # deterministic_fallback component は通常成果物として永続化しない (#347)。
+    # ExportValidationGate が persist 前にブロックするのが正規経路だが、
+    # 旧 artifact からの resume 等でここまで届いた場合の最終ガード。
+    fallback_components = [
+        c for c in components
+        if str(getattr(c, "maturity_source", "") or "") == "deterministic_fallback"
+    ]
+    if fallback_components:
+        logger.warning(
+            "persist_components: skipping %d deterministic-fallback component(s) "
+            "for document=%s (fallback_reason=%r); they remain in the stage "
+            "artifact only and are not persisted to theory_components",
+            len(fallback_components),
+            document_id,
+            str(getattr(fallback_components[0], "fallback_reason", "") or "unknown"),
+        )
+        components = [c for c in components if c not in fallback_components]
     if not components:
         return {}
 

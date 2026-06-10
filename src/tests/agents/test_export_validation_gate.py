@@ -66,7 +66,11 @@ class _ComponentRecord:
         assumptions=None,
         split_recommendation=None,
         component_quality=None,
+        maturity_source: str = "",
+        fallback_reason: str = "",
     ):
+        self.maturity_source = maturity_source
+        self.fallback_reason = fallback_reason
         self.component_id = component_id
         self.component_type = component_type
         self.label = label
@@ -221,6 +225,93 @@ def test_failed_validation_hard_error_from_component_assembly():
     assert result.exportable is False
     assert result.publish_ready is False
     assert result.summary.error_count >= 1
+
+
+def test_deterministic_fallback_issue_is_hard_error():
+    """component_assembly_deterministic_fallback は severity=warning でも hard error (#347)."""
+    artifacts = _make_artifacts(
+        component_assembly={
+            "components": [],
+            "validation_issues": [
+                {
+                    "rule_id": "component_assembly_deterministic_fallback",
+                    "severity": "warning",
+                    "message": "LLM component assembly failed; emitted 12 fallback component(s)",
+                }
+            ],
+        }
+    )
+    result = _run_gate(artifacts=artifacts)
+    assert result.status == "failed_validation"
+    assert result.exportable is False
+    assert any(
+        e.code == "component_assembly_deterministic_fallback" for e in result.errors
+    )
+
+
+def test_deterministic_fallback_components_block_export_without_artifact_issue():
+    """resume 等で validation_issues が無くても fallback component 自体を検出する (#347)."""
+    component_result = _ComponentResult([
+        _ComponentRecord(
+            "comp_fallback_001",
+            {"claim_ids": [], "evidence_ids": []},
+            maturity_source="deterministic_fallback",
+            fallback_reason="LLM component assembly returned no components",
+        ),
+    ])
+    result = _run_gate(component_result=component_result)
+    assert result.status == "failed_validation"
+    fallback_errors = [
+        e for e in result.errors
+        if e.code == "component_assembly_deterministic_fallback"
+    ]
+    assert len(fallback_errors) == 1
+    assert "comp_fallback_001" in fallback_errors[0].message
+    assert "LLM component assembly returned no components" in fallback_errors[0].message
+
+
+def test_deterministic_fallback_error_not_duplicated():
+    """artifact issue と component 検査の両方が該当しても error は 1 件 (#347)."""
+    artifacts = _make_artifacts(
+        component_assembly={
+            "components": [],
+            "validation_issues": [
+                {
+                    "rule_id": "component_assembly_deterministic_fallback",
+                    "severity": "warning",
+                    "message": "fallback emitted",
+                }
+            ],
+        }
+    )
+    component_result = _ComponentResult([
+        _ComponentRecord(
+            "comp_fallback_001",
+            {"claim_ids": [], "evidence_ids": []},
+            maturity_source="deterministic_fallback",
+            fallback_reason="reason",
+        ),
+    ])
+    result = _run_gate(artifacts=artifacts, component_result=component_result)
+    fallback_errors = [
+        e for e in result.errors
+        if e.code == "component_assembly_deterministic_fallback"
+    ]
+    assert len(fallback_errors) == 1
+
+
+def test_non_fallback_components_pass_fallback_check():
+    component_result = _ComponentResult([
+        _ComponentRecord(
+            "comp_001",
+            {"claim_ids": ["claim_1"], "evidence_ids": ["ev_1"]},
+            maturity_source="llm",
+        ),
+    ])
+    result = _run_gate(component_result=component_result)
+    assert not any(
+        e.code == "component_assembly_deterministic_fallback" for e in result.errors
+    )
 
 
 def test_needs_review_summary_only():
