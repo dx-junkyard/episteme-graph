@@ -24,6 +24,30 @@ from .schema import (
 logger = logging.getLogger(__name__)
 _MAX_REPAIR_ATTEMPTS = 2
 
+# Atomicity values that disqualify a claim from being a component's primary
+# support. Mirrors export_validation_gate._claim_is_non_atomic / input_builder
+# so the deterministic fallback never emits a component the export gate rejects
+# with NON_ATOMIC_CLAIM_USED_AS_COMPONENT_SUPPORT (issue #345).
+_NON_ATOMIC_ATOMICITIES = {
+    "composite",
+    "split_required",
+    "compound",
+    "non_atomic",
+    "split_pending",
+}
+
+
+def _claim_row_is_non_atomic(row: dict) -> bool:
+    """Return True for an available_claims row that must not back a component.
+
+    A row is non-atomic when its ``atomicity`` is one of the disqualifying
+    values or ``is_atomic`` is explicitly false. Unknown/missing metadata
+    defaults to atomic (the prior behavior) so legacy rows are still usable.
+    """
+    atomicity = str(row.get("atomicity", "atomic") or "atomic").lower()
+    is_atomic = bool(row.get("is_atomic", atomicity == "atomic"))
+    return atomicity in _NON_ATOMIC_ATOMICITIES or not is_atomic
+
 
 class ComponentAssemblyRepairer:
     def __init__(self, cleanup: ComponentOverlapCleanup | None = None) -> None:
@@ -168,25 +192,37 @@ def make_deterministic_fallback(
     """
     components: list[ComponentRecord] = []
     original_failure_codes = _issue_codes(validation_issues or [])
+    # Only atomic available claims may back a fallback component. Non-atomic
+    # parents (composite / split_required / ...) are dropped so the fallback
+    # never points a component's primary claim support at a non-atomic claim;
+    # any atomic children appear as their own available_claims rows and are
+    # kept (issue #345). accepted_claims is already non-atomic-filtered upstream.
+    atomic_available_claims = [
+        c
+        for c in llm_input.available_claims or []
+        if c.get("claim_id") and not _claim_row_is_non_atomic(c)
+    ]
     evidence_by_claim = {
         str(c.get("claim_id")): list(c.get("source_evidence_ids") or [])
-        for c in llm_input.available_claims or []
-        if c.get("claim_id")
+        for c in atomic_available_claims
     }
     equations_by_claim = {
         str(c.get("claim_id")): list(c.get("equation_ids") or [])
-        for c in llm_input.available_claims or []
-        if c.get("claim_id")
+        for c in atomic_available_claims
     }
+    atomic_accepted_claims = [
+        c
+        for c in llm_input.accepted_claims or []
+        if c.get("claim_id") and not _claim_row_is_non_atomic(c)
+    ]
     accepted_by_claim = {
         str(c.get("claim_id")): c
-        for c in llm_input.accepted_claims or []
-        if c.get("claim_id")
+        for c in atomic_accepted_claims
     }
 
     claim_ids = _ordered_unique(
-        [str(c.get("claim_id")) for c in llm_input.available_claims or [] if c.get("claim_id")]
-        + [str(c.get("claim_id")) for c in llm_input.accepted_claims or [] if c.get("claim_id")]
+        [str(c.get("claim_id")) for c in atomic_available_claims]
+        + [str(c.get("claim_id")) for c in atomic_accepted_claims]
     )
     for idx, claim_id in enumerate(claim_ids[:12], start=1):
         accepted = accepted_by_claim.get(claim_id, {})
