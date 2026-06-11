@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from episteme_graph.agents.id_canonicalization import (
+    canonical_claim_id_for_span,
     canonical_claim_id_set,
     canonicalize_derivation_claim_refs,
     canonicalize_equation_claim_links,
@@ -38,11 +39,22 @@ class _Claim:
     claim_id: str
     source_span_ids: list = field(default_factory=list)
     section_id: str | None = None
+    parent_claim_id: str | None = None
+    subclaim_ids: list = field(default_factory=list)
+    atomicity: str = "atomic"
+    is_atomic: bool = True
 
 
 @dataclass
 class _ClaimObjects:
     claims: list = field(default_factory=list)
+
+
+@dataclass
+class _Span:
+    span_id: str
+    block_id: str | None = None
+    section_id: str | None = None
 
 
 def _eq(eq_id: str, linked_claim_ids: list[str]) -> EquationRecord:
@@ -132,6 +144,37 @@ def test_filter_remaps_span_provisional_to_final():
     kept, dropped = filter_claim_ref_list(["claim_span_001"], objs)
     assert kept == ["claim_final"]
     assert dropped == []
+
+
+def test_span_shared_by_parent_and_children_resolves_to_parent():
+    # Regression (component assembly preflight): a span atomically rewritten
+    # into a composite parent + atomic children shares its span_id with all
+    # three claims. Even without a section_id the span must resolve to the
+    # parent instead of falling back to the legacy `claim:<block>:<span>` ID.
+    objs = _ClaimObjects(claims=[
+        _Claim("claim_p_sub01", source_span_ids=["span_07"], parent_claim_id="claim_p"),
+        _Claim("claim_p_sub02", source_span_ids=["span_07"], parent_claim_id="claim_p"),
+        _Claim(
+            "claim_p",
+            source_span_ids=["span_07"],
+            subclaim_ids=["claim_p_sub01", "claim_p_sub02"],
+            atomicity="composite",
+            is_atomic=False,
+        ),
+    ])
+    span = _Span(span_id="span_07", block_id="blk_3", section_id=None)
+    assert canonical_claim_id_for_span(span, objs) == "claim_p"
+
+
+def test_span_shared_by_unrelated_claims_stays_legacy():
+    # Genuinely ambiguous: two unrelated atomic claims share a span with no
+    # hierarchy links — no canonical pick is possible, keep the legacy ID.
+    objs = _ClaimObjects(claims=[
+        _Claim("claim_a", source_span_ids=["span_07"]),
+        _Claim("claim_b", source_span_ids=["span_07"]),
+    ])
+    span = _Span(span_id="span_07", block_id="blk_3", section_id=None)
+    assert canonical_claim_id_for_span(span, objs) == "claim:blk_3:span_07"
 
 
 def test_filter_none_claim_objects_is_noop():
