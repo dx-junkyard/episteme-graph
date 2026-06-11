@@ -131,6 +131,33 @@ class ClaimQualificationPromptFactory:
             {"role": "user", "content": content},
         ]
 
+    def build_reference_repair_messages(
+        self,
+        llm_input: QualificationLLMInput,
+        previous_output: dict,
+        unresolved_fragments: list[str],
+        cartridge: CartridgeContext | None = None,
+    ) -> list[dict]:
+        """Single targeted retry for unresolved anaphora (issue #357)."""
+        fragments = "\n".join(f"- {f!r}" for f in unresolved_fragments)
+        content = (
+            self._build_user_content(llm_input, cartridge)
+            + "\n\n## Previous Output\n"
+            + json.dumps(previous_output, ensure_ascii=False, indent=2)
+            + "\n\n## Unresolved References\n"
+            + "The following atomic claims still begin with an unresolved "
+            + "pronoun / demonstrative and cannot stand alone:\n"
+            + fragments
+            + "\n\nRewrite each flagged atomic claim so its subject names the "
+            + "concrete referent from the span or source block (e.g. replace "
+            + "\"This result shows\" with \"<the actual quantity/relation> shows\"). "
+            + "Keep every other field unchanged. Return corrected JSON for this same span."
+        )
+        return [
+            {"role": "system", "content": _SYSTEM_CONTENT},
+            {"role": "user", "content": content},
+        ]
+
     def _build_user_content(
         self,
         llm_input: QualificationLLMInput,

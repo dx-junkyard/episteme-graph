@@ -8,6 +8,7 @@ from episteme_graph.agents.paper_skeleton.schema import PaperSkeletonResult
 from episteme_graph.agents.rhetorical_role.schema import RhetoricalRoleResult
 
 from .cartridge_loader import CartridgeLoader
+from .context_lint import unresolved_fragments
 from .input_builder import ClaimQualificationInputBuilder
 from .llm_client import ClaimQualificationLLMClient
 from .prompt import ClaimQualificationPromptFactory
@@ -75,6 +76,9 @@ class ClaimQualificationAgent:
                 continue
 
             record = _parse_record(raw_output, llm_input)
+            record, raw_output = self._retry_unresolved_references(
+                record, raw_output, llm_input, cartridge
+            )
             partial = self._build_result(
                 document_id=roles.document_id,
                 cartridge_id=llm_input.cartridge_id,
@@ -109,6 +113,39 @@ class ClaimQualificationAgent:
         )
         result.validation_issues = self._validator.validate(result, cartridge)
         return result
+
+    def _retry_unresolved_references(
+        self,
+        record: QualifiedSpanRecord,
+        raw_output: dict,
+        llm_input,
+        cartridge: CartridgeContext | None,
+    ):
+        """Single targeted retry when the context lint demoted claims (#357).
+
+        The lint in _parse_record demoted accepted atomic claims with
+        unresolved anaphora; ask the LLM once to name the concrete referent.
+        If the retry still leaves unresolved references (or fails), keep the
+        demoted record — review_required, never silently accepted.
+        """
+        fragments = unresolved_fragments(record.atomic_claims)
+        if not fragments:
+            return record, raw_output
+        try:
+            retry_messages = self._prompt_factory.build_reference_repair_messages(
+                llm_input, raw_output, fragments, cartridge
+            )
+            retry_raw = self._llm_client.generate(retry_messages)
+        except Exception as exc:
+            logger.warning(
+                "Unresolved-reference retry failed for span_id=%s: %s",
+                llm_input.span_id, exc,
+            )
+            return record, raw_output
+        retry_record = _parse_record(retry_raw, llm_input)
+        if unresolved_fragments(retry_record.atomic_claims):
+            return record, raw_output
+        return retry_record, retry_raw
 
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:
         if not cartridge_id:
