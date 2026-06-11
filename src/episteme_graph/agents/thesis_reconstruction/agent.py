@@ -6,6 +6,7 @@ import logging
 from episteme_graph.agents.claim_qualification.schema import ClaimQualificationResult
 from episteme_graph.agents.equation_semantics.schema import EquationSemanticsResult
 from episteme_graph.agents.paper_skeleton.schema import PaperSkeletonResult
+from episteme_graph.agents.claim_selection import selection_issue_payloads
 from episteme_graph.agents.id_canonicalization import (
     canonicalize_claim_refs,
     claim_aliases_from_accepted_claims,
@@ -16,7 +17,7 @@ from .input_builder import ThesisReconstructionInputBuilder
 from .llm_client import ThesisReconstructionLLMClient
 from .prompt import ThesisReconstructionPromptFactory
 from .repair import ThesisReconstructionRepairer, _parse_raw
-from .schema import CartridgeContext, ThesisReconstructionResult
+from .schema import CartridgeContext, ThesisReconstructionResult, ValidationIssue
 from .validator import ThesisReconstructionValidator
 
 logger = logging.getLogger(__name__)
@@ -58,9 +59,11 @@ class ThesisReconstructionAgent:
             raw_output = self._llm_client.generate(messages)
         except Exception as exc:
             logger.error("Thesis reconstruction failed: %s", exc)
-            return ThesisReconstructionResult.make_fallback(
+            result = ThesisReconstructionResult.make_fallback(
                 skeleton.document_id, cartridge_id, str(exc)
             )
+            self._record_claim_exclusions(result, llm_input)
+            return result
 
         raw_output = canonicalize_claim_refs(
             raw_output,
@@ -81,7 +84,22 @@ class ThesisReconstructionAgent:
             )
         else:
             result.validation_issues = issues
+        self._record_claim_exclusions(result, llm_input)
         return result
+
+    @staticmethod
+    def _record_claim_exclusions(result, llm_input) -> None:
+        """Persist limit-dropped claims and surface them as warnings (#356)."""
+        excluded = list(getattr(llm_input, "excluded_from_pipeline_input", []) or [])
+        if not excluded:
+            return
+        result.excluded_from_pipeline_input = excluded
+        result.validation_issues = list(result.validation_issues or []) + [
+            ValidationIssue(**payload)
+            for payload in selection_issue_payloads(
+                excluded, stage="thesis_reconstruction"
+            )
+        ]
 
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:
         if not cartridge_id:

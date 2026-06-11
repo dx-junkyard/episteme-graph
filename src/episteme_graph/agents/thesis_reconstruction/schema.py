@@ -61,6 +61,8 @@ class ThesisLLMInput:
     major_equations: list[dict]
     excluded_regions: list[dict]
     normalized_terms: list[dict] | None = None
+    # Claims dropped by the shared input limit (issue #356).
+    excluded_from_pipeline_input: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -104,6 +106,10 @@ class ThesisReconstructionResult:
     review_notes: list[str]
     confidence: float
     validation_issues: list[ValidationIssue] = field(default_factory=list)
+    # Claims dropped from the LLM input by the shared selection policy
+    # (issue #356): {claim_id, span_id, claim_tier, excluded_at_stage, reason,
+    # referenced_by_thesis}. Recorded so the drop is explicit, never silent.
+    excluded_from_pipeline_input: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -126,6 +132,7 @@ class ThesisReconstructionResult:
             review_notes=d.get("review_notes", []),
             confidence=float(d.get("confidence", 0.0)),
             validation_issues=issues,
+            excluded_from_pipeline_input=d.get("excluded_from_pipeline_input", []),
         )
 
     @classmethod

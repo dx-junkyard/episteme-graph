@@ -113,6 +113,8 @@ class DSLLLMInput:
     equations: list[dict]
     thesis_nodes: list[dict]
     excluded_from_core: list[dict]
+    # Claims dropped by the shared input limit (issue #356).
+    excluded_from_pipeline_input: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -157,6 +159,8 @@ class DSLLinkingResult:
     review_notes: list[str]
     confidence: float
     validation_issues: list[ValidationIssue] = field(default_factory=list)
+    # Claims dropped from the LLM input by the shared selection policy (issue #356).
+    excluded_from_pipeline_input: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -178,6 +182,7 @@ class DSLLinkingResult:
             review_notes=d.get("review_notes", []),
             confidence=float(d.get("confidence", 0.0)),
             validation_issues=issues,
+            excluded_from_pipeline_input=d.get("excluded_from_pipeline_input", []),
         )
 
     @classmethod

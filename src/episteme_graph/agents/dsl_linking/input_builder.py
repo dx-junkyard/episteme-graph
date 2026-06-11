@@ -4,6 +4,10 @@ from __future__ import annotations
 from episteme_graph.agents.claim_qualification.schema import ClaimQualificationResult
 from episteme_graph.agents.equation_semantics.schema import EquationSemanticsResult
 from episteme_graph.agents.thesis_reconstruction.schema import ThesisReconstructionResult
+from episteme_graph.agents.claim_selection import (
+    select_claim_rows,
+    thesis_claim_id_set,
+)
 from episteme_graph.agents.id_canonicalization import (
     canonical_claim_id_for_span,
     canonicalize_claim_refs,
@@ -27,11 +31,13 @@ class DSLLinkingInputBuilder:
         claim_objects=None,
     ) -> DSLLLMInput:
         cfg = config or {}
-        accepted_claims = self._accepted_claims(
+        claim_selection = self._accepted_claims(
             qualified_claims,
             int(cfg.get("max_claims", _MAX_CLAIMS)),
             claim_objects=claim_objects,
+            thesis=thesis,
         )
+        accepted_claims = claim_selection.selected
         aliases = {
             c["legacy_claim_id"]: c["claim_id"]
             for c in accepted_claims
@@ -54,6 +60,7 @@ class DSLLinkingInputBuilder:
                 claim_objects,
                 aliases,
             ),
+            excluded_from_pipeline_input=claim_selection.excluded,
         )
 
     @staticmethod
@@ -61,7 +68,8 @@ class DSLLinkingInputBuilder:
         qualified_claims: ClaimQualificationResult,
         limit: int,
         claim_objects=None,
-    ) -> list[dict]:
+        thesis=None,
+    ):
         result = []
         seen_claim_ids: set[str] = set()
         claim_index = _claim_object_index(claim_objects)
@@ -89,17 +97,18 @@ class DSLLinkingInputBuilder:
             result.append(row)
             if claim_id:
                 seen_claim_ids.add(claim_id)
-            if len(result) >= limit:
-                return result
         for claim_obj in list(getattr(claim_objects, "claims", []) or []):
             claim_id = str(getattr(claim_obj, "claim_id", "") or "")
             if not claim_id or claim_id in seen_claim_ids or _claim_is_non_atomic(claim_obj):
                 continue
             result.append(_claim_object_row(claim_obj))
             seen_claim_ids.add(claim_id)
-            if len(result) >= limit:
-                break
-        return result
+        return select_claim_rows(
+            result,
+            limit,
+            stage="dsl_linking",
+            thesis_claim_ids=thesis_claim_id_set(thesis),
+        )
 
     @staticmethod
     def _equations(

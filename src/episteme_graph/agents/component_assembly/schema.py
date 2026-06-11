@@ -94,6 +94,8 @@ class ComponentAssemblyLLMInput:
     available_dsl_edges: list[dict] = field(default_factory=list)
     available_derivation_ids: list[str] = field(default_factory=list)
     claim_centered_plan: dict = field(default_factory=dict)
+    # Claims dropped by the shared input limit (issue #356).
+    excluded_from_pipeline_input: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -229,6 +231,8 @@ class ComponentAssemblyResult:
     # {theory_bundle, course_mapping, blueprint_updates, theory_bundle_validation,
     #  teaching_output_validation}.
     theory_bundle: dict = field(default_factory=dict)
+    # Claims dropped from the LLM input by the shared selection policy (issue #356).
+    excluded_from_pipeline_input: list[dict] = field(default_factory=list)
     diagnostics: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -319,6 +323,7 @@ class ComponentAssemblyResult:
             component_refinement=d.get("component_refinement") or {},
             derivation_graph_alignment=d.get("derivation_graph_alignment") or {},
             theory_bundle=d.get("theory_bundle") or {},
+            excluded_from_pipeline_input=d.get("excluded_from_pipeline_input") or [],
             diagnostics=d.get("diagnostics") or {},
         )
 

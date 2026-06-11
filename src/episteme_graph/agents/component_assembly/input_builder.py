@@ -5,6 +5,10 @@ from episteme_graph.agents.claim_qualification.schema import ClaimQualificationR
 from episteme_graph.agents.dsl_linking.schema import DSLLinkingResult
 from episteme_graph.agents.equation_semantics.schema import EquationSemanticsResult
 from episteme_graph.agents.thesis_reconstruction.schema import ThesisReconstructionResult
+from episteme_graph.agents.claim_selection import (
+    select_claim_rows,
+    thesis_claim_id_set,
+)
 from episteme_graph.agents.id_canonicalization import (
     canonical_claim_id_for_span,
     canonicalize_claim_refs,
@@ -43,11 +47,13 @@ class ComponentAssemblyInputBuilder:
         derivations=None,
     ) -> ComponentAssemblyLLMInput:
         cfg = config or {}
-        accepted_claims = self._accepted_claims(
+        claim_selection = self._accepted_claims(
             qualified_claims,
             int(cfg.get("max_claims", _MAX_CLAIMS)),
             claim_objects=claim_objects,
+            thesis=thesis,
         )
+        accepted_claims = claim_selection.selected
         claim_aliases = {
             c["legacy_claim_id"]: c["claim_id"]
             for c in accepted_claims
@@ -91,6 +97,7 @@ class ComponentAssemblyInputBuilder:
             available_dsl_edges=self._available_dsl_edges(dsl),
             available_derivation_ids=self._available_derivation_ids(derivations),
             claim_centered_plan=claim_centered_plan,
+            excluded_from_pipeline_input=claim_selection.excluded,
         )
 
     @staticmethod
@@ -122,7 +129,8 @@ class ComponentAssemblyInputBuilder:
         result: ClaimQualificationResult,
         limit: int,
         claim_objects=None,
-    ) -> list[dict]:
+        thesis=None,
+    ):
         claims = []
         seen_claim_ids: set[str] = set()
         claim_index = _claim_object_index(claim_objects)
@@ -157,17 +165,18 @@ class ComponentAssemblyInputBuilder:
             claims.append(row)
             if claim_id:
                 seen_claim_ids.add(claim_id)
-            if len(claims) >= limit:
-                return claims
         for claim_obj in list(getattr(claim_objects, "claims", []) or []):
             claim_id = str(getattr(claim_obj, "claim_id", "") or "")
             if not claim_id or claim_id in seen_claim_ids or _claim_is_non_atomic(claim_obj):
                 continue
             claims.append(_claim_object_row(claim_obj))
             seen_claim_ids.add(claim_id)
-            if len(claims) >= limit:
-                break
-        return claims
+        return select_claim_rows(
+            claims,
+            limit,
+            stage="component_assembly",
+            thesis_claim_ids=thesis_claim_id_set(thesis),
+        )
 
     @staticmethod
     def _equations(equations: EquationSemanticsResult | None, limit: int) -> list[dict]:

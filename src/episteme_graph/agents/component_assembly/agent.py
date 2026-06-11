@@ -7,6 +7,7 @@ from episteme_graph.agents.claim_qualification.schema import ClaimQualificationR
 from episteme_graph.agents.dsl_linking.schema import DSLLinkingResult
 from episteme_graph.agents.equation_semantics.schema import EquationSemanticsResult
 from episteme_graph.agents.thesis_reconstruction.schema import ThesisReconstructionResult
+from episteme_graph.agents.claim_selection import selection_issue_payloads
 from episteme_graph.agents.id_canonicalization import (
     canonicalize_claim_refs,
     claim_aliases_from_accepted_claims,
@@ -98,6 +99,7 @@ class ComponentAssemblyAgent:
                 issue["code"] for issue in diagnostics["component_assembly_input_validation"]["issues"]
             ]
             result.diagnostics = diagnostics
+            self._record_claim_exclusions(result, llm_input)
             return result
 
         messages = self._prompt_factory.build_messages(llm_input)
@@ -110,6 +112,7 @@ class ComponentAssemblyAgent:
             diagnostics["fallback_reason"] = str(exc)
             diagnostics["original_failure_codes"] = ["initial_llm_exception"]
             result.diagnostics = diagnostics
+            self._record_claim_exclusions(result, llm_input)
             return result
         diagnostics["initial_llm_raw_output"] = _llm_capture(self._llm_client, raw_output)
         diagnostics["initial_llm_output_component_count"] = diagnostics["initial_llm_raw_output"]["component_count"]
@@ -182,7 +185,22 @@ class ComponentAssemblyAgent:
         merged_diagnostics = dict(diagnostics)
         merged_diagnostics.update(result.diagnostics or {})
         result.diagnostics = merged_diagnostics
+        self._record_claim_exclusions(result, llm_input)
         return result
+
+    @staticmethod
+    def _record_claim_exclusions(result, llm_input) -> None:
+        """Persist limit-dropped claims and surface them as warnings (#356)."""
+        excluded = list(getattr(llm_input, "excluded_from_pipeline_input", []) or [])
+        if not excluded:
+            return
+        result.excluded_from_pipeline_input = excluded
+        result.validation_issues = list(result.validation_issues or []) + [
+            ValidationIssue(**payload)
+            for payload in selection_issue_payloads(
+                excluded, stage="component_assembly"
+            )
+        ]
 
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:
         if not cartridge_id:
