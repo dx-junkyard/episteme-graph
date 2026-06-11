@@ -766,8 +766,13 @@ def run_document_pipeline(
 
         # ── Stage 12: component_assembly ───────────────────────────────────
         component_artifact = artifact("component_assembly")
-        if should_use_artifact("component_assembly"):
+        reuse_component_artifact = should_use_artifact("component_assembly")
+        if reuse_component_artifact:
             component_result = _from_agent_dict("component_assembly", component_artifact)
+            reuse_component_artifact = _component_assembly_artifact_reusable(
+                component_result, document_id=document_id, material_id=material_id,
+            )
+        if reuse_component_artifact:
             logger.info("Resuming document pipeline: loaded component_assembly artifact for document %s", document_id)
         else:
             report_start("component_assembly", total=1, unit="llm_call")
@@ -1082,6 +1087,34 @@ def _instantiate(agent_class_or_instance):
     if isinstance(agent_class_or_instance, type):
         return agent_class_or_instance()
     return agent_class_or_instance
+
+
+def _component_assembly_artifact_reusable(
+    component_result: Any,
+    *,
+    document_id: str,
+    material_id: str,
+) -> bool:
+    """Decide whether a resumed component_assembly artifact may be reused.
+
+    A deterministic-fallback artifact can never pass the export gate (#347), so
+    reusing it would fail every resumed run at export_validation with the same
+    hard error. Re-running the stage gives the LLM another chance, which is
+    exactly what the gate error message instructs ("rerun component_assembly
+    instead of persisting").
+    """
+    fallback_info = _component_assembly_fallback_info(component_result)
+    if not fallback_info:
+        return True
+    logger.warning(
+        "Resumed component_assembly artifact is a deterministic fallback "
+        "(document=%s material=%s fallback_reason=%r original_failure_codes=%s); "
+        "re-running component_assembly instead of reusing it",
+        document_id, material_id,
+        fallback_info["fallback_reason"],
+        fallback_info["original_failure_codes"],
+    )
+    return False
 
 
 def _component_assembly_fallback_info(component_result: Any) -> dict | None:

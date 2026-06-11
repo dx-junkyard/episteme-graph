@@ -1634,6 +1634,31 @@ def test_component_assembly_fallback_info_none_for_normal_result():
     assert _component_assembly_fallback_info(result) is None
 
 
+def test_resumed_fallback_component_assembly_artifact_is_not_reusable():
+    """fallback artifact は resume で再利用せず stage を再実行する (#347).
+
+    deterministic fallback の artifact は export gate を絶対に通過できないため、
+    再利用すると resume のたびに export_validation で同じ hard error になる。
+    """
+    from core.document_pipeline.orchestrator import _component_assembly_artifact_reusable
+
+    fallback_result = types.SimpleNamespace(
+        components=[_fallback_component()],
+        diagnostics={
+            "fallback_reason": "Repair failed after max attempts",
+            "original_failure_codes": ["unresolved_claim_id"],
+        },
+    )
+    assert _component_assembly_artifact_reusable(
+        fallback_result, document_id="doc-1", material_id="mat-1"
+    ) is False
+
+    normal_result = types.SimpleNamespace(components=[_normal_component()], diagnostics={})
+    assert _component_assembly_artifact_reusable(
+        normal_result, document_id="doc-1", material_id="mat-1"
+    ) is True
+
+
 def test_persist_components_hard_fails_when_all_components_are_fallback():
     """全件 fallback は silent skip せず hard fail する (#347 review).
 
