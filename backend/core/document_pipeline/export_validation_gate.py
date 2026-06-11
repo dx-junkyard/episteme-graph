@@ -208,6 +208,35 @@ def _ordered_unique(values) -> list:
     return result
 
 
+def _append_fallback_diagnostics(message: str, artifact: dict) -> str:
+    """Append the stage artifact's fallback root cause to an escalated error.
+
+    The deterministic-fallback hard error (#347) is what operators see in the
+    exported ERROR log, but the underlying reason (LLM exception, repair
+    exhausted, ...) is only recorded in the artifact's diagnostics or on the
+    fallback components themselves. Inline it so the error is self-contained.
+    """
+    diagnostics = artifact.get("diagnostics") or {}
+    reason = str(diagnostics.get("fallback_reason") or "")
+    failure_codes = list(diagnostics.get("original_failure_codes") or [])
+    if not reason:
+        for component in artifact.get("components") or []:
+            if not isinstance(component, dict):
+                continue
+            reason = str(component.get("fallback_reason") or "")
+            if reason:
+                failure_codes = failure_codes or list(
+                    component.get("original_failure_codes") or []
+                )
+                break
+    if not reason and not failure_codes:
+        return message
+    suffix = f"; fallback_reason={reason!r}" if reason else ""
+    if failure_codes:
+        suffix += f"; original_failure_codes={failure_codes}"
+    return f"{message}{suffix}"
+
+
 def _component_low_confidence_equation_ids(component) -> list:
     """Low-confidence equation ids a component carries (Step 3 fields, #326).
 
@@ -490,6 +519,11 @@ class ExportValidationGate:
                 severity = issue.get("severity", "warning")
                 message = issue.get("message", "")
                 path = issue.get("field") or issue.get("path")
+                if code in _FORCED_ERROR_RULE_IDS:
+                    # Surface the root cause in the hard error itself: the
+                    # exported ERROR log often only carries this message, while
+                    # fallback_reason lives in the stage artifact diagnostics.
+                    message = _append_fallback_diagnostics(message, artifact)
 
                 entry = ValidationEntry(
                     code=code,
