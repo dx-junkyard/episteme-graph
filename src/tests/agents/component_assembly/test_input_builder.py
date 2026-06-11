@@ -240,7 +240,7 @@ def test_build_uses_atomic_claim_objects_before_component_construction():
 
     claim_ids = [c["claim_id"] for c in llm_input.accepted_claims]
     assert "claim_parent" not in claim_ids
-    assert claim_ids == ["claim_atomic_2", "claim_atomic_1"]
+    assert claim_ids == ["claim_atomic_1", "claim_atomic_2"]
     assert all(c["atomicity"] == "atomic" and c["is_atomic"] for c in llm_input.accepted_claims)
 
 
@@ -290,3 +290,108 @@ def test_limits_claims():
     qualified = ClaimQualificationResult("doc", None, [_claim("s1", "b1", "A", "relation"), _claim("s2", "b2", "B", "relation")], [], [], {})
     llm_input = BUILDER.build(qualified, config={"max_claims": 1})
     assert len(llm_input.accepted_claims) == 1
+
+
+def test_span_without_section_id_split_into_atomic_claims_resolves_canonically():
+    """Regression: a span with no section_id whose claim was atomically rewritten
+    (composite parent + atomic children sharing the span_id) must not leak the
+    legacy `claim:<block>:<span>` ID into accepted_claims — that ID is absent
+    from available_claims and hard-fails the assembly preflight
+    (accepted_claim_ids_not_available → deterministic fallback → export gate error).
+    """
+    span = QualifiedSpanRecord(
+        "span_07", "blk_3", None, "The model derives X and shows Y.", ["result"],
+        {"status": "accepted", "claim_tier": "paper_core", "claim_type_candidate": "main_result"},
+        {}, "reason", 0.9,
+    )
+    qualified = ClaimQualificationResult("doc", None, [span], [], [], {})
+    claim_objects = ClaimObjectBuildResult(
+        "doc",
+        None,
+        claims=[
+            ClaimObjectRecord(
+                claim_id="claim_span_07_sub01",
+                document_id="doc",
+                claim_type="derivation_result",
+                text="The model derives X.",
+                source_evidence_ids=["ev_1"],
+                source_span_ids=["span_07"],
+                concepts=[],
+                section_id=None,
+                atomicity="atomic",
+                is_atomic=True,
+                parent_claim_id="claim_span_07",
+            ),
+            ClaimObjectRecord(
+                claim_id="claim_span_07_sub02",
+                document_id="doc",
+                claim_type="main_result",
+                text="The model shows Y.",
+                source_evidence_ids=["ev_1"],
+                source_span_ids=["span_07"],
+                concepts=[],
+                section_id=None,
+                atomicity="atomic",
+                is_atomic=True,
+                parent_claim_id="claim_span_07",
+            ),
+            ClaimObjectRecord(
+                claim_id="claim_span_07",
+                document_id="doc",
+                claim_type="main_result",
+                text="The model derives X and shows Y.",
+                source_evidence_ids=["ev_1"],
+                source_span_ids=["span_07"],
+                concepts=[],
+                section_id=None,
+                atomicity="composite",
+                is_atomic=False,
+                subclaim_ids=["claim_span_07_sub01", "claim_span_07_sub02"],
+            ),
+        ],
+    )
+
+    llm_input = BUILDER.build(qualified, claim_objects=claim_objects)
+
+    accepted_ids = [c["claim_id"] for c in llm_input.accepted_claims]
+    available_ids = {c["claim_id"] for c in llm_input.available_claims}
+    assert set(accepted_ids) <= available_ids
+    assert accepted_ids == ["claim_span_07_sub01", "claim_span_07_sub02"]
+
+
+def test_span_unresolvable_against_claim_objects_is_skipped():
+    """Regression: when claim_objects exist (e.g. resumed artifact) but a span
+    has no corresponding claim object, the span must be skipped instead of
+    injecting a provisional/legacy ID that fails the assembly preflight.
+    """
+    qualified = ClaimQualificationResult(
+        "doc", None,
+        [
+            _claim("s1", "b1", "Known claim.", "result"),
+            _claim("s_orphan", "b9", "Orphan claim.", "result"),
+        ],
+        [], [], {},
+    )
+    claim_objects = ClaimObjectBuildResult(
+        "doc",
+        None,
+        claims=[
+            ClaimObjectRecord(
+                claim_id="claim_s1",
+                document_id="doc",
+                claim_type="result",
+                text="Known claim.",
+                source_evidence_ids=["ev_1"],
+                source_span_ids=["s1"],
+                concepts=[],
+                section_id="sec_1",
+            ),
+        ],
+    )
+
+    llm_input = BUILDER.build(qualified, claim_objects=claim_objects)
+
+    accepted_ids = [c["claim_id"] for c in llm_input.accepted_claims]
+    available_ids = {c["claim_id"] for c in llm_input.available_claims}
+    assert accepted_ids == ["claim_s1"]
+    assert set(accepted_ids) <= available_ids

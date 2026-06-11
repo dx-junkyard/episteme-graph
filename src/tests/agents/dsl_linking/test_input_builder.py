@@ -206,5 +206,5 @@ def test_build_uses_atomic_claim_objects_for_dsl_materials():
 
     claim_ids = [c["claim_id"] for c in llm_input.accepted_claims]
     assert "claim_parent" not in claim_ids
-    assert claim_ids == ["claim_atomic_2", "claim_atomic_1"]
+    assert claim_ids == ["claim_atomic_1", "claim_atomic_2"]
     assert all(c["atomicity"] == "atomic" and c["is_atomic"] for c in llm_input.accepted_claims)

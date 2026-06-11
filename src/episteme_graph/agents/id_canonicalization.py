@@ -226,8 +226,9 @@ def _claim_lookup(claim_objects: Any | None) -> dict[tuple[str, str] | tuple[str
         return {}
 
     lookup: dict[tuple[str, str] | tuple[str, str, str], str] = {}
-    span_to_ids: dict[str, list[str]] = defaultdict(list)
-    safe_span_to_ids: dict[str, list[str]] = defaultdict(list)
+    span_claims: dict[str, list[Any]] = defaultdict(list)
+    section_span_claims: dict[tuple[str, str], list[Any]] = defaultdict(list)
+    safe_span_claims: dict[str, list[Any]] = defaultdict(list)
     for claim in claims:
         claim_id = str(getattr(claim, "claim_id", "") or "")
         if not claim_id:
@@ -237,21 +238,64 @@ def _claim_lookup(claim_objects: Any | None) -> dict[tuple[str, str] | tuple[str
         section_id = str(getattr(claim, "section_id", "") or "")
         for span_id_raw in getattr(claim, "source_span_ids", []) or []:
             span_id = str(span_id_raw)
-            span_to_ids[span_id].append(claim_id)
+            span_claims[span_id].append(claim)
             if section_id:
-                lookup[("section_span", section_id, span_id)] = claim_id
+                section_span_claims[(section_id, span_id)].append(claim)
             safe = re.sub(r"[^A-Za-z0-9_]+", "_", span_id)
-            safe_span_to_ids[f"claim_{safe}"].append(claim_id)
+            safe_span_claims[f"claim_{safe}"].append(claim)
 
-    for span_id, ids in span_to_ids.items():
-        unique = _unique(ids)
-        if len(unique) == 1:
-            lookup[("span", span_id)] = unique[0]
-    for legacy_id, ids in safe_span_to_ids.items():
-        unique = _unique(ids)
-        if len(unique) == 1:
-            lookup[("legacy", legacy_id)] = unique[0]
+    for span_id, group in span_claims.items():
+        resolved = _resolve_span_claim_id(group)
+        if resolved:
+            lookup[("span", span_id)] = resolved
+    for (section_id, span_id), group in section_span_claims.items():
+        resolved = _resolve_span_claim_id(group)
+        if resolved:
+            lookup[("section_span", section_id, span_id)] = resolved
+    for legacy_id, group in safe_span_claims.items():
+        resolved = _resolve_span_claim_id(group)
+        if resolved and ("legacy", legacy_id) not in lookup:
+            lookup[("legacy", legacy_id)] = resolved
     return lookup
+
+
+def _resolve_span_claim_id(group: list[Any]) -> str:
+    """Pick the canonical claim ID for a span shared by several claim objects.
+
+    A span rewritten into atomic claims keeps its span_id on both the composite
+    parent and each child (issue #317), so the parent — the record representing
+    the whole span — is canonical. The parent is identified by hierarchy links
+    (children carry ``parent_claim_id`` / parents list ``subclaim_ids``) or,
+    failing that, as the single non-atomic record among atomic ones. Returns ""
+    when the span is genuinely ambiguous (multiple unrelated claims).
+    """
+    ids = _unique([str(getattr(c, "claim_id", "") or "") for c in group])
+    if len(ids) == 1:
+        return ids[0]
+    child_ids = set()
+    for c in group:
+        child_ids.update(str(v) for v in getattr(c, "subclaim_ids", None) or [])
+    roots = _unique([
+        str(getattr(c, "claim_id", "") or "")
+        for c in group
+        if not getattr(c, "parent_claim_id", None)
+        and str(getattr(c, "claim_id", "") or "") not in child_ids
+    ])
+    if len(roots) == 1:
+        return roots[0]
+    non_atomic = _unique([
+        str(getattr(c, "claim_id", "") or "")
+        for c in group
+        if not _claim_obj_is_atomic(c)
+    ])
+    if len(non_atomic) == 1 and len(non_atomic) < len(ids):
+        return non_atomic[0]
+    return ""
+
+
+def _claim_obj_is_atomic(claim: Any) -> bool:
+    atomicity = str(getattr(claim, "atomicity", "atomic") or "atomic").lower()
+    return bool(getattr(claim, "is_atomic", atomicity == "atomic")) and atomicity == "atomic"
 
 
 def _map_claim_ref_list(

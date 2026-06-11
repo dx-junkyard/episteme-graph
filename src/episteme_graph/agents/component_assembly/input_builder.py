@@ -130,7 +130,14 @@ class ComponentAssemblyInputBuilder:
         for record in result.qualified_spans:
             claim_id = canonical_claim_id_for_span(record, claim_objects)
             claim_obj = claim_index.get(claim_id)
-            if has_claim_objects and claim_obj and _claim_is_non_atomic(claim_obj):
+            # claim_object_builder is the source of truth for claim IDs (issue
+            # #340). A span that doesn't resolve to a final claim object would
+            # inject a provisional/legacy ID that the assembly preflight rejects
+            # (accepted_claim_ids_not_available); its claims, if any, are added
+            # from claim_objects below instead.
+            if has_claim_objects and claim_obj is None:
+                continue
+            if has_claim_objects and _claim_is_non_atomic(claim_obj):
                 continue
             row = {
                 "claim_id": claim_id,
