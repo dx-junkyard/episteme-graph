@@ -244,6 +244,7 @@
       stages: [
         ["evidence_registry", "EvidenceRegistryBuilder"],
         ["claim_object_builder", "ClaimObjectBuilder"],
+        ["symbol_registry", "SymbolRegistryBuilder"],
         ["derivation_chain", "DerivationChainAgent"],
         ["figure_table_semantics", "FigureTableSemanticsAgent"],
       ],
@@ -6879,6 +6880,7 @@
     equation_semantics: "EquationSemanticsAgent",
     evidence_registry: "EvidenceRegistryBuilder",
     claim_object_builder: "ClaimObjectBuilder",
+    symbol_registry: "SymbolRegistryBuilder",
     derivation_chain: "DerivationChainAgent",
     figure_table_semantics: "FigureTableSemanticsAgent",
     thesis_reconstruction: "ThesisReconstructionAgent",

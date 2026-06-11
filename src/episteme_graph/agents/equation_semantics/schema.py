@@ -337,6 +337,9 @@ class DefinedSymbol:
     symbol: str
     definition_status: str
     evidence_text: str | None = None
+    # Reference into the document SymbolRegistry (issue #355). Optional for
+    # backward compatibility; set by SymbolRegistryBuilder when it annotates.
+    symbol_id: str | None = None
 
 
 # ---------------------------------------------------------------------------

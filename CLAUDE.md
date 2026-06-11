@@ -112,6 +112,8 @@ PDF ファイル
 [#220] EquationSemanticsAgent   — 数式ブロック意味役割復元（LLM-first）
                                   + to_equations_export() で equations.json 化
     ↓  EquationSemanticsResult (JSON)
+[#355] SymbolRegistryBuilder    — 数式記号の定義・表記ゆれ・スコープの一元管理（非LLM）
+    ↓  SymbolRegistryResult (JSON)
 [#237] DerivationChainAgent     — 式間導出チェーン構築（非LLM）
     ↓  DerivationChainResult (JSON)
 [#237] FigureTableSemanticsAgent — 図表の意味復元（caption-first, LLM enricher 任意）
@@ -137,6 +139,7 @@ src/episteme_graph/agents/
   claim_qualification/     → ClaimQualificationAgent (#219)
   claim_object_builder/    → ClaimObjectBuilder (#237)
   equation_semantics/      → EquationSemanticsAgent (#220)
+  symbol_registry/         → SymbolRegistryBuilder (#355)
   derivation_chain/        → DerivationChainAgent (#237)
   figure_table_semantics/  → FigureTableSemanticsAgent (#237)
   course_mapping/          → CourseMappingAgent (#237)

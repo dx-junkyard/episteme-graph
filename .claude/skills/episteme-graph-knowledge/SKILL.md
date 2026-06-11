@@ -173,6 +173,7 @@ OpenAI 形式                      → Gemini への変換
 | RhetoricalRoleAgent | #218 | Structure + Skeleton | RhetoricalRoleResult | LLM-first |
 | ClaimQualificationAgent | #219 | Structure + Skeleton + Roles | ClaimQualificationResult | LLM-first |
 | EquationSemanticsAgent | #220 | Structure + Skeleton + Roles | EquationSemanticsResult | LLM-first |
+| SymbolRegistryBuilder | #355 | EquationSemanticsResult | SymbolRegistryResult | 非LLM, deterministic（表記ゆれ正規化・redefinition 検出・scope 導出） |
 | ThesisReconstructionAgent | #221 | Skeleton + Claims + Equations | ThesisReconstructionResult | LLM-first |
 | DSLLinkingAgent | #222 | Claims + Equations + Thesis | DSLLinkingResult | LLM-first |
 | ComponentAssemblyAgent | #223 | Claims + Equations + Thesis + DSL | ComponentAssemblyResult | LLM-first + cartridge-aware |

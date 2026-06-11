@@ -46,6 +46,7 @@ PIPELINE_STAGES = [
     "equation_semantics",
     "evidence_registry",
     "claim_object_builder",
+    "symbol_registry",
     "derivation_chain",
     "figure_table_semantics",
     "thesis_reconstruction",
@@ -616,6 +617,37 @@ def run_document_pipeline(
                 "equation claim-link canonicalization failed (non-fatal): document=%s",
                 document_id, exc_info=True,
             )
+
+        # ── Stage 8c.2: symbol_registry (deterministic from equations, #355) ─
+        # Aggregates defined/used symbols into a document-wide registry and
+        # annotates DefinedSymbol.symbol_id on the equations in place. Non-fatal:
+        # downstream stages do not depend on it yet.
+        symbol_registry_artifact = artifact("symbol_registry")
+        if should_use_artifact("symbol_registry"):
+            symbol_registry = _from_agent_dict("symbol_registry", symbol_registry_artifact)
+            logger.info("Resuming document pipeline: loaded symbol_registry artifact for document %s", document_id)
+        else:
+            report_start("symbol_registry", total=1, unit="builder")
+            symbol_registry = None
+            try:
+                from episteme_graph.agents.symbol_registry.builder import SymbolRegistryBuilder
+
+                symbol_registry = SymbolRegistryBuilder().run(
+                    equations, cartridge_id=cartridge_id
+                )
+                # The builder set DefinedSymbol.symbol_id in place; persist the
+                # annotated equations so resumes keep the registry references.
+                save_artifact("equation_semantics", equations)
+                save_artifact("symbol_registry", symbol_registry)
+            except Exception as exc:
+                logger.warning(
+                    "symbol_registry stage failed (non-fatal): document=%s error=%s",
+                    document_id, exc, exc_info=True,
+                )
+        symbol_count = len(getattr(symbol_registry, "records", []) or [])
+        report_done("symbol_registry", {"symbols": symbol_count, "total": 1, "processed": 1})
+        if finish_target_stage("symbol_registry", {"symbols": symbol_count, "total": 1, "processed": 1}):
+            return result
 
         # ── Stage 8d: derivation_chain (deterministic from equation links) ─
         derivation_artifact = artifact("derivation_chain")
@@ -1225,6 +1257,9 @@ def _from_agent_dict(stage: str, value: dict) -> Any:
     if stage == "claim_object_builder":
         from episteme_graph.agents.claim_object_builder.schema import ClaimObjectBuildResult
         return ClaimObjectBuildResult.from_dict(value)
+    if stage == "symbol_registry":
+        from episteme_graph.agents.symbol_registry.schema import SymbolRegistryResult
+        return SymbolRegistryResult.from_dict(value)
     if stage == "derivation_chain":
         from episteme_graph.agents.derivation_chain.schema import DerivationChainResult
         return DerivationChainResult.from_dict(value)
