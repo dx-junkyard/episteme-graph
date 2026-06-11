@@ -75,6 +75,11 @@ class ComponentAssemblyAgent:
             "component_assembly_input_validation": _preflight_check(llm_input),
         }
         if diagnostics["component_assembly_input_validation"]["status"] == "failed":
+            logger.warning(
+                "Component assembly input preflight failed: document=%s issue_codes=%s",
+                qualified_claims.document_id,
+                [issue["code"] for issue in diagnostics["component_assembly_input_validation"]["issues"]],
+            )
             result = make_deterministic_fallback(
                 llm_input,
                 "component_assembly_input_validation failed",
@@ -107,17 +112,23 @@ class ComponentAssemblyAgent:
             result.diagnostics = diagnostics
             return result
         diagnostics["initial_llm_raw_output"] = _llm_capture(self._llm_client, raw_output)
+        diagnostics["initial_llm_output_component_count"] = diagnostics["initial_llm_raw_output"]["component_count"]
         raw_output = canonicalize_claim_refs(
             raw_output,
             claim_objects,
             claim_aliases_from_accepted_claims(llm_input.accepted_claims),
         )
-        result = self._cleanup.cleanup(
-            _parse_raw(raw_output, qualified_claims.document_id, llm_input.cartridge_id)
-        )
+        parsed = _parse_raw(raw_output, qualified_claims.document_id, llm_input.cartridge_id)
+        diagnostics["parsed_component_count"] = len(parsed.components)
+        result = self._cleanup.cleanup(parsed)
+        diagnostics["cleanup_component_count"] = len(result.components)
         result = enrich_component_assembly(result, llm_input)
+        diagnostics["enriched_component_count"] = len(result.components)
         issues = self._validator.validate(result, cartridge, llm_input=llm_input)
         diagnostics["initial_validation_issues"] = _issue_dicts(issues, llm_input=llm_input)
+        diagnostics["initial_error_codes"] = [
+            issue.rule_id for issue in issues if issue.severity == "error"
+        ]
         if [i for i in issues if i.severity == "error"]:
             result = self._repairer.repair(
                 llm_input=llm_input,

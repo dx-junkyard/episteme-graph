@@ -1565,3 +1565,125 @@ def test_chunker_metadata_includes_extraction_source_from_grobid_blocks():
             f"Expected extraction_source='grobid_hybrid', got {chunk.metadata}"
         )
         assert chunk.metadata.get("tei_section_id") == "div_1"
+
+
+# --- component_assembly deterministic fallback handling (#347) --------------
+
+def _fallback_component(component_id="comp_fallback_001"):
+    return types.SimpleNamespace(
+        component_id=component_id,
+        component_type="ClaimBundleComponent",
+        label="fallback",
+        summary="fallback",
+        evidence_refs={"claim_ids": []},
+        inputs=[], outputs=[], preconditions=[], cautions=[],
+        dependencies=[], internal_flow=[],
+        maturity_source="deterministic_fallback",
+        fallback_reason="LLM component assembly returned no components",
+        review_status="teacher_review_required",
+    )
+
+
+def _normal_component(component_id="comp_001"):
+    return types.SimpleNamespace(
+        component_id=component_id,
+        component_type="RelationComponent",
+        label="relation",
+        summary="relation",
+        evidence_refs={"claim_ids": ["claim_1"]},
+        inputs=[], outputs=[], preconditions=[], cautions=[],
+        dependencies=[], internal_flow=[],
+        maturity_source="llm_proposed",
+        fallback_reason="",
+        review_status="teacher_review_required",
+    )
+
+
+def test_component_assembly_fallback_info_detects_fallback():
+    from core.document_pipeline.orchestrator import _component_assembly_fallback_info
+
+    result = types.SimpleNamespace(
+        components=[_fallback_component()],
+        diagnostics={
+            "fallback_reason": "LLM component assembly returned no components",
+            "original_failure_codes": ["no_components"],
+        },
+    )
+    info = _component_assembly_fallback_info(result)
+    assert info is not None
+    assert info["fallback"] is True
+    assert info["fallback_reason"] == "LLM component assembly returned no components"
+    assert info["original_failure_codes"] == ["no_components"]
+    assert info["fallback_component_count"] == 1
+
+
+def test_component_assembly_fallback_info_detects_resumed_artifact_without_diagnostics():
+    from core.document_pipeline.orchestrator import _component_assembly_fallback_info
+
+    result = types.SimpleNamespace(components=[_fallback_component()], diagnostics={})
+    info = _component_assembly_fallback_info(result)
+    assert info is not None
+    assert info["fallback_reason"] == "LLM component assembly returned no components"
+    assert info["fallback_component_count"] == 1
+
+
+def test_component_assembly_fallback_info_none_for_normal_result():
+    from core.document_pipeline.orchestrator import _component_assembly_fallback_info
+
+    result = types.SimpleNamespace(components=[_normal_component()], diagnostics={})
+    assert _component_assembly_fallback_info(result) is None
+
+
+def test_persist_components_hard_fails_when_all_components_are_fallback():
+    """全件 fallback は silent skip せず hard fail する (#347 review).
+
+    silent に return {} すると同 document の既存 theory_components が
+    削除も置換もされないまま run が成功扱いになり、古い通常成果物が
+    downstream に見え続けるため。既存 rows は破壊しない（DB 未接続のまま）。
+    """
+    from core.document_pipeline import persistence
+
+    component_result = types.SimpleNamespace(
+        components=[_fallback_component("comp_fallback_001"), _fallback_component("comp_fallback_002")]
+    )
+    with patch.object(persistence, "_pg_session") as session_factory:
+        with pytest.raises(persistence.DeterministicFallbackPersistError) as exc_info:
+            persistence.persist_components(
+                document_id="doc_1", component_result=component_result
+            )
+    assert "doc_1" in str(exc_info.value)
+    assert "deterministic-fallback" in str(exc_info.value)
+    session_factory.assert_not_called()
+
+
+def test_persist_components_empty_result_returns_empty_without_db_access():
+    from core.document_pipeline import persistence
+
+    component_result = types.SimpleNamespace(components=[])
+    with patch.object(persistence, "_pg_session") as session_factory:
+        id_map = persistence.persist_components(
+            document_id="doc_1", component_result=component_result
+        )
+    assert id_map == {}
+    session_factory.assert_not_called()
+
+
+def test_persist_components_filters_fallback_but_persists_normal_components():
+    from core.document_pipeline import persistence
+
+    component_result = types.SimpleNamespace(
+        components=[_fallback_component(), _normal_component()]
+    )
+    session = MagicMock()
+    session.execute.return_value.fetchone.return_value = ("db-uuid-1",)
+    with patch.object(persistence, "_pg_session", return_value=session):
+        id_map = persistence.persist_components(
+            document_id="doc_1", component_result=component_result
+        )
+    assert id_map == {"comp_001": "db-uuid-1"}
+    inserted_names = [
+        call.args[1].get("name")
+        for call in session.execute.call_args_list
+        if len(call.args) > 1 and isinstance(call.args[1], dict) and "maturity_source" in call.args[1]
+    ]
+    assert inserted_names == ["relation"]

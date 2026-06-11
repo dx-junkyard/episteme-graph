@@ -311,9 +311,8 @@ def test_llm_failure_returns_fallback():
     assert result.validation_issues[0].rule_id == "component_assembly_deterministic_fallback"
 
 
-def test_empty_llm_components_falls_back_to_claim_components_without_repair():
-    agent = ComponentAssemblyAgent()
-    empty = {
+def _empty_response():
+    return {
         "document_id": "doc_test",
         "components_version": "v1",
         "components": [],
@@ -322,14 +321,47 @@ def test_empty_llm_components_falls_back_to_claim_components_without_repair():
         "confidence": 0.0,
     }
 
-    with patch.object(agent._llm_client, "generate", return_value=empty) as mocked:
+
+def test_empty_llm_components_triggers_repair_regeneration():
+    """no_components は即 fallback せず repair で再生成を試みる (#347)."""
+    agent = ComponentAssemblyAgent()
+
+    with patch.object(
+        agent._llm_client, "generate", side_effect=[_empty_response(), _valid_response()]
+    ) as mocked:
         result = agent.run(_qualified(), equations=_equations(), thesis=_thesis(), dsl=_dsl())
 
-    assert mocked.call_count == 1
+    assert mocked.call_count == 2
     assert len(result.components) == 4
-    assert {c.component_type for c in result.components} == {"ClaimBundleComponent"}
-    assert result.components[0].evidence_refs["claim_ids"] == ["claim:b1:s1"]
+    assert any(c.component_type == "RelationComponent" for c in result.components)
+    assert all(c.maturity_source != "deterministic_fallback" for c in result.components)
     assert result.diagnostics["initial_llm_raw_output"]["component_count"] == 0
     assert result.diagnostics["initial_validation_issues"][0]["code"] == "no_components"
+    assert result.diagnostics["initial_error_codes"] == ["no_components"]
+    assert "fallback_reason" not in result.diagnostics
+
+
+def test_empty_llm_components_falls_back_after_repair_attempts():
+    agent = ComponentAssemblyAgent()
+
+    with patch.object(
+        agent._llm_client,
+        "generate",
+        side_effect=[_empty_response(), _empty_response(), _empty_response()],
+    ) as mocked:
+        result = agent.run(_qualified(), equations=_equations(), thesis=_thesis(), dsl=_dsl())
+
+    # 初回 + repair 2 回（_MAX_REPAIR_ATTEMPTS）試行後に fallback
+    assert mocked.call_count == 3
+    assert len(result.components) == 4
+    assert {c.component_type for c in result.components} == {"ClaimBundleComponent"}
+    assert {c.maturity_source for c in result.components} == {"deterministic_fallback"}
+    assert result.components[0].evidence_refs["claim_ids"] == ["claim:b1:s1"]
     assert result.diagnostics["fallback_reason"] == "LLM component assembly returned no components"
-    assert not [i for i in result.validation_issues if i.severity == "error"]
+    assert "no_components" in result.diagnostics["original_failure_codes"]
+    assert result.diagnostics["repair_attempt_1_component_count"] == 0
+    assert result.diagnostics["repair_attempt_1_error_codes"] == ["no_components"]
+    assert any(
+        i.rule_id == "component_assembly_deterministic_fallback"
+        for i in result.validation_issues
+    )

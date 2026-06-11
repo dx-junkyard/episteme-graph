@@ -175,6 +175,14 @@ _NEEDS_REVIEW_RULE_IDS = {
     "review_required_claim_in_component",
 }
 
+# Rule IDs escalated to hard errors regardless of their reported severity.
+# Deterministic-fallback components are conservative placeholders, not
+# source-backed reusable components, and must never be silently persisted
+# as regular theory_components (#347).
+_FORCED_ERROR_RULE_IDS = {
+    "component_assembly_deterministic_fallback",
+}
+
 # Stage names where validation_issues with severity=error are hard errors
 _HARD_ERROR_STAGES = {
     "component_assembly",
@@ -345,6 +353,7 @@ class ExportValidationGate:
             )
 
         if component_result:
+            self._check_deterministic_fallback_components(component_result, errors)
             self._check_component_internal_flow(component_result, errors)
             self._check_summary_only_derivation_components(component_result, errors)
             component_quality = self._check_component_quality(
@@ -492,6 +501,8 @@ class ExportValidationGate:
 
                 if code in _NEEDS_REVIEW_RULE_IDS:
                     review_items.append(entry)
+                elif code in _FORCED_ERROR_RULE_IDS:
+                    errors.append(entry)
                 elif severity == _SEVERITY_ERROR and (
                     stage in _HARD_ERROR_STAGES or code in _HARD_ERROR_RULE_IDS
                 ):
@@ -738,6 +749,40 @@ class ExportValidationGate:
                         path=f"$.components[{comp_id}].review_status",
                         source_stage="export_validation",
                     ))
+
+    def _check_deterministic_fallback_components(
+        self, component_result, errors: list
+    ) -> None:
+        """Hard-block deterministic-fallback components from persist (#347).
+
+        Fallback components (maturity_source="deterministic_fallback") are
+        conservative placeholders emitted when LLM component assembly failed.
+        They may remain in the stage artifact for debugging, but must never be
+        persisted as regular theory_components. Checking the components
+        directly (not just the artifact validation_issues) also covers resumed
+        runs that reloaded the component_assembly artifact.
+        """
+        fallback_components = [
+            c for c in (getattr(component_result, "components", []) or [])
+            if str(getattr(c, "maturity_source", "") or "") == "deterministic_fallback"
+        ]
+        if not fallback_components:
+            return
+        if any(e.code == "component_assembly_deterministic_fallback" for e in errors):
+            return  # already escalated from the stage artifact's validation_issues
+        comp_ids = [getattr(c, "component_id", "?") for c in fallback_components]
+        reason = str(getattr(fallback_components[0], "fallback_reason", "") or "unknown")
+        errors.append(ValidationEntry(
+            code="component_assembly_deterministic_fallback",
+            message=(
+                f"{len(fallback_components)} deterministic-fallback component(s) "
+                f"present ({', '.join(comp_ids[:5])}{'…' if len(comp_ids) > 5 else ''}); "
+                f"fallback_reason={reason!r}; rerun component_assembly instead of persisting"
+            ),
+            artifact="component_assembly",
+            path="$.components[*].maturity_source",
+            source_stage="export_validation",
+        ))
 
     def _check_component_internal_flow(self, component_result, errors: list) -> None:
         """Derivation-like components must expose their internal flow before export."""

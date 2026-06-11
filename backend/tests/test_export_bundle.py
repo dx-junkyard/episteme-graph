@@ -726,3 +726,91 @@ class TestExportApiRoute:
     def test_export_zip_compression_deflated(self):
         source = _read(EXPORT_ROUTE)
         assert "ZIP_DEFLATED" in source
+
+# ---------------------------------------------------------------------------
+# Unit: component_assembly debug export (#347)
+# ---------------------------------------------------------------------------
+
+class TestComponentAssemblyDebugExport:
+    @staticmethod
+    def _artifacts_by_doc():
+        return {
+            "doc_1": {
+                "component_assembly": {
+                    "components": [
+                        {"component_id": "comp_fallback_001", "maturity_source": "deterministic_fallback"},
+                        {"component_id": "comp_002", "maturity_source": "llm_proposed"},
+                    ],
+                    "validation_issues": [
+                        {"rule_id": "component_assembly_deterministic_fallback", "severity": "warning", "message": "fallback"}
+                    ],
+                    "diagnostics": {
+                        "fallback_reason": "LLM component assembly returned no components",
+                        "original_failure_codes": ["no_components"],
+                        "initial_llm_raw_output": {
+                            "parsed": {"components": []},
+                            "component_count": 0,
+                            "raw_text": "RAW LLM TEXT",
+                            "parse_error": None,
+                        },
+                        "initial_validation_issues": [{"code": "no_components"}],
+                        "repair_attempt_1_issues": [{"code": "no_components"}],
+                        "unrelated_internal_key": {"big": "blob"},
+                    },
+                }
+            }
+        }
+
+    def test_debug_includes_fallback_diagnostics_without_raw_text(self):
+        mod = _get_export_helpers()
+        out = mod._build_component_assembly_debug(self._artifacts_by_doc(), ["doc_1"])
+        assert len(out) == 1
+        entry = out[0]
+        assert entry["document_id"] == "doc_1"
+        assert entry["fallback_component_ids"] == ["comp_fallback_001"]
+        diag = entry["diagnostics"]
+        assert diag["fallback_reason"] == "LLM component assembly returned no components"
+        assert diag["original_failure_codes"] == ["no_components"]
+        assert diag["initial_validation_issues"] == [{"code": "no_components"}]
+        assert diag["repair_attempt_1_issues"] == [{"code": "no_components"}]
+        # raw LLM テキストは default off
+        assert diag["initial_llm_raw_output"] == {"component_count": 0, "parse_error": None}
+        # ホワイトリスト外の diagnostics キーは含めない
+        assert "unrelated_internal_key" not in diag
+
+    def test_debug_includes_raw_text_when_opted_in(self):
+        mod = _get_export_helpers()
+        out = mod._build_component_assembly_debug(
+            self._artifacts_by_doc(), ["doc_1"], include_llm_raw=True
+        )
+        diag = out[0]["diagnostics"]
+        assert diag["initial_llm_raw_output"]["raw_text"] == "RAW LLM TEXT"
+        assert diag["initial_llm_raw_output"]["parsed"] == {"components": []}
+
+    def test_debug_skips_documents_without_artifact(self):
+        mod = _get_export_helpers()
+        out = mod._build_component_assembly_debug({}, ["doc_1"])
+        assert out == []
+
+    def test_zip_contains_component_assembly_artifact_when_debug_enabled(self):
+        mod = _get_export_helpers()
+        debug_entries = mod._build_component_assembly_debug(self._artifacts_by_doc(), ["doc_1"])
+        zip_bytes = mod._build_zip(
+            manifest={},
+            claims=[],
+            dsl_graph={},
+            components=[],
+            component_graph={},
+            evidence_snippets=[],
+            include_debug=True,
+            debug_data={
+                "validation_errors": [],
+                "pipeline_logs": [],
+                "component_assembly_artifacts": debug_entries,
+            },
+        )
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            names = zf.namelist()
+            assert "debug/component_assembly_artifact.json" in names
+            payload = json.loads(zf.read("debug/component_assembly_artifact.json"))
+            assert payload["documents"][0]["fallback_component_ids"] == ["comp_fallback_001"]

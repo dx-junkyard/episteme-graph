@@ -64,15 +64,11 @@ class ComponentAssemblyRepairer:
         validator: object,
         diagnostics: dict | None = None,
     ) -> ComponentAssemblyResult:
-        if _has_no_components_error(validation_issues):
-            if diagnostics is not None:
-                diagnostics["fallback_reason"] = "LLM component assembly returned no components"
-                diagnostics["original_failure_codes"] = _issue_codes(validation_issues)
-            return make_deterministic_fallback(
-                llm_input,
-                "LLM component assembly returned no components",
-                validation_issues,
-            )
+        # no_components is repaired like any other validation error (#347):
+        # the repair prompt explicitly demands a non-empty components array, so
+        # an empty initial LLM output gets at least one regeneration attempt
+        # before the deterministic fallback kicks in.
+        had_no_components = _has_no_components_error(validation_issues)
 
         for attempt in range(1, _MAX_REPAIR_ATTEMPTS + 1):
             logger.info("Component assembly repair attempt %d/%d", attempt, _MAX_REPAIR_ATTEMPTS)
@@ -87,16 +83,18 @@ class ComponentAssemblyRepairer:
                     diagnostics[f"repair_attempt_{attempt}_exception"] = str(exc)
                 break
             if diagnostics is not None:
+                attempt_component_count = (
+                    len(raw_output.get("components", []))
+                    if isinstance(raw_output.get("components"), list)
+                    else 0
+                )
                 diagnostics[f"repair_attempt_{attempt}_output"] = {
                     "parsed": raw_output,
-                    "component_count": (
-                        len(raw_output.get("components", []))
-                        if isinstance(raw_output.get("components"), list)
-                        else 0
-                    ),
+                    "component_count": attempt_component_count,
                     "raw_text": getattr(llm_client, "last_raw_text", None),
                     "parse_error": getattr(llm_client, "last_parse_error", None),
                 }
+                diagnostics[f"repair_attempt_{attempt}_component_count"] = attempt_component_count
             raw_output = canonicalize_claim_refs(
                 raw_output,
                 None,
@@ -109,16 +107,24 @@ class ComponentAssemblyRepairer:
                 diagnostics[f"repair_attempt_{attempt}_issues"] = [
                     _issue_dict(issue, llm_input) for issue in remaining
                 ]
+                diagnostics[f"repair_attempt_{attempt}_error_codes"] = [
+                    issue.rule_id for issue in remaining if issue.severity == "error"
+                ]
             if not [i for i in remaining if i.severity == "error"]:
                 result.validation_issues = remaining
                 return result
             validation_issues = remaining
+        reason = (
+            "LLM component assembly returned no components"
+            if had_no_components and _has_no_components_error(validation_issues)
+            else "Repair failed after max attempts"
+        )
         if diagnostics is not None:
-            diagnostics["fallback_reason"] = "Repair failed after max attempts"
+            diagnostics["fallback_reason"] = reason
             diagnostics["original_failure_codes"] = _issue_codes(validation_issues)
         fallback = make_deterministic_fallback(
             llm_input,
-            "Repair failed after max attempts",
+            reason,
             validation_issues,
         )
         return fallback
@@ -286,6 +292,18 @@ def make_deterministic_fallback(
             fallback_reason=reason,
             original_failure_codes=original_failure_codes,
         ))
+
+    logger.warning(
+        "Component assembly deterministic fallback: document=%s reason=%r "
+        "original_failure_codes=%s atomic_available_claims=%d atomic_accepted_claims=%d "
+        "fallback_components=%d",
+        llm_input.document_id,
+        reason,
+        original_failure_codes,
+        len(atomic_available_claims),
+        len(atomic_accepted_claims),
+        len(components),
+    )
 
     if components:
         result = ComponentAssemblyResult(

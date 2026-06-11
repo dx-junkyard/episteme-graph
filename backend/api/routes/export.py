@@ -216,6 +216,73 @@ def _load_analysis_artifacts(session: Any, document_ids: list[str]) -> dict[str,
     return out
 
 
+_COMPONENT_ASSEMBLY_DIAG_KEY_PREFIXES = (
+    "fallback_reason",
+    "original_failure_codes",
+    "component_assembly_input_validation",
+    "initial_llm_exception",
+    "initial_llm_raw_output",
+    "initial_validation_issues",
+    "initial_error_codes",
+    "initial_llm_output_component_count",
+    "parsed_component_count",
+    "cleanup_component_count",
+    "enriched_component_count",
+    "repair_attempt_",
+)
+
+
+def _build_component_assembly_debug(
+    artifacts_by_doc: dict[str, dict],
+    document_ids: list[str],
+    include_llm_raw: bool = False,
+) -> list[dict]:
+    """component_assembly artifact の diagnostics を debug export 用に整形する (#347)。
+
+    fallback 原因調査に必要な issue code / count / validation_issues を含める。
+    raw LLM テキストはサイズ・機微情報の懸念があるため include_llm_raw が
+    真のときのみ含める（parsed JSON の component_count は常に含める）。
+    """
+    out: list[dict] = []
+    for doc_id in document_ids:
+        artifact = (artifacts_by_doc.get(doc_id) or {}).get("component_assembly")
+        if not isinstance(artifact, dict):
+            continue
+        diagnostics_raw = artifact.get("diagnostics") or {}
+        diagnostics: dict[str, Any] = {}
+        for key, value in (diagnostics_raw.items() if isinstance(diagnostics_raw, dict) else []):
+            if not any(
+                key == prefix or key.startswith(prefix)
+                for prefix in _COMPONENT_ASSEMBLY_DIAG_KEY_PREFIXES
+            ):
+                continue
+            if isinstance(value, dict) and ("raw_text" in value or "parsed" in value):
+                sanitized = {
+                    "component_count": value.get("component_count"),
+                    "parse_error": value.get("parse_error"),
+                }
+                if include_llm_raw:
+                    sanitized["parsed"] = value.get("parsed")
+                    sanitized["raw_text"] = value.get("raw_text")
+                diagnostics[key] = sanitized
+            else:
+                diagnostics[key] = value
+        components = artifact.get("components") or []
+        fallback_component_ids = [
+            c.get("component_id")
+            for c in components
+            if isinstance(c, dict) and c.get("maturity_source") == "deterministic_fallback"
+        ]
+        out.append({
+            "document_id": doc_id,
+            "component_count": len(components) if isinstance(components, list) else 0,
+            "fallback_component_ids": fallback_component_ids,
+            "validation_issues": artifact.get("validation_issues") or [],
+            "diagnostics": diagnostics,
+        })
+    return out
+
+
 def _build_evidence_for_documents(
     artifacts_by_doc: dict[str, dict],
     document_ids: list[str],
@@ -1599,6 +1666,11 @@ def _build_zip(
         if include_debug and debug_data:
             zf.writestr("debug/validation_errors.json", _json_bytes(debug_data.get("validation_errors", [])))
             zf.writestr("debug/pipeline_logs.json", _json_bytes(debug_data.get("pipeline_logs", [])))
+            if debug_data.get("component_assembly_artifacts") is not None:
+                zf.writestr(
+                    "debug/component_assembly_artifact.json",
+                    _json_bytes({"documents": debug_data.get("component_assembly_artifacts", [])}),
+                )
             if debug_data.get("llm_prompts") is not None:
                 zf.writestr("debug/llm_prompts.json", _json_bytes(debug_data.get("llm_prompts", [])))
             if debug_data.get("llm_raw_outputs") is not None:
@@ -1720,7 +1792,13 @@ def export_course_bundle(
             document_boundaries=document_boundaries,
             include_ndjson=req.include_ndjson,
             include_debug=req.include_debug_data,
-            debug_data={"validation_errors": [], "pipeline_logs": []} if req.include_debug_data else None,
+            debug_data={
+                "validation_errors": [],
+                "pipeline_logs": [],
+                "component_assembly_artifacts": _build_component_assembly_debug(
+                    artifacts_by_doc, document_ids, include_llm_raw=req.include_llm_raw_outputs
+                ),
+            } if req.include_debug_data else None,
             export_validation=export_validation,
         )
 
@@ -1838,7 +1916,13 @@ def export_document_bundle(
             document_boundaries=document_boundaries,
             include_ndjson=req.include_ndjson,
             include_debug=req.include_debug_data,
-            debug_data={"validation_errors": [], "pipeline_logs": []} if req.include_debug_data else None,
+            debug_data={
+                "validation_errors": [],
+                "pipeline_logs": [],
+                "component_assembly_artifacts": _build_component_assembly_debug(
+                    artifacts_by_doc, document_ids, include_llm_raw=req.include_llm_raw_outputs
+                ),
+            } if req.include_debug_data else None,
             export_validation=export_validation,
         )
 
