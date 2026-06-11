@@ -15,6 +15,15 @@ from core.postgres import get_session as _pg_session
 logger = logging.getLogger(__name__)
 
 
+class DeterministicFallbackPersistError(RuntimeError):
+    """component_assembly の deterministic-fallback 結果を persist しようとした (#347)。
+
+    ExportValidationGate を通らない経路（resume / 古い export_validation
+    artifact）でも、fallback-only の結果を theory_components へ反映させず、
+    かつ既存の通常成果物を silent に残さないために hard fail する。
+    """
+
+
 def _strip_nuls(value: Any) -> Any:
     if isinstance(value, str):
         return value.replace("\x00", "")
@@ -482,26 +491,41 @@ def persist_components(
         agent component_id → DB UUID のマッピング（dependency 解決用）。
     """
     components = list(getattr(component_result, "components", []) or [])
+    if not components:
+        return {}
 
     # deterministic_fallback component は通常成果物として永続化しない (#347)。
     # ExportValidationGate が persist 前にブロックするのが正規経路だが、
     # 旧 artifact からの resume 等でここまで届いた場合の最終ガード。
+    # 全件 fallback の場合は hard fail にする: silently return すると
+    # 同 document の既存 theory_components（前回 run の通常成果物）が
+    # 削除も置換もされず「成功」扱いのまま downstream に見え続けるため、
+    # 例外で run を failed にして再処理が必要なことを明示する。
     fallback_components = [
         c for c in components
         if str(getattr(c, "maturity_source", "") or "") == "deterministic_fallback"
     ]
     if fallback_components:
+        fallback_reason = str(
+            getattr(fallback_components[0], "fallback_reason", "") or "unknown"
+        )
+        components = [c for c in components if c not in fallback_components]
+        if not components:
+            raise DeterministicFallbackPersistError(
+                f"persist_components blocked for document={document_id}: all "
+                f"{len(fallback_components)} component(s) are deterministic-fallback "
+                f"(fallback_reason={fallback_reason!r}); rerun component_assembly "
+                "instead of persisting. Existing theory_components for this "
+                "document are left untouched."
+            )
         logger.warning(
             "persist_components: skipping %d deterministic-fallback component(s) "
             "for document=%s (fallback_reason=%r); they remain in the stage "
             "artifact only and are not persisted to theory_components",
             len(fallback_components),
             document_id,
-            str(getattr(fallback_components[0], "fallback_reason", "") or "unknown"),
+            fallback_reason,
         )
-        components = [c for c in components if c not in fallback_components]
-    if not components:
-        return {}
 
     id_map: dict[str, str] = {}
     claim_id_map = claim_id_map or {}

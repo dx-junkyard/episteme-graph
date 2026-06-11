@@ -1634,12 +1634,32 @@ def test_component_assembly_fallback_info_none_for_normal_result():
     assert _component_assembly_fallback_info(result) is None
 
 
-def test_persist_components_skips_all_fallback_components_without_db_access():
+def test_persist_components_hard_fails_when_all_components_are_fallback():
+    """全件 fallback は silent skip せず hard fail する (#347 review).
+
+    silent に return {} すると同 document の既存 theory_components が
+    削除も置換もされないまま run が成功扱いになり、古い通常成果物が
+    downstream に見え続けるため。既存 rows は破壊しない（DB 未接続のまま）。
+    """
     from core.document_pipeline import persistence
 
     component_result = types.SimpleNamespace(
         components=[_fallback_component("comp_fallback_001"), _fallback_component("comp_fallback_002")]
     )
+    with patch.object(persistence, "_pg_session") as session_factory:
+        with pytest.raises(persistence.DeterministicFallbackPersistError) as exc_info:
+            persistence.persist_components(
+                document_id="doc_1", component_result=component_result
+            )
+    assert "doc_1" in str(exc_info.value)
+    assert "deterministic-fallback" in str(exc_info.value)
+    session_factory.assert_not_called()
+
+
+def test_persist_components_empty_result_returns_empty_without_db_access():
+    from core.document_pipeline import persistence
+
+    component_result = types.SimpleNamespace(components=[])
     with patch.object(persistence, "_pg_session") as session_factory:
         id_map = persistence.persist_components(
             document_id="doc_1", component_result=component_result
