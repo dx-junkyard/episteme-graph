@@ -104,6 +104,21 @@ class ComponentAssemblyValidator:
         issues += self._check_duplicates(result)
         if not (0.0 <= result.confidence <= 1.0):
             issues.append(ValidationIssue("confidence_out_of_range", "error", "result confidence out of range", "confidence"))
+        # deterministic-fallback component の存在は再 validate でも必ず報告する
+        # (#347): downstream の ExportValidationGate がこの issue / maturity_source
+        # を検出して persist をブロックする。
+        fallback_count = sum(
+            1 for c in result.components
+            if str(getattr(c, "maturity_source", "") or "") == "deterministic_fallback"
+        )
+        if fallback_count:
+            issues.append(ValidationIssue(
+                "component_assembly_deterministic_fallback",
+                "warning",
+                f"result contains {fallback_count} deterministic-fallback component(s); "
+                "LLM component assembly failed and must be rerun before publish",
+                "components",
+            ))
         return issues
 
     def _check_component(

@@ -208,8 +208,20 @@ class ComponentAssemblyPromptFactory:
             + issue_text
             + "\n\n## Validation Issues JSON\n"
             + json.dumps(issue_payload, ensure_ascii=False, indent=2)
-            + "\nReturn corrected JSON."
         )
+        if any(getattr(i, "rule_id", "") == "no_components" for i in issues):
+            content += (
+                "\n\n## Regeneration Required\n"
+                "Your previous output contained NO components. An empty components"
+                " array is never a valid answer when accepted claims exist.\n"
+                "- You MUST return a non-empty components array.\n"
+                "- Build at least one component for every accepted claim, grouping"
+                " related claims into ClaimBundleComponent entries when no richer"
+                " component type applies.\n"
+                "- Use ONLY claim_ids / evidence_ids / equation_ids listed in the"
+                " Available Artifact IDs section.\n"
+            )
+        content += "\nReturn corrected JSON."
         return [
             {"role": "system", "content": _SYSTEM_CONTENT},
             {"role": "user", "content": content},
