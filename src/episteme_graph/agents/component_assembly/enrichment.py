@@ -40,6 +40,7 @@ def enrich_component_assembly(
         _fill_equation_confidence_summary(component, eq_index, review_required)
         _fill_confidence_gate(component, eq_index)
         _fill_claim_support_metadata(component, llm_input)
+        _fill_thesis_support_refs(component, llm_input)
         _fill_concepts(component, claim_index, eq_symbol_index, concept_vocab)
         _propagate_review_status(component)
         _fill_internal_flow(component)
@@ -180,6 +181,37 @@ def _fill_claim_support_metadata(
     component.support_distance_to_headline_claim = metadata["support_distance_to_headline_claim"]
     if component.supports_claim_ids:
         component.linked_claim_ids = _unique(list(component.linked_claim_ids or []) + component.supports_claim_ids)
+
+
+def _fill_thesis_support_refs(
+    component: ComponentRecord,
+    llm_input: ComponentAssemblyLLMInput,
+) -> None:
+    """Derive supports_thesis_node_ids from claim/equation overlap (issue #354).
+
+    A component backs a thesis node (central_thesis or support:<section>:<idx>)
+    when it shares at least one claim or equation reference with that node. No
+    LLM re-judgement: only IDs already present in both artifacts are used.
+    """
+    nodes = llm_input.thesis_nodes or []
+    if not nodes:
+        return
+    claim_ids = set(_component_claim_ids(component))
+    equation_ids = set(_all_component_equation_ids(component))
+    refs: list[str] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        thesis_ref = str(node.get("thesis_ref") or "")
+        if not thesis_ref:
+            continue
+        node_claims = {str(v) for v in (node.get("claim_ids") or []) if v}
+        node_equations = {str(v) for v in (node.get("equation_ids") or []) if v}
+        if (claim_ids & node_claims) or (equation_ids & node_equations):
+            refs.append(thesis_ref)
+    component.supports_thesis_node_ids = _unique(
+        list(component.supports_thesis_node_ids or []) + refs
+    )
 
 
 def _fill_concepts(

@@ -107,6 +107,16 @@ def _empty_theory_bundle_validation() -> dict:
     }
 
 
+def _empty_thesis_coverage() -> dict:
+    return {
+        "thesis_present": False,
+        "coverage_by_section": {},
+        "total_refs": 0,
+        "reachable_refs": 0,
+        "unreachable_refs": [],
+    }
+
+
 def _empty_teaching_output_validation() -> dict:
     return {
         "errors": [],
@@ -138,6 +148,9 @@ class ExportValidationResult:
     theory_bundle_validation: dict = field(default_factory=_empty_theory_bundle_validation)
     # TeachingOutputMapper Step 5 reporting (issue #326).
     teaching_output_validation: dict = field(default_factory=_empty_teaching_output_validation)
+    # Thesis coverage report (issue #354): is the central thesis (and each
+    # support_structure section) actually backed by the exported main graph?
+    thesis_coverage: dict = field(default_factory=_empty_thesis_coverage)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -458,6 +471,14 @@ class ExportValidationGate:
             component_result, errors, warnings, review_items
         )
 
+        # 7g. thesis coverage reporting (#354): verify each claim / equation the
+        # reconstructed thesis references is still present in the final claim /
+        # equation sets and is reachable from a main-layer graph node. Coverage
+        # gaps are review items (never hard errors).
+        thesis_coverage = self._check_thesis_coverage(
+            artifacts, component_result, claim_objects, review_items
+        )
+
         # 6. Determine status
         summary = ValidationSummary(
             error_count=len(errors),
@@ -496,6 +517,7 @@ class ExportValidationGate:
             derivation_graph_alignment=derivation_graph_alignment,
             theory_bundle_validation=theory_bundle_validation,
             teaching_output_validation=teaching_output_validation,
+            thesis_coverage=thesis_coverage,
         )
 
     # ------------------------------------------------------------------
@@ -1785,6 +1807,167 @@ class ExportValidationGate:
                     path=f"$.claims[{claim_id}].atomicity",
                     source_stage="export_validation",
                 ))
+
+    def _check_thesis_coverage(
+        self,
+        artifacts: dict,
+        component_result,
+        claim_objects,
+        review_items: list,
+    ) -> dict:
+        """Thesis coverage report (issue #354).
+
+        For the central thesis and each support_structure section, verify every
+        referenced claim_id / equation_id (a) still exists in the final claim /
+        equation sets and (b) is reachable from a main-layer graph node (or an
+        assembled component when the component_graph artifact is absent).
+        Unreachable refs are recorded with review_reasons=["thesis_support_unreachable"]
+        and surfaced as review items — never hard errors.
+        """
+        result = _empty_thesis_coverage()
+        thesis = artifacts.get("thesis_reconstruction")
+        if not isinstance(thesis, dict):
+            return result
+        central = thesis.get("central_thesis")
+        if not isinstance(central, dict):
+            return result
+        result["thesis_present"] = True
+
+        final_claim_ids = {
+            str(getattr(c, "claim_id", "") or "")
+            for c in (getattr(claim_objects, "claims", []) or [])
+            if getattr(c, "claim_id", None)
+        }
+        known_equation_ids = set(self._equation_index_from_artifacts(artifacts))
+        main_claim_ids, main_equation_ids = self._main_graph_backing_ids(
+            artifacts, component_result
+        )
+
+        sections: list[tuple[str, list[dict]]] = [("central_thesis", [central])]
+        support = thesis.get("support_structure")
+        if isinstance(support, dict):
+            for name, entries in support.items():
+                if isinstance(entries, list):
+                    sections.append(
+                        (str(name), [e for e in entries if isinstance(e, dict)])
+                    )
+
+        for section, entries in sections:
+            section_total = 0
+            section_reachable = 0
+            for entry in entries:
+                ref_groups = (
+                    ("claim", entry.get("claim_ids") or [],
+                     final_claim_ids, main_claim_ids),
+                    ("equation", entry.get("equation_ids") or [],
+                     known_equation_ids, main_equation_ids),
+                )
+                for ref_type, refs, known_ids, covered_ids in ref_groups:
+                    for ref in refs:
+                        ref_id = str(ref or "")
+                        if not ref_id:
+                            continue
+                        section_total += 1
+                        if known_ids and ref_id not in known_ids:
+                            reason = f"missing_{ref_type}"
+                        elif ref_id not in covered_ids:
+                            reason = "not_linked_to_main_graph"
+                        else:
+                            section_reachable += 1
+                            continue
+                        result["unreachable_refs"].append({
+                            "ref_id": ref_id,
+                            "ref_type": ref_type,
+                            "section": section,
+                            "reason": reason,
+                            "review_reasons": ["thesis_support_unreachable"],
+                        })
+                        review_items.append(ValidationEntry(
+                            code="THESIS_SUPPORT_UNREACHABLE",
+                            message=(
+                                f"thesis section {section!r} references {ref_type} "
+                                f"{ref_id!r} which is not reachable from the exported "
+                                f"main graph ({reason})"
+                            ),
+                            artifact="thesis_reconstruction",
+                            path=f"$.support_structure[{section}]"
+                            if section != "central_thesis"
+                            else "$.central_thesis",
+                            source_stage="export_validation",
+                        ))
+            if section_total:
+                result["coverage_by_section"][section] = round(
+                    section_reachable / section_total, 4
+                )
+                result["total_refs"] += section_total
+                result["reachable_refs"] += section_reachable
+        return result
+
+    @staticmethod
+    def _main_graph_backing_ids(
+        artifacts: dict, component_result
+    ) -> tuple[set[str], set[str]]:
+        """Claim / equation ids backed by main-layer graph nodes (issue #354).
+
+        A main node covers its own linked ids plus those of the equation_detail
+        members it aggregates. When the component_graph artifact is absent the
+        assembled components stand in as reachability targets so the report
+        degrades instead of marking everything unreachable.
+        """
+        claim_ids: set[str] = set()
+        equation_ids: set[str] = set()
+        node_claim_keys = (
+            "linked_claim_ids", "supports_claim_ids", "input_claim_ids",
+            "output_claim_ids", "required_claim_ids",
+        )
+        node_equation_keys = (
+            "linked_equation_ids", "input_equation_ids",
+            "intermediate_equation_ids", "output_equation_ids",
+            "definition_equation_ids", "constraint_equation_ids",
+        )
+
+        graph = artifacts.get("component_graph")
+        nodes = graph.get("nodes") if isinstance(graph, dict) else None
+        if isinstance(nodes, list) and nodes:
+            node_by_id = {
+                str(n.get("component_id") or ""): n
+                for n in nodes if isinstance(n, dict)
+            }
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                if str(node.get("graph_layer") or "main") != "main":
+                    continue
+                members = [node] + [
+                    node_by_id.get(str(m))
+                    for m in node.get("member_component_ids") or []
+                ]
+                for member in members:
+                    if not isinstance(member, dict):
+                        continue
+                    for key in node_claim_keys:
+                        claim_ids.update(
+                            str(v) for v in member.get(key) or [] if v
+                        )
+                    for key in node_equation_keys:
+                        equation_ids.update(
+                            str(v) for v in member.get(key) or [] if v
+                        )
+            return claim_ids, equation_ids
+
+        for component in getattr(component_result, "components", []) or []:
+            refs = getattr(component, "evidence_refs", {}) or {}
+            claim_ids.update(
+                str(v) for v in (refs.get("claim_ids") or []) if v
+            )
+            for key in node_claim_keys:
+                claim_ids.update(
+                    str(v) for v in (getattr(component, key, []) or []) if v
+                )
+            equation_ids.update(
+                ExportValidationGate._component_equation_refs(component, refs)
+            )
+        return claim_ids, equation_ids
 
     def _check_concepts(
         self,

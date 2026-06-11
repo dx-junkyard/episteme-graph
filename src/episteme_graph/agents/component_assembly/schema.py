@@ -172,6 +172,9 @@ class ComponentRecord:
     supports_claim_ids: list[str] = field(default_factory=list)
     support_distance_to_headline_claim: int = 0
     support_kind: str = ""
+    # Thesis nodes (central_thesis / support:<section>:<idx>) this component
+    # backs, derived deterministically from claim/equation overlap (issue #354).
+    supports_thesis_node_ids: list[str] = field(default_factory=list)
     # Concept tags required for component graph / course mapping (issue #8).
     # Derived deterministically from linked atomic-claim concepts, equation
     # symbols, and cartridge normalized terms.
@@ -290,6 +293,7 @@ class ComponentAssemblyResult:
                 supports_claim_ids=list(c.get("supports_claim_ids") or []),
                 support_distance_to_headline_claim=int(c.get("support_distance_to_headline_claim", 0) or 0),
                 support_kind=c.get("support_kind", ""),
+                supports_thesis_node_ids=list(c.get("supports_thesis_node_ids") or []),
                 concepts=list(c.get("concepts") or []),
                 prerequisite_concepts=list(c.get("prerequisite_concepts") or []),
                 introduced_concepts=list(c.get("introduced_concepts") or []),
