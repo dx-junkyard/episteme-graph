@@ -54,6 +54,7 @@ PIPELINE_STAGES = [
     "dsl_embedding",
     "component_assembly",
     "component_graph",
+    "narrative_annotator",
     "course_mapping",
     "blueprint",
     "export_validation",
@@ -887,6 +888,42 @@ def run_document_pipeline(
         if finish_target_stage("component_graph", {"nodes": len(getattr(component_graph_result, "nodes", []) or []), "edges": len(getattr(component_graph_result, "edges", []) or []), "total": 1, "processed": 1}):
             return result
 
+        # ── Stage 12a.1: narrative_annotator (reading layer for main graph, #360) ─
+        # Annotation-only LLM stage: graph_summary / narrative_role /
+        # transition_text are stored as a separate artifact and never modify the
+        # graph. Non-fatal: downstream stages do not depend on it.
+        narrative_artifact = artifact("narrative_annotator")
+        if should_use_artifact("narrative_annotator"):
+            narrative = _from_agent_dict("narrative_annotator", narrative_artifact)
+            logger.info("Resuming document pipeline: loaded narrative_annotator artifact for document %s", document_id)
+        else:
+            report_start("narrative_annotator", total=1, unit="llm_call")
+            narrative = None
+            try:
+                from episteme_graph.agents.narrative_annotator.agent import NarrativeAnnotator
+
+                narrative = NarrativeAnnotator().run(
+                    component_graph_result,
+                    thesis=thesis,
+                    derivations=derivations,
+                    cartridge_id=cartridge_id,
+                )
+                save_artifact("narrative_annotator", narrative)
+            except Exception as exc:
+                logger.warning(
+                    "narrative_annotator stage failed (non-fatal): document=%s error=%s",
+                    document_id, exc, exc_info=True,
+                )
+        narrative_counts = {
+            "node_narratives": len(getattr(narrative, "node_narratives", []) or []),
+            "edge_narratives": len(getattr(narrative, "edge_narratives", []) or []),
+            "total": 1,
+            "processed": 1,
+        }
+        report_done("narrative_annotator", narrative_counts)
+        if finish_target_stage("narrative_annotator", narrative_counts):
+            return result
+
         # ── Stage 12b: course_mapping (deterministic component → topic map) ─
         course_mapping_artifact = artifact("course_mapping")
         if should_use_artifact("course_mapping"):
@@ -1051,6 +1088,7 @@ def run_document_pipeline(
                     course_id=course_id,
                     component_graph_result=component_graph_result,
                     claim_id_map=claim_id_map,
+                    narrative_result=narrative,
                 )
                 save_artifact("persist_claims_components_graph", {
                     "claims": result.claim_count,
@@ -1251,6 +1289,9 @@ def _from_agent_dict(stage: str, value: dict) -> Any:
     if stage == "component_graph":
         from episteme_graph.agents.component_graph.schema import ComponentGraphResult
         return ComponentGraphResult.from_dict(value)
+    if stage == "narrative_annotator":
+        from episteme_graph.agents.narrative_annotator.schema import NarrativeAnnotationResult
+        return NarrativeAnnotationResult.from_dict(value)
     if stage == "evidence_registry":
         from episteme_graph.agents.evidence_registry.schema import EvidenceRegistryResult
         return EvidenceRegistryResult.from_dict(value)

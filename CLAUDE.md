@@ -147,6 +147,7 @@ src/episteme_graph/agents/
   dsl_linking/          → DSLLinkingAgent (#222)
   component_assembly/   → ComponentAssemblyAgent (#223)
   component_graph/      → ComponentGraphAgent (#266) — TheoryOperationGraph 構築
+  narrative_annotator/  → NarrativeAnnotator (#360) — main graph への narrative 注釈（LLM-first, graph 構造非変更）
 ```
 
 各Agentディレクトリは最低限以下のファイルを持つ:

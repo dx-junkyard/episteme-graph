@@ -177,6 +177,7 @@ OpenAI 形式                      → Gemini への変換
 | ThesisReconstructionAgent | #221 | Skeleton + Claims + Equations | ThesisReconstructionResult | LLM-first |
 | DSLLinkingAgent | #222 | Claims + Equations + Thesis | DSLLinkingResult | LLM-first |
 | ComponentAssemblyAgent | #223 | Claims + Equations + Thesis + DSL | ComponentAssemblyResult | LLM-first + cartridge-aware |
+| NarrativeAnnotator | #360 | ComponentGraphResult + Thesis + Derivations | NarrativeAnnotationResult | LLM-first（annotation のみ、graph 構造は変更しない・全出力 provisional） |
 
 ### 各Agentの標準ファイル構成
 

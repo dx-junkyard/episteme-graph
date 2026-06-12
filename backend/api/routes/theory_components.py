@@ -2097,6 +2097,8 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
         "nodes": normalized_nodes,
         "edges": normalized_edges,
         "validation_results": graph.get("validation_results") if isinstance(graph.get("validation_results"), list) else [],
+        # NarrativeAnnotator reading layer (issue #360); pass through as-is.
+        "narrative": graph.get("narrative") if isinstance(graph.get("narrative"), dict) else {},
     }
 
 

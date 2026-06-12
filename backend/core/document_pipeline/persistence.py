@@ -699,6 +699,44 @@ def _split_main_label(label: str) -> tuple[str, str]:
     return split_main_label(label)
 
 
+def _narrative_payload(narrative_result, component_id_map: dict[str, str]) -> dict:
+    """NarrativeAnnotator output keyed by stored DB component ids (issue #360)."""
+    if narrative_result is None:
+        return {}
+    node_map: dict[str, dict] = {}
+    for narrative in getattr(narrative_result, "node_narratives", []) or []:
+        agent_id = str(getattr(narrative, "component_id", "") or "")
+        if not agent_id:
+            continue
+        db_id = component_id_map.get(agent_id, agent_id)
+        node_map[db_id] = {
+            "narrative_role": str(getattr(narrative, "narrative_role", "") or ""),
+            "reason": str(getattr(narrative, "reason", "") or ""),
+            "confidence": float(getattr(narrative, "confidence", 0.0) or 0.0),
+        }
+    edge_map: dict[str, dict] = {}
+    for narrative in getattr(narrative_result, "edge_narratives", []) or []:
+        edge_id = str(getattr(narrative, "edge_id", "") or "")
+        if not edge_id:
+            continue
+        edge_map[edge_id] = {
+            "transition_text": str(getattr(narrative, "transition_text", "") or ""),
+            "reason": str(getattr(narrative, "reason", "") or ""),
+            "confidence": float(getattr(narrative, "confidence", 0.0) or 0.0),
+        }
+    graph_summary = str(getattr(narrative_result, "graph_summary", "") or "")
+    if not graph_summary and not node_map and not edge_map:
+        return {}
+    return {
+        "graph_summary": graph_summary,
+        "maturity_source": str(
+            getattr(narrative_result, "maturity_source", "") or "llm_proposed"
+        ),
+        "node_narratives": node_map,
+        "edge_narratives": edge_map,
+    }
+
+
 def _normalize_graph_payload_for_persist(graph: dict) -> dict:
     """Guarantee the persisted graph satisfies the stored-graph invariants (issue #319).
 
@@ -765,6 +803,7 @@ def persist_component_graph(
     course_id: str | None = None,
     component_graph_result=None,
     claim_id_map: dict[str, str] | None = None,
+    narrative_result=None,
 ) -> str | None:
     """document scope の component graph を `theory_component_graphs` に保存。
 
@@ -900,6 +939,11 @@ def persist_component_graph(
         "dsl": {"nodes": dsl_nodes, "edges": dsl_edges},
         "validation_results": validation_issues,
     })
+    # Reading layer from NarrativeAnnotator (issue #360): stored as a sibling
+    # block, never merged into nodes/edges, always provisional.
+    narrative_payload = _narrative_payload(narrative_result, component_id_map)
+    if narrative_payload:
+        graph["narrative"] = narrative_payload
 
     session = _pg_session()
     try:
