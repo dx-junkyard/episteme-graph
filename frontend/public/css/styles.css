@@ -4169,3 +4169,38 @@ body {
   border-left: 3px solid #E24B4A;
   padding-left: 8px;
 }
+
+/* Narrative reading layer from NarrativeAnnotator (issue #360) */
+.ls-graph-narrative-summary {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 8px;
+  background: var(--color-bg-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.ls-graph-narrative-summary p {
+  margin: 6px 0 0;
+}
+.ls-graph-narrative-title {
+  font-weight: 600;
+  font-size: 12px;
+}
+.ls-graph-narrative-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+  font-size: 9px;
+  font-weight: 500;
+  vertical-align: middle;
+}
+.ls-graph-detail-edge-narrative {
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+}

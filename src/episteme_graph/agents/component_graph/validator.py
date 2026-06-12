@@ -138,7 +138,132 @@ class ComponentGraphValidator:
                 "confidence",
             ))
 
+        issues += self._check_main_graph_coverage(result)
+        issues += self._check_layer_linkage(result)
+        issues += self._check_dependency_edge_cycles(result)
+
         return issues
+
+    @staticmethod
+    def _check_layer_linkage(result: ComponentGraphResult) -> list[ValidationIssue]:
+        """Detect orphan detail nodes and member-less main nodes (issue #358).
+
+        The two-layer invariant (#306) requires equation_detail nodes to point
+        at a main parent and main nodes to aggregate at least one member;
+        breaking it leaves nodes the UI layer toggle can never reach.
+        """
+        issues: list[ValidationIssue] = []
+        main_ids = {
+            n.component_id for n in result.nodes
+            if str(getattr(n, "graph_layer", "main") or "main") == "main"
+        }
+        if not main_ids:
+            return issues  # empty main graph is reported by coverage check
+        for node in result.nodes:
+            layer = str(getattr(node, "graph_layer", "main") or "main")
+            cid = node.component_id
+            if layer == "equation_detail":
+                parent = str(getattr(node, "parent_component_id", "") or "")
+                if not parent or parent not in main_ids:
+                    issues.append(ValidationIssue(
+                        "orphan_detail_node",
+                        "warning",
+                        f"equation_detail node {cid!r} has no main-layer parent",
+                        f"nodes[{cid}].parent_component_id",
+                    ))
+            elif layer == "main" and str(
+                getattr(node, "component_type", "") or ""
+            ) == "TheoryOperationNode":
+                if not list(getattr(node, "member_component_ids", []) or []):
+                    issues.append(ValidationIssue(
+                        "empty_main_node",
+                        "warning",
+                        f"main node {cid!r} aggregates no equation_detail members",
+                        f"nodes[{cid}].member_component_ids",
+                    ))
+        return issues
+
+    @staticmethod
+    def _check_dependency_edge_cycles(result: ComponentGraphResult) -> list[ValidationIssue]:
+        """Detect cycles over dependency-like edges (issue #358, hard error)."""
+        dependency_types = {"requires", "depends_on"}
+        adjacency: dict[str, list[str]] = {}
+        for edge in result.edges:
+            if str(edge.edge_type or "").lower() not in dependency_types:
+                continue
+            if edge.source and edge.target:
+                adjacency.setdefault(edge.source, []).append(edge.target)
+        if not adjacency:
+            return []
+
+        issues: list[ValidationIssue] = []
+        WHITE, GRAY, BLACK = 0, 1, 2
+        color: dict[str, int] = {}
+        stack: list[str] = []
+        reported: set[frozenset] = set()
+
+        def visit(cid: str) -> None:
+            color[cid] = GRAY
+            stack.append(cid)
+            for nxt in adjacency.get(cid, []):
+                state = color.get(nxt, WHITE)
+                if state == GRAY:
+                    cycle = stack[stack.index(nxt):] + [nxt]
+                    key = frozenset(cycle)
+                    if key not in reported:
+                        reported.add(key)
+                        issues.append(ValidationIssue(
+                            "component_graph_dependency_cycle",
+                            "error",
+                            "dependency edge cycle detected: " + " -> ".join(cycle),
+                            f"edges[{nxt}]",
+                        ))
+                elif state == WHITE:
+                    visit(nxt)
+            stack.pop()
+            color[cid] = BLACK
+
+        for cid in list(adjacency):
+            if color.get(cid, WHITE) == WHITE:
+                visit(cid)
+        return issues
+
+    @staticmethod
+    def _check_main_graph_coverage(result: ComponentGraphResult) -> list[ValidationIssue]:
+        """Explain WHY the main graph is empty (issue #361).
+
+        When derivation quality is too low every step lands in the
+        equation_detail / debug layer and learners see nothing. Report the
+        generic-operation rate and weak-backing rate so the cause is visible
+        in export_validation instead of a silently empty graph.
+        """
+        nodes = list(result.nodes or [])
+        if not nodes:
+            return []
+        if any(
+            str(getattr(n, "graph_layer", "main") or "main") == "main" for n in nodes
+        ):
+            return []
+        total = len(nodes)
+        generic = sum(
+            1 for n in nodes
+            if classify_operation(str(getattr(n, "operation", "") or ""))[2]
+        )
+        weak_backing = sum(
+            1 for n in nodes
+            if str(getattr(n, "source_backing_status", "") or "")
+            in ("inferred", "review_required", "")
+        )
+        return [ValidationIssue(
+            "main_graph_empty_derivation_quality",
+            "warning",
+            (
+                "main graph is empty — derivation quality insufficient: "
+                f"generic operations {generic}/{total}, "
+                f"weak source backing {weak_backing}/{total}"
+            ),
+            "nodes",
+        )]
 
     @staticmethod
     def _check_node_source_backing(node: ComponentGraphNode, is_main: bool) -> list[ValidationIssue]:

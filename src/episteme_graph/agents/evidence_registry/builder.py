@@ -9,6 +9,8 @@ DocumentStructureResult の block.text の原文範囲のみを採用する。
 """
 from __future__ import annotations
 
+import re
+
 from .schema import (
     EVIDENCE_ROLES,
     EvidenceRecord,
@@ -127,6 +129,61 @@ class EvidenceRegistryBuilder:
             review_note=review_note,
         )
 
+    def add_sentences_for_block(
+        self,
+        block_id: str,
+        *,
+        parent_evidence_id: str | None = None,
+        public_export_policy: str | None = None,
+        review_note: str = "",
+    ) -> list[str]:
+        """Register sentence-level evidence for a block (issue #363).
+
+        Deterministic sentence splitting only (no LLM). Each sentence record
+        carries ``evidence_role="sentence_quote"`` and points back at the
+        block-level record via ``parent_evidence_id`` so atomic claims can cite
+        the exact supporting sentence — also for single-sentence blocks, so
+        sentence-level citation works uniformly (issue #363 review fix).
+        """
+        block = self._block_index.get(block_id)
+        if block is None:
+            self._issues.append(ValidationIssue(
+                rule_id="evidence_block_missing",
+                severity="error",
+                message=f"block not found: {block_id}",
+                field=block_id,
+            ))
+            return []
+        text = getattr(block, "text", "") or ""
+        spans = split_sentences_with_offsets(text)
+        if not spans:
+            return []
+        parent = None
+        if parent_evidence_id:
+            parent = next(
+                (r for r in self._records if r.evidence_id == parent_evidence_id),
+                None,
+            )
+        policy = public_export_policy or (
+            parent.public_export_policy if parent else "location_only"
+        )
+        evidence_ids: list[str] = []
+        for start, end in spans:
+            evidence_id = self._add(
+                block_id=block_id,
+                section_id=getattr(block, "section_id", None),
+                page=getattr(block, "page", None),
+                span_start=start,
+                span_end=end,
+                evidence_text=text[start:end],
+                evidence_role="sentence_quote",
+                public_export_policy=policy,
+                review_note=review_note,
+                parent_evidence_id=parent_evidence_id,
+            )
+            evidence_ids.append(evidence_id)
+        return evidence_ids
+
     def attach_review_note(self, evidence_id: str, review_note: str) -> bool:
         """既存 evidence にレビューコメントを追記する。
         evidence_text を汚染しないことを保証する。
@@ -173,6 +230,7 @@ class EvidenceRegistryBuilder:
         evidence_role: str,
         public_export_policy: str,
         review_note: str,
+        parent_evidence_id: str | None = None,
     ) -> str:
         if evidence_role not in EVIDENCE_ROLES:
             self._issues.append(ValidationIssue(
@@ -208,6 +266,7 @@ class EvidenceRegistryBuilder:
             evidence_role=evidence_role,
             public_export_policy=public_export_policy,
             review_note=review_note,
+            parent_evidence_id=parent_evidence_id,
         )
         self._records.append(record)
         self._dedup_key_to_id[key] = evidence_id
@@ -240,3 +299,89 @@ class EvidenceRegistryBuilder:
                     message=f"evidence {r.evidence_id} has no block_id",
                     field=r.evidence_id,
                 ))
+
+
+# ---------------------------------------------------------------------------
+# Sentence splitting (issue #363) — deterministic, no LLM.
+# ---------------------------------------------------------------------------
+
+# Abbreviations that end with a period but do not end a sentence. General
+# scholarly notation only — no field-specific vocabulary.
+_NON_TERMINAL_ABBREVIATIONS = (
+    "eq", "eqs", "fig", "figs", "tab", "ref", "refs", "sec", "secs",
+    "e.g", "i.e", "cf", "vs", "et al", "al", "no", "dr", "prof", "etc",
+)
+
+_SENTENCE_BOUNDARY = re.compile(r"[.!?。！？]")
+
+
+def split_sentences_with_offsets(text: str) -> list[tuple[int, int]]:
+    """Return (start, end) character offsets of the sentences in ``text``."""
+    text = str(text or "")
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for match in _SENTENCE_BOUNDARY.finditer(text):
+        end = match.end()
+        if end < len(text) and not text[end].isspace():
+            continue  # mid-token period like "3.14" or "v2.0"
+        prefix = text[start:match.start()].rstrip()
+        last_token = prefix.split()[-1].lower().rstrip(".") if prefix.split() else ""
+        if match.group() == "." and last_token in _NON_TERMINAL_ABBREVIATIONS:
+            continue
+        stripped_start = start
+        while stripped_start < end and text[stripped_start].isspace():
+            stripped_start += 1
+        if end > stripped_start and text[stripped_start:end].strip():
+            spans.append((stripped_start, end))
+        start = end
+    rest = text[start:].strip()
+    if rest:
+        stripped_start = start
+        while stripped_start < len(text) and text[stripped_start].isspace():
+            stripped_start += 1
+        spans.append((stripped_start, len(text)))
+    return spans
+
+
+def check_span_alignment(roles_result, registry_result) -> list[ValidationIssue]:
+    """RhetoricalRole span offsets vs evidence spans (issue #363).
+
+    A span annotation whose char range falls outside its block's block-level
+    evidence span indicates the two artifacts disagree about the block text;
+    the mismatch is reported as a warning on the registry result.
+    """
+    block_spans: dict[str, tuple[int, int]] = {}
+    for record in getattr(registry_result, "records", []) or []:
+        if getattr(record, "evidence_role", "") == "sentence_quote":
+            continue
+        block_id = getattr(record.source, "block_id", None)
+        if block_id and block_id not in block_spans:
+            block_spans[str(block_id)] = (
+                int(getattr(record.source, "span_start", 0) or 0),
+                int(getattr(record.source, "span_end", 0) or 0),
+            )
+
+    issues: list[ValidationIssue] = []
+    for annotation in getattr(roles_result, "role_annotations", []) or []:
+        block_id = str(getattr(annotation, "block_id", "") or "")
+        bounds = block_spans.get(block_id)
+        if bounds is None:
+            continue
+        for span in getattr(annotation, "span_annotations", []) or []:
+            char_start = int(getattr(span, "char_start", 0) or 0)
+            char_end = int(getattr(span, "char_end", 0) or 0)
+            if char_start < bounds[0] or char_end > bounds[1]:
+                issues.append(ValidationIssue(
+                    rule_id="evidence_span_alignment_mismatch",
+                    severity="warning",
+                    message=(
+                        f"span {getattr(span, 'span_id', '?')} chars "
+                        f"[{char_start}, {char_end}] fall outside block "
+                        f"{block_id} evidence span {list(bounds)}"
+                    ),
+                    field=block_id,
+                ))
+    registry_result.validation_issues = (
+        list(getattr(registry_result, "validation_issues", []) or []) + issues
+    )
+    return issues

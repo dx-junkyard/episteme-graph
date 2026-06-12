@@ -1,0 +1,26 @@
+{
+  "document_id": "doc_example",
+  "narrative_version": "v1",
+  "cartridge_id": "particle_physics",
+  "graph_summary": "The paper argues that a single consistency relation links the three measured decay ratios. The graph starts from the theory basis that defines the effective operators, builds the observable ratios, linearises the resulting equation system, and eliminates the unknown form-factor parameter. The final consistency relation is then used as a diagnostic against the measured values.",
+  "node_narratives": [
+    {
+      "component_id": "main_theory_basis",
+      "narrative_role": "Defines the effective operators and couplings that every later stage relies on.",
+      "reason": "node description and linked definition equations",
+      "confidence": 0.8
+    }
+  ],
+  "edge_narratives": [
+    {
+      "edge_id": "edge_basis_to_observable",
+      "transition_text": "The operator definitions are combined into the measurable decay ratios.",
+      "reason": "edge reasoning text",
+      "confidence": 0.75
+    }
+  ],
+  "review_notes": [],
+  "confidence": 0.8,
+  "maturity_source": "llm_proposed",
+  "validation_issues": []
+}

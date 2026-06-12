@@ -14,25 +14,66 @@ SUPPORT_STATUSES = [
     "unknown",
 ]
 
-# Atomicity vocabulary:
+# Atomicity vocabulary (issue #359: single source of truth):
 #   atomic         — single minimal proposition
 #   composite      — parent claim split into atomic children
 #   split_required — multiple propositions, not usable as component backing
-# Legacy aliases accepted on read/export validation: compound, non_atomic, split_pending.
-ATOMICITY_VALUES = [
+# Legacy aliases are converted to the canonical values at read time via
+# normalize_atomicity(); freshly built artifacts only ever emit canonical values.
+CANONICAL_ATOMICITY_VALUES = [
     "atomic",
     "composite",
     "split_required",
-    "compound",
-    "non_atomic",
-    "split_pending",
 ]
+
+# legacy value (older artifacts / ClaimQualification vocabulary) → canonical.
+ATOMICITY_ALIASES = {
+    "compound": "composite",
+    "non_atomic": "split_required",
+    "split_pending": "split_required",
+}
+
+# Accepted on read / export validation: canonical + legacy aliases.
+ATOMICITY_VALUES = CANONICAL_ATOMICITY_VALUES + list(ATOMICITY_ALIASES)
+
+
+def normalize_atomicity(value: object) -> str:
+    """Map any accepted atomicity value to the canonical vocabulary (issue #359)."""
+    raw = str(value or "atomic").strip().lower()
+    if raw in CANONICAL_ATOMICITY_VALUES:
+        return raw
+    return ATOMICITY_ALIASES.get(raw, "atomic")
+
 
 REVIEW_STATUSES = [
     "auto_accepted",
     "teacher_review_required",
     "rejected",
 ]
+
+# ClaimQualificationAgent's evidence_adequacy is a qualification-stage
+# intermediate signal; ClaimObjectRecord.support_status is the canonical
+# downstream vocabulary (issue #359). This is the single mapping between the
+# two — do not re-derive it inline.
+EVIDENCE_ADEQUACY_TO_SUPPORT_STATUS = {
+    "sufficient": "source_backed",
+    "weak": "partially_source_backed",
+    "broken": "review_required",
+}
+
+
+def derive_support_status(has_evidence: bool, evidence_adequacy: object = None) -> str:
+    """Canonical support_status from qualification-stage evidence signals.
+
+    Without an evidence link the claim is at most ``inferred`` regardless of
+    adequacy. With evidence, adequacy caps the strength: sufficient →
+    source_backed / weak → partially_source_backed / broken → review_required.
+    Missing adequacy keeps the historical default (source_backed).
+    """
+    if not has_evidence:
+        return "inferred"
+    key = str(evidence_adequacy or "").strip().lower()
+    return EVIDENCE_ADEQUACY_TO_SUPPORT_STATUS.get(key, "source_backed")
 
 # Concept assignment status vocabulary (issue #8):
 #   source_backed    — atomic, source-backed claim with concepts from the cartridge
@@ -121,12 +162,19 @@ class ClaimObjectRecord:
     source_span_ids: list[str]
     concepts: list[ClaimConcept]
     equation_ids: list[str] = field(default_factory=list)
+    # Equation links demoted to inferred (#358): the equation does not link
+    # this claim back, so downstream stages must not consume the link as a
+    # confirmed one. The id is kept here, never dropped.
+    inferred_equation_ids: list[str] = field(default_factory=list)
     figure_ids: list[str] = field(default_factory=list)
     table_ids: list[str] = field(default_factory=list)
     support_status: str = "source_backed"
     review_status: str = "teacher_review_required"
     review_note: str = ""
     section_id: str | None = None
+    # Human-readable section title (issue #359) so a claim can be read on its
+    # own ("in the methods" resolves without the DocumentStructure artifact).
+    section_title: str | None = None
     confidence: float = 0.0
     # Normalized single-proposition phrasing (issue #312). Mirrors `text` when no
     # separate normalization is available.
@@ -148,6 +196,10 @@ class ClaimObjectRecord:
     # confirmed source_backed so the graph / course mapping do not treat their
     # concepts as strong backing.
     concept_assignment_status: str = "review_required"
+    # Deterministic content hash for cross-paper matching (issue #362).
+    # "" / 0 on legacy artifacts that predate hashing.
+    content_hash: str = ""
+    content_hash_version: int = 0
 
 
 @dataclass
@@ -196,15 +248,19 @@ class ClaimObjectBuildResult:
                 source_span_ids=list(raw.get("source_span_ids", [])),
                 concepts=concepts,
                 equation_ids=list(raw.get("equation_ids", [])),
+                inferred_equation_ids=list(raw.get("inferred_equation_ids", [])),
                 figure_ids=list(raw.get("figure_ids", [])),
                 table_ids=list(raw.get("table_ids", [])),
                 support_status=raw.get("support_status", "source_backed"),
                 review_status=raw.get("review_status", "teacher_review_required"),
                 review_note=raw.get("review_note", ""),
                 section_id=raw.get("section_id"),
+                section_title=raw.get("section_title"),
                 confidence=float(raw.get("confidence", 0.0)),
                 normalized_text=raw.get("normalized_text", "") or raw.get("text", ""),
-                atomicity=raw.get("atomicity", "atomic"),
+                # Legacy aliases (compound / non_atomic / split_pending) are
+                # converted to canonical values on read (issue #359).
+                atomicity=normalize_atomicity(raw.get("atomicity", "atomic")),
                 is_atomic=bool(raw.get("is_atomic", raw.get("atomicity", "atomic") == "atomic")),
                 qualification_reason=raw.get("qualification_reason"),
                 parent_claim_id=raw.get("parent_claim_id"),
@@ -214,6 +270,8 @@ class ClaimObjectBuildResult:
                 concept_assignment_status=raw.get(
                     "concept_assignment_status", "review_required"
                 ),
+                content_hash=str(raw.get("content_hash", "") or ""),
+                content_hash_version=int(raw.get("content_hash_version", 0) or 0),
             ))
         issues = [ValidationIssue(**i) for i in d.get("validation_issues", [])]
         return cls(

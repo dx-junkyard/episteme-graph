@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 
+from .context_lint import apply_context_lint
 from .llm_client import ClaimQualificationLLMClient
 from .prompt import ClaimQualificationPromptFactory
 from .schema import (
@@ -79,6 +80,10 @@ def _parse_record(raw: dict, llm_input: QualificationLLMInput) -> QualifiedSpanR
         confidence = 0.5
 
     atomic_claims = _normalize_atomic_claims(raw, edit_suggestions, llm_input)
+    # Deterministic context-dependency lint (issue #357): demote accepted
+    # atomic claims whose text still leads with unresolved anaphora, and fill
+    # the structured context_refs list.
+    apply_context_lint(atomic_claims)
 
     return QualifiedSpanRecord(
         span_id=raw.get("span_id", llm_input.span_id),
@@ -148,6 +153,9 @@ def _normalize_atomic_claims(
                 entry.get("qualification_reason", "")
                 or ("legacy split_claims candidate" if legacy else "")
             ),
+            # Structured intra-document references (issue #357); filled by the
+            # context lint after normalization.
+            "context_refs": list(entry.get("context_refs") or []),
             "confidence": max(0.0, min(1.0, conf)),
         })
     return normalized

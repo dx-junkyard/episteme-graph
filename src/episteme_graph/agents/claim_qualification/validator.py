@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 
+from .context_lint import find_unresolved_reference
 from .schema import (
     ATOMIC_CLAIM_ATOMICITY,
     ATOMIC_CLAIM_LEADING_CONNECTORS,
@@ -288,6 +289,23 @@ class ClaimQualificationValidator:
                                 "it cannot be traced back to the source"
                             ),
                             field=path,
+                        ))
+                    # issue #357: an accepted atomic claim must be context-free.
+                    # The parse-time lint demotes these; this is the safety net
+                    # for reloaded artifacts that bypassed the lint.
+                    fragment = find_unresolved_reference(
+                        str(claim.get("normalized_text") or text)
+                    )
+                    if fragment:
+                        issues.append(ValidationIssue(
+                            rule_id="atomic_claim_unresolved_reference",
+                            severity="warning",
+                            message=(
+                                f"{path} starts with unresolved reference "
+                                f"{fragment!r}; it cannot stand alone outside "
+                                "its original context"
+                            ),
+                            field=f"{path}.text",
                         ))
         return issues
 

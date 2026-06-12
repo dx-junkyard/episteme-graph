@@ -49,6 +49,30 @@ class EquationSemanticsValidator:
             issues += self._check_equation_consistency(record)
             issues += self._check_cartridge_terms(record, cartridge)
 
+        issues += self._check_duplicate_content_hashes(result.equations)
+
+        return issues
+
+    @staticmethod
+    def _check_duplicate_content_hashes(records: list) -> list[ValidationIssue]:
+        """Within-document hash collisions are reported, never auto-merged (#362)."""
+        by_hash: dict[str, list[str]] = {}
+        for record in records:
+            hash_value = str(getattr(record, "content_hash", "") or "")
+            if hash_value:
+                by_hash.setdefault(hash_value, []).append(record.equation_id)
+        issues: list[ValidationIssue] = []
+        for hash_value, equation_ids in by_hash.items():
+            if len(equation_ids) > 1:
+                issues.append(ValidationIssue(
+                    rule_id="duplicate_equation_content_hash",
+                    severity="warning",
+                    message=(
+                        f"equations {', '.join(equation_ids)} share content_hash "
+                        f"{hash_value}; review for duplication (not auto-merged)"
+                    ),
+                    field=equation_ids[0],
+                ))
         return issues
 
     # ------------------------------------------------------------------

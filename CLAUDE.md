@@ -112,6 +112,8 @@ PDF ファイル
 [#220] EquationSemanticsAgent   — 数式ブロック意味役割復元（LLM-first）
                                   + to_equations_export() で equations.json 化
     ↓  EquationSemanticsResult (JSON)
+[#355] SymbolRegistryBuilder    — 数式記号の定義・表記ゆれ・スコープの一元管理（非LLM）
+    ↓  SymbolRegistryResult (JSON)
 [#237] DerivationChainAgent     — 式間導出チェーン構築（非LLM）
     ↓  DerivationChainResult (JSON)
 [#237] FigureTableSemanticsAgent — 図表の意味復元（caption-first, LLM enricher 任意）
@@ -137,6 +139,7 @@ src/episteme_graph/agents/
   claim_qualification/     → ClaimQualificationAgent (#219)
   claim_object_builder/    → ClaimObjectBuilder (#237)
   equation_semantics/      → EquationSemanticsAgent (#220)
+  symbol_registry/         → SymbolRegistryBuilder (#355)
   derivation_chain/        → DerivationChainAgent (#237)
   figure_table_semantics/  → FigureTableSemanticsAgent (#237)
   course_mapping/          → CourseMappingAgent (#237)
@@ -144,6 +147,7 @@ src/episteme_graph/agents/
   dsl_linking/          → DSLLinkingAgent (#222)
   component_assembly/   → ComponentAssemblyAgent (#223)
   component_graph/      → ComponentGraphAgent (#266) — TheoryOperationGraph 構築
+  narrative_annotator/  → NarrativeAnnotator (#360) — main graph への narrative 注釈（LLM-first, graph 構造非変更）
 ```
 
 各Agentディレクトリは最低限以下のファイルを持つ:
@@ -196,7 +200,9 @@ split_pending claim（`is_atomic=False`）は ComponentGraph / TheoryOperationGr
   `eliminate_* → eliminates` / `derive_* → derives` / `constrain_* → constrains` /
   `diagnose_* → diagnoses` / `compare_* → compares` のように prefix で edge_type を決める。
   `transform` / `relate` / `connect` / `support` / `associate` など抽象的な operation は
-  generic 扱いとし、`inferred` / `requires_review` にして warning を出す。
+  generic 扱いとし warning を出す。generic step でも input/output 両方の式 backing があれば
+  equation_detail 層に `partially_source_backed` + `review_reasons=["generic_operation"]` で残し、
+  式 backing が無い generic のみ debug 層で `inferred` にする (#361)。
 - **source-backing を必ず明示する**: 各 node は
   `linked_equation_ids` / `linked_derivation_ids` / `linked_claim_ids` / `linked_evidence_ids` と
   `source_backing_status`（`source_backed` / `partially_source_backed` / `inferred` / `review_required`）を持つ。
@@ -215,7 +221,8 @@ split_pending claim（`is_atomic=False`）は ComponentGraph / TheoryOperationGr
   (`graph_layer = "main"`, `component_type = "TheoryOperationNode"`)、式単位の step は
   (`graph_layer = "equation_detail"`, `component_type = "EquationOperationNode"`) に保持する。
   各 detail node は `parent_component_id`、各 main node は `member_component_ids` で相互参照する。
-  generic operation は main node にしない（detail / debug に置き `inferred`）。
+  generic operation は main node にしない（式 backing があれば detail に `partially_source_backed`、
+  無ければ debug に `inferred`。#361）。
 - **main graph は theory stage 単位で集約する (#308)**: 式 step は `(derivation_id, operation family)`
   ではなく **theory stage** で集約する。stage は `schema.stage_for_edge_type()` が operation の
   edge_type family から domain-neutral に導出する（`defines → theory_basis` /

@@ -6,6 +6,7 @@ import logging
 from episteme_graph.agents.claim_qualification.schema import ClaimQualificationResult
 from episteme_graph.agents.equation_semantics.schema import EquationSemanticsResult
 from episteme_graph.agents.thesis_reconstruction.schema import ThesisReconstructionResult
+from episteme_graph.agents.claim_selection import selection_issue_payloads
 from episteme_graph.agents.id_canonicalization import (
     canonicalize_claim_refs,
     claim_aliases_from_accepted_claims,
@@ -16,7 +17,7 @@ from .input_builder import DSLLinkingInputBuilder
 from .llm_client import DSLLinkingLLMClient
 from .prompt import DSLLinkingPromptFactory
 from .repair import DSLLinkingRepairer, _parse_raw, make_deterministic_fallback
-from .schema import DSLLinkingResult
+from .schema import DSLLinkingResult, ValidationIssue
 from .validator import DSLLinkingValidator
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,9 @@ class DSLLinkingAgent:
             raw_output = self._llm_client.generate(messages)
         except Exception as exc:
             logger.error("DSL linking failed: %s", exc)
-            return make_deterministic_fallback(llm_input, str(exc))
+            result = make_deterministic_fallback(llm_input, str(exc))
+            self._record_claim_exclusions(result, llm_input)
+            return result
 
         raw_output = canonicalize_claim_refs(
             raw_output,
@@ -71,4 +74,17 @@ class DSLLinkingAgent:
             )
         else:
             result.validation_issues = issues
+        self._record_claim_exclusions(result, llm_input)
         return result
+
+    @staticmethod
+    def _record_claim_exclusions(result, llm_input) -> None:
+        """Persist limit-dropped claims and surface them as warnings (#356)."""
+        excluded = list(getattr(llm_input, "excluded_from_pipeline_input", []) or [])
+        if not excluded:
+            return
+        result.excluded_from_pipeline_input = excluded
+        result.validation_issues = list(result.validation_issues or []) + [
+            ValidationIssue(**payload)
+            for payload in selection_issue_payloads(excluded, stage="dsl_linking")
+        ]

@@ -915,6 +915,11 @@ class ComponentGraphResponse(BaseModel):
     nodes: list[ComponentGraphNode] = Field(default_factory=list)
     edges: list[ComponentGraphEdge] = Field(default_factory=list)
     validation_results: list[dict] = Field(default_factory=list)
+    # NarrativeAnnotator reading layer (issue #360): {graph_summary,
+    # maturity_source, node_narratives: {component_id: {...}},
+    # edge_narratives: {edge_id: {...}}}. Annotation only — never part of
+    # nodes / edges.
+    narrative: dict = Field(default_factory=dict)
 
 
 class LectureStudioSettings(BaseModel):

@@ -94,6 +94,8 @@ class ComponentAssemblyLLMInput:
     available_dsl_edges: list[dict] = field(default_factory=list)
     available_derivation_ids: list[str] = field(default_factory=list)
     claim_centered_plan: dict = field(default_factory=dict)
+    # Claims dropped by the shared input limit (issue #356).
+    excluded_from_pipeline_input: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -172,6 +174,9 @@ class ComponentRecord:
     supports_claim_ids: list[str] = field(default_factory=list)
     support_distance_to_headline_claim: int = 0
     support_kind: str = ""
+    # Thesis nodes (central_thesis / support:<section>:<idx>) this component
+    # backs, derived deterministically from claim/equation overlap (issue #354).
+    supports_thesis_node_ids: list[str] = field(default_factory=list)
     # Concept tags required for component graph / course mapping (issue #8).
     # Derived deterministically from linked atomic-claim concepts, equation
     # symbols, and cartridge normalized terms.
@@ -226,6 +231,8 @@ class ComponentAssemblyResult:
     # {theory_bundle, course_mapping, blueprint_updates, theory_bundle_validation,
     #  teaching_output_validation}.
     theory_bundle: dict = field(default_factory=dict)
+    # Claims dropped from the LLM input by the shared selection policy (issue #356).
+    excluded_from_pipeline_input: list[dict] = field(default_factory=list)
     diagnostics: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -290,6 +297,7 @@ class ComponentAssemblyResult:
                 supports_claim_ids=list(c.get("supports_claim_ids") or []),
                 support_distance_to_headline_claim=int(c.get("support_distance_to_headline_claim", 0) or 0),
                 support_kind=c.get("support_kind", ""),
+                supports_thesis_node_ids=list(c.get("supports_thesis_node_ids") or []),
                 concepts=list(c.get("concepts") or []),
                 prerequisite_concepts=list(c.get("prerequisite_concepts") or []),
                 introduced_concepts=list(c.get("introduced_concepts") or []),
@@ -315,6 +323,7 @@ class ComponentAssemblyResult:
             component_refinement=d.get("component_refinement") or {},
             derivation_graph_alignment=d.get("derivation_graph_alignment") or {},
             theory_bundle=d.get("theory_bundle") or {},
+            excluded_from_pipeline_input=d.get("excluded_from_pipeline_input") or [],
             diagnostics=d.get("diagnostics") or {},
         )
 

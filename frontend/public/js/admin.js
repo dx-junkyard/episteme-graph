@@ -244,6 +244,7 @@
       stages: [
         ["evidence_registry", "EvidenceRegistryBuilder"],
         ["claim_object_builder", "ClaimObjectBuilder"],
+        ["symbol_registry", "SymbolRegistryBuilder"],
         ["derivation_chain", "DerivationChainAgent"],
         ["figure_table_semantics", "FigureTableSemanticsAgent"],
       ],
@@ -255,6 +256,7 @@
         ["dsl_linking", "DSLLinkingAgent"],
         ["component_assembly", "ComponentAssemblyAgent"],
         ["component_graph", "ComponentGraphAgent"],
+        ["narrative_annotator", "NarrativeAnnotator"],
       ],
     },
     {
@@ -5289,6 +5291,7 @@
 
     var view = lsGraphForCurrentLayer(graph);
     var html =
+      lsGraphNarrativeSummaryHtml(graph) +
       '<div class="ls-component-graph-shell">' +
         '<div class="ls-component-graph-main">' +
           lsGraphLayerToolbarHtml(nodes) +
@@ -5319,6 +5322,19 @@
     }
 
     lsInitComponentGraphNetwork(view);
+  }
+
+  // Issue #360: NarrativeAnnotator の graph_summary をグラフ上部に表示する。
+  // 注釈は LLM 提案 (provisional) なのでラベルで明示する。
+  function lsGraphNarrativeSummaryHtml(graph) {
+    var narrative = (graph && graph.narrative) || {};
+    var summary = String(narrative.graph_summary || "").trim();
+    if (!summary) return "";
+    return '<div class="ls-graph-narrative-summary">' +
+      '<div class="ls-graph-narrative-title">この論文のグラフの読み方' +
+      '<span class="ls-graph-narrative-badge">AI提案</span></div>' +
+      '<p>' + escHtml(summary) + '</p>' +
+    '</div>';
   }
 
   // Issue #306: グラフは main（上位理論構成）と equation_detail（式単位）の
@@ -5551,6 +5567,14 @@
       html += '<div class="ls-graph-detail-section"><b>このノードの意味</b><p>' + escHtml(node.description) + '</p></div>';
     }
 
+    // 1a. 論文の議論での役割（NarrativeAnnotator, issue #360。LLM 提案）
+    var graphNarrative = (graph && graph.narrative) || {};
+    var nodeNarrative = (graphNarrative.node_narratives || {})[nodeId];
+    if (nodeNarrative && String(nodeNarrative.narrative_role || "").trim()) {
+      html += '<div class="ls-graph-detail-section"><b>議論での役割 <span class="ls-graph-narrative-badge">AI提案</span></b>' +
+        '<p>' + escHtml(nodeNarrative.narrative_role) + '</p></div>';
+    }
+
     // 1b. 抽出メモ（review_reason — step.reason からの抽出/検証メモ）
     var reviewReason = String(node.review_reason || "").trim();
     if (reviewReason) {
@@ -5604,6 +5628,12 @@
         var reason = String(evidence.reason || "").trim();
         if (reason) {
           html += '<div class="ls-graph-detail-edge-reason">' + escHtml(reason) + '</div>';
+        }
+        // 遷移の説明（NarrativeAnnotator, issue #360。LLM 提案）
+        var edgeNarrative = (graphNarrative.edge_narratives || {})[edge.edge_id];
+        var transition = edgeNarrative ? String(edgeNarrative.transition_text || "").trim() : "";
+        if (transition) {
+          html += '<div class="ls-graph-detail-edge-narrative">' + escHtml(transition) + ' <span class="ls-graph-narrative-badge">AI提案</span></div>';
         }
         html += '</li>';
       });
@@ -6879,12 +6909,14 @@
     equation_semantics: "EquationSemanticsAgent",
     evidence_registry: "EvidenceRegistryBuilder",
     claim_object_builder: "ClaimObjectBuilder",
+    symbol_registry: "SymbolRegistryBuilder",
     derivation_chain: "DerivationChainAgent",
     figure_table_semantics: "FigureTableSemanticsAgent",
     thesis_reconstruction: "ThesisReconstructionAgent",
     dsl_linking: "DSLLinkingAgent",
     component_assembly: "ComponentAssemblyAgent",
     component_graph: "ComponentGraphAgent",
+    narrative_annotator: "NarrativeAnnotator",
     course_mapping: "CourseMappingAgent",
     blueprint: "BlueprintAgent",
     export_validation: "ExportValidationGate",

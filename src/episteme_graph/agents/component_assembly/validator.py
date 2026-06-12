@@ -102,6 +102,7 @@ class ComponentAssemblyValidator:
                 issues += self._check_id_references(component, available)
         issues += self._check_hints(result, component_ids)
         issues += self._check_duplicates(result)
+        issues += self._check_dependency_cycles(result.components)
         if not (0.0 <= result.confidence <= 1.0):
             issues.append(ValidationIssue("confidence_out_of_range", "error", "result confidence out of range", "confidence"))
         # deterministic-fallback component の存在は再 validate でも必ず報告する
@@ -119,6 +120,64 @@ class ComponentAssemblyValidator:
                 "LLM component assembly failed and must be rerun before publish",
                 "components",
             ))
+        return issues
+
+    @staticmethod
+    def _check_dependency_cycles(
+        components: list[ComponentRecord],
+    ) -> list[ValidationIssue]:
+        """Detect requires / depends_on cycles (issue #358, hard error).
+
+        Every downstream consumer (graph layering, course ordering) assumes the
+        component dependency graph is a DAG; a cycle would loop forever or be
+        silently mis-ordered, so it blocks export with the cycle path named.
+        """
+        known = {c.component_id for c in components}
+        adjacency: dict[str, list[str]] = {}
+        for component in components:
+            targets: list[str] = []
+            for dep in component.dependencies or []:
+                if not isinstance(dep, dict):
+                    continue
+                dep_type = normalize_dependency_type(dep.get("dependency_type"))
+                if dep_type not in ("requires", "depends_on"):
+                    continue
+                targets.extend(
+                    str(ref) for ref in dep.get("component_refs") or []
+                    if str(ref) in known
+                )
+            adjacency[component.component_id] = targets
+
+        issues: list[ValidationIssue] = []
+        WHITE, GRAY, BLACK = 0, 1, 2
+        color = {cid: WHITE for cid in adjacency}
+        stack: list[str] = []
+        reported: set[frozenset] = set()
+
+        def visit(cid: str) -> None:
+            color[cid] = GRAY
+            stack.append(cid)
+            for nxt in adjacency.get(cid, []):
+                state = color.get(nxt, WHITE)
+                if state == GRAY:
+                    cycle = stack[stack.index(nxt):] + [nxt]
+                    key = frozenset(cycle)
+                    if key not in reported:
+                        reported.add(key)
+                        issues.append(ValidationIssue(
+                            "component_dependency_cycle",
+                            "error",
+                            "dependency cycle detected: " + " -> ".join(cycle),
+                            f"components[{nxt}].dependencies",
+                        ))
+                elif state == WHITE and nxt in color:
+                    visit(nxt)
+            stack.pop()
+            color[cid] = BLACK
+
+        for cid in adjacency:
+            if color[cid] == WHITE:
+                visit(cid)
         return issues
 
     def _check_component(

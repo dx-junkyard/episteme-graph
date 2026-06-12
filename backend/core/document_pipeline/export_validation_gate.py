@@ -107,6 +107,16 @@ def _empty_theory_bundle_validation() -> dict:
     }
 
 
+def _empty_thesis_coverage() -> dict:
+    return {
+        "thesis_present": False,
+        "coverage_by_section": {},
+        "total_refs": 0,
+        "reachable_refs": 0,
+        "unreachable_refs": [],
+    }
+
+
 def _empty_teaching_output_validation() -> dict:
     return {
         "errors": [],
@@ -138,6 +148,9 @@ class ExportValidationResult:
     theory_bundle_validation: dict = field(default_factory=_empty_theory_bundle_validation)
     # TeachingOutputMapper Step 5 reporting (issue #326).
     teaching_output_validation: dict = field(default_factory=_empty_teaching_output_validation)
+    # Thesis coverage report (issue #354): is the central thesis (and each
+    # support_structure section) actually backed by the exported main graph?
+    thesis_coverage: dict = field(default_factory=_empty_thesis_coverage)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -190,6 +203,18 @@ _HARD_ERROR_STAGES = {
     "dsl_linking",
     "claim_object_builder",
     "evidence_registry",
+    # ComponentGraphValidator errors (dependency cycles, equation-id labels,
+    # fallback nodes marked source_backed, ...) are design-level hard errors
+    # and must stop persist (#358 review fix).
+    "component_graph",
+}
+
+# Rule IDs kept as warnings even when their stage is a hard-error stage.
+# component_graph_failed marks the orchestrator's non-fatal stage fallback
+# (the agent crashed and an empty graph was substituted); escalating it would
+# turn a designed-to-be-non-fatal stage failure into a pipeline abort.
+_SOFT_ERROR_RULE_IDS = {
+    "component_graph_failed",
 }
 
 # Claim types representing the paper's main result / central conclusion (#312).
@@ -458,6 +483,27 @@ class ExportValidationGate:
             component_result, errors, warnings, review_items
         )
 
+        # 7g-0. graph health checks (#358): claim↔equation link symmetry and
+        # equation role conflicts across stages. Warnings only — the demotion
+        # itself (primary link → inferred_*) happens upstream in the pipeline;
+        # the gate keeps both demoted and still-asymmetric links visible.
+        if claim_objects is not None:
+            self._check_claim_equation_link_symmetry(
+                claim_objects, artifacts, warnings
+            )
+        if component_result is not None:
+            self._check_equation_role_conflicts(
+                component_result, artifacts, warnings
+            )
+
+        # 7g. thesis coverage reporting (#354): verify each claim / equation the
+        # reconstructed thesis references is still present in the final claim /
+        # equation sets and is reachable from a main-layer graph node. Coverage
+        # gaps are review items (never hard errors).
+        thesis_coverage = self._check_thesis_coverage(
+            artifacts, component_result, claim_objects, review_items
+        )
+
         # 6. Determine status
         summary = ValidationSummary(
             error_count=len(errors),
@@ -496,6 +542,7 @@ class ExportValidationGate:
             derivation_graph_alignment=derivation_graph_alignment,
             theory_bundle_validation=theory_bundle_validation,
             teaching_output_validation=teaching_output_validation,
+            thesis_coverage=thesis_coverage,
         )
 
     # ------------------------------------------------------------------
@@ -537,7 +584,7 @@ class ExportValidationGate:
                     review_items.append(entry)
                 elif code in _FORCED_ERROR_RULE_IDS:
                     errors.append(entry)
-                elif severity == _SEVERITY_ERROR and (
+                elif severity == _SEVERITY_ERROR and code not in _SOFT_ERROR_RULE_IDS and (
                     stage in _HARD_ERROR_STAGES or code in _HARD_ERROR_RULE_IDS
                 ):
                     errors.append(entry)
@@ -1785,6 +1832,327 @@ class ExportValidationGate:
                     path=f"$.claims[{claim_id}].atomicity",
                     source_stage="export_validation",
                 ))
+
+    def _check_claim_equation_link_symmetry(
+        self,
+        claim_objects,
+        artifacts: dict,
+        warnings: list,
+    ) -> None:
+        """Report one-way claim↔equation links (issue #358).
+
+        ``claim.equation_ids`` and ``equation.linked_claim_ids`` are maintained
+        by different stages and can drift apart. The pipeline demotes one-way
+        links into ``inferred_equation_ids`` / ``inferred_claim_ids`` (see
+        ``annotate_claim_equation_link_asymmetries``); this check reports both
+        already-demoted links and any asymmetry still present in the primary
+        fields (artifacts that never went through the annotation step).
+        """
+        equation_index = self._equation_index_from_artifacts(artifacts)
+        if not equation_index:
+            return
+        claims = list(getattr(claim_objects, "claims", []) or [])
+        claim_to_eq: dict[str, set[str]] = {}
+        for claim in claims:
+            claim_id = str(getattr(claim, "claim_id", "") or "")
+            if claim_id:
+                claim_to_eq[claim_id] = {
+                    str(v) for v in (getattr(claim, "equation_ids", []) or []) if v
+                }
+        eq_to_claim: dict[str, set[str]] = {}
+        for eq_id, eq in equation_index.items():
+            eq_to_claim[eq_id] = {
+                str(v) for v in (eq.get("linked_claim_ids") or []) if v
+            }
+
+        for claim_id, eq_ids in claim_to_eq.items():
+            for eq_id in eq_ids:
+                if eq_id in eq_to_claim and claim_id not in eq_to_claim[eq_id]:
+                    warnings.append(ValidationEntry(
+                        code="CLAIM_EQUATION_LINK_ASYMMETRY",
+                        message=(
+                            f"claim {claim_id!r} links equation {eq_id!r} but the "
+                            "equation does not link the claim back; treat the link "
+                            "as inferred until reviewed"
+                        ),
+                        artifact="claim_object_builder",
+                        path=f"$.claims[{claim_id}].equation_ids",
+                        source_stage="export_validation",
+                    ))
+        for eq_id, claim_ids in eq_to_claim.items():
+            for claim_id in claim_ids:
+                if claim_id in claim_to_eq and eq_id not in claim_to_eq[claim_id]:
+                    warnings.append(ValidationEntry(
+                        code="CLAIM_EQUATION_LINK_ASYMMETRY",
+                        message=(
+                            f"equation {eq_id!r} links claim {claim_id!r} but the "
+                            "claim does not link the equation back; treat the link "
+                            "as inferred until reviewed"
+                        ),
+                        artifact="equation_semantics",
+                        path=f"$.equations[{eq_id}].linked_claim_ids",
+                        source_stage="export_validation",
+                    ))
+
+        # Links already demoted by the annotation step stay visible in the
+        # gate report (#358 review fix).
+        for claim in claims:
+            claim_id = str(getattr(claim, "claim_id", "") or "")
+            for eq_id in getattr(claim, "inferred_equation_ids", []) or []:
+                warnings.append(ValidationEntry(
+                    code="CLAIM_EQUATION_LINK_ASYMMETRY",
+                    message=(
+                        f"claim {claim_id!r} → equation {eq_id!r} link was "
+                        "demoted to inferred (one-way link); review before "
+                        "treating it as a confirmed link"
+                    ),
+                    artifact="claim_object_builder",
+                    path=f"$.claims[{claim_id}].inferred_equation_ids",
+                    source_stage="export_validation",
+                ))
+        for eq_id, eq in equation_index.items():
+            sem = eq.get("semantics") if isinstance(eq.get("semantics"), dict) else {}
+            for claim_id in (
+                eq.get("inferred_claim_ids") or sem.get("inferred_claim_ids") or []
+            ):
+                warnings.append(ValidationEntry(
+                    code="CLAIM_EQUATION_LINK_ASYMMETRY",
+                    message=(
+                        f"equation {eq_id!r} → claim {claim_id!r} link was "
+                        "demoted to inferred (one-way link); review before "
+                        "treating it as a confirmed link"
+                    ),
+                    artifact="equation_semantics",
+                    path=f"$.equations[{eq_id}].inferred_claim_ids",
+                    source_stage="export_validation",
+                ))
+
+    # Equation-semantics types whose equations must not appear in conflicting
+    # component role lists (issue #358). equation_semantics is the source of
+    # truth for an equation's type.
+    _EQUATION_ROLE_CONFLICTS = {
+        "definition": ("output_equation_ids",),
+        "result": ("definition_equation_ids",),
+    }
+
+    def _check_equation_role_conflicts(
+        self,
+        component_result,
+        artifacts: dict,
+        warnings: list,
+    ) -> None:
+        """Report stage-to-stage equation role conflicts (issue #358)."""
+        equation_index = self._equation_index_from_artifacts(artifacts)
+        if not equation_index:
+            return
+        eq_type_by_id = {}
+        for eq_id, eq in equation_index.items():
+            semantics = eq.get("semantics") if isinstance(eq.get("semantics"), dict) else {}
+            eq_type = str(eq.get("role") or semantics.get("equation_type") or "")
+            if eq_type:
+                eq_type_by_id[eq_id] = eq_type
+        for component in getattr(component_result, "components", []) or []:
+            comp_id = getattr(component, "component_id", "?")
+            for eq_type, conflicting_fields in self._EQUATION_ROLE_CONFLICTS.items():
+                for field_name in conflicting_fields:
+                    for eq_id in getattr(component, field_name, []) or []:
+                        if eq_type_by_id.get(str(eq_id)) != eq_type:
+                            continue
+                        warnings.append(ValidationEntry(
+                            code="EQUATION_ROLE_CONFLICT",
+                            message=(
+                                f"component {comp_id!r} classifies equation "
+                                f"{eq_id!r} as {field_name} but "
+                                f"equation_semantics types it as {eq_type!r}"
+                            ),
+                            artifact="component_assembly",
+                            path=f"$.components[{comp_id}].{field_name}",
+                            source_stage="export_validation",
+                        ))
+
+    def _check_thesis_coverage(
+        self,
+        artifacts: dict,
+        component_result,
+        claim_objects,
+        review_items: list,
+    ) -> dict:
+        """Thesis coverage report (issue #354).
+
+        For the central thesis and each support_structure section, verify every
+        referenced claim_id / equation_id (a) still exists in the final claim /
+        equation sets and (b) is reachable from a main-layer graph node (or an
+        assembled component when the component_graph artifact is absent).
+        Unreachable refs are recorded with review_reasons=["thesis_support_unreachable"]
+        and surfaced as review items — never hard errors.
+        """
+        result = _empty_thesis_coverage()
+        thesis = artifacts.get("thesis_reconstruction")
+        if not isinstance(thesis, dict):
+            return result
+        central = thesis.get("central_thesis")
+        if not isinstance(central, dict):
+            return result
+        result["thesis_present"] = True
+
+        final_claim_ids = {
+            str(getattr(c, "claim_id", "") or "")
+            for c in (getattr(claim_objects, "claims", []) or [])
+            if getattr(c, "claim_id", None)
+        }
+        known_equation_ids = set(self._equation_index_from_artifacts(artifacts))
+        backing = self._main_graph_backing_ids(artifacts, component_result)
+        main_claim_ids = backing["claims"]
+        main_equation_ids = backing["equations"]
+        weak_claim_ids = backing["weak_claims"]
+        weak_equation_ids = backing["weak_equations"]
+
+        sections: list[tuple[str, list[dict]]] = [("central_thesis", [central])]
+        support = thesis.get("support_structure")
+        if isinstance(support, dict):
+            for name, entries in support.items():
+                if isinstance(entries, list):
+                    sections.append(
+                        (str(name), [e for e in entries if isinstance(e, dict)])
+                    )
+
+        for section, entries in sections:
+            section_total = 0
+            section_reachable = 0
+            for entry in entries:
+                ref_groups = (
+                    ("claim", entry.get("claim_ids") or [],
+                     final_claim_ids, main_claim_ids, weak_claim_ids),
+                    ("equation", entry.get("equation_ids") or [],
+                     known_equation_ids, main_equation_ids, weak_equation_ids),
+                )
+                for ref_type, refs, known_ids, covered_ids, weak_ids in ref_groups:
+                    for ref in refs:
+                        ref_id = str(ref or "")
+                        if not ref_id:
+                            continue
+                        section_total += 1
+                        if known_ids and ref_id not in known_ids:
+                            reason = f"missing_{ref_type}"
+                        elif ref_id in covered_ids:
+                            section_reachable += 1
+                            continue
+                        elif ref_id in weak_ids:
+                            # Reachable only through inferred / review_required
+                            # main nodes — that is not support (#354 review fix).
+                            reason = "main_node_backing_insufficient"
+                        else:
+                            reason = "not_linked_to_main_graph"
+                        result["unreachable_refs"].append({
+                            "ref_id": ref_id,
+                            "ref_type": ref_type,
+                            "section": section,
+                            "reason": reason,
+                            "review_reasons": ["thesis_support_unreachable"],
+                        })
+                        review_items.append(ValidationEntry(
+                            code="THESIS_SUPPORT_UNREACHABLE",
+                            message=(
+                                f"thesis section {section!r} references {ref_type} "
+                                f"{ref_id!r} which is not reachable from the exported "
+                                f"main graph ({reason})"
+                            ),
+                            artifact="thesis_reconstruction",
+                            path=f"$.support_structure[{section}]"
+                            if section != "central_thesis"
+                            else "$.central_thesis",
+                            source_stage="export_validation",
+                        ))
+            if section_total:
+                result["coverage_by_section"][section] = round(
+                    section_reachable / section_total, 4
+                )
+                result["total_refs"] += section_total
+                result["reachable_refs"] += section_reachable
+        return result
+
+    # Main-node backing statuses that count as thesis support (#354): only a
+    # confirmed source_backed node. partially_source_backed / inferred /
+    # review_required / unknown backing is itself unconfirmed structure, so
+    # coverage through such nodes is reported as insufficient backing.
+    _STRONG_MAIN_NODE_BACKING = {"source_backed"}
+
+    @staticmethod
+    def _main_graph_backing_ids(artifacts: dict, component_result) -> dict:
+        """Claim / equation ids backed by main-layer graph nodes (issue #354).
+
+        A main node covers its own linked ids plus those of the equation_detail
+        members it aggregates. Only ``source_backed`` nodes count as strong
+        support; any other ``source_backing_status`` (partially_source_backed,
+        inferred, review_required, unknown) collects into the ``weak_*`` sets —
+        coverage through them is reported as insufficient backing, not support.
+        When the component_graph artifact is absent the assembled components
+        stand in as reachability targets so the report degrades instead of
+        marking everything unreachable.
+        """
+        result = {
+            "claims": set(), "equations": set(),
+            "weak_claims": set(), "weak_equations": set(),
+        }
+        node_claim_keys = (
+            "linked_claim_ids", "supports_claim_ids", "input_claim_ids",
+            "output_claim_ids", "required_claim_ids",
+        )
+        node_equation_keys = (
+            "linked_equation_ids", "input_equation_ids",
+            "intermediate_equation_ids", "output_equation_ids",
+            "definition_equation_ids", "constraint_equation_ids",
+        )
+
+        graph = artifacts.get("component_graph")
+        nodes = graph.get("nodes") if isinstance(graph, dict) else None
+        if isinstance(nodes, list) and nodes:
+            node_by_id = {
+                str(n.get("component_id") or ""): n
+                for n in nodes if isinstance(n, dict)
+            }
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                if str(node.get("graph_layer") or "main") != "main":
+                    continue
+                backing = str(node.get("source_backing_status") or "")
+                weak = backing not in ExportValidationGate._STRONG_MAIN_NODE_BACKING
+                claim_key = "weak_claims" if weak else "claims"
+                equation_key = "weak_equations" if weak else "equations"
+                members = [node] + [
+                    node_by_id.get(str(m))
+                    for m in node.get("member_component_ids") or []
+                ]
+                for member in members:
+                    if not isinstance(member, dict):
+                        continue
+                    for key in node_claim_keys:
+                        result[claim_key].update(
+                            str(v) for v in member.get(key) or [] if v
+                        )
+                    for key in node_equation_keys:
+                        result[equation_key].update(
+                            str(v) for v in member.get(key) or [] if v
+                        )
+            # An id covered by both a strong and a weak node counts as strong.
+            result["weak_claims"] -= result["claims"]
+            result["weak_equations"] -= result["equations"]
+            return result
+
+        for component in getattr(component_result, "components", []) or []:
+            refs = getattr(component, "evidence_refs", {}) or {}
+            result["claims"].update(
+                str(v) for v in (refs.get("claim_ids") or []) if v
+            )
+            for key in node_claim_keys:
+                result["claims"].update(
+                    str(v) for v in (getattr(component, key, []) or []) if v
+                )
+            result["equations"].update(
+                ExportValidationGate._component_equation_refs(component, refs)
+            )
+        return result
 
     def _check_concepts(
         self,
