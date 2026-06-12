@@ -583,6 +583,7 @@ def run_document_pipeline(
                     qualified=qualified,
                     equations=equations,
                     evidence=evidence,
+                    document_structure=structure,
                 )
             except Exception as exc:
                 logger.exception(
@@ -1409,6 +1410,7 @@ def _build_claim_objects(
     qualified: Any,
     equations: Any,
     evidence: Any,
+    document_structure: Any = None,
 ):
     from episteme_graph.agents.claim_object_builder.builder import ClaimObjectBuilder
 
@@ -1424,6 +1426,7 @@ def _build_claim_objects(
         equation_index=equation_index,
         cartridge_ontology=None,
         equation_semantics_result=equations,
+        document_structure=document_structure,
     )
     spans = list(getattr(qualified, "qualified_spans", []) or [])
     return builder.build(

@@ -217,6 +217,9 @@ def _attach_claim_object_metadata(row: dict, claim: object) -> None:
         "is_atomic": bool(getattr(claim, "is_atomic", True)),
         "split_suggestions": list(getattr(claim, "split_suggestions", []) or []),
         "source_evidence_ids": list(getattr(claim, "source_evidence_ids", []) or []),
+        # Human-readable section title (issue #359) so downstream prompts can
+        # show where the claim came from without the structure artifact.
+        "section_title": getattr(claim, "section_title", None),
     })
     if getattr(claim, "qualification_reason", None):
         row["reason"] = str(getattr(claim, "qualification_reason"))

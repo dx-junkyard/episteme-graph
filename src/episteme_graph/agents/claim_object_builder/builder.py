@@ -29,6 +29,8 @@ from .schema import (
     REVIEW_STATUSES,
     SUPPORT_STATUSES,
     ValidationIssue,
+    derive_support_status,
+    normalize_atomicity,
 )
 
 
@@ -68,6 +70,9 @@ class _BuildCtx:
     review_status: str = "teacher_review_required"
     claim_type: str = "unknown"
     text: str = ""
+    section_title: str | None = None
+    # Canonical support_status from evidence presence + adequacy (issue #359).
+    support_status_base: str = "inferred"
 
 
 class ClaimObjectBuilder:
@@ -95,6 +100,7 @@ class ClaimObjectBuilder:
         concept_resolver: Optional[Callable] = None,
         cartridge_ontology: dict | None = None,
         equation_semantics_result: object | None = None,
+        document_structure: object | None = None,
     ) -> None:
         self._evidence_registry = evidence_registry
         self._equation_index = equation_index or {}
@@ -102,6 +108,13 @@ class ClaimObjectBuilder:
         self._cartridge_ontology = cartridge_ontology or {}
         self._span_to_evidence: dict[str, list[str]] = {}
         self._known_evidence_ids: set[str] = set()
+        # section_id → human-readable title (issue #359).
+        self._section_titles: dict[str, str] = {}
+        for section in getattr(document_structure, "sections", None) or []:
+            sid = getattr(section, "section_id", None)
+            title = getattr(section, "title", None)
+            if sid and title:
+                self._section_titles[str(sid)] = str(title)
         if evidence_registry is not None:
             for r in getattr(evidence_registry, "records", []) or []:
                 eid = getattr(r, "evidence_id", None)
@@ -157,6 +170,10 @@ class ClaimObjectBuilder:
             evidence_ids = self._resolve_evidence_ids(block_id)
             review_note = self._extract_review_note(span)
             review_status = self._derive_review_status(qual)
+            support_status_base = derive_support_status(
+                bool(evidence_ids), qual.get("evidence_adequacy")
+            )
+            section_title = self._section_titles.get(str(section_id or "")) or None
 
             ctx = _BuildCtx(
                 document_id=document_id,
@@ -171,6 +188,8 @@ class ClaimObjectBuilder:
                 review_status=review_status,
                 claim_type=claim_type,
                 text=text,
+                section_title=section_title,
+                support_status_base=support_status_base,
             )
 
             # Atomic rewrite responsibility (issue #317): the LLM atomic rewrite is
@@ -254,7 +273,7 @@ class ClaimObjectBuilder:
 
             # Single, already-atomic claim (non-atomic spans were routed to the
             # LLM-atomic or deterministic-fallback paths above, issue #317).
-            single_support_status = "source_backed" if evidence_ids else "inferred"
+            single_support_status = support_status_base
             record = ClaimObjectRecord(
                 claim_id=claim_id,
                 document_id=document_id,
@@ -270,6 +289,7 @@ class ClaimObjectBuilder:
                 review_status=review_status,
                 review_note=review_note,
                 section_id=section_id,
+                section_title=section_title,
                 confidence=confidence,
                 normalized_text=text,
                 atomicity="atomic",
@@ -366,9 +386,7 @@ class ClaimObjectBuilder:
             text = str(cand.get("text", "")).strip()
             if not text:
                 continue
-            atomicity = str(cand.get("atomicity", "atomic")).strip().lower()
-            if atomicity in {"non_atomic", "split_pending"}:
-                atomicity = "split_required"
+            atomicity = normalize_atomicity(cand.get("atomicity", "atomic"))
             if atomicity not in ("atomic", "split_required"):
                 atomicity = "atomic"
             status = str(cand.get("status", "")).strip().lower()
@@ -471,10 +489,11 @@ class ClaimObjectBuilder:
             equation_ids=parent_eqs,
             figure_ids=[],
             table_ids=[],
-            support_status="source_backed" if ctx.evidence_ids else "inferred",
+            support_status=ctx.support_status_base,
             review_status=ctx.review_status,
             review_note=ctx.review_note,
             section_id=ctx.section_id,
+            section_title=ctx.section_title,
             confidence=ctx.confidence,
             normalized_text=ctx.text,
             atomicity="composite",
@@ -485,7 +504,7 @@ class ClaimObjectBuilder:
             split_suggestions=split_suggestions,
             concept_assignment_status=self._concept_assignment_status(
                 is_atomic=False,
-                support_status="source_backed" if ctx.evidence_ids else "inferred",
+                support_status=ctx.support_status_base,
                 concepts=parent_concepts,
             ),
         ))
@@ -513,7 +532,7 @@ class ClaimObjectBuilder:
         if cand["atomicity"] == "atomic" and cand["status"] == "accepted":
             atomicity = "atomic"
             is_atomic = True
-            support_status = "source_backed" if ctx.evidence_ids else "inferred"
+            support_status = ctx.support_status_base
             qualification_reason = None
         else:
             # The agent flagged this piece as not confidently atomized.
@@ -549,6 +568,7 @@ class ClaimObjectBuilder:
             review_status=ctx.review_status,
             review_note=ctx.review_note,
             section_id=ctx.section_id,
+            section_title=ctx.section_title,
             confidence=ctx.confidence,
             normalized_text=text,
             atomicity=atomicity,
@@ -613,6 +633,7 @@ class ClaimObjectBuilder:
                 review_status=ctx.review_status,
                 review_note=ctx.review_note,
                 section_id=ctx.section_id,
+                section_title=ctx.section_title,
                 confidence=ctx.confidence,
                 normalized_text=part,
                 atomicity="split_required",
@@ -646,6 +667,7 @@ class ClaimObjectBuilder:
             review_status=ctx.review_status,
             review_note=ctx.review_note,
             section_id=ctx.section_id,
+            section_title=ctx.section_title,
             confidence=ctx.confidence,
             normalized_text=ctx.text,
             atomicity="split_required",
