@@ -15,6 +15,7 @@ EVIDENCE_ROLES = [
     "equation_quote",       # 式ブロックの引用
     "figure_caption_quote", # 図キャプションの引用
     "table_caption_quote",  # 表キャプションの引用
+    "sentence_quote",       # block 内の 1 文単位の引用 (issue #363)
 ]
 
 PUBLIC_EXPORT_POLICIES = [
@@ -48,6 +49,8 @@ class EvidenceRecord:
     public_export_policy: str = "location_only"
     review_note: str = ""
     cartridge_id: str | None = None
+    # Sentence-level records point back at their block-level record (issue #363).
+    parent_evidence_id: str | None = None
 
 
 @dataclass
@@ -88,6 +91,7 @@ class EvidenceRegistryResult:
                 public_export_policy=r.get("public_export_policy", "location_only"),
                 review_note=r.get("review_note", ""),
                 cartridge_id=r.get("cartridge_id"),
+                parent_evidence_id=r.get("parent_evidence_id"),
             ))
         issues = [ValidationIssue(**i) for i in d.get("validation_issues", [])]
         return cls(

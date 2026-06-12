@@ -1358,11 +1358,17 @@ def _build_evidence_registry(
         qual = getattr(span, "qualification", {}) or {}
         if isinstance(qual, dict) and qual.get("status") not in (None, "accepted"):
             continue
-        builder.add_for_block(
+        parent_evidence_id = builder.add_for_block(
             block_id,
             evidence_role="source_quote",
             review_note=getattr(span, "reason", "") or "",
         )
+        # Sentence-level records (issue #363) so atomic claims can cite the
+        # exact supporting sentence instead of the whole block.
+        if parent_evidence_id:
+            builder.add_sentences_for_block(
+                block_id, parent_evidence_id=parent_evidence_id
+            )
         seen_block_ids.add(block_id)
 
     # Register evidence for each equation block.

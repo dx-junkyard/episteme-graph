@@ -22,6 +22,7 @@ from typing import Callable, Iterable, Optional
 from episteme_graph.agents.content_normalization import (
     CONTENT_HASH_VERSION,
     claim_content_hash,
+    normalize_text_for_hash,
 )
 
 from .schema import (
@@ -113,6 +114,8 @@ class ClaimObjectBuilder:
         self._cartridge_ontology = cartridge_ontology or {}
         self._span_to_evidence: dict[str, list[str]] = {}
         self._known_evidence_ids: set[str] = set()
+        # block_id → [(normalized sentence text, evidence_id)] (issue #363).
+        self._sentence_evidence_by_block: dict[str, list[tuple[str, str]]] = {}
         # section_id → human-readable title (issue #359).
         self._section_titles: dict[str, str] = {}
         for section in getattr(document_structure, "sections", None) or []:
@@ -126,7 +129,17 @@ class ClaimObjectBuilder:
                 if eid:
                     self._known_evidence_ids.add(eid)
                 bid = getattr(r.source, "block_id", None)
-                if bid:
+                if not bid:
+                    continue
+                if getattr(r, "evidence_role", "") == "sentence_quote":
+                    normalized = normalize_text_for_hash(
+                        getattr(r, "evidence_text", "") or ""
+                    )
+                    if normalized:
+                        self._sentence_evidence_by_block.setdefault(bid, []).append(
+                            (normalized, r.evidence_id)
+                        )
+                else:
                     self._span_to_evidence.setdefault(bid, []).append(r.evidence_id)
 
         # Build proximity index: block_id → [equation_id], section_id → [equation_id]
@@ -442,6 +455,7 @@ class ClaimObjectBuilder:
                 "status": status,
                 "qualification_reason": str(cand.get("qualification_reason", "") or ""),
                 "source_span_id": str(cand.get("source_span_id", "") or ""),
+                "evidence_quote": str(cand.get("evidence_quote", "") or ""),
             })
         if normalized:
             return normalized
@@ -466,6 +480,38 @@ class ClaimObjectBuilder:
                 "source_span_id": "",
             })
         return normalized
+
+    def _refine_evidence_ids(
+        self,
+        block_id: str | None,
+        evidence_quote: str,
+        fallback_ids: list[str],
+        claim_id: str,
+        issues: list[ValidationIssue],
+    ) -> list[str]:
+        """Narrow block-level evidence to the matching sentence (issue #363)."""
+        quote = normalize_text_for_hash(evidence_quote or "")
+        if not quote or not block_id:
+            return list(fallback_ids)
+        sentences = self._sentence_evidence_by_block.get(str(block_id)) or []
+        if not sentences:
+            return list(fallback_ids)
+        for normalized, evidence_id in sentences:
+            if normalized == quote:
+                return [evidence_id]
+        for normalized, evidence_id in sentences:
+            if quote in normalized or normalized in quote:
+                return [evidence_id]
+        issues.append(ValidationIssue(
+            rule_id="evidence_quote_unmatched",
+            severity="warning",
+            message=(
+                f"claim {claim_id} evidence_quote does not match any sentence "
+                f"of block {block_id}; keeping block-level evidence"
+            ),
+            field=claim_id,
+        ))
+        return list(fallback_ids)
 
     @staticmethod
     def _dedup_id(base: str, counter: int, seen: set[str]) -> str:
@@ -566,6 +612,14 @@ class ClaimObjectBuilder:
             text, claim_type, ctx.role_labels, ctx.block_id, ctx.section_id
         )
         source_span_id = cand.get("source_span_id") or ctx.span_id
+        # Sentence-level evidence refinement (issue #363): when the atomic
+        # claim's evidence_quote matches a sentence record, cite that sentence
+        # instead of the whole block. On no match the block-level evidence is
+        # kept and the mismatch is reported — never dropped.
+        evidence_ids = self._refine_evidence_ids(
+            ctx.block_id, cand.get("evidence_quote", ""), ctx.evidence_ids,
+            claim_id, issues,
+        )
 
         if cand["atomicity"] == "atomic" and cand["status"] == "accepted":
             atomicity = "atomic"
@@ -596,7 +650,7 @@ class ClaimObjectBuilder:
             document_id=ctx.document_id,
             claim_type=claim_type,
             text=text,
-            source_evidence_ids=ctx.evidence_ids,
+            source_evidence_ids=evidence_ids,
             source_span_ids=[source_span_id] if source_span_id else [],
             concepts=concepts,
             equation_ids=equation_ids,
@@ -621,7 +675,7 @@ class ClaimObjectBuilder:
             ),
         ))
         self._add_issues_for_record(
-            claim_id, ctx.evidence_ids, concepts, claim_type, equation_ids, issues
+            claim_id, evidence_ids, concepts, claim_type, equation_ids, issues
         )
 
     def _emit_fallback_split(
