@@ -471,6 +471,18 @@ class ExportValidationGate:
             component_result, errors, warnings, review_items
         )
 
+        # 7g-0. graph health checks (#358): claim↔equation link symmetry and
+        # equation role conflicts across stages. Warnings only — the links are
+        # kept, never dropped.
+        if claim_objects is not None:
+            self._check_claim_equation_link_symmetry(
+                claim_objects, artifacts, warnings
+            )
+        if component_result is not None:
+            self._check_equation_role_conflicts(
+                component_result, artifacts, warnings
+            )
+
         # 7g. thesis coverage reporting (#354): verify each claim / equation the
         # reconstructed thesis references is still present in the final claim /
         # equation sets and is reachable from a main-layer graph node. Coverage
@@ -1807,6 +1819,107 @@ class ExportValidationGate:
                     path=f"$.claims[{claim_id}].atomicity",
                     source_stage="export_validation",
                 ))
+
+    def _check_claim_equation_link_symmetry(
+        self,
+        claim_objects,
+        artifacts: dict,
+        warnings: list,
+    ) -> None:
+        """Report one-way claim↔equation links (issue #358).
+
+        ``claim.equation_ids`` and ``equation.linked_claim_ids`` are maintained
+        by different stages and can drift apart. A one-way link is downgraded
+        to review metadata (warning) — the link itself is kept, never dropped.
+        """
+        equation_index = self._equation_index_from_artifacts(artifacts)
+        if not equation_index:
+            return
+        claims = list(getattr(claim_objects, "claims", []) or [])
+        claim_to_eq: dict[str, set[str]] = {}
+        for claim in claims:
+            claim_id = str(getattr(claim, "claim_id", "") or "")
+            if claim_id:
+                claim_to_eq[claim_id] = {
+                    str(v) for v in (getattr(claim, "equation_ids", []) or []) if v
+                }
+        eq_to_claim: dict[str, set[str]] = {}
+        for eq_id, eq in equation_index.items():
+            eq_to_claim[eq_id] = {
+                str(v) for v in (eq.get("linked_claim_ids") or []) if v
+            }
+
+        for claim_id, eq_ids in claim_to_eq.items():
+            for eq_id in eq_ids:
+                if eq_id in eq_to_claim and claim_id not in eq_to_claim[eq_id]:
+                    warnings.append(ValidationEntry(
+                        code="CLAIM_EQUATION_LINK_ASYMMETRY",
+                        message=(
+                            f"claim {claim_id!r} links equation {eq_id!r} but the "
+                            "equation does not link the claim back; treat the link "
+                            "as inferred until reviewed"
+                        ),
+                        artifact="claim_object_builder",
+                        path=f"$.claims[{claim_id}].equation_ids",
+                        source_stage="export_validation",
+                    ))
+        for eq_id, claim_ids in eq_to_claim.items():
+            for claim_id in claim_ids:
+                if claim_id in claim_to_eq and eq_id not in claim_to_eq[claim_id]:
+                    warnings.append(ValidationEntry(
+                        code="CLAIM_EQUATION_LINK_ASYMMETRY",
+                        message=(
+                            f"equation {eq_id!r} links claim {claim_id!r} but the "
+                            "claim does not link the equation back; treat the link "
+                            "as inferred until reviewed"
+                        ),
+                        artifact="equation_semantics",
+                        path=f"$.equations[{eq_id}].linked_claim_ids",
+                        source_stage="export_validation",
+                    ))
+
+    # Equation-semantics types whose equations must not appear in conflicting
+    # component role lists (issue #358). equation_semantics is the source of
+    # truth for an equation's type.
+    _EQUATION_ROLE_CONFLICTS = {
+        "definition": ("output_equation_ids",),
+        "result": ("definition_equation_ids",),
+    }
+
+    def _check_equation_role_conflicts(
+        self,
+        component_result,
+        artifacts: dict,
+        warnings: list,
+    ) -> None:
+        """Report stage-to-stage equation role conflicts (issue #358)."""
+        equation_index = self._equation_index_from_artifacts(artifacts)
+        if not equation_index:
+            return
+        eq_type_by_id = {}
+        for eq_id, eq in equation_index.items():
+            semantics = eq.get("semantics") if isinstance(eq.get("semantics"), dict) else {}
+            eq_type = str(eq.get("role") or semantics.get("equation_type") or "")
+            if eq_type:
+                eq_type_by_id[eq_id] = eq_type
+        for component in getattr(component_result, "components", []) or []:
+            comp_id = getattr(component, "component_id", "?")
+            for eq_type, conflicting_fields in self._EQUATION_ROLE_CONFLICTS.items():
+                for field_name in conflicting_fields:
+                    for eq_id in getattr(component, field_name, []) or []:
+                        if eq_type_by_id.get(str(eq_id)) != eq_type:
+                            continue
+                        warnings.append(ValidationEntry(
+                            code="EQUATION_ROLE_CONFLICT",
+                            message=(
+                                f"component {comp_id!r} classifies equation "
+                                f"{eq_id!r} as {field_name} but "
+                                f"equation_semantics types it as {eq_type!r}"
+                            ),
+                            artifact="component_assembly",
+                            path=f"$.components[{comp_id}].{field_name}",
+                            source_stage="export_validation",
+                        ))
 
     def _check_thesis_coverage(
         self,
