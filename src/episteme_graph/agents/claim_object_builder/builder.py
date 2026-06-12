@@ -19,6 +19,11 @@ import re
 from dataclasses import dataclass, field as _dc_field
 from typing import Callable, Iterable, Optional
 
+from episteme_graph.agents.content_normalization import (
+    CONTENT_HASH_VERSION,
+    claim_content_hash,
+)
+
 from .schema import (
     CLAIM_TYPE_ONTOLOGY,
     ClaimConcept,
@@ -305,6 +310,9 @@ class ClaimObjectBuilder:
             )
             claims.append(record)
 
+        # Deterministic content hashes for cross-paper matching (issue #362).
+        self._apply_content_hashes(claims)
+        self._report_duplicate_content_hashes(claims, issues)
         self._validate_claim_set(claims, issues)
 
         return ClaimObjectBuildResult(
@@ -313,6 +321,36 @@ class ClaimObjectBuilder:
             claims=claims,
             validation_issues=issues,
         )
+
+    @staticmethod
+    def _apply_content_hashes(claims: list[ClaimObjectRecord]) -> None:
+        for claim in claims:
+            claim.content_hash = claim_content_hash(
+                claim.normalized_text or claim.text
+            )
+            claim.content_hash_version = CONTENT_HASH_VERSION
+
+    @staticmethod
+    def _report_duplicate_content_hashes(
+        claims: list[ClaimObjectRecord],
+        issues: list[ValidationIssue],
+    ) -> None:
+        """Within-document hash collisions are reported, never auto-merged (#362)."""
+        by_hash: dict[str, list[str]] = {}
+        for claim in claims:
+            if claim.content_hash:
+                by_hash.setdefault(claim.content_hash, []).append(claim.claim_id)
+        for hash_value, claim_ids in by_hash.items():
+            if len(claim_ids) > 1:
+                issues.append(ValidationIssue(
+                    rule_id="duplicate_claim_content_hash",
+                    severity="warning",
+                    message=(
+                        f"claims {', '.join(claim_ids)} share content_hash "
+                        f"{hash_value}; review for duplication (not auto-merged)"
+                    ),
+                    field=claim_ids[0],
+                ))
 
     def _add_issues_for_record(
         self,

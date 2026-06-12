@@ -192,6 +192,10 @@ class ClaimObjectRecord:
     # confirmed source_backed so the graph / course mapping do not treat their
     # concepts as strong backing.
     concept_assignment_status: str = "review_required"
+    # Deterministic content hash for cross-paper matching (issue #362).
+    # "" / 0 on legacy artifacts that predate hashing.
+    content_hash: str = ""
+    content_hash_version: int = 0
 
 
 @dataclass
@@ -261,6 +265,8 @@ class ClaimObjectBuildResult:
                 concept_assignment_status=raw.get(
                     "concept_assignment_status", "review_required"
                 ),
+                content_hash=str(raw.get("content_hash", "") or ""),
+                content_hash_version=int(raw.get("content_hash_version", 0) or 0),
             ))
         issues = [ValidationIssue(**i) for i in d.get("validation_issues", [])]
         return cls(

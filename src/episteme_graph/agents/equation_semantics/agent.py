@@ -6,6 +6,10 @@ from __future__ import annotations
 
 import logging
 
+from episteme_graph.agents.content_normalization import (
+    CONTENT_HASH_VERSION,
+    equation_content_hash,
+)
 from episteme_graph.agents.document_structure.schema import DocumentStructureResult
 from episteme_graph.agents.paper_skeleton.schema import PaperSkeletonResult
 from episteme_graph.agents.rhetorical_role.schema import RhetoricalRoleResult
@@ -247,6 +251,7 @@ class EquationSemanticsAgent:
             if progress_callback:
                 progress_callback(idx, total)
 
+        _apply_content_hashes(records)
         result = EquationSemanticsResult(
             document_id=structure.document_id,
             cartridge_id=cartridge.cartridge_id if cartridge else cartridge_id,
@@ -266,6 +271,20 @@ class EquationSemanticsAgent:
                 "Cartridge '%s' not found; proceeding without cartridge", cartridge_id
             )
             return None
+
+
+def _apply_content_hashes(records: list[EquationRecord]) -> None:
+    """Deterministic content hashes for cross-paper matching (issue #362)."""
+    for record in records:
+        src = record.source_extraction
+        latex = src.latex
+        plain = src.plain_text
+        if not (latex or plain):
+            rec = record.reconstruction
+            latex = rec.latex
+            plain = rec.plain_text
+        record.content_hash = equation_content_hash(latex, plain)
+        record.content_hash_version = CONTENT_HASH_VERSION
 
 
 def _attach_source_image(record: EquationRecord, image: object | None) -> None:

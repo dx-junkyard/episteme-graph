@@ -473,6 +473,10 @@ class EquationRecord:
         review_required=False,
         review_reason=["equation_consistency_not_computed"],
     ))
+    # Deterministic content hash for cross-paper matching (issue #362).
+    # "" / 0 on legacy artifacts that predate hashing.
+    content_hash: str = ""
+    content_hash_version: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -753,6 +757,8 @@ def _record_from_dict(d: dict) -> EquationRecord:
         semantics=semantics,
         confidence_policy=confidence_policy,
         equation_consistency=equation_consistency,
+        content_hash=str(d.get("content_hash", "") or ""),
+        content_hash_version=int(d.get("content_hash_version", 0) or 0),
     )
 
 
