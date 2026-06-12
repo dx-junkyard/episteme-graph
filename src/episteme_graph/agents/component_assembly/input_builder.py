@@ -6,6 +6,7 @@ from episteme_graph.agents.dsl_linking.schema import DSLLinkingResult
 from episteme_graph.agents.equation_semantics.schema import EquationSemanticsResult
 from episteme_graph.agents.thesis_reconstruction.schema import ThesisReconstructionResult
 from episteme_graph.agents.claim_selection import (
+    headline_text_for_selection,
     select_claim_rows,
     thesis_claim_id_set,
 )
@@ -176,6 +177,7 @@ class ComponentAssemblyInputBuilder:
             limit,
             stage="component_assembly",
             thesis_claim_ids=thesis_claim_id_set(thesis),
+            headline_text=headline_text_for_selection(thesis=thesis),
         )
 
     @staticmethod

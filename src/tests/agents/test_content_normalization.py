@@ -44,6 +44,19 @@ def test_case_folding_for_claim_text():
     )
 
 
+def test_math_symbols_in_claims_keep_case():
+    """記号・数式部分は小文字化しない (issue #362)。"""
+    assert claim_content_hash("The ratio R_D is measured.") != claim_content_hash(
+        "The ratio r_d is measured."
+    )
+    assert claim_content_hash("The coupling B vanishes.") != claim_content_hash(
+        "The coupling b vanishes."
+    )
+    assert claim_content_hash("DHOST theories survive.") != claim_content_hash(
+        "dhost theories survive."
+    )
+
+
 def test_different_claims_have_different_hashes():
     assert claim_content_hash("The rate vanishes.") != claim_content_hash(
         "The rate diverges."

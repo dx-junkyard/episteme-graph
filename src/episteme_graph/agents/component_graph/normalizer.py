@@ -86,6 +86,7 @@ class ComponentGraphNormalizer:
             derivations, claim_index, components
         )
         theory_nodes = main_nodes + detail_nodes
+        _annotate_layer_linkage_gaps(theory_nodes)
         if len(theory_nodes) >= _MIN_THEORY_NODES:
             return replace(
                 result,
@@ -579,6 +580,39 @@ def _fallback_sequential_edges(groups: list[dict]) -> list[ComponentGraphEdge]:
             review_reasons=["edge_not_source_backed"],
         ))
     return edges
+
+
+def _annotate_layer_linkage_gaps(nodes: list) -> None:
+    """Record layer-linkage gaps on the nodes themselves (issue #358).
+
+    A detail node without a main parent, or a main TheoryOperationNode without
+    members, breaks the two-layer invariant (#306); the gap is written into the
+    node's ``review_reasons`` so reviewers see it on the node, not only in the
+    validator report.
+    """
+    main_ids = {
+        n.component_id for n in nodes
+        if str(getattr(n, "graph_layer", "main") or "main") == "main"
+    }
+    if not main_ids:
+        return
+    for node in nodes:
+        layer = str(getattr(node, "graph_layer", "main") or "main")
+        if layer == "equation_detail":
+            parent = str(getattr(node, "parent_component_id", "") or "")
+            if (not parent or parent not in main_ids) and \
+                    "orphan_detail_node" not in node.review_reasons:
+                node.review_reasons = _ordered_unique(
+                    list(node.review_reasons) + ["orphan_detail_node"]
+                )
+        elif layer == "main" and str(
+            getattr(node, "component_type", "") or ""
+        ) == THEORY_OPERATION_NODE:
+            if not list(getattr(node, "member_component_ids", []) or []) and \
+                    "empty_main_node" not in node.review_reasons:
+                node.review_reasons = _ordered_unique(
+                    list(node.review_reasons) + ["empty_main_node"]
+                )
 
 
 def _attach_kept_generic_parents(

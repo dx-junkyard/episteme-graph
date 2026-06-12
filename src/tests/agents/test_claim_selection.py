@@ -134,3 +134,32 @@ def test_thesis_claim_id_set_collects_all_sections():
 
 def test_thesis_claim_id_set_handles_none():
     assert thesis_claim_id_set(None) == set()
+
+
+def test_headline_relevance_breaks_ties_within_tier():
+    """同 tier 内では headline claim との関連が confidence より優先される (#356)。"""
+    rows = [
+        _row("unrelated", tier="background", confidence=0.9),
+        _row("related", tier="background", confidence=0.2),
+    ]
+    rows[0]["text"] = "An unrelated statement about the apparatus calibration."
+    rows[1]["text"] = "The sum rule relates the three decay ratios."
+    selection = select_claim_rows(
+        rows, 1, stage="thesis_reconstruction",
+        headline_text="A sum rule relates the decay ratios.",
+    )
+    assert selection.selected[0]["claim_id"] == "related"
+
+
+def test_headline_text_helper_prefers_skeleton_then_thesis():
+    from episteme_graph.agents.claim_selection import headline_text_for_selection
+
+    class _Skeleton:
+        headline_claim = {"text": "headline from skeleton"}
+
+    class _ThesisObj:
+        central_thesis = {"text": "central from thesis"}
+
+    assert headline_text_for_selection(skeleton=_Skeleton()) == "headline from skeleton"
+    assert headline_text_for_selection(thesis=_ThesisObj()) == "central from thesis"
+    assert headline_text_for_selection() == ""

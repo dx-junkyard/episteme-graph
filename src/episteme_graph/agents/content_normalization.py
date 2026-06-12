@@ -22,14 +22,28 @@ CONTENT_HASH_VERSION = 1
 
 _TRAILING_PUNCTUATION = ".,;:。、"
 
+# A token is lowercased only when it looks like prose: an alphabetic word of
+# length >= 2 whose only capital (if any) is the first letter, optionally with
+# trailing punctuation. Math-like tokens (R_D, DHOST, \beta, b_1, single
+# capitals) keep their case — b and B are different symbols (issue #362).
+_PROSE_TOKEN = re.compile(r"([A-Za-z][a-z]+)([.,;:!?)\]\"']*)$")
+
+
+def _casefold_prose_tokens(value: str) -> str:
+    tokens = []
+    for token in value.split(" "):
+        match = _PROSE_TOKEN.fullmatch(token)
+        tokens.append(match.group(1).lower() + match.group(2) if match else token)
+    return " ".join(tokens)
+
 
 def normalize_text_for_hash(text: str) -> str:
     """Canonical claim-text form: NFKC, collapsed whitespace, no trailing
-    punctuation, case-folded prose (math symbols keep their case via NFKC)."""
+    punctuation, prose words case-folded while math-like tokens keep case."""
     value = unicodedata.normalize("NFKC", str(text or ""))
     value = re.sub(r"\s+", " ", value).strip()
     value = value.rstrip(_TRAILING_PUNCTUATION).strip()
-    return value.lower()
+    return _casefold_prose_tokens(value)
 
 
 def normalize_equation_for_hash(latex: str | None, plain_text: str | None = None) -> str:

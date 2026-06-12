@@ -552,6 +552,7 @@ def run_document_pipeline(
                     structure=structure,
                     qualified=qualified,
                     equations=equations,
+                    roles=roles,
                 )
             except Exception as exc:
                 logger.exception(
@@ -617,6 +618,30 @@ def run_document_pipeline(
         except Exception:
             logger.warning(
                 "equation claim-link canonicalization failed (non-fatal): document=%s",
+                document_id, exc_info=True,
+            )
+
+        # ── Stage 8c.1b: claim↔equation link symmetry (issue #358) ─────────
+        # One-way links are kept but explicitly demoted to review metadata on
+        # both artifacts (equation review flag / claim review note).
+        try:
+            from episteme_graph.agents.id_canonicalization import (
+                annotate_claim_equation_link_asymmetries,
+            )
+
+            asymmetries = annotate_claim_equation_link_asymmetries(
+                claim_objects, equations
+            )
+            if asymmetries:
+                save_artifact("claim_object_builder", claim_objects)
+                save_artifact("equation_semantics", equations)
+                logger.info(
+                    "Annotated %d one-way claim↔equation link(s) for document %s",
+                    asymmetries, document_id,
+                )
+        except Exception:
+            logger.warning(
+                "claim-equation link symmetry annotation failed (non-fatal): document=%s",
                 document_id, exc_info=True,
             )
 
@@ -1342,6 +1367,7 @@ def _build_evidence_registry(
     structure: Any,
     qualified: Any,
     equations: Any,
+    roles: Any = None,
 ):
     from episteme_graph.agents.evidence_registry.builder import EvidenceRegistryBuilder
 
@@ -1394,7 +1420,13 @@ def _build_evidence_registry(
             builder.add_for_block(block_id, evidence_role="table_caption_quote")
             seen_block_ids.add(block_id)
 
-    return builder.build(document_id=document_id, cartridge_id=cartridge_id)
+    registry = builder.build(document_id=document_id, cartridge_id=cartridge_id)
+    # RhetoricalRole span offsets vs evidence spans (issue #363).
+    if roles is not None:
+        from episteme_graph.agents.evidence_registry.builder import check_span_alignment
+
+        check_span_alignment(roles, registry)
+    return registry
 
 
 def _empty_evidence_registry(document_id: str, cartridge_id: str | None):

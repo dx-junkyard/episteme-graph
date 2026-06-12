@@ -217,6 +217,54 @@ def test_existing_claim_not_linked_to_main_graph_is_unreachable():
     )
 
 
+def test_weak_main_node_backing_is_not_counted_as_support():
+    """inferred / review_required main node 経由の到達は support にしない (#354)。"""
+    graph = _graph_artifact()
+    graph["nodes"][0]["source_backing_status"] = "inferred"
+    artifacts = _make_artifacts(
+        thesis_reconstruction=_thesis_artifact(),
+        component_graph=graph,
+    )
+    result = _run_gate(
+        artifacts,
+        claim_objects=_ClaimObjectResult([_ClaimObject("claim_main")]),
+    )
+    coverage = result.thesis_coverage
+    assert coverage["coverage_by_section"]["central_thesis"] == 0.0
+    assert all(
+        u["reason"] == "main_node_backing_insufficient"
+        for u in coverage["unreachable_refs"]
+    )
+    assert any(
+        r.code == "THESIS_SUPPORT_UNREACHABLE" for r in result.review_items
+    )
+
+
+def test_strong_node_coverage_wins_over_weak_node():
+    """同じ ref を strong / weak 両方の node が持つ場合は strong 扱い。"""
+    graph = _graph_artifact()
+    weak_node = {
+        "component_id": "main_weak",
+        "label": "Observation model",
+        "component_type": "TheoryOperationNode",
+        "graph_layer": "main",
+        "source_backing_status": "inferred",
+        "linked_claim_ids": ["claim_main"],
+        "linked_equation_ids": ["eq_final"],
+        "member_component_ids": [],
+    }
+    graph["nodes"].append(weak_node)
+    artifacts = _make_artifacts(
+        thesis_reconstruction=_thesis_artifact(),
+        component_graph=graph,
+    )
+    result = _run_gate(
+        artifacts,
+        claim_objects=_ClaimObjectResult([_ClaimObject("claim_main")]),
+    )
+    assert result.thesis_coverage["coverage_by_section"]["central_thesis"] == 1.0
+
+
 def test_support_section_coverage_is_reported_per_section():
     artifacts = _make_artifacts(
         thesis_reconstruction=_thesis_artifact(

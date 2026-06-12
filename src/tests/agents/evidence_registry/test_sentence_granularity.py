@@ -88,11 +88,19 @@ def test_sentence_records_inherit_export_policy():
             assert record.public_export_policy == "snippet_allowed"
 
 
-def test_single_sentence_block_adds_no_sentence_records():
+def test_single_sentence_block_still_gets_a_sentence_record():
+    """単一文 block でも sentence_quote を生成する（#363 レビュー対応）。"""
     structure = _structure(text="Only one sentence here.")
     builder = EvidenceRegistryBuilder(structure)
     parent_id = builder.add_for_block("blk_1")
-    assert builder.add_sentences_for_block("blk_1", parent_evidence_id=parent_id) == []
+    sentence_ids = builder.add_sentences_for_block(
+        "blk_1", parent_evidence_id=parent_id
+    )
+    assert len(sentence_ids) == 1
+    registry = builder.build("doc_test")
+    record = registry.index_by_id()[sentence_ids[0]]
+    assert record.evidence_role == "sentence_quote"
+    assert record.parent_evidence_id == parent_id
 
 
 def test_sentence_records_round_trip_via_dict():
@@ -194,3 +202,36 @@ def test_empty_quote_keeps_block_evidence_silently():
     assert not any(
         i.rule_id == "evidence_quote_unmatched" for i in result.validation_issues
     )
+
+
+def test_span_alignment_mismatch_is_warned():
+    """RhetoricalRole span が evidence span の外にはみ出すと warning (#363)。"""
+    from episteme_graph.agents.evidence_registry.builder import check_span_alignment
+    from episteme_graph.agents.rhetorical_role.schema import (
+        BlockRoleAnnotation,
+        RhetoricalRoleResult,
+        SpanAnnotation,
+    )
+
+    registry, _ = _registry_with_sentences()
+    bad_span = SpanAnnotation(
+        span_id="s_bad", text="x", char_start=0, char_end=99999,
+        role_labels=["result"], is_claim_candidate=True,
+        is_reject_candidate=False, confidence=0.9, reason="r",
+    )
+    ok_span = SpanAnnotation(
+        span_id="s_ok", text="x", char_start=0, char_end=10,
+        role_labels=["result"], is_claim_candidate=True,
+        is_reject_candidate=False, confidence=0.9, reason="r",
+    )
+    roles = RhetoricalRoleResult(
+        document_id="doc_test", cartridge_id=None,
+        role_annotations=[BlockRoleAnnotation("blk_1", "sec_1", "result",
+                                              [bad_span, ok_span])],
+        summary_stats={},
+    )
+    issues = check_span_alignment(roles, registry)
+    assert len(issues) == 1
+    assert issues[0].rule_id == "evidence_span_alignment_mismatch"
+    assert "s_bad" in issues[0].message
+    assert issues[0] in registry.validation_issues

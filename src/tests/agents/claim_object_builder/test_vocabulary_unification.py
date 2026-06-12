@@ -199,3 +199,24 @@ def test_section_title_propagates_to_component_rows():
     row: dict = {"text": "", "claim_type_candidate": "unknown"}
     attach_component_metadata(row, _Claim())
     assert row["section_title"] == "Methods"
+
+
+def test_section_title_propagates_to_thesis_rows():
+    """thesis_reconstruction の入力行にも section_title が付く（#359 レビュー対応）。"""
+    from episteme_graph.agents.thesis_reconstruction.input_builder import (
+        ThesisReconstructionInputBuilder,
+    )
+
+    class _ClaimObj:
+        claim_id = "claim:blk_1:s1"
+        section_title = "Methods"
+
+    class _ClaimObjects:
+        claims = [_ClaimObj()]
+
+    selection = ThesisReconstructionInputBuilder._accepted_claims(
+        type("_Q", (), {"qualified_spans": [_span("s1", "blk_1", "Take the limit.")]})(),
+        10,
+        claim_objects=_ClaimObjects(),
+    )
+    assert selection.selected[0]["section_title"] == "Methods"

@@ -37,6 +37,7 @@ def enrich_component_assembly(
     for component in result.components:
         _normalize_component_lists(component)
         _fill_equation_roles(component, eq_index, review_required)
+        _flag_equation_role_conflicts(component, eq_index)
         _fill_equation_confidence_summary(component, eq_index, review_required)
         _fill_confidence_gate(component, eq_index)
         _fill_claim_support_metadata(component, llm_input)
@@ -110,6 +111,44 @@ def _fill_equation_roles(
             component.output_equation_ids = [linked_eqs[-1]]
         if not component.input_equation_ids:
             component.input_equation_ids = [eq_id for eq_id in linked_eqs if eq_id not in component.output_equation_ids]
+
+
+# equation_semantics の equation_type を正本とし、矛盾する component 側 role を
+# 検出する対応表 (issue #358)。
+_EQUATION_ROLE_CONFLICTS = {
+    "definition": ("output_equation_ids",),
+    "result": ("definition_equation_ids",),
+}
+
+
+def _flag_equation_role_conflicts(
+    component: ComponentRecord,
+    eq_index: dict[str, dict],
+) -> None:
+    """Mark stage-to-stage equation role conflicts on the component (issue #358).
+
+    The conflict is recorded in ``review_notes`` (components carry no
+    review_reasons field) and the component is demoted out of auto_accepted so
+    a teacher confirms the classification. Links are kept, never dropped.
+    """
+    conflicts: list[str] = []
+    for eq_type, conflicting_fields in _EQUATION_ROLE_CONFLICTS.items():
+        for field_name in conflicting_fields:
+            for eq_id in getattr(component, field_name, []) or []:
+                eq = eq_index.get(str(eq_id)) or {}
+                if str(eq.get("role") or "").lower() != eq_type:
+                    continue
+                conflicts.append(
+                    f"equation_role_conflict: {eq_id} listed in {field_name} "
+                    f"but equation_semantics types it as {eq_type}"
+                )
+    if not conflicts:
+        return
+    for note in conflicts:
+        if note not in component.review_notes:
+            component.review_notes.append(note)
+    if component.review_status == "auto_accepted":
+        component.review_status = "teacher_review_required"
 
 
 def _fill_equation_confidence_summary(

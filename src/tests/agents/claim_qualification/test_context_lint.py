@@ -327,3 +327,18 @@ def test_agent_keeps_demotion_when_retry_raises():
         result = agent.run(_structure(), _skeleton(), _roles())
     claim = result.qualified_spans[0].atomic_claims[0]
     assert claim["status"] == "review_required"
+
+
+def test_agent_rejects_retry_that_drops_atomic_claims():
+    """repair が atomic claim を消した場合は採用しない（#357 レビュー対応）。"""
+    agent = ClaimQualificationAgent()
+    bad = _llm_response("This result shows the rate vanishes.")
+    dropped = _llm_response("placeholder")
+    dropped["atomic_claims"] = []  # retry silently drops the claims
+    with patch.object(agent._llm_client, "generate", side_effect=[bad, dropped]):
+        result = agent.run(_structure(), _skeleton(), _roles())
+    claim = result.qualified_spans[0].atomic_claims[0]
+    # 元の降格済み record を保持（情報を落とさない）
+    assert claim["status"] == "review_required"
+    assert "unresolved_reference" in claim["qualification_reason"]
+    assert len(result.qualified_spans[0].atomic_claims) == 1

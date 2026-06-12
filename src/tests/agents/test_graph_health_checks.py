@@ -353,3 +353,108 @@ def test_consistent_equation_roles_produce_no_conflict():
         ]),
     )
     assert not any(w.code == "EQUATION_ROLE_CONFLICT" for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# issue #358 review fixes: 降格・review reason の artifact への付与
+# ---------------------------------------------------------------------------
+
+def test_asymmetry_annotation_demotes_links_on_both_artifacts():
+    from episteme_graph.agents.id_canonicalization import (
+        annotate_claim_equation_link_asymmetries,
+    )
+
+    class _Sem:
+        def __init__(self, linked):
+            self.linked_claim_ids = list(linked)
+            self.review_flags = []
+
+    class _Equation:
+        def __init__(self, equation_id, linked):
+            self.equation_id = equation_id
+            self.semantics = _Sem(linked)
+
+    class _Equations:
+        def __init__(self, equations):
+            self.equations = equations
+
+    class _Claim:
+        def __init__(self, claim_id, equation_ids):
+            self.claim_id = claim_id
+            self.equation_ids = list(equation_ids)
+            self.review_note = ""
+
+    class _Claims:
+        def __init__(self, claims):
+            self.claims = claims
+
+    claim_one_way = _Claim("claim_a", ["eq_1"])      # eq_1 does not link back
+    claim_symmetric = _Claim("claim_b", ["eq_2"])
+    eq_one_way = _Equation("eq_3", ["claim_b"])      # claim_b does not link eq_3
+    equations = _Equations([
+        _Equation("eq_1", []),
+        _Equation("eq_2", ["claim_b"]),
+        eq_one_way,
+    ])
+    count = annotate_claim_equation_link_asymmetries(
+        _Claims([claim_one_way, claim_symmetric]), equations
+    )
+    assert count == 2
+    # claim 側: review_note に明示。リンクは保持
+    assert "one-way" in claim_one_way.review_note
+    assert claim_one_way.equation_ids == ["eq_1"]
+    assert claim_symmetric.review_note == ""
+    # equation 側: review flag に明示。リンクは保持
+    assert "claim_link_asymmetry" in eq_one_way.semantics.review_flags
+    assert eq_one_way.semantics.linked_claim_ids == ["claim_b"]
+
+
+def test_enrichment_flags_equation_role_conflict_on_component():
+    from episteme_graph.agents.component_assembly.enrichment import (
+        enrich_component_assembly,
+    )
+    from episteme_graph.agents.component_assembly.schema import (
+        COMPONENTS_VERSION,
+        ComponentAssemblyLLMInput,
+        ComponentAssemblyResult,
+        ComponentRecord,
+    )
+
+    component = ComponentRecord(
+        "comp_1", "TheoryComponent", "label", "summary",
+        [], [], [], [], [],
+        {"claim_ids": [], "equation_ids": ["eq_def"],
+         "dsl_refs": {"node_ids": [], "edge_ids": []}},
+        "r", 0.8, [],
+        output_equation_ids=["eq_def"],
+        review_status="auto_accepted",
+    )
+    llm_input = ComponentAssemblyLLMInput(
+        document_id="doc", cartridge_id=None, accepted_claims=[],
+        equations=[{"equation_id": "eq_def", "role": "definition"}],
+        thesis_nodes=[], dsl_nodes=[], dsl_edges=[],
+        allowed_component_types=["TheoryComponent"],
+        allowed_dependency_types=["requires"],
+    )
+    enrich_component_assembly(
+        ComponentAssemblyResult("doc", COMPONENTS_VERSION, None, [component], [], [], 0.8),
+        llm_input,
+    )
+    assert any("equation_role_conflict" in note for note in component.review_notes)
+    assert component.review_status == "teacher_review_required"
+    assert "eq_def" in component.output_equation_ids  # link kept
+
+
+def test_normalizer_annotates_orphan_and_empty_main_nodes():
+    from episteme_graph.agents.component_graph.normalizer import (
+        _annotate_layer_linkage_gaps,
+    )
+
+    main = _graph_node("main_1", members=())
+    orphan = _graph_node(
+        "detail_orphan", layer="equation_detail",
+        component_type="EquationOperationNode", parent="",
+    )
+    _annotate_layer_linkage_gaps([main, orphan])
+    assert "empty_main_node" in main.review_reasons
+    assert "orphan_detail_node" in orphan.review_reasons

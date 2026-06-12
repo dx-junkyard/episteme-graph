@@ -6,8 +6,9 @@ own list in document order, so the visible claim set differed per stage and
 claims silently disappeared. This module centralises the ordering policy and
 makes every drop explicit:
 
-- importance order: claim_tier (paper_core first) → confidence (desc) →
-  original document order as the stable tie-break
+- importance order: claim_tier (paper_core first) → relevance to the headline
+  claim (desc) → confidence (desc) → original document order as the stable
+  tie-break
 - claims cut by the limit are returned as ``excluded`` entries
   ({claim_id, span_id, excluded_at_stage, reason, referenced_by_thesis}) so
   agents can persist them on their results instead of dropping silently.
@@ -17,6 +18,7 @@ is decided by importance — so prompts remain stable for the LLM.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 # Lower value = selected first. Unknown tiers rank with background.
@@ -42,21 +44,45 @@ class ClaimSelection:
     excluded: list[dict] = field(default_factory=list)
 
 
+def _relevance_tokens(text: str) -> set[str]:
+    """Lowercased content tokens (length >= 3) for headline-relevance overlap."""
+    return {
+        token
+        for token in re.findall(r"[A-Za-z0-9_]+", str(text or "").lower())
+        if len(token) >= 3
+    }
+
+
+def headline_text_for_selection(*, skeleton=None, thesis=None) -> str:
+    """Headline claim text from the available upstream artifact (issue #356)."""
+    headline = getattr(skeleton, "headline_claim", None)
+    if isinstance(headline, dict) and str(headline.get("text") or "").strip():
+        return str(headline["text"])
+    central = getattr(thesis, "central_thesis", None)
+    if isinstance(central, dict):
+        return str(central.get("text") or "")
+    return ""
+
+
 def select_claim_rows(
     rows: list[dict],
     limit: int,
     *,
     stage: str,
     thesis_claim_ids: set[str] | None = None,
+    headline_text: str | None = None,
 ) -> ClaimSelection:
     """Apply the shared importance-based limit to claim input rows.
 
     ``rows`` are the fully built claim input dicts (must carry ``claim_id``;
-    ``claim_tier`` and ``confidence`` are used for ranking when present).
+    ``claim_tier``, ``confidence``, and token overlap with ``headline_text``
+    are used for ranking when present).
     """
     rows = list(rows or [])
     if limit <= 0 or len(rows) <= limit:
         return ClaimSelection(selected=rows)
+
+    headline_tokens = _relevance_tokens(headline_text or "")
 
     def _priority(index: int) -> tuple:
         row = rows[index]
@@ -65,8 +91,12 @@ def select_claim_rows(
             confidence = float(row.get("confidence") or 0.0)
         except (TypeError, ValueError):
             confidence = 0.0
+        relevance = 0
+        if headline_tokens:
+            relevance = len(headline_tokens & _relevance_tokens(row.get("text")))
         return (
             TIER_PRIORITY.get(tier, _DEFAULT_TIER_PRIORITY),
+            -relevance,
             -confidence,
             index,
         )

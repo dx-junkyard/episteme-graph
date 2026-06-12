@@ -145,6 +145,17 @@ class ClaimQualificationAgent:
         retry_record = _parse_record(retry_raw, llm_input)
         if unresolved_fragments(retry_record.atomic_claims):
             return record, raw_output
+        # Information must never be lost (#357): a retry that silently drops
+        # atomic claims is not a fix — keep the demoted original instead.
+        if len(retry_record.atomic_claims) < len(record.atomic_claims):
+            logger.warning(
+                "Unresolved-reference retry for span_id=%s dropped atomic claims "
+                "(%d -> %d); keeping the demoted original",
+                llm_input.span_id,
+                len(record.atomic_claims),
+                len(retry_record.atomic_claims),
+            )
+            return record, raw_output
         return retry_record, retry_raw
 
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:

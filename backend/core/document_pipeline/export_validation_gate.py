@@ -1952,9 +1952,11 @@ class ExportValidationGate:
             if getattr(c, "claim_id", None)
         }
         known_equation_ids = set(self._equation_index_from_artifacts(artifacts))
-        main_claim_ids, main_equation_ids = self._main_graph_backing_ids(
-            artifacts, component_result
-        )
+        backing = self._main_graph_backing_ids(artifacts, component_result)
+        main_claim_ids = backing["claims"]
+        main_equation_ids = backing["equations"]
+        weak_claim_ids = backing["weak_claims"]
+        weak_equation_ids = backing["weak_equations"]
 
         sections: list[tuple[str, list[dict]]] = [("central_thesis", [central])]
         support = thesis.get("support_structure")
@@ -1971,11 +1973,11 @@ class ExportValidationGate:
             for entry in entries:
                 ref_groups = (
                     ("claim", entry.get("claim_ids") or [],
-                     final_claim_ids, main_claim_ids),
+                     final_claim_ids, main_claim_ids, weak_claim_ids),
                     ("equation", entry.get("equation_ids") or [],
-                     known_equation_ids, main_equation_ids),
+                     known_equation_ids, main_equation_ids, weak_equation_ids),
                 )
-                for ref_type, refs, known_ids, covered_ids in ref_groups:
+                for ref_type, refs, known_ids, covered_ids, weak_ids in ref_groups:
                     for ref in refs:
                         ref_id = str(ref or "")
                         if not ref_id:
@@ -1983,11 +1985,15 @@ class ExportValidationGate:
                         section_total += 1
                         if known_ids and ref_id not in known_ids:
                             reason = f"missing_{ref_type}"
-                        elif ref_id not in covered_ids:
-                            reason = "not_linked_to_main_graph"
-                        else:
+                        elif ref_id in covered_ids:
                             section_reachable += 1
                             continue
+                        elif ref_id in weak_ids:
+                            # Reachable only through inferred / review_required
+                            # main nodes — that is not support (#354 review fix).
+                            reason = "main_node_backing_insufficient"
+                        else:
+                            reason = "not_linked_to_main_graph"
                         result["unreachable_refs"].append({
                             "ref_id": ref_id,
                             "ref_type": ref_type,
@@ -2016,19 +2022,26 @@ class ExportValidationGate:
                 result["reachable_refs"] += section_reachable
         return result
 
+    # Main-node backing statuses that do NOT count as thesis support (#354):
+    # an inferred / review_required node is itself unconfirmed structure.
+    _WEAK_MAIN_NODE_BACKING = {"inferred", "review_required"}
+
     @staticmethod
-    def _main_graph_backing_ids(
-        artifacts: dict, component_result
-    ) -> tuple[set[str], set[str]]:
+    def _main_graph_backing_ids(artifacts: dict, component_result) -> dict:
         """Claim / equation ids backed by main-layer graph nodes (issue #354).
 
         A main node covers its own linked ids plus those of the equation_detail
-        members it aggregates. When the component_graph artifact is absent the
-        assembled components stand in as reachability targets so the report
-        degrades instead of marking everything unreachable.
+        members it aggregates. Nodes whose ``source_backing_status`` is
+        inferred / review_required collect into the ``weak_*`` sets instead —
+        coverage through them is reported as insufficient backing, not support.
+        When the component_graph artifact is absent the assembled components
+        stand in as reachability targets so the report degrades instead of
+        marking everything unreachable.
         """
-        claim_ids: set[str] = set()
-        equation_ids: set[str] = set()
+        result = {
+            "claims": set(), "equations": set(),
+            "weak_claims": set(), "weak_equations": set(),
+        }
         node_claim_keys = (
             "linked_claim_ids", "supports_claim_ids", "input_claim_ids",
             "output_claim_ids", "required_claim_ids",
@@ -2051,6 +2064,10 @@ class ExportValidationGate:
                     continue
                 if str(node.get("graph_layer") or "main") != "main":
                     continue
+                backing = str(node.get("source_backing_status") or "")
+                weak = backing in ExportValidationGate._WEAK_MAIN_NODE_BACKING
+                claim_key = "weak_claims" if weak else "claims"
+                equation_key = "weak_equations" if weak else "equations"
                 members = [node] + [
                     node_by_id.get(str(m))
                     for m in node.get("member_component_ids") or []
@@ -2059,28 +2076,31 @@ class ExportValidationGate:
                     if not isinstance(member, dict):
                         continue
                     for key in node_claim_keys:
-                        claim_ids.update(
+                        result[claim_key].update(
                             str(v) for v in member.get(key) or [] if v
                         )
                     for key in node_equation_keys:
-                        equation_ids.update(
+                        result[equation_key].update(
                             str(v) for v in member.get(key) or [] if v
                         )
-            return claim_ids, equation_ids
+            # An id covered by both a strong and a weak node counts as strong.
+            result["weak_claims"] -= result["claims"]
+            result["weak_equations"] -= result["equations"]
+            return result
 
         for component in getattr(component_result, "components", []) or []:
             refs = getattr(component, "evidence_refs", {}) or {}
-            claim_ids.update(
+            result["claims"].update(
                 str(v) for v in (refs.get("claim_ids") or []) if v
             )
             for key in node_claim_keys:
-                claim_ids.update(
+                result["claims"].update(
                     str(v) for v in (getattr(component, key, []) or []) if v
                 )
-            equation_ids.update(
+            result["equations"].update(
                 ExportValidationGate._component_equation_refs(component, refs)
             )
-        return claim_ids, equation_ids
+        return result
 
     def _check_concepts(
         self,

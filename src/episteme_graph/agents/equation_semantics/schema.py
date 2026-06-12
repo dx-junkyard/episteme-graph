@@ -75,6 +75,8 @@ REVIEW_FLAGS = [
     "needs_reconstruction",
     "reconstruction_only",
     "partial_extraction",
+    # Issue #358: equation links a claim that does not link the equation back.
+    "claim_link_asymmetry",
 ]
 
 CANDIDATE_REVIEW_REASONS = [

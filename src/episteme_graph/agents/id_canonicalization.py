@@ -318,3 +318,65 @@ def _unique(values: list[str]) -> list[str]:
         if value not in result:
             result.append(value)
     return result
+
+
+def annotate_claim_equation_link_asymmetries(claim_objects: Any, equations: Any) -> int:
+    """Explicitly demote one-way claim↔equation links to review metadata (#358).
+
+    ``claim.equation_ids`` and ``equation.semantics.linked_claim_ids`` are
+    maintained by different stages and can drift apart. Neither side carries a
+    per-link status, so the demotion is recorded where each artifact CAN carry
+    it: the equation gains the ``claim_link_asymmetry`` review flag, the claim
+    a review_note line. Links are kept, never dropped. Returns the number of
+    one-way links annotated.
+    """
+    claims = list(getattr(claim_objects, "claims", []) or [])
+    records = list(getattr(equations, "equations", []) or [])
+    claim_by_id = {
+        str(getattr(c, "claim_id", "") or ""): c
+        for c in claims if getattr(c, "claim_id", None)
+    }
+    eq_by_id = {
+        str(getattr(r, "equation_id", "") or ""): r
+        for r in records if getattr(r, "equation_id", None)
+    }
+
+    count = 0
+    for claim in claims:
+        for eq_id in getattr(claim, "equation_ids", []) or []:
+            record = eq_by_id.get(str(eq_id))
+            if record is None:
+                continue
+            linked = [
+                str(v) for v in
+                (getattr(record.semantics, "linked_claim_ids", []) or [])
+            ]
+            if str(getattr(claim, "claim_id", "")) in linked:
+                continue
+            note = (
+                f"equation link {eq_id} is one-way (the equation does not link "
+                "this claim back); treat as inferred until reviewed"
+            )
+            existing = str(getattr(claim, "review_note", "") or "")
+            if note not in existing:
+                claim.review_note = f"{existing}\n{note}".strip() if existing else note
+            count += 1
+
+    for record in records:
+        sem = getattr(record, "semantics", None)
+        if sem is None:
+            continue
+        for claim_id in getattr(sem, "linked_claim_ids", []) or []:
+            claim = claim_by_id.get(str(claim_id))
+            if claim is None:
+                continue
+            if str(getattr(record, "equation_id", "")) in [
+                str(v) for v in (getattr(claim, "equation_ids", []) or [])
+            ]:
+                continue
+            if "claim_link_asymmetry" not in (sem.review_flags or []):
+                sem.review_flags = list(sem.review_flags or []) + [
+                    "claim_link_asymmetry"
+                ]
+            count += 1
+    return count
