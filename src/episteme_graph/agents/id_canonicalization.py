@@ -321,14 +321,16 @@ def _unique(values: list[str]) -> list[str]:
 
 
 def annotate_claim_equation_link_asymmetries(claim_objects: Any, equations: Any) -> int:
-    """Explicitly demote one-way claim↔equation links to review metadata (#358).
+    """Demote one-way claim↔equation links to inferred (#358).
 
     ``claim.equation_ids`` and ``equation.semantics.linked_claim_ids`` are
-    maintained by different stages and can drift apart. Neither side carries a
-    per-link status, so the demotion is recorded where each artifact CAN carry
-    it: the equation gains the ``claim_link_asymmetry`` review flag, the claim
-    a review_note line. Links are kept, never dropped. Returns the number of
-    one-way links annotated.
+    maintained by different stages and can drift apart. A one-way link is
+    moved out of the primary link field into the corresponding ``inferred_*``
+    field (``claim.inferred_equation_ids`` / ``semantics.inferred_claim_ids``)
+    so downstream stages no longer consume it as a confirmed link. The id is
+    kept, never dropped, and the demotion is additionally recorded as review
+    metadata (a review_note line on the claim, the ``claim_link_asymmetry``
+    review flag on the equation). Returns the number of demoted links.
     """
     claims = list(getattr(claim_objects, "claims", []) or [])
     records = list(getattr(equations, "equations", []) or [])
@@ -343,40 +345,65 @@ def annotate_claim_equation_link_asymmetries(claim_objects: Any, equations: Any)
 
     count = 0
     for claim in claims:
+        kept: list[str] = []
         for eq_id in getattr(claim, "equation_ids", []) or []:
             record = eq_by_id.get(str(eq_id))
             if record is None:
+                # Unknown equation id: dangling-ref checks own this case.
+                kept.append(eq_id)
                 continue
             linked = [
                 str(v) for v in
                 (getattr(record.semantics, "linked_claim_ids", []) or [])
             ]
             if str(getattr(claim, "claim_id", "")) in linked:
+                kept.append(eq_id)
                 continue
+            inferred = [
+                str(v) for v in
+                (getattr(claim, "inferred_equation_ids", []) or [])
+            ]
+            if str(eq_id) not in inferred:
+                inferred.append(str(eq_id))
+            claim.inferred_equation_ids = inferred
             note = (
                 f"equation link {eq_id} is one-way (the equation does not link "
-                "this claim back); treat as inferred until reviewed"
+                "this claim back); demoted to inferred_equation_ids until reviewed"
             )
             existing = str(getattr(claim, "review_note", "") or "")
             if note not in existing:
                 claim.review_note = f"{existing}\n{note}".strip() if existing else note
             count += 1
+        if len(kept) != len(getattr(claim, "equation_ids", []) or []):
+            claim.equation_ids = kept
 
     for record in records:
         sem = getattr(record, "semantics", None)
         if sem is None:
             continue
+        kept = []
         for claim_id in getattr(sem, "linked_claim_ids", []) or []:
             claim = claim_by_id.get(str(claim_id))
             if claim is None:
+                # Unknown claim id: unresolved-claim-ref checks own this case.
+                kept.append(claim_id)
                 continue
             if str(getattr(record, "equation_id", "")) in [
                 str(v) for v in (getattr(claim, "equation_ids", []) or [])
             ]:
+                kept.append(claim_id)
                 continue
+            inferred = [
+                str(v) for v in (getattr(sem, "inferred_claim_ids", []) or [])
+            ]
+            if str(claim_id) not in inferred:
+                inferred.append(str(claim_id))
+            sem.inferred_claim_ids = inferred
             if "claim_link_asymmetry" not in (sem.review_flags or []):
                 sem.review_flags = list(sem.review_flags or []) + [
                     "claim_link_asymmetry"
                 ]
             count += 1
+        if len(kept) != len(getattr(sem, "linked_claim_ids", []) or []):
+            sem.linked_claim_ids = kept
     return count

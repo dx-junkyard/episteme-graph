@@ -622,8 +622,9 @@ def run_document_pipeline(
             )
 
         # ── Stage 8c.1b: claim↔equation link symmetry (issue #358) ─────────
-        # One-way links are kept but explicitly demoted to review metadata on
-        # both artifacts (equation review flag / claim review note).
+        # One-way links are demoted to inferred: moved out of the primary link
+        # fields into inferred_equation_ids / inferred_claim_ids (kept, never
+        # dropped) plus review metadata on both artifacts.
         try:
             from episteme_graph.agents.id_canonicalization import (
                 annotate_claim_equation_link_asymmetries,

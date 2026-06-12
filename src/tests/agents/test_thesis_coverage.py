@@ -240,6 +240,28 @@ def test_weak_main_node_backing_is_not_counted_as_support():
     )
 
 
+def test_partially_backed_or_unknown_main_node_is_not_strong_support():
+    """source_backed 以外（partially / 空文字）の main node 経由の到達は
+    support に数えない（#354 レビュー対応）。"""
+    for backing in ("partially_source_backed", ""):
+        graph = _graph_artifact()
+        graph["nodes"][0]["source_backing_status"] = backing
+        artifacts = _make_artifacts(
+            thesis_reconstruction=_thesis_artifact(),
+            component_graph=graph,
+        )
+        result = _run_gate(
+            artifacts,
+            claim_objects=_ClaimObjectResult([_ClaimObject("claim_main")]),
+        )
+        coverage = result.thesis_coverage
+        assert coverage["coverage_by_section"]["central_thesis"] == 0.0, backing
+        assert all(
+            u["reason"] == "main_node_backing_insufficient"
+            for u in coverage["unreachable_refs"]
+        ), backing
+
+
 def test_strong_node_coverage_wins_over_weak_node():
     """同じ ref を strong / weak 両方の node が持つ場合は strong 扱い。"""
     graph = _graph_artifact()

@@ -79,7 +79,9 @@ def test_hash_is_deterministic_and_versioned():
         normalize_text_for_hash("x")
     )
     assert content_hash("") == ""
-    assert isinstance(CONTENT_HASH_VERSION, int) and CONTENT_HASH_VERSION >= 1
+    # v2: prose-token casefolding replaced the v1 full lowercasing — old hashes
+    # are incompatible, so the version must have been bumped (#362 レビュー対応).
+    assert isinstance(CONTENT_HASH_VERSION, int) and CONTENT_HASH_VERSION >= 2
 
 
 def test_normalize_equation_empty_input():

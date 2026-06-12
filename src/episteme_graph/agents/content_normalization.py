@@ -18,7 +18,10 @@ import re
 import unicodedata
 
 # Bump when any normalisation rule below changes.
-CONTENT_HASH_VERSION = 1
+# v1: full-text lowercasing. v2: prose-token casefolding only — math-like
+# tokens (R_D, DHOST, single capitals) keep their case (#362 review fix), so
+# v1 hashes are not comparable and must be recomputed.
+CONTENT_HASH_VERSION = 2
 
 _TRAILING_PUNCTUATION = ".,;:。、"
 

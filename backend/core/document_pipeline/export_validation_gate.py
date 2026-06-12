@@ -203,6 +203,18 @@ _HARD_ERROR_STAGES = {
     "dsl_linking",
     "claim_object_builder",
     "evidence_registry",
+    # ComponentGraphValidator errors (dependency cycles, equation-id labels,
+    # fallback nodes marked source_backed, ...) are design-level hard errors
+    # and must stop persist (#358 review fix).
+    "component_graph",
+}
+
+# Rule IDs kept as warnings even when their stage is a hard-error stage.
+# component_graph_failed marks the orchestrator's non-fatal stage fallback
+# (the agent crashed and an empty graph was substituted); escalating it would
+# turn a designed-to-be-non-fatal stage failure into a pipeline abort.
+_SOFT_ERROR_RULE_IDS = {
+    "component_graph_failed",
 }
 
 # Claim types representing the paper's main result / central conclusion (#312).
@@ -472,8 +484,9 @@ class ExportValidationGate:
         )
 
         # 7g-0. graph health checks (#358): claim↔equation link symmetry and
-        # equation role conflicts across stages. Warnings only — the links are
-        # kept, never dropped.
+        # equation role conflicts across stages. Warnings only — the demotion
+        # itself (primary link → inferred_*) happens upstream in the pipeline;
+        # the gate keeps both demoted and still-asymmetric links visible.
         if claim_objects is not None:
             self._check_claim_equation_link_symmetry(
                 claim_objects, artifacts, warnings
@@ -571,7 +584,7 @@ class ExportValidationGate:
                     review_items.append(entry)
                 elif code in _FORCED_ERROR_RULE_IDS:
                     errors.append(entry)
-                elif severity == _SEVERITY_ERROR and (
+                elif severity == _SEVERITY_ERROR and code not in _SOFT_ERROR_RULE_IDS and (
                     stage in _HARD_ERROR_STAGES or code in _HARD_ERROR_RULE_IDS
                 ):
                     errors.append(entry)
@@ -1829,8 +1842,11 @@ class ExportValidationGate:
         """Report one-way claim↔equation links (issue #358).
 
         ``claim.equation_ids`` and ``equation.linked_claim_ids`` are maintained
-        by different stages and can drift apart. A one-way link is downgraded
-        to review metadata (warning) — the link itself is kept, never dropped.
+        by different stages and can drift apart. The pipeline demotes one-way
+        links into ``inferred_equation_ids`` / ``inferred_claim_ids`` (see
+        ``annotate_claim_equation_link_asymmetries``); this check reports both
+        already-demoted links and any asymmetry still present in the primary
+        fields (artifacts that never went through the annotation step).
         """
         equation_index = self._equation_index_from_artifacts(artifacts)
         if not equation_index:
@@ -1877,6 +1893,39 @@ class ExportValidationGate:
                         path=f"$.equations[{eq_id}].linked_claim_ids",
                         source_stage="export_validation",
                     ))
+
+        # Links already demoted by the annotation step stay visible in the
+        # gate report (#358 review fix).
+        for claim in claims:
+            claim_id = str(getattr(claim, "claim_id", "") or "")
+            for eq_id in getattr(claim, "inferred_equation_ids", []) or []:
+                warnings.append(ValidationEntry(
+                    code="CLAIM_EQUATION_LINK_ASYMMETRY",
+                    message=(
+                        f"claim {claim_id!r} → equation {eq_id!r} link was "
+                        "demoted to inferred (one-way link); review before "
+                        "treating it as a confirmed link"
+                    ),
+                    artifact="claim_object_builder",
+                    path=f"$.claims[{claim_id}].inferred_equation_ids",
+                    source_stage="export_validation",
+                ))
+        for eq_id, eq in equation_index.items():
+            sem = eq.get("semantics") if isinstance(eq.get("semantics"), dict) else {}
+            for claim_id in (
+                eq.get("inferred_claim_ids") or sem.get("inferred_claim_ids") or []
+            ):
+                warnings.append(ValidationEntry(
+                    code="CLAIM_EQUATION_LINK_ASYMMETRY",
+                    message=(
+                        f"equation {eq_id!r} → claim {claim_id!r} link was "
+                        "demoted to inferred (one-way link); review before "
+                        "treating it as a confirmed link"
+                    ),
+                    artifact="equation_semantics",
+                    path=f"$.equations[{eq_id}].inferred_claim_ids",
+                    source_stage="export_validation",
+                ))
 
     # Equation-semantics types whose equations must not appear in conflicting
     # component role lists (issue #358). equation_semantics is the source of
@@ -2022,17 +2071,20 @@ class ExportValidationGate:
                 result["reachable_refs"] += section_reachable
         return result
 
-    # Main-node backing statuses that do NOT count as thesis support (#354):
-    # an inferred / review_required node is itself unconfirmed structure.
-    _WEAK_MAIN_NODE_BACKING = {"inferred", "review_required"}
+    # Main-node backing statuses that count as thesis support (#354): only a
+    # confirmed source_backed node. partially_source_backed / inferred /
+    # review_required / unknown backing is itself unconfirmed structure, so
+    # coverage through such nodes is reported as insufficient backing.
+    _STRONG_MAIN_NODE_BACKING = {"source_backed"}
 
     @staticmethod
     def _main_graph_backing_ids(artifacts: dict, component_result) -> dict:
         """Claim / equation ids backed by main-layer graph nodes (issue #354).
 
         A main node covers its own linked ids plus those of the equation_detail
-        members it aggregates. Nodes whose ``source_backing_status`` is
-        inferred / review_required collect into the ``weak_*`` sets instead —
+        members it aggregates. Only ``source_backed`` nodes count as strong
+        support; any other ``source_backing_status`` (partially_source_backed,
+        inferred, review_required, unknown) collects into the ``weak_*`` sets —
         coverage through them is reported as insufficient backing, not support.
         When the component_graph artifact is absent the assembled components
         stand in as reachability targets so the report degrades instead of
@@ -2065,7 +2117,7 @@ class ExportValidationGate:
                 if str(node.get("graph_layer") or "main") != "main":
                     continue
                 backing = str(node.get("source_backing_status") or "")
-                weak = backing in ExportValidationGate._WEAK_MAIN_NODE_BACKING
+                weak = backing not in ExportValidationGate._STRONG_MAIN_NODE_BACKING
                 claim_key = "weak_claims" if weak else "claims"
                 equation_key = "weak_equations" if weak else "equations"
                 members = [node] + [

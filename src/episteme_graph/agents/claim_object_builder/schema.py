@@ -162,6 +162,10 @@ class ClaimObjectRecord:
     source_span_ids: list[str]
     concepts: list[ClaimConcept]
     equation_ids: list[str] = field(default_factory=list)
+    # Equation links demoted to inferred (#358): the equation does not link
+    # this claim back, so downstream stages must not consume the link as a
+    # confirmed one. The id is kept here, never dropped.
+    inferred_equation_ids: list[str] = field(default_factory=list)
     figure_ids: list[str] = field(default_factory=list)
     table_ids: list[str] = field(default_factory=list)
     support_status: str = "source_backed"
@@ -244,6 +248,7 @@ class ClaimObjectBuildResult:
                 source_span_ids=list(raw.get("source_span_ids", [])),
                 concepts=concepts,
                 equation_ids=list(raw.get("equation_ids", [])),
+                inferred_equation_ids=list(raw.get("inferred_equation_ids", [])),
                 figure_ids=list(raw.get("figure_ids", [])),
                 table_ids=list(raw.get("table_ids", [])),
                 support_status=raw.get("support_status", "source_backed"),

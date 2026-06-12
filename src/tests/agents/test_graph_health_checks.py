@@ -280,6 +280,61 @@ def test_one_way_equation_to_claim_link_is_warned():
     assert asym[0].artifact == "equation_semantics"
 
 
+def test_demoted_inferred_links_stay_visible_in_gate_report():
+    """annotation で降格済みのリンクも gate report に残る（#358 レビュー対応）。"""
+    artifacts = _make_artifacts([
+        {"equation_id": "eq_1", "linked_claim_ids": [],
+         "inferred_claim_ids": ["claim_1"]},
+    ])
+    claim = _ClaimObject("claim_1", [])
+    claim.inferred_equation_ids = ["eq_1"]
+    result = _run_gate(artifacts, claim_objects=_ClaimObjectResult([claim]))
+    asym = [w for w in result.warnings if w.code == "CLAIM_EQUATION_LINK_ASYMMETRY"]
+    assert len(asym) == 2
+    assert {w.artifact for w in asym} == {"claim_object_builder", "equation_semantics"}
+    assert all("demoted to inferred" in w.message for w in asym)
+
+
+def test_component_graph_validator_error_is_hard_error():
+    """component_graph stage の error は persist を止める（#358 レビュー対応）。"""
+    artifacts = _make_artifacts([])
+    artifacts["component_graph"] = {
+        "nodes": [], "edges": [],
+        "validation_issues": [{
+            "rule_id": "component_graph_dependency_cycle",
+            "severity": "error",
+            "message": "dependency edge cycle detected: a -> b -> a",
+            "field": "edges[e2]",
+        }],
+    }
+    result = _run_gate(
+        artifacts, claim_objects=_ClaimObjectResult([_ClaimObject("claim_1")]),
+    )
+    assert any(
+        e.code == "component_graph_dependency_cycle" for e in result.errors
+    )
+    assert result.exportable is False
+
+
+def test_component_graph_stage_fallback_stays_non_fatal():
+    """orchestrator の非fatal設計どおり component_graph_failed は warning 止まり。"""
+    artifacts = _make_artifacts([])
+    artifacts["component_graph"] = {
+        "nodes": [], "edges": [],
+        "validation_issues": [{
+            "rule_id": "component_graph_failed",
+            "severity": "error",
+            "message": "LLM down",
+            "field": "edges",
+        }],
+    }
+    result = _run_gate(
+        artifacts, claim_objects=_ClaimObjectResult([_ClaimObject("claim_1")]),
+    )
+    assert not any(e.code == "component_graph_failed" for e in result.errors)
+    assert any(w.code == "component_graph_failed" for w in result.warnings)
+
+
 def test_symmetric_links_produce_no_warning():
     artifacts = _make_artifacts([
         {"equation_id": "eq_1", "linked_claim_ids": ["claim_1"]},
@@ -400,13 +455,16 @@ def test_asymmetry_annotation_demotes_links_on_both_artifacts():
         _Claims([claim_one_way, claim_symmetric]), equations
     )
     assert count == 2
-    # claim 側: review_note に明示。リンクは保持
+    # claim 側: リンクは inferred_equation_ids に移動（実体としての降格）
     assert "one-way" in claim_one_way.review_note
-    assert claim_one_way.equation_ids == ["eq_1"]
+    assert claim_one_way.equation_ids == []
+    assert claim_one_way.inferred_equation_ids == ["eq_1"]
     assert claim_symmetric.review_note == ""
-    # equation 側: review flag に明示。リンクは保持
+    assert claim_symmetric.equation_ids == ["eq_2"]
+    # equation 側: リンクは inferred_claim_ids に移動 + review flag
     assert "claim_link_asymmetry" in eq_one_way.semantics.review_flags
-    assert eq_one_way.semantics.linked_claim_ids == ["claim_b"]
+    assert eq_one_way.semantics.linked_claim_ids == []
+    assert eq_one_way.semantics.inferred_claim_ids == ["claim_b"]
 
 
 def test_enrichment_flags_equation_role_conflict_on_component():

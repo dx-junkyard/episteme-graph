@@ -366,6 +366,10 @@ class EquationSemantics:
     linked_claim_ids: list[str]
     summary: str
     review_flags: list[str]
+    # Claim links demoted to inferred (#358): the claim does not link this
+    # equation back, so the link is moved out of linked_claim_ids and kept
+    # here instead of being consumed downstream as a confirmed link.
+    inferred_claim_ids: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -591,6 +595,7 @@ class EquationSemanticsResult:
                 "input_equation_ids": list(sem.input_equation_ids),
                 "output_equation_ids": list(sem.output_equation_ids),
                 "linked_claim_ids": sorted(set(sem.linked_claim_ids) | set(claim_index.get(r.equation_id, []))),
+                "inferred_claim_ids": sorted(set(sem.inferred_claim_ids)),
                 "source_evidence_ids": sorted(set(sem.source_evidence_ids) | set(evidence_index.get(block_id, []))),
                 "review_flags": list(sem.review_flags),
                 "section_id": section_id,
@@ -707,6 +712,7 @@ def _record_from_dict(d: dict) -> EquationRecord:
         linked_claim_ids=list(sem_raw.get("linked_claim_ids", [])),
         summary=str(sem_raw.get("summary", "")),
         review_flags=list(sem_raw.get("review_flags", [])),
+        inferred_claim_ids=list(sem_raw.get("inferred_claim_ids", [])),
     )
     cp_raw = d.get("confidence_policy", {})
     confidence_policy = EquationConfidencePolicy(
