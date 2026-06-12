@@ -62,7 +62,10 @@ def _payload():
         ),
         _step("derive_consistency_relation", ["eq_d"], ["eq_e"]),
         _step("apply_criterion", ["eq_e"], ["eq_f"]),
-        _step("transform", ["eq_f"], ["eq_g"]),  # generic → debug layer
+        # Generic with equation IO → kept in equation_detail (issue #361).
+        _step("transform", ["eq_f"], ["eq_g"]),
+        # Generic without output equations → debug layer.
+        _step("relate", ["eq_g"], []),
     ]
     derivations = DerivationChainResult(
         document_id="doc",
@@ -203,7 +206,7 @@ def test_review_required_nodes_and_edges_always_have_reasons():
 def test_inferred_nodes_are_not_confirmed_source_backed():
     _result, payload = _payload()
     debug = _layer(payload, "debug")
-    assert debug  # the generic "transform" step lands here
+    assert debug  # the generic "relate" step (no equation outputs) lands here
     for node in debug:
         assert node["source_backing_status"] != "source_backed"
         assert node["source_backing_status"] in ("inferred", "review_required")

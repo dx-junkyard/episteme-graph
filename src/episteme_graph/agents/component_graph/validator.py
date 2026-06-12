@@ -138,7 +138,46 @@ class ComponentGraphValidator:
                 "confidence",
             ))
 
+        issues += self._check_main_graph_coverage(result)
+
         return issues
+
+    @staticmethod
+    def _check_main_graph_coverage(result: ComponentGraphResult) -> list[ValidationIssue]:
+        """Explain WHY the main graph is empty (issue #361).
+
+        When derivation quality is too low every step lands in the
+        equation_detail / debug layer and learners see nothing. Report the
+        generic-operation rate and weak-backing rate so the cause is visible
+        in export_validation instead of a silently empty graph.
+        """
+        nodes = list(result.nodes or [])
+        if not nodes:
+            return []
+        if any(
+            str(getattr(n, "graph_layer", "main") or "main") == "main" for n in nodes
+        ):
+            return []
+        total = len(nodes)
+        generic = sum(
+            1 for n in nodes
+            if classify_operation(str(getattr(n, "operation", "") or ""))[2]
+        )
+        weak_backing = sum(
+            1 for n in nodes
+            if str(getattr(n, "source_backing_status", "") or "")
+            in ("inferred", "review_required", "")
+        )
+        return [ValidationIssue(
+            "main_graph_empty_derivation_quality",
+            "warning",
+            (
+                "main graph is empty — derivation quality insufficient: "
+                f"generic operations {generic}/{total}, "
+                f"weak source backing {weak_backing}/{total}"
+            ),
+            "nodes",
+        )]
 
     @staticmethod
     def _check_node_source_backing(node: ComponentGraphNode, is_main: bool) -> list[ValidationIssue]:

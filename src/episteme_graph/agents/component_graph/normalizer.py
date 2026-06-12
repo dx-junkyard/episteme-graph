@@ -132,6 +132,11 @@ class ComponentGraphNormalizer:
             for group in groups
             for rec in group["records"]
         }
+        # Issue #361: kept-generic steps (generic operation but equation-backed
+        # on both ends) never form or strengthen a stage group, but they still
+        # need a parent so the layer-linkage invariant holds. Attach each to
+        # the nearest non-generic step's main node in derivation order.
+        _attach_kept_generic_parents(records, parent_by_record, main_nodes)
         detail_nodes = [
             _detail_node_from_record(rec, parent_by_record.get(rec["detail_id"], ""), claim_index)
             for rec in records
@@ -576,6 +581,44 @@ def _fallback_sequential_edges(groups: list[dict]) -> list[ComponentGraphEdge]:
     return edges
 
 
+def _attach_kept_generic_parents(
+    records: list[dict],
+    parent_by_record: dict[str, str],
+    main_nodes: list,
+) -> None:
+    """Give equation-backed generic steps a parent main node (issue #361).
+
+    The parent is the nearest preceding non-generic step's main node (falling
+    back to the nearest following one). The generic record is appended to the
+    main node's member_component_ids only — it never contributes equations,
+    claims, or backing to the main node itself.
+    """
+    main_by_id = {node.component_id: node for node in main_nodes}
+    last_parent = ""
+    pending: list[str] = []
+    for rec in records:
+        detail_id = rec["detail_id"]
+        if not rec["is_generic"]:
+            last_parent = parent_by_record.get(detail_id, last_parent)
+            for deferred in pending:
+                if last_parent:
+                    parent_by_record[deferred] = last_parent
+                    node = main_by_id.get(last_parent)
+                    if node is not None and deferred not in node.member_component_ids:
+                        node.member_component_ids.append(deferred)
+            pending = []
+            continue
+        if not (rec["inputs"] and rec["outputs"]):
+            continue  # debug-bound generic step keeps no parent
+        if last_parent:
+            parent_by_record[detail_id] = last_parent
+            node = main_by_id.get(last_parent)
+            if node is not None and detail_id not in node.member_component_ids:
+                node.member_component_ids.append(detail_id)
+        else:
+            pending.append(detail_id)
+
+
 # ---------------------------------------------------------------------- #
 # Equation-detail layer (one node / edge per derivation step)
 # ---------------------------------------------------------------------- #
@@ -596,19 +639,32 @@ def _detail_node_from_record(
     linked_evidence_ids = _ordered_unique(getattr(step, "source_evidence_ids", []) or [])
     atomic_claim_ids = _atomic_claim_ids(linked_claim_ids, claim_index)
 
+    # Issue #361: a generic step whose input AND output equations are present
+    # still carries usable derivation structure. Keep it in the
+    # equation_detail layer as partially_source_backed (never stronger)
+    # instead of dropping the whole trace to debug; only generic steps without
+    # equation backing on both ends fall back to the debug layer.
+    generic_kept = rec["is_generic"] and bool(inputs) and bool(outputs)
     status, reasons = _node_backing(
         linked_equation_ids=linked_equation_ids,
         linked_derivation_ids=linked_derivation_ids,
         atomic_claim_ids=atomic_claim_ids,
         linked_claim_ids=linked_claim_ids,
         linked_evidence_ids=linked_evidence_ids,
-        is_generic=rec["is_generic"],
+        is_generic=rec["is_generic"] and not generic_kept,
     )
+    if generic_kept:
+        status = "partially_source_backed"
+        reasons = _ordered_unique(list(reasons) + ["generic_operation"])
 
     definitions = outputs if edge_type == "defines" else []
     constraints = outputs if edge_type in ("constrains", "derives", "diagnoses") else []
     # Generic / inferred steps are kept for traceability but never confirmed.
-    layer = GRAPH_LAYER_DEBUG if rec["is_generic"] else GRAPH_LAYER_EQUATION_DETAIL
+    layer = (
+        GRAPH_LAYER_EQUATION_DETAIL
+        if (not rec["is_generic"] or generic_kept)
+        else GRAPH_LAYER_DEBUG
+    )
 
     detail_label = _build_detail_label(rec["verb"], step, inputs, outputs)
     step_reason = str(getattr(step, "reason", "") or "").strip()

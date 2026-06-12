@@ -49,6 +49,20 @@ _CLAIM_TYPE_TO_OPERATION: dict[str, str] = {
     "limitation": "flag_limitation",
 }
 
+# Generic operations that name no concrete theory operation (issue #361).
+# Mirrors component_graph.schema.GENERIC_OPERATIONS so steps the graph layer
+# would flag are reclassified here first.
+_GENERIC_OPERATIONS = {"transform", "relate", "connect", "support", "associate", ""}
+
+# Secondary equation roles → concrete OPERATION_ONTOLOGY verb (issue #361).
+_SECONDARY_TYPE_TO_OPERATION = {
+    "definition": "apply_definition",
+    "result": "derive_result",
+    "constraint": "apply_constraint",
+    "approximation": "approximate",
+    "transformation": "substitute",
+}
+
 
 class DerivationChainAgent:
     """EquationSemanticsResult (and optionally ClaimObjectBuildResult) から DerivationChain を組み立てる。"""
@@ -306,6 +320,7 @@ class DerivationChainAgent:
                 assumptions = list(current_record.semantics.assumptions)
 
             operation = self._infer_operation(current_record)
+            operation = self._refine_generic_operation(operation, current_record)
             linked_claims = list(claim_link_index.get(current, []))
             sem_claims = list(current_record.semantics.linked_claim_ids) if current_record else []
             all_claim_ids = sorted(set(linked_claims + sem_claims))
@@ -481,6 +496,31 @@ class DerivationChainAgent:
             "constraint": "apply_constraint",
         }
         return mapping.get(primary, DEFAULT_OPERATION)
+
+    @staticmethod
+    def _refine_generic_operation(operation: str, record: Optional[EquationRecord]) -> str:
+        """Single deterministic reclassification of a generic operation (#361).
+
+        Before a step is emitted with a generic operation (which the graph
+        layer would push toward the debug layer), try once to pick a concrete
+        OPERATION_ONTOLOGY verb from the equation's own signals: secondary
+        roles first, then defined symbols. When no signal supports a concrete
+        verb the operation stays generic — review keeps it honest.
+        """
+        if record is None or str(operation or "").strip().lower() not in _GENERIC_OPERATIONS:
+            return operation
+        sem = record.semantics
+        for secondary in sem.secondary_types or []:
+            mapped = _SECONDARY_TYPE_TO_OPERATION.get(str(secondary).strip().lower())
+            if mapped:
+                return mapped
+        has_definition = any(
+            str(getattr(s, "definition_status", "") or "") in ("defined", "redefined")
+            for s in (sem.defined_symbols or [])
+        )
+        if has_definition:
+            return "apply_definition"
+        return operation
 
 
 def _confidence_gate(blocked_eqs: list[str]) -> dict:

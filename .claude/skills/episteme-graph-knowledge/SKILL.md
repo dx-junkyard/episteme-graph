@@ -294,7 +294,8 @@ prefix から導出し、特定分野・特定論文の用語をハードコー�
 - **equation_detail 層** (`graph_layer="equation_detail"`, `component_type="EquationOperationNode"`):
   derivation step ごとの式単位 node（ここでは equation ID 入り label を許容）。`parent_component_id` で
   main node を、main node は `member_component_ids` で detail node を相互参照する。generic step は
-  `debug` 層へ。
+  input/output 両方の式 backing があれば equation_detail 層に `partially_source_backed` +
+  `review_reasons=["generic_operation"]` で残し、式 backing が無い場合のみ `debug` 層へ (#361)。
 - **ComponentRefiner は「1 component = 1 reusable theory unit」(#308)**:
   `component_assembly/component_refiner.py` は derivation step を **operation family** 単位の
   再利用可能な理論ユニットに分割する（式 step 1 個 = 1 component ではない）。同 family の複数 step は

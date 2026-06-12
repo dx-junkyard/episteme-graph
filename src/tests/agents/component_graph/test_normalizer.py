@@ -39,7 +39,11 @@ def _derivations():
         ),
         _step("derive_consistency_relation", ["eq_d"], ["eq_e"]),
         _step("apply_criterion", ["eq_e"], ["eq_f"]),
+        # Generic but equation-backed on both ends → kept in equation_detail
+        # as partially_source_backed (issue #361).
         _step("transform", ["eq_f"], ["eq_g"]),
+        # Generic without output equations → debug layer.
+        _step("relate", ["eq_g"], []),
     ]
     return DerivationChainResult(
         document_id="doc",
@@ -133,10 +137,10 @@ def test_main_graph_is_smaller_than_detail_graph():
     detail_nodes = _layer(result, "equation_detail")
     debug_nodes = _layer(result, "debug")
 
-    # 6 derivation steps → 5 non-generic steps become main nodes (one per
+    # 7 derivation steps → 5 non-generic steps become main nodes (one per
     # operation family), and every step is preserved in the detail/debug layer.
     assert len(main_nodes) == 5
-    assert len(detail_nodes) + len(debug_nodes) == 6
+    assert len(detail_nodes) + len(debug_nodes) == 7
     assert len(main_nodes) < len(detail_nodes) + len(debug_nodes)
     assert all(n.component_type == "TheoryOperationNode" for n in main_nodes)
     assert all(n.component_type == "EquationOperationNode" for n in detail_nodes)
@@ -318,12 +322,36 @@ def test_generic_operations_excluded_from_main_graph():
     result = _normalized()
     main_ops = {n.operation for n in _layer(result, "main")}
     assert "transform" not in main_ops
+    assert "relate" not in main_ops
 
-    # The generic step is kept in the debug layer, flagged as inferred.
+    # Issue #361: a generic step with input AND output equations stays in the
+    # equation_detail layer as partially_source_backed (never stronger).
+    detail = _layer(result, "equation_detail")
+    kept = next(n for n in detail if n.operation == "transform")
+    assert kept.source_backing_status == "partially_source_backed"
+    assert "generic_operation" in kept.review_reasons
+    assert kept.review_status == "teacher_review_required"
+
+    # A generic step without equation backing still lands in debug as inferred.
     debug = _layer(result, "debug")
-    generic = next(n for n in debug if n.operation == "transform")
+    generic = next(n for n in debug if n.operation == "relate")
     assert generic.source_backing_status == "inferred"
     assert "fallback_or_inferred_node" in generic.review_reasons
+
+
+def test_kept_generic_detail_node_has_parent_main_node():
+    # Issue #361: the kept-generic step is attached to the nearest preceding
+    # non-generic step's main node so the layer linkage invariant holds, but
+    # it must not strengthen that main node's backing.
+    result = _normalized()
+    detail = _layer(result, "equation_detail")
+    kept = next(n for n in detail if n.operation == "transform")
+    main_by_id = {n.component_id: n for n in _layer(result, "main")}
+    assert kept.parent_component_id in main_by_id
+    parent = main_by_id[kept.parent_component_id]
+    assert kept.component_id in parent.member_component_ids
+    # eq_g (only produced by the generic step) never backs the main node.
+    assert "eq_g" not in parent.linked_equation_ids
 
 
 # --- source backing / review status (acceptance #6, #7, #8, #9) -------------
@@ -412,8 +440,12 @@ def test_main_edges_carry_operation_edge_types():
 
 def test_generic_step_edge_in_detail_is_review_required():
     result = _normalized()
-    debug_ids = {n.component_id for n in _layer(result, "debug")}
-    into_generic = [e for e in result.edges if e.target in debug_ids]
+    generic_ids = {
+        n.component_id
+        for n in result.nodes
+        if n.operation in ("transform", "relate")
+    }
+    into_generic = [e for e in result.edges if e.target in generic_ids]
     assert into_generic
     assert all(e.review_status == "review_required" for e in into_generic)
     assert all(e.review_reasons for e in into_generic)
