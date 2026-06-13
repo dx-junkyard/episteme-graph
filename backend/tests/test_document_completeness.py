@@ -110,7 +110,13 @@ def _complete_structure() -> dict:
             {"section_id": "h_concl", "title": "5 Conclusion", "level": 1,
              "order": 1, "page_start": 6, "page_end": 6},
         ],
-        "metadata": {"title": "Complete paper", "authors": ["Alice", "Bob"], "pages": 6},
+        "metadata": {
+            "title": "Complete paper",
+            "authors": ["Alice", "Bob"],
+            "pages": 6,
+            "author_extraction": {"source": "grobid_tei", "confidence": 0.95,
+                                  "needs_review": False, "review_reasons": []},
+        },
     }
 
 
@@ -350,12 +356,18 @@ class TestBoundaryFixes:
         assert b["needs_review"] is True
         assert "boundary_page_span_too_small" in b["review_reason"]
 
-    def test_reference_authors_filtered_out(self):
+    def test_export_never_deletes_authors(self):
+        # Issue #372: the export layer no longer token-deletes "reference"
+        # authors. A contaminated list (no structured provenance) is preserved
+        # verbatim and flagged for review instead of silently corrected.
         ea = _import_artifacts()
         b = ea.build_document_boundary(_truncated_structure(), document_id="doc_bad")
-        assert b["authors"] == ["Taro Yamada", "Hanako Suzuki", "Jiro Tanaka", "Saburo Kato"]
-        assert "Horndeski" not in b["authors"]
-        assert "reference_authors_in_author_list" in b["review_reason"]
+        assert b["authors"] == [
+            "Taro Yamada", "Hanako Suzuki", "Jiro Tanaka", "Saburo Kato",
+            "Horndeski", "Lesgourgues", "Deffayet", "Steer",
+        ]
+        assert b["needs_review"] is True
+        assert "author_provenance_missing" in b["review_reason"]
 
     def test_self_citing_author_is_preserved(self):
         ea = _import_artifacts()
@@ -367,23 +379,42 @@ class TestBoundaryFixes:
             ],
             "sections": [{"section_id": "s", "title": "Intro", "level": 1, "order": 0,
                           "page_start": 1, "page_end": 9}],
-            "metadata": {"title": "T", "authors": ["Alice Smith"], "pages": 9},
+            "metadata": {
+                "title": "T", "authors": ["Alice Smith"], "pages": 9,
+                "author_extraction": {"source": "pdf_front_matter", "confidence": 0.6,
+                                      "needs_review": False, "review_reasons": []},
+            },
         }
         b = ea.build_document_boundary(structure, document_id="doc_self")
         assert b["authors"] == ["Alice Smith"]
+        assert "author_provenance_missing" not in b["review_reason"]
 
-    def test_authors_never_emptied_from_nonempty_list(self):
+    def test_author_count_over_limit_preserves_values(self):
+        # An anomalously large author list is preserved but flagged (issue #372).
         ea = _import_artifacts()
-        # Author appears only in references (no byline block) — must not vanish.
+        many = [f"Author{i:03d}" for i in range(40)]
         structure = {
-            "blocks": [_reference("r1", 9, "Alice Smith. Prior result. 2019.")],
+            "blocks": [],
             "sections": [{"section_id": "s", "title": "Intro", "level": 1, "order": 0,
                           "page_start": 1, "page_end": 9}],
-            "metadata": {"title": "T", "authors": ["Alice Smith"], "pages": 9},
+            "metadata": {
+                "title": "T", "authors": list(many), "pages": 9,
+                "author_extraction": {"source": "grobid_tei", "confidence": 0.95,
+                                      "needs_review": False, "review_reasons": []},
+            },
         }
-        b = ea.build_document_boundary(structure, document_id="doc_self2")
-        assert b["authors"] == ["Alice Smith"]
-        assert "reference_authors_in_author_list" in b["review_reason"]
+        b = ea.build_document_boundary(structure, document_id="doc_many")
+        assert b["authors"] == many  # nothing deleted
+        assert b["needs_review"] is True
+        assert "author_count_exceeds_limit" in b["review_reason"]
+
+    def test_author_provenance_and_confidence_surfaced(self):
+        # provenance + confidence are reflected in document_boundary.json (#372).
+        ea = _import_artifacts()
+        b = ea.build_document_boundary(_complete_structure(), document_id="doc_ok")
+        assert b["author_extraction"]["source"] == "grobid_tei"
+        assert b["author_extraction"]["confidence"] == 0.95
+        assert b["author_extraction"]["needs_review"] is False
 
     def test_all_completeness_failures_propagate_to_boundary(self):
         ea = _import_artifacts()

@@ -77,6 +77,10 @@ class DocumentMetadata:
     title: str | None = None
     authors: list[str] = field(default_factory=list)
     pages: int = 0
+    # Author provenance (issue #372): which structured front-matter signal the
+    # authors came from (grobid_tei / tex_author / pdf_front_matter / none),
+    # with confidence + needs_review. None for legacy artifacts.
+    author_extraction: dict | None = None
 
 
 @dataclass

@@ -13,6 +13,12 @@ import os
 import re
 from difflib import SequenceMatcher
 
+from .author_extraction import (
+    AuthorExtractionResult,
+    extract_authors_from_front_matter,
+    extract_authors_from_tex,
+    resolve_author_extraction,
+)
 from .cartridge_loader import CartridgeLoader
 from .classifier import BlockClassifier
 from .hierarchy import SectionHierarchyBuilder
@@ -54,6 +60,7 @@ class DocumentStructureAgent:
         cartridge_id: str | None = None,
         config: dict | None = None,
         tei_xml: str | None = None,
+        tex_source: str | None = None,
     ) -> DocumentStructureResult:
         """PDF を解析して DocumentStructureResult を返す。
 
@@ -69,6 +76,9 @@ class DocumentStructureAgent:
             GROBID が生成した TEI XML 文字列。
             指定された場合、parser_backend の設定に関わらず grobid_hybrid 処理を試みる。
             None の場合は parser_backend の設定に従う。
+        tex_source:
+            LaTeX ソース文字列（任意）。``\\author{...}`` から正規著者を抽出し、
+            構造化メタデータとして最優先で採用する（issue #372）。
         """
         cfg = config or {}
         max_pages: int | None = cfg.get("max_pages")
@@ -101,6 +111,11 @@ class DocumentStructureAgent:
                 document_id=document_id,
             )
 
+        # Author provenance resolution (issue #372): prefer explicit structured
+        # metadata. Priority: TeX \author{} > parser front-matter (GROBID TEI /
+        # PDF byline). Authors are only ever read from front-matter sources.
+        self._resolve_author_provenance(metadata, tex_source)
+
         # Step 3: Build result
         result = DocumentStructureResult(
             document_id=document_id,
@@ -115,6 +130,40 @@ class DocumentStructureAgent:
         result.validation_issues = self._validator.validate(result, cartridge)
 
         return result
+
+    # ------------------------------------------------------------------
+    # Author provenance (issue #372)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_author_provenance(
+        metadata: DocumentMetadata, tex_source: str | None
+    ) -> None:
+        """Resolve authors from structured front-matter sources by priority.
+
+        The backend already populated ``metadata.authors`` /
+        ``metadata.author_extraction`` from GROBID TEI or the PDF byline. If a
+        TeX source is supplied, its ``\\author{}`` names take precedence. The
+        chosen list and provenance are written back onto ``metadata``.
+        """
+        existing = AuthorExtractionResult(
+            authors=list(metadata.authors or []),
+            source=str((metadata.author_extraction or {}).get("source", "none")),
+            confidence=float((metadata.author_extraction or {}).get("confidence", 0.0) or 0.0),
+            needs_review=bool((metadata.author_extraction or {}).get("needs_review", False)),
+            review_reasons=list((metadata.author_extraction or {}).get("review_reasons", []) or []),
+        )
+
+        candidates: list[AuthorExtractionResult] = []
+        if tex_source:
+            tex_result = extract_authors_from_tex(tex_source)
+            if tex_result.authors:
+                candidates.append(tex_result)
+        candidates.append(existing)
+
+        resolved = resolve_author_extraction(candidates)
+        metadata.authors = list(resolved.authors)
+        metadata.author_extraction = resolved.to_metadata()
 
     # ------------------------------------------------------------------
     # PyMuPDF backend (既存ロジック)
@@ -140,6 +189,12 @@ class DocumentStructureAgent:
 
         total_pages = max((b.page for b in typed_blocks), default=0)
         metadata = DocumentMetadata(pages=total_pages)
+
+        # Authors from the PDF front-matter byline only (issue #372): never from
+        # the body or references, so a body term cannot inject a citation author.
+        front_matter = extract_authors_from_front_matter(typed_blocks)
+        metadata.authors = list(front_matter.authors)
+        metadata.author_extraction = front_matter.to_metadata()
 
         # pymupdf provenance
         for b in typed_blocks:
