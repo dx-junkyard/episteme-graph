@@ -1,4 +1,4 @@
-"""Deterministic document-completeness analysis (issue #366).
+"""Deterministic document-completeness analysis (issues #366 / #371).
 
 A truncated PDF ingest — where the document's central results never reach the
 pipeline — is detectable without ground truth. This module performs that check
@@ -9,9 +9,18 @@ reuse it:
     sequence, *and* labels referenced in prose (e.g. "Eq. (3.40)") that were
     never ingested as equations (catches a tail truncation at (3.36)),
   * terminal section presence — a Conclusion / Summary-like tail section,
-  * page coverage — ingested content (evidence when available, else content
-    blocks) must not cluster on a small fraction of the document's pages, and
-    the un-ingested page ranges are reported.
+  * ingest reachability (issue #371) — did the DocumentStructure ingest reach
+    the *end* of the source document? The pass/fail signal is whether ingested
+    content extends close enough to the final page (no large trailing
+    un-ingested range), NOT what fraction of pages carry content. Blank /
+    figure-only / references-only pages are legitimate, so a sparse page
+    distribution alone does not mean the ingest was truncated.
+
+The EvidenceRegistry page distribution is reported separately as an *audit-only*
+signal (``evidence_page_distribution``). EvidenceRegistry indexes adopted spans /
+equations / captions, not every page of the document, so a complete document can
+legitimately have evidence clustered on a few pages. Its sparseness never sets
+``complete=false`` (issue #371).
 
 `core` must not import FastAPI / route modules; this module stays dependency-free
 so the orchestrator can call it at the DocumentStructure / EvidenceRegistry exit.
@@ -21,9 +30,15 @@ from __future__ import annotations
 import re
 from typing import Any
 
-# Ingested content clustered on a small fraction of the document's pages signals
-# a truncated ingest (issue #366: evidence only on pages 1 and 3 of 20).
-MIN_PAGE_COVERAGE_RATIO = 0.5
+# Ingest reachability threshold (issue #371): the document is judged to have
+# reached its end when ingested content extends to at least this fraction of the
+# total pages. A small trailing tail of blank / figure-only / references-only
+# pages is tolerated; a large trailing un-ingested range is a truncated ingest.
+MIN_INGEST_REACH_RATIO = 0.8
+
+# EvidenceRegistry pages below this fraction of the document are flagged as
+# *sparse* — an audit signal only, never a completeness pass/fail (issue #371).
+EVIDENCE_SPARSE_RATIO = 0.5
 
 # Coverage / terminal-section checks are only meaningful once enough content was
 # ingested; a small stub legitimately cannot cover many pages or carry a
@@ -101,12 +116,16 @@ def analyze_document_completeness(
     *,
     document_id: str,
 ) -> dict:
-    """Return a JSON-serialisable document-completeness report (issue #366).
+    """Return a JSON-serialisable document-completeness report (issues #366 / #371).
 
     ``structure`` is a DocumentStructureResult dict; ``evidence`` is an optional
-    EvidenceRegistryResult dict used to judge page coverage from actually
-    ingested evidence (falling back to content blocks). ``complete`` is False —
-    and ``review_reasons`` non-empty — when any check fails.
+    EvidenceRegistryResult dict. The pass/fail signal for the document body is
+    the *ingest reachability* of the DocumentStructure (did the parser reach the
+    document end?), reported under ``ingest_coverage``. The EvidenceRegistry page
+    distribution is reported separately under ``evidence_page_distribution`` as
+    audit-only metadata and never sets ``complete=false`` (issue #371).
+    ``complete`` is False — and ``review_reasons`` non-empty — when any check
+    fails.
     """
     structure = structure if isinstance(structure, dict) else {}
     evidence = evidence if isinstance(evidence, dict) else None
@@ -114,6 +133,13 @@ def analyze_document_completeness(
     sections = structure.get("sections") or []
     metadata = structure.get("metadata") or {}
     pages_total = metadata.get("pages") if isinstance(metadata, dict) else None
+    parser_pages_processed = None
+    if isinstance(metadata, dict):
+        for key in ("parser_pages_processed", "pages_processed", "pages_parsed"):
+            value = metadata.get(key)
+            if isinstance(value, int) and value > 0:
+                parser_pages_processed = value
+                break
 
     block_list = [b for b in blocks if isinstance(b, dict)]
     content_blocks = [b for b in block_list if b.get("block_type") in _CONTENT_BLOCK_TYPES]
@@ -172,36 +198,66 @@ def analyze_document_completeness(
     # Only expect a terminal section once the document is substantial enough.
     terminal_missing = enough_content and has_sections and not terminal_present
 
-    # --- page coverage ------------------------------------------------------
-    source = "evidence" if evidence is not None else "content_blocks"
-    ev_pages = _evidence_pages(evidence)
-    if evidence is not None:
-        ingested = ev_pages
-    else:
-        ingested = {
-            int(b["page"]) for b in content_blocks if isinstance(b.get("page"), int)
-        }
-    ingested_pages = sorted(ingested)
-    distinct_page_count = len(ingested_pages)
-    coverage_ratio = None
-    missing_pages: list[list[int]] = []
-    coverage_sufficient = True
+    # --- ingest reachability (issue #371) -----------------------------------
+    # The pass/fail signal is whether the DocumentStructure ingest reached the
+    # document end, not what fraction of pages carry content. ``content_pages``
+    # are pages with body / equation / caption blocks; ``all_ingested_pages``
+    # also counts headings / references so a References- or figure-only final
+    # page still proves the parser reached the document end.
+    content_pages = sorted(
+        {int(b["page"]) for b in content_blocks if isinstance(b.get("page"), int)}
+    )
+    all_ingested_pages = sorted(
+        {int(b["page"]) for b in block_list if isinstance(b.get("page"), int)}
+    )
+    first_content_page = content_pages[0] if content_pages else None
+    last_content_page = content_pages[-1] if content_pages else None
+    last_ingested_page = all_ingested_pages[-1] if all_ingested_pages else None
+
+    structure_page_coverage_ratio = None
+    trailing_uningested_page_ranges: list[list[int]] = []
+    reached_document_end = True
+    ingest_sufficient = True
     if isinstance(pages_total, int) and pages_total > 0:
-        coverage_ratio = round(distinct_page_count / pages_total, 4)
-        missing_pages = _compress_ranges(
-            [p for p in range(1, pages_total + 1) if p not in ingested]
+        structure_page_coverage_ratio = round(len(content_pages) / pages_total, 4)
+        # The furthest page the parser is known to have reached: ingested blocks
+        # or, when available, the parser's own processed-page count.
+        effective_last = max(last_ingested_page or 0, parser_pages_processed or 0)
+        if 0 < effective_last < pages_total:
+            trailing_uningested_page_ranges = _compress_ranges(
+                list(range(effective_last + 1, pages_total + 1))
+            )
+        elif effective_last == 0:
+            trailing_uningested_page_ranges = _compress_ranges(
+                list(range(1, pages_total + 1))
+            )
+        reached_document_end = bool(
+            (parser_pages_processed is not None and parser_pages_processed >= pages_total)
+            or effective_last >= pages_total
+            or effective_last / pages_total >= MIN_INGEST_REACH_RATIO
         )
-        # Coverage is only judged once enough content was ingested.
-        if enough_content or (evidence is not None and distinct_page_count):
-            coverage_sufficient = coverage_ratio >= MIN_PAGE_COVERAGE_RATIO
+        # Reachability is only enforced once enough content was ingested; a small
+        # stub legitimately cannot reach a 20-page tail.
+        if enough_content:
+            ingest_sufficient = reached_document_end
+
+    # --- evidence page distribution (audit-only, issue #371) ----------------
+    # EvidenceRegistry indexes adopted spans / equations / captions, not whole
+    # pages, so its sparseness is recorded for audit but never blocks publish.
+    evidence_pages = sorted(_evidence_pages(evidence))
+    evidence_distribution_ratio = None
+    evidence_sparse = False
+    if evidence is not None and isinstance(pages_total, int) and pages_total > 0:
+        evidence_distribution_ratio = round(len(evidence_pages) / pages_total, 4)
+        evidence_sparse = evidence_distribution_ratio < EVIDENCE_SPARSE_RATIO
 
     review_reasons: list[str] = []
     if equation_has_gaps:
         review_reasons.append("equation_label_discontinuity")
     if terminal_missing:
         review_reasons.append("terminal_section_missing")
-    if not coverage_sufficient:
-        review_reasons.append("page_coverage_insufficient")
+    if not ingest_sufficient:
+        review_reasons.append("ingest_incomplete")
 
     return {
         "document_id": document_id,
@@ -220,13 +276,20 @@ def analyze_document_completeness(
             "missing": terminal_missing,
             "matched_titles": terminal_titles,
         },
-        "page_coverage": {
-            "source": source,
-            "ingested_pages": ingested_pages,
-            "missing_pages": missing_pages,
-            "distinct_page_count": distinct_page_count,
+        "ingest_coverage": {
             "pages_total": pages_total,
-            "coverage_ratio": coverage_ratio,
-            "sufficient": coverage_sufficient,
+            "first_content_page": first_content_page,
+            "last_content_page": last_content_page,
+            "last_ingested_page": last_ingested_page,
+            "parser_pages_processed": parser_pages_processed,
+            "reached_document_end": reached_document_end,
+            "trailing_uningested_page_ranges": trailing_uningested_page_ranges,
+            "structure_page_coverage_ratio": structure_page_coverage_ratio,
+            "sufficient": ingest_sufficient,
+        },
+        "evidence_page_distribution": {
+            "pages": evidence_pages,
+            "distribution_ratio": evidence_distribution_ratio,
+            "sparse": evidence_sparse,
         },
     }

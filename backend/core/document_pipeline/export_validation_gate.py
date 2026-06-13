@@ -637,7 +637,7 @@ class ExportValidationGate:
             return result
 
         eq = report.get("equation_label_continuity") or {}
-        coverage = report.get("page_coverage") or {}
+        ingest = report.get("ingest_coverage") or {}
         if eq.get("missing_labels"):
             warnings.append(ValidationEntry(
                 code="DOCUMENT_EQUATION_LABEL_DISCONTINUITY",
@@ -660,16 +660,17 @@ class ExportValidationGate:
                 path="$.completeness.terminal_section",
                 source_stage="export_validation",
             ))
-        if not coverage.get("sufficient", True):
+        if not ingest.get("sufficient", True):
             warnings.append(ValidationEntry(
-                code="DOCUMENT_PAGE_COVERAGE_INSUFFICIENT",
+                code="DOCUMENT_INGEST_INCOMPLETE",
                 message=(
-                    f"document {document_id!r} ingested pages cover only "
-                    f"{coverage.get('coverage_ratio')} of {coverage.get('pages_total')} "
-                    f"pages; un-ingested ranges {coverage.get('missing_pages')}"
+                    f"document {document_id!r} ingest did not reach the document end: "
+                    f"last ingested page {ingest.get('last_ingested_page')} of "
+                    f"{ingest.get('pages_total')}; trailing un-ingested ranges "
+                    f"{ingest.get('trailing_uningested_page_ranges')}"
                 ),
-                artifact="evidence_registry" if evidence is not None else "document_structure",
-                path="$.completeness.page_coverage",
+                artifact="document_structure",
+                path="$.completeness.ingest_coverage",
                 source_stage="export_validation",
             ))
         return result

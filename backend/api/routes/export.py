@@ -1333,12 +1333,15 @@ def _component_equation_refs_export(comp: dict) -> list[str]:
 
 
 def _build_completeness_report(completeness_reports: list[dict] | None) -> dict:
-    """Aggregate per-document completeness into the export_validation block (#366).
+    """Aggregate per-document completeness into the export_validation block (#366 / #371).
 
     Returns a JSON-serialisable summary listing, per incomplete document, the
-    missing equation labels, the un-ingested page coverage, and whether a
-    terminal (Conclusion/Summary) section was found. Incomplete documents are
-    reported so they are not promoted to publish_ready.
+    missing equation labels, whether the DocumentStructure ingest reached the
+    document end (with any trailing un-ingested page ranges), and whether a
+    terminal (Conclusion/Summary) section was found. The EvidenceRegistry page
+    distribution is carried as audit-only metadata (issue #371) and never sets
+    ``complete=false``. Incomplete documents are reported so they are not
+    promoted to publish_ready.
     """
     reports = completeness_reports or []
     documents: list[dict] = []
@@ -1350,17 +1353,26 @@ def _build_completeness_report(completeness_reports: list[dict] | None) -> dict:
         all_complete = all_complete and complete
         eq = rep.get("equation_label_continuity") or {}
         terminal = rep.get("terminal_section") or {}
-        coverage = rep.get("page_coverage") or {}
+        ingest = rep.get("ingest_coverage") or {}
+        evidence_dist = rep.get("evidence_page_distribution") or {}
         documents.append({
             "document_id": rep.get("document_id"),
             "complete": complete,
             "review_reasons": list(rep.get("review_reasons") or []),
             "missing_equation_labels": list(eq.get("missing_labels") or []),
             "terminal_section_present": bool(terminal.get("present")),
-            "ingested_pages": list(coverage.get("ingested_pages") or []),
-            "uningested_page_ranges": list(coverage.get("missing_pages") or []),
-            "pages_total": coverage.get("pages_total"),
-            "page_coverage_ratio": coverage.get("coverage_ratio"),
+            "reached_document_end": bool(ingest.get("reached_document_end", True)),
+            "last_ingested_page": ingest.get("last_ingested_page"),
+            "trailing_uningested_page_ranges": list(
+                ingest.get("trailing_uningested_page_ranges") or []
+            ),
+            "pages_total": ingest.get("pages_total"),
+            "structure_page_coverage_ratio": ingest.get("structure_page_coverage_ratio"),
+            "ingest_sufficient": bool(ingest.get("sufficient", True)),
+            # Audit-only (issue #371): never blocks publish_ready on its own.
+            "evidence_pages": list(evidence_dist.get("pages") or []),
+            "evidence_distribution_ratio": evidence_dist.get("distribution_ratio"),
+            "evidence_sparse": bool(evidence_dist.get("sparse")),
         })
     return {
         "checked": bool(documents),
@@ -1524,9 +1536,11 @@ def _validate_export_references(
             check_refs(step_claims, claim_ids, "derivations/derivation_chains.json", f"{path}.claim_ids", "claim")
             check_refs(step_evidence, evidence_ids, "derivations/derivation_chains.json", f"{path}.source_evidence_ids", "evidence")
 
-    # Document completeness gate (#366): a truncated ingest (missing equation
-    # labels, absent Conclusion, low page coverage) is surfaced as warnings so
-    # the bundle is exportable for review but never promoted to publish_ready.
+    # Document completeness gate (#366 / #371): a truncated ingest (missing
+    # equation labels, absent Conclusion, or a body that never reached the
+    # document end) is surfaced as warnings so the bundle is exportable for
+    # review but never promoted to publish_ready. EvidenceRegistry sparseness is
+    # audit-only (issue #371) and is never raised as a blocking warning here.
     completeness = _build_completeness_report(completeness_reports)
     for doc in completeness["documents"]:
         if doc["complete"]:
@@ -1548,15 +1562,16 @@ def _validate_export_references(
                 "$.completeness.terminal_section",
                 doc_id,
             )
-        if "page_coverage_insufficient" in doc["review_reasons"]:
+        if "ingest_incomplete" in doc["review_reasons"]:
             warn(
-                "DOCUMENT_PAGE_COVERAGE_INSUFFICIENT",
+                "DOCUMENT_INGEST_INCOMPLETE",
                 (
-                    f"document {doc_id!r} ingested pages {doc['ingested_pages']} cover only "
-                    f"{doc['page_coverage_ratio']} of {doc['pages_total']} pages"
+                    f"document {doc_id!r} ingest did not reach the document end: last "
+                    f"ingested page {doc['last_ingested_page']} of {doc['pages_total']}; "
+                    f"trailing un-ingested ranges {doc['trailing_uningested_page_ranges']}"
                 ),
                 "document_boundary.json",
-                "$.completeness.page_coverage",
+                "$.completeness.ingest_coverage",
                 doc_id,
             )
 
@@ -1651,8 +1666,8 @@ This ZIP contains machine-readable outputs generated by episteme-graph.
 - `equations/equations.json`: first-class equation registry. Each entry has `latex`, `plain_text`, `source_location`, `equation_type`, `defined_symbols`, `used_symbols`, `input_equation_ids`, `output_equation_ids`, `extraction_source`, `extraction_status`, `needs_math_review`, `review_reason`, `candidate_trace_ids`.
 - `equations/equation_candidates.json`: audit trail for equation candidate detection. Each entry records `raw_text`, `source_location`, `detection_method`, `matched_label`, `acceptance_status`, `accepted_equation_id`, `rejection_reason`.
 - `derivations/derivation_chains.json`: derivation steps linking equations / claims with `operation`, `input_equation_ids`, `output_equation_ids`, `assumption_refs`.
-- `document_boundary.json`: per-document active article boundary (page_start, page_end, confidence, needs_review). Useful for multi-article PDFs (journal scans, conference proceedings). A collapsed boundary (span ≪ pages_total) or reference-author contamination drops confidence below 1.0 and raises needs_review. A `completeness` block reports equation-label continuity, terminal-section presence, and page coverage.
-- `export_validation.json`: deterministic cross-artifact validation. The `completeness` section aggregates per-document ingest completeness (missing equation labels, un-ingested page coverage, terminal-section presence); an incomplete document keeps the bundle out of `publish_ready`.
+- `document_boundary.json`: per-document active article boundary (page_start, page_end, confidence, needs_review). Useful for multi-article PDFs (journal scans, conference proceedings). A collapsed boundary (span ≪ pages_total) or reference-author contamination drops confidence below 1.0 and raises needs_review. A `completeness` block reports equation-label continuity, terminal-section presence, and `ingest_coverage` (did the DocumentStructure ingest reach the document end). The EvidenceRegistry page distribution is reported separately under `evidence_page_distribution` as audit-only metadata.
+- `export_validation.json`: deterministic cross-artifact validation. The `completeness` section aggregates per-document ingest reachability (missing equation labels, trailing un-ingested page ranges, terminal-section presence); a document whose ingest did not reach the document end keeps the bundle out of `publish_ready`. EvidenceRegistry sparseness is audit-only and never blocks publish on its own.
 
 ## Data Model Summary
 
