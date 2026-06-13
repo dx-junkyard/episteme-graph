@@ -20,6 +20,7 @@ Issue #242 acceptance criteria:
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 ARTIFACTS_KEY = "_artifacts"
@@ -945,8 +946,220 @@ def enrich_course_topics(
 
 
 # ---------------------------------------------------------------------------
-# Document boundary
+# Document boundary + completeness (issue #366)
 # ---------------------------------------------------------------------------
+
+# A detected boundary spanning far fewer pages than the document total is a
+# collapsed boundary (issue #366: a 20-page paper reported as page 1..1). The
+# boundary must not pass at confidence 1.0 / needs_review=false in that case.
+_MIN_BOUNDARY_PAGE_SPAN_RATIO = 0.5
+
+# Ingested blocks clustered on a small fraction of the document's pages signal a
+# truncated ingest (issue #366: evidence only on pages 1 and 3 of 20).
+_MIN_PAGE_COVERAGE_RATIO = 0.5
+
+# Page-coverage is only meaningful once enough blocks were ingested; a 2-block
+# stub legitimately cannot cover many pages.
+_MIN_BLOCKS_FOR_PAGE_COVERAGE = 8
+
+# An author list far larger than any plausible byline indicates reference /
+# bibliography authors leaked into the document authors (issue #366).
+_MAX_PLAUSIBLE_AUTHORS = 25
+
+# Equation labels such as "(3.36)" / "3.36" / "(12)". Grouped by an optional
+# major section number so continuity is checked within each section.
+_EQUATION_LABEL_RE = re.compile(r"^\(?\s*(?:(\d+)\.)?(\d+)\s*\)?$")
+
+# Terminal / wrap-up section headings whose absence means the document tail was
+# not ingested (issue #366: the Conclusion section was missing entirely).
+_TERMINAL_SECTION_RE = re.compile(
+    r"\b(conclusion|conclusions|concluding|summary|discussion|outlook|"
+    r"final remarks|closing remarks)\b|結論|まとめ|結言|総括|考察",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _reference_author_tokens(blocks: list) -> set[str]:
+    """Lower-cased word tokens appearing inside reference / bibliography blocks.
+
+    Used to strip bibliography authors that leaked into the document authors:
+    a real byline author normally does not appear verbatim inside the paper's
+    own reference list, while leaked citation authors do.
+    """
+    tokens: set[str] = set()
+    for b in blocks if isinstance(blocks, list) else []:
+        if not isinstance(b, dict):
+            continue
+        if b.get("block_type") != "reference_entry":
+            continue
+        text = str(b.get("text") or "").lower()
+        for tok in re.split(r"[^a-zà-öø-ÿ]+", text):
+            if len(tok) >= 2:
+                tokens.add(tok)
+    return tokens
+
+
+def _filter_reference_authors(authors: list, blocks: list) -> tuple[list[str], bool]:
+    """Drop bibliography authors that leaked into the document author list.
+
+    Returns the filtered authors and a flag indicating whether any contamination
+    was detected (either names matched against reference blocks or the raw list
+    exceeded any plausible byline size).
+    """
+    raw = [str(a).strip() for a in (authors or []) if str(a).strip()]
+    if not raw:
+        return [], False
+
+    ref_tokens = _reference_author_tokens(blocks)
+    filtered: list[str] = []
+    for name in raw:
+        name_tokens = [
+            t for t in re.split(r"[^a-zà-öø-ÿ]+", name.lower()) if len(t) >= 2
+        ]
+        # A name whose every alphabetic token also appears in the reference list
+        # is treated as a leaked citation author and dropped.
+        if name_tokens and all(t in ref_tokens for t in name_tokens):
+            continue
+        filtered.append(name)
+
+    contaminated = len(filtered) != len(raw) or len(raw) > _MAX_PLAUSIBLE_AUTHORS
+    # If the list is still implausibly large the boundary stays flagged; we keep
+    # the (already reference-filtered) names rather than guessing a cutoff.
+    return filtered, contaminated
+
+
+def _parse_equation_label(label: Any) -> tuple[int, int] | None:
+    """Parse an equation label into a (major, minor) ordinal pair, or None."""
+    if label is None:
+        return None
+    m = _EQUATION_LABEL_RE.match(str(label).strip())
+    if not m:
+        return None
+    major = int(m.group(1)) if m.group(1) is not None else 0
+    minor = int(m.group(2))
+    return major, minor
+
+
+def build_document_completeness(
+    structure_artifact: Any,
+    *,
+    document_id: str,
+) -> dict:
+    """Deterministic document-completeness report (issue #366).
+
+    Checks — without ground truth — whether the ingest looks truncated:
+      * equation label continuity: gaps in the per-section (N.1)…(N.k) sequence,
+      * terminal section presence: a Conclusion / Summary-like tail section,
+      * page coverage: ingested blocks should not cluster on a small fraction of
+        the document's pages.
+
+    Returns a JSON-serialisable report; ``complete`` is False (and
+    ``review_reasons`` is non-empty) when any check fails. No LLM is used.
+    """
+    structure = _coerce_dict(structure_artifact)
+    blocks = structure.get("blocks") or []
+    sections = structure.get("sections") or []
+    metadata = structure.get("metadata") or {}
+    pages_total = metadata.get("pages") if isinstance(metadata, dict) else None
+
+    # --- equation label continuity -----------------------------------------
+    by_major: dict[int, set[int]] = {}
+    observed_labels: list[str] = []
+    for b in blocks if isinstance(blocks, list) else []:
+        if not isinstance(b, dict):
+            continue
+        if b.get("block_type") != "equation_block":
+            continue
+        parsed = _parse_equation_label(b.get("equation_label"))
+        if parsed is None:
+            continue
+        major, minor = parsed
+        by_major.setdefault(major, set()).add(minor)
+        observed_labels.append(str(b.get("equation_label")).strip())
+
+    missing_labels: list[str] = []
+    for major, minors in by_major.items():
+        if not minors:
+            continue
+        for minor in range(1, max(minors)):
+            if minor not in minors:
+                missing_labels.append(
+                    f"({major}.{minor})" if major else f"({minor})"
+                )
+    missing_labels.sort()
+    equation_has_gaps = bool(missing_labels)
+
+    # --- terminal section presence ------------------------------------------
+    terminal_titles: list[str] = []
+    for s in sections if isinstance(sections, list) else []:
+        if isinstance(s, dict) and _TERMINAL_SECTION_RE.search(str(s.get("title") or "")):
+            terminal_titles.append(str(s.get("title")))
+    for b in blocks if isinstance(blocks, list) else []:
+        if not isinstance(b, dict):
+            continue
+        if b.get("block_type") in ("section_heading", "subsection_heading") and (
+            _TERMINAL_SECTION_RE.search(str(b.get("text") or ""))
+        ):
+            terminal_titles.append(str(b.get("text")).strip())
+    has_sections = bool(sections) or any(
+        isinstance(b, dict)
+        and b.get("block_type") in ("section_heading", "subsection_heading")
+        for b in (blocks if isinstance(blocks, list) else [])
+    )
+    terminal_present = bool(terminal_titles)
+    # Only treat a missing terminal section as a completeness gap when the
+    # document is structured enough to be expected to have one.
+    terminal_missing = has_sections and not terminal_present
+
+    # --- page coverage ------------------------------------------------------
+    block_pages = sorted(
+        {
+            int(b["page"])
+            for b in (blocks if isinstance(blocks, list) else [])
+            if isinstance(b, dict) and isinstance(b.get("page"), int)
+        }
+    )
+    distinct_page_count = len(block_pages)
+    coverage_ratio = None
+    coverage_sufficient = True
+    if isinstance(pages_total, int) and pages_total > 0:
+        coverage_ratio = round(distinct_page_count / pages_total, 4)
+        # Coverage is only judged once enough blocks were ingested; a small stub
+        # legitimately cannot cover many pages.
+        block_count = sum(1 for b in blocks if isinstance(b, dict))
+        if block_count >= _MIN_BLOCKS_FOR_PAGE_COVERAGE:
+            coverage_sufficient = coverage_ratio >= _MIN_PAGE_COVERAGE_RATIO
+
+    review_reasons: list[str] = []
+    if equation_has_gaps:
+        review_reasons.append("equation_label_discontinuity")
+    if terminal_missing:
+        review_reasons.append("terminal_section_missing")
+    if not coverage_sufficient:
+        review_reasons.append("page_coverage_insufficient")
+
+    return {
+        "document_id": document_id,
+        "complete": not review_reasons,
+        "review_reasons": review_reasons,
+        "equation_label_continuity": {
+            "observed_labels": observed_labels,
+            "missing_labels": missing_labels,
+            "has_gaps": equation_has_gaps,
+        },
+        "terminal_section": {
+            "present": terminal_present,
+            "missing": terminal_missing,
+            "matched_titles": terminal_titles,
+        },
+        "page_coverage": {
+            "ingested_pages": block_pages,
+            "distinct_page_count": distinct_page_count,
+            "pages_total": pages_total,
+            "coverage_ratio": coverage_ratio,
+            "sufficient": coverage_sufficient,
+        },
+    }
 
 
 def build_document_boundary(
@@ -960,9 +1173,15 @@ def build_document_boundary(
     first section's page_start as the article start and the last section's
     page_end as the article end, plus the title block when present, so
     consumers can flag spans that fall outside the boundary.
+
+    Issue #366: a collapsed boundary (span ≪ pages_total) or reference-author
+    contamination must drop confidence below 1.0 and raise needs_review instead
+    of passing silently. An equation-label discontinuity in the completeness
+    report also propagates to needs_review.
     """
     structure = _coerce_dict(structure_artifact)
     sections = structure.get("sections") or []
+    blocks = structure.get("blocks") or []
     metadata = structure.get("metadata") or {}
     pages_total = metadata.get("pages") if isinstance(metadata, dict) else None
 
@@ -979,18 +1198,52 @@ def build_document_boundary(
         if s.get("section_id"):
             section_ids.append(s["section_id"])
 
-    confidence = 1.0 if (boundary_page_start is not None and boundary_page_end is not None) else 0.5
-    needs_review = confidence < 0.8
+    raw_authors = list(metadata.get("authors") or []) if isinstance(metadata, dict) else []
+    authors, authors_contaminated = _filter_reference_authors(raw_authors, blocks)
+
+    completeness = build_document_completeness(structure, document_id=document_id)
+
+    review_reasons: list[str] = []
+    have_pages = boundary_page_start is not None and boundary_page_end is not None
+    if not have_pages:
+        review_reasons.append("incomplete_section_page_range")
+
+    # Collapsed boundary: detected span far smaller than the document total.
+    boundary_span_collapsed = False
+    if have_pages and isinstance(pages_total, int) and pages_total > 0:
+        span_pages = int(boundary_page_end) - int(boundary_page_start) + 1
+        if span_pages < pages_total * _MIN_BOUNDARY_PAGE_SPAN_RATIO:
+            boundary_span_collapsed = True
+            review_reasons.append("boundary_page_span_too_small")
+
+    if authors_contaminated:
+        review_reasons.append("reference_authors_in_author_list")
+
+    if completeness["equation_label_continuity"]["has_gaps"]:
+        review_reasons.append("equation_label_discontinuity")
+
+    if not have_pages:
+        confidence = 0.5
+    elif boundary_span_collapsed:
+        # A collapsed boundary must never pass at full confidence (issue #366).
+        confidence = 0.4
+    elif review_reasons:
+        confidence = 0.7
+    else:
+        confidence = 1.0
+
+    needs_review = bool(review_reasons) or confidence < 0.8
 
     return {
         "document_id": document_id,
         "title": metadata.get("title") if isinstance(metadata, dict) else None,
-        "authors": list(metadata.get("authors") or []) if isinstance(metadata, dict) else [],
+        "authors": authors,
         "boundary_page_start": boundary_page_start,
         "boundary_page_end": boundary_page_end,
         "pages_total": pages_total,
         "active_section_ids": section_ids,
         "confidence": confidence,
         "needs_review": needs_review,
-        "review_reason": ([] if not needs_review else ["incomplete_section_page_range"]),
+        "review_reason": review_reasons,
+        "completeness": completeness,
     }

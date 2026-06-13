@@ -19,6 +19,7 @@ from core.postgres import get_session as _pg_session
 from routes.export_artifacts import (
     build_derivation_chains_export,
     build_document_boundary,
+    build_document_completeness,
     build_equation_candidates_export,
     build_equations_export,
     build_evidence_export,
@@ -383,6 +384,21 @@ def _build_document_boundaries(
         if not structure:
             continue
         out.append(build_document_boundary(structure, document_id=doc_id))
+    return out
+
+
+def _build_document_completeness_reports(
+    artifacts_by_doc: dict[str, dict],
+    document_ids: list[str],
+) -> list[dict]:
+    """Deterministic per-document completeness reports for export_validation (#366)."""
+    out: list[dict] = []
+    for doc_id in document_ids:
+        artifacts = artifacts_by_doc.get(doc_id, {})
+        structure = artifacts.get("document_structure")
+        if not structure:
+            continue
+        out.append(build_document_completeness(structure, document_id=doc_id))
     return out
 
 
@@ -1308,6 +1324,42 @@ def _component_equation_refs_export(comp: dict) -> list[str]:
     return sorted(set(values))
 
 
+def _build_completeness_report(completeness_reports: list[dict] | None) -> dict:
+    """Aggregate per-document completeness into the export_validation block (#366).
+
+    Returns a JSON-serialisable summary listing, per incomplete document, the
+    missing equation labels, the un-ingested page coverage, and whether a
+    terminal (Conclusion/Summary) section was found. Incomplete documents are
+    reported so they are not promoted to publish_ready.
+    """
+    reports = completeness_reports or []
+    documents: list[dict] = []
+    all_complete = True
+    for rep in reports:
+        if not isinstance(rep, dict):
+            continue
+        complete = bool(rep.get("complete", True))
+        all_complete = all_complete and complete
+        eq = rep.get("equation_label_continuity") or {}
+        terminal = rep.get("terminal_section") or {}
+        coverage = rep.get("page_coverage") or {}
+        documents.append({
+            "document_id": rep.get("document_id"),
+            "complete": complete,
+            "review_reasons": list(rep.get("review_reasons") or []),
+            "missing_equation_labels": list(eq.get("missing_labels") or []),
+            "terminal_section_present": bool(terminal.get("present")),
+            "ingested_pages": list(coverage.get("ingested_pages") or []),
+            "pages_total": coverage.get("pages_total"),
+            "page_coverage_ratio": coverage.get("coverage_ratio"),
+        })
+    return {
+        "checked": bool(documents),
+        "all_documents_complete": all_complete,
+        "documents": documents,
+    }
+
+
 def _validate_export_references(
     *,
     claims: list[dict],
@@ -1317,6 +1369,7 @@ def _validate_export_references(
     course_info: dict | None,
     evidence_snippets: list[dict],
     derivation_chains: list[dict] | None = None,
+    completeness_reports: list[dict] | None = None,
 ) -> dict:
     errors: list[dict] = []
     warnings: list[dict] = []
@@ -1462,12 +1515,51 @@ def _validate_export_references(
             check_refs(step_claims, claim_ids, "derivations/derivation_chains.json", f"{path}.claim_ids", "claim")
             check_refs(step_evidence, evidence_ids, "derivations/derivation_chains.json", f"{path}.source_evidence_ids", "evidence")
 
+    # Document completeness gate (#366): a truncated ingest (missing equation
+    # labels, absent Conclusion, low page coverage) is surfaced as warnings so
+    # the bundle is exportable for review but never promoted to publish_ready.
+    completeness = _build_completeness_report(completeness_reports)
+    for doc in completeness["documents"]:
+        if doc["complete"]:
+            continue
+        doc_id = doc.get("document_id") or ""
+        if doc["missing_equation_labels"]:
+            warn(
+                "DOCUMENT_EQUATION_LABEL_DISCONTINUITY",
+                f"document {doc_id!r} is missing equation labels {doc['missing_equation_labels']}",
+                "document_boundary.json",
+                "$.completeness.equation_label_continuity",
+                doc_id,
+            )
+        if not doc["terminal_section_present"]:
+            warn(
+                "DOCUMENT_TERMINAL_SECTION_MISSING",
+                f"document {doc_id!r} has no terminal (Conclusion/Summary) section; ingest may be truncated",
+                "document_boundary.json",
+                "$.completeness.terminal_section",
+                doc_id,
+            )
+        if "page_coverage_insufficient" in doc["review_reasons"]:
+            warn(
+                "DOCUMENT_PAGE_COVERAGE_INSUFFICIENT",
+                (
+                    f"document {doc_id!r} ingested pages {doc['ingested_pages']} cover only "
+                    f"{doc['page_coverage_ratio']} of {doc['pages_total']} pages"
+                ),
+                "document_boundary.json",
+                "$.completeness.page_coverage",
+                doc_id,
+            )
+
+    publish_ready = not errors and not warnings and completeness["all_documents_complete"]
+
     return {
         "status": "failed_validation" if errors else "passed",
         "exportable": not errors,
-        "publish_ready": not errors and not warnings,
+        "publish_ready": publish_ready,
         "errors": errors,
         "warnings": warnings,
+        "completeness": completeness,
         "summary": {"error_count": len(errors), "warning_count": len(warnings), "unresolved_reference_count": len(errors)},
     }
 
@@ -1550,7 +1642,8 @@ This ZIP contains machine-readable outputs generated by episteme-graph.
 - `equations/equations.json`: first-class equation registry. Each entry has `latex`, `plain_text`, `source_location`, `equation_type`, `defined_symbols`, `used_symbols`, `input_equation_ids`, `output_equation_ids`, `extraction_source`, `extraction_status`, `needs_math_review`, `review_reason`, `candidate_trace_ids`.
 - `equations/equation_candidates.json`: audit trail for equation candidate detection. Each entry records `raw_text`, `source_location`, `detection_method`, `matched_label`, `acceptance_status`, `accepted_equation_id`, `rejection_reason`.
 - `derivations/derivation_chains.json`: derivation steps linking equations / claims with `operation`, `input_equation_ids`, `output_equation_ids`, `assumption_refs`.
-- `document_boundary.json`: per-document active article boundary (page_start, page_end, confidence, needs_review). Useful for multi-article PDFs (journal scans, conference proceedings).
+- `document_boundary.json`: per-document active article boundary (page_start, page_end, confidence, needs_review). Useful for multi-article PDFs (journal scans, conference proceedings). A collapsed boundary (span ≪ pages_total) or reference-author contamination drops confidence below 1.0 and raises needs_review. A `completeness` block reports equation-label continuity, terminal-section presence, and page coverage.
+- `export_validation.json`: deterministic cross-artifact validation. The `completeness` section aggregates per-document ingest completeness (missing equation labels, un-ingested page coverage, terminal-section presence); an incomplete document keeps the bundle out of `publish_ready`.
 
 ## Data Model Summary
 
@@ -1714,6 +1807,7 @@ def export_course_bundle(
         equation_candidates = _build_equation_candidates_for_documents(artifacts_by_doc, document_ids)
         derivation_chains = _build_derivations_for_documents(artifacts_by_doc, document_ids)
         document_boundaries = _build_document_boundaries(artifacts_by_doc, document_ids)
+        completeness_reports = _build_document_completeness_reports(artifacts_by_doc, document_ids)
         course = _enrich_course_for_export(course, artifacts_by_doc, document_ids)
         _normalize_export_references(
             claims=claims,
@@ -1748,6 +1842,7 @@ def export_course_bundle(
             course_info=course,
             evidence_snippets=evidence_snippets,
             derivation_chains=derivation_chains,
+            completeness_reports=completeness_reports,
         )
 
         docs = _load_course_documents(session, course_id, document_ids)
@@ -1840,6 +1935,7 @@ def export_document_bundle(
         equation_candidates = _build_equation_candidates_for_documents(artifacts_by_doc, document_ids)
         derivation_chains = _build_derivations_for_documents(artifacts_by_doc, document_ids)
         document_boundaries = _build_document_boundaries(artifacts_by_doc, document_ids)
+        completeness_reports = _build_document_completeness_reports(artifacts_by_doc, document_ids)
         document = _enrich_course_for_export(document, artifacts_by_doc, document_ids)
         _normalize_export_references(
             claims=claims,
@@ -1874,6 +1970,7 @@ def export_document_bundle(
             course_info=document,
             evidence_snippets=evidence_snippets,
             derivation_chains=derivation_chains,
+            completeness_reports=completeness_reports,
         )
 
         eid = _export_id("document", document_id)
