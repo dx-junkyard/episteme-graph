@@ -20,6 +20,7 @@ Issue #242 acceptance criteria:
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 ARTIFACTS_KEY = "_artifacts"
@@ -945,14 +946,124 @@ def enrich_course_topics(
 
 
 # ---------------------------------------------------------------------------
-# Document boundary
+# Document boundary + completeness (issue #366)
 # ---------------------------------------------------------------------------
+
+def _load_completeness_analyzer():
+    """Resolve ``analyze_document_completeness`` without forcing the heavy import.
+
+    Importing ``core.document_pipeline.completeness`` triggers the package
+    ``__init__`` (orchestrator → agents), which is not always importable from the
+    export route's environment. Try the package import first, then fall back to
+    loading the dependency-free leaf module directly by path.
+    """
+    try:
+        from core.document_pipeline.completeness import analyze_document_completeness
+        return analyze_document_completeness
+    except Exception:
+        import importlib.util
+        import os
+
+        path = os.path.normpath(os.path.join(
+            os.path.dirname(__file__), "..", "..",
+            "core", "document_pipeline", "completeness.py",
+        ))
+        spec = importlib.util.spec_from_file_location("_dp_completeness", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.analyze_document_completeness
+
+
+# A detected boundary spanning far fewer pages than the document total is a
+# collapsed boundary (issue #366: a 20-page paper reported as page 1..1). The
+# boundary must not pass at confidence 1.0 / needs_review=false in that case.
+_MIN_BOUNDARY_PAGE_SPAN_RATIO = 0.5
+
+# An author list far larger than any plausible byline indicates reference /
+# bibliography authors leaked into the document authors (issue #366).
+_MAX_PLAUSIBLE_AUTHORS = 25
+
+
+def _name_tokens(name: str) -> list[str]:
+    return [t for t in re.split(r"[^a-zà-öø-ÿ]+", str(name).lower()) if len(t) >= 2]
+
+
+def _block_author_tokens(blocks: list, *, reference_only: bool) -> set[str]:
+    """Lower-cased word tokens appearing in reference (or non-reference) blocks.
+
+    Used to strip bibliography authors that leaked into the document authors
+    while protecting names that also occur in the front matter / body (e.g. a
+    self-citing author), which must never be removed.
+    """
+    tokens: set[str] = set()
+    for b in blocks if isinstance(blocks, list) else []:
+        if not isinstance(b, dict):
+            continue
+        is_ref = b.get("block_type") == "reference_entry"
+        if is_ref != reference_only:
+            continue
+        tokens.update(_name_tokens(str(b.get("text") or "")))
+    return tokens
+
+
+def _filter_reference_authors(authors: list, blocks: list) -> tuple[list[str], bool]:
+    """Drop bibliography authors that leaked into the document author list.
+
+    A name is dropped only when every alphabetic token appears in the reference
+    list *and* the name does not also appear in a non-reference block (so a
+    self-citing real author is kept). A non-empty author list never collapses to
+    empty: if filtering would remove everything, the original list is kept and
+    flagged for review instead of silently deleting all authors (#366 review).
+    """
+    raw = [str(a).strip() for a in (authors or []) if str(a).strip()]
+    if not raw:
+        return [], False
+
+    ref_tokens = _block_author_tokens(blocks, reference_only=True)
+    non_ref_tokens = _block_author_tokens(blocks, reference_only=False)
+    filtered: list[str] = []
+    for name in raw:
+        toks = _name_tokens(name)
+        in_references = bool(toks) and all(t in ref_tokens for t in toks)
+        in_document_body = bool(toks) and all(t in non_ref_tokens for t in toks)
+        if in_references and not in_document_body:
+            continue
+        filtered.append(name)
+
+    if not filtered:
+        # Never delete every author from a non-empty list; flag for review.
+        return raw, True
+
+    contaminated = len(filtered) != len(raw) or len(raw) > _MAX_PLAUSIBLE_AUTHORS
+    return filtered, contaminated
+
+
+def build_document_completeness(
+    structure_artifact: Any,
+    *,
+    document_id: str,
+    evidence_artifact: Any = None,
+) -> dict:
+    """Deterministic document-completeness report (issue #366).
+
+    Thin wrapper over ``core.document_pipeline.completeness`` so the export route
+    and the pipeline gate share one implementation. Imported lazily so importing
+    this module never hard-depends on the (sometimes stubbed) ``core`` package.
+    """
+    analyze_document_completeness = _load_completeness_analyzer()
+
+    return analyze_document_completeness(
+        _coerce_dict(structure_artifact),
+        _coerce_dict(evidence_artifact) if evidence_artifact is not None else None,
+        document_id=document_id,
+    )
 
 
 def build_document_boundary(
     structure_artifact: Any,
     *,
     document_id: str,
+    evidence_artifact: Any = None,
 ) -> dict:
     """Surface the active article boundary inside a (potentially multi-article) PDF.
 
@@ -960,9 +1071,15 @@ def build_document_boundary(
     first section's page_start as the article start and the last section's
     page_end as the article end, plus the title block when present, so
     consumers can flag spans that fall outside the boundary.
+
+    Issue #366: a collapsed boundary (span ≪ pages_total) or reference-author
+    contamination drops confidence below 1.0 and raises needs_review. Every
+    completeness failure (equation discontinuity, missing terminal section, low
+    page coverage) also propagates to needs_review.
     """
     structure = _coerce_dict(structure_artifact)
     sections = structure.get("sections") or []
+    blocks = structure.get("blocks") or []
     metadata = structure.get("metadata") or {}
     pages_total = metadata.get("pages") if isinstance(metadata, dict) else None
 
@@ -979,18 +1096,56 @@ def build_document_boundary(
         if s.get("section_id"):
             section_ids.append(s["section_id"])
 
-    confidence = 1.0 if (boundary_page_start is not None and boundary_page_end is not None) else 0.5
-    needs_review = confidence < 0.8
+    raw_authors = list(metadata.get("authors") or []) if isinstance(metadata, dict) else []
+    authors, authors_contaminated = _filter_reference_authors(raw_authors, blocks)
+
+    completeness = build_document_completeness(
+        structure, document_id=document_id, evidence_artifact=evidence_artifact
+    )
+
+    review_reasons: list[str] = []
+    have_pages = boundary_page_start is not None and boundary_page_end is not None
+    if not have_pages:
+        review_reasons.append("incomplete_section_page_range")
+
+    # Collapsed boundary: detected span far smaller than the document total.
+    boundary_span_collapsed = False
+    if have_pages and isinstance(pages_total, int) and pages_total > 0:
+        span_pages = int(boundary_page_end) - int(boundary_page_start) + 1
+        if span_pages < pages_total * _MIN_BOUNDARY_PAGE_SPAN_RATIO:
+            boundary_span_collapsed = True
+            review_reasons.append("boundary_page_span_too_small")
+
+    if authors_contaminated:
+        review_reasons.append("reference_authors_in_author_list")
+
+    # Every completeness failure propagates to the boundary (#366 review).
+    for reason in completeness["review_reasons"]:
+        if reason not in review_reasons:
+            review_reasons.append(reason)
+
+    if not have_pages:
+        confidence = 0.5
+    elif boundary_span_collapsed:
+        # A collapsed boundary must never pass at full confidence (issue #366).
+        confidence = 0.4
+    elif review_reasons:
+        confidence = 0.7
+    else:
+        confidence = 1.0
+
+    needs_review = bool(review_reasons) or confidence < 0.8
 
     return {
         "document_id": document_id,
         "title": metadata.get("title") if isinstance(metadata, dict) else None,
-        "authors": list(metadata.get("authors") or []) if isinstance(metadata, dict) else [],
+        "authors": authors,
         "boundary_page_start": boundary_page_start,
         "boundary_page_end": boundary_page_end,
         "pages_total": pages_total,
         "active_section_ids": section_ids,
         "confidence": confidence,
         "needs_review": needs_review,
-        "review_reason": ([] if not needs_review else ["incomplete_section_page_range"]),
+        "review_reason": review_reasons,
+        "completeness": completeness,
     }

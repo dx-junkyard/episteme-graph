@@ -128,6 +128,46 @@ def _empty_teaching_output_validation() -> dict:
     }
 
 
+def _empty_document_completeness() -> dict:
+    # Document ingest completeness report (issue #366): aggregated per-document.
+    return {
+        "checked": False,
+        "all_documents_complete": True,
+        "documents": [],
+    }
+
+
+def _load_completeness_analyzer():
+    """Resolve analyze_document_completeness robustly (issue #366).
+
+    This module is imported both as part of the ``core.document_pipeline``
+    package (production) and as a standalone file via spec_from_file_location
+    (unit tests), where relative imports have no parent package. Try both, then
+    fall back to loading the sibling file directly by path.
+    """
+    try:
+        from .completeness import analyze_document_completeness
+        return analyze_document_completeness
+    except Exception:
+        pass
+    try:
+        from core.document_pipeline.completeness import analyze_document_completeness
+        return analyze_document_completeness
+    except Exception:
+        pass
+    try:
+        import importlib.util
+        import os
+
+        path = os.path.join(os.path.dirname(__file__), "completeness.py")
+        spec = importlib.util.spec_from_file_location("_dp_completeness", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.analyze_document_completeness
+    except Exception:
+        return None
+
+
 @dataclass
 class ExportValidationResult:
     status: str                          # one of EXPORT_STATUSES
@@ -151,6 +191,9 @@ class ExportValidationResult:
     # Thesis coverage report (issue #354): is the central thesis (and each
     # support_structure section) actually backed by the exported main graph?
     thesis_coverage: dict = field(default_factory=_empty_thesis_coverage)
+    # Document ingest completeness report (issue #366): did the source ingest
+    # capture the whole document (equations / terminal section / page coverage)?
+    document_completeness: dict = field(default_factory=_empty_document_completeness)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -504,6 +547,14 @@ class ExportValidationGate:
             artifacts, component_result, claim_objects, review_items
         )
 
+        # 7h. document completeness gate (#366): a truncated ingest (missing
+        # equations, no Conclusion, low page coverage) at the DocumentStructure /
+        # EvidenceRegistry exit. Reported as warnings so the run stays exportable
+        # for review but is never promoted to publish_ready.
+        document_completeness = self._check_document_completeness(
+            artifacts, warnings
+        )
+
         # 6. Determine status
         summary = ValidationSummary(
             error_count=len(errors),
@@ -543,11 +594,85 @@ class ExportValidationGate:
             theory_bundle_validation=theory_bundle_validation,
             teaching_output_validation=teaching_output_validation,
             thesis_coverage=thesis_coverage,
+            document_completeness=document_completeness,
         )
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _check_document_completeness(self, artifacts: dict, warnings: list) -> dict:
+        """Deterministic ingest-completeness check at the structure exit (#366).
+
+        Runs the shared completeness analysis on the document_structure (and
+        evidence_registry) artifacts. Each incomplete document adds warnings so
+        the run cannot be promoted to publish_ready while its central results may
+        be missing. Never a hard error.
+        """
+        structure = artifacts.get("document_structure")
+        if not isinstance(structure, dict) or not structure:
+            return _empty_document_completeness()
+        evidence = artifacts.get("evidence_registry")
+        document_id = str(structure.get("document_id") or "")
+
+        # Prefer the report the orchestrator already computed at the stage exit;
+        # only recompute if it is absent (e.g. legacy / partial runs).
+        report = artifacts.get("document_completeness")
+        if not isinstance(report, dict) or not report:
+            analyze_document_completeness = _load_completeness_analyzer()
+            if analyze_document_completeness is None:
+                return _empty_document_completeness()
+            report = analyze_document_completeness(
+                structure,
+                evidence if isinstance(evidence, dict) else None,
+                document_id=document_id,
+            )
+
+        result = _empty_document_completeness()
+        result["checked"] = True
+        result["all_documents_complete"] = bool(report.get("complete", True))
+        result["documents"] = [report]
+
+        if report.get("complete", True):
+            return result
+
+        eq = report.get("equation_label_continuity") or {}
+        coverage = report.get("page_coverage") or {}
+        if eq.get("missing_labels"):
+            warnings.append(ValidationEntry(
+                code="DOCUMENT_EQUATION_LABEL_DISCONTINUITY",
+                message=(
+                    f"document {document_id!r} is missing equation labels "
+                    f"{eq.get('missing_labels')}"
+                ),
+                artifact="document_structure",
+                path="$.completeness.equation_label_continuity",
+                source_stage="export_validation",
+            ))
+        if report.get("terminal_section", {}).get("missing"):
+            warnings.append(ValidationEntry(
+                code="DOCUMENT_TERMINAL_SECTION_MISSING",
+                message=(
+                    f"document {document_id!r} has no terminal (Conclusion/Summary) "
+                    "section; ingest may be truncated"
+                ),
+                artifact="document_structure",
+                path="$.completeness.terminal_section",
+                source_stage="export_validation",
+            ))
+        if not coverage.get("sufficient", True):
+            warnings.append(ValidationEntry(
+                code="DOCUMENT_PAGE_COVERAGE_INSUFFICIENT",
+                message=(
+                    f"document {document_id!r} ingested pages cover only "
+                    f"{coverage.get('coverage_ratio')} of {coverage.get('pages_total')} "
+                    f"pages; un-ingested ranges {coverage.get('missing_pages')}"
+                ),
+                artifact="evidence_registry" if evidence is not None else "document_structure",
+                path="$.completeness.page_coverage",
+                source_stage="export_validation",
+            ))
+        return result
 
     def _aggregate_artifact_issues(
         self,
