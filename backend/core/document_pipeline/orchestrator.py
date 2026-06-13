@@ -567,8 +567,10 @@ def run_document_pipeline(
             "processed": 1,
         })
         # Document completeness check at the DocumentStructure / EvidenceRegistry
-        # exit (#366): record a deterministic ingest-completeness artifact so a
-        # truncated document is flagged before downstream stages consume it.
+        # exit (#366): record a deterministic ingest-completeness artifact and
+        # propagate failures into document_structure.validation_issues so the
+        # signal flows downstream (and a truncated document never silently
+        # reaches publish-ready).
         try:
             from .completeness import analyze_document_completeness
 
@@ -579,10 +581,12 @@ def run_document_pipeline(
             )
             save_artifact("document_completeness", completeness_report)
             if not completeness_report.get("complete", True):
+                reasons = completeness_report.get("review_reasons") or []
                 logger.warning(
-                    "document %s ingest looks incomplete: %s",
-                    document_id, completeness_report.get("review_reasons"),
+                    "document %s ingest looks incomplete: %s", document_id, reasons,
                 )
+                _propagate_completeness_to_structure(structure, reasons)
+                save_artifact("document_structure", structure)
         except Exception:
             logger.exception(
                 "document_completeness check failed (non-fatal): document=%s", document_id
@@ -1289,6 +1293,35 @@ def _to_plain_data(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: _to_plain_data(v) for k, v in value.items()}
     return value
+
+
+def _propagate_completeness_to_structure(structure: Any, review_reasons: list) -> None:
+    """Attach document-completeness failures to structure.validation_issues (#366).
+
+    Adds one warning ValidationIssue per completeness review reason (deduped by
+    rule_id) so the signal propagates to downstream stages and the export
+    validation gate instead of living only in a side artifact. Severity is
+    ``warning`` — an incomplete ingest blocks publish-ready but is not a hard
+    error. Best-effort: never raises into the pipeline.
+    """
+    issues = getattr(structure, "validation_issues", None)
+    if issues is None:
+        return
+    try:
+        from episteme_graph.agents.document_structure.schema import ValidationIssue
+    except Exception:
+        return
+    existing = {getattr(i, "rule_id", None) for i in issues}
+    for reason in review_reasons or []:
+        rule_id = f"document_completeness_{reason}"
+        if rule_id in existing:
+            continue
+        issues.append(ValidationIssue(
+            rule_id=rule_id,
+            severity="warning",
+            message=f"document ingest completeness: {reason}",
+        ))
+        existing.add(rule_id)
 
 
 def _from_source_chunks(value: list[dict]) -> list:

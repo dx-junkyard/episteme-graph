@@ -609,21 +609,24 @@ class ExportValidationGate:
         the run cannot be promoted to publish_ready while its central results may
         be missing. Never a hard error.
         """
-        analyze_document_completeness = _load_completeness_analyzer()
-        if analyze_document_completeness is None:
-            return _empty_document_completeness()
-
         structure = artifacts.get("document_structure")
         if not isinstance(structure, dict) or not structure:
             return _empty_document_completeness()
         evidence = artifacts.get("evidence_registry")
         document_id = str(structure.get("document_id") or "")
 
-        report = analyze_document_completeness(
-            structure,
-            evidence if isinstance(evidence, dict) else None,
-            document_id=document_id,
-        )
+        # Prefer the report the orchestrator already computed at the stage exit;
+        # only recompute if it is absent (e.g. legacy / partial runs).
+        report = artifacts.get("document_completeness")
+        if not isinstance(report, dict) or not report:
+            analyze_document_completeness = _load_completeness_analyzer()
+            if analyze_document_completeness is None:
+                return _empty_document_completeness()
+            report = analyze_document_completeness(
+                structure,
+                evidence if isinstance(evidence, dict) else None,
+                document_id=document_id,
+            )
 
         result = _empty_document_completeness()
         result["checked"] = True

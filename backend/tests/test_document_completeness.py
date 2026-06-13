@@ -47,6 +47,19 @@ def _import_export_module():
     return _impl()
 
 
+def _import_gate():
+    # Load the gate standalone (no heavy package __init__); register in
+    # sys.modules so its dataclasses resolve their annotations.
+    import importlib.util
+
+    path = ROOT / "backend" / "core" / "document_pipeline" / "export_validation_gate.py"
+    spec = importlib.util.spec_from_file_location("export_validation_gate", str(path))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["export_validation_gate"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 # ---------------------------------------------------------------------------
 # Fixtures — a complete and a truncated structure artifact
 # ---------------------------------------------------------------------------
@@ -328,3 +341,66 @@ class TestExportValidationCompleteness:
             w["code"] for w in ev["warnings"] if w["code"].startswith("DOCUMENT_")
         }
         assert completeness_codes == set()
+
+
+# ---------------------------------------------------------------------------
+# Pipeline ExportValidationGate runs the completeness check at the stage exit
+# ---------------------------------------------------------------------------
+
+class TestPipelineGateCompleteness:
+    def _struct_dict(self, structure: dict, document_id: str) -> dict:
+        d = dict(structure)
+        d["document_id"] = document_id
+        d.setdefault("validation_issues", [])
+        return d
+
+    def test_gate_flags_incomplete_document(self):
+        mod = _import_gate()
+        artifacts = {
+            "document_structure": self._struct_dict(_truncated_structure(), "doc_bad"),
+            "evidence_registry": _evidence([1, 3]),
+        }
+        res = mod.ExportValidationGate().run(artifacts=artifacts).to_dict()
+        dc = res["document_completeness"]
+        assert dc["checked"] is True
+        assert dc["all_documents_complete"] is False
+        assert res["publish_ready"] is False
+        codes = {w["code"] for w in res["warnings"]}
+        assert "DOCUMENT_EQUATION_LABEL_DISCONTINUITY" in codes
+        assert "DOCUMENT_TERMINAL_SECTION_MISSING" in codes
+        assert "DOCUMENT_PAGE_COVERAGE_INSUFFICIENT" in codes
+
+    def test_gate_passes_complete_document(self):
+        mod = _import_gate()
+        artifacts = {
+            "document_structure": self._struct_dict(_complete_structure(), "doc_ok"),
+            "evidence_registry": _evidence([1, 2, 3, 4, 5, 6]),
+        }
+        res = mod.ExportValidationGate().run(artifacts=artifacts).to_dict()
+        dc = res["document_completeness"]
+        assert dc["all_documents_complete"] is True
+        completeness_codes = {
+            w["code"] for w in res["warnings"] if w["code"].startswith("DOCUMENT_")
+        }
+        assert completeness_codes == set()
+
+    def test_gate_prefers_precomputed_completeness_artifact(self):
+        mod = _import_gate()
+        # A structure that would look complete, but an orchestrator-computed
+        # artifact marks it incomplete: the gate must honour the artifact.
+        precomputed = {
+            "document_id": "doc_pre",
+            "complete": False,
+            "review_reasons": ["terminal_section_missing"],
+            "equation_label_continuity": {"missing_labels": [], "has_gaps": False},
+            "terminal_section": {"present": False, "missing": True, "matched_titles": []},
+            "page_coverage": {"sufficient": True, "coverage_ratio": 1.0, "pages_total": 6,
+                              "ingested_pages": [1, 2, 3, 4, 5, 6], "missing_pages": []},
+        }
+        artifacts = {
+            "document_structure": self._struct_dict(_complete_structure(), "doc_pre"),
+            "document_completeness": precomputed,
+        }
+        res = mod.ExportValidationGate().run(artifacts=artifacts).to_dict()
+        assert res["document_completeness"]["all_documents_complete"] is False
+        assert "DOCUMENT_TERMINAL_SECTION_MISSING" in {w["code"] for w in res["warnings"]}
