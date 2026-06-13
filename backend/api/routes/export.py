@@ -383,7 +383,11 @@ def _build_document_boundaries(
         structure = artifacts.get("document_structure")
         if not structure:
             continue
-        out.append(build_document_boundary(structure, document_id=doc_id))
+        out.append(build_document_boundary(
+            structure,
+            document_id=doc_id,
+            evidence_artifact=artifacts.get("evidence_registry"),
+        ))
     return out
 
 
@@ -398,7 +402,11 @@ def _build_document_completeness_reports(
         structure = artifacts.get("document_structure")
         if not structure:
             continue
-        out.append(build_document_completeness(structure, document_id=doc_id))
+        out.append(build_document_completeness(
+            structure,
+            document_id=doc_id,
+            evidence_artifact=artifacts.get("evidence_registry"),
+        ))
     return out
 
 
@@ -1350,6 +1358,7 @@ def _build_completeness_report(completeness_reports: list[dict] | None) -> dict:
             "missing_equation_labels": list(eq.get("missing_labels") or []),
             "terminal_section_present": bool(terminal.get("present")),
             "ingested_pages": list(coverage.get("ingested_pages") or []),
+            "uningested_page_ranges": list(coverage.get("missing_pages") or []),
             "pages_total": coverage.get("pages_total"),
             "page_coverage_ratio": coverage.get("coverage_ratio"),
         })

@@ -566,6 +566,27 @@ def run_document_pipeline(
             "total": 1,
             "processed": 1,
         })
+        # Document completeness check at the DocumentStructure / EvidenceRegistry
+        # exit (#366): record a deterministic ingest-completeness artifact so a
+        # truncated document is flagged before downstream stages consume it.
+        try:
+            from .completeness import analyze_document_completeness
+
+            completeness_report = analyze_document_completeness(
+                _to_plain_data(structure),
+                _to_plain_data(evidence),
+                document_id=document_id,
+            )
+            save_artifact("document_completeness", completeness_report)
+            if not completeness_report.get("complete", True):
+                logger.warning(
+                    "document %s ingest looks incomplete: %s",
+                    document_id, completeness_report.get("review_reasons"),
+                )
+        except Exception:
+            logger.exception(
+                "document_completeness check failed (non-fatal): document=%s", document_id
+            )
         if finish_target_stage("evidence_registry", {"records": len(getattr(evidence, "records", []) or []), "total": 1, "processed": 1}):
             return result
 
