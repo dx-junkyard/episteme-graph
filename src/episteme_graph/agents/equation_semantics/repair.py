@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 
 from .llm_client import EquationSemanticsLLMClient
+from .normalizer import EquationNormalizer
 from .prompt import EquationSemanticsPromptFactory
 from .schema import (
     CartridgeContext,
@@ -26,6 +27,49 @@ from .schema import (
 logger = logging.getLogger(__name__)
 
 _MAX_REPAIR_ATTEMPTS = 2
+
+# Deterministic, source-aware label validation for the final record (#368).
+_LABEL_NORMALIZER = EquationNormalizer()
+
+
+def _resolve_label_and_id(
+    raw: dict,
+    llm_input: EquationLLMInput,
+) -> tuple[str | None, str, dict]:
+    """Re-validate the LLM-provided label / equation_id (issue #368).
+
+    ``llm_input.label`` / ``llm_input.equation_id`` are canonical (already
+    produced by the source-aware normalizer at input-build time). An LLM may
+    propose a different label; it is only adopted if it passes the same
+    source-aware validator, and the equation_id is always *derived* — never
+    taken verbatim from the LLM. Rejected LLM values are returned as audit
+    metadata so the validator can surface them.
+    """
+    final_label = llm_input.label
+    final_eq_id = llm_input.equation_id or _LABEL_NORMALIZER.equation_id_from_label(
+        final_label, llm_input.block_id
+    )
+    audit: dict = {}
+
+    llm_label = raw.get("label")
+    if llm_label is not None and str(llm_label).strip() != str(final_label or "").strip():
+        norm_label, valid, _rejected = _LABEL_NORMALIZER.validate_label(
+            str(llm_label), source_trusted=llm_input.source_is_trusted
+        )
+        if valid and norm_label:
+            final_label = norm_label
+            final_eq_id = EquationNormalizer.equation_id_from_label(
+                norm_label, llm_input.block_id
+            )
+        else:
+            audit["llm_rejected_label"] = str(llm_label)
+
+    llm_eq_id = raw.get("equation_id")
+    if llm_eq_id and str(llm_eq_id) != str(final_eq_id):
+        # The LLM equation_id is never trusted verbatim; keep the derived id.
+        audit["llm_rejected_equation_id"] = str(llm_eq_id)
+
+    return final_label, final_eq_id, audit
 
 
 class EquationSemanticsRepairer:
@@ -77,6 +121,9 @@ def _parse_record(
     if not isinstance(vision_meta, dict):
         vision_meta = None
 
+    # --- deterministic, source-aware label / equation_id re-validation (#368) ---
+    final_label, final_eq_id, label_audit = _resolve_label_and_id(raw, llm_input)
+
     # --- source_extraction ---
     extraction_status = llm_input.extraction_status if candidate else "complete"
     needs_review = candidate.needs_math_review if candidate else False
@@ -89,16 +136,20 @@ def _parse_record(
         bbox = list(candidate.source_location.get("bbox", []))
         page = candidate.source_location.get("page", 0)
 
+    source_location = {
+        "page": page,
+        "section_id": llm_input.section_id,
+        "block_id": llm_input.block_id,
+        "bbox": bbox,
+    }
+    # Preserve rejected LLM label / equation_id as audit metadata.
+    source_location.update(label_audit)
+
     source_extraction = EquationSourceExtraction(
         raw_text=llm_input.equation_text,
         latex=None if llm_input.needs_reconstruction else llm_input.latex,
         plain_text=None if llm_input.needs_reconstruction else llm_input.plain_text,
-        source_location={
-            "page": page,
-            "section_id": llm_input.section_id,
-            "block_id": llm_input.block_id,
-            "bbox": bbox,
-        },
+        source_location=source_location,
         extraction_source=llm_input.extraction_source,
         extraction_status=extraction_status,
         needs_math_review=needs_review,
@@ -184,7 +235,7 @@ def _parse_record(
     equation_consistency = EquationConsistency.derive(
         source_extraction=source_extraction,
         reconstruction=reconstruction,
-        label=raw.get("label", llm_input.label),
+        label=final_label,
         semantics=semantics,
     )
     confidence_policy = EquationConfidencePolicy.derive(
@@ -200,9 +251,9 @@ def _parse_record(
         candidate_trace_ids = [candidate.candidate_id]
 
     return EquationRecord(
-        equation_id=raw.get("equation_id", llm_input.equation_id),
+        equation_id=final_eq_id,
         document_id=llm_input.document_id,
-        label=raw.get("label", llm_input.label),
+        label=final_label,
         candidate_trace_ids=candidate_trace_ids,
         source_extraction=source_extraction,
         reconstruction=reconstruction,

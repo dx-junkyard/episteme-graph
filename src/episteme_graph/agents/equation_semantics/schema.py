@@ -596,6 +596,14 @@ class EquationSemanticsResult:
                 latex = rec.latex
                 plain_text = rec.plain_text
 
+            # Issue #368: a prose reconstruction (latex_is_prose) is audit-only.
+            # Keep the reconstruction block for audit, but never publish the
+            # paraphrased text as display math; the confidence_gate below then
+            # blocks claim / derivation / final-formula use.
+            if FIDELITY_LATEX_IS_PROSE in (rec.review_reason or []):
+                latex = None
+                plain_text = None
+
             # defined / used / introduced symbols
             defined = [s.symbol for s in sem.defined_symbols if s.definition_status in ("defined", "redefined")]
             introduced = [s.symbol for s in sem.defined_symbols if s.definition_status == "defined"]

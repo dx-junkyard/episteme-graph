@@ -118,24 +118,40 @@ class EquationAcceptanceGate:
     def _is_table_derived(cls, candidate: EquationCandidate, text: str) -> bool:
         """Table provenance or strong coefficient-table match (issue #368)."""
         src_loc = candidate.source_location or {}
+        # table provenance is authoritative — accept it unconditionally.
         if src_loc.get("table_provenance"):
             return True
         if "table_derived_equation_candidate" in (candidate.review_reason or []):
             return True
         return cls._looks_like_coefficient_table(text)
 
-    # A row of numeric coefficients / example values separated by whitespace or
-    # delimiters, with no relational equation structure. e.g. "0.12  0.34  0.56".
+    # A row of bare numeric coefficients separated by whitespace / delimiters
+    # with no relational equation structure. e.g. "0.12  0.34  0.56".
     _COEFF_ROW_RE = re.compile(r"^[\s\d.,;:+\-eE×x()]+$")
+    # A "decimal coefficient × parameter" product, e.g. "3.488 beta_2",
+    # "0.28 beta_K2", "1.2 \alpha". The parameter must be a multi-letter token
+    # (or a LaTeX command), so single-symbol coefficients like "2x" / "0.5 x"
+    # are not matched.
+    _COEFF_PARAM_RE = re.compile(
+        r"\d+\.\d+\s*\*?\s*(?:\\[A-Za-z]+|[A-Za-z]{2,})(?:_\{?[A-Za-z0-9]+\}?)?"
+    )
+    # Minimum number of coefficient×parameter products for a linear-combination
+    # table cell (issue #368 example has "3.488 beta_2 + 0.28 beta_K2 + ...").
+    _MIN_COEFF_PARAM_TERMS = 2
 
     @classmethod
     def _looks_like_coefficient_table(cls, text: str) -> bool:
         stripped = text.strip()
-        if not stripped or _RELATION_RE.search(stripped):
+        if not stripped:
             return False
-        numbers = re.findall(r"[-+]?\d*\.\d+|[-+]?\d+", stripped)
-        # Three or more bare numbers and (almost) nothing else → table row.
-        if len(numbers) >= 3 and cls._COEFF_ROW_RE.match(stripped):
+        # 1) A bare numeric row with no relation operator (pure table cells).
+        if not _RELATION_RE.search(stripped):
+            numbers = re.findall(r"[-+]?\d*\.\d+|[-+]?\d+", stripped)
+            if len(numbers) >= 3 and cls._COEFF_ROW_RE.match(stripped):
+                return True
+        # 2) A linear combination of decimal-coefficient × parameter products,
+        #    even when it carries an "=" (the table lists an example formula).
+        if len(cls._COEFF_PARAM_RE.findall(stripped)) >= cls._MIN_COEFF_PARAM_TERMS:
             return True
         return False
 

@@ -172,7 +172,23 @@ def test_coefficient_row_is_flagged_as_table_derived():
     assert "table_derived_equation_candidate" in result.review_reason
 
 
-def test_normal_equation_is_not_flagged_as_table():
-    c = _make_candidate("E = m c^2 (3.1)", block_id="blk_n1")
+def test_issue_coefficient_formula_is_not_accepted():
+    # The issue's example: a linear combination of decimal-coefficient products
+    # that carries an "=" must still be treated as table-derived.
+    text = "S_g^(0) = b_1^-1 (3.488 beta_2 + 0.28 beta_K2 + 0.11 beta_3)"
+    c = _make_candidate(text, block_id="blk_coef")
+    result = GATE.process([c])[0]
+    assert result.acceptance_status != "accepted"
+    assert "table_derived_equation_candidate" in result.review_reason
+
+
+@pytest.mark.parametrize("text", [
+    "E = m c^2 (3.1)",            # normal physics equation
+    r"\Gamma = 1.16 G_F^2 m^5",  # single-letter coefficients
+    r"\alpha_s = 0.118",          # single numeric coefficient
+    "y = 2 x + 3 z",             # integer linear combination
+])
+def test_normal_equation_is_not_flagged_as_table(text):
+    c = _make_candidate(text, block_id="blk_n1")
     result = GATE.process([c])[0]
     assert "table_derived_equation_candidate" not in result.review_reason

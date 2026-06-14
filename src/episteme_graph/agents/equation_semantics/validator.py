@@ -150,6 +150,32 @@ class EquationSemanticsValidator:
                 field=f"{eid}.candidate_trace_ids",
             ))
 
+        # Issue #368: a rejected LLM label / equation_id is kept as audit
+        # metadata; surface it as a warning so the override is traceable.
+        src_loc = record.source_extraction.source_location or {}
+        rejected_label = src_loc.get("llm_rejected_label")
+        if rejected_label is not None:
+            issues.append(ValidationIssue(
+                rule_id="llm_label_overridden",
+                severity="warning",
+                message=(
+                    f"{eid} LLM-proposed label {rejected_label!r} was rejected by the "
+                    "source-aware validator and normalized away"
+                ),
+                field=f"{eid}.source_extraction.source_location.llm_rejected_label",
+            ))
+        rejected_eq_id = src_loc.get("llm_rejected_equation_id")
+        if rejected_eq_id is not None:
+            issues.append(ValidationIssue(
+                rule_id="llm_equation_id_overridden",
+                severity="warning",
+                message=(
+                    f"{eid} LLM-proposed equation_id {rejected_eq_id!r} was discarded; "
+                    "the deterministic normalized id is used instead"
+                ),
+                field=f"{eid}.source_extraction.source_location.llm_rejected_equation_id",
+            ))
+
         # source_extraction.block_id must exist
         block_id = record.source_extraction.source_location.get("block_id", "")
         if not block_id:

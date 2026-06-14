@@ -123,6 +123,29 @@ def test_build_candidates_flags_table_provenance():
     assert cand.source_location["table_provenance"]["table_id"] == "tbl_2"
 
 
+def test_table_provenance_propagates_to_acceptance_gate():
+    # Issue #368 integration: block.raw table provenance -> candidate -> gate
+    # keeps the equation out of the auto-confirmed set.
+    from episteme_graph.agents.equation_semantics.acceptance_gate import (
+        EquationAcceptanceGate,
+    )
+
+    structure = _structure()
+    tbl = _typed("e_tabcell", "a = b + c (9.1)", "equation_block", 9)
+    tbl.raw = {"container_type": "table", "in_table": True, "table_id": "tab1"}
+    structure.blocks.append(tbl)
+
+    candidates = BUILDER.build_candidates(structure)
+    classified = EquationAcceptanceGate().process(candidates)
+    cell = next(c for c in classified if c.source_location["block_id"] == "e_tabcell")
+    assert cell.acceptance_status != "accepted"
+    assert "table_derived_equation_candidate" in cell.review_reason
+
+    # a normal equation block in the same structure is still accepted
+    normal = next(c for c in classified if c.source_location["block_id"] == "e1")
+    assert normal.acceptance_status == "accepted"
+
+
 # ------------------------------------------------------------------
 # build_llm_inputs
 # ------------------------------------------------------------------

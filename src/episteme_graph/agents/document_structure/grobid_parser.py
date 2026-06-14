@@ -311,6 +311,17 @@ class GROBIDTEIParser:
 
         formula_xml_id = formula_tag.get("xml:id") or formula_tag.get("n") or ""
         block_id = f"blk_{uuid.uuid4().hex[:8]}"
+        raw = {
+            "parser_source": "grobid_tei",
+            "tei_section_id": tei_section_id,
+            "tei_formula_id": formula_xml_id,
+        }
+        # Issue #368: preserve table / container provenance so the equation
+        # semantics acceptance gate does not auto-confirm a table-cell formula
+        # as a standalone independent equation.
+        table_provenance = self._table_container_provenance(formula_tag)
+        if table_provenance:
+            raw.update(table_provenance)
         blocks.append(TypedBlock(
             block_id=block_id,
             page=1,
@@ -319,13 +330,28 @@ class GROBIDTEIParser:
             block_type="equation_block",
             section_id=section_id,
             equation_label=equation_label,
-            raw={
-                "parser_source": "grobid_tei",
-                "tei_section_id": tei_section_id,
-                "tei_formula_id": formula_xml_id,
-            },
+            raw=raw,
         ))
         return block_order + 1
+
+    @staticmethod
+    def _table_container_provenance(formula_tag) -> dict | None:
+        """Return table provenance if the formula is inside a <figure type=table>.
+
+        Walks the TEI ancestors of the formula; a ``<figure type="table">``
+        container means the formula is a table cell, not a standalone numbered
+        equation (issue #368).
+        """
+        parent = getattr(formula_tag, "parent", None)
+        while parent is not None and getattr(parent, "name", None) is not None:
+            if parent.name == "figure" and (parent.get("type") or "").lower() == "table":
+                table_id = parent.get("xml:id") or parent.get("n") or ""
+                provenance: dict = {"container_type": "table", "in_table": True}
+                if table_id:
+                    provenance["table_id"] = str(table_id)
+                return provenance
+            parent = getattr(parent, "parent", None)
+        return None
 
     def _process_figure(
         self,
@@ -339,25 +365,38 @@ class GROBIDTEIParser:
 
         # figDesc = figure/table caption
         desc_tag = fig_tag.find("figDesc")
-        if not desc_tag:
-            return block_order
-        text = desc_tag.get_text(separator=" ", strip=True)
-        if not text:
-            return block_order
+        if desc_tag:
+            text = desc_tag.get_text(separator=" ", strip=True)
+            if text:
+                block_type = "table_caption" if fig_type == "table" else "figure_caption"
+                block_id = f"blk_{uuid.uuid4().hex[:8]}"
+                blocks.append(TypedBlock(
+                    block_id=block_id,
+                    page=1,
+                    order=block_order,
+                    text=text,
+                    block_type=block_type,
+                    section_id=section_id,
+                    raw={
+                        "parser_source": "grobid_tei",
+                        "tei_section_id": tei_section_id,
+                        "tei_fig_type": fig_type,
+                    },
+                ))
+                block_order += 1
 
-        block_type = "table_caption" if fig_type == "table" else "figure_caption"
-        block_id = f"blk_{uuid.uuid4().hex[:8]}"
-        blocks.append(TypedBlock(
-            block_id=block_id,
-            page=1,
-            order=block_order,
-            text=text,
-            block_type=block_type,
-            section_id=section_id,
-            raw={
-                "parser_source": "grobid_tei",
-                "tei_section_id": tei_section_id,
-                "tei_fig_type": fig_type,
-            },
-        ))
-        return block_order + 1
+        # Issue #368: formulas nested inside a <figure type="table"> are table
+        # cells, not standalone numbered equations. Emit them so they are not
+        # lost, but with table provenance (attached by _process_formula) so the
+        # equation semantics gate keeps them out of the auto-confirmed set.
+        if fig_type == "table":
+            for formula_tag in fig_tag.find_all("formula"):
+                block_order = self._process_formula(
+                    formula_tag=formula_tag,
+                    blocks=blocks,
+                    section_id=section_id,
+                    block_order=block_order,
+                    tei_section_id=tei_section_id,
+                )
+
+        return block_order
