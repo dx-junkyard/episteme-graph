@@ -32,7 +32,7 @@ def _import_artifacts():
     return export_artifacts
 
 
-def _import_completeness():
+def _import_completeness_mod():
     # Load the dependency-free leaf module directly so the test does not require
     # the full pipeline package (orchestrator / agents) to be importable.
     import importlib.util
@@ -41,7 +41,11 @@ def _import_completeness():
     spec = importlib.util.spec_from_file_location("_dp_completeness_test", str(path))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return mod.analyze_document_completeness
+    return mod
+
+
+def _import_completeness():
+    return _import_completeness_mod().analyze_document_completeness
 
 
 def _import_export_module():
@@ -217,6 +221,49 @@ def _evidence(pages: list[int]) -> dict:
     }
 
 
+def _complete_eq_sequence() -> dict:
+    """(3.1)…(3.36) contiguous, a Conclusion, document end reached (issue #373).
+
+    No prose reference to a missing equation and no terminal anomaly — the lone
+    fact that the run ends at (3.36) must not invent (3.37) nor suspect a tail
+    truncation.
+    """
+    blocks = [_heading("h_intro", 1, "1 Introduction")]
+    blocks += [_para(f"p_{p}", p, "body text") for p in range(1, 7)]
+    blocks += [_eq_block(f"eq_3_{i}", (i % 6) + 1, f"(3.{i})") for i in range(1, 37)]
+    blocks += [_heading("h_concl", 6, "5 Conclusion")]
+    return {
+        "blocks": blocks,
+        "sections": [
+            {"section_id": "h_intro", "title": "1 Introduction", "level": 1,
+             "order": 0, "page_start": 1, "page_end": 5},
+            {"section_id": "h_concl", "title": "5 Conclusion", "level": 1,
+             "order": 1, "page_start": 6, "page_end": 6},
+        ],
+        "metadata": {"title": "Complete", "authors": ["Alice"], "pages": 6},
+    }
+
+
+def _tail_cut_no_reference() -> dict:
+    """(3.1)…(3.36) contiguous, NO Conclusion, document end not reached, and no
+    prose reference to a later equation (issue #373).
+
+    Confirmed missing labels must stay empty while a tail truncation is
+    suspected from the combination of deterministic signals.
+    """
+    blocks = [_heading("h_intro", 1, "1 Introduction")]
+    blocks += [_para("p_1", 1, "body"), _para("p_2", 2, "body"), _para("p_3", 3, "body")]
+    blocks += [_eq_block(f"eq_3_{i}", 1 if i < 18 else 3, f"(3.{i})") for i in range(1, 37)]
+    return {
+        "blocks": blocks,
+        "sections": [
+            {"section_id": "h_intro", "title": "1 Introduction", "level": 1,
+             "order": 0, "page_start": 1, "page_end": 3},
+        ],
+        "metadata": {"title": "Truncated", "authors": ["Alice"], "pages": 20},
+    }
+
+
 # ---------------------------------------------------------------------------
 # analyze_document_completeness (core)
 # ---------------------------------------------------------------------------
@@ -343,6 +390,115 @@ class TestCompleteness:
 
 
 # ---------------------------------------------------------------------------
+# Equation continuity separation + tail-truncation suspicion (issue #373)
+# ---------------------------------------------------------------------------
+
+class TestEquationContinuitySeparation:
+    def test_unreferenced_tail_not_added_to_missing_labels(self):
+        analyze = _import_completeness()
+        rep = analyze(_complete_eq_sequence(), None, document_id="doc_seq")
+        eq = rep["equation_label_continuity"]
+        # The run ends at (3.36): (3.37) is neither an internal gap nor referenced.
+        assert eq["missing_labels"] == []
+        assert eq["internal_gaps"] == []
+        assert "(3.37)" not in eq["missing_labels"]
+        assert rep["tail_truncation"]["suspected"] is False
+
+    def test_referenced_missing_are_confirmed_not_speculative(self):
+        analyze = _import_completeness()
+        rep = analyze(_truncated_structure(), None, document_id="doc_bad")
+        eq = rep["equation_label_continuity"]
+        assert eq["referenced_missing_labels"] == ["(3.38)", "(3.39)", "(3.40)"]
+        assert eq["missing_labels"] == ["(3.38)", "(3.39)", "(3.40)"]
+        assert eq["internal_gaps"] == []
+        # (3.37) is never invented even though the tail is truncated.
+        assert "(3.37)" not in eq["missing_labels"]
+
+    def test_internal_gap_is_reported_separately(self):
+        analyze = _import_completeness()
+        structure = _complete_eq_sequence()
+        # Drop (3.4) → an internal gap inside the observed run.
+        structure["blocks"] = [b for b in structure["blocks"] if b.get("block_id") != "eq_3_4"]
+        rep = analyze(structure, None, document_id="doc_gap")
+        eq = rep["equation_label_continuity"]
+        assert "(3.4)" in eq["internal_gaps"]
+        assert "(3.4)" in eq["missing_labels"]
+
+    def test_tail_truncation_suspected_without_confirmed_missing(self):
+        analyze = _import_completeness()
+        rep = analyze(_tail_cut_no_reference(), None, document_id="doc_cut")
+        tail = rep["tail_truncation"]
+        assert tail["suspected"] is True
+        assert "document_end_not_reached" in tail["signals"]
+        assert "terminal_section_missing" in tail["signals"]
+        assert tail["confidence"] >= 0.5
+        # No confirmed missing labels are invented.
+        assert rep["equation_label_continuity"]["missing_labels"] == []
+        assert "tail_truncation_suspected" in rep["review_reasons"]
+
+    def test_complete_document_has_no_tail_truncation(self):
+        analyze = _import_completeness()
+        rep = analyze(_complete_structure(), None, document_id="doc_ok")
+        assert rep["tail_truncation"]["suspected"] is False
+        assert rep["tail_truncation"]["signals"] == []
+        assert rep["tail_truncation"]["confidence"] == 0.0
+
+    def test_tex_unclosed_align_raises_environment_signal(self):
+        analyze = _import_completeness()
+        tex = r"\begin{align} a &= b \\ c &= d "  # never closed → truncated mid-align
+        rep = analyze(_tail_cut_no_reference(), None, document_id="doc_tex", tex_source=tex)
+        tail = rep["tail_truncation"]
+        assert "equation_environment_cut_at_boundary" in tail["signals"]
+        assert tail["unclosed_math_environments"] == ["align"]
+        assert tail["suspected"] is True
+
+    def test_single_signal_does_not_conclude_truncation(self):
+        # Terminal section missing alone (one signal) must not conclude tail
+        # truncation (issue #373: never conclude from a single signal).
+        analyze = _import_completeness()
+        structure = _full_20page_structure()
+        # Remove the Conclusion only; the document still reaches its end.
+        structure["blocks"] = [b for b in structure["blocks"] if b.get("block_id") != "h_concl"]
+        structure["sections"] = [s for s in structure["sections"] if s["section_id"] != "h_concl"]
+        rep = analyze(structure, None, document_id="doc_one")
+        tail = rep["tail_truncation"]
+        assert tail["signals"] == ["terminal_section_missing"]
+        assert tail["suspected"] is False
+
+
+class TestTexEnvironmentDetection:
+    def test_complete_align_is_balanced(self):
+        mod = _import_completeness_mod()
+        assert mod.detect_unclosed_math_environments(
+            r"\begin{align} a &= b \end{align}"
+        ) == []
+
+    def test_unclosed_align_detected(self):
+        mod = _import_completeness_mod()
+        assert mod.detect_unclosed_math_environments(
+            r"\begin{align} a &= b \\ c &= d"
+        ) == ["align"]
+
+    def test_unclosed_multline_detected(self):
+        mod = _import_completeness_mod()
+        assert mod.detect_unclosed_math_environments(
+            r"\begin{multline} x + y + z"
+        ) == ["multline"]
+
+    def test_unbalanced_prose_environment_ignored(self):
+        # Only math environments count; an unbalanced itemize is not truncation.
+        mod = _import_completeness_mod()
+        assert mod.detect_unclosed_math_environments(
+            r"\begin{itemize}\item a \begin{equation} x=y \end{equation}"
+        ) == []
+
+    def test_no_tex_returns_empty(self):
+        mod = _import_completeness_mod()
+        assert mod.detect_unclosed_math_environments(None) == []
+        assert mod.detect_unclosed_math_environments("") == []
+
+
+# ---------------------------------------------------------------------------
 # build_document_boundary
 # ---------------------------------------------------------------------------
 
@@ -436,6 +592,14 @@ class TestBoundaryFixes:
         assert b["review_reason"] == []
         assert b["authors"] == ["Alice", "Bob"]
 
+    def test_tail_truncation_propagates_to_boundary(self):
+        # Issue #373: a suspected tail truncation flags the boundary for review.
+        ea = _import_artifacts()
+        b = ea.build_document_boundary(_tail_cut_no_reference(), document_id="doc_cut")
+        assert b["completeness"]["tail_truncation"]["suspected"] is True
+        assert "tail_truncation_suspected" in b["review_reason"]
+        assert b["needs_review"] is True
+
 
 # ---------------------------------------------------------------------------
 # export_validation.json completeness section
@@ -487,6 +651,33 @@ class TestExportValidationCompleteness:
             w["code"] for w in ev["warnings"] if w["code"].startswith("DOCUMENT_")
         }
         assert completeness_codes == set()
+
+    def test_tail_truncation_blocks_publish_ready(self):
+        # Issue #373: a suspected tail truncation (no confirmed missing label)
+        # emits DOCUMENT_TAIL_TRUNCATION_SUSPECTED and blocks publish_ready.
+        analyze = _import_completeness()
+        rep = analyze(_tail_cut_no_reference(), None, document_id="doc_cut")
+        ev = self._validate([rep])
+        codes = {w["code"] for w in ev["warnings"]}
+        assert "DOCUMENT_TAIL_TRUNCATION_SUSPECTED" in codes
+        assert ev["publish_ready"] is False
+        doc = ev["completeness"]["documents"][0]
+        assert doc["tail_truncation_suspected"] is True
+        # Confirmed missing labels stay empty — (3.37) is not invented.
+        assert doc["missing_equation_labels"] == []
+
+    def test_confirmed_missing_and_tail_truncation_both_reported(self):
+        # #366 fixture: (3.38)-(3.40) referenced → confirmed discontinuity AND a
+        # suspected tail truncation, as distinct warning codes.
+        analyze = _import_completeness()
+        rep = analyze(_truncated_structure(), _evidence([1, 3]), document_id="doc_bad")
+        ev = self._validate([rep])
+        codes = {w["code"] for w in ev["warnings"]}
+        assert "DOCUMENT_EQUATION_LABEL_DISCONTINUITY" in codes
+        assert "DOCUMENT_TAIL_TRUNCATION_SUSPECTED" in codes
+        doc = ev["completeness"]["documents"][0]
+        assert "(3.39)" in doc["referenced_missing_labels"]
+        assert "(3.37)" not in doc["missing_equation_labels"]
 
     def test_full_document_with_sparse_evidence_stays_publish_ready(self):
         # Issue #371: a fully-ingested 20-page document with evidence on only
@@ -564,6 +755,18 @@ class TestPipelineGateCompleteness:
             w["code"] for w in res["warnings"] if w["code"].startswith("DOCUMENT_")
         }
         assert completeness_codes == set()
+
+    def test_gate_flags_tail_truncation(self):
+        # Issue #373: the gate surfaces DOCUMENT_TAIL_TRUNCATION_SUSPECTED and
+        # blocks publish_ready when a tail truncation is suspected.
+        mod = _import_gate()
+        artifacts = {
+            "document_structure": self._struct_dict(_tail_cut_no_reference(), "doc_cut"),
+        }
+        res = mod.ExportValidationGate().run(artifacts=artifacts).to_dict()
+        assert res["document_completeness"]["all_documents_complete"] is False
+        assert res["publish_ready"] is False
+        assert "DOCUMENT_TAIL_TRUNCATION_SUSPECTED" in {w["code"] for w in res["warnings"]}
 
     def test_gate_flags_truncated_ingest(self):
         # Issue #371: body content only on pages 1 and 3 of 20 → the ingest

@@ -45,6 +45,35 @@ EVIDENCE_SPARSE_RATIO = 0.5
 # dedicated conclusion.
 MIN_CONTENT_BLOCKS_FOR_CHECKS = 8
 
+# A detected boundary spanning far fewer pages than the document total is a
+# tail-truncation signal (issue #373), matching the export boundary heuristic.
+MIN_BOUNDARY_SPAN_RATIO = 0.5
+
+# Tail-truncation (issue #373): a *suspicion* — not a confirmed missing label —
+# that the document was cut off before its end. Combine several deterministic
+# signals; never conclude from a single weak one. ``suspected`` requires at
+# least two signals and a combined confidence above the threshold.
+_TAIL_TRUNCATION_SIGNAL_WEIGHTS = {
+    "equation_environment_cut_at_boundary": 0.5,
+    "referenced_equation_not_ingested": 0.4,
+    "parser_ended_mid_equation": 0.35,
+    "document_end_not_reached": 0.3,
+    "source_offset_far_from_end": 0.3,
+    "terminal_section_missing": 0.2,
+    "boundary_span_short": 0.2,
+}
+_TAIL_TRUNCATION_MIN_SIGNALS = 2
+_TAIL_TRUNCATION_CONFIDENCE_THRESHOLD = 0.5
+
+# TeX math environments whose unclosed \begin (issue #373: an align block cut at
+# the ingest boundary) is a strong, ground-truth-free truncation signal.
+_MATH_ENV_BASE = {
+    "align", "equation", "gather", "multline", "eqnarray", "flalign",
+    "alignat", "math", "displaymath", "split",
+}
+_TEX_BEGIN_RE = re.compile(r"\\begin\s*\{([A-Za-z*]+)\}")
+_TEX_END_RE = re.compile(r"\\end\s*\{([A-Za-z*]+)\}")
+
 # A parsed equation label token: "(3.36)" / "3.36" / "(12)".
 _EQ_LABEL_RE = re.compile(r"^\(?\s*(?:(\d+)\.)?(\d+)\s*\)?$")
 
@@ -110,13 +139,45 @@ def _evidence_pages(evidence: dict | None) -> set[int]:
     return pages
 
 
+def _is_math_env(env: str) -> bool:
+    return env.rstrip("*") in _MATH_ENV_BASE
+
+
+def detect_unclosed_math_environments(tex_source: Any) -> list[str]:
+    """Return math environments left unclosed in ``tex_source`` (issue #373).
+
+    A ``\\begin{align}`` with no matching ``\\end{align}`` means the LaTeX source
+    was cut inside an equation block (the #366 failure mode). Only math
+    environments are considered, so unbalanced prose environments do not raise a
+    false truncation signal. Labelled-vs-unlabelled equations are irrelevant
+    here — this works purely on environment balance.
+    """
+    text = str(tex_source or "")
+    if not text:
+        return []
+    begins: dict[str, int] = {}
+    for m in _TEX_BEGIN_RE.finditer(text):
+        env = m.group(1)
+        begins[env] = begins.get(env, 0) + 1
+    ends: dict[str, int] = {}
+    for m in _TEX_END_RE.finditer(text):
+        env = m.group(1)
+        ends[env] = ends.get(env, 0) + 1
+    unclosed = [
+        env for env, n in begins.items()
+        if _is_math_env(env) and n > ends.get(env, 0)
+    ]
+    return sorted(unclosed)
+
+
 def analyze_document_completeness(
     structure: Any,
     evidence: Any = None,
     *,
     document_id: str,
+    tex_source: Any = None,
 ) -> dict:
-    """Return a JSON-serialisable document-completeness report (issues #366 / #371).
+    """Return a JSON-serialisable document-completeness report (issues #366 / #371 / #373).
 
     ``structure`` is a DocumentStructureResult dict; ``evidence`` is an optional
     EvidenceRegistryResult dict. The pass/fail signal for the document body is
@@ -124,8 +185,13 @@ def analyze_document_completeness(
     document end?), reported under ``ingest_coverage``. The EvidenceRegistry page
     distribution is reported separately under ``evidence_page_distribution`` as
     audit-only metadata and never sets ``complete=false`` (issue #371).
-    ``complete`` is False — and ``review_reasons`` non-empty — when any check
-    fails.
+
+    Issue #373 separates three equation-continuity concepts — internal gaps,
+    prose-referenced confirmed-missing labels, and a *suspected* tail truncation
+    (a combination of deterministic signals, never a guessed missing label). An
+    optional ``tex_source`` (LaTeX) lets an unclosed ``align``/``equation``
+    environment raise the strongest truncation signal. ``complete`` is False —
+    and ``review_reasons`` non-empty — when any check fails.
     """
     structure = structure if isinstance(structure, dict) else {}
     evidence = evidence if isinstance(evidence, dict) else None
@@ -133,6 +199,11 @@ def analyze_document_completeness(
     sections = structure.get("sections") or []
     metadata = structure.get("metadata") or {}
     pages_total = metadata.get("pages") if isinstance(metadata, dict) else None
+    # TeX source may be passed explicitly or carried on the structure metadata.
+    if tex_source is None and isinstance(metadata, dict):
+        tex_source = metadata.get("tex_source") or metadata.get("source_tex")
+    if tex_source is None:
+        tex_source = structure.get("tex_source") or structure.get("source_tex")
     parser_pages_processed = None
     if isinstance(metadata, dict):
         for key in ("parser_pages_processed", "pages_processed", "pages_parsed"):
@@ -172,12 +243,21 @@ def analyze_document_completeness(
             if pair[0] in defined and pair not in defined_pairs:
                 referenced_missing.add(pair)
 
-    missing_pairs: set[tuple[int, int]] = set(referenced_missing)
+    # Internal gaps: minors missing *inside* an observed (N.1)…(N.k) run. These
+    # are confirmed missing because a later label in the same run was ingested.
+    # An unreferenced tail beyond the last observed label (e.g. (3.37) after a
+    # run ending at (3.36)) is NOT added here — that is only a truncation
+    # suspicion, never a guessed missing label (issue #373).
+    internal_gap_pairs: set[tuple[int, int]] = set()
     for major, minors in defined.items():
         for minor in range(1, max(minors)):
             if minor not in minors:
-                missing_pairs.add((major, minor))
+                internal_gap_pairs.add((major, minor))
+
+    # Confirmed missing = internal gaps ∪ prose-referenced-but-not-ingested.
+    missing_pairs: set[tuple[int, int]] = set(referenced_missing) | internal_gap_pairs
     missing_labels = [_label_text(maj, mn) for maj, mn in sorted(missing_pairs)]
+    internal_gap_labels = [_label_text(maj, mn) for maj, mn in sorted(internal_gap_pairs)]
     equation_has_gaps = bool(missing_labels)
 
     # --- terminal section presence ------------------------------------------
@@ -251,6 +331,77 @@ def analyze_document_completeness(
         evidence_distribution_ratio = round(len(evidence_pages) / pages_total, 4)
         evidence_sparse = evidence_distribution_ratio < EVIDENCE_SPARSE_RATIO
 
+    # --- tail-truncation suspicion (issue #373) -----------------------------
+    # Combine several deterministic signals; never conclude from one alone, and
+    # never invent a missing label. The signals have distinct provenance from
+    # confirmed missing labels, so they are reported as a *suspicion*.
+    unclosed_envs = detect_unclosed_math_environments(tex_source)
+
+    # parser ended inside an equation: the last block in reading order is an
+    # equation block while the ingest did not reach the document end.
+    parser_ended_mid_equation = False
+    if block_list and enough_content and not reached_document_end:
+        last_block = max(
+            block_list,
+            key=lambda b: (b.get("page") or 0, b.get("order") or 0),
+        )
+        if last_block.get("block_type") == "equation_block":
+            parser_ended_mid_equation = True
+
+    # boundary span far shorter than the document (collapsed boundary).
+    boundary_span_short = False
+    sec_starts = [
+        int(s["page_start"]) for s in sections
+        if isinstance(s, dict) and isinstance(s.get("page_start"), int)
+    ]
+    sec_ends = [
+        int(s["page_end"]) for s in sections
+        if isinstance(s, dict) and isinstance(s.get("page_end"), int)
+    ]
+    if sec_starts and sec_ends and isinstance(pages_total, int) and pages_total > 0:
+        span = max(sec_ends) - min(sec_starts) + 1
+        if span < pages_total * MIN_BOUNDARY_SPAN_RATIO:
+            boundary_span_short = True
+
+    # source byte offset far short of the input end (when the parser records it).
+    source_offset_far_from_end = False
+    if isinstance(metadata, dict):
+        total_bytes = metadata.get("source_bytes_total")
+        done_bytes = metadata.get("source_bytes_processed")
+        if done_bytes is None:
+            done_bytes = metadata.get("last_source_offset")
+        if (
+            isinstance(total_bytes, int) and total_bytes > 0
+            and isinstance(done_bytes, int)
+            and done_bytes / total_bytes < MIN_INGEST_REACH_RATIO
+        ):
+            source_offset_far_from_end = True
+
+    tail_signals: list[str] = []
+    if unclosed_envs:
+        tail_signals.append("equation_environment_cut_at_boundary")
+    if referenced_missing:
+        tail_signals.append("referenced_equation_not_ingested")
+    if parser_ended_mid_equation:
+        tail_signals.append("parser_ended_mid_equation")
+    if enough_content and not reached_document_end:
+        tail_signals.append("document_end_not_reached")
+    if source_offset_far_from_end:
+        tail_signals.append("source_offset_far_from_end")
+    if terminal_missing:
+        tail_signals.append("terminal_section_missing")
+    if boundary_span_short:
+        tail_signals.append("boundary_span_short")
+
+    tail_confidence = round(
+        min(0.99, sum(_TAIL_TRUNCATION_SIGNAL_WEIGHTS.get(s, 0.0) for s in tail_signals)),
+        2,
+    )
+    tail_truncation_suspected = bool(
+        len(tail_signals) >= _TAIL_TRUNCATION_MIN_SIGNALS
+        and tail_confidence >= _TAIL_TRUNCATION_CONFIDENCE_THRESHOLD
+    )
+
     review_reasons: list[str] = []
     if equation_has_gaps:
         review_reasons.append("equation_label_discontinuity")
@@ -258,6 +409,8 @@ def analyze_document_completeness(
         review_reasons.append("terminal_section_missing")
     if not ingest_sufficient:
         review_reasons.append("ingest_incomplete")
+    if tail_truncation_suspected:
+        review_reasons.append("tail_truncation_suspected")
 
     return {
         "document_id": document_id,
@@ -266,10 +419,17 @@ def analyze_document_completeness(
         "equation_label_continuity": {
             "observed_labels": observed_labels,
             "missing_labels": missing_labels,
+            "internal_gaps": internal_gap_labels,
             "referenced_missing_labels": [
                 _label_text(maj, mn) for maj, mn in sorted(referenced_missing)
             ],
             "has_gaps": equation_has_gaps,
+        },
+        "tail_truncation": {
+            "suspected": tail_truncation_suspected,
+            "confidence": tail_confidence if tail_signals else 0.0,
+            "signals": tail_signals,
+            "unclosed_math_environments": unclosed_envs,
         },
         "terminal_section": {
             "present": terminal_present,

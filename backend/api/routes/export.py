@@ -1355,11 +1355,19 @@ def _build_completeness_report(completeness_reports: list[dict] | None) -> dict:
         terminal = rep.get("terminal_section") or {}
         ingest = rep.get("ingest_coverage") or {}
         evidence_dist = rep.get("evidence_page_distribution") or {}
+        tail = rep.get("tail_truncation") or {}
         documents.append({
             "document_id": rep.get("document_id"),
             "complete": complete,
             "review_reasons": list(rep.get("review_reasons") or []),
             "missing_equation_labels": list(eq.get("missing_labels") or []),
+            "internal_gap_labels": list(eq.get("internal_gaps") or []),
+            "referenced_missing_labels": list(eq.get("referenced_missing_labels") or []),
+            # Tail truncation is a *suspicion* (issue #373), kept distinct from
+            # confirmed missing labels.
+            "tail_truncation_suspected": bool(tail.get("suspected")),
+            "tail_truncation_confidence": tail.get("confidence"),
+            "tail_truncation_signals": list(tail.get("signals") or []),
             "terminal_section_present": bool(terminal.get("present")),
             "reached_document_end": bool(ingest.get("reached_document_end", True)),
             "last_ingested_page": ingest.get("last_ingested_page"),
@@ -1572,6 +1580,18 @@ def _validate_export_references(
                 ),
                 "document_boundary.json",
                 "$.completeness.ingest_coverage",
+                doc_id,
+            )
+        if doc["tail_truncation_suspected"]:
+            warn(
+                "DOCUMENT_TAIL_TRUNCATION_SUSPECTED",
+                (
+                    f"document {doc_id!r} tail truncation suspected (confidence "
+                    f"{doc['tail_truncation_confidence']}); signals "
+                    f"{doc['tail_truncation_signals']}"
+                ),
+                "document_boundary.json",
+                "$.completeness.tail_truncation",
                 doc_id,
             )
 

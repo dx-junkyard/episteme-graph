@@ -673,6 +673,19 @@ class ExportValidationGate:
                 path="$.completeness.ingest_coverage",
                 source_stage="export_validation",
             ))
+        tail = report.get("tail_truncation") or {}
+        if tail.get("suspected"):
+            warnings.append(ValidationEntry(
+                code="DOCUMENT_TAIL_TRUNCATION_SUSPECTED",
+                message=(
+                    f"document {document_id!r} tail truncation suspected "
+                    f"(confidence {tail.get('confidence')}); signals "
+                    f"{tail.get('signals')}"
+                ),
+                artifact="document_structure",
+                path="$.completeness.tail_truncation",
+                source_stage="export_validation",
+            ))
         return result
 
     def _aggregate_artifact_issues(
