@@ -113,6 +113,29 @@ def test_to_json_round_trip(agent, fake_pdf):
     assert len(d["blocks"]) == len(result.blocks)
 
 
+def test_metadata_uses_source_page_count_not_last_block_page(agent, fake_pdf):
+    page_heights = {page: 792.0 for page in range(1, 21)}
+    with patch.object(agent._extractor, "extract_blocks", return_value=MOCK_BLOCKS), \
+         patch.object(agent._extractor, "get_page_heights", return_value=page_heights):
+        result = agent.run(fake_pdf, config={"max_pages": 3})
+
+    assert result.metadata.pages == 20
+    assert result.metadata.parser_pages_processed == 3
+    assert result.metadata.parser_reached_eof is False
+    assert max(block.page for block in result.blocks) == 3
+
+
+def test_metadata_records_full_scan_when_trailing_pages_are_blank(agent, fake_pdf):
+    page_heights = {page: 792.0 for page in range(1, 21)}
+    with patch.object(agent._extractor, "extract_blocks", return_value=MOCK_BLOCKS), \
+         patch.object(agent._extractor, "get_page_heights", return_value=page_heights):
+        result = agent.run(fake_pdf)
+
+    assert result.metadata.pages == 20
+    assert result.metadata.parser_pages_processed == 20
+    assert result.metadata.parser_reached_eof is True
+
+
 def test_grobid_hybrid_alignment_updates_block_and_section_pages():
     from episteme_graph.agents.document_structure.agent import DocumentStructureAgent
     from episteme_graph.agents.document_structure.schema import Section, TypedBlock

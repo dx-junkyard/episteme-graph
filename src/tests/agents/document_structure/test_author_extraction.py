@@ -156,6 +156,28 @@ class TestSplit:
         assert names == ["Alice Smith", "Bob Jones", "Carol Lee"]
         assert parts == 3
 
+    def test_preserves_inverted_surname_given_names(self):
+        names, parts = split_author_list("Smith, John and Doe, Jane")
+        assert names == ["Smith, John", "Doe, Jane"]
+        assert parts == 2
+
+    def test_preserves_inverted_initials(self):
+        names, parts = split_author_list("Smith, J. and Doe, J. A.")
+        assert names == ["Smith, J.", "Doe, J. A."]
+        assert parts == 2
+
+    def test_preserves_accented_inverted_names_separated_by_semicolon(self):
+        names, parts = split_author_list(
+            "García-Pérez, María; Dubois, Jean-Pierre"
+        )
+        assert names == ["García-Pérez, María", "Dubois, Jean-Pierre"]
+        assert parts == 2
+
+    def test_single_inverted_name_is_one_author(self):
+        names, parts = split_author_list("Smith, John")
+        assert names == ["Smith, John"]
+        assert parts == 1
+
 
 # ---------------------------------------------------------------------------
 # Provenance resolution

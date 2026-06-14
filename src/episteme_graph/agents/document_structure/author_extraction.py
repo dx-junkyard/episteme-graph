@@ -65,8 +65,11 @@ _NAME_RE = re.compile(
     rf"^(?:{_CJK}+(?:\s+{_CJK}+)*|{_LATIN_TOKEN}(?:[\s\-]{_LATIN_TOKEN})*)$"
 )
 
-# Separators between names in a byline / TeX author group.
-_NAME_SEPARATOR_RE = re.compile(r"\s*(?:,|;|&|\band\b|\\and)\s*", re.IGNORECASE)
+# Strong separators are unambiguous author boundaries. A comma is handled
+# separately because it can either separate authors or form "Surname, Given".
+_STRONG_NAME_SEPARATOR_RE = re.compile(
+    r"\s*(?:;|&|\band\b|\\and)\s*", re.IGNORECASE
+)
 
 
 @dataclass
@@ -118,10 +121,33 @@ def looks_like_person_name(name: Any) -> bool:
     low = s.lower()
     if any(ch.isdigit() for ch in s) or "@" in s or "http" in low or "et al" in low:
         return False
+    if s.count(",") == 1:
+        surname, given = (part.strip() for part in s.split(",", 1))
+        return bool(
+            surname
+            and given
+            and _NAME_RE.match(surname)
+            and _NAME_RE.match(given)
+        )
     tokens = s.split()
     if len(tokens) > 5:
         return False
     return bool(_NAME_RE.match(s))
+
+
+def _split_comma_group(group: str) -> list[str]:
+    comma_parts = [part.strip() for part in group.split(",") if part.strip()]
+    if len(comma_parts) <= 1:
+        return comma_parts
+    if len(comma_parts) == 2:
+        left, right = comma_parts
+        if (
+            len(left.split()) == 1
+            and _NAME_RE.match(left)
+            and _NAME_RE.match(right)
+        ):
+            return [f"{left}, {right}"]
+    return comma_parts
 
 
 def split_author_list(text: Any) -> tuple[list[str], int]:
@@ -134,7 +160,15 @@ def split_author_list(text: Any) -> tuple[list[str], int]:
     raw = normalize_author_name(text)
     if not raw:
         return [], 0
-    parts = [p.strip() for p in _NAME_SEPARATOR_RE.split(raw) if p.strip()]
+    strong_groups = [
+        part.strip() for part in _STRONG_NAME_SEPARATOR_RE.split(raw) if part.strip()
+    ]
+    parts = [
+        part
+        for group in strong_groups
+        for part in _split_comma_group(group)
+        if part
+    ]
     if not parts:
         return [], 0
     names: list[str] = []

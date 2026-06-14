@@ -22,6 +22,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "backend" / "api"))
@@ -388,6 +390,36 @@ class TestCompleteness:
         assert ingest["sufficient"] is True
         assert "ingest_incomplete" not in rep["review_reasons"]
 
+    @pytest.mark.parametrize("last_page", [15, 16, 17, 19])
+    def test_fractional_reach_never_proves_document_end(self, last_page):
+        analyze = _import_completeness()
+        structure = _full_20page_structure()
+        structure["blocks"] = [
+            block for block in structure["blocks"]
+            if block.get("page", 0) <= last_page
+        ]
+        structure["sections"] = [
+            section for section in structure["sections"]
+            if section.get("page_start", 0) <= last_page
+        ]
+        rep = analyze(structure, None, document_id=f"doc_{last_page}")
+        ingest = rep["ingest_coverage"]
+        assert ingest["reached_document_end"] is False
+        assert ingest["sufficient"] is False
+        assert ingest["trailing_uningested_page_ranges"] == [
+            [last_page + 1, 20]
+        ]
+        assert "ingest_incomplete" in rep["review_reasons"]
+
+    def test_parser_eof_allows_blank_trailing_pages(self):
+        analyze = _import_completeness()
+        structure = _short_ingest_structure(20)
+        structure["metadata"]["parser_pages_processed"] = 20
+        structure["metadata"]["parser_reached_eof"] = True
+        rep = analyze(structure, None, document_id="doc_blank_tail")
+        assert rep["ingest_coverage"]["reached_document_end"] is True
+        assert rep["ingest_coverage"]["trailing_uningested_page_ranges"] == []
+
 
 # ---------------------------------------------------------------------------
 # Equation continuity separation + tail-truncation suspicion (issue #373)
@@ -491,6 +523,26 @@ class TestTexEnvironmentDetection:
         assert mod.detect_unclosed_math_environments(
             r"\begin{itemize}\item a \begin{equation} x=y \end{equation}"
         ) == []
+
+    def test_reversed_end_then_begin_is_detected(self):
+        mod = _import_completeness_mod()
+        assert mod.detect_unclosed_math_environments(
+            r"\end{align}\begin{align}"
+        ) == ["align"]
+
+    def test_commented_environment_is_ignored(self):
+        mod = _import_completeness_mod()
+        assert mod.detect_unclosed_math_environments(
+            "% \\\\begin{align}\nplain text"
+        ) == []
+
+    def test_precomputed_tex_signal_is_used_by_pipeline_shape(self):
+        analyze = _import_completeness()
+        structure = _tail_cut_no_reference()
+        structure["metadata"]["unclosed_math_environments"] = ["align"]
+        rep = analyze(structure, None, document_id="doc_precomputed")
+        assert rep["tail_truncation"]["unclosed_math_environments"] == ["align"]
+        assert "equation_environment_cut_at_boundary" in rep["tail_truncation"]["signals"]
 
     def test_no_tex_returns_empty(self):
         mod = _import_completeness_mod()
