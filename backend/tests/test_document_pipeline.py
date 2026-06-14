@@ -242,6 +242,8 @@ def test_tex_archive_builds_document_structure_with_sections_and_equations():
     assert structure.document_id == "doc-tex"
     assert structure.metadata.title == "Consistency Relations"
     assert structure.metadata.authors == ["A. Author", "B. Writer"]
+    assert structure.metadata.author_extraction["source"] == "tex_author"
+    assert structure.metadata.author_extraction["needs_review"] is False
     assert [s.title for s in structure.sections] == ["Introduction", "Result"]
     equation_blocks = [b for b in structure.blocks if b.block_type == "equation_block"]
     assert any("R = H^2" in b.text for b in equation_blocks)
@@ -259,6 +261,57 @@ def test_tex_archive_builds_document_structure_with_sections_and_equations():
         if b.raw.get("refs")
     )
     assert all(b.raw.get("parser_source") == "tex_archive" for b in structure.blocks)
+
+
+def test_tex_archive_preserves_inverted_authors_and_provenance():
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    archive = _make_tex_archive({
+        "main.tex": r"""
+            \documentclass{article}
+            \title{Inverted Authors}
+            \author{Smith, John \and Doe, Jane}
+            \begin{document}
+            \maketitle
+            \section{Introduction}
+            Body.
+            \end{document}
+        """,
+    })
+    structure = build_structure_from_tex_archive(
+        archive, document_id="doc-authors", source_file="paper.tar.gz"
+    )
+
+    assert structure.metadata.authors == ["Smith, John", "Doe, Jane"]
+    assert structure.metadata.author_extraction["source"] == "tex_author"
+    restored = type(structure).from_dict(structure.to_dict())
+    assert restored.metadata.authors == ["Smith, John", "Doe, Jane"]
+    assert restored.metadata.author_extraction["source"] == "tex_author"
+
+
+def test_tex_archive_records_unclosed_math_environment_for_completeness():
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+    from core.document_pipeline.completeness import analyze_document_completeness
+
+    archive = _make_tex_archive({
+        "main.tex": r"""
+            \documentclass{article}
+            \begin{document}
+            \section{Result}
+            \begin{align}
+            a &= b
+        """,
+    })
+    structure = build_structure_from_tex_archive(
+        archive, document_id="doc-cut-align", source_file="paper.tar.gz"
+    )
+
+    assert structure.metadata.unclosed_math_environments == ["align"]
+    report = analyze_document_completeness(
+        structure.to_dict(), document_id=structure.document_id
+    )
+    assert report["tail_truncation"]["unclosed_math_environments"] == ["align"]
+    assert "equation_environment_cut_at_boundary" in report["tail_truncation"]["signals"]
 
 
 def test_tex_archive_wraps_alignment_equations_for_rendering():
@@ -462,10 +515,12 @@ def test_orchestrator_accepts_tex_archive_source_kind():
     archive = _make_tex_archive({
         "main.tex": r"""
             \documentclass{article}
+            \author{Smith, John \and Doe, Jane}
             \begin{document}
             \section{Intro}
             TeX source can enter the same agent pipeline.
-            \end{document}
+            \begin{align}
+            a &= b
         """,
     })
 
@@ -521,6 +576,15 @@ def test_orchestrator_accepts_tex_archive_source_kind():
     }
 
     visited: list[str] = []
+    saved_artifacts: dict[str, dict] = {}
+
+    def fake_upsert(*, run_id=None, document_id, material_id, cartridge_id=None,
+                    status="running", current_stage="save_pdf", stage_outputs=None,
+                    error_message=None):
+        if stage_outputs and "_artifacts" in stage_outputs:
+            saved_artifacts.update(stage_outputs["_artifacts"])
+        return run_id or "run-tex"
+
     fake_persistence = {
         "persist_source_chunks": MagicMock(return_value=[
             {"chunk_id": "c1", "chunk_index": 0, "section_id": "sec_1",
@@ -530,7 +594,7 @@ def test_orchestrator_accepts_tex_archive_source_kind():
         "persist_components": MagicMock(return_value={}),
         "persist_component_graph": MagicMock(return_value="graph-tex"),
         "persist_document_embedding": MagicMock(return_value="emb-tex"),
-        "upsert_analysis_run": MagicMock(return_value="run-tex"),
+        "upsert_analysis_run": fake_upsert,
     }
 
     with patch.multiple(orchestrator, **fake_persistence):
@@ -548,6 +612,13 @@ def test_orchestrator_accepts_tex_archive_source_kind():
     assert "grobid_parse" in visited
     assert "document_structure" in visited
     assert "source_chunking" in visited
+    structure_artifact = saved_artifacts["document_structure"]
+    assert structure_artifact["metadata"]["authors"] == ["Smith, John", "Doe, Jane"]
+    assert structure_artifact["metadata"]["author_extraction"]["source"] == "tex_author"
+    assert structure_artifact["metadata"]["unclosed_math_environments"] == ["align"]
+    completeness = saved_artifacts["document_completeness"]
+    assert completeness["tail_truncation"]["unclosed_math_environments"] == ["align"]
+    assert "equation_environment_cut_at_boundary" in completeness["tail_truncation"]["signals"]
 
 
 # --- orchestrator stage flow ---------------------------------------------

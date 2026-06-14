@@ -77,6 +77,11 @@ class DocumentMetadata:
     title: str | None = None
     authors: list[str] = field(default_factory=list)
     pages: int = 0
+    parser_pages_processed: int | None = None
+    parser_reached_eof: bool | None = None
+    source_bytes_total: int | None = None
+    source_bytes_processed: int | None = None
+    unclosed_math_environments: list[str] = field(default_factory=list)
     # Author provenance (issue #372): which structured front-matter signal the
     # authors came from (grobid_tei / tex_author / pdf_front_matter / none),
     # with confidence + needs_review. None for legacy artifacts.

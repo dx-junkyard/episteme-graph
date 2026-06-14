@@ -187,8 +187,15 @@ class DocumentStructureAgent:
 
         sections = self._hierarchy_builder.build(typed_blocks, document_id)
 
-        total_pages = max((b.page for b in typed_blocks), default=0)
-        metadata = DocumentMetadata(pages=total_pages)
+        total_pages = len(page_heights)
+        pages_processed = (
+            min(total_pages, max_pages) if max_pages is not None else total_pages
+        )
+        metadata = DocumentMetadata(
+            pages=total_pages,
+            parser_pages_processed=pages_processed,
+            parser_reached_eof=pages_processed >= total_pages if total_pages else None,
+        )
 
         # Authors from the PDF front-matter byline only (issue #372): never from
         # the body or references, so a body term cannot inject a citation author.
@@ -243,15 +250,24 @@ class DocumentStructureAgent:
                 document_id=document_id,
             )
 
-        # PyMuPDF でページ情報・bbox を補完する
+        # PyMuPDF で原文ページ数・ページ情報・bbox を補完する
+        try:
+            page_heights = self._extractor.get_page_heights(pdf_path)
+            total_pages = len(page_heights)
+        except Exception:
+            logger.warning(
+                "Could not read source page count for %s",
+                pdf_path,
+                exc_info=True,
+            )
+            page_heights = {}
+            total_pages = 0
+        pages_processed = (
+            min(total_pages, max_pages) if max_pages is not None else total_pages
+        )
         try:
             pymupdf_blocks = self._extractor.extract_blocks(
                 pdf_path, max_pages=max_pages
-            )
-            total_pages = (
-                max((b.page for b in pymupdf_blocks), default=0)
-                if pymupdf_blocks
-                else 0
             )
         except Exception:
             logger.warning(
@@ -260,12 +276,15 @@ class DocumentStructureAgent:
                 exc_info=True,
             )
             pymupdf_blocks = []
-            total_pages = 0
 
         typed_blocks = grobid_result.blocks
         sections = grobid_result.sections
         metadata = grobid_result.metadata
         metadata.pages = total_pages or metadata.pages
+        metadata.parser_pages_processed = pages_processed or None
+        metadata.parser_reached_eof = (
+            pages_processed >= total_pages if total_pages else None
+        )
 
         if pymupdf_blocks:
             self._align_grobid_blocks_to_pdf_blocks(typed_blocks, pymupdf_blocks)

@@ -30,10 +30,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-# Ingest reachability threshold (issue #371): the document is judged to have
-# reached its end when ingested content extends to at least this fraction of the
-# total pages. A small trailing tail of blank / figure-only / references-only
-# pages is tolerated; a large trailing un-ingested range is a truncated ingest.
+# Source offsets still use this threshold as a truncation signal. Page
+# reachability itself requires explicit EOF/page-end evidence.
 MIN_INGEST_REACH_RATIO = 0.8
 
 # EvidenceRegistry pages below this fraction of the document are flagged as
@@ -155,19 +153,24 @@ def detect_unclosed_math_environments(tex_source: Any) -> list[str]:
     text = str(tex_source or "")
     if not text:
         return []
-    begins: dict[str, int] = {}
-    for m in _TEX_BEGIN_RE.finditer(text):
-        env = m.group(1)
-        begins[env] = begins.get(env, 0) + 1
-    ends: dict[str, int] = {}
-    for m in _TEX_END_RE.finditer(text):
-        env = m.group(1)
-        ends[env] = ends.get(env, 0) + 1
-    unclosed = [
-        env for env, n in begins.items()
-        if _is_math_env(env) and n > ends.get(env, 0)
-    ]
-    return sorted(unclosed)
+    text = re.sub(r"(?m)(?<!\\)%.*$", "", text)
+    stack: list[str] = []
+    unmatched: set[str] = set()
+    tokens = sorted(
+        [(m.start(), "begin", m.group(1)) for m in _TEX_BEGIN_RE.finditer(text)]
+        + [(m.start(), "end", m.group(1)) for m in _TEX_END_RE.finditer(text)]
+    )
+    for _, kind, env in tokens:
+        if not _is_math_env(env):
+            continue
+        if kind == "begin":
+            stack.append(env)
+        elif stack and stack[-1] == env:
+            stack.pop()
+        else:
+            unmatched.add(env)
+    unmatched.update(stack)
+    return sorted(unmatched)
 
 
 def analyze_document_completeness(
@@ -205,12 +208,15 @@ def analyze_document_completeness(
     if tex_source is None:
         tex_source = structure.get("tex_source") or structure.get("source_tex")
     parser_pages_processed = None
+    parser_reached_eof = None
     if isinstance(metadata, dict):
         for key in ("parser_pages_processed", "pages_processed", "pages_parsed"):
             value = metadata.get(key)
             if isinstance(value, int) and value > 0:
                 parser_pages_processed = value
                 break
+        if isinstance(metadata.get("parser_reached_eof"), bool):
+            parser_reached_eof = metadata["parser_reached_eof"]
 
     block_list = [b for b in blocks if isinstance(b, dict)]
     content_blocks = [b for b in block_list if b.get("block_type") in _CONTENT_BLOCK_TYPES]
@@ -312,9 +318,12 @@ def analyze_document_completeness(
                 list(range(1, pages_total + 1))
             )
         reached_document_end = bool(
-            (parser_pages_processed is not None and parser_pages_processed >= pages_total)
-            or effective_last >= pages_total
-            or effective_last / pages_total >= MIN_INGEST_REACH_RATIO
+            parser_reached_eof is True
+            or (
+                parser_pages_processed is not None
+                and parser_pages_processed >= pages_total
+            )
+            or last_ingested_page == pages_total
         )
         # Reachability is only enforced once enough content was ingested; a small
         # stub legitimately cannot reach a 20-page tail.
@@ -335,7 +344,19 @@ def analyze_document_completeness(
     # Combine several deterministic signals; never conclude from one alone, and
     # never invent a missing label. The signals have distinct provenance from
     # confirmed missing labels, so they are reported as a *suspicion*.
-    unclosed_envs = detect_unclosed_math_environments(tex_source)
+    precomputed_unclosed = (
+        metadata.get("unclosed_math_environments")
+        if isinstance(metadata, dict)
+        else None
+    )
+    if tex_source is not None:
+        unclosed_envs = detect_unclosed_math_environments(tex_source)
+    elif isinstance(precomputed_unclosed, list):
+        unclosed_envs = sorted(
+            {str(env) for env in precomputed_unclosed if _is_math_env(str(env))}
+        )
+    else:
+        unclosed_envs = detect_unclosed_math_environments(tex_source)
 
     # parser ended inside an equation: the last block in reading order is an
     # equation block while the ingest did not reach the document end.
@@ -442,6 +463,7 @@ def analyze_document_completeness(
             "last_content_page": last_content_page,
             "last_ingested_page": last_ingested_page,
             "parser_pages_processed": parser_pages_processed,
+            "parser_reached_eof": parser_reached_eof,
             "reached_document_end": reached_document_end,
             "trailing_uningested_page_ranges": trailing_uningested_page_ranges,
             "structure_page_coverage_ratio": structure_page_coverage_ratio,
