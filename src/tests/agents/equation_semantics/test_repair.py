@@ -78,11 +78,30 @@ def test_invalid_llm_equation_id_keeps_normalized_id():
     assert any(i.rule_id == "llm_equation_id_overridden" for i in issues)
 
 
-def test_valid_llm_label_is_adopted_and_id_rederived():
-    raw = _base_raw(label="3.15", equation_id="whatever")
+def test_valid_llm_label_is_not_adopted_canonical_maintained():
+    # Even a syntactically valid different label must not replace the canonical
+    # input label / id (issue #368 follow-up): both stay pinned to llm_input.
+    raw = _base_raw(label="3.15", equation_id="eq_3_15")
     record = _parse_record(raw, _llm_input(label="3.14", equation_id="eq_3_14"), None)
-    assert record.label == "3.15"
-    assert record.equation_id == "eq_3_15"
+    assert record.label == "3.14"
+    assert record.equation_id == "eq_3_14"
+    assert record.source_extraction.source_location["llm_rejected_label"] == "3.15"
+    assert record.source_extraction.source_location["llm_rejected_equation_id"] == "eq_3_15"
+    issues = _validate(record)
+    assert any(i.rule_id == "llm_label_overridden" for i in issues)
+    assert any(i.rule_id == "llm_equation_id_overridden" for i in issues)
+
+
+def test_llm_output_cannot_collide_ids_across_records():
+    # Two records whose LLM outputs both claim "eq_x" must keep their distinct
+    # canonical ids — no LLM-driven id collision (issue #368 D.7).
+    raw_a = _base_raw(equation_id="eq_x", label="eq_x")
+    raw_b = _base_raw(equation_id="eq_x", label="eq_x")
+    rec_a = _parse_record(raw_a, _llm_input(label="3.14", equation_id="eq_3_14"), None)
+    rec_b = _parse_record(raw_b, _llm_input(label="3.15", equation_id="eq_3_15"), None)
+    assert rec_a.equation_id == "eq_3_14"
+    assert rec_b.equation_id == "eq_3_15"
+    assert rec_a.equation_id != rec_b.equation_id
 
 
 def test_trusted_tex_semantic_label_is_maintained():

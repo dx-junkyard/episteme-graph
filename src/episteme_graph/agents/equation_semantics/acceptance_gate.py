@@ -128,16 +128,20 @@ class EquationAcceptanceGate:
     # A row of bare numeric coefficients separated by whitespace / delimiters
     # with no relational equation structure. e.g. "0.12  0.34  0.56".
     _COEFF_ROW_RE = re.compile(r"^[\s\d.,;:+\-eE×x()]+$")
-    # A "decimal coefficient × parameter" product, e.g. "3.488 beta_2",
-    # "0.28 beta_K2", "1.2 \alpha". The parameter must be a multi-letter token
-    # (or a LaTeX command), so single-symbol coefficients like "2x" / "0.5 x"
-    # are not matched.
+    # A "decimal coefficient × subscripted parameter" product (issue #368). The
+    # parameter must carry a subscript and be one of:
+    #   - a LaTeX command:        \beta_2, \beta_{K2}, \alpha_{K2}
+    #   - a Unicode Greek letter: β_2, β_K2, α_3
+    #   - a multi-letter name:    beta_2, beta_K2
+    #   - a single ASCII letter:  G_F  (only with a subscript)
+    # The <base> group is the parameter family (sans subscript) used to require a
+    # repeated family — the strong signal that distinguishes a coefficient table
+    # from an ordinary regression / physics equation.
     _COEFF_PARAM_RE = re.compile(
-        r"\d+\.\d+\s*\*?\s*(?:\\[A-Za-z]+|[A-Za-z]{2,})(?:_\{?[A-Za-z0-9]+\}?)?"
+        r"[-+]?\d+\.\d+\s*\*?\s*"
+        r"(?P<base>\\[A-Za-z]+|[α-ωΑ-Ω]|[A-Za-z]{2,}|[A-Za-z])"
+        r"_\{?[A-Za-z0-9]+\}?"
     )
-    # Minimum number of coefficient×parameter products for a linear-combination
-    # table cell (issue #368 example has "3.488 beta_2 + 0.28 beta_K2 + ...").
-    _MIN_COEFF_PARAM_TERMS = 2
 
     @classmethod
     def _looks_like_coefficient_table(cls, text: str) -> bool:
@@ -149,10 +153,22 @@ class EquationAcceptanceGate:
             numbers = re.findall(r"[-+]?\d*\.\d+|[-+]?\d+", stripped)
             if len(numbers) >= 3 and cls._COEFF_ROW_RE.match(stripped):
                 return True
-        # 2) A linear combination of decimal-coefficient × parameter products,
-        #    even when it carries an "=" (the table lists an example formula).
-        if len(cls._COEFF_PARAM_RE.findall(stripped)) >= cls._MIN_COEFF_PARAM_TERMS:
-            return True
+        # 2) A linear combination of decimal-coefficient × subscripted parameter
+        #    products with a *repeated parameter family*. Requiring (a) subscripts
+        #    and (b) a repeated base excludes ordinary regression formulas with
+        #    natural-language variable names ("0.50 income + 1.20 education") and
+        #    single-coefficient physics relations ("1.16 G_F^2"), while catching
+        #    coefficient tables like "3.488β_2 + 0.28β_K2 + 0.11β_3".
+        bases = [
+            m.group("base").lstrip("\\").lower()
+            for m in cls._COEFF_PARAM_RE.finditer(stripped)
+        ]
+        if len(bases) >= 2:
+            counts: dict[str, int] = {}
+            for base in bases:
+                counts[base] = counts.get(base, 0) + 1
+            if max(counts.values()) >= 2:
+                return True
         return False
 
     @staticmethod

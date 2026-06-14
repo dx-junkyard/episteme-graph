@@ -36,14 +36,14 @@ def _resolve_label_and_id(
     raw: dict,
     llm_input: EquationLLMInput,
 ) -> tuple[str | None, str, dict]:
-    """Re-validate the LLM-provided label / equation_id (issue #368).
+    """Pin the final label / equation_id to the canonical input (issue #368).
 
-    ``llm_input.label`` / ``llm_input.equation_id`` are canonical (already
-    produced by the source-aware normalizer at input-build time). An LLM may
-    propose a different label; it is only adopted if it passes the same
-    source-aware validator, and the equation_id is always *derived* — never
-    taken verbatim from the LLM. Rejected LLM values are returned as audit
-    metadata so the validator can surface them.
+    ``llm_input.label`` / ``llm_input.equation_id`` are canonical — already
+    produced by the source-aware normalizer at input-build time. The LLM's
+    proposed ``label`` / ``equation_id`` are *never* adopted as final values
+    (even if syntactically valid), so the deterministic ids stay stable and no
+    LLM output can collide ids or break existing references. A differing LLM
+    proposal is preserved as audit metadata that the validator surfaces.
     """
     final_label = llm_input.label
     final_eq_id = llm_input.equation_id or _LABEL_NORMALIZER.equation_id_from_label(
@@ -53,20 +53,10 @@ def _resolve_label_and_id(
 
     llm_label = raw.get("label")
     if llm_label is not None and str(llm_label).strip() != str(final_label or "").strip():
-        norm_label, valid, _rejected = _LABEL_NORMALIZER.validate_label(
-            str(llm_label), source_trusted=llm_input.source_is_trusted
-        )
-        if valid and norm_label:
-            final_label = norm_label
-            final_eq_id = EquationNormalizer.equation_id_from_label(
-                norm_label, llm_input.block_id
-            )
-        else:
-            audit["llm_rejected_label"] = str(llm_label)
+        audit["llm_rejected_label"] = str(llm_label)
 
     llm_eq_id = raw.get("equation_id")
     if llm_eq_id and str(llm_eq_id) != str(final_eq_id):
-        # The LLM equation_id is never trusted verbatim; keep the derived id.
         audit["llm_rejected_equation_id"] = str(llm_eq_id)
 
     return final_label, final_eq_id, audit
