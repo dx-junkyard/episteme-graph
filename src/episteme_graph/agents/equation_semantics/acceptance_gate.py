@@ -67,6 +67,16 @@ class EquationAcceptanceGate:
         if not text:
             return self._mark(candidate, "missing", "context_only", True, ["equation_body_missing"])
 
+        # Issue #368: a candidate with table provenance (or one strongly matching
+        # a coefficient table) must not auto-confirm as a standalone equation.
+        # High-signal candidates are kept review-required as provisional so the
+        # downstream reconstruction / review layer can still inspect them.
+        if self._is_table_derived(candidate, text):
+            reasons = ["table_derived_equation_candidate", "needs_math_review"]
+            if self._is_high_signal(candidate):
+                return self._mark(candidate, "partial", "provisional", True, reasons)
+            return self._mark(candidate, "partial", "context_only", True, reasons)
+
         if _LABEL_ONLY_RE.match(text):
             # High-signal: has a matched_label or display math → provisional (issue #259)
             if self._is_high_signal(candidate):
@@ -103,6 +113,31 @@ class EquationAcceptanceGate:
         if self._is_high_signal(candidate):
             return self._mark(candidate, "unparsed", "provisional", True, ["ambiguous_math_text"])
         return self._mark(candidate, "unparsed", "context_only", True, ["ambiguous_math_text"])
+
+    @classmethod
+    def _is_table_derived(cls, candidate: EquationCandidate, text: str) -> bool:
+        """Table provenance or strong coefficient-table match (issue #368)."""
+        src_loc = candidate.source_location or {}
+        if src_loc.get("table_provenance"):
+            return True
+        if "table_derived_equation_candidate" in (candidate.review_reason or []):
+            return True
+        return cls._looks_like_coefficient_table(text)
+
+    # A row of numeric coefficients / example values separated by whitespace or
+    # delimiters, with no relational equation structure. e.g. "0.12  0.34  0.56".
+    _COEFF_ROW_RE = re.compile(r"^[\s\d.,;:+\-eE×x()]+$")
+
+    @classmethod
+    def _looks_like_coefficient_table(cls, text: str) -> bool:
+        stripped = text.strip()
+        if not stripped or _RELATION_RE.search(stripped):
+            return False
+        numbers = re.findall(r"[-+]?\d*\.\d+|[-+]?\d+", stripped)
+        # Three or more bare numbers and (almost) nothing else → table row.
+        if len(numbers) >= 3 and cls._COEFF_ROW_RE.match(stripped):
+            return True
+        return False
 
     @staticmethod
     def _is_high_signal(candidate: EquationCandidate) -> bool:

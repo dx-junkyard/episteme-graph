@@ -151,3 +151,28 @@ def test_process_returns_all_candidates():
     assert statuses["blk_0"] == "accepted"
     assert statuses["blk_1"] == "rejected"
     assert statuses["blk_2"] == "needs_merge"
+
+
+# ------------------------------------------------------------------
+# Issue #368: table-derived candidates must not auto-confirm
+# ------------------------------------------------------------------
+
+def test_table_provenance_candidate_is_not_auto_confirmed():
+    c = _make_candidate("a = b + c (2.1)", block_id="blk_t1")
+    c.source_location["table_provenance"] = {"table_id": "tbl_3", "row": 2}
+    result = GATE.process([c])[0]
+    assert result.acceptance_status != "accepted"
+    assert "table_derived_equation_candidate" in result.review_reason
+
+
+def test_coefficient_row_is_flagged_as_table_derived():
+    c = _make_candidate("0.12  0.34  0.56  0.78", block_id="blk_t2")
+    result = GATE.process([c])[0]
+    assert result.acceptance_status != "accepted"
+    assert "table_derived_equation_candidate" in result.review_reason
+
+
+def test_normal_equation_is_not_flagged_as_table():
+    c = _make_candidate("E = m c^2 (3.1)", block_id="blk_n1")
+    result = GATE.process([c])[0]
+    assert "table_derived_equation_candidate" not in result.review_reason

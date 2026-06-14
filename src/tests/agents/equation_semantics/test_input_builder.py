@@ -98,6 +98,31 @@ def test_build_candidates_max_limit():
     assert candidates[0].source_location["block_id"] == "e1"
 
 
+def test_build_candidates_flags_invalid_label():
+    # Issue #368: a garbage GROBID label is rejected and recorded for audit.
+    structure = _structure()
+    bad = _typed("e_bad", "F = ma", "equation_block", 4)
+    bad.equation_label = "(1) g , K (3)"
+    structure.blocks.append(bad)
+    candidates = BUILDER.build_candidates(structure)
+    cand = next(c for c in candidates if c.source_location["block_id"] == "e_bad")
+    assert cand.matched_label is None
+    assert "invalid_equation_label" in cand.review_reason
+    assert cand.source_location["rejected_equation_label"] == "(1) g , K (3)"
+
+
+def test_build_candidates_flags_table_provenance():
+    # Issue #368: a block carrying table provenance is marked table-derived.
+    structure = _structure()
+    tbl = _typed("e_tbl", "a = b + c (5.1)", "equation_block", 5)
+    tbl.raw = {"table_id": "tbl_2", "row": 1}
+    structure.blocks.append(tbl)
+    candidates = BUILDER.build_candidates(structure)
+    cand = next(c for c in candidates if c.source_location["block_id"] == "e_tbl")
+    assert "table_derived_equation_candidate" in cand.review_reason
+    assert cand.source_location["table_provenance"]["table_id"] == "tbl_2"
+
+
 # ------------------------------------------------------------------
 # build_llm_inputs
 # ------------------------------------------------------------------

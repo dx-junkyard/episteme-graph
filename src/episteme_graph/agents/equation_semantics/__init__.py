@@ -1,5 +1,13 @@
 from .agent import EquationSemanticsAgent
+from .fidelity import (
+    apply_fidelity_guards,
+    apply_prose_latex_guard,
+    apply_symbol_loss_guard,
+    is_prose_latex,
+    validate_io_links,
+)
 from .schema import (
+    FIDELITY_REVIEW_CODES,
     CartridgeContext,
     DefinedSymbol,
     EquationCandidate,
@@ -16,6 +24,12 @@ from .schema import (
 
 __all__ = [
     "EquationSemanticsAgent",
+    "apply_fidelity_guards",
+    "apply_prose_latex_guard",
+    "apply_symbol_loss_guard",
+    "is_prose_latex",
+    "validate_io_links",
+    "FIDELITY_REVIEW_CODES",
     "CartridgeContext",
     "DefinedSymbol",
     "EquationCandidate",
