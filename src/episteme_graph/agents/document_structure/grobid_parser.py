@@ -95,10 +95,22 @@ class GROBIDTEIParser:
             if t:
                 title = t.get_text(strip=True) or None
 
+        # Issue #372: extract authors ONLY from the front-matter <teiHeader>
+        # (fileDesc/sourceDesc/titleStmt). GROBID records citation authors under
+        # <text><back><listBibl>, so a document-wide soup.find_all("author")
+        # would mix ~100 reference authors into the document author list.
+        header = soup.find("teiHeader") or soup.find("fileDesc")
         authors: list[str] = []
-        for author_tag in soup.find_all("author"):
-            persname = author_tag.find("persName")
-            if persname:
+        seen: set[str] = set()
+        if header is not None:
+            for author_tag in header.find_all("author"):
+                # Defensive: never read authors that sit inside a bibliography
+                # list even if it appears under the header.
+                if author_tag.find_parent("listBibl") is not None:
+                    continue
+                persname = author_tag.find("persName")
+                if not persname:
+                    continue
                 forename = persname.find("forename")
                 surname = persname.find("surname")
                 parts = []
@@ -106,11 +118,24 @@ class GROBIDTEIParser:
                     parts.append(forename.get_text(strip=True))
                 if surname:
                     parts.append(surname.get_text(strip=True))
-                name = " ".join(parts).strip()
-                if name:
+                name = " ".join(p for p in parts if p).strip()
+                if name and name not in seen:
+                    seen.add(name)
                     authors.append(name)
 
-        return DocumentMetadata(title=title, authors=authors, pages=0)
+        author_extraction = {
+            "source": "grobid_tei" if authors else "none",
+            "confidence": 0.95 if authors else 0.0,
+            "needs_review": False,
+            "review_reasons": [],
+            "candidate_sources": {"grobid_tei": list(authors)} if authors else {},
+        }
+        return DocumentMetadata(
+            title=title,
+            authors=authors,
+            pages=0,
+            author_extraction=author_extraction,
+        )
 
     # ------------------------------------------------------------------
     # Body parsing

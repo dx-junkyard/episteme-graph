@@ -980,62 +980,40 @@ def _load_completeness_analyzer():
 _MIN_BOUNDARY_PAGE_SPAN_RATIO = 0.5
 
 # An author list far larger than any plausible byline indicates reference /
-# bibliography authors leaked into the document authors (issue #366).
+# bibliography authors leaked into the document authors (issue #366 / #372).
 _MAX_PLAUSIBLE_AUTHORS = 25
 
 
-def _name_tokens(name: str) -> list[str]:
-    return [t for t in re.split(r"[^a-zà-öø-ÿ]+", str(name).lower()) if len(t) >= 2]
+def _audit_authors(authors: list, author_extraction: Any) -> list[str]:
+    """Deterministic author-list audit for the export layer (issue #372).
 
+    The export layer NEVER deletes authors — the contamination is prevented at
+    parse time by extracting authors only from front-matter / structured
+    metadata. Here we only emit deterministic review reasons (returned as a
+    list, never mutating ``authors``):
 
-def _block_author_tokens(blocks: list, *, reference_only: bool) -> set[str]:
-    """Lower-cased word tokens appearing in reference (or non-reference) blocks.
+      * ``author_count_exceeds_limit`` — more names than any plausible byline,
+      * ``author_provenance_missing``  — a non-empty author list with no
+        structured ``author_extraction`` provenance,
+      * ``author_extraction_needs_review`` — the parser flagged the extraction
+        (e.g. ``author_source_mismatch``) for review.
 
-    Used to strip bibliography authors that leaked into the document authors
-    while protecting names that also occur in the front matter / body (e.g. a
-    self-citing author), which must never be removed.
-    """
-    tokens: set[str] = set()
-    for b in blocks if isinstance(blocks, list) else []:
-        if not isinstance(b, dict):
-            continue
-        is_ref = b.get("block_type") == "reference_entry"
-        if is_ref != reference_only:
-            continue
-        tokens.update(_name_tokens(str(b.get("text") or "")))
-    return tokens
-
-
-def _filter_reference_authors(authors: list, blocks: list) -> tuple[list[str], bool]:
-    """Drop bibliography authors that leaked into the document author list.
-
-    A name is dropped only when every alphabetic token appears in the reference
-    list *and* the name does not also appear in a non-reference block (so a
-    self-citing real author is kept). A non-empty author list never collapses to
-    empty: if filtering would remove everything, the original list is kept and
-    flagged for review instead of silently deleting all authors (#366 review).
+    Data is preserved on anomaly; callers set ``needs_review=true`` instead of
+    correcting with data loss.
     """
     raw = [str(a).strip() for a in (authors or []) if str(a).strip()]
-    if not raw:
-        return [], False
+    reasons: list[str] = []
+    if len(raw) > _MAX_PLAUSIBLE_AUTHORS:
+        reasons.append("author_count_exceeds_limit")
 
-    ref_tokens = _block_author_tokens(blocks, reference_only=True)
-    non_ref_tokens = _block_author_tokens(blocks, reference_only=False)
-    filtered: list[str] = []
-    for name in raw:
-        toks = _name_tokens(name)
-        in_references = bool(toks) and all(t in ref_tokens for t in toks)
-        in_document_body = bool(toks) and all(t in non_ref_tokens for t in toks)
-        if in_references and not in_document_body:
-            continue
-        filtered.append(name)
-
-    if not filtered:
-        # Never delete every author from a non-empty list; flag for review.
-        return raw, True
-
-    contaminated = len(filtered) != len(raw) or len(raw) > _MAX_PLAUSIBLE_AUTHORS
-    return filtered, contaminated
+    provenance = author_extraction if isinstance(author_extraction, dict) else {}
+    source = str(provenance.get("source") or "")
+    has_provenance = bool(provenance) and source not in ("", "none", "unknown")
+    if raw and not has_provenance:
+        reasons.append("author_provenance_missing")
+    elif provenance.get("needs_review"):
+        reasons.append("author_extraction_needs_review")
+    return reasons
 
 
 def build_document_completeness(
@@ -1072,14 +1050,19 @@ def build_document_boundary(
     page_end as the article end, plus the title block when present, so
     consumers can flag spans that fall outside the boundary.
 
-    Issue #366: a collapsed boundary (span ≪ pages_total) or reference-author
-    contamination drops confidence below 1.0 and raises needs_review. Every
-    completeness failure (equation discontinuity, missing terminal section, low
-    page coverage) also propagates to needs_review.
+    Issue #366: a collapsed boundary (span ≪ pages_total) drops confidence below
+    1.0 and raises needs_review. Every completeness failure (equation
+    discontinuity, missing terminal section, low page coverage) also propagates
+    to needs_review.
+
+    Issue #372: the export layer never deletes authors. Authors are extracted at
+    parse time from front-matter / structured metadata only; here we surface the
+    ``author_extraction`` provenance and emit deterministic review reasons
+    (count over limit, missing provenance, extraction flagged) without mutating
+    the author list.
     """
     structure = _coerce_dict(structure_artifact)
     sections = structure.get("sections") or []
-    blocks = structure.get("blocks") or []
     metadata = structure.get("metadata") or {}
     pages_total = metadata.get("pages") if isinstance(metadata, dict) else None
 
@@ -1096,8 +1079,12 @@ def build_document_boundary(
         if s.get("section_id"):
             section_ids.append(s["section_id"])
 
-    raw_authors = list(metadata.get("authors") or []) if isinstance(metadata, dict) else []
-    authors, authors_contaminated = _filter_reference_authors(raw_authors, blocks)
+    # Authors are preserved verbatim (issue #372): no token-matching deletion.
+    authors = list(metadata.get("authors") or []) if isinstance(metadata, dict) else []
+    author_extraction = (
+        metadata.get("author_extraction") if isinstance(metadata, dict) else None
+    )
+    author_review_reasons = _audit_authors(authors, author_extraction)
 
     completeness = build_document_completeness(
         structure, document_id=document_id, evidence_artifact=evidence_artifact
@@ -1116,8 +1103,9 @@ def build_document_boundary(
             boundary_span_collapsed = True
             review_reasons.append("boundary_page_span_too_small")
 
-    if authors_contaminated:
-        review_reasons.append("reference_authors_in_author_list")
+    for reason in author_review_reasons:
+        if reason not in review_reasons:
+            review_reasons.append(reason)
 
     # Every completeness failure propagates to the boundary (#366 review).
     for reason in completeness["review_reasons"]:
@@ -1140,6 +1128,12 @@ def build_document_boundary(
         "document_id": document_id,
         "title": metadata.get("title") if isinstance(metadata, dict) else None,
         "authors": authors,
+        "author_extraction": author_extraction if isinstance(author_extraction, dict) else {
+            "source": "none",
+            "confidence": 0.0,
+            "needs_review": bool(author_review_reasons),
+            "review_reasons": author_review_reasons,
+        },
         "boundary_page_start": boundary_page_start,
         "boundary_page_end": boundary_page_end,
         "pages_total": pages_total,
