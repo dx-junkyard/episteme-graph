@@ -71,6 +71,18 @@ def _response(equation_id, block_id, label, text, eq_type, summary, symbols=None
         "linked_text_spans": [],
         "summary": summary,
         "review_flags": [],
+        # PDF-derived equation candidates are mandatorily reconstructed (#245);
+        # a realistic LLM response therefore carries a reconstruction block.
+        # (Ignored for trusted tex_source equations.)
+        "reconstruction": {
+            "latex": text,
+            "plain_text": text,
+            "status": "reconstructed_from_neighbors",
+            "method": ["nearby_text_context"],
+            "supporting_refs": [block_id],
+            "confidence": 0.8,
+            "review_required": True,
+        },
     }
 
 
@@ -129,6 +141,11 @@ def test_candidate_trace_ids_in_record():
 
 def test_fragment_only_blocks_are_not_processed_by_llm():
     """Fragment-only equation blocks should be gated out before LLM call."""
+    # A low-confidence "+" fragment with no matched label is non high-signal,
+    # so the acceptance gate marks it needs_merge (not provisional) and it is
+    # never sent to the LLM (issue #259 contract).
+    fragment = _typed("e1", "+", "equation_block", 1)
+    fragment.confidence = 0.5
     structure = DocumentStructureResult(
         document_id="doc_test",
         source_file="/tmp/test.pdf",
@@ -137,7 +154,7 @@ def test_fragment_only_blocks_are_not_processed_by_llm():
         sections=[Section("sec_1", "Results", 1, 1, 1)],
         blocks=[
             _typed("b0", "the term is", "body_paragraph", 0),
-            _typed("e1", "+", "equation_block", 1),  # fragment-only
+            fragment,  # fragment-only, non high-signal
             _typed("e2", "N = a + b (1.1)", "equation_block", 2),  # valid
         ],
     )
