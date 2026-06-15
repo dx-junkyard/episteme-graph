@@ -346,7 +346,7 @@ def _preflight_check(llm_input: ComponentAssemblyLLMInput) -> dict:
             ))
 
     return {
-        "status": "failed" if issues else "passed",
+        "status": "failed" if _has_fatal_preflight_issue(issues) else "passed",
         "accepted_claim_count": len(accepted_claim_ids),
         "available_claim_count": len(available_claim_ids),
         "available_evidence_count": len(available_evidence_ids),
@@ -354,6 +354,18 @@ def _preflight_check(llm_input: ComponentAssemblyLLMInput) -> dict:
         "available_derivation_count": len(llm_input.available_derivation_ids or []),
         "issues": issues,
     }
+
+
+# Dangling equation references are a referential-cleanup concern (handled by
+# _strip_unavailable_equation_refs), not broken assembly input. They must never
+# collapse the whole assembly into a deterministic fallback that aborts the
+# pipeline at export validation (#368 follow-up). Only genuinely missing claim /
+# evidence inputs are fatal.
+_NON_FATAL_PREFLIGHT_CODES = {"accepted_equation_ids_not_available"}
+
+
+def _has_fatal_preflight_issue(issues: list[dict]) -> bool:
+    return any(issue.get("code") not in _NON_FATAL_PREFLIGHT_CODES for issue in issues)
 
 
 def _preflight_issue(code: str, field: str, invalid_values: list[str], allowed_values: set[str]) -> dict:

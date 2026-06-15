@@ -341,6 +341,69 @@ def test_empty_llm_components_triggers_repair_regeneration():
     assert "fallback_reason" not in result.diagnostics
 
 
+def test_strip_unavailable_equation_refs_covers_all_sources():
+    """The cleanup removes dangling equation refs from every source the preflight
+    inspects (claims, thesis nodes, DSL node source_refs, DSL edge evidence_refs)
+    and the preflight then passes (#368 follow-up)."""
+    from episteme_graph.agents.component_assembly.agent import (
+        _preflight_check,
+        _strip_unavailable_equation_refs,
+    )
+    from episteme_graph.agents.component_assembly.schema import ComponentAssemblyLLMInput
+
+    llm_input = ComponentAssemblyLLMInput(
+        document_id="doc",
+        cartridge_id=None,
+        accepted_claims=[{"claim_id": "c1", "equation_ids": ["eq_real", "eq_ghost1"]}],
+        equations=[],
+        thesis_nodes=[{"node_id": "t1", "equation_ids": ["eq_ghost2"]}],
+        dsl_nodes=[{"node_id": "n1", "source_refs": {"equation_ids": ["eq_ghost3", "eq_real"]}}],
+        dsl_edges=[{"edge_id": "e1", "evidence_refs": {"equation_ids": ["eq_ghost4"]}}],
+        allowed_component_types=[],
+        allowed_dependency_types=[],
+        available_claims=[{"claim_id": "c1", "equation_ids": ["eq_real", "eq_ghost1"]}],
+        available_equations=[{"equation_id": "eq_real"}],
+    )
+
+    removed = _strip_unavailable_equation_refs(llm_input)
+    assert {r["equation_id"] for r in removed} == {"eq_ghost1", "eq_ghost2", "eq_ghost3", "eq_ghost4"}
+    # valid reference preserved everywhere
+    assert llm_input.available_claims[0]["equation_ids"] == ["eq_real"]
+    assert llm_input.accepted_claims[0]["equation_ids"] == ["eq_real"]
+    assert llm_input.thesis_nodes[0]["equation_ids"] == []
+    assert llm_input.dsl_nodes[0]["source_refs"]["equation_ids"] == ["eq_real"]
+    assert llm_input.dsl_edges[0]["evidence_refs"]["equation_ids"] == []
+    # preflight passes after cleanup
+    pf = _preflight_check(llm_input)
+    assert pf["status"] == "passed"
+    assert not any(i["code"] == "accepted_equation_ids_not_available" for i in pf["issues"])
+
+
+def test_dangling_equation_ref_is_non_fatal_even_without_cleanup():
+    """Defense-in-depth: a dangling equation ref alone is non-fatal in the
+    preflight, so it can never trigger the deterministic fallback (#368)."""
+    from episteme_graph.agents.component_assembly.agent import _preflight_check
+    from episteme_graph.agents.component_assembly.schema import ComponentAssemblyLLMInput
+
+    llm_input = ComponentAssemblyLLMInput(
+        document_id="doc",
+        cartridge_id=None,
+        accepted_claims=[],
+        equations=[],
+        thesis_nodes=[{"node_id": "t1", "equation_ids": ["eq_ghost"]}],
+        dsl_nodes=[],
+        dsl_edges=[],
+        allowed_component_types=[],
+        allowed_dependency_types=[],
+        available_claims=[{"claim_id": "c1", "equation_ids": ["eq_ghost"]}],
+        available_equations=[{"equation_id": "eq_real"}],
+    )
+    pf = _preflight_check(llm_input)
+    # the issue is still reported (observability) but is non-fatal
+    assert any(i["code"] == "accepted_equation_ids_not_available" for i in pf["issues"])
+    assert pf["status"] == "passed"
+
+
 def test_dangling_equation_ref_is_stripped_not_fallback():
     """A dangling equation reference must not collapse assembly into a
     deterministic fallback (#368 follow-up). It is stripped from the input,
