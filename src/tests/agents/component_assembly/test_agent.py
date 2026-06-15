@@ -341,6 +341,29 @@ def test_empty_llm_components_triggers_repair_regeneration():
     assert "fallback_reason" not in result.diagnostics
 
 
+def test_dangling_equation_ref_is_stripped_not_fallback():
+    """A dangling equation reference must not collapse assembly into a
+    deterministic fallback (#368 follow-up). It is stripped from the input,
+    recorded in diagnostics, and the LLM assembly proceeds normally."""
+    agent = ComponentAssemblyAgent()
+    dsl = _dsl()
+    # n2 references a non-existent equation alongside the valid eq_3_14.
+    dsl.nodes[1].source_refs["equation_ids"].append("eq_DOES_NOT_EXIST")
+
+    with patch.object(agent._llm_client, "generate", return_value=_valid_response()):
+        result = agent.run(_qualified(), equations=_equations(), thesis=_thesis(), dsl=dsl)
+
+    # LLM assembly ran — no deterministic fallback, no abort.
+    assert all(c.maturity_source != "deterministic_fallback" for c in result.components)
+    assert "fallback_reason" not in result.diagnostics
+    # Preflight passed once the dangling ref was removed.
+    assert result.diagnostics["component_assembly_input_validation"]["status"] == "passed"
+    # The dangling reference is recorded for audit.
+    cleanup = result.diagnostics["component_assembly_equation_ref_cleanup"]
+    assert any(r["equation_id"] == "eq_DOES_NOT_EXIST" for r in cleanup)
+    assert all(r["equation_id"] != "eq_3_14" for r in cleanup)
+
+
 def test_empty_llm_components_falls_back_after_repair_attempts():
     agent = ComponentAssemblyAgent()
 

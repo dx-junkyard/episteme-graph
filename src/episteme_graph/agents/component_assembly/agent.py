@@ -72,9 +72,21 @@ class ComponentAssemblyAgent:
             evidence_registry=evidence_registry,
             derivations=derivations,
         )
-        diagnostics = {
-            "component_assembly_input_validation": _preflight_check(llm_input),
-        }
+        diagnostics: dict = {}
+        # Defensively strip dangling equation references (#368 follow-up): a
+        # claim / thesis / DSL ref to an equation absent from the final set must
+        # not collapse the whole assembly into a deterministic fallback.
+        equation_ref_cleanup = _strip_unavailable_equation_refs(llm_input)
+        if equation_ref_cleanup:
+            diagnostics["component_assembly_equation_ref_cleanup"] = equation_ref_cleanup
+            logger.warning(
+                "Stripped %d dangling equation reference(s) before component assembly: "
+                "document=%s equation_ids=%s",
+                len(equation_ref_cleanup),
+                qualified_claims.document_id,
+                sorted({r["equation_id"] for r in equation_ref_cleanup}),
+            )
+        diagnostics["component_assembly_input_validation"] = _preflight_check(llm_input)
         if diagnostics["component_assembly_input_validation"]["status"] == "failed":
             logger.warning(
                 "Component assembly input preflight failed: document=%s issue_codes=%s",
@@ -212,6 +224,75 @@ class ComponentAssemblyAgent:
                 "Cartridge '%s' not found; proceeding without cartridge", cartridge_id
             )
             return None
+
+
+def _strip_unavailable_equation_refs(llm_input: ComponentAssemblyLLMInput) -> list[dict]:
+    """Drop dangling equation_id references not present in available_equations.
+
+    A claim / thesis node / DSL node-or-edge may reference an equation_id that is
+    absent from the final equation set — e.g. LLM drift, or an equation that was
+    demoted / dropped upstream (table-derived candidate, prose reconstruction,
+    rejected label). Such a dangling reference must not collapse the whole
+    component assembly into a deterministic fallback (which then aborts the
+    pipeline at the export-validation gate). It is filtered out here and reported
+    in diagnostics, mirroring the equation_semantics I/O-link cleanup (#368).
+
+    Mutates ``llm_input`` in place and returns the removed references.
+    """
+    available = _ids(llm_input.available_equations, "equation_id")
+    if not available:
+        # No equation set to validate against — the preflight already skips the
+        # equation check in this case, so nothing is stripped.
+        return []
+
+    removed: list[dict] = []
+
+    def _filter(refs, location: str, owner_id) -> list:
+        kept = []
+        for ref in refs or []:
+            ref_str = str(ref)
+            if not ref_str:
+                continue
+            if ref_str in available:
+                kept.append(ref)
+            else:
+                removed.append({
+                    "location": location,
+                    "owner_id": owner_id,
+                    "equation_id": ref_str,
+                })
+        return kept
+
+    for claim in llm_input.accepted_claims or []:
+        if isinstance(claim, dict) and "equation_ids" in claim:
+            claim["equation_ids"] = _filter(
+                claim.get("equation_ids"), "accepted_claims.equation_ids", claim.get("claim_id")
+            )
+    for claim in llm_input.available_claims or []:
+        if isinstance(claim, dict) and "equation_ids" in claim:
+            claim["equation_ids"] = _filter(
+                claim.get("equation_ids"), "available_claims.equation_ids", claim.get("claim_id")
+            )
+    for node in llm_input.thesis_nodes or []:
+        if isinstance(node, dict) and "equation_ids" in node:
+            node["equation_ids"] = _filter(
+                node.get("equation_ids"), "thesis_nodes.equation_ids",
+                node.get("node_id") or node.get("id"),
+            )
+    for node in llm_input.dsl_nodes or []:
+        refs = node.get("source_refs") if isinstance(node, dict) else None
+        if isinstance(refs, dict) and "equation_ids" in refs:
+            refs["equation_ids"] = _filter(
+                refs.get("equation_ids"), "dsl_nodes.source_refs.equation_ids", node.get("node_id")
+            )
+    for edge in llm_input.dsl_edges or []:
+        refs = edge.get("evidence_refs") if isinstance(edge, dict) else None
+        if isinstance(refs, dict) and "equation_ids" in refs:
+            refs["equation_ids"] = _filter(
+                refs.get("equation_ids"), "dsl_edges.evidence_refs.equation_ids", edge.get("edge_id")
+            )
+
+    return removed
 
 
 def _preflight_check(llm_input: ComponentAssemblyLLMInput) -> dict:
