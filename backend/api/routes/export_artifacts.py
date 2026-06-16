@@ -910,20 +910,83 @@ def _chain_review_reason_from_steps(steps: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _slugify_topic(title: str, index: int) -> str:
+    base = re.sub(r"[^a-z0-9]+", "_", str(title or "").strip().lower()).strip("_")
+    return f"topic_{base}" if base else f"topic_{index:03d}"
+
+
+def _component_dependency_order(component_graph: dict, components: list[dict]) -> dict[str, int]:
+    """Topological-ish order of components from dependency edges (issue #389).
+
+    Edge types that imply a teaching prerequisite (depends_on / prerequisite_for /
+    uses / requires / parameterizes …) put the source before the target. Falls
+    back to the components' natural order. Domain-neutral; cycles are tolerated.
+    """
+    order_index = {str(c.get("component_id")): i for i, c in enumerate(components) if c.get("component_id")}
+    prereq_edges = {
+        "depends_on", "prerequisite_for", "requires", "uses", "parameterizes",
+        "defines", "produces", "transforms_into",
+    }
+    deps: dict[str, set[str]] = {cid: set() for cid in order_index}
+    for edge in (component_graph or {}).get("edges", []) or []:
+        if not isinstance(edge, dict):
+            continue
+        etype = str(edge.get("edge_type") or edge.get("relation") or "").lower()
+        src = str(edge.get("source") or "")
+        tgt = str(edge.get("target") or "")
+        if etype in prereq_edges and src in deps and tgt in deps:
+            # target depends on source -> source must come first.
+            deps[tgt].add(src)
+
+    # Kahn-ish longest-prerequisite-depth ranking (stable, cycle-tolerant).
+    depth: dict[str, int] = {}
+
+    def _depth(cid: str, stack: set[str]) -> int:
+        if cid in depth:
+            return depth[cid]
+        if cid in stack:
+            return 0
+        stack.add(cid)
+        d = 0
+        for pre in deps.get(cid, ()):  # prerequisites
+            d = max(d, _depth(pre, stack) + 1)
+        stack.discard(cid)
+        depth[cid] = d
+        return d
+
+    for cid in order_index:
+        _depth(cid, set())
+    # Combine prerequisite depth (primary) with natural order (tie-break).
+    return {cid: depth.get(cid, 0) * 10000 + order_index.get(cid, 0) for cid in order_index}
+
+
 def enrich_course_topics(
     course: dict,
     *,
     course_mapping_artifact: Any = None,
     blueprint_artifact: Any = None,
+    components: list[dict] | None = None,
+    component_graph: dict | None = None,
 ) -> dict:
-    """Add learning_objectives, prerequisite_concepts, blackbox_policy,
-    expected_misconceptions, assessment_prompts, visualization_plan to topics.
+    """Build artifact-first, component-linked pedagogical topic metadata (#389).
 
-    Pulls from CourseMappingAgent (for objectives / prerequisites / blackbox)
-    and BlueprintAgent (for visualization_plan derived from narrative_arc).
+    - When the course has no topics, seeds them from the CourseMappingAgent
+      artifact so the blueprint reflects the *current* run's components.
+    - Each topic carries topic_id, linked_component_ids, linked_claim_ids,
+      linked_equation_ids, learning_objectives, prerequisite_concepts,
+      blackbox_policy, visualization_plan, expected_misconceptions,
+      assessment_prompts, and inherited review_required / review_reasons.
+    - Topics are ordered by component-graph dependencies (definitions before
+      transformations, assumptions before results), not section order.
     """
     if not isinstance(course, dict):
         return course
+
+    components = components or []
+    component_graph = component_graph or {}
+    component_index = {
+        str(c.get("component_id")): c for c in components if isinstance(c, dict) and c.get("component_id")
+    }
 
     cm = _coerce_dict(course_mapping_artifact)
     mapping_topics = cm.get("topics") or []
@@ -946,20 +1009,76 @@ def enrich_course_topics(
             "linked_component_ids": list(step.get("linked_component_ids") or []),
         })
 
+    # Artifact-first seeding: when the course carries no topics, build them from
+    # the course_mapping artifact (issue #389).
+    course_topics = [t for t in (course.get("topics") or []) if isinstance(t, dict)]
+    if not course_topics and mapping_by_title:
+        course_topics = [dict(t) for t in mapping_by_title.values()]
+
+    def _component_links(linked_ids: list[str]) -> tuple[list[str], list[str], bool, list[str]]:
+        claim_ids: list[str] = []
+        equation_ids: list[str] = []
+        review_reasons: list[str] = []
+        review_required = False
+        for cid in linked_ids:
+            comp = component_index.get(str(cid))
+            if comp is None:
+                review_reasons.append("linked_component_missing")
+                review_required = True
+                continue
+            claim_ids.extend(str(v) for v in comp.get("evidence_claims") or [] if v)
+            claim_ids.extend(str(v) for v in comp.get("linked_claim_ids") or [] if v)
+            for key in ("linked_equation_ids", "input_equation_ids", "output_equation_ids"):
+                equation_ids.extend(str(v) for v in comp.get(key) or [] if v)
+            if str(comp.get("review_status") or "") in ("review_required", "teacher_review_required"):
+                review_required = True
+                review_reasons.append("linked_component_review_required")
+        return (
+            list(dict.fromkeys(claim_ids)),
+            list(dict.fromkeys(equation_ids)),
+            review_required,
+            list(dict.fromkeys(review_reasons)),
+        )
+
     enriched_topics: list[dict] = []
-    for t in course.get("topics") or []:
-        if not isinstance(t, dict):
-            continue
+    for index, t in enumerate(course_topics):
         title = (t.get("title") or "").strip()
         mapping = mapping_by_title.get(title, {})
         topic = dict(t)
+        linked_component_ids = list(topic.get("linked_component_ids") or mapping.get("linked_component_ids") or [])
+        topic["linked_component_ids"] = linked_component_ids
+        topic.setdefault("topic_id", _slugify_topic(title, index))
         topic.setdefault("learning_objectives", list(mapping.get("learning_objectives") or []))
         topic.setdefault("prerequisite_concepts", list(mapping.get("prerequisite_concepts") or t.get("prerequisites") or []))
         topic.setdefault("blackbox_policy", mapping.get("blackbox_policy") or {})
         topic.setdefault("assessment_prompts", list(mapping.get("assessment_prompts") or []))
         topic.setdefault("expected_misconceptions", list(mapping.get("expected_misconceptions") or []))
         topic.setdefault("visualization_plan", visualization_plan)
+
+        claim_ids, equation_ids, review_required, review_reasons = _component_links(linked_component_ids)
+        topic.setdefault("linked_claim_ids", claim_ids)
+        topic.setdefault("linked_equation_ids", equation_ids)
+        if not linked_component_ids:
+            review_required = True
+            review_reasons = list(dict.fromkeys(review_reasons + ["topic_without_component"]))
+        topic["review_required"] = bool(topic.get("review_required")) or review_required
+        topic["review_reasons"] = list(dict.fromkeys(list(topic.get("review_reasons") or []) + review_reasons))
         enriched_topics.append(topic)
+
+    # Dependency-driven ordering (issue #389): order topics by the earliest
+    # (lowest-rank) component they teach, so definitions/assumptions precede
+    # results/applications.
+    if component_index:
+        rank = _component_dependency_order(component_graph, components)
+        def _topic_rank(topic: dict, fallback: int) -> tuple[int, int]:
+            ranks = [rank[str(cid)] for cid in topic.get("linked_component_ids") or [] if str(cid) in rank]
+            return (min(ranks) if ranks else 10**9, fallback)
+        enriched_topics = [
+            tp for _, tp in sorted(
+                ((_topic_rank(tp, i), tp) for i, tp in enumerate(enriched_topics)),
+                key=lambda pair: pair[0],
+            )
+        ]
 
     enriched = dict(course)
     enriched["topics"] = enriched_topics

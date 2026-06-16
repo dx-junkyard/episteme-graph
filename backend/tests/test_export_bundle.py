@@ -589,9 +589,9 @@ class TestExportReferenceIntegrity:
         validation = mod._validate_export_references(
             claims=[{"claim_id": "claim_001"}],
             equations=[{"equation_id": "eq_001"}, {"equation_id": "eq_002"}],
-            components=[],
+            components=[{"component_id": "component_main"}],
             component_graph={"nodes": [], "edges": []},
-            course_info={"topics": [{"title": "Derivation", "linked_derivation_ids": ["deriv_001"]}]},
+            course_info={"topics": [{"title": "Derivation", "linked_component_ids": ["component_main"], "linked_derivation_ids": ["deriv_001"]}]},
             evidence_snippets=[{"evidence_id": "ev_001"}],
             derivation_chains=[{
                 "derivation_id": "deriv_001",

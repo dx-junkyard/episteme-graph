@@ -205,3 +205,57 @@ def test_validation_flags_operation_id_in_component_graph():
     )
     codes = {e["code"] for e in report["errors"]}
     assert "OPERATION_ID_IN_COMPONENT_GRAPH" in codes
+
+
+# ---------------------------------------------------------------------------
+# Pedagogical course/blueprint metadata (#389)
+# ---------------------------------------------------------------------------
+
+
+def test_enrich_course_seeds_topics_from_mapping_artifact():
+    course = {"title": "C", "topics": []}
+    mapping = {"topics": [
+        {"title": "Definitions", "linked_component_ids": ["comp_def"],
+         "learning_objectives": ["understand X"], "prerequisite_concepts": ["calc"]},
+        {"title": "Results", "linked_component_ids": ["comp_res"]},
+    ]}
+    components = [
+        {"component_id": "comp_def", "review_status": "source_backed",
+         "linked_claim_ids": ["claim_1"], "linked_equation_ids": ["eq_1"]},
+        {"component_id": "comp_res", "review_status": "teacher_review_required",
+         "linked_claim_ids": ["claim_2"]},
+    ]
+    graph = {"edges": [{"source": "comp_def", "target": "comp_res", "edge_type": "prerequisite_for"}]}
+    out = ea.enrich_course_topics(course, course_mapping_artifact=mapping,
+                                  components=components, component_graph=graph)
+    topics = out["topics"]
+    assert len(topics) == 2
+    # Ordered by dependency: definitions (prereq) before results.
+    assert topics[0]["title"] == "Definitions"
+    t0 = topics[0]
+    assert t0["topic_id"]
+    assert t0["linked_claim_ids"] == ["claim_1"]
+    assert t0["linked_equation_ids"] == ["eq_1"]
+    # Results topic inherits review_required from its review-required component.
+    t_res = next(t for t in topics if t["title"] == "Results")
+    assert t_res["review_required"] is True
+    assert "linked_component_review_required" in t_res["review_reasons"]
+
+
+def test_topic_without_component_is_review_required_and_warned():
+    mod = _export_mod()
+    course = {"title": "C", "topics": [{"title": "Floating"}]}
+    out = ea.enrich_course_topics(course, course_mapping_artifact={"topics": []},
+                                  components=[], component_graph={})
+    topic = out["topics"][0]
+    assert topic["review_required"] is True
+    assert "topic_without_component" in topic["review_reasons"]
+
+    report = mod._validate_export_references(
+        claims=[], equations=[], components=[],
+        component_graph={"nodes": [], "edges": []},
+        course_info=out, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []}, component_operation_links=[],
+    )
+    codes = {w["code"] for w in report["warnings"]}
+    assert "COURSE_TOPIC_WITHOUT_COMPONENT" in codes

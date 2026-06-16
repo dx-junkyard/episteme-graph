@@ -574,6 +574,8 @@ def _enrich_course_for_export(
     course: dict,
     artifacts_by_doc: dict[str, dict],
     document_ids: list[str],
+    components: list[dict] | None = None,
+    component_graph: dict | None = None,
 ) -> dict:
     # Pick the first document's artifacts (single-paper scoped courses are the
     # common case). Multi-document course mapping is a pipeline concern.
@@ -589,6 +591,8 @@ def _enrich_course_for_export(
         course,
         course_mapping_artifact=course_mapping,
         blueprint_artifact=blueprint,
+        components=components or [],
+        component_graph=component_graph or {},
     )
 
 
@@ -1210,6 +1214,7 @@ def _normalize_export_references(
 
     if not isinstance(course_info, dict):
         return
+    known_equation_ids = {str(e.get("equation_id")) for e in equations if isinstance(e, dict) and e.get("equation_id")}
     for topic in course_info.get("topics") or []:
         if not isinstance(topic, dict):
             continue
@@ -1220,6 +1225,17 @@ def _normalize_export_references(
                 known_ids=known_component_ids,
                 drop_unresolved=True,
             )
+        # Derived topic claim/equation links (issue #389) are dropped when they
+        # cannot be resolved so the validation gate reports real artifact issues,
+        # not derived-link drift.
+        if isinstance(topic.get("linked_claim_ids"), list):
+            topic["linked_claim_ids"] = _map_ref_list(
+                topic["linked_claim_ids"], claim_map, known_ids=known_claim_ids, drop_unresolved=True,
+            )
+        if isinstance(topic.get("linked_equation_ids"), list):
+            topic["linked_equation_ids"] = [
+                str(v) for v in topic["linked_equation_ids"] if str(v) in known_equation_ids
+            ]
         for step in topic.get("visualization_plan") or []:
             if isinstance(step, dict) and isinstance(step.get("linked_component_ids"), list):
                 step["linked_component_ids"] = _map_ref_list(
@@ -1705,6 +1721,18 @@ def _validate_export_references(
                 )
             check_refs(topic.get("linked_component_ids"), component_ids, "course_info.json", f"$.topics[{idx}].linked_component_ids", "component")
             check_refs(topic.get("linked_derivation_ids"), derivation_ids, "course_info.json", f"$.topics[{idx}].linked_derivation_ids", "derivation")
+            # Every topic must link to at least one component (issue #389). An
+            # empty-component topic is a teaching-export warning, not a hard error.
+            if not (topic.get("linked_component_ids") or []):
+                warn(
+                    "COURSE_TOPIC_WITHOUT_COMPONENT",
+                    f"course topic {idx} ({topic.get('title')!r}) has no linked components",
+                    "course_info.json",
+                    f"$.topics[{idx}].linked_component_ids",
+                    str(topic.get("topic_id") or idx),
+                )
+            check_refs(topic.get("linked_claim_ids"), claim_ids, "course_info.json", f"$.topics[{idx}].linked_claim_ids", "claim")
+            check_refs(topic.get("linked_equation_ids"), equation_ids, "course_info.json", f"$.topics[{idx}].linked_equation_ids", "equation")
             for step_idx, step in enumerate(topic.get("visualization_plan") or []):
                 if isinstance(step, dict):
                     check_refs(step.get("linked_component_ids"), component_ids, "course_info.json", f"$.topics[{idx}].visualization_plan[{step_idx}].linked_component_ids", "component")
@@ -2113,7 +2141,7 @@ def export_course_bundle(
         derivation_chains = _build_derivations_for_documents(artifacts_by_doc, document_ids)
         document_boundaries = _build_document_boundaries(artifacts_by_doc, document_ids)
         completeness_reports = _build_document_completeness_reports(artifacts_by_doc, document_ids)
-        course = _enrich_course_for_export(course, artifacts_by_doc, document_ids)
+        course = _enrich_course_for_export(course, artifacts_by_doc, document_ids, components, component_graph)
         _normalize_export_references(
             claims=claims,
             equations=equations,
@@ -2266,7 +2294,7 @@ def export_document_bundle(
         derivation_chains = _build_derivations_for_documents(artifacts_by_doc, document_ids)
         document_boundaries = _build_document_boundaries(artifacts_by_doc, document_ids)
         completeness_reports = _build_document_completeness_reports(artifacts_by_doc, document_ids)
-        document = _enrich_course_for_export(document, artifacts_by_doc, document_ids)
+        document = _enrich_course_for_export(document, artifacts_by_doc, document_ids, components, component_graph)
         _normalize_export_references(
             claims=claims,
             equations=equations,
