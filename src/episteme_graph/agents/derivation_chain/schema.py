@@ -35,16 +35,14 @@ OPERATION_ONTOLOGY = [
     "transform",
     "derive_result",
     "apply_constraint",
-    # Domain-specific names used by math-heavy cartridges.
-    "linearize_skewness_bias_dependence",
-    "linearize_kurtosis_bias_dependence",
-    "solve_second_order_bias",
-    "substitute_second_order_bias",
-    "solve_third_order_bias",
-    "substitute_third_order_bias",
-    "derive_skewness_consistency_relation",
-    "derive_first_kurtosis_consistency_relation",
-    "derive_second_kurtosis_consistency_relation",
+    # Generic transformation verbs (domain-neutral). Paper-specific operation
+    # names must come from a cartridge, never from this core list (issues
+    # #395 / #397).
+    "linearize",
+    "substitute",
+    "eliminate",
+    "solve",
+    "normalize",
 ]
 
 STEP_REVIEW_STATUSES = [

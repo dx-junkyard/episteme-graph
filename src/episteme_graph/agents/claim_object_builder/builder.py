@@ -42,23 +42,10 @@ from .schema import (
 
 _DEFAULT_CLAIM_TYPE = "unknown"
 
-_DOMAIN_CONCEPT_FALLBACKS: dict[str, tuple[str, str]] = {
-    "nonlinear galaxy bias": ("nonlinear galaxy bias", "domain_concept"),
-    "skewness": ("skewness", "observable"),
-    "kurtosis": ("kurtosis", "observable"),
-    "consistency relation": ("consistency relation", "result"),
-    "matter density perturbation": ("matter density perturbation", "quantity"),
-    "dhost": ("DHOST", "theory_family"),
-    "horndeski": ("Horndeski", "theory_family"),
-    "kernel coefficient": ("kernel coefficient", "parameter"),
-    "smoothing scale": ("smoothing scale", "parameter"),
-    "tree-level approximation": ("tree-level approximation", "approximation"),
-    "local bias": ("local bias", "model"),
-    "linear bias": ("linear bias", "parameter"),
-    "bias elimination": ("bias elimination", "method"),
-    "higher-order moment": ("higher-order moment", "observable"),
-    "gravity diagnostic": ("gravity diagnostic", "diagnostic"),
-}
+# Domain-specific concept fallbacks must live in cartridges, not in core logic
+# (issue #397). Core ships an empty map; a domain cartridge supplies concept
+# vocabulary. Kept as a dict so callers iterate without special-casing.
+_DOMAIN_CONCEPT_FALLBACKS: dict[str, tuple[str, str]] = {}
 
 
 @dataclass
@@ -1065,7 +1052,7 @@ class ClaimObjectBuilder:
     def _rhetorical_roles(cls, text: str) -> set[str]:
         t = text.lower()
         roles: set[str] = set()
-        if any(k in t for k in ("dhost", "horndeski", "background", "theory class", "modified gravity")):
+        if any(k in t for k in ("background", "theory class", "prior work", "framework")):
             roles.add("background")
         if any(k in t for k in ("motivat", "constrain", "parameter", "test", "useful", "probe")):
             roles.add("conclusion")
@@ -1073,7 +1060,7 @@ class ClaimObjectBuilder:
             roles.add("method")
         if any(k in t for k in ("newly derived", "reproduced", "result", "yield", "obtain")):
             roles.add("result")
-        if any(k in t for k in ("observable", "skewness", "kurtosis", "spectrum", "statistics")):
+        if any(k in t for k in ("observable", "spectrum", "statistics", "measurable")):
             roles.add("observable")
         return roles
 

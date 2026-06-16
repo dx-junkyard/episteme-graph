@@ -752,41 +752,35 @@ class ComponentAssemblyValidator:
                     f"components[{component.component_id}].review_status",
                 ))
 
-        text = " ".join([
-            component.label.lower(),
-            component.summary.lower(),
-            component.reason.lower(),
-        ])
-        if "eliminat" in text or "bias" in text:
+        # Domain-neutral elimination check (issues #395 / #397): driven by the
+        # component's declared operation, not by paper-specific label keywords.
+        operation_text = " ".join([
+            str(component.operation or ""),
+            str(component.primary_operation or ""),
+            " ".join(str(o) for o in (component.secondary_operations or [])),
+        ]).lower()
+        if "eliminat" in operation_text:
             if not component.eliminated_symbols:
                 issues.append(ValidationIssue(
-                    "bias_elimination_missing_eliminated_symbols",
+                    "elimination_missing_eliminated_symbols",
                     "warning",
-                    f"{component.component_id} appears to describe elimination but has no eliminated_symbols",
+                    f"{component.component_id} declares an elimination operation but has no eliminated_symbols",
                     f"components[{component.component_id}].eliminated_symbols",
                 ))
             if not component.retained_symbols:
                 issues.append(ValidationIssue(
-                    "bias_elimination_missing_retained_symbols",
+                    "elimination_missing_retained_symbols",
                     "warning",
-                    f"{component.component_id} appears to describe elimination but has no retained_symbols",
+                    f"{component.component_id} declares an elimination operation but has no retained_symbols",
                     f"components[{component.component_id}].retained_symbols",
                 ))
-            if (
-                ("second" in text or "second-order" in text or "2nd" in text)
-                and ("third" in text or "third-order" in text or "3rd" in text)
-            ):
-                issues.append(ValidationIssue(
-                    "bias_elimination_mixes_second_and_third_order",
-                    "warning",
-                    f"{component.component_id} appears to combine second- and third-order bias elimination; split it",
-                    f"components[{component.component_id}]",
-                ))
-        if "consistency relation" in text and not component.output_equation_ids:
+        # A constraint responsibility that declares no output equations is
+        # incomplete (generic; no paper-specific "consistency relation" wording).
+        if canonical_responsibility_type(component.responsibility_type) == "constraint" and not component.output_equation_ids:
             issues.append(ValidationIssue(
-                "consistency_relation_without_output_equations",
-                "error",
-                f"{component.component_id} outputs a consistency relation but has no output_equation_ids",
+                "constraint_component_without_output_equations",
+                "warning",
+                f"{component.component_id} has a constraint responsibility but no output_equation_ids",
                 f"components[{component.component_id}].output_equation_ids",
             ))
         return issues

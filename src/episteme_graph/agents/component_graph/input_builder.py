@@ -284,23 +284,11 @@ def _graph_layer(component) -> str:
 
 
 def _infer_theory_object(component) -> str:
-    text = " ".join([
-        str(getattr(component, "label", "") or ""),
-        str(getattr(component, "summary", "") or ""),
-        str(getattr(component, "reason", "") or ""),
-        " ".join(getattr(component, "linked_equation_ids", []) or []),
-        " ".join(getattr(component, "output_equation_ids", []) or []),
-    ]).lower()
-    if "horndeski" in text or "dhost" in text:
-        return "Horndeski / DHOST gravity"
-    if "skewness" in text or "eq_3_34" in text:
-        return "skewness consistency relation"
-    if "kurtosis" in text or "eq_3_35" in text or "eq_3_36" in text:
-        return "kurtosis consistency relation"
-    if "bias" in text:
-        return "galaxy bias model"
-    if "observable" in text or "eq_2_17" in text or "eq_2_18" in text:
-        return "smoothed observables"
-    if "kernel" in text or "eq_2_5" in text:
-        return "matter perturbation kernels"
+    """Theory object for a graph node (issues #395 / #398).
+
+    Core logic must not guess paper-specific theory objects (observable /
+    parameter / method / model names). The theory object, when shown, must come
+    from the component's own source-backed fields — never from hard-coded
+    domain keyword branches. A domain cartridge may supply richer labels.
+    """
     return ""

@@ -56,11 +56,19 @@ _ONTOLOGY = {
         "Skewness": ["skewness"],
         "Kurtosis": ["kurtosis"],
         "Galaxy bias": ["galaxy bias", "nonlinear galaxy bias"],
+        # Neutral terms used by _NON_ATOMIC. Domain vocabulary is supplied by the
+        # cartridge ontology, not by core fallbacks (issue #397).
+        "Consistency relation": ["consistency relation", "consistency relations"],
+        "Nuisance parameter": ["nuisance parameter", "nuisance parameters"],
+        "Target theory": ["target theory"],
     },
     "concept_types": {
         "Skewness": "observable",
         "Kurtosis": "observable",
         "Galaxy bias": "nuisance",
+        "Consistency relation": "result",
+        "Nuisance parameter": "parameter",
+        "Target theory": "theory_family",
     },
 }
 

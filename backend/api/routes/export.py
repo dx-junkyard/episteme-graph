@@ -64,6 +64,15 @@ def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 
+def _core_operation_families() -> set[str]:
+    """The stable generic operation-family set (issue #398). Empty if unavailable."""
+    try:
+        from episteme_graph.agents.theory_operations import CORE_OPERATION_FAMILIES
+        return set(CORE_OPERATION_FAMILIES)
+    except Exception:
+        return set()
+
+
 def _export_id(scope_type: str, scope_id: str) -> str:
     ts = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
     safe_id = scope_id.replace("-", "")[:16]
@@ -1703,6 +1712,65 @@ def _validate_export_references(
                 f"$.links[{idx}].operation_id",
                 op_id,
             )
+
+    # Operation-graph connectivity (issue #398): a graph with many isolated
+    # operation nodes is incomplete even if extraction succeeded, and equations /
+    # evidence should be able to reach a claim/component through operation links.
+    op_nodes = [n for n in operation_graph.get("nodes", []) or [] if isinstance(n, dict)]
+    if op_nodes:
+        linked_op_ids: set[str] = set()
+        for edge in operation_graph.get("edges", []) or []:
+            if isinstance(edge, dict):
+                linked_op_ids.add(str(edge.get("source") or ""))
+                linked_op_ids.add(str(edge.get("target") or ""))
+        for link in component_operation_links:
+            if isinstance(link, dict):
+                linked_op_ids.add(str(link.get("operation_id") or ""))
+        isolated = [
+            str(n.get("operation_id") or "")
+            for n in op_nodes
+            if str(n.get("operation_id") or "") and str(n.get("operation_id")) not in linked_op_ids
+        ]
+        # Isolated above ~half of all operations (and at least 3) signals a sparse,
+        # incomplete operation graph.
+        if len(isolated) >= 3 and len(isolated) * 2 >= len(op_nodes):
+            warn(
+                "ISOLATED_OPERATION_NODES",
+                f"{len(isolated)} of {len(op_nodes)} operation nodes are isolated "
+                "(no operation edge and no component link); operation graph looks incomplete",
+                "graph/operation_graph.json",
+                "$.nodes",
+                str(len(isolated)),
+            )
+        # Operations exist but none connect to a component: equations/evidence
+        # carried by operations cannot reach any component.
+        if not any(isinstance(l, dict) and l.get("operation_id") for l in component_operation_links):
+            op_equations = sorted({
+                str(e) for n in op_nodes for e in (n.get("linked_equation_ids") or []) if e
+            })
+            if op_equations:
+                warn(
+                    "EQUATIONS_UNREACHABLE_THROUGH_OPERATIONS",
+                    "operation nodes carry equations but no component_operation_links exist; "
+                    "equations/evidence cannot reach any component through operations",
+                    "graph/component_operation_links.json",
+                    "$.links",
+                    str(len(op_equations)),
+                )
+        # Operation families must come from the stable, generic core set (never a
+        # paper-specific core key, issue #398).
+        core_families = _core_operation_families()
+        if core_families:
+            for idx, n in enumerate(op_nodes):
+                fam = str(n.get("operation_family") or "")
+                if fam and fam not in core_families:
+                    warn(
+                        "NON_GENERIC_OPERATION_FAMILY",
+                        f"operation node {n.get('operation_id')!r} has a non-generic operation_family {fam!r}",
+                        "graph/operation_graph.json",
+                        f"$.nodes[{idx}].operation_family",
+                        fam,
+                    )
 
     # Component coverage / granularity (issue #392): a theory-heavy paper with
     # many source-backed equations but only a handful of components is almost

@@ -298,3 +298,69 @@ def test_adequate_components_no_coverage_warning():
     )
     codes = {w["code"] for w in report["warnings"]}
     assert "FEW_COMPONENTS_FOR_SOURCE_BACKED_EQUATIONS" not in codes
+
+
+# ---------------------------------------------------------------------------
+# #398: generic operation framework propagates to graph + export validation.
+# ---------------------------------------------------------------------------
+
+
+def test_operation_graph_nodes_expose_generic_operation_family():
+    artifact = {
+        "graph_schema_version": "0.1.0",
+        "nodes": [
+            {"component_id": "comp_1", "component_type": "TheoryOperationNode", "graph_layer": "main"},
+            {"component_id": "op_1", "component_type": "EquationOperationNode",
+             "graph_layer": "equation_detail", "parent_component_id": "comp_1",
+             "operation": "linearize the skewness bias equation", "linked_equation_ids": ["eq_1"]},
+        ],
+        "edges": [],
+    }
+    out = ea.build_component_graph_export(artifact, document_id="doc_1", known_component_ids={"comp_1"})
+    op = out["operation_graph"]["nodes"][0]
+    # Generic family, never a paper-specific operation key.
+    assert op["operation_family"] == "transform_representation"
+    for term in ("skew", "bias", "kurt"):
+        assert term not in op["operation_family"]
+
+
+def test_validation_warns_on_isolated_operation_nodes():
+    mod = _export_mod()
+    op_nodes = [{"operation_id": f"op_{i}", "operation_family": "derive_consequence"} for i in range(4)]
+    report = mod._validate_export_references(
+        claims=[], equations=[], components=[],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": op_nodes, "edges": []},
+        component_operation_links=[],
+    )
+    codes = {w["code"] for w in report["warnings"]}
+    assert "ISOLATED_OPERATION_NODES" in codes
+
+
+def test_validation_warns_when_equations_cannot_reach_components():
+    mod = _export_mod()
+    op_nodes = [{"operation_id": "op_1", "operation_family": "derive_consequence", "linked_equation_ids": ["eq_1"]}]
+    report = mod._validate_export_references(
+        claims=[], equations=[], components=[],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": op_nodes, "edges": []},
+        component_operation_links=[],
+    )
+    codes = {w["code"] for w in report["warnings"]}
+    assert "EQUATIONS_UNREACHABLE_THROUGH_OPERATIONS" in codes
+
+
+def test_validation_warns_on_non_generic_operation_family():
+    mod = _export_mod()
+    op_nodes = [{"operation_id": "op_1", "operation_family": "linearize_skewness_bias_equation"}]
+    report = mod._validate_export_references(
+        claims=[], equations=[], components=[],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": op_nodes, "edges": []},
+        component_operation_links=[{"component_id": "c", "operation_id": "op_1"}],
+    )
+    codes = {w["code"] for w in report["warnings"]}
+    assert "NON_GENERIC_OPERATION_FAMILY" in codes

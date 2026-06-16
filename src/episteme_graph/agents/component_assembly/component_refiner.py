@@ -31,6 +31,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field
 
+from ..theory_operations import operation_family as _generic_operation_family
 from .equation_role_classifier import EquationRoleClassifier
 from .responsibility import CANONICAL_RESPONSIBILITY_TYPES, canonical_responsibility_type
 from .schema import (
@@ -679,12 +680,16 @@ class ComponentRefiner:
         )
 
         raw_operation = candidate.operation
+        # ``family`` is the verb-level grouping label used for labels/io/flow;
+        # ``broad_family`` is the stable, domain-neutral operation family exposed
+        # on the component (and therefore the operation graph) per #396 / #398.
         family = _operation_family(raw_operation)
+        broad_family = _generic_operation_family(raw_operation)
         # Label / summary describe the theory object (the parent's theoretical
         # subject) qualified by the reusable unit's family — not a bare operation
         # name like "Transform" / "Relate" (issue #308).
         label = _theory_unit_label(raw_operation, parent, eliminated or retained)
-        summary = _theory_unit_summary(label, family, parent, len(steps))
+        summary = _theory_unit_summary(label, broad_family, parent, len(steps))
 
         internal_flow = _build_internal_flow(steps, family)
         review_required = bool(classification.review_required_equation_ids) or any(
@@ -743,11 +748,11 @@ class ComponentRefiner:
             constraints=list(parent.constraints),
             invalid_conditions=list(parent.invalid_conditions),
             responsibility_type=_responsibility_for_operation(raw_operation),
-            primary_operation=family,
-            secondary_operations=_secondary_operations(steps, family),
+            primary_operation=broad_family,
+            secondary_operations=_secondary_operations(steps, broad_family),
             split_recommendation=_no_split_recommendation(),
             **_child_support_fields(parent, _responsibility_for_operation(raw_operation)),
-            operation=family,
+            operation=broad_family,
         )
 
     def _responsibility_children(
@@ -757,42 +762,16 @@ class ComponentRefiner:
         chains: list,
         report: RefinementReport,
     ) -> list[ComponentRecord]:
-        slices = _responsibility_slices(component, eq_index)
-        if slices:
-            seen_labels = {str(spec.get("label") or "") for spec in slices}
-            for spec in _derivation_responsibility_slices(component, chains):
-                if spec["label"] in seen_labels:
-                    continue
-                seen_labels.add(spec["label"])
-                slices.append(spec)
-        if len(slices) < 2:
-            return []
+        """Deprecated paper-specific split path (issues #395 / #396 / #397).
 
-        children: list[ComponentRecord] = []
-        for idx, spec in enumerate(slices, start=1):
-            child_id = f"{component.component_id}__resp{idx}"
-            child = _build_responsibility_component(component, child_id, spec, eq_index)
-            children.append(child)
-
-        for prev, nxt in zip(children, children[1:]):
-            nxt.dependencies.append({
-                "dependency_type": "depends_on",
-                "component_refs": [prev.component_id],
-                "reason": "Sequential responsibility dependency from ComponentRefiner.",
-            })
-
-        report.split_actions.append(RefinementAction(
-            parent_component_id=component.component_id,
-            parent_label=component.label,
-            child_component_ids=[c.component_id for c in children],
-            operations=[c.responsibility_type or c.operation for c in children],
-            reason=(
-                "Component mixed model, observable-construction, and linearized "
-                "equation-system responsibilities; split into reusable "
-                "theory-component units."
-            ),
-        ))
-        return children
+        The previous implementation split a component using hard-coded
+        bias→observable buckets, which locally optimised the pipeline for one
+        paper family. Splitting is now done generically by the granularity
+        analyzer's ``suggested_split`` plan (``_suggested_split_children``) and by
+        domain-neutral operation-family grouping (``_operation_groups``), so this
+        path is disabled.
+        """
+        return []
 
     def _finalize_single(
         self,
@@ -802,9 +781,9 @@ class ComponentRefiner:
     ) -> None:
         if not component.operation:
             if len(groups) == 1:
-                component.operation = _operation_family(next(iter(groups)))
+                component.operation = _generic_operation_family(next(iter(groups)))
             else:
-                component.operation = _infer_operation_from_text(component)
+                component.operation = _generic_operation_family(_infer_operation_from_text(component))
         if not component.responsibility_type:
             component.responsibility_type = _responsibility_for_operation(component.operation)
         if not component.primary_operation:
@@ -891,24 +870,14 @@ def _operation_family(operation: str) -> str:
 
 
 def _operation_group_key(operation: str) -> str:
-    text = str(operation or "").lower()
-    if "linear" in text and "skew" in text:
-        return "linearize_skewness_bias_equation"
-    if "linear" in text and "kurt" in text:
-        return "linearize_kurtosis_bias_equation"
-    if ("solve" in text or "eliminat" in text) and ("second" in text or "b2" in text or "b_2" in text):
-        return "eliminate_second_order_bias"
-    if ("solve" in text or "eliminat" in text) and ("third" in text or "b3" in text or "b_3" in text):
-        return "eliminate_third_order_bias"
-    if "consistency" in text and "skew" in text:
-        return "derive_skewness_consistency_relation"
-    if "consistency" in text and "first" in text and "kurt" in text:
-        return "derive_first_kurtosis_consistency_relation"
-    if "consistency" in text and "second" in text and "kurt" in text:
-        return "derive_second_kurtosis_consistency_relation"
-    if "consistency" in text and "kurt" in text:
-        return "derive_kurtosis_consistency_relation"
-    return _operation_family(operation)
+    """Domain-neutral operation group key (issues #395 / #396).
+
+    Grouping/splitting use a generic operation FAMILY only. Paper-specific
+    operation keys (observable / parameter / method names) are never produced by
+    core logic; any such terminology must come from a cartridge subtype, not from
+    hard-coded branches here.
+    """
+    return _generic_operation_family(operation)
 
 
 def _responsibility_for_operation(operation: str) -> str:
@@ -940,108 +909,39 @@ def _responsibility_for_operation(operation: str) -> str:
 
 
 def _responsibility_labels(component: ComponentRecord, eq_index: dict[str, dict]) -> set[str]:
-    labels: set[str] = set()
-    text = _component_text(component)
-    if any(k in text for k in ("bias model", "galaxy bias", "local bias", "bias expansion")):
-        labels.add("model")
-    if any(k in text for k in ("smoothing", "smoothed", "spectral moment", "sigma_", "variance")):
-        labels.add("definition")
-    if any(k in text for k in ("observable basis", "skewness", "kurtosis")):
-        labels.add("observable_basis")
-    if any(k in text for k in ("linearized", "linearize", "bias elimination", "eliminate")):
-        labels.add("equation_system")
-    if any(k in text for k in ("derive", "derivation", "final result", "consistency relation")):
-        labels.add("constraint")
-    if any(k in text for k in ("constraint", "validity", "limitation", "invalid")):
-        labels.add("limitation")
+    """Domain-neutral responsibility labels from generic operation families (#396).
 
+    Derived from the component's own operation/responsibility fields and equation
+    *roles* — never from paper-specific observable/parameter terms.
+    """
+    labels: set[str] = set()
+    for value in (component.responsibility_type, component.operation, component.primary_operation):
+        if value:
+            labels.add(canonical_responsibility_type(_responsibility_for_operation(str(value))))
+    for op in component.secondary_operations or []:
+        labels.add(canonical_responsibility_type(_responsibility_for_operation(str(op))))
     for eq_id in _all_equation_ids(component):
-        eq_text = _equation_text(eq_id, eq_index)
         role = str((eq_index.get(eq_id) or {}).get("role") or (eq_index.get(eq_id) or {}).get("equation_type") or "").lower()
-        if "definition" in role or "defin" in eq_text:
+        if "definition" in role:
             labels.add("definition")
-        if any(k in eq_text for k in ("skew", "kurt", "s_3", "s3", "k_4", "k4")) and ("definition" in role or "basis" in eq_text):
-            labels.add("observable_basis")
-        if any(k in eq_text for k in ("linear", "bias", "b_1", "b1", "b_2", "b2", "b_3", "b3")) and role in {"relation", "transformation", "result", ""}:
-            labels.add("equation_system")
-        if "constraint" in role:
+        elif "constraint" in role:
             labels.add("constraint")
+        elif role in {"relation", "transformation"}:
+            labels.add("equation_system")
+        elif "result" in role:
+            labels.add("derivation")
+    labels.discard("")
     return labels
 
 
 def _responsibility_slices(component: ComponentRecord, eq_index: dict[str, dict]) -> list[dict]:
-    """Build deterministic responsibility slices for bias→observable map bundles.
+    """Removed paper-specific responsibility slicing (issues #395 / #397).
 
-    The rules are intentionally narrow: they only fire when the component text
-    or equations show the same mixed responsibilities as the known
-    Bias-to-smoothed-observables failure mode.
+    This previously bucketed equations by domain-specific terms (observable and
+    parameter names of one paper family). Splitting is now generic; this path is
+    disabled and returns no slices.
     """
-    text = _component_text(component)
-    labels = _responsibility_labels(component, eq_index)
-    has_observable_map_language = (
-        "bias" in text
-        and ("observable" in text or "observables" in text)
-        and any(k in text for k in ("smooth", "spectral", "skew", "kurt"))
-    )
-    has_equation_backed_mixed_map = (
-        {"model", "observable_basis", "equation_system"} <= labels
-        and any(k in text for k in ("observable", "observables", "smooth", "spectral", "kurtosis"))
-    )
-    looks_like_bias_observable_map = has_observable_map_language or has_equation_backed_mixed_map
-    if not looks_like_bias_observable_map:
-        return []
-
-    buckets: dict[str, list[str]] = {
-        "bias_model": [],
-        "smoothing": [],
-        "skew_basis": [],
-        "kurt_basis": [],
-        "skew_linear": [],
-        "kurt_linear": [],
-    }
-    fallback_eqs = _all_equation_ids(component)
-    for eq_id in fallback_eqs:
-        eq_text = _equation_text(eq_id, eq_index) or eq_id.lower()
-        is_skew = any(k in eq_text for k in ("skew", "s_3", "s3"))
-        is_kurt = any(k in eq_text for k in ("kurt", "k_4", "k4"))
-        is_linear = any(k in eq_text for k in ("linear", "linearized", "bias-linear", "b_1", "b1", "b_2", "b2", "b_3", "b3"))
-        is_definition = any(k in eq_text for k in ("definition", "basis", "observable"))
-        if any(k in eq_text for k in ("galaxy bias", "local bias", "delta_g", "bias model", "bias expansion")):
-            buckets["bias_model"].append(eq_id)
-        elif any(k in eq_text for k in ("smooth", "spectral moment", "sigma_", "sigma", "window", "variance")):
-            buckets["smoothing"].append(eq_id)
-        elif is_skew and is_linear:
-            buckets["skew_linear"].append(eq_id)
-        elif is_kurt and is_linear:
-            buckets["kurt_linear"].append(eq_id)
-        elif is_skew or (is_definition and "third" in eq_text):
-            buckets["skew_basis"].append(eq_id)
-        elif is_kurt or (is_definition and "fourth" in eq_text):
-            buckets["kurt_basis"].append(eq_id)
-
-    # If equation metadata is sparse but the parent clearly names the mixed
-    # bundle, still split by responsibility and leave equations attached to the
-    # most specific slices when possible.
-    specs = [
-        ("Local galaxy bias observation model", "model", "parameterize", buckets["bias_model"]),
-        ("Smoothing and spectral moments", "definition", "define", buckets["smoothing"]),
-        ("Skewness observable basis", "observable_basis", "observable_definition", buckets["skew_basis"]),
-        ("Kurtosis observable basis", "observable_basis", "observable_definition", buckets["kurt_basis"]),
-        ("Skewness linearized bias equation", "equation_system", "linearize", buckets["skew_linear"]),
-        ("Kurtosis linearized bias equation", "equation_system", "linearize", buckets["kurt_linear"]),
-    ]
-    selected = [
-        {"label": label, "responsibility_type": resp, "operation": op, "equation_ids": _ordered_unique(eqs)}
-        for label, resp, op, eqs in specs
-        if eqs or _responsibility_named_in_text(label, text)
-    ]
-    if len(selected) < 2:
-        return []
-    assigned = {eq for spec in selected for eq in spec["equation_ids"]}
-    leftovers = [eq for eq in fallback_eqs if eq not in assigned]
-    if leftovers:
-        selected[-1]["equation_ids"] = _ordered_unique(selected[-1]["equation_ids"] + leftovers)
-    return selected
+    return []
 
 
 def _build_responsibility_component(
@@ -1184,9 +1084,9 @@ def _no_split_recommendation() -> dict:
 
 def _secondary_operations(steps: list, primary: str) -> list[str]:
     return _ordered_unique(
-        _operation_family(str(getattr(step, "operation", "") or ""))
+        _generic_operation_family(str(getattr(step, "operation", "") or ""))
         for step in steps
-        if _operation_family(str(getattr(step, "operation", "") or "")) != primary
+        if _generic_operation_family(str(getattr(step, "operation", "") or "")) != primary
     )
 
 
@@ -1275,19 +1175,7 @@ def _equation_text(eq_id: str, eq_index: dict[str, dict]) -> str:
 
 
 def _responsibility_named_in_text(label: str, text: str) -> bool:
-    label_text = label.lower()
-    if "local galaxy bias" in label_text:
-        return "bias" in text and ("model" in text or "map" in text)
-    if "smoothing" in label_text:
-        return "smooth" in text or "spectral moment" in text
-    if "skewness observable" in label_text:
-        return "skew" in text and "observable" in text
-    if "kurtosis observable" in label_text:
-        return "kurt" in text and "observable" in text
-    if "skewness linearized" in label_text:
-        return "skew" in text and ("linear" in text or "bias" in text)
-    if "kurtosis linearized" in label_text:
-        return "kurt" in text and ("linear" in text or "bias" in text)
+    # Removed paper-specific label matching (issues #395 / #397).
     return False
 
 
@@ -1336,23 +1224,8 @@ def _theory_unit_label(family: str, parent: ComponentRecord, symbols: list[str])
 
 
 def _explicit_theory_unit_label(operation: str) -> str:
-    text = str(operation or "").lower()
-    if "linearize_skewness" in text:
-        return "Skewness linearized bias equation"
-    if "linearize_kurtosis" in text:
-        return "Kurtosis linearized bias equation"
-    if "eliminate_second_order" in text:
-        return "Second-order bias elimination"
-    if "eliminate_third_order" in text:
-        return "Third-order bias elimination"
-    if "derive_skewness_consistency" in text:
-        return "Skewness consistency relation"
-    if "derive_first_kurtosis_consistency" in text:
-        return "First kurtosis consistency relation"
-    if "derive_second_kurtosis_consistency" in text:
-        return "Second kurtosis consistency relation"
-    if "derive_kurtosis_consistency" in text:
-        return "Kurtosis consistency relation"
+    # Removed paper-specific theory-unit labels (issues #395 / #398): core logic
+    # must not emit domain-specific operation labels into components or graphs.
     return ""
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ..theory_operations import classify_operation
 from .responsibility import canonical_responsibility_type, canonical_responsibility_types
 from .schema import ComponentAssemblyResult, ComponentRecord
 
@@ -167,27 +168,50 @@ def _has_mixed_responsibility(responsibility_types: set[str]) -> bool:
     return any(pair <= responsibility_types for pair in mixed_pairs) or len(responsibility_types) > 1
 
 
+# Generic operation family → responsibility type (issues #395 / #396). Domain
+# vocabulary plays no part: responsibilities are inferred from the broad,
+# domain-neutral operation family produced by the theory-operation framework.
+_FAMILY_TO_RESPONSIBILITY = {
+    "introduce_entity": "definition",
+    "define_relation": "definition",
+    "impose_assumption": "model",
+    "construct_model": "model",
+    "transform_representation": "equation_system",
+    "derive_consequence": "derivation",
+    "evaluate_condition": "constraint",
+    "compare_cases": "application",
+    "validate_or_test": "application",
+    "apply_to_context": "application",
+    "state_limitation": "limitation",
+}
+
+
+def _operation_strings(component: ComponentRecord) -> list[str]:
+    """Collect operation-bearing strings from a component (domain-neutral).
+
+    ``responsibility_type`` is intentionally excluded — it is a responsibility
+    label, not an operation, and is added directly by the caller.
+    """
+    values: list[str] = [
+        str(component.operation or ""),
+        str(component.primary_operation or ""),
+    ]
+    values.extend(str(op or "") for op in (component.secondary_operations or []))
+    for step in component.internal_flow or []:
+        if isinstance(step, dict):
+            values.append(str(step.get("operation") or step.get("relation") or ""))
+    return [v for v in values if v]
+
+
 def _detected_responsibilities(component: ComponentRecord) -> set[str]:
+    """Detect responsibility types from generic operation families only (#395/#396)."""
     values = {canonical_responsibility_type(component.responsibility_type)}
-    text = _component_text(component)
-    if any(k in text for k in ("definition", "define", "smoothing", "spectral moment")):
-        values.add("definition")
-    if any(k in text for k in ("bias model", "galaxy bias", "local bias", "parameterize")):
-        values.add("model")
-    if any(k in text for k in ("observation model", "observation design")):
-        values.add("observation_model")
-    if any(k in text for k in ("observable basis", "skewness", "kurtosis")):
-        values.add("observable_basis")
-    if any(k in text for k in ("linearized", "linearize", "equation system")):
-        values.add("equation_system")
-    if any(k in text for k in ("elimination", "eliminate", "solve", "derivation", "derive")):
-        values.add("derivation")
-    if any(k in text for k in ("consistency relation", "constraint relation", "final constraint")):
-        values.add("constraint")
-    if any(k in text for k in ("forecast", "application")):
-        values.add("application")
-    if any(k in text for k in ("caveat", "limitation", "invalid condition")):
-        values.add("limitation")
+    for op in _operation_strings(component):
+        family = classify_operation(op).operation_family
+        responsibility = _FAMILY_TO_RESPONSIBILITY.get(family)
+        if responsibility:
+            values.add(responsibility)
+    values.discard("")
     return canonical_responsibility_types(values)
 
 

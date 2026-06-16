@@ -853,15 +853,11 @@ def _normalize_allowed_downstream_use(value: object) -> str:
 
 
 def _theory_family_conflict(raw_text: str, latex: str) -> bool:
-    raw = raw_text.lower()
-    tex = latex.lower()
-    bias_terms = ("bias", "skewness", "kurtosis", "b_1", "b2", "b_2", "b3", "b_3")
-    benchmark_terms = ("r_d", "r_{d", "lambda_c", "hqet", "sum rule", "isgur", "wilson")
-    return (
-        any(t in raw for t in bias_terms) and any(t in tex for t in benchmark_terms)
-    ) or (
-        any(t in raw for t in benchmark_terms) and any(t in tex for t in bias_terms)
-    )
+    # Removed paper-specific cross-contamination heuristic (issues #395 / #397):
+    # core logic must not hard-code the vocabulary of particular paper families.
+    # The generic raw_text↔latex symbol-overlap consistency check already flags
+    # mismatched extractions; a domain cartridge may add stricter rules.
+    return False
 
 
 def _dedupe_text(values: list[str]) -> list[str]:

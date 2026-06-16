@@ -77,11 +77,17 @@ def test_analyzer_annotates_without_changing_component_count():
 
 
 def test_analyzer_detects_mixed_responsibility_with_canonical_aliases():
+    # Domain-neutral (#395/#396): mixed responsibilities are detected from the
+    # generic operation families of the component's own operations, not from
+    # paper-specific summary text. Here a "construct model" + "derive" component
+    # mixes model construction and derivation.
     component = _component(
-        label="Bias model and consistency relation",
-        summary="Defines a local bias model and derives a final consistency relation.",
+        label="Model construction and derived consequence",
+        summary="Constructs a model and derives a consequence.",
         responsibility_type="final_constraint",
-        primary_operation="derive",
+        primary_operation="construct model",
+        secondary_operations=["derive consequence"],
+        internal_flow=[{"from": "eq_0", "relation": "derive", "to": "eq_1"}],
     )
 
     analyzed = ANALYZER.analyze(_result([component]))
@@ -90,10 +96,11 @@ def test_analyzer_detects_mixed_responsibility_with_canonical_aliases():
     assert analyzed.components[0].responsibility_type == "constraint"
     assert quality["granularity_status"] == "mixed_responsibility"
     assert quality["split_required"] is True
-    assert {"model", "constraint"} <= {
-        item["responsibility_type"]
-        for item in quality["suggested_split"]
-    }
+    detected = {item["responsibility_type"] for item in quality["suggested_split"]}
+    # Generic families map to >= 2 distinct responsibilities (constraint from the
+    # declared responsibility_type, plus model/derivation from the operations).
+    assert "constraint" in detected
+    assert len(detected) >= 2
 
 
 def test_teaching_takeaway_is_not_a_step1_split_reason():

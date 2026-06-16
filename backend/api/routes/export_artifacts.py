@@ -1460,6 +1460,26 @@ _COMPONENT_GRAPH_LAYERS = {"main", ""}
 _OPERATION_NODE_TYPES = {"EquationOperationNode"}
 
 
+def _classify_operation_family(operation_text: str) -> dict:
+    """Classify an operation into a generic family for export (issue #398).
+
+    Resilient to the agents package not being importable from the export
+    environment: falls back to ``unknown_specific_operation`` (review_required).
+    """
+    try:
+        from episteme_graph.agents.theory_operations import classify_operation
+        return classify_operation(operation_text).to_dict()
+    except Exception:
+        return {
+            "operation_family": "unknown_specific_operation",
+            "operation_subtype": "unknown_specific_operation",
+            "subtype_source": "unknown",
+            "confidence": 0.0,
+            "review_required": True,
+            "review_reasons": ["operation_family_unrecognized"],
+        }
+
+
 def _graph_node_is_component(node: dict, known_component_ids: set[str]) -> bool:
     if not isinstance(node, dict):
         return False
@@ -1540,14 +1560,22 @@ def build_component_graph_export(
             if node_id in operation_node_ids:
                 continue
             operation_node_ids.add(node_id)
+            # Generic operation family (issue #398): operation graph nodes expose
+            # a broad, domain-neutral ``operation_family`` (never a paper-specific
+            # operation key). The raw operation is retained as a subtype hint.
+            classification = _classify_operation_family(n.get("operation") or n.get("label") or "")
             operation_nodes.append({
                 "operation_id": node_id,
                 "node_type": "operation",
                 "label": n.get("label") or n.get("visual_label") or "",
                 "operation": n.get("operation") or "",
+                "operation_family": classification["operation_family"],
+                "operation_subtype": classification["operation_subtype"],
+                "subtype_source": classification["subtype_source"],
                 "graph_layer": n.get("graph_layer") or "equation_detail",
                 "source_backing_status": n.get("source_backing_status") or "",
                 "review_status": n.get("review_status") or "teacher_review_required",
+                "review_required": bool(classification["review_required"]) or not n.get("linked_equation_ids"),
                 "parent_component_id": str(n.get("parent_component_id") or ""),
                 "linked_equation_ids": list(n.get("linked_equation_ids") or []),
                 "linked_derivation_ids": list(n.get("linked_derivation_ids") or []),

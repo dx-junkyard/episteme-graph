@@ -438,8 +438,8 @@ def _flow_relation(component: ComponentRecord) -> str:
     text = " ".join([component.label, component.summary, component.reason]).lower()
     if "eliminat" in text:
         return "eliminate_parameter"
-    if "consistency" in text:
-        return "derive_consistency_relation"
+    if "consistency" in text or "constraint" in text or "residual" in text:
+        return "derive_constraint"
     if "diagnos" in text or "forecast" in text:
         return "diagnose_with"
     if "correct" in text:

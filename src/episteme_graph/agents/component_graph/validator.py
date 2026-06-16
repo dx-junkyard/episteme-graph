@@ -18,7 +18,6 @@ from .schema import (
 
 _GENERIC_LABELS = {"define", "transform", "relate", "result"}
 _GENERIC_EDGE_TYPES = {"RELATED_TO", "CORRELATES", "supports", "related_to", "correlates"}
-_BIAS_ELIMINATION_NEEDLES = ("bias elimination", "eliminate second", "eliminate third", "second-order bias", "third-order bias")
 # Operation edge types whose nodes must expose their output/constraint equations.
 _OUTPUT_BEARING_EDGE_TYPES = {"constrains", "derives", "diagnoses"}
 # Equation-id-based main labels are not allowed (issue #308): a main node must
@@ -106,12 +105,17 @@ class ComponentGraphValidator:
                     f"constraint node {node.component_id!r} has no output_equation_ids",
                     f"nodes[{node.component_id}].output_equation_ids",
                 ))
-            label_text = label.lower()
-            if any(needle in label_text for needle in _BIAS_ELIMINATION_NEEDLES) and not getattr(node, "eliminated_symbols", []):
+            # Generic (issues #395 / #398): an elimination operation must expose
+            # eliminated_symbols. Driven by the node's operation, not by
+            # paper-specific label keywords.
+            operation_text = " ".join(
+                str(v) for v in [getattr(node, "operation", ""), *(getattr(node, "derivation_operations", []) or [])]
+            ).lower()
+            if "eliminat" in operation_text and not getattr(node, "eliminated_symbols", []):
                 issues.append(ValidationIssue(
-                    "bias_elimination_missing_eliminated_symbols",
+                    "elimination_missing_eliminated_symbols",
                     "error",
-                    f"bias elimination node {node.component_id!r} has no eliminated_symbols",
+                    f"elimination node {node.component_id!r} has no eliminated_symbols",
                     f"nodes[{node.component_id}].eliminated_symbols",
                 ))
             issues += self._check_node_source_backing(node, is_main)
@@ -532,21 +536,18 @@ def _has_equation_roles(node: ComponentGraphNode) -> bool:
 
 
 def _looks_like_theory_operation_node(node: ComponentGraphNode) -> bool:
+    # Domain-neutral (issues #395 / #398): a theory-operation node is identified
+    # by its component_type / operation, not by paper-specific vocabulary.
+    if str(getattr(node, "component_type", "") or "") in ("TheoryOperationNode", "EquationOperationNode"):
+        return True
     text = " ".join([
         str(node.label or ""),
         str(node.component_type or ""),
-        str(getattr(node, "theory_object", "") or ""),
+        str(getattr(node, "operation", "") or ""),
     ]).lower()
     return any(
         needle in text for needle in (
-            "equation",
-            "relation",
-            "bias",
-            "diagnostic",
-            "observable",
-            "kernel",
-            "constraint",
-            "derive",
-            "eliminate",
+            "equation", "relation", "constraint", "derive", "eliminate",
+            "transform", "define", "compare", "validate",
         )
     )
