@@ -1704,6 +1704,31 @@ def _validate_export_references(
                 op_id,
             )
 
+    # Component coverage / granularity (issue #392): a theory-heavy paper with
+    # many source-backed equations but only a handful of components is almost
+    # certainly over-compressed (definition / model / equation system / derivation
+    # / constraint / application collapsed into one). Surfaced as a review warning
+    # so the bundle is exportable but flagged for refinement.
+    source_backed_equation_count = 0
+    for eq in equations:
+        if not isinstance(eq, dict):
+            continue
+        src_loc = eq.get("source_location") if isinstance(eq.get("source_location"), dict) else {}
+        if eq.get("latex") and src_loc.get("block_id"):
+            source_backed_equation_count += 1
+    if source_backed_equation_count >= 15 and len(components) <= 4:
+        warn(
+            "FEW_COMPONENTS_FOR_SOURCE_BACKED_EQUATIONS",
+            (
+                f"{source_backed_equation_count} source-backed equations but only "
+                f"{len(components)} component(s); distinct responsibilities are "
+                "likely collapsed and should be refined"
+            ),
+            "components/components.json",
+            "$.components",
+            str(len(components)),
+        )
+
     if isinstance(course_info, dict):
         has_derivation_topic = False
         for idx, topic in enumerate(course_info.get("topics") or []):

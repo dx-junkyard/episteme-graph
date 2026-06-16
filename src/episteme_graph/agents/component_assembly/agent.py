@@ -288,10 +288,26 @@ def _refinement_triggered(result, llm_input, derivations) -> tuple[bool, list[st
             break
 
     # Few components while there is a lot of extracted equation/evidence material.
+    # Threshold raised to <= 4 (issue #392): a theory-heavy paper compressed into
+    # 3-4 coarse components must still trigger refinement, not only the <= 2 case.
     eq_count = len(getattr(llm_input, "available_equations", []) or [])
     ev_count = len(getattr(llm_input, "available_evidence", []) or [])
+    if components and len(components) <= 4 and eq_count >= 15:
+        reasons.append("few_components_with_many_equations")
+    if components and len(components) <= 4 and ev_count >= 30:
+        reasons.append("few_components_with_many_evidence")
+    # Keep the tighter low-artifact case so a 1-2 component result with a modest
+    # number of equations/evidence is still refined.
     if components and len(components) <= 2 and (eq_count >= 6 or ev_count >= 12):
         reasons.append("few_components_with_many_artifacts")
+
+    # Any single component linked to many equations is a coarse-grouping signal
+    # even when the overall component count is not low (issue #392).
+    for component in components:
+        quality = component.component_quality or {}
+        if int(quality.get("equation_count") or 0) >= 8:
+            reasons.append("component_links_many_equations")
+            break
 
     # Derivation chains exist but none are linked to a component.
     chains = list(getattr(derivations, "chains", []) or [])

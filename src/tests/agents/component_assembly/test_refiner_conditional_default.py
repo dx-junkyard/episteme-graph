@@ -122,3 +122,60 @@ def test_clean_components_do_not_trigger_refiner():
     run, reasons = _refinement_triggered(_result([comp, comp2, comp3]), _LLMInput(), derivations)
     assert run is False
     assert reasons == []
+
+
+# ---------------------------------------------------------------------------
+# #392: no fixed cap anywhere in the prompt; domain-neutral wording.
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_has_no_fixed_component_cap_anywhere():
+    from episteme_graph.agents.component_assembly.prompt import (
+        ComponentAssemblyPromptFactory,
+    )
+    from episteme_graph.agents.component_assembly.schema import ComponentAssemblyLLMInput
+
+    llm_input = ComponentAssemblyLLMInput(
+        document_id="doc", cartridge_id=None, accepted_claims=[], available_claims=[],
+        available_evidence=[], available_equations=[], thesis_nodes=[], dsl_nodes=[],
+        dsl_edges=[], allowed_component_types=["RelationComponent"],
+        allowed_dependency_types=["depends_on"], available_derivation_ids=[],
+    ) if False else None
+    user_content = ComponentAssemblyPromptFactory()._build_user_content.__doc__
+    # Inspect the raw constraint strings directly.
+    import inspect
+    src = inspect.getsource(ComponentAssemblyPromptFactory._build_user_content)
+    assert "AT MOST 3" not in src
+    assert "AT MOST" not in src
+
+
+def test_prompt_is_domain_neutral():
+    from episteme_graph.agents.component_assembly import prompt as prompt_mod
+    import inspect
+    text = (prompt_mod._SYSTEM_CONTENT + inspect.getsource(prompt_mod)).lower()
+    for term in ("bias", "skewness", "kurtosis", "galaxy", "smoothed"):
+        assert term not in text, f"domain-specific term {term!r} leaked into prompt"
+
+
+def test_three_to_four_component_compression_triggers_refiner():
+    # 4 coarse components with 15+ equations must trigger refinement (#392).
+    comps = [_component(component_id=f"comp_{i}") for i in range(4)]
+    llm_input = _LLMInput(equations=[{"equation_id": f"eq_{i}"} for i in range(15)])
+    run, reasons = _refinement_triggered(_result(comps), llm_input, None)
+    assert run is True
+    assert "few_components_with_many_equations" in reasons
+
+
+def test_three_components_many_evidence_triggers_refiner():
+    comps = [_component(component_id=f"comp_{i}") for i in range(3)]
+    llm_input = _LLMInput(evidence=[{"evidence_id": f"ev_{i}"} for i in range(30)])
+    run, reasons = _refinement_triggered(_result(comps), llm_input, None)
+    assert run is True
+    assert "few_components_with_many_evidence" in reasons
+
+
+def test_component_with_many_equations_triggers_refiner():
+    comp = _component(component_quality={"granularity_status": "good", "equation_count": 9})
+    run, reasons = _refinement_triggered(_result([comp]), _LLMInput(), None)
+    assert run is True
+    assert "component_links_many_equations" in reasons

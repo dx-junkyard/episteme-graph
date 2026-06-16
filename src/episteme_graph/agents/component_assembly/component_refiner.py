@@ -2,10 +2,10 @@
 
 Issue #300: the LLM tends to produce components that follow the explanation
 structure of a paper (section / paragraph / summary units). Such components are
-too coarse to be reusable theory parts. A single component like
-``Linear elimination of nonlinear bias parameters`` actually bundles several
-distinct theoretical operations (linearization, second/third-order bias solving,
-consistency-relation derivations).
+too coarse to be reusable theory parts. A single coarse component (for example a
+"solve and eliminate the nuisance parameters" unit) often bundles several
+distinct theoretical operations (linearization, parameter solving/elimination,
+residual / final-constraint derivations).
 
 ``ComponentRefiner`` is a deterministic (non-LLM) post-processing pass run after
 the initial components are assembled. It uses the derivation chains — which carry
@@ -787,8 +787,8 @@ class ComponentRefiner:
             child_component_ids=[c.component_id for c in children],
             operations=[c.responsibility_type or c.operation for c in children],
             reason=(
-                "Component mixed observation model, observable bases, and "
-                "bias-linearized equation responsibilities; split into reusable "
+                "Component mixed model, observable-construction, and linearized "
+                "equation-system responsibilities; split into reusable "
                 "theory-component units."
             ),
         ))

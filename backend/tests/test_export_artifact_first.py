@@ -259,3 +259,42 @@ def test_topic_without_component_is_review_required_and_warned():
     )
     codes = {w["code"] for w in report["warnings"]}
     assert "COURSE_TOPIC_WITHOUT_COMPONENT" in codes
+
+
+# ---------------------------------------------------------------------------
+# #392: component coverage warning for over-compressed theory papers.
+# ---------------------------------------------------------------------------
+
+
+def test_few_components_many_equations_emits_coverage_warning():
+    mod = _export_mod()
+    equations = [
+        {"equation_id": f"eq_{i}", "latex": "x=y", "source_location": {"block_id": f"b_{i}"}}
+        for i in range(16)
+    ]
+    report = mod._validate_export_references(
+        claims=[], equations=equations,
+        components=[{"component_id": "component_one"}, {"component_id": "component_two"}],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []}, component_operation_links=[],
+    )
+    codes = {w["code"] for w in report["warnings"]}
+    assert "FEW_COMPONENTS_FOR_SOURCE_BACKED_EQUATIONS" in codes
+
+
+def test_adequate_components_no_coverage_warning():
+    mod = _export_mod()
+    equations = [
+        {"equation_id": f"eq_{i}", "latex": "x=y", "source_location": {"block_id": f"b_{i}"}}
+        for i in range(16)
+    ]
+    components = [{"component_id": f"component_{i}"} for i in range(6)]
+    report = mod._validate_export_references(
+        claims=[], equations=equations, components=components,
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []}, component_operation_links=[],
+    )
+    codes = {w["code"] for w in report["warnings"]}
+    assert "FEW_COMPONENTS_FOR_SOURCE_BACKED_EQUATIONS" not in codes
