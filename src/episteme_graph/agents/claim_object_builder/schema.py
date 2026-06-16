@@ -200,6 +200,13 @@ class ClaimObjectRecord:
     # "" / 0 on legacy artifacts that predate hashing.
     content_hash: str = ""
     content_hash_version: int = 0
+    # Equation/derivation-synthesised claims (issue #388). ``derivation_ids`` links
+    # the claim back to the derivations that support it; ``synthesis_method``
+    # records how the claim was generated (e.g. "equation_semantics" /
+    # "system_derivation"); ``review_reasons`` carries structured review codes.
+    derivation_ids: list[str] = field(default_factory=list)
+    synthesis_method: str = ""
+    review_reasons: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -272,6 +279,9 @@ class ClaimObjectBuildResult:
                 ),
                 content_hash=str(raw.get("content_hash", "") or ""),
                 content_hash_version=int(raw.get("content_hash_version", 0) or 0),
+                derivation_ids=list(raw.get("derivation_ids", [])),
+                synthesis_method=raw.get("synthesis_method", ""),
+                review_reasons=list(raw.get("review_reasons", [])),
             ))
         issues = [ValidationIssue(**i) for i in d.get("validation_issues", [])]
         return cls(

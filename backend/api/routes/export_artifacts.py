@@ -1245,6 +1245,10 @@ def build_claims_export(
             "qualification_reason": r.get("qualification_reason"),
             "concept_assignment_status": r.get("concept_assignment_status") or "review_required",
             "confidence": float(r.get("confidence") or 0.0),
+            # Equation/derivation-synthesised claim fields (issue #388).
+            "derivation_ids": [str(v) for v in (r.get("derivation_ids") or []) if v],
+            "synthesis_method": r.get("synthesis_method") or "",
+            "review_reasons": list(r.get("review_reasons") or []),
         })
     return out
 

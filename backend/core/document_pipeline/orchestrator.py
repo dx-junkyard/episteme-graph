@@ -749,6 +749,30 @@ def run_document_pipeline(
         if finish_target_stage("derivation_chain", {"chains": len(getattr(derivations, "chains", []) or []), "total": 1, "processed": 1}):
             return result
 
+        # ── Stage 8d.1: equation/derivation claim synthesis (issue #388) ─
+        # Turn source-backed equation structure and system-level derivations into
+        # atomic equation_backed / derived_from_linked_artifacts claims so the
+        # claim artifact is not weak when prose claims miss equation-expressed
+        # propositions. Additive and non-fatal: synthesised claims are appended to
+        # the claim_object_builder artifact (and to claim_objects so downstream
+        # component assembly can cite them).
+        try:
+            synthesized = _synthesize_equation_claims(
+                equations=equations, derivations=derivations, claim_objects=claim_objects,
+            )
+            if synthesized:
+                claim_objects.claims = list(getattr(claim_objects, "claims", []) or []) + synthesized
+                save_artifact("claim_object_builder", claim_objects)
+                logger.info(
+                    "Synthesised %d equation/derivation-backed claims for document %s",
+                    len(synthesized), document_id,
+                )
+        except Exception:
+            logger.warning(
+                "equation claim synthesis failed (non-fatal): document=%s",
+                document_id, exc_info=True,
+            )
+
         # ── Stage 8e: figure_table_semantics (caption-first deterministic) ─
         fig_tbl_artifact = artifact("figure_table_semantics")
         if should_use_artifact("figure_table_semantics"):
@@ -1638,6 +1662,30 @@ def _empty_derivation_chain_result(document_id: str, cartridge_id: str | None):
         cartridge_id=cartridge_id,
         chains=[],
         validation_issues=[],
+    )
+
+
+def _synthesize_equation_claims(*, equations: Any, derivations: Any, claim_objects: Any) -> list:
+    """Synthesise equation/derivation-backed atomic claims (issue #388).
+
+    Returns new ClaimObjectRecord objects to append to the claim artifact. The
+    next synth index continues past any synthesised claims already present so a
+    resumed run does not collide IDs.
+    """
+    from episteme_graph.agents.claim_object_builder.equation_claim_synthesis import (
+        synthesize_equation_claims,
+    )
+
+    existing = list(getattr(claim_objects, "claims", []) or [])
+    # Drop any previously synthesised claims so a resumed run rebuilds them
+    # deterministically instead of duplicating, then re-synthesise from index 1.
+    prose_claims = [c for c in existing if not str(getattr(c, "claim_id", "")).startswith("synth_claim_")]
+    claim_objects.claims = prose_claims
+    return synthesize_equation_claims(
+        equations,
+        derivations=derivations,
+        existing_claims=prose_claims,
+        start_index=1,
     )
 
 
