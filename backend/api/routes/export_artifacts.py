@@ -1143,3 +1143,318 @@ def build_document_boundary(
         "review_reason": review_reasons,
         "completeness": completeness,
     }
+
+
+# ---------------------------------------------------------------------------
+# Artifact-first claims / components / graph (issue #383)
+#
+# The export bundle prefers the latest analysis-run artifacts over DB-persisted
+# objects so that diagnostic dumps reflect the *current* pipeline stage output
+# rather than legacy persisted side-products. Each builder converts a stage
+# artifact into the same export shape the DB loaders produce, so the downstream
+# normalize / validate / confidence-gate passes keep working unchanged. The DB
+# loaders remain as the fallback when an artifact is absent.
+# ---------------------------------------------------------------------------
+
+
+def _concept_to_export(concept: Any) -> dict:
+    if not isinstance(concept, dict):
+        return {"name": str(concept), "normalized": str(concept)}
+    return {
+        "name": concept.get("name", ""),
+        "normalized": concept.get("normalized", "") or concept.get("name", ""),
+        "concept_type": concept.get("concept_type", "unknown"),
+        "role": concept.get("role", "unknown"),
+    }
+
+
+def build_claims_export(
+    claim_artifact: Any,
+    *,
+    document_id: str,
+) -> list[dict]:
+    """Convert a ``claim_object_builder`` artifact into claims/claims.json shape.
+
+    Preserves the claim_object_builder fields (issue #383 acceptance: claims.json
+    keeps claim_object_builder fields) — atomicity / is_atomic / equation_ids /
+    source_evidence_ids / linked_component_ids / qualification_reason / concepts —
+    while also emitting the legacy keys (``equation`` / ``source_scope`` /
+    ``evidence_text``) the downstream normalize / validation passes expect.
+    """
+    cb = _coerce_dict(claim_artifact)
+    records = cb.get("claims") if isinstance(cb.get("claims"), list) else []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        claim_id = str(r.get("claim_id") or "").strip()
+        if not claim_id or claim_id in seen:
+            continue
+        seen.add(claim_id)
+        equation_ids = [str(v) for v in (r.get("equation_ids") or []) if v]
+        source_evidence_ids = [str(v) for v in (r.get("source_evidence_ids") or []) if v]
+        source_span_ids = [str(v) for v in (r.get("source_span_ids") or []) if v]
+        source_scope = {
+            "document_id": r.get("document_id") or document_id,
+            "section_id": r.get("section_id") or "",
+            "section_title": r.get("section_title") or "",
+            "span_id": source_span_ids[0] if source_span_ids else "",
+        }
+        out.append({
+            "claim_id": claim_id,
+            "document_id": r.get("document_id") or document_id,
+            "source_scope": source_scope,
+            "claim_type": r.get("claim_type") or "unknown",
+            "text": r.get("text") or "",
+            "normalized_text": r.get("normalized_text") or r.get("text") or "",
+            "concepts": [_concept_to_export(c) for c in (r.get("concepts") or [])],
+            "equation": {"equation_ids": equation_ids} if equation_ids else {},
+            "support_status": r.get("support_status") or "source_backed",
+            "evidence_text": "",
+            "review_status": r.get("review_status") or "teacher_review_required",
+            # Preserved claim_object_builder fields (issue #383).
+            "equation_ids": equation_ids,
+            "inferred_equation_ids": [str(v) for v in (r.get("inferred_equation_ids") or []) if v],
+            "source_evidence_ids": source_evidence_ids,
+            "source_span_ids": source_span_ids,
+            "linked_component_ids": [str(v) for v in (r.get("linked_component_ids") or []) if v],
+            "atomicity": r.get("atomicity") or "atomic",
+            "is_atomic": bool(r.get("is_atomic", r.get("atomicity", "atomic") == "atomic")),
+            "qualification_reason": r.get("qualification_reason"),
+            "concept_assignment_status": r.get("concept_assignment_status") or "review_required",
+            "confidence": float(r.get("confidence") or 0.0),
+        })
+    return out
+
+
+def build_components_export(
+    component_artifact: Any,
+    *,
+    document_id: str,
+) -> list[dict]:
+    """Convert a ``component_assembly`` artifact into components/components.json shape.
+
+    Preserves the component_assembly fields (issue #383 acceptance: components.json
+    keeps component_assembly fields) — responsibility_type / linked_*_ids /
+    input/output equation ids / internal_flow / split_recommendation / publish_ready —
+    alongside the legacy keys the DB loader produced (``name`` / ``component_type`` /
+    ``evidence_claims`` / ``source_scope`` …).
+    """
+    ca = _coerce_dict(component_artifact)
+    records = ca.get("components") if isinstance(ca.get("components"), list) else []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        component_id = str(r.get("component_id") or "").strip()
+        if not component_id or component_id in seen:
+            continue
+        seen.add(component_id)
+        evidence_refs = r.get("evidence_refs") if isinstance(r.get("evidence_refs"), dict) else {}
+        linked_claim_ids = [str(v) for v in (r.get("linked_claim_ids") or []) if v]
+        evidence_claims = list(dict.fromkeys(
+            linked_claim_ids + [str(v) for v in (evidence_refs.get("claim_ids") or []) if v]
+        ))
+        source_scope = dict(r.get("source_scope") or {})
+        source_scope.setdefault("document_id", r.get("document_id") or document_id)
+        component_type = r.get("component_type") or r.get("responsibility_type") or "theory"
+        out.append({
+            "component_id": component_id,
+            "course_id": "",
+            "document_id": r.get("document_id") or document_id,
+            "name": r.get("label") or r.get("name") or "",
+            "component_type": component_type,
+            "origin": "paper",
+            "source_scope": source_scope,
+            "evidence_claims": evidence_claims,
+            "maturity_level": r.get("maturity_level") or "paper_claim",
+            "maturity_source": r.get("maturity_source") or "llm_proposed",
+            "review_status": r.get("review_status") or "teacher_review_required",
+            "summary": r.get("summary") or "",
+            "inputs": list(r.get("inputs") or []),
+            "outputs": list(r.get("outputs") or []),
+            "preconditions": list(r.get("preconditions") or []),
+            "cautions": list(r.get("cautions") or []),
+            "constraints": list(r.get("constraints") or []),
+            "invalid_conditions": list(r.get("invalid_conditions") or []),
+            "dependencies": list(r.get("dependencies") or []),
+            "connectors": r.get("connectors") or {},
+            "internal_flow": list(r.get("internal_flow") or []),
+            "teacher_notes": r.get("teaching_takeaway") or "",
+            "smiles_dsl": "",
+            # Preserved component_assembly fields (issue #383 / #384 / #386).
+            "responsibility_type": r.get("responsibility_type") or "",
+            "primary_operation": r.get("primary_operation") or r.get("operation") or "",
+            "secondary_operations": list(r.get("secondary_operations") or []),
+            "split_recommendation": r.get("split_recommendation") or {},
+            "component_quality": r.get("component_quality") or {},
+            "publish_ready": bool(r.get("publish_ready", False)),
+            "assumptions": list(r.get("assumptions") or []),
+            "approximations": list(r.get("approximations") or []),
+            "evidence_refs": evidence_refs,
+            "linked_claim_ids": linked_claim_ids,
+            "linked_equation_ids": [str(v) for v in (r.get("linked_equation_ids") or []) if v],
+            "linked_evidence_ids": [str(v) for v in (r.get("linked_evidence_ids") or []) if v],
+            "linked_derivation_ids": [str(v) for v in (r.get("linked_derivation_ids") or []) if v],
+            "input_equation_ids": [str(v) for v in (r.get("input_equation_ids") or []) if v],
+            "intermediate_equation_ids": [str(v) for v in (r.get("intermediate_equation_ids") or []) if v],
+            "output_equation_ids": [str(v) for v in (r.get("output_equation_ids") or []) if v],
+            "constraint_equation_ids": [str(v) for v in (r.get("constraint_equation_ids") or []) if v],
+            "definition_equation_ids": [str(v) for v in (r.get("definition_equation_ids") or []) if v],
+            "review_required_equation_ids": [str(v) for v in (r.get("review_required_equation_ids") or []) if v],
+        })
+    return out
+
+
+# A component-graph node is a *reusable component* only when it lives in the main
+# layer as a TheoryOperationNode / component. equation_detail / debug nodes
+# (EquationOperationNode, fallback, inferred) are operation-level and must not
+# leak into component_graph.json (issue #387).
+_COMPONENT_GRAPH_LAYERS = {"main", ""}
+_OPERATION_NODE_TYPES = {"EquationOperationNode"}
+
+
+def _graph_node_is_component(node: dict, known_component_ids: set[str]) -> bool:
+    if not isinstance(node, dict):
+        return False
+    layer = str(node.get("graph_layer") or "main")
+    comp_type = str(node.get("component_type") or "")
+    node_id = str(node.get("component_id") or node.get("node_id") or node.get("id") or "")
+    if known_component_ids and node_id in known_component_ids:
+        return True
+    if comp_type in _OPERATION_NODE_TYPES:
+        return False
+    return layer in _COMPONENT_GRAPH_LAYERS
+
+
+def build_component_graph_export(
+    graph_artifact: Any,
+    *,
+    document_id: str,
+    known_component_ids: set[str] | None = None,
+) -> dict:
+    """Split a ``component_graph`` artifact into separate component / operation graphs.
+
+    Issue #387: component_graph.json nodes are component IDs only; operation-level
+    nodes (equation_detail / debug layers, EquationOperationNode) move to
+    operation_graph.json, with a component_operation_links mapping. Edges whose
+    endpoints are not both components move to the operation graph as well, so
+    component_graph validation never fails on operation IDs.
+
+    Returns ``{"component_graph": {...}, "operation_graph": {...},
+    "component_operation_links": [...]}``.
+    """
+    cg = _coerce_dict(graph_artifact)
+    raw_nodes = cg.get("nodes") if isinstance(cg.get("nodes"), list) else []
+    raw_edges = cg.get("edges") if isinstance(cg.get("edges"), list) else []
+    known_component_ids = known_component_ids or set()
+
+    component_node_ids: set[str] = set()
+    operation_node_ids: set[str] = set()
+    component_nodes: list[dict] = []
+    operation_nodes: list[dict] = []
+    links: list[dict] = []
+
+    def _node_id(n: dict) -> str:
+        return str(n.get("component_id") or n.get("node_id") or n.get("id") or "")
+
+    for n in raw_nodes:
+        if not isinstance(n, dict):
+            continue
+        node_id = _node_id(n)
+        if not node_id:
+            continue
+        if _graph_node_is_component(n, known_component_ids):
+            if node_id in component_node_ids:
+                continue
+            component_node_ids.add(node_id)
+            legacy_ids = []
+            for key in ("agent_component_id", "legacy_component_id"):
+                value = n.get(key)
+                if value and str(value) != node_id:
+                    legacy_ids.append(str(value))
+            component_nodes.append({
+                "node_id": node_id,
+                "node_type": "component",
+                "label": n.get("label") or n.get("name") or "",
+                "component_type": n.get("component_type") or "",
+                "review_status": n.get("review_status") or "teacher_review_required",
+                "source_backing_status": n.get("source_backing_status") or "",
+                "graph_layer": n.get("graph_layer") or "main",
+                "legacy_ids": legacy_ids,
+                "member_component_ids": list(n.get("member_component_ids") or []),
+                "detail_node_ids": list(n.get("detail_node_ids") or []),
+            })
+            # Component → operation links (issue #387): a main node aggregates
+            # equation_detail nodes via member_component_ids / detail_node_ids.
+            for op_id in list(n.get("member_component_ids") or []) + list(n.get("detail_node_ids") or []):
+                if op_id:
+                    links.append({"component_id": node_id, "operation_id": str(op_id)})
+        else:
+            if node_id in operation_node_ids:
+                continue
+            operation_node_ids.add(node_id)
+            operation_nodes.append({
+                "operation_id": node_id,
+                "node_type": "operation",
+                "label": n.get("label") or n.get("visual_label") or "",
+                "operation": n.get("operation") or "",
+                "graph_layer": n.get("graph_layer") or "equation_detail",
+                "source_backing_status": n.get("source_backing_status") or "",
+                "review_status": n.get("review_status") or "teacher_review_required",
+                "parent_component_id": str(n.get("parent_component_id") or ""),
+                "linked_equation_ids": list(n.get("linked_equation_ids") or []),
+                "linked_derivation_ids": list(n.get("linked_derivation_ids") or []),
+                "review_reasons": list(n.get("review_reasons") or []),
+            })
+            parent = str(n.get("parent_component_id") or "")
+            if parent:
+                links.append({"component_id": parent, "operation_id": node_id})
+
+    component_edges: list[dict] = []
+    operation_edges: list[dict] = []
+    for i, e in enumerate(raw_edges):
+        if not isinstance(e, dict):
+            continue
+        evidence = e.get("evidence") if isinstance(e.get("evidence"), dict) else {}
+        source = str(e.get("source_component_id") or e.get("source") or e.get("from") or "")
+        target = str(e.get("target_component_id") or e.get("target") or e.get("to") or "")
+        edge = {
+            "edge_id": e.get("edge_id") or f"component_edge_{i+1:04d}",
+            "source": source,
+            "target": target,
+            "edge_type": e.get("relation") or e.get("edge_type") or e.get("type") or "RELATED_TO",
+            "support_status": e.get("support_status") or "source_inferred",
+            "evidence_claims": list(evidence.get("evidence_claims") or e.get("evidence_claims") or []),
+            "review_status": e.get("review_status") or "teacher_review_required",
+        }
+        if source in component_node_ids and target in component_node_ids:
+            component_edges.append(edge)
+        else:
+            operation_edges.append({**edge, "edge_id": edge["edge_id"]})
+
+    # De-dup links.
+    seen_links: set[tuple[str, str]] = set()
+    unique_links: list[dict] = []
+    for link in links:
+        key = (link["component_id"], link["operation_id"])
+        if key in seen_links:
+            continue
+        seen_links.add(key)
+        unique_links.append(link)
+
+    return {
+        "component_graph": {
+            "graph_schema_version": cg.get("graph_schema_version", "0.1.0"),
+            "nodes": component_nodes,
+            "edges": component_edges,
+        },
+        "operation_graph": {
+            "graph_schema_version": "0.1.0",
+            "nodes": operation_nodes,
+            "edges": operation_edges,
+        },
+        "component_operation_links": unique_links,
+    }

@@ -17,6 +17,9 @@ from sqlalchemy import text as sa_text
 from dependencies import _require_teacher
 from core.postgres import get_session as _pg_session
 from routes.export_artifacts import (
+    build_claims_export,
+    build_component_graph_export,
+    build_components_export,
     build_derivation_chains_export,
     build_document_boundary,
     build_document_completeness,
@@ -215,6 +218,163 @@ def _load_analysis_artifacts(session: Any, document_ids: list[str]) -> dict[str,
         if artifacts:
             out[doc_id] = artifacts
     return out
+
+
+def _load_latest_run_ids(session: Any, document_ids: list[str]) -> dict[str, str]:
+    """Map each document to its most recent analysis run id (issue #383 metadata)."""
+    if not document_ids:
+        return {}
+    placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
+    params = {f"doc_{i}": did for i, did in enumerate(document_ids)}
+    try:
+        rows = session.execute(
+            sa_text(f"""
+                SELECT DISTINCT ON (document_id) document_id, id
+                FROM document_analysis_runs
+                WHERE document_id IN ({placeholders})
+                ORDER BY document_id, created_at DESC
+            """),
+            params,
+        ).fetchall()
+    except Exception:
+        return {}
+    return {str(r[0]): str(r[1]) for r in rows if r[0] and r[1]}
+
+
+# Artifact-first stage → fallback DB source mapping (issue #383). When a stage
+# artifact is missing for a document we fall back to the DB-persisted object and
+# record which fallback source was used so the export metadata is honest.
+_FALLBACK_SOURCE = {
+    "claim_object_builder": "theory_claims",
+    "component_assembly": "theory_components",
+    "component_graph": "theory_component_graphs",
+}
+
+
+def _group_by_document(rows: list[dict]) -> dict[str, list[dict]]:
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        grouped.setdefault(str(row.get("document_id") or ""), []).append(row)
+    return grouped
+
+
+def _resolve_artifact_first_claims(
+    artifacts_by_doc: dict[str, dict],
+    document_ids: list[str],
+    db_claims: list[dict],
+    fallback_sources: list[dict],
+) -> list[dict]:
+    """Prefer claim_object_builder artifacts; fall back to DB theory_claims (#383)."""
+    db_by_doc = _group_by_document(db_claims)
+    out: list[dict] = []
+    for doc_id in document_ids:
+        artifact = (artifacts_by_doc.get(doc_id) or {}).get("claim_object_builder")
+        if artifact:
+            out.extend(build_claims_export(artifact, document_id=doc_id))
+        else:
+            doc_claims = db_by_doc.get(doc_id, [])
+            out.extend(doc_claims)
+            fallback_sources.append({
+                "artifact": "claim_object_builder",
+                "document_id": doc_id,
+                "fallback_to": _FALLBACK_SOURCE["claim_object_builder"],
+            })
+    # Claims not bound to any requested document_id (legacy DB rows) are appended
+    # so nothing is silently dropped relative to the prior DB-only behaviour.
+    requested = set(document_ids)
+    for doc_id, rows in db_by_doc.items():
+        if doc_id not in requested and rows:
+            out.extend(rows)
+    return out
+
+
+def _resolve_artifact_first_components(
+    artifacts_by_doc: dict[str, dict],
+    document_ids: list[str],
+    db_components: list[dict],
+    fallback_sources: list[dict],
+) -> list[dict]:
+    """Prefer component_assembly artifacts; fall back to DB theory_components (#383)."""
+    db_by_doc = _group_by_document(db_components)
+    out: list[dict] = []
+    for doc_id in document_ids:
+        artifact = (artifacts_by_doc.get(doc_id) or {}).get("component_assembly")
+        if artifact:
+            out.extend(build_components_export(artifact, document_id=doc_id))
+        else:
+            out.extend(db_by_doc.get(doc_id, []))
+            fallback_sources.append({
+                "artifact": "component_assembly",
+                "document_id": doc_id,
+                "fallback_to": _FALLBACK_SOURCE["component_assembly"],
+            })
+    requested = set(document_ids)
+    for doc_id, rows in db_by_doc.items():
+        if doc_id not in requested and rows:
+            out.extend(rows)
+    return out
+
+
+def _resolve_artifact_first_graph(
+    artifacts_by_doc: dict[str, dict],
+    document_ids: list[str],
+    components: list[dict],
+    db_component_graph: dict,
+    fallback_sources: list[dict],
+) -> dict:
+    """Prefer component_graph artifacts (issue #383), splitting component vs
+    operation graphs (issue #387). Falls back to the DB-persisted graph only when
+    no document carries a component_graph artifact.
+
+    Returns ``{"component_graph", "operation_graph", "component_operation_links"}``.
+    """
+    known_component_ids = {str(c.get("component_id")) for c in components if c.get("component_id")}
+    has_any_artifact = any(
+        (artifacts_by_doc.get(doc_id) or {}).get("component_graph") for doc_id in document_ids
+    )
+    if not has_any_artifact:
+        for doc_id in document_ids:
+            fallback_sources.append({
+                "artifact": "component_graph",
+                "document_id": doc_id,
+                "fallback_to": _FALLBACK_SOURCE["component_graph"],
+            })
+        # Split the DB graph too so operation nodes never leak into the component
+        # graph (issue #387), even on the fallback path.
+        return build_component_graph_export(
+            db_component_graph, document_id="", known_component_ids=known_component_ids
+        )
+
+    component_nodes: list[dict] = []
+    component_edges: list[dict] = []
+    operation_nodes: list[dict] = []
+    operation_edges: list[dict] = []
+    links: list[dict] = []
+    for doc_id in document_ids:
+        artifact = (artifacts_by_doc.get(doc_id) or {}).get("component_graph")
+        if not artifact:
+            continue
+        split = build_component_graph_export(
+            artifact, document_id=doc_id, known_component_ids=known_component_ids
+        )
+        component_nodes.extend(split["component_graph"]["nodes"])
+        component_edges.extend(split["component_graph"]["edges"])
+        operation_nodes.extend(split["operation_graph"]["nodes"])
+        operation_edges.extend(split["operation_graph"]["edges"])
+        links.extend(split["component_operation_links"])
+    return {
+        "component_graph": {
+            "graph_schema_version": "0.1.0",
+            "nodes": component_nodes,
+            "edges": component_edges,
+        },
+        "operation_graph": {
+            "graph_schema_version": "0.1.0",
+            "nodes": operation_nodes,
+            "edges": operation_edges,
+        },
+        "component_operation_links": links,
+    }
 
 
 _COMPONENT_ASSEMBLY_DIAG_KEY_PREFIXES = (
@@ -1399,10 +1559,14 @@ def _validate_export_references(
     evidence_snippets: list[dict],
     derivation_chains: list[dict] | None = None,
     completeness_reports: list[dict] | None = None,
+    operation_graph: dict | None = None,
+    component_operation_links: list[dict] | None = None,
 ) -> dict:
     errors: list[dict] = []
     warnings: list[dict] = []
     derivation_chains = derivation_chains or []
+    operation_graph = operation_graph or {"nodes": [], "edges": []}
+    component_operation_links = component_operation_links or []
     claim_ids = {str(c.get("claim_id")) for c in claims if c.get("claim_id")}
     component_ids = {str(c.get("component_id")) for c in components if c.get("component_id")}
     evidence_ids = {str(e.get("evidence_id")) for e in evidence_snippets if e.get("evidence_id")}
@@ -1479,6 +1643,50 @@ def _validate_export_references(
             elif ref_id not in component_ids:
                 add("UNRESOLVED_EXPORT_REF", f"$.edges[{idx}].{key} references missing component {ref_id!r}", "graph/component_graph.json", f"$.edges[{idx}].{key}", ref_id)
         check_refs(edge.get("evidence_claims"), claim_ids, "graph/component_graph.json", f"$.edges[{idx}].evidence_claims", "claim")
+
+    # Operation-graph separation (issue #387): operation IDs must never appear as
+    # component-graph node IDs, and component_operation_links endpoints must both
+    # resolve. The component_graph is built component-only by construction; these
+    # checks catch regressions / mixed legacy graphs.
+    operation_ids = {
+        str(n.get("operation_id") or n.get("node_id") or n.get("id") or "")
+        for n in operation_graph.get("nodes", []) or []
+        if isinstance(n, dict)
+    }
+    operation_ids.discard("")
+    for idx, node in enumerate(component_graph.get("nodes", []) or []):
+        if not isinstance(node, dict):
+            continue
+        node_id = str(node.get("node_id") or node.get("component_id") or "")
+        if node_id and node_id in operation_ids:
+            add(
+                "OPERATION_ID_IN_COMPONENT_GRAPH",
+                f"component graph node {node_id!r} is an operation ID and must live in operation_graph.json",
+                "graph/component_graph.json",
+                f"$.nodes[{idx}].node_id",
+                node_id,
+            )
+    for idx, link in enumerate(component_operation_links):
+        if not isinstance(link, dict):
+            continue
+        comp_id = str(link.get("component_id") or "")
+        op_id = str(link.get("operation_id") or "")
+        if comp_id and comp_id not in component_ids:
+            add(
+                "UNRESOLVED_EXPORT_REF",
+                f"component_operation_links[{idx}].component_id references missing component {comp_id!r}",
+                "graph/component_operation_links.json",
+                f"$.links[{idx}].component_id",
+                comp_id,
+            )
+        if op_id and op_id not in operation_ids:
+            add(
+                "UNRESOLVED_EXPORT_REF",
+                f"component_operation_links[{idx}].operation_id references missing operation {op_id!r}",
+                "graph/component_operation_links.json",
+                f"$.links[{idx}].operation_id",
+                op_id,
+            )
 
     if isinstance(course_info, dict):
         has_derivation_topic = False
@@ -1624,16 +1832,29 @@ def _build_manifest(
     equation_candidates: list[dict] | None = None,
     derivation_chains: list[dict] | None = None,
     document_boundaries: list[dict] | None = None,
+    operation_graph: dict | None = None,
+    component_operation_links: list[dict] | None = None,
+    export_source: dict | None = None,
 ) -> dict:
     equations = equations or []
     equation_candidates = equation_candidates or []
     derivation_chains = derivation_chains or []
     document_boundaries = document_boundaries or []
+    operation_graph = operation_graph or {"nodes": [], "edges": []}
+    component_operation_links = component_operation_links or []
     return {
         "export_schema_version": "0.2.0",
         "exported_at": _now_iso(),
         "export_id": export_id,
         "app": {"name": "episteme-graph", "version": "unknown", "git_commit": "unknown"},
+        # Artifact-first export provenance (issue #383). ``fallback_used`` /
+        # ``fallback_sources`` make it explicit which artifacts were missing and
+        # what DB object the dump fell back to.
+        "export_source_policy": (export_source or {}).get("export_source_policy", "artifact_first"),
+        "artifact_run_id": (export_source or {}).get("artifact_run_id", ""),
+        "artifact_run_ids": (export_source or {}).get("artifact_run_ids", {}),
+        "fallback_used": (export_source or {}).get("fallback_used", False),
+        "fallback_sources": (export_source or {}).get("fallback_sources", []),
         "scope": {
             "type": scope_type,
             f"{scope_type}_id": scope_id,
@@ -1647,6 +1868,8 @@ def _build_manifest(
             "dsl_graph": "dsl/dsl_graph.json",
             "components": "components/components.json",
             "component_graph": "graph/component_graph.json",
+            "operation_graph": "graph/operation_graph.json",
+            "component_operation_links": "graph/component_operation_links.json",
             "evidence_snippets": "evidence/evidence_snippets.json",
             "equations": "equations/equations.json",
             "equation_candidates": "equations/equation_candidates.json",
@@ -1659,6 +1882,9 @@ def _build_manifest(
             "dsl_edges": len(dsl_graph.get("edges", [])),
             "components": len(components),
             "component_edges": len(component_graph.get("edges", [])),
+            "operation_nodes": len(operation_graph.get("nodes", [])),
+            "operation_edges": len(operation_graph.get("edges", [])),
+            "component_operation_links": len(component_operation_links),
             "evidence_snippets": len(evidence_snippets),
             "equations": len(equations),
             "equation_candidates": len(equation_candidates),
@@ -1681,7 +1907,9 @@ This ZIP contains machine-readable outputs generated by episteme-graph.
 - `claims/claims.json`: extracted claims from source documents
 - `dsl/dsl_graph.json`: lightweight logical graph representation (DSL)
 - `components/components.json`: reusable logical/theory components (Component)
-- `graph/component_graph.json`: graph connections between components (Component Graph)
+- `graph/component_graph.json`: reusable-component dependency graph. Nodes are component IDs only (issue #387); operation-level nodes are kept out.
+- `graph/operation_graph.json`: lower-level operation/equation-operation graph (nodes are operation IDs). Related to but distinct from the component graph.
+- `graph/component_operation_links.json`: optional mapping from component IDs to operation IDs (`links[].component_id` / `links[].operation_id`).
 - `evidence/evidence_snippets.json`: source-backed Evidence (PDF spans). `evidence_text` is PDF-derived text; LLM commentary is kept in `analysis_note` / `review_note`. `extraction_source`, `extraction_status`, `needs_review`, `review_reason` audit the provenance.
 - `equations/equations.json`: first-class equation registry. Each entry has `latex`, `plain_text`, `source_location`, `equation_type`, `defined_symbols`, `used_symbols`, `input_equation_ids`, `output_equation_ids`, `extraction_source`, `extraction_status`, `needs_math_review`, `review_reason`, `candidate_trace_ids`.
 - `equations/equation_candidates.json`: audit trail for equation candidate detection. Each entry records `raw_text`, `source_location`, `detection_method`, `matched_label`, `acceptance_status`, `accepted_equation_id`, `rejection_reason`.
@@ -1754,11 +1982,15 @@ def _build_zip(
     derivation_chains: list[dict] | None = None,
     document_boundaries: list[dict] | None = None,
     export_validation: dict | None = None,
+    operation_graph: dict | None = None,
+    component_operation_links: list[dict] | None = None,
 ) -> bytes:
     equations = equations or []
     equation_candidates = equation_candidates or []
     derivation_chains = derivation_chains or []
     document_boundaries = document_boundaries or []
+    operation_graph = operation_graph or {"nodes": [], "edges": []}
+    component_operation_links = component_operation_links or []
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("README.md", _README_TEMPLATE)
@@ -1774,6 +2006,16 @@ def _build_zip(
         zf.writestr(
             "graph/component_graph.json",
             _json_bytes({**component_graph, "graph_schema_version": component_graph.get("graph_schema_version", "0.1.0")}),
+        )
+        # Operation-level graph kept separate from the component graph (issue #387)
+        # so component_graph.json nodes are component IDs only.
+        zf.writestr(
+            "graph/operation_graph.json",
+            _json_bytes({**operation_graph, "graph_schema_version": operation_graph.get("graph_schema_version", "0.1.0")}),
+        )
+        zf.writestr(
+            "graph/component_operation_links.json",
+            _json_bytes({"schema_version": "0.1.0", "links": component_operation_links}),
         )
         zf.writestr("evidence/evidence_snippets.json", _json_bytes({
             "evidence_schema_version": "0.2.0",
@@ -1837,12 +2079,31 @@ def export_course_bundle(
 
         document_ids = _get_document_ids_for_course(session, course_id)
 
-        claims = _load_claims_for_course(session, course_id, document_ids)
         dsl_graph = _load_dsl_graph_for_course(session, course_id, document_ids)
-        components = _load_components_for_course(session, course_id, document_ids)
-        component_graph = _load_component_graph_for_course(session, course_id, document_ids)
+        db_claims = _load_claims_for_course(session, course_id, document_ids)
+        db_components = _load_components_for_course(session, course_id, document_ids)
+        db_component_graph = _load_component_graph_for_course(session, course_id, document_ids)
 
         artifacts_by_doc = _load_analysis_artifacts(session, document_ids)
+        # Artifact-first export (issue #383): prefer latest-run stage artifacts,
+        # falling back to DB-persisted objects only when an artifact is missing.
+        fallback_sources: list[dict] = []
+        claims = _resolve_artifact_first_claims(artifacts_by_doc, document_ids, db_claims, fallback_sources)
+        components = _resolve_artifact_first_components(artifacts_by_doc, document_ids, db_components, fallback_sources)
+        graph_bundle = _resolve_artifact_first_graph(
+            artifacts_by_doc, document_ids, components, db_component_graph, fallback_sources
+        )
+        component_graph = graph_bundle["component_graph"]
+        operation_graph = graph_bundle["operation_graph"]
+        component_operation_links = graph_bundle["component_operation_links"]
+        run_ids = _load_latest_run_ids(session, document_ids)
+        export_source = {
+            "export_source_policy": "artifact_first",
+            "artifact_run_ids": run_ids,
+            "artifact_run_id": next(iter(run_ids.values()), ""),
+            "fallback_used": bool(fallback_sources),
+            "fallback_sources": fallback_sources,
+        }
         evidence_snippets = (
             _build_evidence_for_documents(artifacts_by_doc, document_ids, claims)
             if req.include_source_snippets else []
@@ -1887,6 +2148,8 @@ def export_course_bundle(
             evidence_snippets=evidence_snippets,
             derivation_chains=derivation_chains,
             completeness_reports=completeness_reports,
+            operation_graph=operation_graph,
+            component_operation_links=component_operation_links,
         )
 
         docs = _load_course_documents(session, course_id, document_ids)
@@ -1914,6 +2177,9 @@ def export_course_bundle(
             equation_candidates=equation_candidates,
             derivation_chains=derivation_chains,
             document_boundaries=document_boundaries,
+            operation_graph=operation_graph,
+            component_operation_links=component_operation_links,
+            export_source=export_source,
             options=options,
         )
 
@@ -1929,6 +2195,8 @@ def export_course_bundle(
             equation_candidates=equation_candidates,
             derivation_chains=derivation_chains,
             document_boundaries=document_boundaries,
+            operation_graph=operation_graph,
+            component_operation_links=component_operation_links,
             include_ndjson=req.include_ndjson,
             include_debug=req.include_debug_data,
             debug_data={
@@ -1964,13 +2232,31 @@ def export_document_bundle(
         if not document:
             raise HTTPException(status_code=404, detail="Document not found")
 
-        claims = _load_claims_for_document(session, document_id)
         dsl_graph = _load_dsl_graph_for_document(session, document_id)
-        components = _load_components_for_document(session, document_id)
-        component_graph = _load_component_graph_for_document(session, document_id)
+        db_claims = _load_claims_for_document(session, document_id)
+        db_components = _load_components_for_document(session, document_id)
+        db_component_graph = _load_component_graph_for_document(session, document_id)
 
         document_ids = [document_id]
         artifacts_by_doc = _load_analysis_artifacts(session, document_ids)
+        # Artifact-first export (issue #383).
+        fallback_sources: list[dict] = []
+        claims = _resolve_artifact_first_claims(artifacts_by_doc, document_ids, db_claims, fallback_sources)
+        components = _resolve_artifact_first_components(artifacts_by_doc, document_ids, db_components, fallback_sources)
+        graph_bundle = _resolve_artifact_first_graph(
+            artifacts_by_doc, document_ids, components, db_component_graph, fallback_sources
+        )
+        component_graph = graph_bundle["component_graph"]
+        operation_graph = graph_bundle["operation_graph"]
+        component_operation_links = graph_bundle["component_operation_links"]
+        run_ids = _load_latest_run_ids(session, document_ids)
+        export_source = {
+            "export_source_policy": "artifact_first",
+            "artifact_run_ids": run_ids,
+            "artifact_run_id": next(iter(run_ids.values()), ""),
+            "fallback_used": bool(fallback_sources),
+            "fallback_sources": fallback_sources,
+        }
         evidence_snippets = (
             _build_evidence_for_documents(artifacts_by_doc, document_ids, claims)
             if req.include_source_snippets else []
@@ -2015,6 +2301,8 @@ def export_document_bundle(
             evidence_snippets=evidence_snippets,
             derivation_chains=derivation_chains,
             completeness_reports=completeness_reports,
+            operation_graph=operation_graph,
+            component_operation_links=component_operation_links,
         )
 
         eid = _export_id("document", document_id)
@@ -2040,6 +2328,9 @@ def export_document_bundle(
             equation_candidates=equation_candidates,
             derivation_chains=derivation_chains,
             document_boundaries=document_boundaries,
+            operation_graph=operation_graph,
+            component_operation_links=component_operation_links,
+            export_source=export_source,
             options=options,
         )
 
@@ -2055,6 +2346,8 @@ def export_document_bundle(
             equation_candidates=equation_candidates,
             derivation_chains=derivation_chains,
             document_boundaries=document_boundaries,
+            operation_graph=operation_graph,
+            component_operation_links=component_operation_links,
             include_ndjson=req.include_ndjson,
             include_debug=req.include_debug_data,
             debug_data={
