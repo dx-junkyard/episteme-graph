@@ -60,7 +60,12 @@ Important constraints:
 - Set concepts (>= 2), prerequisite_concepts, introduced_concepts, and reused_concepts
   per component. Derivation components must include a mathematical/procedural concept,
   observable components an observable name, and comparison components a theory-class name.
-- Return AT MOST 6 components. Prefer the headline-claim support components.
+- Use ADAPTIVE granularity: emit as many components as needed to represent the
+  distinct reusable theoretical responsibilities. There is NO fixed cap. A
+  theory-heavy paper may need several components; a simple one fewer. Do not
+  collapse distinct responsibilities into a single coarse summary, and do not
+  split solely by section heading. Split whenever a unit combines multiple
+  responsibility types or more than one major operation.
 - Keep label <= 10 words, summary <= 40 words, reason <= 30 words,
   teaching_takeaway <= 30 words, and each review_note <= 20 words.
 - Keep inputs/outputs/preconditions/cautions/internal_flow to the minimum needed
