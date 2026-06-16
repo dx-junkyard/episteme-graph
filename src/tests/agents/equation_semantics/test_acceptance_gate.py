@@ -5,7 +5,20 @@ from episteme_graph.agents.equation_semantics.acceptance_gate import EquationAcc
 from episteme_graph.agents.equation_semantics.schema import EquationCandidate
 
 
-def _make_candidate(raw_text: str, block_id: str = "blk_1", page: int = 1, section_id: str = "sec_1") -> EquationCandidate:
+def _make_candidate(
+    raw_text: str,
+    block_id: str = "blk_1",
+    page: int = 1,
+    section_id: str = "sec_1",
+    high_signal: bool = False,
+) -> EquationCandidate:
+    """Build a candidate.
+
+    By default this is a *non* high-signal candidate (no matched_label, low
+    candidate_score) so the acceptance-gate contract for label-only / fragment
+    candidates can be tested. Pass ``high_signal=True`` to exercise the
+    provisional-retention path (issue #259).
+    """
     return EquationCandidate(
         candidate_id=f"eqcand_{block_id}",
         document_id="doc_test",
@@ -13,7 +26,7 @@ def _make_candidate(raw_text: str, block_id: str = "blk_1", page: int = 1, secti
         raw_text=raw_text,
         matched_label=None,
         detection_method=["document_structure_equation_block"],
-        candidate_score=1.0,
+        candidate_score=1.0 if high_signal else 0.5,
         extraction_status="unparsed",
         acceptance_status="rejected",
         needs_math_review=False,
@@ -61,6 +74,24 @@ def test_fragment_only_is_needs_merge(text):
     assert result[0].extraction_status == "fragment_only"
     assert result[0].acceptance_status == "needs_merge"
     assert "fragment_only_candidate" in result[0].review_reason
+
+
+# ------------------------------------------------------------------
+# high-signal label-only / fragment-only → provisional (issue #259 contract)
+# ------------------------------------------------------------------
+
+def test_high_signal_label_only_is_provisional():
+    c = _make_candidate("(3.14)", high_signal=True)
+    result = GATE.process([c])[0]
+    assert result.extraction_status == "label_only"
+    assert result.acceptance_status == "provisional"
+
+
+def test_high_signal_fragment_only_is_provisional():
+    c = _make_candidate("+", high_signal=True)
+    result = GATE.process([c])[0]
+    assert result.extraction_status == "fragment_only"
+    assert result.acceptance_status == "provisional"
 
 
 # ------------------------------------------------------------------
@@ -151,3 +182,52 @@ def test_process_returns_all_candidates():
     assert statuses["blk_0"] == "accepted"
     assert statuses["blk_1"] == "rejected"
     assert statuses["blk_2"] == "needs_merge"
+
+
+# ------------------------------------------------------------------
+# Issue #368: table-derived candidates must not auto-confirm
+# ------------------------------------------------------------------
+
+def test_table_provenance_candidate_is_not_auto_confirmed():
+    c = _make_candidate("a = b + c (2.1)", block_id="blk_t1")
+    c.source_location["table_provenance"] = {"table_id": "tbl_3", "row": 2}
+    result = GATE.process([c])[0]
+    assert result.acceptance_status != "accepted"
+    assert "table_derived_equation_candidate" in result.review_reason
+
+
+def test_coefficient_row_is_flagged_as_table_derived():
+    c = _make_candidate("0.12  0.34  0.56  0.78", block_id="blk_t2")
+    result = GATE.process([c])[0]
+    assert result.acceptance_status != "accepted"
+    assert "table_derived_equation_candidate" in result.review_reason
+
+
+@pytest.mark.parametrize("text", [
+    # Unicode Greek with subscript
+    "S_g^(0) = b_1^-1 (3.488β_2 + 0.28β_K2 + 0.11β_3)",
+    # LaTeX command with braced subscript
+    r"S_g^(0) = b_1^-1 (3.488\beta_2 + 0.28\beta_{K2})",
+    # ASCII names with subscript
+    "S_g^(0) = b_1^-1 (3.488 beta_2 + 0.28 beta_K2)",
+])
+def test_issue_coefficient_formula_is_not_accepted(text):
+    # A linear combination of decimal coefficients × subscripted parameters of
+    # the same family must be treated as table-derived even with an "=".
+    c = _make_candidate(text, block_id="blk_coef")
+    result = GATE.process([c])[0]
+    assert result.acceptance_status != "accepted"
+    assert "table_derived_equation_candidate" in result.review_reason
+
+
+@pytest.mark.parametrize("text", [
+    "y = 0.50 income + 1.20 education",  # natural-language regression vars
+    "E = m c^2 (3.1)",                    # normal physics equation
+    r"\Gamma = 1.16 G_F^2 m^5",          # single decimal-coefficient product
+    r"\alpha_s = 0.118",                  # single numeric coefficient
+    "y = 2 x + 3 z",                     # integer linear combination
+])
+def test_normal_equation_is_not_flagged_as_table(text):
+    c = _make_candidate(text, block_id="blk_n1")
+    result = GATE.process([c])[0]
+    assert "table_derived_equation_candidate" not in result.review_reason

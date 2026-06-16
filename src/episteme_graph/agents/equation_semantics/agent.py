@@ -16,6 +16,7 @@ from episteme_graph.agents.rhetorical_role.schema import RhetoricalRoleResult
 
 from .acceptance_gate import EquationAcceptanceGate
 from .cartridge_loader import CartridgeLoader
+from .fidelity import apply_fidelity_guards
 from .image_extractor import EquationImageExtractor
 from .input_builder import EquationSemanticsInputBuilder
 from .llm_client import EquationSemanticsLLMClient
@@ -258,7 +259,11 @@ class EquationSemanticsAgent:
             equation_candidates=classified_candidates,
             equations=records,
         )
-        result.validation_issues = self._validator.validate(result, cartridge)
+        # Issue #368: deterministic fidelity guards (prose LaTeX, I/O link
+        # referential integrity, unverifiable symbol loss). Run before final
+        # validation so blocked policies are validated consistently.
+        fidelity_issues = apply_fidelity_guards(result)
+        result.validation_issues = self._validator.validate(result, cartridge) + fidelity_issues
         return result
 
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:

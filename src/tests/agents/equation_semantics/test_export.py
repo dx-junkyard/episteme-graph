@@ -194,3 +194,67 @@ def test_export_reconstruction_fallback_for_latex():
     assert e["confidence_policy"]["display_requires_note"] is True
     assert e["confidence_policy"]["can_be_rendered_as_final_formula"] is False
     assert e["confidence_policy"]["allowed_downstream_use"] == "display_with_warning"
+
+
+def test_prose_reconstruction_is_excluded_from_export_display():
+    """Issue #368: a latex_is_prose reconstruction must not appear as display math."""
+    src = EquationSourceExtraction(
+        raw_text="xi_c is a specific combination",
+        latex=None,
+        plain_text=None,
+        source_location={"page": 1, "section_id": "sec_1", "block_id": "blk_p", "bbox": []},
+        extraction_source="pdf_text_layer",
+        extraction_status="partial",
+        needs_math_review=True,
+        review_reason=["partial_extraction"],
+    )
+    rec = EquationReconstruction(
+        latex=r"\xi_c \equiv \text{(a specific convolution symmetric combination of moments)}",
+        plain_text="xi_c is a specific combination of moments",
+        status="reconstructed_from_neighbors",
+        method=["text_context_fallback"],
+        supporting_refs=["blk_0"],
+        confidence=0.4,
+        review_required=True,
+        review_reason=["latex_is_prose"],
+    )
+    sem = EquationSemantics(
+        equation_type="definition",
+        secondary_types=[],
+        semantic_status="reconstruction_based",
+        confidence=0.4,
+        reason="prose",
+        defined_symbols=[],
+        used_symbols=["xi_c"],
+        assumptions=[],
+        input_equation_ids=[],
+        output_equation_ids=[],
+        linked_text_spans=[],
+        source_evidence_ids=[],
+        linked_claim_ids=[],
+        summary="A prose definition.",
+        review_flags=["needs_reconstruction"],
+    )
+    cp = EquationConfidencePolicy.derive(src, rec, sem)
+    record = EquationRecord(
+        equation_id="eq_prose_1",
+        document_id="doc_test",
+        label=None,
+        candidate_trace_ids=["eqcand_blk_p"],
+        source_extraction=src,
+        reconstruction=rec,
+        semantics=sem,
+        confidence_policy=cp,
+    )
+    result = EquationSemanticsResult("doc_test", None, [], [record])
+    e = result.to_equations_export()[0]
+    # Display fields nulled out — never publish the paraphrase as display math.
+    assert e["latex"] is None
+    assert e["plain_text"] is None
+    # Reconstruction retained as audit data, with the reason code preserved.
+    assert e["reconstruction"]["latex"].startswith(r"\xi_c")
+    assert "latex_is_prose" in e["reconstruction"]["review_reason"]
+    # Downstream confidence gate blocks claim / derivation / final formula.
+    assert e["confidence_policy"]["can_support_claim"] is False
+    assert e["confidence_policy"]["can_be_used_in_derivation"] is False
+    assert e["confidence_policy"]["can_be_rendered_as_final_formula"] is False

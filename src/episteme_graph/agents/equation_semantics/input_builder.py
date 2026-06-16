@@ -56,6 +56,7 @@ class EquationSemanticsInputBuilder:
     ) -> list[EquationCandidate]:
         """全 equation_block から EquationCandidate を生成する (acceptance gate 適用前)。"""
         cfg = config or {}
+        self._normalizer.set_extra_label_patterns(self._cartridge_label_patterns(cartridge))
         max_equations = int(cfg.get("max_equations", _MAX_EQUATIONS))
         ordered_blocks = sorted(structure.blocks, key=lambda b: (b.page, b.order))
 
@@ -96,6 +97,7 @@ class EquationSemanticsInputBuilder:
         _accepted = [c for c in accepted_candidates if c.acceptance_status in statuses]
         if not _accepted:
             return []
+        self._normalizer.set_extra_label_patterns(self._cartridge_label_patterns(cartridge))
         sections_by_id = {s.section_id: s for s in structure.sections}
         backbone_by_section = self._map_backbone_by_section(skeleton)
         spans_by_block = self._map_spans_by_block(roles)
@@ -213,18 +215,34 @@ class EquationSemanticsInputBuilder:
         if block.bbox:
             bbox_list = list(block.bbox)
 
+        source_location: dict = {
+            "page": block.page,
+            "section_id": block.section_id,
+            "block_id": block.block_id,
+            "span_start": 0,
+            "span_end": len(block.text),
+            "bbox": bbox_list,
+            "extraction_source": extraction_source,
+        }
+
+        review_reason: list[str] = []
+        # Issue #368: a rejected PDF/GROBID label is recorded for audit and the
+        # equation_label is normalized to None (matched_label stays None).
+        if not equation.label_is_valid and equation.rejected_label is not None:
+            review_reason.append("invalid_equation_label")
+            source_location["rejected_equation_label"] = equation.rejected_label
+
+        # Issue #368: table / table-cell provenance. The acceptance gate uses
+        # this to keep the candidate out of the auto-confirmed equation set.
+        table_provenance = self._table_provenance(block)
+        if table_provenance:
+            source_location["table_provenance"] = table_provenance
+            review_reason.append("table_derived_equation_candidate")
+
         return EquationCandidate(
             candidate_id=f"eqcand_{block.block_id}_{uuid.uuid4().hex[:8]}",
             document_id=document_id,
-            source_location={
-                "page": block.page,
-                "section_id": block.section_id,
-                "block_id": block.block_id,
-                "span_start": 0,
-                "span_end": len(block.text),
-                "bbox": bbox_list,
-                "extraction_source": extraction_source,
-            },
+            source_location=source_location,
             raw_text=block.text.strip(),
             matched_label=equation.label,
             detection_method=detection,
@@ -234,8 +252,30 @@ class EquationSemanticsInputBuilder:
             accepted_equation_id=None,
             merge_target_hint=None,
             needs_math_review=False,
-            review_reason=[],
+            review_reason=review_reason,
         )
+
+    @staticmethod
+    def _table_provenance(block: TypedBlock) -> dict | None:
+        """Detect table / table-cell provenance for an equation candidate (#368).
+
+        Best-effort: reads provenance hints that DocumentStructure may carry on
+        ``block.raw`` (no hard dependency on a schema change). Recognized hints:
+        ``table_id`` / ``table_cell`` / ``in_table`` / ``from_table`` /
+        ``container_type == 'table'`` / ``parent_block_type == 'table_*'``.
+        """
+        raw = block.raw if isinstance(block.raw, dict) else {}
+        provenance: dict = {}
+        for key in ("table_id", "table_cell", "row", "col"):
+            value = raw.get(key)
+            if value not in (None, "", []):
+                provenance[key] = value
+        if raw.get("in_table") or raw.get("from_table"):
+            provenance.setdefault("in_table", True)
+        container = str(raw.get("container_type") or raw.get("parent_block_type") or "")
+        if container.startswith("table"):
+            provenance.setdefault("container_type", container)
+        return provenance or None
 
     def _inline_candidates_for_block(self, block: TypedBlock, document_id: str) -> list[EquationCandidate]:
         candidates: list[EquationCandidate] = []
@@ -324,6 +364,17 @@ class EquationSemanticsInputBuilder:
         if direction < 0:
             texts.reverse()
         return texts
+
+    @staticmethod
+    def _cartridge_label_patterns(cartridge: CartridgeContext | None) -> list[str]:
+        """Cartridge-provided extra allowed equation label patterns (#368)."""
+        if not cartridge:
+            return []
+        rules = cartridge.validation_rules if isinstance(cartridge.validation_rules, dict) else {}
+        patterns = rules.get("equation_label_patterns")
+        if isinstance(patterns, list):
+            return [str(p) for p in patterns if p]
+        return []
 
     @staticmethod
     def _extraction_source(block: TypedBlock) -> str:

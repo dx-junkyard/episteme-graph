@@ -77,6 +77,9 @@ REVIEW_FLAGS = [
     "partial_extraction",
     # Issue #358: equation links a claim that does not link the equation back.
     "claim_link_asymmetry",
+    # Issue #368: an I/O derivation link referenced an id that is not a member
+    # of the document's final equation set (block id / candidate id / dangling).
+    "nonequation_id_in_links",
 ]
 
 CANDIDATE_REVIEW_REASONS = [
@@ -89,6 +92,47 @@ CANDIDATE_REVIEW_REASONS = [
     "ambiguous_math_text",
     "pdf_text_layer_untrusted",
     "inline_pdf_math_untrusted",
+    # Issue #368: PDF parser / GROBID supplied an equation_label that does not
+    # match the allowed label patterns; the label was normalized to None.
+    "invalid_equation_label",
+    # Issue #368: the candidate originates from a table / table-cell and must
+    # not be auto-confirmed as a standalone independent equation.
+    "table_derived_equation_candidate",
+]
+
+# ---------------------------------------------------------------------------
+# Issue #368: fidelity guard reason codes.
+#
+# These deterministic, post-validation reason codes identify *specific* PDF
+# equation reconstruction quality problems on top of the existing blanket
+# needs_math_review / equation_consistency / confidence_policy safety gate.
+# They are aggregated per-type by the ExportValidationGate.
+# ---------------------------------------------------------------------------
+
+# A reconstructed LaTeX whose body is prose (paraphrase of surrounding text)
+# rather than an actual mathematical expression. Stored in reconstruction /
+# equation_consistency review_reason.
+FIDELITY_LATEX_IS_PROSE = "latex_is_prose"
+# A PDF-supplied equation label that was rejected and normalized to None.
+# Stored in candidate / source_extraction review_reason.
+FIDELITY_INVALID_LABEL = "invalid_equation_label"
+# A candidate originating from a table that must not auto-confirm. Stored in
+# candidate review_reason.
+FIDELITY_TABLE_DERIVED = "table_derived_equation_candidate"
+# A non-equation id (block/candidate/dangling) found in I/O derivation links.
+# Stored in semantics.review_flags.
+FIDELITY_NONEQUATION_ID = "nonequation_id_in_links"
+# Symbol loss between raw text and reconstruction that cannot be verified
+# deterministically (image / OCR provenance unavailable). Stored in
+# equation_consistency review_reason.
+FIDELITY_SYMBOL_LOSS_UNVERIFIABLE = "symbol_loss_unverifiable"
+
+FIDELITY_REVIEW_CODES = [
+    FIDELITY_LATEX_IS_PROSE,
+    FIDELITY_INVALID_LABEL,
+    FIDELITY_TABLE_DERIVED,
+    FIDELITY_NONEQUATION_ID,
+    FIDELITY_SYMBOL_LOSS_UNVERIFIABLE,
 ]
 
 DETECTION_METHODS = [
@@ -150,6 +194,11 @@ class NormalizedEquation:
     text: str
     latex: str | None = None
     plain_text: str | None = None
+    # Issue #368: source-aware label validity. When a PDF-supplied label fails
+    # the allowed patterns it is normalized to label=None, label_is_valid=False,
+    # and the original value is preserved in rejected_label for audit.
+    label_is_valid: bool = True
+    rejected_label: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -546,6 +595,14 @@ class EquationSemanticsResult:
             if rec.status != "none":
                 latex = rec.latex
                 plain_text = rec.plain_text
+
+            # Issue #368: a prose reconstruction (latex_is_prose) is audit-only.
+            # Keep the reconstruction block for audit, but never publish the
+            # paraphrased text as display math; the confidence_gate below then
+            # blocks claim / derivation / final-formula use.
+            if FIDELITY_LATEX_IS_PROSE in (rec.review_reason or []):
+                latex = None
+                plain_text = None
 
             # defined / used / introduced symbols
             defined = [s.symbol for s in sem.defined_symbols if s.definition_status in ("defined", "redefined")]

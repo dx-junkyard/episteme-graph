@@ -137,6 +137,26 @@ def _empty_document_completeness() -> dict:
     }
 
 
+# Equation reconstruction fidelity reason codes (issue #368). Aggregated per
+# type with target ids + artifact paths in equation_fidelity.
+_EQUATION_FIDELITY_CODES = [
+    "latex_is_prose",
+    "invalid_equation_label",
+    "table_derived_equation_candidate",
+    "nonequation_id_in_links",
+    "symbol_loss_unverifiable",
+]
+
+
+def _empty_equation_fidelity() -> dict:
+    return {
+        "checked": False,
+        "total": 0,
+        "issue_counts": {code: 0 for code in _EQUATION_FIDELITY_CODES},
+        "issues": {code: [] for code in _EQUATION_FIDELITY_CODES},
+    }
+
+
 def _load_completeness_analyzer():
     """Resolve analyze_document_completeness robustly (issue #366).
 
@@ -194,6 +214,10 @@ class ExportValidationResult:
     # Document ingest completeness report (issue #366): did the source ingest
     # capture the whole document (equations / terminal section / page coverage)?
     document_completeness: dict = field(default_factory=_empty_document_completeness)
+    # Equation reconstruction fidelity report (issue #368): per-type counts,
+    # target equation/candidate ids and artifact paths for the fine-grained
+    # PDF math quality problems.
+    equation_fidelity: dict = field(default_factory=_empty_equation_fidelity)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -435,6 +459,13 @@ class ExportValidationGate:
         # 2. Equation consistency reporting
         self._check_equation_consistency_mismatches(artifacts, review_items, warnings)
         self._check_derivation_equation_confidence(artifacts, warnings, errors)
+        # 2b. Equation reconstruction fidelity reporting (issue #368): per-type
+        # counts + target ids + artifact paths for the fine-grained PDF math
+        # quality problems (prose LaTeX, invalid label, table-derived candidate,
+        # non-equation I/O link, unverifiable symbol loss).
+        equation_fidelity = self._check_equation_fidelity(
+            artifacts, review_items, warnings
+        )
 
         # 3. Cross-artifact ID validation
         if component_result and claim_objects and evidence:
@@ -595,6 +626,7 @@ class ExportValidationGate:
             teaching_output_validation=teaching_output_validation,
             thesis_coverage=thesis_coverage,
             document_completeness=document_completeness,
+            equation_fidelity=equation_fidelity,
         )
 
     # ------------------------------------------------------------------
@@ -1730,6 +1762,115 @@ class ExportValidationGate:
                 review_items.append(entry)
             else:
                 warnings.append(entry)
+
+    def _check_equation_fidelity(
+        self,
+        artifacts: dict,
+        review_items: list,
+        warnings: list,
+    ) -> dict:
+        """Aggregate equation reconstruction fidelity problems (issue #368).
+
+        Scans the equation_semantics artifact (accepted equations + candidates)
+        for the deterministic fidelity reason codes, producing per-type counts,
+        the target equation/candidate ids and the artifact path for each. The
+        underlying blocking (confidence_policy / equation_consistency) is decided
+        upstream; this is the cross-artifact observability report.
+
+        Codes that block confirmed downstream use are surfaced as review_items;
+        normalized / removed values (invalid_equation_label,
+        nonequation_id_in_links) are surfaced as warnings.
+        """
+        report = _empty_equation_fidelity()
+        raw = artifacts.get("equation_semantics")
+        if not isinstance(raw, dict):
+            return report
+        report["checked"] = True
+
+        # code -> bucket ("review_items" | "warnings")
+        bucket_for = {
+            "latex_is_prose": "review_items",
+            "table_derived_equation_candidate": "review_items",
+            "symbol_loss_unverifiable": "review_items",
+            "invalid_equation_label": "warnings",
+            "nonequation_id_in_links": "warnings",
+        }
+
+        def _record(code: str, target_kind: str, target_id: str, path: str) -> None:
+            if code not in report["issues"]:
+                return
+            report["issues"][code].append({
+                target_kind: target_id,
+                "artifact": "equation_semantics",
+                "path": path,
+            })
+            report["issue_counts"][code] += 1
+            report["total"] += 1
+            entry = ValidationEntry(
+                code=f"EQUATION_FIDELITY_{code.upper()}",
+                message=f"equation_semantics {target_kind} {target_id!r}: {code}",
+                artifact="equation_semantics",
+                path=path,
+                source_stage="export_validation",
+            )
+            if bucket_for.get(code) == "review_items":
+                review_items.append(entry)
+            else:
+                warnings.append(entry)
+
+        # --- accepted equations ---
+        equations = raw.get("equations") or []
+        if isinstance(equations, list):
+            for eq in equations:
+                if not isinstance(eq, dict):
+                    continue
+                eq_id = str(eq.get("equation_id") or "")
+                if not eq_id:
+                    continue
+                rec = eq.get("reconstruction") if isinstance(eq.get("reconstruction"), dict) else {}
+                consistency = (
+                    eq.get("equation_consistency")
+                    if isinstance(eq.get("equation_consistency"), dict)
+                    else {}
+                )
+                for code in self._codes_in(eq.get("review_reason")):
+                    if code in report["issues"]:
+                        _record(code, "equation_id", eq_id,
+                                f"$.equations[{eq_id}].review_reason")
+                for code in self._codes_in(rec.get("review_reason")):
+                    if code in report["issues"]:
+                        _record(code, "equation_id", eq_id,
+                                f"$.equations[{eq_id}].reconstruction.review_reason")
+                for code in self._codes_in(consistency.get("review_reason")):
+                    if code in report["issues"]:
+                        _record(code, "equation_id", eq_id,
+                                f"$.equations[{eq_id}].equation_consistency.review_reason")
+                for code in self._codes_in(eq.get("review_flags")):
+                    if code in report["issues"]:
+                        _record(code, "equation_id", eq_id,
+                                f"$.equations[{eq_id}].review_flags")
+
+        # --- candidates ---
+        candidates = raw.get("equation_candidates") or []
+        if isinstance(candidates, list):
+            for cand in candidates:
+                if not isinstance(cand, dict):
+                    continue
+                cand_id = str(cand.get("candidate_id") or "")
+                if not cand_id:
+                    continue
+                for code in self._codes_in(cand.get("review_reason")):
+                    if code in report["issues"]:
+                        _record(code, "candidate_id", cand_id,
+                                f"$.equation_candidates[{cand_id}].review_reason")
+
+        return report
+
+    @staticmethod
+    def _codes_in(values) -> list:
+        if not isinstance(values, list):
+            return []
+        return [str(v) for v in values if str(v) in _EQUATION_FIDELITY_CODES]
 
     def _check_dsl_edges(
         self,

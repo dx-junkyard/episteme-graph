@@ -665,6 +665,65 @@ def test_export_validation_lists_equation_consistency_mismatch_candidates():
 
 
 # ---------------------------------------------------------------------------
+# Tests: equation fidelity aggregation (issue #368)
+# ---------------------------------------------------------------------------
+
+def test_equation_fidelity_aggregates_all_problem_types():
+    artifacts = _make_artifacts(equation_semantics={
+        "equations": [
+            {
+                "equation_id": "eq_prose",
+                "review_reason": [],
+                "reconstruction": {"status": "reconstructed_from_neighbors",
+                                   "review_reason": ["latex_is_prose"]},
+                "equation_consistency": {"review_reason": ["latex_is_prose",
+                                                            "symbol_loss_unverifiable"]},
+                "review_flags": ["nonequation_id_in_links"],
+            },
+            {
+                "equation_id": "eq_lbl",
+                "review_reason": ["invalid_equation_label"],
+                "reconstruction": {"status": "none", "review_reason": []},
+                "equation_consistency": {"review_reason": []},
+                "review_flags": [],
+            },
+        ],
+        "equation_candidates": [
+            {"candidate_id": "cand_tab", "review_reason": ["table_derived_equation_candidate"]},
+            {"candidate_id": "cand_lbl", "review_reason": ["invalid_equation_label"]},
+        ],
+    })
+    result = _run_gate(artifacts=artifacts)
+    fidelity = result.equation_fidelity
+    assert fidelity["checked"] is True
+    counts = fidelity["issue_counts"]
+    assert counts["latex_is_prose"] == 2          # reconstruction + consistency
+    assert counts["symbol_loss_unverifiable"] == 1
+    assert counts["nonequation_id_in_links"] == 1
+    assert counts["table_derived_equation_candidate"] == 1
+    assert counts["invalid_equation_label"] == 2  # equation + candidate
+
+    # target ids + artifact paths are present
+    prose_targets = fidelity["issues"]["latex_is_prose"]
+    assert any(t.get("equation_id") == "eq_prose" for t in prose_targets)
+    assert all(t["artifact"] == "equation_semantics" for t in prose_targets)
+    assert all("path" in t for t in prose_targets)
+    tab_targets = fidelity["issues"]["table_derived_equation_candidate"]
+    assert tab_targets[0]["candidate_id"] == "cand_tab"
+    assert "equation_candidates" in tab_targets[0]["path"]
+
+    codes = [e.code for e in result.review_items] + [e.code for e in result.warnings]
+    assert "EQUATION_FIDELITY_LATEX_IS_PROSE" in codes
+    assert "EQUATION_FIDELITY_INVALID_EQUATION_LABEL" in codes
+
+
+def test_equation_fidelity_empty_when_no_equation_artifact():
+    result = _run_gate()
+    assert result.equation_fidelity["checked"] is False
+    assert result.equation_fidelity["total"] == 0
+
+
+# ---------------------------------------------------------------------------
 # Tests: DSL edge validation
 # ---------------------------------------------------------------------------
 
