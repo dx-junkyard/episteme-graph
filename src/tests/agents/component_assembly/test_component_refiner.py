@@ -246,6 +246,25 @@ def test_case_classification_case_split_consequence():  # Case F
     assert q["split_required"] is True
 
 
+def test_refined_components_expose_responsibility_type():
+    # Issue #396 review: a refined component whose operation is a broad family
+    # (e.g. transform_representation) must still expose a responsibility_type.
+    operations = [
+        ("define the relation", ["eq_a"], ["eq_b"]),
+        ("transform the representation", ["eq_b"], ["eq_c"]),
+        ("derive the consequence", ["eq_c"], ["eq_d"]),
+    ]
+    component = _component(
+        evidence_refs={"claim_ids": ["claim_1"], "equation_ids": _all_equation_ids(operations)},
+    )
+    result = _result([component])
+    REFINER.refine(result, None, _derivation(operations))
+    assert len(result.components) >= 2
+    for c in result.components:
+        assert c.operation, "refined component must declare an operation family"
+        assert c.responsibility_type, "refined component must expose a responsibility_type"
+
+
 def test_single_family_does_not_split():  # negative control
     component = _component(
         component_type="RelationComponent",

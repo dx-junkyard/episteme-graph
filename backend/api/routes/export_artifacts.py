@@ -1561,25 +1561,53 @@ def build_component_graph_export(
                 continue
             operation_node_ids.add(node_id)
             # Generic operation family (issue #398): operation graph nodes expose
-            # a broad, domain-neutral ``operation_family`` (never a paper-specific
-            # operation key). The raw operation is retained as a subtype hint.
+            # a broad, domain-neutral ``operation_family``. A cartridge-/agent-
+            # supplied ``operation_family`` / ``operation_subtype`` /
+            # ``subtype_source`` is PRESERVED (issue #397 — domain terms propagate
+            # as optional subtypes); the deterministic classifier is only a
+            # fallback when the node carries no family yet.
             classification = _classify_operation_family(n.get("operation") or n.get("label") or "")
+            existing_family = str(n.get("operation_family") or "").strip()
+            operation_family_value = existing_family or classification["operation_family"]
+            if existing_family:
+                operation_subtype_value = n.get("operation_subtype")
+                subtype_source_value = n.get("subtype_source") or "cartridge"
+            else:
+                operation_subtype_value = (
+                    n.get("operation_subtype")
+                    if n.get("operation_subtype") is not None
+                    else classification["operation_subtype"]
+                )
+                subtype_source_value = n.get("subtype_source") or classification["subtype_source"]
+            # Merge classification review reasons (e.g. operation_family_unrecognized)
+            # with any reasons already on the node, without duplicates (issue #395/#398).
+            node_review_reasons = list(n.get("review_reasons") or [])
+            for reason in classification["review_reasons"]:
+                if reason not in node_review_reasons:
+                    node_review_reasons.append(reason)
+            review_required_value = bool(
+                n.get("review_required")
+                or classification["review_required"]
+                or not n.get("linked_equation_ids")
+            )
+            if review_required_value and not node_review_reasons:
+                node_review_reasons.append("operation_node_missing_equation_link")
             operation_nodes.append({
                 "operation_id": node_id,
                 "node_type": "operation",
                 "label": n.get("label") or n.get("visual_label") or "",
                 "operation": n.get("operation") or "",
-                "operation_family": classification["operation_family"],
-                "operation_subtype": classification["operation_subtype"],
-                "subtype_source": classification["subtype_source"],
+                "operation_family": operation_family_value,
+                "operation_subtype": operation_subtype_value,
+                "subtype_source": subtype_source_value,
                 "graph_layer": n.get("graph_layer") or "equation_detail",
                 "source_backing_status": n.get("source_backing_status") or "",
                 "review_status": n.get("review_status") or "teacher_review_required",
-                "review_required": bool(classification["review_required"]) or not n.get("linked_equation_ids"),
+                "review_required": review_required_value,
                 "parent_component_id": str(n.get("parent_component_id") or ""),
                 "linked_equation_ids": list(n.get("linked_equation_ids") or []),
                 "linked_derivation_ids": list(n.get("linked_derivation_ids") or []),
-                "review_reasons": list(n.get("review_reasons") or []),
+                "review_reasons": node_review_reasons,
             })
             parent = str(n.get("parent_component_id") or "")
             if parent:

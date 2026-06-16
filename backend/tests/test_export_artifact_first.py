@@ -364,3 +364,47 @@ def test_validation_warns_on_non_generic_operation_family():
     )
     codes = {w["code"] for w in report["warnings"]}
     assert "NON_GENERIC_OPERATION_FAMILY" in codes
+
+
+# ---------------------------------------------------------------------------
+# Review follow-up: responsibility mapping + subtype/review_reasons propagation.
+# ---------------------------------------------------------------------------
+
+
+def test_operation_node_preserves_cartridge_subtype():
+    # A cartridge-supplied operation_family/subtype must survive export (#397/#398).
+    artifact = {
+        "graph_schema_version": "0.1.0",
+        "nodes": [
+            {"component_id": "comp_1", "component_type": "TheoryOperationNode", "graph_layer": "main"},
+            {"component_id": "op_1", "component_type": "EquationOperationNode",
+             "graph_layer": "equation_detail", "parent_component_id": "comp_1",
+             "operation": "linearize", "operation_family": "transform_representation",
+             "operation_subtype": "bias_linearization", "subtype_source": "cartridge",
+             "linked_equation_ids": ["eq_1"]},
+        ],
+        "edges": [],
+    }
+    out = ea.build_component_graph_export(artifact, document_id="doc_1", known_component_ids={"comp_1"})
+    op = out["operation_graph"]["nodes"][0]
+    assert op["operation_family"] == "transform_representation"
+    assert op["operation_subtype"] == "bias_linearization"
+    assert op["subtype_source"] == "cartridge"
+
+
+def test_unknown_operation_node_propagates_review_reasons():
+    artifact = {
+        "graph_schema_version": "0.1.0",
+        "nodes": [
+            {"component_id": "comp_1", "component_type": "TheoryOperationNode", "graph_layer": "main"},
+            {"component_id": "op_1", "component_type": "EquationOperationNode",
+             "graph_layer": "equation_detail", "parent_component_id": "comp_1",
+             "operation": "frobnicate the wibble", "linked_equation_ids": ["eq_1"]},
+        ],
+        "edges": [],
+    }
+    out = ea.build_component_graph_export(artifact, document_id="doc_1", known_component_ids={"comp_1"})
+    op = out["operation_graph"]["nodes"][0]
+    assert op["operation_family"] == "unknown_specific_operation"
+    assert op["review_required"] is True
+    assert "operation_family_unrecognized" in op["review_reasons"]

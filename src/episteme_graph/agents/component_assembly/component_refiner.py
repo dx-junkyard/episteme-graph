@@ -880,31 +880,40 @@ def _operation_group_key(operation: str) -> str:
     return _generic_operation_family(operation)
 
 
+# Generic operation family → responsibility type (issues #396 / #397). Mirrors
+# the granularity analyzer mapping so refined components expose a responsibility
+# even when their operation is a broad family name (e.g. transform_representation).
+_FAMILY_TO_RESPONSIBILITY = {
+    "introduce_entity": "definition",
+    "define_relation": "definition",
+    "impose_assumption": "model",
+    "construct_model": "model",
+    "transform_representation": "equation_system",
+    "derive_consequence": "derivation",
+    "evaluate_condition": "constraint",
+    "compare_cases": "application",
+    "validate_or_test": "application",
+    "apply_to_context": "application",
+    "state_limitation": "limitation",
+}
+
+
 def _responsibility_for_operation(operation: str) -> str:
+    """Map a raw operation string OR a broad operation family to a responsibility.
+
+    Works for both the raw step operation text ("define the relation") and the
+    generic family exposed on refined components ("define_relation") so a refined
+    ``ComponentRecord`` never ends up with an empty ``responsibility_type``
+    (issue #396).
+    """
     text = str(operation or "").lower()
-    family = _operation_family(text)
+    # Finer raw-text distinction first (only meaningful for raw operation text).
     if "observable" in text:
         return "observable_basis"
-    if "linear" in text:
-        return "equation_system"
-    if "eliminat" in text or "solve" in text:
-        return "derivation"
-    if "consistency" in text or "constraint" in text or "criterion" in text:
-        return "constraint"
-    if "forecast" in text:
-        return "application"
-    if "caveat" in text or "limit" in text or "invalid" in text:
-        return "limitation"
-    if family == "define":
-        return "definition"
-    if family in {"parameterize", "assume"}:
-        return "model"
-    if family in {"substitute"}:
-        return "equation_system"
-    if family in {"derive", "constrain"}:
-        return "constraint"
-    if family in {"diagnose", "forecast", "compare"}:
-        return "application"
+    broad = _generic_operation_family(text)
+    mapped = _FAMILY_TO_RESPONSIBILITY.get(broad)
+    if mapped:
+        return mapped
     return canonical_responsibility_type("")
 
 
