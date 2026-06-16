@@ -29,6 +29,21 @@ from .schema import (
     DerivationStep,
     ValidationIssue,
 )
+from .system_derivation import detect_system_level_derivations
+
+
+def _system_chain_issues(system_chains: list[DerivationChainRecord]) -> list[ValidationIssue]:
+    """Surface review reasons from system-level derivations as validation issues (#386)."""
+    issues: list[ValidationIssue] = []
+    for chain in system_chains:
+        for reason in chain.review_reasons or []:
+            issues.append(ValidationIssue(
+                rule_id=f"system_derivation_{reason}",
+                severity="warning",
+                message=f"system-level derivation {chain.derivation_id} flagged: {reason}",
+                field=chain.derivation_id,
+            ))
+    return issues
 
 # Mapping from claim_type → preferred operation (issue #261)
 _CLAIM_TYPE_TO_OPERATION: dict[str, str] = {
@@ -273,6 +288,19 @@ class DerivationChainAgent:
                     message=f"chain {chain.derivation_id} has no teaching_takeaway",
                     field=chain.derivation_id,
                 ))
+
+        # System-level derivations (issue #386): detect multi-equation operations
+        # (solve / eliminate / constrain over an equation group) that local
+        # adjacency chains do not capture. Additive — never mutates local chains.
+        system_chains = detect_system_level_derivations(
+            equations,
+            existing_chains=chains,
+            claim_link_index=claim_link_index or {},
+            next_index=1,
+        )
+        if system_chains:
+            chains.extend(system_chains)
+            issues.extend(_system_chain_issues(system_chains))
 
         return DerivationChainResult(
             document_id=equations.document_id,

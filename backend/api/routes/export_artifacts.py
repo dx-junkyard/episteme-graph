@@ -687,17 +687,38 @@ def build_derivation_chains_export(
                 })
                 if gate.get("blocked_by_equation_ids"):
                     steps[-1]["review_status"] = "teacher_review_required"
-            out.append({
+            chain_out = {
                 "derivation_id": c.get("derivation_id") or "",
                 "document_id": c.get("document_id") or document_id,
                 "source_section_ids": list(c.get("source_section_ids") or []),
                 "steps": steps,
                 "teaching_takeaway": c.get("teaching_takeaway") or "",
                 "blackbox_policy_suggestion": c.get("blackbox_policy_suggestion") or {},
+                "chain_type": c.get("chain_type") or "equation_chain",
                 "review_status": c.get("review_status") or _chain_review_status_from_steps(steps),
                 "review_reason": c.get("review_reason") or _chain_review_reason_from_steps(steps),
                 "confidence_gate": _chain_confidence_gate_from_steps(steps),
-            })
+            }
+            # System-level derivation fields (issue #386): expose the group-level
+            # operation, symbol bookkeeping, and review reasons on the chain.
+            if c.get("chain_type") == "system_level":
+                chain_out.update({
+                    "operation": c.get("operation") or "",
+                    "input_equation_ids": list(c.get("input_equation_ids") or []),
+                    "output_equation_ids": list(c.get("output_equation_ids") or []),
+                    "intermediate_equation_ids": list(c.get("intermediate_equation_ids") or []),
+                    "input_claim_ids": list(c.get("input_claim_ids") or []),
+                    "output_claim_ids": list(c.get("output_claim_ids") or []),
+                    "assumption_ids": list(c.get("assumption_ids") or []),
+                    "source_evidence_ids": list(c.get("source_evidence_ids") or []),
+                    "transformed_symbols": list(c.get("transformed_symbols") or []),
+                    "eliminated_symbols": list(c.get("eliminated_symbols") or []),
+                    "retained_symbols": list(c.get("retained_symbols") or []),
+                    "conditions": list(c.get("conditions") or []),
+                    "review_required": bool(c.get("review_required", True)),
+                    "review_reasons": list(c.get("review_reasons") or []),
+                })
+            out.append(chain_out)
         return out
 
     eq = _coerce_dict(equation_artifact)
