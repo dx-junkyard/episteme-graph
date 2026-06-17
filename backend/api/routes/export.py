@@ -370,6 +370,15 @@ def _resolve_artifact_first_graph(
     for doc_id in document_ids:
         artifact = (artifacts_by_doc.get(doc_id) or {}).get("component_graph")
         if not artifact:
+            # Partial fallback (issue #390): other documents carry a current-run
+            # component_graph artifact but this one does not. Record the fallback
+            # per document — like claims/components do — so the export provenance
+            # is honest that this document's graph is missing from the artifacts.
+            fallback_sources.append({
+                "artifact": "component_graph",
+                "document_id": doc_id,
+                "fallback_to": _FALLBACK_SOURCE["component_graph"],
+            })
             continue
         split = build_component_graph_export(
             artifact, document_id=doc_id, known_component_ids=known_component_ids
@@ -1628,21 +1637,25 @@ def _validate_system_operations(
                 path,
                 sys_id,
             )
-        # Cross-artifact ID integrity for whatever refs are present.
+        # Cross-artifact ID integrity (issue #394 traceability). A system-level
+        # operation must be traceable to real artifacts: a reference that does not
+        # resolve is a dangling ref even when the target artifact is entirely empty
+        # (an export with zero equations cannot back an equation reference). So we
+        # do NOT skip validation when the known set is empty.
         for ref in eq_refs:
-            if equation_ids and ref not in equation_ids:
+            if ref not in equation_ids:
                 add("UNRESOLVED_EXPORT_REF", f"{path}.equation_ids references missing equation {ref!r}", "graph/system_operations.json", f"{path}.equation_ids", ref)
         for ref in claim_refs:
-            if claim_ids and ref not in claim_ids:
+            if ref not in claim_ids:
                 add("UNRESOLVED_EXPORT_REF", f"{path}.claim_ids references missing claim {ref!r}", "graph/system_operations.json", f"{path}.claim_ids", ref)
         for ref in ev_refs:
-            if evidence_ids and ref not in evidence_ids:
+            if ref not in evidence_ids:
                 add("UNRESOLVED_EXPORT_REF", f"{path}.source_evidence_ids references missing evidence {ref!r}", "graph/system_operations.json", f"{path}.source_evidence_ids", ref)
         for ref in deriv_refs:
-            if derivation_ids and ref not in derivation_ids:
+            if ref not in derivation_ids:
                 add("UNRESOLVED_EXPORT_REF", f"{path}.derivation_ids references missing derivation {ref!r}", "graph/system_operations.json", f"{path}.derivation_ids", ref)
         for ref in (str(v) for v in (sys_op.get("component_ids") or []) if v):
-            if component_ids and ref not in component_ids:
+            if ref not in component_ids:
                 add("UNRESOLVED_EXPORT_REF", f"{path}.component_ids references missing component {ref!r}", "graph/system_operations.json", f"{path}.component_ids", ref)
         # Generic family + provenance-tagged optional subtype (#394).
         fam = str(sys_op.get("system_family") or "")
@@ -1907,10 +1920,36 @@ def _validate_export_references(
         if not isinstance(node, dict):
             continue
         node_id = str(node.get("node_id") or node.get("component_id") or "")
-        if node_id and node_id in operation_ids:
+        if not node_id:
+            add(
+                "EMPTY_COMPONENT_GRAPH_NODE_ID",
+                f"component graph node at index {idx} has no node_id",
+                "graph/component_graph.json",
+                f"$.nodes[{idx}].node_id",
+                "",
+            )
+        elif node_id in operation_ids:
             add(
                 "OPERATION_ID_IN_COMPONENT_GRAPH",
                 f"component graph node {node_id!r} is an operation ID and must live in operation_graph.json",
+                "graph/component_graph.json",
+                f"$.nodes[{idx}].node_id",
+                node_id,
+            )
+        elif _is_legacy_export_ref(node_id):
+            add(
+                "LEGACY_EXPORT_REF",
+                f"component graph node {node_id!r} is a provisional ID",
+                "graph/component_graph.json",
+                f"$.nodes[{idx}].node_id",
+                node_id,
+            )
+        elif component_ids and node_id not in component_ids:
+            # Hard error (issues #390 / #393): a component_graph node must be a
+            # known component_id from components/components.json — never a ghost.
+            add(
+                "COMPONENT_GRAPH_NODE_NOT_A_COMPONENT",
+                f"component graph node {node_id!r} is not a known component in components/components.json",
                 "graph/component_graph.json",
                 f"$.nodes[{idx}].node_id",
                 node_id,

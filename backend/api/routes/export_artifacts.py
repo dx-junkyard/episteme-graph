@@ -1637,7 +1637,12 @@ def build_component_graph_export(
             operation_family_value = existing_family or classification["operation_family"]
             if existing_family:
                 operation_subtype_value = n.get("operation_subtype")
-                subtype_source_value = n.get("subtype_source") or "cartridge"
+                # Provenance must be honest (issues #390 / #393): an existing
+                # operation_family may come from an agent/core classifier or a
+                # cartridge. When the node did not declare subtype_source we must
+                # NOT assume "cartridge" — that fabricates provenance. Leave it
+                # "unknown" so export validation can flag uncertain subtypes.
+                subtype_source_value = n.get("subtype_source") or "unknown"
             else:
                 operation_subtype_value = (
                     n.get("operation_subtype")
