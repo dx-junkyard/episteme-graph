@@ -37,13 +37,13 @@ SUPPORT_LAYERS = [
     },
     {
         "layer": "derivation_core",
-        "role": "Eliminate unknown bias parameters or derive the core relation.",
+        "role": "Solve or eliminate auxiliary/nuisance quantities, or derive the core relation.",
         "support_kind": "derivational",
         "support_distance_to_headline_claim": 0,
     },
     {
         "layer": "result_and_application",
-        "role": "State bias-free consistency relations, constraints, or applications.",
+        "role": "State residual relations, final constraints, or applications.",
         "support_kind": "direct",
         "support_distance_to_headline_claim": 0,
     },

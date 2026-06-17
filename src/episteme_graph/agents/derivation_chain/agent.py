@@ -29,6 +29,21 @@ from .schema import (
     DerivationStep,
     ValidationIssue,
 )
+from .system_derivation import detect_system_level_derivations
+
+
+def _system_chain_issues(system_chains: list[DerivationChainRecord]) -> list[ValidationIssue]:
+    """Surface review reasons from system-level derivations as validation issues (#386)."""
+    issues: list[ValidationIssue] = []
+    for chain in system_chains:
+        for reason in chain.review_reasons or []:
+            issues.append(ValidationIssue(
+                rule_id=f"system_derivation_{reason}",
+                severity="warning",
+                message=f"system-level derivation {chain.derivation_id} flagged: {reason}",
+                field=chain.derivation_id,
+            ))
+    return issues
 
 # Mapping from claim_type → preferred operation (issue #261)
 _CLAIM_TYPE_TO_OPERATION: dict[str, str] = {
@@ -274,6 +289,19 @@ class DerivationChainAgent:
                     field=chain.derivation_id,
                 ))
 
+        # System-level derivations (issue #386): detect multi-equation operations
+        # (solve / eliminate / constrain over an equation group) that local
+        # adjacency chains do not capture. Additive — never mutates local chains.
+        system_chains = detect_system_level_derivations(
+            equations,
+            existing_chains=chains,
+            claim_link_index=claim_link_index or {},
+            next_index=1,
+        )
+        if system_chains:
+            chains.extend(system_chains)
+            issues.extend(_system_chain_issues(system_chains))
+
         return DerivationChainResult(
             document_id=equations.document_id,
             cartridge_id=cartridge_id,
@@ -463,29 +491,26 @@ class DerivationChainAgent:
     def _infer_operation(record: Optional[EquationRecord]) -> str:
         if record is None:
             return DEFAULT_OPERATION
+        # Domain-neutral operation inference (issues #395 / #398): map the
+        # equation's *role* (and generic operation verbs in its text) to a
+        # generic operation verb. No paper-specific observable / parameter /
+        # method names are produced by core logic.
         text = " ".join([
             str(getattr(record, "label", "") or ""),
             record.semantics.summary or "",
             record.semantics.reason or "",
-            " ".join(record.semantics.used_symbols or []),
-            " ".join(s.symbol for s in (record.semantics.defined_symbols or [])),
         ]).lower()
-        if "skewness" in text and "linear" in text and "bias" in text:
-            return "linearize_skewness_bias_dependence"
-        if "kurtosis" in text and "linear" in text and "bias" in text:
-            return "linearize_kurtosis_bias_dependence"
-        if ("second" in text or "2nd" in text) and "bias" in text and ("solve" in text or "eliminat" in text):
-            return "solve_second_order_bias"
-        if ("third" in text or "3rd" in text) and "bias" in text and ("solve" in text or "eliminat" in text):
-            return "solve_third_order_bias"
-        if "substitut" in text and ("second" in text or "2nd" in text):
-            return "substitute_second_order_bias"
-        if "substitut" in text and ("third" in text or "3rd" in text):
-            return "substitute_third_order_bias"
-        if "skewness" in text and "consistency relation" in text:
-            return "derive_skewness_consistency_relation"
-        if "kurtosis" in text and "consistency relation" in text:
-            return "derive_first_kurtosis_consistency_relation"
+        for needle, verb in (
+            ("lineariz", "linearize"),
+            ("substitut", "substitute"),
+            ("eliminat", "eliminate"),
+            ("solve", "solve"),
+            ("approximat", "approximate"),
+            ("normaliz", "normalize"),
+            ("constrain", "apply_constraint"),
+        ):
+            if needle in text:
+                return verb
         primary = record.semantics.equation_type
         mapping = {
             "definition": "define",

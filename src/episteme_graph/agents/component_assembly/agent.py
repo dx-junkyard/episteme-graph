@@ -167,13 +167,29 @@ class ComponentAssemblyAgent:
                 result, cartridge, llm_input=llm_input
             )
 
-        # Step 3: optional actual refinement/splitting. Disabled by default so
-        # Step 1 remains detection/proposal only.
-        if (config or {}).get("enable_component_refiner", False):
+        # Step 3: actual refinement/splitting. Now conditionally DEFAULT-ON
+        # (issue #385): when the granularity analyzer detects quality triggers
+        # (split recommendations, mixed/coarse components, few components with
+        # many artifacts, or unlinked derivation chains) the refiner runs
+        # automatically. An explicit ``enable_component_refiner`` config value
+        # (True/False) always overrides the automatic decision.
+        refiner_cfg = (config or {}).get("enable_component_refiner")
+        if refiner_cfg is None:
+            run_refiner, refiner_reasons = _refinement_triggered(result, llm_input, derivations)
+        else:
+            run_refiner, refiner_reasons = bool(refiner_cfg), (["explicit_config"] if refiner_cfg else [])
+        diagnostics["component_refiner_decision"] = {
+            "ran": run_refiner,
+            "auto": refiner_cfg is None,
+            "triggers": refiner_reasons,
+            "component_count_before": len(result.components),
+        }
+        if run_refiner:
             result = self._refiner.refine(result, llm_input, derivations)
             result.validation_issues = self._validator.validate(
                 result, cartridge, llm_input=llm_input
             )
+            diagnostics["component_refiner_decision"]["component_count_after"] = len(result.components)
 
         # Step 4: align refined components with derivation chains, equation
         # operations, the theory component graph, and the support map. Disabled
@@ -224,6 +240,84 @@ class ComponentAssemblyAgent:
                 "Cartridge '%s' not found; proceeding without cartridge", cartridge_id
             )
             return None
+
+
+_REFINER_INTERNAL_FLOW_OPERATIONS = {
+    "define", "transform", "solve", "substitute", "eliminate", "infer", "validate",
+    "linearize", "approximate", "derive", "marginalize",
+}
+
+
+def _refinement_triggered(result, llm_input, derivations) -> tuple[bool, list[str]]:
+    """Decide whether the ComponentRefiner should run by default (issue #385).
+
+    Returns ``(should_run, reasons)``. Domain-independent: the triggers are read
+    from the granularity analyzer's structural annotations and artifact counts,
+    never from field-specific names.
+    """
+    reasons: list[str] = []
+    components = list(result.components or [])
+
+    for component in components:
+        rec = component.split_recommendation or {}
+        if rec.get("required"):
+            reasons.append("component_split_recommended")
+            break
+
+    for component in components:
+        status = (component.component_quality or {}).get("granularity_status")
+        if status in ("too_coarse", "mixed_responsibility"):
+            reasons.append("coarse_or_mixed_responsibility_component")
+            break
+
+    for component in components:
+        quality = component.component_quality or {}
+        if int(quality.get("responsibility_count") or 0) > 1:
+            reasons.append("component_has_multiple_responsibility_types")
+            break
+
+    # A component whose internal flow mixes several major operations in one unit.
+    for component in components:
+        ops = {
+            str(step.get("relation") or step.get("operation") or "").strip().lower().split("_")[0]
+            for step in (component.internal_flow or [])
+            if isinstance(step, dict)
+        }
+        if len(ops & _REFINER_INTERNAL_FLOW_OPERATIONS) > 1:
+            reasons.append("internal_flow_mixes_operations")
+            break
+
+    # Few components while there is a lot of extracted equation/evidence material.
+    # Threshold raised to <= 4 (issue #392): a theory-heavy paper compressed into
+    # 3-4 coarse components must still trigger refinement, not only the <= 2 case.
+    eq_count = len(getattr(llm_input, "available_equations", []) or [])
+    ev_count = len(getattr(llm_input, "available_evidence", []) or [])
+    if components and len(components) <= 4 and eq_count >= 15:
+        reasons.append("few_components_with_many_equations")
+    if components and len(components) <= 4 and ev_count >= 30:
+        reasons.append("few_components_with_many_evidence")
+    # Keep the tighter low-artifact case so a 1-2 component result with a modest
+    # number of equations/evidence is still refined.
+    if components and len(components) <= 2 and (eq_count >= 6 or ev_count >= 12):
+        reasons.append("few_components_with_many_artifacts")
+
+    # Any single component linked to many equations is a coarse-grouping signal
+    # even when the overall component count is not low (issue #392).
+    for component in components:
+        quality = component.component_quality or {}
+        if int(quality.get("equation_count") or 0) >= 8:
+            reasons.append("component_links_many_equations")
+            break
+
+    # Derivation chains exist but none are linked to a component.
+    chains = list(getattr(derivations, "chains", []) or [])
+    if chains and not any(getattr(ch, "linked_component_ids", None) for ch in chains):
+        reasons.append("derivation_chains_unlinked_to_components")
+
+    # De-duplicate while preserving order.
+    seen: set[str] = set()
+    unique = [r for r in reasons if not (r in seen or seen.add(r))]
+    return (bool(unique), unique)
 
 
 def _strip_unavailable_equation_refs(llm_input: ComponentAssemblyLLMInput) -> list[dict]:

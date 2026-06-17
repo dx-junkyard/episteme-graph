@@ -1303,10 +1303,16 @@ def test_orchestrator_runs_newly_integrated_agents_and_saves_artifacts():
     block_ids = {r["source"]["block_id"] for r in ev_records}
     assert {"blk_1", "blk_eq_1", "blk_fig_1"}.issubset(block_ids)
 
-    # claim_object_builder must produce one claim per accepted span.
+    # claim_object_builder must produce one prose claim per accepted span. Issue
+    # #388 additionally synthesises equation/derivation-backed claims (id prefix
+    # "synth_claim_"); those are appended after the prose claims.
     claims = saved_artifacts["claim_object_builder"]["claims"]
-    assert len(claims) == 1
-    assert claims[0]["source_evidence_ids"], "claim must be source-backed"
+    prose_claims = [c for c in claims if not str(c["claim_id"]).startswith("synth_claim_")]
+    assert len(prose_claims) == 1
+    assert prose_claims[0]["source_evidence_ids"], "claim must be source-backed"
+    # The synthesised definition claim for the source-backed equation is present.
+    synth_claims = [c for c in claims if str(c["claim_id"]).startswith("synth_claim_")]
+    assert all(c.get("synthesis_method") for c in synth_claims)
     orchestrator_source = Path(orchestrator.__file__).read_text(encoding="utf-8")
     assert "equation_semantics_result=equations" in orchestrator_source
 
