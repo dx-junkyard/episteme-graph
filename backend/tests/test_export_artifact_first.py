@@ -408,3 +408,168 @@ def test_unknown_operation_node_propagates_review_reasons():
     assert op["operation_family"] == "unknown_specific_operation"
     assert op["review_required"] is True
     assert "operation_family_unrecognized" in op["review_reasons"]
+
+
+# ---------------------------------------------------------------------------
+# #390 / #393 / #394: review items, coverage, system operations, two-layer model.
+# ---------------------------------------------------------------------------
+
+
+def test_validation_reports_review_items_and_coverage_and_artifact_sources():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[{"claim_id": "c1", "source_evidence_ids": ["ev1"]}, {"claim_id": "c2"}],
+        equations=[{"equation_id": "eq1", "source_location": {"block_id": "b1"}}],
+        components=[{"component_id": "cmp1", "evidence_claims": ["c1"]}],
+        component_graph={"nodes": [], "edges": []},
+        course_info={"topics": [{"title": "T", "linked_component_ids": ["cmp1"]}]},
+        evidence_snippets=[{"evidence_id": "ev1"}],
+        operation_graph={"nodes": [], "edges": []},
+        component_operation_links=[],
+        artifact_sources={"export_source_policy": "artifact_first"},
+    )
+    assert "review_items" in report
+    cov = report["coverage"]
+    assert cov["claims_with_source_links"] == {"total": 2, "covered": 1}
+    assert cov["equations_with_source_locations"] == {"total": 1, "covered": 1}
+    assert cov["components_with_evidence_links"]["covered"] == 1
+    assert cov["topics_with_component_links"] == {"total": 1, "covered": 1}
+    assert report["artifact_sources"]["export_source_policy"] == "artifact_first"
+    assert report["summary"]["review_required_count"] == 0
+
+
+def test_operation_subtype_without_provenance_is_review_item():
+    mod = _export_mod()
+    op_nodes = [{
+        "operation_id": "op_1", "operation_family": "derive_consequence",
+        "operation_subtype": "elimination", "subtype_source": "",
+        "linked_equation_ids": ["eq_1"],
+    }]
+    report = mod._validate_export_references(
+        claims=[], equations=[], components=[],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": op_nodes, "edges": []},
+        component_operation_links=[{"component_id": "c", "operation_id": "op_1"}],
+    )
+    codes = {r["code"] for r in report["review_items"]}
+    assert "OPERATION_SUBTYPE_MISSING_PROVENANCE" in codes
+    assert report["publish_ready"] is False
+
+
+def test_unknown_operation_without_review_flags_is_review_item():
+    mod = _export_mod()
+    op_nodes = [{
+        "operation_id": "op_1", "operation_family": "unknown_specific_operation",
+        "review_required": False, "linked_equation_ids": ["eq_1"],
+    }]
+    report = mod._validate_export_references(
+        claims=[], equations=[], components=[],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": op_nodes, "edges": []},
+        component_operation_links=[{"component_id": "c", "operation_id": "op_1"}],
+    )
+    codes = {r["code"] for r in report["review_items"]}
+    assert "UNKNOWN_OPERATION_NOT_REVIEWABLE" in codes
+
+
+def test_build_system_operations_export_from_system_level_chain():
+    chains = [
+        {"derivation_id": "d1", "chain_type": "equation_chain"},
+        {
+            "derivation_id": "system_derivation_0001",
+            "chain_type": "system_level",
+            "system_id": "SYS_0001",
+            "operation": "eliminate",
+            "operation_family": "derive_consequence",
+            "operation_subtype": "eliminate",
+            "subtype_source": "source_text",
+            "operation_ids": ["sys_001_step_1"],
+            "input_equation_ids": ["eq_1", "eq_2"],
+            "output_equation_ids": ["eq_3"],
+            "input_claim_ids": ["c1"],
+            "source_evidence_ids": ["ev1"],
+            "review_required": False,
+            "review_reasons": [],
+        },
+    ]
+    out = ea.build_system_operations_export(chains)
+    assert len(out) == 1
+    sys_op = out[0]
+    assert sys_op["system_id"] == "SYS_0001"
+    assert sys_op["system_family"] == "derive_consequence"
+    assert sys_op["equation_ids"] == ["eq_1", "eq_2", "eq_3"]
+    assert sys_op["derivation_ids"] == ["system_derivation_0001"]
+
+
+def test_system_operation_missing_source_refs_is_hard_error():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[], equations=[], components=[],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []},
+        component_operation_links=[],
+        system_operations=[{"system_id": "SYS_1", "system_family": "derive_consequence"}],
+    )
+    codes = {e["code"] for e in report["errors"]}
+    assert "SYSTEM_OPERATION_NO_SOURCE_REFS" in codes
+    assert report["exportable"] is False
+
+
+def test_system_operation_non_generic_family_warns():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[{"claim_id": "c1"}], equations=[], components=[],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []},
+        component_operation_links=[],
+        system_operations=[{
+            "system_id": "SYS_1", "system_family": "eliminate_second_order_bias",
+            "claim_ids": ["c1"],
+        }],
+    )
+    codes = {w["code"] for w in report["warnings"]}
+    assert "NON_GENERIC_SYSTEM_FAMILY" in codes
+
+
+def test_component_spanning_multiple_families_is_review_item():
+    # Issue #392: a component collapsing several generic operation families
+    # without a split recommendation is flagged for review.
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[], equations=[],
+        components=[{
+            "component_id": "cmp1",
+            "primary_operation": "define_relation",
+            "secondary_operations": ["derive_consequence", "evaluate_condition"],
+            "split_recommendation": {"required": False},
+        }],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []},
+        component_operation_links=[],
+    )
+    codes = {r["code"] for r in report["review_items"]}
+    assert "COMPONENT_MULTIPLE_RESPONSIBILITIES" in codes
+
+
+def test_component_with_split_recommendation_not_double_flagged():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[], equations=[],
+        components=[{
+            "component_id": "cmp1",
+            "primary_operation": "define_relation",
+            "secondary_operations": ["derive_consequence"],
+            "split_recommendation": {"required": True},
+        }],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []},
+        component_operation_links=[],
+    )
+    codes = {r["code"] for r in report["review_items"]}
+    assert "COMPONENT_MULTIPLE_RESPONSIBILITIES" not in codes

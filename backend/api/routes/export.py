@@ -23,6 +23,7 @@ from routes.export_artifacts import (
     build_derivation_chains_export,
     build_document_boundary,
     build_document_completeness,
+    build_system_operations_export,
     build_equation_candidates_export,
     build_equations_export,
     build_evidence_export,
@@ -62,6 +63,13 @@ def _ndjson_bytes(items: list[dict]) -> bytes:
 
 def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
+
+
+# Two-layer operation model (issues #393 / #394). A broad ``operation_family``
+# (always one of CORE_OPERATION_FAMILIES) plus an optional ``operation_subtype``
+# whose ``subtype_source`` identifies honest provenance. These are domain-neutral.
+_UNKNOWN_OPERATION_FAMILY = "unknown_specific_operation"
+_SUBTYPE_SOURCES = {"source_text", "equation_semantics", "cartridge", "llm", "unknown"}
 
 
 def _core_operation_families() -> set[str]:
@@ -1574,6 +1582,191 @@ def _build_completeness_report(completeness_reports: list[dict] | None) -> dict:
     }
 
 
+def _validate_system_operations(
+    system_operations: list[dict],
+    *,
+    core_families: set[str],
+    equation_ids: set[str],
+    claim_ids: set[str],
+    evidence_ids: set[str],
+    derivation_ids: set[str],
+    component_ids: set[str],
+    add,
+    warn,
+    review,
+) -> None:
+    """Validate system-level operation artifacts (issue #394).
+
+    A system operation bundles a *group* of equations / claims / derivations /
+    operations into one explainable artifact. It must keep honest source backing
+    (at least one equation / claim / evidence / derivation reference) and a
+    generic ``system_family`` from CORE_OPERATION_FAMILIES. Domain-specific
+    structure is carried only as an optional, provenance-tagged subtype.
+    """
+    for idx, sys_op in enumerate(system_operations or []):
+        if not isinstance(sys_op, dict):
+            continue
+        sys_id = str(sys_op.get("system_id") or "")
+        path = f"$.system_operations[{idx}]"
+        if not sys_id:
+            add(
+                "SYSTEM_OPERATION_MISSING_ID",
+                f"system operation at index {idx} has no system_id",
+                "graph/system_operations.json",
+                f"{path}.system_id",
+                "",
+            )
+        eq_refs = [str(v) for v in (sys_op.get("equation_ids") or []) if v]
+        claim_refs = [str(v) for v in (sys_op.get("claim_ids") or []) if v]
+        ev_refs = [str(v) for v in (sys_op.get("source_evidence_ids") or []) if v]
+        deriv_refs = [str(v) for v in (sys_op.get("derivation_ids") or []) if v]
+        if not (eq_refs or claim_refs or ev_refs or deriv_refs):
+            add(
+                "SYSTEM_OPERATION_NO_SOURCE_REFS",
+                f"system operation {sys_id!r} references no equation/claim/evidence/derivation",
+                "graph/system_operations.json",
+                path,
+                sys_id,
+            )
+        # Cross-artifact ID integrity for whatever refs are present.
+        for ref in eq_refs:
+            if equation_ids and ref not in equation_ids:
+                add("UNRESOLVED_EXPORT_REF", f"{path}.equation_ids references missing equation {ref!r}", "graph/system_operations.json", f"{path}.equation_ids", ref)
+        for ref in claim_refs:
+            if claim_ids and ref not in claim_ids:
+                add("UNRESOLVED_EXPORT_REF", f"{path}.claim_ids references missing claim {ref!r}", "graph/system_operations.json", f"{path}.claim_ids", ref)
+        for ref in ev_refs:
+            if evidence_ids and ref not in evidence_ids:
+                add("UNRESOLVED_EXPORT_REF", f"{path}.source_evidence_ids references missing evidence {ref!r}", "graph/system_operations.json", f"{path}.source_evidence_ids", ref)
+        for ref in deriv_refs:
+            if derivation_ids and ref not in derivation_ids:
+                add("UNRESOLVED_EXPORT_REF", f"{path}.derivation_ids references missing derivation {ref!r}", "graph/system_operations.json", f"{path}.derivation_ids", ref)
+        for ref in (str(v) for v in (sys_op.get("component_ids") or []) if v):
+            if component_ids and ref not in component_ids:
+                add("UNRESOLVED_EXPORT_REF", f"{path}.component_ids references missing component {ref!r}", "graph/system_operations.json", f"{path}.component_ids", ref)
+        # Generic family + provenance-tagged optional subtype (#394).
+        fam = str(sys_op.get("system_family") or "")
+        if core_families and fam and fam not in core_families:
+            warn(
+                "NON_GENERIC_SYSTEM_FAMILY",
+                f"system operation {sys_id!r} has a non-generic system_family {fam!r}",
+                "graph/system_operations.json",
+                f"{path}.system_family",
+                fam,
+            )
+        subtype = sys_op.get("system_subtype")
+        if subtype and str(subtype) != _UNKNOWN_OPERATION_FAMILY:
+            src = str(sys_op.get("subtype_source") or "")
+            if src not in _SUBTYPE_SOURCES or src in ("", "unknown"):
+                review(
+                    "SYSTEM_SUBTYPE_MISSING_PROVENANCE",
+                    f"system operation {sys_id!r} has system_subtype {subtype!r} but "
+                    f"subtype_source {src!r} is missing or not a known provenance",
+                    "graph/system_operations.json",
+                    f"{path}.subtype_source",
+                    sys_id,
+                )
+        # Unknown / uncertain system semantics must stay reviewable (#394).
+        if fam == _UNKNOWN_OPERATION_FAMILY or sys_op.get("review_required"):
+            if not (sys_op.get("review_reasons") or []):
+                review(
+                    "SYSTEM_OPERATION_REVIEW_WITHOUT_REASON",
+                    f"system operation {sys_id!r} requires review but lists no review_reasons",
+                    "graph/system_operations.json",
+                    f"{path}.review_reasons",
+                    sys_id,
+                )
+
+
+def _coverage_metrics(
+    *,
+    claims: list[dict],
+    equations: list[dict],
+    components: list[dict],
+    derivation_chains: list[dict],
+    course_info: dict | None,
+    operation_graph: dict,
+    component_operation_links: list[dict],
+) -> dict:
+    """Compute source-link coverage metrics for the export (issue #390).
+
+    Each metric is ``{"total": N, "covered": M}`` so a reviewer can see how much
+    of each artifact is actually backed / linked, independent of warnings.
+    """
+    def ratio(items, predicate) -> dict:
+        items = [i for i in (items or []) if isinstance(i, dict)]
+        total = len(items)
+        covered = sum(1 for i in items if predicate(i))
+        return {"total": total, "covered": covered}
+
+    def claim_has_source(c: dict) -> bool:
+        return bool(
+            c.get("source_evidence_ids")
+            or c.get("equation_ids")
+            or c.get("linked_equation_ids")
+            or c.get("derivation_ids")
+            or c.get("source_refs")
+        )
+
+    def component_has_evidence(c: dict) -> bool:
+        refs = c.get("evidence_refs") if isinstance(c.get("evidence_refs"), dict) else {}
+        return bool(
+            c.get("evidence_claims")
+            or c.get("linked_claim_ids")
+            or c.get("linked_equation_ids")
+            or refs.get("claim_ids")
+            or refs.get("evidence_ids")
+        )
+
+    def equation_has_location(e: dict) -> bool:
+        loc = e.get("source_location") if isinstance(e.get("source_location"), dict) else {}
+        return bool(loc.get("block_id") or loc.get("page") or e.get("source_evidence_ids"))
+
+    def derivation_has_io(c: dict) -> bool:
+        if c.get("input_equation_ids") and c.get("output_equation_ids"):
+            return True
+        for step in c.get("steps") or []:
+            if isinstance(step, dict) and step.get("input_equation_ids") and step.get("output_equation_ids"):
+                return True
+        return False
+
+    topics = (course_info or {}).get("topics") if isinstance(course_info, dict) else []
+    op_nodes = [n for n in operation_graph.get("nodes", []) or [] if isinstance(n, dict)]
+    linked_op_ids = {
+        str(l.get("operation_id") or "")
+        for l in (component_operation_links or [])
+        if isinstance(l, dict) and l.get("operation_id")
+    }
+    core_families = _core_operation_families()
+
+    return {
+        "claims_with_source_links": ratio(claims, claim_has_source),
+        "components_with_evidence_links": ratio(components, component_has_evidence),
+        "equations_with_source_locations": ratio(equations, equation_has_location),
+        "derivations_with_inputs_outputs": ratio(derivation_chains, derivation_has_io),
+        "topics_with_component_links": ratio(topics, lambda t: bool(t.get("linked_component_ids"))),
+        "operation_nodes_with_component_links": {
+            "total": len(op_nodes),
+            "covered": sum(1 for n in op_nodes if str(n.get("operation_id") or "") in linked_op_ids),
+        },
+        "operation_nodes_with_generic_family": {
+            "total": len(op_nodes),
+            "covered": sum(
+                1 for n in op_nodes
+                if str(n.get("operation_family") or "") in core_families
+            ) if core_families else 0,
+        },
+        "unknown_operations_requiring_review": {
+            "total": len(op_nodes),
+            "covered": sum(
+                1 for n in op_nodes
+                if str(n.get("operation_family") or "") == _UNKNOWN_OPERATION_FAMILY
+                and n.get("review_required")
+            ),
+        },
+    }
+
+
 def _validate_export_references(
     *,
     claims: list[dict],
@@ -1586,12 +1779,16 @@ def _validate_export_references(
     completeness_reports: list[dict] | None = None,
     operation_graph: dict | None = None,
     component_operation_links: list[dict] | None = None,
+    system_operations: list[dict] | None = None,
+    artifact_sources: dict | None = None,
 ) -> dict:
     errors: list[dict] = []
     warnings: list[dict] = []
+    review_items: list[dict] = []
     derivation_chains = derivation_chains or []
     operation_graph = operation_graph or {"nodes": [], "edges": []}
     component_operation_links = component_operation_links or []
+    system_operations = system_operations or []
     claim_ids = {str(c.get("claim_id")) for c in claims if c.get("claim_id")}
     component_ids = {str(c.get("component_id")) for c in components if c.get("component_id")}
     evidence_ids = {str(e.get("evidence_id")) for e in evidence_snippets if e.get("evidence_id")}
@@ -1604,6 +1801,9 @@ def _validate_export_references(
 
     def warn(code: str, message: str, artifact: str, path: str, ref_id: str) -> None:
         warnings.append({"code": code, "message": message, "artifact": artifact, "path": path, "ref_id": ref_id})
+
+    def review(code: str, message: str, artifact: str, path: str, ref_id: str) -> None:
+        review_items.append({"code": code, "message": message, "artifact": artifact, "path": path, "ref_id": ref_id})
 
     def check_refs(values: Any, known: set[str], artifact: str, path: str, target: str) -> None:
         for ref in values or []:
@@ -1655,6 +1855,30 @@ def _validate_export_references(
         for dep_idx, dep in enumerate(comp.get("dependencies") or []):
             if isinstance(dep, dict):
                 check_refs(dep.get("component_refs"), component_ids, "components/components.json", f"$.components[{idx}].dependencies[{dep_idx}].component_refs", "component")
+
+        # Component granularity / responsibility coverage (issue #392). A component
+        # spanning several distinct generic operation families without a split
+        # recommendation has likely collapsed multiple responsibilities (definition
+        # + model + derivation + ...) and must be reviewed (or split) before it is
+        # trusted as a single reusable unit. Domain-neutral: families only.
+        comp_id = str(comp.get("component_id") or "")
+        families = {
+            str(f) for f in (
+                [comp.get("primary_operation") or comp.get("operation")]
+                + list(comp.get("secondary_operations") or [])
+            )
+            if f and str(f) not in ("", _UNKNOWN_OPERATION_FAMILY)
+        }
+        split_rec = comp.get("split_recommendation") if isinstance(comp.get("split_recommendation"), dict) else {}
+        if len(families) > 1 and not split_rec.get("required"):
+            review(
+                "COMPONENT_MULTIPLE_RESPONSIBILITIES",
+                f"component {comp_id!r} spans multiple operation families {sorted(families)} "
+                "without a split recommendation; distinct responsibilities may be collapsed",
+                "components/components.json",
+                f"$.components[{idx}].secondary_operations",
+                comp_id,
+            )
 
     for idx, edge in enumerate(component_graph.get("edges", []) or []):
         if not isinstance(edge, dict):
@@ -1760,16 +1984,45 @@ def _validate_export_references(
         # Operation families must come from the stable, generic core set (never a
         # paper-specific core key, issue #398).
         core_families = _core_operation_families()
-        if core_families:
-            for idx, n in enumerate(op_nodes):
-                fam = str(n.get("operation_family") or "")
-                if fam and fam not in core_families:
-                    warn(
-                        "NON_GENERIC_OPERATION_FAMILY",
-                        f"operation node {n.get('operation_id')!r} has a non-generic operation_family {fam!r}",
+        for idx, n in enumerate(op_nodes):
+            op_id = str(n.get("operation_id") or "")
+            fam = str(n.get("operation_family") or "")
+            if core_families and fam and fam not in core_families:
+                warn(
+                    "NON_GENERIC_OPERATION_FAMILY",
+                    f"operation node {op_id!r} has a non-generic operation_family {fam!r}",
+                    "graph/operation_graph.json",
+                    f"$.nodes[{idx}].operation_family",
+                    fam,
+                )
+            # Two-layer operation model (issues #393 / #390): an operation_subtype
+            # is optional metadata, but when present it must carry honest
+            # provenance. A subtype without a valid subtype_source is a review item
+            # (fabricated / unverifiable subtype provenance must not pass silently).
+            subtype = n.get("operation_subtype")
+            if subtype and str(subtype) != _UNKNOWN_OPERATION_FAMILY:
+                src = str(n.get("subtype_source") or "")
+                if src not in _SUBTYPE_SOURCES or src in ("", "unknown"):
+                    review(
+                        "OPERATION_SUBTYPE_MISSING_PROVENANCE",
+                        f"operation node {op_id!r} has operation_subtype {subtype!r} "
+                        f"but subtype_source {src!r} is missing or not a known provenance",
                         "graph/operation_graph.json",
-                        f"$.nodes[{idx}].operation_family",
-                        fam,
+                        f"$.nodes[{idx}].subtype_source",
+                        op_id,
+                    )
+            # Unknown operation families must remain reviewable: they may be kept
+            # (information is never dropped) but only with review_required +
+            # review_reasons, never silently passed as source-backed (#393).
+            if fam == _UNKNOWN_OPERATION_FAMILY:
+                if not n.get("review_required") or not (n.get("review_reasons") or []):
+                    review(
+                        "UNKNOWN_OPERATION_NOT_REVIEWABLE",
+                        f"operation node {op_id!r} has unknown operation_family but is not "
+                        "marked review_required with review_reasons",
+                        "graph/operation_graph.json",
+                        f"$.nodes[{idx}].review_required",
+                        op_id,
                     )
 
     # Component coverage / granularity (issue #392): a theory-heavy paper with
@@ -1924,16 +2177,69 @@ def _validate_export_references(
                 doc_id,
             )
 
-    publish_ready = not errors and not warnings and completeness["all_documents_complete"]
+    # System-level operation artifacts (issue #394): a first-class artifact that
+    # bundles several equations / claims / derivations / operations must stay
+    # source-backed and traceable. Domain-neutral: families are validated against
+    # CORE_OPERATION_FAMILIES, never a paper-specific taxonomy.
+    _validate_system_operations(
+        system_operations,
+        core_families=_core_operation_families(),
+        equation_ids=equation_ids,
+        claim_ids=claim_ids,
+        evidence_ids=evidence_ids,
+        derivation_ids=derivation_ids,
+        component_ids=component_ids,
+        add=add,
+        warn=warn,
+        review=review,
+    )
+
+    # Coverage metrics (issue #390): explain *why* an export is or is not
+    # publish-ready by reporting how much of each artifact is source-linked.
+    coverage = _coverage_metrics(
+        claims=claims,
+        equations=equations,
+        components=components,
+        derivation_chains=derivation_chains,
+        course_info=course_info,
+        operation_graph=operation_graph,
+        component_operation_links=component_operation_links,
+    )
+
+    # publish_ready is the strict gate: no hard errors, no quality warnings, no
+    # outstanding review items (#390), and a complete ingest. exportable is the
+    # looser gate (no hard errors) so review bundles can still be downloaded.
+    publish_ready = (
+        not errors
+        and not warnings
+        and not review_items
+        and completeness["all_documents_complete"]
+    )
+    if errors:
+        status = "failed_validation"
+    elif review_items:
+        status = "needs_review"
+    elif warnings or not completeness["all_documents_complete"]:
+        status = "passed_with_warnings"
+    else:
+        status = "passed"
 
     return {
-        "status": "failed_validation" if errors else "passed",
+        "status": status,
         "exportable": not errors,
         "publish_ready": publish_ready,
         "errors": errors,
         "warnings": warnings,
+        "review_items": review_items,
         "completeness": completeness,
-        "summary": {"error_count": len(errors), "warning_count": len(warnings), "unresolved_reference_count": len(errors)},
+        "coverage": coverage,
+        "artifact_sources": artifact_sources or {},
+        "summary": {
+            "error_count": len(errors),
+            "warning_count": len(warnings),
+            "review_required_count": len(review_items),
+            "unresolved_reference_count": len(errors),
+        },
     }
 
 
@@ -1955,6 +2261,7 @@ def _build_manifest(
     document_boundaries: list[dict] | None = None,
     operation_graph: dict | None = None,
     component_operation_links: list[dict] | None = None,
+    system_operations: list[dict] | None = None,
     export_source: dict | None = None,
 ) -> dict:
     equations = equations or []
@@ -1963,6 +2270,7 @@ def _build_manifest(
     document_boundaries = document_boundaries or []
     operation_graph = operation_graph or {"nodes": [], "edges": []}
     component_operation_links = component_operation_links or []
+    system_operations = system_operations or []
     return {
         "export_schema_version": "0.2.0",
         "exported_at": _now_iso(),
@@ -1991,6 +2299,7 @@ def _build_manifest(
             "component_graph": "graph/component_graph.json",
             "operation_graph": "graph/operation_graph.json",
             "component_operation_links": "graph/component_operation_links.json",
+            "system_operations": "graph/system_operations.json",
             "evidence_snippets": "evidence/evidence_snippets.json",
             "equations": "equations/equations.json",
             "equation_candidates": "equations/equation_candidates.json",
@@ -2006,6 +2315,7 @@ def _build_manifest(
             "operation_nodes": len(operation_graph.get("nodes", [])),
             "operation_edges": len(operation_graph.get("edges", [])),
             "component_operation_links": len(component_operation_links),
+            "system_operations": len(system_operations),
             "evidence_snippets": len(evidence_snippets),
             "equations": len(equations),
             "equation_candidates": len(equation_candidates),
@@ -2031,6 +2341,7 @@ This ZIP contains machine-readable outputs generated by episteme-graph.
 - `graph/component_graph.json`: reusable-component dependency graph. Nodes are component IDs only (issue #387); operation-level nodes are kept out.
 - `graph/operation_graph.json`: lower-level operation/equation-operation graph (nodes are operation IDs). Related to but distinct from the component graph.
 - `graph/component_operation_links.json`: optional mapping from component IDs to operation IDs (`links[].component_id` / `links[].operation_id`).
+- `graph/system_operations.json`: first-class system-level operation artifacts. Each bundles a group of equations/claims/derivations into one explainable operation with a generic `system_family` (+ optional provenance-tagged `system_subtype`). Domain-neutral; unknown semantics stay `review_required`.
 - `evidence/evidence_snippets.json`: source-backed Evidence (PDF spans). `evidence_text` is PDF-derived text; LLM commentary is kept in `analysis_note` / `review_note`. `extraction_source`, `extraction_status`, `needs_review`, `review_reason` audit the provenance.
 - `equations/equations.json`: first-class equation registry. Each entry has `latex`, `plain_text`, `source_location`, `equation_type`, `defined_symbols`, `used_symbols`, `input_equation_ids`, `output_equation_ids`, `extraction_source`, `extraction_status`, `needs_math_review`, `review_reason`, `candidate_trace_ids`.
 - `equations/equation_candidates.json`: audit trail for equation candidate detection. Each entry records `raw_text`, `source_location`, `detection_method`, `matched_label`, `acceptance_status`, `accepted_equation_id`, `rejection_reason`.
@@ -2105,6 +2416,7 @@ def _build_zip(
     export_validation: dict | None = None,
     operation_graph: dict | None = None,
     component_operation_links: list[dict] | None = None,
+    system_operations: list[dict] | None = None,
 ) -> bytes:
     equations = equations or []
     equation_candidates = equation_candidates or []
@@ -2112,6 +2424,7 @@ def _build_zip(
     document_boundaries = document_boundaries or []
     operation_graph = operation_graph or {"nodes": [], "edges": []}
     component_operation_links = component_operation_links or []
+    system_operations = system_operations or []
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("README.md", _README_TEMPLATE)
@@ -2137,6 +2450,13 @@ def _build_zip(
         zf.writestr(
             "graph/component_operation_links.json",
             _json_bytes({"schema_version": "0.1.0", "links": component_operation_links}),
+        )
+        # System-level operation artifacts (issue #394): first-class artifacts that
+        # bundle a group of equations/claims/derivations into one explainable
+        # operation with the generic two-layer (family + optional subtype) model.
+        zf.writestr(
+            "graph/system_operations.json",
+            _json_bytes({"schema_version": "0.1.0", "system_operations": system_operations}),
         )
         zf.writestr("evidence/evidence_snippets.json", _json_bytes({
             "evidence_schema_version": "0.2.0",
@@ -2260,6 +2580,7 @@ def export_course_bundle(
             derivation_chains=derivation_chains,
             equations=equations,
         )
+        system_operations = build_system_operations_export(derivation_chains)
         export_validation = _validate_export_references(
             claims=claims,
             equations=equations,
@@ -2271,6 +2592,8 @@ def export_course_bundle(
             completeness_reports=completeness_reports,
             operation_graph=operation_graph,
             component_operation_links=component_operation_links,
+            system_operations=system_operations,
+            artifact_sources=export_source,
         )
 
         docs = _load_course_documents(session, course_id, document_ids)
@@ -2300,6 +2623,7 @@ def export_course_bundle(
             document_boundaries=document_boundaries,
             operation_graph=operation_graph,
             component_operation_links=component_operation_links,
+            system_operations=system_operations,
             export_source=export_source,
             options=options,
         )
@@ -2318,6 +2642,7 @@ def export_course_bundle(
             document_boundaries=document_boundaries,
             operation_graph=operation_graph,
             component_operation_links=component_operation_links,
+            system_operations=system_operations,
             include_ndjson=req.include_ndjson,
             include_debug=req.include_debug_data,
             debug_data={
@@ -2413,6 +2738,7 @@ def export_document_bundle(
             derivation_chains=derivation_chains,
             equations=equations,
         )
+        system_operations = build_system_operations_export(derivation_chains)
         export_validation = _validate_export_references(
             claims=claims,
             equations=equations,
@@ -2424,6 +2750,8 @@ def export_document_bundle(
             completeness_reports=completeness_reports,
             operation_graph=operation_graph,
             component_operation_links=component_operation_links,
+            system_operations=system_operations,
+            artifact_sources=export_source,
         )
 
         eid = _export_id("document", document_id)
@@ -2451,6 +2779,7 @@ def export_document_bundle(
             document_boundaries=document_boundaries,
             operation_graph=operation_graph,
             component_operation_links=component_operation_links,
+            system_operations=system_operations,
             export_source=export_source,
             options=options,
         )
@@ -2469,6 +2798,7 @@ def export_document_bundle(
             document_boundaries=document_boundaries,
             operation_graph=operation_graph,
             component_operation_links=component_operation_links,
+            system_operations=system_operations,
             include_ndjson=req.include_ndjson,
             include_debug=req.include_debug_data,
             debug_data={
