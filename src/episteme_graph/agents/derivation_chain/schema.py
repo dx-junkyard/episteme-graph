@@ -94,6 +94,16 @@ class DerivationChainRecord:
     # *group* of equations (a solved/eliminated/constrained system) rather than a
     # simple adjacent equation-to-equation chain. Domain-neutral.
     operation: str = ""
+    # First-class system-level operation artifact reference (issue #394). A
+    # system-level derivation IS a system operation; ``system_id`` makes it a
+    # referenceable artifact and ``operation_family`` / ``operation_subtype`` /
+    # ``subtype_source`` give it the generic two-layer operation model so it can
+    # be exported to operation/system graphs without paper-specific assumptions.
+    system_id: str = ""
+    operation_ids: list[str] = field(default_factory=list)
+    operation_family: str = ""
+    operation_subtype: str | None = None
+    subtype_source: str = "unknown"
     input_equation_ids: list[str] = field(default_factory=list)
     output_equation_ids: list[str] = field(default_factory=list)
     intermediate_equation_ids: list[str] = field(default_factory=list)

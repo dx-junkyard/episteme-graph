@@ -1493,6 +1493,72 @@ def _graph_node_is_component(node: dict, known_component_ids: set[str]) -> bool:
     return layer in _COMPONENT_GRAPH_LAYERS
 
 
+def build_system_operations_export(derivation_chains: list[dict] | None) -> list[dict]:
+    """Build first-class system-operation artifacts from derivation chains (#394).
+
+    A ``chain_type="system_level"`` derivation bundles a *group* of equations /
+    claims / derivations into one explainable operation. This surfaces them as a
+    standalone, source-backed artifact (``graph/system_operations.json``) with the
+    generic two-layer operation model (``system_family`` + optional
+    ``system_subtype`` + ``subtype_source``). Domain-neutral: no paper-specific
+    taxonomy is assumed, and unknown semantics stay reviewable.
+    """
+    out: list[dict] = []
+    for chain in derivation_chains or []:
+        if not isinstance(chain, dict) or str(chain.get("chain_type") or "") != "system_level":
+            continue
+        derivation_id = str(chain.get("derivation_id") or "")
+        equation_ids = _ordered_unique_str(
+            list(chain.get("input_equation_ids") or [])
+            + list(chain.get("intermediate_equation_ids") or [])
+            + list(chain.get("output_equation_ids") or [])
+        )
+        claim_ids = _ordered_unique_str(
+            list(chain.get("input_claim_ids") or []) + list(chain.get("output_claim_ids") or [])
+        )
+        family = str(chain.get("operation_family") or "")
+        if not family:
+            family = _classify_operation_family(chain.get("operation") or "")["operation_family"]
+        out.append({
+            "system_id": str(chain.get("system_id") or derivation_id or ""),
+            "system_family": family,
+            "system_subtype": chain.get("operation_subtype"),
+            "subtype_source": chain.get("subtype_source") or "unknown",
+            "operation": str(chain.get("operation") or ""),
+            "operation_ids": [str(v) for v in (chain.get("operation_ids") or []) if v],
+            "equation_ids": equation_ids,
+            "claim_ids": claim_ids,
+            "derivation_ids": [derivation_id] if derivation_id else [],
+            "component_ids": [str(v) for v in (chain.get("linked_component_ids") or []) if v],
+            "source_evidence_ids": [str(v) for v in (chain.get("source_evidence_ids") or []) if v],
+            "semantic_roles": {
+                "input_equation_ids": [str(v) for v in (chain.get("input_equation_ids") or []) if v],
+                "intermediate_equation_ids": [str(v) for v in (chain.get("intermediate_equation_ids") or []) if v],
+                "output_equation_ids": [str(v) for v in (chain.get("output_equation_ids") or []) if v],
+                "supporting_equation_ids": [],
+            },
+            "symbol_roles": {
+                "transformed_symbols": [str(v) for v in (chain.get("transformed_symbols") or []) if v],
+                "eliminated_symbols": [str(v) for v in (chain.get("eliminated_symbols") or []) if v],
+                "retained_symbols": [str(v) for v in (chain.get("retained_symbols") or []) if v],
+            },
+            "review_required": bool(chain.get("review_required")),
+            "review_reasons": [str(v) for v in (chain.get("review_reasons") or []) if v],
+        })
+    return out
+
+
+def _ordered_unique_str(values) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for v in values or []:
+        s = str(v)
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
 def build_component_graph_export(
     graph_artifact: Any,
     *,
@@ -1571,7 +1637,12 @@ def build_component_graph_export(
             operation_family_value = existing_family or classification["operation_family"]
             if existing_family:
                 operation_subtype_value = n.get("operation_subtype")
-                subtype_source_value = n.get("subtype_source") or "cartridge"
+                # Provenance must be honest (issues #390 / #393): an existing
+                # operation_family may come from an agent/core classifier or a
+                # cartridge. When the node did not declare subtype_source we must
+                # NOT assume "cartridge" — that fabricates provenance. Leave it
+                # "unknown" so export validation can flag uncertain subtypes.
+                subtype_source_value = n.get("subtype_source") or "unknown"
             else:
                 operation_subtype_value = (
                     n.get("operation_subtype")

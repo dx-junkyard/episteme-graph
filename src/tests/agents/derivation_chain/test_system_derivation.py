@@ -98,6 +98,28 @@ def test_detects_elimination_system_over_equation_group():
     assert sys.source_evidence_ids  # source-backed by evidence
 
 
+def test_system_derivation_exposes_generic_operation_model():
+    # Issue #394: a system-level derivation is a first-class system operation
+    # with a generic two-layer model (family + optional provenance-tagged subtype).
+    eqs = [
+        _make_eq("eq_1", role="relation", defined=["S3"], used=["b1", "b2"],
+                 summary="linearized skewness bias dependence", evidence=["ev_1"]),
+        _make_eq("eq_2", role="relation", defined=["K4"], used=["b1", "b2"],
+                 summary="linearized kurtosis bias dependence", evidence=["ev_2"]),
+        _make_eq("eq_3", role="result", defined=["S3"], used=["b1"],
+                 summary="eliminate b2 to derive consistency relation", evidence=["ev_3"]),
+    ]
+    sys = detect_system_level_derivations(_result(eqs))[0]
+    from episteme_graph.agents.theory_operations import CORE_OPERATION_FAMILIES
+
+    assert sys.system_id.startswith("SYS_")
+    assert sys.operation_family in CORE_OPERATION_FAMILIES
+    # The specific verb is kept only as an optional source-backed subtype.
+    assert sys.operation_subtype == sys.operation
+    assert sys.subtype_source == "source_text"
+    assert sys.operation_ids  # references its own operation step id
+
+
 def test_system_derivation_without_result_is_review_required():
     eqs = [
         _make_eq("eq_1", role="relation", used=["a", "b"]),

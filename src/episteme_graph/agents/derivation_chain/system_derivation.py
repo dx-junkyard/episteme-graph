@@ -21,6 +21,7 @@ from episteme_graph.agents.equation_semantics.schema import (
     EquationRecord,
     EquationSemanticsResult,
 )
+from episteme_graph.agents.theory_operations import classify_operation
 
 from .schema import DerivationChainRecord, DerivationStep
 
@@ -188,6 +189,14 @@ def detect_system_level_derivations(
         transformed = sorted(shared_symbols)
 
         operation = _operation_for_group(members, result)
+        # Generic two-layer operation model (issue #394): map the domain-neutral
+        # grouped operation verb to a broad CORE_OPERATION_FAMILIES family. The
+        # specific verb (solve / eliminate / constrain / ...) is kept only as an
+        # optional source-backed subtype, never as the core family/grouping key.
+        classification = classify_operation(operation)
+        operation_family = classification.operation_family
+        operation_subtype = operation if operation else classification.operation_subtype
+        subtype_source = "source_text" if operation else classification.subtype_source
 
         input_equation_ids = [m.equation_id for m in input_members] or member_ids
         output_equation_ids = [result.equation_id] if result is not None else []
@@ -220,8 +229,13 @@ def detect_system_level_derivations(
             review_reasons.append("no_result_equation_identified")
         if not evidence_ids:
             review_reasons.append("system_derivation_not_source_backed")
+        # Unknown operation semantics must stay reviewable (issue #394): never
+        # drop the group, but flag it for review with an explicit reason.
+        for reason in classification.review_reasons:
+            if reason not in review_reasons:
+                review_reasons.append(reason)
 
-        review_required = bool(review_reasons)
+        review_required = bool(review_reasons) or classification.review_required
 
         step = DerivationStep(
             step_id=f"sys_{index:03d}_step_1",
@@ -250,6 +264,11 @@ def detect_system_level_derivations(
             ),
             chain_type="system_level",
             operation=operation,
+            system_id=f"SYS_{index:04d}",
+            operation_ids=[step.step_id],
+            operation_family=operation_family,
+            operation_subtype=operation_subtype,
+            subtype_source=subtype_source,
             input_equation_ids=input_equation_ids,
             output_equation_ids=output_equation_ids,
             intermediate_equation_ids=intermediate_equation_ids,

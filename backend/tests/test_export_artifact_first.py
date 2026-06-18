@@ -408,3 +408,499 @@ def test_unknown_operation_node_propagates_review_reasons():
     assert op["operation_family"] == "unknown_specific_operation"
     assert op["review_required"] is True
     assert "operation_family_unrecognized" in op["review_reasons"]
+
+
+# ---------------------------------------------------------------------------
+# #390 / #393 / #394: review items, coverage, system operations, two-layer model.
+# ---------------------------------------------------------------------------
+
+
+def test_validation_reports_review_items_and_coverage_and_artifact_sources():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[{"claim_id": "c1", "source_evidence_ids": ["ev1"]}, {"claim_id": "c2"}],
+        equations=[{"equation_id": "eq1", "source_location": {"block_id": "b1"}}],
+        components=[{"component_id": "cmp1", "evidence_claims": ["c1"]}],
+        component_graph={"nodes": [], "edges": []},
+        course_info={"topics": [{"title": "T", "linked_component_ids": ["cmp1"]}]},
+        evidence_snippets=[{"evidence_id": "ev1"}],
+        operation_graph={"nodes": [], "edges": []},
+        component_operation_links=[],
+        artifact_sources={"export_source_policy": "artifact_first"},
+    )
+    assert "review_items" in report
+    cov = report["coverage"]
+    assert cov["claims_with_source_links"] == {"total": 2, "covered": 1}
+    assert cov["equations_with_source_locations"] == {"total": 1, "covered": 1}
+    assert cov["components_with_evidence_links"]["covered"] == 1
+    assert cov["topics_with_component_links"] == {"total": 1, "covered": 1}
+    assert report["artifact_sources"]["export_source_policy"] == "artifact_first"
+    assert report["summary"]["review_required_count"] == 0
+
+
+def test_operation_subtype_without_provenance_is_review_item():
+    mod = _export_mod()
+    op_nodes = [{
+        "operation_id": "op_1", "operation_family": "derive_consequence",
+        "operation_subtype": "elimination", "subtype_source": "",
+        "linked_equation_ids": ["eq_1"],
+    }]
+    report = mod._validate_export_references(
+        claims=[], equations=[], components=[],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": op_nodes, "edges": []},
+        component_operation_links=[{"component_id": "c", "operation_id": "op_1"}],
+    )
+    codes = {r["code"] for r in report["review_items"]}
+    assert "OPERATION_SUBTYPE_MISSING_PROVENANCE" in codes
+    assert report["publish_ready"] is False
+
+
+def test_unknown_operation_without_review_flags_is_review_item():
+    mod = _export_mod()
+    op_nodes = [{
+        "operation_id": "op_1", "operation_family": "unknown_specific_operation",
+        "review_required": False, "linked_equation_ids": ["eq_1"],
+    }]
+    report = mod._validate_export_references(
+        claims=[], equations=[], components=[],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": op_nodes, "edges": []},
+        component_operation_links=[{"component_id": "c", "operation_id": "op_1"}],
+    )
+    codes = {r["code"] for r in report["review_items"]}
+    assert "UNKNOWN_OPERATION_NOT_REVIEWABLE" in codes
+
+
+def test_build_system_operations_export_from_system_level_chain():
+    chains = [
+        {"derivation_id": "d1", "chain_type": "equation_chain"},
+        {
+            "derivation_id": "system_derivation_0001",
+            "chain_type": "system_level",
+            "system_id": "SYS_0001",
+            "operation": "eliminate",
+            "operation_family": "derive_consequence",
+            "operation_subtype": "eliminate",
+            "subtype_source": "source_text",
+            "operation_ids": ["sys_001_step_1"],
+            "input_equation_ids": ["eq_1", "eq_2"],
+            "output_equation_ids": ["eq_3"],
+            "input_claim_ids": ["c1"],
+            "source_evidence_ids": ["ev1"],
+            "review_required": False,
+            "review_reasons": [],
+        },
+    ]
+    out = ea.build_system_operations_export(chains)
+    assert len(out) == 1
+    sys_op = out[0]
+    assert sys_op["system_id"] == "SYS_0001"
+    assert sys_op["system_family"] == "derive_consequence"
+    assert sys_op["equation_ids"] == ["eq_1", "eq_2", "eq_3"]
+    assert sys_op["derivation_ids"] == ["system_derivation_0001"]
+
+
+def test_system_operation_missing_source_refs_is_hard_error():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[], equations=[], components=[],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []},
+        component_operation_links=[],
+        system_operations=[{"system_id": "SYS_1", "system_family": "derive_consequence"}],
+    )
+    codes = {e["code"] for e in report["errors"]}
+    assert "SYSTEM_OPERATION_NO_SOURCE_REFS" in codes
+    assert report["exportable"] is False
+
+
+def test_system_operation_non_generic_family_warns():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[{"claim_id": "c1"}], equations=[], components=[],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []},
+        component_operation_links=[],
+        system_operations=[{
+            "system_id": "SYS_1", "system_family": "eliminate_second_order_bias",
+            "claim_ids": ["c1"],
+        }],
+    )
+    codes = {w["code"] for w in report["warnings"]}
+    assert "NON_GENERIC_SYSTEM_FAMILY" in codes
+
+
+def test_component_spanning_multiple_families_is_review_item():
+    # Issue #392: a component collapsing several generic operation families
+    # without a split recommendation is flagged for review.
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[], equations=[],
+        components=[{
+            "component_id": "cmp1",
+            "primary_operation": "define_relation",
+            "secondary_operations": ["derive_consequence", "evaluate_condition"],
+            "split_recommendation": {"required": False},
+        }],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []},
+        component_operation_links=[],
+    )
+    codes = {r["code"] for r in report["review_items"]}
+    assert "COMPONENT_MULTIPLE_RESPONSIBILITIES" in codes
+
+
+def test_component_with_split_recommendation_not_double_flagged():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[], equations=[],
+        components=[{
+            "component_id": "cmp1",
+            "primary_operation": "define_relation",
+            "secondary_operations": ["derive_consequence"],
+            "split_recommendation": {"required": True},
+        }],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []},
+        component_operation_links=[],
+    )
+    codes = {r["code"] for r in report["review_items"]}
+    assert "COMPONENT_MULTIPLE_RESPONSIBILITIES" not in codes
+
+
+# ---------------------------------------------------------------------------
+# Review follow-up (PR #399): provenance honesty, ghost nodes, partial graph
+# fallback, and system-operation ref integrity with empty target sets.
+# ---------------------------------------------------------------------------
+
+
+def test_existing_family_without_subtype_source_is_not_fabricated_as_cartridge():
+    # An operation_family supplied by an agent/core classifier (not a cartridge)
+    # must not have its subtype_source fabricated as "cartridge" (#390/#393).
+    artifact = {
+        "graph_schema_version": "0.1.0",
+        "nodes": [
+            {"component_id": "comp_1", "component_type": "TheoryOperationNode", "graph_layer": "main"},
+            {"component_id": "op_1", "component_type": "EquationOperationNode",
+             "graph_layer": "equation_detail", "parent_component_id": "comp_1",
+             "operation": "derive", "operation_family": "derive_consequence",
+             "operation_subtype": "elimination", "linked_equation_ids": ["eq_1"]},
+        ],
+        "edges": [],
+    }
+    out = ea.build_component_graph_export(artifact, document_id="doc_1", known_component_ids={"comp_1"})
+    op = out["operation_graph"]["nodes"][0]
+    assert op["operation_family"] == "derive_consequence"
+    assert op["subtype_source"] == "unknown"
+
+
+def test_ghost_component_graph_node_is_hard_error():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[], equations=[],
+        components=[{"component_id": "cmp_real"}],
+        component_graph={"nodes": [{"node_id": "cmp_real"}, {"node_id": "ghost"}], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []},
+        component_operation_links=[],
+    )
+    codes = {e["code"] for e in report["errors"]}
+    assert "COMPONENT_GRAPH_NODE_NOT_A_COMPONENT" in codes
+    assert report["exportable"] is False
+
+
+def test_partial_graph_artifact_records_per_document_fallback():
+    mod = _export_mod()
+    fallback_sources: list = []
+    artifacts_by_doc = {
+        "doc_a": {"component_graph": {"nodes": [
+            {"component_id": "cmp_a", "graph_layer": "main", "component_type": "TheoryOperationNode"}
+        ], "edges": []}},
+        "doc_b": {},  # no component_graph artifact
+    }
+    mod._resolve_artifact_first_graph(
+        artifacts_by_doc,
+        ["doc_a", "doc_b"],
+        components=[{"component_id": "cmp_a"}],
+        db_component_graph={"nodes": [], "edges": []},
+        fallback_sources=fallback_sources,
+    )
+    fb = [f for f in fallback_sources if f["artifact"] == "component_graph" and f["document_id"] == "doc_b"]
+    assert fb, "missing per-document component_graph fallback record"
+
+
+def test_system_operation_ref_unresolved_even_when_equation_set_empty():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[], equations=[], components=[],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []},
+        component_operation_links=[],
+        system_operations=[{
+            "system_id": "SYS_1", "system_family": "derive_consequence",
+            "equation_ids": ["eq_missing"],
+        }],
+    )
+    codes = {e["code"] for e in report["errors"]}
+    assert "UNRESOLVED_EXPORT_REF" in codes
+    assert report["exportable"] is False
+
+
+# ---------------------------------------------------------------------------
+# Review follow-up #2 (PR #399): partial fallback merges real DB graph data,
+# fallback usage warns, ghost nodes are caught even with no components.
+# ---------------------------------------------------------------------------
+
+
+def test_partial_graph_fallback_merges_db_graph_data():
+    mod = _export_mod()
+    fallback_sources: list = []
+    artifacts_by_doc = {
+        "doc_a": {"component_graph": {"nodes": [
+            {"component_id": "cmp_a", "graph_layer": "main", "component_type": "TheoryOperationNode"}
+        ], "edges": []}},
+        "doc_b": {},  # no artifact -> must fall back to DB graph and merge it
+    }
+    db_graphs = {
+        "doc_b": {"nodes": [
+            {"component_id": "cmp_b", "graph_layer": "main", "component_type": "TheoryOperationNode"}
+        ], "edges": []},
+    }
+    bundle = mod._resolve_artifact_first_graph(
+        artifacts_by_doc,
+        ["doc_a", "doc_b"],
+        components=[{"component_id": "cmp_a"}, {"component_id": "cmp_b"}],
+        db_component_graph={"nodes": [], "edges": []},
+        fallback_sources=fallback_sources,
+        load_db_graph=lambda d: db_graphs.get(d, {"nodes": [], "edges": []}),
+    )
+    node_ids = {n["node_id"] for n in bundle["component_graph"]["nodes"]}
+    assert node_ids == {"cmp_a", "cmp_b"}  # doc_b's DB graph was actually merged
+    assert any(f["document_id"] == "doc_b" for f in fallback_sources)
+
+
+def test_fallback_used_emits_warning_and_blocks_publish_ready():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[{"claim_id": "c1", "source_evidence_ids": ["ev1"]}],
+        equations=[], components=[],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[{"evidence_id": "ev1"}],
+        operation_graph={"nodes": [], "edges": []},
+        component_operation_links=[],
+        artifact_sources={
+            "fallback_used": True,
+            "fallback_sources": [{"artifact": "component_graph", "document_id": "doc_b"}],
+        },
+    )
+    codes = {w["code"] for w in report["warnings"]}
+    assert "FALLBACK_DATA_USED" in codes
+    assert report["publish_ready"] is False
+
+
+def test_ghost_node_is_hard_error_even_with_no_components():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[], equations=[], components=[],
+        component_graph={"nodes": [{"node_id": "ghost"}], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []},
+        component_operation_links=[],
+    )
+    codes = {e["code"] for e in report["errors"]}
+    assert "COMPONENT_GRAPH_NODE_NOT_A_COMPONENT" in codes
+    assert report["exportable"] is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #400: complete-fallback merges every DB graph; full claim/component
+# cross-ref validation; empty component_operation_link endpoints error.
+# ---------------------------------------------------------------------------
+
+
+def test_complete_fallback_merges_every_document_db_graph():
+    mod = _export_mod()
+    fallback_sources: list = []
+    artifacts_by_doc = {"doc_a": {}, "doc_b": {}}  # no current-run graph artifacts
+    db_graphs = {
+        "doc_a": {"nodes": [
+            {"component_id": "ca", "graph_layer": "main", "component_type": "TheoryOperationNode"}
+        ], "edges": []},
+        "doc_b": {"nodes": [
+            {"component_id": "cb", "graph_layer": "main", "component_type": "TheoryOperationNode"}
+        ], "edges": []},
+    }
+    bundle = mod._resolve_artifact_first_graph(
+        artifacts_by_doc,
+        ["doc_a", "doc_b"],
+        components=[{"component_id": "ca"}, {"component_id": "cb"}],
+        db_component_graph=db_graphs["doc_a"],  # course-wide DB returns only one
+        fallback_sources=fallback_sources,
+        load_db_graph=lambda d: db_graphs.get(d, {"nodes": [], "edges": []}),
+    )
+    node_ids = {n["node_id"] for n in bundle["component_graph"]["nodes"]}
+    assert node_ids == {"ca", "cb"}  # both documents' DB graphs exported, not just one
+    fb_docs = {f["document_id"] for f in fallback_sources if f["artifact"] == "component_graph"}
+    assert fb_docs == {"doc_a", "doc_b"}
+
+
+def test_claim_with_only_missing_refs_is_hard_error():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[{
+            "claim_id": "c1",
+            "source_evidence_ids": ["ev_missing"],
+            "equation_ids": ["eq_missing"],
+            "derivation_ids": ["d_missing"],
+            "linked_component_ids": ["cmp_missing"],
+        }],
+        equations=[{"equation_id": "eq_real"}],
+        components=[{"component_id": "cmp_real"}],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None,
+        evidence_snippets=[{"evidence_id": "ev_real"}],
+        derivation_chains=[{"derivation_id": "d_real", "steps": [{"input_equation_ids": ["eq_real"], "output_equation_ids": ["eq_real"]}]}],
+        operation_graph={"nodes": [], "edges": []},
+        component_operation_links=[],
+    )
+    codes = {e["code"] for e in report["errors"]}
+    assert "UNRESOLVED_EXPORT_REF" in codes
+    assert report["exportable"] is False
+    assert report["publish_ready"] is False
+
+
+def test_component_with_missing_equation_and_evidence_refs_is_hard_error():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[], equations=[{"equation_id": "eq_real"}],
+        components=[{
+            "component_id": "cmp1",
+            "linked_equation_ids": ["eq_missing"],
+            "output_equation_ids": ["eq_missing2"],
+            "linked_evidence_ids": ["ev_missing"],
+            "linked_derivation_ids": ["d_missing"],
+            "evidence_refs": {"evidence_ids": ["ev_missing2"]},
+        }],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[{"evidence_id": "ev_real"}],
+        operation_graph={"nodes": [], "edges": []},
+        component_operation_links=[],
+    )
+    err_refs = {e["ref_id"] for e in report["errors"] if e["code"] == "UNRESOLVED_EXPORT_REF"}
+    err_paths = {e["path"] for e in report["errors"] if e["code"] == "UNRESOLVED_EXPORT_REF"}
+    # Equation refs (linked_equation_ids, output_equation_ids, evidence_refs.equation_ids)
+    # are aggregated under equation_refs via _component_equation_refs_export.
+    assert {"eq_missing", "eq_missing2"} <= err_refs
+    assert any("equation_refs" in p for p in err_paths)
+    assert any("linked_evidence_ids" in p for p in err_paths)
+    assert any("evidence_refs.evidence_ids" in p for p in err_paths)
+    assert any("linked_derivation_ids" in p for p in err_paths)
+    assert report["exportable"] is False
+
+
+def test_empty_component_operation_link_endpoint_is_hard_error():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[], equations=[], components=[],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []},
+        component_operation_links=[{"component_id": "", "operation_id": ""}],
+    )
+    codes = {e["code"] for e in report["errors"]}
+    assert "EMPTY_COMPONENT_OPERATION_LINK_ENDPOINT" in codes
+    assert report["exportable"] is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #400 follow-up: normalization must not hide dangling refs; nested
+# equation refs validated; system-operation operation_ids validated.
+# ---------------------------------------------------------------------------
+
+
+def test_normalization_does_not_hide_missing_component_refs():
+    # A component evidence_claim / dependency pointing at a missing claim/component
+    # must still be a hard error after _normalize_export_references runs (#400).
+    mod = _export_mod()
+    claims = [{"claim_id": "claim_real"}]
+    components = [{
+        "component_id": "cmp_real",
+        "evidence_claims": ["claim_missing"],
+        "dependencies": [{"component_refs": ["cmp_ghost"]}],
+    }]
+    component_graph = {"nodes": [{"node_id": "cmp_real"}], "edges": []}
+    mod._normalize_export_references(
+        claims=claims, equations=[], components=components,
+        component_graph=component_graph, course_info=None,
+    )
+    # Normalization preserved the unresolved refs instead of dropping them.
+    assert "claim_missing" in components[0]["evidence_claims"]
+    assert "cmp_ghost" in components[0]["dependencies"][0]["component_refs"]
+    report = mod._validate_export_references(
+        claims=claims, equations=[], components=components,
+        component_graph=component_graph, course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []}, component_operation_links=[],
+    )
+    assert any(e["code"] == "UNRESOLVED_EXPORT_REF" for e in report["errors"])
+    assert report["publish_ready"] is False
+
+
+def test_nested_claim_equation_and_inferred_refs_are_validated():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[{
+            "claim_id": "c1",
+            "equation": {"equation_ids": ["eq_nested_missing"]},
+            "inferred_equation_ids": ["eq_inferred_missing"],
+        }],
+        equations=[{"equation_id": "eq_real"}], components=[],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []}, component_operation_links=[],
+    )
+    err_refs = {e["ref_id"] for e in report["errors"] if e["code"] == "UNRESOLVED_EXPORT_REF"}
+    assert {"eq_nested_missing", "eq_inferred_missing"} <= err_refs
+    assert report["publish_ready"] is False
+
+
+def test_component_nested_equation_refs_are_validated():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[], equations=[{"equation_id": "eq_real"}],
+        components=[{
+            "component_id": "cmp1",
+            "evidence_refs": {"equation_ids": ["eq_refs_missing"]},
+            "inputs": [{"equation_ids": ["eq_input_missing"]}],
+        }],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []}, component_operation_links=[],
+    )
+    err_refs = {e["ref_id"] for e in report["errors"] if e["code"] == "UNRESOLVED_EXPORT_REF"}
+    assert {"eq_refs_missing", "eq_input_missing"} <= err_refs
+
+
+def test_system_operation_operation_ids_validated_against_operation_graph():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[{"claim_id": "c1"}], equations=[], components=[],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [{"operation_id": "op_real"}], "edges": []},
+        component_operation_links=[],
+        system_operations=[{
+            "system_id": "SYS_1", "system_family": "derive_consequence",
+            "claim_ids": ["c1"], "operation_ids": ["op_missing"],
+        }],
+    )
+    err = [e for e in report["errors"] if e["code"] == "UNRESOLVED_EXPORT_REF" and e["ref_id"] == "op_missing"]
+    assert err, "system operation operation_ids must be validated against the operation graph"
+    assert report["exportable"] is False
