@@ -794,11 +794,15 @@ def test_component_with_missing_equation_and_evidence_refs_is_hard_error():
         operation_graph={"nodes": [], "edges": []},
         component_operation_links=[],
     )
+    err_refs = {e["ref_id"] for e in report["errors"] if e["code"] == "UNRESOLVED_EXPORT_REF"}
     err_paths = {e["path"] for e in report["errors"] if e["code"] == "UNRESOLVED_EXPORT_REF"}
-    assert any("linked_equation_ids" in p for p in err_paths)
-    assert any("output_equation_ids" in p for p in err_paths)
+    # Equation refs (linked_equation_ids, output_equation_ids, evidence_refs.equation_ids)
+    # are aggregated under equation_refs via _component_equation_refs_export.
+    assert {"eq_missing", "eq_missing2"} <= err_refs
+    assert any("equation_refs" in p for p in err_paths)
     assert any("linked_evidence_ids" in p for p in err_paths)
     assert any("evidence_refs.evidence_ids" in p for p in err_paths)
+    assert any("linked_derivation_ids" in p for p in err_paths)
     assert report["exportable"] is False
 
 
@@ -813,4 +817,90 @@ def test_empty_component_operation_link_endpoint_is_hard_error():
     )
     codes = {e["code"] for e in report["errors"]}
     assert "EMPTY_COMPONENT_OPERATION_LINK_ENDPOINT" in codes
+    assert report["exportable"] is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #400 follow-up: normalization must not hide dangling refs; nested
+# equation refs validated; system-operation operation_ids validated.
+# ---------------------------------------------------------------------------
+
+
+def test_normalization_does_not_hide_missing_component_refs():
+    # A component evidence_claim / dependency pointing at a missing claim/component
+    # must still be a hard error after _normalize_export_references runs (#400).
+    mod = _export_mod()
+    claims = [{"claim_id": "claim_real"}]
+    components = [{
+        "component_id": "cmp_real",
+        "evidence_claims": ["claim_missing"],
+        "dependencies": [{"component_refs": ["cmp_ghost"]}],
+    }]
+    component_graph = {"nodes": [{"node_id": "cmp_real"}], "edges": []}
+    mod._normalize_export_references(
+        claims=claims, equations=[], components=components,
+        component_graph=component_graph, course_info=None,
+    )
+    # Normalization preserved the unresolved refs instead of dropping them.
+    assert "claim_missing" in components[0]["evidence_claims"]
+    assert "cmp_ghost" in components[0]["dependencies"][0]["component_refs"]
+    report = mod._validate_export_references(
+        claims=claims, equations=[], components=components,
+        component_graph=component_graph, course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []}, component_operation_links=[],
+    )
+    assert any(e["code"] == "UNRESOLVED_EXPORT_REF" for e in report["errors"])
+    assert report["publish_ready"] is False
+
+
+def test_nested_claim_equation_and_inferred_refs_are_validated():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[{
+            "claim_id": "c1",
+            "equation": {"equation_ids": ["eq_nested_missing"]},
+            "inferred_equation_ids": ["eq_inferred_missing"],
+        }],
+        equations=[{"equation_id": "eq_real"}], components=[],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []}, component_operation_links=[],
+    )
+    err_refs = {e["ref_id"] for e in report["errors"] if e["code"] == "UNRESOLVED_EXPORT_REF"}
+    assert {"eq_nested_missing", "eq_inferred_missing"} <= err_refs
+    assert report["publish_ready"] is False
+
+
+def test_component_nested_equation_refs_are_validated():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[], equations=[{"equation_id": "eq_real"}],
+        components=[{
+            "component_id": "cmp1",
+            "evidence_refs": {"equation_ids": ["eq_refs_missing"]},
+            "inputs": [{"equation_ids": ["eq_input_missing"]}],
+        }],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []}, component_operation_links=[],
+    )
+    err_refs = {e["ref_id"] for e in report["errors"] if e["code"] == "UNRESOLVED_EXPORT_REF"}
+    assert {"eq_refs_missing", "eq_input_missing"} <= err_refs
+
+
+def test_system_operation_operation_ids_validated_against_operation_graph():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[{"claim_id": "c1"}], equations=[], components=[],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [{"operation_id": "op_real"}], "edges": []},
+        component_operation_links=[],
+        system_operations=[{
+            "system_id": "SYS_1", "system_family": "derive_consequence",
+            "claim_ids": ["c1"], "operation_ids": ["op_missing"],
+        }],
+    )
+    err = [e for e in report["errors"] if e["code"] == "UNRESOLVED_EXPORT_REF" and e["ref_id"] == "op_missing"]
+    assert err, "system operation operation_ids must be validated against the operation graph"
     assert report["exportable"] is False

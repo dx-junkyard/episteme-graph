@@ -1221,22 +1221,28 @@ def _normalize_export_references(
         if not isinstance(comp, dict):
             continue
         if isinstance(comp.get("evidence_claims"), list):
+            # Map legacy/provisional claim IDs to canonical, but do NOT drop
+            # unresolved ones (issue #400): dropping here would hide a dangling
+            # claim reference from _validate_export_references, letting a
+            # component with only missing claims pass as publish_ready.
             comp["evidence_claims"] = _map_ref_list(
                 comp["evidence_claims"],
                 claim_map,
                 known_ids=known_claim_ids,
-                drop_unresolved=True,
+                drop_unresolved=False,
             )
         for key in ("inputs", "outputs", "preconditions", "cautions", "constraints", "invalid_conditions"):
             if key in comp:
                 comp[key] = _normalize_claim_refs_in_items(comp[key], claim_map, known_claim_ids)
         for dep in comp.get("dependencies") or []:
             if isinstance(dep, dict) and isinstance(dep.get("component_refs"), list):
+                # Map but preserve unresolved component refs so validation can
+                # hard-error on a dependency pointing at a missing component (#400).
                 dep["component_refs"] = _map_ref_list(
                     dep["component_refs"],
                     component_map,
                     known_ids=known_component_ids,
-                    drop_unresolved=True,
+                    drop_unresolved=False,
                 )
 
     for edge in component_graph.get("edges", []) or []:
@@ -1615,6 +1621,7 @@ def _validate_system_operations(
     evidence_ids: set[str],
     derivation_ids: set[str],
     component_ids: set[str],
+    operation_ids: set[str],
     add,
     warn,
     review,
@@ -1672,6 +1679,12 @@ def _validate_system_operations(
         for ref in (str(v) for v in (sys_op.get("component_ids") or []) if v):
             if ref not in component_ids:
                 add("UNRESOLVED_EXPORT_REF", f"{path}.component_ids references missing component {ref!r}", "graph/system_operations.json", f"{path}.component_ids", ref)
+        # operation_ids must resolve against the operation graph (issue #400): a
+        # system operation that references an operation node which is not exported
+        # is not traceable and must be a hard error.
+        for ref in (str(v) for v in (sys_op.get("operation_ids") or []) if v):
+            if ref not in operation_ids:
+                add("UNRESOLVED_EXPORT_REF", f"{path}.operation_ids references missing operation {ref!r}", "graph/system_operations.json", f"{path}.operation_ids", ref)
         # Generic family + provenance-tagged optional subtype (#394).
         fam = str(sys_op.get("system_family") or "")
         if core_families and fam and fam not in core_families:
@@ -1854,8 +1867,13 @@ def _validate_export_references(
             continue
         cpath = f"$.claims[{idx}]"
         check_refs(claim.get("source_evidence_ids"), evidence_ids, "claims/claims.json", f"{cpath}.source_evidence_ids", "evidence")
-        check_refs(claim.get("equation_ids"), equation_ids, "claims/claims.json", f"{cpath}.equation_ids", "equation")
-        check_refs(claim.get("linked_equation_ids"), equation_ids, "claims/claims.json", f"{cpath}.linked_equation_ids", "equation")
+        # _claim_equation_refs() aggregates the nested ``equation.equation_ids`` /
+        # ``equation.equation_id`` as well as the top-level equation_ids /
+        # linked_equation_ids, so DB-fallback claims that only carry the nested
+        # form are validated too (issue #400). inferred_equation_ids are checked
+        # separately so weak/inferred links cannot reference missing equations.
+        check_refs(_claim_equation_refs(claim), equation_ids, "claims/claims.json", f"{cpath}.equation_refs", "equation")
+        check_refs(claim.get("inferred_equation_ids"), equation_ids, "claims/claims.json", f"{cpath}.inferred_equation_ids", "equation")
         check_refs(claim.get("derivation_ids"), derivation_ids, "claims/claims.json", f"{cpath}.derivation_ids", "derivation")
         check_refs(claim.get("linked_component_ids"), component_ids, "claims/claims.json", f"{cpath}.linked_component_ids", "component")
 
@@ -1870,16 +1888,11 @@ def _validate_export_references(
         check_refs(comp.get("linked_claim_ids"), claim_ids, "components/components.json", f"{cbase}.linked_claim_ids", "claim")
         check_refs(comp.get("linked_evidence_ids"), evidence_ids, "components/components.json", f"{cbase}.linked_evidence_ids", "evidence")
         check_refs(comp.get("linked_derivation_ids"), derivation_ids, "components/components.json", f"{cbase}.linked_derivation_ids", "derivation")
-        for eq_field in (
-            "linked_equation_ids",
-            "input_equation_ids",
-            "intermediate_equation_ids",
-            "output_equation_ids",
-            "constraint_equation_ids",
-            "definition_equation_ids",
-            "review_required_equation_ids",
-        ):
-            check_refs(comp.get(eq_field), equation_ids, "components/components.json", f"{cbase}.{eq_field}", "equation")
+        # _component_equation_refs_export() aggregates every equation reference a
+        # component can carry — the equation-role fields, nested
+        # ``evidence_refs.equation_ids`` and inputs/outputs equation IDs — so a
+        # DB-fallback component referencing missing equations is caught (#400).
+        check_refs(_component_equation_refs_export(comp), equation_ids, "components/components.json", f"{cbase}.equation_refs", "equation")
         comp_evidence_refs = comp.get("evidence_refs") if isinstance(comp.get("evidence_refs"), dict) else {}
         check_refs(comp_evidence_refs.get("claim_ids"), claim_ids, "components/components.json", f"{cbase}.evidence_refs.claim_ids", "claim")
         check_refs(comp_evidence_refs.get("evidence_ids"), evidence_ids, "components/components.json", f"{cbase}.evidence_refs.evidence_ids", "evidence")
@@ -2297,6 +2310,7 @@ def _validate_export_references(
         evidence_ids=evidence_ids,
         derivation_ids=derivation_ids,
         component_ids=component_ids,
+        operation_ids=operation_ids,
         add=add,
         warn=warn,
         review=review,
