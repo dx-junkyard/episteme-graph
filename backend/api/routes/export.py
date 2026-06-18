@@ -341,33 +341,22 @@ def _resolve_artifact_first_graph(
     load_db_graph=None,
 ) -> dict:
     """Prefer component_graph artifacts (issue #383), splitting component vs
-    operation graphs (issue #387). Falls back to the DB-persisted graph only when
-    no document carries a component_graph artifact.
+    operation graphs (issue #387).
 
-    On a *partial* fallback (some documents carry a current-run artifact and
-    others do not), the missing documents' DB-persisted graphs are loaded via
-    ``load_db_graph(doc_id)`` and merged in, so the export both records the
-    fallback in ``fallback_sources`` AND actually carries that document's graph
-    data (issue #390 — fallback provenance must match the real data used).
+    Resolution is per document: a document that carries a current-run
+    component_graph artifact uses it; a document that does not falls back to its
+    own DB-persisted graph, loaded via ``load_db_graph(doc_id)`` and merged in.
+    This holds for both a *partial* fallback (some documents missing) and a
+    *complete* fallback (every document missing), so no requested document's
+    graph is silently omitted and the recorded ``fallback_sources`` provenance
+    matches the real data carried (issues #390 / #400).
+
+    ``db_component_graph`` is only used as a back-compat fallback when no
+    ``load_db_graph`` loader is supplied and every document fell back.
 
     Returns ``{"component_graph", "operation_graph", "component_operation_links"}``.
     """
     known_component_ids = {str(c.get("component_id")) for c in components if c.get("component_id")}
-    has_any_artifact = any(
-        (artifacts_by_doc.get(doc_id) or {}).get("component_graph") for doc_id in document_ids
-    )
-    if not has_any_artifact:
-        for doc_id in document_ids:
-            fallback_sources.append({
-                "artifact": "component_graph",
-                "document_id": doc_id,
-                "fallback_to": _FALLBACK_SOURCE["component_graph"],
-            })
-        # Split the DB graph too so operation nodes never leak into the component
-        # graph (issue #387), even on the fallback path.
-        return build_component_graph_export(
-            db_component_graph, document_id="", known_component_ids=known_component_ids
-        )
 
     component_nodes: list[dict] = []
     component_edges: list[dict] = []
@@ -382,28 +371,38 @@ def _resolve_artifact_first_graph(
         operation_edges.extend(split["operation_graph"]["edges"])
         links.extend(split["component_operation_links"])
 
+    any_db_fallback = False
     for doc_id in document_ids:
         artifact = (artifacts_by_doc.get(doc_id) or {}).get("component_graph")
-        if not artifact:
-            # Partial fallback (issue #390): other documents carry a current-run
-            # component_graph artifact but this one does not. Record the fallback
-            # per document — like claims/components do — AND actually load and
-            # merge this document's DB-persisted graph so the provenance matches
-            # the real data carried in the export.
-            fallback_sources.append({
-                "artifact": "component_graph",
-                "document_id": doc_id,
-                "fallback_to": _FALLBACK_SOURCE["component_graph"],
-            })
-            db_graph = load_db_graph(doc_id) if callable(load_db_graph) else None
-            if isinstance(db_graph, dict) and (db_graph.get("nodes") or db_graph.get("edges")):
-                _merge(build_component_graph_export(
-                    db_graph, document_id=doc_id, known_component_ids=known_component_ids
-                ))
+        if artifact:
+            _merge(build_component_graph_export(
+                artifact, document_id=doc_id, known_component_ids=known_component_ids
+            ))
             continue
-        _merge(build_component_graph_export(
-            artifact, document_id=doc_id, known_component_ids=known_component_ids
-        ))
+        # Fallback (issues #390 / #400): this document has no current-run
+        # component_graph artifact. Record the fallback per document AND actually
+        # load and merge THIS document's DB-persisted graph — both on a partial
+        # fallback and when every document falls back — so no requested document's
+        # graph is silently omitted and provenance matches the real data carried.
+        any_db_fallback = True
+        fallback_sources.append({
+            "artifact": "component_graph",
+            "document_id": doc_id,
+            "fallback_to": _FALLBACK_SOURCE["component_graph"],
+        })
+        db_graph = load_db_graph(doc_id) if callable(load_db_graph) else None
+        if isinstance(db_graph, dict) and (db_graph.get("nodes") or db_graph.get("edges")):
+            _merge(build_component_graph_export(
+                db_graph, document_id=doc_id, known_component_ids=known_component_ids
+            ))
+
+    # Back-compat: when no per-document loader is supplied but every document fell
+    # back, split the course-wide ``db_component_graph`` argument so callers that
+    # do not provide ``load_db_graph`` still export the DB graph (issue #387 split).
+    if any_db_fallback and not callable(load_db_graph) and not component_nodes and not operation_nodes:
+        return build_component_graph_export(
+            db_component_graph, document_id="", known_component_ids=known_component_ids
+        )
     return {
         "component_graph": {
             "graph_schema_version": "0.1.0",
@@ -1847,10 +1846,43 @@ def _validate_export_references(
             check_refs(eq.get("linked_claim_ids"), claim_ids, "equations/equations.json", f"$.equations[{idx}].linked_claim_ids", "claim")
             check_refs(eq.get("source_evidence_ids"), evidence_ids, "equations/equations.json", f"$.equations[{idx}].source_evidence_ids", "evidence")
 
+    # Claim cross-artifact ID integrity (issue #390 / #400). A claim whose only
+    # links are dangling IDs must be a hard error, not a silently publish-ready
+    # claim. Validate every forward/back reference a claim can carry.
+    for idx, claim in enumerate(claims):
+        if not isinstance(claim, dict):
+            continue
+        cpath = f"$.claims[{idx}]"
+        check_refs(claim.get("source_evidence_ids"), evidence_ids, "claims/claims.json", f"{cpath}.source_evidence_ids", "evidence")
+        check_refs(claim.get("equation_ids"), equation_ids, "claims/claims.json", f"{cpath}.equation_ids", "equation")
+        check_refs(claim.get("linked_equation_ids"), equation_ids, "claims/claims.json", f"{cpath}.linked_equation_ids", "equation")
+        check_refs(claim.get("derivation_ids"), derivation_ids, "claims/claims.json", f"{cpath}.derivation_ids", "derivation")
+        check_refs(claim.get("linked_component_ids"), component_ids, "claims/claims.json", f"{cpath}.linked_component_ids", "component")
+
     for idx, comp in enumerate(components):
         if not isinstance(comp, dict):
             continue
         check_refs(comp.get("evidence_claims"), claim_ids, "components/components.json", f"$.components[{idx}].evidence_claims", "claim")
+        # Component cross-artifact ID integrity (issue #390 / #400): a component
+        # must reference only real claims / equations / evidence / derivations,
+        # including nested evidence_refs and every equation-role field.
+        cbase = f"$.components[{idx}]"
+        check_refs(comp.get("linked_claim_ids"), claim_ids, "components/components.json", f"{cbase}.linked_claim_ids", "claim")
+        check_refs(comp.get("linked_evidence_ids"), evidence_ids, "components/components.json", f"{cbase}.linked_evidence_ids", "evidence")
+        check_refs(comp.get("linked_derivation_ids"), derivation_ids, "components/components.json", f"{cbase}.linked_derivation_ids", "derivation")
+        for eq_field in (
+            "linked_equation_ids",
+            "input_equation_ids",
+            "intermediate_equation_ids",
+            "output_equation_ids",
+            "constraint_equation_ids",
+            "definition_equation_ids",
+            "review_required_equation_ids",
+        ):
+            check_refs(comp.get(eq_field), equation_ids, "components/components.json", f"{cbase}.{eq_field}", "equation")
+        comp_evidence_refs = comp.get("evidence_refs") if isinstance(comp.get("evidence_refs"), dict) else {}
+        check_refs(comp_evidence_refs.get("claim_ids"), claim_ids, "components/components.json", f"{cbase}.evidence_refs.claim_ids", "claim")
+        check_refs(comp_evidence_refs.get("evidence_ids"), evidence_ids, "components/components.json", f"{cbase}.evidence_refs.evidence_ids", "evidence")
         comp_gate = comp.get("confidence_gate") if isinstance(comp.get("confidence_gate"), dict) else {}
         if comp_gate.get("blocked_by_equation_ids"):
             warn(
@@ -1977,7 +2009,18 @@ def _validate_export_references(
             continue
         comp_id = str(link.get("component_id") or "")
         op_id = str(link.get("operation_id") or "")
-        if comp_id and comp_id not in component_ids:
+        # Empty endpoints (issue #400): a link with an empty component_id or
+        # operation_id references neither a valid component nor a valid operation
+        # and must be a hard error, not silently skipped.
+        if not comp_id:
+            add(
+                "EMPTY_COMPONENT_OPERATION_LINK_ENDPOINT",
+                f"component_operation_links[{idx}].component_id is empty",
+                "graph/component_operation_links.json",
+                f"$.links[{idx}].component_id",
+                "",
+            )
+        elif comp_id not in component_ids:
             add(
                 "UNRESOLVED_EXPORT_REF",
                 f"component_operation_links[{idx}].component_id references missing component {comp_id!r}",
@@ -1985,7 +2028,15 @@ def _validate_export_references(
                 f"$.links[{idx}].component_id",
                 comp_id,
             )
-        if op_id and op_id not in operation_ids:
+        if not op_id:
+            add(
+                "EMPTY_COMPONENT_OPERATION_LINK_ENDPOINT",
+                f"component_operation_links[{idx}].operation_id is empty",
+                "graph/component_operation_links.json",
+                f"$.links[{idx}].operation_id",
+                "",
+            )
+        elif op_id not in operation_ids:
             add(
                 "UNRESOLVED_EXPORT_REF",
                 f"component_operation_links[{idx}].operation_id references missing operation {op_id!r}",
