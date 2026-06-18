@@ -652,3 +652,69 @@ def test_system_operation_ref_unresolved_even_when_equation_set_empty():
     codes = {e["code"] for e in report["errors"]}
     assert "UNRESOLVED_EXPORT_REF" in codes
     assert report["exportable"] is False
+
+
+# ---------------------------------------------------------------------------
+# Review follow-up #2 (PR #399): partial fallback merges real DB graph data,
+# fallback usage warns, ghost nodes are caught even with no components.
+# ---------------------------------------------------------------------------
+
+
+def test_partial_graph_fallback_merges_db_graph_data():
+    mod = _export_mod()
+    fallback_sources: list = []
+    artifacts_by_doc = {
+        "doc_a": {"component_graph": {"nodes": [
+            {"component_id": "cmp_a", "graph_layer": "main", "component_type": "TheoryOperationNode"}
+        ], "edges": []}},
+        "doc_b": {},  # no artifact -> must fall back to DB graph and merge it
+    }
+    db_graphs = {
+        "doc_b": {"nodes": [
+            {"component_id": "cmp_b", "graph_layer": "main", "component_type": "TheoryOperationNode"}
+        ], "edges": []},
+    }
+    bundle = mod._resolve_artifact_first_graph(
+        artifacts_by_doc,
+        ["doc_a", "doc_b"],
+        components=[{"component_id": "cmp_a"}, {"component_id": "cmp_b"}],
+        db_component_graph={"nodes": [], "edges": []},
+        fallback_sources=fallback_sources,
+        load_db_graph=lambda d: db_graphs.get(d, {"nodes": [], "edges": []}),
+    )
+    node_ids = {n["node_id"] for n in bundle["component_graph"]["nodes"]}
+    assert node_ids == {"cmp_a", "cmp_b"}  # doc_b's DB graph was actually merged
+    assert any(f["document_id"] == "doc_b" for f in fallback_sources)
+
+
+def test_fallback_used_emits_warning_and_blocks_publish_ready():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[{"claim_id": "c1", "source_evidence_ids": ["ev1"]}],
+        equations=[], components=[],
+        component_graph={"nodes": [], "edges": []},
+        course_info=None, evidence_snippets=[{"evidence_id": "ev1"}],
+        operation_graph={"nodes": [], "edges": []},
+        component_operation_links=[],
+        artifact_sources={
+            "fallback_used": True,
+            "fallback_sources": [{"artifact": "component_graph", "document_id": "doc_b"}],
+        },
+    )
+    codes = {w["code"] for w in report["warnings"]}
+    assert "FALLBACK_DATA_USED" in codes
+    assert report["publish_ready"] is False
+
+
+def test_ghost_node_is_hard_error_even_with_no_components():
+    mod = _export_mod()
+    report = mod._validate_export_references(
+        claims=[], equations=[], components=[],
+        component_graph={"nodes": [{"node_id": "ghost"}], "edges": []},
+        course_info=None, evidence_snippets=[],
+        operation_graph={"nodes": [], "edges": []},
+        component_operation_links=[],
+    )
+    codes = {e["code"] for e in report["errors"]}
+    assert "COMPONENT_GRAPH_NODE_NOT_A_COMPONENT" in codes
+    assert report["exportable"] is False

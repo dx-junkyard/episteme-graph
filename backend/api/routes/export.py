@@ -338,10 +338,17 @@ def _resolve_artifact_first_graph(
     components: list[dict],
     db_component_graph: dict,
     fallback_sources: list[dict],
+    load_db_graph=None,
 ) -> dict:
     """Prefer component_graph artifacts (issue #383), splitting component vs
     operation graphs (issue #387). Falls back to the DB-persisted graph only when
     no document carries a component_graph artifact.
+
+    On a *partial* fallback (some documents carry a current-run artifact and
+    others do not), the missing documents' DB-persisted graphs are loaded via
+    ``load_db_graph(doc_id)`` and merged in, so the export both records the
+    fallback in ``fallback_sources`` AND actually carries that document's graph
+    data (issue #390 — fallback provenance must match the real data used).
 
     Returns ``{"component_graph", "operation_graph", "component_operation_links"}``.
     """
@@ -367,27 +374,36 @@ def _resolve_artifact_first_graph(
     operation_nodes: list[dict] = []
     operation_edges: list[dict] = []
     links: list[dict] = []
-    for doc_id in document_ids:
-        artifact = (artifacts_by_doc.get(doc_id) or {}).get("component_graph")
-        if not artifact:
-            # Partial fallback (issue #390): other documents carry a current-run
-            # component_graph artifact but this one does not. Record the fallback
-            # per document — like claims/components do — so the export provenance
-            # is honest that this document's graph is missing from the artifacts.
-            fallback_sources.append({
-                "artifact": "component_graph",
-                "document_id": doc_id,
-                "fallback_to": _FALLBACK_SOURCE["component_graph"],
-            })
-            continue
-        split = build_component_graph_export(
-            artifact, document_id=doc_id, known_component_ids=known_component_ids
-        )
+
+    def _merge(split: dict) -> None:
         component_nodes.extend(split["component_graph"]["nodes"])
         component_edges.extend(split["component_graph"]["edges"])
         operation_nodes.extend(split["operation_graph"]["nodes"])
         operation_edges.extend(split["operation_graph"]["edges"])
         links.extend(split["component_operation_links"])
+
+    for doc_id in document_ids:
+        artifact = (artifacts_by_doc.get(doc_id) or {}).get("component_graph")
+        if not artifact:
+            # Partial fallback (issue #390): other documents carry a current-run
+            # component_graph artifact but this one does not. Record the fallback
+            # per document — like claims/components do — AND actually load and
+            # merge this document's DB-persisted graph so the provenance matches
+            # the real data carried in the export.
+            fallback_sources.append({
+                "artifact": "component_graph",
+                "document_id": doc_id,
+                "fallback_to": _FALLBACK_SOURCE["component_graph"],
+            })
+            db_graph = load_db_graph(doc_id) if callable(load_db_graph) else None
+            if isinstance(db_graph, dict) and (db_graph.get("nodes") or db_graph.get("edges")):
+                _merge(build_component_graph_export(
+                    db_graph, document_id=doc_id, known_component_ids=known_component_ids
+                ))
+            continue
+        _merge(build_component_graph_export(
+            artifact, document_id=doc_id, known_component_ids=known_component_ids
+        ))
     return {
         "component_graph": {
             "graph_schema_version": "0.1.0",
@@ -1944,9 +1960,11 @@ def _validate_export_references(
                 f"$.nodes[{idx}].node_id",
                 node_id,
             )
-        elif component_ids and node_id not in component_ids:
+        elif node_id not in component_ids:
             # Hard error (issues #390 / #393): a component_graph node must be a
             # known component_id from components/components.json — never a ghost.
+            # No empty-set guard: if no components were exported, every graph node
+            # is a ghost by definition.
             add(
                 "COMPONENT_GRAPH_NODE_NOT_A_COMPONENT",
                 f"component graph node {node_id!r} is not a known component in components/components.json",
@@ -2232,6 +2250,24 @@ def _validate_export_references(
         warn=warn,
         review=review,
     )
+
+    # Fallback provenance (issue #390): DB-persisted / fallback data was used in
+    # place of a current-run artifact. This is a quality warning (the export is
+    # not built purely from current-run analysis), so it must keep the run out of
+    # publish_ready while remaining exportable for review.
+    sources = artifact_sources if isinstance(artifact_sources, dict) else {}
+    fallback_used = bool(sources.get("fallback_used")) or bool(sources.get("fallback_sources"))
+    if fallback_used:
+        fb = sources.get("fallback_sources") or []
+        artifacts_fellback = sorted({str((f or {}).get("artifact") or "") for f in fb if isinstance(f, dict)})
+        warn(
+            "FALLBACK_DATA_USED",
+            "export used fallback/DB-persisted data instead of current-run artifacts"
+            + (f" for {artifacts_fellback}" if artifacts_fellback else ""),
+            "manifest.json",
+            "$.fallback_sources",
+            ",".join(artifacts_fellback),
+        )
 
     # Coverage metrics (issue #390): explain *why* an export is or is not
     # publish-ready by reporting how much of each artifact is source-linked.
@@ -2571,7 +2607,8 @@ def export_course_bundle(
         claims = _resolve_artifact_first_claims(artifacts_by_doc, document_ids, db_claims, fallback_sources)
         components = _resolve_artifact_first_components(artifacts_by_doc, document_ids, db_components, fallback_sources)
         graph_bundle = _resolve_artifact_first_graph(
-            artifacts_by_doc, document_ids, components, db_component_graph, fallback_sources
+            artifacts_by_doc, document_ids, components, db_component_graph, fallback_sources,
+            load_db_graph=lambda d: _load_component_graph_for_document(session, d),
         )
         component_graph = graph_bundle["component_graph"]
         operation_graph = graph_bundle["operation_graph"]
@@ -2729,7 +2766,8 @@ def export_document_bundle(
         claims = _resolve_artifact_first_claims(artifacts_by_doc, document_ids, db_claims, fallback_sources)
         components = _resolve_artifact_first_components(artifacts_by_doc, document_ids, db_components, fallback_sources)
         graph_bundle = _resolve_artifact_first_graph(
-            artifacts_by_doc, document_ids, components, db_component_graph, fallback_sources
+            artifacts_by_doc, document_ids, components, db_component_graph, fallback_sources,
+            load_db_graph=lambda d: _load_component_graph_for_document(session, d),
         )
         component_graph = graph_bundle["component_graph"]
         operation_graph = graph_bundle["operation_graph"]
