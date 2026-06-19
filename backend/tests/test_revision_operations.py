@@ -242,11 +242,14 @@ def test_pre_existing_unresolved_ref_does_not_invalidate():
 # --- protected target ------------------------------------------------------
 
 def test_protected_target_flagged_not_auto_adoptable():
+    # Protection is server-determined from the base inventory's protected_decisions,
+    # not the (untrusted) client flag.
     base = _base_artifacts()
+    inventory = {"protected_decisions": [{"entity_type": "claim", "entity_id": "clm_1"}]}
     res = apply_operations(base, [
         make_operation(operation="update_entity", target_type="claim", target_id="clm_1",
-                       after_json={"text": "x"}, protected_target=True),
-    ])
+                       after_json={"text": "x"}),
+    ], base_inventory=inventory)
     assert res["requires_confirmation"] is True
     assert res["protected_changes"] and res["protected_changes"][0]["target_id"] == "clm_1"
 

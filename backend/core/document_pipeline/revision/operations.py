@@ -467,6 +467,54 @@ def _candidate_dangling(candidate: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Protected-decision detection (server-side, #410 P1-3)
+# ---------------------------------------------------------------------------
+
+# Operations that modify an *existing* entity (everything except add_entity).
+_MODIFYING_OPERATIONS = {
+    "update_entity", "split_entity", "merge_entities", "remove_entity",
+    "add_relation", "remove_relation", "relink_evidence",
+}
+
+
+def _protected_ids(base_inventory: dict | None, base_artifacts: dict) -> set[str]:
+    """Build the protected-entity id set from the *server-side* source of truth.
+
+    Uses ``baseline_inventory.protected_decisions`` when available; otherwise
+    derives it from the base artifacts directly. The client-supplied
+    ``protected_target`` flag is never trusted (#410 P1-3) — a client could omit
+    it to slip a change past confirmation.
+    """
+    decisions = (base_inventory or {}).get("protected_decisions")
+    if decisions is None:
+        # No inventory passed — derive protection straight from base artifacts.
+        from .inventory import build_baseline_inventory
+        decisions = build_baseline_inventory(base_artifacts or {}, base_run_id="").get(
+            "protected_decisions", []
+        )
+    ids: set[str] = set()
+    for d in decisions or []:
+        eid = d.get("entity_id") if isinstance(d, dict) else None
+        if eid:
+            ids.add(str(eid))
+    return ids
+
+
+def _op_protected_targets(op: dict, protected_ids: set[str]) -> list[str]:
+    """Return the protected entity ids an operation modifies (server-determined)."""
+    if op.get("operation") not in _MODIFYING_OPERATIONS:
+        return []
+    candidates: list[str] = []
+    if op.get("target_id"):
+        candidates.append(str(op["target_id"]))
+    # merge: every source target must be inspected
+    for sid in (op.get("source_ids") or op.get("target_ids") or []):
+        if sid:
+            candidates.append(str(sid))
+    return [cid for cid in dict.fromkeys(candidates) if cid in protected_ids]
+
+
+# ---------------------------------------------------------------------------
 # Public entry
 # ---------------------------------------------------------------------------
 
@@ -494,6 +542,10 @@ def apply_operations(
     protected_changes: list[dict] = []
     dropped_edges: list[str] = []
 
+    # Server-side source of truth for protected entities (never trust the client
+    # flag). Computed once from the base inventory / artifacts.
+    protected_ids = _protected_ids(base_inventory, base_artifacts)
+
     for _idx, op in _canonical_order(operations or []):
         op = copy.deepcopy(op)
         handler = _DISPATCH.get(op.get("operation"))
@@ -505,12 +557,18 @@ def apply_operations(
         try:
             handler(candidate, op, id_mapping)
             op["validation_result"] = {"status": "applied"}
-            if op.get("protected_target"):
+            # Determine protected status server-side and overwrite the (untrusted)
+            # client flag so the report and accept gate use the authoritative value.
+            server_protected = _op_protected_targets(op, protected_ids)
+            op["protected_target"] = bool(server_protected)
+            op["protected_target_source"] = "server"
+            if server_protected:
                 protected_changes.append({
                     "operation_id": op.get("operation_id"),
                     "operation": op.get("operation"),
                     "target_type": op.get("target_type"),
                     "target_id": op.get("target_id"),
+                    "protected_entity_ids": server_protected,
                 })
         except _OpError as exc:
             op["validation_result"] = {"status": "failed", "error": str(exc)}
