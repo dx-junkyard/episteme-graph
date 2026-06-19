@@ -1190,11 +1190,14 @@ def get_latest_analysis_run(
 # latest run を使う。revision run は必ず base_run_id を持つ。
 # ----------------------------------------------------------------------------
 
+# Column list for analysis-run SELECTs, qualified with the ``r`` table alias so
+# it is unambiguous when the run table is joined with ``documents`` (which shares
+# column names like ``id`` / ``document_id``) — see get_active_analysis_run.
 _RUN_COLUMNS = (
-    "id::text, document_id::text, material_id, cartridge_id, status, "
-    "current_stage, error_message, stage_outputs, started_at, completed_at, "
-    "created_at, updated_at, run_type, base_run_id::text, "
-    "parent_revision_id::text, revision_status, created_by::text"
+    "r.id::text, r.document_id::text, r.material_id, r.cartridge_id, r.status, "
+    "r.current_stage, r.error_message, r.stage_outputs, r.started_at, r.completed_at, "
+    "r.created_at, r.updated_at, r.run_type, r.base_run_id::text, "
+    "r.parent_revision_id::text, r.revision_status, r.created_by::text"
 )
 
 
@@ -1206,8 +1209,8 @@ def get_analysis_run(*, run_id: str) -> dict | None:
             sa_text(
                 f"""
                 SELECT {_RUN_COLUMNS}
-                FROM document_analysis_runs
-                WHERE id = CAST(:run_id AS uuid)
+                FROM document_analysis_runs r
+                WHERE r.id = CAST(:run_id AS uuid)
                 """
             ),
             {"run_id": run_id},

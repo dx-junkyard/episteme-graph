@@ -103,6 +103,27 @@ def test_runtime_migration_in_main_matches_file():
     assert "document_analysis_runs_base_run_required_chk" in main_src
 
 
+# --- run-fetch SQL must be alias-qualified (regression: ambiguous "id") -------
+
+def test_get_active_analysis_run_columns_are_alias_qualified(fake_session):
+    session = fake_session["install"]([_FakeResult(rows=[])])
+    persistence.get_active_analysis_run(document_id="doc-1")
+    sql = session.executed_sql[0]
+    # joins documents (shares column names) -> columns must be r.-qualified
+    assert "JOIN documents d" in sql
+    assert "r.id::text" in sql
+    assert "SELECT id::text" not in sql  # no bare ambiguous column
+
+
+def test_get_analysis_run_aliases_run_table(fake_session):
+    session = fake_session["install"]([_FakeResult(rows=[])])
+    persistence.get_analysis_run(run_id="run-1")
+    sql = session.executed_sql[0]
+    assert "FROM document_analysis_runs r" in sql
+    assert "r.id::text" in sql
+    assert "WHERE r.id = CAST" in sql
+
+
 # --- create_revision_run ---------------------------------------------------
 
 def test_create_revision_run_requires_base_run_id():
