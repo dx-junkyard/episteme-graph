@@ -8,15 +8,17 @@ ever touching projection tables or the adopted active run.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from .. import persistence
+from .audit import run_source_audit
 from .checkpoints import plan_checkpoints
 from .inventory import ARTIFACTS_KEY, build_baseline_inventory, get_artifacts
 
 # Revision artifact keys (stored under stage_outputs._artifacts of the run).
 BASELINE_INVENTORY_KEY = "baseline_inventory"
 AUDIT_CHECKPOINTS_KEY = "audit_checkpoints"
+AUDIT_RESULTS_KEY = "audit_results"
 
 
 def build_revision_plan(base_run: dict, *, document_id: str = "") -> dict:
@@ -80,3 +82,44 @@ def start_revision_run(
         "document_id": document_id,
         **plan,
     }
+
+
+def audit_revision_run(
+    *,
+    run_id: str,
+    llm_client: Callable[[dict, dict], Any] | None = None,
+    chunk_index: list[dict] | None = None,
+) -> dict:
+    """Run the source re-audit stage for a candidate run.
+
+    Reads the run's planned checkpoints, re-reads the source per checkpoint, and
+    stores audit results as a run artifact. This stage evaluates only — it never
+    builds candidate artifacts nor touches the base/active run (AC #404).
+    """
+    run = persistence.get_analysis_run(run_id=run_id)
+    if not run:
+        raise ValueError(f"revision run {run_id} not found")
+    if run.get("run_type") != "revision":
+        raise ValueError(f"run {run_id} is not a revision run")
+
+    artifacts = get_artifacts(run.get("stage_outputs"))
+    checkpoints = artifacts.get(AUDIT_CHECKPOINTS_KEY) or []
+    document_id = str(run.get("document_id") or "")
+
+    if chunk_index is None:
+        try:
+            chunk_index = persistence.load_source_chunk_index(document_id=document_id)
+        except Exception:
+            chunk_index = []
+
+    audit = run_source_audit(
+        checkpoints=checkpoints,
+        chunk_index=chunk_index or [],
+        llm_client=llm_client,
+    )
+    persistence.update_revision_status(
+        run_id=run_id,
+        revision_status="auditing",
+        stage_outputs={ARTIFACTS_KEY: {AUDIT_RESULTS_KEY: audit}},
+    )
+    return {"revision_run_id": run_id, "document_id": document_id, **audit}
