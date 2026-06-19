@@ -32,6 +32,10 @@ def app_client(monkeypatch):
     app.include_router(revisions.router, prefix="/api/admin")
     app.dependency_overrides[_require_teacher] = lambda: {"id": "user-1", "role": "TEACHER"}
 
+    # default: document authorization passes (overridden per-test for denial)
+    monkeypatch.setattr(revisions, "_authorize_view", lambda doc, user: None)
+    monkeypatch.setattr(revisions, "_authorize_edit", lambda doc, user: None)
+
     # default: the run exists and belongs to the document
     monkeypatch.setattr(revisions.persistence, "get_analysis_run",
                         lambda *, run_id: {"id": run_id, "run_type": "revision",
@@ -158,3 +162,50 @@ def test_authorization_required(app_client):
     app.dependency_overrides[dep] = _forbidden
     resp = client.post("/api/admin/documents/doc-1/revisions")
     assert resp.status_code == 403
+
+
+def test_write_endpoints_require_document_edit_permission(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    from fastapi import HTTPException
+
+    def _deny(doc, user):
+        raise HTTPException(status_code=404, detail="Document not found")
+    monkeypatch.setattr(revisions, "_authorize_edit", _deny)
+    # accept/reject/revise/run/create must all be blocked
+    for path, method in [
+        ("/api/admin/documents/doc-1/revisions", "post"),
+        ("/api/admin/documents/doc-1/revisions/rev-1/run", "post"),
+        ("/api/admin/documents/doc-1/revisions/rev-1/accept", "post"),
+        ("/api/admin/documents/doc-1/revisions/rev-1/reject", "post"),
+        ("/api/admin/documents/doc-1/revisions/rev-1/revise", "post"),
+    ]:
+        resp = getattr(client, method)(path, json={})
+        assert resp.status_code == 404, path
+
+
+def test_read_endpoints_require_document_view_permission(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    from fastapi import HTTPException
+
+    def _deny(doc, user):
+        raise HTTPException(status_code=404, detail="Document not found")
+    monkeypatch.setattr(revisions, "_authorize_view", _deny)
+    for path in [
+        "/api/admin/documents/doc-1/revisions",
+        "/api/admin/documents/doc-1/revisions/rev-1",
+        "/api/admin/documents/doc-1/revisions/rev-1/report",
+    ]:
+        resp = client.get(path)
+        assert resp.status_code == 404, path
+
+
+def test_write_endpoint_does_not_run_coordinator_when_unauthorized(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(revisions, "_authorize_edit",
+                        lambda doc, user: (_ for _ in ()).throw(HTTPException(status_code=404)))
+    monkeypatch.setattr(revisions.coordinator, "accept_revision",
+                        lambda **k: pytest.fail("coordinator must not run when unauthorized"))
+    resp = client.post("/api/admin/documents/doc-1/revisions/rev-1/accept", json={})
+    assert resp.status_code == 404

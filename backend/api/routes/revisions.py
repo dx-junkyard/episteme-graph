@@ -50,6 +50,23 @@ def _require_run_for_document(document_id: str, revision_id: str) -> dict:
     return run
 
 
+def _authorize_view(document_id: str, current_user: dict) -> None:
+    """Require the caller can VIEW the document (#410 P1-4).
+
+    Reuses the existing document authorization (visibility / group / owner / admin).
+    A run's document_id match alone is NOT authorization: any teacher knowing the
+    UUID could otherwise operate on another user's document.
+    """
+    from routes.theory_components import _ensure_document_viewable
+    _ensure_document_viewable(document_id, current_user)
+
+
+def _authorize_edit(document_id: str, current_user: dict) -> None:
+    """Require the caller can EDIT the document (write / decision endpoints)."""
+    from routes.theory_components import _ensure_document_editable
+    _ensure_document_editable(document_id, current_user)
+
+
 # ---------------------------------------------------------------------------
 # Create / run
 # ---------------------------------------------------------------------------
@@ -60,6 +77,7 @@ def create_revision(
     current_user: dict = Depends(_require_teacher),
 ):
     """Start a revision: resolve base (active) run + build inventory/checkpoints."""
+    _authorize_edit(document_id, current_user)
     try:
         result = coordinator.start_revision_run(
             document_id=document_id, created_by=_user_id(current_user),
@@ -82,6 +100,7 @@ def run_revision(
     current_user: dict = Depends(_require_teacher),
 ):
     """Run source re-audit; if operations are supplied, assemble + validate the candidate."""
+    _authorize_edit(document_id, current_user)
     _require_run_for_document(document_id, revision_id)
     audit = coordinator.audit_revision_run(run_id=revision_id)
     response = {"revision_run_id": revision_id, "audit": {
@@ -109,6 +128,7 @@ def list_revisions(
     current_user: dict = Depends(_require_teacher),
 ):
     """List run lineage, distinguishing the latest run from the active (adopted) run."""
+    _authorize_view(document_id, current_user)
     lineage = persistence.get_run_lineage(document_id=document_id)
     return lineage
 
@@ -119,6 +139,7 @@ def get_revision(
     revision_id: str,
     current_user: dict = Depends(_require_teacher),
 ):
+    _authorize_view(document_id, current_user)
     run = _require_run_for_document(document_id, revision_id)
     from core.document_pipeline.revision import get_artifacts
     artifacts = get_artifacts(run.get("stage_outputs"))
@@ -143,6 +164,7 @@ def get_revision_report(
     revision_id: str,
     current_user: dict = Depends(_require_teacher),
 ):
+    _authorize_view(document_id, current_user)
     run = _require_run_for_document(document_id, revision_id)
     from core.document_pipeline.revision import get_artifacts
     artifacts = get_artifacts(run.get("stage_outputs"))
@@ -163,6 +185,7 @@ def accept_revision(
     body: DecisionRequest = Body(default=DecisionRequest()),
     current_user: dict = Depends(_require_teacher),
 ):
+    _authorize_edit(document_id, current_user)
     _require_run_for_document(document_id, revision_id)
     try:
         result = coordinator.accept_revision(
@@ -186,6 +209,7 @@ def reject_revision(
     body: DecisionRequest = Body(default=DecisionRequest()),
     current_user: dict = Depends(_require_teacher),
 ):
+    _authorize_edit(document_id, current_user)
     _require_run_for_document(document_id, revision_id)
     try:
         result = coordinator.reject_revision(
@@ -205,6 +229,7 @@ def revise_revision(
     body: DecisionRequest = Body(default=DecisionRequest()),
     current_user: dict = Depends(_require_teacher),
 ):
+    _authorize_edit(document_id, current_user)
     _require_run_for_document(document_id, revision_id)
     try:
         result = coordinator.revise_revision_run(
