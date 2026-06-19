@@ -713,8 +713,68 @@ def _run_migrations() -> None:
                 ADD COLUMN IF NOT EXISTS published_course_id TEXT
         """))
 
+        # Migration 019: 反復改善パイプライン — analysis run 版管理 (Issue #402)
+        session.execute(sa_text("""
+            ALTER TABLE document_analysis_runs
+                ADD COLUMN IF NOT EXISTS run_type           TEXT NOT NULL DEFAULT 'initial',
+                ADD COLUMN IF NOT EXISTS base_run_id        UUID,
+                ADD COLUMN IF NOT EXISTS parent_revision_id UUID,
+                ADD COLUMN IF NOT EXISTS revision_status    TEXT,
+                ADD COLUMN IF NOT EXISTS created_by         UUID
+        """))
+        session.execute(sa_text("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_analysis_runs_run_type_chk') THEN
+                    ALTER TABLE document_analysis_runs ADD CONSTRAINT document_analysis_runs_run_type_chk
+                        CHECK (run_type IN ('initial', 'revision'));
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_analysis_runs_revision_status_chk') THEN
+                    ALTER TABLE document_analysis_runs ADD CONSTRAINT document_analysis_runs_revision_status_chk
+                        CHECK (revision_status IS NULL OR revision_status IN
+                            ('preparing', 'auditing', 'proposed', 'accepted', 'rejected', 'superseded'));
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_analysis_runs_base_run_required_chk') THEN
+                    ALTER TABLE document_analysis_runs ADD CONSTRAINT document_analysis_runs_base_run_required_chk
+                        CHECK (run_type <> 'revision' OR base_run_id IS NOT NULL);
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_analysis_runs_base_run_fk') THEN
+                    ALTER TABLE document_analysis_runs ADD CONSTRAINT document_analysis_runs_base_run_fk
+                        FOREIGN KEY (base_run_id) REFERENCES document_analysis_runs(id);
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_analysis_runs_parent_revision_fk') THEN
+                    ALTER TABLE document_analysis_runs ADD CONSTRAINT document_analysis_runs_parent_revision_fk
+                        FOREIGN KEY (parent_revision_id) REFERENCES document_analysis_runs(id);
+                END IF;
+            END $$
+        """))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_document_analysis_runs_run_type ON document_analysis_runs(run_type)"))
+        session.execute(sa_text("CREATE INDEX IF NOT EXISTS idx_document_analysis_runs_base     ON document_analysis_runs(base_run_id)"))
+        session.execute(sa_text("ALTER TABLE documents ADD COLUMN IF NOT EXISTS active_analysis_run_id UUID"))
+        session.execute(sa_text("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'documents_active_analysis_run_fk') THEN
+                    ALTER TABLE documents ADD CONSTRAINT documents_active_analysis_run_fk
+                        FOREIGN KEY (active_analysis_run_id) REFERENCES document_analysis_runs(id);
+                END IF;
+            END $$
+        """))
+        session.execute(sa_text("""
+            UPDATE documents d
+            SET active_analysis_run_id = sub.id
+            FROM (
+                SELECT DISTINCT ON (document_id) document_id, id
+                FROM document_analysis_runs
+                WHERE status = 'completed'
+                ORDER BY document_id, completed_at DESC NULLS LAST, created_at DESC, id DESC
+            ) sub
+            WHERE d.id::text = sub.document_id
+              AND d.active_analysis_run_id IS NULL
+        """))
+
         session.commit()
-        logger.info("Migrations (002-018) applied successfully.")
+        logger.info("Migrations (002-019) applied successfully.")
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema

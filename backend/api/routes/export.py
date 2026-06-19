@@ -16,6 +16,7 @@ from sqlalchemy import text as sa_text
 
 from dependencies import _require_teacher
 from core.postgres import get_session as _pg_session
+from core.document_pipeline.persistence import resolve_artifact_runs
 from routes.export_artifacts import (
     build_claims_export,
     build_component_graph_export,
@@ -206,56 +207,42 @@ def _get_document_ids_for_course(session: Any, course_id: str) -> list[str]:
 
 
 def _load_analysis_artifacts(session: Any, document_ids: list[str]) -> dict[str, dict]:
-    """Load `_artifacts` payload from document_analysis_runs for each document.
+    """Load `_artifacts` payload for each document's **adopted (active) run** (#408).
 
     Returns: {document_id: {stage_name: artifact_dict, ...}, ...}.
-    Picks the most recent run per document so resumed runs surface the
-    latest artifacts. Defensive: never raises on malformed JSONB.
+    Prefers the document's active_analysis_run_id; falls back to the latest
+    *completed* run for legacy documents. A latest running/failed (or rejected
+    candidate) run never overrides the adopted artifacts. Defensive: never raises
+    on malformed JSONB.
     """
     if not document_ids:
         return {}
-    placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
-    params = {f"doc_{i}": did for i, did in enumerate(document_ids)}
-    rows = session.execute(
-        sa_text(f"""
-            SELECT DISTINCT ON (document_id)
-                   document_id, stage_outputs, status, created_at
-            FROM document_analysis_runs
-            WHERE document_id IN ({placeholders})
-            ORDER BY document_id, created_at DESC
-        """),
-        params,
-    ).fetchall()
+    try:
+        resolved = resolve_artifact_runs(session, document_ids)
+    except Exception:
+        return {}
     out: dict[str, dict] = {}
-    for r in rows:
-        doc_id = str(r[0]) if r[0] else ""
-        if not doc_id:
-            continue
-        artifacts = get_artifacts(r[1])
+    for doc_id, info in resolved.items():
+        artifacts = get_artifacts(info.get("stage_outputs"))
         if artifacts:
             out[doc_id] = artifacts
     return out
 
 
 def _load_latest_run_ids(session: Any, document_ids: list[str]) -> dict[str, str]:
-    """Map each document to its most recent analysis run id (issue #383 metadata)."""
+    """Map each document to its **adopted (active) run id** for export metadata (#383/#408).
+
+    Uses the active run (artifact source-of-truth), falling back to the latest
+    completed run — not the latest running run, so processing status and artifact
+    provenance are never conflated.
+    """
     if not document_ids:
         return {}
-    placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
-    params = {f"doc_{i}": did for i, did in enumerate(document_ids)}
     try:
-        rows = session.execute(
-            sa_text(f"""
-                SELECT DISTINCT ON (document_id) document_id, id
-                FROM document_analysis_runs
-                WHERE document_id IN ({placeholders})
-                ORDER BY document_id, created_at DESC
-            """),
-            params,
-        ).fetchall()
+        resolved = resolve_artifact_runs(session, document_ids)
     except Exception:
         return {}
-    return {str(r[0]): str(r[1]) for r in rows if r[0] and r[1]}
+    return {doc_id: info["run_id"] for doc_id, info in resolved.items() if info.get("run_id")}
 
 
 # Artifact-first stage → fallback DB source mapping (issue #383). When a stage

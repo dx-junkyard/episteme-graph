@@ -148,21 +148,17 @@ def _load_document_ids(session, material_ids: list[str]) -> list[str]:
 
 
 def _load_latest_artifacts(session, document_ids: list[str]) -> dict[str, dict]:
+    """Load each document's adopted (active) run artifacts for course content (#408).
+
+    Prefers documents.active_analysis_run_id; falls back to the latest *completed*
+    run. A rejected candidate or in-flight latest run never feeds course content.
+    """
+    from core.document_pipeline.persistence import resolve_artifact_runs
+
     artifacts: dict[str, dict] = {}
-    for document_id in document_ids:
-        row = session.execute(
-            sa_text("""
-                SELECT stage_outputs
-                FROM document_analysis_runs
-                WHERE document_id::text = :document_id
-                ORDER BY created_at DESC
-                LIMIT 1
-            """),
-            {"document_id": document_id},
-        ).fetchone()
-        if not row or not row[0]:
-            continue
-        stage_outputs = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+    resolved = resolve_artifact_runs(session, document_ids)
+    for document_id, info in resolved.items():
+        stage_outputs = info.get("stage_outputs")
         doc_artifacts = stage_outputs.get("_artifacts") if isinstance(stage_outputs, dict) else None
         if isinstance(doc_artifacts, dict):
             artifacts[document_id] = doc_artifacts

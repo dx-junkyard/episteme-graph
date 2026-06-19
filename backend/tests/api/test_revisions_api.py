@@ -1,0 +1,237 @@
+"""API tests for revision accept/reject/revise endpoints (#407)."""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+BACKEND = Path(__file__).resolve().parents[2]   # .../backend
+REPO = BACKEND.parent
+SRC = REPO / "src"
+for p in (str(SRC), str(BACKEND), str(BACKEND / "api")):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+_HAS_FASTAPI = True
+try:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+except Exception:  # pragma: no cover
+    _HAS_FASTAPI = False
+
+pytestmark = pytest.mark.skipif(not _HAS_FASTAPI, reason="FastAPI not installed")
+
+
+@pytest.fixture
+def app_client(monkeypatch):
+    from dependencies import _require_teacher
+    from routes import revisions
+
+    app = FastAPI()
+    app.include_router(revisions.router, prefix="/api/admin")
+    app.dependency_overrides[_require_teacher] = lambda: {"id": "user-1", "role": "TEACHER"}
+
+    # default: document authorization passes (overridden per-test for denial)
+    monkeypatch.setattr(revisions, "_authorize_view", lambda doc, user: None)
+    monkeypatch.setattr(revisions, "_authorize_edit", lambda doc, user: None)
+
+    # default: the run exists and belongs to the document
+    monkeypatch.setattr(revisions.persistence, "get_analysis_run",
+                        lambda *, run_id: {"id": run_id, "run_type": "revision",
+                                           "document_id": "doc-1", "status": "running",
+                                           "revision_status": "proposed",
+                                           "base_run_id": "base-1",
+                                           "stage_outputs": {"_artifacts": {}}})
+    return TestClient(app), revisions, _require_teacher, app
+
+
+def test_create_revision(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    monkeypatch.setattr(revisions.coordinator, "start_revision_run",
+                        lambda **k: {"revision_run_id": "rev-1", "base_run_id": "base-1",
+                                     "audit_checkpoints": [{"checkpoint_id": "c1"}]})
+    resp = client.post("/api/admin/documents/doc-1/revisions")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["revision_run_id"] == "rev-1"
+    assert body["checkpoint_count"] == 1
+
+
+def test_create_revision_no_base_returns_409(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+
+    def _boom(**k):
+        raise ValueError("no adoptable base run")
+    monkeypatch.setattr(revisions.coordinator, "start_revision_run", _boom)
+    resp = client.post("/api/admin/documents/doc-1/revisions")
+    assert resp.status_code == 409
+
+
+def test_run_rejects_invalid_raw_operations_with_422(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    monkeypatch.setattr(
+        revisions.coordinator,
+        "audit_revision_run",
+        lambda **kwargs: {"verdict_counts": {}, "revision_targets": []},
+    )
+
+    def _invalid(**kwargs):
+        raise revisions.coordinator.ProposalValidationError([
+            {"raw": kwargs["operations"][0], "reason": "missing_source_or_evidence"},
+        ])
+
+    monkeypatch.setattr(revisions.coordinator, "assemble_candidate", _invalid)
+    resp = client.post(
+        "/api/admin/documents/doc-1/revisions/rev-1/run",
+        json={"operations": [{
+            "operation": "update_entity",
+            "target_type": "claim",
+            "target_id": "clm_1",
+        }]},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["rejected_operations"][0]["reason"] == "missing_source_or_evidence"
+
+
+def test_accept_success(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    monkeypatch.setattr(revisions.coordinator, "accept_revision",
+                        lambda **k: {"active_run_id": "rev-1", "superseded_run_id": "base-1"})
+    resp = client.post("/api/admin/documents/doc-1/revisions/rev-1/accept",
+                       json={"comment": "lgtm"})
+    assert resp.status_code == 200
+    assert resp.json()["accepted"] is True
+
+
+def test_accept_hard_error_returns_422(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    from core.document_pipeline.revision.coordinator import AcceptBlockedError
+
+    def _blocked(**k):
+        raise AcceptBlockedError("candidate has 3 hard error(s)")
+    monkeypatch.setattr(revisions.coordinator, "accept_revision", _blocked)
+    resp = client.post("/api/admin/documents/doc-1/revisions/rev-1/accept", json={})
+    assert resp.status_code == 422
+
+
+def test_accept_conflict_returns_409(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    from core.document_pipeline.persistence import RevisionConflictError
+
+    def _conflict(**k):
+        raise RevisionConflictError("active run changed")
+    monkeypatch.setattr(revisions.coordinator, "accept_revision", _conflict)
+    resp = client.post("/api/admin/documents/doc-1/revisions/rev-1/accept", json={})
+    assert resp.status_code == 409
+
+
+def test_reject_success(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    monkeypatch.setattr(revisions.coordinator, "reject_revision",
+                        lambda **k: {"run_id": "rev-1"})
+    resp = client.post("/api/admin/documents/doc-1/revisions/rev-1/reject",
+                       json={"comment": "no"})
+    assert resp.status_code == 200
+    assert resp.json()["rejected"] is True
+
+
+def test_revise_creates_child(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    monkeypatch.setattr(revisions.coordinator, "revise_revision_run",
+                        lambda **k: {"revision_run_id": "child-1", "base_run_id": "active-1",
+                                     "parent_revision_id": "rev-1",
+                                     "audit_checkpoints": []})
+    resp = client.post("/api/admin/documents/doc-1/revisions/rev-1/revise",
+                       json={"comment": "split eq"})
+    assert resp.status_code == 200
+    assert resp.json()["parent_revision_id"] == "rev-1"
+
+
+def test_report_404_when_missing(app_client):
+    client, _revisions, _dep, _app = app_client
+    resp = client.get("/api/admin/documents/doc-1/revisions/rev-1/report")
+    assert resp.status_code == 404
+
+
+def test_wrong_document_returns_404(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    monkeypatch.setattr(revisions.persistence, "get_analysis_run",
+                        lambda *, run_id: {"id": run_id, "run_type": "revision",
+                                           "document_id": "OTHER"})
+    resp = client.post("/api/admin/documents/doc-1/revisions/rev-1/accept", json={})
+    assert resp.status_code == 404
+
+
+def test_list_revisions_distinguishes_active_and_latest(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    monkeypatch.setattr(revisions.persistence, "get_run_lineage",
+                        lambda *, document_id: {
+                            "document_id": document_id,
+                            "active_run_id": "r1", "latest_run_id": "r2",
+                            "runs": [{"id": "r1", "is_active": True, "is_latest": False},
+                                     {"id": "r2", "is_active": False, "is_latest": True}]})
+    resp = client.get("/api/admin/documents/doc-1/revisions")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["active_run_id"] == "r1"
+    assert body["latest_run_id"] == "r2"
+    assert body["active_run_id"] != body["latest_run_id"]
+
+
+def test_authorization_required(app_client):
+    client, _revisions, dep, app = app_client
+    from fastapi import HTTPException
+
+    def _forbidden():
+        raise HTTPException(status_code=403, detail="teacher only")
+    app.dependency_overrides[dep] = _forbidden
+    resp = client.post("/api/admin/documents/doc-1/revisions")
+    assert resp.status_code == 403
+
+
+def test_write_endpoints_require_document_edit_permission(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    from fastapi import HTTPException
+
+    def _deny(doc, user):
+        raise HTTPException(status_code=404, detail="Document not found")
+    monkeypatch.setattr(revisions, "_authorize_edit", _deny)
+    # accept/reject/revise/run/create must all be blocked
+    for path, method in [
+        ("/api/admin/documents/doc-1/revisions", "post"),
+        ("/api/admin/documents/doc-1/revisions/rev-1/run", "post"),
+        ("/api/admin/documents/doc-1/revisions/rev-1/accept", "post"),
+        ("/api/admin/documents/doc-1/revisions/rev-1/reject", "post"),
+        ("/api/admin/documents/doc-1/revisions/rev-1/revise", "post"),
+    ]:
+        resp = getattr(client, method)(path, json={})
+        assert resp.status_code == 404, path
+
+
+def test_read_endpoints_require_document_view_permission(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    from fastapi import HTTPException
+
+    def _deny(doc, user):
+        raise HTTPException(status_code=404, detail="Document not found")
+    monkeypatch.setattr(revisions, "_authorize_view", _deny)
+    for path in [
+        "/api/admin/documents/doc-1/revisions",
+        "/api/admin/documents/doc-1/revisions/rev-1",
+        "/api/admin/documents/doc-1/revisions/rev-1/report",
+    ]:
+        resp = client.get(path)
+        assert resp.status_code == 404, path
+
+
+def test_write_endpoint_does_not_run_coordinator_when_unauthorized(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(revisions, "_authorize_edit",
+                        lambda doc, user: (_ for _ in ()).throw(HTTPException(status_code=404)))
+    monkeypatch.setattr(revisions.coordinator, "accept_revision",
+                        lambda **k: pytest.fail("coordinator must not run when unauthorized"))
+    resp = client.post("/api/admin/documents/doc-1/revisions/rev-1/accept", json={})
+    assert resp.status_code == 404

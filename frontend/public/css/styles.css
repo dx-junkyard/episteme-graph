@@ -4204,3 +4204,46 @@ body {
   color: var(--color-text-secondary);
   line-height: 1.4;
 }
+
+/* ── 反復改善 (Revisions) modal — #408 ───────────────────────────── */
+.eg-rev-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+  display: flex; align-items: flex-start; justify-content: center;
+  z-index: 1100; overflow-y: auto; padding: 32px 16px;
+}
+.eg-rev-box {
+  background: var(--color-surface, #fff); color: var(--color-text, #1a1a1a);
+  border-radius: 10px; width: min(960px, 96vw); max-width: 960px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.3); padding: 20px 24px;
+}
+.eg-rev-header { display: flex; align-items: center; justify-content: space-between; }
+.eg-rev-close { background: none; border: none; font-size: 24px; cursor: pointer; line-height: 1; }
+.eg-rev-active { margin: 8px 0; padding: 8px 10px; background: rgba(0,0,0,0.04); border-radius: 6px; font-size: 13px; }
+.eg-rev-active code { font-size: 12px; }
+.eg-rev-sep { color: var(--color-text-secondary, #888); margin: 0 6px; }
+.eg-rev-toolbar { display: flex; align-items: center; gap: 12px; margin: 8px 0 12px; }
+.eg-rev-hint, .eg-rev-empty { font-size: 12px; color: var(--color-text-secondary, #888); }
+.eg-rev-table, .eg-rev-metrics { width: 100%; border-collapse: collapse; font-size: 13px; margin: 6px 0; }
+.eg-rev-table th, .eg-rev-table td, .eg-rev-metrics th, .eg-rev-metrics td {
+  border: 1px solid rgba(0,0,0,0.1); padding: 4px 8px; text-align: left;
+}
+.eg-rev-metrics tr.eg-rev-changed { background: #fff6e0; font-weight: 600; }
+.eg-rev-badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 11px; }
+.eg-rev-badge-active { background: #1f9d55; color: #fff; }
+.eg-rev-badge-protected { background: #c0392b; color: #fff; }
+.eg-rev-detail { margin-top: 14px; border-top: 1px solid rgba(0,0,0,0.1); padding-top: 12px; }
+.eg-rev-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0; }
+.eg-rev-confirm { font-size: 12px; display: flex; align-items: center; gap: 4px; }
+.eg-rev-comment { flex: 1 1 200px; padding: 5px 8px; border: 1px solid rgba(0,0,0,0.2); border-radius: 5px; }
+.eg-rev-ops-text { width: 100%; min-height: 70px; font-family: monospace; font-size: 12px; margin-top: 6px; }
+.eg-rev-warn { background: #fdecea; color: #b71c1c; padding: 8px 10px; border-radius: 6px; margin: 8px 0; font-size: 13px; }
+.eg-rev-rec { font-size: 13px; margin: 6px 0; }
+.eg-rev-filter { display: flex; gap: 6px; margin: 8px 0; }
+.eg-rev-filter-btn { padding: 3px 10px; border: 1px solid rgba(0,0,0,0.2); border-radius: 14px; background: #fff; cursor: pointer; font-size: 12px; }
+.eg-rev-filter-btn.active { background: var(--color-primary, #2d6cdf); color: #fff; }
+.eg-rev-changes { list-style: none; padding: 0; margin: 0; }
+.eg-rev-change { border: 1px solid rgba(0,0,0,0.1); border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
+.eg-rev-ctype { font-weight: 600; text-transform: uppercase; font-size: 11px; color: var(--color-primary, #2d6cdf); }
+.eg-rev-reason, .eg-rev-trace { font-size: 12px; color: var(--color-text-secondary, #555); margin-top: 2px; }
+.eg-rev-decisions { margin-top: 12px; font-size: 12px; }
+.eg-rev-decisions ul { margin: 4px 0 0; padding-left: 18px; }

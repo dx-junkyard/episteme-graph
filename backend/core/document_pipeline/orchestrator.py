@@ -17,7 +17,9 @@ from .chunker import build_source_chunks
 from .dsl_text import dsl_result_to_search_text
 from .persistence import (
     _claim_legacy_keys,
+    get_active_analysis_run_id,
     get_latest_analysis_run,
+    set_active_analysis_run,
     load_source_chunk_index,
     persist_component_graph,
     persist_components,
@@ -1200,6 +1202,22 @@ def run_document_pipeline(
                 "dsl_edges": result.dsl_edge_count,
             }},
         )
+        # 初回 (initial) pipeline 完了時は、この Run を採用 (active) Run とする。
+        # 再解析でも最新の completed initial run を active に進める（従来の
+        # 「latest = 参照対象」挙動を維持）。revision Run はこの経路を通らず、
+        # accept API でのみ optimistic に active を切り替える (#402)。
+        # active pointer は best-effort: 失敗しても pipeline 自体は成功扱いにする。
+        try:
+            set_active_analysis_run(
+                document_id=document_id,
+                run_id=run_id,
+                expected_run_id=get_active_analysis_run_id(document_id=document_id),
+            )
+        except Exception:
+            logger.warning(
+                "failed to set active analysis run for document=%s run=%s",
+                document_id, run_id, exc_info=True,
+            )
         result.final_stage = "completed"
         report_done("completed", {
             "chunks": result.chunk_count,
