@@ -287,7 +287,6 @@ def accept_revision(
 
     candidate = run_artifacts.get(CANDIDATE_KEY) or {}
     candidate_artifacts = candidate.get("candidate_artifacts") or {}
-    graph_payload = candidate_artifacts.get("component_graph")
 
     return persistence.accept_revision(
         document_id=str(run.get("document_id")),
@@ -295,7 +294,7 @@ def accept_revision(
         expected_base_run_id=run.get("base_run_id"),
         changed_by=changed_by,
         comment=comment,
-        graph_payload=graph_payload,
+        candidate_artifacts=candidate_artifacts,
     )
 
 

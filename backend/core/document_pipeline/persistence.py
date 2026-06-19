@@ -1584,6 +1584,202 @@ def get_revision_decisions(*, run_id: str) -> list[dict]:
         session.close()
 
 
+# Allowed theory_claims.claim_type values (migration 013 CHECK). Candidate
+# claim types outside this set fall back to the generic diagnostic_claim.
+_THEORY_CLAIM_TYPES = {
+    "definition", "assumption", "approximation", "equation", "relation",
+    "derivation_step", "observable_definition", "correction", "uncertainty",
+    "limitation", "result", "diagnostic_claim", "equation_definition",
+    "equation_relation", "equation_transformation", "equation_approximation",
+    "equation_constraint",
+}
+
+
+def _rebuild_theory_claims_in_session(session, document_id: str, claims: list) -> dict[str, str]:
+    """Rebuild theory_claims from candidate claim_object_builder claims (#410 P1-5).
+
+    Operates on the caller's transaction (no commit). Returns agent claim_id → db id.
+    """
+    session.execute(
+        sa_text("DELETE FROM theory_claims WHERE document_id = :doc"),
+        {"doc": document_id},
+    )
+    id_map: dict[str, str] = {}
+    for c in claims or []:
+        if not isinstance(c, dict):
+            continue
+        agent_id = str(c.get("claim_id") or "")
+        ctype = c.get("claim_type") or "diagnostic_claim"
+        if ctype not in _THEORY_CLAIM_TYPES:
+            ctype = "diagnostic_claim"
+        equation_ids = [str(v) for v in (c.get("equation_ids") or []) if v]
+        source_scope = c.get("source_scope") or {"section_id": c.get("section_id")}
+        row = session.execute(
+            sa_text(
+                """
+                INSERT INTO theory_claims (
+                    document_id, source_scope, claim_type, text, normalized_text,
+                    concepts, equation, support_status, evidence_text, review_status
+                )
+                VALUES (
+                    :document_id, CAST(:source_scope AS jsonb), :claim_type, :text,
+                    :normalized_text, CAST(:concepts AS jsonb), CAST(:equation AS jsonb),
+                    :support_status, :evidence_text, :review_status
+                )
+                RETURNING id
+                """
+            ),
+            {
+                "document_id": _strip_nuls(document_id),
+                "source_scope": _json_dumps(source_scope),
+                "claim_type": ctype,
+                "text": _strip_nuls(c.get("text") or ""),
+                "normalized_text": _strip_nuls(c.get("normalized_text") or c.get("text") or ""),
+                "concepts": _json_dumps(c.get("concepts") or []),
+                "equation": _json_dumps({"equation_ids": equation_ids} if equation_ids else {}),
+                "support_status": c.get("support_status") or "source_backed",
+                "evidence_text": "",
+                "review_status": c.get("review_status") or "teacher_review_required",
+            },
+        ).fetchone()
+        if agent_id:
+            id_map[agent_id] = str(row[0])
+    return id_map
+
+
+def _rebuild_theory_components_in_session(
+    session, document_id: str, components: list, claim_id_map: dict[str, str]
+) -> dict[str, str]:
+    """Rebuild theory_components + theory_component_links from candidate components."""
+    session.execute(
+        sa_text("DELETE FROM theory_component_links WHERE document_id = :doc"),
+        {"doc": document_id},
+    )
+    session.execute(
+        sa_text("DELETE FROM theory_components WHERE document_id = :doc"),
+        {"doc": document_id},
+    )
+    claim_id_map = claim_id_map or {}
+    id_map: dict[str, str] = {}
+    for comp in components or []:
+        if not isinstance(comp, dict):
+            continue
+        agent_id = str(comp.get("component_id") or "")
+        evidence_refs = comp.get("evidence_refs") if isinstance(comp.get("evidence_refs"), dict) else {}
+        linked_claim_ids = [str(v) for v in (comp.get("linked_claim_ids") or []) if v]
+        evidence_claims_agent = list(dict.fromkeys(
+            linked_claim_ids + [str(v) for v in (evidence_refs.get("claim_ids") or []) if v]
+        ))
+        evidence_claims_db = [claim_id_map.get(a, a) for a in evidence_claims_agent]
+        row = session.execute(
+            sa_text(
+                """
+                INSERT INTO theory_components (
+                    course_id, document_id, name, component_type, component_type_text,
+                    summary, status, source_chunks, inputs, outputs, preconditions,
+                    constraints, invalid_conditions, dependencies, blackbox_policy,
+                    validation_warnings, teacher_notes, source_scope, evidence_claims,
+                    maturity_level, maturity_source, review_status, cautions,
+                    connectors, internal_flow, duplicate_candidates
+                )
+                VALUES (
+                    NULL, :document_id, :name, 'theory', :component_type_text,
+                    :summary, 'candidate', CAST(:source_chunks AS jsonb),
+                    CAST(:inputs AS jsonb), CAST(:outputs AS jsonb),
+                    CAST(:preconditions AS jsonb), CAST(:constraints AS jsonb),
+                    CAST(:invalid_conditions AS jsonb), CAST(:dependencies AS jsonb),
+                    CAST(:blackbox_policy AS jsonb), CAST(:validation_warnings AS jsonb),
+                    :teacher_notes, CAST(:source_scope AS jsonb),
+                    CAST(:evidence_claims AS jsonb), :maturity_level, :maturity_source,
+                    :review_status, CAST(:cautions AS jsonb), CAST(:connectors AS jsonb),
+                    CAST(:internal_flow AS jsonb), CAST(:duplicate_candidates AS jsonb)
+                )
+                RETURNING id
+                """
+            ),
+            {
+                "document_id": document_id,
+                "name": _strip_nuls(comp.get("label") or comp.get("name") or "Untitled"),
+                "component_type_text": _strip_nuls(comp.get("component_type") or comp.get("responsibility_type") or ""),
+                "summary": _strip_nuls(comp.get("summary") or ""),
+                "source_chunks": _json_dumps(evidence_refs.get("source_chunks") or []),
+                "inputs": _json_dumps(comp.get("inputs") or []),
+                "outputs": _json_dumps(comp.get("outputs") or []),
+                "preconditions": _json_dumps(comp.get("preconditions") or []),
+                "constraints": _json_dumps(comp.get("constraints") or []),
+                "invalid_conditions": _json_dumps(comp.get("invalid_conditions") or []),
+                "dependencies": _json_dumps(comp.get("dependencies") or []),
+                "blackbox_policy": _json_dumps({"default_level": "summary", "expand_if_unlearned": True}),
+                "validation_warnings": _json_dumps([]),
+                "teacher_notes": _strip_nuls(comp.get("teaching_takeaway") or ""),
+                "source_scope": _json_dumps({"document_id": document_id, "legacy_ids": [agent_id]}),
+                "evidence_claims": _json_dumps(evidence_claims_db),
+                "maturity_level": comp.get("maturity_level") or "paper_claim",
+                "maturity_source": comp.get("maturity_source") or "llm_proposed",
+                "review_status": comp.get("review_status") or "teacher_review_required",
+                "cautions": _json_dumps(comp.get("cautions") or []),
+                "connectors": _json_dumps(comp.get("connectors") or {}),
+                "internal_flow": _json_dumps(comp.get("internal_flow") or []),
+                "duplicate_candidates": _json_dumps([]),
+            },
+        ).fetchone()
+        if agent_id:
+            id_map[agent_id] = str(row[0])
+
+    # Dependency links.
+    for comp in components or []:
+        if not isinstance(comp, dict):
+            continue
+        src_db = id_map.get(str(comp.get("component_id") or ""))
+        if not src_db:
+            continue
+        for dep in comp.get("dependencies") or []:
+            if not isinstance(dep, dict):
+                continue
+            dep_type = dep.get("dependency_type") or "depends_on"
+            link_type = "requires" if dep_type == "requires" else "depends_on"
+            for ref in dep.get("component_refs") or []:
+                dst_db = id_map.get(str(ref))
+                if not dst_db or dst_db == src_db:
+                    continue
+                session.execute(
+                    sa_text(
+                        """
+                        INSERT INTO theory_component_links (
+                            course_id, document_id, source_component_id,
+                            target_component_id, link_type, status, validation_result
+                        )
+                        VALUES (
+                            NULL, :document_id, CAST(:src AS uuid), CAST(:dst AS uuid),
+                            :link_type, 'candidate', CAST(:validation AS jsonb)
+                        )
+                        """
+                    ),
+                    {
+                        "document_id": document_id, "src": src_db, "dst": dst_db,
+                        "link_type": link_type,
+                        "validation": _json_dumps({"agent_dependency_type": dep_type,
+                                                   "reason": dep.get("reason")}),
+                    },
+                )
+    return id_map
+
+
+def _rebuild_component_graph_in_session(session, document_id: str, graph_payload: dict) -> None:
+    session.execute(
+        sa_text(
+            """
+            INSERT INTO theory_component_graphs (document_id, graph_json, scope, updated_at)
+            VALUES (:doc, CAST(:graph AS jsonb), CAST(:scope AS jsonb), now())
+            ON CONFLICT (document_id)
+            DO UPDATE SET graph_json = EXCLUDED.graph_json, updated_at = now()
+            """
+        ),
+        {"doc": document_id, "graph": _json_dumps(graph_payload),
+         "scope": _json_dumps({"level": "paper"})},
+    )
+
+
 def accept_revision(
     *,
     document_id: str,
@@ -1591,16 +1787,20 @@ def accept_revision(
     expected_base_run_id: str | None,
     changed_by: str | None = None,
     comment: str = "",
-    graph_payload: dict | None = None,
+    candidate_artifacts: dict | None = None,
 ) -> dict:
-    """Accept a candidate revision in a single transaction (#407).
+    """Accept a candidate revision in a single transaction (#407 / #410 P1-5).
 
     Switches the document active run base→candidate with optimistic concurrency,
-    rebuilds the component-graph projection from the candidate, marks the
-    candidate accepted and the superseded revision base, and records a decision
-    event. Raises ``RevisionConflictError`` (→ 409) when the active run has moved
-    since the candidate was proposed, or the candidate is not ``proposed``.
+    rebuilds ALL document-scoped projections (theory_claims, theory_components,
+    theory_component_links, theory_component_graphs) from the candidate artifacts,
+    marks the candidate accepted and the superseded revision base, and records a
+    decision event — all in one transaction. Any projection failure rolls the
+    whole thing back (active pointer + projections unchanged). Raises
+    ``RevisionConflictError`` (→ 409) when the active run moved since the candidate
+    was proposed, or the candidate is not ``proposed``.
     """
+    candidate_artifacts = candidate_artifacts or {}
     session = _pg_session()
     try:
         row = session.execute(
@@ -1642,23 +1842,16 @@ def accept_revision(
                 "active run changed since the candidate was proposed; refusing to accept"
             )
 
-        # Projection rebuild (in-transaction): component graph from the candidate.
+        # Projection rebuild (in-transaction): claims, components+links, graph —
+        # all from the candidate artifacts. Any failure here rolls back the active
+        # switch too (single transaction), so projections + active never diverge.
+        claims = ((candidate_artifacts.get("claim_object_builder") or {}).get("claims")) or []
+        components = ((candidate_artifacts.get("component_assembly") or {}).get("components")) or []
+        graph_payload = candidate_artifacts.get("component_graph")
+        claim_id_map = _rebuild_theory_claims_in_session(session, document_id, claims)
+        _rebuild_theory_components_in_session(session, document_id, components, claim_id_map)
         if graph_payload is not None:
-            session.execute(
-                sa_text(
-                    """
-                    INSERT INTO theory_component_graphs (document_id, graph_json, scope, updated_at)
-                    VALUES (:doc, CAST(:graph AS jsonb), CAST(:scope AS jsonb), now())
-                    ON CONFLICT (document_id)
-                    DO UPDATE SET graph_json = EXCLUDED.graph_json, updated_at = now()
-                    """
-                ),
-                {
-                    "doc": document_id,
-                    "graph": _json_dumps(graph_payload),
-                    "scope": _json_dumps({"level": "paper"}),
-                },
-            )
+            _rebuild_component_graph_in_session(session, document_id, graph_payload)
 
         session.execute(
             sa_text(

@@ -122,11 +122,14 @@ def test_entity_change_traces_to_checkpoint_and_evidence():
 
 
 def test_protected_change_listed_independently():
+    # Protection is server-determined: mark clm_1 teacher_approved in the base so
+    # the update is detected as protected regardless of the client flag.
+    base = _artifacts(extra_review=True)
+    base["claim_object_builder"]["claims"][0]["review_status"] = "teacher_approved"
     report, _ = _report_for([
         make_operation(operation="update_entity", target_type="claim",
-                       target_id="clm_1", after_json={"text": "B."},
-                       protected_target=True),
-    ])
+                       target_id="clm_1", after_json={"text": "B."}),
+    ], base=base)
     assert report["summary"]["protected_change_count"] == 1
     assert report["protected_changes"][0]["target_id"] == "clm_1"
     assert report["summary"]["requires_confirmation"] is True

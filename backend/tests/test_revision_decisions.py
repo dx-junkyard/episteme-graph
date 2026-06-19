@@ -72,13 +72,18 @@ def test_accept_switches_active_and_records_decision(monkeypatch):
     out = persistence.accept_revision(
         document_id="doc-1", run_id="rev-1", expected_base_run_id="base-1",
         changed_by="11111111-1111-1111-1111-111111111111", comment="ok",
-        graph_payload={"nodes": [], "edges": []},
+        candidate_artifacts={"component_graph": {"nodes": [], "edges": []},
+                             "claim_object_builder": {"claims": []},
+                             "component_assembly": {"components": []}},
     )
     assert out["accepted"] is True
     assert session.committed is True
     joined = "\n".join(session.sql)
     assert "UPDATE documents" in joined and "IS NOT DISTINCT FROM" in joined
-    assert "theory_component_graphs" in joined  # projection rebuilt in txn
+    # all projections rebuilt in the same transaction
+    assert "theory_component_graphs" in joined
+    assert "DELETE FROM theory_claims" in joined
+    assert "DELETE FROM theory_components" in joined
     assert "theory_review_events" in joined      # decision recorded
     assert "revision_status = 'accepted'" in joined
 
@@ -170,7 +175,7 @@ def test_coordinator_accept_passes_base_and_graph(monkeypatch):
     out = coordinator.accept_revision(document_id="doc-1", run_id="rev-1", comment="go")
     assert out["accepted"] is True
     assert captured["expected_base_run_id"] == "base-1"
-    assert captured["graph_payload"] == {"nodes": []}
+    assert captured["candidate_artifacts"]["component_graph"] == {"nodes": []}
     assert captured["comment"] == "go"
 
 
