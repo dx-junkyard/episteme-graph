@@ -243,3 +243,120 @@ def revalidate_and_report(*, run_id: str, base_run: dict | None = None) -> dict:
         }},
     )
     return {"revision_run_id": run_id, "report": report, "candidate_validation": gate_candidate}
+
+
+class AcceptBlockedError(RuntimeError):
+    """Raised when a candidate cannot be accepted (hard errors / unconfirmed protected)."""
+
+
+def accept_revision(
+    *,
+    document_id: str,
+    run_id: str,
+    changed_by: str | None = None,
+    comment: str = "",
+    confirm_protected: bool = False,
+) -> dict:
+    """Validate-then-accept a candidate revision (#407).
+
+    Refuses candidates with hard errors / invalid status (AcceptBlockedError) and
+    candidates with unconfirmed protected changes. Delegates the atomic state
+    switch to ``persistence.accept_revision`` (raises RevisionConflictError → 409).
+    """
+    run = persistence.get_analysis_run(run_id=run_id)
+    if not run:
+        raise ValueError(f"revision run {run_id} not found")
+    if run.get("run_type") != "revision":
+        raise ValueError(f"run {run_id} is not a revision run")
+    if document_id and str(run.get("document_id")) != str(document_id):
+        raise ValueError("revision run does not belong to this document")
+
+    run_artifacts = get_artifacts(run.get("stage_outputs"))
+    report = run_artifacts.get(DIFF_REPORT_KEY)
+    if not report:
+        raise AcceptBlockedError("candidate has not been validated; run report first")
+    summary = report.get("summary") or {}
+    if not summary.get("acceptable", False) or summary.get("hard_error_count", 0) > 0:
+        raise AcceptBlockedError(
+            f"candidate has {summary.get('hard_error_count', 0)} hard error(s) or is invalid"
+        )
+    if summary.get("protected_change_count", 0) > 0 and not confirm_protected:
+        raise AcceptBlockedError(
+            "candidate changes teacher-approved / manually-edited items; explicit confirmation required"
+        )
+
+    candidate = run_artifacts.get(CANDIDATE_KEY) or {}
+    candidate_artifacts = candidate.get("candidate_artifacts") or {}
+    graph_payload = candidate_artifacts.get("component_graph")
+
+    return persistence.accept_revision(
+        document_id=str(run.get("document_id")),
+        run_id=run_id,
+        expected_base_run_id=run.get("base_run_id"),
+        changed_by=changed_by,
+        comment=comment,
+        graph_payload=graph_payload,
+    )
+
+
+def reject_revision(*, run_id: str, changed_by: str | None = None, comment: str = "") -> dict:
+    """Reject a candidate revision (active run + projections unchanged)."""
+    return persistence.reject_revision(run_id=run_id, changed_by=changed_by, comment=comment)
+
+
+def revise_revision_run(
+    *,
+    document_id: str,
+    parent_run_id: str,
+    created_by: str | None = None,
+    comment: str = "",
+) -> dict:
+    """Create a child revision from a proposed candidate (#407 revise).
+
+    The new revision keeps the adopted active run as its ``base_run_id`` and the
+    current candidate as ``parent_revision_id``. A user comment is carried into
+    the new plan as an extra manual checkpoint.
+    """
+    parent = persistence.get_analysis_run(run_id=parent_run_id)
+    if not parent or parent.get("run_type") != "revision":
+        raise ValueError(f"parent revision run {parent_run_id} not found")
+
+    base = persistence.resolve_artifact_run(document_id=document_id)
+    if not base or not base.get("id"):
+        raise ValueError(f"no adoptable base run for document {document_id}")
+
+    run_id = persistence.create_revision_run(
+        document_id=document_id,
+        base_run_id=str(base["id"]),
+        material_id=base.get("material_id"),
+        cartridge_id=base.get("cartridge_id"),
+        created_by=created_by,
+        parent_revision_id=parent_run_id,
+        revision_status="preparing",
+    )
+
+    plan = build_revision_plan(base, document_id=document_id)
+    if comment:
+        plan[AUDIT_CHECKPOINTS_KEY] = [
+            {
+                "checkpoint_id": f"ckpt_user_{parent_run_id[:8]}",
+                "target_type": "document", "target_id": document_id,
+                "question": comment, "trigger_reason": "user_comment",
+                "severity": "review_required", "expected_evidence_type": "source_text",
+                "source_scope": [], "verification_strategy": "user_directed",
+                "status": "planned",
+            },
+            *plan.get(AUDIT_CHECKPOINTS_KEY, []),
+        ]
+
+    persistence.update_revision_status(
+        run_id=run_id, revision_status="preparing",
+        stage_outputs={ARTIFACTS_KEY: plan},
+    )
+    return {
+        "revision_run_id": run_id,
+        "base_run_id": str(base["id"]),
+        "parent_revision_id": parent_run_id,
+        "document_id": document_id,
+        **plan,
+    }

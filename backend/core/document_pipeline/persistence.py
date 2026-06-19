@@ -1433,6 +1433,229 @@ def get_run_lineage(*, document_id: str) -> dict:
         session.close()
 
 
+class RevisionConflictError(RuntimeError):
+    """Raised when a revision accept loses the optimistic concurrency race."""
+
+
+def _insert_revision_decision(
+    session,
+    *,
+    run_id: str,
+    old_status: str,
+    new_status: str,
+    changed_by: str | None,
+    metadata: dict,
+) -> None:
+    session.execute(
+        sa_text(
+            """
+            INSERT INTO theory_review_events (
+                entity_type, entity_id, old_status, new_status, changed_by, metadata
+            )
+            VALUES (
+                'revision_run', :entity_id, :old_status, :new_status,
+                CAST(:changed_by AS uuid), CAST(:metadata AS jsonb)
+            )
+            """
+        ),
+        {
+            "entity_id": run_id,
+            "old_status": old_status or "",
+            "new_status": new_status or "",
+            "changed_by": changed_by,
+            "metadata": _json_dumps(metadata or {}),
+        },
+    )
+
+
+def get_revision_decisions(*, run_id: str) -> list[dict]:
+    """Return the decision audit history for a revision run."""
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                """
+                SELECT old_status, new_status, changed_by::text, metadata, created_at
+                FROM theory_review_events
+                WHERE entity_type = 'revision_run' AND entity_id = :run_id
+                ORDER BY created_at ASC
+                """
+            ),
+            {"run_id": run_id},
+        ).mappings().all()
+        return [dict(r) for r in rows]
+    finally:
+        session.close()
+
+
+def accept_revision(
+    *,
+    document_id: str,
+    run_id: str,
+    expected_base_run_id: str | None,
+    changed_by: str | None = None,
+    comment: str = "",
+    graph_payload: dict | None = None,
+) -> dict:
+    """Accept a candidate revision in a single transaction (#407).
+
+    Switches the document active run base→candidate with optimistic concurrency,
+    rebuilds the component-graph projection from the candidate, marks the
+    candidate accepted and the superseded revision base, and records a decision
+    event. Raises ``RevisionConflictError`` (→ 409) when the active run has moved
+    since the candidate was proposed, or the candidate is not ``proposed``.
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text(
+                """
+                SELECT status, revision_status, base_run_id::text, run_type
+                FROM document_analysis_runs
+                WHERE id = CAST(:rid AS uuid)
+                FOR UPDATE
+                """
+            ),
+            {"rid": run_id},
+        ).fetchone()
+        if not row:
+            raise ValueError(f"revision run {run_id} not found")
+        _status, rev_status, base_id, run_type = row
+        if run_type != "revision":
+            raise ValueError(f"run {run_id} is not a revision run")
+        if rev_status != "proposed":
+            raise RevisionConflictError(
+                f"revision {run_id} is not in 'proposed' state (revision_status={rev_status})"
+            )
+        if expected_base_run_id and base_id and expected_base_run_id != base_id:
+            raise RevisionConflictError("base_run_id mismatch with candidate")
+
+        switched = session.execute(
+            sa_text(
+                """
+                UPDATE documents
+                SET active_analysis_run_id = CAST(:cand AS uuid), updated_at = now()
+                WHERE id = CAST(:doc AS uuid)
+                  AND active_analysis_run_id IS NOT DISTINCT FROM CAST(:base AS uuid)
+                """
+            ),
+            {"cand": run_id, "doc": document_id, "base": base_id},
+        ).rowcount
+        if switched != 1:
+            raise RevisionConflictError(
+                "active run changed since the candidate was proposed; refusing to accept"
+            )
+
+        # Projection rebuild (in-transaction): component graph from the candidate.
+        if graph_payload is not None:
+            session.execute(
+                sa_text(
+                    """
+                    INSERT INTO theory_component_graphs (document_id, graph_json, scope, updated_at)
+                    VALUES (:doc, CAST(:graph AS jsonb), CAST(:scope AS jsonb), now())
+                    ON CONFLICT (document_id)
+                    DO UPDATE SET graph_json = EXCLUDED.graph_json, updated_at = now()
+                    """
+                ),
+                {
+                    "doc": document_id,
+                    "graph": _json_dumps(graph_payload),
+                    "scope": _json_dumps({"level": "paper"}),
+                },
+            )
+
+        session.execute(
+            sa_text(
+                """
+                UPDATE document_analysis_runs
+                SET revision_status = 'accepted', status = 'completed',
+                    completed_at = now(), updated_at = now()
+                WHERE id = CAST(:rid AS uuid)
+                """
+            ),
+            {"rid": run_id},
+        )
+        # The superseded base — only mark revisions; an initial base keeps NULL.
+        if base_id:
+            session.execute(
+                sa_text(
+                    """
+                    UPDATE document_analysis_runs
+                    SET revision_status = 'superseded', updated_at = now()
+                    WHERE id = CAST(:base AS uuid) AND run_type = 'revision'
+                    """
+                ),
+                {"base": base_id},
+            )
+        _insert_revision_decision(
+            session, run_id=run_id, old_status="proposed", new_status="accepted",
+            changed_by=changed_by,
+            metadata={"decision": "accept", "comment": comment,
+                      "document_id": document_id, "base_run_id": base_id},
+        )
+        session.commit()
+        return {"accepted": True, "active_run_id": run_id, "superseded_run_id": base_id}
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def reject_revision(
+    *,
+    run_id: str,
+    changed_by: str | None = None,
+    comment: str = "",
+) -> dict:
+    """Reject a candidate revision. Never touches the active run or projections."""
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text(
+                """
+                SELECT revision_status, run_type
+                FROM document_analysis_runs
+                WHERE id = CAST(:rid AS uuid)
+                FOR UPDATE
+                """
+            ),
+            {"rid": run_id},
+        ).fetchone()
+        if not row:
+            raise ValueError(f"revision run {run_id} not found")
+        rev_status, run_type = row
+        if run_type != "revision":
+            raise ValueError(f"run {run_id} is not a revision run")
+        if rev_status in ("accepted", "superseded"):
+            raise RevisionConflictError(
+                f"cannot reject revision in '{rev_status}' state"
+            )
+        session.execute(
+            sa_text(
+                """
+                UPDATE document_analysis_runs
+                SET revision_status = 'rejected', status = 'completed',
+                    completed_at = now(), updated_at = now()
+                WHERE id = CAST(:rid AS uuid)
+                """
+            ),
+            {"rid": run_id},
+        )
+        _insert_revision_decision(
+            session, run_id=run_id, old_status=rev_status or "proposed",
+            new_status="rejected", changed_by=changed_by,
+            metadata={"decision": "reject", "comment": comment},
+        )
+        session.commit()
+        return {"rejected": True, "run_id": run_id}
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
 def load_source_chunk_index(*, document_id: str) -> list[dict]:
     """Load persisted source chunk metadata for downstream evidence resolution."""
     session = _pg_session()
