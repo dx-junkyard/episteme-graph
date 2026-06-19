@@ -440,6 +440,7 @@
     });
     html +=
           '<div class="ls-menu-divider"></div>' +
+          '<button class="ls-menu-item material-revision-item" type="button" data-document-id="' + escHtml(material.document_id || "") + '"' + disabled + '><span class="ls-step-mark"></span><span>反復改善（採用版を保ったまま）</span></button>' +
           '<button class="ls-menu-item material-export-item" type="button"><span class="ls-step-mark"></span><span>外部レビュー用に書き出し</span></button>' +
         '</div>' +
       '</div>';
@@ -469,6 +470,18 @@
         if (panel) panel.hidden = true;
         if (!confirm("既存の実行結果を上書きします。本当に実行しますか？")) return;
         runMaterialPipeline(menu.getAttribute("data-material-id"), this.getAttribute("data-stage") || "");
+      });
+    });
+    root.querySelectorAll(".material-revision-item").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var menu = this.closest(".material-pipeline-menu");
+        var docId = this.getAttribute("data-document-id");
+        if (menu) {
+          var panel = menu.querySelector(".material-pipeline-panel");
+          if (panel) panel.hidden = true;
+        }
+        if (!docId) { alert("この教材にはまだドキュメントが紐づいていません。"); return; }
+        if (window.EGRevisions) window.EGRevisions.open(docId);
       });
     });
     root.querySelectorAll(".material-export-item").forEach(function (btn) {
@@ -8720,6 +8733,277 @@
       document.getElementById("refresh-materials").addEventListener("click", loadMaterials);
     }
   }
+
+  // ── 反復改善 (Iterative improvement / Revisions) UI (#408) ───────────
+  // 採用版 (active run) を保持したまま改善候補を生成・検証・採否する管理UI。
+  // latest run（処理状況）と active run（採用成果物）を明確に区別して表示する。
+  var EGRevisions = (function () {
+    var current = { documentId: null, revisionId: null, report: null, filter: "all" };
+
+    function el(id) { return document.getElementById(id); }
+    function close() { var m = el("eg-rev-modal"); if (m) m.remove(); }
+    function docPath() { return "/admin/documents/" + encodeURIComponent(current.documentId) + "/revisions"; }
+
+    function open(documentId) {
+      current.documentId = documentId;
+      current.revisionId = null;
+      current.report = null;
+      current.filter = "all";
+      renderModal();
+      loadList();
+    }
+
+    function renderModal() {
+      close();
+      var overlay = document.createElement("div");
+      overlay.id = "eg-rev-modal";
+      overlay.className = "eg-rev-overlay";
+      overlay.innerHTML =
+        '<div class="eg-rev-box">' +
+          '<div class="eg-rev-header">' +
+            '<h3>反復改善パイプライン</h3>' +
+            '<button id="eg-rev-close" class="eg-rev-close" type="button">×</button>' +
+          '</div>' +
+          '<div class="eg-rev-active" id="eg-rev-active">読み込み中…</div>' +
+          '<div class="eg-rev-toolbar">' +
+            '<button id="eg-rev-start" class="admin-action-btn" type="button">改善処理を開始</button>' +
+            '<span class="eg-rev-hint">採用済み成果物は変更されません。</span>' +
+          '</div>' +
+          '<div class="eg-rev-list" id="eg-rev-list"></div>' +
+          '<div class="eg-rev-detail" id="eg-rev-detail"></div>' +
+        '</div>';
+      document.body.appendChild(overlay);
+      el("eg-rev-close").addEventListener("click", close);
+      el("eg-rev-start").addEventListener("click", startRevision);
+    }
+
+    function loadList() {
+      apiFetch(docPath())
+        .then(function (r) { return r.json(); })
+        .then(renderList)
+        .catch(function () { if (el("eg-rev-list")) el("eg-rev-list").textContent = "一覧の取得に失敗しました。"; });
+    }
+
+    function renderList(lineage) {
+      var act = el("eg-rev-active");
+      if (act) {
+        act.innerHTML =
+          '採用版 (active run): <code>' + escHtml(lineage.active_run_id || "なし（既存データへfallback）") + '</code>' +
+          ' <span class="eg-rev-sep">|</span> 最新run (処理状況): <code>' + escHtml(lineage.latest_run_id || "-") + '</code>';
+      }
+      var runs = (lineage.runs || []).filter(function (r) { return r.run_type === "revision"; });
+      var listEl = el("eg-rev-list");
+      if (!listEl) return;
+      if (!runs.length) { listEl.innerHTML = '<p class="eg-rev-empty">まだ改善runはありません。</p>'; return; }
+      var html = '<table class="eg-rev-table"><thead><tr><th>revision</th><th>状態</th><th>base</th><th></th></tr></thead><tbody>';
+      runs.forEach(function (r) {
+        html += '<tr><td><code>' + escHtml((r.id || "").slice(0, 8)) + '</code>' +
+            (r.is_active ? ' <span class="eg-rev-badge eg-rev-badge-active">採用中</span>' : '') + '</td>' +
+          '<td><span class="eg-rev-status">' + escHtml(r.revision_status || r.status || "") + '</span></td>' +
+          '<td><code>' + escHtml((r.base_run_id || "").slice(0, 8)) + '</code></td>' +
+          '<td><button class="eg-rev-open admin-action-btn" type="button" data-rev="' + escHtml(r.id) + '">詳細</button></td></tr>';
+      });
+      html += '</tbody></table>';
+      listEl.innerHTML = html;
+      listEl.querySelectorAll(".eg-rev-open").forEach(function (b) {
+        b.addEventListener("click", function () { openDetail(this.getAttribute("data-rev")); });
+      });
+    }
+
+    function startRevision() {
+      var btn = el("eg-rev-start"); if (btn) btn.disabled = true;
+      apiFetch(docPath(), { method: "POST", body: "{}" })
+        .then(function (r) {
+          if (r.status === 409) throw new Error("採用版（active run）がありません。先に解析を完了してください。");
+          return r.json();
+        })
+        .then(function (data) {
+          if (btn) btn.disabled = false;
+          loadList();
+          if (data.revision_run_id) openDetail(data.revision_run_id);
+        })
+        .catch(function (e) { if (btn) btn.disabled = false; alert("開始に失敗: " + (e.message || e)); });
+    }
+
+    function openDetail(revId) {
+      current.revisionId = revId;
+      current.report = null;
+      apiFetch(docPath() + "/" + encodeURIComponent(revId))
+        .then(function (r) { return r.json(); })
+        .then(function (detail) { renderDetail(detail); if (detail.has_report) loadReport(); })
+        .catch(function () { alert("詳細の取得に失敗しました。"); });
+    }
+
+    function decisionsHtml(decisions) {
+      if (!decisions || !decisions.length) return "";
+      var rows = decisions.map(function (d) {
+        var meta = d.metadata || {};
+        return '<li>' + escHtml(d.old_status) + ' → <strong>' + escHtml(d.new_status) + '</strong>' +
+          (meta.comment ? ' — ' + escHtml(meta.comment) : '') + '</li>';
+      }).join("");
+      return '<div class="eg-rev-decisions"><h5>監査履歴</h5><ul>' + rows + '</ul></div>';
+    }
+
+    function renderDetail(detail) {
+      var d = el("eg-rev-detail"); if (!d) return;
+      var html = '<div class="eg-rev-detail-head"><h4>revision <code>' +
+          escHtml((detail.revision_run_id || "").slice(0, 8)) + '</code></h4>' +
+        '<div>状態: <strong>' + escHtml(detail.revision_status || detail.status || "") + '</strong>' +
+        ' / checkpoints: ' + (detail.checkpoint_count || 0) + '</div></div>';
+      html += '<details class="eg-rev-ops"><summary>revision operations (JSON) を指定して候補生成</summary>' +
+        '<textarea id="eg-rev-ops" class="eg-rev-ops-text" placeholder="[]"></textarea></details>';
+      html += '<div class="eg-rev-actions">' +
+        '<button id="eg-rev-run" class="admin-action-btn" type="button">監査＋候補生成</button>' +
+        '<button id="eg-rev-accept" class="admin-action-btn"' + (detail.has_report ? '' : ' disabled') + ' type="button">採用</button>' +
+        '<button id="eg-rev-reject" class="admin-action-btn" type="button">却下</button>' +
+        '<button id="eg-rev-revise" class="admin-action-btn" type="button">再修正</button>' +
+        '<label class="eg-rev-confirm"><input type="checkbox" id="eg-rev-confirm-protected"> 保護項目の変更を明示承認</label>' +
+        '<input id="eg-rev-comment" class="eg-rev-comment" placeholder="決定コメント">' +
+        '</div>';
+      html += '<div class="eg-rev-report" id="eg-rev-report"></div>';
+      html += decisionsHtml(detail.decisions);
+      d.innerHTML = html;
+      el("eg-rev-run").addEventListener("click", runRevision);
+      el("eg-rev-accept").addEventListener("click", acceptRevision);
+      el("eg-rev-reject").addEventListener("click", rejectRevision);
+      el("eg-rev-revise").addEventListener("click", reviseRevision);
+    }
+
+    function runRevision() {
+      var btn = el("eg-rev-run"); if (btn) { btn.disabled = true; btn.textContent = "処理中…"; }
+      var body = {};
+      var opsEl = el("eg-rev-ops");
+      if (opsEl && opsEl.value.trim()) {
+        try { body.operations = JSON.parse(opsEl.value); }
+        catch (e) { alert("operations の JSON が不正です。"); if (btn) { btn.disabled = false; btn.textContent = "監査＋候補生成"; } return; }
+      }
+      apiFetch(docPath() + "/" + encodeURIComponent(current.revisionId) + "/run",
+               { method: "POST", body: JSON.stringify(body) })
+        .then(function (r) { return r.json(); })
+        .then(function () { openDetail(current.revisionId); })
+        .catch(function () { alert("処理に失敗しました。"); if (btn) { btn.disabled = false; btn.textContent = "監査＋候補生成"; } });
+    }
+
+    function loadReport() {
+      apiFetch(docPath() + "/" + encodeURIComponent(current.revisionId) + "/report")
+        .then(function (r) { if (!r.ok) throw new Error("no report"); return r.json(); })
+        .then(function (report) { current.report = report; renderReport(); })
+        .catch(function () {});
+    }
+
+    function metricsTable(before, after) {
+      before = before || {}; after = after || {};
+      var keys = [
+        ["hard_error_count", "hard error"], ["warning_count", "warning"],
+        ["review_required_count", "review required"], ["unresolved_reference_count", "未解決参照"],
+        ["source_backed_rate", "source-backed率"], ["low_confidence_equation_count", "低conf式"],
+        ["main_claim_coverage", "main claim coverage"], ["component_granularity_violation_count", "粒度違反"]
+      ];
+      var rows = keys.map(function (k) {
+        var b = before[k[0]], a = after[k[0]];
+        var cls = (typeof a === "number" && typeof b === "number" && a !== b) ? " class=\"eg-rev-changed\"" : "";
+        return '<tr' + cls + '><td>' + escHtml(k[1]) + '</td><td>' + escHtml(String(b)) + '</td><td>' + escHtml(String(a)) + '</td></tr>';
+      }).join("");
+      return '<table class="eg-rev-metrics"><thead><tr><th>指標</th><th>before</th><th>after</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    }
+
+    var FILTERS = [["all", "すべて"], ["claim", "claim"], ["equation", "equation"], ["component", "component"], ["graph_edge", "graph"]];
+
+    function filterBar() {
+      return '<div class="eg-rev-filter">' + FILTERS.map(function (f) {
+        return '<button class="eg-rev-filter-btn' + (current.filter === f[0] ? ' active' : '') +
+          '" type="button" data-filter="' + f[0] + '">' + escHtml(f[1]) + '</button>';
+      }).join("") + '</div>';
+    }
+
+    function changeMatchesFilter(c) {
+      if (current.filter === "all") return true;
+      if (current.filter === "graph_edge") return c.entity_type === "graph_edge" || c.entity_type === "graph_node";
+      return c.entity_type === current.filter;
+    }
+
+    function changesHtml(report) {
+      var changes = (report.entity_changes || []).filter(changeMatchesFilter);
+      if (!changes.length) return '<p class="eg-rev-empty">該当する変更はありません。</p>';
+      return '<ul class="eg-rev-changes">' + changes.map(function (c) {
+        var protectedTag = c.protected ? ' <span class="eg-rev-badge eg-rev-badge-protected">保護項目</span>' : '';
+        var src = (c.source_locations || []).map(function (s) {
+          return escHtml(s.section_id || s.chunk_id || JSON.stringify(s));
+        }).join(", ");
+        return '<li class="eg-rev-change">' +
+          '<span class="eg-rev-ctype">' + escHtml(c.change_type) + '</span> ' +
+          '<code>' + escHtml(c.entity_type) + ':' + escHtml(c.entity_id || "") + '</code>' + protectedTag +
+          (c.reason ? '<div class="eg-rev-reason">理由: ' + escHtml(c.reason) + '</div>' : '') +
+          (c.checkpoint_ids && c.checkpoint_ids.length ? '<div class="eg-rev-trace">checkpoint: ' + escHtml(c.checkpoint_ids.join(", ")) + '</div>' : '') +
+          (c.evidence_refs && c.evidence_refs.length ? '<div class="eg-rev-trace">evidence: ' + escHtml(c.evidence_refs.join(", ")) + '</div>' : '') +
+          (src ? '<div class="eg-rev-trace">原文: ' + src + '</div>' : '') +
+          '</li>';
+      }).join("") + '</ul>';
+    }
+
+    function renderReport() {
+      var rep = el("eg-rev-report"); if (!rep || !current.report) return;
+      var report = current.report;
+      var s = report.summary || {};
+      var acc = el("eg-rev-accept");
+      if (acc) acc.disabled = !s.acceptable;
+      var warn = "";
+      if (!s.acceptable) warn = '<div class="eg-rev-warn">hard error または invalid のため採用できません。</div>';
+      else if (s.protected_change_count > 0) warn = '<div class="eg-rev-warn">教師承認/手動編集済み項目への変更が ' + s.protected_change_count + ' 件あります。採用には明示承認が必要です。</div>';
+      var html = warn +
+        '<div class="eg-rev-rec">推奨: <strong>' + escHtml(report.recommendation) + '</strong>' +
+          '（参考情報。自動採用には使われません）</div>' +
+        '<h5>品質指標 (before / after)</h5>' + metricsTable(report.quality_before, report.quality_after) +
+        '<h5>解消: ' + (s.resolved_issue_count || 0) + ' / 新規: ' + (s.introduced_issue_count || 0) +
+          ' / 変更: ' + (s.entity_change_count || 0) + '</h5>' +
+        filterBar() +
+        '<div id="eg-rev-changes-box">' + changesHtml(report) + '</div>';
+      rep.innerHTML = html;
+      rep.querySelectorAll(".eg-rev-filter-btn").forEach(function (b) {
+        b.addEventListener("click", function () {
+          current.filter = this.getAttribute("data-filter");
+          renderReport();
+        });
+      });
+    }
+
+    function decisionBody() {
+      var comment = (el("eg-rev-comment") && el("eg-rev-comment").value) || "";
+      var confirm = !!(el("eg-rev-confirm-protected") && el("eg-rev-confirm-protected").checked);
+      return JSON.stringify({ comment: comment, confirm_protected: confirm });
+    }
+
+    function acceptRevision() {
+      apiFetch(docPath() + "/" + encodeURIComponent(current.revisionId) + "/accept",
+               { method: "POST", body: decisionBody() })
+        .then(function (r) {
+          if (r.status === 409) throw new Error("競合: 採用版が更新されています。最新の差分で再確認してください。");
+          if (r.status === 422) return r.json().then(function (j) { throw new Error(j.detail || "採用できません"); });
+          return r.json();
+        })
+        .then(function () { alert("採用しました。採用版を切り替えました。"); loadList(); openDetail(current.revisionId); })
+        .catch(function (e) { alert(e.message || "採用に失敗しました。"); });
+    }
+
+    function rejectRevision() {
+      apiFetch(docPath() + "/" + encodeURIComponent(current.revisionId) + "/reject",
+               { method: "POST", body: decisionBody() })
+        .then(function (r) { return r.json(); })
+        .then(function () { alert("却下しました。採用版は変更されません。"); loadList(); openDetail(current.revisionId); })
+        .catch(function () { alert("却下に失敗しました。"); });
+    }
+
+    function reviseRevision() {
+      apiFetch(docPath() + "/" + encodeURIComponent(current.revisionId) + "/revise",
+               { method: "POST", body: decisionBody() })
+        .then(function (r) { return r.json(); })
+        .then(function (data) { loadList(); if (data.revision_run_id) openDetail(data.revision_run_id); })
+        .catch(function () { alert("再修正の作成に失敗しました。"); });
+    }
+
+    return { open: open };
+  })();
+  window.EGRevisions = EGRevisions;
 
   // Boot
   document.addEventListener("DOMContentLoaded", function () {

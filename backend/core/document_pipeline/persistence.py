@@ -1245,6 +1245,61 @@ def resolve_artifact_run(*, document_id: str, material_id: str | None = None) ->
     return None
 
 
+def resolve_artifact_runs(session, document_ids: list[str]) -> dict[str, dict]:
+    """Resolve the *artifact* (adopted) run per document, using a caller session.
+
+    For each document, prefer ``documents.active_analysis_run_id``; otherwise fall
+    back to the latest **completed** run (never a running/failed latest run, so a
+    fresh in-flight or rejected revision can't override the adopted artifacts).
+    Returns ``{document_id: {"run_id", "stage_outputs", "status"}}`` for documents
+    that have a resolvable artifact run (#408).
+    """
+    if not document_ids:
+        return {}
+    placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
+    params = {f"doc_{i}": did for i, did in enumerate(document_ids)}
+    rows = session.execute(
+        sa_text(
+            f"""
+            WITH targets AS (
+                SELECT d.id::text AS document_id,
+                       COALESCE(
+                           d.active_analysis_run_id,
+                           (SELECT r2.id FROM document_analysis_runs r2
+                            WHERE r2.document_id = d.id::text AND r2.status = 'completed'
+                            ORDER BY r2.completed_at DESC NULLS LAST,
+                                     r2.created_at DESC, r2.id DESC
+                            LIMIT 1)
+                       ) AS run_id
+                FROM documents d
+                WHERE d.id::text IN ({placeholders})
+            )
+            SELECT t.document_id, r.id::text, r.stage_outputs, r.status
+            FROM targets t
+            JOIN document_analysis_runs r ON r.id = t.run_id
+            """
+        ),
+        params,
+    ).fetchall()
+    out: dict[str, dict] = {}
+    for row in rows:
+        doc_id = str(row[0]) if row[0] else ""
+        if not doc_id:
+            continue
+        stage_outputs = row[2]
+        if isinstance(stage_outputs, str):
+            try:
+                stage_outputs = json.loads(stage_outputs)
+            except (ValueError, TypeError):
+                stage_outputs = {}
+        out[doc_id] = {
+            "run_id": str(row[1]) if row[1] else None,
+            "stage_outputs": stage_outputs if isinstance(stage_outputs, dict) else {},
+            "status": row[3],
+        }
+    return out
+
+
 def create_revision_run(
     *,
     document_id: str,

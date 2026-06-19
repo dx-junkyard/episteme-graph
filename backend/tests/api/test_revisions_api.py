@@ -133,6 +133,22 @@ def test_wrong_document_returns_404(app_client, monkeypatch):
     assert resp.status_code == 404
 
 
+def test_list_revisions_distinguishes_active_and_latest(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    monkeypatch.setattr(revisions.persistence, "get_run_lineage",
+                        lambda *, document_id: {
+                            "document_id": document_id,
+                            "active_run_id": "r1", "latest_run_id": "r2",
+                            "runs": [{"id": "r1", "is_active": True, "is_latest": False},
+                                     {"id": "r2", "is_active": False, "is_latest": True}]})
+    resp = client.get("/api/admin/documents/doc-1/revisions")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["active_run_id"] == "r1"
+    assert body["latest_run_id"] == "r2"
+    assert body["active_run_id"] != body["latest_run_id"]
+
+
 def test_authorization_required(app_client):
     client, _revisions, dep, app = app_client
     from fastapi import HTTPException
