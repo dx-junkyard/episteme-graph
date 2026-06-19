@@ -23,6 +23,7 @@ BASELINE_INVENTORY_KEY = "baseline_inventory"
 AUDIT_CHECKPOINTS_KEY = "audit_checkpoints"
 AUDIT_RESULTS_KEY = "audit_results"
 REVISION_OPERATIONS_KEY = "revision_operations"
+PROPOSED_OPERATIONS_KEY = "proposed_operations"
 CANDIDATE_KEY = "candidate"
 CANDIDATE_VALIDATION_KEY = "candidate_validation"
 DIFF_REPORT_KEY = "diff_report"
@@ -113,6 +114,14 @@ def audit_revision_run(
     checkpoints = artifacts.get(AUDIT_CHECKPOINTS_KEY) or []
     document_id = str(run.get("document_id") or "")
 
+    # Production path: attach a real LLM audit client (#410 P1-6) built from the
+    # baseline inventory, when a real LLM key is configured. Tests / no-key
+    # environments fall back to the deterministic path (llm_client stays None).
+    if llm_client is None:
+        from .llm_audit import build_default_audit_client
+        inventory = artifacts.get(BASELINE_INVENTORY_KEY) or {}
+        llm_client = build_default_audit_client(inventory)
+
     if chunk_index is None:
         try:
             chunk_index = persistence.load_source_chunk_index(document_id=document_id)
@@ -130,6 +139,38 @@ def audit_revision_run(
         stage_outputs={ARTIFACTS_KEY: {AUDIT_RESULTS_KEY: audit}},
     )
     return {"revision_run_id": run_id, "document_id": document_id, **audit}
+
+
+def generate_proposals(
+    *,
+    run_id: str,
+    generate: Callable[[list[dict]], str] | None = None,
+) -> dict:
+    """Generate validated revision-operation proposals from the audit results (#410 P1-6).
+
+    Reads the run's audit_results + baseline_inventory, asks the LLM (when
+    configured) for one operation per ``requires_revision`` finding, validates each
+    proposal server-side (schema / target / evidence / traceability), and stores
+    the result as the ``proposed_operations`` artifact. Never auto-accepts.
+    """
+    run = persistence.get_analysis_run(run_id=run_id)
+    if not run or run.get("run_type") != "revision":
+        raise ValueError(f"revision run {run_id} not found")
+    artifacts = get_artifacts(run.get("stage_outputs"))
+    inventory = artifacts.get(BASELINE_INVENTORY_KEY) or {}
+    audit_results = (artifacts.get(AUDIT_RESULTS_KEY) or {}).get("audit_results") or []
+
+    from .proposal import propose_operations
+    if generate is None:
+        from .llm_audit import _default_generate, llm_enabled
+        generate = _default_generate if llm_enabled() else None
+
+    result = propose_operations(audit_results, inventory, generate=generate)
+    persistence.update_revision_status(
+        run_id=run_id, revision_status="auditing",
+        stage_outputs={ARTIFACTS_KEY: {PROPOSED_OPERATIONS_KEY: result}},
+    )
+    return {"revision_run_id": run_id, **result}
 
 
 def assemble_candidate(

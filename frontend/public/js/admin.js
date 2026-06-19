@@ -8850,7 +8850,9 @@
           escHtml((detail.revision_run_id || "").slice(0, 8)) + '</code></h4>' +
         '<div>状態: <strong>' + escHtml(detail.revision_status || detail.status || "") + '</strong>' +
         ' / checkpoints: ' + (detail.checkpoint_count || 0) + '</div></div>';
-      html += '<details class="eg-rev-ops"><summary>revision operations (JSON) を指定して候補生成</summary>' +
+      html += '<details class="eg-rev-ops"><summary>（デバッグ用）revision operations JSON を直接指定</summary>' +
+        '<p class="eg-rev-hint">通常は空のままにします。監査結果から修正候補が自動生成されます。' +
+        'JSON を入力した場合のみ、その operations が使われます（サーバー側で検証）。</p>' +
         '<textarea id="eg-rev-ops" class="eg-rev-ops-text" placeholder="[]"></textarea></details>';
       html += '<div class="eg-rev-actions">' +
         '<button id="eg-rev-run" class="admin-action-btn" type="button">監査＋候補生成</button>' +

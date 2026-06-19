@@ -99,7 +99,12 @@ def run_revision(
     body: RevisionRunRequest = Body(default=RevisionRunRequest()),
     current_user: dict = Depends(_require_teacher),
 ):
-    """Run source re-audit; if operations are supplied, assemble + validate the candidate."""
+    """Run source re-audit, build revision-operation proposals, assemble + validate.
+
+    Operations come from the audit-driven proposal generator by default (#410
+    P1-6); supplying ``operations`` is a debug/admin override (raw JSON), still
+    validated server-side during candidate assembly.
+    """
     _authorize_edit(document_id, current_user)
     _require_run_for_document(document_id, revision_id)
     audit = coordinator.audit_revision_run(run_id=revision_id)
@@ -107,14 +112,22 @@ def run_revision(
         "verdict_counts": audit.get("verdict_counts"),
         "revision_targets": audit.get("revision_targets"),
     }}
+
     if body.operations is not None:
-        candidate = coordinator.assemble_candidate(
-            run_id=revision_id, operations=body.operations,
-        )
-        report = coordinator.revalidate_and_report(run_id=revision_id)
-        response["candidate_invalid"] = candidate["invalid"]
-        response["report_summary"] = report["report"]["summary"]
-        response["revision_status"] = "proposed"
+        operations = body.operations
+        response["operation_source"] = "raw"
+    else:
+        proposals = coordinator.generate_proposals(run_id=revision_id)
+        operations = proposals.get("operations") or []
+        response["operation_source"] = "generated"
+        response["proposed_count"] = len(operations)
+        response["manual_review"] = proposals.get("manual_review") or []
+
+    candidate = coordinator.assemble_candidate(run_id=revision_id, operations=operations)
+    report = coordinator.revalidate_and_report(run_id=revision_id)
+    response["candidate_invalid"] = candidate["invalid"]
+    response["report_summary"] = report["report"]["summary"]
+    response["revision_status"] = "proposed"
     return response
 
 

@@ -20,16 +20,24 @@ from .coordinator import (
     CANDIDATE_KEY,
     CANDIDATE_VALIDATION_KEY,
     DIFF_REPORT_KEY,
+    PROPOSED_OPERATIONS_KEY,
     REVISION_OPERATIONS_KEY,
     AcceptBlockedError,
     accept_revision,
     assemble_candidate,
     audit_revision_run,
     build_revision_plan,
+    generate_proposals,
     reject_revision,
     revalidate_and_report,
     revise_revision_run,
     start_revision_run,
+)
+from .llm_audit import LLMAuditClient, build_default_audit_client, llm_enabled
+from .proposal import (
+    propose_operations,
+    validate_proposed_operation,
+    validate_proposed_operations,
 )
 from .diff import build_diff_report, compute_quality_metrics
 from .inventory import ARTIFACTS_KEY, build_baseline_inventory, get_artifacts
@@ -48,8 +56,16 @@ __all__ = [
     "OPERATIONS",
     "REVISION_OPERATIONS_KEY",
     "VERDICTS",
+    "PROPOSED_OPERATIONS_KEY",
+    "LLMAuditClient",
     "AcceptBlockedError",
     "accept_revision",
+    "build_default_audit_client",
+    "generate_proposals",
+    "llm_enabled",
+    "propose_operations",
+    "validate_proposed_operation",
+    "validate_proposed_operations",
     "apply_operations",
     "assemble_candidate",
     "audit_checkpoint",
