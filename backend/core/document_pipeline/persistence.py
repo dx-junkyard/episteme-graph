@@ -1152,6 +1152,287 @@ def get_latest_analysis_run(
         session.close()
 
 
+# ----------------------------------------------------------------------------
+# Run version management (#402)
+#
+# 「最新Run」(get_latest_analysis_run) と「採用Run」(get_active_analysis_run)
+# を明確に区別する。export/API は成果物参照には active run を、処理状況確認には
+# latest run を使う。revision run は必ず base_run_id を持つ。
+# ----------------------------------------------------------------------------
+
+_RUN_COLUMNS = (
+    "id::text, document_id::text, material_id, cartridge_id, status, "
+    "current_stage, error_message, stage_outputs, started_at, completed_at, "
+    "created_at, updated_at, run_type, base_run_id::text, "
+    "parent_revision_id::text, revision_status, created_by::text"
+)
+
+
+def get_analysis_run(*, run_id: str) -> dict | None:
+    """Fetch a single analysis run by id (latest *or* candidate)."""
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text(
+                f"""
+                SELECT {_RUN_COLUMNS}
+                FROM document_analysis_runs
+                WHERE id = CAST(:run_id AS uuid)
+                """
+            ),
+            {"run_id": run_id},
+        ).mappings().fetchone()
+        return dict(row) if row else None
+    finally:
+        session.close()
+
+
+def get_active_analysis_run(*, document_id: str) -> dict | None:
+    """Return the *adopted* (active) analysis run for a document.
+
+    成果物参照に使う採用Run。latest run とは別物であり、混同しないこと。
+    active run が未設定の document（旧データ）では None を返す。呼び出し側は
+    必要なら get_latest_analysis_run() への後方互換 fallback を判断する。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text(
+                f"""
+                SELECT {_RUN_COLUMNS}
+                FROM document_analysis_runs r
+                JOIN documents d ON d.active_analysis_run_id = r.id
+                WHERE d.id = CAST(:document_id AS uuid)
+                """
+            ),
+            {"document_id": document_id},
+        ).mappings().fetchone()
+        return dict(row) if row else None
+    finally:
+        session.close()
+
+
+def get_active_analysis_run_id(*, document_id: str) -> str | None:
+    """Return only documents.active_analysis_run_id (no run join)."""
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text(
+                """
+                SELECT active_analysis_run_id::text
+                FROM documents
+                WHERE id = CAST(:document_id AS uuid)
+                """
+            ),
+            {"document_id": document_id},
+        ).fetchone()
+        return str(row[0]) if row and row[0] else None
+    finally:
+        session.close()
+
+
+def resolve_artifact_run(*, document_id: str, material_id: str | None = None) -> dict | None:
+    """Return the run whose artifacts should be exported/used.
+
+    採用Run優先。active が無い旧 document は最新 completed run へ後方互換 fallback。
+    """
+    active = get_active_analysis_run(document_id=document_id)
+    if active is not None:
+        return active
+    latest = get_latest_analysis_run(document_id=document_id, material_id=material_id)
+    if latest is not None and latest.get("status") == "completed":
+        return latest
+    return None
+
+
+def create_revision_run(
+    *,
+    document_id: str,
+    base_run_id: str,
+    material_id: str | None = None,
+    cartridge_id: str | None = None,
+    parent_revision_id: str | None = None,
+    created_by: str | None = None,
+    revision_status: str = "preparing",
+    stage_outputs: dict | None = None,
+) -> str:
+    """Create a revision (candidate) run.
+
+    revision run は必ず比較元の base_run_id を持つ。base_run_id を省略すると
+    ValueError を送出する（DB CHECK 制約と二重防御）。
+    candidate run は projection table を更新せず、artifact のみを保持する。
+    """
+    if not base_run_id:
+        raise ValueError("create_revision_run requires a non-empty base_run_id")
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text(
+                """
+                INSERT INTO document_analysis_runs (
+                    document_id, material_id, cartridge_id, status,
+                    stage_outputs, run_type, base_run_id, parent_revision_id,
+                    revision_status, created_by
+                )
+                VALUES (
+                    :document_id, :material_id, :cartridge_id, 'pending',
+                    CAST(:stage_outputs AS jsonb), 'revision',
+                    CAST(:base_run_id AS uuid),
+                    CAST(:parent_revision_id AS uuid),
+                    :revision_status,
+                    CAST(:created_by AS uuid)
+                )
+                RETURNING id::text
+                """
+            ),
+            {
+                "document_id": document_id,
+                "material_id": material_id,
+                "cartridge_id": cartridge_id,
+                "stage_outputs": _json_dumps(stage_outputs or {}),
+                "base_run_id": base_run_id,
+                "parent_revision_id": parent_revision_id,
+                "revision_status": revision_status,
+                "created_by": created_by,
+            },
+        ).fetchone()
+        session.commit()
+        return str(row[0])
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def update_revision_status(
+    *,
+    run_id: str,
+    revision_status: str,
+    status: str | None = None,
+    error_message: str | None = None,
+    stage_outputs: dict | None = None,
+) -> None:
+    """Update a revision run's revision_status (and optionally run status / artifacts)."""
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text(
+                """
+                UPDATE document_analysis_runs SET
+                    revision_status = :revision_status,
+                    status = COALESCE(:status, status),
+                    error_message = COALESCE(:error_message, error_message),
+                    stage_outputs = stage_outputs || CAST(:stage_outputs AS jsonb),
+                    completed_at = CASE WHEN :status IN ('completed', 'failed')
+                                        THEN now() ELSE completed_at END,
+                    updated_at = now()
+                WHERE id = CAST(:run_id AS uuid)
+                  AND run_type = 'revision'
+                """
+            ),
+            {
+                "run_id": run_id,
+                "revision_status": revision_status,
+                "status": status,
+                "error_message": error_message,
+                "stage_outputs": _json_dumps(stage_outputs or {}),
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def set_active_analysis_run(
+    *,
+    document_id: str,
+    run_id: str,
+    expected_run_id: str | None,
+) -> bool:
+    """Switch documents.active_analysis_run_id with optimistic concurrency.
+
+    accept 時に base_run_id を expected として渡す。0件更新（=採用Runが既に
+    別Runへ進んでいる）の場合は競合として False を返す。`IS NOT DISTINCT FROM`
+    で NULL（active 未設定）も扱える。
+    """
+    session = _pg_session()
+    try:
+        result = session.execute(
+            sa_text(
+                """
+                UPDATE documents
+                SET active_analysis_run_id = CAST(:run_id AS uuid),
+                    updated_at = now()
+                WHERE id = CAST(:document_id AS uuid)
+                  AND active_analysis_run_id IS NOT DISTINCT FROM CAST(:expected AS uuid)
+                """
+            ),
+            {
+                "run_id": run_id,
+                "document_id": document_id,
+                "expected": expected_run_id,
+            },
+        )
+        session.commit()
+        return result.rowcount == 1
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def get_run_lineage(*, document_id: str) -> dict:
+    """Return run lineage for a document: every run + the current active run id.
+
+    Output keeps latest/active distinct so callers never conflate them.
+    """
+    session = _pg_session()
+    try:
+        active_row = session.execute(
+            sa_text(
+                """
+                SELECT active_analysis_run_id::text
+                FROM documents
+                WHERE id = CAST(:document_id AS uuid)
+                """
+            ),
+            {"document_id": document_id},
+        ).fetchone()
+        active_run_id = str(active_row[0]) if active_row and active_row[0] else None
+
+        rows = session.execute(
+            sa_text(
+                """
+                SELECT id::text, status, run_type, base_run_id::text,
+                       parent_revision_id::text, revision_status,
+                       current_stage, created_by::text, created_at, completed_at
+                FROM document_analysis_runs
+                WHERE document_id = :document_id
+                ORDER BY created_at ASC, id ASC
+                """
+            ),
+            {"document_id": document_id},
+        ).mappings().all()
+        runs = [dict(r) for r in rows]
+        latest_run_id = runs[-1]["id"] if runs else None
+        for run in runs:
+            run["is_active"] = run["id"] == active_run_id
+            run["is_latest"] = run["id"] == latest_run_id
+        return {
+            "document_id": document_id,
+            "active_run_id": active_run_id,
+            "latest_run_id": latest_run_id,
+            "runs": runs,
+        }
+    finally:
+        session.close()
+
+
 def load_source_chunk_index(*, document_id: str) -> list[dict]:
     """Load persisted source chunk metadata for downstream evidence resolution."""
     session = _pg_session()
