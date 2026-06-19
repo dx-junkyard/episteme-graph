@@ -130,6 +130,68 @@ def test_validate_rejects_unknown_evidence_instead_of_dropping_it():
     assert reason == "unknown_evidence:ev_GONE"
 
 
+# --- #412 P0-6: source-chunk vs EvidenceRegistry ID spaces -----------------
+
+def test_chunk_reference_is_not_rejected_as_unknown_evidence():
+    # The LLM cited the retrieved chunk id in the (legacy mixed) evidence_refs.
+    # It must be routed to source_chunk_ids, NOT rejected as unknown evidence.
+    audit = {"checkpoint_id": "ckpt_1", "evidence_refs": ["c1"],
+             "source_locations": [{"chunk_id": "c1"}]}
+    op, reason = validate_proposed_operation(
+        {"operation": "update_entity", "target_type": "claim", "target_id": "clm_1",
+         "after_json": {"text": "fixed"}}, _inventory(), audit)
+    assert op is not None and reason == ""
+    assert op["source_chunk_ids"] == ["c1"]
+    assert op["evidence_refs"] == []
+
+
+def test_typed_evidence_and_chunk_fields_validated_against_their_own_space():
+    op, reason = validate_proposed_operation(
+        {"operation": "update_entity", "target_type": "claim", "target_id": "clm_1",
+         "after_json": {"text": "x"}, "evidence_ids": ["ev_1"],
+         "source_chunk_ids": ["c1"], "checkpoint_ids": ["ckpt_1"]},
+        _inventory(),
+        {"checkpoint_id": "ckpt_1", "source_locations": [{"chunk_id": "c1"}]})
+    assert op is not None and reason == ""
+    assert op["evidence_refs"] == ["ev_1"]
+    assert op["source_chunk_ids"] == ["c1"]
+
+
+def test_chunk_uuid_not_accepted_as_registry_evidence_id():
+    # A chunk id placed in the *evidence* field is unknown registry evidence.
+    op, reason = validate_proposed_operation(
+        {"operation": "update_entity", "target_type": "claim", "target_id": "clm_1",
+         "after_json": {"text": "x"}, "evidence_ids": ["c1"], "checkpoint_ids": ["ckpt_1"]},
+        _inventory(),
+        {"checkpoint_id": "ckpt_1", "source_locations": [{"chunk_id": "c1"}]})
+    assert op is None
+    assert reason == "unknown_evidence:c1"
+
+
+def test_valid_chunk_refs_do_not_cause_mass_rejection():
+    # Mirrors the real-data failure: 58/59 proposals were rejected only because
+    # valid chunk refs were validated against the EvidenceRegistry ID space.
+    audit_results = [
+        {"checkpoint_id": f"ckpt_{i}", "target_type": "claim", "target_id": "clm_1",
+         "evidence_refs": [f"chunk-{i}"], "source_locations": [{"chunk_id": f"chunk-{i}"}]}
+        for i in range(20)
+    ]
+    raw_ops = [
+        {"operation": "update_entity", "target_type": "claim", "target_id": "clm_1",
+         "after_json": {"text": f"fix {i}"}, "checkpoint_ids": [f"ckpt_{i}"]}
+        for i in range(20)
+    ]
+    out = validate_proposed_operations(
+        raw_ops, _inventory(), audit_results=audit_results,
+        checkpoints=[{"checkpoint_id": f"ckpt_{i}"} for i in range(20)],
+    )
+    # all but the duplicate-target collisions accepted; none rejected for evidence
+    rejected_reasons = {r["reason"] for r in out["rejected"]}
+    assert "unknown_evidence" not in " ".join(rejected_reasons)
+    assert out["operations"], "valid chunk-backed proposals must not be mass-rejected"
+    assert out["operations"][0]["source_chunk_ids"] == ["chunk-0"]
+
+
 def test_propose_operations_uses_generate_and_validates():
     audit_results = [{"checkpoint_id": "ckpt_1", "target_type": "claim", "target_id": "clm_1",
                       "verdict": "incorrect", "requires_revision": True,

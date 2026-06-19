@@ -4237,6 +4237,13 @@ body {
 .eg-rev-comment { flex: 1 1 200px; padding: 5px 8px; border: 1px solid rgba(0,0,0,0.2); border-radius: 5px; }
 .eg-rev-ops-text { width: 100%; min-height: 70px; font-family: monospace; font-size: 12px; margin-top: 6px; }
 .eg-rev-warn { background: #fdecea; color: #b71c1c; padding: 8px 10px; border-radius: 6px; margin: 8px 0; font-size: 13px; }
+.eg-rev-info { background: #e8f0fe; color: #174ea6; padding: 8px 10px; border-radius: 6px; margin: 8px 0; font-size: 13px; }
+.eg-rev-done { background: #e6f4ea; color: #1e7e34; padding: 8px 10px; border-radius: 6px; margin: 8px 0; font-size: 13px; font-weight: 600; }
+.eg-rev-progress { margin: 6px 0; }
+.eg-rev-stages { border: 1px solid rgba(0,0,0,0.12); border-radius: 6px; padding: 8px 12px; margin: 8px 0; background: #fafafa; }
+.eg-rev-stages h5 { margin: 8px 0 2px; }
+.eg-rev-stagelist { margin: 0 0 4px; padding-left: 18px; font-size: 13px; }
+.eg-rev-outcome { font-size: 13px; font-weight: 600; margin: 2px 0 6px; }
 .eg-rev-rec { font-size: 13px; margin: 6px 0; }
 .eg-rev-filter { display: flex; gap: 6px; margin: 8px 0; }
 .eg-rev-filter-btn { padding: 3px 10px; border: 1px solid rgba(0,0,0,0.2); border-radius: 14px; background: #fff; cursor: pointer; font-size: 12px; }

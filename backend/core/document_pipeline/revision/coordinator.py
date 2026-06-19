@@ -8,6 +8,7 @@ ever touching projection tables or the adopted active run.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable
 
 from .. import persistence
@@ -22,6 +23,16 @@ from .inventory import (
 )
 from .operations import apply_operations
 from .validation import run_export_validation
+
+logger = logging.getLogger(__name__)
+
+# Revision pipeline stages — values stored in document_analysis_runs.current_stage
+# so the generic run state reflects progress without inspecting artifacts (#412 P1-3).
+STAGE_AUDIT = "audit"
+STAGE_PROPOSAL = "proposal"
+STAGE_CANDIDATE_ASSEMBLY = "candidate_assembly"
+STAGE_REPORT = "report"
+STAGE_COMPLETED = "completed"
 
 # Revision artifact keys (stored under stage_outputs._artifacts of the run).
 BASELINE_INVENTORY_KEY = "baseline_inventory"
@@ -293,9 +304,36 @@ def revalidate_and_report(*, run_id: str, base_run: dict | None = None) -> dict:
     candidate_artifacts = candidate.get("candidate_artifacts") or {}
     applied_operations = run_artifacts.get(REVISION_OPERATIONS_KEY) or []
     audit_results = (run_artifacts.get(AUDIT_RESULTS_KEY) or {}).get("audit_results") or []
+    checkpoints = run_artifacts.get(AUDIT_CHECKPOINTS_KEY) or []
+    proposed = run_artifacts.get(PROPOSED_OPERATIONS_KEY) or {}
 
     gate_base = run_export_validation(base_artifacts)
     gate_candidate = run_export_validation(candidate_artifacts)
+
+    # Stage rollups so the report distinguishes "nothing to improve" from
+    # "improvements proposed but not adoptable" (#412 P1-8).
+    from .diff import summarize_rejections
+    revision_targets = [a for a in audit_results if a.get("requires_revision")]
+    manual_review = proposed.get("manual_review") or [
+        a for a in audit_results
+        if a.get("review_required") and not a.get("requires_revision")
+    ]
+    rejected_proposals = proposed.get("rejected") or []
+    audit_summary = {
+        "checkpoints_total": len(checkpoints) or len(audit_results),
+        "revision_target_count": len(revision_targets),
+        "manual_review_count": len(manual_review),
+    }
+    proposal_summary = {
+        "accepted_count": len(proposed.get("operations") or applied_operations),
+        "rejected_count": len(rejected_proposals),
+        "rejection_reasons": summarize_rejections(rejected_proposals),
+    }
+    new_unknown_reference_count = sum(
+        len(err.get("details") or [])
+        for err in (candidate.get("operation_errors") or [])
+        if isinstance(err, dict) and err.get("error") == "new_unknown_references"
+    )
 
     report = build_diff_report(
         base_run_id=str(base_run_id or ""),
@@ -312,8 +350,11 @@ def revalidate_and_report(*, run_id: str, base_run: dict | None = None) -> dict:
         audit_verifications=[
             {"checkpoint_id": a.get("checkpoint_id"), "target_id": a.get("target_id"),
              "verdict": a.get("verdict"), "source_locations": a.get("source_locations") or []}
-            for a in audit_results if a.get("requires_revision")
+            for a in revision_targets
         ],
+        audit_summary=audit_summary,
+        proposal_summary=proposal_summary,
+        new_unknown_reference_count=new_unknown_reference_count,
     )
 
     persistence.update_revision_status(
@@ -378,6 +419,146 @@ def accept_revision(
         comment=comment,
         candidate_artifacts=candidate_artifacts,
     )
+
+
+def _safe_error(code: str, exc: Exception) -> str:
+    """Bounded, structural error summary for persistence/logs.
+
+    Never includes provider response bodies, full source text, or secrets (#412
+    P1-5); only the error category and a short, truncated message.
+    """
+    detail = str(exc).replace("\n", " ").strip()
+    if len(detail) > 200:
+        detail = detail[:200] + "…"
+    return f"{code}: {detail}" if detail else code
+
+
+def run_revision_pipeline(
+    *,
+    run_id: str,
+    operations: list[dict] | None = None,
+    llm_client: Callable[[dict, dict], Any] | None = None,
+    generate: Callable[[list[dict]], str] | None = None,
+) -> dict:
+    """Run audit → proposal → assembly → validation → report end-to-end.
+
+    Drives the revision run's generic state (``status`` / ``current_stage`` /
+    ``completed_at``) and emits structured stage logs so progress/outcome can be
+    judged from run state + logs alone, without inspecting artifacts (#412 P1-3 /
+    P1-5). Designed to run inside a background worker (#412 P0-2) — it never
+    touches the active run or projection tables. ``operations`` supplied means the
+    raw/debug override path (proposal generation is skipped).
+    """
+    run = persistence.get_analysis_run(run_id=run_id)
+    if not run or run.get("run_type") != "revision":
+        raise ValueError(f"revision run {run_id} not found")
+    document_id = str(run.get("document_id") or "")
+    log_ctx = "run_id=%s document_id=%s" % (run_id, document_id)
+    current_stage = STAGE_AUDIT
+    try:
+        # --- audit ---
+        artifacts = get_artifacts(run.get("stage_outputs"))
+        checkpoints_total = len(artifacts.get(AUDIT_CHECKPOINTS_KEY) or [])
+        persistence.update_revision_status(
+            run_id=run_id, revision_status="auditing",
+            status="running", current_stage=STAGE_AUDIT,
+        )
+        logger.info("revision_started %s checkpoints=%d", log_ctx, checkpoints_total)
+        audit = audit_revision_run(run_id=run_id, llm_client=llm_client)
+        revision_targets = audit.get("revision_targets") or []
+        review_items = audit.get("review_items") or []
+        logger.info(
+            "revision_audit_completed %s checkpoints=%d targets=%d review_items=%d",
+            log_ctx, checkpoints_total, len(revision_targets), len(review_items),
+        )
+
+        # --- proposal (skipped for the raw/debug override path) ---
+        if operations is None:
+            current_stage = STAGE_PROPOSAL
+            persistence.update_revision_status(
+                run_id=run_id, revision_status="auditing", current_stage=STAGE_PROPOSAL,
+            )
+            proposals = generate_proposals(run_id=run_id, generate=generate)
+            ops = proposals.get("operations") or []
+            rejected = proposals.get("rejected") or []
+            manual_review = proposals.get("manual_review") or []
+            logger.info(
+                "revision_proposal_completed %s accepted=%d rejected=%d manual_review=%d",
+                log_ctx, len(ops), len(rejected), len(manual_review),
+            )
+            operation_source = "generated"
+        else:
+            ops = operations
+            operation_source = "raw"
+
+        # --- candidate assembly ---
+        current_stage = STAGE_CANDIDATE_ASSEMBLY
+        persistence.update_revision_status(
+            run_id=run_id, revision_status="auditing", current_stage=STAGE_CANDIDATE_ASSEMBLY,
+        )
+        candidate = assemble_candidate(run_id=run_id, operations=ops)
+        new_unknown = sum(
+            len(err.get("details") or [])
+            for err in (candidate.get("operation_errors") or [])
+            if isinstance(err, dict) and err.get("error") == "new_unknown_references"
+        )
+        logger.info(
+            "revision_candidate_validated %s invalid=%s applied=%d new_unknown_references=%d",
+            log_ctx, bool(candidate.get("invalid")),
+            len(candidate.get("applied_operations") or []), new_unknown,
+        )
+
+        # --- validation + report ---
+        current_stage = STAGE_REPORT
+        persistence.update_revision_status(
+            run_id=run_id, revision_status="proposed", current_stage=STAGE_REPORT,
+        )
+        report_out = revalidate_and_report(run_id=run_id)
+        report = report_out["report"]
+        summary = report.get("summary") or {}
+
+        persistence.update_revision_status(
+            run_id=run_id, revision_status="proposed",
+            status="completed", current_stage=STAGE_COMPLETED,
+        )
+        logger.info(
+            "revision_completed %s recommendation=%s outcome=%s changes=%d candidate_invalid=%s",
+            log_ctx, report.get("recommendation"), summary.get("outcome"),
+            summary.get("entity_change_count"), summary.get("candidate_invalid"),
+        )
+        return {
+            "revision_run_id": run_id,
+            "operation_source": operation_source,
+            "audit": {
+                "verdict_counts": audit.get("verdict_counts"),
+                "revision_targets": audit.get("revision_targets"),
+            },
+            "candidate_invalid": bool(candidate.get("invalid")),
+            "report_summary": summary,
+            "stage_summary": report.get("stage_summary"),
+            "revision_status": "proposed",
+        }
+    except ProposalValidationError as exc:
+        # Not a worker crash: the audit found targets but no adoptable candidate
+        # could be assembled. Persist a failed state with the offending stage.
+        persistence.update_revision_status(
+            run_id=run_id, revision_status="proposed",
+            status="failed", current_stage=STAGE_CANDIDATE_ASSEMBLY,
+            error_message=_safe_error("proposal_validation_failed", exc),
+        )
+        logger.warning(
+            "revision_failed %s stage=%s reason=proposal_validation rejected=%d",
+            log_ctx, STAGE_CANDIDATE_ASSEMBLY, len(exc.rejected),
+        )
+        raise
+    except Exception as exc:
+        persistence.update_revision_status(
+            run_id=run_id, revision_status="failed",
+            status="failed", current_stage=current_stage,
+            error_message=_safe_error(type(exc).__name__, exc),
+        )
+        logger.exception("revision_failed %s stage=%s", log_ctx, current_stage)
+        raise
 
 
 def reject_revision(*, run_id: str, changed_by: str | None = None, comment: str = "") -> dict:

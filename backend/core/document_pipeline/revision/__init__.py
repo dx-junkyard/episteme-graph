@@ -32,6 +32,7 @@ from .coordinator import (
     reject_revision,
     revalidate_and_report,
     revise_revision_run,
+    run_revision_pipeline,
     start_revision_run,
 )
 from .llm_audit import LLMAuditClient, build_default_audit_client, llm_enabled
@@ -91,6 +92,7 @@ __all__ = [
     "revalidate_and_report",
     "revise_revision_run",
     "run_export_validation",
+    "run_revision_pipeline",
     "run_source_audit",
     "start_revision_run",
 ]

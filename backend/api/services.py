@@ -125,6 +125,7 @@ def get_background_task(task_id: str) -> dict | None:
                     SELECT status, current_stage, error_message, stage_outputs
                     FROM document_analysis_runs
                     WHERE document_id = :document_id
+                      AND (run_type IS NULL OR run_type <> 'revision')
                     ORDER BY created_at DESC
                     LIMIT 1
                     """

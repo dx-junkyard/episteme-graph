@@ -34,12 +34,111 @@ def _known_evidence_ids(inventory: dict) -> set[str]:
     return set((inventory.get("entities", {}).get("evidence", {}) or {}).keys())
 
 
+def _chunk_ids_from_locations(value: object) -> set[str]:
+    """Collect chunk ids referenced by a list of source-location dicts."""
+    out: set[str] = set()
+    for loc in value or []:
+        if isinstance(loc, dict):
+            cid = loc.get("chunk_id")
+            if cid:
+                out.add(str(cid))
+        elif loc:
+            out.add(str(loc))
+    return out
+
+
+def chunk_ids_for_audit_result(audit_result: dict | None) -> set[str]:
+    """Source chunk ids known-good for one audit result.
+
+    The chunks actually retrieved for a checkpoint (recorded in
+    ``source_locations`` / ``source_chunk_ids``) are valid *source* references,
+    living in the ``chunks.id`` space — NOT the EvidenceRegistry ``evidence_id``
+    space. They must never be validated as registry evidence (#412 P0-6).
+    """
+    audit_result = audit_result or {}
+    chunks = _chunk_ids_from_locations(audit_result.get("source_locations"))
+    chunks |= {str(c) for c in (audit_result.get("source_chunk_ids") or []) if c}
+    return chunks
+
+
+def _dedup(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for v in values:
+        if v not in seen:
+            seen.add(v)
+            out.append(v)
+    return out
+
+
+def _resolve_evidence_refs(
+    raw_op: dict,
+    audit_result: dict,
+    *,
+    known_evidence_ids: set[str],
+    known_chunk_ids: set[str],
+) -> tuple[list[str], list[str], str]:
+    """Split + validate references into the registry-evidence and source-chunk spaces.
+
+    Returns ``(evidence_refs, source_chunk_ids, reason)``. ``reason`` is non-empty
+    only when a reference resolves to *neither* space (a genuinely unknown id);
+    valid chunk references are never reported as ``unknown_evidence`` (#412 P0-6).
+
+    Three input shapes are accepted so the LLM/audit may emit either typed fields
+    or the legacy mixed ``evidence_refs`` list:
+      * ``evidence_ids``      — explicit EvidenceRegistry ids (validated vs registry)
+      * ``source_chunk_ids``  — explicit ``chunks.id`` refs (validated vs chunk index)
+      * ``evidence_refs``     — legacy mixed list, routed by id space
+    """
+    explicit_evidence = [str(e) for e in (raw_op.get("evidence_ids") or []) if e]
+    explicit_chunks = [
+        str(c)
+        for c in (raw_op.get("source_chunk_ids") or audit_result.get("source_chunk_ids") or [])
+        if c
+    ]
+    mixed = [
+        str(e)
+        for e in (raw_op.get("evidence_refs") or audit_result.get("evidence_refs") or [])
+        if e
+    ]
+
+    evidence_refs: list[str] = []
+    source_chunk_ids: list[str] = []
+    unknown_evidence: list[str] = []
+    unknown_chunks: list[str] = []
+
+    for e in explicit_evidence:
+        (evidence_refs if e in known_evidence_ids else unknown_evidence).append(e)
+    for c in explicit_chunks:
+        # When no chunk index is available we cannot disprove the ref; accept it
+        # rather than mis-rejecting a valid chunk as unknown evidence.
+        if not known_chunk_ids or c in known_chunk_ids:
+            source_chunk_ids.append(c)
+        else:
+            unknown_chunks.append(c)
+    for ref in mixed:
+        if ref in known_evidence_ids:
+            evidence_refs.append(ref)
+        elif ref in known_chunk_ids:
+            source_chunk_ids.append(ref)
+        else:
+            unknown_evidence.append(ref)
+
+    reason = ""
+    if unknown_evidence:
+        reason = f"unknown_evidence:{','.join(_dedup(unknown_evidence))}"
+    elif unknown_chunks:
+        reason = f"unknown_source_chunk:{','.join(_dedup(unknown_chunks))}"
+    return _dedup(evidence_refs), _dedup(source_chunk_ids), reason
+
+
 def validate_proposed_operation(
     raw_op: dict,
     inventory: dict,
     audit_result: dict | None = None,
     *,
     known_checkpoint_ids: set[str] | None = None,
+    known_chunk_ids: set[str] | None = None,
 ) -> tuple:
     """Validate a single proposed operation server-side.
 
@@ -84,14 +183,18 @@ def validate_proposed_operation(
         ):
             return None, f"unknown_relation_target:{relation_target_type}:{relation_target_id}"
 
-    # Evidence refs must resolve (source-derived, from the audit result).
+    # References must resolve, but the registry-evidence and source-chunk ID
+    # spaces are validated separately (#412 P0-6). A valid chunk reference (in
+    # ``chunks.id``) is kept as ``source_chunk_ids`` and never rejected as
+    # unknown registry evidence.
     known_ev = _known_evidence_ids(inventory)
     audit_result = audit_result or {}
-    evidence_refs = [str(e) for e in (raw_op.get("evidence_refs")
-                                      or audit_result.get("evidence_refs") or []) if e]
-    unknown_evidence = [e for e in evidence_refs if e not in known_ev]
-    if unknown_evidence:
-        return None, f"unknown_evidence:{','.join(unknown_evidence)}"
+    known_chunks = set(known_chunk_ids or set()) | chunk_ids_for_audit_result(audit_result)
+    evidence_refs, source_chunk_ids, ref_reason = _resolve_evidence_refs(
+        raw_op, audit_result, known_evidence_ids=known_ev, known_chunk_ids=known_chunks
+    )
+    if ref_reason:
+        return None, ref_reason
 
     checkpoint_ids = [str(value) for value in (raw_op.get("checkpoint_ids") or []) if value]
     if audit_result.get("checkpoint_id") and audit_result["checkpoint_id"] not in checkpoint_ids:
@@ -110,7 +213,7 @@ def validate_proposed_operation(
     source_locations = (
         raw_op.get("source_locations") or audit_result.get("source_locations") or []
     )
-    if not evidence_refs and not source_locations:
+    if not evidence_refs and not source_chunk_ids and not source_locations:
         return None, "missing_source_or_evidence"
 
     op = make_operation(
@@ -123,6 +226,7 @@ def validate_proposed_operation(
             if audit_result.get("findings") else raw_op.get("reason", ""),
         checkpoint_ids=checkpoint_ids,
         evidence_refs=evidence_refs,
+        source_chunk_ids=source_chunk_ids,
         source_locations=source_locations,
         confidence=float(raw_op.get("confidence") or audit_result.get("confidence") or 0.0),
         operation_id=raw_op.get("operation_id") or "",
@@ -152,6 +256,15 @@ def validate_proposed_operations(
         for checkpoint in (checkpoints or [])
         if isinstance(checkpoint, dict) and checkpoint.get("checkpoint_id")
     } | set(audit_by_checkpoint)
+    # Source-chunk id space (chunks.id), distinct from EvidenceRegistry ids. Built
+    # from every audit result's retrieved source + every checkpoint's source scope
+    # so legitimate chunk references survive validation (#412 P0-6).
+    known_chunk_ids: set[str] = set()
+    for audit in audit_by_checkpoint.values():
+        known_chunk_ids |= chunk_ids_for_audit_result(audit)
+    for checkpoint in (checkpoints or []):
+        if isinstance(checkpoint, dict):
+            known_chunk_ids |= _chunk_ids_from_locations(checkpoint.get("source_scope"))
     seen_targets: set[tuple[str, str, str]] = set()
     for raw in raw_ops or []:
         raw_checkpoint_ids = [
@@ -166,6 +279,7 @@ def validate_proposed_operations(
             inventory,
             audit,
             known_checkpoint_ids=known_checkpoint_ids,
+            known_chunk_ids=known_chunk_ids,
         )
         if op is not None:
             key = (op.get("operation") or "", op.get("target_type") or "", op.get("target_id") or "")
@@ -188,8 +302,12 @@ def _proposal_messages(audit_result: dict, inventory: dict) -> list[dict]:
         "revision operationを1つ提案してください。operationは次から選ぶ: "
         + ", ".join(OPERATIONS) +
         "。出力は次のJSONのみ: {\"operation\":..,\"target_type\":..,\"target_id\":..,"
-        "\"after_json\":..,\"reason\":..,\"evidence_refs\":[..]}。"
-        "原文根拠(evidence_refs)を必ず付け、推測だけで確定しないこと。"
+        "\"after_json\":..,\"reason\":..,"
+        "\"evidence_ids\":[EvidenceRegistryのevidence_id],"
+        "\"source_chunk_ids\":[原文chunkのchunks.id]}。"
+        "evidence_ids（登録済みevidence）とsource_chunk_ids（原文chunk）はID空間が異なるため"
+        "必ず分けて出力すること。chunk IDをevidence_idとして出さない。"
+        "原文根拠を必ず付け、推測だけで確定しないこと。"
     )
     payload = {"audit": {
         "verdict": audit_result.get("verdict"),
@@ -197,6 +315,7 @@ def _proposal_messages(audit_result: dict, inventory: dict) -> list[dict]:
         "target_type": audit_result.get("target_type"),
         "target_id": audit_result.get("target_id"),
         "evidence_refs": audit_result.get("evidence_refs"),
+        "source_chunk_ids": sorted(chunk_ids_for_audit_result(audit_result)),
         "source_locations": audit_result.get("source_locations"),
     }, "entity": entity}
     return [
@@ -247,6 +366,7 @@ def propose_operations(
             inventory,
             audit,
             known_checkpoint_ids={str(audit.get("checkpoint_id"))},
+            known_chunk_ids=chunk_ids_for_audit_result(audit),
         )
         if op is not None:
             operations.append(op)

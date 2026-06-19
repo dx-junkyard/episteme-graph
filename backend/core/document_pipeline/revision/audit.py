@@ -139,7 +139,8 @@ def _empty_result(checkpoint: dict) -> dict:
         "trigger_reason": checkpoint.get("trigger_reason"),
         "verdict": "ambiguous",
         "findings": [],
-        "evidence_refs": [],
+        "evidence_refs": [],     # EvidenceRegistry evidence_id refs only
+        "source_chunk_ids": [],  # chunks.id refs only — distinct ID space (#412 P0-6)
         "source_locations": [],
         "source_evidence": [],   # source-derived quotes only
         "analysis_notes": [],    # LLM commentary only — kept separate
@@ -160,6 +161,11 @@ def _deterministic_verdict(checkpoint: dict, retrieval: dict) -> dict:
          "page_start": r.get("page_start"), "page_end": r.get("page_end")}
         for r in retrieved
     ]
+    # Source chunk ids actually retrieved (chunks.id space). These are valid
+    # *source* references, kept separate from EvidenceRegistry evidence_ids.
+    result["source_chunk_ids"] = list(dict.fromkeys(
+        str(r.get("chunk_id")) for r in retrieved if r.get("chunk_id")
+    ))
     result["source_evidence"] = [
         {"chunk_id": r.get("chunk_id"), "text": r.get("text"),
          "match_reason": r.get("match_reason")}
@@ -238,9 +244,16 @@ def _coerce_llm_result(checkpoint: dict, retrieval: dict, raw: Any) -> dict:
             checkpoint, retrieval, failure_type="invalid_verdict"
         )
 
-    evidence_refs = [r for r in (raw.get("evidence_refs") or []) if r]
+    # Registry evidence ids and source chunk ids are kept in separate fields
+    # (#412 P0-6). ``evidence_ids`` is the typed field; ``evidence_refs`` is the
+    # legacy mixed list (routed to the correct space later by the validator).
+    evidence_refs = [r for r in (raw.get("evidence_ids") or raw.get("evidence_refs") or []) if r]
+    source_chunk_ids = list(dict.fromkeys(
+        [str(c) for c in (raw.get("source_chunk_ids") or []) if c]
+        + list(result.get("source_chunk_ids") or [])
+    ))
     # Safety rule: never mark valid without positive source evidence.
-    if verdict == "valid" and not (evidence_refs or result["source_evidence"]):
+    if verdict == "valid" and not (evidence_refs or source_chunk_ids or result["source_evidence"]):
         verdict = "ambiguous"
 
     confidence = float(raw.get("confidence") or 0.0)
@@ -257,6 +270,7 @@ def _coerce_llm_result(checkpoint: dict, retrieval: dict, raw: Any) -> dict:
         "verdict": verdict,
         "findings": list(raw.get("findings") or result["findings"]),
         "evidence_refs": evidence_refs,
+        "source_chunk_ids": source_chunk_ids,
         "analysis_notes": list(raw.get("analysis_notes") or raw.get("notes") or []),
         "confidence": confidence,
         "requires_revision": requires_revision,

@@ -97,6 +97,7 @@ def make_operation(
     reason: str = "",
     checkpoint_ids: list[str] | None = None,
     evidence_refs: list[str] | None = None,
+    source_chunk_ids: list[str] | None = None,
     source_locations: list | None = None,
     confidence: float = 0.0,
     protected_target: bool = False,
@@ -114,7 +115,10 @@ def make_operation(
         "after_json": after_json,
         "reason": reason,
         "checkpoint_ids": list(checkpoint_ids or []),
+        # Registry evidence ids and source chunk ids are kept in separate fields
+        # because they live in different ID spaces (#412 P0-6).
         "evidence_refs": list(evidence_refs or []),
+        "source_chunk_ids": list(source_chunk_ids or []),
         "source_locations": list(source_locations or []),
         "confidence": float(confidence or 0.0),
         "protected_target": bool(protected_target),
@@ -157,18 +161,6 @@ def _find_record(lst: list, id_field: str | None, target_id: str) -> dict | None
         if isinstance(r, dict) and _record_id(r, id_field) == target_id:
             return r
     return None
-
-
-def _collect_ids(candidate: dict) -> dict[str, set]:
-    ids: dict[str, set] = {}
-    for etype, (akey, lkey, idf) in ENTITY_REGISTRY.items():
-        bucket = ids.setdefault(etype, set())
-        for r in _as_list((candidate.get(akey) or {}).get(lkey)):
-            if isinstance(r, dict):
-                rid = _record_id(r, idf)
-                if rid:
-                    bucket.add(rid)
-    return ids
 
 
 # ---------------------------------------------------------------------------
@@ -433,37 +425,28 @@ _DISPATCH = {
 # Integrity check
 # ---------------------------------------------------------------------------
 
+def _ref_key(ref: dict) -> tuple:
+    return (ref.get("source_id"), ref.get("ref_field"), ref.get("target_id"))
+
+
 def _base_unresolved_keys(base_inventory: dict | None) -> set[tuple]:
     keys: set[tuple] = set()
     for u in (base_inventory or {}).get("unresolved_references", []) or []:
-        keys.add((u.get("source_id"), u.get("ref_field"), u.get("target_id")))
+        keys.add(_ref_key(u))
     return keys
 
 
-def _candidate_dangling(candidate: dict) -> list[dict]:
-    ids = _collect_ids(candidate)
-    dangling: list[dict] = []
-    for entity_type, fields in REFERENCE_FIELDS.items():
-        akey, lkey, idf = ENTITY_REGISTRY[entity_type]
-        for r in _as_list((candidate.get(akey) or {}).get(lkey)):
-            if not isinstance(r, dict):
-                continue
-            sid = _record_id(r, idf)
-            for field, target_type in fields:
-                for tid in _as_list(r.get(field)):
-                    if str(tid) not in ids.get(target_type, set()):
-                        dangling.append({"source_id": sid, "ref_field": field, "target_id": str(tid)})
-    # graph edge endpoints
-    node_ids = ids.get("graph_node", set())
-    for e in _as_list((candidate.get("component_graph") or {}).get("edges")):
-        if not isinstance(e, dict):
-            continue
-        eid = str(e.get("edge_id") or "")
-        for role in ("source", "target"):
-            v = e.get(role) or e.get(f"{role}_component_id")
-            if v and str(v) not in node_ids:
-                dangling.append({"source_id": eid, "ref_field": role, "target_id": str(v)})
-    return dangling
+def _candidate_unresolved_references(candidate: dict) -> list[dict]:
+    """Unresolved references in the candidate, via the *same* resolver as the base.
+
+    Using ``build_baseline_inventory`` (rather than a parallel raw-field walk)
+    guarantees base and candidate dangling checks share one schema / ID semantics,
+    so a reference that already dangled in the base is classified as *carried*, not
+    a brand-new error (#412 P1-7).
+    """
+    from .inventory import build_baseline_inventory
+    inv = build_baseline_inventory(candidate or {}, base_run_id="")
+    return list(inv.get("unresolved_references") or [])
 
 
 # ---------------------------------------------------------------------------
@@ -579,12 +562,18 @@ def apply_operations(
     dropped_edges = _apply_id_mapping(candidate, id_mapping)
 
     # Integrity: any NEW dangling reference (not pre-existing in base) is fatal.
-    base_keys = _base_unresolved_keys(base_inventory)
-    candidate_dangling = _candidate_dangling(candidate)
-    new_dangling = [
-        d for d in candidate_dangling
-        if (d["source_id"], d["ref_field"], d["target_id"]) not in base_keys
-    ]
+    # Base keys come from the same inventory resolver, so references that already
+    # dangled in the base are carried, never re-counted as new errors (#412 P1-7).
+    if base_inventory is not None:
+        base_keys = _base_unresolved_keys(base_inventory)
+    else:
+        from .inventory import build_baseline_inventory
+        base_keys = _base_unresolved_keys(
+            build_baseline_inventory(base_artifacts or {}, base_run_id="")
+        )
+    candidate_unresolved = _candidate_unresolved_references(candidate)
+    new_dangling = [d for d in candidate_unresolved if _ref_key(d) not in base_keys]
+    carried = [d for d in candidate_unresolved if _ref_key(d) in base_keys]
     if new_dangling:
         errors.append({"error": "new_unknown_references", "details": new_dangling})
 
@@ -596,10 +585,7 @@ def apply_operations(
         "operation_errors": errors,
         "protected_changes": protected_changes,
         "dropped_edges": dropped_edges,
-        "carried_unresolved_references": [
-            d for d in candidate_dangling
-            if (d["source_id"], d["ref_field"], d["target_id"]) in base_keys
-        ],
+        "carried_unresolved_references": carried,
         "invalid": invalid,
         "requires_confirmation": bool(protected_changes),
     }

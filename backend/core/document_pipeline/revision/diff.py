@@ -133,6 +133,7 @@ def _entity_change_from_operation(op: dict) -> dict:
         "reason": op.get("reason"),
         "checkpoint_ids": op.get("checkpoint_ids") or [],
         "evidence_refs": op.get("evidence_refs") or [],
+        "source_chunk_ids": op.get("source_chunk_ids") or [],
         "source_locations": op.get("source_locations") or [],
         "confidence": op.get("confidence"),
         "protected": bool(op.get("protected_target")),
@@ -173,6 +174,66 @@ def _recommendation(quality_after: dict, candidate_invalid: bool,
     return "manual_review"
 
 
+def summarize_rejections(rejected: list[dict]) -> list[dict]:
+    """Aggregate rejected-proposal reasons by their leading reason code (#412 P1-8)."""
+    counts: dict[str, int] = {}
+    for item in rejected or []:
+        reason = str((item or {}).get("reason") or "unknown")
+        code = reason.split(":", 1)[0]
+        counts[code] = counts.get(code, 0) + 1
+    return [
+        {"reason": code, "count": counts[code]}
+        for code in sorted(counts, key=lambda c: (-counts[c], c))
+    ]
+
+
+def build_stage_summary(
+    *,
+    audit_summary: dict | None,
+    proposal_summary: dict | None,
+    candidate_invalid: bool,
+    new_unknown_reference_count: int,
+    applied_change_count: int,
+) -> dict:
+    """Three-stage rollup (audit / candidate generation / candidate evaluation).
+
+    Distinguishes "no improvement found" from "improvements proposed but could not
+    be validated/adopted" so a 1-change diff over 59 targets is not misread as
+    "nothing to improve" (#412 P1-8).
+    """
+    audit_summary = audit_summary or {}
+    proposal_summary = proposal_summary or {}
+    accepted = int(proposal_summary.get("accepted_count") or 0)
+    rejected = int(proposal_summary.get("rejected_count") or 0)
+    audit_targets = int(audit_summary.get("revision_target_count") or 0)
+    if audit_targets == 0:
+        outcome = "no_audit_targets"
+    elif applied_change_count == 0 and accepted == 0:
+        outcome = "proposals_failed"   # targets found, but no adoptable change
+    elif candidate_invalid:
+        outcome = "candidate_invalid"
+    else:
+        outcome = "changes_proposed"
+    return {
+        "audit": {
+            "checkpoints_total": int(audit_summary.get("checkpoints_total") or 0),
+            "revision_target_count": audit_targets,
+            "manual_review_count": int(audit_summary.get("manual_review_count") or 0),
+        },
+        "candidate_generation": {
+            "accepted_count": accepted,
+            "rejected_count": rejected,
+            "rejection_reasons": list(proposal_summary.get("rejection_reasons") or []),
+        },
+        "candidate_evaluation": {
+            "applied_change_count": applied_change_count,
+            "candidate_invalid": bool(candidate_invalid),
+            "new_unknown_reference_count": int(new_unknown_reference_count),
+        },
+        "outcome": outcome,
+    }
+
+
 def build_diff_report(
     *,
     base_run_id: str,
@@ -187,8 +248,11 @@ def build_diff_report(
     requires_confirmation: bool = False,
     id_mapping: dict | None = None,
     audit_verifications: list[dict] | None = None,
+    audit_summary: dict | None = None,
+    proposal_summary: dict | None = None,
+    new_unknown_reference_count: int = 0,
 ) -> dict:
-    """Assemble the before/after diff report (schema per #406)."""
+    """Assemble the before/after diff report (schema per #406, sections per #412)."""
     quality_before = compute_quality_metrics(base_artifacts, gate_result=gate_base)
     quality_after = compute_quality_metrics(candidate_artifacts, gate_result=gate_candidate)
 
@@ -216,6 +280,14 @@ def build_diff_report(
         len(finding_diff["resolved_issues"]), requires_confirmation,
     )
 
+    stage_summary = build_stage_summary(
+        audit_summary=audit_summary,
+        proposal_summary=proposal_summary,
+        candidate_invalid=candidate_invalid,
+        new_unknown_reference_count=new_unknown_reference_count,
+        applied_change_count=len(entity_changes),
+    )
+
     return {
         "base_run_id": base_run_id,
         "candidate_run_id": candidate_run_id,
@@ -229,7 +301,9 @@ def build_diff_report(
             "hard_error_count": hard_error_count,
             "acceptable": acceptable,
             "requires_confirmation": bool(requires_confirmation),
+            "outcome": stage_summary["outcome"],
         },
+        "stage_summary": stage_summary,
         "entity_changes": entity_changes,
         "structural_summary": structural_summary,
         "id_mapping": id_mapping or {},

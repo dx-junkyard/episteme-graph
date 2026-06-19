@@ -68,30 +68,72 @@ def test_create_revision_no_base_returns_409(app_client, monkeypatch):
     assert resp.status_code == 409
 
 
-def test_run_rejects_invalid_raw_operations_with_422(app_client, monkeypatch):
+def _pending_run(monkeypatch, revisions):
+    """Make the target revision look freshly created (startable)."""
+    monkeypatch.setattr(revisions.persistence, "get_analysis_run",
+                        lambda *, run_id: {"id": run_id, "run_type": "revision",
+                                           "document_id": "doc-1", "status": "pending",
+                                           "revision_status": "preparing",
+                                           "base_run_id": "base-1", "current_stage": None,
+                                           "stage_outputs": {"_artifacts": {}}})
+
+
+def test_run_returns_202_and_launches_worker(app_client, monkeypatch):
     client, revisions, _dep, _app = app_client
-    monkeypatch.setattr(
-        revisions.coordinator,
-        "audit_revision_run",
-        lambda **kwargs: {"verdict_counts": {}, "revision_targets": []},
-    )
+    _pending_run(monkeypatch, revisions)
+    launched = {}
+    monkeypatch.setattr(revisions, "create_background_task", lambda *a, **k: None)
+    monkeypatch.setattr(revisions, "update_background_task", lambda *a, **k: None)
+    monkeypatch.setattr(revisions, "_launch_revision_worker",
+                        lambda **kwargs: launched.update(kwargs))
+    resp = client.post("/api/admin/documents/doc-1/revisions/rev-1/run", json={})
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["revision_run_id"] == "rev-1"
+    assert body["revision_status"] == "running"
+    assert body["task_id"]
+    # the long-running work was handed to the worker, not done in the request
+    assert launched["revision_id"] == "rev-1"
+
+
+def test_run_rejects_duplicate_in_progress_with_409(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    # default fixture run has status "running" -> a second /run is a duplicate
+    monkeypatch.setattr(revisions, "create_background_task",
+                        lambda *a, **k: pytest.fail("must not start a duplicate run"))
+    resp = client.post("/api/admin/documents/doc-1/revisions/rev-1/run", json={})
+    assert resp.status_code == 409
+
+
+def test_run_worker_records_invalid_raw_operations(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    _pending_run(monkeypatch, revisions)
+    tasks: dict = {}
+
+    def _update(task_id, status, result_data=None, error_message=None):
+        tasks[task_id] = {"status": status, "result_data": result_data,
+                          "error_message": error_message}
+    monkeypatch.setattr(revisions, "create_background_task", lambda *a, **k: None)
+    monkeypatch.setattr(revisions, "update_background_task", _update)
 
     def _invalid(**kwargs):
         raise revisions.coordinator.ProposalValidationError([
-            {"raw": kwargs["operations"][0], "reason": "missing_source_or_evidence"},
+            {"raw": (kwargs.get("operations") or [{}])[0], "reason": "missing_source_or_evidence"},
         ])
+    monkeypatch.setattr(revisions.coordinator, "run_revision_pipeline", _invalid)
+    # run the worker synchronously so we can inspect the recorded outcome
+    monkeypatch.setattr(revisions, "_launch_revision_worker",
+                        lambda **kwargs: revisions._revision_run_worker(**kwargs))
 
-    monkeypatch.setattr(revisions.coordinator, "assemble_candidate", _invalid)
     resp = client.post(
         "/api/admin/documents/doc-1/revisions/rev-1/run",
-        json={"operations": [{
-            "operation": "update_entity",
-            "target_type": "claim",
-            "target_id": "clm_1",
-        }]},
+        json={"operations": [{"operation": "update_entity", "target_type": "claim",
+                              "target_id": "clm_1"}]},
     )
-    assert resp.status_code == 422
-    assert resp.json()["detail"]["rejected_operations"][0]["reason"] == "missing_source_or_evidence"
+    assert resp.status_code == 202
+    failed = [t for t in tasks.values() if t["status"] == "failed"]
+    assert failed and failed[0]["result_data"]["rejected_operations"][0]["reason"] == \
+        "missing_source_or_evidence"
 
 
 def test_accept_success(app_client, monkeypatch):

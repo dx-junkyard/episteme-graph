@@ -240,6 +240,52 @@ def test_pre_existing_unresolved_ref_does_not_invalidate():
     assert any(d["target_id"] == "eq_missing" for d in res["carried_unresolved_references"])
 
 
+# --- #412 P1-7: shared resolver for base vs candidate dangling --------------
+
+def test_graph_member_and_step_refs_resolve_via_shared_resolver():
+    base = _base_artifacts()
+    # Main node aggregates a detail node and references a derivation step. Under
+    # the old raw-field check these looked like dangling component/derivation refs.
+    base["component_graph"]["nodes"].append(
+        {"node_id": "main_1", "label": "Stage", "graph_layer": "main",
+         "member_component_ids": ["eq_op_1"], "linked_derivation_ids": ["step_1"]})
+    base["component_graph"]["nodes"].append(
+        {"node_id": "eq_op_1", "label": "detail", "graph_layer": "equation_detail"})
+    base["derivation_chain"]["chains"][0]["steps"][0]["step_id"] = "step_1"
+    # Remove an unrelated, unreferenced evidence record (the "equation deletion"
+    # style case): the pre-existing member/step refs must not become new danglers.
+    res = apply_operations(base, [
+        make_operation(operation="remove_entity", target_type="evidence", target_id="ev_2"),
+    ])
+    assert not any(e.get("error") == "new_unknown_references"
+                   for e in res["operation_errors"]), res["operation_errors"]
+    assert res["invalid"] is False
+
+
+def test_preexisting_member_dangling_is_carried_not_new():
+    base = _base_artifacts()
+    base["component_graph"]["nodes"].append(
+        {"node_id": "main_1", "graph_layer": "main",
+         "member_component_ids": ["ghost_node"]})
+    res = apply_operations(base, [
+        make_operation(operation="remove_entity", target_type="evidence", target_id="ev_2"),
+    ])
+    assert res["invalid"] is False, res["operation_errors"]
+    assert any(d["target_id"] == "ghost_node"
+               for d in res["carried_unresolved_references"])
+
+
+def test_operation_introduced_member_dangling_is_still_new_error():
+    base = _base_artifacts()
+    res = apply_operations(base, [
+        make_operation(operation="add_relation", target_type="graph_edge",
+                       after_json={"edge_id": "edge_new", "source": "cmp_1",
+                                   "target": "ghost_node", "edge_type": "REQUIRES"}),
+    ])
+    assert res["invalid"] is True
+    assert any(e.get("error") == "new_unknown_references" for e in res["operation_errors"])
+
+
 # --- protected target ------------------------------------------------------
 
 def test_protected_target_flagged_not_auto_adoptable():

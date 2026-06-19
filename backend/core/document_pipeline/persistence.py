@@ -1398,6 +1398,7 @@ def update_revision_status(
     run_id: str,
     revision_status: str,
     status: str | None = None,
+    current_stage: str | None = None,
     error_message: str | None = None,
     stage_outputs: dict | None = None,
 ) -> None:
@@ -1421,6 +1422,7 @@ def update_revision_status(
                 UPDATE document_analysis_runs SET
                     revision_status = :revision_status,
                     status = COALESCE(:status, status),
+                    current_stage = COALESCE(:current_stage, current_stage),
                     error_message = COALESCE(:error_message, error_message),
                     stage_outputs = jsonb_set(
                         COALESCE(stage_outputs, '{{}}'::jsonb) || CAST(:other AS jsonb),
@@ -1428,6 +1430,8 @@ def update_revision_status(
                         COALESCE(stage_outputs->'{ARTIFACTS_KEY}', '{{}}'::jsonb)
                             || CAST(:artifacts AS jsonb)
                     ),
+                    started_at = CASE WHEN :status = 'running' AND started_at IS NULL
+                                      THEN now() ELSE started_at END,
                     completed_at = CASE WHEN :status IN ('completed', 'failed')
                                         THEN now() ELSE completed_at END,
                     updated_at = now()
@@ -1439,6 +1443,7 @@ def update_revision_status(
                 "run_id": run_id,
                 "revision_status": revision_status,
                 "status": status,
+                "current_stage": current_stage,
                 "error_message": error_message,
                 "other": _json_dumps(payload),
                 "artifacts": _json_dumps(artifacts_delta or {}),
