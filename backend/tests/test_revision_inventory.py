@@ -14,6 +14,7 @@ if str(SRC) not in sys.path:
 from core.document_pipeline.revision import (  # noqa: E402
     build_baseline_inventory,
     build_revision_plan,
+    overlay_projection_state,
     plan_checkpoints,
 )
 from core.document_pipeline.revision import coordinator  # noqa: E402
@@ -188,6 +189,36 @@ def test_empty_artifacts_yield_empty_inventory():
     assert plan_checkpoints(inv) == []
 
 
+def test_projection_overlay_marks_manual_edits_and_teacher_approval_protected():
+    inv = build_baseline_inventory(
+        _sample_artifacts(), base_run_id="base-1", document_id="doc-1"
+    )
+    out = overlay_projection_state(inv, {
+        "claims": [{
+            "id": "db-claim-1",
+            "source_scope": {"legacy_ids": ["clm_1"]},
+            "text": "Teacher-edited claim",
+            "normalized_text": "Teacher-edited claim",
+            "claim_type": "result",
+            "support_status": "source_backed",
+            "review_status": "teacher_approved",
+        }],
+        "components": [],
+        "review_events": [{
+            "entity_type": "claim",
+            "entity_id": "db-claim-1",
+            "old_status": "teacher_review_required",
+            "new_status": "teacher_approved",
+            "metadata": {},
+        }],
+    })
+    claim = out["entities"]["claims"]["clm_1"]
+    assert claim["text"] == "Teacher-edited claim"
+    assert claim["projection_id"] == "db-claim-1"
+    assert claim["manual_edit"] is True
+    assert {item["entity_id"] for item in out["protected_decisions"]} >= {"clm_1"}
+
+
 def test_start_revision_run_persists_plan_without_touching_active(monkeypatch):
     calls = {}
 
@@ -197,6 +228,11 @@ def test_start_revision_run_persists_plan_without_touching_active(monkeypatch):
             "id": "base-1", "document_id": document_id,
             "stage_outputs": {"_artifacts": _sample_artifacts()},
         },
+    )
+    monkeypatch.setattr(
+        coordinator.persistence,
+        "load_revision_projection_overlay",
+        lambda *, document_id: {"claims": [], "components": [], "review_events": []},
     )
 
     def _create(**kwargs):

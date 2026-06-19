@@ -13,6 +13,7 @@ of checkpoint planning is reproducible (AC #403).
 """
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 ARTIFACTS_KEY = "_artifacts"
@@ -462,6 +463,161 @@ def _collect_protected(entities: dict[str, dict[str, dict]]) -> list[dict]:
                     "reason": "teacher_approved_or_manual_edit",
                 })
     return protected
+
+
+def _legacy_ids(row: dict) -> list[str]:
+    scope = _as_dict(row.get("source_scope"))
+    return _str_list(scope.get("legacy_ids"))
+
+
+def _match_projection_entity(
+    rows: list[dict],
+    entities: dict[str, dict],
+    *,
+    text_field: str,
+    row_text_field: str,
+) -> list[tuple[dict, str]]:
+    """Resolve projection rows to artifact ids without replacing stable agent ids."""
+    matched: list[tuple[dict, str]] = []
+    text_index: dict[str, list[str]] = {}
+    location_index: dict[tuple[str, str, str], list[str]] = {}
+    for entity_id, entity in entities.items():
+        text = str(entity.get(text_field) or "").strip()
+        if text:
+            text_index.setdefault(text, []).append(entity_id)
+        for location in entity.get("source_locations") or []:
+            if not isinstance(location, dict):
+                continue
+            key = (
+                str(location.get("section_id") or ""),
+                str(location.get("block_id") or ""),
+                str(location.get("span_id") or ""),
+            )
+            if any(key):
+                location_index.setdefault(key, []).append(entity_id)
+    for row in rows or []:
+        entity_id = next((value for value in _legacy_ids(row) if value in entities), "")
+        if not entity_id:
+            scope = _as_dict(row.get("source_scope"))
+            location_key = (
+                str(scope.get("section_id") or ""),
+                str(scope.get("block_id") or ""),
+                str(scope.get("span_id") or ""),
+            )
+            candidates = location_index.get(location_key) or []
+            if any(location_key) and len(candidates) == 1:
+                entity_id = candidates[0]
+        if not entity_id:
+            text = str(row.get(row_text_field) or "").strip()
+            candidates = text_index.get(text) or []
+            if len(candidates) == 1:
+                entity_id = candidates[0]
+        if entity_id:
+            matched.append((row, entity_id))
+    return matched
+
+
+def overlay_projection_state(inventory: dict, projection: dict | None) -> dict:
+    """Overlay current DB edits/review decisions onto an artifact inventory.
+
+    Artifact entity ids remain the canonical operation ids. Projection UUIDs are
+    attached as metadata and used to associate review events.
+    """
+    result = copy.deepcopy(inventory or {})
+    projection = projection or {}
+    entities = result.setdefault("entities", {})
+    claims = entities.setdefault("claims", {})
+    components = entities.setdefault("components", {})
+    db_to_entity: dict[tuple[str, str], str] = {}
+
+    for row, entity_id in _match_projection_entity(
+        projection.get("claims") or [],
+        claims,
+        text_field="normalized_text",
+        row_text_field="normalized_text",
+    ):
+        entity = claims[entity_id]
+        original = {
+            "text": entity.get("text") or "",
+            "normalized_text": entity.get("normalized_text") or "",
+            "claim_type": entity.get("claim_type") or "",
+            "support_status": entity.get("support_status") or "",
+            "review_status": entity.get("review_status") or "",
+        }
+        current = {
+            "text": row.get("text") or "",
+            "normalized_text": row.get("normalized_text") or row.get("text") or "",
+            "claim_type": row.get("claim_type") or "",
+            "support_status": row.get("support_status") or "",
+            "review_status": row.get("review_status") or "",
+        }
+        db_id = str(row.get("id") or "")
+        if db_id:
+            db_to_entity[("claim", db_id)] = entity_id
+            entity["projection_id"] = db_id
+        entity.update(current)
+        if current != original:
+            entity["manual_edit"] = True
+            entity["protected"] = True
+            entity["projection_diverged_from_artifact"] = True
+
+    for row, entity_id in _match_projection_entity(
+        projection.get("components") or [],
+        components,
+        text_field="label",
+        row_text_field="name",
+    ):
+        entity = components[entity_id]
+        original = {
+            "label": entity.get("label") or "",
+            "summary": entity.get("summary") or "",
+            "review_status": entity.get("review_status") or "",
+        }
+        current = {
+            "label": row.get("name") or "",
+            "summary": row.get("summary") or "",
+            "review_status": row.get("review_status") or "",
+        }
+        db_id = str(row.get("id") or "")
+        if db_id:
+            db_to_entity[("component", db_id)] = entity_id
+            entity["projection_id"] = db_id
+        entity.update(current)
+        if current != original:
+            entity["manual_edit"] = True
+            entity["protected"] = True
+            entity["projection_diverged_from_artifact"] = True
+
+    latest_events: dict[tuple[str, str], dict] = {}
+    for event in projection.get("review_events") or []:
+        if not isinstance(event, dict):
+            continue
+        key = (str(event.get("entity_type") or ""), str(event.get("entity_id") or ""))
+        if key in db_to_entity:
+            latest_events[key] = event
+    for key, event in latest_events.items():
+        entity_id = db_to_entity[key]
+        bucket = claims if key[0] == "claim" else components
+        entity = bucket[entity_id]
+        entity["latest_review_event"] = {
+            "old_status": event.get("old_status") or "",
+            "new_status": event.get("new_status") or "",
+            "metadata": _as_dict(event.get("metadata")),
+        }
+        new_status = str(event.get("new_status") or "").strip().lower()
+        metadata = _as_dict(event.get("metadata"))
+        if new_status in _PROTECTED_REVIEW_STATUSES or any(
+            metadata.get(flag) for flag in _PROTECTED_FLAGS
+        ):
+            entity["protected"] = True
+
+    result["protected_decisions"] = _collect_protected(entities)
+    result["projection_overlay"] = {
+        "claim_count": len(projection.get("claims") or []),
+        "component_count": len(projection.get("components") or []),
+        "review_event_count": len(projection.get("review_events") or []),
+    }
+    return result
 
 
 # ---------------------------------------------------------------------------

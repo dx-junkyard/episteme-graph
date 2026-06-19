@@ -123,7 +123,18 @@ def run_revision(
         response["proposed_count"] = len(operations)
         response["manual_review"] = proposals.get("manual_review") or []
 
-    candidate = coordinator.assemble_candidate(run_id=revision_id, operations=operations)
+    try:
+        candidate = coordinator.assemble_candidate(
+            run_id=revision_id, operations=operations
+        )
+    except coordinator.ProposalValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(exc),
+                "rejected_operations": exc.rejected,
+            },
+        )
     report = coordinator.revalidate_and_report(run_id=revision_id)
     response["candidate_invalid"] = candidate["invalid"]
     response["report_summary"] = report["report"]["summary"]

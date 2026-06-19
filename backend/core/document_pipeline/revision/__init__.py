@@ -23,6 +23,7 @@ from .coordinator import (
     PROPOSED_OPERATIONS_KEY,
     REVISION_OPERATIONS_KEY,
     AcceptBlockedError,
+    ProposalValidationError,
     accept_revision,
     assemble_candidate,
     audit_revision_run,
@@ -40,7 +41,12 @@ from .proposal import (
     validate_proposed_operations,
 )
 from .diff import build_diff_report, compute_quality_metrics
-from .inventory import ARTIFACTS_KEY, build_baseline_inventory, get_artifacts
+from .inventory import (
+    ARTIFACTS_KEY,
+    build_baseline_inventory,
+    get_artifacts,
+    overlay_projection_state,
+)
 from .operations import OPERATIONS, apply_operations, make_operation
 from .validation import candidate_has_hard_errors, run_export_validation
 
@@ -59,6 +65,7 @@ __all__ = [
     "PROPOSED_OPERATIONS_KEY",
     "LLMAuditClient",
     "AcceptBlockedError",
+    "ProposalValidationError",
     "accept_revision",
     "build_default_audit_client",
     "generate_proposals",
@@ -76,6 +83,7 @@ __all__ = [
     "candidate_has_hard_errors",
     "compute_quality_metrics",
     "get_artifacts",
+    "overlay_projection_state",
     "make_operation",
     "plan_checkpoints",
     "reject_revision",

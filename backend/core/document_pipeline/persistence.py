@@ -1,6 +1,7 @@
 """Adapters from agent results to existing Postgres tables (issue #226)."""
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
@@ -89,7 +90,10 @@ def _remap_nested_claim_refs(value: Any, id_map: dict[str, str]) -> Any:
         return [_remap_nested_claim_refs(item, id_map) for item in value]
     if not isinstance(value, dict):
         return value
-    out = dict(value)
+    out = {
+        key: _remap_nested_claim_refs(item, id_map)
+        for key, item in value.items()
+    }
     for key in ("claim_ids", "evidence_claims", "linked_claim_ids"):
         if isinstance(out.get(key), list):
             out[key] = _remap_string_list(out[key], id_map)
@@ -438,13 +442,15 @@ def persist_qualified_claims(
             if decision == "rejected":
                 continue
             chunk_id = block_to_chunk.get(getattr(span, "block_id", ""))
+            span_id = getattr(span, "span_id", None)
             params = {
                 "document_id": _strip_nuls(document_id),
                 "chunk_id": chunk_id,
                 "source_scope": _json_dumps({
                     "section_id": getattr(span, "section_id", None),
                     "block_id": getattr(span, "block_id", None),
-                    "span_id": getattr(span, "span_id", None),
+                    "span_id": span_id,
+                    "legacy_ids": sorted(_claim_legacy_keys({"span_id": span_id})),
                     # span.reason は LLM 判定理由 (review note) であり PDF 原文根拠ではない。
                     # source-backed 判定の根拠として evidence_text に保存しない (#257)。
                     "qualification_reason": _strip_nuls(getattr(span, "reason", "") or ""),
@@ -1584,6 +1590,69 @@ def get_revision_decisions(*, run_id: str) -> list[dict]:
         session.close()
 
 
+def load_revision_projection_overlay(*, document_id: str) -> dict:
+    """Load the current editable projections and their review history.
+
+    Revision inventory starts from immutable run artifacts, then overlays these
+    rows so post-pipeline manual edits and teacher decisions are not lost.
+    """
+    session = _pg_session()
+    try:
+        claims = session.execute(
+            sa_text(
+                """
+                SELECT id::text, source_scope, claim_type, text, normalized_text,
+                       concepts, equation, support_status, evidence_text,
+                       review_status, updated_at
+                FROM theory_claims
+                WHERE document_id = :doc
+                """
+            ),
+            {"doc": document_id},
+        ).mappings().all()
+        components = session.execute(
+            sa_text(
+                """
+                SELECT id::text, name, component_type_text, summary, status,
+                       source_scope, evidence_claims, review_status, inputs,
+                       outputs, preconditions, constraints, invalid_conditions,
+                       dependencies, updated_at
+                FROM theory_components
+                WHERE document_id = :doc
+                """
+            ),
+            {"doc": document_id},
+        ).mappings().all()
+        entity_ids = [
+            str(row["id"]) for row in [*claims, *components] if row.get("id")
+        ]
+        events: list[dict] = []
+        if entity_ids:
+            events = [
+                dict(row)
+                for row in session.execute(
+                    sa_text(
+                        """
+                        SELECT entity_type, entity_id, old_status, new_status,
+                               metadata, created_at
+                        FROM theory_review_events
+                        WHERE entity_id = ANY(CAST(:entity_ids AS text[]))
+                          AND entity_type IN ('claim', 'component')
+                        ORDER BY created_at ASC, id ASC
+                        """
+                    ),
+                    {"entity_ids": entity_ids},
+                ).mappings().all()
+            ]
+        return {
+            "claims": [dict(row) for row in claims],
+            "components": [dict(row) for row in components],
+            "review_events": events,
+        }
+    finally:
+        session.close()
+
+
 # Allowed theory_claims.claim_type values (migration 013 CHECK). Candidate
 # claim types outside this set fall back to the generic diagnostic_claim.
 _THEORY_CLAIM_TYPES = {
@@ -1613,7 +1682,11 @@ def _rebuild_theory_claims_in_session(session, document_id: str, claims: list) -
         if ctype not in _THEORY_CLAIM_TYPES:
             ctype = "diagnostic_claim"
         equation_ids = [str(v) for v in (c.get("equation_ids") or []) if v]
-        source_scope = c.get("source_scope") or {"section_id": c.get("section_id")}
+        source_scope = dict(c.get("source_scope") or {"section_id": c.get("section_id")})
+        legacy_ids = [str(v) for v in (source_scope.get("legacy_ids") or []) if v]
+        if agent_id and agent_id not in legacy_ids:
+            legacy_ids.append(agent_id)
+        source_scope["legacy_ids"] = legacy_ids
         row = session.execute(
             sa_text(
                 """
@@ -1765,7 +1838,90 @@ def _rebuild_theory_components_in_session(
     return id_map
 
 
-def _rebuild_component_graph_in_session(session, document_id: str, graph_payload: dict) -> None:
+def _remap_revision_graph(
+    graph_payload: dict,
+    component_id_map: dict[str, str],
+    claim_id_map: dict[str, str],
+) -> dict:
+    """Map candidate agent ids to the freshly-created projection UUIDs.
+
+    Component nodes and all graph endpoints must resolve to stored nodes. Claim
+    references embedded in nodes/edges are remapped recursively. Unknown
+    component ids are rejected instead of being persisted as ghost nodes.
+    """
+    graph = copy.deepcopy(graph_payload or {})
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    node_id_map: dict[str, str] = {}
+    stored_node_ids: set[str] = set()
+
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        agent_id = str(
+            node.get("component_id") or node.get("node_id") or node.get("id") or ""
+        ).strip()
+        if not agent_id:
+            raise ValueError("component graph node is missing an id")
+        is_component_node = (
+            bool(node.get("component_id"))
+            or agent_id in component_id_map
+            or str(node.get("type") or "").lower() == "component"
+        )
+        if is_component_node:
+            db_id = component_id_map.get(agent_id)
+            if not db_id:
+                raise ValueError(f"component graph references unknown component id: {agent_id}")
+        else:
+            db_id = agent_id
+        if db_id in stored_node_ids:
+            raise ValueError(f"component graph contains duplicate node id: {db_id}")
+        stored_node_ids.add(db_id)
+        node_id_map[agent_id] = db_id
+        if "id" in node or "node_id" not in node:
+            node["id"] = db_id
+        if "node_id" in node:
+            node["node_id"] = db_id
+        if is_component_node:
+            node["component_id"] = db_id
+            node["agent_component_id"] = agent_id
+        remapped = _remap_nested_claim_refs(node, claim_id_map)
+        node.clear()
+        node.update(remapped)
+
+    edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        for key in (
+            "source", "target", "from", "to",
+            "source_component_id", "target_component_id",
+        ):
+            if key not in edge or edge[key] in (None, ""):
+                continue
+            agent_id = str(edge[key])
+            db_id = node_id_map.get(agent_id)
+            if not db_id or db_id not in stored_node_ids:
+                raise ValueError(
+                    f"component graph edge references unknown node id: {agent_id}"
+                )
+            edge[key] = db_id
+        remapped = _remap_nested_claim_refs(edge, claim_id_map)
+        edge.clear()
+        edge.update(remapped)
+
+    return _normalize_graph_payload_for_persist(graph)
+
+
+def _rebuild_component_graph_in_session(
+    session,
+    document_id: str,
+    graph_payload: dict,
+    component_id_map: dict[str, str],
+    claim_id_map: dict[str, str],
+) -> None:
+    remapped_graph = _remap_revision_graph(
+        graph_payload, component_id_map or {}, claim_id_map or {}
+    )
     session.execute(
         sa_text(
             """
@@ -1775,9 +1931,30 @@ def _rebuild_component_graph_in_session(session, document_id: str, graph_payload
             DO UPDATE SET graph_json = EXCLUDED.graph_json, updated_at = now()
             """
         ),
-        {"doc": document_id, "graph": _json_dumps(graph_payload),
+        {"doc": document_id, "graph": _json_dumps(remapped_graph),
          "scope": _json_dumps({"level": "paper"})},
     )
+
+
+_REVISION_ARTIFACT_KEYS = {
+    "baseline_inventory",
+    "audit_checkpoints",
+    "audit_results",
+    "proposed_operations",
+    "revision_operations",
+    "candidate",
+    "candidate_validation",
+    "diff_report",
+}
+
+
+def _materializable_candidate_artifacts(candidate_artifacts: dict) -> dict:
+    """Return normal pipeline artifacts safe to promote on accept."""
+    return {
+        str(key): value
+        for key, value in (candidate_artifacts or {}).items()
+        if key not in _REVISION_ARTIFACT_KEYS
+    }
 
 
 def accept_revision(
@@ -1801,6 +1978,7 @@ def accept_revision(
     was proposed, or the candidate is not ``proposed``.
     """
     candidate_artifacts = candidate_artifacts or {}
+    promoted_artifacts = _materializable_candidate_artifacts(candidate_artifacts)
     session = _pg_session()
     try:
         row = session.execute(
@@ -1826,6 +2004,27 @@ def accept_revision(
         if expected_base_run_id and base_id and expected_base_run_id != base_id:
             raise RevisionConflictError("base_run_id mismatch with candidate")
 
+        # Materialize the adopted candidate into the normal artifact namespace.
+        # Keep `_artifacts.candidate.candidate_artifacts` and all revision audit
+        # metadata intact for lineage/diff inspection, while making the accepted
+        # run readable by existing Export/Course Builder consumers.
+        session.execute(
+            sa_text(
+                f"""
+                UPDATE document_analysis_runs
+                SET stage_outputs = jsonb_set(
+                        COALESCE(stage_outputs, '{{}}'::jsonb),
+                        '{{{ARTIFACTS_KEY}}}',
+                        COALESCE(stage_outputs->'{ARTIFACTS_KEY}', '{{}}'::jsonb)
+                            || CAST(:promoted AS jsonb)
+                    ),
+                    updated_at = now()
+                WHERE id = CAST(:rid AS uuid)
+                """
+            ),
+            {"rid": run_id, "promoted": _json_dumps(promoted_artifacts)},
+        )
+
         switched = session.execute(
             sa_text(
                 """
@@ -1849,9 +2048,17 @@ def accept_revision(
         components = ((candidate_artifacts.get("component_assembly") or {}).get("components")) or []
         graph_payload = candidate_artifacts.get("component_graph")
         claim_id_map = _rebuild_theory_claims_in_session(session, document_id, claims)
-        _rebuild_theory_components_in_session(session, document_id, components, claim_id_map)
+        component_id_map = _rebuild_theory_components_in_session(
+            session, document_id, components, claim_id_map
+        )
         if graph_payload is not None:
-            _rebuild_component_graph_in_session(session, document_id, graph_payload)
+            _rebuild_component_graph_in_session(
+                session,
+                document_id,
+                graph_payload,
+                component_id_map,
+                claim_id_map,
+            )
 
         session.execute(
             sa_text(

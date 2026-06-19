@@ -68,6 +68,32 @@ def test_create_revision_no_base_returns_409(app_client, monkeypatch):
     assert resp.status_code == 409
 
 
+def test_run_rejects_invalid_raw_operations_with_422(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    monkeypatch.setattr(
+        revisions.coordinator,
+        "audit_revision_run",
+        lambda **kwargs: {"verdict_counts": {}, "revision_targets": []},
+    )
+
+    def _invalid(**kwargs):
+        raise revisions.coordinator.ProposalValidationError([
+            {"raw": kwargs["operations"][0], "reason": "missing_source_or_evidence"},
+        ])
+
+    monkeypatch.setattr(revisions.coordinator, "assemble_candidate", _invalid)
+    resp = client.post(
+        "/api/admin/documents/doc-1/revisions/rev-1/run",
+        json={"operations": [{
+            "operation": "update_entity",
+            "target_type": "claim",
+            "target_id": "clm_1",
+        }]},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["rejected_operations"][0]["reason"] == "missing_source_or_evidence"
+
+
 def test_accept_success(app_client, monkeypatch):
     client, revisions, _dep, _app = app_client
     monkeypatch.setattr(revisions.coordinator, "accept_revision",

@@ -9,6 +9,23 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: episteme
+          POSTGRES_PASSWORD: episteme
+          POSTGRES_DB: episteme_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U episteme -d episteme_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://episteme:episteme@localhost:5432/episteme_test
+      EPISTEME_TEST_DATABASE_URL: postgresql://episteme:episteme@localhost:5432/episteme_test
     defaults:
       run:
         working-directory: backend
@@ -24,6 +41,13 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r api/requirements.txt
+
+      - name: Initialize PostgreSQL schema
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/init.sql
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/013_theory_components.sql
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/015_document_pipeline.sql
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/019_revision_runs.sql
 
       - name: Run tests
         run: python -m pytest tests/ -v

@@ -200,15 +200,43 @@ def _deterministic_verdict(checkpoint: dict, retrieval: dict) -> dict:
     return result
 
 
+def _llm_failure_verdict(
+    checkpoint: dict,
+    retrieval: dict,
+    *,
+    failure_type: str,
+) -> dict:
+    """Fail closed when the requested LLM audit did not complete."""
+    result = _deterministic_verdict(checkpoint, retrieval)
+    result.update({
+        "verdict": "ambiguous",
+        "findings": [{
+            "kind": "llm_audit_failed",
+            "detail": "LLM監査を完了できなかったため、人手確認が必要",
+        }],
+        "analysis_notes": [],
+        "confidence": 0.0,
+        "requires_revision": False,
+        "review_required": True,
+        "audit_method": "llm_failed",
+        "audit_error": {"type": failure_type},
+    })
+    return result
+
+
 def _coerce_llm_result(checkpoint: dict, retrieval: dict, raw: Any) -> dict:
     """Validate / normalize an LLM audit result, enforcing the safety rules."""
     result = _deterministic_verdict(checkpoint, retrieval)
     if not isinstance(raw, dict):
-        return result  # malformed → deterministic fallback
+        return _llm_failure_verdict(
+            checkpoint, retrieval, failure_type="invalid_response_type"
+        )
 
     verdict = str(raw.get("verdict") or "").strip().lower()
     if verdict not in VERDICTS:
-        return result
+        return _llm_failure_verdict(
+            checkpoint, retrieval, failure_type="invalid_verdict"
+        )
 
     evidence_refs = [r for r in (raw.get("evidence_refs") or []) if r]
     # Safety rule: never mark valid without positive source evidence.
@@ -250,8 +278,12 @@ def audit_checkpoint(
         return _deterministic_verdict(checkpoint, retrieval)
     try:
         raw = llm_client(checkpoint, retrieval)
-    except Exception:
-        return _deterministic_verdict(checkpoint, retrieval)
+    except Exception as exc:
+        return _llm_failure_verdict(
+            checkpoint,
+            retrieval,
+            failure_type=type(exc).__name__,
+        )
     return _coerce_llm_result(checkpoint, retrieval, raw)
 
 

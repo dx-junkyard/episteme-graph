@@ -143,6 +143,9 @@ class _InMemoryRuns:
         return [{"chunk_id": "c1", "chunk_index": 0, "section_id": "s1",
                  "block_ids": ["b1"], "page_start": 1, "page_end": 1, "text": "txt"}]
 
+    def load_revision_projection_overlay(self, *, document_id):
+        return {"claims": [], "components": [], "review_events": []}
+
 
 def _base_artifacts():
     return {
@@ -164,15 +167,18 @@ def test_full_lifecycle_keeps_every_artifact(monkeypatch):
     store.add_initial("doc-1", base_artifacts)
 
     for fn in ("get_analysis_run", "resolve_artifact_run", "create_revision_run",
-               "update_revision_status", "load_source_chunk_index"):
+               "update_revision_status", "load_source_chunk_index",
+               "load_revision_projection_overlay"):
         monkeypatch.setattr(coordinator.persistence, fn, getattr(store, fn))
 
     started = coordinator.start_revision_run(document_id="doc-1")
     rev_id = started["revision_run_id"]
     coordinator.audit_revision_run(run_id=rev_id)
+    checkpoint_id = started["audit_checkpoints"][0]["checkpoint_id"]
     coordinator.assemble_candidate(run_id=rev_id, operations=[
         make_operation(operation="update_entity", target_type="claim",
-                       target_id="clm_1", after_json={"text": "A revised"}),
+                       target_id="clm_1", after_json={"text": "A revised"},
+                       checkpoint_ids=[checkpoint_id], evidence_refs=["ev_1"]),
     ])
     coordinator.revalidate_and_report(run_id=rev_id)
 

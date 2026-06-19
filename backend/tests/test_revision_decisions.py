@@ -67,6 +67,7 @@ def _install(monkeypatch, results):
 def test_accept_switches_active_and_records_decision(monkeypatch):
     session = _install(monkeypatch, [
         _FakeResult(one=("running", "proposed", "base-1", "revision")),  # SELECT FOR UPDATE
+        _FakeResult(),  # materialize candidate artifacts
         _FakeResult(rowcount=1),  # UPDATE documents (active switch)
     ])
     out = persistence.accept_revision(
@@ -91,6 +92,7 @@ def test_accept_switches_active_and_records_decision(monkeypatch):
 def test_accept_conflict_when_active_moved(monkeypatch):
     session = _install(monkeypatch, [
         _FakeResult(one=("running", "proposed", "base-1", "revision")),
+        _FakeResult(),  # materialize candidate artifacts
         _FakeResult(rowcount=0),  # optimistic switch matched nothing
     ])
     with pytest.raises(RevisionConflictError):

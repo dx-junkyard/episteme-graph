@@ -1,6 +1,7 @@
 """#410 P1-5: accept rebuilds all projections from the candidate in one txn."""
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -102,6 +103,42 @@ def test_rebuild_components_inserts_links_and_remaps_claims():
     assert "dbclaim1" in comp1_params["evidence_claims"]
 
 
+def test_revision_graph_remaps_component_claim_and_edge_ids():
+    graph = persistence._remap_revision_graph(
+        {
+            "nodes": [{
+                "node_id": "cmp_1",
+                "linked_claim_ids": ["clm_1"],
+            }],
+            "edges": [{
+                "source": "cmp_1",
+                "target": "cmp_1",
+                "evidence": {"claim_ids": ["clm_1"]},
+            }],
+        },
+        {"cmp_1": "db-comp-1"},
+        {"clm_1": "db-claim-1"},
+    )
+    assert graph["nodes"][0]["node_id"] == "db-comp-1"
+    assert graph["nodes"][0]["component_id"] == "db-comp-1"
+    assert graph["nodes"][0]["linked_claim_ids"] == ["db-claim-1"]
+    assert graph["edges"][0]["source"] == "db-comp-1"
+    assert graph["edges"][0]["target"] == "db-comp-1"
+    assert graph["edges"][0]["evidence"]["claim_ids"] == ["db-claim-1"]
+
+
+def test_revision_graph_rejects_unknown_component_endpoint():
+    with pytest.raises(ValueError, match="unknown"):
+        persistence._remap_revision_graph(
+            {
+                "nodes": [{"node_id": "cmp_1"}],
+                "edges": [{"source": "cmp_1", "target": "ghost"}],
+            },
+            {"cmp_1": "db-comp-1"},
+            {},
+        )
+
+
 # --- full accept transaction ----------------------------------------------
 
 def _candidate():
@@ -130,6 +167,16 @@ def test_accept_rebuilds_all_projections_in_one_transaction(monkeypatch):
                    "DELETE FROM theory_components", "theory_component_graphs",
                    "revision_status = 'accepted'", "theory_review_events"):
         assert marker in joined
+    promoted = next(
+        params["promoted"] for params in session.params if "promoted" in params
+    )
+    assert json.loads(promoted)["claim_object_builder"]["claims"][0]["text"] == "A"
+    graph_params = next(
+        params for sql, params in zip(session.sql, session.params)
+        if "theory_component_graphs" in sql
+    )
+    stored_graph = json.loads(graph_params["graph"])
+    assert stored_graph["nodes"][0]["node_id"] == "dbcomp1"
 
 
 def test_accept_rolls_back_when_projection_fails(monkeypatch):

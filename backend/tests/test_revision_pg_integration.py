@@ -77,7 +77,11 @@ def _artifacts():
         "claim_object_builder": {"claims": [{"claim_id": "clm_1", "text": "A", "claim_type": "result"}]},
         "component_assembly": {"components": [{"component_id": "cmp_1", "label": "C1",
                                               "linked_claim_ids": ["clm_1"]}]},
-        "component_graph": {"nodes": [{"node_id": "cmp_1"}], "edges": []},
+        "component_graph": {
+            "nodes": [{"node_id": "cmp_1", "linked_claim_ids": ["clm_1"]}],
+            "edges": [{"edge_id": "edge_1", "source": "cmp_1", "target": "cmp_1",
+                       "evidence": {"claim_ids": ["clm_1"]}}],
+        },
     }}
 
 
@@ -103,12 +107,16 @@ def test_accept_switches_active_and_rebuilds_projection_atomically(pg):
     text, Session = pg["text"], pg["Session"]
     doc_id, base_id = _seed_document(pg, {"_artifacts": {}})
     rev = persistence.create_revision_run(document_id=doc_id, base_run_id=base_id)
+    candidate = _artifacts()["_artifacts"]
     persistence.update_revision_status(run_id=rev, revision_status="proposed",
-                                       stage_outputs={"_artifacts": {}})
+                                       stage_outputs={"_artifacts": {
+                                           "candidate": {"candidate_artifacts": candidate},
+                                           "diff_report": {"summary": {"acceptable": True}},
+                                       }})
 
     out = persistence.accept_revision(
         document_id=doc_id, run_id=rev, expected_base_run_id=base_id,
-        candidate_artifacts=_artifacts()["_artifacts"],
+        candidate_artifacts=candidate,
     )
     assert out["accepted"] is True
     s = Session()
@@ -119,6 +127,28 @@ def test_accept_switches_active_and_rebuilds_projection_atomically(pg):
         claims = s.execute(text("SELECT count(*) FROM theory_claims WHERE document_id = :d"),
                            {"d": doc_id}).fetchone()[0]
         assert claims == 1
+        stage_outputs = s.execute(text(
+            "SELECT stage_outputs FROM document_analysis_runs WHERE id = CAST(:r AS uuid)"
+        ), {"r": rev}).fetchone()[0]
+        artifacts = stage_outputs["_artifacts"]
+        assert artifacts["claim_object_builder"]["claims"][0]["text"] == "A"
+        assert artifacts["candidate"]["candidate_artifacts"]["claim_object_builder"]
+        assert artifacts["diff_report"]["summary"]["acceptable"] is True
+
+        claim_id = s.execute(text(
+            "SELECT id::text FROM theory_claims WHERE document_id = :d"
+        ), {"d": doc_id}).fetchone()[0]
+        component_id = s.execute(text(
+            "SELECT id::text FROM theory_components WHERE document_id = :d"
+        ), {"d": doc_id}).fetchone()[0]
+        graph = s.execute(text(
+            "SELECT graph_json FROM theory_component_graphs WHERE document_id = :d"
+        ), {"d": doc_id}).fetchone()[0]
+        assert graph["nodes"][0]["node_id"] == component_id
+        assert graph["nodes"][0]["linked_claim_ids"] == [claim_id]
+        assert graph["edges"][0]["source"] == component_id
+        assert graph["edges"][0]["target"] == component_id
+        assert graph["edges"][0]["evidence"]["claim_ids"] == [claim_id]
     finally:
         s.close()
 

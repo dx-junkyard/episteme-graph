@@ -14,7 +14,12 @@ from .. import persistence
 from .audit import run_source_audit
 from .checkpoints import plan_checkpoints
 from .diff import build_diff_report
-from .inventory import ARTIFACTS_KEY, build_baseline_inventory, get_artifacts
+from .inventory import (
+    ARTIFACTS_KEY,
+    build_baseline_inventory,
+    get_artifacts,
+    overlay_projection_state,
+)
 from .operations import apply_operations
 from .validation import run_export_validation
 
@@ -29,7 +34,12 @@ CANDIDATE_VALIDATION_KEY = "candidate_validation"
 DIFF_REPORT_KEY = "diff_report"
 
 
-def build_revision_plan(base_run: dict, *, document_id: str = "") -> dict:
+def build_revision_plan(
+    base_run: dict,
+    *,
+    document_id: str = "",
+    projection_overlay: dict | None = None,
+) -> dict:
     """Build inventory + checkpoints from a base run dict (no side effects)."""
     base_run = base_run or {}
     base_run_id = str(base_run.get("id") or "")
@@ -38,6 +48,7 @@ def build_revision_plan(base_run: dict, *, document_id: str = "") -> dict:
     inventory = build_baseline_inventory(
         artifacts, base_run_id=base_run_id, document_id=document_id
     )
+    inventory = overlay_projection_state(inventory, projection_overlay)
     checkpoints = plan_checkpoints(inventory)
     return {
         BASELINE_INVENTORY_KEY: inventory,
@@ -68,6 +79,9 @@ def start_revision_run(
             f"no adoptable base run for document {document_id}; cannot start a revision"
         )
     base_run_id = str(base["id"])
+    projection_overlay = persistence.load_revision_projection_overlay(
+        document_id=document_id
+    )
 
     run_id = persistence.create_revision_run(
         document_id=document_id,
@@ -78,7 +92,11 @@ def start_revision_run(
         revision_status="preparing",
     )
 
-    plan = build_revision_plan(base, document_id=document_id)
+    plan = build_revision_plan(
+        base,
+        document_id=document_id,
+        projection_overlay=projection_overlay,
+    )
     persistence.update_revision_status(
         run_id=run_id,
         revision_status="preparing",
@@ -173,6 +191,14 @@ def generate_proposals(
     return {"revision_run_id": run_id, **result}
 
 
+class ProposalValidationError(ValueError):
+    """Raised before candidate creation when any operation is invalid."""
+
+    def __init__(self, rejected: list[dict]):
+        self.rejected = rejected
+        super().__init__(f"{len(rejected)} revision operation(s) failed validation")
+
+
 def assemble_candidate(
     *,
     run_id: str,
@@ -202,9 +228,24 @@ def assemble_candidate(
 
     run_artifacts = get_artifacts(run.get("stage_outputs"))
     base_inventory = run_artifacts.get(BASELINE_INVENTORY_KEY) or {}
+    audit_results = (
+        (run_artifacts.get(AUDIT_RESULTS_KEY) or {}).get("audit_results") or []
+    )
+
+    # Generated, raw/debug, and user-edited operations all pass through the same
+    # fail-closed validator immediately before candidate assembly.
+    from .proposal import validate_proposed_operations
+    validated = validate_proposed_operations(
+        operations or [],
+        base_inventory,
+        audit_results=audit_results,
+        checkpoints=run_artifacts.get(AUDIT_CHECKPOINTS_KEY) or [],
+    )
+    if validated["rejected"]:
+        raise ProposalValidationError(validated["rejected"])
 
     result = apply_operations(
-        base_artifacts, operations or [], base_inventory=base_inventory
+        base_artifacts, validated["operations"], base_inventory=base_inventory
     )
 
     persistence.update_revision_status(
@@ -364,6 +405,9 @@ def revise_revision_run(
     base = persistence.resolve_artifact_run(document_id=document_id)
     if not base or not base.get("id"):
         raise ValueError(f"no adoptable base run for document {document_id}")
+    projection_overlay = persistence.load_revision_projection_overlay(
+        document_id=document_id
+    )
 
     run_id = persistence.create_revision_run(
         document_id=document_id,
@@ -375,7 +419,11 @@ def revise_revision_run(
         revision_status="preparing",
     )
 
-    plan = build_revision_plan(base, document_id=document_id)
+    plan = build_revision_plan(
+        base,
+        document_id=document_id,
+        projection_overlay=projection_overlay,
+    )
     if comment:
         plan[AUDIT_CHECKPOINTS_KEY] = [
             {

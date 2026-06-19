@@ -15,6 +15,7 @@ if str(SRC) not in sys.path:
 from core.document_pipeline.revision import (  # noqa: E402
     OPERATIONS,
     apply_operations,
+    build_baseline_inventory,
     make_operation,
 )
 from core.document_pipeline.revision import coordinator  # noqa: E402
@@ -276,9 +277,13 @@ def test_apply_is_deterministic_regardless_of_input_order():
 # --- coordinator integration -----------------------------------------------
 
 def test_assemble_candidate_persists_without_touching_projections(monkeypatch):
+    inventory = build_baseline_inventory(_base_artifacts(), base_run_id="base-1")
     run = {"id": "rev-1", "run_type": "revision", "base_run_id": "base-1",
            "document_id": "doc-1",
-           "stage_outputs": {"_artifacts": {"baseline_inventory": {"unresolved_references": []}}}}
+           "stage_outputs": {"_artifacts": {
+               "baseline_inventory": inventory,
+               "audit_checkpoints": [{"checkpoint_id": "ckpt_1"}],
+           }}}
     base = {"id": "base-1", "run_type": "initial", "document_id": "doc-1",
             "stage_outputs": {"_artifacts": _base_artifacts()}}
 
@@ -297,10 +302,44 @@ def test_assemble_candidate_persists_without_touching_projections(monkeypatch):
 
     out = coordinator.assemble_candidate(run_id="rev-1", operations=[
         make_operation(operation="update_entity", target_type="claim",
-                       target_id="clm_1", after_json={"text": "patched"}),
+                       target_id="clm_1", after_json={"text": "patched"},
+                       checkpoint_ids=["ckpt_1"], evidence_refs=["ev_1"]),
     ])
     assert out["invalid"] is False
     assert captured["revision_status"] == "proposed"
     arts = captured["stage_outputs"]["_artifacts"]
     assert "candidate" in arts and "revision_operations" in arts
     assert arts["candidate"]["candidate_artifacts"]["claim_object_builder"]["claims"][0]["text"] == "patched"
+
+
+def test_assemble_candidate_rejects_invalid_operation_before_persist(monkeypatch):
+    inventory = build_baseline_inventory(_base_artifacts(), base_run_id="base-1")
+    run = {"id": "rev-1", "run_type": "revision", "base_run_id": "base-1",
+           "document_id": "doc-1",
+           "stage_outputs": {"_artifacts": {
+               "baseline_inventory": inventory,
+               "audit_checkpoints": [{"checkpoint_id": "ckpt_1"}],
+           }}}
+    base = {"id": "base-1", "run_type": "initial", "document_id": "doc-1",
+            "stage_outputs": {"_artifacts": _base_artifacts()}}
+    monkeypatch.setattr(
+        coordinator.persistence,
+        "get_analysis_run",
+        lambda *, run_id: run if run_id == "rev-1" else base,
+    )
+    monkeypatch.setattr(
+        coordinator.persistence,
+        "update_revision_status",
+        lambda **kwargs: pytest.fail("invalid operations must not create a candidate"),
+    )
+
+    with pytest.raises(coordinator.ProposalValidationError):
+        coordinator.assemble_candidate(run_id="rev-1", operations=[
+            make_operation(
+                operation="update_entity",
+                target_type="claim",
+                target_id="clm_1",
+                after_json={"text": "patched"},
+                checkpoint_ids=["ckpt_1"],
+            ),
+        ])

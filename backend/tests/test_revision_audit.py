@@ -138,13 +138,16 @@ def test_llm_high_confidence_incorrect_requires_revision():
     assert res["audit_method"] == "llm"
 
 
-def test_llm_exception_falls_back_to_deterministic():
+def test_llm_exception_is_review_required_not_revision_target():
     def boom(checkpoint, retrieval):
         raise RuntimeError("llm down")
     res = audit_checkpoint(_cp(trigger_reason="unresolved_reference"),
                            _chunk_index(), llm_client=boom)
-    assert res["audit_method"] == "deterministic"
-    assert res["requires_revision"] is True
+    assert res["audit_method"] == "llm_failed"
+    assert res["requires_revision"] is False
+    assert res["review_required"] is True
+    assert res["confidence"] == 0.0
+    assert res["audit_error"]["type"] == "RuntimeError"
 
 
 # --- run_source_audit summary ----------------------------------------------

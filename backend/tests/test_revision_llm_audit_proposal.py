@@ -108,7 +108,7 @@ def test_validate_rejects_unknown_op_and_target():
 
 
 def test_validate_accepts_and_attaches_traceability():
-    audit = {"checkpoint_id": "ckpt_1", "evidence_refs": ["ev_1", "ev_GONE"],
+    audit = {"checkpoint_id": "ckpt_1", "evidence_refs": ["ev_1"],
              "source_locations": [{"chunk_id": "c1"}], "confidence": 0.8,
              "findings": [{"detail": "fix wording"}]}
     op, reason = validate_proposed_operation(
@@ -116,8 +116,18 @@ def test_validate_accepts_and_attaches_traceability():
          "after_json": {"text": "A holds under C."}}, _inventory(), audit)
     assert op is not None and reason == ""
     assert op["checkpoint_ids"] == ["ckpt_1"]
-    assert op["evidence_refs"] == ["ev_1"]  # unknown ev_GONE filtered out
+    assert op["evidence_refs"] == ["ev_1"]
     assert op["source_locations"] == [{"chunk_id": "c1"}]
+
+
+def test_validate_rejects_unknown_evidence_instead_of_dropping_it():
+    audit = {"checkpoint_id": "ckpt_1", "evidence_refs": ["ev_1", "ev_GONE"],
+             "source_locations": [{"chunk_id": "c1"}]}
+    op, reason = validate_proposed_operation(
+        {"operation": "update_entity", "target_type": "claim", "target_id": "clm_1",
+         "after_json": {"text": "fixed"}}, _inventory(), audit)
+    assert op is None
+    assert reason == "unknown_evidence:ev_GONE"
 
 
 def test_propose_operations_uses_generate_and_validates():
@@ -158,11 +168,33 @@ def test_propose_operation_targeting_missing_entity_is_rejected():
 def test_validate_batch_raw_json_path():
     out = validate_proposed_operations([
         {"operation": "update_entity", "target_type": "claim", "target_id": "clm_1",
-         "after_json": {"text": "x"}},
+         "after_json": {"text": "x"}, "checkpoint_ids": ["ckpt_1"],
+         "source_locations": [{"chunk_id": "c1"}]},
         {"operation": "bogus"},
-    ], _inventory())
+    ], _inventory(), checkpoints=[{"checkpoint_id": "ckpt_1"}])
     assert len(out["operations"]) == 1
     assert len(out["rejected"]) == 1
+
+
+def test_validate_raw_requires_known_checkpoint_and_source():
+    missing_checkpoint = validate_proposed_operations([
+        {"operation": "update_entity", "target_type": "claim", "target_id": "clm_1",
+         "after_json": {"text": "x"}, "source_locations": [{"chunk_id": "c1"}]},
+    ], _inventory(), checkpoints=[{"checkpoint_id": "ckpt_1"}])
+    assert missing_checkpoint["rejected"][0]["reason"] == "missing_checkpoint"
+
+    missing_source = validate_proposed_operations([
+        {"operation": "update_entity", "target_type": "claim", "target_id": "clm_1",
+         "after_json": {"text": "x"}, "checkpoint_ids": ["ckpt_1"]},
+    ], _inventory(), checkpoints=[{"checkpoint_id": "ckpt_1"}])
+    assert missing_source["rejected"][0]["reason"] == "missing_source_or_evidence"
+
+    unknown_checkpoint = validate_proposed_operations([
+        {"operation": "update_entity", "target_type": "claim", "target_id": "clm_1",
+         "after_json": {"text": "x"}, "checkpoint_ids": ["ghost"],
+         "source_locations": [{"chunk_id": "c1"}]},
+    ], _inventory(), checkpoints=[{"checkpoint_id": "ckpt_1"}])
+    assert unknown_checkpoint["rejected"][0]["reason"] == "unknown_checkpoint:ghost"
 
 
 # --- representative entity types -------------------------------------------
@@ -175,7 +207,7 @@ def test_validate_batch_raw_json_path():
 def test_proposal_for_each_entity_type(target_type, bucket, tid):
     inv = _inventory()
     audit = [{"checkpoint_id": "c", "target_type": target_type, "target_id": tid,
-              "requires_revision": True}]
+              "requires_revision": True, "evidence_refs": ["ev_1"]}]
 
     def fake_generate(messages):
         return json.dumps({"operation": "update_entity", "target_type": target_type,
