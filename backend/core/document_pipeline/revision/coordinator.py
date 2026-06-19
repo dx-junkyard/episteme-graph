@@ -14,11 +14,14 @@ from .. import persistence
 from .audit import run_source_audit
 from .checkpoints import plan_checkpoints
 from .inventory import ARTIFACTS_KEY, build_baseline_inventory, get_artifacts
+from .operations import apply_operations
 
 # Revision artifact keys (stored under stage_outputs._artifacts of the run).
 BASELINE_INVENTORY_KEY = "baseline_inventory"
 AUDIT_CHECKPOINTS_KEY = "audit_checkpoints"
 AUDIT_RESULTS_KEY = "audit_results"
+REVISION_OPERATIONS_KEY = "revision_operations"
+CANDIDATE_KEY = "candidate"
 
 
 def build_revision_plan(base_run: dict, *, document_id: str = "") -> dict:
@@ -123,3 +126,57 @@ def audit_revision_run(
         stage_outputs={ARTIFACTS_KEY: {AUDIT_RESULTS_KEY: audit}},
     )
     return {"revision_run_id": run_id, "document_id": document_id, **audit}
+
+
+def assemble_candidate(
+    *,
+    run_id: str,
+    operations: list[dict],
+    base_run: dict | None = None,
+) -> dict:
+    """Apply explicit revision operations and persist the candidate artifacts.
+
+    Base artifacts are read immutably from the run's ``base_run_id``. The
+    candidate is stored only on the revision run; projection tables and the
+    active run are never touched. An invalid candidate (failed op or new unknown
+    reference) is persisted but marked invalid so it can never be adopted.
+    """
+    run = persistence.get_analysis_run(run_id=run_id)
+    if not run:
+        raise ValueError(f"revision run {run_id} not found")
+    if run.get("run_type") != "revision":
+        raise ValueError(f"run {run_id} is not a revision run")
+    base_run_id = run.get("base_run_id")
+    if not base_run_id:
+        raise ValueError(f"revision run {run_id} has no base_run_id")
+
+    base = base_run or persistence.get_analysis_run(run_id=str(base_run_id))
+    if not base:
+        raise ValueError(f"base run {base_run_id} not found")
+    base_artifacts = get_artifacts(base.get("stage_outputs"))
+
+    run_artifacts = get_artifacts(run.get("stage_outputs"))
+    base_inventory = run_artifacts.get(BASELINE_INVENTORY_KEY) or {}
+
+    result = apply_operations(
+        base_artifacts, operations or [], base_inventory=base_inventory
+    )
+
+    persistence.update_revision_status(
+        run_id=run_id,
+        revision_status="proposed",
+        stage_outputs={ARTIFACTS_KEY: {
+            REVISION_OPERATIONS_KEY: result["applied_operations"],
+            CANDIDATE_KEY: {
+                "candidate_artifacts": result["candidate_artifacts"],
+                "id_mapping": result["id_mapping"],
+                "operation_errors": result["operation_errors"],
+                "protected_changes": result["protected_changes"],
+                "dropped_edges": result["dropped_edges"],
+                "carried_unresolved_references": result["carried_unresolved_references"],
+                "invalid": result["invalid"],
+                "requires_confirmation": result["requires_confirmation"],
+            },
+        }},
+    )
+    return {"revision_run_id": run_id, "base_run_id": str(base_run_id), **result}
