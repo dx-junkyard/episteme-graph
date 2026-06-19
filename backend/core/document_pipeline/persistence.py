@@ -14,6 +14,30 @@ from core.postgres import get_session as _pg_session
 
 logger = logging.getLogger(__name__)
 
+# Stage-outputs sub-key holding the per-stage agent artifacts (mirrors
+# orchestrator.ARTIFACTS_KEY). Used for deep-merge of revision artifacts.
+ARTIFACTS_KEY = "_artifacts"
+
+
+def merge_revision_stage_outputs(existing: dict | None, payload: dict | None) -> dict:
+    """Pure model of update_revision_status's JSONB merge (#410 P0).
+
+    Mirrors the SQL exactly: non-``_artifacts`` keys are shallow-merged onto the
+    existing stage_outputs, while ``_artifacts`` is merged key-by-key into the
+    existing ``_artifacts`` so previously-stored artifacts are preserved. Kept as
+    a pure function so the merge semantics are unit-testable without a database.
+    """
+    existing = dict(existing or {})
+    payload = dict(payload or {})
+    artifacts_delta = payload.pop(ARTIFACTS_KEY, None)
+    merged = {**existing, **payload}
+    if artifacts_delta is not None:
+        merged[ARTIFACTS_KEY] = {
+            **dict(existing.get(ARTIFACTS_KEY) or {}),
+            **dict(artifacts_delta or {}),
+        }
+    return merged
+
 
 class DeterministicFallbackPersistError(RuntimeError):
     """component_assembly の deterministic-fallback 結果を persist しようとした (#347)。
@@ -1368,17 +1392,33 @@ def update_revision_status(
     error_message: str | None = None,
     stage_outputs: dict | None = None,
 ) -> None:
-    """Update a revision run's revision_status (and optionally run status / artifacts)."""
+    """Update a revision run's revision_status (and optionally run status / artifacts).
+
+    Artifact merge is **deep at the ``_artifacts`` level** (#410 P0): PostgreSQL's
+    JSONB ``||`` only replaces top-level keys, so a shallow merge would wipe every
+    previously-stored artifact (baseline_inventory / audit_results / candidate / …)
+    each time a new stage writes ``{"_artifacts": {...}}``. We therefore merge the
+    incoming ``_artifacts`` into the existing ``_artifacts`` (preserving sibling
+    artifact keys) and shallow-merge any other top-level keys — all in a single
+    atomic SQL statement so concurrent stage writes cannot lose keys.
+    """
+    payload = dict(stage_outputs or {})
+    artifacts_delta = payload.pop(ARTIFACTS_KEY, None)
     session = _pg_session()
     try:
         session.execute(
             sa_text(
-                """
+                f"""
                 UPDATE document_analysis_runs SET
                     revision_status = :revision_status,
                     status = COALESCE(:status, status),
                     error_message = COALESCE(:error_message, error_message),
-                    stage_outputs = stage_outputs || CAST(:stage_outputs AS jsonb),
+                    stage_outputs = jsonb_set(
+                        COALESCE(stage_outputs, '{{}}'::jsonb) || CAST(:other AS jsonb),
+                        '{{{ARTIFACTS_KEY}}}',
+                        COALESCE(stage_outputs->'{ARTIFACTS_KEY}', '{{}}'::jsonb)
+                            || CAST(:artifacts AS jsonb)
+                    ),
                     completed_at = CASE WHEN :status IN ('completed', 'failed')
                                         THEN now() ELSE completed_at END,
                     updated_at = now()
@@ -1391,7 +1431,8 @@ def update_revision_status(
                 "revision_status": revision_status,
                 "status": status,
                 "error_message": error_message,
-                "stage_outputs": _json_dumps(stage_outputs or {}),
+                "other": _json_dumps(payload),
+                "artifacts": _json_dumps(artifacts_delta or {}),
             },
         )
         session.commit()
