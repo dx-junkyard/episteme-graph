@@ -13,8 +13,10 @@ from typing import Any, Callable
 from .. import persistence
 from .audit import run_source_audit
 from .checkpoints import plan_checkpoints
+from .diff import build_diff_report
 from .inventory import ARTIFACTS_KEY, build_baseline_inventory, get_artifacts
 from .operations import apply_operations
+from .validation import run_export_validation
 
 # Revision artifact keys (stored under stage_outputs._artifacts of the run).
 BASELINE_INVENTORY_KEY = "baseline_inventory"
@@ -22,6 +24,8 @@ AUDIT_CHECKPOINTS_KEY = "audit_checkpoints"
 AUDIT_RESULTS_KEY = "audit_results"
 REVISION_OPERATIONS_KEY = "revision_operations"
 CANDIDATE_KEY = "candidate"
+CANDIDATE_VALIDATION_KEY = "candidate_validation"
+DIFF_REPORT_KEY = "diff_report"
 
 
 def build_revision_plan(base_run: dict, *, document_id: str = "") -> dict:
@@ -180,3 +184,62 @@ def assemble_candidate(
         }},
     )
     return {"revision_run_id": run_id, "base_run_id": str(base_run_id), **result}
+
+
+def revalidate_and_report(*, run_id: str, base_run: dict | None = None) -> dict:
+    """Re-validate the candidate and build the before/after diff report (#406).
+
+    Applies the existing ExportValidationGate to the candidate artifacts, diffs
+    quality + findings against the base run, and stores the report as a run
+    artifact. Never touches the active run or projections; a gate failure is
+    captured as a degraded result rather than raised, so it cannot disturb the
+    adopted run.
+    """
+    run = persistence.get_analysis_run(run_id=run_id)
+    if not run:
+        raise ValueError(f"revision run {run_id} not found")
+    if run.get("run_type") != "revision":
+        raise ValueError(f"run {run_id} is not a revision run")
+    base_run_id = run.get("base_run_id")
+    base = base_run or persistence.get_analysis_run(run_id=str(base_run_id))
+    if not base:
+        raise ValueError(f"base run {base_run_id} not found")
+
+    base_artifacts = get_artifacts(base.get("stage_outputs"))
+    run_artifacts = get_artifacts(run.get("stage_outputs"))
+    candidate = run_artifacts.get(CANDIDATE_KEY) or {}
+    candidate_artifacts = candidate.get("candidate_artifacts") or {}
+    applied_operations = run_artifacts.get(REVISION_OPERATIONS_KEY) or []
+    audit_results = (run_artifacts.get(AUDIT_RESULTS_KEY) or {}).get("audit_results") or []
+
+    gate_base = run_export_validation(base_artifacts)
+    gate_candidate = run_export_validation(candidate_artifacts)
+
+    report = build_diff_report(
+        base_run_id=str(base_run_id or ""),
+        candidate_run_id=str(run_id),
+        base_artifacts=base_artifacts,
+        candidate_artifacts=candidate_artifacts,
+        applied_operations=applied_operations,
+        gate_base=gate_base,
+        gate_candidate=gate_candidate,
+        candidate_invalid=bool(candidate.get("invalid")),
+        protected_changes=candidate.get("protected_changes") or [],
+        requires_confirmation=bool(candidate.get("requires_confirmation")),
+        id_mapping=candidate.get("id_mapping") or {},
+        audit_verifications=[
+            {"checkpoint_id": a.get("checkpoint_id"), "target_id": a.get("target_id"),
+             "verdict": a.get("verdict"), "source_locations": a.get("source_locations") or []}
+            for a in audit_results if a.get("requires_revision")
+        ],
+    )
+
+    persistence.update_revision_status(
+        run_id=run_id,
+        revision_status="proposed",
+        stage_outputs={ARTIFACTS_KEY: {
+            CANDIDATE_VALIDATION_KEY: gate_candidate,
+            DIFF_REPORT_KEY: report,
+        }},
+    )
+    return {"revision_run_id": run_id, "report": report, "candidate_validation": gate_candidate}
