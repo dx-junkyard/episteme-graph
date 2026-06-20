@@ -314,6 +314,95 @@ def test_tex_archive_records_unclosed_math_environment_for_completeness():
     assert "equation_environment_cut_at_boundary" in report["tail_truncation"]["signals"]
 
 
+def _tex_archive_with_math() -> bytes:
+    return _make_tex_archive({
+        "main.tex": r"""
+            \documentclass{article}
+            \begin{document}
+            \section{Results}
+            \begin{equation}\label{eq:energy} E = mc^2 \end{equation}
+            \begin{align}\label{eq:force} F = ma \end{align}
+            \[ a^2 + b^2 = c^2 \]
+            \end{document}
+        """,
+    })
+
+
+def test_tex_archive_ingest_stores_equation_inventory():
+    # AC #420(1,2): ingest persists display-math counts and symbolic labels.
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    structure = build_structure_from_tex_archive(
+        _tex_archive_with_math(), document_id="doc-inv", source_file="paper.tar.gz"
+    )
+    inv = structure.metadata.tex_equation_inventory
+    assert inv is not None
+    assert inv["display_math_blocks"] == 3
+    assert "eq:energy" in inv["labels"]
+    assert "eq:force" in inv["labels"]
+    assert inv["label_count"] == 2
+
+
+def test_tex_equation_inventory_survives_serialization_roundtrip():
+    # AC #420(3): inventory persists through to_dict / from_dict.
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+    from episteme_graph.agents.document_structure.schema import DocumentStructureResult
+
+    structure = build_structure_from_tex_archive(
+        _tex_archive_with_math(), document_id="doc-rt", source_file="paper.tar.gz"
+    )
+    restored = DocumentStructureResult.from_dict(structure.to_dict())
+    assert restored.metadata.tex_equation_inventory == structure.metadata.tex_equation_inventory
+    assert restored.metadata.tex_equation_inventory["display_math_blocks"] == 3
+
+
+def test_completeness_uses_precomputed_inventory_without_tex_source():
+    # AC #420(4,6): a TeX doc (pages=0) with display math but no EquationRecords is
+    # incomplete, detected from the persisted inventory alone (no tex_source).
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+    from core.document_pipeline.completeness import analyze_document_completeness
+
+    structure = build_structure_from_tex_archive(
+        _tex_archive_with_math(), document_id="doc-cov", source_file="paper.tar.gz"
+    )
+    struct_dict = structure.to_dict()
+    # The structure carries no raw tex_source — only the precomputed inventory.
+    assert "tex_source" not in (struct_dict.get("metadata") or {})
+    report = analyze_document_completeness(
+        struct_dict,
+        document_id=structure.document_id,
+        equations={"equations": [], "equation_candidates": []},
+    )
+    cov = report["equation_artifact_coverage"]
+    assert cov["tex_display_math_blocks"] == 3
+    assert cov["complete"] is False
+    assert "tex_display_math_without_equation_records" in cov["review_reasons"]
+    assert report["complete"] is False
+
+
+def test_completeness_passes_when_records_cover_tex_math():
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+    from core.document_pipeline.completeness import analyze_document_completeness
+
+    structure = build_structure_from_tex_archive(
+        _tex_archive_with_math(), document_id="doc-cov2", source_file="paper.tar.gz"
+    )
+    report = analyze_document_completeness(
+        structure.to_dict(),
+        document_id=structure.document_id,
+        equations={
+            "equations": [{"equation_id": "eq_1"}],
+            "equation_candidates": [
+                {"candidate_id": "c1", "acceptance_status": "accepted",
+                 "accepted_equation_id": "eq_1"},
+            ],
+        },
+    )
+    cov = report["equation_artifact_coverage"]
+    assert cov["tex_display_math_blocks"] == 3
+    assert cov["complete"] is True
+
+
 def test_tex_archive_wraps_alignment_equations_for_rendering():
     from core.document_pipeline.tex_archive import build_structure_from_tex_archive
 

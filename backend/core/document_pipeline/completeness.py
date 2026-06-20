@@ -261,22 +261,49 @@ def _equation_artifact_counts(equations: Any) -> dict:
     }
 
 
+def _coerce_tex_inventory(inventory: Any) -> dict:
+    """Normalize a precomputed TeX inventory dict to the canonical shape (#420)."""
+    inv = inventory if isinstance(inventory, dict) else {}
+    labels = [str(v) for v in (inv.get("labels") or []) if str(v)]
+    blocks = inv.get("display_math_blocks")
+    try:
+        blocks = int(blocks)
+    except (TypeError, ValueError):
+        blocks = 0
+    count = inv.get("label_count")
+    try:
+        count = int(count)
+    except (TypeError, ValueError):
+        count = len(labels)
+    return {"display_math_blocks": blocks, "labels": labels, "label_count": count}
+
+
 def analyze_equation_artifact_coverage(
     structure: Any,
     equations: Any,
     *,
     tex_source: Any = None,
     pages_total: Any = None,
+    tex_inventory: Any = None,
 ) -> dict:
-    """Compare TeX math blocks / labels / candidates / records (#416).
+    """Compare TeX math blocks / labels / candidates / records (#416 / #420).
 
     Produces a coverage report (counts + symbolic labels) and a list of
     ``review_reasons`` for artifact-level equation gaps that page-based ingest
     reachability cannot see — in particular TeX inputs where ``pages=0`` would
     otherwise let a missing equation registry pass silently.
+
+    The TeX inventory is taken from ``tex_source`` when given; otherwise the
+    precomputed ``tex_inventory`` (persisted on the metadata at ingest, #420) is
+    used so coverage works even when the raw source is not re-stored.
     """
     structure = structure if isinstance(structure, dict) else {}
-    tex = tex_equation_inventory(tex_source)
+    if tex_source:
+        tex = tex_equation_inventory(tex_source)
+    elif tex_inventory is not None:
+        tex = _coerce_tex_inventory(tex_inventory)
+    else:
+        tex = tex_equation_inventory(None)
     counts = _equation_artifact_counts(equations)
 
     review_reasons: list[str] = []
@@ -341,6 +368,11 @@ def analyze_document_completeness(
         tex_source = metadata.get("tex_source") or metadata.get("source_tex")
     if tex_source is None:
         tex_source = structure.get("tex_source") or structure.get("source_tex")
+    # Precomputed TeX equation inventory persisted at ingest (#420): used when the
+    # raw source is not carried on the structure (the normal TeX-archive case).
+    tex_inventory = (
+        metadata.get("tex_equation_inventory") if isinstance(metadata, dict) else None
+    )
     parser_pages_processed = None
     parser_reached_eof = None
     if isinstance(metadata, dict):
@@ -562,7 +594,11 @@ def analyze_document_completeness(
     # completeness signal that page reachability cannot provide for TeX inputs
     # where ``pages=0`` and the parser reports EOF.
     equation_coverage = analyze_equation_artifact_coverage(
-        structure, equations, tex_source=tex_source, pages_total=pages_total
+        structure,
+        equations,
+        tex_source=tex_source,
+        pages_total=pages_total,
+        tex_inventory=tex_inventory,
     )
 
     review_reasons: list[str] = []

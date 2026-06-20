@@ -101,6 +101,11 @@ def build_structure_from_tex_archive(
     unclosed_math_environments = _detect_unclosed_math_environments(
         source.expanded_tex
     )
+    # Issue #420: compute the TeX equation inventory at ingest from the expanded
+    # source and persist it on the metadata (display math counts + symbolic
+    # labels), so downstream completeness / coverage can detect TeX math without
+    # re-storing the large source.
+    tex_equation_inventory = _compute_tex_equation_inventory(source.expanded_tex)
     source_bytes = len(source.expanded_tex.encode("utf-8"))
     authors = list(author_result.authors or source.authors)
     author_extraction = author_result.to_metadata()
@@ -121,6 +126,7 @@ def build_structure_from_tex_archive(
         source_bytes_processed=source_bytes,
         unclosed_math_environments=unclosed_math_environments,
         author_extraction=author_extraction,
+        tex_equation_inventory=tex_equation_inventory,
     )
     result = DocumentStructureResult(
         document_id=document_id,
@@ -698,6 +704,27 @@ def _split_authors(authors_raw: str) -> list[str]:
         return []
     parts = re.split(r"\s+(?:and|AND)\s+|\\\\|;", authors_raw)
     return [part.strip() for part in parts if part.strip()]
+
+
+def _compute_tex_equation_inventory(tex: str) -> dict:
+    """Compute the canonical TeX equation inventory at ingest (issue #420).
+
+    Delegates to ``completeness.tex_equation_inventory`` so ingest and the
+    completeness / coverage checks share one definition of display-math counting
+    and symbolic-label extraction. Resilient: any failure yields an empty
+    inventory rather than breaking ingestion.
+    """
+    try:
+        from .completeness import tex_equation_inventory
+    except Exception:  # pragma: no cover - import resilience
+        try:
+            from core.document_pipeline.completeness import tex_equation_inventory
+        except Exception:
+            return {"display_math_blocks": 0, "labels": [], "label_count": 0}
+    try:
+        return tex_equation_inventory(tex)
+    except Exception:  # pragma: no cover - defensive
+        return {"display_math_blocks": 0, "labels": [], "label_count": 0}
 
 
 def _detect_unclosed_math_environments(tex: str) -> list[str]:

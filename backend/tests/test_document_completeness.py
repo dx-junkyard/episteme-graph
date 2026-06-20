@@ -967,3 +967,50 @@ class TestEquationArtifactCoverage:
         codes = {w["code"] for w in res["warnings"]}
         assert "DOCUMENT_EQUATION_ARTIFACT_COVERAGE_INCOMPLETE" in codes
         assert res["document_completeness"]["all_documents_complete"] is False
+
+    def test_gate_refresh_uses_precomputed_inventory_without_tex_source(self):
+        # AC #420(5,6): the gate refresh detects TeX math from the persisted
+        # inventory alone — no raw tex_source on the structure.
+        mod = _import_gate()
+        precomputed = {
+            "document_id": "doc_inv",
+            "complete": True,
+            "review_reasons": [],
+            "equation_label_continuity": {"missing_labels": [], "has_gaps": False},
+            "terminal_section": {"present": True, "missing": False, "matched_titles": []},
+            "ingest_coverage": {"sufficient": True, "reached_document_end": True,
+                                "pages_total": 0, "last_ingested_page": None,
+                                "structure_page_coverage_ratio": None,
+                                "trailing_uningested_page_ranges": []},
+            "evidence_page_distribution": {"pages": [], "distribution_ratio": None,
+                                           "sparse": False},
+            "equation_artifact_coverage": {},
+        }
+        artifacts = {
+            "document_structure": {
+                "document_id": "doc_inv",
+                "metadata": {
+                    "pages": 0,
+                    "parser_reached_eof": True,
+                    # No tex_source — only the inventory persisted at ingest.
+                    "tex_equation_inventory": {
+                        "display_math_blocks": 5,
+                        "labels": ["eq:a", "eq:b"],
+                        "label_count": 2,
+                    },
+                },
+                "blocks": [],
+                "sections": [],
+            },
+            "document_completeness": precomputed,
+            "equation_semantics": {"equations": [], "equation_candidates": []},
+        }
+        res = mod.ExportValidationGate().run(artifacts=artifacts).to_dict()
+        doc = res["document_completeness"]["documents"][0]
+        cov = doc["equation_artifact_coverage"]
+        assert cov["tex_display_math_blocks"] == 5
+        assert cov["tex_equation_labels"] == ["eq:a", "eq:b"]
+        assert cov["complete"] is False
+        assert "DOCUMENT_EQUATION_ARTIFACT_COVERAGE_INCOMPLETE" in {
+            w["code"] for w in res["warnings"]
+        }

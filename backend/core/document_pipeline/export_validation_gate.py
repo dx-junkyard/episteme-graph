@@ -777,8 +777,12 @@ class ExportValidationGate:
         metadata = structure.get("metadata") if isinstance(structure, dict) else {}
         pages_total = metadata.get("pages") if isinstance(metadata, dict) else None
         tex_source = None
+        tex_inventory = None
         if isinstance(metadata, dict):
             tex_source = metadata.get("tex_source") or metadata.get("source_tex")
+            # Issue #420: prefer the inventory persisted at ingest when the raw
+            # source is not carried on the structure.
+            tex_inventory = metadata.get("tex_equation_inventory")
         if tex_source is None and isinstance(structure, dict):
             tex_source = structure.get("tex_source") or structure.get("source_tex")
         coverage = analyze_equation_artifact_coverage(
@@ -786,6 +790,7 @@ class ExportValidationGate:
             equations if isinstance(equations, dict) else None,
             tex_source=tex_source,
             pages_total=pages_total,
+            tex_inventory=tex_inventory,
         )
         report = dict(report)
         report["equation_artifact_coverage"] = coverage
