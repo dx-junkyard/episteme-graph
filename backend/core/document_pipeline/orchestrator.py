@@ -587,7 +587,16 @@ def run_document_pipeline(
                 logger.warning(
                     "document %s ingest looks incomplete: %s", document_id, reasons,
                 )
-                _propagate_completeness_to_structure(structure, reasons)
+                # equation_artifact_coverage is evaluated before equation_semantics
+                # has run, so its EquationRecord count is always 0 here (#420). Do
+                # not propagate that (provisional) reason onto document_structure —
+                # it would persist as a stale warning even after the gate refreshes
+                # coverage with the real records. The ExportValidationGate is the
+                # authoritative coverage check.
+                propagated = [
+                    r for r in reasons if r != "equation_artifact_coverage_incomplete"
+                ]
+                _propagate_completeness_to_structure(structure, propagated)
                 save_artifact("document_structure", structure)
         except Exception:
             logger.exception(

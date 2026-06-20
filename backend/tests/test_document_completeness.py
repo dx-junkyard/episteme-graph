@@ -1014,3 +1014,108 @@ class TestEquationArtifactCoverage:
         assert "DOCUMENT_EQUATION_ARTIFACT_COVERAGE_INCOMPLETE" in {
             w["code"] for w in res["warnings"]
         }
+
+    def test_gate_clears_stale_coverage_reason_when_records_present(self):
+        # Regression for #420 P1: the orchestrator's precomputed report ran before
+        # equation_semantics (record_count=0 → equation_artifact_coverage_incomplete
+        # + complete=false). Once real EquationRecords exist, the gate must REMOVE
+        # the stale reason and restore complete=true — not leave the document
+        # permanently incomplete.
+        mod = _import_gate()
+        precomputed = {
+            "document_id": "doc_stale",
+            "complete": False,
+            "review_reasons": ["equation_artifact_coverage_incomplete"],
+            "equation_label_continuity": {"missing_labels": [], "has_gaps": False},
+            "terminal_section": {"present": True, "missing": False, "matched_titles": []},
+            "ingest_coverage": {"sufficient": True, "reached_document_end": True,
+                                "pages_total": 0, "last_ingested_page": None,
+                                "structure_page_coverage_ratio": None,
+                                "trailing_uningested_page_ranges": []},
+            "evidence_page_distribution": {"pages": [], "distribution_ratio": None,
+                                           "sparse": False},
+            "equation_artifact_coverage": {
+                "tex_display_math_blocks": 3, "equation_record_count": 0,
+                "complete": False,
+                "review_reasons": ["tex_display_math_without_equation_records"],
+            },
+        }
+        artifacts = {
+            "document_structure": {
+                "document_id": "doc_stale",
+                "metadata": {
+                    "pages": 0, "parser_reached_eof": True,
+                    "tex_equation_inventory": {
+                        "display_math_blocks": 3, "labels": ["eq:a"], "label_count": 1,
+                    },
+                },
+                "blocks": [],
+                "sections": [],
+            },
+            "document_completeness": precomputed,
+            # Real EquationRecords now exist and cover the math.
+            "equation_semantics": {
+                "equations": [{"equation_id": "eq_1"}],
+                "equation_candidates": [
+                    {"candidate_id": "c1", "acceptance_status": "accepted",
+                     "accepted_equation_id": "eq_1"},
+                ],
+            },
+        }
+        res = mod.ExportValidationGate().run(artifacts=artifacts).to_dict()
+        doc = res["document_completeness"]["documents"][0]
+        assert doc["equation_artifact_coverage"]["complete"] is True
+        assert "equation_artifact_coverage_incomplete" not in doc["review_reasons"]
+        assert doc["complete"] is True
+        assert res["document_completeness"]["all_documents_complete"] is True
+        assert "DOCUMENT_EQUATION_ARTIFACT_COVERAGE_INCOMPLETE" not in {
+            w["code"] for w in res["warnings"]
+        }
+
+    def test_gate_preserves_other_reasons_when_coverage_clears(self):
+        # Clearing the coverage reason must not resurrect completeness when an
+        # unrelated failure (terminal section missing) is still present.
+        mod = _import_gate()
+        precomputed = {
+            "document_id": "doc_mixed",
+            "complete": False,
+            "review_reasons": [
+                "terminal_section_missing",
+                "equation_artifact_coverage_incomplete",
+            ],
+            "equation_label_continuity": {"missing_labels": [], "has_gaps": False},
+            "terminal_section": {"present": False, "missing": True, "matched_titles": []},
+            "ingest_coverage": {"sufficient": True, "reached_document_end": True,
+                                "pages_total": 0, "last_ingested_page": None,
+                                "structure_page_coverage_ratio": None,
+                                "trailing_uningested_page_ranges": []},
+            "evidence_page_distribution": {"pages": [], "distribution_ratio": None,
+                                           "sparse": False},
+            "equation_artifact_coverage": {},
+        }
+        artifacts = {
+            "document_structure": {
+                "document_id": "doc_mixed",
+                "metadata": {
+                    "pages": 0, "parser_reached_eof": True,
+                    "tex_equation_inventory": {
+                        "display_math_blocks": 3, "labels": ["eq:a"], "label_count": 1,
+                    },
+                },
+                "blocks": [],
+                "sections": [],
+            },
+            "document_completeness": precomputed,
+            "equation_semantics": {
+                "equations": [{"equation_id": "eq_1"}],
+                "equation_candidates": [
+                    {"candidate_id": "c1", "acceptance_status": "accepted",
+                     "accepted_equation_id": "eq_1"},
+                ],
+            },
+        }
+        res = mod.ExportValidationGate().run(artifacts=artifacts).to_dict()
+        doc = res["document_completeness"]["documents"][0]
+        assert "equation_artifact_coverage_incomplete" not in doc["review_reasons"]
+        assert "terminal_section_missing" in doc["review_reasons"]
+        assert doc["complete"] is False

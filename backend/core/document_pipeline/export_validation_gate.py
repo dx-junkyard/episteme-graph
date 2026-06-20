@@ -794,12 +794,20 @@ class ExportValidationGate:
         )
         report = dict(report)
         report["equation_artifact_coverage"] = coverage
+        # Reconcile bidirectionally (#420): the orchestrator computes the report
+        # before equation_semantics, so its coverage is stale (record_count=0 →
+        # equation_artifact_coverage_incomplete). When the refreshed coverage is
+        # now complete, the stale reason must be REMOVED and ``complete``
+        # recomputed from the remaining reasons — otherwise a normal TeX document
+        # stays permanently incomplete. Other failure reasons are preserved.
+        reasons = [
+            r for r in (report.get("review_reasons") or [])
+            if r != "equation_artifact_coverage_incomplete"
+        ]
         if not coverage.get("complete", True):
-            reasons = list(report.get("review_reasons") or [])
-            if "equation_artifact_coverage_incomplete" not in reasons:
-                reasons.append("equation_artifact_coverage_incomplete")
-            report["review_reasons"] = reasons
-            report["complete"] = False
+            reasons.append("equation_artifact_coverage_incomplete")
+        report["review_reasons"] = reasons
+        report["complete"] = not reasons
         return report
 
     def _aggregate_artifact_issues(

@@ -403,6 +403,39 @@ def test_completeness_passes_when_records_cover_tex_math():
     assert cov["complete"] is True
 
 
+def test_build_document_completeness_passes_equations_to_coverage():
+    # Regression for #420 P1: the export-route wrapper must forward the
+    # equation_semantics artifact so a normal TeX document with records is not
+    # reported as permanently incomplete.
+    import sys as _sys
+    from pathlib import Path as _Path
+    _api = _Path(__file__).resolve().parents[1] / "api"
+    if str(_api) not in _sys.path:
+        _sys.path.insert(0, str(_api))
+    from routes import export_artifacts as ea
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    structure = build_structure_from_tex_archive(
+        _tex_archive_with_math(), document_id="doc-route", source_file="paper.tar.gz"
+    )
+    struct_dict = structure.to_dict()
+    equations = {
+        "equations": [{"equation_id": "eq_1"}],
+        "equation_candidates": [
+            {"candidate_id": "c1", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_1"},
+        ],
+    }
+    # Without equations → incomplete; with equations → complete.
+    without = ea.build_document_completeness(struct_dict, document_id="doc-route")
+    assert without["equation_artifact_coverage"]["complete"] is False
+    with_eq = ea.build_document_completeness(
+        struct_dict, document_id="doc-route", equations_artifact=equations
+    )
+    assert with_eq["equation_artifact_coverage"]["complete"] is True
+    assert "equation_artifact_coverage_incomplete" not in with_eq["review_reasons"]
+
+
 def test_tex_archive_wraps_alignment_equations_for_rendering():
     from core.document_pipeline.tex_archive import build_structure_from_tex_archive
 

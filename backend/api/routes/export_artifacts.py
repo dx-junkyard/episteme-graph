@@ -1161,12 +1161,17 @@ def build_document_completeness(
     *,
     document_id: str,
     evidence_artifact: Any = None,
+    equations_artifact: Any = None,
 ) -> dict:
-    """Deterministic document-completeness report (issue #366).
+    """Deterministic document-completeness report (issue #366 / #420).
 
     Thin wrapper over ``core.document_pipeline.completeness`` so the export route
     and the pipeline gate share one implementation. Imported lazily so importing
     this module never hard-depends on the (sometimes stubbed) ``core`` package.
+
+    ``equations_artifact`` (equation_semantics) is passed through so equation
+    artifact coverage reflects the real EquationRecords (#420); without it a TeX
+    document with math would be reported as permanently incomplete.
     """
     analyze_document_completeness = _load_completeness_analyzer()
 
@@ -1174,6 +1179,7 @@ def build_document_completeness(
         _coerce_dict(structure_artifact),
         _coerce_dict(evidence_artifact) if evidence_artifact is not None else None,
         document_id=document_id,
+        equations=_coerce_dict(equations_artifact) if equations_artifact is not None else None,
     )
 
 
