@@ -403,6 +403,75 @@ def test_completeness_passes_when_records_cover_tex_math():
     assert cov["complete"] is True
 
 
+class _FakeEquations:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def to_dict(self):
+        return self._payload
+
+
+def test_orchestrator_records_completeness_with_equation_records():
+    # Regression for #420 P1: the orchestrator runs equation_semantics (stage 8)
+    # before this completeness call, so it must pass the real EquationRecords —
+    # the persisted document_completeness artifact must NOT be stale-incomplete
+    # for a normal TeX document with math.
+    from core.document_pipeline.orchestrator import _record_document_completeness
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    structure = build_structure_from_tex_archive(
+        _tex_archive_with_math(), document_id="doc-orch", source_file="paper.tar.gz"
+    )
+    equations = _FakeEquations({
+        "equations": [{"equation_id": "eq_1"}],
+        "equation_candidates": [
+            {"candidate_id": "c1", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_1"},
+        ],
+    })
+    saved: dict = {}
+    report = _record_document_completeness(
+        structure=structure,
+        evidence=None,
+        equations=equations,
+        document_id="doc-orch",
+        save_artifact=lambda name, value: saved.__setitem__(name, value),
+    )
+    cov = saved["document_completeness"]["equation_artifact_coverage"]
+    assert cov["equation_record_count"] == 1
+    assert cov["tex_display_math_blocks"] == 3
+    assert cov["complete"] is True
+    assert report["complete"] is True
+    # A complete document leaves structure untouched (no stale propagation).
+    assert not any(
+        getattr(i, "rule_id", "").startswith("document_completeness_equation")
+        for i in structure.validation_issues
+    )
+
+
+def test_orchestrator_completeness_incomplete_when_records_missing():
+    # The genuine missing-records case still reports incomplete and propagates.
+    from core.document_pipeline.orchestrator import _record_document_completeness
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    structure = build_structure_from_tex_archive(
+        _tex_archive_with_math(), document_id="doc-orch2", source_file="paper.tar.gz"
+    )
+    saved: dict = {}
+    report = _record_document_completeness(
+        structure=structure,
+        evidence=None,
+        equations=_FakeEquations({"equations": [], "equation_candidates": []}),
+        document_id="doc-orch2",
+        save_artifact=lambda name, value: saved.__setitem__(name, value),
+    )
+    assert report["equation_artifact_coverage"]["complete"] is False
+    assert any(
+        getattr(i, "rule_id", "") == "document_completeness_equation_artifact_coverage_incomplete"
+        for i in structure.validation_issues
+    )
+
+
 def test_build_document_completeness_passes_equations_to_coverage():
     # Regression for #420 P1: the export-route wrapper must forward the
     # equation_semantics artifact so a normal TeX document with records is not

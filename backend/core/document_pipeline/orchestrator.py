@@ -574,30 +574,17 @@ def run_document_pipeline(
         # signal flows downstream (and a truncated document never silently
         # reaches publish-ready).
         try:
-            from .completeness import analyze_document_completeness
-
-            completeness_report = analyze_document_completeness(
-                _to_plain_data(structure),
-                _to_plain_data(evidence),
+            # equation_semantics (stage 8) runs before this point, so the real
+            # EquationRecords are available and MUST be passed so equation artifact
+            # coverage reflects them (#420) — otherwise the saved artifact is
+            # permanently incomplete for any TeX document with math.
+            _record_document_completeness(
+                structure=structure,
+                evidence=evidence,
+                equations=equations,
                 document_id=document_id,
+                save_artifact=save_artifact,
             )
-            save_artifact("document_completeness", completeness_report)
-            if not completeness_report.get("complete", True):
-                reasons = completeness_report.get("review_reasons") or []
-                logger.warning(
-                    "document %s ingest looks incomplete: %s", document_id, reasons,
-                )
-                # equation_artifact_coverage is evaluated before equation_semantics
-                # has run, so its EquationRecord count is always 0 here (#420). Do
-                # not propagate that (provisional) reason onto document_structure —
-                # it would persist as a stale warning even after the gate refreshes
-                # coverage with the real records. The ExportValidationGate is the
-                # authoritative coverage check.
-                propagated = [
-                    r for r in reasons if r != "equation_artifact_coverage_incomplete"
-                ]
-                _propagate_completeness_to_structure(structure, propagated)
-                save_artifact("document_structure", structure)
         except Exception:
             logger.exception(
                 "document_completeness check failed (non-fatal): document=%s", document_id
@@ -1344,6 +1331,41 @@ def _to_plain_data(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: _to_plain_data(v) for k, v in value.items()}
     return value
+
+
+def _record_document_completeness(
+    *,
+    structure: Any,
+    evidence: Any,
+    equations: Any,
+    document_id: str,
+    save_artifact,
+) -> dict:
+    """Compute, persist, and propagate document completeness (#366 / #420).
+
+    Runs at the DocumentStructure / equation_semantics / EvidenceRegistry exit.
+    The equation_semantics result is passed through so equation artifact coverage
+    reflects the real EquationRecords; without it the saved ``document_completeness``
+    artifact would be permanently incomplete for any TeX document with math.
+    Returns the report. Best-effort propagation onto ``structure``.
+    """
+    from .completeness import analyze_document_completeness
+
+    report = analyze_document_completeness(
+        _to_plain_data(structure),
+        _to_plain_data(evidence),
+        document_id=document_id,
+        equations=_to_plain_data(equations),
+    )
+    save_artifact("document_completeness", report)
+    if not report.get("complete", True):
+        reasons = report.get("review_reasons") or []
+        logger.warning(
+            "document %s ingest looks incomplete: %s", document_id, reasons,
+        )
+        _propagate_completeness_to_structure(structure, reasons)
+        save_artifact("document_structure", structure)
+    return report
 
 
 def _propagate_completeness_to_structure(structure: Any, review_reasons: list) -> None:
