@@ -46,7 +46,17 @@ def test_decision_actions_present(admin_js):
 
 def test_accept_handles_conflict_and_block(admin_js):
     assert "409" in admin_js  # optimistic-concurrency conflict surfaced
-    assert "422" in admin_js  # hard-error / protected block surfaced
+    # Every non-2xx response, including hard-error/protected blocks (422) and
+    # projection validation failures (400/500), goes through one error path.
+    assert "decisionResponse" in admin_js
+
+
+def test_decision_actions_reject_all_non_success_responses(admin_js):
+    assert "function decisionResponse(r, fallback)" in admin_js
+    assert "if (r.ok) return r.json()" in admin_js
+    assert 'decisionResponse(r, "採用できません")' in admin_js
+    assert 'decisionResponse(r, "却下に失敗しました。")' in admin_js
+    assert 'decisionResponse(r, "再修正の作成に失敗しました。")' in admin_js
 
 
 def test_protected_change_warning_and_confirm(admin_js):

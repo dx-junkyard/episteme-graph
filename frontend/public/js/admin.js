@@ -9179,13 +9179,21 @@
                               accept_partial: acceptPartial });
     }
 
+    function decisionResponse(r, fallback) {
+      if (r.ok) return r.json();
+      return r.json()
+        .catch(function () { return {}; })
+        .then(function (j) {
+          throw new Error(j.detail || fallback || ("server " + r.status));
+        });
+    }
+
     function acceptRevision() {
       apiFetch(docPath() + "/" + encodeURIComponent(current.revisionId) + "/accept",
                { method: "POST", body: decisionBody() })
         .then(function (r) {
           if (r.status === 409) throw new Error("競合: 採用版が更新されています。最新の差分で再確認してください。");
-          if (r.status === 422) return r.json().then(function (j) { throw new Error(j.detail || "採用できません"); });
-          return r.json();
+          return decisionResponse(r, "採用できません");
         })
         .then(function () { alert("採用しました。採用版を切り替えました。"); loadList(); openDetail(current.revisionId); })
         .catch(function (e) { alert(e.message || "採用に失敗しました。"); });
@@ -9194,17 +9202,17 @@
     function rejectRevision() {
       apiFetch(docPath() + "/" + encodeURIComponent(current.revisionId) + "/reject",
                { method: "POST", body: decisionBody() })
-        .then(function (r) { return r.json(); })
+        .then(function (r) { return decisionResponse(r, "却下に失敗しました。"); })
         .then(function () { alert("却下しました。採用版は変更されません。"); loadList(); openDetail(current.revisionId); })
-        .catch(function () { alert("却下に失敗しました。"); });
+        .catch(function (e) { alert(e.message || "却下に失敗しました。"); });
     }
 
     function reviseRevision() {
       apiFetch(docPath() + "/" + encodeURIComponent(current.revisionId) + "/revise",
                { method: "POST", body: decisionBody() })
-        .then(function (r) { return r.json(); })
+        .then(function (r) { return decisionResponse(r, "再修正の作成に失敗しました。"); })
         .then(function (data) { loadList(); if (data.revision_run_id) openDetail(data.revision_run_id); })
-        .catch(function () { alert("再修正の作成に失敗しました。"); });
+        .catch(function (e) { alert(e.message || "再修正の作成に失敗しました。"); });
     }
 
     return { open: open };

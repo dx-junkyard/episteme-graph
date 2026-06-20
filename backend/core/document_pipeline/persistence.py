@@ -1942,10 +1942,22 @@ def _remap_revision_graph(
         ).strip()
         if not agent_id:
             raise ValueError("component graph node is missing an id")
+        graph_layer = str(node.get("graph_layer") or "").strip().lower()
+        component_type = str(node.get("component_type") or "").strip()
+        # TheoryOperationGraph contains graph-native aggregate/detail nodes whose
+        # ``component_id`` is a graph identifier (theory_op_*/eq_op_*), not a
+        # component_assembly entity.  Treating every node carrying component_id as
+        # a projection-backed component made valid revision candidates impossible
+        # to accept.  Explicit stored component nodes and ordinary component ids
+        # still fail closed when they cannot be resolved.
+        is_graph_native_node = (
+            component_type in ("TheoryOperationNode", "EquationOperationNode")
+            or graph_layer in ("equation_detail", "debug")
+        )
         is_component_node = (
-            bool(node.get("component_id"))
-            or agent_id in component_id_map
+            agent_id in component_id_map
             or str(node.get("type") or "").lower() == "component"
+            or (bool(node.get("component_id")) and not is_graph_native_node)
         )
         if is_component_node:
             db_id = component_id_map.get(agent_id)
