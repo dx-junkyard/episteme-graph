@@ -103,6 +103,49 @@ def test_analyzer_detects_mixed_responsibility_with_canonical_aliases():
     assert len(detected) >= 2
 
 
+def test_suggested_split_routes_equations_by_role_not_round_robin():
+    # #421 regression: a coarse component that mixes a definition responsibility
+    # and a constraint responsibility must route its equations to the suggested
+    # child whose responsibility matches the equation ROLE — the definition
+    # equation to the definition child, the constraint equation to the constraint
+    # child — never round-robin (which could drop a definition equation into the
+    # constraint child).
+    component = _component(
+        component_id="comp_roles",
+        responsibility_type="definition",
+        primary_operation="define relation",
+        secondary_operations=["evaluate condition"],
+        evidence_refs={
+            "claim_ids": ["claim_1"],
+            "equation_ids": ["eq_def", "eq_con"],
+            "thesis_refs": [],
+            "dsl_refs": {"node_ids": [], "edge_ids": []},
+        },
+        definition_equation_ids=["eq_def"],
+        constraint_equation_ids=["eq_con"],
+        internal_flow=[
+            {"from": "eq_def", "relation": "define", "to": "eq_con"},
+        ],
+    )
+
+    analyzed = ANALYZER.analyze(_result([component]))
+    quality = analyzed.components[0].component_quality
+    assert quality["split_required"] is True
+
+    suggested = {s["responsibility_type"]: s for s in quality["suggested_split"]}
+    assert "definition" in suggested and "constraint" in suggested
+    assert suggested["definition"]["linked_equation_ids"] == ["eq_def"]
+    assert suggested["constraint"]["linked_equation_ids"] == ["eq_con"]
+    # The definition equation never leaks into the constraint child.
+    assert "eq_def" not in suggested["constraint"]["linked_equation_ids"]
+    # Children never share an equation.
+    seen: set[str] = set()
+    for child in quality["suggested_split"]:
+        eqs = set(child.get("linked_equation_ids") or [])
+        assert not (eqs & seen)
+        seen |= eqs
+
+
 def test_teaching_takeaway_is_not_a_step1_split_reason():
     component = _component(
         component_id="comp_teaching",

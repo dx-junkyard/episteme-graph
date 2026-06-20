@@ -82,6 +82,10 @@ def _empty_refinement_validation() -> dict:
         "unchanged_components": [],
         "failed_refinements": [],
         "review_required_refinements": [],
+        # Components whose split was required but were neither split, failed, nor
+        # review_required — a silent contract violation that must hard-block
+        # publish (#421).
+        "unprocessed_split_required": [],
         "unassigned_links": [],
         "dangling_component_refs": [],
         "teaching_granularity_warnings": [],
@@ -1283,6 +1287,26 @@ class ExportValidationGate:
                 artifact="component_assembly",
                 path=f"$.component_refinement[{original_id}]",
                 source_stage="export_validation",
+                target_type="component",
+                target_id=str(original_id),
+            ))
+
+        # A component whose split was required but was left unprocessed (neither
+        # split, failed, nor review_required) is a silent contract violation
+        # (#421): it must be a hard error so it can never reach publish-ready.
+        for original_id in result["unprocessed_split_required"]:
+            errors.append(ValidationEntry(
+                code="COMPONENT_REFINEMENT_REQUIRED_BUT_UNPROCESSED",
+                message=(
+                    f"component {original_id!r} requires a split but was left "
+                    "unprocessed (not split, failed, or review_required); it "
+                    "cannot be published in this state"
+                ),
+                artifact="component_assembly",
+                path="$.component_refinement.refinement_validation.unprocessed_split_required",
+                source_stage="export_validation",
+                target_type="component",
+                target_id=str(original_id),
             ))
 
         for entry in result["dangling_component_refs"]:
@@ -1297,6 +1321,8 @@ class ExportValidationGate:
                 artifact="component_assembly",
                 path=f"$.component_refinement.component_graph_updates.unresolved_edges",
                 source_stage="export_validation",
+                target_type="component",
+                target_id=str(owner),
             ))
 
         for entry in result["unassigned_links"]:
@@ -1327,6 +1353,8 @@ class ExportValidationGate:
                 artifact="component_assembly",
                 path=f"$.component_refinement[{original_id}]",
                 source_stage="export_validation",
+                target_type="component",
+                target_id=str(original_id),
             ))
 
         return result

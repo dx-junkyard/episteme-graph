@@ -193,6 +193,146 @@ def test_links_redistributed_not_duplicated_and_unassigned_reported():
 
 
 # ---------------------------------------------------------------------------
+# 3a. Responsibility / equation-role consistency (#421)
+# ---------------------------------------------------------------------------
+
+def test_equations_routed_to_responsibility_matching_their_role():
+    # A definition equation must land in the definition child and a result/
+    # constraint equation in the constraint child — driven by the equation ROLE,
+    # never round-robin (#421).
+    component = _component(
+        component_id="comp_roleconsistency",
+        linked_equation_ids=["eq_def", "eq_con"],
+        split_recommendation=_split_rec(
+            _suggested("Definition", "definition"),
+            _suggested("Constraint", "constraint"),
+        ),
+    )
+    llm_input = _LLMInput(equations=[
+        {"equation_id": "eq_def", "role": "definition"},
+        {"equation_id": "eq_con", "role": "constraint"},
+    ])
+    refined = REFINER.refine(_result([component]), llm_input=llm_input, derivations=None)
+
+    definition = next(c for c in refined.components if c.responsibility_type == "definition")
+    constraint = next(c for c in refined.components if c.responsibility_type == "constraint")
+    assert definition.linked_equation_ids == ["eq_def"]
+    assert constraint.linked_equation_ids == ["eq_con"]
+    # The definition equation never leaks into the constraint child and vice versa.
+    assert "eq_def" not in constraint.linked_equation_ids
+    assert "eq_con" not in definition.linked_equation_ids
+    # Role-classified buckets agree with the assignment.
+    assert definition.definition_equation_ids == ["eq_def"]
+    assert "eq_def" not in (constraint.definition_equation_ids or [])
+
+
+def test_unrouteable_equation_is_unassigned_not_round_robined():
+    # An equation whose role matches none of the suggested responsibilities is
+    # left in unassigned_links, never forced onto an arbitrary child (#421).
+    component = _component(
+        component_id="comp_orphan_role",
+        linked_equation_ids=["eq_def", "eq_con", "eq_unknown"],
+        split_recommendation=_split_rec(
+            _suggested("Definition", "definition"),
+            _suggested("Constraint", "constraint"),
+        ),
+    )
+    llm_input = _LLMInput(equations=[
+        {"equation_id": "eq_def", "role": "definition"},
+        {"equation_id": "eq_con", "role": "constraint"},
+        {"equation_id": "eq_unknown", "role": ""},
+    ])
+    refined = REFINER.refine(_result([component]), llm_input=llm_input, derivations=None)
+
+    for child in refined.components:
+        assert "eq_unknown" not in child.linked_equation_ids
+    unassigned = refined.component_refinement["refinement_validation"]["unassigned_links"]
+    assert any(
+        u["link_id"] == "eq_unknown" and u["link_type"] == "equation" for u in unassigned
+    )
+
+
+def test_claim_routed_by_type_when_no_equation_overlap():
+    # A claim sharing no equations with any child is routed by its claim TYPE,
+    # not dropped onto the first child (#421).
+    component = _component(
+        component_id="comp_claimtype",
+        linked_equation_ids=["eq_def", "eq_con"],
+        linked_claim_ids=["claim_typed"],
+        split_recommendation=_split_rec(
+            _suggested("Definition", "definition"),
+            _suggested("Constraint", "constraint"),
+        ),
+    )
+    llm_input = _LLMInput(
+        equations=[
+            {"equation_id": "eq_def", "role": "definition"},
+            {"equation_id": "eq_con", "role": "constraint"},
+        ],
+        claims=[
+            {"claim_id": "claim_typed", "is_atomic": True, "atomicity": "atomic",
+             "claim_type": "constraint", "equation_ids": [], "concepts": ["gamma"]},
+        ],
+    )
+    refined = REFINER.refine(_result([component]), llm_input=llm_input, derivations=None)
+
+    constraint = next(c for c in refined.components if c.responsibility_type == "constraint")
+    definition = next(c for c in refined.components if c.responsibility_type == "definition")
+    assert "claim_typed" in constraint.linked_claim_ids
+    assert "claim_typed" not in definition.linked_claim_ids
+
+
+def test_derivation_routed_by_operation_family():
+    # With two derivational-capable children, a derivation is routed by the
+    # operation family of its steps, not to a fixed "first derivational child".
+    from episteme_graph.agents.derivation_chain.schema import (
+        DerivationChainRecord,
+        DerivationChainResult,
+        DerivationStep,
+    )
+
+    component = _component(
+        component_id="comp_derfamily",
+        linked_equation_ids=["eq_sys", "eq_res"],
+        linked_derivation_ids=["d_constraint"],
+        split_recommendation=_split_rec(
+            _suggested("Equation system", "equation_system"),
+            _suggested("Constraint", "constraint"),
+        ),
+    )
+    llm_input = _LLMInput(equations=[
+        {"equation_id": "eq_sys", "role": "transformation"},
+        {"equation_id": "eq_res", "role": "constraint"},
+    ])
+    derivations = DerivationChainResult(
+        document_id="doc",
+        cartridge_id=None,
+        chains=[
+            DerivationChainRecord(
+                derivation_id="d_constraint",
+                document_id="doc",
+                source_section_ids=["s1"],
+                steps=[
+                    DerivationStep(
+                        step_id="s0",
+                        input_equation_ids=[],
+                        operation="evaluate the constraint condition",
+                        output_equation_ids=[],
+                    ),
+                ],
+                linked_component_ids=[],
+            )
+        ],
+    )
+    refined = REFINER.refine(_result([component]), llm_input=llm_input, derivations=derivations)
+
+    constraint = next(c for c in refined.components if c.responsibility_type == "constraint")
+    eqsys = next(c for c in refined.components if c.responsibility_type == "equation_system")
+    assert constraint.linked_derivation_ids == ["d_constraint"]
+    assert eqsys.linked_derivation_ids == []
+
+
+# ---------------------------------------------------------------------------
 # 3b. Derivation link redistribution (#324 rule 4)
 # ---------------------------------------------------------------------------
 

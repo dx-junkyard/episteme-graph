@@ -136,6 +136,7 @@ class ComponentRefiner:
         eq_index = _equation_index(llm_input)
         claim_index = _claim_index(llm_input)
         chains = list(getattr(derivations, "chains", []) or [])
+        derivation_index = _derivation_index(chains)
         report = RefinementReport()
         self._traces = {}
 
@@ -150,7 +151,7 @@ class ComponentRefiner:
         child_map: dict[str, list[str]] = {}
         for component in result.components:
             children = self._refine_component(
-                component, eq_index, chains, report, claim_index
+                component, eq_index, chains, report, claim_index, derivation_index
             )
             child_map[component.component_id] = [c.component_id for c in children]
             if children and children[0].component_id != component.component_id:
@@ -371,8 +372,10 @@ class ComponentRefiner:
         chains: list,
         report: RefinementReport,
         claim_index: dict[str, dict] | None = None,
+        derivation_index: dict[str, dict] | None = None,
     ) -> list[ComponentRecord]:
         claim_index = claim_index or {}
+        derivation_index = derivation_index or {}
         split = component.split_recommendation if isinstance(component.split_recommendation, dict) else {}
         if split_is_required(split):
             report.oversized_components.append({
@@ -395,7 +398,7 @@ class ComponentRefiner:
         # Step 3 priority order (#324): consume Step 1 ``suggested_split`` as the
         # primary split plan before falling back to derivation-driven splitting.
         suggested_children = self._suggested_split_children(
-            component, split, eq_index, claim_index, report
+            component, split, eq_index, claim_index, report, derivation_index
         )
         if suggested_children:
             return suggested_children
@@ -497,6 +500,7 @@ class ComponentRefiner:
         eq_index: dict[str, dict],
         claim_index: dict[str, dict],
         report: RefinementReport,
+        derivation_index: dict[str, dict] | None = None,
     ) -> list[ComponentRecord]:
         """Split a component using Step 1's ``suggested_split`` plan (#324).
 
@@ -519,7 +523,9 @@ class ComponentRefiner:
         if len(suggested) < 2 or len(responsibilities) < 2:
             return []
 
-        plan, unassigned = _redistribute_links(component, suggested, eq_index, claim_index)
+        plan, unassigned = _redistribute_links(
+            component, suggested, eq_index, claim_index, derivation_index or {}
+        )
         assignable = [spec for spec in plan if _spec_has_payload(spec)]
         if len(assignable) < 2:
             return []
@@ -1494,6 +1500,7 @@ def _claim_index(llm_input) -> dict[str, dict]:
             "concepts": [str(c) for c in (row.get("concepts") or []) if c],
             "atomicity": atomicity,
             "is_atomic": bool(row.get("is_atomic", atomicity == "atomic")),
+            "claim_type": str(row.get("claim_type") or row.get("claim_type_candidate") or ""),
             "equation_ids": [str(e) for e in (row.get("equation_ids") or []) if e],
             "evidence_ids": [str(e) for e in (row.get("source_evidence_ids") or []) if e],
         })
@@ -1554,21 +1561,109 @@ def _spec_has_payload(spec: dict) -> bool:
     )
 
 
+def _claim_category(info: dict) -> str:
+    """Map a claim's declared type to a responsibility category (#421).
+
+    Domain-neutral: keys off the generic claim-type vocabulary only, so the
+    refiner can route a claim by its type when it shares no equations with any
+    child.
+    """
+    ctype = str(info.get("claim_type") or info.get("claim_type_candidate") or "").lower()
+    if not ctype:
+        return ""
+    if any(k in ctype for k in ("definition", "define", "assumption", "model")):
+        return "definition"
+    if any(k in ctype for k in ("result", "conclusion", "constraint", "consistency", "criterion")):
+        return "result"
+    if any(k in ctype for k in ("relation", "transformation", "derivation", "method", "derive")):
+        return "derivation"
+    return ""
+
+
+def _match_spec_by_evidence_provenance(
+    specs: list[dict], evidence_ids: set, claim_evidence: dict[str, set]
+) -> dict | None:
+    """Route a claim to the child that already owns a co-evidenced claim (#421)."""
+    if not evidence_ids:
+        return None
+    best: dict | None = None
+    best_n = 0
+    for spec in specs:
+        overlap = 0
+        for cid in spec["claim_ids"]:
+            overlap += len(evidence_ids & claim_evidence.get(cid, set()))
+        if overlap > best_n:
+            best_n = overlap
+            best = spec
+    return best
+
+
+def _match_spec_by_operation_families(specs: list[dict], families: list[str]) -> dict | None:
+    """Route a derivation to the child whose responsibility matches its operation family (#421)."""
+    for fam in families:
+        resp = _FAMILY_TO_RESPONSIBILITY.get(fam)
+        if not resp:
+            continue
+        for spec in specs:
+            if spec["responsibility_type"] == resp:
+                return spec
+    return None
+
+
+def _derivation_index(chains) -> dict[str, dict]:
+    """Index derivation chains by id → input/output equations and operation families (#421)."""
+    index: dict[str, dict] = {}
+    for chain in chains or []:
+        d_id = str(getattr(chain, "derivation_id", "") or "")
+        if not d_id:
+            continue
+        eqs: list[str] = []
+        families: list[str] = []
+        for step in getattr(chain, "steps", []) or []:
+            eqs.extend(_step_field(step, "input_equation_ids"))
+            eqs.extend(_step_field(step, "output_equation_ids"))
+            op = str(getattr(step, "operation", "") or "")
+            if op:
+                families.append(_generic_operation_family(op))
+        index[d_id] = {
+            "equation_ids": _ordered_unique(eqs),
+            "operation_families": _ordered_unique(families),
+        }
+    return index
+
+
 def _redistribute_links(
     component: ComponentRecord,
     suggested: list[dict],
     eq_index: dict[str, dict],
     claim_index: dict[str, dict],
+    derivation_index: dict[str, dict] | None = None,
 ) -> tuple[list[dict], list[dict]]:
-    """Reassign the parent's links across the suggested children (#324 rule 4).
+    """Reassign the parent's links across the suggested children (#324 / #421).
 
-    Returns ``(child_specs, unassigned_links)``. Links that cannot be assigned
-    confidently are recorded in ``unassigned_links`` rather than dropped.
+    Returns ``(child_specs, unassigned_links)``. Assignment is *responsibility-
+    aware*, never round-robin:
+
+    - equations are routed by their equation *role* (definition / transformation /
+      result) to the responsibility category that owns that role; the analyzer's
+      ``linked_equation_ids`` candidate field is consumed only as a hint when the
+      equation has no usable role in the index;
+    - claims are routed by equation overlap, then by claim type, then by the
+      provenance of their source evidence;
+    - derivations are routed by the overlap of their input/output equations and
+      their operation family, falling back to the sole derivational child;
+    - evidence is routed from the provenance of already-assigned claims /
+      equations.
+
+    Anything that cannot be assigned confidently is recorded in
+    ``unassigned_links`` rather than being forced onto an arbitrary child.
     """
+    derivation_index = derivation_index or {}
     specs: list[dict] = []
+    candidate_equation_hints: dict[str, dict] = {}
     for s in suggested:
         resp = canonical_responsibility_type(s.get("responsibility_type"))
-        specs.append({
+        spec = {
             "name": s.get("name") or resp.replace("_", " ").title(),
             "responsibility_type": resp,
             "operation": s.get("operation") or _operation_for_responsibility(resp),
@@ -1578,12 +1673,24 @@ def _redistribute_links(
             "derivation_ids": [],
             "review_required": False,
             "review_notes": [],
-        })
+        }
+        specs.append(spec)
+        # Consume the analyzer's responsibility-aware candidate equation plan
+        # (#421): map each suggested equation back to the spec that proposed it so
+        # the refiner can honour it when the equation role is otherwise unknown.
+        for eid in s.get("linked_equation_ids") or s.get("candidate_equation_ids") or []:
+            candidate_equation_hints.setdefault(str(eid), spec)
     unassigned: list[dict] = []
 
-    # Equations → responsibility category.
+    # Equations → responsibility category derived from the equation role. When the
+    # role is unknown, fall back to the analyzer's candidate hint; only when both
+    # are missing is the equation left unassigned (never round-robined).
     for eq_id in _all_equation_ids(component):
         target = _match_spec_by_category(specs, _equation_category(eq_index.get(eq_id) or {}))
+        if target is None:
+            hint = candidate_equation_hints.get(eq_id)
+            if hint is not None and hint in specs:
+                target = hint
         if target is None:
             unassigned.append({
                 "link_type": "equation",
@@ -1593,7 +1700,7 @@ def _redistribute_links(
             continue
         target["equation_ids"].append(eq_id)
 
-    # Claims → the child sharing the most equations; atomic fall back to first.
+    # Claims → equation overlap, then claim type, then source-evidence provenance.
     claim_ids = _ordered_unique(
         list(component.linked_claim_ids or [])
         + list((component.evidence_refs or {}).get("claim_ids") or [])
@@ -1605,15 +1712,23 @@ def _redistribute_links(
         claim_evidence[cid] = set(info.get("evidence_ids") or [])
         target = _match_spec_by_equation_overlap(specs, set(info.get("equation_ids") or []))
         if target is None:
-            if _claim_is_atomic(cid, claim_index):
-                target = specs[0]
-            else:
-                unassigned.append({
-                    "link_type": "claim",
-                    "link_id": cid,
-                    "reason": "composite claim without confident target",
-                })
-                continue
+            target = _match_spec_by_category(specs, _claim_category(info))
+        if target is None:
+            target = _match_spec_by_evidence_provenance(
+                specs, claim_evidence[cid], claim_evidence
+            )
+        if target is None:
+            reason = (
+                "composite claim without confident target"
+                if not _claim_is_atomic(cid, claim_index)
+                else "atomic claim without confident responsibility target"
+            )
+            unassigned.append({
+                "link_type": "claim",
+                "link_id": cid,
+                "reason": reason,
+            })
+            continue
         target["claim_ids"].append(cid)
 
     # Evidence → the child whose assigned claims reference it.
@@ -1639,7 +1754,8 @@ def _redistribute_links(
             continue
         target["evidence_ids"].append(ev_id)
 
-    # Derivations → the first derivational child.
+    # Derivations → by input/output equation overlap and operation family, then
+    # the sole derivational child; otherwise left unassigned (never duplicated).
     derivational = [
         spec
         for spec in specs
@@ -1647,14 +1763,24 @@ def _redistribute_links(
         in (_DERIVATION_RESPONSIBILITIES | _EQUATION_SYSTEM_RESPONSIBILITIES | {"constraint"})
     ]
     for d_id in _ordered_unique(component.linked_derivation_ids or []):
-        if derivational:
-            derivational[0]["derivation_ids"].append(d_id)
-        else:
+        info = derivation_index.get(d_id, {})
+        target = _match_spec_by_equation_overlap(specs, set(info.get("equation_ids") or []))
+        if target is None:
+            target = _match_spec_by_operation_families(specs, info.get("operation_families") or [])
+        if target is None and len(derivational) == 1:
+            target = derivational[0]
+        if target is None:
             unassigned.append({
                 "link_type": "derivation",
                 "link_id": d_id,
-                "reason": "no derivational child to receive derivation",
+                "reason": (
+                    "no derivational child to receive derivation"
+                    if not derivational
+                    else "derivation could not be routed to a single derivational child"
+                ),
             })
+            continue
+        target["derivation_ids"].append(d_id)
 
     # Children supported only by composite claims are downgraded.
     for spec in specs:

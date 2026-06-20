@@ -1302,6 +1302,36 @@ def test_component_refinement_review_required_and_teaching_warning():
     assert any(w.code == "COMPONENT_REFINEMENT_TEACHING_GRANULARITY" for w in result.warnings)
 
 
+def test_unprocessed_split_required_is_hard_error_and_not_publish_ready():
+    # #421: a split-required component that was left unprocessed (neither split,
+    # failed, nor review_required) must surface as a hard error carrying the
+    # component target, block export, and forbid publish-ready.
+    comp_result = _RefinedComponentResult({
+        "split_components": [],
+        "unchanged_components": ["comp_unproc"],
+        "failed_refinements": [],
+        "review_required_refinements": [],
+        "unprocessed_split_required": ["comp_unproc"],
+        "unassigned_links": [],
+        "dangling_component_refs": [],
+        "teaching_granularity_warnings": [],
+    })
+    result = _run_gate(component_result=comp_result)
+
+    assert result.status == "failed_validation"
+    assert result.exportable is False
+    assert result.publish_ready is False
+    # The unprocessed split is preserved all the way into the export report.
+    assert result.component_refinement_validation["unprocessed_split_required"] == ["comp_unproc"]
+    unprocessed = [
+        e for e in result.errors
+        if e.code == "COMPONENT_REFINEMENT_REQUIRED_BUT_UNPROCESSED"
+    ]
+    assert len(unprocessed) == 1
+    assert unprocessed[0].target_type == "component"
+    assert unprocessed[0].target_id == "comp_unproc"
+
+
 # ---------------------------------------------------------------------------
 # Step 5: theory bundle + teaching output (issue #326)
 # ---------------------------------------------------------------------------
