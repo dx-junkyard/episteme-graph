@@ -9,6 +9,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from episteme_graph.agents.component_assembly.split_recommendation import (
+    split_is_required,
+)
+
 from .inventory import build_baseline_inventory
 from .validation import gate_error_count
 
@@ -63,8 +67,7 @@ def compute_quality_metrics(artifacts: dict, *, gate_result: dict | None = None)
 
     granularity_violations = sum(
         1 for c in components.values()
-        if (c.get("split_recommendation") or {}).get("split_required")
-        or (c.get("split_recommendation") or {}).get("should_split")
+        if split_is_required(c.get("split_recommendation"))
     )
 
     return {
