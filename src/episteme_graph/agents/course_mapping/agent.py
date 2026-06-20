@@ -181,6 +181,12 @@ class CourseMappingAgent:
         if not objectives:
             objectives.append("このコンポーネントが扱う主題を説明できる")
 
+        # Issue #418: link only derivations that belong to this topic's component
+        # (relevance by component linkage), never an indiscriminate全link.
+        linked_derivation_ids = [
+            str(d) for d in (_attr(component, "linked_derivation_ids") or []) if d
+        ]
+
         # Blackbox policy: derived from component_type
         blackbox_policy = self._default_blackbox_policy(comp_type, component)
 
@@ -191,6 +197,7 @@ class CourseMappingAgent:
             title=label or (comp_id or "Topic"),
             description=summary or label or "",
             linked_component_ids=[comp_id] if comp_id else [],
+            linked_derivation_ids=linked_derivation_ids,
             learning_objectives=objectives,
             prerequisite_concepts=prerequisite_concepts,
             introduced_concepts=introduced_concepts,

@@ -162,6 +162,58 @@ def test_checkpoints_include_deterministic_signals():
     assert any(t.startswith("validation:") for t in triggers)
 
 
+def test_canonical_required_key_drives_component_checkpoint():
+    # Regression for #417: a component carrying the canonical ``required: true``
+    # split-recommendation key (the schema the granularity analyzer actually
+    # emits) must still produce a component_granularity checkpoint. Previously the
+    # planner only read ``split_required`` / ``should_split`` and silently skipped
+    # ``required: true`` components.
+    artifacts = {
+        "component_assembly": {
+            "components": [
+                {
+                    "component_id": "cmp_canon",
+                    "label": "Canonical split component",
+                    "linked_claim_ids": ["clm_x"],
+                    "split_recommendation": {
+                        "required": True,
+                        "reasons": ["responsibility type has more than one primary value"],
+                        "suggested_components": [],
+                    },
+                },
+            ],
+        },
+    }
+    inv = build_baseline_inventory(artifacts, base_run_id="base-canon")
+    # Inventory normalizes the stored recommendation to the canonical key.
+    stored = inv["entities"]["components"]["cmp_canon"]["split_recommendation"]
+    assert stored["required"] is True
+    assert "split_required" not in stored
+    triggers = {
+        (c["target_id"], c["trigger_reason"]) for c in plan_checkpoints(inv)
+    }
+    assert ("cmp_canon", "component_granularity") in triggers
+
+
+def test_legacy_split_keys_still_drive_component_checkpoint():
+    # Migration compatibility (#417): legacy keys are still honored.
+    for legacy_key in ("split_required", "should_split"):
+        artifacts = {
+            "component_assembly": {
+                "components": [
+                    {
+                        "component_id": "cmp_legacy",
+                        "label": "Legacy split component",
+                        "split_recommendation": {legacy_key: True},
+                    },
+                ],
+            },
+        }
+        inv = build_baseline_inventory(artifacts, base_run_id="base-legacy")
+        triggers = {c["trigger_reason"] for c in plan_checkpoints(inv)}
+        assert "component_granularity" in triggers, legacy_key
+
+
 def test_checkpoint_ids_are_stable_hashes():
     inv = build_baseline_inventory(_sample_artifacts(), base_run_id="base-1")
     cps = plan_checkpoints(inv)

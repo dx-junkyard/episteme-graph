@@ -1483,13 +1483,21 @@ def _classify_operation_family(operation_text: str) -> dict:
 def _graph_node_is_component(node: dict, known_component_ids: set[str]) -> bool:
     if not isinstance(node, dict):
         return False
-    layer = str(node.get("graph_layer") or "main")
     comp_type = str(node.get("component_type") or "")
     node_id = str(node.get("component_id") or node.get("node_id") or node.get("id") or "")
-    if known_component_ids and node_id in known_component_ids:
-        return True
+    # Operation-level nodes (EquationOperationNode) are never components.
     if comp_type in _OPERATION_NODE_TYPES:
         return False
+    # Issue #418: when the real component-id registry is supplied, membership is
+    # mandatory — a node is a component_graph node ONLY if its id is an actual
+    # component. This stops aggregate theory nodes (graph_layer=main but not a
+    # real component) from being misclassified as components and leaking into
+    # component_graph.json with a non-component id.
+    if known_component_ids:
+        return node_id in known_component_ids
+    # No registry available (legacy / standalone graph): fall back to the layer
+    # heuristic so the split still works without the components artifact.
+    layer = str(node.get("graph_layer") or "main")
     return layer in _COMPONENT_GRAPH_LAYERS
 
 

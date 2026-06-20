@@ -38,6 +38,10 @@ class ValidationEntry:
     artifact: str
     path: str | None = None
     source_stage: str | None = None
+    # Issue #418: the concrete entity a finding is about, stored directly so the
+    # revision inventory can resolve it without parsing the JSON ``path``.
+    target_type: str | None = None
+    target_id: str | None = None
 
 
 @dataclass
@@ -648,7 +652,10 @@ class ExportValidationGate:
         document_id = str(structure.get("document_id") or "")
 
         # Prefer the report the orchestrator already computed at the stage exit;
-        # only recompute if it is absent (e.g. legacy / partial runs).
+        # only recompute if it is absent (e.g. legacy / partial runs). The
+        # orchestrator runs before equation_semantics, so equation-artifact
+        # coverage (#416) is computed/refreshed here where all artifacts exist.
+        equations = artifacts.get("equation_semantics")
         report = artifacts.get("document_completeness")
         if not isinstance(report, dict) or not report:
             analyze_document_completeness = _load_completeness_analyzer()
@@ -658,6 +665,11 @@ class ExportValidationGate:
                 structure,
                 evidence if isinstance(evidence, dict) else None,
                 document_id=document_id,
+                equations=equations if isinstance(equations, dict) else None,
+            )
+        else:
+            report = self._refresh_equation_artifact_coverage(
+                report, structure, equations, document_id=document_id
             )
 
         result = _empty_document_completeness()
@@ -718,7 +730,72 @@ class ExportValidationGate:
                 path="$.completeness.tail_truncation",
                 source_stage="export_validation",
             ))
+        coverage = report.get("equation_artifact_coverage") or {}
+        if not coverage.get("complete", True):
+            warnings.append(ValidationEntry(
+                code="DOCUMENT_EQUATION_ARTIFACT_COVERAGE_INCOMPLETE",
+                message=(
+                    f"document {document_id!r} equation artifact coverage is "
+                    f"incomplete: TeX display math blocks "
+                    f"{coverage.get('tex_display_math_blocks')}, candidates "
+                    f"{coverage.get('equation_candidate_count')}, records "
+                    f"{coverage.get('equation_record_count')}; reasons "
+                    f"{coverage.get('review_reasons')}"
+                ),
+                artifact="equation_semantics",
+                path="$.completeness.equation_artifact_coverage",
+                source_stage="export_validation",
+            ))
         return result
+
+    @staticmethod
+    def _refresh_equation_artifact_coverage(
+        report: dict,
+        structure: dict,
+        equations: Any,
+        *,
+        document_id: str,
+    ) -> dict:
+        """Recompute equation-artifact coverage on a precomputed report (#416).
+
+        The orchestrator computes ``document_completeness`` before
+        equation_semantics runs, so its coverage block is empty/stale. Here, where
+        the equation artifacts exist, the coverage is recomputed and folded back
+        into ``complete`` / ``review_reasons`` without disturbing the other checks.
+        """
+        if not isinstance(report, dict):
+            return report
+        try:
+            from .completeness import analyze_equation_artifact_coverage
+        except Exception:  # pragma: no cover - import resilience
+            try:
+                from core.document_pipeline.completeness import (
+                    analyze_equation_artifact_coverage,
+                )
+            except Exception:
+                return report
+        metadata = structure.get("metadata") if isinstance(structure, dict) else {}
+        pages_total = metadata.get("pages") if isinstance(metadata, dict) else None
+        tex_source = None
+        if isinstance(metadata, dict):
+            tex_source = metadata.get("tex_source") or metadata.get("source_tex")
+        if tex_source is None and isinstance(structure, dict):
+            tex_source = structure.get("tex_source") or structure.get("source_tex")
+        coverage = analyze_equation_artifact_coverage(
+            structure,
+            equations if isinstance(equations, dict) else None,
+            tex_source=tex_source,
+            pages_total=pages_total,
+        )
+        report = dict(report)
+        report["equation_artifact_coverage"] = coverage
+        if not coverage.get("complete", True):
+            reasons = list(report.get("review_reasons") or [])
+            if "equation_artifact_coverage_incomplete" not in reasons:
+                reasons.append("equation_artifact_coverage_incomplete")
+            report["review_reasons"] = reasons
+            report["complete"] = False
+        return report
 
     def _aggregate_artifact_issues(
         self,
@@ -1484,19 +1561,24 @@ class ExportValidationGate:
         errors: list,
         warnings: list,
     ) -> None:
-        """Verify CourseMapping topics reference real component IDs."""
-        known_component_ids: set[str] = {
-            c.component_id
-            for c in (getattr(component_result, "components", []) or [])
+        """Verify CourseMapping topics reference real component IDs (#418)."""
+        components = list(getattr(component_result, "components", []) or [])
+        known_component_ids: set[str] = {c.component_id for c in components}
+        # Per-component derivation links, used to verify topic→derivation relevance.
+        component_derivations: dict[str, set[str]] = {
+            c.component_id: {str(d) for d in (getattr(c, "linked_derivation_ids", []) or [])}
+            for c in components
         }
+
+        def _topic_attr(topic, name):
+            if isinstance(topic, dict):
+                return topic.get(name) or []
+            return getattr(topic, name, []) or []
+
         topics = getattr(course_mapping, "topics", []) or []
         if isinstance(topics, list):
             for idx, topic in enumerate(topics):
-                linked = []
-                if isinstance(topic, dict):
-                    linked = topic.get("linked_component_ids") or []
-                else:
-                    linked = getattr(topic, "linked_component_ids", []) or []
+                linked = _topic_attr(topic, "linked_component_ids")
                 for comp_id in linked:
                     if known_component_ids and comp_id not in known_component_ids:
                         errors.append(ValidationEntry(
@@ -1505,7 +1587,28 @@ class ExportValidationGate:
                             artifact="course_mapping",
                             path=f"$.topics[{idx}].linked_component_ids",
                             source_stage="export_validation",
-                    ))
+                            target_type="component",
+                            target_id=str(comp_id),
+                        ))
+                # Issue #418: a topic may only link derivations that belong to one
+                # of its linked components; an unrelated derivation link is flagged.
+                relevant_derivations: set[str] = set()
+                for comp_id in linked:
+                    relevant_derivations |= component_derivations.get(comp_id, set())
+                for der_id in _topic_attr(topic, "linked_derivation_ids"):
+                    if str(der_id) not in relevant_derivations:
+                        warnings.append(ValidationEntry(
+                            code="COURSE_TOPIC_UNRELATED_DERIVATION",
+                            message=(
+                                f"course topic [{idx}] links derivation {der_id!r} that is "
+                                "not connected to any of the topic's components"
+                            ),
+                            artifact="course_mapping",
+                            path=f"$.topics[{idx}].linked_derivation_ids",
+                            source_stage="export_validation",
+                            target_type="derivation",
+                            target_id=str(der_id),
+                        ))
 
     @staticmethod
     def _component_equation_refs(component, refs: dict) -> list[str]:
@@ -1929,12 +2032,15 @@ class ExportValidationGate:
             return
 
         node_ids: set[str] = set()
+        for node in nodes:
+            if isinstance(node, dict):
+                nid = str(node.get("component_id") or node.get("node_id") or node.get("id") or "")
+                if nid:
+                    node_ids.add(nid)
         for idx, node in enumerate(nodes):
             if not isinstance(node, dict):
                 continue
-            comp_id = str(node.get("component_id") or "")
-            if comp_id:
-                node_ids.add(comp_id)
+            comp_id = str(node.get("component_id") or node.get("node_id") or node.get("id") or "")
             if not str(node.get("label") or "").strip():
                 errors.append(ValidationEntry(
                     code="COMPONENT_GRAPH_NODE_MISSING_LABEL",
@@ -1942,7 +2048,41 @@ class ExportValidationGate:
                     artifact="component_graph",
                     path=f"$.nodes[{idx}].label",
                     source_stage="export_validation",
+                    target_type="graph_node",
+                    target_id=comp_id or None,
                 ))
+            # Issue #418: a detail / operation node must point at an existing
+            # parent node in the same graph (parent_component_id integrity).
+            parent_id = str(node.get("parent_component_id") or "")
+            if parent_id and parent_id not in node_ids:
+                errors.append(ValidationEntry(
+                    code="COMPONENT_GRAPH_PARENT_COMPONENT_INVALID",
+                    message=(
+                        f"component graph node {comp_id or idx!r} parent_component_id "
+                        f"{parent_id!r} does not resolve to a graph node"
+                    ),
+                    artifact="component_graph",
+                    path=f"$.nodes[{idx}].parent_component_id",
+                    source_stage="export_validation",
+                    target_type="graph_node",
+                    target_id=comp_id or None,
+                ))
+            # Issue #418: a main node aggregates other nodes via member_component_ids;
+            # each member must resolve to an existing graph node.
+            for member_id in node.get("member_component_ids") or []:
+                if str(member_id) and str(member_id) not in node_ids:
+                    errors.append(ValidationEntry(
+                        code="COMPONENT_GRAPH_MEMBER_COMPONENT_INVALID",
+                        message=(
+                            f"component graph node {comp_id or idx!r} member_component_id "
+                            f"{member_id!r} does not resolve to a graph node"
+                        ),
+                        artifact="component_graph",
+                        path=f"$.nodes[{idx}].member_component_ids",
+                        source_stage="export_validation",
+                        target_type="graph_node",
+                        target_id=comp_id or None,
+                    ))
             if not str(node.get("component_type") or "").strip():
                 warnings.append(ValidationEntry(
                     code="COMPONENT_GRAPH_NODE_MISSING_COMPONENT_TYPE",

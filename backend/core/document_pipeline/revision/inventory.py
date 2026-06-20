@@ -16,6 +16,10 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from episteme_graph.agents.component_assembly.split_recommendation import (
+    normalize_split_recommendation as _normalize_split_recommendation,
+)
+
 ARTIFACTS_KEY = "_artifacts"
 
 # Entity buckets used throughout the revision subsystem.
@@ -232,7 +236,12 @@ def _index_components(artifacts: dict) -> dict[str, dict]:
             "label": r.get("label") or r.get("name") or "",
             "responsibility_type": r.get("responsibility_type") or "",
             "review_status": r.get("review_status") or "teacher_review_required",
-            "split_recommendation": _as_dict(r.get("split_recommendation")),
+            # Canonical ``required`` schema (#417): normalize on the way in so the
+            # checkpoint planner and any other reader see a single shape even if
+            # the producing run used a legacy split-recommendation key.
+            "split_recommendation": _normalize_split_recommendation(
+                r.get("split_recommendation")
+            ),
             "component_quality": _as_dict(r.get("component_quality")),
             "confidence": float(r.get("confidence") or 0.0),
             "claim_ids": _str_list(r.get("linked_claim_ids")),
@@ -463,6 +472,9 @@ def _collect_existing_issues(artifacts: dict) -> list[dict]:
                 "message": entry.get("message") or "",
                 "artifact": entry.get("artifact") or "",
                 "path": entry.get("path") or "",
+                # Issue #418: prefer the explicit target_type/target_id the gate
+                # now records, falling back to JSON-path parsing for legacy entries.
+                "target_type": entry.get("target_type") or "",
                 "target_id": entry.get("target_id") or _target_from_path(entry.get("path")),
             })
     # Per-artifact validation_issues.
@@ -482,6 +494,7 @@ def _collect_existing_issues(artifacts: dict) -> list[dict]:
                 "message": vi.get("message") or vi.get("reason") or "",
                 "artifact": stage,
                 "path": vi.get("path") or "",
+                "target_type": vi.get("target_type") or "",
                 "target_id": vi.get("target_id") or vi.get("id") or "",
             })
     return issues

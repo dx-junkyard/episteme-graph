@@ -72,6 +72,14 @@ _MATH_ENV_BASE = {
 _TEX_BEGIN_RE = re.compile(r"\\begin\s*\{([A-Za-z*]+)\}")
 _TEX_END_RE = re.compile(r"\\end\s*\{([A-Za-z*]+)\}")
 
+# A symbolic TeX equation label: ``\label{eq:foo}`` / ``\label{some_label}``.
+# TeX equations are labelled symbolically (not by a numeric (N.k) sequence), so
+# label coverage must be reported separately from numeric continuity (#416).
+_TEX_LABEL_RE = re.compile(r"\\label\s*\{([^}]+)\}")
+# Unnumbered display math delimiters: ``\[ ... \]`` and ``$$ ... $$``.
+_TEX_BRACKET_DISPLAY_RE = re.compile(r"\\\[")
+_TEX_DOLLAR_DISPLAY_RE = re.compile(r"(?<!\\)\$\$")
+
 # A parsed equation label token: "(3.36)" / "3.36" / "(12)".
 _EQ_LABEL_RE = re.compile(r"^\(?\s*(?:(\d+)\.)?(\d+)\s*\)?$")
 
@@ -173,12 +181,138 @@ def detect_unclosed_math_environments(tex_source: Any) -> list[str]:
     return sorted(unmatched)
 
 
+def tex_equation_inventory(tex_source: Any) -> dict:
+    """Inventory TeX math environments and symbolic labels (#416).
+
+    Returns ``{"display_math_blocks": int, "labels": [str], "label_count": int}``.
+    ``display_math_blocks`` counts numbered/unnumbered display environments and
+    ``\\[ \\]`` / ``$$`` delimiters; ``labels`` are the symbolic ``\\label{...}``
+    targets that occur inside math environments (TeX labels are symbolic, not the
+    numeric ``(N.k)`` scheme handled by the label-continuity check).
+    """
+    text = str(tex_source or "")
+    if not text:
+        return {"display_math_blocks": 0, "labels": [], "label_count": 0}
+    text = re.sub(r"(?m)(?<!\\)%.*$", "", text)
+
+    # Collect math-environment spans so labels can be attributed to math.
+    begins = [(m.start(), m.end(), m.group(1)) for m in _TEX_BEGIN_RE.finditer(text)]
+    ends = {m.group(1): [] for m in _TEX_END_RE.finditer(text)}
+    for m in _TEX_END_RE.finditer(text):
+        ends.setdefault(m.group(1), []).append(m.start())
+
+    display_math_blocks = 0
+    math_spans: list[tuple[int, int]] = []
+    used_end: dict[str, set[int]] = {}
+    for start, body_start, env in begins:
+        if not _is_math_env(env):
+            continue
+        display_math_blocks += 1
+        end_starts = ends.get(env) or []
+        chosen = None
+        for e in sorted(end_starts):
+            if e > body_start and e not in used_end.get(env, set()):
+                chosen = e
+                break
+        if chosen is not None:
+            used_end.setdefault(env, set()).add(chosen)
+            math_spans.append((body_start, chosen))
+    display_math_blocks += len(_TEX_BRACKET_DISPLAY_RE.findall(text))
+    # ``$$`` delimiters come in pairs; each pair is one display block.
+    display_math_blocks += len(_TEX_DOLLAR_DISPLAY_RE.findall(text)) // 2
+
+    labels: list[str] = []
+    for m in _TEX_LABEL_RE.finditer(text):
+        pos = m.start()
+        in_math = any(s <= pos <= e for s, e in math_spans)
+        label = m.group(1).strip()
+        # Heuristic: a label is an equation label if it sits inside a math
+        # environment or uses a conventional ``eq``-style prefix.
+        if in_math or re.match(r"(?i)^(eq|eqn|equation)[:.]", label):
+            labels.append(label)
+    labels = sorted(dict.fromkeys(labels))
+    return {
+        "display_math_blocks": display_math_blocks,
+        "labels": labels,
+        "label_count": len(labels),
+    }
+
+
+def _equation_artifact_counts(equations: Any) -> dict:
+    """Count candidates / records and accepted-candidate resolution (#416)."""
+    eq = equations if isinstance(equations, dict) else {}
+    records = [r for r in (eq.get("equations") or eq.get("records") or []) if isinstance(r, dict)]
+    candidates = [c for c in (eq.get("equation_candidates") or []) if isinstance(c, dict)]
+    record_ids = {str(r.get("equation_id") or r.get("id") or "") for r in records}
+    accepted_like = [
+        c for c in candidates
+        if str(c.get("acceptance_status") or "") in ("accepted", "provisional")
+    ]
+    resolved = sum(
+        1 for c in accepted_like
+        if str(c.get("accepted_equation_id") or "") in record_ids
+        and str(c.get("accepted_equation_id") or "")
+    )
+    return {
+        "candidate_count": len(candidates),
+        "accepted_candidate_count": len(accepted_like),
+        "resolved_candidate_count": resolved,
+        "record_count": len(records),
+    }
+
+
+def analyze_equation_artifact_coverage(
+    structure: Any,
+    equations: Any,
+    *,
+    tex_source: Any = None,
+    pages_total: Any = None,
+) -> dict:
+    """Compare TeX math blocks / labels / candidates / records (#416).
+
+    Produces a coverage report (counts + symbolic labels) and a list of
+    ``review_reasons`` for artifact-level equation gaps that page-based ingest
+    reachability cannot see — in particular TeX inputs where ``pages=0`` would
+    otherwise let a missing equation registry pass silently.
+    """
+    structure = structure if isinstance(structure, dict) else {}
+    tex = tex_equation_inventory(tex_source)
+    counts = _equation_artifact_counts(equations)
+
+    review_reasons: list[str] = []
+    # A large silent shrink from accepted/provisional candidates to final records.
+    accepted = counts["accepted_candidate_count"]
+    resolved = counts["resolved_candidate_count"]
+    if accepted and resolved < accepted:
+        review_reasons.append("accepted_candidate_not_in_registry")
+
+    # pages=0 (or unknown) TeX documents: page reachability is meaningless, so a
+    # TeX file with display math but no final equation records is the #416 silent
+    # pass. Use artifact coverage as the completeness signal instead.
+    no_pages = not (isinstance(pages_total, int) and pages_total > 0)
+    if no_pages and tex["display_math_blocks"] > 0 and counts["record_count"] == 0:
+        review_reasons.append("tex_display_math_without_equation_records")
+
+    return {
+        "tex_display_math_blocks": tex["display_math_blocks"],
+        "tex_equation_labels": tex["labels"],
+        "tex_equation_label_count": tex["label_count"],
+        "equation_candidate_count": counts["candidate_count"],
+        "accepted_candidate_count": counts["accepted_candidate_count"],
+        "resolved_candidate_count": counts["resolved_candidate_count"],
+        "equation_record_count": counts["record_count"],
+        "review_reasons": review_reasons,
+        "complete": not review_reasons,
+    }
+
+
 def analyze_document_completeness(
     structure: Any,
     evidence: Any = None,
     *,
     document_id: str,
     tex_source: Any = None,
+    equations: Any = None,
 ) -> dict:
     """Return a JSON-serialisable document-completeness report (issues #366 / #371 / #373).
 
@@ -423,6 +557,14 @@ def analyze_document_completeness(
         and tail_confidence >= _TAIL_TRUNCATION_CONFIDENCE_THRESHOLD
     )
 
+    # --- equation artifact coverage (issue #416) ----------------------------
+    # TeX math-block / label / candidate / record coverage. This is the
+    # completeness signal that page reachability cannot provide for TeX inputs
+    # where ``pages=0`` and the parser reports EOF.
+    equation_coverage = analyze_equation_artifact_coverage(
+        structure, equations, tex_source=tex_source, pages_total=pages_total
+    )
+
     review_reasons: list[str] = []
     if equation_has_gaps:
         review_reasons.append("equation_label_discontinuity")
@@ -432,6 +574,8 @@ def analyze_document_completeness(
         review_reasons.append("ingest_incomplete")
     if tail_truncation_suspected:
         review_reasons.append("tail_truncation_suspected")
+    if not equation_coverage.get("complete", True):
+        review_reasons.append("equation_artifact_coverage_incomplete")
 
     return {
         "document_id": document_id,
@@ -474,4 +618,5 @@ def analyze_document_completeness(
             "distribution_ratio": evidence_distribution_ratio,
             "sparse": evidence_sparse,
         },
+        "equation_artifact_coverage": equation_coverage,
     }

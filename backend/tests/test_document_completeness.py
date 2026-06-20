@@ -857,3 +857,113 @@ class TestPipelineGateCompleteness:
         res = mod.ExportValidationGate().run(artifacts=artifacts).to_dict()
         assert res["document_completeness"]["all_documents_complete"] is False
         assert "DOCUMENT_TERMINAL_SECTION_MISSING" in {w["code"] for w in res["warnings"]}
+
+
+# ---------------------------------------------------------------------------
+# Issue #416: TeX equation-artifact coverage / pages=0 silent pass
+# ---------------------------------------------------------------------------
+
+class TestEquationArtifactCoverage:
+    def test_tex_equation_inventory_counts_blocks_and_symbolic_labels(self):
+        mod = _import_completeness_mod()
+        tex = r"""
+        \begin{equation}\label{eq:energy} E = mc^2 \end{equation}
+        \begin{align}\label{eq:force} F = ma \end{align}
+        \[ a^2 + b^2 = c^2 \]
+        """
+        inv = mod.tex_equation_inventory(tex)
+        assert inv["display_math_blocks"] == 3
+        assert "eq:energy" in inv["labels"]
+        assert "eq:force" in inv["labels"]
+        assert inv["label_count"] == 2
+
+    def test_pages_zero_tex_with_math_but_no_records_is_incomplete(self):
+        # The #416 silent pass: pages=0 + parser_reached_eof=true would let a TeX
+        # document with display math but no equation registry pass. Artifact
+        # coverage must catch it.
+        mod = _import_completeness_mod()
+        structure = {
+            "document_id": "doc_tex",
+            "metadata": {"pages": 0, "parser_reached_eof": True,
+                         "tex_source": r"\begin{equation}\label{eq:a} x=1 \end{equation}"},
+            "blocks": [],
+            "sections": [],
+        }
+        report = mod.analyze_document_completeness(
+            structure, None, document_id="doc_tex",
+            equations={"equations": [], "equation_candidates": []},
+        )
+        cov = report["equation_artifact_coverage"]
+        assert cov["tex_display_math_blocks"] == 1
+        assert cov["complete"] is False
+        assert "tex_display_math_without_equation_records" in cov["review_reasons"]
+        assert "equation_artifact_coverage_incomplete" in report["review_reasons"]
+        assert report["complete"] is False
+
+    def test_accepted_candidate_not_in_registry_is_coverage_gap(self):
+        mod = _import_completeness_mod()
+        equations = {
+            "equations": [{"equation_id": "eq_1"}],
+            "equation_candidates": [
+                {"candidate_id": "c1", "acceptance_status": "accepted",
+                 "accepted_equation_id": "eq_1"},
+                {"candidate_id": "c2", "acceptance_status": "accepted",
+                 "accepted_equation_id": "eq_missing"},
+            ],
+        }
+        cov = mod.analyze_equation_artifact_coverage(
+            {}, equations, tex_source=None, pages_total=10
+        )
+        assert cov["complete"] is False
+        assert "accepted_candidate_not_in_registry" in cov["review_reasons"]
+
+    def test_complete_tex_coverage_passes(self):
+        mod = _import_completeness_mod()
+        equations = {
+            "equations": [{"equation_id": "eq_1"}],
+            "equation_candidates": [
+                {"candidate_id": "c1", "acceptance_status": "accepted",
+                 "accepted_equation_id": "eq_1"},
+            ],
+        }
+        cov = mod.analyze_equation_artifact_coverage(
+            {}, equations,
+            tex_source=r"\begin{equation} x=1 \end{equation}",
+            pages_total=0,
+        )
+        assert cov["complete"] is True
+        assert cov["review_reasons"] == []
+
+    def test_gate_refreshes_coverage_from_equation_artifacts(self):
+        # A precomputed (stale, pre-equation_semantics) completeness report gets
+        # its equation coverage refreshed at the gate where artifacts exist.
+        mod = _import_gate()
+        precomputed = {
+            "document_id": "doc_ref",
+            "complete": True,
+            "review_reasons": [],
+            "equation_label_continuity": {"missing_labels": [], "has_gaps": False},
+            "terminal_section": {"present": True, "missing": False, "matched_titles": []},
+            "ingest_coverage": {"sufficient": True, "reached_document_end": True,
+                                "pages_total": 0, "last_ingested_page": None,
+                                "structure_page_coverage_ratio": None,
+                                "trailing_uningested_page_ranges": []},
+            "evidence_page_distribution": {"pages": [], "distribution_ratio": None,
+                                           "sparse": False},
+            "equation_artifact_coverage": {},
+        }
+        artifacts = {
+            "document_structure": {
+                "document_id": "doc_ref",
+                "metadata": {"pages": 0, "parser_reached_eof": True,
+                             "tex_source": r"\begin{equation} x=1 \end{equation}"},
+                "blocks": [],
+                "sections": [],
+            },
+            "document_completeness": precomputed,
+            "equation_semantics": {"equations": [], "equation_candidates": []},
+        }
+        res = mod.ExportValidationGate().run(artifacts=artifacts).to_dict()
+        codes = {w["code"] for w in res["warnings"]}
+        assert "DOCUMENT_EQUATION_ARTIFACT_COVERAGE_INCOMPLETE" in codes
+        assert res["document_completeness"]["all_documents_complete"] is False

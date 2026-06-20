@@ -39,6 +39,10 @@ from .schema import (
     ComponentAssemblyResult,
     ComponentRecord,
 )
+from .split_recommendation import (
+    normalize_split_recommendation,
+    split_is_required,
+)
 
 # Component types that live on the main derivation path and are therefore
 # candidates for theory-operation refinement.
@@ -253,9 +257,7 @@ class ComponentRefiner:
             records.append({
                 "original_component_id": original_id,
                 "refinement_status": refinement_status,
-                "split_required": bool(
-                    (parent.split_recommendation or {}).get("required")
-                ),
+                "split_required": split_is_required(parent.split_recommendation),
                 "split_into": list(child_ids),
                 "split_reason": list(
                     trace.get("split_reasons")
@@ -295,11 +297,28 @@ class ComponentRefiner:
             remap=remap,
         )
 
+        # A component whose split was required (#417) must be accounted for: it is
+        # either split, failed, or explicitly review_required. Anything left as a
+        # silent "unchanged" while still flagged ``required: true`` is a contract
+        # violation and is surfaced so it cannot reach publish unprocessed.
+        processed = (
+            set(split_components)
+            | set(failed_refinements)
+            | set(review_required_refinements)
+        )
+        unprocessed_split_required = [
+            original_id
+            for original_id in original_order
+            if split_is_required(originals[original_id].split_recommendation)
+            and original_id not in processed
+        ]
+
         refinement_validation = {
             "split_components": split_components,
             "unchanged_components": unchanged_components,
             "failed_refinements": failed_refinements,
             "review_required_refinements": _ordered_unique(review_required_refinements),
+            "unprocessed_split_required": unprocessed_split_required,
             "unassigned_links": unassigned_links,
             "dangling_component_refs": graph_updates["unresolved_edges"],
             "teaching_granularity_warnings": teaching_warnings,
@@ -355,7 +374,7 @@ class ComponentRefiner:
     ) -> list[ComponentRecord]:
         claim_index = claim_index or {}
         split = component.split_recommendation if isinstance(component.split_recommendation, dict) else {}
-        if split.get("required"):
+        if split_is_required(split):
             report.oversized_components.append({
                 "component_id": component.component_id,
                 "label": component.label,
@@ -462,7 +481,7 @@ class ComponentRefiner:
         deterministic split is possible, the component is kept unchanged but the
         refinement is flagged ``review_required`` rather than silently accepted.
         """
-        if not (split or {}).get("required"):
+        if not split_is_required(split):
             return
         trace = self._traces.setdefault(component.component_id, {})
         trace["could_not_split"] = True
@@ -488,7 +507,7 @@ class ComponentRefiner:
         be assigned confidently is recorded as an unassigned link instead of being
         dropped.
         """
-        if not split.get("required"):
+        if not split_is_required(split):
             return []
         suggested = [s for s in (split.get("suggested_components") or []) if isinstance(s, dict)]
         # Distinct primary responsibilities are required to justify a split.
@@ -1088,7 +1107,7 @@ def _support_role_for_responsibility(responsibility_type: str) -> str:
 
 
 def _no_split_recommendation() -> dict:
-    return {"required": False, "suggested_components": []}
+    return normalize_split_recommendation({"required": False, "suggested_components": []})
 
 
 def _secondary_operations(steps: list, primary: str) -> list[str]:
