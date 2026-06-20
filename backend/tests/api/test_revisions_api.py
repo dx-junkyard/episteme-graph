@@ -203,6 +203,17 @@ def test_accept_success(app_client, monkeypatch):
     assert resp.json()["accepted"] is True
 
 
+def test_accept_partial_flag_forwarded(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    captured = {}
+    monkeypatch.setattr(revisions.coordinator, "accept_revision",
+                        lambda **k: captured.update(k) or {"active_run_id": "rev-1"})
+    resp = client.post("/api/admin/documents/doc-1/revisions/rev-1/accept",
+                       json={"comment": "ok", "accept_partial": True})
+    assert resp.status_code == 200
+    assert captured["accept_partial"] is True
+
+
 def test_accept_hard_error_returns_422(app_client, monkeypatch):
     client, revisions, _dep, _app = app_client
     from core.document_pipeline.revision.coordinator import AcceptBlockedError

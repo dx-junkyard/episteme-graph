@@ -284,11 +284,12 @@ def assemble_candidate(
         checkpoints=run_artifacts.get(AUDIT_CHECKPOINTS_KEY) or [],
         known_chunk_ids=_trusted_chunk_ids(_load_chunk_index(str(run.get("document_id") or ""))),
     )
-    if validated["rejected"]:
-        raise ProposalValidationError(validated["rejected"])
 
+    # Partial adoption (#415): pre-rejected operations are excluded (not raised),
+    # so independent valid operations still produce an adoptable candidate.
     result = apply_operations(
-        base_artifacts, validated["operations"], base_inventory=base_inventory
+        base_artifacts, validated["operations"],
+        base_inventory=base_inventory, pre_excluded=validated["rejected"],
     )
 
     persistence.update_revision_status(
@@ -300,6 +301,9 @@ def assemble_candidate(
                 "candidate_artifacts": result["candidate_artifacts"],
                 "id_mapping": result["id_mapping"],
                 "operation_errors": result["operation_errors"],
+                "excluded_operations": result["excluded_operations"],
+                "operation_summary": result["operation_summary"],
+                "candidate_status": result["candidate_status"],
                 "protected_changes": result["protected_changes"],
                 "dropped_edges": result["dropped_edges"],
                 "carried_unresolved_references": result["carried_unresolved_references"],
@@ -387,6 +391,9 @@ def revalidate_and_report(*, run_id: str, base_run: dict | None = None) -> dict:
         audit_summary=audit_summary,
         proposal_summary=proposal_summary,
         new_unknown_reference_count=new_unknown_reference_count,
+        operation_candidate_status=candidate.get("candidate_status"),
+        operation_summary=candidate.get("operation_summary"),
+        excluded_operations=candidate.get("excluded_operations") or [],
     )
 
     persistence.update_revision_status(
@@ -411,11 +418,15 @@ def accept_revision(
     changed_by: str | None = None,
     comment: str = "",
     confirm_protected: bool = False,
+    accept_partial: bool = False,
 ) -> dict:
-    """Validate-then-accept a candidate revision (#407).
+    """Validate-then-accept a candidate revision (#407 / partial adoption #415).
 
-    Refuses candidates with hard errors / invalid status (AcceptBlockedError) and
-    candidates with unconfirmed protected changes. Delegates the atomic state
+    Refuses ``blocked`` candidates (hard errors / unattributable dangling) and
+    candidates with unconfirmed protected changes. A ``partially_adoptable``
+    candidate (some operations excluded) requires explicit ``accept_partial`` so a
+    teacher consciously adopts the reduced operation set. The applied/excluded
+    operation sets are recorded in the decision history. Delegates the atomic state
     switch to ``persistence.accept_revision`` (raises RevisionConflictError → 409).
     """
     run = persistence.get_analysis_run(run_id=run_id)
@@ -431,9 +442,21 @@ def accept_revision(
     if not report:
         raise AcceptBlockedError("candidate has not been validated; run report first")
     summary = report.get("summary") or {}
-    if not summary.get("acceptable", False) or summary.get("hard_error_count", 0) > 0:
+    candidate_status = summary.get("candidate_status") or (
+        "blocked" if summary.get("candidate_invalid") else "adoptable"
+    )
+    if candidate_status == "blocked" or summary.get("hard_error_count", 0) > 0:
         raise AcceptBlockedError(
-            f"candidate has {summary.get('hard_error_count', 0)} hard error(s) or is invalid"
+            f"candidate is blocked: {summary.get('hard_error_count', 0)} hard error(s) "
+            "or unresolved references remain after exclusion"
+        )
+    if candidate_status == "partially_adoptable" and not accept_partial:
+        op_sum = report.get("operation_summary") or {}
+        excluded = (op_sum.get("excluded_invalid_count", 0)
+                    + op_sum.get("excluded_dependency_count", 0))
+        raise AcceptBlockedError(
+            f"candidate is partially adoptable: {excluded} operation(s) will be "
+            "excluded; explicit partial-accept confirmation is required"
         )
     if summary.get("protected_change_count", 0) > 0 and not confirm_protected:
         raise AcceptBlockedError(
@@ -442,6 +465,12 @@ def accept_revision(
 
     candidate = run_artifacts.get(CANDIDATE_KEY) or {}
     candidate_artifacts = candidate.get("candidate_artifacts") or {}
+    op_summary = candidate.get("operation_summary") or {}
+    applied_operation_ids = [
+        rec.get("operation_id")
+        for rec in (run_artifacts.get(REVISION_OPERATIONS_KEY) or [])
+        if (rec.get("operation_status") or "applied") in ("applied", "requires_confirmation")
+    ]
 
     return persistence.accept_revision(
         document_id=str(run.get("document_id")),
@@ -450,6 +479,13 @@ def accept_revision(
         changed_by=changed_by,
         comment=comment,
         candidate_artifacts=candidate_artifacts,
+        decision_metadata={
+            "candidate_status": candidate_status,
+            "partial": candidate_status == "partially_adoptable",
+            "operation_summary": op_summary,
+            "applied_operation_ids": [oid for oid in applied_operation_ids if oid],
+            "excluded_operations": candidate.get("excluded_operations") or [],
+        },
     )
 
 
@@ -665,16 +701,47 @@ def revise_revision_run(
         document_id=document_id,
         projection_overlay=projection_overlay,
     )
-    if comment:
-        plan[AUDIT_CHECKPOINTS_KEY] = [
-            {
-                "checkpoint_id": f"ckpt_user_{parent_run_id[:8]}",
-                "target_type": "document", "target_id": document_id,
-                "question": comment, "trigger_reason": "user_comment",
-                "severity": "review_required", "expected_evidence_type": "source_text",
-                "source_scope": [], "verification_strategy": "user_directed",
-                "status": "planned",
+
+    # Carry the parent's excluded operations into the new revision as checkpoints so
+    # the failure reasons are not lost and the same bad change is not re-proposed
+    # blindly (#415: "再修正時に失敗理由が次revisionへ引き継がれる").
+    parent_artifacts = get_artifacts(parent.get("stage_outputs"))
+    parent_candidate = parent_artifacts.get(CANDIDATE_KEY) or {}
+    carried_checkpoints: list[dict] = []
+    for excluded in parent_candidate.get("excluded_operations") or []:
+        target_type = excluded.get("target_type") or "document"
+        target_id = excluded.get("target_id") or document_id
+        carried_checkpoints.append({
+            "checkpoint_id": f"ckpt_excluded_{parent_run_id[:8]}_{excluded.get('operation_id') or target_id}",
+            "target_type": target_type, "target_id": target_id,
+            "question": (
+                f"前回除外された操作 ({excluded.get('status')}: {excluded.get('reason')}) "
+                "を見直し、原文根拠のある修正に再構成する"
+            ),
+            "trigger_reason": "prior_exclusion",
+            "severity": "review_required", "expected_evidence_type": "source_text",
+            "source_scope": [], "verification_strategy": "user_directed",
+            "prior_exclusion": {
+                "operation_id": excluded.get("operation_id"),
+                "status": excluded.get("status"),
+                "reason": excluded.get("reason"),
             },
+            "status": "planned",
+        })
+
+    user_checkpoints: list[dict] = []
+    if comment:
+        user_checkpoints.append({
+            "checkpoint_id": f"ckpt_user_{parent_run_id[:8]}",
+            "target_type": "document", "target_id": document_id,
+            "question": comment, "trigger_reason": "user_comment",
+            "severity": "review_required", "expected_evidence_type": "source_text",
+            "source_scope": [], "verification_strategy": "user_directed",
+            "status": "planned",
+        })
+    if user_checkpoints or carried_checkpoints:
+        plan[AUDIT_CHECKPOINTS_KEY] = [
+            *user_checkpoints, *carried_checkpoints,
             *plan.get(AUDIT_CHECKPOINTS_KEY, []),
         ]
 

@@ -270,6 +270,65 @@ def test_revision_task_stage_not_overwritten_by_initial_run(pg, monkeypatch):
     assert latest and latest["task_id"] == task_id and latest["stage"] == "audit"
 
 
+def test_partial_accept_rebuilds_projection_and_records_excluded(pg):
+    """#415: partial adoption — blocked without the flag, then single-transaction
+    accept of the reduced op set with the excluded operations in the audit trail."""
+    persistence = pg["persistence"]
+    text, Session = pg["text"], pg["Session"]
+    from core.document_pipeline.revision import coordinator
+
+    doc_id, base_id = _seed_document(pg, {"_artifacts": {}})
+    rev = persistence.create_revision_run(document_id=doc_id, base_run_id=base_id)
+    candidate_artifacts = _artifacts()["_artifacts"]
+    excluded = [{"operation_id": "op-49", "status": "excluded_invalid",
+                 "reason": "target not found", "target_type": "equation",
+                 "target_id": "eq_missing"}]
+    persistence.update_revision_status(run_id=rev, revision_status="proposed",
+        stage_outputs={"_artifacts": {
+            "candidate": {
+                "candidate_artifacts": candidate_artifacts,
+                "candidate_status": "partially_adoptable",
+                "operation_summary": {"applied_count": 1, "excluded_invalid_count": 1,
+                                      "excluded_dependency_count": 0},
+                "excluded_operations": excluded,
+            },
+            "revision_operations": [
+                {"operation_id": "op-1", "operation_status": "applied"},
+                {"operation_id": "op-49", "operation_status": "excluded_invalid"},
+            ],
+            "diff_report": {"summary": {
+                "candidate_status": "partially_adoptable", "acceptable": True,
+                "hard_error_count": 0, "protected_change_count": 0},
+                "operation_summary": {"applied_count": 1, "excluded_invalid_count": 1}},
+        }})
+
+    # Explicit partial confirmation is required.
+    with pytest.raises(coordinator.AcceptBlockedError):
+        coordinator.accept_revision(document_id=doc_id, run_id=rev)
+
+    out = coordinator.accept_revision(document_id=doc_id, run_id=rev, accept_partial=True)
+    assert out["accepted"] is True
+
+    s = Session()
+    try:
+        active = s.execute(text("SELECT active_analysis_run_id::text FROM documents "
+                                "WHERE id=CAST(:d AS uuid)"), {"d": doc_id}).fetchone()[0]
+        assert active == rev   # active switched only on success
+        claims = s.execute(text("SELECT count(*) FROM theory_claims WHERE document_id=:d"),
+                           {"d": doc_id}).fetchone()[0]
+        assert claims == 1     # projection rebuilt from the reduced candidate
+    finally:
+        s.close()
+
+    decisions = persistence.get_revision_decisions(run_id=rev)
+    accept = [d for d in decisions if (d.get("metadata") or {}).get("decision") == "accept"]
+    assert accept, "accept decision recorded"
+    meta = accept[0]["metadata"]
+    assert meta["partial"] is True
+    assert meta["candidate_status"] == "partially_adoptable"
+    assert meta["excluded_operations"][0]["operation_id"] == "op-49"
+
+
 def test_reject_leaves_active_unchanged(pg):
     persistence = pg["persistence"]
     text, Session = pg["text"], pg["Session"]

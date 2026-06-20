@@ -251,8 +251,17 @@ def build_diff_report(
     audit_summary: dict | None = None,
     proposal_summary: dict | None = None,
     new_unknown_reference_count: int = 0,
+    operation_candidate_status: str | None = None,
+    operation_summary: dict | None = None,
+    excluded_operations: list[dict] | None = None,
 ) -> dict:
-    """Assemble the before/after diff report (schema per #406, sections per #412)."""
+    """Assemble the before/after diff report (schema per #406, sections per #412).
+
+    ``operation_candidate_status`` / ``operation_summary`` / ``excluded_operations``
+    carry the partial-adoption verdict (#415); the report's final
+    ``candidate_status`` downgrades that operation-level verdict to ``blocked`` when
+    the ExportValidationGate still reports hard errors after exclusion.
+    """
     quality_before = compute_quality_metrics(base_artifacts, gate_result=gate_base)
     quality_after = compute_quality_metrics(candidate_artifacts, gate_result=gate_candidate)
 
@@ -270,10 +279,26 @@ def build_diff_report(
     protected_changes = protected_changes or []
 
     hard_error_count = quality_after.get("hard_error_count", 0)
-    acceptable = (
-        not candidate_invalid
-        and hard_error_count == 0
+
+    # Final candidate status (#415): start from the operation-level verdict, then
+    # downgrade to blocked if the gate still has hard errors / the candidate is
+    # invalid after exclusion. A partially_adoptable candidate with no hard errors
+    # is acceptable, but only via explicit partial confirmation at accept time.
+    op_status = operation_candidate_status or (
+        "blocked" if candidate_invalid else "adoptable"
     )
+    if candidate_invalid or hard_error_count > 0:
+        candidate_status = "blocked"
+    else:
+        candidate_status = op_status
+    excluded_operations = excluded_operations or []
+    operation_summary = operation_summary or {
+        "applied_count": len(entity_changes),
+        "excluded_invalid_count": 0,
+        "excluded_dependency_count": 0,
+        "requires_confirmation_count": len(protected_changes),
+    }
+    acceptable = candidate_status in ("adoptable", "partially_adoptable")
 
     recommendation = _recommendation(
         quality_after, candidate_invalid, introduced_errors,
@@ -298,11 +323,15 @@ def build_diff_report(
             "introduced_error_count": introduced_errors,
             "protected_change_count": len(protected_changes),
             "candidate_invalid": bool(candidate_invalid),
+            "candidate_status": candidate_status,
             "hard_error_count": hard_error_count,
             "acceptable": acceptable,
             "requires_confirmation": bool(requires_confirmation),
             "outcome": stage_summary["outcome"],
         },
+        "candidate_status": candidate_status,
+        "operation_summary": operation_summary,
+        "excluded_operations": excluded_operations,
         "stage_summary": stage_summary,
         "entity_changes": entity_changes,
         "structural_summary": structural_summary,

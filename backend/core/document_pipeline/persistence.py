@@ -2045,6 +2045,7 @@ def accept_revision(
     changed_by: str | None = None,
     comment: str = "",
     candidate_artifacts: dict | None = None,
+    decision_metadata: dict | None = None,
 ) -> dict:
     """Accept a candidate revision in a single transaction (#407 / #410 P1-5).
 
@@ -2167,7 +2168,10 @@ def accept_revision(
             session, run_id=run_id, old_status="proposed", new_status="accepted",
             changed_by=changed_by,
             metadata={"decision": "accept", "comment": comment,
-                      "document_id": document_id, "base_run_id": base_id},
+                      "document_id": document_id, "base_run_id": base_id,
+                      # Applied/excluded operation sets for the partial-adoption
+                      # audit trail (#415).
+                      **(decision_metadata or {})},
         )
         session.commit()
         return {"accepted": True, "active_run_id": run_id, "superseded_run_id": base_id}

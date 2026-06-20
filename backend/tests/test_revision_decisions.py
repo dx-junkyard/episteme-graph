@@ -192,6 +192,74 @@ def test_coordinator_accept_confirmed_protected_proceeds(monkeypatch):
     assert out["accepted"] is True
 
 
+# --- #415: partial adoption gating -----------------------------------------
+
+def _partial_run(candidate_status, candidate=None):
+    return _run_with_report(
+        {"candidate_status": candidate_status, "hard_error_count": 0,
+         "protected_change_count": 0,
+         "operation_summary": {"applied_count": 48, "excluded_invalid_count": 1,
+                               "excluded_dependency_count": 0}},
+        candidate=candidate or {
+            "candidate_artifacts": {"component_graph": {"nodes": []}},
+            "candidate_status": candidate_status,
+            "operation_summary": {"applied_count": 48, "excluded_invalid_count": 1,
+                                  "excluded_dependency_count": 0},
+            "excluded_operations": [{"operation_id": "op-49", "status": "excluded_invalid",
+                                     "reason": "target not found", "target_type": "equation",
+                                     "target_id": "eq_missing"}],
+        })
+
+
+def test_coordinator_blocks_accept_when_candidate_blocked(monkeypatch):
+    monkeypatch.setattr(coordinator.persistence, "get_analysis_run",
+                        lambda *, run_id: _partial_run("blocked"))
+    with pytest.raises(AcceptBlockedError):
+        coordinator.accept_revision(document_id="doc-1", run_id="rev-1")
+
+
+def test_coordinator_blocks_partial_accept_without_explicit_flag(monkeypatch):
+    monkeypatch.setattr(coordinator.persistence, "get_analysis_run",
+                        lambda *, run_id: _partial_run("partially_adoptable"))
+    with pytest.raises(AcceptBlockedError):
+        coordinator.accept_revision(document_id="doc-1", run_id="rev-1", accept_partial=False)
+
+
+def test_coordinator_partial_accept_records_excluded_in_decision(monkeypatch):
+    monkeypatch.setattr(coordinator.persistence, "get_analysis_run",
+                        lambda *, run_id: _partial_run("partially_adoptable"))
+    captured = {}
+    monkeypatch.setattr(coordinator.persistence, "accept_revision",
+                        lambda **k: captured.update(k) or {"accepted": True})
+    out = coordinator.accept_revision(document_id="doc-1", run_id="rev-1", accept_partial=True)
+    assert out["accepted"] is True
+    meta = captured["decision_metadata"]
+    assert meta["partial"] is True
+    assert meta["candidate_status"] == "partially_adoptable"
+    assert meta["excluded_operations"][0]["operation_id"] == "op-49"
+
+
+def test_revise_carries_parent_exclusions_into_checkpoints(monkeypatch):
+    parent = {"id": "rev-1", "run_type": "revision", "document_id": "doc-1",
+              "stage_outputs": {"_artifacts": {"candidate": {"excluded_operations": [
+                  {"operation_id": "op-49", "status": "excluded_invalid",
+                   "reason": "target not found", "target_type": "equation",
+                   "target_id": "eq_missing"}]}}}}
+    monkeypatch.setattr(coordinator.persistence, "get_analysis_run", lambda *, run_id: parent)
+    monkeypatch.setattr(coordinator.persistence, "resolve_artifact_run",
+                        lambda *, document_id, material_id=None: {
+                            "id": "active-1", "document_id": document_id,
+                            "stage_outputs": {"_artifacts": {}}})
+    monkeypatch.setattr(coordinator.persistence, "load_revision_projection_overlay",
+                        lambda *, document_id: {"claims": [], "components": [], "review_events": []})
+    monkeypatch.setattr(coordinator.persistence, "create_revision_run", lambda **k: "child-1")
+    monkeypatch.setattr(coordinator.persistence, "update_revision_status", lambda **k: None)
+    out = coordinator.revise_revision_run(document_id="doc-1", parent_run_id="rev-1", comment="")
+    carried = [c for c in out["audit_checkpoints"] if c.get("trigger_reason") == "prior_exclusion"]
+    assert carried and carried[0]["prior_exclusion"]["operation_id"] == "op-49"
+    assert carried[0]["target_id"] == "eq_missing"
+
+
 # --- coordinator.revise ----------------------------------------------------
 
 def test_revise_creates_child_with_parent_and_active_base(monkeypatch):

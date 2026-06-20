@@ -46,6 +46,7 @@ class RevisionRunRequest(BaseModel):
 class DecisionRequest(BaseModel):
     comment: str = ""
     confirm_protected: bool = False
+    accept_partial: bool = False
 
 
 def _user_id(current_user: dict) -> str | None:
@@ -360,6 +361,7 @@ def accept_revision(
             document_id=document_id, run_id=revision_id,
             changed_by=_user_id(current_user), comment=body.comment,
             confirm_protected=body.confirm_protected,
+            accept_partial=body.accept_partial,
         )
     except AcceptBlockedError as exc:
         raise HTTPException(status_code=422, detail=str(exc))

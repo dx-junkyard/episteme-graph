@@ -204,25 +204,28 @@ def test_add_and_remove_relation():
 
 # --- safety: invalid candidate ---------------------------------------------
 
-def test_new_unknown_reference_marks_candidate_invalid():
+def test_new_unknown_reference_excludes_op_and_blocks_when_alone():
+    # #415: the op that introduces an unknown reference is excluded. As the only
+    # op, the candidate has nothing adoptable -> blocked.
     base = _base_artifacts()
     res = apply_operations(base, [
         make_operation(operation="add_relation", target_type="claim", target_id="clm_2",
                        relation_target_type="evidence", relation_target_id="ev_DOESNOTEXIST"),
     ])
+    assert res["candidate_status"] == "blocked"
     assert res["invalid"] is True
-    assert any(e.get("error") == "new_unknown_references" for e in res["operation_errors"])
+    assert res["excluded_operations"][0]["status"] == "excluded_invalid"
 
 
-def test_failed_operation_marks_invalid_without_partial_active():
+def test_failed_operation_is_excluded_not_applied():
     base = _base_artifacts()
     res = apply_operations(base, [
         make_operation(operation="update_entity", target_type="claim",
                        target_id="clm_MISSING", after_json={"text": "x"}),
     ])
+    assert res["candidate_status"] == "blocked"
     assert res["invalid"] is True
-    failed = [o for o in res["applied_operations"] if o["validation_result"]["status"] == "failed"]
-    assert failed
+    assert res["excluded_operations"][0]["target_id"] == "clm_MISSING"
 
 
 def test_pre_existing_unresolved_ref_does_not_invalidate():
@@ -275,15 +278,103 @@ def test_preexisting_member_dangling_is_carried_not_new():
                for d in res["carried_unresolved_references"])
 
 
-def test_operation_introduced_member_dangling_is_still_new_error():
+def test_operation_introduced_member_dangling_is_excluded(_=None):
+    # #415: the offending op (edge → ghost_node) is excluded, not the whole
+    # candidate. With it the only op, nothing remains -> blocked.
     base = _base_artifacts()
     res = apply_operations(base, [
         make_operation(operation="add_relation", target_type="graph_edge",
                        after_json={"edge_id": "edge_new", "source": "cmp_1",
                                    "target": "ghost_node", "edge_type": "REQUIRES"}),
     ])
+    assert res["candidate_status"] == "blocked"
     assert res["invalid"] is True
-    assert any(e.get("error") == "new_unknown_references" for e in res["operation_errors"])
+    assert any(x["status"] == "excluded_invalid" for x in res["excluded_operations"])
+
+
+# --- #415: partial adoption -------------------------------------------------
+
+def test_full_adoption_when_all_ops_valid():
+    base = _base_artifacts()
+    res = apply_operations(base, [
+        make_operation(operation="update_entity", target_type="claim",
+                       target_id="clm_1", after_json={"text": "A1"}),
+        make_operation(operation="update_entity", target_type="claim",
+                       target_id="clm_2", after_json={"text": "C1"}),
+    ])
+    assert res["candidate_status"] == "adoptable"
+    assert res["operation_summary"]["applied_count"] == 2
+    assert res["excluded_operations"] == []
+
+
+def test_partial_adoption_keeps_independent_valid_ops():
+    base = _base_artifacts()
+    res = apply_operations(base, [
+        make_operation(operation="update_entity", target_type="claim",
+                       target_id="clm_MISSING", after_json={"text": "x"},
+                       operation_id="op-bad"),
+        make_operation(operation="update_entity", target_type="claim",
+                       target_id="clm_1", after_json={"text": "kept"},
+                       operation_id="op-good"),
+    ])
+    assert res["candidate_status"] == "partially_adoptable"
+    assert res["operation_summary"]["applied_count"] == 1
+    assert res["operation_summary"]["excluded_invalid_count"] == 1
+    # the independent valid change survived
+    claims = _claims(res)
+    assert claims["clm_1"]["text"] == "kept"
+    assert [x["operation_id"] for x in res["excluded_operations"]] == ["op-bad"]
+
+
+def test_dependency_excluded_when_producer_is_excluded():
+    base = _base_artifacts()
+    res = apply_operations(base, [
+        # A: invalid split (target missing) — would have produced clm_x
+        make_operation(operation="split_entity", target_type="claim",
+                       target_id="clm_GONE", operation_id="op-A",
+                       after_json=[{"claim_id": "clm_x", "text": "x", "is_atomic": True}]),
+        # B: depends on clm_x, which only exists if A succeeds
+        make_operation(operation="update_entity", target_type="claim",
+                       target_id="clm_x", after_json={"text": "y"}, operation_id="op-B"),
+        # C: independent valid change
+        make_operation(operation="update_entity", target_type="claim",
+                       target_id="clm_2", after_json={"text": "kept"}, operation_id="op-C"),
+    ])
+    assert res["candidate_status"] == "partially_adoptable"
+    by_id = {x["operation_id"]: x for x in res["excluded_operations"]}
+    assert by_id["op-A"]["status"] == "excluded_invalid"
+    assert by_id["op-B"]["status"] == "excluded_dependency"
+    assert res["operation_summary"]["applied_count"] == 1
+    assert _claims(res)["clm_2"]["text"] == "kept"
+
+
+def test_blocked_when_no_ops_survive_exclusion():
+    base = _base_artifacts()
+    res = apply_operations(base, [
+        make_operation(operation="update_entity", target_type="claim",
+                       target_id="clm_MISSING", after_json={"text": "x"}),
+    ])
+    assert res["candidate_status"] == "blocked"
+    assert res["invalid"] is True
+
+
+def test_pre_excluded_ops_propagate_dependency_exclusion():
+    base = _base_artifacts()
+    # op A pre-rejected upstream (e.g. typed-evidence validation #414); it would
+    # have added eq_new, so the relation op that consumes eq_new is a dependency.
+    res = apply_operations(
+        base,
+        [make_operation(operation="add_relation", target_type="claim",
+                        target_id="clm_2", relation_target_type="equation",
+                        relation_target_id="eq_new", operation_id="op-rel")],
+        pre_excluded=[{"op": {"operation": "add_entity", "target_type": "equation",
+                              "operation_id": "op-add",
+                              "after_json": {"equation_id": "eq_new", "label": "(9)"}},
+                       "reason": "unknown_evidence:ev_x"}],
+    )
+    statuses = {x["operation_id"]: x["status"] for x in res["excluded_operations"]}
+    assert statuses["op-add"] == "excluded_invalid"
+    assert statuses["op-rel"] == "excluded_dependency"
 
 
 # --- protected target ------------------------------------------------------
@@ -358,7 +449,10 @@ def test_assemble_candidate_persists_without_touching_projections(monkeypatch):
     assert arts["candidate"]["candidate_artifacts"]["claim_object_builder"]["claims"][0]["text"] == "patched"
 
 
-def test_assemble_candidate_rejects_invalid_operation_before_persist(monkeypatch):
+def test_assemble_candidate_excludes_invalid_operation_without_raising(monkeypatch):
+    # #415: an invalid operation no longer aborts the whole assembly. It is
+    # excluded and the candidate is persisted (blocked here, since it is the only
+    # op), so the report can show *why* it was excluded.
     inventory = build_baseline_inventory(_base_artifacts(), base_run_id="base-1")
     run = {"id": "rev-1", "run_type": "revision", "base_run_id": "base-1",
            "document_id": "doc-1",
@@ -373,19 +467,19 @@ def test_assemble_candidate_rejects_invalid_operation_before_persist(monkeypatch
         "get_analysis_run",
         lambda *, run_id: run if run_id == "rev-1" else base,
     )
-    monkeypatch.setattr(
-        coordinator.persistence,
-        "update_revision_status",
-        lambda **kwargs: pytest.fail("invalid operations must not create a candidate"),
-    )
+    captured = {}
+    monkeypatch.setattr(coordinator.persistence, "update_revision_status",
+                        lambda **k: captured.update(k))
 
-    with pytest.raises(coordinator.ProposalValidationError):
-        coordinator.assemble_candidate(run_id="rev-1", operations=[
-            make_operation(
-                operation="update_entity",
-                target_type="claim",
-                target_id="clm_1",
-                after_json={"text": "patched"},
-                checkpoint_ids=["ckpt_1"],
-            ),
-        ])
+    out = coordinator.assemble_candidate(run_id="rev-1", operations=[
+        make_operation(
+            operation="update_entity", target_type="claim", target_id="clm_1",
+            after_json={"text": "patched"}, checkpoint_ids=["ckpt_1"],
+            # no evidence/source -> pre-validation rejects -> excluded_invalid
+        ),
+    ])
+    assert out["candidate_status"] == "blocked"
+    cand = captured["stage_outputs"]["_artifacts"]["candidate"]
+    assert cand["candidate_status"] == "blocked"
+    assert cand["excluded_operations"][0]["status"] == "excluded_invalid"
+    assert cand["excluded_operations"][0]["reason"] == "missing_source_or_evidence"

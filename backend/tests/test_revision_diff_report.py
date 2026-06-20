@@ -87,6 +87,9 @@ def _report_for(ops, base=None):
         protected_changes=result["protected_changes"],
         requires_confirmation=result["requires_confirmation"],
         id_mapping=result["id_mapping"],
+        operation_candidate_status=result["candidate_status"],
+        operation_summary=result["operation_summary"],
+        excluded_operations=result["excluded_operations"],
     ), result
 
 
@@ -157,6 +160,40 @@ def test_resolved_vs_introduced_findings_classified():
     # acceptable requires zero hard errors
     if report["quality_after"]["hard_error_count"] == 0:
         assert report["summary"]["acceptable"] is True
+
+
+# --- #415: partial adoption in the report ----------------------------------
+
+def test_report_partially_adoptable_lists_excluded_operations():
+    report, result = _report_for([
+        make_operation(operation="update_entity", target_type="claim",
+                       target_id="clm_MISSING", after_json={"text": "x"},
+                       operation_id="op-bad"),
+        make_operation(operation="update_entity", target_type="claim",
+                       target_id="clm_1", after_json={"text": "kept"},
+                       operation_id="op-good"),
+    ])
+    # operation-level verdict is partially_adoptable (independent of the gate)
+    assert result["candidate_status"] == "partially_adoptable"
+    assert report["operation_summary"]["applied_count"] == 1
+    assert report["operation_summary"]["excluded_invalid_count"] == 1
+    assert report["excluded_operations"][0]["operation_id"] == "op-bad"
+    # report-level status downgrades to blocked only if the gate still has hard
+    # errors after exclusion; otherwise it stays partially_adoptable + acceptable.
+    if report["summary"]["hard_error_count"] == 0:
+        assert report["candidate_status"] == "partially_adoptable"
+        assert report["summary"]["acceptable"] is True
+    else:
+        assert report["candidate_status"] == "blocked"
+
+
+def test_report_blocked_when_all_ops_excluded():
+    report, _ = _report_for([
+        make_operation(operation="update_entity", target_type="claim",
+                       target_id="clm_MISSING", after_json={"text": "x"}),
+    ])
+    assert report["candidate_status"] == "blocked"
+    assert report["summary"]["acceptable"] is False
 
 
 def test_candidate_has_hard_errors_helper():

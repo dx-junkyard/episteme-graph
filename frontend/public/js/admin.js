@@ -9095,18 +9095,63 @@
         '</div>';
     }
 
+    var EXCLUDE_LABELS = {
+      excluded_invalid: "不正な操作", excluded_dependency: "依存により除外",
+      requires_confirmation: "要承認"
+    };
+
+    // #415: per-operation outcome — adoptable / partially_adoptable / blocked.
+    function excludedOpsHtml(report) {
+      var status = report.candidate_status || (report.summary || {}).candidate_status || "adoptable";
+      var os = report.operation_summary || {};
+      var excluded = report.excluded_operations || [];
+      if (status === "adoptable" && !excluded.length) {
+        return '<div class="eg-rev-outcome">すべての変更を採用できます（' +
+          (os.applied_count || 0) + ' 件）。</div>';
+      }
+      var head;
+      if (status === "partially_adoptable") {
+        head = '<div class="eg-rev-outcome">問題のある変更を除外すれば採用できます。</div>';
+      } else if (status === "blocked") {
+        head = '<div class="eg-rev-warn">除外後も hard error または未解決参照が残るため採用できません（blocked）。</div>';
+      } else {
+        head = "";
+      }
+      var counts = '<ul class="eg-rev-stagelist">' +
+        '<li>採用可能な変更: ' + (os.applied_count || 0) + '</li>' +
+        '<li>除外（不正）: ' + (os.excluded_invalid_count || 0) + '</li>' +
+        '<li>除外（依存）: ' + (os.excluded_dependency_count || 0) + '</li>' +
+        '<li>除外後の hard error: ' + ((report.summary || {}).hard_error_count || 0) + '</li></ul>';
+      var rows = excluded.map(function (x) {
+        return '<li class="eg-rev-change"><span class="eg-rev-ctype">' +
+          escHtml(EXCLUDE_LABELS[x.status] || x.status) + '</span> ' +
+          '<code>' + escHtml(x.target_type || "") + ':' + escHtml(x.target_id || "") + '</code>' +
+          (x.operation_id ? ' <span class="eg-rev-trace">(' + escHtml(x.operation_id) + ')</span>' : '') +
+          '<div class="eg-rev-reason">理由: ' + escHtml(x.reason || "") + '</div></li>';
+      }).join("");
+      return '<div class="eg-rev-stages">' + head + counts +
+        (rows ? '<h5>除外される変更</h5><ul class="eg-rev-changes">' + rows + '</ul>' : '') + '</div>';
+    }
+
     function renderReport() {
       var rep = el("eg-rev-report"); if (!rep || !current.report) return;
       var report = current.report;
       var s = report.summary || {};
+      var status = report.candidate_status || s.candidate_status || (s.acceptable ? "adoptable" : "blocked");
+      var partial = status === "partially_adoptable";
       var acc = el("eg-rev-accept");
-      if (acc) acc.disabled = !s.acceptable;
+      if (acc) {
+        acc.disabled = !s.acceptable;
+        // #415: partial adoption needs an explicit, differently-labelled action.
+        acc.textContent = partial ? "問題のある変更を除外して採用" : "採用";
+      }
       var warn = "";
-      if (!s.acceptable) warn = '<div class="eg-rev-warn">hard error または invalid のため採用できません。</div>';
+      if (status === "blocked") warn = '<div class="eg-rev-warn">候補は blocked です。具体的な hard error と除外対象を確認してください。</div>';
       else if (s.protected_change_count > 0) warn = '<div class="eg-rev-warn">教師承認/手動編集済み項目への変更が ' + s.protected_change_count + ' 件あります。採用には明示承認が必要です。</div>';
       var html = warn +
         '<div class="eg-rev-rec">推奨: <strong>' + escHtml(report.recommendation) + '</strong>' +
           '（参考情報。自動採用には使われません）</div>' +
+        excludedOpsHtml(report) +
         stageSummaryHtml(report) +
         '<h5>品質指標 (before / after)</h5>' + metricsTable(report.quality_before, report.quality_after) +
         '<h5>解消: ' + (s.resolved_issue_count || 0) + ' / 新規: ' + (s.introduced_issue_count || 0) +
@@ -9125,7 +9170,13 @@
     function decisionBody() {
       var comment = (el("eg-rev-comment") && el("eg-rev-comment").value) || "";
       var confirm = !!(el("eg-rev-confirm-protected") && el("eg-rev-confirm-protected").checked);
-      return JSON.stringify({ comment: comment, confirm_protected: confirm });
+      // Adopt the reduced operation set only when the candidate is partial; the
+      // differently-labelled button is the user's explicit partial-accept action.
+      var s = (current.report && current.report.summary) || {};
+      var status = (current.report && current.report.candidate_status) || s.candidate_status || "";
+      var acceptPartial = status === "partially_adoptable";
+      return JSON.stringify({ comment: comment, confirm_protected: confirm,
+                              accept_partial: acceptPartial });
     }
 
     function acceptRevision() {

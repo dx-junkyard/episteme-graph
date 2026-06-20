@@ -109,3 +109,27 @@ def test_stop_polling_prevents_duplicate_timers(admin_js):
     assert "stopPolling" in admin_js
     # close() and openDetail() both stop polling before (re)rendering
     assert "function stopPolling()" in admin_js
+
+
+# --- #415: partial adoption UI --------------------------------------------
+
+def test_partial_adoption_rendered(admin_js):
+    assert "excludedOpsHtml" in admin_js
+    assert "candidate_status" in admin_js
+    assert "operation_summary" in admin_js
+    assert "excluded_operations" in admin_js
+    # the three candidate states are surfaced
+    assert "partially_adoptable" in admin_js
+    assert "blocked" in admin_js
+
+
+def test_partial_accept_button_and_flag(admin_js):
+    # a distinct, explicit partial-accept action + accept_partial flag (#415)
+    assert "問題のある変更を除外して採用" in admin_js
+    assert "accept_partial" in admin_js
+
+
+def test_excluded_operations_show_reason(admin_js):
+    assert "除外される変更" in admin_js
+    assert "excluded_invalid" in admin_js
+    assert "excluded_dependency" in admin_js
