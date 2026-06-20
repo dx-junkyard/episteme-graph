@@ -8740,8 +8740,22 @@
   var EGRevisions = (function () {
     var current = { documentId: null, revisionId: null, report: null, filter: "all" };
 
+    var STAGE_LABELS = {
+      queued: "待機中", audit: "原論文を監査中", proposal: "修正候補を生成中",
+      candidate_assembly: "候補を組み立て中", validation: "候補を検証中",
+      report: "差分レポートを作成中", completed: "完了 — 採否を確認してください",
+      failed: "失敗"
+    };
+    var OUTCOME_LABELS = {
+      no_audit_targets: "監査の結果、修正対象は見つかりませんでした。",
+      proposals_failed: "修正対象はありましたが、採用可能な修正候補を生成できませんでした（改善案の生成に失敗）。",
+      candidate_invalid: "修正候補を生成しましたが、検証に通らず採用できません。",
+      changes_proposed: "修正候補を生成しました。採否を確認してください。"
+    };
+
     function el(id) { return document.getElementById(id); }
-    function close() { var m = el("eg-rev-modal"); if (m) m.remove(); }
+    function stopPolling() { if (current.pollTimer) { clearTimeout(current.pollTimer); current.pollTimer = null; } }
+    function close() { stopPolling(); var m = el("eg-rev-modal"); if (m) m.remove(); }
     function docPath() { return "/admin/documents/" + encodeURIComponent(current.documentId) + "/revisions"; }
 
     function open(documentId) {
@@ -8826,12 +8840,38 @@
     }
 
     function openDetail(revId) {
+      stopPolling();
       current.revisionId = revId;
       current.report = null;
       apiFetch(docPath() + "/" + encodeURIComponent(revId))
         .then(function (r) { return r.json(); })
-        .then(function (detail) { renderDetail(detail); if (detail.has_report) loadReport(); })
+        .then(function (detail) {
+          renderDetail(detail);
+          if (detail.has_report) loadReport();
+          restoreRunState(detail);   // #414-4: restore running/failed/completed on reload
+        })
         .catch(function () { alert("詳細の取得に失敗しました。"); });
+    }
+
+    // Restore the run's UI state after a modal reopen / browser reload (#414-4):
+    // running -> resume polling the same task; failed -> show stage + error;
+    // completed -> the report (loaded above) already shows the outcome.
+    function restoreRunState(detail) {
+      var status = String(detail.status || "").toLowerCase();
+      var task = detail.latest_task || null;
+      current.taskId = (task && task.task_id) || null;
+      if (status === "running") {
+        setRunning(true, STAGE_LABELS[detail.current_stage] || "処理中…");
+        renderRunProgress({ current_stage: detail.current_stage, task: task });
+        pollRunStatus();
+      } else if (status === "failed") {
+        setRunning(false);
+        renderRunFailure({
+          current_stage: detail.current_stage,
+          error_message: detail.error_message,
+          task: task
+        });
+      }
     }
 
     function decisionsHtml(decisions) {
@@ -8862,6 +8902,7 @@
         '<label class="eg-rev-confirm"><input type="checkbox" id="eg-rev-confirm-protected"> 保護項目の変更を明示承認</label>' +
         '<input id="eg-rev-comment" class="eg-rev-comment" placeholder="決定コメント">' +
         '</div>';
+      html += '<div class="eg-rev-progress" id="eg-rev-progress"></div>';
       html += '<div class="eg-rev-report" id="eg-rev-report"></div>';
       html += decisionsHtml(detail.decisions);
       d.innerHTML = html;
@@ -8871,19 +8912,105 @@
       el("eg-rev-revise").addEventListener("click", reviseRevision);
     }
 
+    function setProgress(html) { var p = el("eg-rev-progress"); if (p) p.innerHTML = html || ""; }
+
+    function setRunning(on, label) {
+      current.running = !!on;
+      var btn = el("eg-rev-run");
+      if (btn) { btn.disabled = !!on; btn.textContent = on ? (label || "処理中…") : "監査＋候補生成"; }
+      // Prevent accept/revise while a worker is active (#412 P1-4: avoid double run).
+      ["eg-rev-accept", "eg-rev-reject", "eg-rev-revise"].forEach(function (id) {
+        var b = el(id); if (b && on) b.disabled = true;
+      });
+    }
+
+    function renderRunProgress(st) {
+      var rd = (st.task && st.task.result_data) || {};
+      var stageKey = rd.stage || st.current_stage || "queued";
+      var label = STAGE_LABELS[stageKey] || stageKey;
+      // Prefer the real "completed / total" count (e.g. 27 / 199) over a bare %
+      // when the worker has published per-checkpoint progress (#414-3).
+      var detail = "";
+      if (typeof rd.total_count === "number" && rd.total_count > 0) {
+        detail = " " + (rd.completed_count || 0) + " / " + rd.total_count;
+      } else if (typeof rd.progress === "number" && rd.progress > 0) {
+        detail = " " + rd.progress + "%";
+      }
+      setProgress('<div class="eg-rev-info">' + escHtml(label) + escHtml(detail) + ' …</div>');
+    }
+
+    function renderRunFailure(st) {
+      var stage = STAGE_LABELS[st.current_stage] || st.current_stage || "";
+      var msg = st.error_message || "サーバーエラー";
+      var rd = (st.task && st.task.result_data) || {};
+      var extra = "";
+      if (rd.rejected_operations && rd.rejected_operations.length) {
+        extra = '<div>修正候補が検証で却下されました（' + rd.rejected_operations.length + ' 件）。</div>';
+      }
+      setProgress('<div class="eg-rev-warn">処理に失敗しました（' + escHtml(stage) + '）: ' +
+        escHtml(msg) + extra + '</div>');
+    }
+
+    function pollRunStatus() {
+      if (!current.revisionId) return;
+      var url = docPath() + "/" + encodeURIComponent(current.revisionId) + "/run-status" +
+        (current.taskId ? ("?task_id=" + encodeURIComponent(current.taskId)) : "");
+      apiFetch(url)
+        .then(function (r) { if (!r.ok) throw new Error("status " + r.status); return r.json(); })
+        .then(function (st) {
+          current.pollFails = 0;
+          var status = String(st.status || "").toLowerCase();
+          if (status === "completed") {
+            setRunning(false);
+            setProgress('<div class="eg-rev-done">' + escHtml(STAGE_LABELS.completed) + '</div>');
+            openDetail(current.revisionId);   // reload detail + report
+            return;
+          }
+          if (status === "failed") {
+            setRunning(false);
+            renderRunFailure(st);
+            return;
+          }
+          renderRunProgress(st);
+          current.pollTimer = setTimeout(pollRunStatus, 3000);
+        })
+        .catch(function () {
+          // Network/timeout is NOT a processing failure — keep checking (#412 P1-4).
+          current.pollFails = (current.pollFails || 0) + 1;
+          setProgress('<div class="eg-rev-info">接続が切れたため状態を確認中…（再試行 ' +
+            current.pollFails + '）</div>');
+          current.pollTimer = setTimeout(pollRunStatus, 5000);
+        });
+    }
+
     function runRevision() {
-      var btn = el("eg-rev-run"); if (btn) { btn.disabled = true; btn.textContent = "処理中…"; }
       var body = {};
       var opsEl = el("eg-rev-ops");
       if (opsEl && opsEl.value.trim()) {
         try { body.operations = JSON.parse(opsEl.value); }
-        catch (e) { alert("operations の JSON が不正です。"); if (btn) { btn.disabled = false; btn.textContent = "監査＋候補生成"; } return; }
+        catch (e) { alert("operations の JSON が不正です。"); return; }
       }
+      stopPolling();
+      current.taskId = null;
+      setRunning(true, STAGE_LABELS.audit + " …");
+      setProgress('<div class="eg-rev-info">' + escHtml(STAGE_LABELS.queued) + ' …</div>');
       apiFetch(docPath() + "/" + encodeURIComponent(current.revisionId) + "/run",
                { method: "POST", body: JSON.stringify(body) })
-        .then(function (r) { return r.json(); })
-        .then(function () { openDetail(current.revisionId); })
-        .catch(function () { alert("処理に失敗しました。"); if (btn) { btn.disabled = false; btn.textContent = "監査＋候補生成"; } });
+        .then(function (r) {
+          if (r.status === 409) { setRunning(false); setProgress('<div class="eg-rev-warn">この改善runは既に実行中です。</div>'); return null; }
+          if (!r.ok) { return r.text().then(function (t) { throw new Error("server " + r.status + ": " + t); }); }
+          return r.json();
+        })
+        .then(function (data) {
+          if (!data) return;
+          current.taskId = data.task_id || null;
+          pollRunStatus();   // 202 accepted → poll task/revision status
+        })
+        .catch(function (e) {
+          // Could not even start the run → a real failure, not a timeout.
+          setRunning(false);
+          setProgress('<div class="eg-rev-warn">開始に失敗しました: ' + escHtml(String(e.message || e)) + '</div>');
+        });
     }
 
     function loadReport() {
@@ -8938,23 +9065,94 @@
           (c.reason ? '<div class="eg-rev-reason">理由: ' + escHtml(c.reason) + '</div>' : '') +
           (c.checkpoint_ids && c.checkpoint_ids.length ? '<div class="eg-rev-trace">checkpoint: ' + escHtml(c.checkpoint_ids.join(", ")) + '</div>' : '') +
           (c.evidence_refs && c.evidence_refs.length ? '<div class="eg-rev-trace">evidence: ' + escHtml(c.evidence_refs.join(", ")) + '</div>' : '') +
+          (c.source_chunk_ids && c.source_chunk_ids.length ? '<div class="eg-rev-trace">source chunk: ' + escHtml(c.source_chunk_ids.join(", ")) + '</div>' : '') +
           (src ? '<div class="eg-rev-trace">原文: ' + src + '</div>' : '') +
           '</li>';
       }).join("") + '</ul>';
+    }
+
+    function stageSummaryHtml(report) {
+      var ss = report.stage_summary; if (!ss) return "";
+      var a = ss.audit || {}, g = ss.candidate_generation || {}, e = ss.candidate_evaluation || {};
+      var outcomeMsg = OUTCOME_LABELS[ss.outcome] || "";
+      var reasons = (g.rejection_reasons || []).map(function (r) {
+        return '<li>' + escHtml(r.reason) + ': ' + (r.count || 0) + '</li>';
+      }).join("");
+      return '<div class="eg-rev-stages">' +
+        (outcomeMsg ? '<div class="eg-rev-outcome">' + escHtml(outcomeMsg) + '</div>' : '') +
+        '<h5>監査結果</h5><ul class="eg-rev-stagelist">' +
+          '<li>チェック: ' + (a.checkpoints_total || 0) + '</li>' +
+          '<li>修正対象: ' + (a.revision_target_count || 0) + '</li>' +
+          '<li>人手確認: ' + (a.manual_review_count || 0) + '</li></ul>' +
+        '<h5>候補生成</h5><ul class="eg-rev-stagelist">' +
+          '<li>採用可能な提案: ' + (g.accepted_count || 0) + '</li>' +
+          '<li>拒否された提案: ' + (g.rejected_count || 0) + '</li>' +
+          (reasons ? '<li>主な拒否理由:<ul>' + reasons + '</ul></li>' : '') + '</ul>' +
+        '<h5>候補評価</h5><ul class="eg-rev-stagelist">' +
+          '<li>適用変更: ' + (e.applied_change_count || 0) + '</li>' +
+          '<li>candidate invalid: <strong>' + (e.candidate_invalid ? "true" : "false") + '</strong></li>' +
+          '<li>新規未解決参照: ' + (e.new_unknown_reference_count || 0) + '</li></ul>' +
+        '</div>';
+    }
+
+    var EXCLUDE_LABELS = {
+      excluded_invalid: "不正な操作", excluded_dependency: "依存により除外",
+      requires_confirmation: "要承認"
+    };
+
+    // #415: per-operation outcome — adoptable / partially_adoptable / blocked.
+    function excludedOpsHtml(report) {
+      var status = report.candidate_status || (report.summary || {}).candidate_status || "adoptable";
+      var os = report.operation_summary || {};
+      var excluded = report.excluded_operations || [];
+      if (status === "adoptable" && !excluded.length) {
+        return '<div class="eg-rev-outcome">すべての変更を採用できます（' +
+          (os.applied_count || 0) + ' 件）。</div>';
+      }
+      var head;
+      if (status === "partially_adoptable") {
+        head = '<div class="eg-rev-outcome">問題のある変更を除外すれば採用できます。</div>';
+      } else if (status === "blocked") {
+        head = '<div class="eg-rev-warn">除外後も hard error または未解決参照が残るため採用できません（blocked）。</div>';
+      } else {
+        head = "";
+      }
+      var counts = '<ul class="eg-rev-stagelist">' +
+        '<li>採用可能な変更: ' + (os.applied_count || 0) + '</li>' +
+        '<li>除外（不正）: ' + (os.excluded_invalid_count || 0) + '</li>' +
+        '<li>除外（依存）: ' + (os.excluded_dependency_count || 0) + '</li>' +
+        '<li>除外後の hard error: ' + ((report.summary || {}).hard_error_count || 0) + '</li></ul>';
+      var rows = excluded.map(function (x) {
+        return '<li class="eg-rev-change"><span class="eg-rev-ctype">' +
+          escHtml(EXCLUDE_LABELS[x.status] || x.status) + '</span> ' +
+          '<code>' + escHtml(x.target_type || "") + ':' + escHtml(x.target_id || "") + '</code>' +
+          (x.operation_id ? ' <span class="eg-rev-trace">(' + escHtml(x.operation_id) + ')</span>' : '') +
+          '<div class="eg-rev-reason">理由: ' + escHtml(x.reason || "") + '</div></li>';
+      }).join("");
+      return '<div class="eg-rev-stages">' + head + counts +
+        (rows ? '<h5>除外される変更</h5><ul class="eg-rev-changes">' + rows + '</ul>' : '') + '</div>';
     }
 
     function renderReport() {
       var rep = el("eg-rev-report"); if (!rep || !current.report) return;
       var report = current.report;
       var s = report.summary || {};
+      var status = report.candidate_status || s.candidate_status || (s.acceptable ? "adoptable" : "blocked");
+      var partial = status === "partially_adoptable";
       var acc = el("eg-rev-accept");
-      if (acc) acc.disabled = !s.acceptable;
+      if (acc) {
+        acc.disabled = !s.acceptable;
+        // #415: partial adoption needs an explicit, differently-labelled action.
+        acc.textContent = partial ? "問題のある変更を除外して採用" : "採用";
+      }
       var warn = "";
-      if (!s.acceptable) warn = '<div class="eg-rev-warn">hard error または invalid のため採用できません。</div>';
+      if (status === "blocked") warn = '<div class="eg-rev-warn">候補は blocked です。具体的な hard error と除外対象を確認してください。</div>';
       else if (s.protected_change_count > 0) warn = '<div class="eg-rev-warn">教師承認/手動編集済み項目への変更が ' + s.protected_change_count + ' 件あります。採用には明示承認が必要です。</div>';
       var html = warn +
         '<div class="eg-rev-rec">推奨: <strong>' + escHtml(report.recommendation) + '</strong>' +
           '（参考情報。自動採用には使われません）</div>' +
+        excludedOpsHtml(report) +
+        stageSummaryHtml(report) +
         '<h5>品質指標 (before / after)</h5>' + metricsTable(report.quality_before, report.quality_after) +
         '<h5>解消: ' + (s.resolved_issue_count || 0) + ' / 新規: ' + (s.introduced_issue_count || 0) +
           ' / 変更: ' + (s.entity_change_count || 0) + '</h5>' +
@@ -8972,7 +9170,22 @@
     function decisionBody() {
       var comment = (el("eg-rev-comment") && el("eg-rev-comment").value) || "";
       var confirm = !!(el("eg-rev-confirm-protected") && el("eg-rev-confirm-protected").checked);
-      return JSON.stringify({ comment: comment, confirm_protected: confirm });
+      // Adopt the reduced operation set only when the candidate is partial; the
+      // differently-labelled button is the user's explicit partial-accept action.
+      var s = (current.report && current.report.summary) || {};
+      var status = (current.report && current.report.candidate_status) || s.candidate_status || "";
+      var acceptPartial = status === "partially_adoptable";
+      return JSON.stringify({ comment: comment, confirm_protected: confirm,
+                              accept_partial: acceptPartial });
+    }
+
+    function decisionResponse(r, fallback) {
+      if (r.ok) return r.json();
+      return r.json()
+        .catch(function () { return {}; })
+        .then(function (j) {
+          throw new Error(j.detail || fallback || ("server " + r.status));
+        });
     }
 
     function acceptRevision() {
@@ -8980,8 +9193,7 @@
                { method: "POST", body: decisionBody() })
         .then(function (r) {
           if (r.status === 409) throw new Error("競合: 採用版が更新されています。最新の差分で再確認してください。");
-          if (r.status === 422) return r.json().then(function (j) { throw new Error(j.detail || "採用できません"); });
-          return r.json();
+          return decisionResponse(r, "採用できません");
         })
         .then(function () { alert("採用しました。採用版を切り替えました。"); loadList(); openDetail(current.revisionId); })
         .catch(function (e) { alert(e.message || "採用に失敗しました。"); });
@@ -8990,17 +9202,17 @@
     function rejectRevision() {
       apiFetch(docPath() + "/" + encodeURIComponent(current.revisionId) + "/reject",
                { method: "POST", body: decisionBody() })
-        .then(function (r) { return r.json(); })
+        .then(function (r) { return decisionResponse(r, "却下に失敗しました。"); })
         .then(function () { alert("却下しました。採用版は変更されません。"); loadList(); openDetail(current.revisionId); })
-        .catch(function () { alert("却下に失敗しました。"); });
+        .catch(function (e) { alert(e.message || "却下に失敗しました。"); });
     }
 
     function reviseRevision() {
       apiFetch(docPath() + "/" + encodeURIComponent(current.revisionId) + "/revise",
                { method: "POST", body: decisionBody() })
-        .then(function (r) { return r.json(); })
+        .then(function (r) { return decisionResponse(r, "再修正の作成に失敗しました。"); })
         .then(function (data) { loadList(); if (data.revision_run_id) openDetail(data.revision_run_id); })
-        .catch(function () { alert("再修正の作成に失敗しました。"); });
+        .catch(function (e) { alert(e.message || "再修正の作成に失敗しました。"); });
     }
 
     return { open: open };

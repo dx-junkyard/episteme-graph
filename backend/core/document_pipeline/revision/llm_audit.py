@@ -87,10 +87,14 @@ class LLMAuditClient:
         instruction = (
             "あなたは学術論文の校閲者です。既存の抽出成果物(entity)を、取得した原文(source)と"
             "比較し、妥当性を判定してください。原文に根拠が無い場合は valid にしないこと。"
-            "LLMの推測(analysis_notes)と原文由来の根拠(evidence_refs/source由来)を必ず分けること。"
+            "LLMの推測(analysis_notes)と原文由来の根拠を必ず分けること。"
+            "根拠IDは2つのID空間に分けて出力する: "
+            "evidence_ids は related に出てくる EvidenceRegistry の evidence_id、"
+            "source_chunk_ids は source に出てくる chunk_id。混在させないこと。"
             "出力は次のJSONのみ: {\"verdict\": one of [valid, incorrect, incomplete, "
             "unsupported, ambiguous], \"findings\": [{\"kind\":..,\"detail\":..}], "
-            "\"evidence_refs\": [evidence_id|chunk_id ...], \"analysis_notes\": [..], "
+            "\"evidence_ids\": [evidence_id ...], \"source_chunk_ids\": [chunk_id ...], "
+            "\"analysis_notes\": [..], "
             "\"confidence\": 0.0-1.0, \"requires_revision\": bool, \"review_required\": bool}"
         )
         payload = {

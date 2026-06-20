@@ -97,6 +97,7 @@ def make_operation(
     reason: str = "",
     checkpoint_ids: list[str] | None = None,
     evidence_refs: list[str] | None = None,
+    source_chunk_ids: list[str] | None = None,
     source_locations: list | None = None,
     confidence: float = 0.0,
     protected_target: bool = False,
@@ -114,7 +115,10 @@ def make_operation(
         "after_json": after_json,
         "reason": reason,
         "checkpoint_ids": list(checkpoint_ids or []),
+        # Registry evidence ids and source chunk ids are kept in separate fields
+        # because they live in different ID spaces (#412 P0-6).
         "evidence_refs": list(evidence_refs or []),
+        "source_chunk_ids": list(source_chunk_ids or []),
         "source_locations": list(source_locations or []),
         "confidence": float(confidence or 0.0),
         "protected_target": bool(protected_target),
@@ -157,18 +161,6 @@ def _find_record(lst: list, id_field: str | None, target_id: str) -> dict | None
         if isinstance(r, dict) and _record_id(r, id_field) == target_id:
             return r
     return None
-
-
-def _collect_ids(candidate: dict) -> dict[str, set]:
-    ids: dict[str, set] = {}
-    for etype, (akey, lkey, idf) in ENTITY_REGISTRY.items():
-        bucket = ids.setdefault(etype, set())
-        for r in _as_list((candidate.get(akey) or {}).get(lkey)):
-            if isinstance(r, dict):
-                rid = _record_id(r, idf)
-                if rid:
-                    bucket.add(rid)
-    return ids
 
 
 # ---------------------------------------------------------------------------
@@ -433,37 +425,28 @@ _DISPATCH = {
 # Integrity check
 # ---------------------------------------------------------------------------
 
+def _ref_key(ref: dict) -> tuple:
+    return (ref.get("source_id"), ref.get("ref_field"), ref.get("target_id"))
+
+
 def _base_unresolved_keys(base_inventory: dict | None) -> set[tuple]:
     keys: set[tuple] = set()
     for u in (base_inventory or {}).get("unresolved_references", []) or []:
-        keys.add((u.get("source_id"), u.get("ref_field"), u.get("target_id")))
+        keys.add(_ref_key(u))
     return keys
 
 
-def _candidate_dangling(candidate: dict) -> list[dict]:
-    ids = _collect_ids(candidate)
-    dangling: list[dict] = []
-    for entity_type, fields in REFERENCE_FIELDS.items():
-        akey, lkey, idf = ENTITY_REGISTRY[entity_type]
-        for r in _as_list((candidate.get(akey) or {}).get(lkey)):
-            if not isinstance(r, dict):
-                continue
-            sid = _record_id(r, idf)
-            for field, target_type in fields:
-                for tid in _as_list(r.get(field)):
-                    if str(tid) not in ids.get(target_type, set()):
-                        dangling.append({"source_id": sid, "ref_field": field, "target_id": str(tid)})
-    # graph edge endpoints
-    node_ids = ids.get("graph_node", set())
-    for e in _as_list((candidate.get("component_graph") or {}).get("edges")):
-        if not isinstance(e, dict):
-            continue
-        eid = str(e.get("edge_id") or "")
-        for role in ("source", "target"):
-            v = e.get(role) or e.get(f"{role}_component_id")
-            if v and str(v) not in node_ids:
-                dangling.append({"source_id": eid, "ref_field": role, "target_id": str(v)})
-    return dangling
+def _candidate_unresolved_references(candidate: dict) -> list[dict]:
+    """Unresolved references in the candidate, via the *same* resolver as the base.
+
+    Using ``build_baseline_inventory`` (rather than a parallel raw-field walk)
+    guarantees base and candidate dangling checks share one schema / ID semantics,
+    so a reference that already dangled in the base is classified as *carried*, not
+    a brand-new error (#412 P1-7).
+    """
+    from .inventory import build_baseline_inventory
+    inv = build_baseline_inventory(candidate or {}, base_run_id="")
+    return list(inv.get("unresolved_references") or [])
 
 
 # ---------------------------------------------------------------------------
@@ -528,78 +511,346 @@ def _canonical_order(operations: list[dict]) -> list[tuple[int, dict]]:
     )
 
 
+# ---------------------------------------------------------------------------
+# Partial-adoption support (#415): per-operation dependency analysis so a single
+# bad operation excludes only itself + its dependents, not the whole candidate.
+# ---------------------------------------------------------------------------
+
+# Operation status taxonomy (#415).
+OP_APPLIED = "applied"
+OP_EXCLUDED_INVALID = "excluded_invalid"
+OP_EXCLUDED_DEPENDENCY = "excluded_dependency"
+OP_REQUIRES_CONFIRMATION = "requires_confirmation"
+
+# Candidate status taxonomy (#415).
+CAND_ADOPTABLE = "adoptable"
+CAND_PARTIALLY_ADOPTABLE = "partially_adoptable"
+CAND_BLOCKED = "blocked"
+
+
+def _all_base_ids(base_inventory: dict | None, base_artifacts: dict) -> set[str]:
+    """Every entity id present in the base (the ids an operation may safely consume)."""
+    inv = base_inventory
+    if not inv or "entities" not in inv:
+        from .inventory import build_baseline_inventory
+        inv = build_baseline_inventory(base_artifacts or {}, base_run_id="")
+    ids: set[str] = set()
+    for bucket in (inv.get("entities") or {}).values():
+        ids.update(str(k) for k in (bucket or {}).keys())
+    return ids
+
+
+def _produced_ids(op: dict) -> list[str]:
+    """Entity ids an operation *creates* (so dependents can be tracked)."""
+    operation = op.get("operation")
+    target_type = op.get("target_type")
+    _, _, idf = ENTITY_REGISTRY.get(target_type, (None, None, None))
+    after = op.get("after_json")
+    if operation == "add_entity" and isinstance(after, dict):
+        nid = _record_id(after, idf) or str(op.get("target_id") or "")
+        return [nid] if nid else []
+    if operation == "split_entity" and isinstance(after, list):
+        return [_record_id(p, idf) for p in after
+                if isinstance(p, dict) and _record_id(p, idf)]
+    if operation == "merge_entities" and isinstance(after, dict):
+        mid = _record_id(after, idf)
+        return [mid] if mid else []
+    return []
+
+
+def _after_json_ref_ids(op: dict) -> list[str]:
+    """Reference-list ids embedded in an add/update after_json (e.g. equation_ids)."""
+    fields = REFERENCE_FIELDS.get(op.get("target_type"), [])
+    after = op.get("after_json")
+    records = after if isinstance(after, list) else [after]
+    out: list[str] = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        for field, _t in fields:
+            out.extend(str(v) for v in _as_list(rec.get(field)) if v)
+    return out
+
+
+def _consumed_ids(op: dict) -> list[str]:
+    """Entity ids an operation *references* and therefore depends upon (#415)."""
+    operation = op.get("operation")
+    target_type = op.get("target_type")
+    out: list[str] = []
+    if operation == "merge_entities":
+        for sid in (op.get("source_ids") or op.get("target_ids") or []):
+            if sid:
+                out.append(str(sid))
+        if op.get("target_id"):
+            out.append(str(op["target_id"]))
+    elif operation in ("update_entity", "split_entity", "remove_entity",
+                       "relink_evidence", "remove_relation", "add_relation"):
+        if target_type == "graph_edge":
+            after = op.get("after_json") if operation == "add_relation" else None
+            if isinstance(after, dict):
+                for key in ("source", "target", "source_component_id",
+                            "target_component_id", "from", "to"):
+                    if after.get(key):
+                        out.append(str(after[key]))
+            if operation == "remove_relation" and op.get("target_id"):
+                out.append(str(op["target_id"]))
+        else:
+            if op.get("target_id"):
+                out.append(str(op["target_id"]))
+            if op.get("relation_target_id"):
+                out.append(str(op["relation_target_id"]))
+    if operation in ("add_entity", "update_entity", "split_entity"):
+        out.extend(_after_json_ref_ids(op))
+    return list(dict.fromkeys(out))
+
+
+def _op_introduces(op: dict, dangling: dict) -> bool:
+    """Whether ``op`` is responsible for a specific new dangling reference."""
+    source_id = str(dangling.get("source_id") or "")
+    target_id = str(dangling.get("target_id") or "")
+    if source_id and source_id == str(op.get("target_id") or ""):
+        return True
+    if source_id and source_id in _produced_ids(op):
+        return True
+    if op.get("operation") in ("add_relation", "relink_evidence"):
+        if target_id and (target_id == str(op.get("relation_target_id") or "")
+                          or target_id in [str(v) for v in (op.get("evidence_refs") or [])]):
+            return True
+    if op.get("operation") == "add_relation" and op.get("target_type") == "graph_edge":
+        after = op.get("after_json") or {}
+        if isinstance(after, dict) and source_id == str(after.get("edge_id") or ""):
+            return True
+    return False
+
+
+def _normalize_excluded(raw: dict) -> dict:
+    """Minimal normalization of a pre-rejected op so it can still be analysed."""
+    raw = raw if isinstance(raw, dict) else {}
+    return {
+        "operation_id": raw.get("operation_id") or "",
+        "operation": raw.get("operation"),
+        "target_type": raw.get("target_type"),
+        "target_id": raw.get("target_id"),
+        "after_json": raw.get("after_json"),
+        "source_ids": raw.get("source_ids") or raw.get("target_ids") or [],
+        "relation_target_id": raw.get("relation_target_id"),
+        "evidence_refs": raw.get("evidence_refs") or [],
+    }
+
+
+def _excluded_record(op: dict, status: str, reason: str) -> dict:
+    return {
+        "operation_id": op.get("operation_id") or "",
+        "status": status,
+        "reason": reason,
+        "operation": op.get("operation"),
+        "target_type": op.get("target_type"),
+        "target_id": op.get("target_id"),
+    }
+
+
+def _apply_included(base_artifacts: dict, included: list[dict]):
+    """Apply the included ops on a fresh copy; return (candidate, id_mapping, failure).
+
+    ``failure`` is ``(op_index, reason)`` for the first op whose handler raised, or
+    None when all applied cleanly.
+    """
+    candidate = copy.deepcopy(base_artifacts) if isinstance(base_artifacts, dict) else {}
+    id_mapping: dict[str, list[str]] = {}
+    for _idx, op in _canonical_order(included):
+        handler = _DISPATCH.get(op.get("operation"))
+        if handler is None:
+            return candidate, id_mapping, (op["_idx"], f"unknown operation {op.get('operation')}")
+        try:
+            handler(candidate, op, id_mapping)
+        except _OpError as exc:
+            return candidate, id_mapping, (op["_idx"], str(exc))
+    return candidate, id_mapping, None
+
+
 def apply_operations(
     base_artifacts: dict,
     operations: list[dict],
     *,
     base_inventory: dict | None = None,
+    pre_excluded: list[dict] | None = None,
 ) -> dict:
-    """Apply revision operations to immutable base artifacts → candidate set."""
-    candidate = copy.deepcopy(base_artifacts) if isinstance(base_artifacts, dict) else {}
-    id_mapping: dict[str, list[str]] = {}
-    applied: list[dict] = []
-    errors: list[dict] = []
-    protected_changes: list[dict] = []
-    dropped_edges: list[str] = []
+    """Apply revision operations, excluding only the bad ones (#415, partial adoption).
 
-    # Server-side source of truth for protected entities (never trust the client
-    # flag). Computed once from the base inventory / artifacts.
+    Invalid operations (failed pre-validation, missing target, or one that would
+    introduce a new dangling reference) are excluded as ``excluded_invalid``;
+    operations that depend on an excluded operation's output are excluded as
+    ``excluded_dependency``. The candidate is rebuilt from the surviving ops, so
+    independent valid changes remain adoptable even when a sibling op is bad.
+
+    ``pre_excluded`` carries operations already rejected upstream (typed evidence /
+    checkpoint validation, #414) as ``{"op"|"raw": <op>, "reason": str}`` so their
+    dependents are excluded too.
+    """
+    base_artifacts = base_artifacts or {}
+    ops = [copy.deepcopy(o) for o in (operations or [])]
+    for i, o in enumerate(ops):
+        o["_idx"] = i
+
+    # Pre-rejected ops keep their reason and still register produced ids so their
+    # dependents are detected, but are never applied.
+    extra_excluded: list[dict] = []
+    for j, rej in enumerate(pre_excluded or []):
+        xo = _normalize_excluded(rej.get("op") or rej.get("raw") or rej)
+        xo["_idx"] = len(ops) + j
+        xo["_pre_reason"] = rej.get("reason") or "invalid_operation"
+        extra_excluded.append(xo)
+
+    all_ops = {o["_idx"]: o for o in ops}
+    all_ops.update({xo["_idx"]: xo for xo in extra_excluded})
+
+    base_ids = _all_base_ids(base_inventory, base_artifacts)
+    produced_by: dict[str, list[int]] = {}
+    for o in all_ops.values():
+        for pid in _produced_ids(o):
+            produced_by.setdefault(pid, []).append(o["_idx"])
+
+    # excluded: _idx -> {"status", "reason"}
+    excluded: dict[int, dict] = {
+        xo["_idx"]: {"status": OP_EXCLUDED_INVALID, "reason": xo["_pre_reason"]}
+        for xo in extra_excluded
+    }
     protected_ids = _protected_ids(base_inventory, base_artifacts)
 
-    for _idx, op in _canonical_order(operations or []):
-        op = copy.deepcopy(op)
-        handler = _DISPATCH.get(op.get("operation"))
-        if handler is None:
-            op["validation_result"] = {"status": "failed", "error": f"unknown operation {op.get('operation')}"}
-            errors.append({"operation_id": op.get("operation_id"), "error": op["validation_result"]["error"]})
-            applied.append(op)
+    def _propagate() -> None:
+        again = True
+        while again:
+            again = False
+            for o in ops:
+                idx = o["_idx"]
+                if idx in excluded:
+                    continue
+                for cid in _consumed_ids(o):
+                    if cid in base_ids:
+                        continue
+                    producers = produced_by.get(cid, [])
+                    if not producers:
+                        excluded[idx] = {"status": OP_EXCLUDED_INVALID,
+                                         "reason": f"unknown_reference:{cid}"}
+                        again = True
+                        break
+                    if all(p in excluded for p in producers):
+                        excluded[idx] = {"status": OP_EXCLUDED_DEPENDENCY,
+                                         "reason": f"depends_on_excluded:{cid}"}
+                        again = True
+                        break
+
+    blocked_dangling: list[dict] = []
+    candidate: dict = {}
+    id_mapping: dict[str, list[str]] = {}
+    dropped_edges: list[str] = []
+    carried: list[dict] = []
+    # Iterate: exclude dependents, apply, exclude handler failures / new danglers,
+    # repeat until the surviving set applies cleanly. Bounded — each pass excludes
+    # at least one op.
+    for _guard in range(len(ops) + 2):
+        _propagate()
+        included = [o for o in ops if o["_idx"] not in excluded]
+        candidate, id_mapping, failure = _apply_included(base_artifacts, included)
+        if failure is not None:
+            excluded[failure[0]] = {"status": OP_EXCLUDED_INVALID, "reason": failure[1]}
             continue
-        try:
-            handler(candidate, op, id_mapping)
-            op["validation_result"] = {"status": "applied"}
-            # Determine protected status server-side and overwrite the (untrusted)
-            # client flag so the report and accept gate use the authoritative value.
-            server_protected = _op_protected_targets(op, protected_ids)
-            op["protected_target"] = bool(server_protected)
-            op["protected_target_source"] = "server"
+        dropped_edges = _apply_id_mapping(candidate, id_mapping)
+        if base_inventory is not None:
+            base_keys = _base_unresolved_keys(base_inventory)
+        else:
+            from .inventory import build_baseline_inventory
+            base_keys = _base_unresolved_keys(
+                build_baseline_inventory(base_artifacts or {}, base_run_id="")
+            )
+        candidate_unresolved = _candidate_unresolved_references(candidate)
+        new_dangling = [d for d in candidate_unresolved if _ref_key(d) not in base_keys]
+        carried = [d for d in candidate_unresolved if _ref_key(d) in base_keys]
+        if new_dangling:
+            culprits = {o["_idx"] for o in included
+                        for d in new_dangling if _op_introduces(o, d)}
+            if culprits:
+                for idx in culprits:
+                    excluded[idx] = {"status": OP_EXCLUDED_INVALID,
+                                     "reason": "introduces_unknown_reference"}
+                continue
+            blocked_dangling = new_dangling  # unattributable → candidate is blocked
+        break
+
+    # Build the final per-operation records, protected-change flags, and summary.
+    included_idx = {o["_idx"] for o in ops if o["_idx"] not in excluded}
+    protected_changes: list[dict] = []
+    applied_operations: list[dict] = []
+    excluded_operations: list[dict] = []
+    counts = {OP_APPLIED: 0, OP_EXCLUDED_INVALID: 0,
+              OP_EXCLUDED_DEPENDENCY: 0, OP_REQUIRES_CONFIRMATION: 0}
+
+    for o in sorted(all_ops.values(), key=lambda x: x["_idx"]):
+        idx = o["_idx"]
+        record = {k: v for k, v in o.items() if not k.startswith("_")}
+        if idx in excluded:
+            status = excluded[idx]["status"]
+            reason = excluded[idx]["reason"]
+            record["validation_result"] = {"status": "failed", "error": reason}
+            record["operation_status"] = status
+            excluded_operations.append(_excluded_record(record, status, reason))
+            counts[status] = counts.get(status, 0) + 1
+        else:
+            record["validation_result"] = {"status": "applied"}
+            server_protected = _op_protected_targets(o, protected_ids)
+            record["protected_target"] = bool(server_protected)
+            record["protected_target_source"] = "server"
             if server_protected:
+                record["operation_status"] = OP_REQUIRES_CONFIRMATION
+                counts[OP_REQUIRES_CONFIRMATION] += 1
                 protected_changes.append({
-                    "operation_id": op.get("operation_id"),
-                    "operation": op.get("operation"),
-                    "target_type": op.get("target_type"),
-                    "target_id": op.get("target_id"),
+                    "operation_id": o.get("operation_id"),
+                    "operation": o.get("operation"),
+                    "target_type": o.get("target_type"),
+                    "target_id": o.get("target_id"),
                     "protected_entity_ids": server_protected,
                 })
-        except _OpError as exc:
-            op["validation_result"] = {"status": "failed", "error": str(exc)}
-            errors.append({"operation_id": op.get("operation_id"), "error": str(exc)})
-        applied.append(op)
+            else:
+                record["operation_status"] = OP_APPLIED
+            counts[OP_APPLIED] += 1
+        applied_operations.append(record)
 
-    # Follow id changes from split/merge/remove across all references.
-    dropped_edges = _apply_id_mapping(candidate, id_mapping)
+    operation_summary = {
+        "applied_count": counts[OP_APPLIED],
+        "excluded_invalid_count": counts[OP_EXCLUDED_INVALID],
+        "excluded_dependency_count": counts[OP_EXCLUDED_DEPENDENCY],
+        "requires_confirmation_count": counts[OP_REQUIRES_CONFIRMATION],
+    }
+    total_excluded = counts[OP_EXCLUDED_INVALID] + counts[OP_EXCLUDED_DEPENDENCY]
+    if blocked_dangling or (counts[OP_APPLIED] == 0 and total_excluded > 0):
+        candidate_status = CAND_BLOCKED
+    elif total_excluded > 0:
+        candidate_status = CAND_PARTIALLY_ADOPTABLE
+    else:
+        candidate_status = CAND_ADOPTABLE
 
-    # Integrity: any NEW dangling reference (not pre-existing in base) is fatal.
-    base_keys = _base_unresolved_keys(base_inventory)
-    candidate_dangling = _candidate_dangling(candidate)
-    new_dangling = [
-        d for d in candidate_dangling
-        if (d["source_id"], d["ref_field"], d["target_id"]) not in base_keys
+    operation_errors = [
+        {"operation_id": rec["operation_id"], "error": rec["reason"]}
+        for rec in excluded_operations
     ]
-    if new_dangling:
-        errors.append({"error": "new_unknown_references", "details": new_dangling})
+    if blocked_dangling:
+        operation_errors.append({"error": "new_unknown_references",
+                                 "details": blocked_dangling})
 
-    invalid = bool(errors)
     return {
         "candidate_artifacts": candidate,
         "id_mapping": {k: v for k, v in id_mapping.items()},
-        "applied_operations": applied,
-        "operation_errors": errors,
+        "applied_operations": applied_operations,
+        "operation_errors": operation_errors,
+        "excluded_operations": excluded_operations,
+        "operation_summary": operation_summary,
+        "candidate_status": candidate_status,
         "protected_changes": protected_changes,
         "dropped_edges": dropped_edges,
-        "carried_unresolved_references": [
-            d for d in candidate_dangling
-            if (d["source_id"], d["ref_field"], d["target_id"]) in base_keys
-        ],
-        "invalid": invalid,
+        "carried_unresolved_references": carried,
+        # ``invalid`` retains its meaning of "cannot be adopted as-is"; with partial
+        # adoption that is only the fully-blocked case (#415).
+        "invalid": candidate_status == CAND_BLOCKED,
         "requires_confirmation": bool(protected_changes),
     }
+

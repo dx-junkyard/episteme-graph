@@ -139,6 +139,57 @@ def test_revision_graph_rejects_unknown_component_endpoint():
         )
 
 
+def test_revision_graph_preserves_graph_native_operation_nodes():
+    graph = persistence._remap_revision_graph(
+        {
+            "nodes": [
+                {
+                    "component_id": "theory_op_0001",
+                    "component_type": "TheoryOperationNode",
+                    "graph_layer": "main",
+                    "representative_component_id": "cmp_1",
+                },
+                {
+                    "component_id": "eq_op_0001",
+                    "component_type": "EquationOperationNode",
+                    "graph_layer": "equation_detail",
+                },
+                {"component_id": "cmp_1", "label": "Stored component"},
+            ],
+            "edges": [
+                {"source": "theory_op_0001", "target": "eq_op_0001"},
+                {"source": "eq_op_0001", "target": "cmp_1"},
+            ],
+        },
+        {"cmp_1": "db-comp-1"},
+        {},
+    )
+    by_agent = {
+        n.get("agent_component_id") or n.get("component_id"): n
+        for n in graph["nodes"]
+    }
+    assert by_agent["theory_op_0001"]["component_id"] == "theory_op_0001"
+    assert by_agent["eq_op_0001"]["component_id"] == "eq_op_0001"
+    assert by_agent["cmp_1"]["component_id"] == "db-comp-1"
+    assert graph["edges"][0]["source"] == "theory_op_0001"
+    assert graph["edges"][0]["target"] == "eq_op_0001"
+    assert graph["edges"][1]["target"] == "db-comp-1"
+
+
+def test_revision_graph_still_rejects_unresolved_ordinary_component_node():
+    with pytest.raises(ValueError, match="unknown component id"):
+        persistence._remap_revision_graph(
+            {
+                "nodes": [
+                    {"component_id": "cmp_missing", "label": "Missing component"},
+                ],
+                "edges": [],
+            },
+            {},
+            {},
+        )
+
+
 # --- full accept transaction ----------------------------------------------
 
 def _candidate():

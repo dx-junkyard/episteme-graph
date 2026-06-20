@@ -117,14 +117,24 @@ def get_background_task(task_id: str) -> dict | None:
         ).fetchone()
         if not row:
             return None
+        task_type = row[1]
         result_data = row[3] or {}
-        if isinstance(result_data, dict) and result_data.get("document_id"):
+        # Revision-pipeline tasks carry their own stage from the worker and must
+        # NOT be enriched from the latest initial/non-revision run, which would
+        # overwrite the revision stage with the initial run's current_stage
+        # (#414-2). Their progress is read via the revision status API instead.
+        is_revision_task = (
+            task_type == "revision_pipeline"
+            or (isinstance(result_data, dict) and result_data.get("revision_run_id"))
+        )
+        if isinstance(result_data, dict) and result_data.get("document_id") and not is_revision_task:
             run = session.execute(
                 sa_text(
                     """
                     SELECT status, current_stage, error_message, stage_outputs
                     FROM document_analysis_runs
                     WHERE document_id = :document_id
+                      AND (run_type IS NULL OR run_type <> 'revision')
                     ORDER BY created_at DESC
                     LIMIT 1
                     """
@@ -150,6 +160,44 @@ def get_background_task(task_id: str) -> dict | None:
             "status": row[2],
             "result_data": result_data,
             "error_message": row[4] or (run[2] if 'run' in locals() and run else None),
+            "created_at": row[5].isoformat() if row[5] else "",
+            "updated_at": row[6].isoformat() if row[6] else "",
+        }
+    finally:
+        session.close()
+
+
+def get_latest_revision_task(revision_run_id: str) -> dict | None:
+    """Latest revision_pipeline task for a revision run (#414-4 reload restore).
+
+    Returns id/status/stage/progress so the UI can restore polling after a reload
+    without ever pulling in another revision's task. No initial-run enrichment is
+    applied (revision tasks carry their own stage).
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT id, task_type, status, result_data, error_message, created_at, updated_at
+                FROM background_tasks
+                WHERE task_type = 'revision_pipeline'
+                  AND result_data IS NOT NULL
+                  AND result_data->>'revision_run_id' = :rev
+                ORDER BY created_at DESC
+                LIMIT 1
+            """),
+            {"rev": revision_run_id},
+        ).fetchone()
+        if not row:
+            return None
+        result_data = row[3] or {}
+        return {
+            "task_id": row[0],
+            "task_type": row[1],
+            "status": row[2],
+            "stage": (result_data or {}).get("stage") if isinstance(result_data, dict) else None,
+            "result_data": result_data,
+            "error_message": row[4],
             "created_at": row[5].isoformat() if row[5] else "",
             "updated_at": row[6].isoformat() if row[6] else "",
         }

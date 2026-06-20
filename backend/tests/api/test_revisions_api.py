@@ -68,30 +68,129 @@ def test_create_revision_no_base_returns_409(app_client, monkeypatch):
     assert resp.status_code == 409
 
 
-def test_run_rejects_invalid_raw_operations_with_422(app_client, monkeypatch):
+def _claimable(monkeypatch, revisions, ok=True):
+    """Stub the atomic DB run-claim (#414-1) as winner (ok) or loser (409)."""
+    monkeypatch.setattr(revisions.persistence, "claim_revision_run",
+                        lambda *, run_id, **k: ok)
+    monkeypatch.setattr(revisions.persistence, "release_revision_run",
+                        lambda *, run_id, **k: None)
+
+
+def test_run_returns_202_and_launches_worker(app_client, monkeypatch):
     client, revisions, _dep, _app = app_client
-    monkeypatch.setattr(
-        revisions.coordinator,
-        "audit_revision_run",
-        lambda **kwargs: {"verdict_counts": {}, "revision_targets": []},
-    )
+    _claimable(monkeypatch, revisions, ok=True)
+    launched = {}
+    monkeypatch.setattr(revisions, "create_background_task", lambda *a, **k: None)
+    monkeypatch.setattr(revisions, "update_background_task", lambda *a, **k: None)
+    monkeypatch.setattr(revisions, "_launch_revision_worker",
+                        lambda **kwargs: launched.update(kwargs))
+    resp = client.post("/api/admin/documents/doc-1/revisions/rev-1/run", json={})
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["revision_run_id"] == "rev-1"
+    assert body["revision_status"] == "running"
+    assert body["task_id"]
+    # the long-running work was handed to the worker, not done in the request
+    assert launched["revision_id"] == "rev-1"
+
+
+def test_run_rejects_duplicate_via_failed_atomic_claim_with_409(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    # The atomic claim lost the race -> 409, and no worker is started.
+    _claimable(monkeypatch, revisions, ok=False)
+    monkeypatch.setattr(revisions, "create_background_task",
+                        lambda *a, **k: pytest.fail("must not start a duplicate run"))
+    monkeypatch.setattr(revisions, "_launch_revision_worker",
+                        lambda **kwargs: pytest.fail("must not launch worker on 409"))
+    resp = client.post("/api/admin/documents/doc-1/revisions/rev-1/run", json={})
+    assert resp.status_code == 409
+
+
+def test_run_releases_claim_when_worker_launch_fails(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    _claimable(monkeypatch, revisions, ok=True)
+    released = {}
+    monkeypatch.setattr(revisions.persistence, "release_revision_run",
+                        lambda *, run_id, **k: released.update({"run_id": run_id}))
+    monkeypatch.setattr(revisions, "create_background_task", lambda *a, **k: None)
+    monkeypatch.setattr(revisions, "update_background_task", lambda *a, **k: None)
+
+    def _boom(**kwargs):
+        raise RuntimeError("thread pool exhausted")
+    monkeypatch.setattr(revisions, "_launch_revision_worker", _boom)
+    resp = client.post("/api/admin/documents/doc-1/revisions/rev-1/run", json={})
+    assert resp.status_code == 500
+    assert released.get("run_id") == "rev-1"  # claim released -> retryable
+
+
+def test_run_worker_records_invalid_raw_operations(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    _claimable(monkeypatch, revisions, ok=True)
+    tasks: dict = {}
+
+    def _update(task_id, status, result_data=None, error_message=None):
+        tasks[task_id] = {"status": status, "result_data": result_data,
+                          "error_message": error_message}
+    monkeypatch.setattr(revisions, "create_background_task", lambda *a, **k: None)
+    monkeypatch.setattr(revisions, "update_background_task", _update)
 
     def _invalid(**kwargs):
         raise revisions.coordinator.ProposalValidationError([
-            {"raw": kwargs["operations"][0], "reason": "missing_source_or_evidence"},
+            {"raw": (kwargs.get("operations") or [{}])[0], "reason": "missing_source_or_evidence"},
         ])
+    monkeypatch.setattr(revisions.coordinator, "run_revision_pipeline", _invalid)
+    # run the worker synchronously so we can inspect the recorded outcome
+    monkeypatch.setattr(revisions, "_launch_revision_worker",
+                        lambda **kwargs: revisions._revision_run_worker(**kwargs))
 
-    monkeypatch.setattr(revisions.coordinator, "assemble_candidate", _invalid)
     resp = client.post(
         "/api/admin/documents/doc-1/revisions/rev-1/run",
-        json={"operations": [{
-            "operation": "update_entity",
-            "target_type": "claim",
-            "target_id": "clm_1",
-        }]},
+        json={"operations": [{"operation": "update_entity", "target_type": "claim",
+                              "target_id": "clm_1"}]},
     )
-    assert resp.status_code == 422
-    assert resp.json()["detail"]["rejected_operations"][0]["reason"] == "missing_source_or_evidence"
+    assert resp.status_code == 202
+    failed = [t for t in tasks.values() if t["status"] == "failed"]
+    assert failed and failed[0]["result_data"]["rejected_operations"][0]["reason"] == \
+        "missing_source_or_evidence"
+
+
+def test_run_status_attaches_only_owning_task(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    # A task id from a *different* revision must not be attached; fall back to the
+    # latest task that belongs to this revision (#414-2 / #414-4).
+    monkeypatch.setattr(revisions, "get_background_task",
+                        lambda task_id: {"task_id": task_id,
+                                         "result_data": {"revision_run_id": "OTHER"}})
+    monkeypatch.setattr(revisions, "get_latest_revision_task",
+                        lambda rev: {"task_id": "own-task", "status": "processing",
+                                     "stage": "audit",
+                                     "result_data": {"revision_run_id": rev}})
+    resp = client.get("/api/admin/documents/doc-1/revisions/rev-1/run-status?task_id=foreign")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["task"]["task_id"] == "own-task"
+    assert body["task"]["result_data"]["revision_run_id"] == "rev-1"
+
+
+def test_detail_returns_restore_fields(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    monkeypatch.setattr(revisions.persistence, "get_analysis_run",
+                        lambda *, run_id: {"id": run_id, "run_type": "revision",
+                                           "document_id": "doc-1", "status": "failed",
+                                           "revision_status": "proposed",
+                                           "current_stage": "candidate_assembly",
+                                           "error_message": "ProposalValidationError: 3",
+                                           "base_run_id": "base-1",
+                                           "stage_outputs": {"_artifacts": {}}})
+    monkeypatch.setattr(revisions.persistence, "get_revision_decisions", lambda *, run_id: [])
+    monkeypatch.setattr(revisions, "get_latest_revision_task",
+                        lambda rev: {"task_id": "t1", "status": "failed", "stage": "candidate_assembly"})
+    resp = client.get("/api/admin/documents/doc-1/revisions/rev-1")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["current_stage"] == "candidate_assembly"
+    assert body["error_message"].startswith("ProposalValidationError")
+    assert body["latest_task"]["status"] == "failed"
 
 
 def test_accept_success(app_client, monkeypatch):
@@ -102,6 +201,17 @@ def test_accept_success(app_client, monkeypatch):
                        json={"comment": "lgtm"})
     assert resp.status_code == 200
     assert resp.json()["accepted"] is True
+
+
+def test_accept_partial_flag_forwarded(app_client, monkeypatch):
+    client, revisions, _dep, _app = app_client
+    captured = {}
+    monkeypatch.setattr(revisions.coordinator, "accept_revision",
+                        lambda **k: captured.update(k) or {"active_run_id": "rev-1"})
+    resp = client.post("/api/admin/documents/doc-1/revisions/rev-1/accept",
+                       json={"comment": "ok", "accept_partial": True})
+    assert resp.status_code == 200
+    assert captured["accept_partial"] is True
 
 
 def test_accept_hard_error_returns_422(app_client, monkeypatch):

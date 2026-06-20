@@ -46,7 +46,17 @@ def test_decision_actions_present(admin_js):
 
 def test_accept_handles_conflict_and_block(admin_js):
     assert "409" in admin_js  # optimistic-concurrency conflict surfaced
-    assert "422" in admin_js  # hard-error / protected block surfaced
+    # Every non-2xx response, including hard-error/protected blocks (422) and
+    # projection validation failures (400/500), goes through one error path.
+    assert "decisionResponse" in admin_js
+
+
+def test_decision_actions_reject_all_non_success_responses(admin_js):
+    assert "function decisionResponse(r, fallback)" in admin_js
+    assert "if (r.ok) return r.json()" in admin_js
+    assert 'decisionResponse(r, "採用できません")' in admin_js
+    assert 'decisionResponse(r, "却下に失敗しました。")' in admin_js
+    assert 'decisionResponse(r, "再修正の作成に失敗しました。")' in admin_js
 
 
 def test_protected_change_warning_and_confirm(admin_js):
@@ -73,3 +83,63 @@ def test_styles_added():
     css = STYLES.read_text(encoding="utf-8")
     assert ".eg-rev-overlay" in css
     assert ".eg-rev-badge-protected" in css
+
+
+# --- #414: async polling / reload-restore / progress wiring ----------------
+
+def test_async_run_uses_poll_loop_not_inline_report(admin_js):
+    # /run is fire-and-poll: a 202 launches polling, not an inline report fetch.
+    assert "pollRunStatus" in admin_js
+    assert "run-status" in admin_js
+    assert "202" not in admin_js or "pollRunStatus" in admin_js
+
+
+def test_run_status_409_surfaced_and_failure_vs_timeout_distinguished(admin_js):
+    # duplicate run rejected (409), and timeout is NOT shown as a failure (#414-1/-4).
+    assert "既に実行中" in admin_js
+    assert "接続が切れたため状態を確認中" in admin_js  # timeout/network -> keep checking
+    assert "renderRunFailure" in admin_js              # server failure -> explicit fail
+
+
+def test_reload_restores_running_failed_completed(admin_js):
+    assert "restoreRunState" in admin_js
+    assert "latest_task" in admin_js
+    # running -> resume polling the same task; failed -> show stage + error
+    assert "pollRunStatus()" in admin_js
+    assert "renderRunFailure(" in admin_js
+
+
+def test_progress_shows_completed_over_total(admin_js):
+    # recommended "27 / 199" style count, from the worker's completed/total (#414-3).
+    assert "completed_count" in admin_js
+    assert "total_count" in admin_js
+
+
+def test_stop_polling_prevents_duplicate_timers(admin_js):
+    assert "stopPolling" in admin_js
+    # close() and openDetail() both stop polling before (re)rendering
+    assert "function stopPolling()" in admin_js
+
+
+# --- #415: partial adoption UI --------------------------------------------
+
+def test_partial_adoption_rendered(admin_js):
+    assert "excludedOpsHtml" in admin_js
+    assert "candidate_status" in admin_js
+    assert "operation_summary" in admin_js
+    assert "excluded_operations" in admin_js
+    # the three candidate states are surfaced
+    assert "partially_adoptable" in admin_js
+    assert "blocked" in admin_js
+
+
+def test_partial_accept_button_and_flag(admin_js):
+    # a distinct, explicit partial-accept action + accept_partial flag (#415)
+    assert "問題のある変更を除外して採用" in admin_js
+    assert "accept_partial" in admin_js
+
+
+def test_excluded_operations_show_reason(admin_js):
+    assert "除外される変更" in admin_js
+    assert "excluded_invalid" in admin_js
+    assert "excluded_dependency" in admin_js

@@ -193,15 +193,22 @@ def _index_derivations(artifacts: dict) -> dict[str, dict]:
             continue
         steps = _as_list(chain.get("steps"))
         equation_ids: list[str] = []
+        step_ids: list[str] = []
         for s in steps:
             if isinstance(s, dict):
                 equation_ids.extend(_str_list(s.get("input_equation_ids")) + _str_list(s.get("output_equation_ids")))
                 equation_ids.extend(_str_list(s.get("inputs")) + _str_list(s.get("outputs")))
+                sid = str(s.get("step_id") or s.get("id") or "").strip()
+                if sid:
+                    step_ids.append(sid)
         out[did] = {
             "entity_id": did,
             "entity_type": "derivation",
             "label": chain.get("label") or chain.get("name") or "",
             "step_count": len(steps),
+            # Derivation *step* ids live alongside the chain id; refs may point at
+            # either, so both are tracked and the resolver accepts both (#412 P1-7).
+            "step_ids": list(dict.fromkeys(step_ids)),
             "review_status": chain.get("review_status") or "",
             "equation_ids": list(dict.fromkeys(equation_ids)),
             "source_locations": _source_locations(chain),
@@ -268,6 +275,10 @@ def _index_graph(artifacts: dict) -> tuple[dict[str, dict], dict[str, dict]]:
             "equation_ids": _str_list(n.get("linked_equation_ids")),
             "evidence_ids": _str_list(n.get("linked_evidence_ids")),
             "derivation_ids": _str_list(n.get("linked_derivation_ids")),
+            # member_component_ids reference other graph nodes (aggregated detail
+            # nodes) — falling back to component ids. Schema-defined so the same
+            # resolver classifies them for base + candidate alike (#412 P1-7).
+            "member_component_ids": _str_list(n.get("member_component_ids")),
             "protected": _is_protected(n),
         }
     edges: dict[str, dict] = {}
@@ -343,8 +354,20 @@ def _build_relations(entities: dict[str, dict[str, dict]]) -> tuple[list[dict], 
     relations: list[dict] = []
     unresolved: list[dict] = []
 
+    # Derivation *step* ids resolve a ``derivation_ids`` reference just as a chain
+    # id does, so step refs are not mis-flagged as dangling (#412 P1-7).
+    derivation_step_ids: set[str] = set()
+    for d in entities.get("derivations", {}).values():
+        derivation_step_ids.update(d.get("step_ids") or [])
+    graph_node_ids = set(entities.get("graph_nodes", {}))
+    component_ids = set(entities.get("components", {}))
+
     def _bucket_has(bucket: str, _id: str) -> bool:
-        return _id in entities.get(bucket, {})
+        if _id in entities.get(bucket, {}):
+            return True
+        if bucket == "derivations" and _id in derivation_step_ids:
+            return True
+        return False
 
     def _emit(source_type, source_id, rel_type, target_bucket, target_id, field):
         target_singular = target_bucket.rstrip("s") if target_bucket != "evidence" else "evidence"
@@ -373,6 +396,28 @@ def _build_relations(entities: dict[str, dict[str, dict]]) -> tuple[list[dict], 
                 for target_id in ent.get(field, []) or []:
                     _emit(ent["entity_type"], ent_id, f"{ent['entity_type']}_{field}",
                           target_bucket, target_id, field)
+
+    # Graph node membership: a node aggregates other graph nodes (detail nodes),
+    # falling back to component ids. Resolved against both spaces (#412 P1-7).
+    for node_id, node in entities.get("graph_nodes", {}).items():
+        for target_id in node.get("member_component_ids", []) or []:
+            if target_id in graph_node_ids or target_id in component_ids:
+                relations.append({
+                    "type": "graph_node_member_component_ids",
+                    "source_type": "graph_node",
+                    "source_id": node_id,
+                    "target_type": "graph_node",
+                    "target_id": target_id,
+                })
+            else:
+                unresolved.append({
+                    "source_type": "graph_node",
+                    "source_id": node_id,
+                    "ref_field": "member_component_ids",
+                    "target_type": "graph_node",
+                    "target_id": target_id,
+                    "reason": "missing_member",
+                })
 
     # Graph edges → node endpoints.
     for edge_id, edge in entities.get("graph_edges", {}).items():
