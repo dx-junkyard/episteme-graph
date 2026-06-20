@@ -16,6 +16,10 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+from episteme_graph.agents.component_assembly.split_recommendation import (
+    split_is_required as _split_is_required,
+)
+
 # Confidence below which an entity is considered low-confidence and worth a
 # source re-check.
 LOW_CONFIDENCE_THRESHOLD = 0.5
@@ -84,7 +88,11 @@ def _from_existing_issues(inventory: dict) -> list[dict]:
     out: list[dict] = []
     for issue in inventory.get("existing_issues", []):
         target_id = issue.get("target_id") or issue.get("artifact") or "document"
-        target_type = _infer_target_type(issue.get("artifact"), target_id)
+        # Issue #418: prefer the explicit target_type recorded on the issue; fall
+        # back to artifact/id heuristics only when it is absent (legacy issues).
+        target_type = issue.get("target_type") or _infer_target_type(
+            issue.get("artifact"), target_id
+        )
         code = issue.get("code") or "issue"
         out.append(_make_checkpoint(
             target_type=target_type,
@@ -200,7 +208,10 @@ def _from_components(inventory: dict) -> list[dict]:
     out: list[dict] = []
     for cid, comp in (inventory.get("entities", {}).get("components", {}) or {}).items():
         split = comp.get("split_recommendation") or {}
-        if split.get("split_required") or split.get("should_split"):
+        # Canonical key is ``required`` (#417). Read through the shared helper so
+        # legacy ``split_required`` / ``should_split`` shapes are still honored
+        # and a ``required: true`` component is never silently skipped.
+        if _split_is_required(split):
             out.append(_make_checkpoint(
                 target_type="component", target_id=cid,
                 question="component が単一責務・適切な粒度か（分割推奨あり）。input/output が claim/equation と整合するか確認する",

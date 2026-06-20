@@ -1508,3 +1508,101 @@ def test_resolved_claim_refs_produce_no_leak_warning():
         w.code not in ("PROVISIONAL_CLAIM_REF_IN_ARTIFACT", "UNRESOLVED_CLAIM_REF_IN_ARTIFACT")
         for w in result.warnings
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #418: cross-artifact canonicalization / integrity
+# ---------------------------------------------------------------------------
+
+class _CourseTopicWithDerivations:
+    def __init__(self, linked_component_ids=None, linked_derivation_ids=None):
+        self.linked_component_ids = linked_component_ids or []
+        self.linked_derivation_ids = linked_derivation_ids or []
+
+
+def test_graph_node_parent_component_must_resolve():
+    artifacts = _make_artifacts(component_graph={
+        "nodes": [
+            {"component_id": "comp_main", "label": "Main", "component_type": "TheoryOperationNode"},
+            {"component_id": "op_1", "label": "op", "component_type": "EquationOperationNode",
+             "parent_component_id": "comp_ghost"},
+        ],
+        "edges": [],
+    })
+    result = _run_gate(artifacts=artifacts)
+    codes = {e.code for e in result.errors}
+    assert "COMPONENT_GRAPH_PARENT_COMPONENT_INVALID" in codes
+    bad = next(e for e in result.errors if e.code == "COMPONENT_GRAPH_PARENT_COMPONENT_INVALID")
+    assert bad.target_type == "graph_node"
+    assert bad.target_id == "op_1"
+
+
+def test_graph_node_member_component_must_resolve():
+    artifacts = _make_artifacts(component_graph={
+        "nodes": [
+            {"component_id": "comp_main", "label": "Main", "component_type": "TheoryOperationNode",
+             "member_component_ids": ["op_missing"]},
+        ],
+        "edges": [],
+    })
+    result = _run_gate(artifacts=artifacts)
+    assert "COMPONENT_GRAPH_MEMBER_COMPONENT_INVALID" in {e.code for e in result.errors}
+
+
+def test_graph_node_valid_parent_and_member_pass():
+    artifacts = _make_artifacts(component_graph={
+        "nodes": [
+            {"component_id": "comp_main", "label": "Main", "component_type": "TheoryOperationNode",
+             "member_component_ids": ["op_1"]},
+            {"component_id": "op_1", "label": "op", "component_type": "EquationOperationNode",
+             "parent_component_id": "comp_main"},
+        ],
+        "edges": [],
+    })
+    result = _run_gate(artifacts=artifacts)
+    codes = {e.code for e in result.errors}
+    assert "COMPONENT_GRAPH_PARENT_COMPONENT_INVALID" not in codes
+    assert "COMPONENT_GRAPH_MEMBER_COMPONENT_INVALID" not in codes
+
+
+def test_course_topic_unrelated_derivation_is_flagged():
+    component = _ComponentRecord(component_id="comp_1")
+    component.linked_derivation_ids = ["der_1"]
+    comp_result = _ComponentResult([component])
+    course = _CourseMappingResult([
+        _CourseTopicWithDerivations(
+            linked_component_ids=["comp_1"],
+            linked_derivation_ids=["der_1", "der_unrelated"],
+        )
+    ])
+    result = _run_gate(component_result=comp_result, course_mapping=course)
+    unrelated = [w for w in result.warnings if w.code == "COURSE_TOPIC_UNRELATED_DERIVATION"]
+    assert len(unrelated) == 1
+    assert unrelated[0].target_type == "derivation"
+    assert unrelated[0].target_id == "der_unrelated"
+
+
+def test_course_topic_relevant_derivation_passes():
+    component = _ComponentRecord(component_id="comp_1")
+    component.linked_derivation_ids = ["der_1"]
+    comp_result = _ComponentResult([component])
+    course = _CourseMappingResult([
+        _CourseTopicWithDerivations(
+            linked_component_ids=["comp_1"],
+            linked_derivation_ids=["der_1"],
+        )
+    ])
+    result = _run_gate(component_result=comp_result, course_mapping=course)
+    assert not any(w.code == "COURSE_TOPIC_UNRELATED_DERIVATION" for w in result.warnings)
+
+
+def test_validation_entry_serializes_target_fields():
+    artifacts = _make_artifacts(component_graph={
+        "nodes": [{"component_id": "comp_main", "label": "Main",
+                   "component_type": "TheoryOperationNode", "member_component_ids": ["x"]}],
+        "edges": [],
+    })
+    result = _run_gate(artifacts=artifacts)
+    payload = result.to_dict()
+    entry = next(e for e in payload["errors"] if e["code"] == "COMPONENT_GRAPH_MEMBER_COMPONENT_INVALID")
+    assert "target_type" in entry and "target_id" in entry

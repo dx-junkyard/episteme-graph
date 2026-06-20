@@ -155,3 +155,20 @@ def test_empty_component_concepts_safe_fallback():
     topic = agent.run("doc_test", [comp]).topics[0]
     assert topic.introduced_concepts == []
     assert "zero-recoil limit" in topic.prerequisite_concepts
+
+
+def test_topic_links_only_its_components_derivations():
+    # Issue #418: a topic links the derivations of its own component, determined
+    # from the component (not attached indiscriminately).
+    comp = _make_component("comp_d")
+    comp.linked_derivation_ids = ["der_1", "der_2"]  # type: ignore[attr-defined]
+    result = CourseMappingAgent().run("doc", [comp])
+    topic = result.topics[0]
+    assert topic.linked_component_ids == ["comp_d"]
+    assert topic.linked_derivation_ids == ["der_1", "der_2"]
+
+
+def test_topic_has_no_derivations_when_component_has_none():
+    comp = _make_component("comp_nd")
+    result = CourseMappingAgent().run("doc", [comp])
+    assert result.topics[0].linked_derivation_ids == []

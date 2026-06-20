@@ -252,6 +252,14 @@ class EquationSemanticsAgent:
             if progress_callback:
                 progress_callback(idx, total)
 
+        # Issue #416: guarantee completeness — every accepted/provisional candidate
+        # must resolve to a final EquationRecord. A candidate can be silently lost
+        # before reaching the LLM loop (e.g. its source block could not be
+        # resolved in build_llm_inputs). Recover such candidates with a reasoned
+        # provisional record instead of dropping them; downstream artifacts must
+        # never reference an equation id that has no record.
+        self._recover_dropped_candidates(reconstructable, records)
+
         _apply_content_hashes(records)
         result = EquationSemanticsResult(
             document_id=structure.document_id,
@@ -265,6 +273,37 @@ class EquationSemanticsAgent:
         fidelity_issues = apply_fidelity_guards(result)
         result.validation_issues = self._validator.validate(result, cartridge) + fidelity_issues
         return result
+
+    @staticmethod
+    def _recover_dropped_candidates(
+        reconstructable: list[EquationCandidate],
+        records: list[EquationRecord],
+    ) -> None:
+        """Create reasoned provisional records for unprocessed candidates (#416).
+
+        Any accepted/provisional candidate whose ``accepted_equation_id`` does not
+        resolve to a record in ``records`` is recovered with a minimal provisional
+        record so the candidate→record relation is complete and no downstream
+        stage can reference a missing equation.
+        """
+        record_ids = {r.equation_id for r in records}
+        for candidate in reconstructable:
+            if candidate.acceptance_status not in {"accepted", "provisional"}:
+                continue
+            accepted_id = candidate.accepted_equation_id
+            if accepted_id and accepted_id in record_ids:
+                continue
+            if "candidate_dropped_before_record" not in candidate.review_reason:
+                candidate.review_reason.append("candidate_dropped_before_record")
+            logger.warning(
+                "document=%s candidate=%s produced no equation record; "
+                "recovering as provisional (#416)",
+                candidate.document_id,
+                candidate.candidate_id,
+            )
+            provisional = _make_provisional_record(candidate)
+            record_ids.add(provisional.equation_id)
+            records.append(provisional)
 
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:
         if not cartridge_id:

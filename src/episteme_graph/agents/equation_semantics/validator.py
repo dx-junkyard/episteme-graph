@@ -50,7 +50,79 @@ class EquationSemanticsValidator:
             issues += self._check_cartridge_terms(record, cartridge)
 
         issues += self._check_duplicate_content_hashes(result.equations)
+        issues += self._check_candidate_record_completeness(result)
 
+        return issues
+
+    # ------------------------------------------------------------------
+    # Candidate → record completeness (issue #416)
+    # ------------------------------------------------------------------
+
+    def _check_candidate_record_completeness(
+        self, result: EquationSemanticsResult
+    ) -> list[ValidationIssue]:
+        """Guarantee accepted/provisional candidates resolve to a final record.
+
+        A candidate that was accepted/provisional but whose ``accepted_equation_id``
+        is empty or points at no EquationRecord is a hard error
+        (``accepted_candidate_missing_equation``): downstream claim / component /
+        derivation could otherwise reference an equation that does not exist. A
+        large silent shrink from candidate count to record count is also surfaced.
+
+        This check only runs on the full result (candidates + equations both
+        present); per-record partial validation passes an empty candidate list and
+        is unaffected.
+        """
+        candidates = result.equation_candidates
+        if not candidates:
+            return []
+
+        issues: list[ValidationIssue] = []
+        record_ids = {r.equation_id for r in result.equations}
+        accepted_like = [
+            c for c in candidates
+            if c.acceptance_status in ("accepted", "provisional")
+        ]
+        resolved = 0
+        for c in accepted_like:
+            accepted_id = c.accepted_equation_id
+            if not accepted_id:
+                issues.append(ValidationIssue(
+                    rule_id="accepted_candidate_missing_equation",
+                    severity="error",
+                    message=(
+                        f"{c.candidate_id} is {c.acceptance_status} but has no "
+                        "accepted_equation_id (no EquationRecord produced)"
+                    ),
+                    field=f"{c.candidate_id}.accepted_equation_id",
+                ))
+                continue
+            if accepted_id not in record_ids:
+                issues.append(ValidationIssue(
+                    rule_id="accepted_candidate_missing_equation",
+                    severity="error",
+                    message=(
+                        f"{c.candidate_id} accepted_equation_id "
+                        f"{accepted_id!r} does not resolve to any EquationRecord"
+                    ),
+                    field=f"{c.candidate_id}.accepted_equation_id",
+                ))
+                continue
+            resolved += 1
+
+        # Large silent shrink: many accepted/provisional candidates collapsed into
+        # far fewer records without each being individually accounted for above.
+        if accepted_like and resolved < len(accepted_like):
+            issues.append(ValidationIssue(
+                rule_id="equation_candidate_silent_shrink",
+                severity="warning",
+                message=(
+                    f"{len(accepted_like)} accepted/provisional candidate(s) but "
+                    f"only {resolved} resolved to an EquationRecord — "
+                    "candidate→record shrink requires review"
+                ),
+                field="equation_candidates",
+            ))
         return issues
 
     @staticmethod

@@ -314,6 +314,197 @@ def test_tex_archive_records_unclosed_math_environment_for_completeness():
     assert "equation_environment_cut_at_boundary" in report["tail_truncation"]["signals"]
 
 
+def _tex_archive_with_math() -> bytes:
+    return _make_tex_archive({
+        "main.tex": r"""
+            \documentclass{article}
+            \begin{document}
+            \section{Results}
+            \begin{equation}\label{eq:energy} E = mc^2 \end{equation}
+            \begin{align}\label{eq:force} F = ma \end{align}
+            \[ a^2 + b^2 = c^2 \]
+            \end{document}
+        """,
+    })
+
+
+def test_tex_archive_ingest_stores_equation_inventory():
+    # AC #420(1,2): ingest persists display-math counts and symbolic labels.
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    structure = build_structure_from_tex_archive(
+        _tex_archive_with_math(), document_id="doc-inv", source_file="paper.tar.gz"
+    )
+    inv = structure.metadata.tex_equation_inventory
+    assert inv is not None
+    assert inv["display_math_blocks"] == 3
+    assert "eq:energy" in inv["labels"]
+    assert "eq:force" in inv["labels"]
+    assert inv["label_count"] == 2
+
+
+def test_tex_equation_inventory_survives_serialization_roundtrip():
+    # AC #420(3): inventory persists through to_dict / from_dict.
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+    from episteme_graph.agents.document_structure.schema import DocumentStructureResult
+
+    structure = build_structure_from_tex_archive(
+        _tex_archive_with_math(), document_id="doc-rt", source_file="paper.tar.gz"
+    )
+    restored = DocumentStructureResult.from_dict(structure.to_dict())
+    assert restored.metadata.tex_equation_inventory == structure.metadata.tex_equation_inventory
+    assert restored.metadata.tex_equation_inventory["display_math_blocks"] == 3
+
+
+def test_completeness_uses_precomputed_inventory_without_tex_source():
+    # AC #420(4,6): a TeX doc (pages=0) with display math but no EquationRecords is
+    # incomplete, detected from the persisted inventory alone (no tex_source).
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+    from core.document_pipeline.completeness import analyze_document_completeness
+
+    structure = build_structure_from_tex_archive(
+        _tex_archive_with_math(), document_id="doc-cov", source_file="paper.tar.gz"
+    )
+    struct_dict = structure.to_dict()
+    # The structure carries no raw tex_source — only the precomputed inventory.
+    assert "tex_source" not in (struct_dict.get("metadata") or {})
+    report = analyze_document_completeness(
+        struct_dict,
+        document_id=structure.document_id,
+        equations={"equations": [], "equation_candidates": []},
+    )
+    cov = report["equation_artifact_coverage"]
+    assert cov["tex_display_math_blocks"] == 3
+    assert cov["complete"] is False
+    assert "tex_display_math_without_equation_records" in cov["review_reasons"]
+    assert report["complete"] is False
+
+
+def test_completeness_passes_when_records_cover_tex_math():
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+    from core.document_pipeline.completeness import analyze_document_completeness
+
+    structure = build_structure_from_tex_archive(
+        _tex_archive_with_math(), document_id="doc-cov2", source_file="paper.tar.gz"
+    )
+    report = analyze_document_completeness(
+        structure.to_dict(),
+        document_id=structure.document_id,
+        equations={
+            "equations": [{"equation_id": "eq_1"}],
+            "equation_candidates": [
+                {"candidate_id": "c1", "acceptance_status": "accepted",
+                 "accepted_equation_id": "eq_1"},
+            ],
+        },
+    )
+    cov = report["equation_artifact_coverage"]
+    assert cov["tex_display_math_blocks"] == 3
+    assert cov["complete"] is True
+
+
+class _FakeEquations:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def to_dict(self):
+        return self._payload
+
+
+def test_orchestrator_records_completeness_with_equation_records():
+    # Regression for #420 P1: the orchestrator runs equation_semantics (stage 8)
+    # before this completeness call, so it must pass the real EquationRecords —
+    # the persisted document_completeness artifact must NOT be stale-incomplete
+    # for a normal TeX document with math.
+    from core.document_pipeline.orchestrator import _record_document_completeness
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    structure = build_structure_from_tex_archive(
+        _tex_archive_with_math(), document_id="doc-orch", source_file="paper.tar.gz"
+    )
+    equations = _FakeEquations({
+        "equations": [{"equation_id": "eq_1"}],
+        "equation_candidates": [
+            {"candidate_id": "c1", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_1"},
+        ],
+    })
+    saved: dict = {}
+    report = _record_document_completeness(
+        structure=structure,
+        evidence=None,
+        equations=equations,
+        document_id="doc-orch",
+        save_artifact=lambda name, value: saved.__setitem__(name, value),
+    )
+    cov = saved["document_completeness"]["equation_artifact_coverage"]
+    assert cov["equation_record_count"] == 1
+    assert cov["tex_display_math_blocks"] == 3
+    assert cov["complete"] is True
+    assert report["complete"] is True
+    # A complete document leaves structure untouched (no stale propagation).
+    assert not any(
+        getattr(i, "rule_id", "").startswith("document_completeness_equation")
+        for i in structure.validation_issues
+    )
+
+
+def test_orchestrator_completeness_incomplete_when_records_missing():
+    # The genuine missing-records case still reports incomplete and propagates.
+    from core.document_pipeline.orchestrator import _record_document_completeness
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    structure = build_structure_from_tex_archive(
+        _tex_archive_with_math(), document_id="doc-orch2", source_file="paper.tar.gz"
+    )
+    saved: dict = {}
+    report = _record_document_completeness(
+        structure=structure,
+        evidence=None,
+        equations=_FakeEquations({"equations": [], "equation_candidates": []}),
+        document_id="doc-orch2",
+        save_artifact=lambda name, value: saved.__setitem__(name, value),
+    )
+    assert report["equation_artifact_coverage"]["complete"] is False
+    assert any(
+        getattr(i, "rule_id", "") == "document_completeness_equation_artifact_coverage_incomplete"
+        for i in structure.validation_issues
+    )
+
+
+def test_build_document_completeness_passes_equations_to_coverage():
+    # Regression for #420 P1: the export-route wrapper must forward the
+    # equation_semantics artifact so a normal TeX document with records is not
+    # reported as permanently incomplete.
+    import sys as _sys
+    from pathlib import Path as _Path
+    _api = _Path(__file__).resolve().parents[1] / "api"
+    if str(_api) not in _sys.path:
+        _sys.path.insert(0, str(_api))
+    from routes import export_artifacts as ea
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    structure = build_structure_from_tex_archive(
+        _tex_archive_with_math(), document_id="doc-route", source_file="paper.tar.gz"
+    )
+    struct_dict = structure.to_dict()
+    equations = {
+        "equations": [{"equation_id": "eq_1"}],
+        "equation_candidates": [
+            {"candidate_id": "c1", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_1"},
+        ],
+    }
+    # Without equations → incomplete; with equations → complete.
+    without = ea.build_document_completeness(struct_dict, document_id="doc-route")
+    assert without["equation_artifact_coverage"]["complete"] is False
+    with_eq = ea.build_document_completeness(
+        struct_dict, document_id="doc-route", equations_artifact=equations
+    )
+    assert with_eq["equation_artifact_coverage"]["complete"] is True
+    assert "equation_artifact_coverage_incomplete" not in with_eq["review_reasons"]
+
+
 def test_tex_archive_wraps_alignment_equations_for_rendering():
     from core.document_pipeline.tex_archive import build_structure_from_tex_archive
 

@@ -98,6 +98,10 @@ CANDIDATE_REVIEW_REASONS = [
     # Issue #368: the candidate originates from a table / table-cell and must
     # not be auto-confirmed as a standalone independent equation.
     "table_derived_equation_candidate",
+    # Issue #416: an accepted/provisional candidate produced no EquationRecord
+    # (e.g. its source block could not be resolved). A reasoned provisional
+    # record is created instead of silently dropping the candidate.
+    "candidate_dropped_before_record",
 ]
 
 # ---------------------------------------------------------------------------

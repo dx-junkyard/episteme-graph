@@ -594,6 +594,7 @@ def _build_document_completeness_reports(
             structure,
             document_id=doc_id,
             evidence_artifact=artifacts.get("evidence_registry"),
+            equations_artifact=artifacts.get("equation_semantics"),
         ))
     return out
 

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from ..theory_operations import classify_operation
 from .responsibility import canonical_responsibility_type, canonical_responsibility_types
 from .schema import ComponentAssemblyResult, ComponentRecord
+from .split_recommendation import normalize_split_recommendation
 
 
 THRESHOLDS = {
@@ -53,9 +54,13 @@ class ComponentGranularityAnalyzer:
         derivations=None,
     ) -> ComponentAssemblyResult:
         derivation_index = _component_derivation_step_index(derivations)
+        equation_step_index = _equation_derivation_step_index(derivations)
         quality_entries: list[dict] = []
         for component in result.components:
-            quality = self._analyze_component(component, derivation_index.get(component.component_id, []))
+            steps = _derivation_steps_for_component(
+                component, derivation_index, equation_step_index
+            )
+            quality = self._analyze_component(component, steps)
             _apply_quality(component, quality)
             quality_entries.append(quality.to_dict())
 
@@ -99,11 +104,13 @@ class ComponentGranularityAnalyzer:
 
 def _apply_quality(component: ComponentRecord, quality: ComponentQuality) -> None:
     component.component_quality = quality.to_dict()
-    component.split_recommendation = {
+    # Canonical split-recommendation schema (#417): always emit the ``required``
+    # key through the shared normalizer so every downstream stage reads it.
+    component.split_recommendation = normalize_split_recommendation({
         "required": quality.split_required,
         "reasons": list(quality.split_reasons),
         "suggested_components": list(quality.suggested_split),
-    }
+    })
     if component.responsibility_type:
         component.responsibility_type = canonical_responsibility_type(component.responsibility_type)
 
@@ -216,14 +223,60 @@ def _detected_responsibilities(component: ComponentRecord) -> set[str]:
 
 
 def _suggested_split(component: ComponentRecord, responsibilities: set[str]) -> list[dict]:
+    """Build suggested children with *distinct* candidate links (#417).
+
+    Each suggested child must carry its own candidate equations/claims/derivations
+    rather than a duplicate of the parent's full link set, so the downstream
+    refiner has identifying information to redistribute by responsibility. The
+    parent's links are partitioned deterministically across the suggested
+    children (round-robin by sorted responsibility order); the ComponentRefiner
+    later performs the role-aware reassignment using equation roles.
+    """
+    ordered = sorted(responsibilities)
+    if not ordered:
+        return []
+    equation_partition = _partition(_component_equation_refs(component), len(ordered))
+    claim_partition = _partition(_component_claim_refs(component), len(ordered))
+    derivation_partition = _partition(
+        list(component.linked_derivation_ids or []), len(ordered)
+    )
+    evidence_partition = _partition(
+        _ordered_unique(
+            list(component.linked_evidence_ids or [])
+            + list((component.evidence_refs or {}).get("evidence_ids") or [])
+        ),
+        len(ordered),
+    )
     return [
         {
             "name": responsibility.replace("_", " ").title(),
             "responsibility_type": responsibility,
-            "linked_equation_ids": _component_equation_refs(component),
+            "linked_equation_ids": equation_partition[idx],
+            "candidate_claim_ids": claim_partition[idx],
+            "candidate_derivation_ids": derivation_partition[idx],
+            "candidate_evidence_ids": evidence_partition[idx],
         }
-        for responsibility in sorted(responsibilities)
+        for idx, responsibility in enumerate(ordered)
     ]
+
+
+def _partition(values: list[str], buckets: int) -> list[list[str]]:
+    """Split ``values`` into ``buckets`` disjoint lists, deterministically.
+
+    No value appears in more than one bucket, so suggested children never share
+    an identical link set (#417).
+    """
+    out: list[list[str]] = [[] for _ in range(max(buckets, 1))]
+    for i, value in enumerate(values):
+        out[i % len(out)].append(value)
+    return out
+
+
+def _component_claim_refs(component: ComponentRecord) -> list[str]:
+    return _ordered_unique(
+        list((component.evidence_refs or {}).get("claim_ids") or [])
+        + list(component.linked_claim_ids or [])
+    )
 
 
 def _component_derivation_step_index(derivations) -> dict[str, list]:
@@ -233,6 +286,55 @@ def _component_derivation_step_index(derivations) -> dict[str, list]:
         for comp_id in getattr(chain, "linked_component_ids", []) or []:
             index.setdefault(str(comp_id), []).extend(steps)
     return index
+
+
+def _equation_derivation_step_index(derivations) -> dict[str, list]:
+    """Index derivation steps by the equation ids they touch (#417).
+
+    When a derivation chain has no ``linked_component_ids`` it is invisible to the
+    component→step index, which left ``derivation_step_count`` at 0 and hid the
+    derivation structure from the granularity plan. Indexing steps by their
+    input/output equations lets a component recover its steps through equation
+    overlap instead.
+    """
+    index: dict[str, list] = {}
+    for chain in list(getattr(derivations, "chains", []) or []):
+        for step in list(getattr(chain, "steps", []) or []):
+            for eid in _step_equation_ids(step):
+                index.setdefault(str(eid), []).append(step)
+    return index
+
+
+def _step_equation_ids(step) -> list[str]:
+    ids: list[str] = []
+    for field_name in ("input_equation_ids", "output_equation_ids", "inputs", "outputs"):
+        value = getattr(step, field_name, None)
+        if value is None and isinstance(step, dict):
+            value = step.get(field_name)
+        for item in value or []:
+            if item:
+                ids.append(str(item))
+    return ids
+
+
+def _derivation_steps_for_component(
+    component: ComponentRecord,
+    derivation_index: dict[str, list],
+    equation_step_index: dict[str, list],
+) -> list:
+    """Collect a component's derivation steps via explicit link or eq overlap (#417)."""
+    steps = list(derivation_index.get(component.component_id, []))
+    if steps:
+        return steps
+    seen: list[int] = []
+    overlap_steps: list = []
+    for eid in _component_equation_refs(component):
+        for step in equation_step_index.get(eid, []):
+            marker = id(step)
+            if marker not in seen:
+                seen.append(marker)
+                overlap_steps.append(step)
+    return overlap_steps
 
 
 def _component_equation_refs(component: ComponentRecord) -> list[str]:
