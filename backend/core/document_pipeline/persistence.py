@@ -1457,6 +1457,78 @@ def update_revision_status(
         session.close()
 
 
+def claim_revision_run(*, run_id: str, stage: str = "audit") -> bool:
+    """Atomically acquire the right to run a revision (#414-1).
+
+    Flips the run to ``status='running'`` only when it is not already running, in
+    a single ``UPDATE ... WHERE`` so two concurrent ``/run`` requests cannot both
+    win: under READ COMMITTED the second statement re-evaluates the predicate on
+    the row the first committed (now ``running``) and matches zero rows. Returns
+    True for the single winner, False for everyone else (→ 409). Works across
+    multiple API processes — it relies on the DB row, not an in-process lock.
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text(
+                """
+                UPDATE document_analysis_runs
+                SET status = 'running',
+                    revision_status = 'auditing',
+                    current_stage = :stage,
+                    error_message = '',
+                    started_at = COALESCE(started_at, now()),
+                    completed_at = NULL,
+                    updated_at = now()
+                WHERE id = CAST(:run_id AS uuid)
+                  AND run_type = 'revision'
+                  AND status IS DISTINCT FROM 'running'
+                RETURNING id::text
+                """
+            ),
+            {"run_id": run_id, "stage": stage},
+        ).fetchone()
+        session.commit()
+        return row is not None
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def release_revision_run(*, run_id: str, error_message: str = "") -> None:
+    """Release a claimed-but-not-started revision back to a re-runnable state (#414-1).
+
+    Called when task creation / worker launch fails after ``claim_revision_run``
+    succeeded, so the revision does not stay stuck in ``running``. ``failed`` is
+    re-claimable by a subsequent ``/run``.
+    """
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text(
+                """
+                UPDATE document_analysis_runs
+                SET status = 'failed',
+                    error_message = :err,
+                    completed_at = now(),
+                    updated_at = now()
+                WHERE id = CAST(:run_id AS uuid)
+                  AND run_type = 'revision'
+                  AND status = 'running'
+                """
+            ),
+            {"run_id": run_id, "err": error_message or "failed to start revision run"},
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
 def set_active_analysis_run(
     *,
     document_id: str,

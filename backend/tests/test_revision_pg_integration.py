@@ -166,6 +166,110 @@ def test_stale_base_accept_conflicts(pg):
                                     candidate_artifacts={})
 
 
+def _seed_revision(pg, *, with_checkpoints=False):
+    persistence = pg["persistence"]
+    doc_id, base_id = _seed_document(pg, {"_artifacts": {}})
+    rev = persistence.create_revision_run(document_id=doc_id, base_run_id=base_id)
+    if with_checkpoints:
+        persistence.update_revision_status(
+            run_id=rev, revision_status="preparing",
+            stage_outputs={"_artifacts": {
+                "baseline_inventory": {"entities": {}, "unresolved_references": []},
+                "audit_checkpoints": [
+                    {"checkpoint_id": "ckpt_1", "target_type": "claim", "target_id": "clm_1",
+                     "trigger_reason": "non_atomic_claim", "source_scope": [], "status": "planned"},
+                    {"checkpoint_id": "ckpt_2", "target_type": "claim", "target_id": "clm_1",
+                     "trigger_reason": "low_confidence", "source_scope": [], "status": "planned"},
+                ],
+            }})
+    return doc_id, base_id, rev
+
+
+# --- #414-1: atomic run-claim exclusion (real concurrency) -----------------
+
+def test_concurrent_run_claim_is_exclusive(pg):
+    import concurrent.futures
+    persistence = pg["persistence"]
+    _doc, _base, rev = _seed_revision(pg)
+
+    workers = 8
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        results = list(ex.map(lambda _i: persistence.claim_revision_run(run_id=rev),
+                              range(workers)))
+    # Exactly one POST wins the claim; the rest must get 409.
+    assert sum(1 for r in results if r) == 1
+    # A further claim while running fails too.
+    assert persistence.claim_revision_run(run_id=rev) is False
+    # Releasing (task/worker launch failure path) makes it re-claimable.
+    persistence.release_revision_run(run_id=rev, error_message="launch failed")
+    run = persistence.get_analysis_run(run_id=rev)
+    assert run["status"] == "failed"
+    assert persistence.claim_revision_run(run_id=rev) is True
+
+
+def test_different_revisions_claim_independently(pg):
+    persistence = pg["persistence"]
+    _d1, _b1, rev1 = _seed_revision(pg)
+    _d2, _b2, rev2 = _seed_revision(pg)
+    assert persistence.claim_revision_run(run_id=rev1) is True
+    assert persistence.claim_revision_run(run_id=rev2) is True  # independent runs
+
+
+# --- #414-3: status transitions persisted to real DB -----------------------
+
+def test_run_pipeline_persists_status_transitions(pg):
+    persistence = pg["persistence"]
+    from core.document_pipeline.revision import coordinator
+    _doc, _base, rev = _seed_revision(pg, with_checkpoints=True)
+    assert persistence.claim_revision_run(run_id=rev) is True  # endpoint claim
+    coordinator.run_revision_pipeline(run_id=rev)
+    run = persistence.get_analysis_run(run_id=rev)
+    assert run["status"] == "completed"
+    assert run["current_stage"] == "completed"
+    assert run["revision_status"] == "proposed"
+    assert run["started_at"] is not None
+    assert run["completed_at"] is not None
+
+
+# --- #414-2: revision task stage not overwritten by the initial run --------
+
+def test_revision_task_stage_not_overwritten_by_initial_run(pg, monkeypatch):
+    Session, text = pg["Session"], pg["text"]
+    try:
+        import api.services as services
+    except Exception:  # pragma: no cover
+        pytest.skip("api.services unavailable")
+    monkeypatch.setattr(services, "_pg_session", lambda: Session())
+
+    doc_id, base_id, rev = _seed_revision(pg)
+    task_id = "rt_" + uuid.uuid4().hex[:9]   # unique so reruns don't collide
+    s = Session()
+    try:
+        try:
+            s.execute(text("SELECT 1 FROM background_tasks LIMIT 1"))
+        except Exception:
+            pytest.skip("background_tasks table not present")
+        s.execute(text("UPDATE document_analysis_runs SET current_stage='document_pipeline' "
+                       "WHERE id=CAST(:r AS uuid)"), {"r": base_id})
+        s.execute(text("UPDATE document_analysis_runs SET current_stage='audit' "
+                       "WHERE id=CAST(:r AS uuid)"), {"r": rev})
+        s.execute(text("""INSERT INTO background_tasks (id, task_type, status, result_data)
+                          VALUES (:id, 'revision_pipeline', 'processing', CAST(:rd AS jsonb))"""),
+                  {"id": task_id, "rd": _json({
+                      "document_id": doc_id, "revision_run_id": rev,
+                      "stage": "audit", "total_count": 2, "completed_count": 1})})
+        s.commit()
+    finally:
+        s.close()
+
+    task = services.get_background_task(task_id)
+    # NOT overwritten by the initial run's 'document_pipeline' current_stage.
+    assert task["result_data"]["stage"] == "audit"
+    assert task["result_data"]["completed_count"] == 1
+    latest = services.get_latest_revision_task(rev)
+    assert latest and latest["task_id"] == task_id and latest["stage"] == "audit"
+
+
 def test_reject_leaves_active_unchanged(pg):
     persistence = pg["persistence"]
     text, Session = pg["text"], pg["Session"]

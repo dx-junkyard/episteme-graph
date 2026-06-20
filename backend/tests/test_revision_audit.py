@@ -201,3 +201,27 @@ def test_audit_revision_run_rejects_non_revision(monkeypatch):
     )
     with pytest.raises(ValueError):
         coordinator.audit_revision_run(run_id="init-1")
+
+
+# --- #414-3: audit progress callback ---------------------------------------
+
+def test_run_source_audit_reports_monotonic_progress():
+    checkpoints = [_cp(checkpoint_id=f"ckpt_{i}", trigger_reason="non_atomic_claim")
+                   for i in range(5)]
+    seen = []
+    out = run_source_audit(
+        checkpoints=checkpoints, chunk_index=_chunk_index(),
+        progress_callback=lambda done, total: seen.append((done, total)),
+    )
+    assert seen == [(1, 5), (2, 5), (3, 5), (4, 5), (5, 5)]
+    # monotonic non-decreasing completed counts, final == total
+    assert [d for d, _ in seen] == sorted(d for d, _ in seen)
+    assert seen[-1] == (5, 5)
+    assert len(out["audit_results"]) == 5
+
+
+def test_run_source_audit_progress_empty_is_safe():
+    seen = []
+    run_source_audit(checkpoints=[], chunk_index=[],
+                     progress_callback=lambda done, total: seen.append((done, total)))
+    assert seen == []

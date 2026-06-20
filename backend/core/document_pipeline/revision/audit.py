@@ -306,12 +306,20 @@ def run_source_audit(
     checkpoints: list[dict],
     chunk_index: list[dict],
     llm_client: Callable[[dict, dict], Any] | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict:
-    """Audit every checkpoint; return results + a revision worklist summary."""
-    results = [
-        audit_checkpoint(cp, chunk_index, llm_client=llm_client)
-        for cp in (checkpoints or [])
-    ]
+    """Audit every checkpoint; return results + a revision worklist summary.
+
+    ``progress_callback(completed, total)`` is invoked after each checkpoint so a
+    caller can publish real ``completed / total`` progress (#414-3).
+    """
+    checkpoints = checkpoints or []
+    total = len(checkpoints)
+    results = []
+    for index, cp in enumerate(checkpoints, start=1):
+        results.append(audit_checkpoint(cp, chunk_index, llm_client=llm_client))
+        if progress_callback:
+            progress_callback(index, total)
     revision_targets = [
         {"checkpoint_id": r["checkpoint_id"], "target_type": r["target_type"],
          "target_id": r["target_id"], "verdict": r["verdict"]}

@@ -31,8 +31,15 @@ logger = logging.getLogger(__name__)
 STAGE_AUDIT = "audit"
 STAGE_PROPOSAL = "proposal"
 STAGE_CANDIDATE_ASSEMBLY = "candidate_assembly"
+STAGE_VALIDATION = "validation"
 STAGE_REPORT = "report"
 STAGE_COMPLETED = "completed"
+
+# Canonical revision stage order (#414-3).
+REVISION_STAGES = (
+    STAGE_AUDIT, STAGE_PROPOSAL, STAGE_CANDIDATE_ASSEMBLY,
+    STAGE_VALIDATION, STAGE_REPORT, STAGE_COMPLETED,
+)
 
 # Revision artifact keys (stored under stage_outputs._artifacts of the run).
 BASELINE_INVENTORY_KEY = "baseline_inventory"
@@ -121,17 +128,31 @@ def start_revision_run(
     }
 
 
+def _load_chunk_index(document_id: str) -> list[dict]:
+    """Trusted source-chunk index from the chunks table (empty on any failure)."""
+    try:
+        return persistence.load_source_chunk_index(document_id=document_id) or []
+    except Exception:
+        return []
+
+
+def _trusted_chunk_ids(chunk_index: list[dict] | None) -> set[str]:
+    return {str(c.get("chunk_id")) for c in (chunk_index or []) if c.get("chunk_id")}
+
+
 def audit_revision_run(
     *,
     run_id: str,
     llm_client: Callable[[dict, dict], Any] | None = None,
     chunk_index: list[dict] | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict:
     """Run the source re-audit stage for a candidate run.
 
     Reads the run's planned checkpoints, re-reads the source per checkpoint, and
     stores audit results as a run artifact. This stage evaluates only — it never
     builds candidate artifacts nor touches the base/active run (AC #404).
+    ``progress_callback(completed, total)`` reports per-checkpoint progress (#414-3).
     """
     run = persistence.get_analysis_run(run_id=run_id)
     if not run:
@@ -152,15 +173,13 @@ def audit_revision_run(
         llm_client = build_default_audit_client(inventory)
 
     if chunk_index is None:
-        try:
-            chunk_index = persistence.load_source_chunk_index(document_id=document_id)
-        except Exception:
-            chunk_index = []
+        chunk_index = _load_chunk_index(document_id)
 
     audit = run_source_audit(
         checkpoints=checkpoints,
         chunk_index=chunk_index or [],
         llm_client=llm_client,
+        progress_callback=progress_callback,
     )
     persistence.update_revision_status(
         run_id=run_id,
@@ -174,6 +193,8 @@ def generate_proposals(
     *,
     run_id: str,
     generate: Callable[[list[dict]], str] | None = None,
+    chunk_index: list[dict] | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict:
     """Generate validated revision-operation proposals from the audit results (#410 P1-6).
 
@@ -181,6 +202,8 @@ def generate_proposals(
     configured) for one operation per ``requires_revision`` finding, validates each
     proposal server-side (schema / target / evidence / traceability), and stores
     the result as the ``proposed_operations`` artifact. Never auto-accepts.
+    ``source_chunk_ids`` are validated against the trusted chunks index (#414-5);
+    ``progress_callback(completed, total)`` reports per-target progress (#414-3).
     """
     run = persistence.get_analysis_run(run_id=run_id)
     if not run or run.get("run_type") != "revision":
@@ -188,13 +211,19 @@ def generate_proposals(
     artifacts = get_artifacts(run.get("stage_outputs"))
     inventory = artifacts.get(BASELINE_INVENTORY_KEY) or {}
     audit_results = (artifacts.get(AUDIT_RESULTS_KEY) or {}).get("audit_results") or []
+    if chunk_index is None:
+        chunk_index = _load_chunk_index(str(run.get("document_id") or ""))
 
     from .proposal import propose_operations
     if generate is None:
         from .llm_audit import _default_generate, llm_enabled
         generate = _default_generate if llm_enabled() else None
 
-    result = propose_operations(audit_results, inventory, generate=generate)
+    result = propose_operations(
+        audit_results, inventory, generate=generate,
+        known_chunk_ids=_trusted_chunk_ids(chunk_index),
+        progress_callback=progress_callback,
+    )
     persistence.update_revision_status(
         run_id=run_id, revision_status="auditing",
         stage_outputs={ARTIFACTS_KEY: {PROPOSED_OPERATIONS_KEY: result}},
@@ -244,13 +273,16 @@ def assemble_candidate(
     )
 
     # Generated, raw/debug, and user-edited operations all pass through the same
-    # fail-closed validator immediately before candidate assembly.
+    # fail-closed validator immediately before candidate assembly. The trusted
+    # chunks index is supplied so source_chunk_ids are validated against real DB
+    # chunks, not the LLM's own output (#414-5).
     from .proposal import validate_proposed_operations
     validated = validate_proposed_operations(
         operations or [],
         base_inventory,
         audit_results=audit_results,
         checkpoints=run_artifacts.get(AUDIT_CHECKPOINTS_KEY) or [],
+        known_chunk_ids=_trusted_chunk_ids(_load_chunk_index(str(run.get("document_id") or ""))),
     )
     if validated["rejected"]:
         raise ProposalValidationError(validated["rejected"])
@@ -439,21 +471,30 @@ def run_revision_pipeline(
     operations: list[dict] | None = None,
     llm_client: Callable[[dict, dict], Any] | None = None,
     generate: Callable[[list[dict]], str] | None = None,
+    progress_callback: Callable[[str, int, int], None] | None = None,
+    task_id: str | None = None,
 ) -> dict:
-    """Run audit → proposal → assembly → validation → report end-to-end.
+    """Run audit → proposal → candidate_assembly → validation → report end-to-end.
 
     Drives the revision run's generic state (``status`` / ``current_stage`` /
     ``completed_at``) and emits structured stage logs so progress/outcome can be
     judged from run state + logs alone, without inspecting artifacts (#412 P1-3 /
-    P1-5). Designed to run inside a background worker (#412 P0-2) — it never
-    touches the active run or projection tables. ``operations`` supplied means the
-    raw/debug override path (proposal generation is skipped).
+    P1-5). ``progress_callback(stage, completed, total)`` reports intra-stage
+    counts (#414-3); ``task_id`` is included in logs for correlation. Designed to
+    run inside a background worker (#412 P0-2) — it never touches the active run
+    or projection tables. ``operations`` supplied means the raw/debug override
+    path (proposal generation is skipped).
     """
     run = persistence.get_analysis_run(run_id=run_id)
     if not run or run.get("run_type") != "revision":
         raise ValueError(f"revision run {run_id} not found")
     document_id = str(run.get("document_id") or "")
-    log_ctx = "run_id=%s document_id=%s" % (run_id, document_id)
+    log_ctx = "run_id=%s document_id=%s task_id=%s" % (run_id, document_id, task_id or "-")
+
+    def _progress(stage: str, completed: int, total: int) -> None:
+        if progress_callback:
+            progress_callback(stage, completed, total)
+
     current_stage = STAGE_AUDIT
     try:
         # --- audit ---
@@ -464,12 +505,17 @@ def run_revision_pipeline(
             status="running", current_stage=STAGE_AUDIT,
         )
         logger.info("revision_started %s checkpoints=%d", log_ctx, checkpoints_total)
-        audit = audit_revision_run(run_id=run_id, llm_client=llm_client)
+        _progress(STAGE_AUDIT, 0, checkpoints_total)
+        audit = audit_revision_run(
+            run_id=run_id, llm_client=llm_client,
+            progress_callback=lambda done, total: _progress(STAGE_AUDIT, done, total),
+        )
         revision_targets = audit.get("revision_targets") or []
         review_items = audit.get("review_items") or []
         logger.info(
-            "revision_audit_completed %s checkpoints=%d targets=%d review_items=%d",
-            log_ctx, checkpoints_total, len(revision_targets), len(review_items),
+            "revision_audit_completed %s checkpoints=%d completed=%d targets=%d review_items=%d",
+            log_ctx, checkpoints_total, checkpoints_total,
+            len(revision_targets), len(review_items),
         )
 
         # --- proposal (skipped for the raw/debug override path) ---
@@ -478,7 +524,11 @@ def run_revision_pipeline(
             persistence.update_revision_status(
                 run_id=run_id, revision_status="auditing", current_stage=STAGE_PROPOSAL,
             )
-            proposals = generate_proposals(run_id=run_id, generate=generate)
+            _progress(STAGE_PROPOSAL, 0, len(revision_targets))
+            proposals = generate_proposals(
+                run_id=run_id, generate=generate,
+                progress_callback=lambda done, total: _progress(STAGE_PROPOSAL, done, total),
+            )
             ops = proposals.get("operations") or []
             rejected = proposals.get("rejected") or []
             manual_review = proposals.get("manual_review") or []
@@ -496,6 +546,7 @@ def run_revision_pipeline(
         persistence.update_revision_status(
             run_id=run_id, revision_status="auditing", current_stage=STAGE_CANDIDATE_ASSEMBLY,
         )
+        _progress(STAGE_CANDIDATE_ASSEMBLY, 0, 1)
         candidate = assemble_candidate(run_id=run_id, operations=ops)
         new_unknown = sum(
             len(err.get("details") or [])
@@ -508,11 +559,19 @@ def run_revision_pipeline(
             len(candidate.get("applied_operations") or []), new_unknown,
         )
 
-        # --- validation + report ---
+        # --- validation (explicit stage) ---
+        current_stage = STAGE_VALIDATION
+        persistence.update_revision_status(
+            run_id=run_id, revision_status="proposed", current_stage=STAGE_VALIDATION,
+        )
+        _progress(STAGE_VALIDATION, 0, 1)
+
+        # --- report ---
         current_stage = STAGE_REPORT
         persistence.update_revision_status(
             run_id=run_id, revision_status="proposed", current_stage=STAGE_REPORT,
         )
+        _progress(STAGE_REPORT, 0, 1)
         report_out = revalidate_and_report(run_id=run_id)
         report = report_out["report"]
         summary = report.get("summary") or {}
@@ -521,6 +580,7 @@ def run_revision_pipeline(
             run_id=run_id, revision_status="proposed",
             status="completed", current_stage=STAGE_COMPLETED,
         )
+        _progress(STAGE_COMPLETED, 1, 1)
         logger.info(
             "revision_completed %s recommendation=%s outcome=%s changes=%d candidate_invalid=%s",
             log_ctx, report.get("recommendation"), summary.get("outcome"),

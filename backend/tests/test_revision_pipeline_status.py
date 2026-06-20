@@ -58,14 +58,35 @@ def test_pipeline_status_transitions_through_each_stage(monkeypatch, caplog):
     assert ("running", "audit") in stages
     assert (None, "proposal") in stages
     assert (None, "candidate_assembly") in stages
+    # #414-3: validation is an explicit stage, not skipped from assembly to report
+    assert (None, "validation") in stages
     assert (None, "report") in stages
     assert ("completed", "completed") in stages
+    # canonical stage order preserved
+    seen_order = [cs for _, cs in stages if cs in coordinator.REVISION_STAGES]
+    assert seen_order == ["audit", "proposal", "candidate_assembly",
+                          "validation", "report", "completed"]
     assert out["revision_status"] == "proposed"
     # #412 P1-5: stage boundary logs are present and run-scoped
     assert "revision_started" in caplog.text
     assert "revision_audit_completed" in caplog.text
     assert "revision_completed" in caplog.text
     assert "run_id=rev-1" in caplog.text
+
+
+def test_pipeline_reports_stage_progress_counts(monkeypatch):
+    _patch_stages(monkeypatch)
+    # Sub-stage functions are patched out, so assert the pipeline itself forwards
+    # a (stage, done, total) callback at each stage boundary (#414-3).
+    progress = []
+    coordinator.run_revision_pipeline(
+        run_id="rev-1",
+        progress_callback=lambda stage, done, total: progress.append((stage, done, total)),
+    )
+    stages_seen = {p[0] for p in progress}
+    assert "audit" in stages_seen
+    assert "validation" in stages_seen
+    assert ("completed", 1, 1) in progress
 
 
 def test_pipeline_failure_marks_failed_with_stage_and_error(monkeypatch):

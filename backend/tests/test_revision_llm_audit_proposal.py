@@ -192,6 +192,98 @@ def test_valid_chunk_refs_do_not_cause_mass_rejection():
     assert out["operations"][0]["source_chunk_ids"] == ["chunk-0"]
 
 
+# --- #414-5: fail-closed typed reference validation ------------------------
+
+def _update(target_type="claim", target_id="clm_1", **extra):
+    base = {"operation": "update_entity", "target_type": target_type,
+            "target_id": target_id, "after_json": {"text": "x"},
+            "checkpoint_ids": ["ckpt_1"]}
+    base.update(extra)
+    return base
+
+
+def test_existing_registry_evidence_id_accepted():
+    op, reason = validate_proposed_operation(
+        _update(evidence_ids=["ev_1"]), _inventory(),
+        {"checkpoint_id": "ckpt_1"}, known_chunk_ids=set())
+    assert op is not None and reason == ""
+    assert op["evidence_refs"] == ["ev_1"] and op["source_chunk_ids"] == []
+
+
+def test_existing_source_chunk_id_accepted_from_trusted_index():
+    op, reason = validate_proposed_operation(
+        _update(source_chunk_ids=["c1"]), _inventory(),
+        {"checkpoint_id": "ckpt_1"}, known_chunk_ids={"c1"})
+    assert op is not None and reason == ""
+    assert op["source_chunk_ids"] == ["c1"] and op["evidence_refs"] == []
+
+
+def test_evidence_id_in_source_chunk_field_is_rejected():
+    op, reason = validate_proposed_operation(
+        _update(source_chunk_ids=["ev_1"]), _inventory(),
+        {"checkpoint_id": "ckpt_1"}, known_chunk_ids={"c1"})
+    assert op is None
+    assert reason == "unknown_source_chunk:ev_1"
+
+
+def test_nonexistent_source_chunk_is_rejected():
+    op, reason = validate_proposed_operation(
+        _update(source_chunk_ids=["c_GONE"]), _inventory(),
+        {"checkpoint_id": "ckpt_1"}, known_chunk_ids={"c1"})
+    assert op is None
+    assert reason == "unknown_source_chunk:c_GONE"
+
+
+def test_source_chunk_not_accepted_when_chunk_index_unavailable():
+    # No trusted chunk index at all -> a source_chunk_id cannot be proven; reject
+    # rather than fail-open (#414-5).
+    op, reason = validate_proposed_operation(
+        _update(source_chunk_ids=["c1"]), _inventory(),
+        {"checkpoint_id": "ckpt_1"}, known_chunk_ids=set())
+    assert op is None
+    assert reason == "unknown_source_chunk:c1"
+
+
+def test_llm_source_chunk_ids_alone_are_not_self_certifying():
+    # audit_result carries LLM-claimed source_chunk_ids but NO retrieved
+    # source_locations -> the claim is not trusted, so it is rejected.
+    audit = {"checkpoint_id": "ckpt_1", "source_chunk_ids": ["c_hallucinated"]}
+    op, reason = validate_proposed_operation(
+        _update(), _inventory(), audit, known_chunk_ids=set())
+    assert op is None
+    assert reason == "unknown_source_chunk:c_hallucinated"
+
+
+def test_retrieved_source_locations_make_chunk_trusted():
+    # Same chunk id, but now backed by a real retrieval (source_locations).
+    audit = {"checkpoint_id": "ckpt_1", "source_chunk_ids": ["c1"],
+             "source_locations": [{"chunk_id": "c1"}]}
+    op, reason = validate_proposed_operation(
+        _update(), _inventory(), audit, known_chunk_ids=set())
+    assert op is not None and reason == ""
+    assert op["source_chunk_ids"] == ["c1"]
+
+
+# --- #414-3: proposal progress callback ------------------------------------
+
+def test_propose_operations_reports_progress_over_targets():
+    audit_results = [
+        {"checkpoint_id": f"c{i}", "target_type": "claim", "target_id": "clm_1",
+         "requires_revision": True, "source_locations": [{"chunk_id": "c1"}]}
+        for i in range(4)
+    ]
+    seen = []
+
+    def fake_generate(messages):
+        return json.dumps({"operation": "update_entity", "target_type": "claim",
+                           "target_id": "clm_1", "after_json": {"text": "x"},
+                           "source_chunk_ids": ["c1"]})
+    propose_operations(audit_results, _inventory(), generate=fake_generate,
+                       known_chunk_ids={"c1"},
+                       progress_callback=lambda done, total: seen.append((done, total)))
+    assert seen == [(1, 4), (2, 4), (3, 4), (4, 4)]
+
+
 def test_propose_operations_uses_generate_and_validates():
     audit_results = [{"checkpoint_id": "ckpt_1", "target_type": "claim", "target_id": "clm_1",
                       "verdict": "incorrect", "requires_revision": True,

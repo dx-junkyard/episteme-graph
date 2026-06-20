@@ -73,3 +73,39 @@ def test_styles_added():
     css = STYLES.read_text(encoding="utf-8")
     assert ".eg-rev-overlay" in css
     assert ".eg-rev-badge-protected" in css
+
+
+# --- #414: async polling / reload-restore / progress wiring ----------------
+
+def test_async_run_uses_poll_loop_not_inline_report(admin_js):
+    # /run is fire-and-poll: a 202 launches polling, not an inline report fetch.
+    assert "pollRunStatus" in admin_js
+    assert "run-status" in admin_js
+    assert "202" not in admin_js or "pollRunStatus" in admin_js
+
+
+def test_run_status_409_surfaced_and_failure_vs_timeout_distinguished(admin_js):
+    # duplicate run rejected (409), and timeout is NOT shown as a failure (#414-1/-4).
+    assert "既に実行中" in admin_js
+    assert "接続が切れたため状態を確認中" in admin_js  # timeout/network -> keep checking
+    assert "renderRunFailure" in admin_js              # server failure -> explicit fail
+
+
+def test_reload_restores_running_failed_completed(admin_js):
+    assert "restoreRunState" in admin_js
+    assert "latest_task" in admin_js
+    # running -> resume polling the same task; failed -> show stage + error
+    assert "pollRunStatus()" in admin_js
+    assert "renderRunFailure(" in admin_js
+
+
+def test_progress_shows_completed_over_total(admin_js):
+    # recommended "27 / 199" style count, from the worker's completed/total (#414-3).
+    assert "completed_count" in admin_js
+    assert "total_count" in admin_js
+
+
+def test_stop_polling_prevents_duplicate_timers(admin_js):
+    assert "stopPolling" in admin_js
+    # close() and openDetail() both stop polling before (re)rendering
+    assert "function stopPolling()" in admin_js

@@ -8848,14 +8848,30 @@
         .then(function (detail) {
           renderDetail(detail);
           if (detail.has_report) loadReport();
-          // Resume polling after a reload while a worker is still running (#412 P1-4).
-          if (String(detail.status || "").toLowerCase() === "running") {
-            current.taskId = null;
-            setRunning(true, STAGE_LABELS[detail.current_stage] || "処理中…");
-            pollRunStatus();
-          }
+          restoreRunState(detail);   // #414-4: restore running/failed/completed on reload
         })
         .catch(function () { alert("詳細の取得に失敗しました。"); });
+    }
+
+    // Restore the run's UI state after a modal reopen / browser reload (#414-4):
+    // running -> resume polling the same task; failed -> show stage + error;
+    // completed -> the report (loaded above) already shows the outcome.
+    function restoreRunState(detail) {
+      var status = String(detail.status || "").toLowerCase();
+      var task = detail.latest_task || null;
+      current.taskId = (task && task.task_id) || null;
+      if (status === "running") {
+        setRunning(true, STAGE_LABELS[detail.current_stage] || "処理中…");
+        renderRunProgress({ current_stage: detail.current_stage, task: task });
+        pollRunStatus();
+      } else if (status === "failed") {
+        setRunning(false);
+        renderRunFailure({
+          current_stage: detail.current_stage,
+          error_message: detail.error_message,
+          task: task
+        });
+      }
     }
 
     function decisionsHtml(decisions) {
@@ -8912,8 +8928,15 @@
       var rd = (st.task && st.task.result_data) || {};
       var stageKey = rd.stage || st.current_stage || "queued";
       var label = STAGE_LABELS[stageKey] || stageKey;
-      var prog = (typeof rd.progress === "number" && rd.progress > 0) ? (" " + rd.progress + "%") : "";
-      setProgress('<div class="eg-rev-info">' + escHtml(label) + escHtml(prog) + ' …</div>');
+      // Prefer the real "completed / total" count (e.g. 27 / 199) over a bare %
+      // when the worker has published per-checkpoint progress (#414-3).
+      var detail = "";
+      if (typeof rd.total_count === "number" && rd.total_count > 0) {
+        detail = " " + (rd.completed_count || 0) + " / " + rd.total_count;
+      } else if (typeof rd.progress === "number" && rd.progress > 0) {
+        detail = " " + rd.progress + "%";
+      }
+      setProgress('<div class="eg-rev-info">' + escHtml(label) + escHtml(detail) + ' …</div>');
     }
 
     function renderRunFailure(st) {
