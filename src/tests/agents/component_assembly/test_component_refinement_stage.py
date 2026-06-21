@@ -282,6 +282,81 @@ def test_claim_routed_by_type_when_no_equation_overlap():
     assert "claim_typed" not in definition.linked_claim_ids
 
 
+def test_constraint_equation_not_misrouted_to_application_child():
+    # #421 review (P1): constraint and application share the coarse "result"
+    # category. With both children present and responsibilities sorted
+    # (application < constraint), the first-match rule would mis-route the
+    # constraint equation/claim into the application child. The exact role
+    # responsibility must keep the constraint equation in the constraint child.
+    component = _component(
+        component_id="comp_result_pair",
+        linked_equation_ids=["eq_con", "eq_ambig"],
+        linked_claim_ids=["claim_con", "claim_app"],
+        split_recommendation=_split_rec(
+            _suggested("Application", "application"),
+            _suggested("Constraint", "constraint"),
+        ),
+    )
+    llm_input = _LLMInput(
+        equations=[
+            {"equation_id": "eq_con", "role": "constraint"},
+            {"equation_id": "eq_ambig", "role": "result"},
+        ],
+        claims=[
+            {"claim_id": "claim_con", "is_atomic": True, "atomicity": "atomic",
+             "claim_type": "constraint", "equation_ids": [], "concepts": ["c"]},
+            {"claim_id": "claim_app", "is_atomic": True, "atomicity": "atomic",
+             "claim_type": "application", "equation_ids": [], "concepts": ["a"]},
+        ],
+    )
+    refined = REFINER.refine(_result([component]), llm_input=llm_input, derivations=None)
+
+    constraint = next(c for c in refined.components if c.responsibility_type == "constraint")
+    application = next(c for c in refined.components if c.responsibility_type == "application")
+    # The constraint equation stays in the constraint child, not application.
+    assert "eq_con" in constraint.linked_equation_ids
+    assert "eq_con" not in application.linked_equation_ids
+    # Each claim is routed by its exact type to the matching child.
+    assert "claim_con" in constraint.linked_claim_ids
+    assert "claim_app" in application.linked_claim_ids
+    assert "claim_con" not in application.linked_claim_ids
+    # eq_ambig (bare "result" role) is ambiguous between the two result-category
+    # children, so it is left unassigned rather than guessed onto application.
+    unassigned = refined.component_refinement["refinement_validation"]["unassigned_links"]
+    assert any(
+        u["link_id"] == "eq_ambig" and u["link_type"] == "equation" for u in unassigned
+    )
+
+
+def test_evidence_routed_by_equation_provenance_when_no_claim_cites_it():
+    # #421 review (P2): an evidence item referenced only by an assigned equation
+    # (no claim cites it) must be routed to that equation's child via equation
+    # provenance, not dropped as unassigned.
+    component = _component(
+        component_id="comp_eqprov",
+        linked_equation_ids=["eq_def", "eq_der"],
+        linked_evidence_ids=["ev_from_eq"],
+        evidence_refs={"equation_ids": ["eq_def", "eq_der"], "evidence_ids": ["ev_from_eq"]},
+        split_recommendation=_split_rec(
+            _suggested("Definition", "definition"),
+            _suggested("Derivation", "derivation"),
+        ),
+    )
+    llm_input = _LLMInput(equations=[
+        {"equation_id": "eq_def", "role": "definition", "source_evidence_ids": ["ev_from_eq"]},
+        {"equation_id": "eq_der", "role": "transformation"},
+    ])
+    refined = REFINER.refine(_result([component]), llm_input=llm_input, derivations=None)
+
+    definition = next(c for c in refined.components if c.responsibility_type == "definition")
+    derivation = next(c for c in refined.components if c.responsibility_type == "derivation")
+    # The evidence follows its equation (eq_def → definition child).
+    assert "ev_from_eq" in definition.linked_evidence_ids
+    assert "ev_from_eq" not in derivation.linked_evidence_ids
+    unassigned = refined.component_refinement["refinement_validation"]["unassigned_links"]
+    assert not any(u["link_id"] == "ev_from_eq" for u in unassigned)
+
+
 def test_derivation_routed_by_operation_family():
     # With two derivational-capable children, a derivation is routed by the
     # operation family of its steps, not to a fixed "first derivational child".

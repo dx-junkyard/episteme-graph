@@ -1529,13 +1529,33 @@ def _is_review_required_status(status: object) -> bool:
     return str(status or "") in {"review_required", "teacher_review_required"}
 
 
-def _match_spec_by_category(specs: list[dict], category: str) -> dict | None:
+def _match_spec_by_category(
+    specs: list[dict], category: str, *, preferred: str = ""
+) -> dict | None:
+    """Route an artifact to the child owning its responsibility category (#421).
+
+    Categories such as ``result`` cover several distinct responsibilities
+    (constraint / application / limitation). When more than one suggested child
+    falls in the category, returning the first one would mis-route — e.g. a
+    constraint equation into an application child — because the children are
+    sorted by responsibility. To avoid that, an exact ``preferred``
+    responsibility (derived from the equation role / claim type) is required to
+    disambiguate; if the category is ambiguous and no unique exact match exists,
+    the caller leaves the artifact unassigned rather than guessing.
+    """
     if not category:
         return None
     allowed = _CATEGORY_TO_RESPONSIBILITIES.get(category, set())
-    for spec in specs:
-        if spec["responsibility_type"] in allowed:
-            return spec
+    candidates = [spec for spec in specs if spec["responsibility_type"] in allowed]
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    if preferred:
+        exact = [spec for spec in candidates if spec["responsibility_type"] == preferred]
+        if len(exact) == 1:
+            return exact[0]
+    # Ambiguous category with multiple candidates and no unique exact match.
     return None
 
 
@@ -1561,6 +1581,26 @@ def _spec_has_payload(spec: dict) -> bool:
     )
 
 
+# Equation role → the exact responsibility it belongs to (#421). Used to
+# disambiguate a coarse responsibility category (``result`` covers constraint /
+# application / limitation). ``result`` is intentionally absent: a bare "result"
+# role does not name a single exact responsibility, so it stays ambiguous.
+_EQUATION_ROLE_TO_RESPONSIBILITY = {
+    "definition": "definition",
+    "equation_definition": "definition",
+    "constraint": "constraint",
+    "condition": "constraint",
+    "consistency_relation": "constraint",
+    "transformation": "equation_system",
+    "relation": "equation_system",
+}
+
+
+def _equation_responsibility(eq: dict) -> str:
+    role = str(eq.get("role") or eq.get("equation_type") or "").lower()
+    return _EQUATION_ROLE_TO_RESPONSIBILITY.get(role, "")
+
+
 def _claim_category(info: dict) -> str:
     """Map a claim's declared type to a responsibility category (#421).
 
@@ -1573,11 +1613,46 @@ def _claim_category(info: dict) -> str:
         return ""
     if any(k in ctype for k in ("definition", "define", "assumption", "model")):
         return "definition"
-    if any(k in ctype for k in ("result", "conclusion", "constraint", "consistency", "criterion")):
+    if any(k in ctype for k in (
+        "result", "conclusion", "constraint", "consistency", "criterion",
+        "application", "forecast", "limitation", "caveat",
+    )):
         return "result"
     if any(k in ctype for k in ("relation", "transformation", "derivation", "method", "derive")):
         return "derivation"
     return ""
+
+
+def _claim_responsibility(info: dict) -> str:
+    """Exact responsibility a claim's type names, to disambiguate a category (#421)."""
+    ctype = str(info.get("claim_type") or info.get("claim_type_candidate") or "").lower()
+    if not ctype:
+        return ""
+    if ctype in CANONICAL_RESPONSIBILITY_TYPES:
+        return ctype
+    if "constraint" in ctype or "consistency" in ctype or "criterion" in ctype:
+        return "constraint"
+    if "application" in ctype or "forecast" in ctype:
+        return "application"
+    if "limitation" in ctype or "caveat" in ctype:
+        return "limitation"
+    if "definition" in ctype or "define" in ctype:
+        return "definition"
+    if "model" in ctype or "assumption" in ctype:
+        return "model"
+    if "derivation" in ctype or "derive" in ctype:
+        return "derivation"
+    return ""
+
+
+def _equation_evidence_ids(eq: dict) -> list[str]:
+    """Evidence ids an equation is sourced from, for evidence provenance (#421)."""
+    ids: list[str] = []
+    for key in ("source_evidence_ids", "evidence_ids"):
+        for value in eq.get(key) or []:
+            if value:
+                ids.append(str(value))
+    return _ordered_unique(ids)
 
 
 def _match_spec_by_evidence_provenance(
@@ -1682,11 +1757,20 @@ def _redistribute_links(
             candidate_equation_hints.setdefault(str(eid), spec)
     unassigned: list[dict] = []
 
-    # Equations → responsibility category derived from the equation role. When the
-    # role is unknown, fall back to the analyzer's candidate hint; only when both
-    # are missing is the equation left unassigned (never round-robined).
+    # Equations → responsibility category derived from the equation role. When a
+    # category covers several responsibilities (e.g. result → constraint /
+    # application / limitation), the equation's exact role responsibility
+    # disambiguates so a constraint equation cannot fall into an application
+    # child. When the role is unknown, fall back to the analyzer's candidate hint;
+    # only when nothing resolves is the equation left unassigned (never
+    # round-robined).
+    equation_evidence: dict[str, set] = {}
     for eq_id in _all_equation_ids(component):
-        target = _match_spec_by_category(specs, _equation_category(eq_index.get(eq_id) or {}))
+        eq = eq_index.get(eq_id) or {}
+        equation_evidence[eq_id] = set(_equation_evidence_ids(eq))
+        target = _match_spec_by_category(
+            specs, _equation_category(eq), preferred=_equation_responsibility(eq)
+        )
         if target is None:
             hint = candidate_equation_hints.get(eq_id)
             if hint is not None and hint in specs:
@@ -1712,7 +1796,9 @@ def _redistribute_links(
         claim_evidence[cid] = set(info.get("evidence_ids") or [])
         target = _match_spec_by_equation_overlap(specs, set(info.get("equation_ids") or []))
         if target is None:
-            target = _match_spec_by_category(specs, _claim_category(info))
+            target = _match_spec_by_category(
+                specs, _claim_category(info), preferred=_claim_responsibility(info)
+            )
         if target is None:
             target = _match_spec_by_evidence_provenance(
                 specs, claim_evidence[cid], claim_evidence
@@ -1731,7 +1817,10 @@ def _redistribute_links(
             continue
         target["claim_ids"].append(cid)
 
-    # Evidence → the child whose assigned claims reference it.
+    # Evidence → the child whose assigned claims OR assigned equations reference
+    # it (#421). Equation provenance matters: an evidence item cited only by an
+    # equation (no claim) is still routed to the child that owns that equation
+    # instead of being dropped as unassigned.
     evidence_ids = _ordered_unique(
         list(component.linked_evidence_ids or [])
         + list((component.evidence_refs or {}).get("evidence_ids") or [])
@@ -1746,10 +1835,19 @@ def _redistribute_links(
             None,
         )
         if target is None:
+            target = next(
+                (
+                    spec
+                    for spec in specs
+                    if any(ev_id in equation_evidence.get(eid, set()) for eid in spec["equation_ids"])
+                ),
+                None,
+            )
+        if target is None:
             unassigned.append({
                 "link_type": "evidence",
                 "link_id": ev_id,
-                "reason": "no child claim references this evidence",
+                "reason": "no child claim or equation references this evidence",
             })
             continue
         target["evidence_ids"].append(ev_id)
