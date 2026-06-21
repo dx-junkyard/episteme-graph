@@ -128,6 +128,90 @@ def test_component_graph_export_separates_operation_nodes():
     assert {"component_id": "comp_1", "operation_id": "op_1"} in out["component_operation_links"]
 
 
+def test_component_graph_export_canonicalizes_legacy_operation_parent():
+    artifact = {
+        "graph_schema_version": "0.1.0",
+        "nodes": [
+            {
+                "component_id": "canonical_component",
+                "legacy_component_id": "legacy_component",
+                "label": "Canonical component",
+                "component_type": "TheoryOperationNode",
+                "graph_layer": "main",
+            },
+            {
+                "component_id": "op_legacy_parent",
+                "component_type": "EquationOperationNode",
+                "graph_layer": "equation_detail",
+                "parent_component_id": "legacy_component",
+                "linked_equation_ids": ["eq_1"],
+            },
+        ],
+        "edges": [],
+    }
+
+    out = ea.build_component_graph_export(
+        artifact,
+        document_id="doc_1",
+        known_component_ids={"canonical_component"},
+    )
+
+    op = out["operation_graph"]["nodes"][0]
+    assert op["parent_component_id"] == "canonical_component"
+    assert op["unresolved_parent_component_id"] == ""
+    assert out["component_operation_links"] == [{
+        "component_id": "canonical_component",
+        "operation_id": "op_legacy_parent",
+    }]
+
+
+def test_aggregate_parent_never_becomes_component_operation_endpoint():
+    artifact = {
+        "graph_schema_version": "0.1.0",
+        "nodes": [
+            {
+                "component_id": "canonical_component",
+                "label": "Canonical component",
+                "component_type": "TheoryOperationNode",
+                "graph_layer": "main",
+            },
+            {
+                "component_id": "aggregate_theory_node",
+                "label": "Aggregate",
+                "component_type": "TheoryOperationNode",
+                "graph_layer": "main",
+            },
+            {
+                "component_id": "detail_operation",
+                "component_type": "EquationOperationNode",
+                "graph_layer": "equation_detail",
+                "parent_component_id": "aggregate_theory_node",
+                "linked_equation_ids": ["eq_1"],
+            },
+        ],
+        "edges": [],
+    }
+
+    out = ea.build_component_graph_export(
+        artifact,
+        document_id="doc_1",
+        known_component_ids={"canonical_component"},
+    )
+
+    detail = next(
+        node for node in out["operation_graph"]["nodes"]
+        if node["operation_id"] == "detail_operation"
+    )
+    assert detail["parent_component_id"] == ""
+    assert detail["unresolved_parent_component_id"] == "aggregate_theory_node"
+    assert detail["review_required"] is True
+    assert "unresolved_parent_component" in detail["review_reasons"]
+    assert not any(
+        link["component_id"] == "aggregate_theory_node"
+        for link in out["component_operation_links"]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Resolvers + metadata (#383)
 # ---------------------------------------------------------------------------

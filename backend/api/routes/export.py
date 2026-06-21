@@ -344,6 +344,18 @@ def _resolve_artifact_first_graph(
     Returns ``{"component_graph", "operation_graph", "component_operation_links"}``.
     """
     known_component_ids = {str(c.get("component_id")) for c in components if c.get("component_id")}
+    component_aliases: dict[str, str] = {}
+    for component in components:
+        canonical = str(component.get("component_id") or "")
+        if not canonical:
+            continue
+        for alias in (
+            list(component.get("legacy_ids") or [])
+            + [component.get("agent_component_id"), component.get("legacy_component_id")]
+        ):
+            alias = str(alias or "")
+            if alias and alias != canonical:
+                component_aliases[alias] = canonical
 
     component_nodes: list[dict] = []
     component_edges: list[dict] = []
@@ -363,7 +375,10 @@ def _resolve_artifact_first_graph(
         artifact = (artifacts_by_doc.get(doc_id) or {}).get("component_graph")
         if artifact:
             _merge(build_component_graph_export(
-                artifact, document_id=doc_id, known_component_ids=known_component_ids
+                artifact,
+                document_id=doc_id,
+                known_component_ids=known_component_ids,
+                component_aliases=component_aliases,
             ))
             continue
         # Fallback (issues #390 / #400): this document has no current-run
@@ -380,7 +395,10 @@ def _resolve_artifact_first_graph(
         db_graph = load_db_graph(doc_id) if callable(load_db_graph) else None
         if isinstance(db_graph, dict) and (db_graph.get("nodes") or db_graph.get("edges")):
             _merge(build_component_graph_export(
-                db_graph, document_id=doc_id, known_component_ids=known_component_ids
+                db_graph,
+                document_id=doc_id,
+                known_component_ids=known_component_ids,
+                component_aliases=component_aliases,
             ))
 
     # Back-compat: when no per-document loader is supplied but every document fell
@@ -388,7 +406,10 @@ def _resolve_artifact_first_graph(
     # do not provide ``load_db_graph`` still export the DB graph (issue #387 split).
     if any_db_fallback and not callable(load_db_graph) and not component_nodes and not operation_nodes:
         return build_component_graph_export(
-            db_component_graph, document_id="", known_component_ids=known_component_ids
+            db_component_graph,
+            document_id="",
+            known_component_ids=known_component_ids,
+            component_aliases=component_aliases,
         )
     return {
         "component_graph": {
@@ -2050,6 +2071,26 @@ def _validate_export_references(
     # operation nodes is incomplete even if extraction succeeded, and equations /
     # evidence should be able to reach a claim/component through operation links.
     op_nodes = [n for n in operation_graph.get("nodes", []) or [] if isinstance(n, dict)]
+    for idx, node in enumerate(op_nodes):
+        operation_id = str(node.get("operation_id") or "")
+        parent_id = str(node.get("parent_component_id") or "")
+        unresolved_parent = str(node.get("unresolved_parent_component_id") or "")
+        if parent_id and parent_id not in component_ids:
+            add(
+                "OPERATION_PARENT_COMPONENT_INVALID",
+                f"operation {operation_id!r} parent_component_id {parent_id!r} is not canonical",
+                "graph/operation_graph.json",
+                f"$.nodes[{idx}].parent_component_id",
+                parent_id,
+            )
+        if unresolved_parent:
+            review(
+                "OPERATION_PARENT_COMPONENT_UNRESOLVED",
+                f"operation {operation_id!r} could not resolve parent component {unresolved_parent!r}",
+                "graph/operation_graph.json",
+                f"$.nodes[{idx}].unresolved_parent_component_id",
+                unresolved_parent,
+            )
     if op_nodes:
         linked_op_ids: set[str] = set()
         for edge in operation_graph.get("edges", []) or []:

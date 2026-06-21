@@ -76,6 +76,28 @@ class _LLMInput:
         self.claim_centered_plan = claim_centered_plan or {}
 
 
+class _RoutingLLM:
+    def generate(self, messages):
+        return {
+            "assignments": [
+                {
+                    "artifact_type": "equation",
+                    "artifact_id": "eq_blocked",
+                    "selected_responsibility": "derivation",
+                    "confidence": 0.9,
+                    "reason": "The artifact is a transformation equation.",
+                },
+                {
+                    "artifact_type": "derivation",
+                    "artifact_id": "d1",
+                    "selected_responsibility": "derivation",
+                    "confidence": 0.9,
+                    "reason": "The artifact is a derivation chain.",
+                },
+            ]
+        }
+
+
 def _step(step_id, op, inputs, outputs, **kwargs):
     return DerivationStep(
         step_id=step_id,
@@ -205,7 +227,9 @@ def test_low_confidence_equation_propagates_refiner_to_aligner_path():
         },
     ])
 
-    refined = REFINER.refine(_result([cx]), llm_input=llm_input, derivations=None)
+    refined = ComponentRefiner(llm_client=_RoutingLLM()).refine(
+        _result([cx]), llm_input=llm_input, derivations=None
+    )
     derivation_child = next(
         c for c in refined.components if c.responsibility_type == "derivation"
     )
@@ -260,6 +284,8 @@ def test_cannot_render_as_final_formula_downgrades_in_step4_not_step3():
         {
             "equation_id": "eq_final",
             "role": "result",
+            "confidence": 0.95,
+            "semantic_status": "source_backed",
             "confidence_policy": {
                 # otherwise healthy: only the final-formula flag is false.
                 "can_support_claim": True,

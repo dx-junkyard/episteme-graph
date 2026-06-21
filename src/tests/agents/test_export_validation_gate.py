@@ -51,6 +51,8 @@ class _ComponentRecord:
         *,
         linked_claim_ids=None,
         linked_equation_ids=None,
+        linked_dsl_node_ids=None,
+        linked_dsl_edge_ids=None,
         input_equation_ids=None,
         output_equation_ids=None,
         review_required_equation_ids=None,
@@ -78,6 +80,8 @@ class _ComponentRecord:
         self.evidence_refs = evidence_refs or {}
         self.linked_claim_ids = linked_claim_ids or []
         self.linked_equation_ids = linked_equation_ids or []
+        self.linked_dsl_node_ids = linked_dsl_node_ids or []
+        self.linked_dsl_edge_ids = linked_dsl_edge_ids or []
         self.input_equation_ids = input_equation_ids or []
         self.output_equation_ids = output_equation_ids or []
         self.review_required_equation_ids = review_required_equation_ids or []
@@ -1332,6 +1336,40 @@ def test_unprocessed_split_required_is_hard_error_and_not_publish_ready():
     assert unprocessed[0].target_id == "comp_unproc"
 
 
+def test_empty_dsl_hard_fails_nested_and_typed_component_refs_with_targets():
+    component = _ComponentRecord(
+        "comp_dsl",
+        {
+            "claim_ids": [],
+            "evidence_ids": [],
+            "dsl_refs": {
+                "node_ids": ["ghost_nested_node"],
+                "edge_ids": ["ghost_nested_edge"],
+            },
+        },
+        linked_dsl_node_ids=["ghost_typed_node"],
+        linked_dsl_edge_ids=["ghost_typed_edge"],
+    )
+    result = _run_gate(
+        component_result=_ComponentResult([component]),
+        claim_objects=_ClaimObjectResult([]),
+        evidence=_EvidenceResult([]),
+        dsl=_DslResult([], []),
+    )
+
+    assert result.status == "failed_validation"
+    node_errors = [e for e in result.errors if e.code == "UNRESOLVED_DSL_NODE_ID"]
+    edge_errors = [e for e in result.errors if e.code == "UNRESOLVED_DSL_EDGE_ID"]
+    assert {e.target_id for e in node_errors} == {
+        "ghost_nested_node", "ghost_typed_node"
+    }
+    assert {e.target_id for e in edge_errors} == {
+        "ghost_nested_edge", "ghost_typed_edge"
+    }
+    assert all(e.target_type == "dsl_node" for e in node_errors)
+    assert all(e.target_type == "dsl_edge" for e in edge_errors)
+
+
 # ---------------------------------------------------------------------------
 # Step 5: theory bundle + teaching output (issue #326)
 # ---------------------------------------------------------------------------
@@ -1593,6 +1631,45 @@ def test_graph_node_valid_parent_and_member_pass():
     codes = {e.code for e in result.errors}
     assert "COMPONENT_GRAPH_PARENT_COMPONENT_INVALID" not in codes
     assert "COMPONENT_GRAPH_MEMBER_COMPONENT_INVALID" not in codes
+
+
+def test_graph_operation_parent_must_be_canonical_component_not_aggregate_node():
+    artifacts = _make_artifacts(component_graph={
+        "nodes": [
+            {
+                "component_id": "comp_real",
+                "label": "Real",
+                "component_type": "TheoryOperationNode",
+            },
+            {
+                "component_id": "aggregate_theory_node",
+                "label": "Aggregate",
+                "component_type": "TheoryOperationNode",
+            },
+            {
+                "component_id": "detail_operation",
+                "label": "Detail",
+                "component_type": "EquationOperationNode",
+                "parent_component_id": "aggregate_theory_node",
+            },
+        ],
+        "edges": [],
+    })
+    component_result = _ComponentResult([
+        _ComponentRecord("comp_real", {"claim_ids": [], "evidence_ids": []})
+    ])
+
+    result = _run_gate(
+        artifacts=artifacts,
+        component_result=component_result,
+    )
+
+    bad = next(
+        e for e in result.errors
+        if e.code == "COMPONENT_GRAPH_PARENT_COMPONENT_INVALID"
+    )
+    assert bad.target_type == "component"
+    assert bad.target_id == "aggregate_theory_node"
 
 
 def test_course_topic_unrelated_derivation_is_flagged():

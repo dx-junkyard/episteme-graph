@@ -59,6 +59,16 @@ class _LLMInput:
         self.accepted_claims = []
 
 
+class _RoutingLLM:
+    def __init__(self, assignments):
+        self.assignments = assignments
+        self.calls = []
+
+    def generate(self, messages):
+        self.calls.append(messages)
+        return {"assignments": list(self.assignments)}
+
+
 def _split_rec(*suggested, reasons=None):
     return {
         "required": True,
@@ -357,6 +367,166 @@ def test_evidence_routed_by_equation_provenance_when_no_claim_cites_it():
     assert not any(u["link_id"] == "ev_from_eq" for u in unassigned)
 
 
+def test_shared_evidence_is_linked_to_every_explicit_provenance_child():
+    component = _component(
+        component_id="comp_shared_ev",
+        linked_equation_ids=["eq_def", "eq_con"],
+        linked_evidence_ids=["ev_shared"],
+        evidence_refs={
+            "equation_ids": ["eq_def", "eq_con"],
+            "evidence_ids": ["ev_shared"],
+        },
+        split_recommendation=_split_rec(
+            _suggested("Definition", "definition"),
+            _suggested("Constraint", "constraint"),
+        ),
+    )
+    llm_input = _LLMInput(equations=[
+        {"equation_id": "eq_def", "role": "definition",
+         "source_evidence_ids": ["ev_shared"]},
+        {"equation_id": "eq_con", "role": "constraint",
+         "source_evidence_ids": ["ev_shared"]},
+    ])
+
+    refined = REFINER.refine(_result([component]), llm_input=llm_input, derivations=None)
+
+    definition = next(c for c in refined.components if c.responsibility_type == "definition")
+    constraint = next(c for c in refined.components if c.responsibility_type == "constraint")
+    assert definition.linked_evidence_ids == ["ev_shared"]
+    assert constraint.linked_evidence_ids == ["ev_shared"]
+
+
+def test_low_confidence_ambiguous_equation_is_rejudged_by_constrained_llm():
+    component = _component(
+        component_id="comp_llm_route",
+        linked_equation_ids=["eq_def", "eq_result"],
+        split_recommendation=_split_rec(
+            _suggested("Definition", "definition"),
+            _suggested("Constraint", "constraint"),
+        ),
+    )
+    llm_input = _LLMInput(equations=[
+        {"equation_id": "eq_def", "role": "definition"},
+        {
+            "equation_id": "eq_result",
+            "role": "result",
+            "plain_text": "The parameters must satisfy this consistency condition.",
+            "confidence": 0.55,
+            "semantic_status": "context_inferred",
+            "review_flags": ["low_confidence"],
+        },
+    ])
+    routing_llm = _RoutingLLM([{
+        "artifact_type": "equation",
+        "artifact_id": "eq_result",
+        "selected_responsibility": "constraint",
+        "confidence": 0.91,
+        "reason": "The equation states a consistency condition.",
+    }])
+
+    refined = ComponentRefiner(llm_client=routing_llm).refine(
+        _result([component]), llm_input=llm_input, derivations=None
+    )
+
+    constraint = next(c for c in refined.components if c.responsibility_type == "constraint")
+    assert constraint.linked_equation_ids == ["eq_result"]
+    assert len(routing_llm.calls) == 1
+    mapping = refined.component_refinement["component_refinement_records"][0][
+        "split_candidate_mapping"
+    ]
+    decision = next(
+        d
+        for candidate in mapping
+        for d in candidate["routing_decisions"]
+        if d["artifact_id"] == "eq_result"
+    )
+    assert decision["method"] == "llm_rejudgement"
+
+
+def test_low_confidence_or_candidate_outside_llm_answer_stays_unassigned():
+    component = _component(
+        component_id="comp_llm_reject",
+        linked_equation_ids=["eq_def", "eq_con", "eq_result"],
+        split_recommendation=_split_rec(
+            _suggested("Definition", "definition"),
+            _suggested("Constraint", "constraint"),
+        ),
+    )
+    llm_input = _LLMInput(equations=[
+        {"equation_id": "eq_def", "role": "definition"},
+        {"equation_id": "eq_con", "role": "constraint"},
+        {
+            "equation_id": "eq_result",
+            "role": "result",
+            "confidence": 0.4,
+            "semantic_status": "unknown",
+            "review_flags": ["low_confidence"],
+        },
+    ])
+    routing_llm = _RoutingLLM([{
+        "artifact_type": "equation",
+        "artifact_id": "eq_result",
+        "selected_responsibility": "application",
+        "confidence": 0.95,
+        "reason": "Invalid candidate for this split.",
+    }])
+
+    refined = ComponentRefiner(llm_client=routing_llm).refine(
+        _result([component]), llm_input=llm_input, derivations=None
+    )
+
+    unassigned = refined.component_refinement["refinement_validation"]["unassigned_links"]
+    assert any(
+        row["link_type"] == "equation" and row["link_id"] == "eq_result"
+        for row in unassigned
+    )
+
+
+def test_equal_equation_overlap_is_rejudged_instead_of_choosing_first_child():
+    component = _component(
+        component_id="comp_overlap_tie",
+        linked_equation_ids=["eq_def", "eq_con"],
+        linked_claim_ids=["claim_both"],
+        split_recommendation=_split_rec(
+            _suggested("Definition", "definition"),
+            _suggested("Constraint", "constraint"),
+        ),
+    )
+    llm_input = _LLMInput(
+        equations=[
+            {"equation_id": "eq_def", "role": "definition"},
+            {"equation_id": "eq_con", "role": "constraint"},
+        ],
+        claims=[{
+            "claim_id": "claim_both",
+            "claim_type": "constraint",
+            "text": "The defined quantity must satisfy the stated condition.",
+            "equation_ids": ["eq_def", "eq_con"],
+            "confidence": 0.95,
+            "support_status": "source_backed",
+            "review_status": "auto_accepted",
+            "atomicity": "atomic",
+            "is_atomic": True,
+        }],
+    )
+    routing_llm = _RoutingLLM([{
+        "artifact_type": "claim",
+        "artifact_id": "claim_both",
+        "selected_responsibility": "constraint",
+        "confidence": 0.9,
+        "reason": "The proposition asserts a constraint, despite equal equation overlap.",
+    }])
+
+    refined = ComponentRefiner(llm_client=routing_llm).refine(
+        _result([component]), llm_input=llm_input, derivations=None
+    )
+
+    definition = next(c for c in refined.components if c.responsibility_type == "definition")
+    constraint = next(c for c in refined.components if c.responsibility_type == "constraint")
+    assert "claim_both" not in definition.linked_claim_ids
+    assert "claim_both" in constraint.linked_claim_ids
+
+
 def test_derivation_routed_by_operation_family():
     # With two derivational-capable children, a derivation is routed by the
     # operation family of its steps, not to a fixed "first derivational child".
@@ -393,9 +563,14 @@ def test_derivation_routed_by_operation_family():
                         input_equation_ids=[],
                         operation="evaluate the constraint condition",
                         output_equation_ids=[],
+                        confidence=0.95,
+                        review_status="auto_accepted",
                     ),
                 ],
                 linked_component_ids=[],
+                review_status="auto_accepted",
+                confidence=0.95,
+                review_required=False,
             )
         ],
     )
@@ -425,7 +600,19 @@ def test_derivation_links_redistributed_to_derivational_child():
         {"equation_id": "eq_def", "role": "definition"},
         {"equation_id": "eq_der", "role": "transformation"},
     ])
-    refined = REFINER.refine(_result([component]), llm_input=llm_input, derivations=None)
+    routing_llm = _RoutingLLM([
+        {
+            "artifact_type": "derivation",
+            "artifact_id": derivation_id,
+            "selected_responsibility": "derivation",
+            "confidence": 0.9,
+            "reason": "The only derivational responsibility is the derivation child.",
+        }
+        for derivation_id in ("d_a", "d_b")
+    ])
+    refined = ComponentRefiner(llm_client=routing_llm).refine(
+        _result([component]), llm_input=llm_input, derivations=None
+    )
 
     definition = next(c for c in refined.components if c.responsibility_type == "definition")
     derivation = next(c for c in refined.components if c.responsibility_type == "derivation")
@@ -489,7 +676,16 @@ def test_low_confidence_equation_forces_child_review_required():
             },
         },
     ])
-    refined = REFINER.refine(_result([component]), llm_input=llm_input, derivations=None)
+    routing_llm = _RoutingLLM([{
+        "artifact_type": "equation",
+        "artifact_id": "eq_blocked",
+        "selected_responsibility": "derivation",
+        "confidence": 0.9,
+        "reason": "The equation is a transformation despite its restricted downstream use.",
+    }])
+    refined = ComponentRefiner(llm_client=routing_llm).refine(
+        _result([component]), llm_input=llm_input, derivations=None
+    )
 
     derivation = next(c for c in refined.components if c.responsibility_type == "derivation")
     assert "eq_blocked" in derivation.linked_equation_ids

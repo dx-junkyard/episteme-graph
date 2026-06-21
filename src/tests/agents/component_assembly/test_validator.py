@@ -298,6 +298,41 @@ def test_valid_linkage_no_errors():
     assert cross_errors == []
 
 
+def test_empty_dsl_rejects_nested_and_typed_component_refs():
+    llm_input = _make_llm_input(
+        available_dsl_nodes=[],
+        available_dsl_edges=[],
+    )
+    component = _component(
+        evidence_refs={
+            "claim_ids": [],
+            "evidence_ids": [],
+            "equation_ids": [],
+            "dsl_refs": {
+                "node_ids": ["ghost_nested_node"],
+                "edge_ids": ["ghost_nested_edge"],
+            },
+        },
+        linked_dsl_node_ids=["ghost_typed_node"],
+        linked_dsl_edge_ids=["ghost_typed_edge"],
+    )
+
+    issues = VALIDATOR.validate(
+        _result(components=[component]), llm_input=llm_input
+    )
+
+    node_issues = [i for i in issues if i.rule_id == "unresolved_dsl_node_id"]
+    edge_issues = [i for i in issues if i.rule_id == "unresolved_dsl_edge_id"]
+    assert {i.target_id for i in node_issues} == {
+        "ghost_nested_node", "ghost_typed_node"
+    }
+    assert {i.target_id for i in edge_issues} == {
+        "ghost_nested_edge", "ghost_typed_edge"
+    }
+    assert all(i.target_type == "dsl_node" for i in node_issues)
+    assert all(i.target_type == "dsl_edge" for i in edge_issues)
+
+
 def test_component_support_cannot_use_split_required_claim():
     llm_input = _make_llm_input(
         available_claims=[

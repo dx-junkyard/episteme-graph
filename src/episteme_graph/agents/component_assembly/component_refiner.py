@@ -7,11 +7,12 @@ too coarse to be reusable theory parts. A single coarse component (for example a
 distinct theoretical operations (linearization, parameter solving/elimination,
 residual / final-constraint derivations).
 
-``ComponentRefiner`` is a deterministic (non-LLM) post-processing pass run after
+``ComponentRefiner`` is primarily a deterministic post-processing pass run after
 the initial components are assembled. It uses the derivation chains — which carry
 the real theory structure (one step = one operation, with input/output equations,
-eliminated/retained symbols) — to detect over-large components and split them so
-that:
+eliminated/retained symbols) — to detect over-large components and split them.
+Only artifact-to-child assignments that are ambiguous or based on low-confidence
+upstream semantics are sent to a constrained LLM re-judgement step.
 
     1 component = 1 reusable theory unit
 
@@ -29,6 +30,8 @@ inputs change, outputs change, the operation family changes, symbols change.
 from __future__ import annotations
 
 import copy
+import json
+import logging
 from dataclasses import dataclass, field
 
 from ..theory_operations import operation_family as _generic_operation_family
@@ -67,6 +70,12 @@ SIZE_THRESHOLDS = {
     "max_component_types_per_component": 1,
     "max_distinct_responsibility_labels": 1,
 }
+
+logger = logging.getLogger(__name__)
+
+_DETERMINISTIC_CONFIDENCE_THRESHOLD = 0.8
+_LLM_ROUTING_CONFIDENCE_THRESHOLD = 0.7
+_LLM_ROUTING_REVIEW_THRESHOLD = 0.85
 
 
 @dataclass
@@ -121,8 +130,9 @@ class TheoryOperationCandidate:
 
 
 class ComponentRefiner:
-    def __init__(self) -> None:
+    def __init__(self, llm_client=None) -> None:
         self._classifier = EquationRoleClassifier()
+        self._llm_client = llm_client
         # Per-component refinement trace populated during a single refine() call
         # (issue #324). Reset at the start of refine().
         self._traces: dict[str, dict] = {}
@@ -524,7 +534,12 @@ class ComponentRefiner:
             return []
 
         plan, unassigned = _redistribute_links(
-            component, suggested, eq_index, claim_index, derivation_index or {}
+            component,
+            suggested,
+            eq_index,
+            claim_index,
+            derivation_index or {},
+            llm_client=self._llm_client,
         )
         assignable = [spec for spec in plan if _spec_has_payload(spec)]
         if len(assignable) < 2:
@@ -547,6 +562,7 @@ class ComponentRefiner:
                 "assigned_evidence_ids": list(spec.get("evidence_ids") or []),
                 "assigned_derivation_ids": list(spec.get("derivation_ids") or []),
                 "assigned_concepts": list(child.concepts or []),
+                "routing_decisions": list(spec.get("routing_decisions") or []),
             })
 
         # introduced vs reused depends on cross-child ordering (issue #8 / #324).
@@ -1497,12 +1513,16 @@ def _claim_index(llm_input) -> dict[str, dict]:
             continue
         atomicity = str(row.get("atomicity", "atomic") or "atomic")
         entry = index.setdefault(cid, {
+            "text": str(row.get("text") or ""),
             "concepts": [str(c) for c in (row.get("concepts") or []) if c],
             "atomicity": atomicity,
             "is_atomic": bool(row.get("is_atomic", atomicity == "atomic")),
             "claim_type": str(row.get("claim_type") or row.get("claim_type_candidate") or ""),
             "equation_ids": [str(e) for e in (row.get("equation_ids") or []) if e],
             "evidence_ids": [str(e) for e in (row.get("source_evidence_ids") or []) if e],
+            "confidence": row.get("confidence"),
+            "support_status": str(row.get("support_status") or ""),
+            "review_status": str(row.get("review_status") or ""),
         })
     return index
 
@@ -1562,14 +1582,26 @@ def _match_spec_by_category(
 def _match_spec_by_equation_overlap(specs: list[dict], claim_eqs: set) -> dict | None:
     if not claim_eqs:
         return None
-    best: dict | None = None
-    best_n = 0
-    for spec in specs:
-        overlap = len(set(spec["equation_ids"]) & claim_eqs)
-        if overlap > best_n:
-            best_n = overlap
-            best = spec
-    return best
+    scored = [
+        (len(set(spec["equation_ids"]) & claim_eqs), spec)
+        for spec in specs
+    ]
+    best_n = max((score for score, _ in scored), default=0)
+    if best_n <= 0:
+        return None
+    winners = [spec for score, spec in scored if score == best_n]
+    return winners[0] if len(winners) == 1 else None
+
+
+def _equation_overlap_is_ambiguous(specs: list[dict], equation_ids: set) -> bool:
+    if not equation_ids:
+        return False
+    scores = [
+        len(set(spec["equation_ids"]) & equation_ids)
+        for spec in specs
+    ]
+    best_n = max(scores, default=0)
+    return best_n > 0 and sum(score == best_n for score in scores) > 1
 
 
 def _spec_has_payload(spec: dict) -> bool:
@@ -1655,34 +1687,99 @@ def _equation_evidence_ids(eq: dict) -> list[str]:
     return _ordered_unique(ids)
 
 
+def _has_any_key(record: dict, keys: tuple[str, ...]) -> bool:
+    return any(key in record for key in keys)
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value if value not in (None, "") else default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _equation_is_high_confidence(eq: dict) -> bool:
+    """Whether an equation role is safe to consume without re-judgement.
+
+    Production ComponentAssembly input carries these quality fields. Legacy
+    callers and compact unit fixtures may not; in that compatibility case the
+    previous deterministic behavior is retained. Once any quality metadata is
+    present, all source-backed checks below are enforced.
+    """
+    quality_keys = (
+        "confidence",
+        "semantic_status",
+        "review_flags",
+        "needs_math_review",
+        "confidence_policy",
+        "reconstruction_status",
+    )
+    if not _has_any_key(eq, quality_keys):
+        return True
+    policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
+    confidence = _safe_float(eq.get("confidence"))
+    return bool(
+        confidence >= _DETERMINISTIC_CONFIDENCE_THRESHOLD
+        and str(eq.get("semantic_status") or "") == "source_backed"
+        and not bool(eq.get("review_flags"))
+        and not bool(eq.get("needs_math_review"))
+        and eq.get("reconstruction_status") in (None, "", "none")
+        and not bool(policy.get("must_not_treat_as_source_extracted"))
+        and policy.get("allowed_downstream_use") not in {"blocked", "semantic_hint_only"}
+    )
+
+
+def _claim_is_high_confidence(info: dict) -> bool:
+    quality_keys = ("confidence", "support_status", "review_status")
+    if not _has_any_key(info, quality_keys) or all(
+        info.get(key) in (None, "") for key in quality_keys
+    ):
+        return True
+    confidence = _safe_float(info.get("confidence"))
+    support_status = str(info.get("support_status") or "")
+    review_status = str(info.get("review_status") or "")
+    return bool(
+        confidence >= _DETERMINISTIC_CONFIDENCE_THRESHOLD
+        and support_status in {"source_backed", "equation_backed", "derived_from_linked_artifacts"}
+        and review_status not in {"review_required", "teacher_review_required", "needs_verification"}
+    )
+
+
 def _match_spec_by_evidence_provenance(
     specs: list[dict], evidence_ids: set, claim_evidence: dict[str, set]
 ) -> dict | None:
     """Route a claim to the child that already owns a co-evidenced claim (#421)."""
     if not evidence_ids:
         return None
-    best: dict | None = None
-    best_n = 0
+    scored: list[tuple[int, dict]] = []
     for spec in specs:
         overlap = 0
         for cid in spec["claim_ids"]:
             overlap += len(evidence_ids & claim_evidence.get(cid, set()))
-        if overlap > best_n:
-            best_n = overlap
-            best = spec
-    return best
+        scored.append((overlap, spec))
+    best_n = max((score for score, _ in scored), default=0)
+    if best_n <= 0:
+        return None
+    winners = [spec for score, spec in scored if score == best_n]
+    return winners[0] if len(winners) == 1 else None
 
 
 def _match_spec_by_operation_families(specs: list[dict], families: list[str]) -> dict | None:
     """Route a derivation to the child whose responsibility matches its operation family (#421)."""
+    matched_responsibilities: set[str] = set()
     for fam in families:
         resp = _FAMILY_TO_RESPONSIBILITY.get(fam)
         if not resp:
             continue
-        for spec in specs:
-            if spec["responsibility_type"] == resp:
-                return spec
-    return None
+        if any(spec["responsibility_type"] == resp for spec in specs):
+            matched_responsibilities.add(resp)
+    if len(matched_responsibilities) != 1:
+        return None
+    responsibility = next(iter(matched_responsibilities))
+    matches = [
+        spec for spec in specs if spec["responsibility_type"] == responsibility
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _derivation_index(chains) -> dict[str, dict]:
@@ -1694,17 +1791,173 @@ def _derivation_index(chains) -> dict[str, dict]:
             continue
         eqs: list[str] = []
         families: list[str] = []
+        step_confidences: list[float] = []
+        step_review_statuses: list[str] = []
         for step in getattr(chain, "steps", []) or []:
             eqs.extend(_step_field(step, "input_equation_ids"))
             eqs.extend(_step_field(step, "output_equation_ids"))
             op = str(getattr(step, "operation", "") or "")
             if op:
                 families.append(_generic_operation_family(op))
+            step_confidences.append(_safe_float(getattr(step, "confidence", 0.0)))
+            step_review_statuses.append(str(getattr(step, "review_status", "") or ""))
         index[d_id] = {
             "equation_ids": _ordered_unique(eqs),
             "operation_families": _ordered_unique(families),
+            "confidence": _safe_float(getattr(chain, "confidence", 0.0)),
+            "review_status": str(getattr(chain, "review_status", "") or ""),
+            "review_required": bool(getattr(chain, "review_required", False)),
+            "step_confidences": step_confidences,
+            "step_review_statuses": step_review_statuses,
         }
     return index
+
+
+def _derivation_is_high_confidence(info: dict) -> bool:
+    if not info:
+        return False
+    confidence = _safe_float(info.get("confidence"))
+    step_confidences = list(info.get("step_confidences") or [])
+    statuses = {
+        str(info.get("review_status") or ""),
+        *(str(value or "") for value in (info.get("step_review_statuses") or [])),
+    }
+    # Older derivation records often expose confidence only on steps.
+    effective_confidence = confidence or (min(step_confidences) if step_confidences else 0.0)
+    return bool(
+        effective_confidence >= _DETERMINISTIC_CONFIDENCE_THRESHOLD
+        and not bool(info.get("review_required"))
+        and not statuses.intersection(
+            {"review_required", "teacher_review_required", "needs_verification"}
+        )
+    )
+
+
+def _routing_candidate_payload(specs: list[dict]) -> list[dict]:
+    return [
+        {
+            "responsibility_type": spec["responsibility_type"],
+            "name": spec["name"],
+            "assigned_equation_ids": list(spec["equation_ids"]),
+            "assigned_claim_ids": list(spec["claim_ids"]),
+        }
+        for spec in specs
+    ]
+
+
+def _resolve_pending_with_llm(
+    *,
+    component: ComponentRecord,
+    specs: list[dict],
+    pending: list[dict],
+    llm_client,
+) -> tuple[list[dict], list[dict]]:
+    """Resolve only ambiguous/low-confidence links against a closed candidate set."""
+    if not pending:
+        return [], []
+    if llm_client is None:
+        return [], pending
+
+    candidate_responsibilities = {
+        spec["responsibility_type"] for spec in specs if spec["responsibility_type"]
+    }
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You route scientific artifacts to one of the supplied child components. "
+                "Use the artifact text, semantic metadata, explicit IDs, and parent context. "
+                "Do not invent artifacts or children. If the evidence is insufficient or "
+                "conflicting, select 'unassigned'. Return JSON only as "
+                "{\"assignments\":[{\"artifact_type\":\"equation|claim|derivation\","
+                "\"artifact_id\":\"...\",\"selected_responsibility\":\"...|unassigned\","
+                "\"confidence\":0.0,\"reason\":\"...\"}]}."
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps({
+                "parent_component": {
+                    "component_id": component.component_id,
+                    "label": component.label,
+                    "summary": component.summary,
+                    "reason": component.reason,
+                },
+                "candidate_children": _routing_candidate_payload(specs),
+                "artifacts_to_route": pending,
+            }, ensure_ascii=False),
+        },
+    ]
+    try:
+        raw = llm_client.generate(messages)
+    except Exception as exc:
+        logger.warning(
+            "Component refinement routing LLM failed component=%s error=%s",
+            component.component_id,
+            exc,
+        )
+        return [], pending
+
+    pending_by_key = {
+        (entry["artifact_type"], entry["artifact_id"]): entry for entry in pending
+    }
+    resolved: list[dict] = []
+    resolved_keys: set[tuple[str, str]] = set()
+    for row in raw.get("assignments", []) if isinstance(raw, dict) else []:
+        if not isinstance(row, dict):
+            continue
+        artifact_type = str(row.get("artifact_type") or "")
+        artifact_id = str(row.get("artifact_id") or "")
+        key = (artifact_type, artifact_id)
+        if key not in pending_by_key or key in resolved_keys:
+            continue
+        responsibility = canonical_responsibility_type(row.get("selected_responsibility"))
+        confidence = _safe_float(row.get("confidence"))
+        if (
+            responsibility not in candidate_responsibilities
+            or confidence < _LLM_ROUTING_CONFIDENCE_THRESHOLD
+        ):
+            continue
+        target = next(
+            (
+                spec
+                for spec in specs
+                if spec["responsibility_type"] == responsibility
+            ),
+            None,
+        )
+        if target is None:
+            continue
+        field_name = {
+            "equation": "equation_ids",
+            "claim": "claim_ids",
+            "derivation": "derivation_ids",
+        }.get(artifact_type)
+        if field_name is None:
+            continue
+        target[field_name].append(artifact_id)
+        decision = {
+            "artifact_type": artifact_type,
+            "artifact_id": artifact_id,
+            "method": "llm_rejudgement",
+            "confidence": confidence,
+            "reason": str(row.get("reason") or ""),
+        }
+        target["routing_decisions"].append(decision)
+        if confidence < _LLM_ROUTING_REVIEW_THRESHOLD:
+            target["review_required"] = True
+            target["review_notes"].append(
+                f"LLM routing confidence {confidence:.2f} for {artifact_type} {artifact_id}"
+            )
+        resolved.append(decision)
+        resolved_keys.add(key)
+
+    unresolved = [
+        entry
+        for entry in pending
+        if (entry["artifact_type"], entry["artifact_id"]) not in resolved_keys
+    ]
+    return resolved, unresolved
 
 
 def _redistribute_links(
@@ -1713,6 +1966,8 @@ def _redistribute_links(
     eq_index: dict[str, dict],
     claim_index: dict[str, dict],
     derivation_index: dict[str, dict] | None = None,
+    *,
+    llm_client=None,
 ) -> tuple[list[dict], list[dict]]:
     """Reassign the parent's links across the suggested children (#324 / #421).
 
@@ -1748,41 +2003,69 @@ def _redistribute_links(
             "derivation_ids": [],
             "review_required": False,
             "review_notes": [],
+            "routing_decisions": [],
         }
         specs.append(spec)
-        # Consume the analyzer's responsibility-aware candidate equation plan
-        # (#421): map each suggested equation back to the spec that proposed it so
-        # the refiner can honour it when the equation role is otherwise unknown.
+        # Preserve the analyzer's responsibility-aware candidate equation plan as
+        # an LLM hint. It is never sufficient to finalize an assignment by itself.
         for eid in s.get("linked_equation_ids") or s.get("candidate_equation_ids") or []:
             candidate_equation_hints.setdefault(str(eid), spec)
     unassigned: list[dict] = []
+    pending: list[dict] = []
 
     # Equations → responsibility category derived from the equation role. When a
     # category covers several responsibilities (e.g. result → constraint /
     # application / limitation), the equation's exact role responsibility
     # disambiguates so a constraint equation cannot fall into an application
-    # child. When the role is unknown, fall back to the analyzer's candidate hint;
-    # only when nothing resolves is the equation left unassigned (never
-    # round-robined).
+    # child. Unknown, low-confidence, or ambiguous roles are sent to constrained
+    # LLM re-judgement with the analyzer candidate included only as a hint.
     equation_evidence: dict[str, set] = {}
     for eq_id in _all_equation_ids(component):
         eq = eq_index.get(eq_id) or {}
         equation_evidence[eq_id] = set(_equation_evidence_ids(eq))
-        target = _match_spec_by_category(
-            specs, _equation_category(eq), preferred=_equation_responsibility(eq)
-        )
+        category = _equation_category(eq)
+        target = None
+        if _equation_is_high_confidence(eq):
+            target = _match_spec_by_category(
+                specs, category, preferred=_equation_responsibility(eq)
+            )
         if target is None:
             hint = candidate_equation_hints.get(eq_id)
-            if hint is not None and hint in specs:
-                target = hint
-        if target is None:
-            unassigned.append({
-                "link_type": "equation",
-                "link_id": eq_id,
-                "reason": "no responsibility category match",
+            pending.append({
+                "artifact_type": "equation",
+                "artifact_id": eq_id,
+                "reason": (
+                    "low-confidence equation semantics"
+                    if not _equation_is_high_confidence(eq)
+                    else "ambiguous or missing responsibility match"
+                ),
+                "suggested_responsibility": (
+                    hint["responsibility_type"] if hint is not None else ""
+                ),
+                "artifact": {
+                    key: eq.get(key)
+                    for key in (
+                        "role",
+                        "equation_type",
+                        "summary",
+                        "plain_text",
+                        "latex",
+                        "semantic_status",
+                        "confidence",
+                        "review_flags",
+                        "source_evidence_ids",
+                        "linked_claim_ids",
+                    )
+                    if eq.get(key) not in (None, "", [])
+                },
             })
             continue
         target["equation_ids"].append(eq_id)
+        target["routing_decisions"].append({
+            "artifact_type": "equation",
+            "artifact_id": eq_id,
+            "method": "deterministic_high_confidence",
+        })
 
     # Claims → equation overlap, then claim type, then source-evidence provenance.
     claim_ids = _ordered_unique(
@@ -1794,63 +2077,53 @@ def _redistribute_links(
     for cid in claim_ids:
         info = claim_index.get(cid, {})
         claim_evidence[cid] = set(info.get("evidence_ids") or [])
-        target = _match_spec_by_equation_overlap(specs, set(info.get("equation_ids") or []))
+        target = None
+        claim_eqs = set(info.get("equation_ids") or [])
+        ambiguous_overlap = _equation_overlap_is_ambiguous(specs, claim_eqs)
+        if _claim_is_high_confidence(info):
+            target = _match_spec_by_equation_overlap(specs, claim_eqs)
+            if target is None and not ambiguous_overlap:
+                target = _match_spec_by_category(
+                    specs, _claim_category(info), preferred=_claim_responsibility(info)
+                )
+            if target is None and not ambiguous_overlap:
+                target = _match_spec_by_evidence_provenance(
+                    specs, claim_evidence[cid], claim_evidence
+                )
         if target is None:
-            target = _match_spec_by_category(
-                specs, _claim_category(info), preferred=_claim_responsibility(info)
-            )
-        if target is None:
-            target = _match_spec_by_evidence_provenance(
-                specs, claim_evidence[cid], claim_evidence
-            )
-        if target is None:
-            reason = (
-                "composite claim without confident target"
-                if not _claim_is_atomic(cid, claim_index)
-                else "atomic claim without confident responsibility target"
-            )
-            unassigned.append({
-                "link_type": "claim",
-                "link_id": cid,
-                "reason": reason,
+            pending.append({
+                "artifact_type": "claim",
+                "artifact_id": cid,
+                "reason": (
+                    "low-confidence claim classification"
+                    if not _claim_is_high_confidence(info)
+                    else (
+                        "claim equation overlap is tied across responsibilities"
+                        if ambiguous_overlap
+                        else "claim has no unique responsibility target"
+                    )
+                ),
+                "artifact": {
+                    key: info.get(key)
+                    for key in (
+                        "text",
+                        "claim_type",
+                        "equation_ids",
+                        "evidence_ids",
+                        "confidence",
+                        "support_status",
+                        "review_status",
+                    )
+                    if info.get(key) not in (None, "", [])
+                },
             })
             continue
         target["claim_ids"].append(cid)
-
-    # Evidence → the child whose assigned claims OR assigned equations reference
-    # it (#421). Equation provenance matters: an evidence item cited only by an
-    # equation (no claim) is still routed to the child that owns that equation
-    # instead of being dropped as unassigned.
-    evidence_ids = _ordered_unique(
-        list(component.linked_evidence_ids or [])
-        + list((component.evidence_refs or {}).get("evidence_ids") or [])
-    )
-    for ev_id in evidence_ids:
-        target = next(
-            (
-                spec
-                for spec in specs
-                if any(ev_id in claim_evidence.get(cid, set()) for cid in spec["claim_ids"])
-            ),
-            None,
-        )
-        if target is None:
-            target = next(
-                (
-                    spec
-                    for spec in specs
-                    if any(ev_id in equation_evidence.get(eid, set()) for eid in spec["equation_ids"])
-                ),
-                None,
-            )
-        if target is None:
-            unassigned.append({
-                "link_type": "evidence",
-                "link_id": ev_id,
-                "reason": "no child claim or equation references this evidence",
-            })
-            continue
-        target["evidence_ids"].append(ev_id)
+        target["routing_decisions"].append({
+            "artifact_type": "claim",
+            "artifact_id": cid,
+            "method": "deterministic_high_confidence",
+        })
 
     # Derivations → by input/output equation overlap and operation family, then
     # the sole derivational child; otherwise left unassigned (never duplicated).
@@ -1862,23 +2135,98 @@ def _redistribute_links(
     ]
     for d_id in _ordered_unique(component.linked_derivation_ids or []):
         info = derivation_index.get(d_id, {})
-        target = _match_spec_by_equation_overlap(specs, set(info.get("equation_ids") or []))
+        target = None
+        derivation_eqs = set(info.get("equation_ids") or [])
+        ambiguous_overlap = _equation_overlap_is_ambiguous(specs, derivation_eqs)
+        if _derivation_is_high_confidence(info):
+            target = _match_spec_by_equation_overlap(specs, derivation_eqs)
+            if target is None and not ambiguous_overlap:
+                target = _match_spec_by_operation_families(
+                    specs, info.get("operation_families") or []
+                )
+            if target is None and not ambiguous_overlap and len(derivational) == 1:
+                target = derivational[0]
         if target is None:
-            target = _match_spec_by_operation_families(specs, info.get("operation_families") or [])
-        if target is None and len(derivational) == 1:
-            target = derivational[0]
-        if target is None:
-            unassigned.append({
-                "link_type": "derivation",
-                "link_id": d_id,
+            pending.append({
+                "artifact_type": "derivation",
+                "artifact_id": d_id,
                 "reason": (
-                    "no derivational child to receive derivation"
-                    if not derivational
-                    else "derivation could not be routed to a single derivational child"
+                    "low-confidence derivation semantics"
+                    if not _derivation_is_high_confidence(info)
+                    else (
+                        "derivation equation overlap is tied across responsibilities"
+                        if ambiguous_overlap
+                        else "derivation has no unique responsibility target"
+                    )
                 ),
+                "artifact": {
+                    key: info.get(key)
+                    for key in (
+                        "equation_ids",
+                        "operation_families",
+                        "confidence",
+                        "review_status",
+                        "review_required",
+                    )
+                    if info.get(key) not in (None, "", [])
+                },
             })
             continue
         target["derivation_ids"].append(d_id)
+        target["routing_decisions"].append({
+            "artifact_type": "derivation",
+            "artifact_id": d_id,
+            "method": "deterministic_high_confidence",
+        })
+
+    # Ambiguous and low-confidence artifacts are re-judged in one constrained
+    # call. The LLM may select only one of the supplied responsibilities or
+    # leave an artifact unassigned; invalid/low-confidence answers are ignored.
+    _, unresolved = _resolve_pending_with_llm(
+        component=component,
+        specs=specs,
+        pending=pending,
+        llm_client=llm_client,
+    )
+    for entry in unresolved:
+        unassigned.append({
+            "link_type": entry["artifact_type"],
+            "link_id": entry["artifact_id"],
+            "reason": entry["reason"],
+        })
+
+    # Evidence references are not exclusive ownership. Route an evidence item to
+    # every child whose assigned claim or equation explicitly cites it.
+    evidence_ids = _ordered_unique(
+        list(component.linked_evidence_ids or [])
+        + list((component.evidence_refs or {}).get("evidence_ids") or [])
+    )
+    for ev_id in evidence_ids:
+        targets = [
+            spec
+            for spec in specs
+            if (
+                any(ev_id in claim_evidence.get(cid, set()) for cid in spec["claim_ids"])
+                or any(
+                    ev_id in equation_evidence.get(eid, set())
+                    for eid in spec["equation_ids"]
+                )
+            )
+        ]
+        if not targets:
+            unassigned.append({
+                "link_type": "evidence",
+                "link_id": ev_id,
+                "reason": "no child claim or equation references this evidence",
+            })
+            continue
+        for target in targets:
+            target["evidence_ids"].append(ev_id)
+            target["routing_decisions"].append({
+                "artifact_type": "evidence",
+                "artifact_id": ev_id,
+                "method": "explicit_shared_provenance",
+            })
 
     # Children supported only by composite claims are downgraded.
     for spec in specs:
@@ -2014,6 +2362,7 @@ def _build_suggested_component(
     evidence_refs = copy.deepcopy(parent.evidence_refs or {})
     evidence_refs["equation_ids"] = eq_ids
     evidence_refs["claim_ids"] = claim_ids
+    evidence_refs["evidence_ids"] = evidence_ids
 
     eqsys_like = {"equation_system", "derivation", "constraint"}
     return ComponentRecord(
