@@ -204,6 +204,8 @@ class ValidationIssue:
     severity: str
     message: str
     field: str | None = None
+    target_type: str | None = None
+    target_id: str | None = None
 
 
 @dataclass

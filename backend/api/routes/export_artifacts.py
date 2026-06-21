@@ -1454,6 +1454,18 @@ def build_components_export(
             "constraint_equation_ids": [str(v) for v in (r.get("constraint_equation_ids") or []) if v],
             "definition_equation_ids": [str(v) for v in (r.get("definition_equation_ids") or []) if v],
             "review_required_equation_ids": [str(v) for v in (r.get("review_required_equation_ids") or []) if v],
+            # Canonical component endpoint resolution (#422). These identifiers
+            # are provenance aliases only; component_id remains authoritative.
+            "legacy_ids": _ordered_unique_str(
+                [
+                    value
+                    for value in (
+                        list(r.get("legacy_ids") or [])
+                        + [r.get("agent_component_id"), r.get("legacy_component_id")]
+                    )
+                    if value
+                ]
+            ),
         })
     return out
 
@@ -1578,6 +1590,7 @@ def build_component_graph_export(
     *,
     document_id: str,
     known_component_ids: set[str] | None = None,
+    component_aliases: dict[str, str] | None = None,
 ) -> dict:
     """Split a ``component_graph`` artifact into separate component / operation graphs.
 
@@ -1594,6 +1607,56 @@ def build_component_graph_export(
     raw_nodes = cg.get("nodes") if isinstance(cg.get("nodes"), list) else []
     raw_edges = cg.get("edges") if isinstance(cg.get("edges"), list) else []
     known_component_ids = known_component_ids or set()
+    alias_to_component: dict[str, str] = {
+        str(component_id): str(component_id)
+        for component_id in known_component_ids
+        if component_id
+    }
+    for alias, canonical in (component_aliases or {}).items():
+        alias = str(alias or "")
+        canonical = str(canonical or "")
+        if alias and canonical in known_component_ids:
+            alias_to_component[alias] = canonical
+
+    # Graph nodes may carry the canonical DB id alongside an agent/legacy id.
+    # Build the full alias map before classifying operations so parent references
+    # can be canonicalized regardless of node order.
+    for n in raw_nodes:
+        if not isinstance(n, dict):
+            continue
+        identifiers = _ordered_unique_str(
+            value
+            for value in [
+                n.get("component_id"),
+                n.get("node_id"),
+                n.get("id"),
+                n.get("agent_component_id"),
+                n.get("legacy_component_id"),
+                *(n.get("legacy_ids") or []),
+            ]
+            if value
+        )
+        canonical = next(
+            (identifier for identifier in identifiers if identifier in known_component_ids),
+            "",
+        )
+        provenance_candidates = _ordered_unique_str(
+            value
+            for value in (
+                [n.get("representative_component_id")]
+                + list(n.get("linked_component_ids") or [])
+            )
+            if value and str(value) in known_component_ids
+        )
+        if not canonical and len(provenance_candidates) == 1:
+            canonical = provenance_candidates[0]
+        if not known_component_ids and _graph_node_is_component(n, known_component_ids):
+            canonical = str(
+                n.get("component_id") or n.get("node_id") or n.get("id") or ""
+            )
+        if canonical:
+            for identifier in identifiers:
+                alias_to_component[identifier] = canonical
 
     component_node_ids: set[str] = set()
     operation_node_ids: set[str] = set()
@@ -1610,32 +1673,45 @@ def build_component_graph_export(
         node_id = _node_id(n)
         if not node_id:
             continue
-        if _graph_node_is_component(n, known_component_ids):
-            if node_id in component_node_ids:
-                continue
-            component_node_ids.add(node_id)
-            legacy_ids = []
-            for key in ("agent_component_id", "legacy_component_id"):
-                value = n.get(key)
-                if value and str(value) != node_id:
-                    legacy_ids.append(str(value))
-            component_nodes.append({
-                "node_id": node_id,
-                "node_type": "component",
-                "label": n.get("label") or n.get("name") or "",
-                "component_type": n.get("component_type") or "",
-                "review_status": n.get("review_status") or "teacher_review_required",
-                "source_backing_status": n.get("source_backing_status") or "",
-                "graph_layer": n.get("graph_layer") or "main",
-                "legacy_ids": legacy_ids,
-                "member_component_ids": list(n.get("member_component_ids") or []),
-                "detail_node_ids": list(n.get("detail_node_ids") or []),
-            })
+        canonical_component_id = alias_to_component.get(node_id, "")
+        if not known_component_ids and _graph_node_is_component(n, known_component_ids):
+            canonical_component_id = node_id
+        if canonical_component_id:
+            if canonical_component_id not in component_node_ids:
+                component_node_ids.add(canonical_component_id)
+                legacy_ids = []
+                for value in _ordered_unique_str(
+                    value
+                    for value in [
+                        node_id,
+                        n.get("agent_component_id"),
+                        n.get("legacy_component_id"),
+                        *(n.get("legacy_ids") or []),
+                    ]
+                    if value
+                ):
+                    if value != canonical_component_id:
+                        legacy_ids.append(value)
+                component_nodes.append({
+                    "node_id": canonical_component_id,
+                    "node_type": "component",
+                    "label": n.get("label") or n.get("name") or "",
+                    "component_type": n.get("component_type") or "",
+                    "review_status": n.get("review_status") or "teacher_review_required",
+                    "source_backing_status": n.get("source_backing_status") or "",
+                    "graph_layer": n.get("graph_layer") or "main",
+                    "legacy_ids": legacy_ids,
+                    "member_component_ids": list(n.get("member_component_ids") or []),
+                    "detail_node_ids": list(n.get("detail_node_ids") or []),
+                })
             # Component → operation links (issue #387): a main node aggregates
             # equation_detail nodes via member_component_ids / detail_node_ids.
             for op_id in list(n.get("member_component_ids") or []) + list(n.get("detail_node_ids") or []):
                 if op_id:
-                    links.append({"component_id": node_id, "operation_id": str(op_id)})
+                    links.append({
+                        "component_id": canonical_component_id,
+                        "operation_id": str(op_id),
+                    })
         else:
             if node_id in operation_node_ids:
                 continue
@@ -1677,6 +1753,12 @@ def build_component_graph_export(
             )
             if review_required_value and not node_review_reasons:
                 node_review_reasons.append("operation_node_missing_equation_link")
+            raw_parent = str(n.get("parent_component_id") or "")
+            canonical_parent = alias_to_component.get(raw_parent, "")
+            if raw_parent and not canonical_parent:
+                review_required_value = True
+                if "unresolved_parent_component" not in node_review_reasons:
+                    node_review_reasons.append("unresolved_parent_component")
             operation_nodes.append({
                 "operation_id": node_id,
                 "node_type": "operation",
@@ -1689,14 +1771,19 @@ def build_component_graph_export(
                 "source_backing_status": n.get("source_backing_status") or "",
                 "review_status": n.get("review_status") or "teacher_review_required",
                 "review_required": review_required_value,
-                "parent_component_id": str(n.get("parent_component_id") or ""),
+                "parent_component_id": canonical_parent,
+                "unresolved_parent_component_id": (
+                    raw_parent if raw_parent and not canonical_parent else ""
+                ),
                 "linked_equation_ids": list(n.get("linked_equation_ids") or []),
                 "linked_derivation_ids": list(n.get("linked_derivation_ids") or []),
                 "review_reasons": node_review_reasons,
             })
-            parent = str(n.get("parent_component_id") or "")
-            if parent:
-                links.append({"component_id": parent, "operation_id": node_id})
+            if canonical_parent:
+                links.append({
+                    "component_id": canonical_parent,
+                    "operation_id": node_id,
+                })
 
     component_edges: list[dict] = []
     operation_edges: list[dict] = []
@@ -1704,8 +1791,10 @@ def build_component_graph_export(
         if not isinstance(e, dict):
             continue
         evidence = e.get("evidence") if isinstance(e.get("evidence"), dict) else {}
-        source = str(e.get("source_component_id") or e.get("source") or e.get("from") or "")
-        target = str(e.get("target_component_id") or e.get("target") or e.get("to") or "")
+        raw_source = str(e.get("source_component_id") or e.get("source") or e.get("from") or "")
+        raw_target = str(e.get("target_component_id") or e.get("target") or e.get("to") or "")
+        source = alias_to_component.get(raw_source, raw_source)
+        target = alias_to_component.get(raw_target, raw_target)
         edge = {
             "edge_id": e.get("edge_id") or f"component_edge_{i+1:04d}",
             "source": source,
@@ -1724,6 +1813,8 @@ def build_component_graph_export(
     seen_links: set[tuple[str, str]] = set()
     unique_links: list[dict] = []
     for link in links:
+        if known_component_ids and link["component_id"] not in known_component_ids:
+            continue
         key = (link["component_id"], link["operation_id"])
         if key in seen_links:
             continue

@@ -82,6 +82,10 @@ def _empty_refinement_validation() -> dict:
         "unchanged_components": [],
         "failed_refinements": [],
         "review_required_refinements": [],
+        # Components whose split was required but were neither split, failed, nor
+        # review_required — a silent contract violation that must hard-block
+        # publish (#421).
+        "unprocessed_split_required": [],
         "unassigned_links": [],
         "dangling_component_refs": [],
         "teaching_granularity_warnings": [],
@@ -506,7 +510,9 @@ class ExportValidationGate:
             self._check_dsl_edges(dsl, errors, warnings)
 
         # 5. Component graph export structure
-        self._check_component_graph_artifact(artifacts, errors, warnings)
+        self._check_component_graph_artifact(
+            artifacts, component_result, errors, warnings
+        )
 
         # 6. Required artifact presence
         self._check_required_artifacts(artifacts, errors)
@@ -839,6 +845,8 @@ class ExportValidationGate:
                     artifact=stage,
                     path=path,
                     source_stage=stage,
+                    target_type=issue.get("target_type"),
+                    target_id=issue.get("target_id"),
                 )
 
                 if code in _NEEDS_REVIEW_RULE_IDS:
@@ -926,23 +934,35 @@ class ExportValidationGate:
                     ))
 
             dsl_refs = refs.get("dsl_refs") or {}
-            for nid in dsl_refs.get("node_ids") or []:
-                if known_dsl_node_ids and nid not in known_dsl_node_ids:
+            dsl_node_refs = _ordered_unique(
+                list(dsl_refs.get("node_ids") or [])
+                + list(getattr(component, "linked_dsl_node_ids", []) or [])
+            )
+            for nid in dsl_node_refs:
+                if nid not in known_dsl_node_ids:
                     errors.append(ValidationEntry(
                         code="UNRESOLVED_DSL_NODE_ID",
                         message=f"component {comp_id!r} references missing DSL node {nid!r}",
                         artifact="component_assembly",
                         path=f"$.components[{comp_id}].evidence_refs.dsl_refs.node_ids",
                         source_stage="export_validation",
+                        target_type="dsl_node",
+                        target_id=str(nid),
                     ))
-            for eid in dsl_refs.get("edge_ids") or []:
-                if known_dsl_edge_ids and eid not in known_dsl_edge_ids:
+            dsl_edge_refs = _ordered_unique(
+                list(dsl_refs.get("edge_ids") or [])
+                + list(getattr(component, "linked_dsl_edge_ids", []) or [])
+            )
+            for eid in dsl_edge_refs:
+                if eid not in known_dsl_edge_ids:
                     errors.append(ValidationEntry(
                         code="UNRESOLVED_DSL_EDGE_ID",
                         message=f"component {comp_id!r} references missing DSL edge {eid!r}",
                         artifact="component_assembly",
                         path=f"$.components[{comp_id}].evidence_refs.dsl_refs.edge_ids",
                         source_stage="export_validation",
+                        target_type="dsl_edge",
+                        target_id=str(eid),
                     ))
 
             # Warn on summary-only (no claim or evidence)
@@ -1283,6 +1303,26 @@ class ExportValidationGate:
                 artifact="component_assembly",
                 path=f"$.component_refinement[{original_id}]",
                 source_stage="export_validation",
+                target_type="component",
+                target_id=str(original_id),
+            ))
+
+        # A component whose split was required but was left unprocessed (neither
+        # split, failed, nor review_required) is a silent contract violation
+        # (#421): it must be a hard error so it can never reach publish-ready.
+        for original_id in result["unprocessed_split_required"]:
+            errors.append(ValidationEntry(
+                code="COMPONENT_REFINEMENT_REQUIRED_BUT_UNPROCESSED",
+                message=(
+                    f"component {original_id!r} requires a split but was left "
+                    "unprocessed (not split, failed, or review_required); it "
+                    "cannot be published in this state"
+                ),
+                artifact="component_assembly",
+                path="$.component_refinement.refinement_validation.unprocessed_split_required",
+                source_stage="export_validation",
+                target_type="component",
+                target_id=str(original_id),
             ))
 
         for entry in result["dangling_component_refs"]:
@@ -1297,6 +1337,8 @@ class ExportValidationGate:
                 artifact="component_assembly",
                 path=f"$.component_refinement.component_graph_updates.unresolved_edges",
                 source_stage="export_validation",
+                target_type="component",
+                target_id=str(owner),
             ))
 
         for entry in result["unassigned_links"]:
@@ -1327,6 +1369,8 @@ class ExportValidationGate:
                 artifact="component_assembly",
                 path=f"$.component_refinement[{original_id}]",
                 source_stage="export_validation",
+                target_type="component",
+                target_id=str(original_id),
             ))
 
         return result
@@ -2033,6 +2077,7 @@ class ExportValidationGate:
     def _check_component_graph_artifact(
         self,
         artifacts: dict,
+        component_result,
         errors: list,
         warnings: list,
     ) -> None:
@@ -2043,6 +2088,44 @@ class ExportValidationGate:
         edges = graph.get("edges") or []
         if not isinstance(nodes, list) or not isinstance(edges, list):
             return
+
+        canonical_component_ids = {
+            str(getattr(component, "component_id", "") or "")
+            for component in (getattr(component_result, "components", []) or [])
+            if getattr(component, "component_id", None)
+        }
+        component_aliases = {component_id: component_id for component_id in canonical_component_ids}
+        for component in (getattr(component_result, "components", []) or []):
+            canonical = str(getattr(component, "component_id", "") or "")
+            for alias in (
+                list(getattr(component, "legacy_ids", []) or [])
+                + [
+                    getattr(component, "agent_component_id", None),
+                    getattr(component, "legacy_component_id", None),
+                ]
+            ):
+                alias = str(alias or "")
+                if alias and canonical:
+                    component_aliases[alias] = canonical
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            node_id = str(
+                node.get("component_id") or node.get("node_id") or node.get("id") or ""
+            )
+            provenance_candidates = _ordered_unique(
+                [
+                    value
+                    for value in (
+                        [node.get("representative_component_id")]
+                        + list(node.get("linked_component_ids") or [])
+                    )
+                    if value and str(value) in canonical_component_ids
+                ]
+            )
+            if node_id and len(provenance_candidates) == 1:
+                component_aliases[node_id] = str(provenance_candidates[0])
+        canonical_registry_available = component_result is not None
 
         node_ids: set[str] = set()
         for node in nodes:
@@ -2064,21 +2147,34 @@ class ExportValidationGate:
                     target_type="graph_node",
                     target_id=comp_id or None,
                 ))
-            # Issue #418: a detail / operation node must point at an existing
-            # parent node in the same graph (parent_component_id integrity).
+            # Issue #422: graph membership alone is insufficient. An operation
+            # parent must resolve to a canonical component artifact (aliases are
+            # accepted and normalized by export), never an aggregate theory node.
+            # When this validator is invoked without a component_result (legacy
+            # standalone graph checks), retain the older graph-membership check.
             parent_id = str(node.get("parent_component_id") or "")
-            if parent_id and parent_id not in node_ids:
+            parent_known = (
+                parent_id in component_aliases
+                if canonical_registry_available
+                else parent_id in node_ids
+            )
+            if parent_id and not parent_known:
                 errors.append(ValidationEntry(
                     code="COMPONENT_GRAPH_PARENT_COMPONENT_INVALID",
                     message=(
                         f"component graph node {comp_id or idx!r} parent_component_id "
-                        f"{parent_id!r} does not resolve to a graph node"
+                        f"{parent_id!r} does not resolve to "
+                        f"{'a canonical component' if canonical_registry_available else 'a graph node'}"
                     ),
                     artifact="component_graph",
                     path=f"$.nodes[{idx}].parent_component_id",
                     source_stage="export_validation",
-                    target_type="graph_node",
-                    target_id=comp_id or None,
+                    target_type=(
+                        "component" if canonical_registry_available else "graph_node"
+                    ),
+                    target_id=(
+                        parent_id if canonical_registry_available else comp_id
+                    ) or None,
                 ))
             # Issue #418: a main node aggregates other nodes via member_component_ids;
             # each member must resolve to an existing graph node.

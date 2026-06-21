@@ -581,27 +581,35 @@ class ComponentAssemblyValidator:
         # Check DSL node/edge refs
         dsl_refs = refs.get("dsl_refs") or {}
         known_dsl_nodes = available.get("dsl_node_ids", set())
-        if known_dsl_nodes:
-            all_node_ids = list(dsl_refs.get("node_ids") or []) + list(component.linked_dsl_node_ids or [])
-            unknown = [nid for nid in all_node_ids if nid not in known_dsl_nodes]
-            for nid in unknown:
-                issues.append(ValidationIssue(
-                    "unresolved_dsl_node_id",
-                    "error",
-                    f"{component.component_id} contains unresolved DSL node ID: {nid!r}",
-                    f"components[{component.component_id}].linked_dsl_node_ids",
-                ))
+        all_node_ids = _ordered_unique(
+            list(dsl_refs.get("node_ids") or [])
+            + list(component.linked_dsl_node_ids or [])
+        )
+        unknown = [nid for nid in all_node_ids if nid not in known_dsl_nodes]
+        for nid in unknown:
+            issues.append(ValidationIssue(
+                "unresolved_dsl_node_id",
+                "error",
+                f"{component.component_id} contains unresolved DSL node ID: {nid!r}",
+                f"components[{component.component_id}].linked_dsl_node_ids",
+                target_type="dsl_node",
+                target_id=str(nid),
+            ))
         known_dsl_edges = available.get("dsl_edge_ids", set())
-        if known_dsl_edges:
-            all_edge_ids = list(dsl_refs.get("edge_ids") or []) + list(component.linked_dsl_edge_ids or [])
-            unknown = [eid for eid in all_edge_ids if eid not in known_dsl_edges]
-            for eid in unknown:
-                issues.append(ValidationIssue(
-                    "unresolved_dsl_edge_id",
-                    "error",
-                    f"{component.component_id} contains unresolved DSL edge ID: {eid!r}",
-                    f"components[{component.component_id}].linked_dsl_edge_ids",
-                ))
+        all_edge_ids = _ordered_unique(
+            list(dsl_refs.get("edge_ids") or [])
+            + list(component.linked_dsl_edge_ids or [])
+        )
+        unknown = [eid for eid in all_edge_ids if eid not in known_dsl_edges]
+        for eid in unknown:
+            issues.append(ValidationIssue(
+                "unresolved_dsl_edge_id",
+                "error",
+                f"{component.component_id} contains unresolved DSL edge ID: {eid!r}",
+                f"components[{component.component_id}].linked_dsl_edge_ids",
+                target_type="dsl_edge",
+                target_id=str(eid),
+            ))
 
         # Detect summary-only: no typed claim/evidence links in either legacy or new fields
         has_claim_link = bool(refs.get("claim_ids")) or bool(component.linked_claim_ids)

@@ -222,61 +222,79 @@ def _detected_responsibilities(component: ComponentRecord) -> set[str]:
     return canonical_responsibility_types(values)
 
 
-def _suggested_split(component: ComponentRecord, responsibilities: set[str]) -> list[dict]:
-    """Build suggested children with *distinct* candidate links (#417).
+# Responsibility type → the component equation-role fields whose equations
+# belong to that responsibility (#421). Domain-neutral: it relies only on the
+# generic equation-role classification already attached to the component
+# (definition / input / intermediate / output / constraint), never on
+# paper-specific terminology.
+#   - definition / model / observable basis  ← definition (and output for an
+#     observable basis, whose defining equation is its result)
+#   - equation system                        ← input / intermediate (the
+#     transformation / relation equations)
+#   - derivation                             ← intermediate / output
+#   - constraint / application / limitation  ← constraint / output (result /
+#     consistency-relation equations)
+_RESPONSIBILITY_EQUATION_ROLE_FIELDS = {
+    "definition": ("definition_equation_ids",),
+    "model": ("definition_equation_ids",),
+    "observation_model": ("definition_equation_ids",),
+    "observable_basis": ("definition_equation_ids", "output_equation_ids"),
+    "equation_system": ("input_equation_ids", "intermediate_equation_ids"),
+    "derivation": ("intermediate_equation_ids", "output_equation_ids"),
+    "constraint": ("constraint_equation_ids", "output_equation_ids"),
+    "application": ("constraint_equation_ids", "output_equation_ids"),
+    "limitation": ("constraint_equation_ids",),
+}
 
-    Each suggested child must carry its own candidate equations/claims/derivations
-    rather than a duplicate of the parent's full link set, so the downstream
-    refiner has identifying information to redistribute by responsibility. The
-    parent's links are partitioned deterministically across the suggested
-    children (round-robin by sorted responsibility order); the ComponentRefiner
-    later performs the role-aware reassignment using equation roles.
+_ROLE_FIELDS = (
+    "definition_equation_ids",
+    "input_equation_ids",
+    "intermediate_equation_ids",
+    "output_equation_ids",
+    "constraint_equation_ids",
+)
+
+
+def _suggested_split(component: ComponentRecord, responsibilities: set[str]) -> list[dict]:
+    """Build suggested children with *responsibility-aware* candidate equations (#421).
+
+    Each suggested child receives the parent's equations whose *role* matches the
+    child's responsibility — definition equations go to a definition / model /
+    observable child, transformation/relation equations to an equation_system /
+    derivation child, and result / constraint equations to a constraint /
+    application child. Equations are never round-robined: an equation whose role
+    does not map to any of the suggested responsibilities is left out of every
+    suggested child (recorded as ``unassigned_equation_ids``) so a definition
+    equation can never be forced into a constraint child. Each equation is
+    assigned to a single responsibility (the first, in sorted order, whose roles
+    claim it) so suggested children never share equations. The ComponentRefiner —
+    which holds the full equation index — performs the authoritative reassignment
+    and keeps anything it still cannot place confidently in ``unassigned_links``.
     """
     ordered = sorted(responsibilities)
     if not ordered:
         return []
-    equation_partition = _partition(_component_equation_refs(component), len(ordered))
-    claim_partition = _partition(_component_claim_refs(component), len(ordered))
-    derivation_partition = _partition(
-        list(component.linked_derivation_ids or []), len(ordered)
-    )
-    evidence_partition = _partition(
-        _ordered_unique(
-            list(component.linked_evidence_ids or [])
-            + list((component.evidence_refs or {}).get("evidence_ids") or [])
-        ),
-        len(ordered),
-    )
+    role_equations = {
+        field_name: _ordered_unique(getattr(component, field_name, []) or [])
+        for field_name in _ROLE_FIELDS
+    }
+    assigned: set[str] = set()
+    candidate_map: dict[str, list[str]] = {resp: [] for resp in ordered}
+    for resp in ordered:
+        for field_name in _RESPONSIBILITY_EQUATION_ROLE_FIELDS.get(resp, ()):
+            for eid in role_equations.get(field_name, []):
+                if eid in assigned:
+                    continue
+                assigned.add(eid)
+                candidate_map[resp].append(eid)
     return [
         {
             "name": responsibility.replace("_", " ").title(),
             "responsibility_type": responsibility,
-            "linked_equation_ids": equation_partition[idx],
-            "candidate_claim_ids": claim_partition[idx],
-            "candidate_derivation_ids": derivation_partition[idx],
-            "candidate_evidence_ids": evidence_partition[idx],
+            "linked_equation_ids": candidate_map[responsibility],
         }
-        for idx, responsibility in enumerate(ordered)
+        for responsibility in ordered
     ]
-
-
-def _partition(values: list[str], buckets: int) -> list[list[str]]:
-    """Split ``values`` into ``buckets`` disjoint lists, deterministically.
-
-    No value appears in more than one bucket, so suggested children never share
-    an identical link set (#417).
-    """
-    out: list[list[str]] = [[] for _ in range(max(buckets, 1))]
-    for i, value in enumerate(values):
-        out[i % len(out)].append(value)
-    return out
-
-
-def _component_claim_refs(component: ComponentRecord) -> list[str]:
-    return _ordered_unique(
-        list((component.evidence_refs or {}).get("claim_ids") or [])
-        + list(component.linked_claim_ids or [])
-    )
 
 
 def _component_derivation_step_index(derivations) -> dict[str, list]:

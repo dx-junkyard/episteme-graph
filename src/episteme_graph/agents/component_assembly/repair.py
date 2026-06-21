@@ -148,6 +148,10 @@ def _issue_dict(issue: ValidationIssue, llm_input: ComponentAssemblyLLMInput) ->
         "message": issue.message,
         "field": issue.field,
     }
+    if issue.target_type:
+        data["target_type"] = issue.target_type
+    if issue.target_id:
+        data["target_id"] = issue.target_id
     allowed = _allowed_values_for_issue(issue.rule_id, llm_input)
     invalid = _invalid_value_from_message(issue.message)
     if invalid:

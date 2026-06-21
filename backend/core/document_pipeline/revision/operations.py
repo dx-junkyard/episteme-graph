@@ -299,6 +299,7 @@ def _op_split_entity(candidate, op, mapping):
     if not isinstance(parts, list) or not parts:
         raise _OpError("split_entity requires a non-empty after_json list")
     new_ids: list[str] = []
+    normalized_parts: list[dict] = []
     for part in parts:
         if not isinstance(part, dict):
             raise _OpError("split_entity parts must be objects")
@@ -306,8 +307,13 @@ def _op_split_entity(candidate, op, mapping):
         if not nid:
             raise _OpError("split_entity part missing id")
         new_ids.append(nid)
+        # A split replaces one entity with complete child entities. Proposal
+        # payloads normally contain only changed semantic fields, so inherit
+        # stable schema/provenance fields (document_id, source refs, status, …)
+        # from the original record while letting each child override them.
+        normalized_parts.append({**copy.deepcopy(rec), **part})
     lst.remove(rec)
-    lst.extend(parts)
+    lst.extend(normalized_parts)
     mapping[op["target_id"]] = new_ids
 
 
@@ -527,6 +533,26 @@ CAND_ADOPTABLE = "adoptable"
 CAND_PARTIALLY_ADOPTABLE = "partially_adoptable"
 CAND_BLOCKED = "blocked"
 
+_REVISION_CONTROL_ARTIFACT_KEYS = {
+    "baseline_inventory",
+    "audit_checkpoints",
+    "audit_results",
+    "proposed_operations",
+    "revision_operations",
+    "candidate",
+    "candidate_validation",
+    "diff_report",
+}
+
+
+def _domain_artifacts(artifacts: dict) -> dict:
+    """Exclude revision-control artifacts from the revisable domain snapshot."""
+    return {
+        key: value
+        for key, value in (artifacts or {}).items()
+        if key not in _REVISION_CONTROL_ARTIFACT_KEYS
+    }
+
 
 def _all_base_ids(base_inventory: dict | None, base_artifacts: dict) -> set[str]:
     """Every entity id present in the base (the ids an operation may safely consume)."""
@@ -655,7 +681,10 @@ def _apply_included(base_artifacts: dict, included: list[dict]):
     ``failure`` is ``(op_index, reason)`` for the first op whose handler raised, or
     None when all applied cleanly.
     """
-    candidate = copy.deepcopy(base_artifacts) if isinstance(base_artifacts, dict) else {}
+    candidate = copy.deepcopy(
+        _domain_artifacts(base_artifacts)
+        if isinstance(base_artifacts, dict) else {}
+    )
     id_mapping: dict[str, list[str]] = {}
     for _idx, op in _canonical_order(included):
         handler = _DISPATCH.get(op.get("operation"))
@@ -853,4 +882,3 @@ def apply_operations(
         "invalid": candidate_status == CAND_BLOCKED,
         "requires_confirmation": bool(protected_changes),
     }
-

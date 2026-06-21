@@ -43,7 +43,10 @@ class ComponentAssemblyAgent:
         self._cleanup = ComponentOverlapCleanup()
         self._validator = ComponentAssemblyValidator()
         self._repairer = ComponentAssemblyRepairer(cleanup=self._cleanup)
-        self._refiner = ComponentRefiner()
+        # Reuse the provider-aware assembly client for constrained refinement
+        # routing. The refiner calls it only when source-backed deterministic
+        # signals cannot identify a unique child.
+        self._refiner = ComponentRefiner(llm_client=self._llm_client)
         self._granularity_analyzer = ComponentGranularityAnalyzer()
         self._derivation_graph_aligner = DerivationGraphAligner()
         self._theory_bundle_stage = TheoryBundleStage()
@@ -500,6 +503,10 @@ def _issue_dict(issue: ValidationIssue, *, llm_input: ComponentAssemblyLLMInput)
         "message": issue.message,
         "field": issue.field,
     }
+    if issue.target_type:
+        data["target_type"] = issue.target_type
+    if issue.target_id:
+        data["target_id"] = issue.target_id
     allowed = _allowed_values_for_issue(issue.rule_id, llm_input)
     invalid = _invalid_value_from_message(issue.message)
     if invalid:
