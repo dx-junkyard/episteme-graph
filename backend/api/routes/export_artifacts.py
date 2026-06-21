@@ -1640,6 +1640,16 @@ def build_component_graph_export(
             (identifier for identifier in identifiers if identifier in known_component_ids),
             "",
         )
+        provenance_candidates = _ordered_unique_str(
+            value
+            for value in (
+                [n.get("representative_component_id")]
+                + list(n.get("linked_component_ids") or [])
+            )
+            if value and str(value) in known_component_ids
+        )
+        if not canonical and len(provenance_candidates) == 1:
+            canonical = provenance_candidates[0]
         if not known_component_ids and _graph_node_is_component(n, known_component_ids):
             canonical = str(
                 n.get("component_id") or n.get("node_id") or n.get("id") or ""
@@ -1667,34 +1677,33 @@ def build_component_graph_export(
         if not known_component_ids and _graph_node_is_component(n, known_component_ids):
             canonical_component_id = node_id
         if canonical_component_id:
-            if canonical_component_id in component_node_ids:
-                continue
-            component_node_ids.add(canonical_component_id)
-            legacy_ids = []
-            for value in _ordered_unique_str(
-                value
-                for value in [
-                    node_id,
-                    n.get("agent_component_id"),
-                    n.get("legacy_component_id"),
-                    *(n.get("legacy_ids") or []),
-                ]
-                if value
-            ):
-                if value != canonical_component_id:
-                    legacy_ids.append(value)
-            component_nodes.append({
-                "node_id": canonical_component_id,
-                "node_type": "component",
-                "label": n.get("label") or n.get("name") or "",
-                "component_type": n.get("component_type") or "",
-                "review_status": n.get("review_status") or "teacher_review_required",
-                "source_backing_status": n.get("source_backing_status") or "",
-                "graph_layer": n.get("graph_layer") or "main",
-                "legacy_ids": legacy_ids,
-                "member_component_ids": list(n.get("member_component_ids") or []),
-                "detail_node_ids": list(n.get("detail_node_ids") or []),
-            })
+            if canonical_component_id not in component_node_ids:
+                component_node_ids.add(canonical_component_id)
+                legacy_ids = []
+                for value in _ordered_unique_str(
+                    value
+                    for value in [
+                        node_id,
+                        n.get("agent_component_id"),
+                        n.get("legacy_component_id"),
+                        *(n.get("legacy_ids") or []),
+                    ]
+                    if value
+                ):
+                    if value != canonical_component_id:
+                        legacy_ids.append(value)
+                component_nodes.append({
+                    "node_id": canonical_component_id,
+                    "node_type": "component",
+                    "label": n.get("label") or n.get("name") or "",
+                    "component_type": n.get("component_type") or "",
+                    "review_status": n.get("review_status") or "teacher_review_required",
+                    "source_backing_status": n.get("source_backing_status") or "",
+                    "graph_layer": n.get("graph_layer") or "main",
+                    "legacy_ids": legacy_ids,
+                    "member_component_ids": list(n.get("member_component_ids") or []),
+                    "detail_node_ids": list(n.get("detail_node_ids") or []),
+                })
             # Component → operation links (issue #387): a main node aggregates
             # equation_detail nodes via member_component_ids / detail_node_ids.
             for op_id in list(n.get("member_component_ids") or []) + list(n.get("detail_node_ids") or []):

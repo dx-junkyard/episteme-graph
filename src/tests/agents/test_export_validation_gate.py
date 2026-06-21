@@ -1672,6 +1672,39 @@ def test_graph_operation_parent_must_be_canonical_component_not_aggregate_node()
     assert bad.target_id == "aggregate_theory_node"
 
 
+def test_graph_operation_parent_resolves_through_representative_component():
+    artifacts = _make_artifacts(component_graph={
+        "nodes": [
+            {
+                "component_id": "theory_op_1",
+                "label": "Aggregate",
+                "component_type": "TheoryOperationNode",
+                "representative_component_id": "comp_real",
+                "linked_component_ids": ["comp_real"],
+            },
+            {
+                "component_id": "detail_operation",
+                "label": "Detail",
+                "component_type": "EquationOperationNode",
+                "parent_component_id": "theory_op_1",
+            },
+        ],
+        "edges": [],
+    })
+    component_result = _ComponentResult([
+        _ComponentRecord("comp_real", {"claim_ids": [], "evidence_ids": []})
+    ])
+
+    result = _run_gate(
+        artifacts=artifacts,
+        component_result=component_result,
+    )
+
+    assert "COMPONENT_GRAPH_PARENT_COMPONENT_INVALID" not in {
+        error.code for error in result.errors
+    }
+
+
 def test_course_topic_unrelated_derivation_is_flagged():
     component = _ComponentRecord(component_id="comp_1")
     component.linked_derivation_ids = ["der_1"]

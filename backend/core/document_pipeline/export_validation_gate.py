@@ -2107,6 +2107,24 @@ class ExportValidationGate:
                 alias = str(alias or "")
                 if alias and canonical:
                     component_aliases[alias] = canonical
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            node_id = str(
+                node.get("component_id") or node.get("node_id") or node.get("id") or ""
+            )
+            provenance_candidates = _ordered_unique(
+                [
+                    value
+                    for value in (
+                        [node.get("representative_component_id")]
+                        + list(node.get("linked_component_ids") or [])
+                    )
+                    if value and str(value) in canonical_component_ids
+                ]
+            )
+            if node_id and len(provenance_candidates) == 1:
+                component_aliases[node_id] = str(provenance_candidates[0])
         canonical_registry_available = component_result is not None
 
         node_ids: set[str] = set()

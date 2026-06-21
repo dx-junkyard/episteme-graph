@@ -168,9 +168,12 @@ def compute_structural_summary(
 def _recommendation(quality_after: dict, candidate_invalid: bool,
                     introduced_errors: int, resolved_count: int,
                     requires_confirmation: bool) -> str:
-    if candidate_invalid or quality_after.get("hard_error_count", 0) > 0:
+    # A revision may improve an already-invalid adopted run incrementally.
+    # Unchanged base errors are carried debt, not regressions introduced by this
+    # candidate; only newly introduced errors make this proposal rejectable.
+    if candidate_invalid or introduced_errors > 0:
         return "reject"
-    if introduced_errors > 0 or requires_confirmation:
+    if requires_confirmation:
         return "manual_review"
     if resolved_count > 0:
         return "accept"
@@ -281,12 +284,15 @@ def build_diff_report(
     structural_summary = compute_structural_summary(base_artifacts, candidate_artifacts)
     protected_changes = protected_changes or []
 
-    hard_error_count = quality_after.get("hard_error_count", 0)
+    remaining_hard_error_count = quality_after.get("hard_error_count", 0)
+    # Blocking is delta-based: existing base errors must not make every
+    # incremental repair impossible to adopt. New errors are still fail-closed.
+    hard_error_count = introduced_errors
 
     # Final candidate status (#415): start from the operation-level verdict, then
-    # downgrade to blocked if the gate still has hard errors / the candidate is
-    # invalid after exclusion. A partially_adoptable candidate with no hard errors
-    # is acceptable, but only via explicit partial confirmation at accept time.
+    # downgrade to blocked if the candidate introduces hard errors or is invalid
+    # after exclusion. Hard errors already present in the base remain visible as
+    # carried debt but do not prevent incremental repair.
     op_status = operation_candidate_status or (
         "blocked" if candidate_invalid else "adoptable"
     )
@@ -328,6 +334,10 @@ def build_diff_report(
             "candidate_invalid": bool(candidate_invalid),
             "candidate_status": candidate_status,
             "hard_error_count": hard_error_count,
+            "remaining_hard_error_count": remaining_hard_error_count,
+            "carried_hard_error_count": max(
+                0, remaining_hard_error_count - introduced_errors
+            ),
             "acceptable": acceptable,
             "requires_confirmation": bool(requires_confirmation),
             "outcome": stage_summary["outcome"],

@@ -143,6 +143,40 @@ def test_split_entity_records_mapping_and_follows_refs():
     assert comp["linked_claim_ids"] == ["clm_1a", "clm_1b"]
 
 
+def test_split_entity_children_inherit_required_schema_fields():
+    base = _base_artifacts()
+    original = base["claim_object_builder"]["claims"][0]
+    original["document_id"] = "doc-1"
+    original["support_status"] = "source_backed"
+
+    res = apply_operations(base, [
+        make_operation(
+            operation="split_entity",
+            target_type="claim",
+            target_id="clm_1",
+            after_json=[
+                {"claim_id": "clm_1a", "text": "A holds.", "is_atomic": True},
+                {"claim_id": "clm_1b", "text": "B holds.", "is_atomic": True},
+            ],
+        ),
+    ])
+
+    children = _claims(res)
+    assert children["clm_1a"]["document_id"] == "doc-1"
+    assert children["clm_1b"]["support_status"] == "source_backed"
+
+
+def test_candidate_does_not_recursively_copy_revision_control_artifacts():
+    base = _base_artifacts()
+    base["candidate"] = {"candidate_artifacts": {"candidate": {"nested": True}}}
+    base["diff_report"] = {"summary": {"acceptable": False}}
+
+    res = apply_operations(base, [])
+
+    assert "candidate" not in res["candidate_artifacts"]
+    assert "diff_report" not in res["candidate_artifacts"]
+
+
 def test_merge_entities_maps_refs_to_merged():
     base = _base_artifacts()
     res = apply_operations(base, [

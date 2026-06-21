@@ -212,6 +212,43 @@ def test_aggregate_parent_never_becomes_component_operation_endpoint():
     )
 
 
+def test_aggregate_parent_resolves_via_representative_component_provenance():
+    artifact = {
+        "graph_schema_version": "0.1.0",
+        "nodes": [
+            {
+                "component_id": "theory_op_1",
+                "component_type": "TheoryOperationNode",
+                "graph_layer": "main",
+                "representative_component_id": "comp_real",
+                "linked_component_ids": ["comp_real"],
+                "member_component_ids": ["detail_op"],
+            },
+            {
+                "component_id": "detail_op",
+                "component_type": "EquationOperationNode",
+                "graph_layer": "equation_detail",
+                "parent_component_id": "theory_op_1",
+                "linked_equation_ids": ["eq_1"],
+            },
+        ],
+        "edges": [],
+    }
+
+    out = ea.build_component_graph_export(
+        artifact, document_id="doc_1", known_component_ids={"comp_real"}
+    )
+
+    assert {n["node_id"] for n in out["component_graph"]["nodes"]} == {"comp_real"}
+    detail = out["operation_graph"]["nodes"][0]
+    assert detail["parent_component_id"] == "comp_real"
+    assert detail["unresolved_parent_component_id"] == ""
+    assert out["component_operation_links"] == [{
+        "component_id": "comp_real",
+        "operation_id": "detail_op",
+    }]
+
+
 # ---------------------------------------------------------------------------
 # Resolvers + metadata (#383)
 # ---------------------------------------------------------------------------

@@ -108,6 +108,48 @@ def test_report_has_full_schema():
     assert report["recommendation"] in ("accept", "reject", "manual_review")
 
 
+def test_existing_base_hard_errors_are_carried_not_blocking():
+    base = _artifacts()
+    gate_base = {
+        "summary": {"error_count": 2, "warning_count": 0, "review_required_count": 0},
+        "errors": [
+            {"code": "BASE_ERROR_A", "artifact": "x", "path": "$.a"},
+            {"code": "BASE_ERROR_B", "artifact": "x", "path": "$.b"},
+        ],
+        "warnings": [],
+        "review_items": [],
+    }
+    gate_candidate = {
+        "summary": {"error_count": 2, "warning_count": 0, "review_required_count": 0},
+        "errors": list(gate_base["errors"]),
+        "warnings": [],
+        "review_items": [],
+    }
+
+    report = build_diff_report(
+        base_run_id="base-1",
+        candidate_run_id="rev-1",
+        base_artifacts=base,
+        candidate_artifacts=base,
+        applied_operations=[],
+        gate_base=gate_base,
+        gate_candidate=gate_candidate,
+        operation_candidate_status="partially_adoptable",
+        operation_summary={
+            "applied_count": 1,
+            "excluded_invalid_count": 1,
+            "excluded_dependency_count": 0,
+            "requires_confirmation_count": 0,
+        },
+    )
+
+    assert report["candidate_status"] == "partially_adoptable"
+    assert report["summary"]["hard_error_count"] == 0
+    assert report["summary"]["remaining_hard_error_count"] == 2
+    assert report["summary"]["carried_hard_error_count"] == 2
+    assert report["summary"]["acceptable"] is True
+
+
 def test_entity_change_traces_to_checkpoint_and_evidence():
     report, _ = _report_for([
         make_operation(operation="update_entity", target_type="component",

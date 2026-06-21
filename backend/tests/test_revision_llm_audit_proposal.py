@@ -120,6 +120,86 @@ def test_validate_accepts_and_attaches_traceability():
     assert op["source_locations"] == [{"chunk_id": "c1"}]
 
 
+@pytest.mark.parametrize("container_key", [
+    "split_into", "new_entities", "component_claims"
+])
+def test_validate_normalizes_wrapped_split_entity_parts(container_key):
+    audit = {
+        "checkpoint_id": "ckpt_1",
+        "evidence_refs": ["ev_1"],
+        "source_locations": [{"chunk_id": "c1"}],
+        "confidence": 0.9,
+    }
+    op, reason = validate_proposed_operation(
+        {
+            "operation": "split_entity",
+            "target_type": "claim",
+            "target_id": "clm_1",
+            "after_json": {
+                container_key: [
+                    {"text": "A holds."},
+                    {"text": "B holds.", "claim_type": "result"},
+                ]
+            },
+        },
+        _inventory(),
+        audit,
+    )
+
+    assert reason == ""
+    assert op is not None
+    assert isinstance(op["after_json"], list)
+    assert [part["claim_id"] for part in op["after_json"]] == [
+        "clm_1__split_01", "clm_1__split_02"
+    ]
+    assert all(part["is_atomic"] is True for part in op["after_json"])
+    assert all(part["source_evidence_ids"] == ["ev_1"] for part in op["after_json"])
+
+
+def test_validate_normalizes_component_texts_split():
+    audit = {
+        "checkpoint_id": "ckpt_1",
+        "evidence_refs": ["ev_1"],
+        "source_locations": [{"chunk_id": "c1"}],
+    }
+    op, reason = validate_proposed_operation(
+        {
+            "operation": "split_entity",
+            "target_type": "claim",
+            "target_id": "clm_1",
+            "after_json": {"component_texts": ["A holds.", "B holds."]},
+        },
+        _inventory(),
+        audit,
+    )
+    assert reason == ""
+    assert [part["text"] for part in op["after_json"]] == ["A holds.", "B holds."]
+
+
+def test_validate_normalizes_numbered_split_prose():
+    audit = {
+        "checkpoint_id": "ckpt_1",
+        "evidence_refs": ["ev_1"],
+        "source_locations": [{"chunk_id": "c1"}],
+    }
+    op, reason = validate_proposed_operation(
+        {
+            "operation": "split_entity",
+            "target_type": "claim",
+            "target_id": "clm_1",
+            "after_json": {
+                "text": "Split into: (1) A holds; (2) B holds; (3) C holds."
+            },
+        },
+        _inventory(),
+        audit,
+    )
+    assert reason == ""
+    assert [part["text"] for part in op["after_json"]] == [
+        "A holds", "B holds", "C holds."
+    ]
+
+
 def test_validate_rejects_unknown_evidence_instead_of_dropping_it():
     audit = {"checkpoint_id": "ckpt_1", "evidence_refs": ["ev_1", "ev_GONE"],
              "source_locations": [{"chunk_id": "c1"}]}

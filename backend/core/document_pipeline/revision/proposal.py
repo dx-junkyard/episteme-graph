@@ -10,6 +10,7 @@ generator never auto-accepts anything.
 from __future__ import annotations
 
 import json
+import re
 from typing import Callable
 
 from .operations import ENTITY_REGISTRY, OPERATIONS, make_operation
@@ -21,6 +22,13 @@ _BUCKET = {
 }
 _MODIFYING = {"update_entity", "split_entity", "merge_entities", "remove_entity",
               "add_relation", "remove_relation", "relink_evidence"}
+_SPLIT_CONTAINER_KEYS = (
+    "split_into",
+    "new_entities",
+    "component_claims",
+    "parts",
+    "entities",
+)
 
 
 def _entity_exists(inventory: dict, target_type: str, target_id: str) -> bool:
@@ -72,6 +80,115 @@ def _dedup(values: list[str]) -> list[str]:
             seen.add(v)
             out.append(v)
     return out
+
+
+def _normalize_split_after_json(
+    raw_after: object,
+    *,
+    target_type: str,
+    target_id: str,
+    inventory: dict,
+    evidence_refs: list[str],
+) -> tuple[list[dict] | None, str]:
+    """Normalize common LLM split wrappers into the canonical list contract.
+
+    Proposal models frequently return ``{"split_into": [...]}``,
+    ``{"new_entities": [...]}``, or ``{"component_texts": [...]}`` despite the
+    operation executor requiring ``after_json`` to be a list. Preserve the
+    substantive proposal, generate deterministic child IDs, and inherit stable
+    source/link metadata from the audited entity.
+    """
+    parts: object = raw_after
+    if isinstance(raw_after, dict):
+        parts = next(
+            (
+                raw_after.get(key)
+                for key in _SPLIT_CONTAINER_KEYS
+                if isinstance(raw_after.get(key), list)
+            ),
+            None,
+        )
+        if parts is None and isinstance(raw_after.get("component_texts"), list):
+            parts = [
+                {"text": text}
+                for text in raw_after.get("component_texts") or []
+                if str(text or "").strip()
+            ]
+        if parts is None and isinstance(raw_after.get("text"), str):
+            # Some models emit an explicitly numbered decomposition in prose.
+            # Accept it only when at least two numbered clauses can be parsed.
+            clauses = [
+                match.group(1).strip().rstrip(";")
+                for match in re.finditer(
+                    r"(?:^|\s)\(\d+\)\s*(.*?)(?=\s*\(\d+\)\s*|$)",
+                    raw_after["text"],
+                    flags=re.DOTALL,
+                )
+                if match.group(1).strip()
+            ]
+            if len(clauses) >= 2:
+                parts = [{"text": clause} for clause in clauses]
+    if not isinstance(parts, list) or not parts:
+        return None, (
+            "split_after_json_requires_parts:"
+            "expected_list_or_split_into_new_entities_component_claims"
+        )
+
+    bucket = _BUCKET.get(target_type)
+    base = (
+        (inventory.get("entities", {}).get(bucket, {}) or {}).get(target_id, {})
+        if bucket else {}
+    )
+    _, _, id_field = ENTITY_REGISTRY[target_type]
+    if not id_field:
+        return None, f"split_unsupported_target_type:{target_type}"
+    existing_ids = set((inventory.get("entities", {}).get(bucket, {}) or {}).keys())
+    normalized: list[dict] = []
+    for index, raw_part in enumerate(parts, start=1):
+        if isinstance(raw_part, str):
+            part = {"text": raw_part}
+        elif isinstance(raw_part, dict):
+            part = dict(raw_part)
+        else:
+            return None, "split_part_not_object"
+        if not str(part.get("text") or part.get("normalized_text") or "").strip():
+            return None, "split_part_missing_text"
+
+        child_id = str(
+            part.get(id_field) or part.get("entity_id") or part.get("id") or ""
+        ).strip()
+        if not child_id or child_id == target_id or child_id in existing_ids:
+            stem = f"{target_id}__split_{index:02d}"
+            child_id = stem
+            suffix = 2
+            while child_id in existing_ids or any(
+                item.get(id_field) == child_id for item in normalized
+            ):
+                child_id = f"{stem}_{suffix}"
+                suffix += 1
+        part[id_field] = child_id
+        part.pop("entity_id", None)
+        part.pop("entity_type", None)
+        if target_type == "claim":
+            part.setdefault("normalized_text", part.get("text") or "")
+            part.setdefault("claim_type", base.get("claim_type") or "unknown")
+            part["atomicity"] = "atomic"
+            part["is_atomic"] = True
+            part.setdefault("support_status", base.get("support_status") or "source_backed")
+            part.setdefault("review_status", base.get("review_status") or "teacher_review_required")
+            part.setdefault("confidence", base.get("confidence") or 0.0)
+            if not part.get("source_evidence_ids"):
+                part["source_evidence_ids"] = _dedup(
+                    [str(v) for v in (part.pop("evidence_ids", []) or []) if v]
+                    + list(evidence_refs)
+                    + [str(v) for v in (base.get("evidence_ids") or []) if v]
+                )
+            part.setdefault("equation_ids", list(base.get("equation_ids") or []))
+            part.setdefault("linked_component_ids", list(base.get("component_ids") or []))
+            part.setdefault("derivation_ids", list(base.get("derivation_ids") or []))
+            part.setdefault("source_locations", list(base.get("source_locations") or []))
+        normalized.append(part)
+    return normalized, ""
 
 
 def _resolve_evidence_refs(
@@ -198,6 +315,18 @@ def validate_proposed_operation(
     if ref_reason:
         return None, ref_reason
 
+    after_json = raw_op.get("after_json")
+    if operation == "split_entity":
+        after_json, split_reason = _normalize_split_after_json(
+            after_json,
+            target_type=target_type,
+            target_id=target_id,
+            inventory=inventory,
+            evidence_refs=evidence_refs,
+        )
+        if split_reason:
+            return None, split_reason
+
     checkpoint_ids = [str(value) for value in (raw_op.get("checkpoint_ids") or []) if value]
     if audit_result.get("checkpoint_id") and audit_result["checkpoint_id"] not in checkpoint_ids:
         checkpoint_ids.append(audit_result["checkpoint_id"])
@@ -223,7 +352,7 @@ def validate_proposed_operation(
         target_type=target_type,
         target_id=target_id,
         before_json=raw_op.get("before_json"),
-        after_json=raw_op.get("after_json"),
+        after_json=after_json,
         reason=raw_op.get("reason") or (audit_result.get("findings") or [{}])[0].get("detail", "")
             if audit_result.get("findings") else raw_op.get("reason", ""),
         checkpoint_ids=checkpoint_ids,
@@ -317,6 +446,8 @@ def _proposal_messages(audit_result: dict, inventory: dict) -> list[dict]:
         "evidence_ids（登録済みevidence）とsource_chunk_ids（原文chunk）はID空間が異なるため"
         "必ず分けて出力すること。chunk IDをevidence_idとして出さない。"
         "原文根拠を必ず付け、推測だけで確定しないこと。"
+        "split_entityの場合、after_jsonは分割後entityオブジェクトの非空配列にし、"
+        "各要素に対象typeのIDフィールドとatomicな内容を入れること。"
     )
     payload = {"audit": {
         "verdict": audit_result.get("verdict"),

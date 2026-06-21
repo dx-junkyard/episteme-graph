@@ -9121,7 +9121,10 @@
         '<li>採用可能な変更: ' + (os.applied_count || 0) + '</li>' +
         '<li>除外（不正）: ' + (os.excluded_invalid_count || 0) + '</li>' +
         '<li>除外（依存）: ' + (os.excluded_dependency_count || 0) + '</li>' +
-        '<li>除外後の hard error: ' + ((report.summary || {}).hard_error_count || 0) + '</li></ul>';
+        '<li>この候補が新規に生じさせる hard error: ' +
+          ((report.summary || {}).hard_error_count || 0) + '</li>' +
+        '<li>元データから引き継ぐ hard error: ' +
+          ((report.summary || {}).carried_hard_error_count || 0) + '</li></ul>';
       var rows = excluded.map(function (x) {
         return '<li class="eg-rev-change"><span class="eg-rev-ctype">' +
           escHtml(EXCLUDE_LABELS[x.status] || x.status) + '</span> ' +
