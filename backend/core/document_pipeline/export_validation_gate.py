@@ -30,6 +30,10 @@ EXPORT_STATUSES = [
     "failed_validation",
 ]
 
+# Issue #432: a result/relation equation with no input links is only acceptable
+# when explicitly justified by one of these link_status values.
+_ALLOWED_NO_INPUT_LINK_STATUSES = {"axiomatic", "external_reference"}
+
 
 @dataclass
 class ValidationEntry:
@@ -480,6 +484,12 @@ class ExportValidationGate:
         # of the equation_semantics soft-stage error downgrade. Detection is a
         # pure ID-set difference — no branching on labels/formula text/domain.
         self._check_accepted_equations_registered(artifacts, errors)
+        # 2d. Inter-equation link integrity (issue #432): links must resolve to
+        # real registry equations and carry link_provenance; result/relation
+        # equations must have at least one input link or an allowed link_status
+        # (axiomatic / external_reference). Domain-agnostic — only ID resolution,
+        # provenance presence, and link_status are checked.
+        self._check_equation_link_integrity(artifacts, errors, review_items)
 
         # 3. Cross-artifact ID validation
         if component_result and claim_objects and evidence:
@@ -2114,6 +2124,120 @@ class ExportValidationGate:
                 target_type="equation_candidate",
                 target_id=cid,
             ))
+
+    def _check_equation_link_integrity(
+        self,
+        artifacts: dict,
+        errors: list,
+        review_items: list,
+    ) -> None:
+        """Enforce structural inter-equation link integrity (issue #432).
+
+        Three domain-agnostic checks over the equation registry:
+
+          - ``EQ_DANGLING_EQUATION_LINK`` (hard error): an input/output link id
+            that does not resolve to a registry equation.
+          - ``EQ_LINK_MISSING_PROVENANCE`` (hard error): a resolved input link
+            with no ``link_provenance`` entry — links must be traceable to the
+            structural cue (shared_symbol / textual_reference / derivation_step)
+            that produced them.
+          - ``EQ_RESULT_RELATION_WITHOUT_INPUT``: a ``result``/``relation``
+            equation with no input links and no allowed ``link_status``
+            justification. A derivation-usable equation in this state is a hard
+            error (a result that came from nowhere); a non-usable / review-gated
+            one is reported as a review item instead.
+
+        Reads both the nested (asdict) and flattened (export) equation shapes.
+        """
+        raw = artifacts.get("equation_semantics")
+        if not isinstance(raw, dict):
+            return
+        records = raw.get("equations")
+        if not isinstance(records, list):
+            return
+        registry_ids = {
+            str(r.get("equation_id") or "")
+            for r in records
+            if isinstance(r, dict)
+        }
+        registry_ids.discard("")
+
+        def _field(eq: dict, name: str):
+            if name in eq:
+                return eq.get(name)
+            sem = eq.get("semantics")
+            return sem.get(name) if isinstance(sem, dict) else None
+
+        for eq in records:
+            if not isinstance(eq, dict):
+                continue
+            eq_id = str(eq.get("equation_id") or "")
+            if not eq_id:
+                continue
+            inputs = [str(x) for x in (_field(eq, "input_equation_ids") or []) if x]
+            outputs = [str(x) for x in (_field(eq, "output_equation_ids") or []) if x]
+            provenance = _field(eq, "link_provenance")
+            provenance = provenance if isinstance(provenance, dict) else {}
+            link_status = str(_field(eq, "link_status") or "")
+            eq_type = str(_field(eq, "equation_type") or eq.get("role") or "")
+
+            # (a) dangling links
+            for ref in inputs + outputs:
+                if ref not in registry_ids:
+                    errors.append(ValidationEntry(
+                        code="EQ_DANGLING_EQUATION_LINK",
+                        message=(
+                            f"equation {eq_id!r} links to non-existent equation "
+                            f"{ref!r}"
+                        ),
+                        artifact="equation_semantics",
+                        path=f"$.equations[{eq_id}]",
+                        source_stage="export_validation",
+                        target_type="equation",
+                        target_id=eq_id,
+                    ))
+
+            # (b) every input link must carry provenance
+            for ref in inputs:
+                if not provenance.get(ref):
+                    errors.append(ValidationEntry(
+                        code="EQ_LINK_MISSING_PROVENANCE",
+                        message=(
+                            f"equation {eq_id!r} input link {ref!r} has no "
+                            f"link_provenance"
+                        ),
+                        artifact="equation_semantics",
+                        path=f"$.equations[{eq_id}].link_provenance",
+                        source_stage="export_validation",
+                        target_type="equation",
+                        target_id=eq_id,
+                    ))
+
+            # (c) result / relation equations need inputs or an allowed status
+            if eq_type in ("result", "relation") and not inputs:
+                if link_status in _ALLOWED_NO_INPUT_LINK_STATUSES:
+                    continue
+                policy = eq.get("confidence_policy")
+                policy = policy if isinstance(policy, dict) else {}
+                usable = bool(policy.get("can_be_used_in_derivation"))
+                entry = ValidationEntry(
+                    code="EQ_RESULT_RELATION_WITHOUT_INPUT",
+                    message=(
+                        f"{eq_type} equation {eq_id!r} has no input_equation_ids "
+                        f"and link_status {link_status or 'unset'!r} is not an "
+                        f"allowed no-input justification "
+                        f"({sorted(_ALLOWED_NO_INPUT_LINK_STATUSES)})"
+                    ),
+                    artifact="equation_semantics",
+                    path=f"$.equations[{eq_id}].input_equation_ids",
+                    source_stage="export_validation",
+                    target_type="equation",
+                    target_id=eq_id,
+                )
+                if usable:
+                    errors.append(entry)
+                else:
+                    review_items.append(entry)
 
     def _check_dsl_edges(
         self,
