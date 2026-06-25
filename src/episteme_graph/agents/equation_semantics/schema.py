@@ -48,6 +48,23 @@ EQUATION_TYPES = [
     "unknown",
 ]
 
+# Issue #432: inter-equation links must be derived from structural cues, not
+# hardcoded paper-specific pairs. Every derived link records how it was found.
+LINK_PROVENANCE_KINDS = [
+    "textual_reference",   # the equation text references another equation's label
+    "shared_symbol",       # uses a symbol another equation defines (symbol registry)
+    "derivation_step",     # an upstream-declared derivation link that resolves
+]
+
+# Per-equation status describing why a result/relation equation may legitimately
+# carry no input links. ``derived`` = links present; ``unresolved`` = no input
+# and no justification (a defect the gate flags).
+LINK_STATUSES = ["derived", "axiomatic", "external_reference", "unresolved"]
+
+# result / relation equations with no input_equation_ids are only acceptable
+# when explicitly justified by one of these statuses (issue #432).
+ALLOWED_NO_INPUT_LINK_STATUSES = {"axiomatic", "external_reference"}
+
 ALLOWED_DOWNSTREAM_USES = [
     "blocked",
     "semantic_hint_only",
@@ -423,6 +440,12 @@ class EquationSemantics:
     # equation back, so the link is moved out of linked_claim_ids and kept
     # here instead of being consumed downstream as a confirmed link.
     inferred_claim_ids: list[str] = field(default_factory=list)
+    # Issue #432: provenance for every resolved input link. Maps an
+    # input_equation_id → sorted list of LINK_PROVENANCE_KINDS that justify it.
+    # Populated deterministically by EquationLinkNormalizer; empty until then.
+    link_provenance: dict[str, list[str]] = field(default_factory=dict)
+    # Issue #432: why this equation may carry no input links (LINK_STATUSES).
+    link_status: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -655,6 +678,10 @@ class EquationSemanticsResult:
                 },
                 "input_equation_ids": list(sem.input_equation_ids),
                 "output_equation_ids": list(sem.output_equation_ids),
+                "link_provenance": {
+                    k: list(v) for k, v in (sem.link_provenance or {}).items()
+                },
+                "link_status": sem.link_status or "",
                 "linked_claim_ids": sorted(set(sem.linked_claim_ids) | set(claim_index.get(r.equation_id, []))),
                 "inferred_claim_ids": sorted(set(sem.inferred_claim_ids)),
                 "source_evidence_ids": sorted(set(sem.source_evidence_ids) | set(evidence_index.get(block_id, []))),
@@ -774,6 +801,11 @@ def _record_from_dict(d: dict) -> EquationRecord:
         summary=str(sem_raw.get("summary", "")),
         review_flags=list(sem_raw.get("review_flags", [])),
         inferred_claim_ids=list(sem_raw.get("inferred_claim_ids", [])),
+        link_provenance={
+            str(k): [str(v) for v in (vals or [])]
+            for k, vals in (sem_raw.get("link_provenance", {}) or {}).items()
+        },
+        link_status=str(sem_raw.get("link_status", "")),
     )
     cp_raw = d.get("confidence_policy", {})
     confidence_policy = EquationConfidencePolicy(

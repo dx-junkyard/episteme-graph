@@ -98,6 +98,33 @@ def test_to_json_round_trip():
     assert eq.confidence_policy.allowed_downstream_use == "unrestricted"
 
 
+def test_link_fields_default_empty():
+    # Issue #432: link_provenance / link_status default to empty without breaking
+    # construction or serialization of legacy records.
+    sem = _make_semantics()
+    assert sem.link_provenance == {}
+    assert sem.link_status == ""
+
+
+def test_link_provenance_and_status_round_trip():
+    # Issue #432: link_provenance / link_status survive to_json/from_dict and
+    # appear in the first-class equations export.
+    record = _make_record()
+    record.semantics.input_equation_ids = ["eq_0_1"]
+    record.semantics.link_provenance = {"eq_0_1": ["shared_symbol", "textual_reference"]}
+    record.semantics.link_status = "derived"
+    result = EquationSemanticsResult("doc_test", None, [], [record])
+
+    restored = EquationSemanticsResult.from_dict(json.loads(result.to_json()))
+    sem = restored.equations[0].semantics
+    assert sem.link_provenance == {"eq_0_1": ["shared_symbol", "textual_reference"]}
+    assert sem.link_status == "derived"
+
+    exported = result.to_equations_export()[0]
+    assert exported["link_provenance"] == {"eq_0_1": ["shared_symbol", "textual_reference"]}
+    assert exported["link_status"] == "derived"
+
+
 def test_candidate_round_trip():
     candidate = _make_candidate()
     result = EquationSemanticsResult("doc_test", None, [candidate], [])

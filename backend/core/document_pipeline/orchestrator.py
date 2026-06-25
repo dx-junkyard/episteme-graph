@@ -686,8 +686,34 @@ def run_document_pipeline(
                 symbol_registry = SymbolRegistryBuilder().run(
                     equations, cartridge_id=cartridge_id
                 )
-                # The builder set DefinedSymbol.symbol_id in place; persist the
-                # annotated equations so resumes keep the registry references.
+                # Issue #432: derive inter-equation links from structural cues
+                # (shared symbols from the registry + textual references), record
+                # link_provenance, drop dangling links, and assign link_status.
+                # Mutates the equation records in place before they are persisted.
+                try:
+                    from episteme_graph.agents.symbol_registry.link_normalizer import (
+                        EquationLinkNormalizer,
+                    )
+
+                    link_summary = EquationLinkNormalizer().normalize(
+                        equations, symbol_registry
+                    )
+                    logger.info(
+                        "equation link normalization for document %s: %s links, "
+                        "%d dangling dropped, statuses=%s",
+                        document_id,
+                        link_summary.get("link_count"),
+                        link_summary.get("dangling_dropped", 0),
+                        link_summary.get("link_status_counts"),
+                    )
+                except Exception:
+                    logger.warning(
+                        "equation link normalization failed (non-fatal): document=%s",
+                        document_id, exc_info=True,
+                    )
+                # The builder set DefinedSymbol.symbol_id in place and the link
+                # normalizer rewrote the equation links; persist the annotated
+                # equations so resumes keep the registry references and links.
                 save_artifact("equation_semantics", equations)
                 save_artifact("symbol_registry", symbol_registry)
             except Exception as exc:

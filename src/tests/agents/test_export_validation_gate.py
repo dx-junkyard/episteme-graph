@@ -1886,3 +1886,142 @@ def test_no_equation_semantics_artifact_is_noop():
     # Documents without an equation_semantics artifact must not trip the check.
     result = _run_gate()
     assert _accepted_codes(result) == set()
+
+
+# ---------------------------------------------------------------------------
+# Tests: inter-equation link integrity (issue #432)
+#
+# Domain-agnostic. Equation records use the nested (asdict) shape produced by
+# EquationSemanticsResult.to_dict(). Assertions are by error code / target id,
+# never by formula text or hardcoded equation pairs.
+# ---------------------------------------------------------------------------
+
+def _eq_record(equation_id, *, equation_type="relation", inputs=None, outputs=None,
+               provenance=None, link_status="", can_derive=True):
+    return {
+        "equation_id": equation_id,
+        "confidence_policy": {"can_be_used_in_derivation": can_derive},
+        "semantics": {
+            "equation_type": equation_type,
+            "input_equation_ids": list(inputs or []),
+            "output_equation_ids": list(outputs or []),
+            "link_provenance": dict(provenance or {}),
+            "link_status": link_status,
+        },
+    }
+
+
+def _link_codes(result, code):
+    return {e.target_id for e in result.errors if e.code == code}
+
+
+def test_dangling_equation_link_is_hard_error():
+    artifacts = _make_artifacts(equation_semantics={"equations": [
+        _eq_record("eq_1", inputs=["eq_ghost"],
+                   provenance={"eq_ghost": ["derivation_step"]}),
+    ]})
+    result = _run_gate(artifacts=artifacts)
+    assert _link_codes(result, "EQ_DANGLING_EQUATION_LINK") == {"eq_1"}
+    assert result.status == "failed_validation"
+    assert result.publish_ready is False
+
+
+def test_link_missing_provenance_is_hard_error():
+    artifacts = _make_artifacts(equation_semantics={"equations": [
+        _eq_record("eq_src"),
+        _eq_record("eq_dst", inputs=["eq_src"], provenance={}),
+    ]})
+    result = _run_gate(artifacts=artifacts)
+    assert _link_codes(result, "EQ_LINK_MISSING_PROVENANCE") == {"eq_dst"}
+    assert result.status == "failed_validation"
+
+
+def test_resolved_link_with_provenance_passes():
+    artifacts = _make_artifacts(equation_semantics={"equations": [
+        _eq_record("eq_src", equation_type="definition"),
+        _eq_record("eq_dst", equation_type="result", inputs=["eq_src"],
+                   outputs=[], provenance={"eq_src": ["shared_symbol"]},
+                   link_status="derived"),
+    ]})
+    result = _run_gate(artifacts=artifacts)
+    assert not any(
+        e.code in ("EQ_DANGLING_EQUATION_LINK", "EQ_LINK_MISSING_PROVENANCE",
+                   "EQ_RESULT_RELATION_WITHOUT_INPUT")
+        for e in result.errors
+    )
+
+
+def test_result_without_input_is_hard_error_when_usable():
+    artifacts = _make_artifacts(equation_semantics={"equations": [
+        _eq_record("eq_r", equation_type="result", inputs=[],
+                   link_status="unresolved", can_derive=True),
+    ]})
+    result = _run_gate(artifacts=artifacts)
+    assert _link_codes(result, "EQ_RESULT_RELATION_WITHOUT_INPUT") == {"eq_r"}
+    assert result.status == "failed_validation"
+
+
+def test_relation_without_input_is_hard_error_when_usable():
+    artifacts = _make_artifacts(equation_semantics={"equations": [
+        _eq_record("eq_rel", equation_type="relation", inputs=[],
+                   link_status="unresolved", can_derive=True),
+    ]})
+    result = _run_gate(artifacts=artifacts)
+    assert _link_codes(result, "EQ_RESULT_RELATION_WITHOUT_INPUT") == {"eq_rel"}
+
+
+def test_result_without_input_allowed_when_axiomatic():
+    artifacts = _make_artifacts(equation_semantics={"equations": [
+        _eq_record("eq_r", equation_type="result", inputs=[],
+                   link_status="axiomatic", can_derive=True),
+    ]})
+    result = _run_gate(artifacts=artifacts)
+    assert not any(e.code == "EQ_RESULT_RELATION_WITHOUT_INPUT" for e in result.errors)
+
+
+def test_result_without_input_allowed_when_external_reference():
+    artifacts = _make_artifacts(equation_semantics={"equations": [
+        _eq_record("eq_r", equation_type="result", inputs=[],
+                   link_status="external_reference", can_derive=True),
+    ]})
+    result = _run_gate(artifacts=artifacts)
+    assert not any(e.code == "EQ_RESULT_RELATION_WITHOUT_INPUT" for e in result.errors)
+
+
+def test_result_without_input_is_review_item_when_not_usable():
+    # A non-derivation-usable (review-gated) result is a review item, not a hard
+    # error — it is already blocked from confident downstream use.
+    artifacts = _make_artifacts(equation_semantics={"equations": [
+        _eq_record("eq_r", equation_type="result", inputs=[],
+                   link_status="unresolved", can_derive=False),
+    ]})
+    result = _run_gate(artifacts=artifacts)
+    assert not any(e.code == "EQ_RESULT_RELATION_WITHOUT_INPUT" for e in result.errors)
+    assert any(
+        e.code == "EQ_RESULT_RELATION_WITHOUT_INPUT" for e in result.review_items
+    )
+
+
+def test_definition_without_input_is_not_flagged():
+    # Only result / relation equations are subject to the no-input invariant.
+    artifacts = _make_artifacts(equation_semantics={"equations": [
+        _eq_record("eq_def", equation_type="definition", inputs=[],
+                   link_status="", can_derive=True),
+    ]})
+    result = _run_gate(artifacts=artifacts)
+    assert not any(
+        e.code == "EQ_RESULT_RELATION_WITHOUT_INPUT"
+        for e in (result.errors + result.review_items)
+    )
+
+
+def test_link_integrity_reads_flattened_export_shape():
+    # The check must also work on the flattened to_equations_export() shape.
+    artifacts = _make_artifacts(equation_semantics={"equations": [
+        {"equation_id": "eq_1", "equation_type": "result",
+         "input_equation_ids": ["eq_ghost"],
+         "link_provenance": {"eq_ghost": ["derivation_step"]},
+         "link_status": "derived"},
+    ]})
+    result = _run_gate(artifacts=artifacts)
+    assert _link_codes(result, "EQ_DANGLING_EQUATION_LINK") == {"eq_1"}
