@@ -129,6 +129,40 @@ def test_already_resolved_candidate_is_not_duplicated():
     assert len(records) == 1
 
 
+def test_candidate_registered_only_via_trace_is_not_duplicated():
+    # A record traces the candidate via candidate_trace_ids even though the
+    # candidate's own accepted_equation_id was never written back. The recovery
+    # must treat it as registered (same ID-set definition as the export gate)
+    # and not create a duplicate provisional record (#431).
+    candidate = _candidate("cand_traced", acc_status="accepted", accepted_equation_id=None)
+    record = _make_provisional_record(_candidate("cand_other"))
+    record.candidate_trace_ids = ["cand_traced"]
+    records = [record]
+    EquationSemanticsAgent._recover_dropped_candidates([candidate], records)
+    assert len(records) == 1
+
+
+def test_recovery_makes_accepted_subset_of_registry():
+    # After recovery, the accepted-candidate set is a subset of the registry by
+    # construction: every accepted candidate is traceable to a record. Asserted
+    # via set inclusion, not formula names or counts (#431).
+    accepted = [
+        _candidate("cand_1", acc_status="accepted", accepted_equation_id=None),
+        _candidate("cand_2", acc_status="accepted", accepted_equation_id=None),
+    ]
+    records = []
+    EquationSemanticsAgent._recover_dropped_candidates(accepted, records)
+
+    registry_equation_ids = {r.equation_id for r in records}
+    traced = {cid for r in records for cid in r.candidate_trace_ids}
+    accepted_ids = {c.candidate_id for c in accepted}
+    registered = traced | {
+        c.candidate_id for c in accepted
+        if c.accepted_equation_id in registry_equation_ids
+    }
+    assert accepted_ids - registered == set()
+
+
 # ---------------------------------------------------------------------------
 # Silent shrink detection
 # ---------------------------------------------------------------------------
