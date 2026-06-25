@@ -279,30 +279,48 @@ class EquationSemanticsAgent:
         reconstructable: list[EquationCandidate],
         records: list[EquationRecord],
     ) -> None:
-        """Create reasoned provisional records for unprocessed candidates (#416).
+        """Guarantee the candidate→registry promotion invariant (#416, #431).
 
-        Any accepted/provisional candidate whose ``accepted_equation_id`` does not
-        resolve to a record in ``records`` is recovered with a minimal provisional
-        record so the candidate→record relation is complete and no downstream
-        stage can reference a missing equation.
+        Any accepted/provisional candidate that is not represented in the
+        registry is recovered with a minimal provisional record so the
+        candidate→record relation is complete and no downstream stage can
+        reference a missing equation. A candidate counts as registered — using
+        the same domain-agnostic ID-set definition as the ExportValidationGate —
+        when either:
+
+          - a record traces it via ``candidate_trace_ids``, or
+          - its ``accepted_equation_id`` resolves to an existing record.
+
+        Recovery is keyed on those ID links only, so the inclusion relationship
+        holds by construction regardless of how a candidate reached (or failed to
+        reach) the LLM loop. The strict #431 invariant is about ``accepted``
+        candidates; ``provisional`` is recovered too so it never dangles either.
         """
         record_ids = {r.equation_id for r in records}
+        traced_candidate_ids = {
+            cid for r in records for cid in r.candidate_trace_ids
+        }
         for candidate in reconstructable:
             if candidate.acceptance_status not in {"accepted", "provisional"}:
                 continue
             accepted_id = candidate.accepted_equation_id
-            if accepted_id and accepted_id in record_ids:
+            registered = (
+                (accepted_id and accepted_id in record_ids)
+                or candidate.candidate_id in traced_candidate_ids
+            )
+            if registered:
                 continue
             if "candidate_dropped_before_record" not in candidate.review_reason:
                 candidate.review_reason.append("candidate_dropped_before_record")
             logger.warning(
                 "document=%s candidate=%s produced no equation record; "
-                "recovering as provisional (#416)",
+                "recovering as provisional (#416/#431)",
                 candidate.document_id,
                 candidate.candidate_id,
             )
             provisional = _make_provisional_record(candidate)
             record_ids.add(provisional.equation_id)
+            traced_candidate_ids.update(provisional.candidate_trace_ids)
             records.append(provisional)
 
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:

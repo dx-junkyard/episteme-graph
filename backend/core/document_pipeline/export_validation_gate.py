@@ -474,6 +474,12 @@ class ExportValidationGate:
         equation_fidelity = self._check_equation_fidelity(
             artifacts, review_items, warnings
         )
+        # 2c. Candidate→registry promotion invariant (issue #431): every accepted
+        # equation candidate must be present in the equation registry. This is a
+        # hard publish blocker enforced directly by the gate so it is independent
+        # of the equation_semantics soft-stage error downgrade. Detection is a
+        # pure ID-set difference — no branching on labels/formula text/domain.
+        self._check_accepted_equations_registered(artifacts, errors)
 
         # 3. Cross-artifact ID validation
         if component_result and claim_objects and evidence:
@@ -2031,6 +2037,83 @@ class ExportValidationGate:
         if not isinstance(values, list):
             return []
         return [str(v) for v in values if str(v) in _EQUATION_FIDELITY_CODES]
+
+    def _check_accepted_equations_registered(self, artifacts: dict, errors: list) -> None:
+        """Enforce the candidate→registry promotion invariant (issue #431).
+
+        Invariant (domain-agnostic): for any document, the set of equation
+        candidates with ``acceptance_status == "accepted"`` must be a subset of
+        the equation registry. Registry membership is established purely by ID
+        links and never by formula names, labels, or domain vocabulary:
+
+          - a registry record traces the candidate via ``candidate_trace_ids``, or
+          - the candidate's own ``accepted_equation_id`` resolves to a registry
+            ``equation_id``.
+
+        The check is a pure set difference ``accepted_ids - registered_ids``; a
+        non-empty difference yields one hard ``EQ_ACCEPTED_NOT_REGISTERED`` error
+        per orphaned candidate, which blocks publish. ``provisional`` and other
+        statuses are intentionally out of scope — the invariant is about
+        ``accepted`` candidates only.
+        """
+        raw = artifacts.get("equation_semantics")
+        if not isinstance(raw, dict):
+            return
+        candidates = raw.get("equation_candidates")
+        equations = raw.get("equations")
+        if not isinstance(candidates, list) or not isinstance(equations, list):
+            return
+
+        # Registry side: equation ids present + candidate ids any record traces.
+        registry_equation_ids: set[str] = set()
+        traced_candidate_ids: set[str] = set()
+        for rec in equations:
+            if not isinstance(rec, dict):
+                continue
+            eq_id = str(rec.get("equation_id") or "")
+            if eq_id:
+                registry_equation_ids.add(eq_id)
+            for cid in rec.get("candidate_trace_ids") or []:
+                cid = str(cid)
+                if cid:
+                    traced_candidate_ids.add(cid)
+
+        # Candidate side: accepted candidates + their accepted_equation_id pointer.
+        accepted_candidate_ids: set[str] = set()
+        accepted_equation_id_by_candidate: dict[str, str] = {}
+        for cand in candidates:
+            if not isinstance(cand, dict):
+                continue
+            if cand.get("acceptance_status") != "accepted":
+                continue
+            cid = str(cand.get("candidate_id") or "")
+            if not cid:
+                continue
+            accepted_candidate_ids.add(cid)
+            acc_eq = str(cand.get("accepted_equation_id") or "")
+            if acc_eq:
+                accepted_equation_id_by_candidate[cid] = acc_eq
+
+        # registered = traced by a record OR own pointer resolves to the registry.
+        registered_candidate_ids = set(traced_candidate_ids)
+        for cid, acc_eq in accepted_equation_id_by_candidate.items():
+            if acc_eq in registry_equation_ids:
+                registered_candidate_ids.add(cid)
+
+        for cid in sorted(accepted_candidate_ids - registered_candidate_ids):
+            errors.append(ValidationEntry(
+                code="EQ_ACCEPTED_NOT_REGISTERED",
+                message=(
+                    f"accepted equation candidate {cid!r} is absent from the "
+                    f"equation registry: no registry record traces it and its "
+                    f"accepted_equation_id does not resolve to a registry equation"
+                ),
+                artifact="equation_semantics",
+                path=f"$.equation_candidates[{cid}]",
+                source_stage="export_validation",
+                target_type="equation_candidate",
+                target_id=cid,
+            ))
 
     def _check_dsl_edges(
         self,

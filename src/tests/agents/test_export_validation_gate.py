@@ -1746,3 +1746,143 @@ def test_validation_entry_serializes_target_fields():
     payload = result.to_dict()
     entry = next(e for e in payload["errors"] if e["code"] == "COMPONENT_GRAPH_MEMBER_COMPONENT_INVALID")
     assert "target_type" in entry and "target_id" in entry
+
+
+# ---------------------------------------------------------------------------
+# Tests: candidate→registry promotion invariant (issue #431)
+#
+# The invariant is domain-agnostic: every accepted equation candidate must be a
+# subset of the equation registry, established by ID links only. These fixtures
+# deliberately use two unrelated domain vocabularies and assert the subset
+# relationship via set inclusion — never by formula names or hardcoded counts.
+# ---------------------------------------------------------------------------
+
+def _equation_semantics_artifact(equations, candidates):
+    return {"equations": list(equations), "equation_candidates": list(candidates)}
+
+
+def _accepted_codes(result):
+    return {e.code for e in result.errors if e.code == "EQ_ACCEPTED_NOT_REGISTERED"}
+
+
+def _orphaned_accepted_ids(result):
+    return {
+        e.target_id
+        for e in result.errors
+        if e.code == "EQ_ACCEPTED_NOT_REGISTERED"
+    }
+
+
+def test_accepted_equation_registered_via_trace_passes():
+    # Domain A (particle physics-ish ids). Accepted candidate is traced by a
+    # registry record → invariant holds, no EQ_ACCEPTED_NOT_REGISTERED.
+    artifacts = _make_artifacts(equation_semantics=_equation_semantics_artifact(
+        equations=[{"equation_id": "eq_pp_1", "candidate_trace_ids": ["cand_pp_1"]}],
+        candidates=[{"candidate_id": "cand_pp_1", "acceptance_status": "accepted",
+                     "accepted_equation_id": "eq_pp_1"}],
+    ))
+    result = _run_gate(artifacts=artifacts)
+    assert _accepted_codes(result) == set()
+
+
+def test_accepted_equation_registered_via_accepted_equation_id_passes():
+    # Registry record does not list the candidate in candidate_trace_ids, but the
+    # candidate's own accepted_equation_id resolves to a registry equation.
+    artifacts = _make_artifacts(equation_semantics=_equation_semantics_artifact(
+        equations=[{"equation_id": "eq_x", "candidate_trace_ids": []}],
+        candidates=[{"candidate_id": "cand_x", "acceptance_status": "accepted",
+                     "accepted_equation_id": "eq_x"}],
+    ))
+    result = _run_gate(artifacts=artifacts)
+    assert _accepted_codes(result) == set()
+
+
+def test_accepted_equation_not_registered_blocks_publish_domain_a():
+    # Domain A: an accepted candidate that no record traces and whose pointer does
+    # not resolve → hard error, publish blocked. Asserted by set inclusion.
+    accepted_ids = {"cand_pp_1", "cand_pp_2"}
+    artifacts = _make_artifacts(equation_semantics=_equation_semantics_artifact(
+        equations=[{"equation_id": "eq_pp_1", "candidate_trace_ids": ["cand_pp_1"]}],
+        candidates=[
+            {"candidate_id": "cand_pp_1", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_pp_1"},
+            {"candidate_id": "cand_pp_2", "acceptance_status": "accepted",
+             "accepted_equation_id": None},
+        ],
+    ))
+    result = _run_gate(artifacts=artifacts)
+    registered = {"cand_pp_1"}
+    assert _orphaned_accepted_ids(result) == accepted_ids - registered
+    assert result.status == "failed_validation"
+    assert result.exportable is False
+    assert result.publish_ready is False
+
+
+def test_accepted_equation_not_registered_blocks_publish_domain_b():
+    # Domain B: an entirely different vocabulary (economics-ish). Same invariant,
+    # no formula-name or count assumptions — pure ID-set difference.
+    accepted_ids = {"cand_econ_a", "cand_econ_b", "cand_econ_c"}
+    artifacts = _make_artifacts(equation_semantics=_equation_semantics_artifact(
+        equations=[
+            {"equation_id": "eq_econ_a", "candidate_trace_ids": ["cand_econ_a"]},
+            {"equation_id": "eq_econ_b", "candidate_trace_ids": ["cand_econ_b"]},
+        ],
+        candidates=[
+            {"candidate_id": "cand_econ_a", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_econ_a"},
+            {"candidate_id": "cand_econ_b", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_econ_b"},
+            {"candidate_id": "cand_econ_c", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_ghost"},
+        ],
+    ))
+    result = _run_gate(artifacts=artifacts)
+    registered = {"cand_econ_a", "cand_econ_b"}
+    assert _orphaned_accepted_ids(result) == accepted_ids - registered
+    assert result.status == "failed_validation"
+    assert result.publish_ready is False
+
+
+def test_non_accepted_candidates_are_out_of_scope():
+    # provisional / rejected / needs_merge / context_only candidates absent from
+    # the registry must NOT raise the accepted-subset invariant.
+    artifacts = _make_artifacts(equation_semantics=_equation_semantics_artifact(
+        equations=[],
+        candidates=[
+            {"candidate_id": "c_prov", "acceptance_status": "provisional",
+             "accepted_equation_id": None},
+            {"candidate_id": "c_rej", "acceptance_status": "rejected"},
+            {"candidate_id": "c_merge", "acceptance_status": "needs_merge"},
+            {"candidate_id": "c_ctx", "acceptance_status": "context_only"},
+        ],
+    ))
+    result = _run_gate(artifacts=artifacts)
+    assert _accepted_codes(result) == set()
+
+
+def test_all_accepted_registered_is_publish_ready():
+    # Full subset relationship across two records → clean, publish-ready.
+    artifacts = _make_artifacts(equation_semantics=_equation_semantics_artifact(
+        equations=[
+            {"equation_id": "eq_1", "candidate_trace_ids": ["cand_1"]},
+            {"equation_id": "eq_2", "candidate_trace_ids": ["cand_2", "cand_3"]},
+        ],
+        candidates=[
+            {"candidate_id": "cand_1", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_1"},
+            {"candidate_id": "cand_2", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_2"},
+            {"candidate_id": "cand_3", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_2"},
+        ],
+    ))
+    result = _run_gate(artifacts=artifacts)
+    assert _accepted_codes(result) == set()
+    assert result.status == "passed"
+    assert result.publish_ready is True
+
+
+def test_no_equation_semantics_artifact_is_noop():
+    # Documents without an equation_semantics artifact must not trip the check.
+    result = _run_gate()
+    assert _accepted_codes(result) == set()
