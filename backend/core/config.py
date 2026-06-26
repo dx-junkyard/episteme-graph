@@ -85,6 +85,27 @@ class Settings(BaseSettings):
     llm_deep_model: str = "gpt-5.2"
     llm_deep_effort: Literal["low", "medium", "high"] = "high"
 
+    # --- モデルティアごとの最大出力トークン数 ---
+    # エージェント LLM 呼び出しの ``max_tokens`` は、使用モデルのティアに応じて
+    # 切り替える。Fast は 400k、それ以外（Standard / Analysis / Deep）は 1M を
+    # デフォルトとする。出力切断（truncation）を避けるための上限値。
+    llm_fast_model_max_tokens: int = Field(
+        default=128_000,
+        validation_alias=AliasChoices("LLM_FAST_MODEL_MAX_TOKENS"),
+    )
+    llm_standard_model_max_tokens: int = Field(
+        default=128_000,
+        validation_alias=AliasChoices("LLM_STANDARD_MODEL_MAX_TOKENS"),
+    )
+    llm_analysis_model_max_tokens: int = Field(
+        default=128_000,
+        validation_alias=AliasChoices("LLM_ANALYSIS_MODEL_MAX_TOKENS"),
+    )
+    llm_deep_model_max_tokens: int = Field(
+        default=128_000,
+        validation_alias=AliasChoices("LLM_DEEP_MODEL_MAX_TOKENS"),
+    )
+
     # --- JWT / Auth ---
     jwt_secret: str = "episteme-dev-secret-change-in-prod"
     admin_password: str = ""

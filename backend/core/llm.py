@@ -91,6 +91,39 @@ def get_llm_params(mode: LLMMode) -> dict[str, Any]:
     return params
 
 
+def max_tokens_for_model(model: str | None) -> int:
+    """モデル名から対応するティアの最大出力トークン数を解決する。
+
+    エージェント LLM 呼び出しは ``model=None`` で「Settings 既定の analysis モデル」
+    を指す。明示モデルが各ティアのモデル名に一致すればそのティアの上限を返し、
+    一致しなければ analysis ティアの上限をフォールバックとして返す。
+
+    Parameters
+    ----------
+    model : str | None
+        解決対象のモデル名。None は analysis ティア（generate_text の既定）。
+
+    Returns
+    -------
+    int
+        当該ティアの ``max_tokens`` 値。
+    """
+    settings = get_settings()
+    name = (model or settings.llm_analysis_model or "").strip()
+    # fast / analysis / standard / deep の順に照合する。analysis を standard /
+    # deep より先に見るのは、model=None（= analysis モデル）が他ティアと同名でも
+    # analysis ティアの上限に解決されるようにするため。
+    for tier_model, tier_max in (
+        (settings.llm_fast_model, settings.llm_fast_model_max_tokens),
+        (settings.llm_analysis_model, settings.llm_analysis_model_max_tokens),
+        (settings.llm_standard_model, settings.llm_standard_model_max_tokens),
+        (settings.llm_deep_model, settings.llm_deep_model_max_tokens),
+    ):
+        if name and name == tier_model:
+            return tier_max
+    return settings.llm_analysis_model_max_tokens
+
+
 # ---------------------------------------------------------------------------
 # Reasoning モデル判定
 # ---------------------------------------------------------------------------

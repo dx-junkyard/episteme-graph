@@ -547,7 +547,11 @@ class ComponentRefiner:
 
         children: list[ComponentRecord] = []
         candidate_mapping: list[dict] = []
-        for idx, spec in enumerate(plan, start=1):
+        # Iterate only over specs that have payload. Specs with no assigned
+        # equations/claims/evidence/derivations would produce components with
+        # empty internal_flow, which the export gate rejects as hard errors for
+        # MethodComponent / RelationComponent and similar derivation-path types.
+        for idx, spec in enumerate(assignable, start=1):
             child_id = f"{component.component_id}__r{idx}"
             child = _build_suggested_component(
                 component, child_id, spec, eq_index, claim_index
@@ -1021,7 +1025,10 @@ def _build_responsibility_component(
         reason=f"Split from oversized component {parent.component_id} by responsibility.",
         confidence=parent.confidence,
         review_notes=list(parent.review_notes),
-        internal_flow=_responsibility_flow(eq_ids, operation),
+        internal_flow=(
+            _responsibility_flow(eq_ids, operation)
+            or _inherit_parent_flow(parent, eq_ids)
+        ),
         linked_claim_ids=list(parent.linked_claim_ids),
         linked_equation_ids=eq_ids,
         linked_evidence_ids=list(parent.linked_evidence_ids),
@@ -1165,6 +1172,28 @@ def _responsibility_flow(eq_ids: list[str], operation: str) -> list[dict]:
         for src, dst in zip(eq_ids, eq_ids[1:])
         if src != dst
     ][:SIZE_THRESHOLDS["max_internal_flow_steps_soft"]]
+
+
+def _inherit_parent_flow(parent: "ComponentRecord", child_eq_ids: list[str]) -> list[dict]:
+    """Split 後に方程式が 1 本以下しか割り当たらない子コンポーネント向けのフロー継承。
+
+    親の internal_flow のうち子の eq_ids を参照するステップを抽出し返す。
+    マッチするステップが無い場合は親フロー全体の先頭スライスを返す。
+    RelationComponent / MethodComponent 等、export gate が non-empty flow を
+    必須とする component_type の split 子で空フローが発生しないようにする。
+    """
+    parent_flow: list[dict] = parent.internal_flow or []
+    if not parent_flow:
+        return []
+    cap = SIZE_THRESHOLDS["max_internal_flow_steps_soft"]
+    child_eq_set = set(child_eq_ids)
+    filtered = [
+        step for step in parent_flow
+        if step.get("from") in child_eq_set or step.get("to") in child_eq_set
+    ]
+    if filtered:
+        return filtered[:cap]
+    return parent_flow[:cap]
 
 
 def _review_required_equation_ids(eq_ids: list[str], eq_index: dict[str, dict]) -> list[str]:
@@ -2382,7 +2411,10 @@ def _build_suggested_component(
         ),
         confidence=parent.confidence,
         review_notes=review_notes,
-        internal_flow=_responsibility_flow(eq_ids, operation),
+        internal_flow=(
+            _responsibility_flow(eq_ids, operation)
+            or _inherit_parent_flow(parent, eq_ids)
+        ),
         linked_claim_ids=claim_ids,
         linked_equation_ids=eq_ids,
         linked_evidence_ids=evidence_ids,

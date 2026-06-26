@@ -202,12 +202,18 @@ def test_steps_from_multiple_derivations_share_a_stage_node():
     assert len(basis_nodes[0].member_component_ids) == 2
 
 
-def test_detail_nodes_point_back_at_main_node():
+def test_detail_nodes_are_listed_in_main_member_ids():
+    # Issue #422: parent_component_id now holds a canonical component_assembly
+    # ID (not a theory_op graph-node ID). The detail→main relationship is
+    # maintained exclusively via member_component_ids on main nodes.
     result = _normalized()
-    main_by_id = {n.component_id: n for n in _layer(result, "main")}
+    claimed_by_main: set[str] = set()
+    for n in _layer(result, "main"):
+        claimed_by_main.update(n.member_component_ids or [])
     for detail in _layer(result, "equation_detail"):
-        assert detail.parent_component_id in main_by_id
-        assert detail.component_id in main_by_id[detail.parent_component_id].member_component_ids
+        assert detail.component_id in claimed_by_main, (
+            f"detail node {detail.component_id!r} not found in any main node's member_component_ids"
+        )
 
 
 # --- labels (acceptance #3, #4) ---------------------------------------------
@@ -343,13 +349,18 @@ def test_kept_generic_detail_node_has_parent_main_node():
     # Issue #361: the kept-generic step is attached to the nearest preceding
     # non-generic step's main node so the layer linkage invariant holds, but
     # it must not strengthen that main node's backing.
+    # Issue #422: parent_component_id now holds a canonical component ID, so
+    # the detail→main relationship is checked via member_component_ids.
     result = _normalized()
     detail = _layer(result, "equation_detail")
     kept = next(n for n in detail if n.operation == "transform")
     main_by_id = {n.component_id: n for n in _layer(result, "main")}
-    assert kept.parent_component_id in main_by_id
-    parent = main_by_id[kept.parent_component_id]
-    assert kept.component_id in parent.member_component_ids
+    # Find the main node that claims this kept-generic detail node.
+    parent = next(
+        (n for n in main_by_id.values() if kept.component_id in (n.member_component_ids or [])),
+        None,
+    )
+    assert parent is not None, f"{kept.component_id!r} not in any main node's member_component_ids"
     # eq_g (only produced by the generic step) never backs the main node.
     assert "eq_g" not in parent.linked_equation_ids
 

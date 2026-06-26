@@ -69,6 +69,29 @@ class TestLLMSettings:
         assert s.llm_fast_effort == "medium"
         assert s.llm_deep_effort == "low"
 
+    def test_default_max_tokens_per_tier(self):
+        """各ティアの max_tokens デフォルト（Fast=400k, 他=1M）が正しいこと。"""
+        from core.config import Settings
+
+        s = Settings(_env_file=None, llm_api_key="sk-test")
+        assert s.llm_fast_model_max_tokens == 128_000
+        assert s.llm_standard_model_max_tokens == 128_000
+        assert s.llm_analysis_model_max_tokens == 128_000
+        assert s.llm_deep_model_max_tokens == 128_000
+
+    def test_max_tokens_env_override(self):
+        """環境変数で各ティアの max_tokens を上書きできること。"""
+        from core.config import Settings
+
+        s = Settings(
+            _env_file=None,
+            llm_api_key="sk-test",
+            llm_fast_model_max_tokens=128_000,
+            llm_deep_model_max_tokens=200_000,
+        )
+        assert s.llm_fast_model_max_tokens == 128_000
+        assert s.llm_deep_model_max_tokens == 200_000
+
     def test_effort_validation(self):
         """effort に不正な値を渡すとバリデーションエラーになること。"""
         from pydantic import ValidationError

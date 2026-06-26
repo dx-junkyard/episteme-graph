@@ -281,11 +281,18 @@
 
     var html = "";
     materials.forEach(function (m) {
+      var pipelineStatus = state.materialPipelineStatus[m.material_id] || {};
+      var isDegraded = pipelineStatus.is_degraded || false;
+      var degradedStages = pipelineStatus.degraded_stages || [];
+      var availableFeatures = pipelineStatus.available_features || [];
+      var retryStage = pipelineStatus.retry_suggestion || "";
+
       var statusClass = "status-" + m.status;
+      if (isDegraded) statusClass += " status-degraded";
       var statusLabel = {
         uploaded: "アップロード済み",
         processing: "処理中...",
-        completed: "完了",
+        completed: isDegraded ? "完了（一部機能制限）" : "完了",
         failed: "失敗",
       }[m.status] || m.status;
       if (m.status === "processing" && m.analysis_stage) {
@@ -298,7 +305,7 @@
         statusLabel = "処理中: " + m.analysis_stage + progressText;
       }
       if (m.status === "failed" && m.analysis_stage) {
-        statusLabel = "失敗: " + m.analysis_stage;
+        statusLabel = "失敗: " + m.analysis_stage + " (チャンク・RAGチャットは使用可能)";
       }
 
       var uploadedAt = m.uploaded_at || "";
@@ -313,18 +320,28 @@
       html += "<tr>";
       html += "<td>" + escHtml(m.filename) + "</td>";
       html += "<td>" + escHtml(m.title) + "</td>";
-      html += '<td><span class="admin-status ' + statusClass + '">' + statusLabel + "</span></td>";
+      html += '<td><span class="admin-status ' + statusClass + '" title="' +
+        (isDegraded ? "利用可能な機能: " + availableFeatures.join(", ") + "\n機能制限中のステージ: " + degradedStages.join(", ") : "") +
+        '">' + statusLabel + "</span>";
+      if (isDegraded) {
+        html += '<div class="admin-degraded-hint" style="font-size:11px;color:var(--color-text-warning,#c85a00);margin-top:2px;">' +
+          '⚠ 一部の高度な機能は制限されています。RAGチャットは利用可能です。' +
+          (retryStage ? ' <a href="#" class="admin-retry-stage-link" data-material-id="' + escHtml(m.material_id) + '" data-stage="' + escHtml(retryStage) + '" style="text-decoration:underline;cursor:pointer;">ステージ再実行</a>' : '') +
+          '</div>';
+      }
+      html += "</td>";
       html += "<td>" + escHtml(uploadedAt) + "</td>";
       var hasPdf = m.has_pdf === true;
       var chunkCount = typeof m.chunk_count === "number" ? m.chunk_count : null;
-      var pdfRegistrationFailed = m.status === "failed" || (m.status === "completed" && chunkCount === 0);
+      // status=failed のみ PDF 再登録を促す。縮退(completed)はチャンクが存在するため不要
+      var pdfRegistrationFailed = m.status === "failed" && chunkCount === 0;
       var pdfBtnLabel = pdfRegistrationFailed ? "失敗 (PDF再登録)" : (hasPdf ? "登録済" : "PDF再登録");
       var pdfBtnClass = pdfRegistrationFailed ? " admin-pdf-reupload-btn-failed" : "";
       var pdfBtnTitle = pdfRegistrationFailed
-        ? "教材処理に失敗、またはチャンクが作成されませんでした。PDFを再登録してください"
+        ? "チャンク作成に失敗しました。PDFを再登録してください"
         : "PDFのみ再登録";
       var resumeBtn = "";
-      if ((m.status === "processing" || m.status === "failed") && m.document_id) {
+      if (m.status === "failed" && m.document_id) {
         resumeBtn = '<button class="admin-resume-analysis-btn" data-document-id="' + escHtml(m.document_id) + '" data-filename="' + escHtml(m.filename || m.title || "教材") + '" title="保存済みPDFから解析を再開">解析再開</button>';
       }
       html += '<td><div class="materials-action-cell">' +
@@ -414,6 +431,17 @@
             btn.textContent = "解析再開";
             showUploadStatus("解析の再開に失敗しました。", "error");
           });
+      });
+    });
+
+    tbody.querySelectorAll(".admin-retry-stage-link").forEach(function (link) {
+      link.addEventListener("click", function (e) {
+        e.preventDefault();
+        var materialId = this.getAttribute("data-material-id");
+        var stage = this.getAttribute("data-stage");
+        if (!materialId || !stage) return;
+        if (!confirm("ステージ「" + stage + "」を再実行します。既存の結果は上書きされます。よろしいですか？")) return;
+        runMaterialPipeline(materialId, stage);
       });
     });
   }

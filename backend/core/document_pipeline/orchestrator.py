@@ -1128,31 +1128,64 @@ def run_document_pipeline(
         if finish_target_stage("export_validation", {"status": validation_result_dict.get("status"), "error_count": (validation_result_dict.get("summary") or {}).get("error_count", 0), "warning_count": (validation_result_dict.get("summary") or {}).get("warning_count", 0), "total": 1, "processed": 1}):
             return result
 
-        # Block persist / completed if validation failed
+        # ── Export-validation failure: graceful degradation ─────────────────
+        # 設計原則: source_embedding が成功した後は status=failed にしない。
+        # chunks + embeddings は常に保存済みであり RAG は必ず動く。
+        # validation エラーは「どの機能が使えないか」を示すだけで、
+        # ユーザーを完全に詰まらせてはならない。
+        #
+        # エラーの種類に応じて persist をスキップし、completed（機能縮退）で完了する:
+        #   component_graph エラー   → graph のみスキップ、claims + components は保存
+        #   no_components /
+        #   deterministic_fallback   → components + graph スキップ、claims は保存
+        #   その他の品質エラー       → すべて保存（review_required フラグのみ）
+        #
+        # status=failed になる唯一のケースは source_chunking / source_embedding の
+        # 失敗（= chunks が保存されていない）であり、それは既にパイプライン前段で
+        # PipelineStageError として raise 済み。
+        _COMPONENT_SKIP_CODES = {
+            # LLM が完全に失敗して placeholder しかない → コンポーネント保存不可
+            "component_assembly_deterministic_fallback",
+            # コンポーネントが 1 件もない → 保存対象なし
+            "no_components",
+            # コンポーネント型が不正 → DB スキーマ違反になる
+            "invalid_component_type",
+        }
+        _skip_graph_persist = False
+        _skip_component_persist = False
+        _degraded_stages: list[str] = []
         if validation_result_dict.get("status") == "failed_validation":
-            error_count = (validation_result_dict.get("summary") or {}).get("error_count", 0)
-            error_details = _summarize_export_validation_errors(validation_result_dict)
-            upsert_analysis_run(
-                run_id=run_id,
-                document_id=document_id,
-                material_id=material_id,
-                cartridge_id=cartridge_id,
-                status="failed",
-                current_stage="export_validation",
-                error_message=(
-                    f"ExportValidationGate: {error_count} hard error(s) found; "
-                    f"persist blocked{error_details}"
-                ),
-            )
-            result.final_stage = "export_validation"
-            logger.warning(
-                "ExportValidationGate blocked persist for document=%s: %d error(s)%s",
-                document_id, error_count, error_details,
-            )
-            raise PipelineStageError(
-                "export_validation",
-                f"Validation failed with {error_count} hard error(s){error_details}; see export_validation artifact",
-            )
+            all_val_errors = validation_result_dict.get("errors") or []
+            component_skip_errors = [e for e in all_val_errors if e.get("code") in _COMPONENT_SKIP_CODES]
+            graph_errors = [e for e in all_val_errors if e.get("artifact") == "component_graph"]
+
+            if component_skip_errors:
+                # components も graph も保存しない: claims だけ保存して completed
+                _skip_component_persist = True
+                _skip_graph_persist = True
+                _degraded_stages = ["component_assembly", "component_graph"]
+                logger.warning(
+                    "ExportValidationGate: コンポーネント生成不可 (%d error(s)) — "
+                    "claims のみ保存して completed に移行: document=%s material=%s",
+                    len(all_val_errors), document_id, material_id,
+                )
+            elif graph_errors:
+                # graph のみスキップ、claims + components は保存
+                _skip_graph_persist = True
+                _degraded_stages = ["component_graph"]
+                logger.warning(
+                    "ExportValidationGate: component_graph エラー (%d) — "
+                    "graph のみスキップして completed に移行: document=%s material=%s",
+                    len(graph_errors), document_id, material_id,
+                )
+            else:
+                # その他の品質エラー: 全部保存して review_required フラグを残す
+                _degraded_stages = []
+                logger.warning(
+                    "ExportValidationGate: 品質エラー (%d) — "
+                    "全アーティファクトを保存して completed に移行: document=%s material=%s",
+                    len(all_val_errors), document_id, material_id,
+                )
 
         # ── Stage 13: persist_claims_components_graph ──────────────────────
         report_start("persist_claims_components_graph", total=3, unit="tables")
@@ -1173,26 +1206,43 @@ def run_document_pipeline(
                 result.claim_count = len(saved_claims)
                 report_item("persist_claims_components_graph", 1, 3, "tables")
 
-                id_map = persist_components(
-                    document_id=document_id,
-                    component_result=component_result,
-                    course_id=course_id,
-                    claim_id_map=claim_id_map,
-                )
+                id_map: dict[str, str] = {}
+                if _skip_component_persist:
+                    logger.warning(
+                        "components persist skipped (validation errors): document=%s",
+                        document_id,
+                    )
+                else:
+                    id_map = persist_components(
+                        document_id=document_id,
+                        component_result=component_result,
+                        course_id=course_id,
+                        claim_id_map=claim_id_map,
+                    )
                 report_item("persist_claims_components_graph", 2, 3, "tables")
-                persist_component_graph(
-                    document_id=document_id,
-                    component_id_map=id_map,
-                    component_result=component_result,
-                    dsl_result=dsl,
-                    course_id=course_id,
-                    component_graph_result=component_graph_result,
-                    claim_id_map=claim_id_map,
-                    narrative_result=narrative,
-                )
+
+                if _skip_graph_persist or _skip_component_persist:
+                    logger.warning(
+                        "component_graph persist skipped (validation errors): document=%s",
+                        document_id,
+                    )
+                else:
+                    persist_component_graph(
+                        document_id=document_id,
+                        component_id_map=id_map,
+                        component_result=component_result,
+                        dsl_result=dsl,
+                        course_id=course_id,
+                        component_graph_result=component_graph_result,
+                        claim_id_map=claim_id_map,
+                        narrative_result=narrative,
+                    )
                 save_artifact("persist_claims_components_graph", {
                     "claims": result.claim_count,
                     "components": result.component_count,
+                    "graph_skipped": _skip_graph_persist or _skip_component_persist,
+                    "components_skipped": _skip_component_persist,
+                    "degraded_stages": _degraded_stages,
                 })
             except Exception as exc:
                 logger.exception("persist_claims_components_graph stage failed for document=%s material=%s", document_id, material_id)

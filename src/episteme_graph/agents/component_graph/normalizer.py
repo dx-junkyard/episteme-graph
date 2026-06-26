@@ -589,18 +589,31 @@ def _annotate_layer_linkage_gaps(nodes: list) -> None:
     members, breaks the two-layer invariant (#306); the gap is written into the
     node's ``review_reasons`` so reviewers see it on the node, not only in the
     validator report.
+
+    NOTE: parent_component_id on detail nodes now stores a canonical
+    component_assembly ID (issue #422), not a theory_op graph-node ID. Orphan
+    detection therefore uses the forward reference (main node's
+    member_component_ids) rather than the reverse pointer.
     """
-    main_ids = {
-        n.component_id for n in nodes
-        if str(getattr(n, "graph_layer", "main") or "main") == "main"
-    }
-    if not main_ids:
+    if not nodes:
+        return
+    # Build the set of detail-node IDs that are claimed by at least one main node.
+    claimed_detail_ids: set[str] = set()
+    for node in nodes:
+        if str(getattr(node, "graph_layer", "main") or "main") == "main":
+            for mid in (getattr(node, "member_component_ids", []) or []):
+                if mid:
+                    claimed_detail_ids.add(str(mid))
+    has_main = any(
+        str(getattr(n, "graph_layer", "main") or "main") == "main" for n in nodes
+    )
+    if not has_main:
         return
     for node in nodes:
         layer = str(getattr(node, "graph_layer", "main") or "main")
         if layer == "equation_detail":
-            parent = str(getattr(node, "parent_component_id", "") or "")
-            if (not parent or parent not in main_ids) and \
+            node_id = str(getattr(node, "component_id", "") or "")
+            if node_id not in claimed_detail_ids and \
                     "orphan_detail_node" not in node.review_reasons:
                 node.review_reasons = _ordered_unique(
                     list(node.review_reasons) + ["orphan_detail_node"]
@@ -739,7 +752,11 @@ def _detail_node_from_record(
         linked_evidence_ids=linked_evidence_ids,
         source_backing_status=status,
         review_reasons=reasons,
-        parent_component_id=parent_id,
+        # Issue #422: parent_component_id must be a canonical component_assembly
+        # component ID, not a theory_op graph-node ID. Use the first linked
+        # component from the derivation step's component index. The detail→main
+        # graph relationship is maintained via member_component_ids on main nodes.
+        parent_component_id=(rec.get("linked_component_ids") or [""])[0],
         visual_label=visual,
         input_claim_ids=step_input_claims,
         output_claim_ids=step_output_claims,

@@ -14,6 +14,7 @@ from core.llm import (
     _build_api_kwargs,
     _is_reasoning_model,
     get_llm_params,
+    max_tokens_for_model,
 )
 
 
@@ -150,3 +151,41 @@ class TestGetLlmParams:
         params = get_llm_params("standard")
 
         assert params["model"] == "gemini-2.5-pro"
+
+
+# ---------------------------------------------------------------------------
+# max_tokens_for_model
+# ---------------------------------------------------------------------------
+
+
+class TestMaxTokensForModel:
+    @pytest.fixture
+    def _settings(self, monkeypatch):
+        settings = Settings(
+            llm_fast_model="fast-m",
+            llm_standard_model="standard-m",
+            llm_analysis_model="analysis-m",
+            llm_deep_model="deep-m",
+            llm_fast_model_max_tokens=400_000,
+            llm_standard_model_max_tokens=1_000_000,
+            llm_analysis_model_max_tokens=900_000,
+            llm_deep_model_max_tokens=1_100_000,
+        )
+        monkeypatch.setattr("core.llm.get_settings", lambda: settings)
+        return settings
+
+    def test_none_resolves_to_analysis_tier(self, _settings):
+        # model=None means "settings default analysis model".
+        assert max_tokens_for_model(None) == 900_000
+
+    def test_fast_model_resolves_to_fast_tier(self, _settings):
+        assert max_tokens_for_model("fast-m") == 400_000
+
+    def test_standard_model_resolves_to_standard_tier(self, _settings):
+        assert max_tokens_for_model("standard-m") == 1_000_000
+
+    def test_deep_model_resolves_to_deep_tier(self, _settings):
+        assert max_tokens_for_model("deep-m") == 1_100_000
+
+    def test_unknown_model_falls_back_to_analysis_tier(self, _settings):
+        assert max_tokens_for_model("some-other-model") == 900_000

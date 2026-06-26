@@ -275,3 +275,82 @@ def test_single_family_does_not_split():  # negative control
     )
     analyzed = ANALYZER.analyze(_result([component]))
     assert analyzed.components[0].component_quality["split_required"] is False
+
+
+# ---------------------------------------------------------------------------
+# _inherit_parent_flow — fallback for split children with fewer than 2 eqs
+# ---------------------------------------------------------------------------
+
+
+def test_inherit_parent_flow_filters_by_child_equations():
+    """子の eq_ids に合致するステップのみ返す。"""
+    from episteme_graph.agents.component_assembly.component_refiner import (
+        _inherit_parent_flow,
+    )
+
+    parent = _component(
+        internal_flow=[
+            {"from": "eq_A", "relation": "derives", "to": "eq_B"},
+            {"from": "eq_B", "relation": "derives", "to": "eq_C"},
+        ]
+    )
+    result = _inherit_parent_flow(parent, ["eq_A"])
+    assert result == [{"from": "eq_A", "relation": "derives", "to": "eq_B"}]
+
+
+def test_inherit_parent_flow_falls_back_to_full_slice_when_no_match():
+    """子の eq_ids が親フローに現れない場合は親フロー全体のスライスを返す。"""
+    from episteme_graph.agents.component_assembly.component_refiner import (
+        _inherit_parent_flow,
+    )
+
+    parent = _component(
+        internal_flow=[
+            {"from": "eq_A", "relation": "derives", "to": "eq_B"},
+        ]
+    )
+    result = _inherit_parent_flow(parent, [])
+    assert result == [{"from": "eq_A", "relation": "derives", "to": "eq_B"}]
+
+
+def test_inherit_parent_flow_returns_empty_when_parent_has_no_flow():
+    """親フローが空なら [] を返す。"""
+    from episteme_graph.agents.component_assembly.component_refiner import (
+        _inherit_parent_flow,
+    )
+
+    parent = _component(internal_flow=[])
+    assert _inherit_parent_flow(parent, ["eq_X"]) == []
+
+
+def test_split_relation_component_with_one_eq_gets_non_empty_flow():
+    """RelationComponent の split 後に各子コンポーネントが non-empty internal_flow を持つこと。
+
+    comp_005__r1 / comp_005__r2 の再現ケース: 親は eq_A→eq_B のフローを持ち、
+    split 後に子が 1 本ずつ eq を受け取る。export gate が要求する non-empty flow を
+    _inherit_parent_flow のフォールバックで充足すること。
+    """
+    operations = [
+        ("define relation", ["eq_A"], ["eq_B"]),
+        ("derive consequence", ["eq_B"], ["eq_C"]),
+    ]
+    component = _component(
+        component_type="RelationComponent",
+        evidence_refs={"claim_ids": ["claim_1"], "equation_ids": ["eq_A", "eq_B", "eq_C"]},
+        internal_flow=[
+            {"from": "eq_A", "relation": "defines", "to": "eq_B"},
+            {"from": "eq_B", "relation": "derives", "to": "eq_C"},
+        ],
+    )
+    result = _result([component])
+    REFINER.refine(result, None, _derivation(operations))
+    for child in result.components:
+        if child.component_type in {
+            "RelationComponent",
+            "MethodComponent",
+            "DiagnosticComponent",
+            "CorrectionComponent",
+        }:
+            assert child.internal_flow, (
+                f"{child.component_id} ({child.component_type}) has empty internal_flow"
+            )

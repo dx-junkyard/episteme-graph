@@ -1797,6 +1797,8 @@ def _material_pipeline_status(material_id: str, document_id: str) -> dict:
     finally:
         session.close()
 
+    degraded_stages: list = []
+    available_features: list = ["rag_chat"]  # chunks は常に使える
     if row:
         status = row[0] or "not_started"
         current_stage = row[1] or ""
@@ -1812,6 +1814,17 @@ def _material_pipeline_status(material_id: str, document_id: str) -> dict:
                 info = stage_outputs.get(stage)
                 if isinstance(info, dict):
                     stages[stage] = info.get("status") or ("completed" if info.get("progress") == 100 else "not_started")
+            # 縮退ステージ情報を persist artifact から取得
+            persist_info = stage_outputs.get("persist_claims_components_graph") or {}
+            if isinstance(persist_info, dict):
+                degraded_stages = list(persist_info.get("degraded_stages") or [])
+                if not persist_info.get("components_skipped"):
+                    available_features.append("components")
+                if not persist_info.get("graph_skipped"):
+                    available_features.append("component_graph")
+            elif status == "completed":
+                # 縮退情報なし = 全機能利用可能
+                available_features.extend(["components", "component_graph"])
 
     active = _get_active_task_for_material(material_id)
     if active:
@@ -1830,6 +1843,10 @@ def _material_pipeline_status(material_id: str, document_id: str) -> dict:
     if status == "failed" and current_stage in stages:
         stages[current_stage] = "failed"
 
+    is_degraded = bool(degraded_stages)
+    # 縮退状態を retry ヒントとして提示（最初の縮退ステージから再実行を促す）
+    retry_suggestion = degraded_stages[0] if degraded_stages else ""
+
     return {
         "material_id": material_id,
         "document_id": document_id,
@@ -1840,6 +1857,11 @@ def _material_pipeline_status(material_id: str, document_id: str) -> dict:
         "active_task_id": active["task_id"] if active else "",
         "active_target_stage": ((active.get("result_data") or {}).get("target_stage") if active else "") or "",
         "active_start_stage": ((active.get("result_data") or {}).get("start_stage") if active else "") or "",
+        # 縮退状態情報 (フロントエンドが「何が使えて何が使えないか」を表示するために使う)
+        "is_degraded": is_degraded,
+        "degraded_stages": degraded_stages,
+        "available_features": available_features,
+        "retry_suggestion": retry_suggestion,
     }
 
 
