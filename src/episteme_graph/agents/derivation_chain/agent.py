@@ -22,6 +22,7 @@ from episteme_graph.agents.equation_semantics.schema import (
 )
 
 from .schema import (
+    CONTROLLED_OPERATIONS,
     DEFAULT_OPERATION,
     OPERATION_ONTOLOGY,
     DerivationChainRecord,
@@ -349,6 +350,7 @@ class DerivationChainAgent:
 
             operation = self._infer_operation(current_record)
             operation = self._refine_generic_operation(operation, current_record)
+            operation, operation_subtype, subtype_source = self._resolve_step_operation(operation)
             linked_claims = list(claim_link_index.get(current, []))
             sem_claims = list(current_record.semantics.linked_claim_ids) if current_record else []
             all_claim_ids = sorted(set(linked_claims + sem_claims))
@@ -358,6 +360,8 @@ class DerivationChainAgent:
                 input_equation_ids=list(sources),
                 operation=operation,
                 output_equation_ids=[current],
+                operation_subtype=operation_subtype,
+                subtype_source=subtype_source,
                 required_claim_ids=all_claim_ids,
                 assumption_refs=assumptions,
                 reason=current_record.semantics.summary if current_record else "",
@@ -429,6 +433,7 @@ class DerivationChainAgent:
                 claim_id = getattr(claim, "claim_id", None) or f"claim_{step_idx}"
                 claim_type = getattr(claim, "claim_type", "unknown") or "unknown"
                 operation = _CLAIM_TYPE_TO_OPERATION.get(claim_type, "infer_intermediate_claim")
+                operation, operation_subtype, subtype_source = self._resolve_step_operation(operation)
 
                 # Evidence IDs for this claim
                 source_ev_ids: list[str] = list(getattr(claim, "source_evidence_ids", []) or [])
@@ -438,6 +443,8 @@ class DerivationChainAgent:
                     input_equation_ids=[],
                     operation=operation,
                     output_equation_ids=[],
+                    operation_subtype=operation_subtype,
+                    subtype_source=subtype_source,
                     required_claim_ids=[prev_claim_id] if prev_claim_id else [],
                     assumption_refs=list(claim_id for c2 in section_claims[:step_idx - 1]
                                         if getattr(c2, "claim_type", "") == "assumption"
@@ -486,6 +493,24 @@ class DerivationChainAgent:
             f"Derive {', '.join(last_output)} from {', '.join(first_inputs)} "
             f"via {op_summary}"
         )
+
+    @staticmethod
+    def _resolve_step_operation(operation: str) -> tuple[str, str | None, str]:
+        """Map a step operation onto the controlled vocabulary (issue #433).
+
+        Returns ``(operation, operation_subtype, subtype_source)``. A verb in
+        CONTROLLED_OPERATIONS passes through unchanged. A domain-specific or
+        otherwise unknown verb is demoted: the controlled ``operation`` becomes
+        the generic DEFAULT_OPERATION while the original name is preserved in
+        ``operation_subtype`` with ``subtype_source="inferred"`` provenance, so no
+        information is lost and the controlled field stays domain-agnostic.
+        """
+        op = str(operation or "").strip()
+        if op in CONTROLLED_OPERATIONS:
+            return op, None, "unknown"
+        if not op:
+            return DEFAULT_OPERATION, None, "unknown"
+        return DEFAULT_OPERATION, op, "inferred"
 
     @staticmethod
     def _infer_operation(record: Optional[EquationRecord]) -> str:

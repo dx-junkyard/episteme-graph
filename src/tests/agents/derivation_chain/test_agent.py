@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 from episteme_graph.agents.derivation_chain import DerivationChainAgent
-from episteme_graph.agents.derivation_chain.schema import OPERATION_ONTOLOGY
+from episteme_graph.agents.derivation_chain.schema import (
+    CONTROLLED_OPERATIONS,
+    DEFAULT_OPERATION,
+    DerivationChainResult,
+    OPERATION_ONTOLOGY,
+)
 from episteme_graph.agents.equation_semantics.schema import (
     DefinedSymbol,
     EquationCandidate,
@@ -151,6 +156,76 @@ def test_required_claim_ids_propagated():
     agent = DerivationChainAgent()
     chain_result = agent.run(result, claim_link_index={"eq_2": ["claim_xyz"]})
     assert "claim_xyz" in chain_result.chains[0].steps[0].required_claim_ids
+
+
+# ---------------------------------------------------------------------------
+# Issue #433: controlled operation vocabulary + operation_subtype provenance
+# ---------------------------------------------------------------------------
+
+def test_resolve_step_operation_passes_controlled_verb():
+    op, subtype, source = DerivationChainAgent._resolve_step_operation("substitute")
+    assert op == "substitute"
+    assert subtype is None
+    assert source == "unknown"
+
+
+def test_resolve_step_operation_demotes_unknown_to_subtype():
+    op, subtype, source = DerivationChainAgent._resolve_step_operation("schwinger_dyson")
+    assert op == DEFAULT_OPERATION
+    assert op in CONTROLLED_OPERATIONS
+    assert subtype == "schwinger_dyson"
+    assert source == "inferred"
+
+
+def test_all_step_operations_are_controlled_vocabulary():
+    result = _make_result([
+        _make_eq("eq_1_2", role="definition"),
+        _make_eq("eq_3_1", from_eqs=["eq_1_2"], role="transformation"),
+        _make_eq("eq_3_14", from_eqs=["eq_3_1"], role="result"),
+    ])
+    chain_result = DerivationChainAgent().run(result)
+    steps = [s for c in chain_result.chains for s in c.steps]
+    assert steps
+    for s in steps:
+        assert s.operation in CONTROLLED_OPERATIONS
+
+
+def test_step_subtype_fields_round_trip():
+    result = _make_result([
+        _make_eq("eq_1"),
+        _make_eq("eq_2", from_eqs=["eq_1"], role="result"),
+    ])
+    chain_result = DerivationChainAgent().run(result)
+    chain_result.chains[0].steps[0].operation_subtype = "domain_specific_move"
+    chain_result.chains[0].steps[0].subtype_source = "cartridge"
+
+    restored = DerivationChainResult.from_dict(chain_result.to_dict())
+    step = restored.chains[0].steps[0]
+    assert step.operation_subtype == "domain_specific_move"
+    assert step.subtype_source == "cartridge"
+
+
+def test_controlled_operations_are_reproducible_across_domains():
+    # Two unrelated domain vocabularies with the same chain shape must both yield
+    # controlled-vocabulary operations and resolvable endpoints — no assertion on
+    # paper-specific chain structure.
+    def _chain(summary_a, summary_b):
+        return _make_result([
+            _make_eq("eq_1", role="definition", summary=summary_a),
+            _make_eq("eq_2", from_eqs=["eq_1"], role="result", summary=summary_b),
+        ])
+
+    physics = DerivationChainAgent().run(_chain("Lagrangian density", "decay rate"))
+    economics = DerivationChainAgent().run(_chain("utility function", "market equilibrium"))
+
+    for res in (physics, economics):
+        steps = [s for c in res.chains for s in c.steps]
+        assert steps
+        eq_ids = {"eq_1", "eq_2"}
+        for s in steps:
+            assert s.operation in CONTROLLED_OPERATIONS
+            for ref in s.input_equation_ids + s.output_equation_ids:
+                assert ref in eq_ids
 
 
 def test_semantics_linked_claim_ids_propagated():

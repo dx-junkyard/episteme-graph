@@ -300,6 +300,31 @@ _SOFT_ERROR_RULE_IDS = {
 # A non-atomic main-result claim is a paper-level summary, not a usable claim.
 _MAIN_RESULT_CLAIM_TYPES = {"result", "conclusion", "main_result"}
 
+# Issue #433: controlled vocabulary a derivation step ``operation`` must belong
+# to. Single source of truth is derivation_chain.schema.CONTROLLED_OPERATIONS;
+# imported when available with a hardcoded mirror as a fallback so the gate never
+# fails to load if the agents package is not importable.
+try:  # pragma: no cover - import wiring
+    from episteme_graph.agents.derivation_chain.schema import (
+        CONTROLLED_OPERATIONS as _DERIVATION_CONTROLLED_OPERATIONS,
+    )
+    _DERIVATION_CONTROLLED_OPERATIONS = set(_DERIVATION_CONTROLLED_OPERATIONS)
+except Exception:  # pragma: no cover - fallback mirror
+    _DERIVATION_CONTROLLED_OPERATIONS = {
+        "state_assumption", "apply_definition", "apply_criterion",
+        "introduce_observable", "apply_equation", "substitute",
+        "solve_linear_system", "eliminate_parameter", "normalize", "approximate",
+        "compare", "branch_on_condition", "apply_measurement_or_update",
+        "apply_non_disturbance_or_independence", "infer_intermediate_claim",
+        "infer_conclusion", "flag_limitation", "define", "relate", "transform",
+        "derive_result", "apply_constraint", "linearize", "eliminate", "solve",
+        "constrain", "integrate", "eliminate_variable",
+    }
+
+# Step review states that count as "flagged for review" — an out-of-vocabulary
+# operation is tolerated (review item, not hard error) when the step is flagged.
+_DERIVATION_REVIEW_STATES = {"teacher_review_required", "needs_verification"}
+
 
 def _ordered_unique(values) -> list:
     result = []
@@ -490,6 +515,11 @@ class ExportValidationGate:
         # (axiomatic / external_reference). Domain-agnostic — only ID resolution,
         # provenance presence, and link_status are checked.
         self._check_equation_link_integrity(artifacts, errors, review_items)
+        # 2e. Derivation step structural constraints (issue #433): every step
+        # needs non-empty endpoints, all referenced equations must be registered,
+        # the operation must be in the controlled vocabulary (or the step flagged
+        # for review), and at least one source_evidence_id must be present.
+        self._check_derivation_step_constraints(artifacts, errors, review_items)
 
         # 3. Cross-artifact ID validation
         if component_result and claim_objects and evidence:
@@ -1900,6 +1930,129 @@ class ExportValidationGate:
                         artifact="derivation_chain",
                         path=f"$.chains[{chain_idx}].steps[{step_idx}].review_status",
                         source_stage="export_validation",
+                    ))
+
+    def _check_derivation_step_constraints(
+        self,
+        artifacts: dict,
+        errors: list,
+        review_items: list,
+    ) -> None:
+        """Enforce generic structural constraints on derivation steps (issue #433).
+
+        Domain-agnostic invariants, asserting nothing about paper-specific chain
+        structure:
+
+          - ``DERIVATION_STEP_MISSING_ENDPOINT`` (hard error): a step with no
+            input endpoint (equation or claim) or no output endpoint.
+          - ``DERIVATION_STEP_DANGLING_EQUATION_REF`` (hard error): an
+            input/output equation id absent from the equation registry.
+          - ``DERIVATION_STEP_UNCONTROLLED_OPERATION``: an ``operation`` outside
+            the controlled vocabulary. A hard error when the step is not flagged
+            for review; a review item when it is (the domain-specific name should
+            live in ``operation_subtype``).
+          - ``DERIVATION_STEP_MISSING_EVIDENCE`` (review item): no
+            ``source_evidence_id`` on the step.
+        """
+        raw = artifacts.get("derivation_chain")
+        if not isinstance(raw, dict):
+            return
+        chains = raw.get("chains")
+        if not isinstance(chains, list):
+            return
+        registry_ids = set(self._equation_index_from_artifacts(artifacts).keys())
+
+        for chain in chains:
+            if not isinstance(chain, dict):
+                continue
+            deriv_id = str(chain.get("derivation_id") or "")
+            for step in chain.get("steps") or []:
+                if not isinstance(step, dict):
+                    continue
+                step_id = str(step.get("step_id") or "")
+                target = f"{deriv_id}:{step_id}" if deriv_id else step_id
+                base_path = f"$.chains[{deriv_id}].steps[{step_id}]"
+
+                in_eq = [str(x) for x in (step.get("input_equation_ids") or []) if x]
+                out_eq = [str(x) for x in (step.get("output_equation_ids") or []) if x]
+                in_claim = [
+                    str(x) for x in (
+                        list(step.get("input_claim_ids") or [])
+                        + list(step.get("required_claim_ids") or [])
+                    ) if x
+                ]
+                out_claim = [str(x) for x in (step.get("output_claim_ids") or []) if x]
+
+                # (a) endpoints — every step needs an input and an output side.
+                if not (in_eq or in_claim) or not (out_eq or out_claim):
+                    errors.append(ValidationEntry(
+                        code="DERIVATION_STEP_MISSING_ENDPOINT",
+                        message=(
+                            f"derivation step {target!r} is missing an input or "
+                            f"output endpoint (equation or claim)"
+                        ),
+                        artifact="derivation_chain",
+                        path=base_path,
+                        source_stage="export_validation",
+                        target_type="derivation_step",
+                        target_id=target,
+                    ))
+
+                # (b) dangling equation references.
+                if registry_ids:
+                    for ref in in_eq + out_eq:
+                        if ref not in registry_ids:
+                            errors.append(ValidationEntry(
+                                code="DERIVATION_STEP_DANGLING_EQUATION_REF",
+                                message=(
+                                    f"derivation step {target!r} references "
+                                    f"non-existent equation {ref!r}"
+                                ),
+                                artifact="derivation_chain",
+                                path=base_path,
+                                source_stage="export_validation",
+                                target_type="derivation_step",
+                                target_id=target,
+                            ))
+
+                # (c) controlled operation vocabulary.
+                operation = str(step.get("operation") or "")
+                if operation not in _DERIVATION_CONTROLLED_OPERATIONS:
+                    flagged = (
+                        str(step.get("review_status") or "") in _DERIVATION_REVIEW_STATES
+                        or bool(step.get("review_reason"))
+                    )
+                    entry = ValidationEntry(
+                        code="DERIVATION_STEP_UNCONTROLLED_OPERATION",
+                        message=(
+                            f"derivation step {target!r} operation "
+                            f"{operation or 'unset'!r} is not in the controlled "
+                            f"vocabulary; domain-specific names belong in "
+                            f"operation_subtype"
+                        ),
+                        artifact="derivation_chain",
+                        path=f"{base_path}.operation",
+                        source_stage="export_validation",
+                        target_type="derivation_step",
+                        target_id=target,
+                    )
+                    if flagged:
+                        review_items.append(entry)
+                    else:
+                        errors.append(entry)
+
+                # (d) evidence presence.
+                if not (step.get("source_evidence_ids") or []):
+                    review_items.append(ValidationEntry(
+                        code="DERIVATION_STEP_MISSING_EVIDENCE",
+                        message=(
+                            f"derivation step {target!r} has no source_evidence_id"
+                        ),
+                        artifact="derivation_chain",
+                        path=f"{base_path}.source_evidence_ids",
+                        source_stage="export_validation",
+                        target_type="derivation_step",
+                        target_id=target,
                     ))
 
     def _check_equation_consistency_mismatches(
