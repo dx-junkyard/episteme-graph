@@ -1,16 +1,38 @@
 """Deterministic cleanup for DSL graphs."""
 from __future__ import annotations
 
-from .schema import DSLEdge, DSLLinkingResult, DSLNode
+from .schema import EDGE_TYPE_VOCAB, DSLEdge, DSLLinkingResult, DSLNode
 
 
 class DSLGraphCleanup:
     def cleanup(self, result: DSLLinkingResult) -> DSLLinkingResult:
         nodes, id_map = self._dedupe_nodes(result.nodes)
         edges = self._dedupe_edges(result.edges, id_map, {n.node_id for n in nodes})
+        # Issue #441: every edge must carry a non-null edge_type from the managed
+        # vocabulary and non-empty evidence_refs. Fill both deterministically:
+        # edge_type mirrors core_predicate; evidence_refs inherit the source/target
+        # nodes' source_refs (the relation is at least backed by what it connects).
+        self._fill_edge_traversal_fields(edges, {n.node_id: n for n in nodes})
         result.nodes = nodes
         result.edges = edges
         return result
+
+    @staticmethod
+    def _fill_edge_traversal_fields(
+        edges: list[DSLEdge],
+        node_by_id: dict[str, DSLNode],
+    ) -> None:
+        for edge in edges:
+            if not getattr(edge, "edge_type", "") or edge.edge_type not in EDGE_TYPE_VOCAB:
+                if edge.core_predicate in EDGE_TYPE_VOCAB:
+                    edge.edge_type = edge.core_predicate
+            if not _has_refs(edge.evidence_refs):
+                source = node_by_id.get(edge.from_node_id)
+                target = node_by_id.get(edge.to_node_id)
+                edge.evidence_refs = _merge_refs(
+                    _merge_refs(edge.evidence_refs, getattr(source, "source_refs", {}) or {}),
+                    getattr(target, "source_refs", {}) or {},
+                )
 
     @staticmethod
     def _dedupe_nodes(nodes: list[DSLNode]) -> tuple[list[DSLNode], dict[str, str]]:
@@ -72,3 +94,7 @@ def _merge_refs(a: dict, b: dict) -> dict:
         values.extend((b or {}).get(key, []) or [])
         merged[key] = sorted({str(v) for v in values})
     return merged
+
+
+def _has_refs(refs: dict) -> bool:
+    return any((refs or {}).get(key) for key in ("claim_ids", "equation_ids", "thesis_refs"))

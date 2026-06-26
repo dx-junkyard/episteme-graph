@@ -42,6 +42,8 @@ def enrich_component_assembly(
         _fill_confidence_gate(component, eq_index)
         _fill_claim_support_metadata(component, llm_input)
         _fill_thesis_support_refs(component, llm_input)
+        _fill_role_in_thesis(component)
+        _fill_teaching_takeaway(component)
         _fill_concepts(component, claim_index, eq_symbol_index, concept_vocab)
         _propagate_review_status(component)
         _fill_internal_flow(component)
@@ -251,6 +253,61 @@ def _fill_thesis_support_refs(
     component.supports_thesis_node_ids = _unique(
         list(component.supports_thesis_node_ids or []) + refs
     )
+
+
+# Issue #440: domain-agnostic role_in_thesis phrasing per support_role. The
+# component's role in the thesis is derived from its support role; whether it
+# backs the central thesis refines the wording.
+_ROLE_IN_THESIS_BY_SUPPORT_ROLE = {
+    "result": "States a result the thesis asserts.",
+    "derivation_core": "Derives the core relation the thesis depends on.",
+    "observable_bridge": "Connects theory quantities to the observables the thesis uses.",
+    "theory_base": "Provides the theoretical basis the thesis builds on.",
+    "application": "Applies the thesis to a concrete case.",
+    "limitation": "States a limitation that qualifies the thesis.",
+}
+
+
+def _fill_role_in_thesis(component: ComponentRecord) -> None:
+    """Derive a self-describing role_in_thesis statement (issue #440).
+
+    Deterministic and domain-agnostic: maps support_role to a generic phrase and
+    notes when the component directly backs the central thesis. Never overwrites a
+    non-empty LLM-supplied value.
+    """
+    if str(getattr(component, "role_in_thesis", "") or "").strip():
+        return
+    role = str(getattr(component, "support_role", "") or "")
+    phrase = _ROLE_IN_THESIS_BY_SUPPORT_ROLE.get(role, "Supports the thesis.")
+    backs_central = any(
+        str(ref) == "central_thesis" or str(ref).startswith("central_thesis")
+        for ref in (getattr(component, "supports_thesis_node_ids", []) or [])
+    )
+    if backs_central and role != "result":
+        phrase = "Directly supports the central thesis. " + phrase
+    component.role_in_thesis = phrase
+
+
+def _fill_teaching_takeaway(component: ComponentRecord) -> None:
+    """Guarantee a non-empty teaching_takeaway (issue #440).
+
+    When the LLM left it empty, synthesise a generic, source-agnostic takeaway
+    from the component label and its responsibility. Never overwrites a non-empty
+    value.
+    """
+    if str(getattr(component, "teaching_takeaway", "") or "").strip():
+        return
+    label = str(getattr(component, "label", "") or "").strip() or "This component"
+    responsibility = (
+        str(getattr(component, "responsibility_type", "") or "")
+        or str(getattr(component, "component_type", "") or "")
+    )
+    if responsibility:
+        component.teaching_takeaway = (
+            f"{label} carries one {responsibility.replace('_', ' ')} responsibility."
+        )
+    else:
+        component.teaching_takeaway = f"{label} has one clear responsibility."
 
 
 def _fill_concepts(

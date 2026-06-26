@@ -865,6 +865,21 @@ def run_document_pipeline(
             except Exception as exc:
                 logger.exception("dsl_linking stage failed for document=%s material=%s", document_id, material_id)
                 raise PipelineStageError("dsl_linking", str(exc), cause=exc) from exc
+            # Issue #442: cross-link the thesis artifact and the DSL graph so the
+            # thesis has explicit traversal anchors and the anchor nodes carry the
+            # is_thesis_anchor flag. Deterministic, non-fatal — re-save both.
+            try:
+                from episteme_graph.agents.thesis_reconstruction.anchor_linker import (
+                    link_thesis_anchors,
+                )
+                anchors = link_thesis_anchors(thesis, dsl)
+                if anchors:
+                    save_artifact("thesis_reconstruction", thesis)
+            except Exception as exc:
+                logger.warning(
+                    "thesis anchor linking failed (non-fatal): document=%s error=%s",
+                    document_id, exc,
+                )
             save_artifact("dsl_linking", dsl)
         result.dsl_node_count = len(dsl.nodes)
         result.dsl_edge_count = len(dsl.edges)

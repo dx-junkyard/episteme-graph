@@ -48,6 +48,99 @@ EQUATION_TYPES = [
     "unknown",
 ]
 
+# Issue #439: controlled vocabulary for an equation's role in the argument.
+# Domain-agnostic — derived from equation_type and derivation links, never from
+# paper-specific wording.
+ROLE_IN_ARGUMENT_VOCAB = [
+    "premise",
+    "definition",
+    "derived",
+    "result",
+    "constraint",
+]
+
+# LaTeX command / function names that are not free symbols (issue #439). General
+# math notation only — no field-specific vocabulary.
+_LATEX_NON_SYMBOL_TOKENS = {
+    "frac", "sqrt", "sum", "int", "prod", "lim", "log", "ln", "exp", "sin",
+    "cos", "tan", "sec", "csc", "cot", "sinh", "cosh", "tanh", "det", "dim",
+    "max", "min", "sup", "inf", "arg", "deg", "gcd", "hom", "ker", "left",
+    "right", "cdot", "cdots", "ldots", "dots", "vdots", "times", "div", "pm",
+    "mp", "leq", "geq", "neq", "approx", "equiv", "propto", "sim", "simeq",
+    "partial", "nabla", "infty", "mathrm", "mathbf", "mathit", "mathcal",
+    "mathbb", "mathfrak", "text", "textrm", "textbf", "boldsymbol", "hat",
+    "bar", "tilde", "vec", "dot", "ddot", "overline", "underline", "operatorname",
+    "begin", "end", "label", "quad", "qquad", "to", "rightarrow", "leftarrow",
+    "Rightarrow", "Leftarrow", "langle", "rangle", "lvert", "rvert", "lfloor",
+    "rfloor", "lceil", "rceil",
+}
+
+# Greek-letter LaTeX command names are genuine free symbols (issue #439).
+_LATEX_GREEK_NAMES = {
+    "alpha", "beta", "gamma", "delta", "epsilon", "varepsilon", "zeta", "eta",
+    "theta", "vartheta", "iota", "kappa", "lambda", "mu", "nu", "xi", "pi",
+    "varpi", "rho", "varrho", "sigma", "varsigma", "tau", "upsilon", "phi",
+    "varphi", "chi", "psi", "omega",
+    "Gamma", "Delta", "Theta", "Lambda", "Xi", "Pi", "Sigma", "Upsilon",
+    "Phi", "Psi", "Omega",
+}
+
+
+def extract_free_symbols(latex: str | None) -> set[str]:
+    """Extract the free symbols of a LaTeX expression (issue #439, domain-agnostic).
+
+    Returns the set of single-letter / greek / subscripted identifiers that act
+    as variables, excluding LaTeX structural commands and common function names.
+    Heuristic and notation-only — it never interprets meaning.
+    """
+    if not latex:
+        return set()
+    text = str(latex)
+    symbols: set[str] = set()
+    # Backslash commands: greek letters are symbols, everything else structural.
+    for command in re.findall(r"\\([A-Za-z]+)", text):
+        if command in _LATEX_GREEK_NAMES:
+            symbols.add(command)
+    # Drop the command names so their trailing letters are not double-counted.
+    stripped = re.sub(r"\\[A-Za-z]+", " ", text)
+    for token in re.findall(r"[A-Za-z]+", stripped):
+        if token in _LATEX_NON_SYMBOL_TOKENS:
+            continue
+        # Multi-letter ASCII runs are usually macro residue (e.g. "tot"); keep
+        # only single letters as free symbols, plus greek already captured above.
+        for ch in token:
+            symbols.add(ch)
+    return symbols
+
+
+def derive_role_in_argument(
+    equation_type: str,
+    *,
+    input_equation_ids: list[str] | None = None,
+    output_equation_ids: list[str] | None = None,
+) -> str:
+    """Map an equation_type + derivation links to a ROLE_IN_ARGUMENT_VOCAB value.
+
+    Deterministic and domain-agnostic (issue #439):
+      * definition           → ``definition``
+      * constraint           → ``constraint``
+      * result               → ``result``
+      * has input links      → ``derived``
+      * otherwise            → ``premise``
+    """
+    etype = str(equation_type or "").strip().lower()
+    if etype == "definition":
+        return "definition"
+    if etype == "constraint":
+        return "constraint"
+    if etype == "result":
+        return "result"
+    if input_equation_ids:
+        return "derived"
+    if etype in ("transformation", "approximation"):
+        return "derived" if input_equation_ids else "premise"
+    return "premise"
+
 # Issue #432: inter-equation links must be derived from structural cues, not
 # hardcoded paper-specific pairs. Every derived link records how it was found.
 LINK_PROVENANCE_KINDS = [
@@ -412,6 +505,12 @@ class DefinedSymbol:
     # Reference into the document SymbolRegistry (issue #355). Optional for
     # backward compatibility; set by SymbolRegistryBuilder when it annotates.
     symbol_id: str | None = None
+    # Issue #439: the resolved meaning + its source so an equation object is
+    # self-describing without an external artifact. Projected from the symbol
+    # registry / definition evidence by SymbolRegistryBuilder; kept optional for
+    # backward compatibility.
+    meaning: str | None = None
+    source_evidence_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +545,10 @@ class EquationSemantics:
     link_provenance: dict[str, list[str]] = field(default_factory=dict)
     # Issue #432: why this equation may carry no input links (LINK_STATUSES).
     link_status: str = ""
+    # Issue #439: the equation's role in the argument (ROLE_IN_ARGUMENT_VOCAB).
+    # Derived deterministically from equation_type + derivation links when the
+    # upstream stage leaves it empty.
+    role_in_argument: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -596,6 +699,7 @@ class EquationSemanticsResult:
         *,
         evidence_index: dict | None = None,
         claim_index: dict | None = None,
+        symbol_index: dict | None = None,
     ) -> list[dict]:
         """equations.json first-class export 形式に変換する。
 
@@ -605,9 +709,13 @@ class EquationSemanticsResult:
             block_id -> [evidence_id, ...] のマップ（オプション）。
         claim_index:
             equation_id -> [claim_id, ...] のマップ（オプション）。
+        symbol_index:
+            symbol_id / canonical symbol -> {"meaning", "source_evidence_id"} の
+            マップ（issue #439, SymbolRegistry 由来, オプション）。
         """
         evidence_index = evidence_index or {}
         claim_index = claim_index or {}
+        symbol_index = symbol_index or {}
         out: list[dict] = []
         for r in self.equations:
             sem = r.semantics
@@ -639,6 +747,29 @@ class EquationSemanticsResult:
             block_id = src.source_location.get("block_id", "")
             section_id = src.source_location.get("section_id")
 
+            equation_evidence_ids = sorted(
+                set(sem.source_evidence_ids) | set(evidence_index.get(block_id, []))
+            )
+            # Issue #439: self-describing symbols[]. Resolve each free symbol of
+            # the equation against the SymbolRegistry (symbol_index) so the
+            # equation object carries symbol -> meaning -> source without an
+            # external artifact. Falls back to the equation's own definition
+            # evidence text / source evidence id when no registry meaning exists.
+            symbols = _build_equation_symbols(
+                sem,
+                symbol_index=symbol_index,
+                equation_evidence_ids=equation_evidence_ids,
+            )
+
+            # Issue #439: role_in_argument from the controlled vocabulary.
+            role_in_argument = sem.role_in_argument
+            if role_in_argument not in ROLE_IN_ARGUMENT_VOCAB:
+                role_in_argument = derive_role_in_argument(
+                    sem.equation_type,
+                    input_equation_ids=sem.input_equation_ids,
+                    output_equation_ids=sem.output_equation_ids,
+                )
+
             out.append({
                 "equation_id": r.equation_id,
                 "document_id": r.document_id,
@@ -665,6 +796,9 @@ class EquationSemanticsResult:
                 "introduced_symbols": introduced,
                 "used_symbols": used,
                 "defined_symbols": defined,
+                # Issue #439: self-describing symbol definitions + role.
+                "symbols": symbols,
+                "role_in_argument": role_in_argument,
                 "symbol_definitions": {
                     s.symbol: s.evidence_text
                     for s in sem.defined_symbols
@@ -684,7 +818,7 @@ class EquationSemanticsResult:
                 "link_status": sem.link_status or "",
                 "linked_claim_ids": sorted(set(sem.linked_claim_ids) | set(claim_index.get(r.equation_id, []))),
                 "inferred_claim_ids": sorted(set(sem.inferred_claim_ids)),
-                "source_evidence_ids": sorted(set(sem.source_evidence_ids) | set(evidence_index.get(block_id, []))),
+                "source_evidence_ids": equation_evidence_ids,
                 "review_flags": list(sem.review_flags),
                 "section_id": section_id,
                 "needs_math_review": src.needs_math_review,
@@ -733,6 +867,78 @@ class EquationSemanticsResult:
                 field=block_id,
             )],
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #439: self-describing symbol projection for equations.json
+# ---------------------------------------------------------------------------
+
+def _build_equation_symbols(
+    sem: "EquationSemantics",
+    *,
+    symbol_index: dict,
+    equation_evidence_ids: list[str],
+) -> list[dict]:
+    """Build the self-describing ``symbols[]`` array for one equation (#439).
+
+    Each entry is ``{symbol, meaning, source_evidence_id}``. Meanings/sources are
+    resolved against the SymbolRegistry-derived ``symbol_index`` (keyed by
+    symbol_id and by canonical symbol text); the equation's own definition
+    evidence text and source evidence id are used as a fallback so the projection
+    degrades instead of emitting empty descriptions.
+    """
+    fallback_evidence = equation_evidence_ids[0] if equation_evidence_ids else None
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    def _resolve(symbol_text: str, symbol_id: str | None, own_meaning, own_source):
+        record = {}
+        if symbol_id and symbol_id in symbol_index:
+            record = symbol_index.get(symbol_id) or {}
+        elif symbol_text in symbol_index:
+            record = symbol_index.get(symbol_text) or {}
+        meaning = (
+            own_meaning
+            or record.get("meaning")
+            or ""
+        )
+        source = (
+            own_source
+            or record.get("source_evidence_id")
+            or fallback_evidence
+        )
+        return str(meaning or ""), (str(source) if source else None)
+
+    for ds in sem.defined_symbols or []:
+        symbol_text = str(getattr(ds, "symbol", "") or "")
+        if not symbol_text or symbol_text in seen:
+            continue
+        seen.add(symbol_text)
+        meaning, source = _resolve(
+            symbol_text,
+            getattr(ds, "symbol_id", None),
+            getattr(ds, "meaning", None) or getattr(ds, "evidence_text", None),
+            getattr(ds, "source_evidence_id", None),
+        )
+        out.append({
+            "symbol": symbol_text,
+            "meaning": meaning,
+            "source_evidence_id": source,
+        })
+
+    for raw in sem.used_symbols or []:
+        symbol_text = str(raw or "")
+        if not symbol_text or symbol_text in seen:
+            continue
+        seen.add(symbol_text)
+        meaning, source = _resolve(symbol_text, None, None, None)
+        out.append({
+            "symbol": symbol_text,
+            "meaning": meaning,
+            "source_evidence_id": source,
+        })
+
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -806,6 +1012,7 @@ def _record_from_dict(d: dict) -> EquationRecord:
             for k, vals in (sem_raw.get("link_provenance", {}) or {}).items()
         },
         link_status=str(sem_raw.get("link_status", "")),
+        role_in_argument=str(sem_raw.get("role_in_argument", "")),
     )
     cp_raw = d.get("confidence_policy", {})
     confidence_policy = EquationConfidencePolicy(

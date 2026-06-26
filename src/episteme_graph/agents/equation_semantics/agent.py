@@ -24,6 +24,7 @@ from .prompt import EquationSemanticsPromptFactory
 from .reconstruction_layer import EquationReconstructionLayer
 from .repair import EquationSemanticsRepairer, _fallback_record, _parse_record
 from .schema import (
+    ROLE_IN_ARGUMENT_VOCAB,
     CartridgeContext,
     EquationCandidate,
     EquationConsistency,
@@ -33,6 +34,7 @@ from .schema import (
     EquationSemantics,
     EquationSemanticsResult,
     EquationSourceExtraction,
+    derive_role_in_argument,
 )
 from .validator import EquationSemanticsValidator
 
@@ -261,6 +263,19 @@ class EquationSemanticsAgent:
         self._recover_dropped_candidates(reconstructable, records)
 
         _apply_content_hashes(records)
+        # Issue #439: every accepted equation carries a role_in_argument from the
+        # controlled vocabulary, derived deterministically from its type +
+        # derivation links when the LLM left it empty/invalid.
+        for record in records:
+            sem = getattr(record, "semantics", None)
+            if sem is None:
+                continue
+            if getattr(sem, "role_in_argument", "") not in ROLE_IN_ARGUMENT_VOCAB:
+                sem.role_in_argument = derive_role_in_argument(
+                    sem.equation_type,
+                    input_equation_ids=sem.input_equation_ids,
+                    output_equation_ids=sem.output_equation_ids,
+                )
         result = EquationSemanticsResult(
             document_id=structure.document_id,
             cartridge_id=cartridge.cartridge_id if cartridge else cartridge_id,

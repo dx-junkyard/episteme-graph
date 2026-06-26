@@ -99,6 +99,7 @@ def make_deterministic_fallback(llm_input: DSLLLMInput, reason: str) -> DSLLinki
             },
             reason="Conservative fallback edge preserving source-backed graph connectivity.",
             confidence=0.35,
+            edge_type="CORRELATES",
         ))
 
     if not nodes:
@@ -164,16 +165,20 @@ def _parse_raw(raw: dict, document_id: str) -> DSLLinkingResult:
     for idx, edge in enumerate(raw.get("edges", []) if isinstance(raw.get("edges", []), list) else []):
         if not isinstance(edge, dict):
             continue
+        core_predicate = str(edge.get("core_predicate", "CONTAINS"))
         edges.append(DSLEdge(
             edge_id=str(edge.get("edge_id", f"e{idx + 1}")),
             from_node_id=str(edge.get("from_node_id", "")),
             to_node_id=str(edge.get("to_node_id", "")),
-            core_predicate=str(edge.get("core_predicate", "CONTAINS")),
+            core_predicate=core_predicate,
             domain_verb=str(edge.get("domain_verb", "supports")),
             polarity=str(edge.get("polarity", "?")),
             evidence_refs=_refs(edge.get("evidence_refs", {})),
             reason=str(edge.get("reason", "")),
             confidence=_confidence(edge.get("confidence", 0.5)),
+            # Issue #441: edge_type normalises to the managed vocab; the raw LLM
+            # value is honoured when present, otherwise mirrors core_predicate.
+            edge_type=str(edge.get("edge_type") or core_predicate),
         ))
 
     confidence = _confidence(raw.get("confidence", 0.0))
