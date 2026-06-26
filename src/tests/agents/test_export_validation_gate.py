@@ -2025,3 +2025,148 @@ def test_link_integrity_reads_flattened_export_shape():
     ]})
     result = _run_gate(artifacts=artifacts)
     assert _link_codes(result, "EQ_DANGLING_EQUATION_LINK") == {"eq_1"}
+
+
+# ---------------------------------------------------------------------------
+# Tests: derivation step structural constraints (issue #433)
+#
+# Domain-agnostic — assertions are by error code / target id only, never by
+# paper-specific chain structure.
+# ---------------------------------------------------------------------------
+
+def _registry(*equation_ids):
+    return {"equations": [{"equation_id": e} for e in equation_ids]}
+
+
+def _step(step_id, **kw):
+    step = {
+        "step_id": step_id,
+        "input_equation_ids": [],
+        "output_equation_ids": [],
+        "input_claim_ids": [],
+        "output_claim_ids": [],
+        "required_claim_ids": [],
+        "operation": "substitute",
+        "operation_subtype": None,
+        "subtype_source": "unknown",
+        "source_evidence_ids": ["ev_1"],
+        "review_status": "teacher_review_required",
+    }
+    step.update(kw)
+    return step
+
+
+def _deriv(*steps, derivation_id="der_1"):
+    return {"chains": [{"derivation_id": derivation_id, "steps": list(steps)}]}
+
+
+def _codes(result, code):
+    return {e.target_id for e in result.errors if e.code == code}
+
+
+def _review_codes(result, code):
+    return {e.target_id for e in result.review_items if e.code == code}
+
+
+def test_derivation_step_well_formed_passes():
+    artifacts = _make_artifacts(
+        equation_semantics=_registry("eq_1", "eq_2"),
+        derivation_chain=_deriv(_step(
+            "step_001", input_equation_ids=["eq_1"], output_equation_ids=["eq_2"],
+            operation="substitute", source_evidence_ids=["ev_1"],
+        )),
+    )
+    result = _run_gate(artifacts=artifacts)
+    assert not any(e.code.startswith("DERIVATION_STEP_") for e in result.errors)
+    assert not any(
+        e.code in ("DERIVATION_STEP_MISSING_EVIDENCE",
+                   "DERIVATION_STEP_UNCONTROLLED_OPERATION")
+        for e in result.review_items
+    )
+
+
+def test_derivation_step_missing_endpoint_is_hard_error():
+    artifacts = _make_artifacts(
+        equation_semantics=_registry("eq_1"),
+        derivation_chain=_deriv(_step(
+            "step_001", input_equation_ids=["eq_1"], output_equation_ids=[],
+        )),
+    )
+    result = _run_gate(artifacts=artifacts)
+    assert _codes(result, "DERIVATION_STEP_MISSING_ENDPOINT") == {"der_1:step_001"}
+    assert result.status == "failed_validation"
+
+
+def test_derivation_step_claim_endpoints_satisfy_endpoint_rule():
+    # A claim-only step (no equation ids) is well-formed via claim endpoints.
+    artifacts = _make_artifacts(
+        derivation_chain=_deriv(_step(
+            "step_001", input_claim_ids=["c_1"], output_claim_ids=["c_2"],
+        )),
+    )
+    result = _run_gate(artifacts=artifacts)
+    assert not any(e.code == "DERIVATION_STEP_MISSING_ENDPOINT" for e in result.errors)
+
+
+def test_derivation_step_dangling_equation_ref_is_hard_error():
+    artifacts = _make_artifacts(
+        equation_semantics=_registry("eq_1"),
+        derivation_chain=_deriv(_step(
+            "step_001", input_equation_ids=["eq_ghost"], output_equation_ids=["eq_1"],
+        )),
+    )
+    result = _run_gate(artifacts=artifacts)
+    assert _codes(result, "DERIVATION_STEP_DANGLING_EQUATION_REF") == {"der_1:step_001"}
+    assert result.status == "failed_validation"
+
+
+def test_uncontrolled_operation_unflagged_is_hard_error():
+    artifacts = _make_artifacts(
+        equation_semantics=_registry("eq_1", "eq_2"),
+        derivation_chain=_deriv(_step(
+            "step_001", input_equation_ids=["eq_1"], output_equation_ids=["eq_2"],
+            operation="schwinger_dyson", review_status="auto_accepted",
+            review_reason="",
+        )),
+    )
+    result = _run_gate(artifacts=artifacts)
+    assert _codes(result, "DERIVATION_STEP_UNCONTROLLED_OPERATION") == {"der_1:step_001"}
+    assert result.status == "failed_validation"
+
+
+def test_uncontrolled_operation_flagged_is_review_item():
+    artifacts = _make_artifacts(
+        equation_semantics=_registry("eq_1", "eq_2"),
+        derivation_chain=_deriv(_step(
+            "step_001", input_equation_ids=["eq_1"], output_equation_ids=["eq_2"],
+            operation="schwinger_dyson", review_status="teacher_review_required",
+        )),
+    )
+    result = _run_gate(artifacts=artifacts)
+    assert not any(
+        e.code == "DERIVATION_STEP_UNCONTROLLED_OPERATION" for e in result.errors
+    )
+    assert _review_codes(result, "DERIVATION_STEP_UNCONTROLLED_OPERATION") == {
+        "der_1:step_001"
+    }
+
+
+def test_derivation_step_missing_evidence_is_review_item():
+    artifacts = _make_artifacts(
+        equation_semantics=_registry("eq_1", "eq_2"),
+        derivation_chain=_deriv(_step(
+            "step_001", input_equation_ids=["eq_1"], output_equation_ids=["eq_2"],
+            source_evidence_ids=[],
+        )),
+    )
+    result = _run_gate(artifacts=artifacts)
+    assert not any(e.code == "DERIVATION_STEP_MISSING_EVIDENCE" for e in result.errors)
+    assert _review_codes(result, "DERIVATION_STEP_MISSING_EVIDENCE") == {
+        "der_1:step_001"
+    }
+
+
+def test_no_derivation_chain_artifact_is_noop():
+    result = _run_gate()
+    assert not any(e.code.startswith("DERIVATION_STEP_") for e in result.errors)
+    assert not any(e.code.startswith("DERIVATION_STEP_") for e in result.review_items)

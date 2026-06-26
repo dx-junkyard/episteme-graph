@@ -43,7 +43,20 @@ OPERATION_ONTOLOGY = [
     "eliminate",
     "solve",
     "normalize",
+    # Issue #433: additional domain-neutral generic operations. System-level and
+    # cartridge operations resolve to one of these core verbs; paper-specific
+    # names live in operation_subtype, never here.
+    "constrain",
+    "integrate",
+    "eliminate_variable",
 ]
+
+# Issue #433: the controlled vocabulary a derivation step's ``operation`` field
+# must belong to. Domain-specific operation names must be carried in
+# ``operation_subtype`` (with ``subtype_source`` provenance), never in
+# ``operation``. An operation outside this set is only acceptable on a step that
+# is explicitly flagged for review.
+CONTROLLED_OPERATIONS = frozenset(OPERATION_ONTOLOGY)
 
 STEP_REVIEW_STATUSES = [
     "auto_accepted",
@@ -58,6 +71,12 @@ class DerivationStep:
     input_equation_ids: list[str]
     operation: str
     output_equation_ids: list[str]
+    # Issue #433: two-layer operation model for steps. ``operation`` must be a
+    # CONTROLLED_OPERATIONS verb; a domain-specific name is carried here with
+    # ``subtype_source`` provenance ("cartridge" / "source_text" / "inferred" /
+    # "unknown") instead of polluting the controlled ``operation`` field.
+    operation_subtype: str | None = None
+    subtype_source: str = "unknown"
     required_claim_ids: list[str] = field(default_factory=list)
     assumption_refs: list[str] = field(default_factory=list)
     reason: str = ""
@@ -152,6 +171,8 @@ class DerivationChainResult:
                     input_equation_ids=list(s.get("input_equation_ids") or []),
                     operation=s.get("operation", DEFAULT_OPERATION),
                     output_equation_ids=list(s.get("output_equation_ids") or []),
+                    operation_subtype=s.get("operation_subtype"),
+                    subtype_source=s.get("subtype_source", "unknown"),
                     required_claim_ids=list(s.get("required_claim_ids") or []),
                     assumption_refs=list(s.get("assumption_refs") or []),
                     reason=s.get("reason", ""),
