@@ -433,6 +433,10 @@ class ComponentGraphEdge:
     evidence_claim_ids: list[str] = field(default_factory=list)
     source_evidence_ids: list[str] = field(default_factory=list)
     review_reasons: list[str] = field(default_factory=list)
+    # Issue #451: relation polarity ("+" promotes/holds, "-" inhibits/negates,
+    # "" non-polar). Mirrors DSLEdge.polarity; carried to the UI so polarity is
+    # visualised from the field, never guessed from the relation label string.
+    polarity: str = ""
 
 
 @dataclass
@@ -541,6 +545,7 @@ class ComponentGraphResult:
                     "source_backing_status": e.source_backing_status,
                     "review_status": e.review_status,
                     "review_reasons": e.review_reasons,
+                    "polarity": e.polarity,
                     "evidence": {
                         "evidence_claims": e.evidence_claims,
                         "evidence_equation_ids": e.evidence_equation_ids,

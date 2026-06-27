@@ -1008,6 +1008,18 @@ def run_document_pipeline(
                 "component thesis-anchor linking failed (non-fatal): document=%s error=%s",
                 document_id, exc,
             )
+        # Issue #451: propagate DSL edge polarity onto the component graph so the UI
+        # can visualise promotion vs. inhibition. Deterministic, non-fatal.
+        try:
+            from episteme_graph.agents.component_graph.edge_polarity_linker import (
+                link_component_edge_polarity,
+            )
+            link_component_edge_polarity(dsl, component_graph_result)
+        except Exception as exc:
+            logger.warning(
+                "component edge polarity linking failed (non-fatal): document=%s error=%s",
+                document_id, exc,
+            )
         report_done("component_graph", {
             "nodes": len(getattr(component_graph_result, "nodes", []) or []),
             "edges": len(getattr(component_graph_result, "edges", []) or []),

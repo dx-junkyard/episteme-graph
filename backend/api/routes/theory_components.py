@@ -2090,6 +2090,8 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
             "review_status": edge_review,
             "review_reasons": edge_reasons,
             "evidence": edge.get("evidence") if isinstance(edge.get("evidence"), dict) else {"reason": edge.get("reason") or ""},
+            # Issue #451: preserve relation polarity for UI visualisation.
+            "polarity": str(edge.get("polarity") or ""),
         })
     if not normalized_nodes and not normalized_edges:
         return {}

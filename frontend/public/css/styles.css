@@ -3556,6 +3556,82 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* Issue #452: recommended-path toggle (top-right, beside the fit button). */
+.ls-graph-path-btn {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 6;
+  border: 1px solid var(--color-border-tertiary);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08);
+  color: var(--color-text-secondary);
+}
+.ls-graph-path-btn.is-active {
+  background: #4f46e5;
+  border-color: #4f46e5;
+  color: #ffffff;
+}
+
+/* Issue #451: edge polarity legend swatches. */
+.ls-legend-line {
+  display: inline-block;
+  width: 20px;
+  height: 0;
+  margin-right: 7px;
+  vertical-align: 4px;
+}
+.ls-legend-line-negative {
+  border-top: 2px dashed #dc2626;
+}
+.ls-legend-line-positive {
+  border-top: 2px solid #94a3b8;
+}
+
+/* Issue #452: path-order number swatch in the legend. */
+.ls-legend-path-num {
+  display: inline-block;
+  width: 13px;
+  margin-right: 7px;
+  color: #4f46e5;
+  font-weight: 700;
+  text-align: center;
+  vertical-align: -1px;
+}
+
+/* Issue #452: recommended reading-path banner above the graph. */
+.ls-graph-reading-path {
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border: 1px solid #c7d2fe;
+  border-radius: 10px;
+  background: #eef2ff;
+}
+.ls-graph-reading-path-title {
+  font-weight: 700;
+  color: #3730a3;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+.ls-graph-reading-path-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  counter-reset: none;
+}
+.ls-graph-reading-path-list li {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.ls-graph-path-num {
+  color: #4f46e5;
+  font-weight: 700;
+  margin-right: 2px;
+}
+
 .ls-component-graph-detail {
   min-width: 0;
   padding: 18px;
@@ -3747,6 +3823,87 @@ body {
   font-weight: 700;
   color: var(--color-text-primary);
   margin-right: 4px;
+}
+
+/* Issue #448/#450: detail-panel role line, anchor mark, and reference links. */
+.ls-graph-detail-role {
+  margin-top: 6px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+.ls-graph-detail-anchor {
+  color: #b45309;
+  font-weight: 700;
+}
+
+/* Issue #450: evidence-link rows (resolved → navigable, unresolved → explicit) */
+.ls-graph-detail-refrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+  margin-top: 8px;
+}
+.ls-graph-detail-reflabel {
+  flex: 0 0 auto;
+  min-width: 52px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+.ls-graph-ref-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.ls-graph-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border-tertiary);
+  background: var(--color-background-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.ls-graph-ref-nav {
+  cursor: pointer;
+  color: #1d4ed8;
+  border-color: #93c5fd;
+  background: #eff6ff;
+  font-family: inherit;
+}
+.ls-graph-ref-nav:hover {
+  background: #dbeafe;
+  border-color: #2563eb;
+}
+.ls-graph-ref-resolved {
+  color: var(--color-text-primary);
+}
+.ls-graph-ref-id {
+  color: var(--color-text-tertiary);
+  font-size: 10px;
+}
+.ls-graph-ref-unresolved {
+  color: var(--color-text-tertiary);
+  border-style: dashed;
+}
+.ls-graph-ref-flag {
+  font-size: 10px;
+  font-weight: 700;
+  color: #b45309;
+}
+
+/* Issue #450: neighbour groups (incoming / outgoing) in the 隣接 section. */
+.ls-graph-detail-neighbor-group {
+  margin-top: 8px;
+}
+.ls-graph-detail-neighbor-head {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+  margin-bottom: 4px;
 }
 
 .ls-graph-validation {

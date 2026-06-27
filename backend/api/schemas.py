@@ -910,6 +910,9 @@ class ComponentGraphEdge(BaseModel):
     review_status: str = "review_required"
     review_reasons: list[str] = Field(default_factory=list)
     evidence: dict = Field(default_factory=dict)
+    # Issue #451: relation polarity ("+" / "-" / "" non-polar). Mirrors
+    # DSLEdge.polarity; the UI visualises polarity from this field, not the label.
+    polarity: str = ""
 
 
 class ComponentGraphResponse(BaseModel):
