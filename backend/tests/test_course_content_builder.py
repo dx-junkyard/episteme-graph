@@ -142,6 +142,77 @@ def test_detailed_check_questions_preserves_and_fills_partial_dict():
     assert questions[0]["explanation"] == "用語の暗記ではなく、前提、中心概念、結論のつながりを確認する。"
 
 
+def test_topic_evidence_links_surfaces_component_equation_claim_and_source():
+    from core.course_content_builder import _topic_evidence_links
+
+    components = [
+        {
+            "component_id": "comp_001",
+            "summary": "摂動カーネルの役割を述べるコンポーネント",
+            "linked_claim_ids": ["clm_1", "clm_missing"],
+            "linked_evidence_ids": ["ev_1", "ev_missing"],
+        },
+    ]
+    equations = [{"equation_id": "eq_kernel", "plain_text": "F2 と F3 の定義"}]
+    claims = {"clm_1": {"claim_id": "clm_1", "normalized_text": "カーネル係数は時間依存である"}}
+    evidence = {
+        "ev_1": {
+            "evidence_id": "ev_1",
+            "evidence_text": "We find that the kernel coefficients are time dependent.",
+            "evidence_role": "source_quote",
+        }
+    }
+
+    links = _topic_evidence_links(components, equations, claims, evidence, "high")
+    by_key = {(l["kind"], l["target_id"]): l for l in links}
+
+    assert ("component", "comp_001") in by_key
+    assert ("equation", "eq_kernel") in by_key
+    # claims.json / evidence_registry に実体があるものだけが根拠化される。
+    assert ("claim", "clm_1") in by_key
+    assert ("claim", "clm_missing") not in by_key
+    assert ("source", "ev_1") in by_key
+    assert ("source", "ev_missing") not in by_key
+    assert by_key[("claim", "clm_1")]["summary"] == "カーネル係数は時間依存である"
+    assert by_key[("source", "ev_1")]["summary"] == "We find that the kernel coefficients are time dependent."
+    assert by_key[("source", "ev_1")]["support_role"] == "source_quote"
+    assert by_key[("component", "comp_001")]["confidence"] == "high"
+
+
+def test_topic_evidence_for_prompt_derives_available_references_from_links():
+    from core.course_content_builder import _topic_evidence_for_prompt
+
+    topic = {
+        "evidence_links": [
+            {"kind": "component", "target_id": "comp_001", "summary": "..."},
+            {"kind": "equation", "target_id": "eq_kernel", "summary": "..."},
+            {"kind": "claim", "target_id": "clm_1", "summary": "..."},
+            {"kind": "source", "target_id": "ev_1", "summary": "..."},
+        ],
+        "source_excerpt": "原文の抜粋テキスト",
+    }
+
+    refs = _topic_evidence_for_prompt(topic)["available_references"]
+
+    assert {"kind": "component", "id": "comp_001"} in refs
+    assert {"kind": "equation", "id": "eq_kernel"} in refs
+    assert {"kind": "claim", "id": "clm_1"} in refs
+    # 特定の source span も解決可能な参照として提示される。
+    assert {"kind": "source", "id": "ev_1"} in refs
+    # source_excerpt がある場合は汎用の topic_summary 参照も含まれる。
+    assert {"kind": "source", "id": "topic_summary"} in refs
+
+
+def test_topic_evidence_for_prompt_omits_source_reference_without_excerpt():
+    from core.course_content_builder import _topic_evidence_for_prompt
+
+    topic = {"evidence_links": [{"kind": "component", "target_id": "comp_001", "summary": "..."}]}
+    refs = _topic_evidence_for_prompt(topic)["available_references"]
+
+    assert {"kind": "component", "id": "comp_001"} in refs
+    assert all(ref["kind"] != "source" for ref in refs)
+
+
 def test_fallback_topic_draft_creates_detailed_check_question():
     from core.course_content_builder import _apply_deterministic_topic_draft_fallback
 
