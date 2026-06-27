@@ -62,6 +62,10 @@ class ThesisReconstructionAgent:
             result = ThesisReconstructionResult.make_fallback(
                 skeleton.document_id, cartridge_id, str(exc)
             )
+            result.finalize_traversal_fields(
+                central_question_hint=llm_input.central_question,
+                headline_claim_hint=llm_input.headline_claim,
+            )
             self._record_claim_exclusions(result, llm_input)
             return result
 
@@ -84,6 +88,12 @@ class ThesisReconstructionAgent:
             )
         else:
             result.validation_issues = issues
+        # Issue #442: populate the traversal-anchor description fields
+        # deterministically (anchor_node_ids are linked after DSL linking).
+        result.finalize_traversal_fields(
+            central_question_hint=llm_input.central_question,
+            headline_claim_hint=llm_input.headline_claim,
+        )
         self._record_claim_exclusions(result, llm_input)
         return result
 

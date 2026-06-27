@@ -945,6 +945,8 @@ def persist_component_graph(
             "id": getattr(n, "node_id", ""),
             "node_type": getattr(n, "node_type", ""),
             "value": getattr(n, "node_value", ""),
+            # Issue #442: preserve the thesis traversal-anchor flag.
+            "is_thesis_anchor": bool(getattr(n, "is_thesis_anchor", False)),
         }
         for n in (getattr(dsl_result, "nodes", []) or [])
     ]
@@ -953,8 +955,13 @@ def persist_component_graph(
             "from": getattr(e, "from_node_id", ""),
             "to": getattr(e, "to_node_id", ""),
             "predicate": getattr(e, "core_predicate", ""),
+            # Issue #441: persist the controlled edge_type (mirrors core_predicate)
+            # and the relation's evidence_refs; keep the raw verb as the subtype.
+            "edge_type": getattr(e, "edge_type", "") or getattr(e, "core_predicate", ""),
             "verb": getattr(e, "domain_verb", ""),
+            "domain_verb": getattr(e, "domain_verb", ""),
             "polarity": getattr(e, "polarity", ""),
+            "evidence_refs": getattr(e, "evidence_refs", {}) or {},
         }
         for e in (getattr(dsl_result, "edges", []) or [])
     ]

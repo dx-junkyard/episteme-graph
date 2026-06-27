@@ -4556,8 +4556,16 @@
   function lsEvidenceItemByRef(topic, kind, id) {
     var key = lsCourseEvidenceKey(kind, id);
     var normalizedId = lsNormalizeEvidenceId(id);
-    return lsTopicEvidenceItems(topic).find(function (item) {
+    var items = lsTopicEvidenceItems(topic);
+    var exact = items.find(function (item) {
       return item.key === key || (item.kind === kind && lsNormalizeEvidenceId(item.id) === normalizedId);
+    });
+    if (exact) return exact;
+    // kind フォールバック: 本文の埋め込みが kind を取り違えていても（例: 実体は
+    // component なのに `claim:comp_001` と書かれている場合）、同一IDの根拠アイテムが
+    // あれば解決する。これにより誤った kind 接頭辞による「未解決」表示を防ぐ。
+    return items.find(function (item) {
+      return lsNormalizeEvidenceId(item.id) === normalizedId;
     }) || null;
   }
 
@@ -4719,19 +4727,21 @@
           '<span class="ls-material-embed-summary">' + escHtml(lsShortSummary(topic.summary || "", 260) || "このトピックの概要はまだ生成されていません。") + '</span>' +
         '</button>';
       }
-      if (embed.kind === "source" && topic.source_excerpt) {
-        return '<button type="button" class="ls-material-embed ls-material-evidence-card ls-material-source" data-evidence-ref="' + escHtml(key) + '">' +
-          '<span class="ls-material-embed-kind">原文抜粋</span>' +
-          '<strong>参照抜粋</strong>' +
-          '<span class="ls-material-embed-summary">' + escHtml(lsShortSummary(topic.source_excerpt, 260)) + '</span>' +
-        '</button>';
-      }
+      // 特定の根拠アイテム（source span / claim / component 等）が解決できる場合は、
+      // 汎用のトピック原文抜粋フォールバックより優先して、そのアイテム自身を表示する。
       if (evidenceItem) {
         return '<button type="button" class="ls-material-embed ls-material-evidence-card" data-evidence-ref="' + escHtml(key) + '">' +
           '<span class="ls-material-embed-kind">' + escHtml(evidenceItem.kind) + '</span>' +
           '<strong>' + escHtml(evidenceItem.title || evidenceItem.id) + '</strong>' +
           '<span class="ls-material-embed-summary">' + escHtml(lsShortSummary(evidenceItem.summary, 260) || "この教材要素に紐づく根拠リンクです。右ペインで詳細を確認できます。") + '</span>' +
           '<span class="ls-material-embed-meta">' + escHtml([evidenceItem.role, evidenceItem.confidence].filter(Boolean).join(" / ")) + '</span>' +
+        '</button>';
+      }
+      if (embed.kind === "source" && topic.source_excerpt) {
+        return '<button type="button" class="ls-material-embed ls-material-evidence-card ls-material-source" data-evidence-ref="' + escHtml(key) + '">' +
+          '<span class="ls-material-embed-kind">原文抜粋</span>' +
+          '<strong>参照抜粋</strong>' +
+          '<span class="ls-material-embed-summary">' + escHtml(lsShortSummary(topic.source_excerpt, 260)) + '</span>' +
         '</button>';
       }
       return '<button type="button" class="ls-material-embed ls-material-evidence-card ls-material-missing" data-evidence-ref="' + escHtml(key) + '">' +

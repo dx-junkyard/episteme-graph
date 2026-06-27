@@ -325,6 +325,64 @@ except Exception:  # pragma: no cover - fallback mirror
 # operation is tolerated (review item, not hard error) when the step is flagged.
 _DERIVATION_REVIEW_STATES = {"teacher_review_required", "needs_verification"}
 
+# Issue #439: controlled vocabulary for an equation's role in the argument, and
+# a free-symbol extractor, sourced from the agents package when importable with a
+# hardcoded mirror so the gate never fails to load.
+try:  # pragma: no cover - import wiring
+    from episteme_graph.agents.equation_semantics.schema import (
+        ROLE_IN_ARGUMENT_VOCAB as _EQUATION_ROLE_VOCAB,
+        extract_free_symbols as _extract_free_symbols,
+    )
+    _EQUATION_ROLE_VOCAB = set(_EQUATION_ROLE_VOCAB)
+except Exception:  # pragma: no cover - fallback mirror
+    _EQUATION_ROLE_VOCAB = {"premise", "definition", "derived", "result", "constraint"}
+
+    def _extract_free_symbols(latex):  # type: ignore[misc]
+        if not latex:
+            return set()
+        text = re.sub(r"\\[A-Za-z]+", " ", str(latex))
+        return {ch for token in re.findall(r"[A-Za-z]+", text) for ch in token}
+
+# Issue #441: controlled vocabulary a DSL edge's edge_type must belong to.
+try:  # pragma: no cover - import wiring
+    from episteme_graph.agents.dsl_linking.schema import (
+        EDGE_TYPE_VOCAB as _DSL_EDGE_TYPE_VOCAB,
+    )
+    _DSL_EDGE_TYPE_VOCAB = set(_DSL_EDGE_TYPE_VOCAB)
+except Exception:  # pragma: no cover - fallback mirror
+    _DSL_EDGE_TYPE_VOCAB = {
+        "REQUIRES", "PRODUCES", "TRANSFORMS", "DEFINES", "MEASURES",
+        "CONTAINS", "CORRELATES", "CAUSES", "INHIBITS", "EQUIVALENT",
+    }
+
+# Issue #443: shared reference resolution — membership after normalization only,
+# never name-pattern branching. Single source of truth in agents.ref_resolution.
+try:  # pragma: no cover - import wiring
+    from episteme_graph.agents.ref_resolution import (
+        detect_field_alias_conflicts as _detect_field_alias_conflicts,
+        id_set as _id_set_helper,
+        normalize_ref as _normalize_ref_for_gate,
+    )
+except Exception:  # pragma: no cover - fallback mirror
+    def _normalize_ref_for_gate(ref):
+        text = str(ref or "").strip()
+        if text.count(":") == 1:
+            prefix, _, rest = text.partition(":")
+            if prefix and rest:
+                return rest
+        return text
+
+    def _id_set_helper(ids):
+        return {_normalize_ref_for_gate(v) for v in (ids or []) if _normalize_ref_for_gate(v)}
+
+    def _detect_field_alias_conflicts(obj, field_map=None):
+        return []
+
+
+def _ref_id_set_for_gate(ids) -> set:
+    """Normalized id-set helper used by the gate's membership checks (#443)."""
+    return _id_set_helper(ids)
+
 
 def _ordered_unique(values) -> list:
     result = []
@@ -503,6 +561,11 @@ class ExportValidationGate:
         equation_fidelity = self._check_equation_fidelity(
             artifacts, review_items, warnings
         )
+        # 2b-2. Equation self-describing report (issue #439): an equation with
+        # free symbols in its (trusted) LaTeX must carry symbol descriptions, and
+        # its role_in_argument must belong to the controlled vocabulary. Reported
+        # as warnings — equation_semantics is a soft stage.
+        self._check_equation_self_describing(artifacts, warnings)
         # 2c. Candidate→registry promotion invariant (issue #431): every accepted
         # equation candidate must be present in the equation registry. This is a
         # hard publish blocker enforced directly by the gate so it is independent
@@ -553,7 +616,13 @@ class ExportValidationGate:
 
         # 4. DSL graph edge completeness
         if dsl:
-            self._check_dsl_edges(dsl, errors, warnings)
+            self._check_dsl_edges(
+                dsl, artifacts, claim_objects, evidence, errors, warnings
+            )
+            # 4b. Thesis traversal anchor (issue #442): when there is a graph to
+            # traverse, the thesis_reconstruction artifact must exist and its
+            # anchor nodes must resolve to reachable graph nodes.
+            self._check_thesis_artifact(artifacts, dsl, errors, review_items)
 
         # 5. Component graph export structure
         self._check_component_graph_artifact(
@@ -562,6 +631,10 @@ class ExportValidationGate:
 
         # 6. Required artifact presence
         self._check_required_artifacts(artifacts, errors)
+
+        # 6a. Field-alias duplication (issue #443): a same-concept field must not
+        # be emitted under multiple alias names with conflicting values.
+        self._check_field_alias_duplicates(artifacts, warnings)
 
         # 6b. provisional claim ref leakage (#340): equation_semantics /
         # derivation_chain must not carry claim refs that are absent from the
@@ -1802,17 +1875,42 @@ class ExportValidationGate:
             and extraction_status in ("partial", "fragment_only", "label_only", "missing", "unparsed")
         )
 
-    # Provisional / pre-canonical claim ID patterns (issue #340). Mirrors the
-    # export-side _LEGACY_REF_PATTERNS so the pipeline catches the same leaks.
-    _PROVISIONAL_CLAIM_REF_PATTERNS = (
-        re.compile(r"^claim_span_"),
-        re.compile(r"^claim:[^:]+:[^:]+$"),
-        re.compile(r"^claim::"),
-    )
+    def _check_field_alias_duplicates(self, artifacts: dict, warnings: list) -> None:
+        """Flag same-concept fields emitted under conflicting alias names (#443).
 
-    @classmethod
-    def _looks_provisional_claim_ref(cls, ref: str) -> bool:
-        return any(p.match(ref) for p in cls._PROVISIONAL_CLAIM_REF_PATTERNS)
+        Domain-agnostic: uses the shared canonical-field map, so no field name is
+        hardcoded here. A conflict means two alias fields for one concept both
+        carry different non-empty values.
+        """
+        sources = (
+            ("component_assembly", "components", "component_id", "components/components.json"),
+            ("claim_object_builder", "claims", "claim_id", "claims/claims.json"),
+            ("equation_semantics", "equations", "equation_id", "equations/equations.json"),
+        )
+        for stage, list_key, id_key, artifact_name in sources:
+            artifact = artifacts.get(stage)
+            if not isinstance(artifact, dict):
+                continue
+            items = artifact.get(list_key)
+            if not isinstance(items, list):
+                continue
+            for idx, item in enumerate(items):
+                if not isinstance(item, dict):
+                    continue
+                for conflict in _detect_field_alias_conflicts(item):
+                    warnings.append(ValidationEntry(
+                        code="FIELD_ALIAS_DUPLICATE",
+                        message=(
+                            f"{list_key}[{idx}] emits concept {conflict['concept']!r} under "
+                            f"both {conflict['canonical']!r} and alias {conflict['alias']!r} "
+                            "with conflicting values"
+                        ),
+                        artifact=artifact_name,
+                        path=f"$.{list_key}[{idx}].{conflict['alias']}",
+                        source_stage="export_validation",
+                        target_type=stage,
+                        target_id=str(item.get(id_key) or ""),
+                    ))
 
     def _check_unresolved_claim_refs(
         self,
@@ -1820,34 +1918,30 @@ class ExportValidationGate:
         claim_objects,
         warnings: list,
     ) -> None:
-        """Report claim refs in equations / derivations absent from claims.json (#340).
+        """Report claim refs in equations / derivations absent from claims.json (#340/#443).
 
         The claim_object_builder stage is the source of truth for claim IDs. Any
         claim ref carried by equation_semantics or derivation_chain that is not in
-        the final claim set (or that still looks provisional) indicates a broken
-        artifact ID contract. These are surfaced as warnings so they show up in
+        the final claim set indicates a broken artifact ID contract. Membership is
+        judged by set membership after normalization only (issue #443) — never by
+        whether the id "looks provisional". Surfaced as warnings so they appear in
         export_validation review metadata without blocking persist.
         """
-        final_claim_ids = {
+        final_claim_ids = _ref_id_set_for_gate(
             str(getattr(c, "claim_id", "") or "")
             for c in (getattr(claim_objects, "claims", []) or [])
             if getattr(c, "claim_id", None)
-        }
+        )
 
         def report(refs, artifact: str, path: str) -> None:
             for ref in refs or []:
                 ref_id = str(ref)
                 if not ref_id:
                     continue
-                if ref_id in final_claim_ids:
+                if _normalize_ref_for_gate(ref_id) in final_claim_ids:
                     continue
-                provisional = self._looks_provisional_claim_ref(ref_id)
                 warnings.append(ValidationEntry(
-                    code=(
-                        "PROVISIONAL_CLAIM_REF_IN_ARTIFACT"
-                        if provisional
-                        else "UNRESOLVED_CLAIM_REF_IN_ARTIFACT"
-                    ),
+                    code="UNRESOLVED_CLAIM_REF_IN_ARTIFACT",
                     message=(
                         f"{path} references claim {ref_id!r} which is not in the final "
                         "claims.json claim set"
@@ -2392,15 +2486,161 @@ class ExportValidationGate:
                 else:
                     review_items.append(entry)
 
+    def _check_equation_self_describing(self, artifacts: dict, warnings: list) -> None:
+        """Equation self-describing report (issue #439).
+
+        An equation whose trusted LaTeX contains free symbols must describe them
+        (``defined_symbols`` / ``used_symbols`` non-empty); a missing description
+        is reported as ``EQ_SYMBOLS_EMPTY``. An equation whose ``role_in_argument``
+        is absent or outside the controlled vocabulary is reported as
+        ``EQ_ROLE_INVALID``. Both are warnings (equation_semantics is a soft stage)
+        and are domain-agnostic — no symbol/equation names are asserted.
+        """
+        equations = artifacts.get("equation_semantics")
+        if not isinstance(equations, dict):
+            return
+        records = equations.get("equations")
+        if not isinstance(records, list):
+            return
+        for idx, record in enumerate(records):
+            if not isinstance(record, dict):
+                continue
+            eq_id = str(record.get("equation_id") or f"index_{idx}")
+            sem = record.get("semantics") if isinstance(record.get("semantics"), dict) else {}
+            # Only fully-analyzed equations (with a semantics block) are subject to
+            # the self-describing contract; minimal/legacy stub records are skipped.
+            if not sem:
+                continue
+            src = record.get("source_extraction") if isinstance(record.get("source_extraction"), dict) else {}
+            rec = record.get("reconstruction") if isinstance(record.get("reconstruction"), dict) else {}
+
+            # Trusted display math only: needs_math_review LaTeX is audit text.
+            latex = None
+            if not src.get("needs_math_review"):
+                latex = src.get("latex")
+            if str(rec.get("status") or "none") != "none":
+                latex = rec.get("latex")
+            free_symbols = _extract_free_symbols(latex)
+
+            described = bool(sem.get("defined_symbols")) or bool(sem.get("used_symbols"))
+            if free_symbols and not described:
+                warnings.append(ValidationEntry(
+                    code="EQ_SYMBOLS_EMPTY",
+                    message=(
+                        f"equation {eq_id!r} has free symbols {sorted(free_symbols)} in its "
+                        "LaTeX but no symbol descriptions (defined_symbols / used_symbols empty)"
+                    ),
+                    artifact="equation_semantics",
+                    path=f"$.equations[{idx}].semantics.defined_symbols",
+                    source_stage="export_validation",
+                    target_type="equation",
+                    target_id=eq_id,
+                ))
+
+            role = str(sem.get("role_in_argument") or "")
+            if role not in _EQUATION_ROLE_VOCAB:
+                warnings.append(ValidationEntry(
+                    code="EQ_ROLE_INVALID",
+                    message=(
+                        f"equation {eq_id!r} role_in_argument {role!r} is not in the "
+                        f"controlled vocabulary {sorted(_EQUATION_ROLE_VOCAB)}"
+                    ),
+                    artifact="equation_semantics",
+                    path=f"$.equations[{idx}].semantics.role_in_argument",
+                    source_stage="export_validation",
+                    target_type="equation",
+                    target_id=eq_id,
+                ))
+
     def _check_dsl_edges(
         self,
         dsl,
+        artifacts: dict,
+        claim_objects,
+        evidence,
         errors: list,
         warnings: list,
     ) -> None:
-        """Verify DSL graph edges have non-empty source and target."""
+        """Verify DSL graph edges are typed, evidence-backed, and resolvable.
+
+        In addition to non-empty endpoints, issue #441 requires that every edge
+        carry a non-null ``edge_type`` from the controlled vocabulary
+        (``DSL_EDGE_UNTYPED``) and a non-empty ``evidence_refs`` set
+        (``DSL_EDGE_NO_EVIDENCE``) whose claim/equation references resolve against
+        the final artifacts (``DSL_EDGE_DANGLING_EVIDENCE``). Domain-agnostic — no
+        specific verbs/ids are asserted.
+        """
         node_ids: set[str] = {n.node_id for n in (dsl.nodes or [])}
+
+        # Known id universe for dangling-ref detection.
+        known_claim_ids = {
+            str(getattr(c, "claim_id", "") or "")
+            for c in (getattr(claim_objects, "claims", []) or [])
+            if getattr(c, "claim_id", None)
+        }
+        known_equation_ids = set(self._equation_index_from_artifacts(artifacts))
+        known_evidence_ids = {
+            str(getattr(r, "evidence_id", "") or "")
+            for r in (getattr(evidence, "records", []) or [])
+            if getattr(r, "evidence_id", None)
+        }
+
         for edge in dsl.edges or []:
+            edge_id = getattr(edge, "edge_id", "?")
+            # Issue #441: edge_type must be present and in the controlled vocab.
+            edge_type = str(getattr(edge, "edge_type", "") or "")
+            if not edge_type or edge_type not in _DSL_EDGE_TYPE_VOCAB:
+                errors.append(ValidationEntry(
+                    code="DSL_EDGE_UNTYPED",
+                    message=(
+                        f"DSL edge {edge_id!r} has no controlled edge_type "
+                        f"(edge_type={edge_type!r}); traversal cannot branch on relation kind"
+                    ),
+                    artifact="dsl_linking",
+                    path=f"$.edges[{edge_id}].edge_type",
+                    source_stage="export_validation",
+                    target_type="dsl_edge",
+                    target_id=str(edge_id),
+                ))
+
+            # Issue #441: evidence_refs must be non-empty and resolve.
+            refs = getattr(edge, "evidence_refs", {}) or {}
+            claim_refs = [str(v) for v in (refs.get("claim_ids") or []) if v]
+            equation_refs = [str(v) for v in (refs.get("equation_ids") or []) if v]
+            thesis_refs = [str(v) for v in (refs.get("thesis_refs") or []) if v]
+            if not (claim_refs or equation_refs or thesis_refs):
+                errors.append(ValidationEntry(
+                    code="DSL_EDGE_NO_EVIDENCE",
+                    message=(
+                        f"DSL edge {edge_id!r} has empty evidence_refs; the relation "
+                        "cannot be traced back to a source"
+                    ),
+                    artifact="dsl_linking",
+                    path=f"$.edges[{edge_id}].evidence_refs",
+                    source_stage="export_validation",
+                    target_type="dsl_edge",
+                    target_id=str(edge_id),
+                ))
+            else:
+                dangling: list[str] = []
+                if known_claim_ids:
+                    dangling += [r for r in claim_refs if r not in known_claim_ids]
+                if known_equation_ids:
+                    dangling += [r for r in equation_refs if r not in known_equation_ids]
+                if dangling:
+                    errors.append(ValidationEntry(
+                        code="DSL_EDGE_DANGLING_EVIDENCE",
+                        message=(
+                            f"DSL edge {edge_id!r} evidence_refs reference unknown "
+                            f"claim/equation ids {sorted(set(dangling))}"
+                        ),
+                        artifact="dsl_linking",
+                        path=f"$.edges[{edge_id}].evidence_refs",
+                        source_stage="export_validation",
+                        target_type="dsl_edge",
+                        target_id=str(edge_id),
+                    ))
+
             if not getattr(edge, "from_node_id", None):
                 errors.append(ValidationEntry(
                     code="EMPTY_GRAPH_EDGE_SOURCE",
@@ -2433,6 +2673,135 @@ class ExportValidationGate:
                     path=f"$.edges[{edge.edge_id}].to_node_id",
                     source_stage="export_validation",
                 ))
+
+    def _check_thesis_artifact(
+        self,
+        artifacts: dict,
+        dsl,
+        errors: list,
+        review_items: list,
+    ) -> None:
+        """Thesis traversal-anchor check (issue #442).
+
+        When there is a DSL graph to traverse, the thesis_reconstruction artifact
+        must exist with a central thesis and a headline claim
+        (``THESIS_ARTIFACT_MISSING``). Its ``anchor_node_ids`` must reference real
+        DSL nodes (``THESIS_ANCHOR_UNRESOLVED``); at least one anchor must be
+        present (``THESIS_ANCHOR_MISSING``) and reachable from a graph root
+        (``THESIS_ANCHOR_UNREACHABLE``). Domain-agnostic — no specific claim text
+        or node id is asserted.
+        """
+        thesis = artifacts.get("thesis_reconstruction")
+        central = thesis.get("central_thesis") if isinstance(thesis, dict) else None
+        if not isinstance(thesis, dict) or not isinstance(central, dict) or not central:
+            errors.append(ValidationEntry(
+                code="THESIS_ARTIFACT_MISSING",
+                message=(
+                    "thesis_reconstruction artifact is missing or has no central_thesis; "
+                    "graph traversal has no defined goal"
+                ),
+                artifact="thesis_reconstruction",
+                path="$.central_thesis",
+                source_stage="export_validation",
+            ))
+            return
+
+        headline = str(thesis.get("headline_claim") or central.get("text") or "")
+        central_question = str(thesis.get("central_question") or "")
+        if not headline:
+            errors.append(ValidationEntry(
+                code="THESIS_ARTIFACT_MISSING",
+                message="thesis_reconstruction artifact has no headline_claim",
+                artifact="thesis_reconstruction",
+                path="$.headline_claim",
+                source_stage="export_validation",
+            ))
+        if not central_question:
+            review_items.append(ValidationEntry(
+                code="THESIS_CENTRAL_QUESTION_MISSING",
+                message="thesis_reconstruction artifact has no central_question",
+                artifact="thesis_reconstruction",
+                path="$.central_question",
+                source_stage="export_validation",
+            ))
+
+        node_ids = {str(getattr(n, "node_id", "") or "") for n in (getattr(dsl, "nodes", []) or [])}
+        anchor_ids = [str(a) for a in (thesis.get("anchor_node_ids") or []) if a]
+        if not anchor_ids:
+            review_items.append(ValidationEntry(
+                code="THESIS_ANCHOR_MISSING",
+                message=(
+                    "thesis_reconstruction has no anchor_node_ids; the traversal "
+                    "entry/exit nodes are undefined"
+                ),
+                artifact="thesis_reconstruction",
+                path="$.anchor_node_ids",
+                source_stage="export_validation",
+            ))
+            return
+
+        unresolved = [a for a in anchor_ids if node_ids and a not in node_ids]
+        if unresolved:
+            review_items.append(ValidationEntry(
+                code="THESIS_ANCHOR_UNRESOLVED",
+                message=(
+                    f"thesis anchor_node_ids {sorted(set(unresolved))} do not resolve "
+                    "to DSL graph nodes"
+                ),
+                artifact="thesis_reconstruction",
+                path="$.anchor_node_ids",
+                source_stage="export_validation",
+            ))
+
+        resolved_anchors = [a for a in anchor_ids if a in node_ids]
+        if resolved_anchors and not self._anchor_reachable_from_root(dsl, set(resolved_anchors)):
+            review_items.append(ValidationEntry(
+                code="THESIS_ANCHOR_UNREACHABLE",
+                message=(
+                    "no path from a graph root reaches any thesis anchor node "
+                    f"{sorted(set(resolved_anchors))}"
+                ),
+                artifact="thesis_reconstruction",
+                path="$.anchor_node_ids",
+                source_stage="export_validation",
+            ))
+
+    @staticmethod
+    def _anchor_reachable_from_root(dsl, anchors: set) -> bool:
+        """Return True when some graph root can reach a thesis anchor (issue #442).
+
+        Roots are nodes with in-degree 0. With no edges, every node is its own
+        root, so an anchor that exists is reachable. With a fully cyclic graph
+        (no in-degree-0 node) reachability is treated as satisfied — there is no
+        well-defined root to fail against. Domain-agnostic graph traversal.
+        """
+        nodes = [str(getattr(n, "node_id", "") or "") for n in (getattr(dsl, "nodes", []) or [])]
+        node_set = {n for n in nodes if n}
+        if anchors & node_set and not (getattr(dsl, "edges", []) or []):
+            return True
+        adjacency: dict[str, list[str]] = {n: [] for n in node_set}
+        indegree: dict[str, int] = {n: 0 for n in node_set}
+        for edge in getattr(dsl, "edges", []) or []:
+            src = str(getattr(edge, "from_node_id", "") or "")
+            dst = str(getattr(edge, "to_node_id", "") or "")
+            if src in node_set and dst in node_set:
+                adjacency[src].append(dst)
+                indegree[dst] += 1
+        roots = [n for n in node_set if indegree.get(n, 0) == 0]
+        if not roots:
+            # Fully cyclic / every node has an incoming edge: no root to fail on.
+            return True
+        seen: set[str] = set()
+        stack = list(roots)
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            if current in anchors:
+                return True
+            stack.extend(adjacency.get(current, []))
+        return False
 
     def _check_component_graph_artifact(
         self,

@@ -28,6 +28,7 @@ from routes.export_artifacts import (
     build_equation_candidates_export,
     build_equations_export,
     build_evidence_export,
+    build_thesis_export,
     enrich_course_topics,
     get_artifacts,
 )
@@ -547,7 +548,24 @@ def _build_equations_for_documents(
             structure_artifact=artifacts.get("document_structure"),
             evidence_index=evidence_index,
             claim_index=claim_index,
+            symbol_registry_artifact=artifacts.get("symbol_registry"),
         ))
+    return out
+
+
+def _build_theses_for_documents(
+    artifacts_by_doc: dict[str, dict],
+    document_ids: list[str],
+) -> list[dict]:
+    """Per-document thesis_reconstruction export objects (issue #442)."""
+    out: list[dict] = []
+    for doc_id in document_ids:
+        artifacts = artifacts_by_doc.get(doc_id, {})
+        thesis = build_thesis_export(
+            artifacts.get("thesis_reconstruction"), document_id=doc_id
+        )
+        if thesis:
+            out.append(thesis)
     return out
 
 
@@ -843,6 +861,8 @@ def _load_dsl_from_component_graphs(
                     "chunk_id": "",
                     "document_id": doc_id,
                     "smiles_dsl": "",
+                    # Issue #442: surface the thesis traversal-anchor flag.
+                    "is_thesis_anchor": bool(n.get("is_thesis_anchor", False)),
                 })
 
         for edge in raw_edges:
@@ -850,8 +870,8 @@ def _load_dsl_from_component_graphs(
                 continue
             source = str(edge.get("from") or edge.get("source") or "").strip()
             target = str(edge.get("to") or edge.get("target") or "").strip()
-            predicate = str(edge.get("predicate") or edge.get("relation") or "RELATED_TO").strip()
-            verb = str(edge.get("verb") or "").strip()
+            predicate = str(edge.get("predicate") or edge.get("core_predicate") or edge.get("relation") or "RELATED_TO").strip()
+            verb = str(edge.get("verb") or edge.get("domain_verb") or "").strip()
             polarity = str(edge.get("polarity") or "+").strip()
             if not source or not target:
                 continue
@@ -861,8 +881,12 @@ def _load_dsl_from_component_graphs(
                 "source": f"{doc_id}:{source}",
                 "target": f"{doc_id}:{target}",
                 "core_predicate": predicate,
+                # Issue #441: controlled edge_type (mirrors core_predicate) + the
+                # raw verb as subtype + the relation's evidence_refs.
+                "edge_type": str(edge.get("edge_type") or predicate).strip(),
                 "domain_verb": verb,
                 "polarity": polarity,
+                "evidence_refs": _normalize_dsl_evidence_refs(edge.get("evidence_refs")),
                 "chunk_id": "",
             })
 
@@ -902,17 +926,44 @@ def _rows_to_dsl_graph(rows: list) -> dict:
             pred = anc.get("predicate", "") or anc.get("core_predicate", "")
             if src and tgt:
                 edge_counter += 1
+                # Issue #441: the legacy chunk path carries no relation evidence;
+                # back the edge by its endpoint node ids so evidence_refs is never
+                # empty, and mirror the predicate into the controlled edge_type.
+                evidence_refs = _normalize_dsl_evidence_refs(anc.get("evidence_refs"))
+                if not any(evidence_refs.values()):
+                    evidence_refs["node_ids"] = [str(src), str(tgt)]
                 edges.append({
                     "edge_id": f"edge_{chunk_id[:8]}_{edge_counter:04d}",
                     "source": src,
                     "target": tgt,
                     "core_predicate": pred,
+                    "edge_type": str(anc.get("edge_type") or pred or "RELATED_TO").strip(),
                     "domain_verb": anc.get("verb", ""),
                     "polarity": anc.get("polarity", "+"),
+                    "evidence_refs": evidence_refs,
                     "chunk_id": chunk_id,
                 })
 
     return {"dsl_schema_version": "0.1.0", "nodes": nodes, "edges": edges}
+
+
+def _normalize_dsl_evidence_refs(raw: Any) -> dict:
+    """Normalize a DSL edge's evidence_refs into a stable dict shape (issue #441).
+
+    Always returns a dict with the standard reference buckets so the exported
+    edge never carries a null evidence_refs. Extra keys present in the source
+    (e.g. ``node_ids``) are preserved.
+    """
+    refs = raw if isinstance(raw, dict) else {}
+    out: dict = {
+        "claim_ids": [str(v) for v in (refs.get("claim_ids") or []) if v],
+        "equation_ids": [str(v) for v in (refs.get("equation_ids") or []) if v],
+        "thesis_refs": [str(v) for v in (refs.get("thesis_refs") or []) if v],
+    }
+    for key, value in refs.items():
+        if key not in out and isinstance(value, list):
+            out[key] = [str(v) for v in value if v]
+    return out
 
 
 def _load_components_for_course(session: Any, course_id: str, document_ids: list[str]) -> list[dict]:
@@ -1105,17 +1156,29 @@ def _build_evidence_snippets(claims: list[dict]) -> list[dict]:
     return snippets
 
 
-_LEGACY_REF_PATTERNS = [
-    re.compile(r"^claim_span_"),
-    re.compile(r"^claim:[^:]+:[^:]+$"),
-    re.compile(r"^comp_\d+$"),
-]
+# Issue #443: reference validity is decided by set membership after
+# normalization — never by ID name form / contained tokens. The shared
+# resolution helpers are the single source of truth.
+try:  # pragma: no cover - import wiring
+    from episteme_graph.agents.ref_resolution import (
+        detect_field_alias_conflicts as _detect_field_alias_conflicts,
+        id_set as _ref_id_set,
+        normalize_ref as _normalize_ref,
+    )
+except Exception:  # pragma: no cover - defensive fallback
+    def _normalize_ref(ref: Any) -> str:
+        text = str(ref or "").strip()
+        if text.count(":") == 1:
+            prefix, _, rest = text.partition(":")
+            if prefix and rest:
+                return rest
+        return text
 
+    def _ref_id_set(ids: Any) -> set:
+        return {_normalize_ref(v) for v in (ids or []) if _normalize_ref(v)}
 
-def _is_legacy_export_ref(value: Any) -> bool:
-    if not isinstance(value, str):
-        return False
-    return any(pattern.match(value) for pattern in _LEGACY_REF_PATTERNS)
+    def _detect_field_alias_conflicts(obj: Any, field_map: Any = None) -> list:
+        return []
 
 
 def _claim_ref_map(claims: list[dict]) -> dict[str, str]:
@@ -1830,6 +1893,7 @@ def _validate_export_references(
     operation_graph: dict | None = None,
     component_operation_links: list[dict] | None = None,
     system_operations: list[dict] | None = None,
+    dsl_graph: dict | None = None,
     artifact_sources: dict | None = None,
 ) -> dict:
     errors: list[dict] = []
@@ -1837,6 +1901,7 @@ def _validate_export_references(
     review_items: list[dict] = []
     derivation_chains = derivation_chains or []
     operation_graph = operation_graph or {"nodes": [], "edges": []}
+    dsl_graph = dsl_graph or {"nodes": [], "edges": []}
     component_operation_links = component_operation_links or []
     system_operations = system_operations or []
     claim_ids = {str(c.get("claim_id")) for c in claims if c.get("claim_id")}
@@ -1855,12 +1920,22 @@ def _validate_export_references(
     def review(code: str, message: str, artifact: str, path: str, ref_id: str) -> None:
         review_items.append({"code": code, "message": message, "artifact": artifact, "path": path, "ref_id": ref_id})
 
+    # Issue #443: a reference is dangling iff — after normalization — it is not
+    # in the known canonical id set. No name-pattern / token branching.
+    _norm_known_cache: dict[int, set] = {}
+
+    def _norm_known(known: set[str]) -> set[str]:
+        cached = _norm_known_cache.get(id(known))
+        if cached is None:
+            cached = _ref_id_set(known)
+            _norm_known_cache[id(known)] = cached
+        return cached
+
     def check_refs(values: Any, known: set[str], artifact: str, path: str, target: str) -> None:
+        known_norm = _norm_known(known)
         for ref in values or []:
             ref_id = str(ref)
-            if _is_legacy_export_ref(ref_id):
-                add("LEGACY_EXPORT_REF", f"{path} contains provisional ID {ref_id!r}", artifact, path, ref_id)
-            if ref_id not in known:
+            if _normalize_ref(ref_id) not in known_norm:
                 add("UNRESOLVED_EXPORT_REF", f"{path} references missing {target} {ref_id!r}", artifact, path, ref_id)
 
     for idx, eq in enumerate(equations):
@@ -1970,9 +2045,7 @@ def _validate_export_references(
             ref_id = str(edge.get(key) or "")
             if not ref_id:
                 add("EMPTY_COMPONENT_GRAPH_ENDPOINT", f"$.edges[{idx}].{key} is empty", "graph/component_graph.json", f"$.edges[{idx}].{key}", ref_id)
-            elif _is_legacy_export_ref(ref_id):
-                add("LEGACY_EXPORT_REF", f"$.edges[{idx}].{key} contains provisional ID {ref_id!r}", "graph/component_graph.json", f"$.edges[{idx}].{key}", ref_id)
-            elif ref_id not in component_ids:
+            elif _normalize_ref(ref_id) not in _ref_id_set(component_ids):
                 add("UNRESOLVED_EXPORT_REF", f"$.edges[{idx}].{key} references missing component {ref_id!r}", "graph/component_graph.json", f"$.edges[{idx}].{key}", ref_id)
         check_refs(edge.get("evidence_claims"), claim_ids, "graph/component_graph.json", f"$.edges[{idx}].evidence_claims", "claim")
 
@@ -2006,15 +2079,7 @@ def _validate_export_references(
                 f"$.nodes[{idx}].node_id",
                 node_id,
             )
-        elif _is_legacy_export_ref(node_id):
-            add(
-                "LEGACY_EXPORT_REF",
-                f"component graph node {node_id!r} is a provisional ID",
-                "graph/component_graph.json",
-                f"$.nodes[{idx}].node_id",
-                node_id,
-            )
-        elif node_id not in component_ids:
+        elif _normalize_ref(node_id) not in _ref_id_set(component_ids):
             # Hard error (issues #390 / #393): a component_graph node must be a
             # known component_id from components/components.json — never a ghost.
             # No empty-set guard: if no components were exported, every graph node
@@ -2363,6 +2428,74 @@ def _validate_export_references(
             ",".join(artifacts_fellback),
         )
 
+    # Issue #441: every exported DSL edge must carry a non-null edge_type and a
+    # non-empty, resolvable evidence_refs so graph traversal can branch on the
+    # relation kind and trace it back to a source.
+    dsl_edges = dsl_graph.get("edges") if isinstance(dsl_graph.get("edges"), list) else []
+    claim_ids_norm = _ref_id_set(claim_ids)
+    equation_ids_norm = _ref_id_set(equation_ids)
+    for idx, edge in enumerate(dsl_edges):
+        if not isinstance(edge, dict):
+            continue
+        edge_id = str(edge.get("edge_id") or f"index_{idx}")
+        if not str(edge.get("edge_type") or "").strip():
+            add(
+                "DSL_EDGE_UNTYPED",
+                f"DSL edge {edge_id!r} has no controlled edge_type",
+                "dsl/dsl_graph.json",
+                f"$.edges[{idx}].edge_type",
+                edge_id,
+            )
+        refs = edge.get("evidence_refs") if isinstance(edge.get("evidence_refs"), dict) else {}
+        claim_refs = [str(v) for v in (refs.get("claim_ids") or []) if v]
+        equation_refs = [str(v) for v in (refs.get("equation_ids") or []) if v]
+        other_refs = any(
+            v for k, v in refs.items()
+            if k not in ("claim_ids", "equation_ids") and isinstance(v, list) and v
+        )
+        if not (claim_refs or equation_refs or other_refs):
+            add(
+                "DSL_EDGE_NO_EVIDENCE",
+                f"DSL edge {edge_id!r} has empty evidence_refs",
+                "dsl/dsl_graph.json",
+                f"$.edges[{idx}].evidence_refs",
+                edge_id,
+            )
+        else:
+            dangling = [r for r in claim_refs if _normalize_ref(r) not in claim_ids_norm and claim_ids_norm]
+            dangling += [r for r in equation_refs if _normalize_ref(r) not in equation_ids_norm and equation_ids_norm]
+            if dangling:
+                add(
+                    "DSL_EDGE_DANGLING_EVIDENCE",
+                    f"DSL edge {edge_id!r} evidence_refs reference unknown ids {sorted(set(dangling))}",
+                    "dsl/dsl_graph.json",
+                    f"$.edges[{idx}].evidence_refs",
+                    edge_id,
+                )
+
+    # Issue #443: a same-concept field must not be emitted under multiple alias
+    # names with conflicting values. Detected via the canonical field map (no
+    # hardcoded field names here), reported as warnings.
+    for artifact_name, items, base in (
+        ("components/components.json", components, "$.components"),
+        ("claims/claims.json", claims, "$.claims"),
+        ("equations/equations.json", equations, "$.equations"),
+    ):
+        for idx, item in enumerate(items or []):
+            for conflict in _detect_field_alias_conflicts(item):
+                warn(
+                    "FIELD_ALIAS_DUPLICATE",
+                    (
+                        f"{base}[{idx}] emits concept {conflict['concept']!r} under both "
+                        f"{conflict['canonical']!r} and alias {conflict['alias']!r} with "
+                        "conflicting values"
+                    ),
+                    artifact_name,
+                    f"{base}[{idx}].{conflict['alias']}",
+                    str((item or {}).get("component_id") or (item or {}).get("claim_id")
+                        or (item or {}).get("equation_id") or ""),
+                )
+
     # Coverage metrics (issue #390): explain *why* an export is or is not
     # publish-ready by reporting how much of each artifact is source-linked.
     coverage = _coverage_metrics(
@@ -2431,6 +2564,7 @@ def _build_manifest(
     operation_graph: dict | None = None,
     component_operation_links: list[dict] | None = None,
     system_operations: list[dict] | None = None,
+    theses: list[dict] | None = None,
     export_source: dict | None = None,
 ) -> dict:
     equations = equations or []
@@ -2440,6 +2574,7 @@ def _build_manifest(
     operation_graph = operation_graph or {"nodes": [], "edges": []}
     component_operation_links = component_operation_links or []
     system_operations = system_operations or []
+    theses = theses or []
     return {
         "export_schema_version": "0.2.0",
         "exported_at": _now_iso(),
@@ -2464,6 +2599,7 @@ def _build_manifest(
             "export_validation": "export_validation.json",
             "claims": "claims/claims.json",
             "dsl_graph": "dsl/dsl_graph.json",
+            "thesis_reconstruction": "thesis/thesis_reconstruction.json",
             "components": "components/components.json",
             "component_graph": "graph/component_graph.json",
             "operation_graph": "graph/operation_graph.json",
@@ -2479,6 +2615,7 @@ def _build_manifest(
             "claims": len(claims),
             "dsl_nodes": len(dsl_graph.get("nodes", [])),
             "dsl_edges": len(dsl_graph.get("edges", [])),
+            "theses": len(theses),
             "components": len(components),
             "component_edges": len(component_graph.get("edges", [])),
             "operation_nodes": len(operation_graph.get("nodes", [])),
@@ -2505,7 +2642,8 @@ This ZIP contains machine-readable outputs generated by episteme-graph.
 - `manifest.json`: index of this export bundle
 - `course_info.json`: course metadata, topics (with learning_objectives, prerequisite_concepts, blackbox_policy, expected_misconceptions, assessment_prompts, visualization_plan), chapters, and source materials
 - `claims/claims.json`: extracted claims from source documents
-- `dsl/dsl_graph.json`: lightweight logical graph representation (DSL)
+- `dsl/dsl_graph.json`: lightweight logical graph representation (DSL). Edges carry a controlled `edge_type` plus the raw `domain_verb` subtype and `evidence_refs`; nodes corresponding to the thesis carry `is_thesis_anchor` (issue #441/#442).
+- `thesis/thesis_reconstruction.json`: per-document thesis reconstruction — the traversal anchor. Each entry has `central_question`, `headline_claim`, `supporting_subclaim_ids`, `anchor_node_ids` (the DSL nodes the traversal should reach), `central_thesis`, and `support_structure` (issue #442).
 - `components/components.json`: reusable logical/theory components (Component)
 - `graph/component_graph.json`: reusable-component dependency graph. Nodes are component IDs only (issue #387); operation-level nodes are kept out.
 - `graph/operation_graph.json`: lower-level operation/equation-operation graph (nodes are operation IDs). Related to but distinct from the component graph.
@@ -2586,6 +2724,7 @@ def _build_zip(
     operation_graph: dict | None = None,
     component_operation_links: list[dict] | None = None,
     system_operations: list[dict] | None = None,
+    theses: list[dict] | None = None,
 ) -> bytes:
     equations = equations or []
     equation_candidates = equation_candidates or []
@@ -2594,6 +2733,7 @@ def _build_zip(
     operation_graph = operation_graph or {"nodes": [], "edges": []}
     component_operation_links = component_operation_links or []
     system_operations = system_operations or []
+    theses = theses or []
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("README.md", _README_TEMPLATE)
@@ -2605,6 +2745,12 @@ def _build_zip(
             "dsl/dsl_graph.json",
             _json_bytes({**dsl_graph, "dsl_schema_version": dsl_graph.get("dsl_schema_version", "0.1.0")}),
         )
+        # Issue #442: the thesis reconstruction is the traversal anchor and must be
+        # present in the bundle so consumers know the goal of the graph traversal.
+        zf.writestr("thesis/thesis_reconstruction.json", _json_bytes({
+            "thesis_schema_version": "0.1.0",
+            "theses": theses,
+        }))
         zf.writestr("components/components.json", _json_bytes({"component_schema_version": "0.1.0", "components": components}))
         zf.writestr(
             "graph/component_graph.json",
@@ -2763,6 +2909,7 @@ def export_course_bundle(
             operation_graph=operation_graph,
             component_operation_links=component_operation_links,
             system_operations=system_operations,
+            dsl_graph=dsl_graph,
             artifact_sources=export_source,
         )
 
@@ -2794,6 +2941,7 @@ def export_course_bundle(
             operation_graph=operation_graph,
             component_operation_links=component_operation_links,
             system_operations=system_operations,
+            theses=_build_theses_for_documents(artifacts_by_doc, document_ids),
             export_source=export_source,
             options=options,
         )
@@ -2813,6 +2961,7 @@ def export_course_bundle(
             operation_graph=operation_graph,
             component_operation_links=component_operation_links,
             system_operations=system_operations,
+            theses=_build_theses_for_documents(artifacts_by_doc, document_ids),
             include_ndjson=req.include_ndjson,
             include_debug=req.include_debug_data,
             debug_data={
@@ -2922,6 +3071,7 @@ def export_document_bundle(
             operation_graph=operation_graph,
             component_operation_links=component_operation_links,
             system_operations=system_operations,
+            dsl_graph=dsl_graph,
             artifact_sources=export_source,
         )
 
@@ -2951,6 +3101,7 @@ def export_document_bundle(
             operation_graph=operation_graph,
             component_operation_links=component_operation_links,
             system_operations=system_operations,
+            theses=_build_theses_for_documents(artifacts_by_doc, document_ids),
             export_source=export_source,
             options=options,
         )
@@ -2970,6 +3121,7 @@ def export_document_bundle(
             operation_graph=operation_graph,
             component_operation_links=component_operation_links,
             system_operations=system_operations,
+            theses=_build_theses_for_documents(artifacts_by_doc, document_ids),
             include_ndjson=req.include_ndjson,
             include_debug=req.include_debug_data,
             debug_data={

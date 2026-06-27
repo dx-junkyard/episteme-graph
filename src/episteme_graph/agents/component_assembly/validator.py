@@ -12,6 +12,7 @@ from .schema import (
     ComponentAssemblyResult,
     ComponentRecord,
     ValidationIssue,
+    is_generic_component_name,
     normalize_dependency_type,
 )
 from .responsibility import CANONICAL_RESPONSIBILITY_TYPES, canonical_responsibility_type
@@ -204,6 +205,7 @@ class ComponentAssemblyValidator:
                     f"{component.component_id}.{field} must be a list",
                     f"components[{component.component_id}].{field}",
                 ))
+        issues += self._check_self_describing(component)
         issues += self._check_internal_flow(component, available)
         issues += self._check_responsibility_separation(component)
         issues += self._check_claim_support_contract(component, available or {})
@@ -251,6 +253,47 @@ class ComponentAssemblyValidator:
                 "warning",
                 f"{component.component_id} appears dominated by meta/prior-work evidence",
                 f"components[{component.component_id}].evidence_refs",
+            ))
+        return issues
+
+    def _check_self_describing(self, component: ComponentRecord) -> list[ValidationIssue]:
+        """Components must carry a specific identity (issue #440).
+
+        Warns when the name is a bare generic responsibility/operation label
+        (``COMPONENT_NAME_GENERIC``) or when role_in_thesis / teaching_takeaway
+        are empty (``COMPONENT_ROLE_IN_THESIS_EMPTY`` /
+        ``COMPONENT_TEACHING_TAKEAWAY_EMPTY``). Domain-agnostic — no specific
+        names are asserted.
+        """
+        issues: list[ValidationIssue] = []
+        cid = component.component_id
+        if is_generic_component_name(component.label):
+            issues.append(ValidationIssue(
+                "COMPONENT_NAME_GENERIC",
+                "warning",
+                f"{cid} name {component.label!r} is a generic responsibility label; "
+                "it should pair a subject with the responsibility",
+                f"components[{cid}].label",
+                target_type="component",
+                target_id=cid,
+            ))
+        if not str(getattr(component, "role_in_thesis", "") or "").strip():
+            issues.append(ValidationIssue(
+                "COMPONENT_ROLE_IN_THESIS_EMPTY",
+                "warning",
+                f"{cid} has empty role_in_thesis",
+                f"components[{cid}].role_in_thesis",
+                target_type="component",
+                target_id=cid,
+            ))
+        if not str(getattr(component, "teaching_takeaway", "") or "").strip():
+            issues.append(ValidationIssue(
+                "COMPONENT_TEACHING_TAKEAWAY_EMPTY",
+                "warning",
+                f"{cid} has empty teaching_takeaway",
+                f"components[{cid}].teaching_takeaway",
+                target_type="component",
+                target_id=cid,
             ))
         return issues
 

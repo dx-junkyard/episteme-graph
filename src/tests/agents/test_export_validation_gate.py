@@ -1521,7 +1521,12 @@ def test_teaching_output_blueprint_dangling_ref_is_hard_error():
 # ---------------------------------------------------------------------------
 
 def test_provisional_claim_ref_in_equation_is_warned():
-    """equation linked_claim_ids not in claims.json → warning, not a hard error."""
+    """equation linked_claim_ids not in claims.json → warning, not a hard error.
+
+    Issue #443: judged purely by set membership (the id is not in the final claim
+    set), no longer by name pattern, so the single code is
+    UNRESOLVED_CLAIM_REF_IN_ARTIFACT.
+    """
     artifacts = _make_artifacts(
         equation_semantics={
             "equations": [
@@ -1533,12 +1538,14 @@ def test_provisional_claim_ref_in_equation_is_warned():
     )
     result = _run_gate(artifacts=artifacts, claim_objects=_ClaimObjectResult([]))
     assert any(
-        w.code == "PROVISIONAL_CLAIM_REF_IN_ARTIFACT"
+        w.code == "UNRESOLVED_CLAIM_REF_IN_ARTIFACT"
         and w.artifact == "equation_semantics"
         for w in result.warnings
     )
     # Reported, but never a hard block.
-    assert all(e.code != "PROVISIONAL_CLAIM_REF_IN_ARTIFACT" for e in result.errors)
+    assert all(e.code != "UNRESOLVED_CLAIM_REF_IN_ARTIFACT" for e in result.errors)
+    # Name-pattern code is no longer emitted (issue #443).
+    assert all(w.code != "PROVISIONAL_CLAIM_REF_IN_ARTIFACT" for w in result.warnings)
 
 
 def test_provisional_claim_ref_in_derivation_is_warned():
@@ -1556,7 +1563,8 @@ def test_provisional_claim_ref_in_derivation_is_warned():
     )
     result = _run_gate(artifacts=artifacts, claim_objects=_ClaimObjectResult([]))
     codes = {w.code for w in result.warnings if w.artifact == "derivation_chain"}
-    assert "PROVISIONAL_CLAIM_REF_IN_ARTIFACT" in codes
+    assert "UNRESOLVED_CLAIM_REF_IN_ARTIFACT" in codes
+    assert "PROVISIONAL_CLAIM_REF_IN_ARTIFACT" not in codes
 
 
 def test_resolved_claim_refs_produce_no_leak_warning():

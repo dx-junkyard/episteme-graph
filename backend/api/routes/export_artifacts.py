@@ -75,6 +75,7 @@ def build_equations_export(
     structure_artifact: Any = None,
     evidence_index: dict[str, list[str]] | None = None,
     claim_index: dict[str, list[str]] | None = None,
+    symbol_registry_artifact: Any = None,
 ) -> list[dict]:
     """Convert the equation_semantics artifact into equations/equations.json shape.
 
@@ -95,6 +96,14 @@ def build_equations_export(
     first = records_raw[0] if records_raw else {}
     has_nested = isinstance(first, dict) and "source_extraction" in first
 
+    symbol_index: dict = {}
+    if symbol_registry_artifact is not None:
+        try:
+            from episteme_graph.agents.symbol_registry.builder import build_symbol_index
+            symbol_index = build_symbol_index(_coerce_dict(symbol_registry_artifact))
+        except Exception:
+            symbol_index = {}
+
     if has_nested:
         try:
             sem_result = EquationSemanticsResult.from_dict({
@@ -107,6 +116,7 @@ def build_equations_export(
             exported = sem_result.to_equations_export(
                 evidence_index=evidence_index,
                 claim_index=claim_index,
+                symbol_index=symbol_index,
             )
             # Validate and annotate
             _validate_equations_export(exported)
@@ -1376,6 +1386,35 @@ def build_claims_export(
             "review_reasons": list(r.get("review_reasons") or []),
         })
     return out
+
+
+def build_thesis_export(
+    thesis_artifact: Any,
+    *,
+    document_id: str,
+) -> dict:
+    """Convert a ``thesis_reconstruction`` artifact into the export shape (#442).
+
+    The thesis is the traversal anchor: it exposes central_question /
+    headline_claim / supporting_subclaim_ids / anchor_node_ids plus the central
+    thesis and support structure. Returns ``{}`` when the artifact is absent so
+    the caller can skip empty documents.
+    """
+    th = _coerce_dict(thesis_artifact)
+    central = th.get("central_thesis") if isinstance(th.get("central_thesis"), dict) else {}
+    if not th or not central:
+        return {}
+    return {
+        "document_id": th.get("document_id") or document_id,
+        "central_question": th.get("central_question") or "",
+        "headline_claim": th.get("headline_claim") or central.get("text") or "",
+        "supporting_subclaim_ids": [str(v) for v in (th.get("supporting_subclaim_ids") or []) if v],
+        "anchor_node_ids": [str(v) for v in (th.get("anchor_node_ids") or []) if v],
+        "central_thesis": central,
+        "support_structure": th.get("support_structure") or {},
+        "confidence": float(th.get("confidence") or 0.0),
+        "review_notes": list(th.get("review_notes") or []),
+    }
 
 
 def build_components_export(

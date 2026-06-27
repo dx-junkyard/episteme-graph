@@ -158,7 +158,10 @@ class SymbolRegistryBuilder:
         )
 
         if annotate_equations:
-            self._annotate_equations(records, alias_map, symbol_id_by_key)
+            record_by_id = {r.symbol_id: r for r in symbol_records}
+            self._annotate_equations(
+                records, alias_map, symbol_id_by_key, record_by_id
+            )
 
         return SymbolRegistryResult(
             document_id=document_id,
@@ -331,8 +334,17 @@ class SymbolRegistryBuilder:
         records: list,
         alias_map: dict[str, str],
         symbol_id_by_key: dict[str, str],
+        record_by_id: dict | None = None,
     ) -> None:
-        """Set DefinedSymbol.symbol_id in place so equations reference the registry."""
+        """Project SymbolRegistry data onto equation DefinedSymbols in place.
+
+        Sets ``symbol_id`` so equations reference the registry, and (issue #439)
+        ``meaning`` + ``source_evidence_id`` so each equation object is
+        self-describing without loading the registry. Meaning is the resolved
+        definition evidence text when available; source is the registry's first
+        source_evidence_id for the symbol.
+        """
+        record_by_id = record_by_id or {}
         for record in records:
             sem = getattr(record, "semantics", None)
             if sem is None:
@@ -343,5 +355,53 @@ class SymbolRegistryBuilder:
                     continue
                 key = cls._canonical_key(raw, alias_map)
                 symbol_id = symbol_id_by_key.get(key)
-                if symbol_id:
-                    ds.symbol_id = symbol_id
+                if not symbol_id:
+                    continue
+                ds.symbol_id = symbol_id
+                symbol_record = record_by_id.get(symbol_id)
+                if symbol_record is None:
+                    continue
+                if hasattr(ds, "meaning") and not getattr(ds, "meaning", None):
+                    texts = list(getattr(symbol_record, "definition_evidence_texts", []) or [])
+                    own = getattr(ds, "evidence_text", None)
+                    ds.meaning = (own or (texts[0] if texts else "")) or None
+                if hasattr(ds, "source_evidence_id") and not getattr(ds, "source_evidence_id", None):
+                    sources = list(getattr(symbol_record, "source_evidence_ids", []) or [])
+                    if sources:
+                        ds.source_evidence_id = sources[0]
+
+
+def build_symbol_index(symbol_registry) -> dict:
+    """Build a symbol_index for EquationSemanticsResult.to_equations_export (#439).
+
+    Maps both ``symbol_id`` and the canonical symbol text to
+    ``{"meaning", "source_evidence_id"}`` so the equation export can resolve any
+    free symbol. Accepts a SymbolRegistryResult or its dict form; tolerates None.
+    """
+    index: dict = {}
+    if symbol_registry is None:
+        return index
+    if isinstance(symbol_registry, dict):
+        records = symbol_registry.get("records") or []
+    else:
+        records = getattr(symbol_registry, "records", []) or []
+    for record in records:
+        if isinstance(record, dict):
+            symbol_id = str(record.get("symbol_id") or "")
+            canonical = str(record.get("canonical_symbol") or "")
+            texts = list(record.get("definition_evidence_texts") or [])
+            sources = list(record.get("source_evidence_ids") or [])
+        else:
+            symbol_id = str(getattr(record, "symbol_id", "") or "")
+            canonical = str(getattr(record, "canonical_symbol", "") or "")
+            texts = list(getattr(record, "definition_evidence_texts", []) or [])
+            sources = list(getattr(record, "source_evidence_ids", []) or [])
+        entry = {
+            "meaning": texts[0] if texts else "",
+            "source_evidence_id": sources[0] if sources else None,
+        }
+        if symbol_id:
+            index[symbol_id] = entry
+        if canonical and canonical not in index:
+            index[canonical] = entry
+    return index

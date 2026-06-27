@@ -865,6 +865,21 @@ def run_document_pipeline(
             except Exception as exc:
                 logger.exception("dsl_linking stage failed for document=%s material=%s", document_id, material_id)
                 raise PipelineStageError("dsl_linking", str(exc), cause=exc) from exc
+            # Issue #442: cross-link the thesis artifact and the DSL graph so the
+            # thesis has explicit traversal anchors and the anchor nodes carry the
+            # is_thesis_anchor flag. Deterministic, non-fatal — re-save both.
+            try:
+                from episteme_graph.agents.thesis_reconstruction.anchor_linker import (
+                    link_thesis_anchors,
+                )
+                anchors = link_thesis_anchors(thesis, dsl)
+                if anchors:
+                    save_artifact("thesis_reconstruction", thesis)
+            except Exception as exc:
+                logger.warning(
+                    "thesis anchor linking failed (non-fatal): document=%s error=%s",
+                    document_id, exc,
+                )
             save_artifact("dsl_linking", dsl)
         result.dsl_node_count = len(dsl.nodes)
         result.dsl_edge_count = len(dsl.edges)
@@ -1118,14 +1133,19 @@ def run_document_pipeline(
                     "summary": {"error_count": 0, "warning_count": 1, "review_required_count": 0},
                 }
             save_artifact("export_validation", validation_result_dict)
-        report_done("export_validation", {
-            "status": validation_result_dict.get("status"),
+        # Keep the gate verdict under `gate_status` (passed / passed_with_warnings
+        # / needs_review / failed_validation) and let report_done/finish_target_stage
+        # set `status="completed"`, so the UI stage mark reflects "this stage ran"
+        # rather than mis-mapping the verdict string to a blank "not_started" dot.
+        export_validation_payload = {
+            "gate_status": validation_result_dict.get("status"),
             "error_count": (validation_result_dict.get("summary") or {}).get("error_count", 0),
             "warning_count": (validation_result_dict.get("summary") or {}).get("warning_count", 0),
             "total": 1,
             "processed": 1,
-        })
-        if finish_target_stage("export_validation", {"status": validation_result_dict.get("status"), "error_count": (validation_result_dict.get("summary") or {}).get("error_count", 0), "warning_count": (validation_result_dict.get("summary") or {}).get("warning_count", 0), "total": 1, "processed": 1}):
+        }
+        report_done("export_validation", export_validation_payload)
+        if finish_target_stage("export_validation", {"status": "completed", **export_validation_payload}):
             return result
 
         # ── Export-validation failure: graceful degradation ─────────────────
