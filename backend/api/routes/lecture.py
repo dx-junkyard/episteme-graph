@@ -501,6 +501,51 @@ def _topic_spoken_script(topic: dict) -> str:
     return str(topic.get("spoken_script") or topic.get("content") or topic.get("summary") or "").strip()
 
 
+import re as _re
+
+def _resolve_equation_embeds(
+    text: str,
+    evidence_links: list[dict],
+    existing_formulas: list[dict],
+) -> tuple[str, list[dict]]:
+    """![[equation:xxx]] / [[equation:xxx]] 埋め込みを [[FORMULA_N]] プレースホルダーに変換する。
+
+    evidence_links から LaTeX を取得できる場合はそれを使い、取得できない場合は
+    埋め込みを空文字列に除去する（生テキストをフロントに渡さない）。
+    """
+    eq_by_id: dict[str, dict] = {}
+    for link in (evidence_links or []):
+        if link.get("kind") == "equation":
+            tid = str(link.get("target_id") or "").strip()
+            if tid:
+                eq_by_id[tid] = link
+
+    formulas = list(existing_formulas)
+    formula_offset = len(formulas)
+
+    def _replace(m: _re.Match) -> str:
+        eq_id = m.group(1).strip()
+        link = eq_by_id.get(eq_id)
+        summary = str(link.get("summary") or "") if link else ""
+        idx = formula_offset + len(formulas) - len(existing_formulas)
+        placeholder = f"[[FORMULA_{idx}]]"
+        # summary が LaTeX らしければ数式として埋め込む、なければ空文字にする
+        if summary:
+            formulas.append({
+                "id": placeholder,
+                "latex": summary,
+                "spoken": summary,
+                "is_display": True,
+            })
+            return placeholder
+        # 解決できない場合は埋め込みを除去する（生テキストを見せない）
+        return ""
+
+    result = _re.sub(r"!\[\[equation:([^\]]+)\]\]", _replace, text)
+    result = _re.sub(r"\[\[equation:([^\]]+)\]\]", _replace, result)
+    return result, formulas
+
+
 def _build_topic_draft_segment(
     topic_id: str,
     topic: dict,
@@ -511,6 +556,8 @@ def _build_topic_draft_segment(
     spoken_text = _topic_spoken_script(topic)
     if not display_text and not spoken_text:
         return None
+
+    evidence_links = topic.get("evidence_links") or []
 
     narration_persona = course_persona_settings(course_data)["narration_persona"]
     if not spoken_text:
@@ -526,6 +573,9 @@ def _build_topic_draft_segment(
     else:
         normalized, formulas = normalize_to_placeholder_format(display_text or spoken_text, [])
         display_text = normalized
+
+    # ![[equation:xxx]] 埋め込みを [[FORMULA_N]] プレースホルダーに解決する
+    display_text, formulas = _resolve_equation_embeds(display_text, evidence_links, formulas)
 
     display_text, formulas = normalize_to_placeholder_format(display_text or spoken_text, formulas)
     return LectureSegment(

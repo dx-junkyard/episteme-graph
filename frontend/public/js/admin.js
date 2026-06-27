@@ -4453,7 +4453,11 @@
     var value = String(id || "").trim();
     value = value.replace(/^\[\[/, "").replace(/\]\]$/, "");
     value = value.replace(/^\[\[/, "").replace(/\]\]$/, "");
-    return value.trim();
+    value = value.trim();
+    // Collapse a duplicated "eq_" prefix from the legacy double-prefix bug
+    // ("eq_eq_F2" → "eq_F2") so legacy and corrected ids resolve to the same key.
+    value = value.replace(/^(?:eq_){2,}/i, "eq_");
+    return value;
   }
 
   function lsCourseEvidenceKey(kind, id) {
@@ -4707,17 +4711,18 @@
       var key = lsCourseEvidenceKey(embed.kind, embedId);
       var evidenceItem = lsEvidenceItemByRef(topic, embed.kind, embedId);
       if (embed.kind === "equation") {
-        var formula = formulaById[String(embed.id)] || formulaById[embedId] || (evidenceItem && evidenceItem.latex ? evidenceItem : null);
-        if (formula && (formula.latex || formula.summary)) {
-          var latex = formula.latex || formula.summary || "";
+        var formula = formulaById[String(embed.id)] || formulaById[embedId] ||
+          (evidenceItem && (evidenceItem.latex || evidenceItem.plain_text || evidenceItem.raw_text) ? evidenceItem : null);
+        var body = lsEquationEmbedBody(formula);
+        if (body) {
           return '<button type="button" class="ls-material-embed ls-material-formula-only" data-evidence-ref="' + escHtml(key) + '">' +
-            lsRenderKatex(latex, true) +
+            body +
           '</button>';
         }
         return '<button type="button" class="ls-material-embed ls-material-missing" data-evidence-ref="' + escHtml(key) + '">' +
           '<span class="ls-material-embed-kind">未解決の数式</span>' +
           '<strong>' + escHtml(embedId || "数式") + '</strong>' +
-          '<span class="ls-material-embed-summary">この数式IDに対応するLaTeXを取得できませんでした。</span>' +
+          '<span class="ls-material-embed-summary">この数式IDに対応する数式本文を取得できませんでした。</span>' +
         '</button>';
       }
       if (embed.kind === "source" && (embedId === "summary" || embedId === "topic_summary")) {
@@ -5341,11 +5346,14 @@
     }
 
     var view = lsGraphForCurrentLayer(graph);
+    var readingPath = lsGraphComputeReadingPath(view);
     var html =
       lsGraphNarrativeSummaryHtml(graph) +
+      lsGraphReadingPathBannerHtml(view, readingPath) +
       '<div class="ls-component-graph-shell">' +
         '<div class="ls-component-graph-main">' +
           lsGraphLayerToolbarHtml(nodes) +
+          lsGraphReadingPathToggleHtml(readingPath.length) +
           '<div id="ls-component-network" class="ls-component-network" tabindex="0"></div>' +
           '<div class="ls-component-legend">' +
             '<div class="ls-component-legend-title">論理コンポーネント</div>' +
@@ -5355,6 +5363,10 @@
             '<div><span class="ls-legend-swatch ls-legend-diagnostic"></span>検証・制約</div>' +
             '<div><span class="ls-legend-swatch ls-legend-conclusion"></span>結論・出力</div>' +
             '<div><span class="ls-legend-swatch ls-legend-uncertainty"></span>注意・不確実性</div>' +
+            '<div><span class="ls-legend-anchor">★</span>主張の到達点（アンカー）</div>' +
+            '<div><span class="ls-legend-line ls-legend-line-negative"></span>負の関係（抑制・否定）</div>' +
+            '<div><span class="ls-legend-line ls-legend-line-positive"></span>正・非極性の関係</div>' +
+            (readingPath.length ? '<div><span class="ls-legend-path-num">①</span>推奨経路（順序）</div>' : '') +
           '</div>' +
           '<button id="ls-component-graph-fit" class="ls-component-graph-fit" type="button" title="全体を表示">⤢</button>' +
         '</div>' +
@@ -5366,13 +5378,14 @@
     container.innerHTML = html;
 
     lsBindGraphLayerToolbar(documentId);
+    lsBindGraphReadingPathToggle(documentId);
 
     if (!window.vis || !window.vis.Network) {
       lsRenderGraphFallback(container, view);
       return;
     }
 
-    lsInitComponentGraphNetwork(view);
+    lsInitComponentGraphNetwork(view, lsState.graphReadingPath ? readingPath : []);
   }
 
   // Issue #360: NarrativeAnnotator の graph_summary をグラフ上部に表示する。
@@ -5462,6 +5475,109 @@
     return Object.assign({}, graph, { nodes: visible, edges: visibleEdges });
   }
 
+  // Issue #452: recommended reading path on the main graph. Domain-agnostic — nodes
+  // are ordered by theory stage (the support-structure-derived canonical order in
+  // LS_MAIN_STAGE_LABELS), the destination is the thesis anchor (node flag), and
+  // only nodes on a reachable root→anchor route are kept. No node IDs hardcoded.
+  function lsCircledNumber(n) {
+    if (n >= 1 && n <= 20) return String.fromCharCode(0x2460 + (n - 1));
+    return "(" + n + ")";
+  }
+
+  function lsGraphStageIndex(node) {
+    return LS_MAIN_STAGE_LABELS.indexOf(lsGraphMainStageLabel(node));
+  }
+
+  function lsGraphComputeReadingPath(view) {
+    var nodes = (view && view.nodes) || [];
+    var edges = (view && view.edges) || [];
+    var main = nodes.filter(function (n) {
+      return String((n && n.graph_layer) || "main").toLowerCase() === "main";
+    });
+    if (!main.length) main = nodes.slice();
+    if (main.length < 2) return [];
+    var idOf = function (n) { return lsGraphNodeId(n); };
+    var ordered = main.slice().sort(function (a, b) {
+      var ia = lsGraphStageIndex(a), ib = lsGraphStageIndex(b);
+      var ra = ia < 0 ? 999 : ia, rb = ib < 0 ? 999 : ib;
+      if (ra !== rb) return ra - rb;
+      return (Number(a.display_order || 0)) - (Number(b.display_order || 0));
+    });
+    var mainIds = {};
+    main.forEach(function (n) { mainIds[idOf(n)] = true; });
+    var adj = {}, radj = {};
+    edges.forEach(function (e) {
+      var s = e.source_component_id || e.source || e.from;
+      var t = e.target_component_id || e.target || e.to;
+      if (!mainIds[s] || !mainIds[t] || s === t) return;
+      (adj[s] = adj[s] || []).push(t);
+      (radj[t] = radj[t] || []).push(s);
+    });
+    // anchor: prefer the flagged thesis anchor (issue #449); else latest stage.
+    var anchorNode = null;
+    for (var i = ordered.length - 1; i >= 0; i--) {
+      if (ordered[i].is_thesis_anchor) { anchorNode = ordered[i]; break; }
+    }
+    if (!anchorNode) anchorNode = ordered[ordered.length - 1];
+    var anchorId = idOf(anchorNode);
+    function reach(startId, g) {
+      var seen = {}, stack = [startId]; seen[startId] = true;
+      while (stack.length) {
+        var cur = stack.pop();
+        (g[cur] || []).forEach(function (nx) { if (!seen[nx]) { seen[nx] = true; stack.push(nx); } });
+      }
+      return seen;
+    }
+    var canReachAnchor = reach(anchorId, radj); // nodes with a forward route to anchor
+    var rootId = null;
+    for (var j = 0; j < ordered.length; j++) {
+      var oid = idOf(ordered[j]);
+      if (canReachAnchor[oid]) { rootId = oid; break; }
+    }
+    if (!rootId) return [];
+    var reachableFromRoot = reach(rootId, adj);
+    var pathSet = {};
+    Object.keys(reachableFromRoot).forEach(function (id) {
+      if (canReachAnchor[id]) pathSet[id] = true;
+    });
+    pathSet[anchorId] = true;
+    var path = [];
+    ordered.forEach(function (n) { var id = idOf(n); if (pathSet[id]) path.push(id); });
+    if (path.indexOf(anchorId) < 0) path.push(anchorId);
+    return path.length >= 2 ? path : [];
+  }
+
+  function lsGraphReadingPathToggleHtml(hasPath) {
+    if (!hasPath) return "";
+    var active = lsState.graphReadingPath ? " is-active" : "";
+    return '<button type="button" id="ls-graph-path-btn" class="ls-graph-layer-btn ls-graph-path-btn' + active +
+      '" aria-pressed="' + (lsState.graphReadingPath ? "true" : "false") + '">推奨経路</button>';
+  }
+
+  function lsGraphReadingPathBannerHtml(view, path) {
+    if (!lsState.graphReadingPath || !path.length) return "";
+    var byId = {};
+    (view.nodes || []).forEach(function (n) { byId[lsGraphNodeId(n)] = n; });
+    var items = path.map(function (id, i) {
+      var n = byId[id];
+      var label = n ? (lsGraphSemanticLabel(n) || id).replace(/\n/g, " ") : id;
+      return '<li><span class="ls-graph-path-num">' + escHtml(lsCircledNumber(i + 1)) + '</span> ' + escHtml(label) + '</li>';
+    }).join("");
+    return '<div class="ls-graph-reading-path">' +
+      '<div class="ls-graph-reading-path-title">推奨読解経路（前提 → 主張アンカー）' +
+      '<span class="ls-graph-narrative-badge">AI提案</span></div>' +
+      '<ol class="ls-graph-reading-path-list">' + items + '</ol></div>';
+  }
+
+  function lsBindGraphReadingPathToggle(documentId) {
+    var btn = document.getElementById("ls-graph-path-btn");
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      lsState.graphReadingPath = !lsState.graphReadingPath;
+      lsRenderGraphPanel(documentId);
+    });
+  }
+
   function lsGraphEmptyDetailHtml(nodeCount, edgeCount) {
     return '<div class="ls-graph-detail-empty">' +
       '<div class="ls-graph-detail-icon">⌖</div>' +
@@ -5487,9 +5603,36 @@
     return html + '</div>';
   }
 
-  function lsInitComponentGraphNetwork(graph) {
+  // Issue #450: keep the live network + graph so detail-panel reference links can
+  // navigate (select + focus) to neighbouring / referenced nodes.
+  var lsActiveComponentNetwork = null;
+  var lsActiveComponentGraph = null;
+
+  function lsGraphNavigateToNode(nodeId) {
+    var graph = lsActiveComponentGraph;
+    if (!graph || !nodeId) return;
+    var target = null;
+    (graph.nodes || []).some(function (n) {
+      if (lsGraphNodeId(n) === nodeId) { target = n; return true; }
+      return false;
+    });
+    if (!target) return;
+    if (lsActiveComponentNetwork) {
+      try {
+        lsActiveComponentNetwork.selectNodes([nodeId]);
+        lsActiveComponentNetwork.focus(nodeId, { scale: 1.05, animation: { duration: 350, easingFunction: "easeInOutQuad" } });
+      } catch (e) { /* node may be filtered out of the current layer */ }
+    }
+    lsRenderGraphNodeDetail(target, graph);
+  }
+
+  function lsInitComponentGraphNetwork(graph, readingPath) {
     var networkEl = document.getElementById("ls-component-network");
     if (!networkEl) return;
+    lsActiveComponentGraph = graph;
+    // Issue #452: ordered reading-path overlay (id -> 1-based step).
+    var pathOrder = {};
+    (readingPath || []).forEach(function (id, i) { pathOrder[id] = i + 1; });
 
     var nodes = graph.nodes || [];
     var edges = graph.edges || [];
@@ -5499,6 +5642,11 @@
     nodes.forEach(function (node) {
       var id = lsGraphNodeId(node);
       if (id) nodeById[id] = node;
+    });
+    // Issue #450: map vis edge id -> edge so edge selection can render its detail.
+    var edgeById = {};
+    graphEdges.forEach(function (edge, index) {
+      edgeById[edge.edge_id || ("edge-" + index)] = edge;
     });
 
     var visNodes = new window.vis.DataSet(nodes.map(function (node, index) {
@@ -5523,6 +5671,24 @@
       if (lsGraphNodeFaded(node, backing)) {
         visNode.opacity = 0.55;
       }
+      // Issue #449: thesis-anchor nodes (the goal of the argument) must always be
+      // visually distinguishable. Emphasis comes from the node's own
+      // is_thesis_anchor flag — never from ID string matching — so it works
+      // regardless of any prefix mismatch between artifacts (#443 is separate).
+      if (node && node.is_thesis_anchor) {
+        visNode.label = "★ " + visNode.label;
+        visNode.borderWidth = 4;
+        visNode.borderWidthSelected = 5;
+        visNode.font = { multi: true, color: "#b45309" };
+        visNode.shadow = { enabled: true, color: "rgba(245, 158, 11, 0.45)", size: 16, x: 0, y: 0 };
+      }
+      // Issue #452: number path nodes in reading order and emphasise their border.
+      if (pathOrder[id]) {
+        visNode.label = lsCircledNumber(pathOrder[id]) + " " + visNode.label;
+        if (!(node && node.is_thesis_anchor)) {
+          visNode.borderWidth = Math.max(visNode.borderWidth || 2, 3);
+        }
+      }
       return visNode;
     }));
 
@@ -5530,7 +5696,7 @@
       var from = edge.source_component_id || edge.source || edge.from;
       var to = edge.target_component_id || edge.target || edge.to;
       var relation = edge.relation || edge.edge_type || edge.type || "RELATED_TO";
-      return {
+      var visEdge = {
         id: edge.edge_id || ("edge-" + index),
         from: from,
         to: to,
@@ -5540,6 +5706,13 @@
         width: Math.max(1, Math.min(4, Number(edge.confidence || 0.7) * 4)),
         color: { color: lsGraphEdgeColor(edge) },
       };
+      // Issue #452: highlight forward edges that lie on the recommended path.
+      if (pathOrder[from] && pathOrder[to] && pathOrder[to] > pathOrder[from]) {
+        visEdge.color = { color: "#4f46e5", highlight: "#4338ca" };
+        visEdge.width = 4;
+        visEdge.dashes = false;
+      }
+      return visEdge;
     }).filter(function (edge) {
       return edge.from && edge.to;
     }));
@@ -5571,6 +5744,7 @@
       },
       interaction: { hover: true, tooltipDelay: 180 },
     });
+    lsActiveComponentNetwork = network;
 
     var fitBtn = document.getElementById("ls-component-graph-fit");
     if (fitBtn) {
@@ -5581,124 +5755,246 @@
     network.once("afterDrawing", function () {
       network.fit({ animation: false });
     });
-    network.on("selectNode", function (params) {
-      var node = nodeById[params.nodes[0]];
-      if (node) lsRenderGraphNodeDetail(node, graph);
-    });
-    network.on("deselectNode", function () {
+    // Issue #450: a single click handler renders the detail panel for ANY selected
+    // element — node (priority) or edge — and resets on background click.
+    network.on("click", function (params) {
       var detail = document.getElementById("ls-component-graph-detail");
+      if (params.nodes && params.nodes.length) {
+        var node = nodeById[params.nodes[0]];
+        if (node) { lsRenderGraphNodeDetail(node, graph); return; }
+      }
+      if (params.edges && params.edges.length) {
+        var edge = edgeById[params.edges[0]];
+        if (edge) { lsRenderGraphEdgeDetail(edge, graph); return; }
+      }
       if (detail) detail.innerHTML = lsGraphEmptyDetailHtml(nodes.length, edges.length);
     });
+  }
+
+  // Issue #448: map an internal component_type/node_type to the user-facing role
+  // name shown in the legend. Implementation-derived type names (e.g. *Node) must
+  // never reach the UI; only these role names do. Domain-agnostic — derived from
+  // the node's group (keyword-based), not from paper-specific vocabulary.
+  var LS_GRAPH_ROLE_LABELS = {
+    assumption: "前提・定義",
+    method: "手法・構成",
+    relation: "推論・関係",
+    diagnostic: "検証・制約",
+    conclusion: "結論・出力",
+    uncertainty: "注意・不確実性",
+  };
+
+  function lsGraphRoleLabel(node) {
+    return LS_GRAPH_ROLE_LABELS[lsGraphNodeGroup(node)] || LS_GRAPH_ROLE_LABELS.relation;
+  }
+
+  // Issue #450: common reference resolution. Resolve an id against the actual
+  // sets present in the view — graph nodes (always), and claims/equations
+  // (best-effort, from loaded chunk state). Unresolvable references are reported
+  // explicitly, never silently dropped.
+  function lsGraphBuildResolver(graph) {
+    var nodeMap = {};
+    ((graph && graph.nodes) || []).forEach(function (n) {
+      var id = lsGraphNodeId(n);
+      if (id) nodeMap[id] = n;
+    });
+    var claimMap = {};
+    var equationMap = {};
+    var byChunk = lsState.claimsByChunk || {};
+    Object.keys(byChunk).forEach(function (cid) {
+      (byChunk[cid] || []).forEach(function (claim) {
+        if (!claim) return;
+        var clid = claim.claim_id || claim.id;
+        if (clid && !claimMap[clid]) claimMap[clid] = claim;
+        var eq = claim.equation;
+        if (eq) {
+          var eqid = eq.equation_id || eq.label;
+          if (eqid && !equationMap[eqid]) equationMap[eqid] = eq;
+        }
+      });
+    });
+    return { nodeMap: nodeMap, claimMap: claimMap, equationMap: equationMap };
+  }
+
+  function lsGraphSnippet(text, max) {
+    var s = String(text || "").replace(/\s+/g, " ").trim();
+    var limit = max || 90;
+    return s.length > limit ? s.slice(0, limit - 1) + "…" : s;
+  }
+
+  // kind: "component" | "equation" | "claim" | "evidence" | "derivation"
+  function lsGraphResolveRef(resolver, kind, id) {
+    var ref = { id: id, kind: kind, resolved: false, label: id, navNodeId: "", latex: "" };
+    if (!id) return ref;
+    if (kind === "component") {
+      var node = resolver.nodeMap[id];
+      if (node) {
+        ref.resolved = true;
+        ref.navNodeId = id;
+        ref.label = (lsGraphSemanticLabel(node) || id).replace(/\n/g, " ");
+      }
+    } else if (kind === "equation") {
+      var eq = resolver.equationMap[id];
+      if (eq) {
+        ref.resolved = true;
+        ref.latex = eq.latex || "";
+        ref.label = eq.label || id;
+      }
+    } else if (kind === "claim") {
+      var claim = resolver.claimMap[id];
+      if (claim) {
+        ref.resolved = true;
+        ref.label = lsGraphSnippet(claim.text || claim.normalized_text || id);
+      }
+    }
+    return ref;
+  }
+
+  function lsGraphRefChipHtml(ref) {
+    if (ref.resolved && ref.navNodeId) {
+      return '<button type="button" class="ls-graph-ref ls-graph-ref-nav" data-ls-nav-node="' +
+        escHtml(ref.navNodeId) + '">' + escHtml(ref.label) + '</button>';
+    }
+    if (ref.resolved) {
+      if (ref.kind === "equation" && ref.latex) {
+        return '<span class="ls-graph-ref ls-graph-ref-resolved">' + lsRenderKatex(ref.latex, false) +
+          ' <span class="ls-graph-ref-id">' + escHtml(ref.id) + '</span></span>';
+      }
+      return '<span class="ls-graph-ref ls-graph-ref-resolved">' + escHtml(ref.label) + '</span>';
+    }
+    return '<span class="ls-graph-ref ls-graph-ref-unresolved" title="参照先を解決できませんでした">' +
+      escHtml(ref.id) + ' <span class="ls-graph-ref-flag">未解決</span></span>';
+  }
+
+  // Render a labelled row of resolved/unresolved reference chips. Returns "" when
+  // there are no ids, so the caller can decide overall section emptiness.
+  function lsGraphRefRowHtml(resolver, label, kind, ids) {
+    var unique = [];
+    var seen = {};
+    (ids || []).forEach(function (id) {
+      var key = String(id || "");
+      if (!key || seen[key]) return;
+      seen[key] = true;
+      unique.push(key);
+    });
+    if (!unique.length) return "";
+    var chips = unique.map(function (id) {
+      return lsGraphRefChipHtml(lsGraphResolveRef(resolver, kind, id));
+    }).join(" ");
+    return '<div class="ls-graph-detail-refrow"><span class="ls-graph-detail-reflabel">' + escHtml(label) +
+      '</span><div class="ls-graph-ref-chips">' + chips + '</div></div>';
+  }
+
+  // Issue #450: render incoming/outgoing neighbours with their relation type and a
+  // navigable chip to the neighbour node.
+  function lsGraphNeighborListHtml(list, heading, resolver, graphNarrative) {
+    if (!list.length) return "";
+    var html = '<div class="ls-graph-detail-neighbor-group">' +
+      '<div class="ls-graph-detail-neighbor-head">' + escHtml(heading) + '</div>' +
+      '<ul class="ls-graph-detail-edges">';
+    list.forEach(function (item) {
+      var edge = item.edge;
+      var relation = edge.relation || edge.edge_type || edge.type || "RELATED_TO";
+      var ref = lsGraphResolveRef(resolver, "component", item.other);
+      html += '<li><span>' + escHtml(lsGraphEdgeLabel(relation)) + '</span>' + lsGraphRefChipHtml(ref);
+      var evidence = edge.evidence || {};
+      var reason = String(evidence.reason || "").trim();
+      if (reason) {
+        html += '<div class="ls-graph-detail-edge-reason">' + escHtml(reason) + '</div>';
+      }
+      var edgeNarrative = (graphNarrative.edge_narratives || {})[edge.edge_id];
+      var transition = edgeNarrative ? String(edgeNarrative.transition_text || "").trim() : "";
+      if (transition) {
+        html += '<div class="ls-graph-detail-edge-narrative">' + escHtml(transition) + ' <span class="ls-graph-narrative-badge">AI提案</span></div>';
+      }
+      html += '</li>';
+    });
+    html += '</ul></div>';
+    return html;
   }
 
   function lsRenderGraphNodeDetail(node, graph) {
     var detail = document.getElementById("ls-component-graph-detail");
     if (!detail) return;
     var nodeId = lsGraphNodeId(node);
-    var nodeById = {};
-    (graph.nodes || []).forEach(function (n) {
-      var id = lsGraphNodeId(n);
-      if (id) nodeById[id] = n;
-    });
-    var connected = (graph.edges || []).filter(function (edge) {
-      var source = edge.source_component_id || edge.source || edge.from;
-      var target = edge.target_component_id || edge.target || edge.to;
-      return source === nodeId || target === nodeId;
-    });
     var backing = String(node.source_backing_status || "").toLowerCase();
+    var resolver = lsGraphBuildResolver(graph);
+    var graphNarrative = (graph && graph.narrative) || {};
+    var anchorMark = node.is_thesis_anchor
+      ? '<span class="ls-graph-detail-anchor" title="主張の到達点（アンカー）">★</span> ' : "";
 
-    // Header: badge + title
+    // Header: role badge (issue #448 — user-facing role name, no internal type) + title.
     var html =
       '<div class="ls-graph-detail-badge ' + escHtml(lsGraphNodeGroup(node)) + '">' +
-      escHtml(node.component_type_text || node.component_type || node.typeName || "component") + '</div>' +
-      '<h4>' + escHtml((lsGraphNodeDisplayLabel(node, nodeId) || nodeId || "無題").replace(/\n/g, " — ")) + '</h4>';
+      escHtml(lsGraphRoleLabel(node)) + '</div>' +
+      '<h4>' + anchorMark + escHtml((lsGraphNodeDisplayLabel(node, nodeId) || nodeId || "無題").replace(/\n/g, " — ")) + '</h4>';
 
-    // 1. このノードの意味
-    if (node.description) {
-      html += '<div class="ls-graph-detail-section"><b>このノードの意味</b><p>' + escHtml(node.description) + '</p></div>';
+    // ── (a) 説明: 何を表すか（平文）─────────────────────────────────
+    html += '<div class="ls-graph-detail-section"><b>説明</b>';
+    html += '<p class="ls-graph-detail-role">役割: ' + escHtml(lsGraphRoleLabel(node)) + '</p>';
+    var description = String(node.description || "").trim();
+    if (description) {
+      html += '<p>' + escHtml(description) + '</p>';
+    } else {
+      var fallbackText = (lsGraphNodeDisplayLabel(node, nodeId) || "").replace(/\n/g, " ").trim();
+      html += '<p class="ls-theory-muted">' + escHtml(fallbackText || "説明文はありません。") + '</p>';
     }
-
-    // 1a. 論文の議論での役割（NarrativeAnnotator, issue #360。LLM 提案）
-    var graphNarrative = (graph && graph.narrative) || {};
     var nodeNarrative = (graphNarrative.node_narratives || {})[nodeId];
     if (nodeNarrative && String(nodeNarrative.narrative_role || "").trim()) {
-      html += '<div class="ls-graph-detail-section"><b>議論での役割 <span class="ls-graph-narrative-badge">AI提案</span></b>' +
-        '<p>' + escHtml(nodeNarrative.narrative_role) + '</p></div>';
+      html += '<p>議論での役割: ' + escHtml(nodeNarrative.narrative_role) + ' <span class="ls-graph-narrative-badge">AI提案</span></p>';
     }
-
-    // 1b. 抽出メモ（review_reason — step.reason からの抽出/検証メモ）
     var reviewReason = String(node.review_reason || "").trim();
     if (reviewReason) {
-      html += '<div class="ls-graph-detail-section"><b>抽出メモ</b><p class="ls-graph-detail-memo">' + escHtml(reviewReason) + '</p></div>';
-    }
-
-    // 2. 入力
-    var inputParts = "";
-    if ((node.input_equation_ids || []).length) {
-      inputParts += '<div class="ls-graph-detail-link"><span>式</span> ' + escHtml((node.input_equation_ids).join(", ")) + '</div>';
-    }
-    if ((node.input_claim_ids || []).length) {
-      inputParts += '<div class="ls-graph-detail-link"><span>claim</span> ' + escHtml((node.input_claim_ids).join(", ")) + '</div>';
-    }
-    if ((node.required_claim_ids || []).length) {
-      inputParts += '<div class="ls-graph-detail-link"><span>前提claim</span> ' + escHtml((node.required_claim_ids).join(", ")) + '</div>';
-    }
-    if (inputParts) {
-      html += '<div class="ls-graph-detail-section"><b>入力</b>' + inputParts + '</div>';
-    }
-
-    // 3. 出力
-    var outputParts = "";
-    if ((node.output_equation_ids || []).length) {
-      outputParts += '<div class="ls-graph-detail-link"><span>式</span> ' + escHtml((node.output_equation_ids).join(", ")) + '</div>';
-    }
-    if ((node.output_claim_ids || []).length) {
-      outputParts += '<div class="ls-graph-detail-link"><span>claim</span> ' + escHtml((node.output_claim_ids).join(", ")) + '</div>';
-    }
-    if (outputParts) {
-      html += '<div class="ls-graph-detail-section"><b>出力</b>' + outputParts + '</div>';
-    }
-
-    // 4. 接続（接続先ノードのラベルと接続理由を表示）
-    html += '<div class="ls-graph-detail-section"><b>接続</b>';
-    if (!connected.length) {
-      html += '<p class="ls-theory-muted">接続エッジはありません。</p>';
-    } else {
-      html += '<ul class="ls-graph-detail-edges">';
-      connected.forEach(function (edge) {
-        var source = edge.source_component_id || edge.source || edge.from;
-        var target = edge.target_component_id || edge.target || edge.to;
-        var otherId = source === nodeId ? target : source;
-        var otherNode = nodeById[otherId];
-        var otherLabel = otherNode ? ((lsGraphNodeDisplayLabel(otherNode, otherId) || otherId).replace(/\n/g, " ")) : otherId;
-        var arrow = source === nodeId ? "→" : "←";
-        var relation = edge.relation || edge.edge_type || edge.type || "RELATED_TO";
-        var edgeLabel = lsGraphEdgeLabel(relation);
-        html += '<li><span>' + escHtml(edgeLabel) + '</span>' + escHtml(arrow + " " + otherLabel);
-        var evidence = edge.evidence || {};
-        var reason = String(evidence.reason || "").trim();
-        if (reason) {
-          html += '<div class="ls-graph-detail-edge-reason">' + escHtml(reason) + '</div>';
-        }
-        // 遷移の説明（NarrativeAnnotator, issue #360。LLM 提案）
-        var edgeNarrative = (graphNarrative.edge_narratives || {})[edge.edge_id];
-        var transition = edgeNarrative ? String(edgeNarrative.transition_text || "").trim() : "";
-        if (transition) {
-          html += '<div class="ls-graph-detail-edge-narrative">' + escHtml(transition) + ' <span class="ls-graph-narrative-badge">AI提案</span></div>';
-        }
-        html += '</li>';
-      });
-      html += '</ul>';
+      html += '<p class="ls-graph-detail-memo">' + escHtml(reviewReason) + '</p>';
     }
     html += '</div>';
 
-    // 5. 根拠
-    var links = lsGraphSourceLinksHtml(node);
-    if (links) {
-      html += '<div class="ls-graph-detail-section"><b>根拠</b>' + links + '</div>';
-    }
+    // ── (b) 根拠リンク: 何に支えられるか（共通の参照解決を介す）──────────
+    var equationIds = []
+      .concat(node.linked_equation_ids || [])
+      .concat(node.input_equation_ids || [])
+      .concat(node.output_equation_ids || []);
+    var claimIds = []
+      .concat(node.linked_claim_ids || [])
+      .concat(node.input_claim_ids || [])
+      .concat(node.output_claim_ids || [])
+      .concat(node.required_claim_ids || []);
+    var derivationIds = []
+      .concat(node.linked_derivation_ids || [])
+      .concat(node.supporting_derivation_ids || []);
+    var componentIds = []
+      .concat(node.representative_component_id ? [node.representative_component_id] : [])
+      .concat(node.parent_component_id ? [node.parent_component_id] : [])
+      .concat(node.linked_component_ids || [])
+      .concat(node.member_component_ids || []);
+    var refRows =
+      lsGraphRefRowHtml(resolver, "式", "equation", equationIds) +
+      lsGraphRefRowHtml(resolver, "claim", "claim", claimIds) +
+      lsGraphRefRowHtml(resolver, "evidence", "evidence", node.linked_evidence_ids) +
+      lsGraphRefRowHtml(resolver, "derivation", "derivation", derivationIds) +
+      lsGraphRefRowHtml(resolver, "関連要素", "component", componentIds);
+    html += '<div class="ls-graph-detail-section"><b>根拠リンク</b>' +
+      (refRows || '<p class="ls-theory-muted">根拠リンクはありません。</p>') + '</div>';
 
-    // 6. 要確認事項
+    // ── (c) 隣接: 何と繋がるか（入る／出るエッジ、関係種別付き）────────────
+    var incoming = [];
+    var outgoing = [];
+    (graph.edges || []).forEach(function (edge) {
+      var source = edge.source_component_id || edge.source || edge.from;
+      var target = edge.target_component_id || edge.target || edge.to;
+      if (source === nodeId) outgoing.push({ edge: edge, other: target });
+      else if (target === nodeId) incoming.push({ edge: edge, other: source });
+    });
+    html += '<div class="ls-graph-detail-section"><b>隣接</b>';
+    if (!incoming.length && !outgoing.length) {
+      html += '<p class="ls-theory-muted">接続エッジはありません。</p>';
+    } else {
+      html += lsGraphNeighborListHtml(outgoing, "→ 出力（このノードから）", resolver, graphNarrative);
+      html += lsGraphNeighborListHtml(incoming, "← 入力（このノードへ）", resolver, graphNarrative);
+    }
+    html += '</div>';
+
+    // 要確認事項
     var hasReview = backing || (node.review_reasons || []).length;
     if (hasReview) {
       html += '<div class="ls-graph-detail-section"><b>要確認事項</b>';
@@ -5716,10 +6012,11 @@
       html += '</div>';
     }
 
-    // 7. システム情報（折りたたみ）
+    // システム情報（折りたたみ。内部 type 名はユーザー向けには出さず、ここにのみ残す — issue #448）
     html += '<div class="ls-graph-detail-section ls-graph-detail-system">' +
       '<details><summary>システム情報</summary>' +
       '<div class="ls-graph-detail-link"><b>ID</b> <code>' + escHtml(nodeId || "") + '</code></div>' +
+      '<div class="ls-graph-detail-link"><b>内部type</b> <code>' + escHtml(node.component_type || node.type || "") + '</code></div>' +
       '<div class="ls-graph-detail-link"><b>レイヤー</b> ' + escHtml(lsGraphLayerLabel(node.graph_layer)) + '</div>' +
       '<div class="ls-graph-detail-link"><b>ステータス</b> ' + escHtml(node.review_status || node.origin || "paper") + '</div>';
     var linkage = lsGraphLayerLinkageHtml(node);
@@ -5727,6 +6024,101 @@
     html += '</details></div>';
 
     detail.innerHTML = html;
+    lsGraphBindDetailNav(detail);
+  }
+
+  // Issue #450: wire navigable reference chips to select + focus the target node.
+  function lsGraphBindDetailNav(detail) {
+    var navEls = detail.querySelectorAll("[data-ls-nav-node]");
+    for (var ni = 0; ni < navEls.length; ni++) {
+      (function (el) {
+        el.addEventListener("click", function () {
+          lsGraphNavigateToNode(el.getAttribute("data-ls-nav-node"));
+        });
+      })(navEls[ni]);
+    }
+  }
+
+  // Issue #450: edge detail panel — same three tiers as nodes (説明 → 根拠リンク →
+  // 隣接), so selecting ANY element yields a structured, navigable detail view.
+  function lsRenderGraphEdgeDetail(edge, graph) {
+    var detail = document.getElementById("ls-component-graph-detail");
+    if (!detail) return;
+    var resolver = lsGraphBuildResolver(graph);
+    var graphNarrative = (graph && graph.narrative) || {};
+    var relation = edge.relation || edge.edge_type || edge.type || "RELATED_TO";
+    var sourceId = edge.source_component_id || edge.source || edge.from;
+    var targetId = edge.target_component_id || edge.target || edge.to;
+    var evidence = edge.evidence || {};
+    var backing = String(edge.source_backing_status || "").toLowerCase();
+    var srcRef = lsGraphResolveRef(resolver, "component", sourceId);
+    var tgtRef = lsGraphResolveRef(resolver, "component", targetId);
+
+    // Header: relation badge + relation label.
+    var html =
+      '<div class="ls-graph-detail-badge relation">関係</div>' +
+      '<h4>' + escHtml(lsGraphEdgeLabel(relation)) + '</h4>';
+
+    // ── (a) 説明 ─────────────────────────────────────────────────────
+    html += '<div class="ls-graph-detail-section"><b>説明</b>';
+    html += '<p class="ls-graph-detail-role">関係種別: ' + escHtml(lsGraphEdgeLabel(relation)) + '</p>';
+    var domainVerb = String(edge.domain_verb || "").trim();
+    if (domainVerb) html += '<p>動詞: ' + escHtml(domainVerb) + '</p>';
+    var reasoning = String(evidence.reason || edge.reasoning || "").trim();
+    if (reasoning) html += '<p>' + escHtml(reasoning) + '</p>';
+    html += '<p class="ls-theory-muted">' +
+      escHtml((srcRef.label || sourceId || "?")) + ' → ' + escHtml((tgtRef.label || targetId || "?")) + '</p>';
+    var edgeNarrative = (graphNarrative.edge_narratives || {})[edge.edge_id];
+    var transition = edgeNarrative ? String(edgeNarrative.transition_text || "").trim() : "";
+    if (transition) {
+      html += '<p>遷移: ' + escHtml(transition) + ' <span class="ls-graph-narrative-badge">AI提案</span></p>';
+    }
+    html += '</div>';
+
+    // ── (b) 根拠リンク（evidence_refs を共通の参照解決で解決）──────────────
+    var claimIds = [].concat(evidence.evidence_claim_ids || []).concat(evidence.evidence_claims || []);
+    var refRows =
+      lsGraphRefRowHtml(resolver, "式", "equation", evidence.evidence_equation_ids) +
+      lsGraphRefRowHtml(resolver, "claim", "claim", claimIds) +
+      lsGraphRefRowHtml(resolver, "derivation", "derivation", evidence.evidence_derivation_ids) +
+      lsGraphRefRowHtml(resolver, "evidence", "evidence", evidence.source_evidence_ids) +
+      lsGraphRefRowHtml(resolver, "thesis", "component", evidence.thesis_refs);
+    html += '<div class="ls-graph-detail-section"><b>根拠リンク</b>' +
+      (refRows || '<p class="ls-theory-muted">根拠リンクはありません。</p>') + '</div>';
+
+    // ── (c) 隣接（始点・終点ノード、ともに遷移可能）────────────────────────
+    html += '<div class="ls-graph-detail-section"><b>隣接</b>' +
+      '<div class="ls-graph-detail-neighbor-group"><div class="ls-graph-detail-neighbor-head">始点</div>' +
+      '<div class="ls-graph-ref-chips">' + lsGraphRefChipHtml(srcRef) + '</div></div>' +
+      '<div class="ls-graph-detail-neighbor-group"><div class="ls-graph-detail-neighbor-head">終点</div>' +
+      '<div class="ls-graph-ref-chips">' + lsGraphRefChipHtml(tgtRef) + '</div></div></div>';
+
+    // 要確認事項
+    var reasons = edge.review_reasons || [];
+    if (backing || reasons.length) {
+      html += '<div class="ls-graph-detail-section"><b>要確認事項</b>';
+      if (backing) {
+        html += '<p class="ls-graph-backing ls-graph-backing-' + escHtml(backing) + '">' +
+          escHtml(lsGraphSourceBackingLabel(backing)) + '</p>';
+      }
+      if (reasons.length) {
+        html += '<ul class="ls-graph-detail-reasons">';
+        reasons.forEach(function (r) { html += '<li>' + escHtml(lsGraphReviewReasonLabel(r)) + '</li>'; });
+        html += '</ul>';
+      }
+      html += '</div>';
+    }
+
+    // システム情報（折りたたみ。内部 relation 名はここにのみ残す — issue #448）
+    var confidence = edge.confidence != null ? String(edge.confidence) : "";
+    html += '<div class="ls-graph-detail-section ls-graph-detail-system"><details><summary>システム情報</summary>' +
+      '<div class="ls-graph-detail-link"><b>edge ID</b> <code>' + escHtml(edge.edge_id || "") + '</code></div>' +
+      '<div class="ls-graph-detail-link"><b>内部relation</b> <code>' + escHtml(edge.edge_type || edge.relation || "") + '</code></div>' +
+      (confidence ? '<div class="ls-graph-detail-link"><b>確信度</b> ' + escHtml(confidence) + '</div>' : '') +
+      '</details></div>';
+
+    detail.innerHTML = html;
+    lsGraphBindDetailNav(detail);
   }
 
   function lsRenderGraphFallback(container, graph) {
@@ -5736,16 +6128,17 @@
     nodes.forEach(function (node) { nodeById[lsGraphNodeId(node)] = node; });
     var html = '<div class="ls-empty-state">ネットワーク描画ライブラリを読み込めませんでした。テキスト表示に切り替えます。</div><div class="ls-graph-flow">';
     nodes.forEach(function (node) {
-      html += '<div class="ls-graph-node">' + escHtml(lsGraphMainStageLabel(node) || node.label || lsGraphNodeId(node)) + '<div class="ls-theory-muted">' + escHtml(node.origin || "paper") + ' / ' + escHtml(node.component_type || "") + '</div></div>';
+      var fallbackAnchor = node && node.is_thesis_anchor ? "★ " : "";
+      html += '<div class="ls-graph-node' + (node && node.is_thesis_anchor ? ' ls-graph-node-anchor' : '') + '">' + escHtml(fallbackAnchor + (lsGraphSemanticLabel(node) || lsGraphNodeId(node))) + '<div class="ls-theory-muted">' + escHtml(node.origin || "paper") + ' / ' + escHtml(lsGraphRoleLabel(node)) + '</div></div>';
     });
     edges.forEach(function (edge) {
       var sourceId = edge.source_component_id || edge.source || edge.from;
       var targetId = edge.target_component_id || edge.target || edge.to;
       var source = nodeById[sourceId] || {};
       var target = nodeById[targetId] || {};
-      html += '<details class="ls-graph-edge"><summary><span class="ls-graph-node-inline">' + escHtml(source.label || sourceId || "") + '</span>' +
+      html += '<details class="ls-graph-edge"><summary><span class="ls-graph-node-inline">' + escHtml(lsGraphSemanticLabel(source) || sourceId || "") + '</span>' +
         '<span class="ls-graph-edge-label"> -- ' + escHtml(edge.relation || edge.edge_type || edge.type || "RELATED_TO") + ' → </span>' +
-        '<span class="ls-graph-node-inline">' + escHtml(target.label || targetId || "") + '</span></summary></details>';
+        '<span class="ls-graph-node-inline">' + escHtml(lsGraphSemanticLabel(target) || targetId || "") + '</span></summary></details>';
     });
     html += '</div>' + lsGraphValidationHtml(graph.validation_results || []);
     container.innerHTML = html;
@@ -5753,23 +6146,6 @@
 
   function lsGraphNodeId(node) {
     return node && (node.component_id || node.id || node.node_id);
-  }
-
-  function lsGraphSourceLinksHtml(node) {
-    var rows = [
-      ["equation", node.linked_equation_ids],
-      ["derivation", node.linked_derivation_ids],
-      ["claim", node.linked_claim_ids],
-      ["evidence", node.linked_evidence_ids],
-    ];
-    var html = "";
-    rows.forEach(function (row) {
-      var ids = row[1] || [];
-      if (!ids.length) return;
-      html += '<div class="ls-graph-detail-link"><span>' + escHtml(row[0]) + '</span> ' +
-        escHtml(ids.join(", ")) + '</div>';
-    });
-    return html;
   }
 
   function lsWrapGraphLabel(label) {
@@ -5900,18 +6276,104 @@
     return label;
   }
 
+  // Issue #447: a node's primary label must contain only human-readable
+  // semantic terms — never internal identifiers (equation IDs, parser/operation
+  // node IDs, claim IDs, etc.). These are domain-agnostic machine tokens:
+  // snake_case runs that carry a digit (eq_2_7, theory_op_0001, claim_12),
+  // "eq.(2.7)"-style equation references, or bare dotted/parenthesised numerics.
+  function lsGraphLooksLikeInternalId(token) {
+    var t = String(token || "").replace(/^[(\[]+|[)\].,;:]+$/g, "").trim();
+    if (!t) return false;
+    // snake_case machine id carrying a digit: eq_2_7 / theory_op_0001 / claim_12.
+    if (t.indexOf("_") >= 0 && /\d/.test(t) && !/\s/.test(t)) return true;
+    // equation reference: eq2, eq.2.7, eq(2.7), eq 2.7.
+    if (/^eq[\s._-]*\(?\d/i.test(t)) return true;
+    // dotted / parenthesised numeric ref: (2.7), 2.7, (3).
+    if (/^\(?\d+(?:[._]\d+)+\)?$/.test(t)) return true;
+    if (/^\(\d+\)$/.test(t)) return true;
+    return false;
+  }
+
+  // Issue #447: remove internal-ID tokens (and the separators left dangling
+  // around them, e.g. "Derive result — eq_2_7 → eq_2_9") so labels stay readable.
+  function lsGraphStripInternalIds(text) {
+    var s = String(text || "");
+    if (!s.trim()) return "";
+    // Pre-remove inline equation references that may be glued to other words.
+    s = s.replace(/\beq[\s._-]*\(?\d+(?:[._]\d+)*\)?/gi, " ");
+    var SEP = /^[—–→←\-<>|,:;./]+$/; // — – → ← - etc.
+    var kept = [];
+    s.split(/\s+/).forEach(function (tok) {
+      if (!tok || lsGraphLooksLikeInternalId(tok)) return;
+      kept.push(tok);
+    });
+    var out = [];
+    kept.forEach(function (tok) {
+      var isSep = SEP.test(tok);
+      if (isSep && (out.length === 0 || SEP.test(out[out.length - 1]))) return;
+      out.push(tok);
+    });
+    while (out.length && SEP.test(out[out.length - 1])) out.pop();
+    // Trim separator punctuation left dangling on a word after ID removal
+    // ("Theory basis: " once the equation ID is gone -> "Theory basis").
+    return out.join(" ")
+      .replace(/\s{2,}/g, " ")
+      .replace(/^[\s—–→←<>|,:;]+|[\s—–→←<>|,:;]+$/g, "")
+      .trim();
+  }
+
+  // "derive_result" -> "Derive result" so the English->Japanese verb map matches.
+  function lsGraphHumanizeOperation(op) {
+    var s = String(op || "").replace(/_/g, " ").trim();
+    if (!s) return "";
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+
+  // Issue #447: concise operation label = readable verb + readable target,
+  // sourced from semantic fields (operation + theory_object), never from IDs.
+  function lsGraphOperationSemanticLabel(node) {
+    var operation = String((node && node.operation) || "").trim();
+    if (!operation) return "";
+    var verb = lsGraphStripInternalIds(lsGraphOperationLabelJa(lsGraphHumanizeOperation(operation)));
+    var target = lsGraphStripInternalIds(String((node && node.theory_object) || "").trim());
+    if (verb && target && target.toLowerCase() !== verb.toLowerCase()) {
+      return verb + ": " + target;
+    }
+    return verb || target || "";
+  }
+
+  // Issue #447: resolve a node's human-readable label without ever leaking an
+  // internal ID. Priority: visual_label -> display_label -> operation semantic
+  // -> stage/theory_object -> stage -> generic. Every branch is ID-stripped.
+  function lsGraphSemanticLabel(node) {
+    if (!node) return "";
+    var cand;
+    var visualLabel = String(node.visual_label || "").trim();
+    if (visualLabel) {
+      cand = lsGraphStripInternalIds(lsGraphOperationLabelJa(visualLabel));
+      if (cand) return cand;
+    }
+    var explicit = String(node.display_label || "").trim();
+    if (explicit) {
+      cand = lsGraphStripInternalIds(explicit);
+      if (cand) return cand;
+    }
+    cand = lsGraphOperationSemanticLabel(node);
+    if (cand) return cand;
+    cand = lsGraphStripInternalIds(lsGraphFullDisplayLabel(node));
+    if (cand) return cand;
+    cand = lsGraphStripInternalIds(lsGraphMainStageLabel(node));
+    if (cand) return cand;
+    cand = lsGraphStripInternalIds(lsGraphOperationLabelJa(lsGraphHumanizeOperation(node.operation)));
+    return cand || "（無題）";
+  }
+
   // Prefix a warning icon for fallback / inferred nodes so they are not mistaken
   // for confirmed, source-backed theory operations (issue #302).
   // Issue #337: prefer visual_label (short), translate to Japanese.
+  // Issue #447: route through lsGraphSemanticLabel so no internal ID can leak.
   function lsGraphNodeDisplayLabel(node, id) {
-    var visualLabel = String((node && node.visual_label) || "").trim();
-    var raw;
-    if (visualLabel) {
-      raw = lsGraphOperationLabelJa(visualLabel);
-    } else {
-      raw = lsGraphFullDisplayLabel(node) || id;
-    }
-    var label = lsWrapGraphLabel(raw);
+    var label = lsWrapGraphLabel(lsGraphSemanticLabel(node) || id);
     return lsGraphNodeIsFallback(node) ? "⚠ " + label : label;
   }
 
@@ -5986,9 +6448,13 @@
 
   function lsGraphMainStageLabel(node) {
     var label = String((node && (node.label || node.name)) || "");
-    var layer = String((node && node.graph_layer) || "main").toLowerCase();
     var ctype = String((node && (node.component_type || node.type)) || "");
-    if (layer !== "main" || ctype !== "TheoryOperationNode") return label;
+    // Issue #447: shorten "<Stage>: <long text>" -> "<Stage>" for ALL operation
+    // nodes (TheoryOperationNode / EquationOperationNode, or any node carrying an
+    // operation), not just the main layer.
+    var isOperationNode = /OperationNode$/.test(ctype) ||
+      String((node && node.operation) || "").trim() !== "";
+    if (!isOperationNode) return label;
     // "<Stage>: <long text>" -> "<Stage>".
     var colon = label.indexOf(":");
     if (colon >= 0) {
@@ -6016,8 +6482,9 @@
 
   function lsGraphNodeTooltip(node) {
     var parts = [];
-    var type = node.component_type_text || node.component_type || node.review_status || "";
-    if (type) parts.push(type);
+    // Issue #448: show the user-facing role name, never the internal *Node type.
+    parts.push(lsGraphRoleLabel(node));
+    if (node.is_thesis_anchor) parts.push("★ 主張の到達点");
     var backing = lsGraphSourceBackingLabel(node.source_backing_status);
     if (backing) parts.push(backing);
     var reasons = (node.review_reasons || []).map(lsGraphReviewReasonLabel);
@@ -6161,17 +6628,32 @@
     return labels[key] || key;
   }
 
+  // Issue #451: normalised edge polarity from the `polarity` field (not the label).
+  // "-" = inhibits/negates, "+" = promotes/holds, "" = non-polar.
+  function lsGraphEdgePolarity(edge) {
+    var p = String((edge && edge.polarity) || "").trim();
+    if (p === "-") return "-";
+    if (p === "+") return "+";
+    return "";
+  }
+
   function lsGraphEdgeDashed(edge) {
     var status = String((edge && edge.support_status) || "").toLowerCase();
     var relation = String((edge && (edge.relation || edge.edge_type || edge.type)) || "").toLowerCase();
     var review = String((edge && edge.review_status) || "").toLowerCase();
     var backing = String((edge && edge.source_backing_status) || "").toLowerCase();
+    // Negative polarity is always rendered dashed so it reads differently from
+    // positive / non-polar edges (issue #451).
+    if (lsGraphEdgePolarity(edge) === "-") return true;
     if (review === "review_required") return true;
     if (backing === "review_required" || backing === "inferred") return true;
     return /llm|related|qualifies|conflicts|inhibits|uncertain/.test(status + " " + relation);
   }
 
   function lsGraphEdgeColor(edge) {
+    // Issue #451: negative-polarity edges take a distinct crimson hue so they are
+    // visually separable from positive / non-polar relations, based on the field.
+    if (lsGraphEdgePolarity(edge) === "-") return "#dc2626";
     var relation = String((edge && (edge.relation || edge.edge_type || edge.type)) || "").toUpperCase();
     if (relation === "DIAGNOSES" || relation === "COMPARES") return "#7c3aed";
     if (relation === "DERIVES" || relation === "ELIMINATES_BIAS" || relation === "ELIMINATES" || relation === "SOLVES") return "#2563eb";
@@ -6598,17 +7080,35 @@
     ((topic && topic.content_blocks) || []).forEach(function (block) {
       if (!block || block.type !== "equations") return;
       (block.items || []).forEach(function (item) {
-        if (!item || !item.latex) return;
+        // Keep an equation as long as ANY renderable form exists (latex,
+        // reading, or raw text). Previously items without latex were dropped,
+        // which left their `![[equation:...]]` embeds "未解決" (issue 未解決の数式).
+        if (!item || (!item.latex && !item.plain_text && !item.raw_text)) return;
         formulas.push({
           id: item.equation_id || ("TOPIC_FORMULA_" + formulas.length),
           label: item.label || "",
-          latex: item.latex,
+          latex: item.latex || "",
           plain_text: item.plain_text || "",
+          raw_text: item.raw_text || "",
           is_display: true,
         });
       });
     });
     return formulas;
+  }
+
+  // Render the best available representation of an equation embed: rendered math
+  // when LaTeX exists, else its reading (plain_text), else the raw extracted text.
+  // Returns "" only when nothing renderable is available (issue 未解決の数式).
+  function lsEquationEmbedBody(formula) {
+    if (!formula) return "";
+    var latex = formula.latex || formula.summary || "";
+    if (latex) return lsRenderKatex(latex, true);
+    var plain = formula.plain_text || "";
+    if (plain) return '<span class="ls-material-formula-plain">' + escHtml(plain) + '</span>';
+    var raw = formula.raw_text || "";
+    if (raw) return '<span class="ls-material-formula-raw" title="原文（未整形・要確認）">' + escHtml(raw) + '</span>';
+    return "";
   }
 
   function lsNormalizePreviewLineBreaks(text) {

@@ -10,6 +10,19 @@ def test_extracts_trailing_numeric_label():
     assert eq.equation_id == "eq_3_14"
 
 
+def test_eq_prefix_is_idempotent():
+    """Labels already encoding "eq" must not get a doubled prefix (未解決の数式 fix)."""
+    f = EquationNormalizer.equation_id_from_label
+    assert f("eq:F2", "blk") == "eq_F2"            # was "eq_eq_F2"
+    assert f("eq:functions1", "blk") == "eq_functions1"
+    assert f("delta-fourier", "blk") == "eq_delta_fourier"  # non-eq label keeps single prefix
+    assert f("eq_tex_b24", "blk") == "eq_tex_b24"  # already prefixed → unchanged
+    assert f("F2", "blk") == "eq_F2"
+    assert EquationNormalizer.ref_to_equation_id("eq:F2") == "eq_F2"
+    # id_from_label and ref_to_equation_id must agree so references resolve.
+    assert f("eq:F2", "blk") == EquationNormalizer.ref_to_equation_id("eq:F2")
+
+
 def test_extracts_appendix_label():
     block = TypedBlock("b1", 1, 0, "F = ma (B.2)", "equation_block")
     eq = EquationNormalizer().normalize(block)
@@ -84,7 +97,9 @@ def test_tex_semantic_label_is_preserved():
     eq = EquationNormalizer().normalize(block)
     assert eq.label == "eq:dispersion"
     assert eq.label_is_valid is True
-    assert eq.equation_id == "eq_eq_dispersion"
+    # Idempotent prefix: "eq:dispersion" -> "eq_dispersion", NOT "eq_eq_dispersion"
+    # (the old double-prefix produced the "未解決の数式" id breakage).
+    assert eq.equation_id == "eq_dispersion"
 
 
 def test_cartridge_extra_pattern_accepts_custom_label():

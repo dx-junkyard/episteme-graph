@@ -2016,6 +2016,9 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
             "output_claim_ids": node.get("output_claim_ids") if isinstance(node.get("output_claim_ids"), list) else [],
             "required_claim_ids": node.get("required_claim_ids") if isinstance(node.get("required_claim_ids"), list) else [],
             "review_reason": str(node.get("review_reason") or ""),
+            # Issue #449: preserve the thesis-anchor flag so the UI can emphasise
+            # the argument's goal nodes (flag-based, not ID string matching).
+            "is_thesis_anchor": bool(node.get("is_thesis_anchor", False)),
         })
         seen_nodes.add(component_id)
     normalized_edges = []
@@ -2087,6 +2090,8 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
             "review_status": edge_review,
             "review_reasons": edge_reasons,
             "evidence": edge.get("evidence") if isinstance(edge.get("evidence"), dict) else {"reason": edge.get("reason") or ""},
+            # Issue #451: preserve relation polarity for UI visualisation.
+            "polarity": str(edge.get("polarity") or ""),
         })
     if not normalized_nodes and not normalized_edges:
         return {}
