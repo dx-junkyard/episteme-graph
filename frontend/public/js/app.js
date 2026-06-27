@@ -1761,15 +1761,23 @@
   function renderSegmentContent(seg) {
     var rawText = seg.text || seg.display_text || seg.spoken_text || "";
 
-    // 1. 本文全体を安全にエスケープ（数式部分はプレースホルダーなので壊れない）
+    // 1. 残存する ![[xxx:yyy]] / [[xxx:yyy]] 埋め込みを除去（バックエンドで未解決のもの）
+    rawText = rawText.replace(/!\[\[[^\]]+\]\]/g, "");
+    rawText = rawText.replace(/\[\[(?!FORMULA_)[^\]]+\]\]/g, "");
+
+    // 2. 本文全体を安全にエスケープ（数式プレースホルダーはこの後に置換）
     var text = escHtml(rawText);
 
-    // 2. 段落・改行処理
+    // 3. Markdown 処理
+    text = text.replace(/^### (.+)$/gm, "<h4>$1</h4>");
+    text = text.replace(/^## (.+)$/gm, "<h3>$1</h3>");
+    text = text.replace(/^# (.+)$/gm, "<h2>$1</h2>");
     text = text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    text = text.replace(/^- (.+)$/gm, "<li>$1</li>");
     text = text.split("\n\n").map(function (p) { return "<p>" + p + "</p>"; }).join("");
     text = text.replace(/\n/g, "<br>");
 
-    // 3. IDをキーにして確実に数式をはめ込む（正規表現を使わない堅牢な置換）
+    // 4. IDをキーにして確実に数式をはめ込む（正規表現を使わない堅牢な置換）
     if (seg.formulas && seg.formulas.length > 0) {
       seg.formulas.forEach(function(f) {
         var rendered = "";
