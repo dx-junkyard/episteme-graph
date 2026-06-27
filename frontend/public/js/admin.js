@@ -5355,6 +5355,7 @@
             '<div><span class="ls-legend-swatch ls-legend-diagnostic"></span>検証・制約</div>' +
             '<div><span class="ls-legend-swatch ls-legend-conclusion"></span>結論・出力</div>' +
             '<div><span class="ls-legend-swatch ls-legend-uncertainty"></span>注意・不確実性</div>' +
+            '<div><span class="ls-legend-anchor">★</span>主張の到達点（アンカー）</div>' +
           '</div>' +
           '<button id="ls-component-graph-fit" class="ls-component-graph-fit" type="button" title="全体を表示">⤢</button>' +
         '</div>' +
@@ -5522,6 +5523,17 @@
       }
       if (lsGraphNodeFaded(node, backing)) {
         visNode.opacity = 0.55;
+      }
+      // Issue #449: thesis-anchor nodes (the goal of the argument) must always be
+      // visually distinguishable. Emphasis comes from the node's own
+      // is_thesis_anchor flag — never from ID string matching — so it works
+      // regardless of any prefix mismatch between artifacts (#443 is separate).
+      if (node && node.is_thesis_anchor) {
+        visNode.label = "★ " + visNode.label;
+        visNode.borderWidth = 4;
+        visNode.borderWidthSelected = 5;
+        visNode.font = { multi: true, color: "#b45309" };
+        visNode.shadow = { enabled: true, color: "rgba(245, 158, 11, 0.45)", size: 16, x: 0, y: 0 };
       }
       return visNode;
     }));
@@ -5736,16 +5748,17 @@
     nodes.forEach(function (node) { nodeById[lsGraphNodeId(node)] = node; });
     var html = '<div class="ls-empty-state">ネットワーク描画ライブラリを読み込めませんでした。テキスト表示に切り替えます。</div><div class="ls-graph-flow">';
     nodes.forEach(function (node) {
-      html += '<div class="ls-graph-node">' + escHtml(lsGraphMainStageLabel(node) || node.label || lsGraphNodeId(node)) + '<div class="ls-theory-muted">' + escHtml(node.origin || "paper") + ' / ' + escHtml(node.component_type || "") + '</div></div>';
+      var fallbackAnchor = node && node.is_thesis_anchor ? "★ " : "";
+      html += '<div class="ls-graph-node' + (node && node.is_thesis_anchor ? ' ls-graph-node-anchor' : '') + '">' + escHtml(fallbackAnchor + (lsGraphSemanticLabel(node) || lsGraphNodeId(node))) + '<div class="ls-theory-muted">' + escHtml(node.origin || "paper") + ' / ' + escHtml(node.component_type || "") + '</div></div>';
     });
     edges.forEach(function (edge) {
       var sourceId = edge.source_component_id || edge.source || edge.from;
       var targetId = edge.target_component_id || edge.target || edge.to;
       var source = nodeById[sourceId] || {};
       var target = nodeById[targetId] || {};
-      html += '<details class="ls-graph-edge"><summary><span class="ls-graph-node-inline">' + escHtml(source.label || sourceId || "") + '</span>' +
+      html += '<details class="ls-graph-edge"><summary><span class="ls-graph-node-inline">' + escHtml(lsGraphSemanticLabel(source) || sourceId || "") + '</span>' +
         '<span class="ls-graph-edge-label"> -- ' + escHtml(edge.relation || edge.edge_type || edge.type || "RELATED_TO") + ' → </span>' +
-        '<span class="ls-graph-node-inline">' + escHtml(target.label || targetId || "") + '</span></summary></details>';
+        '<span class="ls-graph-node-inline">' + escHtml(lsGraphSemanticLabel(target) || targetId || "") + '</span></summary></details>';
     });
     html += '</div>' + lsGraphValidationHtml(graph.validation_results || []);
     container.innerHTML = html;
@@ -5900,18 +5913,104 @@
     return label;
   }
 
+  // Issue #447: a node's primary label must contain only human-readable
+  // semantic terms — never internal identifiers (equation IDs, parser/operation
+  // node IDs, claim IDs, etc.). These are domain-agnostic machine tokens:
+  // snake_case runs that carry a digit (eq_2_7, theory_op_0001, claim_12),
+  // "eq.(2.7)"-style equation references, or bare dotted/parenthesised numerics.
+  function lsGraphLooksLikeInternalId(token) {
+    var t = String(token || "").replace(/^[(\[]+|[)\].,;:]+$/g, "").trim();
+    if (!t) return false;
+    // snake_case machine id carrying a digit: eq_2_7 / theory_op_0001 / claim_12.
+    if (t.indexOf("_") >= 0 && /\d/.test(t) && !/\s/.test(t)) return true;
+    // equation reference: eq2, eq.2.7, eq(2.7), eq 2.7.
+    if (/^eq[\s._-]*\(?\d/i.test(t)) return true;
+    // dotted / parenthesised numeric ref: (2.7), 2.7, (3).
+    if (/^\(?\d+(?:[._]\d+)+\)?$/.test(t)) return true;
+    if (/^\(\d+\)$/.test(t)) return true;
+    return false;
+  }
+
+  // Issue #447: remove internal-ID tokens (and the separators left dangling
+  // around them, e.g. "Derive result — eq_2_7 → eq_2_9") so labels stay readable.
+  function lsGraphStripInternalIds(text) {
+    var s = String(text || "");
+    if (!s.trim()) return "";
+    // Pre-remove inline equation references that may be glued to other words.
+    s = s.replace(/\beq[\s._-]*\(?\d+(?:[._]\d+)*\)?/gi, " ");
+    var SEP = /^[—–→←\-<>|,:;./]+$/; // — – → ← - etc.
+    var kept = [];
+    s.split(/\s+/).forEach(function (tok) {
+      if (!tok || lsGraphLooksLikeInternalId(tok)) return;
+      kept.push(tok);
+    });
+    var out = [];
+    kept.forEach(function (tok) {
+      var isSep = SEP.test(tok);
+      if (isSep && (out.length === 0 || SEP.test(out[out.length - 1]))) return;
+      out.push(tok);
+    });
+    while (out.length && SEP.test(out[out.length - 1])) out.pop();
+    // Trim separator punctuation left dangling on a word after ID removal
+    // ("Theory basis: " once the equation ID is gone -> "Theory basis").
+    return out.join(" ")
+      .replace(/\s{2,}/g, " ")
+      .replace(/^[\s—–→←<>|,:;]+|[\s—–→←<>|,:;]+$/g, "")
+      .trim();
+  }
+
+  // "derive_result" -> "Derive result" so the English->Japanese verb map matches.
+  function lsGraphHumanizeOperation(op) {
+    var s = String(op || "").replace(/_/g, " ").trim();
+    if (!s) return "";
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+
+  // Issue #447: concise operation label = readable verb + readable target,
+  // sourced from semantic fields (operation + theory_object), never from IDs.
+  function lsGraphOperationSemanticLabel(node) {
+    var operation = String((node && node.operation) || "").trim();
+    if (!operation) return "";
+    var verb = lsGraphStripInternalIds(lsGraphOperationLabelJa(lsGraphHumanizeOperation(operation)));
+    var target = lsGraphStripInternalIds(String((node && node.theory_object) || "").trim());
+    if (verb && target && target.toLowerCase() !== verb.toLowerCase()) {
+      return verb + ": " + target;
+    }
+    return verb || target || "";
+  }
+
+  // Issue #447: resolve a node's human-readable label without ever leaking an
+  // internal ID. Priority: visual_label -> display_label -> operation semantic
+  // -> stage/theory_object -> stage -> generic. Every branch is ID-stripped.
+  function lsGraphSemanticLabel(node) {
+    if (!node) return "";
+    var cand;
+    var visualLabel = String(node.visual_label || "").trim();
+    if (visualLabel) {
+      cand = lsGraphStripInternalIds(lsGraphOperationLabelJa(visualLabel));
+      if (cand) return cand;
+    }
+    var explicit = String(node.display_label || "").trim();
+    if (explicit) {
+      cand = lsGraphStripInternalIds(explicit);
+      if (cand) return cand;
+    }
+    cand = lsGraphOperationSemanticLabel(node);
+    if (cand) return cand;
+    cand = lsGraphStripInternalIds(lsGraphFullDisplayLabel(node));
+    if (cand) return cand;
+    cand = lsGraphStripInternalIds(lsGraphMainStageLabel(node));
+    if (cand) return cand;
+    cand = lsGraphStripInternalIds(lsGraphOperationLabelJa(lsGraphHumanizeOperation(node.operation)));
+    return cand || "（無題）";
+  }
+
   // Prefix a warning icon for fallback / inferred nodes so they are not mistaken
   // for confirmed, source-backed theory operations (issue #302).
   // Issue #337: prefer visual_label (short), translate to Japanese.
+  // Issue #447: route through lsGraphSemanticLabel so no internal ID can leak.
   function lsGraphNodeDisplayLabel(node, id) {
-    var visualLabel = String((node && node.visual_label) || "").trim();
-    var raw;
-    if (visualLabel) {
-      raw = lsGraphOperationLabelJa(visualLabel);
-    } else {
-      raw = lsGraphFullDisplayLabel(node) || id;
-    }
-    var label = lsWrapGraphLabel(raw);
+    var label = lsWrapGraphLabel(lsGraphSemanticLabel(node) || id);
     return lsGraphNodeIsFallback(node) ? "⚠ " + label : label;
   }
 
@@ -5986,9 +6085,13 @@
 
   function lsGraphMainStageLabel(node) {
     var label = String((node && (node.label || node.name)) || "");
-    var layer = String((node && node.graph_layer) || "main").toLowerCase();
     var ctype = String((node && (node.component_type || node.type)) || "");
-    if (layer !== "main" || ctype !== "TheoryOperationNode") return label;
+    // Issue #447: shorten "<Stage>: <long text>" -> "<Stage>" for ALL operation
+    // nodes (TheoryOperationNode / EquationOperationNode, or any node carrying an
+    // operation), not just the main layer.
+    var isOperationNode = /OperationNode$/.test(ctype) ||
+      String((node && node.operation) || "").trim() !== "";
+    if (!isOperationNode) return label;
     // "<Stage>: <long text>" -> "<Stage>".
     var colon = label.indexOf(":");
     if (colon >= 0) {

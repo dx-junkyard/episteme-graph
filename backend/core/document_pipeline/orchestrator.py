@@ -994,6 +994,20 @@ def run_document_pipeline(
                     document_id, cartridge_id, str(exc)
                 )
             save_artifact("component_graph", component_graph_result)
+        # Issue #449: propagate the thesis-anchor flag onto the component graph so
+        # the UI can always highlight the argument's goal nodes. Deterministic and
+        # non-fatal; applied on both fresh and resumed graphs (mutates in place,
+        # so the DB persist below carries the flag).
+        try:
+            from episteme_graph.agents.component_graph.anchor_linker import (
+                link_component_thesis_anchors,
+            )
+            link_component_thesis_anchors(thesis, component_graph_result)
+        except Exception as exc:
+            logger.warning(
+                "component thesis-anchor linking failed (non-fatal): document=%s error=%s",
+                document_id, exc,
+            )
         report_done("component_graph", {
             "nodes": len(getattr(component_graph_result, "nodes", []) or []),
             "edges": len(getattr(component_graph_result, "edges", []) or []),

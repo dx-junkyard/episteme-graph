@@ -404,6 +404,10 @@ class ComponentGraphNode:
     # derivation pipeline; distinct from ``review_reasons`` (structured codes)
     # and ``description`` (reader-facing explanation).
     review_reason: str = ""
+    # Issue #449: true when this node is a thesis traversal anchor (the goal of
+    # the argument). Mirrors DSLNode.is_thesis_anchor; carried through to the UI
+    # so anchors are emphasised via the flag, not ID string matching (#443).
+    is_thesis_anchor: bool = False
 
 
 @dataclass
@@ -521,6 +525,7 @@ class ComponentGraphResult:
                     "output_claim_ids": n.output_claim_ids,
                     "required_claim_ids": n.required_claim_ids,
                     "review_reason": n.review_reason,
+                    "is_thesis_anchor": n.is_thesis_anchor,
                 }
                 for n in self.nodes
             ],

@@ -254,5 +254,10 @@ class TestAdminJsMainLabelGuard:
     def test_admin_js_has_main_stage_label_guard(self):
         source = _read(ADMIN_JS)
         assert "lsGraphMainStageLabel" in source
-        # The visual node label and detail heading must route through the guard.
-        assert "lsGraphMainStageLabel(node) ||" in source
+        # Issue #447: the visual node label, detail heading and text fallback must
+        # route through lsGraphSemanticLabel, which strips internal identifiers and
+        # falls back to a stage/operation label rather than leaking a raw ID/name.
+        assert "lsGraphSemanticLabel" in source
+        assert "lsGraphStripInternalIds" in source
+        # The no-vis text fallback must not fall back to the raw node.label.
+        assert "lsGraphMainStageLabel(node) || node.label" not in source
