@@ -149,6 +149,37 @@ class TestClassifyIntentLLM:
                 mock_params.assert_called_once_with("fast")
 
 
+class TestRouteForTypedAction:
+    """UI ボタン由来の型付きアクションは LLM 分類を経由せず確定ルートへ割り当てる（P1/P3）。"""
+
+    def test_prerequisite_actions_route_to_learning_advice(self):
+        from api.routes.learning import _route_for_typed_action
+
+        assert _route_for_typed_action("check_prerequisites") == "LEARNING_ADVICE"
+        assert _route_for_typed_action("review_prerequisite") == "LEARNING_ADVICE"
+        assert _route_for_typed_action("prerequisite_review") == "LEARNING_ADVICE"
+
+    def test_detail_actions_route_to_domain_rag(self):
+        from api.routes.learning import _route_for_typed_action
+
+        for action in ("drilldown", "ask_question", "continue_detail", "start_topic"):
+            assert _route_for_typed_action(action) == "DOMAIN_RAG"
+
+    def test_unknown_or_empty_returns_none(self):
+        from api.routes.learning import _route_for_typed_action
+
+        assert _route_for_typed_action(None) is None
+        assert _route_for_typed_action("") is None
+        assert _route_for_typed_action("totally_unknown") is None
+
+    def test_typed_action_bypasses_chit_chat_misclassification(self):
+        """壊れた/曖昧なメッセージでも、型付きアクションがあれば分類を呼ばない。"""
+        from api.routes.learning import _route_for_typed_action
+
+        # 例: かつて "\x00SUGGEST_0\x00" が CHIT_CHAT に誤分類された事故の再発防止。
+        assert _route_for_typed_action("drilldown") == "DOMAIN_RAG"
+
+
 # ---------------------------------------------------------------------------
 # 3. RAGコンテキスト統合テスト（旧: 基礎知識フォールバック）
 # ---------------------------------------------------------------------------
@@ -350,6 +381,23 @@ class TestGenerateLearningAdviceResponse:
             )
             assert "量子力学入門" in result
             assert "波動関数" in result
+
+    def test_prompt_does_not_request_action_button_markup(self):
+        """プロンプトは本文へのボタン記法埋め込みを指示しない（next_actions に集約）。"""
+        from api.routes.learning import _generate_learning_advice_response
+
+        with patch("api.routes.learning.generate_text", return_value="本文") as mock_gen:
+            _generate_learning_advice_response("量子力学入門", "波動関数", "学習を始めたい")
+            prompt = mock_gen.call_args[1]["messages"][0]["content"]
+            assert "ACTION_BUTTON" not in prompt
+
+    def test_fallback_has_no_action_button_markup(self):
+        """LLM 失敗時のフォールバック本文にも旧ボタン記法を含めない。"""
+        from api.routes.learning import _generate_learning_advice_response
+
+        with patch("api.routes.learning.generate_text", side_effect=Exception("error")):
+            result = _generate_learning_advice_response("量子力学入門", "波動関数", "開始")
+            assert "ACTION_BUTTON" not in result
 
 
 # ---------------------------------------------------------------------------

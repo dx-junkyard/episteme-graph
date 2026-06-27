@@ -58,6 +58,33 @@
     saveLearningSupportContext();
   }
 
+  // ── Learning session (single source of truth) ──────────────────────
+  // 学習セッションの「現在位置」を1か所に集約する facade。
+  //   anchor  = state.currentTopicId（パス上のトピック）
+  //   detour  = state.learningSupport（寄り道。origin に復帰先アンカーを保持）
+  //   segment = lectureState.currentSegmentIndex（レクチャー再生位置）
+  // 位置情報の読み書きはすべてここを経由し、永続化は learningSupport の
+  // localStorage を継続利用する。
+  var Session = {
+    anchorTopicId: function () { return state.currentTopicId; },
+    inDetour: function () {
+      return !!(state.learningSupport && state.learningSupport.origin);
+    },
+    detourOrigin: function () {
+      return state.learningSupport ? state.learningSupport.origin : null;
+    },
+    // detour 中なら support_context を含む payload 断片を返す（型付き送信の補助）。
+    contextPayload: function () {
+      return Session.inDetour() ? { support_context: state.learningSupport } : {};
+    },
+    // 寄り道を終了し、アンカーへ復帰する準備をする（再描画は呼び出し側）。
+    clearDetour: function () {
+      if (!state.learningSupport) return;
+      state.learningSupport = null;
+      saveLearningSupportContext();
+    },
+  };
+
   function parseJwtPayload(token) {
     try {
       var parts = token.split(".");
@@ -409,17 +436,14 @@
         var payload = {};
         var supportAction = this.getAttribute("data-support-action") || "";
         if (supportAction === "return_to_learning_path") {
+          var origin = Session.detourOrigin();
           var targetTopicId = this.getAttribute("data-target-topic-id") ||
-            (state.learningSupport && state.learningSupport.origin && state.learningSupport.origin.topic_id);
-          state.learningSupport = null;
-          saveLearningSupportContext();
-          renderSidebar();
-          renderRightPanel();
-          if (targetTopicId) selectTopic(targetTopicId);
+            (origin && origin.topic_id);
+          returnToLearningPath(targetTopicId);
           return;
         }
         if (supportAction) payload.support_action = supportAction;
-        if (state.learningSupport) payload.support_context = state.learningSupport;
+        Object.assign(payload, Session.contextPayload());
         sendMessage(suggest, payload);
       });
     });
@@ -436,7 +460,7 @@
           element_type: type,
           element_label: label,
         };
-        if (state.learningSupport) payload.support_context = state.learningSupport;
+        Object.assign(payload, Session.contextPayload());
         var suffix = type === "citation" ? "の引用情報" : type === "reference" ? "の参照先" : "を説明";
         sendMessage(label + suffix, payload);
       });
@@ -461,8 +485,7 @@
   function renderAiContent(text, msg) {
     // Preserve LaTeX expressions before HTML escaping
     var latexBlocks = [];
-    var preserved = text;
-    var fallbackActions = [];
+    var preserved = text || "";
 
     // Preserve display math $$...$$ first
     preserved = preserved.replace(/\$\$([\s\S]+?)\$\$/g, function (m, expr) {
@@ -489,62 +512,17 @@
       return "\x00LATEX_BLOCK_" + idx + "\x00";
     });
 
-    // Extract explicit action buttons before escaping.
-    // Preferred LLM format: [ACTION_BUTTON: 〇〇について聞く]
-    var suggestions = [];
-    preserved = preserved.replace(/\[ACTION_BUTTON:\s*([^\]\n]{1,120})\]/g, function (_, s) {
-      var trimmed = s.trim();
-      suggestions.push(trimmed);
-      return "\x00SUGGEST_" + (suggestions.length - 1) + "\x00";
-    });
-
-    // Backward compatibility for older responses already stored in chat history.
-    preserved = preserved.replace(/\[([^\]\n]{4,80})\]/g, function (match, s) {
-      var trimmed = s.trim();
-      var isLegacySuggestion = /について詳しく聞く/.test(trimmed);
-      if (!isLegacySuggestion) return match;
-      suggestions.push(trimmed);
-      return "\x00SUGGEST_" + (suggestions.length - 1) + "\x00";
-    });
-
-    // Some LLM responses describe next actions in prose instead of structured
-    // next_actions. Convert that trailing section into click targets, including
-    // the return-to-path action first when a support detour is active.
-    preserved = preserved.replace(/(?:^|\n)(?:\d+[.．]\s*)?【ネクストアクション】([\s\S]*)$/m, function (_, actionText) {
-      var seen = {};
-      function addAction(type, label, message, targetTopicId) {
-        if (!label || seen[label]) return;
-        seen[label] = true;
-        fallbackActions.push({
-          type: type || "",
-          label: label,
-          message: message || label,
-          target_topic_id: targetTopicId || "",
-        });
-      }
-      if (state.learningSupport && state.learningSupport.origin) {
-        addAction(
-          "return_to_learning_path",
-          "学習パスに戻る",
-          "学習パスに戻る",
-          state.learningSupport.origin.topic_id
-        );
-      }
-      if (/前提知識/.test(actionText) && /復習|確認/.test(actionText)) {
-        addAction("continue_detail", "前提知識を復習する", "前提知識を復習したい");
-      }
-      var conceptMatch = actionText.match(/最初の概念\s*[「『]([^」』]+)[」』]/);
-      if (conceptMatch && conceptMatch[1]) {
-        addAction("continue_detail", "「" + conceptMatch[1].trim() + "」の説明に進む", conceptMatch[1].trim() + "について説明して");
-      }
-      if (fallbackActions.length === 0) {
-        actionText.split(/それとも|または|、|。|\?|？|\n/).forEach(function (part) {
-          var label = part.replace(/^[\s-]+/, "").replace(/ですか$/, "").trim();
-          if (label.length >= 4 && label.length <= 48) addAction("continue_detail", label, label);
-        });
-      }
-      return "\n\x00FALLBACK_ACTIONS\x00";
-    });
+    // Click targets are delivered exclusively via the structured `next_actions`
+    // contract (normalized server-side). Here we only strip leftover inline
+    // markers from legacy stored messages so they never leak as visible text or
+    // the old \x00SUGGEST_n\x00 sentinels.
+    preserved = preserved
+      .replace(/\[ACTION_BUTTON:\s*[^\]\n]{1,120}\]/g, "")
+      .replace(/\[[^\]\n]{2,80}?について(?:詳しく)?(?:聞く|教えて|教えてください|知りたい)\]/g, "")
+      .replace(/(?:^|\n)(?:\d+[.．]\s*)?【ネクストアクション】[\s\S]*$/m, "")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
 
     // Escape HTML
     var html = escHtml(preserved);
@@ -568,46 +546,27 @@
       }
     });
 
-    // Restore suggestions as placeholder (remove from inline text)
-    html = html.replace(/\x00SUGGEST_(\d+)\x00/g, "");
-
-    // Render suggestion buttons
-    if (suggestions.length > 0) {
-      html += '<div class="dd">';
-      suggestions.forEach(function (s) {
-        html += '<button class="suggest-btn" data-suggest="' + escHtml(s) + '">' + escHtml(s) + ' ↗</button>';
-      });
-      html += "</div>";
-    }
-
+    // Render next-step buttons — single source: the structured next_actions
+    // contract. Each button carries a typed support-action + an explicit
+    // message, so clicking never round-trips a display label through intent
+    // classification.
     if (msg && msg.next_actions && msg.next_actions.length > 0) {
-      html += '<div class="learning-actions">';
-      msg.next_actions.forEach(function (action) {
-        html += '<button class="suggest-btn learning-action-btn"'
-          + ' data-suggest="' + escHtml(action.message || action.label || "") + '"'
-          + ' data-support-action="' + escHtml(action.type || "") + '"'
-          + (action.target_topic_id ? ' data-target-topic-id="' + escHtml(action.target_topic_id) + '"' : "")
-          + '>' + escHtml(action.label || action.message || "次へ") + '</button>';
-      });
-      html += "</div>";
-    }
-
-    if (fallbackActions.length > 0 && !(msg && msg.next_actions && msg.next_actions.length > 0)) {
-      html = html.replace(/\x00FALLBACK_ACTIONS\x00/g, "");
-      html += '<div class="learning-actions">';
-      fallbackActions.forEach(function (action) {
-        html += '<button class="suggest-btn learning-action-btn"'
-          + ' data-suggest="' + escHtml(action.message || action.label || "") + '"'
-          + ' data-support-action="' + escHtml(action.type || "") + '"'
-          + (action.target_topic_id ? ' data-target-topic-id="' + escHtml(action.target_topic_id) + '"' : "")
-          + '>' + escHtml(action.label || action.message || "次へ") + '</button>';
-      });
-      html += "</div>";
-    } else {
-      html = html.replace(/\x00FALLBACK_ACTIONS\x00/g, "");
+      html += renderNextActions(msg.next_actions);
     }
 
     return html;
+  }
+
+  function renderNextActions(actions) {
+    var html = '<div class="learning-actions">';
+    actions.forEach(function (action) {
+      html += '<button class="suggest-btn learning-action-btn"'
+        + ' data-suggest="' + escHtml(action.message || action.label || "") + '"'
+        + ' data-support-action="' + escHtml(action.type || "") + '"'
+        + (action.target_topic_id ? ' data-target-topic-id="' + escHtml(action.target_topic_id) + '"' : "")
+        + '>' + escHtml(action.label || action.message || "次へ") + '</button>';
+    });
+    return html + "</div>";
   }
 
   // ── Render: Right panel ────────────────────────────────────────────
@@ -683,20 +642,16 @@
     // Bind prerequisite clicks
     el.querySelectorAll("[data-prereq]").forEach(function (pEl) {
       pEl.addEventListener("click", function () {
-        var payload = {};
-        if (state.learningSupport) payload.support_context = state.learningSupport;
+        var payload = Session.contextPayload();
         sendMessage(this.getAttribute("data-prereq") + "について教えてください", payload);
       });
     });
     el.querySelectorAll('[data-support-action="return_to_learning_path"]').forEach(function (btn) {
       btn.addEventListener("click", function () {
+        var origin = Session.detourOrigin();
         var targetTopicId = this.getAttribute("data-target-topic-id") ||
-          (state.learningSupport && state.learningSupport.origin && state.learningSupport.origin.topic_id);
-        state.learningSupport = null;
-        saveLearningSupportContext();
-        renderSidebar();
-        renderRightPanel();
-        if (targetTopicId) selectTopic(targetTopicId);
+          (origin && origin.topic_id);
+        returnToLearningPath(targetTopicId);
       });
     });
   }
@@ -832,8 +787,30 @@
     return [];
   }
 
+  // detour（寄り道）を終了し、元の学習パス（アンカー）へ復帰する。
+  // どの入口（本文ボタン / 右ペイン / レクチャー）から呼ばれても挙動を一本化する。
+  function returnToLearningPath(targetTopicId) {
+    Session.clearDetour();
+    var dest = targetTopicId || Session.anchorTopicId();
+    renderSidebar();
+    renderRightPanel();
+    if (dest) selectTopic(dest, { keepDetour: true });
+  }
+
   // ── Topic Selection ────────────────────────────────────────────────
-  async function selectTopic(topicId) {
+  // opts.keepDetour: true のとき detour 状態を維持する（復帰処理側で既に確定済みの場合）。
+  // 既定（サイドツリーからの手動選択など）では detour を閉じて再アンカーする。
+  async function selectTopic(topicId, opts) {
+    opts = opts || {};
+    if (!opts.keepDetour) {
+      // 手動ナビゲーション = 再アンカー。開いている寄り道は閉じる。
+      Session.clearDetour();
+    }
+    // レクチャー中に別トピックへ移ると、再生中セグメントが旧トピックのまま残り
+    // 状態が割れる。手動切替時はレクチャーを終了してテキスト表示へ戻す。
+    if (lectureState.active && !opts.keepLecture) {
+      deactivateLecture();
+    }
     state.currentTopicId = topicId;
     state.chatMessages = [];
     state.topicMaterial = [];
@@ -923,6 +900,7 @@
       var directNext = getNextTopic();
       var directOverlay = document.getElementById("check-overlay");
       if (directOverlay) directOverlay.remove();
+      // 前進は再アンカー（selectTopic 既定で detour を閉じ、レクチャー中なら終了する）。
       if (directNext) selectTopic(directNext.id);
       return;
     }
@@ -956,6 +934,7 @@
         var next = getNextTopic();
         var overlay = document.getElementById("check-overlay");
         if (overlay) overlay.remove();
+        // 合格 → 次トピックへ再アンカー。detour 残はここで自動的に解消される。
         if (next) selectTopic(next.id);
       } else {
         if (feedbackEl) {
@@ -997,13 +976,17 @@
     const input = document.getElementById("chat-input");
     if (input) input.value = "";
 
+    // detour 中の自由質問でも origin（復帰先）が失われないよう、明示 payload が
+    // support_context を持たない場合は現在のセッション文脈を補完する。
+    const payload = Object.assign({}, Session.contextPayload(), actionPayload || {});
+
     try {
       const res = await apiFetch("/learning/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/chat", {
         method: "POST",
         body: JSON.stringify({
           message: text,
           history: state.chatMessages.slice(0, -1),
-          ...(actionPayload || {}),
+          ...payload,
         }),
       });
       if (res.ok) {
@@ -1548,7 +1531,7 @@
     playing: false,
     audio: null,
     pausePositionMs: 0,
-    interruptHistory: [],
+    sendingInterrupt: false,
     highlightTimer: null,
     voiceRecognition: null,
   };
@@ -1641,6 +1624,33 @@
     recognition.start();
   }
 
+  // レクチャーモードを終了してテキスト表示へ戻す（トグル・トピック切替の両方から使う）。
+  function deactivateLecture() {
+    if (!lectureState.active) return;
+    var toggleBtn = document.getElementById("lecture-toggle");
+    var chatArea = document.getElementById("chat-area");
+    var lectureContent = document.getElementById("lecture-content");
+    var lecturePlayer = document.getElementById("lecture-player");
+    var chatInput = document.getElementById("chat-input");
+    var sendBtn = document.getElementById("send-btn");
+
+    lectureState.active = false;
+    stopPlayback();
+    closeInterruptChat();
+    if (toggleBtn) {
+      toggleBtn.classList.remove("active");
+      toggleBtn.innerHTML = "&#127897; レクチャー";
+    }
+    if (chatArea) chatArea.style.display = "";
+    if (lectureContent) lectureContent.classList.remove("visible");
+    if (lecturePlayer) {
+      lecturePlayer.classList.remove("visible");
+      lecturePlayer.style.display = "";
+    }
+    if (chatInput) chatInput.style.display = "";
+    if (sendBtn) sendBtn.style.display = "";
+  }
+
   async function toggleLectureMode() {
     var toggleBtn = document.getElementById("lecture-toggle");
     var chatArea = document.getElementById("chat-area");
@@ -1650,17 +1660,7 @@
     var sendBtn = document.getElementById("send-btn");
 
     if (lectureState.active) {
-      // Deactivate lecture mode
-      lectureState.active = false;
-      stopPlayback();
-      toggleBtn.classList.remove("active");
-      toggleBtn.innerHTML = "&#127897; レクチャー";
-      chatArea.style.display = "";
-      lectureContent.classList.remove("visible");
-      lecturePlayer.classList.remove("visible");
-      lecturePlayer.style.display = "";
-      chatInput.style.display = "";
-      sendBtn.style.display = "";
+      deactivateLecture();
       return;
     }
 
@@ -2138,6 +2138,31 @@
     } else {
       lectureState.playing = false;
       updateLectureControls();
+      onLectureComplete();
+    }
+  }
+
+  // レクチャー最終セグメント到達時、テキストパスと同じ確認フローへ合流する。
+  function onLectureComplete() {
+    var lectureContent = document.getElementById("lecture-content");
+    if (lectureContent && !document.getElementById("lecture-complete-banner")) {
+      var next = getNextTopic();
+      var label = next ? "確認問題に進む" : "レクチャー完了";
+      lectureContent.insertAdjacentHTML("beforeend",
+        '<div class="lecture-complete" id="lecture-complete-banner">' +
+        '<p>このトピックのレクチャーは以上です。</p>' +
+        '<button class="suggest-btn" id="lecture-complete-next">' + label + '</button>' +
+        '</div>');
+      var btn = document.getElementById("lecture-complete-next");
+      if (btn) {
+        btn.addEventListener("click", function () {
+          if (getNextTopic()) {
+            openCheckModal();
+          } else {
+            deactivateLecture();
+          }
+        });
+      }
     }
   }
 
@@ -2181,13 +2206,13 @@
   }
 
   // ── Interrupt Chat ──────────────────────────────────────────────
+  // 割込みチャットはレクチャー（origin=現セグメント）からの寄り道。会話は本トピックの
+  // state.chatMessages と同一スレッドで管理し、テキスト表示へ戻っても継続して見える。
   function openInterruptChat() {
     pausePlayback();
-    lectureState.interruptHistory = [];
     var popup = document.getElementById("lecture-chat-popup");
     popup.classList.add("visible");
-    var messages = document.getElementById("lecture-chat-messages");
-    messages.innerHTML = '<div class="mg ai">講義を一時停止しました。ご質問をどうぞ。</div>';
+    renderInterruptMessages();
     var input = document.getElementById("lecture-chat-input");
     if (input) input.focus();
   }
@@ -2201,63 +2226,35 @@
       if (micBtn) micBtn.classList.remove("recording");
     }
     var popup = document.getElementById("lecture-chat-popup");
-    popup.classList.remove("visible");
+    if (popup) popup.classList.remove("visible");
   }
 
-  async function sendInterruptMessage() {
-    var input = document.getElementById("lecture-chat-input");
-    var message = input.value.trim();
-    if (!message) return;
-    input.value = "";
-
+  // ポップアップへ会話スレッドを描画し、AI 応答のボタンを bind する（型付き送信）。
+  function renderInterruptMessages(pendingUserText) {
     var messages = document.getElementById("lecture-chat-messages");
-    messages.innerHTML += '<div class="mg usr">' + escHtml(message) + '</div>';
-    messages.innerHTML += '<div class="mg ai"><div class="typing"><span></span><span></span><span></span></div></div>';
-    messages.scrollTop = messages.scrollHeight;
-
-    var seg = lectureState.segments[lectureState.currentSegmentIndex];
-
-    try {
-      var res = await apiFetch(
-        "/learning/lecture/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/interrupt",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            message: message,
-            current_chunk_id: seg ? seg.chunk_id : "",
-            pause_position_ms: lectureState.pausePositionMs,
-            history: lectureState.interruptHistory,
-          }),
-        }
-      );
-
-      // Remove typing indicator
-      var typingEl = messages.querySelector(".typing");
-      if (typingEl) typingEl.parentElement.remove();
-
-      if (res.ok) {
-        var data = await res.json();
-        messages.innerHTML += '<div class="mg ai">' + renderAiContent(data.answer) + '</div>';
-        lectureState.interruptHistory.push({ role: "user", content: message });
-        lectureState.interruptHistory.push({ role: "assistant", content: data.answer });
-
-        if (data.course_update && state.course) {
-          Object.assign(state.course, data.course_update);
-          renderSidebar();
-          renderRightPanel();
-        }
+    if (!messages) return;
+    var html = '<div class="mg ai">講義を一時停止しました。ご質問をどうぞ。</div>';
+    state.chatMessages.forEach(function (m) {
+      if (m.role === "user") {
+        html += '<div class="mg usr">' + escHtml(m.content) + '</div>';
       } else {
-        messages.innerHTML += '<div class="mg ai" style="color:var(--color-text-danger)">エラーが発生しました。</div>';
+        html += '<div class="mg ai">' + renderAiContent(m.content, m) + '</div>';
       }
-    } catch (err) {
-      var typingEl2 = messages.querySelector(".typing");
-      if (typingEl2) typingEl2.parentElement.remove();
-      messages.innerHTML += '<div class="mg ai" style="color:var(--color-text-danger)">サーバーに接続できません。</div>';
+    });
+    if (pendingUserText) {
+      html += '<div class="mg usr">' + escHtml(pendingUserText) + '</div>';
+      html += '<div class="mg ai"><div class="typing"><span></span><span></span><span></span></div></div>';
     }
+    messages.innerHTML = html;
 
-    messages.scrollTop = messages.scrollHeight;
+    // AI 応答内のアクションボタンは、押すとさらに割込み質問として送信する。
+    messages.querySelectorAll(".suggest-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var text = this.getAttribute("data-suggest") || this.textContent.replace(/\s*↗$/, "");
+        if (text) sendInterruptMessage(text);
+      });
+    });
 
-    // Render KaTeX in popup
     if (window.renderMathInElement) {
       try {
         window.renderMathInElement(messages, {
@@ -2268,6 +2265,66 @@
           throwOnError: false,
         });
       } catch (e) { /* ignore */ }
+    }
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  async function sendInterruptMessage(presetText) {
+    var input = document.getElementById("lecture-chat-input");
+    var message = (presetText != null ? presetText : (input ? input.value : "")).trim();
+    if (!message || lectureState.sendingInterrupt) return;
+    if (input && presetText == null) input.value = "";
+
+    lectureState.sendingInterrupt = true;
+    var priorHistory = state.chatMessages.slice();
+    renderInterruptMessages(message);
+
+    var seg = lectureState.segments[lectureState.currentSegmentIndex];
+    var messages = document.getElementById("lecture-chat-messages");
+
+    try {
+      var res = await apiFetch(
+        "/learning/lecture/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/interrupt",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            message: message,
+            current_chunk_id: seg ? seg.chunk_id : "",
+            pause_position_ms: lectureState.pausePositionMs,
+            history: priorHistory,
+          }),
+        }
+      );
+
+      if (res.ok) {
+        var data = await res.json();
+        // 同一スレッドへ追記（テキスト表示へ戻っても継続して見える）。
+        state.chatMessages.push({ role: "user", content: message });
+        state.chatMessages.push({
+          role: "assistant",
+          content: data.answer,
+          next_actions: data.next_actions || [],
+        });
+        renderInterruptMessages();
+
+        if (data.course_update && state.course) {
+          Object.assign(state.course, data.course_update);
+          renderSidebar();
+          renderRightPanel();
+        }
+      } else if (messages) {
+        var typingEl = messages.querySelector(".typing");
+        if (typingEl) typingEl.parentElement.remove();
+        messages.innerHTML += '<div class="mg ai" style="color:var(--color-text-danger)">エラーが発生しました。</div>';
+      }
+    } catch (err) {
+      if (messages) {
+        var typingEl2 = messages.querySelector(".typing");
+        if (typingEl2) typingEl2.parentElement.remove();
+        messages.innerHTML += '<div class="mg ai" style="color:var(--color-text-danger)">サーバーに接続できません。</div>';
+      }
+    } finally {
+      lectureState.sendingInterrupt = false;
     }
   }
 

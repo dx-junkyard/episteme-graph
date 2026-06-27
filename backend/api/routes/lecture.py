@@ -12,6 +12,7 @@ import base64
 import json
 import logging
 import uuid
+from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text as sa_text
@@ -38,6 +39,7 @@ from core.lecture import (
     get_user_mastered_concepts,
     normalize_to_placeholder_format,
 )
+from core.learning_support_agent import extract_inline_actions
 from core.llm import generate_text, get_llm_params
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
@@ -460,17 +462,22 @@ def lecture_interrupt_chat(
             body.message, answer,
         )
 
-    # チャット履歴を永続化
+    # 本文中のドリルダウンマーカーは構造化アクションへ正規化する（フロントは
+    # next_actions のみ描画）。講義への復帰はポップアップの「講義を再開する」ボタンが担う。
+    clean_answer, inline_actions = extract_inline_actions(answer)
+
+    # チャット履歴は本トピックの会話と同一スレッドに永続化する（割込みも同じ会話）。
     persist_chat_history(
         current_user["id"], course_id, topic_id,
-        body.history, body.message, answer,
+        body.history, body.message, clean_answer,
     )
 
     return LectureInterruptResponse(
-        answer=answer,
+        answer=clean_answer,
         resume_chunk_id=body.current_chunk_id,
         resume_position_ms=body.pause_position_ms,
         course_update=course_update,
+        next_actions=[asdict(a) for a in inline_actions],
     )
 
 
