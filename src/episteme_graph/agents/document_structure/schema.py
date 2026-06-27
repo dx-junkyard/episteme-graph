@@ -77,6 +77,21 @@ class DocumentMetadata:
     title: str | None = None
     authors: list[str] = field(default_factory=list)
     pages: int = 0
+    parser_pages_processed: int | None = None
+    parser_reached_eof: bool | None = None
+    source_bytes_total: int | None = None
+    source_bytes_processed: int | None = None
+    unclosed_math_environments: list[str] = field(default_factory=list)
+    # Author provenance (issue #372): which structured front-matter signal the
+    # authors came from (grobid_tei / tex_author / pdf_front_matter / none),
+    # with confidence + needs_review. None for legacy artifacts.
+    author_extraction: dict | None = None
+    # TeX equation inventory (issue #420): a deterministic count of display math
+    # blocks + symbolic labels computed from the expanded TeX at ingest time, so
+    # completeness / coverage can detect TeX math without re-storing the (large)
+    # source. Shape: {"display_math_blocks": int, "labels": [str], "label_count": int}.
+    # None for non-TeX or legacy artifacts.
+    tex_equation_inventory: dict | None = None
 
 
 @dataclass

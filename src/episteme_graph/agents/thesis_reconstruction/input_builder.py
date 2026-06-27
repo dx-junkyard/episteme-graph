@@ -4,6 +4,10 @@ from __future__ import annotations
 from episteme_graph.agents.claim_qualification.schema import ClaimQualificationResult
 from episteme_graph.agents.equation_semantics.schema import EquationSemanticsResult
 from episteme_graph.agents.paper_skeleton.schema import PaperSkeletonResult
+from episteme_graph.agents.claim_selection import (
+    headline_text_for_selection,
+    select_claim_rows,
+)
 from episteme_graph.agents.id_canonicalization import (
     canonical_claim_id_for_span,
     legacy_claim_id_for_span,
@@ -27,11 +31,13 @@ class ThesisReconstructionInputBuilder:
         claim_objects=None,
     ) -> ThesisLLMInput:
         cfg = config or {}
-        accepted_claims = self._accepted_claims(
+        claim_selection = self._accepted_claims(
             qualified_claims,
             int(cfg.get("max_claims", _MAX_CLAIMS)),
             claim_objects=claim_objects,
+            skeleton=skeleton,
         )
+        accepted_claims = claim_selection.selected
         major_equations = self._major_equations(
             equations, int(cfg.get("max_equations", _MAX_EQUATIONS))
         )
@@ -52,6 +58,7 @@ class ThesisReconstructionInputBuilder:
             major_equations=major_equations,
             excluded_regions=excluded_regions,
             normalized_terms=self._build_normalized_terms(cartridge) if cartridge else None,
+            excluded_from_pipeline_input=claim_selection.excluded,
         )
 
     @staticmethod
@@ -81,15 +88,24 @@ class ThesisReconstructionInputBuilder:
         result: ClaimQualificationResult,
         limit: int,
         claim_objects=None,
-    ) -> list[dict]:
+        skeleton=None,
+    ):
+        claim_index = {
+            str(getattr(c, "claim_id", "") or ""): c
+            for c in getattr(claim_objects, "claims", []) or []
+        }
         claims = []
-        for record in result.qualified_spans[:limit]:
+        for record in result.qualified_spans:
+            claim_id = canonical_claim_id_for_span(record, claim_objects)
+            claim_obj = claim_index.get(claim_id)
             claims.append({
-                "claim_id": canonical_claim_id_for_span(record, claim_objects),
+                "claim_id": claim_id,
                 "legacy_claim_id": legacy_claim_id_for_span(record),
                 "span_id": record.span_id,
                 "block_id": record.block_id,
                 "section_id": record.section_id,
+                # Human-readable section title (issue #359).
+                "section_title": getattr(claim_obj, "section_title", None),
                 "text": record.text,
                 "role_labels": record.role_labels,
                 "claim_tier": record.qualification.get("claim_tier"),
@@ -98,7 +114,12 @@ class ThesisReconstructionInputBuilder:
                 "reason": record.reason,
                 "confidence": record.confidence,
             })
-        return claims
+        return select_claim_rows(
+            claims,
+            limit,
+            stage="thesis_reconstruction",
+            headline_text=headline_text_for_selection(skeleton=skeleton),
+        )
 
     @staticmethod
     def _major_equations(

@@ -92,7 +92,12 @@ def _record(
     )
 
 
-def _candidate(cid: str = "eqcand_blk_e1", ext_status: str = "complete", acc_status: str = "accepted") -> EquationCandidate:
+def _candidate(
+    cid: str = "eqcand_blk_e1",
+    ext_status: str = "complete",
+    acc_status: str = "accepted",
+    accepted_equation_id: str | None = "eq_1_1",
+) -> EquationCandidate:
     return EquationCandidate(
         candidate_id=cid,
         document_id="doc_test",
@@ -103,6 +108,8 @@ def _candidate(cid: str = "eqcand_blk_e1", ext_status: str = "complete", acc_sta
         candidate_score=1.0,
         extraction_status=ext_status,
         acceptance_status=acc_status,
+        # An accepted/provisional candidate resolves to its EquationRecord (#416).
+        accepted_equation_id=accepted_equation_id,
         needs_math_review=False,
         review_reason=[],
     )

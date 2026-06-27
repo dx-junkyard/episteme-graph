@@ -10,6 +10,9 @@ class CourseTopicMapping:
     title: str
     description: str
     linked_component_ids: list[str] = field(default_factory=list)
+    # Issue #418: only derivations relevant to the topic's components are linked,
+    # determined from the linked components (not attached indiscriminately).
+    linked_derivation_ids: list[str] = field(default_factory=list)
     learning_objectives: list[str] = field(default_factory=list)
     prerequisite_concepts: list[str] = field(default_factory=list)
     introduced_concepts: list[str] = field(default_factory=list)

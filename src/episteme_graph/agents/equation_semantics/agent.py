@@ -6,12 +6,17 @@ from __future__ import annotations
 
 import logging
 
+from episteme_graph.agents.content_normalization import (
+    CONTENT_HASH_VERSION,
+    equation_content_hash,
+)
 from episteme_graph.agents.document_structure.schema import DocumentStructureResult
 from episteme_graph.agents.paper_skeleton.schema import PaperSkeletonResult
 from episteme_graph.agents.rhetorical_role.schema import RhetoricalRoleResult
 
 from .acceptance_gate import EquationAcceptanceGate
 from .cartridge_loader import CartridgeLoader
+from .fidelity import apply_fidelity_guards
 from .image_extractor import EquationImageExtractor
 from .input_builder import EquationSemanticsInputBuilder
 from .llm_client import EquationSemanticsLLMClient
@@ -19,6 +24,7 @@ from .prompt import EquationSemanticsPromptFactory
 from .reconstruction_layer import EquationReconstructionLayer
 from .repair import EquationSemanticsRepairer, _fallback_record, _parse_record
 from .schema import (
+    ROLE_IN_ARGUMENT_VOCAB,
     CartridgeContext,
     EquationCandidate,
     EquationConsistency,
@@ -28,6 +34,7 @@ from .schema import (
     EquationSemantics,
     EquationSemanticsResult,
     EquationSourceExtraction,
+    derive_role_in_argument,
 )
 from .validator import EquationSemanticsValidator
 
@@ -247,14 +254,89 @@ class EquationSemanticsAgent:
             if progress_callback:
                 progress_callback(idx, total)
 
+        # Issue #416: guarantee completeness — every accepted/provisional candidate
+        # must resolve to a final EquationRecord. A candidate can be silently lost
+        # before reaching the LLM loop (e.g. its source block could not be
+        # resolved in build_llm_inputs). Recover such candidates with a reasoned
+        # provisional record instead of dropping them; downstream artifacts must
+        # never reference an equation id that has no record.
+        self._recover_dropped_candidates(reconstructable, records)
+
+        _apply_content_hashes(records)
+        # Issue #439: every accepted equation carries a role_in_argument from the
+        # controlled vocabulary, derived deterministically from its type +
+        # derivation links when the LLM left it empty/invalid.
+        for record in records:
+            sem = getattr(record, "semantics", None)
+            if sem is None:
+                continue
+            if getattr(sem, "role_in_argument", "") not in ROLE_IN_ARGUMENT_VOCAB:
+                sem.role_in_argument = derive_role_in_argument(
+                    sem.equation_type,
+                    input_equation_ids=sem.input_equation_ids,
+                    output_equation_ids=sem.output_equation_ids,
+                )
         result = EquationSemanticsResult(
             document_id=structure.document_id,
             cartridge_id=cartridge.cartridge_id if cartridge else cartridge_id,
             equation_candidates=classified_candidates,
             equations=records,
         )
-        result.validation_issues = self._validator.validate(result, cartridge)
+        # Issue #368: deterministic fidelity guards (prose LaTeX, I/O link
+        # referential integrity, unverifiable symbol loss). Run before final
+        # validation so blocked policies are validated consistently.
+        fidelity_issues = apply_fidelity_guards(result)
+        result.validation_issues = self._validator.validate(result, cartridge) + fidelity_issues
         return result
+
+    @staticmethod
+    def _recover_dropped_candidates(
+        reconstructable: list[EquationCandidate],
+        records: list[EquationRecord],
+    ) -> None:
+        """Guarantee the candidate→registry promotion invariant (#416, #431).
+
+        Any accepted/provisional candidate that is not represented in the
+        registry is recovered with a minimal provisional record so the
+        candidate→record relation is complete and no downstream stage can
+        reference a missing equation. A candidate counts as registered — using
+        the same domain-agnostic ID-set definition as the ExportValidationGate —
+        when either:
+
+          - a record traces it via ``candidate_trace_ids``, or
+          - its ``accepted_equation_id`` resolves to an existing record.
+
+        Recovery is keyed on those ID links only, so the inclusion relationship
+        holds by construction regardless of how a candidate reached (or failed to
+        reach) the LLM loop. The strict #431 invariant is about ``accepted``
+        candidates; ``provisional`` is recovered too so it never dangles either.
+        """
+        record_ids = {r.equation_id for r in records}
+        traced_candidate_ids = {
+            cid for r in records for cid in r.candidate_trace_ids
+        }
+        for candidate in reconstructable:
+            if candidate.acceptance_status not in {"accepted", "provisional"}:
+                continue
+            accepted_id = candidate.accepted_equation_id
+            registered = (
+                (accepted_id and accepted_id in record_ids)
+                or candidate.candidate_id in traced_candidate_ids
+            )
+            if registered:
+                continue
+            if "candidate_dropped_before_record" not in candidate.review_reason:
+                candidate.review_reason.append("candidate_dropped_before_record")
+            logger.warning(
+                "document=%s candidate=%s produced no equation record; "
+                "recovering as provisional (#416/#431)",
+                candidate.document_id,
+                candidate.candidate_id,
+            )
+            provisional = _make_provisional_record(candidate)
+            record_ids.add(provisional.equation_id)
+            traced_candidate_ids.update(provisional.candidate_trace_ids)
+            records.append(provisional)
 
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:
         if not cartridge_id:
@@ -266,6 +348,20 @@ class EquationSemanticsAgent:
                 "Cartridge '%s' not found; proceeding without cartridge", cartridge_id
             )
             return None
+
+
+def _apply_content_hashes(records: list[EquationRecord]) -> None:
+    """Deterministic content hashes for cross-paper matching (issue #362)."""
+    for record in records:
+        src = record.source_extraction
+        latex = src.latex
+        plain = src.plain_text
+        if not (latex or plain):
+            rec = record.reconstruction
+            latex = rec.latex
+            plain = rec.plain_text
+        record.content_hash = equation_content_hash(latex, plain)
+        record.content_hash_version = CONTENT_HASH_VERSION
 
 
 def _attach_source_image(record: EquationRecord, image: object | None) -> None:

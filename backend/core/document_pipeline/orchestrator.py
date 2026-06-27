@@ -17,7 +17,9 @@ from .chunker import build_source_chunks
 from .dsl_text import dsl_result_to_search_text
 from .persistence import (
     _claim_legacy_keys,
+    get_active_analysis_run_id,
     get_latest_analysis_run,
+    set_active_analysis_run,
     load_source_chunk_index,
     persist_component_graph,
     persist_components,
@@ -46,6 +48,7 @@ PIPELINE_STAGES = [
     "equation_semantics",
     "evidence_registry",
     "claim_object_builder",
+    "symbol_registry",
     "derivation_chain",
     "figure_table_semantics",
     "thesis_reconstruction",
@@ -53,6 +56,7 @@ PIPELINE_STAGES = [
     "dsl_embedding",
     "component_assembly",
     "component_graph",
+    "narrative_annotator",
     "course_mapping",
     "blueprint",
     "export_validation",
@@ -550,6 +554,7 @@ def run_document_pipeline(
                     structure=structure,
                     qualified=qualified,
                     equations=equations,
+                    roles=roles,
                 )
             except Exception as exc:
                 logger.exception(
@@ -563,6 +568,27 @@ def run_document_pipeline(
             "total": 1,
             "processed": 1,
         })
+        # Document completeness check at the DocumentStructure / EvidenceRegistry
+        # exit (#366): record a deterministic ingest-completeness artifact and
+        # propagate failures into document_structure.validation_issues so the
+        # signal flows downstream (and a truncated document never silently
+        # reaches publish-ready).
+        try:
+            # equation_semantics (stage 8) runs before this point, so the real
+            # EquationRecords are available and MUST be passed so equation artifact
+            # coverage reflects them (#420) — otherwise the saved artifact is
+            # permanently incomplete for any TeX document with math.
+            _record_document_completeness(
+                structure=structure,
+                evidence=evidence,
+                equations=equations,
+                document_id=document_id,
+                save_artifact=save_artifact,
+            )
+        except Exception:
+            logger.exception(
+                "document_completeness check failed (non-fatal): document=%s", document_id
+            )
         if finish_target_stage("evidence_registry", {"records": len(getattr(evidence, "records", []) or []), "total": 1, "processed": 1}):
             return result
 
@@ -581,6 +607,7 @@ def run_document_pipeline(
                     qualified=qualified,
                     equations=equations,
                     evidence=evidence,
+                    document_structure=structure,
                 )
             except Exception as exc:
                 logger.exception(
@@ -616,6 +643,88 @@ def run_document_pipeline(
                 "equation claim-link canonicalization failed (non-fatal): document=%s",
                 document_id, exc_info=True,
             )
+
+        # ── Stage 8c.1b: claim↔equation link symmetry (issue #358) ─────────
+        # One-way links are demoted to inferred: moved out of the primary link
+        # fields into inferred_equation_ids / inferred_claim_ids (kept, never
+        # dropped) plus review metadata on both artifacts.
+        try:
+            from episteme_graph.agents.id_canonicalization import (
+                annotate_claim_equation_link_asymmetries,
+            )
+
+            asymmetries = annotate_claim_equation_link_asymmetries(
+                claim_objects, equations
+            )
+            if asymmetries:
+                save_artifact("claim_object_builder", claim_objects)
+                save_artifact("equation_semantics", equations)
+                logger.info(
+                    "Annotated %d one-way claim↔equation link(s) for document %s",
+                    asymmetries, document_id,
+                )
+        except Exception:
+            logger.warning(
+                "claim-equation link symmetry annotation failed (non-fatal): document=%s",
+                document_id, exc_info=True,
+            )
+
+        # ── Stage 8c.2: symbol_registry (deterministic from equations, #355) ─
+        # Aggregates defined/used symbols into a document-wide registry and
+        # annotates DefinedSymbol.symbol_id on the equations in place. Non-fatal:
+        # downstream stages do not depend on it yet.
+        symbol_registry_artifact = artifact("symbol_registry")
+        if should_use_artifact("symbol_registry"):
+            symbol_registry = _from_agent_dict("symbol_registry", symbol_registry_artifact)
+            logger.info("Resuming document pipeline: loaded symbol_registry artifact for document %s", document_id)
+        else:
+            report_start("symbol_registry", total=1, unit="builder")
+            symbol_registry = None
+            try:
+                from episteme_graph.agents.symbol_registry.builder import SymbolRegistryBuilder
+
+                symbol_registry = SymbolRegistryBuilder().run(
+                    equations, cartridge_id=cartridge_id
+                )
+                # Issue #432: derive inter-equation links from structural cues
+                # (shared symbols from the registry + textual references), record
+                # link_provenance, drop dangling links, and assign link_status.
+                # Mutates the equation records in place before they are persisted.
+                try:
+                    from episteme_graph.agents.symbol_registry.link_normalizer import (
+                        EquationLinkNormalizer,
+                    )
+
+                    link_summary = EquationLinkNormalizer().normalize(
+                        equations, symbol_registry
+                    )
+                    logger.info(
+                        "equation link normalization for document %s: %s links, "
+                        "%d dangling dropped, statuses=%s",
+                        document_id,
+                        link_summary.get("link_count"),
+                        link_summary.get("dangling_dropped", 0),
+                        link_summary.get("link_status_counts"),
+                    )
+                except Exception:
+                    logger.warning(
+                        "equation link normalization failed (non-fatal): document=%s",
+                        document_id, exc_info=True,
+                    )
+                # The builder set DefinedSymbol.symbol_id in place and the link
+                # normalizer rewrote the equation links; persist the annotated
+                # equations so resumes keep the registry references and links.
+                save_artifact("equation_semantics", equations)
+                save_artifact("symbol_registry", symbol_registry)
+            except Exception as exc:
+                logger.warning(
+                    "symbol_registry stage failed (non-fatal): document=%s error=%s",
+                    document_id, exc, exc_info=True,
+                )
+        symbol_count = len(getattr(symbol_registry, "records", []) or [])
+        report_done("symbol_registry", {"symbols": symbol_count, "total": 1, "processed": 1})
+        if finish_target_stage("symbol_registry", {"symbols": symbol_count, "total": 1, "processed": 1}):
+            return result
 
         # ── Stage 8d: derivation_chain (deterministic from equation links) ─
         derivation_artifact = artifact("derivation_chain")
@@ -663,6 +772,30 @@ def run_document_pipeline(
         })
         if finish_target_stage("derivation_chain", {"chains": len(getattr(derivations, "chains", []) or []), "total": 1, "processed": 1}):
             return result
+
+        # ── Stage 8d.1: equation/derivation claim synthesis (issue #388) ─
+        # Turn source-backed equation structure and system-level derivations into
+        # atomic equation_backed / derived_from_linked_artifacts claims so the
+        # claim artifact is not weak when prose claims miss equation-expressed
+        # propositions. Additive and non-fatal: synthesised claims are appended to
+        # the claim_object_builder artifact (and to claim_objects so downstream
+        # component assembly can cite them).
+        try:
+            synthesized = _synthesize_equation_claims(
+                equations=equations, derivations=derivations, claim_objects=claim_objects,
+            )
+            if synthesized:
+                claim_objects.claims = list(getattr(claim_objects, "claims", []) or []) + synthesized
+                save_artifact("claim_object_builder", claim_objects)
+                logger.info(
+                    "Synthesised %d equation/derivation-backed claims for document %s",
+                    len(synthesized), document_id,
+                )
+        except Exception:
+            logger.warning(
+                "equation claim synthesis failed (non-fatal): document=%s",
+                document_id, exc_info=True,
+            )
 
         # ── Stage 8e: figure_table_semantics (caption-first deterministic) ─
         fig_tbl_artifact = artifact("figure_table_semantics")
@@ -732,6 +865,21 @@ def run_document_pipeline(
             except Exception as exc:
                 logger.exception("dsl_linking stage failed for document=%s material=%s", document_id, material_id)
                 raise PipelineStageError("dsl_linking", str(exc), cause=exc) from exc
+            # Issue #442: cross-link the thesis artifact and the DSL graph so the
+            # thesis has explicit traversal anchors and the anchor nodes carry the
+            # is_thesis_anchor flag. Deterministic, non-fatal — re-save both.
+            try:
+                from episteme_graph.agents.thesis_reconstruction.anchor_linker import (
+                    link_thesis_anchors,
+                )
+                anchors = link_thesis_anchors(thesis, dsl)
+                if anchors:
+                    save_artifact("thesis_reconstruction", thesis)
+            except Exception as exc:
+                logger.warning(
+                    "thesis anchor linking failed (non-fatal): document=%s error=%s",
+                    document_id, exc,
+                )
             save_artifact("dsl_linking", dsl)
         result.dsl_node_count = len(dsl.nodes)
         result.dsl_edge_count = len(dsl.edges)
@@ -855,6 +1003,42 @@ def run_document_pipeline(
         if finish_target_stage("component_graph", {"nodes": len(getattr(component_graph_result, "nodes", []) or []), "edges": len(getattr(component_graph_result, "edges", []) or []), "total": 1, "processed": 1}):
             return result
 
+        # ── Stage 12a.1: narrative_annotator (reading layer for main graph, #360) ─
+        # Annotation-only LLM stage: graph_summary / narrative_role /
+        # transition_text are stored as a separate artifact and never modify the
+        # graph. Non-fatal: downstream stages do not depend on it.
+        narrative_artifact = artifact("narrative_annotator")
+        if should_use_artifact("narrative_annotator"):
+            narrative = _from_agent_dict("narrative_annotator", narrative_artifact)
+            logger.info("Resuming document pipeline: loaded narrative_annotator artifact for document %s", document_id)
+        else:
+            report_start("narrative_annotator", total=1, unit="llm_call")
+            narrative = None
+            try:
+                from episteme_graph.agents.narrative_annotator.agent import NarrativeAnnotator
+
+                narrative = NarrativeAnnotator().run(
+                    component_graph_result,
+                    thesis=thesis,
+                    derivations=derivations,
+                    cartridge_id=cartridge_id,
+                )
+                save_artifact("narrative_annotator", narrative)
+            except Exception as exc:
+                logger.warning(
+                    "narrative_annotator stage failed (non-fatal): document=%s error=%s",
+                    document_id, exc, exc_info=True,
+                )
+        narrative_counts = {
+            "node_narratives": len(getattr(narrative, "node_narratives", []) or []),
+            "edge_narratives": len(getattr(narrative, "edge_narratives", []) or []),
+            "total": 1,
+            "processed": 1,
+        }
+        report_done("narrative_annotator", narrative_counts)
+        if finish_target_stage("narrative_annotator", narrative_counts):
+            return result
+
         # ── Stage 12b: course_mapping (deterministic component → topic map) ─
         course_mapping_artifact = artifact("course_mapping")
         if should_use_artifact("course_mapping"):
@@ -949,41 +1133,79 @@ def run_document_pipeline(
                     "summary": {"error_count": 0, "warning_count": 1, "review_required_count": 0},
                 }
             save_artifact("export_validation", validation_result_dict)
-        report_done("export_validation", {
-            "status": validation_result_dict.get("status"),
+        # Keep the gate verdict under `gate_status` (passed / passed_with_warnings
+        # / needs_review / failed_validation) and let report_done/finish_target_stage
+        # set `status="completed"`, so the UI stage mark reflects "this stage ran"
+        # rather than mis-mapping the verdict string to a blank "not_started" dot.
+        export_validation_payload = {
+            "gate_status": validation_result_dict.get("status"),
             "error_count": (validation_result_dict.get("summary") or {}).get("error_count", 0),
             "warning_count": (validation_result_dict.get("summary") or {}).get("warning_count", 0),
             "total": 1,
             "processed": 1,
-        })
-        if finish_target_stage("export_validation", {"status": validation_result_dict.get("status"), "error_count": (validation_result_dict.get("summary") or {}).get("error_count", 0), "warning_count": (validation_result_dict.get("summary") or {}).get("warning_count", 0), "total": 1, "processed": 1}):
+        }
+        report_done("export_validation", export_validation_payload)
+        if finish_target_stage("export_validation", {"status": "completed", **export_validation_payload}):
             return result
 
-        # Block persist / completed if validation failed
+        # ── Export-validation failure: graceful degradation ─────────────────
+        # 設計原則: source_embedding が成功した後は status=failed にしない。
+        # chunks + embeddings は常に保存済みであり RAG は必ず動く。
+        # validation エラーは「どの機能が使えないか」を示すだけで、
+        # ユーザーを完全に詰まらせてはならない。
+        #
+        # エラーの種類に応じて persist をスキップし、completed（機能縮退）で完了する:
+        #   component_graph エラー   → graph のみスキップ、claims + components は保存
+        #   no_components /
+        #   deterministic_fallback   → components + graph スキップ、claims は保存
+        #   その他の品質エラー       → すべて保存（review_required フラグのみ）
+        #
+        # status=failed になる唯一のケースは source_chunking / source_embedding の
+        # 失敗（= chunks が保存されていない）であり、それは既にパイプライン前段で
+        # PipelineStageError として raise 済み。
+        _COMPONENT_SKIP_CODES = {
+            # LLM が完全に失敗して placeholder しかない → コンポーネント保存不可
+            "component_assembly_deterministic_fallback",
+            # コンポーネントが 1 件もない → 保存対象なし
+            "no_components",
+            # コンポーネント型が不正 → DB スキーマ違反になる
+            "invalid_component_type",
+        }
+        _skip_graph_persist = False
+        _skip_component_persist = False
+        _degraded_stages: list[str] = []
         if validation_result_dict.get("status") == "failed_validation":
-            error_count = (validation_result_dict.get("summary") or {}).get("error_count", 0)
-            error_details = _summarize_export_validation_errors(validation_result_dict)
-            upsert_analysis_run(
-                run_id=run_id,
-                document_id=document_id,
-                material_id=material_id,
-                cartridge_id=cartridge_id,
-                status="failed",
-                current_stage="export_validation",
-                error_message=(
-                    f"ExportValidationGate: {error_count} hard error(s) found; "
-                    f"persist blocked{error_details}"
-                ),
-            )
-            result.final_stage = "export_validation"
-            logger.warning(
-                "ExportValidationGate blocked persist for document=%s: %d error(s)%s",
-                document_id, error_count, error_details,
-            )
-            raise PipelineStageError(
-                "export_validation",
-                f"Validation failed with {error_count} hard error(s){error_details}; see export_validation artifact",
-            )
+            all_val_errors = validation_result_dict.get("errors") or []
+            component_skip_errors = [e for e in all_val_errors if e.get("code") in _COMPONENT_SKIP_CODES]
+            graph_errors = [e for e in all_val_errors if e.get("artifact") == "component_graph"]
+
+            if component_skip_errors:
+                # components も graph も保存しない: claims だけ保存して completed
+                _skip_component_persist = True
+                _skip_graph_persist = True
+                _degraded_stages = ["component_assembly", "component_graph"]
+                logger.warning(
+                    "ExportValidationGate: コンポーネント生成不可 (%d error(s)) — "
+                    "claims のみ保存して completed に移行: document=%s material=%s",
+                    len(all_val_errors), document_id, material_id,
+                )
+            elif graph_errors:
+                # graph のみスキップ、claims + components は保存
+                _skip_graph_persist = True
+                _degraded_stages = ["component_graph"]
+                logger.warning(
+                    "ExportValidationGate: component_graph エラー (%d) — "
+                    "graph のみスキップして completed に移行: document=%s material=%s",
+                    len(graph_errors), document_id, material_id,
+                )
+            else:
+                # その他の品質エラー: 全部保存して review_required フラグを残す
+                _degraded_stages = []
+                logger.warning(
+                    "ExportValidationGate: 品質エラー (%d) — "
+                    "全アーティファクトを保存して completed に移行: document=%s material=%s",
+                    len(all_val_errors), document_id, material_id,
+                )
 
         # ── Stage 13: persist_claims_components_graph ──────────────────────
         report_start("persist_claims_components_graph", total=3, unit="tables")
@@ -1004,25 +1226,43 @@ def run_document_pipeline(
                 result.claim_count = len(saved_claims)
                 report_item("persist_claims_components_graph", 1, 3, "tables")
 
-                id_map = persist_components(
-                    document_id=document_id,
-                    component_result=component_result,
-                    course_id=course_id,
-                    claim_id_map=claim_id_map,
-                )
+                id_map: dict[str, str] = {}
+                if _skip_component_persist:
+                    logger.warning(
+                        "components persist skipped (validation errors): document=%s",
+                        document_id,
+                    )
+                else:
+                    id_map = persist_components(
+                        document_id=document_id,
+                        component_result=component_result,
+                        course_id=course_id,
+                        claim_id_map=claim_id_map,
+                    )
                 report_item("persist_claims_components_graph", 2, 3, "tables")
-                persist_component_graph(
-                    document_id=document_id,
-                    component_id_map=id_map,
-                    component_result=component_result,
-                    dsl_result=dsl,
-                    course_id=course_id,
-                    component_graph_result=component_graph_result,
-                    claim_id_map=claim_id_map,
-                )
+
+                if _skip_graph_persist or _skip_component_persist:
+                    logger.warning(
+                        "component_graph persist skipped (validation errors): document=%s",
+                        document_id,
+                    )
+                else:
+                    persist_component_graph(
+                        document_id=document_id,
+                        component_id_map=id_map,
+                        component_result=component_result,
+                        dsl_result=dsl,
+                        course_id=course_id,
+                        component_graph_result=component_graph_result,
+                        claim_id_map=claim_id_map,
+                        narrative_result=narrative,
+                    )
                 save_artifact("persist_claims_components_graph", {
                     "claims": result.claim_count,
                     "components": result.component_count,
+                    "graph_skipped": _skip_graph_persist or _skip_component_persist,
+                    "components_skipped": _skip_component_persist,
+                    "degraded_stages": _degraded_stages,
                 })
             except Exception as exc:
                 logger.exception("persist_claims_components_graph stage failed for document=%s material=%s", document_id, material_id)
@@ -1054,6 +1294,22 @@ def run_document_pipeline(
                 "dsl_edges": result.dsl_edge_count,
             }},
         )
+        # 初回 (initial) pipeline 完了時は、この Run を採用 (active) Run とする。
+        # 再解析でも最新の completed initial run を active に進める（従来の
+        # 「latest = 参照対象」挙動を維持）。revision Run はこの経路を通らず、
+        # accept API でのみ optimistic に active を切り替える (#402)。
+        # active pointer は best-effort: 失敗しても pipeline 自体は成功扱いにする。
+        try:
+            set_active_analysis_run(
+                document_id=document_id,
+                run_id=run_id,
+                expected_run_id=get_active_analysis_run_id(document_id=document_id),
+            )
+        except Exception:
+            logger.warning(
+                "failed to set active analysis run for document=%s run=%s",
+                document_id, run_id, exc_info=True,
+            )
         result.final_stage = "completed"
         report_done("completed", {
             "chunks": result.chunk_count,
@@ -1173,6 +1429,70 @@ def _to_plain_data(value: Any) -> Any:
     return value
 
 
+def _record_document_completeness(
+    *,
+    structure: Any,
+    evidence: Any,
+    equations: Any,
+    document_id: str,
+    save_artifact,
+) -> dict:
+    """Compute, persist, and propagate document completeness (#366 / #420).
+
+    Runs at the DocumentStructure / equation_semantics / EvidenceRegistry exit.
+    The equation_semantics result is passed through so equation artifact coverage
+    reflects the real EquationRecords; without it the saved ``document_completeness``
+    artifact would be permanently incomplete for any TeX document with math.
+    Returns the report. Best-effort propagation onto ``structure``.
+    """
+    from .completeness import analyze_document_completeness
+
+    report = analyze_document_completeness(
+        _to_plain_data(structure),
+        _to_plain_data(evidence),
+        document_id=document_id,
+        equations=_to_plain_data(equations),
+    )
+    save_artifact("document_completeness", report)
+    if not report.get("complete", True):
+        reasons = report.get("review_reasons") or []
+        logger.warning(
+            "document %s ingest looks incomplete: %s", document_id, reasons,
+        )
+        _propagate_completeness_to_structure(structure, reasons)
+        save_artifact("document_structure", structure)
+    return report
+
+
+def _propagate_completeness_to_structure(structure: Any, review_reasons: list) -> None:
+    """Attach document-completeness failures to structure.validation_issues (#366).
+
+    Adds one warning ValidationIssue per completeness review reason (deduped by
+    rule_id) so the signal propagates to downstream stages and the export
+    validation gate instead of living only in a side artifact. Severity is
+    ``warning`` — an incomplete ingest blocks publish-ready but is not a hard
+    error. Best-effort: never raises into the pipeline.
+    """
+    issues = getattr(structure, "validation_issues", None)
+    if issues is None:
+        return
+    try:
+        from episteme_graph.agents.document_structure.schema import ValidationIssue
+    except Exception:
+        return
+    existing = {getattr(i, "rule_id", None) for i in issues}
+    for reason in review_reasons or []:
+        rule_id = f"document_completeness_{reason}"
+        if rule_id in existing:
+            continue
+        issues.append(ValidationIssue(
+            rule_id=rule_id,
+            severity="warning",
+            message=f"document ingest completeness: {reason}",
+        ))
+        existing.add(rule_id)
+
+
 def _from_source_chunks(value: list[dict]) -> list:
     from .chunker import SourceChunk
 
@@ -1219,12 +1539,18 @@ def _from_agent_dict(stage: str, value: dict) -> Any:
     if stage == "component_graph":
         from episteme_graph.agents.component_graph.schema import ComponentGraphResult
         return ComponentGraphResult.from_dict(value)
+    if stage == "narrative_annotator":
+        from episteme_graph.agents.narrative_annotator.schema import NarrativeAnnotationResult
+        return NarrativeAnnotationResult.from_dict(value)
     if stage == "evidence_registry":
         from episteme_graph.agents.evidence_registry.schema import EvidenceRegistryResult
         return EvidenceRegistryResult.from_dict(value)
     if stage == "claim_object_builder":
         from episteme_graph.agents.claim_object_builder.schema import ClaimObjectBuildResult
         return ClaimObjectBuildResult.from_dict(value)
+    if stage == "symbol_registry":
+        from episteme_graph.agents.symbol_registry.schema import SymbolRegistryResult
+        return SymbolRegistryResult.from_dict(value)
     if stage == "derivation_chain":
         from episteme_graph.agents.derivation_chain.schema import DerivationChainResult
         return DerivationChainResult.from_dict(value)
@@ -1265,6 +1591,7 @@ def _build_evidence_registry(
     structure: Any,
     qualified: Any,
     equations: Any,
+    roles: Any = None,
 ):
     from episteme_graph.agents.evidence_registry.builder import EvidenceRegistryBuilder
 
@@ -1281,11 +1608,17 @@ def _build_evidence_registry(
         qual = getattr(span, "qualification", {}) or {}
         if isinstance(qual, dict) and qual.get("status") not in (None, "accepted"):
             continue
-        builder.add_for_block(
+        parent_evidence_id = builder.add_for_block(
             block_id,
             evidence_role="source_quote",
             review_note=getattr(span, "reason", "") or "",
         )
+        # Sentence-level records (issue #363) so atomic claims can cite the
+        # exact supporting sentence instead of the whole block.
+        if parent_evidence_id:
+            builder.add_sentences_for_block(
+                block_id, parent_evidence_id=parent_evidence_id
+            )
         seen_block_ids.add(block_id)
 
     # Register evidence for each equation block.
@@ -1311,7 +1644,13 @@ def _build_evidence_registry(
             builder.add_for_block(block_id, evidence_role="table_caption_quote")
             seen_block_ids.add(block_id)
 
-    return builder.build(document_id=document_id, cartridge_id=cartridge_id)
+    registry = builder.build(document_id=document_id, cartridge_id=cartridge_id)
+    # RhetoricalRole span offsets vs evidence spans (issue #363).
+    if roles is not None:
+        from episteme_graph.agents.evidence_registry.builder import check_span_alignment
+
+        check_span_alignment(roles, registry)
+    return registry
 
 
 def _empty_evidence_registry(document_id: str, cartridge_id: str | None):
@@ -1333,6 +1672,7 @@ def _build_claim_objects(
     qualified: Any,
     equations: Any,
     evidence: Any,
+    document_structure: Any = None,
 ):
     from episteme_graph.agents.claim_object_builder.builder import ClaimObjectBuilder
 
@@ -1348,6 +1688,7 @@ def _build_claim_objects(
         equation_index=equation_index,
         cartridge_ontology=None,
         equation_semantics_result=equations,
+        document_structure=document_structure,
     )
     spans = list(getattr(qualified, "qualified_spans", []) or [])
     return builder.build(
@@ -1466,6 +1807,30 @@ def _empty_derivation_chain_result(document_id: str, cartridge_id: str | None):
         cartridge_id=cartridge_id,
         chains=[],
         validation_issues=[],
+    )
+
+
+def _synthesize_equation_claims(*, equations: Any, derivations: Any, claim_objects: Any) -> list:
+    """Synthesise equation/derivation-backed atomic claims (issue #388).
+
+    Returns new ClaimObjectRecord objects to append to the claim artifact. The
+    next synth index continues past any synthesised claims already present so a
+    resumed run does not collide IDs.
+    """
+    from episteme_graph.agents.claim_object_builder.equation_claim_synthesis import (
+        synthesize_equation_claims,
+    )
+
+    existing = list(getattr(claim_objects, "claims", []) or [])
+    # Drop any previously synthesised claims so a resumed run rebuilds them
+    # deterministically instead of duplicating, then re-synthesise from index 1.
+    prose_claims = [c for c in existing if not str(getattr(c, "claim_id", "")).startswith("synth_claim_")]
+    claim_objects.claims = prose_claims
+    return synthesize_equation_claims(
+        equations,
+        derivations=derivations,
+        existing_claims=prose_claims,
+        start_index=1,
     )
 
 

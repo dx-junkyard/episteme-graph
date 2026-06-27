@@ -66,6 +66,12 @@ REVIEW_REASONS = [
     "edge_not_source_backed",
     "fallback_or_inferred_node",
     "source_span_missing",
+    # Issue #361: generic-operation step kept in the equation_detail layer
+    # because its input/output equations still back it.
+    "generic_operation",
+    # Issue #358: two-layer linkage gaps recorded on the node itself.
+    "orphan_detail_node",
+    "empty_main_node",
 ]
 
 # Edge types that are too generic to publish as confirmed theory structure.

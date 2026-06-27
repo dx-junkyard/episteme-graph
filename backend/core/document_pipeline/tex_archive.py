@@ -20,6 +20,9 @@ from episteme_graph.agents.document_structure.schema import (
     Section,
     TypedBlock,
 )
+from episteme_graph.agents.document_structure.author_extraction import (
+    extract_authors_from_tex,
+)
 
 _TEX_EXT = ".tex"
 _BIB_EXT = ".bib"
@@ -58,6 +61,12 @@ _NEWCOMMAND_NAMES = ("newcommand", "renewcommand", "providecommand")
 _MAX_SIMPLE_MACROS = 200
 _MAX_MACRO_EXPANSION_PASSES = 8
 _ALIGNMENT_ENVS = {"align", "eqnarray", "gather", "multline"}
+_MATH_ENV_BASE = _ALIGNMENT_ENVS | {
+    "equation", "flalign", "alignat", "math", "displaymath", "split",
+}
+_TEX_ENV_TOKEN_RE = re.compile(
+    r"\\(?P<kind>begin|end)\s*\{(?P<env>[A-Za-z*]+)\}"
+)
 
 
 @dataclass(frozen=True)
@@ -88,7 +97,37 @@ def build_structure_from_tex_archive(
     blocks, sections = _tex_to_blocks_and_sections(
         source.expanded_tex, document_id, bibliography=source.bibliography
     )
-    metadata = DocumentMetadata(title=source.title, authors=source.authors, pages=0)
+    author_result = extract_authors_from_tex(source.expanded_tex)
+    unclosed_math_environments = _detect_unclosed_math_environments(
+        source.expanded_tex
+    )
+    # Issue #420: compute the TeX equation inventory at ingest from the expanded
+    # source and persist it on the metadata (display math counts + symbolic
+    # labels), so downstream completeness / coverage can detect TeX math without
+    # re-storing the large source.
+    tex_equation_inventory = _compute_tex_equation_inventory(source.expanded_tex)
+    source_bytes = len(source.expanded_tex.encode("utf-8"))
+    authors = list(author_result.authors or source.authors)
+    author_extraction = author_result.to_metadata()
+    if not author_result.authors and authors:
+        author_extraction = {
+            "source": "tex_front_matter",
+            "confidence": 0.6,
+            "needs_review": True,
+            "review_reasons": ["tex_author_macro_missing"],
+            "candidate_sources": {"tex_front_matter": authors},
+        }
+    metadata = DocumentMetadata(
+        title=source.title,
+        authors=authors,
+        pages=0,
+        parser_reached_eof=True,
+        source_bytes_total=source_bytes,
+        source_bytes_processed=source_bytes,
+        unclosed_math_environments=unclosed_math_environments,
+        author_extraction=author_extraction,
+        tex_equation_inventory=tex_equation_inventory,
+    )
     result = DocumentStructureResult(
         document_id=document_id,
         source_file=source.source_file,
@@ -665,6 +704,45 @@ def _split_authors(authors_raw: str) -> list[str]:
         return []
     parts = re.split(r"\s+(?:and|AND)\s+|\\\\|;", authors_raw)
     return [part.strip() for part in parts if part.strip()]
+
+
+def _compute_tex_equation_inventory(tex: str) -> dict:
+    """Compute the canonical TeX equation inventory at ingest (issue #420).
+
+    Delegates to ``completeness.tex_equation_inventory`` so ingest and the
+    completeness / coverage checks share one definition of display-math counting
+    and symbolic-label extraction. Resilient: any failure yields an empty
+    inventory rather than breaking ingestion.
+    """
+    try:
+        from .completeness import tex_equation_inventory
+    except Exception:  # pragma: no cover - import resilience
+        try:
+            from core.document_pipeline.completeness import tex_equation_inventory
+        except Exception:
+            return {"display_math_blocks": 0, "labels": [], "label_count": 0}
+    try:
+        return tex_equation_inventory(tex)
+    except Exception:  # pragma: no cover - defensive
+        return {"display_math_blocks": 0, "labels": [], "label_count": 0}
+
+
+def _detect_unclosed_math_environments(tex: str) -> list[str]:
+    stack: list[str] = []
+    unmatched: set[str] = set()
+    uncommented = re.sub(r"(?m)(?<!\\)%.*$", "", tex)
+    for match in _TEX_ENV_TOKEN_RE.finditer(uncommented):
+        env = match.group("env")
+        if env.rstrip("*") not in _MATH_ENV_BASE:
+            continue
+        if match.group("kind") == "begin":
+            stack.append(env)
+        elif stack and stack[-1] == env:
+            stack.pop()
+        else:
+            unmatched.add(env)
+    unmatched.update(stack)
+    return sorted(unmatched)
 
 
 def _infer_title(tex: str) -> str | None:

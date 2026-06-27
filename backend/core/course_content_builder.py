@@ -148,21 +148,17 @@ def _load_document_ids(session, material_ids: list[str]) -> list[str]:
 
 
 def _load_latest_artifacts(session, document_ids: list[str]) -> dict[str, dict]:
+    """Load each document's adopted (active) run artifacts for course content (#408).
+
+    Prefers documents.active_analysis_run_id; falls back to the latest *completed*
+    run. A rejected candidate or in-flight latest run never feeds course content.
+    """
+    from core.document_pipeline.persistence import resolve_artifact_runs
+
     artifacts: dict[str, dict] = {}
-    for document_id in document_ids:
-        row = session.execute(
-            sa_text("""
-                SELECT stage_outputs
-                FROM document_analysis_runs
-                WHERE document_id::text = :document_id
-                ORDER BY created_at DESC
-                LIMIT 1
-            """),
-            {"document_id": document_id},
-        ).fetchone()
-        if not row or not row[0]:
-            continue
-        stage_outputs = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+    resolved = resolve_artifact_runs(session, document_ids)
+    for document_id, info in resolved.items():
+        stage_outputs = info.get("stage_outputs")
         doc_artifacts = stage_outputs.get("_artifacts") if isinstance(stage_outputs, dict) else None
         if isinstance(doc_artifacts, dict):
             artifacts[document_id] = doc_artifacts
@@ -173,6 +169,8 @@ def _collect_structured_content(artifacts_by_doc: dict[str, dict]) -> dict:
     mapping_topics: list[dict] = []
     components: dict[str, dict] = {}
     equations: dict[str, dict] = {}
+    claims: dict[str, dict] = {}
+    evidence: dict[str, dict] = {}
 
     for document_id, artifacts in artifacts_by_doc.items():
         mapping = _as_dict(artifacts.get("course_mapping"))
@@ -199,10 +197,29 @@ def _collect_structured_content(artifacts_by_doc: dict[str, dict]) -> dict:
             if eq_id:
                 equations[eq_id] = eq
 
+        # claims.json (ClaimObjectBuilder) を取り込み、claim を根拠アイテム化できるようにする。
+        claim_artifact = _as_dict(artifacts.get("claim_object_builder"))
+        for claim in _as_list(claim_artifact.get("claims")):
+            if isinstance(claim, dict) and claim.get("claim_id"):
+                item = dict(claim)
+                item.setdefault("document_id", document_id)
+                claims[str(item["claim_id"])] = item
+
+        # evidence_registry (EvidenceRegistryBuilder) を取り込み、PDF 原文スパンを
+        # kind=source の根拠アイテム化できるようにする。
+        evidence_artifact = _as_dict(artifacts.get("evidence_registry"))
+        for record in _as_list(evidence_artifact.get("records")):
+            if isinstance(record, dict) and record.get("evidence_id"):
+                item = dict(record)
+                item.setdefault("document_id", document_id)
+                evidence[str(item["evidence_id"])] = item
+
     return {
         "mapping_topics": mapping_topics,
         "components": components,
         "equations": equations,
+        "claims": claims,
+        "evidence": evidence,
     }
 
 
@@ -252,6 +269,13 @@ def _enrich_topics(topics: list[dict], bundle: dict, chunks_by_material: dict[st
         prerequisite_concepts = _as_str_list(mapping.get("prerequisite_concepts") if mapping else [])
         teaching_takeaways = _as_str_list([c.get("teaching_takeaway") for c in components if c.get("teaching_takeaway")])
         evidence_ids = _linked_ids(components, "linked_evidence_ids")
+        evidence_links = _topic_evidence_links(
+            components,
+            equations,
+            bundle.get("claims") or {},
+            bundle.get("evidence") or {},
+            mapping_confidence,
+        )
 
         fallback_formulas = _fallback_formulas(fallback_chunk)
 
@@ -279,7 +303,9 @@ def _enrich_topics(topics: list[dict], bundle: dict, chunks_by_material: dict[st
             "expected_misconceptions": _as_str_list(mapping.get("expected_misconceptions") if mapping else []),
             "linked_component_ids": component_ids,
             "linked_equation_ids": [str(e.get("equation_id") or e.get("id")) for e in equations if e.get("equation_id") or e.get("id")],
+            "linked_claim_ids": _linked_ids(components, "linked_claim_ids"),
             "source_evidence_ids": evidence_ids,
+            "evidence_links": evidence_links,
             "teaching_takeaways": teaching_takeaways,
             "material_chunk_ids": [fallback_chunk["id"]] if fallback_chunk else [],
             "source_excerpt": _short_excerpt(fallback_chunk.get("text", "")) if fallback_chunk else "",
@@ -288,6 +314,84 @@ def _enrich_topics(topics: list[dict], bundle: dict, chunks_by_material: dict[st
         })
         enriched.append(topic)
     return enriched
+
+
+def _topic_evidence_links(
+    components: list[dict],
+    equations: list[dict],
+    claims_by_id: dict[str, dict],
+    evidence_by_id: dict[str, dict],
+    confidence: str,
+) -> list[dict]:
+    """Build the authoritative 根拠リンク list consumed by the lecture studio UI.
+
+    Surfaces component / equation / claim / source references with summaries so
+    the frontend can resolve `![[component:id]]` / `![[equation:id]]` /
+    `![[claim:id]]` / `![[source:id]]` embeds. Without this, `topic.evidence_links`
+    stayed empty and any claim/source reference rendered as "未解決".
+    """
+    links: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(kind: str, target_id: str, summary: str, support_role: str) -> None:
+        target_id = str(target_id or "").strip()
+        if not target_id:
+            return
+        key = (kind, target_id)
+        if key in seen:
+            return
+        seen.add(key)
+        links.append({
+            "kind": kind,
+            "target_id": target_id,
+            "summary": _short_excerpt(summary, limit=220) if summary else "",
+            "support_role": support_role,
+            "confidence": confidence,
+        })
+
+    for component in components:
+        add(
+            "component",
+            component.get("component_id") or component.get("id") or "",
+            component.get("summary") or component.get("teaching_takeaway") or "",
+            "support",
+        )
+
+    for equation in equations:
+        add(
+            "equation",
+            equation.get("equation_id") or equation.get("id") or "",
+            equation.get("plain_text") or equation.get("latex") or "",
+            "equation",
+        )
+
+    # claim は component の linked_claim_ids 経由で参照される。claims.json に実体が
+    # あるものだけを根拠化する（存在しない id はリンクにしない）。
+    for claim_id in _linked_ids(components, "linked_claim_ids"):
+        claim = claims_by_id.get(str(claim_id))
+        if not claim:
+            continue
+        add(
+            "claim",
+            claim_id,
+            claim.get("normalized_text") or claim.get("text") or "",
+            str(claim.get("support_status") or "claim"),
+        )
+
+    # source span は component の linked_evidence_ids 経由で参照される。
+    # evidence_registry に実体がある PDF 原文引用だけを kind=source で根拠化する。
+    for evidence_id in _linked_ids(components, "linked_evidence_ids"):
+        record = evidence_by_id.get(str(evidence_id))
+        if not record:
+            continue
+        add(
+            "source",
+            evidence_id,
+            record.get("evidence_text") or "",
+            str(record.get("evidence_role") or "source_quote"),
+        )
+
+    return links
 
 
 def _best_mapping(topic: dict, mapping_topics: list[dict], index: int) -> tuple[dict, str]:
@@ -488,7 +592,11 @@ _COURSE_CONTENT_DRAFT_PROMPT = """あなたは大学教員の授業用ドラフ�
 - インライン数式は `$...$`
 - ブロック数式は `$$...$$`
 - `\(...\)` や `\[...\]` は使わず、必ず `$...$` / `$$...$$` を使う
-- 埋め込みは `![[equation:id]]`, `![[figure:id]]`, `![[source:id]]`, `![[claim:id]]`, `![[component:id]]`
+- 埋め込みは `![[equation:id]]`, `![[component:id]]`, `![[claim:id]]`, `![[source:id]]` の形式を使う
+- 埋め込みに使ってよい kind と id の組み合わせは、根拠候補の `available_references` に列挙されたものだけ
+- `available_references` に無い id を発明してはならない。また id 本来の kind を変えて埋め込んではならない（例: component の id を `claim:` や `equation:` で埋め込まない）
+- 該当する根拠が `available_references` に無い場合は埋め込みを使わず、本文の言葉だけで説明する
+- `![[source:id]]` は `available_references` にある source span の id、または原文抜粋(source_excerpt)を指す `![[source:topic_summary]]` のみを使う
 - 根拠候補の `content_blocks` に equations がある場合、トピック理解に必須の式を `![[equation:id]]` で教材欄に埋め込む
 - 数式を埋め込む前後には、その式が何を定義・変換・制約しているかを短く説明する
 - 数式を単に列挙せず、授業の流れの中で使う
@@ -689,6 +797,16 @@ def _topic_sequence_context(topics: list[dict], index: int) -> dict:
 
 
 def _topic_evidence_for_prompt(topic: dict) -> dict:
+    # 埋め込みに使ってよい (kind, id) の組み合わせは、実際に解決可能な evidence_links
+    # からそのまま導出する。これにより LLM が kind を取り違えたり存在しない id を
+    # 発明したりするのを防ぐ（提示する候補＝解決できる候補、を保証する）。
+    available_references = [
+        {"kind": link.get("kind"), "id": link.get("target_id")}
+        for link in (topic.get("evidence_links") or [])
+        if isinstance(link, dict) and link.get("kind") and link.get("target_id")
+    ]
+    if topic.get("source_excerpt"):
+        available_references.append({"kind": "source", "id": "topic_summary"})
     return {
         "summary": topic.get("summary") or "",
         "content": topic.get("content") or "",
@@ -696,7 +814,9 @@ def _topic_evidence_for_prompt(topic: dict) -> dict:
         "source_excerpt": topic.get("source_excerpt") or "",
         "linked_component_ids": topic.get("linked_component_ids") or [],
         "linked_equation_ids": topic.get("linked_equation_ids") or [],
+        "linked_claim_ids": topic.get("linked_claim_ids") or [],
         "source_evidence_ids": topic.get("source_evidence_ids") or [],
+        "available_references": available_references,
         "assessment_prompts": topic.get("assessment_prompts") or [],
         "teaching_takeaways": topic.get("teaching_takeaways") or [],
     }

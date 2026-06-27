@@ -250,6 +250,26 @@ class TestGROBIDTEIParserFigures:
         assert tbl_blocks
         assert any("Table 1" in b.text for b in tbl_blocks)
 
+    def test_table_cell_formula_carries_table_provenance(self):
+        """Issue #368: a formula inside <figure type=table> keeps table provenance."""
+        tei = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body>'
+            '<div n="1"><head>Results</head>'
+            '<figure type="table" xml:id="tab1">'
+            '<figDesc>Table 1. Coefficients.</figDesc>'
+            '<formula xml:id="t1f1">S = 3.488 beta_2 + 0.28 beta_K2</formula>'
+            '</figure></div></body></text></TEI>'
+        )
+        parser = GROBIDTEIParser()
+        result = parser.parse(tei)
+        eq_blocks = [b for b in result.blocks if b.block_type == "equation_block"]
+        assert len(eq_blocks) == 1
+        raw = eq_blocks[0].raw
+        assert raw.get("container_type") == "table"
+        assert raw.get("in_table") is True
+        assert raw.get("table_id") == "tab1"
+
 
 class TestGROBIDTEIParserProvenance:
     def test_parser_source_set_on_blocks(self):

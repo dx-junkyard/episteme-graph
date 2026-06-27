@@ -67,6 +67,16 @@ class EquationAcceptanceGate:
         if not text:
             return self._mark(candidate, "missing", "context_only", True, ["equation_body_missing"])
 
+        # Issue #368: a candidate with table provenance (or one strongly matching
+        # a coefficient table) must not auto-confirm as a standalone equation.
+        # High-signal candidates are kept review-required as provisional so the
+        # downstream reconstruction / review layer can still inspect them.
+        if self._is_table_derived(candidate, text):
+            reasons = ["table_derived_equation_candidate", "needs_math_review"]
+            if self._is_high_signal(candidate):
+                return self._mark(candidate, "partial", "provisional", True, reasons)
+            return self._mark(candidate, "partial", "context_only", True, reasons)
+
         if _LABEL_ONLY_RE.match(text):
             # High-signal: has a matched_label or display math → provisional (issue #259)
             if self._is_high_signal(candidate):
@@ -103,6 +113,63 @@ class EquationAcceptanceGate:
         if self._is_high_signal(candidate):
             return self._mark(candidate, "unparsed", "provisional", True, ["ambiguous_math_text"])
         return self._mark(candidate, "unparsed", "context_only", True, ["ambiguous_math_text"])
+
+    @classmethod
+    def _is_table_derived(cls, candidate: EquationCandidate, text: str) -> bool:
+        """Table provenance or strong coefficient-table match (issue #368)."""
+        src_loc = candidate.source_location or {}
+        # table provenance is authoritative — accept it unconditionally.
+        if src_loc.get("table_provenance"):
+            return True
+        if "table_derived_equation_candidate" in (candidate.review_reason or []):
+            return True
+        return cls._looks_like_coefficient_table(text)
+
+    # A row of bare numeric coefficients separated by whitespace / delimiters
+    # with no relational equation structure. e.g. "0.12  0.34  0.56".
+    _COEFF_ROW_RE = re.compile(r"^[\s\d.,;:+\-eE×x()]+$")
+    # A "decimal coefficient × subscripted parameter" product (issue #368). The
+    # parameter must carry a subscript and be one of:
+    #   - a LaTeX command:        \beta_2, \beta_{K2}, \alpha_{K2}
+    #   - a Unicode Greek letter: β_2, β_K2, α_3
+    #   - a multi-letter name:    beta_2, beta_K2
+    #   - a single ASCII letter:  G_F  (only with a subscript)
+    # The <base> group is the parameter family (sans subscript) used to require a
+    # repeated family — the strong signal that distinguishes a coefficient table
+    # from an ordinary regression / physics equation.
+    _COEFF_PARAM_RE = re.compile(
+        r"[-+]?\d+\.\d+\s*\*?\s*"
+        r"(?P<base>\\[A-Za-z]+|[α-ωΑ-Ω]|[A-Za-z]{2,}|[A-Za-z])"
+        r"_\{?[A-Za-z0-9]+\}?"
+    )
+
+    @classmethod
+    def _looks_like_coefficient_table(cls, text: str) -> bool:
+        stripped = text.strip()
+        if not stripped:
+            return False
+        # 1) A bare numeric row with no relation operator (pure table cells).
+        if not _RELATION_RE.search(stripped):
+            numbers = re.findall(r"[-+]?\d*\.\d+|[-+]?\d+", stripped)
+            if len(numbers) >= 3 and cls._COEFF_ROW_RE.match(stripped):
+                return True
+        # 2) A linear combination of decimal-coefficient × subscripted parameter
+        #    products with a *repeated parameter family*. Requiring (a) subscripts
+        #    and (b) a repeated base excludes ordinary regression formulas with
+        #    natural-language variable names ("0.50 income + 1.20 education") and
+        #    single-coefficient physics relations ("1.16 G_F^2"), while catching
+        #    coefficient tables like "3.488β_2 + 0.28β_K2 + 0.11β_3".
+        bases = [
+            m.group("base").lstrip("\\").lower()
+            for m in cls._COEFF_PARAM_RE.finditer(stripped)
+        ]
+        if len(bases) >= 2:
+            counts: dict[str, int] = {}
+            for base in bases:
+                counts[base] = counts.get(base, 0) + 1
+            if max(counts.values()) >= 2:
+                return True
+        return False
 
     @staticmethod
     def _is_high_signal(candidate: EquationCandidate) -> bool:

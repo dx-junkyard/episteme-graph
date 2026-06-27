@@ -62,7 +62,10 @@ def _payload():
         ),
         _step("derive_consistency_relation", ["eq_d"], ["eq_e"]),
         _step("apply_criterion", ["eq_e"], ["eq_f"]),
-        _step("transform", ["eq_f"], ["eq_g"]),  # generic → debug layer
+        # Generic with equation IO → kept in equation_detail (issue #361).
+        _step("transform", ["eq_f"], ["eq_g"]),
+        # Generic without output equations → debug layer.
+        _step("relate", ["eq_g"], []),
     ]
     derivations = DerivationChainResult(
         document_id="doc",
@@ -162,13 +165,20 @@ def test_graph_layer_separates_main_detail_debug():
 def test_main_layer_nodes_link_to_their_detail_members():
     # The UI defaults to the main layer; that only works if main nodes reference
     # the detail nodes they aggregate so the toggle can drill down.
+    # Issue #422: parent_component_id now holds a canonical component_assembly
+    # ID (not a theory_op graph-node ID). The detail→main link is maintained
+    # exclusively via member_component_ids on main nodes.
     _result, payload = _payload()
     main_by_id = {n["component_id"]: n for n in _layer(payload, "main")}
     detail = _layer(payload, "equation_detail")
     assert detail
+    claimed_by_main: set[str] = set()
+    for n in main_by_id.values():
+        claimed_by_main.update(n.get("member_component_ids") or [])
     for node in detail:
-        assert node["parent_component_id"] in main_by_id
-        assert node["component_id"] in main_by_id[node["parent_component_id"]]["member_component_ids"]
+        assert node["component_id"] in claimed_by_main, (
+            f"detail node {node['component_id']!r} not found in any main node's member_component_ids"
+        )
 
 
 # --- Criterion 6: source_backing_status everywhere --------------------------
@@ -203,7 +213,7 @@ def test_review_required_nodes_and_edges_always_have_reasons():
 def test_inferred_nodes_are_not_confirmed_source_backed():
     _result, payload = _payload()
     debug = _layer(payload, "debug")
-    assert debug  # the generic "transform" step lands here
+    assert debug  # the generic "relate" step (no equation outputs) lands here
     for node in debug:
         assert node["source_backing_status"] != "source_backed"
         assert node["source_backing_status"] in ("inferred", "review_required")

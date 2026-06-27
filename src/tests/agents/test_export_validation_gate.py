@@ -51,6 +51,8 @@ class _ComponentRecord:
         *,
         linked_claim_ids=None,
         linked_equation_ids=None,
+        linked_dsl_node_ids=None,
+        linked_dsl_edge_ids=None,
         input_equation_ids=None,
         output_equation_ids=None,
         review_required_equation_ids=None,
@@ -78,6 +80,8 @@ class _ComponentRecord:
         self.evidence_refs = evidence_refs or {}
         self.linked_claim_ids = linked_claim_ids or []
         self.linked_equation_ids = linked_equation_ids or []
+        self.linked_dsl_node_ids = linked_dsl_node_ids or []
+        self.linked_dsl_edge_ids = linked_dsl_edge_ids or []
         self.input_equation_ids = input_equation_ids or []
         self.output_equation_ids = output_equation_ids or []
         self.review_required_equation_ids = review_required_equation_ids or []
@@ -665,6 +669,65 @@ def test_export_validation_lists_equation_consistency_mismatch_candidates():
 
 
 # ---------------------------------------------------------------------------
+# Tests: equation fidelity aggregation (issue #368)
+# ---------------------------------------------------------------------------
+
+def test_equation_fidelity_aggregates_all_problem_types():
+    artifacts = _make_artifacts(equation_semantics={
+        "equations": [
+            {
+                "equation_id": "eq_prose",
+                "review_reason": [],
+                "reconstruction": {"status": "reconstructed_from_neighbors",
+                                   "review_reason": ["latex_is_prose"]},
+                "equation_consistency": {"review_reason": ["latex_is_prose",
+                                                            "symbol_loss_unverifiable"]},
+                "review_flags": ["nonequation_id_in_links"],
+            },
+            {
+                "equation_id": "eq_lbl",
+                "review_reason": ["invalid_equation_label"],
+                "reconstruction": {"status": "none", "review_reason": []},
+                "equation_consistency": {"review_reason": []},
+                "review_flags": [],
+            },
+        ],
+        "equation_candidates": [
+            {"candidate_id": "cand_tab", "review_reason": ["table_derived_equation_candidate"]},
+            {"candidate_id": "cand_lbl", "review_reason": ["invalid_equation_label"]},
+        ],
+    })
+    result = _run_gate(artifacts=artifacts)
+    fidelity = result.equation_fidelity
+    assert fidelity["checked"] is True
+    counts = fidelity["issue_counts"]
+    assert counts["latex_is_prose"] == 2          # reconstruction + consistency
+    assert counts["symbol_loss_unverifiable"] == 1
+    assert counts["nonequation_id_in_links"] == 1
+    assert counts["table_derived_equation_candidate"] == 1
+    assert counts["invalid_equation_label"] == 2  # equation + candidate
+
+    # target ids + artifact paths are present
+    prose_targets = fidelity["issues"]["latex_is_prose"]
+    assert any(t.get("equation_id") == "eq_prose" for t in prose_targets)
+    assert all(t["artifact"] == "equation_semantics" for t in prose_targets)
+    assert all("path" in t for t in prose_targets)
+    tab_targets = fidelity["issues"]["table_derived_equation_candidate"]
+    assert tab_targets[0]["candidate_id"] == "cand_tab"
+    assert "equation_candidates" in tab_targets[0]["path"]
+
+    codes = [e.code for e in result.review_items] + [e.code for e in result.warnings]
+    assert "EQUATION_FIDELITY_LATEX_IS_PROSE" in codes
+    assert "EQUATION_FIDELITY_INVALID_EQUATION_LABEL" in codes
+
+
+def test_equation_fidelity_empty_when_no_equation_artifact():
+    result = _run_gate()
+    assert result.equation_fidelity["checked"] is False
+    assert result.equation_fidelity["total"] == 0
+
+
+# ---------------------------------------------------------------------------
 # Tests: DSL edge validation
 # ---------------------------------------------------------------------------
 
@@ -1243,6 +1306,70 @@ def test_component_refinement_review_required_and_teaching_warning():
     assert any(w.code == "COMPONENT_REFINEMENT_TEACHING_GRANULARITY" for w in result.warnings)
 
 
+def test_unprocessed_split_required_is_hard_error_and_not_publish_ready():
+    # #421: a split-required component that was left unprocessed (neither split,
+    # failed, nor review_required) must surface as a hard error carrying the
+    # component target, block export, and forbid publish-ready.
+    comp_result = _RefinedComponentResult({
+        "split_components": [],
+        "unchanged_components": ["comp_unproc"],
+        "failed_refinements": [],
+        "review_required_refinements": [],
+        "unprocessed_split_required": ["comp_unproc"],
+        "unassigned_links": [],
+        "dangling_component_refs": [],
+        "teaching_granularity_warnings": [],
+    })
+    result = _run_gate(component_result=comp_result)
+
+    assert result.status == "failed_validation"
+    assert result.exportable is False
+    assert result.publish_ready is False
+    # The unprocessed split is preserved all the way into the export report.
+    assert result.component_refinement_validation["unprocessed_split_required"] == ["comp_unproc"]
+    unprocessed = [
+        e for e in result.errors
+        if e.code == "COMPONENT_REFINEMENT_REQUIRED_BUT_UNPROCESSED"
+    ]
+    assert len(unprocessed) == 1
+    assert unprocessed[0].target_type == "component"
+    assert unprocessed[0].target_id == "comp_unproc"
+
+
+def test_empty_dsl_hard_fails_nested_and_typed_component_refs_with_targets():
+    component = _ComponentRecord(
+        "comp_dsl",
+        {
+            "claim_ids": [],
+            "evidence_ids": [],
+            "dsl_refs": {
+                "node_ids": ["ghost_nested_node"],
+                "edge_ids": ["ghost_nested_edge"],
+            },
+        },
+        linked_dsl_node_ids=["ghost_typed_node"],
+        linked_dsl_edge_ids=["ghost_typed_edge"],
+    )
+    result = _run_gate(
+        component_result=_ComponentResult([component]),
+        claim_objects=_ClaimObjectResult([]),
+        evidence=_EvidenceResult([]),
+        dsl=_DslResult([], []),
+    )
+
+    assert result.status == "failed_validation"
+    node_errors = [e for e in result.errors if e.code == "UNRESOLVED_DSL_NODE_ID"]
+    edge_errors = [e for e in result.errors if e.code == "UNRESOLVED_DSL_EDGE_ID"]
+    assert {e.target_id for e in node_errors} == {
+        "ghost_nested_node", "ghost_typed_node"
+    }
+    assert {e.target_id for e in edge_errors} == {
+        "ghost_nested_edge", "ghost_typed_edge"
+    }
+    assert all(e.target_type == "dsl_node" for e in node_errors)
+    assert all(e.target_type == "dsl_edge" for e in edge_errors)
+
+
 # ---------------------------------------------------------------------------
 # Step 5: theory bundle + teaching output (issue #326)
 # ---------------------------------------------------------------------------
@@ -1394,7 +1521,12 @@ def test_teaching_output_blueprint_dangling_ref_is_hard_error():
 # ---------------------------------------------------------------------------
 
 def test_provisional_claim_ref_in_equation_is_warned():
-    """equation linked_claim_ids not in claims.json → warning, not a hard error."""
+    """equation linked_claim_ids not in claims.json → warning, not a hard error.
+
+    Issue #443: judged purely by set membership (the id is not in the final claim
+    set), no longer by name pattern, so the single code is
+    UNRESOLVED_CLAIM_REF_IN_ARTIFACT.
+    """
     artifacts = _make_artifacts(
         equation_semantics={
             "equations": [
@@ -1406,12 +1538,14 @@ def test_provisional_claim_ref_in_equation_is_warned():
     )
     result = _run_gate(artifacts=artifacts, claim_objects=_ClaimObjectResult([]))
     assert any(
-        w.code == "PROVISIONAL_CLAIM_REF_IN_ARTIFACT"
+        w.code == "UNRESOLVED_CLAIM_REF_IN_ARTIFACT"
         and w.artifact == "equation_semantics"
         for w in result.warnings
     )
     # Reported, but never a hard block.
-    assert all(e.code != "PROVISIONAL_CLAIM_REF_IN_ARTIFACT" for e in result.errors)
+    assert all(e.code != "UNRESOLVED_CLAIM_REF_IN_ARTIFACT" for e in result.errors)
+    # Name-pattern code is no longer emitted (issue #443).
+    assert all(w.code != "PROVISIONAL_CLAIM_REF_IN_ARTIFACT" for w in result.warnings)
 
 
 def test_provisional_claim_ref_in_derivation_is_warned():
@@ -1429,7 +1563,8 @@ def test_provisional_claim_ref_in_derivation_is_warned():
     )
     result = _run_gate(artifacts=artifacts, claim_objects=_ClaimObjectResult([]))
     codes = {w.code for w in result.warnings if w.artifact == "derivation_chain"}
-    assert "PROVISIONAL_CLAIM_REF_IN_ARTIFACT" in codes
+    assert "UNRESOLVED_CLAIM_REF_IN_ARTIFACT" in codes
+    assert "PROVISIONAL_CLAIM_REF_IN_ARTIFACT" not in codes
 
 
 def test_resolved_claim_refs_produce_no_leak_warning():
@@ -1449,3 +1584,597 @@ def test_resolved_claim_refs_produce_no_leak_warning():
         w.code not in ("PROVISIONAL_CLAIM_REF_IN_ARTIFACT", "UNRESOLVED_CLAIM_REF_IN_ARTIFACT")
         for w in result.warnings
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #418: cross-artifact canonicalization / integrity
+# ---------------------------------------------------------------------------
+
+class _CourseTopicWithDerivations:
+    def __init__(self, linked_component_ids=None, linked_derivation_ids=None):
+        self.linked_component_ids = linked_component_ids or []
+        self.linked_derivation_ids = linked_derivation_ids or []
+
+
+def test_graph_node_parent_component_must_resolve():
+    artifacts = _make_artifacts(component_graph={
+        "nodes": [
+            {"component_id": "comp_main", "label": "Main", "component_type": "TheoryOperationNode"},
+            {"component_id": "op_1", "label": "op", "component_type": "EquationOperationNode",
+             "parent_component_id": "comp_ghost"},
+        ],
+        "edges": [],
+    })
+    result = _run_gate(artifacts=artifacts)
+    codes = {e.code for e in result.errors}
+    assert "COMPONENT_GRAPH_PARENT_COMPONENT_INVALID" in codes
+    bad = next(e for e in result.errors if e.code == "COMPONENT_GRAPH_PARENT_COMPONENT_INVALID")
+    assert bad.target_type == "graph_node"
+    assert bad.target_id == "op_1"
+
+
+def test_graph_node_member_component_must_resolve():
+    artifacts = _make_artifacts(component_graph={
+        "nodes": [
+            {"component_id": "comp_main", "label": "Main", "component_type": "TheoryOperationNode",
+             "member_component_ids": ["op_missing"]},
+        ],
+        "edges": [],
+    })
+    result = _run_gate(artifacts=artifacts)
+    assert "COMPONENT_GRAPH_MEMBER_COMPONENT_INVALID" in {e.code for e in result.errors}
+
+
+def test_graph_node_valid_parent_and_member_pass():
+    artifacts = _make_artifacts(component_graph={
+        "nodes": [
+            {"component_id": "comp_main", "label": "Main", "component_type": "TheoryOperationNode",
+             "member_component_ids": ["op_1"]},
+            {"component_id": "op_1", "label": "op", "component_type": "EquationOperationNode",
+             "parent_component_id": "comp_main"},
+        ],
+        "edges": [],
+    })
+    result = _run_gate(artifacts=artifacts)
+    codes = {e.code for e in result.errors}
+    assert "COMPONENT_GRAPH_PARENT_COMPONENT_INVALID" not in codes
+    assert "COMPONENT_GRAPH_MEMBER_COMPONENT_INVALID" not in codes
+
+
+def test_graph_operation_parent_must_be_canonical_component_not_aggregate_node():
+    artifacts = _make_artifacts(component_graph={
+        "nodes": [
+            {
+                "component_id": "comp_real",
+                "label": "Real",
+                "component_type": "TheoryOperationNode",
+            },
+            {
+                "component_id": "aggregate_theory_node",
+                "label": "Aggregate",
+                "component_type": "TheoryOperationNode",
+            },
+            {
+                "component_id": "detail_operation",
+                "label": "Detail",
+                "component_type": "EquationOperationNode",
+                "parent_component_id": "aggregate_theory_node",
+            },
+        ],
+        "edges": [],
+    })
+    component_result = _ComponentResult([
+        _ComponentRecord("comp_real", {"claim_ids": [], "evidence_ids": []})
+    ])
+
+    result = _run_gate(
+        artifacts=artifacts,
+        component_result=component_result,
+    )
+
+    bad = next(
+        e for e in result.errors
+        if e.code == "COMPONENT_GRAPH_PARENT_COMPONENT_INVALID"
+    )
+    assert bad.target_type == "component"
+    assert bad.target_id == "aggregate_theory_node"
+
+
+def test_graph_operation_parent_resolves_through_representative_component():
+    artifacts = _make_artifacts(component_graph={
+        "nodes": [
+            {
+                "component_id": "theory_op_1",
+                "label": "Aggregate",
+                "component_type": "TheoryOperationNode",
+                "representative_component_id": "comp_real",
+                "linked_component_ids": ["comp_real"],
+            },
+            {
+                "component_id": "detail_operation",
+                "label": "Detail",
+                "component_type": "EquationOperationNode",
+                "parent_component_id": "theory_op_1",
+            },
+        ],
+        "edges": [],
+    })
+    component_result = _ComponentResult([
+        _ComponentRecord("comp_real", {"claim_ids": [], "evidence_ids": []})
+    ])
+
+    result = _run_gate(
+        artifacts=artifacts,
+        component_result=component_result,
+    )
+
+    assert "COMPONENT_GRAPH_PARENT_COMPONENT_INVALID" not in {
+        error.code for error in result.errors
+    }
+
+
+def test_course_topic_unrelated_derivation_is_flagged():
+    component = _ComponentRecord(component_id="comp_1")
+    component.linked_derivation_ids = ["der_1"]
+    comp_result = _ComponentResult([component])
+    course = _CourseMappingResult([
+        _CourseTopicWithDerivations(
+            linked_component_ids=["comp_1"],
+            linked_derivation_ids=["der_1", "der_unrelated"],
+        )
+    ])
+    result = _run_gate(component_result=comp_result, course_mapping=course)
+    unrelated = [w for w in result.warnings if w.code == "COURSE_TOPIC_UNRELATED_DERIVATION"]
+    assert len(unrelated) == 1
+    assert unrelated[0].target_type == "derivation"
+    assert unrelated[0].target_id == "der_unrelated"
+
+
+def test_course_topic_relevant_derivation_passes():
+    component = _ComponentRecord(component_id="comp_1")
+    component.linked_derivation_ids = ["der_1"]
+    comp_result = _ComponentResult([component])
+    course = _CourseMappingResult([
+        _CourseTopicWithDerivations(
+            linked_component_ids=["comp_1"],
+            linked_derivation_ids=["der_1"],
+        )
+    ])
+    result = _run_gate(component_result=comp_result, course_mapping=course)
+    assert not any(w.code == "COURSE_TOPIC_UNRELATED_DERIVATION" for w in result.warnings)
+
+
+def test_validation_entry_serializes_target_fields():
+    artifacts = _make_artifacts(component_graph={
+        "nodes": [{"component_id": "comp_main", "label": "Main",
+                   "component_type": "TheoryOperationNode", "member_component_ids": ["x"]}],
+        "edges": [],
+    })
+    result = _run_gate(artifacts=artifacts)
+    payload = result.to_dict()
+    entry = next(e for e in payload["errors"] if e["code"] == "COMPONENT_GRAPH_MEMBER_COMPONENT_INVALID")
+    assert "target_type" in entry and "target_id" in entry
+
+
+# ---------------------------------------------------------------------------
+# Tests: candidate→registry promotion invariant (issue #431)
+#
+# The invariant is domain-agnostic: every accepted equation candidate must be a
+# subset of the equation registry, established by ID links only. These fixtures
+# deliberately use two unrelated domain vocabularies and assert the subset
+# relationship via set inclusion — never by formula names or hardcoded counts.
+# ---------------------------------------------------------------------------
+
+def _equation_semantics_artifact(equations, candidates):
+    return {"equations": list(equations), "equation_candidates": list(candidates)}
+
+
+def _accepted_codes(result):
+    return {e.code for e in result.errors if e.code == "EQ_ACCEPTED_NOT_REGISTERED"}
+
+
+def _orphaned_accepted_ids(result):
+    return {
+        e.target_id
+        for e in result.errors
+        if e.code == "EQ_ACCEPTED_NOT_REGISTERED"
+    }
+
+
+def test_accepted_equation_registered_via_trace_passes():
+    # Domain A (particle physics-ish ids). Accepted candidate is traced by a
+    # registry record → invariant holds, no EQ_ACCEPTED_NOT_REGISTERED.
+    artifacts = _make_artifacts(equation_semantics=_equation_semantics_artifact(
+        equations=[{"equation_id": "eq_pp_1", "candidate_trace_ids": ["cand_pp_1"]}],
+        candidates=[{"candidate_id": "cand_pp_1", "acceptance_status": "accepted",
+                     "accepted_equation_id": "eq_pp_1"}],
+    ))
+    result = _run_gate(artifacts=artifacts)
+    assert _accepted_codes(result) == set()
+
+
+def test_accepted_equation_registered_via_accepted_equation_id_passes():
+    # Registry record does not list the candidate in candidate_trace_ids, but the
+    # candidate's own accepted_equation_id resolves to a registry equation.
+    artifacts = _make_artifacts(equation_semantics=_equation_semantics_artifact(
+        equations=[{"equation_id": "eq_x", "candidate_trace_ids": []}],
+        candidates=[{"candidate_id": "cand_x", "acceptance_status": "accepted",
+                     "accepted_equation_id": "eq_x"}],
+    ))
+    result = _run_gate(artifacts=artifacts)
+    assert _accepted_codes(result) == set()
+
+
+def test_accepted_equation_not_registered_blocks_publish_domain_a():
+    # Domain A: an accepted candidate that no record traces and whose pointer does
+    # not resolve → hard error, publish blocked. Asserted by set inclusion.
+    accepted_ids = {"cand_pp_1", "cand_pp_2"}
+    artifacts = _make_artifacts(equation_semantics=_equation_semantics_artifact(
+        equations=[{"equation_id": "eq_pp_1", "candidate_trace_ids": ["cand_pp_1"]}],
+        candidates=[
+            {"candidate_id": "cand_pp_1", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_pp_1"},
+            {"candidate_id": "cand_pp_2", "acceptance_status": "accepted",
+             "accepted_equation_id": None},
+        ],
+    ))
+    result = _run_gate(artifacts=artifacts)
+    registered = {"cand_pp_1"}
+    assert _orphaned_accepted_ids(result) == accepted_ids - registered
+    assert result.status == "failed_validation"
+    assert result.exportable is False
+    assert result.publish_ready is False
+
+
+def test_accepted_equation_not_registered_blocks_publish_domain_b():
+    # Domain B: an entirely different vocabulary (economics-ish). Same invariant,
+    # no formula-name or count assumptions — pure ID-set difference.
+    accepted_ids = {"cand_econ_a", "cand_econ_b", "cand_econ_c"}
+    artifacts = _make_artifacts(equation_semantics=_equation_semantics_artifact(
+        equations=[
+            {"equation_id": "eq_econ_a", "candidate_trace_ids": ["cand_econ_a"]},
+            {"equation_id": "eq_econ_b", "candidate_trace_ids": ["cand_econ_b"]},
+        ],
+        candidates=[
+            {"candidate_id": "cand_econ_a", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_econ_a"},
+            {"candidate_id": "cand_econ_b", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_econ_b"},
+            {"candidate_id": "cand_econ_c", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_ghost"},
+        ],
+    ))
+    result = _run_gate(artifacts=artifacts)
+    registered = {"cand_econ_a", "cand_econ_b"}
+    assert _orphaned_accepted_ids(result) == accepted_ids - registered
+    assert result.status == "failed_validation"
+    assert result.publish_ready is False
+
+
+def test_non_accepted_candidates_are_out_of_scope():
+    # provisional / rejected / needs_merge / context_only candidates absent from
+    # the registry must NOT raise the accepted-subset invariant.
+    artifacts = _make_artifacts(equation_semantics=_equation_semantics_artifact(
+        equations=[],
+        candidates=[
+            {"candidate_id": "c_prov", "acceptance_status": "provisional",
+             "accepted_equation_id": None},
+            {"candidate_id": "c_rej", "acceptance_status": "rejected"},
+            {"candidate_id": "c_merge", "acceptance_status": "needs_merge"},
+            {"candidate_id": "c_ctx", "acceptance_status": "context_only"},
+        ],
+    ))
+    result = _run_gate(artifacts=artifacts)
+    assert _accepted_codes(result) == set()
+
+
+def test_all_accepted_registered_is_publish_ready():
+    # Full subset relationship across two records → clean, publish-ready.
+    artifacts = _make_artifacts(equation_semantics=_equation_semantics_artifact(
+        equations=[
+            {"equation_id": "eq_1", "candidate_trace_ids": ["cand_1"]},
+            {"equation_id": "eq_2", "candidate_trace_ids": ["cand_2", "cand_3"]},
+        ],
+        candidates=[
+            {"candidate_id": "cand_1", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_1"},
+            {"candidate_id": "cand_2", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_2"},
+            {"candidate_id": "cand_3", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_2"},
+        ],
+    ))
+    result = _run_gate(artifacts=artifacts)
+    assert _accepted_codes(result) == set()
+    assert result.status == "passed"
+    assert result.publish_ready is True
+
+
+def test_no_equation_semantics_artifact_is_noop():
+    # Documents without an equation_semantics artifact must not trip the check.
+    result = _run_gate()
+    assert _accepted_codes(result) == set()
+
+
+# ---------------------------------------------------------------------------
+# Tests: inter-equation link integrity (issue #432)
+#
+# Domain-agnostic. Equation records use the nested (asdict) shape produced by
+# EquationSemanticsResult.to_dict(). Assertions are by error code / target id,
+# never by formula text or hardcoded equation pairs.
+# ---------------------------------------------------------------------------
+
+def _eq_record(equation_id, *, equation_type="relation", inputs=None, outputs=None,
+               provenance=None, link_status="", can_derive=True):
+    return {
+        "equation_id": equation_id,
+        "confidence_policy": {"can_be_used_in_derivation": can_derive},
+        "semantics": {
+            "equation_type": equation_type,
+            "input_equation_ids": list(inputs or []),
+            "output_equation_ids": list(outputs or []),
+            "link_provenance": dict(provenance or {}),
+            "link_status": link_status,
+        },
+    }
+
+
+def _link_codes(result, code):
+    return {e.target_id for e in result.errors if e.code == code}
+
+
+def test_dangling_equation_link_is_hard_error():
+    artifacts = _make_artifacts(equation_semantics={"equations": [
+        _eq_record("eq_1", inputs=["eq_ghost"],
+                   provenance={"eq_ghost": ["derivation_step"]}),
+    ]})
+    result = _run_gate(artifacts=artifacts)
+    assert _link_codes(result, "EQ_DANGLING_EQUATION_LINK") == {"eq_1"}
+    assert result.status == "failed_validation"
+    assert result.publish_ready is False
+
+
+def test_link_missing_provenance_is_hard_error():
+    artifacts = _make_artifacts(equation_semantics={"equations": [
+        _eq_record("eq_src"),
+        _eq_record("eq_dst", inputs=["eq_src"], provenance={}),
+    ]})
+    result = _run_gate(artifacts=artifacts)
+    assert _link_codes(result, "EQ_LINK_MISSING_PROVENANCE") == {"eq_dst"}
+    assert result.status == "failed_validation"
+
+
+def test_resolved_link_with_provenance_passes():
+    artifacts = _make_artifacts(equation_semantics={"equations": [
+        _eq_record("eq_src", equation_type="definition"),
+        _eq_record("eq_dst", equation_type="result", inputs=["eq_src"],
+                   outputs=[], provenance={"eq_src": ["shared_symbol"]},
+                   link_status="derived"),
+    ]})
+    result = _run_gate(artifacts=artifacts)
+    assert not any(
+        e.code in ("EQ_DANGLING_EQUATION_LINK", "EQ_LINK_MISSING_PROVENANCE",
+                   "EQ_RESULT_RELATION_WITHOUT_INPUT")
+        for e in result.errors
+    )
+
+
+def test_result_without_input_is_hard_error_when_usable():
+    artifacts = _make_artifacts(equation_semantics={"equations": [
+        _eq_record("eq_r", equation_type="result", inputs=[],
+                   link_status="unresolved", can_derive=True),
+    ]})
+    result = _run_gate(artifacts=artifacts)
+    assert _link_codes(result, "EQ_RESULT_RELATION_WITHOUT_INPUT") == {"eq_r"}
+    assert result.status == "failed_validation"
+
+
+def test_relation_without_input_is_hard_error_when_usable():
+    artifacts = _make_artifacts(equation_semantics={"equations": [
+        _eq_record("eq_rel", equation_type="relation", inputs=[],
+                   link_status="unresolved", can_derive=True),
+    ]})
+    result = _run_gate(artifacts=artifacts)
+    assert _link_codes(result, "EQ_RESULT_RELATION_WITHOUT_INPUT") == {"eq_rel"}
+
+
+def test_result_without_input_allowed_when_axiomatic():
+    artifacts = _make_artifacts(equation_semantics={"equations": [
+        _eq_record("eq_r", equation_type="result", inputs=[],
+                   link_status="axiomatic", can_derive=True),
+    ]})
+    result = _run_gate(artifacts=artifacts)
+    assert not any(e.code == "EQ_RESULT_RELATION_WITHOUT_INPUT" for e in result.errors)
+
+
+def test_result_without_input_allowed_when_external_reference():
+    artifacts = _make_artifacts(equation_semantics={"equations": [
+        _eq_record("eq_r", equation_type="result", inputs=[],
+                   link_status="external_reference", can_derive=True),
+    ]})
+    result = _run_gate(artifacts=artifacts)
+    assert not any(e.code == "EQ_RESULT_RELATION_WITHOUT_INPUT" for e in result.errors)
+
+
+def test_result_without_input_is_review_item_when_not_usable():
+    # A non-derivation-usable (review-gated) result is a review item, not a hard
+    # error — it is already blocked from confident downstream use.
+    artifacts = _make_artifacts(equation_semantics={"equations": [
+        _eq_record("eq_r", equation_type="result", inputs=[],
+                   link_status="unresolved", can_derive=False),
+    ]})
+    result = _run_gate(artifacts=artifacts)
+    assert not any(e.code == "EQ_RESULT_RELATION_WITHOUT_INPUT" for e in result.errors)
+    assert any(
+        e.code == "EQ_RESULT_RELATION_WITHOUT_INPUT" for e in result.review_items
+    )
+
+
+def test_definition_without_input_is_not_flagged():
+    # Only result / relation equations are subject to the no-input invariant.
+    artifacts = _make_artifacts(equation_semantics={"equations": [
+        _eq_record("eq_def", equation_type="definition", inputs=[],
+                   link_status="", can_derive=True),
+    ]})
+    result = _run_gate(artifacts=artifacts)
+    assert not any(
+        e.code == "EQ_RESULT_RELATION_WITHOUT_INPUT"
+        for e in (result.errors + result.review_items)
+    )
+
+
+def test_link_integrity_reads_flattened_export_shape():
+    # The check must also work on the flattened to_equations_export() shape.
+    artifacts = _make_artifacts(equation_semantics={"equations": [
+        {"equation_id": "eq_1", "equation_type": "result",
+         "input_equation_ids": ["eq_ghost"],
+         "link_provenance": {"eq_ghost": ["derivation_step"]},
+         "link_status": "derived"},
+    ]})
+    result = _run_gate(artifacts=artifacts)
+    assert _link_codes(result, "EQ_DANGLING_EQUATION_LINK") == {"eq_1"}
+
+
+# ---------------------------------------------------------------------------
+# Tests: derivation step structural constraints (issue #433)
+#
+# Domain-agnostic — assertions are by error code / target id only, never by
+# paper-specific chain structure.
+# ---------------------------------------------------------------------------
+
+def _registry(*equation_ids):
+    return {"equations": [{"equation_id": e} for e in equation_ids]}
+
+
+def _step(step_id, **kw):
+    step = {
+        "step_id": step_id,
+        "input_equation_ids": [],
+        "output_equation_ids": [],
+        "input_claim_ids": [],
+        "output_claim_ids": [],
+        "required_claim_ids": [],
+        "operation": "substitute",
+        "operation_subtype": None,
+        "subtype_source": "unknown",
+        "source_evidence_ids": ["ev_1"],
+        "review_status": "teacher_review_required",
+    }
+    step.update(kw)
+    return step
+
+
+def _deriv(*steps, derivation_id="der_1"):
+    return {"chains": [{"derivation_id": derivation_id, "steps": list(steps)}]}
+
+
+def _codes(result, code):
+    return {e.target_id for e in result.errors if e.code == code}
+
+
+def _review_codes(result, code):
+    return {e.target_id for e in result.review_items if e.code == code}
+
+
+def test_derivation_step_well_formed_passes():
+    artifacts = _make_artifacts(
+        equation_semantics=_registry("eq_1", "eq_2"),
+        derivation_chain=_deriv(_step(
+            "step_001", input_equation_ids=["eq_1"], output_equation_ids=["eq_2"],
+            operation="substitute", source_evidence_ids=["ev_1"],
+        )),
+    )
+    result = _run_gate(artifacts=artifacts)
+    assert not any(e.code.startswith("DERIVATION_STEP_") for e in result.errors)
+    assert not any(
+        e.code in ("DERIVATION_STEP_MISSING_EVIDENCE",
+                   "DERIVATION_STEP_UNCONTROLLED_OPERATION")
+        for e in result.review_items
+    )
+
+
+def test_derivation_step_missing_endpoint_is_hard_error():
+    artifacts = _make_artifacts(
+        equation_semantics=_registry("eq_1"),
+        derivation_chain=_deriv(_step(
+            "step_001", input_equation_ids=["eq_1"], output_equation_ids=[],
+        )),
+    )
+    result = _run_gate(artifacts=artifacts)
+    assert _codes(result, "DERIVATION_STEP_MISSING_ENDPOINT") == {"der_1:step_001"}
+    assert result.status == "failed_validation"
+
+
+def test_derivation_step_claim_endpoints_satisfy_endpoint_rule():
+    # A claim-only step (no equation ids) is well-formed via claim endpoints.
+    artifacts = _make_artifacts(
+        derivation_chain=_deriv(_step(
+            "step_001", input_claim_ids=["c_1"], output_claim_ids=["c_2"],
+        )),
+    )
+    result = _run_gate(artifacts=artifacts)
+    assert not any(e.code == "DERIVATION_STEP_MISSING_ENDPOINT" for e in result.errors)
+
+
+def test_derivation_step_dangling_equation_ref_is_hard_error():
+    artifacts = _make_artifacts(
+        equation_semantics=_registry("eq_1"),
+        derivation_chain=_deriv(_step(
+            "step_001", input_equation_ids=["eq_ghost"], output_equation_ids=["eq_1"],
+        )),
+    )
+    result = _run_gate(artifacts=artifacts)
+    assert _codes(result, "DERIVATION_STEP_DANGLING_EQUATION_REF") == {"der_1:step_001"}
+    assert result.status == "failed_validation"
+
+
+def test_uncontrolled_operation_unflagged_is_hard_error():
+    artifacts = _make_artifacts(
+        equation_semantics=_registry("eq_1", "eq_2"),
+        derivation_chain=_deriv(_step(
+            "step_001", input_equation_ids=["eq_1"], output_equation_ids=["eq_2"],
+            operation="schwinger_dyson", review_status="auto_accepted",
+            review_reason="",
+        )),
+    )
+    result = _run_gate(artifacts=artifacts)
+    assert _codes(result, "DERIVATION_STEP_UNCONTROLLED_OPERATION") == {"der_1:step_001"}
+    assert result.status == "failed_validation"
+
+
+def test_uncontrolled_operation_flagged_is_review_item():
+    artifacts = _make_artifacts(
+        equation_semantics=_registry("eq_1", "eq_2"),
+        derivation_chain=_deriv(_step(
+            "step_001", input_equation_ids=["eq_1"], output_equation_ids=["eq_2"],
+            operation="schwinger_dyson", review_status="teacher_review_required",
+        )),
+    )
+    result = _run_gate(artifacts=artifacts)
+    assert not any(
+        e.code == "DERIVATION_STEP_UNCONTROLLED_OPERATION" for e in result.errors
+    )
+    assert _review_codes(result, "DERIVATION_STEP_UNCONTROLLED_OPERATION") == {
+        "der_1:step_001"
+    }
+
+
+def test_derivation_step_missing_evidence_is_review_item():
+    artifacts = _make_artifacts(
+        equation_semantics=_registry("eq_1", "eq_2"),
+        derivation_chain=_deriv(_step(
+            "step_001", input_equation_ids=["eq_1"], output_equation_ids=["eq_2"],
+            source_evidence_ids=[],
+        )),
+    )
+    result = _run_gate(artifacts=artifacts)
+    assert not any(e.code == "DERIVATION_STEP_MISSING_EVIDENCE" for e in result.errors)
+    assert _review_codes(result, "DERIVATION_STEP_MISSING_EVIDENCE") == {
+        "der_1:step_001"
+    }
+
+
+def test_no_derivation_chain_artifact_is_noop():
+    result = _run_gate()
+    assert not any(e.code.startswith("DERIVATION_STEP_") for e in result.errors)
+    assert not any(e.code.startswith("DERIVATION_STEP_") for e in result.review_items)

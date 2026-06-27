@@ -56,7 +56,11 @@ SAMPLE_STRUCTURE = {
         {"section_id": "sec_1", "title": "Intro", "level": 1, "order": 0,
          "page_start": 1, "page_end": 5},
     ],
-    "metadata": {"title": "Test paper", "authors": ["Alice"], "pages": 10},
+    "metadata": {
+        "title": "Test paper", "authors": ["Alice"], "pages": 10,
+        "author_extraction": {"source": "grobid_tei", "confidence": 0.95,
+                              "needs_review": False, "review_reasons": []},
+    },
 }
 
 SAMPLE_EQUATIONS = {

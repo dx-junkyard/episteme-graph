@@ -59,6 +59,12 @@ CORE_PREDICATES = [
     "EQUIVALENT",
 ]
 
+# Issue #441: the controlled vocabulary a DSL edge's ``edge_type`` must belong to
+# so graph traversal can branch on relation kind. It mirrors CORE_PREDICATES (the
+# domain-agnostic core relation set); the raw domain verb is preserved separately
+# in ``domain_verb`` as the subtype.
+EDGE_TYPE_VOCAB = list(CORE_PREDICATES)
+
 DOMAIN_VERBS = [
     "assumes",
     "derives",
@@ -113,6 +119,8 @@ class DSLLLMInput:
     equations: list[dict]
     thesis_nodes: list[dict]
     excluded_from_core: list[dict]
+    # Claims dropped by the shared input limit (issue #356).
+    excluded_from_pipeline_input: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -124,6 +132,10 @@ class DSLNode:
     source_refs: dict
     reason: str
     confidence: float
+    # Issue #442: set when this node is a thesis traversal anchor (the node a
+    # thesis claim/equation maps to). Bidirectional with
+    # ThesisReconstructionResult.anchor_node_ids; filled after DSL linking.
+    is_thesis_anchor: bool = False
 
 
 @dataclass
@@ -137,6 +149,10 @@ class DSLEdge:
     evidence_refs: dict
     reason: str
     confidence: float
+    # Issue #441: the controlled relation type for traversal (EDGE_TYPE_VOCAB).
+    # Mirrors core_predicate; the raw domain verb stays in domain_verb as subtype.
+    # Filled deterministically by cleanup when empty so it is never null.
+    edge_type: str = ""
 
 
 @dataclass
@@ -157,6 +173,8 @@ class DSLLinkingResult:
     review_notes: list[str]
     confidence: float
     validation_issues: list[ValidationIssue] = field(default_factory=list)
+    # Claims dropped from the LLM input by the shared selection policy (issue #356).
+    excluded_from_pipeline_input: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -178,6 +196,7 @@ class DSLLinkingResult:
             review_notes=d.get("review_notes", []),
             confidence=float(d.get("confidence", 0.0)),
             validation_issues=issues,
+            excluded_from_pipeline_input=d.get("excluded_from_pipeline_input", []),
         )
 
     @classmethod

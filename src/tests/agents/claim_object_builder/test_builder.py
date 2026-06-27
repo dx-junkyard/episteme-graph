@@ -176,21 +176,28 @@ def test_validation_flags_missing_concepts():
     assert "claim_concepts_empty" in rules
 
 
-def test_domain_concept_fallback_for_bias_elimination_paper():
+def test_cartridge_supplies_domain_concepts():
+    # Issue #397: domain concepts come from the cartridge ontology, not from
+    # hard-coded core fallbacks. With a cartridge, neutral concept terms resolve.
     spans = [
         _make_qualified(
             "span_001",
             "blk_x",
-            "Skewness and kurtosis consistency relations eliminate nonlinear galaxy bias.",
+            "The consistency relations eliminate the nuisance parameters of the target theory.",
             claim_type="result",
         )
     ]
-    builder = ClaimObjectBuilder()
+    builder = ClaimObjectBuilder(cartridge_ontology=_ONTOLOGY)
     result = builder.build("doc_test", spans)
 
     concepts = {c.normalized for c in result.claims[0].concepts}
-    assert {"skewness", "kurtosis", "consistency relation", "nonlinear galaxy bias"} <= concepts
-    assert "claim_concepts_empty" not in {i.rule_id for i in result.validation_issues}
+    assert {"Consistency relation", "Nuisance parameter", "Target theory"} <= concepts
+
+
+def test_core_has_no_domain_concept_fallbacks():
+    # Issue #397: core must not hard-code domain concept vocabulary.
+    from episteme_graph.agents.claim_object_builder import builder as builder_mod
+    assert builder_mod._DOMAIN_CONCEPT_FALLBACKS == {}
 
 
 def _make_registry(block_id: str, text: str):
@@ -403,12 +410,14 @@ def test_single_proposition_with_and_stays_atomic():
 
 def test_concept_completion_from_evidence_span_text():
     # Concept appears only in the raw evidence span, not the normalized claim text.
-    span = _make_qualified("span_001", "blk_x", "Skewness consistency relations hold.")
+    # Concepts come from the cartridge ontology (issue #397), not hard-coded core
+    # vocabulary.
+    span = _make_qualified("span_001", "blk_x", "The alpha quantity relations hold.")
     span.edit_suggestions = {"normalized_text": "The relation holds."}
-    builder = ClaimObjectBuilder()
+    builder = ClaimObjectBuilder(cartridge_ontology=_ONTOLOGY)
     claim = builder.build("doc_test", [span]).claims[0]
     names = {c.normalized for c in claim.concepts}
-    assert "skewness" in names
+    assert "Alpha quantity" in names
 
 
 def test_source_backed_claim_has_valid_evidence_ids():
@@ -455,14 +464,29 @@ def test_split_claims_create_compound_parent_and_atomic_children():
 # issue #8: concept_assignment_status + main-claim concept count
 # ---------------------------------------------------------------------------
 
+# Generic cartridge ontology (issue #397): domain-specific vocabulary lives in
+# the cartridge, not in core. These neutral aliases let the cartridge mechanism
+# supply concepts for the neutral fixtures below.
 _ONTOLOGY = {
-    "aliases": {"Skewness": ["skewness"], "Kurtosis": ["kurtosis"]},
-    "concept_types": {"Skewness": "observable", "Kurtosis": "observable"},
+    "aliases": {
+        "Consistency relation": ["consistency relation", "consistency relations"],
+        "Nuisance parameter": ["nuisance parameter", "nuisance parameters"],
+        "Target theory": ["target theory"],
+        "Alpha quantity": ["alpha quantity"],
+        "Beta quantity": ["beta quantity"],
+    },
+    "concept_types": {
+        "Consistency relation": "result",
+        "Nuisance parameter": "parameter",
+        "Target theory": "theory_family",
+        "Alpha quantity": "observable",
+        "Beta quantity": "observable",
+    },
 }
 
 
 def test_atomic_cartridge_backed_concept_is_source_backed():
-    text = "Skewness and kurtosis are observables."
+    text = "The alpha quantity and beta quantity are observables."
     registry = _make_registry("blk_x", text)
     span = _make_qualified("span_001", "blk_x", text)
     builder = ClaimObjectBuilder(evidence_registry=registry, cartridge_ontology=_ONTOLOGY)
@@ -473,16 +497,17 @@ def test_atomic_cartridge_backed_concept_is_source_backed():
     assert claim.concept_assignment_status == "source_backed"
 
 
-def test_atomic_fallback_only_concept_is_inferred():
-    # No cartridge ontology: concepts come only from domain fallbacks.
-    text = "Skewness is computed in the analysis."
+def test_cartridge_backed_atomic_concept_is_source_backed():
+    # Issue #397: a domain cartridge supplies the concept vocabulary; an atomic
+    # source-backed claim whose concepts are cartridge-backed is source_backed.
+    text = "The alpha quantity is computed in the analysis."
     registry = _make_registry("blk_x", text)
     span = _make_qualified("span_001", "blk_x", text)
-    builder = ClaimObjectBuilder(evidence_registry=registry)
+    builder = ClaimObjectBuilder(evidence_registry=registry, cartridge_ontology=_ONTOLOGY)
     claim = builder.build("doc_test", [span]).claims[0]
 
     assert claim.concepts
-    assert claim.concept_assignment_status == "inferred"
+    assert claim.concept_assignment_status == "source_backed"
 
 
 def test_composite_claim_concepts_are_tentative():
@@ -513,10 +538,10 @@ def test_split_required_claim_concepts_are_review_required():
 
 
 def test_main_claim_with_single_concept_warns_insufficient():
-    text = "Skewness is computed."
+    text = "The alpha quantity is computed."
     registry = _make_registry("blk_x", text)
     span = _make_qualified("span_001", "blk_x", text, claim_type="result")
-    builder = ClaimObjectBuilder(evidence_registry=registry)
+    builder = ClaimObjectBuilder(evidence_registry=registry, cartridge_ontology=_ONTOLOGY)
     result = builder.build("doc_test", [span])
 
     claim = result.claims[0]
@@ -543,7 +568,7 @@ def test_claim_concept_fields_round_trip_through_serialization():
     # issue #8: concepts + concept_assignment_status must survive to_dict/from_dict.
     from episteme_graph.agents.claim_object_builder.schema import ClaimObjectBuildResult
 
-    text = "Skewness and kurtosis are observables."
+    text = "The alpha quantity and beta quantity are observables."
     registry = _make_registry("blk_x", text)
     span = _make_qualified("span_001", "blk_x", text)
     builder = ClaimObjectBuilder(evidence_registry=registry, cartridge_ontology=_ONTOLOGY)

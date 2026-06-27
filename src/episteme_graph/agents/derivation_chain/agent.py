@@ -22,6 +22,7 @@ from episteme_graph.agents.equation_semantics.schema import (
 )
 
 from .schema import (
+    CONTROLLED_OPERATIONS,
     DEFAULT_OPERATION,
     OPERATION_ONTOLOGY,
     DerivationChainRecord,
@@ -29,6 +30,21 @@ from .schema import (
     DerivationStep,
     ValidationIssue,
 )
+from .system_derivation import detect_system_level_derivations
+
+
+def _system_chain_issues(system_chains: list[DerivationChainRecord]) -> list[ValidationIssue]:
+    """Surface review reasons from system-level derivations as validation issues (#386)."""
+    issues: list[ValidationIssue] = []
+    for chain in system_chains:
+        for reason in chain.review_reasons or []:
+            issues.append(ValidationIssue(
+                rule_id=f"system_derivation_{reason}",
+                severity="warning",
+                message=f"system-level derivation {chain.derivation_id} flagged: {reason}",
+                field=chain.derivation_id,
+            ))
+    return issues
 
 # Mapping from claim_type → preferred operation (issue #261)
 _CLAIM_TYPE_TO_OPERATION: dict[str, str] = {
@@ -47,6 +63,20 @@ _CLAIM_TYPE_TO_OPERATION: dict[str, str] = {
     "conclusion": "infer_conclusion",
     "causal_or_dependency_claim": "infer_intermediate_claim",
     "limitation": "flag_limitation",
+}
+
+# Generic operations that name no concrete theory operation (issue #361).
+# Mirrors component_graph.schema.GENERIC_OPERATIONS so steps the graph layer
+# would flag are reclassified here first.
+_GENERIC_OPERATIONS = {"transform", "relate", "connect", "support", "associate", ""}
+
+# Secondary equation roles → concrete OPERATION_ONTOLOGY verb (issue #361).
+_SECONDARY_TYPE_TO_OPERATION = {
+    "definition": "apply_definition",
+    "result": "derive_result",
+    "constraint": "apply_constraint",
+    "approximation": "approximate",
+    "transformation": "substitute",
 }
 
 
@@ -260,6 +290,19 @@ class DerivationChainAgent:
                     field=chain.derivation_id,
                 ))
 
+        # System-level derivations (issue #386): detect multi-equation operations
+        # (solve / eliminate / constrain over an equation group) that local
+        # adjacency chains do not capture. Additive — never mutates local chains.
+        system_chains = detect_system_level_derivations(
+            equations,
+            existing_chains=chains,
+            claim_link_index=claim_link_index or {},
+            next_index=1,
+        )
+        if system_chains:
+            chains.extend(system_chains)
+            issues.extend(_system_chain_issues(system_chains))
+
         return DerivationChainResult(
             document_id=equations.document_id,
             cartridge_id=cartridge_id,
@@ -306,6 +349,8 @@ class DerivationChainAgent:
                 assumptions = list(current_record.semantics.assumptions)
 
             operation = self._infer_operation(current_record)
+            operation = self._refine_generic_operation(operation, current_record)
+            operation, operation_subtype, subtype_source = self._resolve_step_operation(operation)
             linked_claims = list(claim_link_index.get(current, []))
             sem_claims = list(current_record.semantics.linked_claim_ids) if current_record else []
             all_claim_ids = sorted(set(linked_claims + sem_claims))
@@ -315,6 +360,8 @@ class DerivationChainAgent:
                 input_equation_ids=list(sources),
                 operation=operation,
                 output_equation_ids=[current],
+                operation_subtype=operation_subtype,
+                subtype_source=subtype_source,
                 required_claim_ids=all_claim_ids,
                 assumption_refs=assumptions,
                 reason=current_record.semantics.summary if current_record else "",
@@ -386,6 +433,7 @@ class DerivationChainAgent:
                 claim_id = getattr(claim, "claim_id", None) or f"claim_{step_idx}"
                 claim_type = getattr(claim, "claim_type", "unknown") or "unknown"
                 operation = _CLAIM_TYPE_TO_OPERATION.get(claim_type, "infer_intermediate_claim")
+                operation, operation_subtype, subtype_source = self._resolve_step_operation(operation)
 
                 # Evidence IDs for this claim
                 source_ev_ids: list[str] = list(getattr(claim, "source_evidence_ids", []) or [])
@@ -395,6 +443,8 @@ class DerivationChainAgent:
                     input_equation_ids=[],
                     operation=operation,
                     output_equation_ids=[],
+                    operation_subtype=operation_subtype,
+                    subtype_source=subtype_source,
                     required_claim_ids=[prev_claim_id] if prev_claim_id else [],
                     assumption_refs=list(claim_id for c2 in section_claims[:step_idx - 1]
                                         if getattr(c2, "claim_type", "") == "assumption"
@@ -445,32 +495,47 @@ class DerivationChainAgent:
         )
 
     @staticmethod
+    def _resolve_step_operation(operation: str) -> tuple[str, str | None, str]:
+        """Map a step operation onto the controlled vocabulary (issue #433).
+
+        Returns ``(operation, operation_subtype, subtype_source)``. A verb in
+        CONTROLLED_OPERATIONS passes through unchanged. A domain-specific or
+        otherwise unknown verb is demoted: the controlled ``operation`` becomes
+        the generic DEFAULT_OPERATION while the original name is preserved in
+        ``operation_subtype`` with ``subtype_source="inferred"`` provenance, so no
+        information is lost and the controlled field stays domain-agnostic.
+        """
+        op = str(operation or "").strip()
+        if op in CONTROLLED_OPERATIONS:
+            return op, None, "unknown"
+        if not op:
+            return DEFAULT_OPERATION, None, "unknown"
+        return DEFAULT_OPERATION, op, "inferred"
+
+    @staticmethod
     def _infer_operation(record: Optional[EquationRecord]) -> str:
         if record is None:
             return DEFAULT_OPERATION
+        # Domain-neutral operation inference (issues #395 / #398): map the
+        # equation's *role* (and generic operation verbs in its text) to a
+        # generic operation verb. No paper-specific observable / parameter /
+        # method names are produced by core logic.
         text = " ".join([
             str(getattr(record, "label", "") or ""),
             record.semantics.summary or "",
             record.semantics.reason or "",
-            " ".join(record.semantics.used_symbols or []),
-            " ".join(s.symbol for s in (record.semantics.defined_symbols or [])),
         ]).lower()
-        if "skewness" in text and "linear" in text and "bias" in text:
-            return "linearize_skewness_bias_dependence"
-        if "kurtosis" in text and "linear" in text and "bias" in text:
-            return "linearize_kurtosis_bias_dependence"
-        if ("second" in text or "2nd" in text) and "bias" in text and ("solve" in text or "eliminat" in text):
-            return "solve_second_order_bias"
-        if ("third" in text or "3rd" in text) and "bias" in text and ("solve" in text or "eliminat" in text):
-            return "solve_third_order_bias"
-        if "substitut" in text and ("second" in text or "2nd" in text):
-            return "substitute_second_order_bias"
-        if "substitut" in text and ("third" in text or "3rd" in text):
-            return "substitute_third_order_bias"
-        if "skewness" in text and "consistency relation" in text:
-            return "derive_skewness_consistency_relation"
-        if "kurtosis" in text and "consistency relation" in text:
-            return "derive_first_kurtosis_consistency_relation"
+        for needle, verb in (
+            ("lineariz", "linearize"),
+            ("substitut", "substitute"),
+            ("eliminat", "eliminate"),
+            ("solve", "solve"),
+            ("approximat", "approximate"),
+            ("normaliz", "normalize"),
+            ("constrain", "apply_constraint"),
+        ):
+            if needle in text:
+                return verb
         primary = record.semantics.equation_type
         mapping = {
             "definition": "define",
@@ -481,6 +546,31 @@ class DerivationChainAgent:
             "constraint": "apply_constraint",
         }
         return mapping.get(primary, DEFAULT_OPERATION)
+
+    @staticmethod
+    def _refine_generic_operation(operation: str, record: Optional[EquationRecord]) -> str:
+        """Single deterministic reclassification of a generic operation (#361).
+
+        Before a step is emitted with a generic operation (which the graph
+        layer would push toward the debug layer), try once to pick a concrete
+        OPERATION_ONTOLOGY verb from the equation's own signals: secondary
+        roles first, then defined symbols. When no signal supports a concrete
+        verb the operation stays generic — review keeps it honest.
+        """
+        if record is None or str(operation or "").strip().lower() not in _GENERIC_OPERATIONS:
+            return operation
+        sem = record.semantics
+        for secondary in sem.secondary_types or []:
+            mapped = _SECONDARY_TYPE_TO_OPERATION.get(str(secondary).strip().lower())
+            if mapped:
+                return mapped
+        has_definition = any(
+            str(getattr(s, "definition_status", "") or "") in ("defined", "redefined")
+            for s in (sem.defined_symbols or [])
+        )
+        if has_definition:
+            return "apply_definition"
+        return operation
 
 
 def _confidence_gate(blocked_eqs: list[str]) -> dict:

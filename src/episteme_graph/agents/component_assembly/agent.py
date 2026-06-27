@@ -7,6 +7,7 @@ from episteme_graph.agents.claim_qualification.schema import ClaimQualificationR
 from episteme_graph.agents.dsl_linking.schema import DSLLinkingResult
 from episteme_graph.agents.equation_semantics.schema import EquationSemanticsResult
 from episteme_graph.agents.thesis_reconstruction.schema import ThesisReconstructionResult
+from episteme_graph.agents.claim_selection import selection_issue_payloads
 from episteme_graph.agents.id_canonicalization import (
     canonicalize_claim_refs,
     claim_aliases_from_accepted_claims,
@@ -42,7 +43,10 @@ class ComponentAssemblyAgent:
         self._cleanup = ComponentOverlapCleanup()
         self._validator = ComponentAssemblyValidator()
         self._repairer = ComponentAssemblyRepairer(cleanup=self._cleanup)
-        self._refiner = ComponentRefiner()
+        # Reuse the provider-aware assembly client for constrained refinement
+        # routing. The refiner calls it only when source-backed deterministic
+        # signals cannot identify a unique child.
+        self._refiner = ComponentRefiner(llm_client=self._llm_client)
         self._granularity_analyzer = ComponentGranularityAnalyzer()
         self._derivation_graph_aligner = DerivationGraphAligner()
         self._theory_bundle_stage = TheoryBundleStage()
@@ -71,9 +75,21 @@ class ComponentAssemblyAgent:
             evidence_registry=evidence_registry,
             derivations=derivations,
         )
-        diagnostics = {
-            "component_assembly_input_validation": _preflight_check(llm_input),
-        }
+        diagnostics: dict = {}
+        # Defensively strip dangling equation references (#368 follow-up): a
+        # claim / thesis / DSL ref to an equation absent from the final set must
+        # not collapse the whole assembly into a deterministic fallback.
+        equation_ref_cleanup = _strip_unavailable_equation_refs(llm_input)
+        if equation_ref_cleanup:
+            diagnostics["component_assembly_equation_ref_cleanup"] = equation_ref_cleanup
+            logger.warning(
+                "Stripped %d dangling equation reference(s) before component assembly: "
+                "document=%s equation_ids=%s",
+                len(equation_ref_cleanup),
+                qualified_claims.document_id,
+                sorted({r["equation_id"] for r in equation_ref_cleanup}),
+            )
+        diagnostics["component_assembly_input_validation"] = _preflight_check(llm_input)
         if diagnostics["component_assembly_input_validation"]["status"] == "failed":
             logger.warning(
                 "Component assembly input preflight failed: document=%s issue_codes=%s",
@@ -98,6 +114,7 @@ class ComponentAssemblyAgent:
                 issue["code"] for issue in diagnostics["component_assembly_input_validation"]["issues"]
             ]
             result.diagnostics = diagnostics
+            self._record_claim_exclusions(result, llm_input)
             return result
 
         messages = self._prompt_factory.build_messages(llm_input)
@@ -110,6 +127,7 @@ class ComponentAssemblyAgent:
             diagnostics["fallback_reason"] = str(exc)
             diagnostics["original_failure_codes"] = ["initial_llm_exception"]
             result.diagnostics = diagnostics
+            self._record_claim_exclusions(result, llm_input)
             return result
         diagnostics["initial_llm_raw_output"] = _llm_capture(self._llm_client, raw_output)
         diagnostics["initial_llm_output_component_count"] = diagnostics["initial_llm_raw_output"]["component_count"]
@@ -152,13 +170,29 @@ class ComponentAssemblyAgent:
                 result, cartridge, llm_input=llm_input
             )
 
-        # Step 3: optional actual refinement/splitting. Disabled by default so
-        # Step 1 remains detection/proposal only.
-        if (config or {}).get("enable_component_refiner", False):
+        # Step 3: actual refinement/splitting. Now conditionally DEFAULT-ON
+        # (issue #385): when the granularity analyzer detects quality triggers
+        # (split recommendations, mixed/coarse components, few components with
+        # many artifacts, or unlinked derivation chains) the refiner runs
+        # automatically. An explicit ``enable_component_refiner`` config value
+        # (True/False) always overrides the automatic decision.
+        refiner_cfg = (config or {}).get("enable_component_refiner")
+        if refiner_cfg is None:
+            run_refiner, refiner_reasons = _refinement_triggered(result, llm_input, derivations)
+        else:
+            run_refiner, refiner_reasons = bool(refiner_cfg), (["explicit_config"] if refiner_cfg else [])
+        diagnostics["component_refiner_decision"] = {
+            "ran": run_refiner,
+            "auto": refiner_cfg is None,
+            "triggers": refiner_reasons,
+            "component_count_before": len(result.components),
+        }
+        if run_refiner:
             result = self._refiner.refine(result, llm_input, derivations)
             result.validation_issues = self._validator.validate(
                 result, cartridge, llm_input=llm_input
             )
+            diagnostics["component_refiner_decision"]["component_count_after"] = len(result.components)
 
         # Step 4: align refined components with derivation chains, equation
         # operations, the theory component graph, and the support map. Disabled
@@ -182,7 +216,22 @@ class ComponentAssemblyAgent:
         merged_diagnostics = dict(diagnostics)
         merged_diagnostics.update(result.diagnostics or {})
         result.diagnostics = merged_diagnostics
+        self._record_claim_exclusions(result, llm_input)
         return result
+
+    @staticmethod
+    def _record_claim_exclusions(result, llm_input) -> None:
+        """Persist limit-dropped claims and surface them as warnings (#356)."""
+        excluded = list(getattr(llm_input, "excluded_from_pipeline_input", []) or [])
+        if not excluded:
+            return
+        result.excluded_from_pipeline_input = excluded
+        result.validation_issues = list(result.validation_issues or []) + [
+            ValidationIssue(**payload)
+            for payload in selection_issue_payloads(
+                excluded, stage="component_assembly"
+            )
+        ]
 
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:
         if not cartridge_id:
@@ -194,6 +243,153 @@ class ComponentAssemblyAgent:
                 "Cartridge '%s' not found; proceeding without cartridge", cartridge_id
             )
             return None
+
+
+_REFINER_INTERNAL_FLOW_OPERATIONS = {
+    "define", "transform", "solve", "substitute", "eliminate", "infer", "validate",
+    "linearize", "approximate", "derive", "marginalize",
+}
+
+
+def _refinement_triggered(result, llm_input, derivations) -> tuple[bool, list[str]]:
+    """Decide whether the ComponentRefiner should run by default (issue #385).
+
+    Returns ``(should_run, reasons)``. Domain-independent: the triggers are read
+    from the granularity analyzer's structural annotations and artifact counts,
+    never from field-specific names.
+    """
+    reasons: list[str] = []
+    components = list(result.components or [])
+
+    for component in components:
+        rec = component.split_recommendation or {}
+        if rec.get("required"):
+            reasons.append("component_split_recommended")
+            break
+
+    for component in components:
+        status = (component.component_quality or {}).get("granularity_status")
+        if status in ("too_coarse", "mixed_responsibility"):
+            reasons.append("coarse_or_mixed_responsibility_component")
+            break
+
+    for component in components:
+        quality = component.component_quality or {}
+        if int(quality.get("responsibility_count") or 0) > 1:
+            reasons.append("component_has_multiple_responsibility_types")
+            break
+
+    # A component whose internal flow mixes several major operations in one unit.
+    for component in components:
+        ops = {
+            str(step.get("relation") or step.get("operation") or "").strip().lower().split("_")[0]
+            for step in (component.internal_flow or [])
+            if isinstance(step, dict)
+        }
+        if len(ops & _REFINER_INTERNAL_FLOW_OPERATIONS) > 1:
+            reasons.append("internal_flow_mixes_operations")
+            break
+
+    # Few components while there is a lot of extracted equation/evidence material.
+    # Threshold raised to <= 4 (issue #392): a theory-heavy paper compressed into
+    # 3-4 coarse components must still trigger refinement, not only the <= 2 case.
+    eq_count = len(getattr(llm_input, "available_equations", []) or [])
+    ev_count = len(getattr(llm_input, "available_evidence", []) or [])
+    if components and len(components) <= 4 and eq_count >= 15:
+        reasons.append("few_components_with_many_equations")
+    if components and len(components) <= 4 and ev_count >= 30:
+        reasons.append("few_components_with_many_evidence")
+    # Keep the tighter low-artifact case so a 1-2 component result with a modest
+    # number of equations/evidence is still refined.
+    if components and len(components) <= 2 and (eq_count >= 6 or ev_count >= 12):
+        reasons.append("few_components_with_many_artifacts")
+
+    # Any single component linked to many equations is a coarse-grouping signal
+    # even when the overall component count is not low (issue #392).
+    for component in components:
+        quality = component.component_quality or {}
+        if int(quality.get("equation_count") or 0) >= 8:
+            reasons.append("component_links_many_equations")
+            break
+
+    # Derivation chains exist but none are linked to a component.
+    chains = list(getattr(derivations, "chains", []) or [])
+    if chains and not any(getattr(ch, "linked_component_ids", None) for ch in chains):
+        reasons.append("derivation_chains_unlinked_to_components")
+
+    # De-duplicate while preserving order.
+    seen: set[str] = set()
+    unique = [r for r in reasons if not (r in seen or seen.add(r))]
+    return (bool(unique), unique)
+
+
+def _strip_unavailable_equation_refs(llm_input: ComponentAssemblyLLMInput) -> list[dict]:
+    """Drop dangling equation_id references not present in available_equations.
+
+    A claim / thesis node / DSL node-or-edge may reference an equation_id that is
+    absent from the final equation set — e.g. LLM drift, or an equation that was
+    demoted / dropped upstream (table-derived candidate, prose reconstruction,
+    rejected label). Such a dangling reference must not collapse the whole
+    component assembly into a deterministic fallback (which then aborts the
+    pipeline at the export-validation gate). It is filtered out here and reported
+    in diagnostics, mirroring the equation_semantics I/O-link cleanup (#368).
+
+    Mutates ``llm_input`` in place and returns the removed references.
+    """
+    available = _ids(llm_input.available_equations, "equation_id")
+    if not available:
+        # No equation set to validate against — the preflight already skips the
+        # equation check in this case, so nothing is stripped.
+        return []
+
+    removed: list[dict] = []
+
+    def _filter(refs, location: str, owner_id) -> list:
+        kept = []
+        for ref in refs or []:
+            ref_str = str(ref)
+            if not ref_str:
+                continue
+            if ref_str in available:
+                kept.append(ref)
+            else:
+                removed.append({
+                    "location": location,
+                    "owner_id": owner_id,
+                    "equation_id": ref_str,
+                })
+        return kept
+
+    for claim in llm_input.accepted_claims or []:
+        if isinstance(claim, dict) and "equation_ids" in claim:
+            claim["equation_ids"] = _filter(
+                claim.get("equation_ids"), "accepted_claims.equation_ids", claim.get("claim_id")
+            )
+    for claim in llm_input.available_claims or []:
+        if isinstance(claim, dict) and "equation_ids" in claim:
+            claim["equation_ids"] = _filter(
+                claim.get("equation_ids"), "available_claims.equation_ids", claim.get("claim_id")
+            )
+    for node in llm_input.thesis_nodes or []:
+        if isinstance(node, dict) and "equation_ids" in node:
+            node["equation_ids"] = _filter(
+                node.get("equation_ids"), "thesis_nodes.equation_ids",
+                node.get("node_id") or node.get("id"),
+            )
+    for node in llm_input.dsl_nodes or []:
+        refs = node.get("source_refs") if isinstance(node, dict) else None
+        if isinstance(refs, dict) and "equation_ids" in refs:
+            refs["equation_ids"] = _filter(
+                refs.get("equation_ids"), "dsl_nodes.source_refs.equation_ids", node.get("node_id")
+            )
+    for edge in llm_input.dsl_edges or []:
+        refs = edge.get("evidence_refs") if isinstance(edge, dict) else None
+        if isinstance(refs, dict) and "equation_ids" in refs:
+            refs["equation_ids"] = _filter(
+                refs.get("equation_ids"), "dsl_edges.evidence_refs.equation_ids", edge.get("edge_id")
+            )
+
+    return removed
 
 
 def _preflight_check(llm_input: ComponentAssemblyLLMInput) -> dict:
@@ -247,7 +443,7 @@ def _preflight_check(llm_input: ComponentAssemblyLLMInput) -> dict:
             ))
 
     return {
-        "status": "failed" if issues else "passed",
+        "status": "failed" if _has_fatal_preflight_issue(issues) else "passed",
         "accepted_claim_count": len(accepted_claim_ids),
         "available_claim_count": len(available_claim_ids),
         "available_evidence_count": len(available_evidence_ids),
@@ -255,6 +451,18 @@ def _preflight_check(llm_input: ComponentAssemblyLLMInput) -> dict:
         "available_derivation_count": len(llm_input.available_derivation_ids or []),
         "issues": issues,
     }
+
+
+# Dangling equation references are a referential-cleanup concern (handled by
+# _strip_unavailable_equation_refs), not broken assembly input. They must never
+# collapse the whole assembly into a deterministic fallback that aborts the
+# pipeline at export validation (#368 follow-up). Only genuinely missing claim /
+# evidence inputs are fatal.
+_NON_FATAL_PREFLIGHT_CODES = {"accepted_equation_ids_not_available"}
+
+
+def _has_fatal_preflight_issue(issues: list[dict]) -> bool:
+    return any(issue.get("code") not in _NON_FATAL_PREFLIGHT_CODES for issue in issues)
 
 
 def _preflight_issue(code: str, field: str, invalid_values: list[str], allowed_values: set[str]) -> dict:
@@ -295,6 +503,10 @@ def _issue_dict(issue: ValidationIssue, *, llm_input: ComponentAssemblyLLMInput)
         "message": issue.message,
         "field": issue.field,
     }
+    if issue.target_type:
+        data["target_type"] = issue.target_type
+    if issue.target_id:
+        data["target_id"] = issue.target_id
     allowed = _allowed_values_for_issue(issue.rule_id, llm_input)
     invalid = _invalid_value_from_message(issue.message)
     if invalid:

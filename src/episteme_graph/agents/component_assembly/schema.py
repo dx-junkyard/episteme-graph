@@ -41,6 +41,51 @@ ASSEMBLY_HINT_TYPES = [
     "candidate_diagnostic_cluster",
 ]
 
+# Issue #440: generic responsibility/operation labels that, on their own, fail to
+# identify a component. A concrete name pairs a subject with a responsibility;
+# a name equal to one of these bare labels is flagged COMPONENT_NAME_GENERIC.
+# Domain-agnostic — these are structural responsibility/operation words, not
+# field-specific terms.
+GENERIC_COMPONENT_LABELS = {
+    "",
+    "component",
+    "theory",
+    "theory component",
+    "relation",
+    "relation component",
+    "method",
+    "method component",
+    "model",
+    "definition",
+    "derivation",
+    "constraint",
+    "application",
+    "limitation",
+    "observation model",
+    "observation_model",
+    "observable basis",
+    "observable_basis",
+    "equation system",
+    "equation_system",
+    "correction",
+    "uncertainty",
+    "diagnostic",
+    "result",
+    "assumption",
+    # bare generic operations (mirror component_refiner._GENERIC_OPERATIONS)
+    "transform",
+    "relate",
+    "connect",
+    "support",
+    "associate",
+}
+
+
+def is_generic_component_name(name: object) -> bool:
+    """Return True when ``name`` is a generic responsibility/operation label (#440)."""
+    normalized = " ".join(str(name or "").strip().lower().split())
+    return normalized in GENERIC_COMPONENT_LABELS
+
 
 def normalize_dependency_type(value: object) -> str:
     raw = str(value or "").strip().lower()
@@ -94,6 +139,8 @@ class ComponentAssemblyLLMInput:
     available_dsl_edges: list[dict] = field(default_factory=list)
     available_derivation_ids: list[str] = field(default_factory=list)
     claim_centered_plan: dict = field(default_factory=dict)
+    # Claims dropped by the shared input limit (issue #356).
+    excluded_from_pipeline_input: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -172,6 +219,14 @@ class ComponentRecord:
     supports_claim_ids: list[str] = field(default_factory=list)
     support_distance_to_headline_claim: int = 0
     support_kind: str = ""
+    # Thesis nodes (central_thesis / support:<section>:<idx>) this component
+    # backs, derived deterministically from claim/equation overlap (issue #354).
+    supports_thesis_node_ids: list[str] = field(default_factory=list)
+    # Issue #440: a self-describing statement of the component's role in the
+    # thesis (e.g. "States the central result", "Provides the theoretical
+    # basis"). Derived deterministically from support_role / support_kind /
+    # thesis backing when the LLM leaves it empty. Domain-agnostic.
+    role_in_thesis: str = ""
     # Concept tags required for component graph / course mapping (issue #8).
     # Derived deterministically from linked atomic-claim concepts, equation
     # symbols, and cartridge normalized terms.
@@ -199,6 +254,8 @@ class ValidationIssue:
     severity: str
     message: str
     field: str | None = None
+    target_type: str | None = None
+    target_id: str | None = None
 
 
 @dataclass
@@ -226,6 +283,8 @@ class ComponentAssemblyResult:
     # {theory_bundle, course_mapping, blueprint_updates, theory_bundle_validation,
     #  teaching_output_validation}.
     theory_bundle: dict = field(default_factory=dict)
+    # Claims dropped from the LLM input by the shared selection policy (issue #356).
+    excluded_from_pipeline_input: list[dict] = field(default_factory=list)
     diagnostics: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -234,6 +293,12 @@ class ComponentAssemblyResult:
             responsibility = component.get("responsibility_type") or ""
             if responsibility:
                 component.setdefault("type", responsibility)
+            # Issue #440: ``name`` mirrors the component label so consumers do not
+            # have to know the internal field name. The classification ``type``
+            # the issue mandates is carried by ``component_type`` (validated
+            # against the COMPONENT_TYPE vocabulary by the agent validator).
+            if "name" not in component:
+                component["name"] = component.get("label") or ""
         return data
 
     def to_json(self, indent: int = 2) -> str:
@@ -290,6 +355,8 @@ class ComponentAssemblyResult:
                 supports_claim_ids=list(c.get("supports_claim_ids") or []),
                 support_distance_to_headline_claim=int(c.get("support_distance_to_headline_claim", 0) or 0),
                 support_kind=c.get("support_kind", ""),
+                supports_thesis_node_ids=list(c.get("supports_thesis_node_ids") or []),
+                role_in_thesis=c.get("role_in_thesis", ""),
                 concepts=list(c.get("concepts") or []),
                 prerequisite_concepts=list(c.get("prerequisite_concepts") or []),
                 introduced_concepts=list(c.get("introduced_concepts") or []),
@@ -315,6 +382,7 @@ class ComponentAssemblyResult:
             component_refinement=d.get("component_refinement") or {},
             derivation_graph_alignment=d.get("derivation_graph_alignment") or {},
             theory_bundle=d.get("theory_bundle") or {},
+            excluded_from_pipeline_input=d.get("excluded_from_pipeline_input") or [],
             diagnostics=d.get("diagnostics") or {},
         )
 

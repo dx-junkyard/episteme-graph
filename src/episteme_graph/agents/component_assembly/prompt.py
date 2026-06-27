@@ -22,8 +22,9 @@ Components are reusable theory parts that support the paper's main claim, not
 section summaries or contiguous equation sequences.
 Split a component when it contains two or more of:
 define, parameterize, linearize, solve, substitute, eliminate, derive, compare,
-diagnose, forecast, limit. Do NOT keep a bias-parameter solution, a consistency
-relation, a forecast constraint, and a validity caveat inside one component.
+diagnose, forecast, limit. Do NOT keep a parameter-solving step, a residual /
+final-constraint relation, an application / forecast, and a validity caveat
+inside one component.
 Each component should set "operation" to its single main operation.
 Each component should set "responsibility_type" to one of:
 definition, model, observation_model, observable_basis, equation_system,
@@ -43,15 +44,16 @@ Important constraints:
   theory_base, observable_bridge, derivation_core, result, application, and
   limitation components even when they appear in the same section.
 - Background-only components must use support_kind=prerequisite.
-- Bias-elimination or solve/eliminate components belong in support_role=derivation_core.
-- Consistency-relation outputs belong in support_role=result.
+- Solve / eliminate / estimate (nuisance-parameter handling) components belong in
+  support_role=derivation_core.
+- Residual-relation / final-constraint outputs belong in support_role=result.
 - Forecast/diagnostic use belongs in support_role=application, not derivation_core.
-- Split oversized map components into definition / model /
+- Split oversized model-to-observable map components into definition / model /
   observation_model / observable_basis / equation_system /
-  derivation / constraint units. For example, a
-  bias-to-smoothed-observables map must not mix galaxy bias, smoothing,
-  skewness/kurtosis observable bases, bias-linearized equations, bias
-  elimination, and final consistency relations.
+  derivation / constraint units. For example, a model-to-observable map must not
+  mix the parameter model, the observable construction, the linearized equation
+  system, the nuisance-parameter elimination, and the final constraint relation
+  in one component.
 - Use accepted claims, equation semantics, thesis structure, and DSL graph evidence.
 - Use only atomic claims as primary support. Do not use claims with
   atomicity=composite, split_required, non_atomic, split_pending, or is_atomic=false
@@ -60,7 +62,12 @@ Important constraints:
 - Set concepts (>= 2), prerequisite_concepts, introduced_concepts, and reused_concepts
   per component. Derivation components must include a mathematical/procedural concept,
   observable components an observable name, and comparison components a theory-class name.
-- Return AT MOST 6 components. Prefer the headline-claim support components.
+- Use ADAPTIVE granularity: emit as many components as needed to represent the
+  distinct reusable theoretical responsibilities. There is NO fixed cap. A
+  theory-heavy paper may need several components; a simple one fewer. Do not
+  collapse distinct responsibilities into a single coarse summary, and do not
+  split solely by section heading. Split whenever a unit combines multiple
+  responsibility types or more than one major operation.
 - Keep label <= 10 words, summary <= 40 words, reason <= 30 words,
   teaching_takeaway <= 30 words, and each review_note <= 20 words.
 - Keep inputs/outputs/preconditions/cautions/internal_flow to the minimum needed
@@ -97,8 +104,9 @@ equation role requirement:
 - If an equation is review_required, reconstructed, or cannot support claims, include
   it in review_required_equation_ids and set component review_status to
   teacher_review_required unless the component is merely cautionary.
-- Bias-elimination components should include eliminated_symbols, retained_symbols,
-  and internal_flow steps with concrete solve/substitute/eliminate operations.
+- Solve/eliminate (nuisance-parameter handling) components should include
+  eliminated_symbols, retained_symbols, and internal_flow steps with concrete
+  solve/substitute/eliminate operations.
 
 Return ONLY valid JSON matching the schema.
 """
@@ -268,14 +276,19 @@ class ComponentAssemblyPromptFactory:
             ", ".join(ASSEMBLY_HINT_TYPES),
             "\n## Constraints",
             "- Avoid section-summary components\n"
-            "- Return AT MOST 3 components\n"
+            "- Return as many components as needed to represent distinct reusable "
+            "theoretical responsibilities. There is NO fixed upper limit. Use fewer "
+            "components only when the source genuinely contains fewer distinct "
+            "operations. Do not collapse definition, model, observable construction, "
+            "equation system, derivation, constraint, application, and limitation "
+            "into one component when they play distinct roles\n"
             "- Keep summaries/reasons concise; avoid long explanatory prose\n"
             "- Each strong component should include evidence_refs\n"
             "- Use ONLY IDs from the available_* lists above in evidence_refs\n"
             "- Do NOT invent or guess IDs not present in available_* lists\n"
             "- Derivation-like components need outputs and usually preconditions\n"
             "- Derivation-like components with equations must classify equations into input/intermediate/output/constraint/definition roles\n"
-            "- Bias-elimination components must name eliminated_symbols and retained_symbols\n"
+            "- Solve/eliminate (nuisance-parameter handling) components must name eliminated_symbols and retained_symbols\n"
             "- Do not use can_support_claim=false or review_required equations as source-backed component outputs\n"
             "- Correction/uncertainty/diagnostic components should remain distinct when evidence supports separation\n"
             "- Relation/Correction/Diagnostic/Method components MUST include internal_flow\n"

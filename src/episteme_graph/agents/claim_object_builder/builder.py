@@ -19,6 +19,12 @@ import re
 from dataclasses import dataclass, field as _dc_field
 from typing import Callable, Iterable, Optional
 
+from episteme_graph.agents.content_normalization import (
+    CONTENT_HASH_VERSION,
+    claim_content_hash,
+    normalize_text_for_hash,
+)
+
 from .schema import (
     CLAIM_TYPE_ONTOLOGY,
     ClaimConcept,
@@ -29,28 +35,17 @@ from .schema import (
     REVIEW_STATUSES,
     SUPPORT_STATUSES,
     ValidationIssue,
+    derive_support_status,
+    normalize_atomicity,
 )
 
 
 _DEFAULT_CLAIM_TYPE = "unknown"
 
-_DOMAIN_CONCEPT_FALLBACKS: dict[str, tuple[str, str]] = {
-    "nonlinear galaxy bias": ("nonlinear galaxy bias", "domain_concept"),
-    "skewness": ("skewness", "observable"),
-    "kurtosis": ("kurtosis", "observable"),
-    "consistency relation": ("consistency relation", "result"),
-    "matter density perturbation": ("matter density perturbation", "quantity"),
-    "dhost": ("DHOST", "theory_family"),
-    "horndeski": ("Horndeski", "theory_family"),
-    "kernel coefficient": ("kernel coefficient", "parameter"),
-    "smoothing scale": ("smoothing scale", "parameter"),
-    "tree-level approximation": ("tree-level approximation", "approximation"),
-    "local bias": ("local bias", "model"),
-    "linear bias": ("linear bias", "parameter"),
-    "bias elimination": ("bias elimination", "method"),
-    "higher-order moment": ("higher-order moment", "observable"),
-    "gravity diagnostic": ("gravity diagnostic", "diagnostic"),
-}
+# Domain-specific concept fallbacks must live in cartridges, not in core logic
+# (issue #397). Core ships an empty map; a domain cartridge supplies concept
+# vocabulary. Kept as a dict so callers iterate without special-casing.
+_DOMAIN_CONCEPT_FALLBACKS: dict[str, tuple[str, str]] = {}
 
 
 @dataclass
@@ -68,6 +63,9 @@ class _BuildCtx:
     review_status: str = "teacher_review_required"
     claim_type: str = "unknown"
     text: str = ""
+    section_title: str | None = None
+    # Canonical support_status from evidence presence + adequacy (issue #359).
+    support_status_base: str = "inferred"
 
 
 class ClaimObjectBuilder:
@@ -95,6 +93,7 @@ class ClaimObjectBuilder:
         concept_resolver: Optional[Callable] = None,
         cartridge_ontology: dict | None = None,
         equation_semantics_result: object | None = None,
+        document_structure: object | None = None,
     ) -> None:
         self._evidence_registry = evidence_registry
         self._equation_index = equation_index or {}
@@ -102,13 +101,32 @@ class ClaimObjectBuilder:
         self._cartridge_ontology = cartridge_ontology or {}
         self._span_to_evidence: dict[str, list[str]] = {}
         self._known_evidence_ids: set[str] = set()
+        # block_id → [(normalized sentence text, evidence_id)] (issue #363).
+        self._sentence_evidence_by_block: dict[str, list[tuple[str, str]]] = {}
+        # section_id → human-readable title (issue #359).
+        self._section_titles: dict[str, str] = {}
+        for section in getattr(document_structure, "sections", None) or []:
+            sid = getattr(section, "section_id", None)
+            title = getattr(section, "title", None)
+            if sid and title:
+                self._section_titles[str(sid)] = str(title)
         if evidence_registry is not None:
             for r in getattr(evidence_registry, "records", []) or []:
                 eid = getattr(r, "evidence_id", None)
                 if eid:
                     self._known_evidence_ids.add(eid)
                 bid = getattr(r.source, "block_id", None)
-                if bid:
+                if not bid:
+                    continue
+                if getattr(r, "evidence_role", "") == "sentence_quote":
+                    normalized = normalize_text_for_hash(
+                        getattr(r, "evidence_text", "") or ""
+                    )
+                    if normalized:
+                        self._sentence_evidence_by_block.setdefault(bid, []).append(
+                            (normalized, r.evidence_id)
+                        )
+                else:
                     self._span_to_evidence.setdefault(bid, []).append(r.evidence_id)
 
         # Build proximity index: block_id → [equation_id], section_id → [equation_id]
@@ -157,6 +175,10 @@ class ClaimObjectBuilder:
             evidence_ids = self._resolve_evidence_ids(block_id)
             review_note = self._extract_review_note(span)
             review_status = self._derive_review_status(qual)
+            support_status_base = derive_support_status(
+                bool(evidence_ids), qual.get("evidence_adequacy")
+            )
+            section_title = self._section_titles.get(str(section_id or "")) or None
 
             ctx = _BuildCtx(
                 document_id=document_id,
@@ -171,6 +193,8 @@ class ClaimObjectBuilder:
                 review_status=review_status,
                 claim_type=claim_type,
                 text=text,
+                section_title=section_title,
+                support_status_base=support_status_base,
             )
 
             # Atomic rewrite responsibility (issue #317): the LLM atomic rewrite is
@@ -254,7 +278,7 @@ class ClaimObjectBuilder:
 
             # Single, already-atomic claim (non-atomic spans were routed to the
             # LLM-atomic or deterministic-fallback paths above, issue #317).
-            single_support_status = "source_backed" if evidence_ids else "inferred"
+            single_support_status = support_status_base
             record = ClaimObjectRecord(
                 claim_id=claim_id,
                 document_id=document_id,
@@ -270,6 +294,7 @@ class ClaimObjectBuilder:
                 review_status=review_status,
                 review_note=review_note,
                 section_id=section_id,
+                section_title=section_title,
                 confidence=confidence,
                 normalized_text=text,
                 atomicity="atomic",
@@ -285,6 +310,9 @@ class ClaimObjectBuilder:
             )
             claims.append(record)
 
+        # Deterministic content hashes for cross-paper matching (issue #362).
+        self._apply_content_hashes(claims)
+        self._report_duplicate_content_hashes(claims, issues)
         self._validate_claim_set(claims, issues)
 
         return ClaimObjectBuildResult(
@@ -293,6 +321,36 @@ class ClaimObjectBuilder:
             claims=claims,
             validation_issues=issues,
         )
+
+    @staticmethod
+    def _apply_content_hashes(claims: list[ClaimObjectRecord]) -> None:
+        for claim in claims:
+            claim.content_hash = claim_content_hash(
+                claim.normalized_text or claim.text
+            )
+            claim.content_hash_version = CONTENT_HASH_VERSION
+
+    @staticmethod
+    def _report_duplicate_content_hashes(
+        claims: list[ClaimObjectRecord],
+        issues: list[ValidationIssue],
+    ) -> None:
+        """Within-document hash collisions are reported, never auto-merged (#362)."""
+        by_hash: dict[str, list[str]] = {}
+        for claim in claims:
+            if claim.content_hash:
+                by_hash.setdefault(claim.content_hash, []).append(claim.claim_id)
+        for hash_value, claim_ids in by_hash.items():
+            if len(claim_ids) > 1:
+                issues.append(ValidationIssue(
+                    rule_id="duplicate_claim_content_hash",
+                    severity="warning",
+                    message=(
+                        f"claims {', '.join(claim_ids)} share content_hash "
+                        f"{hash_value}; review for duplication (not auto-merged)"
+                    ),
+                    field=claim_ids[0],
+                ))
 
     def _add_issues_for_record(
         self,
@@ -366,9 +424,7 @@ class ClaimObjectBuilder:
             text = str(cand.get("text", "")).strip()
             if not text:
                 continue
-            atomicity = str(cand.get("atomicity", "atomic")).strip().lower()
-            if atomicity in {"non_atomic", "split_pending"}:
-                atomicity = "split_required"
+            atomicity = normalize_atomicity(cand.get("atomicity", "atomic"))
             if atomicity not in ("atomic", "split_required"):
                 atomicity = "atomic"
             status = str(cand.get("status", "")).strip().lower()
@@ -386,6 +442,7 @@ class ClaimObjectBuilder:
                 "status": status,
                 "qualification_reason": str(cand.get("qualification_reason", "") or ""),
                 "source_span_id": str(cand.get("source_span_id", "") or ""),
+                "evidence_quote": str(cand.get("evidence_quote", "") or ""),
             })
         if normalized:
             return normalized
@@ -410,6 +467,38 @@ class ClaimObjectBuilder:
                 "source_span_id": "",
             })
         return normalized
+
+    def _refine_evidence_ids(
+        self,
+        block_id: str | None,
+        evidence_quote: str,
+        fallback_ids: list[str],
+        claim_id: str,
+        issues: list[ValidationIssue],
+    ) -> list[str]:
+        """Narrow block-level evidence to the matching sentence (issue #363)."""
+        quote = normalize_text_for_hash(evidence_quote or "")
+        if not quote or not block_id:
+            return list(fallback_ids)
+        sentences = self._sentence_evidence_by_block.get(str(block_id)) or []
+        if not sentences:
+            return list(fallback_ids)
+        for normalized, evidence_id in sentences:
+            if normalized == quote:
+                return [evidence_id]
+        for normalized, evidence_id in sentences:
+            if quote in normalized or normalized in quote:
+                return [evidence_id]
+        issues.append(ValidationIssue(
+            rule_id="evidence_quote_unmatched",
+            severity="warning",
+            message=(
+                f"claim {claim_id} evidence_quote does not match any sentence "
+                f"of block {block_id}; keeping block-level evidence"
+            ),
+            field=claim_id,
+        ))
+        return list(fallback_ids)
 
     @staticmethod
     def _dedup_id(base: str, counter: int, seen: set[str]) -> str:
@@ -471,10 +560,11 @@ class ClaimObjectBuilder:
             equation_ids=parent_eqs,
             figure_ids=[],
             table_ids=[],
-            support_status="source_backed" if ctx.evidence_ids else "inferred",
+            support_status=ctx.support_status_base,
             review_status=ctx.review_status,
             review_note=ctx.review_note,
             section_id=ctx.section_id,
+            section_title=ctx.section_title,
             confidence=ctx.confidence,
             normalized_text=ctx.text,
             atomicity="composite",
@@ -485,7 +575,7 @@ class ClaimObjectBuilder:
             split_suggestions=split_suggestions,
             concept_assignment_status=self._concept_assignment_status(
                 is_atomic=False,
-                support_status="source_backed" if ctx.evidence_ids else "inferred",
+                support_status=ctx.support_status_base,
                 concepts=parent_concepts,
             ),
         ))
@@ -509,11 +599,19 @@ class ClaimObjectBuilder:
             text, claim_type, ctx.role_labels, ctx.block_id, ctx.section_id
         )
         source_span_id = cand.get("source_span_id") or ctx.span_id
+        # Sentence-level evidence refinement (issue #363): when the atomic
+        # claim's evidence_quote matches a sentence record, cite that sentence
+        # instead of the whole block. On no match the block-level evidence is
+        # kept and the mismatch is reported — never dropped.
+        evidence_ids = self._refine_evidence_ids(
+            ctx.block_id, cand.get("evidence_quote", ""), ctx.evidence_ids,
+            claim_id, issues,
+        )
 
         if cand["atomicity"] == "atomic" and cand["status"] == "accepted":
             atomicity = "atomic"
             is_atomic = True
-            support_status = "source_backed" if ctx.evidence_ids else "inferred"
+            support_status = ctx.support_status_base
             qualification_reason = None
         else:
             # The agent flagged this piece as not confidently atomized.
@@ -539,7 +637,7 @@ class ClaimObjectBuilder:
             document_id=ctx.document_id,
             claim_type=claim_type,
             text=text,
-            source_evidence_ids=ctx.evidence_ids,
+            source_evidence_ids=evidence_ids,
             source_span_ids=[source_span_id] if source_span_id else [],
             concepts=concepts,
             equation_ids=equation_ids,
@@ -549,6 +647,7 @@ class ClaimObjectBuilder:
             review_status=ctx.review_status,
             review_note=ctx.review_note,
             section_id=ctx.section_id,
+            section_title=ctx.section_title,
             confidence=ctx.confidence,
             normalized_text=text,
             atomicity=atomicity,
@@ -563,7 +662,7 @@ class ClaimObjectBuilder:
             ),
         ))
         self._add_issues_for_record(
-            claim_id, ctx.evidence_ids, concepts, claim_type, equation_ids, issues
+            claim_id, evidence_ids, concepts, claim_type, equation_ids, issues
         )
 
     def _emit_fallback_split(
@@ -613,6 +712,7 @@ class ClaimObjectBuilder:
                 review_status=ctx.review_status,
                 review_note=ctx.review_note,
                 section_id=ctx.section_id,
+                section_title=ctx.section_title,
                 confidence=ctx.confidence,
                 normalized_text=part,
                 atomicity="split_required",
@@ -646,6 +746,7 @@ class ClaimObjectBuilder:
             review_status=ctx.review_status,
             review_note=ctx.review_note,
             section_id=ctx.section_id,
+            section_title=ctx.section_title,
             confidence=ctx.confidence,
             normalized_text=ctx.text,
             atomicity="split_required",
@@ -951,7 +1052,7 @@ class ClaimObjectBuilder:
     def _rhetorical_roles(cls, text: str) -> set[str]:
         t = text.lower()
         roles: set[str] = set()
-        if any(k in t for k in ("dhost", "horndeski", "background", "theory class", "modified gravity")):
+        if any(k in t for k in ("background", "theory class", "prior work", "framework")):
             roles.add("background")
         if any(k in t for k in ("motivat", "constrain", "parameter", "test", "useful", "probe")):
             roles.add("conclusion")
@@ -959,7 +1060,7 @@ class ClaimObjectBuilder:
             roles.add("method")
         if any(k in t for k in ("newly derived", "reproduced", "result", "yield", "obtain")):
             roles.add("result")
-        if any(k in t for k in ("observable", "skewness", "kurtosis", "spectrum", "statistics")):
+        if any(k in t for k in ("observable", "spectrum", "statistics", "measurable")):
             roles.add("observable")
         return roles
 

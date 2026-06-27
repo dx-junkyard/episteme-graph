@@ -1,0 +1,46 @@
+{
+  "document_id": "doc_example",
+  "registry_version": "v1",
+  "cartridge_id": "particle_physics",
+  "records": [
+    {
+      "symbol_id": "sym_doc_example_β",
+      "document_id": "doc_example",
+      "canonical_symbol": "β",
+      "notation_variants": ["β", "\\beta"],
+      "kind": "parameter",
+      "unit": null,
+      "domain_constraints": [],
+      "scope": "document",
+      "defining_equation_ids": ["eq_2_1"],
+      "used_in_equation_ids": ["eq_2_3", "eq_3_1"],
+      "source_evidence_ids": ["ev_0001"],
+      "definition_status": "defined",
+      "definition_evidence_texts": ["where β is the linear bias parameter"],
+      "review_reasons": [],
+      "maturity_source": "deterministic",
+      "confidence": 0.9,
+      "reason": "defined with source evidence text"
+    },
+    {
+      "symbol_id": "sym_doc_example_σ_8",
+      "document_id": "doc_example",
+      "canonical_symbol": "σ_8",
+      "notation_variants": ["σ_8", "\\sigma_8"],
+      "kind": "unknown",
+      "unit": null,
+      "domain_constraints": [],
+      "scope": "section",
+      "defining_equation_ids": [],
+      "used_in_equation_ids": ["eq_2_3", "eq_2_4"],
+      "source_evidence_ids": [],
+      "definition_status": "used",
+      "definition_evidence_texts": [],
+      "review_reasons": ["definition_missing"],
+      "maturity_source": "deterministic",
+      "confidence": 0.4,
+      "reason": "used but never defined in the document"
+    }
+  ],
+  "validation_issues": []
+}

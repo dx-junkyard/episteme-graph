@@ -35,17 +35,28 @@ OPERATION_ONTOLOGY = [
     "transform",
     "derive_result",
     "apply_constraint",
-    # Domain-specific names used by math-heavy cartridges.
-    "linearize_skewness_bias_dependence",
-    "linearize_kurtosis_bias_dependence",
-    "solve_second_order_bias",
-    "substitute_second_order_bias",
-    "solve_third_order_bias",
-    "substitute_third_order_bias",
-    "derive_skewness_consistency_relation",
-    "derive_first_kurtosis_consistency_relation",
-    "derive_second_kurtosis_consistency_relation",
+    # Generic transformation verbs (domain-neutral). Paper-specific operation
+    # names must come from a cartridge, never from this core list (issues
+    # #395 / #397).
+    "linearize",
+    "substitute",
+    "eliminate",
+    "solve",
+    "normalize",
+    # Issue #433: additional domain-neutral generic operations. System-level and
+    # cartridge operations resolve to one of these core verbs; paper-specific
+    # names live in operation_subtype, never here.
+    "constrain",
+    "integrate",
+    "eliminate_variable",
 ]
+
+# Issue #433: the controlled vocabulary a derivation step's ``operation`` field
+# must belong to. Domain-specific operation names must be carried in
+# ``operation_subtype`` (with ``subtype_source`` provenance), never in
+# ``operation``. An operation outside this set is only acceptable on a step that
+# is explicitly flagged for review.
+CONTROLLED_OPERATIONS = frozenset(OPERATION_ONTOLOGY)
 
 STEP_REVIEW_STATUSES = [
     "auto_accepted",
@@ -60,6 +71,12 @@ class DerivationStep:
     input_equation_ids: list[str]
     operation: str
     output_equation_ids: list[str]
+    # Issue #433: two-layer operation model for steps. ``operation`` must be a
+    # CONTROLLED_OPERATIONS verb; a domain-specific name is carried here with
+    # ``subtype_source`` provenance ("cartridge" / "source_text" / "inferred" /
+    # "unknown") instead of polluting the controlled ``operation`` field.
+    operation_subtype: str | None = None
+    subtype_source: str = "unknown"
     required_claim_ids: list[str] = field(default_factory=list)
     assumption_refs: list[str] = field(default_factory=list)
     reason: str = ""
@@ -87,10 +104,39 @@ class DerivationChainRecord:
     # Extended fields (issue #261)
     source_scope: dict = field(default_factory=dict)
     linked_component_ids: list[str] = field(default_factory=list)
-    chain_type: str = "equation_chain"  # "equation_chain" | "claim_chain" | "mixed_chain"
+    chain_type: str = "equation_chain"  # "equation_chain" | "claim_chain" | "mixed_chain" | "system_level"
     review_status: str = "teacher_review_required"
     review_reason: str = ""
     confidence_gate: dict = field(default_factory=dict)
+    # System-level derivation fields (issue #386). Populated only for
+    # chain_type="system_level" derivations that represent an operation over a
+    # *group* of equations (a solved/eliminated/constrained system) rather than a
+    # simple adjacent equation-to-equation chain. Domain-neutral.
+    operation: str = ""
+    # First-class system-level operation artifact reference (issue #394). A
+    # system-level derivation IS a system operation; ``system_id`` makes it a
+    # referenceable artifact and ``operation_family`` / ``operation_subtype`` /
+    # ``subtype_source`` give it the generic two-layer operation model so it can
+    # be exported to operation/system graphs without paper-specific assumptions.
+    system_id: str = ""
+    operation_ids: list[str] = field(default_factory=list)
+    operation_family: str = ""
+    operation_subtype: str | None = None
+    subtype_source: str = "unknown"
+    input_equation_ids: list[str] = field(default_factory=list)
+    output_equation_ids: list[str] = field(default_factory=list)
+    intermediate_equation_ids: list[str] = field(default_factory=list)
+    input_claim_ids: list[str] = field(default_factory=list)
+    output_claim_ids: list[str] = field(default_factory=list)
+    assumption_ids: list[str] = field(default_factory=list)
+    source_evidence_ids: list[str] = field(default_factory=list)
+    transformed_symbols: list[str] = field(default_factory=list)
+    eliminated_symbols: list[str] = field(default_factory=list)
+    retained_symbols: list[str] = field(default_factory=list)
+    conditions: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+    review_required: bool = True
+    review_reasons: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -125,6 +171,8 @@ class DerivationChainResult:
                     input_equation_ids=list(s.get("input_equation_ids") or []),
                     operation=s.get("operation", DEFAULT_OPERATION),
                     output_equation_ids=list(s.get("output_equation_ids") or []),
+                    operation_subtype=s.get("operation_subtype"),
+                    subtype_source=s.get("subtype_source", "unknown"),
                     required_claim_ids=list(s.get("required_claim_ids") or []),
                     assumption_refs=list(s.get("assumption_refs") or []),
                     reason=s.get("reason", ""),
@@ -152,6 +200,21 @@ class DerivationChainResult:
                 review_status=c.get("review_status", "teacher_review_required"),
                 review_reason=c.get("review_reason", ""),
                 confidence_gate=c.get("confidence_gate") or {},
+                operation=c.get("operation", ""),
+                input_equation_ids=list(c.get("input_equation_ids") or []),
+                output_equation_ids=list(c.get("output_equation_ids") or []),
+                intermediate_equation_ids=list(c.get("intermediate_equation_ids") or []),
+                input_claim_ids=list(c.get("input_claim_ids") or []),
+                output_claim_ids=list(c.get("output_claim_ids") or []),
+                assumption_ids=list(c.get("assumption_ids") or []),
+                source_evidence_ids=list(c.get("source_evidence_ids") or []),
+                transformed_symbols=list(c.get("transformed_symbols") or []),
+                eliminated_symbols=list(c.get("eliminated_symbols") or []),
+                retained_symbols=list(c.get("retained_symbols") or []),
+                conditions=list(c.get("conditions") or []),
+                confidence=float(c.get("confidence", 0.0) or 0.0),
+                review_required=bool(c.get("review_required", True)),
+                review_reasons=list(c.get("review_reasons") or []),
             ))
         issues = [ValidationIssue(**i) for i in d.get("validation_issues", [])]
         return cls(

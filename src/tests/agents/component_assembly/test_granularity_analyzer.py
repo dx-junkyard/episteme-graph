@@ -77,11 +77,17 @@ def test_analyzer_annotates_without_changing_component_count():
 
 
 def test_analyzer_detects_mixed_responsibility_with_canonical_aliases():
+    # Domain-neutral (#395/#396): mixed responsibilities are detected from the
+    # generic operation families of the component's own operations, not from
+    # paper-specific summary text. Here a "construct model" + "derive" component
+    # mixes model construction and derivation.
     component = _component(
-        label="Bias model and consistency relation",
-        summary="Defines a local bias model and derives a final consistency relation.",
+        label="Model construction and derived consequence",
+        summary="Constructs a model and derives a consequence.",
         responsibility_type="final_constraint",
-        primary_operation="derive",
+        primary_operation="construct model",
+        secondary_operations=["derive consequence"],
+        internal_flow=[{"from": "eq_0", "relation": "derive", "to": "eq_1"}],
     )
 
     analyzed = ANALYZER.analyze(_result([component]))
@@ -90,10 +96,54 @@ def test_analyzer_detects_mixed_responsibility_with_canonical_aliases():
     assert analyzed.components[0].responsibility_type == "constraint"
     assert quality["granularity_status"] == "mixed_responsibility"
     assert quality["split_required"] is True
-    assert {"model", "constraint"} <= {
-        item["responsibility_type"]
-        for item in quality["suggested_split"]
-    }
+    detected = {item["responsibility_type"] for item in quality["suggested_split"]}
+    # Generic families map to >= 2 distinct responsibilities (constraint from the
+    # declared responsibility_type, plus model/derivation from the operations).
+    assert "constraint" in detected
+    assert len(detected) >= 2
+
+
+def test_suggested_split_routes_equations_by_role_not_round_robin():
+    # #421 regression: a coarse component that mixes a definition responsibility
+    # and a constraint responsibility must route its equations to the suggested
+    # child whose responsibility matches the equation ROLE — the definition
+    # equation to the definition child, the constraint equation to the constraint
+    # child — never round-robin (which could drop a definition equation into the
+    # constraint child).
+    component = _component(
+        component_id="comp_roles",
+        responsibility_type="definition",
+        primary_operation="define relation",
+        secondary_operations=["evaluate condition"],
+        evidence_refs={
+            "claim_ids": ["claim_1"],
+            "equation_ids": ["eq_def", "eq_con"],
+            "thesis_refs": [],
+            "dsl_refs": {"node_ids": [], "edge_ids": []},
+        },
+        definition_equation_ids=["eq_def"],
+        constraint_equation_ids=["eq_con"],
+        internal_flow=[
+            {"from": "eq_def", "relation": "define", "to": "eq_con"},
+        ],
+    )
+
+    analyzed = ANALYZER.analyze(_result([component]))
+    quality = analyzed.components[0].component_quality
+    assert quality["split_required"] is True
+
+    suggested = {s["responsibility_type"]: s for s in quality["suggested_split"]}
+    assert "definition" in suggested and "constraint" in suggested
+    assert suggested["definition"]["linked_equation_ids"] == ["eq_def"]
+    assert suggested["constraint"]["linked_equation_ids"] == ["eq_con"]
+    # The definition equation never leaks into the constraint child.
+    assert "eq_def" not in suggested["constraint"]["linked_equation_ids"]
+    # Children never share an equation.
+    seen: set[str] = set()
+    for child in quality["suggested_split"]:
+        eqs = set(child.get("linked_equation_ids") or [])
+        assert not (eqs & seen)
+        seen |= eqs
 
 
 def test_teaching_takeaway_is_not_a_step1_split_reason():

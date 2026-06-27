@@ -115,6 +115,7 @@ class QualifiedSpanRecord:
     # Atomic claim candidates produced by the LLM atomic-rewrite step (issue #317).
     # Each entry is a dict with: text, normalized_text, claim_type_candidate,
     # atomicity, status, source_span_id, evidence_quote, qualification_reason,
+    # context_refs (structured intra-document references, issue #357),
     # confidence. Empty when the span is already atomic or no rewrite was needed.
     atomic_claims: list[dict] = field(default_factory=list)
 

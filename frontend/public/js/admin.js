@@ -244,6 +244,7 @@
       stages: [
         ["evidence_registry", "EvidenceRegistryBuilder"],
         ["claim_object_builder", "ClaimObjectBuilder"],
+        ["symbol_registry", "SymbolRegistryBuilder"],
         ["derivation_chain", "DerivationChainAgent"],
         ["figure_table_semantics", "FigureTableSemanticsAgent"],
       ],
@@ -255,6 +256,7 @@
         ["dsl_linking", "DSLLinkingAgent"],
         ["component_assembly", "ComponentAssemblyAgent"],
         ["component_graph", "ComponentGraphAgent"],
+        ["narrative_annotator", "NarrativeAnnotator"],
       ],
     },
     {
@@ -279,11 +281,18 @@
 
     var html = "";
     materials.forEach(function (m) {
+      var pipelineStatus = state.materialPipelineStatus[m.material_id] || {};
+      var isDegraded = pipelineStatus.is_degraded || false;
+      var degradedStages = pipelineStatus.degraded_stages || [];
+      var availableFeatures = pipelineStatus.available_features || [];
+      var retryStage = pipelineStatus.retry_suggestion || "";
+
       var statusClass = "status-" + m.status;
+      if (isDegraded) statusClass += " status-degraded";
       var statusLabel = {
         uploaded: "アップロード済み",
         processing: "処理中...",
-        completed: "完了",
+        completed: isDegraded ? "完了（一部機能制限）" : "完了",
         failed: "失敗",
       }[m.status] || m.status;
       if (m.status === "processing" && m.analysis_stage) {
@@ -296,7 +305,7 @@
         statusLabel = "処理中: " + m.analysis_stage + progressText;
       }
       if (m.status === "failed" && m.analysis_stage) {
-        statusLabel = "失敗: " + m.analysis_stage;
+        statusLabel = "失敗: " + m.analysis_stage + " (チャンク・RAGチャットは使用可能)";
       }
 
       var uploadedAt = m.uploaded_at || "";
@@ -311,18 +320,28 @@
       html += "<tr>";
       html += "<td>" + escHtml(m.filename) + "</td>";
       html += "<td>" + escHtml(m.title) + "</td>";
-      html += '<td><span class="admin-status ' + statusClass + '">' + statusLabel + "</span></td>";
+      html += '<td><span class="admin-status ' + statusClass + '" title="' +
+        (isDegraded ? "利用可能な機能: " + availableFeatures.join(", ") + "\n機能制限中のステージ: " + degradedStages.join(", ") : "") +
+        '">' + statusLabel + "</span>";
+      if (isDegraded) {
+        html += '<div class="admin-degraded-hint" style="font-size:11px;color:var(--color-text-warning,#c85a00);margin-top:2px;">' +
+          '⚠ 一部の高度な機能は制限されています。RAGチャットは利用可能です。' +
+          (retryStage ? ' <a href="#" class="admin-retry-stage-link" data-material-id="' + escHtml(m.material_id) + '" data-stage="' + escHtml(retryStage) + '" style="text-decoration:underline;cursor:pointer;">ステージ再実行</a>' : '') +
+          '</div>';
+      }
+      html += "</td>";
       html += "<td>" + escHtml(uploadedAt) + "</td>";
       var hasPdf = m.has_pdf === true;
       var chunkCount = typeof m.chunk_count === "number" ? m.chunk_count : null;
-      var pdfRegistrationFailed = m.status === "failed" || (m.status === "completed" && chunkCount === 0);
+      // status=failed のみ PDF 再登録を促す。縮退(completed)はチャンクが存在するため不要
+      var pdfRegistrationFailed = m.status === "failed" && chunkCount === 0;
       var pdfBtnLabel = pdfRegistrationFailed ? "失敗 (PDF再登録)" : (hasPdf ? "登録済" : "PDF再登録");
       var pdfBtnClass = pdfRegistrationFailed ? " admin-pdf-reupload-btn-failed" : "";
       var pdfBtnTitle = pdfRegistrationFailed
-        ? "教材処理に失敗、またはチャンクが作成されませんでした。PDFを再登録してください"
+        ? "チャンク作成に失敗しました。PDFを再登録してください"
         : "PDFのみ再登録";
       var resumeBtn = "";
-      if ((m.status === "processing" || m.status === "failed") && m.document_id) {
+      if (m.status === "failed" && m.document_id) {
         resumeBtn = '<button class="admin-resume-analysis-btn" data-document-id="' + escHtml(m.document_id) + '" data-filename="' + escHtml(m.filename || m.title || "教材") + '" title="保存済みPDFから解析を再開">解析再開</button>';
       }
       html += '<td><div class="materials-action-cell">' +
@@ -414,6 +433,17 @@
           });
       });
     });
+
+    tbody.querySelectorAll(".admin-retry-stage-link").forEach(function (link) {
+      link.addEventListener("click", function (e) {
+        e.preventDefault();
+        var materialId = this.getAttribute("data-material-id");
+        var stage = this.getAttribute("data-stage");
+        if (!materialId || !stage) return;
+        if (!confirm("ステージ「" + stage + "」を再実行します。既存の結果は上書きされます。よろしいですか？")) return;
+        runMaterialPipeline(materialId, stage);
+      });
+    });
   }
 
   function materialPipelineMenuHtml(material) {
@@ -438,6 +468,7 @@
     });
     html +=
           '<div class="ls-menu-divider"></div>' +
+          '<button class="ls-menu-item material-revision-item" type="button" data-document-id="' + escHtml(material.document_id || "") + '"' + disabled + '><span class="ls-step-mark"></span><span>反復改善（採用版を保ったまま）</span></button>' +
           '<button class="ls-menu-item material-export-item" type="button"><span class="ls-step-mark"></span><span>外部レビュー用に書き出し</span></button>' +
         '</div>' +
       '</div>';
@@ -467,6 +498,18 @@
         if (panel) panel.hidden = true;
         if (!confirm("既存の実行結果を上書きします。本当に実行しますか？")) return;
         runMaterialPipeline(menu.getAttribute("data-material-id"), this.getAttribute("data-stage") || "");
+      });
+    });
+    root.querySelectorAll(".material-revision-item").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var menu = this.closest(".material-pipeline-menu");
+        var docId = this.getAttribute("data-document-id");
+        if (menu) {
+          var panel = menu.querySelector(".material-pipeline-panel");
+          if (panel) panel.hidden = true;
+        }
+        if (!docId) { alert("この教材にはまだドキュメントが紐づいていません。"); return; }
+        if (window.EGRevisions) window.EGRevisions.open(docId);
       });
     });
     root.querySelectorAll(".material-export-item").forEach(function (btn) {
@@ -4513,8 +4556,16 @@
   function lsEvidenceItemByRef(topic, kind, id) {
     var key = lsCourseEvidenceKey(kind, id);
     var normalizedId = lsNormalizeEvidenceId(id);
-    return lsTopicEvidenceItems(topic).find(function (item) {
+    var items = lsTopicEvidenceItems(topic);
+    var exact = items.find(function (item) {
       return item.key === key || (item.kind === kind && lsNormalizeEvidenceId(item.id) === normalizedId);
+    });
+    if (exact) return exact;
+    // kind フォールバック: 本文の埋め込みが kind を取り違えていても（例: 実体は
+    // component なのに `claim:comp_001` と書かれている場合）、同一IDの根拠アイテムが
+    // あれば解決する。これにより誤った kind 接頭辞による「未解決」表示を防ぐ。
+    return items.find(function (item) {
+      return lsNormalizeEvidenceId(item.id) === normalizedId;
     }) || null;
   }
 
@@ -4676,19 +4727,21 @@
           '<span class="ls-material-embed-summary">' + escHtml(lsShortSummary(topic.summary || "", 260) || "このトピックの概要はまだ生成されていません。") + '</span>' +
         '</button>';
       }
-      if (embed.kind === "source" && topic.source_excerpt) {
-        return '<button type="button" class="ls-material-embed ls-material-evidence-card ls-material-source" data-evidence-ref="' + escHtml(key) + '">' +
-          '<span class="ls-material-embed-kind">原文抜粋</span>' +
-          '<strong>参照抜粋</strong>' +
-          '<span class="ls-material-embed-summary">' + escHtml(lsShortSummary(topic.source_excerpt, 260)) + '</span>' +
-        '</button>';
-      }
+      // 特定の根拠アイテム（source span / claim / component 等）が解決できる場合は、
+      // 汎用のトピック原文抜粋フォールバックより優先して、そのアイテム自身を表示する。
       if (evidenceItem) {
         return '<button type="button" class="ls-material-embed ls-material-evidence-card" data-evidence-ref="' + escHtml(key) + '">' +
           '<span class="ls-material-embed-kind">' + escHtml(evidenceItem.kind) + '</span>' +
           '<strong>' + escHtml(evidenceItem.title || evidenceItem.id) + '</strong>' +
           '<span class="ls-material-embed-summary">' + escHtml(lsShortSummary(evidenceItem.summary, 260) || "この教材要素に紐づく根拠リンクです。右ペインで詳細を確認できます。") + '</span>' +
           '<span class="ls-material-embed-meta">' + escHtml([evidenceItem.role, evidenceItem.confidence].filter(Boolean).join(" / ")) + '</span>' +
+        '</button>';
+      }
+      if (embed.kind === "source" && topic.source_excerpt) {
+        return '<button type="button" class="ls-material-embed ls-material-evidence-card ls-material-source" data-evidence-ref="' + escHtml(key) + '">' +
+          '<span class="ls-material-embed-kind">原文抜粋</span>' +
+          '<strong>参照抜粋</strong>' +
+          '<span class="ls-material-embed-summary">' + escHtml(lsShortSummary(topic.source_excerpt, 260)) + '</span>' +
         '</button>';
       }
       return '<button type="button" class="ls-material-embed ls-material-evidence-card ls-material-missing" data-evidence-ref="' + escHtml(key) + '">' +
@@ -5289,6 +5342,7 @@
 
     var view = lsGraphForCurrentLayer(graph);
     var html =
+      lsGraphNarrativeSummaryHtml(graph) +
       '<div class="ls-component-graph-shell">' +
         '<div class="ls-component-graph-main">' +
           lsGraphLayerToolbarHtml(nodes) +
@@ -5319,6 +5373,19 @@
     }
 
     lsInitComponentGraphNetwork(view);
+  }
+
+  // Issue #360: NarrativeAnnotator の graph_summary をグラフ上部に表示する。
+  // 注釈は LLM 提案 (provisional) なのでラベルで明示する。
+  function lsGraphNarrativeSummaryHtml(graph) {
+    var narrative = (graph && graph.narrative) || {};
+    var summary = String(narrative.graph_summary || "").trim();
+    if (!summary) return "";
+    return '<div class="ls-graph-narrative-summary">' +
+      '<div class="ls-graph-narrative-title">この論文のグラフの読み方' +
+      '<span class="ls-graph-narrative-badge">AI提案</span></div>' +
+      '<p>' + escHtml(summary) + '</p>' +
+    '</div>';
   }
 
   // Issue #306: グラフは main（上位理論構成）と equation_detail（式単位）の
@@ -5551,6 +5618,14 @@
       html += '<div class="ls-graph-detail-section"><b>このノードの意味</b><p>' + escHtml(node.description) + '</p></div>';
     }
 
+    // 1a. 論文の議論での役割（NarrativeAnnotator, issue #360。LLM 提案）
+    var graphNarrative = (graph && graph.narrative) || {};
+    var nodeNarrative = (graphNarrative.node_narratives || {})[nodeId];
+    if (nodeNarrative && String(nodeNarrative.narrative_role || "").trim()) {
+      html += '<div class="ls-graph-detail-section"><b>議論での役割 <span class="ls-graph-narrative-badge">AI提案</span></b>' +
+        '<p>' + escHtml(nodeNarrative.narrative_role) + '</p></div>';
+    }
+
     // 1b. 抽出メモ（review_reason — step.reason からの抽出/検証メモ）
     var reviewReason = String(node.review_reason || "").trim();
     if (reviewReason) {
@@ -5604,6 +5679,12 @@
         var reason = String(evidence.reason || "").trim();
         if (reason) {
           html += '<div class="ls-graph-detail-edge-reason">' + escHtml(reason) + '</div>';
+        }
+        // 遷移の説明（NarrativeAnnotator, issue #360。LLM 提案）
+        var edgeNarrative = (graphNarrative.edge_narratives || {})[edge.edge_id];
+        var transition = edgeNarrative ? String(edgeNarrative.transition_text || "").trim() : "";
+        if (transition) {
+          html += '<div class="ls-graph-detail-edge-narrative">' + escHtml(transition) + ' <span class="ls-graph-narrative-badge">AI提案</span></div>';
         }
         html += '</li>';
       });
@@ -6879,12 +6960,14 @@
     equation_semantics: "EquationSemanticsAgent",
     evidence_registry: "EvidenceRegistryBuilder",
     claim_object_builder: "ClaimObjectBuilder",
+    symbol_registry: "SymbolRegistryBuilder",
     derivation_chain: "DerivationChainAgent",
     figure_table_semantics: "FigureTableSemanticsAgent",
     thesis_reconstruction: "ThesisReconstructionAgent",
     dsl_linking: "DSLLinkingAgent",
     component_assembly: "ComponentAssemblyAgent",
     component_graph: "ComponentGraphAgent",
+    narrative_annotator: "NarrativeAnnotator",
     course_mapping: "CourseMappingAgent",
     blueprint: "BlueprintAgent",
     export_validation: "ExportValidationGate",
@@ -8688,6 +8771,494 @@
       document.getElementById("refresh-materials").addEventListener("click", loadMaterials);
     }
   }
+
+  // ── 反復改善 (Iterative improvement / Revisions) UI (#408) ───────────
+  // 採用版 (active run) を保持したまま改善候補を生成・検証・採否する管理UI。
+  // latest run（処理状況）と active run（採用成果物）を明確に区別して表示する。
+  var EGRevisions = (function () {
+    var current = { documentId: null, revisionId: null, report: null, filter: "all" };
+
+    var STAGE_LABELS = {
+      queued: "待機中", audit: "原論文を監査中", proposal: "修正候補を生成中",
+      candidate_assembly: "候補を組み立て中", validation: "候補を検証中",
+      report: "差分レポートを作成中", completed: "完了 — 採否を確認してください",
+      failed: "失敗"
+    };
+    var OUTCOME_LABELS = {
+      no_audit_targets: "監査の結果、修正対象は見つかりませんでした。",
+      proposals_failed: "修正対象はありましたが、採用可能な修正候補を生成できませんでした（改善案の生成に失敗）。",
+      candidate_invalid: "修正候補を生成しましたが、検証に通らず採用できません。",
+      changes_proposed: "修正候補を生成しました。採否を確認してください。"
+    };
+
+    function el(id) { return document.getElementById(id); }
+    function stopPolling() { if (current.pollTimer) { clearTimeout(current.pollTimer); current.pollTimer = null; } }
+    function close() { stopPolling(); var m = el("eg-rev-modal"); if (m) m.remove(); }
+    function docPath() { return "/admin/documents/" + encodeURIComponent(current.documentId) + "/revisions"; }
+
+    function open(documentId) {
+      current.documentId = documentId;
+      current.revisionId = null;
+      current.report = null;
+      current.filter = "all";
+      renderModal();
+      loadList();
+    }
+
+    function renderModal() {
+      close();
+      var overlay = document.createElement("div");
+      overlay.id = "eg-rev-modal";
+      overlay.className = "eg-rev-overlay";
+      overlay.innerHTML =
+        '<div class="eg-rev-box">' +
+          '<div class="eg-rev-header">' +
+            '<h3>反復改善パイプライン</h3>' +
+            '<button id="eg-rev-close" class="eg-rev-close" type="button">×</button>' +
+          '</div>' +
+          '<div class="eg-rev-active" id="eg-rev-active">読み込み中…</div>' +
+          '<div class="eg-rev-toolbar">' +
+            '<button id="eg-rev-start" class="admin-action-btn" type="button">改善処理を開始</button>' +
+            '<span class="eg-rev-hint">採用済み成果物は変更されません。</span>' +
+          '</div>' +
+          '<div class="eg-rev-list" id="eg-rev-list"></div>' +
+          '<div class="eg-rev-detail" id="eg-rev-detail"></div>' +
+        '</div>';
+      document.body.appendChild(overlay);
+      el("eg-rev-close").addEventListener("click", close);
+      el("eg-rev-start").addEventListener("click", startRevision);
+    }
+
+    function loadList() {
+      apiFetch(docPath())
+        .then(function (r) { return r.json(); })
+        .then(renderList)
+        .catch(function () { if (el("eg-rev-list")) el("eg-rev-list").textContent = "一覧の取得に失敗しました。"; });
+    }
+
+    function renderList(lineage) {
+      var act = el("eg-rev-active");
+      if (act) {
+        act.innerHTML =
+          '採用版 (active run): <code>' + escHtml(lineage.active_run_id || "なし（既存データへfallback）") + '</code>' +
+          ' <span class="eg-rev-sep">|</span> 最新run (処理状況): <code>' + escHtml(lineage.latest_run_id || "-") + '</code>';
+      }
+      var runs = (lineage.runs || []).filter(function (r) { return r.run_type === "revision"; });
+      var listEl = el("eg-rev-list");
+      if (!listEl) return;
+      if (!runs.length) { listEl.innerHTML = '<p class="eg-rev-empty">まだ改善runはありません。</p>'; return; }
+      var html = '<table class="eg-rev-table"><thead><tr><th>revision</th><th>状態</th><th>base</th><th></th></tr></thead><tbody>';
+      runs.forEach(function (r) {
+        html += '<tr><td><code>' + escHtml((r.id || "").slice(0, 8)) + '</code>' +
+            (r.is_active ? ' <span class="eg-rev-badge eg-rev-badge-active">採用中</span>' : '') + '</td>' +
+          '<td><span class="eg-rev-status">' + escHtml(r.revision_status || r.status || "") + '</span></td>' +
+          '<td><code>' + escHtml((r.base_run_id || "").slice(0, 8)) + '</code></td>' +
+          '<td><button class="eg-rev-open admin-action-btn" type="button" data-rev="' + escHtml(r.id) + '">詳細</button></td></tr>';
+      });
+      html += '</tbody></table>';
+      listEl.innerHTML = html;
+      listEl.querySelectorAll(".eg-rev-open").forEach(function (b) {
+        b.addEventListener("click", function () { openDetail(this.getAttribute("data-rev")); });
+      });
+    }
+
+    function startRevision() {
+      var btn = el("eg-rev-start"); if (btn) btn.disabled = true;
+      apiFetch(docPath(), { method: "POST", body: "{}" })
+        .then(function (r) {
+          if (r.status === 409) throw new Error("採用版（active run）がありません。先に解析を完了してください。");
+          return r.json();
+        })
+        .then(function (data) {
+          if (btn) btn.disabled = false;
+          loadList();
+          if (data.revision_run_id) openDetail(data.revision_run_id);
+        })
+        .catch(function (e) { if (btn) btn.disabled = false; alert("開始に失敗: " + (e.message || e)); });
+    }
+
+    function openDetail(revId) {
+      stopPolling();
+      current.revisionId = revId;
+      current.report = null;
+      apiFetch(docPath() + "/" + encodeURIComponent(revId))
+        .then(function (r) { return r.json(); })
+        .then(function (detail) {
+          renderDetail(detail);
+          if (detail.has_report) loadReport();
+          restoreRunState(detail);   // #414-4: restore running/failed/completed on reload
+        })
+        .catch(function () { alert("詳細の取得に失敗しました。"); });
+    }
+
+    // Restore the run's UI state after a modal reopen / browser reload (#414-4):
+    // running -> resume polling the same task; failed -> show stage + error;
+    // completed -> the report (loaded above) already shows the outcome.
+    function restoreRunState(detail) {
+      var status = String(detail.status || "").toLowerCase();
+      var task = detail.latest_task || null;
+      current.taskId = (task && task.task_id) || null;
+      if (status === "running") {
+        setRunning(true, STAGE_LABELS[detail.current_stage] || "処理中…");
+        renderRunProgress({ current_stage: detail.current_stage, task: task });
+        pollRunStatus();
+      } else if (status === "failed") {
+        setRunning(false);
+        renderRunFailure({
+          current_stage: detail.current_stage,
+          error_message: detail.error_message,
+          task: task
+        });
+      }
+    }
+
+    function decisionsHtml(decisions) {
+      if (!decisions || !decisions.length) return "";
+      var rows = decisions.map(function (d) {
+        var meta = d.metadata || {};
+        return '<li>' + escHtml(d.old_status) + ' → <strong>' + escHtml(d.new_status) + '</strong>' +
+          (meta.comment ? ' — ' + escHtml(meta.comment) : '') + '</li>';
+      }).join("");
+      return '<div class="eg-rev-decisions"><h5>監査履歴</h5><ul>' + rows + '</ul></div>';
+    }
+
+    function renderDetail(detail) {
+      var d = el("eg-rev-detail"); if (!d) return;
+      var html = '<div class="eg-rev-detail-head"><h4>revision <code>' +
+          escHtml((detail.revision_run_id || "").slice(0, 8)) + '</code></h4>' +
+        '<div>状態: <strong>' + escHtml(detail.revision_status || detail.status || "") + '</strong>' +
+        ' / checkpoints: ' + (detail.checkpoint_count || 0) + '</div></div>';
+      html += '<details class="eg-rev-ops"><summary>（デバッグ用）revision operations JSON を直接指定</summary>' +
+        '<p class="eg-rev-hint">通常は空のままにします。監査結果から修正候補が自動生成されます。' +
+        'JSON を入力した場合のみ、その operations が使われます（サーバー側で検証）。</p>' +
+        '<textarea id="eg-rev-ops" class="eg-rev-ops-text" placeholder="[]"></textarea></details>';
+      html += '<div class="eg-rev-actions">' +
+        '<button id="eg-rev-run" class="admin-action-btn" type="button">監査＋候補生成</button>' +
+        '<button id="eg-rev-accept" class="admin-action-btn"' + (detail.has_report ? '' : ' disabled') + ' type="button">採用</button>' +
+        '<button id="eg-rev-reject" class="admin-action-btn" type="button">却下</button>' +
+        '<button id="eg-rev-revise" class="admin-action-btn" type="button">再修正</button>' +
+        '<label class="eg-rev-confirm"><input type="checkbox" id="eg-rev-confirm-protected"> 保護項目の変更を明示承認</label>' +
+        '<input id="eg-rev-comment" class="eg-rev-comment" placeholder="決定コメント">' +
+        '</div>';
+      html += '<div class="eg-rev-progress" id="eg-rev-progress"></div>';
+      html += '<div class="eg-rev-report" id="eg-rev-report"></div>';
+      html += decisionsHtml(detail.decisions);
+      d.innerHTML = html;
+      el("eg-rev-run").addEventListener("click", runRevision);
+      el("eg-rev-accept").addEventListener("click", acceptRevision);
+      el("eg-rev-reject").addEventListener("click", rejectRevision);
+      el("eg-rev-revise").addEventListener("click", reviseRevision);
+    }
+
+    function setProgress(html) { var p = el("eg-rev-progress"); if (p) p.innerHTML = html || ""; }
+
+    function setRunning(on, label) {
+      current.running = !!on;
+      var btn = el("eg-rev-run");
+      if (btn) { btn.disabled = !!on; btn.textContent = on ? (label || "処理中…") : "監査＋候補生成"; }
+      // Prevent accept/revise while a worker is active (#412 P1-4: avoid double run).
+      ["eg-rev-accept", "eg-rev-reject", "eg-rev-revise"].forEach(function (id) {
+        var b = el(id); if (b && on) b.disabled = true;
+      });
+    }
+
+    function renderRunProgress(st) {
+      var rd = (st.task && st.task.result_data) || {};
+      var stageKey = rd.stage || st.current_stage || "queued";
+      var label = STAGE_LABELS[stageKey] || stageKey;
+      // Prefer the real "completed / total" count (e.g. 27 / 199) over a bare %
+      // when the worker has published per-checkpoint progress (#414-3).
+      var detail = "";
+      if (typeof rd.total_count === "number" && rd.total_count > 0) {
+        detail = " " + (rd.completed_count || 0) + " / " + rd.total_count;
+      } else if (typeof rd.progress === "number" && rd.progress > 0) {
+        detail = " " + rd.progress + "%";
+      }
+      setProgress('<div class="eg-rev-info">' + escHtml(label) + escHtml(detail) + ' …</div>');
+    }
+
+    function renderRunFailure(st) {
+      var stage = STAGE_LABELS[st.current_stage] || st.current_stage || "";
+      var msg = st.error_message || "サーバーエラー";
+      var rd = (st.task && st.task.result_data) || {};
+      var extra = "";
+      if (rd.rejected_operations && rd.rejected_operations.length) {
+        extra = '<div>修正候補が検証で却下されました（' + rd.rejected_operations.length + ' 件）。</div>';
+      }
+      setProgress('<div class="eg-rev-warn">処理に失敗しました（' + escHtml(stage) + '）: ' +
+        escHtml(msg) + extra + '</div>');
+    }
+
+    function pollRunStatus() {
+      if (!current.revisionId) return;
+      var url = docPath() + "/" + encodeURIComponent(current.revisionId) + "/run-status" +
+        (current.taskId ? ("?task_id=" + encodeURIComponent(current.taskId)) : "");
+      apiFetch(url)
+        .then(function (r) { if (!r.ok) throw new Error("status " + r.status); return r.json(); })
+        .then(function (st) {
+          current.pollFails = 0;
+          var status = String(st.status || "").toLowerCase();
+          if (status === "completed") {
+            setRunning(false);
+            setProgress('<div class="eg-rev-done">' + escHtml(STAGE_LABELS.completed) + '</div>');
+            openDetail(current.revisionId);   // reload detail + report
+            return;
+          }
+          if (status === "failed") {
+            setRunning(false);
+            renderRunFailure(st);
+            return;
+          }
+          renderRunProgress(st);
+          current.pollTimer = setTimeout(pollRunStatus, 3000);
+        })
+        .catch(function () {
+          // Network/timeout is NOT a processing failure — keep checking (#412 P1-4).
+          current.pollFails = (current.pollFails || 0) + 1;
+          setProgress('<div class="eg-rev-info">接続が切れたため状態を確認中…（再試行 ' +
+            current.pollFails + '）</div>');
+          current.pollTimer = setTimeout(pollRunStatus, 5000);
+        });
+    }
+
+    function runRevision() {
+      var body = {};
+      var opsEl = el("eg-rev-ops");
+      if (opsEl && opsEl.value.trim()) {
+        try { body.operations = JSON.parse(opsEl.value); }
+        catch (e) { alert("operations の JSON が不正です。"); return; }
+      }
+      stopPolling();
+      current.taskId = null;
+      setRunning(true, STAGE_LABELS.audit + " …");
+      setProgress('<div class="eg-rev-info">' + escHtml(STAGE_LABELS.queued) + ' …</div>');
+      apiFetch(docPath() + "/" + encodeURIComponent(current.revisionId) + "/run",
+               { method: "POST", body: JSON.stringify(body) })
+        .then(function (r) {
+          if (r.status === 409) { setRunning(false); setProgress('<div class="eg-rev-warn">この改善runは既に実行中です。</div>'); return null; }
+          if (!r.ok) { return r.text().then(function (t) { throw new Error("server " + r.status + ": " + t); }); }
+          return r.json();
+        })
+        .then(function (data) {
+          if (!data) return;
+          current.taskId = data.task_id || null;
+          pollRunStatus();   // 202 accepted → poll task/revision status
+        })
+        .catch(function (e) {
+          // Could not even start the run → a real failure, not a timeout.
+          setRunning(false);
+          setProgress('<div class="eg-rev-warn">開始に失敗しました: ' + escHtml(String(e.message || e)) + '</div>');
+        });
+    }
+
+    function loadReport() {
+      apiFetch(docPath() + "/" + encodeURIComponent(current.revisionId) + "/report")
+        .then(function (r) { if (!r.ok) throw new Error("no report"); return r.json(); })
+        .then(function (report) { current.report = report; renderReport(); })
+        .catch(function () {});
+    }
+
+    function metricsTable(before, after) {
+      before = before || {}; after = after || {};
+      var keys = [
+        ["hard_error_count", "hard error"], ["warning_count", "warning"],
+        ["review_required_count", "review required"], ["unresolved_reference_count", "未解決参照"],
+        ["source_backed_rate", "source-backed率"], ["low_confidence_equation_count", "低conf式"],
+        ["main_claim_coverage", "main claim coverage"], ["component_granularity_violation_count", "粒度違反"]
+      ];
+      var rows = keys.map(function (k) {
+        var b = before[k[0]], a = after[k[0]];
+        var cls = (typeof a === "number" && typeof b === "number" && a !== b) ? " class=\"eg-rev-changed\"" : "";
+        return '<tr' + cls + '><td>' + escHtml(k[1]) + '</td><td>' + escHtml(String(b)) + '</td><td>' + escHtml(String(a)) + '</td></tr>';
+      }).join("");
+      return '<table class="eg-rev-metrics"><thead><tr><th>指標</th><th>before</th><th>after</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    }
+
+    var FILTERS = [["all", "すべて"], ["claim", "claim"], ["equation", "equation"], ["component", "component"], ["graph_edge", "graph"]];
+
+    function filterBar() {
+      return '<div class="eg-rev-filter">' + FILTERS.map(function (f) {
+        return '<button class="eg-rev-filter-btn' + (current.filter === f[0] ? ' active' : '') +
+          '" type="button" data-filter="' + f[0] + '">' + escHtml(f[1]) + '</button>';
+      }).join("") + '</div>';
+    }
+
+    function changeMatchesFilter(c) {
+      if (current.filter === "all") return true;
+      if (current.filter === "graph_edge") return c.entity_type === "graph_edge" || c.entity_type === "graph_node";
+      return c.entity_type === current.filter;
+    }
+
+    function changesHtml(report) {
+      var changes = (report.entity_changes || []).filter(changeMatchesFilter);
+      if (!changes.length) return '<p class="eg-rev-empty">該当する変更はありません。</p>';
+      return '<ul class="eg-rev-changes">' + changes.map(function (c) {
+        var protectedTag = c.protected ? ' <span class="eg-rev-badge eg-rev-badge-protected">保護項目</span>' : '';
+        var src = (c.source_locations || []).map(function (s) {
+          return escHtml(s.section_id || s.chunk_id || JSON.stringify(s));
+        }).join(", ");
+        return '<li class="eg-rev-change">' +
+          '<span class="eg-rev-ctype">' + escHtml(c.change_type) + '</span> ' +
+          '<code>' + escHtml(c.entity_type) + ':' + escHtml(c.entity_id || "") + '</code>' + protectedTag +
+          (c.reason ? '<div class="eg-rev-reason">理由: ' + escHtml(c.reason) + '</div>' : '') +
+          (c.checkpoint_ids && c.checkpoint_ids.length ? '<div class="eg-rev-trace">checkpoint: ' + escHtml(c.checkpoint_ids.join(", ")) + '</div>' : '') +
+          (c.evidence_refs && c.evidence_refs.length ? '<div class="eg-rev-trace">evidence: ' + escHtml(c.evidence_refs.join(", ")) + '</div>' : '') +
+          (c.source_chunk_ids && c.source_chunk_ids.length ? '<div class="eg-rev-trace">source chunk: ' + escHtml(c.source_chunk_ids.join(", ")) + '</div>' : '') +
+          (src ? '<div class="eg-rev-trace">原文: ' + src + '</div>' : '') +
+          '</li>';
+      }).join("") + '</ul>';
+    }
+
+    function stageSummaryHtml(report) {
+      var ss = report.stage_summary; if (!ss) return "";
+      var a = ss.audit || {}, g = ss.candidate_generation || {}, e = ss.candidate_evaluation || {};
+      var outcomeMsg = OUTCOME_LABELS[ss.outcome] || "";
+      var reasons = (g.rejection_reasons || []).map(function (r) {
+        return '<li>' + escHtml(r.reason) + ': ' + (r.count || 0) + '</li>';
+      }).join("");
+      return '<div class="eg-rev-stages">' +
+        (outcomeMsg ? '<div class="eg-rev-outcome">' + escHtml(outcomeMsg) + '</div>' : '') +
+        '<h5>監査結果</h5><ul class="eg-rev-stagelist">' +
+          '<li>チェック: ' + (a.checkpoints_total || 0) + '</li>' +
+          '<li>修正対象: ' + (a.revision_target_count || 0) + '</li>' +
+          '<li>人手確認: ' + (a.manual_review_count || 0) + '</li></ul>' +
+        '<h5>候補生成</h5><ul class="eg-rev-stagelist">' +
+          '<li>採用可能な提案: ' + (g.accepted_count || 0) + '</li>' +
+          '<li>拒否された提案: ' + (g.rejected_count || 0) + '</li>' +
+          (reasons ? '<li>主な拒否理由:<ul>' + reasons + '</ul></li>' : '') + '</ul>' +
+        '<h5>候補評価</h5><ul class="eg-rev-stagelist">' +
+          '<li>適用変更: ' + (e.applied_change_count || 0) + '</li>' +
+          '<li>candidate invalid: <strong>' + (e.candidate_invalid ? "true" : "false") + '</strong></li>' +
+          '<li>新規未解決参照: ' + (e.new_unknown_reference_count || 0) + '</li></ul>' +
+        '</div>';
+    }
+
+    var EXCLUDE_LABELS = {
+      excluded_invalid: "不正な操作", excluded_dependency: "依存により除外",
+      requires_confirmation: "要承認"
+    };
+
+    // #415: per-operation outcome — adoptable / partially_adoptable / blocked.
+    function excludedOpsHtml(report) {
+      var status = report.candidate_status || (report.summary || {}).candidate_status || "adoptable";
+      var os = report.operation_summary || {};
+      var excluded = report.excluded_operations || [];
+      if (status === "adoptable" && !excluded.length) {
+        return '<div class="eg-rev-outcome">すべての変更を採用できます（' +
+          (os.applied_count || 0) + ' 件）。</div>';
+      }
+      var head;
+      if (status === "partially_adoptable") {
+        head = '<div class="eg-rev-outcome">問題のある変更を除外すれば採用できます。</div>';
+      } else if (status === "blocked") {
+        head = '<div class="eg-rev-warn">除外後も hard error または未解決参照が残るため採用できません（blocked）。</div>';
+      } else {
+        head = "";
+      }
+      var counts = '<ul class="eg-rev-stagelist">' +
+        '<li>採用可能な変更: ' + (os.applied_count || 0) + '</li>' +
+        '<li>除外（不正）: ' + (os.excluded_invalid_count || 0) + '</li>' +
+        '<li>除外（依存）: ' + (os.excluded_dependency_count || 0) + '</li>' +
+        '<li>この候補が新規に生じさせる hard error: ' +
+          ((report.summary || {}).hard_error_count || 0) + '</li>' +
+        '<li>元データから引き継ぐ hard error: ' +
+          ((report.summary || {}).carried_hard_error_count || 0) + '</li></ul>';
+      var rows = excluded.map(function (x) {
+        return '<li class="eg-rev-change"><span class="eg-rev-ctype">' +
+          escHtml(EXCLUDE_LABELS[x.status] || x.status) + '</span> ' +
+          '<code>' + escHtml(x.target_type || "") + ':' + escHtml(x.target_id || "") + '</code>' +
+          (x.operation_id ? ' <span class="eg-rev-trace">(' + escHtml(x.operation_id) + ')</span>' : '') +
+          '<div class="eg-rev-reason">理由: ' + escHtml(x.reason || "") + '</div></li>';
+      }).join("");
+      return '<div class="eg-rev-stages">' + head + counts +
+        (rows ? '<h5>除外される変更</h5><ul class="eg-rev-changes">' + rows + '</ul>' : '') + '</div>';
+    }
+
+    function renderReport() {
+      var rep = el("eg-rev-report"); if (!rep || !current.report) return;
+      var report = current.report;
+      var s = report.summary || {};
+      var status = report.candidate_status || s.candidate_status || (s.acceptable ? "adoptable" : "blocked");
+      var partial = status === "partially_adoptable";
+      var acc = el("eg-rev-accept");
+      if (acc) {
+        acc.disabled = !s.acceptable;
+        // #415: partial adoption needs an explicit, differently-labelled action.
+        acc.textContent = partial ? "問題のある変更を除外して採用" : "採用";
+      }
+      var warn = "";
+      if (status === "blocked") warn = '<div class="eg-rev-warn">候補は blocked です。具体的な hard error と除外対象を確認してください。</div>';
+      else if (s.protected_change_count > 0) warn = '<div class="eg-rev-warn">教師承認/手動編集済み項目への変更が ' + s.protected_change_count + ' 件あります。採用には明示承認が必要です。</div>';
+      var html = warn +
+        '<div class="eg-rev-rec">推奨: <strong>' + escHtml(report.recommendation) + '</strong>' +
+          '（参考情報。自動採用には使われません）</div>' +
+        excludedOpsHtml(report) +
+        stageSummaryHtml(report) +
+        '<h5>品質指標 (before / after)</h5>' + metricsTable(report.quality_before, report.quality_after) +
+        '<h5>解消: ' + (s.resolved_issue_count || 0) + ' / 新規: ' + (s.introduced_issue_count || 0) +
+          ' / 変更: ' + (s.entity_change_count || 0) + '</h5>' +
+        filterBar() +
+        '<div id="eg-rev-changes-box">' + changesHtml(report) + '</div>';
+      rep.innerHTML = html;
+      rep.querySelectorAll(".eg-rev-filter-btn").forEach(function (b) {
+        b.addEventListener("click", function () {
+          current.filter = this.getAttribute("data-filter");
+          renderReport();
+        });
+      });
+    }
+
+    function decisionBody() {
+      var comment = (el("eg-rev-comment") && el("eg-rev-comment").value) || "";
+      var confirm = !!(el("eg-rev-confirm-protected") && el("eg-rev-confirm-protected").checked);
+      // Adopt the reduced operation set only when the candidate is partial; the
+      // differently-labelled button is the user's explicit partial-accept action.
+      var s = (current.report && current.report.summary) || {};
+      var status = (current.report && current.report.candidate_status) || s.candidate_status || "";
+      var acceptPartial = status === "partially_adoptable";
+      return JSON.stringify({ comment: comment, confirm_protected: confirm,
+                              accept_partial: acceptPartial });
+    }
+
+    function decisionResponse(r, fallback) {
+      if (r.ok) return r.json();
+      return r.json()
+        .catch(function () { return {}; })
+        .then(function (j) {
+          throw new Error(j.detail || fallback || ("server " + r.status));
+        });
+    }
+
+    function acceptRevision() {
+      apiFetch(docPath() + "/" + encodeURIComponent(current.revisionId) + "/accept",
+               { method: "POST", body: decisionBody() })
+        .then(function (r) {
+          if (r.status === 409) throw new Error("競合: 採用版が更新されています。最新の差分で再確認してください。");
+          return decisionResponse(r, "採用できません");
+        })
+        .then(function () { alert("採用しました。採用版を切り替えました。"); loadList(); openDetail(current.revisionId); })
+        .catch(function (e) { alert(e.message || "採用に失敗しました。"); });
+    }
+
+    function rejectRevision() {
+      apiFetch(docPath() + "/" + encodeURIComponent(current.revisionId) + "/reject",
+               { method: "POST", body: decisionBody() })
+        .then(function (r) { return decisionResponse(r, "却下に失敗しました。"); })
+        .then(function () { alert("却下しました。採用版は変更されません。"); loadList(); openDetail(current.revisionId); })
+        .catch(function (e) { alert(e.message || "却下に失敗しました。"); });
+    }
+
+    function reviseRevision() {
+      apiFetch(docPath() + "/" + encodeURIComponent(current.revisionId) + "/revise",
+               { method: "POST", body: decisionBody() })
+        .then(function (r) { return decisionResponse(r, "再修正の作成に失敗しました。"); })
+        .then(function (data) { loadList(); if (data.revision_run_id) openDetail(data.revision_run_id); })
+        .catch(function (e) { alert(e.message || "再修正の作成に失敗しました。"); });
+    }
+
+    return { open: open };
+  })();
+  window.EGRevisions = EGRevisions;
 
   // Boot
   document.addEventListener("DOMContentLoaded", function () {

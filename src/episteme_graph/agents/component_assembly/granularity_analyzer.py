@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ..theory_operations import classify_operation
 from .responsibility import canonical_responsibility_type, canonical_responsibility_types
 from .schema import ComponentAssemblyResult, ComponentRecord
+from .split_recommendation import normalize_split_recommendation
 
 
 THRESHOLDS = {
@@ -52,9 +54,13 @@ class ComponentGranularityAnalyzer:
         derivations=None,
     ) -> ComponentAssemblyResult:
         derivation_index = _component_derivation_step_index(derivations)
+        equation_step_index = _equation_derivation_step_index(derivations)
         quality_entries: list[dict] = []
         for component in result.components:
-            quality = self._analyze_component(component, derivation_index.get(component.component_id, []))
+            steps = _derivation_steps_for_component(
+                component, derivation_index, equation_step_index
+            )
+            quality = self._analyze_component(component, steps)
             _apply_quality(component, quality)
             quality_entries.append(quality.to_dict())
 
@@ -98,11 +104,13 @@ class ComponentGranularityAnalyzer:
 
 def _apply_quality(component: ComponentRecord, quality: ComponentQuality) -> None:
     component.component_quality = quality.to_dict()
-    component.split_recommendation = {
+    # Canonical split-recommendation schema (#417): always emit the ``required``
+    # key through the shared normalizer so every downstream stage reads it.
+    component.split_recommendation = normalize_split_recommendation({
         "required": quality.split_required,
         "reasons": list(quality.split_reasons),
         "suggested_components": list(quality.suggested_split),
-    }
+    })
     if component.responsibility_type:
         component.responsibility_type = canonical_responsibility_type(component.responsibility_type)
 
@@ -167,38 +175,125 @@ def _has_mixed_responsibility(responsibility_types: set[str]) -> bool:
     return any(pair <= responsibility_types for pair in mixed_pairs) or len(responsibility_types) > 1
 
 
+# Generic operation family → responsibility type (issues #395 / #396). Domain
+# vocabulary plays no part: responsibilities are inferred from the broad,
+# domain-neutral operation family produced by the theory-operation framework.
+_FAMILY_TO_RESPONSIBILITY = {
+    "introduce_entity": "definition",
+    "define_relation": "definition",
+    "impose_assumption": "model",
+    "construct_model": "model",
+    "transform_representation": "equation_system",
+    "derive_consequence": "derivation",
+    "evaluate_condition": "constraint",
+    "compare_cases": "application",
+    "validate_or_test": "application",
+    "apply_to_context": "application",
+    "state_limitation": "limitation",
+}
+
+
+def _operation_strings(component: ComponentRecord) -> list[str]:
+    """Collect operation-bearing strings from a component (domain-neutral).
+
+    ``responsibility_type`` is intentionally excluded — it is a responsibility
+    label, not an operation, and is added directly by the caller.
+    """
+    values: list[str] = [
+        str(component.operation or ""),
+        str(component.primary_operation or ""),
+    ]
+    values.extend(str(op or "") for op in (component.secondary_operations or []))
+    for step in component.internal_flow or []:
+        if isinstance(step, dict):
+            values.append(str(step.get("operation") or step.get("relation") or ""))
+    return [v for v in values if v]
+
+
 def _detected_responsibilities(component: ComponentRecord) -> set[str]:
+    """Detect responsibility types from generic operation families only (#395/#396)."""
     values = {canonical_responsibility_type(component.responsibility_type)}
-    text = _component_text(component)
-    if any(k in text for k in ("definition", "define", "smoothing", "spectral moment")):
-        values.add("definition")
-    if any(k in text for k in ("bias model", "galaxy bias", "local bias", "parameterize")):
-        values.add("model")
-    if any(k in text for k in ("observation model", "observation design")):
-        values.add("observation_model")
-    if any(k in text for k in ("observable basis", "skewness", "kurtosis")):
-        values.add("observable_basis")
-    if any(k in text for k in ("linearized", "linearize", "equation system")):
-        values.add("equation_system")
-    if any(k in text for k in ("elimination", "eliminate", "solve", "derivation", "derive")):
-        values.add("derivation")
-    if any(k in text for k in ("consistency relation", "constraint relation", "final constraint")):
-        values.add("constraint")
-    if any(k in text for k in ("forecast", "application")):
-        values.add("application")
-    if any(k in text for k in ("caveat", "limitation", "invalid condition")):
-        values.add("limitation")
+    for op in _operation_strings(component):
+        family = classify_operation(op).operation_family
+        responsibility = _FAMILY_TO_RESPONSIBILITY.get(family)
+        if responsibility:
+            values.add(responsibility)
+    values.discard("")
     return canonical_responsibility_types(values)
 
 
+# Responsibility type → the component equation-role fields whose equations
+# belong to that responsibility (#421). Domain-neutral: it relies only on the
+# generic equation-role classification already attached to the component
+# (definition / input / intermediate / output / constraint), never on
+# paper-specific terminology.
+#   - definition / model / observable basis  ← definition (and output for an
+#     observable basis, whose defining equation is its result)
+#   - equation system                        ← input / intermediate (the
+#     transformation / relation equations)
+#   - derivation                             ← intermediate / output
+#   - constraint / application / limitation  ← constraint / output (result /
+#     consistency-relation equations)
+_RESPONSIBILITY_EQUATION_ROLE_FIELDS = {
+    "definition": ("definition_equation_ids",),
+    "model": ("definition_equation_ids",),
+    "observation_model": ("definition_equation_ids",),
+    "observable_basis": ("definition_equation_ids", "output_equation_ids"),
+    "equation_system": ("input_equation_ids", "intermediate_equation_ids"),
+    "derivation": ("intermediate_equation_ids", "output_equation_ids"),
+    "constraint": ("constraint_equation_ids", "output_equation_ids"),
+    "application": ("constraint_equation_ids", "output_equation_ids"),
+    "limitation": ("constraint_equation_ids",),
+}
+
+_ROLE_FIELDS = (
+    "definition_equation_ids",
+    "input_equation_ids",
+    "intermediate_equation_ids",
+    "output_equation_ids",
+    "constraint_equation_ids",
+)
+
+
 def _suggested_split(component: ComponentRecord, responsibilities: set[str]) -> list[dict]:
+    """Build suggested children with *responsibility-aware* candidate equations (#421).
+
+    Each suggested child receives the parent's equations whose *role* matches the
+    child's responsibility — definition equations go to a definition / model /
+    observable child, transformation/relation equations to an equation_system /
+    derivation child, and result / constraint equations to a constraint /
+    application child. Equations are never round-robined: an equation whose role
+    does not map to any of the suggested responsibilities is left out of every
+    suggested child (recorded as ``unassigned_equation_ids``) so a definition
+    equation can never be forced into a constraint child. Each equation is
+    assigned to a single responsibility (the first, in sorted order, whose roles
+    claim it) so suggested children never share equations. The ComponentRefiner —
+    which holds the full equation index — performs the authoritative reassignment
+    and keeps anything it still cannot place confidently in ``unassigned_links``.
+    """
+    ordered = sorted(responsibilities)
+    if not ordered:
+        return []
+    role_equations = {
+        field_name: _ordered_unique(getattr(component, field_name, []) or [])
+        for field_name in _ROLE_FIELDS
+    }
+    assigned: set[str] = set()
+    candidate_map: dict[str, list[str]] = {resp: [] for resp in ordered}
+    for resp in ordered:
+        for field_name in _RESPONSIBILITY_EQUATION_ROLE_FIELDS.get(resp, ()):
+            for eid in role_equations.get(field_name, []):
+                if eid in assigned:
+                    continue
+                assigned.add(eid)
+                candidate_map[resp].append(eid)
     return [
         {
             "name": responsibility.replace("_", " ").title(),
             "responsibility_type": responsibility,
-            "linked_equation_ids": _component_equation_refs(component),
+            "linked_equation_ids": candidate_map[responsibility],
         }
-        for responsibility in sorted(responsibilities)
+        for responsibility in ordered
     ]
 
 
@@ -209,6 +304,55 @@ def _component_derivation_step_index(derivations) -> dict[str, list]:
         for comp_id in getattr(chain, "linked_component_ids", []) or []:
             index.setdefault(str(comp_id), []).extend(steps)
     return index
+
+
+def _equation_derivation_step_index(derivations) -> dict[str, list]:
+    """Index derivation steps by the equation ids they touch (#417).
+
+    When a derivation chain has no ``linked_component_ids`` it is invisible to the
+    component→step index, which left ``derivation_step_count`` at 0 and hid the
+    derivation structure from the granularity plan. Indexing steps by their
+    input/output equations lets a component recover its steps through equation
+    overlap instead.
+    """
+    index: dict[str, list] = {}
+    for chain in list(getattr(derivations, "chains", []) or []):
+        for step in list(getattr(chain, "steps", []) or []):
+            for eid in _step_equation_ids(step):
+                index.setdefault(str(eid), []).append(step)
+    return index
+
+
+def _step_equation_ids(step) -> list[str]:
+    ids: list[str] = []
+    for field_name in ("input_equation_ids", "output_equation_ids", "inputs", "outputs"):
+        value = getattr(step, field_name, None)
+        if value is None and isinstance(step, dict):
+            value = step.get(field_name)
+        for item in value or []:
+            if item:
+                ids.append(str(item))
+    return ids
+
+
+def _derivation_steps_for_component(
+    component: ComponentRecord,
+    derivation_index: dict[str, list],
+    equation_step_index: dict[str, list],
+) -> list:
+    """Collect a component's derivation steps via explicit link or eq overlap (#417)."""
+    steps = list(derivation_index.get(component.component_id, []))
+    if steps:
+        return steps
+    seen: list[int] = []
+    overlap_steps: list = []
+    for eid in _component_equation_refs(component):
+        for step in equation_step_index.get(eid, []):
+            marker = id(step)
+            if marker not in seen:
+                seen.append(marker)
+                overlap_steps.append(step)
+    return overlap_steps
 
 
 def _component_equation_refs(component: ComponentRecord) -> list[str]:

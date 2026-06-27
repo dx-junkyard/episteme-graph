@@ -12,6 +12,7 @@ from .schema import (
     ComponentAssemblyResult,
     ComponentRecord,
     ValidationIssue,
+    is_generic_component_name,
     normalize_dependency_type,
 )
 from .responsibility import CANONICAL_RESPONSIBILITY_TYPES, canonical_responsibility_type
@@ -102,6 +103,7 @@ class ComponentAssemblyValidator:
                 issues += self._check_id_references(component, available)
         issues += self._check_hints(result, component_ids)
         issues += self._check_duplicates(result)
+        issues += self._check_dependency_cycles(result.components)
         if not (0.0 <= result.confidence <= 1.0):
             issues.append(ValidationIssue("confidence_out_of_range", "error", "result confidence out of range", "confidence"))
         # deterministic-fallback component の存在は再 validate でも必ず報告する
@@ -119,6 +121,64 @@ class ComponentAssemblyValidator:
                 "LLM component assembly failed and must be rerun before publish",
                 "components",
             ))
+        return issues
+
+    @staticmethod
+    def _check_dependency_cycles(
+        components: list[ComponentRecord],
+    ) -> list[ValidationIssue]:
+        """Detect requires / depends_on cycles (issue #358, hard error).
+
+        Every downstream consumer (graph layering, course ordering) assumes the
+        component dependency graph is a DAG; a cycle would loop forever or be
+        silently mis-ordered, so it blocks export with the cycle path named.
+        """
+        known = {c.component_id for c in components}
+        adjacency: dict[str, list[str]] = {}
+        for component in components:
+            targets: list[str] = []
+            for dep in component.dependencies or []:
+                if not isinstance(dep, dict):
+                    continue
+                dep_type = normalize_dependency_type(dep.get("dependency_type"))
+                if dep_type not in ("requires", "depends_on"):
+                    continue
+                targets.extend(
+                    str(ref) for ref in dep.get("component_refs") or []
+                    if str(ref) in known
+                )
+            adjacency[component.component_id] = targets
+
+        issues: list[ValidationIssue] = []
+        WHITE, GRAY, BLACK = 0, 1, 2
+        color = {cid: WHITE for cid in adjacency}
+        stack: list[str] = []
+        reported: set[frozenset] = set()
+
+        def visit(cid: str) -> None:
+            color[cid] = GRAY
+            stack.append(cid)
+            for nxt in adjacency.get(cid, []):
+                state = color.get(nxt, WHITE)
+                if state == GRAY:
+                    cycle = stack[stack.index(nxt):] + [nxt]
+                    key = frozenset(cycle)
+                    if key not in reported:
+                        reported.add(key)
+                        issues.append(ValidationIssue(
+                            "component_dependency_cycle",
+                            "error",
+                            "dependency cycle detected: " + " -> ".join(cycle),
+                            f"components[{nxt}].dependencies",
+                        ))
+                elif state == WHITE and nxt in color:
+                    visit(nxt)
+            stack.pop()
+            color[cid] = BLACK
+
+        for cid in adjacency:
+            if color[cid] == WHITE:
+                visit(cid)
         return issues
 
     def _check_component(
@@ -145,6 +205,7 @@ class ComponentAssemblyValidator:
                     f"{component.component_id}.{field} must be a list",
                     f"components[{component.component_id}].{field}",
                 ))
+        issues += self._check_self_describing(component)
         issues += self._check_internal_flow(component, available)
         issues += self._check_responsibility_separation(component)
         issues += self._check_claim_support_contract(component, available or {})
@@ -192,6 +253,47 @@ class ComponentAssemblyValidator:
                 "warning",
                 f"{component.component_id} appears dominated by meta/prior-work evidence",
                 f"components[{component.component_id}].evidence_refs",
+            ))
+        return issues
+
+    def _check_self_describing(self, component: ComponentRecord) -> list[ValidationIssue]:
+        """Components must carry a specific identity (issue #440).
+
+        Warns when the name is a bare generic responsibility/operation label
+        (``COMPONENT_NAME_GENERIC``) or when role_in_thesis / teaching_takeaway
+        are empty (``COMPONENT_ROLE_IN_THESIS_EMPTY`` /
+        ``COMPONENT_TEACHING_TAKEAWAY_EMPTY``). Domain-agnostic — no specific
+        names are asserted.
+        """
+        issues: list[ValidationIssue] = []
+        cid = component.component_id
+        if is_generic_component_name(component.label):
+            issues.append(ValidationIssue(
+                "COMPONENT_NAME_GENERIC",
+                "warning",
+                f"{cid} name {component.label!r} is a generic responsibility label; "
+                "it should pair a subject with the responsibility",
+                f"components[{cid}].label",
+                target_type="component",
+                target_id=cid,
+            ))
+        if not str(getattr(component, "role_in_thesis", "") or "").strip():
+            issues.append(ValidationIssue(
+                "COMPONENT_ROLE_IN_THESIS_EMPTY",
+                "warning",
+                f"{cid} has empty role_in_thesis",
+                f"components[{cid}].role_in_thesis",
+                target_type="component",
+                target_id=cid,
+            ))
+        if not str(getattr(component, "teaching_takeaway", "") or "").strip():
+            issues.append(ValidationIssue(
+                "COMPONENT_TEACHING_TAKEAWAY_EMPTY",
+                "warning",
+                f"{cid} has empty teaching_takeaway",
+                f"components[{cid}].teaching_takeaway",
+                target_type="component",
+                target_id=cid,
             ))
         return issues
 
@@ -522,27 +624,35 @@ class ComponentAssemblyValidator:
         # Check DSL node/edge refs
         dsl_refs = refs.get("dsl_refs") or {}
         known_dsl_nodes = available.get("dsl_node_ids", set())
-        if known_dsl_nodes:
-            all_node_ids = list(dsl_refs.get("node_ids") or []) + list(component.linked_dsl_node_ids or [])
-            unknown = [nid for nid in all_node_ids if nid not in known_dsl_nodes]
-            for nid in unknown:
-                issues.append(ValidationIssue(
-                    "unresolved_dsl_node_id",
-                    "error",
-                    f"{component.component_id} contains unresolved DSL node ID: {nid!r}",
-                    f"components[{component.component_id}].linked_dsl_node_ids",
-                ))
+        all_node_ids = _ordered_unique(
+            list(dsl_refs.get("node_ids") or [])
+            + list(component.linked_dsl_node_ids or [])
+        )
+        unknown = [nid for nid in all_node_ids if nid not in known_dsl_nodes]
+        for nid in unknown:
+            issues.append(ValidationIssue(
+                "unresolved_dsl_node_id",
+                "error",
+                f"{component.component_id} contains unresolved DSL node ID: {nid!r}",
+                f"components[{component.component_id}].linked_dsl_node_ids",
+                target_type="dsl_node",
+                target_id=str(nid),
+            ))
         known_dsl_edges = available.get("dsl_edge_ids", set())
-        if known_dsl_edges:
-            all_edge_ids = list(dsl_refs.get("edge_ids") or []) + list(component.linked_dsl_edge_ids or [])
-            unknown = [eid for eid in all_edge_ids if eid not in known_dsl_edges]
-            for eid in unknown:
-                issues.append(ValidationIssue(
-                    "unresolved_dsl_edge_id",
-                    "error",
-                    f"{component.component_id} contains unresolved DSL edge ID: {eid!r}",
-                    f"components[{component.component_id}].linked_dsl_edge_ids",
-                ))
+        all_edge_ids = _ordered_unique(
+            list(dsl_refs.get("edge_ids") or [])
+            + list(component.linked_dsl_edge_ids or [])
+        )
+        unknown = [eid for eid in all_edge_ids if eid not in known_dsl_edges]
+        for eid in unknown:
+            issues.append(ValidationIssue(
+                "unresolved_dsl_edge_id",
+                "error",
+                f"{component.component_id} contains unresolved DSL edge ID: {eid!r}",
+                f"components[{component.component_id}].linked_dsl_edge_ids",
+                target_type="dsl_edge",
+                target_id=str(eid),
+            ))
 
         # Detect summary-only: no typed claim/evidence links in either legacy or new fields
         has_claim_link = bool(refs.get("claim_ids")) or bool(component.linked_claim_ids)
@@ -693,41 +803,35 @@ class ComponentAssemblyValidator:
                     f"components[{component.component_id}].review_status",
                 ))
 
-        text = " ".join([
-            component.label.lower(),
-            component.summary.lower(),
-            component.reason.lower(),
-        ])
-        if "eliminat" in text or "bias" in text:
+        # Domain-neutral elimination check (issues #395 / #397): driven by the
+        # component's declared operation, not by paper-specific label keywords.
+        operation_text = " ".join([
+            str(component.operation or ""),
+            str(component.primary_operation or ""),
+            " ".join(str(o) for o in (component.secondary_operations or [])),
+        ]).lower()
+        if "eliminat" in operation_text:
             if not component.eliminated_symbols:
                 issues.append(ValidationIssue(
-                    "bias_elimination_missing_eliminated_symbols",
+                    "elimination_missing_eliminated_symbols",
                     "warning",
-                    f"{component.component_id} appears to describe elimination but has no eliminated_symbols",
+                    f"{component.component_id} declares an elimination operation but has no eliminated_symbols",
                     f"components[{component.component_id}].eliminated_symbols",
                 ))
             if not component.retained_symbols:
                 issues.append(ValidationIssue(
-                    "bias_elimination_missing_retained_symbols",
+                    "elimination_missing_retained_symbols",
                     "warning",
-                    f"{component.component_id} appears to describe elimination but has no retained_symbols",
+                    f"{component.component_id} declares an elimination operation but has no retained_symbols",
                     f"components[{component.component_id}].retained_symbols",
                 ))
-            if (
-                ("second" in text or "second-order" in text or "2nd" in text)
-                and ("third" in text or "third-order" in text or "3rd" in text)
-            ):
-                issues.append(ValidationIssue(
-                    "bias_elimination_mixes_second_and_third_order",
-                    "warning",
-                    f"{component.component_id} appears to combine second- and third-order bias elimination; split it",
-                    f"components[{component.component_id}]",
-                ))
-        if "consistency relation" in text and not component.output_equation_ids:
+        # A constraint responsibility that declares no output equations is
+        # incomplete (generic; no paper-specific "consistency relation" wording).
+        if canonical_responsibility_type(component.responsibility_type) == "constraint" and not component.output_equation_ids:
             issues.append(ValidationIssue(
-                "consistency_relation_without_output_equations",
-                "error",
-                f"{component.component_id} outputs a consistency relation but has no output_equation_ids",
+                "constraint_component_without_output_equations",
+                "warning",
+                f"{component.component_id} has a constraint responsibility but no output_equation_ids",
                 f"components[{component.component_id}].output_equation_ids",
             ))
         return issues

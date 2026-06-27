@@ -20,6 +20,7 @@ Issue #242 acceptance criteria:
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 ARTIFACTS_KEY = "_artifacts"
@@ -74,6 +75,7 @@ def build_equations_export(
     structure_artifact: Any = None,
     evidence_index: dict[str, list[str]] | None = None,
     claim_index: dict[str, list[str]] | None = None,
+    symbol_registry_artifact: Any = None,
 ) -> list[dict]:
     """Convert the equation_semantics artifact into equations/equations.json shape.
 
@@ -94,6 +96,14 @@ def build_equations_export(
     first = records_raw[0] if records_raw else {}
     has_nested = isinstance(first, dict) and "source_extraction" in first
 
+    symbol_index: dict = {}
+    if symbol_registry_artifact is not None:
+        try:
+            from episteme_graph.agents.symbol_registry.builder import build_symbol_index
+            symbol_index = build_symbol_index(_coerce_dict(symbol_registry_artifact))
+        except Exception:
+            symbol_index = {}
+
     if has_nested:
         try:
             sem_result = EquationSemanticsResult.from_dict({
@@ -106,6 +116,7 @@ def build_equations_export(
             exported = sem_result.to_equations_export(
                 evidence_index=evidence_index,
                 claim_index=claim_index,
+                symbol_index=symbol_index,
             )
             # Validate and annotate
             _validate_equations_export(exported)
@@ -686,17 +697,38 @@ def build_derivation_chains_export(
                 })
                 if gate.get("blocked_by_equation_ids"):
                     steps[-1]["review_status"] = "teacher_review_required"
-            out.append({
+            chain_out = {
                 "derivation_id": c.get("derivation_id") or "",
                 "document_id": c.get("document_id") or document_id,
                 "source_section_ids": list(c.get("source_section_ids") or []),
                 "steps": steps,
                 "teaching_takeaway": c.get("teaching_takeaway") or "",
                 "blackbox_policy_suggestion": c.get("blackbox_policy_suggestion") or {},
+                "chain_type": c.get("chain_type") or "equation_chain",
                 "review_status": c.get("review_status") or _chain_review_status_from_steps(steps),
                 "review_reason": c.get("review_reason") or _chain_review_reason_from_steps(steps),
                 "confidence_gate": _chain_confidence_gate_from_steps(steps),
-            })
+            }
+            # System-level derivation fields (issue #386): expose the group-level
+            # operation, symbol bookkeeping, and review reasons on the chain.
+            if c.get("chain_type") == "system_level":
+                chain_out.update({
+                    "operation": c.get("operation") or "",
+                    "input_equation_ids": list(c.get("input_equation_ids") or []),
+                    "output_equation_ids": list(c.get("output_equation_ids") or []),
+                    "intermediate_equation_ids": list(c.get("intermediate_equation_ids") or []),
+                    "input_claim_ids": list(c.get("input_claim_ids") or []),
+                    "output_claim_ids": list(c.get("output_claim_ids") or []),
+                    "assumption_ids": list(c.get("assumption_ids") or []),
+                    "source_evidence_ids": list(c.get("source_evidence_ids") or []),
+                    "transformed_symbols": list(c.get("transformed_symbols") or []),
+                    "eliminated_symbols": list(c.get("eliminated_symbols") or []),
+                    "retained_symbols": list(c.get("retained_symbols") or []),
+                    "conditions": list(c.get("conditions") or []),
+                    "review_required": bool(c.get("review_required", True)),
+                    "review_reasons": list(c.get("review_reasons") or []),
+                })
+            out.append(chain_out)
         return out
 
     eq = _coerce_dict(equation_artifact)
@@ -888,20 +920,83 @@ def _chain_review_reason_from_steps(steps: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _slugify_topic(title: str, index: int) -> str:
+    base = re.sub(r"[^a-z0-9]+", "_", str(title or "").strip().lower()).strip("_")
+    return f"topic_{base}" if base else f"topic_{index:03d}"
+
+
+def _component_dependency_order(component_graph: dict, components: list[dict]) -> dict[str, int]:
+    """Topological-ish order of components from dependency edges (issue #389).
+
+    Edge types that imply a teaching prerequisite (depends_on / prerequisite_for /
+    uses / requires / parameterizes …) put the source before the target. Falls
+    back to the components' natural order. Domain-neutral; cycles are tolerated.
+    """
+    order_index = {str(c.get("component_id")): i for i, c in enumerate(components) if c.get("component_id")}
+    prereq_edges = {
+        "depends_on", "prerequisite_for", "requires", "uses", "parameterizes",
+        "defines", "produces", "transforms_into",
+    }
+    deps: dict[str, set[str]] = {cid: set() for cid in order_index}
+    for edge in (component_graph or {}).get("edges", []) or []:
+        if not isinstance(edge, dict):
+            continue
+        etype = str(edge.get("edge_type") or edge.get("relation") or "").lower()
+        src = str(edge.get("source") or "")
+        tgt = str(edge.get("target") or "")
+        if etype in prereq_edges and src in deps and tgt in deps:
+            # target depends on source -> source must come first.
+            deps[tgt].add(src)
+
+    # Kahn-ish longest-prerequisite-depth ranking (stable, cycle-tolerant).
+    depth: dict[str, int] = {}
+
+    def _depth(cid: str, stack: set[str]) -> int:
+        if cid in depth:
+            return depth[cid]
+        if cid in stack:
+            return 0
+        stack.add(cid)
+        d = 0
+        for pre in deps.get(cid, ()):  # prerequisites
+            d = max(d, _depth(pre, stack) + 1)
+        stack.discard(cid)
+        depth[cid] = d
+        return d
+
+    for cid in order_index:
+        _depth(cid, set())
+    # Combine prerequisite depth (primary) with natural order (tie-break).
+    return {cid: depth.get(cid, 0) * 10000 + order_index.get(cid, 0) for cid in order_index}
+
+
 def enrich_course_topics(
     course: dict,
     *,
     course_mapping_artifact: Any = None,
     blueprint_artifact: Any = None,
+    components: list[dict] | None = None,
+    component_graph: dict | None = None,
 ) -> dict:
-    """Add learning_objectives, prerequisite_concepts, blackbox_policy,
-    expected_misconceptions, assessment_prompts, visualization_plan to topics.
+    """Build artifact-first, component-linked pedagogical topic metadata (#389).
 
-    Pulls from CourseMappingAgent (for objectives / prerequisites / blackbox)
-    and BlueprintAgent (for visualization_plan derived from narrative_arc).
+    - When the course has no topics, seeds them from the CourseMappingAgent
+      artifact so the blueprint reflects the *current* run's components.
+    - Each topic carries topic_id, linked_component_ids, linked_claim_ids,
+      linked_equation_ids, learning_objectives, prerequisite_concepts,
+      blackbox_policy, visualization_plan, expected_misconceptions,
+      assessment_prompts, and inherited review_required / review_reasons.
+    - Topics are ordered by component-graph dependencies (definitions before
+      transformations, assumptions before results), not section order.
     """
     if not isinstance(course, dict):
         return course
+
+    components = components or []
+    component_graph = component_graph or {}
+    component_index = {
+        str(c.get("component_id")): c for c in components if isinstance(c, dict) and c.get("component_id")
+    }
 
     cm = _coerce_dict(course_mapping_artifact)
     mapping_topics = cm.get("topics") or []
@@ -924,20 +1019,76 @@ def enrich_course_topics(
             "linked_component_ids": list(step.get("linked_component_ids") or []),
         })
 
+    # Artifact-first seeding: when the course carries no topics, build them from
+    # the course_mapping artifact (issue #389).
+    course_topics = [t for t in (course.get("topics") or []) if isinstance(t, dict)]
+    if not course_topics and mapping_by_title:
+        course_topics = [dict(t) for t in mapping_by_title.values()]
+
+    def _component_links(linked_ids: list[str]) -> tuple[list[str], list[str], bool, list[str]]:
+        claim_ids: list[str] = []
+        equation_ids: list[str] = []
+        review_reasons: list[str] = []
+        review_required = False
+        for cid in linked_ids:
+            comp = component_index.get(str(cid))
+            if comp is None:
+                review_reasons.append("linked_component_missing")
+                review_required = True
+                continue
+            claim_ids.extend(str(v) for v in comp.get("evidence_claims") or [] if v)
+            claim_ids.extend(str(v) for v in comp.get("linked_claim_ids") or [] if v)
+            for key in ("linked_equation_ids", "input_equation_ids", "output_equation_ids"):
+                equation_ids.extend(str(v) for v in comp.get(key) or [] if v)
+            if str(comp.get("review_status") or "") in ("review_required", "teacher_review_required"):
+                review_required = True
+                review_reasons.append("linked_component_review_required")
+        return (
+            list(dict.fromkeys(claim_ids)),
+            list(dict.fromkeys(equation_ids)),
+            review_required,
+            list(dict.fromkeys(review_reasons)),
+        )
+
     enriched_topics: list[dict] = []
-    for t in course.get("topics") or []:
-        if not isinstance(t, dict):
-            continue
+    for index, t in enumerate(course_topics):
         title = (t.get("title") or "").strip()
         mapping = mapping_by_title.get(title, {})
         topic = dict(t)
+        linked_component_ids = list(topic.get("linked_component_ids") or mapping.get("linked_component_ids") or [])
+        topic["linked_component_ids"] = linked_component_ids
+        topic.setdefault("topic_id", _slugify_topic(title, index))
         topic.setdefault("learning_objectives", list(mapping.get("learning_objectives") or []))
         topic.setdefault("prerequisite_concepts", list(mapping.get("prerequisite_concepts") or t.get("prerequisites") or []))
         topic.setdefault("blackbox_policy", mapping.get("blackbox_policy") or {})
         topic.setdefault("assessment_prompts", list(mapping.get("assessment_prompts") or []))
         topic.setdefault("expected_misconceptions", list(mapping.get("expected_misconceptions") or []))
         topic.setdefault("visualization_plan", visualization_plan)
+
+        claim_ids, equation_ids, review_required, review_reasons = _component_links(linked_component_ids)
+        topic.setdefault("linked_claim_ids", claim_ids)
+        topic.setdefault("linked_equation_ids", equation_ids)
+        if not linked_component_ids:
+            review_required = True
+            review_reasons = list(dict.fromkeys(review_reasons + ["topic_without_component"]))
+        topic["review_required"] = bool(topic.get("review_required")) or review_required
+        topic["review_reasons"] = list(dict.fromkeys(list(topic.get("review_reasons") or []) + review_reasons))
         enriched_topics.append(topic)
+
+    # Dependency-driven ordering (issue #389): order topics by the earliest
+    # (lowest-rank) component they teach, so definitions/assumptions precede
+    # results/applications.
+    if component_index:
+        rank = _component_dependency_order(component_graph, components)
+        def _topic_rank(topic: dict, fallback: int) -> tuple[int, int]:
+            ranks = [rank[str(cid)] for cid in topic.get("linked_component_ids") or [] if str(cid) in rank]
+            return (min(ranks) if ranks else 10**9, fallback)
+        enriched_topics = [
+            tp for _, tp in sorted(
+                ((_topic_rank(tp, i), tp) for i, tp in enumerate(enriched_topics)),
+                key=lambda pair: pair[0],
+            )
+        ]
 
     enriched = dict(course)
     enriched["topics"] = enriched_topics
@@ -945,14 +1096,108 @@ def enrich_course_topics(
 
 
 # ---------------------------------------------------------------------------
-# Document boundary
+# Document boundary + completeness (issue #366)
 # ---------------------------------------------------------------------------
+
+def _load_completeness_analyzer():
+    """Resolve ``analyze_document_completeness`` without forcing the heavy import.
+
+    Importing ``core.document_pipeline.completeness`` triggers the package
+    ``__init__`` (orchestrator → agents), which is not always importable from the
+    export route's environment. Try the package import first, then fall back to
+    loading the dependency-free leaf module directly by path.
+    """
+    try:
+        from core.document_pipeline.completeness import analyze_document_completeness
+        return analyze_document_completeness
+    except Exception:
+        import importlib.util
+        import os
+
+        path = os.path.normpath(os.path.join(
+            os.path.dirname(__file__), "..", "..",
+            "core", "document_pipeline", "completeness.py",
+        ))
+        spec = importlib.util.spec_from_file_location("_dp_completeness", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.analyze_document_completeness
+
+
+# A detected boundary spanning far fewer pages than the document total is a
+# collapsed boundary (issue #366: a 20-page paper reported as page 1..1). The
+# boundary must not pass at confidence 1.0 / needs_review=false in that case.
+_MIN_BOUNDARY_PAGE_SPAN_RATIO = 0.5
+
+# An author list far larger than any plausible byline indicates reference /
+# bibliography authors leaked into the document authors (issue #366 / #372).
+_MAX_PLAUSIBLE_AUTHORS = 25
+
+
+def _audit_authors(authors: list, author_extraction: Any) -> list[str]:
+    """Deterministic author-list audit for the export layer (issue #372).
+
+    The export layer NEVER deletes authors — the contamination is prevented at
+    parse time by extracting authors only from front-matter / structured
+    metadata. Here we only emit deterministic review reasons (returned as a
+    list, never mutating ``authors``):
+
+      * ``author_count_exceeds_limit`` — more names than any plausible byline,
+      * ``author_provenance_missing``  — a non-empty author list with no
+        structured ``author_extraction`` provenance,
+      * ``author_extraction_needs_review`` — the parser flagged the extraction
+        (e.g. ``author_source_mismatch``) for review.
+
+    Data is preserved on anomaly; callers set ``needs_review=true`` instead of
+    correcting with data loss.
+    """
+    raw = [str(a).strip() for a in (authors or []) if str(a).strip()]
+    reasons: list[str] = []
+    if len(raw) > _MAX_PLAUSIBLE_AUTHORS:
+        reasons.append("author_count_exceeds_limit")
+
+    provenance = author_extraction if isinstance(author_extraction, dict) else {}
+    source = str(provenance.get("source") or "")
+    has_provenance = bool(provenance) and source not in ("", "none", "unknown")
+    if raw and not has_provenance:
+        reasons.append("author_provenance_missing")
+    elif provenance.get("needs_review"):
+        reasons.append("author_extraction_needs_review")
+    return reasons
+
+
+def build_document_completeness(
+    structure_artifact: Any,
+    *,
+    document_id: str,
+    evidence_artifact: Any = None,
+    equations_artifact: Any = None,
+) -> dict:
+    """Deterministic document-completeness report (issue #366 / #420).
+
+    Thin wrapper over ``core.document_pipeline.completeness`` so the export route
+    and the pipeline gate share one implementation. Imported lazily so importing
+    this module never hard-depends on the (sometimes stubbed) ``core`` package.
+
+    ``equations_artifact`` (equation_semantics) is passed through so equation
+    artifact coverage reflects the real EquationRecords (#420); without it a TeX
+    document with math would be reported as permanently incomplete.
+    """
+    analyze_document_completeness = _load_completeness_analyzer()
+
+    return analyze_document_completeness(
+        _coerce_dict(structure_artifact),
+        _coerce_dict(evidence_artifact) if evidence_artifact is not None else None,
+        document_id=document_id,
+        equations=_coerce_dict(equations_artifact) if equations_artifact is not None else None,
+    )
 
 
 def build_document_boundary(
     structure_artifact: Any,
     *,
     document_id: str,
+    evidence_artifact: Any = None,
 ) -> dict:
     """Surface the active article boundary inside a (potentially multi-article) PDF.
 
@@ -960,6 +1205,17 @@ def build_document_boundary(
     first section's page_start as the article start and the last section's
     page_end as the article end, plus the title block when present, so
     consumers can flag spans that fall outside the boundary.
+
+    Issue #366: a collapsed boundary (span ≪ pages_total) drops confidence below
+    1.0 and raises needs_review. Every completeness failure (equation
+    discontinuity, missing terminal section, low page coverage) also propagates
+    to needs_review.
+
+    Issue #372: the export layer never deletes authors. Authors are extracted at
+    parse time from front-matter / structured metadata only; here we surface the
+    ``author_extraction`` provenance and emit deterministic review reasons
+    (count over limit, missing provenance, extraction flagged) without mutating
+    the author list.
     """
     structure = _coerce_dict(structure_artifact)
     sections = structure.get("sections") or []
@@ -979,18 +1235,641 @@ def build_document_boundary(
         if s.get("section_id"):
             section_ids.append(s["section_id"])
 
-    confidence = 1.0 if (boundary_page_start is not None and boundary_page_end is not None) else 0.5
-    needs_review = confidence < 0.8
+    # Authors are preserved verbatim (issue #372): no token-matching deletion.
+    authors = list(metadata.get("authors") or []) if isinstance(metadata, dict) else []
+    author_extraction = (
+        metadata.get("author_extraction") if isinstance(metadata, dict) else None
+    )
+    author_review_reasons = _audit_authors(authors, author_extraction)
+
+    completeness = build_document_completeness(
+        structure, document_id=document_id, evidence_artifact=evidence_artifact
+    )
+
+    review_reasons: list[str] = []
+    have_pages = boundary_page_start is not None and boundary_page_end is not None
+    if not have_pages:
+        review_reasons.append("incomplete_section_page_range")
+
+    # Collapsed boundary: detected span far smaller than the document total.
+    boundary_span_collapsed = False
+    if have_pages and isinstance(pages_total, int) and pages_total > 0:
+        span_pages = int(boundary_page_end) - int(boundary_page_start) + 1
+        if span_pages < pages_total * _MIN_BOUNDARY_PAGE_SPAN_RATIO:
+            boundary_span_collapsed = True
+            review_reasons.append("boundary_page_span_too_small")
+
+    for reason in author_review_reasons:
+        if reason not in review_reasons:
+            review_reasons.append(reason)
+
+    # Every completeness failure propagates to the boundary (#366 review).
+    for reason in completeness["review_reasons"]:
+        if reason not in review_reasons:
+            review_reasons.append(reason)
+
+    if not have_pages:
+        confidence = 0.5
+    elif boundary_span_collapsed:
+        # A collapsed boundary must never pass at full confidence (issue #366).
+        confidence = 0.4
+    elif review_reasons:
+        confidence = 0.7
+    else:
+        confidence = 1.0
+
+    needs_review = bool(review_reasons) or confidence < 0.8
 
     return {
         "document_id": document_id,
         "title": metadata.get("title") if isinstance(metadata, dict) else None,
-        "authors": list(metadata.get("authors") or []) if isinstance(metadata, dict) else [],
+        "authors": authors,
+        "author_extraction": author_extraction if isinstance(author_extraction, dict) else {
+            "source": "none",
+            "confidence": 0.0,
+            "needs_review": bool(author_review_reasons),
+            "review_reasons": author_review_reasons,
+        },
         "boundary_page_start": boundary_page_start,
         "boundary_page_end": boundary_page_end,
         "pages_total": pages_total,
         "active_section_ids": section_ids,
         "confidence": confidence,
         "needs_review": needs_review,
-        "review_reason": ([] if not needs_review else ["incomplete_section_page_range"]),
+        "review_reason": review_reasons,
+        "completeness": completeness,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Artifact-first claims / components / graph (issue #383)
+#
+# The export bundle prefers the latest analysis-run artifacts over DB-persisted
+# objects so that diagnostic dumps reflect the *current* pipeline stage output
+# rather than legacy persisted side-products. Each builder converts a stage
+# artifact into the same export shape the DB loaders produce, so the downstream
+# normalize / validate / confidence-gate passes keep working unchanged. The DB
+# loaders remain as the fallback when an artifact is absent.
+# ---------------------------------------------------------------------------
+
+
+def _concept_to_export(concept: Any) -> dict:
+    if not isinstance(concept, dict):
+        return {"name": str(concept), "normalized": str(concept)}
+    return {
+        "name": concept.get("name", ""),
+        "normalized": concept.get("normalized", "") or concept.get("name", ""),
+        "concept_type": concept.get("concept_type", "unknown"),
+        "role": concept.get("role", "unknown"),
+    }
+
+
+def build_claims_export(
+    claim_artifact: Any,
+    *,
+    document_id: str,
+) -> list[dict]:
+    """Convert a ``claim_object_builder`` artifact into claims/claims.json shape.
+
+    Preserves the claim_object_builder fields (issue #383 acceptance: claims.json
+    keeps claim_object_builder fields) — atomicity / is_atomic / equation_ids /
+    source_evidence_ids / linked_component_ids / qualification_reason / concepts —
+    while also emitting the legacy keys (``equation`` / ``source_scope`` /
+    ``evidence_text``) the downstream normalize / validation passes expect.
+    """
+    cb = _coerce_dict(claim_artifact)
+    records = cb.get("claims") if isinstance(cb.get("claims"), list) else []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        claim_id = str(r.get("claim_id") or "").strip()
+        if not claim_id or claim_id in seen:
+            continue
+        seen.add(claim_id)
+        equation_ids = [str(v) for v in (r.get("equation_ids") or []) if v]
+        source_evidence_ids = [str(v) for v in (r.get("source_evidence_ids") or []) if v]
+        source_span_ids = [str(v) for v in (r.get("source_span_ids") or []) if v]
+        source_scope = {
+            "document_id": r.get("document_id") or document_id,
+            "section_id": r.get("section_id") or "",
+            "section_title": r.get("section_title") or "",
+            "span_id": source_span_ids[0] if source_span_ids else "",
+        }
+        out.append({
+            "claim_id": claim_id,
+            "document_id": r.get("document_id") or document_id,
+            "source_scope": source_scope,
+            "claim_type": r.get("claim_type") or "unknown",
+            "text": r.get("text") or "",
+            "normalized_text": r.get("normalized_text") or r.get("text") or "",
+            "concepts": [_concept_to_export(c) for c in (r.get("concepts") or [])],
+            "equation": {"equation_ids": equation_ids} if equation_ids else {},
+            "support_status": r.get("support_status") or "source_backed",
+            "evidence_text": "",
+            "review_status": r.get("review_status") or "teacher_review_required",
+            # Preserved claim_object_builder fields (issue #383).
+            "equation_ids": equation_ids,
+            "inferred_equation_ids": [str(v) for v in (r.get("inferred_equation_ids") or []) if v],
+            "source_evidence_ids": source_evidence_ids,
+            "source_span_ids": source_span_ids,
+            "linked_component_ids": [str(v) for v in (r.get("linked_component_ids") or []) if v],
+            "atomicity": r.get("atomicity") or "atomic",
+            "is_atomic": bool(r.get("is_atomic", r.get("atomicity", "atomic") == "atomic")),
+            "qualification_reason": r.get("qualification_reason"),
+            "concept_assignment_status": r.get("concept_assignment_status") or "review_required",
+            "confidence": float(r.get("confidence") or 0.0),
+            # Equation/derivation-synthesised claim fields (issue #388).
+            "derivation_ids": [str(v) for v in (r.get("derivation_ids") or []) if v],
+            "synthesis_method": r.get("synthesis_method") or "",
+            "review_reasons": list(r.get("review_reasons") or []),
+        })
+    return out
+
+
+def build_thesis_export(
+    thesis_artifact: Any,
+    *,
+    document_id: str,
+) -> dict:
+    """Convert a ``thesis_reconstruction`` artifact into the export shape (#442).
+
+    The thesis is the traversal anchor: it exposes central_question /
+    headline_claim / supporting_subclaim_ids / anchor_node_ids plus the central
+    thesis and support structure. Returns ``{}`` when the artifact is absent so
+    the caller can skip empty documents.
+    """
+    th = _coerce_dict(thesis_artifact)
+    central = th.get("central_thesis") if isinstance(th.get("central_thesis"), dict) else {}
+    if not th or not central:
+        return {}
+    return {
+        "document_id": th.get("document_id") or document_id,
+        "central_question": th.get("central_question") or "",
+        "headline_claim": th.get("headline_claim") or central.get("text") or "",
+        "supporting_subclaim_ids": [str(v) for v in (th.get("supporting_subclaim_ids") or []) if v],
+        "anchor_node_ids": [str(v) for v in (th.get("anchor_node_ids") or []) if v],
+        "central_thesis": central,
+        "support_structure": th.get("support_structure") or {},
+        "confidence": float(th.get("confidence") or 0.0),
+        "review_notes": list(th.get("review_notes") or []),
+    }
+
+
+def build_components_export(
+    component_artifact: Any,
+    *,
+    document_id: str,
+) -> list[dict]:
+    """Convert a ``component_assembly`` artifact into components/components.json shape.
+
+    Preserves the component_assembly fields (issue #383 acceptance: components.json
+    keeps component_assembly fields) — responsibility_type / linked_*_ids /
+    input/output equation ids / internal_flow / split_recommendation / publish_ready —
+    alongside the legacy keys the DB loader produced (``name`` / ``component_type`` /
+    ``evidence_claims`` / ``source_scope`` …).
+    """
+    ca = _coerce_dict(component_artifact)
+    records = ca.get("components") if isinstance(ca.get("components"), list) else []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        component_id = str(r.get("component_id") or "").strip()
+        if not component_id or component_id in seen:
+            continue
+        seen.add(component_id)
+        evidence_refs = r.get("evidence_refs") if isinstance(r.get("evidence_refs"), dict) else {}
+        linked_claim_ids = [str(v) for v in (r.get("linked_claim_ids") or []) if v]
+        evidence_claims = list(dict.fromkeys(
+            linked_claim_ids + [str(v) for v in (evidence_refs.get("claim_ids") or []) if v]
+        ))
+        source_scope = dict(r.get("source_scope") or {})
+        source_scope.setdefault("document_id", r.get("document_id") or document_id)
+        component_type = r.get("component_type") or r.get("responsibility_type") or "theory"
+        out.append({
+            "component_id": component_id,
+            "course_id": "",
+            "document_id": r.get("document_id") or document_id,
+            "name": r.get("label") or r.get("name") or "",
+            "component_type": component_type,
+            "origin": "paper",
+            "source_scope": source_scope,
+            "evidence_claims": evidence_claims,
+            "maturity_level": r.get("maturity_level") or "paper_claim",
+            "maturity_source": r.get("maturity_source") or "llm_proposed",
+            "review_status": r.get("review_status") or "teacher_review_required",
+            "summary": r.get("summary") or "",
+            "inputs": list(r.get("inputs") or []),
+            "outputs": list(r.get("outputs") or []),
+            "preconditions": list(r.get("preconditions") or []),
+            "cautions": list(r.get("cautions") or []),
+            "constraints": list(r.get("constraints") or []),
+            "invalid_conditions": list(r.get("invalid_conditions") or []),
+            "dependencies": list(r.get("dependencies") or []),
+            "connectors": r.get("connectors") or {},
+            "internal_flow": list(r.get("internal_flow") or []),
+            "teacher_notes": r.get("teaching_takeaway") or "",
+            "smiles_dsl": "",
+            # Preserved component_assembly fields (issue #383 / #384 / #386).
+            "responsibility_type": r.get("responsibility_type") or "",
+            "primary_operation": r.get("primary_operation") or r.get("operation") or "",
+            "secondary_operations": list(r.get("secondary_operations") or []),
+            "split_recommendation": r.get("split_recommendation") or {},
+            "component_quality": r.get("component_quality") or {},
+            "publish_ready": bool(r.get("publish_ready", False)),
+            "assumptions": list(r.get("assumptions") or []),
+            "approximations": list(r.get("approximations") or []),
+            "evidence_refs": evidence_refs,
+            "linked_claim_ids": linked_claim_ids,
+            "linked_equation_ids": [str(v) for v in (r.get("linked_equation_ids") or []) if v],
+            "linked_evidence_ids": [str(v) for v in (r.get("linked_evidence_ids") or []) if v],
+            "linked_derivation_ids": [str(v) for v in (r.get("linked_derivation_ids") or []) if v],
+            "input_equation_ids": [str(v) for v in (r.get("input_equation_ids") or []) if v],
+            "intermediate_equation_ids": [str(v) for v in (r.get("intermediate_equation_ids") or []) if v],
+            "output_equation_ids": [str(v) for v in (r.get("output_equation_ids") or []) if v],
+            "constraint_equation_ids": [str(v) for v in (r.get("constraint_equation_ids") or []) if v],
+            "definition_equation_ids": [str(v) for v in (r.get("definition_equation_ids") or []) if v],
+            "review_required_equation_ids": [str(v) for v in (r.get("review_required_equation_ids") or []) if v],
+            # Canonical component endpoint resolution (#422). These identifiers
+            # are provenance aliases only; component_id remains authoritative.
+            "legacy_ids": _ordered_unique_str(
+                [
+                    value
+                    for value in (
+                        list(r.get("legacy_ids") or [])
+                        + [r.get("agent_component_id"), r.get("legacy_component_id")]
+                    )
+                    if value
+                ]
+            ),
+        })
+    return out
+
+
+# A component-graph node is a *reusable component* only when it lives in the main
+# layer as a TheoryOperationNode / component. equation_detail / debug nodes
+# (EquationOperationNode, fallback, inferred) are operation-level and must not
+# leak into component_graph.json (issue #387).
+_COMPONENT_GRAPH_LAYERS = {"main", ""}
+_OPERATION_NODE_TYPES = {"EquationOperationNode"}
+
+
+def _classify_operation_family(operation_text: str) -> dict:
+    """Classify an operation into a generic family for export (issue #398).
+
+    Resilient to the agents package not being importable from the export
+    environment: falls back to ``unknown_specific_operation`` (review_required).
+    """
+    try:
+        from episteme_graph.agents.theory_operations import classify_operation
+        return classify_operation(operation_text).to_dict()
+    except Exception:
+        return {
+            "operation_family": "unknown_specific_operation",
+            "operation_subtype": "unknown_specific_operation",
+            "subtype_source": "unknown",
+            "confidence": 0.0,
+            "review_required": True,
+            "review_reasons": ["operation_family_unrecognized"],
+        }
+
+
+def _graph_node_is_component(node: dict, known_component_ids: set[str]) -> bool:
+    if not isinstance(node, dict):
+        return False
+    comp_type = str(node.get("component_type") or "")
+    node_id = str(node.get("component_id") or node.get("node_id") or node.get("id") or "")
+    # Operation-level nodes (EquationOperationNode) are never components.
+    if comp_type in _OPERATION_NODE_TYPES:
+        return False
+    # Issue #418: when the real component-id registry is supplied, membership is
+    # mandatory — a node is a component_graph node ONLY if its id is an actual
+    # component. This stops aggregate theory nodes (graph_layer=main but not a
+    # real component) from being misclassified as components and leaking into
+    # component_graph.json with a non-component id.
+    if known_component_ids:
+        return node_id in known_component_ids
+    # No registry available (legacy / standalone graph): fall back to the layer
+    # heuristic so the split still works without the components artifact.
+    layer = str(node.get("graph_layer") or "main")
+    return layer in _COMPONENT_GRAPH_LAYERS
+
+
+def build_system_operations_export(derivation_chains: list[dict] | None) -> list[dict]:
+    """Build first-class system-operation artifacts from derivation chains (#394).
+
+    A ``chain_type="system_level"`` derivation bundles a *group* of equations /
+    claims / derivations into one explainable operation. This surfaces them as a
+    standalone, source-backed artifact (``graph/system_operations.json``) with the
+    generic two-layer operation model (``system_family`` + optional
+    ``system_subtype`` + ``subtype_source``). Domain-neutral: no paper-specific
+    taxonomy is assumed, and unknown semantics stay reviewable.
+    """
+    out: list[dict] = []
+    for chain in derivation_chains or []:
+        if not isinstance(chain, dict) or str(chain.get("chain_type") or "") != "system_level":
+            continue
+        derivation_id = str(chain.get("derivation_id") or "")
+        equation_ids = _ordered_unique_str(
+            list(chain.get("input_equation_ids") or [])
+            + list(chain.get("intermediate_equation_ids") or [])
+            + list(chain.get("output_equation_ids") or [])
+        )
+        claim_ids = _ordered_unique_str(
+            list(chain.get("input_claim_ids") or []) + list(chain.get("output_claim_ids") or [])
+        )
+        family = str(chain.get("operation_family") or "")
+        if not family:
+            family = _classify_operation_family(chain.get("operation") or "")["operation_family"]
+        out.append({
+            "system_id": str(chain.get("system_id") or derivation_id or ""),
+            "system_family": family,
+            "system_subtype": chain.get("operation_subtype"),
+            "subtype_source": chain.get("subtype_source") or "unknown",
+            "operation": str(chain.get("operation") or ""),
+            "operation_ids": [str(v) for v in (chain.get("operation_ids") or []) if v],
+            "equation_ids": equation_ids,
+            "claim_ids": claim_ids,
+            "derivation_ids": [derivation_id] if derivation_id else [],
+            "component_ids": [str(v) for v in (chain.get("linked_component_ids") or []) if v],
+            "source_evidence_ids": [str(v) for v in (chain.get("source_evidence_ids") or []) if v],
+            "semantic_roles": {
+                "input_equation_ids": [str(v) for v in (chain.get("input_equation_ids") or []) if v],
+                "intermediate_equation_ids": [str(v) for v in (chain.get("intermediate_equation_ids") or []) if v],
+                "output_equation_ids": [str(v) for v in (chain.get("output_equation_ids") or []) if v],
+                "supporting_equation_ids": [],
+            },
+            "symbol_roles": {
+                "transformed_symbols": [str(v) for v in (chain.get("transformed_symbols") or []) if v],
+                "eliminated_symbols": [str(v) for v in (chain.get("eliminated_symbols") or []) if v],
+                "retained_symbols": [str(v) for v in (chain.get("retained_symbols") or []) if v],
+            },
+            "review_required": bool(chain.get("review_required")),
+            "review_reasons": [str(v) for v in (chain.get("review_reasons") or []) if v],
+        })
+    return out
+
+
+def _ordered_unique_str(values) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for v in values or []:
+        s = str(v)
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+def build_component_graph_export(
+    graph_artifact: Any,
+    *,
+    document_id: str,
+    known_component_ids: set[str] | None = None,
+    component_aliases: dict[str, str] | None = None,
+) -> dict:
+    """Split a ``component_graph`` artifact into separate component / operation graphs.
+
+    Issue #387: component_graph.json nodes are component IDs only; operation-level
+    nodes (equation_detail / debug layers, EquationOperationNode) move to
+    operation_graph.json, with a component_operation_links mapping. Edges whose
+    endpoints are not both components move to the operation graph as well, so
+    component_graph validation never fails on operation IDs.
+
+    Returns ``{"component_graph": {...}, "operation_graph": {...},
+    "component_operation_links": [...]}``.
+    """
+    cg = _coerce_dict(graph_artifact)
+    raw_nodes = cg.get("nodes") if isinstance(cg.get("nodes"), list) else []
+    raw_edges = cg.get("edges") if isinstance(cg.get("edges"), list) else []
+    known_component_ids = known_component_ids or set()
+    alias_to_component: dict[str, str] = {
+        str(component_id): str(component_id)
+        for component_id in known_component_ids
+        if component_id
+    }
+    for alias, canonical in (component_aliases or {}).items():
+        alias = str(alias or "")
+        canonical = str(canonical or "")
+        if alias and canonical in known_component_ids:
+            alias_to_component[alias] = canonical
+
+    # Graph nodes may carry the canonical DB id alongside an agent/legacy id.
+    # Build the full alias map before classifying operations so parent references
+    # can be canonicalized regardless of node order.
+    for n in raw_nodes:
+        if not isinstance(n, dict):
+            continue
+        identifiers = _ordered_unique_str(
+            value
+            for value in [
+                n.get("component_id"),
+                n.get("node_id"),
+                n.get("id"),
+                n.get("agent_component_id"),
+                n.get("legacy_component_id"),
+                *(n.get("legacy_ids") or []),
+            ]
+            if value
+        )
+        canonical = next(
+            (identifier for identifier in identifiers if identifier in known_component_ids),
+            "",
+        )
+        provenance_candidates = _ordered_unique_str(
+            value
+            for value in (
+                [n.get("representative_component_id")]
+                + list(n.get("linked_component_ids") or [])
+            )
+            if value and str(value) in known_component_ids
+        )
+        if not canonical and len(provenance_candidates) == 1:
+            canonical = provenance_candidates[0]
+        if not known_component_ids and _graph_node_is_component(n, known_component_ids):
+            canonical = str(
+                n.get("component_id") or n.get("node_id") or n.get("id") or ""
+            )
+        if canonical:
+            for identifier in identifiers:
+                alias_to_component[identifier] = canonical
+
+    component_node_ids: set[str] = set()
+    operation_node_ids: set[str] = set()
+    component_nodes: list[dict] = []
+    operation_nodes: list[dict] = []
+    links: list[dict] = []
+
+    def _node_id(n: dict) -> str:
+        return str(n.get("component_id") or n.get("node_id") or n.get("id") or "")
+
+    for n in raw_nodes:
+        if not isinstance(n, dict):
+            continue
+        node_id = _node_id(n)
+        if not node_id:
+            continue
+        canonical_component_id = alias_to_component.get(node_id, "")
+        if not known_component_ids and _graph_node_is_component(n, known_component_ids):
+            canonical_component_id = node_id
+        if canonical_component_id:
+            if canonical_component_id not in component_node_ids:
+                component_node_ids.add(canonical_component_id)
+                legacy_ids = []
+                for value in _ordered_unique_str(
+                    value
+                    for value in [
+                        node_id,
+                        n.get("agent_component_id"),
+                        n.get("legacy_component_id"),
+                        *(n.get("legacy_ids") or []),
+                    ]
+                    if value
+                ):
+                    if value != canonical_component_id:
+                        legacy_ids.append(value)
+                component_nodes.append({
+                    "node_id": canonical_component_id,
+                    "node_type": "component",
+                    "label": n.get("label") or n.get("name") or "",
+                    "component_type": n.get("component_type") or "",
+                    "review_status": n.get("review_status") or "teacher_review_required",
+                    "source_backing_status": n.get("source_backing_status") or "",
+                    "graph_layer": n.get("graph_layer") or "main",
+                    "legacy_ids": legacy_ids,
+                    "member_component_ids": list(n.get("member_component_ids") or []),
+                    "detail_node_ids": list(n.get("detail_node_ids") or []),
+                })
+            # Component → operation links (issue #387): a main node aggregates
+            # equation_detail nodes via member_component_ids / detail_node_ids.
+            for op_id in list(n.get("member_component_ids") or []) + list(n.get("detail_node_ids") or []):
+                if op_id:
+                    links.append({
+                        "component_id": canonical_component_id,
+                        "operation_id": str(op_id),
+                    })
+        else:
+            if node_id in operation_node_ids:
+                continue
+            operation_node_ids.add(node_id)
+            # Generic operation family (issue #398): operation graph nodes expose
+            # a broad, domain-neutral ``operation_family``. A cartridge-/agent-
+            # supplied ``operation_family`` / ``operation_subtype`` /
+            # ``subtype_source`` is PRESERVED (issue #397 — domain terms propagate
+            # as optional subtypes); the deterministic classifier is only a
+            # fallback when the node carries no family yet.
+            classification = _classify_operation_family(n.get("operation") or n.get("label") or "")
+            existing_family = str(n.get("operation_family") or "").strip()
+            operation_family_value = existing_family or classification["operation_family"]
+            if existing_family:
+                operation_subtype_value = n.get("operation_subtype")
+                # Provenance must be honest (issues #390 / #393): an existing
+                # operation_family may come from an agent/core classifier or a
+                # cartridge. When the node did not declare subtype_source we must
+                # NOT assume "cartridge" — that fabricates provenance. Leave it
+                # "unknown" so export validation can flag uncertain subtypes.
+                subtype_source_value = n.get("subtype_source") or "unknown"
+            else:
+                operation_subtype_value = (
+                    n.get("operation_subtype")
+                    if n.get("operation_subtype") is not None
+                    else classification["operation_subtype"]
+                )
+                subtype_source_value = n.get("subtype_source") or classification["subtype_source"]
+            # Merge classification review reasons (e.g. operation_family_unrecognized)
+            # with any reasons already on the node, without duplicates (issue #395/#398).
+            node_review_reasons = list(n.get("review_reasons") or [])
+            for reason in classification["review_reasons"]:
+                if reason not in node_review_reasons:
+                    node_review_reasons.append(reason)
+            review_required_value = bool(
+                n.get("review_required")
+                or classification["review_required"]
+                or not n.get("linked_equation_ids")
+            )
+            if review_required_value and not node_review_reasons:
+                node_review_reasons.append("operation_node_missing_equation_link")
+            raw_parent = str(n.get("parent_component_id") or "")
+            canonical_parent = alias_to_component.get(raw_parent, "")
+            if raw_parent and not canonical_parent:
+                review_required_value = True
+                if "unresolved_parent_component" not in node_review_reasons:
+                    node_review_reasons.append("unresolved_parent_component")
+            operation_nodes.append({
+                "operation_id": node_id,
+                "node_type": "operation",
+                "label": n.get("label") or n.get("visual_label") or "",
+                "operation": n.get("operation") or "",
+                "operation_family": operation_family_value,
+                "operation_subtype": operation_subtype_value,
+                "subtype_source": subtype_source_value,
+                "graph_layer": n.get("graph_layer") or "equation_detail",
+                "source_backing_status": n.get("source_backing_status") or "",
+                "review_status": n.get("review_status") or "teacher_review_required",
+                "review_required": review_required_value,
+                "parent_component_id": canonical_parent,
+                "unresolved_parent_component_id": (
+                    raw_parent if raw_parent and not canonical_parent else ""
+                ),
+                "linked_equation_ids": list(n.get("linked_equation_ids") or []),
+                "linked_derivation_ids": list(n.get("linked_derivation_ids") or []),
+                "review_reasons": node_review_reasons,
+            })
+            if canonical_parent:
+                links.append({
+                    "component_id": canonical_parent,
+                    "operation_id": node_id,
+                })
+
+    component_edges: list[dict] = []
+    operation_edges: list[dict] = []
+    for i, e in enumerate(raw_edges):
+        if not isinstance(e, dict):
+            continue
+        evidence = e.get("evidence") if isinstance(e.get("evidence"), dict) else {}
+        raw_source = str(e.get("source_component_id") or e.get("source") or e.get("from") or "")
+        raw_target = str(e.get("target_component_id") or e.get("target") or e.get("to") or "")
+        source = alias_to_component.get(raw_source, raw_source)
+        target = alias_to_component.get(raw_target, raw_target)
+        edge = {
+            "edge_id": e.get("edge_id") or f"component_edge_{i+1:04d}",
+            "source": source,
+            "target": target,
+            "edge_type": e.get("relation") or e.get("edge_type") or e.get("type") or "RELATED_TO",
+            "support_status": e.get("support_status") or "source_inferred",
+            "evidence_claims": list(evidence.get("evidence_claims") or e.get("evidence_claims") or []),
+            "review_status": e.get("review_status") or "teacher_review_required",
+        }
+        if source in component_node_ids and target in component_node_ids:
+            component_edges.append(edge)
+        else:
+            operation_edges.append({**edge, "edge_id": edge["edge_id"]})
+
+    # De-dup links.
+    seen_links: set[tuple[str, str]] = set()
+    unique_links: list[dict] = []
+    for link in links:
+        if known_component_ids and link["component_id"] not in known_component_ids:
+            continue
+        key = (link["component_id"], link["operation_id"])
+        if key in seen_links:
+            continue
+        seen_links.add(key)
+        unique_links.append(link)
+
+    return {
+        "component_graph": {
+            "graph_schema_version": cg.get("graph_schema_version", "0.1.0"),
+            "nodes": component_nodes,
+            "edges": component_edges,
+        },
+        "operation_graph": {
+            "graph_schema_version": "0.1.0",
+            "nodes": operation_nodes,
+            "edges": operation_edges,
+        },
+        "component_operation_links": unique_links,
     }

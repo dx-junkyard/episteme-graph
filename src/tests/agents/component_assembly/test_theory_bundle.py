@@ -357,6 +357,8 @@ def test_step3_4_5_integration_bundle_separation_and_refined_ids():
             {
                 "equation_id": "eq_final",
                 "role": "result",
+                "confidence": 0.95,
+                "semantic_status": "source_backed",
                 "confidence_policy": {
                     "can_support_claim": True,
                     "can_be_used_in_derivation": True,

@@ -30,6 +30,10 @@ EXPORT_STATUSES = [
     "failed_validation",
 ]
 
+# Issue #432: a result/relation equation with no input links is only acceptable
+# when explicitly justified by one of these link_status values.
+_ALLOWED_NO_INPUT_LINK_STATUSES = {"axiomatic", "external_reference"}
+
 
 @dataclass
 class ValidationEntry:
@@ -38,6 +42,10 @@ class ValidationEntry:
     artifact: str
     path: str | None = None
     source_stage: str | None = None
+    # Issue #418: the concrete entity a finding is about, stored directly so the
+    # revision inventory can resolve it without parsing the JSON ``path``.
+    target_type: str | None = None
+    target_id: str | None = None
 
 
 @dataclass
@@ -78,6 +86,10 @@ def _empty_refinement_validation() -> dict:
         "unchanged_components": [],
         "failed_refinements": [],
         "review_required_refinements": [],
+        # Components whose split was required but were neither split, failed, nor
+        # review_required — a silent contract violation that must hard-block
+        # publish (#421).
+        "unprocessed_split_required": [],
         "unassigned_links": [],
         "dangling_component_refs": [],
         "teaching_granularity_warnings": [],
@@ -107,6 +119,16 @@ def _empty_theory_bundle_validation() -> dict:
     }
 
 
+def _empty_thesis_coverage() -> dict:
+    return {
+        "thesis_present": False,
+        "coverage_by_section": {},
+        "total_refs": 0,
+        "reachable_refs": 0,
+        "unreachable_refs": [],
+    }
+
+
 def _empty_teaching_output_validation() -> dict:
     return {
         "errors": [],
@@ -116,6 +138,66 @@ def _empty_teaching_output_validation() -> dict:
         "blueprint_refs_valid": True,
         "blackbox_policy_respects_confidence": True,
     }
+
+
+def _empty_document_completeness() -> dict:
+    # Document ingest completeness report (issue #366): aggregated per-document.
+    return {
+        "checked": False,
+        "all_documents_complete": True,
+        "documents": [],
+    }
+
+
+# Equation reconstruction fidelity reason codes (issue #368). Aggregated per
+# type with target ids + artifact paths in equation_fidelity.
+_EQUATION_FIDELITY_CODES = [
+    "latex_is_prose",
+    "invalid_equation_label",
+    "table_derived_equation_candidate",
+    "nonequation_id_in_links",
+    "symbol_loss_unverifiable",
+]
+
+
+def _empty_equation_fidelity() -> dict:
+    return {
+        "checked": False,
+        "total": 0,
+        "issue_counts": {code: 0 for code in _EQUATION_FIDELITY_CODES},
+        "issues": {code: [] for code in _EQUATION_FIDELITY_CODES},
+    }
+
+
+def _load_completeness_analyzer():
+    """Resolve analyze_document_completeness robustly (issue #366).
+
+    This module is imported both as part of the ``core.document_pipeline``
+    package (production) and as a standalone file via spec_from_file_location
+    (unit tests), where relative imports have no parent package. Try both, then
+    fall back to loading the sibling file directly by path.
+    """
+    try:
+        from .completeness import analyze_document_completeness
+        return analyze_document_completeness
+    except Exception:
+        pass
+    try:
+        from core.document_pipeline.completeness import analyze_document_completeness
+        return analyze_document_completeness
+    except Exception:
+        pass
+    try:
+        import importlib.util
+        import os
+
+        path = os.path.join(os.path.dirname(__file__), "completeness.py")
+        spec = importlib.util.spec_from_file_location("_dp_completeness", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.analyze_document_completeness
+    except Exception:
+        return None
 
 
 @dataclass
@@ -138,6 +220,16 @@ class ExportValidationResult:
     theory_bundle_validation: dict = field(default_factory=_empty_theory_bundle_validation)
     # TeachingOutputMapper Step 5 reporting (issue #326).
     teaching_output_validation: dict = field(default_factory=_empty_teaching_output_validation)
+    # Thesis coverage report (issue #354): is the central thesis (and each
+    # support_structure section) actually backed by the exported main graph?
+    thesis_coverage: dict = field(default_factory=_empty_thesis_coverage)
+    # Document ingest completeness report (issue #366): did the source ingest
+    # capture the whole document (equations / terminal section / page coverage)?
+    document_completeness: dict = field(default_factory=_empty_document_completeness)
+    # Equation reconstruction fidelity report (issue #368): per-type counts,
+    # target equation/candidate ids and artifact paths for the fine-grained
+    # PDF math quality problems.
+    equation_fidelity: dict = field(default_factory=_empty_equation_fidelity)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -190,11 +282,106 @@ _HARD_ERROR_STAGES = {
     "dsl_linking",
     "claim_object_builder",
     "evidence_registry",
+    # ComponentGraphValidator errors (dependency cycles, equation-id labels,
+    # fallback nodes marked source_backed, ...) are design-level hard errors
+    # and must stop persist (#358 review fix).
+    "component_graph",
+}
+
+# Rule IDs kept as warnings even when their stage is a hard-error stage.
+# component_graph_failed marks the orchestrator's non-fatal stage fallback
+# (the agent crashed and an empty graph was substituted); escalating it would
+# turn a designed-to-be-non-fatal stage failure into a pipeline abort.
+_SOFT_ERROR_RULE_IDS = {
+    "component_graph_failed",
 }
 
 # Claim types representing the paper's main result / central conclusion (#312).
 # A non-atomic main-result claim is a paper-level summary, not a usable claim.
 _MAIN_RESULT_CLAIM_TYPES = {"result", "conclusion", "main_result"}
+
+# Issue #433: controlled vocabulary a derivation step ``operation`` must belong
+# to. Single source of truth is derivation_chain.schema.CONTROLLED_OPERATIONS;
+# imported when available with a hardcoded mirror as a fallback so the gate never
+# fails to load if the agents package is not importable.
+try:  # pragma: no cover - import wiring
+    from episteme_graph.agents.derivation_chain.schema import (
+        CONTROLLED_OPERATIONS as _DERIVATION_CONTROLLED_OPERATIONS,
+    )
+    _DERIVATION_CONTROLLED_OPERATIONS = set(_DERIVATION_CONTROLLED_OPERATIONS)
+except Exception:  # pragma: no cover - fallback mirror
+    _DERIVATION_CONTROLLED_OPERATIONS = {
+        "state_assumption", "apply_definition", "apply_criterion",
+        "introduce_observable", "apply_equation", "substitute",
+        "solve_linear_system", "eliminate_parameter", "normalize", "approximate",
+        "compare", "branch_on_condition", "apply_measurement_or_update",
+        "apply_non_disturbance_or_independence", "infer_intermediate_claim",
+        "infer_conclusion", "flag_limitation", "define", "relate", "transform",
+        "derive_result", "apply_constraint", "linearize", "eliminate", "solve",
+        "constrain", "integrate", "eliminate_variable",
+    }
+
+# Step review states that count as "flagged for review" — an out-of-vocabulary
+# operation is tolerated (review item, not hard error) when the step is flagged.
+_DERIVATION_REVIEW_STATES = {"teacher_review_required", "needs_verification"}
+
+# Issue #439: controlled vocabulary for an equation's role in the argument, and
+# a free-symbol extractor, sourced from the agents package when importable with a
+# hardcoded mirror so the gate never fails to load.
+try:  # pragma: no cover - import wiring
+    from episteme_graph.agents.equation_semantics.schema import (
+        ROLE_IN_ARGUMENT_VOCAB as _EQUATION_ROLE_VOCAB,
+        extract_free_symbols as _extract_free_symbols,
+    )
+    _EQUATION_ROLE_VOCAB = set(_EQUATION_ROLE_VOCAB)
+except Exception:  # pragma: no cover - fallback mirror
+    _EQUATION_ROLE_VOCAB = {"premise", "definition", "derived", "result", "constraint"}
+
+    def _extract_free_symbols(latex):  # type: ignore[misc]
+        if not latex:
+            return set()
+        text = re.sub(r"\\[A-Za-z]+", " ", str(latex))
+        return {ch for token in re.findall(r"[A-Za-z]+", text) for ch in token}
+
+# Issue #441: controlled vocabulary a DSL edge's edge_type must belong to.
+try:  # pragma: no cover - import wiring
+    from episteme_graph.agents.dsl_linking.schema import (
+        EDGE_TYPE_VOCAB as _DSL_EDGE_TYPE_VOCAB,
+    )
+    _DSL_EDGE_TYPE_VOCAB = set(_DSL_EDGE_TYPE_VOCAB)
+except Exception:  # pragma: no cover - fallback mirror
+    _DSL_EDGE_TYPE_VOCAB = {
+        "REQUIRES", "PRODUCES", "TRANSFORMS", "DEFINES", "MEASURES",
+        "CONTAINS", "CORRELATES", "CAUSES", "INHIBITS", "EQUIVALENT",
+    }
+
+# Issue #443: shared reference resolution — membership after normalization only,
+# never name-pattern branching. Single source of truth in agents.ref_resolution.
+try:  # pragma: no cover - import wiring
+    from episteme_graph.agents.ref_resolution import (
+        detect_field_alias_conflicts as _detect_field_alias_conflicts,
+        id_set as _id_set_helper,
+        normalize_ref as _normalize_ref_for_gate,
+    )
+except Exception:  # pragma: no cover - fallback mirror
+    def _normalize_ref_for_gate(ref):
+        text = str(ref or "").strip()
+        if text.count(":") == 1:
+            prefix, _, rest = text.partition(":")
+            if prefix and rest:
+                return rest
+        return text
+
+    def _id_set_helper(ids):
+        return {_normalize_ref_for_gate(v) for v in (ids or []) if _normalize_ref_for_gate(v)}
+
+    def _detect_field_alias_conflicts(obj, field_map=None):
+        return []
+
+
+def _ref_id_set_for_gate(ids) -> set:
+    """Normalized id-set helper used by the gate's membership checks (#443)."""
+    return _id_set_helper(ids)
 
 
 def _ordered_unique(values) -> list:
@@ -367,6 +554,35 @@ class ExportValidationGate:
         # 2. Equation consistency reporting
         self._check_equation_consistency_mismatches(artifacts, review_items, warnings)
         self._check_derivation_equation_confidence(artifacts, warnings, errors)
+        # 2b. Equation reconstruction fidelity reporting (issue #368): per-type
+        # counts + target ids + artifact paths for the fine-grained PDF math
+        # quality problems (prose LaTeX, invalid label, table-derived candidate,
+        # non-equation I/O link, unverifiable symbol loss).
+        equation_fidelity = self._check_equation_fidelity(
+            artifacts, review_items, warnings
+        )
+        # 2b-2. Equation self-describing report (issue #439): an equation with
+        # free symbols in its (trusted) LaTeX must carry symbol descriptions, and
+        # its role_in_argument must belong to the controlled vocabulary. Reported
+        # as warnings — equation_semantics is a soft stage.
+        self._check_equation_self_describing(artifacts, warnings)
+        # 2c. Candidate→registry promotion invariant (issue #431): every accepted
+        # equation candidate must be present in the equation registry. This is a
+        # hard publish blocker enforced directly by the gate so it is independent
+        # of the equation_semantics soft-stage error downgrade. Detection is a
+        # pure ID-set difference — no branching on labels/formula text/domain.
+        self._check_accepted_equations_registered(artifacts, errors)
+        # 2d. Inter-equation link integrity (issue #432): links must resolve to
+        # real registry equations and carry link_provenance; result/relation
+        # equations must have at least one input link or an allowed link_status
+        # (axiomatic / external_reference). Domain-agnostic — only ID resolution,
+        # provenance presence, and link_status are checked.
+        self._check_equation_link_integrity(artifacts, errors, review_items)
+        # 2e. Derivation step structural constraints (issue #433): every step
+        # needs non-empty endpoints, all referenced equations must be registered,
+        # the operation must be in the controlled vocabulary (or the step flagged
+        # for review), and at least one source_evidence_id must be present.
+        self._check_derivation_step_constraints(artifacts, errors, review_items)
 
         # 3. Cross-artifact ID validation
         if component_result and claim_objects and evidence:
@@ -400,13 +616,25 @@ class ExportValidationGate:
 
         # 4. DSL graph edge completeness
         if dsl:
-            self._check_dsl_edges(dsl, errors, warnings)
+            self._check_dsl_edges(
+                dsl, artifacts, claim_objects, evidence, errors, warnings
+            )
+            # 4b. Thesis traversal anchor (issue #442): when there is a graph to
+            # traverse, the thesis_reconstruction artifact must exist and its
+            # anchor nodes must resolve to reachable graph nodes.
+            self._check_thesis_artifact(artifacts, dsl, errors, review_items)
 
         # 5. Component graph export structure
-        self._check_component_graph_artifact(artifacts, errors, warnings)
+        self._check_component_graph_artifact(
+            artifacts, component_result, errors, warnings
+        )
 
         # 6. Required artifact presence
         self._check_required_artifacts(artifacts, errors)
+
+        # 6a. Field-alias duplication (issue #443): a same-concept field must not
+        # be emitted under multiple alias names with conflicting values.
+        self._check_field_alias_duplicates(artifacts, warnings)
 
         # 6b. provisional claim ref leakage (#340): equation_semantics /
         # derivation_chain must not carry claim refs that are absent from the
@@ -458,6 +686,35 @@ class ExportValidationGate:
             component_result, errors, warnings, review_items
         )
 
+        # 7g-0. graph health checks (#358): claim↔equation link symmetry and
+        # equation role conflicts across stages. Warnings only — the demotion
+        # itself (primary link → inferred_*) happens upstream in the pipeline;
+        # the gate keeps both demoted and still-asymmetric links visible.
+        if claim_objects is not None:
+            self._check_claim_equation_link_symmetry(
+                claim_objects, artifacts, warnings
+            )
+        if component_result is not None:
+            self._check_equation_role_conflicts(
+                component_result, artifacts, warnings
+            )
+
+        # 7g. thesis coverage reporting (#354): verify each claim / equation the
+        # reconstructed thesis references is still present in the final claim /
+        # equation sets and is reachable from a main-layer graph node. Coverage
+        # gaps are review items (never hard errors).
+        thesis_coverage = self._check_thesis_coverage(
+            artifacts, component_result, claim_objects, review_items
+        )
+
+        # 7h. document completeness gate (#366): a truncated ingest (missing
+        # equations, no Conclusion, low page coverage) at the DocumentStructure /
+        # EvidenceRegistry exit. Reported as warnings so the run stays exportable
+        # for review but is never promoted to publish_ready.
+        document_completeness = self._check_document_completeness(
+            artifacts, warnings
+        )
+
         # 6. Determine status
         summary = ValidationSummary(
             error_count=len(errors),
@@ -496,11 +753,187 @@ class ExportValidationGate:
             derivation_graph_alignment=derivation_graph_alignment,
             theory_bundle_validation=theory_bundle_validation,
             teaching_output_validation=teaching_output_validation,
+            thesis_coverage=thesis_coverage,
+            document_completeness=document_completeness,
+            equation_fidelity=equation_fidelity,
         )
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _check_document_completeness(self, artifacts: dict, warnings: list) -> dict:
+        """Deterministic ingest-completeness check at the structure exit (#366).
+
+        Runs the shared completeness analysis on the document_structure (and
+        evidence_registry) artifacts. Each incomplete document adds warnings so
+        the run cannot be promoted to publish_ready while its central results may
+        be missing. Never a hard error.
+        """
+        structure = artifacts.get("document_structure")
+        if not isinstance(structure, dict) or not structure:
+            return _empty_document_completeness()
+        evidence = artifacts.get("evidence_registry")
+        document_id = str(structure.get("document_id") or "")
+
+        # Prefer the report the orchestrator already computed at the stage exit;
+        # only recompute if it is absent (e.g. legacy / partial runs). The
+        # orchestrator runs before equation_semantics, so equation-artifact
+        # coverage (#416) is computed/refreshed here where all artifacts exist.
+        equations = artifacts.get("equation_semantics")
+        report = artifacts.get("document_completeness")
+        if not isinstance(report, dict) or not report:
+            analyze_document_completeness = _load_completeness_analyzer()
+            if analyze_document_completeness is None:
+                return _empty_document_completeness()
+            report = analyze_document_completeness(
+                structure,
+                evidence if isinstance(evidence, dict) else None,
+                document_id=document_id,
+                equations=equations if isinstance(equations, dict) else None,
+            )
+        else:
+            report = self._refresh_equation_artifact_coverage(
+                report, structure, equations, document_id=document_id
+            )
+
+        result = _empty_document_completeness()
+        result["checked"] = True
+        result["all_documents_complete"] = bool(report.get("complete", True))
+        result["documents"] = [report]
+
+        if report.get("complete", True):
+            return result
+
+        eq = report.get("equation_label_continuity") or {}
+        ingest = report.get("ingest_coverage") or {}
+        if eq.get("missing_labels"):
+            warnings.append(ValidationEntry(
+                code="DOCUMENT_EQUATION_LABEL_DISCONTINUITY",
+                message=(
+                    f"document {document_id!r} is missing equation labels "
+                    f"{eq.get('missing_labels')}"
+                ),
+                artifact="document_structure",
+                path="$.completeness.equation_label_continuity",
+                source_stage="export_validation",
+            ))
+        if report.get("terminal_section", {}).get("missing"):
+            warnings.append(ValidationEntry(
+                code="DOCUMENT_TERMINAL_SECTION_MISSING",
+                message=(
+                    f"document {document_id!r} has no terminal (Conclusion/Summary) "
+                    "section; ingest may be truncated"
+                ),
+                artifact="document_structure",
+                path="$.completeness.terminal_section",
+                source_stage="export_validation",
+            ))
+        if not ingest.get("sufficient", True):
+            warnings.append(ValidationEntry(
+                code="DOCUMENT_INGEST_INCOMPLETE",
+                message=(
+                    f"document {document_id!r} ingest did not reach the document end: "
+                    f"last ingested page {ingest.get('last_ingested_page')} of "
+                    f"{ingest.get('pages_total')}; trailing un-ingested ranges "
+                    f"{ingest.get('trailing_uningested_page_ranges')}"
+                ),
+                artifact="document_structure",
+                path="$.completeness.ingest_coverage",
+                source_stage="export_validation",
+            ))
+        tail = report.get("tail_truncation") or {}
+        if tail.get("suspected"):
+            warnings.append(ValidationEntry(
+                code="DOCUMENT_TAIL_TRUNCATION_SUSPECTED",
+                message=(
+                    f"document {document_id!r} tail truncation suspected "
+                    f"(confidence {tail.get('confidence')}); signals "
+                    f"{tail.get('signals')}"
+                ),
+                artifact="document_structure",
+                path="$.completeness.tail_truncation",
+                source_stage="export_validation",
+            ))
+        coverage = report.get("equation_artifact_coverage") or {}
+        if not coverage.get("complete", True):
+            warnings.append(ValidationEntry(
+                code="DOCUMENT_EQUATION_ARTIFACT_COVERAGE_INCOMPLETE",
+                message=(
+                    f"document {document_id!r} equation artifact coverage is "
+                    f"incomplete: TeX display math blocks "
+                    f"{coverage.get('tex_display_math_blocks')}, candidates "
+                    f"{coverage.get('equation_candidate_count')}, records "
+                    f"{coverage.get('equation_record_count')}; reasons "
+                    f"{coverage.get('review_reasons')}"
+                ),
+                artifact="equation_semantics",
+                path="$.completeness.equation_artifact_coverage",
+                source_stage="export_validation",
+            ))
+        return result
+
+    @staticmethod
+    def _refresh_equation_artifact_coverage(
+        report: dict,
+        structure: dict,
+        equations: Any,
+        *,
+        document_id: str,
+    ) -> dict:
+        """Recompute equation-artifact coverage on a precomputed report (#416).
+
+        The orchestrator computes ``document_completeness`` before
+        equation_semantics runs, so its coverage block is empty/stale. Here, where
+        the equation artifacts exist, the coverage is recomputed and folded back
+        into ``complete`` / ``review_reasons`` without disturbing the other checks.
+        """
+        if not isinstance(report, dict):
+            return report
+        try:
+            from .completeness import analyze_equation_artifact_coverage
+        except Exception:  # pragma: no cover - import resilience
+            try:
+                from core.document_pipeline.completeness import (
+                    analyze_equation_artifact_coverage,
+                )
+            except Exception:
+                return report
+        metadata = structure.get("metadata") if isinstance(structure, dict) else {}
+        pages_total = metadata.get("pages") if isinstance(metadata, dict) else None
+        tex_source = None
+        tex_inventory = None
+        if isinstance(metadata, dict):
+            tex_source = metadata.get("tex_source") or metadata.get("source_tex")
+            # Issue #420: prefer the inventory persisted at ingest when the raw
+            # source is not carried on the structure.
+            tex_inventory = metadata.get("tex_equation_inventory")
+        if tex_source is None and isinstance(structure, dict):
+            tex_source = structure.get("tex_source") or structure.get("source_tex")
+        coverage = analyze_equation_artifact_coverage(
+            structure,
+            equations if isinstance(equations, dict) else None,
+            tex_source=tex_source,
+            pages_total=pages_total,
+            tex_inventory=tex_inventory,
+        )
+        report = dict(report)
+        report["equation_artifact_coverage"] = coverage
+        # Reconcile bidirectionally (#420): the orchestrator computes the report
+        # before equation_semantics, so its coverage is stale (record_count=0 →
+        # equation_artifact_coverage_incomplete). When the refreshed coverage is
+        # now complete, the stale reason must be REMOVED and ``complete``
+        # recomputed from the remaining reasons — otherwise a normal TeX document
+        # stays permanently incomplete. Other failure reasons are preserved.
+        reasons = [
+            r for r in (report.get("review_reasons") or [])
+            if r != "equation_artifact_coverage_incomplete"
+        ]
+        if not coverage.get("complete", True):
+            reasons.append("equation_artifact_coverage_incomplete")
+        report["review_reasons"] = reasons
+        report["complete"] = not reasons
+        return report
 
     def _aggregate_artifact_issues(
         self,
@@ -531,13 +964,15 @@ class ExportValidationGate:
                     artifact=stage,
                     path=path,
                     source_stage=stage,
+                    target_type=issue.get("target_type"),
+                    target_id=issue.get("target_id"),
                 )
 
                 if code in _NEEDS_REVIEW_RULE_IDS:
                     review_items.append(entry)
                 elif code in _FORCED_ERROR_RULE_IDS:
                     errors.append(entry)
-                elif severity == _SEVERITY_ERROR and (
+                elif severity == _SEVERITY_ERROR and code not in _SOFT_ERROR_RULE_IDS and (
                     stage in _HARD_ERROR_STAGES or code in _HARD_ERROR_RULE_IDS
                 ):
                     errors.append(entry)
@@ -618,23 +1053,35 @@ class ExportValidationGate:
                     ))
 
             dsl_refs = refs.get("dsl_refs") or {}
-            for nid in dsl_refs.get("node_ids") or []:
-                if known_dsl_node_ids and nid not in known_dsl_node_ids:
+            dsl_node_refs = _ordered_unique(
+                list(dsl_refs.get("node_ids") or [])
+                + list(getattr(component, "linked_dsl_node_ids", []) or [])
+            )
+            for nid in dsl_node_refs:
+                if nid not in known_dsl_node_ids:
                     errors.append(ValidationEntry(
                         code="UNRESOLVED_DSL_NODE_ID",
                         message=f"component {comp_id!r} references missing DSL node {nid!r}",
                         artifact="component_assembly",
                         path=f"$.components[{comp_id}].evidence_refs.dsl_refs.node_ids",
                         source_stage="export_validation",
+                        target_type="dsl_node",
+                        target_id=str(nid),
                     ))
-            for eid in dsl_refs.get("edge_ids") or []:
-                if known_dsl_edge_ids and eid not in known_dsl_edge_ids:
+            dsl_edge_refs = _ordered_unique(
+                list(dsl_refs.get("edge_ids") or [])
+                + list(getattr(component, "linked_dsl_edge_ids", []) or [])
+            )
+            for eid in dsl_edge_refs:
+                if eid not in known_dsl_edge_ids:
                     errors.append(ValidationEntry(
                         code="UNRESOLVED_DSL_EDGE_ID",
                         message=f"component {comp_id!r} references missing DSL edge {eid!r}",
                         artifact="component_assembly",
                         path=f"$.components[{comp_id}].evidence_refs.dsl_refs.edge_ids",
                         source_stage="export_validation",
+                        target_type="dsl_edge",
+                        target_id=str(eid),
                     ))
 
             # Warn on summary-only (no claim or evidence)
@@ -975,6 +1422,26 @@ class ExportValidationGate:
                 artifact="component_assembly",
                 path=f"$.component_refinement[{original_id}]",
                 source_stage="export_validation",
+                target_type="component",
+                target_id=str(original_id),
+            ))
+
+        # A component whose split was required but was left unprocessed (neither
+        # split, failed, nor review_required) is a silent contract violation
+        # (#421): it must be a hard error so it can never reach publish-ready.
+        for original_id in result["unprocessed_split_required"]:
+            errors.append(ValidationEntry(
+                code="COMPONENT_REFINEMENT_REQUIRED_BUT_UNPROCESSED",
+                message=(
+                    f"component {original_id!r} requires a split but was left "
+                    "unprocessed (not split, failed, or review_required); it "
+                    "cannot be published in this state"
+                ),
+                artifact="component_assembly",
+                path="$.component_refinement.refinement_validation.unprocessed_split_required",
+                source_stage="export_validation",
+                target_type="component",
+                target_id=str(original_id),
             ))
 
         for entry in result["dangling_component_refs"]:
@@ -989,6 +1456,8 @@ class ExportValidationGate:
                 artifact="component_assembly",
                 path=f"$.component_refinement.component_graph_updates.unresolved_edges",
                 source_stage="export_validation",
+                target_type="component",
+                target_id=str(owner),
             ))
 
         for entry in result["unassigned_links"]:
@@ -1019,6 +1488,8 @@ class ExportValidationGate:
                 artifact="component_assembly",
                 path=f"$.component_refinement[{original_id}]",
                 source_stage="export_validation",
+                target_type="component",
+                target_id=str(original_id),
             ))
 
         return result
@@ -1266,19 +1737,24 @@ class ExportValidationGate:
         errors: list,
         warnings: list,
     ) -> None:
-        """Verify CourseMapping topics reference real component IDs."""
-        known_component_ids: set[str] = {
-            c.component_id
-            for c in (getattr(component_result, "components", []) or [])
+        """Verify CourseMapping topics reference real component IDs (#418)."""
+        components = list(getattr(component_result, "components", []) or [])
+        known_component_ids: set[str] = {c.component_id for c in components}
+        # Per-component derivation links, used to verify topic→derivation relevance.
+        component_derivations: dict[str, set[str]] = {
+            c.component_id: {str(d) for d in (getattr(c, "linked_derivation_ids", []) or [])}
+            for c in components
         }
+
+        def _topic_attr(topic, name):
+            if isinstance(topic, dict):
+                return topic.get(name) or []
+            return getattr(topic, name, []) or []
+
         topics = getattr(course_mapping, "topics", []) or []
         if isinstance(topics, list):
             for idx, topic in enumerate(topics):
-                linked = []
-                if isinstance(topic, dict):
-                    linked = topic.get("linked_component_ids") or []
-                else:
-                    linked = getattr(topic, "linked_component_ids", []) or []
+                linked = _topic_attr(topic, "linked_component_ids")
                 for comp_id in linked:
                     if known_component_ids and comp_id not in known_component_ids:
                         errors.append(ValidationEntry(
@@ -1287,7 +1763,28 @@ class ExportValidationGate:
                             artifact="course_mapping",
                             path=f"$.topics[{idx}].linked_component_ids",
                             source_stage="export_validation",
-                    ))
+                            target_type="component",
+                            target_id=str(comp_id),
+                        ))
+                # Issue #418: a topic may only link derivations that belong to one
+                # of its linked components; an unrelated derivation link is flagged.
+                relevant_derivations: set[str] = set()
+                for comp_id in linked:
+                    relevant_derivations |= component_derivations.get(comp_id, set())
+                for der_id in _topic_attr(topic, "linked_derivation_ids"):
+                    if str(der_id) not in relevant_derivations:
+                        warnings.append(ValidationEntry(
+                            code="COURSE_TOPIC_UNRELATED_DERIVATION",
+                            message=(
+                                f"course topic [{idx}] links derivation {der_id!r} that is "
+                                "not connected to any of the topic's components"
+                            ),
+                            artifact="course_mapping",
+                            path=f"$.topics[{idx}].linked_derivation_ids",
+                            source_stage="export_validation",
+                            target_type="derivation",
+                            target_id=str(der_id),
+                        ))
 
     @staticmethod
     def _component_equation_refs(component, refs: dict) -> list[str]:
@@ -1378,17 +1875,42 @@ class ExportValidationGate:
             and extraction_status in ("partial", "fragment_only", "label_only", "missing", "unparsed")
         )
 
-    # Provisional / pre-canonical claim ID patterns (issue #340). Mirrors the
-    # export-side _LEGACY_REF_PATTERNS so the pipeline catches the same leaks.
-    _PROVISIONAL_CLAIM_REF_PATTERNS = (
-        re.compile(r"^claim_span_"),
-        re.compile(r"^claim:[^:]+:[^:]+$"),
-        re.compile(r"^claim::"),
-    )
+    def _check_field_alias_duplicates(self, artifacts: dict, warnings: list) -> None:
+        """Flag same-concept fields emitted under conflicting alias names (#443).
 
-    @classmethod
-    def _looks_provisional_claim_ref(cls, ref: str) -> bool:
-        return any(p.match(ref) for p in cls._PROVISIONAL_CLAIM_REF_PATTERNS)
+        Domain-agnostic: uses the shared canonical-field map, so no field name is
+        hardcoded here. A conflict means two alias fields for one concept both
+        carry different non-empty values.
+        """
+        sources = (
+            ("component_assembly", "components", "component_id", "components/components.json"),
+            ("claim_object_builder", "claims", "claim_id", "claims/claims.json"),
+            ("equation_semantics", "equations", "equation_id", "equations/equations.json"),
+        )
+        for stage, list_key, id_key, artifact_name in sources:
+            artifact = artifacts.get(stage)
+            if not isinstance(artifact, dict):
+                continue
+            items = artifact.get(list_key)
+            if not isinstance(items, list):
+                continue
+            for idx, item in enumerate(items):
+                if not isinstance(item, dict):
+                    continue
+                for conflict in _detect_field_alias_conflicts(item):
+                    warnings.append(ValidationEntry(
+                        code="FIELD_ALIAS_DUPLICATE",
+                        message=(
+                            f"{list_key}[{idx}] emits concept {conflict['concept']!r} under "
+                            f"both {conflict['canonical']!r} and alias {conflict['alias']!r} "
+                            "with conflicting values"
+                        ),
+                        artifact=artifact_name,
+                        path=f"$.{list_key}[{idx}].{conflict['alias']}",
+                        source_stage="export_validation",
+                        target_type=stage,
+                        target_id=str(item.get(id_key) or ""),
+                    ))
 
     def _check_unresolved_claim_refs(
         self,
@@ -1396,34 +1918,30 @@ class ExportValidationGate:
         claim_objects,
         warnings: list,
     ) -> None:
-        """Report claim refs in equations / derivations absent from claims.json (#340).
+        """Report claim refs in equations / derivations absent from claims.json (#340/#443).
 
         The claim_object_builder stage is the source of truth for claim IDs. Any
         claim ref carried by equation_semantics or derivation_chain that is not in
-        the final claim set (or that still looks provisional) indicates a broken
-        artifact ID contract. These are surfaced as warnings so they show up in
+        the final claim set indicates a broken artifact ID contract. Membership is
+        judged by set membership after normalization only (issue #443) — never by
+        whether the id "looks provisional". Surfaced as warnings so they appear in
         export_validation review metadata without blocking persist.
         """
-        final_claim_ids = {
+        final_claim_ids = _ref_id_set_for_gate(
             str(getattr(c, "claim_id", "") or "")
             for c in (getattr(claim_objects, "claims", []) or [])
             if getattr(c, "claim_id", None)
-        }
+        )
 
         def report(refs, artifact: str, path: str) -> None:
             for ref in refs or []:
                 ref_id = str(ref)
                 if not ref_id:
                     continue
-                if ref_id in final_claim_ids:
+                if _normalize_ref_for_gate(ref_id) in final_claim_ids:
                     continue
-                provisional = self._looks_provisional_claim_ref(ref_id)
                 warnings.append(ValidationEntry(
-                    code=(
-                        "PROVISIONAL_CLAIM_REF_IN_ARTIFACT"
-                        if provisional
-                        else "UNRESOLVED_CLAIM_REF_IN_ARTIFACT"
-                    ),
+                    code="UNRESOLVED_CLAIM_REF_IN_ARTIFACT",
                     message=(
                         f"{path} references claim {ref_id!r} which is not in the final "
                         "claims.json claim set"
@@ -1508,6 +2026,129 @@ class ExportValidationGate:
                         source_stage="export_validation",
                     ))
 
+    def _check_derivation_step_constraints(
+        self,
+        artifacts: dict,
+        errors: list,
+        review_items: list,
+    ) -> None:
+        """Enforce generic structural constraints on derivation steps (issue #433).
+
+        Domain-agnostic invariants, asserting nothing about paper-specific chain
+        structure:
+
+          - ``DERIVATION_STEP_MISSING_ENDPOINT`` (hard error): a step with no
+            input endpoint (equation or claim) or no output endpoint.
+          - ``DERIVATION_STEP_DANGLING_EQUATION_REF`` (hard error): an
+            input/output equation id absent from the equation registry.
+          - ``DERIVATION_STEP_UNCONTROLLED_OPERATION``: an ``operation`` outside
+            the controlled vocabulary. A hard error when the step is not flagged
+            for review; a review item when it is (the domain-specific name should
+            live in ``operation_subtype``).
+          - ``DERIVATION_STEP_MISSING_EVIDENCE`` (review item): no
+            ``source_evidence_id`` on the step.
+        """
+        raw = artifacts.get("derivation_chain")
+        if not isinstance(raw, dict):
+            return
+        chains = raw.get("chains")
+        if not isinstance(chains, list):
+            return
+        registry_ids = set(self._equation_index_from_artifacts(artifacts).keys())
+
+        for chain in chains:
+            if not isinstance(chain, dict):
+                continue
+            deriv_id = str(chain.get("derivation_id") or "")
+            for step in chain.get("steps") or []:
+                if not isinstance(step, dict):
+                    continue
+                step_id = str(step.get("step_id") or "")
+                target = f"{deriv_id}:{step_id}" if deriv_id else step_id
+                base_path = f"$.chains[{deriv_id}].steps[{step_id}]"
+
+                in_eq = [str(x) for x in (step.get("input_equation_ids") or []) if x]
+                out_eq = [str(x) for x in (step.get("output_equation_ids") or []) if x]
+                in_claim = [
+                    str(x) for x in (
+                        list(step.get("input_claim_ids") or [])
+                        + list(step.get("required_claim_ids") or [])
+                    ) if x
+                ]
+                out_claim = [str(x) for x in (step.get("output_claim_ids") or []) if x]
+
+                # (a) endpoints — every step needs an input and an output side.
+                if not (in_eq or in_claim) or not (out_eq or out_claim):
+                    errors.append(ValidationEntry(
+                        code="DERIVATION_STEP_MISSING_ENDPOINT",
+                        message=(
+                            f"derivation step {target!r} is missing an input or "
+                            f"output endpoint (equation or claim)"
+                        ),
+                        artifact="derivation_chain",
+                        path=base_path,
+                        source_stage="export_validation",
+                        target_type="derivation_step",
+                        target_id=target,
+                    ))
+
+                # (b) dangling equation references.
+                if registry_ids:
+                    for ref in in_eq + out_eq:
+                        if ref not in registry_ids:
+                            errors.append(ValidationEntry(
+                                code="DERIVATION_STEP_DANGLING_EQUATION_REF",
+                                message=(
+                                    f"derivation step {target!r} references "
+                                    f"non-existent equation {ref!r}"
+                                ),
+                                artifact="derivation_chain",
+                                path=base_path,
+                                source_stage="export_validation",
+                                target_type="derivation_step",
+                                target_id=target,
+                            ))
+
+                # (c) controlled operation vocabulary.
+                operation = str(step.get("operation") or "")
+                if operation not in _DERIVATION_CONTROLLED_OPERATIONS:
+                    flagged = (
+                        str(step.get("review_status") or "") in _DERIVATION_REVIEW_STATES
+                        or bool(step.get("review_reason"))
+                    )
+                    entry = ValidationEntry(
+                        code="DERIVATION_STEP_UNCONTROLLED_OPERATION",
+                        message=(
+                            f"derivation step {target!r} operation "
+                            f"{operation or 'unset'!r} is not in the controlled "
+                            f"vocabulary; domain-specific names belong in "
+                            f"operation_subtype"
+                        ),
+                        artifact="derivation_chain",
+                        path=f"{base_path}.operation",
+                        source_stage="export_validation",
+                        target_type="derivation_step",
+                        target_id=target,
+                    )
+                    if flagged:
+                        review_items.append(entry)
+                    else:
+                        errors.append(entry)
+
+                # (d) evidence presence.
+                if not (step.get("source_evidence_ids") or []):
+                    review_items.append(ValidationEntry(
+                        code="DERIVATION_STEP_MISSING_EVIDENCE",
+                        message=(
+                            f"derivation step {target!r} has no source_evidence_id"
+                        ),
+                        artifact="derivation_chain",
+                        path=f"{base_path}.source_evidence_ids",
+                        source_stage="export_validation",
+                        target_type="derivation_step",
+                        target_id=target,
+                    ))
+
     def _check_equation_consistency_mismatches(
         self,
         artifacts: dict,
@@ -1545,15 +2186,461 @@ class ExportValidationGate:
             else:
                 warnings.append(entry)
 
+    def _check_equation_fidelity(
+        self,
+        artifacts: dict,
+        review_items: list,
+        warnings: list,
+    ) -> dict:
+        """Aggregate equation reconstruction fidelity problems (issue #368).
+
+        Scans the equation_semantics artifact (accepted equations + candidates)
+        for the deterministic fidelity reason codes, producing per-type counts,
+        the target equation/candidate ids and the artifact path for each. The
+        underlying blocking (confidence_policy / equation_consistency) is decided
+        upstream; this is the cross-artifact observability report.
+
+        Codes that block confirmed downstream use are surfaced as review_items;
+        normalized / removed values (invalid_equation_label,
+        nonequation_id_in_links) are surfaced as warnings.
+        """
+        report = _empty_equation_fidelity()
+        raw = artifacts.get("equation_semantics")
+        if not isinstance(raw, dict):
+            return report
+        report["checked"] = True
+
+        # code -> bucket ("review_items" | "warnings")
+        bucket_for = {
+            "latex_is_prose": "review_items",
+            "table_derived_equation_candidate": "review_items",
+            "symbol_loss_unverifiable": "review_items",
+            "invalid_equation_label": "warnings",
+            "nonequation_id_in_links": "warnings",
+        }
+
+        def _record(code: str, target_kind: str, target_id: str, path: str) -> None:
+            if code not in report["issues"]:
+                return
+            report["issues"][code].append({
+                target_kind: target_id,
+                "artifact": "equation_semantics",
+                "path": path,
+            })
+            report["issue_counts"][code] += 1
+            report["total"] += 1
+            entry = ValidationEntry(
+                code=f"EQUATION_FIDELITY_{code.upper()}",
+                message=f"equation_semantics {target_kind} {target_id!r}: {code}",
+                artifact="equation_semantics",
+                path=path,
+                source_stage="export_validation",
+            )
+            if bucket_for.get(code) == "review_items":
+                review_items.append(entry)
+            else:
+                warnings.append(entry)
+
+        # --- accepted equations ---
+        equations = raw.get("equations") or []
+        if isinstance(equations, list):
+            for eq in equations:
+                if not isinstance(eq, dict):
+                    continue
+                eq_id = str(eq.get("equation_id") or "")
+                if not eq_id:
+                    continue
+                rec = eq.get("reconstruction") if isinstance(eq.get("reconstruction"), dict) else {}
+                consistency = (
+                    eq.get("equation_consistency")
+                    if isinstance(eq.get("equation_consistency"), dict)
+                    else {}
+                )
+                for code in self._codes_in(eq.get("review_reason")):
+                    if code in report["issues"]:
+                        _record(code, "equation_id", eq_id,
+                                f"$.equations[{eq_id}].review_reason")
+                for code in self._codes_in(rec.get("review_reason")):
+                    if code in report["issues"]:
+                        _record(code, "equation_id", eq_id,
+                                f"$.equations[{eq_id}].reconstruction.review_reason")
+                for code in self._codes_in(consistency.get("review_reason")):
+                    if code in report["issues"]:
+                        _record(code, "equation_id", eq_id,
+                                f"$.equations[{eq_id}].equation_consistency.review_reason")
+                for code in self._codes_in(eq.get("review_flags")):
+                    if code in report["issues"]:
+                        _record(code, "equation_id", eq_id,
+                                f"$.equations[{eq_id}].review_flags")
+
+        # --- candidates ---
+        candidates = raw.get("equation_candidates") or []
+        if isinstance(candidates, list):
+            for cand in candidates:
+                if not isinstance(cand, dict):
+                    continue
+                cand_id = str(cand.get("candidate_id") or "")
+                if not cand_id:
+                    continue
+                for code in self._codes_in(cand.get("review_reason")):
+                    if code in report["issues"]:
+                        _record(code, "candidate_id", cand_id,
+                                f"$.equation_candidates[{cand_id}].review_reason")
+
+        return report
+
+    @staticmethod
+    def _codes_in(values) -> list:
+        if not isinstance(values, list):
+            return []
+        return [str(v) for v in values if str(v) in _EQUATION_FIDELITY_CODES]
+
+    def _check_accepted_equations_registered(self, artifacts: dict, errors: list) -> None:
+        """Enforce the candidate→registry promotion invariant (issue #431).
+
+        Invariant (domain-agnostic): for any document, the set of equation
+        candidates with ``acceptance_status == "accepted"`` must be a subset of
+        the equation registry. Registry membership is established purely by ID
+        links and never by formula names, labels, or domain vocabulary:
+
+          - a registry record traces the candidate via ``candidate_trace_ids``, or
+          - the candidate's own ``accepted_equation_id`` resolves to a registry
+            ``equation_id``.
+
+        The check is a pure set difference ``accepted_ids - registered_ids``; a
+        non-empty difference yields one hard ``EQ_ACCEPTED_NOT_REGISTERED`` error
+        per orphaned candidate, which blocks publish. ``provisional`` and other
+        statuses are intentionally out of scope — the invariant is about
+        ``accepted`` candidates only.
+        """
+        raw = artifacts.get("equation_semantics")
+        if not isinstance(raw, dict):
+            return
+        candidates = raw.get("equation_candidates")
+        equations = raw.get("equations")
+        if not isinstance(candidates, list) or not isinstance(equations, list):
+            return
+
+        # Registry side: equation ids present + candidate ids any record traces.
+        registry_equation_ids: set[str] = set()
+        traced_candidate_ids: set[str] = set()
+        for rec in equations:
+            if not isinstance(rec, dict):
+                continue
+            eq_id = str(rec.get("equation_id") or "")
+            if eq_id:
+                registry_equation_ids.add(eq_id)
+            for cid in rec.get("candidate_trace_ids") or []:
+                cid = str(cid)
+                if cid:
+                    traced_candidate_ids.add(cid)
+
+        # Candidate side: accepted candidates + their accepted_equation_id pointer.
+        accepted_candidate_ids: set[str] = set()
+        accepted_equation_id_by_candidate: dict[str, str] = {}
+        for cand in candidates:
+            if not isinstance(cand, dict):
+                continue
+            if cand.get("acceptance_status") != "accepted":
+                continue
+            cid = str(cand.get("candidate_id") or "")
+            if not cid:
+                continue
+            accepted_candidate_ids.add(cid)
+            acc_eq = str(cand.get("accepted_equation_id") or "")
+            if acc_eq:
+                accepted_equation_id_by_candidate[cid] = acc_eq
+
+        # registered = traced by a record OR own pointer resolves to the registry.
+        registered_candidate_ids = set(traced_candidate_ids)
+        for cid, acc_eq in accepted_equation_id_by_candidate.items():
+            if acc_eq in registry_equation_ids:
+                registered_candidate_ids.add(cid)
+
+        for cid in sorted(accepted_candidate_ids - registered_candidate_ids):
+            errors.append(ValidationEntry(
+                code="EQ_ACCEPTED_NOT_REGISTERED",
+                message=(
+                    f"accepted equation candidate {cid!r} is absent from the "
+                    f"equation registry: no registry record traces it and its "
+                    f"accepted_equation_id does not resolve to a registry equation"
+                ),
+                artifact="equation_semantics",
+                path=f"$.equation_candidates[{cid}]",
+                source_stage="export_validation",
+                target_type="equation_candidate",
+                target_id=cid,
+            ))
+
+    def _check_equation_link_integrity(
+        self,
+        artifacts: dict,
+        errors: list,
+        review_items: list,
+    ) -> None:
+        """Enforce structural inter-equation link integrity (issue #432).
+
+        Three domain-agnostic checks over the equation registry:
+
+          - ``EQ_DANGLING_EQUATION_LINK`` (hard error): an input/output link id
+            that does not resolve to a registry equation.
+          - ``EQ_LINK_MISSING_PROVENANCE`` (hard error): a resolved input link
+            with no ``link_provenance`` entry — links must be traceable to the
+            structural cue (shared_symbol / textual_reference / derivation_step)
+            that produced them.
+          - ``EQ_RESULT_RELATION_WITHOUT_INPUT``: a ``result``/``relation``
+            equation with no input links and no allowed ``link_status``
+            justification. A derivation-usable equation in this state is a hard
+            error (a result that came from nowhere); a non-usable / review-gated
+            one is reported as a review item instead.
+
+        Reads both the nested (asdict) and flattened (export) equation shapes.
+        """
+        raw = artifacts.get("equation_semantics")
+        if not isinstance(raw, dict):
+            return
+        records = raw.get("equations")
+        if not isinstance(records, list):
+            return
+        registry_ids = {
+            str(r.get("equation_id") or "")
+            for r in records
+            if isinstance(r, dict)
+        }
+        registry_ids.discard("")
+
+        def _field(eq: dict, name: str):
+            if name in eq:
+                return eq.get(name)
+            sem = eq.get("semantics")
+            return sem.get(name) if isinstance(sem, dict) else None
+
+        for eq in records:
+            if not isinstance(eq, dict):
+                continue
+            eq_id = str(eq.get("equation_id") or "")
+            if not eq_id:
+                continue
+            inputs = [str(x) for x in (_field(eq, "input_equation_ids") or []) if x]
+            outputs = [str(x) for x in (_field(eq, "output_equation_ids") or []) if x]
+            provenance = _field(eq, "link_provenance")
+            provenance = provenance if isinstance(provenance, dict) else {}
+            link_status = str(_field(eq, "link_status") or "")
+            eq_type = str(_field(eq, "equation_type") or eq.get("role") or "")
+
+            # (a) dangling links
+            for ref in inputs + outputs:
+                if ref not in registry_ids:
+                    errors.append(ValidationEntry(
+                        code="EQ_DANGLING_EQUATION_LINK",
+                        message=(
+                            f"equation {eq_id!r} links to non-existent equation "
+                            f"{ref!r}"
+                        ),
+                        artifact="equation_semantics",
+                        path=f"$.equations[{eq_id}]",
+                        source_stage="export_validation",
+                        target_type="equation",
+                        target_id=eq_id,
+                    ))
+
+            # (b) every input link must carry provenance
+            for ref in inputs:
+                if not provenance.get(ref):
+                    errors.append(ValidationEntry(
+                        code="EQ_LINK_MISSING_PROVENANCE",
+                        message=(
+                            f"equation {eq_id!r} input link {ref!r} has no "
+                            f"link_provenance"
+                        ),
+                        artifact="equation_semantics",
+                        path=f"$.equations[{eq_id}].link_provenance",
+                        source_stage="export_validation",
+                        target_type="equation",
+                        target_id=eq_id,
+                    ))
+
+            # (c) result / relation equations need inputs or an allowed status
+            if eq_type in ("result", "relation") and not inputs:
+                if link_status in _ALLOWED_NO_INPUT_LINK_STATUSES:
+                    continue
+                policy = eq.get("confidence_policy")
+                policy = policy if isinstance(policy, dict) else {}
+                usable = bool(policy.get("can_be_used_in_derivation"))
+                entry = ValidationEntry(
+                    code="EQ_RESULT_RELATION_WITHOUT_INPUT",
+                    message=(
+                        f"{eq_type} equation {eq_id!r} has no input_equation_ids "
+                        f"and link_status {link_status or 'unset'!r} is not an "
+                        f"allowed no-input justification "
+                        f"({sorted(_ALLOWED_NO_INPUT_LINK_STATUSES)})"
+                    ),
+                    artifact="equation_semantics",
+                    path=f"$.equations[{eq_id}].input_equation_ids",
+                    source_stage="export_validation",
+                    target_type="equation",
+                    target_id=eq_id,
+                )
+                if usable:
+                    errors.append(entry)
+                else:
+                    review_items.append(entry)
+
+    def _check_equation_self_describing(self, artifacts: dict, warnings: list) -> None:
+        """Equation self-describing report (issue #439).
+
+        An equation whose trusted LaTeX contains free symbols must describe them
+        (``defined_symbols`` / ``used_symbols`` non-empty); a missing description
+        is reported as ``EQ_SYMBOLS_EMPTY``. An equation whose ``role_in_argument``
+        is absent or outside the controlled vocabulary is reported as
+        ``EQ_ROLE_INVALID``. Both are warnings (equation_semantics is a soft stage)
+        and are domain-agnostic — no symbol/equation names are asserted.
+        """
+        equations = artifacts.get("equation_semantics")
+        if not isinstance(equations, dict):
+            return
+        records = equations.get("equations")
+        if not isinstance(records, list):
+            return
+        for idx, record in enumerate(records):
+            if not isinstance(record, dict):
+                continue
+            eq_id = str(record.get("equation_id") or f"index_{idx}")
+            sem = record.get("semantics") if isinstance(record.get("semantics"), dict) else {}
+            # Only fully-analyzed equations (with a semantics block) are subject to
+            # the self-describing contract; minimal/legacy stub records are skipped.
+            if not sem:
+                continue
+            src = record.get("source_extraction") if isinstance(record.get("source_extraction"), dict) else {}
+            rec = record.get("reconstruction") if isinstance(record.get("reconstruction"), dict) else {}
+
+            # Trusted display math only: needs_math_review LaTeX is audit text.
+            latex = None
+            if not src.get("needs_math_review"):
+                latex = src.get("latex")
+            if str(rec.get("status") or "none") != "none":
+                latex = rec.get("latex")
+            free_symbols = _extract_free_symbols(latex)
+
+            described = bool(sem.get("defined_symbols")) or bool(sem.get("used_symbols"))
+            if free_symbols and not described:
+                warnings.append(ValidationEntry(
+                    code="EQ_SYMBOLS_EMPTY",
+                    message=(
+                        f"equation {eq_id!r} has free symbols {sorted(free_symbols)} in its "
+                        "LaTeX but no symbol descriptions (defined_symbols / used_symbols empty)"
+                    ),
+                    artifact="equation_semantics",
+                    path=f"$.equations[{idx}].semantics.defined_symbols",
+                    source_stage="export_validation",
+                    target_type="equation",
+                    target_id=eq_id,
+                ))
+
+            role = str(sem.get("role_in_argument") or "")
+            if role not in _EQUATION_ROLE_VOCAB:
+                warnings.append(ValidationEntry(
+                    code="EQ_ROLE_INVALID",
+                    message=(
+                        f"equation {eq_id!r} role_in_argument {role!r} is not in the "
+                        f"controlled vocabulary {sorted(_EQUATION_ROLE_VOCAB)}"
+                    ),
+                    artifact="equation_semantics",
+                    path=f"$.equations[{idx}].semantics.role_in_argument",
+                    source_stage="export_validation",
+                    target_type="equation",
+                    target_id=eq_id,
+                ))
+
     def _check_dsl_edges(
         self,
         dsl,
+        artifacts: dict,
+        claim_objects,
+        evidence,
         errors: list,
         warnings: list,
     ) -> None:
-        """Verify DSL graph edges have non-empty source and target."""
+        """Verify DSL graph edges are typed, evidence-backed, and resolvable.
+
+        In addition to non-empty endpoints, issue #441 requires that every edge
+        carry a non-null ``edge_type`` from the controlled vocabulary
+        (``DSL_EDGE_UNTYPED``) and a non-empty ``evidence_refs`` set
+        (``DSL_EDGE_NO_EVIDENCE``) whose claim/equation references resolve against
+        the final artifacts (``DSL_EDGE_DANGLING_EVIDENCE``). Domain-agnostic — no
+        specific verbs/ids are asserted.
+        """
         node_ids: set[str] = {n.node_id for n in (dsl.nodes or [])}
+
+        # Known id universe for dangling-ref detection.
+        known_claim_ids = {
+            str(getattr(c, "claim_id", "") or "")
+            for c in (getattr(claim_objects, "claims", []) or [])
+            if getattr(c, "claim_id", None)
+        }
+        known_equation_ids = set(self._equation_index_from_artifacts(artifacts))
+        known_evidence_ids = {
+            str(getattr(r, "evidence_id", "") or "")
+            for r in (getattr(evidence, "records", []) or [])
+            if getattr(r, "evidence_id", None)
+        }
+
         for edge in dsl.edges or []:
+            edge_id = getattr(edge, "edge_id", "?")
+            # Issue #441: edge_type must be present and in the controlled vocab.
+            edge_type = str(getattr(edge, "edge_type", "") or "")
+            if not edge_type or edge_type not in _DSL_EDGE_TYPE_VOCAB:
+                errors.append(ValidationEntry(
+                    code="DSL_EDGE_UNTYPED",
+                    message=(
+                        f"DSL edge {edge_id!r} has no controlled edge_type "
+                        f"(edge_type={edge_type!r}); traversal cannot branch on relation kind"
+                    ),
+                    artifact="dsl_linking",
+                    path=f"$.edges[{edge_id}].edge_type",
+                    source_stage="export_validation",
+                    target_type="dsl_edge",
+                    target_id=str(edge_id),
+                ))
+
+            # Issue #441: evidence_refs must be non-empty and resolve.
+            refs = getattr(edge, "evidence_refs", {}) or {}
+            claim_refs = [str(v) for v in (refs.get("claim_ids") or []) if v]
+            equation_refs = [str(v) for v in (refs.get("equation_ids") or []) if v]
+            thesis_refs = [str(v) for v in (refs.get("thesis_refs") or []) if v]
+            if not (claim_refs or equation_refs or thesis_refs):
+                errors.append(ValidationEntry(
+                    code="DSL_EDGE_NO_EVIDENCE",
+                    message=(
+                        f"DSL edge {edge_id!r} has empty evidence_refs; the relation "
+                        "cannot be traced back to a source"
+                    ),
+                    artifact="dsl_linking",
+                    path=f"$.edges[{edge_id}].evidence_refs",
+                    source_stage="export_validation",
+                    target_type="dsl_edge",
+                    target_id=str(edge_id),
+                ))
+            else:
+                dangling: list[str] = []
+                if known_claim_ids:
+                    dangling += [r for r in claim_refs if r not in known_claim_ids]
+                if known_equation_ids:
+                    dangling += [r for r in equation_refs if r not in known_equation_ids]
+                if dangling:
+                    errors.append(ValidationEntry(
+                        code="DSL_EDGE_DANGLING_EVIDENCE",
+                        message=(
+                            f"DSL edge {edge_id!r} evidence_refs reference unknown "
+                            f"claim/equation ids {sorted(set(dangling))}"
+                        ),
+                        artifact="dsl_linking",
+                        path=f"$.edges[{edge_id}].evidence_refs",
+                        source_stage="export_validation",
+                        target_type="dsl_edge",
+                        target_id=str(edge_id),
+                    ))
+
             if not getattr(edge, "from_node_id", None):
                 errors.append(ValidationEntry(
                     code="EMPTY_GRAPH_EDGE_SOURCE",
@@ -1587,9 +2674,139 @@ class ExportValidationGate:
                     source_stage="export_validation",
                 ))
 
+    def _check_thesis_artifact(
+        self,
+        artifacts: dict,
+        dsl,
+        errors: list,
+        review_items: list,
+    ) -> None:
+        """Thesis traversal-anchor check (issue #442).
+
+        When there is a DSL graph to traverse, the thesis_reconstruction artifact
+        must exist with a central thesis and a headline claim
+        (``THESIS_ARTIFACT_MISSING``). Its ``anchor_node_ids`` must reference real
+        DSL nodes (``THESIS_ANCHOR_UNRESOLVED``); at least one anchor must be
+        present (``THESIS_ANCHOR_MISSING``) and reachable from a graph root
+        (``THESIS_ANCHOR_UNREACHABLE``). Domain-agnostic — no specific claim text
+        or node id is asserted.
+        """
+        thesis = artifacts.get("thesis_reconstruction")
+        central = thesis.get("central_thesis") if isinstance(thesis, dict) else None
+        if not isinstance(thesis, dict) or not isinstance(central, dict) or not central:
+            errors.append(ValidationEntry(
+                code="THESIS_ARTIFACT_MISSING",
+                message=(
+                    "thesis_reconstruction artifact is missing or has no central_thesis; "
+                    "graph traversal has no defined goal"
+                ),
+                artifact="thesis_reconstruction",
+                path="$.central_thesis",
+                source_stage="export_validation",
+            ))
+            return
+
+        headline = str(thesis.get("headline_claim") or central.get("text") or "")
+        central_question = str(thesis.get("central_question") or "")
+        if not headline:
+            errors.append(ValidationEntry(
+                code="THESIS_ARTIFACT_MISSING",
+                message="thesis_reconstruction artifact has no headline_claim",
+                artifact="thesis_reconstruction",
+                path="$.headline_claim",
+                source_stage="export_validation",
+            ))
+        if not central_question:
+            review_items.append(ValidationEntry(
+                code="THESIS_CENTRAL_QUESTION_MISSING",
+                message="thesis_reconstruction artifact has no central_question",
+                artifact="thesis_reconstruction",
+                path="$.central_question",
+                source_stage="export_validation",
+            ))
+
+        node_ids = {str(getattr(n, "node_id", "") or "") for n in (getattr(dsl, "nodes", []) or [])}
+        anchor_ids = [str(a) for a in (thesis.get("anchor_node_ids") or []) if a]
+        if not anchor_ids:
+            review_items.append(ValidationEntry(
+                code="THESIS_ANCHOR_MISSING",
+                message=(
+                    "thesis_reconstruction has no anchor_node_ids; the traversal "
+                    "entry/exit nodes are undefined"
+                ),
+                artifact="thesis_reconstruction",
+                path="$.anchor_node_ids",
+                source_stage="export_validation",
+            ))
+            return
+
+        unresolved = [a for a in anchor_ids if node_ids and a not in node_ids]
+        if unresolved:
+            review_items.append(ValidationEntry(
+                code="THESIS_ANCHOR_UNRESOLVED",
+                message=(
+                    f"thesis anchor_node_ids {sorted(set(unresolved))} do not resolve "
+                    "to DSL graph nodes"
+                ),
+                artifact="thesis_reconstruction",
+                path="$.anchor_node_ids",
+                source_stage="export_validation",
+            ))
+
+        resolved_anchors = [a for a in anchor_ids if a in node_ids]
+        if resolved_anchors and not self._anchor_reachable_from_root(dsl, set(resolved_anchors)):
+            review_items.append(ValidationEntry(
+                code="THESIS_ANCHOR_UNREACHABLE",
+                message=(
+                    "no path from a graph root reaches any thesis anchor node "
+                    f"{sorted(set(resolved_anchors))}"
+                ),
+                artifact="thesis_reconstruction",
+                path="$.anchor_node_ids",
+                source_stage="export_validation",
+            ))
+
+    @staticmethod
+    def _anchor_reachable_from_root(dsl, anchors: set) -> bool:
+        """Return True when some graph root can reach a thesis anchor (issue #442).
+
+        Roots are nodes with in-degree 0. With no edges, every node is its own
+        root, so an anchor that exists is reachable. With a fully cyclic graph
+        (no in-degree-0 node) reachability is treated as satisfied — there is no
+        well-defined root to fail against. Domain-agnostic graph traversal.
+        """
+        nodes = [str(getattr(n, "node_id", "") or "") for n in (getattr(dsl, "nodes", []) or [])]
+        node_set = {n for n in nodes if n}
+        if anchors & node_set and not (getattr(dsl, "edges", []) or []):
+            return True
+        adjacency: dict[str, list[str]] = {n: [] for n in node_set}
+        indegree: dict[str, int] = {n: 0 for n in node_set}
+        for edge in getattr(dsl, "edges", []) or []:
+            src = str(getattr(edge, "from_node_id", "") or "")
+            dst = str(getattr(edge, "to_node_id", "") or "")
+            if src in node_set and dst in node_set:
+                adjacency[src].append(dst)
+                indegree[dst] += 1
+        roots = [n for n in node_set if indegree.get(n, 0) == 0]
+        if not roots:
+            # Fully cyclic / every node has an incoming edge: no root to fail on.
+            return True
+        seen: set[str] = set()
+        stack = list(roots)
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            if current in anchors:
+                return True
+            stack.extend(adjacency.get(current, []))
+        return False
+
     def _check_component_graph_artifact(
         self,
         artifacts: dict,
+        component_result,
         errors: list,
         warnings: list,
     ) -> None:
@@ -1601,13 +2818,54 @@ class ExportValidationGate:
         if not isinstance(nodes, list) or not isinstance(edges, list):
             return
 
+        canonical_component_ids = {
+            str(getattr(component, "component_id", "") or "")
+            for component in (getattr(component_result, "components", []) or [])
+            if getattr(component, "component_id", None)
+        }
+        component_aliases = {component_id: component_id for component_id in canonical_component_ids}
+        for component in (getattr(component_result, "components", []) or []):
+            canonical = str(getattr(component, "component_id", "") or "")
+            for alias in (
+                list(getattr(component, "legacy_ids", []) or [])
+                + [
+                    getattr(component, "agent_component_id", None),
+                    getattr(component, "legacy_component_id", None),
+                ]
+            ):
+                alias = str(alias or "")
+                if alias and canonical:
+                    component_aliases[alias] = canonical
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            node_id = str(
+                node.get("component_id") or node.get("node_id") or node.get("id") or ""
+            )
+            provenance_candidates = _ordered_unique(
+                [
+                    value
+                    for value in (
+                        [node.get("representative_component_id")]
+                        + list(node.get("linked_component_ids") or [])
+                    )
+                    if value and str(value) in canonical_component_ids
+                ]
+            )
+            if node_id and len(provenance_candidates) == 1:
+                component_aliases[node_id] = str(provenance_candidates[0])
+        canonical_registry_available = component_result is not None
+
         node_ids: set[str] = set()
+        for node in nodes:
+            if isinstance(node, dict):
+                nid = str(node.get("component_id") or node.get("node_id") or node.get("id") or "")
+                if nid:
+                    node_ids.add(nid)
         for idx, node in enumerate(nodes):
             if not isinstance(node, dict):
                 continue
-            comp_id = str(node.get("component_id") or "")
-            if comp_id:
-                node_ids.add(comp_id)
+            comp_id = str(node.get("component_id") or node.get("node_id") or node.get("id") or "")
             if not str(node.get("label") or "").strip():
                 errors.append(ValidationEntry(
                     code="COMPONENT_GRAPH_NODE_MISSING_LABEL",
@@ -1615,7 +2873,54 @@ class ExportValidationGate:
                     artifact="component_graph",
                     path=f"$.nodes[{idx}].label",
                     source_stage="export_validation",
+                    target_type="graph_node",
+                    target_id=comp_id or None,
                 ))
+            # Issue #422: graph membership alone is insufficient. An operation
+            # parent must resolve to a canonical component artifact (aliases are
+            # accepted and normalized by export), never an aggregate theory node.
+            # When this validator is invoked without a component_result (legacy
+            # standalone graph checks), retain the older graph-membership check.
+            parent_id = str(node.get("parent_component_id") or "")
+            parent_known = (
+                parent_id in component_aliases
+                if canonical_registry_available
+                else parent_id in node_ids
+            )
+            if parent_id and not parent_known:
+                errors.append(ValidationEntry(
+                    code="COMPONENT_GRAPH_PARENT_COMPONENT_INVALID",
+                    message=(
+                        f"component graph node {comp_id or idx!r} parent_component_id "
+                        f"{parent_id!r} does not resolve to "
+                        f"{'a canonical component' if canonical_registry_available else 'a graph node'}"
+                    ),
+                    artifact="component_graph",
+                    path=f"$.nodes[{idx}].parent_component_id",
+                    source_stage="export_validation",
+                    target_type=(
+                        "component" if canonical_registry_available else "graph_node"
+                    ),
+                    target_id=(
+                        parent_id if canonical_registry_available else comp_id
+                    ) or None,
+                ))
+            # Issue #418: a main node aggregates other nodes via member_component_ids;
+            # each member must resolve to an existing graph node.
+            for member_id in node.get("member_component_ids") or []:
+                if str(member_id) and str(member_id) not in node_ids:
+                    errors.append(ValidationEntry(
+                        code="COMPONENT_GRAPH_MEMBER_COMPONENT_INVALID",
+                        message=(
+                            f"component graph node {comp_id or idx!r} member_component_id "
+                            f"{member_id!r} does not resolve to a graph node"
+                        ),
+                        artifact="component_graph",
+                        path=f"$.nodes[{idx}].member_component_ids",
+                        source_stage="export_validation",
+                        target_type="graph_node",
+                        target_id=comp_id or None,
+                    ))
             if not str(node.get("component_type") or "").strip():
                 warnings.append(ValidationEntry(
                     code="COMPONENT_GRAPH_NODE_MISSING_COMPONENT_TYPE",
@@ -1785,6 +3090,327 @@ class ExportValidationGate:
                     path=f"$.claims[{claim_id}].atomicity",
                     source_stage="export_validation",
                 ))
+
+    def _check_claim_equation_link_symmetry(
+        self,
+        claim_objects,
+        artifacts: dict,
+        warnings: list,
+    ) -> None:
+        """Report one-way claim↔equation links (issue #358).
+
+        ``claim.equation_ids`` and ``equation.linked_claim_ids`` are maintained
+        by different stages and can drift apart. The pipeline demotes one-way
+        links into ``inferred_equation_ids`` / ``inferred_claim_ids`` (see
+        ``annotate_claim_equation_link_asymmetries``); this check reports both
+        already-demoted links and any asymmetry still present in the primary
+        fields (artifacts that never went through the annotation step).
+        """
+        equation_index = self._equation_index_from_artifacts(artifacts)
+        if not equation_index:
+            return
+        claims = list(getattr(claim_objects, "claims", []) or [])
+        claim_to_eq: dict[str, set[str]] = {}
+        for claim in claims:
+            claim_id = str(getattr(claim, "claim_id", "") or "")
+            if claim_id:
+                claim_to_eq[claim_id] = {
+                    str(v) for v in (getattr(claim, "equation_ids", []) or []) if v
+                }
+        eq_to_claim: dict[str, set[str]] = {}
+        for eq_id, eq in equation_index.items():
+            eq_to_claim[eq_id] = {
+                str(v) for v in (eq.get("linked_claim_ids") or []) if v
+            }
+
+        for claim_id, eq_ids in claim_to_eq.items():
+            for eq_id in eq_ids:
+                if eq_id in eq_to_claim and claim_id not in eq_to_claim[eq_id]:
+                    warnings.append(ValidationEntry(
+                        code="CLAIM_EQUATION_LINK_ASYMMETRY",
+                        message=(
+                            f"claim {claim_id!r} links equation {eq_id!r} but the "
+                            "equation does not link the claim back; treat the link "
+                            "as inferred until reviewed"
+                        ),
+                        artifact="claim_object_builder",
+                        path=f"$.claims[{claim_id}].equation_ids",
+                        source_stage="export_validation",
+                    ))
+        for eq_id, claim_ids in eq_to_claim.items():
+            for claim_id in claim_ids:
+                if claim_id in claim_to_eq and eq_id not in claim_to_eq[claim_id]:
+                    warnings.append(ValidationEntry(
+                        code="CLAIM_EQUATION_LINK_ASYMMETRY",
+                        message=(
+                            f"equation {eq_id!r} links claim {claim_id!r} but the "
+                            "claim does not link the equation back; treat the link "
+                            "as inferred until reviewed"
+                        ),
+                        artifact="equation_semantics",
+                        path=f"$.equations[{eq_id}].linked_claim_ids",
+                        source_stage="export_validation",
+                    ))
+
+        # Links already demoted by the annotation step stay visible in the
+        # gate report (#358 review fix).
+        for claim in claims:
+            claim_id = str(getattr(claim, "claim_id", "") or "")
+            for eq_id in getattr(claim, "inferred_equation_ids", []) or []:
+                warnings.append(ValidationEntry(
+                    code="CLAIM_EQUATION_LINK_ASYMMETRY",
+                    message=(
+                        f"claim {claim_id!r} → equation {eq_id!r} link was "
+                        "demoted to inferred (one-way link); review before "
+                        "treating it as a confirmed link"
+                    ),
+                    artifact="claim_object_builder",
+                    path=f"$.claims[{claim_id}].inferred_equation_ids",
+                    source_stage="export_validation",
+                ))
+        for eq_id, eq in equation_index.items():
+            sem = eq.get("semantics") if isinstance(eq.get("semantics"), dict) else {}
+            for claim_id in (
+                eq.get("inferred_claim_ids") or sem.get("inferred_claim_ids") or []
+            ):
+                warnings.append(ValidationEntry(
+                    code="CLAIM_EQUATION_LINK_ASYMMETRY",
+                    message=(
+                        f"equation {eq_id!r} → claim {claim_id!r} link was "
+                        "demoted to inferred (one-way link); review before "
+                        "treating it as a confirmed link"
+                    ),
+                    artifact="equation_semantics",
+                    path=f"$.equations[{eq_id}].inferred_claim_ids",
+                    source_stage="export_validation",
+                ))
+
+    # Equation-semantics types whose equations must not appear in conflicting
+    # component role lists (issue #358). equation_semantics is the source of
+    # truth for an equation's type.
+    _EQUATION_ROLE_CONFLICTS = {
+        "definition": ("output_equation_ids",),
+        "result": ("definition_equation_ids",),
+    }
+
+    def _check_equation_role_conflicts(
+        self,
+        component_result,
+        artifacts: dict,
+        warnings: list,
+    ) -> None:
+        """Report stage-to-stage equation role conflicts (issue #358)."""
+        equation_index = self._equation_index_from_artifacts(artifacts)
+        if not equation_index:
+            return
+        eq_type_by_id = {}
+        for eq_id, eq in equation_index.items():
+            semantics = eq.get("semantics") if isinstance(eq.get("semantics"), dict) else {}
+            eq_type = str(eq.get("role") or semantics.get("equation_type") or "")
+            if eq_type:
+                eq_type_by_id[eq_id] = eq_type
+        for component in getattr(component_result, "components", []) or []:
+            comp_id = getattr(component, "component_id", "?")
+            for eq_type, conflicting_fields in self._EQUATION_ROLE_CONFLICTS.items():
+                for field_name in conflicting_fields:
+                    for eq_id in getattr(component, field_name, []) or []:
+                        if eq_type_by_id.get(str(eq_id)) != eq_type:
+                            continue
+                        warnings.append(ValidationEntry(
+                            code="EQUATION_ROLE_CONFLICT",
+                            message=(
+                                f"component {comp_id!r} classifies equation "
+                                f"{eq_id!r} as {field_name} but "
+                                f"equation_semantics types it as {eq_type!r}"
+                            ),
+                            artifact="component_assembly",
+                            path=f"$.components[{comp_id}].{field_name}",
+                            source_stage="export_validation",
+                        ))
+
+    def _check_thesis_coverage(
+        self,
+        artifacts: dict,
+        component_result,
+        claim_objects,
+        review_items: list,
+    ) -> dict:
+        """Thesis coverage report (issue #354).
+
+        For the central thesis and each support_structure section, verify every
+        referenced claim_id / equation_id (a) still exists in the final claim /
+        equation sets and (b) is reachable from a main-layer graph node (or an
+        assembled component when the component_graph artifact is absent).
+        Unreachable refs are recorded with review_reasons=["thesis_support_unreachable"]
+        and surfaced as review items — never hard errors.
+        """
+        result = _empty_thesis_coverage()
+        thesis = artifacts.get("thesis_reconstruction")
+        if not isinstance(thesis, dict):
+            return result
+        central = thesis.get("central_thesis")
+        if not isinstance(central, dict):
+            return result
+        result["thesis_present"] = True
+
+        final_claim_ids = {
+            str(getattr(c, "claim_id", "") or "")
+            for c in (getattr(claim_objects, "claims", []) or [])
+            if getattr(c, "claim_id", None)
+        }
+        known_equation_ids = set(self._equation_index_from_artifacts(artifacts))
+        backing = self._main_graph_backing_ids(artifacts, component_result)
+        main_claim_ids = backing["claims"]
+        main_equation_ids = backing["equations"]
+        weak_claim_ids = backing["weak_claims"]
+        weak_equation_ids = backing["weak_equations"]
+
+        sections: list[tuple[str, list[dict]]] = [("central_thesis", [central])]
+        support = thesis.get("support_structure")
+        if isinstance(support, dict):
+            for name, entries in support.items():
+                if isinstance(entries, list):
+                    sections.append(
+                        (str(name), [e for e in entries if isinstance(e, dict)])
+                    )
+
+        for section, entries in sections:
+            section_total = 0
+            section_reachable = 0
+            for entry in entries:
+                ref_groups = (
+                    ("claim", entry.get("claim_ids") or [],
+                     final_claim_ids, main_claim_ids, weak_claim_ids),
+                    ("equation", entry.get("equation_ids") or [],
+                     known_equation_ids, main_equation_ids, weak_equation_ids),
+                )
+                for ref_type, refs, known_ids, covered_ids, weak_ids in ref_groups:
+                    for ref in refs:
+                        ref_id = str(ref or "")
+                        if not ref_id:
+                            continue
+                        section_total += 1
+                        if known_ids and ref_id not in known_ids:
+                            reason = f"missing_{ref_type}"
+                        elif ref_id in covered_ids:
+                            section_reachable += 1
+                            continue
+                        elif ref_id in weak_ids:
+                            # Reachable only through inferred / review_required
+                            # main nodes — that is not support (#354 review fix).
+                            reason = "main_node_backing_insufficient"
+                        else:
+                            reason = "not_linked_to_main_graph"
+                        result["unreachable_refs"].append({
+                            "ref_id": ref_id,
+                            "ref_type": ref_type,
+                            "section": section,
+                            "reason": reason,
+                            "review_reasons": ["thesis_support_unreachable"],
+                        })
+                        review_items.append(ValidationEntry(
+                            code="THESIS_SUPPORT_UNREACHABLE",
+                            message=(
+                                f"thesis section {section!r} references {ref_type} "
+                                f"{ref_id!r} which is not reachable from the exported "
+                                f"main graph ({reason})"
+                            ),
+                            artifact="thesis_reconstruction",
+                            path=f"$.support_structure[{section}]"
+                            if section != "central_thesis"
+                            else "$.central_thesis",
+                            source_stage="export_validation",
+                        ))
+            if section_total:
+                result["coverage_by_section"][section] = round(
+                    section_reachable / section_total, 4
+                )
+                result["total_refs"] += section_total
+                result["reachable_refs"] += section_reachable
+        return result
+
+    # Main-node backing statuses that count as thesis support (#354): only a
+    # confirmed source_backed node. partially_source_backed / inferred /
+    # review_required / unknown backing is itself unconfirmed structure, so
+    # coverage through such nodes is reported as insufficient backing.
+    _STRONG_MAIN_NODE_BACKING = {"source_backed"}
+
+    @staticmethod
+    def _main_graph_backing_ids(artifacts: dict, component_result) -> dict:
+        """Claim / equation ids backed by main-layer graph nodes (issue #354).
+
+        A main node covers its own linked ids plus those of the equation_detail
+        members it aggregates. Only ``source_backed`` nodes count as strong
+        support; any other ``source_backing_status`` (partially_source_backed,
+        inferred, review_required, unknown) collects into the ``weak_*`` sets —
+        coverage through them is reported as insufficient backing, not support.
+        When the component_graph artifact is absent the assembled components
+        stand in as reachability targets so the report degrades instead of
+        marking everything unreachable.
+        """
+        result = {
+            "claims": set(), "equations": set(),
+            "weak_claims": set(), "weak_equations": set(),
+        }
+        node_claim_keys = (
+            "linked_claim_ids", "supports_claim_ids", "input_claim_ids",
+            "output_claim_ids", "required_claim_ids",
+        )
+        node_equation_keys = (
+            "linked_equation_ids", "input_equation_ids",
+            "intermediate_equation_ids", "output_equation_ids",
+            "definition_equation_ids", "constraint_equation_ids",
+        )
+
+        graph = artifacts.get("component_graph")
+        nodes = graph.get("nodes") if isinstance(graph, dict) else None
+        if isinstance(nodes, list) and nodes:
+            node_by_id = {
+                str(n.get("component_id") or ""): n
+                for n in nodes if isinstance(n, dict)
+            }
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                if str(node.get("graph_layer") or "main") != "main":
+                    continue
+                backing = str(node.get("source_backing_status") or "")
+                weak = backing not in ExportValidationGate._STRONG_MAIN_NODE_BACKING
+                claim_key = "weak_claims" if weak else "claims"
+                equation_key = "weak_equations" if weak else "equations"
+                members = [node] + [
+                    node_by_id.get(str(m))
+                    for m in node.get("member_component_ids") or []
+                ]
+                for member in members:
+                    if not isinstance(member, dict):
+                        continue
+                    for key in node_claim_keys:
+                        result[claim_key].update(
+                            str(v) for v in member.get(key) or [] if v
+                        )
+                    for key in node_equation_keys:
+                        result[equation_key].update(
+                            str(v) for v in member.get(key) or [] if v
+                        )
+            # An id covered by both a strong and a weak node counts as strong.
+            result["weak_claims"] -= result["claims"]
+            result["weak_equations"] -= result["equations"]
+            return result
+
+        for component in getattr(component_result, "components", []) or []:
+            refs = getattr(component, "evidence_refs", {}) or {}
+            result["claims"].update(
+                str(v) for v in (refs.get("claim_ids") or []) if v
+            )
+            for key in node_claim_keys:
+                result["claims"].update(
+                    str(v) for v in (getattr(component, key, []) or []) if v
+                )
+            result["equations"].update(
+                ExportValidationGate._component_equation_refs(component, refs)
+            )
+        return result
 
     def _check_concepts(
         self,

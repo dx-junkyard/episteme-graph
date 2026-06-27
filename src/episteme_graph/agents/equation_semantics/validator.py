@@ -49,6 +49,102 @@ class EquationSemanticsValidator:
             issues += self._check_equation_consistency(record)
             issues += self._check_cartridge_terms(record, cartridge)
 
+        issues += self._check_duplicate_content_hashes(result.equations)
+        issues += self._check_candidate_record_completeness(result)
+
+        return issues
+
+    # ------------------------------------------------------------------
+    # Candidate → record completeness (issue #416)
+    # ------------------------------------------------------------------
+
+    def _check_candidate_record_completeness(
+        self, result: EquationSemanticsResult
+    ) -> list[ValidationIssue]:
+        """Guarantee accepted/provisional candidates resolve to a final record.
+
+        A candidate that was accepted/provisional but whose ``accepted_equation_id``
+        is empty or points at no EquationRecord is a hard error
+        (``accepted_candidate_missing_equation``): downstream claim / component /
+        derivation could otherwise reference an equation that does not exist. A
+        large silent shrink from candidate count to record count is also surfaced.
+
+        This check only runs on the full result (candidates + equations both
+        present); per-record partial validation passes an empty candidate list and
+        is unaffected.
+        """
+        candidates = result.equation_candidates
+        if not candidates:
+            return []
+
+        issues: list[ValidationIssue] = []
+        record_ids = {r.equation_id for r in result.equations}
+        accepted_like = [
+            c for c in candidates
+            if c.acceptance_status in ("accepted", "provisional")
+        ]
+        resolved = 0
+        for c in accepted_like:
+            accepted_id = c.accepted_equation_id
+            if not accepted_id:
+                issues.append(ValidationIssue(
+                    rule_id="accepted_candidate_missing_equation",
+                    severity="error",
+                    message=(
+                        f"{c.candidate_id} is {c.acceptance_status} but has no "
+                        "accepted_equation_id (no EquationRecord produced)"
+                    ),
+                    field=f"{c.candidate_id}.accepted_equation_id",
+                ))
+                continue
+            if accepted_id not in record_ids:
+                issues.append(ValidationIssue(
+                    rule_id="accepted_candidate_missing_equation",
+                    severity="error",
+                    message=(
+                        f"{c.candidate_id} accepted_equation_id "
+                        f"{accepted_id!r} does not resolve to any EquationRecord"
+                    ),
+                    field=f"{c.candidate_id}.accepted_equation_id",
+                ))
+                continue
+            resolved += 1
+
+        # Large silent shrink: many accepted/provisional candidates collapsed into
+        # far fewer records without each being individually accounted for above.
+        if accepted_like and resolved < len(accepted_like):
+            issues.append(ValidationIssue(
+                rule_id="equation_candidate_silent_shrink",
+                severity="warning",
+                message=(
+                    f"{len(accepted_like)} accepted/provisional candidate(s) but "
+                    f"only {resolved} resolved to an EquationRecord — "
+                    "candidate→record shrink requires review"
+                ),
+                field="equation_candidates",
+            ))
+        return issues
+
+    @staticmethod
+    def _check_duplicate_content_hashes(records: list) -> list[ValidationIssue]:
+        """Within-document hash collisions are reported, never auto-merged (#362)."""
+        by_hash: dict[str, list[str]] = {}
+        for record in records:
+            hash_value = str(getattr(record, "content_hash", "") or "")
+            if hash_value:
+                by_hash.setdefault(hash_value, []).append(record.equation_id)
+        issues: list[ValidationIssue] = []
+        for hash_value, equation_ids in by_hash.items():
+            if len(equation_ids) > 1:
+                issues.append(ValidationIssue(
+                    rule_id="duplicate_equation_content_hash",
+                    severity="warning",
+                    message=(
+                        f"equations {', '.join(equation_ids)} share content_hash "
+                        f"{hash_value}; review for duplication (not auto-merged)"
+                    ),
+                    field=equation_ids[0],
+                ))
         return issues
 
     # ------------------------------------------------------------------
@@ -124,6 +220,32 @@ class EquationSemanticsValidator:
                 severity="error",
                 message=f"{eid} accepted equation has no candidate_trace_ids",
                 field=f"{eid}.candidate_trace_ids",
+            ))
+
+        # Issue #368: a rejected LLM label / equation_id is kept as audit
+        # metadata; surface it as a warning so the override is traceable.
+        src_loc = record.source_extraction.source_location or {}
+        rejected_label = src_loc.get("llm_rejected_label")
+        if rejected_label is not None:
+            issues.append(ValidationIssue(
+                rule_id="llm_label_overridden",
+                severity="warning",
+                message=(
+                    f"{eid} LLM-proposed label {rejected_label!r} was rejected by the "
+                    "source-aware validator and normalized away"
+                ),
+                field=f"{eid}.source_extraction.source_location.llm_rejected_label",
+            ))
+        rejected_eq_id = src_loc.get("llm_rejected_equation_id")
+        if rejected_eq_id is not None:
+            issues.append(ValidationIssue(
+                rule_id="llm_equation_id_overridden",
+                severity="warning",
+                message=(
+                    f"{eid} LLM-proposed equation_id {rejected_eq_id!r} was discarded; "
+                    "the deterministic normalized id is used instead"
+                ),
+                field=f"{eid}.source_extraction.source_location.llm_rejected_equation_id",
             ))
 
         # source_extraction.block_id must exist
