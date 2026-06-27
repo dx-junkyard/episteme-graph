@@ -1881,10 +1881,13 @@
             body +
           '</span>';
         }
-        return '<span class="ls-material-embed ls-material-missing" data-evidence-ref="equation:' + escHtml(embedId) + '">' +
-          '<span class="ls-material-embed-kind">未解決の数式</span>' +
-          '<strong>' + escHtml(embedId || "数式") + '</strong>' +
-          '<span class="ls-material-embed-summary">この数式IDに対応する数式本文を取得できませんでした。</span>' +
+        // 本体（LaTeX/reading/原文）が無い数式埋め込みは、学習者には不安を与える
+        // 赤いエラーカードではなく、落ち着いた「準備中」表示にする。直前の本文に式の
+        // 説明（- ラベル: 意味）が出ているため、ここでは控えめな注記に留める。
+        return '<span class="ls-material-embed ls-material-formula-pending"' +
+          ' data-evidence-ref="equation:' + escHtml(embedId) + '"' +
+          ' title="この数式は本文を準備中です（' + escHtml(embedId || "数式") + '）">' +
+          '数式は準備中です' +
         '</span>';
       }
       return '<span class="ls-material-embed ls-material-evidence-card ls-material-missing" data-evidence-ref="' + escHtml(embed.kind + ":" + embedId) + '">' +

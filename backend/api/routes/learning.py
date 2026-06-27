@@ -827,6 +827,37 @@ def _select_check_question(topic: dict, requested_question: str = "", request_it
     return _normalize_check_question_item("このセクションの要点を説明してください。")
 
 
+def _topic_formulas_from_content_blocks(topic: dict) -> list[dict]:
+    """topic.content_blocks の equations から、UIの数式埋め込み解決用 formulas を作る。
+
+    未解決の数式 fix: LaTeX が無くても reading(plain_text) や原文(raw_text) があれば
+    数式項目として渡す（フロントは latex → plain_text → raw_text の順にフォールバック
+    描画する）。これで `![[equation:id]]` 埋め込みが「未解決」にならずに済む。描画材料が
+    一切無い項目だけを除外する。
+    """
+    formulas: list[dict] = []
+    for block in topic.get("content_blocks") or []:
+        if not isinstance(block, dict) or block.get("type") != "equations":
+            continue
+        for item in block.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            latex = item.get("latex") or ""
+            plain_text = item.get("plain_text") or ""
+            raw_text = item.get("raw_text") or ""
+            if not (latex or plain_text or raw_text):
+                continue
+            formulas.append({
+                "id": item.get("equation_id") or f"TOPIC_FORMULA_{len(formulas)}",
+                "latex": latex,
+                "label": item.get("label") or "",
+                "plain_text": plain_text,
+                "raw_text": raw_text,
+                "is_display": True,
+            })
+    return formulas
+
+
 @router.get(
     "/courses/{course_id}/topics/{topic_id}/material",
     response_model=TopicMaterialResponse,
@@ -858,23 +889,7 @@ def get_topic_material(
 
     topic_text = _topic_student_material(topic or {})
     if topic_text.strip():
-        formulas: list[dict] = []
-        for block in (topic or {}).get("content_blocks") or []:
-            if not isinstance(block, dict) or block.get("type") != "equations":
-                continue
-            for item in block.get("items") or []:
-                if not isinstance(item, dict):
-                    continue
-                latex = item.get("latex") or ""
-                if not latex:
-                    continue
-                formulas.append({
-                    "id": item.get("equation_id") or f"TOPIC_FORMULA_{len(formulas)}",
-                    "latex": latex,
-                    "label": item.get("label") or "",
-                    "plain_text": item.get("plain_text") or "",
-                    "is_display": True,
-                })
+        formulas = _topic_formulas_from_content_blocks(topic or {})
         chunks = [ChunkContent(
             id=f"topic:{topic_id}",
             text=topic_text,

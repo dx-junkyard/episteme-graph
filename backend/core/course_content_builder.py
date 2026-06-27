@@ -931,8 +931,23 @@ def _ensure_required_equations_in_material(result: dict, topic: dict) -> None:
         label = str(item.get("label") or eq_id)
         description = _equation_material_description(item)
         lines.append(f"- {label}: {description}")
-        lines.append(f"![[equation:{eq_id}]]")
+        # 未解決の数式 fix: 描画できる本体（LaTeX / reading / 原文）を持つ式だけ
+        # `![[equation:id]]` を埋め込む。本体の無い式（linked_equation_ids だけの
+        # 裸ID 等）に埋め込みを出すと、必ず「未解決の数式」になるため埋め込まない。
+        if _equation_has_renderable_body(item):
+            lines.append(f"![[equation:{eq_id}]]")
     material["source_text"] = "\n".join(line for line in lines if line is not None).strip()
+
+
+def _equation_has_renderable_body(item: dict) -> bool:
+    """数式項目が UI で描画可能な本体（LaTeX / reading / 原文）を持つか。"""
+    if not isinstance(item, dict):
+        return False
+    return bool(
+        (item.get("latex") or item.get("latex_canonical") or item.get("normalized_latex"))
+        or (item.get("plain_text") or item.get("reading"))
+        or (item.get("raw_text") or item.get("text"))
+    )
 
 
 def _equation_material_description(item: dict) -> str:

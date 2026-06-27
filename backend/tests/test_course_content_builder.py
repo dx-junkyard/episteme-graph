@@ -60,8 +60,25 @@ def test_ensure_required_equations_adds_missing_embeds():
     assert "### この節で使う数式" in source_text
     assert "- 式A: 物理量の関係を定義する式" in source_text
     assert r"\begin{aligned}" not in source_text
+    # 本体（plain_text）を持つ式は埋め込まれる。
     assert "![[equation:eq_from_id]]" in source_text
-    assert "![[equation:eq_link_only]]" in source_text
+    # 未解決の数式 fix: 本体の無い裸ID（linked_equation_ids だけ）には埋め込みを出さない
+    # （出すと必ず「未解決の数式」になるため）。説明バレットは残す。
+    assert "![[equation:eq_link_only]]" not in source_text
+    assert "eq_link_only" in source_text
+
+
+def test_equation_has_renderable_body():
+    from core.course_content_builder import _equation_has_renderable_body
+
+    assert _equation_has_renderable_body({"latex": "a=b"})
+    assert _equation_has_renderable_body({"plain_text": "aはbに等しい"})
+    assert _equation_has_renderable_body({"raw_text": "F2 = a+b"})
+    assert _equation_has_renderable_body({"normalized_latex": "x=y"})
+    # 本体が無い（IDとラベルだけ）の式は埋め込み不可と判定される。
+    assert not _equation_has_renderable_body({"equation_id": "eq_x", "label": "eq:x"})
+    assert not _equation_has_renderable_body({})
+    assert not _equation_has_renderable_body(None)
 
 
 def test_content_blocks_carry_raw_text_for_latexless_equations():
