@@ -535,6 +535,10 @@ def _content_blocks(
             "label": e.get("label"),
             "latex": e.get("latex") or e.get("latex_canonical") or e.get("normalized_latex"),
             "plain_text": e.get("plain_text") or e.get("reading"),
+            # Issue: 未解決の数式. Carry the raw extracted text so the UI can still
+            # show a reading when LaTeX is absent (e.g. needs_math_review), instead
+            # of an empty "LaTeX を取得できませんでした" box.
+            "raw_text": e.get("raw_text") or e.get("text"),
         }
         for e in equations
     ]
@@ -550,6 +554,7 @@ def _content_blocks(
             "label": f.get("label") or "",
             "latex": latex,
             "plain_text": f.get("plain_text") or f.get("spoken") or f.get("reading") or "",
+            "raw_text": f.get("raw_text") or f.get("text") or "",
         })
     if equation_items:
         blocks.append({
@@ -931,7 +936,7 @@ def _ensure_required_equations_in_material(result: dict, topic: dict) -> None:
 
 
 def _equation_material_description(item: dict) -> str:
-    for key in ("summary", "description", "semantic_summary", "role", "meaning"):
+    for key in ("summary", "description", "semantic_summary", "role", "meaning", "plain_text", "reading"):
         text = str(item.get(key) or "").strip()
         if text and not _looks_like_tex_source(text):
             return _short_excerpt(text, limit=120)

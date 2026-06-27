@@ -3240,6 +3240,19 @@ body {
   border-color: #fecaca;
 }
 
+/* Issue 未解決の数式: readable fallbacks when an equation has no LaTeX. */
+.ls-material-formula-plain {
+  font-style: italic;
+  color: var(--color-text-secondary);
+}
+.ls-material-formula-raw {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92em;
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .ls-theory-panel {
   flex: 1;
   min-height: 0;

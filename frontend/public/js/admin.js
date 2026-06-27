@@ -4453,7 +4453,11 @@
     var value = String(id || "").trim();
     value = value.replace(/^\[\[/, "").replace(/\]\]$/, "");
     value = value.replace(/^\[\[/, "").replace(/\]\]$/, "");
-    return value.trim();
+    value = value.trim();
+    // Collapse a duplicated "eq_" prefix from the legacy double-prefix bug
+    // ("eq_eq_F2" → "eq_F2") so legacy and corrected ids resolve to the same key.
+    value = value.replace(/^(?:eq_){2,}/i, "eq_");
+    return value;
   }
 
   function lsCourseEvidenceKey(kind, id) {
@@ -4707,17 +4711,18 @@
       var key = lsCourseEvidenceKey(embed.kind, embedId);
       var evidenceItem = lsEvidenceItemByRef(topic, embed.kind, embedId);
       if (embed.kind === "equation") {
-        var formula = formulaById[String(embed.id)] || formulaById[embedId] || (evidenceItem && evidenceItem.latex ? evidenceItem : null);
-        if (formula && (formula.latex || formula.summary)) {
-          var latex = formula.latex || formula.summary || "";
+        var formula = formulaById[String(embed.id)] || formulaById[embedId] ||
+          (evidenceItem && (evidenceItem.latex || evidenceItem.plain_text || evidenceItem.raw_text) ? evidenceItem : null);
+        var body = lsEquationEmbedBody(formula);
+        if (body) {
           return '<button type="button" class="ls-material-embed ls-material-formula-only" data-evidence-ref="' + escHtml(key) + '">' +
-            lsRenderKatex(latex, true) +
+            body +
           '</button>';
         }
         return '<button type="button" class="ls-material-embed ls-material-missing" data-evidence-ref="' + escHtml(key) + '">' +
           '<span class="ls-material-embed-kind">未解決の数式</span>' +
           '<strong>' + escHtml(embedId || "数式") + '</strong>' +
-          '<span class="ls-material-embed-summary">この数式IDに対応するLaTeXを取得できませんでした。</span>' +
+          '<span class="ls-material-embed-summary">この数式IDに対応する数式本文を取得できませんでした。</span>' +
         '</button>';
       }
       if (embed.kind === "source" && (embedId === "summary" || embedId === "topic_summary")) {
@@ -7075,17 +7080,35 @@
     ((topic && topic.content_blocks) || []).forEach(function (block) {
       if (!block || block.type !== "equations") return;
       (block.items || []).forEach(function (item) {
-        if (!item || !item.latex) return;
+        // Keep an equation as long as ANY renderable form exists (latex,
+        // reading, or raw text). Previously items without latex were dropped,
+        // which left their `![[equation:...]]` embeds "未解決" (issue 未解決の数式).
+        if (!item || (!item.latex && !item.plain_text && !item.raw_text)) return;
         formulas.push({
           id: item.equation_id || ("TOPIC_FORMULA_" + formulas.length),
           label: item.label || "",
-          latex: item.latex,
+          latex: item.latex || "",
           plain_text: item.plain_text || "",
+          raw_text: item.raw_text || "",
           is_display: true,
         });
       });
     });
     return formulas;
+  }
+
+  // Render the best available representation of an equation embed: rendered math
+  // when LaTeX exists, else its reading (plain_text), else the raw extracted text.
+  // Returns "" only when nothing renderable is available (issue 未解決の数式).
+  function lsEquationEmbedBody(formula) {
+    if (!formula) return "";
+    var latex = formula.latex || formula.summary || "";
+    if (latex) return lsRenderKatex(latex, true);
+    var plain = formula.plain_text || "";
+    if (plain) return '<span class="ls-material-formula-plain">' + escHtml(plain) + '</span>';
+    var raw = formula.raw_text || "";
+    if (raw) return '<span class="ls-material-formula-raw" title="原文（未整形・要確認）">' + escHtml(raw) + '</span>';
+    return "";
   }
 
   function lsNormalizePreviewLineBreaks(text) {
