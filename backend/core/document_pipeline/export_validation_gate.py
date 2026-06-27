@@ -355,6 +355,34 @@ except Exception:  # pragma: no cover - fallback mirror
         "CONTAINS", "CORRELATES", "CAUSES", "INHIBITS", "EQUIVALENT",
     }
 
+# Issue #443: shared reference resolution — membership after normalization only,
+# never name-pattern branching. Single source of truth in agents.ref_resolution.
+try:  # pragma: no cover - import wiring
+    from episteme_graph.agents.ref_resolution import (
+        detect_field_alias_conflicts as _detect_field_alias_conflicts,
+        id_set as _id_set_helper,
+        normalize_ref as _normalize_ref_for_gate,
+    )
+except Exception:  # pragma: no cover - fallback mirror
+    def _normalize_ref_for_gate(ref):
+        text = str(ref or "").strip()
+        if text.count(":") == 1:
+            prefix, _, rest = text.partition(":")
+            if prefix and rest:
+                return rest
+        return text
+
+    def _id_set_helper(ids):
+        return {_normalize_ref_for_gate(v) for v in (ids or []) if _normalize_ref_for_gate(v)}
+
+    def _detect_field_alias_conflicts(obj, field_map=None):
+        return []
+
+
+def _ref_id_set_for_gate(ids) -> set:
+    """Normalized id-set helper used by the gate's membership checks (#443)."""
+    return _id_set_helper(ids)
+
 
 def _ordered_unique(values) -> list:
     result = []
@@ -603,6 +631,10 @@ class ExportValidationGate:
 
         # 6. Required artifact presence
         self._check_required_artifacts(artifacts, errors)
+
+        # 6a. Field-alias duplication (issue #443): a same-concept field must not
+        # be emitted under multiple alias names with conflicting values.
+        self._check_field_alias_duplicates(artifacts, warnings)
 
         # 6b. provisional claim ref leakage (#340): equation_semantics /
         # derivation_chain must not carry claim refs that are absent from the
@@ -1843,17 +1875,42 @@ class ExportValidationGate:
             and extraction_status in ("partial", "fragment_only", "label_only", "missing", "unparsed")
         )
 
-    # Provisional / pre-canonical claim ID patterns (issue #340). Mirrors the
-    # export-side _LEGACY_REF_PATTERNS so the pipeline catches the same leaks.
-    _PROVISIONAL_CLAIM_REF_PATTERNS = (
-        re.compile(r"^claim_span_"),
-        re.compile(r"^claim:[^:]+:[^:]+$"),
-        re.compile(r"^claim::"),
-    )
+    def _check_field_alias_duplicates(self, artifacts: dict, warnings: list) -> None:
+        """Flag same-concept fields emitted under conflicting alias names (#443).
 
-    @classmethod
-    def _looks_provisional_claim_ref(cls, ref: str) -> bool:
-        return any(p.match(ref) for p in cls._PROVISIONAL_CLAIM_REF_PATTERNS)
+        Domain-agnostic: uses the shared canonical-field map, so no field name is
+        hardcoded here. A conflict means two alias fields for one concept both
+        carry different non-empty values.
+        """
+        sources = (
+            ("component_assembly", "components", "component_id", "components/components.json"),
+            ("claim_object_builder", "claims", "claim_id", "claims/claims.json"),
+            ("equation_semantics", "equations", "equation_id", "equations/equations.json"),
+        )
+        for stage, list_key, id_key, artifact_name in sources:
+            artifact = artifacts.get(stage)
+            if not isinstance(artifact, dict):
+                continue
+            items = artifact.get(list_key)
+            if not isinstance(items, list):
+                continue
+            for idx, item in enumerate(items):
+                if not isinstance(item, dict):
+                    continue
+                for conflict in _detect_field_alias_conflicts(item):
+                    warnings.append(ValidationEntry(
+                        code="FIELD_ALIAS_DUPLICATE",
+                        message=(
+                            f"{list_key}[{idx}] emits concept {conflict['concept']!r} under "
+                            f"both {conflict['canonical']!r} and alias {conflict['alias']!r} "
+                            "with conflicting values"
+                        ),
+                        artifact=artifact_name,
+                        path=f"$.{list_key}[{idx}].{conflict['alias']}",
+                        source_stage="export_validation",
+                        target_type=stage,
+                        target_id=str(item.get(id_key) or ""),
+                    ))
 
     def _check_unresolved_claim_refs(
         self,
@@ -1861,34 +1918,30 @@ class ExportValidationGate:
         claim_objects,
         warnings: list,
     ) -> None:
-        """Report claim refs in equations / derivations absent from claims.json (#340).
+        """Report claim refs in equations / derivations absent from claims.json (#340/#443).
 
         The claim_object_builder stage is the source of truth for claim IDs. Any
         claim ref carried by equation_semantics or derivation_chain that is not in
-        the final claim set (or that still looks provisional) indicates a broken
-        artifact ID contract. These are surfaced as warnings so they show up in
+        the final claim set indicates a broken artifact ID contract. Membership is
+        judged by set membership after normalization only (issue #443) — never by
+        whether the id "looks provisional". Surfaced as warnings so they appear in
         export_validation review metadata without blocking persist.
         """
-        final_claim_ids = {
+        final_claim_ids = _ref_id_set_for_gate(
             str(getattr(c, "claim_id", "") or "")
             for c in (getattr(claim_objects, "claims", []) or [])
             if getattr(c, "claim_id", None)
-        }
+        )
 
         def report(refs, artifact: str, path: str) -> None:
             for ref in refs or []:
                 ref_id = str(ref)
                 if not ref_id:
                     continue
-                if ref_id in final_claim_ids:
+                if _normalize_ref_for_gate(ref_id) in final_claim_ids:
                     continue
-                provisional = self._looks_provisional_claim_ref(ref_id)
                 warnings.append(ValidationEntry(
-                    code=(
-                        "PROVISIONAL_CLAIM_REF_IN_ARTIFACT"
-                        if provisional
-                        else "UNRESOLVED_CLAIM_REF_IN_ARTIFACT"
-                    ),
+                    code="UNRESOLVED_CLAIM_REF_IN_ARTIFACT",
                     message=(
                         f"{path} references claim {ref_id!r} which is not in the final "
                         "claims.json claim set"

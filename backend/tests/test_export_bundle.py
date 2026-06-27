@@ -495,7 +495,10 @@ class TestExportReferenceIntegrity:
         assert validation["publish_ready"] is True
         assert validation["summary"]["unresolved_reference_count"] == 0
 
-    def test_export_reference_validation_blocks_unresolved_or_legacy_refs(self):
+    def test_export_reference_validation_blocks_unresolved_refs(self):
+        # Issue #443: dangling refs (not in the known set after normalization) are
+        # UNRESOLVED_EXPORT_REF regardless of ID form. The name-pattern
+        # LEGACY_EXPORT_REF code is no longer emitted.
         mod = _get_export_helpers()
         validation = mod._validate_export_references(
             claims=[{"claim_id": "claim-real"}],
@@ -507,8 +510,31 @@ class TestExportReferenceIntegrity:
         )
         codes = {e["code"] for e in validation["errors"]}
         assert validation["publish_ready"] is False
-        assert "LEGACY_EXPORT_REF" in codes
+        assert "LEGACY_EXPORT_REF" not in codes
         assert "UNRESOLVED_EXPORT_REF" in codes
+
+    def test_legitimate_atypical_ids_are_not_flagged(self):
+        # Issue #443 acceptance: atypical-but-legitimate IDs that resolve into the
+        # known set must produce zero false positives, even when their form would
+        # historically have matched a "legacy" name pattern (e.g. ``comp_001``,
+        # ``claim_span_x``). A scope-prefixed referrer also resolves to a bare
+        # referent after normalization.
+        mod = _get_export_helpers()
+        validation = mod._validate_export_references(
+            claims=[{"claim_id": "claim_span_x"}],
+            equations=[{"equation_id": "eq1", "linked_claim_ids": ["claim_span_x"]}],
+            components=[{"component_id": "comp_001", "evidence_claims": ["claim_span_x"]}],
+            component_graph={
+                "nodes": [{"node_id": "comp_001"}],
+                "edges": [{"source": "docA:comp_001", "target": "comp_001",
+                           "evidence_claims": ["claim_span_x"]}],
+            },
+            course_info={"topics": [{"linked_component_ids": ["comp_001"]}]},
+            evidence_snippets=[],
+        )
+        codes = {e["code"] for e in validation["errors"]}
+        assert "LEGACY_EXPORT_REF" not in codes
+        assert "UNRESOLVED_EXPORT_REF" not in codes
 
     def test_export_normalization_drops_claim_refs_when_claims_are_absent(self):
         mod = _get_export_helpers()
@@ -814,3 +840,104 @@ class TestComponentAssemblyDebugExport:
             assert "debug/component_assembly_artifact.json" in names
             payload = json.loads(zf.read("debug/component_assembly_artifact.json"))
             assert payload["documents"][0]["fallback_component_ids"] == ["comp_fallback_001"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #441: exported DSL edges carry controlled edge_type + evidence_refs
+# ---------------------------------------------------------------------------
+
+class TestDslEdgeTraversalFields:
+    def test_rows_to_dsl_graph_emits_edge_type_and_evidence(self):
+        # The chunk fallback path must never emit a null edge_type / empty
+        # evidence_refs; edge_type mirrors the predicate, evidence_refs is backed
+        # by the endpoint nodes when no relation evidence exists.
+        mod = _get_export_helpers()
+        rows = [(
+            "chunk_abc",
+            "",  # smiles_dsl
+            {"v1": {"ontology_type": "Observable", "value": "x"},
+             "v2": {"ontology_type": "Parameter", "value": "y"}},
+            [{"source": "node_chunkabc_v1", "target": "node_chunkabc_v2",
+              "predicate": "REQUIRES", "verb": "assumes"}],
+            "doc_1",
+        )]
+        graph = mod._rows_to_dsl_graph(rows)
+        assert graph["edges"], "expected at least one edge"
+        for edge in graph["edges"]:
+            assert edge.get("edge_type"), "edge_type must be non-null"
+            refs = edge.get("evidence_refs") or {}
+            assert any(refs.get(k) for k in refs), "evidence_refs must be non-empty"
+
+    def test_normalize_dsl_evidence_refs_shape(self):
+        mod = _get_export_helpers()
+        out = mod._normalize_dsl_evidence_refs({"claim_ids": ["c1"], "extra": ["x"]})
+        assert out["claim_ids"] == ["c1"]
+        assert out["equation_ids"] == []
+        assert out["thesis_refs"] == []
+        assert out["extra"] == ["x"]
+        # Tolerates None / non-dict.
+        assert mod._normalize_dsl_evidence_refs(None) == {
+            "claim_ids": [], "equation_ids": [], "thesis_refs": [],
+        }
+
+    def test_validation_flags_untyped_and_unevidenced_edges(self):
+        mod = _get_export_helpers()
+        dsl_graph = {
+            "nodes": [{"node_id": "n1"}, {"node_id": "n2"}],
+            "edges": [
+                {"edge_id": "e_bad", "source": "n1", "target": "n2",
+                 "edge_type": "", "evidence_refs": {}},
+            ],
+        }
+        validation = mod._validate_export_references(
+            claims=[], equations=[], components=[],
+            component_graph={"nodes": [], "edges": []},
+            course_info={}, evidence_snippets=[], dsl_graph=dsl_graph,
+        )
+        codes = {e["code"] for e in validation["errors"]}
+        assert "DSL_EDGE_UNTYPED" in codes
+        assert "DSL_EDGE_NO_EVIDENCE" in codes
+
+    def test_validation_passes_well_formed_edges(self):
+        # Issue #441 acceptance: a typed, evidence-backed edge whose refs resolve
+        # produces zero DSL edge errors, across two unrelated id sets.
+        mod = _get_export_helpers()
+        for claim_id, eq_id in (("claim_a", "eq_a"), ("C_one", "E_one")):
+            dsl_graph = {
+                "nodes": [{"node_id": "n1"}, {"node_id": "n2"}],
+                "edges": [
+                    {"edge_id": "e_ok", "source": "n1", "target": "n2",
+                     "edge_type": "REQUIRES", "domain_verb": "assumes",
+                     "evidence_refs": {"claim_ids": [claim_id], "equation_ids": [eq_id],
+                                       "thesis_refs": []}},
+                ],
+            }
+            validation = mod._validate_export_references(
+                claims=[{"claim_id": claim_id}],
+                equations=[{"equation_id": eq_id}],
+                components=[], component_graph={"nodes": [], "edges": []},
+                course_info={}, evidence_snippets=[], dsl_graph=dsl_graph,
+            )
+            codes = {e["code"] for e in validation["errors"]}
+            assert "DSL_EDGE_UNTYPED" not in codes
+            assert "DSL_EDGE_NO_EVIDENCE" not in codes
+            assert "DSL_EDGE_DANGLING_EVIDENCE" not in codes
+
+    def test_validation_flags_dangling_edge_evidence(self):
+        mod = _get_export_helpers()
+        dsl_graph = {
+            "nodes": [{"node_id": "n1"}, {"node_id": "n2"}],
+            "edges": [
+                {"edge_id": "e_dangle", "source": "n1", "target": "n2",
+                 "edge_type": "REQUIRES",
+                 "evidence_refs": {"claim_ids": ["claim_ghost"], "equation_ids": [],
+                                   "thesis_refs": []}},
+            ],
+        }
+        validation = mod._validate_export_references(
+            claims=[{"claim_id": "claim_real"}], equations=[], components=[],
+            component_graph={"nodes": [], "edges": []},
+            course_info={}, evidence_snippets=[], dsl_graph=dsl_graph,
+        )
+        codes = {e["code"] for e in validation["errors"]}
+        assert "DSL_EDGE_DANGLING_EVIDENCE" in codes
