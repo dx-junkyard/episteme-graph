@@ -891,6 +891,8 @@ def persist_component_graph(
                 "review_reasons": list(e.get("review_reasons") or []),
                 "evidence": evidence,
                 "edge_id": e.get("edge_id", ""),
+                # Issue #451: relation polarity (+/-/""), carried to API/UI.
+                "polarity": e.get("polarity", ""),
             })
         validation_issues = [
             {"rule_id": v.rule_id, "severity": v.severity, "message": v.message}

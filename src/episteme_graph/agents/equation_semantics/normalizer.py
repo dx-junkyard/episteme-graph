@@ -126,17 +126,28 @@ class EquationNormalizer:
         return raw.get("parser_source") == "tex_archive"
 
     @staticmethod
+    def _with_eq_prefix(normalized: str) -> str:
+        # Idempotent ``eq_`` prefix. A label that already encodes "eq" — e.g.
+        # ``eq:F2`` normalises to ``eq_F2`` — must NOT become ``eq_eq_F2``
+        # (otherwise downstream references render as "未解決の数式"). Only prepend
+        # when the normalised string does not already start with an eq marker.
+        low = normalized.lower()
+        if low == "eq" or low.startswith("eq_"):
+            return normalized
+        return f"eq_{normalized}"
+
+    @staticmethod
     def equation_id_from_label(label: str | None, block_id: str) -> str:
         if label:
             normalized = re.sub(r"[^A-Za-z0-9]+", "_", label).strip("_")
             if normalized:
-                return f"eq_{normalized}"
+                return EquationNormalizer._with_eq_prefix(normalized)
         return f"eq_{block_id}"
 
     @staticmethod
     def ref_to_equation_id(ref: str) -> str:
         normalized = re.sub(r"[^A-Za-z0-9]+", "_", ref).strip("_")
-        return f"eq_{normalized}"
+        return EquationNormalizer._with_eq_prefix(normalized) if normalized else "eq_"
 
     @staticmethod
     def _plain_text(text: str) -> str:

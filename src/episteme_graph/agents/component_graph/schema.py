@@ -404,6 +404,10 @@ class ComponentGraphNode:
     # derivation pipeline; distinct from ``review_reasons`` (structured codes)
     # and ``description`` (reader-facing explanation).
     review_reason: str = ""
+    # Issue #449: true when this node is a thesis traversal anchor (the goal of
+    # the argument). Mirrors DSLNode.is_thesis_anchor; carried through to the UI
+    # so anchors are emphasised via the flag, not ID string matching (#443).
+    is_thesis_anchor: bool = False
 
 
 @dataclass
@@ -429,6 +433,10 @@ class ComponentGraphEdge:
     evidence_claim_ids: list[str] = field(default_factory=list)
     source_evidence_ids: list[str] = field(default_factory=list)
     review_reasons: list[str] = field(default_factory=list)
+    # Issue #451: relation polarity ("+" promotes/holds, "-" inhibits/negates,
+    # "" non-polar). Mirrors DSLEdge.polarity; carried to the UI so polarity is
+    # visualised from the field, never guessed from the relation label string.
+    polarity: str = ""
 
 
 @dataclass
@@ -521,6 +529,7 @@ class ComponentGraphResult:
                     "output_claim_ids": n.output_claim_ids,
                     "required_claim_ids": n.required_claim_ids,
                     "review_reason": n.review_reason,
+                    "is_thesis_anchor": n.is_thesis_anchor,
                 }
                 for n in self.nodes
             ],
@@ -536,6 +545,7 @@ class ComponentGraphResult:
                     "source_backing_status": e.source_backing_status,
                     "review_status": e.review_status,
                     "review_reasons": e.review_reasons,
+                    "polarity": e.polarity,
                     "evidence": {
                         "evidence_claims": e.evidence_claims,
                         "evidence_equation_ids": e.evidence_equation_ids,

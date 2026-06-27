@@ -892,6 +892,10 @@ class ComponentGraphNode(BaseModel):
     required_claim_ids: list[str] = Field(default_factory=list)
     # Extraction/review note text (issue #337).
     review_reason: str = ""
+    # Issue #449: true when this node is a thesis traversal anchor (the goal of
+    # the argument). Mirrors DSLNode.is_thesis_anchor; the UI emphasises anchors
+    # via this flag rather than ID string matching (#443 is separate).
+    is_thesis_anchor: bool = False
 
 
 class ComponentGraphEdge(BaseModel):
@@ -906,6 +910,9 @@ class ComponentGraphEdge(BaseModel):
     review_status: str = "review_required"
     review_reasons: list[str] = Field(default_factory=list)
     evidence: dict = Field(default_factory=dict)
+    # Issue #451: relation polarity ("+" / "-" / "" non-polar). Mirrors
+    # DSLEdge.polarity; the UI visualises polarity from this field, not the label.
+    polarity: str = ""
 
 
 class ComponentGraphResponse(BaseModel):

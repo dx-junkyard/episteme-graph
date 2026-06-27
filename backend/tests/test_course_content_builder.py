@@ -64,6 +64,30 @@ def test_ensure_required_equations_adds_missing_embeds():
     assert "![[equation:eq_link_only]]" in source_text
 
 
+def test_content_blocks_carry_raw_text_for_latexless_equations():
+    """未解決の数式 fix: equation items must keep a readable fallback (plain/raw)
+    even when LaTeX is absent, and the description should use the reading."""
+    from core.course_content_builder import (
+        _content_blocks,
+        _equation_material_description,
+    )
+
+    equations = [
+        {"equation_id": "eq_F2", "label": "eq:F2", "raw_text": "F2 = a + b", "latex": None},
+        {"equation_id": "eq_g", "label": "g", "latex": "g = h", "plain_text": "gはhに等しい"},
+    ]
+    blocks = _content_blocks("", [], [], equations, [])
+    eq_block = next(b for b in blocks if b["type"] == "equations")
+    by_id = {item["equation_id"]: item for item in eq_block["items"]}
+    # LaTeX-less equation keeps a raw_text fallback rather than being dropped.
+    assert by_id["eq_F2"]["raw_text"] == "F2 = a + b"
+    assert by_id["eq_F2"]["latex"] in (None, "")
+    assert by_id["eq_g"]["latex"] == "g = h"
+
+    # Description falls back to the reading instead of the generic sentence.
+    assert _equation_material_description({"plain_text": "F2はaとbの和"}) == "F2はaとbの和"
+
+
 def test_detailed_check_questions_fills_legacy_question_fields():
     from core.course_content_builder import _detailed_check_questions
 

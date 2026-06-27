@@ -1761,15 +1761,23 @@
   function renderSegmentContent(seg) {
     var rawText = seg.text || seg.display_text || seg.spoken_text || "";
 
-    // 1. 本文全体を安全にエスケープ（数式部分はプレースホルダーなので壊れない）
+    // 1. 残存する ![[xxx:yyy]] / [[xxx:yyy]] 埋め込みを除去（バックエンドで未解決のもの）
+    rawText = rawText.replace(/!\[\[[^\]]+\]\]/g, "");
+    rawText = rawText.replace(/\[\[(?!FORMULA_)[^\]]+\]\]/g, "");
+
+    // 2. 本文全体を安全にエスケープ（数式プレースホルダーはこの後に置換）
     var text = escHtml(rawText);
 
-    // 2. 段落・改行処理
+    // 3. Markdown 処理
+    text = text.replace(/^### (.+)$/gm, "<h4>$1</h4>");
+    text = text.replace(/^## (.+)$/gm, "<h3>$1</h3>");
+    text = text.replace(/^# (.+)$/gm, "<h2>$1</h2>");
     text = text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    text = text.replace(/^- (.+)$/gm, "<li>$1</li>");
     text = text.split("\n\n").map(function (p) { return "<p>" + p + "</p>"; }).join("");
     text = text.replace(/\n/g, "<br>");
 
-    // 3. IDをキーにして確実に数式をはめ込む（正規表現を使わない堅牢な置換）
+    // 4. IDをキーにして確実に数式をはめ込む（正規表現を使わない堅牢な置換）
     if (seg.formulas && seg.formulas.length > 0) {
       seg.formulas.forEach(function(f) {
         var rendered = "";
@@ -1867,15 +1875,16 @@
       var embedId = normalizeMaterialEvidenceId(embed.id);
       if (embed.kind === "equation") {
         var formula = formulaById[String(embed.id)] || formulaById[embedId];
-        if (formula && (formula.latex || formula.summary)) {
+        var body = renderMaterialEquationBody(formula);
+        if (body) {
           return '<span class="ls-material-embed ls-material-formula-only" data-evidence-ref="equation:' + escHtml(embedId) + '">' +
-            renderMaterialKatex(formula.latex || formula.summary || "", true) +
+            body +
           '</span>';
         }
         return '<span class="ls-material-embed ls-material-missing" data-evidence-ref="equation:' + escHtml(embedId) + '">' +
           '<span class="ls-material-embed-kind">未解決の数式</span>' +
           '<strong>' + escHtml(embedId || "数式") + '</strong>' +
-          '<span class="ls-material-embed-summary">この数式IDに対応するLaTeXを取得できませんでした。</span>' +
+          '<span class="ls-material-embed-summary">この数式IDに対応する数式本文を取得できませんでした。</span>' +
         '</span>';
       }
       return '<span class="ls-material-embed ls-material-evidence-card ls-material-missing" data-evidence-ref="' + escHtml(embed.kind + ":" + embedId) + '">' +
@@ -1886,6 +1895,20 @@
     });
 
     return html || "";
+  }
+
+  // Best available representation of an equation embed: rendered math when LaTeX
+  // exists, else its reading (plain_text), else raw extracted text. "" only when
+  // nothing renderable is available (issue 未解決の数式).
+  function renderMaterialEquationBody(formula) {
+    if (!formula) return "";
+    var latex = formula.latex || formula.summary || "";
+    if (latex) return renderMaterialKatex(latex, true);
+    var plain = formula.plain_text || "";
+    if (plain) return '<span class="ls-material-formula-plain">' + escHtml(plain) + '</span>';
+    var raw = formula.raw_text || "";
+    if (raw) return '<span class="ls-material-formula-raw" title="原文（未整形・要確認）">' + escHtml(raw) + '</span>';
+    return "";
   }
 
   function renderMaterialKatex(expr, display) {
@@ -1913,7 +1936,10 @@
       .replace(/^\[\[/, "")
       .replace(/\]\]$/, "")
       .replace(/^equation:/, "")
-      .trim();
+      .trim()
+      // Collapse a duplicated "eq_" prefix from the legacy double-prefix bug
+      // ("eq_eq_F2" → "eq_F2") so legacy and corrected ids resolve alike.
+      .replace(/^(?:eq_){2,}/i, "eq_");
   }
 
   function normalizeMaterialLineBreaks(text) {
