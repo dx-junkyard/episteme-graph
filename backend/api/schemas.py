@@ -544,6 +544,7 @@ class LectureInterruptResponse(BaseModel):
     resume_chunk_id: str
     resume_position_ms: int = 0
     course_update: dict | None = None
+    next_actions: list[LearningSupportNextAction] = []
 
 
 # ---------------------------------------------------------------------------

@@ -1066,6 +1066,47 @@ body {
   font-size: 13px;
 }
 
+.mg.ai h1,
+.mg.ai h2,
+.mg.ai h3,
+.mg.ai h4,
+.mg.ai h5,
+.mg.ai h6 {
+  margin: 14px 0 6px;
+  line-height: 1.4;
+  font-weight: 600;
+}
+
+.mg.ai h1:first-child,
+.mg.ai h2:first-child,
+.mg.ai h3:first-child,
+.mg.ai h4:first-child,
+.mg.ai h5:first-child,
+.mg.ai h6:first-child {
+  margin-top: 0;
+}
+
+.mg.ai h1 { font-size: 18px; }
+.mg.ai h2 { font-size: 16px; }
+.mg.ai h3 { font-size: 15px; }
+.mg.ai h4,
+.mg.ai h5,
+.mg.ai h6 { font-size: 14px; }
+
+.mg.ai ul,
+.mg.ai ol {
+  margin: 6px 0;
+  padding-left: 22px;
+}
+
+.mg.ai li {
+  margin: 3px 0;
+}
+
+.mg.ai li > p {
+  margin: 0;
+}
+
 /* ===================================================================
    Admin UI Styles
    =================================================================== */
@@ -1876,6 +1917,17 @@ body {
 .lecture-toggle-btn.active {
   background: var(--color-text-info);
   color: #fff;
+}
+
+.lecture-toggle-btn:disabled,
+.lecture-toggle-btn.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.lecture-toggle-btn:disabled:hover,
+.lecture-toggle-btn.disabled:hover {
+  background: transparent;
 }
 
 /* Lecture player bar */
@@ -3244,6 +3296,16 @@ body {
 .ls-material-formula-plain {
   font-style: italic;
   color: var(--color-text-secondary);
+}
+/* 学習者向け: 本体の無い数式埋め込みは控えめな「準備中」注記にする（赤いエラー枠にしない）。 */
+.ls-material-formula-pending {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--color-background-secondary, #f3f4f6);
+  color: var(--color-text-tertiary, #6b7280);
+  font-size: 12px;
+  font-style: italic;
 }
 .ls-material-formula-raw {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

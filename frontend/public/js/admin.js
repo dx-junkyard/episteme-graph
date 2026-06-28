@@ -4495,10 +4495,35 @@
 
   function lsTopicEvidenceItems(topic) {
     var items = [];
+    // 数式は content_blocks 由来の formula（latex を持つ）で本文をレンダリングする。
+    // evidence_links 由来の数式アイテムにも latex / label を引き当てて、根拠リンク
+    // カード・チップが生 LaTeX 文字列ではなく数式・ラベルとして表示されるようにする。
+    var formulaByNorm = {};
+    lsTopicFormulas(topic).forEach(function (f) {
+      formulaByNorm[lsNormalizeEvidenceId(f.id)] = f;
+    });
     (topic.evidence_links || []).forEach(function (link) {
       if (!link) return;
       var kind = link.kind || "source";
       var id = link.target_id || link.id || "";
+      if (kind === "equation") {
+        var f = formulaByNorm[lsNormalizeEvidenceId(id)];
+        var eqLatex = link.latex || (f && f.latex) || "";
+        var eqLabel = link.label || (f && f.label) || lsNormalizeEvidenceId(id);
+        items.push({
+          key: lsCourseEvidenceKey(kind, id),
+          kind: kind,
+          id: id,
+          // タイトルに生 LaTeX を出さない。ラベル（無ければ正規化ID）を使う。
+          title: eqLabel,
+          summary: link.summary || "",
+          latex: eqLatex,
+          plain_text: link.plain_text || (f && f.plain_text) || "",
+          role: link.support_role || "equation",
+          confidence: link.confidence || "",
+        });
+        return;
+      }
       items.push({
         key: lsCourseEvidenceKey(kind, id),
         kind: kind,

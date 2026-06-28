@@ -165,6 +165,53 @@ def _load_latest_artifacts(session, document_ids: list[str]) -> dict[str, dict]:
     return artifacts
 
 
+def _equation_display_math(equation: dict) -> tuple[str | None, str | None]:
+    """ネストされた equation_semantics 生成物から表示用 latex / plain_text を導出する。
+
+    EquationSemanticsResult.to_equations_export() と同じ規則:
+    - 信頼できる source_extraction を基本とするが、needs_math_review の PDF 由来数式は
+      監査用テキストであり表示用数式にしない（None）。
+    - reconstruction があればそれを優先する。
+    - prose 再構成（latex_is_prose）は監査専用なので表示しない（None）。
+    既にトップレベルへフラット化済み（latex/plain_text を持つ）の生成物はそのまま尊重する。
+    """
+    src = equation.get("source_extraction") if isinstance(equation.get("source_extraction"), dict) else {}
+    rec = equation.get("reconstruction") if isinstance(equation.get("reconstruction"), dict) else {}
+
+    needs_review = bool(src.get("needs_math_review"))
+    latex = None if needs_review else src.get("latex")
+    plain_text = None if needs_review else src.get("plain_text")
+
+    if str(rec.get("status") or "none") != "none":
+        latex = rec.get("latex")
+        plain_text = rec.get("plain_text")
+
+    if "latex_is_prose" in (rec.get("review_reason") or []):
+        latex = None
+        plain_text = None
+
+    return latex, plain_text
+
+
+def _fill_equation_display_math(eq: dict) -> None:
+    """equation dict にトップレベル latex / plain_text / raw_text を補完する（in-place）。
+
+    既にトップレベルに非空の値があれば尊重し、無い場合のみネスト構造から導出して埋める。
+    raw_text は表示用数式（latex/plain_text）が無い needs_math_review な式でも UI が
+    「原文（未整形）」として表示できるよう、source_extraction.raw_text から補完する。
+    """
+    latex, plain_text = _equation_display_math(eq)
+    if latex and not eq.get("latex"):
+        eq["latex"] = latex
+    if plain_text and not eq.get("plain_text"):
+        eq["plain_text"] = plain_text
+    if not eq.get("raw_text"):
+        src = eq.get("source_extraction") if isinstance(eq.get("source_extraction"), dict) else {}
+        raw = src.get("raw_text")
+        if raw:
+            eq["raw_text"] = raw
+
+
 def _collect_structured_content(artifacts_by_doc: dict[str, dict]) -> dict:
     mapping_topics: list[dict] = []
     components: dict[str, dict] = {}
@@ -193,6 +240,12 @@ def _collect_structured_content(artifacts_by_doc: dict[str, dict]) -> dict:
                 continue
             eq = dict(equation)
             eq.setdefault("document_id", document_id)
+            # equation_semantics の生成物はネスト構造（source_extraction / reconstruction）で
+            # 保存されており、トップレベルに latex / plain_text を持たない。後段の
+            # _topic_evidence_links は equation.get("latex") を参照するため、ここで
+            # to_equations_export() と同じ規則でフラット化して埋める（欠落していると
+            # 根拠リンクの本文が空になり ![[equation:id]] が「未解決」になる）。
+            _fill_equation_display_math(eq)
             eq_id = str(eq.get("equation_id") or eq.get("id") or "")
             if eq_id:
                 equations[eq_id] = eq
@@ -333,7 +386,16 @@ def _topic_evidence_links(
     links: list[dict] = []
     seen: set[tuple[str, str]] = set()
 
-    def add(kind: str, target_id: str, summary: str, support_role: str) -> None:
+    def add(
+        kind: str,
+        target_id: str,
+        summary: str,
+        support_role: str,
+        *,
+        latex: str | None = None,
+        plain_text: str | None = None,
+        label: str | None = None,
+    ) -> None:
         target_id = str(target_id or "").strip()
         if not target_id:
             return
@@ -341,13 +403,22 @@ def _topic_evidence_links(
         if key in seen:
             return
         seen.add(key)
-        links.append({
+        link = {
             "kind": kind,
             "target_id": target_id,
             "summary": _short_excerpt(summary, limit=220) if summary else "",
             "support_role": support_role,
             "confidence": confidence,
-        })
+        }
+        # 数式は latex / label を持たせ、UI が生 LaTeX 文字列ではなく数式として
+        # 描画できるようにする（summary はあくまで人間向けの説明にする）。
+        if latex:
+            link["latex"] = latex
+        if plain_text:
+            link["plain_text"] = plain_text
+        if label:
+            link["label"] = label
+        links.append(link)
 
     for component in components:
         add(
@@ -358,11 +429,17 @@ def _topic_evidence_links(
         )
 
     for equation in equations:
+        semantics = equation.get("semantics") if isinstance(equation.get("semantics"), dict) else {}
+        # summary は生 LaTeX ではなく、意味要約 / ラベルなど人間向けの説明にする。
+        eq_summary = semantics.get("summary") or equation.get("label") or ""
         add(
             "equation",
             equation.get("equation_id") or equation.get("id") or "",
-            equation.get("plain_text") or equation.get("latex") or "",
+            eq_summary,
             "equation",
+            latex=equation.get("latex") or equation.get("latex_canonical") or equation.get("normalized_latex") or "",
+            plain_text=equation.get("plain_text") or "",
+            label=equation.get("label") or "",
         )
 
     # claim は component の linked_claim_ids 経由で参照される。claims.json に実体が
@@ -931,8 +1008,23 @@ def _ensure_required_equations_in_material(result: dict, topic: dict) -> None:
         label = str(item.get("label") or eq_id)
         description = _equation_material_description(item)
         lines.append(f"- {label}: {description}")
-        lines.append(f"![[equation:{eq_id}]]")
+        # 未解決の数式 fix: 描画できる本体（LaTeX / reading / 原文）を持つ式だけ
+        # `![[equation:id]]` を埋め込む。本体の無い式（linked_equation_ids だけの
+        # 裸ID 等）に埋め込みを出すと、必ず「未解決の数式」になるため埋め込まない。
+        if _equation_has_renderable_body(item):
+            lines.append(f"![[equation:{eq_id}]]")
     material["source_text"] = "\n".join(line for line in lines if line is not None).strip()
+
+
+def _equation_has_renderable_body(item: dict) -> bool:
+    """数式項目が UI で描画可能な本体（LaTeX / reading / 原文）を持つか。"""
+    if not isinstance(item, dict):
+        return False
+    return bool(
+        (item.get("latex") or item.get("latex_canonical") or item.get("normalized_latex"))
+        or (item.get("plain_text") or item.get("reading"))
+        or (item.get("raw_text") or item.get("text"))
+    )
 
 
 def _equation_material_description(item: dict) -> str:

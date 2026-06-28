@@ -60,8 +60,25 @@ def test_ensure_required_equations_adds_missing_embeds():
     assert "### この節で使う数式" in source_text
     assert "- 式A: 物理量の関係を定義する式" in source_text
     assert r"\begin{aligned}" not in source_text
+    # 本体（plain_text）を持つ式は埋め込まれる。
     assert "![[equation:eq_from_id]]" in source_text
-    assert "![[equation:eq_link_only]]" in source_text
+    # 未解決の数式 fix: 本体の無い裸ID（linked_equation_ids だけ）には埋め込みを出さない
+    # （出すと必ず「未解決の数式」になるため）。説明バレットは残す。
+    assert "![[equation:eq_link_only]]" not in source_text
+    assert "eq_link_only" in source_text
+
+
+def test_equation_has_renderable_body():
+    from core.course_content_builder import _equation_has_renderable_body
+
+    assert _equation_has_renderable_body({"latex": "a=b"})
+    assert _equation_has_renderable_body({"plain_text": "aはbに等しい"})
+    assert _equation_has_renderable_body({"raw_text": "F2 = a+b"})
+    assert _equation_has_renderable_body({"normalized_latex": "x=y"})
+    # 本体が無い（IDとラベルだけ）の式は埋め込み不可と判定される。
+    assert not _equation_has_renderable_body({"equation_id": "eq_x", "label": "eq:x"})
+    assert not _equation_has_renderable_body({})
+    assert not _equation_has_renderable_body(None)
 
 
 def test_content_blocks_carry_raw_text_for_latexless_equations():
@@ -201,6 +218,97 @@ def test_topic_evidence_links_surfaces_component_equation_claim_and_source():
     assert by_key[("source", "ev_1")]["summary"] == "We find that the kernel coefficients are time dependent."
     assert by_key[("source", "ev_1")]["support_role"] == "source_quote"
     assert by_key[("component", "comp_001")]["confidence"] == "high"
+
+
+def test_collect_structured_content_flattens_nested_equation_latex():
+    """equation_semantics 生成物のネストされた source_extraction.latex を
+    トップレベル latex/plain_text に補完し、根拠リンク本文が空にならないこと。"""
+    from core.course_content_builder import _collect_structured_content, _topic_evidence_links
+
+    artifacts_by_doc = {
+        "doc-1": {
+            "equation_semantics": {
+                "equations": [
+                    {
+                        "equation_id": "eq_eq_functions1",
+                        "source_extraction": {
+                            "latex": r"\alpha(k_1,k_2) := 1 + \frac{k_1\cdot k_2}{k_1^2}",
+                            "plain_text": "alpha = 1 + ...",
+                            "needs_math_review": False,
+                            "extraction_status": "complete",
+                        },
+                        "reconstruction": {"status": "none"},
+                    },
+                ],
+            },
+        },
+    }
+
+    bundle = _collect_structured_content(artifacts_by_doc)
+    eq = bundle["equations"]["eq_eq_functions1"]
+    assert eq["latex"].startswith(r"\alpha(k_1,k_2)")
+    assert eq["plain_text"] == "alpha = 1 + ..."
+
+    links = _topic_evidence_links([], [eq], {}, {}, "high")
+    by_key = {(l["kind"], l["target_id"]): l for l in links}
+    # 描画用 latex が根拠リンクに載る（summary は意味要約用で、ここでは空でも可）。
+    assert by_key[("equation", "eq_eq_functions1")]["latex"].startswith(r"\alpha(k_1,k_2)")
+
+
+def test_topic_evidence_links_equation_uses_semantic_summary_and_carries_latex():
+    """数式の根拠リンクは summary に生 LaTeX を入れず意味要約を使い、
+    描画用に latex / label を別フィールドで持つこと。"""
+    from core.course_content_builder import _topic_evidence_links
+
+    equations = [{
+        "equation_id": "eq_eq_functions1",
+        "label": "eq:functions1",
+        "latex": r"\alpha(k_1,k_2) := 1 + \frac{k_1\cdot k_2}{k_1^2}",
+        "plain_text": "alpha = ...",
+        "semantics": {"summary": "モード結合の基底関数を定義する。"},
+    }]
+
+    links = _topic_evidence_links([], equations, {}, {}, "high")
+    eq_link = next(l for l in links if l["kind"] == "equation" and l["target_id"] == "eq_eq_functions1")
+
+    assert eq_link["summary"] == "モード結合の基底関数を定義する。"
+    assert not eq_link["summary"].startswith("\\")  # 生 LaTeX ではない
+    assert eq_link["latex"].startswith(r"\alpha(k_1,k_2)")
+    assert eq_link["label"] == "eq:functions1"
+
+
+def test_equation_display_math_respects_needs_math_review_and_reconstruction():
+    from core.course_content_builder import _equation_display_math
+
+    # needs_math_review な PDF 由来数式は表示用にしない（None）。
+    latex, plain = _equation_display_math({
+        "source_extraction": {"latex": "garbled", "plain_text": "garbled", "needs_math_review": True},
+        "reconstruction": {"status": "none"},
+    })
+    assert latex is None and plain is None
+
+    # reconstruction があればそれを優先する。
+    latex, plain = _equation_display_math({
+        "source_extraction": {"latex": "raw", "plain_text": "raw", "needs_math_review": True},
+        "reconstruction": {"status": "reconstructed", "latex": "E=mc^2", "plain_text": "E equals m c squared"},
+    })
+    assert latex == "E=mc^2" and plain == "E equals m c squared"
+
+    # prose 再構成（latex_is_prose）は監査専用なので表示しない。
+    latex, plain = _equation_display_math({
+        "source_extraction": {"latex": "raw", "plain_text": "raw", "needs_math_review": True},
+        "reconstruction": {"status": "reconstructed", "latex": "これは説明文です", "review_reason": ["latex_is_prose"]},
+    })
+    assert latex is None and plain is None
+
+
+def test_fill_equation_display_math_respects_existing_top_level():
+    from core.course_content_builder import _fill_equation_display_math
+
+    # 既にトップレベルへフラット化済みの値は尊重する。
+    eq = {"latex": "kept", "source_extraction": {"latex": "other", "needs_math_review": False}}
+    _fill_equation_display_math(eq)
+    assert eq["latex"] == "kept"
 
 
 def test_topic_evidence_for_prompt_derives_available_references_from_links():

@@ -1294,8 +1294,16 @@ def check_prerequisites(
     course_data: dict,
     topic_title: str,
     user_message: str,
-) -> str | None:
-    """コースデータの prerequisites フィールドを基に前提知識を確認し、未習得なら逆質問を返す。"""
+) -> dict | None:
+    """コースデータの prerequisites フィールドを基に前提知識を確認し、未習得なら介入情報を返す。
+
+    Returns
+    -------
+    dict | None
+        未習得の前提知識がある場合は ``{"message", "first_prerequisite", "unlearned"}``。
+        介入不要なら ``None``。選択肢ボタン（はい/いいえ）は呼び出し側（ルート）が
+        構造化 ``next_actions`` として組み立てるため、ここでは本文のみを返す。
+    """
     skip_keywords = ["理解", "わかります", "わかっています", "知っています", "できます", "学習済み"]
     if any(kw in user_message for kw in skip_keywords):
         return None
@@ -1361,15 +1369,19 @@ def check_prerequisites(
 
         prereq_list = "、".join(unlearned[:3])
         first_prereq = unlearned[0]
-        return (
+        message = (
             f"「{topic_title}」を理解するには、まず以下の前提知識を押さえる必要があります：\n\n"
             f"**{prereq_list}**\n\n"
             f"この前提知識を理解していますか？\n"
             f"理解している場合は、その前提で「{topic_title}」の説明に進みます。"
             f"理解できていない場合は、まず「{first_prereq}」から説明します。\n\n"
-            f"[ACTION_BUTTON: はい、理解しています]\n"
-            f"[ACTION_BUTTON: いいえ、理解できていないので{first_prereq}について教えてください]"
+            f"（下の選択肢から進め方を選んでください。）"
         )
+        return {
+            "message": message,
+            "first_prerequisite": first_prereq,
+            "unlearned": unlearned,
+        }
     except Exception:
         logger.warning("Prerequisite check failed, continuing without intervention", exc_info=True)
         return None

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
+from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text as sa_text
@@ -47,7 +48,7 @@ from services import (
     user_can_view_course,
 )
 from core.llm import generate_text, get_llm_params
-from core.learning_support_agent import LearningSupportAgent
+from core.learning_support_agent import LearningSupportAgent, extract_inline_actions
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
 from core.course_content_builder import build_course_content_background
@@ -463,6 +464,29 @@ def _is_greeting(message: str) -> bool:
     return False
 
 
+# UI ボタン由来の型付きアクションは、自然文の intent 分類を経由せず決定論的に
+# ルートへ割り当てる。これにより日本語ラベル（や壊れたトークン）が CHIT_CHAT へ
+# 誤分類される事故を防ぐ。
+_TYPED_ACTION_INTENT: dict[str, str] = {
+    "check_prerequisites": "LEARNING_ADVICE",
+    "review_prerequisite": "LEARNING_ADVICE",
+    "prerequisite_review": "LEARNING_ADVICE",
+    "drilldown": "DOMAIN_RAG",
+    "ask_question": "DOMAIN_RAG",
+    "continue_detail": "DOMAIN_RAG",
+    "start_topic": "DOMAIN_RAG",
+}
+
+_PREREQUISITE_ACTIONS = {"check_prerequisites", "review_prerequisite", "prerequisite_review"}
+
+
+def _route_for_typed_action(support_action: str | None) -> str | None:
+    """型付き support_action に対応する確定ルートを返す（無ければ None）。"""
+    if not support_action:
+        return None
+    return _TYPED_ACTION_INTENT.get(support_action.strip())
+
+
 def _classify_intent(message: str, course_title: str) -> str:
     """ユーザーメッセージの意図を分類する (Intent Routing)。
 
@@ -569,10 +593,9 @@ def _generate_learning_advice_response(
         "1. 【歓迎と目標】このトピックで学ぶことの全体像と、最終的な学習目標を簡潔に説明する。\n"
         "2. 【構成要素】習得すべき主要な概念をリストアップする。\n"
         "3. 【前提知識の確認】このトピックを学ぶために必要な前提知識を提示する。\n"
-        "4. 【ネクストアクション】本文の自然文だけで選択肢を書かず、必ず次の形式でクリック用候補を2つ出す:\n"
-        "   [ACTION_BUTTON: 前提知識を復習する]\n"
-        "   [ACTION_BUTTON: 最初の概念の説明に進む]\n\n"
-        "※注意: ここでは具体的な解説（数式展開など）はまだ行わないこと。"
+        "4. 【次の一歩】最後に、学生がこの後どう進めばよいかを1〜2文で促す。\n\n"
+        "※注意: ここでは具体的な解説（数式展開など）はまだ行わないこと。\n"
+        "※注意: 選択肢ボタンはシステムが自動付与するので、本文に [ ] 形式のボタン記法は書かないこと。"
     )
 
     try:
@@ -588,8 +611,7 @@ def _generate_learning_advice_response(
             f"これから「{topic_title}」の学習を始めます。\n\n"
             + (f"**習得すべき主要概念:** {', '.join(concepts)}\n\n" if concepts else "")
             + (f"**必要な前提知識:** {', '.join(prerequisites)}\n\n" if prerequisites else "")
-            + "[ACTION_BUTTON: 前提知識を復習する]\n"
-            + "[ACTION_BUTTON: 最初の概念の説明に進む]"
+            + "下の選択肢から、前提知識の確認に進むか、最初の概念の説明に進むかを選んでください。"
         )
 
 
@@ -805,6 +827,37 @@ def _select_check_question(topic: dict, requested_question: str = "", request_it
     return _normalize_check_question_item("このセクションの要点を説明してください。")
 
 
+def _topic_formulas_from_content_blocks(topic: dict) -> list[dict]:
+    """topic.content_blocks の equations から、UIの数式埋め込み解決用 formulas を作る。
+
+    未解決の数式 fix: LaTeX が無くても reading(plain_text) や原文(raw_text) があれば
+    数式項目として渡す（フロントは latex → plain_text → raw_text の順にフォールバック
+    描画する）。これで `![[equation:id]]` 埋め込みが「未解決」にならずに済む。描画材料が
+    一切無い項目だけを除外する。
+    """
+    formulas: list[dict] = []
+    for block in topic.get("content_blocks") or []:
+        if not isinstance(block, dict) or block.get("type") != "equations":
+            continue
+        for item in block.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            latex = item.get("latex") or ""
+            plain_text = item.get("plain_text") or ""
+            raw_text = item.get("raw_text") or ""
+            if not (latex or plain_text or raw_text):
+                continue
+            formulas.append({
+                "id": item.get("equation_id") or f"TOPIC_FORMULA_{len(formulas)}",
+                "latex": latex,
+                "label": item.get("label") or "",
+                "plain_text": plain_text,
+                "raw_text": raw_text,
+                "is_display": True,
+            })
+    return formulas
+
+
 @router.get(
     "/courses/{course_id}/topics/{topic_id}/material",
     response_model=TopicMaterialResponse,
@@ -836,23 +889,7 @@ def get_topic_material(
 
     topic_text = _topic_student_material(topic or {})
     if topic_text.strip():
-        formulas: list[dict] = []
-        for block in (topic or {}).get("content_blocks") or []:
-            if not isinstance(block, dict) or block.get("type") != "equations":
-                continue
-            for item in block.get("items") or []:
-                if not isinstance(item, dict):
-                    continue
-                latex = item.get("latex") or ""
-                if not latex:
-                    continue
-                formulas.append({
-                    "id": item.get("equation_id") or f"TOPIC_FORMULA_{len(formulas)}",
-                    "latex": latex,
-                    "label": item.get("label") or "",
-                    "plain_text": item.get("plain_text") or "",
-                    "is_display": True,
-                })
+        formulas = _topic_formulas_from_content_blocks(topic or {})
         chunks = [ChunkContent(
             id=f"topic:{topic_id}",
             text=topic_text,
@@ -1106,17 +1143,20 @@ def learning_chat(
             course_data=course_data,
             body=body,
         )
-        if body.support_context:
-            result = support_agent.with_learning_actions(
-                answer=graph_response.answer,
-                mode="detail_explanation",
-                origin=support_origin,
-            )
-            return LearningChatResponse(**result.model_dump(), course_update=graph_response.course_update)
-        return graph_response
+        # グラフ要素の説明は常に detour（origin=現在アンカー）として扱い、
+        # どの入口由来でも「学習パスに戻る」を提示する。
+        clean_answer, inline_actions = extract_inline_actions(graph_response.answer)
+        result = support_agent.with_learning_actions(
+            answer=clean_answer,
+            mode="detail_explanation",
+            origin=support_origin,
+            include_continue=False,
+            extra_actions=inline_actions,
+        )
+        return LearningChatResponse(**result.model_dump(), course_update=graph_response.course_update)
 
-    # 2. 意図分類（Intent Routing）
-    intent = _classify_intent(body.message, course_title)
+    # 2. 意図分類（Intent Routing）— UI ボタン由来の型付きアクションは分類を経由しない。
+    intent = _route_for_typed_action(body.support_action) or _classify_intent(body.message, course_title)
 
     # ルート①: 雑談・無関係な質問 → 学習に関する質問を促す
     if intent == "CHIT_CHAT":
@@ -1137,32 +1177,57 @@ def learning_chat(
             course_title, topic_title, body.message,
             topic_info=topic_info, course_data=course_data,
         )
-        if body.support_action == "check_prerequisites" or LearningSupportAgent.is_prerequisite_request(body.message):
+        advice_answer, inline_actions = extract_inline_actions(advice_answer)
+        is_prereq = (
+            body.support_action in _PREREQUISITE_ACTIONS
+            or LearningSupportAgent.is_prerequisite_request(body.message)
+        )
+        if is_prereq:
+            # 前提確認は detour（origin=現在アンカー）。復帰導線を必ず付ける。
             result = support_agent.with_learning_actions(
                 answer=advice_answer,
                 mode="prerequisite_review",
                 origin=support_origin,
+                extra_actions=inline_actions,
             )
             persist_chat_history(
                 current_user["id"], course_id, topic_id,
                 body.history, body.message, result.answer,
             )
             return LearningChatResponse(**result.model_dump(), course_update=None)
+        # 学習開始・一般アドバイスはパス上（detour ではない）。前進アクションを型付きで提示。
         persist_chat_history(
             current_user["id"], course_id, topic_id,
             body.history, body.message, advice_answer,
         )
-        return LearningChatResponse(answer=advice_answer, course_update=None)
+        first_concept = ""
+        for _c in (course_data.get("concepts") or []):
+            _name = _c.get("name", _c) if isinstance(_c, dict) else str(_c)
+            if _name:
+                first_concept = str(_name)
+                break
+        advice_next = support_agent.advice_actions(support_origin, topic_title, first_concept)
+        return LearningChatResponse(
+            answer=advice_answer,
+            course_update=None,
+            origin=asdict(support_origin),
+            next_actions=[asdict(a) for a in (advice_next + inline_actions)],
+        )
 
     # 3. Adaptive Routing: 前提知識の自動判定 (ルート③/④の前に実行)
     prerequisite_intervention = check_prerequisites(
         current_user["id"], course_id, course_data, topic_title, body.message
     )
     if prerequisite_intervention:
+        choice_actions = support_agent.prerequisite_choice_actions(
+            prerequisite_intervention.get("first_prerequisite", "")
+        )
         result = support_agent.with_learning_actions(
-            answer=prerequisite_intervention,
+            answer=prerequisite_intervention["message"],
             mode="prerequisite_review",
             origin=support_origin,
+            include_continue=False,
+            extra_actions=choice_actions,
         )
         persist_chat_history(
             current_user["id"], course_id, topic_id,
@@ -1221,11 +1286,14 @@ def learning_chat(
         current_user["id"], course_id, topic_id,
         body.history, body.message, answer,
     )
-    if body.support_context:
-        result = support_agent.with_learning_actions(
-            answer=answer,
-            mode="detail_explanation",
-            origin=support_origin,
-        )
-        return LearningChatResponse(**result.model_dump(), course_update=course_update)
-    return LearningChatResponse(answer=answer, course_update=course_update)
+    # ドメイン質問は常に detour（origin=現在アンカー）として扱う。本文中のドリルダウン
+    # マーカーは構造化アクションへ正規化し、復帰導線と合わせて next_actions に集約する。
+    clean_answer, inline_actions = extract_inline_actions(answer)
+    result = support_agent.with_learning_actions(
+        answer=clean_answer,
+        mode="detail_explanation",
+        origin=support_origin,
+        include_continue=False,
+        extra_actions=inline_actions,
+    )
+    return LearningChatResponse(**result.model_dump(), course_update=course_update)

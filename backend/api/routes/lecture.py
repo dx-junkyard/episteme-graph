@@ -12,6 +12,7 @@ import base64
 import json
 import logging
 import uuid
+from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text as sa_text
@@ -38,6 +39,7 @@ from core.lecture import (
     get_user_mastered_concepts,
     normalize_to_placeholder_format,
 )
+from core.learning_support_agent import extract_inline_actions
 from core.llm import generate_text, get_llm_params
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
@@ -292,77 +294,103 @@ def generate_tts(
     body: LectureTTSRequest,
     current_user: dict = Depends(_get_current_user),
 ) -> LectureTTSResponse:
-    """チャンクの spoken_text から TTS 音声を生成する。キャッシュがあればそれを返す。"""
+    """キャッシュ済みの TTS 音声を返す。
+
+    音声の生成は管理画面のバッチ処理（``/admin/courses/{id}/lecture-audio/generate``）でのみ
+    行う方針のため、学習画面からの本エンドポイントはキャッシュ済み音声の配信のみを担い、
+    オンデマンド生成は行わない。キャッシュが無い場合は 404 を返す（呼び出し側はレクチャー
+    ボタンを無効化して未生成トピックを再生不可にする）。
+    """
     chunk_id = body.chunk_id
 
-    if chunk_id.startswith("topic:"):
-        course_data = get_course_data(current_user["id"], course_id)
-        if not course_data:
-            raise HTTPException(status_code=404, detail="Course not found")
-        topic = next((t for t in course_data.get("topics", []) if t.get("id") == topic_id), None)
-        if not topic:
-            raise HTTPException(status_code=404, detail="Topic not found")
-        spoken_text = _topic_spoken_script(topic)
-        if not spoken_text:
-            raise HTTPException(status_code=404, detail="Topic has no spoken script")
-        return _generate_tts_response(chunk_id, body.voice, spoken_text)
+    # topic: ドラフト原稿などキャッシュ不可（非 UUID）の chunk_id は音声未生成扱い。
+    if not _is_valid_uuid(chunk_id):
+        raise HTTPException(
+            status_code=404,
+            detail="この内容の音声はまだ生成されていません。管理画面で音声を生成してください。",
+        )
 
-    # キャッシュ確認
     cached = _get_audio_cache(chunk_id, body.voice)
-    if cached:
-        return LectureTTSResponse(
-            chunk_id=chunk_id,
-            audio_base64=cached["audio_base64"],
-            duration_ms=cached["duration_ms"],
-            word_timestamps=cached["word_timestamps"],
+    if not cached:
+        raise HTTPException(
+            status_code=404,
+            detail="この内容の音声はまだ生成されていません。管理画面で音声を生成してください。",
         )
 
-    # spoken_text を取得
-    spoken_text = _get_chunk_spoken_text(chunk_id)
-    if not spoken_text:
-        raise HTTPException(status_code=404, detail="Chunk not found or has no spoken text")
-
-    response = _generate_tts_response(chunk_id, body.voice, spoken_text)
-    if _is_valid_uuid(chunk_id):
-        audio_bytes = base64.b64decode(response.audio_base64)
-        _save_audio_cache(chunk_id, body.voice, audio_bytes, response.duration_ms, [])
-    return response
+    return LectureTTSResponse(
+        chunk_id=chunk_id,
+        audio_base64=cached["audio_base64"],
+        duration_ms=cached["duration_ms"],
+        word_timestamps=cached["word_timestamps"],
+    )
 
 
-def _generate_tts_response(chunk_id: str, voice: str, spoken_text: str) -> LectureTTSResponse:
-    """OpenAI TTS API で音声生成する。"""
+@router.get("/courses/{course_id}/topics/{topic_id}/audio-status")
+def get_topic_audio_status(
+    course_id: str,
+    topic_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """トピックに再生可能（キャッシュ済み）な音声があるかを軽量に判定する。
+
+    学習画面のレクチャーボタンの有効/無効を決めるための判定で、spoken_text や音声の
+    生成は一切行わない。ドラフト原稿ベースのトピック（``topic:`` セグメントで再生され、
+    音声をキャッシュできない）と、教材チャンクが無いトピックは ``has_audio=False`` を返す。
+    """
+    course_data = get_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    topic_info = next(
+        (t for t in course_data.get("topics", []) if t.get("id") == topic_id), None,
+    )
+    if not topic_info:
+        raise HTTPException(status_code=404, detail="Topic not found")
+
+    empty = {
+        "course_id": course_id,
+        "topic_id": topic_id,
+        "has_audio": False,
+        "ready_chunks": 0,
+        "total_chunks": 0,
+    }
+
+    # ドラフト原稿ベースのトピックは topic: セグメントで再生され音声をキャッシュできない。
+    if _topic_student_material(topic_info) or _topic_spoken_script(topic_info):
+        return empty
+
+    sources = course_data.get("sources", [])
+    material_ids = [s.get("material_id") for s in sources if s.get("material_id")]
+    if not material_ids:
+        return empty
+
+    session = _pg_session()
     try:
-        from core.config import get_settings
-        import openai
+        mid_placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
+        params: dict = {f"mid_{i}": mid for i, mid in enumerate(material_ids)}
+        row = session.execute(
+            sa_text(f"""
+                SELECT COUNT(DISTINCT c.id) AS total,
+                       COUNT(DISTINCT a.chunk_id) AS ready
+                FROM chunks c
+                LEFT JOIN lecture_audio_cache a ON a.chunk_id = c.id
+                WHERE c.material_id IN ({mid_placeholders})
+                  AND c.text IS NOT NULL AND c.text != ''
+            """),
+            params,
+        ).fetchone()
+    finally:
+        session.close()
 
-        settings = get_settings()
-        client = openai.OpenAI(api_key=settings.llm_api_key)
-
-        response = client.audio.speech.create(
-            model="tts-1",
-            voice=voice,
-            input=spoken_text[:4096],
-            response_format="mp3",
-        )
-
-        audio_bytes = response.content
-        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-
-        # 簡易的な再生時間推定（MP3: ~128kbps → bytes / 16000 * 1000 ms）
-        estimated_duration_ms = max(1000, len(audio_bytes) * 8 // 128)
-
-        return LectureTTSResponse(
-            chunk_id=chunk_id,
-            audio_base64=audio_b64,
-            duration_ms=estimated_duration_ms,
-            word_timestamps=[],
-        )
-
-    except ImportError:
-        raise HTTPException(status_code=501, detail="OpenAI SDK not available for TTS")
-    except Exception as exc:
-        logger.exception("TTS generation failed for chunk %s", chunk_id)
-        raise HTTPException(status_code=500, detail=f"TTS generation failed: {exc}") from exc
+    total = int(row[0]) if row and row[0] is not None else 0
+    ready = int(row[1]) if row and row[1] is not None else 0
+    return {
+        "course_id": course_id,
+        "topic_id": topic_id,
+        "has_audio": ready > 0,
+        "ready_chunks": ready,
+        "total_chunks": total,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -460,17 +488,22 @@ def lecture_interrupt_chat(
             body.message, answer,
         )
 
-    # チャット履歴を永続化
+    # 本文中のドリルダウンマーカーは構造化アクションへ正規化する（フロントは
+    # next_actions のみ描画）。講義への復帰はポップアップの「講義を再開する」ボタンが担う。
+    clean_answer, inline_actions = extract_inline_actions(answer)
+
+    # チャット履歴は本トピックの会話と同一スレッドに永続化する（割込みも同じ会話）。
     persist_chat_history(
         current_user["id"], course_id, topic_id,
-        body.history, body.message, answer,
+        body.history, body.message, clean_answer,
     )
 
     return LectureInterruptResponse(
-        answer=answer,
+        answer=clean_answer,
         resume_chunk_id=body.current_chunk_id,
         resume_position_ms=body.pause_position_ms,
         course_update=course_update,
+        next_actions=[asdict(a) for a in inline_actions],
     )
 
 
