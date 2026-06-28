@@ -609,3 +609,130 @@ class TestGenerateSequenceFromSearchUsesRealIds:
         assert len(result.segments) == 1
         assert result.segments[0].chunk_id == "search_0"
         assert result.segments[0].has_audio is False
+
+
+# ---------------------------------------------------------------------------
+# 10. /tts はキャッシュ済み音声のみ配信し生成しない（音声生成は管理画面のみ）
+# ---------------------------------------------------------------------------
+
+
+_UUID = "550e8400-e29b-41d4-a716-446655440000"
+
+
+class TestGenerateTtsCachedOnly:
+    """generate_tts はキャッシュ済み音声のみを配信し、オンデマンド生成を行わない。"""
+
+    def test_non_uuid_chunk_returns_404(self):
+        from fastapi import HTTPException
+        from api.routes.lecture import generate_tts
+        from schemas import LectureTTSRequest
+
+        with pytest.raises(HTTPException) as exc:
+            generate_tts("c1", "t1", LectureTTSRequest(chunk_id="topic:t1"), {"id": "u1"})
+        assert exc.value.status_code == 404
+
+    @patch("api.routes.lecture._get_audio_cache", return_value=None)
+    def test_uuid_without_cache_returns_404(self, mock_cache):
+        from fastapi import HTTPException
+        from api.routes.lecture import generate_tts
+        from schemas import LectureTTSRequest
+
+        with pytest.raises(HTTPException) as exc:
+            generate_tts("c1", "t1", LectureTTSRequest(chunk_id=_UUID), {"id": "u1"})
+        assert exc.value.status_code == 404
+
+    @patch("api.routes.lecture._get_audio_cache")
+    def test_uuid_with_cache_returns_audio(self, mock_cache):
+        from api.routes.lecture import generate_tts
+        from schemas import LectureTTSRequest
+
+        mock_cache.return_value = {
+            "audio_base64": "Zm9v",
+            "duration_ms": 1234,
+            "word_timestamps": [],
+        }
+        resp = generate_tts("c1", "t1", LectureTTSRequest(chunk_id=_UUID), {"id": "u1"})
+        assert resp.chunk_id == _UUID
+        assert resp.audio_base64 == "Zm9v"
+        assert resp.duration_ms == 1234
+
+    def test_generation_helper_removed_from_learning_route(self):
+        """学習ルートからは TTS 生成関数を撤去済み（生成は管理画面のみ）。"""
+        import api.routes.lecture as lecture_module
+
+        assert not hasattr(lecture_module, "_generate_tts_response")
+
+
+class TestTopicAudioStatus:
+    """get_topic_audio_status のレクチャー音声可否判定。"""
+
+    @patch("api.routes.lecture.get_course_data", return_value=None)
+    def test_course_not_found_404(self, mock_course):
+        from fastapi import HTTPException
+        from api.routes.lecture import get_topic_audio_status
+
+        with pytest.raises(HTTPException) as exc:
+            get_topic_audio_status("c1", "t1", {"id": "u1"})
+        assert exc.value.status_code == 404
+
+    @patch("api.routes.lecture.get_course_data")
+    def test_topic_not_found_404(self, mock_course):
+        from fastapi import HTTPException
+        from api.routes.lecture import get_topic_audio_status
+
+        mock_course.return_value = {"topics": [{"id": "other"}]}
+        with pytest.raises(HTTPException) as exc:
+            get_topic_audio_status("c1", "t1", {"id": "u1"})
+        assert exc.value.status_code == 404
+
+    @patch("api.routes.lecture.get_course_data")
+    def test_draft_topic_has_no_audio(self, mock_course):
+        """ドラフト原稿ベースのトピックは音声をキャッシュできないため has_audio=False。"""
+        from api.routes.lecture import get_topic_audio_status
+
+        mock_course.return_value = {"topics": [{"id": "t1", "spoken_script": "原稿テキスト"}]}
+        result = get_topic_audio_status("c1", "t1", {"id": "u1"})
+        assert result["has_audio"] is False
+
+    @patch("api.routes.lecture.get_course_data")
+    def test_no_material_ids_has_no_audio(self, mock_course):
+        from api.routes.lecture import get_topic_audio_status
+
+        mock_course.return_value = {"topics": [{"id": "t1"}], "sources": []}
+        result = get_topic_audio_status("c1", "t1", {"id": "u1"})
+        assert result["has_audio"] is False
+
+    @patch("api.routes.lecture._pg_session")
+    @patch("api.routes.lecture.get_course_data")
+    def test_material_topic_with_cached_audio(self, mock_course, mock_session):
+        from api.routes.lecture import get_topic_audio_status
+
+        mock_course.return_value = {
+            "topics": [{"id": "t1"}],
+            "sources": [{"material_id": "m1"}],
+        }
+        session = MagicMock()
+        session.execute.return_value.fetchone.return_value = (10, 4)
+        mock_session.return_value = session
+
+        result = get_topic_audio_status("c1", "t1", {"id": "u1"})
+        assert result["has_audio"] is True
+        assert result["total_chunks"] == 10
+        assert result["ready_chunks"] == 4
+
+    @patch("api.routes.lecture._pg_session")
+    @patch("api.routes.lecture.get_course_data")
+    def test_material_topic_without_cached_audio(self, mock_course, mock_session):
+        from api.routes.lecture import get_topic_audio_status
+
+        mock_course.return_value = {
+            "topics": [{"id": "t1"}],
+            "sources": [{"material_id": "m1"}],
+        }
+        session = MagicMock()
+        session.execute.return_value.fetchone.return_value = (10, 0)
+        mock_session.return_value = session
+
+        result = get_topic_audio_status("c1", "t1", {"id": "u1"})
+        assert result["has_audio"] is False
+        assert result["ready_chunks"] == 0

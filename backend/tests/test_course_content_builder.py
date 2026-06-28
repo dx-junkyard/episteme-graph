@@ -220,6 +220,74 @@ def test_topic_evidence_links_surfaces_component_equation_claim_and_source():
     assert by_key[("component", "comp_001")]["confidence"] == "high"
 
 
+def test_collect_structured_content_flattens_nested_equation_latex():
+    """equation_semantics 生成物のネストされた source_extraction.latex を
+    トップレベル latex/plain_text に補完し、根拠リンク本文が空にならないこと。"""
+    from core.course_content_builder import _collect_structured_content, _topic_evidence_links
+
+    artifacts_by_doc = {
+        "doc-1": {
+            "equation_semantics": {
+                "equations": [
+                    {
+                        "equation_id": "eq_eq_functions1",
+                        "source_extraction": {
+                            "latex": r"\alpha(k_1,k_2) := 1 + \frac{k_1\cdot k_2}{k_1^2}",
+                            "plain_text": "alpha = 1 + ...",
+                            "needs_math_review": False,
+                            "extraction_status": "complete",
+                        },
+                        "reconstruction": {"status": "none"},
+                    },
+                ],
+            },
+        },
+    }
+
+    bundle = _collect_structured_content(artifacts_by_doc)
+    eq = bundle["equations"]["eq_eq_functions1"]
+    assert eq["latex"].startswith(r"\alpha(k_1,k_2)")
+    assert eq["plain_text"] == "alpha = 1 + ..."
+
+    links = _topic_evidence_links([], [eq], {}, {}, "high")
+    by_key = {(l["kind"], l["target_id"]): l for l in links}
+    assert by_key[("equation", "eq_eq_functions1")]["summary"] != ""
+
+
+def test_equation_display_math_respects_needs_math_review_and_reconstruction():
+    from core.course_content_builder import _equation_display_math
+
+    # needs_math_review な PDF 由来数式は表示用にしない（None）。
+    latex, plain = _equation_display_math({
+        "source_extraction": {"latex": "garbled", "plain_text": "garbled", "needs_math_review": True},
+        "reconstruction": {"status": "none"},
+    })
+    assert latex is None and plain is None
+
+    # reconstruction があればそれを優先する。
+    latex, plain = _equation_display_math({
+        "source_extraction": {"latex": "raw", "plain_text": "raw", "needs_math_review": True},
+        "reconstruction": {"status": "reconstructed", "latex": "E=mc^2", "plain_text": "E equals m c squared"},
+    })
+    assert latex == "E=mc^2" and plain == "E equals m c squared"
+
+    # prose 再構成（latex_is_prose）は監査専用なので表示しない。
+    latex, plain = _equation_display_math({
+        "source_extraction": {"latex": "raw", "plain_text": "raw", "needs_math_review": True},
+        "reconstruction": {"status": "reconstructed", "latex": "これは説明文です", "review_reason": ["latex_is_prose"]},
+    })
+    assert latex is None and plain is None
+
+
+def test_fill_equation_display_math_respects_existing_top_level():
+    from core.course_content_builder import _fill_equation_display_math
+
+    # 既にトップレベルへフラット化済みの値は尊重する。
+    eq = {"latex": "kept", "source_extraction": {"latex": "other", "needs_math_review": False}}
+    _fill_equation_display_math(eq)
+    assert eq["latex"] == "kept"
+
+
 def test_topic_evidence_for_prompt_derives_available_references_from_links():
     from core.course_content_builder import _topic_evidence_for_prompt
 

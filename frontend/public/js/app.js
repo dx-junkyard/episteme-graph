@@ -19,6 +19,7 @@
     learningSupport: null, // {mode, status_label, origin}
     sending: false,
     checkingUnderstanding: false,
+    topicHasAudio: false, // 現トピックに再生可能なキャッシュ済み音声があるか
   };
 
   function learningSupportStorageKey() {
@@ -482,6 +483,55 @@
     }
   }
 
+  // 既にHTMLエスケープ済みのテキストを行単位で走査し、見出し・箇条書き・
+  // 番号付きリスト・段落へ変換する。inline はボールド/コード変換コールバック。
+  function mdBlocksToHtml(escaped, inline) {
+    var lines = escaped.split("\n");
+    var out = [];
+    var listType = null; // "ul" | "ol"
+    var para = [];
+    function closeList() { if (listType) { out.push("</" + listType + ">"); listType = null; } }
+    function flushPara() {
+      if (para.length) { out.push("<p>" + para.join("<br>") + "</p>"); para = []; }
+    }
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].replace(/\s+$/, "");
+      if (line === "") { flushPara(); closeList(); continue; }
+      var h = /^(#{1,6})\s+(.*)$/.exec(line);
+      if (h) {
+        flushPara(); closeList();
+        var lvl = h[1].length;
+        out.push("<h" + lvl + ">" + inline(h[2]) + "</h" + lvl + ">");
+        continue;
+      }
+      var ul = /^\s*[-*+]\s+(.*)$/.exec(line);
+      if (ul) {
+        flushPara();
+        if (listType !== "ul") { closeList(); out.push("<ul>"); listType = "ul"; }
+        out.push("<li>" + inline(ul[1]) + "</li>");
+        continue;
+      }
+      var ol = /^\s*(\d+)[.)]\s+(.*)$/.exec(line);
+      if (ol) {
+        flushPara();
+        // 連続しない番号付き項目（各 "2." "3." が段落で分断される節見出しなど）でも
+        // 元の番号を保つため、リスト開始時に start 属性へ実番号を反映する。
+        if (listType !== "ol") {
+          closeList();
+          var start = parseInt(ol[1], 10);
+          out.push(start > 1 ? '<ol start="' + start + '">' : "<ol>");
+          listType = "ol";
+        }
+        out.push("<li>" + inline(ol[2]) + "</li>");
+        continue;
+      }
+      closeList();
+      para.push(inline(line));
+    }
+    flushPara(); closeList();
+    return out.join("");
+  }
+
   function renderAiContent(text, msg) {
     // Preserve LaTeX expressions before HTML escaping
     var latexBlocks = [];
@@ -526,13 +576,15 @@
 
     // Escape HTML
     var html = escHtml(preserved);
-    // Bold
-    html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-    // Inline code (but not LaTeX placeholders)
-    html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
-    // Line breaks → paragraphs
-    html = html.split("\n\n").map(function (p) { return "<p>" + p + "</p>"; }).join("");
-    html = html.replace(/\n/g, "<br>");
+    // Inline formatting (applied per-line below): bold / inline code
+    function inlineMd(s) {
+      s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+      s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+      return s;
+    }
+    // Block-level markdown: headings (#..######), ordered/unordered lists,
+    // and paragraphs. Operates on already-escaped text so markers survive.
+    html = mdBlocksToHtml(html, inlineMd);
 
     // Restore LaTeX blocks
     html = html.replace(/\x00LATEX_BLOCK_(\d+)\x00/g, function (_, idx) {
@@ -818,6 +870,7 @@
     renderChat();
     renderRightPanel();
     updateNextTopicBtn();
+    refreshLectureAvailability();
 
     if (state.courseId && topicId) {
       // 教材チャンクとチャット履歴を並行取得
@@ -1262,6 +1315,7 @@
     renderChat();
     renderRightPanel();
     updateNextTopicBtn();
+    refreshLectureAvailability();
   }
 
   // ── Utilities ──────────────────────────────────────────────────────
@@ -1534,7 +1588,47 @@
     sendingInterrupt: false,
     highlightTimer: null,
     voiceRecognition: null,
+    loadingAudio: false, // TTS フェッチ中フラグ（連打による多重再生を防ぐ）
   };
+
+  // 現トピックに再生可能な音声があるかを確認し、レクチャーボタンの有効/無効を更新する。
+  // 音声生成は管理画面のみで行う方針のため、ここでは生成は一切トリガーしない。
+  async function refreshLectureAvailability() {
+    state.topicHasAudio = false;
+    updateLectureToggleAvailability();
+    if (!state.courseId || !state.currentTopicId) return;
+    var requestedTopicId = state.currentTopicId;
+    try {
+      var res = await apiFetch(
+        "/learning/lecture/courses/" + state.courseId + "/topics/" + requestedTopicId + "/audio-status"
+      );
+      if (res.ok) {
+        var data = await res.json();
+        // 取得中にトピックが切り替わっていたら結果を破棄する。
+        if (state.currentTopicId === requestedTopicId) {
+          state.topicHasAudio = !!data.has_audio;
+        }
+      }
+    } catch (e) {
+      /* 取得失敗時は無効化のまま（生成はさせない） */
+    }
+    updateLectureToggleAvailability();
+  }
+
+  function updateLectureToggleAvailability() {
+    var btn = document.getElementById("lecture-toggle");
+    if (!btn) return;
+    // レクチャー再生中はトグル（テキストへ戻る）を常に許可する。
+    var enabled = lectureState.active || state.topicHasAudio;
+    btn.disabled = !enabled;
+    if (enabled) {
+      btn.classList.remove("disabled");
+      btn.title = "レクチャーモード切替";
+    } else {
+      btn.classList.add("disabled");
+      btn.title = "このトピックの音声はまだ生成されていません（管理画面で音声を生成してください）";
+    }
+  }
 
   function initLectureMode() {
     var toggleBtn = document.getElementById("lecture-toggle");
@@ -1550,6 +1644,7 @@
     var nextTopicBtn = document.getElementById("next-topic-btn");
 
     if (toggleBtn) toggleBtn.addEventListener("click", toggleLectureMode);
+    updateLectureToggleAvailability();
     if (playBtn) playBtn.addEventListener("click", togglePlayPause);
     if (prevBtn) prevBtn.addEventListener("click", prevSegment);
     if (nextBtn) nextBtn.addEventListener("click", nextSegment);
@@ -1649,6 +1744,7 @@
     }
     if (chatInput) chatInput.style.display = "";
     if (sendBtn) sendBtn.style.display = "";
+    updateLectureToggleAvailability();
   }
 
   async function toggleLectureMode() {
@@ -1665,6 +1761,12 @@
     }
 
     if (!state.courseId || !state.currentTopicId) return;
+
+    // 音声未生成のトピックではレクチャーを開始しない（音声生成は管理画面のみ）。
+    if (!state.topicHasAudio) {
+      updateLectureToggleAvailability();
+      return;
+    }
 
     // Activate lecture mode
     lectureState.active = true;
@@ -1993,6 +2095,9 @@
 
   async function startPlayback() {
     if (!lectureState.segments.length) return;
+    // 音声フェッチ中の連打による多重再生を防ぐ。
+    if (lectureState.loadingAudio) return;
+    lectureState.loadingAudio = true;
 
     var seg = lectureState.segments[lectureState.currentSegmentIndex];
 
@@ -2086,6 +2191,8 @@
       lectureState.playing = false;
       updateLectureControls();
       _restoreChatUI();
+    } finally {
+      lectureState.loadingAudio = false;
     }
   }
 
