@@ -251,7 +251,30 @@ def test_collect_structured_content_flattens_nested_equation_latex():
 
     links = _topic_evidence_links([], [eq], {}, {}, "high")
     by_key = {(l["kind"], l["target_id"]): l for l in links}
-    assert by_key[("equation", "eq_eq_functions1")]["summary"] != ""
+    # 描画用 latex が根拠リンクに載る（summary は意味要約用で、ここでは空でも可）。
+    assert by_key[("equation", "eq_eq_functions1")]["latex"].startswith(r"\alpha(k_1,k_2)")
+
+
+def test_topic_evidence_links_equation_uses_semantic_summary_and_carries_latex():
+    """数式の根拠リンクは summary に生 LaTeX を入れず意味要約を使い、
+    描画用に latex / label を別フィールドで持つこと。"""
+    from core.course_content_builder import _topic_evidence_links
+
+    equations = [{
+        "equation_id": "eq_eq_functions1",
+        "label": "eq:functions1",
+        "latex": r"\alpha(k_1,k_2) := 1 + \frac{k_1\cdot k_2}{k_1^2}",
+        "plain_text": "alpha = ...",
+        "semantics": {"summary": "モード結合の基底関数を定義する。"},
+    }]
+
+    links = _topic_evidence_links([], equations, {}, {}, "high")
+    eq_link = next(l for l in links if l["kind"] == "equation" and l["target_id"] == "eq_eq_functions1")
+
+    assert eq_link["summary"] == "モード結合の基底関数を定義する。"
+    assert not eq_link["summary"].startswith("\\")  # 生 LaTeX ではない
+    assert eq_link["latex"].startswith(r"\alpha(k_1,k_2)")
+    assert eq_link["label"] == "eq:functions1"
 
 
 def test_equation_display_math_respects_needs_math_review_and_reconstruction():

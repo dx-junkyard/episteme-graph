@@ -386,7 +386,16 @@ def _topic_evidence_links(
     links: list[dict] = []
     seen: set[tuple[str, str]] = set()
 
-    def add(kind: str, target_id: str, summary: str, support_role: str) -> None:
+    def add(
+        kind: str,
+        target_id: str,
+        summary: str,
+        support_role: str,
+        *,
+        latex: str | None = None,
+        plain_text: str | None = None,
+        label: str | None = None,
+    ) -> None:
         target_id = str(target_id or "").strip()
         if not target_id:
             return
@@ -394,13 +403,22 @@ def _topic_evidence_links(
         if key in seen:
             return
         seen.add(key)
-        links.append({
+        link = {
             "kind": kind,
             "target_id": target_id,
             "summary": _short_excerpt(summary, limit=220) if summary else "",
             "support_role": support_role,
             "confidence": confidence,
-        })
+        }
+        # 数式は latex / label を持たせ、UI が生 LaTeX 文字列ではなく数式として
+        # 描画できるようにする（summary はあくまで人間向けの説明にする）。
+        if latex:
+            link["latex"] = latex
+        if plain_text:
+            link["plain_text"] = plain_text
+        if label:
+            link["label"] = label
+        links.append(link)
 
     for component in components:
         add(
@@ -411,11 +429,17 @@ def _topic_evidence_links(
         )
 
     for equation in equations:
+        semantics = equation.get("semantics") if isinstance(equation.get("semantics"), dict) else {}
+        # summary は生 LaTeX ではなく、意味要約 / ラベルなど人間向けの説明にする。
+        eq_summary = semantics.get("summary") or equation.get("label") or ""
         add(
             "equation",
             equation.get("equation_id") or equation.get("id") or "",
-            equation.get("plain_text") or equation.get("latex") or "",
+            eq_summary,
             "equation",
+            latex=equation.get("latex") or equation.get("latex_canonical") or equation.get("normalized_latex") or "",
+            plain_text=equation.get("plain_text") or "",
+            label=equation.get("label") or "",
         )
 
     # claim は component の linked_claim_ids 経由で参照される。claims.json に実体が
