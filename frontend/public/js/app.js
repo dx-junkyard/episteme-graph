@@ -20,7 +20,35 @@
     sending: false,
     checkingUnderstanding: false,
     topicHasAudio: false, // 現トピックに再生可能なキャッシュ済み音声があるか
+    // ── 学習者体験レイヤー(B層) Stage M ──
+    lastSources: [],        // L1: 直近回答の根拠 tier 一覧 [{source_title, tier, score}]
+    lastOverallTier: null,  // L1: 直近回答全体の格
+    interestTraces: null,   // L3: UnfinishedQuestionBox（mock）
   };
+
+  // 🚧 Mock 検知: API レスポンスが mock データを含むか（_mock / mock の両方を許容）。
+  function isMock(obj) {
+    return !!(obj && (obj._mock === true || obj.mock === true));
+  }
+
+  // 🚧 MOCK バッジ。Stage M の mock データに必ず付与し、デモ時に一目で分かるようにする。
+  function mockFlag(note) {
+    return '<span class="mock-flag" title="' + escHtml(note || "Stage M のモックデータです") + '">🚧 MOCK</span>';
+  }
+
+  // L1 tier の表示メタ（ラベル・CSS クラス）。
+  var TIER_META = {
+    approved: { label: "承認済み", cls: "tier-approved" },
+    source: { label: "原典", cls: "tier-source" },
+    out_of_source: { label: "未踏", cls: "tier-out" },
+  };
+  function tierMeta(tier) {
+    return TIER_META[tier] || TIER_META.out_of_source;
+  }
+  function tierBadge(tier) {
+    var m = tierMeta(tier);
+    return '<span class="tier-badge ' + m.cls + '">' + escHtml(m.label) + "</span>";
+  }
 
   function learningSupportStorageKey() {
     return "eg_learning_support:" + (state.courseId || "");
@@ -606,6 +634,17 @@
       html += renderNextActions(msg.next_actions);
     }
 
+    // L1 信頼性: 回答全体の格（tier）を末尾に明示する。
+    // EPISTEME_MOCK[M07] UI/L1: tier 値は Stage M の簡易 mock 由来。— replace in Stage 2
+    if (msg && msg.overall_tier) {
+      var bar = '<div class="answer-tier-bar">';
+      bar += '<span class="answer-tier-label">この回答の根拠の格</span>';
+      bar += tierBadge(msg.overall_tier);
+      if (msg.mock) bar += mockFlag("tier 判定は Stage M の簡易 mock");
+      bar += "</div>";
+      html += bar;
+    }
+
     return html;
   }
 
@@ -717,15 +756,24 @@
     const p = state.course.progress || {};
     let html = "";
 
-    // Overview cards
-    html += '<div class="ps"><h4>全体の概要</h4><div class="prog-ov">';
+    html += '<div class="progress-head"><h3>あなたの学習の現在地</h3>' +
+      '<p>コース全体のどこにいるか、寄り道中ならどこへ戻ればいいかが分かります。</p></div>';
+
+    // ① コース行程（位置・復帰レイヤー）
+    html += renderJourneyBlock();
+
+    // ② 問いの軌跡（資産化レイヤー・mock）
+    html += renderProblemTrails();
+
+    // 既存の学習サマリ（章ごとの進捗・連続日数など）は補助情報として下に残す。
+    html += '<div class="progress-head" style="margin:20px 0 8px"><h3 style="font-size:14px">学習サマリ</h3></div>';
+    html += '<div class="ps"><div class="prog-ov">';
     html += '<div class="prog-card"><div class="val" style="color:var(--color-text-success)">' + (p.mastered_concepts || 0) + '</div><div class="lbl">習得済み概念</div></div>';
     html += '<div class="prog-card"><div class="val" style="color:var(--color-text-info)">' + (p.learning_concepts || 0) + '</div><div class="lbl">学習中</div></div>';
     html += '<div class="prog-card"><div class="val" style="color:var(--color-text-warning)">' + (p.misconceptions || 0) + '</div><div class="lbl">訂正された誤解</div></div>';
     html += '<div class="prog-card"><div class="val">' + (p.streak_days || 0) + '</div><div class="lbl">連続学習日数</div></div>';
     html += "</div></div>";
 
-    // Chapter progress
     html += '<div class="ps"><h4>章ごとの進捗</h4>';
     (state.course.chapters || []).forEach(function (ch, i) {
       const pct = ch.progress_pct || 0;
@@ -738,19 +786,105 @@
     });
     html += "</div>";
 
-    // Recent sessions
-    if (p.sessions && p.sessions.length > 0) {
-      html += '<div class="ps"><h4>最近のセッション</h4>';
-      p.sessions.forEach(function (s) {
-        html += '<div class="sess-item">';
-        html += '<span class="sess-date">' + escHtml(s.date) + "</span>";
-        html += '<span class="sess-topic">' + escHtml(s.topic) + "</span>";
-        html += '<span class="sess-dur">' + escHtml(s.duration) + "</span></div>";
-      });
-      html += "</div>";
-    }
+    html += '<p class="lx-note">数を消すためのリストではありません。点数やランキングではなく、自分の関心がどこへ向かったかを見るための地図です。</p>';
 
     el.innerHTML = html;
+
+    // interest-traces を未取得なら遅延ロード（取得後 renderProgressTab を再実行）。
+    if (state.interestTraces === null) {
+      loadInterestTraces();
+    }
+    bindProgressTabEvents(el);
+  }
+
+  // コース行程ブロック（全行程レール＋現在地＋一本パス＋戻りCTA）。
+  function renderJourneyBlock() {
+    var ordered = _getOrderedTopics();
+    var total = ordered.length || 1;
+    var chapters = state.course.chapters || [];
+    var nChap = chapters.length || 1;
+
+    var inDetour = Session.inDetour();
+    var origin = inDetour ? Session.detourOrigin() : null;
+    var baseTopicId = (origin && origin.topic_id) || state.currentTopicId;
+    var baseIdx = ordered.findIndex(function (t) { return t.id === baseTopicId; });
+    if (baseIdx < 0) baseIdx = 0;
+    var pct = Math.round((baseIdx + 1) / total * 100);
+    var baseTopic = ordered[baseIdx] || {};
+    var curChap = (typeof baseTopic.chapter_index === "number") ? baseTopic.chapter_index : 0;
+    var baseTitle = baseTopic.title || (origin && origin.topic_title) || "現在のトピック";
+
+    var html = '<div class="lx-journey"><div class="lx-journey-head">';
+    html += '<span class="t">' + escHtml(state.course.title || "コース") + '</span>';
+    html += '<span class="pct">全' + nChap + '章 ・ ' + pct + '% 到達</span></div>';
+
+    // 全行程レール（章を目盛りに）
+    html += '<div class="lx-track" aria-hidden="true"><div class="lx-done" style="width:' + pct + '%"></div>';
+    for (var k = 1; k < nChap; k++) {
+      html += '<div class="lx-tick" style="left:' + (k / nChap * 100) + '%"></div>';
+    }
+    html += '<div class="lx-here" style="left:' + pct + '%" title="本筋の現在地（戻る場所）"></div></div>';
+    html += '<div class="lx-chapters">';
+    chapters.forEach(function (ch, i) {
+      html += '<span class="' + (i === curChap ? "cur" : "") + '">' + (i + 1) + "章</span>";
+    });
+    html += '</div>';
+
+    // 一本パス：本筋の現在地 →（寄り道中なら）寄り道先
+    html += '<div class="lx-path">';
+    html += '<span class="lx-seg course"><span class="pin"></span>' + escHtml(baseTitle) + '</span>';
+    if (inDetour) {
+      var detourLabel = (state.learningSupport && state.learningSupport.status_label) || "寄り道中";
+      html += '<span class="lx-conn detour">⟿</span>';
+      html += '<span class="lx-seg detour"><span class="pin"></span>寄り道：' + escHtml(detourLabel) + '</span>';
+    }
+    html += '</div>';
+
+    // 戻りCTA（寄り道中のみ）
+    if (inDetour) {
+      html += '<div class="lx-return-cta"><span class="r-text">いまは<b>寄り道中</b>。本筋の <b>' +
+        escHtml(baseTitle) + '</b> に戻れます</span>' +
+        '<button data-journey-return="' + escHtml(baseTopicId || "") + '">本筋へ戻る</button></div>';
+    }
+    html += '<p class="lx-journey-foot">寄り道に至るまでの細かな経路は記録していますが、ここでは戻り先だけを示します。</p>';
+    html += '</div>';
+    return html;
+  }
+
+  // 進捗タブのクリック配線（フィルタ・トレース操作・戻りCTA）。
+  function bindProgressTabEvents(el) {
+    el.querySelectorAll("[data-trace-filter]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        state.traceFilter = this.getAttribute("data-trace-filter");
+        renderProgressTab();
+      });
+    });
+    el.querySelectorAll("[data-trace-return]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        var text = this.getAttribute("data-trace-return");
+        if (text) sendMessage(text, Session.contextPayload());
+      });
+    });
+    el.querySelectorAll("[data-journey-return]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        returnToLearningPath(this.getAttribute("data-journey-return"));
+      });
+    });
+    // EPISTEME_MOCK[M08]: 「解決済みにする」「なぜ気になった？」は Stage 3/4 で配線。
+    el.querySelectorAll("[data-trace-resolve],[data-trace-why]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        this.textContent = "（Stage 3/4 で実装）";
+        this.disabled = true;
+      });
+    });
+  }
+
+  // ============ 出典タブ：信頼性レイヤーだけ（再設計）============
+  // 3ブロックのみ: 全体格バナー / 根拠の合流(並列枝) / 参照した根拠カード。
+  // 位置情報や問いの軌跡は持たせない（前者は進捗タブのコース行程、後者は問いの軌跡へ）。
+  var TIER_LABEL = { approved: "承認", source: "原典", out_of_source: "未踏" };
+  function tierCls(tier) {
+    return tier === "approved" ? "approved" : tier === "source" ? "source" : "oos";
   }
 
   function renderSourcesTab() {
@@ -761,7 +895,77 @@
     }
     let html = "";
 
-    // Registered materials
+    var overall = state.lastOverallTier;
+    var srcs = state.lastSources || [];
+
+    if (!overall) {
+      html += '<div class="ps"><p class="lx-note" style="margin:0">質問するとこのタブに、回答が依拠した根拠と信頼性（tier）が表示されます。</p></div>';
+    } else {
+      // ① 全体格バナー（overall_tier）
+      var oc = tierCls(overall);
+      var note = (overall === "out_of_source")
+        ? 'この回答は十分な根拠が見つからない<b>未踏</b>です。確実なことは言えないため、断定を避けます。'
+        : 'この回答の格は <b>' + escHtml(TIER_LABEL[overall] || overall) +
+          '</b>。複数の根拠のうち最も弱いものに合わせて、安全側で格付けしています。';
+      html += '<div class="ps" style="border:none;padding:0">';
+      html += '<div class="lx-overall ' + oc + '">' + lxTierIcon(overall) +
+        '<span>' + note + ' ' + mockFlag("tier 判定は Stage M の簡易 mock") + '</span></div>';
+
+      // ② 根拠の合流（並列の枝・順序なし）。最弱（=overall）に注記。
+      if (srcs.length > 0) {
+        // overall と同 tier の最初の根拠を「全体格を決めた最弱」として注記する。
+        var weakestIdx = -1;
+        srcs.forEach(function (s, i) {
+          if (weakestIdx === -1 && s.tier === overall) weakestIdx = i;
+        });
+        html += '<p class="lx-sec-head">この回答が依拠した根拠</p>';
+        html += '<div class="lx-merge"><div class="lx-merge-node"><span class="lx-ans">この回答</span></div>';
+        html += '<div class="lx-merge-link" aria-hidden="true"></div><div class="lx-branches">';
+        srcs.forEach(function (s, i) {
+          var c = tierCls(s.tier);
+          html += '<div class="lx-branch"><span class="lx-crumb ' + c + '"><span class="lx-sw"></span>' +
+            escHtml(s.source_title || "不明な教材") + (s.tier === "out_of_source" ? "（根拠なし）" : "") + '</span>';
+          if (i === weakestIdx && overall !== "approved") {
+            html += '<span class="lx-weakest">← 全体格はこれに合わせる</span>';
+          }
+          html += '</div>';
+        });
+        html += '</div></div>';
+        html += '<p class="lx-merge-foot">根拠は並列です。全体格は最も弱い根拠に安全側で引きずられます。</p>';
+      } else if (overall === "out_of_source") {
+        html += '<p class="lx-merge-foot">この回答に依拠できる教材根拠は見つかりませんでした。</p>';
+      }
+
+      // tier 凡例
+      html += '<div class="lx-legend">' +
+        '<span><i style="background:var(--lx-approved)"></i>承認</span>' +
+        '<span><i style="background:var(--lx-source)"></i>原典</span>' +
+        '<span><i style="background:var(--lx-oos)"></i>未踏</span></div>';
+
+      // ③ 参照した根拠カード
+      if (srcs.length > 0) {
+        html += '<p class="lx-sec-head">参照した根拠</p>';
+        srcs.forEach(function (s) {
+          var c = tierCls(s.tier);
+          html += '<div class="lx-src ' + c + '"><div class="lx-src-top">';
+          html += '<span class="lx-src-title">' + escHtml(s.source_title || "不明な教材") + '</span>';
+          html += '<span class="lx-badge ' + c + '">' + escHtml(TIER_LABEL[s.tier] || s.tier) + '</span></div>';
+          if (s.meta) html += '<div class="lx-src-meta">' + escHtml(s.meta) +
+            (s.tier === "source" ? "（未承認）" : "") + '</div>';
+          if (s.tier === "out_of_source") {
+            html += '<div class="lx-oos-note">この点は登録教材に十分な根拠が見つかりませんでした。断定は避けます。</div>';
+          } else {
+            if (s.quote) html += '<div class="lx-src-quote">「' + escHtml(s.quote) + '」</div>';
+            if (typeof s.score === "number") html += '<div class="lx-score">類似度 ' + s.score.toFixed(2) + '</div>';
+          }
+          html += '</div>';
+        });
+      }
+      html += '</div>';
+      html += '<p class="lx-note">出典タブは「いま見ている回答が信頼できるか」だけを扱います。過去の問いや寄り道は〈進捗〉タブへ。</p>';
+    }
+
+    // 既存: 登録済み教材 / 参照セクション（再設計対象外。コース教材情報として残す）
     const sources = state.course.sources || [];
     if (sources.length > 0) {
       html += '<div class="ps"><h4>登録済み教材</h4>';
@@ -775,8 +979,6 @@
       });
       html += "</div>";
     }
-
-    // Referenced sections
     const refs = state.course.referenced_sections || [];
     if (refs.length > 0) {
       html += '<div class="ps"><h4>本セッションで参照されたセクション</h4>';
@@ -789,6 +991,118 @@
     }
 
     el.innerHTML = html;
+  }
+
+  // 全体格バナー用の小アイコン（tier色の丸＋!）。
+  function lxTierIcon(tier) {
+    var col = tier === "approved" ? "var(--lx-approved)" : tier === "source" ? "var(--lx-source)" : "var(--lx-oos)";
+    return '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="flex:0 0 auto">' +
+      '<circle cx="8" cy="8" r="7" stroke="' + col + '" stroke-width="1.4"/>' +
+      '<path d="M8 4.5v4.5M8 11.2h.01" stroke="' + col + '" stroke-width="1.6" stroke-linecap="round"/></svg>';
+  }
+
+  // ============ 問いの軌跡（資産化レイヤー）— 進捗タブで使用 ============
+  // EPISTEME_MOCK[M08] UI/L3: interest-traces の mock 配列を status 主役で表示。— replace in Stage 3
+  var TRACE_KIND_LABEL = { question: "問い", detour: "寄り道", misconception: "誤答", raw: "記録" };
+  var TRACE_KIND_CLS = { question: "q", detour: "detour", misconception: "mis", raw: "q" };
+  var STATUS_META = {
+    open: { label: "未解決", cls: "open" },
+    revisited: { label: "再訪推奨", cls: "revisit" },
+    resolved: { label: "解決済み", cls: "resolved" },
+  };
+
+  function renderProblemTrails() {
+    var data = state.interestTraces;
+    var html = '<div class="progress-head" style="margin:18px 0 8px"><h3 style="font-size:14px">問いの軌跡 ' +
+      mockFlag("interest_traces 未実装。Stage 3 で本実装") + '</h3></div>';
+
+    if (!data) {
+      html += '<p class="lx-note" style="margin-top:0">読み込み中…</p>';
+      return html;
+    }
+    var traces = Array.isArray(data.traces) ? data.traces : [];
+
+    // 再訪のころ合いカード（DecayPolicy の入口）
+    var cue = data.revisit_cue;
+    if (cue) {
+      html += '<div class="lx-revisit"><div class="k">' + escHtml(cue.kind_label || "再訪のころ合い") + '</div>';
+      html += '<div class="h">' + escHtml(cue.headline || "") + '</div>';
+      html += '<div class="s">' + escHtml(cue.sub || "") + '</div></div>';
+    }
+
+    if (traces.length === 0) {
+      html += '<p class="lx-note" style="margin-top:0">まだ記録された問いはありません。学習で生まれた問い・寄り道・誤答がここに溜まります。</p>';
+      return html;
+    }
+
+    // 種別フィルタ（消化リストではなく関心の地図として）
+    var f = state.traceFilter || "all";
+    function fbtn(key, label, colorVar) {
+      var on = f === key;
+      var dot = colorVar ? '<i style="background:' + colorVar + '"></i>' : "";
+      return '<button class="lx-filter" aria-pressed="' + on + '" data-trace-filter="' + key + '">' + dot + label + '</button>';
+    }
+    html += '<div class="lx-filters">' +
+      fbtn("all", "すべて", "") +
+      fbtn("question", "問い", "var(--lx-kind-q)") +
+      fbtn("detour", "寄り道", "var(--lx-kind-detour)") +
+      fbtn("misconception", "誤答", "var(--lx-kind-mis)") + '</div>';
+
+    // トレース群（status を主役に）
+    traces.forEach(function (t) {
+      if (f !== "all" && t.kind !== f) return;
+      var kc = TRACE_KIND_CLS[t.kind] || "q";
+      var sm = STATUS_META[t.status] || { label: t.status || "", cls: "open" };
+      html += '<div class="lx-trace ' + kc + '"><div class="lx-rail"></div><div class="lx-trace-body">';
+      html += '<div class="lx-trace-top"><span class="lx-kind-tag">' + escHtml(TRACE_KIND_LABEL[t.kind] || t.kind || "記録") + '</span>';
+      html += '<span class="lx-status-tag ' + sm.cls + '">' + escHtml(sm.label) + '</span></div>';
+      html += '<div class="lx-trace-text">' + escHtml(t.text || "") + '</div>';
+      if (t.context_label) html += '<div class="lx-trace-ctx">' + escHtml(t.context_label) + '</div>';
+      // アクション（status により出し分け）。実挙動は Stage 3/4 で配線。
+      if (t.status !== "resolved") {
+        html += '<div class="lx-trace-actions">';
+        html += '<button class="lx-ghost" data-trace-return="' + escHtml(t.text || "") + '">この問いに戻る</button>';
+        if (t.kind === "detour") {
+          html += '<button class="lx-ghost secondary" data-trace-why="1">なぜ気になった？</button>';
+        } else {
+          html += '<button class="lx-ghost secondary" data-trace-resolve="' + escHtml(t.id || "") + '">解決済みにする</button>';
+        }
+        html += '</div>';
+      }
+      html += '</div></div>';
+    });
+    return html;
+  }
+
+  // 進捗タブに再訪推奨ドットを点す（タブ見出し）。
+  function updateProgressTabDot() {
+    var btn = document.querySelector('#tabBar button[data-tab="progress"]');
+    if (!btn) return;
+    var data = state.interestTraces;
+    var hasRevisit = !!(data && Array.isArray(data.traces) &&
+      data.traces.some(function (t) { return t.status === "revisited"; }));
+    var dot = btn.querySelector(".lx-tab-dot");
+    if (hasRevisit && !dot) {
+      btn.insertAdjacentHTML("beforeend", '<span class="lx-tab-dot" title="再訪推奨あり"></span>');
+    } else if (!hasRevisit && dot) {
+      dot.remove();
+    }
+  }
+
+  async function loadInterestTraces() {
+    if (!state.courseId) return;
+    state.interestTraces = {}; // 多重ロード防止のプレースホルダ
+    try {
+      var res = await apiFetch(
+        "/learning/courses/" + state.courseId + "/interest-traces" +
+        (state.currentTopicId ? "?topic_id=" + encodeURIComponent(state.currentTopicId) : "")
+      );
+      state.interestTraces = res.ok ? await res.json() : { traces: [] };
+    } catch (_) {
+      state.interestTraces = { traces: [] };
+    }
+    renderProgressTab();
+    updateProgressTabDot();
   }
 
   // ── Topic Navigation ───────────────────────────────────────────────
@@ -1045,6 +1359,9 @@
       if (res.ok) {
         const data = await res.json();
         setLearningSupportFromResponse(data);
+        // L1/L2: tier・根拠・位置アンカーを保持（Stage M は mock を含む）。
+        state.lastSources = data.sources || [];
+        state.lastOverallTier = data.overall_tier || null;
         state.chatMessages.push({
           role: "assistant",
           content: data.answer,
@@ -1052,6 +1369,11 @@
           support_mode: data.support_mode || "",
           status_label: data.status_label || "",
           origin: data.origin || null,
+          // ── B層 Stage M ──
+          overall_tier: data.overall_tier || null,
+          sources: data.sources || [],
+          position_anchor: data.position_anchor || null,
+          mock: isMock(data),
         });
         // Issue #145: 個人レイヤーの更新を反映する
         if (data.course_update) {
@@ -1083,6 +1405,7 @@
 
     state.sending = false;
     renderChat();
+    renderRightPanel();  // L1: 直近回答の tier を Sources タブへ反映
   }
 
   // ── Tab Switching ──────────────────────────────────────────────────

@@ -279,6 +279,15 @@ class LearningSupportOriginOut(BaseModel):
     chapter_title: str = ""
 
 
+class SourceTierItem(BaseModel):
+    """回答の根拠1件の格付け（L1 信頼性レイヤー）。"""
+    source_title: str = ""
+    tier: str = "out_of_source"  # approved | source | out_of_source
+    score: float = 0.0
+    quote: str = ""   # 根拠本文の抜粋（出典カードの引用）
+    meta: str = ""    # 出典メタ（ファイル名/節など）
+
+
 class LearningChatResponse(BaseModel):
     answer: str
     course_update: dict | None = None
@@ -286,6 +295,11 @@ class LearningChatResponse(BaseModel):
     status_label: str | None = None
     origin: LearningSupportOriginOut | None = None
     next_actions: list[LearningSupportNextAction] = []
+    # --- 学習者体験レイヤー(B層) Stage M ---
+    sources: list[SourceTierItem] = []          # L1: 各根拠の tier
+    overall_tier: str | None = None             # L1: 回答全体の格（最弱根拠に集約）
+    position_anchor: dict | None = None         # L2: 復帰位置アンカー
+    mock: bool = False                          # 🚧 mock 由来データを含むか（UI バッジ用）
 
 
 class LearningChatHistoryResponse(BaseModel):

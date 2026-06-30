@@ -2586,6 +2586,25 @@ def approve_schema_proposal_with_scope(
 
 
 # ---------------------------------------------------------------------------
+# 学習者体験レイヤー(B層) — 教員向け関心集約ダッシュボード (Stage M)
+# ---------------------------------------------------------------------------
+@router.get("/interest-dashboard")
+def get_interest_dashboard(
+    course_id: str | None = None,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """教員向け InterestDashboard（集団集計を既定）。
+
+    EPISTEME_MOCK[M06] L4可視化: 集団集計を固定 mock データで返す。個人を特定できる
+    フィールドは最初から持たせない（プライバシー設計を織り込む）。レスポンスは
+    `_mock: true` を含み、フロントは 🚧MOCK バッジを描画する。
+    — replace in Stage 4 (interest_traces からの実集計)
+    """
+    from core.learning_experience import mock_interest_dashboard
+    return mock_interest_dashboard(course_id)
+
+
+# ---------------------------------------------------------------------------
 # Lecture Script Studio (Issue #70) — サブルーターとしてインクルード
 # ---------------------------------------------------------------------------
 from routes.lecture_studio import router as _lecture_studio_router  # noqa: E402

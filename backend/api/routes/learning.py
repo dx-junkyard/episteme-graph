@@ -48,6 +48,13 @@ from services import (
     user_can_view_course,
 )
 from core.llm import generate_text, get_llm_params
+from core.learning_experience import (
+    TIER_OUT_OF_SOURCE,
+    aggregate_overall_tier,
+    build_position_anchor,
+    mock_interest_traces,
+    out_of_source_notice,
+)
 from core.learning_support_agent import LearningSupportAgent, extract_inline_actions
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
@@ -1236,8 +1243,10 @@ def learning_chat(
         return LearningChatResponse(**result.model_dump(), course_update=None)
 
     # 4. RAG: システム全域のチャンクを検索し、コンテキストを構築
+    #    search_chunks_with_metadata は各チャンクに tier(L1信頼性) を付与して返す。
     chunk_results = search_chunks_with_metadata(body.message, top_k=8)
     cited_chunks = []
+    cited_sources: list[dict] = []  # L1: 文脈に採用した根拠の tier 一覧
     if topic_info:
         topic_material = _topic_student_material(topic_info)
         if topic_material:
@@ -1245,6 +1254,17 @@ def learning_chat(
     for r in chunk_results:
         if r["score"] >= 0.30:
             cited_chunks.append(f"[出典: 『{r['source_title']}』]\n{r['text']}")
+            _quote = (r.get("text") or "").strip().replace("\n", " ")
+            cited_sources.append({
+                "source_title": r.get("source_title", "不明な教材"),
+                "tier": r.get("tier", TIER_OUT_OF_SOURCE),
+                "score": round(float(r.get("score", 0.0)), 3),
+                "quote": (_quote[:80] + "…") if len(_quote) > 80 else _quote,
+                "meta": r.get("source_file") or "",
+            })
+
+    # L1: 回答全体の格を最弱根拠へ安全側集約。採用根拠が無ければ未踏(out_of_source)。
+    overall_tier = aggregate_overall_tier([s["tier"] for s in cited_sources])
 
     if cited_chunks:
         context_block = "## 関連する教材のコンテキスト\n" + "\n---\n".join(cited_chunks)
@@ -1275,6 +1295,10 @@ def learning_chat(
         logger.exception("Learning chat LLM call failed for topic %s", topic_id)
         raise HTTPException(status_code=500, detail=f"Chat failed: {exc}") from exc
 
+    # L1 OutOfSourceGuard: 未踏なら断定せず、根拠が弱い旨を先頭に明示する。
+    if overall_tier == TIER_OUT_OF_SOURCE:
+        answer = out_of_source_notice() + "\n\n" + answer
+
     # 誤解検出（マイルドな表現にも対応）
     course_update = None
     if topic_info and any(kw in answer for kw in ["訂正", "より正確です", "誤解"]):
@@ -1296,4 +1320,29 @@ def learning_chat(
         include_continue=False,
         extra_actions=inline_actions,
     )
-    return LearningChatResponse(**result.model_dump(), course_update=course_update)
+    # EPISTEME_MOCK[M04] L2位置復帰: position_anchor は仮値(segment/scroll=0)。
+    # — replace in Stage 1
+    position_anchor = build_position_anchor(topic_id)
+    return LearningChatResponse(
+        **result.model_dump(),
+        course_update=course_update,
+        sources=cited_sources,
+        overall_tier=overall_tier,
+        position_anchor=position_anchor,
+        mock=True,  # 🚧 tier 判定と position_anchor は Stage M の mock を含む
+    )
+
+
+@router.get("/courses/{course_id}/interest-traces")
+def get_interest_traces(
+    course_id: str,
+    topic_id: str | None = None,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """UnfinishedQuestionBox（未解決の問い・寄り道・誤答）を返す。
+
+    EPISTEME_MOCK[M05] L3資産化: interest_traces テーブル未作成のため固定 mock を返す。
+    レスポンスは `_mock: true` を含み、フロントは 🚧MOCK バッジを描画する。
+    — replace in Stage 3 (db/020_interest_trace.sql + 安価な生記録)
+    """
+    return mock_interest_traces(course_id, topic_id)

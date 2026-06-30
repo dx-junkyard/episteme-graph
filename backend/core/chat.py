@@ -14,6 +14,7 @@ import logging
 
 from sqlalchemy import text
 
+from core.learning_experience import attach_tiers
 from core.llm import generate_text, generate_embeddings, get_embedding_dim
 from core.postgres import get_session
 
@@ -59,8 +60,13 @@ def _embed_query(question: str) -> list[float]:
     return vectors[0]
 
 
-def search_chunks(question: str, material_id: str, top_k: int = 5) -> list[str]:
-    """PostgreSQL pgvector で material_id に属するチャンクを類似度検索して返す。"""
+def search_chunks(question: str, material_id: str, top_k: int = 5) -> list[dict]:
+    """PostgreSQL pgvector で material_id に属するチャンクを類似度検索して返す。
+
+    仕様書 §3.3 の契約変更: 戻り値は ``list[str]`` ではなく構造化 dict のリスト
+    ``{text, source_title, source_file, score, tier}``。tier は信頼性レイヤー(L1)で
+    付与する（Stage M は簡易判定の mock。M03 / replace in Stage 2）。
+    """
     query_vector = _embed_query(question)
     dim = get_embedding_dim()
 
@@ -68,8 +74,12 @@ def search_chunks(question: str, material_id: str, top_k: int = 5) -> list[str]:
     try:
         rows = session.execute(
             text(f"""
-                SELECT c.text
+                SELECT c.text,
+                       COALESCE(d.title, '') AS source_title,
+                       COALESCE(d.filename, '') AS source_file,
+                       1 - (c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))) AS score
                 FROM chunks c
+                LEFT JOIN documents d ON c.document_id = d.id
                 WHERE c.material_id = :material_id
                   AND c.embedding IS NOT NULL
                 ORDER BY c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))
@@ -82,7 +92,19 @@ def search_chunks(question: str, material_id: str, top_k: int = 5) -> list[str]:
             },
         ).fetchall()
 
-        return [row[0] for row in rows if row[0]]
+        # EPISTEME_MOCK[M03] L1信頼性: tier は attach_tiers の簡易判定（approved 非出力）。
+        # — replace in Stage 2
+        results = [
+            {
+                "text": row[0],
+                "source_title": row[1] or row[2] or "不明な教材",
+                "source_file": row[2],
+                "score": float(row[3]),
+            }
+            for row in rows
+            if row[0]
+        ]
+        return attach_tiers(results)
     finally:
         session.close()
 
@@ -119,7 +141,11 @@ def generate_chat_response(
     # 3. コンテキストブロックを構築
     context_parts: list[str] = []
     if chunks:
-        context_parts.append("## Relevant Paper Excerpts\n" + "\n---\n".join(chunks))
+        # search_chunks の契約変更(§3.3)により chunks は dict のリスト。tier 付きの本文を結合。
+        excerpts = [
+            f"[tier: {c.get('tier', 'out_of_source')}] {c.get('text', '')}" for c in chunks
+        ]
+        context_parts.append("## Relevant Paper Excerpts\n" + "\n---\n".join(excerpts))
     if structure:
         context_parts.append(
             "## Extracted Paper Structure\n"

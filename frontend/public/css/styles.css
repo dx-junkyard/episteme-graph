@@ -4504,3 +4504,178 @@ body {
 .eg-rev-reason, .eg-rev-trace { font-size: 12px; color: var(--color-text-secondary, #555); margin-top: 2px; }
 .eg-rev-decisions { margin-top: 12px; font-size: 12px; }
 .eg-rev-decisions ul { margin: 4px 0 0; padding-left: 18px; }
+
+/* ===================================================================
+   学習者体験レイヤー(B層) Stage M — tier / mock / 痕跡
+   =================================================================== */
+
+/* 🚧 MOCK バッジ — Stage M の mock データに必ず付与（取り残しの視覚的目印） */
+.mock-flag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #7a4b00;
+  background: repeating-linear-gradient(45deg, #ffe9b0, #ffe9b0 6px, #ffd470 6px, #ffd470 12px);
+  border: 1px solid #e0a800;
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+/* L1 tier バッジ */
+.tier-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 4px;
+  padding: 1px 8px;
+  border: 1px solid transparent;
+}
+.tier-badge.tier-approved { color: #1c7a4d; background: var(--color-background-success); border-color: var(--color-border-success); }
+.tier-badge.tier-source   { color: var(--color-text-info); background: var(--color-background-info); border-color: var(--color-border-info); }
+.tier-badge.tier-out      { color: var(--color-text-warning); background: #fff6e6; border-color: var(--color-text-warning); }
+
+/* 回答末尾の tier バー */
+.answer-tier-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 0.5px dashed var(--color-border-secondary);
+  font-size: 12px;
+}
+.answer-tier-label { color: var(--color-text-secondary); }
+
+/* ===== 右パネル再設計（episteme-right-panel-mock 由来。lx- 接頭辞で既存と分離）===== */
+:root {
+  --lx-approved:#1f9d5b; --lx-approved-bg:#e9f7ef;
+  --lx-source:#c98a16;   --lx-source-bg:#fcf3e1;
+  --lx-oos:#8a93a1;      --lx-oos-bg:#f2f4f7;
+  --lx-brand:#2f6fed;    --lx-brand-soft:#eaf1ff;
+  --lx-line:#e6e9ef;     --lx-line-soft:#eef1f6;
+  --lx-ink-faint:#8a93a1; --lx-ink-soft:#5b6472;
+  --lx-revisit:#7c4dd6;
+  --lx-kind-q:#2f6fed; --lx-kind-detour:#c98a16; --lx-kind-mis:#d2483f;
+}
+.lx-note { font-size: 11px; color: var(--lx-ink-faint); margin-top: 16px; line-height: 1.5; }
+.lx-sec-head { font-size: 12px; color: var(--lx-ink-soft); font-weight: 600; margin: 0 0 10px; }
+
+/* 進捗タブの再訪推奨ドット */
+.lx-tab-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--lx-revisit); margin-left:6px; vertical-align:middle; }
+
+/* --- 出典タブ：全体格バナー --- */
+.lx-overall { display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:9px; margin-bottom:18px; font-size:13px; line-height:1.5; }
+.lx-overall.approved { background:var(--lx-approved-bg); color:#0f6d3d; }
+.lx-overall.source   { background:var(--lx-source-bg);   color:#8a5e0a; }
+.lx-overall.oos      { background:var(--lx-oos-bg);      color:#5b6472; }
+
+/* --- 出典タブ：根拠の合流（並列の枝）--- */
+.lx-merge { display:flex; align-items:stretch; margin-bottom:6px; }
+.lx-merge-node { flex:0 0 auto; display:flex; align-items:center; padding:0 4px 0 2px; }
+.lx-merge-node .lx-ans { font-size:11.5px; font-weight:700; color:var(--ink,#1f2530); white-space:nowrap; writing-mode:vertical-rl; text-orientation:mixed; letter-spacing:.06em; padding:8px 3px; border-radius:7px; background:#fafbfd; border:1px solid var(--lx-line); }
+.lx-merge-link { flex:0 0 26px; position:relative; }
+.lx-merge-link::before { content:""; position:absolute; left:0; top:14px; bottom:14px; width:1.5px; background:var(--lx-line); }
+.lx-branches { flex:1; min-width:0; display:flex; flex-direction:column; gap:8px; }
+.lx-branch { display:flex; align-items:center; gap:8px; position:relative; }
+.lx-branch::before { content:""; position:absolute; left:-26px; top:50%; width:26px; height:1.5px; background:var(--lx-line); }
+.lx-crumb { display:inline-flex; align-items:center; gap:6px; padding:5px 11px; border-radius:8px; font-size:12px; border:1px solid transparent; }
+.lx-crumb .lx-sw { width:8px; height:8px; border-radius:50%; flex:0 0 auto; }
+.lx-crumb.approved { background:var(--lx-approved-bg); color:#0f6d3d; border-color:#cdeedd; }
+.lx-crumb.approved .lx-sw { background:var(--lx-approved); }
+.lx-crumb.source { background:var(--lx-source-bg); color:#8a5e0a; }
+.lx-crumb.source .lx-sw { background:var(--lx-source); }
+.lx-crumb.oos { background:var(--lx-oos-bg); color:#5b6472; border-style:dashed; border-color:#d6dae2; }
+.lx-crumb.oos .lx-sw { background:var(--lx-oos); }
+.lx-weakest { font-size:10.5px; color:var(--lx-source); font-weight:600; white-space:nowrap; }
+.lx-merge-foot { font-size:11px; color:var(--lx-ink-faint); margin:6px 0 18px; padding-left:2px; }
+
+/* tier 凡例 */
+.lx-legend { display:flex; gap:14px; margin-bottom:18px; font-size:11px; color:var(--lx-ink-soft); }
+.lx-legend span { display:inline-flex; align-items:center; gap:5px; }
+.lx-legend i { width:8px; height:8px; border-radius:2px; display:inline-block; }
+
+/* --- 出典タブ：根拠カード --- */
+.lx-src { border:1px solid var(--lx-line); border-radius:10px; padding:12px 13px; margin-bottom:10px; border-left-width:3px; }
+.lx-src.approved { border-left-color:var(--lx-approved); }
+.lx-src.source { border-left-color:var(--lx-source); }
+.lx-src.oos { border-left-color:var(--lx-oos); background:#fafbfd; }
+.lx-src-top { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:4px; }
+.lx-badge { font-size:10.5px; font-weight:700; padding:2px 8px; border-radius:6px; white-space:nowrap; }
+.lx-badge.approved { background:var(--lx-approved-bg); color:#0f6d3d; }
+.lx-badge.source { background:var(--lx-source-bg); color:#8a5e0a; }
+.lx-badge.oos { background:var(--lx-oos-bg); color:#5b6472; }
+.lx-src-title { font-weight:600; font-size:13px; }
+.lx-src-meta { font-size:11.5px; color:var(--lx-ink-faint); }
+.lx-src-quote { font-size:12.5px; color:var(--lx-ink-soft); margin-top:6px; }
+.lx-score { font-size:11px; color:var(--lx-ink-faint); margin-top:6px; }
+.lx-oos-note { font-size:12.5px; color:#6b7280; margin-top:6px; }
+
+/* --- 進捗タブ：コース行程 --- */
+.lx-journey { border:1px solid var(--lx-line); border-radius:11px; padding:14px 14px 12px; margin-bottom:18px; background:linear-gradient(180deg,#fbfcfe,#fff); }
+.lx-journey-head { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:12px; }
+.lx-journey-head .t { font-size:12px; font-weight:700; }
+.lx-journey-head .pct { font-size:11px; color:var(--lx-ink-faint); }
+.lx-track { position:relative; height:8px; border-radius:6px; background:var(--lx-line-soft); margin:0 4px 4px; }
+.lx-done { position:absolute; left:0; top:0; bottom:0; border-radius:6px; background:var(--lx-brand); opacity:.85; }
+.lx-tick { position:absolute; top:-3px; width:2px; height:14px; background:#fff; transform:translateX(-1px); }
+.lx-here { position:absolute; top:50%; width:13px; height:13px; border-radius:50%; background:#fff; border:2.5px solid var(--lx-brand); transform:translate(-50%,-50%); z-index:2; }
+.lx-chapters { display:flex; justify-content:space-between; margin:8px 6px 0; font-size:10px; color:var(--lx-ink-faint); }
+.lx-chapters span { flex:1; text-align:center; }
+.lx-chapters span.cur { color:var(--lx-brand); font-weight:700; }
+.lx-path { display:flex; align-items:center; gap:7px; flex-wrap:wrap; margin-top:14px; font-size:12px; }
+.lx-seg { display:inline-flex; align-items:center; gap:6px; padding:5px 10px; border-radius:8px; }
+.lx-seg.course { background:var(--lx-brand-soft); color:var(--lx-brand); font-weight:600; }
+.lx-seg.detour { background:var(--lx-source-bg); color:#8a5e0a; font-weight:600; border:1px dashed #e3c98a; }
+.lx-seg .pin { width:7px; height:7px; border-radius:50%; }
+.lx-seg.course .pin { background:var(--lx-brand); }
+.lx-seg.detour .pin { background:var(--lx-source); }
+.lx-conn { color:var(--lx-ink-faint); font-size:13px; }
+.lx-conn.detour { color:var(--lx-source); }
+.lx-return-cta { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:12px; padding:9px 11px; border-radius:9px; background:#fff; border:1px solid #e3c98a; }
+.lx-return-cta .r-text { font-size:12px; color:#8a5e0a; }
+.lx-return-cta button { appearance:none; border:none; cursor:pointer; font-family:inherit; background:var(--lx-source); color:#fff; border-radius:7px; padding:6px 12px; font-size:12px; font-weight:600; white-space:nowrap; }
+.lx-journey-foot { font-size:10.5px; color:var(--lx-ink-faint); margin-top:10px; line-height:1.5; }
+
+/* --- 進捗タブ：問いの軌跡 --- */
+.lx-revisit { background:linear-gradient(180deg,#f6f1ff,#fbf9ff); border:1px solid #e6dbfb; border-radius:10px; padding:13px 14px; margin-bottom:14px; }
+.lx-revisit .k { font-size:11px; font-weight:700; color:var(--lx-revisit); letter-spacing:.04em; }
+.lx-revisit .h { font-size:13.5px; font-weight:600; margin:3px 0 2px; }
+.lx-revisit .s { font-size:12px; color:var(--lx-ink-soft); }
+.lx-filters { display:flex; gap:8px; margin:0 0 14px; flex-wrap:wrap; }
+.lx-filter { appearance:none; border:1px solid var(--lx-line); background:#fff; cursor:pointer; border-radius:999px; padding:5px 11px; font-size:12px; color:var(--lx-ink-soft); font-family:inherit; display:inline-flex; align-items:center; gap:6px; }
+.lx-filter[aria-pressed="true"] { border-color:var(--lx-brand); background:var(--lx-brand-soft); color:var(--lx-brand); font-weight:600; }
+.lx-filter i { width:7px; height:7px; border-radius:50%; }
+.lx-trace { border:1px solid var(--lx-line); border-radius:10px; padding:12px 13px; margin-bottom:10px; display:flex; gap:11px; align-items:flex-start; }
+.lx-trace .lx-rail { width:3px; align-self:stretch; border-radius:3px; flex:0 0 auto; margin-top:2px; }
+.lx-trace.q .lx-rail { background:var(--lx-kind-q); }
+.lx-trace.detour .lx-rail { background:var(--lx-kind-detour); }
+.lx-trace.mis .lx-rail { background:var(--lx-kind-mis); }
+.lx-trace-body { flex:1; min-width:0; }
+.lx-trace-top { display:flex; align-items:center; gap:8px; margin-bottom:3px; flex-wrap:wrap; }
+.lx-kind-tag { font-size:11px; font-weight:600; }
+.lx-trace.q .lx-kind-tag { color:var(--lx-kind-q); }
+.lx-trace.detour .lx-kind-tag { color:var(--lx-kind-detour); }
+.lx-trace.mis .lx-kind-tag { color:var(--lx-kind-mis); }
+.lx-status-tag { font-size:10px; font-weight:700; padding:1px 7px; border-radius:5px; }
+.lx-status-tag.open { background:#eaf1ff; color:#2f6fed; }
+.lx-status-tag.revisit { background:#f1e9ff; color:#7c4dd6; }
+.lx-status-tag.resolved { background:#e9f7ef; color:#1f9d5b; }
+.lx-trace-text { font-size:13px; line-height:1.5; }
+.lx-trace-ctx { font-size:11.5px; color:var(--lx-ink-faint); margin-top:3px; }
+.lx-trace-actions { margin-top:9px; display:flex; gap:8px; flex-wrap:wrap; }
+.lx-ghost { appearance:none; border:1px solid var(--lx-line); background:#fff; cursor:pointer; border-radius:7px; padding:5px 10px; font-size:12px; color:var(--lx-brand); font-family:inherit; }
+.lx-ghost.secondary { color:var(--lx-ink-soft); }
+.lx-ghost:disabled { cursor:default; color:var(--lx-ink-faint); }
+
+/* 教員 InterestDashboard (admin) */
+.interest-dashboard .id-hotspot {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border: 1px solid var(--color-border-tertiary);
+  border-radius: 6px; margin-bottom: 6px;
+}
+.interest-dashboard .id-bar { height: 8px; border-radius: 4px; background: var(--color-border-info); }
+.interest-dashboard .id-topic { flex: 1; font-size: 13px; }
+.interest-dashboard .id-count { font-variant-numeric: tabular-nums; color: var(--color-text-secondary); font-size: 12px; }

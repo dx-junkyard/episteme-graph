@@ -128,8 +128,14 @@ def retrieval_node(state: StudentState) -> dict[str, Any]:
     """ベクトル検索 + グラフ走査 (LLM 不使用)。
 
     services.search_chunks_with_metadata を内部で呼び出す。
+    各チャンクに tier(L1信頼性) を付与し、回答全体の overall_tier を安全側で集約する。
     """
     from services import search_chunks_with_metadata
+    from core.learning_experience import (
+        TIER_OUT_OF_SOURCE,
+        aggregate_overall_tier,
+        attach_tiers,
+    )
 
     question = state["question"]
     relevance_threshold = 0.35
@@ -137,9 +143,17 @@ def retrieval_node(state: StudentState) -> dict[str, Any]:
 
     above_threshold = [r for r in chunk_results if r["score"] >= relevance_threshold]
     if not above_threshold:
-        return {"chunks": [], "no_relevant_chunks": True}
+        # EPISTEME_MOCK[M02] L1信頼性: ヒットなし → 未踏として安全側に倒す。
+        # — replace in Stage 2 (OutOfSourceGuard 本実装)
+        return {"chunks": [], "no_relevant_chunks": True, "overall_tier": TIER_OUT_OF_SOURCE}
 
-    return {"chunks": above_threshold, "no_relevant_chunks": False}
+    above_threshold = attach_tiers(above_threshold)
+    overall = aggregate_overall_tier([c["tier"] for c in above_threshold])
+    return {
+        "chunks": above_threshold,
+        "no_relevant_chunks": False,
+        "overall_tier": overall,
+    }
 
 
 def _route_after_retrieval(state: StudentState) -> str:

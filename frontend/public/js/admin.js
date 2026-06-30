@@ -1916,6 +1916,62 @@
     refreshBtn.addEventListener("click", loadStumbles);
   }
 
+  // ── 学習者体験レイヤー(B層) Stage M — 関心集約ダッシュボード ──────────
+  // EPISTEME_MOCK[M09] UI/L4: /admin/interest-dashboard の mock 集計を表示する。
+  // — replace in Stage 4（interest_traces からの実集計に置き換え）
+  function initInterestDashboard() {
+    var loaded = false;
+    onTabActivate("interest-dashboard", function () {
+      if (loaded) return;
+      loaded = true;
+      loadInterestDashboard();
+    });
+  }
+
+  function loadInterestDashboard() {
+    var body = document.getElementById("interest-dashboard-body");
+    var mockEl = document.getElementById("interest-dashboard-mock");
+    if (!body) return;
+    apiFetch("/admin/interest-dashboard")
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        // 🚧 mock 印を表示（_mock を検知）。
+        if (mockEl && (data._mock || data.mock)) {
+          mockEl.innerHTML = '<span class="mock-flag" title="集団集計は Stage M の mock">🚧 MOCK</span>';
+        }
+        var hotspots = data.hotspots || [];
+        var maxCount = hotspots.reduce(function (m, h) { return Math.max(m, h.interest_count || 0); }, 1);
+        var html = "";
+        html += '<div style="font-size:12px;color:var(--color-text-secondary);margin-bottom:8px">対象クラス規模: ' +
+          escHtml(String(data.cohort_size || "-")) + ' 名（個人は特定しません）</div>';
+
+        html += '<h4 style="margin:8px 0 6px;font-size:13px">関心が集まっている領域</h4>';
+        hotspots.forEach(function (h) {
+          var pct = Math.round((h.interest_count || 0) / maxCount * 100);
+          html += '<div class="id-hotspot">';
+          html += '<div class="id-topic">' + escHtml(h.topic_title || "") +
+            ' <span style="color:var(--color-text-tertiary);font-size:11px">未消化 ' +
+            Math.round((h.unfinished_ratio || 0) * 100) + '%</span></div>';
+          html += '<div class="id-bar" style="width:' + pct + 'px;min-width:20px"></div>';
+          html += '<div class="id-count">' + escHtml(String(h.interest_count || 0)) + '</div>';
+          html += '</div>';
+        });
+
+        var us = data.unfinished_summary || {};
+        html += '<h4 style="margin:14px 0 6px;font-size:13px">未消化の総量</h4>';
+        html += '<div style="display:flex;gap:16px;font-size:13px">';
+        html += '<div>未解決の問い: <strong>' + escHtml(String(us.open_questions || 0)) + '</strong></div>';
+        html += '<div>反復した寄り道: <strong>' + escHtml(String(us.repeated_detours || 0)) + '</strong></div>';
+        html += '<div>反復する誤答: <strong>' + escHtml(String(us.recurring_misconceptions || 0)) + '</strong></div>';
+        html += '</div>';
+
+        body.innerHTML = html;
+      })
+      .catch(function () {
+        body.innerHTML = '<div style="color:var(--color-text-danger)">読み込みに失敗しました</div>';
+      });
+  }
+
   // ── Error Log Analysis ─────────────────────────────────────────────
   function initErrorAnalysis() {
     if (state.role !== "SYSTEM_ADMIN") return;
@@ -9284,6 +9340,7 @@
       initLectureStudio();
     }
     initStumbles();
+    initInterestDashboard();
     initSchemaProposals();
     initSchemaEvolution();
     initUserManagement();

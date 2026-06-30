@@ -846,7 +846,9 @@ def search_chunks_with_metadata(
                 """),
                 {"query_vector": str(query_vector), "limit": top_k},
             ).fetchall()
-            return [
+            from core.learning_experience import attach_tiers
+
+            results = [
                 {
                     "id": str(row[0]),
                     "text": row[1],
@@ -857,6 +859,8 @@ def search_chunks_with_metadata(
                 for row in rows
                 if row[1]
             ]
+            # L1 信頼性: 各チャンクに tier を付与（Stage M は簡易 mock 判定。M01/replace in Stage 2）。
+            return attach_tiers(results)
         finally:
             session.close()
     except Exception as exc:

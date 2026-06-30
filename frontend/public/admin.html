@@ -32,6 +32,7 @@
       <button class="admin-tab" data-tab="course-management">コース管理</button>
       <button class="admin-tab" data-tab="lecture-studio">原稿スタジオ</button>
       <button class="admin-tab" data-tab="stumbles">つまづきデータ</button>
+      <button class="admin-tab" data-tab="interest-dashboard">関心集約 🚧</button>
       <button class="admin-tab" data-tab="schema-proposals">スキーマ提案</button>
       <button class="admin-tab" data-tab="groups">グループ管理</button>
       <button class="admin-tab" data-tab="system-stats" id="tab-btn-system-stats" style="display:none">システム統計</button>
@@ -464,6 +465,19 @@
             <tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">コースを選択してください</td></tr>
           </tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- 学習者体験レイヤー(B層) Stage M — 教員向け関心集約（集団集計を既定） -->
+    <div class="admin-panel" id="tab-interest-dashboard">
+      <div class="admin-section">
+        <h3 class="admin-section-title">関心集約ダッシュボード <span id="interest-dashboard-mock"></span></h3>
+        <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:12px">
+          クラス全体の関心傾向を、個人を特定しない集団集計で表示します（点数・ランキングではなく問いの深まりを見せる設計）。
+        </p>
+        <div id="interest-dashboard-body" class="interest-dashboard">
+          <div style="color:var(--color-text-tertiary)">読み込み中…</div>
+        </div>
       </div>
     </div>
 
