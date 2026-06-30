@@ -1,16 +1,17 @@
 """学習者体験レイヤー(B層)の共有ロジック。
 
-仕様書 `episteme-graph_learner-experience-spec.md` の4レイヤーのうち、Stage M
-（フルスタックの薄い殻）で導入する tier 判定・位置アンカー・関心痕跡の口を集約する。
+仕様書 `episteme-graph_learner-experience-spec.md` の4レイヤーの共有部品を集約する:
+tier 判定(L1 SourceTierJudge/OutOfSourceGuard)・位置アンカー(L2)・関心痕跡のビュー(L3)。
 
-このモジュールは **(A) 教材生成パイプラインに依存しない**（読み取り配線は Stage 2 以降）。
-Stage M の段階では中身の多くが Mock であり、各 Mock には `EPISTEME_MOCK` タグを付けて
-`MOCKS.md` 台帳と grep の二点で取り残しを検出できるようにしている。
+このモジュールは **(A) 教材生成パイプラインに依存しない**（承認情報は読み取りのみ）。
+Stage 1〜4 で全 Mock を本実装へ置換済み（経緯は MOCKS.md を参照）。
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+from sqlalchemy import text as _sa_text
 
 # ---------------------------------------------------------------------------
 # tier 定義（L1 信頼性レイヤー）
@@ -18,7 +19,7 @@ from typing import Any
 
 TIER_APPROVED = "approved"        # 承認済み（教員承認済み教材由来）
 TIER_SOURCE = "source"            # 原典（論文本文に根拠あり、未承認）
-TIER_OUT_OF_SOURCE = "out_of_source"  # 未踏（十分な根拠なし）
+TIER_OUT_OF_SOURCE = "out_of_source"  # 参考（出典提示なし・十分な根拠なし）
 
 # 安全側の集約順序（弱い → 強い）。overall_tier は最弱に引きずる。
 _TIER_STRENGTH = {TIER_OUT_OF_SOURCE: 0, TIER_SOURCE: 1, TIER_APPROVED: 2}
@@ -28,18 +29,59 @@ _SOURCE_SCORE_THRESHOLD = 0.45
 
 
 def judge_source_tier(chunk: dict[str, Any]) -> str:
-    """検索ヒットした1チャンクに tier を付与する。
+    """検索ヒットした1チャンクに tier を付与する（L1 SourceTierJudge）。
 
-    # EPISTEME_MOCK[M01] L1信頼性: (A) の承認フラグを未だ読んでいないため、
-    # approved は決して出さず score 閾値だけで source / out_of_source を判定する
-    # 簡易ロジック。確信が持てない場合は必ず安全側(out_of_source)へ倒す。
-    # — replace in Stage 2 (SourceTierJudge: 承認フラグ・出典メタを配線)
+    承認の正本は (A) の `theory_components.status='teacher_reviewed'`。検索層が chunk に
+    付与した ``approved`` フラグ（teacher_reviewed な component に紐づくか）と類似度から判定する:
+
+    - ``approved is True``        → approved（教員が承認した教材由来）
+    - 類似度が閾値以上            → source（原典・未承認）
+    - それ以外                    → out_of_source（未踏）
+
+    不可侵の一線: ``approved`` が明示的に True のときだけ承認に昇格する。
+    candidate / draft / 不明・混在は決して approved 扱いしない（安全側へ倒す）。
     """
+    if chunk.get("approved") is True:
+        return TIER_APPROVED
     score = float(chunk.get("score") or 0.0)
     if score >= _SOURCE_SCORE_THRESHOLD:
-        # 不可侵の一線: provisional を approved 扱いしない。Stage M では approved は出さない。
         return TIER_SOURCE
     return TIER_OUT_OF_SOURCE
+
+
+def approved_chunk_ids(session, chunk_ids: list[str]) -> set[str]:
+    """教員承認済み(teacher_reviewed)の theory_components に紐づく chunk id 集合を返す（L1）。
+
+    承認の正本は ``theory_components.status='teacher_reviewed'``（A層が生成・教員が検証）。
+    chunk へのリンクは ``primary_chunk_id``（直接）と ``source_chunks``（JSONB 配列）の両方を辿る。
+    **A層は読み取りのみ**。該当が無ければ空集合を返し、呼び出し側は安全側で source/out_of_source に倒す。
+    """
+    ids = [str(c) for c in (chunk_ids or []) if c]
+    if not ids:
+        return set()
+    try:
+        rows = session.execute(
+            _sa_text("""
+                SELECT DISTINCT cid FROM (
+                    SELECT primary_chunk_id::text AS cid
+                    FROM theory_components
+                    WHERE status = 'teacher_reviewed'
+                      AND primary_chunk_id::text = ANY(:ids)
+                    UNION
+                    SELECT elem AS cid
+                    FROM theory_components tc,
+                         LATERAL jsonb_array_elements_text(tc.source_chunks) AS elem
+                    WHERE tc.status = 'teacher_reviewed'
+                      AND elem = ANY(:ids)
+                ) q
+                WHERE cid IS NOT NULL
+            """),
+            {"ids": ids},
+        ).fetchall()
+        return {str(r[0]) for r in rows}
+    except Exception:
+        # theory_components 未整備のコース等では安全側（承認なし）にフォールバック。
+        return set()
 
 
 def aggregate_overall_tier(tiers: list[str]) -> str:
@@ -58,15 +100,25 @@ def attach_tiers(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def out_of_source_notice() -> str:
-    """未踏（out_of_source）時の、断定しない定型文。
+    """out_of_source（参考）時に回答の冒頭へ添える、断定しない定型バナー（L1 OutOfSourceGuard）。"""
+    return (
+        "⚠️ これは**出典が提示できない「参考」情報**です。\n"
+        "教材（承認済み/原典）の裏づけはなく、一般的な学術知識に基づく参考であり、断定ではありません。"
+    )
 
-    # EPISTEME_MOCK[M02] L1信頼性: 暫定のガード文。Stage 2 で OutOfSourceGuard の
-    # 本実装（予想→根拠→誤答比較→原典tier解説の順序ゲート）に置き換える。
-    # — replace in Stage 2
+
+def out_of_source_guard_instruction() -> str:
+    """未踏時に生成プロンプトへ注入する順序ゲート指示（Productive Failure）。
+
+    根拠が弱いときに即断定させず、予想→根拠の所在→（あれば）誤答との対比→原典 tier の明示、
+    の順で進ませる。仕様書 §5（PS-I による概念理解・転移）に基づく。
     """
     return (
-        "⚠️ この質問に十分に対応する**承認済み/原典の根拠が見つかりませんでした（未踏）**。\n"
-        "以下は一般的な学術知識に基づく参考情報であり、教材で裏づけられた断定ではありません。"
+        "【重要・未踏ガード】この質問は教材内に十分な根拠が見つかっていません。次の順序で応答すること:\n"
+        "1. 断定しない。「教材では確認できない」と最初に明示する。\n"
+        "2. 学習者自身の予想を一度引き出す問いを投げる（すぐに答えを与えない）。\n"
+        "3. 一般知識で補う場合は『これは教材の裏づけがない参考情報』と区別して示す。\n"
+        "4. 確実な事実と推測を混ぜない。誇張・断定表現を避ける。"
     )
 
 
@@ -80,17 +132,16 @@ def build_position_anchor(
     segment_id: str | int | None = None,
     scroll_offset: float | int | None = None,
 ) -> dict[str, Any]:
-    """復帰位置アンカー {topic_id, segment_id, scroll_offset} を組み立てる。
+    """復帰位置アンカー {topic_id, segment_id, scroll_offset} を組み立てる（L2）。
 
-    # EPISTEME_MOCK[M04] L2位置復帰: segment_id / scroll_offset は呼び出し側から
-    # 渡らなければ仮値(0)で埋める。DB永続化なし・寄り道復帰の精密化は未実装。
-    # — replace in Stage 1 (PositionAnchor: lecture interrupt と統合、回帰テスト)
+    segment_id / scroll_offset はクライアントが報告した実際の現在位置。未指定なら
+    先頭(0)。トピックを跨がない単段の DetourStack 入口として origin に保持され、
+    「本筋へ戻る」で同じ位置に復帰する。
     """
     return {
         "topic_id": topic_id,
-        "segment_id": segment_id if segment_id is not None else 0,
-        "scroll_offset": scroll_offset if scroll_offset is not None else 0,
-        "_mock": True,
+        "segment_id": int(segment_id) if segment_id is not None else 0,
+        "scroll_offset": int(scroll_offset) if scroll_offset is not None else 0,
     }
 
 
@@ -99,79 +150,63 @@ def build_position_anchor(
 # ---------------------------------------------------------------------------
 
 
-def mock_interest_traces(course_id: str, topic_id: str | None = None) -> dict[str, Any]:
-    """問いの軌跡（UnfinishedQuestionBox）を返す（Stage M は mock）。
+_TRACE_KIND_WORD = {"misconception": "誤答", "question": "問い", "detour": "寄り道"}
 
-    再設計（右パネル）に合わせ、status を主役にした curated な痕跡と、再訪のころ合い
-    （DecayPolicy の入口）を返す。kind: question|detour|misconception、
-    status: open(未解決/未消化) | revisited(再訪推奨) | resolved(解決済み)。
 
-    # EPISTEME_MOCK[M05] L3資産化: interest_traces テーブル未作成のため固定 mock。
-    # 総数バッジは廃止し status 軸で見せる。Stage 3 で db/020_interest_trace.sql と
-    # 安価な生記録(kind='raw')に置き換える。revisit_cue は Stage 4 (DecayPolicy)。
-    # — replace in Stage 3/4
+def _days_ago(dt) -> int | None:
+    """tz-aware/naive 両対応で経過日数を返す（不明は None）。"""
+    if not dt:
+        return None
+    try:
+        import datetime as _dt
+        now = _dt.datetime.now(dt.tzinfo) if getattr(dt, "tzinfo", None) else _dt.datetime.now()
+        return max(0, (now - dt).days)
+    except Exception:
+        return None
+
+
+def build_traces_view(rows: list) -> dict[str, Any]:
+    """interest_traces の行 → 問いの軌跡ビュー（traces + revisit_cue）に変換する（純関数）。
+
+    rows: ``(id, kind, status, payload(dict|json), created_at)`` の並び。
+    再訪のころ合い(revisit_cue)は「最も古い未解決(open/revisited)の誤答 > 問い」を
+    決定論的に選ぶ簡易版（DecayPolicy の本格的な間隔最適化は Stage 4）。
     """
-    return {
-        "_mock": True,
-        "_mock_fields": ["traces", "revisit_cue"],
-        "course_id": course_id,
-        "topic_id": topic_id,
-        "revisit_cue": {
+    import json as _json
+
+    traces: list[dict[str, Any]] = []
+    cue_candidate = None
+    for r in rows:
+        payload = r[3] if isinstance(r[3], dict) else (_json.loads(r[3]) if r[3] else {})
+        days = _days_ago(r[4]) if len(r) > 4 else None
+        trace = {
+            "id": str(r[0]),
+            "kind": r[1],
+            "status": r[2],
+            "text": (payload or {}).get("text", ""),
+            "context_label": (payload or {}).get("context_label", ""),
+        }
+        traces.append(trace)
+        if r[2] in ("open", "revisited") and (days is None or days >= 1):
+            rank = 0 if r[1] == "misconception" else 1
+            key = (rank, -(days or 0))
+            if cue_candidate is None or key < cue_candidate[0]:
+                cue_candidate = (key, trace, days)
+
+    revisit_cue = None
+    if cue_candidate:
+        _, t, days = cue_candidate
+        word = _TRACE_KIND_WORD.get(t["kind"], "問い")
+        when = f"{days}日前" if days else "先日"
+        revisit_cue = {
             "kind_label": "再訪のころ合い",
-            "headline": "前に符号を取り違えた問い、今なら見えるかも",
-            "sub": "5日前に一度訂正済み。間隔をあけて戻ると定着しやすいタイミングです。",
-        },
-        "traces": [
-            {
-                "id": "mock-trace-1", "kind": "misconception", "status": "revisited",
-                "context_label": "第1章 · 修正重力理論のテストとしての大規模構造",
-                "text": "（モック）尖度の規格化で符号を取り違えた",
-            },
-            {
-                "id": "mock-trace-2", "kind": "detour", "status": "open",
-                "context_label": "第2章 · Gravity kernels の定義と役割",
-                "text": "（モック）前提知識Aに寄り道したが、消化しないまま元のパスに戻った",
-            },
-            {
-                "id": "mock-trace-3", "kind": "question", "status": "open",
-                "context_label": "第1章 · フーリエ摂動基底を用いた物質密度揺らぎの記述",
-                "text": "（モック）この近似はどの条件で破綻しますか？",
-            },
-            {
-                "id": "mock-trace-4", "kind": "question", "status": "resolved",
-                "context_label": "第3章 · 局所バイアス模型の定義",
-                "text": "（モック）局所バイアスを3次で打ち切る根拠は？",
-            },
-        ],
-    }
+            "headline": f"前に引っかかった{word}、今なら見えるかも",
+            "sub": f"{when}の{word}です。間隔をあけて戻ると定着しやすいタイミングです。",
+        }
+
+    return {"traces": traces, "revisit_cue": revisit_cue}
 
 
 # ---------------------------------------------------------------------------
-# 可視化・活用（L4）: 教員向け InterestDashboard（集団集計を既定）
+# 可視化・活用（L4）の集計は services.aggregate_interest_dashboard（DB集計）に実装。
 # ---------------------------------------------------------------------------
-
-
-def mock_interest_dashboard(course_id: str | None = None) -> dict[str, Any]:
-    """教員向け関心集約（集団集計）。Stage M は固定 mock。
-
-    # EPISTEME_MOCK[M06] L4可視化: 集団集計を固定 mock データで返す。
-    # 個人を特定可能なフィールドは最初から持たせない（プライバシー設計を織り込む）。
-    # Stage 4 で interest_traces からの実集計に置き換える。
-    # — replace in Stage 4 (InterestDashboard: 集団集計優先・個人非特定)
-    """
-    return {
-        "_mock": True,
-        "_mock_fields": ["hotspots", "unfinished_summary"],
-        "course_id": course_id,
-        "cohort_size": 24,  # 集団規模のみ。個人IDは持たない。
-        "hotspots": [
-            {"topic_title": "（モック）固有値問題の境界条件", "interest_count": 17, "unfinished_ratio": 0.41},
-            {"topic_title": "（モック）摂動展開の収束", "interest_count": 12, "unfinished_ratio": 0.25},
-            {"topic_title": "（モック）規格化の物理的意味", "interest_count": 9, "unfinished_ratio": 0.55},
-        ],
-        "unfinished_summary": {
-            "open_questions": 38,
-            "repeated_detours": 11,
-            "recurring_misconceptions": 6,
-        },
-    }

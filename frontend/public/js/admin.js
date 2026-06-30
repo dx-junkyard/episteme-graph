@@ -1916,28 +1916,45 @@
     refreshBtn.addEventListener("click", loadStumbles);
   }
 
-  // ── 学習者体験レイヤー(B層) Stage M — 関心集約ダッシュボード ──────────
-  // EPISTEME_MOCK[M09] UI/L4: /admin/interest-dashboard の mock 集計を表示する。
-  // — replace in Stage 4（interest_traces からの実集計に置き換え）
+  // ── 学習者体験レイヤー(B層) Stage 4 — 関心集約ダッシュボード（実集計）──────
   function initInterestDashboard() {
-    var loaded = false;
-    onTabActivate("interest-dashboard", function () {
-      if (loaded) return;
-      loaded = true;
-      loadInterestDashboard();
-    });
+    var select = document.getElementById("interest-dashboard-course-select");
+    var refreshBtn = document.getElementById("refresh-interest-dashboard");
+    if (!select) return;
+
+    // コース一覧を読み込んでセレクタに反映。
+    apiFetch("/learning/courses")
+      .then(function (res) { return res.json(); })
+      .then(function (courses) {
+        (courses || []).forEach(function (c) {
+          var opt = document.createElement("option");
+          opt.value = c.id;
+          opt.textContent = c.title;
+          select.appendChild(opt);
+        });
+      })
+      .catch(function () {});
+
+    select.addEventListener("change", loadInterestDashboard);
+    if (refreshBtn) refreshBtn.addEventListener("click", loadInterestDashboard);
   }
 
   function loadInterestDashboard() {
     var body = document.getElementById("interest-dashboard-body");
-    var mockEl = document.getElementById("interest-dashboard-mock");
+    var select = document.getElementById("interest-dashboard-course-select");
     if (!body) return;
-    apiFetch("/admin/interest-dashboard")
+    var courseId = select ? select.value : "";
+    if (!courseId) {
+      body.innerHTML = '<div style="color:var(--color-text-tertiary)">コースを選択してください</div>';
+      return;
+    }
+    body.innerHTML = '<div style="color:var(--color-text-tertiary)">読み込み中…</div>';
+    apiFetch("/admin/interest-dashboard?course_id=" + encodeURIComponent(courseId))
       .then(function (res) { return res.json(); })
       .then(function (data) {
-        // 🚧 mock 印を表示（_mock を検知）。
-        if (mockEl && (data._mock || data.mock)) {
-          mockEl.innerHTML = '<span class="mock-flag" title="集団集計は Stage M の mock">🚧 MOCK</span>';
+        if ((data.cohort_size || 0) === 0 && (!data.hotspots || data.hotspots.length === 0)) {
+          body.innerHTML = '<div style="color:var(--color-text-tertiary)">このコースにはまだ関心痕跡が記録されていません。</div>';
+          return;
         }
         var hotspots = data.hotspots || [];
         var maxCount = hotspots.reduce(function (m, h) { return Math.max(m, h.interest_count || 0); }, 1);
@@ -1951,7 +1968,8 @@
           html += '<div class="id-hotspot">';
           html += '<div class="id-topic">' + escHtml(h.topic_title || "") +
             ' <span style="color:var(--color-text-tertiary);font-size:11px">未消化 ' +
-            Math.round((h.unfinished_ratio || 0) * 100) + '%</span></div>';
+            Math.round((h.unfinished_ratio || 0) * 100) + '%' +
+            (h.learners ? ' ・ ' + escHtml(String(h.learners)) + '名' : '') + '</span></div>';
           html += '<div class="id-bar" style="width:' + pct + 'px;min-width:20px"></div>';
           html += '<div class="id-count">' + escHtml(String(h.interest_count || 0)) + '</div>';
           html += '</div>';

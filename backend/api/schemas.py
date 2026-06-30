@@ -259,6 +259,7 @@ class LearningChatRequest(BaseModel):
     action: str | None = None
     support_action: str | None = None
     support_context: dict | None = None
+    position_anchor: dict | None = None  # L2: クライアントの現在位置 {segment_id, scroll_offset}
     chunk_id: str | None = None
     element_id: str | None = None
     element_type: str | None = None
@@ -277,10 +278,14 @@ class LearningSupportOriginOut(BaseModel):
     topic_id: str
     topic_title: str
     chapter_title: str = ""
+    segment_id: int = 0      # L2 位置・復帰: 復帰先セグメント
+    scroll_offset: int = 0   # L2 位置・復帰: 復帰先スクロール量
 
 
 class SourceTierItem(BaseModel):
     """回答の根拠1件の格付け（L1 信頼性レイヤー）。"""
+    index: int = 0    # 連番出典 [出典N]（本文マーカーと対応）
+    chunk_id: str = ""  # 該当チャンク（ポップアップで全文取得）
     source_title: str = ""
     tier: str = "out_of_source"  # approved | source | out_of_source
     score: float = 0.0

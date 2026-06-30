@@ -35,24 +35,30 @@ from services import (
     get_course_chunks_ordered,
     get_course_data,
     get_editable_course_data,
+    get_chunk_passage,
     get_graph_element_context,
+    get_interest_traces,
     get_personal_layer,
     get_user_group_ids,
     log_unanswered_query,
     persist_chat_history,
+    record_internalization,
+    record_interest_trace,
     record_student_stumble_event,
+    resolve_interest_trace,
     save_course_data,
     delete_course_data,
     search_chunks_with_metadata,
     user_can_access_group,
     user_can_view_course,
 )
+from pydantic import BaseModel
 from core.llm import generate_text, get_llm_params
 from core.learning_experience import (
     TIER_OUT_OF_SOURCE,
     aggregate_overall_tier,
     build_position_anchor,
-    mock_interest_traces,
+    out_of_source_guard_instruction,
     out_of_source_notice,
 )
 from core.learning_support_agent import LearningSupportAgent, extract_inline_actions
@@ -646,7 +652,7 @@ def _get_integrated_tutor_system_prompt(domain: str, response_persona: str | Non
 
 **フォーマット要件:**
 - 数式は必ず LaTeX 記法で記述（インラインは $...$、ディスプレイは $$...$$）
-- 教材を参照した場合は [出典: 『書籍名』] を文脈に自然に混ぜて言及すること。{persona_block}"""
+- 教材を参照した場合は、コンテキストに付された番号付き出典マーカー `[出典1]` `[出典2]` … を本文に自然に挿入して言及すること。番号は提示された出典に対応させ、独自の番号や『書籍名』形式は使わないこと。{persona_block}"""
 
 
 def _generate_graph_element_explanation(
@@ -1129,7 +1135,14 @@ def learning_chat(
     domain = course_data.get("domain") or course_title
     response_persona = course_persona_settings(course_data)["response_persona"]
     support_agent = LearningSupportAgent(course_id, course_data)
-    support_origin = support_agent.origin_for_topic(topic_id, topic_info)
+    # L2 位置・復帰: クライアントが報告した現在位置（segment/scroll）を origin に取り込み、
+    # 寄り道に入っても同じ位置へ正確に復帰できるようにする。
+    _anchor = body.position_anchor or {}
+    _seg = int(_anchor.get("segment_id") or 0)
+    _scroll = int(_anchor.get("scroll_offset") or 0)
+    support_origin = support_agent.origin_for_topic(
+        topic_id, topic_info, segment_id=_seg, scroll_offset=_scroll
+    )
 
     if body.support_action == "return_to_learning_path":
         result = support_agent.return_to_path_result((body.support_context or {}).get("origin"))
@@ -1253,9 +1266,12 @@ def learning_chat(
             cited_chunks.append(f"[現在表示中の教材]\n{topic_material[:5000]}")
     for r in chunk_results:
         if r["score"] >= 0.30:
-            cited_chunks.append(f"[出典: 『{r['source_title']}』]\n{r['text']}")
+            _n = len(cited_sources) + 1  # 連番出典 [出典N]（cited_sources と 1 対 1）
+            cited_chunks.append(f"[出典{_n}] 『{r['source_title']}』\n{r['text']}")
             _quote = (r.get("text") or "").strip().replace("\n", " ")
             cited_sources.append({
+                "index": _n,
+                "chunk_id": r.get("id", ""),
                 "source_title": r.get("source_title", "不明な教材"),
                 "tier": r.get("tier", TIER_OUT_OF_SOURCE),
                 "score": round(float(r.get("score", 0.0)), 3),
@@ -1273,8 +1289,12 @@ def learning_chat(
         log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
 
     # 5. 回答の生成（ルート統合）
+    # L1 OutOfSourceGuard: 未踏なら生成前に順序ゲート（断定回避・予想促し）を system へ注入する。
+    _system_prompt = _get_integrated_tutor_system_prompt(domain, response_persona)
+    if overall_tier == TIER_OUT_OF_SOURCE:
+        _system_prompt += "\n\n" + out_of_source_guard_instruction()
     messages: list[dict] = [
-        {"role": "system", "content": _get_integrated_tutor_system_prompt(domain, response_persona)},
+        {"role": "system", "content": _system_prompt},
         {"role": "user", "content": (
             f"コース: {course_title}\n"
             f"現在のトピック: {topic_title}\n\n"
@@ -1310,6 +1330,19 @@ def learning_chat(
         current_user["id"], course_id, topic_id,
         body.history, body.message, answer,
     )
+    # L2: クライアント報告の実位置で position_anchor を構築（mock ではない）。
+    position_anchor = build_position_anchor(topic_id, _seg, _scroll)
+    # L3 資産化: この往復を関心痕跡として安価に記録（LLM不使用）。
+    # kind は既存シグナルから決定: 誤解検出→misconception / それ以外→question。
+    _trace_kind = "misconception" if course_update else "question"
+    _ctx_label = " · ".join([s for s in [support_origin.chapter_title, topic_title] if s])
+    record_interest_trace(
+        current_user["id"], course_id, topic_id,
+        kind=_trace_kind,
+        text=body.message,
+        context_label=_ctx_label,
+        extra_payload={"overall_tier": overall_tier, "position_anchor": position_anchor},
+    )
     # ドメイン質問は常に detour（origin=現在アンカー）として扱う。本文中のドリルダウン
     # マーカーは構造化アクションへ正規化し、復帰導線と合わせて next_actions に集約する。
     clean_answer, inline_actions = extract_inline_actions(answer)
@@ -1320,29 +1353,69 @@ def learning_chat(
         include_continue=False,
         extra_actions=inline_actions,
     )
-    # EPISTEME_MOCK[M04] L2位置復帰: position_anchor は仮値(segment/scroll=0)。
-    # — replace in Stage 1
-    position_anchor = build_position_anchor(topic_id)
+    # L1 tier・L2 位置ともに実データ化済み（Stage 1/2）。チャット応答に mock は含まれない。
     return LearningChatResponse(
         **result.model_dump(),
         course_update=course_update,
         sources=cited_sources,
         overall_tier=overall_tier,
         position_anchor=position_anchor,
-        mock=True,  # 🚧 tier 判定と position_anchor は Stage M の mock を含む
+        mock=False,
     )
 
 
+@router.get("/courses/{course_id}/source-chunk/{chunk_id}")
+def get_source_chunk_route(
+    course_id: str,
+    chunk_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """出典ポップアップ用: チャンク本文（数式プレースホルダ正規化済み）と数式を返す（L1）。"""
+    passage = get_chunk_passage(chunk_id)
+    if not passage:
+        raise HTTPException(status_code=404, detail="Source chunk not found")
+    return passage
+
+
 @router.get("/courses/{course_id}/interest-traces")
-def get_interest_traces(
+def get_interest_traces_route(
     course_id: str,
     topic_id: str | None = None,
     current_user: dict = Depends(_get_current_user),
 ) -> dict:
-    """UnfinishedQuestionBox（未解決の問い・寄り道・誤答）を返す。
+    """問いの軌跡（未解決の問い・寄り道・誤答）を実データで返す（L3 資産化）。
 
-    EPISTEME_MOCK[M05] L3資産化: interest_traces テーブル未作成のため固定 mock を返す。
-    レスポンスは `_mock: true` を含み、フロントは 🚧MOCK バッジを描画する。
-    — replace in Stage 3 (db/020_interest_trace.sql + 安価な生記録)
+    interest_traces から本人の痕跡を status 主役で返す。個人特定情報は含めない。
     """
-    return mock_interest_traces(course_id, topic_id)
+    return get_interest_traces(current_user["id"], course_id, topic_id)
+
+
+@router.post("/courses/{course_id}/interest-traces/{trace_id}/resolve")
+def resolve_interest_trace_route(
+    course_id: str,
+    trace_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """痕跡を「解決済み」にする（本人の痕跡のみ）。"""
+    ok = resolve_interest_trace(current_user["id"], trace_id, status="resolved")
+    if not ok:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    return {"ok": True, "trace_id": trace_id, "status": "resolved"}
+
+
+class InternalizationRequest(BaseModel):
+    reason: str = ""
+
+
+@router.post("/courses/{course_id}/interest-traces/{trace_id}/internalize")
+def internalize_interest_trace_route(
+    course_id: str,
+    trace_id: str,
+    body: InternalizationRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """「なぜ自分に重要か」(Internalization Prompt) を痕跡へ保存する（L3・内発的動機）。"""
+    ok = record_internalization(current_user["id"], trace_id, body.reason)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Could not save internalization")
+    return {"ok": True, "trace_id": trace_id}

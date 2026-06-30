@@ -846,7 +846,7 @@ def search_chunks_with_metadata(
                 """),
                 {"query_vector": str(query_vector), "limit": top_k},
             ).fetchall()
-            from core.learning_experience import attach_tiers
+            from core.learning_experience import attach_tiers, approved_chunk_ids
 
             results = [
                 {
@@ -859,7 +859,10 @@ def search_chunks_with_metadata(
                 for row in rows
                 if row[1]
             ]
-            # L1 信頼性: 各チャンクに tier を付与（Stage M は簡易 mock 判定。M01/replace in Stage 2）。
+            # L1 信頼性: 教員承認(teacher_reviewed)に紐づく chunk へ approved を付与してから tier 判定。
+            approved = approved_chunk_ids(session, [r["id"] for r in results])
+            for r in results:
+                r["approved"] = r["id"] in approved
             return attach_tiers(results)
         finally:
             session.close()
@@ -1518,6 +1521,255 @@ def log_unanswered_query(user_id: str, course_id: str, topic_id: str, question: 
     except Exception as exc:
         session.rollback()
         logger.warning("Failed to log unanswered query: %s", exc)
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# 関心痕跡 InterestTraceStore (L3 資産化 / Stage 3) — 安価記録・LLM不使用
+# ---------------------------------------------------------------------------
+
+_INTEREST_KINDS = ("raw", "question", "detour", "misconception")
+_TRACE_STATUSES = ("open", "revisited", "resolved")
+
+
+def record_interest_trace(
+    user_id: str,
+    course_id: str,
+    topic_id: str | None,
+    kind: str,
+    text: str,
+    context_label: str = "",
+    extra_payload: dict | None = None,
+    status: str = "open",
+) -> None:
+    """学習者の問い・寄り道・誤答を interest_traces に1行追記する（安価・LLM不使用）。
+
+    失敗してもチャット応答を止めない（best-effort）。chat_anchors への二重書きはしない。
+    """
+    if kind not in _INTEREST_KINDS:
+        kind = "raw"
+    if status not in _TRACE_STATUSES:
+        status = "open"
+    payload = {"text": (text or "")[:500], "context_label": context_label or ""}
+    if extra_payload:
+        payload.update(extra_payload)
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO interest_traces (id, user_id, course_id, topic_id, kind, payload, status)
+                VALUES (gen_random_uuid(), CAST(:uid AS uuid), :cid, :tid, :kind,
+                        CAST(:payload AS jsonb), :status)
+            """),
+            {
+                "uid": user_id, "cid": course_id, "tid": topic_id, "kind": kind,
+                "payload": json.dumps(payload, ensure_ascii=False), "status": status,
+            },
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.warning("Failed to record interest trace: %s", exc)
+    finally:
+        session.close()
+
+
+def get_interest_traces(user_id: str, course_id: str, topic_id: str | None = None, limit: int = 50) -> dict:
+    """問いの軌跡（UnfinishedQuestionBox）を実データで返す（L3）。
+
+    status を主役に、未解決(open)→再訪推奨(revisited)→解決済み(resolved) の順で返す。
+    行→ビューの変換と再訪のころ合い算出は core.learning_experience.build_traces_view に集約。
+    """
+    from core.learning_experience import build_traces_view
+
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT id, kind, status, payload, created_at
+                FROM interest_traces
+                WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
+                ORDER BY
+                    CASE status WHEN 'revisited' THEN 0 WHEN 'open' THEN 1 ELSE 2 END,
+                    created_at DESC
+                LIMIT :lim
+            """),
+            {"uid": user_id, "cid": course_id, "lim": limit},
+        ).fetchall()
+    except Exception as exc:
+        logger.warning("get_interest_traces failed: %s", exc)
+        rows = []
+    finally:
+        session.close()
+
+    view = build_traces_view(rows)
+    view["course_id"] = course_id
+    view["topic_id"] = topic_id
+    return view
+
+
+def aggregate_interest_dashboard(course_id: str, topic_title_map: dict | None = None, top_n: int = 10) -> dict:
+    """教員向け InterestDashboard の集団集計（L4）。
+
+    **個人を特定しない**: 返すのは件数・比率・関与人数（COUNT(DISTINCT user_id)）のみで、
+    痕跡本文や user_id は一切出さない。集団集計を既定とする（仕様書 §6-5）。
+    """
+    title_map = topic_title_map or {}
+    session = _pg_session()
+    try:
+        cohort = session.execute(
+            sa_text("SELECT COUNT(DISTINCT user_id) FROM interest_traces WHERE course_id = :cid"),
+            {"cid": course_id},
+        ).scalar() or 0
+
+        rows = session.execute(
+            sa_text("""
+                SELECT topic_id,
+                       COUNT(*) AS cnt,
+                       COUNT(*) FILTER (WHERE status IN ('open', 'revisited')) AS unfinished,
+                       COUNT(DISTINCT user_id) AS learners
+                FROM interest_traces
+                WHERE course_id = :cid
+                GROUP BY topic_id
+                ORDER BY cnt DESC
+                LIMIT :lim
+            """),
+            {"cid": course_id, "lim": top_n},
+        ).fetchall()
+
+        summary = session.execute(
+            sa_text("""
+                SELECT
+                    COUNT(*) FILTER (WHERE kind = 'question' AND status IN ('open','revisited')) AS open_q,
+                    COUNT(*) FILTER (WHERE kind = 'detour') AS detours,
+                    COUNT(*) FILTER (WHERE kind = 'misconception') AS miscon
+                FROM interest_traces
+                WHERE course_id = :cid
+            """),
+            {"cid": course_id},
+        ).fetchone()
+    except Exception as exc:
+        logger.warning("aggregate_interest_dashboard failed: %s", exc)
+        return {"course_id": course_id, "cohort_size": 0, "hotspots": [],
+                "unfinished_summary": {"open_questions": 0, "repeated_detours": 0, "recurring_misconceptions": 0}}
+    finally:
+        session.close()
+
+    hotspots = []
+    for r in rows:
+        tid, cnt, unfinished, learners = r[0], int(r[1]), int(r[2]), int(r[3])
+        hotspots.append({
+            "topic_title": title_map.get(tid) or tid or "(不明トピック)",
+            "interest_count": cnt,
+            "unfinished_ratio": round(unfinished / cnt, 2) if cnt else 0.0,
+            "learners": learners,  # 関与人数（個人は特定しない）
+        })
+
+    return {
+        "course_id": course_id,
+        "cohort_size": int(cohort),
+        "hotspots": hotspots,
+        "unfinished_summary": {
+            "open_questions": int(summary[0]) if summary else 0,
+            "repeated_detours": int(summary[1]) if summary else 0,
+            "recurring_misconceptions": int(summary[2]) if summary else 0,
+        },
+    }
+
+
+def resolve_interest_trace(user_id: str, trace_id: str, status: str = "resolved") -> bool:
+    """痕跡の status を更新する（解決済み化など）。本人の痕跡のみ更新可。"""
+    if status not in _TRACE_STATUSES:
+        return False
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                UPDATE interest_traces
+                SET status = :status, last_seen_at = now()
+                WHERE id = CAST(:tid AS uuid) AND user_id = CAST(:uid AS uuid)
+                RETURNING id
+            """),
+            {"status": status, "tid": trace_id, "uid": user_id},
+        ).fetchone()
+        session.commit()
+        return row is not None
+    except Exception as exc:
+        session.rollback()
+        logger.warning("resolve_interest_trace failed: %s", exc)
+        return False
+    finally:
+        session.close()
+
+
+def get_chunk_passage(chunk_id: str) -> dict | None:
+    """出典ポップアップ用に、チャンク本文（数式プレースホルダ正規化済み）と数式を返す。
+
+    display_text を優先し、`normalize_to_placeholder_format` で [[FORMULA_N]] 形式へ正規化する
+    （フロントの renderMaterialChunk がそのまま数式を KaTeX 描画できる形）。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT c.text, c.display_text, c.formulas, c.chapter, c.section,
+                       COALESCE(d.title, d.filename, '') AS source_title, d.filename
+                FROM chunks c
+                LEFT JOIN documents d ON c.document_id = d.id
+                WHERE c.id = CAST(:cid AS uuid)
+                LIMIT 1
+            """),
+            {"cid": chunk_id},
+        ).fetchone()
+    except Exception as exc:
+        logger.warning("get_chunk_passage failed: %s", exc)
+        return None
+    finally:
+        session.close()
+
+    if not row:
+        return None
+    raw_text = row[1] or row[0] or ""
+    raw_formulas = row[2] if row[2] else []
+    text, formulas = _normalize_formulas(raw_text, raw_formulas)
+    section = " · ".join([s for s in [row[3], row[4]] if s])
+    return {
+        "chunk_id": str(chunk_id),
+        "text": text,
+        "formulas": formulas,
+        "source_title": row[5] or row[6] or "不明な教材",
+        "source_file": row[6] or "",
+        "section": section,
+    }
+
+
+def record_internalization(user_id: str, trace_id: str, reason: str) -> bool:
+    """痕跡に「なぜ自分に重要か」(Internalization Prompt) を payload へ保存する（L3/内発的動機）。
+
+    本人の痕跡のみ更新可。LLM は使わず、学習者の言語化テキストをそのまま保持する。
+    """
+    reason = (reason or "").strip()[:1000]
+    if not reason:
+        return False
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                UPDATE interest_traces
+                SET payload = payload || jsonb_build_object('internalization', :reason),
+                    last_seen_at = now()
+                WHERE id = CAST(:tid AS uuid) AND user_id = CAST(:uid AS uuid)
+                RETURNING id
+            """),
+            {"reason": reason, "tid": trace_id, "uid": user_id},
+        ).fetchone()
+        session.commit()
+        return row is not None
+    except Exception as exc:
+        session.rollback()
+        logger.warning("record_internalization failed: %s", exc)
+        return False
     finally:
         session.close()
 

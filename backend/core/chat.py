@@ -14,7 +14,7 @@ import logging
 
 from sqlalchemy import text
 
-from core.learning_experience import attach_tiers
+from core.learning_experience import attach_tiers, approved_chunk_ids
 from core.llm import generate_text, generate_embeddings, get_embedding_dim
 from core.postgres import get_session
 
@@ -64,8 +64,8 @@ def search_chunks(question: str, material_id: str, top_k: int = 5) -> list[dict]
     """PostgreSQL pgvector で material_id に属するチャンクを類似度検索して返す。
 
     仕様書 §3.3 の契約変更: 戻り値は ``list[str]`` ではなく構造化 dict のリスト
-    ``{text, source_title, source_file, score, tier}``。tier は信頼性レイヤー(L1)で
-    付与する（Stage M は簡易判定の mock。M03 / replace in Stage 2）。
+    ``{id, text, source_title, source_file, score, approved, tier}``。tier は信頼性
+    レイヤー(L1)で付与し、approved は教員承認(teacher_reviewed)に紐づく chunk のみ True。
     """
     query_vector = _embed_query(question)
     dim = get_embedding_dim()
@@ -74,7 +74,8 @@ def search_chunks(question: str, material_id: str, top_k: int = 5) -> list[dict]
     try:
         rows = session.execute(
             text(f"""
-                SELECT c.text,
+                SELECT c.id,
+                       c.text,
                        COALESCE(d.title, '') AS source_title,
                        COALESCE(d.filename, '') AS source_file,
                        1 - (c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))) AS score
@@ -92,18 +93,21 @@ def search_chunks(question: str, material_id: str, top_k: int = 5) -> list[dict]
             },
         ).fetchall()
 
-        # EPISTEME_MOCK[M03] L1信頼性: tier は attach_tiers の簡易判定（approved 非出力）。
-        # — replace in Stage 2
         results = [
             {
-                "text": row[0],
-                "source_title": row[1] or row[2] or "不明な教材",
-                "source_file": row[2],
-                "score": float(row[3]),
+                "id": str(row[0]),
+                "text": row[1],
+                "source_title": row[2] or row[3] or "不明な教材",
+                "source_file": row[3],
+                "score": float(row[4]),
             }
             for row in rows
-            if row[0]
+            if row[1]
         ]
+        # L1 信頼性: 教員承認に紐づく chunk へ approved を付与してから tier を判定。
+        approved = approved_chunk_ids(session, [r["id"] for r in results])
+        for r in results:
+            r["approved"] = r["id"] in approved
         return attach_tiers(results)
     finally:
         session.close()

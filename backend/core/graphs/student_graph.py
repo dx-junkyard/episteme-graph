@@ -143,8 +143,7 @@ def retrieval_node(state: StudentState) -> dict[str, Any]:
 
     above_threshold = [r for r in chunk_results if r["score"] >= relevance_threshold]
     if not above_threshold:
-        # EPISTEME_MOCK[M02] L1信頼性: ヒットなし → 未踏として安全側に倒す。
-        # — replace in Stage 2 (OutOfSourceGuard 本実装)
+        # L1: ヒットなし → 未踏(out_of_source)として安全側に倒す。
         return {"chunks": [], "no_relevant_chunks": True, "overall_tier": TIER_OUT_OF_SOURCE}
 
     above_threshold = attach_tiers(above_threshold)

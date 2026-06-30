@@ -4669,6 +4669,9 @@ body {
 .lx-ghost { appearance:none; border:1px solid var(--lx-line); background:#fff; cursor:pointer; border-radius:7px; padding:5px 10px; font-size:12px; color:var(--lx-brand); font-family:inherit; }
 .lx-ghost.secondary { color:var(--lx-ink-soft); }
 .lx-ghost:disabled { cursor:default; color:var(--lx-ink-faint); }
+.lx-why-input { margin-top:9px; }
+.lx-why-input textarea { width:100%; box-sizing:border-box; border:1px solid var(--lx-line); border-radius:7px; padding:7px 9px; font-size:12px; font-family:inherit; resize:vertical; }
+.lx-why-actions { display:flex; gap:8px; margin-top:6px; }
 
 /* 教員 InterestDashboard (admin) */
 .interest-dashboard .id-hotspot {
@@ -4679,3 +4682,39 @@ body {
 .interest-dashboard .id-bar { height: 8px; border-radius: 4px; background: var(--color-border-info); }
 .interest-dashboard .id-topic { flex: 1; font-size: 13px; }
 .interest-dashboard .id-count { font-variant-numeric: tabular-nums; color: var(--color-text-secondary); font-size: 12px; }
+
+/* 出典チップ ＆ 出典ポップアップ（該当チャンク全文・数式込み） */
+.src-cite {
+  cursor: pointer;
+  color: var(--lx-brand, #2f6fed);
+  border-bottom: 1px dotted var(--lx-brand, #2f6fed);
+  padding: 0 1px;
+  white-space: nowrap;
+}
+.src-cite:hover { background: var(--lx-brand-soft, #eaf1ff); border-radius: 3px; }
+.src-popup {
+  position: fixed;
+  z-index: 1000;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid var(--lx-line, #e6e9ef);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(31,37,48,.18);
+  font-size: 13px;
+}
+.src-popup-head {
+  position: sticky; top: 0;
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--lx-line, #e6e9ef);
+  background: #fafbfd;
+}
+.src-popup-title { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.src-popup-score { font-size: 11px; color: var(--lx-ink-faint, #8a93a1); white-space: nowrap; }
+.src-popup-close {
+  appearance: none; border: none; background: none; cursor: pointer;
+  font-size: 18px; line-height: 1; color: var(--lx-ink-faint, #8a93a1); padding: 0 2px;
+}
+.src-popup-body { padding: 12px; line-height: 1.6; }
+.src-popup-section { font-size: 11px; color: var(--lx-ink-faint, #8a93a1); margin-bottom: 8px; }

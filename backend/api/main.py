@@ -773,8 +773,31 @@ def _run_migrations() -> None:
               AND d.active_analysis_run_id IS NULL
         """))
 
+        # Migration 020: 学習者体験レイヤー(B層) 関心痕跡 InterestTraceStore (Stage 3)
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS interest_traces (
+                id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id       UUID NOT NULL,
+                course_id     TEXT NOT NULL,
+                topic_id      TEXT,
+                kind          TEXT NOT NULL DEFAULT 'raw',
+                payload       JSONB NOT NULL DEFAULT '{}'::jsonb,
+                weight        REAL NOT NULL DEFAULT 1.0,
+                status        TEXT NOT NULL DEFAULT 'open',
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+                last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                analyzed_at   TIMESTAMPTZ
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_interest_traces_user_course ON interest_traces(user_id, course_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_interest_traces_status ON interest_traces(status)"
+        ))
+
         session.commit()
-        logger.info("Migrations (002-019) applied successfully.")
+        logger.info("Migrations (002-020) applied successfully.")
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema
