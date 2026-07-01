@@ -61,7 +61,11 @@ from core.learning_experience import (
     out_of_source_guard_instruction,
     out_of_source_notice,
 )
-from core.learning_support_agent import LearningSupportAgent, extract_inline_actions
+from core.learning_support_agent import (
+    LearningSupportAgent,
+    LearningSupportResult,
+    extract_inline_actions,
+)
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
 from core.course_content_builder import build_course_content_background
@@ -1343,16 +1347,27 @@ def learning_chat(
         context_label=_ctx_label,
         extra_payload={"overall_tier": overall_tier, "position_anchor": position_anchor},
     )
-    # ドメイン質問は常に detour（origin=現在アンカー）として扱う。本文中のドリルダウン
-    # マーカーは構造化アクションへ正規化し、復帰導線と合わせて next_actions に集約する。
+    # 本文中のドリルダウンマーカーは構造化アクションへ正規化する。
     clean_answer, inline_actions = extract_inline_actions(answer)
-    result = support_agent.with_learning_actions(
-        answer=clean_answer,
-        mode="detail_explanation",
-        origin=support_origin,
-        include_continue=False,
-        extra_actions=inline_actions,
-    )
+
+    # 送信意図で分岐（教材/チャット2区画 UX）:
+    #  - on_path : 本筋維持。detour にせず origin/status_label を返さない（フロントは寄り道化しない）
+    #  - explore : 従来どおり寄り道（detail_explanation, 復帰導線つき）
+    if (body.intent_mode or "").strip() == "on_path":
+        result = LearningSupportResult(
+            answer=clean_answer,
+            mode="normal",
+            origin=None,
+            next_actions=inline_actions,
+        )
+    else:
+        result = support_agent.with_learning_actions(
+            answer=clean_answer,
+            mode="detail_explanation",
+            origin=support_origin,
+            include_continue=False,
+            extra_actions=inline_actions,
+        )
     # L1 tier・L2 位置ともに実データ化済み（Stage 1/2）。チャット応答に mock は含まれない。
     return LearningChatResponse(
         **result.model_dump(),

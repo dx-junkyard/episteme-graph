@@ -37,6 +37,16 @@
 
     <!-- Main Chat Area -->
     <div class="mn">
+      <!-- 教材区画（本筋・順路）: 教材本文＋確認して次へ。会話で流れない独立スクロール -->
+      <div class="material-region" id="material-region">
+        <div class="material-body" id="material-body"></div>
+        <div class="material-foot">
+          <span class="material-here" id="material-here"></span>
+          <button class="next-topic-btn" id="next-topic-btn" style="display:none" title="次のトピックへ進む">確認して次へ</button>
+        </div>
+      </div>
+      <!-- チャット区画（探索）: モードバー＋会話 -->
+      <div class="mode-bar" id="mode-bar" hidden></div>
       <div class="ca" id="chat-area">
         <div class="mg ai" style="color:var(--color-text-tertiary)">
           トピックを選択して学習を始めましょう。
@@ -60,9 +70,9 @@
       </div>
       <div class="ia">
         <button class="lecture-toggle-btn" id="lecture-toggle" title="レクチャーモード切替">&#127897; レクチャー</button>
-        <button class="next-topic-btn" id="next-topic-btn" style="display:none" title="次のトピックへ進む">次に進む →</button>
-        <input type="text" id="chat-input" placeholder="質問を入力してください...">
-        <button id="send-btn">送信</button>
+        <input type="text" id="chat-input" placeholder="質問を入力してください…（Enterで現モード送信）">
+        <button id="send-btn" title="現トピックの教材を主な根拠に回答（本筋を維持）">📘 教材に沿って質問</button>
+        <button id="send-explore" title="教材から離れて自由に質問・探索（寄り道）">🔍 自由に質問・探索</button>
       </div>
     </div>
 

@@ -260,6 +260,7 @@ class LearningChatRequest(BaseModel):
     support_action: str | None = None
     support_context: dict | None = None
     position_anchor: dict | None = None  # L2: クライアントの現在位置 {segment_id, scroll_offset}
+    intent_mode: str | None = None  # "on_path"(本筋維持) | "explore"(寄り道) — 送信時の意図
     chunk_id: str | None = None
     element_id: str | None = None
     element_type: str | None = None

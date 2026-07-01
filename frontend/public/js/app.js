@@ -389,12 +389,6 @@
   }
 
   // ── Render: Chat ───────────────────────────────────────────────────
-  function _getFirstTopicTitle() {
-    if (!state.course || !state.currentTopicId) return null;
-    var topic = (state.course.topics || []).find(function (t) { return t.id === state.currentTopicId; });
-    return topic ? topic.title : null;
-  }
-
   function getCurrentTopic() {
     if (!state.course || !state.currentTopicId) return null;
     return (state.course.topics || []).find(function (t) { return t.id === state.currentTopicId; }) || null;
@@ -402,16 +396,14 @@
 
   function _renderInitialSuggestions() {
     var courseTitle = state.course ? escHtml(state.course.title || "") : "";
-    var topicTitle = _getFirstTopicTitle();
-    var topicLabel = topicTitle ? escHtml(topicTitle) : "最初のトピック";
 
+    // 順路の前進は上部の教材＋「確認して次へ」で行う。ここでは順路と紛らわしい
+    // 「学習を開始する」ボタンは出さず、前提知識の確認とフリー質問だけを促す。
     var html = '<div class="mg ai">';
     html += "「" + courseTitle + "」の学習サポートへようこそ！<br>";
-    html += "現在のあなたのレベルと前提知識に合わせてサポートします。何から始めますか？";
+    html += "上の教材を読み進めながら、分からない点は質問してください。次のセクションへは「確認して次へ」で進めます。";
     html += "</div>";
     html += '<div class="initial-suggestions">';
-    html += '<button class="suggest-btn initial-suggest-btn" data-suggest="' + topicLabel + 'の学習を開始する">';
-    html += topicLabel + "の学習を開始する</button>";
     html += '<button class="suggest-btn initial-suggest-btn" data-suggest="このコースに必要な前提知識を確認する" data-support-action="check_prerequisites">';
     html += "このコースに必要な前提知識を確認する</button>";
     html += "</div>";
@@ -422,43 +414,14 @@
     const ca = document.getElementById("chat-area");
     if (!state.course || !state.currentTopicId) {
       ca.innerHTML = '<div class="mg ai" style="color:var(--color-text-tertiary)">左のサイドバーからトピックを選択してください。</div>';
+      renderMaterialRegion();
+      renderModeBar();
       return;
     }
 
     let html = "";
 
-    // 教材チャンクをチャット上部に静的表示（RAG検索不使用、数式KaTeXレンダリング）
-    if (state.topicMaterial && state.topicMaterial.length > 0) {
-      html += '<div class="material-block">';
-      html += '<div class="material-block-header">教材</div>';
-      state.topicMaterial.forEach(function (chunk) {
-        html += '<div class="material-chunk">';
-        if (chunk.chapter || chunk.section) {
-          var loc = [chunk.chapter, chunk.section].filter(Boolean).join(" › ");
-          html += '<div class="material-chunk-loc">' + escHtml(loc) + '</div>';
-        }
-        html += '<div class="material-chunk-text">' + renderMaterialChunk(chunk) + '</div>';
-        if (chunk.graph_mentions && chunk.graph_mentions.length > 0) {
-          html += '<div class="graph-suggestions">';
-          chunk.graph_mentions.slice(0, 4).forEach(function (m) {
-            var label = m.label || m.surface_text || m.element_id || "この要素";
-            var actionText = (m.element_type === "citation") ? "引用情報" :
-              (m.element_type === "reference") ? "参照先" : "説明";
-            html += '<button class="graph-suggest-btn"'
-              + ' data-chunk-id="' + escHtml(chunk.id || "") + '"'
-              + ' data-element-id="' + escHtml(m.element_id || "") + '"'
-              + ' data-element-type="' + escHtml(m.element_type || "concept") + '"'
-              + ' data-element-label="' + escHtml(label) + '"'
-              + ' title="' + escHtml(label) + '">';
-            html += escHtml(label + "の" + actionText) + '</button>';
-          });
-          html += '</div>';
-        }
-        html += '</div>';
-      });
-      html += '</div>';
-    }
-
+    // 教材は上部の「教材区画」に分離（renderMaterialRegion）。ここはチャット（探索）のみ。
     // 初期状態（チャット履歴なし）ならサジェストUIを表示
     if (state.chatMessages.length === 0 && !state.sending) {
       html += _renderInitialSuggestions();
@@ -508,7 +471,78 @@
       });
     });
 
-    ca.querySelectorAll(".graph-suggest-btn").forEach(function (btn) {
+    // Render KaTeX for any remaining raw LaTeX (fallback)
+    if (window.renderMathInElement) {
+      try {
+        window.renderMathInElement(ca, {
+          delimiters: [
+            { left: "$$", right: "$$", display: true },
+            { left: "\\[", right: "\\]", display: true },
+            { left: "\\(", right: "\\)", display: false },
+            { left: "$", right: "$", display: false },
+          ],
+          throwOnError: false,
+        });
+      } catch (e) { /* KaTeX not yet loaded */ }
+    }
+
+    // 教材区画（本筋）とモードバー（現在地）を更新する。
+    renderMaterialRegion();
+    renderModeBar();
+  }
+
+  // 教材区画（本筋・順路）: 教材本文を独立スクロール領域に描画する。
+  // ここは renderChat とは別の #material-body に出すため、会話で流れて消えない。
+  function renderMaterialRegion() {
+    var body = document.getElementById("material-body");
+    var here = document.getElementById("material-here");
+    if (!body) return;
+    if (!state.course || !state.currentTopicId) {
+      body.innerHTML = '<div style="color:var(--color-text-tertiary);font-size:13px">トピックを選択すると教材が表示されます。</div>';
+      if (here) here.textContent = "";
+      updateNextTopicBtn();
+      return;
+    }
+    if (!state.topicMaterial || state.topicMaterial.length === 0) {
+      body.innerHTML = '<div style="color:var(--color-text-tertiary);font-size:13px">教材を読み込み中…</div>';
+      if (here) here.textContent = "";
+      updateNextTopicBtn();
+      return;
+    }
+    var html = '<div class="material-block-header">教材</div>';
+    state.topicMaterial.forEach(function (chunk) {
+      html += '<div class="material-chunk">';
+      if (chunk.chapter || chunk.section) {
+        var loc = [chunk.chapter, chunk.section].filter(Boolean).join(" › ");
+        html += '<div class="material-chunk-loc">' + escHtml(loc) + '</div>';
+      }
+      html += '<div class="material-chunk-text">' + renderMaterialChunk(chunk) + '</div>';
+      if (chunk.graph_mentions && chunk.graph_mentions.length > 0) {
+        html += '<div class="graph-suggestions">';
+        chunk.graph_mentions.slice(0, 4).forEach(function (m) {
+          var label = m.label || m.surface_text || m.element_id || "この要素";
+          var actionText = (m.element_type === "citation") ? "引用情報" :
+            (m.element_type === "reference") ? "参照先" : "説明";
+          html += '<button class="graph-suggest-btn"'
+            + ' data-chunk-id="' + escHtml(chunk.id || "") + '"'
+            + ' data-element-id="' + escHtml(m.element_id || "") + '"'
+            + ' data-element-type="' + escHtml(m.element_type || "concept") + '"'
+            + ' data-element-label="' + escHtml(label) + '"'
+            + ' title="' + escHtml(label) + '">';
+          html += escHtml(label + "の" + actionText) + '</button>';
+        });
+        html += '</div>';
+      }
+      html += '</div>';
+    });
+    body.innerHTML = html;
+
+    // 現在地ラベル（本筋）
+    var topic = getCurrentTopic();
+    if (here) here.textContent = topic ? ("本筋：" + (topic.title || "")) : "";
+
+    // グラフサジェストの配線（教材区画内）
+    body.querySelectorAll(".graph-suggest-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
         var label = this.getAttribute("data-element-label") ||
           this.textContent.replace(/\s*の(?:説明|引用情報|参照先)$/, "");
@@ -525,20 +559,33 @@
         sendMessage(label + suffix, payload);
       });
     });
+    updateNextTopicBtn();
+  }
 
-    // Render KaTeX for any remaining raw LaTeX (fallback)
-    if (window.renderMathInElement) {
-      try {
-        window.renderMathInElement(ca, {
-          delimiters: [
-            { left: "$$", right: "$$", display: true },
-            { left: "\\[", right: "\\]", display: true },
-            { left: "\\(", right: "\\)", display: false },
-            { left: "$", right: "$", display: false },
-          ],
-          throwOnError: false,
-        });
-      } catch (e) { /* KaTeX not yet loaded */ }
+  // チャット区画のモードバー: 本筋（青）か寄り道（アンバー＋戻る）かを常時表示する。
+  function renderModeBar() {
+    var bar = document.getElementById("mode-bar");
+    if (!bar) return;
+    if (!state.course || !state.currentTopicId) { bar.hidden = true; return; }
+    bar.hidden = false;
+    if (Session.inDetour()) {
+      var origin = Session.detourOrigin() || {};
+      var label = (state.learningSupport && (state.learningSupport.detour_label || state.learningSupport.status_label)) || "寄り道中";
+      if (label.length > 28) label = label.slice(0, 28) + "…";
+      bar.className = "mode-bar detour";
+      bar.innerHTML =
+        '<span class="mb-label">🔍 寄り道中：' + escHtml(label) +
+        '<span class="mb-sub"> ／ 本筋〈' + escHtml(origin.topic_title || "") + '〉に戻れます</span></span>' +
+        '<button class="mb-return" data-mode-return="' + escHtml(origin.topic_id || "") + '">↩ 本筋へ戻る</button>';
+      var rbtn = bar.querySelector("[data-mode-return]");
+      if (rbtn) rbtn.addEventListener("click", function () {
+        returnToLearningPath(this.getAttribute("data-mode-return"));
+      });
+    } else {
+      var topic = getCurrentTopic();
+      bar.className = "mode-bar on-path";
+      bar.innerHTML = '<span class="mb-label">📘 本筋に沿って学習中：' + escHtml(topic ? (topic.title || "") : "") +
+        '<span class="mb-sub"> ／ 次のセクションは上の「確認して次へ」</span></span>';
     }
   }
 
@@ -1624,18 +1671,27 @@
   // ── Input handling ─────────────────────────────────────────────────
   function initInput() {
     const input = document.getElementById("chat-input");
-    const btn = document.getElementById("send-btn");
+    const btn = document.getElementById("send-btn");          // 教材に沿って質問（本筋維持）
+    const exploreBtn = document.getElementById("send-explore"); // 自由に質問・探索（寄り道）
     const clearBtn = document.getElementById("chat-clear-btn");
 
-    btn.addEventListener("click", function () {
-      sendMessage(input.value.trim());
-    });
+    // intent_mode を付けて送信する。on_path は寄り道状態を畳んでから送る。
+    function sendWith(mode) {
+      var text = input.value.trim();
+      if (!text) return;
+      if (mode === "on_path") Session.clearDetour();
+      sendMessage(text, { intent_mode: mode });
+    }
+
+    btn.addEventListener("click", function () { sendWith("on_path"); });
+    if (exploreBtn) exploreBtn.addEventListener("click", function () { sendWith("explore"); });
     if (clearBtn) clearBtn.addEventListener("click", clearChatHistory);
 
     input.addEventListener("keydown", function (e) {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
         e.preventDefault();
-        sendMessage(input.value.trim());
+        // Enter＝現在のモードで送信（寄り道中なら explore、そうでなければ on_path）
+        sendWith(Session.inDetour() ? "explore" : "on_path");
       }
     });
   }
@@ -2267,6 +2323,13 @@
     }
     if (chatInput) chatInput.style.display = "";
     if (sendBtn) sendBtn.style.display = "";
+    var mrOff = document.getElementById("material-region");
+    var mbOff = document.getElementById("mode-bar");
+    var exOff = document.getElementById("send-explore");
+    if (mrOff) mrOff.style.display = "";
+    if (mbOff) mbOff.style.display = "";
+    if (exOff) exOff.style.display = "";
+    renderModeBar();
     updateLectureToggleAvailability();
   }
 
@@ -2298,6 +2361,12 @@
     chatArea.style.display = "none";
     chatInput.style.display = "none";
     sendBtn.style.display = "none";
+    var mrOn = document.getElementById("material-region");
+    var mbOn = document.getElementById("mode-bar");
+    var exOn = document.getElementById("send-explore");
+    if (mrOn) mrOn.style.display = "none";
+    if (mbOn) mbOn.style.display = "none";
+    if (exOn) exOn.style.display = "none";
     lectureContent.classList.add("visible");
     lecturePlayer.classList.add("visible");
 
