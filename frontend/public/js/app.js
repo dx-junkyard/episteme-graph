@@ -547,6 +547,11 @@
         var label = this.getAttribute("data-element-label") ||
           this.textContent.replace(/\s*の(?:説明|引用情報|参照先)$/, "");
         var type = this.getAttribute("data-element-type") || "concept";
+        // 要素が理論コンポーネントの場合は、標準/各教員の説明バージョンを表示する(C層 Phase 2)。
+        if (type === "component") {
+          showComponentExplanations(this, this.getAttribute("data-element-id") || "", label);
+          return;
+        }
         var payload = {
           action: "EXPLAIN_GRAPH_ELEMENT",
           chunk_id: this.getAttribute("data-chunk-id") || "",
@@ -817,6 +822,47 @@
       }
     } catch (_) {
       var b = pop.querySelector(".src-popup-body");
+      if (b) b.textContent = "サーバーに接続できません。";
+    }
+  }
+
+  // ── 説明バージョン ポップアップ(C層 Phase 2) ───────────────────────────
+  // 1つの理論・概念に対する「標準の説明」と「各教員の説明」を並べて表示する。
+  // 承認済み(teacher_approved)のみ。承認の厚みは段階ラベルで示し、点数は出さない。
+  async function showComponentExplanations(anchor, componentId, label) {
+    closeSourcePopup();
+    if (!componentId || !state.courseId) return;
+    const pop = document.createElement("div");
+    pop.className = "src-popup";
+    pop.id = "src-popup";
+    pop.innerHTML = '<div class="src-popup-head">' +
+      '<span class="src-popup-title">' + escHtml(label || "説明バージョン") + '</span>' +
+      '<button class="src-popup-close" aria-label="閉じる">×</button></div>' +
+      '<div class="src-popup-body">読み込み中…</div>';
+    document.body.appendChild(pop);
+    _positionSourcePopup(pop, anchor);
+    pop.querySelector(".src-popup-close").addEventListener("click", closeSourcePopup);
+    document.addEventListener("mousedown", _srcOutsideClose, true);
+    document.addEventListener("keydown", _srcEscClose, true);
+    try {
+      const res = await apiFetch("/learning/courses/" + state.courseId +
+        "/components/" + encodeURIComponent(componentId) + "/explanations");
+      const body = pop.querySelector(".src-popup-body");
+      if (!body) return;
+      if (!res.ok) { body.textContent = "説明を取得できませんでした。"; return; }
+      const data = await res.json();
+      const items = (data && data.explanations) || [];
+      if (!items.length) { body.textContent = "承認済みの説明はまだありません。"; return; }
+      body.innerHTML = items.map(function (e) {
+        const who = e.kind === "standard" ? "標準の説明" : ("教員: " + (e.author_name || "不明"));
+        return '<div class="material-chunk" style="margin-bottom:10px">' +
+          '<div class="material-chunk-loc">' + escHtml(who) +
+          (e.endorsement_label ? ' ・ ' + escHtml(e.endorsement_label) : "") + '</div>' +
+          (e.title ? '<div style="font-weight:600">' + escHtml(e.title) + '</div>' : "") +
+          '<div class="material-chunk-text">' + escHtml(e.body || "") + '</div></div>';
+      }).join("");
+    } catch (_) {
+      const b = pop.querySelector(".src-popup-body");
       if (b) b.textContent = "サーバーに接続できません。";
     }
   }

@@ -35,6 +35,7 @@ from services import (
     get_course_chunks_ordered,
     get_course_data,
     get_editable_course_data,
+    get_viewable_course_data,
     get_chunk_passage,
     get_graph_element_context,
     get_interest_traces,
@@ -1434,3 +1435,56 @@ def internalize_interest_trace_route(
     if not ok:
         raise HTTPException(status_code=400, detail="Could not save internalization")
     return {"ok": True, "trace_id": trace_id}
+
+
+@router.get("/courses/{course_id}/components/{component_id}/explanations")
+def get_component_explanations_for_learner(
+    course_id: str,
+    component_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """学習者向け: 1つの理論・概念の説明バージョン(標準/各教員の説明)を返す(C層 Phase 2)。
+
+    承認済み(teacher_approved)の説明のみを返す。標準説明は kind='standard'。
+    承認の厚みは段階ラベルで示し、数値スコアは学習者に提示しない(点数化を避ける)。
+    """
+    from routes.theory_components import _endorsement_label  # 遅延 import(循環回避)
+
+    if not get_viewable_course_data(current_user["id"], course_id):
+        raise HTTPException(status_code=404, detail="Course not found")
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT e.id, e.kind, COALESCE(u.display_name, ''), e.title, e.body,
+                       COALESCE(s.endorser_count, 0), COALESCE(s.strong_count, 0),
+                       COALESCE(s.provisional_count, 0), COALESCE(s.expertise_breadth, 0)
+                FROM component_explanations e
+                LEFT JOIN users u ON u.id = e.author_id
+                LEFT JOIN component_explanation_endorsement_summary s ON s.explanation_id = e.id
+                WHERE e.component_id = CAST(:cid AS uuid)
+                  AND e.course_id = :course_id
+                  AND e.review_status = 'teacher_approved'
+                ORDER BY (e.kind = 'standard') DESC, COALESCE(s.endorser_count, 0) DESC, e.created_at ASC
+            """),
+            {"cid": component_id, "course_id": course_id},
+        ).fetchall()
+    finally:
+        session.close()
+    explanations = []
+    for r in rows:
+        summary = {
+            "endorser_count": int(r[5] or 0),
+            "strong_count": int(r[6] or 0),
+            "provisional_count": int(r[7] or 0),
+            "expertise_breadth": int(r[8] or 0),
+        }
+        explanations.append({
+            "id": str(r[0]),
+            "kind": str(r[1] or "personal"),
+            "author_name": str(r[2] or ""),
+            "title": str(r[3] or ""),
+            "body": str(r[4] or ""),
+            "endorsement_label": _endorsement_label(summary),
+        })
+    return {"component_id": component_id, "explanations": explanations}

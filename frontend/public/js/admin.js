@@ -4243,6 +4243,7 @@
         if (action === "insert") lsInsertTheoryChip(component);
         if (action === "approve") lsSaveTheoryComponent(component, { status: "teacher_reviewed" });
         if (action === "reject") lsRejectTheoryComponent(component);
+        if (action === "endorse") lsOpenEndorsementModal(component);
       });
     });
   }
@@ -5289,6 +5290,7 @@
           '<button class="admin-action-btn" data-theory-action="insert">原稿に挿入</button>' +
           '<button class="admin-action-btn" data-theory-action="approve"' + approveDisabled + '>承認</button>' +
           '<button class="admin-action-btn" data-theory-action="reject">却下</button>' +
+          '<button class="admin-action-btn" data-theory-action="endorse">説明・承認の共有</button>' +
         '</div>' +
       '</div>';
   }
@@ -5318,6 +5320,7 @@
           if (action === "insert") lsInsertTheoryChip(component);
           if (action === "approve") lsSaveTheoryComponent(component, { status: "teacher_reviewed" });
           if (action === "reject") lsRejectTheoryComponent(component);
+          if (action === "endorse") lsOpenEndorsementModal(component);
         });
       });
       return;
@@ -5350,6 +5353,7 @@
         if (action === "insert") lsInsertTheoryChip(component);
         if (action === "approve") lsSaveTheoryComponent(component, { status: "teacher_reviewed" });
         if (action === "reject") lsRejectTheoryComponent(component);
+        if (action === "endorse") lsOpenEndorsementModal(component);
       });
     });
   }
@@ -6935,6 +6939,213 @@
       .catch(function (err) {
         lsSetTheoryStatus(err.message || "却下に失敗しました", "error");
       });
+  }
+
+  // === 承認・共有レイヤー(C層) UI ==========================================
+
+  function lsEnsureEndorseStyles() {
+    if (document.getElementById("ls-endorse-styles")) return;
+    var style = document.createElement("style");
+    style.id = "ls-endorse-styles";
+    style.textContent =
+      ".ls-endorse-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:32px 12px;}" +
+      ".ls-endorse-modal{background:#fff;max-width:820px;width:100%;border-radius:8px;padding:20px;box-shadow:0 8px 32px rgba(0,0,0,.3);}" +
+      ".ls-endorse-modal h3{margin:0 0 4px;} .ls-endorse-modal .ls-endorse-sub{color:#666;font-size:12px;margin-bottom:12px;}" +
+      ".ls-exp-card{border:1px solid #ddd;border-radius:6px;padding:12px;margin-bottom:10px;}" +
+      ".ls-exp-card.kind-standard{border-left:4px solid #3b82f6;} .ls-exp-card.kind-personal{border-left:4px solid #10b981;}" +
+      ".ls-exp-head{display:flex;justify-content:space-between;align-items:center;gap:8px;}" +
+      ".ls-exp-badge{font-size:11px;padding:2px 8px;border-radius:10px;background:#eef;}" +
+      ".ls-exp-label{font-size:12px;color:#0a7;} .ls-exp-body{white-space:pre-wrap;margin:6px 0;font-size:13px;}" +
+      ".ls-exp-controls{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px;}" +
+      ".ls-exp-controls input,.ls-exp-controls select{font-size:12px;padding:3px 6px;}" +
+      ".ls-endorse-form{border-top:1px solid #eee;margin-top:12px;padding-top:12px;}" +
+      ".ls-endorse-form textarea,.ls-endorse-form input{width:100%;margin:3px 0;font-size:13px;padding:4px;box-sizing:border-box;}" +
+      ".ls-endorse-status{font-size:12px;margin:6px 0;min-height:16px;}";
+    document.head.appendChild(style);
+  }
+
+  function lsCloseEndorseModal() {
+    var ov = document.getElementById("ls-endorse-overlay");
+    if (ov && ov.parentNode) ov.parentNode.removeChild(ov);
+  }
+
+  function lsSetEndorseStatus(msg, kind) {
+    var el = document.getElementById("ls-endorse-status");
+    if (!el) return;
+    el.textContent = msg || "";
+    el.style.color = kind === "error" ? "#c00" : kind === "success" ? "#0a7" : "#666";
+  }
+
+  function lsExpLevelSelect(id) {
+    return '<select data-exp-level="' + escHtml(id) + '">' +
+      '<option value="provisional">暫定</option>' +
+      '<option value="endorsed" selected>承認</option>' +
+      '<option value="strong">強い承認</option>' +
+      '</select>';
+  }
+
+  function lsRenderExplanationCard(exp) {
+    var kindLabel = exp.kind === "standard" ? "標準の説明" : ("教員: " + (exp.author_name || "不明"));
+    var reviewLabel = exp.review_status === "teacher_approved" ? "承認済み" :
+      exp.review_status === "rejected" ? "却下" :
+      exp.review_status === "needs_revision" ? "要修正" : "査読待ち";
+    var backing = (exp.backing_claims || []).map(function (b) {
+      var cid = b.claim_id || b;
+      var confirmed = (b && b.confirmed) ? "✓" : "候補";
+      return '<span class="ls-theory-ref">' + escHtml(String(cid)) + " [" + confirmed + "]</span>";
+    }).join(" ");
+    return '<div class="ls-exp-card kind-' + escHtml(exp.kind) + '" data-exp-id="' + escHtml(exp.id) + '">' +
+      '<div class="ls-exp-head">' +
+        '<div><span class="ls-exp-badge">' + escHtml(kindLabel) + '</span> <strong>' + escHtml(exp.title || "(無題)") + '</strong></div>' +
+        '<span class="ls-exp-label">' + escHtml(exp.endorsement_label || "未承認") + '</span>' +
+      '</div>' +
+      '<div class="ls-exp-body">' + escHtml(exp.body || "") + '</div>' +
+      '<div class="ls-theory-muted">状態: ' + escHtml(reviewLabel) + ' / 共有: ' + (exp.shared ? "ON" : "OFF") +
+        ' / 引用: ' + escHtml(String(exp.citation_count || 0)) + (backing ? (' / 根拠: ' + backing) : "") + '</div>' +
+      '<div class="ls-exp-controls">' +
+        lsExpLevelSelect(exp.id) +
+        '<input type="text" data-exp-tag="' + escHtml(exp.id) + '" placeholder="専門タグ (例: 統計物理)" />' +
+        '<button class="admin-action-btn" data-exp-action="endorse">承認する</button>' +
+        '<button class="admin-action-btn" data-exp-action="revoke">承認取消</button>' +
+        '<button class="admin-action-btn" data-exp-action="approve">査読承認</button>' +
+        '<button class="admin-action-btn" data-exp-action="share">' + (exp.shared ? "共有OFF" : "共有ON") + '</button>' +
+        '<button class="admin-action-btn" data-exp-action="cite">別コースで引用</button>' +
+      '</div>' +
+      '</div>';
+  }
+
+  function lsBindExplanationActions(component) {
+    var list = document.getElementById("ls-endorse-list");
+    if (!list) return;
+    list.querySelectorAll("[data-exp-action]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var card = this.closest(".ls-exp-card");
+        var expId = card.getAttribute("data-exp-id");
+        var action = this.getAttribute("data-exp-action");
+        if (action === "endorse") {
+          var level = (card.querySelector("[data-exp-level]") || {}).value || "endorsed";
+          var tag = (card.querySelector("[data-exp-tag]") || {}).value || "";
+          lsEndorseExplanation(component, expId, { level: level, expertise_tag: tag, note: "" });
+        } else if (action === "revoke") {
+          lsCallExplanation(component, "/admin/explanations/" + expId + "/endorse", "DELETE", null, "承認を取り消しました");
+        } else if (action === "approve") {
+          lsCallExplanation(component, "/admin/explanations/" + expId, "PATCH", { review_status: "teacher_approved" }, "査読承認しました");
+        } else if (action === "share") {
+          var turnOn = this.textContent.indexOf("ON") >= 0;
+          lsCallExplanation(component, "/admin/explanations/" + expId, "PATCH", { shared: turnOn }, "共有設定を更新しました");
+        } else if (action === "cite") {
+          var target = window.prompt("引用先のコースID を入力してください");
+          if (target) lsCallExplanation(component, "/admin/explanations/" + expId + "/cite", "POST", { citing_course_id: target }, "引用しました");
+        }
+      });
+    });
+  }
+
+  function lsEndorseExplanation(component, expId, payload) {
+    lsCallExplanation(component, "/admin/explanations/" + expId + "/endorse", "POST", payload, "承認しました");
+  }
+
+  function lsCallExplanation(component, path, method, body, okMsg) {
+    lsSetEndorseStatus("処理中...", "info");
+    var opts = { method: method };
+    if (body) opts.body = JSON.stringify(body);
+    apiFetch(path, opts)
+      .then(function (res) {
+        if (!res.ok) {
+          return res.json().then(function (b) { throw new Error(b && b.detail ? (typeof b.detail === "string" ? b.detail : JSON.stringify(b.detail)) : "処理に失敗しました"); }, function () { throw new Error("処理に失敗しました"); });
+        }
+        return res.json();
+      })
+      .then(function () {
+        lsSetEndorseStatus(okMsg || "完了しました", "success");
+        lsReloadExplanations(component);
+      })
+      .catch(function (err) { lsSetEndorseStatus(err.message || "処理に失敗しました", "error"); });
+  }
+
+  function lsReloadExplanations(component) {
+    var list = document.getElementById("ls-endorse-list");
+    if (!list) return;
+    apiFetch("/admin/theory-components/" + component.id + "/explanations")
+      .then(function (res) { if (!res.ok) throw new Error("読み込みに失敗しました"); return res.json(); })
+      .then(function (data) {
+        var items = data || [];
+        list.innerHTML = items.length ? items.map(lsRenderExplanationCard).join("") : '<div class="ls-empty-state">説明バージョンがありません。</div>';
+        lsBindExplanationActions(component);
+      })
+      .catch(function (err) { list.innerHTML = '<div class="ls-empty-state">' + escHtml(err.message || "読み込みに失敗しました") + '</div>'; });
+  }
+
+  function lsAddExplanation(component) {
+    var title = (document.getElementById("ls-new-exp-title") || {}).value || "";
+    var body = (document.getElementById("ls-new-exp-body") || {}).value || "";
+    if (!body.trim()) { lsSetEndorseStatus("説明本文を入力してください", "error"); return; }
+    lsSetEndorseStatus("追加中...", "info");
+    apiFetch("/admin/theory-components/" + component.id + "/explanations", {
+      method: "POST",
+      body: JSON.stringify({ title: title, body: body, shared: false }),
+    })
+      .then(function (res) { if (!res.ok) throw new Error("追加に失敗しました"); return res.json(); })
+      .then(function () {
+        document.getElementById("ls-new-exp-title").value = "";
+        document.getElementById("ls-new-exp-body").value = "";
+        lsSetEndorseStatus("独自解釈を追加しました", "success");
+        lsReloadExplanations(component);
+      })
+      .catch(function (err) { lsSetEndorseStatus(err.message || "追加に失敗しました", "error"); });
+  }
+
+  function lsGenerateCandidatesFromQuery(component) {
+    var question = (document.getElementById("ls-cand-question") || {}).value || "";
+    var answer = (document.getElementById("ls-cand-answer") || {}).value || "";
+    if (!answer.trim()) { lsSetEndorseStatus("AI回答本文を入力してください", "error"); return; }
+    lsSetEndorseStatus("候補生成中...(AIが理論・概念とclaim候補を抽出します)", "info");
+    apiFetch("/admin/theory-components/candidates/from-query", {
+      method: "POST",
+      body: JSON.stringify({ course_id: component.course_id, question: question, answer_text: answer }),
+    })
+      .then(function (res) { if (!res.ok) throw new Error("候補生成に失敗しました"); return res.json(); })
+      .then(function (data) {
+        var n = (data.candidates || []).length;
+        lsSetEndorseStatus(n + " 件の候補を生成しました(査読待ち)。claim紐づけは教員が確定してください。", "success");
+      })
+      .catch(function (err) { lsSetEndorseStatus(err.message || "候補生成に失敗しました", "error"); });
+  }
+
+  function lsOpenEndorsementModal(component) {
+    lsEnsureEndorseStyles();
+    lsCloseEndorseModal();
+    var overlay = document.createElement("div");
+    overlay.id = "ls-endorse-overlay";
+    overlay.className = "ls-endorse-overlay";
+    overlay.innerHTML =
+      '<div class="ls-endorse-modal">' +
+        '<div class="ls-exp-head">' +
+          '<h3>説明バージョンと承認 — ' + escHtml(component.name || "無題") + '</h3>' +
+          '<button class="admin-action-btn" id="ls-endorse-close">閉じる</button>' +
+        '</div>' +
+        '<div class="ls-endorse-sub">承認は説明バージョン単位。承認の厚みは段階ラベルで表示(点数化しない)。</div>' +
+        '<div id="ls-endorse-status" class="ls-endorse-status"></div>' +
+        '<div id="ls-endorse-list"><div class="ls-empty-state">読み込み中...</div></div>' +
+        '<div class="ls-endorse-form">' +
+          '<strong>独自解釈を追加</strong>' +
+          '<input type="text" id="ls-new-exp-title" placeholder="タイトル (例: 私ならこう説明する)" />' +
+          '<textarea id="ls-new-exp-body" rows="3" placeholder="説明本文"></textarea>' +
+          '<button class="admin-action-btn" id="ls-add-exp-btn">この説明を追加</button>' +
+        '</div>' +
+        '<div class="ls-endorse-form">' +
+          '<strong>受講者質問からコンポーネント候補を生成 (AI候補→教員確定)</strong>' +
+          '<input type="text" id="ls-cand-question" placeholder="受講者の質問" />' +
+          '<textarea id="ls-cand-answer" rows="3" placeholder="AI回答本文"></textarea>' +
+          '<button class="admin-action-btn" id="ls-gen-cand-btn">候補を生成</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    document.getElementById("ls-endorse-close").addEventListener("click", lsCloseEndorseModal);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) lsCloseEndorseModal(); });
+    document.getElementById("ls-add-exp-btn").addEventListener("click", function () { lsAddExplanation(component); });
+    document.getElementById("ls-gen-cand-btn").addEventListener("click", function () { lsGenerateCandidatesFromQuery(component); });
+    lsReloadExplanations(component);
   }
 
   function lsInsertTheoryChip(component) {

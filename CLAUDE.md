@@ -75,7 +75,7 @@ src/tests/                     → agents 用 pytest テスト
 
 ### データストア構成
 
-- **PostgreSQL（正本）:** ユーザー・認証、教材メタデータ、チャンク本文+embedding (pgvector)、学習者状態、コース管理、対話履歴、コースビルダーセッション
+- **PostgreSQL（正本）:** ユーザー・認証、教材メタデータ、チャンク本文+embedding (pgvector)、学習者状態、コース管理、対話履歴、コースビルダーセッション、承認・共有（`component_explanations` / `component_endorsements` / `component_citations` — 承認・共有レイヤー(C層)）
 - **Neo4j（グラフ走査専用）:** 概念グラフ (REQUIRES, RELATES_TO, CONTAINS)、チャンク↔概念クロスリンク
 - **MinIO:** PDF原本、PaperStructure JSON
 
@@ -300,6 +300,37 @@ class CartridgeContext:
 - **Group**: 指定されたグループ（Group）の参加メンバーのみアクセス可能
 - **Private**: 作成者（自分）のみアクセス可能
 ※ グループへの参加は、管理者による直接招待、または招待コードにより行われる。
+
+### 承認・共有レイヤー（C層, migration 021）
+
+A層（`src/episteme_graph/agents/` の生成パイプライン、export_validation_gate 等）には手を入れず、
+その上に「教員による査読承認」と「教員間の共有」を積む層。C層は A層が出力した
+`theory_components` / `theory_claims` を**読む側**として実装し、承認・共有情報を新規テーブルに積む
+（B層＝学習者体験レイヤーと同じ立場）。**A層のコードは変更しない。**
+
+- **`component_explanations`**: 1コンポーネントに複数の説明バージョンを並存させる。
+  `kind='standard'` は A層/AI 由来の標準説明（`theory_components.summary` から**遅延生成**。
+  A層は explanation 行を作らないため、承認対象を成立させるために C層が
+  `_ensure_standard_explanation()` で補う）、`kind='personal'` は教員の独自解釈。
+- **`component_endorsements`**: 個々の教員の承認を1行ずつ記録。**承認は説明バージョン（explanation）単位**
+  （どの説明を承認したかを区別できる）。`UNIQUE(explanation_id, endorser_id)` で二重カウントを防ぎ、
+  取り消しは行削除ではなく `revoked=TRUE`（履歴を残す）。`level`（provisional/endorsed/strong）と
+  `expertise_tag` を集計ビュー `component_explanation_endorsement_summary` で合成する。
+- **`component_citations`**: 他教員が承認済み説明を再利用・引用したことを帰属付きで記録。
+
+**設計原則**:
+1. **承認の重みは学習者への評価点にしない** — 表示は段階ラベル（例「専門家3名が承認」）で、数値スコアを学習者に出さない。
+2. **claim 紐づけの最終確定は必ず教員** — 質問→候補生成（`core/component_candidates.py`）は AI が候補提示に限定し、
+   `backing_claims` は `confirmed=False` の候補扱い。教員が確定するまで確定しない。
+3. **状態変更は監査** — 承認・引用・共有切替・説明の review_status 遷移は `theory_review_events` に記録
+   （`entity_type` を `'endorsement'` / `'explanation'` / `'citation'` に拡張）。既存の `_record_review_event` を再利用。
+
+**API**（`backend/api/routes/theory_components.py`、実パスは `/api/admin/...`）:
+`POST /theory-components/candidates/from-query`（候補生成）、
+`GET|POST /theory-components/{id}/explanations`、`PATCH /explanations/{id}`（編集・shared切替・review_status）、
+`POST|DELETE /explanations/{id}/endorse`、`GET /explanations/{id}/endorsements`、
+`POST /explanations/{id}/cite`、`GET /courses/{course_id}/sharing-dashboard`。
+学習者向けは `GET /api/learning/courses/{course_id}/components/{component_id}/explanations`（承認済みのみ）。
 
 
 ## 開発ルール
