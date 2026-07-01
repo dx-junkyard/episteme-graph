@@ -110,6 +110,18 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | メンバー/招待 | `POST/DELETE /groups/{id}/members[/{uid}]`, `POST /groups/join-by-code`, `GET /groups/{id}/invitations` |
 | 自分の招待 | `GET /me/invitations`, `POST /me/invitations/{id}/accept`（`/decline`） |
 
+### 承認・共有レイヤー `/api/admin`（`routes/theory_components.py`, C層）
+教員による査読承認・独自解釈の並存・教員間共有。詳細は [承認・共有レイヤー](../features/endorsement-sharing.md)。
+承認は説明バージョン（explanation）単位。状態変更は `theory_review_events` に監査記録。
+
+| 分類 | 代表的なエンドポイント | 権限 |
+|---|---|---|
+| 説明バージョン | `GET/POST /theory-components/{id}/explanations`, `PATCH /explanations/{id}`（編集・shared切替・review_status） | teacher（PATCH は作者/admin） |
+| 承認 | `POST/DELETE /explanations/{id}/endorse`, `GET /explanations/{id}/endorsements`（集計＋段階ラベル） | teacher |
+| 引用・可視化 | `POST /explanations/{id}/cite`, `GET /courses/{id}/sharing-dashboard`（集団集計） | teacher |
+| 候補生成 | `POST /theory-components/candidates/from-query`（AI候補→教員確定, claim紐づけは confirmed=false） | teacher |
+| 学習者向け | `GET /api/learning/courses/{id}/components/{cid}/explanations`（承認済みのみ） | 受講者 |
+
 ---
 
 ## 4. 非同期処理パターン
