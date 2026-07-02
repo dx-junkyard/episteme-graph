@@ -91,6 +91,9 @@ diagnose_*   → diagnoses      compare_*   → compares
   derives / constrains            → consistency_relation
   diagnoses / compares            → diagnostic_application
   ```
+  stage 語彙（`schema.THEORY_STAGES`）は上記 6 つに **`observation_model`（label: `Observation model`）** を
+  加えた 7 段。observation_model は edge_type マッピングからは導出されない予約ステージで、
+  main graph の上から下への正準順序（theory_basis → observation_model → observable_construction → …）に含まれる。
 - main node の label は **stage label そのもの**（`Theory basis` / `Equation system` …）。長い説明は `description` へ。
   `Define eq_2_7` のような equation-id ラベルや generic operation の main ノードは validator が hard error 検出。
 

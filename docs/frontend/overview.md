@@ -23,8 +23,11 @@
 
 ## 2. 学習 SPA（app.js）
 
-- 3 パネルレイアウト（学習パス / チャット・レクチャー / コンテキスト）。
-- 主要 state: `token / role / courseId / course / personalLayer / currentTopicId / chatMessages / topicMaterial / learningSupport`。
+- 3 パネルレイアウト（学習パス / チャット・レクチャー / コンテキスト）。中央には教材区画・チャット区画・
+  レクチャープレイヤーに加えて**ハンズフリー音声会話パネル**（🤖 ボタンで起動、「いま話している題材」を表示）。
+- 右パネルの進捗タブに**違和感（tension）ダイジェストカード**（`renderTensionDigestCard()`）と問いの軌跡を表示。
+- 回答バブル・出典タブには**出所バッジ**（`GROUNDING_META` / `groundingBadge()`: 教材から回答 / 別の資料から回答 / AI の一般知識）。
+- 主要 state: `token / role / courseId / course / personalLayer / currentTopicId / chatMessages / topicMaterial / learningSupport` + `lastGrounding / lastSources / lastOverallTier / interestTraces / tensionDigest / tensionDeferred / topicHasAudio`。
 - 機能の詳細は [学習機能](../features/learning.md)。
 
 代表的な関数 → API 対応:
@@ -35,6 +38,8 @@
 | `loadProgress()` | `GET /api/learning/courses/{id}/progress` |
 | `sendMessage()` | `POST /api/learning/courses/{id}/topics/{tid}/chat` |
 | `loadLectureSequence()` | `GET /api/learning/lecture/courses/{id}/topics/{tid}/sequence` |
+| 音声会話ループ | `POST /api/learning/voice/transcribe` → chat（`intent_mode='casual'`）→ `POST /api/learning/voice/speak` |
+| `confirmTension()` / `dismissTension()` | `POST /api/learning/tension/{trace_id}/confirm`（`/dismiss`） |
 
 ---
 

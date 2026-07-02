@@ -103,13 +103,21 @@ EPISTEME_DEFAULT_CARTRIDGE_ID=particle_physics
 EPISTEME_CARTRIDGES_DIR=     # カートリッジのパス上書き（未設定なら自動探索）
 ```
 
+### ハンズフリー音声会話 / TensionMiningAgent（B層）
+```bash
+LLM_TRANSCRIBE_MODEL=whisper-1   # 音声文字起こしモデル（openai プロバイダのみ）
+TENSION_MAX_CALLS_PER_SESSION=3  # tension 解析の LLM コール上限（1セッションあたり）
+TENSION_MAX_CALLS_PER_DAY=10     # 同・1ユーザー1日あたり
+TENSION_LLM_MODEL=               # 空なら fast tier（LLM_FAST_MODEL）を使用
+```
+
 ---
 
 ## 4. 起動時の処理
 
 `api-server` 起動時、`backend/api/main.py` の lifespan で以下が実行されます。
 
-1. **マイグレーション適用** — `backend/db/` の `init.sql`〜`019_*.sql` を冪等に適用（pgvector 次元の変更や列追加を含む）。
+1. **マイグレーション適用** — `backend/db/` の `init.sql`〜`022_*.sql` を冪等に適用（pgvector 次元の変更や列追加を含む）。
 2. **ビルトインスキーマの seed** — `schema_registry.seed_builtin_schema()` が `OntologyType` / `CorePredicate` を DB に投入。
 3. **システム管理者アカウント初期化** — `ADMIN_PASSWORD` で初期管理者を作成。
 

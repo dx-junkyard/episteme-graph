@@ -110,6 +110,12 @@
 ### ExportValidationGate — 決定論
 `backend/core/document_pipeline/export_validation_gate.py`。最終検証。成果物の完全性・ソースバッキング整合性・スキーマ妥当性をチェック。非 atomic / split_pending な claim が main graph に強い backing として使われていないか等を明示 report（一部は hard error）。
 
+### 未統合・レガシーのディレクトリ
+- `document_unit_boundary/` — 文書のユニット境界検出 Agent。実装（agent / detector / validator / schema）は
+  存在するが、`orchestrator.py` の `PIPELINE_STAGES` にはまだ組み込まれていない（設計案は
+  DocumentStructureAgent → 本 Agent → SourceChunking）。
+- `graph_narrative/` — 空ディレクトリ（レガシー）。narrative 注釈の現行実装は `narrative_annotator/`。
+
 ---
 
 ## 3. 共有モジュール（agents/ 直下）
