@@ -1,0 +1,27 @@
+{
+  "description": "陰性・gap: 「わからないので教えて」→ candidates 空、rejected_as_gap に理由付きで記録（空出力が正解になり得ることの固定）",
+  "window": {
+    "course_id": "c_demo",
+    "topic_id": "t_02",
+    "topic_title": "リー群の基礎",
+    "turns": [
+      {"turn_id": "msg_0020", "role": "learner", "text": "群論がまだ全然わからないので、リー群の定義から教えてください。", "tier": null, "tension_hint": false},
+      {"turn_id": "msg_0021", "role": "tutor", "text": "リー群は群構造を持つ滑らかな多様体です。まず群の公理から確認しましょう。", "tier": "source", "tension_hint": false}
+    ],
+    "components": [],
+    "chunks": []
+  },
+  "llm_output": {
+    "candidates": [],
+    "rejected_as_gap": [
+      {
+        "turn_ids": ["msg_0020"],
+        "reason": "Explicit statement of not understanding (「わからない」) with a definition lookup request; belongs to the question/misconception pipeline, not a tension."
+      }
+    ]
+  },
+  "expected": {
+    "candidate_count": 0,
+    "rejected_count": 1
+  }
+}

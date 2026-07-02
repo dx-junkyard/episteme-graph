@@ -37,6 +37,16 @@
 
     <!-- Main Chat Area -->
     <div class="mn">
+      <!-- 教材区画（本筋・順路）: 教材本文＋確認して次へ。会話で流れない独立スクロール -->
+      <div class="material-region" id="material-region">
+        <div class="material-body" id="material-body"></div>
+        <div class="material-foot">
+          <span class="material-here" id="material-here"></span>
+          <button class="next-topic-btn" id="next-topic-btn" style="display:none" title="次のトピックへ進む">確認して次へ</button>
+        </div>
+      </div>
+      <!-- チャット区画（探索）: モードバー＋会話 -->
+      <div class="mode-bar" id="mode-bar" hidden></div>
       <div class="ca" id="chat-area">
         <div class="mg ai" style="color:var(--color-text-tertiary)">
           トピックを選択して学習を始めましょう。
@@ -60,9 +70,20 @@
       </div>
       <div class="ia">
         <button class="lecture-toggle-btn" id="lecture-toggle" title="レクチャーモード切替">&#127897; レクチャー</button>
-        <button class="next-topic-btn" id="next-topic-btn" style="display:none" title="次のトピックへ進む">次に進む →</button>
-        <input type="text" id="chat-input" placeholder="質問を入力してください...">
-        <button id="send-btn">送信</button>
+        <input type="text" id="chat-input" placeholder="質問を入力してください…（Enterで送信）">
+        <button id="send-btn" title="質問する（回答が教材由来か自動で判定し、出典タブと回答欄に表示します）">質問</button>
+        <button id="voice-mode-btn" class="voice-mode-btn" title="気軽に話せる先生とハンズフリーで会話">🤖</button>
+      </div>
+
+      <!-- ハンズフリー音声会話パネル（気軽に話せる先生） -->
+      <div class="voice-panel" id="voice-panel">
+        <div class="voice-panel-head">
+          <span class="voice-panel-title">🤖 気軽に話せる先生</span>
+          <span class="voice-status" id="voice-status">準備中…</span>
+          <button class="voice-close" id="voice-close" title="音声会話を終了">&times;</button>
+        </div>
+        <div class="voice-transcript" id="voice-transcript"></div>
+        <div class="voice-material" id="voice-material"></div>
       </div>
     </div>
 

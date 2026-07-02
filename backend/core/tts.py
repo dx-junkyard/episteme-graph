@@ -17,10 +17,34 @@ Usage::
 from __future__ import annotations
 
 import logging
+import re
 
 from core.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+# 音声読み上げ前のテキスト整形: LaTeX・markdown 記号・システムマーカーを除去する。
+_SPEECH_STRIP_PATTERNS = (
+    re.compile(r"\$\$.*?\$\$", re.DOTALL),          # ディスプレイ数式
+    re.compile(r"\$[^$\n]+\$"),                      # インライン数式
+    re.compile(r"\[ACTION_BUTTON:[^\]]*\]"),         # アクションボタン記法
+    re.compile(r"\[[^\]]*について詳しく聞く\]"),      # ドリルダウンマーカー
+    re.compile(r"\[出典\d+\]"),                      # 出典マーカー
+    re.compile(r"[*_#`>|]+"),                        # markdown 記号
+)
+
+
+def strip_text_for_speech(text: str, limit: int = 4000) -> str:
+    """回答テキストを TTS 向けに整形する（記号除去・空白正規化・長さ上限）。
+
+    ハンズフリー音声会話（カジュアル対話モード）の読み上げ前処理。
+    """
+    cleaned = text or ""
+    for pat in _SPEECH_STRIP_PATTERNS:
+        cleaned = pat.sub(" ", cleaned)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\n{2,}", "\n", cleaned).strip()
+    return cleaned[:limit]
 
 
 class TtsFatalError(Exception):

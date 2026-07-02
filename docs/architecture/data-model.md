@@ -72,7 +72,17 @@ ORM 定義は `backend/core/models.py`、スキーマ初期化は `backend/db/in
 | `theory_claims` | ソース由来の atomic claim（support_status, evidence_text, review_status） |
 | `theory_component_links` | コンポーネント間の関係 |
 | `theory_component_graphs` | TheoryOperationGraph の JSON（ドキュメント単位） |
-| `theory_review_events` | 状態変更の監査ログ |
+| `theory_review_events` | 状態変更の監査ログ（`entity_type`: claim / component / endorsement / explanation / citation） |
+
+### 承認・共有レイヤー（C層, マイグレーション 021）
+A層（生成パイプライン）を書き換えず、その上に「教員による査読承認」と「教員間の共有」を積む層。詳細は [承認・共有レイヤー](../features/endorsement-sharing.md)。
+
+| テーブル | 役割 |
+|---|---|
+| `component_explanations` | 1コンポーネントに複数の説明バージョンを並存（`kind='standard'` はA層 summary から遅延生成 / `kind='personal'` は教員の独自解釈）。`backing_claims`, `origin_query_id`, `review_status`, `shared` |
+| `component_endorsements` | 個々の教員の承認を1行ずつ記録（**explanation 単位**）。`UNIQUE(explanation_id, endorser_id)` で二重カウント防止、取り消しは `revoked=TRUE`（履歴保持）。`level`(provisional/endorsed/strong), `expertise_tag` |
+| `component_citations` | 承認済み説明の再利用・引用を帰属付きで記録 |
+| `component_explanation_endorsement_summary`（VIEW） | endorsements から承認の厚みを都度集計（endorser_count / strong_count / provisional_count / expertise_breadth） |
 
 ### パイプライン実行・リビジョン
 | テーブル | 役割 |
@@ -98,6 +108,13 @@ ORM 定義は `backend/core/models.py`、スキーマ初期化は `backend/db/in
 （preparing → auditing → proposed → accepted/rejected/superseded）を追加。
 `documents.active_analysis_run_id` が現在アクティブな（承認済み）ランを指します。
 複数のリビジョン候補が並存でき、アクティブは常に 1 つ。
+
+### 承認は説明バージョン単位・重みは表示のみ（C層, マイグレーション 021）
+承認（endorsement）はコンポーネントではなく **説明バージョン（explanation）単位** に付ける
+（「標準説明を承認したのか、A先生の説明を承認したのか」を区別するため）。
+承認の重みは `component_explanation_endorsement_summary` から算出し、アプリ層で段階ラベル化する
+（例「専門家3名が承認」）。**数値スコアは学習者に提示しない**（B層と一貫し報酬化・点数化を避ける）。
+claim 紐づけの最終確定は必ず教員が行い、AI 候補は `backing_claims` に `confirmed=false` で保持する。
 
 ---
 
@@ -126,6 +143,11 @@ ORM 定義は `backend/core/models.py`、スキーマ初期化は `backend/db/in
 | `017_tex_references_mentions.sql` | TeX 参照・mention の拡張 |
 | `018_course_builder_session_status.sql` | コースビルダーセッションの status |
 | `019_revision_runs.sql` | リビジョンラン（run_type, base_run_id, revision_status; documents.active_analysis_run_id） |
+| `020_interest_trace.sql` | 学習者体験レイヤー(B層) 関心痕跡（interest_traces） |
+| `021_endorsement_sharing.sql` | 承認・共有レイヤー(C層)（component_explanations / component_endorsements / component_citations + 集計ビュー） |
+
+> 注: マイグレーションは `backend/db/*.sql` を正本リファレンスとしつつ、実際の適用は
+> `backend/api/main.py` の `_run_migrations()` に直書きした DDL を起動時に冪等適用する方式です。
 
 ---
 

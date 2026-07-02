@@ -80,7 +80,12 @@ def get_lecture_sequence(
     if not topic_info:
         raise HTTPException(status_code=404, detail="Topic not found")
 
-    topic_segment = _build_topic_draft_segment(topic_id, topic_info, course_data)
+    # 実チャンク教材（音声キャッシュ可能）を持つトピックは、たとえ student_material/
+    # content が設定されていても、チャンクベースの再生（下記）を優先する。ドラフト
+    # セグメントは実チャンク教材が無いトピックの代替手段としてのみ使う。
+    topic_segment = None
+    if not _topic_has_linkable_material(topic_info, course_data):
+        topic_segment = _build_topic_draft_segment(topic_id, topic_info, course_data)
     if topic_segment:
         return LectureSequenceResponse(
             course_id=course_id,
@@ -356,7 +361,12 @@ def get_topic_audio_status(
     }
 
     # ドラフト原稿ベースのトピックは topic: セグメントで再生され音声をキャッシュできない。
-    if _topic_student_material(topic_info) or _topic_spoken_script(topic_info):
+    # ただし student_material/content/summary はほぼ全トピックに設定されるため、
+    # それだけで判定すると実チャンク教材を持つトピックまで無効化してしまう。
+    # 実チャンク教材（キャッシュ可能）が無い場合のみドラフト専用として扱う。
+    if not _topic_has_linkable_material(topic_info, course_data) and (
+        _topic_student_material(topic_info) or _topic_spoken_script(topic_info)
+    ):
         return empty
 
     sources = course_data.get("sources", [])
@@ -534,6 +544,20 @@ def _topic_spoken_script(topic: dict) -> str:
     return str(topic.get("spoken_script") or topic.get("content") or topic.get("summary") or "").strip()
 
 
+def _topic_has_linkable_material(topic: dict, course_data: dict) -> bool:
+    """トピックが実チャンク教材（音声を事前生成・キャッシュできる教材）を持つか判定する。
+
+    ``student_material``/``content``/``summary`` はコースビルダーが生成する
+    ほぼ全トピックに設定されるため、それらの有無だけでは「ドラフト専用トピックか」を
+    判定できない（実チャンクを持つトピックまで誤って無効化してしまう）。
+    実際にチャンク単位で音声をキャッシュできる教材があるかどうかで判定する。
+    """
+    if topic.get("material_chunk_ids"):
+        return True
+    sources = course_data.get("sources", []) if isinstance(course_data, dict) else []
+    return any(isinstance(s, dict) and s.get("material_id") for s in sources)
+
+
 import re as _re
 
 def _resolve_equation_embeds(
@@ -559,15 +583,20 @@ def _resolve_equation_embeds(
     def _replace(m: _re.Match) -> str:
         eq_id = m.group(1).strip()
         link = eq_by_id.get(eq_id)
+        latex = str(link.get("latex") or "") if link else ""
         summary = str(link.get("summary") or "") if link else ""
+        plain_text = str(link.get("plain_text") or "") if link else ""
         idx = formula_offset + len(formulas) - len(existing_formulas)
         placeholder = f"[[FORMULA_{idx}]]"
-        # summary が LaTeX らしければ数式として埋め込む、なければ空文字にする
-        if summary:
+        # 描画用 LaTeX は link.latex を最優先する。summary は意味要約（散文）の
+        # 場合があり、それを LaTeX として埋め込むと数式描画が壊れる。
+        body = latex or summary
+        if body:
             formulas.append({
                 "id": placeholder,
-                "latex": summary,
-                "spoken": summary,
+                "latex": body,
+                # 読み上げは人間向けテキストを優先する（生 TeX を読み上げない）。
+                "spoken": plain_text or summary or body,
                 "is_display": True,
             })
             return placeholder
