@@ -277,6 +277,106 @@ def test_topic_evidence_links_equation_uses_semantic_summary_and_carries_latex()
     assert eq_link["label"] == "eq:functions1"
 
 
+def test_topic_evidence_links_equation_quote_source_carries_full_latex():
+    """equation_quote の source 根拠リンクは evidence_text（生 TeX）を切り詰めずに
+    latex フィールドで全文保持し、summary 経由の 220 字切り詰めで TeX を壊さないこと
+    （arXiv TeX アーカイブ由来の \\begin{aligned}...\\end{aligned} が "\\end{a..." に
+    壊れていた退行の再発防止）。"""
+    from core.course_content_builder import _topic_evidence_links
+
+    # 220 字を超える現実的な aligned 数式（arXiv-2508.06322 の sum rule 相当）。
+    long_latex = (
+        r"\begin{aligned} \frac{R_{\Lambda_c}}{R_{\Lambda_c}^{SM}} = "
+        r"a^{\rm HQ} \frac{R_{D}}{R_{D}^{SM}} + b^{\rm HQ} \frac{R_{D^*}}{R_{D^*}^{SM}} "
+        r"\,,~~~ \text{with}~~ a^{\rm HQ} = \frac{1}{4},~ b^{\rm HQ} = \frac{3}{4} \,. "
+        r"\end{aligned}"
+    )
+    assert len(long_latex) > 220
+    components = [{"component_id": "comp_1", "linked_evidence_ids": ["ev_eq_1"]}]
+    evidence = {
+        "ev_eq_1": {
+            "evidence_id": "ev_eq_1",
+            "evidence_text": long_latex,
+            "evidence_role": "equation_quote",
+        }
+    }
+
+    links = _topic_evidence_links(components, [], {}, evidence, "exact_title")
+    src = next(l for l in links if l["kind"] == "source" and l["target_id"] == "ev_eq_1")
+
+    assert src["latex"] == long_latex  # 全文・無切り詰め
+    assert src["latex"].endswith(r"\end{aligned}")
+    assert "..." not in src.get("summary", "")
+    assert not src.get("summary", "").startswith("\\begin")  # 生 TeX を summary に出さない
+    assert src["support_role"] == "equation_quote"
+
+
+def test_topic_evidence_links_tex_like_source_quote_is_promoted_to_latex():
+    """role が equation_quote でなくても本文が生 TeX なら latex に昇格し、
+    途中切り詰めの対象にしないこと（他論文・他経路への汎用ガード）。"""
+    from core.course_content_builder import _topic_evidence_links
+
+    tex_body = r"\frac{d\Gamma}{dq^2} = \frac{G_F^2 |V_{cb}|^2}{192\pi^3 m_b^3} \sum_i |H_i|^2" * 4
+    components = [{"component_id": "comp_1", "linked_evidence_ids": ["ev_2"]}]
+    evidence = {
+        "ev_2": {
+            "evidence_id": "ev_2",
+            "evidence_text": tex_body,
+            "evidence_role": "source_quote",
+        }
+    }
+
+    links = _topic_evidence_links(components, [], {}, evidence, "high")
+    src = next(l for l in links if l["kind"] == "source" and l["target_id"] == "ev_2")
+
+    assert src["latex"] == tex_body
+    assert "..." not in src.get("summary", "")
+
+
+def test_topic_evidence_links_prose_source_quote_still_truncated_as_text():
+    """散文の source 引用は従来どおり 220 字で要約されること（TeX ガードの誤爆なし）。
+    散文中に数式コマンドが少し混ざっても TeX 扱いしない。"""
+    from core.course_content_builder import _topic_evidence_links
+
+    prose = (
+        "The coefficients \\alpha_R and \\beta_R are independent of NP effects. "
+        "The sum rule provides a powerful tool for cross-checking the consistency "
+        "of experimental data and testing the validity of SM predictions. "
+    ) * 3
+    components = [{"component_id": "comp_1", "linked_evidence_ids": ["ev_3"]}]
+    evidence = {
+        "ev_3": {
+            "evidence_id": "ev_3",
+            "evidence_text": prose,
+            "evidence_role": "source_quote",
+        }
+    }
+
+    links = _topic_evidence_links(components, [], {}, evidence, "high")
+    src = next(l for l in links if l["kind"] == "source" and l["target_id"] == "ev_3")
+
+    assert "latex" not in src
+    assert len(src["summary"]) <= 223  # 220 + "..."
+
+
+def test_looks_like_tex_math_heuristic():
+    from core.course_content_builder import _looks_like_tex_math
+
+    # 数式環境があれば即 TeX。
+    assert _looks_like_tex_math(r"\begin{aligned} x &= y \end{aligned}")
+    assert _looks_like_tex_math(r"\begin{align*} a &= b \\ c &= d \end{align*}")
+    assert _looks_like_tex_math(r"\begin{pmatrix} a & b \end{pmatrix}")
+    # 環境なしでもコマンド密度が高ければ TeX。
+    assert _looks_like_tex_math(r"\frac{R_{\Lambda_c}}{R_{\Lambda_c}^{SM}} - \alpha_R \frac{R_D}{R_D^{SM}}")
+    # 散文は False（数式コマンドが少し混ざっても）。
+    assert not _looks_like_tex_math("The sum rule provides a powerful cross-check of the data.")
+    assert not _looks_like_tex_math(
+        "We denote the ratio by \\alpha_R in the following discussion, "
+        "which is independent of new physics contributions to the decay rates."
+    )
+    assert not _looks_like_tex_math("")
+
+
 def test_equation_display_math_respects_needs_math_review_and_reconstruction():
     from core.course_content_builder import _equation_display_math
 

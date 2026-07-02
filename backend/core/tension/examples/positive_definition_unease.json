@@ -1,0 +1,37 @@
+{
+  "description": "陽性: 正しい復唱 + 「腑に落ちない」ヘッジ + 同一概念への再訪 → definition_unease (confidence 0.8台)",
+  "window": {
+    "course_id": "c_demo",
+    "topic_id": "t_01",
+    "topic_title": "有効場理論入門",
+    "turns": [
+      {"turn_id": "msg_0010", "role": "learner", "text": "有効場理論のカットオフの定義はわかりました。高エネルギーの自由度を積分で落とすんですよね。", "tier": null, "tension_hint": false},
+      {"turn_id": "msg_0011", "role": "tutor", "text": "その通りです。カットオフスケールより上の自由度を経路積分で積分し、低エネルギー有効作用に押し込めます。", "tier": "approved", "tension_hint": false},
+      {"turn_id": "msg_0012", "role": "learner", "text": "定義は復唱できるんですが、カットオフの選び方が恣意的に思えて、なんとなく腑に落ちないんです。", "tier": null, "tension_hint": true},
+      {"turn_id": "msg_0013", "role": "tutor", "text": "良い着眼です。物理量はカットオフの選び方に依存しないよう繰り込み条件で調整されます。", "tier": "approved", "tension_hint": false},
+      {"turn_id": "msg_0014", "role": "learner", "text": "さっきのカットオフの話に戻るんですが、物理量が本当に依存しないと言い切れるんでしょうか。", "tier": null, "tension_hint": true}
+    ],
+    "components": [],
+    "chunks": []
+  },
+  "llm_output": {
+    "candidates": [
+      {
+        "tension_type": "definition_unease",
+        "evidence_quote": "定義は復唱できるんですが、カットオフの選び方が恣意的に思えて、なんとなく腑に落ちないんです。",
+        "turn_ids": ["msg_0012", "msg_0014"],
+        "target_refs": {"component_ids": [], "chunk_ids": [], "topic_id": "t_01", "edge_ids": []},
+        "is_tension_not_gap": true,
+        "paraphrase": "定義を理解した上で、カットオフの恣意性に引っかかりが残っているのかもしれません",
+        "confidence": 0.82,
+        "reason": "Correct restatement (msg_0010, msg_0012) followed by hedged unease markers 「なんとなく」「腑に落ちない」 (msg_0012) and a revisit of the same concept without acknowledgement (msg_0014)."
+      }
+    ],
+    "rejected_as_gap": []
+  },
+  "expected": {
+    "candidate_count": 1,
+    "tension_type": "definition_unease",
+    "min_confidence": 0.8
+  }
+}

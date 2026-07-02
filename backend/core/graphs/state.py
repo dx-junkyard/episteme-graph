@@ -29,9 +29,14 @@ class StudentState(TypedDict, total=False):
     intent: str  # "greeting" | "factual" | "conceptual" | "misconception" | "formula" | "other"
     search_keywords: list[str]
 
-    # --- Retrieval 出力 ---
-    chunks: list[dict[str, Any]]  # [{text, source_title, source_file, score}]
+    # --- Retrieval 出力（tier 付与: 仕様書 §3.2）---
+    chunks: list[dict[str, Any]]  # [{text, source_title, source_file, score, tier}]
     no_relevant_chunks: bool
+    overall_tier: str             # 回答全体の格（最弱根拠に引きずる安全側集約）
+
+    # --- 位置・復帰（仕様書 §3.2 / L2）---
+    position_anchor: dict[str, Any]  # {topic_id, segment_id, scroll_offset}
+    detour_origin: dict[str, Any]    # DetourStack 単段の入口
 
     # --- PedagogicalEval 出力 ---
     route: str  # "standard" | "deep"

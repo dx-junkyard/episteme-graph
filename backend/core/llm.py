@@ -762,3 +762,53 @@ def generate_embeddings(
 
     resp = client.embeddings.create(model=model_name, input=texts)
     return [e.embedding for e in resp.data]
+
+
+# ---------------------------------------------------------------------------
+# 公開 API: 音声文字起こし (Speech-to-Text)
+# ---------------------------------------------------------------------------
+
+def transcribe_audio(
+    audio_bytes: bytes,
+    filename: str = "audio.webm",
+    *,
+    language: str = "ja",
+    model: str | None = None,
+) -> str:
+    """音声データをテキストに文字起こしする（ハンズフリー会話用）。
+
+    現状 openai プロバイダのみ対応（whisper-1 / gpt-4o-mini-transcribe 等、
+    ``LLM_TRANSCRIBE_MODEL`` で切替）。他プロバイダでは RuntimeError を送出する
+    （呼び出し側で 503 に変換すること）。
+
+    Parameters
+    ----------
+    audio_bytes : bytes
+        音声データ（webm / mp4 / wav 等、拡張子は filename から判定される）。
+    filename : str
+        フォーマット判定用のファイル名。
+    language : str
+        ISO-639-1 言語コード（言語指定のハードコード禁止ルールに従い引数で受ける）。
+
+    Returns
+    -------
+    str
+        文字起こし結果テキスト（空白のみの場合は空文字列）。
+    """
+    settings = get_settings()
+    if settings.llm_provider != "openai":
+        raise RuntimeError(
+            f"transcribe_audio is not supported for provider '{settings.llm_provider}'"
+        )
+    model_name = model or settings.llm_transcribe_model
+    client = _get_openai_client()
+    import io
+
+    buf = io.BytesIO(audio_bytes)
+    buf.name = filename  # openai SDK はファイル名からフォーマットを判定する
+    resp = client.audio.transcriptions.create(
+        model=model_name,
+        file=buf,
+        language=language,
+    )
+    return (getattr(resp, "text", "") or "").strip()

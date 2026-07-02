@@ -1,0 +1,23 @@
+{
+  "description": "陰性・満足クローズ: 「なるほど、納得しました」→ 両リスト空（過検出防止の固定）",
+  "window": {
+    "course_id": "c_demo",
+    "topic_id": "t_03",
+    "topic_title": "繰り込み群",
+    "turns": [
+      {"turn_id": "msg_0030", "role": "learner", "text": "繰り込み群方程式の導出はどうやるんですか。", "tier": null, "tension_hint": false},
+      {"turn_id": "msg_0031", "role": "tutor", "text": "ベータ関数を定義し、スケール変換に対する結合定数の応答を微分方程式として書き下します。", "tier": "source", "tension_hint": false},
+      {"turn_id": "msg_0032", "role": "learner", "text": "なるほど、納得しました。ありがとうございます。", "tier": null, "tension_hint": false}
+    ],
+    "components": [],
+    "chunks": []
+  },
+  "llm_output": {
+    "candidates": [],
+    "rejected_as_gap": []
+  },
+  "expected": {
+    "candidate_count": 0,
+    "rejected_count": 0
+  }
+}

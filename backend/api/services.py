@@ -837,7 +837,8 @@ def search_chunks_with_metadata(
                            c.text,
                            COALESCE(d.title, '') AS source_title,
                            COALESCE(d.filename, '') AS source_file,
-                           1 - (c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))) AS score
+                           1 - (c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))) AS score,
+                           c.material_id
                     FROM chunks c
                     LEFT JOIN documents d ON c.document_id = d.id
                     WHERE c.embedding IS NOT NULL
@@ -846,17 +847,25 @@ def search_chunks_with_metadata(
                 """),
                 {"query_vector": str(query_vector), "limit": top_k},
             ).fetchall()
-            return [
+            from core.learning_experience import attach_tiers, approved_chunk_ids
+
+            results = [
                 {
                     "id": str(row[0]),
                     "text": row[1],
                     "source_title": row[2] or row[3] or "不明な教材",
                     "source_file": row[3],
                     "score": float(row[4]),
+                    "material_id": str(row[5]) if row[5] else "",
                 }
                 for row in rows
                 if row[1]
             ]
+            # L1 信頼性: 教員承認(teacher_reviewed)に紐づく chunk へ approved を付与してから tier 判定。
+            approved = approved_chunk_ids(session, [r["id"] for r in results])
+            for r in results:
+                r["approved"] = r["id"] in approved
+            return attach_tiers(results)
         finally:
             session.close()
     except Exception as exc:
@@ -1516,6 +1525,495 @@ def log_unanswered_query(user_id: str, course_id: str, topic_id: str, question: 
         logger.warning("Failed to log unanswered query: %s", exc)
     finally:
         session.close()
+
+
+# ---------------------------------------------------------------------------
+# 関心痕跡 InterestTraceStore (L3 資産化 / Stage 3) — 安価記録・LLM不使用
+# ---------------------------------------------------------------------------
+
+# tension は TensionMiningAgent (B層, backend/core/tension/) が追加する kind。
+# LLM 出力は常に status='candidate' で、学習者本人の confirm/dismiss でのみ遷移する（P1）。
+_INTEREST_KINDS = ("raw", "question", "detour", "misconception", "tension")
+_TRACE_STATUSES = (
+    "open", "revisited", "resolved",   # 既存
+    "candidate",      # LLM提案・本人未確定（tension のみ）
+    "dismissed",      # 本人が「違う」と判定（削除しない。P4）
+    "articulated",    # 本人が自分の言葉で編集済み
+    "connected",      # グラフ上の node/edge に接続済み
+    "abstracted",     # 新しい抽象化・教材提案へ昇格
+)
+
+
+def record_interest_trace(
+    user_id: str,
+    course_id: str,
+    topic_id: str | None,
+    kind: str,
+    text: str,
+    context_label: str = "",
+    extra_payload: dict | None = None,
+    status: str = "open",
+) -> None:
+    """学習者の問い・寄り道・誤答を interest_traces に1行追記する（安価・LLM不使用）。
+
+    失敗してもチャット応答を止めない（best-effort）。chat_anchors への二重書きはしない。
+    """
+    if kind not in _INTEREST_KINDS:
+        kind = "raw"
+    if status not in _TRACE_STATUSES:
+        status = "open"
+    payload = {"text": (text or "")[:500], "context_label": context_label or ""}
+    if extra_payload:
+        payload.update(extra_payload)
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO interest_traces (id, user_id, course_id, topic_id, kind, payload, status)
+                VALUES (gen_random_uuid(), CAST(:uid AS uuid), :cid, :tid, :kind,
+                        CAST(:payload AS jsonb), :status)
+            """),
+            {
+                "uid": user_id, "cid": course_id, "tid": topic_id, "kind": kind,
+                "payload": json.dumps(payload, ensure_ascii=False), "status": status,
+            },
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.warning("Failed to record interest trace: %s", exc)
+    finally:
+        session.close()
+
+
+def get_interest_traces(user_id: str, course_id: str, topic_id: str | None = None, limit: int = 50) -> dict:
+    """問いの軌跡（UnfinishedQuestionBox）を実データで返す（L3）。
+
+    status を主役に、未解決(open)→再訪推奨(revisited)→解決済み(resolved) の順で返す。
+    行→ビューの変換と再訪のころ合い算出は core.learning_experience.build_traces_view に集約。
+    """
+    from core.learning_experience import build_traces_view
+
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT id, kind, status, payload, created_at
+                FROM interest_traces
+                WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
+                  -- tension の未確定候補・棄却は問いの軌跡に出さない（提示はダイジェスト経由のみ。P1/P7）
+                  AND NOT (kind = 'tension' AND status IN ('candidate', 'dismissed'))
+                ORDER BY
+                    CASE status WHEN 'revisited' THEN 0 WHEN 'open' THEN 1 ELSE 2 END,
+                    created_at DESC
+                LIMIT :lim
+            """),
+            {"uid": user_id, "cid": course_id, "lim": limit},
+        ).fetchall()
+    except Exception as exc:
+        logger.warning("get_interest_traces failed: %s", exc)
+        rows = []
+    finally:
+        session.close()
+
+    view = build_traces_view(rows)
+    view["course_id"] = course_id
+    view["topic_id"] = topic_id
+    return view
+
+
+def aggregate_interest_dashboard(course_id: str, topic_title_map: dict | None = None, top_n: int = 10) -> dict:
+    """教員向け InterestDashboard の集団集計（L4）。
+
+    **個人を特定しない**: 返すのは件数・比率・関与人数（COUNT(DISTINCT user_id)）のみで、
+    痕跡本文や user_id は一切出さない。集団集計を既定とする（仕様書 §6-5）。
+    """
+    title_map = topic_title_map or {}
+    session = _pg_session()
+    try:
+        cohort = session.execute(
+            sa_text("SELECT COUNT(DISTINCT user_id) FROM interest_traces WHERE course_id = :cid"),
+            {"cid": course_id},
+        ).scalar() or 0
+
+        rows = session.execute(
+            sa_text("""
+                SELECT topic_id,
+                       COUNT(*) AS cnt,
+                       COUNT(*) FILTER (WHERE status IN ('open', 'revisited')) AS unfinished,
+                       COUNT(DISTINCT user_id) AS learners
+                FROM interest_traces
+                WHERE course_id = :cid
+                GROUP BY topic_id
+                ORDER BY cnt DESC
+                LIMIT :lim
+            """),
+            {"cid": course_id, "lim": top_n},
+        ).fetchall()
+
+        summary = session.execute(
+            sa_text("""
+                SELECT
+                    COUNT(*) FILTER (WHERE kind = 'question' AND status IN ('open','revisited')) AS open_q,
+                    COUNT(*) FILTER (WHERE kind = 'detour') AS detours,
+                    COUNT(*) FILTER (WHERE kind = 'misconception') AS miscon
+                FROM interest_traces
+                WHERE course_id = :cid
+            """),
+            {"cid": course_id},
+        ).fetchone()
+
+        # 違和感ヒートマップ（TensionMiningAgent Stage 3）。
+        # 対象は本人が引き受けた status のみ（candidate/dismissed は集計に入れない —
+        # 本人が引き受けたものだけが違和感。P1/P3）。
+        tension_rows = session.execute(
+            sa_text("""
+                SELECT topic_id,
+                       COALESCE(payload->>'tension_type', 'unclassified') AS tension_type,
+                       COUNT(*) AS cnt,
+                       COUNT(DISTINCT user_id) AS learners
+                FROM interest_traces
+                WHERE course_id = :cid AND kind = 'tension'
+                  AND status IN ('open', 'articulated', 'connected', 'abstracted')
+                GROUP BY topic_id, COALESCE(payload->>'tension_type', 'unclassified')
+                ORDER BY cnt DESC
+            """),
+            {"cid": course_id},
+        ).fetchall()
+    except Exception as exc:
+        logger.warning("aggregate_interest_dashboard failed: %s", exc)
+        return {"course_id": course_id, "cohort_size": 0, "hotspots": [],
+                "unfinished_summary": {"open_questions": 0, "repeated_detours": 0, "recurring_misconceptions": 0},
+                "tension_heatmap": []}
+    finally:
+        session.close()
+
+    # k-匿名化: 関与人数 n<3 のセルは表示しない（個人を特定不可能にする）。
+    # 痕跡本文・user_id は一切出さない（匿名件数 + tension_type 分布のみ）。
+    _TENSION_K_ANONYMITY = 3
+    tension_heatmap = []
+    from core.tension.schema import TENSION_TYPE_LABELS as _TT_LABELS
+    for r in tension_rows:
+        tid, ttype, cnt, learners = r[0], str(r[1]), int(r[2]), int(r[3])
+        if learners < _TENSION_K_ANONYMITY:
+            continue
+        tension_heatmap.append({
+            "topic_title": title_map.get(tid) or tid or "(不明トピック)",
+            "tension_type": ttype,
+            "tension_type_label": _TT_LABELS.get(ttype, _TT_LABELS["unclassified"]),
+            "count": cnt,
+            "learners": learners,  # 関与人数（個人は特定しない）
+        })
+
+    hotspots = []
+    for r in rows:
+        tid, cnt, unfinished, learners = r[0], int(r[1]), int(r[2]), int(r[3])
+        hotspots.append({
+            "topic_title": title_map.get(tid) or tid or "(不明トピック)",
+            "interest_count": cnt,
+            "unfinished_ratio": round(unfinished / cnt, 2) if cnt else 0.0,
+            "learners": learners,  # 関与人数（個人は特定しない）
+        })
+
+    return {
+        "course_id": course_id,
+        "cohort_size": int(cohort),
+        "hotspots": hotspots,
+        "unfinished_summary": {
+            "open_questions": int(summary[0]) if summary else 0,
+            "repeated_detours": int(summary[1]) if summary else 0,
+            "recurring_misconceptions": int(summary[2]) if summary else 0,
+        },
+        "tension_heatmap": tension_heatmap,
+    }
+
+
+def resolve_interest_trace(user_id: str, trace_id: str, status: str = "resolved") -> bool:
+    """痕跡の status を更新する（解決済み化など）。本人の痕跡のみ更新可。"""
+    if status not in _TRACE_STATUSES:
+        return False
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                UPDATE interest_traces
+                SET status = :status, last_seen_at = now()
+                WHERE id = CAST(:tid AS uuid) AND user_id = CAST(:uid AS uuid)
+                RETURNING id
+            """),
+            {"status": status, "tid": trace_id, "uid": user_id},
+        ).fetchone()
+        session.commit()
+        return row is not None
+    except Exception as exc:
+        session.rollback()
+        logger.warning("resolve_interest_trace failed: %s", exc)
+        return False
+    finally:
+        session.close()
+
+
+def get_chunk_passage(chunk_id: str) -> dict | None:
+    """出典ポップアップ用に、チャンク本文（数式プレースホルダ正規化済み）と数式を返す。
+
+    display_text を優先し、`normalize_to_placeholder_format` で [[FORMULA_N]] 形式へ正規化する
+    （フロントの renderMaterialChunk がそのまま数式を KaTeX 描画できる形）。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT c.text, c.display_text, c.formulas, c.chapter, c.section,
+                       COALESCE(d.title, d.filename, '') AS source_title, d.filename
+                FROM chunks c
+                LEFT JOIN documents d ON c.document_id = d.id
+                WHERE c.id = CAST(:cid AS uuid)
+                LIMIT 1
+            """),
+            {"cid": chunk_id},
+        ).fetchone()
+    except Exception as exc:
+        logger.warning("get_chunk_passage failed: %s", exc)
+        return None
+    finally:
+        session.close()
+
+    if not row:
+        return None
+    raw_text = row[1] or row[0] or ""
+    raw_formulas = row[2] if row[2] else []
+    text, formulas = _normalize_formulas(raw_text, raw_formulas)
+    section = " · ".join([s for s in [row[3], row[4]] if s])
+    return {
+        "chunk_id": str(chunk_id),
+        "text": text,
+        "formulas": formulas,
+        "source_title": row[5] or row[6] or "不明な教材",
+        "source_file": row[6] or "",
+        "section": section,
+    }
+
+
+def record_internalization(user_id: str, trace_id: str, reason: str) -> bool:
+    """痕跡に「なぜ自分に重要か」(Internalization Prompt) を payload へ保存する（L3/内発的動機）。
+
+    本人の痕跡のみ更新可。LLM は使わず、学習者の言語化テキストをそのまま保持する。
+    """
+    reason = (reason or "").strip()[:1000]
+    if not reason:
+        return False
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                UPDATE interest_traces
+                SET payload = payload || jsonb_build_object('internalization', :reason),
+                    last_seen_at = now()
+                WHERE id = CAST(:tid AS uuid) AND user_id = CAST(:uid AS uuid)
+                RETURNING id
+            """),
+            {"reason": reason, "tid": trace_id, "uid": user_id},
+        ).fetchone()
+        session.commit()
+        return row is not None
+    except Exception as exc:
+        session.rollback()
+        logger.warning("record_internalization failed: %s", exc)
+        return False
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# 違和感（tension）— TensionMiningAgent (B層) Stage 2: ダイジェスト・本人確定
+# ---------------------------------------------------------------------------
+# P1: 確定は学習者本人のみ。P3: 候補・確定とも本人のみ可視（教員は個別行に触れない）。
+# P4: dismiss は削除でなく status='dismissed' で保持する。
+
+# ダイジェスト提示条件（設計書 §8/§9）
+_TENSION_DIGEST_MIN_CONFIDENCE = 0.55
+_TENSION_DIGEST_MAX_ITEMS = 3
+
+
+def _record_tension_event(
+    trace_id: str, old_status: str, new_status: str, user_id: str, metadata: dict | None = None,
+) -> None:
+    """tension の状態変更を theory_review_events に監査記録する（entity_type='tension'）。"""
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO theory_review_events (entity_type, entity_id, old_status, new_status, changed_by, metadata)
+                VALUES ('tension', :eid, :old, :new, CAST(:uid AS uuid), CAST(:meta AS jsonb))
+            """),
+            {
+                "eid": str(trace_id), "old": old_status, "new": new_status,
+                "uid": user_id, "meta": json.dumps(metadata or {}, ensure_ascii=False),
+            },
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.warning("_record_tension_event failed: %s", exc)
+    finally:
+        session.close()
+
+
+def get_tension_digest(user_id: str, course_id: str) -> dict:
+    """本人の status='candidate' かつ confidence>=0.55 を新しい順に最大3件返す。
+
+    confidence の数値は返さない（学習者に数値スコアを見せない原則の準用）。
+    件数バッジ・ランキング化はしない（P7）。
+    """
+    from core.tension.schema import TENSION_TYPE_LABELS
+
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT id, payload
+                FROM interest_traces
+                WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
+                  AND kind = 'tension' AND status = 'candidate'
+                  AND COALESCE((payload->>'confidence')::float, 0.0) >= :minc
+                ORDER BY created_at DESC
+                LIMIT :lim
+            """),
+            {
+                "uid": user_id, "cid": course_id,
+                "minc": _TENSION_DIGEST_MIN_CONFIDENCE, "lim": _TENSION_DIGEST_MAX_ITEMS,
+            },
+        ).fetchall()
+    except Exception as exc:
+        logger.warning("get_tension_digest failed: %s", exc)
+        rows = []
+    finally:
+        session.close()
+
+    items = []
+    for r in rows:
+        payload = r[1] if isinstance(r[1], dict) else (json.loads(r[1]) if r[1] else {})
+        ttype = payload.get("tension_type", "unclassified")
+        items.append({
+            "trace_id": str(r[0]),
+            "paraphrase": payload.get("paraphrase", ""),
+            "evidence_quote": payload.get("text", ""),
+            "tension_type_label": TENSION_TYPE_LABELS.get(ttype, TENSION_TYPE_LABELS["unclassified"]),
+            "context_label": payload.get("context_label", ""),
+        })
+    return {"course_id": course_id, "items": items}
+
+
+def confirm_tension_trace(user_id: str, trace_id: str, learner_text: str = "") -> dict | None:
+    """候補を本人が引き受ける: candidate → open（learner_text ありなら articulated）。
+
+    本人の痕跡のみ更新可。状態変更は theory_review_events に監査記録する。
+    """
+    learner_text = (learner_text or "").strip()[:1000]
+    new_status = "articulated" if learner_text else "open"
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                UPDATE interest_traces
+                SET status = :new_status,
+                    payload = payload || jsonb_build_object('learner_text', CAST(:ltext AS text)),
+                    last_seen_at = now()
+                WHERE id = CAST(:tid AS uuid) AND user_id = CAST(:uid AS uuid)
+                  AND kind = 'tension' AND status = 'candidate'
+                RETURNING id
+            """),
+            {"new_status": new_status, "ltext": learner_text, "tid": trace_id, "uid": user_id},
+        ).fetchone()
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.warning("confirm_tension_trace failed: %s", exc)
+        return None
+    finally:
+        session.close()
+    if row is None:
+        return None
+    _record_tension_event(trace_id, "candidate", new_status, user_id,
+                          {"articulated": bool(learner_text)})
+    return {"trace_id": str(trace_id), "status": new_status}
+
+
+def dismiss_tension_trace(user_id: str, trace_id: str) -> dict | None:
+    """本人が「違う」と判定: candidate → dismissed（行は残す。P4）。"""
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                UPDATE interest_traces
+                SET status = 'dismissed', last_seen_at = now()
+                WHERE id = CAST(:tid AS uuid) AND user_id = CAST(:uid AS uuid)
+                  AND kind = 'tension' AND status = 'candidate'
+                RETURNING id
+            """),
+            {"tid": trace_id, "uid": user_id},
+        ).fetchone()
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.warning("dismiss_tension_trace failed: %s", exc)
+        return None
+    finally:
+        session.close()
+    if row is None:
+        return None
+    _record_tension_event(trace_id, "candidate", "dismissed", user_id)
+    return {"trace_id": str(trace_id), "status": "dismissed"}
+
+
+def connect_tension_trace(
+    user_id: str, trace_id: str, component_id: str = "", edge_id: str = "",
+) -> dict | None:
+    """確定済み tension をグラフ上の node/edge に接続する: → connected（後続フェーズ）。
+
+    candidate からの直接 connect は許さない（本人の confirm を経ること。P1）。
+    """
+    component_id = (component_id or "").strip()
+    edge_id = (edge_id or "").strip()
+    if not component_id and not edge_id:
+        return None
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                UPDATE interest_traces
+                SET status = 'connected',
+                    payload = jsonb_set(
+                        payload,
+                        '{target_refs}',
+                        COALESCE(payload->'target_refs', '{}'::jsonb) || jsonb_build_object(
+                            'component_ids',
+                            COALESCE(payload->'target_refs'->'component_ids', '[]'::jsonb)
+                                || CASE WHEN :comp <> '' THEN jsonb_build_array(CAST(:comp AS text)) ELSE '[]'::jsonb END,
+                            'edge_ids',
+                            COALESCE(payload->'target_refs'->'edge_ids', '[]'::jsonb)
+                                || CASE WHEN :edge <> '' THEN jsonb_build_array(CAST(:edge AS text)) ELSE '[]'::jsonb END
+                        )
+                    ),
+                    last_seen_at = now()
+                WHERE id = CAST(:tid AS uuid) AND user_id = CAST(:uid AS uuid)
+                  AND kind = 'tension' AND status IN ('open', 'articulated')
+                RETURNING status
+            """),
+            {"comp": component_id, "edge": edge_id, "tid": trace_id, "uid": user_id},
+        ).fetchone()
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.warning("connect_tension_trace failed: %s", exc)
+        return None
+    finally:
+        session.close()
+    if row is None:
+        return None
+    _record_tension_event(trace_id, "open/articulated", "connected", user_id,
+                          {"component_id": component_id, "edge_id": edge_id})
+    return {"trace_id": str(trace_id), "status": "connected"}
 
 
 def get_graph_element_context(

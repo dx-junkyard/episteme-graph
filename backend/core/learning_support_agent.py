@@ -23,6 +23,9 @@ class LearningSupportOrigin:
     topic_id: str
     topic_title: str
     chapter_title: str = ""
+    # 位置・復帰レイヤー(L2): 寄り道に入った時点の正確な復帰位置。
+    segment_id: int = 0       # レクチャー再生セグメント（テキスト時は 0）
+    scroll_offset: int = 0    # 読み位置のスクロール量（px、ベストエフォート）
 
 
 @dataclass
@@ -58,7 +61,13 @@ class LearningSupportAgent:
         self.course_id = course_id
         self.course_data = course_data or {}
 
-    def origin_for_topic(self, topic_id: str, topic_info: dict | None) -> LearningSupportOrigin:
+    def origin_for_topic(
+        self,
+        topic_id: str,
+        topic_info: dict | None,
+        segment_id: int = 0,
+        scroll_offset: int = 0,
+    ) -> LearningSupportOrigin:
         topic = topic_info or {}
         chapter_title = ""
         chapter_index = topic.get("chapter_index")
@@ -71,6 +80,8 @@ class LearningSupportAgent:
             topic_id=topic_id,
             topic_title=str(topic.get("title") or topic_id),
             chapter_title=chapter_title,
+            segment_id=int(segment_id or 0),
+            scroll_offset=int(scroll_offset or 0),
         )
 
     def return_to_path_result(self, origin: dict | None) -> LearningSupportResult:

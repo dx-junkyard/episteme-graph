@@ -369,6 +369,33 @@ def _enrich_topics(topics: list[dict], bundle: dict, chunks_by_material: dict[st
     return enriched
 
 
+_TEX_MATH_ENV_RE = re.compile(
+    r"\\begin\{(?:aligned|align|equation|gather|multline|eqnarray|flalign|alignat"
+    r"|split|cases|array|smallmatrix|[pbBvV]?matrix)\*?\}"
+)
+_TEX_COMMAND_RE = re.compile(r"\\[a-zA-Z]+")
+
+
+def _looks_like_tex_math(text: str) -> bool:
+    """テキストが散文ではなく生の TeX 数式かどうかを判定する。
+
+    equation_quote evidence や TeX ソース由来の equation block の本文を、
+    文字数切り詰め（TeX を途中で壊す）や生テキスト表示の対象にしないための
+    汎用判定。数式環境があれば即 TeX、それ以外は TeX コマンドの占有率で
+    判定する（散文中に数式コマンドが少し混ざる程度では True にしない）。
+    """
+    t = str(text or "").strip()
+    if not t:
+        return False
+    if _TEX_MATH_ENV_RE.search(t):
+        return True
+    commands = _TEX_COMMAND_RE.findall(t)
+    if len(commands) < 2:
+        return False
+    covered = sum(len(cmd) + 1 for cmd in commands)
+    return covered >= max(10, int(len(t) * 0.2))
+
+
 def _topic_evidence_links(
     components: list[dict],
     equations: list[dict],
@@ -403,6 +430,12 @@ def _topic_evidence_links(
         if key in seen:
             return
         seen.add(key)
+        # 生 TeX の summary を 220 字で機械的に切ると数式が途中で壊れて描画不能に
+        # なる（例: "\end{a..."）。TeX とみなせる summary は全文を latex に移し、
+        # UI に数式として描画させる（equation_quote に限らず全 kind に効く汎用ガード）。
+        if not latex and _looks_like_tex_math(summary):
+            latex = summary.strip()
+            summary = ""
         link = {
             "kind": kind,
             "target_id": target_id,
@@ -461,12 +494,16 @@ def _topic_evidence_links(
         record = evidence_by_id.get(str(evidence_id))
         if not record:
             continue
-        add(
-            "source",
-            evidence_id,
-            record.get("evidence_text") or "",
-            str(record.get("evidence_role") or "source_quote"),
-        )
+        evidence_text = str(record.get("evidence_text") or "")
+        evidence_role = str(record.get("evidence_role") or "source_quote")
+        # equation_quote の evidence_text は生 TeX（TeX アーカイブ由来では
+        # \begin{aligned}...\end{aligned} 全体）。summary 経由にすると 220 字で
+        # 切り詰められて TeX が壊れるため、全文を latex として渡し UI に数式
+        # 描画させる。role が別でも本文が TeX なら同様に扱う。
+        if evidence_role == "equation_quote" or _looks_like_tex_math(evidence_text):
+            add("source", evidence_id, "", evidence_role, latex=evidence_text)
+        else:
+            add("source", evidence_id, evidence_text, evidence_role)
 
     return links
 

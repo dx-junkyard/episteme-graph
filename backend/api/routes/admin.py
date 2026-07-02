@@ -2586,6 +2586,37 @@ def approve_schema_proposal_with_scope(
 
 
 # ---------------------------------------------------------------------------
+# 学習者体験レイヤー(B層) — 教員向け関心集約ダッシュボード (Stage 4)
+# ---------------------------------------------------------------------------
+@router.get("/interest-dashboard")
+def get_interest_dashboard(
+    course_id: str | None = None,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """教員向け InterestDashboard（集団集計を既定・L4）。
+
+    interest_traces を集団集計し、件数・比率・関与人数のみを返す（個人特定情報なし）。
+    course_id 未指定なら空集計を返す（フロントでコースを選択する）。
+    """
+    from services import aggregate_interest_dashboard, _fetch_course_data_row
+
+    if not course_id:
+        return {"course_id": None, "cohort_size": 0, "hotspots": [],
+                "unfinished_summary": {"open_questions": 0, "repeated_detours": 0, "recurring_misconceptions": 0}}
+
+    title_map: dict = {}
+    try:
+        data = _fetch_course_data_row(course_id) or {}
+        for t in data.get("topics", []):
+            if isinstance(t, dict) and t.get("id"):
+                title_map[t["id"]] = t.get("title") or t["id"]
+    except Exception:
+        title_map = {}
+
+    return aggregate_interest_dashboard(course_id, title_map)
+
+
+# ---------------------------------------------------------------------------
 # Lecture Script Studio (Issue #70) — サブルーターとしてインクルード
 # ---------------------------------------------------------------------------
 from routes.lecture_studio import router as _lecture_studio_router  # noqa: E402

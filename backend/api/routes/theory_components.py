@@ -48,6 +48,7 @@ from core.theory_components import (
     enrich_theory_components_with_llm,
     extract_theory_components_from_dsl,
 )
+from core.component_candidates import generate_component_candidates
 
 try:
     # Shared deterministic helper so stored-graph normalization and the
@@ -2659,3 +2660,754 @@ def validate_connection(
         "matched": matched,
         "warnings": warnings,
     }
+
+
+# ===========================================================================
+# 承認・共有レイヤー(C層) — migration 021
+# A層(生成パイプライン)には手を入れず、A層が出力した theory_components /
+# theory_claims を「読む側」として承認・共有情報を新規テーブルに積む。
+# 承認(endorsement)は「説明バージョン(explanation)」単位で付ける。
+# ===========================================================================
+
+_ENDORSEMENT_LEVELS = ("provisional", "endorsed", "strong")
+_EXPLANATION_REVIEW_STATUSES = (
+    "teacher_review_required",
+    "teacher_approved",
+    "needs_revision",
+    "rejected",
+)
+
+
+class ExplanationCreateRequest(BaseModel):
+    title: str = ""
+    body: str = ""
+    backing_claims: list[dict] = Field(default_factory=list)
+    origin_query_id: str = ""
+    shared: bool = False
+
+
+class ExplanationPatchRequest(BaseModel):
+    title: str | None = None
+    body: str | None = None
+    backing_claims: list[dict] | None = None
+    shared: bool | None = None
+    review_status: str | None = None
+
+
+class EndorsementRequest(BaseModel):
+    level: str = "endorsed"
+    expertise_tag: str = ""
+    note: str = ""
+
+
+class CandidateFromQueryRequest(BaseModel):
+    course_id: str
+    question: str = ""
+    answer_text: str = ""
+    origin_query_id: str = ""
+    max_claims: int = 100
+
+
+class ExplanationOut(BaseModel):
+    id: str
+    component_id: str
+    course_id: str
+    kind: str
+    author_id: str = ""
+    author_name: str = ""
+    title: str = ""
+    body: str = ""
+    backing_claims: list[dict] = Field(default_factory=list)
+    origin_query_id: str = ""
+    review_status: str = "teacher_review_required"
+    shared: bool = False
+    endorsement_summary: dict = Field(default_factory=dict)
+    endorsement_label: str = ""
+    citation_count: int = 0
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class EndorsementOut(BaseModel):
+    id: str
+    explanation_id: str
+    endorser_id: str
+    endorser_name: str = ""
+    level: str = "endorsed"
+    expertise_tag: str = ""
+    note: str = ""
+    created_at: str = ""
+
+
+def _endorsement_label(summary: dict) -> str:
+    """承認の厚みを段階ラベルにする(数値スコアは学習者に出さない)。"""
+    count = int(summary.get("endorser_count") or 0)
+    strong = int(summary.get("strong_count") or 0)
+    provisional = int(summary.get("provisional_count") or 0)
+    breadth = int(summary.get("expertise_breadth") or 0)
+    if count == 0:
+        return "未承認"
+    if count == provisional:
+        return f"暫定的に{count}名が承認"
+    label = f"{count}名の教員が承認"
+    if strong > 0:
+        label = f"強い支持: {label}"
+    if breadth >= 2:
+        label = f"{label}(専門{breadth}分野)"
+    return label
+
+
+def _iso(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        return value.isoformat()
+    except AttributeError:
+        return str(value)
+
+
+_EXPLANATION_SELECT = """
+    SELECT e.id, e.component_id, e.course_id, e.kind, e.author_id,
+           COALESCE(u.display_name, ''), e.title, e.body, e.backing_claims,
+           e.origin_query_id, e.review_status, e.shared, e.created_at, e.updated_at,
+           COALESCE(s.endorser_count, 0), COALESCE(s.strong_count, 0),
+           COALESCE(s.provisional_count, 0), COALESCE(s.expertise_breadth, 0),
+           COALESCE(c.cnt, 0)
+    FROM component_explanations e
+    LEFT JOIN users u ON u.id = e.author_id
+    LEFT JOIN component_explanation_endorsement_summary s ON s.explanation_id = e.id
+    LEFT JOIN (
+        SELECT explanation_id, COUNT(*) AS cnt FROM component_citations GROUP BY explanation_id
+    ) c ON c.explanation_id = e.id
+"""
+
+
+def _row_to_explanation_out(row: Any) -> ExplanationOut:
+    summary = {
+        "endorser_count": int(row[14] or 0),
+        "strong_count": int(row[15] or 0),
+        "provisional_count": int(row[16] or 0),
+        "expertise_breadth": int(row[17] or 0),
+    }
+    return ExplanationOut(
+        id=str(row[0]),
+        component_id=str(row[1]),
+        course_id=str(row[2] or ""),
+        kind=str(row[3] or "personal"),
+        author_id=str(row[4]) if row[4] else "",
+        author_name=str(row[5] or ""),
+        title=str(row[6] or ""),
+        body=str(row[7] or ""),
+        backing_claims=_json_value(row[8], []),
+        origin_query_id=str(row[9] or ""),
+        review_status=str(row[10] or "teacher_review_required"),
+        shared=bool(row[11]),
+        endorsement_summary=summary,
+        endorsement_label=_endorsement_label(summary),
+        citation_count=int(row[18] or 0),
+        created_at=_iso(row[12]),
+        updated_at=_iso(row[13]),
+    )
+
+
+def _explanation_context(explanation_id: str) -> tuple[str, str, str, bool, str] | None:
+    """(component_id, course_id, author_id, shared, review_status) を返す。"""
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text(
+                "SELECT component_id, course_id, author_id, shared, review_status "
+                "FROM component_explanations WHERE id = CAST(:id AS uuid)"
+            ),
+            {"id": explanation_id},
+        ).fetchone()
+        if not row:
+            return None
+        return (
+            str(row[0]),
+            str(row[1] or ""),
+            str(row[2]) if row[2] else "",
+            bool(row[3]),
+            str(row[4] or ""),
+        )
+    finally:
+        session.close()
+
+
+def _get_explanation_out(explanation_id: str) -> ExplanationOut | None:
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text(_EXPLANATION_SELECT + " WHERE e.id = CAST(:id AS uuid)"),
+            {"id": explanation_id},
+        ).fetchone()
+        return _row_to_explanation_out(row) if row else None
+    finally:
+        session.close()
+
+
+def _ensure_standard_explanation(component: TheoryComponentOut) -> None:
+    """コンポーネントの標準説明(kind='standard')が無ければ、A層由来の summary から遅延生成する。
+
+    A層は component_explanations を作らないため、承認対象を成立させるために C層で補う。
+    """
+    review_status = getattr(component, "review_status", "") or "teacher_review_required"
+    if review_status not in _EXPLANATION_REVIEW_STATUSES:
+        review_status = "teacher_review_required"
+    session = _pg_session()
+    try:
+        existing = session.execute(
+            sa_text(
+                "SELECT 1 FROM component_explanations "
+                "WHERE component_id = CAST(:cid AS uuid) AND kind = 'standard' LIMIT 1"
+            ),
+            {"cid": component.id},
+        ).fetchone()
+        if existing:
+            return
+        session.execute(
+            sa_text("""
+                INSERT INTO component_explanations
+                    (component_id, course_id, kind, author_id, title, body, review_status)
+                VALUES
+                    (CAST(:cid AS uuid), :course_id, 'standard', NULL, :title, :body, :review_status)
+                ON CONFLICT DO NOTHING
+            """),
+            {
+                "cid": component.id,
+                "course_id": component.course_id,
+                "title": getattr(component, "name", "") or "標準の説明",
+                "body": getattr(component, "summary", "") or "",
+                "review_status": review_status,
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.warning("Failed to ensure standard explanation for %s", component.id, exc_info=True)
+    finally:
+        session.close()
+
+
+def _endorsement_summary_for(explanation_id: str) -> dict:
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text(
+                "SELECT endorser_count, strong_count, provisional_count, expertise_breadth "
+                "FROM component_explanation_endorsement_summary WHERE explanation_id = CAST(:id AS uuid)"
+            ),
+            {"id": explanation_id},
+        ).fetchone()
+        if not row:
+            return {"endorser_count": 0, "strong_count": 0, "provisional_count": 0, "expertise_breadth": 0}
+        return {
+            "endorser_count": int(row[0] or 0),
+            "strong_count": int(row[1] or 0),
+            "provisional_count": int(row[2] or 0),
+            "expertise_breadth": int(row[3] or 0),
+        }
+    finally:
+        session.close()
+
+
+# --- Phase 2: 独自解釈の並存 -------------------------------------------------
+
+
+@router.get("/theory-components/{component_id}/explanations", response_model=list[ExplanationOut])
+def list_component_explanations(
+    component_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> list[ExplanationOut]:
+    component = _get_component(component_id)
+    if not component:
+        raise HTTPException(status_code=404, detail="Theory component not found")
+    _ensure_viewable(component.course_id, current_user)
+    _ensure_standard_explanation(component)
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                _EXPLANATION_SELECT
+                + " WHERE e.component_id = CAST(:cid AS uuid)"
+                + " ORDER BY (e.kind = 'standard') DESC, e.created_at ASC"
+            ),
+            {"cid": component_id},
+        ).fetchall()
+        return [_row_to_explanation_out(row) for row in rows]
+    finally:
+        session.close()
+
+
+@router.post("/theory-components/{component_id}/explanations", response_model=ExplanationOut)
+def create_component_explanation(
+    component_id: str,
+    body: ExplanationCreateRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> ExplanationOut:
+    component = _get_component(component_id)
+    if not component:
+        raise HTTPException(status_code=404, detail="Theory component not found")
+    # 独自解釈は自分が閲覧できるコンポーネントに追加できる(教員間共有が目的)。
+    _ensure_viewable(component.course_id, current_user)
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                INSERT INTO component_explanations
+                    (component_id, course_id, kind, author_id, title, body,
+                     backing_claims, origin_query_id, shared)
+                VALUES
+                    (CAST(:cid AS uuid), :course_id, 'personal', CAST(:author AS uuid),
+                     :title, :body, CAST(:backing AS jsonb), :origin, :shared)
+                RETURNING id
+            """),
+            {
+                "cid": component_id,
+                "course_id": component.course_id,
+                "author": current_user["id"],
+                "title": body.title or "",
+                "body": body.body or "",
+                "backing": json.dumps(body.backing_claims or [], ensure_ascii=False),
+                "origin": body.origin_query_id or "",
+                "shared": bool(body.shared),
+            },
+        ).fetchone()
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to create explanation for %s", component_id)
+        raise HTTPException(status_code=500, detail="Failed to create explanation")
+    finally:
+        session.close()
+    explanation_id = str(row[0])
+    _record_review_event(
+        "explanation", explanation_id, "", "teacher_review_required", current_user.get("id"),
+        {"action": "create", "component_id": component_id},
+    )
+    out = _get_explanation_out(explanation_id)
+    if not out:
+        raise HTTPException(status_code=500, detail="Failed to load explanation")
+    return out
+
+
+@router.patch("/explanations/{explanation_id}", response_model=ExplanationOut)
+def patch_explanation(
+    explanation_id: str,
+    body: ExplanationPatchRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> ExplanationOut:
+    ctx = _explanation_context(explanation_id)
+    if not ctx:
+        raise HTTPException(status_code=404, detail="Explanation not found")
+    _component_id, course_id, author_id, _shared, old_review_status = ctx
+    is_admin = current_user.get("role") == ROLE_SYSTEM_ADMIN
+    if not is_admin and author_id != current_user.get("id"):
+        raise HTTPException(status_code=403, detail="Only the author or an admin can edit this explanation")
+    if body.review_status is not None and body.review_status not in _EXPLANATION_REVIEW_STATUSES:
+        raise HTTPException(status_code=422, detail="Invalid review_status")
+
+    sets = ["updated_at = now()"]
+    params: dict[str, Any] = {"id": explanation_id}
+    if body.title is not None:
+        sets.append("title = :title")
+        params["title"] = body.title
+    if body.body is not None:
+        sets.append("body = :body")
+        params["body"] = body.body
+    if body.backing_claims is not None:
+        sets.append("backing_claims = CAST(:backing AS jsonb)")
+        params["backing"] = json.dumps(body.backing_claims, ensure_ascii=False)
+    if body.shared is not None:
+        sets.append("shared = :shared")
+        params["shared"] = bool(body.shared)
+    if body.review_status is not None:
+        sets.append("review_status = :review_status")
+        params["review_status"] = body.review_status
+
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text(f"UPDATE component_explanations SET {', '.join(sets)} WHERE id = CAST(:id AS uuid)"),
+            params,
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to patch explanation %s", explanation_id)
+        raise HTTPException(status_code=500, detail="Failed to update explanation")
+    finally:
+        session.close()
+
+    if body.review_status is not None and body.review_status != old_review_status:
+        _record_review_event(
+            "explanation", explanation_id, old_review_status, body.review_status, current_user.get("id"),
+        )
+    out = _get_explanation_out(explanation_id)
+    if not out:
+        raise HTTPException(status_code=404, detail="Explanation not found")
+    return out
+
+
+# --- Phase 1: 承認の重み -----------------------------------------------------
+
+
+@router.post("/explanations/{explanation_id}/endorse", response_model=ExplanationOut)
+def endorse_explanation(
+    explanation_id: str,
+    body: EndorsementRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> ExplanationOut:
+    ctx = _explanation_context(explanation_id)
+    if not ctx:
+        raise HTTPException(status_code=404, detail="Explanation not found")
+    _component_id, course_id, _author_id, _shared, _review_status = ctx
+    _ensure_viewable(course_id, current_user)
+    level = (body.level or "endorsed").strip().lower()
+    if level not in _ENDORSEMENT_LEVELS:
+        raise HTTPException(status_code=422, detail="Invalid endorsement level")
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO component_endorsements
+                    (explanation_id, endorser_id, level, expertise_tag, note, revoked, updated_at)
+                VALUES
+                    (CAST(:eid AS uuid), CAST(:uid AS uuid), :level, :tag, :note, FALSE, now())
+                ON CONFLICT (explanation_id, endorser_id)
+                DO UPDATE SET level = EXCLUDED.level,
+                              expertise_tag = EXCLUDED.expertise_tag,
+                              note = EXCLUDED.note,
+                              revoked = FALSE,
+                              updated_at = now()
+            """),
+            {
+                "eid": explanation_id,
+                "uid": current_user["id"],
+                "level": level,
+                "tag": body.expertise_tag or "",
+                "note": body.note or "",
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to endorse explanation %s", explanation_id)
+        raise HTTPException(status_code=500, detail="Failed to endorse")
+    finally:
+        session.close()
+    _record_review_event(
+        "endorsement", explanation_id, "", level, current_user.get("id"),
+        {"action": "endorse", "expertise_tag": body.expertise_tag or ""},
+    )
+    out = _get_explanation_out(explanation_id)
+    if not out:
+        raise HTTPException(status_code=404, detail="Explanation not found")
+    return out
+
+
+@router.delete("/explanations/{explanation_id}/endorse", response_model=ExplanationOut)
+def revoke_endorsement(
+    explanation_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> ExplanationOut:
+    ctx = _explanation_context(explanation_id)
+    if not ctx:
+        raise HTTPException(status_code=404, detail="Explanation not found")
+    session = _pg_session()
+    try:
+        # 承認取り消しは行削除ではなく revoked=TRUE(履歴を残す原則)。
+        result = session.execute(
+            sa_text("""
+                UPDATE component_endorsements SET revoked = TRUE, updated_at = now()
+                WHERE explanation_id = CAST(:eid AS uuid) AND endorser_id = CAST(:uid AS uuid) AND NOT revoked
+                RETURNING id
+            """),
+            {"eid": explanation_id, "uid": current_user["id"]},
+        ).fetchone()
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to revoke endorsement on %s", explanation_id)
+        raise HTTPException(status_code=500, detail="Failed to revoke endorsement")
+    finally:
+        session.close()
+    if result:
+        _record_review_event(
+            "endorsement", explanation_id, "endorsed", "revoked", current_user.get("id"),
+            {"action": "revoke"},
+        )
+    out = _get_explanation_out(explanation_id)
+    if not out:
+        raise HTTPException(status_code=404, detail="Explanation not found")
+    return out
+
+
+@router.get("/explanations/{explanation_id}/endorsements")
+def list_endorsements(
+    explanation_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    ctx = _explanation_context(explanation_id)
+    if not ctx:
+        raise HTTPException(status_code=404, detail="Explanation not found")
+    _component_id, course_id, _author_id, _shared, _review_status = ctx
+    _ensure_viewable(course_id, current_user)
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT en.id, en.explanation_id, en.endorser_id, COALESCE(u.display_name, ''),
+                       en.level, en.expertise_tag, en.note, en.created_at
+                FROM component_endorsements en
+                LEFT JOIN users u ON u.id = en.endorser_id
+                WHERE en.explanation_id = CAST(:eid AS uuid) AND NOT en.revoked
+                ORDER BY en.created_at ASC
+            """),
+            {"eid": explanation_id},
+        ).fetchall()
+    finally:
+        session.close()
+    endorsements = [
+        EndorsementOut(
+            id=str(r[0]),
+            explanation_id=str(r[1]),
+            endorser_id=str(r[2]),
+            endorser_name=str(r[3] or ""),
+            level=str(r[4] or "endorsed"),
+            expertise_tag=str(r[5] or ""),
+            note=str(r[6] or ""),
+            created_at=_iso(r[7]),
+        )
+        for r in rows
+    ]
+    summary = _endorsement_summary_for(explanation_id)
+    return {
+        "explanation_id": explanation_id,
+        "endorsements": [e.model_dump() for e in endorsements],
+        "summary": summary,
+        "label": _endorsement_label(summary),
+    }
+
+
+# --- Phase 4: 引用と共有の可視化 ---------------------------------------------
+
+
+@router.post("/explanations/{explanation_id}/cite")
+def cite_explanation(
+    explanation_id: str,
+    citing_course_id: str = Body(..., embed=True),
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    ctx = _explanation_context(explanation_id)
+    if not ctx:
+        raise HTTPException(status_code=404, detail="Explanation not found")
+    _component_id, _course_id, author_id, shared, _review_status = ctx
+    # 共有されている、または自分の説明のみ引用できる。
+    if not shared and author_id != current_user.get("id") and current_user.get("role") != ROLE_SYSTEM_ADMIN:
+        raise HTTPException(status_code=403, detail="This explanation is not shared")
+    _ensure_editable(citing_course_id, current_user)
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                INSERT INTO component_citations (explanation_id, citing_course_id, citing_user_id)
+                VALUES (CAST(:eid AS uuid), :course_id, CAST(:uid AS uuid))
+                RETURNING id
+            """),
+            {"eid": explanation_id, "course_id": citing_course_id, "uid": current_user["id"]},
+        ).fetchone()
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to cite explanation %s", explanation_id)
+        raise HTTPException(status_code=500, detail="Failed to cite explanation")
+    finally:
+        session.close()
+    _record_review_event(
+        "citation", explanation_id, "", "cited", current_user.get("id"),
+        {"action": "cite", "citing_course_id": citing_course_id},
+    )
+    return {"citation_id": str(row[0]), "explanation_id": explanation_id, "citing_course_id": citing_course_id}
+
+
+@router.get("/courses/{course_id}/sharing-dashboard")
+def sharing_dashboard(
+    course_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """引用数・承認の厚みの集団集計(個人追跡ではなく集計)。"""
+    _ensure_viewable(course_id, current_user)
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                _EXPLANATION_SELECT
+                + " WHERE e.course_id = :course_id"
+                + " ORDER BY COALESCE(s.endorser_count, 0) DESC, COALESCE(c.cnt, 0) DESC"
+            ),
+            {"course_id": course_id},
+        ).fetchall()
+    finally:
+        session.close()
+    explanations = [_row_to_explanation_out(row) for row in rows]
+    totals = {
+        "explanation_count": len(explanations),
+        "shared_count": sum(1 for e in explanations if e.shared),
+        "endorsed_count": sum(1 for e in explanations if e.endorsement_summary.get("endorser_count", 0) > 0),
+        "citation_total": sum(e.citation_count for e in explanations),
+    }
+    return {"course_id": course_id, "totals": totals, "explanations": [e.model_dump() for e in explanations]}
+
+
+# --- Phase 3: 質問 → コンポーネント候補 → 教員確定 -----------------------------
+
+
+def _claims_for_course(course_id: str, current_user: dict, limit: int = 100) -> list[dict]:
+    """コースの資料に紐づく theory_claims を候補母集団として取得する。"""
+    course_data = (
+        get_viewable_course_data(current_user["id"], course_id)
+        or _system_admin_course_data(course_id)
+        or {}
+    )
+    document_ids: list[str] = []
+    material_ids: list[str] = []
+    for source in course_data.get("sources", []) if isinstance(course_data, dict) else []:
+        if isinstance(source, dict) and source.get("document_id"):
+            document_ids.append(str(source["document_id"]))
+        if isinstance(source, dict) and source.get("material_id"):
+            material_ids.append(str(source["material_id"]))
+    session = _pg_session()
+    try:
+        if material_ids:
+            mid_placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
+            mid_rows = session.execute(
+                sa_text(
+                    f"SELECT DISTINCT document_id FROM chunks "
+                    f"WHERE material_id IN ({mid_placeholders}) AND document_id IS NOT NULL"
+                ),
+                {f"mid_{i}": m for i, m in enumerate(material_ids)},
+            ).fetchall()
+            document_ids.extend(str(r[0]) for r in mid_rows if r[0])
+        document_ids = list(dict.fromkeys(document_ids))
+        if not document_ids:
+            return []
+        placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
+        params = {f"doc_{i}": d for i, d in enumerate(document_ids)}
+        params["limit"] = limit
+        rows = session.execute(
+            sa_text(
+                f"SELECT id, text FROM theory_claims "
+                f"WHERE document_id IN ({placeholders}) AND review_status != 'rejected' "
+                f"ORDER BY updated_at DESC LIMIT :limit"
+            ),
+            params,
+        ).fetchall()
+        return [{"id": str(r[0]), "text": str(r[1] or "")} for r in rows]
+    finally:
+        session.close()
+
+
+def _insert_candidate_component(course_id: str, name: str, component_type: str, summary: str, user_id: str) -> str:
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                INSERT INTO theory_components
+                    (course_id, name, component_type, summary, status, review_status, created_by)
+                VALUES
+                    (:course_id, :name, :component_type, :summary, 'candidate', 'teacher_review_required', CAST(:created_by AS uuid))
+                RETURNING id
+            """),
+            {
+                "course_id": course_id,
+                "name": name,
+                "component_type": component_type,
+                "summary": summary,
+                "created_by": user_id,
+            },
+        ).fetchone()
+        session.commit()
+        return str(row[0])
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to insert candidate component")
+        raise HTTPException(status_code=500, detail="Failed to insert candidate component")
+    finally:
+        session.close()
+
+
+@router.post("/theory-components/candidates/from-query")
+def create_candidates_from_query(
+    body: CandidateFromQueryRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """受講者質問 + AI 回答からコンポーネント候補を生成する(§5)。
+
+    すべて candidate / teacher_review_required 状態で保存する。
+    claim 紐づけの最終確定は必ず教員(ここでは confirmed=False の候補に留める)。
+    """
+    _ensure_editable(body.course_id, current_user)
+    existing_claims = _claims_for_course(body.course_id, current_user, limit=max(1, min(body.max_claims, 300)))
+    result = generate_component_candidates(body.question, body.answer_text, existing_claims)
+
+    created: list[dict] = []
+    for candidate in result.components:
+        component_id = _insert_candidate_component(
+            body.course_id, candidate.name, candidate.component_type, candidate.summary, current_user["id"],
+        )
+        # AI 提示の claim 候補は confirmed=False(教員が確定するまで候補扱い)。
+        backing = [
+            {
+                "claim_id": link.claim_id,
+                "reason": link.reason,
+                "confidence": link.confidence,
+                "confirmed": False,
+            }
+            for link in candidate.backing_claims
+        ]
+        session = _pg_session()
+        try:
+            exp_row = session.execute(
+                sa_text("""
+                    INSERT INTO component_explanations
+                        (component_id, course_id, kind, author_id, title, body,
+                         backing_claims, origin_query_id, review_status, shared)
+                    VALUES
+                        (CAST(:cid AS uuid), :course_id, 'personal', CAST(:author AS uuid),
+                         :title, :body, CAST(:backing AS jsonb), :origin, 'teacher_review_required', FALSE)
+                    RETURNING id
+                """),
+                {
+                    "cid": component_id,
+                    "course_id": body.course_id,
+                    "author": current_user["id"],
+                    "title": candidate.name,
+                    "body": candidate.explanation_body or candidate.summary,
+                    "backing": json.dumps(backing, ensure_ascii=False),
+                    "origin": body.origin_query_id or "",
+                },
+            ).fetchone()
+            session.commit()
+        except Exception:
+            session.rollback()
+            logger.exception("Failed to create candidate explanation")
+            raise HTTPException(status_code=500, detail="Failed to create candidate explanation")
+        finally:
+            session.close()
+        explanation_id = str(exp_row[0])
+        _record_review_event(
+            "explanation", explanation_id, "", "teacher_review_required", current_user.get("id"),
+            {"action": "candidate_from_query", "origin_query_id": body.origin_query_id or ""},
+        )
+        created.append({
+            "component_id": component_id,
+            "explanation_id": explanation_id,
+            "name": candidate.name,
+            "component_type": candidate.component_type,
+            "summary": candidate.summary,
+            "reason": candidate.reason,
+            "confidence": candidate.confidence,
+            "backing_claims": backing,
+        })
+    return {"course_id": body.course_id, "candidates": created, "claims_considered": len(existing_claims)}

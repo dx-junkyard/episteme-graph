@@ -259,6 +259,8 @@ class LearningChatRequest(BaseModel):
     action: str | None = None
     support_action: str | None = None
     support_context: dict | None = None
+    position_anchor: dict | None = None  # L2: クライアントの現在位置 {segment_id, scroll_offset}
+    intent_mode: str | None = None  # "on_path"(本筋維持) | "explore"(寄り道) | "casual"(気軽に話せる先生) — 送信時の意図
     chunk_id: str | None = None
     element_id: str | None = None
     element_type: str | None = None
@@ -277,6 +279,20 @@ class LearningSupportOriginOut(BaseModel):
     topic_id: str
     topic_title: str
     chapter_title: str = ""
+    segment_id: int = 0      # L2 位置・復帰: 復帰先セグメント
+    scroll_offset: int = 0   # L2 位置・復帰: 復帰先スクロール量
+
+
+class SourceTierItem(BaseModel):
+    """回答の根拠1件の格付け（L1 信頼性レイヤー）。"""
+    index: int = 0    # 連番出典 [出典N]（本文マーカーと対応）
+    chunk_id: str = ""  # 該当チャンク（ポップアップで全文取得）
+    source_title: str = ""
+    tier: str = "out_of_source"  # approved | source | out_of_source
+    score: float = 0.0
+    quote: str = ""   # 根拠本文の抜粋（出典カードの引用）
+    meta: str = ""    # 出典メタ（ファイル名/節など）
+    origin: str = "other_material"  # course_material（このコースの教材）| other_material（別の資料）
 
 
 class LearningChatResponse(BaseModel):
@@ -286,6 +302,15 @@ class LearningChatResponse(BaseModel):
     status_label: str | None = None
     origin: LearningSupportOriginOut | None = None
     next_actions: list[LearningSupportNextAction] = []
+    # --- 学習者体験レイヤー(B層) Stage M ---
+    sources: list[SourceTierItem] = []          # L1: 各根拠の tier
+    overall_tier: str | None = None             # L1: 回答全体の格（最弱根拠に集約）
+    # 回答内容が「教材(このコース)」「別の資料」「出典を追えないモデル生成」のどれに
+    # 基づくか。tier（教員承認状況）とは別軸の分類。RAG応答のみ設定（意図分類・前提知識
+    # 確認等のシステム応答では None のまま）。
+    content_grounding: str | None = None        # course_material | other_material | model_generated
+    position_anchor: dict | None = None         # L2: 復帰位置アンカー
+    mock: bool = False                          # 🚧 mock 由来データを含むか（UI バッジ用）
 
 
 class LearningChatHistoryResponse(BaseModel):
