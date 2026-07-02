@@ -64,10 +64,13 @@ episteme-graph/
 │   │   ├── extractor.py / embedder.py / chat.py / lecture.py / tts.py
 │   │   ├── llm.py / config.py / storage.py / postgres.py / db.py / models.py
 │   │   ├── schema_registry.py / meta_analyzer.py / simulator.py / reextractor.py
-│   │   ├── theory_components.py / isom.py / harvester.py / batch.py
-│   │   └── document_pipeline/    # Agent パイプライン オーケストレータ
+│   │   ├── theory_components.py / component_candidates.py / isom.py / harvester.py / batch.py
+│   │   ├── learning_experience.py / learning_support_agent.py / personas.py
+│   │   ├── document_pipeline/    # Agent パイプライン オーケストレータ（revision/ を含む）
+│   │   ├── graphs/               # 学生向け/教員向けグラフ組み立て（student_graph / teacher_graph）
+│   │   └── tension/              # TensionMiningAgent（prefilter / agent / worker など, B層）
 │   ├── cartridges/               # ドメインカートリッジ（particle_physics）
-│   ├── db/                       # SQL マイグレーション（init.sql, 002〜019）
+│   ├── db/                       # SQL マイグレーション（init.sql, 002〜022）
 │   └── tests/                    # pytest（FastAPI / core）
 │
 ├── src/episteme_graph/agents/    # PDF解析 Agent 群（→ pipeline/agents.md）
@@ -87,9 +90,11 @@ episteme-graph/
 - ユーザー・認証・セッション
 - 教材（`documents`）メタデータ、テキストチャンク本文 + 埋め込みベクトル（`chunks.embedding`）
 - 学習者状態（習得・つまずき・誤解概念）、コース（`learning_courses`）、対話履歴
+- 学習者体験の関心痕跡（`interest_traces` — 質問・寄り道・誤答・違和感(tension)候補, B層）
 - コースビルダーセッション、講義スクリプト/音声キャッシュ
 - スキーマ進化（`schema_*`, `schema_proposals`, `reextraction_jobs`）
 - 理論コンポーネント・理論操作グラフ（`theory_*`）
+- 承認・共有レイヤー（`component_explanations` / `component_endorsements` / `component_citations`, C層）
 - Agent パイプライン実行履歴・リビジョン（`document_analysis_runs`）
 
 詳細なテーブル一覧は [データモデル](data-model.md) を参照。
@@ -106,8 +111,8 @@ episteme-graph/
 
 ### GROBID / LLM / TTS（外部・補助）
 - GROBID: PDF → TEI-XML（落ちていても PyMuPDF で継続）
-- LLM: 抽出・RAG・コース生成・講義スクリプト生成（OpenAI / Gemini / Vertex AI）
-- TTS: 講義音声生成（OpenAI tts-1 / Google Cloud TTS）
+- LLM: 抽出・RAG・コース生成・講義スクリプト生成・tension 分類（OpenAI / Gemini / Vertex AI）
+- 音声: TTS 音声生成（OpenAI tts-1 / Google Cloud TTS）と音声文字起こし（Whisper 系, `LLM_TRANSCRIBE_MODEL`）
 
 ---
 
@@ -119,7 +124,9 @@ episteme-graph/
 | RAG チャット | pgvector 検索 + PaperStructure でコンテキストを組み、LLM が回答 | [backend/rag-chat.md](../backend/rag-chat.md) |
 | 動的スキーマ進化 | 未回答クエリから新しい OntologyType/CorePredicate を提案・検証・反映 | [pipeline/schema-evolution.md](../pipeline/schema-evolution.md) |
 | 理論操作グラフ | 導出チェーンから理論の操作構造を 2 層グラフで表現 | [pipeline/theory-graph.md](../pipeline/theory-graph.md) |
-| 学習・講義 | 適応的 RAG 学習 + TTS インタラクティブ講義 | [features/learning.md](../features/learning.md) |
+| 学習・講義 | 適応的 RAG 学習 + TTS インタラクティブ講義 + ハンズフリー音声会話 | [features/learning.md](../features/learning.md) |
+| TensionMiningAgent | 対話ログから「理解した上での引っかかり（tension）」候補を検出し本人が確定 | [backend/rag-chat.md](../backend/rag-chat.md) |
+| 承認・共有レイヤー（C層） | 教員による説明バージョン単位の査読承認と教員間共有 | [features/endorsement-sharing.md](../features/endorsement-sharing.md) |
 | 認証・開示範囲 | JWT + RBAC（STUDENT/TEACHER/SYSTEM_ADMIN）+ グループ + Visibility | [features/auth-visibility.md](../features/auth-visibility.md) |
 
 ---

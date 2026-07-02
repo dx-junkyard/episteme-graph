@@ -43,6 +43,14 @@ ORM 定義は `backend/core/models.py`、スキーマ初期化は `backend/db/in
 | `unanswered_query_logs` | システムが答えられなかった質問（スキーマ進化の入力） |
 | `student_stumble_events` | 学生のつまずきイベント（教員向け分析） |
 
+### 学習者体験・関心痕跡（B層, マイグレーション 020 / 022）
+| テーブル | 役割 |
+|---|---|
+| `interest_traces` | 学習者の問い・寄り道・誤答・違和感（tension）候補の痕跡。`kind`（raw / question / detour / misconception / **tension**）、`status`（open / revisited / resolved / **candidate / dismissed / articulated / connected / abstracted**）、`payload(JSONB)` に tension_type / paraphrase / evidence_quote / confidence / tension_hint / casual などを保持。tension の candidate / dismissed は「問いの軌跡」には出さず、本人向けダイジェスト経由でのみ提示 |
+
+> tension 行は [TensionMiningAgent](../backend/rag-chat.md)（B層, マイグレーション 022）が `status='candidate'` で生成し、
+> 本人の confirm / dismiss を経てのみ確定します。教員へは k-匿名化した集計のみ提示されます。
+
 ### 講義モード
 | テーブル | 役割 |
 |---|---|
@@ -145,6 +153,7 @@ claim 紐づけの最終確定は必ず教員が行い、AI 候補は `backing_c
 | `019_revision_runs.sql` | リビジョンラン（run_type, base_run_id, revision_status; documents.active_analysis_run_id） |
 | `020_interest_trace.sql` | 学習者体験レイヤー(B層) 関心痕跡（interest_traces） |
 | `021_endorsement_sharing.sql` | 承認・共有レイヤー(C層)（component_explanations / component_endorsements / component_citations + 集計ビュー） |
+| `022_tension.sql` | TensionMiningAgent(B層) — `interest_traces` を `kind='tension'` で拡張利用するためのインデックス追加（新規テーブル・新規カラムなし） |
 
 > 注: マイグレーションは `backend/db/*.sql` を正本リファレンスとしつつ、実際の適用は
 > `backend/api/main.py` の `_run_migrations()` に直書きした DDL を起動時に冪等適用する方式です。

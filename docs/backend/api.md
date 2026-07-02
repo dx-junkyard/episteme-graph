@@ -15,7 +15,7 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | `backend/api/dependencies.py` | 認証・RBAC の依存関数（JWT 検証、ロール要求） |
 | `backend/api/schemas.py` | API 固有の Pydantic リクエスト/レスポンスモデル |
 | `backend/api/services.py` | 共通ビジネスロジック（バックグラウンドタスク CRUD、Neo4j ドライバ取得など） |
-| `backend/api/routes/*.py` | 機能別ルーター（auth / learning / admin / lecture / lecture_studio / groups） |
+| `backend/api/routes/*.py` | 機能別ルーター（auth / learning / admin / lecture / lecture_studio / groups / theory_components / cartridges / revisions / error_logs / export）。lecture_studio・theory_components・cartridges・revisions は `admin.py` のルーターに include され `/api/admin` 配下で公開される（`export_artifacts.py` はルーターではなく export のヘルパー） |
 
 > `core/` には FastAPI を import しない方針（テスタビリティ確保）。API 固有モデルは `api/` 側に置きます。
 
@@ -67,6 +67,24 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | POST | `/courses/{cid}/topics/{tid}/chat` | RAG チャット + 誤解検出 | 受講者 |
 | POST | `/courses/{cid}/topics/{tid}/check-question` | 理解度チェック | 受講者 |
 | DELETE | `/courses/{cid}/topics/{tid}/stumble-events` | つまずきログ消去 | 教員 |
+| GET | `/courses/{cid}/source-chunk/{chunk_id}` | 根拠チャンク本文の取得（出典表示・音声会話の教材パネル用） | 受講者 |
+| GET | `/courses/{cid}/interest-traces` | 問いの軌跡（関心痕跡）一覧。tension の candidate/dismissed は含めない | 本人のみ |
+| POST | `/courses/{cid}/interest-traces/{trace_id}/resolve`（`/internalize`） | 痕跡の解決 / 内在化 | 本人のみ |
+| GET | `/courses/{cid}/components/{component_id}/explanations` | 承認済み説明の閲覧（C層の学習者向け窓口） | 受講者 |
+
+#### 違和感（tension）ダイジェスト（B層, マイグレーション 022）
+| メソッド | パス | 説明 | 権限 |
+|---|---|---|---|
+| GET | `/courses/{cid}/tension/digest` | 本人の tension 候補（confidence≥0.55、最大3件。confidence 数値は返さない） | 本人のみ |
+| POST | `/tension/{trace_id}/confirm` | 候補を本人が確定（candidate → open / `learner_text` 付きなら articulated） | 本人のみ |
+| POST | `/tension/{trace_id}/dismiss` | 「違う」と判定（candidate → dismissed。行は削除しない） | 本人のみ |
+| POST | `/tension/{trace_id}/connect` | 確定済み tension をグラフ上の node/edge に接続 | 本人のみ |
+
+#### ハンズフリー音声会話
+| メソッド | パス | 説明 |
+|---|---|---|
+| POST | `/voice/transcribe` | multipart 音声 → `core.llm.transcribe_audio()` で文字起こし（Whisper 系。openai プロバイダのみ） |
+| POST | `/voice/speak` | `{text}` → LaTeX/markdown 記号を除去して `core.tts.generate_tts_audio()` で MP3(base64) |
 
 → RAG の中身は [RAG チャットフロー](rag-chat.md)。学習 UI 側は [学習機能](../features/learning.md)。
 
@@ -87,9 +105,19 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | コース公開/権限 | `GET /courses`, `PUT /courses/{id}/publish`, `GET/POST /courses/{id}/groups`, `DELETE /courses/{id}/groups/{gid}` |
 | ユーザー管理 | `POST /users/student`（TEACHER+）, `POST /users/teacher`（SYSTEM_ADMIN のみ） |
 | スキーマ進化 | `GET/POST /schema/types`, `GET/POST /schema/predicates`, `GET /schema-proposals`, `POST /schema-proposals/analyze`, `PUT /schema-proposals/{id}/approve`（`/approve-with-scope`, `/reject`）, `GET/POST /reextraction-jobs` |
-| タスク/分析 | `GET /tasks/{task_id}`, `GET /courses/{id}/unanswered-queries`, `GET /system/materials-stats`（SYSTEM_ADMIN） |
+| タスク/分析 | `GET /tasks/{task_id}`, `GET /courses/{id}/unanswered-queries`, `GET /system/materials-stats`（SYSTEM_ADMIN）, `GET /interest-dashboard`（関心・tension の k-匿名化集計） |
+| カートリッジ | `GET /cartridges`, `GET /cartridges/{id}`（`/ontology`, `/component-types`, `/relation-types`, `/maturity-levels`, `/support-statuses`）（`routes/cartridges.py`） |
+| リビジョン | `POST/GET /documents/{id}/revisions`, `POST .../revisions/{rid}/run`, `GET .../run-status`, `GET .../report`, `POST .../accept`（`/reject`, `/revise`）（`routes/revisions.py`, マイグレーション 019） |
+| ドキュメント構造/グラフ閲覧 | `GET /documents/{id}/structure`, `GET /documents/{id}/component-graph`, `GET /documents/{id}/chunks/{chunk_id}/claims`, `PATCH /claims/{claim_id}`（`routes/theory_components.py`） |
+| エラーログ | `GET /api/admin/error-logs`（`routes/error_logs.py`。5xx を middleware が記録） |
 
 → スキーマ進化の流れは [動的スキーマ進化](../pipeline/schema-evolution.md)。管理 UI 側は [管理機能](../features/admin.md)。
+
+### エクスポート（`routes/export.py`）
+| メソッド | パス | 説明 |
+|---|---|---|
+| POST | `/api/courses/{course_id}/export-bundle` | コース一式のエクスポートバンドル生成 |
+| POST | `/api/documents/{document_id}/export-bundle` | ドキュメント一式のエクスポートバンドル生成 |
 
 ### Lecture Studio `/api/admin`（`routes/lecture_studio.py`）
 教員向けの講義原稿・音声の事前構築、理論コンポーネント、ドキュメントパイプライン操作。

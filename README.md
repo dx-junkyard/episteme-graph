@@ -1,16 +1,19 @@
 # episteme-graph
 
 大学院生の学習プロセスを支援する知識グラフ管理システム。
-PDF文献から概念・関係性を自動抽出してナレッジグラフを構築し、RAGベースの対話型学習・インタラクティブ講義を実現します。
+PDF文献から概念・主張・数式・関係性を自動抽出してナレッジグラフ／理論操作グラフを構築し、RAGベースの対話型学習・インタラクティブ講義・ハンズフリー音声会話を実現します。
 
+> **詳細ドキュメント:** 設計・動作解説は [docs/](docs/README.md) にまとまっています
+> （アーキテクチャ / データモデル / API / PDF解析パイプライン / 機能解説）。
 
 ## コンセプト
 
-研究者・大学院生が直面する「散在する先行研究の統合」「前提知識の体系的習得」という課題を解決するため、次の3層で設計されています。
+研究者・大学院生が直面する「散在する先行研究の統合」「前提知識の体系的習得」という課題を解決するため、次の層で設計されています。
 
-1. **知識の構造化** — PDFをアップロードするだけで概念グラフが自動生成される
-2. **適応的学習** — 習得状態を追跡し、前提知識に応じた問いかけで理解を深める
+1. **知識の構造化（A層）** — PDFをアップロードするだけで、概念・主張・数式・導出を PDF解析エージェントパイプラインが構造化し、概念グラフ・理論操作グラフを自動生成する
+2. **適応的学習（B層）** — 習得状態・関心痕跡・違和感（tension）を追跡し、前提知識に応じた問いかけで理解を深める
 3. **没入型講義** — TTS音声＋カラオケ式ハイライトで、論文をセミナー形式に変換する
+4. **承認・共有（C層）** — 教員が説明バージョン単位で査読承認し、教員間で解釈を共有する
 
 ## 技術スタック
 
@@ -18,11 +21,13 @@ PDF文献から概念・関係性を自動抽出してナレッジグラフを�
 |---|---|
 | フロントエンド | Vanilla JS SPA + nginx |
 | APIサーバー | FastAPI (Python 3.11) |
-| RDB + ベクトル検索 | PostgreSQL 16 + pgvector (cosine, 次元数は `LLM_EMBEDDING_DIM` で設定) |
+| RDB + ベクトル検索 | PostgreSQL 16 + pgvector (cosine, 次元数は `LLM_EMBEDDING_DIM`、既定 3072) |
 | グラフDB | Neo4j 5（概念グラフ走査専用） |
 | オブジェクトストレージ | MinIO（S3互換） |
-| LLM | OpenAI API または Google Gemini API（`LLM_PROVIDER` で切替） |
-| TTS 音声合成 | OpenAI TTS API (tts-1) |
+| PDF構造解析 | GROBID（TEI-XML）／フォールバックで PyMuPDF |
+| LLM | OpenAI API または Google Gemini / Vertex AI（`LLM_PROVIDER` で切替） |
+| TTS 音声合成 | OpenAI TTS (tts-1) または Google Cloud Text-to-Speech |
+| 音声文字起こし | OpenAI Whisper 系（`LLM_TRANSCRIBE_MODEL`、ハンズフリー音声会話用） |
 | 認証 | JWT (HS256) + bcrypt |
 
 ## セットアップ
@@ -50,6 +55,10 @@ docker compose logs -f api-server
 > **ネットワーク設計:** 外部に公開されるポートは `frontend:3000` (Nginx) のみです。
 > `api-server` や各種データベースへの直接アクセスは Docker 内部ネットワーク経由のみで行われます。
 
+> **PostgreSQL について:** ベースの `docker-compose.yml` には `postgres` サービスが含まれません。
+> 本番ではマネージド PostgreSQL を `DB_HOST` で参照し、ローカル開発では
+> `docker-compose.local.yml` の `postgres`（pgvector/pgvector:pg16）を併用します。
+
 ### アクセス先（本番 / 共通）
 
 | サービス | URL |
@@ -57,9 +66,9 @@ docker compose logs -f api-server
 | 学習UI | http://localhost:3000 |
 | 管理UI | http://localhost:3000/admin.html |
 
-### ローカル開発（ngrok + デバッグポート公開）
+### ローカル開発（postgres + ngrok + デバッグポート公開）
 
-開発時は `docker-compose.local.yml` を併用することで、DBクライアントや ngrok トンネルが利用できます。
+開発時は `docker-compose.local.yml` を併用することで、postgres コンテナ・DBクライアント・ngrok トンネルが利用できます。
 
 #### 事前準備
 
@@ -89,6 +98,7 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
 | ngrok Web UI | http://localhost:4040 |
 | Neo4j Browser | http://localhost:7474 |
 | MinIO コンソール | http://localhost:9001 |
+| PostgreSQL | localhost:5432（psql / TablePlus など） |
 
 > **セキュリティ注意:** `api-server` のポート（8001）はローカル開発時も直接公開されません。
 > API へのアクセスは必ず Nginx（3000番）経由で行ってください。
@@ -102,19 +112,23 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
 
 ### 1. 学習UI（学生向け）
 
-3パネルレイアウト（コース一覧・チャット・詳細）で学習を進めます。
+3パネルレイアウト（学習パス・チャット・コンテキスト/進捗/出典）で学習を進めます。
+→ 詳細: [docs/features/learning.md](docs/features/learning.md)
 
-- **RAGチャット** — pgvector検索で関連チャンクを取得し、LLMが回答
-- **誤解検出** — 応答に「訂正」「間違い」が含まれると自動記録
-- **学習進捗トラッキング** — 習得概念・学習中概念・連続学習日数
+- **RAGチャット** — pgvector検索で関連チャンクを取得し、LLMが回答。送信ボタンは「質問」1つに統合
+- **回答の出所表示（content_grounding）** — 回答が「教材」「別の資料」「AIの一般知識」のどれに基づくかをバッジ表示
+- **誤解検出** — 応答に訂正シグナルが含まれると個人レイヤーへ自動記録
 - **前提知識チェック** — コース内 `prerequisites` に基づく適応的ルーティング（未習得なら逆質問）
-- **コース受講登録** — 公開されたテンプレートコースをクローンして自分用インスタンスを作成
+- **学習進捗トラッキング** — 習得概念・学習中概念・問いの軌跡（関心痕跡）
+- **違和感（tension）ダイジェスト** — 対話ログから TensionMiningAgent が「理解した上での引っかかり」候補を検出し、本人の確定（そう、これ / 違う）を経て問いの軌跡に昇格。教員へは k-匿名化集計のみ
+- **ハンズフリー音声会話** — 🤖 ボタンで「気軽に話せる先生」モード。無音検知で発話を区切り、Whisper文字起こし → カジュアル対話（`intent_mode='casual'`）→ TTS読み上げのループ
+- **コース受講登録** — 公開されたテンプレートコースへの受講登録（マスターと個人進捗を分離）
 
 #### インタラクティブ・レクチャーモード
 
 論文チャンクをセミナー形式の音声講義に変換する没入型学習機能。
 
-- TTS音声（tts-1）＋カラオケ風ワードハイライト
+- TTS音声（OpenAI tts-1 / Google Cloud TTS）＋カラオケ風ワードハイライト
 - 数式のLaTeX表示と音声読み上げテキスト自動生成
 - 習得状態に基づく適応的シーケンス（既知チャンクのスキップ・簡易版変換）
 - **中断チャット** — 再生を一時停止して質問 → コンテキスト保持で回答 → 再開
@@ -124,15 +138,21 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
 ### 2. PDF → ナレッジグラフ パイプライン
 
 ```
-PDF アップロード
-  → PyMuPDF テキスト抽出
-  → LLM 仮説駆動型分析 → PaperStructure 生成
+PDF アップロード → MinIO 保存
+  → GROBID TEI-XML 解析（利用不可時は PyMuPDF フォールバック）
+  → PDF解析エージェントパイプライン（src/episteme_graph/agents/, 20超のステージ）
+     文書構造復元 → 主張（claim）の採否・atomic 化 → 数式の意味・導出チェーン
+     → 中心命題の再構成 → DSL 接続 → 再利用可能コンポーネント → 理論操作グラフ
   → テキストチャンク → PostgreSQL pgvector（次元数は `LLM_EMBEDDING_DIM` 準拠）
   → 概念ノード・エッジ → Neo4j（REQUIRES / RELATES_TO / CONTAINS）
-  → PaperStructure JSON → MinIO（extracted-structures バケット）
+  → 成果物 JSON → MinIO / PostgreSQL
 ```
 
+→ 詳細: [docs/pipeline/overview.md](docs/pipeline/overview.md) / [docs/pipeline/agents.md](docs/pipeline/agents.md)
+
+- **理論操作グラフ（TheoryOperationGraph）** — 導出チェーンから理論の操作構造を main / equation_detail / debug の層で表現。全ノード・エッジにソースバッキング（`source_backed` / `partially_source_backed` / `inferred` / `review_required`）を明示
 - **DSL（SMILES形式）** — 抽象構造を `(varID:OntologyType:value) ==[CorePredicate:verb:polarity]=> (...)` で表現
+- **カートリッジシステム** — ドメイン固有の語彙・検証ルールを JSON で注入（`backend/cartridges/particle_physics/`）
 - **構造的同型性評価** — パターン登録時にバックグラウンドで過去論文群とのクロスドメインマッチングを非同期実行
 - **arXiv ハーベスター** — 商業出版社フィルタリング付きでarXiv論文を自動収集
 - **.isom シリアライズ** — OSLパイプライン連携用の `.isom` ファイル出力
@@ -141,11 +161,14 @@ PDF アップロード
 
 ### 3. 管理UI（教師・管理者向け）
 
+→ 詳細: [docs/features/admin.md](docs/features/admin.md)
+
 #### 教材管理
 
-- PDFアップロード → 非同期バックグラウンドタスクで抽出・グラフ化
-- `GET /api/admin/tasks/{task_id}` でポーリングして進捗確認
-- 教材詳細で抽出された概念グラフ構造を閲覧
+- PDFアップロード → 非同期バックグラウンドタスクで抽出・グラフ化（`GET /api/admin/tasks/{task_id}` でポーリング）
+- 教材詳細で抽出された概念グラフ・理論操作グラフを閲覧
+- 教材・コースの開示範囲（Public / Group / Private）設定
+- **リビジョンラン** — 解析結果の反復改善（audit → proposed → accept/reject、アクティブなランは常に1つ）
 
 #### AI支援コースビルダー
 
@@ -157,10 +180,17 @@ PDF アップロード
 
 教員向けのレクチャー原稿事前構築・編集機能。
 
-- コースに紐づくチャンクに対して**バッチスクリプト生成**（非同期＋ポーリング）
-- AIによるスクリプト書き換え（トーン・難易度・長さ調整）
-- 手動スクリプト保存
-- 全チャンクの**バッチ音声生成**（非同期＋ポーリング）
+- コースに紐づくチャンクへの**バッチスクリプト生成**・**バッチ音声生成**（非同期＋ポーリング）
+- AIによるスクリプト書き換え（トーン・難易度・長さ調整）、手動保存
+- ナレーション/応答ペルソナの設定
+
+#### 理論コンポーネントと承認・共有レイヤー（C層）
+
+- チャンク・コースから再利用可能な理論コンポーネントを抽出・管理
+- 1コンポーネントに複数の**説明バージョン**（標準説明＋教員の独自解釈）を並存
+- 教員による**説明バージョン単位の承認**（endorsement）と教員間の引用・共有ダッシュボード
+- 承認の重みは段階ラベルで表示し、学習者に数値スコアを見せない
+→ 詳細: [docs/features/endorsement-sharing.md](docs/features/endorsement-sharing.md)
 
 #### 動的スキーマ進化
 
@@ -172,20 +202,24 @@ PDF アップロード
 4. 教員が承認 → 新スキーマを `schema_registry` に追加
 5. バックグラウンドで**再抽出ジョブ**を実行し、既存ナレッジグラフを新スキーマで再構築
 
-#### ユーザー管理
+#### グループ・ユーザー管理
 
-- 学生アカウント作成（TEACHER以上）
-- 教師アカウント作成（SYSTEM_ADMINのみ）
+- グループの作成・招待コード・メンバー管理（教材/コースのグループ単位共有）
+- 学生アカウント作成（TEACHER以上）、教師アカウント作成（SYSTEM_ADMINのみ）
+- エラーログ閲覧、関心・違和感の匿名化ダッシュボード
 
 ---
 
-### 4. 認証・ロール管理
+### 4. 認証・ロール・開示範囲
 
 | ロール | 権限 |
 |---|---|
 | STUDENT | 学習UI、チャット、コース受講登録 |
-| TEACHER | 上記＋教材アップロード、コース作成・公開、学生アカウント作成 |
+| TEACHER | 上記＋教材アップロード、コース作成・公開、グループ管理、承認・共有、学生アカウント作成 |
 | SYSTEM_ADMIN | 全権限（教師アカウント作成を含む） |
+
+教材・コースは **Public / Group / Private** の開示範囲を持ちます。
+→ 詳細: [docs/features/auth-visibility.md](docs/features/auth-visibility.md)
 
 ---
 
@@ -205,17 +239,23 @@ episteme-graph/
 │   └── Dockerfile
 ├── backend/
 │   ├── api/
-│   │   ├── main.py            # FastAPI アプリ本体・マイグレーション
+│   │   ├── main.py            # FastAPI アプリ本体・起動時マイグレーション
 │   │   ├── dependencies.py    # 認証依存関係
 │   │   ├── schemas.py         # API固有 Pydantic モデル
 │   │   ├── services.py        # ビジネスロジック共通関数
-│   │   ├── routes/
-│   │   │   ├── auth.py        # /api/auth/*
-│   │   │   ├── learning.py    # /api/learning/*
-│   │   │   ├── admin.py       # /api/admin/*
-│   │   │   ├── lecture.py     # /api/learning/lecture/*
-│   │   │   └── lecture_studio.py  # /api/admin/lecture-studio/*
-│   │   └── Dockerfile
+│   │   └── routes/
+│   │       ├── auth.py        # /api/auth/*
+│   │       ├── learning.py    # /api/learning/*（チャット・tension・voice など）
+│   │       ├── admin.py       # /api/admin/*
+│   │       ├── lecture.py     # /api/learning/lecture/*
+│   │       ├── lecture_studio.py    # /api/admin/...（Lecture Studio）
+│   │       ├── theory_components.py # /api/admin/...（理論コンポーネント・C層承認共有）
+│   │       ├── cartridges.py        # /api/admin/cartridges/*
+│   │       ├── revisions.py         # /api/admin/documents/{id}/revisions/*
+│   │       ├── groups.py            # /api/groups/*, /api/me/*
+│   │       ├── error_logs.py        # /api/admin/error-logs
+│   │       ├── export.py            # /api/courses|documents/{id}/export-bundle
+│   │       └── export_artifacts.py  # export のヘルパー
 │   ├── core/
 │   │   ├── schema.py          # 全 Pydantic モデル（OntologyType, CorePredicate など）
 │   │   ├── schema_registry.py # 動的スキーマ（DBから読み込み・キャッシュ）
@@ -226,99 +266,64 @@ episteme-graph/
 │   │   ├── embedder.py        # pgvector ベクトル保存・検索
 │   │   ├── chat.py            # RAG チャットロジック
 │   │   ├── lecture.py         # レクチャーシーケンス生成・TTS補助
-│   │   ├── llm.py             # LLM アダプタ（OpenAI / Gemini 切替）
+│   │   ├── tts.py             # TTS（OpenAI / Google Cloud）・読み上げテキスト整形
+│   │   ├── llm.py             # LLM アダプタ（OpenAI / Gemini 切替、Whisper 文字起こし）
 │   │   ├── storage.py         # MinIO S3互換ストレージ
+│   │   ├── learning_experience.py   # 学習体験レイヤー（B層）共通ロジック
+│   │   ├── learning_support_agent.py # 学習支援（寄り道・前提復習の構造化）
+│   │   ├── personas.py        # ナレーション/応答ペルソナ
+│   │   ├── theory_components.py     # 理論コンポーネント抽出
+│   │   ├── component_candidates.py  # 質問→コンポーネント候補生成（C層）
+│   │   ├── course_content_builder.py # パイプライン成果物からコース内容生成
+│   │   ├── concept_normalizer.py    # 概念・記号の正規化
+│   │   ├── document_sections.py     # セクション構造復元
+│   │   ├── cartridges.py      # カートリッジのロード
 │   │   ├── batch.py           # 構造的同型性評価バッチ
 │   │   ├── meta_analyzer.py   # 未回答クエリ → スキーマ拡張提案
 │   │   ├── simulator.py       # スキーマ提案の Shadow Testing
 │   │   ├── reextractor.py     # スキーマ更新後の再抽出ワークフロー
 │   │   ├── harvester.py       # arXiv API 連携
 │   │   ├── isom.py            # .isom DSL シリアライズ
-│   │   └── config.py          # 設定管理
-│   ├── db/
-│   │   ├── init.sql           # 初期スキーマ
-│   │   ├── 002_a1_a2_a3.sql   # コースビルダー永続化・受講登録・前提知識
-│   │   ├── 003_unanswered_queries.sql
-│   │   ├── 004_schema_evolution.sql
-│   │   ├── 005_background_tasks.sql
-│   │   ├── 006_lecture_mode.sql
-│   │   └── 007_drop_arxiv_id.sql
-│   └── tests/                 # pytest テスト
-├── docker-compose.yml
+│   │   ├── config.py          # 設定管理
+│   │   ├── document_pipeline/ # Agent パイプライン オーケストレータ（revision/ 含む）
+│   │   ├── graphs/            # 学生向け/教員向けグラフ組み立て
+│   │   └── tension/           # TensionMiningAgent（B層: prefilter/agent/worker …）
+│   ├── cartridges/            # ドメインカートリッジ（particle_physics）
+│   ├── db/                    # SQLマイグレーション（init.sql, 002〜022）
+│   └── tests/                 # pytest テスト（FastAPI / core）
+├── src/
+│   ├── episteme_graph/agents/ # PDF解析エージェント群（document_structure, paper_skeleton,
+│   │                          #  claim_qualification, equation_semantics, derivation_chain,
+│   │                          #  thesis_reconstruction, dsl_linking, component_assembly,
+│   │                          #  component_graph, narrative_annotator, course_mapping …）
+│   └── tests/                 # agents 用 pytest
+├── docs/                      # 設計・動作解説ドキュメント
+├── docker-compose.yml         # 本番 / CI 用ベース
+├── docker-compose.local.yml   # ローカル開発用（postgres, ngrok, デバッグポート）
+├── docker-compose.prod.yml    # 本番補助（ngrok トンネル）
 └── .env.example
 ```
 
-## API エンドポイント一覧
+マイグレーションは `backend/db/`（init.sql 〜 022）。一覧と各テーブルの説明は
+[docs/architecture/data-model.md](docs/architecture/data-model.md) を参照してください。
 
-### 認証 `/api/auth`
+## API エンドポイント概要
 
-| メソッド | パス | 説明 |
+全エンドポイントの一覧・権限は [docs/backend/api.md](docs/backend/api.md) を参照してください。主なグループ:
+
+| グループ | プレフィックス | 内容 |
 |---|---|---|
-| POST | `/register` | ユーザー登録 |
-| POST | `/login` | ログイン（JWTトークン取得） |
-| GET | `/me` | 現在のユーザー情報 |
-
-### 学習 `/api/learning`
-
-| メソッド | パス | 説明 |
-|---|---|---|
-| GET | `/courses` | コース一覧（公開テンプレート含む） |
-| POST | `/courses` | コース新規作成 |
-| GET | `/courses/{id}` | コース詳細 |
-| PUT | `/courses/{id}` | コース更新 |
-| DELETE | `/courses/{id}` | コース削除 |
-| GET | `/courses/{id}/progress` | 学習進捗 |
-| POST | `/courses/{id}/enroll` | 公開コースに受講登録（クローン） |
-| GET | `/courses/{cid}/topics/{tid}/chat` | チャット履歴 |
-| POST | `/courses/{cid}/topics/{tid}/chat` | RAGチャット |
-
-### レクチャーモード `/api/learning/lecture`
-
-| メソッド | パス | 説明 |
-|---|---|---|
-| GET | `/sequence` | レクチャーシーケンス取得 |
-| POST | `/tts` | TTS音声生成 |
-| POST | `/interrupt` | 中断チャット |
-
-### 管理 `/api/admin`
-
-| メソッド | パス | 説明 |
-|---|---|---|
-| POST | `/materials/upload` | PDF教材アップロード（非同期） |
-| GET | `/materials` | 教材一覧 |
-| GET | `/materials/{id}` | 教材詳細（グラフ構造） |
-| GET | `/tasks/{task_id}` | バックグラウンドタスク進捗 |
-| POST | `/course-builder/sessions` | コース構築セッション作成 |
-| GET | `/course-builder/sessions` | セッション一覧 |
-| GET | `/course-builder/sessions/{id}` | セッション取得 |
-| PUT | `/course-builder/sessions/{id}` | セッション更新 |
-| POST | `/course-builder/chat` | コース構築AIチャット |
-| GET | `/courses` | 管理用コース一覧 |
-| GET | `/courses/{id}/draft-format` | コースのドラフト形式取得 |
-| PUT | `/courses/{id}/publish` | コースを学生に公開 |
-| GET | `/courses/{id}/unanswered-queries` | 未回答クエリ一覧 |
-| POST | `/users/student` | 学生アカウント作成 |
-| POST | `/users/teacher` | 教師アカウント作成 |
-| GET | `/schema/types` | OntologyType 一覧 |
-| POST | `/schema/types` | OntologyType 追加 |
-| GET | `/schema/predicates` | CorePredicate 一覧 |
-| POST | `/schema/predicates` | CorePredicate 追加 |
-| GET | `/schema-proposals` | スキーマ拡張提案一覧 |
-| POST | `/schema-proposals/analyze` | 未回答クエリからスキーマ提案を生成 |
-| PUT | `/schema-proposals/{id}/approve` | スキーマ提案を承認 |
-| PUT | `/schema-proposals/{id}/approve-with-scope` | スコープ指定で承認 |
-| PUT | `/schema-proposals/{id}/reject` | スキーマ提案を棄却 |
-| GET | `/reextraction-jobs` | 再抽出ジョブ一覧 |
-
-### Lecture Script Studio `/api/admin`
-
-| メソッド | パス | 説明 |
-|---|---|---|
-| POST | `/lecture-studio/courses/{id}/generate-scripts` | バッチスクリプト生成開始（非同期） |
-| GET | `/lecture-studio/courses/{id}/scripts` | スクリプト一覧 |
-| POST | `/lecture-studio/scripts/{id}/save` | スクリプト手動保存 |
-| POST | `/lecture-studio/scripts/{id}/rewrite` | AIスクリプト書き換え |
-| POST | `/lecture-studio/courses/{id}/generate-audio` | バッチ音声生成開始（非同期） |
+| 認証 | `/api/auth` | register / login / me |
+| 学習 | `/api/learning` | コースCRUD・受講登録・進捗・RAGチャット・理解度チェック・問いの軌跡・tension ダイジェスト（confirm/dismiss/connect）・音声（transcribe/speak）・承認済み説明の閲覧 |
+| レクチャー | `/api/learning/lecture` | 適応的シーケンス・TTS・中断チャット |
+| 管理 | `/api/admin` | 教材管理・コースビルダー・コース公開/権限・ユーザー管理・スキーマ進化・タスク・関心ダッシュボード |
+| Lecture Studio | `/api/admin`（`lecture_studio.py`） | スクリプト/音声のバッチ生成・ペルソナ設定・コース構造編集・ドキュメントパイプライン実行 |
+| 理論コンポーネント / C層 | `/api/admin`（`theory_components.py`） | コンポーネントCRUD・component-graph・説明バージョン・承認（endorse）・引用・共有ダッシュボード |
+| カートリッジ | `/api/admin/cartridges` | オントロジー・コンポーネント型・関係型などの参照 |
+| リビジョン | `/api/admin/documents/{id}/revisions` | リビジョン作成・実行・レポート・承認/棄却 |
+| グループ | `/api/groups`, `/api/me` | グループCRUD・招待コード・メンバー・招待の受諾 |
+| エクスポート | `/api/courses|documents/{id}/export-bundle` | コース/ドキュメントのバンドル出力 |
+| エラーログ | `/api/admin/error-logs` | 5xx エラーの記録参照 |
 
 ## 開発
 
@@ -329,12 +334,18 @@ docker compose up -d --build api-server
 # ログ確認
 docker compose logs -f api-server
 
-# テスト実行（全件）
+# テスト実行（FastAPI / core, 全件）
 cd backend && pytest backend/tests/
 
 # テスト実行（単一ファイル）
 cd backend && pytest backend/tests/test_diff_merge.py -v
+
+# agents（PDF解析パイプライン）のテスト
+pytest src/tests/
 ```
+
+開発ルール（環境変数・Pydanticスキーマ・LLM呼び出し・フロントエンド規約など）は
+[CLAUDE.md](CLAUDE.md) と [docs/](docs/README.md) を参照してください。
 
 ## ライセンス
 
