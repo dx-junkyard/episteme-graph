@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import logging
+import re
 import threading
 import uuid
 from dataclasses import asdict
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy import text as sa_text
 
 from dependencies import _get_current_user
@@ -30,7 +32,11 @@ from schemas import (
 from services import (
     calculate_progress,
     check_prerequisites,
+    confirm_tension_trace,
+    connect_tension_trace,
     detect_and_record_misconception,
+    dismiss_tension_trace,
+    get_tension_digest,
     enroll_user_in_course,
     get_course_chunks_ordered,
     get_course_data,
@@ -54,7 +60,8 @@ from services import (
     user_can_view_course,
 )
 from pydantic import BaseModel
-from core.llm import generate_text, get_llm_params
+from core.llm import generate_text, get_llm_params, transcribe_audio
+from core.tts import generate_tts_audio, strip_text_for_speech
 from core.learning_experience import (
     TIER_OUT_OF_SOURCE,
     aggregate_overall_tier,
@@ -70,6 +77,8 @@ from core.learning_support_agent import (
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
 from core.course_content_builder import build_course_content_background
+from core.tension.prefilter import judge_tension_hint
+from core.tension.worker import maybe_schedule_tension_mining
 
 logger = logging.getLogger(__name__)
 
@@ -660,6 +669,31 @@ def _get_integrated_tutor_system_prompt(domain: str, response_persona: str | Non
 - 教材を参照した場合は、コンテキストに付された番号付き出典マーカー `[出典1]` `[出典2]` … を本文に自然に挿入して言及すること。番号は提示された出典に対応させ、独自の番号や『書籍名』形式は使わないこと。{persona_block}"""
 
 
+def _get_casual_teacher_system_prompt(domain: str, response_persona: str | None = None) -> str:
+    """カジュアル対話モード（気軽に話せる先生）のシステムプロンプトを生成する。
+
+    ハンズフリー音声会話が主用途のため、短い会話調・記号なしの応答を強制する。
+    根拠の一線（教材コンテキスト優先・断定回避）はチューターモードと同じに保つ。
+    """
+    domain_label = domain.strip() if domain.strip() else "このコースの専門分野"
+    persona_instruction = persona_prompt(response_persona, target="response")
+    persona_block = f"\n\n**口調設定:**\n{persona_instruction}" if persona_instruction else ""
+    return f"""あなたは{domain_label}が大好きで、学生と雑談するのが楽しみな「気軽に話せる先生」です。
+研究室の廊下やゼミ後の立ち話のように、教材で扱っている題材について肩の力を抜いて一緒に面白がってください。
+
+**会話のルール:**
+1. 【会話調】音声で読み上げられます。1回の応答は2〜4文の短い話し言葉にしてください。
+   箇条書き・見出し・記号・絵文字は使わないでください。
+2. 【一緒に面白がる】採点や訂正を急がず、学生の言葉をまず受け止めてください。
+   「たしかにそう見えるよね」「いいところに気づいたね」のような相づちから入って構いません。
+3. 【聞き返す】ときどき「きみはどう思う?」「どこが引っかかった?」と軽く聞き返し、
+   学生が自分の言葉で話す余地を残してください。毎回はしつこいので2〜3往復に1回程度。
+4. 【根拠は正直に】提供される「教材からのコンテキスト」があればそれに沿って話してください。
+   教材に無い話題は、想像や一般論であることが伝わる言い方（「たぶん」「一般には」）で話してください。
+5. 【出さないもの】数式の羅列・LaTeX・出典番号マーカー・`[ACTION_BUTTON: ...]` などの
+   システム記法は一切出力しないでください。数式が必要なら言葉で言い換えてください。{persona_block}"""
+
+
 def _generate_graph_element_explanation(
     *,
     user_id: str,
@@ -1180,8 +1214,15 @@ def learning_chat(
         )
         return LearningChatResponse(**result.model_dump(), course_update=graph_response.course_update)
 
+    # カジュアル対話モード（気軽に話せる先生・ハンズフリー音声会話）:
+    # 意図分類（雑談拒否）・前提知識ゲート・誤解検出をバイパスし、RAG検索と
+    # tier 集約（根拠の一線）はそのまま通す。
+    _is_casual = (body.intent_mode or "").strip() == "casual"
+
     # 2. 意図分類（Intent Routing）— UI ボタン由来の型付きアクションは分類を経由しない。
-    intent = _route_for_typed_action(body.support_action) or _classify_intent(body.message, course_title)
+    intent = None if _is_casual else (
+        _route_for_typed_action(body.support_action) or _classify_intent(body.message, course_title)
+    )
 
     # ルート①: 雑談・無関係な質問 → 学習に関する質問を促す
     if intent == "CHIT_CHAT":
@@ -1240,7 +1281,8 @@ def learning_chat(
         )
 
     # 3. Adaptive Routing: 前提知識の自動判定 (ルート③/④の前に実行)
-    prerequisite_intervention = check_prerequisites(
+    # casual モードでは会話を止めない（前提確認の逆質問ゲートを挟まない）。
+    prerequisite_intervention = None if _is_casual else check_prerequisites(
         current_user["id"], course_id, course_data, topic_title, body.message
     )
     if prerequisite_intervention:
@@ -1262,18 +1304,26 @@ def learning_chat(
 
     # 4. RAG: システム全域のチャンクを検索し、コンテキストを構築
     #    search_chunks_with_metadata は各チャンクに tier(L1信頼性) を付与して返す。
+    # このコース自身の教材（material_id）の集合。出典が「教材」か「別の資料」かの分類に使う。
+    course_material_ids = {
+        str(s.get("material_id")) for s in course_data.get("sources", [])
+        if isinstance(s, dict) and s.get("material_id")
+    }
     chunk_results = search_chunks_with_metadata(body.message, top_k=8)
     cited_chunks = []
     cited_sources: list[dict] = []  # L1: 文脈に採用した根拠の tier 一覧
+    has_topic_material = False
     if topic_info:
         topic_material = _topic_student_material(topic_info)
         if topic_material:
+            has_topic_material = True
             cited_chunks.append(f"[現在表示中の教材]\n{topic_material[:5000]}")
     for r in chunk_results:
         if r["score"] >= 0.30:
             _n = len(cited_sources) + 1  # 連番出典 [出典N]（cited_sources と 1 対 1）
             cited_chunks.append(f"[出典{_n}] 『{r['source_title']}』\n{r['text']}")
             _quote = (r.get("text") or "").strip().replace("\n", " ")
+            _origin = "course_material" if r.get("material_id") in course_material_ids else "other_material"
             cited_sources.append({
                 "index": _n,
                 "chunk_id": r.get("id", ""),
@@ -1282,10 +1332,19 @@ def learning_chat(
                 "score": round(float(r.get("score", 0.0)), 3),
                 "quote": (_quote[:80] + "…") if len(_quote) > 80 else _quote,
                 "meta": r.get("source_file") or "",
+                "origin": _origin,
             })
 
     # L1: 回答全体の格を最弱根拠へ安全側集約。採用根拠が無ければ未踏(out_of_source)。
     overall_tier = aggregate_overall_tier([s["tier"] for s in cited_sources])
+    # 回答内容の出所分類（tier=教員承認状況とは別軸）:
+    #   教材(このコース) > 別の資料 > 出典を追えないモデル生成、の優先度で決める。
+    if has_topic_material or any(s["origin"] == "course_material" for s in cited_sources):
+        content_grounding = "course_material"
+    elif cited_sources:
+        content_grounding = "other_material"
+    else:
+        content_grounding = "model_generated"
 
     if cited_chunks:
         context_block = "## 関連する教材のコンテキスト\n" + "\n---\n".join(cited_chunks)
@@ -1295,7 +1354,11 @@ def learning_chat(
 
     # 5. 回答の生成（ルート統合）
     # L1 OutOfSourceGuard: 未踏なら生成前に順序ゲート（断定回避・予想促し）を system へ注入する。
-    _system_prompt = _get_integrated_tutor_system_prompt(domain, response_persona)
+    # casual モードでも guard の注入（振る舞い）は維持する — 気軽さ≠根拠の放棄。
+    if _is_casual:
+        _system_prompt = _get_casual_teacher_system_prompt(domain, response_persona)
+    else:
+        _system_prompt = _get_integrated_tutor_system_prompt(domain, response_persona)
     if overall_tier == TIER_OUT_OF_SOURCE:
         _system_prompt += "\n\n" + out_of_source_guard_instruction()
     messages: list[dict] = [
@@ -1321,12 +1384,14 @@ def learning_chat(
         raise HTTPException(status_code=500, detail=f"Chat failed: {exc}") from exc
 
     # L1 OutOfSourceGuard: 未踏なら断定せず、根拠が弱い旨を先頭に明示する。
-    if overall_tier == TIER_OUT_OF_SOURCE:
+    # casual では可視プレフィックスのみ省略（音声で毎回読み上げると会話が壊れるため）。
+    # tier 自体はレスポンスで返し、UI のバッジ表示で担保する。
+    if overall_tier == TIER_OUT_OF_SOURCE and not _is_casual:
         answer = out_of_source_notice() + "\n\n" + answer
 
-    # 誤解検出（マイルドな表現にも対応）
+    # 誤解検出（マイルドな表現にも対応）。casual では採点・訂正の圧を掛けない。
     course_update = None
-    if topic_info and any(kw in answer for kw in ["訂正", "より正確です", "誤解"]):
+    if not _is_casual and topic_info and any(kw in answer for kw in ["訂正", "より正確です", "誤解"]):
         course_update = detect_and_record_misconception(
             current_user["id"], course_id, course_data, topic_id, body.message, answer
         )
@@ -1341,20 +1406,34 @@ def learning_chat(
     # kind は既存シグナルから決定: 誤解検出→misconception / それ以外→question。
     _trace_kind = "misconception" if course_update else "question"
     _ctx_label = " · ".join([s for s in [support_origin.chapter_title, topic_title] if s])
+    # Stage 0 TensionPrefilter（同期・非LLM・数ms）: ヘッジ/逆接マーカーと直近3往復の
+    # 同語再訪でヒントを立てるだけ。LLM 分類は非同期バッチ（P6: 応答を遅延させない）。
+    _recent_user_texts = [t.get("content", "") for t in body.history if t.get("role") == "user"][-3:]
+    _tension_hint = judge_tension_hint(body.message, _recent_user_texts)
     record_interest_trace(
         current_user["id"], course_id, topic_id,
         kind=_trace_kind,
         text=body.message,
         context_label=_ctx_label,
-        extra_payload={"overall_tier": overall_tier, "position_anchor": position_anchor},
+        extra_payload={
+            "overall_tier": overall_tier,
+            "position_anchor": position_anchor,
+            "tension_hint": _tension_hint,
+            "casual": _is_casual,
+        },
     )
+    # ヒント累積が閾値に達していればバックグラウンドで TensionMiningAgent を起動
+    # （best-effort: 失敗してもチャット応答を止めない）。
+    if _tension_hint:
+        maybe_schedule_tension_mining(current_user["id"], course_id, topic_id)
     # 本文中のドリルダウンマーカーは構造化アクションへ正規化する。
     clean_answer, inline_actions = extract_inline_actions(answer)
 
     # 送信意図で分岐（教材/チャット2区画 UX）:
     #  - on_path : 本筋維持。detour にせず origin/status_label を返さない（フロントは寄り道化しない）
+    #  - casual  : 気軽に話せる先生。detour 化も復帰導線も付けない（会話を UI 遷移で邪魔しない）
     #  - explore : 従来どおり寄り道（detail_explanation, 復帰導線つき）
-    if (body.intent_mode or "").strip() == "on_path":
+    if (body.intent_mode or "").strip() in ("on_path", "casual"):
         result = LearningSupportResult(
             answer=clean_answer,
             mode="normal",
@@ -1375,6 +1454,7 @@ def learning_chat(
         course_update=course_update,
         sources=cited_sources,
         overall_tier=overall_tier,
+        content_grounding=content_grounding,
         position_anchor=position_anchor,
         mock=False,
     )
@@ -1435,6 +1515,155 @@ def internalize_interest_trace_route(
     if not ok:
         raise HTTPException(status_code=400, detail="Could not save internalization")
     return {"ok": True, "trace_id": trace_id}
+
+
+# ---------------------------------------------------------------------------
+# 違和感（tension）— TensionMiningAgent Stage 2: ダイジェスト・本人確定
+# ---------------------------------------------------------------------------
+# 権限: すべて本人（user_id 一致）のみ。教員・管理者は個別行にアクセス不可（P3）。
+
+
+class TensionConfirmRequest(BaseModel):
+    learner_text: str = ""
+
+
+class TensionConnectRequest(BaseModel):
+    component_id: str = ""
+    edge_id: str = ""
+
+
+@router.get("/courses/{course_id}/tension/digest")
+def get_tension_digest_route(
+    course_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """本人の tension 候補ダイジェスト（candidate・confidence>=0.55・新しい順に最大3件）。
+
+    confidence の数値は返さない（学習者に数値スコアを見せない原則の準用）。
+    セッション終了（20分無活動）後の未解析ヒントがあれば、ここで遅延起動する
+    （best-effort・非同期。今回のレスポンスには間に合わなくてよい）。
+    """
+    session = _pg_session()
+    try:
+        topic_rows = session.execute(
+            sa_text("""
+                SELECT DISTINCT topic_id FROM interest_traces
+                WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
+                  AND payload->>'tension_hint' = 'true' AND analyzed_at IS NULL
+            """),
+            {"uid": current_user["id"], "cid": course_id},
+        ).fetchall()
+    except Exception:
+        topic_rows = []
+    finally:
+        session.close()
+    for (tid,) in topic_rows:
+        maybe_schedule_tension_mining(current_user["id"], course_id, tid, session_end_check=True)
+
+    return get_tension_digest(current_user["id"], course_id)
+
+
+@router.post("/tension/{trace_id}/confirm")
+def confirm_tension_route(
+    trace_id: str,
+    body: TensionConfirmRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """候補を本人が引き受ける: candidate → open（learner_text ありなら articulated）。
+
+    違和感を生成するのは人間であり、この操作だけが候補を tension として確定する（P1）。
+    """
+    result = confirm_tension_trace(current_user["id"], trace_id, body.learner_text)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Tension candidate not found")
+    return {"ok": True, **result}
+
+
+@router.post("/tension/{trace_id}/dismiss")
+def dismiss_tension_route(
+    trace_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """本人が「違う」と判定: candidate → dismissed（行は残す。P4）。"""
+    result = dismiss_tension_trace(current_user["id"], trace_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Tension candidate not found")
+    return {"ok": True, **result}
+
+
+# ---------------------------------------------------------------------------
+# ハンズフリー音声会話（カジュアル対話モード用）
+# ---------------------------------------------------------------------------
+
+# アップロード音声の上限（無音区切りの1発話分。長くても数十秒を想定）
+_VOICE_MAX_AUDIO_BYTES = 10 * 1024 * 1024
+
+
+class VoiceSpeakRequest(BaseModel):
+    text: str
+
+
+@router.post("/voice/transcribe")
+async def voice_transcribe_route(
+    audio: UploadFile = File(...),
+    language: str = "ja",
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """音声（1発話分）を Whisper 系モデルでテキストに文字起こしする。
+
+    フロントの無音検知が区切った短い音声チャンクを受ける。openai プロバイダ以外では 503。
+    """
+    data = await audio.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty audio")
+    if len(data) > _VOICE_MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=413, detail="Audio too large")
+    try:
+        text = transcribe_audio(data, audio.filename or "audio.webm", language=language)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("voice transcribe failed")
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {exc}") from exc
+    return {"text": text}
+
+
+@router.post("/voice/speak")
+def voice_speak_route(
+    body: VoiceSpeakRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """回答テキストを TTS で MP3(base64) に変換する（ハンズフリー会話の読み上げ用）。
+
+    読み上げ前に LaTeX・markdown 記号・出典マーカーを除去する。
+    """
+    spoken = strip_text_for_speech(body.text)
+    if not spoken:
+        raise HTTPException(status_code=400, detail="Nothing to speak")
+    try:
+        audio_bytes = generate_tts_audio(spoken)
+    except Exception as exc:
+        logger.exception("voice speak failed")
+        raise HTTPException(status_code=500, detail=f"TTS failed: {exc}") from exc
+    if audio_bytes is None:
+        raise HTTPException(status_code=503, detail="TTS provider is not available")
+    return {"audio_base64": base64.b64encode(audio_bytes).decode("ascii"), "format": "mp3"}
+
+
+@router.post("/tension/{trace_id}/connect")
+def connect_tension_route(
+    trace_id: str,
+    body: TensionConnectRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """確定済み tension をグラフ上の node/edge に接続する（後続フェーズ）。"""
+    result = connect_tension_trace(
+        current_user["id"], trace_id,
+        component_id=body.component_id, edge_id=body.edge_id,
+    )
+    if result is None:
+        raise HTTPException(status_code=400, detail="Could not connect tension trace")
+    return {"ok": True, **result}
 
 
 @router.get("/courses/{course_id}/components/{component_id}/explanations")

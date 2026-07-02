@@ -70,9 +70,20 @@
       </div>
       <div class="ia">
         <button class="lecture-toggle-btn" id="lecture-toggle" title="レクチャーモード切替">&#127897; レクチャー</button>
-        <input type="text" id="chat-input" placeholder="質問を入力してください…（Enterで現モード送信）">
-        <button id="send-btn" title="現トピックの教材を主な根拠に回答（本筋を維持）">📘 教材に沿って質問</button>
-        <button id="send-explore" title="教材から離れて自由に質問・探索（寄り道）">🔍 自由に質問・探索</button>
+        <input type="text" id="chat-input" placeholder="質問を入力してください…（Enterで送信）">
+        <button id="send-btn" title="質問する（回答が教材由来か自動で判定し、出典タブと回答欄に表示します）">質問</button>
+        <button id="voice-mode-btn" class="voice-mode-btn" title="気軽に話せる先生とハンズフリーで会話">🤖</button>
+      </div>
+
+      <!-- ハンズフリー音声会話パネル（気軽に話せる先生） -->
+      <div class="voice-panel" id="voice-panel">
+        <div class="voice-panel-head">
+          <span class="voice-panel-title">🤖 気軽に話せる先生</span>
+          <span class="voice-status" id="voice-status">準備中…</span>
+          <button class="voice-close" id="voice-close" title="音声会話を終了">&times;</button>
+        </div>
+        <div class="voice-transcript" id="voice-transcript"></div>
+        <div class="voice-material" id="voice-material"></div>
       </div>
     </div>
 

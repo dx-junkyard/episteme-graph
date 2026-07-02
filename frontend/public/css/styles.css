@@ -4780,3 +4780,125 @@ body {
 }
 .src-popup-body { padding: 12px; line-height: 1.6; }
 .src-popup-section { font-size: 11px; color: var(--lx-ink-faint, #8a93a1); margin-bottom: 8px; }
+
+/* ============ ハンズフリー音声会話（気軽に話せる先生） ============ */
+.voice-mode-btn {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 1px solid var(--color-border-secondary);
+  background: var(--color-background-secondary);
+  font-size: 17px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all 0.15s;
+}
+.voice-mode-btn:hover {
+  background: var(--color-background-info);
+  border-color: var(--color-border-info);
+}
+.voice-mode-btn.active {
+  background: #fee2e2;
+  border-color: #ef4444;
+  animation: mic-pulse 1.2s ease-in-out infinite;
+}
+
+.voice-panel {
+  display: none;
+  border-top: 1px solid var(--color-border-secondary);
+  background: var(--color-background-secondary);
+  padding: 10px 14px;
+  max-height: 40%;
+  overflow-y: auto;
+}
+.voice-panel.on { display: block; }
+
+.voice-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.voice-panel-title { font-size: 13px; font-weight: 600; }
+.voice-status {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  padding: 2px 10px;
+  border-radius: 10px;
+  background: var(--color-background-primary);
+  border: 1px solid var(--color-border-secondary);
+}
+.voice-status.listening { color: #16a34a; border-color: #16a34a; }
+.voice-status.thinking { color: var(--color-text-info); border-color: var(--color-border-info); }
+.voice-status.speaking { color: #d97706; border-color: #d97706; }
+.voice-close {
+  margin-left: auto;
+  appearance: none; border: none; background: none; cursor: pointer;
+  font-size: 18px; line-height: 1; color: var(--color-text-secondary);
+}
+
+.voice-transcript {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  min-height: 16px;
+  margin-bottom: 6px;
+  white-space: pre-wrap;
+}
+
+.voice-material {
+  display: none;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 8px;
+  background: var(--color-background-primary);
+  padding: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.voice-material.on { display: block; }
+.voice-material .voice-material-title {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  margin-bottom: 6px;
+}
+
+/* ============ 回答の出所分類（教材 / 別の資料 / モデル生成） ============ */
+.grounding-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 10px;
+  white-space: nowrap;
+  margin-right: 8px;
+}
+.grounding-badge.grounding-course { background: var(--lx-approved-bg); color: #0f6d3d; }
+.grounding-badge.grounding-other  { background: var(--lx-source-bg);   color: #8a5e0a; }
+.grounding-badge.grounding-model  { background: var(--lx-oos-bg);      color: #5b6472; }
+
+.lx-grounding-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.lx-grounding-banner.grounding-course { background: var(--lx-approved-bg); color: #0f6d3d; }
+.lx-grounding-banner.grounding-other  { background: var(--lx-source-bg);   color: #8a5e0a; }
+.lx-grounding-banner.grounding-model  { background: var(--lx-oos-bg);      color: #5b6472; }
+
+.lx-src-badges { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.lx-origin-badge {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  background: var(--color-background-secondary, #eef1f5);
+  color: var(--color-text-secondary, #5b6472);
+}

@@ -332,6 +332,84 @@ A層（`src/episteme_graph/agents/` の生成パイプライン、export_validat
 `POST /explanations/{id}/cite`、`GET /courses/{course_id}/sharing-dashboard`。
 学習者向けは `GET /api/learning/courses/{course_id}/components/{component_id}/explanations`（承認済みのみ）。
 
+### TensionMiningAgent（B層, migration 022）
+
+学習者との対話ログから「未理解（gap）」ではなく「理解した上での引っかかり（tension）」の
+**候補**を抽出し、学習者本人の確定を経て `interest_traces` に記録する（新テーブルなし・
+`kind='tension'` と status 語彙の拡張のみ）。実装は `backend/core/tension/`
+（prefilter / agent / input_builder / prompt / llm_client / schema / validator / repair / worker / examples）。
+
+**設計原則（不変条項）**: P1 違和感を生成するのは人間（LLM 出力は常に `status='candidate'`、
+本人 confirm なしに確定しない）/ P2 断定しない（`paraphrase` は推量形を validator でハード強制）/
+P3 監視にしない（本人のみ可視、教員へは k-匿名化集約のみ、評価利用禁止）/
+P4 情報を落とさない（dismiss は `status='dismissed'` で保持、分類不能は `unclassified`）/
+P5 evidence-based（逐語 `evidence_quote`・`reason`・`confidence` 必須）/
+P6 チャット応答を遅延させない（同期パスは非 LLM prefilter のみ、LLM は非同期バッチ）/
+P7 演技化させない（バッジ・ランキング化しない）。
+
+**ステージ構成**: Stage 0 `prefilter.judge_tension_hint()`（同期・非LLM、`payload.tension_hint` 付与）
+→ Stage 1 `TensionMiningAgent.run()`（非同期バッチ・LLM 1コール/窓、validator/repair 付き、
+2回修復失敗は `unclassified`/`confidence=0.0`/`payload.repair_failed=true` で1行保持）
+→ Stage 2 学習者ダイジェスト & 確定 API（confirm → `open`/`articulated`、dismiss → `dismissed`、
+`theory_review_events` に `entity_type='tension'` で監査記録）
+→ Stage 3 `aggregate_interest_dashboard` の tension 集計
+（対象は本人が引き受けた status のみ、n<3 セル非表示の k-匿名化）。
+
+**Worker**（`backend/core/tension/worker.py`）: `threading.Thread` 方式。トリガーは
+未解析 `tension_hint` 累積5件 or セッション終了（20分無活動）。冪等性は raw 痕跡の
+`analyzed_at` で管理。コスト上限は `TENSION_MAX_CALLS_PER_SESSION`（既定3）/
+`TENSION_MAX_CALLS_PER_DAY`（既定10）、モデルは fast tier 既定（`TENSION_LLM_MODEL` で上書き）。
+
+**API**（`backend/api/routes/learning.py`）:
+`GET /api/learning/courses/{course_id}/tension/digest`（本人の candidate・confidence≥0.55・最大3件、
+confidence 数値は返さない）、`POST /api/learning/tension/{trace_id}/confirm`（body: `learner_text?`）、
+`POST /api/learning/tension/{trace_id}/dismiss`、`POST /api/learning/tension/{trace_id}/connect`。
+すべて本人のみ（教員・管理者は個別行にアクセス不可）。
+
+### レクチャー音声キャッシュの判定（`backend/api/routes/lecture.py`）
+
+`student_material`/`content`/`summary` はコースビルダーが生成するほぼ全トピックに
+設定されるため、これらの有無だけで「ドラフト専用トピック（`topic:` セグメント再生、
+音声キャッシュ不可）」を判定してはならない（実チャンク教材を持つトピックまで
+`get_topic_audio_status`/`get_lecture_sequence` が無効化してしまう）。判定は
+`_topic_has_linkable_material(topic, course_data)`（`topic.material_chunk_ids` または
+`course_data.sources[].material_id` の有無）を必ず経由し、実チャンク教材が無い
+トピックに限ってドラフト（`_build_topic_draft_segment`）へフォールバックすること。
+
+### 質問の出所分類（教材/別の資料/モデル生成）
+
+学習チャットの「教材に沿って質問」「自由に質問・探索」ボタンは廃止し「質問」1つに
+統合済み（`intent_mode` の on_path/explore 自体は寄り道復帰導線のため内部的に残り、
+単一ボタンは Enter キーと同じ判定＝寄り道中なら explore、そうでなければ on_path で送る）。
+代わりに **回答が何に基づくか**（`content_grounding`: `course_material` | `other_material` |
+`model_generated`）を RAG 実行後に判定し、回答バブルと出典タブに提示する。
+`tier`（教員承認状況）とは別軸: `origin` はチャンクの `material_id` がそのコースの
+`sources[].material_id` に含まれるか（教材）否か（別の資料）で決め、`cited_sources` が
+完全に空なら `model_generated`。判定は `search_chunks_with_metadata` が返す
+`material_id` を使うため、この関数のクエリを変更する際は `material_id` の SELECT を
+落とさないこと。
+
+### カジュアル対話モード + ハンズフリー音声会話（B層）
+
+学習チャットに「気軽に話せる先生」モード（`intent_mode='casual'`）を追加。
+雑談拒否（CHIT_CHAT ルート）・前提知識ゲート・誤解検出をバイパスし、短い会話調
+（音声向け・箇条書き/ドリルダウンマーカーなし）で応答する。**根拠の一線は維持**:
+RAG 検索・tier 集約・OutOfSourceGuard の system 注入はそのまま
+（可視の注意書きプレフィックスのみ casual では省略、tier はレスポンスで返す）。
+interest_traces 記録と tension プレフィルタも通常どおり効く（payload に `casual: true`）。
+
+**音声 API**（`backend/api/routes/learning.py`）:
+- `POST /api/learning/voice/transcribe` — multipart 音声 → `core.llm.transcribe_audio()`
+  （OpenAI Whisper 系、`LLM_TRANSCRIBE_MODEL` 既定 `whisper-1`。openai プロバイダのみ）
+- `POST /api/learning/voice/speak` — `{text}` → `core.tts.generate_tts_audio()` で MP3(base64)。
+  読み上げ前に LaTeX・markdown 記号・出典マーカーを除去（`_spoken_text_for_voice`）
+
+**フロント**（`app.js`）: 通常学習画面の入力欄に 🤖 ボタン。押すとハンズフリーモード:
+MediaRecorder + WebAudio 無音検知（発話後 ~1.4 秒の沈黙）で区切って自動送信 →
+casual チャット → 応答を TTS 再生（再生中はマイク停止）→ 再生終了で聞き取り再開。
+応答の第1根拠チャンク（`sources[0].chunk_id`）を `/source-chunk/` から取得し
+ボイスパネルに教材表示する。
+
 
 ## 開発ルール
 

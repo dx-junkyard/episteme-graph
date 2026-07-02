@@ -128,6 +128,10 @@ CorePredicate の定義は `backend/core/schema.py` を直接読んで最新の�
 | `LLM_ANALYSIS_MODEL` | テキスト生成に使用するモデル名 | `o3-mini` |
 | `LLM_EMBEDDING_MODEL` | Embedding に使用するモデル名 | `text-embedding-3-large` |
 | `LLM_EMBEDDING_DIM` | Embedding ベクトル次元数（pgvector スキーマと一致が必要） | `3072` |
+| `TENSION_MAX_CALLS_PER_SESSION` | TensionMiningAgent: 1セッションあたり LLM コール上限 | `3` |
+| `TENSION_MAX_CALLS_PER_DAY` | TensionMiningAgent: 1ユーザー1日あたり LLM コール上限 | `10` |
+| `TENSION_LLM_MODEL` | TensionMiningAgent が使うモデル（空なら fast tier に委譲） | （空） |
+| `LLM_TRANSCRIBE_MODEL` | 音声文字起こしモデル（ハンズフリー会話、openai プロバイダのみ） | `whisper-1` |
 
 > **禁止**: `google-cloud-aiplatform` (Vertex AI) を新規パイプラインコードで使用すること。
 > Google の LLM を使う場合は必ず `LLM_PROVIDER=gemini` (`google-generativeai`) を指定すること。

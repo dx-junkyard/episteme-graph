@@ -873,8 +873,20 @@ def _run_migrations() -> None:
             GROUP BY explanation_id
         """))
 
+        # Migration 022: TensionMiningAgent (B層) — 違和感候補のインデックス（列追加ゼロ）
+        # interest_traces を kind='tension' で拡張利用する。候補は status='candidate' で
+        # 保存され、学習者本人の confirm/dismiss でのみ状態遷移する（P1/P4）。
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_interest_traces_kind_status ON interest_traces(kind, status)"
+        ))
+        session.execute(sa_text("""
+            CREATE INDEX IF NOT EXISTS idx_interest_traces_candidate
+                ON interest_traces(user_id, course_id)
+                WHERE kind = 'tension' AND status = 'candidate'
+        """))
+
         session.commit()
-        logger.info("Migrations (002-021) applied successfully.")
+        logger.info("Migrations (002-022) applied successfully.")
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema

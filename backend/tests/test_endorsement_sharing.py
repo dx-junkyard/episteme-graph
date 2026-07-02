@@ -58,7 +58,7 @@ class TestMigration021:
         assert "component_explanations" in source
         assert "component_endorsements" in source
         assert "component_citations" in source
-        assert "Migrations (002-021) applied successfully." in source
+        assert "Migrations (002-022) applied successfully." in source
 
 
 class TestRoutes:

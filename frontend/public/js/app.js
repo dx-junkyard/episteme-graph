@@ -23,7 +23,10 @@
     // ── 学習者体験レイヤー(B層) Stage M ──
     lastSources: [],        // L1: 直近回答の根拠 tier 一覧 [{source_title, tier, score}]
     lastOverallTier: null,  // L1: 直近回答全体の格
+    lastGrounding: null,    // 直近回答の出所分類: course_material | other_material | model_generated
     interestTraces: null,   // L3: UnfinishedQuestionBox（mock）
+    tensionDigest: null,    // 違和感ダイジェスト {items: [...]}（TensionMiningAgent Stage 2）
+    tensionDeferred: {},    // [あとで] で今セッション中は隠す trace_id の集合
   };
 
   // 🚧 Mock 検知: API レスポンスが mock データを含むか（_mock / mock の両方を許容）。
@@ -49,6 +52,23 @@
     var m = tierMeta(tier);
     return '<span class="tier-badge ' + m.cls + '">' + escHtml(m.label) + "</span>";
   }
+
+  // 回答の出所分類（教材 / 別の資料 / 出典を追えないモデル生成）の表示メタ。
+  // tier（教員承認状況）とは別軸: 「そもそも教材が使われたか」を示す。
+  var GROUNDING_META = {
+    course_material: { label: "教材から回答", cls: "grounding-course", icon: "📘" },
+    other_material: { label: "別の資料から回答", cls: "grounding-other", icon: "📄" },
+    model_generated: { label: "AIの一般知識（出典なし）", cls: "grounding-model", icon: "💭" },
+  };
+  function groundingMeta(g) {
+    return GROUNDING_META[g] || null;
+  }
+  function groundingBadge(g) {
+    var m = groundingMeta(g);
+    if (!m) return "";
+    return '<span class="grounding-badge ' + m.cls + '">' + m.icon + " " + escHtml(m.label) + "</span>";
+  }
+  var ORIGIN_LABEL = { course_material: "教材", other_material: "別の資料" };
 
   function learningSupportStorageKey() {
     return "eg_learning_support:" + (state.courseId || "");
@@ -717,11 +737,14 @@
       html += renderNextActions(msg.next_actions);
     }
 
-    // L1 信頼性: 回答全体の格（tier）を末尾に明示する（実データ）。
-    if (msg && msg.overall_tier) {
+    // 回答内容の出所（教材/別の資料/モデル生成）と L1 信頼性（tier）を末尾に明示する。
+    if (msg && (msg.content_grounding || msg.overall_tier)) {
       var bar = '<div class="answer-tier-bar">';
-      bar += '<span class="answer-tier-label">この回答の根拠の格</span>';
-      bar += tierBadge(msg.overall_tier);
+      if (msg.content_grounding) bar += groundingBadge(msg.content_grounding);
+      if (msg.overall_tier) {
+        bar += '<span class="answer-tier-label">この回答の根拠の格</span>';
+        bar += tierBadge(msg.overall_tier);
+      }
       if (msg.mock) bar += mockFlag("この回答に mock データが含まれます");
       bar += "</div>";
       html += bar;
@@ -1114,6 +1137,78 @@
         openInternalizationInput(this);
       });
     });
+    // 違和感ダイジェスト: [そう、これ] [違う] [あとで]（確定は本人のみ。P1）
+    el.querySelectorAll("[data-tension-confirm]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        openTensionConfirmInput(this.getAttribute("data-tension-confirm"));
+      });
+    });
+    el.querySelectorAll("[data-tension-dismiss]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        dismissTension(this.getAttribute("data-tension-dismiss"));
+      });
+    });
+    el.querySelectorAll("[data-tension-defer]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        state.tensionDeferred[this.getAttribute("data-tension-defer")] = true;
+        renderProgressTab();  // 今セッション中は隠すだけ（candidate のまま保持）
+      });
+    });
+  }
+
+  // [そう、これ] の後にだけ任意の一行編集欄を出す（空のままでも open で確定できる）。
+  function openTensionConfirmInput(traceId) {
+    var card = document.querySelector('[data-tension-card="' + traceId + '"]');
+    if (!card) return;
+    var actions = card.querySelector(".lx-trace-actions");
+    if (!actions) return;
+    var box = document.createElement("div");
+    box.className = "lx-why-input";
+    box.innerHTML =
+      '<textarea rows="2" placeholder="自分の言葉で言い直すと?（任意・空のままでも確定できます）"></textarea>' +
+      '<div class="lx-why-actions"><button class="lx-ghost lx-tension-save">この違和感を引き受ける</button>' +
+      '<button class="lx-ghost secondary lx-tension-cancel">やめる</button></div>';
+    actions.replaceWith(box);
+    var ta = box.querySelector("textarea");
+    ta.focus();
+    box.querySelector(".lx-tension-cancel").addEventListener("click", function () {
+      renderProgressTab();
+    });
+    box.querySelector(".lx-tension-save").addEventListener("click", async function () {
+      await confirmTension(traceId, (ta.value || "").trim());
+    });
+  }
+
+  async function confirmTension(traceId, learnerText) {
+    try {
+      await apiFetch(
+        "/learning/tension/" + encodeURIComponent(traceId) + "/confirm",
+        { method: "POST", body: JSON.stringify({ learner_text: learnerText || "" }) }
+      );
+    } catch (_) { /* best-effort */ }
+    await loadTensionDigest();
+    loadInterestTraces();  // 確定した違和感は問いの軌跡に現れる
+  }
+
+  async function dismissTension(traceId) {
+    try {
+      await apiFetch(
+        "/learning/tension/" + encodeURIComponent(traceId) + "/dismiss",
+        { method: "POST", body: JSON.stringify({}) }
+      );
+    } catch (_) { /* best-effort */ }
+    await loadTensionDigest();
+    renderProgressTab();
+  }
+
+  async function loadTensionDigest() {
+    if (!state.courseId) return;
+    try {
+      var res = await apiFetch("/learning/courses/" + state.courseId + "/tension/digest");
+      state.tensionDigest = res.ok ? await res.json() : { items: [] };
+    } catch (_) {
+      state.tensionDigest = { items: [] };
+    }
   }
 
   // 痕跡を「解決済み」にして問いの軌跡を再取得する（Stage 3）。
@@ -1180,6 +1275,18 @@
     if (!overall) {
       html += '<div class="ps"><p class="lx-note" style="margin:0">質問するとこのタブに、回答が依拠した根拠と信頼性（tier）が表示されます。</p></div>';
     } else {
+      // ⓪ 出所バナー: 教材 / 別の資料 / 出典を追えないモデル生成。
+      var gMeta = groundingMeta(state.lastGrounding);
+      if (gMeta) {
+        var gNote = state.lastGrounding === "course_material"
+          ? "このコースの教材に基づいて回答しています。"
+          : state.lastGrounding === "other_material"
+            ? "このコース以外の資料（システム内の他教材）を根拠に回答しています。"
+            : "教材の根拠が見つからず、AIの一般知識のみで回答しています。内容の裏づけはありません。";
+        html += '<div class="ps" style="border:none;padding:0 0 8px">';
+        html += '<div class="lx-grounding-banner ' + gMeta.cls + '">' + gMeta.icon +
+          ' <span><b>' + escHtml(gMeta.label) + '</b> — ' + gNote + '</span></div></div>';
+      }
       // ① 全体格バナー（overall_tier）
       var oc = tierCls(overall);
       var note = (overall === "out_of_source")
@@ -1228,7 +1335,9 @@
           var c = tierCls(s.tier);
           html += '<div class="lx-src ' + c + '"><div class="lx-src-top">';
           html += '<span class="lx-src-title">' + escHtml(s.source_title || "不明な教材") + '</span>';
-          html += '<span class="lx-badge ' + c + '">' + escHtml(TIER_LABEL[s.tier] || s.tier) + '</span></div>';
+          html += '<span class="lx-src-badges">';
+          if (s.origin) html += '<span class="lx-origin-badge">' + escHtml(ORIGIN_LABEL[s.origin] || s.origin) + '</span>';
+          html += '<span class="lx-badge ' + c + '">' + escHtml(TIER_LABEL[s.tier] || s.tier) + '</span></span></div>';
           if (s.meta) html += '<div class="lx-src-meta">' + escHtml(s.meta) +
             (s.tier === "source" ? "（未承認）" : "") + '</div>';
           if (s.tier === "out_of_source") {
@@ -1282,17 +1391,47 @@
 
   // ============ 問いの軌跡（資産化レイヤー）— 進捗タブで使用 ============
   // 表示・「解決済みにする」は interest_traces の実データ（Stage 3）。
-  var TRACE_KIND_LABEL = { question: "問い", detour: "寄り道", misconception: "誤答", raw: "記録" };
-  var TRACE_KIND_CLS = { question: "q", detour: "detour", misconception: "mis", raw: "q" };
+  var TRACE_KIND_LABEL = { question: "問い", detour: "寄り道", misconception: "誤答", raw: "記録", tension: "違和感" };
+  var TRACE_KIND_CLS = { question: "q", detour: "detour", misconception: "mis", raw: "q", tension: "q" };
   var STATUS_META = {
     open: { label: "未解決", cls: "open" },
     revisited: { label: "再訪推奨", cls: "revisit" },
     resolved: { label: "解決済み", cls: "resolved" },
+    articulated: { label: "言語化済み", cls: "open" },
+    connected: { label: "接続済み", cls: "resolved" },
+    abstracted: { label: "抽象化済み", cls: "resolved" },
   };
+
+  // 違和感ダイジェストカード（TensionMiningAgent Stage 2）。
+  // 会話中の割り込み表示はしない: セッション末尾または次回ログイン時に控えめに1枚だけ。
+  // 件数バッジ・ランキング化はしない（P7）。
+  function renderTensionDigestCard() {
+    var digest = state.tensionDigest;
+    if (!digest || !Array.isArray(digest.items)) return "";
+    var item = null;
+    for (var i = 0; i < digest.items.length; i++) {
+      if (!state.tensionDeferred[digest.items[i].trace_id]) { item = digest.items[i]; break; }
+    }
+    if (!item) return "";
+    var html = '<div class="lx-revisit lx-tension" data-tension-card="' + escHtml(item.trace_id) + '">';
+    html += '<div class="k">引っかかりの気配' + (item.context_label ? ' · ' + escHtml(item.context_label) : '') + '</div>';
+    html += '<div class="h">今日の会話で、こんな引っかかりがあったかもしれません</div>';
+    html += '<div class="s">『' + escHtml(item.evidence_quote || "") + '』' +
+      (item.paraphrase ? '——' + escHtml(item.paraphrase) : '') + '</div>';
+    html += '<div class="lx-trace-actions" style="margin-top:8px">';
+    html += '<button class="lx-ghost" data-tension-confirm="' + escHtml(item.trace_id) + '">そう、これ</button>';
+    html += '<button class="lx-ghost secondary" data-tension-dismiss="' + escHtml(item.trace_id) + '">違う</button>';
+    html += '<button class="lx-ghost secondary" data-tension-defer="' + escHtml(item.trace_id) + '">あとで</button>';
+    html += '</div></div>';
+    return html;
+  }
 
   function renderProblemTrails() {
     var data = state.interestTraces;
     var html = '<div class="progress-head" style="margin:18px 0 8px"><h3 style="font-size:14px">問いの軌跡</h3></div>';
+
+    // 違和感ダイジェスト（候補は本人の確定までダイジェスト経由でのみ提示する）
+    html += renderTensionDigestCard();
 
     if (!data) {
       html += '<p class="lx-note" style="margin-top:0">読み込み中…</p>';
@@ -1376,6 +1515,10 @@
       state.interestTraces = res.ok ? await res.json() : { traces: [] };
     } catch (_) {
       state.interestTraces = { traces: [] };
+    }
+    // 違和感ダイジェスト（次回ログイン時の提示。会話への割り込みはしない）
+    if (state.tensionDigest === null) {
+      await loadTensionDigest();
     }
     renderProgressTab();
     updateProgressTabDot();
@@ -1617,7 +1760,8 @@
 
   // ── Send Message ───────────────────────────────────────────────────
   async function sendMessage(text, actionPayload) {
-    if (!text || state.sending || !state.currentTopicId) return;
+    if (!text || state.sending || !state.currentTopicId) return null;
+    let respData = null;  // 音声会話モードが answer/sources を使うため応答を返す
 
     state.chatMessages.push({ role: "user", content: text });
     state.sending = true;
@@ -1645,6 +1789,7 @@
       });
       if (res.ok) {
         const data = await res.json();
+        respData = data;
         setLearningSupportFromResponse(data);
         // L2 寄り道先ラベル: 寄り道に入ったら、その入口となった問い本文を origin に添える
         // （status_label のような汎用語ではなく、何に寄り道したかを実体で示す）。
@@ -1655,6 +1800,7 @@
         // L1/L2: tier・根拠・位置アンカーを保持（Stage M は mock を含む）。
         state.lastSources = data.sources || [];
         state.lastOverallTier = data.overall_tier || null;
+        state.lastGrounding = data.content_grounding || null;
         state.chatMessages.push({
           role: "assistant",
           content: data.answer,
@@ -1664,6 +1810,7 @@
           origin: data.origin || null,
           // ── B層 Stage M ──
           overall_tier: data.overall_tier || null,
+          content_grounding: data.content_grounding || null,
           sources: data.sources || [],
           position_anchor: data.position_anchor || null,
           mock: isMock(data),
@@ -1699,6 +1846,7 @@
     state.sending = false;
     renderChat();
     renderRightPanel();  // L1: 直近回答の tier を Sources タブへ反映
+    return respData;
   }
 
   // ── Tab Switching ──────────────────────────────────────────────────
@@ -1715,13 +1863,16 @@
   }
 
   // ── Input handling ─────────────────────────────────────────────────
+  // 「教材に沿って質問」「自由に質問・探索」の2ボタンは廃止し「質問」1つに統合。
+  // 事前に意図を選ばせず、常に RAG 検索を行った上で回答が何に基づくか
+  // （教材/別の資料/モデル生成）を事後に判定してバッジ表示する（groundingBadge 参照）。
+  // intent_mode 自体（on_path/explore）は寄り道の復帰導線のため内部的に残し、
+  // 現在すでに寄り道中なら explore として送る（Enter キーと同じ判定）。
   function initInput() {
     const input = document.getElementById("chat-input");
-    const btn = document.getElementById("send-btn");          // 教材に沿って質問（本筋維持）
-    const exploreBtn = document.getElementById("send-explore"); // 自由に質問・探索（寄り道）
+    const btn = document.getElementById("send-btn");          // 質問（統合ボタン）
     const clearBtn = document.getElementById("chat-clear-btn");
 
-    // intent_mode を付けて送信する。on_path は寄り道状態を畳んでから送る。
     function sendWith(mode) {
       var text = input.value.trim();
       if (!text) return;
@@ -1729,17 +1880,284 @@
       sendMessage(text, { intent_mode: mode });
     }
 
-    btn.addEventListener("click", function () { sendWith("on_path"); });
-    if (exploreBtn) exploreBtn.addEventListener("click", function () { sendWith("explore"); });
+    function sendCurrent() { sendWith(Session.inDetour() ? "explore" : "on_path"); }
+
+    btn.addEventListener("click", sendCurrent);
     if (clearBtn) clearBtn.addEventListener("click", clearChatHistory);
+    // 🤖 気軽に話せる先生（ハンズフリー音声会話）
+    const voiceBtn = document.getElementById("voice-mode-btn");
+    if (voiceBtn) voiceBtn.addEventListener("click", toggleVoiceMode);
+    const voiceClose = document.getElementById("voice-close");
+    if (voiceClose) voiceClose.addEventListener("click", stopVoiceMode);
 
     input.addEventListener("keydown", function (e) {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
         e.preventDefault();
-        // Enter＝現在のモードで送信（寄り道中なら explore、そうでなければ on_path）
-        sendWith(Session.inDetour() ? "explore" : "on_path");
+        sendCurrent();
       }
     });
+  }
+
+  // ============ ハンズフリー音声会話（気軽に話せる先生・casual モード） ============
+  // MediaRecorder + WebAudio の無音検知で発話を区切り、Whisper 文字起こし →
+  // casual チャット → 応答を TTS 再生、のループを回す。再生中はマイクを止める。
+  // 応答の第1根拠チャンクをパネルに教材表示する（会話しながら教材が見える）。
+  const VOICE_SILENCE_MS = 1400;      // 発話後この長さの沈黙で区切って送信
+  const VOICE_MIN_SPEECH_MS = 400;    // これ未満の発話は物音とみなして破棄
+  const VOICE_RMS_THRESHOLD = 0.015;  // 発話とみなす音量（RMS）
+  const VOICE_IDLE_RESET_MS = 60000;  // 無発話でセグメントを作り直す（メモリ抑制）
+
+  const voiceState = {
+    active: false,
+    stream: null,
+    recorder: null,
+    chunks: [],
+    mimeType: "",
+    audioCtx: null,
+    analyser: null,
+    vadTimer: null,
+    speechDetected: false,
+    speechStart: 0,
+    silenceStart: 0,
+    segmentStart: 0,
+    busy: false,   // 文字起こし〜応答再生中（この間は区切り検知を止める）
+    player: null,
+  };
+
+  function setVoiceStatus(kind, label) {
+    const el = document.getElementById("voice-status");
+    if (!el) return;
+    el.className = "voice-status" + (kind ? " " + kind : "");
+    el.textContent = label;
+  }
+
+  function setVoiceTranscript(text) {
+    const el = document.getElementById("voice-transcript");
+    if (el) el.textContent = text || "";
+  }
+
+  function toggleVoiceMode() {
+    if (voiceState.active) stopVoiceMode();
+    else startVoiceMode();
+  }
+
+  async function startVoiceMode() {
+    if (!state.currentTopicId) {
+      alert("トピックを選択してから音声会話を開始してください。");
+      return;
+    }
+    if (!navigator.mediaDevices || !window.MediaRecorder) {
+      alert("このブラウザは録音に対応していません。Chrome または Edge をお試しください。");
+      return;
+    }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (_) {
+      alert("マイクの使用が許可されていません。ブラウザのアドレスバーからマイクの許可を確認してください。");
+      return;
+    }
+    voiceState.stream = stream;
+    voiceState.mimeType = pickVoiceMimeType();
+    voiceState.active = true;
+    voiceState.busy = false;
+
+    // 無音検知用の AnalyserNode（録音とは独立に音量だけを監視する）
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    voiceState.audioCtx = new AudioCtx();
+    const source = voiceState.audioCtx.createMediaStreamSource(stream);
+    voiceState.analyser = voiceState.audioCtx.createAnalyser();
+    voiceState.analyser.fftSize = 2048;
+    source.connect(voiceState.analyser);
+
+    const panel = document.getElementById("voice-panel");
+    if (panel) panel.classList.add("on");
+    const btn = document.getElementById("voice-mode-btn");
+    if (btn) btn.classList.add("active");
+    setVoiceTranscript("");
+    setVoiceStatus("listening", "聞いています… 話し終えると自動で送信されます");
+
+    startVoiceSegment();
+    voiceState.vadTimer = setInterval(voiceVadTick, 100);
+  }
+
+  function stopVoiceMode() {
+    voiceState.active = false;
+    if (voiceState.vadTimer) { clearInterval(voiceState.vadTimer); voiceState.vadTimer = null; }
+    if (voiceState.recorder && voiceState.recorder.state !== "inactive") {
+      voiceState.recorder.onstop = null;  // 終了時の残りセグメントは送信しない
+      try { voiceState.recorder.stop(); } catch (_) { /* noop */ }
+    }
+    voiceState.recorder = null;
+    if (voiceState.stream) {
+      voiceState.stream.getTracks().forEach(function (t) { t.stop(); });
+      voiceState.stream = null;
+    }
+    if (voiceState.audioCtx) { try { voiceState.audioCtx.close(); } catch (_) { /* noop */ } voiceState.audioCtx = null; }
+    if (voiceState.player) { try { voiceState.player.pause(); } catch (_) { /* noop */ } voiceState.player = null; }
+    const panel = document.getElementById("voice-panel");
+    if (panel) panel.classList.remove("on");
+    const material = document.getElementById("voice-material");
+    if (material) { material.classList.remove("on"); material.innerHTML = ""; }
+    const btn = document.getElementById("voice-mode-btn");
+    if (btn) btn.classList.remove("active");
+  }
+
+  function pickVoiceMimeType() {
+    const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
+    for (const c of candidates) {
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(c)) return c;
+    }
+    return "";
+  }
+
+  function startVoiceSegment() {
+    if (!voiceState.active || !voiceState.stream) return;
+    voiceState.chunks = [];
+    voiceState.speechDetected = false;
+    voiceState.speechStart = 0;
+    voiceState.silenceStart = 0;
+    voiceState.segmentStart = Date.now();
+    const opts = voiceState.mimeType ? { mimeType: voiceState.mimeType } : undefined;
+    const rec = new MediaRecorder(voiceState.stream, opts);
+    rec.ondataavailable = function (e) { if (e.data && e.data.size > 0) voiceState.chunks.push(e.data); };
+    rec.onstop = function () { handleVoiceSegment(); };
+    rec.start();
+    voiceState.recorder = rec;
+  }
+
+  function voiceRms() {
+    const analyser = voiceState.analyser;
+    if (!analyser) return 0;
+    const buf = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+    return Math.sqrt(sum / buf.length);
+  }
+
+  function voiceVadTick() {
+    if (!voiceState.active || voiceState.busy || !voiceState.recorder) return;
+    const now = Date.now();
+    const rms = voiceRms();
+    if (rms >= VOICE_RMS_THRESHOLD) {
+      if (!voiceState.speechDetected) {
+        voiceState.speechDetected = true;
+        voiceState.speechStart = now;
+        setVoiceStatus("listening", "聞き取り中…");
+      }
+      voiceState.silenceStart = 0;
+      return;
+    }
+    if (voiceState.speechDetected) {
+      if (!voiceState.silenceStart) {
+        voiceState.silenceStart = now;
+      } else if (now - voiceState.silenceStart >= VOICE_SILENCE_MS) {
+        // 会話の区切れ目: 発話が短すぎればセグメントを捨てて作り直す
+        if (voiceState.silenceStart - voiceState.speechStart < VOICE_MIN_SPEECH_MS) {
+          restartVoiceSegment();
+        } else if (voiceState.recorder.state !== "inactive") {
+          voiceState.busy = true;  // onstop → handleVoiceSegment で送信
+          voiceState.recorder.stop();
+        }
+      }
+    } else if (now - voiceState.segmentStart >= VOICE_IDLE_RESET_MS) {
+      restartVoiceSegment();  // 長時間無発話: 録りっぱなしを避ける
+    }
+  }
+
+  function restartVoiceSegment() {
+    if (!voiceState.recorder) return;
+    voiceState.recorder.onstop = null;  // 破棄（handleVoiceSegment を呼ばない）
+    try { voiceState.recorder.stop(); } catch (_) { /* noop */ }
+    startVoiceSegment();
+  }
+
+  async function handleVoiceSegment() {
+    if (!voiceState.active) return;
+    const blob = new Blob(voiceState.chunks, { type: voiceState.mimeType || "audio/webm" });
+    voiceState.chunks = [];
+    if (blob.size < 1000) { resumeVoiceListening(); return; }
+
+    setVoiceStatus("thinking", "文字起こし中…");
+    let text = "";
+    try {
+      text = await transcribeVoiceBlob(blob);
+    } catch (_) { /* best-effort */ }
+    if (!voiceState.active) return;
+    if (!text) { resumeVoiceListening(); return; }
+
+    setVoiceTranscript("あなた: " + text);
+    setVoiceStatus("thinking", "先生が考えています…");
+    const data = await sendMessage(text, { intent_mode: "casual" });
+    if (!voiceState.active) return;
+    if (!data || !data.answer) { resumeVoiceListening(); return; }
+
+    showVoiceSourceMaterial(data.sources || []);
+    await speakVoiceAnswer(data.answer);
+    if (voiceState.active) resumeVoiceListening();
+  }
+
+  function resumeVoiceListening() {
+    voiceState.busy = false;
+    setVoiceStatus("listening", "聞いています… 話し終えると自動で送信されます");
+    startVoiceSegment();
+  }
+
+  async function transcribeVoiceBlob(blob) {
+    const ext = (voiceState.mimeType || "").indexOf("mp4") >= 0 ? "mp4" : "webm";
+    const form = new FormData();
+    form.append("audio", blob, "speech." + ext);
+    // apiFetch は Content-Type: application/json を強制するため multipart は素の fetch で送る
+    const headers = {};
+    if (state.token) headers["Authorization"] = "Bearer " + state.token;
+    const res = await fetch(API + "/learning/voice/transcribe?language=ja", {
+      method: "POST", headers: headers, body: form,
+    });
+    if (!res.ok) return "";
+    const data = await res.json();
+    return (data.text || "").trim();
+  }
+
+  // 応答を TTS で再生する。TTS が使えない環境では静かにスキップ（テキストは残る）。
+  async function speakVoiceAnswer(answerText) {
+    let audioB64 = "";
+    try {
+      const res = await apiFetch("/learning/voice/speak", {
+        method: "POST", body: JSON.stringify({ text: answerText }),
+      });
+      if (res.ok) audioB64 = (await res.json()).audio_base64 || "";
+    } catch (_) { /* best-effort */ }
+    if (!audioB64 || !voiceState.active) return;
+    setVoiceStatus("speaking", "先生が話しています…");
+    await new Promise(function (resolve) {
+      const player = new Audio("data:audio/mp3;base64," + audioB64);
+      voiceState.player = player;
+      player.onended = resolve;
+      player.onerror = resolve;
+      player.play().catch(resolve);
+    });
+    voiceState.player = null;
+  }
+
+  // 応答の第1根拠チャンクをパネルに教材表示する（会話中に教材が画面に出る）。
+  async function showVoiceSourceMaterial(sources) {
+    const el = document.getElementById("voice-material");
+    if (!el) return;
+    const top = (sources || []).find(function (s) { return s && s.chunk_id; });
+    if (!top) { el.classList.remove("on"); el.innerHTML = ""; return; }
+    try {
+      const res = await apiFetch(
+        "/learning/courses/" + state.courseId + "/source-chunk/" + encodeURIComponent(top.chunk_id));
+      if (!res.ok) return;
+      const data = await res.json();
+      el.innerHTML =
+        '<div class="voice-material-title">📖 いま話している題材: ' +
+        escHtml(data.source_title || top.source_title || "教材") +
+        (data.section ? " · " + escHtml(data.section) : "") + "</div>" +
+        renderMaterialChunk({ text: data.text, formulas: data.formulas });
+      el.classList.add("on");
+    } catch (_) { /* best-effort */ }
   }
 
   // ── Course selector (topbar dropdown) ───────────────────────────
@@ -2371,10 +2789,10 @@
     if (sendBtn) sendBtn.style.display = "";
     var mrOff = document.getElementById("material-region");
     var mbOff = document.getElementById("mode-bar");
-    var exOff = document.getElementById("send-explore");
+    var voiceOff = document.getElementById("voice-mode-btn");
     if (mrOff) mrOff.style.display = "";
     if (mbOff) mbOff.style.display = "";
-    if (exOff) exOff.style.display = "";
+    if (voiceOff) voiceOff.style.display = "";
     renderModeBar();
     updateLectureToggleAvailability();
   }
@@ -2394,6 +2812,9 @@
 
     if (!state.courseId || !state.currentTopicId) return;
 
+    // ハンズフリー音声会話とマイク/音声再生を奪い合うため、レクチャー開始時は止める。
+    if (voiceState.active) stopVoiceMode();
+
     // 音声未生成のトピックではレクチャーを開始しない（音声生成は管理画面のみ）。
     if (!state.topicHasAudio) {
       updateLectureToggleAvailability();
@@ -2409,10 +2830,10 @@
     sendBtn.style.display = "none";
     var mrOn = document.getElementById("material-region");
     var mbOn = document.getElementById("mode-bar");
-    var exOn = document.getElementById("send-explore");
+    var voiceOn = document.getElementById("voice-mode-btn");
     if (mrOn) mrOn.style.display = "none";
     if (mbOn) mbOn.style.display = "none";
-    if (exOn) exOn.style.display = "none";
+    if (voiceOn) voiceOn.style.display = "none";
     lectureContent.classList.add("visible");
     lecturePlayer.classList.add("visible");
 

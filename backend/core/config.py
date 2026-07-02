@@ -106,6 +106,30 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("LLM_DEEP_MODEL_MAX_TOKENS"),
     )
 
+    # --- 音声文字起こし（ハンズフリー会話） ---
+    # openai プロバイダのみ対応（whisper-1 / gpt-4o-mini-transcribe 等）
+    llm_transcribe_model: str = Field(
+        default="whisper-1",
+        validation_alias=AliasChoices("LLM_TRANSCRIBE_MODEL"),
+    )
+
+    # --- TensionMiningAgent (B層) — コスト制御（設計書 §8） ---
+    # 1セッション（user×course×topic×日）あたりの LLM コール上限
+    tension_max_calls_per_session: int = Field(
+        default=3,
+        validation_alias=AliasChoices("TENSION_MAX_CALLS_PER_SESSION"),
+    )
+    # 1ユーザー1日あたりの LLM コール上限
+    tension_max_calls_per_day: int = Field(
+        default=10,
+        validation_alias=AliasChoices("TENSION_MAX_CALLS_PER_DAY"),
+    )
+    # 空文字なら fast tier（llm_fast_model）に委譲
+    tension_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("TENSION_LLM_MODEL"),
+    )
+
     # --- JWT / Auth ---
     jwt_secret: str = "episteme-dev-secret-change-in-prod"
     admin_password: str = ""
