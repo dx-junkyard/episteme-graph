@@ -4599,12 +4599,24 @@
         });
         return;
       }
+      // equation 以外（source の equation_quote 等）でも latex を持てる。
+      // 旧データ互換: summary に生 TeX が入っている場合は latex に移し、
+      // タイトル・本文に生 LaTeX 文字列を出さず数式として描画する。
+      var srcLatex = link.latex || "";
+      var srcSummary = link.summary || "";
+      if (!srcLatex && lsLooksLikeTexMath(srcSummary)) {
+        srcLatex = srcSummary;
+        srcSummary = "";
+      }
       items.push({
         key: lsCourseEvidenceKey(kind, id),
         kind: kind,
         id: id,
-        title: link.summary || id || kind,
-        summary: link.summary || "",
+        title: srcLatex
+          ? (link.label || (link.support_role === "equation_quote" ? "数式引用" : "数式"))
+          : (srcSummary || id || kind),
+        summary: srcSummary,
+        latex: srcLatex,
         role: link.support_role || "",
         confidence: link.confidence || "",
       });
@@ -4694,7 +4706,7 @@
           '<span class="ls-evidence-kind">' + escHtml(item.kind) + '</span>' +
           '<strong>' + escHtml(item.title) + '</strong>' +
         '</div>' +
-        (item.kind === "equation" && item.latex
+        (item.latex
           ? '<div class="ls-course-evidence-formula">' + lsRenderKatex(item.latex, true) + '</div>'
           : (item.summary ? '<div class="ls-course-evidence-summary">' + lsRenderTextWithFormulas(item.summary, lsTopicFormulas(topic)) + '</div>' : '')) +
         '<div class="ls-course-evidence-meta">' +
@@ -4835,10 +4847,15 @@
       // 特定の根拠アイテム（source span / claim / component 等）が解決できる場合は、
       // 汎用のトピック原文抜粋フォールバックより優先して、そのアイテム自身を表示する。
       if (evidenceItem) {
+        // 数式（equation_quote の source 等）は生 LaTeX 文字列を切り詰めて出さず、
+        // KaTeX で数式として描画する。
+        var embedBody = evidenceItem.latex
+          ? '<span class="ls-material-embed-summary ls-material-embed-formula">' + lsRenderKatex(evidenceItem.latex, true) + '</span>'
+          : '<span class="ls-material-embed-summary">' + escHtml(lsShortSummary(evidenceItem.summary, 260) || "この教材要素に紐づく根拠リンクです。右ペインで詳細を確認できます。") + '</span>';
         return '<button type="button" class="ls-material-embed ls-material-evidence-card" data-evidence-ref="' + escHtml(key) + '">' +
           '<span class="ls-material-embed-kind">' + escHtml(evidenceItem.kind) + '</span>' +
           '<strong>' + escHtml(evidenceItem.title || evidenceItem.id) + '</strong>' +
-          '<span class="ls-material-embed-summary">' + escHtml(lsShortSummary(evidenceItem.summary, 260) || "この教材要素に紐づく根拠リンクです。右ペインで詳細を確認できます。") + '</span>' +
+          embedBody +
           '<span class="ls-material-embed-meta">' + escHtml([evidenceItem.role, evidenceItem.confidence].filter(Boolean).join(" / ")) + '</span>' +
         '</button>';
       }
@@ -7473,6 +7490,21 @@
       formula = "\\begin{aligned} " + formula + " \\end{aligned}";
     }
     return formula;
+  }
+
+  // テキストが散文ではなく生の TeX 数式かどうかのヒューリスティック判定。
+  // 数式環境（\begin{aligned} 等）があれば即 TeX、それ以外は TeX コマンドの
+  // 占有率で判定する（散文に数式コマンドが少し混ざる程度では true にしない）。
+  // course_content_builder.py の _looks_like_tex_math と同じ基準を使う。
+  function lsLooksLikeTexMath(text) {
+    var t = String(text || "").trim();
+    if (!t) return false;
+    if (/\\begin\{[A-Za-z]+\*?\}/.test(t)) return true;
+    var commands = t.match(/\\[a-zA-Z]+/g) || [];
+    if (commands.length < 2) return false;
+    var covered = 0;
+    for (var i = 0; i < commands.length; i++) covered += commands[i].length + 1;
+    return covered >= Math.max(10, Math.floor(t.length * 0.2));
   }
 
   function lsLoadPdfForChunk(chunk) {

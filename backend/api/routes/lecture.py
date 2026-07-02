@@ -583,15 +583,20 @@ def _resolve_equation_embeds(
     def _replace(m: _re.Match) -> str:
         eq_id = m.group(1).strip()
         link = eq_by_id.get(eq_id)
+        latex = str(link.get("latex") or "") if link else ""
         summary = str(link.get("summary") or "") if link else ""
+        plain_text = str(link.get("plain_text") or "") if link else ""
         idx = formula_offset + len(formulas) - len(existing_formulas)
         placeholder = f"[[FORMULA_{idx}]]"
-        # summary が LaTeX らしければ数式として埋め込む、なければ空文字にする
-        if summary:
+        # 描画用 LaTeX は link.latex を最優先する。summary は意味要約（散文）の
+        # 場合があり、それを LaTeX として埋め込むと数式描画が壊れる。
+        body = latex or summary
+        if body:
             formulas.append({
                 "id": placeholder,
-                "latex": summary,
-                "spoken": summary,
+                "latex": body,
+                # 読み上げは人間向けテキストを優先する（生 TeX を読み上げない）。
+                "spoken": plain_text or summary or body,
                 "is_display": True,
             })
             return placeholder
