@@ -2111,11 +2111,13 @@ body {
   background: #fef5e6;
 }
 
-/* Lecture content area */
+/* Lecture content area — 音声で解説する「教材」の本文を読ませる面。
+   読み上げ台本を並べるのではなく、教材を落ち着いて表示し、
+   いま読んでいる文だけを最小限ハイライトする。 */
 .lecture-content {
   display: none;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   padding: 16px 0;
 }
 
@@ -2132,16 +2134,28 @@ body {
   padding: 8px 0;
 }
 
+/* 文単位の追従ハイライト（読んでいるところの最小限表示）。
+   既定は素の本文と同じ見た目で、reading のときだけ控えめなマーカーを乗せる。 */
 .lecture-sentence {
   display: inline;
+  border-radius: 4px;
+  padding: 1px 0;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  transition: background-color 0.25s ease-out, color 0.25s ease-out;
+}
+
+.lecture-sentence.reading {
+  background: var(--color-background-info);
+  color: var(--color-text-primary);
 }
 
 .lecture-segment {
   opacity: 0;
   transform: translateY(8px);
   transition: opacity 0.6s ease-out, transform 0.6s ease-out;
-  line-height: 1.8;
-  font-size: 14px;
+  line-height: 1.9;
+  font-size: 15px;
   color: var(--color-text-primary);
 }
 
@@ -2150,15 +2164,16 @@ body {
   transform: translateY(0);
 }
 
+/* 教材としてどの段落も読めるよう、既読でも大きくは沈めない。 */
 .lecture-segment.past {
-  opacity: 0.5;
+  opacity: 0.78;
 }
 
+/* 現在のセグメントは大きな塗り箱ではなく、細い左アクセントだけの控えめな表示にして、
+   文単位の reading ハイライトが主役になるようにする。 */
 .lecture-segment.current {
   opacity: 1;
-  background: var(--color-background-info);
-  padding: 12px 16px;
-  border-radius: 10px;
+  padding-left: 12px;
   border-left: 3px solid var(--color-text-info);
 }
 

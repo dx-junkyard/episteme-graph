@@ -2632,6 +2632,8 @@
     highlightTimer: null,
     voiceRecognition: null,
     loadingAudio: false, // TTS フェッチ中フラグ（連打による多重再生を防ぐ）
+    readingSentence: -1, // 現在読み上げ中の文インデックス（-1 = 未設定）
+    lastReadingScrollAt: 0, // 追従スクロールのスロットル用タイムスタンプ
   };
 
   // 現トピックに再生可能な音声があるかを確認し、レクチャーボタンの有効/無効を更新する。
@@ -2884,6 +2886,8 @@
 
   function renderLectureContent() {
     var lectureContent = document.getElementById("lecture-content");
+    // 新しく描画するたびに読み上げ追従状態はリセットする（DOM が作り直されるため）。
+    lectureState.readingSentence = -1;
     if (!lectureState.segments.length) {
       lectureContent.innerHTML = '<div class="mg ai" style="color:var(--color-text-tertiary)">このトピックにはレクチャーコンテンツがありません。</div>';
       return;
@@ -2960,6 +2964,106 @@
     }
 
     return text;
+  }
+
+  // 描画済みセグメント内のプレーンテキストを文単位の <span> に包む。
+  // 音声再生位置に合わせて「読んでいるところ」を最小限ハイライトするための下ごしらえ。
+  // KaTeX（数式）配下のテキストは対象外にして数式描画を壊さない。
+  function annotateSentences(segEl) {
+    if (!segEl || segEl.getAttribute("data-sentences-annotated")) return;
+
+    var textNodes = [];
+    var walker = document.createTreeWalker(segEl, NodeFilter.SHOW_TEXT, null);
+    var node;
+    while ((node = walker.nextNode())) {
+      if (!node.nodeValue || !node.nodeValue.replace(/\s/g, "")) continue;
+      var skip = false;
+      var p = node.parentNode;
+      while (p && p !== segEl) {
+        if (p.nodeType === 1 && p.className && /katex|lecture-formula/.test(p.className)) {
+          skip = true;
+          break;
+        }
+        p = p.parentNode;
+      }
+      if (!skip) textNodes.push(node);
+    }
+
+    var idx = 0;
+    textNodes.forEach(function (tn) {
+      // 文末記号（。．！？!?）または改行までを1文とみなして分割（区切り文字は残す）。
+      var pieces = tn.nodeValue.match(/[^。．！？!?\n]*[。．！？!?\n]+|[^。．！？!?\n]+$/g) || [tn.nodeValue];
+      var frag = document.createDocumentFragment();
+      pieces.forEach(function (piece) {
+        if (piece === "") return;
+        var span = document.createElement("span");
+        span.className = "lecture-sentence";
+        span.setAttribute("data-sentence", String(idx));
+        span.textContent = piece;
+        frag.appendChild(span);
+        // 文末記号／改行で終わっていれば次の文へ。数式をまたぐ文は同一 idx を共有する。
+        if (/[。．！？!?\n]\s*$/.test(piece)) idx++;
+      });
+      tn.parentNode.replaceChild(frag, tn);
+    });
+
+    segEl.setAttribute("data-sentences-annotated", "1");
+  }
+
+  // 音声再生の進捗（ratio: 0〜1）から、現在読み上げている文を推定してハイライトする。
+  // 実際の word-level タイムスタンプは無いため、文の文字数比で近似する。
+  function updateReadingHighlight(ratio) {
+    if (!lectureState.active) return;
+    var content = document.getElementById("lecture-content");
+    if (!content) return;
+    var segEl = content.querySelector(".lecture-segment.current");
+    if (!segEl) return;
+
+    annotateSentences(segEl);
+    var spans = segEl.querySelectorAll(".lecture-sentence");
+    if (!spans.length) return;
+
+    // 文インデックスごとの重み（文字数）を集計する（数式をまたいだ文は合算される）。
+    var weights = {};
+    var maxIdx = 0;
+    spans.forEach(function (s) {
+      var i = parseInt(s.getAttribute("data-sentence"), 10) || 0;
+      weights[i] = (weights[i] || 0) + (s.textContent ? s.textContent.length : 1);
+      if (i > maxIdx) maxIdx = i;
+    });
+
+    var totalW = 0;
+    for (var k = 0; k <= maxIdx; k++) totalW += weights[k] || 0;
+    totalW = totalW || 1;
+
+    var r = Math.max(0, Math.min(1, ratio || 0));
+    var target = r * totalW;
+    var cum = 0;
+    var cur = 0;
+    for (var j = 0; j <= maxIdx; j++) {
+      cum += weights[j] || 0;
+      if (target <= cum) { cur = j; break; }
+      cur = j;
+    }
+
+    if (lectureState.readingSentence === cur) return; // 変化なし
+    lectureState.readingSentence = cur;
+
+    spans.forEach(function (s) {
+      var i = parseInt(s.getAttribute("data-sentence"), 10) || 0;
+      if (i === cur) s.classList.add("reading");
+      else s.classList.remove("reading");
+    });
+
+    // 読んでいる箇所を画面内に保つ（ジッタ防止に 600ms スロットル）。
+    var now = Date.now();
+    if (now - lectureState.lastReadingScrollAt > 600) {
+      lectureState.lastReadingScrollAt = now;
+      var target2 = segEl.querySelector(".lecture-sentence.reading");
+      if (target2 && target2.scrollIntoView) {
+        target2.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }
   }
 
   // ── Material chunk renderer（教材スタジオプレビュー互換）───────────
@@ -3216,6 +3320,9 @@
 
         lectureState.audio.addEventListener("timeupdate", function () {
           updateTimeDisplay();
+          if (lectureState.audio && lectureState.audio.duration) {
+            updateReadingHighlight(lectureState.audio.currentTime / lectureState.audio.duration);
+          }
         });
 
         // 【修正・重要】自動再生エラー（ブラウザブロック）の安全なハンドリング
@@ -3269,6 +3376,9 @@
         var min = Math.floor(sec / 60);
         timeEl.textContent = min + ":" + (sec % 60 < 10 ? "0" : "") + (sec % 60);
       }
+
+      // 音声が無い場合も推定所要時間に対する経過比で読み上げ位置を追従表示する。
+      updateReadingHighlight(elapsed / durationMs);
 
       if (elapsed >= durationMs) {
         stopHighlighting();
