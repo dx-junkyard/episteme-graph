@@ -1396,9 +1396,10 @@ def learning_chat(
             current_user["id"], course_id, course_data, topic_id, body.message, answer
         )
 
-    persist_chat_history(
+    _persisted = persist_chat_history(
         current_user["id"], course_id, topic_id,
         body.history, body.message, answer,
+        user_message_id=body.message_id or None,
     )
     # L2: クライアント報告の実位置で position_anchor を構築（mock ではない）。
     position_anchor = build_position_anchor(topic_id, _seg, _scroll)
@@ -1420,6 +1421,8 @@ def learning_chat(
             "position_anchor": position_anchor,
             "tension_hint": _tension_hint,
             "casual": _is_casual,
+            # 「この問いに戻る」で元の往復へジャンプするための逆引き（この問いを発した user メッセージ id）。
+            "message_id": _persisted.get("user_message_id"),
         },
     )
     # ヒント累積が閾値に達していればバックグラウンドで TensionMiningAgent を起動

@@ -185,6 +185,8 @@ def build_traces_view(rows: list) -> dict[str, Any]:
             "status": r[2],
             "text": (payload or {}).get("text", ""),
             "context_label": (payload or {}).get("context_label", ""),
+            # 「この問いに戻る」の逆引き（元の往復へジャンプ）。旧行には無いので空文字許容。
+            "message_id": (payload or {}).get("message_id", ""),
         }
         traces.append(trace)
         if r[2] in ("open", "revisited") and (days is None or days >= 1):

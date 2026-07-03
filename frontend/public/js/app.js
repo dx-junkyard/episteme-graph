@@ -448,10 +448,12 @@
     }
 
     state.chatMessages.forEach(function (msg) {
+      // 「この問いに戻る」のジャンプ先アンカー（id を持つメッセージのみ）。
+      var idAttr = msg.id ? ' id="msg-' + escHtml(msg.id) + '"' : "";
       if (msg.role === "user") {
-        html += '<div class="mg usr">' + escHtml(msg.content) + "</div>";
+        html += '<div class="mg usr"' + idAttr + '>' + escHtml(msg.content) + "</div>";
       } else {
-        html += '<div class="mg ai">' + renderAiContent(msg.content, msg) + "</div>";
+        html += '<div class="mg ai"' + idAttr + '>' + renderAiContent(msg.content, msg) + "</div>";
       }
     });
 
@@ -585,6 +587,10 @@
       });
     });
     updateNextTopicBtn();
+    // レクチャー中に教材が再描画されたら、直近の進捗位置へスクロールを戻す。
+    if (typeof lectureState !== "undefined" && lectureState.active) {
+      autoScrollMaterialToProgress(lectureState.lastOverallRatio);
+    }
   }
 
   // チャット区画のモードバー: 本筋（青）か寄り道（アンバー＋戻る）かを常時表示する。
@@ -1116,6 +1122,10 @@
     });
     el.querySelectorAll("[data-trace-return]").forEach(function (b) {
       b.addEventListener("click", function () {
+        // まず元の往復へジャンプ（前後の文脈ごと見返せる）。前後の会話次第で同じ問いに
+        // まともな答えが返る保証はないため、再送信は履歴に該当メッセージが無い場合の
+        // フォールバックに限定する。
+        if (jumpToChatMessage(this.getAttribute("data-trace-msg"))) return;
         var text = this.getAttribute("data-trace-return");
         if (text) sendMessage(text, Session.contextPayload());
       });
@@ -1478,7 +1488,7 @@
       // アクション。「この問いに戻る」「解決済みにする」は実データ配線済み（Stage 3）。
       if (t.status !== "resolved") {
         html += '<div class="lx-trace-actions">';
-        html += '<button class="lx-ghost" data-trace-return="' + escHtml(t.text || "") + '">この問いに戻る</button>';
+        html += '<button class="lx-ghost" data-trace-return="' + escHtml(t.text || "") + '" data-trace-msg="' + escHtml(t.message_id || "") + '">この問いに戻る</button>';
         html += '<button class="lx-ghost secondary" data-trace-resolve="' + escHtml(t.id || "") + '">解決済みにする</button>';
         // Internalization Prompt: 「なぜ自分に重要か」を言語化させ payload に保存（内発的動機の支援）。
         html += '<button class="lx-ghost secondary" data-trace-why="' + escHtml(t.id || "") + '">なぜ気になった？</button>';
@@ -1763,7 +1773,10 @@
     if (!text || state.sending || !state.currentTopicId) return null;
     let respData = null;  // 音声会話モードが answer/sources を使うため応答を返す
 
-    state.chatMessages.push({ role: "user", content: text });
+    // クライアントで採番し、サーバ永続履歴・関心痕跡と同じ id を in-memory にも持たせる
+    // （「この問いに戻る」でこの往復へジャンプするためのアンカー）。
+    const userMsgId = genMsgId();
+    state.chatMessages.push({ role: "user", content: text, id: userMsgId });
     state.sending = true;
     renderChat();
 
@@ -1782,6 +1795,7 @@
         method: "POST",
         body: JSON.stringify({
           message: text,
+          message_id: userMsgId,
           history: state.chatMessages.slice(0, -1),
           position_anchor: anchorAtAsk,
           ...payload,
@@ -2367,6 +2381,24 @@
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
+  // クライアント側でメッセージ id を採番する。サーバへ送って永続履歴・関心痕跡に焼き込み、
+  // 「この問いに戻る」で該当往復へジャンプできるようにする。
+  function genMsgId() {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    return "m-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+  }
+
+  // 指定 id のチャットメッセージへスクロール＋一時ハイライトする。DOM に無ければ false。
+  function jumpToChatMessage(msgId) {
+    if (!msgId) return false;
+    var elm = document.getElementById("msg-" + msgId);
+    if (!elm) return false;
+    elm.scrollIntoView({ behavior: "smooth", block: "center" });
+    elm.classList.add("mg-highlight");
+    setTimeout(function () { elm.classList.remove("mg-highlight"); }, 2400);
+    return true;
+  }
+
   // ── Logout ───────────────────────────────────────────────────────
   function initLogout() {
     var btn = document.getElementById("logout-btn");
@@ -2633,7 +2665,7 @@
     voiceRecognition: null,
     loadingAudio: false, // TTS フェッチ中フラグ（連打による多重再生を防ぐ）
     readingSentence: -1, // 現在読み上げ中の文インデックス（-1 = 未設定）
-    lastReadingScrollAt: 0, // 追従スクロールのスロットル用タイムスタンプ
+    lastOverallRatio: 0, // レクチャー全体の進捗（教材の自動スクロール位置に使う）
   };
 
   // 現トピックに再生可能な音声があるかを確認し、レクチャーボタンの有効/無効を更新する。
@@ -2693,6 +2725,8 @@
     if (playBtn) playBtn.addEventListener("click", togglePlayPause);
     if (prevBtn) prevBtn.addEventListener("click", prevSegment);
     if (nextBtn) nextBtn.addEventListener("click", nextSegment);
+    // レクチャー中は下段（チャット）を畳んでいるため、質問はフローティングの
+    // 割込みポップアップで受ける（講義を一時停止して開く）。
     if (questionBtn) questionBtn.addEventListener("click", openInterruptChat);
     if (chatCloseBtn) chatCloseBtn.addEventListener("click", closeInterruptChat);
     if (chatSendBtn) chatSendBtn.addEventListener("click", sendInterruptMessage);
@@ -2764,48 +2798,39 @@
     recognition.start();
   }
 
-  // レクチャーモードを終了してテキスト表示へ戻す（トグル・トピック切替の両方から使う）。
+  // レクチャーモードを終了して通常表示へ戻す（トグル・トピック切替の両方から使う）。
+  // レクチャー中は下段（チャット/ホワイトボード）と分割ハンドルを畳んでいるので、
+  // ここでその畳み（.lecture-on）を解除し、専用UIの後片付けを行う。
   function deactivateLecture() {
     if (!lectureState.active) return;
     var toggleBtn = document.getElementById("lecture-toggle");
-    var chatArea = document.getElementById("chat-area");
-    var lectureContent = document.getElementById("lecture-content");
     var lecturePlayer = document.getElementById("lecture-player");
-    var chatInput = document.getElementById("chat-input");
-    var sendBtn = document.getElementById("send-btn");
+    var mn = document.querySelector(".mn");
 
     lectureState.active = false;
     stopPlayback();
     closeInterruptChat();
+    if (mn) mn.classList.remove("lecture-on");
     if (toggleBtn) {
       toggleBtn.classList.remove("active");
       toggleBtn.innerHTML = "&#127897; レクチャー";
     }
-    if (chatArea) chatArea.style.display = "";
-    if (lectureContent) lectureContent.classList.remove("visible");
+    hideLectureCaption();
+    lectureState.lastOverallRatio = 0;
+    var banner = document.getElementById("lecture-complete-banner");
+    if (banner) banner.remove();
     if (lecturePlayer) {
       lecturePlayer.classList.remove("visible");
       lecturePlayer.style.display = "";
     }
-    if (chatInput) chatInput.style.display = "";
-    if (sendBtn) sendBtn.style.display = "";
-    var mrOff = document.getElementById("material-region");
-    var mbOff = document.getElementById("mode-bar");
-    var voiceOff = document.getElementById("voice-mode-btn");
-    if (mrOff) mrOff.style.display = "";
-    if (mbOff) mbOff.style.display = "";
-    if (voiceOff) voiceOff.style.display = "";
     renderModeBar();
     updateLectureToggleAvailability();
   }
 
   async function toggleLectureMode() {
     var toggleBtn = document.getElementById("lecture-toggle");
-    var chatArea = document.getElementById("chat-area");
-    var lectureContent = document.getElementById("lecture-content");
     var lecturePlayer = document.getElementById("lecture-player");
-    var chatInput = document.getElementById("chat-input");
-    var sendBtn = document.getElementById("send-btn");
+    var mn = document.querySelector(".mn");
 
     if (lectureState.active) {
       deactivateLecture();
@@ -2823,20 +2848,15 @@
       return;
     }
 
-    // Activate lecture mode
+    // Activate lecture mode。上段の教材をいっぱいに広げ、いま再生中の場所を
+    // 教材内で強調表示する。中段に読み上げ中の行（キャプション）を出し、
+    // 下段（チャット/ホワイトボード）と分割ハンドルは .lecture-on で畳む。
     lectureState.active = true;
+    lectureState.lastOverallRatio = 0;
+    if (mn) mn.classList.add("lecture-on");
     toggleBtn.classList.add("active");
-    toggleBtn.innerHTML = "&#128196; テキスト";
-    chatArea.style.display = "none";
-    chatInput.style.display = "none";
-    sendBtn.style.display = "none";
-    var mrOn = document.getElementById("material-region");
-    var mbOn = document.getElementById("mode-bar");
-    var voiceOn = document.getElementById("voice-mode-btn");
-    if (mrOn) mrOn.style.display = "none";
-    if (mbOn) mbOn.style.display = "none";
-    if (voiceOn) voiceOn.style.display = "none";
-    lectureContent.classList.add("visible");
+    toggleBtn.innerHTML = "&#9209; レクチャー終了";
+    showLectureCaption();
     lecturePlayer.classList.add("visible");
 
     // Ensure player is actually visible (override any CSS hiding)
@@ -2853,20 +2873,63 @@
         await startPlayback();
       }
     } catch (err) {
-      _restoreChatUI();
+      // 読み込み失敗はキャプションにエラー表示済み。レクチャーUIは開いたままにして、
+      // 学習者がトグルで通常表示へ戻れるようにする。
     }
   }
 
-  function _restoreChatUI() {
-    var chatInput = document.getElementById("chat-input");
-    var sendBtn = document.getElementById("send-btn");
-    if (chatInput) chatInput.style.display = "";
-    if (sendBtn) sendBtn.style.display = "";
+  // ── 教材の進捗連動オートスクロール ─────────────────────────────
+  // 上段の教材（student_material）とレクチャーの読み上げ（原文チャンク）は
+  // 別内容で厳密な位置対応が無いため、レクチャー全体の進捗比率に合わせて
+  // 教材ビューをおおまかに自動スクロールし、「いまこのあたり」を示す。
+  function autoScrollMaterialToProgress(overallRatio) {
+    if (!lectureState.active) return;
+    var r = Math.max(0, Math.min(1, overallRatio || 0));
+    lectureState.lastOverallRatio = r;
+    var body = document.getElementById("material-body");
+    if (!body) return;
+    var scrollable = body.scrollHeight - body.clientHeight;
+    if (scrollable <= 0) return;
+    body.scrollTop = r * scrollable;
+  }
+
+  // 現在の再生位置（セグメント index + セグメント内比率）からレクチャー全体の
+  // 進捗比率を求める。segmentRatio は音声の再生位置（0〜1、無ければ 0）。
+  function overallLectureRatio(segmentRatio) {
+    var total = lectureState.segments.length || 1;
+    var within = Math.max(0, Math.min(1, segmentRatio || 0));
+    return (lectureState.currentSegmentIndex + within) / total;
+  }
+
+  // ── レクチャーキャプション（読み上げ中の文の表示）───────────────
+  function showLectureCaption() {
+    var cap = document.getElementById("lecture-caption");
+    if (cap) cap.classList.add("visible");
+  }
+
+  function hideLectureCaption() {
+    var cap = document.getElementById("lecture-caption");
+    if (cap) {
+      cap.classList.remove("visible");
+      cap.classList.remove("warn");
+    }
+    setLectureCaption("");
+  }
+
+  // キャプション本文を差し替える。html=true のとき（数式込みの文の複製）以外は
+  // テキストとして扱う。warn は自動再生ブロックなどの注意表示に使う。
+  function setLectureCaption(content, opts) {
+    opts = opts || {};
+    var cap = document.getElementById("lecture-caption");
+    var textEl = document.getElementById("lecture-caption-text");
+    if (!textEl) return;
+    if (opts.html) textEl.innerHTML = content;
+    else textEl.textContent = content;
+    if (cap) cap.classList.toggle("warn", !!opts.warn);
   }
 
   async function loadLectureSequence() {
-    var lectureContent = document.getElementById("lecture-content");
-    lectureContent.innerHTML = '<div class="mg ai"><div class="typing"><span></span><span></span><span></span></div></div>';
+    setLectureCaption("レクチャーを読み込み中…");
 
     try {
       var res = await apiFetch(
@@ -2876,20 +2939,25 @@
       var data = await res.json();
       lectureState.segments = data.segments || [];
       lectureState.currentSegmentIndex = 0;
+      lectureState.lastOverallRatio = 0;
       renderLectureContent();
       updateLectureControls();
     } catch (err) {
-      lectureContent.innerHTML = '<div class="mg ai" style="color:var(--color-text-danger)">レクチャーシーケンスの読み込みに失敗しました。</div>';
-      _restoreChatUI();
+      setLectureCaption("レクチャーシーケンスの読み込みに失敗しました。", { warn: true });
+      throw err;
     }
   }
 
+  // セグメント本文は非表示のステージング領域（#lecture-content）に描画する。
+  // 画面には出さず、文分割（annotateSentences）と KaTeX 描画済みDOMの供給源として使い、
+  // 読み上げ中の文だけをキャプションへ複製表示する。
   function renderLectureContent() {
     var lectureContent = document.getElementById("lecture-content");
     // 新しく描画するたびに読み上げ追従状態はリセットする（DOM が作り直されるため）。
     lectureState.readingSentence = -1;
     if (!lectureState.segments.length) {
-      lectureContent.innerHTML = '<div class="mg ai" style="color:var(--color-text-tertiary)">このトピックにはレクチャーコンテンツがありません。</div>';
+      lectureContent.innerHTML = "";
+      setLectureCaption("このトピックにはレクチャーコンテンツがありません。");
       return;
     }
 
@@ -2918,9 +2986,9 @@
       } catch (e) { /* ignore */ }
     }
 
-    // Scroll to current segment
-    var currentEl = lectureContent.querySelector(".lecture-segment.current");
-    if (currentEl) currentEl.scrollIntoView({ behavior: "smooth", block: "center" });
+    // キャプションを現セグメントの先頭文で初期化し、教材も進捗位置へスクロールする
+    // （updateReadingHighlight 内で autoScrollMaterialToProgress を呼ぶ）。
+    updateReadingHighlight(0);
   }
 
   function renderSegmentContent(seg) {
@@ -3014,6 +3082,9 @@
   // 実際の word-level タイムスタンプは無いため、文の文字数比で近似する。
   function updateReadingHighlight(ratio) {
     if (!lectureState.active) return;
+    // 教材（上段）をレクチャー全体の進捗に合わせて自動スクロールする。
+    // キャプション用の文特定（下段）が失敗しても、上段のスクロールは進めたいので先に行う。
+    autoScrollMaterialToProgress(overallLectureRatio(ratio));
     var content = document.getElementById("lecture-content");
     if (!content) return;
     var segEl = content.querySelector(".lecture-segment.current");
@@ -3055,14 +3126,28 @@
       else s.classList.remove("reading");
     });
 
-    // 読んでいる箇所を画面内に保つ（ジッタ防止に 600ms スロットル）。
-    var now = Date.now();
-    if (now - lectureState.lastReadingScrollAt > 600) {
-      lectureState.lastReadingScrollAt = now;
-      var target2 = segEl.querySelector(".lecture-sentence.reading");
-      if (target2 && target2.scrollIntoView) {
-        target2.scrollIntoView({ behavior: "smooth", block: "center" });
-      }
+    // 読み上げ中の文（数式をまたぐ場合はその範囲ごと）をキャプションへ複製表示する。
+    var sentenceHtml = extractSentenceHtml(segEl, cur);
+    if (sentenceHtml) setLectureCaption(sentenceHtml, { html: true });
+  }
+
+  // 指定した文インデックスに属する範囲（同一 idx の先頭 span 〜 末尾 span、
+  // 間に挟まる描画済み数式を含む）を Range で複製し、キャプション用 HTML を返す。
+  function extractSentenceHtml(segEl, sentenceIdx) {
+    var spans = segEl.querySelectorAll('.lecture-sentence[data-sentence="' + sentenceIdx + '"]');
+    if (!spans.length) return "";
+    try {
+      var range = document.createRange();
+      range.setStartBefore(spans[0]);
+      range.setEndAfter(spans[spans.length - 1]);
+      var container = document.createElement("div");
+      container.appendChild(range.cloneContents());
+      return container.innerHTML;
+    } catch (e) {
+      // Range が組めない場合はテキストのみで返す。
+      var text = "";
+      spans.forEach(function (s) { text += s.textContent; });
+      return escHtml(text);
     }
   }
 
@@ -3260,24 +3345,27 @@
     if (!lectureState.segments.length) return;
     // 音声フェッチ中の連打による多重再生を防ぐ。
     if (lectureState.loadingAudio) return;
-    lectureState.loadingAudio = true;
 
-    var seg = lectureState.segments[lectureState.currentSegmentIndex];
-
-    // Show loading spinner before TTS fetch
-    var lectureContent = document.getElementById("lecture-content");
-    var currentEl = lectureContent
-      ? lectureContent.querySelector('.lecture-segment[data-segment="' + lectureState.currentSegmentIndex + '"]')
-      : null;
-    if (currentEl) {
-      currentEl.insertAdjacentHTML("afterbegin",
-        '<div class="lecture-loading" id="lecture-loading">' +
-        '<div class="typing"><span></span><span></span><span></span></div>' +
-        '<span style="font-size:12px;color:var(--color-text-tertiary);margin-left:8px;">音声を準備中...</span></div>');
+    // 同一セグメントの一時停止からの再開: 音声を取得し直さず途中から続きを再生する。
+    if (lectureState.audio && !lectureState.audio.ended) {
+      lectureState.playing = true;
+      updateLectureControls();
+      var resumePromise = lectureState.audio.play();
+      if (resumePromise !== undefined) {
+        resumePromise.catch(function () {
+          lectureState.playing = false;
+          updateLectureControls();
+        });
+      }
+      return;
     }
 
+    lectureState.loadingAudio = true;
+    var seg = lectureState.segments[lectureState.currentSegmentIndex];
+    setLectureCaption("音声を準備中…");
+
     try {
-      // Fetch TTS audio first (while spinner is visible)
+      // Fetch TTS audio first (while caption shows loading)
       var ttsData = null;
       try {
         var res = await apiFetch(
@@ -3294,11 +3382,7 @@
         // TTS unavailable — will fall back to simulation
       }
 
-      // Remove spinner
-      var loadingEl = document.getElementById("lecture-loading");
-      if (loadingEl) loadingEl.remove();
-
-      // Now enter playing state and re-render with fade-in sentences
+      // Now enter playing state and re-render sentence staging
       lectureState.playing = true;
       updateLectureControls();
       renderLectureContent();
@@ -3315,6 +3399,8 @@
 
         lectureState.audio.addEventListener("ended", function () {
           stopHighlighting();
+          // 再開パスが終了済み音声を拾わないよう、次のセグメントへ進む前に破棄する。
+          lectureState.audio = null;
           autoAdvance();
         });
 
@@ -3335,15 +3421,7 @@
             console.warn("Autoplay blocked by browser:", error);
             lectureState.playing = false;
             updateLectureControls();
-
-            // ユーザーに再生ボタンを押すよう案内を出す
-            var currentEl = document.querySelector(".lecture-segment.current");
-            if (currentEl && !document.getElementById("autoplay-warning")) {
-              currentEl.insertAdjacentHTML("afterbegin",
-                '<div id="autoplay-warning" style="color: var(--color-text-danger); background: #fcebeb; padding: 10px; border-radius: 8px; margin-bottom: 12px; font-size: 12px;">' +
-                'ブラウザの制限により自動再生がブロックされました。下の「▶（再生）」ボタンを押して開始してください。</div>'
-              );
-            }
+            setLectureCaption("ブラウザの制限により自動再生がブロックされました。下の「▶（再生）」ボタンを押して開始してください。", { warn: true });
           });
         }
       } else {
@@ -3351,16 +3429,14 @@
         simulatePlayback(seg);
       }
     } catch (err) {
-      // Remove spinner if still present
-      var loadingEl2 = document.getElementById("lecture-loading");
-      if (loadingEl2) loadingEl2.remove();
       lectureState.playing = false;
       updateLectureControls();
-      _restoreChatUI();
+      setLectureCaption("音声の再生に失敗しました。", { warn: true });
     } finally {
       lectureState.loadingAudio = false;
     }
   }
+
 
   function simulatePlayback(seg) {
     // Estimate reading time: ~300 chars/min for Japanese
@@ -3422,26 +3498,29 @@
   }
 
   // レクチャー最終セグメント到達時、テキストパスと同じ確認フローへ合流する。
+  // 下段（チャット）は畳んでいるので、完了バナーは教材とプレイヤーの間に出す。
   function onLectureComplete() {
-    var lectureContent = document.getElementById("lecture-content");
-    if (lectureContent && !document.getElementById("lecture-complete-banner")) {
-      var next = getNextTopic();
-      var label = next ? "確認問題に進む" : "レクチャー完了";
-      lectureContent.insertAdjacentHTML("beforeend",
-        '<div class="lecture-complete" id="lecture-complete-banner">' +
-        '<p>このトピックのレクチャーは以上です。</p>' +
-        '<button class="suggest-btn" id="lecture-complete-next">' + label + '</button>' +
-        '</div>');
-      var btn = document.getElementById("lecture-complete-next");
-      if (btn) {
-        btn.addEventListener("click", function () {
-          if (getNextTopic()) {
-            openCheckModal();
-          } else {
-            deactivateLecture();
-          }
-        });
-      }
+    setLectureCaption("このトピックのレクチャーは以上です。");
+    var mn = document.querySelector(".mn");
+    var player = document.getElementById("lecture-player");
+    if (!mn || !player || document.getElementById("lecture-complete-banner")) return;
+    var next = getNextTopic();
+    var label = next ? "確認問題に進む" : "レクチャーを終了";
+    var banner = document.createElement("div");
+    banner.className = "lecture-complete";
+    banner.id = "lecture-complete-banner";
+    banner.innerHTML = '<span>このトピックのレクチャーは以上です。</span>' +
+      '<button class="suggest-btn" id="lecture-complete-next">' + label + '</button>';
+    mn.insertBefore(banner, player);
+    var btn = document.getElementById("lecture-complete-next");
+    if (btn) {
+      btn.addEventListener("click", function () {
+        if (getNextTopic()) {
+          openCheckModal();
+        } else {
+          deactivateLecture();
+        }
+      });
     }
   }
 
@@ -3612,6 +3691,54 @@
     startPlayback();
   }
 
+  // ── 分割ハンドル ─────────────────────────────────────────────────
+  // 教材区画（上段）と下段（読み上げ行＋ホワイトボード）の比率をドラッグで調整する。
+  // 高さは localStorage に保存し、次回以降も同じ比率で表示する。
+  var SPLIT_STORAGE_KEY = "eg_material_split_px";
+
+  function initSplitHandle() {
+    var handle = document.getElementById("split-handle");
+    var region = document.getElementById("material-region");
+    if (!handle || !region) return;
+    var mn = region.parentElement;
+
+    function applyHeight(px) {
+      var max = Math.max(120, (mn.clientHeight || window.innerHeight) * 0.75);
+      px = Math.max(80, Math.min(px, max));
+      region.style.height = px + "px";
+      region.style.maxHeight = "none";
+      region.style.flex = "0 0 auto";
+      return px;
+    }
+
+    // 保存済みの高さを復元（未保存なら CSS 既定の max-height 42% のまま）。
+    var saved = parseInt(localStorage.getItem(SPLIT_STORAGE_KEY) || "", 10);
+    if (saved > 0) applyHeight(saved);
+
+    var dragging = false, startY = 0, startH = 0;
+    handle.addEventListener("pointerdown", function (e) {
+      dragging = true;
+      startY = e.clientY;
+      startH = region.getBoundingClientRect().height;
+      handle.classList.add("dragging");
+      if (handle.setPointerCapture) handle.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    handle.addEventListener("pointermove", function (e) {
+      if (!dragging) return;
+      applyHeight(startH + (e.clientY - startY));
+    });
+    function endDrag() {
+      if (!dragging) return;
+      dragging = false;
+      handle.classList.remove("dragging");
+      var h = Math.round(region.getBoundingClientRect().height);
+      try { localStorage.setItem(SPLIT_STORAGE_KEY, String(h)); } catch (_) { /* noop */ }
+    }
+    handle.addEventListener("pointerup", endDrag);
+    handle.addEventListener("pointercancel", endDrag);
+  }
+
   // ── Init ───────────────────────────────────────────────────────────
   async function initApp() {
     if (!state.token) {
@@ -3623,6 +3750,7 @@
     initInput();
     initLogout();
     initLectureMode();
+    initSplitHandle();
     await initCourseSelector();
   }
 
