@@ -45,6 +45,13 @@
           <button class="next-topic-btn" id="next-topic-btn" style="display:none" title="次のトピックへ進む">確認して次へ</button>
         </div>
       </div>
+      <!-- 分割ハンドル: 教材区画と下段（読み上げ行＋ホワイトボード）の比率をドラッグで調整 -->
+      <div class="split-handle" id="split-handle" title="ドラッグして教材の表示比率を調整"><span class="split-grip"></span></div>
+      <!-- レクチャー読み上げキャプション: 現在読み上げ中の文だけを表示（レクチャー中のみ） -->
+      <div class="lecture-caption" id="lecture-caption">
+        <span class="lecture-caption-icon">&#128266;</span>
+        <span class="lecture-caption-text" id="lecture-caption-text"></span>
+      </div>
       <!-- チャット区画（探索）: モードバー＋会話 -->
       <div class="mode-bar" id="mode-bar" hidden></div>
       <div class="ca" id="chat-area">
@@ -52,8 +59,8 @@
           トピックを選択して学習を始めましょう。
         </div>
       </div>
-      <!-- Lecture content area (hidden by default) -->
-      <div class="lecture-content" id="lecture-content"></div>
+      <!-- Lecture segment staging (never shown; sentence annotation / KaTeX 用の下ごしらえ領域) -->
+      <div class="lecture-content" id="lecture-content" aria-hidden="true"></div>
       <!-- Lecture player bar -->
       <div class="lecture-player" id="lecture-player">
         <div class="lecture-controls">

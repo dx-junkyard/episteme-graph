@@ -30,6 +30,7 @@ OpenAI / Gemini(REST) / Vertex AI を 1 つのインターフェースで扱い�
 - `generate_text(messages, ...)` — プロバイダを判定して生成。**推論モデル互換対応**を内蔵（`system`→`developer` 変換、`temperature`/`max_tokens` 除去、`max_completion_tokens` 使用）
 - `generate_text_with_structured_output(messages, response_format)` — Pydantic モデルで構造化出力（OpenAI は `response_format`、Gemini/Vertex は事後 JSON 抽出）
 - `generate_embeddings(texts)` — 埋め込みベクトル生成（次元は `llm_embedding_dim`）
+- `transcribe_audio(audio_bytes, filename, ...)` — 音声の文字起こし（`LLM_TRANSCRIBE_MODEL`、既定 whisper-1。openai プロバイダのみ、他プロバイダは RuntimeError）。ハンズフリー音声会話の入力に使用
 
 ### `config.py` — 設定
 `Settings`（pydantic-settings）。`LLM_PROVIDER` / `LLM_API_KEY` / 各モデル名 / `LLM_EMBEDDING_DIM` / GCP（Vertex ADC）/ `DATABASE_URL` / `NEO4J_*` / `MINIO_*` / `GROBID_URL` などを環境変数から読み込みます。互換のため `OPENAI_API_KEY` 等の別名も受け付けます。
@@ -63,6 +64,7 @@ OpenAI / Gemini(REST) / Vertex AI を 1 つのインターフェースで扱い�
 
 ### `tts.py`
 - `generate_tts_audio(spoken_text)` — プロバイダ分岐（OpenAI tts-1 / Google Cloud TTS）で MP3 バイト列を返す。認証失敗は `TtsFatalError`、一時エラーは `None`
+- `strip_text_for_speech(text, limit=4000)` — 回答テキストを読み上げ向けに整形（LaTeX・markdown 記号・出典マーカーの除去）。ハンズフリー音声会話の `/voice/speak` が使用
 
 → 学習 UI 側の動き: [学習機能](../features/learning.md)。
 
@@ -77,6 +79,24 @@ OpenAI / Gemini(REST) / Vertex AI を 1 つのインターフェースで扱い�
 | `concept_normalizer.py` | 数式記号・別名の正規化（λ→"lambda" 等、snake_case 化）。カートリッジの aliases / notation_patterns を利用 |
 | `course_content_builder.py` | パイプライン成果物（CourseMapping / ComponentAssembly）でコースの topics を肉付け |
 | `document_sections.py` | チャンクから階層セクション構造を復元（見出し検出、section_id 付与） |
+| `learning_experience.py` | 学習体験レイヤー（B層）の共通ロジック（OutOfSourceGuard・tier 集約など） |
+| `component_candidates.py` | 質問→理論コンポーネント候補の生成（C層。AI は候補提示まで、確定は教員） |
+| `graphs/` | 学生向け / 教員向けのグラフ組み立て（`student_graph.py` / `teacher_graph.py` / `state.py`） |
+
+### `tension/` — TensionMiningAgent（B層, マイグレーション 022）
+対話ログから「理解した上での引っかかり（tension）」の**候補**を抽出するサブパッケージ。
+LLM 出力は常に `status='candidate'` で、本人の confirm を経てのみ確定します（詳細は [RAG チャットフロー](rag-chat.md)）。
+
+| ファイル | 役割 |
+|---|---|
+| `prefilter.py` | **Stage 0（同期・非LLM・数ms）**: `judge_tension_hint()`。ヘッジ/逆接マーカー・同語再訪でヒント判定し `payload.tension_hint` を付与 |
+| `worker.py` | `threading.Thread` 方式の非同期バッチ。未解析ヒント累積 5 件 or セッション終了（20分無活動）で起動。冪等性は `analyzed_at`、コスト上限は `TENSION_MAX_CALLS_PER_SESSION` / `TENSION_MAX_CALLS_PER_DAY` |
+| `agent.py` | `TensionMiningAgent.run()` — 会話窓 1 つにつき LLM 1 コールで tension 候補を分類 |
+| `input_builder.py` | ヒント発話を核にした会話窓（ConversationWindow）の組み立て |
+| `prompt.py` / `llm_client.py` | プロンプト定義と LLM 呼び出し（fast tier 既定、`TENSION_LLM_MODEL` で上書き） |
+| `schema.py` | tension 型・status 語彙の定義（`TENSION_TYPES` など） |
+| `validator.py` / `repair.py` | 構造化出力の検証と修復。`paraphrase` の推量形をハード強制。2 回修復失敗は `unclassified` / `confidence=0.0` で 1 行保持（情報を落とさない） |
+| `examples/` | サンプル入出力 JSON |
 
 ---
 

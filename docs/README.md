@@ -101,12 +101,12 @@ PDF アップロード
 ### アーキテクチャ / 基盤
 - [アーキテクチャ概要](architecture/overview.md) — システム全体構成、ディレクトリ構成、データストア役割分担
 - [デプロイ構成](architecture/deployment.md) — Docker Compose 構成、環境変数、ネットワーク設計
-- [データモデル](architecture/data-model.md) — PostgreSQL テーブル設計、マイグレーション一覧（init → 021）
+- [データモデル](architecture/data-model.md) — PostgreSQL テーブル設計、マイグレーション一覧（init → 022）
 
 ### バックエンド
 - [API とルーティング](backend/api.md) — エンドポイント一覧、認証・RBAC・開示範囲
 - [コアエンジン](backend/core-engine.md) — `backend/core/` 各モジュールの責務
-- [RAG チャットフロー](backend/rag-chat.md) — 検索 → コンテキスト構築 → 生成 → 誤解検出
+- [RAG チャットフロー](backend/rag-chat.md) — 検索 → コンテキスト構築 → 生成 → 誤解検出、カジュアル対話モード、出所判定（content_grounding）、TensionMiningAgent（違和感候補検出）
 
 ### PDF 解析パイプライン
 - [パイプライン概要](pipeline/overview.md) — PDF → ナレッジグラフの全 23 ステージ
@@ -116,7 +116,7 @@ PDF アップロード
 - [動的スキーマ進化](pipeline/schema-evolution.md) — 未回答クエリ → 提案 → Shadow Testing → 再抽出
 
 ### 機能
-- [学習機能（学生UI）](features/learning.md) — 3 パネル UI、RAG チャット、レクチャーモード
+- [学習機能（学生UI）](features/learning.md) — 3 パネル UI、RAG チャット、レクチャーモード、ハンズフリー音声会話（カジュアル対話モード）、違和感（tension）ダイジェスト、回答の出所表示（content_grounding）
 - [管理機能（教員/管理者UI）](features/admin.md) — 教材管理、コースビルダー、Lecture Studio
 - [承認・共有レイヤー（C層）](features/endorsement-sharing.md) — 教員による査読承認、独自解釈の並存、教員間共有、質問→候補生成
 - [認証・権限・開示範囲](features/auth-visibility.md) — JWT、RBAC、グループ、Visibility

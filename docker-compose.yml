@@ -66,6 +66,12 @@ services:
       EPISTEME_DEFAULT_CARTRIDGE_ID: ${EPISTEME_DEFAULT_CARTRIDGE_ID:-particle_physics}
       EPISTEME_CARTRIDGES_DIR: ${EPISTEME_CARTRIDGES_DIR:-}
       GROBID_URL: ${GROBID_URL:-http://grobid:8070}
+      # 音声文字起こし（ハンズフリー会話、openai プロバイダのみ）
+      LLM_TRANSCRIBE_MODEL: ${LLM_TRANSCRIBE_MODEL:-whisper-1}
+      # TensionMiningAgent (B層) — コスト制御
+      TENSION_MAX_CALLS_PER_SESSION: ${TENSION_MAX_CALLS_PER_SESSION:-3}
+      TENSION_MAX_CALLS_PER_DAY: ${TENSION_MAX_CALLS_PER_DAY:-10}
+      TENSION_LLM_MODEL: ${TENSION_LLM_MODEL:-}
     # ローカルの .gcp/ をコンテナに読み取り専用でマウントする。
     # ファイルが存在しない場合は空ディレクトリとしてマウントされる（エラーにはならない）。
     # サービスアカウントキーを使う場合: .gcp/credentials.json に配置する。
