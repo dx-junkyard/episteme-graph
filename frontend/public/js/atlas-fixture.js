@@ -10,6 +10,7 @@
  */
 window.ATLAS_FIXTURE = {
   "skeleton_version": "2026.1",
+  "cartridge": "particle_physics",
   "provenance": "AI生成・教員レビュー済",
   "crumbs": {
     "1": "素粒子物理 › 全体　—　ノードを選ぶと下に詳細",

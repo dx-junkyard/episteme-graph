@@ -14,6 +14,7 @@
 .atlas-ov[hidden] { display: none; }
 
 .atlas-sheet {
+  position: relative; /* 修正報告トースト (Issue D) の基準位置 */
   width: 100%;
   max-width: 860px;
   background: var(--color-background-secondary, #f5f5f7);
@@ -299,4 +300,99 @@
   color: var(--color-text-tertiary, #aeaeb2);
   margin: 8px 0 0;
   text-align: right;
+}
+
+/* ── 修正報告フォーム (Issue D-1) ───────────────────────────────── */
+.atlas-report-form {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--color-border, #d2d2d7);
+}
+.atlas-report-text {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: inherit;
+  font-size: 12.5px;
+  padding: 6px 8px;
+  border: 1px solid var(--color-border, #d2d2d7);
+  border-radius: 6px;
+  background: var(--color-background, #fff);
+  color: var(--color-text-primary, #1d1d1f);
+  resize: vertical;
+}
+.atlas-report-meta {
+  font-size: 11px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  margin: 6px 0 8px;
+}
+.atlas-report-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.atlas-report-attribution {
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.atlas-report-status {
+  font-size: 12px;
+  color: var(--color-text-danger, #e53935);
+  min-height: 14px;
+  margin: 6px 0 0;
+}
+
+/* 送信後トースト (オーバーレイ内) */
+.atlas-toast {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%) translateY(8px);
+  background: var(--color-text-primary, #1d1d1f);
+  color: var(--color-background, #fff);
+  font-size: 12.5px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  z-index: 10;
+}
+.atlas-toast.show {
+  opacity: 0.95;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* ── 修正報告の結果通知 (Issue D-3, 報告者本人のみ) ──────────────── */
+#atlas-report-notices {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 360px;
+  z-index: 900;
+}
+.atlas-report-notice {
+  background: var(--color-background, #fff);
+  border: 1px solid var(--color-border, #d2d2d7);
+  border-left: 3px solid #378add;
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  font-size: 12.5px;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.atlas-report-notice p {
+  margin: 0 0 8px;
+}
+.atlas-report-notice button {
+  font-size: 12px;
+  padding: 3px 12px;
+  border: 1px solid var(--color-border, #d2d2d7);
+  border-radius: 6px;
+  background: var(--color-background-secondary, #f5f5f7);
+  color: var(--color-text-primary, #1d1d1f);
+  cursor: pointer;
 }

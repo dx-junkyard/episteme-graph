@@ -1955,11 +1955,26 @@
       var frozen = data && data.frozen ? data.frozen.skeleton : null;
       if (frozen) {
         var reviewers = (frozen.reviewed_by || []).join(", ");
-        frozenInfoEl.innerHTML =
+        var infoHtml =
           "凍結済み: 版 <b>" + escHtml(frozen.version) + "</b>" +
           " ／ 生成来歴: " + escHtml(frozen.generated_by || "—") +
           " ／ レビュー帰属: " + escHtml(reviewers || "—") +
           "（凍結版は不変。修正は draft を作って次版で凍結）";
+        // changelog と修正報告者への帰属 credits の表示 (Issue D-3, 受け入れ条件3)
+        var entries = frozen.changelog || [];
+        if (entries.length) {
+          infoHtml += "<div style='margin-top:6px'>changelog:</div><ul style='margin:2px 0 0 18px;padding:0'>";
+          for (var ci = entries.length - 1; ci >= 0; ci--) {
+            var entry = entries[ci];
+            infoHtml += "<li>版 " + escHtml(entry.version) + " — " + escHtml(entry.note || "");
+            if ((entry.credits || []).length) {
+              infoHtml += "（修正報告の帰属: " + escHtml(entry.credits.join(", ")) + "）";
+            }
+            infoHtml += "</li>";
+          }
+          infoHtml += "</ul>";
+        }
+        frozenInfoEl.innerHTML = infoHtml;
       } else {
         frozenInfoEl.textContent = "凍結済みの骨格はまだありません（学習者には地図が表示されません）。";
       }
@@ -1980,6 +1995,7 @@
       if (!select.value) {
         frozenInfoEl.textContent = "";
         draftArea.style.display = "none";
+        renderReports(null);
         setStatus("カートリッジを選択してください");
         return;
       }
@@ -1991,6 +2007,151 @@
         })
         .then(function (data) { renderState(data); setStatus(""); })
         .catch(function (err) { setStatus("読み込みに失敗しました: " + err.message, true); });
+      loadReports();
+    }
+
+    // ── 修正報告のレビューキュー (Issue D-2 / D-3) ────────────────────
+    var reportsListEl = document.getElementById("atlas-reports-list");
+    var reportsHintEl = document.getElementById("atlas-reports-hint");
+    var reportsStatusEl = document.getElementById("atlas-reports-status");
+    var reportsFilterEl = document.getElementById("atlas-report-status-filter");
+
+    var REPORT_STATUS_LABELS = {
+      pending: "レビュー待ち",
+      accepted: "採用（次版へ反映予定）",
+      declined: "見送り",
+      merged: "重複統合",
+    };
+
+    function setReportsStatus(text, isError) {
+      if (!reportsStatusEl) return;
+      reportsStatusEl.textContent = text || "";
+      reportsStatusEl.style.color = isError ? "var(--color-text-danger, #e53935)" : "var(--color-text-secondary)";
+    }
+
+    function reportsPath() {
+      return "/admin/cartridges/" + encodeURIComponent(select.value) + "/atlas/reports";
+    }
+
+    function renderReports(data) {
+      if (!reportsListEl) return;
+      if (!data) {
+        reportsListEl.innerHTML = "";
+        reportsHintEl.innerHTML = "";
+        return;
+      }
+      // 改版検討ヒント (issue A の閾値と接続。表示のみ・自動改版はしない)
+      var hints = data.revision_hint_targets || [];
+      if (hints.length) {
+        reportsHintEl.innerHTML =
+          "<span style='color:var(--color-text-danger,#e53935)'>改版検討: </span>" +
+          "同一対象への未クローズ報告が閾値（" + escHtml(String(data.revision_trigger_threshold)) + "件）に達しています — " +
+          escHtml(hints.join(", "));
+      } else {
+        reportsHintEl.innerHTML = "";
+      }
+      var reports = data.reports || [];
+      if (!reports.length) {
+        reportsListEl.innerHTML = "<div style='color:var(--color-text-tertiary)'>該当する報告はありません。</div>";
+        return;
+      }
+      var html = "";
+      reports.forEach(function (r) {
+        var target = r.node_id ? ("ノード " + r.node_id) : ("領域 " + r.region_id);
+        if (r.node_label) target += "（" + r.node_label + "）";
+        html += "<div class='admin-list-item' data-report-id='" + escHtml(r.id) + "' style='border:1px solid var(--color-border);border-radius:6px;padding:8px 10px;margin-bottom:8px'>";
+        html += "<div style='display:flex;gap:8px;flex-wrap:wrap;align-items:center'>";
+        html += "<b>" + escHtml(target) + "</b>";
+        html += "<span>レベル" + escHtml(String(r.level)) + "</span>";
+        html += "<span>骨格 " + escHtml(r.skeleton_version) + "</span>";
+        if (r.version_mismatch) {
+          // 旧版への報告の識別 (受け入れ条件5)
+          html += "<span style='color:var(--color-text-danger,#e53935);border:1px solid currentColor;border-radius:4px;padding:0 6px;font-size:11px'>旧版（現行 " + escHtml(data.current_version || "—") + "）</span>";
+        }
+        html += "<span style='color:var(--color-text-secondary)'>" + escHtml(REPORT_STATUS_LABELS[r.status] || r.status) + "</span>";
+        if (r.open_count_for_target > 1) {
+          html += "<span style='color:var(--color-text-secondary)'>同一対象の未クローズ報告: " + escHtml(String(r.open_count_for_target)) + "件</span>";
+        }
+        html += "</div>";
+        html += "<div style='margin:6px 0;white-space:pre-wrap'>" + escHtml(r.report_text) + "</div>";
+        html += "<div style='color:var(--color-text-tertiary);font-size:11.5px'>報告者: " + escHtml(r.reporter_name || r.reporter_id) +
+          " ／ " + escHtml((r.created_at || "").slice(0, 16).replace("T", " ")) + "</div>";
+        if (r.resolution_note) {
+          html += "<div style='color:var(--color-text-secondary);font-size:12px;margin-top:4px'>処理メモ: " + escHtml(r.resolution_note) + "</div>";
+        }
+        if (r.applied_version) {
+          html += "<div style='color:var(--color-text-secondary);font-size:12px;margin-top:2px'>版 " + escHtml(r.applied_version) + " に反映済み</div>";
+        }
+        if (r.status === "pending") {
+          html += "<div style='display:flex;gap:6px;margin-top:6px;flex-wrap:wrap'>" +
+            "<button class='admin-action-btn' data-report-action='accept'>採用（次版へ）</button>" +
+            "<button class='admin-action-btn' data-report-action='decline'>見送り（理由つき）</button>" +
+            "<button class='admin-action-btn' data-report-action='merge'>重複統合</button>" +
+            "</div>";
+        }
+        html += "</div>";
+      });
+      reportsListEl.innerHTML = html;
+    }
+
+    function loadReports() {
+      if (!select.value || !reportsListEl) { renderReports(null); return; }
+      var status = reportsFilterEl ? reportsFilterEl.value : "pending";
+      setReportsStatus("読み込み中...");
+      apiFetch(reportsPath() + (status ? "?status=" + encodeURIComponent(status) : ""))
+        .then(function (res) {
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          return res.json();
+        })
+        .then(function (data) { renderReports(data); setReportsStatus(""); })
+        .catch(function (err) {
+          renderReports(null);
+          setReportsStatus("報告の読み込みに失敗しました: " + err.message, true);
+        });
+    }
+
+    function resolveReport(reportId, action) {
+      var note = "";
+      var mergeInto = "";
+      if (action === "decline") {
+        note = prompt("見送りの理由（必須・報告者に通知されます）") || "";
+        if (!note.trim()) { setReportsStatus("見送りには理由が必要です", true); return; }
+      } else if (action === "merge") {
+        mergeInto = prompt("統合先の報告ID（同じ内容の報告の id）") || "";
+        if (!mergeInto.trim()) { setReportsStatus("統合先の報告IDが必要です", true); return; }
+        note = prompt("統合メモ（任意）") || "";
+      } else if (action === "accept") {
+        if (!confirm("この報告を採用します。次版の凍結時に changelog へ報告者の帰属が記録されます。よろしいですか？")) return;
+        note = prompt("処理メモ（任意）") || "";
+      }
+      setReportsStatus("処理中...");
+      apiFetch(reportsPath() + "/" + encodeURIComponent(reportId) + "/resolve", {
+        method: "POST",
+        body: JSON.stringify({ action: action, note: note, merge_into: mergeInto }),
+      })
+        .then(function (res) {
+          return res.json().then(function (body) {
+            if (!res.ok) {
+              var detail = body.detail;
+              throw new Error(typeof detail === "string" ? detail : "HTTP " + res.status);
+            }
+            return body;
+          });
+        })
+        .then(function () { setReportsStatus("処理しました（報告者に通知されます）"); loadReports(); })
+        .catch(function (err) { setReportsStatus("処理に失敗しました: " + err.message, true); });
+    }
+
+    if (reportsListEl) {
+      reportsListEl.addEventListener("click", function (e) {
+        var btn = e.target.closest ? e.target.closest("[data-report-action]") : null;
+        if (!btn) return;
+        var item = btn.closest("[data-report-id]");
+        if (!item) return;
+        resolveReport(item.getAttribute("data-report-id"), btn.getAttribute("data-report-action"));
+      });
+      document.getElementById("atlas-reports-refresh").addEventListener("click", loadReports);
+      reportsFilterEl.addEventListener("change", loadReports);
     }
 
     function loadCartridges() {

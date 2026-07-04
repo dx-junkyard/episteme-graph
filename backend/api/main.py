@@ -886,8 +886,49 @@ def _run_migrations() -> None:
                 WHERE kind = 'tension' AND status = 'candidate'
         """))
 
+        # Migration 023: 分野の地図 — 修正報告フロー (Issue D)
+        # 骨格への修正報告を帰属つき(匿名不可)・骨格バージョンつきで記録する。
+        # レビューは既存の C層教員レビュー導線を流用(監査は theory_review_events)。
+        # 正本リファレンス: backend/db/023_atlas_correction_reports.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS atlas_correction_reports (
+                id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                kind             TEXT NOT NULL DEFAULT 'map_correction',
+                cartridge_id     TEXT NOT NULL DEFAULT '',
+                skeleton_version TEXT NOT NULL,
+                node_id          TEXT NOT NULL DEFAULT '',
+                region_id        TEXT NOT NULL DEFAULT '',
+                level            INTEGER NOT NULL DEFAULT 1 CHECK (level BETWEEN 1 AND 3),
+                node_label       TEXT NOT NULL DEFAULT '',
+                report_text      TEXT NOT NULL,
+                reporter_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                status           TEXT NOT NULL DEFAULT 'pending'
+                                     CHECK (status IN ('pending', 'accepted', 'declined', 'merged')),
+                resolution_note  TEXT NOT NULL DEFAULT '',
+                resolved_by      UUID REFERENCES users(id) ON DELETE SET NULL,
+                resolved_at      TIMESTAMPTZ,
+                merged_into      UUID REFERENCES atlas_correction_reports(id) ON DELETE SET NULL,
+                applied_version  TEXT NOT NULL DEFAULT '',
+                notified_at      TIMESTAMPTZ,
+                created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+                CHECK (node_id <> '' OR region_id <> '')
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_atlas_reports_cartridge_status ON atlas_correction_reports(cartridge_id, status)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_atlas_reports_reporter ON atlas_correction_reports(reporter_id)"
+        ))
+        session.execute(sa_text("""
+            CREATE INDEX IF NOT EXISTS idx_atlas_reports_unnotified
+                ON atlas_correction_reports(reporter_id)
+                WHERE resolved_at IS NOT NULL AND notified_at IS NULL
+        """))
+
         session.commit()
-        logger.info("Migrations (002-022) applied successfully.")
+        logger.info("Migrations (002-023) applied successfully.")
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema
@@ -975,6 +1016,7 @@ app.include_router(lecture.router)
 app.include_router(groups.router)
 app.include_router(export_routes.router)
 app.include_router(atlas_routes.learning_router)
+app.include_router(atlas_routes.report_router)
 
 
 @app.get("/healthz")
