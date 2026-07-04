@@ -1408,11 +1408,20 @@ def persist_chat_history(
     history: list[dict],
     user_message: str,
     assistant_answer: str,
-) -> None:
-    """チャット履歴を PostgreSQL に永続化する。"""
+    user_message_id: str | None = None,
+    assistant_message_id: str | None = None,
+) -> dict:
+    """チャット履歴を PostgreSQL に永続化し、付与したメッセージ id を返す。
+
+    各メッセージに安定した ``id`` を焼き込む。これを interest_traces にも記録することで、
+    「この問いに戻る」を同じ問いの再送信ではなく該当往復（元の Q/A）へのジャンプに使える。
+    id は best-effort で、永続化に失敗しても返す（呼び出し側の in-memory 状態と一致させる）。
+    """
+    user_message_id = user_message_id or str(uuid.uuid4())
+    assistant_message_id = assistant_message_id or str(uuid.uuid4())
     updated_history = history + [
-        {"role": "user", "content": user_message},
-        {"role": "assistant", "content": assistant_answer},
+        {"role": "user", "content": user_message, "id": user_message_id},
+        {"role": "assistant", "content": assistant_answer, "id": assistant_message_id},
     ]
     try:
         session = _pg_session()
@@ -1442,6 +1451,10 @@ def persist_chat_history(
             "Failed to persist learning chat for user=%s topic=%s",
             user_id, topic_id,
         )
+    return {
+        "user_message_id": user_message_id,
+        "assistant_message_id": assistant_message_id,
+    }
 
 
 # ---------------------------------------------------------------------------

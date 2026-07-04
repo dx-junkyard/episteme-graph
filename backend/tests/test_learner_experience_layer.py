@@ -145,6 +145,20 @@ def test_build_traces_view_shape_and_cue():
     assert "誤答" in view["revisit_cue"]["headline"]
 
 
+def test_build_traces_view_exposes_message_id_for_jump():
+    """「この問いに戻る」で元の往復へジャンプするため、payload.message_id をビューへ通す。"""
+    import datetime
+    recent = datetime.datetime.now()
+    rows = [
+        ("t1", "question", "open",
+         {"text": "近似の破綻条件は?", "context_label": "第1章", "message_id": "msg-abc"}, recent),
+        ("t2", "question", "open", {"text": "id の無い旧行"}, recent),  # 旧行は message_id 無し
+    ]
+    view = build_traces_view(rows)
+    assert view["traces"][0]["message_id"] == "msg-abc"
+    assert view["traces"][1]["message_id"] == ""  # 後方互換: 無ければ空文字（フロントは再送信にフォールバック）
+
+
 def test_build_traces_view_no_cue_when_all_resolved_or_recent():
     import datetime
     recent = datetime.datetime.now()
