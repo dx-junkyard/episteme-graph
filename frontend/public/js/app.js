@@ -493,6 +493,9 @@
       });
     });
 
+    // 分野の地図 (Issue C-3): 学習パス提案カードの三択と「自分で繋ぐ」を配線
+    bindAtlasPathCards(ca);
+
     // Render KaTeX for any remaining raw LaTeX (fallback)
     if (window.renderMathInElement) {
       try {
@@ -743,6 +746,11 @@
       html += renderNextActions(msg.next_actions);
     }
 
+    // 分野の地図 (Issue C-3): 学習パス提案カード (§8)
+    if (msg && msg.atlas_path_card) {
+      html += renderAtlasPathCard(msg.atlas_path_card);
+    }
+
     // 回答内容の出所（教材/別の資料/モデル生成）と L1 信頼性（tier）を末尾に明示する。
     if (msg && (msg.content_grounding || msg.overall_tier)) {
       var bar = '<div class="answer-tier-bar">';
@@ -894,6 +902,159 @@
       const b = pop.querySelector(".src-popup-body");
       if (b) b.textContent = "サーバーに接続できません。";
     }
+  }
+
+  // ── 分野の地図: 学習パス提案カード (Issue C-3, 仕様書 §8) ─────────────
+  // 表示規則: 各ステップに出所 (教材 / AI一般知識) と状態を明示。行間ステップは
+  // 「先生に聞くポイント」として質問テンプレートを添付。暗黙の前提は台帳状態を
+  // そのまま表示するのみ (評価しない)。終端は可能なら並置 + 「自分で繋ぐ」入力。
+  // 評価語・推薦理由・誘導文言は置かない。
+  var atlasCardSeq = 0;
+  var atlasPathCards = {}; // card_key → card (再描画・決定ハンドラ用)
+
+  function registerAtlasPathCard(card) {
+    if (!card) return null;
+    card.card_key = "apc-" + (++atlasCardSeq);
+    card.decision = card.decision || ""; // proceed/edit/dismiss 後の再描画用
+    atlasPathCards[card.card_key] = card;
+    return card;
+  }
+
+  function renderAtlasPathStep(step, isJuxta) {
+    var html = '<div class="atlas-path-step' + (step.is_gap ? " gap" : "") + '">';
+    html += '<span class="atlas-path-step-label">' + escHtml(step.label || "") + '</span>';
+    if (step.status_label) {
+      html += '<span class="atlas-path-badge">' + escHtml(step.status_label) + '</span>';
+    }
+    html += '<span class="atlas-path-badge ' +
+      (step.source === "model_knowledge" ? "src-model" : "src-material") + '">' +
+      escHtml(step.source_label || "") + '</span>';
+    if (step.is_gap && step.teacher_question) {
+      html += '<p class="atlas-path-teacherq">先生に聞くポイント: ' + escHtml(step.teacher_question) + '</p>';
+    } else if (step.ledger_note) {
+      html += '<p class="atlas-path-note">' + escHtml(step.ledger_note) + '</p>';
+    }
+    if (!isJuxta && step.visited_note) {
+      html += '<p class="atlas-path-note">' + escHtml(step.visited_note) + '</p>';
+    }
+    return html + "</div>";
+  }
+
+  function renderAtlasPathCard(card) {
+    var html = '<div class="atlas-path-card" data-card-key="' + escHtml(card.card_key || "") + '">';
+    html += '<div class="atlas-path-title">学習パスの候補 — 「' + escHtml((card.target || {}).label || "") + '」から</div>';
+    if (card.current_thread) {
+      html += '<div class="atlas-path-thread">いまの糸: ' + escHtml(card.current_thread) + '</div>';
+    }
+    (card.steps || []).forEach(function (step) { html += renderAtlasPathStep(step, false); });
+    (card.notes || []).forEach(function (note) {
+      html += '<p class="atlas-path-note">' + escHtml(note) + '</p>';
+    });
+
+    var terminal = card.terminal || {};
+    html += '<div class="atlas-path-terminal">';
+    if (terminal.mode === "juxtapose" && (terminal.pair || []).length === 2) {
+      // 並置: 2つの構造を黙って並べる。接続の言語化はしない (§8)
+      html += '<div class="atlas-path-juxta">';
+      terminal.pair.forEach(function (step) {
+        html += '<div class="atlas-path-juxta-cell">' + renderAtlasPathStep(step, true) + '</div>';
+      });
+      html += '</div>';
+    }
+    if (terminal.connect_input) {
+      html += '<div class="atlas-path-connect">'
+        + '<input type="text" class="atlas-path-connect-input" placeholder="自分で繋ぐ（自分の言葉で）">'
+        + '<button class="lx-ghost atlas-path-connect-save" type="button">記録する</button>'
+        + '</div>';
+      html += '<p class="atlas-path-connect-ack atlas-path-decided" style="display:none">自分の言葉で記録しました。</p>';
+    }
+    html += '</div>';
+
+    if (card.decision === "dismiss") {
+      html += '<p class="atlas-path-decided">この提案は閉じ、記録に残しました。</p>';
+    } else if (card.decision === "proceed") {
+      html += '<p class="atlas-path-decided">この糸で進んでいます。</p>';
+    } else {
+      html += '<div class="atlas-path-decisions">'
+        + '<button class="lx-ghost atlas-path-decide" data-decision="proceed" type="button">この糸で進む</button>'
+        + '<button class="lx-ghost secondary atlas-path-decide" data-decision="edit" type="button">編集する</button>'
+        + '<button class="lx-ghost secondary atlas-path-decide" data-decision="dismiss" type="button">今はやめる</button>'
+        + '</div>';
+    }
+    return html + "</div>";
+  }
+
+  // 三択 ([この糸で進む]/[編集する]/[今はやめる]) と「自分で繋ぐ」の記録。
+  // 却下 (今はやめる) も interest_traces に記録する — 情報を落とさない。
+  async function postAtlasPathDecision(card, decision, learnerText) {
+    try {
+      await apiFetch("/learning/courses/" + state.courseId + "/atlas/path-decision", {
+        method: "POST",
+        body: JSON.stringify({
+          node_id: (card.target || {}).node_id || "",
+          node_label: (card.target || {}).label || "",
+          level: card.level || 1,
+          skeleton_version: card.skeleton_version || "",
+          decision: decision,
+          learner_text: learnerText || "",
+          steps: (card.steps || []).map(function (s) { return s.label; }),
+          topic_id: state.currentTopicId || null,
+        }),
+      });
+    } catch (e) { /* best-effort: 記録失敗で操作は止めない */ }
+  }
+
+  function bindAtlasPathCards(container) {
+    container.querySelectorAll(".atlas-path-card").forEach(function (cardEl) {
+      var card = atlasPathCards[cardEl.getAttribute("data-card-key")];
+      if (!card) return;
+      cardEl.querySelectorAll(".atlas-path-decide").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var decision = this.getAttribute("data-decision");
+          postAtlasPathDecision(card, decision);
+          if (decision === "proceed") {
+            card.decision = "proceed";
+            var first = (card.steps || [])[0];
+            if (first) {
+              sendMessage("この学習パスで進めたい。まず「" + first.label + "」から説明して", {
+                atlas_context: {
+                  node_id: (card.target || {}).node_id || "",
+                  level: card.level || 1,
+                  skeleton_version: card.skeleton_version || "",
+                  action: "path_proceed",
+                  node_label: (card.target || {}).label || "",
+                },
+              });
+            } else {
+              renderChat();
+            }
+          } else if (decision === "edit") {
+            // 本人の言葉で編集して送る (§1.2-5): パスの文字列を入力欄に展開する
+            var input = document.getElementById("chat-input");
+            if (input) {
+              input.value = "この学習パスを編集したい: " +
+                (card.steps || []).map(function (s) { return s.label; }).join(" → ");
+              input.focus();
+            }
+          } else if (decision === "dismiss") {
+            card.decision = "dismiss";
+            renderChat();
+          }
+        });
+      });
+      var saveBtn = cardEl.querySelector(".atlas-path-connect-save");
+      if (saveBtn) {
+        saveBtn.addEventListener("click", function () {
+          var input = cardEl.querySelector(".atlas-path-connect-input");
+          var text = input ? input.value.trim() : "";
+          if (!text) return;
+          postAtlasPathDecision(card, "connect", text);
+          var ack = cardEl.querySelector(".atlas-path-connect-ack");
+          if (ack) ack.style.display = "";
+          if (input) input.value = "";
+        });
+      }
+    });
   }
 
   function renderNextActions(actions) {
@@ -1827,6 +1988,8 @@
           content_grounding: data.content_grounding || null,
           sources: data.sources || [],
           position_anchor: data.position_anchor || null,
+          // 分野の地図 (Issue C-3): 学習パス提案カード
+          atlas_path_card: registerAtlasPathCard(data.atlas_path_card),
           mock: isMock(data),
         });
         // Issue #145: 個人レイヤーの更新を反映する
@@ -2648,8 +2811,11 @@
   }
 
   // ── Expose sendPrompt globally for inline onclick ──────────────────
-  window.sendPrompt = function (text) {
-    sendMessage(text);
+  // 第2引数 payload は分野の地図 (Issue C-2) の構造化ペイロード
+  // ({atlas_context: {node_id, level, skeleton_version, action, ...}}) などを
+  // チャット API へそのまま引き渡すためのもの (自由文のみに依存しない)。
+  window.sendPrompt = function (text, payload) {
+    sendMessage(text, payload);
   };
 
   // ── Interactive Lecture Mode (Issue #66) ───────────────────────────

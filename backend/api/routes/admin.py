@@ -2623,8 +2623,10 @@ from routes.lecture_studio import router as _lecture_studio_router  # noqa: E402
 from routes.theory_components import router as _theory_components_router  # noqa: E402
 from routes.cartridges import router as _cartridges_router  # noqa: E402
 from routes.revisions import router as _revisions_router  # noqa: E402
+from routes.atlas import router as _atlas_router  # noqa: E402
 
 router.include_router(_lecture_studio_router)
 router.include_router(_theory_components_router)
 router.include_router(_cartridges_router)
 router.include_router(_revisions_router)
+router.include_router(_atlas_router)

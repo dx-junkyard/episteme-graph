@@ -1,0 +1,302 @@
+/* 分野の地図 — 全画面オーバーレイ (Issue B) */
+
+.atlas-ov {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 24px 16px;
+  overflow-y: auto;
+}
+.atlas-ov[hidden] { display: none; }
+
+.atlas-sheet {
+  width: 100%;
+  max-width: 860px;
+  background: var(--color-background-secondary, #f5f5f7);
+  border: 0.5px solid var(--color-border, #e5e5ea);
+  border-radius: 12px;
+  padding: 12px 12px 14px;
+  box-sizing: border-box;
+}
+
+.atlas-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  margin: 0;
+}
+
+/* ヘッダー行 */
+.atlas-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.atlas-title {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.atlas-spacer { flex: 1; }
+.atlas-seg {
+  display: inline-flex;
+  border: 0.5px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.atlas-seg-btn {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-text-primary, #1d1d1f);
+  font-size: 12.5px;
+  font-family: inherit;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.atlas-seg-btn + .atlas-seg-btn {
+  border-left: 0.5px solid var(--color-border, #e5e5ea);
+}
+.atlas-seg-btn.on {
+  background: var(--color-background-tertiary, #eeeef0);
+  color: var(--color-text-info, #378add);
+}
+.atlas-close {
+  background: transparent;
+  border: 0.5px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 6px;
+  color: var(--color-text-primary, #1d1d1f);
+  font-size: 13px;
+  font-family: inherit;
+  padding: 5px 9px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.atlas-crumb {
+  font-size: 12px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  margin: 6px 0 8px;
+}
+
+/* マップキャンバス */
+.atlas-canvas {
+  border: 0.5px solid var(--color-border, #e5e5ea);
+  border-radius: 8px;
+  background: var(--color-background-primary, #ffffff);
+  overflow: hidden;
+}
+.atlas-canvas svg { display: block; }
+
+.atlas-box {
+  fill: var(--color-background-primary, #ffffff);
+  stroke: var(--color-border-secondary, #d2d2d7);
+}
+.atlas-th {
+  font-size: 13px;
+  fill: var(--color-text-primary, #1d1d1f);
+  font-family: inherit;
+}
+.atlas-ts {
+  font-size: 11px;
+  fill: var(--color-text-secondary, #6e6e73);
+  font-family: inherit;
+}
+.atlas-node { cursor: pointer; }
+.atlas-node:focus { outline: none; }
+.atlas-node:focus-visible circle,
+.atlas-node:focus-visible rect {
+  filter: drop-shadow(0 0 2px rgba(55, 138, 221, 0.9));
+}
+.atlas-node.sel .atlas-ts,
+.atlas-node.sel .atlas-th {
+  fill: var(--color-text-primary, #1d1d1f);
+  font-weight: 600;
+}
+
+/* 詳細パネル (プレースホルダ。中身は C-1) */
+.atlas-panel {
+  border: 0.5px solid var(--color-border, #e5e5ea);
+  border-radius: 8px;
+  background: var(--color-background-primary, #ffffff);
+  padding: 12px 14px;
+  margin-top: 10px;
+  min-height: 40px;
+}
+.atlas-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.atlas-panel-name {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.atlas-panel-pill {
+  font-size: 11.5px;
+  padding: 2px 10px;
+  border-radius: 9px;
+}
+.atlas-panel-body { margin-top: 4px; }
+
+/* 詳細パネル中身 (Issue C-1) */
+.atlas-panel-verify,
+.atlas-panel-endorse {
+  font-size: 12.5px;
+  color: var(--color-text-secondary, #6e6e73);
+  margin: 8px 0 2px;
+}
+.atlas-panel-endorse { margin: 2px 0 10px; }
+.atlas-panel-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.atlas-act-btn {
+  font-size: 12.5px;
+  padding: 6px 12px;
+  background: var(--color-background-secondary, #f5f5f7);
+  border: 0.5px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 6px;
+  color: var(--color-text-primary, #1d1d1f);
+  font-family: inherit;
+  cursor: pointer;
+}
+.atlas-act-btn:hover {
+  background: var(--color-background-tertiary, #eeeef0);
+}
+
+/* 学習パス提案カード (Issue C-3) — 中央対話パネルに表示 */
+.atlas-path-card {
+  border: 0.5px solid var(--color-border, #e5e5ea);
+  border-radius: 8px;
+  background: var(--color-background-primary, #ffffff);
+  padding: 12px 14px;
+  margin-top: 10px;
+  font-size: 13px;
+}
+.atlas-path-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--color-text-primary, #1d1d1f);
+  margin-bottom: 6px;
+}
+.atlas-path-thread {
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 8px;
+}
+.atlas-path-step {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 0;
+  border-top: 0.5px dashed var(--color-border, #e5e5ea);
+}
+.atlas-path-step:first-of-type { border-top: none; }
+.atlas-path-step.gap {
+  border: 1px dashed #BA7517;
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin: 4px 0;
+}
+.atlas-path-step-label {
+  font-weight: 500;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.atlas-path-badge {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 8px;
+  background: var(--color-background-tertiary, #eeeef0);
+  color: var(--color-text-secondary, #6e6e73);
+  white-space: nowrap;
+}
+.atlas-path-badge.src-material { background: #E1F5EE; color: #085041; }
+.atlas-path-badge.src-model { background: transparent; border: 1px dashed #888780; }
+.atlas-path-note {
+  flex-basis: 100%;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+  margin: 2px 0 0;
+}
+.atlas-path-teacherq {
+  flex-basis: 100%;
+  font-size: 12px;
+  color: #854F0B;
+  margin: 2px 0 0;
+}
+.atlas-path-terminal {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 0.5px solid var(--color-border, #e5e5ea);
+}
+.atlas-path-juxta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 6px 0;
+}
+.atlas-path-juxta-cell {
+  border: 0.5px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 6px;
+  padding: 8px;
+}
+.atlas-path-connect {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.atlas-path-connect input {
+  flex: 1;
+  font-size: 12.5px;
+  padding: 5px 8px;
+  border: 0.5px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 6px;
+  font-family: inherit;
+}
+.atlas-path-decisions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.atlas-path-decided {
+  font-size: 12px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  margin-top: 8px;
+}
+
+/* 凡例 (常時表示・4項目) */
+.atlas-legend {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.atlas-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* フッター: 骨格の版数 (出所の常時明示) */
+.atlas-foot {
+  font-size: 11px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  margin: 8px 0 0;
+  text-align: right;
+}

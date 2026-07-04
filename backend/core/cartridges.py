@@ -22,6 +22,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from core import atlas as atlas_module
 from core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,9 @@ class DomainCartridge:
     review_prompt: str
     examples: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     raw_manifest: dict[str, Any] = field(default_factory=dict)
+    # 分野の地図の骨格 (Issue A)。同梱されていないカートリッジでは None
+    # (フォールバック: 地図機能を出さない)
+    atlas_skeleton: atlas_module.AtlasSkeleton | None = None
 
     # Convenience accessors -------------------------------------------------
 
@@ -128,6 +132,14 @@ class DomainCartridge:
         for entry in self.component_types:
             if str(entry.get("id")) == component_type_id:
                 return dict(entry)
+        return None
+
+    @property
+    def learner_atlas_skeleton(self) -> atlas_module.AtlasSkeleton | None:
+        """学習者向けに表示してよい骨格。draft / 未レビューは決して返さない。"""
+        skeleton = self.atlas_skeleton
+        if skeleton is not None and skeleton.is_learner_visible:
+            return skeleton
         return None
 
     def default_maturity_for(self, component_type_id: str) -> str | None:
@@ -162,6 +174,11 @@ class DomainCartridge:
             "extraction_prompt": self.extraction_prompt,
             "review_prompt": self.review_prompt,
             "examples": list(self.examples),
+            "atlas_skeleton": (
+                atlas_module.skeleton_to_dict(self.atlas_skeleton)["atlas_skeleton"]
+                if self.atlas_skeleton is not None
+                else None
+            ),
         }
 
 
@@ -228,6 +245,35 @@ def _load_manifest(directory: Path) -> dict[str, Any]:
     return manifest
 
 
+def _load_atlas_skeleton(directory: Path, files: dict[str, Any]) -> atlas_module.AtlasSkeleton | None:
+    """同梱骨格 `atlas/skeleton.yaml` を読み込む (Issue A-1)。
+
+    - ファイルが無ければ None (地図機能を出さないフォールバック)
+    - 同梱できるのは凍結済み (frozen) の骨格のみ。draft の同梱や
+      `generated_by` / `reviewed_by` の欠落はビルド失敗 (ValueError) にする
+      (受け入れ条件2・3)
+    """
+    path = directory / str(files.get("atlas_skeleton", atlas_module.SKELETON_FILENAME))
+    if not path.exists():
+        return None
+    try:
+        skeleton = atlas_module.load_skeleton(path)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"atlas skeleton の読み込みに失敗しました: {path}: {exc}") from exc
+    if skeleton.status != atlas_module.STATUS_FROZEN:
+        raise ValueError(
+            f"カートリッジに同梱できる骨格は凍結済みのみです (status={skeleton.status!r}): {path}"
+        )
+    report = atlas_module.validate_skeleton(skeleton)
+    if not report.ok:
+        raise ValueError(
+            f"同梱骨格のバリデーションに失敗しました: {path}: " + "; ".join(report.errors)
+        )
+    for warning in report.warnings:
+        logger.warning("atlas skeleton (%s): %s", path, warning)
+    return skeleton
+
+
 def _load_one(directory: Path) -> DomainCartridge:
     manifest = _load_manifest(directory)
     files = manifest.get("files") or {}
@@ -289,6 +335,7 @@ def _load_one(directory: Path) -> DomainCartridge:
         review_prompt=review_prompt,
         examples=_load_examples(directory),
         raw_manifest=manifest,
+        atlas_skeleton=_load_atlas_skeleton(directory, files if isinstance(files, dict) else {}),
     )
 
     _validate_internal_consistency(cartridge)
@@ -351,6 +398,14 @@ def load_cartridge(cartridge_id: str | None = None) -> DomainCartridge:
 
 def get_default_cartridge() -> DomainCartridge:
     return load_cartridge()
+
+
+def cartridge_directory(cartridge_id: str) -> Path:
+    """カートリッジのディレクトリを返す (atlas 骨格の draft 読み書きなどに使う)。"""
+    directory = _cartridges_root() / cartridge_id
+    if not directory.is_dir():
+        raise FileNotFoundError(f"Cartridge directory not found: {directory}")
+    return directory
 
 
 def list_cartridges() -> list[CartridgeSummary]:

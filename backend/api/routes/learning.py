@@ -77,6 +77,7 @@ from core.learning_support_agent import (
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
 from core.course_content_builder import build_course_content_background
+from core.atlas_path import build_learning_path_card
 from core.tension.prefilter import judge_tension_hint
 from core.tension.worker import maybe_schedule_tension_mining
 
@@ -1147,6 +1148,120 @@ def delete_chat_history(
     return {"status": "deleted"}
 
 
+# ---------------------------------------------------------------------------
+# 分野の地図 (Issue C-2/C-3) — ↗ アクションの型付き処理
+# ---------------------------------------------------------------------------
+
+def _atlas_safe_int(value, default: int = 1) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _atlas_step_dicts(raw) -> list[dict]:
+    """クライアント添付の related / juxtapose を検証済みの dict 列に正規化する。"""
+    out: list[dict] = []
+    if isinstance(raw, list):
+        for e in raw:
+            if isinstance(e, dict):
+                out.append({
+                    "node_id": str(e.get("node_id") or ""),
+                    "label": str(e.get("label") or ""),
+                    "status": str(e.get("status") or ""),
+                    "pill": str(e.get("pill") or ""),
+                })
+    return out
+
+
+def _atlas_attribution(ctx: dict) -> dict:
+    """帰属つき記録に焼き込む構造化ペイロード (自由文のみに依存しない)。"""
+    return {
+        "node_id": str(ctx.get("node_id") or ""),
+        "level": _atlas_safe_int(ctx.get("level")),
+        "skeleton_version": str(ctx.get("skeleton_version") or ""),
+        "action": str(ctx.get("action") or ""),
+        "node_label": str(ctx.get("node_label") or ""),
+    }
+
+
+def _atlas_action_response(
+    user_id: str,
+    course_id: str,
+    topic_id: str,
+    body: LearningChatRequest,
+    course_data: dict,
+    ctx: dict,
+) -> LearningChatResponse | None:
+    """地図の ↗ アクションのうち、決定論的に応答するもの (mind / learn) を処理する。
+
+    - mind (気になる ↗): 学習者本人が宣言した違和感。既存 tension 記録経路
+      (interest_traces kind='tension') に帰属つきで記録する。本人発の宣言なので
+      candidate ではなく open (P1: 違和感を生成するのは人間 — ここでは人間が押している)。
+    - learn (ここから学ぶ ↗): 学習パス提案カード (§8) を決定論的に生成して返す。
+      リアルタイム LLM 生成はしない。
+    - evid ほかは None を返し、通常の RAG フローに流す (帰属は呼び出し側で焼き込む)。
+    """
+    action = str(ctx.get("action") or "")
+    node_label = str(ctx.get("node_label") or ctx.get("node_id") or "")
+    attribution = _atlas_attribution(ctx)
+
+    if action == "mind":
+        record_interest_trace(
+            user_id, course_id, topic_id,
+            kind="tension",
+            text=body.message,
+            context_label=node_label,
+            extra_payload={"atlas": attribution, "origin": "atlas_mind"},
+            status="open",
+        )
+        answer = (
+            f"「{node_label}」への引っかかりを、あなたの違和感として帰属つきで記録しました。\n"
+            "記録は「問いの軌跡」に残ります。言葉にできるようになったら、"
+            "いつでも自分の言葉で書き直せます。"
+        )
+        persist_chat_history(
+            user_id, course_id, topic_id,
+            body.history, body.message, answer,
+            user_message_id=body.message_id or None,
+        )
+        return LearningChatResponse(answer=answer, course_update=None)
+
+    if action == "learn":
+        interest_view = get_interest_traces(user_id, course_id, topic_id)
+        card = build_learning_path_card(
+            node_id=str(ctx.get("node_id") or ""),
+            node_label=node_label,
+            level=_atlas_safe_int(ctx.get("level")),
+            skeleton_version=str(ctx.get("skeleton_version") or ""),
+            node_status=str(ctx.get("node_status") or ""),
+            node_pill=str(ctx.get("node_pill") or ""),
+            related=_atlas_step_dicts(ctx.get("related")),
+            juxtapose=_atlas_step_dicts(ctx.get("juxtapose")),
+            course_topics=course_data.get("topics") or [],
+            interest_traces=(interest_view or {}).get("traces") or [],
+        )
+        answer = (
+            f"「{node_label}」からの学習パスの候補です。"
+            "各ステップに出所（教材 / AI一般知識）と台帳の状態を添えています。"
+        )
+        record_interest_trace(
+            user_id, course_id, topic_id,
+            kind="question",
+            text=body.message,
+            context_label=node_label,
+            extra_payload={"atlas": attribution, "atlas_path_proposed": True},
+        )
+        persist_chat_history(
+            user_id, course_id, topic_id,
+            body.history, body.message, answer,
+            user_message_id=body.message_id or None,
+        )
+        return LearningChatResponse(answer=answer, course_update=None, atlas_path_card=card)
+
+    return None
+
+
 @router.post(
     "/courses/{course_id}/topics/{topic_id}/chat",
     response_model=LearningChatResponse,
@@ -1219,8 +1334,18 @@ def learning_chat(
     # tier 集約（根拠の一線）はそのまま通す。
     _is_casual = (body.intent_mode or "").strip() == "casual"
 
+    # 分野の地図 (Issue C-2/C-3): ↗ アクションは型付きなので意図分類を経由しない。
+    # mind / learn は決定論的に応答し、evid ほかは通常の RAG フローへ流す。
+    _atlas_ctx = body.atlas_context if isinstance(body.atlas_context, dict) else None
+    if _atlas_ctx:
+        _atlas_response = _atlas_action_response(
+            current_user["id"], course_id, topic_id, body, course_data, _atlas_ctx
+        )
+        if _atlas_response is not None:
+            return _atlas_response
+
     # 2. 意図分類（Intent Routing）— UI ボタン由来の型付きアクションは分類を経由しない。
-    intent = None if _is_casual else (
+    intent = None if (_is_casual or _atlas_ctx) else (
         _route_for_typed_action(body.support_action) or _classify_intent(body.message, course_title)
     )
 
@@ -1282,7 +1407,7 @@ def learning_chat(
 
     # 3. Adaptive Routing: 前提知識の自動判定 (ルート③/④の前に実行)
     # casual モードでは会話を止めない（前提確認の逆質問ゲートを挟まない）。
-    prerequisite_intervention = None if _is_casual else check_prerequisites(
+    prerequisite_intervention = None if (_is_casual or _atlas_ctx) else check_prerequisites(
         current_user["id"], course_id, course_data, topic_title, body.message
     )
     if prerequisite_intervention:
@@ -1423,6 +1548,8 @@ def learning_chat(
             "casual": _is_casual,
             # 「この問いに戻る」で元の往復へジャンプするための逆引き（この問いを発した user メッセージ id）。
             "message_id": _persisted.get("user_message_id"),
+            # 分野の地図由来の質問 (根拠を見る ↗ など) は帰属を構造化して焼き込む (Issue C-2)
+            **({"atlas": _atlas_attribution(_atlas_ctx)} if _atlas_ctx else {}),
         },
     )
     # ヒント累積が閾値に達していればバックグラウンドで TensionMiningAgent を起動
@@ -1518,6 +1645,72 @@ def internalize_interest_trace_route(
     if not ok:
         raise HTTPException(status_code=400, detail="Could not save internalization")
     return {"ok": True, "trace_id": trace_id}
+
+
+# ---------------------------------------------------------------------------
+# 分野の地図 — 学習パス提案カードの三択記録 (Issue C-3)
+# ---------------------------------------------------------------------------
+
+
+class AtlasPathDecisionRequest(BaseModel):
+    node_id: str = ""
+    node_label: str = ""
+    level: int = 1
+    skeleton_version: str = ""
+    decision: str = ""  # proceed | edit | dismiss | connect
+    learner_text: str = ""
+    steps: list[str] = []
+    topic_id: str | None = None
+
+
+# 三択 + 「自分で繋ぐ」→ interest_traces の status。
+# 却下 (dismiss) も status='dismissed' で保持し、削除しない (情報を落とさない §1.2)。
+# connect は本人の言葉での記録なので articulated。
+_ATLAS_PATH_DECISIONS = {
+    "proceed": ("resolved", "この糸で進む"),
+    "edit": ("resolved", "編集する"),
+    "dismiss": ("dismissed", "今はやめる"),
+    "connect": ("articulated", "自分で繋ぐ"),
+}
+
+
+@router.post("/courses/{course_id}/atlas/path-decision")
+def record_atlas_path_decision(
+    course_id: str,
+    body: AtlasPathDecisionRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """学習パス提案カードの選択を interest_traces に帰属つきで記録する (Issue C-3)。
+
+    [この糸で進む] [編集する] [今はやめる] と「自分で繋ぐ」入力のすべてを記録する。
+    却下 (今はやめる) も記録する — 情報を落とさない。
+    """
+    if body.decision not in _ATLAS_PATH_DECISIONS:
+        raise HTTPException(status_code=400, detail="Unknown decision")
+    status, decision_label = _ATLAS_PATH_DECISIONS[body.decision]
+    text = f"学習パス提案（「{body.node_label or body.node_id}」から）: {decision_label}"
+    if body.decision == "connect" and body.learner_text.strip():
+        # 「自分で繋ぐ」は本人の言葉をそのまま主文に残す (§1.2-5)
+        text = body.learner_text.strip()
+    record_interest_trace(
+        current_user["id"], course_id, body.topic_id,
+        kind="raw",
+        text=text,
+        context_label=body.node_label,
+        extra_payload={
+            "atlas": {
+                "node_id": body.node_id,
+                "level": body.level,
+                "skeleton_version": body.skeleton_version,
+                "action": "path_decision",
+                "node_label": body.node_label,
+            },
+            "decision": body.decision,
+            "path_steps": body.steps[:12],
+        },
+        status=status,
+    )
+    return {"ok": True, "decision": body.decision, "status": status}
 
 
 # ---------------------------------------------------------------------------

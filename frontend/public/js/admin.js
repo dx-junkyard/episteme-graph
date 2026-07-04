@@ -1916,6 +1916,182 @@
     refreshBtn.addEventListener("click", loadStumbles);
   }
 
+  // ── 分野の地図 — 骨格レビュー・凍結 (Issue A-3) ─────────────────────
+  function initAtlas() {
+    var select = document.getElementById("atlas-cartridge-select");
+    if (!select) return;
+    var statusEl = document.getElementById("atlas-status");
+    var frozenInfoEl = document.getElementById("atlas-frozen-info");
+    var draftArea = document.getElementById("atlas-draft-area");
+    var editor = document.getElementById("atlas-draft-editor");
+    var validationEl = document.getElementById("atlas-validation");
+    var generateBtn = document.getElementById("atlas-generate");
+    var hasDraft = false;
+    var cartridgesLoaded = false;
+
+    function setStatus(text, isError) {
+      statusEl.textContent = text || "";
+      statusEl.style.color = isError ? "var(--color-text-danger, #e53935)" : "var(--color-text-secondary)";
+    }
+
+    function basePath() {
+      return "/admin/cartridges/" + encodeURIComponent(select.value) + "/atlas/skeleton";
+    }
+
+    function renderValidation(validation) {
+      if (!validation) { validationEl.innerHTML = ""; return; }
+      var html = "";
+      (validation.errors || []).forEach(function (e) {
+        html += "<div style='color:var(--color-text-danger,#e53935)'>エラー: " + escHtml(e) + "</div>";
+      });
+      (validation.warnings || []).forEach(function (w) {
+        html += "<div style='color:var(--color-text-secondary)'>警告: " + escHtml(w) + "</div>";
+      });
+      validationEl.innerHTML = html;
+    }
+
+    function renderState(data) {
+      hasDraft = !!(data && data.draft);
+      var frozen = data && data.frozen ? data.frozen.skeleton : null;
+      if (frozen) {
+        var reviewers = (frozen.reviewed_by || []).join(", ");
+        frozenInfoEl.innerHTML =
+          "凍結済み: 版 <b>" + escHtml(frozen.version) + "</b>" +
+          " ／ 生成来歴: " + escHtml(frozen.generated_by || "—") +
+          " ／ レビュー帰属: " + escHtml(reviewers || "—") +
+          "（凍結版は不変。修正は draft を作って次版で凍結）";
+      } else {
+        frozenInfoEl.textContent = "凍結済みの骨格はまだありません（学習者には地図が表示されません）。";
+      }
+      if (hasDraft) {
+        draftArea.style.display = "";
+        editor.value = JSON.stringify({ atlas_skeleton: data.draft.skeleton }, null, 2);
+        renderValidation(data.draft.validation);
+        generateBtn.textContent = "draft を再生成（AIバッチ・上書き）";
+      } else {
+        draftArea.style.display = "none";
+        editor.value = "";
+        renderValidation(null);
+        generateBtn.textContent = "draft を生成（AIバッチ）";
+      }
+    }
+
+    function loadState() {
+      if (!select.value) {
+        frozenInfoEl.textContent = "";
+        draftArea.style.display = "none";
+        setStatus("カートリッジを選択してください");
+        return;
+      }
+      setStatus("読み込み中...");
+      apiFetch(basePath())
+        .then(function (res) {
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          return res.json();
+        })
+        .then(function (data) { renderState(data); setStatus(""); })
+        .catch(function (err) { setStatus("読み込みに失敗しました: " + err.message, true); });
+    }
+
+    function loadCartridges() {
+      if (cartridgesLoaded) { loadState(); return; }
+      apiFetch("/admin/cartridges")
+        .then(function (res) { return res.json(); })
+        .then(function (items) {
+          (items || []).forEach(function (c) {
+            var opt = document.createElement("option");
+            opt.value = c.cartridge_id;
+            opt.textContent = c.name + " (" + c.cartridge_id + ")";
+            select.appendChild(opt);
+          });
+          cartridgesLoaded = true;
+          if (items && items.length === 1) {
+            select.value = items[0].cartridge_id;
+            loadState();
+          }
+        })
+        .catch(function () { setStatus("カートリッジ一覧の取得に失敗しました", true); });
+    }
+
+    generateBtn.addEventListener("click", function () {
+      if (!select.value) { setStatus("カートリッジを選択してください", true); return; }
+      if (hasDraft && !confirm("既存の draft を破棄して再生成します。よろしいですか？")) return;
+      setStatus("LLM バッチ生成中...（この操作は明示的な一度だけの実行です）");
+      apiFetch(basePath() + "/generate", {
+        method: "POST",
+        body: JSON.stringify({ force: hasDraft }),
+      })
+        .then(function (res) {
+          return res.json().then(function (body) {
+            if (!res.ok) throw new Error(body.detail || ("HTTP " + res.status));
+            return body;
+          });
+        })
+        .then(function () { setStatus("draft を生成しました。レビュー・修正のうえ凍結してください"); loadState(); })
+        .catch(function (err) { setStatus("生成に失敗しました: " + err.message, true); });
+    });
+
+    document.getElementById("atlas-save-draft").addEventListener("click", function () {
+      var parsed;
+      try {
+        parsed = JSON.parse(editor.value);
+      } catch (e) {
+        setStatus("JSON の構文エラー: " + e.message, true);
+        return;
+      }
+      setStatus("保存中...");
+      apiFetch(basePath() + "/draft", {
+        method: "PUT",
+        body: JSON.stringify({ skeleton: parsed }),
+      })
+        .then(function (res) {
+          return res.json().then(function (body) {
+            if (!res.ok) {
+              var detail = body.detail;
+              if (detail && detail.errors) {
+                renderValidation({ errors: detail.errors, warnings: [] });
+                throw new Error(detail.message || "バリデーションエラー");
+              }
+              throw new Error(typeof detail === "string" ? detail : "HTTP " + res.status);
+            }
+            return body;
+          });
+        })
+        .then(function (body) {
+          renderValidation(body.draft.validation);
+          setStatus("draft を保存しました");
+        })
+        .catch(function (err) { setStatus("保存に失敗しました: " + err.message, true); });
+    });
+
+    document.getElementById("atlas-freeze").addEventListener("click", function () {
+      var version = document.getElementById("atlas-freeze-version").value.trim();
+      var note = document.getElementById("atlas-freeze-note").value.trim();
+      if (!version) { setStatus("版数を入力してください (例: 2026.1)", true); return; }
+      if (!confirm("版 " + version + " として凍結します。凍結後は不変で、あなたのIDがレビュー帰属として記録されます。よろしいですか？")) return;
+      setStatus("凍結中...");
+      apiFetch(basePath() + "/freeze", {
+        method: "POST",
+        body: JSON.stringify({ version: version, note: note }),
+      })
+        .then(function (res) {
+          return res.json().then(function (body) {
+            if (!res.ok) {
+              var detail = body.detail;
+              throw new Error(typeof detail === "string" ? detail : "HTTP " + res.status);
+            }
+            return body;
+          });
+        })
+        .then(function () { setStatus("凍結しました。カートリッジに同梱されます"); loadState(); })
+        .catch(function (err) { setStatus("凍結に失敗しました: " + err.message, true); });
+    });
+
+    select.addEventListener("change", loadState);
+    document.getElementById("atlas-refresh").addEventListener("click", loadState);
+    onTabActivate("atlas", loadCartridges);
+  }
+
   // ── 学習者体験レイヤー(B層) Stage 4 — 関心集約ダッシュボード（実集計）──────
   function initInterestDashboard() {
     var select = document.getElementById("interest-dashboard-course-select");
@@ -9601,6 +9777,7 @@
       initLectureStudio();
     }
     initStumbles();
+    initAtlas();
     initInterestDashboard();
     initSchemaProposals();
     initSchemaEvolution();

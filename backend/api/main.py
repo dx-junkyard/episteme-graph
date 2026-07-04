@@ -54,6 +54,7 @@ from sqlalchemy import text as sa_text
 
 from dependencies import _hash_password
 from routes import auth, learning, admin, lecture, groups, error_logs, export as export_routes
+from routes import atlas as atlas_routes
 from core.config import get_settings as _get_settings
 from core.postgres import get_session as _pg_session, check_connection as _pg_check
 
@@ -973,6 +974,7 @@ app.include_router(error_logs.router)
 app.include_router(lecture.router)
 app.include_router(groups.router)
 app.include_router(export_routes.router)
+app.include_router(atlas_routes.learning_router)
 
 
 @app.get("/healthz")

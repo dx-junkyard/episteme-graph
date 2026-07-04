@@ -262,6 +262,10 @@ class LearningChatRequest(BaseModel):
     position_anchor: dict | None = None  # L2: クライアントの現在位置 {segment_id, scroll_offset}
     message_id: str | None = None  # クライアント生成のメッセージ id。永続履歴・関心痕跡へ焼き込み「この問いに戻る」で該当往復へジャンプさせる
     intent_mode: str | None = None  # "on_path"(本筋維持) | "explore"(寄り道) | "casual"(気軽に話せる先生) — 送信時の意図
+    # 分野の地図 (Issue C-2): ↗ アクション由来の構造化ペイロード
+    # {node_id, level, skeleton_version, action, node_label, node_status, node_pill,
+    #  related?, juxtapose?} — 自由文のみに依存しない
+    atlas_context: dict | None = None
     chunk_id: str | None = None
     element_id: str | None = None
     element_type: str | None = None
@@ -311,6 +315,9 @@ class LearningChatResponse(BaseModel):
     # 確認等のシステム応答では None のまま）。
     content_grounding: str | None = None        # course_material | other_material | model_generated
     position_anchor: dict | None = None         # L2: 復帰位置アンカー
+    # 分野の地図 (Issue C-3): 「ここから学ぶ」への学習パス提案カード
+    # (core.atlas_path.build_learning_path_card の出力。通常チャットでは None)
+    atlas_path_card: dict | None = None
     mock: bool = False                          # 🚧 mock 由来データを含むか（UI バッジ用）
 
 
