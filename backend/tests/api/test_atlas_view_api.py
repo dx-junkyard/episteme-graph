@@ -535,3 +535,93 @@ class TestPerformance:
         samples.sort()
         p95 = samples[int(len(samples) * 0.95) - 1]
         assert p95 < 0.3, f"p95={p95 * 1000:.1f}ms"
+
+
+# ---------------------------------------------------------------------------
+# gap4: データソース既定 (runtime-config)
+# ---------------------------------------------------------------------------
+
+
+class TestRuntimeConfig:
+    def test_default_is_api(self, client):
+        """本番でモック地図が出ないよう、既定は api (認証不要の軽量フラグ)。"""
+        res = client.get("/api/atlas/runtime-config")
+        assert res.status_code == 200
+        assert res.json()["data_source"] == "api"
+
+
+# ---------------------------------------------------------------------------
+# gap2/gap3: get_atlas の course/topic 対応
+# ---------------------------------------------------------------------------
+
+
+class TestCourseAware:
+    def test_course_resolves_cartridge_and_topic_focus(self, client, warm_cache, monkeypatch):
+        from api import services
+
+        course_data = {
+            "cartridge_id": "particle_physics",
+            "sources": [],
+            "topics": [{"id": "t1", "title": "演算子積展開"}],
+        }
+        monkeypatch.setattr(services, "get_course_data", lambda uid, cid: course_data)
+        res = client.get("/api/atlas?course=c1&topic=t1", headers=_headers())
+        assert res.status_code == 200
+        data = res.json()
+        # gap3: コースからカートリッジが解決される
+        assert data["cartridge"] == "particle_physics"
+        # gap2: topic → 骨格概念の focus がサーバ側で解決される
+        assert data["focus"] == "ope"
+        assert data["initial_selection"]["1"] == "ope"
+
+    def test_missing_cartridge_and_course_is_422(self, client, warm_cache):
+        res = client.get("/api/atlas", headers=_headers())
+        assert res.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# gap1: 通常学習で「いまここ」を動かす帰属解決
+# ---------------------------------------------------------------------------
+
+
+class TestTopicAttributionGap1:
+    def test_resolves_now_from_topic(self, sandbox_cartridges, monkeypatch):
+        from api.routes import learning
+        from core import atlas_state
+        from core import cartridges as cartridges_module
+
+        skeleton = cartridges_module.load_cartridge("particle_physics").learner_atlas_skeleton
+        concept_id = skeleton.concept_ids()[0]
+
+        class _S:
+            def close(self):
+                pass
+
+        monkeypatch.setattr(learning, "_pg_session", lambda: _S())
+        monkeypatch.setattr(atlas_state, "resolve_course_cartridge", lambda s, cd: "particle_physics")
+
+        out = learning._atlas_topic_attribution(
+            {"cartridge_id": "particle_physics"},
+            {"id": "t1", "title": "x", "atlas_node_id": concept_id},
+        )
+        assert out is not None
+        assert out["node_id"] == concept_id
+        assert out["action"] == "study"
+        assert out["level"] == 1
+        assert out["skeleton_version"] == skeleton.version
+
+    def test_returns_none_when_no_match(self, sandbox_cartridges, monkeypatch):
+        from api.routes import learning
+        from core import atlas_state
+
+        class _S:
+            def close(self):
+                pass
+
+        monkeypatch.setattr(learning, "_pg_session", lambda: _S())
+        monkeypatch.setattr(atlas_state, "resolve_course_cartridge", lambda s, cd: "particle_physics")
+
+        out = learning._atlas_topic_attribution(
+            {}, {"id": "t", "title": "全く無関係な題目zzz9"}
+        )
+        assert out is None

@@ -52,7 +52,8 @@
     return !!(window.AtlasMinimap && window.AtlasMinimap.available === false);
   }
 
-  // 完了トピック名 → 地図ノードの決定論的な突き合わせ (ラベル一致 → 包含一致)。
+  // gap2 fallback: 完了トピック名 → 地図ノードの突き合わせ (ラベル一致 → 包含一致)。
+  // 本筋はサーバ側 binding 解決 (data.focus)。これはサーバが解決できなかったときの縮退。
   // 見つからなければ null を返し、オーバーレイは「いまここ」中心で開く。
   function resolveFocusNode(data, label) {
     if (!data || !data.nodes || !label) return null;
@@ -74,9 +75,13 @@
   }
 
   async function openFromCue(kind, opts) {
-    const data = window.AtlasData ? await window.AtlasData.load() : undefined;
+    // gap2: トピック id を渡してサーバ側 (binding) で focus を解決させる。
+    const data = window.AtlasData
+      ? await window.AtlasData.load(undefined, { focusTopicId: opts.focusTopicId })
+      : undefined;
     if (window.AtlasData && !data) { removeCard(); return; } // 骨格なし
-    const focus = resolveFocusNode(data, opts.focusLabel || "");
+    // サーバ解決 focus を優先。無ければラベル一致で縮退する。
+    const focus = (data && data.focus) || resolveFocusNode(data, opts.focusLabel || "");
     removeCard();
     if (window.AtlasOverlay) {
       window.AtlasOverlay.open(data, {

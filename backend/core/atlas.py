@@ -601,6 +601,76 @@ def learner_view(skeleton: AtlasSkeleton) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# topic → 骨格概念の対応付け (Issue: 個人層 binding の整備)
+#
+# 通常学習で「いまここ」を動かす (gap1) / トピック完了導線の focus 解決 (gap2) の
+# 共通土台。決定論的で LLM/DB に依存しない (本モジュールの純粋性を維持する)。
+# コーパス由来の binding (topic の教材 → component → concept_bindings) は DB 層で
+# 算出し、その結果 (bound_concept_id) を引数として渡す。
+# ---------------------------------------------------------------------------
+
+
+def normalize_label(text: str) -> str:
+    """ラベル比較用の正規化 (小文字化・空白/中黒/全角空白の除去)。純粋。"""
+    return "".join(str(text or "").lower().split()).replace("・", "").replace("　", "")
+
+
+def match_topic_to_concept(
+    topic: dict,
+    skeleton: AtlasSkeleton,
+    *,
+    bound_concept_id: str | None = None,
+) -> str | None:
+    """コースのトピックを骨格概念 id に対応付ける (決定論的・LLM/DB非依存)。
+
+    優先順:
+      1. 明示 binding: topic.atlas_node_id / atlas_concept_id が既知の骨格 id なら採用
+         (authoring-time で最強)。
+      2. コーパス binding: 呼び出し側 (DB層) が算出した bound_concept_id
+         (topic の教材由来 component → concept_bindings 経由の骨格概念)。
+      3. ラベル一致 (fallback): 正規化した topic.title と concept.label/id の一致 → 包含。
+         最後の縮退先として region.label を使う。gap2 のクライアント文字列一致を置換する。
+    返り値は骨格概念 id (該当なければ region id、いずれも無ければ None)。
+    """
+    if not isinstance(topic, dict) or skeleton is None:
+        return None
+    concept_ids = set(skeleton.concept_ids())
+    region_ids = set(skeleton.region_ids())
+    known = concept_ids | region_ids
+
+    # 1. 明示 binding
+    for key in ("atlas_node_id", "atlas_concept_id"):
+        explicit = str(topic.get(key) or "")
+        if explicit and explicit in known:
+            return explicit
+
+    # 2. コーパス binding (DB 層で算出)
+    if bound_concept_id and bound_concept_id in known:
+        return bound_concept_id
+
+    # 3. ラベル一致 (concept 優先、region は最後の縮退先)
+    title = normalize_label(topic.get("title") or topic.get("label") or topic.get("name") or "")
+    if not title:
+        return None
+    concepts = [c for r in skeleton.regions for c in r.concepts]
+    # 3a. 完全一致 (label / id)
+    for c in concepts:
+        if normalize_label(c.label) == title or normalize_label(c.id) == title:
+            return c.id
+    # 3b. 包含一致 (短すぎる概念ラベルは誤爆防止のため 2 文字以上に限る)
+    for c in concepts:
+        cl = normalize_label(c.label)
+        if len(cl) >= 2 and (cl in title or title in cl):
+            return c.id
+    # 3c. 縮退: region ラベル
+    for r in skeleton.regions:
+        rl = normalize_label(r.label)
+        if rl and (rl == title or (len(rl) >= 2 and (rl in title or title in rl))):
+            return r.id
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 凍結
 # ---------------------------------------------------------------------------
 

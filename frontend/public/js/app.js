@@ -2012,6 +2012,7 @@
         window.AtlasCues.showCue("detour_return", {
           container: document.getElementById("chat-area"),
           text: "寄り道から「" + destTopic.title + "」へ戻りました。",
+          focusTopicId: destTopic.id,
           focusLabel: destTopic.title,
           highlight: true,
         });
@@ -2036,6 +2037,16 @@
     state.currentTopicId = topicId;
     state.chatMessages = [];
     state.topicMaterial = [];
+    // 分野の地図 (gap3): course/topic の文脈を配線し、地図データを正しいカートリッジ・
+    // 現在地で取得できるようにする (AtlasData / AtlasMinimap / AtlasCues が参照)。
+    var _topicForAtlas = (state.course && (state.course.topics || []).find(function (t) {
+      return t.id === topicId;
+    })) || null;
+    window.AtlasContext = {
+      courseId: state.courseId || "",
+      topicId: topicId || "",
+      topicLabel: _topicForAtlas ? (_topicForAtlas.title || "") : "",
+    };
     renderSidebar();
     renderChat();
     renderRightPanel();
@@ -2097,6 +2108,8 @@
       text: crossedChapter
         ? "章「" + (chapterTitle || completedTopic.title) + "」を終えました。"
         : "「" + completedTopic.title + "」を確認しました。",
+      // gap2: focus はサーバ側 (binding) 解決を優先する。id を渡し、title はラベル縮退用。
+      focusTopicId: completedTopic.id,
       focusLabel: completedTopic.title,
     });
   }
@@ -3996,6 +4009,9 @@
     // 分野の地図 (Issue F-2 導線2): 講義の章末 (章の最後のトピックのレクチャーを
     // 聴き終えたとき) にサマリーの末尾で「地図で現在地を見る」を提示する。
     // 章の途中のトピックでは出さない (完了時の導線1がその役を持つ)。
+    // gap5(将来対応): 本アプリに明示的な「章末サマリー画面」が無いため、導線2は章末を
+    // 跨ぐ完了とこのレクチャー完了バナーで代替している。章末サマリー UI ができたら
+    // その画面へ移設するのが本来形 (issue の付随項目5)。
     var lectureTopic = getCurrentTopic();
     var lectureNext = getNextTopic();
     var chapterDone = lectureTopic &&
@@ -4004,6 +4020,7 @@
       window.AtlasCues.showCue("chapter_end", {
         container: banner,
         text: "この章のレクチャーはここまでです。",
+        focusTopicId: lectureTopic.id,
         focusLabel: lectureTopic.title,
       });
     }

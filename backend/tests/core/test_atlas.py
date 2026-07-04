@@ -221,3 +221,61 @@ class TestDeterminism:
         assert path.exists(), "particle_physics に骨格が同梱されていること (受け入れ条件1)"
         text = path.read_text(encoding="utf-8")
         assert atlas.dump_skeleton(atlas.load_skeleton(path)) == text
+
+
+# ---------------------------------------------------------------------------
+# topic → 骨格概念の対応付け (個人層 binding の整備)
+# ---------------------------------------------------------------------------
+
+
+class TestMatchTopicToConcept:
+    def _sk(self) -> atlas.AtlasSkeleton:
+        return _minimal_skeleton()
+
+    def test_normalize_label_strips_space_and_middot(self):
+        assert atlas.normalize_label(" 演 算 子 ") == "演算子"
+        assert atlas.normalize_label("A・B") == "ab"
+
+    def test_explicit_atlas_node_id_wins_over_label(self):
+        topic = {"atlas_node_id": "concept_a", "title": "全然違う名前"}
+        assert atlas.match_topic_to_concept(topic, self._sk()) == "concept_a"
+
+    def test_explicit_atlas_concept_id_alias(self):
+        topic = {"atlas_concept_id": "concept_a"}
+        assert atlas.match_topic_to_concept(topic, self._sk()) == "concept_a"
+
+    def test_explicit_region_id_allowed(self):
+        assert atlas.match_topic_to_concept({"atlas_node_id": "region_a"}, self._sk()) == "region_a"
+
+    def test_unknown_explicit_id_falls_through_to_label(self):
+        topic = {"atlas_node_id": "ghost", "title": "概念A"}
+        assert atlas.match_topic_to_concept(topic, self._sk()) == "concept_a"
+
+    def test_bound_concept_id_used_when_no_explicit(self):
+        topic = {"title": "無関係タイトル"}
+        assert (
+            atlas.match_topic_to_concept(topic, self._sk(), bound_concept_id="concept_a")
+            == "concept_a"
+        )
+
+    def test_bound_concept_id_must_be_known(self):
+        topic = {"title": "無関係タイトル"}
+        assert atlas.match_topic_to_concept(topic, self._sk(), bound_concept_id="ghost") is None
+
+    def test_label_exact_match(self):
+        assert atlas.match_topic_to_concept({"title": "概念A"}, self._sk()) == "concept_a"
+
+    def test_label_contains_match(self):
+        assert atlas.match_topic_to_concept({"title": "第3回：概念A の導入"}, self._sk()) == "concept_a"
+
+    def test_region_label_fallback(self):
+        assert atlas.match_topic_to_concept({"title": "領域A"}, self._sk()) == "region_a"
+
+    def test_no_match_returns_none(self):
+        assert atlas.match_topic_to_concept({"title": "全く無関係な題目"}, self._sk()) is None
+
+    def test_non_dict_topic_returns_none(self):
+        assert atlas.match_topic_to_concept(None, self._sk()) is None
+
+    def test_empty_title_returns_none(self):
+        assert atlas.match_topic_to_concept({"title": ""}, self._sk()) is None

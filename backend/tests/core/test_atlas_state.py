@@ -625,3 +625,109 @@ class TestRefreshOverlayCache:
             return FakeResult([("2026-07-01", "", "", "", "")])
 
         assert st.is_overlay_stale(FakeSession(route), "particle_physics", "2026.1") is False
+
+
+# ---------------------------------------------------------------------------
+# topic ↔ 骨格概念 binding の DB 解決 (個人層 binding の整備)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveCourseCartridge:
+    def test_explicit_cartridge_id_wins(self):
+        # 明示指定は session を使わない (None でも解決できる)
+        assert st.resolve_course_cartridge(None, {"cartridge_id": "chem"}) == "chem"
+
+    def test_derived_from_sources(self):
+        def route(sql, params):
+            if "document_analysis_runs" in sql:
+                assert params["material_ids"] == ["m1", "m2"]
+                return FakeResult([("bio", 3)])
+            return FakeResult()
+
+        cd = {"sources": [{"material_id": "m1"}, {"material_id": "m2"}]}
+        assert st.resolve_course_cartridge(FakeSession(route), cd) == "bio"
+
+    def test_fallback_to_default_when_no_material(self):
+        # sources 無し → 既定カートリッジ (Settings.default_cartridge_id) へ縮退
+        assert st.resolve_course_cartridge(None, {"sources": []}) == "particle_physics"
+
+
+class TestBuildComponentConceptMap:
+    def _snapshot(self):
+        def comp(cid, name, status="draft", review=""):
+            return {
+                "id": cid,
+                "name": name,
+                "status": status,
+                "review_status": review,
+                "document_id": "d",
+                "evidence_claims": [],
+                "source_scope": {},
+            }
+
+        return st.CorpusSnapshot(
+            components=[
+                comp("comp-ope", "演算子積展開"),           # binding で ope
+                comp("comp-dual", "クォーク・ハドロン双対性"),  # 名前一致で dual
+                comp("comp-rej", "演算子積展開", status="rejected"),  # 除外
+            ]
+        )
+
+    def test_maps_via_binding_and_name(self):
+        sk = _skeleton(
+            concept_bindings=(
+                atlas.ConceptBinding(skeleton="ope", graph_concept_id="comp-ope", reviewed=True),
+            )
+        )
+        m = st.build_component_concept_map(self._snapshot(), sk)
+        assert m["comp-ope"] == "ope"       # reviewed binding
+        assert m["comp-dual"] == "dual"     # 正規化名一致 (中黒を無視)
+        assert "comp-rej" not in m          # rejected は除外
+
+    def test_unreviewed_binding_ignored(self):
+        sk = _skeleton(
+            concept_bindings=(
+                atlas.ConceptBinding(skeleton="bc_sumrule", graph_concept_id="comp-ope", reviewed=False),
+            )
+        )
+        m = st.build_component_concept_map(self._snapshot(), sk)
+        # 未レビュー binding は無効。comp-ope は名前一致で ope になる
+        assert m.get("comp-ope") == "ope"
+
+
+class TestResolveTopicConceptViaCorpus:
+    def test_none_without_chunk_ids(self):
+        out = st.resolve_topic_concept_via_corpus(
+            FakeSession(), _skeleton(), "particle_physics", {"id": "t"}
+        )
+        assert out is None
+
+    def test_resolves_via_component_name(self):
+        sk = _skeleton()
+
+        def route(sql, params):
+            if "primary_chunk_id IN" in sql:
+                return FakeResult([("comp-ope", "演算子積展開")])
+            if "evidence_claims" in sql:  # _COMPONENTS_SQL (load_corpus_snapshot)
+                return FakeResult(
+                    [("comp-ope", "演算子積展開", "d", "", "draft", [], {})]
+                )
+            return FakeResult()  # claims / graphs / explanations / vectors は空
+
+        topic = {"id": "t", "material_chunk_ids": ["ch1", "ch2"]}
+        out = st.resolve_topic_concept_via_corpus(
+            FakeSession(route), sk, "particle_physics", topic
+        )
+        assert out == "ope"
+
+    def test_none_when_no_components_match(self):
+        def route(sql, params):
+            if "primary_chunk_id IN" in sql:
+                return FakeResult([])  # トピックに紐づく component 無し
+            return FakeResult()
+
+        topic = {"id": "t", "material_chunk_ids": ["ch1"]}
+        out = st.resolve_topic_concept_via_corpus(
+            FakeSession(route), _skeleton(), "particle_physics", topic
+        )
+        assert out is None

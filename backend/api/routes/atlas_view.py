@@ -129,9 +129,31 @@ def _scale(value: float, size: int) -> int:
     return int(round(float(value) * size))
 
 
+@router.get("/runtime-config")
+def atlas_runtime_config() -> dict:
+    """フロント (atlas-data.js) のデータソース既定を返す (gap4)。
+
+    既定は "api" (本番でモック地図が全ユーザーに出るのを構造的に防ぐ)。
+    開発でフィクスチャを使う場合のみ ATLAS_DATA_SOURCE=fixture を設定する。
+    軽量フラグのため認証は要求しない。
+    """
+    source = "api"
+    try:
+        from core.config import get_settings
+
+        source = (get_settings().atlas_data_source or "api").strip().lower()
+    except Exception:  # noqa: BLE001
+        source = "api"
+    if source not in ("api", "fixture"):
+        source = "api"
+    return {"data_source": source}
+
+
 @router.get("")
 def get_atlas(
-    cartridge: str,
+    cartridge: str | None = None,
+    course: str | None = None,
+    topic: str | None = None,
     level: int = 1,
     focus: str | None = None,
     current_user: dict = Depends(_get_current_user),
@@ -139,14 +161,39 @@ def get_atlas(
     """地図データ一式 (骨格 + キャッシュ + 個人層)。
 
     骨格・状態はキャッシュそのまま、`me` (いまここ・足跡・隣接の光) のみ実行時合成。
-    `focus` 指定時は初期選択ノードとして返す (トピック完了直後の導線用)。
+    - `course` 指定時: コースからカートリッジを導出する (gap3)。`cartridge` は任意。
+    - `topic` 指定時: トピックを骨格概念へ対応付けて初期選択 (focus) をサーバ側で解決する
+      (gap2)。`focus` (node id) の明示指定が最優先。
     """
     if level not in (1, 2, 3):
         raise HTTPException(status_code=422, detail="level は 1..3 を指定してください")
-    skeleton = _load_learner_skeleton(cartridge)
     session = _session()
+    resolved_focus = focus
     try:
-        overlay = _ensure_overlay_rows(session, skeleton, cartridge)
+        # --- カートリッジ決定 (course 指定時はコースから導出。gap3) ---
+        cartridge_id = (cartridge or "").strip()
+        course_data = None
+        if course:
+            try:
+                from api import services
+
+                course_data = services.get_course_data(
+                    str(current_user.get("id") or ""), course
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("atlas course lookup failed for %s", course, exc_info=True)
+                course_data = None
+            if course_data is not None:
+                cartridge_id = (
+                    atlas_state.resolve_course_cartridge(session, course_data) or cartridge_id
+                )
+        if not cartridge_id:
+            raise HTTPException(
+                status_code=422, detail="cartridge または course を指定してください"
+            )
+
+        skeleton = _load_learner_skeleton(cartridge_id)
+        overlay = _ensure_overlay_rows(session, skeleton, cartridge_id)
         node_rows = {r["entry_id"]: r for r in overlay if r["entry_type"] == "node"}
         region_rows = {r["entry_id"]: r for r in overlay if r["entry_type"] == "region"}
         chain_row = next((r for r in overlay if r["entry_type"] == "chain"), None)
@@ -154,6 +201,26 @@ def get_atlas(
         me = _personal_layer(
             session, str(current_user.get("id") or ""), set(node_rows.keys())
         )
+
+        # --- topic → focus 概念のサーバ側解決 (gap2)。focus 明示が最優先 ---
+        if not resolved_focus and topic:
+            topic_info = None
+            if course_data is not None:
+                for t in course_data.get("topics") or []:
+                    if isinstance(t, dict) and str(t.get("id") or "") == str(topic):
+                        topic_info = t
+                        break
+            # course_data 無し / 未一致でもラベルのみで縮退解決する
+            if topic_info is None:
+                topic_info = {"title": topic}
+            bound = None
+            if course_data is not None:
+                bound = atlas_state.resolve_topic_concept_via_corpus(
+                    session, skeleton, cartridge_id, topic_info
+                )
+            resolved_focus = atlas_module.match_topic_to_concept(
+                topic_info, skeleton, bound_concept_id=bound
+            )
     finally:
         if session is not None:
             session.close()
@@ -348,14 +415,14 @@ def get_atlas(
         (nid for nid in chain if nodes.get(nid, {}).get("ledger_status") == atlas_state.STATUS_GAP),
         chain[0] if chain else None,
     )
-    focus_id = focus if focus and focus in nodes else None
+    focus_id = resolved_focus if resolved_focus and resolved_focus in nodes else None
     initial_selection = {
         "1": focus_id or now_id,
         "2": focus_id or now_id,
         "3": focus_id if focus_id in chain else default_gap,
     }
 
-    cartridge_label = skeleton.cartridge or cartridge
+    cartridge_label = skeleton.cartridge or cartridge_id
     crumbs = {
         "1": f"{cartridge_label} › 全体　—　ノードを選ぶと下に詳細",
         "2": f"{cartridge_label} › コース（概念マップ）",
@@ -364,9 +431,10 @@ def get_atlas(
 
     return {
         "skeleton_version": skeleton.version,
-        "cartridge": cartridge,
+        "cartridge": cartridge_id,
         "provenance": "AI生成・教員レビュー済",
         "level": level,
+        "focus": focus_id,
         "crumbs": crumbs,
         "initial_selection": initial_selection,
         "nodes": nodes,

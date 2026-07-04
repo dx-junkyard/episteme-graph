@@ -1242,6 +1242,45 @@ def _atlas_attribution(ctx: dict) -> dict:
     }
 
 
+def _atlas_topic_attribution(course_data: dict, topic_info: dict | None) -> dict | None:
+    """通常学習 (地図アクション以外) の往復から topic → 骨格概念を解決し、個人層の
+    「いまここ」を動かすための atlas 帰属を返す (gap1)。
+
+    cheap path: 明示 binding + ラベル一致のみで解決する (corpus 経路は使わない)。
+    骨格が無い / 対応概念が引けない場合は None。best-effort — 例外はチャットを止めない。
+    """
+    if not isinstance(topic_info, dict):
+        return None
+    try:
+        from core import atlas as atlas_module
+        from core import atlas_state
+        from core import cartridges as cartridges_module
+
+        session = _pg_session()
+        try:
+            cartridge_id = atlas_state.resolve_course_cartridge(session, course_data)
+        finally:
+            session.close()
+        if not cartridge_id:
+            return None
+        skeleton = cartridges_module.load_cartridge(cartridge_id).learner_atlas_skeleton
+        if skeleton is None:
+            return None
+        node_id = atlas_module.match_topic_to_concept(topic_info, skeleton)
+        if not node_id:
+            return None
+        return {
+            "node_id": node_id,
+            "level": 1,
+            "skeleton_version": skeleton.version,
+            "action": "study",
+            "node_label": str(topic_info.get("title") or ""),
+        }
+    except Exception:  # noqa: BLE001
+        logger.warning("atlas topic attribution failed", exc_info=True)
+        return None
+
+
 def _atlas_action_response(
     user_id: str,
     course_id: str,
@@ -1627,6 +1666,12 @@ def learning_chat(
         # 分野の地図由来の質問 (根拠を見る ↗ など) は帰属を構造化して焼き込む (Issue C-2)
         **({"atlas": _atlas_attribution(_atlas_ctx)} if _atlas_ctx else {}),
     }
+    # gap1: 地図アクション由来でない通常学習でも、topic → 骨格概念を解決して atlas 帰属を
+    # 焼き込む (個人層の「いまここ」を動かす)。地図由来 (_atlas_ctx) は上書きしない。
+    if not _atlas_ctx:
+        _topic_atlas = _atlas_topic_attribution(course_data, topic_info)
+        if _topic_atlas:
+            _trace_payload["atlas"] = _topic_atlas
     if _sel_anchor:
         _trace_payload["structure_anchor"] = _sel_anchor
     _trace_id = record_interest_trace(

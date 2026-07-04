@@ -245,6 +245,15 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("EPISTEME_CARTRIDGES_DIR"),
     )
 
+    # --- Field Atlas (分野の地図) ---
+    # 学習UIの地図データソース。フロント (atlas-data.js) が /api/atlas/runtime-config
+    # 経由で参照する。既定 "api" (本番でモック地図が全ユーザーに出るのを構造的に防ぐ)。
+    # 開発でフィクスチャを使いたい場合のみ明示的に "fixture" に設定する。
+    atlas_data_source: str = Field(
+        default="api",
+        validation_alias=AliasChoices("ATLAS_DATA_SOURCE"),
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -35,6 +35,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from sqlalchemy import bindparam
 from sqlalchemy import text as sa_text
 
 from core import atlas_placement
@@ -786,6 +787,142 @@ def _skeleton_binding_maps(skeleton) -> tuple[dict[str, str], dict[str, str]]:
         if binding.reviewed and binding.skeleton in concept_region:
             binding_to_concept[str(binding.graph_concept_id)] = binding.skeleton
     return (binding_to_concept, concept_region)
+
+
+# ---------------------------------------------------------------------------
+# topic ↔ 骨格概念 binding の DB 解決 (Issue: 個人層 binding の整備)
+#
+# 純粋な突き合わせ (core.atlas.match_topic_to_concept) の DB 依存部分:
+# コース → カートリッジの導出 (gap3) と、topic の教材由来 component から
+# concept_bindings 経由で骨格概念を引く corpus binding (gap1/gap2 の on-demand 経路)。
+# ---------------------------------------------------------------------------
+
+
+def _fallback_cartridge_id() -> str:
+    """既定カートリッジ (Settings.default_cartridge_id → particle_physics)。"""
+    try:
+        from core import cartridges as cartridges_module
+
+        return cartridges_module._default_cartridge_id()
+    except Exception:  # noqa: BLE001
+        return "particle_physics"
+
+
+_COURSE_CARTRIDGE_SQL = """
+    SELECT r.cartridge_id, count(*) AS n
+      FROM document_analysis_runs r
+     WHERE r.material_id IN :material_ids
+       AND r.status = 'completed'
+       AND COALESCE(r.cartridge_id, '') <> ''
+     GROUP BY r.cartridge_id
+     ORDER BY n DESC, r.cartridge_id
+     LIMIT 1
+"""
+
+
+def resolve_course_cartridge(session, course_data: dict) -> str:
+    """コースに対応するカートリッジ id を決定論的に導出する (gap3)。
+
+    優先順:
+      1. course_data.cartridge_id の明示指定
+      2. course_data.sources[].material_id → document_analysis_runs.cartridge_id
+         (status='completed' の最頻カートリッジ、同数なら id 昇順)
+      3. 既定カートリッジへ縮退
+    """
+    if isinstance(course_data, dict):
+        explicit = str(course_data.get("cartridge_id") or "").strip()
+        if explicit:
+            return explicit
+
+    material_ids: list[str] = []
+    if isinstance(course_data, dict):
+        for source in course_data.get("sources") or []:
+            if isinstance(source, dict) and source.get("material_id"):
+                material_ids.append(str(source["material_id"]))
+    if material_ids and session is not None:
+        try:
+            row = session.execute(
+                sa_text(_COURSE_CARTRIDGE_SQL).bindparams(
+                    bindparam("material_ids", expanding=True)
+                ),
+                {"material_ids": material_ids},
+            ).fetchone()
+            if row and row[0]:
+                return str(row[0])
+        except Exception:  # noqa: BLE001
+            logger.warning("atlas course cartridge query failed", exc_info=True)
+    return _fallback_cartridge_id()
+
+
+def build_component_concept_map(snapshot: CorpusSnapshot, skeleton) -> dict[str, str]:
+    """component_id → 骨格概念 id のマップ (reviewed concept_bindings + 正規化名一致)。"""
+    binding_to_concept, _ = _skeleton_binding_maps(skeleton)
+    concept_by_norm_label: dict[str, str] = {}
+    for region in skeleton.regions:
+        for concept in region.concepts:
+            concept_by_norm_label.setdefault(_normalize(concept.label), concept.id)
+            concept_by_norm_label.setdefault(_normalize(concept.id), concept.id)
+
+    out: dict[str, str] = {}
+    for comp in snapshot.components:
+        if comp["status"] == "rejected" or comp["review_status"] == "rejected":
+            continue
+        target = binding_to_concept.get(comp["id"]) or concept_by_norm_label.get(
+            _normalize(comp["name"])
+        )
+        if target:
+            out[comp["id"]] = target
+    return out
+
+
+_TOPIC_COMPONENTS_SQL = """
+    SELECT DISTINCT tc.id::text, tc.name
+      FROM theory_components tc
+      JOIN document_analysis_runs r
+        ON r.document_id = tc.document_id
+       AND r.cartridge_id = :cartridge_id
+       AND r.status = 'completed'
+     WHERE tc.primary_chunk_id IN :chunk_ids
+       AND COALESCE(tc.status, '') <> 'rejected'
+       AND COALESCE(tc.review_status, '') <> 'rejected'
+"""
+
+
+def resolve_topic_concept_via_corpus(session, skeleton, cartridge_id: str, topic: dict) -> str | None:
+    """topic の教材由来 component → concept_bindings 経由で骨格概念 id を引く。
+
+    hot path (チャット) では呼ばない (スナップショット読み込みを伴う)。トピック完了
+    導線の focus 解決など on-demand の経路でのみ使用する。
+    """
+    if session is None or not isinstance(topic, dict):
+        return None
+    raw_chunk_ids = topic.get("material_chunk_ids") or []
+    chunk_ids = [str(c) for c in raw_chunk_ids if c]
+    if not chunk_ids:
+        return None
+    try:
+        rows = session.execute(
+            sa_text(_TOPIC_COMPONENTS_SQL).bindparams(bindparam("chunk_ids", expanding=True)),
+            {"cartridge_id": cartridge_id, "chunk_ids": chunk_ids},
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        logger.warning("atlas topic->component query failed", exc_info=True)
+        return None
+    if not rows:
+        return None
+
+    snapshot = load_corpus_snapshot(session, cartridge_id)
+    comp_map = build_component_concept_map(snapshot, skeleton)
+    concept_by_norm_label: dict[str, str] = {}
+    for region in skeleton.regions:
+        for concept in region.concepts:
+            concept_by_norm_label.setdefault(_normalize(concept.label), concept.id)
+    # id 昇順で決定論的に最初に骨格概念へ引ける component を採用する
+    for comp_id, comp_name in sorted((str(r[0]), r[1] or "") for r in rows):
+        target = comp_map.get(comp_id) or concept_by_norm_label.get(_normalize(comp_name))
+        if target:
+            return target
+    return None
 
 
 def compute_overlay_rows(
