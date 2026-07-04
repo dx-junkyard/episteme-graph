@@ -571,3 +571,45 @@ def resolve_atlas_report(
         entity_type="atlas_report",
     )
     return {"report_id": report_id, **transition}
+
+
+# ---------------------------------------------------------------------------
+# 状態導出バッチ (Issue E-1) — 明示実行
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{cartridge_id}/atlas/overlay/refresh")
+def refresh_atlas_overlay(
+    cartridge_id: str, current_user: dict = Depends(_require_teacher)
+) -> dict:
+    """`atlas_overlay_cache` の状態導出バッチを明示実行する (教員以上)。
+
+    更新契機 (論文取り込み完了 / 承認・解釈追加 / 行間確定) は通常
+    core.atlas_state のコーパス署名の変化として検知され、GET /api/atlas 時に
+    非同期リフレッシュが走る。本エンドポイントは初期構築・検証用の同期実行。
+    """
+    from core import atlas_state
+
+    frozen = _load_optional(_frozen_path(cartridge_id))
+    if frozen is None:
+        try:
+            cartridge = cartridges_module.load_cartridge(cartridge_id)
+            frozen = cartridge.atlas_skeleton
+        except (FileNotFoundError, ValueError):
+            frozen = None
+    if frozen is None or not frozen.is_learner_visible:
+        raise HTTPException(status_code=404, detail="凍結済みの骨格がありません")
+
+    session = _reports_session()
+    try:
+        summary = atlas_state.refresh_overlay_cache(
+            session, frozen, cartridge_id=cartridge_id
+        )
+        session.commit()
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        logger.error("Failed to refresh atlas overlay for %s", cartridge_id, exc_info=True)
+        raise HTTPException(status_code=500, detail="状態導出バッチに失敗しました") from exc
+    finally:
+        session.close()
+    return summary

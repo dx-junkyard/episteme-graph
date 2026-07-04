@@ -548,8 +548,12 @@
   };
 
   // エントリポイント: トップバーの「地図」ボタン (常設導線 F系までの暫定)
+  // データソースは atlas-data.js が解決する (fixture ⇄ Atlas API の設定切替。Issue E-3)
   document.addEventListener("DOMContentLoaded", () => {
     const btn = document.getElementById("atlas-btn");
-    if (btn) btn.addEventListener("click", () => openOverlay());
+    if (btn) btn.addEventListener("click", async () => {
+      const data = window.AtlasData ? await window.AtlasData.load() : null;
+      openOverlay(data);
+    });
   });
 })();

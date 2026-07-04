@@ -55,6 +55,7 @@ from sqlalchemy import text as sa_text
 from dependencies import _hash_password
 from routes import auth, learning, admin, lecture, groups, error_logs, export as export_routes
 from routes import atlas as atlas_routes
+from routes import atlas_view as atlas_view_routes
 from core.config import get_settings as _get_settings
 from core.postgres import get_session as _pg_session, check_connection as _pg_check
 
@@ -927,8 +928,45 @@ def _run_migrations() -> None:
                 WHERE resolved_at IS NOT NULL AND notified_at IS NULL
         """))
 
+        # Migration 024: 分野の地図 — 状態導出キャッシュ atlas_overlay_cache (Issue E)
+        # 骨格(カートリッジ同梱)の上へ、既存データから近似導出した状態を差分バッチで
+        # 重ねるキャッシュ。導出規則は core/atlas_state.py に一箇所隔離する。
+        # 正本リファレンス: backend/db/024_atlas_overlay_cache.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS atlas_overlay_cache (
+                id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                cartridge_id     TEXT NOT NULL,
+                skeleton_version TEXT NOT NULL,
+                entry_type       TEXT NOT NULL CHECK (entry_type IN ('region', 'node', 'chain', 'meta')),
+                entry_id         TEXT NOT NULL,
+                region_id        TEXT NOT NULL DEFAULT '',
+                label            TEXT NOT NULL DEFAULT '',
+                status           TEXT NOT NULL DEFAULT '',
+                status_source    TEXT NOT NULL DEFAULT 'derived',
+                verify_line      TEXT NOT NULL DEFAULT '',
+                endorse_line     TEXT NOT NULL DEFAULT '',
+                learn_enabled    BOOLEAN NOT NULL DEFAULT TRUE,
+                evid_enabled     BOOLEAN NOT NULL DEFAULT TRUE,
+                layout           JSONB NOT NULL DEFAULT '{}'::jsonb,
+                placement        JSONB NOT NULL DEFAULT '{}'::jsonb,
+                evidence         JSONB NOT NULL DEFAULT '{}'::jsonb,
+                updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE(cartridge_id, skeleton_version, entry_type, entry_id)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_atlas_overlay_cache_key ON atlas_overlay_cache(cartridge_id, skeleton_version)"
+        ))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS atlas_overlay_dirty (
+                cartridge_id TEXT PRIMARY KEY,
+                reason       TEXT NOT NULL DEFAULT '',
+                marked_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+
         session.commit()
-        logger.info("Migrations (002-023) applied successfully.")
+        logger.info("Migrations (002-024) applied successfully.")
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema
@@ -1017,6 +1055,7 @@ app.include_router(groups.router)
 app.include_router(export_routes.router)
 app.include_router(atlas_routes.learning_router)
 app.include_router(atlas_routes.report_router)
+app.include_router(atlas_view_routes.router)
 
 
 @app.get("/healthz")
