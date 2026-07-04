@@ -421,6 +421,10 @@
         selectTopic(tid);
       });
     });
+
+    // 分野の地図 (Issue F-1): 学習パスパネル下部の常設ミニマップ。
+    // 骨格を同梱したカートリッジでのみ表示される (なければ領域ごと非表示)。
+    if (window.AtlasMinimap) window.AtlasMinimap.mount(sb);
   }
 
   // ── Render: Chat ───────────────────────────────────────────────────
@@ -2000,6 +2004,18 @@
       if (origin && (origin.segment_id || origin.scroll_offset)) {
         Session.restorePosition(origin);
       }
+      // 分野の地図 (Issue F-2 導線3): 寄り道から戻った文脈で「地図で現在地を見る」
+      // を提示する。開いたときは戻った位置をハイライトする (§3-4)。
+      var destTopic = (state.course && state.course.topics || [])
+        .find(function (t) { return t.id === dest; });
+      if (window.AtlasCues && destTopic) {
+        window.AtlasCues.showCue("detour_return", {
+          container: document.getElementById("chat-area"),
+          text: "寄り道から「" + destTopic.title + "」へ戻りました。",
+          focusLabel: destTopic.title,
+          highlight: true,
+        });
+      }
     }
   }
 
@@ -2025,6 +2041,8 @@
     renderRightPanel();
     updateNextTopicBtn();
     refreshLectureAvailability();
+    // 分野の地図 (Issue F-1): ミニマップはトピック遷移時に再取得する (ポーリングしない)
+    if (window.AtlasMinimap) window.AtlasMinimap.refresh();
 
     if (state.courseId && topicId) {
       // 教材チャンクとチャット履歴を並行取得
@@ -2063,6 +2081,24 @@
         : [],
       explanation: item.explanation || item.rationale || "",
     };
+  }
+
+  // 分野の地図 (Issue F-2 導線1・2): トピック完了直後の「見晴らしの瞬間」。
+  // 完了が章の最後のトピックなら章末 (chapter_end)、それ以外は topic_complete。
+  // カードの提示に留め、地図を自動で開かない。抑制ルールは AtlasCues 側が持つ。
+  function showAtlasCueAfterAdvance(completedTopic, nextTopic) {
+    if (!window.AtlasCues || !completedTopic) return;
+    var crossedChapter = nextTopic &&
+      completedTopic.chapter_index !== nextTopic.chapter_index;
+    var chapters = (state.course && state.course.chapters) || [];
+    var chapterTitle = (chapters[completedTopic.chapter_index] || {}).title || "";
+    window.AtlasCues.showCue(crossedChapter ? "chapter_end" : "topic_complete", {
+      container: document.getElementById("chat-area"),
+      text: crossedChapter
+        ? "章「" + (chapterTitle || completedTopic.title) + "」を終えました。"
+        : "「" + completedTopic.title + "」を確認しました。",
+      focusLabel: completedTopic.title,
+    });
   }
 
   function openCheckModal() {
@@ -2105,10 +2141,14 @@
     var submitBtn = document.getElementById("check-submit");
     if (submitBtn && submitBtn.getAttribute("data-advance") === "true") {
       var directNext = getNextTopic();
+      var directCompleted = getCurrentTopic();
       var directOverlay = document.getElementById("check-overlay");
       if (directOverlay) directOverlay.remove();
       // 前進は再アンカー（selectTopic 既定で detour を閉じ、レクチャー中なら終了する）。
-      if (directNext) selectTopic(directNext.id);
+      if (directNext) {
+        await selectTopic(directNext.id);
+        showAtlasCueAfterAdvance(directCompleted, directNext);
+      }
       return;
     }
     var answer = answerEl ? answerEl.value.trim() : "";
@@ -2139,10 +2179,15 @@
       var data = await res.json();
       if (data.passed) {
         var next = getNextTopic();
+        var completedTopic = getCurrentTopic();
         var overlay = document.getElementById("check-overlay");
         if (overlay) overlay.remove();
         // 合格 → 次トピックへ再アンカー。detour 残はここで自動的に解消される。
-        if (next) selectTopic(next.id);
+        if (next) {
+          await selectTopic(next.id);
+          // 分野の地図 (Issue F-2 導線1・2): 完了直後に「地図で現在地を見る」を提示
+          showAtlasCueAfterAdvance(completedTopic, next);
+        }
       } else {
         if (feedbackEl) {
           feedbackEl.innerHTML = '<strong>もう一度確認しましょう。</strong><br>' +
@@ -3948,6 +3993,20 @@
         }
       });
     }
+    // 分野の地図 (Issue F-2 導線2): 講義の章末 (章の最後のトピックのレクチャーを
+    // 聴き終えたとき) にサマリーの末尾で「地図で現在地を見る」を提示する。
+    // 章の途中のトピックでは出さない (完了時の導線1がその役を持つ)。
+    var lectureTopic = getCurrentTopic();
+    var lectureNext = getNextTopic();
+    var chapterDone = lectureTopic &&
+      (!lectureNext || lectureNext.chapter_index !== lectureTopic.chapter_index);
+    if (window.AtlasCues && chapterDone) {
+      window.AtlasCues.showCue("chapter_end", {
+        container: banner,
+        text: "この章のレクチャーはここまでです。",
+        focusLabel: lectureTopic.title,
+      });
+    }
   }
 
   function prevSegment() {
@@ -4179,6 +4238,9 @@
     initLectureMode();
     initSplitHandle();
     await initCourseSelector();
+    // 分野の地図 (Issue F-2 導線4): 初回ログイン時のみ L1 を俯瞰位置で自動表示する。
+    // フラグはサーバに永続化され、再ログイン・別端末でも繰り返さない。
+    if (window.AtlasCues) window.AtlasCues.maybeAutoOpenFirstLogin();
   }
 
   // Boot

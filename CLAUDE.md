@@ -413,6 +413,36 @@ confidence 数値は返さない）、`POST /api/learning/anchors/{trace_id}/con
 **設計原則**: tension の不変条項（P1/P4/P5/P6/P7）を継承。同期パスは非LLM（A）のみ、
 LLM（B）は非同期バッチ。LLM 候補は本人確定まで確定扱いしない。
 
+### 分野の地図（Field Atlas, Stage 2, issue A〜F 実装済み）
+
+学習中の箇所が分野全体のどこに該当するかを示す全画面オーバーレイ + 常設ミニマップ。
+仕様の正本は `field_atlas_overlay_spec.md`（3層モデル: S=骨格カートリッジ同梱 /
+C=`atlas_overlay_cache` / P=個人層 `interest_traces`）。設計原則: 宣言しない・煽らない・
+出所の正直さ・**踏破率を数値にしない**・リアルタイム LLM 生成をしない。
+
+- **バックエンド**: `core/atlas*.py`（骨格・状態導出・配置・報告）、
+  `routes/atlas.py`（骨格生成/レビュー/凍結・修正報告・**導線計測**）、
+  `routes/atlas_view.py`（`GET /api/atlas` 閲覧 API。状態判定はサーバ側のみ）
+- **フロント**: `atlas-overlay.js`（オーバーレイ B/C）/ `atlas-panel.js`（詳細パネル）/
+  `atlas-report.js`（修正報告 D）/ `atlas-data.js`（fixture ⇄ API 切替。404=骨格なし→null）/
+  `atlas-minimap.js`（F-1）/ `atlas-cues.js`（F-2）
+
+**F: 常設ミニマップと見晴らしの導線（issue F, migration 026）**
+- ミニマップ（左パネル下・切手大）は「いまここ + 状態ドット + 霧ハッチ」**のみ**。
+  数値・ラベル・凡例を描かない。L1 をそのまま縮小（縮約アルゴリズムの決定）。
+  更新はトピック遷移とオーバーレイ閉時のみ（ポーリング禁止）。骨格なしカートリッジ
+  （`/api/atlas` 404）ではミニマップ・導線とも領域ごと非表示。
+- 導線4箇所: ①トピック完了直後 ②章末（章の最後のトピックのみ）③寄り道復帰
+  （戻った位置を `atlas-pulse` でハイライト）④初回ログインの一度きり自動表示。
+  ①〜③はカード提示に留め**自動で開かない**。抑制ルール: 直近10分以内にオーバーレイを
+  開いていたら①②のカードを出さない（③は対象外）。カードは常に最新1枚。
+- 初回自動表示フラグは `atlas_cue_events` の `(user_id, 'first_login', 'opened')` 行の
+  存在で永続化（再ログイン・別端末でも一度きり）。オプトアウトは設定項目ではなく
+  オーバーレイ内注記（§16-6 の決定）。フラグ確認不能時は自動表示しない（fail-closed）。
+- 内部計測（`POST /api/learning/atlas/cues/events`: shown/opened/dwell/learn_reached、
+  `GET /api/learning/atlas/cues/state`）は Stage 2 ゲート判断の材料。
+  **数値をユーザーに見せる API・UI は作らない**。
+
 ### レクチャー音声キャッシュの判定（`backend/api/routes/lecture.py`）
 
 `student_material`/`content`/`summary` はコースビルダーが生成するほぼ全トピックに

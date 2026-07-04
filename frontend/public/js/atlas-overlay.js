@@ -55,6 +55,9 @@
     // 保持はセッション内のみ (メモリ)。骨格改版時の id 永続性問題を避けるため、
     // data が差し替わったら破棄する (未決事項の決定: セッション内のみ)。
     reopen: false,
+    // F-2 の内部計測用: どの導線から開かれ、いつ開いたか (atlas:opened / atlas:closed)
+    openSource: "",
+    openedAt: 0,
   };
 
   // -------------------------------------------------------------------
@@ -501,8 +504,39 @@
   // 公開 API
   // -------------------------------------------------------------------
 
-  function openOverlay(data) {
-    const nextData = data || window.ATLAS_FIXTURE;
+  // 導線3 (寄り道復帰): 戻った位置を一時ハイライトする (§3-4)。誘導文言は付けない。
+  function pulseNode(id) {
+    const ov = document.getElementById("atlas-overlay");
+    if (!ov) return;
+    ov.querySelectorAll('.atlas-node[data-node="' + id + '"]').forEach((g) => {
+      g.classList.add("atlas-pulse");
+      setTimeout(() => g.classList.remove("atlas-pulse"), 4000);
+    });
+  }
+
+  // 導線4 (初回ログイン): 自動表示が初回のみであることの注記 (§16-6 の決定:
+  // オプトアウトは設定項目ではなく、一度きりの自動表示 + この注記で成立させる)
+  function setIntroNote(show) {
+    const ov = document.getElementById("atlas-overlay");
+    if (!ov) return;
+    const existing = ov.querySelector(".atlas-intro-note");
+    if (existing) existing.remove();
+    if (!show) return;
+    const note = el("p", { class: "atlas-intro-note" },
+      "分野の地図です。この自動表示は初回のみ — 次回からは左下のミニマップや上部の「地図」からいつでも開けます。");
+    const foot = ov.querySelector("#atlas-foot");
+    foot.parentNode.insertBefore(note, foot);
+  }
+
+  // opts (Issue F): { level, focus, highlight, intro, source }
+  // - level / focus 指定時はセッション内復元 (reopen) より優先する
+  // - source は導線名 (minimap / topic_complete / ...) — atlas:opened / atlas:closed
+  //   イベントに載せ、内部計測 (atlas-cues.js) が拾う。ユーザーには見せない
+  function openOverlay(data, opts) {
+    opts = opts || {};
+    // data === null は「骨格なし」の明示 (API 404)。undefined のときだけフィクスチャへ
+    // フォールバックする (骨格なしカートリッジで地図を出さない — issue F 受け入れ条件6)
+    const nextData = data === undefined ? window.ATLAS_FIXTURE : data;
     if (!nextData) {
       console.warn("[atlas] 骨格データがありません (地図機能を出さない)");
       return;
@@ -520,19 +554,40 @@
     ov.querySelector("#atlas-foot").textContent =
       "骨格 " + (state.data.skeleton_version || "—") + " / " + (state.data.provenance || "AI生成");
     ov.removeAttribute("hidden");
-    // C-2: 再オープン時は直前のレベル・選択を復元する (初回は L1 + 初期選択)
-    const restoreLevel = state.reopen ? state.level : 1;
-    const restoreSel = state.reopen ? state.selected : null;
+    // C-2: 再オープン時は直前のレベル・選択を復元する (初回は L1 + 初期選択)。
+    // 導線からの明示オープン (opts.level / opts.focus) は復元より優先する。
+    let restoreLevel = state.reopen ? state.level : 1;
+    let restoreSel = state.reopen ? state.selected : null;
+    if (opts.level || opts.focus) {
+      restoreLevel = opts.level || 1;
+      restoreSel = opts.focus && state.data.nodes && state.data.nodes[opts.focus]
+        ? opts.focus
+        : null;
+    }
     showLevel(restoreLevel);
     if (restoreSel) selectNode(restoreSel);
+    if (opts.highlight) pulseNode(restoreSel || state.selected);
+    setIntroNote(!!opts.intro);
+    state.openSource = opts.source || "";
+    state.openedAt = Date.now();
+    document.dispatchEvent(new CustomEvent("atlas:opened", {
+      detail: { source: state.openSource },
+    }));
     const seg = ov.querySelector('.atlas-seg-btn[data-level="' + restoreLevel + '"]');
     if (seg) seg.focus();
   }
 
   function closeOverlay() {
     const ov = document.getElementById("atlas-overlay");
-    if (ov) ov.setAttribute("hidden", "");
+    if (!ov || ov.hasAttribute("hidden")) return;
+    ov.setAttribute("hidden", "");
     state.reopen = true; // 次回オープンで選択・レベルを復元 (セッション内のみ)
+    document.dispatchEvent(new CustomEvent("atlas:closed", {
+      detail: {
+        source: state.openSource,
+        duration_ms: state.openedAt ? Date.now() - state.openedAt : 0,
+      },
+    }));
     if (state.lastFocus && typeof state.lastFocus.focus === "function") state.lastFocus.focus();
   }
 
@@ -547,13 +602,18 @@
     get data() { return state.data; },
   };
 
-  // エントリポイント: トップバーの「地図」ボタン (常設導線 F系までの暫定)
+  // エントリポイント: トップバーの「地図」ボタン (ミニマップと並ぶ常設導線)
   // データソースは atlas-data.js が解決する (fixture ⇄ Atlas API の設定切替。Issue E-3)
   document.addEventListener("DOMContentLoaded", () => {
     const btn = document.getElementById("atlas-btn");
     if (btn) btn.addEventListener("click", async () => {
-      const data = window.AtlasData ? await window.AtlasData.load() : null;
-      openOverlay(data);
+      const data = window.AtlasData ? await window.AtlasData.load() : undefined;
+      if (window.AtlasData && !data) {
+        // 骨格なしカートリッジでは地図機能ごと出さない
+        btn.style.display = "none";
+        return;
+      }
+      openOverlay(data, { level: 1, source: "topbar" });
     });
   });
 })();

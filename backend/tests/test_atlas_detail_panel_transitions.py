@@ -291,7 +291,10 @@ class TestDetailPanelFrontend:
     def test_overlay_restores_selection_on_reopen(self):
         source = _read(OVERLAY_JS)
         assert "state.reopen" in source
-        assert "const restoreLevel = state.reopen ? state.level : 1;" in source
+        # Issue F: 導線からの明示オープン (opts.level / opts.focus) は復元より優先するため
+        # let になったが、reopen 時の復元既定は維持されている
+        assert "let restoreLevel = state.reopen ? state.level : 1;" in source
+        assert "if (opts.level || opts.focus)" in source
         assert "if (restoreSel) selectNode(restoreSel);" in source
 
     def test_index_includes_panel_script(self):

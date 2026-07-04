@@ -27,24 +27,25 @@
     }
   }
 
-  async function fetchFromApi(cartridgeId) {
+  async function fetchFromApi(cartridgeId, opts) {
     const headers = {};
     try {
       const token = localStorage.getItem("eg_token");
       if (token) headers["Authorization"] = "Bearer " + token;
     } catch (e) { /* localStorage 不可の環境ではそのまま */ }
-    const res = await fetch(
-      "/api/atlas?cartridge=" + encodeURIComponent(cartridgeId || DEFAULT_CARTRIDGE),
-      { headers: headers }
-    );
+    let url = "/api/atlas?cartridge=" + encodeURIComponent(cartridgeId || DEFAULT_CARTRIDGE);
+    if (opts && opts.focus) url += "&focus=" + encodeURIComponent(opts.focus);
+    const res = await fetch(url, { headers: headers });
+    if (res.status === 404) return null; // 骨格なし → 地図機能を出さない (issue F 受け入れ条件6)
     if (!res.ok) throw new Error("atlas api " + res.status);
     return res.json();
   }
 
-  async function load(cartridgeId) {
+  // opts.focus: 初期選択したいノード id (導線カード用。API の focus パラメータへ渡す)
+  async function load(cartridgeId, opts) {
     if (source() !== "api") return window.ATLAS_FIXTURE;
     try {
-      return await fetchFromApi(cartridgeId);
+      return await fetchFromApi(cartridgeId, opts);
     } catch (err) {
       console.warn("[atlas] API 取得に失敗。フィクスチャで表示します:", err);
       return window.ATLAS_FIXTURE;

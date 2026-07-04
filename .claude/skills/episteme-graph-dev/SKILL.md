@@ -22,6 +22,8 @@ PDF教材からの知識抽出、RAGベースの対話型学習、コース管�
 | `backend/api/routes/auth.py` | 認証ルーター | 登録・ログイン・ユーザー情報 |
 | `backend/api/routes/learning.py` | 学習ルーター | コース管理・RAGチャット（intent_mode: on_path/explore/casual）・進捗・tension 確定 API・structure_anchor 確定 API（`/api/learning/anchors/...`）・音声会話（`/voice/transcribe`=Whisper STT, `/voice/speak`=TTS） |
 | `backend/api/routes/admin.py` | 管理ルーター | 教材アップロード・コースビルダー・ユーザー管理 |
+| `backend/api/routes/atlas.py` | 分野の地図（骨格・報告・導線） | 骨格の生成/レビュー/凍結（教員）、修正報告（`POST /api/atlas/report`）、見晴らしの導線の内部計測と初回自動表示フラグ（`/api/learning/atlas/cues/...`、migration 026 `atlas_cue_events`） |
+| `backend/api/routes/atlas_view.py` | 分野の地図（閲覧） | `GET /api/atlas`（骨格+`atlas_overlay_cache`+個人層合成）・`GET /api/atlas/node/{id}`。状態判定はサーバ側 `core/atlas_state.py` のみ |
 | `backend/core/config.py` | 設定一元管理 | pydantic-settings による環境変数管理 |
 | `backend/core/llm.py` | LLM 抽象化レイヤー | Reasoning モデル自動対応 |
 | `backend/core/models.py` | SQLAlchemy ORM モデル | 全テーブル定義 |

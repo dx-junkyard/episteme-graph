@@ -173,6 +173,9 @@
     };
 
     if (actionKey === "learn") {
+      // F-2 の内部計測: どの導線で開いた地図から「ここから学ぶ」に到達したか
+      // (atlas-cues.js が購読。ユーザーに数値は見せない)
+      document.dispatchEvent(new CustomEvent("atlas:learnaction", { detail: base }));
       // C-3: 学習パス提案カードの入力素材 (related / juxtapose) を添付する
       const ctx = contextForNode(cur.node_id, cur.level);
       sendToChat(

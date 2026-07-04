@@ -365,6 +365,105 @@ def get_learner_atlas_skeleton(
 
 
 # ---------------------------------------------------------------------------
+# 見晴らしの導線 (Issue F) — 初回自動表示フラグと内部計測
+# ---------------------------------------------------------------------------
+#
+# - 計測は内部のみ (Stage 2 ゲート判断の材料)。数値をユーザーへ返す API は作らない
+# - 初回ログイン自動表示 (導線4) の一度きりフラグは
+#   (user_id, cue='first_login', event='opened') 行の存在で表す (端末を跨いで永続)
+
+CUE_KINDS = frozenset(
+    {"minimap", "topbar", "topic_complete", "chapter_end", "detour_return", "first_login"}
+)
+CUE_EVENTS = frozenset({"shown", "opened", "dwell", "learn_reached"})
+_CUE_PAYLOAD_MAX_CHARS = 2000
+
+
+class AtlasCueEventRequest(BaseModel):
+    cue: str = Field(description="導線の種別 (minimap / topic_complete / ... / first_login)")
+    event: str = Field(description="shown / opened / dwell / learn_reached")
+    payload: dict = Field(default_factory=dict, description="補足 (duration_ms など)")
+
+
+@learning_router.get("/cues/state")
+def get_atlas_cue_state(current_user: dict = Depends(_get_current_user)) -> dict:
+    """導線の永続状態。first_login_seen が真なら初回自動表示は済んでいる。
+
+    DB 不通時は fail-closed (seen=True) — 確認できないときに自動表示を繰り返さない。
+    """
+    user_id = str(current_user.get("id") or "").strip()
+    if not user_id:
+        return {"first_login_seen": True}
+    try:
+        from sqlalchemy import text as sa_text
+
+        from core.postgres import get_session
+
+        session = get_session()
+    except Exception:  # noqa: BLE001
+        logger.warning("atlas cue state DB session unavailable", exc_info=True)
+        return {"first_login_seen": True}
+    try:
+        row = session.execute(
+            sa_text(
+                """
+                SELECT 1 FROM atlas_cue_events
+                 WHERE user_id = CAST(:uid AS uuid)
+                   AND cue = 'first_login' AND event = 'opened'
+                 LIMIT 1
+                """
+            ),
+            {"uid": user_id},
+        ).fetchone()
+        return {"first_login_seen": row is not None}
+    except Exception:  # noqa: BLE001
+        logger.warning("atlas cue state query failed", exc_info=True)
+        return {"first_login_seen": True}
+    finally:
+        session.close()
+
+
+@learning_router.post("/cues/events", status_code=201)
+def record_atlas_cue_event(
+    body: AtlasCueEventRequest, current_user: dict = Depends(_get_current_user)
+) -> dict:
+    """導線イベントを内部計測として記録する (帰属は JWT から)。"""
+    if body.cue not in CUE_KINDS:
+        raise HTTPException(status_code=422, detail=f"未知の導線種別: {body.cue}")
+    if body.event not in CUE_EVENTS:
+        raise HTTPException(status_code=422, detail=f"未知のイベント種別: {body.event}")
+    user_id = str(current_user.get("id") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=403, detail="帰属(ユーザーID)が確認できません")
+
+    payload_json = json.dumps(body.payload or {}, ensure_ascii=False)
+    if len(payload_json) > _CUE_PAYLOAD_MAX_CHARS:
+        payload_json = "{}"
+
+    session = _reports_session()
+    try:
+        from sqlalchemy import text as sa_text
+
+        session.execute(
+            sa_text(
+                """
+                INSERT INTO atlas_cue_events (user_id, cue, event, payload)
+                VALUES (CAST(:uid AS uuid), :cue, :event, CAST(:payload AS jsonb))
+                """
+            ),
+            {"uid": user_id, "cue": body.cue, "event": body.event, "payload": payload_json},
+        )
+        session.commit()
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        logger.error("Failed to record atlas cue event", exc_info=True)
+        raise HTTPException(status_code=500, detail="導線イベントの記録に失敗しました") from exc
+    finally:
+        session.close()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
 # 修正報告 (Issue D) — 学習者向け: 送信・自分の報告・結果通知の既読
 # ---------------------------------------------------------------------------
 

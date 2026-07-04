@@ -396,3 +396,93 @@
   color: var(--color-text-primary, #1d1d1f);
   cursor: pointer;
 }
+
+/* ── 常設ミニマップ (Issue F-1) — 左パネル下部の切手大表示 ────────── */
+/* 情報を詰めない: いまここ + 簡略ドット + 霧ハッチのみ。数値・ラベル・凡例なし */
+#atlas-minimap-slot {
+  position: sticky;
+  bottom: -12px; /* .sb の下 padding ぶんを吸収して底面に密着させる */
+  margin-top: 14px;
+  padding: 8px 14px 12px;
+  background: var(--color-background-primary, #fff);
+  border-top: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+}
+#atlas-minimap-slot:empty {
+  display: none; /* 骨格なしカートリッジでは領域ごと消す */
+}
+.atlas-minimap {
+  width: 160px;
+  max-width: 100%;
+  cursor: pointer;
+  border: 1px solid var(--color-border, #d2d2d7);
+  border-radius: 8px;
+  padding: 4px;
+  background: var(--color-background, #fff);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.atlas-minimap:hover,
+.atlas-minimap:focus-visible {
+  border-color: #378add;
+  box-shadow: 0 0 0 2px rgba(55, 138, 221, 0.22);
+  outline: none;
+}
+.atlas-minimap svg {
+  display: block;
+  border-radius: 5px;
+}
+
+/* ── 見晴らしの導線カード (Issue F-2) ─────────────────────────────── */
+/* 「地図で現在地を見る」— 提示に留め、自動では開かない (学習フローを塞がない) */
+.atlas-cue-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0;
+  padding: 9px 12px;
+  border: 1px solid var(--color-border, #d2d2d7);
+  border-left: 3px solid #378add;
+  border-radius: 8px;
+  background: var(--color-background, #fff);
+  font-size: 12.5px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.atlas-cue-card .atlas-cue-open {
+  margin-left: auto;
+  white-space: nowrap;
+  font-size: 12px;
+  padding: 4px 12px;
+  border: 1px solid #378add;
+  border-radius: 6px;
+  background: var(--color-background, #fff);
+  color: #185fa5;
+  cursor: pointer;
+  font-family: inherit;
+}
+.atlas-cue-card .atlas-cue-open:hover {
+  background: #e6f1fb;
+}
+.atlas-cue-card .atlas-cue-dismiss {
+  border: none;
+  background: none;
+  color: var(--color-text-tertiary, #aeaeb2);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+/* 寄り道復帰 (導線3): 戻った位置の一時ハイライト (§3-4)。文言は付けない */
+.atlas-node.atlas-pulse {
+  animation: atlas-pulse 1.2s ease-in-out 3;
+}
+@keyframes atlas-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* 初回ログイン自動表示 (導線4) の注記 — 一度きりであることの明示 (§16-6 の決定) */
+.atlas-intro-note {
+  margin: 8px 18px 0;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+}

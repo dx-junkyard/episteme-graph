@@ -982,8 +982,26 @@ def _run_migrations() -> None:
                   AND (payload->>'anchor_analyzed_at') IS NULL
         """))
 
+        # Migration 026: 分野の地図 — 見晴らしの導線の内部計測 + 初回自動表示フラグ (Issue F)
+        # 導線別 開封率・滞在・「ここから学ぶ」到達の内部計測 (数値はユーザーに見せない)。
+        # 初回ログイン自動表示の一度きりフラグは (user_id, 'first_login', 'opened') 行の存在。
+        # 正本リファレンス: backend/db/026_atlas_cue_events.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS atlas_cue_events (
+                id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                cue        TEXT NOT NULL,
+                event      TEXT NOT NULL,
+                payload    JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_atlas_cue_events_user ON atlas_cue_events(user_id, cue, event)"
+        ))
+
         session.commit()
-        logger.info("Migrations (002-025) applied successfully.")
+        logger.info("Migrations (002-026) applied successfully.")
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema
