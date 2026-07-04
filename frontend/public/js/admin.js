@@ -2320,6 +2320,32 @@
         html += '<div>反復する誤答: <strong>' + escHtml(String(us.recurring_misconceptions || 0)) + '</strong></div>';
         html += '</div>';
 
+        // 構造帰属ヒートマップ（Structure-Anchored Questions Stage 3）。
+        // 集計対象は本人が確定した帰属のみ・n<3 のセルはサーバ側で非表示（k-匿名化）。
+        // 教材改善のための可視化であり、学習者の評価には使わないこと。
+        var anchors = data.anchor_heatmap || [];
+        if (anchors.length > 0) {
+          var maxAnchor = anchors.reduce(function (m, a) { return Math.max(m, a.count || 0); }, 1);
+          html += '<h4 style="margin:14px 0 6px;font-size:13px">疑問が集中している構造（どこに・どう引っかかったか）</h4>';
+          anchors.forEach(function (a) {
+            var where = a.stage
+              ? a.stage + '（' + (a.anchor_type_label || "") + '）'
+              : (a.anchor_type_label || a.anchor_type || "");
+            var pct = Math.round((a.count || 0) / maxAnchor * 100);
+            html += '<div class="id-hotspot">';
+            html += '<div class="id-topic">' + escHtml(a.topic_title || "") +
+              ' — ' + escHtml(where) +
+              ' <span style="color:var(--color-text-tertiary);font-size:11px">' +
+              escHtml(a.doubt_type_label || "") +
+              (a.learners ? ' ・ ' + escHtml(String(a.learners)) + '名' : '') + '</span></div>';
+            html += '<div class="id-bar" style="width:' + pct + 'px;min-width:20px"></div>';
+            html += '<div class="id-count">' + escHtml(String(a.count || 0)) + '</div>';
+            html += '</div>';
+          });
+          html += '<div style="font-size:11px;color:var(--color-text-tertiary);margin-top:4px">' +
+            '本人が確定した帰属のみ・3名未満のセルは表示されません（教材改善用。評価には使いません）</div>';
+        }
+
         body.innerHTML = html;
       })
       .catch(function () {

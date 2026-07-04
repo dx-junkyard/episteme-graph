@@ -130,6 +130,28 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("TENSION_LLM_MODEL"),
     )
 
+    # --- StructureAnchorAgent (B層) — コスト制御（tension とは独立のカウンタ） ---
+    # 1セッション（user×course×topic×日）あたりの LLM コール上限
+    anchor_max_calls_per_session: int = Field(
+        default=3,
+        validation_alias=AliasChoices("ANCHOR_MAX_CALLS_PER_SESSION"),
+    )
+    # 1ユーザー1日あたりの LLM コール上限
+    anchor_max_calls_per_day: int = Field(
+        default=10,
+        validation_alias=AliasChoices("ANCHOR_MAX_CALLS_PER_DAY"),
+    )
+    # 空文字なら fast tier（llm_fast_model）に委譲
+    anchor_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("ANCHOR_LLM_MODEL"),
+    )
+    # 回答末尾の帰属確認プロンプト（方法C）のセッション内提示上限（P7: 毎回出さない）
+    anchor_confirm_max_per_session: int = Field(
+        default=3,
+        validation_alias=AliasChoices("ANCHOR_CONFIRM_MAX_PER_SESSION"),
+    )
+
     # --- JWT / Auth ---
     jwt_secret: str = "episteme-dev-secret-change-in-prod"
     admin_password: str = ""

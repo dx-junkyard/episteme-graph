@@ -965,8 +965,25 @@ def _run_migrations() -> None:
             )
         """))
 
+        # Migration 025: Structure-Anchored Questions (B層) — 構造帰属のインデックス（列追加ゼロ）
+        # interest_traces.payload.structure_anchor の拡張のみ。帰属候補は
+        # attribution_source='llm_candidate' で保存し、本人の confirm/dismiss でのみ確定する（P1/P4）。
+        session.execute(sa_text("""
+            CREATE INDEX IF NOT EXISTS idx_interest_traces_anchor_candidate
+                ON interest_traces(user_id, course_id)
+                WHERE kind = 'question'
+                  AND (payload->'structure_anchor'->>'attribution_source') = 'llm_candidate'
+        """))
+        session.execute(sa_text("""
+            CREATE INDEX IF NOT EXISTS idx_interest_traces_anchor_pending
+                ON interest_traces(user_id, course_id)
+                WHERE kind = 'question'
+                  AND (payload->'structure_anchor') IS NULL
+                  AND (payload->>'anchor_analyzed_at') IS NULL
+        """))
+
         session.commit()
-        logger.info("Migrations (002-024) applied successfully.")
+        logger.info("Migrations (002-025) applied successfully.")
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema

@@ -20,7 +20,7 @@ PDF教材からの知識抽出、RAGベースの対話型学習、コース管�
 |---|---|---|
 | `backend/api/main.py` | FastAPI アプリ本体 (lifespan, CORS, ルーター統合) | エントリポイント |
 | `backend/api/routes/auth.py` | 認証ルーター | 登録・ログイン・ユーザー情報 |
-| `backend/api/routes/learning.py` | 学習ルーター | コース管理・RAGチャット（intent_mode: on_path/explore/casual）・進捗・tension 確定 API・音声会話（`/voice/transcribe`=Whisper STT, `/voice/speak`=TTS） |
+| `backend/api/routes/learning.py` | 学習ルーター | コース管理・RAGチャット（intent_mode: on_path/explore/casual）・進捗・tension 確定 API・structure_anchor 確定 API（`/api/learning/anchors/...`）・音声会話（`/voice/transcribe`=Whisper STT, `/voice/speak`=TTS） |
 | `backend/api/routes/admin.py` | 管理ルーター | 教材アップロード・コースビルダー・ユーザー管理 |
 | `backend/core/config.py` | 設定一元管理 | pydantic-settings による環境変数管理 |
 | `backend/core/llm.py` | LLM 抽象化レイヤー | Reasoning モデル自動対応 |
@@ -33,6 +33,7 @@ PDF教材からの知識抽出、RAGベースの対話型学習、コース管�
 | `backend/core/db.py` | Neo4j ドライバ | グラフ走査専用 (レガシー) |
 | `backend/core/storage.py` | MinIO ストレージ | S3互換ファイル管理 |
 | `backend/core/tension/` | TensionMiningAgent (B層) | 会話からの違和感候補検出（prefilter=同期非LLM / agent=非同期LLM / validator・repair / worker）。候補は `interest_traces` kind='tension' status='candidate' に保存し、学習者本人の confirm/dismiss API（`/api/learning/tension/...`）で確定。教員へは k-匿名化集約のみ |
+| `backend/core/structure_anchor/` | StructureAnchorAgent (B層) | 学習チャットの問いを「構造のどこに・どう引っかかったか」へ帰属（agent=非同期LLM / validator・repair / worker、tension と同型の独立モジュール）。候補は `interest_traces.payload.structure_anchor` に `attribution_source='llm_candidate'` で保存し（行 status は変更しない）、学習者本人の confirm/dismiss API（`/api/learning/anchors/...`）で確定。明示アンカー（テキスト選択・要素タップ）は同期・非LLMで `learner_selected` 記録。教員へは k-匿名化集約のみ |
 | `frontend/public/js/app.js` | 学習 UI | ES6+ SPA |
 | `frontend/public/js/admin.js` | 管理 UI | ES5互換 Vanilla JS |
 

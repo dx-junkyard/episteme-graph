@@ -270,6 +270,10 @@ class LearningChatRequest(BaseModel):
     element_id: str | None = None
     element_type: str | None = None
     element_label: str | None = None
+    # 構造帰属（方法A）: 教材区画のテキスト選択→「ここについて質問」の明示アンカー。
+    # 選択テキストの逐語と、選択があったセグメント番号（position_anchor とは独立に保持）。
+    selection_text: str | None = None
+    selection_segment_id: int | None = None
 
 
 class LearningSupportNextAction(BaseModel):
@@ -318,6 +322,11 @@ class LearningChatResponse(BaseModel):
     # 分野の地図 (Issue C-3): 「ここから学ぶ」への学習パス提案カード
     # (core.atlas_path.build_learning_path_card の出力。通常チャットでは None)
     atlas_path_card: dict | None = None
+    # 構造帰属: この往復で同期記録した明示アンカー（方法A）。学習者バブルのチップ表示用。
+    structure_anchor: dict | None = None
+    # 構造帰属（方法C）: 回答末尾の1タップ確認プロンプト。tension_hint 等でゲートされた
+    # ときのみ設定される（毎回は出さない。P7）。{trace_id, question, options:[{doubt_type,label}]}
+    anchor_confirm: dict | None = None
     mock: bool = False                          # 🚧 mock 由来データを含むか（UI バッジ用）
 
 

@@ -366,6 +366,53 @@ confidence 数値は返さない）、`POST /api/learning/tension/{trace_id}/con
 `POST /api/learning/tension/{trace_id}/dismiss`、`POST /api/learning/tension/{trace_id}/connect`。
 すべて本人のみ（教員・管理者は個別行にアクセス不可）。
 
+### 構造帰属型の問い記録（Structure-Anchored Questions, B層, migration 025）
+
+学習チャットの問いを質問文の保存だけでなく **「提示された情報構造のどこに（anchor）、
+どう引っかかったか（doubt_type）」** として記録する。新テーブルなし・
+`interest_traces.payload.structure_anchor` の拡張のみ（質問原文 `text` は残す, P4）。
+実装は `backend/core/structure_anchor/`
+（agent / input_builder / prompt / llm_client / schema / validator / repair / worker / examples、
+tension と同型の独立モジュール。コスト上限も tension とは独立）。
+
+**payload 形式**（`payload.structure_anchor`）:
+`anchor_type`（`claim | equation | derivation_step | concept | stage | chunk | segment`）/
+`anchor_id` / `anchor_label` / `doubt_type`（`definition | justification_gap | premise |
+prior_conflict | scope | connection | unclassified`）/
+`attribution_source`（`learner_selected | llm_candidate | confirmed`）/
+`evidence_quote` / `reason` / `confidence` / `status`（`active | dismissed`）。
+帰属語彙は domain-independent（theory stage は `schema.THEORY_STAGES` を使う）。
+構造を持たない教材では `claim → concept → chunk → segment` の順で粗い粒度へ縮退させる。
+
+**帰属の3経路**:
+- **A 明示アンカー（同期・非LLM）**: 教材区画のテキスト選択→「ここについて質問」
+  （`LearningChatRequest.selection_text` / `selection_segment_id`）、または
+  数式・claim 要素タップ（既存 `chunk_id`/`element_id`/`element_type`/`element_label`）。
+  `attribution_source='learner_selected'` で即確定（doubt_type は `unclassified` のまま可）。
+- **B 非同期LLM帰属**: worker が未帰属の `kind='question'` 痕跡をバッチ処理し
+  `attribution_source='llm_candidate'` の候補を書く。**行の `status` は変更しない**
+  （tension と違い問い自体は確定済み。候補なのは帰属だけなので、確定状態は
+  `attribution_source` のみで管理する）。本人の confirm/訂正で `confirmed` になる（P1）。
+- **C 回答末尾の確認プロンプト**: `tension_hint` が立ったとき等にゲートして
+  doubt_type の1タップ選択肢を回答に添付（`anchor_confirm`）。毎回は出さない（P7）。
+
+**Worker**（`backend/core/structure_anchor/worker.py`）: `threading.Thread` 方式・
+冪等性は `payload.anchor_analyzed_at`。コスト上限 `ANCHOR_MAX_CALLS_PER_SESSION`（既定3）/
+`ANCHOR_MAX_CALLS_PER_DAY`（既定10）、モデルは fast tier 既定（`ANCHOR_LLM_MODEL` で上書き）。
+
+**API**（`backend/api/routes/learning.py`）:
+`GET /api/learning/courses/{course_id}/anchors/digest`（本人の `llm_candidate`・最大3件、
+confidence 数値は返さない）、`POST /api/learning/anchors/{trace_id}/confirm`
+（body: `doubt_type?` / `anchor_type?` / `anchor_id?` — 訂正可）、
+`POST /api/learning/anchors/{trace_id}/dismiss`（`structure_anchor.status='dismissed'` で保持, P4）。
+確定・却下は `theory_review_events` に `entity_type='structure_anchor'` で監査記録。
+教員向けは `GET /api/admin/courses/{course_id}/anchor-insights`
+（stage / doubt_type 単位の k-匿名化集約、k=3・n<3 セル非表示。対象は
+`learner_selected` / `confirmed` のみ。評価利用禁止, P3）。
+
+**設計原則**: tension の不変条項（P1/P4/P5/P6/P7）を継承。同期パスは非LLM（A）のみ、
+LLM（B）は非同期バッチ。LLM 候補は本人確定まで確定扱いしない。
+
 ### レクチャー音声キャッシュの判定（`backend/api/routes/lecture.py`）
 
 `student_material`/`content`/`summary` はコースビルダーが生成するほぼ全トピックに

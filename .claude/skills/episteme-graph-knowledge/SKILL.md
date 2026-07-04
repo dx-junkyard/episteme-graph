@@ -131,6 +131,10 @@ CorePredicate の定義は `backend/core/schema.py` を直接読んで最新の�
 | `TENSION_MAX_CALLS_PER_SESSION` | TensionMiningAgent: 1セッションあたり LLM コール上限 | `3` |
 | `TENSION_MAX_CALLS_PER_DAY` | TensionMiningAgent: 1ユーザー1日あたり LLM コール上限 | `10` |
 | `TENSION_LLM_MODEL` | TensionMiningAgent が使うモデル（空なら fast tier に委譲） | （空） |
+| `ANCHOR_MAX_CALLS_PER_SESSION` | StructureAnchorAgent: 1セッションあたり LLM コール上限 | `3` |
+| `ANCHOR_MAX_CALLS_PER_DAY` | StructureAnchorAgent: 1ユーザー1日あたり LLM コール上限 | `10` |
+| `ANCHOR_LLM_MODEL` | StructureAnchorAgent が使うモデル（空なら fast tier に委譲） | （空） |
+| `ANCHOR_CONFIRM_MAX_PER_SESSION` | 回答末尾の帰属確認プロンプト（C）を出すセッション内上限 | `3` |
 | `LLM_TRANSCRIBE_MODEL` | 音声文字起こしモデル（ハンズフリー会話、openai プロバイダのみ） | `whisper-1` |
 
 > **禁止**: `google-cloud-aiplatform` (Vertex AI) を新規パイプラインコードで使用すること。

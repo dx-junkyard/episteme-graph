@@ -27,7 +27,22 @@
     interestTraces: null,   // L3: UnfinishedQuestionBox（mock）
     tensionDigest: null,    // 違和感ダイジェスト {items: [...]}（TensionMiningAgent Stage 2）
     tensionDeferred: {},    // [あとで] で今セッション中は隠す trace_id の集合
+    // ── 構造帰属（Structure-Anchored Questions） ──
+    anchorDigest: null,     // 帰属候補ダイジェスト {items: [...]}（StructureAnchorAgent Stage 2）
+    anchorDeferred: {},     // [あとで] で今セッション中は隠す trace_id の集合
+    pendingSelection: null, // 方法A: 「ここについて質問」で選択したテキスト {text, segment_id}
   };
+
+  // 構造帰属: 疑いの様相の1タップ選択肢（サーバの DOUBT_TYPE_LABELS と同語彙。
+  // unclassified は提示しない — 未選択のまま閉じれば unclassified が保たれる）。
+  var ANCHOR_DOUBT_OPTIONS = [
+    { doubt_type: "definition", label: "定義がわからない" },
+    { doubt_type: "justification_gap", label: "なぜ成り立つのか" },
+    { doubt_type: "premise", label: "前提への疑い" },
+    { doubt_type: "prior_conflict", label: "既有知識との衝突" },
+    { doubt_type: "scope", label: "どこまで成り立つのか" },
+    { doubt_type: "connection", label: "他とどう繋がるのか" },
+  ];
 
   // 🚧 Mock 検知: API レスポンスが mock データを含むか（_mock / mock の両方を許容）。
   function isMock(obj) {
@@ -451,9 +466,16 @@
       // 「この問いに戻る」のジャンプ先アンカー（id を持つメッセージのみ）。
       var idAttr = msg.id ? ' id="msg-' + escHtml(msg.id) + '"' : "";
       if (msg.role === "user") {
-        html += '<div class="mg usr"' + idAttr + '>' + escHtml(msg.content) + "</div>";
+        var anchorChip = "";
+        // 構造帰属（方法A）: この問いが指した構造要素のチップ（learner_selected）
+        if (msg.structure_anchor && msg.structure_anchor.anchor_label) {
+          anchorChip = '<div style="font-size:11px;opacity:.75;margin-top:4px">📍 ' +
+            escHtml(msg.structure_anchor.anchor_label) + '</div>';
+        }
+        html += '<div class="mg usr"' + idAttr + '>' + escHtml(msg.content) + anchorChip + "</div>";
       } else {
-        html += '<div class="mg ai"' + idAttr + '>' + renderAiContent(msg.content, msg) + "</div>";
+        html += '<div class="mg ai"' + idAttr + '>' + renderAiContent(msg.content, msg) +
+          renderAnchorConfirmPrompt(msg) + "</div>";
       }
     });
 
@@ -471,6 +493,17 @@
       el.addEventListener("click", function () { openSourcePopup(this); });
       el.addEventListener("keydown", function (e) {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openSourcePopup(this); }
+      });
+    });
+
+    // 構造帰属（方法C）: 回答末尾の1タップ様相選択（選択がそのまま帰属の確定になる）。
+    ca.querySelectorAll("[data-anchor-prompt-doubt]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var traceId = this.getAttribute("data-anchor-prompt-trace");
+        var doubt = this.getAttribute("data-anchor-prompt-doubt");
+        markAnchorPromptDone(traceId);
+        if (doubt) confirmAnchor(traceId, doubt);
+        renderChat();
       });
     });
 
@@ -514,6 +547,112 @@
     // 教材区画（本筋）とモードバー（現在地）を更新する。
     renderMaterialRegion();
     renderModeBar();
+  }
+
+  // ── 構造帰属（方法A）: 教材区画のテキスト選択 →「ここについて質問」 ──
+  // 選択テキストは次の1問にだけ selection_text として添えられ、learner_selected の
+  // 明示アンカー（ground truth）として同期記録される。
+
+  function clearPendingSelection() {
+    state.pendingSelection = null;
+    var chip = document.getElementById("anchor-selection-chip");
+    if (chip) chip.remove();
+  }
+
+  // 入力欄の直前に「選択中: …」チップを出す（解除可能）。
+  function showPendingSelectionChip() {
+    var input = document.getElementById("chat-input");
+    if (!input || !state.pendingSelection) return;
+    var chip = document.getElementById("anchor-selection-chip");
+    if (!chip) {
+      chip = document.createElement("div");
+      chip.id = "anchor-selection-chip";
+      chip.style.cssText =
+        "font-size:11px;padding:4px 8px;margin:0 0 4px;border-radius:6px;" +
+        "background:var(--color-bg-secondary,#f3f4f6);display:flex;align-items:center;gap:6px";
+      input.parentNode.insertBefore(chip, input);
+    }
+    var t = state.pendingSelection.text;
+    chip.innerHTML = '📍 ここについて質問: <span style="opacity:.8">' +
+      escHtml(t.length > 40 ? t.slice(0, 40) + "…" : t) + '</span>' +
+      '<button class="lx-ghost secondary" id="anchor-selection-clear" style="margin-left:auto">解除</button>';
+    chip.querySelector("#anchor-selection-clear").addEventListener("click", clearPendingSelection);
+  }
+
+  function hideSelectionAskButton() {
+    var b = document.getElementById("anchor-ask-btn");
+    if (b) b.remove();
+  }
+
+  // 教材区画（#material-body）内のテキスト選択にフローティングボタンを出す。
+  function initSelectionAnchor() {
+    if (document._anchorSelectionWired) return;
+    document._anchorSelectionWired = true;
+    document.addEventListener("mouseup", function () {
+      // click 直後に selection が確定するのを待つ
+      setTimeout(function () {
+        hideSelectionAskButton();
+        var body = document.getElementById("material-body");
+        var sel = window.getSelection();
+        var text = sel ? String(sel.toString() || "").trim() : "";
+        if (!body || !text || text.length < 4 || text.length > 300) return;
+        if (!sel.rangeCount) return;
+        var range = sel.getRangeAt(0);
+        if (!body.contains(range.commonAncestorContainer)) return;
+        var rect = range.getBoundingClientRect();
+        var btn = document.createElement("button");
+        btn.id = "anchor-ask-btn";
+        btn.textContent = "ここについて質問";
+        btn.style.cssText =
+          "position:fixed;z-index:1000;left:" + Math.round(rect.left) + "px;" +
+          "top:" + Math.round(rect.bottom + 6) + "px;font-size:12px;padding:4px 10px;" +
+          "border-radius:14px;border:1px solid var(--color-border,#ccc);" +
+          "background:var(--color-bg,#fff);box-shadow:0 2px 8px rgba(0,0,0,.15);cursor:pointer";
+        // mousedown で選択が消えるのを防ぐ
+        btn.addEventListener("mousedown", function (e) { e.preventDefault(); });
+        btn.addEventListener("click", function () {
+          var seg = (Session.currentAnchor() || {}).segment_id || 0;
+          state.pendingSelection = { text: text, segment_id: seg };
+          hideSelectionAskButton();
+          showPendingSelectionChip();
+          var input = document.getElementById("chat-input");
+          if (input) input.focus();
+        });
+        document.body.appendChild(btn);
+      }, 0);
+    });
+    document.addEventListener("mousedown", function (e) {
+      if (e.target && e.target.id === "anchor-ask-btn") return;
+      hideSelectionAskButton();
+    });
+  }
+
+  // 構造帰属（方法C）: 回答末尾の1タップ確認プロンプト。ゲート済み応答にのみ付く。
+  // 選択しないまま流しても問い自体は unclassified で保持される（P4/P7）。
+  function renderAnchorConfirmPrompt(msg) {
+    var ac = msg.anchor_confirm;
+    if (!ac || ac.done || !ac.trace_id) return "";
+    var tid = escHtml(ac.trace_id);
+    var html = '<div class="anchor-confirm" style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--color-border,#ccc);font-size:12px">';
+    html += '<div style="opacity:.8;margin-bottom:6px">この疑問はどれに近いですか？（任意・1タップ）</div>';
+    html += '<div style="display:flex;flex-wrap:wrap;gap:6px">';
+    (ac.options || ANCHOR_DOUBT_OPTIONS).forEach(function (o) {
+      html += '<button class="lx-ghost" data-anchor-prompt-trace="' + tid +
+        '" data-anchor-prompt-doubt="' + escHtml(o.doubt_type) + '">' + escHtml(o.label) + '</button>';
+    });
+    html += '<button class="lx-ghost secondary" data-anchor-prompt-trace="' + tid +
+      '" data-anchor-prompt-doubt="">スキップ</button>';
+    html += '</div></div>';
+    return html;
+  }
+
+  // 方法C のプロンプトを消化済みにする（再描画で出さない）。
+  function markAnchorPromptDone(traceId) {
+    state.chatMessages.forEach(function (m) {
+      if (m.anchor_confirm && m.anchor_confirm.trace_id === traceId) {
+        m.anchor_confirm.done = true;
+      }
+    });
   }
 
   // 教材区画（本筋・順路）: 教材本文を独立スクロール領域に描画する。
@@ -1325,6 +1464,28 @@
         renderProgressTab();  // 今セッション中は隠すだけ（candidate のまま保持）
       });
     });
+    // 帰属候補の確認カード: [そう、これ] [違う] [あとで] + 様相の訂正チップ（P1）
+    el.querySelectorAll("[data-anchor-confirm]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        confirmAnchor(this.getAttribute("data-anchor-confirm"), "");
+      });
+    });
+    el.querySelectorAll("[data-anchor-correct]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        confirmAnchor(this.getAttribute("data-anchor-correct"), this.getAttribute("data-anchor-doubt"));
+      });
+    });
+    el.querySelectorAll("[data-anchor-dismiss]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        dismissAnchor(this.getAttribute("data-anchor-dismiss"));
+      });
+    });
+    el.querySelectorAll("[data-anchor-defer]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        state.anchorDeferred[this.getAttribute("data-anchor-defer")] = true;
+        renderProgressTab();  // 今セッション中は隠すだけ（llm_candidate のまま保持）
+      });
+    });
   }
 
   // [そう、これ] の後にだけ任意の一行編集欄を出す（空のままでも open で確定できる）。
@@ -1380,6 +1541,41 @@
     } catch (_) {
       state.tensionDigest = { items: [] };
     }
+  }
+
+  // ── 構造帰属（Structure-Anchored Questions）Stage 2: ダイジェスト・本人確定 ──
+
+  async function loadAnchorDigest() {
+    if (!state.courseId) return;
+    try {
+      var res = await apiFetch("/learning/courses/" + state.courseId + "/anchors/digest");
+      state.anchorDigest = res.ok ? await res.json() : { items: [] };
+    } catch (_) {
+      state.anchorDigest = { items: [] };
+    }
+  }
+
+  // 帰属を本人が確定/訂正する（doubtType は任意。空なら候補のまま確定）。
+  async function confirmAnchor(traceId, doubtType) {
+    try {
+      await apiFetch(
+        "/learning/anchors/" + encodeURIComponent(traceId) + "/confirm",
+        { method: "POST", body: JSON.stringify({ doubt_type: doubtType || "" }) }
+      );
+    } catch (_) { /* best-effort */ }
+    await loadAnchorDigest();
+    loadInterestTraces();  // 確定した帰属は問いの軌跡のチップに現れる
+  }
+
+  async function dismissAnchor(traceId) {
+    try {
+      await apiFetch(
+        "/learning/anchors/" + encodeURIComponent(traceId) + "/dismiss",
+        { method: "POST", body: JSON.stringify({}) }
+      );
+    } catch (_) { /* best-effort */ }
+    await loadAnchorDigest();
+    renderProgressTab();
   }
 
   // 痕跡を「解決済み」にして問いの軌跡を再取得する（Stage 3）。
@@ -1597,12 +1793,46 @@
     return html;
   }
 
+  // 帰属候補の確認カード:「この疑問は◯◯についてでしたか？」（確定は本人のみ。P1）。
+  // 様相チップをタップするとその doubt_type で訂正確定できる（自己説明の入口。方法C と連続）。
+  function renderAnchorDigestCard() {
+    var digest = state.anchorDigest;
+    if (!digest || !Array.isArray(digest.items)) return "";
+    var item = null;
+    for (var i = 0; i < digest.items.length; i++) {
+      if (!state.anchorDeferred[digest.items[i].trace_id]) { item = digest.items[i]; break; }
+    }
+    if (!item) return "";
+    var tid = escHtml(item.trace_id);
+    var html = '<div class="lx-revisit lx-anchor" data-anchor-card="' + tid + '">';
+    html += '<div class="k">疑問の在り処' + (item.context_label ? ' · ' + escHtml(item.context_label) : '') + '</div>';
+    html += '<div class="h">この疑問は「' + escHtml(item.anchor_label || item.anchor_type_label || "") +
+      '」の<b>' + escHtml(item.doubt_type_label || "") + '</b>についてでしたか？</div>';
+    html += '<div class="s">『' + escHtml(item.question_text || "") + '』</div>';
+    html += '<div class="lx-trace-actions" style="margin-top:8px">';
+    html += '<button class="lx-ghost" data-anchor-confirm="' + tid + '">そう、これ</button>';
+    html += '<button class="lx-ghost secondary" data-anchor-dismiss="' + tid + '">違う</button>';
+    html += '<button class="lx-ghost secondary" data-anchor-defer="' + tid + '">あとで</button>';
+    html += '</div>';
+    // 様相の訂正チップ（提案と違う様相ならタップで訂正確定）
+    html += '<div class="lx-trace-actions" style="margin-top:6px;flex-wrap:wrap">';
+    ANCHOR_DOUBT_OPTIONS.forEach(function (o) {
+      if (o.doubt_type === item.doubt_type) return;
+      html += '<button class="lx-ghost secondary" data-anchor-correct="' + tid +
+        '" data-anchor-doubt="' + escHtml(o.doubt_type) + '">' + escHtml(o.label) + '</button>';
+    });
+    html += '</div></div>';
+    return html;
+  }
+
   function renderProblemTrails() {
     var data = state.interestTraces;
     var html = '<div class="progress-head" style="margin:18px 0 8px"><h3 style="font-size:14px">問いの軌跡</h3></div>';
 
     // 違和感ダイジェスト（候補は本人の確定までダイジェスト経由でのみ提示する）
     html += renderTensionDigestCard();
+    // 帰属候補の確認カード（llm_candidate は本人の確定までここでのみ提示する。P1）
+    html += renderAnchorDigestCard();
 
     if (!data) {
       html += '<p class="lx-note" style="margin-top:0">読み込み中…</p>';
@@ -1646,6 +1876,14 @@
       html += '<span class="lx-status-tag ' + sm.cls + '">' + escHtml(sm.label) + '</span></div>';
       html += '<div class="lx-trace-text">' + escHtml(t.text || "") + '</div>';
       if (t.context_label) html += '<div class="lx-trace-ctx">' + escHtml(t.context_label) + '</div>';
+      // 構造帰属チップ: 「どこに・どう引っかかったか」（確定済みのみサーバが返す）
+      if (t.structure_anchor && (t.structure_anchor.anchor_label || t.structure_anchor.doubt_type_label)) {
+        html += '<div class="lx-trace-ctx" style="margin-top:2px">📍 ' +
+          escHtml(t.structure_anchor.anchor_label || t.structure_anchor.anchor_type_label || "") +
+          (t.structure_anchor.doubt_type !== "unclassified"
+            ? ' · ' + escHtml(t.structure_anchor.doubt_type_label || "") : '') +
+          '</div>';
+      }
       // アクション。「この問いに戻る」「解決済みにする」は実データ配線済み（Stage 3）。
       if (t.status !== "resolved") {
         html += '<div class="lx-trace-actions">';
@@ -1690,6 +1928,10 @@
     // 違和感ダイジェスト（次回ログイン時の提示。会話への割り込みはしない）
     if (state.tensionDigest === null) {
       await loadTensionDigest();
+    }
+    // 帰属候補ダイジェスト（同上。確認カードは進捗タブでのみ提示する）
+    if (state.anchorDigest === null) {
+      await loadAnchorDigest();
     }
     renderProgressTab();
     updateProgressTabDot();
@@ -1950,6 +2192,12 @@
     const payload = Object.assign({}, Session.contextPayload(), actionPayload || {});
     // L2: いまの読み位置（segment/scroll）。寄り道に入る瞬間の origin に正確に焼き込む。
     const anchorAtAsk = Session.currentAnchor();
+    // 構造帰属（方法A）: 「ここについて質問」で選択したテキストをこの1問にだけ添える。
+    if (state.pendingSelection && !payload.selection_text) {
+      payload.selection_text = state.pendingSelection.text;
+      payload.selection_segment_id = state.pendingSelection.segment_id;
+    }
+    clearPendingSelection();
 
     try {
       const res = await apiFetch("/learning/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/chat", {
@@ -1976,6 +2224,15 @@
         state.lastSources = data.sources || [];
         state.lastOverallTier = data.overall_tier || null;
         state.lastGrounding = data.content_grounding || null;
+        // 構造帰属（方法A）: 同期記録された明示アンカーを発話バブルのチップに反映する。
+        if (data.structure_anchor) {
+          for (let i = state.chatMessages.length - 1; i >= 0; i--) {
+            if (state.chatMessages[i].id === userMsgId) {
+              state.chatMessages[i].structure_anchor = data.structure_anchor;
+              break;
+            }
+          }
+        }
         state.chatMessages.push({
           role: "assistant",
           content: data.answer,
@@ -1990,6 +2247,8 @@
           position_anchor: data.position_anchor || null,
           // 分野の地図 (Issue C-3): 学習パス提案カード
           atlas_path_card: registerAtlasPathCard(data.atlas_path_card),
+          // 構造帰属（方法C）: 回答末尾の1タップ確認プロンプト（ゲート済みのときのみ）
+          anchor_confirm: data.anchor_confirm || null,
           mock: isMock(data),
         });
         // Issue #145: 個人レイヤーの更新を反映する
@@ -2610,6 +2869,7 @@
     setupRoleUI();
     initTabs();
     initInput();
+    initSelectionAnchor();
     initLogout();
     initGroups();
     await initCourseSelector();
@@ -3914,6 +4174,7 @@
     setupRoleUI();
     initTabs();
     initInput();
+    initSelectionAnchor();
     initLogout();
     initLectureMode();
     initSplitHandle();

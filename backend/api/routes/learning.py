@@ -32,10 +32,13 @@ from schemas import (
 from services import (
     calculate_progress,
     check_prerequisites,
+    confirm_anchor_trace,
     confirm_tension_trace,
     connect_tension_trace,
     detect_and_record_misconception,
+    dismiss_anchor_trace,
     dismiss_tension_trace,
+    get_anchor_digest,
     get_tension_digest,
     enroll_user_in_course,
     get_course_chunks_ordered,
@@ -80,6 +83,16 @@ from core.course_content_builder import build_course_content_background
 from core.atlas_path import build_learning_path_card
 from core.tension.prefilter import judge_tension_hint
 from core.tension.worker import maybe_schedule_tension_mining
+from core.structure_anchor.schema import (
+    ATTRIBUTION_LEARNER_SELECTED,
+    DOUBT_TYPE_LABELS,
+    anchor_type_for_element,
+    build_anchor_payload,
+)
+from core.structure_anchor.worker import (
+    check_and_count_confirm_prompt,
+    maybe_schedule_anchor_mining,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -693,6 +706,50 @@ def _get_casual_teacher_system_prompt(domain: str, response_persona: str | None 
    教材に無い話題は、想像や一般論であることが伝わる言い方（「たぶん」「一般には」）で話してください。
 5. 【出さないもの】数式の羅列・LaTeX・出典番号マーカー・`[ACTION_BUTTON: ...]` などの
    システム記法は一切出力しないでください。数式が必要なら言葉で言い換えてください。{persona_block}"""
+
+
+def _learner_selected_anchor(body: LearningChatRequest) -> dict | None:
+    """発話時の明示アンカー（構造帰属・方法A）を非LLMで構築する。無ければ None。
+
+    「どこ（anchor）」はこの操作で確定するが「どう（doubt_type）」までは分からないため
+    unclassified のまま保持する（P4。方法B/C が後から補い得る）。
+    """
+    if body.element_id:
+        atype = anchor_type_for_element(body.element_type)
+        # 出典系（reference/citation→chunk）はタップ元チャンクをアンカーにする
+        anchor_id = body.chunk_id if (atype == "chunk" and body.chunk_id) else body.element_id
+        return build_anchor_payload(
+            anchor_type=atype,
+            anchor_id=anchor_id,
+            anchor_label=body.element_label or body.element_id,
+            doubt_type="unclassified",
+            attribution_source=ATTRIBUTION_LEARNER_SELECTED,
+            evidence_quote="",
+            reason="element_tap",
+            confidence=1.0,
+        )
+    sel = (body.selection_text or "").strip()
+    if sel:
+        seg = body.selection_segment_id
+        return build_anchor_payload(
+            anchor_type="segment",
+            anchor_id=f"seg_{int(seg)}" if seg is not None else "",
+            anchor_label=(sel[:40] + "…") if len(sel) > 40 else sel,
+            doubt_type="unclassified",
+            attribution_source=ATTRIBUTION_LEARNER_SELECTED,
+            evidence_quote=sel,
+            reason="text_selection",
+            confidence=1.0,
+        )
+    return None
+
+
+# 方法C の1タップ選択肢（unclassified は「その他」として提示しない — 未選択のまま
+# 閉じれば unclassified が保たれる）
+_ANCHOR_CONFIRM_DOUBT_OPTIONS = [
+    {"doubt_type": d, "label": DOUBT_TYPE_LABELS[d]}
+    for d in ("definition", "justification_gap", "premise", "prior_conflict", "scope", "connection")
+]
 
 
 def _generate_graph_element_explanation(
@@ -1327,7 +1384,26 @@ def learning_chat(
             include_continue=False,
             extra_actions=inline_actions,
         )
-        return LearningChatResponse(**result.model_dump(), course_update=graph_response.course_update)
+        # 構造帰属（方法A）: 要素タップは ground truth のアンカー。問いとして
+        # learner_selected 帰属付きで記録する（同期・非LLM）。
+        _tap_anchor = _learner_selected_anchor(body)
+        record_interest_trace(
+            current_user["id"], course_id, topic_id,
+            kind="question",
+            text=body.message or f"{body.element_label or body.element_id}について質問",
+            context_label=" · ".join(
+                [s for s in [support_origin.chapter_title, topic_title] if s]
+            ),
+            extra_payload={
+                "position_anchor": build_position_anchor(topic_id, _seg, _scroll),
+                "structure_anchor": _tap_anchor,
+            } if _tap_anchor else None,
+        )
+        return LearningChatResponse(
+            **result.model_dump(),
+            course_update=graph_response.course_update,
+            structure_anchor=_tap_anchor,
+        )
 
     # カジュアル対話モード（気軽に話せる先生・ハンズフリー音声会話）:
     # 意図分類（雑談拒否）・前提知識ゲート・誤解検出をバイパスし、RAG検索と
@@ -1536,26 +1612,52 @@ def learning_chat(
     # 同語再訪でヒントを立てるだけ。LLM 分類は非同期バッチ（P6: 応答を遅延させない）。
     _recent_user_texts = [t.get("content", "") for t in body.history if t.get("role") == "user"][-3:]
     _tension_hint = judge_tension_hint(body.message, _recent_user_texts)
-    record_interest_trace(
+    # 構造帰属（方法A・同期・非LLM）: テキスト選択・要素タップの明示アンカーがあれば
+    # learner_selected で確定記録する。無ければ方法B（非同期LLM）の帰属対象になる。
+    _sel_anchor = _learner_selected_anchor(body)
+    _trace_payload = {
+        "overall_tier": overall_tier,
+        "position_anchor": position_anchor,
+        "tension_hint": _tension_hint,
+        "casual": _is_casual,
+        # 「この問いに戻る」で元の往復へジャンプするための逆引き（この問いを発した user メッセージ id）。
+        "message_id": _persisted.get("user_message_id"),
+        # 方法Bの帰属コンテキスト用: この回答が実際に引用したチャンク（上位3件）。
+        "cited_chunk_ids": [s["chunk_id"] for s in cited_sources[:3] if s.get("chunk_id")],
+        # 分野の地図由来の質問 (根拠を見る ↗ など) は帰属を構造化して焼き込む (Issue C-2)
+        **({"atlas": _atlas_attribution(_atlas_ctx)} if _atlas_ctx else {}),
+    }
+    if _sel_anchor:
+        _trace_payload["structure_anchor"] = _sel_anchor
+    _trace_id = record_interest_trace(
         current_user["id"], course_id, topic_id,
         kind=_trace_kind,
         text=body.message,
         context_label=_ctx_label,
-        extra_payload={
-            "overall_tier": overall_tier,
-            "position_anchor": position_anchor,
-            "tension_hint": _tension_hint,
-            "casual": _is_casual,
-            # 「この問いに戻る」で元の往復へジャンプするための逆引き（この問いを発した user メッセージ id）。
-            "message_id": _persisted.get("user_message_id"),
-            # 分野の地図由来の質問 (根拠を見る ↗ など) は帰属を構造化して焼き込む (Issue C-2)
-            **({"atlas": _atlas_attribution(_atlas_ctx)} if _atlas_ctx else {}),
-        },
+        extra_payload=_trace_payload,
     )
     # ヒント累積が閾値に達していればバックグラウンドで TensionMiningAgent を起動
     # （best-effort: 失敗してもチャット応答を止めない）。
     if _tension_hint:
         maybe_schedule_tension_mining(current_user["id"], course_id, topic_id)
+    # 未帰属の問いが累積していればバックグラウンドで StructureAnchorAgent を起動
+    # （方法B・非同期。明示アンカー付きの問いは最初から対象外）。
+    if _trace_kind == "question" and not _sel_anchor:
+        maybe_schedule_anchor_mining(current_user["id"], course_id, topic_id)
+    # 方法C: 回答末尾の帰属確認プロンプト。tension_hint が立った往復か、明示アンカーは
+    # あるが疑いの様相が未分類の往復に限り、セッション内上限までゲートして提示する（P7）。
+    _anchor_confirm = None
+    if (
+        _trace_id
+        and not _is_casual
+        and (_tension_hint or _sel_anchor is not None)
+        and check_and_count_confirm_prompt(current_user["id"], course_id, topic_id)
+    ):
+        _anchor_confirm = {
+            "trace_id": _trace_id,
+            "question": (body.message or "")[:120],
+            "options": _ANCHOR_CONFIRM_DOUBT_OPTIONS,
+        }
     # 本文中のドリルダウンマーカーは構造化アクションへ正規化する。
     clean_answer, inline_actions = extract_inline_actions(answer)
 
@@ -1586,6 +1688,8 @@ def learning_chat(
         overall_tier=overall_tier,
         content_grounding=content_grounding,
         position_anchor=position_anchor,
+        structure_anchor=_sel_anchor,
+        anchor_confirm=_anchor_confirm,
         mock=False,
     )
 
@@ -1784,6 +1888,92 @@ def dismiss_tension_route(
     result = dismiss_tension_trace(current_user["id"], trace_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Tension candidate not found")
+    return {"ok": True, **result}
+
+
+# ---------------------------------------------------------------------------
+# 構造帰属（structure_anchor）— StructureAnchorAgent Stage 2: ダイジェスト・本人確定
+# ---------------------------------------------------------------------------
+# 権限: すべて本人（user_id 一致）のみ。教員・管理者は個別行にアクセス不可（P3）。
+# 行の status は変えない（問い自体は確定済み。候補なのは帰属だけ）。
+
+
+class AnchorConfirmRequest(BaseModel):
+    doubt_type: str = ""
+    anchor_type: str = ""
+    anchor_id: str = ""
+    anchor_label: str = ""
+
+
+@router.get("/courses/{course_id}/anchors/digest")
+def get_anchor_digest_route(
+    course_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """本人の帰属候補ダイジェスト（llm_candidate・confidence>=0.55・新しい順に最大3件）。
+
+    「この疑問は◯◯についてでしたか？」の確認カード用。confidence の数値は返さない。
+    セッション終了（20分無活動）後の未帰属の問いがあれば、ここで遅延起動する
+    （best-effort・非同期。今回のレスポンスには間に合わなくてよい）。
+    """
+    session = _pg_session()
+    try:
+        topic_rows = session.execute(
+            sa_text("""
+                SELECT DISTINCT topic_id FROM interest_traces
+                WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
+                  AND kind = 'question'
+                  AND payload->'structure_anchor' IS NULL
+                  AND payload->>'anchor_analyzed_at' IS NULL
+            """),
+            {"uid": current_user["id"], "cid": course_id},
+        ).fetchall()
+    except Exception:
+        topic_rows = []
+    finally:
+        session.close()
+    for (tid,) in topic_rows:
+        maybe_schedule_anchor_mining(current_user["id"], course_id, tid, session_end_check=True)
+
+    return get_anchor_digest(current_user["id"], course_id)
+
+
+@router.post("/anchors/{trace_id}/confirm")
+def confirm_anchor_route(
+    trace_id: str,
+    body: AnchorConfirmRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """帰属を本人が確定/訂正する: → attribution_source='confirmed'。
+
+    帰属を確定するのは人間であり、この操作だけが LLM 候補を帰属として確定する（P1）。
+    doubt_type / anchor_type / anchor_id を与えればその値で訂正して確定する。
+    帰属が未生成の痕跡（方法Cの1タップ申告）には segment 縮退の最小アンカーを作る。
+    """
+    result = confirm_anchor_trace(
+        current_user["id"], trace_id,
+        doubt_type=body.doubt_type,
+        anchor_type=body.anchor_type,
+        anchor_id=body.anchor_id,
+        anchor_label=body.anchor_label,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Anchor trace not found")
+    return {"ok": True, **result}
+
+
+@router.post("/anchors/{trace_id}/dismiss")
+def dismiss_anchor_route(
+    trace_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """本人が帰属候補を「違う」と判定: structure_anchor.status='dismissed'（保持する。P4）。
+
+    問い自体（行）は有効なまま残る。
+    """
+    result = dismiss_anchor_trace(current_user["id"], trace_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Anchor candidate not found")
     return {"ok": True, **result}
 
 

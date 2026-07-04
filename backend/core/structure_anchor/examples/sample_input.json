@@ -1,0 +1,31 @@
+{
+  "course_id": "course_demo",
+  "topic_id": "t_02",
+  "topic_title": "線形応答理論",
+  "questions": [
+    {
+      "trace_id": "tr_001",
+      "text": "式(12)の線形化で高次項を無視できるのはなぜですか。摂動が小さいという仮定だけで正当化できるのでしょうか。",
+      "context_label": "第2章 · 線形応答理論",
+      "segment_id": 4,
+      "cited_chunk_ids": ["ch_aa11"]
+    },
+    {
+      "trace_id": "tr_002",
+      "text": "ここに出てくるエントロピーという言葉の意味がまだよくわかりません。",
+      "context_label": "第2章 · 線形応答理論",
+      "segment_id": 3,
+      "cited_chunk_ids": []
+    }
+  ],
+  "claims": [],
+  "equations": [{"id": "clm_040", "text": "応答関数の定義式 (12)"}],
+  "derivation_steps": [{"id": "clm_042", "text": "線形化により高次項を無視して式(12)を得る"}],
+  "concepts": [{"id": "cmp_007", "label": "線形応答"}],
+  "chunks": [{"id": "ch_aa11", "head": "線形応答理論では外場が十分小さいとき…"}],
+  "segments": [
+    {"id": "seg_3", "label": "第2章 · 線形応答理論"},
+    {"id": "seg_4", "label": "第2章 · 線形応答理論"}
+  ],
+  "stages": ["theory_basis", "observation_model", "observable_construction", "equation_system", "elimination", "consistency_relation", "diagnostic_application"]
+}

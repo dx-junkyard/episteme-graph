@@ -1566,10 +1566,11 @@ def record_interest_trace(
     context_label: str = "",
     extra_payload: dict | None = None,
     status: str = "open",
-) -> None:
+) -> str | None:
     """学習者の問い・寄り道・誤答を interest_traces に1行追記する（安価・LLM不使用）。
 
     失敗してもチャット応答を止めない（best-effort）。chat_anchors への二重書きはしない。
+    戻り値は挿入した痕跡の id（帰属確認プロンプト等の後続操作用）。失敗時は None。
     """
     if kind not in _INTEREST_KINDS:
         kind = "raw"
@@ -1580,21 +1581,24 @@ def record_interest_trace(
         payload.update(extra_payload)
     session = _pg_session()
     try:
-        session.execute(
+        row = session.execute(
             sa_text("""
                 INSERT INTO interest_traces (id, user_id, course_id, topic_id, kind, payload, status)
                 VALUES (gen_random_uuid(), CAST(:uid AS uuid), :cid, :tid, :kind,
                         CAST(:payload AS jsonb), :status)
+                RETURNING id
             """),
             {
                 "uid": user_id, "cid": course_id, "tid": topic_id, "kind": kind,
                 "payload": json.dumps(payload, ensure_ascii=False), "status": status,
             },
-        )
+        ).fetchone()
         session.commit()
+        return str(row[0]) if row else None
     except Exception as exc:
         session.rollback()
         logger.warning("Failed to record interest trace: %s", exc)
+        return None
     finally:
         session.close()
 
@@ -1693,11 +1697,35 @@ def aggregate_interest_dashboard(course_id: str, topic_title_map: dict | None = 
             """),
             {"cid": course_id},
         ).fetchall()
+
+        # 構造帰属ヒートマップ（StructureAnchorAgent Stage 3）。
+        # 対象は learner_selected / confirmed のみ（llm_candidate は本人未確定なので
+        # 集計に入れない。P1/P3）。語彙（anchor_type/stage/doubt_type）単位の集計のみで
+        # 自由記述ラベル・本文は出さない。
+        anchor_rows = session.execute(
+            sa_text("""
+                SELECT topic_id,
+                       COALESCE(payload->'structure_anchor'->>'anchor_type', 'segment') AS anchor_type,
+                       CASE WHEN payload->'structure_anchor'->>'anchor_type' = 'stage'
+                            THEN COALESCE(payload->'structure_anchor'->>'anchor_id', '')
+                            ELSE '' END AS stage,
+                       COALESCE(payload->'structure_anchor'->>'doubt_type', 'unclassified') AS doubt_type,
+                       COUNT(*) AS cnt,
+                       COUNT(DISTINCT user_id) AS learners
+                FROM interest_traces
+                WHERE course_id = :cid AND kind IN ('question', 'misconception')
+                  AND payload->'structure_anchor'->>'attribution_source' IN ('learner_selected', 'confirmed')
+                  AND COALESCE(payload->'structure_anchor'->>'status', 'active') = 'active'
+                GROUP BY 1, 2, 3, 4
+                ORDER BY cnt DESC
+            """),
+            {"cid": course_id},
+        ).fetchall()
     except Exception as exc:
         logger.warning("aggregate_interest_dashboard failed: %s", exc)
         return {"course_id": course_id, "cohort_size": 0, "hotspots": [],
                 "unfinished_summary": {"open_questions": 0, "repeated_detours": 0, "recurring_misconceptions": 0},
-                "tension_heatmap": []}
+                "tension_heatmap": [], "anchor_heatmap": []}
     finally:
         session.close()
 
@@ -1714,6 +1742,30 @@ def aggregate_interest_dashboard(course_id: str, topic_title_map: dict | None = 
             "topic_title": title_map.get(tid) or tid or "(不明トピック)",
             "tension_type": ttype,
             "tension_type_label": _TT_LABELS.get(ttype, _TT_LABELS["unclassified"]),
+            "count": cnt,
+            "learners": learners,  # 関与人数（個人は特定しない）
+        })
+
+    # k-匿名化: 関与人数 n<3 のセルは表示しない（tension と同じ k=3）。
+    _ANCHOR_K_ANONYMITY = 3
+    anchor_heatmap = []
+    from core.structure_anchor.schema import (
+        ANCHOR_TYPE_LABELS as _AT_LABELS,
+        DOUBT_TYPE_LABELS as _DT_LABELS,
+    )
+    for r in anchor_rows:
+        tid, atype, stage, dtype, cnt, learners = (
+            r[0], str(r[1]), str(r[2]), str(r[3]), int(r[4]), int(r[5]),
+        )
+        if learners < _ANCHOR_K_ANONYMITY:
+            continue
+        anchor_heatmap.append({
+            "topic_title": title_map.get(tid) or tid or "(不明トピック)",
+            "anchor_type": atype,
+            "anchor_type_label": _AT_LABELS.get(atype, atype),
+            "stage": stage,  # anchor_type='stage' のときのみ非空（theory stage 語彙）
+            "doubt_type": dtype,
+            "doubt_type_label": _DT_LABELS.get(dtype, _DT_LABELS["unclassified"]),
             "count": cnt,
             "learners": learners,  # 関与人数（個人は特定しない）
         })
@@ -1738,6 +1790,7 @@ def aggregate_interest_dashboard(course_id: str, topic_title_map: dict | None = 
             "recurring_misconceptions": int(summary[2]) if summary else 0,
         },
         "tension_heatmap": tension_heatmap,
+        "anchor_heatmap": anchor_heatmap,
     }
 
 
@@ -2027,6 +2080,222 @@ def connect_tension_trace(
     _record_tension_event(trace_id, "open/articulated", "connected", user_id,
                           {"component_id": component_id, "edge_id": edge_id})
     return {"trace_id": str(trace_id), "status": "connected"}
+
+
+# ---------------------------------------------------------------------------
+# 構造帰属（structure_anchor）— StructureAnchorAgent Stage 2: ダイジェスト・本人確定
+# ---------------------------------------------------------------------------
+# 行の status は触らない（問い自体は確定済み。候補なのは帰属だけなので、確定状態は
+# payload.structure_anchor.attribution_source のみで管理する）。
+
+# ダイジェスト提示条件（worker.DIGEST_* と同値。循環 import を避けてここに持つ）
+_ANCHOR_DIGEST_MIN_CONFIDENCE = 0.55
+_ANCHOR_DIGEST_MAX_ITEMS = 3
+
+
+def _record_anchor_event(
+    trace_id: str, old_status: str, new_status: str, user_id: str, metadata: dict | None = None,
+) -> None:
+    """帰属の状態変更を theory_review_events に監査記録する（entity_type='structure_anchor'）。"""
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO theory_review_events (entity_type, entity_id, old_status, new_status, changed_by, metadata)
+                VALUES ('structure_anchor', :eid, :old, :new, CAST(:uid AS uuid), CAST(:meta AS jsonb))
+            """),
+            {
+                "eid": str(trace_id), "old": old_status, "new": new_status,
+                "uid": user_id, "meta": json.dumps(metadata or {}, ensure_ascii=False),
+            },
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.warning("_record_anchor_event failed: %s", exc)
+    finally:
+        session.close()
+
+
+def get_anchor_digest(user_id: str, course_id: str) -> dict:
+    """本人の帰属候補（llm_candidate・active・confidence>=0.55）を新しい順に最大3件返す。
+
+    「この疑問は◯◯についてでしたか？」の確認カード用。confidence の数値は返さない
+    （学習者に数値スコアを見せない原則の準用。P7）。
+    """
+    from core.structure_anchor.schema import ANCHOR_TYPE_LABELS, DOUBT_TYPE_LABELS
+
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT id, payload
+                FROM interest_traces
+                WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
+                  AND kind = 'question'
+                  AND payload->'structure_anchor'->>'attribution_source' = 'llm_candidate'
+                  AND COALESCE(payload->'structure_anchor'->>'status', 'active') = 'active'
+                  AND COALESCE((payload->'structure_anchor'->>'confidence')::float, 0.0) >= :minc
+                ORDER BY created_at DESC
+                LIMIT :lim
+            """),
+            {
+                "uid": user_id, "cid": course_id,
+                "minc": _ANCHOR_DIGEST_MIN_CONFIDENCE, "lim": _ANCHOR_DIGEST_MAX_ITEMS,
+            },
+        ).fetchall()
+    except Exception as exc:
+        logger.warning("get_anchor_digest failed: %s", exc)
+        rows = []
+    finally:
+        session.close()
+
+    items = []
+    for r in rows:
+        payload = r[1] if isinstance(r[1], dict) else (json.loads(r[1]) if r[1] else {})
+        anchor = payload.get("structure_anchor") or {}
+        atype = anchor.get("anchor_type", "segment")
+        dtype = anchor.get("doubt_type", "unclassified")
+        items.append({
+            "trace_id": str(r[0]),
+            "question_text": payload.get("text", ""),
+            "anchor_type": atype,
+            "anchor_type_label": ANCHOR_TYPE_LABELS.get(atype, atype),
+            "anchor_label": anchor.get("anchor_label", ""),
+            "doubt_type": dtype,
+            "doubt_type_label": DOUBT_TYPE_LABELS.get(dtype, DOUBT_TYPE_LABELS["unclassified"]),
+            "evidence_quote": anchor.get("evidence_quote", ""),
+            "context_label": payload.get("context_label", ""),
+        })
+    return {"course_id": course_id, "items": items}
+
+
+def confirm_anchor_trace(
+    user_id: str,
+    trace_id: str,
+    doubt_type: str = "",
+    anchor_type: str = "",
+    anchor_id: str = "",
+    anchor_label: str = "",
+) -> dict | None:
+    """帰属を本人が確定/訂正する: → attribution_source='confirmed'（P1）。
+
+    引数の doubt_type / anchor_type / anchor_id / anchor_label が与えられた場合は
+    その値で訂正する。structure_anchor が無い痕跡（方法Cの1タップ確定）には、
+    payload.position_anchor の segment から最小のアンカーを新規作成する。
+    """
+    from core.structure_anchor.schema import (
+        ANCHOR_TYPES,
+        ATTRIBUTION_CONFIRMED,
+        DOUBT_TYPES,
+        build_anchor_payload,
+    )
+
+    doubt_type = (doubt_type or "").strip()
+    anchor_type = (anchor_type or "").strip()
+    if doubt_type and doubt_type not in DOUBT_TYPES:
+        return None
+    if anchor_type and anchor_type not in ANCHOR_TYPES:
+        return None
+
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT payload FROM interest_traces
+                WHERE id = CAST(:tid AS uuid) AND user_id = CAST(:uid AS uuid)
+                  AND kind IN ('question', 'misconception')
+            """),
+            {"tid": trace_id, "uid": user_id},
+        ).fetchone()
+        if row is None:
+            return None
+        payload = row[0] if isinstance(row[0], dict) else (json.loads(row[0]) if row[0] else {})
+        anchor = payload.get("structure_anchor") or {}
+        old_source = anchor.get("attribution_source", "")
+        if not anchor:
+            # 方法C: 帰属未生成のまま本人が doubt_type を申告 → segment 縮退で新規作成
+            pos = payload.get("position_anchor") or {}
+            seg = pos.get("segment_id")
+            anchor = build_anchor_payload(
+                anchor_type="segment",
+                anchor_id=f"seg_{seg}" if seg is not None else "",
+                anchor_label=payload.get("context_label", ""),
+                doubt_type=doubt_type or "unclassified",
+                attribution_source=ATTRIBUTION_CONFIRMED,
+                reason="learner_declared_via_confirm_prompt",
+                confidence=1.0,
+            )
+        else:
+            if doubt_type:
+                anchor["doubt_type"] = doubt_type
+            if anchor_type:
+                anchor["anchor_type"] = anchor_type
+                anchor["anchor_id"] = (anchor_id or "").strip()
+                anchor["anchor_label"] = (anchor_label or "").strip()[:80]
+            elif anchor_id:
+                anchor["anchor_id"] = anchor_id.strip()
+                if anchor_label:
+                    anchor["anchor_label"] = anchor_label.strip()[:80]
+            anchor["attribution_source"] = ATTRIBUTION_CONFIRMED
+            anchor["status"] = "active"
+        result = session.execute(
+            sa_text("""
+                UPDATE interest_traces
+                SET payload = jsonb_set(payload, '{structure_anchor}', CAST(:anchor AS jsonb)),
+                    last_seen_at = now()
+                WHERE id = CAST(:tid AS uuid) AND user_id = CAST(:uid AS uuid)
+                RETURNING id
+            """),
+            {"anchor": json.dumps(anchor, ensure_ascii=False), "tid": trace_id, "uid": user_id},
+        ).fetchone()
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.warning("confirm_anchor_trace failed: %s", exc)
+        return None
+    finally:
+        session.close()
+    if result is None:
+        return None
+    _record_anchor_event(trace_id, old_source or "(none)", "confirmed", user_id,
+                         {"doubt_type": anchor.get("doubt_type", ""),
+                          "anchor_type": anchor.get("anchor_type", ""),
+                          "corrected": bool(doubt_type or anchor_type or anchor_id)})
+    return {"trace_id": str(trace_id), "structure_anchor": anchor}
+
+
+def dismiss_anchor_trace(user_id: str, trace_id: str) -> dict | None:
+    """本人が帰属候補を「違う」と判定: structure_anchor.status='dismissed'（保持する。P4）。
+
+    行の status・問い本文には触らない（問い自体は有効なまま）。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                UPDATE interest_traces
+                SET payload = jsonb_set(
+                        payload, '{structure_anchor,status}', '"dismissed"'::jsonb),
+                    last_seen_at = now()
+                WHERE id = CAST(:tid AS uuid) AND user_id = CAST(:uid AS uuid)
+                  AND payload->'structure_anchor' IS NOT NULL
+                  AND payload->'structure_anchor'->>'attribution_source' = 'llm_candidate'
+                RETURNING id
+            """),
+            {"tid": trace_id, "uid": user_id},
+        ).fetchone()
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.warning("dismiss_anchor_trace failed: %s", exc)
+        return None
+    finally:
+        session.close()
+    if row is None:
+        return None
+    _record_anchor_event(trace_id, "llm_candidate", "dismissed", user_id)
+    return {"trace_id": str(trace_id), "anchor_status": "dismissed"}
 
 
 def get_graph_element_context(
