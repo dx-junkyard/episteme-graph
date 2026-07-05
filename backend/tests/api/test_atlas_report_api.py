@@ -124,15 +124,28 @@ def fake_db(monkeypatch):
 
     ルーティング関数は fake_db.route で後から差し替えられる。
     生成された全セッションは fake_db.sessions に残る (SQL の検証用)。
+    atlas_skeletons (migration 027: 骨格の DB 管理) はステートフルな
+    インメモリフェイクへ委譲する (draft 保存 → 凍結の流れを成立させるため)。
     """
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+    from tests.fixtures.atlas_skeletons_fake import AtlasSkeletonTableFake
 
     class Factory:
         def __init__(self):
             self.sessions = []
             self.route = lambda sql, params: FakeResult()
+            self.skeletons = AtlasSkeletonTableFake()
+
+        def _dispatch(self, sql, params):
+            if "atlas_skeletons" in sql:
+                return self.skeletons.execute(sql, params)
+            return self.route(sql, params)
 
         def __call__(self):
-            session = FakeSession(lambda sql, p: self.route(sql, p))
+            session = FakeSession(lambda sql, p: self._dispatch(sql, p))
             self.sessions.append(session)
             return session
 

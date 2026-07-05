@@ -92,8 +92,11 @@
     try {
       return await fetchFromApi(cartridgeId, opts);
     } catch (err) {
-      console.warn("[atlas] API 取得に失敗。フィクスチャで表示します:", err);
-      return window.ATLAS_FIXTURE;
+      // fail-closed: source=api での取得・パース失敗時にフィクスチャへ退避しない
+      // (本番でモック地図を出さない gap4 の意図)。骨格なし (404) と同じ null を返し、
+      // 地図領域ごと非表示にする。フィクスチャは明示指定 (fixture) のときのみ。
+      console.warn("[atlas] API 取得に失敗。地図を非表示にします:", err);
+      return null;
     }
   }
 

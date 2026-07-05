@@ -1000,8 +1000,50 @@ def _run_migrations() -> None:
             "CREATE INDEX IF NOT EXISTS idx_atlas_cue_events_user ON atlas_cue_events(user_id, cue, event)"
         ))
 
+        # Migration 027: 分野の地図 — 骨格 (S層) の DB 管理化
+        # draft/凍結版をファイル (カートリッジ同梱) から DB へ移す。楽観ロックは revision。
+        # 既存同梱 skeleton.yaml は起動時に一度だけ取り込む (下の import 呼び出し・冪等)。
+        # 正本リファレンス: backend/db/027_atlas_skeletons.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS atlas_skeletons (
+                id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                domain_key   TEXT NOT NULL,
+                status       TEXT NOT NULL CHECK (status IN ('draft', 'frozen')),
+                version      TEXT NOT NULL DEFAULT '',
+                content      JSONB NOT NULL,
+                revision     INTEGER NOT NULL DEFAULT 1,
+                generated_by TEXT NOT NULL DEFAULT '',
+                created_by   UUID,
+                updated_by   UUID,
+                created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_atlas_skeletons_draft "
+            "ON atlas_skeletons(domain_key) WHERE status = 'draft'"
+        ))
+        session.execute(sa_text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_atlas_skeletons_frozen "
+            "ON atlas_skeletons(domain_key, version) WHERE status = 'frozen'"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_atlas_skeletons_domain "
+            "ON atlas_skeletons(domain_key, status, created_at DESC)"
+        ))
+
         session.commit()
-        logger.info("Migrations (002-026) applied successfully.")
+        logger.info("Migrations (002-027) applied successfully.")
+
+        # 骨格 DB 管理化 (027): カートリッジ同梱の凍結骨格を一度だけ DB へ取り込む (冪等)
+        try:
+            from core import atlas_store
+
+            atlas_store.import_bundled_skeletons(session)
+            session.commit()
+        except Exception:  # noqa: BLE001
+            session.rollback()
+            logger.warning("bundled atlas skeleton import skipped", exc_info=True)
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema

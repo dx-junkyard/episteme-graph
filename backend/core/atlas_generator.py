@@ -74,13 +74,34 @@ def build_generation_prompt(cartridge: DomainCartridge) -> str:
     concept_types = ", ".join(
         str(c.get("label") or c.get("id") or "") for c in cartridge.ontology.concept_types[:20]
     )
-    domains = ", ".join(cartridge.target_domain)
+    return build_generation_prompt_from_meta(
+        name=cartridge.name,
+        target_domain=list(cartridge.target_domain),
+        description=cartridge.description,
+        concept_vocabulary=concept_types,
+    )
+
+
+def build_generation_prompt_from_meta(
+    *,
+    name: str,
+    target_domain: list[str] | tuple[str, ...] = (),
+    description: str = "",
+    concept_vocabulary: str = "",
+) -> str:
+    """分野メタデータから生成プロンプトを組み立てる。
+
+    migration 027 (骨格の DB 管理化) で、カートリッジファイルを持たない新分野でも
+    骨格を生成できるよう、プロンプト構築をカートリッジ非依存に分離した。
+    """
+    concept_types = concept_vocabulary or "(指定なし — 分野の標準的な語彙を使うこと)"
+    domains = ", ".join(target_domain) if target_domain else name
     return (
         "あなたは大学院教育のカリキュラム設計者です。"
         "以下の分野について、学習者に見せる「分野の地図」の骨格 (領域と代表概念の配置) を設計してください。\n\n"
-        f"分野: {cartridge.name}\n"
+        f"分野: {name}\n"
         f"対象ドメイン: {domains}\n"
-        f"説明: {cartridge.description}\n"
+        f"説明: {description}\n"
         f"分野の概念タイプ語彙: {concept_types}\n\n"
         "制約:\n"
         f"- 領域 (regions) は最大 {atlas.MAX_REGIONS} 件。分野を俯瞰する主要領域に絞る\n"
@@ -223,23 +244,39 @@ def generate_skeleton_draft(
     *,
     batch_id: str | None = None,
     model: str | None = None,
+    domain_meta: dict | None = None,
 ) -> atlas.AtlasSkeleton:
-    """カートリッジのメタデータ + モデル知識から draft 骨格を生成する。"""
+    """カートリッジのメタデータ + モデル知識から draft 骨格を生成する。
+
+    domain_meta (migration 027): カートリッジファイルを持たない新分野向けに
+    {name, description, target_domain, concept_vocabulary} をリクエストから渡す。
+    指定があればカートリッジは読まない (骨格の DB 管理化に伴いファイル非依存)。
+    """
     # 遅延インポート: core.atlas / cartridges の単体テストを LLM SDK なしで動かすため
     from core.llm import generate_text_with_structured_output
 
-    cartridge = load_cartridge(cartridge_id)
+    if domain_meta:
+        prompt = build_generation_prompt_from_meta(
+            name=str(domain_meta.get("name") or cartridge_id),
+            target_domain=[str(d) for d in (domain_meta.get("target_domain") or []) if d],
+            description=str(domain_meta.get("description") or ""),
+            concept_vocabulary=str(domain_meta.get("concept_vocabulary") or ""),
+        )
+    else:
+        cartridge = load_cartridge(cartridge_id)
+        prompt = build_generation_prompt(cartridge)
+
     settings = get_settings()
     model_name = model or settings.llm_analysis_model
     batch = batch_id or uuid.uuid4().hex[:12]
 
     generated = generate_text_with_structured_output(
-        messages=[{"role": "user", "content": build_generation_prompt(cartridge)}],
+        messages=[{"role": "user", "content": prompt}],
         response_format=GeneratedSkeleton,
         model=model_name,
     )
     return normalize_generated(
         generated,
-        cartridge_id=cartridge.cartridge_id,
+        cartridge_id=cartridge_id,
         generated_by=f"model:{model_name} batch:{batch}",
     )

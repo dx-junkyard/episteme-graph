@@ -333,7 +333,7 @@ _GRAPHS_SQL = """
 
 _EXPLANATIONS_SQL = """
     SELECT e.component_id::text, e.id::text, e.kind, e.shared, e.review_status,
-           COALESCE(u.username, '') AS author_name,
+           COALESCE(u.display_name, '') AS author_name,
            COALESCE(s.endorser_count, 0) AS endorser_count,
            COALESCE(s.strong_count, 0) AS strong_count,
            COALESCE(s.expertise_breadth, 0) AS expertise_breadth
@@ -854,6 +854,59 @@ def resolve_course_cartridge(session, course_data: dict) -> str:
     return _fallback_cartridge_id()
 
 
+def course_has_skeleton_anchor(session, skeleton, cartridge_id: str, course_data: dict) -> bool:
+    """コースが骨格へ少なくとも1つの足がかり (topic → 骨格概念対応) を持つか。
+
+    導出カートリッジの妥当性ゲート (gap3 hardening)。解析パイプラインは既定
+    カートリッジで走るため、`document_analysis_runs` 由来の導出だけでは別分野の
+    コースにも既定カートリッジが返る。明示指定 (`course_data.cartridge_id`) のない
+    コースで、どのトピックも骨格概念へ対応付かない場合、その骨格はこのコースの
+    分野地図ではない — 呼び出し側 (atlas_view) は 404 (骨格なし扱い) に縮退させる。
+
+    判定は gap1/gap2 と同じ決定論的経路の再利用:
+      1. 明示 binding / ラベル一致 (`atlas.match_topic_to_concept`、非DB・軽量)
+      2. コーパス binding (全 topic の教材チャンク → component → 骨格概念、単一クエリ)
+    """
+    if skeleton is None or not isinstance(course_data, dict):
+        return False
+    from core import atlas as atlas_module
+
+    topics = [t for t in (course_data.get("topics") or []) if isinstance(t, dict)]
+
+    # 1) 明示 binding / ラベル一致 (純粋・非DB)
+    for topic in topics:
+        if atlas_module.match_topic_to_concept(topic, skeleton):
+            return True
+
+    # 2) コーパス binding: 全 topic の教材チャンク → component → 骨格概念
+    chunk_ids = sorted(
+        {str(c) for t in topics for c in (t.get("material_chunk_ids") or []) if c}
+    )
+    if not chunk_ids or session is None:
+        return False
+    try:
+        rows = session.execute(
+            sa_text(_TOPIC_COMPONENTS_SQL).bindparams(bindparam("chunk_ids", expanding=True)),
+            {"cartridge_id": cartridge_id, "chunk_ids": chunk_ids},
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        logger.warning("atlas course anchor query failed", exc_info=True)
+        return False
+    if not rows:
+        return False
+
+    snapshot = load_corpus_snapshot(session, cartridge_id)
+    comp_map = build_component_concept_map(snapshot, skeleton)
+    concept_by_norm_label: dict[str, str] = {}
+    for region in skeleton.regions:
+        for concept in region.concepts:
+            concept_by_norm_label.setdefault(_normalize(concept.label), concept.id)
+    for comp_id, comp_name in ((str(r[0]), r[1] or "") for r in rows):
+        if comp_map.get(comp_id) or concept_by_norm_label.get(_normalize(comp_name)):
+            return True
+    return False
+
+
 def build_component_concept_map(snapshot: CorpusSnapshot, skeleton) -> dict[str, str]:
     """component_id → 骨格概念 id のマップ (reviewed concept_bindings + 正規化名一致)。"""
     binding_to_concept, _ = _skeleton_binding_maps(skeleton)
@@ -1305,15 +1358,15 @@ def _run_background_refresh(cartridge_id: str) -> None:
     with _refresh_lock:
         _refresh_timers.pop(cartridge_id, None)
     try:
-        from core import cartridges as cartridges_module
+        from core import atlas_store
         from core.postgres import get_session
 
-        cartridge = cartridges_module.load_cartridge(cartridge_id)
-        skeleton = cartridge.learner_atlas_skeleton
-        if skeleton is None:
-            return
         session = get_session()
         try:
+            # migration 027: 骨格は DB 凍結版が正本 (同梱ファイルはフォールバック)
+            skeleton = atlas_store.load_learner_skeleton(cartridge_id, session)
+            if skeleton is None:
+                return
             refresh_overlay_cache(session, skeleton, cartridge_id=cartridge_id)
             session.commit()
         except Exception:  # noqa: BLE001

@@ -557,7 +557,7 @@ class TestRuntimeConfig:
 
 class TestCourseAware:
     def test_course_resolves_cartridge_and_topic_focus(self, client, warm_cache, monkeypatch):
-        from api import services
+        import services
 
         course_data = {
             "cartridge_id": "particle_physics",
@@ -577,6 +577,57 @@ class TestCourseAware:
     def test_missing_cartridge_and_course_is_422(self, client, warm_cache):
         res = client.get("/api/atlas", headers=_headers())
         assert res.status_code == 422
+
+
+class TestDerivedCartridgeGate:
+    """gap3 hardening: 導出カートリッジの妥当性ゲート。
+
+    解析パイプラインは既定カートリッジで走るため、`document_analysis_runs` 由来の
+    導出だけでは別分野のコース (例: 修正重力理論) にも particle_physics の地図が
+    返ってしまう。コースが骨格へ足がかりを持たない場合は 404 (骨格なし扱い) に
+    縮退し、フロントは地図領域ごと非表示にする (issue F 受け入れ条件6 と同じ縮退)。
+    """
+
+    def test_derived_cartridge_without_anchor_is_404(self, client, warm_cache, monkeypatch):
+        """明示指定なし + どのトピックも骨格概念に対応しない → 404。"""
+        import services
+
+        course_data = {
+            "sources": [{"material_id": "m-dhost"}],
+            "topics": [
+                {"id": "t1", "title": "修正重力理論のテストとしての大規模構造"},
+                {"id": "t2", "title": "局所バイアス模型の導入"},
+            ],
+        }
+        monkeypatch.setattr(services, "get_course_data", lambda uid, cid: course_data)
+        res = client.get("/api/atlas?course=c-dhost&topic=t1", headers=_headers())
+        assert res.status_code == 404
+
+    def test_derived_cartridge_with_label_anchor_is_200(self, client, warm_cache, monkeypatch):
+        """明示指定なしでも topic が骨格概念にラベル一致すれば地図を返す。"""
+        import services
+
+        course_data = {
+            "sources": [{"material_id": "m-bc"}],
+            "topics": [{"id": "t1", "title": "演算子積展開"}],
+        }
+        monkeypatch.setattr(services, "get_course_data", lambda uid, cid: course_data)
+        res = client.get("/api/atlas?course=c-bc&topic=t1", headers=_headers())
+        assert res.status_code == 200
+        assert res.json()["cartridge"] == "particle_physics"
+
+    def test_explicit_course_cartridge_skips_gate(self, client, warm_cache, monkeypatch):
+        """course_data.cartridge_id の明示指定 (authoring-time の意思) はゲートを通さない。"""
+        import services
+
+        course_data = {
+            "cartridge_id": "particle_physics",
+            "sources": [],
+            "topics": [{"id": "t1", "title": "骨格と無関係な題目zzz"}],
+        }
+        monkeypatch.setattr(services, "get_course_data", lambda uid, cid: course_data)
+        res = client.get("/api/atlas?course=c1", headers=_headers())
+        assert res.status_code == 200
 
 
 # ---------------------------------------------------------------------------

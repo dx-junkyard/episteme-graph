@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from core import atlas
 from core import atlas_reports
+from core import atlas_store
 from core import cartridges as cartridges_module
 from dependencies import _get_current_user, _require_teacher
 
@@ -26,6 +27,14 @@ logger = logging.getLogger(__name__)
 
 # /api/admin/cartridges/... 配下 (routes/admin.py がインクルード)
 router = APIRouter(prefix="/cartridges", tags=["Admin"])
+
+# /api/admin/atlas/... 配下 (routes/admin.py がインクルード。ドメイン一覧など
+# cartridge_id パスに馴染まない管理エンドポイント)
+admin_atlas_router = APIRouter(prefix="/atlas", tags=["Admin"])
+
+# /api/admin/courses/{course_id}/atlas-binding (routes/admin.py がインクルード。
+# コース ⇄ 地図バインディングの提案・承認保存)
+binding_router = APIRouter(prefix="/courses", tags=["Admin"])
 
 # 学習者向け (main.py がインクルード)
 learning_router = APIRouter(prefix="/api/learning/atlas", tags=["Learning"])
@@ -94,32 +103,40 @@ def _reports_session():
 
 
 # ---------------------------------------------------------------------------
-# パス解決ヘルパー
+# 骨格ストアヘルパー (migration 027: DB が正本。ファイルは同梱シードのみ)
 # ---------------------------------------------------------------------------
 
 
-def _cartridge_dir(cartridge_id: str):
+def _skeleton_session():
+    """骨格 draft/凍結の DB セッション。取得不能は 503 (永続化が本体のため)。"""
     try:
-        return cartridges_module.cartridge_directory(cartridge_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"cartridge '{cartridge_id}' not found") from exc
+        from core.postgres import get_session
 
-
-def _draft_path(cartridge_id: str):
-    return _cartridge_dir(cartridge_id) / atlas.DRAFT_FILENAME
-
-
-def _frozen_path(cartridge_id: str):
-    return _cartridge_dir(cartridge_id) / atlas.SKELETON_FILENAME
-
-
-def _load_optional(path) -> atlas.AtlasSkeleton | None:
-    if not path.exists():
-        return None
-    try:
-        return atlas.load_skeleton(path)
+        return get_session()
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"骨格の読み込みに失敗しました: {exc}") from exc
+        logger.error("atlas skeleton DB session unavailable", exc_info=True)
+        raise HTTPException(status_code=503, detail="データベースに接続できません") from exc
+
+
+def _ensure_domain_exists(cartridge_id: str) -> None:
+    """domain の存在チェック (404)。カートリッジディレクトリまたは DB 骨格のどちらかで成立。
+
+    migration 027 以降、カートリッジファイルを持たない DB 管理の domain がありうる。
+    """
+    try:
+        cartridges_module.cartridge_directory(cartridge_id)
+        return
+    except FileNotFoundError:
+        pass
+    session = _skeleton_session()
+    try:
+        if atlas_store.load_frozen_skeleton(session, cartridge_id) is not None:
+            return
+        if atlas_store.load_draft(session, cartridge_id) is not None:
+            return
+    finally:
+        session.close()
+    raise HTTPException(status_code=404, detail=f"domain '{cartridge_id}' not found")
 
 
 def _skeleton_payload(skeleton: atlas.AtlasSkeleton | None) -> dict[str, Any] | None:
@@ -140,16 +157,36 @@ def _skeleton_payload(skeleton: atlas.AtlasSkeleton | None) -> dict[str, Any] | 
 class GenerateSkeletonRequest(BaseModel):
     force: bool = Field(default=False, description="既存 draft がある場合に上書き再生成するか")
     model: str | None = Field(default=None, description="使用モデルの上書き (省略時は設定値)")
+    domain: dict | None = Field(
+        default=None,
+        description=(
+            "新分野メタデータ {name, description, target_domain[], concept_vocabulary}。"
+            "カートリッジファイルを持たない domain の骨格生成に使う (migration 027)"
+        ),
+    )
 
 
 class SaveDraftRequest(BaseModel):
     skeleton: dict = Field(description="skeleton.yaml 相当の dict (atlas_skeleton キー可)")
+    revision: int | None = Field(
+        default=None,
+        description="楽観ロック。現在の draft revision。省略は新規作成のみ許可 (migration 027)",
+    )
 
 
 class FreezeSkeletonRequest(BaseModel):
     version: str = Field(description="凍結版の版数 (例: 2026.1)")
     note: str = Field(default="", description="changelog に残すメモ")
     credits: list[str] = Field(default_factory=list, description="修正報告者などの帰属")
+
+
+class SaveAtlasBindingRequest(BaseModel):
+    cartridge_id: str = Field(description="バインドする domain_key (空文字で解除)")
+    topic_bindings: list[dict] = Field(
+        default_factory=list,
+        description="topic → 骨格概念の明示 binding [{topic_id, atlas_node_id}]。"
+        "atlas_node_id が空の要素は該当 topic の binding を解除する",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -161,12 +198,32 @@ class FreezeSkeletonRequest(BaseModel):
 def get_atlas_skeleton_state(
     cartridge_id: str, current_user: dict = Depends(_require_teacher)
 ) -> dict:
-    """骨格のレビュー状態 (draft / 凍結済み) を返す。"""
+    """骨格のレビュー状態 (draft / 凍結済み) を返す (migration 027: DB が正本)。"""
+    session = _skeleton_session()
+    try:
+        draft_row = atlas_store.load_draft(session, cartridge_id)
+        frozen = atlas_store.load_learner_skeleton(cartridge_id, session)
+    finally:
+        session.close()
+    draft_payload = _skeleton_payload(draft_row["skeleton"]) if draft_row else None
+    if draft_payload is not None:
+        draft_payload["revision"] = draft_row["revision"]
     return {
         "cartridge_id": cartridge_id,
-        "draft": _skeleton_payload(_load_optional(_draft_path(cartridge_id))),
-        "frozen": _skeleton_payload(_load_optional(_frozen_path(cartridge_id))),
+        "draft": draft_payload,
+        "frozen": _skeleton_payload(frozen),
     }
+
+
+@admin_atlas_router.get("/domains")
+def list_atlas_domains(current_user: dict = Depends(_require_teacher)) -> dict:
+    """骨格を持つ (または draft 中の) domain の一覧 (migration 027)。"""
+    session = _skeleton_session()
+    try:
+        domains = atlas_store.list_domains(session)
+    finally:
+        session.close()
+    return {"domains": domains}
 
 
 @router.post("/{cartridge_id}/atlas/skeleton/generate")
@@ -175,10 +232,18 @@ def generate_atlas_skeleton(
     body: GenerateSkeletonRequest | None = None,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """骨格 draft を LLM バッチ生成する。一度だけ実行し、再実行は force 指定の明示操作。"""
+    """骨格 draft を LLM バッチ生成する。一度だけ実行し、再実行は force 指定の明示操作。
+
+    migration 027: draft は DB 保存。カートリッジファイルの無い新分野は
+    body.domain のメタデータで生成する。
+    """
     body = body or GenerateSkeletonRequest()
-    draft_path = _draft_path(cartridge_id)
-    if draft_path.exists() and not body.force:
+    session = _skeleton_session()
+    try:
+        existing = atlas_store.load_draft(session, cartridge_id)
+    finally:
+        session.close()
+    if existing is not None and not body.force:
         raise HTTPException(
             status_code=409,
             detail="draft が既に存在します。再生成する場合は force を指定してください",
@@ -187,13 +252,41 @@ def generate_atlas_skeleton(
     from core.atlas_generator import generate_skeleton_draft
 
     try:
-        skeleton = generate_skeleton_draft(cartridge_id, model=body.model)
+        skeleton = generate_skeleton_draft(
+            cartridge_id, model=body.model, domain_meta=body.domain
+        )
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=404,
+            detail=f"{exc} — カートリッジファイルの無い新分野は body.domain に"
+            " {name, description} を指定してください",
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    atlas.write_skeleton(skeleton, draft_path)
+    session = _skeleton_session()
+    try:
+        revision = atlas_store.save_draft(
+            session,
+            cartridge_id,
+            skeleton,
+            expected_revision=existing["revision"] if existing else None,
+            user_id=str(current_user.get("id") or "") or None,
+            generated_by=skeleton.generated_by,
+        )
+        session.commit()
+    except atlas_store.DraftRevisionConflict as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "current_revision": exc.current_revision},
+        ) from exc
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
     _record_review_event(
         cartridge_id,
         "",
@@ -201,7 +294,10 @@ def generate_atlas_skeleton(
         current_user.get("id"),
         {"action": "generate", "generated_by": skeleton.generated_by, "force": body.force},
     )
-    return {"cartridge_id": cartridge_id, "draft": _skeleton_payload(skeleton)}
+    payload = _skeleton_payload(skeleton)
+    if payload is not None:
+        payload["revision"] = revision
+    return {"cartridge_id": cartridge_id, "draft": payload}
 
 
 @router.put("/{cartridge_id}/atlas/skeleton/draft")
@@ -210,43 +306,77 @@ def save_atlas_skeleton_draft(
     body: SaveDraftRequest,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """教員レビューによる draft の修正を保存する (領域・概念・配置・エッジ・seed_status)。"""
-    draft_path = _draft_path(cartridge_id)
-    existing = _load_optional(draft_path)
+    """教員レビューによる draft の修正を保存する (領域・概念・配置・エッジ・seed_status)。
+
+    migration 027: DB 保存 + 楽観ロック。body.revision が現在の draft と
+    ズレていれば 409 (最新を読み込み直して再編集)。
+    """
     try:
         edited = atlas.parse_skeleton(body.skeleton)
     except atlas.SkeletonParseError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    # 来歴は編集で失わせない。status は凍結エンドポイント以外では draft のまま
-    generated_by = edited.generated_by or (existing.generated_by if existing else "")
-    draft = atlas.AtlasSkeleton(
-        cartridge=cartridge_id,
-        status=atlas.STATUS_DRAFT,
-        version="",
-        generated_by=generated_by,
-        reviewed_by=(),
-        changelog=existing.changelog if existing else (),
-        regions=edited.regions,
-        edges=edited.edges,
-        concept_bindings=edited.concept_bindings,
-        id_migrations=edited.id_migrations,
-    )
-    report = atlas.validate_skeleton(draft)
-    if not report.ok:
-        raise HTTPException(
-            status_code=422,
-            detail={"message": "骨格がスキーマに適合しません", "errors": list(report.errors)},
+    session = _skeleton_session()
+    try:
+        existing = atlas_store.load_draft(session, cartridge_id)
+        existing_skeleton = existing["skeleton"] if existing else None
+
+        # 来歴は編集で失わせない。status は凍結エンドポイント以外では draft のまま
+        generated_by = edited.generated_by or (
+            existing_skeleton.generated_by if existing_skeleton else ""
         )
-    atlas.write_skeleton(draft, draft_path)
+        draft = atlas.AtlasSkeleton(
+            cartridge=cartridge_id,
+            status=atlas.STATUS_DRAFT,
+            version="",
+            generated_by=generated_by,
+            reviewed_by=(),
+            changelog=existing_skeleton.changelog if existing_skeleton else (),
+            regions=edited.regions,
+            edges=edited.edges,
+            concept_bindings=edited.concept_bindings,
+            id_migrations=edited.id_migrations,
+        )
+        report = atlas.validate_skeleton(draft)
+        if not report.ok:
+            raise HTTPException(
+                status_code=422,
+                detail={"message": "骨格がスキーマに適合しません", "errors": list(report.errors)},
+            )
+        revision = atlas_store.save_draft(
+            session,
+            cartridge_id,
+            draft,
+            expected_revision=body.revision,
+            user_id=str(current_user.get("id") or "") or None,
+        )
+        session.commit()
+    except atlas_store.DraftRevisionConflict as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "current_revision": exc.current_revision},
+        ) from exc
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
     _record_review_event(
         cartridge_id,
         atlas.STATUS_DRAFT,
         atlas.STATUS_DRAFT,
         current_user.get("id"),
-        {"action": "review_edit"},
+        {"action": "review_edit", "revision": revision},
     )
-    return {"cartridge_id": cartridge_id, "draft": _skeleton_payload(draft)}
+    payload = _skeleton_payload(draft)
+    if payload is not None:
+        payload["revision"] = revision
+    return {"cartridge_id": cartridge_id, "draft": payload}
 
 
 @router.post("/{cartridge_id}/atlas/skeleton/freeze")
@@ -255,7 +385,7 @@ def freeze_atlas_skeleton(
     body: FreezeSkeletonRequest,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """承認された draft を凍結して版を付与し、カートリッジに同梱する。
+    """承認された draft を凍結して版を付与する (migration 027: DB へ保存)。
 
     - 承認で reviewed_by に帰属を記録する (受け入れ条件2)
     - 凍結後は不変。修正は次版で行う
@@ -263,9 +393,14 @@ def freeze_atlas_skeleton(
       当該報告に applied_version を刻印してクローズする。pending の報告は
       新版へ引き継ぎ、id_migrations に従って対象 node_id を付け替える
     """
-    draft = _load_optional(_draft_path(cartridge_id))
-    if draft is None:
+    session = _skeleton_session()
+    try:
+        draft_row = atlas_store.load_draft(session, cartridge_id)
+    finally:
+        session.close()
+    if draft_row is None:
         raise HTTPException(status_code=404, detail="凍結対象の draft がありません")
+    draft = draft_row["skeleton"]
 
     # 採用済み報告の帰属を credits に合流する (受け入れ条件3)。
     # DB 不通時は明示 credits のみで凍結を続行する (報告の刻印は次版凍結時に再試行される)。
@@ -299,9 +434,35 @@ def freeze_atlas_skeleton(
             report_session.close()
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    atlas.write_skeleton(frozen, _frozen_path(cartridge_id))
-    _draft_path(cartridge_id).unlink(missing_ok=True)
+    # DB へ凍結版を追加し draft を消す (migration 027: DB が正本。ファイルは書かない)
+    session = _skeleton_session()
+    try:
+        atlas_store.insert_frozen(
+            session,
+            cartridge_id,
+            frozen,
+            user_id=str(current_user.get("id") or "") or None,
+        )
+        atlas_store.delete_draft(session, cartridge_id)
+        session.commit()
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        if report_session is not None:
+            report_session.close()
+        # (domain_key, version) の一意制約 = 同じ版の二重凍結
+        raise HTTPException(
+            status_code=409, detail=f"この版は既に凍結済みの可能性があります: {exc}"
+        ) from exc
+    finally:
+        session.close()
     cartridges_module.clear_cache()
+    # 新版の overlay cache はコールドスタートになるため非同期リフレッシュを予約する
+    try:
+        from core import atlas_state
+
+        atlas_state.schedule_overlay_refresh(cartridge_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("atlas overlay refresh scheduling failed", exc_info=True)
 
     report_summary = {"applied": 0, "migrated": 0}
     if report_session is not None:
@@ -337,6 +498,199 @@ def freeze_atlas_skeleton(
 
 
 # ---------------------------------------------------------------------------
+# コース ⇄ 地図バインディング (S2: 提案・教員承認保存)
+#
+# - 提案は決定論的 (match_topic_to_concept のラベル/明示一致のみ。LLM を使わない)
+# - 保存で learning_courses.data.cartridge_id + topics[].atlas_node_id を更新する。
+#   明示 cartridge_id は atlas_view の妥当性ゲートを免除される (authoring-time の意思)
+# - 対象コースはオーナー教員または SYSTEM_ADMIN のみ操作できる
+# ---------------------------------------------------------------------------
+
+
+def _load_course_for_teacher(session, course_id: str, current_user: dict) -> dict:
+    from sqlalchemy import text as sa_text
+
+    row = session.execute(
+        sa_text(
+            "SELECT data, user_id FROM learning_courses WHERE id = :cid LIMIT 1"
+        ),
+        {"cid": course_id},
+    ).fetchone()
+    if not row or row[0] is None:
+        raise HTTPException(status_code=404, detail="course not found")
+    data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+    owner_id = str(row[1] or "")
+    role = str(current_user.get("role") or "")
+    if owner_id != str(current_user.get("id") or "") and role != "SYSTEM_ADMIN":
+        raise HTTPException(status_code=403, detail="course owner or admin required")
+    return data
+
+
+def _skeleton_node_index(skeleton: atlas.AtlasSkeleton) -> dict[str, str]:
+    """骨格の binding 先候補 (概念 + 領域) → 表示ラベルの索引。"""
+    index: dict[str, str] = {}
+    for region in skeleton.regions:
+        index[region.id] = region.label
+        for concept in region.concepts:
+            index[concept.id] = concept.label
+    return index
+
+
+@binding_router.post("/{course_id}/atlas-binding/propose")
+def propose_course_atlas_binding(
+    course_id: str, current_user: dict = Depends(_require_teacher)
+) -> dict:
+    """コースの地図配置を決定論的に提案する (教員が確認して保存するまで確定しない)。
+
+    全 domain の凍結骨格に対し topic → 概念のカバレッジを算出して返す。
+    """
+    session = _skeleton_session()
+    try:
+        course_data = _load_course_for_teacher(session, course_id, current_user)
+        topics = [t for t in (course_data.get("topics") or []) if isinstance(t, dict)]
+        proposals: list[dict] = []
+        for domain in atlas_store.list_domains(session):
+            skeleton = atlas_store.load_learner_skeleton(domain["domain_key"], session)
+            if skeleton is None:
+                continue
+            node_index = _skeleton_node_index(skeleton)
+            bindings: list[dict] = []
+            matched = 0
+            for topic in topics:
+                node_id = atlas.match_topic_to_concept(topic, skeleton) or ""
+                if node_id:
+                    matched += 1
+                bindings.append(
+                    {
+                        "topic_id": str(topic.get("id") or ""),
+                        "topic_title": str(topic.get("title") or ""),
+                        "atlas_node_id": node_id,
+                        "node_label": node_index.get(node_id, node_id),
+                        "current": str(topic.get("atlas_node_id") or ""),
+                    }
+                )
+            proposals.append(
+                {
+                    "domain_key": domain["domain_key"],
+                    "frozen_version": skeleton.version,
+                    "matched": matched,
+                    "topic_count": len(topics),
+                    "bindings": bindings,
+                    "concepts": [
+                        {"id": c.id, "label": c.label, "region_label": r.label}
+                        for r in skeleton.regions
+                        for c in r.concepts
+                    ],
+                }
+            )
+    finally:
+        session.close()
+
+    proposals.sort(key=lambda p: (-p["matched"], p["domain_key"]))
+    recommended = ""
+    if proposals and proposals[0]["matched"] > 0:
+        recommended = proposals[0]["domain_key"]
+    return {
+        "course_id": course_id,
+        "current_cartridge_id": str(course_data.get("cartridge_id") or ""),
+        "recommended": recommended,
+        "proposals": proposals,
+    }
+
+
+@binding_router.put("/{course_id}/atlas-binding")
+def save_course_atlas_binding(
+    course_id: str,
+    body: SaveAtlasBindingRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """教員承認済みのバインディングを保存する。
+
+    cartridge_id="" で解除 (地図は導出+妥当性ゲートに戻る)。骨格に存在しない
+    atlas_node_id は適用しない (該当 topic の binding は解除)。
+    """
+    from sqlalchemy import text as sa_text
+
+    new_key = str(body.cartridge_id or "").strip()
+    session = _skeleton_session()
+    try:
+        course_data = _load_course_for_teacher(session, course_id, current_user)
+        known_nodes: dict[str, str] = {}
+        if new_key:
+            skeleton = atlas_store.load_learner_skeleton(new_key, session)
+            if skeleton is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"domain '{new_key}' に凍結済みの骨格がありません",
+                )
+            known_nodes = _skeleton_node_index(skeleton)
+
+        old_key = str(course_data.get("cartridge_id") or "")
+        if new_key:
+            course_data["cartridge_id"] = new_key
+        else:
+            course_data.pop("cartridge_id", None)
+
+        requested = {
+            str(b.get("topic_id") or ""): str(b.get("atlas_node_id") or "")
+            for b in body.topic_bindings
+            if isinstance(b, dict) and b.get("topic_id")
+        }
+        applied = 0
+        skipped: list[str] = []
+        for topic in course_data.get("topics") or []:
+            if not isinstance(topic, dict):
+                continue
+            topic_id = str(topic.get("id") or "")
+            if topic_id not in requested:
+                continue
+            node_id = requested[topic_id]
+            if node_id and new_key and node_id in known_nodes:
+                topic["atlas_node_id"] = node_id
+                applied += 1
+            else:
+                if node_id:
+                    skipped.append(topic_id)
+                topic.pop("atlas_node_id", None)
+
+        session.execute(
+            sa_text(
+                "UPDATE learning_courses SET data = CAST(:data AS jsonb), "
+                "updated_at = now() WHERE id = :cid"
+            ),
+            {"cid": course_id, "data": json.dumps(course_data, ensure_ascii=False)},
+        )
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    _record_review_event(
+        course_id,
+        old_key,
+        new_key,
+        current_user.get("id"),
+        {
+            "action": "course_atlas_binding",
+            "bindings_applied": applied,
+            "bindings_skipped": skipped,
+        },
+        entity_type="atlas_binding",
+    )
+    return {
+        "course_id": course_id,
+        "cartridge_id": new_key,
+        "bindings_applied": applied,
+        "bindings_skipped": skipped,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 学習者向けエンドポイント (凍結済みのみ。draft は決して返さない)
 # ---------------------------------------------------------------------------
 
@@ -347,18 +701,10 @@ def get_learner_atlas_skeleton(
 ) -> dict:
     """学習者向けの骨格。凍結・レビュー済みの版のみ返す。
 
-    骨格未同梱・draft のみのカートリッジでは 404 (地図機能を出さない)。
+    骨格なし・draft のみの domain では 404 (地図機能を出さない)。
+    migration 027: DB 凍結版が正本 (同梱ファイルはフォールバック)。
     """
-    try:
-        cartridge = cartridges_module.load_cartridge(cartridge_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"cartridge '{cartridge_id}' not found") from exc
-    except ValueError as exc:
-        # 同梱骨格が不正 (draft 同梱など) — 学習者には存在しないものとして扱う
-        logger.error("invalid bundled atlas skeleton for %s: %s", cartridge_id, exc)
-        raise HTTPException(status_code=404, detail="atlas skeleton not available") from exc
-
-    skeleton = cartridge.learner_atlas_skeleton
+    skeleton = atlas_store.load_learner_skeleton(cartridge_id)
     if skeleton is None:
         raise HTTPException(status_code=404, detail="atlas skeleton not available")
     return atlas.learner_view(skeleton)
@@ -601,10 +947,11 @@ def list_atlas_reports(
     - 現行凍結版との不一致 (旧版への報告) を version_mismatch で識別 (受け入れ条件5)
     - 同一対象への報告蓄積 (未クローズ件数) と改版検討ヒントを返す (issue A の閾値と接続)
     """
-    _cartridge_dir(cartridge_id)  # 存在チェック (404)
+    _ensure_domain_exists(cartridge_id)  # 存在チェック (404)
     if status and status not in atlas_reports.REPORT_STATUSES:
         raise HTTPException(status_code=422, detail=f"不明な status です: {status}")
-    frozen = _load_optional(_frozen_path(cartridge_id))
+    # migration 027: 現行凍結版は DB 優先 (同梱ファイルはフォールバック)
+    frozen = atlas_store.load_learner_skeleton(cartridge_id)
     session = _reports_session()
     try:
         reports = atlas_reports.fetch_reports(
@@ -630,7 +977,7 @@ def resolve_atlas_report(
 
     処理結果は報告者本人への通知対象になる (notified_at を未読に戻す)。
     """
-    _cartridge_dir(cartridge_id)  # 存在チェック (404)
+    _ensure_domain_exists(cartridge_id)  # 存在チェック (404)
     resolver_id = str(current_user.get("id") or "").strip()
     session = _reports_session()
     try:
@@ -689,13 +1036,8 @@ def refresh_atlas_overlay(
     """
     from core import atlas_state
 
-    frozen = _load_optional(_frozen_path(cartridge_id))
-    if frozen is None:
-        try:
-            cartridge = cartridges_module.load_cartridge(cartridge_id)
-            frozen = cartridge.atlas_skeleton
-        except (FileNotFoundError, ValueError):
-            frozen = None
+    # migration 027: DB 凍結版が正本 (同梱ファイルはフォールバック)
+    frozen = atlas_store.load_learner_skeleton(cartridge_id)
     if frozen is None or not frozen.is_learner_visible:
         raise HTTPException(status_code=404, detail="凍結済みの骨格がありません")
 

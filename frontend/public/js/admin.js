@@ -1472,6 +1472,17 @@
 
         var newCourseId = data.id;
 
+        // S2: コース登録直後に分野の地図への配置を提案する (教員が承認するまで確定しない)
+        var cbAtlasArea = document.getElementById("cb-atlas-binding-area");
+        if (cbAtlasArea) {
+          cbAtlasArea.style.display = "";
+          atlasBindingPropose(
+            newCourseId,
+            document.getElementById("cb-atlas-binding-body"),
+            document.getElementById("cb-atlas-binding-status")
+          );
+        }
+
         // セッションの status を published に更新
         state.currentSessionStatus = "published";
         state.currentSessionPublishedCourseId = newCourseId;
@@ -1928,6 +1939,10 @@
     var generateBtn = document.getElementById("atlas-generate");
     var hasDraft = false;
     var cartridgesLoaded = false;
+    // migration 027: 楽観ロック。保存/生成は state 取得時の revision を添えて送る
+    var draftRevision = null;
+    // 新分野 (カートリッジファイル無し) の生成メタデータ: domain_key → {name, description}
+    var pendingDomainMeta = {};
 
     function setStatus(text, isError) {
       statusEl.textContent = text || "";
@@ -1983,11 +1998,13 @@
         editor.value = JSON.stringify({ atlas_skeleton: data.draft.skeleton }, null, 2);
         renderValidation(data.draft.validation);
         generateBtn.textContent = "draft を再生成（AIバッチ・上書き）";
+        draftRevision = data.draft.revision || null;
       } else {
         draftArea.style.display = "none";
         editor.value = "";
         renderValidation(null);
         generateBtn.textContent = "draft を生成（AIバッチ）";
+        draftRevision = null;
       }
     }
 
@@ -2154,43 +2171,103 @@
       reportsFilterEl.addEventListener("change", loadReports);
     }
 
+    function addDomainOption(key, label) {
+      for (var i = 0; i < select.options.length; i++) {
+        if (select.options[i].value === key) return;
+      }
+      var opt = document.createElement("option");
+      opt.value = key;
+      opt.textContent = label || key;
+      select.appendChild(opt);
+    }
+
     function loadCartridges() {
       if (cartridgesLoaded) { loadState(); return; }
+      // migration 027: 一覧はカートリッジ (名前) + DB 骨格の domain の合成
+      var names = {};
       apiFetch("/admin/cartridges")
         .then(function (res) { return res.json(); })
         .then(function (items) {
           (items || []).forEach(function (c) {
-            var opt = document.createElement("option");
-            opt.value = c.cartridge_id;
-            opt.textContent = c.name + " (" + c.cartridge_id + ")";
-            select.appendChild(opt);
+            names[c.cartridge_id] = c.name;
+          });
+          return apiFetch("/admin/atlas/domains");
+        })
+        .then(function (res) { return res.ok ? res.json() : { domains: [] }; })
+        .then(function (data) {
+          var keys = {};
+          (data.domains || []).forEach(function (d) { keys[d.domain_key] = true; });
+          Object.keys(names).forEach(function (k) { keys[k] = true; });
+          var sorted = Object.keys(keys).sort();
+          sorted.forEach(function (k) {
+            addDomainOption(k, names[k] ? names[k] + " (" + k + ")" : k);
           });
           cartridgesLoaded = true;
-          if (items && items.length === 1) {
-            select.value = items[0].cartridge_id;
+          if (sorted.length === 1) {
+            select.value = sorted[0];
             loadState();
           }
         })
-        .catch(function () { setStatus("カートリッジ一覧の取得に失敗しました", true); });
+        .catch(function () { setStatus("分野一覧の取得に失敗しました", true); });
     }
 
-    generateBtn.addEventListener("click", function () {
-      if (!select.value) { setStatus("カートリッジを選択してください", true); return; }
-      if (hasDraft && !confirm("既存の draft を破棄して再生成します。よろしいですか？")) return;
+    function runGenerate(force) {
       setStatus("LLM バッチ生成中...（この操作は明示的な一度だけの実行です）");
+      var payload = { force: !!force };
+      if (pendingDomainMeta[select.value]) {
+        payload.domain = pendingDomainMeta[select.value];
+      }
       apiFetch(basePath() + "/generate", {
         method: "POST",
-        body: JSON.stringify({ force: hasDraft }),
+        body: JSON.stringify(payload),
       })
         .then(function (res) {
           return res.json().then(function (body) {
-            if (!res.ok) throw new Error(body.detail || ("HTTP " + res.status));
+            if (!res.ok) {
+              var detail = body.detail;
+              if (res.status === 409 && detail && detail.current_revision != null) {
+                throw new Error("他の編集とぶつかりました。再読込してください");
+              }
+              throw new Error(
+                typeof detail === "string" ? detail : (detail && detail.message) || ("HTTP " + res.status)
+              );
+            }
             return body;
           });
         })
         .then(function () { setStatus("draft を生成しました。レビュー・修正のうえ凍結してください"); loadState(); })
         .catch(function (err) { setStatus("生成に失敗しました: " + err.message, true); });
+    }
+
+    generateBtn.addEventListener("click", function () {
+      if (!select.value) { setStatus("分野を選択してください", true); return; }
+      if (hasDraft && !confirm("既存の draft を破棄して再生成します。よろしいですか？")) return;
+      runGenerate(hasDraft);
     });
+
+    // 新分野の追加 (migration 027: カートリッジファイル不要。骨格はDB管理)
+    var addDomainToggle = document.getElementById("atlas-add-domain-toggle");
+    var addDomainForm = document.getElementById("atlas-add-domain-form");
+    if (addDomainToggle && addDomainForm) {
+      addDomainToggle.addEventListener("click", function () {
+        addDomainForm.style.display = addDomainForm.style.display === "none" ? "" : "none";
+      });
+      document.getElementById("atlas-add-domain").addEventListener("click", function () {
+        var key = document.getElementById("atlas-new-domain-key").value.trim();
+        var name = document.getElementById("atlas-new-domain-name").value.trim();
+        var desc = document.getElementById("atlas-new-domain-desc").value.trim();
+        if (!/^[a-z][a-z0-9_]*$/.test(key)) {
+          setStatus("domain_key は英小文字・数字・アンダースコア (先頭は英字) で入力してください", true);
+          return;
+        }
+        if (!name) { setStatus("分野名を入力してください", true); return; }
+        pendingDomainMeta[key] = { name: name, description: desc };
+        addDomainOption(key, name + " (" + key + ")");
+        select.value = key;
+        addDomainForm.style.display = "none";
+        runGenerate(false);
+      });
+    }
 
     document.getElementById("atlas-save-draft").addEventListener("click", function () {
       var parsed;
@@ -2203,12 +2280,17 @@
       setStatus("保存中...");
       apiFetch(basePath() + "/draft", {
         method: "PUT",
-        body: JSON.stringify({ skeleton: parsed }),
+        body: JSON.stringify({ skeleton: parsed, revision: draftRevision }),
       })
         .then(function (res) {
           return res.json().then(function (body) {
             if (!res.ok) {
               var detail = body.detail;
+              if (res.status === 409) {
+                // 楽観ロック衝突: 他の教員の保存が先行した。最新を読み直す
+                loadState();
+                throw new Error("他の教員の編集で draft が更新されています。最新の内容を再読込しました。編集をやり直してください");
+              }
               if (detail && detail.errors) {
                 renderValidation({ errors: detail.errors, warnings: [] });
                 throw new Error(detail.message || "バリデーションエラー");
@@ -2220,6 +2302,7 @@
         })
         .then(function (body) {
           renderValidation(body.draft.validation);
+          draftRevision = body.draft.revision || null;
           setStatus("draft を保存しました");
         })
         .catch(function (err) { setStatus("保存に失敗しました: " + err.message, true); });
@@ -2244,13 +2327,186 @@
             return body;
           });
         })
-        .then(function () { setStatus("凍結しました。カートリッジに同梱されます"); loadState(); })
+        .then(function () { setStatus("凍結しました。学習者に表示されます（骨格はDBで管理）"); loadState(); })
         .catch(function (err) { setStatus("凍結に失敗しました: " + err.message, true); });
     });
 
     select.addEventListener("change", loadState);
     document.getElementById("atlas-refresh").addEventListener("click", loadState);
     onTabActivate("atlas", loadCartridges);
+    initAtlasBinding();
+  }
+
+  // ── 学習マップ編集 — コース ⇄ 地図バインディング (S2) ─────────────────
+  //
+  // 提案は決定論的な突合 (サーバ側 match_topic_to_concept)。教員が確認して
+  // 「承認して保存」するまで確定しない。コースビルダーの登録直後にも同じ
+  // エディタを cb-atlas-binding-area へ描画する。
+
+  function atlasBindingRenderEditor(bodyEl, statusEl, courseId, data, onSaved) {
+    function setStatus(text, isError) {
+      if (!statusEl) return;
+      statusEl.textContent = text || "";
+      statusEl.style.color = isError ? "var(--color-text-danger, #e53935)" : "var(--color-text-secondary)";
+    }
+    var proposals = data.proposals || [];
+    if (!proposals.length) {
+      bodyEl.innerHTML = "<div style='color:var(--color-text-tertiary)'>凍結済みの骨格がありません。先に「分野の地図」で骨格を生成・凍結してください。</div>";
+      return;
+    }
+    var byKey = {};
+    proposals.forEach(function (p) { byKey[p.domain_key] = p; });
+    var initial = data.recommended || data.current_cartridge_id || proposals[0].domain_key;
+
+    var html = "<div style='display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px'>";
+    html += "<label style='font-size:12.5px'>分野:</label>";
+    html += "<select data-role='ab-domain' style='padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)'>";
+    html += "<option value=''>（バインドしない — 地図を出さない/導出に任せる）</option>";
+    proposals.forEach(function (p) {
+      var sel = p.domain_key === initial ? " selected" : "";
+      html += "<option value='" + escHtml(p.domain_key) + "'" + sel + ">" +
+        escHtml(p.domain_key) + "（トピック一致 " + p.matched + "/" + p.topic_count + "）</option>";
+    });
+    html += "</select>";
+    if (data.recommended) {
+      html += "<span style='font-size:12px;color:var(--color-text-tertiary)'>提案: " + escHtml(data.recommended) + "</span>";
+    }
+    html += "</div>";
+    html += "<div data-role='ab-table'></div>";
+    html += "<div style='margin-top:8px'><button data-role='ab-save' class='admin-action-btn'>承認して保存</button></div>";
+    bodyEl.innerHTML = html;
+
+    var domainSelect = bodyEl.querySelector("[data-role='ab-domain']");
+    var tableEl = bodyEl.querySelector("[data-role='ab-table']");
+
+    function renderTable() {
+      var p = byKey[domainSelect.value];
+      if (!p) {
+        tableEl.innerHTML = "<div style='color:var(--color-text-tertiary);font-size:12px'>分野をバインドしない場合、トピックの対応付けは保存時にすべて解除されます。</div>";
+        return;
+      }
+      var t = "<table style='width:100%;border-collapse:collapse;font-size:12.5px'>";
+      t += "<tr><th style='text-align:left;padding:4px;border-bottom:1px solid var(--color-border)'>トピック</th>" +
+        "<th style='text-align:left;padding:4px;border-bottom:1px solid var(--color-border)'>地図上の概念（提案を編集可）</th></tr>";
+      (p.bindings || []).forEach(function (b) {
+        t += "<tr><td style='padding:4px;border-bottom:1px solid var(--color-border)'>" + escHtml(b.topic_title) + "</td>";
+        t += "<td style='padding:4px;border-bottom:1px solid var(--color-border)'>";
+        t += "<select data-role='ab-topic' data-topic-id='" + escHtml(b.topic_id) + "' style='padding:2px 6px;font-size:12.5px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)'>";
+        var selectedNode = b.atlas_node_id || b.current || "";
+        t += "<option value=''" + (selectedNode ? "" : " selected") + ">（対応なし）</option>";
+        (p.concepts || []).forEach(function (c) {
+          var sel = c.id === selectedNode ? " selected" : "";
+          t += "<option value='" + escHtml(c.id) + "'" + sel + ">" +
+            escHtml(c.region_label + " › " + c.label) + "</option>";
+        });
+        t += "</select>";
+        if (b.atlas_node_id) {
+          t += " <span style='font-size:11.5px;color:var(--color-text-tertiary)'>提案: " + escHtml(b.node_label || b.atlas_node_id) + "</span>";
+        }
+        t += "</td></tr>";
+      });
+      t += "</table>";
+      tableEl.innerHTML = t;
+    }
+    domainSelect.addEventListener("change", renderTable);
+    renderTable();
+
+    bodyEl.querySelector("[data-role='ab-save']").addEventListener("click", function () {
+      var bindings = [];
+      var selects = tableEl.querySelectorAll("[data-role='ab-topic']");
+      for (var i = 0; i < selects.length; i++) {
+        bindings.push({
+          topic_id: selects[i].getAttribute("data-topic-id"),
+          atlas_node_id: selects[i].value,
+        });
+      }
+      setStatus("保存中...");
+      apiFetch("/admin/courses/" + encodeURIComponent(courseId) + "/atlas-binding", {
+        method: "PUT",
+        body: JSON.stringify({ cartridge_id: domainSelect.value, topic_bindings: bindings }),
+      })
+        .then(function (res) {
+          return res.json().then(function (body) {
+            if (!res.ok) {
+              var detail = body.detail;
+              throw new Error(typeof detail === "string" ? detail : "HTTP " + res.status);
+            }
+            return body;
+          });
+        })
+        .then(function (body) {
+          if (body.cartridge_id) {
+            setStatus("保存しました（分野: " + body.cartridge_id + " ／ トピック対応 " + body.bindings_applied + " 件）");
+          } else {
+            setStatus("バインドを解除しました");
+          }
+          if (onSaved) onSaved(body);
+        })
+        .catch(function (err) { setStatus("保存に失敗しました: " + err.message, true); });
+    });
+  }
+
+  function atlasBindingPropose(courseId, bodyEl, statusEl, onSaved) {
+    if (!courseId || !bodyEl) return;
+    if (statusEl) {
+      statusEl.textContent = "配置を提案中...";
+      statusEl.style.color = "var(--color-text-secondary)";
+    }
+    apiFetch("/admin/courses/" + encodeURIComponent(courseId) + "/atlas-binding/propose", { method: "POST" })
+      .then(function (res) {
+        return res.json().then(function (body) {
+          if (!res.ok) {
+            var detail = body.detail;
+            throw new Error(typeof detail === "string" ? detail : "HTTP " + res.status);
+          }
+          return body;
+        });
+      })
+      .then(function (data) {
+        if (statusEl) statusEl.textContent = "";
+        atlasBindingRenderEditor(bodyEl, statusEl, courseId, data, onSaved);
+      })
+      .catch(function (err) {
+        if (statusEl) {
+          statusEl.textContent = "提案の取得に失敗しました: " + err.message;
+          statusEl.style.color = "var(--color-text-danger, #e53935)";
+        }
+      });
+  }
+
+  function initAtlasBinding() {
+    var select = document.getElementById("atlas-binding-course-select");
+    var proposeBtn = document.getElementById("atlas-binding-propose");
+    if (!select || !proposeBtn) return;
+    var bodyEl = document.getElementById("atlas-binding-body");
+    var statusEl = document.getElementById("atlas-binding-status");
+    var coursesLoaded = false;
+
+    function loadCourses() {
+      if (coursesLoaded) return;
+      apiFetch("/learning/courses")
+        .then(function (res) { return res.json(); })
+        .then(function (courses) {
+          (courses || []).forEach(function (c) {
+            var opt = document.createElement("option");
+            opt.value = c.id;
+            opt.textContent = c.title + " (" + c.id + ")";
+            select.appendChild(opt);
+          });
+          coursesLoaded = true;
+        })
+        .catch(function () {});
+    }
+
+    proposeBtn.addEventListener("click", function () {
+      if (!select.value) {
+        statusEl.textContent = "コースを選択してください";
+        statusEl.style.color = "var(--color-text-danger, #e53935)";
+        return;
+      }
+      atlasBindingPropose(select.value, bodyEl, statusEl);
+    });
+    onTabActivate("atlas", loadCourses);
   }
 
   // ── 学習者体験レイヤー(B層) Stage 4 — 関心集約ダッシュボード（実集計）──────

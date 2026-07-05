@@ -1254,16 +1254,17 @@ def _atlas_topic_attribution(course_data: dict, topic_info: dict | None) -> dict
     try:
         from core import atlas as atlas_module
         from core import atlas_state
-        from core import cartridges as cartridges_module
+        from core import atlas_store
 
         session = _pg_session()
         try:
             cartridge_id = atlas_state.resolve_course_cartridge(session, course_data)
+            if not cartridge_id:
+                return None
+            # migration 027: 骨格は DB 凍結版が正本 (同梱ファイルはフォールバック)
+            skeleton = atlas_store.load_learner_skeleton(cartridge_id, session)
         finally:
             session.close()
-        if not cartridge_id:
-            return None
-        skeleton = cartridges_module.load_cartridge(cartridge_id).learner_atlas_skeleton
         if skeleton is None:
             return None
         node_id = atlas_module.match_topic_to_concept(topic_info, skeleton)

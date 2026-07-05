@@ -47,14 +47,30 @@
           <h3 class="admin-section-title" style="margin-bottom:0">分野の地図 — 骨格レビュー</h3>
           <div style="display:flex;gap:8px;align-items:center">
             <select id="atlas-cartridge-select" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
-              <option value="">カートリッジを選択...</option>
+              <option value="">分野を選択...</option>
             </select>
             <button id="atlas-refresh" class="admin-action-btn">更新</button>
+            <button id="atlas-add-domain-toggle" class="admin-action-btn">新しい分野を追加</button>
+          </div>
+        </div>
+        <div id="atlas-add-domain-form" style="display:none;border:1px solid var(--color-border);border-radius:6px;padding:10px;margin-bottom:12px">
+          <div style="font-size:12.5px;font-weight:600;margin-bottom:6px">新しい分野（骨格はDBで管理。カートリッジファイルは不要）</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <input id="atlas-new-domain-key" placeholder="domain_key (例: modified_gravity)"
+              style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;width:220px">
+            <input id="atlas-new-domain-name" placeholder="分野名 (例: 修正重力理論と大規模構造)"
+              style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;width:260px">
+          </div>
+          <textarea id="atlas-new-domain-desc" rows="2" placeholder="分野の説明（骨格のAI生成プロンプトに使われます）"
+            style="width:100%;font-size:12.5px;border:1px solid var(--color-border);border-radius:4px;padding:6px;box-sizing:border-box;margin-top:6px"></textarea>
+          <div style="margin-top:6px">
+            <button id="atlas-add-domain" class="admin-action-btn">分野を追加して draft を生成（AIバッチ）</button>
           </div>
         </div>
         <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:12px">
-          骨格はAIがバッチ生成した draft を教員がレビューし、承認して凍結するとカートリッジに同梱されます。
+          骨格はAIがバッチ生成した draft を教員がレビューし、承認して凍結すると学習者に表示されます（DB管理・migration 027）。
           draft は凍結するまで学習者には一切表示されません。凍結後の版は不変で、修正は次版で行います。
+          同時編集は楽観ロックで保護されます（他の教員の保存とぶつかった場合は再読込が必要です）。
         </p>
         <div id="atlas-frozen-info" style="font-size:12.5px;color:var(--color-text-secondary);margin-bottom:12px"></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
@@ -100,6 +116,25 @@
         <div id="atlas-reports-hint" style="font-size:12.5px;margin-bottom:8px"></div>
         <div id="atlas-reports-list" style="font-size:12.5px"></div>
         <div id="atlas-reports-status" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:8px"></div>
+      </div>
+
+      <!-- 学習マップ編集 (S2: コース ⇄ 地図バインディング。提案は決定論・教員が承認して保存) -->
+      <div class="admin-section" id="atlas-binding-section" style="margin-top:18px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:8px">
+          <h3 class="admin-section-title" style="margin-bottom:0">学習マップ編集（コースの地図配置）</h3>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="atlas-binding-course-select" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
+              <option value="">コースを選択...</option>
+            </select>
+            <button id="atlas-binding-propose" class="admin-action-btn">配置を提案</button>
+          </div>
+        </div>
+        <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:10px">
+          コースがどの分野の地図に属し、各トピックが地図上のどの概念に対応するかを設定します。
+          提案は決定論的な突合（AIによる推薦ではありません）で、教員が承認して保存するまで確定しません。
+        </p>
+        <div id="atlas-binding-body" style="font-size:12.5px"></div>
+        <div id="atlas-binding-status" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:8px"></div>
       </div>
     </div>
 
@@ -217,6 +252,12 @@
           </div>
           <div class="cb-approve-area" id="cb-approve-area" style="display:none">
             <button id="cb-approve-btn" class="cb-approve-btn">承認してコースを登録</button>
+          </div>
+          <!-- コース登録直後の地図配置の提案 (S2)。教員が承認して保存するまで確定しない -->
+          <div id="cb-atlas-binding-area" style="display:none;margin-top:12px;border:1px solid var(--color-border);border-radius:6px;padding:10px">
+            <div style="font-size:13px;font-weight:600;margin-bottom:6px">分野の地図への配置（提案）</div>
+            <div id="cb-atlas-binding-body" style="font-size:12.5px"></div>
+            <div id="cb-atlas-binding-status" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:6px"></div>
           </div>
         </div>
       </div>

@@ -29,7 +29,6 @@ from sqlalchemy import text as sa_text
 from core import atlas as atlas_module
 from core import atlas_state
 from core import atlas_placement
-from core import cartridges as cartridges_module
 from dependencies import _get_current_user
 
 logger = logging.getLogger(__name__)
@@ -43,15 +42,11 @@ _VIEWBOX = {1: (680, 370), 2: (680, 330), 3: (680, 400)}
 _MAX_L2_NODES = 20
 
 
-def _load_learner_skeleton(cartridge_id: str) -> atlas_module.AtlasSkeleton:
-    try:
-        cartridge = cartridges_module.load_cartridge(cartridge_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"cartridge '{cartridge_id}' not found") from exc
-    except ValueError as exc:
-        logger.error("invalid bundled atlas skeleton for %s: %s", cartridge_id, exc)
-        raise HTTPException(status_code=404, detail="atlas skeleton not available") from exc
-    skeleton = cartridge.learner_atlas_skeleton
+def _load_learner_skeleton(cartridge_id: str, session=None) -> atlas_module.AtlasSkeleton:
+    """骨格の読み取り (migration 027: DB 凍結版が正本・同梱ファイルはフォールバック)。"""
+    from core import atlas_store
+
+    skeleton = atlas_store.load_learner_skeleton(cartridge_id, session)
     if skeleton is None:
         raise HTTPException(status_code=404, detail="atlas skeleton not available")
     return skeleton
@@ -173,9 +168,13 @@ def get_atlas(
         # --- カートリッジ決定 (course 指定時はコースから導出。gap3) ---
         cartridge_id = (cartridge or "").strip()
         course_data = None
+        derived_cartridge = False  # 明示指定なしの導出 (妥当性ゲートの対象)
         if course:
             try:
-                from api import services
+                # 注意: コンテナは /app 直下のフラット配置 (`api` パッケージは存在しない)。
+                # 他ルーター同様にトップレベル `services` を使う (`from api import services`
+                # はテストでは通るが実コンテナで ModuleNotFoundError になる)。
+                import services
 
                 course_data = services.get_course_data(
                     str(current_user.get("id") or ""), course
@@ -184,15 +183,31 @@ def get_atlas(
                 logger.warning("atlas course lookup failed for %s", course, exc_info=True)
                 course_data = None
             if course_data is not None:
-                cartridge_id = (
-                    atlas_state.resolve_course_cartridge(session, course_data) or cartridge_id
+                resolved = atlas_state.resolve_course_cartridge(session, course_data)
+                explicit_course_cartridge = bool(
+                    str(course_data.get("cartridge_id") or "").strip()
                 )
+                derived_cartridge = (
+                    not cartridge_id and not explicit_course_cartridge and bool(resolved)
+                )
+                cartridge_id = resolved or cartridge_id
         if not cartridge_id:
             raise HTTPException(
                 status_code=422, detail="cartridge または course を指定してください"
             )
 
-        skeleton = _load_learner_skeleton(cartridge_id)
+        skeleton = _load_learner_skeleton(cartridge_id, session)
+
+        # --- 導出カートリッジの妥当性ゲート (gap3 hardening) ---
+        # 解析パイプラインは既定カートリッジで走るため、導出だけでは別分野のコースにも
+        # 既定カートリッジの地図が出る。コースが骨格へ1つも足がかり (topic→概念対応) を
+        # 持たない場合は骨格なしと同じ 404 に縮退させる (フロントは地図領域ごと非表示)。
+        if derived_cartridge and not atlas_state.course_has_skeleton_anchor(
+            session, skeleton, cartridge_id, course_data
+        ):
+            raise HTTPException(
+                status_code=404, detail="atlas skeleton not available for this course"
+            )
         overlay = _ensure_overlay_rows(session, skeleton, cartridge_id)
         node_rows = {r["entry_id"]: r for r in overlay if r["entry_type"] == "node"}
         region_rows = {r["entry_id"]: r for r in overlay if r["entry_type"] == "region"}
@@ -484,9 +499,9 @@ def get_atlas_node(
     current_user: dict = Depends(_get_current_user),
 ) -> dict:
     """詳細パネル用のノード情報 (§11)。"""
-    skeleton = _load_learner_skeleton(cartridge)
     session = _session()
     try:
+        skeleton = _load_learner_skeleton(cartridge, session)
         rows = atlas_state.fetch_overlay_rows(session, cartridge, skeleton.version) if session else []
     finally:
         if session is not None:

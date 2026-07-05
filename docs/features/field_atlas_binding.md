@@ -44,6 +44,27 @@ issue F 完了後のレビューで、地図は描けているが「いまここ
 フロントは `window.AtlasContext = {courseId, topicId, topicLabel}` (app.js の
 `selectTopic` で設定) を配線し、`atlas-data.js` が `course`/`topic` 付きで取得する。
 
+### 明示バインディング (推奨・S2)
+
+コースの分野は導出に頼らず、コース ⇄ 地図バインディング API
+（`POST/PUT /api/admin/courses/{id}/atlas-binding[...]`、
+`field_atlas_db_managed_skeleton.md` 参照）で教員が明示設定するのが推奨。
+明示設定されたコースは下記ゲートを通らない。
+
+### 導出カートリッジの妥当性ゲート (gap3 hardening)
+
+2./3. の**導出**(明示指定なし) でカートリッジが決まった場合、そのコースが骨格へ
+少なくとも1つの足がかり (topic → 骨格概念対応) を持つことを
+`core/atlas_state.py:course_has_skeleton_anchor` で検証する。判定は gap1/gap2 と
+同じ決定論的経路 (明示 binding → ラベル一致 → コーパス binding) の再利用で、
+どのトピックも対応しない場合 `GET /api/atlas` は **404 (骨格なし扱い)** を返す。
+
+背景: 解析パイプラインは既定カートリッジで走るため、`document_analysis_runs` は
+分野が無関係なコース (例: 修正重力理論) でも `particle_physics` を返す。ゲートが
+ないと**別分野のコースに素粒子物理の地図が表示される**。404 → フロントは地図領域
+ごと非表示 (issue F 受け入れ条件6 と同じ縮退) にする。
+`course_data.cartridge_id` の明示指定 (authoring-time の意思) はゲートを通さず信頼する。
+
 ## データソースの運用ガード (gap4)
 
 データソース既定を **`api`** に倒した (以前は `fixture` 既定で、本番切替を忘れると
@@ -53,6 +74,14 @@ issue F 完了後のレビューで、地図は描けているが「いまここ
 - 公開: `GET /api/atlas/runtime-config` が `{"data_source": ...}` を返す。
 - フロント (`atlas-data.js`) の解決順:
   `window.ATLAS_DATA_SOURCE` > `localStorage` > runtime-config > 取得不能時は `api`。
+- **API 失敗時は fail-closed**: source=`api` で取得・JSON パースに失敗した場合、
+  フィクスチャへ退避**しない** (骨格なしと同じ `null` を返し、地図領域ごと非表示)。
+  以前はエラー時にフィクスチャへ退避しており、nginx のルーティング欠落 (下記) を
+  隠蔽して本番相当環境でモック地図が表示される事故が起きた。
+- **nginx ルーティング**: `/api/atlas` は `frontend/nginx.conf` で明示的に
+  api-server へ proxy する必要がある (`location /api/atlas/` + `location = /api/atlas`)。
+  欠落すると SPA フォールバック (`location /`) が index.html を **200 で**返し、
+  フロントの `res.ok` 判定をすり抜ける。
 - **デプロイ手順**: `.env` に `ATLAS_DATA_SOURCE=api` を設定する (`.env.example` 参照)。
   `fixture` はローカル確認用にのみ明示的に使うこと。
 

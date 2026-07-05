@@ -426,6 +426,27 @@ C=`atlas_overlay_cache` / P=個人層 `interest_traces`）。設計原則: 宣�
 - **フロント**: `atlas-overlay.js`（オーバーレイ B/C）/ `atlas-panel.js`（詳細パネル）/
   `atlas-report.js`（修正報告 D）/ `atlas-data.js`（fixture ⇄ API 切替。404=骨格なし→null）/
   `atlas-minimap.js`（F-1）/ `atlas-cues.js`（F-2）
+- **骨格は DB 管理（migration 027, `atlas_skeletons`）**: draft/凍結版は
+  `core/atlas_store.py` 経由で DB が正本（同梱 `atlas/skeleton.yaml` は起動時に一度だけ
+  取込むシード兼フォールバック）。draft の同時編集は**楽観ロック**（`revision` 照合、
+  衝突は 409）。凍結版は (domain_key, version) で履歴保持。**カートリッジファイルの無い
+  新分野**も generate API の `body.domain`（name/description 等）で骨格を生成でき、
+  ファイルデプロイ不要（例: `modified_gravity`）。骨格の読みは必ず
+  `atlas_store.load_learner_skeleton()` を使う（`cartridge.learner_atlas_skeleton` 直読み禁止）。
+- **コース⇄地図バインディング（S2）**: `POST /api/admin/courses/{id}/atlas-binding/propose`
+  が全ドメイン骨格への topic 対応カバレッジを**決定論的に**提案し（LLM 不使用）、教員承認で
+  `PUT .../atlas-binding` が `learning_courses.data.cartridge_id` + `topics[].atlas_node_id`
+  を保存（監査: `theory_review_events` `entity_type='atlas_binding'`）。コースビルダーの
+  登録直後と管理画面「学習マップ編集」から操作。明示 cartridge_id は下記ゲートを免除。
+- **コース⇄カートリッジの妥当性ゲート（gap3 hardening）**: カートリッジが**導出**
+  （`course_data.cartridge_id` 明示なし）で決まった場合、コースのどのトピックも骨格概念に
+  対応しなければ `GET /api/atlas` は 404（骨格なし扱い→地図領域ごと非表示）。解析パイプ
+  ラインは既定カートリッジで走るため、`document_analysis_runs` 由来の導出だけでは別分野
+  コースに無関係な地図が出る（`atlas_state.course_has_skeleton_anchor`）。
+- **フロントの fail-closed**: `atlas-data.js` は API 失敗時にフィクスチャへ退避しない
+  （`null`＝非表示）。フィクスチャは `ATLAS_DATA_SOURCE=fixture` の明示時のみ。
+  `/api/atlas` は `frontend/nginx.conf` の明示 proxy が必須（欠落すると SPA フォール
+  バックが index.html を 200 で返し、JSON パース失敗経由で事故る）。
 
 **F: 常設ミニマップと見晴らしの導線（issue F, migration 026）**
 - ミニマップ（左パネル下・切手大）は「いまここ + 状態ドット + 霧ハッチ」**のみ**。

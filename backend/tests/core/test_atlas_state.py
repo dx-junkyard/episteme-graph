@@ -652,6 +652,79 @@ class TestResolveCourseCartridge:
         assert st.resolve_course_cartridge(None, {"sources": []}) == "particle_physics"
 
 
+class TestCourseHasSkeletonAnchor:
+    """導出カートリッジの妥当性ゲート (gap3 hardening)。
+
+    解析パイプラインは既定カートリッジで走るため、導出だけでは別分野のコース
+    (例: 修正重力理論) にも particle_physics が返る。骨格へ足がかりが無ければ
+    False → atlas_view が 404 (骨格なし扱い) に縮退させる。
+    """
+
+    def test_false_for_unrelated_course(self):
+        """別分野コース: どのトピックも骨格概念にラベル一致せず、チャンクも無い → False。"""
+        cd = {
+            "topics": [
+                {"id": "t1", "title": "修正重力理論のテストとしての大規模構造"},
+                {"id": "t2", "title": "局所バイアス模型の導入"},
+            ]
+        }
+        assert st.course_has_skeleton_anchor(None, _skeleton(), "particle_physics", cd) is False
+
+    def test_true_via_label_match(self):
+        """topic.title が骨格概念にラベル一致 → DB 不要で True。"""
+        cd = {"topics": [{"id": "t1", "title": "演算子積展開"}]}
+        assert st.course_has_skeleton_anchor(None, _skeleton(), "particle_physics", cd) is True
+
+    def test_true_via_explicit_binding(self):
+        """topic.atlas_node_id の明示 binding → True。"""
+        cd = {"topics": [{"id": "t1", "title": "何でもよい題目", "atlas_node_id": "ope"}]}
+        assert st.course_has_skeleton_anchor(None, _skeleton(), "particle_physics", cd) is True
+
+    def test_true_via_corpus_binding(self):
+        """ラベル不一致でも教材チャンク → component → 骨格概念で True。"""
+        sk = _skeleton()
+
+        def route(sql, params):
+            if "primary_chunk_id IN" in sql:
+                assert sorted(params["chunk_ids"]) == ["ch1", "ch2"]
+                return FakeResult([("comp-ope", "演算子積展開")])
+            if "evidence_claims" in sql:  # _COMPONENTS_SQL (load_corpus_snapshot)
+                return FakeResult(
+                    [("comp-ope", "演算子積展開", "d", "", "draft", [], {})]
+                )
+            return FakeResult()
+
+        cd = {
+            "topics": [
+                {"id": "t1", "title": "無関係な題目", "material_chunk_ids": ["ch1"]},
+                {"id": "t2", "title": "別の題目", "material_chunk_ids": ["ch2"]},
+            ]
+        }
+        assert st.course_has_skeleton_anchor(FakeSession(route), sk, "particle_physics", cd) is True
+
+    def test_false_when_components_do_not_bind(self):
+        """component はあるが骨格概念へ対応しない (別分野の component) → False。"""
+        sk = _skeleton()
+
+        def route(sql, params):
+            if "primary_chunk_id IN" in sql:
+                return FakeResult([("comp-x", "DHOST 係数の読み方")])
+            if "evidence_claims" in sql:
+                return FakeResult(
+                    [("comp-x", "DHOST 係数の読み方", "d", "", "draft", [], {})]
+                )
+            return FakeResult()
+
+        cd = {"topics": [{"id": "t1", "title": "無関係な題目", "material_chunk_ids": ["ch1"]}]}
+        assert (
+            st.course_has_skeleton_anchor(FakeSession(route), sk, "particle_physics", cd) is False
+        )
+
+    def test_false_without_session_or_course(self):
+        assert st.course_has_skeleton_anchor(None, _skeleton(), "particle_physics", None) is False
+        assert st.course_has_skeleton_anchor(None, None, "particle_physics", {}) is False
+
+
 class TestBuildComponentConceptMap:
     def _snapshot(self):
         def comp(cid, name, status="draft", review=""):
