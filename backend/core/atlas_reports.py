@@ -74,7 +74,7 @@ _REPORT_COLUMNS = (
 _SELECT_REPORTS = """
     SELECT r.id::text, r.cartridge_id, r.skeleton_version, r.node_id, r.region_id,
            r.level, r.node_label, r.report_text, r.reporter_id::text,
-           COALESCE(u.username, r.reporter_id::text) AS reporter_name,
+           COALESCE(u.display_name, r.reporter_id::text) AS reporter_name,
            r.status, r.resolution_note, r.resolved_by::text, r.resolved_at,
            r.merged_into::text, r.applied_version, r.notified_at, r.created_at
       FROM atlas_correction_reports r

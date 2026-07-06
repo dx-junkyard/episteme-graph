@@ -185,6 +185,7 @@ def list_domains(session) -> list[dict]:
                 str(domain_key),
                 {
                     "domain_key": str(domain_key),
+                    "domain_name": "",
                     "frozen_version": "",
                     "has_draft": False,
                     "draft_revision": None,
@@ -196,6 +197,16 @@ def list_domains(session) -> list[dict]:
             elif status == "draft":
                 entry["has_draft"] = True
                 entry["draft_revision"] = int(revision or 1)
+
+        try:
+            meta_rows = session.execute(
+                sa_text("SELECT domain_key, name FROM atlas_domain_meta")
+            ).fetchall()
+            for domain_key, name in meta_rows:
+                if str(domain_key) in domains and name:
+                    domains[str(domain_key)]["domain_name"] = str(name)
+        except Exception:  # noqa: BLE001
+            logger.warning("atlas domain_meta listing failed", exc_info=True)
 
     # 同梱カートリッジ (未取込環境のフォールバック表示)
     try:
@@ -210,6 +221,7 @@ def list_domains(session) -> list[dict]:
                 continue
             domains[key] = {
                 "domain_key": key,
+                "domain_name": "",
                 "frozen_version": skeleton.version,
                 "has_draft": False,
                 "draft_revision": None,
@@ -219,6 +231,65 @@ def list_domains(session) -> list[dict]:
         logger.warning("bundled cartridge listing failed", exc_info=True)
 
     return sorted(domains.values(), key=lambda d: d["domain_key"])
+
+
+def load_domain_meta(session, domain_key: str) -> dict | None:
+    """カートリッジファイルの無い新分野向けに永続化した domain_meta (migration 028)。
+
+    generate API で body.domain が省略された場合のフォールバックに使う
+    (フロントの画面内メモリ pendingDomainMeta はリロードで消えるため)。
+    """
+    if session is None or not domain_key:
+        return None
+    row = session.execute(
+        sa_text(
+            """
+            SELECT name, description, target_domain, concept_vocabulary
+              FROM atlas_domain_meta
+             WHERE domain_key = :domain_key
+            """
+        ),
+        {"domain_key": domain_key},
+    ).fetchone()
+    if not row:
+        return None
+    target_domain = row[2]
+    if isinstance(target_domain, str):
+        target_domain = json.loads(target_domain)
+    return {
+        "name": str(row[0] or ""),
+        "description": str(row[1] or ""),
+        "target_domain": list(target_domain or []),
+        "concept_vocabulary": str(row[3] or ""),
+    }
+
+
+def save_domain_meta(session, domain_key: str, meta: dict, *, user_id: str | None = None) -> None:
+    """domain_meta を upsert する (次回以降の generate で body.domain 省略を許す)。"""
+    session.execute(
+        sa_text(
+            """
+            INSERT INTO atlas_domain_meta
+                (domain_key, name, description, target_domain, concept_vocabulary, created_by)
+            VALUES
+                (:domain_key, :name, :description, CAST(:target_domain AS JSONB), :concept_vocabulary, :created_by)
+            ON CONFLICT (domain_key) DO UPDATE SET
+                name = EXCLUDED.name,
+                description = EXCLUDED.description,
+                target_domain = EXCLUDED.target_domain,
+                concept_vocabulary = EXCLUDED.concept_vocabulary,
+                updated_at = now()
+            """
+        ),
+        {
+            "domain_key": domain_key,
+            "name": str(meta.get("name") or domain_key),
+            "description": str(meta.get("description") or ""),
+            "target_domain": json.dumps([str(d) for d in (meta.get("target_domain") or []) if d]),
+            "concept_vocabulary": str(meta.get("concept_vocabulary") or ""),
+            "created_by": user_id or None,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -1032,8 +1032,24 @@ def _run_migrations() -> None:
             "ON atlas_skeletons(domain_key, status, created_at DESC)"
         ))
 
+        # Migration 028: 分野の地図 — カートリッジファイルの無い新分野の domain_meta 永続化
+        # (name/description 等)。generate API で body.domain が省略された場合の
+        # フォールバックに使う。正本リファレンス: backend/db/028_atlas_domain_meta.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS atlas_domain_meta (
+                domain_key         TEXT PRIMARY KEY,
+                name               TEXT NOT NULL,
+                description        TEXT NOT NULL DEFAULT '',
+                target_domain      JSONB NOT NULL DEFAULT '[]'::jsonb,
+                concept_vocabulary TEXT NOT NULL DEFAULT '',
+                created_by         UUID,
+                created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+
         session.commit()
-        logger.info("Migrations (002-027) applied successfully.")
+        logger.info("Migrations (002-028) applied successfully.")
 
         # 骨格 DB 管理化 (027): カートリッジ同梱の凍結骨格を一度だけ DB へ取り込む (冪等)
         try:

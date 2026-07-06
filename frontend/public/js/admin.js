@@ -2196,7 +2196,14 @@
         .then(function (res) { return res.ok ? res.json() : { domains: [] }; })
         .then(function (data) {
           var keys = {};
-          (data.domains || []).forEach(function (d) { keys[d.domain_key] = true; });
+          (data.domains || []).forEach(function (d) {
+            keys[d.domain_key] = true;
+            // migration 028: DB 永続化された domain_meta の名前をラベルに使う
+            // (カートリッジファイルの無い新分野。names には出てこない)
+            if (d.domain_name && !names[d.domain_key]) {
+              names[d.domain_key] = d.domain_name;
+            }
+          });
           Object.keys(names).forEach(function (k) { keys[k] = true; });
           var sorted = Object.keys(keys).sort();
           sorted.forEach(function (k) {

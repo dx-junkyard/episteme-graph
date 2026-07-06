@@ -241,6 +241,7 @@ def generate_atlas_skeleton(
     session = _skeleton_session()
     try:
         existing = atlas_store.load_draft(session, cartridge_id)
+        domain_meta = body.domain or atlas_store.load_domain_meta(session, cartridge_id)
     finally:
         session.close()
     if existing is not None and not body.force:
@@ -253,7 +254,7 @@ def generate_atlas_skeleton(
 
     try:
         skeleton = generate_skeleton_draft(
-            cartridge_id, model=body.model, domain_meta=body.domain
+            cartridge_id, model=body.model, domain_meta=domain_meta
         )
     except FileNotFoundError as exc:
         raise HTTPException(
@@ -274,6 +275,11 @@ def generate_atlas_skeleton(
             user_id=str(current_user.get("id") or "") or None,
             generated_by=skeleton.generated_by,
         )
+        if body.domain:
+            atlas_store.save_domain_meta(
+                session, cartridge_id, body.domain,
+                user_id=str(current_user.get("id") or "") or None,
+            )
         session.commit()
     except atlas_store.DraftRevisionConflict as exc:
         session.rollback()

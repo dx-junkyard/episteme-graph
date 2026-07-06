@@ -238,7 +238,21 @@
       "Bash(curl -s -H 'Authorization: Bearer __CMDSUB_OUTPUT__' http://localhost:3000/api/atlas?cartridge=particle_physics -o /private/tmp/claude-501/-Users-urakawashinichi-IdeaProjects-dx-junkyard-episteme-graph/36f883ec-5104-4717-9c14-942851254554/scratchpad/atlas_pp.json -w 'HTTP %{http_code}\\\\n')",
       "Bash(python3 -c 'import json; d=json.load\\(open\\('\\\\''/private/tmp/claude-501/-Users-urakawashinichi-IdeaProjects-dx-junkyard-episteme-graph/36f883ec-5104-4717-9c14-942851254554/scratchpad/atlas_pp.json'\\\\''\\)\\); print\\('\\\\''cartridge:'\\\\'', d['\\\\''cartridge'\\\\''], '\\\\''/ version:'\\\\'', d['\\\\''skeleton_version'\\\\'']\\)')",
       "Bash(curl -s http://localhost:3000/js/admin.js)",
-      "Bash(curl -s http://localhost:3000/admin.html)"
+      "Bash(curl -s http://localhost:3000/admin.html)",
+      "Bash(python3 -c \"import json; print\\(json.load\\(open\\('/private/tmp/claude-501/-Users-urakawashinichi-IdeaProjects-dx-junkyard-episteme-graph/36f883ec-5104-4717-9c14-942851254554/scratchpad/pp_course.json'\\)\\)\\)\")",
+      "Bash(grep -n \"^services:\\\\|^  [a-z_-]*:$\" docker-compose.yml docker-compose.local.yml)",
+      "Bash(docker buildx *)",
+      "Bash(docker builder *)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('backend/core/atlas_store.py'\\).read\\(\\)\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('backend/api/routes/atlas.py'\\).read\\(\\)\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('backend/api/main.py'\\).read\\(\\)\\)\")",
+      "Bash(curl -s http://localhost:3000/api/admin/atlas/domains -H 'Authorization: Bearer __CMDSUB_OUTPUT__')",
+      "Bash(curl -s http://localhost:3000/api/admin/cartridges/modified_gravity/atlas/skeleton -H 'Authorization: Bearer __CMDSUB_OUTPUT__')",
+      "Bash(python3 -c \"import sys,json;d=json.load\\(sys.stdin\\);print\\('has draft:', d.get\\('draft'\\) is not None\\); print\\('has frozen:', d.get\\('frozen'\\) is not None\\)\")",
+      "Bash(curl -s -X POST http://localhost:3000/api/admin/cartridges/modified_gravity/atlas/skeleton/generate -H 'Authorization: Bearer __CMDSUB_OUTPUT__' -H 'Content-Type: application/json' -d '{\"force\": true}')",
+      "Bash(curl -s -X POST http://localhost:3000/api/admin/cartridges/modified_gravity/atlas/skeleton/generate -H 'Authorization: Bearer __CMDSUB_OUTPUT__' -H 'Content-Type: application/json' -d '{\"force\": true, \"domain\": {\"name\": \"修正重力理論\", \"description\": \"MOND等の修正重力理論分野\"}}')",
+      "Bash(python3 -c \"import sys,json;d=json.load\\(sys.stdin\\);print\\(json.dumps\\({k:v for k,v in d.items\\(\\) if k!='draft'}, ensure_ascii=False\\)\\); print\\('draft present:', 'draft' in d and d['draft'] is not None\\)\")",
+      "Bash(python3 -c \"import sys,json;d=json.load\\(sys.stdin\\);print\\('error' if 'detail' in d else 'OK, draft present:', d.get\\('draft'\\) is not None if 'draft' in d else d.get\\('detail'\\)\\)\")"
     ]
   }
 }
