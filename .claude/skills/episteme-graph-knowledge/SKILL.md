@@ -135,7 +135,13 @@ CorePredicate の定義は `backend/core/schema.py` を直接読んで最新の�
 | `ANCHOR_MAX_CALLS_PER_DAY` | StructureAnchorAgent: 1ユーザー1日あたり LLM コール上限 | `10` |
 | `ANCHOR_LLM_MODEL` | StructureAnchorAgent が使うモデル（空なら fast tier に委譲） | （空） |
 | `ANCHOR_CONFIRM_MAX_PER_SESSION` | 回答末尾の帰属確認プロンプト（C）を出すセッション内上限 | `3` |
+| `DOUBT_SCOPE_MAX_CALLS_PER_DAY` | D層: 検証スコープ候補抽出の 1 日あたり LLM コール上限 | `10` |
+| `DOUBT_SCOPE_LLM_MODEL` | D層: スコープ候補抽出が使うモデル（空なら fast tier に委譲） | （空） |
+| `DOUBT_ASSUMPTION_MAX_CALLS_PER_DAY` | D層: 暗黙前提の LLM 正規化の 1 日あたりコール上限 | `10` |
+| `DOUBT_ASSUMPTION_LLM_MODEL` | D層: 前提正規化が使うモデル（空なら fast tier に委譲） | （空） |
 | `LLM_TRANSCRIBE_MODEL` | 音声文字起こしモデル（ハンズフリー会話、openai プロバイダのみ） | `whisper-1` |
+| `ASSISTANT_MAX_CALLS_PER_DAY` | Admin Copilot: chat の 1 ユーザー 1 日あたり LLM コール上限 | `20` |
+| `ASSISTANT_LLM_MODEL` | Admin Copilot: intent 分類/応答が使うモデル（空なら fast tier に委譲） | （空） |
 
 > **禁止**: `google-cloud-aiplatform` (Vertex AI) を新規パイプラインコードで使用すること。
 > Google の LLM を使う場合は必ず `LLM_PROVIDER=gemini` (`google-generativeai`) を指定すること。

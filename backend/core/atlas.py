@@ -164,10 +164,59 @@ class AtlasSkeleton:
         return tuple(r.id for r in self.regions)
 
 
+class ValidationIssue(str):
+    """検証の1件。対象 id を機械可読で持ちつつ、文字列としても振る舞う。
+
+    骨格エディタ改善 (#field_atlas_skeleton_editor_upgrade P2): プレビュー上で
+    該当ノードをインラインハイライトするため、`region_id` / `concept_id` /
+    `edge` を機械可読で保持する。既存の呼び出し元 (``"; ".join(report.errors)`` /
+    ``"reviewed_by" in e`` / ``json.dumps(list(report.errors))``) との後方互換の
+    ため ``str`` を継承する — メッセージ文字列そのものとして扱え、JSON では
+    ただの文字列として直列化される。id は ``to_dict()`` で明示的に取り出す。
+    """
+
+    region_id: str | None
+    concept_id: str | None
+    edge: tuple[str, str] | None
+
+    def __new__(
+        cls,
+        message: str,
+        *,
+        region_id: str | None = None,
+        concept_id: str | None = None,
+        edge: tuple[str, str] | None = None,
+    ) -> "ValidationIssue":
+        obj = super().__new__(cls, message)
+        obj.region_id = region_id
+        obj.concept_id = concept_id
+        obj.edge = edge
+        return obj
+
+    @property
+    def message(self) -> str:
+        return str(self)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "message": str(self),
+            "region_id": self.region_id,
+            "concept_id": self.concept_id,
+            "edge": list(self.edge) if self.edge else None,
+        }
+
+
+def issue_to_dict(issue: Any) -> dict[str, Any]:
+    """ValidationIssue / 素の str のどちらでも {message, region_id, ...} に正規化する。"""
+    if isinstance(issue, ValidationIssue):
+        return issue.to_dict()
+    return {"message": str(issue), "region_id": None, "concept_id": None, "edge": None}
+
+
 @dataclass(frozen=True)
 class ValidationReport:
-    errors: tuple[str, ...] = ()
-    warnings: tuple[str, ...] = ()
+    errors: tuple[ValidationIssue, ...] = ()
+    warnings: tuple[ValidationIssue, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -420,33 +469,40 @@ def _rects_overlap(a: RegionLayout, b: RegionLayout) -> bool:
 
 
 def validate_skeleton(skeleton: AtlasSkeleton) -> ValidationReport:
-    errors: list[str] = []
-    warnings: list[str] = []
+    errors: list[ValidationIssue] = []
+    warnings: list[ValidationIssue] = []
+
+    def err(message: str, **ids: Any) -> None:
+        errors.append(ValidationIssue(message, **ids))
+
+    def warn(message: str, **ids: Any) -> None:
+        warnings.append(ValidationIssue(message, **ids))
 
     if not skeleton.cartridge:
-        errors.append("cartridge が未設定です")
+        err("cartridge が未設定です")
     if skeleton.status not in SKELETON_STATUSES:
-        errors.append(f"status が不正です: {skeleton.status!r}")
+        err(f"status が不正です: {skeleton.status!r}")
     if not skeleton.generated_by:
-        errors.append("generated_by (AI生成の来歴) が未記録です")
+        err("generated_by (AI生成の来歴) が未記録です")
 
     is_frozen = skeleton.status == STATUS_FROZEN
     if skeleton.status != STATUS_DRAFT and not skeleton.reviewed_by:
-        errors.append("reviewed_by が空のまま status が draft 以外になっています")
+        err("reviewed_by が空のまま status が draft 以外になっています")
     if is_frozen:
         if not skeleton.version:
-            errors.append("凍結済み骨格に version がありません")
+            err("凍結済み骨格に version がありません")
         elif not any(e.version == skeleton.version for e in skeleton.changelog):
-            errors.append(f"changelog に version {skeleton.version} のエントリがありません")
+            err(f"changelog に version {skeleton.version} のエントリがありません")
 
     # 上限 (§13)
     if len(skeleton.regions) > MAX_REGIONS:
-        errors.append(f"領域数 {len(skeleton.regions)} が上限 {MAX_REGIONS} を超えています")
+        err(f"領域数 {len(skeleton.regions)} が上限 {MAX_REGIONS} を超えています")
     for region in skeleton.regions:
         if len(region.concepts) > MAX_CONCEPTS_PER_REGION:
-            errors.append(
+            err(
                 f"領域 '{region.id}' の代表概念数 {len(region.concepts)} が"
-                f"上限 {MAX_CONCEPTS_PER_REGION} を超えています"
+                f"上限 {MAX_CONCEPTS_PER_REGION} を超えています",
+                region_id=region.id,
             )
 
     # id の一意性・形式
@@ -454,48 +510,68 @@ def validate_skeleton(skeleton: AtlasSkeleton) -> ValidationReport:
     seen_concept_ids: set[str] = set()
     for region in skeleton.regions:
         if not region.id:
-            errors.append("id が空の領域があります")
+            err("id が空の領域があります")
             continue
         if not _ID_PATTERN.match(region.id):
-            errors.append(f"領域 id が不正です (小文字英数と_のみ): {region.id!r}")
+            err(f"領域 id が不正です (小文字英数と_のみ): {region.id!r}", region_id=region.id)
         if region.id in seen_region_ids:
-            errors.append(f"領域 id が重複しています: {region.id}")
+            err(f"領域 id が重複しています: {region.id}", region_id=region.id)
         seen_region_ids.add(region.id)
         if not region.label:
-            errors.append(f"領域 '{region.id}' に label がありません")
+            err(f"領域 '{region.id}' に label がありません", region_id=region.id)
         for concept in region.concepts:
             if not concept.id:
-                errors.append(f"領域 '{region.id}' に id が空の概念があります")
+                err(f"領域 '{region.id}' に id が空の概念があります", region_id=region.id)
                 continue
             if not _ID_PATTERN.match(concept.id):
-                errors.append(f"概念 id が不正です (小文字英数と_のみ): {concept.id!r}")
+                err(
+                    f"概念 id が不正です (小文字英数と_のみ): {concept.id!r}",
+                    region_id=region.id,
+                    concept_id=concept.id,
+                )
             if concept.id in seen_concept_ids or concept.id in seen_region_ids:
-                errors.append(f"概念 id が重複しています: {concept.id}")
+                err(
+                    f"概念 id が重複しています: {concept.id}",
+                    region_id=region.id,
+                    concept_id=concept.id,
+                )
             seen_concept_ids.add(concept.id)
             if not concept.label:
-                errors.append(f"概念 '{concept.id}' に label がありません")
+                err(
+                    f"概念 '{concept.id}' に label がありません",
+                    region_id=region.id,
+                    concept_id=concept.id,
+                )
 
     # 正規化座標の範囲
     for region in skeleton.regions:
         if region.layout is not None:
             lo = region.layout
             if not (0.0 <= lo.x <= 1.0 and 0.0 <= lo.y <= 1.0):
-                errors.append(f"領域 '{region.id}' の layout 座標が [0,1] を外れています")
+                err(f"領域 '{region.id}' の layout 座標が [0,1] を外れています", region_id=region.id)
             if not (0.0 < lo.w <= 1.0 and 0.0 < lo.h <= 1.0):
-                errors.append(f"領域 '{region.id}' の layout サイズが (0,1] を外れています")
+                err(f"領域 '{region.id}' の layout サイズが (0,1] を外れています", region_id=region.id)
             elif lo.x + lo.w > 1.0 + 1e-9 or lo.y + lo.h > 1.0 + 1e-9:
-                errors.append(f"領域 '{region.id}' が正規化キャンバスからはみ出しています")
+                err(f"領域 '{region.id}' が正規化キャンバスからはみ出しています", region_id=region.id)
         for concept in region.concepts:
             if concept.layout is not None:
                 if not (0.0 <= concept.layout.x <= 1.0 and 0.0 <= concept.layout.y <= 1.0):
-                    errors.append(f"概念 '{concept.id}' の layout 座標が [0,1] を外れています")
+                    err(
+                        f"概念 '{concept.id}' の layout 座標が [0,1] を外れています",
+                        region_id=region.id,
+                        concept_id=concept.id,
+                    )
 
     # 領域の重なり (警告)
     laid_out = [r for r in skeleton.regions if r.layout is not None]
     for i, a in enumerate(laid_out):
         for b in laid_out[i + 1 :]:
             if _rects_overlap(a.layout, b.layout):  # type: ignore[arg-type]
-                warnings.append(f"領域 '{a.id}' と '{b.id}' の配置が重なっています")
+                warn(
+                    f"領域 '{a.id}' と '{b.id}' の配置が重なっています",
+                    region_id=a.id,
+                    edge=(a.id, b.id),
+                )
 
     # seed_status
     for region in skeleton.regions:
@@ -504,40 +580,52 @@ def validate_skeleton(skeleton: AtlasSkeleton) -> ValidationReport:
             if ss is None:
                 continue
             if ss.value not in SEED_STATUS_VALUES:
-                errors.append(
-                    f"概念 '{concept.id}' の seed_status.value が不正です: {ss.value!r}"
+                err(
+                    f"概念 '{concept.id}' の seed_status.value が不正です: {ss.value!r}",
+                    region_id=region.id,
+                    concept_id=concept.id,
                 )
             if is_frozen and not ss.reviewed:
-                warnings.append(
-                    f"概念 '{concept.id}' の seed_status が未レビューのため表示されません"
+                warn(
+                    f"概念 '{concept.id}' の seed_status が未レビューのため表示されません",
+                    region_id=region.id,
+                    concept_id=concept.id,
                 )
 
     # エッジの参照整合
     known_ids = seen_region_ids | seen_concept_ids
     for edge in skeleton.edges:
         if edge.kind not in EDGE_KINDS:
-            errors.append(f"エッジ kind が不正です: {edge.kind!r}")
+            err(f"エッジ kind が不正です: {edge.kind!r}", edge=(edge.from_id, edge.to_id))
         for endpoint in (edge.from_id, edge.to_id):
             if endpoint not in known_ids:
-                errors.append(f"エッジが未知の id を参照しています: {endpoint!r}")
+                err(
+                    f"エッジが未知の id を参照しています: {endpoint!r}",
+                    edge=(edge.from_id, edge.to_id),
+                )
 
     # concept_bindings (凍結版に同梱できるのはレビュー済みのみ)
     for binding in skeleton.concept_bindings:
         if binding.skeleton not in seen_concept_ids:
-            errors.append(
-                f"concept_bindings が未知の骨格概念を参照しています: {binding.skeleton!r}"
+            err(
+                f"concept_bindings が未知の骨格概念を参照しています: {binding.skeleton!r}",
+                concept_id=binding.skeleton,
             )
         if not binding.graph_concept_id:
-            errors.append(f"concept_bindings ('{binding.skeleton}') に graph_concept_id がありません")
+            err(
+                f"concept_bindings ('{binding.skeleton}') に graph_concept_id がありません",
+                concept_id=binding.skeleton,
+            )
         if is_frozen and not binding.reviewed:
-            errors.append(
-                f"凍結済み骨格に未レビューの concept_binding があります: {binding.skeleton!r}"
+            err(
+                f"凍結済み骨格に未レビューの concept_binding があります: {binding.skeleton!r}",
+                concept_id=binding.skeleton,
             )
 
     # id_migrations
     for migration in skeleton.id_migrations:
         if not migration.from_id or not migration.to_id or not migration.version:
-            errors.append("id_migrations に from/to/version が欠けたエントリがあります")
+            err("id_migrations に from/to/version が欠けたエントリがあります")
 
     return ValidationReport(errors=tuple(errors), warnings=tuple(warnings))
 

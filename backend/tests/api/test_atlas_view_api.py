@@ -358,6 +358,62 @@ class TestGetAtlas:
             "step_d1", "step_d2", "step_gy", "step_d4", "step_d5"
         ]
 
+    def test_skeleton_concept_coords_are_region_relative(self, client, warm_cache):
+        """骨格概念の layout は領域内相対 (0-1)。L1/L2 では所属領域 box の offset/size を
+        適用したキャンバス絶対座標で返る (seed yaml / atlas-fixture.js /
+        atlas-draft-preview.js の conceptAbs() と一致)。
+
+        回帰: 以前 atlas_view.py は相対座標を絶対として scale していたため、領域の
+        右下寄りにある概念 (dual: 相対 0.72,0.8) が領域ボックスの外へはみ出していた。
+        """
+        from core import cartridges as cartridges_module
+
+        data = client.get(
+            "/api/atlas?cartridge=particle_physics", headers=_headers()
+        ).json()
+        skeleton = cartridges_module.load_cartridge(
+            "particle_physics"
+        ).learner_atlas_skeleton
+
+        l1 = data["levels"]["1"]
+        w1, h1 = l1["viewBox"]
+        l1_by_id = {n["id"]: n for n in l1["nodes"]}
+
+        # ope: 相対 (0.22,0.39), 領域 eft_sumrules (0.06,0.1,0.53,0.62)
+        # → 絶対 x = 0.06 + 0.22*0.53 = 0.1766 → round(0.1766*680) = 120 (fixture と一致)
+        assert l1_by_id["ope"]["x"] == round((0.06 + 0.22 * 0.53) * w1)  # == 120
+
+        # 全骨格概念が「所属領域のボックス内」に収まる (相対解釈なら常に真、
+        # 絶対誤解釈だと dual のような概念が領域外へ出る)
+        region_box = {}
+        for region in skeleton.regions:
+            lo = region.layout
+            if lo is not None:
+                region_box[region.id] = (
+                    round(lo.x * w1), round(lo.y * h1),
+                    round(lo.w * w1), round(lo.h * h1),
+                )
+        concept_region = {
+            c.id: r.id for r in skeleton.regions for c in r.concepts
+        }
+        for node in l1["nodes"]:
+            box = region_box.get(concept_region.get(node["id"]))
+            if box is None:
+                continue
+            rx, ry, rw, rh = box
+            assert rx - 1 <= node["x"] <= rx + rw + 1, f"{node['id']} が領域 x 範囲外"
+            assert ry - 1 <= node["y"] <= ry + rh + 1, f"{node['id']} が領域 y 範囲外"
+
+        # L2 でも同じ絶対化が効く (dual の絶対 x を明示検証)
+        l2 = data["levels"]["2"]
+        w2, _ = l2["viewBox"]
+        l2_by_id = {n["id"]: n for n in l2["nodes"]}
+        assert l2_by_id["dual"]["x"] == round((0.06 + 0.72 * 0.53) * w2)  # 領域内に収まる
+
+        # nodes_list (§11 構造化出力) も絶対正規化座標で一貫する
+        nodes_list = {n["id"]: n for n in data["nodes_list"]}
+        assert nodes_list["ope"]["layout"]["x"] == pytest.approx(0.06 + 0.22 * 0.53)
+
     def test_derived_statuses_over_api(self, client, warm_cache):
         data = client.get(
             "/api/atlas?cartridge=particle_physics", headers=_headers()

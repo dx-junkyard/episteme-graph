@@ -56,6 +56,7 @@ from dependencies import _hash_password
 from routes import auth, learning, admin, lecture, groups, error_logs, export as export_routes
 from routes import atlas as atlas_routes
 from routes import atlas_view as atlas_view_routes
+from routes import doubt as doubt_routes
 from core.config import get_settings as _get_settings
 from core.postgres import get_session as _pg_session, check_connection as _pg_check
 
@@ -1048,8 +1049,205 @@ def _run_migrations() -> None:
             )
         """))
 
+        # Migration 029: D層（Doubt Layer）— 認識的地位台帳 epistemic_ledger (D1-1)
+        # 「合意の強さ」と「検証の強さ」をデータ構造レベルで分離する台帳。
+        # 検証は単一ブールでなく verification_scopes JSONB（配列）。スコープ 0 件
+        # （空欄）は正常状態。directly_verified は人間の記帳専用（builder は生成しない）。
+        # LLM スコープ候補は scope_candidates に candidate で保持し、教員確定まで
+        # verification_scopes 本体に入らない。正本リファレンス: backend/db/029_epistemic_ledger.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS epistemic_ledger (
+                id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                target_id            TEXT NOT NULL,
+                target_type          TEXT NOT NULL
+                                         CHECK (target_type IN ('claim', 'assumption', 'equation', 'component')),
+                document_id          TEXT NOT NULL DEFAULT '',
+                course_id            TEXT NOT NULL DEFAULT '',
+                verification_status  TEXT NOT NULL DEFAULT 'unknown'
+                                         CHECK (verification_status IN (
+                                             'directly_verified', 'indirectly_supported',
+                                             'untested', 'refuted', 'unknown'
+                                         )),
+                verification_scopes  JSONB NOT NULL DEFAULT '[]'::jsonb,
+                scope_candidates     JSONB NOT NULL DEFAULT '[]'::jsonb,
+                scope_candidates_analyzed_at TIMESTAMPTZ,
+                consensus_explicit   JSONB NOT NULL DEFAULT '{}'::jsonb,
+                consensus_behavioral INTEGER NOT NULL DEFAULT 0,
+                load_score           DOUBLE PRECISION,
+                load_computed_at     TIMESTAMPTZ,
+                created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE(target_id, target_type)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_epistemic_ledger_target ON epistemic_ledger(target_type, target_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_epistemic_ledger_course ON epistemic_ledger(course_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_epistemic_ledger_document ON epistemic_ledger(document_id)"
+        ))
+        session.execute(sa_text("""
+            CREATE INDEX IF NOT EXISTS idx_epistemic_ledger_unscoped
+                ON epistemic_ledger(course_id)
+                WHERE verification_scopes = '[]'::jsonb
+        """))
+
+        # Migration 030: D層 — 暗黙前提ノード assumption_nodes (D2-2)
+        # マイニング（経路A: 導出の隙間 / 経路B: コーパス横断）と手動登録の受け皿。
+        # 出力は常に status='candidate'。confirmed / dismissed への遷移は教員 API のみ
+        # （D2-4）。dismissed も行として保持（P4）。cluster_key で同一前提の再候補化を防ぐ。
+        # 正本リファレンス: backend/db/030_assumption_nodes.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS assumption_nodes (
+                id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                statement           TEXT NOT NULL,
+                origin              TEXT NOT NULL DEFAULT 'mined_gap'
+                                        CHECK (origin IN ('mined_gap', 'mined_corpus', 'naive_aggregate', 'manual')),
+                status              TEXT NOT NULL DEFAULT 'candidate'
+                                        CHECK (status IN ('candidate', 'confirmed', 'operationalized', 'dismissed')),
+                cluster_key         TEXT NOT NULL DEFAULT '',
+                created_from        JSONB NOT NULL DEFAULT '{}'::jsonb,
+                evidence_quote      TEXT NOT NULL DEFAULT '',
+                reason              TEXT NOT NULL DEFAULT '',
+                confidence          REAL NOT NULL DEFAULT 0.0,
+                course_id           TEXT NOT NULL DEFAULT '',
+                document_ids        JSONB NOT NULL DEFAULT '[]'::jsonb,
+                confirmed_by        UUID REFERENCES users(id) ON DELETE SET NULL,
+                confirmed_at        TIMESTAMPTZ,
+                operationalized_by  UUID REFERENCES users(id) ON DELETE SET NULL,
+                dismissed_by        UUID REFERENCES users(id) ON DELETE SET NULL,
+                created_by          UUID REFERENCES users(id) ON DELETE SET NULL,
+                created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_assumption_nodes_status ON assumption_nodes(status)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_assumption_nodes_course ON assumption_nodes(course_id, status)"
+        ))
+        session.execute(sa_text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_assumption_nodes_cluster "
+            "ON assumption_nodes(cluster_key) WHERE cluster_key <> ''"
+        ))
+
+        # Migration 031: D層 — 疑義 challenges (D3-1)
+        # 承認（endorsement）と対になる一級市民。帰属（challenger_id）・理由・型必須で
+        # 匿名疑義は構造的に作れない。withdraw は行削除でなく status 遷移（P4）。
+        # 正本リファレンス: backend/db/031_challenges.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS challenges (
+                id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                target_id      TEXT NOT NULL,
+                target_type    TEXT NOT NULL CHECK (target_type IN ('assumption', 'claim')),
+                challenger_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                challenge_type TEXT NOT NULL
+                                   CHECK (challenge_type IN (
+                                       'scope_extrapolation', 'untested_in_domain',
+                                       'definitional', 'hidden_lemma'
+                                   )),
+                reason         TEXT NOT NULL CHECK (reason <> ''),
+                status         TEXT NOT NULL DEFAULT 'open'
+                                   CHECK (status IN ('open', 'answered', 'withdrawn', 'led_to_verification')),
+                course_id      TEXT NOT NULL DEFAULT '',
+                created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_challenges_target ON challenges(target_type, target_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_challenges_challenger ON challenges(challenger_id)"
+        ))
+
+        # Migration 032: D層 — 検証提案 verification_proposals (D3-2)
+        # 疑義から「この実験・この計算で検証可能」への昇格経路。昇格時に元 challenge を
+        # led_to_verification に遷移させる。正本リファレンス: backend/db/032_verification_proposals.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS verification_proposals (
+                id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                challenge_id UUID NOT NULL REFERENCES challenges(id) ON DELETE CASCADE,
+                proposal     TEXT NOT NULL CHECK (proposal <> ''),
+                proposer_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                status       TEXT NOT NULL DEFAULT 'proposed'
+                                 CHECK (status IN ('proposed', 'in_progress', 'completed', 'withdrawn')),
+                created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_verification_proposals_challenge ON verification_proposals(challenge_id)"
+        ))
+
+        # Migration 033: D層 — 反実仮想セッション counterfactual_sessions (D3-3)
+        # 前提を仮に偽に倒したときの崩壊/生存/判定不能のスナップショットを保存。
+        # 「再構築」は計算しない。共有範囲は既存 Visibility 語彙を流用。
+        # 正本リファレンス: backend/db/033_counterfactual_sessions.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS counterfactual_sessions (
+                id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                owner_id               UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                course_id              TEXT NOT NULL DEFAULT '',
+                document_id            TEXT NOT NULL DEFAULT '',
+                toggled_assumption_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                collapsed_subgraph     JSONB NOT NULL DEFAULT '{}'::jsonb,
+                surviving_subgraph     JSONB NOT NULL DEFAULT '{}'::jsonb,
+                indeterminate_subgraph JSONB NOT NULL DEFAULT '{}'::jsonb,
+                notes                  TEXT NOT NULL DEFAULT '',
+                shared_scope           TEXT NOT NULL DEFAULT 'private'
+                                           CHECK (shared_scope IN ('private', 'group', 'public')),
+                group_id               UUID REFERENCES groups(id) ON DELETE SET NULL,
+                created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_counterfactual_sessions_owner ON counterfactual_sessions(owner_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_counterfactual_sessions_shared "
+            "ON counterfactual_sessions(shared_scope) WHERE shared_scope <> 'private'"
+        ))
+
+        # Migration 034: 横断ユーティリティ層（Admin Copilot）— 操作代行の戻す台帳
+        # assistant_actions。apply 前に before_snapshot を保持し、取り消しは行削除でなく
+        # status 遷移（applied → reverted）で行う（P3）。reversible=FALSE は戻す UI で
+        # 無効化（P2）。監査は既存 theory_review_events（entity_type='assistant_action'）。
+        # 正本リファレンス: backend/db/034_assistant_actions.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS assistant_actions (
+                id              TEXT PRIMARY KEY,
+                user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                session_id      TEXT,
+                capability_id   TEXT NOT NULL,
+                screen          TEXT NOT NULL,
+                target_type     TEXT NOT NULL,
+                target_id       TEXT,
+                args            JSONB NOT NULL DEFAULT '{}'::jsonb,
+                before_snapshot JSONB,
+                after_snapshot  JSONB,
+                reversible      BOOLEAN NOT NULL DEFAULT TRUE,
+                revert_spec     JSONB,
+                status          TEXT NOT NULL DEFAULT 'applied'
+                                    CHECK (status IN ('applied', 'reverted', 'failed', 'confirm_pending')),
+                reverted_at     TIMESTAMPTZ,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_assistant_actions_user ON assistant_actions(user_id, created_at DESC)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_assistant_actions_target ON assistant_actions(target_type, target_id)"
+        ))
+
         session.commit()
-        logger.info("Migrations (002-028) applied successfully.")
+        logger.info("Migrations (002-034) applied successfully.")
 
         # 骨格 DB 管理化 (027): カートリッジ同梱の凍結骨格を一度だけ DB へ取り込む (冪等)
         try:
@@ -1149,6 +1347,7 @@ app.include_router(export_routes.router)
 app.include_router(atlas_routes.learning_router)
 app.include_router(atlas_routes.report_router)
 app.include_router(atlas_view_routes.router)
+app.include_router(doubt_routes.learning_router)
 
 
 @app.get("/healthz")

@@ -21,6 +21,8 @@
         <a href="/" style="color:var(--color-text-info);text-decoration:none;font-size:12px">学習画面へ</a>
         <span style="opacity:.3">|</span>
         <span id="admin-username"></span>
+        <button id="admin-copilot-toggle" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px" title="管理画面の操作を手伝う AI アシスタント">🤖 操作アシスタント</button>
+        <span style="opacity:.3">|</span>
         <button id="logout-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px">ログアウト</button>
       </div>
     </div>
@@ -35,10 +37,14 @@
       <button class="admin-tab" data-tab="interest-dashboard">関心集約</button>
       <button class="admin-tab" data-tab="schema-proposals">スキーマ提案</button>
       <button class="admin-tab" data-tab="atlas">分野の地図</button>
+      <button class="admin-tab" data-tab="doubt-atlas">前提の地図</button>
       <button class="admin-tab" data-tab="groups">グループ管理</button>
       <button class="admin-tab" data-tab="system-stats" id="tab-btn-system-stats" style="display:none">システム統計</button>
       <button class="admin-tab" data-tab="error-analysis" id="tab-btn-error-analysis" style="display:none">エラー解析</button>
     </div>
+
+    <!-- D層（Doubt Layer）— 前提の地図タブ（Field Atlas とは別機能。中身は doubt-atlas.js が描画） -->
+    <div class="admin-panel" id="tab-doubt-atlas"></div>
 
     <!-- Field Atlas skeleton review tab (Issue A-3) -->
     <div class="admin-panel" id="tab-atlas">
@@ -77,9 +83,22 @@
           <button id="atlas-generate" class="admin-action-btn">draft を生成（AIバッチ）</button>
         </div>
         <div id="atlas-draft-area" style="display:none">
-          <h4 style="font-size:13px;margin:12px 0 6px">draft の修正（領域・概念・配置・エッジ・seed_status）</h4>
-          <textarea id="atlas-draft-editor" rows="18" spellcheck="false"
-            style="width:100%;font-family:monospace;font-size:12px;border:1px solid var(--color-border);border-radius:4px;padding:8px;box-sizing:border-box"></textarea>
+          <div style="display:flex;align-items:center;gap:8px;margin:12px 0 6px;flex-wrap:wrap">
+            <h4 style="font-size:13px;margin:0">draft の修正（領域・概念・配置・エッジ・seed_status）</h4>
+            <span style="flex:1"></span>
+            <div class="atlas-editor-tabs" role="tablist" style="display:inline-flex;border:1px solid var(--color-border);border-radius:6px;overflow:hidden">
+              <button id="atlas-tab-json" class="admin-action-btn atlas-editor-tab on" data-atlas-view="json" role="tab" aria-selected="true" style="border:none;border-radius:0">JSON編集</button>
+              <button id="atlas-tab-preview" class="admin-action-btn atlas-editor-tab" data-atlas-view="preview" role="tab" aria-selected="false" style="border:none;border-radius:0">プレビュー</button>
+            </div>
+            <button id="atlas-assist-toggle" class="admin-action-btn" title="骨格の一部分をAIと対話しながら修正します">AI agent</button>
+          </div>
+          <div id="atlas-view-json">
+            <textarea id="atlas-draft-editor" rows="18" spellcheck="false"
+              style="width:100%;font-family:monospace;font-size:12px;border:1px solid var(--color-border);border-radius:4px;padding:8px;box-sizing:border-box"></textarea>
+          </div>
+          <div id="atlas-view-preview" style="display:none"></div>
+          <!-- AI アシスト編集パネル (skeleton editor upgrade P3/P4)。中身は atlas-assist-panel.js -->
+          <div id="atlas-assist-panel" style="display:none;border:1px solid var(--color-border);border-radius:6px;padding:10px;margin-top:8px;background:var(--color-bg-secondary)"></div>
           <div id="atlas-validation" style="font-size:12px;margin:6px 0"></div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">
             <button id="atlas-save-draft" class="admin-action-btn">draft を保存</button>
@@ -225,9 +244,27 @@
           <div class="cb-chat-header">AIアシスタントとコース設計</div>
           <div class="cb-session-bar" id="cb-session-bar"></div>
           <div class="cb-material-select" id="cb-material-select">
-            <div class="cb-material-select-header">使用する教材を選択</div>
+            <div class="cb-material-select-header">
+              <span>使用する教材を選択</span>
+              <span class="cb-material-count" id="cb-material-count"></span>
+            </div>
+            <div class="cb-material-toolbar">
+              <input type="text" id="cb-material-search" class="cb-material-search" placeholder="ファイル名・タイトルで検索…">
+              <select id="cb-material-sort" class="cb-material-sort">
+                <option value="uploaded">新しい順（アップロード）</option>
+                <option value="analyzed">直近の生成順</option>
+                <option value="title">タイトル順</option>
+                <option value="volume">ボリューム順</option>
+              </select>
+            </div>
+            <div class="cb-material-filters" id="cb-material-filters">
+              <button class="cb-mat-chip active" data-filter="all" type="button">すべて</button>
+              <button class="cb-mat-chip" data-filter="no_course" type="button">コース未作成</button>
+              <button class="cb-mat-chip" data-filter="recent" type="button">直近の生成</button>
+              <button class="cb-mat-chip" data-filter="completed" type="button">解析完了</button>
+            </div>
             <div class="cb-material-select-list" id="cb-material-select-list">
-              <span style="color:var(--color-text-tertiary);font-size:12px">教材を読み込み中...</span>
+              <span class="cb-mat-empty">教材を読み込み中…</span>
             </div>
           </div>
           <div class="cb-chat-area" id="cb-chat-area">
@@ -665,6 +702,13 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-  <script src="/js/admin.js?v=pipeline-start-stage-20260602-1"></script>
+  <!-- D層（Doubt Layer）管理 UI — 「分野の地図」(atlas-*) とは別機能 -->
+  <script src="/js/doubt-atlas.js?v=doubt-layer-20260707-1"></script>
+  <!-- Field Atlas 骨格エディタ改善: ビジュアルプレビュー + AIアシスト編集 -->
+  <script src="/js/atlas-draft-preview.js?v=atlas-editor-20260707-1"></script>
+  <script src="/js/atlas-assist-panel.js?v=atlas-editor-20260707-1"></script>
+  <!-- 横断ユーティリティ層（Admin Copilot）— 統合 AI アシスタント -->
+  <script src="/js/admin-assistant.js?v=admin-copilot-20260707-1"></script>
+  <script src="/js/admin.js?v=atlas-editor-20260707-1"></script>
 </body>
 </html>

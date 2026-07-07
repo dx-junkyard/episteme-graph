@@ -22,8 +22,11 @@ PDF教材からの知識抽出、RAGベースの対話型学習、コース管�
 | `backend/api/routes/auth.py` | 認証ルーター | 登録・ログイン・ユーザー情報 |
 | `backend/api/routes/learning.py` | 学習ルーター | コース管理・RAGチャット（intent_mode: on_path/explore/casual）・進捗・tension 確定 API・structure_anchor 確定 API（`/api/learning/anchors/...`）・音声会話（`/voice/transcribe`=Whisper STT, `/voice/speak`=TTS） |
 | `backend/api/routes/admin.py` | 管理ルーター | 教材アップロード・コースビルダー・ユーザー管理 |
-| `backend/api/routes/atlas.py` | 分野の地図（骨格・報告・導線） | 骨格の生成/レビュー/凍結（教員）、修正報告（`POST /api/atlas/report`）、見晴らしの導線の内部計測と初回自動表示フラグ（`/api/learning/atlas/cues/...`、migration 026 `atlas_cue_events`） |
+| `backend/api/routes/atlas.py` | 分野の地図（骨格・報告・導線） | 骨格の生成/レビュー/凍結（教員）、修正報告（`POST /api/atlas/report`）、見晴らしの導線の内部計測と初回自動表示フラグ（`/api/learning/atlas/cues/...`、migration 026 `atlas_cue_events`）、骨格エディタ AIアシスト編集（`POST .../atlas/skeleton/assist/interpret|propose`。意図解釈→教員確定→JSON Patch 提案の2段階、draft は書き換えない。コスト上限 `ATLAS_ASSIST_MAX_CALLS_PER_DAY`、監査 `entity_type='atlas_assist'`） |
 | `backend/api/routes/atlas_view.py` | 分野の地図（閲覧） | `GET /api/atlas`（骨格+`atlas_overlay_cache`+個人層合成）・`GET /api/atlas/node/{id}`。状態判定はサーバ側 `core/atlas_state.py` のみ |
+| `backend/api/routes/doubt.py` | D層（Doubt Layer）ルーター | 認識的地位台帳（記帳/閲覧, `/api/admin/doubt/ledger/...`）・暗黙前提の確定フロー・疑義/検証提案・反実仮想セッション・前提の地図・naive-signals（k-匿名）・KPI（SYSTEM_ADMIN）。学習者向け読み取りは `learning_router`（`/api/learning/courses/{id}/ledger/...`・`open-assumptions`）。全書き込みを `theory_review_events` に監査。**load_score・confidence の生数値をレスポンスに含めない**（段階ラベルのみ） |
+| `backend/api/routes/admin_assistant.py` | 横断ユーティリティ層（Admin Copilot, migration 034）ルーター | 管理画面 統合 AI アシスタント。`POST /api/admin/assistant/chat`（intent 分類 → guidance / locate / action / clarify）・`POST .../actions`（代行実行）・`POST .../actions/{id}/revert`（取り消し）・`GET .../actions`（戻す履歴）。admin.router 配下（prefix `/assistant`）。capability registry で role×screen を fail-closed 判定、代行・取り消しを `theory_review_events` `entity_type='assistant_action'` に監査。**A/B/C/D 層のコードは変更せず既存 API を呼ぶ側**（P7） |
+| `backend/core/admin_assistant/` | Admin Copilot コア（横断ユーティリティ層） | `capabilities.py`（capability registry＝単一の真実源。role/screen/reversible/confirm/locate_steps）/ `knowledge.py`（`docs/admin_operations/*.md` の操作KB ローダ + role/screen フィルタ）/ `intent.py`（LLM intent 分類＋応答。失敗時は非LLMヒューリスティックへ縮退）/ `actions/`（tool 実装 = capture_before/apply/revert。apply は既存 API を呼ぶだけ）/ `action_store.py`（`assistant_actions` I/O）/ `schema.py`（Capability / Intent 等の dataclass・Pydantic）。**FastAPI を import しない**（core の testability） |
 | `backend/core/config.py` | 設定一元管理 | pydantic-settings による環境変数管理 |
 | `backend/core/llm.py` | LLM 抽象化レイヤー | Reasoning モデル自動対応 |
 | `backend/core/models.py` | SQLAlchemy ORM モデル | 全テーブル定義 |
@@ -36,8 +39,11 @@ PDF教材からの知識抽出、RAGベースの対話型学習、コース管�
 | `backend/core/storage.py` | MinIO ストレージ | S3互換ファイル管理 |
 | `backend/core/tension/` | TensionMiningAgent (B層) | 会話からの違和感候補検出（prefilter=同期非LLM / agent=非同期LLM / validator・repair / worker）。候補は `interest_traces` kind='tension' status='candidate' に保存し、学習者本人の confirm/dismiss API（`/api/learning/tension/...`）で確定。教員へは k-匿名化集約のみ |
 | `backend/core/structure_anchor/` | StructureAnchorAgent (B層) | 学習チャットの問いを「構造のどこに・どう引っかかったか」へ帰属（agent=非同期LLM / validator・repair / worker、tension と同型の独立モジュール）。候補は `interest_traces.payload.structure_anchor` に `attribution_source='llm_candidate'` で保存し（行 status は変更しない）、学習者本人の confirm/dismiss API（`/api/learning/anchors/...`）で確定。明示アンカー（テキスト選択・要素タップ）は同期・非LLMで `learner_selected` 記録。教員へは k-匿名化集約のみ |
-| `frontend/public/js/app.js` | 学習 UI | ES6+ SPA |
+| `backend/core/doubt/` | D層（Doubt Layer, migration 029〜033） | 認識的地位台帳。`schema.py`（語彙の正本）/ `ledger_builder.py`（A層成果物からの非LLMバックフィル。directly_verified は人間専用）/ `naive_signal.py`（k=3 匿名集計）/ `dependency.py`+`load_calculator.py`（下流到達可能性・閉路対応）/ `counterfactual.py`（3区分伝播。再構築は計算しない）/ `scope_candidates/`・`assumption_mining/`（tension と同型の非同期LLM worker。出力は常に candidate、確定は教員API）/ `open_assumptions.py` / `metrics.py`。A層コードは読むだけで変更しない |
+| `frontend/public/js/app.js` | 学習 UI | ES6+ SPA。D3-6: 出典タブ・コンポーネント説明への台帳事実行の併記（fail-closed）・未検証合意リスト（プル型） |
 | `frontend/public/js/admin.js` | 管理 UI | ES5互換 Vanilla JS |
+| `frontend/public/js/doubt-atlas.js` | D層 管理 UI（ES5） | 前提の地図タブ・台帳セクション（ノード詳細ペインへ追記）・前提候補レビュー・反実仮想モード。**Field Atlas（atlas-*.js）とは別機能** — 識別子/CSS は doubt- プレフィックス |
+| `frontend/public/js/admin-assistant.js` | Admin Copilot 管理 UI（ES5・`window.AdminAssistant`） | 全タブ横断の常設フローティングパネル。チャット（`/api/admin/assistant/chat`）・道案内の点灯（`runLocatePlan` + `.admin-assistant-spotlight`）・戻す（`ActionStack` L1 ローカル/L2 サーバ revert）。各画面は `registerScreenContext`/`registerUiAnchors`/`registerUndoHandler` で状態・点灯先・Undo を注入。識別子/CSS は `admin-assistant-` プレフィックス（Field Atlas / Doubt Atlas と非衝突） |
 
 ### PDF解析Agentパイプライン（src/episteme_graph/）
 

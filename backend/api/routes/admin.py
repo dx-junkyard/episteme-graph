@@ -442,6 +442,7 @@ def reanalyze_document(
 
 @router.get("/materials", response_model=list[MaterialOut])
 def list_materials(
+    include: str | None = None,
     current_user: dict = Depends(_require_teacher),
 ) -> list[MaterialOut]:
     """アップロード済み教材の一覧を返す。
@@ -451,7 +452,12 @@ def list_materials(
     - visibility='group' かつ自分の参加グループで共有された教材
     - 自分が editor/viewer 権限を持つコースで参照されている教材
       （course_group_permissions 経由）
+
+    ``include=summary`` を指定すると、教材選択UI向けにサマリ情報
+    （主要 theory component 名・件数・文書構造の見出し・コース作成済みか）を
+    既存テーブルから追加集約して返す。指定しない場合の挙動は従来どおり。
     """
+    want_summary = bool(include and "summary" in include)
     user_groups = get_user_group_ids(current_user["id"])
 
     params: dict = {"user_id": current_user["id"]}
@@ -484,7 +490,8 @@ def list_materials(
                 SELECT d.source_path, d.filename, d.title, d.status, d.created_at, d.knowledge_graph,
                        COALESCE(d.visibility, 'private'), d.group_id,
                        COALESCE(d.chunk_count, cs.chunk_count, 0) AS chunk_count,
-                       d.id::text AS document_id
+                       d.id::text AS document_id,
+                       COALESCE(d.authors, '{{}}') AS authors, d.year, d.doc_type
                 FROM documents d
                 LEFT JOIN (
                     SELECT material_id, COUNT(*) AS chunk_count
@@ -513,7 +520,7 @@ def list_materials(
                     f"""
                     SELECT DISTINCT ON (material_id)
                            material_id, status, current_stage, error_message,
-                           stage_outputs, updated_at
+                           stage_outputs, updated_at, completed_at
                     FROM document_analysis_runs
                     WHERE material_id IN ({run_placeholders})
                     ORDER BY material_id, created_at DESC
@@ -522,6 +529,51 @@ def list_materials(
                 run_params,
             ).mappings().all()
             latest_runs = {row["material_id"]: dict(row) for row in run_rows}
+
+        # --- サマリ集約（?include=summary のときのみ）---------------------
+        # 教材選択UI向け。すべて既存テーブルからの読み取りで、A層は非改変。
+        components_by_mid: dict[str, list[str]] = {}
+        materials_with_course: set[str] = set()
+        if want_summary and records:
+            uuid_to_mid = {r[9]: r[0] for r in records if r[9]}
+            doc_uuids = [u for u in uuid_to_mid if u]
+            if doc_uuids:
+                uuid_ph = ", ".join(f":u_{i}" for i in range(len(doc_uuids)))
+                uuid_params = {f"u_{i}": u for i, u in enumerate(doc_uuids)}
+                comp_rows = session.execute(
+                    sa_text(
+                        f"""
+                        SELECT document_id::text, name
+                        FROM theory_components
+                        WHERE document_id IN ({uuid_ph}) AND name IS NOT NULL
+                        ORDER BY document_id,
+                            CASE review_status WHEN 'teacher_reviewed' THEN 0 ELSE 1 END,
+                            CASE maturity_level
+                                WHEN 'peer_reviewed' THEN 0 WHEN 'textbook' THEN 1
+                                WHEN 'paper_claim' THEN 2 ELSE 3 END
+                        """
+                    ),
+                    uuid_params,
+                ).fetchall()
+                for uid, name in comp_rows:
+                    mid = uuid_to_mid.get(uid)
+                    if mid:
+                        components_by_mid.setdefault(mid, []).append(name)
+
+            # 自分がこの教材からコースを作成済みか（コース未作成リスト用）
+            course_mid_rows = session.execute(
+                sa_text(
+                    """
+                    SELECT DISTINCT (jsonb_array_elements(lc.data->'sources')->>'material_id') AS mid
+                    FROM learning_courses lc
+                    WHERE lc.user_id = CAST(:user_id AS uuid)
+                      AND lc.data IS NOT NULL
+                      AND jsonb_typeof(lc.data->'sources') = 'array'
+                    """
+                ),
+                {"user_id": current_user["id"]},
+            ).fetchall()
+            materials_with_course = {row[0] for row in course_mid_rows if row[0]}
     finally:
         session.close()
 
@@ -561,6 +613,43 @@ def list_materials(
         elif run.get("status") == "completed":
             status = "completed"
 
+        completed_at = run.get("completed_at")
+        analyzed_at = (
+            completed_at.isoformat()
+            if completed_at is not None and status == "completed"
+            else None
+        )
+
+        # メタデータ（authors / year / doc_type は常時付与）
+        authors = list(r[10]) if r[10] else []
+        year = r[11]
+        doc_type = r[12]
+
+        # サマリ（?include=summary のときのみ）
+        component_names: list[str] = []
+        top_concepts: list[str] = []
+        section_outline: list[str] = []
+        has_course = False
+        if want_summary:
+            component_names = components_by_mid.get(mid, [])
+            has_course = mid in materials_with_course
+            # legacy knowledge_graph の概念名
+            if isinstance(kg, dict):
+                for c in (kg.get("concepts") or [])[:8]:
+                    name = c.get("name") if isinstance(c, dict) else str(c)
+                    if name:
+                        top_concepts.append(name)
+            # 文書構造の見出し
+            doc_structure = (stage_outputs.get("_artifacts") or {}).get("document_structure")
+            if isinstance(doc_structure, dict):
+                struct_sections = doc_structure.get("sections") or doc_structure.get("blocks") or []
+                for sec in struct_sections[:12]:
+                    if not isinstance(sec, dict):
+                        continue
+                    sec_title = sec.get("title") or sec.get("heading") or sec.get("label")
+                    if sec_title:
+                        section_outline.append(str(sec_title))
+
         uploaded_at = r[4].isoformat() if r[4] else ""
         materials.append(MaterialOut(
             material_id=mid,
@@ -579,6 +668,15 @@ def list_materials(
             analysis_processed=stage_info.get("processed"),
             analysis_total=stage_info.get("total"),
             analysis_error=run.get("error_message") or None,
+            authors=authors,
+            year=year,
+            doc_type=doc_type,
+            analyzed_at=analyzed_at,
+            component_count=(len(component_names) if want_summary else None),
+            top_components=component_names[:6],
+            top_concepts=top_concepts[:6],
+            section_outline=section_outline,
+            has_course=has_course,
         ))
 
     return materials
@@ -2626,6 +2724,8 @@ from routes.revisions import router as _revisions_router  # noqa: E402
 from routes.atlas import router as _atlas_router  # noqa: E402
 from routes.atlas import admin_atlas_router as _admin_atlas_router  # noqa: E402
 from routes.atlas import binding_router as _atlas_binding_router  # noqa: E402
+from routes.doubt import admin_router as _doubt_admin_router  # noqa: E402
+from routes.admin_assistant import admin_router as _admin_assistant_router  # noqa: E402
 
 router.include_router(_lecture_studio_router)
 router.include_router(_theory_components_router)
@@ -2634,3 +2734,5 @@ router.include_router(_revisions_router)
 router.include_router(_atlas_router)
 router.include_router(_admin_atlas_router)
 router.include_router(_atlas_binding_router)
+router.include_router(_doubt_admin_router)
+router.include_router(_admin_assistant_router)

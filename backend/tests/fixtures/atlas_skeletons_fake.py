@@ -85,6 +85,17 @@ class AtlasSkeletonTableFake:
         if "theory_review_events" in sql and sql.startswith("INSERT"):
             self.review_events.append(dict(p))
             return FakeResult(rowcount=1)
+        if "theory_review_events" in sql and "COUNT" in sql:
+            # atlas assist の日次コスト判定 (routes/atlas.py _assist_calls_today)。
+            # 日付フィルタは無視し、当該ユーザーの atlas_assist 行数を返す。
+            uid = str(p.get("uid") or "")
+            n = sum(
+                1
+                for e in self.review_events
+                if e.get("entity_type") == "atlas_assist"
+                and str(e.get("changed_by") or "") == uid
+            )
+            return FakeResult([(n,)])
         if "FROM learning_courses" in sql:
             course = self.courses.get(str(p.get("cid") or p.get("course_id") or ""))
             if not course:

@@ -63,6 +63,17 @@ class MaterialOut(BaseModel):
     analysis_processed: int | None = None
     analysis_total: int | None = None
     analysis_error: str | None = None
+    # --- メタデータ（教材選択UIの情報提示用。documents 列から常時付与）---
+    authors: list[str] = Field(default_factory=list)
+    year: int | None = None
+    doc_type: str | None = None
+    analyzed_at: str | None = None  # パイプライン解析の完了時刻（直近の生成の並び替え用）
+    # --- サマリ（?include=summary 指定時のみ集約。既存テーブルからの読み取りのみ）---
+    component_count: int | None = None
+    top_components: list[str] = Field(default_factory=list)  # 主要 theory component 名
+    top_concepts: list[str] = Field(default_factory=list)  # legacy knowledge_graph 概念名
+    section_outline: list[str] = Field(default_factory=list)  # 文書構造のセクション見出し
+    has_course: bool = False  # 自分がこの教材からコースを作成済みか（コース未作成リスト用）
 
 
 class VisibilityUpdateRequest(BaseModel):
@@ -1065,3 +1076,95 @@ class CourseGroupPermissionUpsertRequest(BaseModel):
     """コースにグループ権限マッピングを追加/更新するリクエスト。"""
     group_id: str
     permission: str = "viewer"  # viewer | editor
+
+
+# ---------------------------------------------------------------------------
+# 横断ユーティリティ層（Admin Copilot, migration 034）
+# ---------------------------------------------------------------------------
+
+class AssistantScreenContext(BaseModel):
+    """フロントの collectScreenContext() が渡す構造化状態（DOM スクレイプではない）。"""
+    tab: str = ""
+    selection: dict = Field(default_factory=dict)
+    visible_entities: list = Field(default_factory=list)
+
+
+class AssistantChatRequest(BaseModel):
+    """POST /api/admin/assistant/chat のリクエスト。"""
+    message: str
+    history: list[dict] = Field(default_factory=list)
+    session_id: str | None = None
+    screen_context: AssistantScreenContext = Field(default_factory=AssistantScreenContext)
+
+
+class AssistantActionPlan(BaseModel):
+    """intent=action のとき返す実行計画（未実行。フロントが §8.2 を叩く）。"""
+    capability_id: str
+    title: str = ""
+    target: dict = Field(default_factory=dict)
+    args: dict = Field(default_factory=dict)
+    reversible: bool = True
+    confirm_required: bool = False
+    supported: bool = True  # 代行 handler が存在するか（P1 段階登録）
+
+
+class AssistantLocateStep(BaseModel):
+    screen: str
+    anchor_id: str
+    hint: str = ""
+    precondition: str | None = None
+
+
+class AssistantLocatePlan(BaseModel):
+    """intent=locate のとき返す点灯手順（§5.3）。DB 非変更・監査対象外。"""
+    capability_id: str
+    steps: list[AssistantLocateStep] = Field(default_factory=list)
+
+
+class AssistantChatResponse(BaseModel):
+    """POST /api/admin/assistant/chat のレスポンス。"""
+    answer: str
+    intent: str                                  # guidance | locate | action | clarify
+    action_plan: AssistantActionPlan | None = None
+    locate_plan: AssistantLocatePlan | None = None
+    next_actions: list[dict] = Field(default_factory=list)
+    citations: list[dict] = Field(default_factory=list)
+    source: str = "heuristic"                     # 分類の由来（llm | heuristic）
+
+
+class AssistantActionRequest(BaseModel):
+    """POST /api/admin/assistant/actions のリクエスト（代行実行）。"""
+    capability_id: str
+    target: dict = Field(default_factory=dict)    # {"type": "...", "id": "..."}
+    args: dict = Field(default_factory=dict)
+    session_id: str | None = None
+    confirm: bool = False                          # reversible=False は True 必須（P2）
+
+
+class AssistantActionResponse(BaseModel):
+    action_id: str
+    status: str                                    # applied | confirm_pending | failed
+    capability_id: str
+    reversible: bool
+    after: dict | None = None
+    message: str = ""
+
+
+class AssistantRevertResponse(BaseModel):
+    action_id: str
+    status: str                                    # reverted
+    restored: dict | None = None
+    message: str = ""
+
+
+class AssistantActionSummary(BaseModel):
+    """GET /api/admin/assistant/actions の 1 行（戻す履歴の復元用）。"""
+    action_id: str
+    capability_id: str
+    screen: str = ""
+    target_type: str = ""
+    target_id: str | None = None
+    reversible: bool = True
+    status: str = "applied"
+    created_at: str = ""
+    reverted_at: str | None = None

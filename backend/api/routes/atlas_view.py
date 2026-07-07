@@ -124,6 +124,24 @@ def _scale(value: float, size: int) -> int:
     return int(round(float(value) * size))
 
 
+def _concept_abs(x: float, y: float, region_layout: dict) -> tuple[float, float]:
+    """骨格概念の領域内相対座標 (0-1) をキャンバス絶対正規化座標へ変換する。
+
+    骨格の ``concept.layout.{x,y}`` は「所属領域ボックス内の相対座標」という規約で、
+    seed の ``atlas/skeleton.yaml`` / ``atlas-fixture.js`` / 教員プレビュー
+    ``atlas-draft-preview.js`` の ``conceptAbs()`` はいずれもこの相対解釈で一致する。
+    L1/L2 の描画・``nodes_list`` はキャンバス絶対座標を前提とするため、ここで領域の
+    offset/size を適用して絶対化する。コーパス概念 (``atlas_placement.layout_in_region``
+    由来) は既に絶対座標なので、この変換は骨格概念 (placement.method == "skeleton")
+    にのみ適用する。
+    """
+    rx = float(region_layout.get("x", 0.0))
+    ry = float(region_layout.get("y", 0.0))
+    rw = float(region_layout.get("w", 1.0))
+    rh = float(region_layout.get("h", 1.0))
+    return rx + x * rw, ry + y * rh
+
+
 @router.get("/runtime-config")
 def atlas_runtime_config() -> dict:
     """フロント (atlas-data.js) のデータソース既定を返す (gap4)。
@@ -243,6 +261,15 @@ def get_atlas(
     concept_region = {
         c.id: r.id for r in skeleton.regions for c in r.concepts
     }
+    # 領域ボックス (キャンバス絶対 0-1)。骨格概念の相対座標を絶対化するのに使う。
+    region_layout_by_id = {
+        r.id: (
+            {"x": r.layout.x, "y": r.layout.y, "w": r.layout.w, "h": r.layout.h}
+            if r.layout is not None
+            else {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+        )
+        for r in skeleton.regions
+    }
     # 概念間エッジ (L2 / 隣接の光の判定に使う)
     concept_edges = [
         (e.from_id, e.to_id)
@@ -294,11 +321,23 @@ def get_atlas(
         if entry_id in glow:
             node_view["glow"] = True
         nodes[entry_id] = node_view
+        # 骨格概念の layout は領域内相対。nodes_list はキャンバス絶対座標を前提と
+        # するため絶対化する (コーパス概念は既に絶対なのでそのまま)。
+        raw_layout = row["layout"] or {}
+        if row.get("placement", {}).get("method") == "skeleton" and raw_layout:
+            ax, ay = _concept_abs(
+                float(raw_layout.get("x", 0.5)),
+                float(raw_layout.get("y", 0.5)),
+                region_layout_by_id.get(row["region_id"], {}),
+            )
+            layout_out = {"x": ax, "y": ay}
+        else:
+            layout_out = raw_layout
         nodes_list.append(
             {
                 "id": entry_id,
                 "label": row["label"],
-                "layout": row["layout"],
+                "layout": layout_out,
                 "status": display_status,
                 "ledger_status": ledger_status,
                 "region_id": row["region_id"],
@@ -367,12 +406,14 @@ def get_atlas(
             for concept in region.concepts:
                 if concept.layout is None or concept.id not in node_rows:
                     continue
+                # 骨格概念の layout は領域内相対 → 領域 box を適用して絶対化する
+                ax, ay = _concept_abs(concept.layout.x, concept.layout.y, layout)
                 l1_nodes.append(
                     {
                         "id": concept.id,
                         "region": region.id,
-                        "x": _scale(concept.layout.x, w1),
-                        "y": _scale(concept.layout.y, h1),
+                        "x": _scale(ax, w1),
+                        "y": _scale(ay, h1),
                     }
                 )
 
@@ -390,14 +431,17 @@ def get_atlas(
     l2_nodes = []
     skeleton_concept_ids = set(concept_region.keys())
     for region in skeleton.regions:
+        region_layout = region_layout_by_id.get(region.id, {})
         for concept in region.concepts:
             if concept.layout is None or concept.id not in node_rows:
                 continue
+            # 骨格概念の layout は領域内相対 → 領域 box を適用して絶対化する
+            ax, ay = _concept_abs(concept.layout.x, concept.layout.y, region_layout)
             l2_nodes.append(
                 {
                     "id": concept.id,
-                    "x": _scale(concept.layout.x, w2),
-                    "y": _scale(concept.layout.y, h2),
+                    "x": _scale(ax, w2),
+                    "y": _scale(ay, h2),
                 }
             )
     # 配置済みコーパス概念 (E-2)。上限 §13 (L2 ≤ 20)。骨格を優先し、

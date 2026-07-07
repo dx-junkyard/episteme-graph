@@ -446,3 +446,192 @@ class TestCourseAtlasBinding:
         )
         assert resp.status_code == 200
         assert "cartridge_id" not in skeleton_db.courses["c1"]["data"]
+
+
+@_skip_no_fastapi
+class TestAtlasAssistEditing:
+    """skeleton editor upgrade P3/P4: AIアシスト編集 (interpret / propose)。
+
+    LLM は monkeypatch でスタブ化する (対象特定・編集生成の高次判断は本テストの対象外)。
+    """
+
+    def _seed_draft(self, client, teacher_headers):
+        resp = client.put(
+            "/api/admin/cartridges/particle_physics/atlas/skeleton/draft",
+            headers=teacher_headers,
+            json={"skeleton": _sample_draft_dict()},
+        )
+        assert resp.status_code == 200, resp.text
+        return resp.json()["draft"]["revision"]
+
+    def _stub_interpret(self, monkeypatch, **overrides):
+        import core.atlas_generator as gen
+
+        interp = gen.SkeletonInterpretation(
+            is_continuation=overrides.get("is_continuation", False),
+            continuation_of=None,
+            target=gen.InterpretedTarget(
+                kind=overrides.get("kind", "concept"),
+                concept_id=overrides.get("concept_id", "concept_a"),
+                region_id="region_a",
+                label_snapshot="概念A",
+            ),
+            requested_change="ラベルを教科書用語に揃える",
+            ambiguous=overrides.get("ambiguous", False),
+            clarifying_question=overrides.get("clarifying_question"),
+            confidence=0.8,
+        )
+        monkeypatch.setattr(gen, "interpret_skeleton_instruction", lambda *a, **k: interp)
+
+    def _stub_propose(self, monkeypatch):
+        import core.atlas_generator as gen
+
+        proposal = gen.SkeletonEditProposal(
+            summary="概念Aのラベルを更新",
+            patch=[
+                gen.PatchOp(
+                    op="replace",
+                    path="/regions/0/concepts/0/label",
+                    value_json='"概念A（改）"',
+                    before="概念A",
+                    after="概念A（改）",
+                )
+            ],
+        )
+        monkeypatch.setattr(gen, "propose_skeleton_edit", lambda *a, **k: proposal)
+
+    def test_interpret_requires_teacher(self, client, student_headers, sandbox_cartridges):
+        resp = client.post(
+            "/api/admin/cartridges/particle_physics/atlas/skeleton/assist/interpret",
+            headers=student_headers,
+            json={"message": "直して"},
+        )
+        assert resp.status_code == 403
+
+    def test_interpret_without_draft_is_404(self, client, teacher_headers, sandbox_cartridges):
+        resp = client.post(
+            "/api/admin/cartridges/particle_physics/atlas/skeleton/assist/interpret",
+            headers=teacher_headers,
+            json={"message": "直して"},
+        )
+        assert resp.status_code == 404
+
+    def test_interpret_returns_interpretation_and_audits(
+        self, client, teacher_headers, sandbox_cartridges, skeleton_db, monkeypatch
+    ):
+        rev = self._seed_draft(client, teacher_headers)
+        self._stub_interpret(monkeypatch)
+        resp = client.post(
+            "/api/admin/cartridges/particle_physics/atlas/skeleton/assist/interpret",
+            headers=teacher_headers,
+            json={"message": "この概念のラベルを揃えて", "revision": rev},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["interpretation"]["target"]["concept_id"] == "concept_a"
+        assert body["interpretation"]["ambiguous"] is False
+        # 呼び出しが監査記録される (帰属必須)
+        assert any(e.get("entity_type") == "atlas_assist" for e in skeleton_db.review_events)
+
+    def test_interpret_stale_revision_is_409(
+        self, client, teacher_headers, sandbox_cartridges, monkeypatch
+    ):
+        self._seed_draft(client, teacher_headers)
+        self._stub_interpret(monkeypatch)
+        resp = client.post(
+            "/api/admin/cartridges/particle_physics/atlas/skeleton/assist/interpret",
+            headers=teacher_headers,
+            json={"message": "直して", "revision": 999},
+        )
+        assert resp.status_code == 409
+
+    def test_propose_returns_patch_and_valid_result(
+        self, client, teacher_headers, sandbox_cartridges, monkeypatch
+    ):
+        rev = self._seed_draft(client, teacher_headers)
+        self._stub_propose(monkeypatch)
+        confirmed = {
+            "target": {"kind": "concept", "concept_id": "concept_a"},
+            "requested_change": "ラベルを揃える",
+        }
+        resp = client.post(
+            "/api/admin/cartridges/particle_physics/atlas/skeleton/assist/propose",
+            headers=teacher_headers,
+            json={"confirmed_interpretation": confirmed, "revision": rev},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["proposal"]["patch"][0]["op"] == "replace"
+        # 提案適用後の骨格が返り、検証エラーはない (適用可能)
+        assert body["result_skeleton"] is not None
+        assert body["result_skeleton"]["regions"][0]["concepts"][0]["label"] == "概念A（改）"
+        assert body["validation"]["errors"] == []
+
+    def test_propose_does_not_persist_draft(
+        self, client, teacher_headers, sandbox_cartridges, skeleton_db, monkeypatch
+    ):
+        rev = self._seed_draft(client, teacher_headers)
+        self._stub_propose(monkeypatch)
+        client.post(
+            "/api/admin/cartridges/particle_physics/atlas/skeleton/assist/propose",
+            headers=teacher_headers,
+            json={"confirmed_interpretation": {"target": {"kind": "concept"}}, "revision": rev},
+        )
+        # propose は draft を書き換えない (AIが直接確定させない)。ラベルは元のまま
+        draft = next(r for r in skeleton_db.skeleton_rows if r["status"] == "draft")
+        content = draft["content"]
+        inner = content.get("atlas_skeleton", content)
+        label = inner["regions"][0]["concepts"][0]["label"]
+        assert label == "概念A"
+
+    def test_inapplicable_patch_is_presented_without_result(
+        self, client, teacher_headers, sandbox_cartridges, monkeypatch
+    ):
+        """LLM が不正な path を返しても 500 にせず「提案は返すが適用不可」で返す。"""
+        import core.atlas_generator as gen
+
+        rev = self._seed_draft(client, teacher_headers)
+        proposal = gen.SkeletonEditProposal(
+            summary="存在しない概念のラベルを更新",
+            patch=[
+                gen.PatchOp(
+                    op="replace",
+                    path="/regions/0/concepts/9/label",  # 範囲外インデックス
+                    value_json='"新ラベル"',
+                )
+            ],
+        )
+        monkeypatch.setattr(gen, "propose_skeleton_edit", lambda *a, **k: proposal)
+        resp = client.post(
+            "/api/admin/cartridges/particle_physics/atlas/skeleton/assist/propose",
+            headers=teacher_headers,
+            json={"confirmed_interpretation": {"target": {"kind": "concept"}}, "revision": rev},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["result_skeleton"] is None
+        assert body["validation"]["errors"]
+        assert "適用できません" in body["validation"]["errors"][0]["message"]
+
+    def test_daily_cost_limit_returns_429(
+        self, client, teacher_headers, sandbox_cartridges, monkeypatch
+    ):
+        """ATLAS_ASSIST_MAX_CALLS_PER_DAY 超過で 429 (interpret/propose 合算)。"""
+        from core.config import get_settings
+
+        self._seed_draft(client, teacher_headers)
+        self._stub_interpret(monkeypatch)
+        monkeypatch.setattr(get_settings(), "atlas_assist_max_calls_per_day", 1, raising=False)
+
+        first = client.post(
+            "/api/admin/cartridges/particle_physics/atlas/skeleton/assist/interpret",
+            headers=teacher_headers,
+            json={"message": "直して"},
+        )
+        assert first.status_code == 200, first.text
+        second = client.post(
+            "/api/admin/cartridges/particle_physics/atlas/skeleton/assist/interpret",
+            headers=teacher_headers,
+            json={"message": "もう一度"},
+        )
+        assert second.status_code == 429

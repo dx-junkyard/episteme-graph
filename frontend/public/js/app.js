@@ -1041,10 +1041,36 @@
           (e.title ? '<div style="font-weight:600">' + escHtml(e.title) + '</div>' : "") +
           '<div class="material-chunk-text">' + escHtml(e.body || "") + '</div></div>';
       }).join("");
+      // D層 (D3-6): 台帳の正直表示 — 検証状態を一行の事実として静かに併記
+      appendLearnerLedgerLine(body, "component", componentId);
     } catch (_) {
       const b = pop.querySelector(".src-popup-body");
       if (b) b.textContent = "サーバーに接続できません。";
     }
+  }
+
+  // D層 (D3-6): 対象 claim/equation/component の検証状態の一行事実文を併記する。
+  // 台帳未記帳 (404)・取得失敗時はセクション自体を出さない（fail-closed）。
+  // 検証済みスコープも未記帳も同じ精度で示す（§8-1・8-2 — 不安を煽らない中立文言）。
+  async function appendLearnerLedgerLine(container, targetType, targetId) {
+    if (!container || !targetId || !state.courseId) return;
+    try {
+      const res = await apiFetch("/learning/courses/" + state.courseId +
+        "/ledger/" + encodeURIComponent(targetType) + "/" + encodeURIComponent(targetId));
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data || !data.fact_line) return;
+      var text = data.fact_line;
+      var axes = (data.scopes || []).map(function (s) {
+        return [s.condition, s.domain, s.precision, s.system].filter(Boolean).join(" / ");
+      }).filter(Boolean);
+      if (axes.length > 1) text += "（記帳スコープ: " + axes.join("；") + "）";
+      var div = document.createElement("div");
+      div.style.cssText = "margin-top:8px;padding-top:6px;border-top:1px dashed var(--color-border,#ddd);" +
+        "font-size:12px;color:var(--color-text-secondary,#64748b)";
+      div.textContent = text;
+      container.appendChild(div);
+    } catch (_) { /* fail-closed */ }
   }
 
   // ── 分野の地図: 学習パス提案カード (Issue C-3, 仕様書 §8) ─────────────
@@ -1562,13 +1588,34 @@
   // 帰属を本人が確定/訂正する（doubtType は任意。空なら候補のまま確定）。
   async function confirmAnchor(traceId, doubtType) {
     try {
-      await apiFetch(
+      var res = await apiFetch(
         "/learning/anchors/" + encodeURIComponent(traceId) + "/confirm",
         { method: "POST", body: JSON.stringify({ doubt_type: doubtType || "" }) }
       );
+      // D層 (D3-6): 確定した anchor が分野で明示化済みの前提に対応していれば、
+      // 事後に静かに併記する（通知・ポップアップにしない。帰属事実のみ）。
+      if (res && res.ok) {
+        var data = await res.json();
+        var related = data && data.related_assumption;
+        if (related && related.statement) {
+          appendSystemNote(
+            "この問いは、分野で明示化されている前提「" + related.statement + "」に関わっています。"
+          );
+        }
+      }
     } catch (_) { /* best-effort */ }
     await loadAnchorDigest();
     loadInterestTraces();  // 確定した帰属は問いの軌跡のチップに現れる
+  }
+
+  // D層 (D3-6): チャット欄の末尾に静かな注記を 1 行足す（割り込み要素ゼロ）。
+  function appendSystemNote(text) {
+    var messages = document.getElementById("chat-area");
+    if (!messages || !text) return;
+    var div = document.createElement("div");
+    div.style.cssText = "font-size:12px;color:var(--color-text-tertiary,#94a3b8);margin:6px 12px";
+    div.textContent = text;
+    messages.appendChild(div);
   }
 
   async function dismissAnchor(traceId) {
@@ -1749,7 +1796,46 @@
       html += "</div>";
     }
 
+    // D層 (D3-6): 未検証合意リストの閲覧（プル型・読み取り専用。開いた人だけが見る）
+    html += '<details class="ps" id="lx-open-assumptions"><summary style="cursor:pointer;font-size:12.5px;' +
+      'color:var(--color-text-secondary)">この分野の未検証の前提を見る</summary>' +
+      '<div id="lx-open-assumptions-body" style="font-size:12px;margin-top:6px">' +
+      '<span style="color:var(--color-text-tertiary)">開くと読み込みます…</span></div></details>';
+
     el.innerHTML = html;
+
+    var openDetails = el.querySelector("#lx-open-assumptions");
+    if (openDetails) {
+      openDetails.addEventListener("toggle", function () {
+        if (openDetails.open) loadLearnerOpenAssumptions();
+      });
+    }
+  }
+
+  // D層 (D3-6): 未検証合意リスト（読み取り専用・台帳の投影）。
+  // 台帳未記帳のコースでは何も出ない（fail-closed: セクションを畳んだまま空表示）。
+  async function loadLearnerOpenAssumptions() {
+    var body = document.getElementById("lx-open-assumptions-body");
+    if (!body || !state.courseId) return;
+    try {
+      const res = await apiFetch("/learning/courses/" + state.courseId + "/open-assumptions");
+      if (!res.ok) { body.textContent = "現在、表示できる項目はありません。"; return; }
+      const data = await res.json();
+      const items = (data && data.items) || [];
+      if (!items.length) { body.textContent = "現在、表示できる項目はありません。"; return; }
+      body.innerHTML = items.map(function (item) {
+        var line = escHtml(item.statement || item.target_id);
+        var meta = [];
+        if (item.scope_count_is_zero) meta.push("検証スコープの記帳なし");
+        else meta.push("検証: 記帳あり");
+        if (item.has_verification_proposal) meta.push("検証提案あり");
+        return '<div style="padding:6px 0;border-bottom:1px dashed var(--color-border,#eee)">' + line +
+          '<div style="color:var(--color-text-tertiary);font-size:11px;margin-top:2px">' +
+          escHtml(meta.join(" ・ ")) + '</div></div>';
+      }).join("");
+    } catch (_) {
+      body.textContent = "現在、表示できる項目はありません。";
+    }
   }
 
   // 全体格バナー用の小アイコン（tier色の丸＋!）。

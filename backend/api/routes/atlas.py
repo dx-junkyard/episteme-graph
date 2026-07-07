@@ -145,7 +145,15 @@ def _skeleton_payload(skeleton: atlas.AtlasSkeleton | None) -> dict[str, Any] | 
     report = atlas.validate_skeleton(skeleton)
     return {
         "skeleton": atlas.skeleton_to_dict(skeleton)["atlas_skeleton"],
-        "validation": {"errors": list(report.errors), "warnings": list(report.warnings)},
+        "validation": {
+            # errors/warnings は後方互換のためメッセージ文字列のまま返す。
+            # *_issues は骨格エディタのインラインハイライト用に region_id/concept_id
+            # /edge を機械可読で載せる (P2)。
+            "errors": list(report.errors),
+            "warnings": list(report.warnings),
+            "error_issues": [atlas.issue_to_dict(e) for e in report.errors],
+            "warning_issues": [atlas.issue_to_dict(w) for w in report.warnings],
+        },
     }
 
 
@@ -178,6 +186,31 @@ class FreezeSkeletonRequest(BaseModel):
     version: str = Field(description="凍結版の版数 (例: 2026.1)")
     note: str = Field(default="", description="changelog に残すメモ")
     credits: list[str] = Field(default_factory=list, description="修正報告者などの帰属")
+
+
+class AssistInterpretRequest(BaseModel):
+    """§4.2 意図解釈ステップ。まだ骨格を変更しない。"""
+
+    message: str = Field(description="教員の発言")
+    revision: int | None = Field(
+        default=None, description="会話の基準にした draft revision (楽観ロック・古ければ 409)"
+    )
+    history: list[dict] = Field(
+        default_factory=list,
+        description="[{role: teacher|agent, content, resolved_target?}] のチャット履歴",
+    )
+    selection_hint: dict | None = Field(
+        default=None, description="直前にクリックしたノード {region_id?, concept_id?}"
+    )
+
+
+class AssistProposeRequest(BaseModel):
+    """§4.3 差分提案ステップ。確定済みの解釈から編集案を生成する (再解釈しない)。"""
+
+    confirmed_interpretation: dict = Field(description="§4.2 で教員が確定した interpretation")
+    revision: int | None = Field(
+        default=None, description="基準にした draft revision (古ければ 409)"
+    )
 
 
 class SaveAtlasBindingRequest(BaseModel):
@@ -347,7 +380,11 @@ def save_atlas_skeleton_draft(
         if not report.ok:
             raise HTTPException(
                 status_code=422,
-                detail={"message": "骨格がスキーマに適合しません", "errors": list(report.errors)},
+                detail={
+                    "message": "骨格がスキーマに適合しません",
+                    "errors": list(report.errors),
+                    "error_issues": [atlas.issue_to_dict(e) for e in report.errors],
+                },
             )
         revision = atlas_store.save_draft(
             session,
@@ -501,6 +538,176 @@ def freeze_atlas_skeleton(
         },
     )
     return {"cartridge_id": cartridge_id, "frozen": _skeleton_payload(frozen)}
+
+
+# ---------------------------------------------------------------------------
+# AIアシスト編集 (skeleton editor upgrade P3/P4) — interpret / propose
+#
+# - どちらも draft を書き換えない。interpret は解釈のみ、propose は JSON Patch 案のみ返す。
+# - コスト上限は theory_review_events の当日 assist 呼び出し数で判定する
+#   (専用カウンタテーブルを持たない — D層 KPI と同じ思想)。呼び出し自体も監査記録する。
+# - revision が現行 draft とズレていれば 409 (会話が古い draft に基づくため再読込を促す。§4.1)。
+# ---------------------------------------------------------------------------
+
+
+def _assist_calls_today(session, user_id: str) -> int:
+    from sqlalchemy import text as sa_text
+
+    row = session.execute(
+        sa_text(
+            """
+            SELECT COUNT(*) FROM theory_review_events
+             WHERE entity_type = 'atlas_assist'
+               AND changed_by = CAST(:uid AS uuid)
+               AND created_at >= date_trunc('day', now())
+            """
+        ),
+        {"uid": user_id or None},
+    ).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def _load_assist_draft(cartridge_id: str, revision: int | None) -> tuple[dict, int]:
+    """assist 用に現行 draft を取得し (atlas_skeleton dict, revision) を返す。
+
+    draft 無しは 404、revision がズレていれば 409 (会話が古い draft に基づく)。
+    """
+    session = _skeleton_session()
+    try:
+        draft_row = atlas_store.load_draft(session, cartridge_id)
+    finally:
+        session.close()
+    if draft_row is None:
+        raise HTTPException(status_code=404, detail="編集対象の draft がありません")
+    current_revision = draft_row["revision"]
+    if revision is not None and revision != current_revision:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "draft が更新されています。最新を読み込み直してから続けてください",
+                "current_revision": current_revision,
+            },
+        )
+    skeleton_dict = atlas.skeleton_to_dict(draft_row["skeleton"])["atlas_skeleton"]
+    return skeleton_dict, current_revision
+
+
+def _guard_assist_cost(user_id: str) -> None:
+    from core.config import get_settings
+
+    limit = get_settings().atlas_assist_max_calls_per_day
+    session = _skeleton_session()
+    try:
+        used = _assist_calls_today(session, user_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("atlas assist cost check failed", exc_info=True)
+        return
+    finally:
+        session.close()
+    if used >= limit:
+        raise HTTPException(
+            status_code=429,
+            detail=f"本日の AI アシスト編集の上限 ({limit} 回) に達しました。明日以降に再開してください",
+        )
+
+
+@router.post("/{cartridge_id}/atlas/skeleton/assist/interpret")
+def assist_interpret(
+    cartridge_id: str,
+    body: AssistInterpretRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """§4.2: 教員の発言を対象・要望・継続性に解釈する (まだ編集しない)。"""
+    if not (body.message or "").strip():
+        raise HTTPException(status_code=422, detail="発言が空です")
+    user_id = str(current_user.get("id") or "").strip()
+    _guard_assist_cost(user_id)
+    skeleton_dict, revision = _load_assist_draft(cartridge_id, body.revision)
+
+    from core.atlas_generator import interpret_skeleton_instruction
+
+    try:
+        interpretation = interpret_skeleton_instruction(
+            skeleton_dict,
+            body.message,
+            history=body.history,
+            selection_hint=body.selection_hint,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("atlas assist interpret failed", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"意図解釈に失敗しました: {exc}") from exc
+
+    _record_review_event(
+        cartridge_id, atlas.STATUS_DRAFT, atlas.STATUS_DRAFT, current_user.get("id"),
+        {"action": "assist_interpret", "revision": revision},
+        entity_type="atlas_assist",
+    )
+    return {
+        "cartridge_id": cartridge_id,
+        "revision": revision,
+        "interpretation": interpretation.model_dump(),
+    }
+
+
+@router.post("/{cartridge_id}/atlas/skeleton/assist/propose")
+def assist_propose(
+    cartridge_id: str,
+    body: AssistProposeRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """§4.3: 確定済み解釈から編集案 (JSON Patch) を生成して返す (draft は書き換えない)。"""
+    if not body.confirmed_interpretation:
+        raise HTTPException(status_code=422, detail="confirmed_interpretation が空です")
+    user_id = str(current_user.get("id") or "").strip()
+    _guard_assist_cost(user_id)
+    skeleton_dict, revision = _load_assist_draft(cartridge_id, body.revision)
+
+    from core.atlas_generator import (
+        PatchApplyError,
+        apply_json_patch,
+        propose_skeleton_edit,
+    )
+
+    try:
+        proposal = propose_skeleton_edit(skeleton_dict, body.confirmed_interpretation)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("atlas assist propose failed", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"編集案の生成に失敗しました: {exc}") from exc
+
+    patch = [op.model_dump() for op in proposal.patch]
+    result_skeleton: dict | None = None
+    val_errors: list[dict] = []
+    val_warnings: list[dict] = []
+    try:
+        result_skeleton = apply_json_patch(skeleton_dict, patch)
+    except PatchApplyError as exc:
+        # patch が適用不能: 提案は返すが適用ボタンは出さない (result_skeleton=None)
+        val_errors.append({"message": f"提案パッチを適用できませんでした: {exc}"})
+
+    if result_skeleton is not None:
+        try:
+            parsed = atlas.parse_skeleton(result_skeleton)
+            report = atlas.validate_skeleton(parsed)
+            val_errors.extend(atlas.issue_to_dict(e) for e in report.errors)
+            val_warnings.extend(atlas.issue_to_dict(w) for w in report.warnings)
+        except atlas.SkeletonParseError as exc:
+            result_skeleton = None
+            val_errors.append({"message": f"提案適用後の骨格が壊れています: {exc}"})
+
+    _record_review_event(
+        cartridge_id, atlas.STATUS_DRAFT, atlas.STATUS_DRAFT, current_user.get("id"),
+        {"action": "assist_propose", "revision": revision, "ops": len(patch)},
+        entity_type="atlas_assist",
+    )
+    return {
+        "cartridge_id": cartridge_id,
+        "revision": revision,
+        "proposal": {"summary": proposal.summary, "patch": patch},
+        # 教員が「適用」で PUT する前提のプレビュー用。検証エラーがあっても提示はする
+        # (最終的に PUT の 422 で二重チェックされる。§4.3)
+        "result_skeleton": result_skeleton,
+        "validation": {"errors": val_errors, "warnings": val_warnings},
+    }
 
 
 # ---------------------------------------------------------------------------

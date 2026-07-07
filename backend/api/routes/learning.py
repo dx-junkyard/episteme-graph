@@ -2005,6 +2005,24 @@ def confirm_anchor_route(
     )
     if result is None:
         raise HTTPException(status_code=404, detail="Anchor trace not found")
+    # D層 (D3-6): 確定した anchor が分野で明示化済みの前提に対応していれば、
+    # 事後に静かに併記する（通知しない・押し付けない。best-effort、失敗は無視）。
+    try:
+        from core.doubt.open_assumptions import related_confirmed_assumption
+        from core.postgres import get_session as _doubt_session
+
+        anchor = result.get("structure_anchor") or {}
+        anchor_id = str(anchor.get("anchor_id") or "")
+        if anchor_id:
+            _ds = _doubt_session()
+            try:
+                related = related_confirmed_assumption(_ds, anchor_id)
+            finally:
+                _ds.close()
+            if related:
+                result["related_assumption"] = related
+    except Exception:
+        logger.debug("related assumption lookup skipped", exc_info=True)
     return {"ok": True, **result}
 
 

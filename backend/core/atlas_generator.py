@@ -13,9 +13,12 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import logging
 import re
 import uuid
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -280,3 +283,283 @@ def generate_skeleton_draft(
         cartridge_id=cartridge_id,
         generated_by=f"model:{model_name} batch:{batch}",
     )
+
+
+# ---------------------------------------------------------------------------
+# AIアシスト編集 (skeleton editor upgrade P3/P4)
+#
+# 全体再生成 (generate_skeleton_draft) とは別に、draft の一部分を対話で修正する。
+# 責務を「対象特定 (interpret)」と「編集内容生成 (propose)」の 2 関数に分離し、
+# prompt を混ぜない (§4.3)。どちらも draft を書き換えない — propose は JSON Patch
+# 案を返すだけで、確定は教員が admin UI の「適用」で PUT を経由して行う。
+# ---------------------------------------------------------------------------
+
+
+class InterpretedTarget(BaseModel):
+    kind: str = Field(
+        description="対象種別: region / concept / edge / region_set / unresolved"
+    )
+    region_id: str | None = Field(default=None, description="対象領域ID (kind=region)")
+    concept_id: str | None = Field(default=None, description="対象概念ID (kind=concept)")
+    edge_from: str | None = Field(default=None, description="対象エッジの始点ID (kind=edge)")
+    edge_to: str | None = Field(default=None, description="対象エッジの終点ID (kind=edge)")
+    region_ids: list[str] = Field(
+        default_factory=list, description="対象領域IDの集合 (kind=region_set)"
+    )
+    label_snapshot: str | None = Field(
+        default=None, description="特定時点での対象ラベル (教員確認用)"
+    )
+
+
+class SkeletonInterpretation(BaseModel):
+    is_continuation: bool = Field(description="直前のやりとりの続きと判断したか")
+    continuation_of: str | None = Field(
+        default=None, description="history 中のどの発言を継続対象と見たか (turn id)"
+    )
+    target: InterpretedTarget = Field(description="今回の発言が指す対象")
+    requested_change: str = Field(description="要望の言い直し (教員に見せる人間可読な要約)")
+    ambiguous: bool = Field(description="対象・要望が曖昧で確認が必要か")
+    clarifying_question: str | None = Field(
+        default=None, description="ambiguous=true のとき教員に返す問い返し"
+    )
+    confidence: float = Field(description="解釈の確信度 0.0-1.0")
+
+
+class PatchOp(BaseModel):
+    op: str = Field(description="JSON Patch 操作: replace / add / remove")
+    path: str = Field(
+        description="RFC 6901 JSON Pointer。atlas_skeleton 直下からのパス "
+        "(例: /regions/0/concepts/2/label)。配列末尾追加は /-"
+    )
+    value_json: str | None = Field(
+        default=None,
+        description="replace / add の新しい値を JSON 文字列で。ラベルなら \"\\\"新ラベル\\\"\"、"
+        "概念オブジェクトなら {\"id\":...} を JSON エンコードした文字列",
+    )
+    before: str | None = Field(default=None, description="変更前の人間可読な値 (diff 表示用)")
+    after: str | None = Field(default=None, description="変更後の人間可読な値 (diff 表示用)")
+
+
+class SkeletonEditProposal(BaseModel):
+    summary: str = Field(description="この編集案の一言サマリ (教員向け)")
+    patch: list[PatchOp] = Field(default_factory=list, description="JSON Patch 操作の並び")
+
+
+def _skeleton_outline(skeleton: dict) -> str:
+    """LLM に渡す骨格の要約 (id とラベルのみ。座標や来歴は出さない)。"""
+    lines: list[str] = []
+    for region in skeleton.get("regions") or []:
+        lines.append(f"- region [{region.get('id')}] \"{region.get('label')}\"")
+        for concept in region.get("concepts") or []:
+            seed = (concept.get("seed_status") or {}).get("value") or "-"
+            lines.append(
+                f"    - concept [{concept.get('id')}] \"{concept.get('label')}\" (seed={seed})"
+            )
+    edges = skeleton.get("edges") or []
+    if edges:
+        lines.append("edges:")
+        for e in edges:
+            lines.append(f"    - {e.get('from')} --{e.get('kind')}--> {e.get('to')}")
+    return "\n".join(lines)
+
+
+def _assist_model(model: str | None) -> str:
+    settings = get_settings()
+    return model or settings.atlas_assist_llm_model or settings.llm_analysis_model
+
+
+def interpret_skeleton_instruction(
+    skeleton: dict,
+    message: str,
+    history: list[dict] | None = None,
+    selection_hint: dict | None = None,
+    *,
+    model: str | None = None,
+) -> SkeletonInterpretation:
+    """教員の自由文を「対象・要望・継続性」に解釈する (まだ編集しない。§4.2)。
+
+    - skeleton: atlas_skeleton 相当の dict (regions/edges/...)
+    - history: [{role: teacher|agent, content, resolved_target?}] のチャット履歴
+    - selection_hint: 直前にクリックしたノード {region_id?, concept_id?} — ヒントであり強制ではない
+    """
+    from core.llm import generate_text_with_structured_output
+
+    outline = _skeleton_outline(skeleton)
+    history_lines: list[str] = []
+    for i, turn in enumerate(history or []):
+        role = "教員" if str(turn.get("role")) == "teacher" else "AI"
+        rt = turn.get("resolved_target")
+        rt_str = f" (対象: {json.dumps(rt, ensure_ascii=False)})" if rt else ""
+        history_lines.append(f"[turn_{i}] {role}: {turn.get('content')}{rt_str}")
+    history_block = "\n".join(history_lines) or "(履歴なし)"
+    hint_block = (
+        json.dumps(selection_hint, ensure_ascii=False)
+        if selection_hint
+        else "(なし)"
+    )
+
+    prompt = (
+        "あなたは分野の地図の骨格を教員と一緒に編集するアシスタントです。"
+        "教員の発言を実行に移す前に、まず『何を・どう変えたいか』を解釈して確認します。\n"
+        "この段階では骨格を一切変更しません。対象の特定と要望の言い直しだけを行ってください。\n\n"
+        f"# 現在の骨格 (id とラベル)\n{outline}\n\n"
+        f"# これまでの会話\n{history_block}\n\n"
+        f"# 直前にクリックしたノード (ヒント。強制ではない)\n{hint_block}\n\n"
+        f"# 教員の今回の発言\n{message}\n\n"
+        "# 指示\n"
+        "- 発言が指す対象 (region / concept / edge / 複数領域=region_set) を、上記の id から特定する。"
+        "id が特定できないときは kind=unresolved とする。\n"
+        "- 指示語 (『さっきの』『そっちの』『同様に』等) や継続の言及があれば is_continuation=true とし、"
+        "history 中の該当 turn を continuation_of に入れる。新しい話題なら is_continuation=false。\n"
+        "- クリックヒントと発言内容が矛盾する場合、勝手に決めず ambiguous=true にして clarifying_question で問い返す。\n"
+        "- requested_change には要望を教員が確認できる短い日本語で言い直す (まだ実行はしない)。\n"
+        "- 断定を避ける。少しでも対象が曖昧なら ambiguous=true とし clarifying_question を必ず書く。\n"
+        "- label_snapshot には特定した対象の現在のラベルを入れる。"
+    )
+    return generate_text_with_structured_output(
+        messages=[{"role": "user", "content": prompt}],
+        response_format=SkeletonInterpretation,
+        model=_assist_model(model),
+    )
+
+
+def propose_skeleton_edit(
+    skeleton: dict,
+    interpretation: dict,
+    *,
+    model: str | None = None,
+) -> SkeletonEditProposal:
+    """確定済みの解釈から実際の編集案 (JSON Patch) を生成する (§4.3)。
+
+    interpretation は §4.2 で教員が確認・確定した SkeletonInterpretation の dict。
+    ここでは再解釈せず、確定した対象・要望に沿って最小の patch を作る。
+    """
+    from core.llm import generate_text_with_structured_output
+
+    outline = _skeleton_outline(skeleton)
+    interp_block = json.dumps(interpretation, ensure_ascii=False, indent=2)
+    prompt = (
+        "あなたは分野の地図の骨格を編集するアシスタントです。"
+        "教員が確認・確定した解釈に沿って、骨格 (atlas_skeleton) への最小の編集案を "
+        "JSON Patch (RFC 6902) で作ってください。\n\n"
+        f"# 現在の骨格 (id とラベル)\n{outline}\n\n"
+        f"# 確定済みの解釈 (この対象・要望に忠実に。再解釈しない)\n{interp_block}\n\n"
+        "# 骨格 JSON の構造\n"
+        "{ regions: [ { id, label, layout:{x,y,w,h}, "
+        "concepts:[ { id, label, layout:{x,y}, seed_status:{value,reviewed} } ] } ], "
+        "edges:[ { from, to, kind } ] }\n\n"
+        "# 指示\n"
+        "- path は atlas_skeleton 直下からの JSON Pointer (例 /regions/0/concepts/2/label)。\n"
+        "- 値の変更は op=replace。value_json には新しい値を JSON 文字列で入れる "
+        "(ラベル変更なら value_json=\"\\\"新ラベル\\\"\")。\n"
+        "- 概念やエッジの追加は op=add。配列末尾は path 末尾を /- にする。value_json に完全なオブジェクトを入れる。\n"
+        "- 削除は op=remove。\n"
+        "- id は原則変更しない (版を跨いで不変。§16-4)。ラベルや配置・seed_status の調整に留める。\n"
+        "- 要望と無関係な箇所は変更しない。最小の patch にする。\n"
+        "- before / after に変更前後の値を人間可読な文字列で入れる (教員の diff 確認用)。\n"
+        "- summary に編集案の一言サマリを日本語で書く。"
+    )
+    return generate_text_with_structured_output(
+        messages=[{"role": "user", "content": prompt}],
+        response_format=SkeletonEditProposal,
+        model=_assist_model(model),
+    )
+
+
+# ---------------------------------------------------------------------------
+# JSON Patch (RFC 6902) の最小適用器 — 依存を増やさず replace/add/remove を扱う
+# ---------------------------------------------------------------------------
+
+
+class PatchApplyError(ValueError):
+    pass
+
+
+def _unescape_token(token: str) -> str:
+    return token.replace("~1", "/").replace("~0", "~")
+
+
+def _resolve_parent(doc: Any, path: str):
+    """JSON Pointer の親コンテナと末尾トークンを返す。"""
+    if not path.startswith("/"):
+        raise PatchApplyError(f"path は / で始まる必要があります: {path!r}")
+    tokens = [_unescape_token(t) for t in path.split("/")[1:]]
+    if not tokens:
+        raise PatchApplyError("空の path は編集できません")
+    parent = doc
+    for token in tokens[:-1]:
+        if isinstance(parent, list):
+            try:
+                parent = parent[int(token)]
+            except (ValueError, IndexError) as exc:
+                raise PatchApplyError(f"配列インデックス不正: {path!r}") from exc
+        elif isinstance(parent, dict):
+            if token not in parent:
+                raise PatchApplyError(f"path が存在しません: {path!r}")
+            parent = parent[token]
+        else:
+            raise PatchApplyError(f"path をたどれません: {path!r}")
+    return parent, tokens[-1]
+
+
+def _list_index(parent: list, token: str, path: str, *, for_insert: bool = False) -> int:
+    """末尾トークンを配列インデックスとして解決する。不正は PatchApplyError。"""
+    try:
+        idx = int(token)
+    except (ValueError, TypeError) as exc:
+        raise PatchApplyError(f"配列インデックスが数値ではありません: {path!r}") from exc
+    limit = len(parent) + (1 if for_insert else 0)
+    if idx < 0 or idx >= limit:
+        raise PatchApplyError(f"配列インデックスが範囲外です: {path!r}")
+    return idx
+
+
+def apply_json_patch(skeleton: dict, patch: list[dict]) -> dict:
+    """atlas_skeleton dict に JSON Patch を適用した新しい dict を返す (非破壊)。
+
+    対応 op: replace / add / remove。value は各 op の value_json を json.loads した値。
+    LLM 由来の patch を教員承認前に適用してプレビュー・検証するために使う。
+    LLM 生成の path は信用できないため、不正はすべて PatchApplyError に正規化する
+    (呼び出し側が「提案は返すが適用不可」として扱えるように)。
+    """
+    doc = copy.deepcopy(skeleton)
+    for i, raw in enumerate(patch):
+        op = str(raw.get("op") or "")
+        path = str(raw.get("path") or "")
+        value = None
+        if raw.get("value_json") is not None:
+            try:
+                value = json.loads(raw["value_json"])
+            except (ValueError, TypeError) as exc:
+                raise PatchApplyError(f"patch[{i}] の value_json が JSON として不正です") from exc
+        parent, token = _resolve_parent(doc, path)
+
+        if op == "replace":
+            if isinstance(parent, list):
+                parent[_list_index(parent, token, path)] = value
+            elif isinstance(parent, dict):
+                if token not in parent:
+                    raise PatchApplyError(f"replace 対象が存在しません: {path!r}")
+                parent[token] = value
+            else:
+                raise PatchApplyError(f"replace できません: {path!r}")
+        elif op == "add":
+            if isinstance(parent, list):
+                if token == "-":
+                    parent.append(value)
+                else:
+                    parent.insert(_list_index(parent, token, path, for_insert=True), value)
+            elif isinstance(parent, dict):
+                parent[token] = value
+            else:
+                raise PatchApplyError(f"add できません: {path!r}")
+        elif op == "remove":
+            if isinstance(parent, list):
+                del parent[_list_index(parent, token, path)]
+            elif isinstance(parent, dict):
+                parent.pop(token, None)
+            else:
+                raise PatchApplyError(f"remove できません: {path!r}")
+        else:
+            raise PatchApplyError(f"未対応の op です: {op!r}")
+    return doc

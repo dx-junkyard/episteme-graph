@@ -464,6 +464,111 @@ C=`atlas_overlay_cache` / P=個人層 `interest_traces`）。設計原則: 宣�
   `GET /api/learning/atlas/cues/state`）は Stage 2 ゲート判断の材料。
   **数値をユーザーに見せる API・UI は作らない**。
 
+### D層（Doubt Layer, migration 029〜033）
+
+A層（構造化）・B層（学習）・C層（承認）に続く第四の層。「合意の強さ」と「検証の強さ」を
+データ構造レベルで分離した**認識的地位台帳（epistemic ledger）**を軸に、暗黙前提の明示化・
+疑義・検証提案・反実仮想を制度化する。issue 分割の正本は
+`docs/features/doubt_layer_issues.md`。実装は `backend/core/doubt/`（tension /
+structure_anchor と同型の独立モジュール群）+ `backend/api/routes/doubt.py`
+（実パス `/api/admin/doubt/...`、学習者向け読み取りは `/api/learning/.../ledger` 等）。
+
+**不変条項（§0）**: A層非改変（`src/episteme_graph/agents/` を読むだけ）/
+AIに疑わせない（LLM 出力は常に candidate、確定は人間。反実仮想の「再構築」は計算しない）/
+帰属必須・匿名疑義なし（全書き込みを `theory_review_events` に監査。entity_type は
+`'ledger'` `'assumption'` `'challenge'` `'verification_proposal'` `'counterfactual_session'` を追加）/
+情報を落とさない（dismiss・withdraw は status 遷移で保持, P4）/
+煽らない・数値を見せない（`load_score`・confidence の生数値を API/UI に出さない。段階ラベルのみ）/
+同期パスに LLM を入れない（スコープ候補・前提正規化は非同期 worker, P6）/
+学習者を監視しない（naive signals は k-匿名 k=3・n<3 非表示, P3）。
+
+- **台帳（D1, migration 029 `epistemic_ledger`）**: `UNIQUE(target_id, target_type)`。
+  `verification_status`（`directly_verified | indirectly_supported | untested | refuted | unknown`）と
+  `verification_scopes JSONB`（**配列**。各要素 = condition/domain/precision/system +
+  `evidence_ids` + `recorded_by` + `reason`。検証を単一ブールにしない — 構想の心臓部）。
+  スコープ 0 件（空欄）は正常状態であり**発見**（エラー表示・警告色にしない）。
+  `directly_verified` への昇格はスコープ 1 件以上のときのみ許可（全称検証の構造的禁止）。
+  `directly_verified` は人間の記帳専用で、`ledger_builder.py`（非LLM バックフィル）は生成しない
+  （evidence 付き `source_backed` atomic claim も `indirectly_supported` 止まり）。
+  LLM スコープ候補（`backend/core/doubt/scope_candidates/`）は `scope_candidates` 列に
+  `status='candidate'` で保持し、教員確定まで `verification_scopes` 本体に入らない。
+  コスト上限 `DOUBT_SCOPE_MAX_CALLS_PER_DAY`（既定 10、tension とは独立）。
+- **素朴な問いの計器化（D1-5）**: `naive_signal.py` が interest_traces のうち
+  **本人が引き受けた行のみ**（tension: owned status / anchor: `learner_selected`・`confirmed`）を
+  anchor 単位で k-匿名集計（件数はレンジ表示 3-5 / 6-10 / 11+）。candidate は集計に入れない（P1）。
+- **負荷度（D2-1）**: `load_calculator.py` が TheoryOperationGraph + derivation +
+  claim リンクから下流到達集合サイズを決定論的に計算（閉路対応）。`graph_layer='debug'` /
+  `inferred` ノードは根拠にしない。生値は DB のみ、API は段階ラベル（低/中/高/最高位）。
+- **暗黙前提マイニング（D2-2 経路A / D3-5 経路B, migration 030 `assumption_nodes`）**:
+  経路A = `inferred`/`review_required` 補完ステップのコーパス横断クラスタ（**2 論文以上 or
+  2 導出以上**の反復のみ候補化、LLM は正規化のみ・非同期）。経路B = 「依存されているが
+  被主張・被引用がないノード」の検出（`corpus_audit.py`、3 論文未満のコーパスでは実行しない）。
+  出力は常に `status='candidate'`。確定（`confirmed`）・却下（`dismissed` 保持）は教員 API（D2-4）。
+  確定時に台帳行を自動生成（既定 `untested`・スコープ空欄）。
+- **前提の地図（D2-3, Assumption Atlas）**: 負荷度×検証度の散布図（admin.js タブ +
+  `doubt-atlas.js`）。ゾーン名・煽り文句・推奨マークを描かない。空欄スコープの点は
+  塗りなし・点線輪郭。**Field Atlas（分野の地図）とは別機能** — コード・API・UI 文言とも
+  `doubt-` / `assumption-` プレフィックスで衝突回避。
+- **疑義（D3-1, migration 031 `challenges`）**: 承認と対になる一級市民。
+  `challenge_type`（`scope_extrapolation | untested_in_domain | definitional | hidden_lemma`）+
+  `reason` 必須・匿名不可。withdraw は status 遷移で履歴保持。疑義カードの主語は常に型
+  （人格対立の文面にしない）。数値スコア化しない。
+- **検証提案 + 未検証合意リスト（D3-2, migration 032 `verification_proposals`）**:
+  challenge → proposal 昇格で `led_to_verification` に遷移。open-assumptions リストは
+  台帳の投影（高負荷×低検証の自動編纂・編集不可）。
+- **反実仮想（D3-3/D3-4, migration 033 `counterfactual_sessions`）**: 前提を仮に偽に倒し
+  `collapsed / surviving / indeterminate` の 3 区分を決定論的に伝播計算（再構築は計算しない）。
+  セッション保存は既存 Visibility 語彙（private/group/public）。UI は可逆・非破壊を明示し
+  「崩壊」でなく「この前提に依存する範囲」と事実で書く。
+- **学習者導線（D3-6）**: 読み取り専用 + 間接参加のみ。出典タブ・教材詳細に検証状態を
+  一行の事実として併記（未検証と検証済みを同じ精度で併記, §8-1/8-2）。学習者の直接疑義投稿は
+  意図的にやらない（地位勾配 §8-3、運用観察後に別 issue で判断）。
+  台帳未記帳コースではセクション自体が出ない（fail-closed）。
+- **ガードレール（DX-1）**: `backend/tests/test_doubt_guardrails.py` が AI断定禁止・
+  匿名疑義なし・数値非表示・k-匿名・P4 保持・禁止語彙（「疑え」「ノーベル賞」等）を構造的に守る。
+- **KPI（DX-2）**: `GET /api/admin/doubt/metrics`（SYSTEM_ADMIN のみ）。
+  `theory_review_events` の再集計のみで専用カウンタテーブルを持たない。ダッシュボード UI は作らない。
+
+### 横断ユーティリティ層（Admin Copilot, migration 034）
+
+管理画面に点在する AI 機能（コース構築チャット・原稿スタジオ rewrite・コンポーネント候補生成）を、
+全タブ横断の**統合 AI アシスタント（Admin Copilot）**に統合する層。正本は
+`docs/features/admin_assistant_design.md`。A層/B層/C層/D層の**コードは変更せず**、既存 API を
+呼ぶ側として実装する（P7）。実装は `backend/core/admin_assistant/` + `backend/api/routes/admin_assistant.py`
+（実パス `/api/admin/assistant/...`）+ `frontend/public/js/admin-assistant.js`（ES5・`window.AdminAssistant`）。
+
+**不変条項**: P1 権限を越えない（fail-closed。**capability registry** に登録され、かつ現在ユーザーの
+ロールで許可された操作のみ説明・代行・道案内。判定はサーバ側、フロント表示を信頼しない）/
+P2 破壊的操作（`reversible=false`＝削除・公開・freeze・アカウント作成）は代行前に明示確認ゲート/
+P3 情報を落とさない（apply 前に before スナップショット、取り消しは状態遷移で行削除しない）/
+P4 断定・捏造しない（説明は登録済み KB に基づき根拠併記、無ければ「未整備」）/
+P5 監査必須（apply/revert/confirm を `theory_review_events` `entity_type='assistant_action'` に記録）/
+P6 同期パスを重くしない（chat は 1 LLM コール上限、失敗時は非LLMヒューリスティックへ縮退）/
+P7 既存 A/B/C/D 層コードを変更しない/ P8 道案内は誘導まで（画面遷移＋入力箇所の点灯のみ。
+値入力・送信・保存は本人。fail-closed は同じく適用）。
+
+- **3 モード（単一チャットで自動振り分け）**: `intent.py` が `guidance`（説明・DB非変更）/
+  `locate`（道案内・DB非変更）/ `action`（代行・変更）/ `clarify`（聞き返し）に分類。
+- **Capability Registry（心臓部）**: `core/admin_assistant/capabilities.py` が画面横断の**単一の真実源**。
+  各 `Capability` は `id` / `screen` / `required_role` / `scope` / `kind`（`guidance_only`|`action`）/
+  `reversible` / `confirm`（`reversible=false` は必ず `confirm=true`）/ `api` / `revert` / `howto_doc` /
+  `locate_steps`（道案内の順序付き点灯手順。各要素 = `{screen, anchor_id, hint, precondition?}`。
+  `anchor_id` は**論理 ID**でバックエンドは DOM セレクタを持たない）を宣言。全 API を一度に載せず
+  安全・高頻度から段階登録（fail-closed）。ロール階層 SYSTEM_ADMIN ≥ TEACHER ≥ STUDENT。
+- **操作 KB**: `docs/admin_operations/*.md`（front-matter `capability`/`role`/`screen`）。`knowledge.py` が
+  起動時にインデックス化し、検索前に `capabilities_for(role)` で絞る（権限外の手順は出さない）。
+  リアルタイム生成しない。KB に無ければ「未整備」。
+- **操作代行 + 戻す**: `action` capability は `actions/` に tool（`capture_before`/`apply`/`revert`）として実装し
+  `apply` は既存 API/関数を呼ぶだけ（P7）。リスク階層 = 局所可逆(L1・クライアント Undo) /
+  永続可逆(L2・サーバ revert) / 不可逆(要確認)。取り消しは `assistant_actions`（migration 034）の
+  before/after スナップショットで復元。`reversible=false` の revert は 409。
+- **道案内（Locate & Spotlight）**: `locate_plan.steps` をフロント `runLocatePlan()` が順に実行し
+  `activateTabView` → `registerUiAnchors` で DOM 解決 → `scrollIntoView` → `.admin-assistant-spotlight` 点灯
+  + hint 吹き出し。`precondition` 未達のステップで停止し画面の選択完了を待って次へ。DB 非変更・監査対象外。
+- **コスト上限**: `ASSISTANT_MAX_CALLS_PER_DAY`（既定 20）/ モデルは fast tier 既定（`ASSISTANT_LLM_MODEL` で上書き）。
+- **ガードレール**: `backend/tests/test_admin_assistant.py` が「全 `reversible=false` は `confirm=true`」
+  「`core/admin_assistant/` が FastAPI を import しない」「locate は role で fail-closed」を構造的に守る。
+
 ### レクチャー音声キャッシュの判定（`backend/api/routes/lecture.py`）
 
 `student_material`/`content`/`summary` はコースビルダーが生成するほぼ全トピックに

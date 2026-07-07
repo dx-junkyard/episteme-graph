@@ -152,6 +152,52 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("ANCHOR_CONFIRM_MAX_PER_SESSION"),
     )
 
+    # --- D層（Doubt Layer） — コスト制御（tension / anchor とは独立のカウンタ） ---
+    # 検証スコープ候補抽出（D1-4）の 1 日あたり LLM コール上限
+    doubt_scope_max_calls_per_day: int = Field(
+        default=10,
+        validation_alias=AliasChoices("DOUBT_SCOPE_MAX_CALLS_PER_DAY"),
+    )
+    # 空文字なら fast tier（llm_fast_model）に委譲
+    doubt_scope_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("DOUBT_SCOPE_LLM_MODEL"),
+    )
+    # 暗黙前提マイニングの LLM 正規化（D2-2）の 1 日あたりコール上限
+    doubt_assumption_max_calls_per_day: int = Field(
+        default=10,
+        validation_alias=AliasChoices("DOUBT_ASSUMPTION_MAX_CALLS_PER_DAY"),
+    )
+    # 空文字なら fast tier（llm_fast_model）に委譲
+    doubt_assumption_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("DOUBT_ASSUMPTION_LLM_MODEL"),
+    )
+
+    # --- Field Atlas 骨格エディタ AIアシスト編集（interpret / propose。P3/P4） ---
+    # 1教員1日あたりの assist LLM コール上限（interpret + propose の合算）
+    atlas_assist_max_calls_per_day: int = Field(
+        default=60,
+        validation_alias=AliasChoices("ATLAS_ASSIST_MAX_CALLS_PER_DAY"),
+    )
+    # 空文字なら分析 tier（llm_analysis_model）に委譲（対象特定・編集生成には精度が要る）
+    atlas_assist_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("ATLAS_ASSIST_LLM_MODEL"),
+    )
+
+    # --- 横断ユーティリティ層（Admin Copilot） — コスト制御（他機能とは独立） ---
+    # chat の intent 分類/応答の 1 ユーザー 1 日あたり LLM コール上限
+    assistant_max_calls_per_day: int = Field(
+        default=20,
+        validation_alias=AliasChoices("ASSISTANT_MAX_CALLS_PER_DAY"),
+    )
+    # 空文字なら fast tier（llm_fast_model）に委譲
+    assistant_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("ASSISTANT_LLM_MODEL"),
+    )
+
     # --- JWT / Auth ---
     jwt_secret: str = "episteme-dev-secret-change-in-prod"
     admin_password: str = ""

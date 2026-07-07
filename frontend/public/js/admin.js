@@ -21,6 +21,9 @@
     availableMaterials: [],
     availableSessions: [],
     selectedMaterialIds: [],
+    materialFilter: "all",   // all | no_course | recent | completed
+    materialSort: "uploaded", // uploaded | analyzed | title | volume
+    materialSearch: "",
     materialPipelineStatus: {},
     materialPipelineTimers: {},
     exportContext: null,
@@ -946,63 +949,249 @@
 
     // A1: セッション一覧をロード
     loadSessions();
+    // 機能2: 教材選択ツールバー（検索・並び替え・絞り込み）を配線
+    initMaterialToolbar();
     // Issue #72: 利用可能な教材一覧をロード
     loadMaterialsForSelection();
   }
 
-  // ── Material Selection (Issue #72) ────────────────────────────────
+  // ── Material Selection (Issue #72 / 機能2 コース作成UX) ─────────────
   function loadMaterialsForSelection() {
-    apiFetch("/admin/materials")
+    // include=summary で主要コンポーネント名・章立て・コース作成済みかを併せて取得
+    apiFetch("/admin/materials?include=summary")
       .then(function (res) { return res.json(); })
       .then(function (data) {
         var materials = Array.isArray(data) ? data : (data.materials || []);
-        state.availableMaterials = materials.filter(function (m) {
-          return m.status === "completed";
-        });
-        renderMaterialCheckboxes();
+        // 全ステータスを保持（未解析/解析中もカードで状態を明示する）
+        state.availableMaterials = materials;
+        renderMaterialCards();
       })
       .catch(function () {
         var listEl = document.getElementById("cb-material-select-list");
-        if (listEl) listEl.innerHTML = '<span style="color:var(--color-text-tertiary);font-size:12px">教材の読み込みに失敗しました</span>';
+        if (listEl) listEl.innerHTML = '<span class="cb-mat-empty">教材の読み込みに失敗しました</span>';
       });
   }
 
-  function renderMaterialCheckboxes() {
+  // 教材選択ツールバー（検索・並び替え・絞り込み）の初期化。DOM は静的なので一度だけ配線する。
+  function initMaterialToolbar() {
+    var search = document.getElementById("cb-material-search");
+    var sort = document.getElementById("cb-material-sort");
+    var filters = document.getElementById("cb-material-filters");
+    if (search) {
+      search.addEventListener("input", function () {
+        state.materialSearch = this.value || "";
+        renderMaterialCards();
+      });
+    }
+    if (sort) {
+      sort.addEventListener("change", function () {
+        state.materialSort = this.value;
+        renderMaterialCards();
+      });
+    }
+    if (filters) {
+      filters.querySelectorAll(".cb-mat-chip").forEach(function (chip) {
+        chip.addEventListener("click", function () {
+          state.materialFilter = this.getAttribute("data-filter") || "all";
+          filters.querySelectorAll(".cb-mat-chip").forEach(function (c) { c.classList.remove("active"); });
+          this.classList.add("active");
+          renderMaterialCards();
+        });
+      });
+    }
+  }
+
+  function cbMaterialSelectable(m) { return m && m.status === "completed"; }
+
+  function cbDocTypeLabel(t) {
+    return { textbook: "教科書", lecture_note: "講義ノート", paper: "論文", report: "レポート" }[t] || t || "";
+  }
+
+  function cbStatusBadge(m) {
+    switch (m.status) {
+      case "completed": return { text: "解析完了", cls: "ok" };
+      case "processing":
+        var p = (m.analysis_progress != null) ? " " + m.analysis_progress + "%" : "";
+        return { text: "解析中" + p, cls: "proc" };
+      case "failed": return { text: "解析失敗", cls: "fail" };
+      default: return { text: "未解析", cls: "idle" };
+    }
+  }
+
+  function cbFindMaterial(mid) {
+    var list = state.availableMaterials || [];
+    for (var i = 0; i < list.length; i++) {
+      if ((list[i].material_id || list[i].id) === mid) return list[i];
+    }
+    return null;
+  }
+
+  function cbFilteredMaterials() {
+    var list = (state.availableMaterials || []).slice();
+    var q = (state.materialSearch || "").toLowerCase().trim();
+    if (q) {
+      list = list.filter(function (m) {
+        return ((m.title || "") + " " + (m.filename || "")).toLowerCase().indexOf(q) !== -1;
+      });
+    }
+    if (state.materialFilter === "no_course") {
+      list = list.filter(function (m) { return !m.has_course; });
+    } else if (state.materialFilter === "recent") {
+      list = list.filter(function (m) { return !!m.analyzed_at; });
+    } else if (state.materialFilter === "completed") {
+      list = list.filter(function (m) { return m.status === "completed"; });
+    }
+    // 「直近の生成」タブは解析完了時刻順を優先する
+    var sort = (state.materialFilter === "recent") ? "analyzed" : state.materialSort;
+    list.sort(function (a, b) {
+      if (sort === "title") return (a.title || a.filename || "").localeCompare(b.title || b.filename || "");
+      if (sort === "volume") return (b.chunk_count || 0) - (a.chunk_count || 0);
+      if (sort === "analyzed") return (b.analyzed_at || "").localeCompare(a.analyzed_at || "");
+      return (b.uploaded_at || "").localeCompare(a.uploaded_at || "");
+    });
+    return list;
+  }
+
+  function cbUpdateMaterialCount() {
+    var el = document.getElementById("cb-material-count");
+    if (!el) return;
+    var total = (state.availableMaterials || []).length;
+    var shown = cbFilteredMaterials().length;
+    var sel = (state.selectedMaterialIds || []).length;
+    var txt = "表示 " + shown + " / 全 " + total;
+    if (sel > 0) txt += "（選択 " + sel + "）";
+    el.textContent = txt;
+  }
+
+  function renderMaterialCards() {
     var listEl = document.getElementById("cb-material-select-list");
     if (!listEl) return;
 
-    if (!state.availableMaterials || state.availableMaterials.length === 0) {
-      listEl.innerHTML = '<span style="color:var(--color-text-tertiary);font-size:12px">利用可能な教材がありません</span>';
+    var all = state.availableMaterials || [];
+    if (all.length === 0) {
+      listEl.innerHTML = '<span class="cb-mat-empty">利用可能な教材がありません</span>';
+      cbUpdateMaterialCount();
+      return;
+    }
+
+    var list = cbFilteredMaterials();
+    if (list.length === 0) {
+      listEl.innerHTML = '<span class="cb-mat-empty">条件に一致する教材がありません</span>';
+      cbUpdateMaterialCount();
       return;
     }
 
     var html = "";
-    state.availableMaterials.forEach(function (m) {
-      var mid = escHtml(m.material_id || m.id || "");
+    list.forEach(function (m) {
+      var mid = m.material_id || m.id || "";
+      var midE = escHtml(mid);
+      var selected = state.selectedMaterialIds.indexOf(mid) !== -1;
+      var selectable = cbMaterialSelectable(m);
+      var st = cbStatusBadge(m);
       var title = escHtml(m.title || m.filename || "不明な教材");
-      var checked = state.selectedMaterialIds.indexOf(m.material_id || m.id || "") !== -1;
-      html += '<label class="cb-material-checkbox' + (checked ? " selected" : "") + '" data-mid="' + mid + '">';
-      html += '<input type="checkbox" value="' + mid + '"' + (checked ? " checked" : "") + '>';
-      html += title;
-      html += "</label>";
+
+      var metaParts = [];
+      if (m.authors && m.authors.length) {
+        metaParts.push(escHtml(m.authors.slice(0, 2).join(", ")) + (m.authors.length > 2 ? " 他" : ""));
+      }
+      if (m.year) metaParts.push(String(m.year));
+      if (m.doc_type) metaParts.push(escHtml(cbDocTypeLabel(m.doc_type)));
+
+      var previewNames = (m.top_components && m.top_components.length) ? m.top_components : (m.top_concepts || []);
+      var hasDetail = (m.section_outline && m.section_outline.length) || (previewNames && previewNames.length);
+
+      html += '<div class="cb-mat-card' + (selected ? " selected" : "") + (selectable ? "" : " disabled") + '" data-mid="' + midE + '">';
+      html += '<div class="cb-mat-card-row">';
+      html += '<span class="cb-mat-check">' + (selected ? "✓" : "") + '</span>';
+      html += '<div class="cb-mat-body">';
+      html += '<div class="cb-mat-title">' + title + '</div>';
+      if (metaParts.length) html += '<div class="cb-mat-meta">' + metaParts.join(" · ") + '</div>';
+      html += '<div class="cb-mat-badges">';
+      html += '<span class="cb-mat-badge st-' + st.cls + '">' + escHtml(st.text) + '</span>';
+      if (m.chunk_count) html += '<span class="cb-mat-badge">' + m.chunk_count + ' チャンク</span>';
+      if (m.component_count) html += '<span class="cb-mat-badge">コンポーネント ' + m.component_count + '</span>';
+      if (!m.has_course) html += '<span class="cb-mat-badge nocourse">コース未作成</span>';
+      html += '</div>';
+      if (previewNames && previewNames.length) {
+        html += '<div class="cb-mat-preview-line">主要: ' + escHtml(previewNames.slice(0, 3).join(" / ")) + (previewNames.length > 3 ? " …" : "") + '</div>';
+      }
+      if (!selectable) {
+        html += '<div class="cb-mat-note">解析が完了すると選択できます</div>';
+      }
+      html += '</div>';
+      if (hasDetail) html += '<button class="cb-mat-detail-btn" data-mid="' + midE + '" type="button">詳細</button>';
+      html += '</div>';
+      html += '<div class="cb-mat-detail" style="display:none"></div>';
+      html += '</div>';
     });
     listEl.innerHTML = html;
+    cbUpdateMaterialCount();
+    wireMaterialCards(listEl);
+  }
 
-    listEl.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
-      cb.addEventListener("change", function () {
-        var mid = this.value;
-        var label = this.parentElement;
-        if (this.checked) {
-          if (state.selectedMaterialIds.indexOf(mid) === -1) {
-            state.selectedMaterialIds.push(mid);
-          }
-          label.classList.add("selected");
-        } else {
-          state.selectedMaterialIds = state.selectedMaterialIds.filter(function (id) { return id !== mid; });
-          label.classList.remove("selected");
-        }
+  function wireMaterialCards(listEl) {
+    listEl.querySelectorAll(".cb-mat-card").forEach(function (card) {
+      card.addEventListener("click", function () {
+        var mid = card.getAttribute("data-mid");
+        var m = cbFindMaterial(mid);
+        if (!m || !cbMaterialSelectable(m)) return;
+        toggleMaterialSelection(mid, card);
       });
     });
+    listEl.querySelectorAll(".cb-mat-detail-btn").forEach(function (btn) {
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation(); // カードの選択トグルを発火させない
+        toggleMaterialDetail(btn.getAttribute("data-mid"), btn.parentElement.parentElement);
+      });
+    });
+  }
+
+  function toggleMaterialSelection(mid, card) {
+    var idx = state.selectedMaterialIds.indexOf(mid);
+    var selected;
+    if (idx === -1) { state.selectedMaterialIds.push(mid); selected = true; }
+    else { state.selectedMaterialIds.splice(idx, 1); selected = false; }
+    if (card) {
+      if (selected) card.classList.add("selected"); else card.classList.remove("selected");
+      var chk = card.querySelector(".cb-mat-check");
+      if (chk) chk.textContent = selected ? "✓" : "";
+    }
+    cbUpdateMaterialCount();
+  }
+
+  function toggleMaterialDetail(mid, card) {
+    if (!card) return;
+    var panel = card.querySelector(".cb-mat-detail");
+    if (!panel) return;
+    if (!panel.style.display || panel.style.display === "none") {
+      panel.innerHTML = renderMaterialDetailHtml(cbFindMaterial(mid));
+      panel.style.display = "block";
+    } else {
+      panel.style.display = "none";
+    }
+  }
+
+  function renderMaterialDetailHtml(m) {
+    if (!m) return "";
+    var html = "";
+    var comps = m.top_components || [];
+    if (comps.length) {
+      html += '<div class="cb-mat-detail-sec"><div class="cb-mat-detail-h">主要コンポーネント</div><ul>';
+      comps.forEach(function (n) { html += "<li>" + escHtml(n) + "</li>"; });
+      html += "</ul></div>";
+    }
+    var outline = m.section_outline || [];
+    if (outline.length) {
+      html += '<div class="cb-mat-detail-sec"><div class="cb-mat-detail-h">章立て</div><ul>';
+      outline.forEach(function (s) { html += "<li>" + escHtml(s) + "</li>"; });
+      html += "</ul></div>";
+    }
+    if (!comps.length && m.top_concepts && m.top_concepts.length) {
+      html += '<div class="cb-mat-detail-sec"><div class="cb-mat-detail-h">主要概念</div><ul>';
+      m.top_concepts.forEach(function (s) { html += "<li>" + escHtml(s) + "</li>"; });
+      html += "</ul></div>";
+    }
+    return html || '<span class="cb-mat-empty">追加情報はありません</span>';
   }
 
   // ── Session Management ─────────────────────────────────────────────
@@ -1937,10 +2126,22 @@
     var editor = document.getElementById("atlas-draft-editor");
     var validationEl = document.getElementById("atlas-validation");
     var generateBtn = document.getElementById("atlas-generate");
+    // JSON編集 / プレビュー タブ (skeleton editor upgrade P1/P2)
+    var jsonView = document.getElementById("atlas-view-json");
+    var previewView = document.getElementById("atlas-view-preview");
+    var tabJson = document.getElementById("atlas-tab-json");
+    var tabPreview = document.getElementById("atlas-tab-preview");
+    var assistToggle = document.getElementById("atlas-assist-toggle");
+    var assistPanelEl = document.getElementById("atlas-assist-panel");
     var hasDraft = false;
     var cartridgesLoaded = false;
     // migration 027: 楽観ロック。保存/生成は state 取得時の revision を添えて送る
     var draftRevision = null;
+    // P2: 直近の検証 issue (region_id/concept_id 付き) をプレビューのハイライトに使う
+    var currentIssues = { errorIssues: [], warningIssues: [] };
+    // P5: プレビュー上でクリックしたノード (AI agent のスコープヒント)
+    var selectionHint = null;
+    var activeView = "json";
     // 新分野 (カートリッジファイル無し) の生成メタデータ: domain_key → {name, description}
     var pendingDomainMeta = {};
 
@@ -1954,7 +2155,16 @@
     }
 
     function renderValidation(validation) {
-      if (!validation) { validationEl.innerHTML = ""; return; }
+      if (!validation) {
+        validationEl.innerHTML = "";
+        currentIssues = { errorIssues: [], warningIssues: [] };
+        return;
+      }
+      // P2: 構造化 issue (region_id/concept_id/edge) を保持。無ければメッセージ文字列から補う
+      currentIssues = {
+        errorIssues: validation.error_issues || (validation.errors || []).map(function (m) { return { message: m }; }),
+        warningIssues: validation.warning_issues || (validation.warnings || []).map(function (m) { return { message: m }; }),
+      };
       var html = "";
       (validation.errors || []).forEach(function (e) {
         html += "<div style='color:var(--color-text-danger,#e53935)'>エラー: " + escHtml(e) + "</div>";
@@ -1963,7 +2173,55 @@
         html += "<div style='color:var(--color-text-secondary)'>警告: " + escHtml(w) + "</div>";
       });
       validationEl.innerHTML = html;
+      // プレビュー表示中なら最新の issue でハイライトを描き直す
+      if (activeView === "preview") renderPreview();
     }
+
+    // 現在の editor JSON をパースして骨格 dict (atlas_skeleton 中身) を返す。失敗時 null。
+    function parseSkeletonFromEditor() {
+      try {
+        var parsed = JSON.parse(editor.value);
+        return parsed && parsed.atlas_skeleton ? parsed.atlas_skeleton : parsed;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function renderPreview() {
+      if (!previewView || !window.AtlasDraftPreview) return;
+      var skeleton = parseSkeletonFromEditor();
+      if (!skeleton) {
+        previewView.innerHTML = "<div style='color:var(--color-text-danger,#e53935);font-size:12px;padding:10px'>" +
+          "JSON の構文エラーのためプレビューできません。「JSON編集」タブで修正してください。</div>";
+        return;
+      }
+      window.AtlasDraftPreview.render(previewView, skeleton, {
+        errorIssues: currentIssues.errorIssues,
+        warningIssues: currentIssues.warningIssues,
+        selectedId: selectionHint ? (selectionHint.concept_id || selectionHint.region_id) : null,
+        onSelect: function (detail) {
+          selectionHint = detail;
+          if (window.AtlasAssistPanel && window.AtlasAssistPanel.setSelectionHint) {
+            window.AtlasAssistPanel.setSelectionHint(detail);
+          }
+        },
+      });
+    }
+
+    function switchView(view) {
+      activeView = view;
+      var isPreview = view === "preview";
+      if (jsonView) jsonView.style.display = isPreview ? "none" : "";
+      if (previewView) previewView.style.display = isPreview ? "" : "none";
+      if (tabJson) { tabJson.classList.toggle("on", !isPreview); tabJson.setAttribute("aria-selected", isPreview ? "false" : "true"); }
+      if (tabPreview) { tabPreview.classList.toggle("on", isPreview); tabPreview.setAttribute("aria-selected", isPreview ? "true" : "false"); }
+      if (isPreview) renderPreview();
+    }
+
+    if (tabJson) tabJson.addEventListener("click", function () { switchView("json"); });
+    if (tabPreview) tabPreview.addEventListener("click", function () { switchView("preview"); });
+    // §3.1: JSON編集タブでの編集は blur 時に (構文が通れば) プレビューへ即時反映する
+    if (editor) editor.addEventListener("blur", function () { if (activeView === "preview") renderPreview(); });
 
     function renderState(data) {
       hasDraft = !!(data && data.draft);
@@ -2005,6 +2263,10 @@
         renderValidation(null);
         generateBtn.textContent = "draft を生成（AIバッチ）";
         draftRevision = null;
+      }
+      // draft を読み直したら AI agent は古い revision に基づくため会話を無効化する
+      if (window.AtlasAssistPanel && window.AtlasAssistPanel.notifyDraftChanged) {
+        window.AtlasAssistPanel.notifyDraftChanged(draftRevision);
       }
     }
 
@@ -2276,16 +2538,17 @@
       });
     }
 
-    document.getElementById("atlas-save-draft").addEventListener("click", function () {
+    // draft 保存 (AIアシスト適用からも再利用するため関数化)。成功時に Promise を解決する。
+    function saveDraft() {
       var parsed;
       try {
         parsed = JSON.parse(editor.value);
       } catch (e) {
         setStatus("JSON の構文エラー: " + e.message, true);
-        return;
+        return Promise.reject(e);
       }
       setStatus("保存中...");
-      apiFetch(basePath() + "/draft", {
+      return apiFetch(basePath() + "/draft", {
         method: "PUT",
         body: JSON.stringify({ skeleton: parsed, revision: draftRevision }),
       })
@@ -2299,7 +2562,10 @@
                 throw new Error("他の教員の編集で draft が更新されています。最新の内容を再読込しました。編集をやり直してください");
               }
               if (detail && detail.errors) {
-                renderValidation({ errors: detail.errors, warnings: [] });
+                renderValidation({
+                  errors: detail.errors, warnings: [],
+                  error_issues: detail.error_issues, warning_issues: [],
+                });
                 throw new Error(detail.message || "バリデーションエラー");
               }
               throw new Error(typeof detail === "string" ? detail : "HTTP " + res.status);
@@ -2311,9 +2577,54 @@
           renderValidation(body.draft.validation);
           draftRevision = body.draft.revision || null;
           setStatus("draft を保存しました");
+          // 4.1: draft が更新されたので AI agent の古い revision の提案を無効化する
+          if (window.AtlasAssistPanel && window.AtlasAssistPanel.notifyDraftChanged) {
+            window.AtlasAssistPanel.notifyDraftChanged(draftRevision);
+          }
+          return body;
         })
-        .catch(function (err) { setStatus("保存に失敗しました: " + err.message, true); });
+        .catch(function (err) { setStatus("保存に失敗しました: " + err.message, true); throw err; });
+    }
+
+    document.getElementById("atlas-save-draft").addEventListener("click", function () {
+      saveDraft().catch(function () {});
     });
+
+    // AIアシスト提案の適用: 提案後の骨格 dict を editor へ反映し、保存フローに乗せる
+    // (AIが直接 draft を確定させない — 教員の「適用」で PUT を経由する。§4.3)
+    function applyAssistProposal(resultSkeleton) {
+      if (!resultSkeleton) return Promise.reject(new Error("提案結果が空です"));
+      editor.value = JSON.stringify({ atlas_skeleton: resultSkeleton }, null, 2);
+      if (activeView === "preview") renderPreview();
+      return saveDraft();
+    }
+
+    // AI agent トグル (skeleton editor upgrade P3/P4)
+    if (assistToggle && assistPanelEl) {
+      assistToggle.addEventListener("click", function () {
+        if (!select.value) { setStatus("分野を選択してください", true); return; }
+        var visible = assistPanelEl.style.display !== "none";
+        if (visible) { assistPanelEl.style.display = "none"; return; }
+        assistPanelEl.style.display = "";
+        if (window.AtlasAssistPanel) {
+          window.AtlasAssistPanel.open({
+            panelEl: assistPanelEl,
+            cartridgeId: select.value,
+            apiFetch: apiFetch,
+            basePath: basePath,
+            getRevision: function () { return draftRevision; },
+            getSkeleton: parseSkeletonFromEditor,
+            getSelectionHint: function () { return selectionHint; },
+            onApply: applyAssistProposal,
+            // §4.4: 解釈した対象をプレビュー上でハイライトし、チャットと連動させる
+            onHighlight: function (detail) {
+              selectionHint = detail;
+              switchView("preview");
+            },
+          });
+        }
+      });
+    }
 
     document.getElementById("atlas-freeze").addEventListener("click", function () {
       var version = document.getElementById("atlas-freeze-version").value.trim();
@@ -2338,7 +2649,14 @@
         .catch(function (err) { setStatus("凍結に失敗しました: " + err.message, true); });
     });
 
-    select.addEventListener("change", loadState);
+    select.addEventListener("change", function () {
+      // 分野を切り替えたら選択ヒント・ビュー・AI agent をリセットする
+      selectionHint = null;
+      switchView("json");
+      if (assistPanelEl) assistPanelEl.style.display = "none";
+      if (window.AtlasAssistPanel && window.AtlasAssistPanel.reset) window.AtlasAssistPanel.reset();
+      loadState();
+    });
     document.getElementById("atlas-refresh").addEventListener("click", loadState);
     onTabActivate("atlas", loadCartridges);
     initAtlasBinding();
@@ -6100,6 +6418,8 @@
         '<div class="ls-component-graph-main">' +
           lsGraphLayerToolbarHtml(nodes) +
           lsGraphReadingPathToggleHtml(readingPath.length) +
+          // D層 (D3-4): 反実仮想モードのトグル（可逆・非破壊。doubt-atlas.js が本体）
+          (window.DoubtAtlas ? window.DoubtAtlas.counterfactualToolbarHtml() : "") +
           '<div id="ls-component-network" class="ls-component-network" tabindex="0"></div>' +
           '<div class="ls-component-legend">' +
             '<div class="ls-component-legend-title">論理コンポーネント</div>' +
@@ -6125,6 +6445,9 @@
 
     lsBindGraphLayerToolbar(documentId);
     lsBindGraphReadingPathToggle(documentId);
+    if (window.DoubtAtlas) {
+      window.DoubtAtlas.bindCounterfactualToolbar(container, { documentId: documentId });
+    }
 
     if (!window.vis || !window.vis.Network) {
       lsRenderGraphFallback(container, view);
@@ -6505,6 +6828,12 @@
     // element — node (priority) or edge — and resets on background click.
     network.on("click", function (params) {
       var detail = document.getElementById("ls-component-graph-detail");
+      // D層 (D3-4): 反実仮想モード中はノードタップを「仮に偽」トグルとして扱う
+      if (params.nodes && params.nodes.length &&
+          window.DoubtAtlas && window.DoubtAtlas.isCounterfactualActive()) {
+        window.DoubtAtlas.toggleCounterfactualNode(params.nodes[0], visNodes);
+        return;
+      }
       if (params.nodes && params.nodes.length) {
         var node = nodeById[params.nodes[0]];
         if (node) { lsRenderGraphNodeDetail(node, graph); return; }
@@ -6771,6 +7100,11 @@
 
     detail.innerHTML = html;
     lsGraphBindDetailNav(detail);
+    // D層 (D1-4/D1-5/D3-1): 認識的地位台帳セクションを静かに追記する。
+    // fail-closed — 取得失敗時はセクション自体を出さず既存表示を壊さない。
+    if (window.DoubtAtlas && nodeId) {
+      window.DoubtAtlas.renderNodeLedgerSection(detail, "component", nodeId);
+    }
   }
 
   // Issue #450: wire navigable reference chips to select + focus the target node.
@@ -10228,6 +10562,10 @@
     }
     initStumbles();
     initAtlas();
+    // D層 — 前提の地図タブ（doubt-atlas.js が本体。「分野の地図」とは別機能）
+    if (window.DoubtAtlas) {
+      onTabActivate("doubt-atlas", function () { window.DoubtAtlas.initTab(); });
+    }
     initInterestDashboard();
     initSchemaProposals();
     initSchemaEvolution();
@@ -10236,10 +10574,71 @@
     initSystemStats();
     initLogout();
 
+    // 横断ユーティリティ層（Admin Copilot）— 統合 AI アシスタント。
+    // 依存を注入して疎結合に起動し、各画面の状態・点灯先フックを登録する。
+    if (window.AdminAssistant) {
+      window.AdminAssistant.init({
+        apiFetch: apiFetch,
+        state: state,
+        activateTabView: activateTabView,
+      });
+      registerAssistantHooks();
+    }
+
     if (state.role !== "SYSTEM_ADMIN") {
       loadMaterials();
       document.getElementById("refresh-materials").addEventListener("click", loadMaterials);
     }
+  }
+
+  // 各画面の構造化状態（screen context）と道案内の点灯先（UI anchors）を Copilot に登録する。
+  // DOM スクレイプではなく、画面が自分の状態・要素を提供する（設計 §9.2 / §9.5）。
+  function registerAssistantHooks() {
+    var AA = window.AdminAssistant;
+    if (!AA) return;
+
+    // --- UI アンカー（道案内の点灯先。論理ID → 実 DOM） ---
+    AA.registerUiAnchors("materials", {
+      upload_dropzone: function () { return document.getElementById("upload-zone"); },
+      material_row: function () { return document.getElementById("materials-tbody"); },
+      material_visibility_control: function () { return document.getElementById("materials-tbody"); }
+    });
+    AA.registerUiAnchors("course-builder", {
+      cb_material_select: function () { return document.getElementById("cb-material-select"); },
+      cb_chat_input: function () { return document.getElementById("cb-chat-input"); }
+    });
+    AA.registerUiAnchors("lecture-studio", {
+      chunk_list: function () { return document.getElementById("ls-chunk-list"); },
+      assistant_open_button: function () { return document.getElementById("ls-ai-assistant-btn"); },
+      "ls-rewrite-prompt": function () { return document.getElementById("ls-rewrite-prompt"); }
+    });
+    AA.registerUiAnchors("course-management", {
+      course_list: function () { return document.getElementById("cm-table"); },
+      course_row: function () { return document.getElementById("cm-tbody"); },
+      course_visibility_control: function () { return document.getElementById("cm-tbody"); },
+      publish_button: function () { return document.getElementById("cm-table"); }
+    });
+    AA.registerUiAnchors("atlas", {
+      atlas_generate_button: function () { return document.getElementById("atlas-generate"); }
+    });
+    AA.registerUiAnchors("groups", {
+      create_student_form: function () { return document.getElementById("tab-groups"); },
+      create_teacher_form: function () { return document.getElementById("tab-groups"); }
+    });
+
+    // --- 画面コンテキスト（現在の選択・可視要素） ---
+    AA.registerScreenContext("lecture-studio", function () {
+      var chunks = (typeof lsState !== "undefined" && lsState.chunks) ? lsState.chunks : [];
+      return {
+        selection: {
+          chunk_id: (typeof lsState !== "undefined") ? lsState.selectedChunkId : null,
+          course_id: (typeof lsState !== "undefined") ? lsState.courseId : null
+        },
+        visible_entities: chunks.slice(0, 20).map(function (c) {
+          return { type: "chunk", id: c.chunk_id, title: (c.display_text || "").slice(0, 40) };
+        })
+      };
+    });
   }
 
   // ── 反復改善 (Iterative improvement / Revisions) UI (#408) ───────────

@@ -128,6 +128,53 @@ class TestValidator:
 
 
 # ---------------------------------------------------------------------------
+# ValidationIssue (skeleton editor upgrade P2): region_id/concept_id を機械可読で持つ
+# ---------------------------------------------------------------------------
+
+
+class TestValidationIssue:
+    def test_issue_behaves_as_str_for_backward_compat(self):
+        # `"; ".join(...)` / `in` / json 直列化が従来どおり動くこと
+        issue = atlas.ValidationIssue("概念 'x' に label がありません", concept_id="x")
+        assert isinstance(issue, str)
+        assert "label" in issue
+        assert "; ".join([issue, issue]).count(";") == 1
+        import json
+
+        assert json.dumps([issue]) == json.dumps(["概念 'x' に label がありません"])
+
+    def test_concept_error_carries_ids(self):
+        regions = (
+            atlas.SkeletonRegion(
+                id="region_a",
+                label="領域A",
+                layout=atlas.RegionLayout(0.1, 0.1, 0.4, 0.4),
+                concepts=(atlas.SkeletonConcept(id="concept_a", label=""),),  # label 欠落
+            ),
+        )
+        report = atlas.validate_skeleton(_minimal_skeleton(regions=regions))
+        assert not report.ok
+        label_issue = next(e for e in report.errors if "label" in e)
+        assert label_issue.concept_id == "concept_a"
+        assert label_issue.region_id == "region_a"
+        d = atlas.issue_to_dict(label_issue)
+        assert d["concept_id"] == "concept_a" and d["region_id"] == "region_a"
+
+    def test_overlap_warning_carries_edge_endpoints(self):
+        regions = (
+            atlas.SkeletonRegion(id="r1", label="R1", layout=atlas.RegionLayout(0.1, 0.1, 0.5, 0.5)),
+            atlas.SkeletonRegion(id="r2", label="R2", layout=atlas.RegionLayout(0.2, 0.2, 0.5, 0.5)),
+        )
+        report = atlas.validate_skeleton(_minimal_skeleton(regions=regions))
+        overlap = next(w for w in report.warnings if "重なって" in w)
+        assert overlap.edge == ("r1", "r2")
+
+    def test_issue_to_dict_accepts_plain_str(self):
+        d = atlas.issue_to_dict("素の文字列")
+        assert d == {"message": "素の文字列", "region_id": None, "concept_id": None, "edge": None}
+
+
+# ---------------------------------------------------------------------------
 # 学習者向けビュー (draft 非公開・未レビュー seed_status 除去)
 # ---------------------------------------------------------------------------
 
