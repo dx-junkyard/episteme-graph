@@ -272,6 +272,10 @@ class LearningChatRequest(BaseModel):
     support_context: dict | None = None
     position_anchor: dict | None = None  # L2: クライアントの現在位置 {segment_id, scroll_offset}
     message_id: str | None = None  # クライアント生成のメッセージ id。永続履歴・関心痕跡へ焼き込み「この問いに戻る」で該当往復へジャンプさせる
+    # 書き直し（機能3）: このメッセージ id 以降（当該 user メッセージ・その回答・以降の往復）を
+    # サーバ正本の履歴から削除し、派生 interest_traces を status='superseded' にしてから、
+    # message を新しいターンとして同じ位置から再処理する。指定なしなら通常の追記。
+    replace_message_id: str | None = None
     intent_mode: str | None = None  # "on_path"(本筋維持) | "explore"(寄り道) | "casual"(気軽に話せる先生) — 送信時の意図
     # 分野の地図 (Issue C-2): ↗ アクション由来の構造化ペイロード
     # {node_id, level, skeleton_version, action, node_label, node_status, node_pill,
@@ -1074,6 +1078,22 @@ class CourseGroupPermissionOut(BaseModel):
 
 class CourseGroupPermissionUpsertRequest(BaseModel):
     """コースにグループ権限マッピングを追加/更新するリクエスト。"""
+    group_id: str
+    permission: str = "viewer"  # viewer | editor
+
+
+class DocumentGroupPermissionOut(BaseModel):
+    """ドキュメント（教材・パイプライン成果）に紐づくグループ権限（migration 035）。"""
+    document_id: str
+    group_id: str
+    group_name: str = ""
+    permission: str = "viewer"  # viewer | editor
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class DocumentGroupPermissionUpsertRequest(BaseModel):
+    """ドキュメントにグループ権限マッピングを追加/更新するリクエスト。"""
     group_id: str
     permission: str = "viewer"  # viewer | editor
 

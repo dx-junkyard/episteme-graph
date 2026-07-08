@@ -37,6 +37,8 @@ from services import (
     get_viewable_course_data,
     reanalyze_course_structure_background,
     update_background_task,
+    user_can_edit_document,
+    user_can_view_document,
 )
 from core.config import get_settings
 from core.concept_normalizer import normalize_concept, normalize_concepts, normalize_key
@@ -655,7 +657,15 @@ def _ensure_document_viewable(document_id: str, current_user: dict) -> list[dict
         raise HTTPException(status_code=404, detail="Document not found")
     if current_user.get("role") == ROLE_SYSTEM_ADMIN:
         return chunks
+    # migration 035: ドキュメント直接共有（所有者 / public / group / document_group_permissions）。
+    # document_id は UUID か material_id のどちらでも user_can_view_document が解決する。
+    if user_can_view_document(current_user["id"], document_id):
+        return chunks
     for chunk in chunks:
+        # chunk 側の material_id でも判定（document_id が UUID でない経路の保険）
+        mid = chunk.get("material_id")
+        if mid and user_can_view_document(current_user["id"], mid):
+            return chunks
         course_id = _find_viewable_course_for_chunk(chunk, current_user)
         if course_id:
             return chunks
@@ -668,7 +678,13 @@ def _ensure_document_editable(document_id: str, current_user: dict) -> list[dict
         raise HTTPException(status_code=404, detail="Document not found")
     if current_user.get("role") == ROLE_SYSTEM_ADMIN:
         return chunks
+    # migration 035: ドキュメント直接共有（所有者 / editor グループ）でも編集可
+    if user_can_edit_document(current_user["id"], document_id):
+        return chunks
     for chunk in chunks:
+        mid = chunk.get("material_id")
+        if mid and user_can_edit_document(current_user["id"], mid):
+            return chunks
         course_id = _find_course_for_chunk(chunk, current_user)
         if course_id:
             _ensure_editable(course_id, current_user)

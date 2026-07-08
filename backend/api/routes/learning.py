@@ -52,6 +52,7 @@ from services import (
     get_user_group_ids,
     log_unanswered_query,
     persist_chat_history,
+    truncate_chat_and_supersede,
     record_internalization,
     record_interest_trace,
     record_student_stumble_event,
@@ -1205,6 +1206,42 @@ def delete_chat_history(
     return {"status": "deleted"}
 
 
+@router.delete(
+    "/courses/{course_id}/topics/{topic_id}/chat/messages/{message_id}",
+)
+def delete_chat_message_from(
+    course_id: str,
+    topic_id: str,
+    message_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """機能3（削除）: 指定メッセージ以降の往復を本人の履歴から取り除く。
+
+    書き直しと同じ ``truncate_chat_and_supersede`` を使い、当該メッセージ・その回答・以降の
+    往復を履歴から削除し、派生 interest_traces を status='superseded' にする（保持はする。P4）。
+    再送は行わない（純粋な削除）。
+    """
+    course_data = get_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    try:
+        result = truncate_chat_and_supersede(
+            current_user["id"], course_id, topic_id, message_id
+        )
+    except Exception:
+        logger.exception(
+            "Failed to delete chat message for user=%s topic=%s msg=%s",
+            current_user["id"], topic_id, message_id,
+        )
+        raise HTTPException(status_code=500, detail="Failed to delete chat message")
+
+    if result is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    return {"status": "deleted", "removed_count": result["removed_count"]}
+
+
 # ---------------------------------------------------------------------------
 # 分野の地図 (Issue C-2/C-3) — ↗ アクションの型付き処理
 # ---------------------------------------------------------------------------
@@ -1374,6 +1411,17 @@ def learning_chat(
     course_data = get_course_data(current_user["id"], course_id)
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
+
+    # 機能3（書き直し）: replace_message_id 指定時は、その往復以降をサーバ正本の履歴から
+    # 取り除き、派生 interest_traces を supersede してから、message を同じ位置から再処理する。
+    # サーバの履歴を正本にするため、切り詰め済みの履歴で body.history を上書きし、
+    # 以降の文脈構築・永続化（persist_chat_history が全体を UPSERT）を一貫させる。
+    if body.replace_message_id:
+        _trunc = truncate_chat_and_supersede(
+            current_user["id"], course_id, topic_id, body.replace_message_id
+        )
+        if _trunc is not None:
+            body.history = _trunc["truncated_history"]
 
     topic_info = None
     for t in course_data.get("topics", []):

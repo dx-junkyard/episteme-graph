@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Episteme Graph — 管理画面</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-  <link rel="stylesheet" href="/css/styles.css?v=lecture-studio-wire-20260521-1">
+  <link rel="stylesheet" href="/css/styles.css?v=admin-tab-groups-20260708-1">
   <script defer src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
 </head>
 <body>
@@ -27,20 +27,56 @@
       </div>
     </div>
 
-    <!-- Tab navigation -->
+    <!-- Tab navigation — グループ別プルダウン（.admin-tab の data-tab / on は維持し、見せ方だけ束ねる） -->
     <div class="admin-tabs" id="adminTabs">
-      <button class="admin-tab on" data-tab="materials">教材管理</button>
-      <button class="admin-tab" data-tab="course-builder">コース構築</button>
-      <button class="admin-tab" data-tab="course-management">コース管理</button>
-      <button class="admin-tab" data-tab="lecture-studio">原稿スタジオ</button>
-      <button class="admin-tab" data-tab="stumbles">つまづきデータ</button>
-      <button class="admin-tab" data-tab="interest-dashboard">関心集約</button>
-      <button class="admin-tab" data-tab="schema-proposals">スキーマ提案</button>
-      <button class="admin-tab" data-tab="atlas">分野の地図</button>
-      <button class="admin-tab" data-tab="doubt-atlas">前提の地図</button>
-      <button class="admin-tab" data-tab="groups">グループ管理</button>
-      <button class="admin-tab" data-tab="system-stats" id="tab-btn-system-stats" style="display:none">システム統計</button>
-      <button class="admin-tab" data-tab="error-analysis" id="tab-btn-error-analysis" style="display:none">エラー解析</button>
+      <div class="admin-tab-group" data-group="content">
+        <button class="admin-tab-group-trigger" type="button" aria-haspopup="true" aria-expanded="false">
+          <span class="admin-tab-group-label">コンテンツ</span>
+          <span class="admin-tab-group-current"></span>
+          <span class="admin-tab-group-caret" aria-hidden="true">▾</span>
+        </button>
+        <div class="admin-tab-menu" id="admin-tab-menu-content" role="menu">
+          <button class="admin-tab on" data-tab="materials" role="menuitem">教材管理</button>
+          <button class="admin-tab" data-tab="course-builder" role="menuitem">コース構築</button>
+          <button class="admin-tab" data-tab="course-management" role="menuitem">コース管理</button>
+          <button class="admin-tab" data-tab="lecture-studio" role="menuitem">原稿スタジオ</button>
+        </div>
+      </div>
+      <div class="admin-tab-group" data-group="insights">
+        <button class="admin-tab-group-trigger" type="button" aria-haspopup="true" aria-expanded="false">
+          <span class="admin-tab-group-label">学習インサイト</span>
+          <span class="admin-tab-group-current"></span>
+          <span class="admin-tab-group-caret" aria-hidden="true">▾</span>
+        </button>
+        <div class="admin-tab-menu" id="admin-tab-menu-insights" role="menu">
+          <button class="admin-tab" data-tab="stumbles" role="menuitem">つまづきデータ</button>
+          <button class="admin-tab" data-tab="interest-dashboard" role="menuitem">関心集約</button>
+          <button class="admin-tab" data-tab="atlas" role="menuitem">分野の地図</button>
+          <button class="admin-tab" data-tab="doubt-atlas" role="menuitem">前提の地図</button>
+        </div>
+      </div>
+      <div class="admin-tab-group" data-group="knowledge">
+        <button class="admin-tab-group-trigger" type="button" aria-haspopup="true" aria-expanded="false">
+          <span class="admin-tab-group-label">ナレッジ基盤</span>
+          <span class="admin-tab-group-current"></span>
+          <span class="admin-tab-group-caret" aria-hidden="true">▾</span>
+        </button>
+        <div class="admin-tab-menu" id="admin-tab-menu-knowledge" role="menu">
+          <button class="admin-tab" data-tab="schema-proposals" role="menuitem">スキーマ提案</button>
+        </div>
+      </div>
+      <div class="admin-tab-group" data-group="ops">
+        <button class="admin-tab-group-trigger" type="button" aria-haspopup="true" aria-expanded="false">
+          <span class="admin-tab-group-label">運用</span>
+          <span class="admin-tab-group-current"></span>
+          <span class="admin-tab-group-caret" aria-hidden="true">▾</span>
+        </button>
+        <div class="admin-tab-menu" id="admin-tab-menu-ops" role="menu">
+          <button class="admin-tab" data-tab="groups" role="menuitem">グループ管理</button>
+          <button class="admin-tab" data-tab="system-stats" id="tab-btn-system-stats" role="menuitem" style="display:none">システム統計</button>
+          <button class="admin-tab" data-tab="error-analysis" id="tab-btn-error-analysis" role="menuitem" style="display:none">エラー解析</button>
+        </div>
+      </div>
     </div>
 
     <!-- D層（Doubt Layer）— 前提の地図タブ（Field Atlas とは別機能。中身は doubt-atlas.js が描画） -->

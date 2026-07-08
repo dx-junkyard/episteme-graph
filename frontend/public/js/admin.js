@@ -185,16 +185,70 @@
     _tabActivateCallbacks[tabName].push(fn);
   }
 
+  // Close every open group dropdown.
+  function closeAllTabMenus() {
+    document.querySelectorAll(".admin-tab-group.open").forEach(function (g) {
+      g.classList.remove("open");
+      var trigger = g.querySelector(".admin-tab-group-trigger");
+      if (trigger) trigger.setAttribute("aria-expanded", "false");
+    });
+  }
+
+  // Mark the group that owns the active tab, and surface the current sub-tab
+  // label on its trigger so the selection stays visible when the menu is closed.
+  function _syncActiveGroup(tabName) {
+    document.querySelectorAll(".admin-tab-group").forEach(function (g) {
+      var activeBtn = g.querySelector('.admin-tab[data-tab="' + tabName + '"]');
+      g.classList.toggle("active-group", !!activeBtn);
+      var cur = g.querySelector(".admin-tab-group-current");
+      if (cur) cur.textContent = activeBtn ? activeBtn.textContent : "";
+    });
+  }
+
+  // Core activation: toggle .on on the tab button, show its panel, sync group.
+  // Shared by the click handler and the public activateTabView().
+  function _applyActiveTab(tabName) {
+    document.querySelectorAll(".admin-tab").forEach(function (b) {
+      b.classList.toggle("on", b.dataset.tab === tabName);
+    });
+    document.querySelectorAll(".admin-panel").forEach(function (p) { p.classList.remove("vis"); });
+    var target = document.getElementById("tab-" + tabName);
+    if (target) target.classList.add("vis");
+    _syncActiveGroup(tabName);
+  }
+
+  // Hide a group's trigger when it has no visible tabs (e.g. SYSTEM_ADMIN hides
+  // all コンテンツ tabs). Call after role-based visibility changes.
+  function refreshTabGroupVisibility() {
+    document.querySelectorAll(".admin-tab-group").forEach(function (g) {
+      var tabs = g.querySelectorAll(".admin-tab");
+      var anyVisible = false;
+      tabs.forEach(function (b) { if (b.style.display !== "none") anyVisible = true; });
+      g.style.display = anyVisible ? "" : "none";
+    });
+  }
+
   function initTabs() {
     document.getElementById("adminTabs").addEventListener("click", function (e) {
+      // Group trigger → toggle its dropdown (accordion: only one open at a time)
+      var trigger = e.target.closest(".admin-tab-group-trigger");
+      if (trigger) {
+        var group = trigger.parentElement;
+        var wasOpen = group.classList.contains("open");
+        closeAllTabMenus();
+        if (!wasOpen) {
+          group.classList.add("open");
+          trigger.setAttribute("aria-expanded", "true");
+        }
+        return;
+      }
+
+      // Tab menu item → activate the tab and close the dropdown
       var btn = e.target.closest(".admin-tab");
       if (!btn || !btn.dataset.tab) return;
       if (btn.style.display === "none") return;
-      this.querySelectorAll(".admin-tab").forEach(function (b) { b.classList.remove("on"); });
-      btn.classList.add("on");
-      document.querySelectorAll(".admin-panel").forEach(function (p) { p.classList.remove("vis"); });
-      var target = document.getElementById("tab-" + btn.dataset.tab);
-      if (target) target.classList.add("vis");
+      _applyActiveTab(btn.dataset.tab);
+      closeAllTabMenus();
 
       // Fire tab activation callbacks
       var cbs = _tabActivateCallbacks[btn.dataset.tab];
@@ -202,15 +256,20 @@
         cbs.forEach(function (fn) { fn(); });
       }
     });
+
+    // Click outside any group closes the open dropdown
+    document.addEventListener("click", function (e) {
+      if (!e.target.closest(".admin-tab-group")) closeAllTabMenus();
+    });
+
+    // Reflect the initially-active tab (HTML default, or role-based default) on its group
+    var initiallyOn = document.querySelector(".admin-tab.on");
+    if (initiallyOn && initiallyOn.dataset.tab) _syncActiveGroup(initiallyOn.dataset.tab);
   }
 
   function activateTabView(tabName) {
-    document.querySelectorAll(".admin-tab").forEach(function (b) {
-      b.classList.toggle("on", b.dataset.tab === tabName);
-    });
-    document.querySelectorAll(".admin-panel").forEach(function (p) { p.classList.remove("vis"); });
-    var target = document.getElementById("tab-" + tabName);
-    if (target) target.classList.add("vis");
+    _applyActiveTab(tabName);
+    closeAllTabMenus();
   }
 
   // ── Materials Management ──────────────────────────────────────────
@@ -347,10 +406,15 @@
       if (m.status === "failed" && m.document_id) {
         resumeBtn = '<button class="admin-resume-analysis-btn" data-document-id="' + escHtml(m.document_id) + '" data-filename="' + escHtml(m.filename || m.title || "教材") + '" title="保存済みPDFから解析を再開">解析再開</button>';
       }
+      // 機能1: 解析成果をグループへ共有（document_id が必要）
+      var shareBtn = m.document_id
+        ? '<button class="admin-share-doc-btn" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="解析成果をグループへ共有" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">共有</button>'
+        : "";
       html += '<td><div class="materials-action-cell">' +
         materialPipelineMenuHtml(m) +
         '<button class="admin-pdf-reupload-btn' + pdfBtnClass + '" data-material-id="' + escHtml(m.material_id) + '" title="' + escHtml(pdfBtnTitle) + '">' + pdfBtnLabel + '</button>' +
         resumeBtn +
+        shareBtn +
         '<button class="admin-delete-btn" data-material-id="' + escHtml(m.material_id) + '" data-material-title="' + escHtml(m.title) + '" style="background:none;border:1px solid var(--color-text-danger);color:var(--color-text-danger);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">削除</button>' +
         '</div></td>';
       html += "</tr>";
@@ -368,6 +432,13 @@
         var mid = this.getAttribute("data-material-id");
         var title = this.getAttribute("data-material-title");
         openDeleteConfirmModal("material", mid, title);
+      });
+    });
+
+    // 機能1: 解析成果のグループ共有ボタン
+    tbody.querySelectorAll(".admin-share-doc-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        openDocumentShareModal(this.getAttribute("data-document-id"), this.getAttribute("data-title"));
       });
     });
 
@@ -3323,6 +3394,9 @@
     }
 
     var tabsEl = document.getElementById("adminTabs");
+    // 動的タブはグループのプルダウンメニューへ入れる（無ければタブバー直下にフォールバック）
+    var opsMenu = document.getElementById("admin-tab-menu-ops") || tabsEl;
+    var knowledgeMenu = document.getElementById("admin-tab-menu-knowledge") || tabsEl;
 
     if (state.role === "SYSTEM_ADMIN") {
       ["materials", "course-builder", "course-management", "lecture-studio"].forEach(function (tabName) {
@@ -3342,8 +3416,9 @@
       var studentTab = document.createElement("button");
       studentTab.className = "admin-tab";
       studentTab.dataset.tab = "students";
+      studentTab.setAttribute("role", "menuitem");
       studentTab.textContent = "学生管理";
-      tabsEl.appendChild(studentTab);
+      opsMenu.appendChild(studentTab);
     }
 
     // Show teacher management tab for SYSTEM_ADMIN only
@@ -3351,8 +3426,9 @@
       var teacherTab = document.createElement("button");
       teacherTab.className = "admin-tab";
       teacherTab.dataset.tab = "teachers";
+      teacherTab.setAttribute("role", "menuitem");
       teacherTab.textContent = "教員管理";
-      tabsEl.appendChild(teacherTab);
+      opsMenu.appendChild(teacherTab);
 
       var ssTabBtn = document.getElementById("tab-btn-system-stats");
       if (ssTabBtn) ssTabBtn.style.display = "";
@@ -3363,8 +3439,9 @@
       var schemaTab = document.createElement("button");
       schemaTab.className = "admin-tab";
       schemaTab.dataset.tab = "schema";
+      schemaTab.setAttribute("role", "menuitem");
       schemaTab.textContent = "スキーマ管理";
-      tabsEl.appendChild(schemaTab);
+      knowledgeMenu.appendChild(schemaTab);
     }
 
     // Create schema management panel
@@ -3453,6 +3530,9 @@
         '</div>';
       tabsEl.parentElement.appendChild(teacherPanel);
     }
+
+    // 役割ごとの表示調整が終わったら、タブが1つも無いグループの見出しを隠す
+    refreshTabGroupVisibility();
 
     return true;
   }
@@ -10161,6 +10241,134 @@
       .catch(function (e) {
         setPermStatus(e.message || "削除に失敗しました", "error");
       });
+  }
+
+  // ── 機能1: ドキュメント（解析成果）のグループ共有（migration 035）─────────
+  // 教材管理タブの「共有」ボタンから開く。コース共有モーダルと同型。
+  var _docShareState = { documentId: null, title: "", perms: [], groups: [] };
+
+  function openDocumentShareModal(documentId, title) {
+    _docShareState.documentId = documentId;
+    _docShareState.title = title || "";
+
+    var existing = document.getElementById("doc-share-modal");
+    if (existing) existing.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = "doc-share-modal";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+    overlay.innerHTML =
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:24px;min-width:480px;max-width:640px;max-height:80vh;display:flex;flex-direction:column">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">' +
+          '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">解析成果のグループ共有</h3>' +
+          '<button id="doc-share-close" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
+        '</div>' +
+        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 12px">教材「' + escHtml(title || "") + '」の解析成果（理論コンポーネント・グラフ・Claim）を指定グループへ共有します。viewer=閲覧・引用／editor=編集・再解析。</p>' +
+        '<div id="doc-share-status" class="upload-status" style="display:none;margin-bottom:12px"></div>' +
+        '<h4 style="font-size:13px;margin:0 0 8px 0;color:var(--color-text-secondary)">現在の共有設定</h4>' +
+        '<div id="doc-share-current" style="margin-bottom:16px;overflow-y:auto;flex:1"></div>' +
+        '<hr style="border:none;border-top:1px solid var(--color-border);margin:4px 0 12px 0">' +
+        '<h4 style="font-size:13px;margin:0 0 8px 0;color:var(--color-text-secondary)">グループを追加</h4>' +
+        '<div style="display:flex;gap:8px;align-items:center">' +
+          '<select id="doc-share-group" style="flex:1;padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)"></select>' +
+          '<select id="doc-share-role" style="padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)">' +
+            '<option value="viewer">viewer (閲覧・引用)</option>' +
+            '<option value="editor">editor (編集・再解析)</option>' +
+          '</select>' +
+          '<button id="doc-share-add" class="admin-action-btn" style="background:var(--color-text-info);color:#fff">追加</button>' +
+        '</div>' +
+      '</div>';
+
+    document.body.appendChild(overlay);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) overlay.remove(); });
+    document.getElementById("doc-share-close").addEventListener("click", function () { overlay.remove(); });
+    document.getElementById("doc-share-add").addEventListener("click", addDocumentShare);
+
+    loadDocumentShareModal();
+  }
+
+  function setDocShareStatus(msg, kind) {
+    var el = document.getElementById("doc-share-status");
+    if (!el) return;
+    if (!msg) { el.style.display = "none"; return; }
+    el.style.display = "block";
+    el.textContent = msg;
+    el.className = "upload-status upload-status-" + (kind || "info");
+  }
+
+  function loadDocumentShareModal() {
+    var docId = _docShareState.documentId;
+    Promise.all([
+      apiFetch("/admin/documents/" + encodeURIComponent(docId) + "/groups").then(function (r) { return r.json(); }),
+      apiFetch("/groups").then(function (r) { return r.json(); }),
+    ]).then(function (results) {
+      _docShareState.perms = results[0] || [];
+      _docShareState.groups = results[1] || [];
+      renderDocShareCurrent();
+      renderDocShareDropdown();
+    }).catch(function () { setDocShareStatus("共有設定の取得に失敗しました", "error"); });
+  }
+
+  function renderDocShareCurrent() {
+    var el = document.getElementById("doc-share-current");
+    if (!el) return;
+    if (!_docShareState.perms.length) {
+      el.innerHTML = '<p style="color:var(--color-text-tertiary);font-size:12px;margin:0">まだ共有グループは設定されていません。</p>';
+      return;
+    }
+    var html = '<table class="admin-table"><thead><tr><th>グループ</th><th>権限</th><th>操作</th></tr></thead><tbody>';
+    _docShareState.perms.forEach(function (p) {
+      html += '<tr><td>' + escHtml(p.group_name || p.group_id) + '</td><td>' + escHtml(p.permission) + '</td>' +
+        '<td><button class="doc-share-remove admin-action-btn" data-gid="' + escHtml(p.group_id) + '" style="background:var(--color-text-danger);color:#fff">削除</button></td></tr>';
+    });
+    html += "</tbody></table>";
+    el.innerHTML = html;
+    el.querySelectorAll(".doc-share-remove").forEach(function (btn) {
+      btn.addEventListener("click", function () { removeDocumentShare(this.getAttribute("data-gid")); });
+    });
+  }
+
+  function renderDocShareDropdown() {
+    var sel = document.getElementById("doc-share-group");
+    if (!sel) return;
+    var assigned = {};
+    _docShareState.perms.forEach(function (p) { assigned[p.group_id] = true; });
+    var html = '<option value="">グループを選択...</option>';
+    _docShareState.groups.forEach(function (g) {
+      var suffix = assigned[g.id] ? " (設定済み)" : "";
+      html += '<option value="' + escHtml(g.id) + '">' + escHtml(g.name) + suffix + '</option>';
+    });
+    sel.innerHTML = html;
+  }
+
+  function addDocumentShare() {
+    var groupSel = document.getElementById("doc-share-group");
+    var roleSel = document.getElementById("doc-share-role");
+    if (!groupSel.value) { setDocShareStatus("グループを選択してください", "error"); return; }
+    setDocShareStatus("追加中...", "info");
+    apiFetch("/admin/documents/" + encodeURIComponent(_docShareState.documentId) + "/groups", {
+      method: "POST",
+      body: JSON.stringify({ group_id: groupSel.value, permission: roleSel.value }),
+    }).then(function (res) {
+      if (!res.ok) return res.json().then(function (d) { throw new Error(d.detail || "追加に失敗しました"); });
+      return res.json();
+    }).then(function () {
+      setDocShareStatus("共有しました", "success");
+      loadDocumentShareModal();
+    }).catch(function (e) { setDocShareStatus(e.message || "追加に失敗しました", "error"); });
+  }
+
+  function removeDocumentShare(groupId) {
+    setDocShareStatus("削除中...", "info");
+    apiFetch("/admin/documents/" + encodeURIComponent(_docShareState.documentId) + "/groups/" + encodeURIComponent(groupId), {
+      method: "DELETE",
+    }).then(function (res) {
+      if (!res.ok) return res.json().then(function (d) { throw new Error(d.detail || "削除に失敗しました"); });
+      return res.json();
+    }).then(function () {
+      setDocShareStatus("削除しました", "success");
+      loadDocumentShareModal();
+    }).catch(function (e) { setDocShareStatus(e.message || "削除に失敗しました", "error"); });
   }
 
   // ── System Statistics (Issue #144, SYSTEM_ADMIN only) ──────────────

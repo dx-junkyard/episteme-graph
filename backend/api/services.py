@@ -692,6 +692,189 @@ def user_can_access_group(user_id: str, group_id: str | None) -> bool:
         session.close()
 
 
+# ---------------------------------------------------------------------------
+# ドキュメント（教材・パイプライン成果）× グループ 共有（migration 035）
+# ---------------------------------------------------------------------------
+# パイプライン成果（theory_components / theory_claims / theory_component_graphs /
+# document_analysis_runs）はすべて document_id 由来なので、権限はドキュメント単位に
+# 集約し、成果はそれを継承する（course_group_permissions の移植）。
+
+
+def _resolve_document(document_ref: str) -> dict | None:
+    """document_ref（documents.id UUID か source_path=material_id）から doc メタを解決する。"""
+    if not document_ref:
+        return None
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT id::text, source_path,
+                       uploaded_by::text,
+                       COALESCE(visibility, 'private'),
+                       group_id::text
+                FROM documents
+                WHERE id::text = :ref OR source_path = :ref
+                LIMIT 1
+            """),
+            {"ref": document_ref},
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "source_path": row[1] or "",
+            "uploaded_by": row[2],
+            "visibility": row[3] or "private",
+            "group_id": row[4],
+        }
+    finally:
+        session.close()
+
+
+def _has_document_group_permission(user_id: str, document_uuid: str, permissions: tuple[str, ...]) -> bool:
+    """ユーザーが document_group_permissions 経由で当該権限を持つか。"""
+    if not permissions:
+        return False
+    session = _pg_session()
+    try:
+        ph = ", ".join(f":p{i}" for i in range(len(permissions)))
+        params = {"uid": user_id, "did": document_uuid}
+        for i, p in enumerate(permissions):
+            params[f"p{i}"] = p
+        row = session.execute(
+            sa_text(f"""
+                SELECT 1
+                FROM document_group_permissions dgp
+                JOIN group_members gm ON gm.group_id = dgp.group_id
+                WHERE dgp.document_id = CAST(:did AS uuid)
+                  AND dgp.permission IN ({ph})
+                  AND gm.user_id = CAST(:uid AS uuid)
+                LIMIT 1
+            """),
+            params,
+        ).fetchone()
+        return row is not None
+    finally:
+        session.close()
+
+
+def user_owns_document(user_id: str, document_ref: str) -> bool:
+    """ユーザーがドキュメント（教材）の所有者（uploaded_by）か。共有設定の変更に使う。"""
+    doc = _resolve_document(document_ref)
+    return bool(doc and doc.get("uploaded_by") and doc["uploaded_by"] == user_id)
+
+
+def user_can_view_document(user_id: str, document_ref: str) -> bool:
+    """ユーザーがドキュメントの解析成果を閲覧できるか。
+
+    - 所有者
+    - visibility='public'
+    - visibility='group' の単一グループ共有（既存）に所属
+    - document_group_permissions の viewer/editor グループに所属（migration 035）
+    のいずれか。コース経由の閲覧可否（既存の course_group_permissions）は
+    呼び出し側（theory_components._ensure_document_viewable）が別途フォールバックする。
+    """
+    doc = _resolve_document(document_ref)
+    if not doc:
+        return False
+    if doc.get("uploaded_by") and doc["uploaded_by"] == user_id:
+        return True
+    if doc.get("visibility") == "public":
+        return True
+    if doc.get("visibility") == "group" and doc.get("group_id") and user_can_access_group(user_id, doc["group_id"]):
+        return True
+    return _has_document_group_permission(user_id, doc["id"], ("viewer", "editor"))
+
+
+def user_can_edit_document(user_id: str, document_ref: str) -> bool:
+    """ユーザーがドキュメントの解析成果を編集（再解析・説明追加等）できるか。
+
+    - 所有者
+    - document_group_permissions の editor グループに所属
+    のいずれか。
+    """
+    doc = _resolve_document(document_ref)
+    if not doc:
+        return False
+    if doc.get("uploaded_by") and doc["uploaded_by"] == user_id:
+        return True
+    return _has_document_group_permission(user_id, doc["id"], ("editor",))
+
+
+def get_document_group_permissions(document_ref: str) -> list[dict]:
+    """ドキュメントに紐づくグループ権限マッピング一覧を返す（グループ名付き）。"""
+    doc = _resolve_document(document_ref)
+    if not doc:
+        return []
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT dgp.document_id::text,
+                       dgp.group_id,
+                       COALESCE(g.name, '') AS group_name,
+                       dgp.permission,
+                       dgp.created_at,
+                       dgp.updated_at
+                FROM document_group_permissions dgp
+                LEFT JOIN groups g ON g.id = dgp.group_id
+                WHERE dgp.document_id = CAST(:did AS uuid)
+                ORDER BY dgp.permission, g.name
+            """),
+            {"did": doc["id"]},
+        ).fetchall()
+    finally:
+        session.close()
+    return [
+        {
+            "document_id": r[0],
+            "group_id": str(r[1]),
+            "group_name": r[2] or "",
+            "permission": r[3],
+            "created_at": r[4].isoformat() if r[4] else "",
+            "updated_at": r[5].isoformat() if r[5] else "",
+        }
+        for r in rows
+    ]
+
+
+def record_review_event(
+    entity_type: str,
+    entity_id: str,
+    old_status: str,
+    new_status: str,
+    user_id: str | None,
+    metadata: dict | None = None,
+) -> None:
+    """theory_review_events に監査行を1件追記する（best-effort）。
+
+    C層/D層の `_record_review_event` と同じ表を使う共通ヘルパー。共有付与・解除など
+    admin ルータからの監査記録に使う。
+    """
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO theory_review_events (entity_type, entity_id, old_status, new_status, changed_by, metadata)
+                VALUES (:entity_type, :entity_id, :old_status, :new_status, CAST(:changed_by AS uuid), CAST(:metadata AS jsonb))
+            """),
+            {
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "old_status": old_status or "",
+                "new_status": new_status or "",
+                "changed_by": user_id or None,
+                "metadata": json.dumps(metadata or {}, ensure_ascii=False),
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.warning("Failed to record review event for %s %s", entity_type, entity_id, exc_info=True)
+    finally:
+        session.close()
+
+
 def delete_course_data(user_id: str, course_id: str) -> bool:
     """LearningCourse レコードを削除する。"""
     session = _pg_session()
@@ -1457,6 +1640,110 @@ def persist_chat_history(
     }
 
 
+def _split_history_at(history: list, from_message_id: str):
+    """``history`` を ``from_message_id`` の位置で分割する（純粋関数・DB非依存）。
+
+    Returns ``(truncated, removed, removed_ids)``。id が見つからなければ ``(None, None, None)``。
+    truncate_chat_and_supersede から切り出し、単体テスト可能にしている。
+    """
+    index = None
+    for i, m in enumerate(history or []):
+        if isinstance(m, dict) and m.get("id") == from_message_id:
+            index = i
+            break
+    if index is None:
+        return None, None, None
+    removed = history[index:]
+    truncated = history[:index]
+    removed_ids = [m.get("id") for m in removed if isinstance(m, dict) and m.get("id")]
+    return truncated, removed, removed_ids
+
+
+def truncate_chat_and_supersede(
+    user_id: str,
+    course_id: str,
+    topic_id: str,
+    from_message_id: str,
+) -> dict | None:
+    """機能3: ``from_message_id`` 以降の往復を履歴から取り除き、派生痕跡を supersede する。
+
+    - ``learning_chat_history.history`` から ``from_message_id`` の位置以降（当該メッセージを
+      含む）を切り詰める（空になれば行削除）。
+    - 取り除いたメッセージ id を ``payload.message_id`` に持つ ``interest_traces`` を
+      ``status='superseded'`` にする（削除せず保持。P4）。以降の worker / digest は superseded を除外する。
+
+    サーバ側の永続履歴を正本として位置を決めるため、クライアントの history は信用しない。
+    戻り値 ``{"truncated_history": [...], "removed_ids": [...], "removed_count": n}``。
+    ``from_message_id`` が履歴に無ければ ``None``（呼び出し側が 404 等を返す）。
+    """
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("""
+                SELECT history FROM learning_chat_history
+                WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid AND topic_id = :tid
+                LIMIT 1
+            """),
+            {"uid": user_id, "cid": course_id, "tid": topic_id},
+        ).fetchone()
+        history = record[0] if record and isinstance(record[0], list) else []
+
+        truncated, removed, removed_ids = _split_history_at(history, from_message_id)
+        if truncated is None:
+            return None
+
+        if truncated:
+            session.execute(
+                sa_text("""
+                    UPDATE learning_chat_history
+                    SET history = CAST(:history AS jsonb), updated_at = now()
+                    WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid AND topic_id = :tid
+                """),
+                {"uid": user_id, "cid": course_id, "tid": topic_id,
+                 "history": json.dumps(truncated, ensure_ascii=False)},
+            )
+        else:
+            session.execute(
+                sa_text("""
+                    DELETE FROM learning_chat_history
+                    WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid AND topic_id = :tid
+                """),
+                {"uid": user_id, "cid": course_id, "tid": topic_id},
+            )
+
+        # 派生痕跡を supersede（削除せず保持。P4）。worker/digest は superseded を拾わない。
+        if removed_ids:
+            ph = ", ".join(f":rid_{i}" for i in range(len(removed_ids)))
+            params = {"uid": user_id, "cid": course_id}
+            for i, rid in enumerate(removed_ids):
+                params[f"rid_{i}"] = rid
+            session.execute(
+                sa_text(f"""
+                    UPDATE interest_traces
+                    SET status = 'superseded', last_seen_at = now()
+                    WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
+                      AND payload->>'message_id' IN ({ph})
+                      AND status <> 'superseded'
+                """),
+                params,
+            )
+        session.commit()
+        return {
+            "truncated_history": truncated,
+            "removed_ids": removed_ids,
+            "removed_count": len(removed),
+        }
+    except Exception:
+        session.rollback()
+        logger.exception(
+            "Failed to truncate chat history for user=%s topic=%s from=%s",
+            user_id, topic_id, from_message_id,
+        )
+        raise
+    finally:
+        session.close()
+
+
 # ---------------------------------------------------------------------------
 # Misconception detection
 # ---------------------------------------------------------------------------
@@ -1554,6 +1841,7 @@ _TRACE_STATUSES = (
     "articulated",    # 本人が自分の言葉で編集済み
     "connected",      # グラフ上の node/edge に接続済み
     "abstracted",     # 新しい抽象化・教材提案へ昇格
+    "superseded",     # 機能3: メッセージ書き直し/削除で往復ごと差し替えられた（削除しない。P4）
 )
 
 
@@ -1620,6 +1908,8 @@ def get_interest_traces(user_id: str, course_id: str, topic_id: str | None = Non
                 WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
                   -- tension の未確定候補・棄却は問いの軌跡に出さない（提示はダイジェスト経由のみ。P1/P7）
                   AND NOT (kind = 'tension' AND status IN ('candidate', 'dismissed'))
+                  -- 機能3: 書き直し/削除で往復ごと差し替えられた痕跡は出さない（保持はする。P4）
+                  AND status <> 'superseded'
                 ORDER BY
                     CASE status WHEN 'revisited' THEN 0 WHEN 'open' THEN 1 ELSE 2 END,
                     created_at DESC
@@ -2133,6 +2423,7 @@ def get_anchor_digest(user_id: str, course_id: str) -> dict:
                 FROM interest_traces
                 WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
                   AND kind = 'question'
+                  AND status <> 'superseded'  -- 機能3: 差し替え済み往復の帰属候補は出さない
                   AND payload->'structure_anchor'->>'attribution_source' = 'llm_candidate'
                   AND COALESCE(payload->'structure_anchor'->>'status', 'active') = 'active'
                   AND COALESCE((payload->'structure_anchor'->>'confidence')::float, 0.0) >= :minc

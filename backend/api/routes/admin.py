@@ -34,6 +34,8 @@ from schemas import (
     CourseGroupPermissionUpsertRequest,
     CreateUserRequest,
     DeleteConfirmRequest,
+    DocumentGroupPermissionOut,
+    DocumentGroupPermissionUpsertRequest,
     MaterialOut,
     ReextractionJobOut,
     SimulationResponse,
@@ -46,17 +48,22 @@ from schemas import (
 from services import (
     _material_lock,
     _material_status,
+    _resolve_document,
     create_background_task,
     extract_pdf_pages,
     get_background_task,
     get_course_group_permissions,
+    get_document_group_permissions,
     get_user_group_ids,
     process_material_background,
+    record_review_event,
     save_cb_session,
     user_can_access_group,
     user_can_edit_course,
     user_can_view_course,
+    user_can_view_document,
     user_owns_course,
+    user_owns_document,
 )
 from core.llm import generate_text
 from core.meta_analyzer import (
@@ -463,6 +470,7 @@ def list_materials(
     params: dict = {"user_id": current_user["id"]}
     group_clause = "FALSE"
     course_mat_clause = "FALSE"
+    doc_perm_clause = "FALSE"
 
     if user_groups:
         gph = ", ".join(f"CAST(:g_{i} AS uuid)" for i in range(len(user_groups)))
@@ -480,6 +488,17 @@ def list_materials(
                   AND cgp.permission IN ('viewer', 'editor')
                   AND lc.data IS NOT NULL
                   AND jsonb_typeof(lc.data->'sources') = 'array'
+            )
+        """
+        # migration 035: 解析成果をグループへ直接共有（document_group_permissions 経由）
+        doc_perm_clause = f"""
+            d.id IN (
+                SELECT dgp.document_id
+                FROM document_group_permissions dgp
+                JOIN group_members gm ON gm.group_id = dgp.group_id
+                WHERE gm.user_id = CAST(:user_id AS uuid)
+                  AND dgp.group_id IN ({gph})
+                  AND dgp.permission IN ('viewer', 'editor')
             )
         """
 
@@ -504,6 +523,7 @@ def list_materials(
                       OR d.visibility = 'public'
                       OR {group_clause}
                       OR {course_mat_clause}
+                      OR {doc_perm_clause}
                   )
                 ORDER BY d.created_at DESC
             """),
@@ -696,6 +716,7 @@ def get_material(
     params: dict = {"user_id": current_user["id"], "material_id": material_id}
     group_clause = "FALSE"
     course_mat_clause = "FALSE"
+    doc_perm_clause = "FALSE"
 
     if user_groups:
         gph = ", ".join(f"CAST(:g_{i} AS uuid)" for i in range(len(user_groups)))
@@ -713,6 +734,17 @@ def get_material(
                   AND cgp.permission IN ('viewer', 'editor')
                   AND lc.data IS NOT NULL
                   AND jsonb_typeof(lc.data->'sources') = 'array'
+            )
+        """
+        # migration 035: 解析成果のグループ直接共有（document_group_permissions 経由）
+        doc_perm_clause = f"""
+            d.id IN (
+                SELECT dgp.document_id
+                FROM document_group_permissions dgp
+                JOIN group_members gm ON gm.group_id = dgp.group_id
+                WHERE gm.user_id = CAST(:user_id AS uuid)
+                  AND dgp.group_id IN ({gph})
+                  AND dgp.permission IN ('viewer', 'editor')
             )
         """
 
@@ -735,6 +767,7 @@ def get_material(
                       OR d.visibility = 'public'
                       OR {group_clause}
                       OR {course_mat_clause}
+                      OR {doc_perm_clause}
                   )
                 LIMIT 1
             """),
@@ -2163,6 +2196,139 @@ def delete_course_group_permission(
         course_id, group_id, current_user["id"],
     )
     return {"course_id": course_id, "group_id": group_id, "deleted": True}
+
+
+# ---------------------------------------------------------------------------
+# ドキュメント（教材・パイプライン成果）× グループ 共有（migration 035）
+# ---------------------------------------------------------------------------
+# コースを作らずに解析成果（theory_components / theory_claims / graphs / analysis_runs、
+# すべて document_id 由来）を指定グループへ共有する。course_group_permissions の移植。
+
+
+@router.get(
+    "/documents/{document_id}/groups",
+    response_model=list[DocumentGroupPermissionOut],
+)
+def list_document_group_permissions(
+    document_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> list[DocumentGroupPermissionOut]:
+    """ドキュメントに紐づくグループ共有設定の一覧を返す。
+
+    閲覧可能な者（所有者・共有先グループメンバー）は現在の設定を参照できる。変更は所有者のみ。
+    """
+    if not user_can_view_document(current_user["id"], document_id):
+        raise HTTPException(status_code=404, detail="Document not found")
+    rows = get_document_group_permissions(document_id)
+    return [DocumentGroupPermissionOut(**r) for r in rows]
+
+
+@router.post(
+    "/documents/{document_id}/groups",
+    response_model=DocumentGroupPermissionOut,
+    status_code=201,
+)
+def upsert_document_group_permission(
+    document_id: str,
+    body: DocumentGroupPermissionUpsertRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> DocumentGroupPermissionOut:
+    """ドキュメントの解析成果をグループへ共有する（既存なら権限を更新）。共有設定の変更は所有者のみ。"""
+    if body.permission not in ("viewer", "editor"):
+        raise HTTPException(
+            status_code=400, detail="permission must be 'viewer' or 'editor'",
+        )
+    doc = _resolve_document(document_id)
+    if not doc or not user_owns_document(current_user["id"], document_id):
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    session = _pg_session()
+    try:
+        group_row = session.execute(
+            sa_text("SELECT name FROM groups WHERE id = CAST(:gid AS uuid) LIMIT 1"),
+            {"gid": body.group_id},
+        ).fetchone()
+        if not group_row:
+            raise HTTPException(status_code=404, detail="Group not found")
+
+        row = session.execute(
+            sa_text("""
+                INSERT INTO document_group_permissions (document_id, group_id, permission)
+                VALUES (CAST(:did AS uuid), CAST(:gid AS uuid), :permission)
+                ON CONFLICT (document_id, group_id) DO UPDATE
+                SET permission = EXCLUDED.permission,
+                    updated_at = now()
+                RETURNING document_id, group_id, permission, created_at, updated_at
+            """),
+            {"did": doc["id"], "gid": body.group_id, "permission": body.permission},
+        ).fetchone()
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    # 監査: 共有付与を theory_review_events に記録（entity_type='document_share'）
+    record_review_event(
+        "document_share", doc["id"], "", body.permission, current_user["id"],
+        {"group_id": body.group_id, "action": "grant"},
+    )
+    logger.info(
+        "Document %s group permission set: group=%s permission=%s by user=%s",
+        doc["id"], body.group_id, body.permission, current_user["id"],
+    )
+    return DocumentGroupPermissionOut(
+        document_id=str(row[0]),
+        group_id=str(row[1]),
+        group_name=group_row[0] or "",
+        permission=row[2],
+        created_at=row[3].isoformat() if row[3] else "",
+        updated_at=row[4].isoformat() if row[4] else "",
+    )
+
+
+@router.delete("/documents/{document_id}/groups/{group_id}")
+def delete_document_group_permission(
+    document_id: str,
+    group_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """ドキュメントからグループ共有を解除する。共有設定の変更は所有者のみ。"""
+    doc = _resolve_document(document_id)
+    if not doc or not user_owns_document(current_user["id"], document_id):
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    session = _pg_session()
+    try:
+        result = session.execute(
+            sa_text("""
+                DELETE FROM document_group_permissions
+                WHERE document_id = CAST(:did AS uuid) AND group_id = CAST(:gid AS uuid)
+                RETURNING document_id
+            """),
+            {"did": doc["id"], "gid": group_id},
+        ).fetchone()
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Permission mapping not found")
+    record_review_event(
+        "document_share", doc["id"], "shared", "removed", current_user["id"],
+        {"group_id": group_id, "action": "revoke"},
+    )
+    logger.info(
+        "Document %s group permission removed: group=%s by user=%s",
+        doc["id"], group_id, current_user["id"],
+    )
+    return {"document_id": doc["id"], "group_id": group_id, "deleted": True}
 
 
 @router.delete("/courses/{course_id}")

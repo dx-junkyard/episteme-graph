@@ -1246,8 +1246,32 @@ def _run_migrations() -> None:
             "CREATE INDEX IF NOT EXISTS idx_assistant_actions_target ON assistant_actions(target_type, target_id)"
         ))
 
+        # ---- Migration 035: ドキュメント × グループ 権限（パイプライン成果の共有）----
+        # 正本リファレンス: backend/db/035_document_group_permissions.sql
+        # course_group_permissions（010）の移植。成果は document_id 経由で権限を継承する。
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS document_group_permissions (
+                document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                group_id    UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                permission  TEXT NOT NULL DEFAULT 'viewer'
+                                CHECK (permission IN ('viewer', 'editor')),
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (document_id, group_id)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_dgp_document ON document_group_permissions(document_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_dgp_group ON document_group_permissions(group_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_dgp_group_permission ON document_group_permissions(group_id, permission)"
+        ))
+
         session.commit()
-        logger.info("Migrations (002-034) applied successfully.")
+        logger.info("Migrations (002-035) applied successfully.")
 
         # 骨格 DB 管理化 (027): カートリッジ同梱の凍結骨格を一度だけ DB へ取り込む (冪等)
         try:

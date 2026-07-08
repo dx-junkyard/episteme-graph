@@ -15,6 +15,7 @@
     personalLayer: null, // personal_layer（個人の誤解・注釈データ）
     currentTopicId: null,
     chatMessages: [], // {role, content}
+    editingMessageId: null, // 機能3: 書き直し中の user メッセージ id（送信で replace_message_id として使う）
     topicMaterial: [], // {id, text, chunk_index, chapter, section}
     learningSupport: null, // {mode, status_label, origin}
     sending: false,
@@ -345,6 +346,79 @@
     }
   }
 
+  // ── 機能3: メッセージの書き直し・削除（以降を削除して再処理） ──────────
+  function _findMessageIndexById(msgId) {
+    for (var i = 0; i < state.chatMessages.length; i++) {
+      if (state.chatMessages[i].id === msgId) return i;
+    }
+    return -1;
+  }
+
+  // 書き直し開始: 対象 user メッセージ本文を入力欄に戻し、送信で以降を差し替える。
+  function startEditMessage(msgId) {
+    if (state.sending) return;
+    var idx = _findMessageIndexById(msgId);
+    if (idx === -1 || state.chatMessages[idx].role !== "user") return;
+    var input = document.getElementById("chat-input");
+    if (input) {
+      input.value = state.chatMessages[idx].content || "";
+      input.focus();
+    }
+    state.editingMessageId = msgId;
+    showEditIndicator();
+  }
+
+  function cancelEditMessage() {
+    state.editingMessageId = null;
+    var input = document.getElementById("chat-input");
+    if (input) input.value = "";
+    hideEditIndicator();
+  }
+
+  // 入力欄の直前に「書き直し中（送信すると以降を削除して作り直します）」バナーを出す。
+  function showEditIndicator() {
+    var input = document.getElementById("chat-input");
+    if (!input) return;
+    var el = document.getElementById("chat-edit-indicator");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "chat-edit-indicator";
+      el.className = "chat-edit-indicator";
+      input.parentNode.insertBefore(el, input);
+    }
+    el.innerHTML = '✏️ 書き直し中 — 送信するとこのメッセージ以降の会話を削除して作り直します ' +
+      '<button type="button" id="chat-edit-cancel" class="chat-edit-cancel">取消</button>';
+    var cancel = document.getElementById("chat-edit-cancel");
+    if (cancel) cancel.addEventListener("click", cancelEditMessage);
+  }
+
+  function hideEditIndicator() {
+    var el = document.getElementById("chat-edit-indicator");
+    if (el) el.remove();
+  }
+
+  // 削除: このメッセージ以降の往復を本人の履歴から取り除く（サーバ側で supersede）。
+  async function deleteMessageFrom(msgId) {
+    if (state.sending || !state.courseId || !state.currentTopicId) return;
+    if (!confirm("このメッセージ以降の会話を削除します。よろしいですか？")) return;
+    // 書き直し中の対象を消す場合は編集状態も解除
+    if (state.editingMessageId === msgId) cancelEditMessage();
+    var idx = _findMessageIndexById(msgId);
+    try {
+      const res = await apiFetch(
+        "/learning/courses/" + state.courseId + "/topics/" + state.currentTopicId +
+        "/chat/messages/" + encodeURIComponent(msgId),
+        { method: "DELETE" }
+      );
+      if (!res.ok) throw new Error("Delete failed");
+      if (idx !== -1) state.chatMessages = state.chatMessages.slice(0, idx);
+      renderChat();
+      renderRightPanel();
+    } catch (err) {
+      alert("メッセージの削除に失敗しました。");
+    }
+  }
+
   // ── Render: Sidebar ────────────────────────────────────────────────
   function renderSidebar() {
     const sb = document.getElementById("sidebar");
@@ -476,7 +550,15 @@
           anchorChip = '<div style="font-size:11px;opacity:.75;margin-top:4px">📍 ' +
             escHtml(msg.structure_anchor.anchor_label) + '</div>';
         }
-        html += '<div class="mg usr"' + idAttr + '>' + escHtml(msg.content) + anchorChip + "</div>";
+        // 機能3: 書き直し（✏️）/ 以降削除（🗑）。id を持つメッセージのみ・送信中は出さない。
+        var msgActions = "";
+        if (msg.id && !state.sending) {
+          msgActions = '<div class="mg-actions">' +
+            '<button class="mg-act-btn" data-edit-msg="' + escHtml(msg.id) + '" title="このメッセージを書き直す">✏️</button>' +
+            '<button class="mg-act-btn" data-del-msg="' + escHtml(msg.id) + '" title="このメッセージ以降を削除">🗑</button>' +
+            '</div>';
+        }
+        html += '<div class="mg usr"' + idAttr + '>' + escHtml(msg.content) + anchorChip + msgActions + "</div>";
       } else {
         html += '<div class="mg ai"' + idAttr + '>' + renderAiContent(msg.content, msg) +
           renderAnchorConfirmPrompt(msg) + "</div>";
@@ -508,6 +590,18 @@
         markAnchorPromptDone(traceId);
         if (doubt) confirmAnchor(traceId, doubt);
         renderChat();
+      });
+    });
+
+    // 機能3: メッセージの書き直し・削除ボタンを配線
+    ca.querySelectorAll("[data-edit-msg]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        startEditMessage(this.getAttribute("data-edit-msg"));
+      });
+    });
+    ca.querySelectorAll("[data-del-msg]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        deleteMessageFrom(this.getAttribute("data-del-msg"));
       });
     });
 
@@ -2122,6 +2216,8 @@
     }
     state.currentTopicId = topicId;
     state.chatMessages = [];
+    state.editingMessageId = null; // 機能3: トピック切替で書き直し状態を解除
+    hideEditIndicator();
     state.topicMaterial = [];
     // 分野の地図 (gap3): course/topic の文脈を配線し、地図データを正しいカートリッジ・
     // 現在地で取得できるようにする (AtlasData / AtlasMinimap / AtlasCues が参照)。
@@ -2320,6 +2416,17 @@
     if (!text || state.sending || !state.currentTopicId) return null;
     let respData = null;  // 音声会話モードが answer/sources を使うため応答を返す
 
+    // 機能3（書き直し）: _replace_message_id が指定されていれば、その往復以降を
+    // クライアント履歴から取り除いてから新しいターンを積む。サーバへは replace_message_id を
+    // 送り、サーバ正本の履歴も同位置で切り詰め・派生痕跡を supersede させる。
+    let replaceMessageId = null;
+    if (actionPayload && actionPayload._replace_message_id) {
+      replaceMessageId = actionPayload._replace_message_id;
+      delete actionPayload._replace_message_id;
+      const ri = _findMessageIndexById(replaceMessageId);
+      if (ri !== -1) state.chatMessages = state.chatMessages.slice(0, ri);
+    }
+
     // クライアントで採番し、サーバ永続履歴・関心痕跡と同じ id を in-memory にも持たせる
     // （「この問いに戻る」でこの往復へジャンプするためのアンカー）。
     const userMsgId = genMsgId();
@@ -2351,6 +2458,7 @@
           message_id: userMsgId,
           history: state.chatMessages.slice(0, -1),
           position_anchor: anchorAtAsk,
+          ...(replaceMessageId ? { replace_message_id: replaceMessageId } : {}),
           ...payload,
         }),
       });
@@ -2457,6 +2565,14 @@
       var text = input.value.trim();
       if (!text) return;
       if (mode === "on_path") Session.clearDetour();
+      // 機能3: 書き直し中なら replace_message_id を添えて以降を差し替える
+      if (state.editingMessageId) {
+        var replaceId = state.editingMessageId;
+        state.editingMessageId = null;
+        hideEditIndicator();
+        sendMessage(text, { intent_mode: mode, _replace_message_id: replaceId });
+        return;
+      }
       sendMessage(text, { intent_mode: mode });
     }
 

@@ -301,6 +301,33 @@ class CartridgeContext:
 - **Private**: 作成者（自分）のみアクセス可能
 ※ グループへの参加は、管理者による直接招待、または招待コードにより行われる。
 
+### パイプライン成果のグループ共有（migration 035）
+
+コースを作らずに **PDF 解析パイプラインの成果**（`theory_components` / `theory_claims` /
+`theory_component_graphs` / `document_analysis_runs`）を指定グループへ共有する層。成果は
+すべて `document_id` 由来なので、**権限はドキュメント単位に集約**し、成果はそれを継承する
+（成果テーブルに列を足さない）。`course_group_permissions`（migration 010）の完全な移植。
+
+- **`document_group_permissions`**（migration 035）: `PRIMARY KEY(document_id, group_id)`、
+  `permission ∈ {viewer, editor}`。viewer=解析成果の閲覧・引用、editor=再解析・説明追加等の編集。
+  `documents(id)` / `groups(id)` に `ON DELETE CASCADE`。
+- **アクセス判定（`services.py`）**: `user_can_view_document` / `user_can_edit_document` /
+  `user_owns_document`（共有変更は所有者のみ）。`_resolve_document(ref)` は `documents.id`(UUID) と
+  `source_path`(material_id) の両方を解決する。view = 所有者 / public / group単一共有 /
+  document_group_permissions(viewer|editor)。既存のコース経由（course_group_permissions）は
+  `theory_components._ensure_document_viewable/editable` がフォールバックで併用する。
+- **成果読み取りゲート**: `/api/admin/documents/{document_id}/...`（structure / component-graph /
+  sections/{id}/components / chunks/{id}/claims）は `_ensure_document_viewable/editable` を通すため、
+  ドキュメント共有だけで全成果が閲覧可能になる（コース不要）。
+- **API**（`backend/api/routes/admin.py`、実パス `/api/admin/...`）:
+  `GET /documents/{id}/groups`（閲覧可能な者は参照、変更は所有者のみ）、
+  `POST /documents/{id}/groups`（共有付与/更新）、`DELETE /documents/{id}/groups/{group_id}`（解除）。
+  `list_materials` / `get_material` は document_group_permissions 経由の共有も一覧・取得対象に含める。
+- **監査**: 付与・解除を `theory_review_events`（`entity_type='document_share'`）に記録。
+- **UI**（`admin.js`）: 教材管理タブの各行「共有」ボタン → `openDocumentShareModal`（コース共有
+  モーダルと同型。グループ選択＋viewer/editor）。
+- 想定利用は**教員間コラボ**（査読・再利用）。学習者への読み取り開示は現状スコープ外（将来別途）。
+
 ### 承認・共有レイヤー（C層, migration 021）
 
 A層（`src/episteme_graph/agents/` の生成パイプライン、export_validation_gate 等）には手を入れず、
@@ -612,6 +639,27 @@ MediaRecorder + WebAudio 無音検知（発話後 ~1.4 秒の沈黙）で区切�
 casual チャット → 応答を TTS 再生（再生中はマイク停止）→ 再生終了で聞き取り再開。
 応答の第1根拠チャンク（`sources[0].chunk_id`）を `/source-chunk/` から取得し
 ボイスパネルに教材表示する。
+
+### 学習チャットのメッセージ書き直し・削除（機能3, B層）
+
+学習チャットで、学習者が自分の入力メッセージを **書き直し（✏️）／以降削除（🗑）** できる。
+どちらも「そのメッセージ以降の往復を捨てる」truncate セマンティクスで統一する。
+
+- **書き直し**: `LearningChatRequest.replace_message_id` を付けて送信。`learning_chat` は本処理の
+  前に `services.truncate_chat_and_supersede()` を呼び、**サーバ正本の履歴**を当該メッセージの
+  位置で切り詰め（当該 user メッセージ・その回答・以降の往復を除去）、`body.history` を切り詰め
+  済みで上書きしてから、`message` を同じ位置から通常フローで再処理する。誤解検出・tier・
+  grounding・intent 分類は再処理で自然に再実行される。
+- **削除**: `DELETE /api/learning/courses/{course_id}/topics/{topic_id}/chat/messages/{message_id}`。
+  同じ `truncate_chat_and_supersede()` を使い、再送はしない。履歴が空になれば行削除。
+- **派生痕跡の後始末（P4 情報を落とさない）**: 取り除いたメッセージ id を `payload.message_id` に
+  持つ `interest_traces` は **削除せず** `status='superseded'` にする。以降 tension/anchor の
+  worker（`_fetch_pending_*`）と各 digest・問いの軌跡ビューは `status <> 'superseded'` で除外する。
+  ※ 誤解記録（`personal_layer.misconceptions_by_topic`）は message_id リンクを持たないため、
+  現状は個別 supersede しない（既知の限界。将来 message_id 紐づけを付けてから対応）。
+- **フロント（app.js）**: user バブルに ✏️/🗑。書き直しは本文を入力欄へ戻し `editingMessageId` を
+  立て、送信で `_replace_message_id`（内部）→ クライアント履歴も同位置で truncate。削除は確認の上
+  DELETE API を呼び、成功時にクライアント履歴を truncate。トピック切替で編集状態は解除する。
 
 
 ## 開発ルール

@@ -407,6 +407,55 @@ body {
   align-self: flex-start;
 }
 
+/* 機能3: ユーザーメッセージの書き直し・削除アクション */
+.mg-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  margin-top: 6px;
+  opacity: 0.5;
+  transition: opacity 0.1s;
+}
+
+.mg.usr:hover .mg-actions { opacity: 1; }
+
+.mg-act-btn {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 6px;
+}
+
+.mg-act-btn:hover { background: rgba(0, 0, 0, 0.08); }
+
+/* 機能3: 書き直し中バナー（入力欄の直前） */
+.chat-edit-indicator {
+  font-size: 11.5px;
+  padding: 6px 10px;
+  margin: 0 0 6px;
+  border-radius: 8px;
+  background: var(--color-background-warning, #fff3cd);
+  color: var(--color-text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-edit-cancel {
+  margin-left: auto;
+  border: 1px solid var(--color-border);
+  background: var(--color-background-primary);
+  color: var(--color-text-secondary);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
 /* 「この問いに戻る」でジャンプした往復を一時的に強調する */
 .mg-highlight {
   animation: mg-highlight-fade 2.4s ease-out;
@@ -1286,14 +1335,24 @@ body {
 
 .admin-tabs {
   display: flex;
-  gap: 0;
+  gap: 2px;
   background: var(--color-background-primary);
   border-bottom: 0.5px solid var(--color-border-tertiary);
   padding: 0 20px;
+  position: relative;
+  flex-wrap: wrap;
 }
 
-.admin-tab {
-  padding: 12px 20px;
+/* ── Grouped tab dropdowns ──────────────────────────────────────── */
+.admin-tab-group {
+  position: relative;
+}
+
+.admin-tab-group-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 16px;
   font-size: 13px;
   font-weight: 500;
   border: none;
@@ -1302,16 +1361,93 @@ body {
   cursor: pointer;
   border-bottom: 2px solid transparent;
   font-family: inherit;
-  transition: all 0.12s;
+  transition: color 0.12s;
 }
 
-.admin-tab.on {
+.admin-tab-group-trigger:hover {
+  color: var(--color-text-primary);
+}
+
+.admin-tab-group.active-group > .admin-tab-group-trigger {
   color: var(--color-text-info);
   border-bottom-color: var(--color-text-info);
 }
 
-.admin-tab:hover {
+.admin-tab-group-caret {
+  font-size: 10px;
+  opacity: 0.55;
+  transition: transform 0.12s;
+}
+
+.admin-tab-group.open .admin-tab-group-caret {
+  transform: rotate(180deg);
+}
+
+/* current sub-tab label — only shown on the active group's trigger */
+.admin-tab-group-current {
+  display: none;
+}
+
+.admin-tab-group.active-group .admin-tab-group-label {
+  color: var(--color-text-secondary);
+  font-weight: 400;
+}
+
+.admin-tab-group.active-group .admin-tab-group-current {
+  display: inline;
+  color: var(--color-text-info);
+}
+
+.admin-tab-group.active-group .admin-tab-group-current::before {
+  content: "·";
+  margin: 0 6px;
+  color: var(--color-text-tertiary);
+}
+
+/* dropdown panel */
+.admin-tab-menu {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 8px;
+  min-width: 180px;
+  background: var(--color-background-primary);
+  border: 0.5px solid var(--color-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.08);
+  padding: 6px;
+  z-index: 50;
+}
+
+.admin-tab-group.open .admin-tab-menu {
+  display: block;
+}
+
+/* menu items (were the old flat tab buttons) */
+.admin-tab {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 400;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
   color: var(--color-text-primary);
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+  transition: background 0.12s;
+}
+
+.admin-tab:hover {
+  background: var(--color-background-secondary);
+}
+
+.admin-tab.on {
+  background: var(--color-background-info);
+  color: var(--color-text-info);
 }
 
 .admin-panel {
