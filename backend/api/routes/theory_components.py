@@ -32,6 +32,7 @@ from schemas import (
     TheoryConnectionValidateRequest,
 )
 from services import (
+    _resolve_document,
     create_background_task,
     get_editable_course_data,
     get_viewable_course_data,
@@ -3249,11 +3250,69 @@ def cite_explanation(
         raise HTTPException(status_code=500, detail="Failed to cite explanation")
     finally:
         session.close()
+    # V層（migration 037）: 引用の版固定 + 引用元 document への auto-pin（best-effort）。
+    # 引用元が更新されても、取り込むまでは引用時点の版に留まる。
+    try:
+        _stamp_citation_source_version(str(row[0]), _component_id, current_user.get("id"))
+    except Exception:  # noqa: BLE001 — 版固定の失敗は引用を止めない
+        logger.debug("citation source-version stamping skipped for %s", explanation_id, exc_info=True)
     _record_review_event(
         "citation", explanation_id, "", "cited", current_user.get("id"),
         {"action": "cite", "citing_course_id": citing_course_id},
     )
     return {"citation_id": str(row[0]), "explanation_id": explanation_id, "citing_course_id": citing_course_id}
+
+
+def _stamp_citation_source_version(citation_id: str, component_id: str | None, user_id: str | None) -> None:
+    """引用行に引用元 document の版（Release）を刻み、引用者を当該版へ auto-pin する。
+
+    引用元 document がまだ共有版として発行されていなければ何もしない（source_* は NULL のまま）。
+    """
+    if not component_id or not user_id:
+        return
+    session = _pg_session()
+    try:
+        comp = session.execute(
+            sa_text("SELECT document_id FROM theory_components WHERE id = CAST(:id AS uuid)"),
+            {"id": component_id},
+        ).fetchone()
+    finally:
+        session.close()
+    raw_doc = (comp[0] if comp else "") or ""
+    if not raw_doc:
+        return
+    resolved = _resolve_document(raw_doc)
+    canonical = resolved["id"] if resolved else raw_doc
+
+    from core.versioning import releases as _vreleases
+    from core.versioning import subscriptions as _vsubs
+
+    release_id = _vsubs.resolve_effective_release_id("document", canonical, user_id)
+    if not release_id:
+        return
+    rel = _vreleases.get_release(release_id)
+    version_no = rel.get("version_no") if rel else None
+    _vsubs.ensure_pin("document", canonical, user_id, release_id)
+
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                UPDATE component_citations
+                SET source_object_type = 'document',
+                    source_object_id = :oid,
+                    source_release_id = CAST(:rid AS uuid),
+                    source_version_no = :vno
+                WHERE id = CAST(:cid AS uuid)
+            """),
+            {"oid": canonical, "rid": release_id, "vno": version_no, "cid": citation_id},
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.debug("failed to stamp citation %s", citation_id, exc_info=True)
+    finally:
+        session.close()
 
 
 @router.get("/courses/{course_id}/sharing-dashboard")

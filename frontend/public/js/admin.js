@@ -410,11 +410,16 @@
       var shareBtn = m.document_id
         ? '<button class="admin-share-doc-btn" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="解析成果をグループへ共有" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">共有</button>'
         : "";
+      // V層: 共有版の発行・履歴・削除予約（document_id が必要）
+      var versionBtn = m.document_id
+        ? '<button class="admin-version-doc-btn" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="共有バージョンを管理" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">共有版</button>'
+        : "";
       html += '<td><div class="materials-action-cell">' +
         materialPipelineMenuHtml(m) +
         '<button class="admin-pdf-reupload-btn' + pdfBtnClass + '" data-material-id="' + escHtml(m.material_id) + '" title="' + escHtml(pdfBtnTitle) + '">' + pdfBtnLabel + '</button>' +
         resumeBtn +
         shareBtn +
+        versionBtn +
         '<button class="admin-delete-btn" data-material-id="' + escHtml(m.material_id) + '" data-material-title="' + escHtml(m.title) + '" style="background:none;border:1px solid var(--color-text-danger);color:var(--color-text-danger);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">削除</button>' +
         '</div></td>';
       html += "</tr>";
@@ -439,6 +444,15 @@
     tbody.querySelectorAll(".admin-share-doc-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
         openDocumentShareModal(this.getAttribute("data-document-id"), this.getAttribute("data-title"));
+      });
+    });
+
+    // V層: 共有バージョン管理ボタン（発行 / 版履歴 / 削除予約）
+    tbody.querySelectorAll(".admin-version-doc-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (window.Versioning) {
+          window.Versioning.openModal("document", this.getAttribute("data-document-id"), this.getAttribute("data-title"));
+        }
       });
     });
 
@@ -10267,7 +10281,8 @@
       }
       var actionHtml;
       if (c.role === "owner") {
-        actionHtml = '<button class="cm-manage-btn admin-action-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '">共有設定</button>';
+        actionHtml = '<button class="cm-manage-btn admin-action-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '">共有設定</button>' +
+          ' <button class="cm-version-btn admin-action-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '">共有版</button>';
       } else {
         actionHtml = '<span style="font-size:11px;color:var(--color-text-tertiary)">所有者のみ変更可</span>';
       }
@@ -10282,6 +10297,14 @@
     tbody.querySelectorAll(".cm-manage-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
         openPermissionModal(this.getAttribute("data-course-id"), this.getAttribute("data-course-title"));
+      });
+    });
+    // V層: コースの共有バージョン管理
+    tbody.querySelectorAll(".cm-version-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (window.Versioning) {
+          window.Versioning.openModal("course", this.getAttribute("data-course-id"), this.getAttribute("data-course-title"));
+        }
       });
     });
   }
@@ -10985,6 +11008,12 @@
         activateTabView: activateTabView,
       });
       registerAssistantHooks();
+    }
+
+    // V層（共有物のバージョン管理）: 依存注入 + 通知インボックス起動。
+    if (window.Versioning) {
+      window.Versioning.init({ apiFetch: apiFetch, state: state });
+      window.Versioning.initInbox();
     }
 
     if (state.role !== "SYSTEM_ADMIN") {

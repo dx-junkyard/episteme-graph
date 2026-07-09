@@ -120,7 +120,10 @@
     closeBtn.addEventListener("click", closePanel);
     undoBtn.addEventListener("click", onUndo);
     inputEl.addEventListener("keydown", function (e) {
-      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onSend(); }
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+        e.preventDefault();
+        onSend();
+      }
     });
   }
 

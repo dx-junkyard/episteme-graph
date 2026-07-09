@@ -267,7 +267,7 @@ def get_course_data(user_id: str, course_id: str) -> dict | None:
         if str(owner_id) == str(user_id):
             # Issue #145: オーナーも learning_states を保持する（自動作成）
             enroll_user_in_course(user_id, course_id)
-            return data
+            return data  # 所有者は HEAD（working copy）
 
         # 受講者チェック
         state_row = session.execute(
@@ -280,10 +280,12 @@ def get_course_data(user_id: str, course_id: str) -> dict | None:
         ).fetchone()
         if not state_row:
             return None
-
-        return data
     finally:
         session.close()
+
+    # V層（migration 037）: 受講学習者（非所有者）の主経路も発行版に追従させる。
+    # editor は HEAD、純 viewer・学習者は有効な版のスナップショット（未発行なら live）。
+    return _apply_course_version_view(course_id, user_id, data)
 
 
 def get_personal_layer(user_id: str, course_id: str) -> dict:
@@ -435,10 +437,49 @@ def get_editable_course_data(user_id: str, course_id: str) -> dict | None:
 
 
 def get_viewable_course_data(user_id: str, course_id: str) -> dict | None:
-    """閲覧権限（オーナー / editor / viewer グループ）でコースデータを取得する。"""
+    """閲覧権限（オーナー / editor / viewer グループ）でコースデータを取得する。
+
+    V層（migration 037）: 純 viewer（オーナー/editor でない共有先）は、発行済みなら
+    有効な版（ピン or active）のスナップショットを見る。所有者・editor は HEAD（working copy）。
+    版が無い（未発行）コースは live にフォールバックする（既存挙動）。
+    """
     if not user_can_view_course(user_id, course_id):
         return None
-    return _fetch_course_data_row(course_id)
+    return _apply_course_version_view(course_id, user_id, _fetch_course_data_row(course_id))
+
+
+def _resolve_versioned_course_data(course_id: str, viewer_id: str) -> dict | None:
+    """V層の版解決（best-effort）。版が無い / エラー時は None で live にフォールバック。"""
+    try:
+        from core.versioning import resolver as _vresolver
+
+        return _vresolver.resolve_course_data(course_id, viewer_id)
+    except Exception:  # noqa: BLE001 — 版解決の失敗は live 読み取りを止めない
+        logger.debug("course version resolution skipped for %s", course_id, exc_info=True)
+        return None
+
+
+def _apply_course_version_view(course_id: str, viewer_id: str, live_data: dict | None) -> dict | None:
+    """コース読み取りの版解決を一元化する（V層, migration 037）。
+
+    - 所有者・editor は HEAD（live working copy）を読む（版にピンしない）。
+    - それ以外（純 viewer・受講学習者）は有効な版（ピン or active）のスナップショットを見る。
+    - 版が未発行 / 解決失敗のときは live にフォールバックする（後方互換・学習を止めない）。
+
+    大多数の未発行コースでは owner/editor 判定のコストを避けるため、まず版解決を試み、
+    発行版がある場合にのみ owner/editor 判定を行う。学習者向けの全読み取り経路
+    （get_course_data / get_viewable_course_data / get_accessible_course_data）は
+    必ずこの関数を通し、同一学習者が経路ごとに違う版を見る不整合を防ぐ。
+    """
+    if live_data is None:
+        return None
+    resolved = _resolve_versioned_course_data(course_id, viewer_id)
+    if resolved is None:
+        return live_data  # 未発行 or 解決失敗 → HEAD（既存挙動）
+    # 発行版がある。所有者・editor は常に HEAD を読む。
+    if user_can_edit_course(viewer_id, course_id):
+        return live_data
+    return resolved
 
 
 def get_accessible_course_data(user_id: str, course_id: str) -> dict | None:
@@ -466,10 +507,13 @@ def get_accessible_course_data(user_id: str, course_id: str) -> dict | None:
         data_raw, owner_id, visibility, group_id, is_published, is_template = record
         data = data_raw if isinstance(data_raw, dict) else json.loads(data_raw)
 
+        # オーナーは HEAD（working copy）。非オーナーの受講者・共有先は発行版に追従する。
+        # editor（グループ）は _apply_course_version_view 内で HEAD 扱いとなる
+        # （get_viewable_course_data と同じ owner/editor→HEAD 判定に揃える）。
         if str(owner_id) == str(user_id):
             return data
         if visibility == "public" and is_published and is_template:
-            return data
+            return _apply_course_version_view(course_id, user_id, data)
         if visibility == "group" and group_id:
             row = session.execute(
                 sa_text("""
@@ -480,10 +524,88 @@ def get_accessible_course_data(user_id: str, course_id: str) -> dict | None:
                 {"gid": group_id, "uid": user_id},
             ).fetchone()
             if row:
-                return data
+                return _apply_course_version_view(course_id, user_id, data)
         return None
     finally:
         session.close()
+
+
+def course_deletion_notice(course_id: str) -> dict | None:
+    """コース自体、またはその元教材が削除予約中なら学習者バナー用の通知 dict を返す（無ければ None）。
+
+    V層（migration 037）: 削除は 2 経路でこのコースを消しうる。
+    1. コース自身の削除予約（shared_version_state('course', course_id)）。
+    2. 教材の削除予約: 教材 purge（`deletion._purge_document`）は「その教材を source に含む
+       所有者のコース」を巻き添え削除する。よってコースの sources[].material_id が指す document が
+       pending_deletion で、かつその document の所有者がコース所有者と一致する場合、このコースも
+       猶予期限後に消える → 学習者に警告する。
+
+    best-effort。取得失敗時は None（呼び出し側は active 扱いでバナーを出さない）。
+    """
+    try:
+        from core.versioning import releases as _vreleases
+    except Exception:  # noqa: BLE001
+        return None
+
+    def _pending(state: dict | None) -> dict | None:
+        if state and state.get("lifecycle") == "pending_deletion":
+            return {
+                "lifecycle": "pending_deletion",
+                "delete_purge_after": state.get("delete_purge_after"),
+                "delete_reason": state.get("delete_reason", "") or "",
+            }
+        return None
+
+    # 1) コース自体の削除予約
+    try:
+        own = _pending(_vreleases.get_state("course", course_id))
+    except Exception:  # noqa: BLE001 — fail-open（学習を止めない）
+        return None
+    if own:
+        return own
+
+    # 2) 元教材の削除予約（所有者のコースは教材 purge で巻き添え削除される）
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT data, user_id::text FROM learning_courses WHERE id = :cid LIMIT 1"),
+            {"cid": course_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not row or not row[0]:
+        return None
+    data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+    owner_id = row[1]
+    sources = data.get("sources", []) if isinstance(data, dict) else []
+
+    candidates: list[tuple[str, dict]] = []
+    seen_docs: set[str] = set()
+    for src in sources:
+        if not isinstance(src, dict):
+            continue
+        material_id = src.get("material_id")
+        if not material_id:
+            continue
+        doc = _resolve_document(material_id)
+        if not doc or doc["id"] in seen_docs:
+            continue
+        seen_docs.add(doc["id"])
+        # 巻き添え削除の対象は「所有者のコース」のみ。所有者不一致なら消えない。
+        if owner_id and doc.get("uploaded_by") and doc["uploaded_by"] != owner_id:
+            continue
+        try:
+            notice = _pending(_vreleases.get_state("document", doc["id"]))
+        except Exception:  # noqa: BLE001
+            continue
+        if notice:
+            if not notice.get("delete_reason"):
+                notice["delete_reason"] = "この教材が削除予定のため"
+            candidates.append((notice.get("delete_purge_after") or "9999", notice))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: c[0])  # 期限が最も早いものを返す
+    return candidates[0][1]
 
 
 def save_course_data(

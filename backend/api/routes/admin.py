@@ -1034,6 +1034,43 @@ def update_course_visibility(
 # ---------------------------------------------------------------------------
 
 
+def _versioning_collect_recipients(object_type: str, object_id: str) -> list[str]:
+    """物理削除の前に V層の通知宛先（グループ共有先 + 購読者）を集める（best-effort）。
+
+    削除でグループ権限が消える前に集めておく（消えた後は recipients_for が空になる）。
+    """
+    try:
+        from core.versioning import notifications as _vn, subscriptions as _vs
+        ids = list(_vn.recipients_for(object_type, str(object_id)))
+        ids += _vs.subscriber_ids(object_type, str(object_id))
+        return ids
+    except Exception:  # noqa: BLE001 — 収集失敗は削除本体を止めない
+        logger.debug("versioning recipient collection skipped: %s %s", object_type, object_id, exc_info=True)
+        return []
+
+
+def _versioning_teardown_after_delete(targets, *, primary_recipients=None, actor=None) -> None:
+    """既存の即時削除（delete_material / delete_course）後の V層あと片付け（best-effort）。
+
+    共有版・ピン・通知を掃除し state を 'purged' 墓標にして、購読者へ 'deleted' を送る。
+    これにより手動削除でも幽霊ピン・陳腐化通知・active のままの state を残さない（orphan gap 解消）。
+    targets: (object_type, object_id) のリスト。primary_recipients は targets[0] のみに適用する。
+    """
+    try:
+        from core.versioning import deletion as _vdeletion
+    except Exception:  # noqa: BLE001
+        return
+    for i, (object_type, object_id) in enumerate(targets):
+        try:
+            _vdeletion.teardown_versioning(
+                object_type, str(object_id),
+                extra_recipients=(primary_recipients if i == 0 else None),
+                actor=actor,
+            )
+        except Exception:  # noqa: BLE001 — 片付け失敗は削除本体を無効化しない
+            logger.debug("versioning teardown skipped: %s %s", object_type, object_id, exc_info=True)
+
+
 @router.delete("/materials/{material_id}")
 def delete_material(
     material_id: str,
@@ -1069,6 +1106,9 @@ def delete_material(
                 status_code=400,
                 detail="確認用の名前が一致しません。正確な教材名を入力してください。",
             )
+
+        # V層（migration 037）: 削除でグループ権限が消える前に通知宛先を集めておく
+        doc_recipients = _versioning_collect_recipients("document", doc_id)
 
         # 2) この教材を sources に含むコースを特定して削除
         course_rows = session.execute(
@@ -1130,6 +1170,12 @@ def delete_material(
     logger.info(
         "Material %s (%s) deleted by user=%s, cascade-deleted courses: %s",
         material_id, doc_title, current_user["id"], deleted_course_ids,
+    )
+    # V層（migration 037）: 教材とその巻き添えコースの共有版状態を掃除し購読者へ通知する
+    _versioning_teardown_after_delete(
+        [("document", doc_id)] + [("course", cid) for cid in deleted_course_ids],
+        primary_recipients=doc_recipients,
+        actor=current_user["id"],
     )
     return {
         "material_id": material_id,
@@ -2366,6 +2412,9 @@ def delete_course(
                 detail="確認用の名前が一致しません。正確なコース名を入力してください。",
             )
 
+        # V層（migration 037）: 削除でグループ権限が消える前に通知宛先を集めておく
+        course_recipients = _versioning_collect_recipients("course", course_id)
+
         # 関連する学習チャット履歴を削除
         session.execute(
             sa_text("DELETE FROM learning_chat_history WHERE course_id = :cid"),
@@ -2386,6 +2435,10 @@ def delete_course(
         session.close()
 
     logger.info("Course %s (%s) deleted by user=%s", course_id, course_title, current_user["id"])
+    # V層（migration 037）: コースの共有版状態を掃除し購読者へ通知する（orphan gap 解消）
+    _versioning_teardown_after_delete(
+        [("course", course_id)], primary_recipients=course_recipients, actor=current_user["id"],
+    )
     return {"course_id": course_id, "deleted": True}
 
 
@@ -2893,6 +2946,7 @@ from routes.atlas import binding_router as _atlas_binding_router  # noqa: E402
 from routes.doubt import admin_router as _doubt_admin_router  # noqa: E402
 from routes.admin_assistant import admin_router as _admin_assistant_router  # noqa: E402
 from routes.reconstruction import admin_router as _reconstruction_admin_router  # noqa: E402
+from routes.versioning import router as _versioning_router  # noqa: E402
 
 router.include_router(_lecture_studio_router)
 router.include_router(_theory_components_router)
@@ -2904,3 +2958,4 @@ router.include_router(_atlas_binding_router)
 router.include_router(_doubt_admin_router)
 router.include_router(_admin_assistant_router)
 router.include_router(_reconstruction_admin_router)
+router.include_router(_versioning_router)

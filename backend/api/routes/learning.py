@@ -40,6 +40,7 @@ from services import (
     dismiss_tension_trace,
     get_anchor_digest,
     get_tension_digest,
+    course_deletion_notice,
     enroll_user_in_course,
     get_course_chunks_ordered,
     get_course_data,
@@ -357,6 +358,28 @@ def get_course(
         master_course=LearningCourseDetail(**data),
         personal_layer=PersonalLayer(**personal),
     )
+
+
+@router.get("/courses/{course_id}/version-notice")
+def get_course_version_notice(
+    course_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """受講者向け: コースの削除予定など版ライフサイクルの一行通知（V層, migration 037）。
+
+    受講/アクセス可能なコースのみ。コース自体の削除予約に加え、元教材の削除予約（教材 purge は
+    所有者のコースを巻き添え削除する）も検出して猶予期限を返し、学習 UI がバナー表示する。
+    版が無い / エラー時は lifecycle='active' として静かに返す（fail-open で学習を止めない）。
+    """
+    if not get_course_data(current_user["id"], course_id):
+        raise HTTPException(status_code=404, detail="Course not found")
+    try:
+        notice = course_deletion_notice(course_id)
+    except Exception:  # noqa: BLE001 — fail-open
+        notice = None
+    if notice:
+        return notice
+    return {"lifecycle": "active", "delete_purge_after": None, "delete_reason": ""}
 
 
 @router.put("/courses/{course_id}", response_model=LearningCourseDetail)

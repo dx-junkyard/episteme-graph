@@ -1351,8 +1351,102 @@ def _run_migrations() -> None:
             GROUP BY i.id
         """))
 
+        # ---- Migration 037: 共有物のバージョン管理 + 更新通知 + 削除猶予（V層）----
+        # 正本リファレンス: backend/db/037_shared_versioning.sql
+        # 版 = Release（不変スナップショット）。消費側は Release にピンし、所有者の発行後も
+        # 同意（adopt）するまで旧版を見続ける。削除は猶予表示のうえ期限後に全ユーザーから物理削除。
+        # ポリモーフィック（course=TEXT id, document=UUID）のため object_id TEXT で FK なし。
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS shared_versions (
+                id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                object_type  TEXT NOT NULL CHECK (object_type IN ('course', 'document')),
+                object_id    TEXT NOT NULL,
+                version_no   INT  NOT NULL,
+                snapshot     JSONB NOT NULL DEFAULT '{}'::jsonb,
+                note         TEXT NOT NULL DEFAULT '',
+                published_by UUID REFERENCES users(id),
+                created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (object_type, object_id, version_no)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_shared_versions_object "
+            "ON shared_versions(object_type, object_id, version_no DESC)"
+        ))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS shared_version_state (
+                object_type         TEXT NOT NULL CHECK (object_type IN ('course', 'document')),
+                object_id           TEXT NOT NULL,
+                active_release_id   UUID REFERENCES shared_versions(id),
+                latest_version_no   INT  NOT NULL DEFAULT 0,
+                lifecycle           TEXT NOT NULL DEFAULT 'active'
+                                        CHECK (lifecycle IN ('active', 'pending_deletion', 'purged')),
+                delete_scheduled_at TIMESTAMPTZ,
+                delete_purge_after  TIMESTAMPTZ,
+                delete_scheduled_by UUID REFERENCES users(id),
+                delete_reason       TEXT NOT NULL DEFAULT '',
+                updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (object_type, object_id)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_svs_pending_purge "
+            "ON shared_version_state(lifecycle, delete_purge_after) "
+            "WHERE lifecycle = 'pending_deletion'"
+        ))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS shared_version_subscriptions (
+                id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                object_type       TEXT NOT NULL CHECK (object_type IN ('course', 'document')),
+                object_id         TEXT NOT NULL,
+                subscriber_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                pinned_release_id UUID REFERENCES shared_versions(id),
+                status            TEXT NOT NULL DEFAULT 'active'
+                                      CHECK (status IN ('active', 'unsubscribed')),
+                created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (object_type, object_id, subscriber_id)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_svsub_object "
+            "ON shared_version_subscriptions(object_type, object_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_svsub_subscriber "
+            "ON shared_version_subscriptions(subscriber_id, status)"
+        ))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS share_notifications (
+                id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                recipient_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                object_type  TEXT NOT NULL,
+                object_id    TEXT NOT NULL,
+                kind         TEXT NOT NULL CHECK (kind IN
+                                 ('version_published', 'deletion_scheduled',
+                                  'deletion_cancelled', 'deleted')),
+                release_id   UUID REFERENCES shared_versions(id),
+                payload      JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+                read_at      TIMESTAMPTZ,
+                acted_at     TIMESTAMPTZ
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_share_notif_recipient "
+            "ON share_notifications(recipient_id, read_at, created_at DESC)"
+        ))
+        # 引用の版固定（component_citations, migration 021）
+        session.execute(sa_text(
+            "ALTER TABLE component_citations "
+            "ADD COLUMN IF NOT EXISTS source_object_type TEXT, "
+            "ADD COLUMN IF NOT EXISTS source_object_id   TEXT, "
+            "ADD COLUMN IF NOT EXISTS source_release_id  UUID, "
+            "ADD COLUMN IF NOT EXISTS source_version_no  INT"
+        ))
+
         session.commit()
-        logger.info("Migrations (002-036) applied successfully.")
+        logger.info("Migrations (002-037) applied successfully.")
 
         # 骨格 DB 管理化 (027): カートリッジ同梱の凍結骨格を一度だけ DB へ取り込む (冪等)
         try:
@@ -1423,6 +1517,15 @@ async def _lifespan(application: FastAPI):
             else:
                 logger.critical("Failed to connect to PostgreSQL after %d attempts.", max_retries)
                 sys.exit(1)
+
+    # V層（migration 037）: 削除猶予の定期スイーパを起動（best-effort。起動を止めない）
+    try:
+        from core.versioning import worker as _versioning_worker
+
+        _versioning_worker.start_background_sweeper()
+    except Exception:  # noqa: BLE001
+        logger.warning("versioning sweeper startup skipped", exc_info=True)
+
     yield
 
 

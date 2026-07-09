@@ -211,6 +211,7 @@
       return;
     }
     if (overlay) return; // already showing
+    removeVersionNoticeBanner();  // ログアウト時に削除予定バナーを残さない
 
     overlay = document.createElement("div");
     overlay.id = "auth-overlay";
@@ -2984,6 +2985,7 @@
   }
 
   function showNoCourseState(hasEnrollable = false) {
+    removeVersionNoticeBanner();
     const select = document.getElementById("course-select");
     if (!hasEnrollable) {
       select.innerHTML = '<option value="">コースなし</option>';
@@ -3017,6 +3019,40 @@
     if (clearBtn) clearBtn.disabled = !enabled || !state.currentTopicId || state.chatMessages.length === 0;
   }
 
+  // V層（migration 037）: 受講中コースが削除予約されていれば猶予バナーを表示する。
+  // 学習者は版に追従（opt-in 取り込みは教員向け）。fail-open: 取得失敗時は何もしない。
+  async function showVersionNoticeBanner(courseId) {
+    const existing = document.getElementById("vg-learner-banner");
+    if (existing) existing.remove();
+    let notice = null;
+    try {
+      const res = await apiFetch("/learning/courses/" + courseId + "/version-notice");
+      if (res.ok) notice = await res.json();
+    } catch (_) { return; }
+    if (!notice || notice.lifecycle !== "pending_deletion") return;
+    const when = notice.delete_purge_after ? new Date(notice.delete_purge_after) : null;
+    const whenText = when && !isNaN(when.getTime())
+      ? when.getFullYear() + "/" + (when.getMonth() + 1) + "/" + when.getDate()
+      : "";
+    const banner = document.createElement("div");
+    banner.id = "vg-learner-banner";
+    banner.style.cssText = "background:#fdecea;color:#8a1c1c;border:1px solid #e0a0a0;border-radius:6px;padding:10px 14px;margin:8px;font-size:13px";
+    // whenText 欠落時に「近日中に以降に」とならないよう、期限の有無で語句を組み立てる。
+    const lead = whenText ? (whenText + " 以降に") : "近日中に";
+    banner.textContent = "このコースは" + lead +
+      "削除される予定です。それまでは通常どおり学習できます。" +
+      (notice.delete_reason ? "（理由: " + notice.delete_reason + "）" : "");
+    // index.html に <main>/#app は無い。学習ビューの主カラム .mn に載せ、
+    // コース離脱時（showNoCourseState / renderAuth）に確実に除去して他画面へ残さない。
+    const host = document.querySelector(".mn") || document.querySelector(".app") || document.body;
+    host.insertBefore(banner, host.firstChild);
+  }
+
+  function removeVersionNoticeBanner() {
+    const b = document.getElementById("vg-learner-banner");
+    if (b) b.remove();
+  }
+
   async function loadAndRenderCourse() {
     const courseData = await loadCourse(state.courseId);
     if (!courseData) return;
@@ -3026,6 +3062,7 @@
     state.course = courseData.master;
     state.personalLayer = courseData.personal;
     loadLearningSupportContext();
+    showVersionNoticeBanner(state.courseId);
     if (progress) state.course.progress = progress;
 
     const course = state.course;
