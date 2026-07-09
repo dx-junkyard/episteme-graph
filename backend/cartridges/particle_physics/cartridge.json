@@ -31,6 +31,7 @@
     "support_statuses": "support_statuses.json",
     "extraction_prompt": "extraction_prompt.md",
     "review_prompt": "review_prompt.md",
-    "validation_rules": "validation_rules.json"
+    "validation_rules": "validation_rules.json",
+    "atlas_skeleton": "atlas/skeleton.yaml"
   }
 }

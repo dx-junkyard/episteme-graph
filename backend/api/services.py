@@ -267,7 +267,7 @@ def get_course_data(user_id: str, course_id: str) -> dict | None:
         if str(owner_id) == str(user_id):
             # Issue #145: オーナーも learning_states を保持する（自動作成）
             enroll_user_in_course(user_id, course_id)
-            return data
+            return data  # 所有者は HEAD（working copy）
 
         # 受講者チェック
         state_row = session.execute(
@@ -280,10 +280,12 @@ def get_course_data(user_id: str, course_id: str) -> dict | None:
         ).fetchone()
         if not state_row:
             return None
-
-        return data
     finally:
         session.close()
+
+    # V層（migration 037）: 受講学習者（非所有者）の主経路も発行版に追従させる。
+    # editor は HEAD、純 viewer・学習者は有効な版のスナップショット（未発行なら live）。
+    return _apply_course_version_view(course_id, user_id, data)
 
 
 def get_personal_layer(user_id: str, course_id: str) -> dict:
@@ -435,10 +437,49 @@ def get_editable_course_data(user_id: str, course_id: str) -> dict | None:
 
 
 def get_viewable_course_data(user_id: str, course_id: str) -> dict | None:
-    """閲覧権限（オーナー / editor / viewer グループ）でコースデータを取得する。"""
+    """閲覧権限（オーナー / editor / viewer グループ）でコースデータを取得する。
+
+    V層（migration 037）: 純 viewer（オーナー/editor でない共有先）は、発行済みなら
+    有効な版（ピン or active）のスナップショットを見る。所有者・editor は HEAD（working copy）。
+    版が無い（未発行）コースは live にフォールバックする（既存挙動）。
+    """
     if not user_can_view_course(user_id, course_id):
         return None
-    return _fetch_course_data_row(course_id)
+    return _apply_course_version_view(course_id, user_id, _fetch_course_data_row(course_id))
+
+
+def _resolve_versioned_course_data(course_id: str, viewer_id: str) -> dict | None:
+    """V層の版解決（best-effort）。版が無い / エラー時は None で live にフォールバック。"""
+    try:
+        from core.versioning import resolver as _vresolver
+
+        return _vresolver.resolve_course_data(course_id, viewer_id)
+    except Exception:  # noqa: BLE001 — 版解決の失敗は live 読み取りを止めない
+        logger.debug("course version resolution skipped for %s", course_id, exc_info=True)
+        return None
+
+
+def _apply_course_version_view(course_id: str, viewer_id: str, live_data: dict | None) -> dict | None:
+    """コース読み取りの版解決を一元化する（V層, migration 037）。
+
+    - 所有者・editor は HEAD（live working copy）を読む（版にピンしない）。
+    - それ以外（純 viewer・受講学習者）は有効な版（ピン or active）のスナップショットを見る。
+    - 版が未発行 / 解決失敗のときは live にフォールバックする（後方互換・学習を止めない）。
+
+    大多数の未発行コースでは owner/editor 判定のコストを避けるため、まず版解決を試み、
+    発行版がある場合にのみ owner/editor 判定を行う。学習者向けの全読み取り経路
+    （get_course_data / get_viewable_course_data / get_accessible_course_data）は
+    必ずこの関数を通し、同一学習者が経路ごとに違う版を見る不整合を防ぐ。
+    """
+    if live_data is None:
+        return None
+    resolved = _resolve_versioned_course_data(course_id, viewer_id)
+    if resolved is None:
+        return live_data  # 未発行 or 解決失敗 → HEAD（既存挙動）
+    # 発行版がある。所有者・editor は常に HEAD を読む。
+    if user_can_edit_course(viewer_id, course_id):
+        return live_data
+    return resolved
 
 
 def get_accessible_course_data(user_id: str, course_id: str) -> dict | None:
@@ -466,10 +507,13 @@ def get_accessible_course_data(user_id: str, course_id: str) -> dict | None:
         data_raw, owner_id, visibility, group_id, is_published, is_template = record
         data = data_raw if isinstance(data_raw, dict) else json.loads(data_raw)
 
+        # オーナーは HEAD（working copy）。非オーナーの受講者・共有先は発行版に追従する。
+        # editor（グループ）は _apply_course_version_view 内で HEAD 扱いとなる
+        # （get_viewable_course_data と同じ owner/editor→HEAD 判定に揃える）。
         if str(owner_id) == str(user_id):
             return data
         if visibility == "public" and is_published and is_template:
-            return data
+            return _apply_course_version_view(course_id, user_id, data)
         if visibility == "group" and group_id:
             row = session.execute(
                 sa_text("""
@@ -480,10 +524,88 @@ def get_accessible_course_data(user_id: str, course_id: str) -> dict | None:
                 {"gid": group_id, "uid": user_id},
             ).fetchone()
             if row:
-                return data
+                return _apply_course_version_view(course_id, user_id, data)
         return None
     finally:
         session.close()
+
+
+def course_deletion_notice(course_id: str) -> dict | None:
+    """コース自体、またはその元教材が削除予約中なら学習者バナー用の通知 dict を返す（無ければ None）。
+
+    V層（migration 037）: 削除は 2 経路でこのコースを消しうる。
+    1. コース自身の削除予約（shared_version_state('course', course_id)）。
+    2. 教材の削除予約: 教材 purge（`deletion._purge_document`）は「その教材を source に含む
+       所有者のコース」を巻き添え削除する。よってコースの sources[].material_id が指す document が
+       pending_deletion で、かつその document の所有者がコース所有者と一致する場合、このコースも
+       猶予期限後に消える → 学習者に警告する。
+
+    best-effort。取得失敗時は None（呼び出し側は active 扱いでバナーを出さない）。
+    """
+    try:
+        from core.versioning import releases as _vreleases
+    except Exception:  # noqa: BLE001
+        return None
+
+    def _pending(state: dict | None) -> dict | None:
+        if state and state.get("lifecycle") == "pending_deletion":
+            return {
+                "lifecycle": "pending_deletion",
+                "delete_purge_after": state.get("delete_purge_after"),
+                "delete_reason": state.get("delete_reason", "") or "",
+            }
+        return None
+
+    # 1) コース自体の削除予約
+    try:
+        own = _pending(_vreleases.get_state("course", course_id))
+    except Exception:  # noqa: BLE001 — fail-open（学習を止めない）
+        return None
+    if own:
+        return own
+
+    # 2) 元教材の削除予約（所有者のコースは教材 purge で巻き添え削除される）
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT data, user_id::text FROM learning_courses WHERE id = :cid LIMIT 1"),
+            {"cid": course_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not row or not row[0]:
+        return None
+    data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+    owner_id = row[1]
+    sources = data.get("sources", []) if isinstance(data, dict) else []
+
+    candidates: list[tuple[str, dict]] = []
+    seen_docs: set[str] = set()
+    for src in sources:
+        if not isinstance(src, dict):
+            continue
+        material_id = src.get("material_id")
+        if not material_id:
+            continue
+        doc = _resolve_document(material_id)
+        if not doc or doc["id"] in seen_docs:
+            continue
+        seen_docs.add(doc["id"])
+        # 巻き添え削除の対象は「所有者のコース」のみ。所有者不一致なら消えない。
+        if owner_id and doc.get("uploaded_by") and doc["uploaded_by"] != owner_id:
+            continue
+        try:
+            notice = _pending(_vreleases.get_state("document", doc["id"]))
+        except Exception:  # noqa: BLE001
+            continue
+        if notice:
+            if not notice.get("delete_reason"):
+                notice["delete_reason"] = "この教材が削除予定のため"
+            candidates.append((notice.get("delete_purge_after") or "9999", notice))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: c[0])  # 期限が最も早いものを返す
+    return candidates[0][1]
 
 
 def save_course_data(
@@ -688,6 +810,189 @@ def user_can_access_group(user_id: str, group_id: str | None) -> bool:
             {"uid": user_id, "gid": group_id},
         ).fetchone()
         return row is not None
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# ドキュメント（教材・パイプライン成果）× グループ 共有（migration 035）
+# ---------------------------------------------------------------------------
+# パイプライン成果（theory_components / theory_claims / theory_component_graphs /
+# document_analysis_runs）はすべて document_id 由来なので、権限はドキュメント単位に
+# 集約し、成果はそれを継承する（course_group_permissions の移植）。
+
+
+def _resolve_document(document_ref: str) -> dict | None:
+    """document_ref（documents.id UUID か source_path=material_id）から doc メタを解決する。"""
+    if not document_ref:
+        return None
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT id::text, source_path,
+                       uploaded_by::text,
+                       COALESCE(visibility, 'private'),
+                       group_id::text
+                FROM documents
+                WHERE id::text = :ref OR source_path = :ref
+                LIMIT 1
+            """),
+            {"ref": document_ref},
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "source_path": row[1] or "",
+            "uploaded_by": row[2],
+            "visibility": row[3] or "private",
+            "group_id": row[4],
+        }
+    finally:
+        session.close()
+
+
+def _has_document_group_permission(user_id: str, document_uuid: str, permissions: tuple[str, ...]) -> bool:
+    """ユーザーが document_group_permissions 経由で当該権限を持つか。"""
+    if not permissions:
+        return False
+    session = _pg_session()
+    try:
+        ph = ", ".join(f":p{i}" for i in range(len(permissions)))
+        params = {"uid": user_id, "did": document_uuid}
+        for i, p in enumerate(permissions):
+            params[f"p{i}"] = p
+        row = session.execute(
+            sa_text(f"""
+                SELECT 1
+                FROM document_group_permissions dgp
+                JOIN group_members gm ON gm.group_id = dgp.group_id
+                WHERE dgp.document_id = CAST(:did AS uuid)
+                  AND dgp.permission IN ({ph})
+                  AND gm.user_id = CAST(:uid AS uuid)
+                LIMIT 1
+            """),
+            params,
+        ).fetchone()
+        return row is not None
+    finally:
+        session.close()
+
+
+def user_owns_document(user_id: str, document_ref: str) -> bool:
+    """ユーザーがドキュメント（教材）の所有者（uploaded_by）か。共有設定の変更に使う。"""
+    doc = _resolve_document(document_ref)
+    return bool(doc and doc.get("uploaded_by") and doc["uploaded_by"] == user_id)
+
+
+def user_can_view_document(user_id: str, document_ref: str) -> bool:
+    """ユーザーがドキュメントの解析成果を閲覧できるか。
+
+    - 所有者
+    - visibility='public'
+    - visibility='group' の単一グループ共有（既存）に所属
+    - document_group_permissions の viewer/editor グループに所属（migration 035）
+    のいずれか。コース経由の閲覧可否（既存の course_group_permissions）は
+    呼び出し側（theory_components._ensure_document_viewable）が別途フォールバックする。
+    """
+    doc = _resolve_document(document_ref)
+    if not doc:
+        return False
+    if doc.get("uploaded_by") and doc["uploaded_by"] == user_id:
+        return True
+    if doc.get("visibility") == "public":
+        return True
+    if doc.get("visibility") == "group" and doc.get("group_id") and user_can_access_group(user_id, doc["group_id"]):
+        return True
+    return _has_document_group_permission(user_id, doc["id"], ("viewer", "editor"))
+
+
+def user_can_edit_document(user_id: str, document_ref: str) -> bool:
+    """ユーザーがドキュメントの解析成果を編集（再解析・説明追加等）できるか。
+
+    - 所有者
+    - document_group_permissions の editor グループに所属
+    のいずれか。
+    """
+    doc = _resolve_document(document_ref)
+    if not doc:
+        return False
+    if doc.get("uploaded_by") and doc["uploaded_by"] == user_id:
+        return True
+    return _has_document_group_permission(user_id, doc["id"], ("editor",))
+
+
+def get_document_group_permissions(document_ref: str) -> list[dict]:
+    """ドキュメントに紐づくグループ権限マッピング一覧を返す（グループ名付き）。"""
+    doc = _resolve_document(document_ref)
+    if not doc:
+        return []
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT dgp.document_id::text,
+                       dgp.group_id,
+                       COALESCE(g.name, '') AS group_name,
+                       dgp.permission,
+                       dgp.created_at,
+                       dgp.updated_at
+                FROM document_group_permissions dgp
+                LEFT JOIN groups g ON g.id = dgp.group_id
+                WHERE dgp.document_id = CAST(:did AS uuid)
+                ORDER BY dgp.permission, g.name
+            """),
+            {"did": doc["id"]},
+        ).fetchall()
+    finally:
+        session.close()
+    return [
+        {
+            "document_id": r[0],
+            "group_id": str(r[1]),
+            "group_name": r[2] or "",
+            "permission": r[3],
+            "created_at": r[4].isoformat() if r[4] else "",
+            "updated_at": r[5].isoformat() if r[5] else "",
+        }
+        for r in rows
+    ]
+
+
+def record_review_event(
+    entity_type: str,
+    entity_id: str,
+    old_status: str,
+    new_status: str,
+    user_id: str | None,
+    metadata: dict | None = None,
+) -> None:
+    """theory_review_events に監査行を1件追記する（best-effort）。
+
+    C層/D層の `_record_review_event` と同じ表を使う共通ヘルパー。共有付与・解除など
+    admin ルータからの監査記録に使う。
+    """
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO theory_review_events (entity_type, entity_id, old_status, new_status, changed_by, metadata)
+                VALUES (:entity_type, :entity_id, :old_status, :new_status, CAST(:changed_by AS uuid), CAST(:metadata AS jsonb))
+            """),
+            {
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "old_status": old_status or "",
+                "new_status": new_status or "",
+                "changed_by": user_id or None,
+                "metadata": json.dumps(metadata or {}, ensure_ascii=False),
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.warning("Failed to record review event for %s %s", entity_type, entity_id, exc_info=True)
     finally:
         session.close()
 
@@ -1457,6 +1762,110 @@ def persist_chat_history(
     }
 
 
+def _split_history_at(history: list, from_message_id: str):
+    """``history`` を ``from_message_id`` の位置で分割する（純粋関数・DB非依存）。
+
+    Returns ``(truncated, removed, removed_ids)``。id が見つからなければ ``(None, None, None)``。
+    truncate_chat_and_supersede から切り出し、単体テスト可能にしている。
+    """
+    index = None
+    for i, m in enumerate(history or []):
+        if isinstance(m, dict) and m.get("id") == from_message_id:
+            index = i
+            break
+    if index is None:
+        return None, None, None
+    removed = history[index:]
+    truncated = history[:index]
+    removed_ids = [m.get("id") for m in removed if isinstance(m, dict) and m.get("id")]
+    return truncated, removed, removed_ids
+
+
+def truncate_chat_and_supersede(
+    user_id: str,
+    course_id: str,
+    topic_id: str,
+    from_message_id: str,
+) -> dict | None:
+    """機能3: ``from_message_id`` 以降の往復を履歴から取り除き、派生痕跡を supersede する。
+
+    - ``learning_chat_history.history`` から ``from_message_id`` の位置以降（当該メッセージを
+      含む）を切り詰める（空になれば行削除）。
+    - 取り除いたメッセージ id を ``payload.message_id`` に持つ ``interest_traces`` を
+      ``status='superseded'`` にする（削除せず保持。P4）。以降の worker / digest は superseded を除外する。
+
+    サーバ側の永続履歴を正本として位置を決めるため、クライアントの history は信用しない。
+    戻り値 ``{"truncated_history": [...], "removed_ids": [...], "removed_count": n}``。
+    ``from_message_id`` が履歴に無ければ ``None``（呼び出し側が 404 等を返す）。
+    """
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("""
+                SELECT history FROM learning_chat_history
+                WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid AND topic_id = :tid
+                LIMIT 1
+            """),
+            {"uid": user_id, "cid": course_id, "tid": topic_id},
+        ).fetchone()
+        history = record[0] if record and isinstance(record[0], list) else []
+
+        truncated, removed, removed_ids = _split_history_at(history, from_message_id)
+        if truncated is None:
+            return None
+
+        if truncated:
+            session.execute(
+                sa_text("""
+                    UPDATE learning_chat_history
+                    SET history = CAST(:history AS jsonb), updated_at = now()
+                    WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid AND topic_id = :tid
+                """),
+                {"uid": user_id, "cid": course_id, "tid": topic_id,
+                 "history": json.dumps(truncated, ensure_ascii=False)},
+            )
+        else:
+            session.execute(
+                sa_text("""
+                    DELETE FROM learning_chat_history
+                    WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid AND topic_id = :tid
+                """),
+                {"uid": user_id, "cid": course_id, "tid": topic_id},
+            )
+
+        # 派生痕跡を supersede（削除せず保持。P4）。worker/digest は superseded を拾わない。
+        if removed_ids:
+            ph = ", ".join(f":rid_{i}" for i in range(len(removed_ids)))
+            params = {"uid": user_id, "cid": course_id}
+            for i, rid in enumerate(removed_ids):
+                params[f"rid_{i}"] = rid
+            session.execute(
+                sa_text(f"""
+                    UPDATE interest_traces
+                    SET status = 'superseded', last_seen_at = now()
+                    WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
+                      AND payload->>'message_id' IN ({ph})
+                      AND status <> 'superseded'
+                """),
+                params,
+            )
+        session.commit()
+        return {
+            "truncated_history": truncated,
+            "removed_ids": removed_ids,
+            "removed_count": len(removed),
+        }
+    except Exception:
+        session.rollback()
+        logger.exception(
+            "Failed to truncate chat history for user=%s topic=%s from=%s",
+            user_id, topic_id, from_message_id,
+        )
+        raise
+    finally:
+        session.close()
+
+
 # ---------------------------------------------------------------------------
 # Misconception detection
 # ---------------------------------------------------------------------------
@@ -1554,6 +1963,7 @@ _TRACE_STATUSES = (
     "articulated",    # 本人が自分の言葉で編集済み
     "connected",      # グラフ上の node/edge に接続済み
     "abstracted",     # 新しい抽象化・教材提案へ昇格
+    "superseded",     # 機能3: メッセージ書き直し/削除で往復ごと差し替えられた（削除しない。P4）
 )
 
 
@@ -1566,10 +1976,11 @@ def record_interest_trace(
     context_label: str = "",
     extra_payload: dict | None = None,
     status: str = "open",
-) -> None:
+) -> str | None:
     """学習者の問い・寄り道・誤答を interest_traces に1行追記する（安価・LLM不使用）。
 
     失敗してもチャット応答を止めない（best-effort）。chat_anchors への二重書きはしない。
+    戻り値は挿入した痕跡の id（帰属確認プロンプト等の後続操作用）。失敗時は None。
     """
     if kind not in _INTEREST_KINDS:
         kind = "raw"
@@ -1580,21 +1991,24 @@ def record_interest_trace(
         payload.update(extra_payload)
     session = _pg_session()
     try:
-        session.execute(
+        row = session.execute(
             sa_text("""
                 INSERT INTO interest_traces (id, user_id, course_id, topic_id, kind, payload, status)
                 VALUES (gen_random_uuid(), CAST(:uid AS uuid), :cid, :tid, :kind,
                         CAST(:payload AS jsonb), :status)
+                RETURNING id
             """),
             {
                 "uid": user_id, "cid": course_id, "tid": topic_id, "kind": kind,
                 "payload": json.dumps(payload, ensure_ascii=False), "status": status,
             },
-        )
+        ).fetchone()
         session.commit()
+        return str(row[0]) if row else None
     except Exception as exc:
         session.rollback()
         logger.warning("Failed to record interest trace: %s", exc)
+        return None
     finally:
         session.close()
 
@@ -1616,6 +2030,8 @@ def get_interest_traces(user_id: str, course_id: str, topic_id: str | None = Non
                 WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
                   -- tension の未確定候補・棄却は問いの軌跡に出さない（提示はダイジェスト経由のみ。P1/P7）
                   AND NOT (kind = 'tension' AND status IN ('candidate', 'dismissed'))
+                  -- 機能3: 書き直し/削除で往復ごと差し替えられた痕跡は出さない（保持はする。P4）
+                  AND status <> 'superseded'
                 ORDER BY
                     CASE status WHEN 'revisited' THEN 0 WHEN 'open' THEN 1 ELSE 2 END,
                     created_at DESC
@@ -1693,11 +2109,35 @@ def aggregate_interest_dashboard(course_id: str, topic_title_map: dict | None = 
             """),
             {"cid": course_id},
         ).fetchall()
+
+        # 構造帰属ヒートマップ（StructureAnchorAgent Stage 3）。
+        # 対象は learner_selected / confirmed のみ（llm_candidate は本人未確定なので
+        # 集計に入れない。P1/P3）。語彙（anchor_type/stage/doubt_type）単位の集計のみで
+        # 自由記述ラベル・本文は出さない。
+        anchor_rows = session.execute(
+            sa_text("""
+                SELECT topic_id,
+                       COALESCE(payload->'structure_anchor'->>'anchor_type', 'segment') AS anchor_type,
+                       CASE WHEN payload->'structure_anchor'->>'anchor_type' = 'stage'
+                            THEN COALESCE(payload->'structure_anchor'->>'anchor_id', '')
+                            ELSE '' END AS stage,
+                       COALESCE(payload->'structure_anchor'->>'doubt_type', 'unclassified') AS doubt_type,
+                       COUNT(*) AS cnt,
+                       COUNT(DISTINCT user_id) AS learners
+                FROM interest_traces
+                WHERE course_id = :cid AND kind IN ('question', 'misconception')
+                  AND payload->'structure_anchor'->>'attribution_source' IN ('learner_selected', 'confirmed')
+                  AND COALESCE(payload->'structure_anchor'->>'status', 'active') = 'active'
+                GROUP BY 1, 2, 3, 4
+                ORDER BY cnt DESC
+            """),
+            {"cid": course_id},
+        ).fetchall()
     except Exception as exc:
         logger.warning("aggregate_interest_dashboard failed: %s", exc)
         return {"course_id": course_id, "cohort_size": 0, "hotspots": [],
                 "unfinished_summary": {"open_questions": 0, "repeated_detours": 0, "recurring_misconceptions": 0},
-                "tension_heatmap": []}
+                "tension_heatmap": [], "anchor_heatmap": []}
     finally:
         session.close()
 
@@ -1714,6 +2154,30 @@ def aggregate_interest_dashboard(course_id: str, topic_title_map: dict | None = 
             "topic_title": title_map.get(tid) or tid or "(不明トピック)",
             "tension_type": ttype,
             "tension_type_label": _TT_LABELS.get(ttype, _TT_LABELS["unclassified"]),
+            "count": cnt,
+            "learners": learners,  # 関与人数（個人は特定しない）
+        })
+
+    # k-匿名化: 関与人数 n<3 のセルは表示しない（tension と同じ k=3）。
+    _ANCHOR_K_ANONYMITY = 3
+    anchor_heatmap = []
+    from core.structure_anchor.schema import (
+        ANCHOR_TYPE_LABELS as _AT_LABELS,
+        DOUBT_TYPE_LABELS as _DT_LABELS,
+    )
+    for r in anchor_rows:
+        tid, atype, stage, dtype, cnt, learners = (
+            r[0], str(r[1]), str(r[2]), str(r[3]), int(r[4]), int(r[5]),
+        )
+        if learners < _ANCHOR_K_ANONYMITY:
+            continue
+        anchor_heatmap.append({
+            "topic_title": title_map.get(tid) or tid or "(不明トピック)",
+            "anchor_type": atype,
+            "anchor_type_label": _AT_LABELS.get(atype, atype),
+            "stage": stage,  # anchor_type='stage' のときのみ非空（theory stage 語彙）
+            "doubt_type": dtype,
+            "doubt_type_label": _DT_LABELS.get(dtype, _DT_LABELS["unclassified"]),
             "count": cnt,
             "learners": learners,  # 関与人数（個人は特定しない）
         })
@@ -1738,6 +2202,7 @@ def aggregate_interest_dashboard(course_id: str, topic_title_map: dict | None = 
             "recurring_misconceptions": int(summary[2]) if summary else 0,
         },
         "tension_heatmap": tension_heatmap,
+        "anchor_heatmap": anchor_heatmap,
     }
 
 
@@ -2027,6 +2492,223 @@ def connect_tension_trace(
     _record_tension_event(trace_id, "open/articulated", "connected", user_id,
                           {"component_id": component_id, "edge_id": edge_id})
     return {"trace_id": str(trace_id), "status": "connected"}
+
+
+# ---------------------------------------------------------------------------
+# 構造帰属（structure_anchor）— StructureAnchorAgent Stage 2: ダイジェスト・本人確定
+# ---------------------------------------------------------------------------
+# 行の status は触らない（問い自体は確定済み。候補なのは帰属だけなので、確定状態は
+# payload.structure_anchor.attribution_source のみで管理する）。
+
+# ダイジェスト提示条件（worker.DIGEST_* と同値。循環 import を避けてここに持つ）
+_ANCHOR_DIGEST_MIN_CONFIDENCE = 0.55
+_ANCHOR_DIGEST_MAX_ITEMS = 3
+
+
+def _record_anchor_event(
+    trace_id: str, old_status: str, new_status: str, user_id: str, metadata: dict | None = None,
+) -> None:
+    """帰属の状態変更を theory_review_events に監査記録する（entity_type='structure_anchor'）。"""
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO theory_review_events (entity_type, entity_id, old_status, new_status, changed_by, metadata)
+                VALUES ('structure_anchor', :eid, :old, :new, CAST(:uid AS uuid), CAST(:meta AS jsonb))
+            """),
+            {
+                "eid": str(trace_id), "old": old_status, "new": new_status,
+                "uid": user_id, "meta": json.dumps(metadata or {}, ensure_ascii=False),
+            },
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.warning("_record_anchor_event failed: %s", exc)
+    finally:
+        session.close()
+
+
+def get_anchor_digest(user_id: str, course_id: str) -> dict:
+    """本人の帰属候補（llm_candidate・active・confidence>=0.55）を新しい順に最大3件返す。
+
+    「この疑問は◯◯についてでしたか？」の確認カード用。confidence の数値は返さない
+    （学習者に数値スコアを見せない原則の準用。P7）。
+    """
+    from core.structure_anchor.schema import ANCHOR_TYPE_LABELS, DOUBT_TYPE_LABELS
+
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT id, payload
+                FROM interest_traces
+                WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
+                  AND kind = 'question'
+                  AND status <> 'superseded'  -- 機能3: 差し替え済み往復の帰属候補は出さない
+                  AND payload->'structure_anchor'->>'attribution_source' = 'llm_candidate'
+                  AND COALESCE(payload->'structure_anchor'->>'status', 'active') = 'active'
+                  AND COALESCE((payload->'structure_anchor'->>'confidence')::float, 0.0) >= :minc
+                ORDER BY created_at DESC
+                LIMIT :lim
+            """),
+            {
+                "uid": user_id, "cid": course_id,
+                "minc": _ANCHOR_DIGEST_MIN_CONFIDENCE, "lim": _ANCHOR_DIGEST_MAX_ITEMS,
+            },
+        ).fetchall()
+    except Exception as exc:
+        logger.warning("get_anchor_digest failed: %s", exc)
+        rows = []
+    finally:
+        session.close()
+
+    items = []
+    for r in rows:
+        payload = r[1] if isinstance(r[1], dict) else (json.loads(r[1]) if r[1] else {})
+        anchor = payload.get("structure_anchor") or {}
+        atype = anchor.get("anchor_type", "segment")
+        dtype = anchor.get("doubt_type", "unclassified")
+        items.append({
+            "trace_id": str(r[0]),
+            "question_text": payload.get("text", ""),
+            "anchor_type": atype,
+            "anchor_type_label": ANCHOR_TYPE_LABELS.get(atype, atype),
+            "anchor_label": anchor.get("anchor_label", ""),
+            "doubt_type": dtype,
+            "doubt_type_label": DOUBT_TYPE_LABELS.get(dtype, DOUBT_TYPE_LABELS["unclassified"]),
+            "evidence_quote": anchor.get("evidence_quote", ""),
+            "context_label": payload.get("context_label", ""),
+        })
+    return {"course_id": course_id, "items": items}
+
+
+def confirm_anchor_trace(
+    user_id: str,
+    trace_id: str,
+    doubt_type: str = "",
+    anchor_type: str = "",
+    anchor_id: str = "",
+    anchor_label: str = "",
+) -> dict | None:
+    """帰属を本人が確定/訂正する: → attribution_source='confirmed'（P1）。
+
+    引数の doubt_type / anchor_type / anchor_id / anchor_label が与えられた場合は
+    その値で訂正する。structure_anchor が無い痕跡（方法Cの1タップ確定）には、
+    payload.position_anchor の segment から最小のアンカーを新規作成する。
+    """
+    from core.structure_anchor.schema import (
+        ANCHOR_TYPES,
+        ATTRIBUTION_CONFIRMED,
+        DOUBT_TYPES,
+        build_anchor_payload,
+    )
+
+    doubt_type = (doubt_type or "").strip()
+    anchor_type = (anchor_type or "").strip()
+    if doubt_type and doubt_type not in DOUBT_TYPES:
+        return None
+    if anchor_type and anchor_type not in ANCHOR_TYPES:
+        return None
+
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT payload FROM interest_traces
+                WHERE id = CAST(:tid AS uuid) AND user_id = CAST(:uid AS uuid)
+                  AND kind IN ('question', 'misconception')
+            """),
+            {"tid": trace_id, "uid": user_id},
+        ).fetchone()
+        if row is None:
+            return None
+        payload = row[0] if isinstance(row[0], dict) else (json.loads(row[0]) if row[0] else {})
+        anchor = payload.get("structure_anchor") or {}
+        old_source = anchor.get("attribution_source", "")
+        if not anchor:
+            # 方法C: 帰属未生成のまま本人が doubt_type を申告 → segment 縮退で新規作成
+            pos = payload.get("position_anchor") or {}
+            seg = pos.get("segment_id")
+            anchor = build_anchor_payload(
+                anchor_type="segment",
+                anchor_id=f"seg_{seg}" if seg is not None else "",
+                anchor_label=payload.get("context_label", ""),
+                doubt_type=doubt_type or "unclassified",
+                attribution_source=ATTRIBUTION_CONFIRMED,
+                reason="learner_declared_via_confirm_prompt",
+                confidence=1.0,
+            )
+        else:
+            if doubt_type:
+                anchor["doubt_type"] = doubt_type
+            if anchor_type:
+                anchor["anchor_type"] = anchor_type
+                anchor["anchor_id"] = (anchor_id or "").strip()
+                anchor["anchor_label"] = (anchor_label or "").strip()[:80]
+            elif anchor_id:
+                anchor["anchor_id"] = anchor_id.strip()
+                if anchor_label:
+                    anchor["anchor_label"] = anchor_label.strip()[:80]
+            anchor["attribution_source"] = ATTRIBUTION_CONFIRMED
+            anchor["status"] = "active"
+        result = session.execute(
+            sa_text("""
+                UPDATE interest_traces
+                SET payload = jsonb_set(payload, '{structure_anchor}', CAST(:anchor AS jsonb)),
+                    last_seen_at = now()
+                WHERE id = CAST(:tid AS uuid) AND user_id = CAST(:uid AS uuid)
+                RETURNING id
+            """),
+            {"anchor": json.dumps(anchor, ensure_ascii=False), "tid": trace_id, "uid": user_id},
+        ).fetchone()
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.warning("confirm_anchor_trace failed: %s", exc)
+        return None
+    finally:
+        session.close()
+    if result is None:
+        return None
+    _record_anchor_event(trace_id, old_source or "(none)", "confirmed", user_id,
+                         {"doubt_type": anchor.get("doubt_type", ""),
+                          "anchor_type": anchor.get("anchor_type", ""),
+                          "corrected": bool(doubt_type or anchor_type or anchor_id)})
+    return {"trace_id": str(trace_id), "structure_anchor": anchor}
+
+
+def dismiss_anchor_trace(user_id: str, trace_id: str) -> dict | None:
+    """本人が帰属候補を「違う」と判定: structure_anchor.status='dismissed'（保持する。P4）。
+
+    行の status・問い本文には触らない（問い自体は有効なまま）。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                UPDATE interest_traces
+                SET payload = jsonb_set(
+                        payload, '{structure_anchor,status}', '"dismissed"'::jsonb),
+                    last_seen_at = now()
+                WHERE id = CAST(:tid AS uuid) AND user_id = CAST(:uid AS uuid)
+                  AND payload->'structure_anchor' IS NOT NULL
+                  AND payload->'structure_anchor'->>'attribution_source' = 'llm_candidate'
+                RETURNING id
+            """),
+            {"tid": trace_id, "uid": user_id},
+        ).fetchone()
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.warning("dismiss_anchor_trace failed: %s", exc)
+        return None
+    finally:
+        session.close()
+    if row is None:
+        return None
+    _record_anchor_event(trace_id, "llm_candidate", "dismissed", user_id)
+    return {"trace_id": str(trace_id), "anchor_status": "dismissed"}
 
 
 def get_graph_element_context(

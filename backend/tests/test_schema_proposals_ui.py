@@ -95,13 +95,11 @@ class TestAdminHTMLSchemaProposals:
 
     def test_tab_inside_admin_tabs_container(self):
         """タブボタンが adminTabs コンテナ内にあること。"""
-        tabs_match = re.search(
-            r'id="adminTabs"[^>]*>(.*?)</div>',
-            self.html,
-            re.DOTALL,
-        )
-        assert tabs_match, "adminTabs container not found"
-        assert 'data-tab="schema-proposals"' in tabs_match.group(1)
+        start = self.html.find('id="adminTabs"')
+        end = self.html.find('<!-- D層', start)
+        assert start != -1, "adminTabs container not found"
+        assert end != -1, "adminTabs container end marker not found"
+        assert 'data-tab="schema-proposals"' in self.html[start:end]
 
 
 class TestAdminJSSchemaProposals:

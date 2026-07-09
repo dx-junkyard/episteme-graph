@@ -1,0 +1,328 @@
+"""core/atlas.py の単体テスト (Issue A-1/A-3)。
+
+骨格スキーマのバリデーション・学習者向けビュー・凍結・シリアライズ再現性を検証する。
+外部 API は一切呼び出さない。
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from core import atlas
+
+
+def _minimal_skeleton(**overrides) -> atlas.AtlasSkeleton:
+    base = dict(
+        cartridge="particle_physics",
+        status=atlas.STATUS_DRAFT,
+        generated_by="model:test batch:t1",
+        regions=(
+            atlas.SkeletonRegion(
+                id="region_a",
+                label="領域A",
+                layout=atlas.RegionLayout(0.1, 0.1, 0.4, 0.4),
+                concepts=(
+                    atlas.SkeletonConcept(
+                        id="concept_a",
+                        label="概念A",
+                        layout=atlas.ConceptLayout(0.5, 0.5),
+                        seed_status=atlas.SeedStatus("verified", reviewed=True),
+                    ),
+                ),
+            ),
+        ),
+    )
+    base.update(overrides)
+    return atlas.AtlasSkeleton(**base)
+
+
+# ---------------------------------------------------------------------------
+# バリデータ
+# ---------------------------------------------------------------------------
+
+
+class TestValidator:
+    def test_valid_draft_passes(self):
+        report = atlas.validate_skeleton(_minimal_skeleton())
+        assert report.ok
+        assert report.warnings == ()
+
+    def test_missing_generated_by_is_error(self):
+        report = atlas.validate_skeleton(_minimal_skeleton(generated_by=""))
+        assert not report.ok
+
+    def test_non_draft_without_reviewed_by_is_rejected(self):
+        skeleton = _minimal_skeleton(
+            status=atlas.STATUS_FROZEN,
+            version="2026.1",
+            changelog=(atlas.ChangelogEntry("2026.1", "初版"),),
+            reviewed_by=(),
+        )
+        report = atlas.validate_skeleton(skeleton)
+        assert any("reviewed_by" in e for e in report.errors)
+
+    def test_region_limit_enforced(self):
+        regions = tuple(
+            atlas.SkeletonRegion(id=f"r{i}", label=f"R{i}") for i in range(atlas.MAX_REGIONS + 1)
+        )
+        report = atlas.validate_skeleton(_minimal_skeleton(regions=regions))
+        assert any("上限" in e for e in report.errors)
+
+    def test_concept_limit_enforced(self):
+        concepts = tuple(
+            atlas.SkeletonConcept(id=f"c{i}", label=f"C{i}")
+            for i in range(atlas.MAX_CONCEPTS_PER_REGION + 1)
+        )
+        regions = (atlas.SkeletonRegion(id="r1", label="R1", concepts=concepts),)
+        report = atlas.validate_skeleton(_minimal_skeleton(regions=regions))
+        assert any("代表概念数" in e for e in report.errors)
+
+    def test_coordinates_out_of_range_is_error(self):
+        regions = (
+            atlas.SkeletonRegion(
+                id="r1", label="R1", layout=atlas.RegionLayout(0.9, 0.9, 0.5, 0.5)
+            ),
+        )
+        report = atlas.validate_skeleton(_minimal_skeleton(regions=regions))
+        assert any("はみ出し" in e for e in report.errors)
+
+    def test_region_overlap_is_warning(self):
+        regions = (
+            atlas.SkeletonRegion(id="r1", label="R1", layout=atlas.RegionLayout(0.1, 0.1, 0.4, 0.4)),
+            atlas.SkeletonRegion(id="r2", label="R2", layout=atlas.RegionLayout(0.3, 0.3, 0.4, 0.4)),
+        )
+        report = atlas.validate_skeleton(_minimal_skeleton(regions=regions))
+        assert report.ok
+        assert any("重なって" in w for w in report.warnings)
+
+    def test_duplicate_concept_id_is_error(self):
+        regions = (
+            atlas.SkeletonRegion(
+                id="r1",
+                label="R1",
+                concepts=(
+                    atlas.SkeletonConcept(id="dup", label="A"),
+                    atlas.SkeletonConcept(id="dup", label="B"),
+                ),
+            ),
+        )
+        report = atlas.validate_skeleton(_minimal_skeleton(regions=regions))
+        assert any("重複" in e for e in report.errors)
+
+    def test_edge_referencing_unknown_id_is_error(self):
+        report = atlas.validate_skeleton(
+            _minimal_skeleton(edges=(atlas.SkeletonEdge("region_a", "nowhere"),))
+        )
+        assert any("未知" in e for e in report.errors)
+
+    def test_frozen_with_unreviewed_binding_is_error(self):
+        skeleton = _minimal_skeleton(
+            status=atlas.STATUS_FROZEN,
+            version="2026.1",
+            reviewed_by=("t1",),
+            changelog=(atlas.ChangelogEntry("2026.1", "初版"),),
+            concept_bindings=(atlas.ConceptBinding("concept_a", "uuid-1", reviewed=False),),
+        )
+        report = atlas.validate_skeleton(skeleton)
+        assert any("未レビューの concept_binding" in e for e in report.errors)
+
+
+# ---------------------------------------------------------------------------
+# ValidationIssue (skeleton editor upgrade P2): region_id/concept_id を機械可読で持つ
+# ---------------------------------------------------------------------------
+
+
+class TestValidationIssue:
+    def test_issue_behaves_as_str_for_backward_compat(self):
+        # `"; ".join(...)` / `in` / json 直列化が従来どおり動くこと
+        issue = atlas.ValidationIssue("概念 'x' に label がありません", concept_id="x")
+        assert isinstance(issue, str)
+        assert "label" in issue
+        assert "; ".join([issue, issue]).count(";") == 1
+        import json
+
+        assert json.dumps([issue]) == json.dumps(["概念 'x' に label がありません"])
+
+    def test_concept_error_carries_ids(self):
+        regions = (
+            atlas.SkeletonRegion(
+                id="region_a",
+                label="領域A",
+                layout=atlas.RegionLayout(0.1, 0.1, 0.4, 0.4),
+                concepts=(atlas.SkeletonConcept(id="concept_a", label=""),),  # label 欠落
+            ),
+        )
+        report = atlas.validate_skeleton(_minimal_skeleton(regions=regions))
+        assert not report.ok
+        label_issue = next(e for e in report.errors if "label" in e)
+        assert label_issue.concept_id == "concept_a"
+        assert label_issue.region_id == "region_a"
+        d = atlas.issue_to_dict(label_issue)
+        assert d["concept_id"] == "concept_a" and d["region_id"] == "region_a"
+
+    def test_overlap_warning_carries_edge_endpoints(self):
+        regions = (
+            atlas.SkeletonRegion(id="r1", label="R1", layout=atlas.RegionLayout(0.1, 0.1, 0.5, 0.5)),
+            atlas.SkeletonRegion(id="r2", label="R2", layout=atlas.RegionLayout(0.2, 0.2, 0.5, 0.5)),
+        )
+        report = atlas.validate_skeleton(_minimal_skeleton(regions=regions))
+        overlap = next(w for w in report.warnings if "重なって" in w)
+        assert overlap.edge == ("r1", "r2")
+
+    def test_issue_to_dict_accepts_plain_str(self):
+        d = atlas.issue_to_dict("素の文字列")
+        assert d == {"message": "素の文字列", "region_id": None, "concept_id": None, "edge": None}
+
+
+# ---------------------------------------------------------------------------
+# 学習者向けビュー (draft 非公開・未レビュー seed_status 除去)
+# ---------------------------------------------------------------------------
+
+
+class TestLearnerView:
+    def test_draft_is_never_learner_visible(self):
+        draft = _minimal_skeleton()
+        assert not draft.is_learner_visible
+        with pytest.raises(atlas.SkeletonNotVisibleError):
+            atlas.learner_view(draft)
+
+    def test_unreviewed_seed_status_is_stripped(self):
+        regions = (
+            atlas.SkeletonRegion(
+                id="r1",
+                label="R1",
+                concepts=(
+                    atlas.SkeletonConcept(
+                        id="c1", label="C1", seed_status=atlas.SeedStatus("verified", reviewed=False)
+                    ),
+                    atlas.SkeletonConcept(
+                        id="c2", label="C2", seed_status=atlas.SeedStatus("assumed", reviewed=True)
+                    ),
+                ),
+            ),
+        )
+        frozen = atlas.freeze_skeleton(
+            _minimal_skeleton(regions=regions), version="2026.1", reviewed_by=["t1"]
+        )
+        view = atlas.learner_view(frozen)
+        concepts = {c["id"]: c for c in view["regions"][0]["concepts"]}
+        assert "seed_status" not in concepts["c1"]
+        assert concepts["c2"]["seed_status"] == "assumed"
+        assert view["skeleton_version"] == "2026.1"
+
+
+# ---------------------------------------------------------------------------
+# 凍結
+# ---------------------------------------------------------------------------
+
+
+class TestFreeze:
+    def test_freeze_records_attribution_and_changelog(self):
+        frozen = atlas.freeze_skeleton(
+            _minimal_skeleton(), version="2026.1", reviewed_by=["faculty-1"], note="初版"
+        )
+        assert frozen.status == atlas.STATUS_FROZEN
+        assert frozen.reviewed_by == ("faculty-1",)
+        assert frozen.changelog[-1].version == "2026.1"
+        assert frozen.is_learner_visible
+
+    def test_freeze_requires_reviewer(self):
+        with pytest.raises(atlas.SkeletonFreezeError):
+            atlas.freeze_skeleton(_minimal_skeleton(), version="2026.1", reviewed_by=[])
+
+    def test_frozen_skeleton_cannot_be_refrozen(self):
+        frozen = atlas.freeze_skeleton(
+            _minimal_skeleton(), version="2026.1", reviewed_by=["t1"]
+        )
+        with pytest.raises(atlas.SkeletonFreezeError):
+            atlas.freeze_skeleton(frozen, version="2026.2", reviewed_by=["t1"])
+
+
+# ---------------------------------------------------------------------------
+# シリアライズの再現性 (受け入れ条件4: 再ビルドでバイト同一)
+# ---------------------------------------------------------------------------
+
+
+class TestDeterminism:
+    def test_dump_is_deterministic(self):
+        frozen = atlas.freeze_skeleton(
+            _minimal_skeleton(), version="2026.1", reviewed_by=["t1"], note="初版"
+        )
+        assert atlas.dump_skeleton(frozen) == atlas.dump_skeleton(frozen)
+
+    def test_load_dump_roundtrip_is_stable(self, tmp_path):
+        frozen = atlas.freeze_skeleton(
+            _minimal_skeleton(), version="2026.1", reviewed_by=["t1"], note="初版"
+        )
+        path = tmp_path / "skeleton.yaml"
+        atlas.write_skeleton(frozen, path)
+        text1 = path.read_text(encoding="utf-8")
+        reloaded = atlas.load_skeleton(path)
+        assert atlas.dump_skeleton(reloaded) == text1
+
+    def test_bundled_particle_physics_skeleton_is_reproducible(self):
+        """同梱済みの骨格が dump(load(x)) == x を満たす (再ビルドでバイト同一)。"""
+        from core.cartridges import _cartridges_root
+
+        path = _cartridges_root() / "particle_physics" / atlas.SKELETON_FILENAME
+        assert path.exists(), "particle_physics に骨格が同梱されていること (受け入れ条件1)"
+        text = path.read_text(encoding="utf-8")
+        assert atlas.dump_skeleton(atlas.load_skeleton(path)) == text
+
+
+# ---------------------------------------------------------------------------
+# topic → 骨格概念の対応付け (個人層 binding の整備)
+# ---------------------------------------------------------------------------
+
+
+class TestMatchTopicToConcept:
+    def _sk(self) -> atlas.AtlasSkeleton:
+        return _minimal_skeleton()
+
+    def test_normalize_label_strips_space_and_middot(self):
+        assert atlas.normalize_label(" 演 算 子 ") == "演算子"
+        assert atlas.normalize_label("A・B") == "ab"
+
+    def test_explicit_atlas_node_id_wins_over_label(self):
+        topic = {"atlas_node_id": "concept_a", "title": "全然違う名前"}
+        assert atlas.match_topic_to_concept(topic, self._sk()) == "concept_a"
+
+    def test_explicit_atlas_concept_id_alias(self):
+        topic = {"atlas_concept_id": "concept_a"}
+        assert atlas.match_topic_to_concept(topic, self._sk()) == "concept_a"
+
+    def test_explicit_region_id_allowed(self):
+        assert atlas.match_topic_to_concept({"atlas_node_id": "region_a"}, self._sk()) == "region_a"
+
+    def test_unknown_explicit_id_falls_through_to_label(self):
+        topic = {"atlas_node_id": "ghost", "title": "概念A"}
+        assert atlas.match_topic_to_concept(topic, self._sk()) == "concept_a"
+
+    def test_bound_concept_id_used_when_no_explicit(self):
+        topic = {"title": "無関係タイトル"}
+        assert (
+            atlas.match_topic_to_concept(topic, self._sk(), bound_concept_id="concept_a")
+            == "concept_a"
+        )
+
+    def test_bound_concept_id_must_be_known(self):
+        topic = {"title": "無関係タイトル"}
+        assert atlas.match_topic_to_concept(topic, self._sk(), bound_concept_id="ghost") is None
+
+    def test_label_exact_match(self):
+        assert atlas.match_topic_to_concept({"title": "概念A"}, self._sk()) == "concept_a"
+
+    def test_label_contains_match(self):
+        assert atlas.match_topic_to_concept({"title": "第3回：概念A の導入"}, self._sk()) == "concept_a"
+
+    def test_region_label_fallback(self):
+        assert atlas.match_topic_to_concept({"title": "領域A"}, self._sk()) == "region_a"
+
+    def test_no_match_returns_none(self):
+        assert atlas.match_topic_to_concept({"title": "全く無関係な題目"}, self._sk()) is None
+
+    def test_non_dict_topic_returns_none(self):
+        assert atlas.match_topic_to_concept(None, self._sk()) is None
+
+    def test_empty_title_returns_none(self):
+        assert atlas.match_topic_to_concept({"title": ""}, self._sk()) is None

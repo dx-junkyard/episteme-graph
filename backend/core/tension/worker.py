@@ -86,6 +86,7 @@ def _fetch_pending_hints(session, user_id: str, course_id: str, topic_id: str) -
               AND (topic_id = :tid OR (:tid IS NULL AND topic_id IS NULL))
               AND payload->>'tension_hint' = 'true'
               AND analyzed_at IS NULL
+              AND status <> 'superseded'  -- 機能3: 書き直し/削除で差し替えられた痕跡は解析しない
             ORDER BY created_at ASC
         """),
         {"uid": user_id, "cid": course_id, "tid": topic_id},

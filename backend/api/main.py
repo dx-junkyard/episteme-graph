@@ -54,6 +54,10 @@ from sqlalchemy import text as sa_text
 
 from dependencies import _hash_password
 from routes import auth, learning, admin, lecture, groups, error_logs, export as export_routes
+from routes import atlas as atlas_routes
+from routes import atlas_view as atlas_view_routes
+from routes import doubt as doubt_routes
+from routes import reconstruction as reconstruction_routes
 from core.config import get_settings as _get_settings
 from core.postgres import get_session as _pg_session, check_connection as _pg_check
 
@@ -885,8 +889,574 @@ def _run_migrations() -> None:
                 WHERE kind = 'tension' AND status = 'candidate'
         """))
 
+        # Migration 023: 分野の地図 — 修正報告フロー (Issue D)
+        # 骨格への修正報告を帰属つき(匿名不可)・骨格バージョンつきで記録する。
+        # レビューは既存の C層教員レビュー導線を流用(監査は theory_review_events)。
+        # 正本リファレンス: backend/db/023_atlas_correction_reports.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS atlas_correction_reports (
+                id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                kind             TEXT NOT NULL DEFAULT 'map_correction',
+                cartridge_id     TEXT NOT NULL DEFAULT '',
+                skeleton_version TEXT NOT NULL,
+                node_id          TEXT NOT NULL DEFAULT '',
+                region_id        TEXT NOT NULL DEFAULT '',
+                level            INTEGER NOT NULL DEFAULT 1 CHECK (level BETWEEN 1 AND 3),
+                node_label       TEXT NOT NULL DEFAULT '',
+                report_text      TEXT NOT NULL,
+                reporter_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                status           TEXT NOT NULL DEFAULT 'pending'
+                                     CHECK (status IN ('pending', 'accepted', 'declined', 'merged')),
+                resolution_note  TEXT NOT NULL DEFAULT '',
+                resolved_by      UUID REFERENCES users(id) ON DELETE SET NULL,
+                resolved_at      TIMESTAMPTZ,
+                merged_into      UUID REFERENCES atlas_correction_reports(id) ON DELETE SET NULL,
+                applied_version  TEXT NOT NULL DEFAULT '',
+                notified_at      TIMESTAMPTZ,
+                created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+                CHECK (node_id <> '' OR region_id <> '')
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_atlas_reports_cartridge_status ON atlas_correction_reports(cartridge_id, status)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_atlas_reports_reporter ON atlas_correction_reports(reporter_id)"
+        ))
+        session.execute(sa_text("""
+            CREATE INDEX IF NOT EXISTS idx_atlas_reports_unnotified
+                ON atlas_correction_reports(reporter_id)
+                WHERE resolved_at IS NOT NULL AND notified_at IS NULL
+        """))
+
+        # Migration 024: 分野の地図 — 状態導出キャッシュ atlas_overlay_cache (Issue E)
+        # 骨格(カートリッジ同梱)の上へ、既存データから近似導出した状態を差分バッチで
+        # 重ねるキャッシュ。導出規則は core/atlas_state.py に一箇所隔離する。
+        # 正本リファレンス: backend/db/024_atlas_overlay_cache.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS atlas_overlay_cache (
+                id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                cartridge_id     TEXT NOT NULL,
+                skeleton_version TEXT NOT NULL,
+                entry_type       TEXT NOT NULL CHECK (entry_type IN ('region', 'node', 'chain', 'meta')),
+                entry_id         TEXT NOT NULL,
+                region_id        TEXT NOT NULL DEFAULT '',
+                label            TEXT NOT NULL DEFAULT '',
+                status           TEXT NOT NULL DEFAULT '',
+                status_source    TEXT NOT NULL DEFAULT 'derived',
+                verify_line      TEXT NOT NULL DEFAULT '',
+                endorse_line     TEXT NOT NULL DEFAULT '',
+                learn_enabled    BOOLEAN NOT NULL DEFAULT TRUE,
+                evid_enabled     BOOLEAN NOT NULL DEFAULT TRUE,
+                layout           JSONB NOT NULL DEFAULT '{}'::jsonb,
+                placement        JSONB NOT NULL DEFAULT '{}'::jsonb,
+                evidence         JSONB NOT NULL DEFAULT '{}'::jsonb,
+                updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE(cartridge_id, skeleton_version, entry_type, entry_id)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_atlas_overlay_cache_key ON atlas_overlay_cache(cartridge_id, skeleton_version)"
+        ))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS atlas_overlay_dirty (
+                cartridge_id TEXT PRIMARY KEY,
+                reason       TEXT NOT NULL DEFAULT '',
+                marked_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+
+        # Migration 025: Structure-Anchored Questions (B層) — 構造帰属のインデックス（列追加ゼロ）
+        # interest_traces.payload.structure_anchor の拡張のみ。帰属候補は
+        # attribution_source='llm_candidate' で保存し、本人の confirm/dismiss でのみ確定する（P1/P4）。
+        session.execute(sa_text("""
+            CREATE INDEX IF NOT EXISTS idx_interest_traces_anchor_candidate
+                ON interest_traces(user_id, course_id)
+                WHERE kind = 'question'
+                  AND (payload->'structure_anchor'->>'attribution_source') = 'llm_candidate'
+        """))
+        session.execute(sa_text("""
+            CREATE INDEX IF NOT EXISTS idx_interest_traces_anchor_pending
+                ON interest_traces(user_id, course_id)
+                WHERE kind = 'question'
+                  AND (payload->'structure_anchor') IS NULL
+                  AND (payload->>'anchor_analyzed_at') IS NULL
+        """))
+
+        # Migration 026: 分野の地図 — 見晴らしの導線の内部計測 + 初回自動表示フラグ (Issue F)
+        # 導線別 開封率・滞在・「ここから学ぶ」到達の内部計測 (数値はユーザーに見せない)。
+        # 初回ログイン自動表示の一度きりフラグは (user_id, 'first_login', 'opened') 行の存在。
+        # 正本リファレンス: backend/db/026_atlas_cue_events.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS atlas_cue_events (
+                id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                cue        TEXT NOT NULL,
+                event      TEXT NOT NULL,
+                payload    JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_atlas_cue_events_user ON atlas_cue_events(user_id, cue, event)"
+        ))
+
+        # Migration 027: 分野の地図 — 骨格 (S層) の DB 管理化
+        # draft/凍結版をファイル (カートリッジ同梱) から DB へ移す。楽観ロックは revision。
+        # 既存同梱 skeleton.yaml は起動時に一度だけ取り込む (下の import 呼び出し・冪等)。
+        # 正本リファレンス: backend/db/027_atlas_skeletons.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS atlas_skeletons (
+                id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                domain_key   TEXT NOT NULL,
+                status       TEXT NOT NULL CHECK (status IN ('draft', 'frozen')),
+                version      TEXT NOT NULL DEFAULT '',
+                content      JSONB NOT NULL,
+                revision     INTEGER NOT NULL DEFAULT 1,
+                generated_by TEXT NOT NULL DEFAULT '',
+                created_by   UUID,
+                updated_by   UUID,
+                created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_atlas_skeletons_draft "
+            "ON atlas_skeletons(domain_key) WHERE status = 'draft'"
+        ))
+        session.execute(sa_text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_atlas_skeletons_frozen "
+            "ON atlas_skeletons(domain_key, version) WHERE status = 'frozen'"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_atlas_skeletons_domain "
+            "ON atlas_skeletons(domain_key, status, created_at DESC)"
+        ))
+
+        # Migration 028: 分野の地図 — カートリッジファイルの無い新分野の domain_meta 永続化
+        # (name/description 等)。generate API で body.domain が省略された場合の
+        # フォールバックに使う。正本リファレンス: backend/db/028_atlas_domain_meta.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS atlas_domain_meta (
+                domain_key         TEXT PRIMARY KEY,
+                name               TEXT NOT NULL,
+                description        TEXT NOT NULL DEFAULT '',
+                target_domain      JSONB NOT NULL DEFAULT '[]'::jsonb,
+                concept_vocabulary TEXT NOT NULL DEFAULT '',
+                created_by         UUID,
+                created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+
+        # Migration 029: D層（Doubt Layer）— 認識的地位台帳 epistemic_ledger (D1-1)
+        # 「合意の強さ」と「検証の強さ」をデータ構造レベルで分離する台帳。
+        # 検証は単一ブールでなく verification_scopes JSONB（配列）。スコープ 0 件
+        # （空欄）は正常状態。directly_verified は人間の記帳専用（builder は生成しない）。
+        # LLM スコープ候補は scope_candidates に candidate で保持し、教員確定まで
+        # verification_scopes 本体に入らない。正本リファレンス: backend/db/029_epistemic_ledger.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS epistemic_ledger (
+                id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                target_id            TEXT NOT NULL,
+                target_type          TEXT NOT NULL
+                                         CHECK (target_type IN ('claim', 'assumption', 'equation', 'component')),
+                document_id          TEXT NOT NULL DEFAULT '',
+                course_id            TEXT NOT NULL DEFAULT '',
+                verification_status  TEXT NOT NULL DEFAULT 'unknown'
+                                         CHECK (verification_status IN (
+                                             'directly_verified', 'indirectly_supported',
+                                             'untested', 'refuted', 'unknown'
+                                         )),
+                verification_scopes  JSONB NOT NULL DEFAULT '[]'::jsonb,
+                scope_candidates     JSONB NOT NULL DEFAULT '[]'::jsonb,
+                scope_candidates_analyzed_at TIMESTAMPTZ,
+                consensus_explicit   JSONB NOT NULL DEFAULT '{}'::jsonb,
+                consensus_behavioral INTEGER NOT NULL DEFAULT 0,
+                load_score           DOUBLE PRECISION,
+                load_computed_at     TIMESTAMPTZ,
+                created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE(target_id, target_type)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_epistemic_ledger_target ON epistemic_ledger(target_type, target_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_epistemic_ledger_course ON epistemic_ledger(course_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_epistemic_ledger_document ON epistemic_ledger(document_id)"
+        ))
+        session.execute(sa_text("""
+            CREATE INDEX IF NOT EXISTS idx_epistemic_ledger_unscoped
+                ON epistemic_ledger(course_id)
+                WHERE verification_scopes = '[]'::jsonb
+        """))
+
+        # Migration 030: D層 — 暗黙前提ノード assumption_nodes (D2-2)
+        # マイニング（経路A: 導出の隙間 / 経路B: コーパス横断）と手動登録の受け皿。
+        # 出力は常に status='candidate'。confirmed / dismissed への遷移は教員 API のみ
+        # （D2-4）。dismissed も行として保持（P4）。cluster_key で同一前提の再候補化を防ぐ。
+        # 正本リファレンス: backend/db/030_assumption_nodes.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS assumption_nodes (
+                id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                statement           TEXT NOT NULL,
+                origin              TEXT NOT NULL DEFAULT 'mined_gap'
+                                        CHECK (origin IN ('mined_gap', 'mined_corpus', 'naive_aggregate', 'manual')),
+                status              TEXT NOT NULL DEFAULT 'candidate'
+                                        CHECK (status IN ('candidate', 'confirmed', 'operationalized', 'dismissed')),
+                cluster_key         TEXT NOT NULL DEFAULT '',
+                created_from        JSONB NOT NULL DEFAULT '{}'::jsonb,
+                evidence_quote      TEXT NOT NULL DEFAULT '',
+                reason              TEXT NOT NULL DEFAULT '',
+                confidence          REAL NOT NULL DEFAULT 0.0,
+                course_id           TEXT NOT NULL DEFAULT '',
+                document_ids        JSONB NOT NULL DEFAULT '[]'::jsonb,
+                confirmed_by        UUID REFERENCES users(id) ON DELETE SET NULL,
+                confirmed_at        TIMESTAMPTZ,
+                operationalized_by  UUID REFERENCES users(id) ON DELETE SET NULL,
+                dismissed_by        UUID REFERENCES users(id) ON DELETE SET NULL,
+                created_by          UUID REFERENCES users(id) ON DELETE SET NULL,
+                created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_assumption_nodes_status ON assumption_nodes(status)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_assumption_nodes_course ON assumption_nodes(course_id, status)"
+        ))
+        session.execute(sa_text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_assumption_nodes_cluster "
+            "ON assumption_nodes(cluster_key) WHERE cluster_key <> ''"
+        ))
+
+        # Migration 031: D層 — 疑義 challenges (D3-1)
+        # 承認（endorsement）と対になる一級市民。帰属（challenger_id）・理由・型必須で
+        # 匿名疑義は構造的に作れない。withdraw は行削除でなく status 遷移（P4）。
+        # 正本リファレンス: backend/db/031_challenges.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS challenges (
+                id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                target_id      TEXT NOT NULL,
+                target_type    TEXT NOT NULL CHECK (target_type IN ('assumption', 'claim')),
+                challenger_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                challenge_type TEXT NOT NULL
+                                   CHECK (challenge_type IN (
+                                       'scope_extrapolation', 'untested_in_domain',
+                                       'definitional', 'hidden_lemma'
+                                   )),
+                reason         TEXT NOT NULL CHECK (reason <> ''),
+                status         TEXT NOT NULL DEFAULT 'open'
+                                   CHECK (status IN ('open', 'answered', 'withdrawn', 'led_to_verification')),
+                course_id      TEXT NOT NULL DEFAULT '',
+                created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_challenges_target ON challenges(target_type, target_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_challenges_challenger ON challenges(challenger_id)"
+        ))
+
+        # Migration 032: D層 — 検証提案 verification_proposals (D3-2)
+        # 疑義から「この実験・この計算で検証可能」への昇格経路。昇格時に元 challenge を
+        # led_to_verification に遷移させる。正本リファレンス: backend/db/032_verification_proposals.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS verification_proposals (
+                id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                challenge_id UUID NOT NULL REFERENCES challenges(id) ON DELETE CASCADE,
+                proposal     TEXT NOT NULL CHECK (proposal <> ''),
+                proposer_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                status       TEXT NOT NULL DEFAULT 'proposed'
+                                 CHECK (status IN ('proposed', 'in_progress', 'completed', 'withdrawn')),
+                created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_verification_proposals_challenge ON verification_proposals(challenge_id)"
+        ))
+
+        # Migration 033: D層 — 反実仮想セッション counterfactual_sessions (D3-3)
+        # 前提を仮に偽に倒したときの崩壊/生存/判定不能のスナップショットを保存。
+        # 「再構築」は計算しない。共有範囲は既存 Visibility 語彙を流用。
+        # 正本リファレンス: backend/db/033_counterfactual_sessions.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS counterfactual_sessions (
+                id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                owner_id               UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                course_id              TEXT NOT NULL DEFAULT '',
+                document_id            TEXT NOT NULL DEFAULT '',
+                toggled_assumption_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                collapsed_subgraph     JSONB NOT NULL DEFAULT '{}'::jsonb,
+                surviving_subgraph     JSONB NOT NULL DEFAULT '{}'::jsonb,
+                indeterminate_subgraph JSONB NOT NULL DEFAULT '{}'::jsonb,
+                notes                  TEXT NOT NULL DEFAULT '',
+                shared_scope           TEXT NOT NULL DEFAULT 'private'
+                                           CHECK (shared_scope IN ('private', 'group', 'public')),
+                group_id               UUID REFERENCES groups(id) ON DELETE SET NULL,
+                created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_counterfactual_sessions_owner ON counterfactual_sessions(owner_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_counterfactual_sessions_shared "
+            "ON counterfactual_sessions(shared_scope) WHERE shared_scope <> 'private'"
+        ))
+
+        # Migration 034: 横断ユーティリティ層（Admin Copilot）— 操作代行の戻す台帳
+        # assistant_actions。apply 前に before_snapshot を保持し、取り消しは行削除でなく
+        # status 遷移（applied → reverted）で行う（P3）。reversible=FALSE は戻す UI で
+        # 無効化（P2）。監査は既存 theory_review_events（entity_type='assistant_action'）。
+        # 正本リファレンス: backend/db/034_assistant_actions.sql
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS assistant_actions (
+                id              TEXT PRIMARY KEY,
+                user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                session_id      TEXT,
+                capability_id   TEXT NOT NULL,
+                screen          TEXT NOT NULL,
+                target_type     TEXT NOT NULL,
+                target_id       TEXT,
+                args            JSONB NOT NULL DEFAULT '{}'::jsonb,
+                before_snapshot JSONB,
+                after_snapshot  JSONB,
+                reversible      BOOLEAN NOT NULL DEFAULT TRUE,
+                revert_spec     JSONB,
+                status          TEXT NOT NULL DEFAULT 'applied'
+                                    CHECK (status IN ('applied', 'reverted', 'failed', 'confirm_pending')),
+                reverted_at     TIMESTAMPTZ,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_assistant_actions_user ON assistant_actions(user_id, created_at DESC)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_assistant_actions_target ON assistant_actions(target_type, target_id)"
+        ))
+
+        # ---- Migration 035: ドキュメント × グループ 権限（パイプライン成果の共有）----
+        # 正本リファレンス: backend/db/035_document_group_permissions.sql
+        # course_group_permissions（010）の移植。成果は document_id 経由で権限を継承する。
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS document_group_permissions (
+                document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                group_id    UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                permission  TEXT NOT NULL DEFAULT 'viewer'
+                                CHECK (permission IN ('viewer', 'editor')),
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (document_id, group_id)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_dgp_document ON document_group_permissions(document_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_dgp_group ON document_group_permissions(group_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_dgp_group_permission ON document_group_permissions(group_id, permission)"
+        ))
+
+        # ---- Migration 036: 再構成ループ（Reconstruction Loop, R層）----
+        # 正本リファレンス: backend/db/036_reconstruction_loop.sql
+        # claim を答えキーとした再構成課題（reconstruction_items）と学習者の産出物
+        # （learner_reconstructions）。item は LLM 自動オーサリング（status='auto'=candidate 相当）で
+        # 教員確定なしに配信し、教員は事後の監査役。判定は構造照合（非LLM・同期）、
+        # 権威は出典リビール、点数は出さない（P7）。P4: item は削除せず状態遷移で回収。
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS reconstruction_items (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                claim_id UUID NOT NULL REFERENCES theory_claims(id) ON DELETE CASCADE,
+                document_id TEXT NOT NULL DEFAULT '',
+                elicit_mode TEXT NOT NULL DEFAULT 'predict',
+                prompt TEXT NOT NULL,
+                response_space JSONB NOT NULL DEFAULT '[]'::jsonb,
+                expected JSONB NOT NULL DEFAULT '{}'::jsonb,
+                claim_fields_used JSONB NOT NULL DEFAULT '[]'::jsonb,
+                author TEXT NOT NULL DEFAULT 'llm',
+                author_confidence REAL NOT NULL DEFAULT 0.0,
+                status TEXT NOT NULL DEFAULT 'auto'
+                    CHECK (status IN ('auto', 'flagged', 'retired', 'confirmed')),
+                created_by UUID REFERENCES users(id),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_recon_items_claim ON reconstruction_items(claim_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_recon_items_status ON reconstruction_items(status)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_recon_items_document ON reconstruction_items(document_id)"
+        ))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS learner_reconstructions (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                course_id TEXT NOT NULL DEFAULT '',
+                item_id UUID NOT NULL REFERENCES reconstruction_items(id) ON DELETE CASCADE,
+                claim_id UUID NOT NULL,
+                response JSONB NOT NULL DEFAULT '{}'::jsonb,
+                machine_verdict TEXT NOT NULL DEFAULT 'na'
+                    CHECK (machine_verdict IN ('match', 'mismatch', 'na')),
+                self_check TEXT
+                    CHECK (self_check IS NULL OR self_check IN ('agreed', 'disagreed', 'verdict_wrong')),
+                descended_to_symbol BOOLEAN NOT NULL DEFAULT FALSE,
+                revision_of UUID REFERENCES learner_reconstructions(id),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_learner_recon_user ON learner_reconstructions(user_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_learner_recon_item ON learner_reconstructions(item_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_learner_recon_claim ON learner_reconstructions(claim_id)"
+        ))
+        session.execute(sa_text("""
+            CREATE OR REPLACE VIEW reconstruction_item_health AS
+            SELECT
+                i.id AS item_id,
+                i.claim_id,
+                i.status,
+                i.author_confidence,
+                COUNT(r.id)                                                    AS n_responses,
+                COUNT(*) FILTER (WHERE r.machine_verdict='mismatch')           AS n_mismatch,
+                COUNT(*) FILTER (WHERE r.self_check='verdict_wrong')           AS n_verdict_dissent,
+                COUNT(*) FILTER (WHERE r.machine_verdict='mismatch'
+                                   AND r.self_check='agreed')                  AS n_verdict_self_disagree,
+                COUNT(*) FILTER (WHERE r.descended_to_symbol)                  AS n_descend,
+                COUNT(DISTINCT r.user_id)                                      AS n_users
+            FROM reconstruction_items i
+            LEFT JOIN learner_reconstructions r ON r.item_id = i.id
+            GROUP BY i.id
+        """))
+
+        # ---- Migration 037: 共有物のバージョン管理 + 更新通知 + 削除猶予（V層）----
+        # 正本リファレンス: backend/db/037_shared_versioning.sql
+        # 版 = Release（不変スナップショット）。消費側は Release にピンし、所有者の発行後も
+        # 同意（adopt）するまで旧版を見続ける。削除は猶予表示のうえ期限後に全ユーザーから物理削除。
+        # ポリモーフィック（course=TEXT id, document=UUID）のため object_id TEXT で FK なし。
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS shared_versions (
+                id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                object_type  TEXT NOT NULL CHECK (object_type IN ('course', 'document')),
+                object_id    TEXT NOT NULL,
+                version_no   INT  NOT NULL,
+                snapshot     JSONB NOT NULL DEFAULT '{}'::jsonb,
+                note         TEXT NOT NULL DEFAULT '',
+                published_by UUID REFERENCES users(id),
+                created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (object_type, object_id, version_no)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_shared_versions_object "
+            "ON shared_versions(object_type, object_id, version_no DESC)"
+        ))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS shared_version_state (
+                object_type         TEXT NOT NULL CHECK (object_type IN ('course', 'document')),
+                object_id           TEXT NOT NULL,
+                active_release_id   UUID REFERENCES shared_versions(id),
+                latest_version_no   INT  NOT NULL DEFAULT 0,
+                lifecycle           TEXT NOT NULL DEFAULT 'active'
+                                        CHECK (lifecycle IN ('active', 'pending_deletion', 'purged')),
+                delete_scheduled_at TIMESTAMPTZ,
+                delete_purge_after  TIMESTAMPTZ,
+                delete_scheduled_by UUID REFERENCES users(id),
+                delete_reason       TEXT NOT NULL DEFAULT '',
+                updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (object_type, object_id)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_svs_pending_purge "
+            "ON shared_version_state(lifecycle, delete_purge_after) "
+            "WHERE lifecycle = 'pending_deletion'"
+        ))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS shared_version_subscriptions (
+                id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                object_type       TEXT NOT NULL CHECK (object_type IN ('course', 'document')),
+                object_id         TEXT NOT NULL,
+                subscriber_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                pinned_release_id UUID REFERENCES shared_versions(id),
+                status            TEXT NOT NULL DEFAULT 'active'
+                                      CHECK (status IN ('active', 'unsubscribed')),
+                created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (object_type, object_id, subscriber_id)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_svsub_object "
+            "ON shared_version_subscriptions(object_type, object_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_svsub_subscriber "
+            "ON shared_version_subscriptions(subscriber_id, status)"
+        ))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS share_notifications (
+                id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                recipient_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                object_type  TEXT NOT NULL,
+                object_id    TEXT NOT NULL,
+                kind         TEXT NOT NULL CHECK (kind IN
+                                 ('version_published', 'deletion_scheduled',
+                                  'deletion_cancelled', 'deleted')),
+                release_id   UUID REFERENCES shared_versions(id),
+                payload      JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+                read_at      TIMESTAMPTZ,
+                acted_at     TIMESTAMPTZ
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_share_notif_recipient "
+            "ON share_notifications(recipient_id, read_at, created_at DESC)"
+        ))
+        # 引用の版固定（component_citations, migration 021）
+        session.execute(sa_text(
+            "ALTER TABLE component_citations "
+            "ADD COLUMN IF NOT EXISTS source_object_type TEXT, "
+            "ADD COLUMN IF NOT EXISTS source_object_id   TEXT, "
+            "ADD COLUMN IF NOT EXISTS source_release_id  UUID, "
+            "ADD COLUMN IF NOT EXISTS source_version_no  INT"
+        ))
+
         session.commit()
-        logger.info("Migrations (002-022) applied successfully.")
+        logger.info("Migrations (002-037) applied successfully.")
+
+        # 骨格 DB 管理化 (027): カートリッジ同梱の凍結骨格を一度だけ DB へ取り込む (冪等)
+        try:
+            from core import atlas_store
+
+            atlas_store.import_bundled_skeletons(session)
+            session.commit()
+        except Exception:  # noqa: BLE001
+            session.rollback()
+            logger.warning("bundled atlas skeleton import skipped", exc_info=True)
 
         # Seed builtin schema types/predicates
         from core.schema_registry import seed_builtin_schema
@@ -947,6 +1517,15 @@ async def _lifespan(application: FastAPI):
             else:
                 logger.critical("Failed to connect to PostgreSQL after %d attempts.", max_retries)
                 sys.exit(1)
+
+    # V層（migration 037）: 削除猶予の定期スイーパを起動（best-effort。起動を止めない）
+    try:
+        from core.versioning import worker as _versioning_worker
+
+        _versioning_worker.start_background_sweeper()
+    except Exception:  # noqa: BLE001
+        logger.warning("versioning sweeper startup skipped", exc_info=True)
+
     yield
 
 
@@ -973,6 +1552,11 @@ app.include_router(error_logs.router)
 app.include_router(lecture.router)
 app.include_router(groups.router)
 app.include_router(export_routes.router)
+app.include_router(atlas_routes.learning_router)
+app.include_router(atlas_routes.report_router)
+app.include_router(atlas_view_routes.router)
+app.include_router(doubt_routes.learning_router)
+app.include_router(reconstruction_routes.learning_router)
 
 
 @app.get("/healthz")

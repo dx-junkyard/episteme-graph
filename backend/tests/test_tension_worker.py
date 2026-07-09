@@ -86,7 +86,7 @@ HISTORY = [
 class TestRunTensionMining:
     def test_saves_candidates_with_candidate_status(self, monkeypatch):
         script = {
-            "analyzed_at IS NULL\n            ORDER BY": [("id-1", {"text": "なんとなく腑に落ちない", "tension_hint": True}, None)],
+            "payload->>'tension_hint' = 'true'": [("id-1", {"text": "なんとなく腑に落ちない", "tension_hint": True}, None)],
             "SET analyzed_at = now()": [("id-1",)],
             "FROM learning_chat_history": [(HISTORY,)],
             "FROM learning_courses": [({"topics": [], "chapters": []},)],
@@ -110,7 +110,7 @@ class TestRunTensionMining:
     def test_skips_when_claim_lost_to_concurrent_run(self, monkeypatch):
         """並行スレッドが先に analyzed_at を立てた場合は LLM を呼ばず終了する。"""
         script = {
-            "analyzed_at IS NULL\n            ORDER BY": [("id-1", {"text": "x"}, None)],
+            "payload->>'tension_hint' = 'true'": [("id-1", {"text": "x"}, None)],
             "SET analyzed_at = now()": [],  # 先行スレッドが claim 済み
         }
         log, agent = _wire(monkeypatch, script, TensionMiningResult())
@@ -119,7 +119,7 @@ class TestRunTensionMining:
 
     def test_repair_failure_saves_one_unclassified_row(self, monkeypatch):
         script = {
-            "analyzed_at IS NULL\n            ORDER BY": [("id-1", {"text": "なんとなく腑に落ちない"}, None)],
+            "payload->>'tension_hint' = 'true'": [("id-1", {"text": "なんとなく腑に落ちない"}, None)],
             "SET analyzed_at = now()": [("id-1",)],
             "FROM learning_chat_history": [(HISTORY,)],
             "FROM learning_courses": [({},)],
@@ -134,7 +134,7 @@ class TestRunTensionMining:
 
     def test_daily_cost_cap_blocks_llm_call(self, monkeypatch):
         script = {
-            "analyzed_at IS NULL\n            ORDER BY": [("id-1", {"text": "x"}, None)],
+            "payload->>'tension_hint' = 'true'": [("id-1", {"text": "x"}, None)],
             "SET analyzed_at = now()": [("id-1",)],
             "FROM learning_chat_history": [(HISTORY,)],
             "FROM learning_courses": [({},)],
@@ -149,7 +149,7 @@ class TestMaybeSchedule:
     def _wire_threads(self, monkeypatch, pending_rows):
         monkeypatch.setattr(
             worker, "_pg_session",
-            lambda: _FakeSession({"analyzed_at IS NULL\n            ORDER BY": pending_rows}, []),
+            lambda: _FakeSession({"payload->>'tension_hint' = 'true'": pending_rows}, []),
         )
         started = []
 

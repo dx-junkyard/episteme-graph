@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Episteme Graph — 管理画面</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-  <link rel="stylesheet" href="/css/styles.css?v=lecture-studio-wire-20260521-1">
+  <link rel="stylesheet" href="/css/styles.css?v=admin-tab-groups-20260708-1">
   <script defer src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
 </head>
 <body>
@@ -21,22 +21,176 @@
         <a href="/" style="color:var(--color-text-info);text-decoration:none;font-size:12px">学習画面へ</a>
         <span style="opacity:.3">|</span>
         <span id="admin-username"></span>
+        <button id="admin-copilot-toggle" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px" title="管理画面の操作を手伝う AI アシスタント">🤖 操作アシスタント</button>
+        <span style="opacity:.3">|</span>
         <button id="logout-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px">ログアウト</button>
       </div>
     </div>
 
-    <!-- Tab navigation -->
+    <!-- Tab navigation — グループ別プルダウン（.admin-tab の data-tab / on は維持し、見せ方だけ束ねる） -->
     <div class="admin-tabs" id="adminTabs">
-      <button class="admin-tab on" data-tab="materials">教材管理</button>
-      <button class="admin-tab" data-tab="course-builder">コース構築</button>
-      <button class="admin-tab" data-tab="course-management">コース管理</button>
-      <button class="admin-tab" data-tab="lecture-studio">原稿スタジオ</button>
-      <button class="admin-tab" data-tab="stumbles">つまづきデータ</button>
-      <button class="admin-tab" data-tab="interest-dashboard">関心集約</button>
-      <button class="admin-tab" data-tab="schema-proposals">スキーマ提案</button>
-      <button class="admin-tab" data-tab="groups">グループ管理</button>
-      <button class="admin-tab" data-tab="system-stats" id="tab-btn-system-stats" style="display:none">システム統計</button>
-      <button class="admin-tab" data-tab="error-analysis" id="tab-btn-error-analysis" style="display:none">エラー解析</button>
+      <div class="admin-tab-group" data-group="content">
+        <button class="admin-tab-group-trigger" type="button" aria-haspopup="true" aria-expanded="false">
+          <span class="admin-tab-group-label">コンテンツ</span>
+          <span class="admin-tab-group-current"></span>
+          <span class="admin-tab-group-caret" aria-hidden="true">▾</span>
+        </button>
+        <div class="admin-tab-menu" id="admin-tab-menu-content" role="menu">
+          <button class="admin-tab on" data-tab="materials" role="menuitem">教材管理</button>
+          <button class="admin-tab" data-tab="course-builder" role="menuitem">コース構築</button>
+          <button class="admin-tab" data-tab="course-management" role="menuitem">コース管理</button>
+          <button class="admin-tab" data-tab="lecture-studio" role="menuitem">原稿スタジオ</button>
+        </div>
+      </div>
+      <div class="admin-tab-group" data-group="insights">
+        <button class="admin-tab-group-trigger" type="button" aria-haspopup="true" aria-expanded="false">
+          <span class="admin-tab-group-label">学習インサイト</span>
+          <span class="admin-tab-group-current"></span>
+          <span class="admin-tab-group-caret" aria-hidden="true">▾</span>
+        </button>
+        <div class="admin-tab-menu" id="admin-tab-menu-insights" role="menu">
+          <button class="admin-tab" data-tab="stumbles" role="menuitem">つまづきデータ</button>
+          <button class="admin-tab" data-tab="interest-dashboard" role="menuitem">関心集約</button>
+          <button class="admin-tab" data-tab="atlas" role="menuitem">分野の地図</button>
+          <button class="admin-tab" data-tab="doubt-atlas" role="menuitem">前提の地図</button>
+        </div>
+      </div>
+      <div class="admin-tab-group" data-group="knowledge">
+        <button class="admin-tab-group-trigger" type="button" aria-haspopup="true" aria-expanded="false">
+          <span class="admin-tab-group-label">ナレッジ基盤</span>
+          <span class="admin-tab-group-current"></span>
+          <span class="admin-tab-group-caret" aria-hidden="true">▾</span>
+        </button>
+        <div class="admin-tab-menu" id="admin-tab-menu-knowledge" role="menu">
+          <button class="admin-tab" data-tab="schema-proposals" role="menuitem">スキーマ提案</button>
+        </div>
+      </div>
+      <div class="admin-tab-group" data-group="ops">
+        <button class="admin-tab-group-trigger" type="button" aria-haspopup="true" aria-expanded="false">
+          <span class="admin-tab-group-label">運用</span>
+          <span class="admin-tab-group-current"></span>
+          <span class="admin-tab-group-caret" aria-hidden="true">▾</span>
+        </button>
+        <div class="admin-tab-menu" id="admin-tab-menu-ops" role="menu">
+          <button class="admin-tab" data-tab="groups" role="menuitem">グループ管理</button>
+          <button class="admin-tab" data-tab="system-stats" id="tab-btn-system-stats" role="menuitem" style="display:none">システム統計</button>
+          <button class="admin-tab" data-tab="error-analysis" id="tab-btn-error-analysis" role="menuitem" style="display:none">エラー解析</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- D層（Doubt Layer）— 前提の地図タブ（Field Atlas とは別機能。中身は doubt-atlas.js が描画） -->
+    <div class="admin-panel" id="tab-doubt-atlas"></div>
+
+    <!-- Field Atlas skeleton review tab (Issue A-3) -->
+    <div class="admin-panel" id="tab-atlas">
+      <div class="admin-section">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+          <h3 class="admin-section-title" style="margin-bottom:0">分野の地図 — 骨格レビュー</h3>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="atlas-cartridge-select" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
+              <option value="">分野を選択...</option>
+            </select>
+            <button id="atlas-refresh" class="admin-action-btn">更新</button>
+            <button id="atlas-add-domain-toggle" class="admin-action-btn">新しい分野を追加</button>
+          </div>
+        </div>
+        <div id="atlas-add-domain-form" style="display:none;border:1px solid var(--color-border);border-radius:6px;padding:10px;margin-bottom:12px">
+          <div style="font-size:12.5px;font-weight:600;margin-bottom:6px">新しい分野（骨格はDBで管理。カートリッジファイルは不要）</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <input id="atlas-new-domain-key" placeholder="domain_key (例: modified_gravity)"
+              style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;width:220px">
+            <input id="atlas-new-domain-name" placeholder="分野名 (例: 修正重力理論と大規模構造)"
+              style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;width:260px">
+          </div>
+          <textarea id="atlas-new-domain-desc" rows="2" placeholder="分野の説明（骨格のAI生成プロンプトに使われます）"
+            style="width:100%;font-size:12.5px;border:1px solid var(--color-border);border-radius:4px;padding:6px;box-sizing:border-box;margin-top:6px"></textarea>
+          <div style="margin-top:6px">
+            <button id="atlas-add-domain" class="admin-action-btn">分野を追加して draft を生成（AIバッチ）</button>
+          </div>
+        </div>
+        <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:12px">
+          骨格はAIがバッチ生成した draft を教員がレビューし、承認して凍結すると学習者に表示されます（DB管理・migration 027）。
+          draft は凍結するまで学習者には一切表示されません。凍結後の版は不変で、修正は次版で行います。
+          同時編集は楽観ロックで保護されます（他の教員の保存とぶつかった場合は再読込が必要です）。
+        </p>
+        <div id="atlas-frozen-info" style="font-size:12.5px;color:var(--color-text-secondary);margin-bottom:12px"></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          <button id="atlas-generate" class="admin-action-btn">draft を生成（AIバッチ）</button>
+        </div>
+        <div id="atlas-draft-area" style="display:none">
+          <div style="display:flex;align-items:center;gap:8px;margin:12px 0 6px;flex-wrap:wrap">
+            <h4 style="font-size:13px;margin:0">draft の修正（領域・概念・配置・エッジ・seed_status）</h4>
+            <span style="flex:1"></span>
+            <div class="atlas-editor-tabs" role="tablist" style="display:inline-flex;border:1px solid var(--color-border);border-radius:6px;overflow:hidden">
+              <button id="atlas-tab-json" class="admin-action-btn atlas-editor-tab on" data-atlas-view="json" role="tab" aria-selected="true" style="border:none;border-radius:0">JSON編集</button>
+              <button id="atlas-tab-preview" class="admin-action-btn atlas-editor-tab" data-atlas-view="preview" role="tab" aria-selected="false" style="border:none;border-radius:0">プレビュー</button>
+            </div>
+            <button id="atlas-assist-toggle" class="admin-action-btn" title="骨格の一部分をAIと対話しながら修正します">AI agent</button>
+          </div>
+          <div id="atlas-view-json">
+            <textarea id="atlas-draft-editor" rows="18" spellcheck="false"
+              style="width:100%;font-family:monospace;font-size:12px;border:1px solid var(--color-border);border-radius:4px;padding:8px;box-sizing:border-box"></textarea>
+          </div>
+          <div id="atlas-view-preview" style="display:none"></div>
+          <!-- AI アシスト編集パネル (skeleton editor upgrade P3/P4)。中身は atlas-assist-panel.js -->
+          <div id="atlas-assist-panel" style="display:none;border:1px solid var(--color-border);border-radius:6px;padding:10px;margin-top:8px;background:var(--color-bg-secondary)"></div>
+          <div id="atlas-validation" style="font-size:12px;margin:6px 0"></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">
+            <button id="atlas-save-draft" class="admin-action-btn">draft を保存</button>
+            <span style="flex:1"></span>
+            <input id="atlas-freeze-version" placeholder="版数 (例: 2026.1)"
+              style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;width:120px">
+            <input id="atlas-freeze-note" placeholder="changelog メモ"
+              style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;width:220px">
+            <button id="atlas-freeze" class="admin-action-btn">承認して凍結</button>
+          </div>
+        </div>
+        <div id="atlas-status" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:10px"></div>
+      </div>
+
+      <!-- 修正報告のレビューキュー (Issue D-2 / D-3。既存C層レビュー導線の一部) -->
+      <div class="admin-section" id="atlas-reports-section" style="margin-top:18px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:8px">
+          <h3 class="admin-section-title" style="margin-bottom:0">修正報告のレビュー</h3>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="atlas-report-status-filter" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
+              <option value="pending" selected>レビュー待ち</option>
+              <option value="accepted">採用（次版へ反映予定）</option>
+              <option value="declined">見送り</option>
+              <option value="merged">重複統合</option>
+              <option value="">すべて</option>
+            </select>
+            <button id="atlas-reports-refresh" class="admin-action-btn">更新</button>
+          </div>
+        </div>
+        <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:10px">
+          学習者・教員が地図上から送信した帰属つきの修正報告です。採用した報告は次版の凍結時に
+          changelog へ報告者の帰属（credits）とともに記録されます。旧版への報告は「旧版」と表示されます。
+        </p>
+        <div id="atlas-reports-hint" style="font-size:12.5px;margin-bottom:8px"></div>
+        <div id="atlas-reports-list" style="font-size:12.5px"></div>
+        <div id="atlas-reports-status" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:8px"></div>
+      </div>
+
+      <!-- 学習マップ編集 (S2: コース ⇄ 地図バインディング。提案は決定論・教員が承認して保存) -->
+      <div class="admin-section" id="atlas-binding-section" style="margin-top:18px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:8px">
+          <h3 class="admin-section-title" style="margin-bottom:0">学習マップ編集（コースの地図配置）</h3>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="atlas-binding-course-select" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
+              <option value="">コースを選択...</option>
+            </select>
+            <button id="atlas-binding-propose" class="admin-action-btn">配置を提案</button>
+          </div>
+        </div>
+        <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:10px">
+          コースがどの分野の地図に属し、各トピックが地図上のどの概念に対応するかを設定します。
+          提案は決定論的な突合（AIによる推薦ではありません）で、教員が承認して保存するまで確定しません。
+        </p>
+        <div id="atlas-binding-body" style="font-size:12.5px"></div>
+        <div id="atlas-binding-status" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:8px"></div>
+      </div>
     </div>
 
     <!-- Error Analysis tab -->
@@ -126,9 +280,27 @@
           <div class="cb-chat-header">AIアシスタントとコース設計</div>
           <div class="cb-session-bar" id="cb-session-bar"></div>
           <div class="cb-material-select" id="cb-material-select">
-            <div class="cb-material-select-header">使用する教材を選択</div>
+            <div class="cb-material-select-header">
+              <span>使用する教材を選択</span>
+              <span class="cb-material-count" id="cb-material-count"></span>
+            </div>
+            <div class="cb-material-toolbar">
+              <input type="text" id="cb-material-search" class="cb-material-search" placeholder="ファイル名・タイトルで検索…">
+              <select id="cb-material-sort" class="cb-material-sort">
+                <option value="uploaded">新しい順（アップロード）</option>
+                <option value="analyzed">直近の生成順</option>
+                <option value="title">タイトル順</option>
+                <option value="volume">ボリューム順</option>
+              </select>
+            </div>
+            <div class="cb-material-filters" id="cb-material-filters">
+              <button class="cb-mat-chip active" data-filter="all" type="button">すべて</button>
+              <button class="cb-mat-chip" data-filter="no_course" type="button">コース未作成</button>
+              <button class="cb-mat-chip" data-filter="recent" type="button">直近の生成</button>
+              <button class="cb-mat-chip" data-filter="completed" type="button">解析完了</button>
+            </div>
             <div class="cb-material-select-list" id="cb-material-select-list">
-              <span style="color:var(--color-text-tertiary);font-size:12px">教材を読み込み中...</span>
+              <span class="cb-mat-empty">教材を読み込み中…</span>
             </div>
           </div>
           <div class="cb-chat-area" id="cb-chat-area">
@@ -153,6 +325,12 @@
           </div>
           <div class="cb-approve-area" id="cb-approve-area" style="display:none">
             <button id="cb-approve-btn" class="cb-approve-btn">承認してコースを登録</button>
+          </div>
+          <!-- コース登録直後の地図配置の提案 (S2)。教員が承認して保存するまで確定しない -->
+          <div id="cb-atlas-binding-area" style="display:none;margin-top:12px;border:1px solid var(--color-border);border-radius:6px;padding:10px">
+            <div style="font-size:13px;font-weight:600;margin-bottom:6px">分野の地図への配置（提案）</div>
+            <div id="cb-atlas-binding-body" style="font-size:12.5px"></div>
+            <div id="cb-atlas-binding-status" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:6px"></div>
           </div>
         </div>
       </div>
@@ -293,6 +471,11 @@
                       <button class="ls-mini-tab active" data-ls-display="preview">プレビュー</button>
                       <button class="ls-mini-tab" data-ls-display="script">原稿</button>
                       <button class="ls-mini-tab" data-ls-display="formulas">数式一覧</button>
+                    </div>
+                    <!-- 再構成ループ (R層): 根拠リンク ⇄ つまづき の表示切り替え（別タブにしない） -->
+                    <div class="ls-mini-tabs" id="ls-stumble-tabs" hidden>
+                      <button class="ls-mini-tab active" data-ls-rightmode="evidence">根拠リンク</button>
+                      <button class="ls-mini-tab" data-ls-rightmode="stumble">つまづき</button>
                     </div>
                   </div>
                   <div class="ls-pane-body">
@@ -560,6 +743,15 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-  <script src="/js/admin.js?v=pipeline-start-stage-20260602-1"></script>
+  <!-- D層（Doubt Layer）管理 UI — 「分野の地図」(atlas-*) とは別機能 -->
+  <script src="/js/doubt-atlas.js?v=doubt-layer-20260707-1"></script>
+  <!-- Field Atlas 骨格エディタ改善: ビジュアルプレビュー + AIアシスト編集 -->
+  <script src="/js/atlas-draft-preview.js?v=atlas-editor-20260707-1"></script>
+  <script src="/js/atlas-assist-panel.js?v=atlas-editor-20260707-1"></script>
+  <!-- 横断ユーティリティ層（Admin Copilot）— 統合 AI アシスタント -->
+  <script src="/js/admin-assistant.js?v=admin-copilot-20260707-1"></script>
+  <!-- V層（共有物のバージョン管理 + 更新通知 + 削除猶予, migration 037）-->
+  <script src="/js/versioning.js?v=versioning-20260709-1"></script>
+  <script src="/js/admin.js?v=versioning-20260709-1"></script>
 </body>
 </html>
