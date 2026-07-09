@@ -221,6 +221,7 @@ class TestStudentGraphStructure:
         import sys
         mock_services = MagicMock()
         mock_services.search_chunks_with_metadata = MagicMock(return_value=[])
+        original_services = sys.modules.get("services")
         sys.modules["services"] = mock_services
         try:
             from core.graphs.student_graph import retrieval_node
@@ -228,7 +229,10 @@ class TestStudentGraphStructure:
             assert result["no_relevant_chunks"] is True
             assert result["chunks"] == []
         finally:
-            del sys.modules["services"]
+            if original_services is None:
+                sys.modules.pop("services", None)
+            else:
+                sys.modules["services"] = original_services
 
     def test_retrieval_with_chunks(self):
         """閾値以上のチャンクがある場合に no_relevant_chunks=False。"""
@@ -239,6 +243,7 @@ class TestStudentGraphStructure:
         ]
         mock_services = MagicMock()
         mock_services.search_chunks_with_metadata = MagicMock(return_value=mock_chunks)
+        original_services = sys.modules.get("services")
         sys.modules["services"] = mock_services
         try:
             from core.graphs.student_graph import retrieval_node
@@ -246,7 +251,10 @@ class TestStudentGraphStructure:
             assert result["no_relevant_chunks"] is False
             assert len(result["chunks"]) == 1  # score >= 0.35 のみ
         finally:
-            del sys.modules["services"]
+            if original_services is None:
+                sys.modules.pop("services", None)
+            else:
+                sys.modules["services"] = original_services
 
     def test_format_guard_fallback(self):
         """FormatGuard の LLM 呼び出しが失敗しても raw_answer をそのまま返すこと。"""
