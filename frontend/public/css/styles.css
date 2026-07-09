@@ -5521,3 +5521,121 @@ body {
   pointer-events: none;
   z-index: 10060;
 }
+
+/* ── 再構成ループ (R層) 学習カード ─────────────────────────────── */
+.reconstruction-region { margin-top: 8px; }
+.recon-open {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px dashed var(--lx-line, #d0d7de);
+  border-radius: 8px;
+  background: var(--color-background-secondary, #f6f8fa);
+  color: var(--lx-brand, var(--color-primary, #2563eb));
+  font-size: 13px;
+  cursor: pointer;
+}
+.recon-open:hover { background: var(--color-background-tertiary, #eef1f4); }
+.recon-card {
+  border: 1px solid var(--lx-line, #d0d7de);
+  border-radius: 10px;
+  background: var(--color-background-primary, #fff);
+  padding: 12px 14px;
+}
+.recon-head { display: flex; align-items: center; justify-content: space-between; }
+.recon-title { font-weight: 600; font-size: 14px; color: var(--color-text-primary, #1f2328); }
+.recon-close {
+  border: none; background: none; font-size: 20px; line-height: 1;
+  cursor: pointer; color: var(--color-text-tertiary, #8b949e);
+}
+.recon-auto-note { font-size: 11px; color: var(--color-text-tertiary, #8b949e); margin: 2px 0 10px; }
+.recon-prompt { font-size: 14px; color: var(--color-text-primary, #1f2328); margin: 6px 0 10px; line-height: 1.5; }
+.recon-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.recon-chip {
+  font-size: 12px; padding: 2px 8px; border-radius: 999px;
+  background: var(--color-background-tertiary, #eef1f4); color: var(--color-text-secondary, #57606a);
+}
+.recon-options { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.recon-option {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  border: 1px solid var(--lx-line-soft, #e6e8eb); border-radius: 8px; cursor: pointer; font-size: 13px;
+}
+.recon-option:hover { border-color: var(--lx-brand, var(--color-primary, #2563eb)); }
+.recon-restate {
+  width: 100%; min-height: 64px; resize: vertical; padding: 8px 10px;
+  border: 1px solid var(--lx-line, #d0d7de); border-radius: 8px; font-size: 13px;
+  font-family: inherit; box-sizing: border-box; margin-bottom: 10px;
+}
+.recon-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.recon-primary {
+  padding: 7px 14px; border: none; border-radius: 8px; cursor: pointer; font-size: 13px;
+  background: var(--lx-brand, var(--color-primary, #2563eb)); color: #fff;
+}
+.recon-primary:disabled { opacity: 0.6; cursor: default; }
+.recon-secondary {
+  padding: 7px 14px; border: 1px solid var(--lx-line, #d0d7de); border-radius: 8px; cursor: pointer;
+  font-size: 13px; background: var(--color-background-secondary, #f6f8fa); color: var(--color-text-primary, #1f2328);
+}
+.recon-muted { font-size: 13px; color: var(--color-text-tertiary, #8b949e); line-height: 1.5; }
+.recon-warn { color: var(--color-text-warning, #9a6700); margin-bottom: 6px; }
+.recon-reflect { margin-bottom: 10px; }
+.recon-statement { font-size: 13px; color: var(--color-text-primary, #1f2328); margin: 4px 0; line-height: 1.5; }
+.recon-reveal {
+  border-left: 3px solid var(--lx-source, var(--color-primary, #2563eb));
+  background: var(--lx-source-bg, var(--color-background-info, #eff6ff));
+  padding: 8px 10px; border-radius: 0 8px 8px 0; margin-bottom: 10px;
+}
+.recon-reveal-label { font-size: 11px; font-weight: 600; color: var(--color-text-secondary, #57606a); margin-bottom: 4px; }
+.recon-reveal-text { font-size: 13px; color: var(--color-text-primary, #1f2328); line-height: 1.5; }
+.recon-reveal-eq { margin: 6px 0; overflow-x: auto; }
+.recon-reveal-evidence { font-size: 12px; color: var(--color-text-tertiary, #8b949e); margin-top: 6px; }
+.recon-selfcheck { margin-top: 8px; }
+.recon-selfcheck-q { font-size: 13px; color: var(--color-text-secondary, #57606a); margin-bottom: 6px; }
+.recon-selfcheck-btns { display: flex; flex-wrap: wrap; gap: 8px; }
+.recon-sc {
+  padding: 6px 12px; border: 1px solid var(--lx-line, #d0d7de); border-radius: 999px; cursor: pointer;
+  font-size: 13px; background: var(--color-background-secondary, #f6f8fa); color: var(--color-text-primary, #1f2328);
+}
+.recon-sc.active { background: var(--lx-brand, var(--color-primary, #2563eb)); color: #fff; border-color: transparent; }
+.recon-sc:disabled { opacity: 0.6; cursor: default; }
+.recon-descend {
+  margin-top: 8px; padding: 8px 10px; border: 1px dashed var(--lx-line, #d0d7de); border-radius: 8px;
+}
+.recon-descend-label { font-size: 11px; font-weight: 600; color: var(--color-text-secondary, #57606a); margin-bottom: 6px; }
+
+/* ── 再構成ループ (R層) 原稿スタジオ つまづきサマリー ─────────────── */
+.ls-stumble-list { display: flex; flex-direction: column; gap: 10px; }
+.ls-stumble-card {
+  border: 1px solid var(--lx-line, #d0d7de); border-radius: 8px; padding: 10px 12px;
+  background: var(--color-background-primary, #fff);
+}
+.ls-stumble-label { font-size: 13px; font-weight: 600; color: var(--color-text-primary, #1f2328); margin-bottom: 8px; }
+.ls-stumble-axes { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.ls-stumble-axis {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 6px;
+  background: var(--color-background-secondary, #f6f8fa); font-size: 12px;
+}
+.ls-stumble-axis-label { color: var(--color-text-tertiary, #8b949e); }
+.ls-stumble-axis-value { color: var(--color-text-primary, #1f2328); font-weight: 600; }
+.ls-stumble-high { background: var(--color-background-warning, #fff8e1); }
+.ls-stumble-high .ls-stumble-axis-value { color: var(--color-text-warning, #9a6700); }
+.ls-stumble-mid .ls-stumble-axis-value { color: var(--color-text-secondary, #57606a); }
+.ls-stumble-nodata .ls-stumble-axis-value { color: var(--color-text-tertiary, #8b949e); font-weight: 400; }
+.ls-stumble-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.ls-stumble-link {
+  border: none; background: none; padding: 0; cursor: pointer; font-size: 12px;
+  color: var(--lx-brand, var(--color-primary, #2563eb)); text-decoration: underline;
+}
+.ls-stumble-note { margin-top: 10px; font-size: 11px; }
+.ls-stumble-review { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+.ls-stumble-item {
+  border-left: 3px solid var(--lx-line, #d0d7de); padding: 6px 10px;
+  background: var(--color-background-secondary, #f6f8fa); border-radius: 0 6px 6px 0;
+}
+.ls-stumble-item-tier { font-size: 11px; font-weight: 600; color: var(--color-text-secondary, #57606a); }
+.ls-stumble-item-prompt { font-size: 13px; color: var(--color-text-primary, #1f2328); margin: 4px 0; }
+.ls-stumble-item-sig { font-size: 11px; color: var(--color-text-tertiary, #8b949e); }
+.ls-stumble-item-actions { display: flex; gap: 8px; margin-top: 6px; }
+.ls-stumble-mini {
+  padding: 3px 10px; border: 1px solid var(--lx-line, #d0d7de); border-radius: 6px; cursor: pointer;
+  font-size: 12px; background: var(--color-background-primary, #fff); color: var(--color-text-primary, #1f2328);
+}

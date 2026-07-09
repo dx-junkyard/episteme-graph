@@ -4091,6 +4091,9 @@
     rightPaneVisible: true,
     courseStructure: null,
     courseComponents: null,
+    // 再構成ループ (R層): コーストピック右ペインの表示 ("evidence" | "stumble")
+    rightPaneMode: "evidence",
+    stumbleByDocument: {},
   };
 
   var lsPersonaOptions = [
@@ -5358,6 +5361,9 @@
 
     document.getElementById("ls-display-tabs").hidden = true;
     document.getElementById("ls-evidence-tabs").hidden = true;
+    // 再構成ループ (R層): コーストピックでは根拠リンク⇄つまづきトグルを出す
+    var stumbleTabs = document.getElementById("ls-stumble-tabs");
+    if (stumbleTabs) stumbleTabs.hidden = false;
     document.getElementById("ls-left-pane").hidden = false;
     document.getElementById("ls-right-pane").hidden = false;
     var splitEl = document.querySelector("#ls-workspace .ls-split");
@@ -5371,14 +5377,199 @@
     document.getElementById("ls-source-text").hidden = false;
     document.getElementById("ls-display-preview").hidden = false;
 
-    var preview = document.getElementById("ls-display-preview");
-    if (preview) preview.innerHTML = lsCourseEvidenceHtml(topic);
+    lsRenderRightPaneForTopic(topic);
     var saveBtn = document.getElementById("ls-save-btn");
     if (saveBtn) saveBtn.disabled = false;
     var rewriteBtn = document.getElementById("ls-rewrite-btn");
     if (rewriteBtn) rewriteBtn.disabled = true;
     lsApplyRightPaneVisibility();
     lsUpdateAssistantContext();
+  }
+
+  // 再構成ループ (R層): 右ペインを現在のモード（根拠リンク / つまづき）で描画する。
+  function lsRenderRightPaneForTopic(topic) {
+    var rightTitle = document.getElementById("ls-right-title");
+    var preview = document.getElementById("ls-display-preview");
+    var tabs = document.getElementById("ls-stumble-tabs");
+    if (tabs) {
+      tabs.querySelectorAll("[data-ls-rightmode]").forEach(function (btn) {
+        var active = btn.getAttribute("data-ls-rightmode") === lsState.rightPaneMode;
+        btn.classList.toggle("active", active);
+        btn.onclick = function () {
+          lsState.rightPaneMode = btn.getAttribute("data-ls-rightmode") || "evidence";
+          lsRenderRightPaneForTopic(topic);
+        };
+      });
+    }
+    if (!preview) return;
+    if (lsState.rightPaneMode === "stumble") {
+      if (rightTitle) rightTitle.textContent = "つまづき";
+      preview.innerHTML = '<div class="ls-course-muted">つまづきの集計を読み込み中…</div>';
+      lsLoadStumbleSummary(topic, preview);
+    } else {
+      if (rightTitle) rightTitle.textContent = "根拠リンク";
+      preview.innerHTML = lsCourseEvidenceHtml(topic);
+    }
+  }
+
+  // つまづきサマリーを document 単位で取得（キャッシュ）し、トピックの claim に絞って描画。
+  function lsLoadStumbleSummary(topic, container) {
+    var documentId = lsCurrentDocumentId() || lsCoursePrimaryDocumentId();
+    if (!documentId) {
+      container.innerHTML = '<div class="ls-course-muted">このコースに紐づく解析済みドキュメントが見つかりません。</div>';
+      return;
+    }
+    var cached = lsState.stumbleByDocument[documentId];
+    if (cached) { lsRenderStumbleSummary(topic, container, cached); return; }
+    apiFetch("/admin/documents/" + encodeURIComponent(documentId) + "/claims/stumble-summary")
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        if (!data) {
+          container.innerHTML = '<div class="ls-course-muted">つまづき集計を取得できませんでした。</div>';
+          return;
+        }
+        lsState.stumbleByDocument[documentId] = data;
+        lsRenderStumbleSummary(topic, container, data);
+      })
+      .catch(function () {
+        container.innerHTML = '<div class="ls-course-muted">つまづき集計の取得に失敗しました。</div>';
+      });
+  }
+
+  // コースの主ドキュメント id（sources[].material_id）を返す（chunk 由来が取れない場合の保険）。
+  function lsCoursePrimaryDocumentId() {
+    var course = lsState.courseStructure || {};
+    var sources = course.sources || (course.data && course.data.sources) || [];
+    for (var i = 0; i < sources.length; i++) {
+      if (sources[i] && sources[i].material_id) return sources[i].material_id;
+    }
+    return "";
+  }
+
+  // トピックに紐づく claim id（evidence_links kind='claim'）の集合を返す。
+  function lsStumbleClaimIdsForTopic(topic) {
+    var ids = {};
+    (topic.evidence_links || []).forEach(function (link) {
+      if (link && link.kind === "claim") {
+        var id = link.target_id || link.id || "";
+        if (id) ids[id] = true;
+      }
+    });
+    return ids;
+  }
+
+  function lsRenderStumbleSummary(topic, container, data) {
+    var claims = (data && data.claims) || [];
+    var topicIds = lsStumbleClaimIdsForTopic(topic);
+    var hasFilter = Object.keys(topicIds).length > 0;
+    var filtered = hasFilter
+      ? claims.filter(function (c) { return topicIds[c.claim_id]; })
+      : claims;
+    if (!filtered.length) {
+      container.innerHTML = '<div class="ls-course-muted">' +
+        (hasFilter
+          ? 'このトピックの claim には、まだ再構成の記録がありません。'
+          : 'このドキュメントには、まだ再構成の記録がありません。') +
+        '<br>学習者が再構成に挑戦すると、ここに難所が集計されます（k=3 未満は「まだデータなし」）。</div>';
+      return;
+    }
+    var html = '<div class="ls-stumble-list">';
+    filtered.forEach(function (c) {
+      var axes = c.axes || {};
+      var faq = axes.faq || {};
+      html += '<article class="ls-stumble-card" data-claim-id="' + escHtml(c.claim_id) + '">' +
+        '<div class="ls-stumble-label">' + escHtml(c.label || c.claim_type || c.claim_id) + '</div>' +
+        '<div class="ls-stumble-axes">' +
+          lsStumbleAxis("誤り率", axes.error_rate) +
+          lsStumbleAxis("記号降下", axes.symbol_descent) +
+          lsStumbleAxis("判定の乖離", axes.verdict_self_check_divergence) +
+          lsStumbleAxis("質問・誤解", faq.questions) +
+        '</div>' +
+        '<div class="ls-stumble-actions">' +
+          '<button type="button" class="ls-stumble-link" data-stumble-review="' + escHtml(c.claim_id) + '">この claim の問いを確認</button>' +
+          '<button type="button" class="ls-stumble-link" data-stumble-draft="' + escHtml(c.claim_id) + '">ドラフトの該当箇所へ</button>' +
+        '</div>' +
+        '<div class="ls-stumble-review" id="ls-stumble-review-' + escHtml(c.claim_id) + '" hidden></div>' +
+      '</article>';
+    });
+    html += '</div>';
+    html += '<div class="ls-course-muted ls-stumble-note">段階ラベルとレンジのみを表示します（k=3 の匿名化。個人は特定されません）。</div>';
+    container.innerHTML = html;
+
+    container.querySelectorAll("[data-stumble-review]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        lsToggleReviewQueueForClaim(this.getAttribute("data-stumble-review"));
+      });
+    });
+    container.querySelectorAll("[data-stumble-draft]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        // 既存の根拠リンク⇄ドラフト対応を再利用（claim の evidence key へフォーカス）。
+        lsFocusEvidence(lsCourseEvidenceKey("claim", this.getAttribute("data-stumble-draft")));
+      });
+    });
+  }
+
+  function lsStumbleAxis(label, value) {
+    var v = value || "まだデータなし";
+    var cls = "ls-stumble-axis";
+    if (v === "高") cls += " ls-stumble-high";
+    else if (v === "中") cls += " ls-stumble-mid";
+    else if (v === "まだデータなし") cls += " ls-stumble-nodata";
+    return '<span class="' + cls + '"><span class="ls-stumble-axis-label">' + escHtml(label) +
+      '</span><span class="ls-stumble-axis-value">' + escHtml(v) + '</span></span>';
+  }
+
+  // review キュー（該当 claim の item のみ）をインラインで開閉する。
+  function lsToggleReviewQueueForClaim(claimId) {
+    var box = document.getElementById("ls-stumble-review-" + claimId);
+    if (!box) return;
+    if (!box.hidden) { box.hidden = true; box.innerHTML = ""; return; }
+    box.hidden = false;
+    box.innerHTML = '<div class="ls-course-muted">問いを読み込み中…</div>';
+    var documentId = lsCurrentDocumentId() || lsCoursePrimaryDocumentId();
+    apiFetch("/admin/reconstruction/items/review-queue?document_id=" + encodeURIComponent(documentId))
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        var items = ((data && data.items) || []).filter(function (it) { return it.claim_id === claimId; });
+        if (!items.length) {
+          box.innerHTML = '<div class="ls-course-muted">この claim に紐づく再構成課題はありません。</div>';
+          return;
+        }
+        box.innerHTML = items.map(function (it) {
+          var sig = it.signals || {};
+          return '<div class="ls-stumble-item">' +
+            '<div class="ls-stumble-item-tier">' + escHtml(it.rank_tier || "") + ' · ' + escHtml(it.elicit_mode || "") + '</div>' +
+            '<div class="ls-stumble-item-prompt">' + escHtml(it.prompt || "") + '</div>' +
+            '<div class="ls-stumble-item-sig">回答 ' + escHtml(sig.responses || "-") +
+              ' / 誤り ' + escHtml(sig.mismatch_level || "-") +
+              (sig.verdict_dissent ? ' / 判定への異議あり' : '') + '</div>' +
+            '<div class="ls-stumble-item-actions">' +
+              '<button type="button" class="ls-stumble-mini" data-item-status="retired" data-item-id="' + escHtml(it.item_id) + '">配信停止（retire）</button>' +
+              '<button type="button" class="ls-stumble-mini" data-item-status="confirmed" data-item-id="' + escHtml(it.item_id) + '">追認（confirm）</button>' +
+            '</div>' +
+          '</div>';
+        }).join("");
+        box.querySelectorAll("[data-item-id]").forEach(function (b) {
+          b.addEventListener("click", function () {
+            lsPatchReconItem(this.getAttribute("data-item-id"), this.getAttribute("data-item-status"), box, claimId);
+          });
+        });
+      })
+      .catch(function () { box.innerHTML = '<div class="ls-course-muted">読み込みに失敗しました。</div>'; });
+  }
+
+  function lsPatchReconItem(itemId, status, box, claimId) {
+    apiFetch("/admin/reconstruction/items/" + encodeURIComponent(itemId), {
+      method: "PATCH",
+      body: JSON.stringify({ status: status }),
+    })
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function () {
+        // review キューを再取得して反映
+        box.hidden = true;
+        lsToggleReviewQueueForClaim(claimId);
+      })
+      .catch(function () {});
   }
 
   function lsTopicCoverageStatus(topic) {
@@ -5969,6 +6160,9 @@
 
     document.getElementById("ls-left-pane").hidden = isStructure || isAudio || isTheory || isClaims || isGraph;
     document.getElementById("ls-right-pane").hidden = isStructure || isTheory || isClaims || isGraph;
+    // 再構成ループ (R層): つまづきトグルはコーストピック専用。チャンク編集ビューでは隠す。
+    var stumbleTabsEl = document.getElementById("ls-stumble-tabs");
+    if (stumbleTabsEl) stumbleTabsEl.hidden = true;
 
     document.getElementById("ls-evidence-tabs").querySelectorAll(".ls-mini-tab").forEach(function (b) {
       b.classList.toggle("active", b.getAttribute("data-ls-evidence") === lsState.evidenceView);

@@ -47,6 +47,8 @@
           <span class="material-here" id="material-here"></span>
           <button class="next-topic-btn" id="next-topic-btn" style="display:none" title="次のトピックへ進む">確認して次へ</button>
         </div>
+        <!-- 再構成ループ (R層): 「再構成に挑戦」導線。自動では開かない（本人が開く） -->
+        <div class="reconstruction-region" id="reconstruction-region" hidden></div>
       </div>
       <!-- 分割ハンドル: 教材区画と下段（読み上げ行＋ホワイトボード）の比率をドラッグで調整 -->
       <div class="split-handle" id="split-handle" title="ドラッグして教材の表示比率を調整"><span class="split-grip"></span></div>
@@ -136,5 +138,6 @@
   <script src="/js/atlas-report.js"></script>
   <script src="/js/atlas-minimap.js"></script>
   <script src="/js/atlas-cues.js"></script>
+  <script src="/js/reconstruction.js"></script>
 </body>
 </html>

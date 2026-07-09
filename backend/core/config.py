@@ -174,6 +174,24 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("DOUBT_ASSUMPTION_LLM_MODEL"),
     )
 
+    # --- 再構成ループ（Reconstruction Loop, R層） — item オーサリングのコスト制御 ---
+    # （tension / anchor / doubt とは独立のカウンタ）
+    # 1 ドキュメントあたりの自動生成 item 上限
+    recon_max_items_per_document: int = Field(
+        default=30,
+        validation_alias=AliasChoices("RECON_MAX_ITEMS_PER_DOCUMENT"),
+    )
+    # item オーサリング worker の 1 日あたり LLM コール上限
+    recon_max_calls_per_day: int = Field(
+        default=10,
+        validation_alias=AliasChoices("RECON_MAX_CALLS_PER_DAY"),
+    )
+    # 空文字なら fast tier（llm_fast_model）に委譲
+    recon_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("RECON_LLM_MODEL"),
+    )
+
     # --- Field Atlas 骨格エディタ AIアシスト編集（interpret / propose。P3/P4） ---
     # 1教員1日あたりの assist LLM コール上限（interpret + propose の合算）
     atlas_assist_max_calls_per_day: int = Field(

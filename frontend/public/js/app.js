@@ -2236,6 +2236,8 @@
     refreshLectureAvailability();
     // 分野の地図 (Issue F-1): ミニマップはトピック遷移時に再取得する (ポーリングしない)
     if (window.AtlasMinimap) window.AtlasMinimap.refresh();
+    // 再構成ループ (R層): トピックの文脈を配線する。自動割り込みはしない（本人が開く）。
+    if (window.Reconstruction) window.Reconstruction.setContext(state.courseId || "", topicId || "");
 
     if (state.courseId && topicId) {
       // 教材チャンクとチャット履歴を並行取得

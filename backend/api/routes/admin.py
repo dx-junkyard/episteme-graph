@@ -2892,6 +2892,7 @@ from routes.atlas import admin_atlas_router as _admin_atlas_router  # noqa: E402
 from routes.atlas import binding_router as _atlas_binding_router  # noqa: E402
 from routes.doubt import admin_router as _doubt_admin_router  # noqa: E402
 from routes.admin_assistant import admin_router as _admin_assistant_router  # noqa: E402
+from routes.reconstruction import admin_router as _reconstruction_admin_router  # noqa: E402
 
 router.include_router(_lecture_studio_router)
 router.include_router(_theory_components_router)
@@ -2902,3 +2903,4 @@ router.include_router(_admin_atlas_router)
 router.include_router(_atlas_binding_router)
 router.include_router(_doubt_admin_router)
 router.include_router(_admin_assistant_router)
+router.include_router(_reconstruction_admin_router)

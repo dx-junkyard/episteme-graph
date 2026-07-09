@@ -1,0 +1,28 @@
+{
+  "input_claim": {
+    "claim_type": "relation",
+    "text": "The observable offset δO grows linearly with the coupling g.",
+    "normalized_text": "δO ∝ g",
+    "concepts": [
+      {"name": "δO", "concept_type": "Observable", "role": "subject"},
+      {"name": "g", "concept_type": "Parameter", "role": "driver"}
+    ],
+    "equation": {"label": "3.2", "latex": "\\delta O = \\alpha g", "defined_symbols": ["δO", "g", "α"], "relation_type": "proportional"},
+    "source_scope": {"level": "chunk", "section_title": "3. Observable construction"},
+    "evidence_text": "we find δO to scale linearly with g in the weak-coupling regime"
+  },
+  "authoring_output": {
+    "elicit_mode": "predict",
+    "prompt": "観測量 δO は結合定数 g に対してどのように振る舞うと予想しますか？",
+    "response_space": [
+      {"id": "opt_a", "label": "δO は g に比例する（∝ g）"},
+      {"id": "opt_b", "label": "δO は 1/g に比例する（∝ 1/g）"},
+      {"id": "opt_c", "label": "δO は g² に比例する（∝ g²）"},
+      {"id": "opt_d", "label": "δO は g に依存しない"}
+    ],
+    "expected": {"option_id": "opt_a", "relation_type": "proportional"},
+    "claim_fields_used": ["concepts", "equation"],
+    "author_confidence": 0.72,
+    "reason": "変数間の関係を選択肢から予測させることで、結果の暗記でなく構造の再構成を促す。"
+  }
+}

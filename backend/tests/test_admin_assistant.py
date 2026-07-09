@@ -219,7 +219,9 @@ class TestGuardrails:
     def test_migration_034_present(self):
         assert "assistant_actions" in _MAIN_SRC
         assert (BACKEND / "db" / "034_assistant_actions.sql").exists()
-        assert "Migrations (002-034)" in _MAIN_SRC
+        # マイグレーション範囲が 034 以上をカバーしている（後続 migration の追加で壊れない形で確認）
+        m = re.search(r"Migrations \(002-(\d+)\)", _MAIN_SRC)
+        assert m and int(m.group(1)) >= 34
 
     def test_registry_anchor_ids_registered_in_frontend(self):
         """registry の locate anchor（base id）が admin.js の registerUiAnchors に存在する。"""

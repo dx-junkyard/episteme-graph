@@ -661,6 +661,62 @@ casual チャット → 応答を TTS 再生（再生中はマイク停止）→
   立て、送信で `_replace_message_id`（内部）→ クライアント履歴も同位置で truncate。削除は確認の上
   DELETE API を呼び、成功時にクライアント履歴を truncate。トピック切替で編集状態は解除する。
 
+### 再構成ループ（Reconstruction Loop, R層, migration 036）
+
+学習者の「能動的・生成的理解」を支える第五の学習機構。学習者に理論の再構成（予測 /
+言い直し）をさせ、A層が生成した精密な構造（`theory_claims`）を **答えキー（ground truth）**
+として構造照合し、ズレを事実として返す閉ループ。併せて claim 単位のつまづき信号を集約し、
+原稿スタジオ「根拠リンク」ペインに表示切り替えで提示する。正本は
+`docs/features/reconstruction_loop_design.md`。A層（`src/episteme_graph/agents/`）は**読むだけ・非改変**。
+実装は `backend/core/reconstruction/`（tension / structure_anchor と同型の独立モジュール）+
+`backend/api/routes/reconstruction.py` + `frontend/public/js/reconstruction.js`（学習）/
+`admin.js`（原稿スタジオ トグル）。
+
+**融合ループ**: 出題 ELICIT → 提出 CAPTURE → 照合 DIFF(=仮説・非LLM同期) →
+開示 REVEAL(=権威) → 自己確認 SELF-CHECK(必須) →（再挑戦 REVISE ↺ / 記号葉へ降下 DESCEND ↓）。
+
+**設計原則（不変条項）**: A層非改変 / 判定は構造（非LLM同期）で権威は出典リビール、
+判定を authoritative に見せない（「食い違いの可能性」の仮説文体）/ item は LLM 自動オーサリング
+（`status='auto'`=candidate 相当）で教員確定なしに配信、教員は事後の監査役（confirmed 追認 /
+retired 回収）/ P4 情報を落とさない（item は削除せず `auto → flagged → retired` 状態遷移。学習者の
+成果物・自己確認・異議も行削除しない）/ P6 実行時 DIFF は非LLM（LLM はオーサリング worker のみ）/
+P7 スコア・正答率数値を学習者に見せない、REFLECT は事実文のみ、教員向けも段階ラベル + レンジ
+（3-5 / 6-10 / 11+）/ P3 教員向け集計は k-匿名（k=3・n<3 セル非表示、個別履歴を見せない、評価利用禁止）。
+出題対象は `support_status='source_backed'` かつ承認済み review_status（`teacher_approved` 等）の claim のみ。
+葉は主張（claim）が既定、記号（SymbolRegistry）は原因が絞れないときだけ降りる点検口（§1.6）。
+
+- **DB（migration 036）**: `reconstruction_items`（claim → ELICIT 変換の出題。
+  `elicit_mode ∈ {predict, restate, symbol}` / `response_space`（predict の選択肢）/ `expected`（想定解）/
+  `status ∈ {auto, flagged, retired, confirmed}`）、`learner_reconstructions`（学習者の産出物・改訂履歴。
+  `machine_verdict ∈ {match, mismatch, na}` / `self_check ∈ {agreed, disagreed, verdict_wrong}` /
+  `descended_to_symbol` / `revision_of`）、`reconstruction_item_health`（集計ビュー。疑わしさランクは
+  `core/reconstruction/health.py` がアプリ側で計算し SQL に埋め込まない）。
+- **core/reconstruction/**: `schema.py`（語彙・伏せフィールド・承認語彙の正本）/ `item_builder.py`
+  （predict 可否判定・restate 縮退・伏せ・降下プローブ。非LLM）/ `diff.py`（実行時 DIFF + REFLECT 事実文。
+  非LLM）/ `prompt.py`・`input_builder.py`・`llm_client.py`・`validator.py`・`repair.py`（item オーサリング。
+  LLM は選択肢・expected 生成のみ、2回修復失敗で item を生成しない=配信しない）/ `worker.py`
+  （オーサリング worker。トリガー: claim 承認時（`theory_components.update_claim` のフック）/ 手動バッチ API。
+  冪等性: claim に非 retired item があればスキップ）/ `health.py`（review キュー）/ `stumble.py`
+  （claim 単位つまづきサマリー。k-匿名）。
+- **API**: 学習者向け（`routes/reconstruction.py` `learning_router`、本人のみ・受講ゲートは
+  `get_accessible_course_data`）= `GET /api/learning/courses/{course_id}/topics/{topic_id}/reconstruction/next`
+  （伏せフィールドを返さない）/ `POST /api/learning/reconstruction/{item_id}/submit`（応答保存 → DIFF →
+  verdict + リビール）/ `POST .../{recon_id}/self-check` / `POST .../{recon_id}/descend` /
+  `POST .../{item_id}/revise`。教員向け（`admin_router`、`_require_teacher`）=
+  `GET /api/admin/reconstruction/items/review-queue`（疑わしさランク順）/
+  `PATCH /api/admin/reconstruction/items/{item_id}`（status 遷移・prompt/expected 修正。削除 API は無い）/
+  `POST /api/admin/reconstruction/documents/{document_id}/author`（手動オーサリング）/
+  `GET /api/admin/documents/{document_id}/claims/stumble-summary`（つまづきサマリー）。
+- **監査**: item 生成 / status 遷移 / self-check(verdict_wrong) / descend を `theory_review_events`
+  （`entity_type` を `'reconstruction_item'` / `'reconstruction_response'` に拡張）に記録。
+- **コスト上限**: `RECON_MAX_ITEMS_PER_DOCUMENT`（既定 30）/ `RECON_MAX_CALLS_PER_DAY`（既定 10、
+  他機能と独立）、モデルは fast tier 既定（`RECON_LLM_MODEL` で上書き）。
+- **フロント**: 学習画面は `reconstruction.js`（`window.Reconstruction`。トピック学習ビュー下部に
+  「再構成に挑戦」導線。自動では開かない。P7）。原稿スタジオは `admin.js` 右ペインタイトル行の
+  トグル `根拠リンク | つまづき`（別タブにしない。`lsState.rightPaneMode`）。
+- **ガードレール**: `backend/tests/test_reconstruction_guardrails.py`（伏せフィールド非漏洩・
+  スコア非表示・出題対象制限・削除 API 不在・k-匿名・core が FastAPI 非 import・REFLECT 禁止語彙）。
+
 
 ## 開発ルール
 

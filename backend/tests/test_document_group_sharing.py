@@ -49,7 +49,8 @@ def test_main_registers_migration_035():
     src = MAIN_PY.read_text(encoding="utf-8")
     assert "CREATE TABLE IF NOT EXISTS document_group_permissions" in src
     assert "idx_dgp_group_permission" in src
-    assert "Migrations (002-035) applied successfully." in src
+    # migration 035 は登録済み（適用完了ログの範囲は後続 migration 追加で末尾が伸びる）
+    assert "Migrations (002-036) applied successfully." in src
 
 
 # ---------------------------------------------------------------------------

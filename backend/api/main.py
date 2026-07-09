@@ -57,6 +57,7 @@ from routes import auth, learning, admin, lecture, groups, error_logs, export as
 from routes import atlas as atlas_routes
 from routes import atlas_view as atlas_view_routes
 from routes import doubt as doubt_routes
+from routes import reconstruction as reconstruction_routes
 from core.config import get_settings as _get_settings
 from core.postgres import get_session as _pg_session, check_connection as _pg_check
 
@@ -1270,8 +1271,88 @@ def _run_migrations() -> None:
             "CREATE INDEX IF NOT EXISTS idx_dgp_group_permission ON document_group_permissions(group_id, permission)"
         ))
 
+        # ---- Migration 036: 再構成ループ（Reconstruction Loop, R層）----
+        # 正本リファレンス: backend/db/036_reconstruction_loop.sql
+        # claim を答えキーとした再構成課題（reconstruction_items）と学習者の産出物
+        # （learner_reconstructions）。item は LLM 自動オーサリング（status='auto'=candidate 相当）で
+        # 教員確定なしに配信し、教員は事後の監査役。判定は構造照合（非LLM・同期）、
+        # 権威は出典リビール、点数は出さない（P7）。P4: item は削除せず状態遷移で回収。
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS reconstruction_items (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                claim_id UUID NOT NULL REFERENCES theory_claims(id) ON DELETE CASCADE,
+                document_id TEXT NOT NULL DEFAULT '',
+                elicit_mode TEXT NOT NULL DEFAULT 'predict',
+                prompt TEXT NOT NULL,
+                response_space JSONB NOT NULL DEFAULT '[]'::jsonb,
+                expected JSONB NOT NULL DEFAULT '{}'::jsonb,
+                claim_fields_used JSONB NOT NULL DEFAULT '[]'::jsonb,
+                author TEXT NOT NULL DEFAULT 'llm',
+                author_confidence REAL NOT NULL DEFAULT 0.0,
+                status TEXT NOT NULL DEFAULT 'auto'
+                    CHECK (status IN ('auto', 'flagged', 'retired', 'confirmed')),
+                created_by UUID REFERENCES users(id),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_recon_items_claim ON reconstruction_items(claim_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_recon_items_status ON reconstruction_items(status)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_recon_items_document ON reconstruction_items(document_id)"
+        ))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS learner_reconstructions (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                course_id TEXT NOT NULL DEFAULT '',
+                item_id UUID NOT NULL REFERENCES reconstruction_items(id) ON DELETE CASCADE,
+                claim_id UUID NOT NULL,
+                response JSONB NOT NULL DEFAULT '{}'::jsonb,
+                machine_verdict TEXT NOT NULL DEFAULT 'na'
+                    CHECK (machine_verdict IN ('match', 'mismatch', 'na')),
+                self_check TEXT
+                    CHECK (self_check IS NULL OR self_check IN ('agreed', 'disagreed', 'verdict_wrong')),
+                descended_to_symbol BOOLEAN NOT NULL DEFAULT FALSE,
+                revision_of UUID REFERENCES learner_reconstructions(id),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_learner_recon_user ON learner_reconstructions(user_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_learner_recon_item ON learner_reconstructions(item_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_learner_recon_claim ON learner_reconstructions(claim_id)"
+        ))
+        session.execute(sa_text("""
+            CREATE OR REPLACE VIEW reconstruction_item_health AS
+            SELECT
+                i.id AS item_id,
+                i.claim_id,
+                i.status,
+                i.author_confidence,
+                COUNT(r.id)                                                    AS n_responses,
+                COUNT(*) FILTER (WHERE r.machine_verdict='mismatch')           AS n_mismatch,
+                COUNT(*) FILTER (WHERE r.self_check='verdict_wrong')           AS n_verdict_dissent,
+                COUNT(*) FILTER (WHERE r.machine_verdict='mismatch'
+                                   AND r.self_check='agreed')                  AS n_verdict_self_disagree,
+                COUNT(*) FILTER (WHERE r.descended_to_symbol)                  AS n_descend,
+                COUNT(DISTINCT r.user_id)                                      AS n_users
+            FROM reconstruction_items i
+            LEFT JOIN learner_reconstructions r ON r.item_id = i.id
+            GROUP BY i.id
+        """))
+
         session.commit()
-        logger.info("Migrations (002-035) applied successfully.")
+        logger.info("Migrations (002-036) applied successfully.")
 
         # 骨格 DB 管理化 (027): カートリッジ同梱の凍結骨格を一度だけ DB へ取り込む (冪等)
         try:
@@ -1372,6 +1453,7 @@ app.include_router(atlas_routes.learning_router)
 app.include_router(atlas_routes.report_router)
 app.include_router(atlas_view_routes.router)
 app.include_router(doubt_routes.learning_router)
+app.include_router(reconstruction_routes.learning_router)
 
 
 @app.get("/healthz")

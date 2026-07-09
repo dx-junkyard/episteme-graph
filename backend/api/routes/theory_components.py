@@ -2438,6 +2438,15 @@ def update_claim(
             _record_review_event("claim", claim_id, existing[1], updated.review_status, current_user.get("id"))
             if updated.review_status == "rejected":
                 _propagate_rejected_claim(claim_id)
+            # R層: claim が承認済みへ遷移したら再構成 item のオーサリングを非同期起動する
+            # （best-effort。失敗はチャット/編集を止めない）。トリガー詳細は設計 §5 の未決事項。
+            elif updated.review_status in ("teacher_approved", "teacher_reviewed", "endorsed"):
+                try:
+                    from core.reconstruction.worker import maybe_schedule_item_authoring
+
+                    maybe_schedule_item_authoring(updated.document_id or existing[0] or "")
+                except Exception:
+                    logger.debug("reconstruction authoring scheduling skipped", exc_info=True)
         return updated
     except Exception:
         session.rollback()
