@@ -328,3 +328,97 @@ def test_unknown_default_maturity_raises(tmp_path, monkeypatch):
     clear_cache()
     with pytest.raises(ValueError, match="unknown default_maturity_level"):
         load_cartridge("unknown_maturity")
+
+
+# ---------------------------------------------------------------------------
+# Atlas skeleton (Issue A-1) — 同梱骨格のロード・フォールバック・ビルド失敗
+# ---------------------------------------------------------------------------
+
+from core import atlas
+
+def _minimal_draft_skeleton(cartridge: str):
+    from core import atlas
+
+    return atlas.AtlasSkeleton(
+        cartridge=cartridge,
+        status=atlas.STATUS_DRAFT,
+        generated_by="model:test batch:t1",
+        regions=(
+            atlas.SkeletonRegion(
+                id="region_a",
+                label="領域A",
+                layout=atlas.RegionLayout(0.1, 0.1, 0.4, 0.4),
+            ),
+        ),
+    )
+
+
+class TestAtlasSkeletonLoading:
+    def test_bundled_skeleton_loads_via_cartridge(self):
+        from core.cartridges import clear_cache, load_cartridge
+
+        clear_cache()
+        cartridge = load_cartridge("particle_physics")
+        skeleton = cartridge.atlas_skeleton
+        assert skeleton is not None
+        assert skeleton.status == atlas.STATUS_FROZEN
+        assert skeleton.generated_by
+        assert skeleton.reviewed_by
+        assert cartridge.learner_atlas_skeleton is skeleton
+
+    def test_cartridge_without_skeleton_falls_back_to_none(self, tmp_path, monkeypatch):
+        import json as json_module
+
+        from core import cartridges as cartridges_module
+
+        directory = tmp_path / "bare_cartridge"
+        directory.mkdir()
+        (directory / "cartridge.json").write_text(
+            json_module.dumps({"cartridge_id": "bare_cartridge", "name": "Bare"}),
+            encoding="utf-8",
+        )
+        for name in (
+            "ontology.json",
+            "component_types.json",
+            "relation_types.json",
+            "maturity_levels.json",
+            "support_statuses.json",
+            "validation_rules.json",
+        ):
+            (directory / name).write_text("{}", encoding="utf-8")
+
+        monkeypatch.setattr(cartridges_module, "_cartridges_root", lambda: tmp_path)
+        cartridges_module.clear_cache()
+        cartridge = cartridges_module.load_cartridge("bare_cartridge")
+        assert cartridge.atlas_skeleton is None
+        assert cartridge.learner_atlas_skeleton is None
+        cartridges_module.clear_cache()
+
+    def test_bundled_draft_skeleton_fails_build(self, tmp_path, monkeypatch):
+        """draft を skeleton.yaml として同梱するとロード失敗 (レビュー前公開の禁止)。"""
+        import json as json_module
+
+        from core import cartridges as cartridges_module
+
+        directory = tmp_path / "bad_cartridge"
+        (directory / "atlas").mkdir(parents=True)
+        (directory / "cartridge.json").write_text(
+            json_module.dumps({"cartridge_id": "bad_cartridge", "name": "Bad"}),
+            encoding="utf-8",
+        )
+        for name in (
+            "ontology.json",
+            "component_types.json",
+            "relation_types.json",
+            "maturity_levels.json",
+            "support_statuses.json",
+            "validation_rules.json",
+        ):
+            (directory / name).write_text("{}", encoding="utf-8")
+        atlas.write_skeleton(_minimal_draft_skeleton("bad_cartridge"), directory / "atlas" / "skeleton.yaml")
+
+        monkeypatch.setattr(cartridges_module, "_cartridges_root", lambda: tmp_path)
+        cartridges_module.clear_cache()
+        with pytest.raises(ValueError, match="凍結済み"):
+            cartridges_module.load_cartridge("bad_cartridge")
+        cartridges_module.clear_cache()

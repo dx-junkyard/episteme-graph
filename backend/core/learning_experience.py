@@ -174,6 +174,8 @@ def build_traces_view(rows: list) -> dict[str, Any]:
     """
     import json as _json
 
+    from core.structure_anchor.schema import ANCHOR_TYPE_LABELS, DOUBT_TYPE_LABELS
+
     traces: list[dict[str, Any]] = []
     cue_candidate = None
     for r in rows:
@@ -188,6 +190,22 @@ def build_traces_view(rows: list) -> dict[str, Any]:
             # 「この問いに戻る」の逆引き（元の往復へジャンプ）。旧行には無いので空文字許容。
             "message_id": (payload or {}).get("message_id", ""),
         }
+        # 構造帰属（structure_anchor）: 確定済み（learner_selected/confirmed）のみビューに載せる。
+        # llm_candidate はダイジェスト経由でのみ提示する（P1/P7）。
+        anchor = (payload or {}).get("structure_anchor") or {}
+        if (
+            anchor.get("attribution_source") in ("learner_selected", "confirmed")
+            and anchor.get("status", "active") == "active"
+        ):
+            atype = anchor.get("anchor_type", "segment")
+            dtype = anchor.get("doubt_type", "unclassified")
+            trace["structure_anchor"] = {
+                "anchor_type": atype,
+                "anchor_type_label": ANCHOR_TYPE_LABELS.get(atype, atype),
+                "anchor_label": anchor.get("anchor_label", ""),
+                "doubt_type": dtype,
+                "doubt_type_label": DOUBT_TYPE_LABELS.get(dtype, DOUBT_TYPE_LABELS["unclassified"]),
+            }
         traces.append(trace)
         if r[2] in ("open", "revisited") and (days is None or days >= 1):
             rank = 0 if r[1] == "misconception" else 1
@@ -200,9 +218,18 @@ def build_traces_view(rows: list) -> dict[str, Any]:
         _, t, days = cue_candidate
         word = _TRACE_KIND_WORD.get(t["kind"], "問い")
         when = f"{days}日前" if days else "先日"
+        # 構造帰属があれば「どこに・どう引っかかっていたか」で再訪キューを構造化する（Stage 3）。
+        t_anchor = t.get("structure_anchor") or {}
+        if t_anchor.get("anchor_label"):
+            headline = (
+                f"「{t_anchor['anchor_label']}」の"
+                f"{t_anchor.get('doubt_type_label', '引っかかり')}に戻るころ合い"
+            )
+        else:
+            headline = f"前に引っかかった{word}、今なら見えるかも"
         revisit_cue = {
             "kind_label": "再訪のころ合い",
-            "headline": f"前に引っかかった{word}、今なら見えるかも",
+            "headline": headline,
             "sub": f"{when}の{word}です。間隔をあけて戻ると定着しやすいタイミングです。",
         }
 

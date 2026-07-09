@@ -32,11 +32,15 @@ from schemas import (
 from services import (
     calculate_progress,
     check_prerequisites,
+    confirm_anchor_trace,
     confirm_tension_trace,
     connect_tension_trace,
     detect_and_record_misconception,
+    dismiss_anchor_trace,
     dismiss_tension_trace,
+    get_anchor_digest,
     get_tension_digest,
+    course_deletion_notice,
     enroll_user_in_course,
     get_course_chunks_ordered,
     get_course_data,
@@ -49,6 +53,7 @@ from services import (
     get_user_group_ids,
     log_unanswered_query,
     persist_chat_history,
+    truncate_chat_and_supersede,
     record_internalization,
     record_interest_trace,
     record_student_stumble_event,
@@ -77,8 +82,19 @@ from core.learning_support_agent import (
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
 from core.course_content_builder import build_course_content_background
+from core.atlas_path import build_learning_path_card
 from core.tension.prefilter import judge_tension_hint
 from core.tension.worker import maybe_schedule_tension_mining
+from core.structure_anchor.schema import (
+    ATTRIBUTION_LEARNER_SELECTED,
+    DOUBT_TYPE_LABELS,
+    anchor_type_for_element,
+    build_anchor_payload,
+)
+from core.structure_anchor.worker import (
+    check_and_count_confirm_prompt,
+    maybe_schedule_anchor_mining,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -342,6 +358,28 @@ def get_course(
         master_course=LearningCourseDetail(**data),
         personal_layer=PersonalLayer(**personal),
     )
+
+
+@router.get("/courses/{course_id}/version-notice")
+def get_course_version_notice(
+    course_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """受講者向け: コースの削除予定など版ライフサイクルの一行通知（V層, migration 037）。
+
+    受講/アクセス可能なコースのみ。コース自体の削除予約に加え、元教材の削除予約（教材 purge は
+    所有者のコースを巻き添え削除する）も検出して猶予期限を返し、学習 UI がバナー表示する。
+    版が無い / エラー時は lifecycle='active' として静かに返す（fail-open で学習を止めない）。
+    """
+    if not get_course_data(current_user["id"], course_id):
+        raise HTTPException(status_code=404, detail="Course not found")
+    try:
+        notice = course_deletion_notice(course_id)
+    except Exception:  # noqa: BLE001 — fail-open
+        notice = None
+    if notice:
+        return notice
+    return {"lifecycle": "active", "delete_purge_after": None, "delete_reason": ""}
 
 
 @router.put("/courses/{course_id}", response_model=LearningCourseDetail)
@@ -692,6 +730,50 @@ def _get_casual_teacher_system_prompt(domain: str, response_persona: str | None 
    教材に無い話題は、想像や一般論であることが伝わる言い方（「たぶん」「一般には」）で話してください。
 5. 【出さないもの】数式の羅列・LaTeX・出典番号マーカー・`[ACTION_BUTTON: ...]` などの
    システム記法は一切出力しないでください。数式が必要なら言葉で言い換えてください。{persona_block}"""
+
+
+def _learner_selected_anchor(body: LearningChatRequest) -> dict | None:
+    """発話時の明示アンカー（構造帰属・方法A）を非LLMで構築する。無ければ None。
+
+    「どこ（anchor）」はこの操作で確定するが「どう（doubt_type）」までは分からないため
+    unclassified のまま保持する（P4。方法B/C が後から補い得る）。
+    """
+    if body.element_id:
+        atype = anchor_type_for_element(body.element_type)
+        # 出典系（reference/citation→chunk）はタップ元チャンクをアンカーにする
+        anchor_id = body.chunk_id if (atype == "chunk" and body.chunk_id) else body.element_id
+        return build_anchor_payload(
+            anchor_type=atype,
+            anchor_id=anchor_id,
+            anchor_label=body.element_label or body.element_id,
+            doubt_type="unclassified",
+            attribution_source=ATTRIBUTION_LEARNER_SELECTED,
+            evidence_quote="",
+            reason="element_tap",
+            confidence=1.0,
+        )
+    sel = (body.selection_text or "").strip()
+    if sel:
+        seg = body.selection_segment_id
+        return build_anchor_payload(
+            anchor_type="segment",
+            anchor_id=f"seg_{int(seg)}" if seg is not None else "",
+            anchor_label=(sel[:40] + "…") if len(sel) > 40 else sel,
+            doubt_type="unclassified",
+            attribution_source=ATTRIBUTION_LEARNER_SELECTED,
+            evidence_quote=sel,
+            reason="text_selection",
+            confidence=1.0,
+        )
+    return None
+
+
+# 方法C の1タップ選択肢（unclassified は「その他」として提示しない — 未選択のまま
+# 閉じれば unclassified が保たれる）
+_ANCHOR_CONFIRM_DOUBT_OPTIONS = [
+    {"doubt_type": d, "label": DOUBT_TYPE_LABELS[d]}
+    for d in ("definition", "justification_gap", "premise", "prior_conflict", "scope", "connection")
+]
 
 
 def _generate_graph_element_explanation(
@@ -1147,6 +1229,196 @@ def delete_chat_history(
     return {"status": "deleted"}
 
 
+@router.delete(
+    "/courses/{course_id}/topics/{topic_id}/chat/messages/{message_id}",
+)
+def delete_chat_message_from(
+    course_id: str,
+    topic_id: str,
+    message_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """機能3（削除）: 指定メッセージ以降の往復を本人の履歴から取り除く。
+
+    書き直しと同じ ``truncate_chat_and_supersede`` を使い、当該メッセージ・その回答・以降の
+    往復を履歴から削除し、派生 interest_traces を status='superseded' にする（保持はする。P4）。
+    再送は行わない（純粋な削除）。
+    """
+    course_data = get_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    try:
+        result = truncate_chat_and_supersede(
+            current_user["id"], course_id, topic_id, message_id
+        )
+    except Exception:
+        logger.exception(
+            "Failed to delete chat message for user=%s topic=%s msg=%s",
+            current_user["id"], topic_id, message_id,
+        )
+        raise HTTPException(status_code=500, detail="Failed to delete chat message")
+
+    if result is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    return {"status": "deleted", "removed_count": result["removed_count"]}
+
+
+# ---------------------------------------------------------------------------
+# 分野の地図 (Issue C-2/C-3) — ↗ アクションの型付き処理
+# ---------------------------------------------------------------------------
+
+def _atlas_safe_int(value, default: int = 1) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _atlas_step_dicts(raw) -> list[dict]:
+    """クライアント添付の related / juxtapose を検証済みの dict 列に正規化する。"""
+    out: list[dict] = []
+    if isinstance(raw, list):
+        for e in raw:
+            if isinstance(e, dict):
+                out.append({
+                    "node_id": str(e.get("node_id") or ""),
+                    "label": str(e.get("label") or ""),
+                    "status": str(e.get("status") or ""),
+                    "pill": str(e.get("pill") or ""),
+                })
+    return out
+
+
+def _atlas_attribution(ctx: dict) -> dict:
+    """帰属つき記録に焼き込む構造化ペイロード (自由文のみに依存しない)。"""
+    return {
+        "node_id": str(ctx.get("node_id") or ""),
+        "level": _atlas_safe_int(ctx.get("level")),
+        "skeleton_version": str(ctx.get("skeleton_version") or ""),
+        "action": str(ctx.get("action") or ""),
+        "node_label": str(ctx.get("node_label") or ""),
+    }
+
+
+def _atlas_topic_attribution(course_data: dict, topic_info: dict | None) -> dict | None:
+    """通常学習 (地図アクション以外) の往復から topic → 骨格概念を解決し、個人層の
+    「いまここ」を動かすための atlas 帰属を返す (gap1)。
+
+    cheap path: 明示 binding + ラベル一致のみで解決する (corpus 経路は使わない)。
+    骨格が無い / 対応概念が引けない場合は None。best-effort — 例外はチャットを止めない。
+    """
+    if not isinstance(topic_info, dict):
+        return None
+    try:
+        from core import atlas as atlas_module
+        from core import atlas_state
+        from core import atlas_store
+
+        session = _pg_session()
+        try:
+            cartridge_id = atlas_state.resolve_course_cartridge(session, course_data)
+            if not cartridge_id:
+                return None
+            # migration 027: 骨格は DB 凍結版が正本 (同梱ファイルはフォールバック)
+            skeleton = atlas_store.load_learner_skeleton(cartridge_id, session)
+        finally:
+            session.close()
+        if skeleton is None:
+            return None
+        node_id = atlas_module.match_topic_to_concept(topic_info, skeleton)
+        if not node_id:
+            return None
+        return {
+            "node_id": node_id,
+            "level": 1,
+            "skeleton_version": skeleton.version,
+            "action": "study",
+            "node_label": str(topic_info.get("title") or ""),
+        }
+    except Exception:  # noqa: BLE001
+        logger.warning("atlas topic attribution failed", exc_info=True)
+        return None
+
+
+def _atlas_action_response(
+    user_id: str,
+    course_id: str,
+    topic_id: str,
+    body: LearningChatRequest,
+    course_data: dict,
+    ctx: dict,
+) -> LearningChatResponse | None:
+    """地図の ↗ アクションのうち、決定論的に応答するもの (mind / learn) を処理する。
+
+    - mind (気になる ↗): 学習者本人が宣言した違和感。既存 tension 記録経路
+      (interest_traces kind='tension') に帰属つきで記録する。本人発の宣言なので
+      candidate ではなく open (P1: 違和感を生成するのは人間 — ここでは人間が押している)。
+    - learn (ここから学ぶ ↗): 学習パス提案カード (§8) を決定論的に生成して返す。
+      リアルタイム LLM 生成はしない。
+    - evid ほかは None を返し、通常の RAG フローに流す (帰属は呼び出し側で焼き込む)。
+    """
+    action = str(ctx.get("action") or "")
+    node_label = str(ctx.get("node_label") or ctx.get("node_id") or "")
+    attribution = _atlas_attribution(ctx)
+
+    if action == "mind":
+        record_interest_trace(
+            user_id, course_id, topic_id,
+            kind="tension",
+            text=body.message,
+            context_label=node_label,
+            extra_payload={"atlas": attribution, "origin": "atlas_mind"},
+            status="open",
+        )
+        answer = (
+            f"「{node_label}」への引っかかりを、あなたの違和感として帰属つきで記録しました。\n"
+            "記録は「問いの軌跡」に残ります。言葉にできるようになったら、"
+            "いつでも自分の言葉で書き直せます。"
+        )
+        persist_chat_history(
+            user_id, course_id, topic_id,
+            body.history, body.message, answer,
+            user_message_id=body.message_id or None,
+        )
+        return LearningChatResponse(answer=answer, course_update=None)
+
+    if action == "learn":
+        interest_view = get_interest_traces(user_id, course_id, topic_id)
+        card = build_learning_path_card(
+            node_id=str(ctx.get("node_id") or ""),
+            node_label=node_label,
+            level=_atlas_safe_int(ctx.get("level")),
+            skeleton_version=str(ctx.get("skeleton_version") or ""),
+            node_status=str(ctx.get("node_status") or ""),
+            node_pill=str(ctx.get("node_pill") or ""),
+            related=_atlas_step_dicts(ctx.get("related")),
+            juxtapose=_atlas_step_dicts(ctx.get("juxtapose")),
+            course_topics=course_data.get("topics") or [],
+            interest_traces=(interest_view or {}).get("traces") or [],
+        )
+        answer = (
+            f"「{node_label}」からの学習パスの候補です。"
+            "各ステップに出所（教材 / AI一般知識）と台帳の状態を添えています。"
+        )
+        record_interest_trace(
+            user_id, course_id, topic_id,
+            kind="question",
+            text=body.message,
+            context_label=node_label,
+            extra_payload={"atlas": attribution, "atlas_path_proposed": True},
+        )
+        persist_chat_history(
+            user_id, course_id, topic_id,
+            body.history, body.message, answer,
+            user_message_id=body.message_id or None,
+        )
+        return LearningChatResponse(answer=answer, course_update=None, atlas_path_card=card)
+
+    return None
+
+
 @router.post(
     "/courses/{course_id}/topics/{topic_id}/chat",
     response_model=LearningChatResponse,
@@ -1162,6 +1434,17 @@ def learning_chat(
     course_data = get_course_data(current_user["id"], course_id)
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
+
+    # 機能3（書き直し）: replace_message_id 指定時は、その往復以降をサーバ正本の履歴から
+    # 取り除き、派生 interest_traces を supersede してから、message を同じ位置から再処理する。
+    # サーバの履歴を正本にするため、切り詰め済みの履歴で body.history を上書きし、
+    # 以降の文脈構築・永続化（persist_chat_history が全体を UPSERT）を一貫させる。
+    if body.replace_message_id:
+        _trunc = truncate_chat_and_supersede(
+            current_user["id"], course_id, topic_id, body.replace_message_id
+        )
+        if _trunc is not None:
+            body.history = _trunc["truncated_history"]
 
     topic_info = None
     for t in course_data.get("topics", []):
@@ -1212,15 +1495,44 @@ def learning_chat(
             include_continue=False,
             extra_actions=inline_actions,
         )
-        return LearningChatResponse(**result.model_dump(), course_update=graph_response.course_update)
+        # 構造帰属（方法A）: 要素タップは ground truth のアンカー。問いとして
+        # learner_selected 帰属付きで記録する（同期・非LLM）。
+        _tap_anchor = _learner_selected_anchor(body)
+        record_interest_trace(
+            current_user["id"], course_id, topic_id,
+            kind="question",
+            text=body.message or f"{body.element_label or body.element_id}について質問",
+            context_label=" · ".join(
+                [s for s in [support_origin.chapter_title, topic_title] if s]
+            ),
+            extra_payload={
+                "position_anchor": build_position_anchor(topic_id, _seg, _scroll),
+                "structure_anchor": _tap_anchor,
+            } if _tap_anchor else None,
+        )
+        return LearningChatResponse(
+            **result.model_dump(),
+            course_update=graph_response.course_update,
+            structure_anchor=_tap_anchor,
+        )
 
     # カジュアル対話モード（気軽に話せる先生・ハンズフリー音声会話）:
     # 意図分類（雑談拒否）・前提知識ゲート・誤解検出をバイパスし、RAG検索と
     # tier 集約（根拠の一線）はそのまま通す。
     _is_casual = (body.intent_mode or "").strip() == "casual"
 
+    # 分野の地図 (Issue C-2/C-3): ↗ アクションは型付きなので意図分類を経由しない。
+    # mind / learn は決定論的に応答し、evid ほかは通常の RAG フローへ流す。
+    _atlas_ctx = body.atlas_context if isinstance(body.atlas_context, dict) else None
+    if _atlas_ctx:
+        _atlas_response = _atlas_action_response(
+            current_user["id"], course_id, topic_id, body, course_data, _atlas_ctx
+        )
+        if _atlas_response is not None:
+            return _atlas_response
+
     # 2. 意図分類（Intent Routing）— UI ボタン由来の型付きアクションは分類を経由しない。
-    intent = None if _is_casual else (
+    intent = None if (_is_casual or _atlas_ctx) else (
         _route_for_typed_action(body.support_action) or _classify_intent(body.message, course_title)
     )
 
@@ -1282,7 +1594,7 @@ def learning_chat(
 
     # 3. Adaptive Routing: 前提知識の自動判定 (ルート③/④の前に実行)
     # casual モードでは会話を止めない（前提確認の逆質問ゲートを挟まない）。
-    prerequisite_intervention = None if _is_casual else check_prerequisites(
+    prerequisite_intervention = None if (_is_casual or _atlas_ctx) else check_prerequisites(
         current_user["id"], course_id, course_data, topic_title, body.message
     )
     if prerequisite_intervention:
@@ -1411,24 +1723,58 @@ def learning_chat(
     # 同語再訪でヒントを立てるだけ。LLM 分類は非同期バッチ（P6: 応答を遅延させない）。
     _recent_user_texts = [t.get("content", "") for t in body.history if t.get("role") == "user"][-3:]
     _tension_hint = judge_tension_hint(body.message, _recent_user_texts)
-    record_interest_trace(
+    # 構造帰属（方法A・同期・非LLM）: テキスト選択・要素タップの明示アンカーがあれば
+    # learner_selected で確定記録する。無ければ方法B（非同期LLM）の帰属対象になる。
+    _sel_anchor = _learner_selected_anchor(body)
+    _trace_payload = {
+        "overall_tier": overall_tier,
+        "position_anchor": position_anchor,
+        "tension_hint": _tension_hint,
+        "casual": _is_casual,
+        # 「この問いに戻る」で元の往復へジャンプするための逆引き（この問いを発した user メッセージ id）。
+        "message_id": _persisted.get("user_message_id"),
+        # 方法Bの帰属コンテキスト用: この回答が実際に引用したチャンク（上位3件）。
+        "cited_chunk_ids": [s["chunk_id"] for s in cited_sources[:3] if s.get("chunk_id")],
+        # 分野の地図由来の質問 (根拠を見る ↗ など) は帰属を構造化して焼き込む (Issue C-2)
+        **({"atlas": _atlas_attribution(_atlas_ctx)} if _atlas_ctx else {}),
+    }
+    # gap1: 地図アクション由来でない通常学習でも、topic → 骨格概念を解決して atlas 帰属を
+    # 焼き込む (個人層の「いまここ」を動かす)。地図由来 (_atlas_ctx) は上書きしない。
+    if not _atlas_ctx:
+        _topic_atlas = _atlas_topic_attribution(course_data, topic_info)
+        if _topic_atlas:
+            _trace_payload["atlas"] = _topic_atlas
+    if _sel_anchor:
+        _trace_payload["structure_anchor"] = _sel_anchor
+    _trace_id = record_interest_trace(
         current_user["id"], course_id, topic_id,
         kind=_trace_kind,
         text=body.message,
         context_label=_ctx_label,
-        extra_payload={
-            "overall_tier": overall_tier,
-            "position_anchor": position_anchor,
-            "tension_hint": _tension_hint,
-            "casual": _is_casual,
-            # 「この問いに戻る」で元の往復へジャンプするための逆引き（この問いを発した user メッセージ id）。
-            "message_id": _persisted.get("user_message_id"),
-        },
+        extra_payload=_trace_payload,
     )
     # ヒント累積が閾値に達していればバックグラウンドで TensionMiningAgent を起動
     # （best-effort: 失敗してもチャット応答を止めない）。
     if _tension_hint:
         maybe_schedule_tension_mining(current_user["id"], course_id, topic_id)
+    # 未帰属の問いが累積していればバックグラウンドで StructureAnchorAgent を起動
+    # （方法B・非同期。明示アンカー付きの問いは最初から対象外）。
+    if _trace_kind == "question" and not _sel_anchor:
+        maybe_schedule_anchor_mining(current_user["id"], course_id, topic_id)
+    # 方法C: 回答末尾の帰属確認プロンプト。tension_hint が立った往復か、明示アンカーは
+    # あるが疑いの様相が未分類の往復に限り、セッション内上限までゲートして提示する（P7）。
+    _anchor_confirm = None
+    if (
+        _trace_id
+        and not _is_casual
+        and (_tension_hint or _sel_anchor is not None)
+        and check_and_count_confirm_prompt(current_user["id"], course_id, topic_id)
+    ):
+        _anchor_confirm = {
+            "trace_id": _trace_id,
+            "question": (body.message or "")[:120],
+            "options": _ANCHOR_CONFIRM_DOUBT_OPTIONS,
+        }
     # 本文中のドリルダウンマーカーは構造化アクションへ正規化する。
     clean_answer, inline_actions = extract_inline_actions(answer)
 
@@ -1459,6 +1805,8 @@ def learning_chat(
         overall_tier=overall_tier,
         content_grounding=content_grounding,
         position_anchor=position_anchor,
+        structure_anchor=_sel_anchor,
+        anchor_confirm=_anchor_confirm,
         mock=False,
     )
 
@@ -1518,6 +1866,72 @@ def internalize_interest_trace_route(
     if not ok:
         raise HTTPException(status_code=400, detail="Could not save internalization")
     return {"ok": True, "trace_id": trace_id}
+
+
+# ---------------------------------------------------------------------------
+# 分野の地図 — 学習パス提案カードの三択記録 (Issue C-3)
+# ---------------------------------------------------------------------------
+
+
+class AtlasPathDecisionRequest(BaseModel):
+    node_id: str = ""
+    node_label: str = ""
+    level: int = 1
+    skeleton_version: str = ""
+    decision: str = ""  # proceed | edit | dismiss | connect
+    learner_text: str = ""
+    steps: list[str] = []
+    topic_id: str | None = None
+
+
+# 三択 + 「自分で繋ぐ」→ interest_traces の status。
+# 却下 (dismiss) も status='dismissed' で保持し、削除しない (情報を落とさない §1.2)。
+# connect は本人の言葉での記録なので articulated。
+_ATLAS_PATH_DECISIONS = {
+    "proceed": ("resolved", "この糸で進む"),
+    "edit": ("resolved", "編集する"),
+    "dismiss": ("dismissed", "今はやめる"),
+    "connect": ("articulated", "自分で繋ぐ"),
+}
+
+
+@router.post("/courses/{course_id}/atlas/path-decision")
+def record_atlas_path_decision(
+    course_id: str,
+    body: AtlasPathDecisionRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """学習パス提案カードの選択を interest_traces に帰属つきで記録する (Issue C-3)。
+
+    [この糸で進む] [編集する] [今はやめる] と「自分で繋ぐ」入力のすべてを記録する。
+    却下 (今はやめる) も記録する — 情報を落とさない。
+    """
+    if body.decision not in _ATLAS_PATH_DECISIONS:
+        raise HTTPException(status_code=400, detail="Unknown decision")
+    status, decision_label = _ATLAS_PATH_DECISIONS[body.decision]
+    text = f"学習パス提案（「{body.node_label or body.node_id}」から）: {decision_label}"
+    if body.decision == "connect" and body.learner_text.strip():
+        # 「自分で繋ぐ」は本人の言葉をそのまま主文に残す (§1.2-5)
+        text = body.learner_text.strip()
+    record_interest_trace(
+        current_user["id"], course_id, body.topic_id,
+        kind="raw",
+        text=text,
+        context_label=body.node_label,
+        extra_payload={
+            "atlas": {
+                "node_id": body.node_id,
+                "level": body.level,
+                "skeleton_version": body.skeleton_version,
+                "action": "path_decision",
+                "node_label": body.node_label,
+            },
+            "decision": body.decision,
+            "path_steps": body.steps[:12],
+        },
+        status=status,
+    )
+    return {"ok": True, "decision": body.decision, "status": status}
 
 
 # ---------------------------------------------------------------------------
@@ -1591,6 +2005,110 @@ def dismiss_tension_route(
     result = dismiss_tension_trace(current_user["id"], trace_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Tension candidate not found")
+    return {"ok": True, **result}
+
+
+# ---------------------------------------------------------------------------
+# 構造帰属（structure_anchor）— StructureAnchorAgent Stage 2: ダイジェスト・本人確定
+# ---------------------------------------------------------------------------
+# 権限: すべて本人（user_id 一致）のみ。教員・管理者は個別行にアクセス不可（P3）。
+# 行の status は変えない（問い自体は確定済み。候補なのは帰属だけ）。
+
+
+class AnchorConfirmRequest(BaseModel):
+    doubt_type: str = ""
+    anchor_type: str = ""
+    anchor_id: str = ""
+    anchor_label: str = ""
+
+
+@router.get("/courses/{course_id}/anchors/digest")
+def get_anchor_digest_route(
+    course_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """本人の帰属候補ダイジェスト（llm_candidate・confidence>=0.55・新しい順に最大3件）。
+
+    「この疑問は◯◯についてでしたか？」の確認カード用。confidence の数値は返さない。
+    セッション終了（20分無活動）後の未帰属の問いがあれば、ここで遅延起動する
+    （best-effort・非同期。今回のレスポンスには間に合わなくてよい）。
+    """
+    session = _pg_session()
+    try:
+        topic_rows = session.execute(
+            sa_text("""
+                SELECT DISTINCT topic_id FROM interest_traces
+                WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
+                  AND kind = 'question'
+                  AND payload->'structure_anchor' IS NULL
+                  AND payload->>'anchor_analyzed_at' IS NULL
+            """),
+            {"uid": current_user["id"], "cid": course_id},
+        ).fetchall()
+    except Exception:
+        topic_rows = []
+    finally:
+        session.close()
+    for (tid,) in topic_rows:
+        maybe_schedule_anchor_mining(current_user["id"], course_id, tid, session_end_check=True)
+
+    return get_anchor_digest(current_user["id"], course_id)
+
+
+@router.post("/anchors/{trace_id}/confirm")
+def confirm_anchor_route(
+    trace_id: str,
+    body: AnchorConfirmRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """帰属を本人が確定/訂正する: → attribution_source='confirmed'。
+
+    帰属を確定するのは人間であり、この操作だけが LLM 候補を帰属として確定する（P1）。
+    doubt_type / anchor_type / anchor_id を与えればその値で訂正して確定する。
+    帰属が未生成の痕跡（方法Cの1タップ申告）には segment 縮退の最小アンカーを作る。
+    """
+    result = confirm_anchor_trace(
+        current_user["id"], trace_id,
+        doubt_type=body.doubt_type,
+        anchor_type=body.anchor_type,
+        anchor_id=body.anchor_id,
+        anchor_label=body.anchor_label,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Anchor trace not found")
+    # D層 (D3-6): 確定した anchor が分野で明示化済みの前提に対応していれば、
+    # 事後に静かに併記する（通知しない・押し付けない。best-effort、失敗は無視）。
+    try:
+        from core.doubt.open_assumptions import related_confirmed_assumption
+        from core.postgres import get_session as _doubt_session
+
+        anchor = result.get("structure_anchor") or {}
+        anchor_id = str(anchor.get("anchor_id") or "")
+        if anchor_id:
+            _ds = _doubt_session()
+            try:
+                related = related_confirmed_assumption(_ds, anchor_id)
+            finally:
+                _ds.close()
+            if related:
+                result["related_assumption"] = related
+    except Exception:
+        logger.debug("related assumption lookup skipped", exc_info=True)
+    return {"ok": True, **result}
+
+
+@router.post("/anchors/{trace_id}/dismiss")
+def dismiss_anchor_route(
+    trace_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """本人が帰属候補を「違う」と判定: structure_anchor.status='dismissed'（保持する。P4）。
+
+    問い自体（行）は有効なまま残る。
+    """
+    result = dismiss_anchor_trace(current_user["id"], trace_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Anchor candidate not found")
     return {"ok": True, **result}
 
 

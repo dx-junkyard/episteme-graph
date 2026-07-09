@@ -37,11 +37,11 @@ class TestCasualModeRouting:
     def test_casual_bypasses_intent_classification(self):
         """CHIT_CHAT 拒否ルートを通らない（雑談を弾かない）。"""
         source = _read(LEARNING)
-        assert "None if _is_casual else (" in source
+        assert "None if (_is_casual or _atlas_ctx) else (" in source
 
     def test_casual_bypasses_prerequisite_gate(self):
         source = _read(LEARNING)
-        assert "None if _is_casual else check_prerequisites(" in source
+        assert "None if (_is_casual or _atlas_ctx) else check_prerequisites(" in source
 
     def test_casual_skips_visible_notice_but_keeps_guard(self):
         """OutOfSourceGuard の system 注入は維持し、可視プレフィックスのみ省略する。"""

@@ -1337,6 +1337,34 @@ def run_document_pipeline(
                 document_id, run_id, exc_info=True,
             )
         result.final_stage = "completed"
+        # D層 (D1-2): A層パイプライン完了後の後処理として認識的地位台帳を
+        # 決定論的にバックフィルする（読むだけ・best-effort・失敗しても pipeline は成功扱い）。
+        try:
+            from core.doubt.ledger_builder import backfill_document_ledger
+
+            backfill_document_ledger(document_id=document_id, course_id=course_id or "")
+        except Exception:
+            logger.warning(
+                "epistemic ledger backfill skipped for document=%s", document_id, exc_info=True
+            )
+        # D層 (D2-1): 負荷度の再計算（非LLM・決定論的, best-effort）。
+        try:
+            from core.doubt.load_calculator import recompute_load_scores
+
+            recompute_load_scores(document_id=document_id)
+        except Exception:
+            logger.warning(
+                "load score recompute skipped for document=%s", document_id, exc_info=True
+            )
+        # D層 (D1-4): 検証スコープ候補の非同期 LLM 補助（P6: 同期パスに LLM を入れない）。
+        try:
+            from core.doubt.scope_candidates.worker import maybe_schedule_scope_candidates
+
+            maybe_schedule_scope_candidates(document_id=document_id)
+        except Exception:
+            logger.warning(
+                "scope candidate scheduling skipped for document=%s", document_id, exc_info=True
+            )
         report_done("completed", {
             "chunks": result.chunk_count,
             "claims": result.claim_count,

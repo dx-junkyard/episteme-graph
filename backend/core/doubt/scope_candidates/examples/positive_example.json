@@ -1,0 +1,37 @@
+{
+  "description": "検証スコープ候補抽出の正例。出典に明示された適用条件だけを候補化する。",
+  "input": {
+    "target_type": "claim",
+    "target_id": "11111111-1111-1111-1111-111111111111",
+    "target_label": "有効結合定数は低エネルギー極限で一定値に収束する",
+    "source_blocks": [
+      {
+        "block_id": "S1",
+        "label": "claim 本文",
+        "text": "有効結合定数は低エネルギー極限で一定値に収束する"
+      },
+      {
+        "block_id": "S2",
+        "label": "evidence（原文）",
+        "text": "この収束は一次摂動の精度で、電磁相互作用の領域において確認されている。"
+      }
+    ]
+  },
+  "output": {
+    "candidates": [
+      {
+        "condition": "低エネルギー極限で",
+        "domain": "電磁相互作用の領域で",
+        "precision": "一次摂動の精度で",
+        "system": "",
+        "evidence_quote": "この収束は一次摂動の精度で、電磁相互作用の領域において確認されている。",
+        "reason": "evidence に精度と領域の限定が明示されている",
+        "confidence": 0.8
+      }
+    ]
+  },
+  "notes": [
+    "system 軸は出典に無いため空のまま（無理に埋めない）",
+    "『検証されている』という断定はどこにも出力しない（status は常に candidate）"
+  ]
+}

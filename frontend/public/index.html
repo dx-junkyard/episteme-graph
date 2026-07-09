@@ -8,6 +8,7 @@
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
   <link rel="stylesheet" href="/css/styles.css">
+  <link rel="stylesheet" href="/css/atlas.css">
 </head>
 <body>
   <div class="app">
@@ -24,6 +25,8 @@
         <span id="streak" style="color:var(--color-text-success)"></span>
         <span style="opacity:.3">|</span>
         <button id="groups-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="グループ管理">グループ <span id="groups-badge" style="display:none;background:var(--color-text-danger,#e53935);color:#fff;border-radius:8px;padding:1px 6px;margin-left:2px;font-size:10px">0</span></button>
+        <span style="opacity:.3">|</span>
+        <button id="atlas-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="分野の地図を開く">地図</button>
         <span style="opacity:.3">|</span>
         <span id="username"></span>
         <button id="logout-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit">ログアウト</button>
@@ -44,6 +47,8 @@
           <span class="material-here" id="material-here"></span>
           <button class="next-topic-btn" id="next-topic-btn" style="display:none" title="次のトピックへ進む">確認して次へ</button>
         </div>
+        <!-- 再構成ループ (R層): 「再構成に挑戦」導線。自動では開かない（本人が開く） -->
+        <div class="reconstruction-region" id="reconstruction-region" hidden></div>
       </div>
       <!-- 分割ハンドル: 教材区画と下段（読み上げ行＋ホワイトボード）の比率をドラッグで調整 -->
       <div class="split-handle" id="split-handle" title="ドラッグして教材の表示比率を調整"><span class="split-grip"></span></div>
@@ -126,5 +131,13 @@
   </div>
 
   <script src="/js/app.js"></script>
+  <script src="/js/atlas-fixture.js"></script>
+  <script src="/js/atlas-data.js"></script>
+  <script src="/js/atlas-overlay.js"></script>
+  <script src="/js/atlas-panel.js"></script>
+  <script src="/js/atlas-report.js"></script>
+  <script src="/js/atlas-minimap.js"></script>
+  <script src="/js/atlas-cues.js"></script>
+  <script src="/js/reconstruction.js"></script>
 </body>
 </html>
