@@ -15,6 +15,7 @@
     personalLayer: null, // personal_layer（個人の誤解・注釈データ）
     currentTopicId: null,
     chatMessages: [], // {role, content}
+    editingMessageId: null, // 機能3: 書き直し中の user メッセージ id（送信で replace_message_id として使う）
     topicMaterial: [], // {id, text, chunk_index, chapter, section}
     learningSupport: null, // {mode, status_label, origin}
     sending: false,
@@ -27,7 +28,22 @@
     interestTraces: null,   // L3: UnfinishedQuestionBox（mock）
     tensionDigest: null,    // 違和感ダイジェスト {items: [...]}（TensionMiningAgent Stage 2）
     tensionDeferred: {},    // [あとで] で今セッション中は隠す trace_id の集合
+    // ── 構造帰属（Structure-Anchored Questions） ──
+    anchorDigest: null,     // 帰属候補ダイジェスト {items: [...]}（StructureAnchorAgent Stage 2）
+    anchorDeferred: {},     // [あとで] で今セッション中は隠す trace_id の集合
+    pendingSelection: null, // 方法A: 「ここについて質問」で選択したテキスト {text, segment_id}
   };
+
+  // 構造帰属: 疑いの様相の1タップ選択肢（サーバの DOUBT_TYPE_LABELS と同語彙。
+  // unclassified は提示しない — 未選択のまま閉じれば unclassified が保たれる）。
+  var ANCHOR_DOUBT_OPTIONS = [
+    { doubt_type: "definition", label: "定義がわからない" },
+    { doubt_type: "justification_gap", label: "なぜ成り立つのか" },
+    { doubt_type: "premise", label: "前提への疑い" },
+    { doubt_type: "prior_conflict", label: "既有知識との衝突" },
+    { doubt_type: "scope", label: "どこまで成り立つのか" },
+    { doubt_type: "connection", label: "他とどう繋がるのか" },
+  ];
 
   // 🚧 Mock 検知: API レスポンスが mock データを含むか（_mock / mock の両方を許容）。
   function isMock(obj) {
@@ -195,6 +211,7 @@
       return;
     }
     if (overlay) return; // already showing
+    removeVersionNoticeBanner();  // ログアウト時に削除予定バナーを残さない
 
     overlay = document.createElement("div");
     overlay.id = "auth-overlay";
@@ -330,6 +347,79 @@
     }
   }
 
+  // ── 機能3: メッセージの書き直し・削除（以降を削除して再処理） ──────────
+  function _findMessageIndexById(msgId) {
+    for (var i = 0; i < state.chatMessages.length; i++) {
+      if (state.chatMessages[i].id === msgId) return i;
+    }
+    return -1;
+  }
+
+  // 書き直し開始: 対象 user メッセージ本文を入力欄に戻し、送信で以降を差し替える。
+  function startEditMessage(msgId) {
+    if (state.sending) return;
+    var idx = _findMessageIndexById(msgId);
+    if (idx === -1 || state.chatMessages[idx].role !== "user") return;
+    var input = document.getElementById("chat-input");
+    if (input) {
+      input.value = state.chatMessages[idx].content || "";
+      input.focus();
+    }
+    state.editingMessageId = msgId;
+    showEditIndicator();
+  }
+
+  function cancelEditMessage() {
+    state.editingMessageId = null;
+    var input = document.getElementById("chat-input");
+    if (input) input.value = "";
+    hideEditIndicator();
+  }
+
+  // 入力欄の直前に「書き直し中（送信すると以降を削除して作り直します）」バナーを出す。
+  function showEditIndicator() {
+    var input = document.getElementById("chat-input");
+    if (!input) return;
+    var el = document.getElementById("chat-edit-indicator");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "chat-edit-indicator";
+      el.className = "chat-edit-indicator";
+      input.parentNode.insertBefore(el, input);
+    }
+    el.innerHTML = '✏️ 書き直し中 — 送信するとこのメッセージ以降の会話を削除して作り直します ' +
+      '<button type="button" id="chat-edit-cancel" class="chat-edit-cancel">取消</button>';
+    var cancel = document.getElementById("chat-edit-cancel");
+    if (cancel) cancel.addEventListener("click", cancelEditMessage);
+  }
+
+  function hideEditIndicator() {
+    var el = document.getElementById("chat-edit-indicator");
+    if (el) el.remove();
+  }
+
+  // 削除: このメッセージ以降の往復を本人の履歴から取り除く（サーバ側で supersede）。
+  async function deleteMessageFrom(msgId) {
+    if (state.sending || !state.courseId || !state.currentTopicId) return;
+    if (!confirm("このメッセージ以降の会話を削除します。よろしいですか？")) return;
+    // 書き直し中の対象を消す場合は編集状態も解除
+    if (state.editingMessageId === msgId) cancelEditMessage();
+    var idx = _findMessageIndexById(msgId);
+    try {
+      const res = await apiFetch(
+        "/learning/courses/" + state.courseId + "/topics/" + state.currentTopicId +
+        "/chat/messages/" + encodeURIComponent(msgId),
+        { method: "DELETE" }
+      );
+      if (!res.ok) throw new Error("Delete failed");
+      if (idx !== -1) state.chatMessages = state.chatMessages.slice(0, idx);
+      renderChat();
+      renderRightPanel();
+    } catch (err) {
+      alert("メッセージの削除に失敗しました。");
+    }
+  }
+
   // ── Render: Sidebar ────────────────────────────────────────────────
   function renderSidebar() {
     const sb = document.getElementById("sidebar");
@@ -406,6 +496,10 @@
         selectTopic(tid);
       });
     });
+
+    // 分野の地図 (Issue F-1): 学習パスパネル下部の常設ミニマップ。
+    // 骨格を同梱したカートリッジでのみ表示される (なければ領域ごと非表示)。
+    if (window.AtlasMinimap) window.AtlasMinimap.mount(sb);
   }
 
   // ── Render: Chat ───────────────────────────────────────────────────
@@ -448,10 +542,27 @@
     }
 
     state.chatMessages.forEach(function (msg) {
+      // 「この問いに戻る」のジャンプ先アンカー（id を持つメッセージのみ）。
+      var idAttr = msg.id ? ' id="msg-' + escHtml(msg.id) + '"' : "";
       if (msg.role === "user") {
-        html += '<div class="mg usr">' + escHtml(msg.content) + "</div>";
+        var anchorChip = "";
+        // 構造帰属（方法A）: この問いが指した構造要素のチップ（learner_selected）
+        if (msg.structure_anchor && msg.structure_anchor.anchor_label) {
+          anchorChip = '<div style="font-size:11px;opacity:.75;margin-top:4px">📍 ' +
+            escHtml(msg.structure_anchor.anchor_label) + '</div>';
+        }
+        // 機能3: 書き直し（✏️）/ 以降削除（🗑）。id を持つメッセージのみ・送信中は出さない。
+        var msgActions = "";
+        if (msg.id && !state.sending) {
+          msgActions = '<div class="mg-actions">' +
+            '<button class="mg-act-btn" data-edit-msg="' + escHtml(msg.id) + '" title="このメッセージを書き直す">✏️</button>' +
+            '<button class="mg-act-btn" data-del-msg="' + escHtml(msg.id) + '" title="このメッセージ以降を削除">🗑</button>' +
+            '</div>';
+        }
+        html += '<div class="mg usr"' + idAttr + '>' + escHtml(msg.content) + anchorChip + msgActions + "</div>";
       } else {
-        html += '<div class="mg ai">' + renderAiContent(msg.content, msg) + "</div>";
+        html += '<div class="mg ai"' + idAttr + '>' + renderAiContent(msg.content, msg) +
+          renderAnchorConfirmPrompt(msg) + "</div>";
       }
     });
 
@@ -469,6 +580,29 @@
       el.addEventListener("click", function () { openSourcePopup(this); });
       el.addEventListener("keydown", function (e) {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openSourcePopup(this); }
+      });
+    });
+
+    // 構造帰属（方法C）: 回答末尾の1タップ様相選択（選択がそのまま帰属の確定になる）。
+    ca.querySelectorAll("[data-anchor-prompt-doubt]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var traceId = this.getAttribute("data-anchor-prompt-trace");
+        var doubt = this.getAttribute("data-anchor-prompt-doubt");
+        markAnchorPromptDone(traceId);
+        if (doubt) confirmAnchor(traceId, doubt);
+        renderChat();
+      });
+    });
+
+    // 機能3: メッセージの書き直し・削除ボタンを配線
+    ca.querySelectorAll("[data-edit-msg]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        startEditMessage(this.getAttribute("data-edit-msg"));
+      });
+    });
+    ca.querySelectorAll("[data-del-msg]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        deleteMessageFrom(this.getAttribute("data-del-msg"));
       });
     });
 
@@ -491,6 +625,9 @@
       });
     });
 
+    // 分野の地図 (Issue C-3): 学習パス提案カードの三択と「自分で繋ぐ」を配線
+    bindAtlasPathCards(ca);
+
     // Render KaTeX for any remaining raw LaTeX (fallback)
     if (window.renderMathInElement) {
       try {
@@ -509,6 +646,112 @@
     // 教材区画（本筋）とモードバー（現在地）を更新する。
     renderMaterialRegion();
     renderModeBar();
+  }
+
+  // ── 構造帰属（方法A）: 教材区画のテキスト選択 →「ここについて質問」 ──
+  // 選択テキストは次の1問にだけ selection_text として添えられ、learner_selected の
+  // 明示アンカー（ground truth）として同期記録される。
+
+  function clearPendingSelection() {
+    state.pendingSelection = null;
+    var chip = document.getElementById("anchor-selection-chip");
+    if (chip) chip.remove();
+  }
+
+  // 入力欄の直前に「選択中: …」チップを出す（解除可能）。
+  function showPendingSelectionChip() {
+    var input = document.getElementById("chat-input");
+    if (!input || !state.pendingSelection) return;
+    var chip = document.getElementById("anchor-selection-chip");
+    if (!chip) {
+      chip = document.createElement("div");
+      chip.id = "anchor-selection-chip";
+      chip.style.cssText =
+        "font-size:11px;padding:4px 8px;margin:0 0 4px;border-radius:6px;" +
+        "background:var(--color-bg-secondary,#f3f4f6);display:flex;align-items:center;gap:6px";
+      input.parentNode.insertBefore(chip, input);
+    }
+    var t = state.pendingSelection.text;
+    chip.innerHTML = '📍 ここについて質問: <span style="opacity:.8">' +
+      escHtml(t.length > 40 ? t.slice(0, 40) + "…" : t) + '</span>' +
+      '<button class="lx-ghost secondary" id="anchor-selection-clear" style="margin-left:auto">解除</button>';
+    chip.querySelector("#anchor-selection-clear").addEventListener("click", clearPendingSelection);
+  }
+
+  function hideSelectionAskButton() {
+    var b = document.getElementById("anchor-ask-btn");
+    if (b) b.remove();
+  }
+
+  // 教材区画（#material-body）内のテキスト選択にフローティングボタンを出す。
+  function initSelectionAnchor() {
+    if (document._anchorSelectionWired) return;
+    document._anchorSelectionWired = true;
+    document.addEventListener("mouseup", function () {
+      // click 直後に selection が確定するのを待つ
+      setTimeout(function () {
+        hideSelectionAskButton();
+        var body = document.getElementById("material-body");
+        var sel = window.getSelection();
+        var text = sel ? String(sel.toString() || "").trim() : "";
+        if (!body || !text || text.length < 4 || text.length > 300) return;
+        if (!sel.rangeCount) return;
+        var range = sel.getRangeAt(0);
+        if (!body.contains(range.commonAncestorContainer)) return;
+        var rect = range.getBoundingClientRect();
+        var btn = document.createElement("button");
+        btn.id = "anchor-ask-btn";
+        btn.textContent = "ここについて質問";
+        btn.style.cssText =
+          "position:fixed;z-index:1000;left:" + Math.round(rect.left) + "px;" +
+          "top:" + Math.round(rect.bottom + 6) + "px;font-size:12px;padding:4px 10px;" +
+          "border-radius:14px;border:1px solid var(--color-border,#ccc);" +
+          "background:var(--color-bg,#fff);box-shadow:0 2px 8px rgba(0,0,0,.15);cursor:pointer";
+        // mousedown で選択が消えるのを防ぐ
+        btn.addEventListener("mousedown", function (e) { e.preventDefault(); });
+        btn.addEventListener("click", function () {
+          var seg = (Session.currentAnchor() || {}).segment_id || 0;
+          state.pendingSelection = { text: text, segment_id: seg };
+          hideSelectionAskButton();
+          showPendingSelectionChip();
+          var input = document.getElementById("chat-input");
+          if (input) input.focus();
+        });
+        document.body.appendChild(btn);
+      }, 0);
+    });
+    document.addEventListener("mousedown", function (e) {
+      if (e.target && e.target.id === "anchor-ask-btn") return;
+      hideSelectionAskButton();
+    });
+  }
+
+  // 構造帰属（方法C）: 回答末尾の1タップ確認プロンプト。ゲート済み応答にのみ付く。
+  // 選択しないまま流しても問い自体は unclassified で保持される（P4/P7）。
+  function renderAnchorConfirmPrompt(msg) {
+    var ac = msg.anchor_confirm;
+    if (!ac || ac.done || !ac.trace_id) return "";
+    var tid = escHtml(ac.trace_id);
+    var html = '<div class="anchor-confirm" style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--color-border,#ccc);font-size:12px">';
+    html += '<div style="opacity:.8;margin-bottom:6px">この疑問はどれに近いですか？（任意・1タップ）</div>';
+    html += '<div style="display:flex;flex-wrap:wrap;gap:6px">';
+    (ac.options || ANCHOR_DOUBT_OPTIONS).forEach(function (o) {
+      html += '<button class="lx-ghost" data-anchor-prompt-trace="' + tid +
+        '" data-anchor-prompt-doubt="' + escHtml(o.doubt_type) + '">' + escHtml(o.label) + '</button>';
+    });
+    html += '<button class="lx-ghost secondary" data-anchor-prompt-trace="' + tid +
+      '" data-anchor-prompt-doubt="">スキップ</button>';
+    html += '</div></div>';
+    return html;
+  }
+
+  // 方法C のプロンプトを消化済みにする（再描画で出さない）。
+  function markAnchorPromptDone(traceId) {
+    state.chatMessages.forEach(function (m) {
+      if (m.anchor_confirm && m.anchor_confirm.trace_id === traceId) {
+        m.anchor_confirm.done = true;
+      }
+    });
   }
 
   // 教材区画（本筋・順路）: 教材本文を独立スクロール領域に描画する。
@@ -585,6 +828,10 @@
       });
     });
     updateNextTopicBtn();
+    // レクチャー中に教材が再描画されたら、直近の進捗位置へスクロールを戻す。
+    if (typeof lectureState !== "undefined" && lectureState.active) {
+      autoScrollMaterialToProgress(lectureState.lastOverallRatio);
+    }
   }
 
   // チャット区画のモードバー: 本筋（青）か寄り道（アンバー＋戻る）かを常時表示する。
@@ -737,6 +984,11 @@
       html += renderNextActions(msg.next_actions);
     }
 
+    // 分野の地図 (Issue C-3): 学習パス提案カード (§8)
+    if (msg && msg.atlas_path_card) {
+      html += renderAtlasPathCard(msg.atlas_path_card);
+    }
+
     // 回答内容の出所（教材/別の資料/モデル生成）と L1 信頼性（tier）を末尾に明示する。
     if (msg && (msg.content_grounding || msg.overall_tier)) {
       var bar = '<div class="answer-tier-bar">';
@@ -884,10 +1136,189 @@
           (e.title ? '<div style="font-weight:600">' + escHtml(e.title) + '</div>' : "") +
           '<div class="material-chunk-text">' + escHtml(e.body || "") + '</div></div>';
       }).join("");
+      // D層 (D3-6): 台帳の正直表示 — 検証状態を一行の事実として静かに併記
+      appendLearnerLedgerLine(body, "component", componentId);
     } catch (_) {
       const b = pop.querySelector(".src-popup-body");
       if (b) b.textContent = "サーバーに接続できません。";
     }
+  }
+
+  // D層 (D3-6): 対象 claim/equation/component の検証状態の一行事実文を併記する。
+  // 台帳未記帳 (404)・取得失敗時はセクション自体を出さない（fail-closed）。
+  // 検証済みスコープも未記帳も同じ精度で示す（§8-1・8-2 — 不安を煽らない中立文言）。
+  async function appendLearnerLedgerLine(container, targetType, targetId) {
+    if (!container || !targetId || !state.courseId) return;
+    try {
+      const res = await apiFetch("/learning/courses/" + state.courseId +
+        "/ledger/" + encodeURIComponent(targetType) + "/" + encodeURIComponent(targetId));
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data || !data.fact_line) return;
+      var text = data.fact_line;
+      var axes = (data.scopes || []).map(function (s) {
+        return [s.condition, s.domain, s.precision, s.system].filter(Boolean).join(" / ");
+      }).filter(Boolean);
+      if (axes.length > 1) text += "（記帳スコープ: " + axes.join("；") + "）";
+      var div = document.createElement("div");
+      div.style.cssText = "margin-top:8px;padding-top:6px;border-top:1px dashed var(--color-border,#ddd);" +
+        "font-size:12px;color:var(--color-text-secondary,#64748b)";
+      div.textContent = text;
+      container.appendChild(div);
+    } catch (_) { /* fail-closed */ }
+  }
+
+  // ── 分野の地図: 学習パス提案カード (Issue C-3, 仕様書 §8) ─────────────
+  // 表示規則: 各ステップに出所 (教材 / AI一般知識) と状態を明示。行間ステップは
+  // 「先生に聞くポイント」として質問テンプレートを添付。暗黙の前提は台帳状態を
+  // そのまま表示するのみ (評価しない)。終端は可能なら並置 + 「自分で繋ぐ」入力。
+  // 評価語・推薦理由・誘導文言は置かない。
+  var atlasCardSeq = 0;
+  var atlasPathCards = {}; // card_key → card (再描画・決定ハンドラ用)
+
+  function registerAtlasPathCard(card) {
+    if (!card) return null;
+    card.card_key = "apc-" + (++atlasCardSeq);
+    card.decision = card.decision || ""; // proceed/edit/dismiss 後の再描画用
+    atlasPathCards[card.card_key] = card;
+    return card;
+  }
+
+  function renderAtlasPathStep(step, isJuxta) {
+    var html = '<div class="atlas-path-step' + (step.is_gap ? " gap" : "") + '">';
+    html += '<span class="atlas-path-step-label">' + escHtml(step.label || "") + '</span>';
+    if (step.status_label) {
+      html += '<span class="atlas-path-badge">' + escHtml(step.status_label) + '</span>';
+    }
+    html += '<span class="atlas-path-badge ' +
+      (step.source === "model_knowledge" ? "src-model" : "src-material") + '">' +
+      escHtml(step.source_label || "") + '</span>';
+    if (step.is_gap && step.teacher_question) {
+      html += '<p class="atlas-path-teacherq">先生に聞くポイント: ' + escHtml(step.teacher_question) + '</p>';
+    } else if (step.ledger_note) {
+      html += '<p class="atlas-path-note">' + escHtml(step.ledger_note) + '</p>';
+    }
+    if (!isJuxta && step.visited_note) {
+      html += '<p class="atlas-path-note">' + escHtml(step.visited_note) + '</p>';
+    }
+    return html + "</div>";
+  }
+
+  function renderAtlasPathCard(card) {
+    var html = '<div class="atlas-path-card" data-card-key="' + escHtml(card.card_key || "") + '">';
+    html += '<div class="atlas-path-title">学習パスの候補 — 「' + escHtml((card.target || {}).label || "") + '」から</div>';
+    if (card.current_thread) {
+      html += '<div class="atlas-path-thread">いまの糸: ' + escHtml(card.current_thread) + '</div>';
+    }
+    (card.steps || []).forEach(function (step) { html += renderAtlasPathStep(step, false); });
+    (card.notes || []).forEach(function (note) {
+      html += '<p class="atlas-path-note">' + escHtml(note) + '</p>';
+    });
+
+    var terminal = card.terminal || {};
+    html += '<div class="atlas-path-terminal">';
+    if (terminal.mode === "juxtapose" && (terminal.pair || []).length === 2) {
+      // 並置: 2つの構造を黙って並べる。接続の言語化はしない (§8)
+      html += '<div class="atlas-path-juxta">';
+      terminal.pair.forEach(function (step) {
+        html += '<div class="atlas-path-juxta-cell">' + renderAtlasPathStep(step, true) + '</div>';
+      });
+      html += '</div>';
+    }
+    if (terminal.connect_input) {
+      html += '<div class="atlas-path-connect">'
+        + '<input type="text" class="atlas-path-connect-input" placeholder="自分で繋ぐ（自分の言葉で）">'
+        + '<button class="lx-ghost atlas-path-connect-save" type="button">記録する</button>'
+        + '</div>';
+      html += '<p class="atlas-path-connect-ack atlas-path-decided" style="display:none">自分の言葉で記録しました。</p>';
+    }
+    html += '</div>';
+
+    if (card.decision === "dismiss") {
+      html += '<p class="atlas-path-decided">この提案は閉じ、記録に残しました。</p>';
+    } else if (card.decision === "proceed") {
+      html += '<p class="atlas-path-decided">この糸で進んでいます。</p>';
+    } else {
+      html += '<div class="atlas-path-decisions">'
+        + '<button class="lx-ghost atlas-path-decide" data-decision="proceed" type="button">この糸で進む</button>'
+        + '<button class="lx-ghost secondary atlas-path-decide" data-decision="edit" type="button">編集する</button>'
+        + '<button class="lx-ghost secondary atlas-path-decide" data-decision="dismiss" type="button">今はやめる</button>'
+        + '</div>';
+    }
+    return html + "</div>";
+  }
+
+  // 三択 ([この糸で進む]/[編集する]/[今はやめる]) と「自分で繋ぐ」の記録。
+  // 却下 (今はやめる) も interest_traces に記録する — 情報を落とさない。
+  async function postAtlasPathDecision(card, decision, learnerText) {
+    try {
+      await apiFetch("/learning/courses/" + state.courseId + "/atlas/path-decision", {
+        method: "POST",
+        body: JSON.stringify({
+          node_id: (card.target || {}).node_id || "",
+          node_label: (card.target || {}).label || "",
+          level: card.level || 1,
+          skeleton_version: card.skeleton_version || "",
+          decision: decision,
+          learner_text: learnerText || "",
+          steps: (card.steps || []).map(function (s) { return s.label; }),
+          topic_id: state.currentTopicId || null,
+        }),
+      });
+    } catch (e) { /* best-effort: 記録失敗で操作は止めない */ }
+  }
+
+  function bindAtlasPathCards(container) {
+    container.querySelectorAll(".atlas-path-card").forEach(function (cardEl) {
+      var card = atlasPathCards[cardEl.getAttribute("data-card-key")];
+      if (!card) return;
+      cardEl.querySelectorAll(".atlas-path-decide").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var decision = this.getAttribute("data-decision");
+          postAtlasPathDecision(card, decision);
+          if (decision === "proceed") {
+            card.decision = "proceed";
+            var first = (card.steps || [])[0];
+            if (first) {
+              sendMessage("この学習パスで進めたい。まず「" + first.label + "」から説明して", {
+                atlas_context: {
+                  node_id: (card.target || {}).node_id || "",
+                  level: card.level || 1,
+                  skeleton_version: card.skeleton_version || "",
+                  action: "path_proceed",
+                  node_label: (card.target || {}).label || "",
+                },
+              });
+            } else {
+              renderChat();
+            }
+          } else if (decision === "edit") {
+            // 本人の言葉で編集して送る (§1.2-5): パスの文字列を入力欄に展開する
+            var input = document.getElementById("chat-input");
+            if (input) {
+              input.value = "この学習パスを編集したい: " +
+                (card.steps || []).map(function (s) { return s.label; }).join(" → ");
+              input.focus();
+            }
+          } else if (decision === "dismiss") {
+            card.decision = "dismiss";
+            renderChat();
+          }
+        });
+      });
+      var saveBtn = cardEl.querySelector(".atlas-path-connect-save");
+      if (saveBtn) {
+        saveBtn.addEventListener("click", function () {
+          var input = cardEl.querySelector(".atlas-path-connect-input");
+          var text = input ? input.value.trim() : "";
+          if (!text) return;
+          postAtlasPathDecision(card, "connect", text);
+          var ack = cardEl.querySelector(".atlas-path-connect-ack");
+          if (ack) ack.style.display = "";
+          if (input) input.value = "";
+        });
+      }
+    });
   }
 
   function renderNextActions(actions) {
@@ -1116,6 +1547,10 @@
     });
     el.querySelectorAll("[data-trace-return]").forEach(function (b) {
       b.addEventListener("click", function () {
+        // まず元の往復へジャンプ（前後の文脈ごと見返せる）。前後の会話次第で同じ問いに
+        // まともな答えが返る保証はないため、再送信は履歴に該当メッセージが無い場合の
+        // フォールバックに限定する。
+        if (jumpToChatMessage(this.getAttribute("data-trace-msg"))) return;
         var text = this.getAttribute("data-trace-return");
         if (text) sendMessage(text, Session.contextPayload());
       });
@@ -1152,6 +1587,28 @@
       b.addEventListener("click", function () {
         state.tensionDeferred[this.getAttribute("data-tension-defer")] = true;
         renderProgressTab();  // 今セッション中は隠すだけ（candidate のまま保持）
+      });
+    });
+    // 帰属候補の確認カード: [そう、これ] [違う] [あとで] + 様相の訂正チップ（P1）
+    el.querySelectorAll("[data-anchor-confirm]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        confirmAnchor(this.getAttribute("data-anchor-confirm"), "");
+      });
+    });
+    el.querySelectorAll("[data-anchor-correct]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        confirmAnchor(this.getAttribute("data-anchor-correct"), this.getAttribute("data-anchor-doubt"));
+      });
+    });
+    el.querySelectorAll("[data-anchor-dismiss]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        dismissAnchor(this.getAttribute("data-anchor-dismiss"));
+      });
+    });
+    el.querySelectorAll("[data-anchor-defer]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        state.anchorDeferred[this.getAttribute("data-anchor-defer")] = true;
+        renderProgressTab();  // 今セッション中は隠すだけ（llm_candidate のまま保持）
       });
     });
   }
@@ -1209,6 +1666,62 @@
     } catch (_) {
       state.tensionDigest = { items: [] };
     }
+  }
+
+  // ── 構造帰属（Structure-Anchored Questions）Stage 2: ダイジェスト・本人確定 ──
+
+  async function loadAnchorDigest() {
+    if (!state.courseId) return;
+    try {
+      var res = await apiFetch("/learning/courses/" + state.courseId + "/anchors/digest");
+      state.anchorDigest = res.ok ? await res.json() : { items: [] };
+    } catch (_) {
+      state.anchorDigest = { items: [] };
+    }
+  }
+
+  // 帰属を本人が確定/訂正する（doubtType は任意。空なら候補のまま確定）。
+  async function confirmAnchor(traceId, doubtType) {
+    try {
+      var res = await apiFetch(
+        "/learning/anchors/" + encodeURIComponent(traceId) + "/confirm",
+        { method: "POST", body: JSON.stringify({ doubt_type: doubtType || "" }) }
+      );
+      // D層 (D3-6): 確定した anchor が分野で明示化済みの前提に対応していれば、
+      // 事後に静かに併記する（通知・ポップアップにしない。帰属事実のみ）。
+      if (res && res.ok) {
+        var data = await res.json();
+        var related = data && data.related_assumption;
+        if (related && related.statement) {
+          appendSystemNote(
+            "この問いは、分野で明示化されている前提「" + related.statement + "」に関わっています。"
+          );
+        }
+      }
+    } catch (_) { /* best-effort */ }
+    await loadAnchorDigest();
+    loadInterestTraces();  // 確定した帰属は問いの軌跡のチップに現れる
+  }
+
+  // D層 (D3-6): チャット欄の末尾に静かな注記を 1 行足す（割り込み要素ゼロ）。
+  function appendSystemNote(text) {
+    var messages = document.getElementById("chat-area");
+    if (!messages || !text) return;
+    var div = document.createElement("div");
+    div.style.cssText = "font-size:12px;color:var(--color-text-tertiary,#94a3b8);margin:6px 12px";
+    div.textContent = text;
+    messages.appendChild(div);
+  }
+
+  async function dismissAnchor(traceId) {
+    try {
+      await apiFetch(
+        "/learning/anchors/" + encodeURIComponent(traceId) + "/dismiss",
+        { method: "POST", body: JSON.stringify({}) }
+      );
+    } catch (_) { /* best-effort */ }
+    await loadAnchorDigest();
+    renderProgressTab();
   }
 
   // 痕跡を「解決済み」にして問いの軌跡を再取得する（Stage 3）。
@@ -1378,7 +1891,46 @@
       html += "</div>";
     }
 
+    // D層 (D3-6): 未検証合意リストの閲覧（プル型・読み取り専用。開いた人だけが見る）
+    html += '<details class="ps" id="lx-open-assumptions"><summary style="cursor:pointer;font-size:12.5px;' +
+      'color:var(--color-text-secondary)">この分野の未検証の前提を見る</summary>' +
+      '<div id="lx-open-assumptions-body" style="font-size:12px;margin-top:6px">' +
+      '<span style="color:var(--color-text-tertiary)">開くと読み込みます…</span></div></details>';
+
     el.innerHTML = html;
+
+    var openDetails = el.querySelector("#lx-open-assumptions");
+    if (openDetails) {
+      openDetails.addEventListener("toggle", function () {
+        if (openDetails.open) loadLearnerOpenAssumptions();
+      });
+    }
+  }
+
+  // D層 (D3-6): 未検証合意リスト（読み取り専用・台帳の投影）。
+  // 台帳未記帳のコースでは何も出ない（fail-closed: セクションを畳んだまま空表示）。
+  async function loadLearnerOpenAssumptions() {
+    var body = document.getElementById("lx-open-assumptions-body");
+    if (!body || !state.courseId) return;
+    try {
+      const res = await apiFetch("/learning/courses/" + state.courseId + "/open-assumptions");
+      if (!res.ok) { body.textContent = "現在、表示できる項目はありません。"; return; }
+      const data = await res.json();
+      const items = (data && data.items) || [];
+      if (!items.length) { body.textContent = "現在、表示できる項目はありません。"; return; }
+      body.innerHTML = items.map(function (item) {
+        var line = escHtml(item.statement || item.target_id);
+        var meta = [];
+        if (item.scope_count_is_zero) meta.push("検証スコープの記帳なし");
+        else meta.push("検証: 記帳あり");
+        if (item.has_verification_proposal) meta.push("検証提案あり");
+        return '<div style="padding:6px 0;border-bottom:1px dashed var(--color-border,#eee)">' + line +
+          '<div style="color:var(--color-text-tertiary);font-size:11px;margin-top:2px">' +
+          escHtml(meta.join(" ・ ")) + '</div></div>';
+      }).join("");
+    } catch (_) {
+      body.textContent = "現在、表示できる項目はありません。";
+    }
   }
 
   // 全体格バナー用の小アイコン（tier色の丸＋!）。
@@ -1426,12 +1978,46 @@
     return html;
   }
 
+  // 帰属候補の確認カード:「この疑問は◯◯についてでしたか？」（確定は本人のみ。P1）。
+  // 様相チップをタップするとその doubt_type で訂正確定できる（自己説明の入口。方法C と連続）。
+  function renderAnchorDigestCard() {
+    var digest = state.anchorDigest;
+    if (!digest || !Array.isArray(digest.items)) return "";
+    var item = null;
+    for (var i = 0; i < digest.items.length; i++) {
+      if (!state.anchorDeferred[digest.items[i].trace_id]) { item = digest.items[i]; break; }
+    }
+    if (!item) return "";
+    var tid = escHtml(item.trace_id);
+    var html = '<div class="lx-revisit lx-anchor" data-anchor-card="' + tid + '">';
+    html += '<div class="k">疑問の在り処' + (item.context_label ? ' · ' + escHtml(item.context_label) : '') + '</div>';
+    html += '<div class="h">この疑問は「' + escHtml(item.anchor_label || item.anchor_type_label || "") +
+      '」の<b>' + escHtml(item.doubt_type_label || "") + '</b>についてでしたか？</div>';
+    html += '<div class="s">『' + escHtml(item.question_text || "") + '』</div>';
+    html += '<div class="lx-trace-actions" style="margin-top:8px">';
+    html += '<button class="lx-ghost" data-anchor-confirm="' + tid + '">そう、これ</button>';
+    html += '<button class="lx-ghost secondary" data-anchor-dismiss="' + tid + '">違う</button>';
+    html += '<button class="lx-ghost secondary" data-anchor-defer="' + tid + '">あとで</button>';
+    html += '</div>';
+    // 様相の訂正チップ（提案と違う様相ならタップで訂正確定）
+    html += '<div class="lx-trace-actions" style="margin-top:6px;flex-wrap:wrap">';
+    ANCHOR_DOUBT_OPTIONS.forEach(function (o) {
+      if (o.doubt_type === item.doubt_type) return;
+      html += '<button class="lx-ghost secondary" data-anchor-correct="' + tid +
+        '" data-anchor-doubt="' + escHtml(o.doubt_type) + '">' + escHtml(o.label) + '</button>';
+    });
+    html += '</div></div>';
+    return html;
+  }
+
   function renderProblemTrails() {
     var data = state.interestTraces;
     var html = '<div class="progress-head" style="margin:18px 0 8px"><h3 style="font-size:14px">問いの軌跡</h3></div>';
 
     // 違和感ダイジェスト（候補は本人の確定までダイジェスト経由でのみ提示する）
     html += renderTensionDigestCard();
+    // 帰属候補の確認カード（llm_candidate は本人の確定までここでのみ提示する。P1）
+    html += renderAnchorDigestCard();
 
     if (!data) {
       html += '<p class="lx-note" style="margin-top:0">読み込み中…</p>';
@@ -1475,10 +2061,18 @@
       html += '<span class="lx-status-tag ' + sm.cls + '">' + escHtml(sm.label) + '</span></div>';
       html += '<div class="lx-trace-text">' + escHtml(t.text || "") + '</div>';
       if (t.context_label) html += '<div class="lx-trace-ctx">' + escHtml(t.context_label) + '</div>';
+      // 構造帰属チップ: 「どこに・どう引っかかったか」（確定済みのみサーバが返す）
+      if (t.structure_anchor && (t.structure_anchor.anchor_label || t.structure_anchor.doubt_type_label)) {
+        html += '<div class="lx-trace-ctx" style="margin-top:2px">📍 ' +
+          escHtml(t.structure_anchor.anchor_label || t.structure_anchor.anchor_type_label || "") +
+          (t.structure_anchor.doubt_type !== "unclassified"
+            ? ' · ' + escHtml(t.structure_anchor.doubt_type_label || "") : '') +
+          '</div>';
+      }
       // アクション。「この問いに戻る」「解決済みにする」は実データ配線済み（Stage 3）。
       if (t.status !== "resolved") {
         html += '<div class="lx-trace-actions">';
-        html += '<button class="lx-ghost" data-trace-return="' + escHtml(t.text || "") + '">この問いに戻る</button>';
+        html += '<button class="lx-ghost" data-trace-return="' + escHtml(t.text || "") + '" data-trace-msg="' + escHtml(t.message_id || "") + '">この問いに戻る</button>';
         html += '<button class="lx-ghost secondary" data-trace-resolve="' + escHtml(t.id || "") + '">解決済みにする</button>';
         // Internalization Prompt: 「なぜ自分に重要か」を言語化させ payload に保存（内発的動機の支援）。
         html += '<button class="lx-ghost secondary" data-trace-why="' + escHtml(t.id || "") + '">なぜ気になった？</button>';
@@ -1519,6 +2113,10 @@
     // 違和感ダイジェスト（次回ログイン時の提示。会話への割り込みはしない）
     if (state.tensionDigest === null) {
       await loadTensionDigest();
+    }
+    // 帰属候補ダイジェスト（同上。確認カードは進捗タブでのみ提示する）
+    if (state.anchorDigest === null) {
+      await loadAnchorDigest();
     }
     renderProgressTab();
     updateProgressTabDot();
@@ -1587,6 +2185,19 @@
       if (origin && (origin.segment_id || origin.scroll_offset)) {
         Session.restorePosition(origin);
       }
+      // 分野の地図 (Issue F-2 導線3): 寄り道から戻った文脈で「地図で現在地を見る」
+      // を提示する。開いたときは戻った位置をハイライトする (§3-4)。
+      var destTopic = (state.course && state.course.topics || [])
+        .find(function (t) { return t.id === dest; });
+      if (window.AtlasCues && destTopic) {
+        window.AtlasCues.showCue("detour_return", {
+          container: document.getElementById("chat-area"),
+          text: "寄り道から「" + destTopic.title + "」へ戻りました。",
+          focusTopicId: destTopic.id,
+          focusLabel: destTopic.title,
+          highlight: true,
+        });
+      }
     }
   }
 
@@ -1606,12 +2217,28 @@
     }
     state.currentTopicId = topicId;
     state.chatMessages = [];
+    state.editingMessageId = null; // 機能3: トピック切替で書き直し状態を解除
+    hideEditIndicator();
     state.topicMaterial = [];
+    // 分野の地図 (gap3): course/topic の文脈を配線し、地図データを正しいカートリッジ・
+    // 現在地で取得できるようにする (AtlasData / AtlasMinimap / AtlasCues が参照)。
+    var _topicForAtlas = (state.course && (state.course.topics || []).find(function (t) {
+      return t.id === topicId;
+    })) || null;
+    window.AtlasContext = {
+      courseId: state.courseId || "",
+      topicId: topicId || "",
+      topicLabel: _topicForAtlas ? (_topicForAtlas.title || "") : "",
+    };
     renderSidebar();
     renderChat();
     renderRightPanel();
     updateNextTopicBtn();
     refreshLectureAvailability();
+    // 分野の地図 (Issue F-1): ミニマップはトピック遷移時に再取得する (ポーリングしない)
+    if (window.AtlasMinimap) window.AtlasMinimap.refresh();
+    // 再構成ループ (R層): トピックの文脈を配線する。自動割り込みはしない（本人が開く）。
+    if (window.Reconstruction) window.Reconstruction.setContext(state.courseId || "", topicId || "");
 
     if (state.courseId && topicId) {
       // 教材チャンクとチャット履歴を並行取得
@@ -1650,6 +2277,26 @@
         : [],
       explanation: item.explanation || item.rationale || "",
     };
+  }
+
+  // 分野の地図 (Issue F-2 導線1・2): トピック完了直後の「見晴らしの瞬間」。
+  // 完了が章の最後のトピックなら章末 (chapter_end)、それ以外は topic_complete。
+  // カードの提示に留め、地図を自動で開かない。抑制ルールは AtlasCues 側が持つ。
+  function showAtlasCueAfterAdvance(completedTopic, nextTopic) {
+    if (!window.AtlasCues || !completedTopic) return;
+    var crossedChapter = nextTopic &&
+      completedTopic.chapter_index !== nextTopic.chapter_index;
+    var chapters = (state.course && state.course.chapters) || [];
+    var chapterTitle = (chapters[completedTopic.chapter_index] || {}).title || "";
+    window.AtlasCues.showCue(crossedChapter ? "chapter_end" : "topic_complete", {
+      container: document.getElementById("chat-area"),
+      text: crossedChapter
+        ? "章「" + (chapterTitle || completedTopic.title) + "」を終えました。"
+        : "「" + completedTopic.title + "」を確認しました。",
+      // gap2: focus はサーバ側 (binding) 解決を優先する。id を渡し、title はラベル縮退用。
+      focusTopicId: completedTopic.id,
+      focusLabel: completedTopic.title,
+    });
   }
 
   function openCheckModal() {
@@ -1692,10 +2339,14 @@
     var submitBtn = document.getElementById("check-submit");
     if (submitBtn && submitBtn.getAttribute("data-advance") === "true") {
       var directNext = getNextTopic();
+      var directCompleted = getCurrentTopic();
       var directOverlay = document.getElementById("check-overlay");
       if (directOverlay) directOverlay.remove();
       // 前進は再アンカー（selectTopic 既定で detour を閉じ、レクチャー中なら終了する）。
-      if (directNext) selectTopic(directNext.id);
+      if (directNext) {
+        await selectTopic(directNext.id);
+        showAtlasCueAfterAdvance(directCompleted, directNext);
+      }
       return;
     }
     var answer = answerEl ? answerEl.value.trim() : "";
@@ -1726,10 +2377,15 @@
       var data = await res.json();
       if (data.passed) {
         var next = getNextTopic();
+        var completedTopic = getCurrentTopic();
         var overlay = document.getElementById("check-overlay");
         if (overlay) overlay.remove();
         // 合格 → 次トピックへ再アンカー。detour 残はここで自動的に解消される。
-        if (next) selectTopic(next.id);
+        if (next) {
+          await selectTopic(next.id);
+          // 分野の地図 (Issue F-2 導線1・2): 完了直後に「地図で現在地を見る」を提示
+          showAtlasCueAfterAdvance(completedTopic, next);
+        }
       } else {
         if (feedbackEl) {
           feedbackEl.innerHTML = '<strong>もう一度確認しましょう。</strong><br>' +
@@ -1763,7 +2419,21 @@
     if (!text || state.sending || !state.currentTopicId) return null;
     let respData = null;  // 音声会話モードが answer/sources を使うため応答を返す
 
-    state.chatMessages.push({ role: "user", content: text });
+    // 機能3（書き直し）: _replace_message_id が指定されていれば、その往復以降を
+    // クライアント履歴から取り除いてから新しいターンを積む。サーバへは replace_message_id を
+    // 送り、サーバ正本の履歴も同位置で切り詰め・派生痕跡を supersede させる。
+    let replaceMessageId = null;
+    if (actionPayload && actionPayload._replace_message_id) {
+      replaceMessageId = actionPayload._replace_message_id;
+      delete actionPayload._replace_message_id;
+      const ri = _findMessageIndexById(replaceMessageId);
+      if (ri !== -1) state.chatMessages = state.chatMessages.slice(0, ri);
+    }
+
+    // クライアントで採番し、サーバ永続履歴・関心痕跡と同じ id を in-memory にも持たせる
+    // （「この問いに戻る」でこの往復へジャンプするためのアンカー）。
+    const userMsgId = genMsgId();
+    state.chatMessages.push({ role: "user", content: text, id: userMsgId });
     state.sending = true;
     renderChat();
 
@@ -1776,14 +2446,22 @@
     const payload = Object.assign({}, Session.contextPayload(), actionPayload || {});
     // L2: いまの読み位置（segment/scroll）。寄り道に入る瞬間の origin に正確に焼き込む。
     const anchorAtAsk = Session.currentAnchor();
+    // 構造帰属（方法A）: 「ここについて質問」で選択したテキストをこの1問にだけ添える。
+    if (state.pendingSelection && !payload.selection_text) {
+      payload.selection_text = state.pendingSelection.text;
+      payload.selection_segment_id = state.pendingSelection.segment_id;
+    }
+    clearPendingSelection();
 
     try {
       const res = await apiFetch("/learning/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/chat", {
         method: "POST",
         body: JSON.stringify({
           message: text,
+          message_id: userMsgId,
           history: state.chatMessages.slice(0, -1),
           position_anchor: anchorAtAsk,
+          ...(replaceMessageId ? { replace_message_id: replaceMessageId } : {}),
           ...payload,
         }),
       });
@@ -1801,6 +2479,15 @@
         state.lastSources = data.sources || [];
         state.lastOverallTier = data.overall_tier || null;
         state.lastGrounding = data.content_grounding || null;
+        // 構造帰属（方法A）: 同期記録された明示アンカーを発話バブルのチップに反映する。
+        if (data.structure_anchor) {
+          for (let i = state.chatMessages.length - 1; i >= 0; i--) {
+            if (state.chatMessages[i].id === userMsgId) {
+              state.chatMessages[i].structure_anchor = data.structure_anchor;
+              break;
+            }
+          }
+        }
         state.chatMessages.push({
           role: "assistant",
           content: data.answer,
@@ -1813,6 +2500,10 @@
           content_grounding: data.content_grounding || null,
           sources: data.sources || [],
           position_anchor: data.position_anchor || null,
+          // 分野の地図 (Issue C-3): 学習パス提案カード
+          atlas_path_card: registerAtlasPathCard(data.atlas_path_card),
+          // 構造帰属（方法C）: 回答末尾の1タップ確認プロンプト（ゲート済みのときのみ）
+          anchor_confirm: data.anchor_confirm || null,
           mock: isMock(data),
         });
         // Issue #145: 個人レイヤーの更新を反映する
@@ -1877,6 +2568,14 @@
       var text = input.value.trim();
       if (!text) return;
       if (mode === "on_path") Session.clearDetour();
+      // 機能3: 書き直し中なら replace_message_id を添えて以降を差し替える
+      if (state.editingMessageId) {
+        var replaceId = state.editingMessageId;
+        state.editingMessageId = null;
+        hideEditIndicator();
+        sendMessage(text, { intent_mode: mode, _replace_message_id: replaceId });
+        return;
+      }
       sendMessage(text, { intent_mode: mode });
     }
 
@@ -2286,6 +2985,7 @@
   }
 
   function showNoCourseState(hasEnrollable = false) {
+    removeVersionNoticeBanner();
     const select = document.getElementById("course-select");
     if (!hasEnrollable) {
       select.innerHTML = '<option value="">コースなし</option>';
@@ -2319,6 +3019,40 @@
     if (clearBtn) clearBtn.disabled = !enabled || !state.currentTopicId || state.chatMessages.length === 0;
   }
 
+  // V層（migration 037）: 受講中コースが削除予約されていれば猶予バナーを表示する。
+  // 学習者は版に追従（opt-in 取り込みは教員向け）。fail-open: 取得失敗時は何もしない。
+  async function showVersionNoticeBanner(courseId) {
+    const existing = document.getElementById("vg-learner-banner");
+    if (existing) existing.remove();
+    let notice = null;
+    try {
+      const res = await apiFetch("/learning/courses/" + courseId + "/version-notice");
+      if (res.ok) notice = await res.json();
+    } catch (_) { return; }
+    if (!notice || notice.lifecycle !== "pending_deletion") return;
+    const when = notice.delete_purge_after ? new Date(notice.delete_purge_after) : null;
+    const whenText = when && !isNaN(when.getTime())
+      ? when.getFullYear() + "/" + (when.getMonth() + 1) + "/" + when.getDate()
+      : "";
+    const banner = document.createElement("div");
+    banner.id = "vg-learner-banner";
+    banner.style.cssText = "background:#fdecea;color:#8a1c1c;border:1px solid #e0a0a0;border-radius:6px;padding:10px 14px;margin:8px;font-size:13px";
+    // whenText 欠落時に「近日中に以降に」とならないよう、期限の有無で語句を組み立てる。
+    const lead = whenText ? (whenText + " 以降に") : "近日中に";
+    banner.textContent = "このコースは" + lead +
+      "削除される予定です。それまでは通常どおり学習できます。" +
+      (notice.delete_reason ? "（理由: " + notice.delete_reason + "）" : "");
+    // index.html に <main>/#app は無い。学習ビューの主カラム .mn に載せ、
+    // コース離脱時（showNoCourseState / renderAuth）に確実に除去して他画面へ残さない。
+    const host = document.querySelector(".mn") || document.querySelector(".app") || document.body;
+    host.insertBefore(banner, host.firstChild);
+  }
+
+  function removeVersionNoticeBanner() {
+    const b = document.getElementById("vg-learner-banner");
+    if (b) b.remove();
+  }
+
   async function loadAndRenderCourse() {
     const courseData = await loadCourse(state.courseId);
     if (!courseData) return;
@@ -2328,6 +3062,7 @@
     state.course = courseData.master;
     state.personalLayer = courseData.personal;
     loadLearningSupportContext();
+    showVersionNoticeBanner(state.courseId);
     if (progress) state.course.progress = progress;
 
     const course = state.course;
@@ -2365,6 +3100,24 @@
   function escHtml(s) {
     if (!s) return "";
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  // クライアント側でメッセージ id を採番する。サーバへ送って永続履歴・関心痕跡に焼き込み、
+  // 「この問いに戻る」で該当往復へジャンプできるようにする。
+  function genMsgId() {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    return "m-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+  }
+
+  // 指定 id のチャットメッセージへスクロール＋一時ハイライトする。DOM に無ければ false。
+  function jumpToChatMessage(msgId) {
+    if (!msgId) return false;
+    var elm = document.getElementById("msg-" + msgId);
+    if (!elm) return false;
+    elm.scrollIntoView({ behavior: "smooth", block: "center" });
+    elm.classList.add("mg-highlight");
+    setTimeout(function () { elm.classList.remove("mg-highlight"); }, 2400);
+    return true;
   }
 
   // ── Logout ───────────────────────────────────────────────────────
@@ -2415,6 +3168,7 @@
     setupRoleUI();
     initTabs();
     initInput();
+    initSelectionAnchor();
     initLogout();
     initGroups();
     await initCourseSelector();
@@ -2616,8 +3370,11 @@
   }
 
   // ── Expose sendPrompt globally for inline onclick ──────────────────
-  window.sendPrompt = function (text) {
-    sendMessage(text);
+  // 第2引数 payload は分野の地図 (Issue C-2) の構造化ペイロード
+  // ({atlas_context: {node_id, level, skeleton_version, action, ...}}) などを
+  // チャット API へそのまま引き渡すためのもの (自由文のみに依存しない)。
+  window.sendPrompt = function (text, payload) {
+    sendMessage(text, payload);
   };
 
   // ── Interactive Lecture Mode (Issue #66) ───────────────────────────
@@ -2632,6 +3389,8 @@
     highlightTimer: null,
     voiceRecognition: null,
     loadingAudio: false, // TTS フェッチ中フラグ（連打による多重再生を防ぐ）
+    readingSentence: -1, // 現在読み上げ中の文インデックス（-1 = 未設定）
+    lastOverallRatio: 0, // レクチャー全体の進捗（教材の自動スクロール位置に使う）
   };
 
   // 現トピックに再生可能な音声があるかを確認し、レクチャーボタンの有効/無効を更新する。
@@ -2691,6 +3450,8 @@
     if (playBtn) playBtn.addEventListener("click", togglePlayPause);
     if (prevBtn) prevBtn.addEventListener("click", prevSegment);
     if (nextBtn) nextBtn.addEventListener("click", nextSegment);
+    // レクチャー中は下段（チャット）を畳んでいるため、質問はフローティングの
+    // 割込みポップアップで受ける（講義を一時停止して開く）。
     if (questionBtn) questionBtn.addEventListener("click", openInterruptChat);
     if (chatCloseBtn) chatCloseBtn.addEventListener("click", closeInterruptChat);
     if (chatSendBtn) chatSendBtn.addEventListener("click", sendInterruptMessage);
@@ -2762,48 +3523,39 @@
     recognition.start();
   }
 
-  // レクチャーモードを終了してテキスト表示へ戻す（トグル・トピック切替の両方から使う）。
+  // レクチャーモードを終了して通常表示へ戻す（トグル・トピック切替の両方から使う）。
+  // レクチャー中は下段（チャット/ホワイトボード）と分割ハンドルを畳んでいるので、
+  // ここでその畳み（.lecture-on）を解除し、専用UIの後片付けを行う。
   function deactivateLecture() {
     if (!lectureState.active) return;
     var toggleBtn = document.getElementById("lecture-toggle");
-    var chatArea = document.getElementById("chat-area");
-    var lectureContent = document.getElementById("lecture-content");
     var lecturePlayer = document.getElementById("lecture-player");
-    var chatInput = document.getElementById("chat-input");
-    var sendBtn = document.getElementById("send-btn");
+    var mn = document.querySelector(".mn");
 
     lectureState.active = false;
     stopPlayback();
     closeInterruptChat();
+    if (mn) mn.classList.remove("lecture-on");
     if (toggleBtn) {
       toggleBtn.classList.remove("active");
       toggleBtn.innerHTML = "&#127897; レクチャー";
     }
-    if (chatArea) chatArea.style.display = "";
-    if (lectureContent) lectureContent.classList.remove("visible");
+    hideLectureCaption();
+    lectureState.lastOverallRatio = 0;
+    var banner = document.getElementById("lecture-complete-banner");
+    if (banner) banner.remove();
     if (lecturePlayer) {
       lecturePlayer.classList.remove("visible");
       lecturePlayer.style.display = "";
     }
-    if (chatInput) chatInput.style.display = "";
-    if (sendBtn) sendBtn.style.display = "";
-    var mrOff = document.getElementById("material-region");
-    var mbOff = document.getElementById("mode-bar");
-    var voiceOff = document.getElementById("voice-mode-btn");
-    if (mrOff) mrOff.style.display = "";
-    if (mbOff) mbOff.style.display = "";
-    if (voiceOff) voiceOff.style.display = "";
     renderModeBar();
     updateLectureToggleAvailability();
   }
 
   async function toggleLectureMode() {
     var toggleBtn = document.getElementById("lecture-toggle");
-    var chatArea = document.getElementById("chat-area");
-    var lectureContent = document.getElementById("lecture-content");
     var lecturePlayer = document.getElementById("lecture-player");
-    var chatInput = document.getElementById("chat-input");
-    var sendBtn = document.getElementById("send-btn");
+    var mn = document.querySelector(".mn");
 
     if (lectureState.active) {
       deactivateLecture();
@@ -2821,20 +3573,15 @@
       return;
     }
 
-    // Activate lecture mode
+    // Activate lecture mode。上段の教材をいっぱいに広げ、いま再生中の場所を
+    // 教材内で強調表示する。中段に読み上げ中の行（キャプション）を出し、
+    // 下段（チャット/ホワイトボード）と分割ハンドルは .lecture-on で畳む。
     lectureState.active = true;
+    lectureState.lastOverallRatio = 0;
+    if (mn) mn.classList.add("lecture-on");
     toggleBtn.classList.add("active");
-    toggleBtn.innerHTML = "&#128196; テキスト";
-    chatArea.style.display = "none";
-    chatInput.style.display = "none";
-    sendBtn.style.display = "none";
-    var mrOn = document.getElementById("material-region");
-    var mbOn = document.getElementById("mode-bar");
-    var voiceOn = document.getElementById("voice-mode-btn");
-    if (mrOn) mrOn.style.display = "none";
-    if (mbOn) mbOn.style.display = "none";
-    if (voiceOn) voiceOn.style.display = "none";
-    lectureContent.classList.add("visible");
+    toggleBtn.innerHTML = "&#9209; レクチャー終了";
+    showLectureCaption();
     lecturePlayer.classList.add("visible");
 
     // Ensure player is actually visible (override any CSS hiding)
@@ -2851,20 +3598,63 @@
         await startPlayback();
       }
     } catch (err) {
-      _restoreChatUI();
+      // 読み込み失敗はキャプションにエラー表示済み。レクチャーUIは開いたままにして、
+      // 学習者がトグルで通常表示へ戻れるようにする。
     }
   }
 
-  function _restoreChatUI() {
-    var chatInput = document.getElementById("chat-input");
-    var sendBtn = document.getElementById("send-btn");
-    if (chatInput) chatInput.style.display = "";
-    if (sendBtn) sendBtn.style.display = "";
+  // ── 教材の進捗連動オートスクロール ─────────────────────────────
+  // 上段の教材（student_material）とレクチャーの読み上げ（原文チャンク）は
+  // 別内容で厳密な位置対応が無いため、レクチャー全体の進捗比率に合わせて
+  // 教材ビューをおおまかに自動スクロールし、「いまこのあたり」を示す。
+  function autoScrollMaterialToProgress(overallRatio) {
+    if (!lectureState.active) return;
+    var r = Math.max(0, Math.min(1, overallRatio || 0));
+    lectureState.lastOverallRatio = r;
+    var body = document.getElementById("material-body");
+    if (!body) return;
+    var scrollable = body.scrollHeight - body.clientHeight;
+    if (scrollable <= 0) return;
+    body.scrollTop = r * scrollable;
+  }
+
+  // 現在の再生位置（セグメント index + セグメント内比率）からレクチャー全体の
+  // 進捗比率を求める。segmentRatio は音声の再生位置（0〜1、無ければ 0）。
+  function overallLectureRatio(segmentRatio) {
+    var total = lectureState.segments.length || 1;
+    var within = Math.max(0, Math.min(1, segmentRatio || 0));
+    return (lectureState.currentSegmentIndex + within) / total;
+  }
+
+  // ── レクチャーキャプション（読み上げ中の文の表示）───────────────
+  function showLectureCaption() {
+    var cap = document.getElementById("lecture-caption");
+    if (cap) cap.classList.add("visible");
+  }
+
+  function hideLectureCaption() {
+    var cap = document.getElementById("lecture-caption");
+    if (cap) {
+      cap.classList.remove("visible");
+      cap.classList.remove("warn");
+    }
+    setLectureCaption("");
+  }
+
+  // キャプション本文を差し替える。html=true のとき（数式込みの文の複製）以外は
+  // テキストとして扱う。warn は自動再生ブロックなどの注意表示に使う。
+  function setLectureCaption(content, opts) {
+    opts = opts || {};
+    var cap = document.getElementById("lecture-caption");
+    var textEl = document.getElementById("lecture-caption-text");
+    if (!textEl) return;
+    if (opts.html) textEl.innerHTML = content;
+    else textEl.textContent = content;
+    if (cap) cap.classList.toggle("warn", !!opts.warn);
   }
 
   async function loadLectureSequence() {
-    var lectureContent = document.getElementById("lecture-content");
-    lectureContent.innerHTML = '<div class="mg ai"><div class="typing"><span></span><span></span><span></span></div></div>';
+    setLectureCaption("レクチャーを読み込み中…");
 
     try {
       var res = await apiFetch(
@@ -2874,18 +3664,25 @@
       var data = await res.json();
       lectureState.segments = data.segments || [];
       lectureState.currentSegmentIndex = 0;
+      lectureState.lastOverallRatio = 0;
       renderLectureContent();
       updateLectureControls();
     } catch (err) {
-      lectureContent.innerHTML = '<div class="mg ai" style="color:var(--color-text-danger)">レクチャーシーケンスの読み込みに失敗しました。</div>';
-      _restoreChatUI();
+      setLectureCaption("レクチャーシーケンスの読み込みに失敗しました。", { warn: true });
+      throw err;
     }
   }
 
+  // セグメント本文は非表示のステージング領域（#lecture-content）に描画する。
+  // 画面には出さず、文分割（annotateSentences）と KaTeX 描画済みDOMの供給源として使い、
+  // 読み上げ中の文だけをキャプションへ複製表示する。
   function renderLectureContent() {
     var lectureContent = document.getElementById("lecture-content");
+    // 新しく描画するたびに読み上げ追従状態はリセットする（DOM が作り直されるため）。
+    lectureState.readingSentence = -1;
     if (!lectureState.segments.length) {
-      lectureContent.innerHTML = '<div class="mg ai" style="color:var(--color-text-tertiary)">このトピックにはレクチャーコンテンツがありません。</div>';
+      lectureContent.innerHTML = "";
+      setLectureCaption("このトピックにはレクチャーコンテンツがありません。");
       return;
     }
 
@@ -2914,9 +3711,9 @@
       } catch (e) { /* ignore */ }
     }
 
-    // Scroll to current segment
-    var currentEl = lectureContent.querySelector(".lecture-segment.current");
-    if (currentEl) currentEl.scrollIntoView({ behavior: "smooth", block: "center" });
+    // キャプションを現セグメントの先頭文で初期化し、教材も進捗位置へスクロールする
+    // （updateReadingHighlight 内で autoScrollMaterialToProgress を呼ぶ）。
+    updateReadingHighlight(0);
   }
 
   function renderSegmentContent(seg) {
@@ -2960,6 +3757,123 @@
     }
 
     return text;
+  }
+
+  // 描画済みセグメント内のプレーンテキストを文単位の <span> に包む。
+  // 音声再生位置に合わせて「読んでいるところ」を最小限ハイライトするための下ごしらえ。
+  // KaTeX（数式）配下のテキストは対象外にして数式描画を壊さない。
+  function annotateSentences(segEl) {
+    if (!segEl || segEl.getAttribute("data-sentences-annotated")) return;
+
+    var textNodes = [];
+    var walker = document.createTreeWalker(segEl, NodeFilter.SHOW_TEXT, null);
+    var node;
+    while ((node = walker.nextNode())) {
+      if (!node.nodeValue || !node.nodeValue.replace(/\s/g, "")) continue;
+      var skip = false;
+      var p = node.parentNode;
+      while (p && p !== segEl) {
+        if (p.nodeType === 1 && p.className && /katex|lecture-formula/.test(p.className)) {
+          skip = true;
+          break;
+        }
+        p = p.parentNode;
+      }
+      if (!skip) textNodes.push(node);
+    }
+
+    var idx = 0;
+    textNodes.forEach(function (tn) {
+      // 文末記号（。．！？!?）または改行までを1文とみなして分割（区切り文字は残す）。
+      var pieces = tn.nodeValue.match(/[^。．！？!?\n]*[。．！？!?\n]+|[^。．！？!?\n]+$/g) || [tn.nodeValue];
+      var frag = document.createDocumentFragment();
+      pieces.forEach(function (piece) {
+        if (piece === "") return;
+        var span = document.createElement("span");
+        span.className = "lecture-sentence";
+        span.setAttribute("data-sentence", String(idx));
+        span.textContent = piece;
+        frag.appendChild(span);
+        // 文末記号／改行で終わっていれば次の文へ。数式をまたぐ文は同一 idx を共有する。
+        if (/[。．！？!?\n]\s*$/.test(piece)) idx++;
+      });
+      tn.parentNode.replaceChild(frag, tn);
+    });
+
+    segEl.setAttribute("data-sentences-annotated", "1");
+  }
+
+  // 音声再生の進捗（ratio: 0〜1）から、現在読み上げている文を推定してハイライトする。
+  // 実際の word-level タイムスタンプは無いため、文の文字数比で近似する。
+  function updateReadingHighlight(ratio) {
+    if (!lectureState.active) return;
+    // 教材（上段）をレクチャー全体の進捗に合わせて自動スクロールする。
+    // キャプション用の文特定（下段）が失敗しても、上段のスクロールは進めたいので先に行う。
+    autoScrollMaterialToProgress(overallLectureRatio(ratio));
+    var content = document.getElementById("lecture-content");
+    if (!content) return;
+    var segEl = content.querySelector(".lecture-segment.current");
+    if (!segEl) return;
+
+    annotateSentences(segEl);
+    var spans = segEl.querySelectorAll(".lecture-sentence");
+    if (!spans.length) return;
+
+    // 文インデックスごとの重み（文字数）を集計する（数式をまたいだ文は合算される）。
+    var weights = {};
+    var maxIdx = 0;
+    spans.forEach(function (s) {
+      var i = parseInt(s.getAttribute("data-sentence"), 10) || 0;
+      weights[i] = (weights[i] || 0) + (s.textContent ? s.textContent.length : 1);
+      if (i > maxIdx) maxIdx = i;
+    });
+
+    var totalW = 0;
+    for (var k = 0; k <= maxIdx; k++) totalW += weights[k] || 0;
+    totalW = totalW || 1;
+
+    var r = Math.max(0, Math.min(1, ratio || 0));
+    var target = r * totalW;
+    var cum = 0;
+    var cur = 0;
+    for (var j = 0; j <= maxIdx; j++) {
+      cum += weights[j] || 0;
+      if (target <= cum) { cur = j; break; }
+      cur = j;
+    }
+
+    if (lectureState.readingSentence === cur) return; // 変化なし
+    lectureState.readingSentence = cur;
+
+    spans.forEach(function (s) {
+      var i = parseInt(s.getAttribute("data-sentence"), 10) || 0;
+      if (i === cur) s.classList.add("reading");
+      else s.classList.remove("reading");
+    });
+
+    // 読み上げ中の文（数式をまたぐ場合はその範囲ごと）をキャプションへ複製表示する。
+    var sentenceHtml = extractSentenceHtml(segEl, cur);
+    if (sentenceHtml) setLectureCaption(sentenceHtml, { html: true });
+  }
+
+  // 指定した文インデックスに属する範囲（同一 idx の先頭 span 〜 末尾 span、
+  // 間に挟まる描画済み数式を含む）を Range で複製し、キャプション用 HTML を返す。
+  function extractSentenceHtml(segEl, sentenceIdx) {
+    var spans = segEl.querySelectorAll('.lecture-sentence[data-sentence="' + sentenceIdx + '"]');
+    if (!spans.length) return "";
+    try {
+      var range = document.createRange();
+      range.setStartBefore(spans[0]);
+      range.setEndAfter(spans[spans.length - 1]);
+      var container = document.createElement("div");
+      container.appendChild(range.cloneContents());
+      return container.innerHTML;
+    } catch (e) {
+      // Range が組めない場合はテキストのみで返す。
+      var text = "";
+      spans.forEach(function (s) { text += s.textContent; });
+      return escHtml(text);
+    }
   }
 
   // ── Material chunk renderer（教材スタジオプレビュー互換）───────────
@@ -3156,24 +4070,27 @@
     if (!lectureState.segments.length) return;
     // 音声フェッチ中の連打による多重再生を防ぐ。
     if (lectureState.loadingAudio) return;
-    lectureState.loadingAudio = true;
 
-    var seg = lectureState.segments[lectureState.currentSegmentIndex];
-
-    // Show loading spinner before TTS fetch
-    var lectureContent = document.getElementById("lecture-content");
-    var currentEl = lectureContent
-      ? lectureContent.querySelector('.lecture-segment[data-segment="' + lectureState.currentSegmentIndex + '"]')
-      : null;
-    if (currentEl) {
-      currentEl.insertAdjacentHTML("afterbegin",
-        '<div class="lecture-loading" id="lecture-loading">' +
-        '<div class="typing"><span></span><span></span><span></span></div>' +
-        '<span style="font-size:12px;color:var(--color-text-tertiary);margin-left:8px;">音声を準備中...</span></div>');
+    // 同一セグメントの一時停止からの再開: 音声を取得し直さず途中から続きを再生する。
+    if (lectureState.audio && !lectureState.audio.ended) {
+      lectureState.playing = true;
+      updateLectureControls();
+      var resumePromise = lectureState.audio.play();
+      if (resumePromise !== undefined) {
+        resumePromise.catch(function () {
+          lectureState.playing = false;
+          updateLectureControls();
+        });
+      }
+      return;
     }
 
+    lectureState.loadingAudio = true;
+    var seg = lectureState.segments[lectureState.currentSegmentIndex];
+    setLectureCaption("音声を準備中…");
+
     try {
-      // Fetch TTS audio first (while spinner is visible)
+      // Fetch TTS audio first (while caption shows loading)
       var ttsData = null;
       try {
         var res = await apiFetch(
@@ -3190,11 +4107,7 @@
         // TTS unavailable — will fall back to simulation
       }
 
-      // Remove spinner
-      var loadingEl = document.getElementById("lecture-loading");
-      if (loadingEl) loadingEl.remove();
-
-      // Now enter playing state and re-render with fade-in sentences
+      // Now enter playing state and re-render sentence staging
       lectureState.playing = true;
       updateLectureControls();
       renderLectureContent();
@@ -3211,11 +4124,16 @@
 
         lectureState.audio.addEventListener("ended", function () {
           stopHighlighting();
+          // 再開パスが終了済み音声を拾わないよう、次のセグメントへ進む前に破棄する。
+          lectureState.audio = null;
           autoAdvance();
         });
 
         lectureState.audio.addEventListener("timeupdate", function () {
           updateTimeDisplay();
+          if (lectureState.audio && lectureState.audio.duration) {
+            updateReadingHighlight(lectureState.audio.currentTime / lectureState.audio.duration);
+          }
         });
 
         // 【修正・重要】自動再生エラー（ブラウザブロック）の安全なハンドリング
@@ -3228,15 +4146,7 @@
             console.warn("Autoplay blocked by browser:", error);
             lectureState.playing = false;
             updateLectureControls();
-
-            // ユーザーに再生ボタンを押すよう案内を出す
-            var currentEl = document.querySelector(".lecture-segment.current");
-            if (currentEl && !document.getElementById("autoplay-warning")) {
-              currentEl.insertAdjacentHTML("afterbegin",
-                '<div id="autoplay-warning" style="color: var(--color-text-danger); background: #fcebeb; padding: 10px; border-radius: 8px; margin-bottom: 12px; font-size: 12px;">' +
-                'ブラウザの制限により自動再生がブロックされました。下の「▶（再生）」ボタンを押して開始してください。</div>'
-              );
-            }
+            setLectureCaption("ブラウザの制限により自動再生がブロックされました。下の「▶（再生）」ボタンを押して開始してください。", { warn: true });
           });
         }
       } else {
@@ -3244,16 +4154,14 @@
         simulatePlayback(seg);
       }
     } catch (err) {
-      // Remove spinner if still present
-      var loadingEl2 = document.getElementById("lecture-loading");
-      if (loadingEl2) loadingEl2.remove();
       lectureState.playing = false;
       updateLectureControls();
-      _restoreChatUI();
+      setLectureCaption("音声の再生に失敗しました。", { warn: true });
     } finally {
       lectureState.loadingAudio = false;
     }
   }
+
 
   function simulatePlayback(seg) {
     // Estimate reading time: ~300 chars/min for Japanese
@@ -3269,6 +4177,9 @@
         var min = Math.floor(sec / 60);
         timeEl.textContent = min + ":" + (sec % 60 < 10 ? "0" : "") + (sec % 60);
       }
+
+      // 音声が無い場合も推定所要時間に対する経過比で読み上げ位置を追従表示する。
+      updateReadingHighlight(elapsed / durationMs);
 
       if (elapsed >= durationMs) {
         stopHighlighting();
@@ -3312,26 +4223,47 @@
   }
 
   // レクチャー最終セグメント到達時、テキストパスと同じ確認フローへ合流する。
+  // 下段（チャット）は畳んでいるので、完了バナーは教材とプレイヤーの間に出す。
   function onLectureComplete() {
-    var lectureContent = document.getElementById("lecture-content");
-    if (lectureContent && !document.getElementById("lecture-complete-banner")) {
-      var next = getNextTopic();
-      var label = next ? "確認問題に進む" : "レクチャー完了";
-      lectureContent.insertAdjacentHTML("beforeend",
-        '<div class="lecture-complete" id="lecture-complete-banner">' +
-        '<p>このトピックのレクチャーは以上です。</p>' +
-        '<button class="suggest-btn" id="lecture-complete-next">' + label + '</button>' +
-        '</div>');
-      var btn = document.getElementById("lecture-complete-next");
-      if (btn) {
-        btn.addEventListener("click", function () {
-          if (getNextTopic()) {
-            openCheckModal();
-          } else {
-            deactivateLecture();
-          }
-        });
-      }
+    setLectureCaption("このトピックのレクチャーは以上です。");
+    var mn = document.querySelector(".mn");
+    var player = document.getElementById("lecture-player");
+    if (!mn || !player || document.getElementById("lecture-complete-banner")) return;
+    var next = getNextTopic();
+    var label = next ? "確認問題に進む" : "レクチャーを終了";
+    var banner = document.createElement("div");
+    banner.className = "lecture-complete";
+    banner.id = "lecture-complete-banner";
+    banner.innerHTML = '<span>このトピックのレクチャーは以上です。</span>' +
+      '<button class="suggest-btn" id="lecture-complete-next">' + label + '</button>';
+    mn.insertBefore(banner, player);
+    var btn = document.getElementById("lecture-complete-next");
+    if (btn) {
+      btn.addEventListener("click", function () {
+        if (getNextTopic()) {
+          openCheckModal();
+        } else {
+          deactivateLecture();
+        }
+      });
+    }
+    // 分野の地図 (Issue F-2 導線2): 講義の章末 (章の最後のトピックのレクチャーを
+    // 聴き終えたとき) にサマリーの末尾で「地図で現在地を見る」を提示する。
+    // 章の途中のトピックでは出さない (完了時の導線1がその役を持つ)。
+    // gap5(将来対応): 本アプリに明示的な「章末サマリー画面」が無いため、導線2は章末を
+    // 跨ぐ完了とこのレクチャー完了バナーで代替している。章末サマリー UI ができたら
+    // その画面へ移設するのが本来形 (issue の付随項目5)。
+    var lectureTopic = getCurrentTopic();
+    var lectureNext = getNextTopic();
+    var chapterDone = lectureTopic &&
+      (!lectureNext || lectureNext.chapter_index !== lectureTopic.chapter_index);
+    if (window.AtlasCues && chapterDone) {
+      window.AtlasCues.showCue("chapter_end", {
+        container: banner,
+        text: "この章のレクチャーはここまでです。",
+        focusTopicId: lectureTopic.id,
+        focusLabel: lectureTopic.title,
+      });
     }
   }
 
@@ -3502,6 +4434,54 @@
     startPlayback();
   }
 
+  // ── 分割ハンドル ─────────────────────────────────────────────────
+  // 教材区画（上段）と下段（読み上げ行＋ホワイトボード）の比率をドラッグで調整する。
+  // 高さは localStorage に保存し、次回以降も同じ比率で表示する。
+  var SPLIT_STORAGE_KEY = "eg_material_split_px";
+
+  function initSplitHandle() {
+    var handle = document.getElementById("split-handle");
+    var region = document.getElementById("material-region");
+    if (!handle || !region) return;
+    var mn = region.parentElement;
+
+    function applyHeight(px) {
+      var max = Math.max(120, (mn.clientHeight || window.innerHeight) * 0.75);
+      px = Math.max(80, Math.min(px, max));
+      region.style.height = px + "px";
+      region.style.maxHeight = "none";
+      region.style.flex = "0 0 auto";
+      return px;
+    }
+
+    // 保存済みの高さを復元（未保存なら CSS 既定の max-height 42% のまま）。
+    var saved = parseInt(localStorage.getItem(SPLIT_STORAGE_KEY) || "", 10);
+    if (saved > 0) applyHeight(saved);
+
+    var dragging = false, startY = 0, startH = 0;
+    handle.addEventListener("pointerdown", function (e) {
+      dragging = true;
+      startY = e.clientY;
+      startH = region.getBoundingClientRect().height;
+      handle.classList.add("dragging");
+      if (handle.setPointerCapture) handle.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    handle.addEventListener("pointermove", function (e) {
+      if (!dragging) return;
+      applyHeight(startH + (e.clientY - startY));
+    });
+    function endDrag() {
+      if (!dragging) return;
+      dragging = false;
+      handle.classList.remove("dragging");
+      var h = Math.round(region.getBoundingClientRect().height);
+      try { localStorage.setItem(SPLIT_STORAGE_KEY, String(h)); } catch (_) { /* noop */ }
+    }
+    handle.addEventListener("pointerup", endDrag);
+    handle.addEventListener("pointercancel", endDrag);
+  }
+
   // ── Init ───────────────────────────────────────────────────────────
   async function initApp() {
     if (!state.token) {
@@ -3511,9 +4491,14 @@
     setupRoleUI();
     initTabs();
     initInput();
+    initSelectionAnchor();
     initLogout();
     initLectureMode();
+    initSplitHandle();
     await initCourseSelector();
+    // 分野の地図 (Issue F-2 導線4): 初回ログイン時のみ L1 を俯瞰位置で自動表示する。
+    // フラグはサーバに永続化され、再ログイン・別端末でも繰り返さない。
+    if (window.AtlasCues) window.AtlasCues.maybeAutoOpenFirstLogin();
   }
 
   // Boot

@@ -130,6 +130,92 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("TENSION_LLM_MODEL"),
     )
 
+    # --- StructureAnchorAgent (B層) — コスト制御（tension とは独立のカウンタ） ---
+    # 1セッション（user×course×topic×日）あたりの LLM コール上限
+    anchor_max_calls_per_session: int = Field(
+        default=3,
+        validation_alias=AliasChoices("ANCHOR_MAX_CALLS_PER_SESSION"),
+    )
+    # 1ユーザー1日あたりの LLM コール上限
+    anchor_max_calls_per_day: int = Field(
+        default=10,
+        validation_alias=AliasChoices("ANCHOR_MAX_CALLS_PER_DAY"),
+    )
+    # 空文字なら fast tier（llm_fast_model）に委譲
+    anchor_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("ANCHOR_LLM_MODEL"),
+    )
+    # 回答末尾の帰属確認プロンプト（方法C）のセッション内提示上限（P7: 毎回出さない）
+    anchor_confirm_max_per_session: int = Field(
+        default=3,
+        validation_alias=AliasChoices("ANCHOR_CONFIRM_MAX_PER_SESSION"),
+    )
+
+    # --- D層（Doubt Layer） — コスト制御（tension / anchor とは独立のカウンタ） ---
+    # 検証スコープ候補抽出（D1-4）の 1 日あたり LLM コール上限
+    doubt_scope_max_calls_per_day: int = Field(
+        default=10,
+        validation_alias=AliasChoices("DOUBT_SCOPE_MAX_CALLS_PER_DAY"),
+    )
+    # 空文字なら fast tier（llm_fast_model）に委譲
+    doubt_scope_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("DOUBT_SCOPE_LLM_MODEL"),
+    )
+    # 暗黙前提マイニングの LLM 正規化（D2-2）の 1 日あたりコール上限
+    doubt_assumption_max_calls_per_day: int = Field(
+        default=10,
+        validation_alias=AliasChoices("DOUBT_ASSUMPTION_MAX_CALLS_PER_DAY"),
+    )
+    # 空文字なら fast tier（llm_fast_model）に委譲
+    doubt_assumption_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("DOUBT_ASSUMPTION_LLM_MODEL"),
+    )
+
+    # --- 再構成ループ（Reconstruction Loop, R層） — item オーサリングのコスト制御 ---
+    # （tension / anchor / doubt とは独立のカウンタ）
+    # 1 ドキュメントあたりの自動生成 item 上限
+    recon_max_items_per_document: int = Field(
+        default=30,
+        validation_alias=AliasChoices("RECON_MAX_ITEMS_PER_DOCUMENT"),
+    )
+    # item オーサリング worker の 1 日あたり LLM コール上限
+    recon_max_calls_per_day: int = Field(
+        default=10,
+        validation_alias=AliasChoices("RECON_MAX_CALLS_PER_DAY"),
+    )
+    # 空文字なら fast tier（llm_fast_model）に委譲
+    recon_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("RECON_LLM_MODEL"),
+    )
+
+    # --- Field Atlas 骨格エディタ AIアシスト編集（interpret / propose。P3/P4） ---
+    # 1教員1日あたりの assist LLM コール上限（interpret + propose の合算）
+    atlas_assist_max_calls_per_day: int = Field(
+        default=60,
+        validation_alias=AliasChoices("ATLAS_ASSIST_MAX_CALLS_PER_DAY"),
+    )
+    # 空文字なら分析 tier（llm_analysis_model）に委譲（対象特定・編集生成には精度が要る）
+    atlas_assist_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("ATLAS_ASSIST_LLM_MODEL"),
+    )
+
+    # --- 横断ユーティリティ層（Admin Copilot） — コスト制御（他機能とは独立） ---
+    # chat の intent 分類/応答の 1 ユーザー 1 日あたり LLM コール上限
+    assistant_max_calls_per_day: int = Field(
+        default=20,
+        validation_alias=AliasChoices("ASSISTANT_MAX_CALLS_PER_DAY"),
+    )
+    # 空文字なら fast tier（llm_fast_model）に委譲
+    assistant_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("ASSISTANT_LLM_MODEL"),
+    )
+
     # --- JWT / Auth ---
     jwt_secret: str = "episteme-dev-secret-change-in-prod"
     admin_password: str = ""
@@ -221,6 +307,15 @@ class Settings(BaseSettings):
     cartridges_dir: str = Field(
         default="",
         validation_alias=AliasChoices("EPISTEME_CARTRIDGES_DIR"),
+    )
+
+    # --- Field Atlas (分野の地図) ---
+    # 学習UIの地図データソース。フロント (atlas-data.js) が /api/atlas/runtime-config
+    # 経由で参照する。既定 "api" (本番でモック地図が全ユーザーに出るのを構造的に防ぐ)。
+    # 開発でフィクスチャを使いたい場合のみ明示的に "fixture" に設定する。
+    atlas_data_source: str = Field(
+        default="api",
+        validation_alias=AliasChoices("ATLAS_DATA_SOURCE"),
     )
 
 

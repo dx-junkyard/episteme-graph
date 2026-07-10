@@ -34,6 +34,8 @@ from schemas import (
     CourseGroupPermissionUpsertRequest,
     CreateUserRequest,
     DeleteConfirmRequest,
+    DocumentGroupPermissionOut,
+    DocumentGroupPermissionUpsertRequest,
     MaterialOut,
     ReextractionJobOut,
     SimulationResponse,
@@ -46,17 +48,22 @@ from schemas import (
 from services import (
     _material_lock,
     _material_status,
+    _resolve_document,
     create_background_task,
     extract_pdf_pages,
     get_background_task,
     get_course_group_permissions,
+    get_document_group_permissions,
     get_user_group_ids,
     process_material_background,
+    record_review_event,
     save_cb_session,
     user_can_access_group,
     user_can_edit_course,
     user_can_view_course,
+    user_can_view_document,
     user_owns_course,
+    user_owns_document,
 )
 from core.llm import generate_text
 from core.meta_analyzer import (
@@ -442,6 +449,7 @@ def reanalyze_document(
 
 @router.get("/materials", response_model=list[MaterialOut])
 def list_materials(
+    include: str | None = None,
     current_user: dict = Depends(_require_teacher),
 ) -> list[MaterialOut]:
     """アップロード済み教材の一覧を返す。
@@ -451,12 +459,18 @@ def list_materials(
     - visibility='group' かつ自分の参加グループで共有された教材
     - 自分が editor/viewer 権限を持つコースで参照されている教材
       （course_group_permissions 経由）
+
+    ``include=summary`` を指定すると、教材選択UI向けにサマリ情報
+    （主要 theory component 名・件数・文書構造の見出し・コース作成済みか）を
+    既存テーブルから追加集約して返す。指定しない場合の挙動は従来どおり。
     """
+    want_summary = bool(include and "summary" in include)
     user_groups = get_user_group_ids(current_user["id"])
 
     params: dict = {"user_id": current_user["id"]}
     group_clause = "FALSE"
     course_mat_clause = "FALSE"
+    doc_perm_clause = "FALSE"
 
     if user_groups:
         gph = ", ".join(f"CAST(:g_{i} AS uuid)" for i in range(len(user_groups)))
@@ -476,6 +490,17 @@ def list_materials(
                   AND jsonb_typeof(lc.data->'sources') = 'array'
             )
         """
+        # migration 035: 解析成果をグループへ直接共有（document_group_permissions 経由）
+        doc_perm_clause = f"""
+            d.id IN (
+                SELECT dgp.document_id
+                FROM document_group_permissions dgp
+                JOIN group_members gm ON gm.group_id = dgp.group_id
+                WHERE gm.user_id = CAST(:user_id AS uuid)
+                  AND dgp.group_id IN ({gph})
+                  AND dgp.permission IN ('viewer', 'editor')
+            )
+        """
 
     session = _pg_session()
     try:
@@ -484,7 +509,8 @@ def list_materials(
                 SELECT d.source_path, d.filename, d.title, d.status, d.created_at, d.knowledge_graph,
                        COALESCE(d.visibility, 'private'), d.group_id,
                        COALESCE(d.chunk_count, cs.chunk_count, 0) AS chunk_count,
-                       d.id::text AS document_id
+                       d.id::text AS document_id,
+                       COALESCE(d.authors, '{{}}') AS authors, d.year, d.doc_type
                 FROM documents d
                 LEFT JOIN (
                     SELECT material_id, COUNT(*) AS chunk_count
@@ -497,6 +523,7 @@ def list_materials(
                       OR d.visibility = 'public'
                       OR {group_clause}
                       OR {course_mat_clause}
+                      OR {doc_perm_clause}
                   )
                 ORDER BY d.created_at DESC
             """),
@@ -513,7 +540,7 @@ def list_materials(
                     f"""
                     SELECT DISTINCT ON (material_id)
                            material_id, status, current_stage, error_message,
-                           stage_outputs, updated_at
+                           stage_outputs, updated_at, completed_at
                     FROM document_analysis_runs
                     WHERE material_id IN ({run_placeholders})
                     ORDER BY material_id, created_at DESC
@@ -522,6 +549,51 @@ def list_materials(
                 run_params,
             ).mappings().all()
             latest_runs = {row["material_id"]: dict(row) for row in run_rows}
+
+        # --- サマリ集約（?include=summary のときのみ）---------------------
+        # 教材選択UI向け。すべて既存テーブルからの読み取りで、A層は非改変。
+        components_by_mid: dict[str, list[str]] = {}
+        materials_with_course: set[str] = set()
+        if want_summary and records:
+            uuid_to_mid = {r[9]: r[0] for r in records if r[9]}
+            doc_uuids = [u for u in uuid_to_mid if u]
+            if doc_uuids:
+                uuid_ph = ", ".join(f":u_{i}" for i in range(len(doc_uuids)))
+                uuid_params = {f"u_{i}": u for i, u in enumerate(doc_uuids)}
+                comp_rows = session.execute(
+                    sa_text(
+                        f"""
+                        SELECT document_id::text, name
+                        FROM theory_components
+                        WHERE document_id IN ({uuid_ph}) AND name IS NOT NULL
+                        ORDER BY document_id,
+                            CASE review_status WHEN 'teacher_reviewed' THEN 0 ELSE 1 END,
+                            CASE maturity_level
+                                WHEN 'peer_reviewed' THEN 0 WHEN 'textbook' THEN 1
+                                WHEN 'paper_claim' THEN 2 ELSE 3 END
+                        """
+                    ),
+                    uuid_params,
+                ).fetchall()
+                for uid, name in comp_rows:
+                    mid = uuid_to_mid.get(uid)
+                    if mid:
+                        components_by_mid.setdefault(mid, []).append(name)
+
+            # 自分がこの教材からコースを作成済みか（コース未作成リスト用）
+            course_mid_rows = session.execute(
+                sa_text(
+                    """
+                    SELECT DISTINCT (jsonb_array_elements(lc.data->'sources')->>'material_id') AS mid
+                    FROM learning_courses lc
+                    WHERE lc.user_id = CAST(:user_id AS uuid)
+                      AND lc.data IS NOT NULL
+                      AND jsonb_typeof(lc.data->'sources') = 'array'
+                    """
+                ),
+                {"user_id": current_user["id"]},
+            ).fetchall()
+            materials_with_course = {row[0] for row in course_mid_rows if row[0]}
     finally:
         session.close()
 
@@ -561,6 +633,43 @@ def list_materials(
         elif run.get("status") == "completed":
             status = "completed"
 
+        completed_at = run.get("completed_at")
+        analyzed_at = (
+            completed_at.isoformat()
+            if completed_at is not None and status == "completed"
+            else None
+        )
+
+        # メタデータ（authors / year / doc_type は常時付与）
+        authors = list(r[10]) if r[10] else []
+        year = r[11]
+        doc_type = r[12]
+
+        # サマリ（?include=summary のときのみ）
+        component_names: list[str] = []
+        top_concepts: list[str] = []
+        section_outline: list[str] = []
+        has_course = False
+        if want_summary:
+            component_names = components_by_mid.get(mid, [])
+            has_course = mid in materials_with_course
+            # legacy knowledge_graph の概念名
+            if isinstance(kg, dict):
+                for c in (kg.get("concepts") or [])[:8]:
+                    name = c.get("name") if isinstance(c, dict) else str(c)
+                    if name:
+                        top_concepts.append(name)
+            # 文書構造の見出し
+            doc_structure = (stage_outputs.get("_artifacts") or {}).get("document_structure")
+            if isinstance(doc_structure, dict):
+                struct_sections = doc_structure.get("sections") or doc_structure.get("blocks") or []
+                for sec in struct_sections[:12]:
+                    if not isinstance(sec, dict):
+                        continue
+                    sec_title = sec.get("title") or sec.get("heading") or sec.get("label")
+                    if sec_title:
+                        section_outline.append(str(sec_title))
+
         uploaded_at = r[4].isoformat() if r[4] else ""
         materials.append(MaterialOut(
             material_id=mid,
@@ -579,6 +688,15 @@ def list_materials(
             analysis_processed=stage_info.get("processed"),
             analysis_total=stage_info.get("total"),
             analysis_error=run.get("error_message") or None,
+            authors=authors,
+            year=year,
+            doc_type=doc_type,
+            analyzed_at=analyzed_at,
+            component_count=(len(component_names) if want_summary else None),
+            top_components=component_names[:6],
+            top_concepts=top_concepts[:6],
+            section_outline=section_outline,
+            has_course=has_course,
         ))
 
     return materials
@@ -598,6 +716,7 @@ def get_material(
     params: dict = {"user_id": current_user["id"], "material_id": material_id}
     group_clause = "FALSE"
     course_mat_clause = "FALSE"
+    doc_perm_clause = "FALSE"
 
     if user_groups:
         gph = ", ".join(f"CAST(:g_{i} AS uuid)" for i in range(len(user_groups)))
@@ -615,6 +734,17 @@ def get_material(
                   AND cgp.permission IN ('viewer', 'editor')
                   AND lc.data IS NOT NULL
                   AND jsonb_typeof(lc.data->'sources') = 'array'
+            )
+        """
+        # migration 035: 解析成果のグループ直接共有（document_group_permissions 経由）
+        doc_perm_clause = f"""
+            d.id IN (
+                SELECT dgp.document_id
+                FROM document_group_permissions dgp
+                JOIN group_members gm ON gm.group_id = dgp.group_id
+                WHERE gm.user_id = CAST(:user_id AS uuid)
+                  AND dgp.group_id IN ({gph})
+                  AND dgp.permission IN ('viewer', 'editor')
             )
         """
 
@@ -637,6 +767,7 @@ def get_material(
                       OR d.visibility = 'public'
                       OR {group_clause}
                       OR {course_mat_clause}
+                      OR {doc_perm_clause}
                   )
                 LIMIT 1
             """),
@@ -903,6 +1034,43 @@ def update_course_visibility(
 # ---------------------------------------------------------------------------
 
 
+def _versioning_collect_recipients(object_type: str, object_id: str) -> list[str]:
+    """物理削除の前に V層の通知宛先（グループ共有先 + 購読者）を集める（best-effort）。
+
+    削除でグループ権限が消える前に集めておく（消えた後は recipients_for が空になる）。
+    """
+    try:
+        from core.versioning import notifications as _vn, subscriptions as _vs
+        ids = list(_vn.recipients_for(object_type, str(object_id)))
+        ids += _vs.subscriber_ids(object_type, str(object_id))
+        return ids
+    except Exception:  # noqa: BLE001 — 収集失敗は削除本体を止めない
+        logger.debug("versioning recipient collection skipped: %s %s", object_type, object_id, exc_info=True)
+        return []
+
+
+def _versioning_teardown_after_delete(targets, *, primary_recipients=None, actor=None) -> None:
+    """既存の即時削除（delete_material / delete_course）後の V層あと片付け（best-effort）。
+
+    共有版・ピン・通知を掃除し state を 'purged' 墓標にして、購読者へ 'deleted' を送る。
+    これにより手動削除でも幽霊ピン・陳腐化通知・active のままの state を残さない（orphan gap 解消）。
+    targets: (object_type, object_id) のリスト。primary_recipients は targets[0] のみに適用する。
+    """
+    try:
+        from core.versioning import deletion as _vdeletion
+    except Exception:  # noqa: BLE001
+        return
+    for i, (object_type, object_id) in enumerate(targets):
+        try:
+            _vdeletion.teardown_versioning(
+                object_type, str(object_id),
+                extra_recipients=(primary_recipients if i == 0 else None),
+                actor=actor,
+            )
+        except Exception:  # noqa: BLE001 — 片付け失敗は削除本体を無効化しない
+            logger.debug("versioning teardown skipped: %s %s", object_type, object_id, exc_info=True)
+
+
 @router.delete("/materials/{material_id}")
 def delete_material(
     material_id: str,
@@ -938,6 +1106,9 @@ def delete_material(
                 status_code=400,
                 detail="確認用の名前が一致しません。正確な教材名を入力してください。",
             )
+
+        # V層（migration 037）: 削除でグループ権限が消える前に通知宛先を集めておく
+        doc_recipients = _versioning_collect_recipients("document", doc_id)
 
         # 2) この教材を sources に含むコースを特定して削除
         course_rows = session.execute(
@@ -999,6 +1170,12 @@ def delete_material(
     logger.info(
         "Material %s (%s) deleted by user=%s, cascade-deleted courses: %s",
         material_id, doc_title, current_user["id"], deleted_course_ids,
+    )
+    # V層（migration 037）: 教材とその巻き添えコースの共有版状態を掃除し購読者へ通知する
+    _versioning_teardown_after_delete(
+        [("document", doc_id)] + [("course", cid) for cid in deleted_course_ids],
+        primary_recipients=doc_recipients,
+        actor=current_user["id"],
     )
     return {
         "material_id": material_id,
@@ -2067,6 +2244,139 @@ def delete_course_group_permission(
     return {"course_id": course_id, "group_id": group_id, "deleted": True}
 
 
+# ---------------------------------------------------------------------------
+# ドキュメント（教材・パイプライン成果）× グループ 共有（migration 035）
+# ---------------------------------------------------------------------------
+# コースを作らずに解析成果（theory_components / theory_claims / graphs / analysis_runs、
+# すべて document_id 由来）を指定グループへ共有する。course_group_permissions の移植。
+
+
+@router.get(
+    "/documents/{document_id}/groups",
+    response_model=list[DocumentGroupPermissionOut],
+)
+def list_document_group_permissions(
+    document_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> list[DocumentGroupPermissionOut]:
+    """ドキュメントに紐づくグループ共有設定の一覧を返す。
+
+    閲覧可能な者（所有者・共有先グループメンバー）は現在の設定を参照できる。変更は所有者のみ。
+    """
+    if not user_can_view_document(current_user["id"], document_id):
+        raise HTTPException(status_code=404, detail="Document not found")
+    rows = get_document_group_permissions(document_id)
+    return [DocumentGroupPermissionOut(**r) for r in rows]
+
+
+@router.post(
+    "/documents/{document_id}/groups",
+    response_model=DocumentGroupPermissionOut,
+    status_code=201,
+)
+def upsert_document_group_permission(
+    document_id: str,
+    body: DocumentGroupPermissionUpsertRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> DocumentGroupPermissionOut:
+    """ドキュメントの解析成果をグループへ共有する（既存なら権限を更新）。共有設定の変更は所有者のみ。"""
+    if body.permission not in ("viewer", "editor"):
+        raise HTTPException(
+            status_code=400, detail="permission must be 'viewer' or 'editor'",
+        )
+    doc = _resolve_document(document_id)
+    if not doc or not user_owns_document(current_user["id"], document_id):
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    session = _pg_session()
+    try:
+        group_row = session.execute(
+            sa_text("SELECT name FROM groups WHERE id = CAST(:gid AS uuid) LIMIT 1"),
+            {"gid": body.group_id},
+        ).fetchone()
+        if not group_row:
+            raise HTTPException(status_code=404, detail="Group not found")
+
+        row = session.execute(
+            sa_text("""
+                INSERT INTO document_group_permissions (document_id, group_id, permission)
+                VALUES (CAST(:did AS uuid), CAST(:gid AS uuid), :permission)
+                ON CONFLICT (document_id, group_id) DO UPDATE
+                SET permission = EXCLUDED.permission,
+                    updated_at = now()
+                RETURNING document_id, group_id, permission, created_at, updated_at
+            """),
+            {"did": doc["id"], "gid": body.group_id, "permission": body.permission},
+        ).fetchone()
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    # 監査: 共有付与を theory_review_events に記録（entity_type='document_share'）
+    record_review_event(
+        "document_share", doc["id"], "", body.permission, current_user["id"],
+        {"group_id": body.group_id, "action": "grant"},
+    )
+    logger.info(
+        "Document %s group permission set: group=%s permission=%s by user=%s",
+        doc["id"], body.group_id, body.permission, current_user["id"],
+    )
+    return DocumentGroupPermissionOut(
+        document_id=str(row[0]),
+        group_id=str(row[1]),
+        group_name=group_row[0] or "",
+        permission=row[2],
+        created_at=row[3].isoformat() if row[3] else "",
+        updated_at=row[4].isoformat() if row[4] else "",
+    )
+
+
+@router.delete("/documents/{document_id}/groups/{group_id}")
+def delete_document_group_permission(
+    document_id: str,
+    group_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """ドキュメントからグループ共有を解除する。共有設定の変更は所有者のみ。"""
+    doc = _resolve_document(document_id)
+    if not doc or not user_owns_document(current_user["id"], document_id):
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    session = _pg_session()
+    try:
+        result = session.execute(
+            sa_text("""
+                DELETE FROM document_group_permissions
+                WHERE document_id = CAST(:did AS uuid) AND group_id = CAST(:gid AS uuid)
+                RETURNING document_id
+            """),
+            {"did": doc["id"], "gid": group_id},
+        ).fetchone()
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Permission mapping not found")
+    record_review_event(
+        "document_share", doc["id"], "shared", "removed", current_user["id"],
+        {"group_id": group_id, "action": "revoke"},
+    )
+    logger.info(
+        "Document %s group permission removed: group=%s by user=%s",
+        doc["id"], group_id, current_user["id"],
+    )
+    return {"document_id": doc["id"], "group_id": group_id, "deleted": True}
+
+
 @router.delete("/courses/{course_id}")
 def delete_course(
     course_id: str,
@@ -2102,6 +2412,9 @@ def delete_course(
                 detail="確認用の名前が一致しません。正確なコース名を入力してください。",
             )
 
+        # V層（migration 037）: 削除でグループ権限が消える前に通知宛先を集めておく
+        course_recipients = _versioning_collect_recipients("course", course_id)
+
         # 関連する学習チャット履歴を削除
         session.execute(
             sa_text("DELETE FROM learning_chat_history WHERE course_id = :cid"),
@@ -2122,6 +2435,10 @@ def delete_course(
         session.close()
 
     logger.info("Course %s (%s) deleted by user=%s", course_id, course_title, current_user["id"])
+    # V層（migration 037）: コースの共有版状態を掃除し購読者へ通知する（orphan gap 解消）
+    _versioning_teardown_after_delete(
+        [("course", course_id)], primary_recipients=course_recipients, actor=current_user["id"],
+    )
     return {"course_id": course_id, "deleted": True}
 
 
@@ -2623,8 +2940,22 @@ from routes.lecture_studio import router as _lecture_studio_router  # noqa: E402
 from routes.theory_components import router as _theory_components_router  # noqa: E402
 from routes.cartridges import router as _cartridges_router  # noqa: E402
 from routes.revisions import router as _revisions_router  # noqa: E402
+from routes.atlas import router as _atlas_router  # noqa: E402
+from routes.atlas import admin_atlas_router as _admin_atlas_router  # noqa: E402
+from routes.atlas import binding_router as _atlas_binding_router  # noqa: E402
+from routes.doubt import admin_router as _doubt_admin_router  # noqa: E402
+from routes.admin_assistant import admin_router as _admin_assistant_router  # noqa: E402
+from routes.reconstruction import admin_router as _reconstruction_admin_router  # noqa: E402
+from routes.versioning import router as _versioning_router  # noqa: E402
 
 router.include_router(_lecture_studio_router)
 router.include_router(_theory_components_router)
 router.include_router(_cartridges_router)
 router.include_router(_revisions_router)
+router.include_router(_atlas_router)
+router.include_router(_admin_atlas_router)
+router.include_router(_atlas_binding_router)
+router.include_router(_doubt_admin_router)
+router.include_router(_admin_assistant_router)
+router.include_router(_reconstruction_admin_router)
+router.include_router(_versioning_router)

@@ -45,7 +45,7 @@ class TestMigration022:
         assert "Migration 022" in source
         assert "idx_interest_traces_kind_status" in source
         assert "idx_interest_traces_candidate" in source
-        assert "Migrations (002-022) applied successfully." in source
+        assert "Migrations (002-" in source  # 以降の migration 追加 (023...) でも壊れないよう prefix で確認
 
 
 class TestVocabulary:

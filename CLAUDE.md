@@ -301,6 +301,33 @@ class CartridgeContext:
 - **Private**: 作成者（自分）のみアクセス可能
 ※ グループへの参加は、管理者による直接招待、または招待コードにより行われる。
 
+### パイプライン成果のグループ共有（migration 035）
+
+コースを作らずに **PDF 解析パイプラインの成果**（`theory_components` / `theory_claims` /
+`theory_component_graphs` / `document_analysis_runs`）を指定グループへ共有する層。成果は
+すべて `document_id` 由来なので、**権限はドキュメント単位に集約**し、成果はそれを継承する
+（成果テーブルに列を足さない）。`course_group_permissions`（migration 010）の完全な移植。
+
+- **`document_group_permissions`**（migration 035）: `PRIMARY KEY(document_id, group_id)`、
+  `permission ∈ {viewer, editor}`。viewer=解析成果の閲覧・引用、editor=再解析・説明追加等の編集。
+  `documents(id)` / `groups(id)` に `ON DELETE CASCADE`。
+- **アクセス判定（`services.py`）**: `user_can_view_document` / `user_can_edit_document` /
+  `user_owns_document`（共有変更は所有者のみ）。`_resolve_document(ref)` は `documents.id`(UUID) と
+  `source_path`(material_id) の両方を解決する。view = 所有者 / public / group単一共有 /
+  document_group_permissions(viewer|editor)。既存のコース経由（course_group_permissions）は
+  `theory_components._ensure_document_viewable/editable` がフォールバックで併用する。
+- **成果読み取りゲート**: `/api/admin/documents/{document_id}/...`（structure / component-graph /
+  sections/{id}/components / chunks/{id}/claims）は `_ensure_document_viewable/editable` を通すため、
+  ドキュメント共有だけで全成果が閲覧可能になる（コース不要）。
+- **API**（`backend/api/routes/admin.py`、実パス `/api/admin/...`）:
+  `GET /documents/{id}/groups`（閲覧可能な者は参照、変更は所有者のみ）、
+  `POST /documents/{id}/groups`（共有付与/更新）、`DELETE /documents/{id}/groups/{group_id}`（解除）。
+  `list_materials` / `get_material` は document_group_permissions 経由の共有も一覧・取得対象に含める。
+- **監査**: 付与・解除を `theory_review_events`（`entity_type='document_share'`）に記録。
+- **UI**（`admin.js`）: 教材管理タブの各行「共有」ボタン → `openDocumentShareModal`（コース共有
+  モーダルと同型。グループ選択＋viewer/editor）。
+- 想定利用は**教員間コラボ**（査読・再利用）。学習者への読み取り開示は現状スコープ外（将来別途）。
+
 ### 承認・共有レイヤー（C層, migration 021）
 
 A層（`src/episteme_graph/agents/` の生成パイプライン、export_validation_gate 等）には手を入れず、
@@ -366,6 +393,209 @@ confidence 数値は返さない）、`POST /api/learning/tension/{trace_id}/con
 `POST /api/learning/tension/{trace_id}/dismiss`、`POST /api/learning/tension/{trace_id}/connect`。
 すべて本人のみ（教員・管理者は個別行にアクセス不可）。
 
+### 構造帰属型の問い記録（Structure-Anchored Questions, B層, migration 025）
+
+学習チャットの問いを質問文の保存だけでなく **「提示された情報構造のどこに（anchor）、
+どう引っかかったか（doubt_type）」** として記録する。新テーブルなし・
+`interest_traces.payload.structure_anchor` の拡張のみ（質問原文 `text` は残す, P4）。
+実装は `backend/core/structure_anchor/`
+（agent / input_builder / prompt / llm_client / schema / validator / repair / worker / examples、
+tension と同型の独立モジュール。コスト上限も tension とは独立）。
+
+**payload 形式**（`payload.structure_anchor`）:
+`anchor_type`（`claim | equation | derivation_step | concept | stage | chunk | segment`）/
+`anchor_id` / `anchor_label` / `doubt_type`（`definition | justification_gap | premise |
+prior_conflict | scope | connection | unclassified`）/
+`attribution_source`（`learner_selected | llm_candidate | confirmed`）/
+`evidence_quote` / `reason` / `confidence` / `status`（`active | dismissed`）。
+帰属語彙は domain-independent（theory stage は `schema.THEORY_STAGES` を使う）。
+構造を持たない教材では `claim → concept → chunk → segment` の順で粗い粒度へ縮退させる。
+
+**帰属の3経路**:
+- **A 明示アンカー（同期・非LLM）**: 教材区画のテキスト選択→「ここについて質問」
+  （`LearningChatRequest.selection_text` / `selection_segment_id`）、または
+  数式・claim 要素タップ（既存 `chunk_id`/`element_id`/`element_type`/`element_label`）。
+  `attribution_source='learner_selected'` で即確定（doubt_type は `unclassified` のまま可）。
+- **B 非同期LLM帰属**: worker が未帰属の `kind='question'` 痕跡をバッチ処理し
+  `attribution_source='llm_candidate'` の候補を書く。**行の `status` は変更しない**
+  （tension と違い問い自体は確定済み。候補なのは帰属だけなので、確定状態は
+  `attribution_source` のみで管理する）。本人の confirm/訂正で `confirmed` になる（P1）。
+- **C 回答末尾の確認プロンプト**: `tension_hint` が立ったとき等にゲートして
+  doubt_type の1タップ選択肢を回答に添付（`anchor_confirm`）。毎回は出さない（P7）。
+
+**Worker**（`backend/core/structure_anchor/worker.py`）: `threading.Thread` 方式・
+冪等性は `payload.anchor_analyzed_at`。コスト上限 `ANCHOR_MAX_CALLS_PER_SESSION`（既定3）/
+`ANCHOR_MAX_CALLS_PER_DAY`（既定10）、モデルは fast tier 既定（`ANCHOR_LLM_MODEL` で上書き）。
+
+**API**（`backend/api/routes/learning.py`）:
+`GET /api/learning/courses/{course_id}/anchors/digest`（本人の `llm_candidate`・最大3件、
+confidence 数値は返さない）、`POST /api/learning/anchors/{trace_id}/confirm`
+（body: `doubt_type?` / `anchor_type?` / `anchor_id?` — 訂正可）、
+`POST /api/learning/anchors/{trace_id}/dismiss`（`structure_anchor.status='dismissed'` で保持, P4）。
+確定・却下は `theory_review_events` に `entity_type='structure_anchor'` で監査記録。
+教員向けは `GET /api/admin/courses/{course_id}/anchor-insights`
+（stage / doubt_type 単位の k-匿名化集約、k=3・n<3 セル非表示。対象は
+`learner_selected` / `confirmed` のみ。評価利用禁止, P3）。
+
+**設計原則**: tension の不変条項（P1/P4/P5/P6/P7）を継承。同期パスは非LLM（A）のみ、
+LLM（B）は非同期バッチ。LLM 候補は本人確定まで確定扱いしない。
+
+### 分野の地図（Field Atlas, Stage 2, issue A〜F 実装済み）
+
+学習中の箇所が分野全体のどこに該当するかを示す全画面オーバーレイ + 常設ミニマップ。
+仕様の正本は `field_atlas_overlay_spec.md`（3層モデル: S=骨格カートリッジ同梱 /
+C=`atlas_overlay_cache` / P=個人層 `interest_traces`）。設計原則: 宣言しない・煽らない・
+出所の正直さ・**踏破率を数値にしない**・リアルタイム LLM 生成をしない。
+
+- **バックエンド**: `core/atlas*.py`（骨格・状態導出・配置・報告）、
+  `routes/atlas.py`（骨格生成/レビュー/凍結・修正報告・**導線計測**）、
+  `routes/atlas_view.py`（`GET /api/atlas` 閲覧 API。状態判定はサーバ側のみ）
+- **フロント**: `atlas-overlay.js`（オーバーレイ B/C）/ `atlas-panel.js`（詳細パネル）/
+  `atlas-report.js`（修正報告 D）/ `atlas-data.js`（fixture ⇄ API 切替。404=骨格なし→null）/
+  `atlas-minimap.js`（F-1）/ `atlas-cues.js`（F-2）
+- **骨格は DB 管理（migration 027, `atlas_skeletons`）**: draft/凍結版は
+  `core/atlas_store.py` 経由で DB が正本（同梱 `atlas/skeleton.yaml` は起動時に一度だけ
+  取込むシード兼フォールバック）。draft の同時編集は**楽観ロック**（`revision` 照合、
+  衝突は 409）。凍結版は (domain_key, version) で履歴保持。**カートリッジファイルの無い
+  新分野**も generate API の `body.domain`（name/description 等）で骨格を生成でき、
+  ファイルデプロイ不要（例: `modified_gravity`）。骨格の読みは必ず
+  `atlas_store.load_learner_skeleton()` を使う（`cartridge.learner_atlas_skeleton` 直読み禁止）。
+- **コース⇄地図バインディング（S2）**: `POST /api/admin/courses/{id}/atlas-binding/propose`
+  が全ドメイン骨格への topic 対応カバレッジを**決定論的に**提案し（LLM 不使用）、教員承認で
+  `PUT .../atlas-binding` が `learning_courses.data.cartridge_id` + `topics[].atlas_node_id`
+  を保存（監査: `theory_review_events` `entity_type='atlas_binding'`）。コースビルダーの
+  登録直後と管理画面「学習マップ編集」から操作。明示 cartridge_id は下記ゲートを免除。
+- **コース⇄カートリッジの妥当性ゲート（gap3 hardening）**: カートリッジが**導出**
+  （`course_data.cartridge_id` 明示なし）で決まった場合、コースのどのトピックも骨格概念に
+  対応しなければ `GET /api/atlas` は 404（骨格なし扱い→地図領域ごと非表示）。解析パイプ
+  ラインは既定カートリッジで走るため、`document_analysis_runs` 由来の導出だけでは別分野
+  コースに無関係な地図が出る（`atlas_state.course_has_skeleton_anchor`）。
+- **フロントの fail-closed**: `atlas-data.js` は API 失敗時にフィクスチャへ退避しない
+  （`null`＝非表示）。フィクスチャは `ATLAS_DATA_SOURCE=fixture` の明示時のみ。
+  `/api/atlas` は `frontend/nginx.conf` の明示 proxy が必須（欠落すると SPA フォール
+  バックが index.html を 200 で返し、JSON パース失敗経由で事故る）。
+
+**F: 常設ミニマップと見晴らしの導線（issue F, migration 026）**
+- ミニマップ（左パネル下・切手大）は「いまここ + 状態ドット + 霧ハッチ」**のみ**。
+  数値・ラベル・凡例を描かない。L1 をそのまま縮小（縮約アルゴリズムの決定）。
+  更新はトピック遷移とオーバーレイ閉時のみ（ポーリング禁止）。骨格なしカートリッジ
+  （`/api/atlas` 404）ではミニマップ・導線とも領域ごと非表示。
+- 導線4箇所: ①トピック完了直後 ②章末（章の最後のトピックのみ）③寄り道復帰
+  （戻った位置を `atlas-pulse` でハイライト）④初回ログインの一度きり自動表示。
+  ①〜③はカード提示に留め**自動で開かない**。抑制ルール: 直近10分以内にオーバーレイを
+  開いていたら①②のカードを出さない（③は対象外）。カードは常に最新1枚。
+- 初回自動表示フラグは `atlas_cue_events` の `(user_id, 'first_login', 'opened')` 行の
+  存在で永続化（再ログイン・別端末でも一度きり）。オプトアウトは設定項目ではなく
+  オーバーレイ内注記（§16-6 の決定）。フラグ確認不能時は自動表示しない（fail-closed）。
+- 内部計測（`POST /api/learning/atlas/cues/events`: shown/opened/dwell/learn_reached、
+  `GET /api/learning/atlas/cues/state`）は Stage 2 ゲート判断の材料。
+  **数値をユーザーに見せる API・UI は作らない**。
+
+### D層（Doubt Layer, migration 029〜033）
+
+A層（構造化）・B層（学習）・C層（承認）に続く第四の層。「合意の強さ」と「検証の強さ」を
+データ構造レベルで分離した**認識的地位台帳（epistemic ledger）**を軸に、暗黙前提の明示化・
+疑義・検証提案・反実仮想を制度化する。issue 分割の正本は
+`docs/features/doubt_layer_issues.md`。実装は `backend/core/doubt/`（tension /
+structure_anchor と同型の独立モジュール群）+ `backend/api/routes/doubt.py`
+（実パス `/api/admin/doubt/...`、学習者向け読み取りは `/api/learning/.../ledger` 等）。
+
+**不変条項（§0）**: A層非改変（`src/episteme_graph/agents/` を読むだけ）/
+AIに疑わせない（LLM 出力は常に candidate、確定は人間。反実仮想の「再構築」は計算しない）/
+帰属必須・匿名疑義なし（全書き込みを `theory_review_events` に監査。entity_type は
+`'ledger'` `'assumption'` `'challenge'` `'verification_proposal'` `'counterfactual_session'` を追加）/
+情報を落とさない（dismiss・withdraw は status 遷移で保持, P4）/
+煽らない・数値を見せない（`load_score`・confidence の生数値を API/UI に出さない。段階ラベルのみ）/
+同期パスに LLM を入れない（スコープ候補・前提正規化は非同期 worker, P6）/
+学習者を監視しない（naive signals は k-匿名 k=3・n<3 非表示, P3）。
+
+- **台帳（D1, migration 029 `epistemic_ledger`）**: `UNIQUE(target_id, target_type)`。
+  `verification_status`（`directly_verified | indirectly_supported | untested | refuted | unknown`）と
+  `verification_scopes JSONB`（**配列**。各要素 = condition/domain/precision/system +
+  `evidence_ids` + `recorded_by` + `reason`。検証を単一ブールにしない — 構想の心臓部）。
+  スコープ 0 件（空欄）は正常状態であり**発見**（エラー表示・警告色にしない）。
+  `directly_verified` への昇格はスコープ 1 件以上のときのみ許可（全称検証の構造的禁止）。
+  `directly_verified` は人間の記帳専用で、`ledger_builder.py`（非LLM バックフィル）は生成しない
+  （evidence 付き `source_backed` atomic claim も `indirectly_supported` 止まり）。
+  LLM スコープ候補（`backend/core/doubt/scope_candidates/`）は `scope_candidates` 列に
+  `status='candidate'` で保持し、教員確定まで `verification_scopes` 本体に入らない。
+  コスト上限 `DOUBT_SCOPE_MAX_CALLS_PER_DAY`（既定 10、tension とは独立）。
+- **素朴な問いの計器化（D1-5）**: `naive_signal.py` が interest_traces のうち
+  **本人が引き受けた行のみ**（tension: owned status / anchor: `learner_selected`・`confirmed`）を
+  anchor 単位で k-匿名集計（件数はレンジ表示 3-5 / 6-10 / 11+）。candidate は集計に入れない（P1）。
+- **負荷度（D2-1）**: `load_calculator.py` が TheoryOperationGraph + derivation +
+  claim リンクから下流到達集合サイズを決定論的に計算（閉路対応）。`graph_layer='debug'` /
+  `inferred` ノードは根拠にしない。生値は DB のみ、API は段階ラベル（低/中/高/最高位）。
+- **暗黙前提マイニング（D2-2 経路A / D3-5 経路B, migration 030 `assumption_nodes`）**:
+  経路A = `inferred`/`review_required` 補完ステップのコーパス横断クラスタ（**2 論文以上 or
+  2 導出以上**の反復のみ候補化、LLM は正規化のみ・非同期）。経路B = 「依存されているが
+  被主張・被引用がないノード」の検出（`corpus_audit.py`、3 論文未満のコーパスでは実行しない）。
+  出力は常に `status='candidate'`。確定（`confirmed`）・却下（`dismissed` 保持）は教員 API（D2-4）。
+  確定時に台帳行を自動生成（既定 `untested`・スコープ空欄）。
+- **前提の地図（D2-3, Assumption Atlas）**: 負荷度×検証度の散布図（admin.js タブ +
+  `doubt-atlas.js`）。ゾーン名・煽り文句・推奨マークを描かない。空欄スコープの点は
+  塗りなし・点線輪郭。**Field Atlas（分野の地図）とは別機能** — コード・API・UI 文言とも
+  `doubt-` / `assumption-` プレフィックスで衝突回避。
+- **疑義（D3-1, migration 031 `challenges`）**: 承認と対になる一級市民。
+  `challenge_type`（`scope_extrapolation | untested_in_domain | definitional | hidden_lemma`）+
+  `reason` 必須・匿名不可。withdraw は status 遷移で履歴保持。疑義カードの主語は常に型
+  （人格対立の文面にしない）。数値スコア化しない。
+- **検証提案 + 未検証合意リスト（D3-2, migration 032 `verification_proposals`）**:
+  challenge → proposal 昇格で `led_to_verification` に遷移。open-assumptions リストは
+  台帳の投影（高負荷×低検証の自動編纂・編集不可）。
+- **反実仮想（D3-3/D3-4, migration 033 `counterfactual_sessions`）**: 前提を仮に偽に倒し
+  `collapsed / surviving / indeterminate` の 3 区分を決定論的に伝播計算（再構築は計算しない）。
+  セッション保存は既存 Visibility 語彙（private/group/public）。UI は可逆・非破壊を明示し
+  「崩壊」でなく「この前提に依存する範囲」と事実で書く。
+- **学習者導線（D3-6）**: 読み取り専用 + 間接参加のみ。出典タブ・教材詳細に検証状態を
+  一行の事実として併記（未検証と検証済みを同じ精度で併記, §8-1/8-2）。学習者の直接疑義投稿は
+  意図的にやらない（地位勾配 §8-3、運用観察後に別 issue で判断）。
+  台帳未記帳コースではセクション自体が出ない（fail-closed）。
+- **ガードレール（DX-1）**: `backend/tests/test_doubt_guardrails.py` が AI断定禁止・
+  匿名疑義なし・数値非表示・k-匿名・P4 保持・禁止語彙（「疑え」「ノーベル賞」等）を構造的に守る。
+- **KPI（DX-2）**: `GET /api/admin/doubt/metrics`（SYSTEM_ADMIN のみ）。
+  `theory_review_events` の再集計のみで専用カウンタテーブルを持たない。ダッシュボード UI は作らない。
+
+### 横断ユーティリティ層（Admin Copilot, migration 034）
+
+管理画面に点在する AI 機能（コース構築チャット・原稿スタジオ rewrite・コンポーネント候補生成）を、
+全タブ横断の**統合 AI アシスタント（Admin Copilot）**に統合する層。正本は
+`docs/features/admin_assistant_design.md`。A層/B層/C層/D層の**コードは変更せず**、既存 API を
+呼ぶ側として実装する（P7）。実装は `backend/core/admin_assistant/` + `backend/api/routes/admin_assistant.py`
+（実パス `/api/admin/assistant/...`）+ `frontend/public/js/admin-assistant.js`（ES5・`window.AdminAssistant`）。
+
+**不変条項**: P1 権限を越えない（fail-closed。**capability registry** に登録され、かつ現在ユーザーの
+ロールで許可された操作のみ説明・代行・道案内。判定はサーバ側、フロント表示を信頼しない）/
+P2 破壊的操作（`reversible=false`＝削除・公開・freeze・アカウント作成）は代行前に明示確認ゲート/
+P3 情報を落とさない（apply 前に before スナップショット、取り消しは状態遷移で行削除しない）/
+P4 断定・捏造しない（説明は登録済み KB に基づき根拠併記、無ければ「未整備」）/
+P5 監査必須（apply/revert/confirm を `theory_review_events` `entity_type='assistant_action'` に記録）/
+P6 同期パスを重くしない（chat は 1 LLM コール上限、失敗時は非LLMヒューリスティックへ縮退）/
+P7 既存 A/B/C/D 層コードを変更しない/ P8 道案内は誘導まで（画面遷移＋入力箇所の点灯のみ。
+値入力・送信・保存は本人。fail-closed は同じく適用）。
+
+- **3 モード（単一チャットで自動振り分け）**: `intent.py` が `guidance`（説明・DB非変更）/
+  `locate`（道案内・DB非変更）/ `action`（代行・変更）/ `clarify`（聞き返し）に分類。
+- **Capability Registry（心臓部）**: `core/admin_assistant/capabilities.py` が画面横断の**単一の真実源**。
+  各 `Capability` は `id` / `screen` / `required_role` / `scope` / `kind`（`guidance_only`|`action`）/
+  `reversible` / `confirm`（`reversible=false` は必ず `confirm=true`）/ `api` / `revert` / `howto_doc` /
+  `locate_steps`（道案内の順序付き点灯手順。各要素 = `{screen, anchor_id, hint, precondition?}`。
+  `anchor_id` は**論理 ID**でバックエンドは DOM セレクタを持たない）を宣言。全 API を一度に載せず
+  安全・高頻度から段階登録（fail-closed）。ロール階層 SYSTEM_ADMIN ≥ TEACHER ≥ STUDENT。
+- **操作 KB**: `docs/admin_operations/*.md`（front-matter `capability`/`role`/`screen`）。`knowledge.py` が
+  起動時にインデックス化し、検索前に `capabilities_for(role)` で絞る（権限外の手順は出さない）。
+  リアルタイム生成しない。KB に無ければ「未整備」。
+- **操作代行 + 戻す**: `action` capability は `actions/` に tool（`capture_before`/`apply`/`revert`）として実装し
+  `apply` は既存 API/関数を呼ぶだけ（P7）。リスク階層 = 局所可逆(L1・クライアント Undo) /
+  永続可逆(L2・サーバ revert) / 不可逆(要確認)。取り消しは `assistant_actions`（migration 034）の
+  before/after スナップショットで復元。`reversible=false` の revert は 409。
+- **道案内（Locate & Spotlight）**: `locate_plan.steps` をフロント `runLocatePlan()` が順に実行し
+  `activateTabView` → `registerUiAnchors` で DOM 解決 → `scrollIntoView` → `.admin-assistant-spotlight` 点灯
+  + hint 吹き出し。`precondition` 未達のステップで停止し画面の選択完了を待って次へ。DB 非変更・監査対象外。
+- **コスト上限**: `ASSISTANT_MAX_CALLS_PER_DAY`（既定 20）/ モデルは fast tier 既定（`ASSISTANT_LLM_MODEL` で上書き）。
+- **ガードレール**: `backend/tests/test_admin_assistant.py` が「全 `reversible=false` は `confirm=true`」
+  「`core/admin_assistant/` が FastAPI を import しない」「locate は role で fail-closed」を構造的に守る。
+
 ### レクチャー音声キャッシュの判定（`backend/api/routes/lecture.py`）
 
 `student_material`/`content`/`summary` はコースビルダーが生成するほぼ全トピックに
@@ -409,6 +639,83 @@ MediaRecorder + WebAudio 無音検知（発話後 ~1.4 秒の沈黙）で区切�
 casual チャット → 応答を TTS 再生（再生中はマイク停止）→ 再生終了で聞き取り再開。
 応答の第1根拠チャンク（`sources[0].chunk_id`）を `/source-chunk/` から取得し
 ボイスパネルに教材表示する。
+
+### 学習チャットのメッセージ書き直し・削除（機能3, B層）
+
+学習チャットで、学習者が自分の入力メッセージを **書き直し（✏️）／以降削除（🗑）** できる。
+どちらも「そのメッセージ以降の往復を捨てる」truncate セマンティクスで統一する。
+
+- **書き直し**: `LearningChatRequest.replace_message_id` を付けて送信。`learning_chat` は本処理の
+  前に `services.truncate_chat_and_supersede()` を呼び、**サーバ正本の履歴**を当該メッセージの
+  位置で切り詰め（当該 user メッセージ・その回答・以降の往復を除去）、`body.history` を切り詰め
+  済みで上書きしてから、`message` を同じ位置から通常フローで再処理する。誤解検出・tier・
+  grounding・intent 分類は再処理で自然に再実行される。
+- **削除**: `DELETE /api/learning/courses/{course_id}/topics/{topic_id}/chat/messages/{message_id}`。
+  同じ `truncate_chat_and_supersede()` を使い、再送はしない。履歴が空になれば行削除。
+- **派生痕跡の後始末（P4 情報を落とさない）**: 取り除いたメッセージ id を `payload.message_id` に
+  持つ `interest_traces` は **削除せず** `status='superseded'` にする。以降 tension/anchor の
+  worker（`_fetch_pending_*`）と各 digest・問いの軌跡ビューは `status <> 'superseded'` で除外する。
+  ※ 誤解記録（`personal_layer.misconceptions_by_topic`）は message_id リンクを持たないため、
+  現状は個別 supersede しない（既知の限界。将来 message_id 紐づけを付けてから対応）。
+- **フロント（app.js）**: user バブルに ✏️/🗑。書き直しは本文を入力欄へ戻し `editingMessageId` を
+  立て、送信で `_replace_message_id`（内部）→ クライアント履歴も同位置で truncate。削除は確認の上
+  DELETE API を呼び、成功時にクライアント履歴を truncate。トピック切替で編集状態は解除する。
+
+### 再構成ループ（Reconstruction Loop, R層, migration 036）
+
+学習者の「能動的・生成的理解」を支える第五の学習機構。学習者に理論の再構成（予測 /
+言い直し）をさせ、A層が生成した精密な構造（`theory_claims`）を **答えキー（ground truth）**
+として構造照合し、ズレを事実として返す閉ループ。併せて claim 単位のつまづき信号を集約し、
+原稿スタジオ「根拠リンク」ペインに表示切り替えで提示する。正本は
+`docs/features/reconstruction_loop_design.md`。A層（`src/episteme_graph/agents/`）は**読むだけ・非改変**。
+実装は `backend/core/reconstruction/`（tension / structure_anchor と同型の独立モジュール）+
+`backend/api/routes/reconstruction.py` + `frontend/public/js/reconstruction.js`（学習）/
+`admin.js`（原稿スタジオ トグル）。
+
+**融合ループ**: 出題 ELICIT → 提出 CAPTURE → 照合 DIFF(=仮説・非LLM同期) →
+開示 REVEAL(=権威) → 自己確認 SELF-CHECK(必須) →（再挑戦 REVISE ↺ / 記号葉へ降下 DESCEND ↓）。
+
+**設計原則（不変条項）**: A層非改変 / 判定は構造（非LLM同期）で権威は出典リビール、
+判定を authoritative に見せない（「食い違いの可能性」の仮説文体）/ item は LLM 自動オーサリング
+（`status='auto'`=candidate 相当）で教員確定なしに配信、教員は事後の監査役（confirmed 追認 /
+retired 回収）/ P4 情報を落とさない（item は削除せず `auto → flagged → retired` 状態遷移。学習者の
+成果物・自己確認・異議も行削除しない）/ P6 実行時 DIFF は非LLM（LLM はオーサリング worker のみ）/
+P7 スコア・正答率数値を学習者に見せない、REFLECT は事実文のみ、教員向けも段階ラベル + レンジ
+（3-5 / 6-10 / 11+）/ P3 教員向け集計は k-匿名（k=3・n<3 セル非表示、個別履歴を見せない、評価利用禁止）。
+出題対象は `support_status='source_backed'` かつ承認済み review_status（`teacher_approved` 等）の claim のみ。
+葉は主張（claim）が既定、記号（SymbolRegistry）は原因が絞れないときだけ降りる点検口（§1.6）。
+
+- **DB（migration 036）**: `reconstruction_items`（claim → ELICIT 変換の出題。
+  `elicit_mode ∈ {predict, restate, symbol}` / `response_space`（predict の選択肢）/ `expected`（想定解）/
+  `status ∈ {auto, flagged, retired, confirmed}`）、`learner_reconstructions`（学習者の産出物・改訂履歴。
+  `machine_verdict ∈ {match, mismatch, na}` / `self_check ∈ {agreed, disagreed, verdict_wrong}` /
+  `descended_to_symbol` / `revision_of`）、`reconstruction_item_health`（集計ビュー。疑わしさランクは
+  `core/reconstruction/health.py` がアプリ側で計算し SQL に埋め込まない）。
+- **core/reconstruction/**: `schema.py`（語彙・伏せフィールド・承認語彙の正本）/ `item_builder.py`
+  （predict 可否判定・restate 縮退・伏せ・降下プローブ。非LLM）/ `diff.py`（実行時 DIFF + REFLECT 事実文。
+  非LLM）/ `prompt.py`・`input_builder.py`・`llm_client.py`・`validator.py`・`repair.py`（item オーサリング。
+  LLM は選択肢・expected 生成のみ、2回修復失敗で item を生成しない=配信しない）/ `worker.py`
+  （オーサリング worker。トリガー: claim 承認時（`theory_components.update_claim` のフック）/ 手動バッチ API。
+  冪等性: claim に非 retired item があればスキップ）/ `health.py`（review キュー）/ `stumble.py`
+  （claim 単位つまづきサマリー。k-匿名）。
+- **API**: 学習者向け（`routes/reconstruction.py` `learning_router`、本人のみ・受講ゲートは
+  `get_accessible_course_data`）= `GET /api/learning/courses/{course_id}/topics/{topic_id}/reconstruction/next`
+  （伏せフィールドを返さない）/ `POST /api/learning/reconstruction/{item_id}/submit`（応答保存 → DIFF →
+  verdict + リビール）/ `POST .../{recon_id}/self-check` / `POST .../{recon_id}/descend` /
+  `POST .../{item_id}/revise`。教員向け（`admin_router`、`_require_teacher`）=
+  `GET /api/admin/reconstruction/items/review-queue`（疑わしさランク順）/
+  `PATCH /api/admin/reconstruction/items/{item_id}`（status 遷移・prompt/expected 修正。削除 API は無い）/
+  `POST /api/admin/reconstruction/documents/{document_id}/author`（手動オーサリング）/
+  `GET /api/admin/documents/{document_id}/claims/stumble-summary`（つまづきサマリー）。
+- **監査**: item 生成 / status 遷移 / self-check(verdict_wrong) / descend を `theory_review_events`
+  （`entity_type` を `'reconstruction_item'` / `'reconstruction_response'` に拡張）に記録。
+- **コスト上限**: `RECON_MAX_ITEMS_PER_DOCUMENT`（既定 30）/ `RECON_MAX_CALLS_PER_DAY`（既定 10、
+  他機能と独立）、モデルは fast tier 既定（`RECON_LLM_MODEL` で上書き）。
+- **フロント**: 学習画面は `reconstruction.js`（`window.Reconstruction`。トピック学習ビュー下部に
+  「再構成に挑戦」導線。自動では開かない。P7）。原稿スタジオは `admin.js` 右ペインタイトル行の
+  トグル `根拠リンク | つまづき`（別タブにしない。`lsState.rightPaneMode`）。
+- **ガードレール**: `backend/tests/test_reconstruction_guardrails.py`（伏せフィールド非漏洩・
+  スコア非表示・出題対象制限・削除 API 不在・k-匿名・core が FastAPI 非 import・REFLECT 禁止語彙）。
 
 
 ## 開発ルール

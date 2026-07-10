@@ -63,6 +63,17 @@ class MaterialOut(BaseModel):
     analysis_processed: int | None = None
     analysis_total: int | None = None
     analysis_error: str | None = None
+    # --- メタデータ（教材選択UIの情報提示用。documents 列から常時付与）---
+    authors: list[str] = Field(default_factory=list)
+    year: int | None = None
+    doc_type: str | None = None
+    analyzed_at: str | None = None  # パイプライン解析の完了時刻（直近の生成の並び替え用）
+    # --- サマリ（?include=summary 指定時のみ集約。既存テーブルからの読み取りのみ）---
+    component_count: int | None = None
+    top_components: list[str] = Field(default_factory=list)  # 主要 theory component 名
+    top_concepts: list[str] = Field(default_factory=list)  # legacy knowledge_graph 概念名
+    section_outline: list[str] = Field(default_factory=list)  # 文書構造のセクション見出し
+    has_course: bool = False  # 自分がこの教材からコースを作成済みか（コース未作成リスト用）
 
 
 class VisibilityUpdateRequest(BaseModel):
@@ -260,11 +271,24 @@ class LearningChatRequest(BaseModel):
     support_action: str | None = None
     support_context: dict | None = None
     position_anchor: dict | None = None  # L2: クライアントの現在位置 {segment_id, scroll_offset}
+    message_id: str | None = None  # クライアント生成のメッセージ id。永続履歴・関心痕跡へ焼き込み「この問いに戻る」で該当往復へジャンプさせる
+    # 書き直し（機能3）: このメッセージ id 以降（当該 user メッセージ・その回答・以降の往復）を
+    # サーバ正本の履歴から削除し、派生 interest_traces を status='superseded' にしてから、
+    # message を新しいターンとして同じ位置から再処理する。指定なしなら通常の追記。
+    replace_message_id: str | None = None
     intent_mode: str | None = None  # "on_path"(本筋維持) | "explore"(寄り道) | "casual"(気軽に話せる先生) — 送信時の意図
+    # 分野の地図 (Issue C-2): ↗ アクション由来の構造化ペイロード
+    # {node_id, level, skeleton_version, action, node_label, node_status, node_pill,
+    #  related?, juxtapose?} — 自由文のみに依存しない
+    atlas_context: dict | None = None
     chunk_id: str | None = None
     element_id: str | None = None
     element_type: str | None = None
     element_label: str | None = None
+    # 構造帰属（方法A）: 教材区画のテキスト選択→「ここについて質問」の明示アンカー。
+    # 選択テキストの逐語と、選択があったセグメント番号（position_anchor とは独立に保持）。
+    selection_text: str | None = None
+    selection_segment_id: int | None = None
 
 
 class LearningSupportNextAction(BaseModel):
@@ -310,6 +334,14 @@ class LearningChatResponse(BaseModel):
     # 確認等のシステム応答では None のまま）。
     content_grounding: str | None = None        # course_material | other_material | model_generated
     position_anchor: dict | None = None         # L2: 復帰位置アンカー
+    # 分野の地図 (Issue C-3): 「ここから学ぶ」への学習パス提案カード
+    # (core.atlas_path.build_learning_path_card の出力。通常チャットでは None)
+    atlas_path_card: dict | None = None
+    # 構造帰属: この往復で同期記録した明示アンカー（方法A）。学習者バブルのチップ表示用。
+    structure_anchor: dict | None = None
+    # 構造帰属（方法C）: 回答末尾の1タップ確認プロンプト。tension_hint 等でゲートされた
+    # ときのみ設定される（毎回は出さない。P7）。{trace_id, question, options:[{doubt_type,label}]}
+    anchor_confirm: dict | None = None
     mock: bool = False                          # 🚧 mock 由来データを含むか（UI バッジ用）
 
 
@@ -1048,3 +1080,111 @@ class CourseGroupPermissionUpsertRequest(BaseModel):
     """コースにグループ権限マッピングを追加/更新するリクエスト。"""
     group_id: str
     permission: str = "viewer"  # viewer | editor
+
+
+class DocumentGroupPermissionOut(BaseModel):
+    """ドキュメント（教材・パイプライン成果）に紐づくグループ権限（migration 035）。"""
+    document_id: str
+    group_id: str
+    group_name: str = ""
+    permission: str = "viewer"  # viewer | editor
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class DocumentGroupPermissionUpsertRequest(BaseModel):
+    """ドキュメントにグループ権限マッピングを追加/更新するリクエスト。"""
+    group_id: str
+    permission: str = "viewer"  # viewer | editor
+
+
+# ---------------------------------------------------------------------------
+# 横断ユーティリティ層（Admin Copilot, migration 034）
+# ---------------------------------------------------------------------------
+
+class AssistantScreenContext(BaseModel):
+    """フロントの collectScreenContext() が渡す構造化状態（DOM スクレイプではない）。"""
+    tab: str = ""
+    selection: dict = Field(default_factory=dict)
+    visible_entities: list = Field(default_factory=list)
+
+
+class AssistantChatRequest(BaseModel):
+    """POST /api/admin/assistant/chat のリクエスト。"""
+    message: str
+    history: list[dict] = Field(default_factory=list)
+    session_id: str | None = None
+    screen_context: AssistantScreenContext = Field(default_factory=AssistantScreenContext)
+
+
+class AssistantActionPlan(BaseModel):
+    """intent=action のとき返す実行計画（未実行。フロントが §8.2 を叩く）。"""
+    capability_id: str
+    title: str = ""
+    target: dict = Field(default_factory=dict)
+    args: dict = Field(default_factory=dict)
+    reversible: bool = True
+    confirm_required: bool = False
+    supported: bool = True  # 代行 handler が存在するか（P1 段階登録）
+
+
+class AssistantLocateStep(BaseModel):
+    screen: str
+    anchor_id: str
+    hint: str = ""
+    precondition: str | None = None
+
+
+class AssistantLocatePlan(BaseModel):
+    """intent=locate のとき返す点灯手順（§5.3）。DB 非変更・監査対象外。"""
+    capability_id: str
+    steps: list[AssistantLocateStep] = Field(default_factory=list)
+
+
+class AssistantChatResponse(BaseModel):
+    """POST /api/admin/assistant/chat のレスポンス。"""
+    answer: str
+    intent: str                                  # guidance | locate | action | clarify
+    action_plan: AssistantActionPlan | None = None
+    locate_plan: AssistantLocatePlan | None = None
+    next_actions: list[dict] = Field(default_factory=list)
+    citations: list[dict] = Field(default_factory=list)
+    source: str = "heuristic"                     # 分類の由来（llm | heuristic）
+
+
+class AssistantActionRequest(BaseModel):
+    """POST /api/admin/assistant/actions のリクエスト（代行実行）。"""
+    capability_id: str
+    target: dict = Field(default_factory=dict)    # {"type": "...", "id": "..."}
+    args: dict = Field(default_factory=dict)
+    session_id: str | None = None
+    confirm: bool = False                          # reversible=False は True 必須（P2）
+
+
+class AssistantActionResponse(BaseModel):
+    action_id: str
+    status: str                                    # applied | confirm_pending | failed
+    capability_id: str
+    reversible: bool
+    after: dict | None = None
+    message: str = ""
+
+
+class AssistantRevertResponse(BaseModel):
+    action_id: str
+    status: str                                    # reverted
+    restored: dict | None = None
+    message: str = ""
+
+
+class AssistantActionSummary(BaseModel):
+    """GET /api/admin/assistant/actions の 1 行（戻す履歴の復元用）。"""
+    action_id: str
+    capability_id: str
+    screen: str = ""
+    target_type: str = ""
+    target_id: str | None = None
+    reversible: bool = True
+    status: str = "applied"
+    created_at: str = ""
+    reverted_at: str | None = None

@@ -1,0 +1,25 @@
+{
+  "anchors": [
+    {
+      "trace_id": "tr_001",
+      "anchor_type": "derivation_step",
+      "anchor_id": "clm_042",
+      "anchor_label": "線形化により高次項を無視",
+      "doubt_type": "justification_gap",
+      "evidence_quote": "高次項を無視できるのはなぜですか",
+      "confidence": 0.86,
+      "reason": "The question explicitly names the linearization step (「式(12)の線形化」「高次項を無視」) matching clm_042, and asks WHY it holds (「なぜですか」「正当化できる」)."
+    },
+    {
+      "trace_id": "tr_002",
+      "anchor_type": "segment",
+      "anchor_id": "seg_3",
+      "anchor_label": "第2章 · 線形応答理論",
+      "doubt_type": "definition",
+      "evidence_quote": "エントロピーという言葉の意味がまだよくわかりません",
+      "confidence": 0.62,
+      "reason": "No claim/concept candidate mentions エントロピー; the question points at the current segment (「ここに出てくる」, segment_id=seg_3) and asks for the meaning of a term (definition)."
+    }
+  ],
+  "unattributed": []
+}
