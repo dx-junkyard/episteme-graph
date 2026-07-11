@@ -63,7 +63,7 @@ class TestAppliedInMain:
         assert "CREATE TABLE IF NOT EXISTS share_notifications" in _MAIN
 
     def test_success_log_bumped(self):
-        assert "Migrations (002-037) applied successfully." in _MAIN
+        # migration 038 が後続で log 行を (002-038) へ更新済み（本行は最終値を主張しない）。
         assert "Migrations (002-036) applied successfully." not in _MAIN
 
     def test_citation_columns_applied_in_main(self):

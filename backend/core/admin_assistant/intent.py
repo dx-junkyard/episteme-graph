@@ -21,6 +21,7 @@ from core.admin_assistant.schema import (
     INTENT_CLARIFY,
     INTENT_GUIDANCE,
     INTENT_LOCATE,
+    INTENT_STATUS_QUERY,
     INTENTS,
     IntentResult,
     LLMIntentResponse,
@@ -37,6 +38,14 @@ _ACTION_MARKERS = (
     "して", "したい", "してほしい", "してくれ", "変更", "書き換え", "書き直",
     "リライト", "修正", "直して", "整え", "公開", "非公開", "削除", "消して",
     "作成", "作って", "生成", "凍結", "差し替え", "更新", "登録",
+)
+
+# 状態照会（教材・コースの処理状態を尋ねる発話）の合図。
+# 「状況」単体は system.view_stats（利用状況）の keyword と重なるため、
+# ここでは「進捗・完了・失敗」等の状態照会に固有の複合語のみを合図にする。
+_STATUS_QUERY_MARKERS = (
+    "どうなって", "進捗", "終わった", "終わりました", "完了した", "完了しました",
+    "失敗した", "解析状況", "処理状況", "状態を教えて", "ステータス",
 )
 
 # capability ごとのキーワード（keyword マッチで解決）。
@@ -82,6 +91,11 @@ def has_where_marker(message: str) -> bool:
 def has_action_marker(message: str) -> bool:
     msg = message or ""
     return any(m in msg for m in _ACTION_MARKERS)
+
+
+def has_status_query_marker(message: str) -> bool:
+    msg = message or ""
+    return any(m in msg for m in _STATUS_QUERY_MARKERS)
 
 
 def _selection_target_types(screen_context: Optional[dict]) -> set:
@@ -138,6 +152,12 @@ def heuristic_classify(
     cap = caps.get_capability(cap_id) if cap_id else None
     is_where = has_where_marker(message)
 
+    # 状態照会は capability 解決より先に判定する（教材/コースの進捗確認は
+    # 特定の capability に紐づかない読み取り専用の照会のため）。where 型
+    # （「教材アップロードはどこ？」等）は道案内を優先する。
+    if has_status_query_marker(message) and not is_where:
+        return IntentResult(intent=INTENT_STATUS_QUERY, answer="", capability_id="", source="heuristic")
+
     if is_where and cap is not None:
         intent = INTENT_LOCATE
     elif cap is not None and cap.is_action() and has_action_marker(message):
@@ -170,7 +190,8 @@ def _refine_with_llm(
     sys_prompt = (
         "あなたは学習支援システムの管理画面アシスタントのルータです。"
         "ユーザーの発話を intent に分類し、可能なら操作カタログから 1 つの capability を選びます。\n"
-        "intent: guidance(操作の説明) / locate(どこで操作するかの道案内) / action(操作の代行) / clarify(聞き返し)。\n"
+        "intent: guidance(操作の説明) / locate(どこで操作するかの道案内) / action(操作の代行) / "
+        "clarify(聞き返し) / status_query(教材・コースの処理状態の照会)。\n"
         "capability_id は必ず与えられた許可リストの id から選ぶ（無ければ空文字）。"
         "リストに無い操作を発明しない。断定しない。"
     )

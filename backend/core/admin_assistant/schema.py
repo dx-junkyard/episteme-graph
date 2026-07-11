@@ -56,7 +56,8 @@ INTENT_GUIDANCE = "guidance"   # 説明（読み取り専用・DB非変更）
 INTENT_LOCATE = "locate"       # 道案内（画面遷移＋点灯・DB非変更）
 INTENT_ACTION = "action"       # 操作代行（変更を伴う）
 INTENT_CLARIFY = "clarify"     # 聞き返し
-INTENTS = (INTENT_GUIDANCE, INTENT_LOCATE, INTENT_ACTION, INTENT_CLARIFY)
+INTENT_STATUS_QUERY = "status_query"  # 状態照会（投影の事実回答・DB非変更）
+INTENTS = (INTENT_GUIDANCE, INTENT_LOCATE, INTENT_ACTION, INTENT_CLARIFY, INTENT_STATUS_QUERY)
 
 KIND_GUIDANCE_ONLY = "guidance_only"
 KIND_ACTION = "action"

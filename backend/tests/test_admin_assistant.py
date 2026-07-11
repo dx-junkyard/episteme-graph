@@ -37,7 +37,9 @@ from core.admin_assistant.actions import (  # noqa: E402
 )
 from core.admin_assistant.schema import (  # noqa: E402
     INTENT_ACTION,
+    INTENT_GUIDANCE,
     INTENT_LOCATE,
+    INTENT_STATUS_QUERY,
     KIND_ACTION,
     role_satisfies,
 )
@@ -159,6 +161,29 @@ class TestIntentHeuristic:
         assert intent_mod.parse_visibility("非公開にして") == "private"
         assert intent_mod.parse_visibility("よろしく") is None
 
+    def test_status_query_progress_phrase(self):
+        r = intent_mod.classify("解析どうなってる？", "TEACHER")
+        assert r.intent == INTENT_STATUS_QUERY
+        assert r.capability_id == ""
+
+    def test_status_query_completion_phrase(self):
+        r = intent_mod.classify("教材の処理は終わりましたか", "TEACHER")
+        assert r.intent == INTENT_STATUS_QUERY
+
+    def test_view_stats_keyword_alone_is_not_status_query(self):
+        """「状況」単体（system.view_stats のキーワード）は状態照会に奪われない。"""
+        r = intent_mod.classify("利用状況を見たい", "TEACHER")
+        assert r.intent != INTENT_STATUS_QUERY
+        assert r.intent == INTENT_GUIDANCE
+        assert r.capability_id == "system.view_stats"
+
+    def test_where_question_still_locates_over_status_query(self):
+        r = intent_mod.classify(
+            "教材アップロードはどこ？", "TEACHER", screen_context={"tab": "materials"},
+        )
+        assert r.intent == INTENT_LOCATE
+        assert r.capability_id == "materials.upload"
+
 
 # ===========================================================================
 # Group A-4: Action handler の純粋ロジック
@@ -236,6 +261,40 @@ class TestGuardrails:
     def test_frontend_uses_prefix_and_spotlight_class(self):
         assert "admin-assistant-spotlight" in _ADMIN_JS
         assert "window.AdminAssistant" in _ADMIN_JS
+
+
+# ===========================================================================
+# Group A-6: status_query（Phase 3, 状態管理・通知基盤との統合）
+# ===========================================================================
+
+
+class TestStatusQueryGuardrails:
+    """状態照会 intent は読み取り専用（DB非変更・LLM非呼び出し）であること。"""
+
+    def test_no_write_statements_in_status_query_handler(self):
+        src = _ROUTE_SRC
+        start = src.index("def _status_query_response(")
+        end = src.index("\ndef ", start + 1)
+        handler_src = src[start:end]
+        for forbidden in ("INSERT", "UPDATE", "DELETE"):
+            assert forbidden not in handler_src, f"_status_query_response に {forbidden} が含まれている"
+
+    def test_scoped_to_current_user(self):
+        src = _ROUTE_SRC
+        start = src.index("def _status_query_response(")
+        end = src.index("\ndef ", start + 1)
+        handler_src = src[start:end]
+        assert "uploaded_by" in handler_src
+        assert "user_id" in handler_src
+
+    def test_dispatch_branch_present(self):
+        assert "INTENT_STATUS_QUERY" in _ROUTE_SRC
+        assert "res.intent == INTENT_STATUS_QUERY" in _ROUTE_SRC
+
+    def test_intent_registered_in_schema(self):
+        from core.admin_assistant.schema import INTENTS
+
+        assert INTENT_STATUS_QUERY in INTENTS
 
 
 # ===========================================================================
@@ -396,6 +455,19 @@ class TestChatAPI:
         data = r.json()
         assert data["locate_plan"] is None
         assert "実行できません" in data["answer"]
+
+    def test_status_query_degrades_gracefully_without_live_db(self, api):
+        """DB 未接続環境でも捏造せず fail-closed に縮退する（S5）。action_plan は出さない。"""
+        client, _store, _mp, _svc = api
+        r = client.post("/api/admin/assistant/chat",
+                        json={"message": "解析どうなってる？"},
+                        headers=_headers("TEACHER"))
+        assert r.status_code == 200
+        data = r.json()
+        assert data["intent"] == "status_query"
+        assert data["action_plan"] is None
+        assert data["locate_plan"] is None
+        assert data["answer"]
 
     def test_action_plan_confirm_required_for_publish(self, api):
         client, _store, _mp, _svc = api

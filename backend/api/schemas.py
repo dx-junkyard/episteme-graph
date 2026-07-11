@@ -1144,7 +1144,7 @@ class AssistantLocatePlan(BaseModel):
 class AssistantChatResponse(BaseModel):
     """POST /api/admin/assistant/chat のレスポンス。"""
     answer: str
-    intent: str                                  # guidance | locate | action | clarify
+    intent: str                                  # guidance | locate | action | clarify | status_query
     action_plan: AssistantActionPlan | None = None
     locate_plan: AssistantLocatePlan | None = None
     next_actions: list[dict] = Field(default_factory=list)

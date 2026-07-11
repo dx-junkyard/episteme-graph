@@ -1445,8 +1445,56 @@ def _run_migrations() -> None:
             "ADD COLUMN IF NOT EXISTS source_version_no  INT"
         ))
 
+        # ---- Migration 038: 状態管理・通知基盤 — 遷移イベント + 統合通知インボックス ----
+        # 正本リファレンス: backend/db/038_status_events_notifications.sql
+        # 現在状態は既存テーブルからの投影のみ（core/status/projector.py, 保存しない）。
+        # ここで作るのは遷移の事実（status_events, 冪等 UNIQUE）と汎用通知インボックス
+        # （user_notifications, share_notifications と同形・V層非改変）のみ。
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS status_events (
+                id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                event_kind   TEXT NOT NULL,
+                entity_type  TEXT NOT NULL,
+                entity_id    TEXT NOT NULL,
+                from_state   TEXT NOT NULL DEFAULT '',
+                to_state     TEXT NOT NULL,
+                source_table TEXT NOT NULL,
+                source_id    TEXT NOT NULL,
+                payload      JSONB NOT NULL DEFAULT '{}'::jsonb,
+                occurred_at  TIMESTAMPTZ NOT NULL,
+                created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (source_table, source_id, event_kind)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_status_events_entity "
+            "ON status_events(entity_type, entity_id)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_status_events_watermark "
+            "ON status_events(source_table, occurred_at DESC)"
+        ))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS user_notifications (
+                id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                recipient_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                kind         TEXT NOT NULL,
+                entity_type  TEXT NOT NULL,
+                entity_id    TEXT NOT NULL,
+                event_id     UUID REFERENCES status_events(id),
+                payload      JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+                read_at      TIMESTAMPTZ,
+                dismissed_at TIMESTAMPTZ
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_user_notif_recipient "
+            "ON user_notifications(recipient_id, read_at, created_at DESC)"
+        ))
+
         session.commit()
-        logger.info("Migrations (002-037) applied successfully.")
+        logger.info("Migrations (002-038) applied successfully.")
 
         # 骨格 DB 管理化 (027): カートリッジ同梱の凍結骨格を一度だけ DB へ取り込む (冪等)
         try:
@@ -1525,6 +1573,14 @@ async def _lifespan(application: FastAPI):
         _versioning_worker.start_background_sweeper()
     except Exception:  # noqa: BLE001
         logger.warning("versioning sweeper startup skipped", exc_info=True)
+
+    # 状態管理・通知基盤（migration 038）: 遷移検知 watcher を起動（best-effort）
+    try:
+        from core.status import watcher as _status_watcher
+
+        _status_watcher.start_watcher()
+    except Exception:  # noqa: BLE001
+        logger.warning("status watcher startup skipped", exc_info=True)
 
     yield
 

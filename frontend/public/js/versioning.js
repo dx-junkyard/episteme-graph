@@ -36,7 +36,7 @@
     } catch (e) { return iso; }
   }
 
-  function typeLabel(t) { return t === "course" ? "コース" : "教材の解析成果"; }
+  function typeLabel(t) { return t === "course" ? "コース" : (t === "material" ? "教材" : "教材の解析成果"); }
 
   function json(res) { return res.json(); }
 
@@ -216,7 +216,7 @@
   }
 
   function _refreshInbox() {
-    apiFetch("/admin/shared/notifications").then(json).then(function (data) {
+    apiFetch("/admin/notifications").then(json).then(function (data) {
       var badge = document.getElementById("vg-inbox-badge");
       if (!badge) return;
       var n = (data && data.unread_count) || 0;
@@ -238,7 +238,7 @@
       '</div><div id="vg-inbox-list"><p style="font-size:12px;color:var(--color-text-tertiary)">読み込み中...</p></div>';
     document.body.appendChild(panel);
     document.getElementById("vg-inbox-readall").addEventListener("click", function () {
-      apiFetch("/admin/shared/notifications/read-all", { method: "POST" }).then(function () {
+      apiFetch("/admin/notifications/read-all", { method: "POST" }).then(function () {
         _refreshInbox(); _loadInboxList();
       });
     });
@@ -246,7 +246,7 @@
   }
 
   function _loadInboxList() {
-    apiFetch("/admin/shared/notifications").then(json).then(function (data) {
+    apiFetch("/admin/notifications").then(json).then(function (data) {
       var list = document.getElementById("vg-inbox-list");
       if (!list) return;
       var items = (data && data.notifications) || [];
@@ -261,7 +261,7 @@
 
   // 生テキストを返す（HTML エスケープは _renderNotif 側で一度だけ行う。二重エスケープ防止）。
   function _notifText(n) {
-    var t = typeLabel(n.object_type);
+    var t = typeLabel(n.object_type || n.entity_type);
     var note = n.payload && n.payload.note ? n.payload.note : "";
     if (n.kind === "version_published") {
       if (n.object_type === "document") {
@@ -273,6 +273,16 @@
     if (n.kind === "deletion_scheduled") return t + "の削除が予約されました。期限 " + fmtDate(n.payload && n.payload.purge_after) + " 以降に削除されます";
     if (n.kind === "deletion_cancelled") return t + "の削除予約が取り消されました";
     if (n.kind === "deleted") return t + "は削除されました";
+    // 状態管理・通知基盤（migration 038）の通知種別
+    if (n.kind === "material_analysis_completed") return t + "の解析が完了しました";
+    if (n.kind === "material_analysis_failed") {
+      var reason = n.payload && n.payload.reason ? "（" + n.payload.reason + "）" : "";
+      return t + "の解析に失敗しました" + reason;
+    }
+    if (n.kind === "course_script_completed") return t + "の原稿生成が完了しました";
+    if (n.kind === "course_script_failed") return t + "の原稿生成に失敗しました";
+    if (n.kind === "course_audio_completed") return t + "の音声生成が完了しました";
+    if (n.kind === "course_audio_failed") return t + "の音声生成に失敗しました";
     return t + "の更新";
   }
 
@@ -284,7 +294,7 @@
   function _renderNotif(n) {
     var unread = !n.read_at;
     var canAdopt = n.kind === "version_published" && !n.acted_at;
-    return '<div class="vg-notif" data-id="' + esc(n.id) + '" data-type="' + esc(n.object_type) + '" data-oid="' + esc(n.object_id) + '"' +
+    return '<div class="vg-notif" data-id="' + esc(n.id) + '" data-type="' + esc(n.object_type || n.entity_type) + '" data-oid="' + esc(n.object_id || n.entity_id) + '"' +
       ' style="border-bottom:1px solid var(--color-border,#eee);padding:8px 2px;' + (unread ? 'background:rgba(0,100,200,0.05)' : '') + '">' +
       '<div style="font-size:12px;color:var(--color-text-primary)">' + esc(_notifText(n)) + '</div>' +
       '<div style="font-size:10px;color:var(--color-text-tertiary);margin-top:2px">' + esc(fmtDate(n.created_at)) + '</div>' +
@@ -301,7 +311,7 @@
       // クリックで既読
       node.addEventListener("click", function (e) {
         if (e.target && e.target.className && String(e.target.className).indexOf("vg-adopt-btn") >= 0) return;
-        apiFetch("/admin/shared/notifications/" + encodeURIComponent(id) + "/read", { method: "POST" })
+        apiFetch("/admin/notifications/" + encodeURIComponent(id) + "/read", { method: "POST" })
           .then(function () { _refreshInbox(); });
       });
       var adoptBtn = node.querySelector(".vg-adopt-btn");
@@ -311,7 +321,7 @@
         _adopt(objectType, objectId).then(function (ok) {
           var doneLabel = objectType === "document" ? "確認済み" : "取り込み済み";
           adoptBtn.textContent = ok ? doneLabel : "再読込してください";
-          apiFetch("/admin/shared/notifications/" + encodeURIComponent(id) + "/read", { method: "POST" });
+          apiFetch("/admin/notifications/" + encodeURIComponent(id) + "/read", { method: "POST" });
           _refreshInbox(); _loadInboxList();
         });
       });

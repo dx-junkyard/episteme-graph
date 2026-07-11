@@ -20,6 +20,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+from collections import Counter
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text as sa_text
@@ -43,7 +44,10 @@ from core.admin_assistant.schema import (
     INTENT_CLARIFY,
     INTENT_GUIDANCE,
     INTENT_LOCATE,
+    INTENT_STATUS_QUERY,
 )
+from core.status import projector as status_projector
+from core.status import schema as status_schema
 from schemas import (
     AssistantActionPlan,
     AssistantActionRequest,
@@ -329,6 +333,143 @@ def _action_response(message: str, role: str, cap, screen_context: dict) -> Assi
     return AssistantChatResponse(answer=answer, intent=INTENT_ACTION, action_plan=plan)
 
 
+_MATERIAL_STATE_LABELS = {
+    status_schema.MATERIAL_STATE_UPLOADED: "アップロード済み（未解析）",
+    status_schema.MATERIAL_STATE_CHUNKING: "解析待ち",
+    status_schema.MATERIAL_STATE_ANALYZING: "解析実行中",
+    status_schema.MATERIAL_STATE_ANALYZED: "解析完了",
+    status_schema.MATERIAL_STATE_ANALYSIS_FAILED: "解析失敗",
+    status_schema.MATERIAL_STATE_UNKNOWN: "状態不明",
+}
+_SCRIPT_STATUS_LABELS = {
+    status_schema.SCRIPT_STATUS_DRAFT: "未生成",
+    status_schema.SCRIPT_STATUS_PARTIAL: "一部生成",
+    status_schema.SCRIPT_STATUS_GENERATED: "生成済み",
+}
+_AUDIO_STATUS_LABELS = {
+    status_schema.AUDIO_STATUS_NONE: "未生成",
+    status_schema.AUDIO_STATUS_PARTIAL: "一部生成",
+    status_schema.AUDIO_STATUS_GENERATED: "生成済み",
+}
+
+# 「対応が必要」とみなす教材状態（詳細列挙の対象。解析完了は詳細列挙しない）。
+_MATERIAL_NEEDS_ATTENTION = {
+    status_schema.MATERIAL_STATE_ANALYZING,
+    status_schema.MATERIAL_STATE_ANALYSIS_FAILED,
+    status_schema.MATERIAL_STATE_CHUNKING,
+    status_schema.MATERIAL_STATE_UPLOADED,
+    status_schema.MATERIAL_STATE_UNKNOWN,
+}
+
+
+def _material_status_line(title: str, ms) -> str:
+    label = _MATERIAL_STATE_LABELS.get(ms.state, ms.state)
+    detail = ""
+    if ms.state == status_schema.MATERIAL_STATE_ANALYZING and ms.stage:
+        detail = f"（stage: {ms.stage}）"
+    elif ms.state == status_schema.MATERIAL_STATE_ANALYSIS_FAILED and ms.reason:
+        detail = f"（{ms.reason}）"
+    when = f" — {ms.updated_at}" if ms.updated_at else ""
+    return f"教材『{title}』: {label}{detail}{when}"
+
+
+def _course_status_line(title: str, cs) -> str:
+    script = _SCRIPT_STATUS_LABELS.get(cs.script_status, cs.script_status)
+    audio = _AUDIO_STATUS_LABELS.get(cs.audio_status, cs.audio_status)
+    published = "公開済み" if cs.published else "未公開"
+    return f"コース『{title}』: 原稿 {script} / 音声 {audio} / {published}"
+
+
+def _status_query_response(message: str, current_user: dict) -> AssistantChatResponse:
+    """状態照会（guidance 相当・DB 非変更）。core.status.projector を直接呼び、
+
+    自分が所有する教材・コースのみを事実文で回答する（P4: 根拠併記・断定捏造しない）。
+    LLM は呼ばない（同期パスを重くしない, P6）。DB アクセス失敗時は fail-closed で
+    「取得できませんでした」に縮退し、状態を捏造しない（S5）。
+    """
+    uid = str(current_user.get("id") or "")
+    citations: list = []
+    try:
+        session = _pg_session()
+        try:
+            doc_rows = session.execute(
+                sa_text(
+                    "SELECT id::text, title FROM documents WHERE uploaded_by = CAST(:uid AS uuid) "
+                    "ORDER BY updated_at DESC"
+                ),
+                {"uid": uid},
+            ).mappings().fetchall()
+            course_rows = session.execute(
+                sa_text(
+                    "SELECT id, data FROM learning_courses WHERE user_id = CAST(:uid AS uuid) "
+                    "ORDER BY updated_at DESC"
+                ),
+                {"uid": uid},
+            ).mappings().fetchall()
+
+            materials = []
+            for row in doc_rows:
+                ms = status_projector.project_material_status(session, row["id"])
+                title = row["title"] or row["id"]
+                materials.append((title, ms))
+
+            courses = []
+            for row in course_rows:
+                cs = status_projector.project_course_status(session, row["id"])
+                data = row["data"] if isinstance(row["data"], dict) else {}
+                title = data.get("title") or row["id"]
+                courses.append((title, cs))
+        finally:
+            session.close()
+    except Exception:
+        logger.warning("status_query: failed to read status projections", exc_info=True)
+        return AssistantChatResponse(
+            answer="状態を取得できませんでした。",
+            intent=INTENT_STATUS_QUERY,
+        )
+
+    if not materials and not courses:
+        return AssistantChatResponse(
+            answer="教材・コースが見つかりませんでした。",
+            intent=INTENT_STATUS_QUERY,
+        )
+
+    total = len(materials) + len(courses)
+    lines: list[str] = []
+
+    if total > 8:
+        # 件数が多いときは状態別サマリーを先に出し、対応が必要なものだけ詳細列挙する（P4/S5）。
+        mat_counts = Counter(ms.state for _, ms in materials)
+        if materials:
+            summary = "・".join(
+                f"{_MATERIAL_STATE_LABELS.get(state, state)}{count}"
+                for state, count in mat_counts.items()
+            )
+            lines.append(f"教材{len(materials)}件: {summary}")
+        if courses:
+            lines.append(f"コース{len(courses)}件。")
+        detail_materials = [(t, ms) for t, ms in materials if ms.state in _MATERIAL_NEEDS_ATTENTION]
+        for title, ms in detail_materials:
+            lines.append(_material_status_line(title, ms))
+            citations.append({"doc": f"status:material:{ms.material_id or ms.document_id}"})
+        for title, cs in courses:
+            lines.append(_course_status_line(title, cs))
+            citations.append({"doc": f"status:course:{cs.course_id}"})
+    else:
+        for title, ms in materials:
+            lines.append(_material_status_line(title, ms))
+            citations.append({"doc": f"status:material:{ms.material_id or ms.document_id}"})
+        for title, cs in courses:
+            lines.append(_course_status_line(title, cs))
+            citations.append({"doc": f"status:course:{cs.course_id}"})
+
+    return AssistantChatResponse(
+        answer="\n".join(lines),
+        intent=INTENT_STATUS_QUERY,
+        citations=citations,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 8.1 POST /chat
 # ---------------------------------------------------------------------------
@@ -364,6 +505,8 @@ def assistant_chat(
         resp = _locate_response(role, cap, screen_context)
     elif res.intent == INTENT_ACTION and cap is not None:
         resp = _action_response(body.message, role, cap, screen_context)
+    elif res.intent == INTENT_STATUS_QUERY:
+        resp = _status_query_response(body.message, current_user)
     elif res.intent == INTENT_CLARIFY and not cap:
         resp = AssistantChatResponse(
             answer=res.answer
