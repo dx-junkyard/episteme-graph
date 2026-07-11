@@ -56,6 +56,7 @@ from core.lecture import (
 )
 from core.document_sections import enrich_chunks_with_sections
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
+from core.llm_usage.context import bind_usage_context, usage_context
 from core.personas import course_persona_settings, normalize_persona_id, persona_prompt
 from core.postgres import get_session as _pg_session
 from core.storage import get_storage_client
@@ -780,6 +781,7 @@ def _batch_generate_worker(
     ``language`` 省略時はコース設定 (``lecture_language``) を使う (migration 040 Phase 4)。
     生成した各チャンクには ``chunks.spoken_language`` として生成言語を記録する。
     """
+    bind_usage_context("admin:lecture_generate", user_id=user_id, course_id=course_id)
     total = len(chunks)
     generated = 0
     skipped = 0
@@ -1375,11 +1377,12 @@ def rewrite_lecture_script(
     params = get_llm_params("fast")
 
     try:
-        raw = generate_text(
-            messages=[{"role": "user", "content": prompt}],
-            model=params["model"],
-            reasoning_effort=params["reasoning_effort"],
-        )
+        with usage_context("admin:lecture_rewrite", user_id=current_user["id"]):
+            raw = generate_text(
+                messages=[{"role": "user", "content": prompt}],
+                model=params["model"],
+                reasoning_effort=params["reasoning_effort"],
+            )
         cleaned = raw.strip()
         if cleaned.startswith("```"):
             lines = cleaned.split("\n")
@@ -1466,6 +1469,7 @@ def _batch_audio_worker(
     タスク自体が既に ``phase: "script"`` を経ているため、ここでは ``phase: "audio"`` を
     result_data に出す (§3-3)。
     """
+    bind_usage_context("admin:lecture_tts", course_id=course_id)
     total = len(chunks)
     generated = 0
     skipped = 0
@@ -1666,6 +1670,7 @@ def _batch_generate_and_audio_worker(
     キャッシュ（旧言語含む全スライド）を削除し、既存の「原稿変更時は音声キャッシュ無効化」
     ルールと同じ挙動にする。
     """
+    bind_usage_context("admin:lecture_generate", course_id=course_id)
     chunks = _get_course_chunks(course_data)
     total = len(chunks)
     settings = course_persona_settings(course_data)
@@ -3094,29 +3099,30 @@ def rewrite_lecture_studio_course_topic(
 
     params = get_llm_params("fast")
     parsed: object = {}
-    try:
-        parsed = generate_text_with_structured_output(
-            messages=[{"role": "user", "content": prompt}],
-            response_format=CourseTopicDraftLLMResponse,
-            model=params["model"],
-        )
-    except Exception as structured_exc:
-        logger.warning(
-            "Structured course topic draft failed; retrying text JSON parse course_id=%s topic_id=%s error=%s",
-            course_id,
-            topic_id,
-            structured_exc,
-        )
+    with usage_context("admin:lecture_rewrite", user_id=current_user["id"], course_id=course_id):
         try:
-            raw = generate_text(
+            parsed = generate_text_with_structured_output(
                 messages=[{"role": "user", "content": prompt}],
+                response_format=CourseTopicDraftLLMResponse,
                 model=params["model"],
-                reasoning_effort=params["reasoning_effort"],
             )
-            parsed = _parse_course_topic_draft_json(raw)
-        except Exception:
-            logger.exception("AI course topic draft retry failed for course_id=%s topic_id=%s", course_id, topic_id)
-            raise HTTPException(status_code=502, detail="AI draft generation failed")
+        except Exception as structured_exc:
+            logger.warning(
+                "Structured course topic draft failed; retrying text JSON parse course_id=%s topic_id=%s error=%s",
+                course_id,
+                topic_id,
+                structured_exc,
+            )
+            try:
+                raw = generate_text(
+                    messages=[{"role": "user", "content": prompt}],
+                    model=params["model"],
+                    reasoning_effort=params["reasoning_effort"],
+                )
+                parsed = _parse_course_topic_draft_json(raw)
+            except Exception:
+                logger.exception("AI course topic draft retry failed for course_id=%s topic_id=%s", course_id, topic_id)
+                raise HTTPException(status_code=502, detail="AI draft generation failed")
     result = _normalize_course_topic_draft_response(parsed)
     if not any([
         result["key_concepts"],

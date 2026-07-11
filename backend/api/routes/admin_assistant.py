@@ -27,6 +27,7 @@ from sqlalchemy import text as sa_text
 
 from dependencies import _get_current_user, _require_teacher  # noqa: F401
 from core.config import get_settings
+from core.llm_usage.context import usage_context
 from core.postgres import get_session as _pg_session
 from core.admin_assistant import capabilities as caps
 from core.admin_assistant import intent as intent_mod
@@ -487,14 +488,15 @@ def assistant_chat(
     screen_context = body.screen_context.model_dump() if body.screen_context else {}
 
     allow_llm = _reserve_llm_quota(str(current_user.get("id") or ""))
-    res = intent_mod.classify(
-        body.message,
-        role,
-        history=body.history,
-        screen_context=screen_context,
-        allow_llm=allow_llm,
-        model=_assistant_model(),
-    )
+    with usage_context("admin:assistant", user_id=current_user["id"]):
+        res = intent_mod.classify(
+            body.message,
+            role,
+            history=body.history,
+            screen_context=screen_context,
+            allow_llm=allow_llm,
+            model=_assistant_model(),
+        )
 
     cap = caps.get_capability(res.capability_id) if res.capability_id else None
 

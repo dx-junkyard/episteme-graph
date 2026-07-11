@@ -59,6 +59,7 @@ from routes import atlas_view as atlas_view_routes
 from routes import doubt as doubt_routes
 from routes import reconstruction as reconstruction_routes
 from routes import library as library_routes
+from routes import llm_usage as llm_usage_routes
 from core.config import get_settings as _get_settings
 from core.postgres import get_session as _pg_session, check_connection as _pg_check
 
@@ -1657,8 +1658,83 @@ def _run_migrations() -> None:
             "ON library_entry_versions(entry_id, version_no DESC)"
         ))
 
+        # ---- Migration 043: LLM トークン使用量推計（U層）----
+        # 正本リファレンス: backend/db/043_llm_usage_events.sql
+        # 実測（プロバイダ報告値）を正本、決定論的推計をフォールバックとする使用量台帳。
+        # append-only（行削除 API は作らない, U6）。FK を意図的に張らない（テレメトリ行が
+        # 本体の削除を妨げたり、本体削除でカスケード消失したりしないため）。
+        # コスト（金額）列は持たない（単価は集計時に価格表で都度換算する, U7）。
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS llm_usage_events (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                occurred_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                operation TEXT NOT NULL CHECK (operation IN
+                    ('chat','structured','embedding','vision','transcribe','tts')),
+                feature TEXT NOT NULL DEFAULT 'unattributed',
+                usage_source TEXT NOT NULL CHECK (usage_source IN
+                    ('reported','estimated_tokenizer','estimated_heuristic')),
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                total_tokens INTEGER,
+                cached_tokens INTEGER,
+                reasoning_tokens INTEGER,
+                input_characters INTEGER,
+                output_characters INTEGER,
+                image_count INTEGER NOT NULL DEFAULT 0,
+                audio_bytes BIGINT,
+                tts_characters INTEGER,
+                duration_ms INTEGER,
+                success BOOLEAN NOT NULL DEFAULT TRUE,
+                error_type TEXT,
+                user_id UUID,
+                document_id UUID,
+                course_id TEXT,
+                run_id UUID,
+                metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_llm_usage_events_occurred "
+            "ON llm_usage_events (occurred_at)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_llm_usage_events_feature "
+            "ON llm_usage_events (feature, occurred_at)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_llm_usage_events_model "
+            "ON llm_usage_events (model, occurred_at)"
+        ))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_llm_usage_events_document "
+            "ON llm_usage_events (document_id) WHERE document_id IS NOT NULL"
+        ))
+        # 日次集計ビュー（day × feature × model × usage_source の SUM）。
+        # 専用カウンタテーブルは作らない（DX-2 と同じ立場）。
+        session.execute(sa_text("""
+            CREATE OR REPLACE VIEW llm_usage_daily AS
+            SELECT
+                date_trunc('day', occurred_at) AS day,
+                feature,
+                model,
+                usage_source,
+                COUNT(*) AS calls,
+                SUM(prompt_tokens) AS sum_prompt_tokens,
+                SUM(completion_tokens) AS sum_completion_tokens,
+                SUM(total_tokens) AS sum_total_tokens,
+                SUM(cached_tokens) AS sum_cached_tokens,
+                SUM(reasoning_tokens) AS sum_reasoning_tokens,
+                SUM(image_count) AS sum_image_count,
+                SUM(audio_bytes) AS sum_audio_bytes,
+                SUM(tts_characters) AS sum_tts_characters
+            FROM llm_usage_events
+            GROUP BY date_trunc('day', occurred_at), feature, model, usage_source
+        """))
+
         session.commit()
-        logger.info("Migrations (002-042) applied successfully.")
+        logger.info("Migrations (002-043) applied successfully.")
 
         # 骨格 DB 管理化 (027): カートリッジ同梱の凍結骨格を一度だけ DB へ取り込む (冪等)
         try:
@@ -1787,6 +1863,7 @@ app.include_router(atlas_view_routes.router)
 app.include_router(doubt_routes.learning_router)
 app.include_router(reconstruction_routes.learning_router)
 app.include_router(library_routes.router)
+app.include_router(llm_usage_routes.router)
 
 
 @app.get("/healthz")

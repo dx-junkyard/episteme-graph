@@ -26,6 +26,7 @@ import threading
 from sqlalchemy import text as sa_text
 
 from core.config import get_settings
+from core.llm_usage.context import bind_usage_context
 from core.postgres import get_session as _pg_session
 from core.tension.agent import DEFAULT_MAX_CANDIDATES, TensionMiningAgent
 from core.tension.input_builder import select_window_turns, turns_from_history
@@ -138,6 +139,7 @@ def run_tension_mining(user_id: str, course_id: str, topic_id: str | None) -> in
     戻り値は保存した candidate 行数。冪等性: 処理対象のヒント痕跡に analyzed_at を
     先に付けてから LLM を呼ぶ（同一窓の並行再実行をスキップ）。
     """
+    bind_usage_context("learning:tension", user_id=str(user_id), course_id=str(course_id))
     session = _pg_session()
     try:
         hints = _fetch_pending_hints(session, user_id, course_id, topic_id)

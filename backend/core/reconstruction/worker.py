@@ -20,6 +20,7 @@ from typing import Any
 from sqlalchemy import text as sa_text
 
 from core.config import get_settings
+from core.llm_usage.context import bind_usage_context
 from core.postgres import get_session as _pg_session
 from core.reconstruction.input_builder import build_user_content
 from core.reconstruction.item_builder import preferred_elicit_mode, response_options_to_dicts
@@ -152,6 +153,7 @@ def run_item_authoring_for_document(document_id: str) -> int:
     """
     if not document_id:
         return 0
+    bind_usage_context("admin:reconstruction_authoring", document_id=str(document_id))
     max_items = int(getattr(get_settings(), "recon_max_items_per_document", 30))
     session = _pg_session()
     try:

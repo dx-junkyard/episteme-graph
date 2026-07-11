@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     Column,
@@ -362,3 +363,42 @@ class AssistantStepDismissal(Base):
     dismissed_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     revoked = Column(Boolean, nullable=False, default=False)
     responded_at = Column(DateTime(timezone=True), nullable=True)
+
+
+# ============================================================
+# U層（LLM トークン使用量推計）— llm_usage_events（migration 043）
+# ============================================================
+
+class LlmUsageEvent(Base):
+    """LLM/TTS/STT 呼び出し1回分の使用量記録（append-only。行削除 API は作らない, U6）。
+
+    FK を意図的に張らない（テレメトリ行が本体の削除を妨げたり、本体削除でカスケード
+    消失したりしないため。帰属 ID は文字列/UUID として残すのみ。設計書 §5）。
+    """
+    __tablename__ = "llm_usage_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    occurred_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    provider = Column(Text, nullable=False)
+    model = Column(Text, nullable=False)
+    operation = Column(Text, nullable=False)  # chat|structured|embedding|vision|transcribe|tts
+    feature = Column(Text, nullable=False, default="unattributed")
+    usage_source = Column(Text, nullable=False)  # reported|estimated_tokenizer|estimated_heuristic
+    prompt_tokens = Column(Integer, nullable=True)
+    completion_tokens = Column(Integer, nullable=True)
+    total_tokens = Column(Integer, nullable=True)
+    cached_tokens = Column(Integer, nullable=True)
+    reasoning_tokens = Column(Integer, nullable=True)
+    input_characters = Column(Integer, nullable=True)
+    output_characters = Column(Integer, nullable=True)
+    image_count = Column(Integer, nullable=False, default=0)
+    audio_bytes = Column(BigInteger, nullable=True)
+    tts_characters = Column(Integer, nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+    success = Column(Boolean, nullable=False, default=True)
+    error_type = Column(Text, nullable=True)
+    user_id = Column(UUID(as_uuid=True), nullable=True)
+    document_id = Column(UUID(as_uuid=True), nullable=True)
+    course_id = Column(Text, nullable=True)
+    run_id = Column(UUID(as_uuid=True), nullable=True)
+    metadata_json = Column("metadata", JSONB, nullable=False, default=dict)

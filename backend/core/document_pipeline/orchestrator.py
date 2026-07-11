@@ -14,6 +14,8 @@ import tempfile
 from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Callable
 
+from core.llm_usage.context import bind_usage_context, set_current_feature
+
 from .chunker import build_source_chunks
 from .dsl_text import dsl_result_to_search_text
 from .persistence import (
@@ -222,6 +224,16 @@ def run_document_pipeline(
             options=effective_options,
         )
 
+    # U層（LLM 使用量帰属, 設計書 §6）: run_id 確定直後にこのスレッドの帰属文脈を
+    # bind する。以降の generate_text 等の呼び出しは report_start() が差し替える
+    # "pipeline:{stage}" feature で記録される。
+    bind_usage_context(
+        "pipeline",
+        document_id=str(document_id),
+        run_id=str(run_id),
+        course_id=str(course_id) if course_id else None,
+    )
+
     def report(stage: str, payload: dict | None = None, *, run_status: str = "running") -> None:
         payload = payload or {}
         if progress_callback:
@@ -240,6 +252,8 @@ def run_document_pipeline(
         )
 
     def report_start(stage: str, *, total: int | None = None, unit: str | None = None) -> None:
+        # U層: ステージ開始イベントでのみ帰属 feature を差し替える（帰属 ID は維持）。
+        set_current_feature(f"pipeline:{stage}")
         payload: dict[str, Any] = {"status": "running", "processed": 0}
         if total is not None:
             payload["total"] = total

@@ -25,6 +25,7 @@ import threading
 from sqlalchemy import text as sa_text
 
 from core.config import get_settings
+from core.llm_usage.context import bind_usage_context
 from core.postgres import get_session as _pg_session
 from core.structure_anchor.agent import StructureAnchorAgent
 from core.structure_anchor.schema import (
@@ -199,6 +200,7 @@ def run_anchor_mining(user_id: str, course_id: str, topic_id: str | None) -> int
     戻り値は候補を書き込んだ行数。冪等性: 処理対象の問い痕跡に
     payload.anchor_analyzed_at を先に付けてから LLM を呼ぶ（並行再実行をスキップ）。
     """
+    bind_usage_context("learning:structure_anchor", user_id=str(user_id), course_id=str(course_id))
     session = _pg_session()
     try:
         pending = _fetch_pending_questions(session, user_id, course_id, topic_id)

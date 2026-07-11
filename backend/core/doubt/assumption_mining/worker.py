@@ -22,6 +22,7 @@ from core.doubt.assumption_mining.detector import detect_gap_clusters, register_
 from core.doubt.assumption_mining.llm_client import AssumptionLLMClient
 from core.doubt.assumption_mining.prompt import build_content
 from core.doubt.assumption_mining.repair import run_with_repair
+from core.llm_usage.context import bind_usage_context
 from core.postgres import get_session
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,7 @@ def _mark_created_from(session, assumption_id: str, patch: dict) -> None:
 
 def run_assumption_mining(course_id: str = "") -> dict:
     """検出 + 登録 + 正規化を 1 バッチ実行する（同期実行本体）。"""
+    bind_usage_context("doubt:assumption_normalize", course_id=course_id or None)
     session = get_session()
     registered = 0
     normalized = 0

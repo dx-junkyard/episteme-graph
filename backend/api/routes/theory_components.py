@@ -47,6 +47,7 @@ from core.document_sections import build_document_structure, detect_section_head
 from core.postgres import get_session as _pg_session
 from core.cartridges import load_cartridge
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
+from core.llm_usage.context import usage_context
 from core.theory_components import (
     enrich_theory_components_with_llm,
     extract_theory_components_from_dsl,
@@ -3433,7 +3434,8 @@ def create_candidates_from_query(
     """
     _ensure_editable(body.course_id, current_user)
     existing_claims = _claims_for_course(body.course_id, current_user, limit=max(1, min(body.max_claims, 300)))
-    result = generate_component_candidates(body.question, body.answer_text, existing_claims)
+    with usage_context("admin:component_candidates", user_id=current_user["id"], course_id=body.course_id):
+        result = generate_component_candidates(body.question, body.answer_text, existing_claims)
 
     created: list[dict] = []
     for candidate in result.components:

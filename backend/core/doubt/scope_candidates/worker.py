@@ -22,6 +22,7 @@ from sqlalchemy import text as sa_text
 from core.config import get_settings
 from core.doubt.scope_candidates.agent import ScopeCandidateAgent
 from core.doubt.scope_candidates.input_builder import build_target_context
+from core.llm_usage.context import bind_usage_context
 from core.postgres import get_session
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,11 @@ def _append_candidates(session, target_type: str, target_id: str, candidates: li
 
 def run_scope_candidate_mining(document_id: str = "", course_id: str = "") -> dict:
     """未解析の台帳行に対してスコープ候補を抽出する（同期実行本体）。"""
+    bind_usage_context(
+        "doubt:scope_candidates",
+        document_id=document_id or None,
+        course_id=course_id or None,
+    )
     session = get_session()
     try:
         targets = _claim_pending_targets(session, document_id, course_id)

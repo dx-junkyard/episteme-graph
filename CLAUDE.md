@@ -738,6 +738,38 @@ PDF 内の画像（装置図・設計図等）を解析パイプラインに取�
 - **非スコープ（v1）**: 学習者向け表示 / TheoryOperationGraph への装置ノード / CLIP 等の
   画像埋め込みモデル / グループ限定ライブラリ / vision 自動有効化 / table の画像解析。
 
+### LLM トークン使用量推計（U層, migration 043）
+
+全 LLM 呼び出し（agent 群は `ProviderJSONLLMClient` 経由で `core.llm` に集約済み）の
+トークン消費を記録・推計する観測レイヤー。正本は `docs/features/llm_usage_metering_design.md`。
+呼び出し側のコードは変更せず、フックは `core/llm.py`（+ `core/tts.py`）に一元化する。
+
+- **不変条項**: U1 実測優先・推計は正直に（`usage_source ∈ {reported, estimated_tokenizer,
+  estimated_heuristic}` を分離集計、混ぜた単一数値を見せない）/ U2 呼び出しを止めない
+  （記録は bounded buffer + flusher thread、`record()` は例外を漏らさない）/ U3 計測点は
+  `core/llm.py` に一元化（帰属は contextvars）/ U4 A層非改変 / U5 数値は SYSTEM_ADMIN のみ
+  （事前見積りのみ TEACHER・レンジ表示）/ U6 削除 API を作らない（append-only）/
+  U7 料金をハードコードしない（価格表は `LLM_PRICE_TABLE_PATH` の JSON、無ければ cost=null）/
+  U8 バッファ溢れ（dropped_events）を隠さない。
+- **実装**: `backend/core/llm_usage/`（schema / context / estimator / recorder / observe /
+  pricing / metrics。FastAPI 非 import）+ migration 043 `llm_usage_events`（FK なし・金額列
+  なし）+ `backend/api/routes/llm_usage.py`。
+- **帰属**: `usage_context(feature=..., user_id=..., document_id=..., run_id=...)` を
+  orchestrator / chat / 各 worker がセット。未設定は `feature='unattributed'` で記録
+  （記録自体は fail-open、消費量を落とさない）。feature 語彙は `pipeline:{stage}` /
+  `learning:chat` / `admin:course_builder` 等（正本は `llm_usage/schema.py`）。
+- **推計**: reported が無いときのみ。tiktoken は optional、フォールバックは
+  `ceil(CJK×1.0 + その他/4)` ±40% レンジ。vision は寸法既知なら `85+170×tiles`、
+  不明なら 765/枚。structured output は schema JSON も入力に算入。
+- **API**: `GET /api/admin/llm-usage/metrics`（SYSTEM_ADMIN、reported/estimated 分離 +
+  dropped_events + cost_usd）/ `GET /api/admin/llm-usage/estimate/documents/{id}`
+  （TEACHER・`_ensure_document_viewable`・レンジのみ・金額なし）。
+- **既存の回数上限（`*_MAX_CALLS_PER_*`）は変更しない**。enforcement・ストリーミング
+  usage・学習者向け表示は非スコープ。
+- **ガードレール**: `backend/tests/test_llm_usage_guardrails.py`（recorder 非漏洩・
+  FastAPI 非 import・削除 API 不在・権限 fail-closed・分離集計・レンジのみ・
+  価格ハードコード検出・学習者 API 非漏洩・estimator 決定性）。
+
 ### 質問の出所分類（教材/別の資料/モデル生成）
 
 学習チャットの「教材に沿って質問」「自由に質問・探索」ボタンは廃止し「質問」1つに

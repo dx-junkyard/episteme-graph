@@ -352,6 +352,33 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("ATLAS_DATA_SOURCE"),
     )
 
+    # --- U層（LLM 使用量計測, migration 043） ---
+    # false で record() を no-op に（テスト・ローカル用）
+    llm_usage_tracking_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("LLM_USAGE_TRACKING_ENABLED"),
+    )
+    # in-memory バッファ上限。超過分は最古から破棄し dropped_events に計上する（U8）
+    llm_usage_buffer_max: int = Field(
+        default=1000,
+        validation_alias=AliasChoices("LLM_USAGE_BUFFER_MAX"),
+    )
+    # バックグラウンド flusher の周期（秒）
+    llm_usage_flush_interval_seconds: float = Field(
+        default=10.0,
+        validation_alias=AliasChoices("LLM_USAGE_FLUSH_INTERVAL_SECONDS"),
+    )
+    # この件数到達で flusher を即時起こす
+    llm_usage_flush_batch: int = Field(
+        default=100,
+        validation_alias=AliasChoices("LLM_USAGE_FLUSH_BATCH"),
+    )
+    # モデル単価表 (JSON) のパス。空なら cost_usd は常に null（U7: 価格をハードコードしない）
+    llm_price_table_path: str = Field(
+        default="",
+        validation_alias=AliasChoices("LLM_PRICE_TABLE_PATH"),
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -27,16 +27,40 @@ import json
 import logging
 import os
 import re
+import time
+import types
 from functools import lru_cache
 from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel
 
 from core.config import get_settings
+from core.llm_usage.observe import (
+    observe_chat,
+    observe_embeddings,
+    observe_transcribe,
+    observe_vision,
+)
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def _safe_len(value: Any) -> int:
+    """``len()`` が例外を投げうる想定外入力でも安全に 0 を返す（観測フック専用）。"""
+    try:
+        return len(value)
+    except Exception:
+        return 0
+
+
+def _safe_json_schema(response_format: type[BaseModel]) -> dict | None:
+    """観測フック用に JSON Schema を取り出す。失敗しても本体の呼び出しを壊さない。"""
+    try:
+        return response_format.model_json_schema()
+    except Exception:
+        return None
 
 
 def get_embedding_dim() -> int:
@@ -341,8 +365,32 @@ def _vertex_ai_generate_text(
     kwargs: dict[str, Any] = {"generation_config": generation_config}
     if timeout is not None:
         kwargs["request_options"] = {"timeout": timeout}
-    response = model.generate_content(contents, **kwargs)
-    return _extract_vertex_ai_text(response)
+
+    provider_label = get_settings().llm_provider
+    started = time.monotonic()
+    try:
+        response = model.generate_content(contents, **kwargs)
+        text = _extract_vertex_ai_text(response)
+    except Exception as exc:
+        observe_chat(
+            provider=provider_label,
+            model=model_name,
+            messages=messages,
+            operation="chat",
+            error=exc,
+            started_monotonic=started,
+        )
+        raise
+    observe_chat(
+        provider=provider_label,
+        model=model_name,
+        messages=messages,
+        operation="chat",
+        response=response,
+        response_text=text,
+        started_monotonic=started,
+    )
+    return text
 
 
 def _vertex_ai_generate_structured(
@@ -359,14 +407,39 @@ def _vertex_ai_generate_structured(
         model_name=model_name,
         system_instruction=system_instruction,
     )
-    response = model.generate_content(
-        contents,
-        generation_config=GenerationConfig(
-            response_mime_type="application/json",
-            response_schema=schema,
-        ),
+
+    provider_label = get_settings().llm_provider
+    started = time.monotonic()
+    try:
+        response = model.generate_content(
+            contents,
+            generation_config=GenerationConfig(
+                response_mime_type="application/json",
+                response_schema=schema,
+            ),
+        )
+        raw = _extract_vertex_ai_text(response)
+    except Exception as exc:
+        observe_chat(
+            provider=provider_label,
+            model=model_name,
+            messages=messages,
+            operation="structured",
+            schema=schema,
+            error=exc,
+            started_monotonic=started,
+        )
+        raise
+    observe_chat(
+        provider=provider_label,
+        model=model_name,
+        messages=messages,
+        operation="structured",
+        schema=schema,
+        response=response,
+        response_text=raw,
+        started_monotonic=started,
     )
-    raw = _extract_vertex_ai_text(response)
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -423,6 +496,28 @@ def _sanitize_vertex_response_schema(schema: Any) -> Any:
     return clean(schema)
 
 
+def _vertex_embeddings_usage_response(embeddings: list[Any]) -> Any:
+    """Vertex AI embeddings の ``statistics.token_count`` を
+    ``observe_embeddings`` が期待する ``response.usage.prompt_tokens`` 形へ変換する
+    （設計書 §3.2 Vertex embeddings 行）。取り出せなければ None を返し estimator
+    フォールバックへ委ねる。
+    """
+    try:
+        total = 0
+        found = False
+        for e in embeddings:
+            stats = getattr(e, "statistics", None)
+            token_count = getattr(stats, "token_count", None) if stats is not None else None
+            if token_count is not None:
+                total += token_count
+                found = True
+        if not found:
+            return None
+        return types.SimpleNamespace(usage=types.SimpleNamespace(prompt_tokens=total))
+    except Exception:
+        return None
+
+
 def _vertex_ai_generate_embeddings(
     texts: list[str],
     model_name: str,
@@ -431,7 +526,27 @@ def _vertex_ai_generate_embeddings(
 
     model = TextEmbeddingModel.from_pretrained(model_name)
     inputs = [TextEmbeddingInput(text=t) for t in texts]
-    embeddings = model.get_embeddings(inputs)
+
+    provider_label = get_settings().llm_provider
+    started = time.monotonic()
+    try:
+        embeddings = model.get_embeddings(inputs)
+    except Exception as exc:
+        observe_embeddings(
+            provider=provider_label,
+            model=model_name,
+            texts=texts,
+            error=exc,
+            started_monotonic=started,
+        )
+        raise
+    observe_embeddings(
+        provider=provider_label,
+        model=model_name,
+        texts=texts,
+        response=_vertex_embeddings_usage_response(embeddings),
+        started_monotonic=started,
+    )
     return [list(e.values) for e in embeddings]
 
 
@@ -535,8 +650,33 @@ def _gemini_generate_text(
     kwargs: dict[str, Any] = {"generation_config": generation_config or None}
     if timeout is not None:
         kwargs["request_options"] = {"timeout": timeout}
-    response = model.generate_content(contents, **kwargs)
-    return (getattr(response, "text", "") or "").strip()
+
+    # provider ラベルは実際の設定値を使う（廃止予定の gemini-vertex も本関数を共用するため）。
+    provider_label = get_settings().llm_provider
+    started = time.monotonic()
+    try:
+        response = model.generate_content(contents, **kwargs)
+    except Exception as exc:
+        observe_chat(
+            provider=provider_label,
+            model=model_name,
+            messages=messages,
+            operation="chat",
+            error=exc,
+            started_monotonic=started,
+        )
+        raise
+    text = (getattr(response, "text", "") or "").strip()
+    observe_chat(
+        provider=provider_label,
+        model=model_name,
+        messages=messages,
+        operation="chat",
+        response=response,
+        response_text=text,
+        started_monotonic=started,
+    )
+    return text
 
 
 def _gemini_generate_structured(
@@ -553,14 +693,39 @@ def _gemini_generate_structured(
         model_name=model_name,
         system_instruction=system_instruction,
     )
-    response = model.generate_content(
-        contents,
-        generation_config={
-            "response_mime_type": "application/json",
-            "response_schema": schema,
-        },
-    )
+
+    provider_label = get_settings().llm_provider
+    started = time.monotonic()
+    try:
+        response = model.generate_content(
+            contents,
+            generation_config={
+                "response_mime_type": "application/json",
+                "response_schema": schema,
+            },
+        )
+    except Exception as exc:
+        observe_chat(
+            provider=provider_label,
+            model=model_name,
+            messages=messages,
+            operation="structured",
+            schema=schema,
+            error=exc,
+            started_monotonic=started,
+        )
+        raise
     raw = getattr(response, "text", "") or ""
+    observe_chat(
+        provider=provider_label,
+        model=model_name,
+        messages=messages,
+        operation="structured",
+        schema=schema,
+        response=response,
+        response_text=raw,
+        started_monotonic=started,
+    )
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -575,15 +740,33 @@ def _gemini_generate_embeddings(
     genai_module: Any,
 ) -> list[list[float]]:
     genai = genai_module
+    provider_label = get_settings().llm_provider
+    started = time.monotonic()
     # Gemini の embed_content は text 単位のためループで呼び出す。
     result: list[list[float]] = []
-    for t in texts:
-        resp = genai.embed_content(model=model_name, content=t)
-        # resp は dict-like: {"embedding": [...]} または {"embedding": {"values": [...]}}
-        emb = resp["embedding"] if isinstance(resp, dict) else getattr(resp, "embedding", None)
-        if isinstance(emb, dict) and "values" in emb:
-            emb = emb["values"]
-        result.append(list(emb or []))
+    try:
+        for t in texts:
+            resp = genai.embed_content(model=model_name, content=t)
+            # resp は dict-like: {"embedding": [...]} または {"embedding": {"values": [...]}}
+            emb = resp["embedding"] if isinstance(resp, dict) else getattr(resp, "embedding", None)
+            if isinstance(emb, dict) and "values" in emb:
+                emb = emb["values"]
+            result.append(list(emb or []))
+    except Exception as exc:
+        observe_embeddings(
+            provider=provider_label,
+            model=model_name,
+            texts=texts,
+            error=exc,
+            started_monotonic=started,
+        )
+        raise
+    observe_embeddings(
+        provider=provider_label,
+        model=model_name,
+        texts=texts,
+        started_monotonic=started,
+    )
     return result
 
 
@@ -664,13 +847,35 @@ def generate_text(
         reasoning_effort=reasoning_effort,
     )
 
-    response = client.chat.completions.create(
+    started = time.monotonic()
+    try:
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=adapted_messages,
+            timeout=timeout,
+            **api_kwargs,
+        )
+    except Exception as exc:
+        observe_chat(
+            provider=settings.llm_provider,
+            model=model_name,
+            messages=messages,
+            operation="chat",
+            error=exc,
+            started_monotonic=started,
+        )
+        raise
+    text = response.choices[0].message.content or ""
+    observe_chat(
+        provider=settings.llm_provider,
         model=model_name,
-        messages=adapted_messages,
-        timeout=timeout,
-        **api_kwargs,
+        messages=messages,
+        operation="chat",
+        response=response,
+        response_text=text,
+        started_monotonic=started,
     )
-    return response.choices[0].message.content or ""
+    return text
 
 
 def generate_text_with_structured_output(
@@ -713,13 +918,38 @@ def generate_text_with_structured_output(
     client = _get_openai_client()
 
     adapted_messages = _adapt_messages_for_model(messages, model_name)
+    schema = _safe_json_schema(response_format)
 
-    response = client.beta.chat.completions.parse(
+    started = time.monotonic()
+    try:
+        response = client.beta.chat.completions.parse(
+            model=model_name,
+            messages=adapted_messages,
+            response_format=response_format,
+        )
+    except Exception as exc:
+        observe_chat(
+            provider=settings.llm_provider,
+            model=model_name,
+            messages=messages,
+            operation="structured",
+            schema=schema,
+            error=exc,
+            started_monotonic=started,
+        )
+        raise
+    response_message = response.choices[0].message
+    observe_chat(
+        provider=settings.llm_provider,
         model=model_name,
-        messages=adapted_messages,
-        response_format=response_format,
+        messages=messages,
+        operation="structured",
+        schema=schema,
+        response=response,
+        response_text=getattr(response_message, "content", None),
+        started_monotonic=started,
     )
-    return response.choices[0].message.parsed
+    return response_message.parsed
 
 
 # ---------------------------------------------------------------------------
@@ -763,7 +993,25 @@ def generate_embeddings(
 
     client = _get_openai_client()
 
-    resp = client.embeddings.create(model=model_name, input=texts)
+    started = time.monotonic()
+    try:
+        resp = client.embeddings.create(model=model_name, input=texts)
+    except Exception as exc:
+        observe_embeddings(
+            provider=settings.llm_provider,
+            model=model_name,
+            texts=texts,
+            error=exc,
+            started_monotonic=started,
+        )
+        raise
+    observe_embeddings(
+        provider=settings.llm_provider,
+        model=model_name,
+        texts=texts,
+        response=resp,
+        started_monotonic=started,
+    )
     return [e.embedding for e in resp.data]
 
 
@@ -809,12 +1057,31 @@ def transcribe_audio(
 
     buf = io.BytesIO(audio_bytes)
     buf.name = filename  # openai SDK はファイル名からフォーマットを判定する
-    resp = client.audio.transcriptions.create(
+
+    started = time.monotonic()
+    try:
+        resp = client.audio.transcriptions.create(
+            model=model_name,
+            file=buf,
+            language=language,
+        )
+    except Exception as exc:
+        observe_transcribe(
+            provider="openai",
+            model=model_name,
+            audio_bytes_len=_safe_len(audio_bytes),
+            error=exc,
+            started_monotonic=started,
+        )
+        raise
+    text = (getattr(resp, "text", "") or "").strip()
+    observe_transcribe(
+        provider="openai",
         model=model_name,
-        file=buf,
-        language=language,
+        audio_bytes_len=_safe_len(audio_bytes),
+        started_monotonic=started,
     )
-    return (getattr(resp, "text", "") or "").strip()
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -918,10 +1185,33 @@ def generate_structured_with_images(
     )
 
     client = _get_openai_client()
-    response = client.chat.completions.create(
+
+    started = time.monotonic()
+    try:
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=adapted_messages,
+            **api_kwargs,
+        )
+    except Exception as exc:
+        observe_vision(
+            provider=settings.llm_provider,
+            model=model_name,
+            prompt=prompt,
+            image_count=_safe_len(images),
+            schema=schema,
+            error=exc,
+            started_monotonic=started,
+        )
+        raise
+    observe_vision(
+        provider=settings.llm_provider,
         model=model_name,
-        messages=adapted_messages,
-        **api_kwargs,
+        prompt=prompt,
+        image_count=_safe_len(images),
+        schema=schema,
+        response=response,
+        started_monotonic=started,
     )
     raw = response.choices[0].message.content or "{}"
     try:

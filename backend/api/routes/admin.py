@@ -69,6 +69,7 @@ from services import (
 from core.document_pipeline.figure_images import load_document_figures
 from core.document_pipeline.persistence import get_latest_analysis_run
 from core.llm import generate_text
+from core.llm_usage.context import usage_context
 from core.meta_analyzer import (
     analyze_unanswered_queries,
     approve_proposal,
@@ -1688,7 +1689,8 @@ def course_builder_chat(
     messages.append({"role": "user", "content": body.message})
 
     try:
-        raw_answer = generate_text(messages=messages, temperature=0.4)
+        with usage_context("admin:course_builder", user_id=current_user["id"]):
+            raw_answer = generate_text(messages=messages, temperature=0.4)
     except Exception as exc:
         logger.exception("Course builder chat LLM call failed")
         raise HTTPException(status_code=500, detail=f"Chat failed: {exc}") from exc

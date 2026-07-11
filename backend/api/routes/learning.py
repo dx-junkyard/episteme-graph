@@ -66,6 +66,7 @@ from services import (
 )
 from pydantic import BaseModel
 from core.llm import generate_text, get_llm_params, transcribe_audio
+from core.llm_usage.context import usage_context
 from core.tts import generate_tts_audio, strip_text_for_speech
 from core.learning_experience import (
     TIER_OUT_OF_SOURCE,
@@ -1476,15 +1477,16 @@ def learning_chat(
 
     # UIサジェスト由来の明示アクションは自然文の意図分類より優先する。
     if body.action == "EXPLAIN_GRAPH_ELEMENT":
-        graph_response = _generate_graph_element_explanation(
-            user_id=current_user["id"],
-            course_id=course_id,
-            topic_id=topic_id,
-            course_title=course_title,
-            topic_title=topic_title,
-            course_data=course_data,
-            body=body,
-        )
+        with usage_context("learning:chat", user_id=current_user["id"], course_id=course_id):
+            graph_response = _generate_graph_element_explanation(
+                user_id=current_user["id"],
+                course_id=course_id,
+                topic_id=topic_id,
+                course_title=course_title,
+                topic_title=topic_title,
+                course_data=course_data,
+                body=body,
+            )
         # グラフ要素の説明は常に detour（origin=現在アンカー）として扱い、
         # どの入口由来でも「学習パスに戻る」を提示する。
         clean_answer, inline_actions = extract_inline_actions(graph_response.answer)
@@ -1532,9 +1534,10 @@ def learning_chat(
             return _atlas_response
 
     # 2. 意図分類（Intent Routing）— UI ボタン由来の型付きアクションは分類を経由しない。
-    intent = None if (_is_casual or _atlas_ctx) else (
-        _route_for_typed_action(body.support_action) or _classify_intent(body.message, course_title)
-    )
+    with usage_context("learning:chat", user_id=current_user["id"], course_id=course_id):
+        intent = None if (_is_casual or _atlas_ctx) else (
+            _route_for_typed_action(body.support_action) or _classify_intent(body.message, course_title)
+        )
 
     # ルート①: 雑談・無関係な質問 → 学習に関する質問を促す
     if intent == "CHIT_CHAT":
@@ -1551,10 +1554,11 @@ def learning_chat(
 
     # ルート②: 学習相談・メタ質問 → RAGをスキップし、コース情報をベースにアドバイス
     if intent == "LEARNING_ADVICE":
-        advice_answer = _generate_learning_advice_response(
-            course_title, topic_title, body.message,
-            topic_info=topic_info, course_data=course_data,
-        )
+        with usage_context("learning:chat", user_id=current_user["id"], course_id=course_id):
+            advice_answer = _generate_learning_advice_response(
+                course_title, topic_title, body.message,
+                topic_info=topic_info, course_data=course_data,
+            )
         advice_answer, inline_actions = extract_inline_actions(advice_answer)
         is_prereq = (
             body.support_action in _PREREQUISITE_ACTIONS
@@ -1689,8 +1693,10 @@ def learning_chat(
         messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": body.message})
 
+    _chat_feature = "learning:chat_casual" if _is_casual else "learning:chat"
     try:
-        answer = generate_text(messages=messages, temperature=0.3)
+        with usage_context(_chat_feature, user_id=current_user["id"], course_id=course_id):
+            answer = generate_text(messages=messages, temperature=0.3)
     except Exception as exc:
         logger.exception("Learning chat LLM call failed for topic %s", topic_id)
         raise HTTPException(status_code=500, detail=f"Chat failed: {exc}") from exc
@@ -2140,7 +2146,8 @@ async def voice_transcribe_route(
     if len(data) > _VOICE_MAX_AUDIO_BYTES:
         raise HTTPException(status_code=413, detail="Audio too large")
     try:
-        text = transcribe_audio(data, audio.filename or "audio.webm", language=language)
+        with usage_context("learning:voice_stt", user_id=current_user["id"]):
+            text = transcribe_audio(data, audio.filename or "audio.webm", language=language)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
@@ -2162,7 +2169,8 @@ def voice_speak_route(
     if not spoken:
         raise HTTPException(status_code=400, detail="Nothing to speak")
     try:
-        audio_bytes = generate_tts_audio(spoken)
+        with usage_context("learning:voice_tts", user_id=current_user["id"]):
+            audio_bytes = generate_tts_audio(spoken)
     except Exception as exc:
         logger.exception("voice speak failed")
         raise HTTPException(status_code=500, detail=f"TTS failed: {exc}") from exc

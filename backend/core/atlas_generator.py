@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from core import atlas
 from core.cartridges import DomainCartridge, load_cartridge
 from core.config import get_settings
+from core.llm_usage.context import usage_context
 
 logger = logging.getLogger(__name__)
 
@@ -273,11 +274,12 @@ def generate_skeleton_draft(
     model_name = model or settings.llm_analysis_model
     batch = batch_id or uuid.uuid4().hex[:12]
 
-    generated = generate_text_with_structured_output(
-        messages=[{"role": "user", "content": prompt}],
-        response_format=GeneratedSkeleton,
-        model=model_name,
-    )
+    with usage_context("admin:atlas_skeleton"):
+        generated = generate_text_with_structured_output(
+            messages=[{"role": "user", "content": prompt}],
+            response_format=GeneratedSkeleton,
+            model=model_name,
+        )
     return normalize_generated(
         generated,
         cartridge_id=cartridge_id,
@@ -416,11 +418,12 @@ def interpret_skeleton_instruction(
         "- 断定を避ける。少しでも対象が曖昧なら ambiguous=true とし clarifying_question を必ず書く。\n"
         "- label_snapshot には特定した対象の現在のラベルを入れる。"
     )
-    return generate_text_with_structured_output(
-        messages=[{"role": "user", "content": prompt}],
-        response_format=SkeletonInterpretation,
-        model=_assist_model(model),
-    )
+    with usage_context("admin:atlas_assist"):
+        return generate_text_with_structured_output(
+            messages=[{"role": "user", "content": prompt}],
+            response_format=SkeletonInterpretation,
+            model=_assist_model(model),
+        )
 
 
 def propose_skeleton_edit(
@@ -459,11 +462,12 @@ def propose_skeleton_edit(
         "- before / after に変更前後の値を人間可読な文字列で入れる (教員の diff 確認用)。\n"
         "- summary に編集案の一言サマリを日本語で書く。"
     )
-    return generate_text_with_structured_output(
-        messages=[{"role": "user", "content": prompt}],
-        response_format=SkeletonEditProposal,
-        model=_assist_model(model),
-    )
+    with usage_context("admin:atlas_assist"):
+        return generate_text_with_structured_output(
+            messages=[{"role": "user", "content": prompt}],
+            response_format=SkeletonEditProposal,
+            model=_assist_model(model),
+        )
 
 
 # ---------------------------------------------------------------------------
