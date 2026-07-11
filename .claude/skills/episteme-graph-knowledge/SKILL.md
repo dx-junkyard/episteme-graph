@@ -142,6 +142,7 @@ CorePredicate の定義は `backend/core/schema.py` を直接読んで最新の�
 | `LLM_TRANSCRIBE_MODEL` | 音声文字起こしモデル（ハンズフリー会話、openai プロバイダのみ） | `whisper-1` |
 | `ASSISTANT_MAX_CALLS_PER_DAY` | Admin Copilot: chat の 1 ユーザー 1 日あたり LLM コール上限 | `20` |
 | `ASSISTANT_LLM_MODEL` | Admin Copilot: intent 分類/応答が使うモデル（空なら fast tier に委譲） | （空） |
+| `LECTURE_TTS_VOICE` | レクチャー音声生成の TTS voice（OpenAI 経路。多言語対応 voice を想定） | `alloy` |
 
 > **禁止**: `google-cloud-aiplatform` (Vertex AI) を新規パイプラインコードで使用すること。
 > Google の LLM を使う場合は必ず `LLM_PROVIDER=gemini` (`google-generativeai`) を指定すること。

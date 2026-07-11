@@ -131,6 +131,9 @@ class Chunk(Base):
     display_text = Column(Text, nullable=True)
     spoken_text = Column(Text, nullable=True)
     formulas = Column(JSONB, default=list)
+    # レクチャースライド同期 + 音声言語切替 (migration 040): 原稿の生成言語。
+    # NULL は既存データ（日本語前提で生成済み）とみなす。
+    spoken_language = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
 
     document = relationship("Document", back_populates="chunks")
@@ -141,14 +144,22 @@ class Chunk(Base):
 # ============================================================
 
 class LectureAudioCache(Base):
-    """TTS 音声キャッシュ (Issue #66)。"""
+    """TTS 音声キャッシュ (Issue #66)。
+
+    migration 040 でスライド単位 (``slide_index``) + 言語 (``language``) に拡張。
+    ``UNIQUE(chunk_id, slide_index, voice)``。既存行は ``slide_index=0`` のまま有効
+    （マーカーなしチャンク = 1スライドとして後方互換）。
+    """
     __tablename__ = "lecture_audio_cache"
-    __table_args__ = (UniqueConstraint("chunk_id", "voice"),)
+    __table_args__ = (UniqueConstraint("chunk_id", "slide_index", "voice"),)
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
     chunk_id = Column(UUID(as_uuid=True), ForeignKey("chunks.id", ondelete="CASCADE"), nullable=False)
+    slide_index = Column(Integer, nullable=False, default=0)
     voice = Column(Text, nullable=False, default="alloy")
-    audio_data = Column(Text, nullable=False)  # base64-encoded audio
+    language = Column(Text, nullable=False, default="ja")
+    # 実体は BYTEA（生SQL経由でバイナリ格納。ORM 自体は音声IOに未使用のため型不整合は挙動に影響しない）。
+    audio_data = Column(Text, nullable=False)
     duration_ms = Column(Integer, nullable=False, default=0)
     word_timestamps = Column(JSONB, default=list)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)

@@ -475,6 +475,7 @@
                       <button class="ls-mini-tab active" data-ls-display="preview">プレビュー</button>
                       <button class="ls-mini-tab" data-ls-display="script">原稿</button>
                       <button class="ls-mini-tab" data-ls-display="formulas">数式一覧</button>
+                      <button class="ls-mini-tab" data-ls-display="slides">スライド</button>
                     </div>
                     <!-- 再構成ループ (R層): 根拠リンク ⇄ つまづき の表示切り替え（別タブにしない） -->
                     <div class="ls-mini-tabs" id="ls-stumble-tabs" hidden>
@@ -482,11 +483,22 @@
                       <button class="ls-mini-tab" data-ls-rightmode="stumble">つまづき</button>
                     </div>
                   </div>
+                  <!-- レクチャースライド同期 (migration 040 Phase 3): 表示/読み上げテキストの
+                       近くにスライド区切り挿入ボタン + 整合インジケータを置く。原稿タブでのみ表示。 -->
+                  <div id="ls-slide-tools-row" class="ls-slide-tools-row" hidden>
+                    <button type="button" id="ls-insert-slide-marker-btn" class="ls-mini-tab"
+                      title="最後にフォーカスしていた入力欄（表示テキスト or 読み上げテキスト）のカーソル位置に区切りを挿入します。もう一方には自動挿入されないため、対応する位置には手動で追加してください。">+ スライド区切りを挿入</button>
+                    <span id="ls-slide-tools-indicator" class="ls-slides-indicator ls-slides-indicator-inline"></span>
+                  </div>
                   <div class="ls-pane-body">
                     <div id="ls-display-preview" class="ls-display-preview"></div>
                     <textarea id="ls-display-text" class="ls-script-textarea" placeholder="表示テキスト" hidden></textarea>
                     <textarea id="ls-spoken-text" class="ls-script-textarea" placeholder="読み上げテキスト" hidden></textarea>
                     <div id="ls-formulas" class="ls-formulas-panel" hidden></div>
+                    <div id="ls-slides-panel" class="ls-slides-panel" hidden>
+                      <div id="ls-slides-indicator" class="ls-slides-indicator"></div>
+                      <div id="ls-slides-list" class="ls-slides-list"></div>
+                    </div>
                   </div>
                 </section>
               </div>
@@ -548,6 +560,31 @@
               <label id="ls-assistant-label" class="ls-assistant-label">書き換え指示:</label>
               <textarea id="ls-rewrite-prompt" class="ls-rewrite-textarea" placeholder="例: 前提知識の説明を1文追加して" disabled></textarea>
               <button id="ls-rewrite-btn" class="admin-action-btn" disabled>AIで提案</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- レクチャースライド同期 + 音声言語切替 (migration 040 Phase 3/4): 音声生成前の言語選択モーダル -->
+        <div id="ls-audio-lang-modal" class="ls-settings-modal" hidden>
+          <div class="ls-settings-dialog">
+            <div class="ls-settings-head">
+              <h3>音声を生成します</h3>
+              <button id="ls-audio-lang-close" class="lecture-chat-close" type="button">&times;</button>
+            </div>
+            <div class="ls-settings-field">
+              <span>読み上げ言語</span>
+              <label class="ls-audio-lang-option">
+                <input type="radio" name="ls-audio-lang" id="ls-audio-lang-ja" value="ja" checked> 日本語
+              </label>
+              <label class="ls-audio-lang-option">
+                <input type="radio" name="ls-audio-lang" id="ls-audio-lang-en" value="en"> English
+              </label>
+            </div>
+            <div id="ls-audio-lang-status" class="ls-course-muted"></div>
+            <div id="ls-audio-lang-warning" class="upload-status upload-status-info" style="display:none"></div>
+            <div class="ls-settings-actions">
+              <button id="ls-audio-lang-cancel" class="admin-action-btn" type="button">キャンセル</button>
+              <button id="ls-audio-lang-start" class="admin-action-btn" type="button" style="background:var(--color-text-success);color:#fff">生成を開始</button>
             </div>
           </div>
         </div>

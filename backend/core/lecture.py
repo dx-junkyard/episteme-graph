@@ -43,6 +43,9 @@ _SPOKEN_TEXT_PROMPT = """あなたは大学院レベルの学習を支援する�
 ## 語り口設定:
 {persona_instruction}
 
+## 言語指定:
+{language_instruction}
+
 ## 指示:
 1. **display_text**: 画面表示用テキストを再構築してください。
    - 抽出テキスト内の欠落・OCRノイズ・崩れた数式を補正し、教材として自然に読める本文へ修復する
@@ -78,6 +81,22 @@ _SPOKEN_TEXT_PROMPT = """あなたは大学院レベルの学習を支援する�
 - `spoken` を `reading`・`text`・`description` などに改名してはいけません。
 - display_text には `$` や `$$` を絶対に含めないでください。数式は必ず `[[FORMULA_N]]` プレースホルダーで表現してください。
 """
+
+
+_LANGUAGE_LABELS: dict[str, str] = {"ja": "日本語", "en": "English"}
+
+
+def _language_instruction(language: str) -> str:
+    """言語切替 (migration 040 Phase 4) 用のプロンプト指示文を返す。
+
+    spoken_text の生成言語のみを指定する。display_text（表示教材）はソースの言語のまま
+    変更しない方針（§3-2: 翻訳は本機能のスコープ外）。
+    """
+    label = _LANGUAGE_LABELS.get(language, _LANGUAGE_LABELS["ja"])
+    return (
+        f"spoken_text は必ず{label}で書くこと。"
+        "display_text はソーステキストの言語のまま変更しないこと（表示テキストの翻訳はしない）。"
+    )
 
 
 _FORMULA_REQUIRED_KEYS = {"latex", "spoken", "is_display"}
@@ -146,12 +165,20 @@ def _build_course_context_text(course_data: dict) -> str:
 
 
 def generate_spoken_text_and_formulas(
-    chunk_text: str, 
-    chunk_index: int = 0, 
+    chunk_text: str,
+    chunk_index: int = 0,
     course_data: dict | None = None,
     persona_id: str | None = None,
+    language: str = "ja",
 ) -> dict:
-    """チャンクテキストから display_text / spoken_text / formulas を LLM で生成する。"""
+    """チャンクテキストから display_text / spoken_text / formulas を LLM で生成する。
+
+    Parameters
+    ----------
+    language : str
+        spoken_text の生成言語 (``"ja"`` / ``"en"``)。既定は ``"ja"``（後方互換）。
+        display_text（表示教材）はソースの言語のまま維持され、翻訳されない（§3-2）。
+    """
     if not chunk_text or not chunk_text.strip():
         return {"display_text": "", "spoken_text": "", "formulas": []}
 
@@ -178,6 +205,7 @@ def generate_spoken_text_and_formulas(
         chunk_index=chunk_index,
         chunk_text=chunk_text[:4000],
         persona_instruction=persona_prompt(persona_id, target="narration") or "指定なし。通常の自然な講義調で生成してください。",
+        language_instruction=_language_instruction(language),
     )
 
     last_exc: Exception | None = None
@@ -363,6 +391,139 @@ def _find_spoken_for_latex(latex: str, formulas: list[dict]) -> str:
         if f.get("latex", "").strip() == latex:
             return f.get("spoken", "")
     return ""
+
+
+# ---------------------------------------------------------------------------
+# スライド分割 (migration 040: レクチャースライド同期 Phase 1)
+# ---------------------------------------------------------------------------
+
+# スライド区切りマーカー: 単独行の "===" （3個以上の連続 "=" を許容、行頭行末の空白も許容）
+_SLIDE_MARKER_RE = re.compile(r"^[ \t]*={3,}[ \t]*$", re.MULTILINE)
+_SLIDE_FORMULA_ID_RE = re.compile(r"\[\[FORMULA_\d+\]\]")
+
+
+def _split_marker_segments(text: str | None) -> list[str]:
+    """テキストをスライド区切りマーカーで分割し、空セグメントを除去して返す。"""
+    if not text:
+        return []
+    raw_segments = _SLIDE_MARKER_RE.split(text)
+    segments = [seg.strip() for seg in raw_segments]
+    return [seg for seg in segments if seg]
+
+
+def _assign_slide_formulas(
+    slide_texts: list[tuple[str, str | None]],
+    formulas: list[dict],
+) -> list[list[dict]]:
+    """formulas を、各スライドの display_text が参照する [[FORMULA_N]] にのみ割り当てる。
+
+    どのスライドからも参照されない formulas（id が無い、あるいはどの display_text にも
+    現れない）は最後のスライドに付与し、情報を落とさない
+    （全スライドの formulas の和 == 入力 formulas を保証）。
+    """
+    slide_formula_lists: list[list[dict]] = [[] for _ in slide_texts]
+    if not slide_texts:
+        return slide_formula_lists
+
+    ids_per_slide = [
+        set(_SLIDE_FORMULA_ID_RE.findall(display)) for display, _spoken in slide_texts
+    ]
+
+    unassigned: list[dict] = []
+    for formula in formulas:
+        fid = str(formula.get("id") or "") if isinstance(formula, dict) else ""
+        assigned = False
+        if fid:
+            for i, ids in enumerate(ids_per_slide):
+                if fid in ids:
+                    slide_formula_lists[i].append(formula)
+                    assigned = True
+                    break
+        if not assigned:
+            unassigned.append(formula)
+
+    if unassigned:
+        slide_formula_lists[-1].extend(unassigned)
+
+    return slide_formula_lists
+
+
+def split_slides(
+    display_text: str | None,
+    spoken_text: str | None,
+    formulas: list | None = None,
+) -> tuple[list[dict], bool]:
+    """display_text / spoken_text をスライド区切りマーカー ``===`` で分割する。
+
+    分割結果は DB に保存せず、読み出し時に決定論的に導出する（§2-2）。
+
+    Parameters
+    ----------
+    display_text : str | None
+        画面表示用テキスト。None/空の場合のフォールバック（``text`` 列などへの代替）は
+        呼び出し側の責務とする（既存の ``display_text or text`` パターンを踏襲）。
+    spoken_text : str | None
+        音声読み上げ用テキスト。None/空の場合は各スライドの spoken_text は None になる。
+    formulas : list[dict] | None
+        数式メタデータのリスト。各スライドの display_text が参照する [[FORMULA_N]]
+        の分だけ割り当てられる。未参照分は最後のスライドに付与する。
+
+    Returns
+    -------
+    tuple[list[dict], bool]
+        ``(slides, mismatch)``。``slides`` の各要素は
+        ``{"slide_index": int, "display_text": str, "spoken_text": str | None, "formulas": list}``。
+        ``mismatch`` は表示と読み上げの分割数が一致せず 1 スライドに縮退した場合に True。
+    """
+    formulas = list(formulas) if formulas else []
+
+    display_segments = _split_marker_segments(display_text)
+    if not display_segments:
+        # display_text が None/空、またはマーカーのみで実質空 → 1件の空スライド
+        display_segments = [""]
+
+    spoken_segments = _split_marker_segments(spoken_text)
+
+    if not spoken_segments:
+        # spoken_text が無い/空: display の分割数でスライドを作り spoken_text=None
+        slide_texts: list[tuple[str, str | None]] = [(d, None) for d in display_segments]
+        mismatch = False
+    elif len(display_segments) == len(spoken_segments):
+        slide_texts = list(zip(display_segments, spoken_segments))
+        mismatch = False
+    else:
+        # 分割数不一致 → 1スライドに縮退（マーカー除去済み全文どうしをペア）。情報は落とさない。
+        merged_display = "\n\n".join(display_segments)
+        merged_spoken = "\n\n".join(spoken_segments)
+        slide_texts = [(merged_display, merged_spoken)]
+        mismatch = True
+
+    slide_formula_lists = _assign_slide_formulas(slide_texts, formulas)
+
+    slides = [
+        {
+            "slide_index": i,
+            "display_text": display,
+            "spoken_text": spoken,
+            "formulas": slide_formula_lists[i],
+        }
+        for i, (display, spoken) in enumerate(slide_texts)
+    ]
+    return slides, mismatch
+
+
+def get_course_lecture_language(course_data: dict | None) -> str:
+    """コースのレクチャースタジオ設定から読み上げ言語 (``ja``/``en``) を取得する。
+
+    設定が無い、または ``lecture_language`` 未設定の場合は既定の ``"ja"`` を返す。
+    """
+    if isinstance(course_data, dict):
+        settings = course_data.get("lecture_studio_settings")
+        if isinstance(settings, dict):
+            language = settings.get("lecture_language")
+            if language:
+                return str(language)
+    return "ja"
 
 
 # ---------------------------------------------------------------------------

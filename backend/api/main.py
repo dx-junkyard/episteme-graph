@@ -240,6 +240,40 @@ def _run_migrations() -> None:
             "CREATE INDEX IF NOT EXISTS idx_lecture_audio_cache_chunk_id ON lecture_audio_cache(chunk_id)"
         ))
 
+        # Migration 040: レクチャースライド同期 Phase 1 — スライド単位の音声キャッシュ
+        session.execute(sa_text(
+            "ALTER TABLE lecture_audio_cache ADD COLUMN IF NOT EXISTS slide_index INTEGER NOT NULL DEFAULT 0"
+        ))
+        session.execute(sa_text(
+            "ALTER TABLE lecture_audio_cache ADD COLUMN IF NOT EXISTS language TEXT NOT NULL DEFAULT 'ja'"
+        ))
+        session.execute(sa_text("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM pg_constraint WHERE conname = 'lecture_audio_cache_chunk_id_voice_key'
+                ) THEN
+                    ALTER TABLE lecture_audio_cache
+                        DROP CONSTRAINT lecture_audio_cache_chunk_id_voice_key;
+                END IF;
+            END $$;
+        """))
+        session.execute(sa_text("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint WHERE conname = 'lecture_audio_cache_chunk_slide_voice_key'
+                ) THEN
+                    ALTER TABLE lecture_audio_cache
+                        ADD CONSTRAINT lecture_audio_cache_chunk_slide_voice_key
+                        UNIQUE (chunk_id, slide_index, voice);
+                END IF;
+            END $$;
+        """))
+        session.execute(sa_text(
+            "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS spoken_language TEXT"
+        ))
+
         # Migration 007: arxiv_id カラムを廃止し material_id に統一 (Issue #70)
         # UPDATE chunks SET material_id = arxiv_id は既存DBからの移行用のため削除済み
         # クリーンなDBには arxiv_id カラムが存在しないため実行しない

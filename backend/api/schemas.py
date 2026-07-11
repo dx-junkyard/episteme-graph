@@ -5,6 +5,8 @@ main.py から分離した API 固有のスキーマを集約する。
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -549,6 +551,21 @@ class LectureFormulaItem(BaseModel):
     review_reason: list[str] = Field(default_factory=list)
 
 
+class LectureSlide(BaseModel):
+    """レクチャーセグメント内の1スライド（migration 040: レクチャースライド同期 Phase 1）。
+
+    表示 (display_text) と読み上げ (spoken_text) の同期最小単位。既定では
+    1セグメント（チャンク）= 1スライドだが、``===`` マーカーで複数スライドに分割できる
+    （``core.lecture.split_slides`` が導出。DB には保存しない）。
+    """
+    slide_index: int
+    display_text: str
+    spoken_text: str | None = None
+    formulas: list[LectureFormulaItem] = []
+    has_audio: bool = False
+    duration_ms: int = 0
+
+
 class LectureSegment(BaseModel):
     """レクチャーモードの1セグメント（チャンク単位）。"""
     chunk_id: str
@@ -559,6 +576,8 @@ class LectureSegment(BaseModel):
     has_audio: bool = False
     duration_ms: int = 0
     segment_mode: str = "full"  # full | summary | skip
+    slides: list[LectureSlide] = []
+    language: str = "ja"  # このセグメントの spoken_language（無指定は "ja"）
 
 
 class LectureSequenceResponse(BaseModel):
@@ -570,12 +589,14 @@ class LectureSequenceResponse(BaseModel):
     total_duration_ms: int = 0
     skipped_segments: int = 0  # 習得済みスキップ数
     summary_segments: int = 0  # 簡易版変換数
+    total_slides: int = 0  # 全セグメントのスライド数合計
 
 
 class LectureTTSRequest(BaseModel):
     """TTS 音声生成リクエスト。"""
     chunk_id: str
     voice: str = "alloy"
+    slide_index: int = 0
 
 
 class LectureTTSResponse(BaseModel):
@@ -593,6 +614,7 @@ class LectureInterruptRequest(BaseModel):
     current_chunk_id: str
     pause_position_ms: int = 0
     history: list[dict] = []
+    current_slide_index: int | None = None  # 記録用。挙動には影響しない
 
 
 class LectureInterruptResponse(BaseModel):
@@ -632,12 +654,18 @@ class LectureScriptChunkOut(BaseModel):
     ancestors: list | None = None
     neo4j_node_id: str = ""
     graph_elements: list[dict] = []
+    # レクチャースライド同期 + 音声言語切替 (migration 040 Phase 4)
+    spoken_language: str | None = None  # 原稿の生成言語。None/未生成時は "ja" とみなす
+    slide_count: int = 1  # split_slides() でのスライド枚数
+    slide_mismatch: bool = False  # 表示/読み上げの区切り数不一致で1枚に縮退したか
+    audio_ready_slides: int = 0  # 音声キャッシュ済みスライド数
 
 
 class LectureScriptGenerateRequest(BaseModel):
     """バッチスクリプト生成リクエスト。"""
     override: bool = False  # 既存スクリプトを上書きするか
     auto_audio: bool = False  # スクリプト生成完了後、自動で音声生成タスクを起動するか (Issue #139)
+    language: Literal["ja", "en"] | None = None  # 省略時はコース設定 (lecture_language) を使う
 
 
 class LectureScriptGenerateStartResponse(BaseModel):
@@ -685,6 +713,11 @@ class LectureScriptRewriteResponse(BaseModel):
     spoken_text: str
     formulas: list[LectureFormulaItem] = []
     theory_components: list[dict] = Field(default_factory=list)
+
+
+class LectureAudioGenerateRequest(BaseModel):
+    """バッチ音声生成リクエスト (migration 040 Phase 4: 言語切替)。"""
+    language: Literal["ja", "en"] | None = None  # 省略時はコース設定 (lecture_language) を使う
 
 
 class LectureAudioGenerateResponse(BaseModel):
@@ -991,6 +1024,9 @@ class LectureStudioSettings(BaseModel):
     """原稿スタジオのコース単位設定。"""
     narration_persona: str = ""
     response_persona: str = ""
+    # レクチャースライド同期 + 音声言語切替 (migration 040 Phase 4): コース単位の読み上げ言語。
+    # 不正値は pydantic のバリデーションで 422 になる。
+    lecture_language: Literal["ja", "en"] = "ja"
 
 
 # ---------------------------------------------------------------------------

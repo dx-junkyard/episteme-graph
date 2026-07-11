@@ -647,6 +647,41 @@ P7 既存 A/B/C/D 層コードを変更しない/ P8 道案内は誘導まで（
 `course_data.sources[].material_id` の有無）を必ず経由し、実チャンク教材が無い
 トピックに限ってドラフト（`_build_topic_draft_segment`）へフォールバックすること。
 
+### レクチャースライド同期 + 音声言語切替（migration 040）
+
+受講レクチャーを「スライド + スピーカーノーツ」モデルへ転換し、表示と読み上げを構造的に
+一致させる層。正本は `docs/features/lecture_slide_sync_design.md`。
+
+- **スライド = 表示と音声の同期最小単位**: 既定 1チャンク=1スライド。`display_text` /
+  `spoken_text` 内の**単独行 `===` マーカー**で対分割できる。分割は DB に保存せず
+  `core/lecture.py` の `split_slides()` が読み出し時に決定論的に導出する。表示/読み上げの
+  分割数不一致は**1スライドに縮退**（エラーにしない・情報を落とさない）し、スタジオで
+  `slide_mismatch` 警告を出す。`formulas` は各スライドの display_text が参照する
+  `[[FORMULA_N]]` だけを割当（未参照分は最後のスライドに残す）。
+- **音声はスライド単位で生成・キャッシュ**: `lecture_audio_cache` に `slide_index` /
+  `language` 列を追加（migration 040、`UNIQUE(chunk_id, slide_index, voice)` に張替え）。
+  `_batch_audio_worker` はスライドごとに `generate_tts_audio(spoken_text, language)` を
+  呼ぶ。原稿編集・AI書き換え時の無効化はチャンク単位で全スライド分 DELETE（既存挙動）。
+  学習者経路からの音声生成禁止（`generate_tts` はキャッシュ配信のみ・404 方針）は不変。
+- **言語**: コース単位の `lecture_language`（`ja`|`en`、lecture-studio settings に保持）。
+  TTS への言語指定ハードコード禁止（開発ルール8。Google 経路の `ja-JP` 固定は撤廃済み）。
+  `chunks.spoken_language` に原稿の生成言語を記録（NULL は `ja` とみなす）し、
+  `lecture_language` と不一致の音声は audio-status の ready に数えない（`stale_language`）。
+  言語切替は音声生成モーダルで選択 →「原稿再生成 → 音声再生成」の自動チェーン
+  （既存音声が無効になることを生成前に明示告知する）。
+- **受講画面（`app.js`）**: レクチャーモード中は `#lecture-slide-stage` にスライド1枚
+  表示（縦スクロールさせない。収まらない場合はフォント段階縮小 → 等比縮小で全文表示）。
+  表示ソースは `segment.slides[].display_text` に一本化（`student_material` 全文表示・
+  線形オートスクロール・キャプション領域・非表示ステージング `#lecture-content` は
+  レクチャーモードから廃止）。◀▶ = スライド移動、音声 `ended` で自動送り。
+  文ハイライトは表示中スライド本文への文字数比近似（`word_timestamps` は非スコープ）。
+  音声なしスライドはタイマー送り（ja 300字/分・en 150wpm・最低3秒）+「音声未生成」表示。
+- **原稿スタジオ（`admin.js`）**: displayView に `slides` プレビュー（受講画面と同一
+  レンダラ・分割整合インジケータ・長さ警告・スライド単位試聴
+  `GET /api/admin/chunks/{chunk_id}/lecture-audio`（`_require_teacher`・キャッシュ配信のみ））。
+  音声生成はモーダルで言語選択。教員がプレビューで見た分割・聞いた音声がそのまま
+  学習者に配信される（プレビューと配信のレンダラ・分割ロジックを共有すること）。
+
 ### 質問の出所分類（教材/別の資料/モデル生成）
 
 学習チャットの「教材に沿って質問」「自由に質問・探索」ボタンは廃止し「質問」1つに

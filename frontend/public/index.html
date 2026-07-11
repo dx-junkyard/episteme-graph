@@ -52,11 +52,6 @@
       </div>
       <!-- 分割ハンドル: 教材区画と下段（読み上げ行＋ホワイトボード）の比率をドラッグで調整 -->
       <div class="split-handle" id="split-handle" title="ドラッグして教材の表示比率を調整"><span class="split-grip"></span></div>
-      <!-- レクチャー読み上げキャプション: 現在読み上げ中の文だけを表示（レクチャー中のみ） -->
-      <div class="lecture-caption" id="lecture-caption">
-        <span class="lecture-caption-icon">&#128266;</span>
-        <span class="lecture-caption-text" id="lecture-caption-text"></span>
-      </div>
       <!-- チャット区画（探索）: モードバー＋会話 -->
       <div class="mode-bar" id="mode-bar" hidden></div>
       <div class="ca" id="chat-area">
@@ -64,8 +59,14 @@
           トピックを選択して学習を始めましょう。
         </div>
       </div>
-      <!-- Lecture segment staging (never shown; sentence annotation / KaTeX 用の下ごしらえ領域) -->
-      <div class="lecture-content" id="lecture-content" aria-hidden="true"></div>
+      <!-- レクチャースライドステージ: 表示と読み上げの同期最小単位（スライド）を1枚だけ表示する。
+           レクチャーモード中は #material-region の代わりにこちらを表示し、縦スクロールはさせない
+           （収まらない場合はフォント段階縮小 → 等比縮小で全文を収める）。 -->
+      <div class="lecture-slide-stage" id="lecture-slide-stage">
+        <div class="lecture-slide-inner" id="lecture-slide-inner"></div>
+        <span class="lecture-slide-badge" id="lecture-slide-noaudio" hidden>&#128263; 音声未生成</span>
+        <div class="lecture-slide-notice" id="lecture-slide-notice" hidden></div>
+      </div>
       <!-- Lecture player bar -->
       <div class="lecture-player" id="lecture-player">
         <div class="lecture-controls">

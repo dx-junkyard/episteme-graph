@@ -8,7 +8,7 @@ Usage::
     from core.tts import generate_tts_audio, TtsFatalError
 
     try:
-        audio_bytes = generate_tts_audio("読み上げるテキスト")
+        audio_bytes = generate_tts_audio("読み上げるテキスト", language="ja")
     except TtsFatalError:
         # 設定起因の恒久エラー。リトライ不要
         ...
@@ -55,7 +55,7 @@ class TtsFatalError(Exception):
     """
 
 
-def generate_tts_audio(spoken_text: str) -> bytes | None:
+def generate_tts_audio(spoken_text: str, language: str = "ja") -> bytes | None:
     """設定に基づいて TTS プロバイダを動的に選択し、MP3 音声データを返す。
 
     選択ロジック:
@@ -66,6 +66,10 @@ def generate_tts_audio(spoken_text: str) -> bytes | None:
 
     Args:
         spoken_text: 音声合成するテキスト。OpenAI は 4096 文字、Google は 5000 文字で切り詰める。
+        language: 読み上げ言語 (``"ja"`` / ``"en"``)。既定は ``"ja"``（後方互換）。
+            OpenAI は多言語対応の voice を使うため voice 自体の切替は不要（テキストに従う）。
+            Google Cloud TTS はこの値で ``language_code`` を切り替える
+            （migration 040: ``ja-JP`` ハードコード撤廃）。
 
     Returns:
         bytes: MP3 形式の音声データ。生成失敗またはプロバイダ未設定の場合は ``None``。
@@ -76,6 +80,10 @@ def generate_tts_audio(spoken_text: str) -> bytes | None:
     settings = get_settings()
     api_key = settings.llm_api_key
     provider = settings.llm_provider
+    # lecture_tts_voice 未設定の Settings 互換オブジェクト（テストのモック等）でも
+    # 動作するよう getattr で防御的に取得する。
+    voice = getattr(settings, "lecture_tts_voice", None) or "alloy"
+    google_language_code = "en-US" if language == "en" else "ja-JP"
 
     # --- OpenAI TTS ---
     if provider == "openai":
@@ -84,7 +92,7 @@ def generate_tts_audio(spoken_text: str) -> bytes | None:
             client = openai.OpenAI(api_key=api_key)
             response = client.audio.speech.create(
                 model="tts-1",
-                voice="alloy",
+                voice=voice,
                 input=spoken_text[:4096],
                 response_format="mp3",
             )
@@ -106,7 +114,7 @@ def generate_tts_audio(spoken_text: str) -> bytes | None:
             tts_client = texttospeech.TextToSpeechClient()
             synthesis_input = texttospeech.SynthesisInput(text=spoken_text[:5000])
             voice_params = texttospeech.VoiceSelectionParams(
-                language_code="ja-JP",
+                language_code=google_language_code,
                 ssml_gender=texttospeech.SsmlVoiceGender.NEUTRAL,
             )
             audio_config = texttospeech.AudioConfig(

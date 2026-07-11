@@ -295,47 +295,14 @@ body {
   background: var(--color-text-info);
 }
 
-/* レクチャー読み上げキャプション: いま読んでいる文だけを 1〜2 行で表示 */
-.lecture-caption {
-  display: none;
-  flex: 0 0 auto;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 8px 12px;
-  margin-bottom: 10px;
-  border-radius: 8px;
-  border-left: 3px solid var(--color-text-info);
-  background: var(--color-background-info);
-  font-size: 14px;
-  line-height: 1.7;
-  color: var(--color-text-primary);
-}
-.lecture-caption.visible { display: flex; }
-.lecture-caption.warn {
-  border-left-color: var(--color-text-warning);
-  background: #fff6e6;
-}
-.lecture-caption-icon {
-  flex: 0 0 auto;
-  font-size: 13px;
-  margin-top: 2px;
-}
-.lecture-caption-text {
-  flex: 1;
-  min-width: 0;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-/* レクチャー中のレイアウト: 下段（チャット/ホワイトボード）と分割ハンドルを畳み、
-   上段の教材をいっぱいに広げる。中段キャプション（読み上げ中の行）は教材直下に残す。 */
+/* レクチャー中のレイアウト: 上段の教材区画（#material-region）を隠し、代わりに
+   スライドステージ（#lecture-slide-stage）をいっぱいに広げる。下段（チャット/
+   ホワイトボード）と分割ハンドルは畳む。 */
 .mn.lecture-on #material-region {
-  flex: 1 1 auto !important;
-  max-height: none !important;
-  height: auto !important;
-  margin-bottom: 0;
+  display: none !important;
+}
+.mn.lecture-on .lecture-slide-stage {
+  display: flex !important;
 }
 .mn.lecture-on #split-handle,
 .mn.lecture-on #chat-area,
@@ -2528,27 +2495,76 @@ body {
   background: #fef5e6;
 }
 
-/* Lecture content area — 音声で解説する「教材」の本文を読ませる面。
-   読み上げ台本を並べるのではなく、教材を落ち着いて表示し、
-   いま読んでいる文だけを最小限ハイライトする。 */
-.lecture-content {
+/* レクチャースライドステージ: 表示と音声の同期最小単位（スライド）を1枚だけ表示する
+   面。縦スクロールはさせず、収まらない場合は #lecture-slide-inner 側で
+   フォント段階縮小 → 等比縮小して全文を1画面に収める（fitLectureSlideContent）。 */
+.lecture-slide-stage {
   display: none;
-  flex-direction: column;
-  gap: 10px;
-  padding: 16px 0;
-}
-
-.lecture-content.visible {
-  display: flex;
-  flex: 1;
-  overflow-y: auto;
+  position: relative;
+  flex: 1 1 auto;
   min-height: 0;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 20px 28px;
+  border: 0.5px solid var(--color-border-tertiary);
+  border-radius: 10px;
+  background: var(--color-background-secondary, #fafbfd);
+  margin-bottom: 12px;
 }
 
-.lecture-loading {
-  display: flex;
-  align-items: center;
-  padding: 8px 0;
+.lecture-slide-inner {
+  width: 100%;
+  max-width: 880px;
+  max-height: 100%;
+  overflow: hidden;
+  font-size: 16px;
+  line-height: 1.8;
+  color: var(--color-text-primary);
+  transform-origin: top center;
+}
+
+.lecture-slide-message {
+  color: var(--color-text-tertiary);
+  font-size: 14px;
+  text-align: center;
+}
+
+.lecture-slide-message.warn {
+  color: var(--color-text-warning);
+}
+
+/* 「音声未生成」の恒常バッジ（ステージ右下・控えめ） */
+.lecture-slide-badge {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  background: var(--color-background-primary);
+  border: 0.5px solid var(--color-border-tertiary);
+  border-radius: 10px;
+  padding: 2px 8px;
+  opacity: 0.85;
+}
+
+/* 一時的な通知（音声準備中・自動再生ブロック・再生失敗などの警告） */
+.lecture-slide-notice {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 10px;
+  font-size: 12px;
+  text-align: center;
+  color: var(--color-text-info);
+  background: var(--color-background-info);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
+.lecture-slide-notice.warn {
+  color: var(--color-text-warning);
+  background: #fff6e6;
 }
 
 /* 文単位の追従ハイライト（読んでいるところの最小限表示）。
@@ -2565,33 +2581,6 @@ body {
 .lecture-sentence.reading {
   background: var(--color-background-info);
   color: var(--color-text-primary);
-}
-
-.lecture-segment {
-  opacity: 0;
-  transform: translateY(8px);
-  transition: opacity 0.6s ease-out, transform 0.6s ease-out;
-  line-height: 1.9;
-  font-size: 15px;
-  color: var(--color-text-primary);
-}
-
-.lecture-segment.visible {
-  opacity: 1;
-  transform: translateY(0);
-}
-
-/* 教材としてどの段落も読めるよう、既読でも大きくは沈めない。 */
-.lecture-segment.past {
-  opacity: 0.78;
-}
-
-/* 現在のセグメントは大きな塗り箱ではなく、細い左アクセントだけの控えめな表示にして、
-   文単位の reading ハイライトが主役になるようにする。 */
-.lecture-segment.current {
-  opacity: 1;
-  padding-left: 12px;
-  border-left: 3px solid var(--color-text-info);
 }
 
 /* Lecture formula display */
@@ -3449,6 +3438,173 @@ body {
 
 .ls-display-preview p {
   margin: 0 0 12px;
+}
+
+/* レクチャースライド同期 (migration 040 Phase 3): スライドプレビュー・区切り挿入・整合インジケータ */
+.ls-slide-tools-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-background-secondary);
+}
+
+.ls-slide-tools-row[hidden] {
+  display: none !important;
+}
+
+.ls-slides-panel {
+  height: 100%;
+  min-height: 360px;
+  padding: 12px;
+  overflow-y: auto;
+  background: var(--color-background-primary);
+}
+
+.ls-slides-panel[hidden] {
+  display: none !important;
+}
+
+.ls-slides-indicator {
+  margin-bottom: 10px;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  background: var(--color-background-secondary);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+}
+
+.ls-slides-indicator-ok {
+  color: var(--color-text-success);
+  border-color: var(--color-text-success);
+}
+
+.ls-slides-indicator-warn {
+  color: var(--color-text-warning);
+  border-color: var(--color-text-warning);
+}
+
+.ls-slides-indicator-inline {
+  display: inline-block;
+  margin: 0;
+  padding: 3px 8px;
+}
+
+.ls-slide-card {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  margin-bottom: 14px;
+  padding: 12px;
+  background: var(--color-background-primary);
+}
+
+.ls-slide-card-playing {
+  border-color: var(--color-text-info);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25);
+}
+
+.ls-slide-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.ls-slide-card-index {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+}
+
+.ls-slide-card-body {
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.ls-slide-card-body p {
+  margin: 0 0 10px;
+}
+
+.ls-slide-card-notes {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--color-background-secondary);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ls-slide-card-notes p {
+  margin: 0 0 6px;
+}
+
+.ls-slide-warn {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--color-text-warning);
+}
+
+.ls-slide-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.ls-slide-play-status {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.ls-slide-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.ls-slide-badge-ready {
+  color: var(--color-text-success);
+  border-color: var(--color-text-success);
+}
+
+.ls-slide-badge-warn {
+  color: var(--color-text-warning);
+  border-color: var(--color-text-warning);
+}
+
+.ls-slide-badge-none {
+  color: var(--color-text-tertiary);
+}
+
+.ls-slide-mismatch-badge {
+  color: var(--color-text-warning);
+  margin-left: 4px;
+}
+
+.ls-audio-lang-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: var(--color-text-primary);
+}
+
+.ls-course-slide-tools-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-background-secondary);
 }
 
 .ls-course-draft {

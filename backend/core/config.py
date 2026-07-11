@@ -113,6 +113,13 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("LLM_TRANSCRIBE_MODEL"),
     )
 
+    # --- レクチャースライド同期 + 音声言語切替 (migration 040) ---
+    # OpenAI TTS の voice。多言語対応の音声のため言語による分岐は不要（既定 "alloy"）。
+    lecture_tts_voice: str = Field(
+        default="alloy",
+        validation_alias=AliasChoices("LECTURE_TTS_VOICE"),
+    )
+
     # --- TensionMiningAgent (B層) — コスト制御（設計書 §8） ---
     # 1セッション（user×course×topic×日）あたりの LLM コール上限
     tension_max_calls_per_session: int = Field(

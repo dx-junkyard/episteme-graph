@@ -4125,7 +4125,10 @@
     settings: {
       narration_persona: "",
       response_persona: "",
+      lecture_language: "ja",
     },
+    // レクチャースライド同期 (migration 040 Phase 3): スライド試聴中の Audio ハンドル
+    slideAudioPlayer: null,
     componentsByChunk: {},
     claimsByChunk: {},
     claimMetaByChunk: {},
@@ -4336,7 +4339,7 @@
         lsState.selectedTheoryComponentId = null;
         lsState.analysisStatus = null;
         lsState.pipelineTask = null;
-        lsState.settings = { narration_persona: "", response_persona: "" };
+        lsState.settings = { narration_persona: "", response_persona: "", lecture_language: "ja" };
         lsState.courseStructure = null;
         lsState.courseComponents = null;
         if (audioAllBtn) audioAllBtn.disabled = true;
@@ -4376,8 +4379,10 @@
       if (!lsState.courseId || lsState.generating) return;
       if (!lsIsCourseContentComplete()) return;
       lsCloseMenus();
-      lsBatchAudio();
+      lsOpenAudioLangModal();
     });
+
+    lsInitAudioLangModal();
 
     settingsBtn.addEventListener("click", function () {
       if (!lsState.courseId) return;
@@ -4456,11 +4461,19 @@
         lsState.settings = {
           narration_persona: settings.narration_persona || "",
           response_persona: settings.response_persona || "",
+          // レクチャースライド同期 + 音声言語切替 (migration 040): バックエンドが未対応でも
+          // 既定 "ja" にフォールバックする（Phase 4 実装待ちでも動作するよう防御的に）。
+          lecture_language: settings.lecture_language || "ja",
         };
       })
       .catch(function () {
-        lsState.settings = { narration_persona: "", response_persona: "" };
+        lsState.settings = { narration_persona: "", response_persona: "", lecture_language: "ja" };
       });
+  }
+
+  // レクチャースライド同期 + 音声言語切替 (migration 040): コースの現在の読み上げ言語。
+  function lsCourseLectureLanguage() {
+    return (lsState.settings && lsState.settings.lecture_language) || "ja";
   }
 
   function lsPersonaSelectHtml(id, selected) {
@@ -4624,6 +4637,7 @@
         lsState.settings = {
           narration_persona: saved.narration_persona || "",
           response_persona: saved.response_persona || "",
+          lecture_language: saved.lecture_language || lsCourseLectureLanguage(),
         };
         modal.remove();
         lsShowProgress("原稿スタジオ設定を保存しました", "success");
@@ -4633,6 +4647,111 @@
         statusEl.className = "upload-status upload-status-error";
         saveBtn.disabled = false;
       });
+  }
+
+  // レクチャースライド同期 + 音声言語切替 (migration 040 Phase 3/4): 音声一括生成の言語選択モーダル。
+  // #ls-audio-all-btn は即実行せずこのモーダルを開き、[生成を開始] で lsBatchAudio(language) を呼ぶ。
+  function lsAudioStatusForLanguage(language) {
+    var chunks = lsState.chunks || [];
+    var total = 0;
+    var ready = 0;
+    var sawField = false;
+    chunks.forEach(function (c) {
+      if (typeof c.slide_count !== "number") return;
+      sawField = true;
+      total += c.slide_count;
+      var chunkLang = c.spoken_language || "ja";
+      if (chunkLang === language && typeof c.audio_ready_slides === "number") {
+        ready += c.audio_ready_slides;
+      }
+    });
+    return sawField ? { total: total, ready: ready } : null;
+  }
+
+  function lsAudioLangLabel(language) {
+    return language === "en" ? "English" : "日本語";
+  }
+
+  function lsRenderAudioLangModalStatus(language) {
+    var statusEl = document.getElementById("ls-audio-lang-status");
+    if (!statusEl) return;
+    var stat = lsAudioStatusForLanguage(language);
+    if (!stat) {
+      // フィールド欠落時（Phase 4 バックエンド未反映時）は表示を省略する（防御的）。
+      statusEl.textContent = "";
+      return;
+    }
+    statusEl.textContent = "現状: " + lsAudioLangLabel(language) + "音声 " + stat.ready + "/" + stat.total + " スライド生成済み";
+  }
+
+  function lsUpdateAudioLangWarning(selectedLanguage) {
+    var warnEl = document.getElementById("ls-audio-lang-warning");
+    if (!warnEl) return;
+    var currentLanguage = lsCourseLectureLanguage();
+    if (selectedLanguage !== currentLanguage) {
+      warnEl.textContent = "⚠ 読み上げ原稿を " + lsAudioLangLabel(selectedLanguage) + " で再生成し、音声を作り直します。" +
+        "既存の " + lsAudioLangLabel(currentLanguage) + " 音声は使われなくなります。";
+      warnEl.style.display = "block";
+    } else {
+      warnEl.style.display = "none";
+    }
+  }
+
+  function lsSelectedAudioLangValue() {
+    var checked = document.querySelector('input[name="ls-audio-lang"]:checked');
+    return checked ? checked.value : lsCourseLectureLanguage();
+  }
+
+  function lsOpenAudioLangModal() {
+    var modal = document.getElementById("ls-audio-lang-modal");
+    if (!modal) {
+      // モーダルDOMが無い場合でも音声生成自体は現在の設定言語でブロックしない（fail-safe）。
+      lsBatchAudio(lsCourseLectureLanguage());
+      return;
+    }
+    var currentLanguage = lsCourseLectureLanguage();
+    var jaRadio = document.getElementById("ls-audio-lang-ja");
+    var enRadio = document.getElementById("ls-audio-lang-en");
+    if (jaRadio) jaRadio.checked = currentLanguage !== "en";
+    if (enRadio) enRadio.checked = currentLanguage === "en";
+    lsRenderAudioLangModalStatus(currentLanguage);
+    lsUpdateAudioLangWarning(currentLanguage);
+    var startBtn = document.getElementById("ls-audio-lang-start");
+    if (startBtn) startBtn.disabled = false;
+    modal.hidden = false;
+  }
+
+  function lsCloseAudioLangModal() {
+    var modal = document.getElementById("ls-audio-lang-modal");
+    if (modal) modal.hidden = true;
+  }
+
+  function lsInitAudioLangModal() {
+    var modal = document.getElementById("ls-audio-lang-modal");
+    if (!modal || modal.getAttribute("data-ls-bound") === "1") return;
+    modal.setAttribute("data-ls-bound", "1");
+    var closeBtn = document.getElementById("ls-audio-lang-close");
+    var cancelBtn = document.getElementById("ls-audio-lang-cancel");
+    var startBtn = document.getElementById("ls-audio-lang-start");
+    if (closeBtn) closeBtn.addEventListener("click", lsCloseAudioLangModal);
+    if (cancelBtn) cancelBtn.addEventListener("click", lsCloseAudioLangModal);
+    modal.addEventListener("click", function (e) {
+      if (e.target === modal) lsCloseAudioLangModal();
+    });
+    ["ls-audio-lang-ja", "ls-audio-lang-en"].forEach(function (id) {
+      var radio = document.getElementById(id);
+      if (!radio) return;
+      radio.addEventListener("change", function () {
+        var lang = this.value;
+        lsRenderAudioLangModalStatus(lang);
+        lsUpdateAudioLangWarning(lang);
+      });
+    });
+    if (startBtn) startBtn.addEventListener("click", function () {
+      var lang = lsSelectedAudioLangValue();
+      lsCloseAudioLangModal();
+      lsBatchAudio(lang);
+    });
   }
 
   function lsLoadCourses() {
@@ -5111,10 +5230,15 @@
           var preview = (c.text || "").substring(0, 40).replace(/\n/g, " ");
           if (c.text && c.text.length > 40) preview += "...";
           var theoryState = lsChunkTheoryState(c.chunk_id) + lsClaimState(c.chunk_id);
+          // レクチャースライド同期 (migration 040 Phase 3): 表示/読み上げのスライド分割数が
+          // 一致しないチャンクに ⚠ を添える（既存の status 表示は壊さない）。
+          var slideMismatchBadge = lsChunkSlideMismatch(c)
+            ? '<span class="ls-slide-mismatch-badge" title="表示テキストと読み上げテキストのスライド区切り数が一致していません">⚠</span>'
+            : "";
           html +=
             '<div class="ls-chunk-item ls-chunk-child' + active + '" data-chunk-id="' + escHtml(c.chunk_id) + '">' +
               '<span class="ls-chunk-status ' + escHtml(c.status) + '"></span>' +
-              '<span class="ls-chunk-label">chunk ' + (c.chunk_index || i) + " " + escHtml(preview) + theoryState + '</span>' +
+              '<span class="ls-chunk-label">chunk ' + (c.chunk_index || i) + " " + escHtml(preview) + theoryState + slideMismatchBadge + '</span>' +
             '</div>';
         });
       });
@@ -5141,6 +5265,7 @@
   }
 
   function lsSelectChunk(chunkId) {
+    lsStopSlideAudioPlayback();
     lsState.selectedChunkId = chunkId;
     lsState.selectedScope = { type: "chunk", chunkId: chunkId };
     lsState.selectedTheoryComponentId = null;
@@ -5167,6 +5292,7 @@
   }
 
   function lsSelectSection(documentId, sectionId) {
+    lsStopSlideAudioPlayback();
     var first = null;
     (lsState.chunks || []).some(function (chunk) {
       if ((chunk.document_id || chunk.material_id) === documentId && lsSectionIdForChunk(chunk) === sectionId) {
@@ -5186,6 +5312,7 @@
   }
 
   function lsSelectPaper(documentId) {
+    lsStopSlideAudioPlayback();
     var first = (lsState.chunks || []).find(function (chunk) {
       return (chunk.document_id || chunk.material_id) === documentId;
     });
@@ -5254,6 +5381,9 @@
     document.getElementById("ls-display-tabs").addEventListener("click", function (e) {
       var btn = e.target.closest("[data-ls-display]");
       if (!btn) return;
+      if (lsState.displayView === "slides" && btn.getAttribute("data-ls-display") !== "slides") {
+        lsStopSlideAudioPlayback();
+      }
       lsState.displayView = btn.getAttribute("data-ls-display") || "preview";
       lsRenderWorkspace();
     });
@@ -5280,6 +5410,27 @@
       var chunk = lsGetSelectedChunk();
       if (chunk) chunk.spoken_text = this.value;
     });
+    // レクチャースライド同期 (migration 040 Phase 3): どちらの textarea に最後に
+    // フォーカスしていたかを覚えておく（「スライド区切りを挿入」の挿入先判定に使う）。
+    document.getElementById("ls-display-text").addEventListener("focus", function () {
+      lsSlideToolsLastFocus = "ls-display-text";
+    });
+    document.getElementById("ls-spoken-text").addEventListener("focus", function () {
+      lsSlideToolsLastFocus = "ls-spoken-text";
+    });
+    // 整合インジケータ・スライドタブのライブ更新（描画は debounce 300ms）。
+    document.getElementById("ls-display-text").addEventListener("input", function () {
+      lsUpdateSlideIndicatorsDebounced();
+    });
+    document.getElementById("ls-spoken-text").addEventListener("input", function () {
+      lsUpdateSlideIndicatorsDebounced();
+    });
+    var insertSlideMarkerBtn = document.getElementById("ls-insert-slide-marker-btn");
+    if (insertSlideMarkerBtn) {
+      insertSlideMarkerBtn.addEventListener("click", function () {
+        lsInsertSlideMarker();
+      });
+    }
     var extractBtn = document.getElementById("ls-extract-theory-btn");
     if (extractBtn) {
       extractBtn.addEventListener("click", function () {
@@ -5734,6 +5885,13 @@
           '<textarea id="ls-course-spoken-script" class="ls-course-script-textarea"' + editHidden + ' placeholder="教員が話せる自然文。音声読み上げ対象です。">' + escHtml(spokenText) + '</textarea>' +
           '<div id="ls-course-spoken-preview" class="ls-course-field-preview"' + previewHidden + '>' + lsRenderCourseMaterialPreview(spokenText, topic) + '</div>' +
         '</section>' +
+        // レクチャースライド同期 (migration 040 Phase 3): 教材/本文説明にも同じ
+        // 区切り挿入ボタンと整合インジケータを付ける（編集タブでのみ表示）。
+        '<div class="ls-course-slide-tools-row"' + editHidden + '>' +
+          '<button type="button" id="ls-course-insert-slide-marker-btn" class="ls-mini-tab" ' +
+            'title="最後にフォーカスしていた入力欄（教材 or 本文説明）のカーソル位置に区切りを挿入します。もう一方には自動挿入されないため、対応する位置には手動で追加してください。">+ スライド区切りを挿入</button>' +
+          '<span id="ls-course-slides-indicator" class="ls-slides-indicator ls-slides-indicator-inline"></span>' +
+        '</div>' +
         '<section class="ls-course-draft-section">' +
           '<div class="ls-course-draft-label">注意点</div>' +
           '<textarea id="ls-course-cautions" class="ls-course-small-textarea"' + editHidden + ' placeholder="誤解しやすい点や適用条件を1行ずつ入力">' + escHtml(cautionsText) + '</textarea>' +
@@ -5791,6 +5949,42 @@
         lsFocusEvidence(link.getAttribute("data-evidence-ref"));
       });
     });
+
+    // レクチャースライド同期 (migration 040 Phase 3): コーストピックドラフトの
+    // 「スライド区切りを挿入」ボタン + 整合インジケータ。
+    var spokenScriptEl = document.getElementById("ls-course-spoken-script");
+    var courseSlideLastFocus = "ls-course-material-text";
+    if (materialEl) materialEl.addEventListener("focus", function () { courseSlideLastFocus = "ls-course-material-text"; });
+    if (spokenScriptEl) spokenScriptEl.addEventListener("focus", function () { courseSlideLastFocus = "ls-course-spoken-script"; });
+
+    function updateCourseSlideIndicator() {
+      var indicatorEl = document.getElementById("ls-course-slides-indicator");
+      if (!indicatorEl) return;
+      var dText = materialEl ? materialEl.value : lsTopicStudentMaterialSource(topic);
+      var sText = spokenScriptEl ? spokenScriptEl.value : (topic.spoken_script || topic.content || "");
+      lsRenderSlideIndicatorEl(indicatorEl, lsSplitSlides(dText, sText));
+    }
+    var courseSlideIndicatorTimer = null;
+    function scheduleCourseSlideIndicatorUpdate() {
+      if (courseSlideIndicatorTimer) clearTimeout(courseSlideIndicatorTimer);
+      courseSlideIndicatorTimer = setTimeout(function () {
+        courseSlideIndicatorTimer = null;
+        updateCourseSlideIndicator();
+      }, 300);
+    }
+    if (materialEl) materialEl.addEventListener("input", scheduleCourseSlideIndicatorUpdate);
+    if (spokenScriptEl) spokenScriptEl.addEventListener("input", scheduleCourseSlideIndicatorUpdate);
+    updateCourseSlideIndicator();
+
+    var courseInsertMarkerBtn = document.getElementById("ls-course-insert-slide-marker-btn");
+    if (courseInsertMarkerBtn) {
+      courseInsertMarkerBtn.addEventListener("click", function () {
+        var target = document.getElementById(courseSlideLastFocus) || materialEl;
+        lsInsertSlideMarkerIntoTextarea(target);
+        updateTopic();
+        updateCourseSlideIndicator();
+      });
+    }
   }
 
   function lsNormalizeEvidenceId(id) {
@@ -6191,6 +6385,9 @@
     var displayEl = document.getElementById("ls-display-text");
     var spokenEl = document.getElementById("ls-spoken-text");
     var formulasEl = document.getElementById("ls-formulas");
+    // レクチャースライド同期 (migration 040 Phase 3)
+    var slidesEl = document.getElementById("ls-slides-panel");
+    var slideToolsRow = document.getElementById("ls-slide-tools-row");
     sourceEl.textContent = chunk.raw_text || chunk.text || "(抽出テキストなし)";
     if (displayEl.value !== (chunk.display_text || chunk.text || "")) displayEl.value = chunk.display_text || chunk.text || "";
     if (spokenEl.value !== (chunk.spoken_text || displayEl.value || "")) spokenEl.value = chunk.spoken_text || displayEl.value || "";
@@ -6230,6 +6427,8 @@
       spokenEl.hidden = true;
       displayEl.hidden = true;
       if (formulasEl) formulasEl.hidden = true;
+      if (slidesEl) slidesEl.hidden = true;
+      if (slideToolsRow) slideToolsRow.hidden = true;
       document.getElementById("ls-display-preview").hidden = true;
       lsRenderTheoryPanel(chunk);
     } else if (isClaims) {
@@ -6237,6 +6436,8 @@
       spokenEl.hidden = true;
       displayEl.hidden = true;
       if (formulasEl) formulasEl.hidden = true;
+      if (slidesEl) slidesEl.hidden = true;
+      if (slideToolsRow) slideToolsRow.hidden = true;
       document.getElementById("ls-display-preview").hidden = true;
       lsRenderClaimsPanel(chunk);
     } else if (isGraph) {
@@ -6244,6 +6445,8 @@
       spokenEl.hidden = true;
       displayEl.hidden = true;
       if (formulasEl) formulasEl.hidden = true;
+      if (slidesEl) slidesEl.hidden = true;
+      if (slideToolsRow) slideToolsRow.hidden = true;
       document.getElementById("ls-display-preview").hidden = true;
       var graphDocumentId = lsCurrentDocumentId();
       if (graphDocumentId && !lsState.graphByDocument[graphDocumentId] && !lsState.graphLoading) {
@@ -6256,10 +6459,13 @@
       document.getElementById("ls-display-preview").hidden = true;
       displayEl.hidden = true;
       if (formulasEl) formulasEl.hidden = true;
+      if (slidesEl) slidesEl.hidden = true;
+      if (slideToolsRow) slideToolsRow.hidden = false;
       spokenEl.hidden = false;
       spokenEl.disabled = lsState.syncSpoken;
     } else {
-      document.getElementById("ls-right-title").textContent = lsState.displayView === "formulas" ? "数式一覧" : "表示テキスト";
+      document.getElementById("ls-right-title").textContent = lsState.displayView === "formulas" ? "数式一覧" :
+        lsState.displayView === "slides" ? "スライド" : "表示テキスト";
       document.getElementById("ls-display-tabs").hidden = false;
       spokenEl.hidden = true;
       displayEl.hidden = lsState.displayView !== "script";
@@ -6268,6 +6474,11 @@
         formulasEl.hidden = lsState.displayView !== "formulas";
         if (lsState.displayView === "formulas") lsRenderFormulas(chunk.formulas || []);
       }
+      if (slidesEl) {
+        slidesEl.hidden = lsState.displayView !== "slides";
+        if (lsState.displayView === "slides") lsRenderSlidesPanel(chunk);
+      }
+      if (slideToolsRow) slideToolsRow.hidden = lsState.displayView !== "script";
       lsRenderDisplayPreview();
     }
 
@@ -6282,9 +6493,12 @@
       displayEl.hidden = true;
       document.getElementById("ls-display-preview").hidden = false;
       if (formulasEl) formulasEl.hidden = true;
+      if (slidesEl) slidesEl.hidden = true;
+      if (slideToolsRow) slideToolsRow.hidden = true;
     }
     if (isStructure) lsRenderStructure(chunk);
     lsApplyRightPaneVisibility();
+    lsUpdateSlideIndicatorsNow();
     lsUpdateAssistantContext();
   }
 
@@ -8795,6 +9009,265 @@
     return covered >= Math.max(10, Math.floor(t.length * 0.2));
   }
 
+  // ── レクチャースライド同期 (migration 040 Phase 3) ──────────────────────
+  // スライド = 表示と音声の同期最小単位。display_text / spoken_text 内の単独行
+  // "===" マーカーで分割する。backend core/lecture.py の split_slides() と
+  // 同じ意味論をクライアント側で再現する（マーカー正規表現・空セグメント除去・
+  // 分割数不一致時の1枚縮退）。formulas の割当（_assign_slide_formulas 相当）は
+  // 行わない — 各スライドの表示は既存の lsRenderTextWithFormulas(text, formulas) に
+  // チャンク全体の formulas をそのまま渡せば、そのスライドに実在する
+  // [[FORMULA_N]] だけが解決されるため、事前の割当処理は不要。
+  var LS_SLIDE_MARKER_RE = /^[ \t]*={3,}[ \t]*$/gm;
+
+  function lsSplitSlideMarkerSegments(text) {
+    if (!text) return [];
+    var raw = String(text).split(LS_SLIDE_MARKER_RE);
+    var segments = [];
+    for (var i = 0; i < raw.length; i++) {
+      var seg = raw[i].replace(/^\s+|\s+$/g, "");
+      if (seg) segments.push(seg);
+    }
+    return segments;
+  }
+
+  // (displayText, spokenText) -> { slides: [{slide_index, display, spoken}],
+  //   mismatch, displayCount, spokenCount }
+  function lsSplitSlides(displayText, spokenText) {
+    var displaySegments = lsSplitSlideMarkerSegments(displayText);
+    if (!displaySegments.length) displaySegments = [""];
+    var spokenSegments = lsSplitSlideMarkerSegments(spokenText);
+
+    var slideTexts = [];
+    var mismatch = false;
+    if (!spokenSegments.length) {
+      // spoken_text が無い/空: display の分割数でスライドを作り spoken は null。
+      for (var i = 0; i < displaySegments.length; i++) {
+        slideTexts.push({ display: displaySegments[i], spoken: null });
+      }
+    } else if (displaySegments.length === spokenSegments.length) {
+      for (var j = 0; j < displaySegments.length; j++) {
+        slideTexts.push({ display: displaySegments[j], spoken: spokenSegments[j] });
+      }
+    } else {
+      // 分割数不一致 -> 1スライドに縮退（マーカー除去済み全文どうしをペア）。
+      mismatch = true;
+      slideTexts.push({
+        display: displaySegments.join("\n\n"),
+        spoken: spokenSegments.join("\n\n"),
+      });
+    }
+
+    var slides = slideTexts.map(function (t, idx) {
+      return { slide_index: idx, display: t.display, spoken: t.spoken };
+    });
+
+    return {
+      slides: slides,
+      mismatch: mismatch,
+      displayCount: displaySegments.length,
+      spokenCount: spokenSegments.length,
+    };
+  }
+
+  // display_text の実効長（長さ警告の判定用）。文字数 + [[FORMULA_N]] 1個 = 60文字換算。
+  function lsSlideEffectiveLength(displayText) {
+    var text = String(displayText || "");
+    var placeholderRe = /\[\[FORMULA_\d+\]\]/g;
+    var placeholders = text.match(placeholderRe) || [];
+    var withoutPlaceholders = text.replace(placeholderRe, "");
+    return withoutPlaceholders.length + placeholders.length * 60;
+  }
+
+  // 整合インジケータの見た目を1箇所に集約（チャンク編集用・コーストピック用で共有）。
+  function lsRenderSlideIndicatorEl(el, split) {
+    if (!el) return;
+    el.classList.remove("ls-slides-indicator-ok", "ls-slides-indicator-warn");
+    if (split.mismatch) {
+      el.textContent = "⚠ 表示 " + split.displayCount + " / 読み上げ " + split.spokenCount +
+        " — 1枚に統合して配信されます";
+      el.classList.add("ls-slides-indicator-warn");
+    } else if (split.spokenCount === 0) {
+      el.textContent = "表示 " + split.displayCount + " 枚 / 読み上げ未入力";
+    } else {
+      el.textContent = "表示 " + split.displayCount + " 枚 / 読み上げ " + split.spokenCount + " 区切り ✓";
+      el.classList.add("ls-slides-indicator-ok");
+    }
+  }
+
+  // チャンク一覧 (§4 表示上の整合): slide_mismatch はバックエンド値があれば優先し、
+  // 無ければ (Phase 4 未反映でも動くよう) クライアント側で split して判定する。
+  function lsChunkSlideMismatch(chunk) {
+    if (typeof chunk.slide_mismatch === "boolean") return chunk.slide_mismatch;
+    var split = lsSplitSlides(chunk.display_text || chunk.text || "", chunk.spoken_text || "");
+    return split.mismatch;
+  }
+
+  // 音声バッジ: 言語不一致 > 音声あり > 音声未生成 の優先順位で判定する。
+  // audio_ready_slides はバックエンド未反映時は 0 とみなす（過大表示を避ける防御的デフォルト）。
+  function lsSlideAudioBadgeHtml(chunk, slideIndex) {
+    var courseLanguage = lsCourseLectureLanguage();
+    var chunkLanguage = chunk.spoken_language || "ja";
+    if (chunkLanguage !== courseLanguage) {
+      return '<span class="ls-slide-badge ls-slide-badge-warn">言語不一致 ⚠</span>';
+    }
+    var ready = typeof chunk.audio_ready_slides === "number" ? chunk.audio_ready_slides : 0;
+    if (ready > slideIndex) {
+      return '<span class="ls-slide-badge ls-slide-badge-ready">音声あり (' + escHtml(chunkLanguage) + ')</span>';
+    }
+    return '<span class="ls-slide-badge ls-slide-badge-none">音声未生成</span>';
+  }
+
+  // スライド単位の試聴再生を停止する（カード/ボタンの見た目も元に戻す）。
+  function lsStopSlideAudioPlayback() {
+    var player = lsState.slideAudioPlayer;
+    if (!player) return;
+    try { player.audio.pause(); } catch (e) { /* noop */ }
+    if (player.card) player.card.classList.remove("ls-slide-card-playing");
+    if (player.btn) player.btn.textContent = "▶ 試聴";
+    var statusEl = player.card ? player.card.querySelector(".ls-slide-play-status") : null;
+    if (statusEl) statusEl.textContent = "";
+    lsState.slideAudioPlayer = null;
+  }
+
+  // ▶ 試聴ボタン: GET /api/admin/chunks/{chunk_id}/lecture-audio（キャッシュ配信のみ・
+  // 404 = 音声未生成）。同じスライドを再クリックすると停止する。
+  function lsToggleSlideAudio(chunk, slideIndex, btnEl) {
+    var card = btnEl.closest(".ls-slide-card");
+    var statusEl = card ? card.querySelector(".ls-slide-play-status") : null;
+    var current = lsState.slideAudioPlayer;
+    if (current && current.chunkId === chunk.chunk_id && current.slideIndex === slideIndex) {
+      lsStopSlideAudioPlayback();
+      return;
+    }
+    lsStopSlideAudioPlayback();
+    if (statusEl) statusEl.textContent = "読み込み中...";
+    apiFetch("/admin/chunks/" + encodeURIComponent(chunk.chunk_id) + "/lecture-audio?slide_index=" + slideIndex + "&voice=alloy")
+      .then(function (res) {
+        if (res.status === 404) {
+          var notFound = new Error("no_audio");
+          notFound.noAudio = true;
+          throw notFound;
+        }
+        if (!res.ok) throw new Error("failed");
+        return res.json();
+      })
+      .then(function (data) {
+        var audio = new Audio("data:" + (data.content_type || "audio/mpeg") + ";base64," + data.audio_base64);
+        lsState.slideAudioPlayer = { chunkId: chunk.chunk_id, slideIndex: slideIndex, audio: audio, card: card, btn: btnEl };
+        if (card) card.classList.add("ls-slide-card-playing");
+        btnEl.textContent = "■ 停止";
+        if (statusEl) statusEl.textContent = "再生中...";
+        audio.addEventListener("ended", function () {
+          lsStopSlideAudioPlayback();
+        });
+        audio.play();
+      })
+      .catch(function (err) {
+        if (statusEl) statusEl.textContent = err && err.noAudio ? "音声未生成です" : "再生に失敗しました";
+        lsShowActionStatus(
+          err && err.noAudio ? "このスライドの音声はまだ生成されていません" : "音声の再生に失敗しました",
+          err && err.noAudio ? "info" : "error"
+        );
+      });
+  }
+
+  // 「スライド」タブ本体: チャンクを split して1枚ずつカード描画する。
+  // 表示テキストは受講画面と同じレンダラ lsRenderTextWithFormulas を再利用する。
+  function lsRenderSlidesPanel(chunk) {
+    var indicatorEl = document.getElementById("ls-slides-indicator");
+    var listEl = document.getElementById("ls-slides-list");
+    if (!listEl) return;
+    var displayEl = document.getElementById("ls-display-text");
+    var spokenEl = document.getElementById("ls-spoken-text");
+    // displayEl/spokenEl の value は現在の編集内容の正本（hidden でも input リスナーで
+    // chunk.display_text / spoken_text と常に同期している）。
+    var displayText = (displayEl && displayEl.value) || chunk.display_text || chunk.text || "";
+    var spokenText = (spokenEl && spokenEl.value) || chunk.spoken_text || "";
+    var split = lsSplitSlides(displayText, spokenText);
+    lsRenderSlideIndicatorEl(indicatorEl, split);
+
+    var formulas = chunk.formulas || [];
+    var html = "";
+    split.slides.forEach(function (slide, idx) {
+      var effLen = lsSlideEffectiveLength(slide.display);
+      var lengthWarn = effLen > 600
+        ? '<div class="ls-slide-warn">⚠ 受講画面で縮小表示されます。=== で分割を検討してください</div>'
+        : "";
+      var badge = lsSlideAudioBadgeHtml(chunk, idx);
+      var notesHtml = slide.spoken
+        ? lsRenderTextWithFormulas(slide.spoken, formulas)
+        : '<span class="ls-course-muted">読み上げ原稿がありません</span>';
+      html +=
+        '<div class="ls-slide-card" data-slide-index="' + idx + '">' +
+          '<div class="ls-slide-card-head">' +
+            '<span class="ls-slide-card-index">スライド ' + (idx + 1) + ' / ' + split.slides.length + '</span>' +
+            badge +
+          '</div>' +
+          '<div class="ls-slide-card-body">' + lsRenderTextWithFormulas(slide.display, formulas) + '</div>' +
+          lengthWarn +
+          '<div class="ls-slide-card-notes">' + notesHtml + '</div>' +
+          '<div class="ls-slide-card-actions">' +
+            '<button type="button" class="ls-slide-play-btn admin-action-btn" data-slide-index="' + idx + '">▶ 試聴</button>' +
+            '<span class="ls-slide-play-status"></span>' +
+          '</div>' +
+        '</div>';
+    });
+    listEl.innerHTML = html || '<div class="ls-empty-state">スライドがありません</div>';
+    listEl.querySelectorAll(".ls-slide-play-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var slideIndex = parseInt(this.getAttribute("data-slide-index"), 10) || 0;
+        lsToggleSlideAudio(chunk, slideIndex, this);
+      });
+    });
+  }
+
+  var lsSlideToolsLastFocus = "ls-display-text";
+  var lsSlideIndicatorDebounceTimer = null;
+
+  function lsUpdateSlideIndicatorsNow() {
+    var chunk = lsGetSelectedChunk();
+    if (!chunk) return;
+    var displayEl = document.getElementById("ls-display-text");
+    var spokenEl = document.getElementById("ls-spoken-text");
+    var displayText = (displayEl && displayEl.value) || chunk.display_text || chunk.text || "";
+    var spokenText = (spokenEl && spokenEl.value) || chunk.spoken_text || "";
+    var split = lsSplitSlides(displayText, spokenText);
+    lsRenderSlideIndicatorEl(document.getElementById("ls-slide-tools-indicator"), split);
+    if (lsState.displayView === "slides") lsRenderSlidesPanel(chunk);
+  }
+
+  // textarea の input イベントでライブ更新するが、描画は debounce 300ms にする（§4-1）。
+  function lsUpdateSlideIndicatorsDebounced() {
+    if (lsSlideIndicatorDebounceTimer) clearTimeout(lsSlideIndicatorDebounceTimer);
+    lsSlideIndicatorDebounceTimer = setTimeout(function () {
+      lsSlideIndicatorDebounceTimer = null;
+      lsUpdateSlideIndicatorsNow();
+    }, 300);
+  }
+
+  // 「スライド区切りを挿入」ボタン: 最後にフォーカスしていた textarea のカーソル位置に
+  // \n===\n を挿入する。もう一方の textarea には挿入しない（対応位置の自動推定は不確実）。
+  function lsInsertSlideMarkerIntoTextarea(el) {
+    if (!el) return;
+    var marker = "\n===\n";
+    var start = typeof el.selectionStart === "number" ? el.selectionStart : (el.value || "").length;
+    var end = typeof el.selectionEnd === "number" ? el.selectionEnd : start;
+    var value = el.value || "";
+    el.value = value.slice(0, start) + marker + value.slice(end);
+    var newPos = start + marker.length;
+    el.selectionStart = el.selectionEnd = newPos;
+    el.focus();
+    el.dispatchEvent(new Event("input"));
+  }
+
+  function lsInsertSlideMarker() {
+    var id = lsSlideToolsLastFocus || "ls-display-text";
+    var el = document.getElementById(id);
+    if (!el || el.hidden || el.disabled) el = document.getElementById("ls-display-text");
+    lsInsertSlideMarkerIntoTextarea(el);
+    lsUpdateSlideIndicatorsNow();
+  }
+
   function lsLoadPdfForChunk(chunk) {
     var pdfView = document.getElementById("ls-pdf-view");
     if (!chunk.pdf_url) {
@@ -9557,14 +10030,18 @@
     poll();
   }
 
-  function lsBatchAudio() {
+  function lsBatchAudio(language) {
+    // レクチャースライド同期 + 音声言語切替 (migration 040 Phase 3/4): 言語は
+    // #ls-audio-lang-modal で選択された値（省略時は現在のコース設定言語）を送る。
+    // バックエンドが language を未対応でも body に余分なフィールドがあるだけで無害。
+    var selectedLanguage = language || lsCourseLectureLanguage();
     lsState.pipelineTask = { step: "audio", status: "running" };
     lsSetCourseTaskBusy(true);
     lsShowProgress("音声生成を開始しています...", "info");
 
     apiFetch("/admin/courses/" + lsState.courseId + "/lecture-audio/generate", {
       method: "POST",
-      body: "{}",
+      body: JSON.stringify({ language: selectedLanguage }),
     })
       .then(function (res) {
         if (!res.ok) {
@@ -9610,6 +10087,11 @@
           var errors = rd.errors || 0;
           var progress = rd.progress || 0;
           var processed = generated + skipped + errors;
+          // レクチャースライド同期 + 音声言語切替 (migration 040 Phase 4): 言語切替時は
+          // 「原稿再生成 → 音声生成」のチェーンが result_data.phase で進捗する
+          // （フィールド未実装でも動くよう防御的に、無ければ従来表示のまま）。
+          var phase = rd.phase;
+          var phaseLabel = phase === "script" ? "原稿再生成中... " : "音声生成中... ";
 
           if (task.status === "completed") {
             clearInterval(timer);
@@ -9622,6 +10104,7 @@
             );
             lsSetCourseTaskBusy(false);
             lsLoadScripts(lsState.courseId);
+            if (lsState.courseId) lsLoadSettings(lsState.courseId);
           } else if (task.status === "failed") {
             clearInterval(timer);
             lsState.pipelineTask = { step: "audio", status: "failed" };
@@ -9630,7 +10113,7 @@
           } else {
             // pending / processing
             lsShowProgress(
-              "音声生成中... (" + processed + " / " + totalChunks + " — " + progress + "%)",
+              phaseLabel + "(" + processed + " / " + totalChunks + " — " + progress + "%)",
               "info"
             );
           }

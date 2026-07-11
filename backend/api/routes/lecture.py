@@ -24,6 +24,7 @@ from schemas import (
     LectureInterruptResponse,
     LectureSegment,
     LectureSequenceResponse,
+    LectureSlide,
     LectureTTSRequest,
     LectureTTSResponse,
 )
@@ -36,8 +37,10 @@ from services import (
 from core.lecture import (
     build_lecture_sequence,
     generate_spoken_text_and_formulas,
+    get_course_lecture_language,
     get_user_mastered_concepts,
     normalize_to_placeholder_format,
+    split_slides,
 )
 from core.learning_support_agent import extract_inline_actions
 from core.llm import generate_text, get_llm_params
@@ -93,6 +96,7 @@ def get_lecture_sequence(
             segments=[topic_segment],
             total_segments=1,
             total_duration_ms=0,
+            total_slides=len(topic_segment.slides),
         )
 
     # コースのソース教材 (material_id) を収集
@@ -118,7 +122,7 @@ def get_lecture_sequence(
         rows = session.execute(
             sa_text(f"""
                 SELECT c.id, c.chunk_index, c.text, c.display_text, c.spoken_text, c.formulas,
-                       c.chapter, c.section
+                       c.chapter, c.section, c.spoken_language
                 FROM chunks c
                 WHERE ({where_clause})
                   AND c.text IS NOT NULL AND c.text != ''
@@ -137,8 +141,10 @@ def get_lecture_sequence(
 
     # チャンクデータを構築し、spoken_text がなければ生成
     narration_persona = course_persona_settings(course_data)["narration_persona"]
+    lecture_language = get_course_lecture_language(course_data)
     chunks = []
     chunks_to_update = []
+    language_by_chunk_id: dict[str, str] = {}
     for row in rows:
         chunk_id = str(row[0])
         chunk_index = row[1]
@@ -146,6 +152,10 @@ def get_lecture_sequence(
         display_text = row[3] or text
         spoken_text = row[4]
         formulas = row[5] if row[5] else []
+        # spoken_language は migration 040 で追加された列。古いモック行 (len<=8) は
+        # 未指定として扱う（後方互換）。NULL は既存データとみなし "ja" とする。
+        spoken_language = row[8] if len(row) > 8 else None
+        language_by_chunk_id[chunk_id] = spoken_language or "ja"
 
         if not spoken_text:
             result = generate_spoken_text_and_formulas(
@@ -153,6 +163,7 @@ def get_lecture_sequence(
                 chunk_index=chunk_index,
                 course_data=course_data,
                 persona_id=narration_persona,
+                language=lecture_language,
             )
             display_text = result.get("display_text") or text
             spoken_text = result["spoken_text"]
@@ -162,7 +173,9 @@ def get_lecture_sequence(
                 "display_text": display_text,
                 "spoken_text": spoken_text,
                 "formulas": formulas,
+                "spoken_language": lecture_language,
             })
+            language_by_chunk_id[chunk_id] = lecture_language
 
         # 旧フォーマット（$...$）のデータをプレースホルダー方式に正規化
         display_text, formulas = normalize_to_placeholder_format(display_text, formulas)
@@ -190,8 +203,19 @@ def get_lecture_sequence(
     )
     segments = build_lecture_sequence(topic_id, course_data, chunks, mastered_concepts)
 
-    lecture_segments = [
-        LectureSegment(
+    # スライド単位の音声キャッシュ有無を一括取得 (chunk_id, slide_index) -> duration_ms
+    slide_audio_map = _get_slide_audio_map([s["chunk_id"] for s in segments])
+
+    lecture_segments = []
+    total_slides = 0
+    for s in segments:
+        segment_mode = s.get("segment_mode", "full")
+        slides = _build_slides_for_segment(
+            s["text"], s["spoken_text"], s["formulas"], segment_mode,
+            s["chunk_id"], slide_audio_map,
+        )
+        total_slides += len(slides)
+        lecture_segments.append(LectureSegment(
             chunk_id=s["chunk_id"],
             chunk_index=s["chunk_index"],
             text=s["text"],
@@ -199,10 +223,10 @@ def get_lecture_sequence(
             formulas=[LectureFormulaItem(**f) for f in s["formulas"]],
             has_audio=s["has_audio"],
             duration_ms=s["duration_ms"],
-            segment_mode=s.get("segment_mode", "full"),
-        )
-        for s in segments
-    ]
+            segment_mode=segment_mode,
+            slides=slides,
+            language=language_by_chunk_id.get(s["chunk_id"], "ja"),
+        ))
 
     total_duration = sum(s.duration_ms for s in lecture_segments)
     summary_count = sum(1 for s in lecture_segments if s.segment_mode == "summary")
@@ -218,6 +242,7 @@ def get_lecture_sequence(
         total_duration_ms=total_duration,
         skipped_segments=skipped_count,
         summary_segments=summary_count,
+        total_slides=total_slides,
     )
 
 
@@ -241,6 +266,16 @@ def _generate_sequence_from_search(
 
     segments = []
     chunks_to_update = []
+    search_chunk_ids = []
+    for i, cr in enumerate(chunk_results):
+        if cr["score"] < 0.3:
+            continue
+        chunk_id = cr.get("id", f"search_{i}")
+        search_chunk_ids.append(chunk_id)
+    slide_audio_map = _get_slide_audio_map(search_chunk_ids)
+    lecture_language = get_course_lecture_language(course_data)
+
+    total_slides = 0
     for i, cr in enumerate(chunk_results):
         if cr["score"] < 0.3:
             continue
@@ -250,6 +285,7 @@ def _generate_sequence_from_search(
             chunk_index=i,
             course_data=course_data,
             persona_id=course_persona_settings(course_data)["narration_persona"],
+            language=lecture_language,
         )
         display_text = result.get("display_text") or cr["text"]
         is_valid_uuid = _is_valid_uuid(chunk_id)
@@ -260,7 +296,14 @@ def _generate_sequence_from_search(
                 "display_text": display_text,
                 "spoken_text": result["spoken_text"],
                 "formulas": result["formulas"],
+                "spoken_language": lecture_language,
             })
+
+        slides = _build_slides_for_segment(
+            display_text, result["spoken_text"], result["formulas"], "full",
+            chunk_id, slide_audio_map,
+        )
+        total_slides += len(slides)
 
         segments.append(LectureSegment(
             chunk_id=chunk_id,
@@ -270,6 +313,8 @@ def _generate_sequence_from_search(
             formulas=[LectureFormulaItem(**f) for f in result["formulas"]],
             has_audio=_check_audio_cache(chunk_id) if is_valid_uuid else False,
             duration_ms=0,
+            slides=slides,
+            language=lecture_language,
         ))
 
     if chunks_to_update:
@@ -281,6 +326,7 @@ def _generate_sequence_from_search(
         segments=segments,
         total_segments=len(segments),
         total_duration_ms=0,
+        total_slides=total_slides,
     )
 
 
@@ -315,7 +361,7 @@ def generate_tts(
             detail="この内容の音声はまだ生成されていません。管理画面で音声を生成してください。",
         )
 
-    cached = _get_audio_cache(chunk_id, body.voice)
+    cached = _get_audio_cache(chunk_id, body.voice, body.slide_index)
     if not cached:
         raise HTTPException(
             status_code=404,
@@ -352,12 +398,17 @@ def get_topic_audio_status(
     if not topic_info:
         raise HTTPException(status_code=404, detail="Topic not found")
 
+    lecture_language = get_course_lecture_language(course_data)
     empty = {
         "course_id": course_id,
         "topic_id": topic_id,
         "has_audio": False,
         "ready_chunks": 0,
         "total_chunks": 0,
+        "ready_slides": 0,
+        "total_slides": 0,
+        "language": lecture_language,
+        "stale_language": False,
     }
 
     # ドラフト原稿ベースのトピックは topic: セグメントで再生され音声をキャッシュできない。
@@ -378,28 +429,73 @@ def get_topic_audio_status(
     try:
         mid_placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
         params: dict = {f"mid_{i}": mid for i, mid in enumerate(material_ids)}
-        row = session.execute(
+        chunk_rows = session.execute(
             sa_text(f"""
-                SELECT COUNT(DISTINCT c.id) AS total,
-                       COUNT(DISTINCT a.chunk_id) AS ready
+                SELECT c.id, c.display_text, c.text, c.spoken_text, c.formulas, c.spoken_language
                 FROM chunks c
-                LEFT JOIN lecture_audio_cache a ON a.chunk_id = c.id
                 WHERE c.material_id IN ({mid_placeholders})
                   AND c.text IS NOT NULL AND c.text != ''
             """),
             params,
-        ).fetchone()
+        ).fetchall()
+
+        chunk_ids = [str(row[0]) for row in chunk_rows]
+        audio_rows = []
+        if chunk_ids:
+            audio_placeholders = ", ".join(f":cid_{i}" for i in range(len(chunk_ids)))
+            audio_params: dict = {f"cid_{i}": cid for i, cid in enumerate(chunk_ids)}
+            audio_rows = session.execute(
+                sa_text(f"""
+                    SELECT chunk_id, slide_index
+                    FROM lecture_audio_cache
+                    WHERE chunk_id IN ({audio_placeholders}) AND voice = 'alloy'
+                """),
+                audio_params,
+            ).fetchall()
     finally:
         session.close()
 
-    total = int(row[0]) if row and row[0] is not None else 0
-    ready = int(row[1]) if row and row[1] is not None else 0
+    audio_slide_set = {(str(row[0]), int(row[1])) for row in audio_rows}
+
+    total_chunks = len(chunk_rows)
+    total_slides = 0
+    ready_slides = 0
+    ready_chunks = 0
+    stale_language = False
+
+    for row in chunk_rows:
+        chunk_id = str(row[0])
+        display_text = row[1] or row[2] or ""
+        spoken_text = row[3]
+        formulas = row[4] if row[4] else []
+        chunk_language = row[5] or "ja"
+
+        slides, _mismatch = split_slides(display_text, spoken_text, formulas)
+        total_slides += len(slides)
+
+        chunk_has_cached_slide = False
+        for slide in slides:
+            if (chunk_id, slide["slide_index"]) not in audio_slide_set:
+                continue
+            chunk_has_cached_slide = True
+            if chunk_language == lecture_language:
+                ready_slides += 1
+
+        if chunk_has_cached_slide:
+            ready_chunks += 1
+            if chunk_language != lecture_language:
+                stale_language = True
+
     return {
         "course_id": course_id,
         "topic_id": topic_id,
-        "has_audio": ready > 0,
-        "ready_chunks": ready,
-        "total_chunks": total,
+        "has_audio": ready_slides > 0,
+        "ready_chunks": ready_chunks,
+        "total_chunks": total_chunks,
+        "ready_slides": ready_slides,
+        "total_slides": total_slides,
+        "language": lecture_language,
+        "stale_language": stale_language,
     }
 
 
@@ -628,6 +724,7 @@ def _build_topic_draft_segment(
             chunk_index=0,
             course_data=course_data,
             persona_id=narration_persona,
+            language=get_course_lecture_language(course_data),
         )
         spoken_text = result["spoken_text"]
         display_text = result.get("display_text") or display_text
@@ -640,6 +737,22 @@ def _build_topic_draft_segment(
     display_text, formulas = _resolve_equation_embeds(display_text, evidence_links, formulas)
 
     display_text, formulas = normalize_to_placeholder_format(display_text or spoken_text, formulas)
+
+    # ドラフト専用トピックは音声をキャッシュできないため、スライドは常に has_audio=False
+    # （§2-4）。同じ === マーカー規約で複数スライドに分割する。
+    slide_dicts, _mismatch = split_slides(display_text, spoken_text, formulas)
+    slides = [
+        LectureSlide(
+            slide_index=sd["slide_index"],
+            display_text=sd["display_text"],
+            spoken_text=sd["spoken_text"],
+            formulas=[LectureFormulaItem(**f) for f in sd["formulas"]],
+            has_audio=False,
+            duration_ms=0,
+        )
+        for sd in slide_dicts
+    ]
+
     return LectureSegment(
         chunk_id=f"topic:{topic_id}",
         chunk_index=int(topic.get("topic_index") or 0),
@@ -649,6 +762,8 @@ def _build_topic_draft_segment(
         has_audio=False,
         duration_ms=0,
         segment_mode="full",
+        slides=slides,
+        language=get_course_lecture_language(course_data),
     )
 
 
@@ -669,8 +784,8 @@ def _check_audio_cache(chunk_id: str) -> bool:
         session.close()
 
 
-def _get_audio_cache(chunk_id: str, voice: str) -> dict | None:
-    """音声キャッシュを取得する。"""
+def _get_audio_cache(chunk_id: str, voice: str, slide_index: int = 0) -> dict | None:
+    """音声キャッシュを取得する（chunk_id, slide_index, voice のキャッシュキー）。"""
     if not _is_valid_uuid(chunk_id):
         return None
     session = _pg_session()
@@ -679,10 +794,10 @@ def _get_audio_cache(chunk_id: str, voice: str) -> dict | None:
             sa_text("""
                 SELECT audio_data, duration_ms, word_timestamps
                 FROM lecture_audio_cache
-                WHERE chunk_id = CAST(:cid AS uuid) AND voice = :voice
+                WHERE chunk_id = CAST(:cid AS uuid) AND voice = :voice AND slide_index = :slide_index
                 LIMIT 1
             """),
-            {"cid": chunk_id, "voice": voice},
+            {"cid": chunk_id, "voice": voice, "slide_index": slide_index},
         ).fetchone()
         if not row:
             return None
@@ -702,43 +817,74 @@ def _get_audio_cache(chunk_id: str, voice: str) -> dict | None:
         session.close()
 
 
-def _save_audio_cache(
-    chunk_id: str,
-    voice: str,
-    audio_bytes: bytes,
-    duration_ms: int,
-    word_timestamps: list[dict],
-) -> None:
-    """音声キャッシュを保存する。"""
-    if not _is_valid_uuid(chunk_id):
-        logger.debug("Skipping audio cache save for non-UUID chunk_id: %s", chunk_id)
-        return
+def _get_slide_audio_map(chunk_ids: list[str]) -> dict[tuple[str, int], int]:
+    """指定チャンク群のスライド単位音声キャッシュを一括取得する。
+
+    Returns
+    -------
+    dict[tuple[str, int], int]
+        ``(chunk_id, slide_index) -> duration_ms``。voice='alloy' のキャッシュのみ対象
+        （学習画面の再生ボイスは alloy 固定。Issue #66 の既存挙動を踏襲）。
+    """
+    valid_ids = list(dict.fromkeys(cid for cid in chunk_ids if _is_valid_uuid(cid)))
+    if not valid_ids:
+        return {}
     session = _pg_session()
     try:
-        session.execute(
-            sa_text("""
-                INSERT INTO lecture_audio_cache (chunk_id, voice, audio_data, duration_ms, word_timestamps)
-                VALUES (CAST(:cid AS uuid), :voice, :audio_data, :duration_ms, CAST(:wt AS jsonb))
-                ON CONFLICT (chunk_id, voice) DO UPDATE
-                SET audio_data = EXCLUDED.audio_data,
-                    duration_ms = EXCLUDED.duration_ms,
-                    word_timestamps = EXCLUDED.word_timestamps,
-                    created_at = now()
+        placeholders = ", ".join(f":cid_{i}" for i in range(len(valid_ids)))
+        params: dict = {f"cid_{i}": cid for i, cid in enumerate(valid_ids)}
+        rows = session.execute(
+            sa_text(f"""
+                SELECT chunk_id, slide_index, duration_ms
+                FROM lecture_audio_cache
+                WHERE chunk_id IN ({placeholders}) AND voice = 'alloy'
             """),
-            {
-                "cid": chunk_id,
-                "voice": voice,
-                "audio_data": audio_bytes,
-                "duration_ms": duration_ms,
-                "wt": json.dumps(word_timestamps, ensure_ascii=False),
-            },
-        )
-        session.commit()
+            params,
+        ).fetchall()
+        return {(str(row[0]), int(row[1])): int(row[2] or 0) for row in rows}
     except Exception:
-        session.rollback()
-        logger.warning("Failed to save audio cache for chunk %s", chunk_id, exc_info=True)
+        logger.warning("Failed to load slide audio map for %d chunks", len(valid_ids), exc_info=True)
+        return {}
     finally:
         session.close()
+
+
+def _build_slides_for_segment(
+    display_text: str,
+    spoken_text: str | None,
+    formulas: list[dict],
+    segment_mode: str,
+    chunk_id: str,
+    audio_map: dict[tuple[str, int], int],
+) -> list[LectureSlide]:
+    """セグメントをスライドに分割し、スライド単位の音声キャッシュ有無を付与する。
+
+    ``segment_mode == "summary"`` のセグメントは分割せず1スライドにする
+    （display はセグメント本文、spoken は要約テキスト）。
+    """
+    if segment_mode == "summary":
+        slide_dicts = [{
+            "slide_index": 0,
+            "display_text": display_text,
+            "spoken_text": spoken_text,
+            "formulas": formulas,
+        }]
+    else:
+        slide_dicts, _mismatch = split_slides(display_text, spoken_text, formulas)
+
+    slides = []
+    for sd in slide_dicts:
+        key = (chunk_id, sd["slide_index"])
+        duration_ms = audio_map.get(key)
+        slides.append(LectureSlide(
+            slide_index=sd["slide_index"],
+            display_text=sd["display_text"],
+            spoken_text=sd["spoken_text"],
+            formulas=[LectureFormulaItem(**f) for f in sd["formulas"]],
+            has_audio=key in audio_map,
+            duration_ms=duration_ms or 0,
+        ))
+    return slides
 
 
 def _get_chunk_spoken_text(chunk_id: str) -> str | None:
@@ -792,7 +938,12 @@ def _get_chunk_text(chunk_id: str) -> str:
 
 
 def _persist_spoken_text(chunks: list[dict]) -> None:
-    """チャンクの display_text / spoken_text / formulas を DB に永続化する。"""
+    """チャンクの display_text / spoken_text / formulas を DB に永続化する。
+
+    ``chunk["spoken_language"]`` が指定されていれば ``chunks.spoken_language`` も
+    併せて書く（migration 040 Phase 4）。未指定（キー無し/None）の場合は既存値を
+    保持する（``COALESCE`` で上書きしない）。
+    """
     valid_chunks = [c for c in chunks if _is_valid_uuid(c["id"])]
     if not valid_chunks:
         return
@@ -804,7 +955,8 @@ def _persist_spoken_text(chunks: list[dict]) -> None:
                     UPDATE chunks
                     SET display_text = :display_text,
                         spoken_text = :spoken_text,
-                        formulas = CAST(:formulas AS jsonb)
+                        formulas = CAST(:formulas AS jsonb),
+                        spoken_language = COALESCE(:spoken_language, spoken_language)
                     WHERE id = CAST(:id AS uuid)
                 """),
                 {
@@ -812,6 +964,7 @@ def _persist_spoken_text(chunks: list[dict]) -> None:
                     "display_text": chunk.get("display_text", ""),
                     "spoken_text": chunk["spoken_text"],
                     "formulas": json.dumps(chunk["formulas"], ensure_ascii=False),
+                    "spoken_language": chunk.get("spoken_language"),
                 },
             )
         session.commit()
