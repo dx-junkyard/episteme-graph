@@ -3572,18 +3572,24 @@ def process_material_background(
     task_id: str | None = None,
     cartridge_id: str | None = None,
     source_kind: str = "pdf",
+    options: dict | None = None,
 ) -> None:
     """バックグラウンドで新Agent Pipelineを実行する (issue #226)。
 
     Stages:
-        save_pdf → document_structure → source_chunking → source_embedding
-        → paper_skeleton → rhetorical_role → claim_qualification
-        → equation_semantics → thesis_reconstruction → dsl_linking
+        save_pdf → document_structure → figure_image_extraction →
+        source_chunking → source_embedding → paper_skeleton → rhetorical_role
+        → claim_qualification → equation_semantics → figure_table_semantics
+        → apparatus_semantics → thesis_reconstruction → dsl_linking
         → dsl_embedding → component_assembly
         → persist_claims_components_graph → completed
 
     各ステージ完了時に background_tasks.result_data["stage"] を更新する。
     旧 build_knowledge_graph / chunk_pdf_pages ベースの導線は廃止。
+
+    ``options``（画像パイプライン §3-2）はアップロード時オプションのスナップ
+    ショット（例: ``{"analyze_images": True}``）。``run_document_pipeline`` へ
+    そのまま受け渡し、``document_analysis_runs.options`` に保存される。
     """
     from core.document_pipeline import PipelineStageError, run_document_pipeline
 
@@ -3629,6 +3635,7 @@ def process_material_background(
             source_kind=source_kind,
             cartridge_id=cartridge_id,
             progress_callback=_on_stage,
+            options=options,
         )
 
         # documents テーブルの最終ステータスを更新

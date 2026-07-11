@@ -8,6 +8,8 @@
 - ``generate_text(messages, ...)``   — チャット補完
 - ``generate_text_with_structured_output(messages, response_format, ...)``
                                      — 構造化出力（Pydantic モデル）
+- ``generate_structured_with_images(prompt, images, schema, ...)``
+                                     — vision 構造化出力（OpenAI のみ、v1）
 - ``generate_embeddings(texts)``     — テキスト埋め込み
 
 内部では ``core.config.Settings`` からモデル名を取得し、
@@ -20,6 +22,7 @@ Reasoning モデル（o1, o3-mini, gpt-5.x 等）向けの自動変換を行う:
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -812,3 +815,118 @@ def transcribe_audio(
         language=language,
     )
     return (getattr(resp, "text", "") or "").strip()
+
+
+# ---------------------------------------------------------------------------
+# 公開 API: Vision 構造化出力 (apparatus_semantics 等)
+# ---------------------------------------------------------------------------
+
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+_JPEG_MAGIC = b"\xff\xd8\xff"
+
+
+def _detect_image_mime_type(image_bytes: bytes) -> str:
+    """画像バイト列の magic bytes から MIME タイプを判別する。
+
+    PNG / JPEG のみ判別する。判別できない場合は ``image/png`` にフォールバック
+    する（呼び出し側は PNG 想定のため安全側の既定値）。
+    """
+    if image_bytes.startswith(_PNG_MAGIC):
+        return "image/png"
+    if image_bytes.startswith(_JPEG_MAGIC):
+        return "image/jpeg"
+    return "image/png"
+
+
+def generate_structured_with_images(
+    prompt: str,
+    images: list[bytes],
+    schema: dict,
+    model: str | None = None,
+) -> dict:
+    """画像 + テキストプロンプトから構造化 JSON を生成する（vision 対応）。
+
+    ``apparatus_semantics`` 等、画像を LLM に渡して構造化出力を得る用途向け。
+    v1 は OpenAI 経路のみ対応する（開発ルール4に従い ``system`` ロールと
+    ``temperature`` / ``max_tokens`` は使用しない。``user`` ロール1件に
+    テキスト + 画像パーツをまとめる）。
+
+    Parameters
+    ----------
+    prompt : str
+        ``user`` ロールのテキスト部分。
+    images : list[bytes]
+        画像バイト列のリスト（PNG 想定。JPEG も magic bytes で判別可能）。
+        base64 化して OpenAI の ``image_url`` パーツ
+        (``data:<mime>;base64,...``) にする。
+    schema : dict
+        期待する出力の JSON Schema。OpenAI の
+        ``response_format={"type": "json_schema", "json_schema": {...}}``
+        にそのまま埋め込む。
+    model : str | None
+        使用するモデル名。None の場合は ``Settings.apparatus_llm_model``
+        （未定義環境では ``"gpt-4o"``）を使用する。
+
+    Returns
+    -------
+    dict
+        パース済みの構造化出力。
+
+    Raises
+    ------
+    NotImplementedError
+        ``LLM_PROVIDER`` が ``openai`` 以外の場合。
+    ValueError
+        レスポンスを JSON として解析できなかった場合。
+    """
+    settings = get_settings()
+    if settings.llm_provider != "openai":
+        raise NotImplementedError(
+            "apparatus vision is only supported for LLM_PROVIDER=openai"
+        )
+
+    model_name = model or getattr(settings, "apparatus_llm_model", "gpt-4o")
+
+    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    for image_bytes in images:
+        mime_type = _detect_image_mime_type(image_bytes)
+        data_b64 = base64.b64encode(image_bytes).decode("ascii")
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{mime_type};base64,{data_b64}",
+                    "detail": "high",
+                },
+            }
+        )
+
+    messages: list[dict[str, Any]] = [{"role": "user", "content": content}]
+    adapted_messages = _adapt_messages_for_model(messages, model_name)
+    api_kwargs = _build_api_kwargs(
+        model_name,
+        extra_kwargs={
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "generate_structured_with_images_response",
+                    "schema": schema,
+                    "strict": False,
+                },
+            }
+        },
+    )
+
+    client = _get_openai_client()
+    response = client.chat.completions.create(
+        model=model_name,
+        messages=adapted_messages,
+        **api_kwargs,
+    )
+    raw = response.choices[0].message.content or "{}"
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"vision 構造化レスポンスを JSON として解析できませんでした: {raw!r}"
+        ) from exc

@@ -118,6 +118,8 @@ PDF ファイル
     ↓  DerivationChainResult (JSON)
 [#237] FigureTableSemanticsAgent — 図表の意味復元（caption-first, LLM enricher 任意）
     ↓  FigureTableSemanticsResult (JSON)
+[L層]  ApparatusSemanticsAgent    — 図画像の装置・パーツ候補抽出（vision LLM、`analyze_images` オプトイン時のみ）
+    ↓  ApparatusSemanticsResult (JSON; 全出力 review_required 系)
 [#221] ThesisReconstructionAgent — 中心命題・支持構造の再構成（LLM-first）
     ↓  ThesisReconstructionResult (JSON)
 [#222] DSLLinkingAgent          — Claim/Equation/Thesis → DSL グラフ接続（LLM-first）
@@ -142,6 +144,7 @@ src/episteme_graph/agents/
   symbol_registry/         → SymbolRegistryBuilder (#355)
   derivation_chain/        → DerivationChainAgent (#237)
   figure_table_semantics/  → FigureTableSemanticsAgent (#237)
+  apparatus_semantics/     → ApparatusSemanticsAgent (L層) — 図画像から装置・パーツ候補（vision LLM）
   course_mapping/          → CourseMappingAgent (#237)
   thesis_reconstruction/ → ThesisReconstructionAgent (#221)
   dsl_linking/          → DSLLinkingAgent (#222)
@@ -681,6 +684,59 @@ P7 既存 A/B/C/D 層コードを変更しない/ P8 道案内は誘導まで（
   `GET /api/admin/chunks/{chunk_id}/lecture-audio`（`_require_teacher`・キャッシュ配信のみ））。
   音声生成はモーダルで言語選択。教員がプレビューで見た分割・聞いた音声がそのまま
   学習者に配信される（プレビューと配信のレンダラ・分割ロジックを共有すること）。
+
+### 画像読み取りパイプライン + 分野別ナレッジライブラリ（L層, migration 041/042）
+
+PDF 内の画像（装置図・設計図等）を解析パイプラインに取り込み、分野別ナレッジライブラリを
+参照して装置・パーツを候補抽出する層。正本は
+`docs/features/image_pipeline_knowledge_library_design.md`。既存 agent は非改変
+（`parser.py` の画像スキップ・FigureTableSemanticsAgent はそのまま）。
+
+- **アップロードオプション**: `upload_material` / `reanalyze_document` に
+  `analyze_images`（既定 false）。`document_analysis_runs.options JSONB`（migration 041）に
+  run 単位で保存（`stage_outputs` への相乗り禁止）。
+- **`figure_image_extraction`**（`core/document_pipeline/figure_images.py`、非LLM・**常時実行**、
+  `document_structure` 直後）: PyMuPDF 埋め込み画像抽出 + caption 近傍の領域レンダリング
+  fallback（`extraction_method='embedded'|'region_render'`）。MinIO `figure-images` バケット +
+  `document_figures` テーブル（`UNIQUE(document_id, figure_key)` upsert）。caption 対応が
+  取れない画像も `caption_block_id=NULL` で保持（P4）。図単位の失敗は `status='failed'` で
+  非致命。
+- **`apparatus_semantics`**（`src/episteme_graph/agents/apparatus_semantics/`、vision LLM、
+  `figure_table_semantics` 直後・`analyze_images=true` のときのみ）: 画像 + caption + 近傍本文
+  + ライブラリ**凍結版**の retrieval（caption テキスト embedding → pgvector top-k、既定5）を
+  入力に、装置同定・パーツ分解を structured output で候補化。出力は常に
+  `review_status='review_required'` 系・`source_backed` を自動付与しない（確定は人間のみ）。
+  off 時は `{"skipped_by_option": true}` を `stage_outputs` に正直に記録。ライブラリ 0 件でも
+  単独動作（`match_status ∈ {novel, unknown}` に縮退）。参照版は
+  `stage_outputs.referenced_library_versions` に記録。vision は `core/llm.py` の
+  `generate_structured_with_images()`（v1 は OpenAI 経路のみ）。上限は
+  `APPARATUS_MAX_IMAGES_PER_DOCUMENT`（既定20）/ `APPARATUS_MAX_CALLS_PER_DAY`（既定30）、
+  超過分は `skipped_by_limit` で保持しステージは正常完了。
+- **component_type 語彙拡張**（migration 041）: `theory_components.component_type` CHECK に
+  `apparatus` / `instrument` / `part` を追加。カートリッジ `component_types.json` にも同語彙。
+  装置候補は ComponentAssembly 経由で `status='candidate'` の theory_components になる。
+  **TheoryOperationGraph には組み込まない**（v1。式 backing が無いため）。
+- **L層ライブラリ**（migration 042 `library_entries` / `library_entry_versions`、
+  `backend/core/library/`（store/search/seed、FastAPI 非 import）+
+  `backend/api/routes/library.py`（実パス `/api/admin/library/...`、`_require_teacher`））:
+  分野（domain_key = cartridge_id 名前空間）ごとの教員共同財。atlas_skeletons パターン踏襲
+  （draft 正本 + `revision` 楽観ロック（衝突 409）+ 凍結版履歴 + カートリッジ同梱
+  `library/*.json` シードの冪等取込）。**パイプラインが読むのは凍結版のみ**（draft 不使用）。
+  削除 API は無く `status='retired'` 遷移のみ（P4）。retired は retrieval に出ない。
+- **昇格は人間の操作のみ**（LLM がライブラリへ書き込む経路を作らない）: 装置候補 /
+  theory_components / 白紙の 3 経路 → 昇格モーダル（類似エントリ提示・統合可）。
+  **例示画像は既定で含めない** — 含有は元 document 所有者のみが明示確認を経て実行
+  （所有者以外は 403、fail-closed）。エントリ本文（テキスト）は教員全体に開示、
+  画像は元 document の権限を継承。
+- **図画像 API**: `GET /api/admin/documents/{id}/figures` / `GET .../figures/{fid}/image` —
+  必ず `_ensure_document_viewable` を通す（権利 fail-closed）。
+- **監査**: 作成・draft 更新・凍結・retire/restore・画像含有承認を `theory_review_events`
+  `entity_type='library_entry'` に記録。
+- **ガードレール**: `backend/tests/test_image_library_guardrails.py`（LLM 直接書込経路なし・
+  review_required 徹底・画像既定非含有・配信 API の権限ゲート・行削除 API 不在・
+  skipped_by_option 記録・core/library の FastAPI 非 import・retrieval が draft を読まない）。
+- **非スコープ（v1）**: 学習者向け表示 / TheoryOperationGraph への装置ノード / CLIP 等の
+  画像埋め込みモデル / グループ限定ライブラリ / vision 自動有効化 / table の画像解析。
 
 ### 質問の出所分類（教材/別の資料/モデル生成）
 

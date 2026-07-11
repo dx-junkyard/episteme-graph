@@ -7,6 +7,7 @@ CoursMapping → Blueprint → ExportValidation → Persist → Completed
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import tempfile
@@ -40,6 +41,7 @@ PIPELINE_STAGES = [
     "save_pdf",
     "grobid_parse",
     "document_structure",
+    "figure_image_extraction",
     "source_chunking",
     "source_embedding",
     "paper_skeleton",
@@ -51,6 +53,7 @@ PIPELINE_STAGES = [
     "symbol_registry",
     "derivation_chain",
     "figure_table_semantics",
+    "apparatus_semantics",
     "thesis_reconstruction",
     "dsl_linking",
     "dsl_embedding",
@@ -140,6 +143,7 @@ def run_document_pipeline(
     resume: bool = True,
     target_stage: str | None = None,
     start_stage: str | None = None,
+    options: dict | None = None,
 ) -> DocumentPipelineResult:
     """新 pipeline 本体。同期実行。
 
@@ -155,6 +159,9 @@ def run_document_pipeline(
         progress_callback: 各 stage 完了時に (stage_name, info_dict) で呼ばれる。
             background_tasks への進捗反映に使う。
         agents: テスト用に注入可能な agent インスタンス dict。
+        options: アップロード時オプションのスナップショット（migration 041 §3-2）。
+            例: ``{"analyze_images": True}``。``document_analysis_runs.options`` に
+            保存され、resume 時は明示指定が無ければ前回 run の options を引き継ぐ。
 
     Raises:
         PipelineStageError: 任意 stage で復旧不能な失敗が起きた場合。
@@ -175,6 +182,14 @@ def run_document_pipeline(
         get_latest_analysis_run(document_id=document_id, material_id=material_id)
         if resume and agents is None else None
     )
+    # options（migration 041 §3-2）: 明示指定があればそれを優先し、なければ前回 run の
+    # options を引き継ぐ（再解析のたびに analyze_images 等を指定しなくても前回の選択が
+    # 維持される）。completed 済み run は artifact 再利用の対象から外れる（下の reset）が、
+    # options の引き継ぎ元としては有効なので reset **前**にここで確定させる。
+    if options is not None:
+        effective_options = dict(options)
+    else:
+        effective_options = dict((previous_run or {}).get("options") or {})
     if previous_run and previous_run.get("status") == "completed" and target_stage is None and start_stage is None:
         previous_run = None
     previous_outputs = dict((previous_run or {}).get("stage_outputs") or {})
@@ -195,6 +210,7 @@ def run_document_pipeline(
             status="running",
             current_stage=(previous_run or {}).get("current_stage") or "save_pdf",
             stage_outputs={"resume": {"resumed": True}},
+            options=effective_options,
         )
     else:
         run_id = upsert_analysis_run(
@@ -203,6 +219,7 @@ def run_document_pipeline(
             cartridge_id=cartridge_id,
             status="running",
             current_stage="save_pdf",
+            options=effective_options,
         )
 
     def report(stage: str, payload: dict | None = None, *, run_status: str = "running") -> None:
@@ -401,6 +418,42 @@ def run_document_pipeline(
         if source_kind == "pdf":
             structure.source_file = pdf_path
         if finish_target_stage("document_structure", {"block_count": len(structure.blocks), "section_count": len(structure.sections)}):
+            return result
+
+        # ── Stage 2b: figure_image_extraction (non-LLM, deterministic, always runs) ─
+        # 画像パイプライン §4: caption ブロックの分類結果 (document_structure) を使う
+        # ため直後に置く。チェックボックス (options.analyze_images) に関係なく常時
+        # 実行する（決定 0-4-2）。非致命: 失敗しても pipeline は継続する。
+        figure_extraction_artifact = artifact("figure_image_extraction")
+        if should_use_artifact("figure_image_extraction"):
+            figure_extraction_summary = figure_extraction_artifact or {}
+            logger.info(
+                "Resuming document pipeline: loaded figure_image_extraction artifact for document %s",
+                document_id,
+            )
+        else:
+            report_start("figure_image_extraction", total=1, unit="builder")
+            if source_kind != "pdf":
+                figure_extraction_summary = {"skipped": True, "reason": "not_pdf"}
+            else:
+                try:
+                    from .figure_images import extract_document_figures
+
+                    figure_extraction_summary = extract_document_figures(
+                        pdf_bytes=pdf_bytes,
+                        document_id=document_id,
+                        run_id=run_id,
+                        structure=structure,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "figure_image_extraction stage failed (non-fatal): document=%s material=%s error=%s",
+                        document_id, material_id, exc, exc_info=True,
+                    )
+                    figure_extraction_summary = {"status": "completed", "error": str(exc)}
+            save_artifact("figure_image_extraction", figure_extraction_summary)
+        report_done("figure_image_extraction", dict(figure_extraction_summary or {}))
+        if finish_target_stage("figure_image_extraction", dict(figure_extraction_summary or {})):
             return result
 
         # ── Stage 3: source_chunking ───────────────────────────────────────
@@ -828,6 +881,52 @@ def run_document_pipeline(
         if finish_target_stage("figure_table_semantics", {"figures": len(getattr(fig_tbl, "figures", []) or []), "tables": len(getattr(fig_tbl, "tables", []) or []), "total": 1, "processed": 1}):
             return result
 
+        # ── Stage 8f: apparatus_semantics (vision LLM, opt-in via options.analyze_images) ─
+        # 画像パイプライン §5: FigureRecord (figure_table_semantics) と caption 意味付けを
+        # 入力に使うためこの位置に置く。出力は component_assembly が下流で消費する (§5-5)。
+        apparatus_artifact = artifact("apparatus_semantics")
+        if should_use_artifact("apparatus_semantics"):
+            apparatus_result = _from_agent_dict("apparatus_semantics", apparatus_artifact)
+            if apparatus_result is None:
+                # 前回 run が skipped_by_option / エラーで保存した placeholder。
+                # component_assembly には渡さず、そのまま正直に報告する。
+                apparatus_done_payload = dict(apparatus_artifact or {})
+                apparatus_done_payload.setdefault("status", "completed")
+            else:
+                apparatus_done_payload = {
+                    "status": "completed",
+                    "apparatus_records": len(getattr(apparatus_result, "apparatus_records", []) or []),
+                }
+            logger.info(
+                "Resuming document pipeline: loaded apparatus_semantics artifact for document %s",
+                document_id,
+            )
+        else:
+            report_start("apparatus_semantics", total=1, unit="builder")
+            if not effective_options.get("analyze_images"):
+                apparatus_result = None
+                apparatus_done_payload = {"status": "completed", "skipped_by_option": True}
+                save_artifact("apparatus_semantics", {"skipped_by_option": True})
+            else:
+                try:
+                    apparatus_result, apparatus_done_payload = _build_apparatus_semantics(
+                        document_id=document_id,
+                        cartridge_id=cartridge_id,
+                        fig_tbl=fig_tbl,
+                    )
+                    save_artifact("apparatus_semantics", apparatus_result)
+                except Exception as exc:
+                    logger.warning(
+                        "apparatus_semantics stage failed (non-fatal): document=%s material=%s error=%s",
+                        document_id, material_id, exc, exc_info=True,
+                    )
+                    apparatus_result = None
+                    apparatus_done_payload = {"status": "completed", "error": str(exc)}
+                    save_artifact("apparatus_semantics", {"status": "completed", "error": str(exc)})
+        report_done("apparatus_semantics", apparatus_done_payload)
+        if finish_target_stage("apparatus_semantics", apparatus_done_payload):
+            return result
+
         # ── Stage 9: thesis_reconstruction ─────────────────────────────────
         thesis_artifact = artifact("thesis_reconstruction")
         if should_use_artifact("thesis_reconstruction"):
@@ -926,13 +1025,37 @@ def run_document_pipeline(
             report_start("component_assembly", total=1, unit="llm_call")
             try:
                 ca_agent = _instantiate(agent_classes["ComponentAssemblyAgent"])
-                component_result = ca_agent.run(
+                ca_kwargs: dict[str, Any] = dict(
                     qualified_claims=qualified, equations=equations,
                     thesis=thesis, dsl=dsl, cartridge_id=cartridge_id,
                     claim_objects=claim_objects,
                     evidence_registry=evidence,
                     derivations=derivations,
                 )
+                # 画像パイプライン §5-5: apparatus_semantics の出力を装置候補として
+                # 下流に渡す。別チームが並行して agent 側に同名 kwarg を実装中のため、
+                # 未対応なら渡さず素通りさせる（防御的）。
+                if apparatus_result is not None:
+                    try:
+                        run_sig = inspect.signature(ca_agent.run)
+                        accepts_apparatus = (
+                            "apparatus_semantics" in run_sig.parameters
+                            or any(
+                                p.kind == inspect.Parameter.VAR_KEYWORD
+                                for p in run_sig.parameters.values()
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        accepts_apparatus = False
+                    if accepts_apparatus:
+                        ca_kwargs["apparatus_semantics"] = apparatus_result
+                    else:
+                        logger.info(
+                            "component_assembly: ComponentAssemblyAgent.run() does not "
+                            "accept apparatus_semantics yet; skipping (document=%s)",
+                            document_id,
+                        )
+                component_result = ca_agent.run(**ca_kwargs)
             except Exception as exc:
                 logger.exception("component_assembly stage failed for document=%s material=%s", document_id, material_id)
                 raise PipelineStageError("component_assembly", str(exc), cause=exc) from exc
@@ -1611,6 +1734,15 @@ def _from_agent_dict(stage: str, value: dict) -> Any:
     if stage == "figure_table_semantics":
         # FigureTableSemanticsResult lacks from_dict; use raw dict for resume.
         return value
+    if stage == "apparatus_semantics":
+        # 画像パイプライン §5: skipped_by_option / エラー時は素の placeholder dict
+        # (document_id を持たない) を artifact に保存しているため、正規の
+        # ApparatusSemanticsResult とは区別して None を返す（呼び出し側が
+        # component_assembly へ渡さないよう判定できるようにする）。
+        if not isinstance(value, dict) or "document_id" not in value or "apparatus_records" not in value:
+            return None
+        from episteme_graph.agents.apparatus_semantics.schema import ApparatusSemanticsResult
+        return ApparatusSemanticsResult.from_dict(value)
     if stage == "course_mapping":
         # CourseMappingResult lacks from_dict; use raw dict for resume.
         return value
@@ -1938,6 +2070,199 @@ def _empty_figure_table_result(document_id: str, cartridge_id: str | None):
         tables=[],
         validation_issues=[],
     )
+
+
+def _apparatus_daily_remaining(settings: Any) -> int:
+    """画像パイプライン §10: vision 呼び出しの日次上限に対する残数を概算する。
+
+    新テーブルは作らず、当日 (UTC) に開始した run の
+    ``stage_outputs.apparatus_semantics.vision_calls`` を合算する方式（design doc
+    §5-5 dev note）。クエリ失敗は非致命（上限を守る側に倒し、既定は「消費なし」
+    として続行する。過大な vision コールを防ぎたいので、失敗時は保守的に上限を
+    使い切ったとみなさず 0 に倒すのではなく、設定上限をそのまま返す。
+    """
+    limit = max(0, int(getattr(settings, "apparatus_max_calls_per_day", 30) or 0))
+    try:
+        from sqlalchemy import text as sa_text
+
+        from core.postgres import get_session as _pg_session
+
+        session = _pg_session()
+        try:
+            row = session.execute(
+                sa_text(
+                    """
+                    SELECT COALESCE(SUM((stage_outputs#>>'{apparatus_semantics,vision_calls}')::int), 0)
+                    FROM document_analysis_runs
+                    WHERE started_at >= date_trunc('day', now())
+                    """
+                )
+            ).fetchone()
+            used = int(row[0] or 0) if row else 0
+        finally:
+            session.close()
+    except Exception:
+        logger.warning("apparatus_semantics: daily usage query failed (non-fatal)", exc_info=True)
+        used = 0
+    return max(0, limit - used)
+
+
+def _build_apparatus_semantics(
+    *,
+    document_id: str,
+    cartridge_id: str | None,
+    fig_tbl: Any,
+) -> tuple[Any, dict]:
+    """apparatus_semantics ステージ本体（画像パイプライン §5-3/5-5）。
+
+    document_figures（figure_image_extraction の成果）を読み、MinIO から画像
+    bytes を取得し、ライブラリ retrieval（凍結版のみ、§6-5）で few-shot 候補を
+    注入して ApparatusSemanticsAgent を実行する。上限（1 document あたり /
+    日次）を超えた図は agent に渡さず ``skipped_by_limit`` として記録する (P4)。
+
+    Returns: (ApparatusSemanticsResult, done_payload dict)
+    """
+    from core.config import get_settings
+    from core.storage import get_storage_client
+    from episteme_graph.agents.apparatus_semantics.agent import ApparatusSemanticsAgent
+    from episteme_graph.agents.apparatus_semantics.schema import (
+        FigureImageInput,
+        LibraryCandidate,
+    )
+
+    from .figure_images import load_document_figures
+
+    settings = get_settings()
+    figure_rows = [
+        row for row in load_document_figures(document_id)
+        if row.get("status") == "extracted"
+    ]
+
+    storage = get_storage_client()
+
+    # figure_table_semantics の FigureRecord を figure_key / caption_block_id で
+    # 対応付ける（一致しなければ figure_record=None のまま渡す。§5-2）。
+    fig_record_by_key: dict[str, dict] = {}
+    fig_record_by_caption_block: dict[str, dict] = {}
+    for fig in getattr(fig_tbl, "figures", []) or []:
+        fig_dict = _to_plain_data(fig)
+        fid = str(fig_dict.get("figure_id") or "")
+        if fid:
+            fig_record_by_key[fid] = fig_dict
+        loc = fig_dict.get("source_location") or {}
+        cbid = str(loc.get("caption_block_id") or "")
+        if cbid:
+            fig_record_by_caption_block[cbid] = fig_dict
+
+    max_images = max(0, int(getattr(settings, "apparatus_max_images_per_document", 20) or 0))
+    daily_remaining = _apparatus_daily_remaining(settings)
+
+    figure_inputs: list[FigureImageInput] = []
+    skipped_by_limit: list[str] = []
+    for idx, row in enumerate(figure_rows):
+        figure_key = str(row.get("figure_key") or "")
+        if idx >= max_images or daily_remaining <= 0:
+            skipped_by_limit.append(figure_key)
+            continue
+        daily_remaining -= 1
+
+        image_bytes = None
+        minio_key = row.get("minio_key")
+        if minio_key:
+            try:
+                image_bytes = storage.get_object("figure-images", minio_key)
+            except Exception:
+                logger.warning(
+                    "apparatus_semantics: failed to load figure image document=%s figure=%s",
+                    document_id, figure_key, exc_info=True,
+                )
+                image_bytes = None
+
+        fig_record = (
+            fig_record_by_caption_block.get(str(row.get("caption_block_id") or ""))
+            or fig_record_by_key.get(figure_key)
+        )
+        caption_text = str(row.get("caption_text") or "")
+
+        figure_inputs.append(FigureImageInput(
+            figure_id=str(row.get("id") or figure_key),
+            figure_key=figure_key,
+            figure_label=row.get("figure_label"),
+            caption_text=caption_text,
+            image_bytes=image_bytes,
+            nearby_text=[],
+            figure_record=fig_record,
+        ))
+
+    # ライブラリ retrieval（凍結版のみ、§5-3/6-5）: cartridge が無ければ候補なしに
+    # 縮退する（原則 5）。retrieval 失敗も非致命（search_frozen_entries は例外を
+    # 投げず空リストを返す契約）。
+    library_candidates: dict[str, list[LibraryCandidate]] = {}
+    if cartridge_id:
+        try:
+            from core.library.search import search_frozen_entries
+        except Exception:
+            search_frozen_entries = None  # type: ignore[assignment]
+        if search_frozen_entries is not None:
+            for fig_input in figure_inputs:
+                query_text = " ".join(
+                    t for t in [fig_input.caption_text, *(fig_input.nearby_text or [])] if t
+                ).strip()
+                if not query_text:
+                    continue
+                try:
+                    hits = search_frozen_entries(
+                        domain_key=cartridge_id,
+                        query_text=query_text,
+                        top_k=settings.apparatus_retrieval_top_k,
+                    )
+                except Exception:
+                    logger.warning(
+                        "apparatus_semantics: library retrieval failed document=%s figure=%s",
+                        document_id, fig_input.figure_id, exc_info=True,
+                    )
+                    hits = []
+                if hits:
+                    library_candidates[fig_input.figure_id] = [
+                        LibraryCandidate(
+                            entry_id=str(h.get("entry_id") or ""),
+                            version_no=int(h.get("version_no") or 0),
+                            name=str(h.get("name") or ""),
+                            aliases=list(h.get("aliases") or []),
+                            summary=str(h.get("summary") or ""),
+                            body=dict(h.get("body") or {}),
+                        )
+                        for h in hits
+                    ]
+
+    vision_calls = sum(1 for fi in figure_inputs if fi.image_bytes)
+
+    agent = ApparatusSemanticsAgent(cartridge_id=cartridge_id)
+    result = agent.run(
+        document_id=document_id,
+        figures=figure_inputs,
+        library_candidates=library_candidates,
+        cartridge_id=cartridge_id,
+    )
+
+    seen_versions: set[tuple[str, int]] = set()
+    referenced_versions: list[dict] = []
+    for candidates in library_candidates.values():
+        for c in candidates:
+            key = (c.entry_id, c.version_no)
+            if key in seen_versions:
+                continue
+            seen_versions.add(key)
+            referenced_versions.append({"entry_id": c.entry_id, "version_no": c.version_no})
+
+    done_payload = {
+        "status": "completed",
+        "apparatus_records": len(getattr(result, "apparatus_records", []) or []),
+        "vision_calls": vision_calls,
+        "skipped_by_limit": skipped_by_limit,
+        "referenced_library_versions": referenced_versions,
+    }
+    return result, done_payload
 
 
 def _build_course_mapping(

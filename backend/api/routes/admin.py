@@ -10,8 +10,9 @@ import threading
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
+from pydantic import BaseModel
 from sqlalchemy import text as sa_text
 
 from dependencies import (
@@ -65,6 +66,8 @@ from services import (
     user_owns_course,
     user_owns_document,
 )
+from core.document_pipeline.figure_images import load_document_figures
+from core.document_pipeline.persistence import get_latest_analysis_run
 from core.llm import generate_text
 from core.meta_analyzer import (
     analyze_unanswered_queries,
@@ -81,6 +84,9 @@ from core.schema_registry import (
     get_predicates,
 )
 from core.storage import get_storage_client
+# 画像パイプライン §7: 図画像 API は theory_components.py の
+# _ensure_document_viewable（document_id は UUID / material_id 両対応）を必ず通す。
+from routes.theory_components import _ensure_document_viewable
 
 logger = logging.getLogger(__name__)
 
@@ -267,11 +273,17 @@ def _backfill_missing_chunk_pages_from_pdf(material_id: str, pdf_bytes: bytes) -
 @router.post("/materials/upload", status_code=202)
 def upload_material(
     file: UploadFile = File(...),
+    analyze_images: bool = Form(False),
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """PDF/TeX教材をアップロードし、バックグラウンドでグラフ化処理を開始する。
 
     即座に task_id を返却し、処理完了はポーリングで確認する。
+
+    ``analyze_images``（画像パイプライン §3）: True のとき ``apparatus_semantics``
+    ステージ（vision LLM による装置図同定）が有効になる。既定 off（原則6:
+    コスト fail-closed）。``figure_image_extraction``（非LLM の図画像抽出）は
+    このフラグに関係なく常時実行される（決定 0-4-2）。
     """
     import datetime
 
@@ -328,13 +340,14 @@ def upload_material(
     thread = threading.Thread(
         target=process_material_background,
         args=(material_id, str(doc_id), file.filename, source_bytes, task_id, None, source_kind),
+        kwargs={"options": {"analyze_images": bool(analyze_images)}},
         daemon=True,
     )
     thread.start()
 
     logger.info(
-        "Material upload accepted: %s (%s) task=%s by user=%s",
-        material_id, file.filename, task_id, current_user["id"],
+        "Material upload accepted: %s (%s) task=%s by user=%s analyze_images=%s",
+        material_id, file.filename, task_id, current_user["id"], analyze_images,
     )
 
     return {
@@ -345,12 +358,19 @@ def upload_material(
         "source_kind": source_kind,
         "status": "pending",
         "uploaded_at": now,
+        "analyze_images": bool(analyze_images),
     }
+
+
+class ReanalyzeRequest(BaseModel):
+    """画像パイプライン §3: 再解析時の analyze_images オプション（任意 body）。"""
+    analyze_images: bool = False
 
 
 @router.post("/documents/{document_id}/reanalyze", status_code=202)
 def reanalyze_document(
     document_id: str,
+    body: ReanalyzeRequest | None = None,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """新Agent Pipeline (issue #226) で document を再解析する。
@@ -358,6 +378,10 @@ def reanalyze_document(
     保存済み PDF を MinIO から取り出し、process_material_background と同じ
     pipeline をバックグラウンド起動する。旧 course/section/chunk 単位の解析
     エンドポイントの後継。
+
+    ``body.analyze_images``（画像パイプライン §3）: True のとき
+    ``apparatus_semantics`` ステージを有効にする。省略時は False
+    （明示オプトインのみ有効、原則6）。
     """
     session = _pg_session()
     try:
@@ -428,9 +452,11 @@ def reanalyze_document(
     finally:
         session.close()
 
+    analyze_images = bool(body.analyze_images) if body is not None else False
     thread = threading.Thread(
         target=process_material_background,
         args=(material_id, document_id, filename, source_bytes, task_id, None, source_kind or "pdf"),
+        kwargs={"options": {"analyze_images": analyze_images}},
         daemon=True,
     )
     thread.start()
@@ -2375,6 +2401,112 @@ def delete_document_group_permission(
         doc["id"], group_id, current_user["id"],
     )
     return {"document_id": doc["id"], "group_id": group_id, "deleted": True}
+
+
+# ---------------------------------------------------------------------------
+# 図画像（画像パイプライン §4-3 / §7、migration 041）
+# ---------------------------------------------------------------------------
+# _ensure_document_viewable（routes/theory_components.py）を必ず通す（原則7:
+# 抽出画像は元 document の権限を継承する）。document_id は UUID / material_id の
+# どちらでも解決できるが、document_figures.document_id は常に documents.id
+# （UUID 文字列）で保存されている（figure_image_extraction が orchestrator の
+# document_id=doc_id をそのまま使うため）ので、chunks から解決した canonical な
+# document_id で照会する。
+
+
+def _canonical_document_id(chunks: list[dict], fallback: str) -> str:
+    for chunk in chunks:
+        did = chunk.get("document_id")
+        if did:
+            return did
+    return fallback
+
+
+@router.get("/documents/{document_id}/figures")
+def list_document_figures(
+    document_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """図画像一覧（caption・抽出方式・装置候補つき）を返す。"""
+    chunks = _ensure_document_viewable(document_id, current_user)
+    canonical_document_id = _canonical_document_id(chunks, document_id)
+
+    rows = load_document_figures(canonical_document_id)
+
+    # 最新 run の apparatus_semantics artifact から figure_id 単位の候補を拾う
+    # （無ければ空リスト。apparatus_semantics は常に review_required 系の
+    # candidate であり、ここでは表示用に必要なフィールドだけを抜粋する）。
+    apparatus_by_figure: dict[str, list[dict]] = {}
+    try:
+        latest_run = get_latest_analysis_run(document_id=canonical_document_id)
+        stage_outputs = (latest_run or {}).get("stage_outputs") or {}
+        artifacts = stage_outputs.get("_artifacts") or {}
+        apparatus_artifact = artifacts.get("apparatus_semantics") or {}
+        for record in apparatus_artifact.get("apparatus_records") or []:
+            fig_id = str(record.get("figure_id") or "")
+            if not fig_id:
+                continue
+            apparatus_by_figure.setdefault(fig_id, []).append({
+                "apparatus_name_candidate": record.get("apparatus_name_candidate", ""),
+                "match_status": record.get("match_status", "unknown"),
+                "parts": [
+                    {"name": p.get("name", ""), "role": p.get("role", "")}
+                    for p in (record.get("parts") or [])
+                    if isinstance(p, dict)
+                ],
+                "confidence": record.get("confidence", 0.0),
+                "review_status": record.get("review_status", "review_required"),
+                "matched_library_entry_id": record.get("matched_library_entry_id"),
+            })
+    except Exception:
+        logger.warning(
+            "list_document_figures: failed to load apparatus candidates for document=%s",
+            canonical_document_id, exc_info=True,
+        )
+
+    figures = []
+    for row in rows:
+        fig_id = str(row.get("id") or "")
+        figures.append({
+            "id": fig_id,
+            "figure_key": row.get("figure_key"),
+            "figure_label": row.get("figure_label"),
+            "page": row.get("page"),
+            "caption_text": row.get("caption_text"),
+            "extraction_method": row.get("extraction_method"),
+            "region_confidence": row.get("region_confidence"),
+            "status": row.get("status"),
+            "image_url": f"/api/admin/documents/{document_id}/figures/{fig_id}/image",
+            "apparatus_candidates": apparatus_by_figure.get(fig_id, []),
+        })
+    return {"figures": figures}
+
+
+@router.get("/documents/{document_id}/figures/{figure_id}/image")
+def get_document_figure_image(
+    document_id: str,
+    figure_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> Response:
+    """図画像そのものを配信する（MinIO bucket figure-images）。"""
+    chunks = _ensure_document_viewable(document_id, current_user)
+    canonical_document_id = _canonical_document_id(chunks, document_id)
+
+    rows = load_document_figures(canonical_document_id)
+    row = next((r for r in rows if str(r.get("id")) == figure_id), None)
+    if not row or not row.get("minio_key"):
+        raise HTTPException(status_code=404, detail="Figure not found")
+
+    try:
+        image_bytes = get_storage_client().get_object("figure-images", row["minio_key"])
+    except Exception:
+        logger.warning(
+            "get_document_figure_image: MinIO fetch failed document=%s figure=%s",
+            canonical_document_id, figure_id, exc_info=True,
+        )
+        raise HTTPException(status_code=404, detail="Figure image not found")
+
+    return Response(content=image_bytes, media_type="image/png")
 
 
 @router.delete("/courses/{course_id}")

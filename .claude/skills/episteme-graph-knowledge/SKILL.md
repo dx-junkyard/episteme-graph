@@ -143,6 +143,11 @@ CorePredicate の定義は `backend/core/schema.py` を直接読んで最新の�
 | `ASSISTANT_MAX_CALLS_PER_DAY` | Admin Copilot: chat の 1 ユーザー 1 日あたり LLM コール上限 | `20` |
 | `ASSISTANT_LLM_MODEL` | Admin Copilot: intent 分類/応答が使うモデル（空なら fast tier に委譲） | （空） |
 | `LECTURE_TTS_VOICE` | レクチャー音声生成の TTS voice（OpenAI 経路。多言語対応 voice を想定） | `alloy` |
+| `APPARATUS_LLM_MODEL` | apparatus_semantics: vision 同定モデル（OpenAI 経路のみ） | `gpt-4o` |
+| `APPARATUS_MAX_IMAGES_PER_DOCUMENT` | apparatus_semantics: 1 document あたり vision 対象の図の上限（超過は `skipped_by_limit` で保持） | `20` |
+| `APPARATUS_MAX_CALLS_PER_DAY` | apparatus_semantics: vision 呼び出しの日次上限（他機能と独立） | `30` |
+| `APPARATUS_FEWSHOT_IMAGES` | apparatus_semantics: 含有承認済み例示画像の few-shot 添付 | `false` |
+| `APPARATUS_RETRIEVAL_TOP_K` | apparatus_semantics: ライブラリ凍結版 retrieval の候補数 | `5` |
 
 > **禁止**: `google-cloud-aiplatform` (Vertex AI) を新規パイプラインコードで使用すること。
 > Google の LLM を使う場合は必ず `LLM_PROVIDER=gemini` (`google-generativeai`) を指定すること。

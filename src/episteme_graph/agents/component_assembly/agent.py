@@ -13,6 +13,7 @@ from episteme_graph.agents.id_canonicalization import (
     claim_aliases_from_accepted_claims,
 )
 
+from .apparatus_components import build_apparatus_components
 from .cartridge_loader import CartridgeLoader
 from .component_refiner import ComponentRefiner
 from .derivation_graph_aligner import DerivationGraphAligner
@@ -62,6 +63,7 @@ class ComponentAssemblyAgent:
         claim_objects=None,
         evidence_registry=None,
         derivations=None,
+        apparatus_semantics=None,
     ) -> ComponentAssemblyResult:
         cartridge = self._load_cartridge(cartridge_id)
         llm_input = self._input_builder.build(
@@ -212,6 +214,31 @@ class ComponentAssemblyAgent:
                 result, llm_input=llm_input, derivations=derivations
             )
             result.theory_bundle = bundle.to_dict()
+
+        # Step 6: fold apparatus/instrument identification candidates (image
+        # pipeline, design doc §5-5) into theory_components candidates.
+        # Purely additive and non-LLM here: apparatus_components.py only
+        # translates the already candidate-only ApparatusSemanticsResult into
+        # the same ComponentRecord shape used above; it never confirms or
+        # repairs anything. Re-validating after the append keeps
+        # validation_issues consistent with the final component set without
+        # re-entering the LLM repair loop (which is claim/equation-only and
+        # would be the wrong tool for a deterministic append). ``None`` (no
+        # apparatus_semantics stage run) leaves this entire block a no-op, so
+        # every existing caller/test is unaffected.
+        if apparatus_semantics is not None:
+            apparatus_components = build_apparatus_components(
+                apparatus_semantics,
+                qualified_claims.document_id,
+                cartridge=cartridge,
+                existing_component_ids={c.component_id for c in result.components},
+            )
+            if apparatus_components:
+                result.components = list(result.components) + apparatus_components
+                result.validation_issues = self._validator.validate(
+                    result, cartridge, llm_input=llm_input
+                )
+                diagnostics["apparatus_component_count"] = len(apparatus_components)
 
         merged_diagnostics = dict(diagnostics)
         merged_diagnostics.update(result.diagnostics or {})

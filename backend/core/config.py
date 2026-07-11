@@ -223,6 +223,33 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("ASSISTANT_LLM_MODEL"),
     )
 
+    # --- 画像読み取りパイプライン（apparatus_semantics） — コスト制御（他機能とは独立） ---
+    # vision 同定に使う LLM モデル（OpenAI 経路のみ対応。§5-4）
+    apparatus_llm_model: str = Field(
+        default="gpt-4o",
+        validation_alias=AliasChoices("APPARATUS_LLM_MODEL"),
+    )
+    # 1 document あたり vision 対象にする図の上限（超過分は skipped_by_limit で保持, P4）
+    apparatus_max_images_per_document: int = Field(
+        default=20,
+        validation_alias=AliasChoices("APPARATUS_MAX_IMAGES_PER_DOCUMENT"),
+    )
+    # vision 呼び出しの日次上限（他機能と独立のカウンタ）
+    apparatus_max_calls_per_day: int = Field(
+        default=30,
+        validation_alias=AliasChoices("APPARATUS_MAX_CALLS_PER_DAY"),
+    )
+    # 例示画像の few-shot 添付（含有承認済みのみ。既定 off — コスト・権利の両面で保守的に）
+    apparatus_fewshot_images: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("APPARATUS_FEWSHOT_IMAGES"),
+    )
+    # ライブラリ retrieval（凍結版のみ）の候補数
+    apparatus_retrieval_top_k: int = Field(
+        default=5,
+        validation_alias=AliasChoices("APPARATUS_RETRIEVAL_TOP_K"),
+    )
+
     # --- JWT / Auth ---
     jwt_secret: str = "episteme-dev-secret-change-in-prod"
     admin_password: str = ""

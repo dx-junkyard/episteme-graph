@@ -10,7 +10,7 @@ from minio import Minio
 
 from core.config import get_settings
 
-BUCKETS = ("raw-papers", "raw-texts", "extracted-structures")
+BUCKETS = ("raw-papers", "raw-texts", "extracted-structures", "figure-images")
 
 
 class StorageManager:

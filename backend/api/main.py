@@ -58,6 +58,7 @@ from routes import atlas as atlas_routes
 from routes import atlas_view as atlas_view_routes
 from routes import doubt as doubt_routes
 from routes import reconstruction as reconstruction_routes
+from routes import library as library_routes
 from core.config import get_settings as _get_settings
 from core.postgres import get_session as _pg_session, check_connection as _pg_check
 
@@ -1547,8 +1548,117 @@ def _run_migrations() -> None:
             "ON assistant_step_dismissals(user_id, revoked)"
         ))
 
+        # ---- Migration 041: 画像読み取りパイプライン ----
+        # 正本リファレンス: backend/db/041_image_pipeline.sql
+        # 正本設計書: docs/features/image_pipeline_knowledge_library_design.md (§3-2, §4-3, §5-5)
+        # 1) document_analysis_runs にアップロード時オプションのスナップショットを追加
+        #    （stage_outputs とは意味が異なるため相乗りしない）。
+        session.execute(sa_text(
+            "ALTER TABLE document_analysis_runs ADD COLUMN IF NOT EXISTS options JSONB NOT NULL DEFAULT '{}'::jsonb"
+        ))
+        # 2) document_figures: PDF から抽出した図画像のレジストリ（§4-3）
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS document_figures (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                document_id TEXT NOT NULL,
+                run_id UUID,
+                figure_key TEXT NOT NULL,
+                figure_label TEXT,
+                page INT,
+                bbox JSONB,
+                caption_block_id TEXT,
+                caption_text TEXT,
+                minio_key TEXT NOT NULL,
+                extraction_method TEXT NOT NULL CHECK (extraction_method IN ('embedded','region_render')),
+                region_confidence REAL,
+                status TEXT NOT NULL DEFAULT 'extracted' CHECK (status IN ('extracted','failed')),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE(document_id, figure_key)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_document_figures_doc ON document_figures(document_id)"
+        ))
+        # 3) theory_components.component_type CHECK に apparatus / instrument / part を追加。
+        #    旧定義（backend/db/013_theory_components.sql）はカラム定義直付けの無名 CHECK
+        #    のため、自動命名規則により制約名は theory_components_component_type_check
+        #    になる（同テーブルの claim_type 系で確認済みの命名規則と同型）。
+        session.execute(sa_text("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'theory_components_component_type_check'
+                      AND pg_get_constraintdef(oid) NOT LIKE '%apparatus%'
+                ) THEN
+                    ALTER TABLE theory_components DROP CONSTRAINT theory_components_component_type_check;
+                END IF;
+            END $$;
+        """))
+        session.execute(sa_text("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint WHERE conname = 'theory_components_component_type_check'
+                ) THEN
+                    ALTER TABLE theory_components
+                        ADD CONSTRAINT theory_components_component_type_check
+                        CHECK (component_type IN (
+                            'theory', 'concept', 'law', 'mechanism', 'operator', 'observation',
+                            'apparatus', 'instrument', 'part'
+                        ));
+                END IF;
+            END $$;
+        """))
+
+        # ---- Migration 042: 分野別ナレッジライブラリ（L層）----
+        # 正本リファレンス: backend/db/042_knowledge_library.sql
+        # atlas_skeletons（migration 027）と同じ「draft が正本・凍結版が履歴・
+        # カートリッジ同梱シードを起動時に冪等取込」パターンを踏襲する（§6-3）。
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS library_entries (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                domain_key TEXT NOT NULL,
+                entry_type TEXT NOT NULL CHECK (entry_type IN ('apparatus','theory_component')),
+                name TEXT NOT NULL,
+                aliases JSONB NOT NULL DEFAULT '[]',
+                summary TEXT NOT NULL DEFAULT '',
+                body JSONB NOT NULL DEFAULT '{}',
+                exemplar_images JSONB NOT NULL DEFAULT '[]',
+                source_component_ids JSONB NOT NULL DEFAULT '[]',
+                source_document_ids JSONB NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','retired')),
+                revision INT NOT NULL DEFAULT 1,
+                latest_version_no INT NOT NULL DEFAULT 0,
+                created_by TEXT, updated_by TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_library_entries_domain "
+            "ON library_entries(domain_key, entry_type, status)"
+        ))
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS library_entry_versions (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                entry_id UUID NOT NULL REFERENCES library_entries(id) ON DELETE CASCADE,
+                version_no INT NOT NULL,
+                content JSONB NOT NULL,
+                embedding vector(3072),
+                note TEXT,
+                published_by TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE(entry_id, version_no)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_library_versions_entry "
+            "ON library_entry_versions(entry_id, version_no DESC)"
+        ))
+
         session.commit()
-        logger.info("Migrations (002-039) applied successfully.")
+        logger.info("Migrations (002-042) applied successfully.")
 
         # 骨格 DB 管理化 (027): カートリッジ同梱の凍結骨格を一度だけ DB へ取り込む (冪等)
         try:
@@ -1610,6 +1720,15 @@ async def _lifespan(application: FastAPI):
             finally:
                 session.close()
             _run_migrations()
+            # ナレッジライブラリ（L層, migration 042）: カートリッジ同梱ライブラリの
+            # 起動時冪等取込（atlas_skeletons と同じシードパターン）。seed 側は自身の
+            # 例外を握る設計だが、念のため呼び出し側でも起動を止めない。
+            try:
+                from core.library import seed as _library_seed
+
+                _library_seed.import_bundled_library()
+            except Exception:  # noqa: BLE001
+                logger.warning("bundled library seed import skipped", exc_info=True)
             break
         except Exception as exc:
             if attempt < max_retries - 1:
@@ -1667,6 +1786,7 @@ app.include_router(atlas_routes.report_router)
 app.include_router(atlas_view_routes.router)
 app.include_router(doubt_routes.learning_router)
 app.include_router(reconstruction_routes.learning_router)
+app.include_router(library_routes.router)
 
 
 @app.get("/healthz")

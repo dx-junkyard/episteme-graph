@@ -64,6 +64,7 @@
         </button>
         <div class="admin-tab-menu" id="admin-tab-menu-knowledge" role="menu">
           <button class="admin-tab" data-tab="schema-proposals" role="menuitem">スキーマ提案</button>
+          <button class="admin-tab" data-tab="knowledge-library" role="menuitem">ナレッジライブラリ</button>
         </div>
       </div>
       <div class="admin-tab-group" data-group="ops">
@@ -247,6 +248,11 @@
             <input type="file" id="file-input" accept=".pdf,.tar.gz,.tgz,application/pdf,application/gzip" hidden>
           </label>
         </div>
+        <!-- 画像読み取りパイプライン（migration 041）: 既定 off。vision LLM は明示オプトインのみで呼ぶ -->
+        <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-secondary);margin-top:8px">
+          <input type="checkbox" id="upload-analyze-images">
+          図面・画像を解析する（装置図の同定に vision AI を使用）
+        </label>
         <div id="upload-status" class="upload-status"></div>
       </div>
 
@@ -620,6 +626,48 @@
             <button id="sp-canary-confirm" class="admin-action-btn" style="margin-top:8px;font-size:12px">選択したコースに適用</button>
           </div>
           <div id="sp-approve-msg" class="upload-status" style="display:none;margin-top:8px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ナレッジライブラリタブ（L層, migration 042）— 分野別の教員共同財（apparatus / theory_component） -->
+    <div class="admin-panel" id="tab-knowledge-library">
+      <div class="admin-section">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+          <h3 class="admin-section-title" style="margin-bottom:0">ナレッジライブラリ</h3>
+          <button id="library-new-entry-btn" class="admin-action-btn">新規エントリ作成</button>
+        </div>
+        <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:12px">
+          分野ごとの装置・理論コンポーネントの記述を教員コミュニティで編集・凍結する共有ライブラリです。
+          閲覧・編集は教員全員が可能です（wiki型）。凍結版のみが解析パイプラインの参照対象になります。
+          削除はできません（廃止＝status遷移のみ、履歴は保持されます）。
+        </p>
+        <div id="library-body" style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">
+          <div id="library-domains-panel" style="min-width:180px;max-width:220px;flex:0 0 200px">
+            <div style="font-size:12.5px;font-weight:600;margin-bottom:6px">分野</div>
+            <div id="library-domains-list" style="display:flex;flex-direction:column;gap:4px">
+              <div style="padding:8px;color:var(--color-text-tertiary);font-size:12.5px">読み込み中...</div>
+            </div>
+          </div>
+          <div id="library-entries-panel" style="min-width:260px;flex:1 1 320px">
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+              <input type="text" id="library-search-q" placeholder="名称・別名で検索..." style="flex:1;min-width:140px;padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)">
+              <select id="library-filter-type" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)">
+                <option value="">すべての種別</option>
+                <option value="apparatus">装置 (apparatus)</option>
+                <option value="theory_component">理論コンポーネント</option>
+              </select>
+              <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--color-text-secondary);white-space:nowrap">
+                <input type="checkbox" id="library-include-retired"> 廃止済みも表示
+              </label>
+            </div>
+            <div id="library-entries-list" style="display:flex;flex-direction:column;gap:4px;max-height:520px;overflow-y:auto">
+              <div style="padding:8px;color:var(--color-text-tertiary);font-size:12.5px">分野を選択してください</div>
+            </div>
+          </div>
+          <div id="library-detail-panel" style="min-width:300px;flex:1 1 380px;border:1px solid var(--color-border);border-radius:6px;padding:12px">
+            <div id="library-detail-body" style="color:var(--color-text-tertiary);font-size:12.5px">左の一覧からエントリを選択してください</div>
+          </div>
         </div>
       </div>
     </div>

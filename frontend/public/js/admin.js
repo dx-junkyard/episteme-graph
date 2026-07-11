@@ -419,10 +419,15 @@
       var versionBtn = m.document_id
         ? '<button class="admin-version-doc-btn" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="共有バージョンを管理" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">共有版</button>'
         : "";
+      // 画像読み取りパイプライン（migration 041）: 抽出された図・画像を表示（document_id が必要）
+      var figuresBtn = m.document_id
+        ? '<button class="admin-figures-btn" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="抽出された図・画像を表示" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">図・画像</button>'
+        : "";
       html += '<td><div class="materials-action-cell">' +
         materialPipelineMenuHtml(m) +
         '<button class="admin-pdf-reupload-btn' + pdfBtnClass + '" data-material-id="' + escHtml(m.material_id) + '" title="' + escHtml(pdfBtnTitle) + '">' + pdfBtnLabel + '</button>' +
         resumeBtn +
+        figuresBtn +
         shareBtn +
         versionBtn +
         '<button class="admin-delete-btn" data-material-id="' + escHtml(m.material_id) + '" data-material-title="' + escHtml(m.title) + '" style="background:none;border:1px solid var(--color-text-danger);color:var(--color-text-danger);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">削除</button>' +
@@ -449,6 +454,13 @@
     tbody.querySelectorAll(".admin-share-doc-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
         openDocumentShareModal(this.getAttribute("data-document-id"), this.getAttribute("data-title"));
+      });
+    });
+
+    // 画像読み取りパイプライン（migration 041）: 図・画像一覧モーダル
+    tbody.querySelectorAll(".admin-figures-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        openFiguresModal(this.getAttribute("data-document-id"), this.getAttribute("data-title"));
       });
     });
 
@@ -507,23 +519,7 @@
         var docId = this.getAttribute("data-document-id");
         var filename = this.getAttribute("data-filename") || "教材";
         if (!docId) return;
-        btn.disabled = true;
-        btn.textContent = "再開中...";
-        apiFetch("/admin/documents/" + docId + "/reanalyze", { method: "POST" })
-          .then(function (res) {
-            if (!res.ok) throw new Error("status " + res.status);
-            return res.json();
-          })
-          .then(function (data) {
-            btn.textContent = "処理中";
-            if (data.task_id) startTaskPolling(data.task_id, filename);
-            loadMaterials();
-          })
-          .catch(function () {
-            btn.disabled = false;
-            btn.textContent = "解析再開";
-            showUploadStatus("解析の再開に失敗しました。", "error");
-          });
+        openReanalyzeOptionsModal(docId, filename, btn);
       });
     });
 
@@ -867,6 +863,924 @@
     input.focus();
   }
 
+  // ── 画像読み取りパイプライン（migration 041）— 再解析オプション ─────────
+  // 「解析再開」ボタンのフローにもアップロード時と同じチェックボックスを出す。
+  function openReanalyzeOptionsModal(docId, filename, triggerBtn) {
+    var existing = document.getElementById("reanalyze-options-modal");
+    if (existing) existing.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = "reanalyze-options-modal";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+    overlay.innerHTML =
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:360px;max-width:440px">' +
+        '<h3 style="margin:0 0 12px;font-size:15px;color:var(--color-text-primary)">解析を再開</h3>' +
+        '<p style="font-size:12.5px;color:var(--color-text-secondary);margin:0 0 12px">「' + escHtml(filename) + '」の解析を再開します。</p>' +
+        '<label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-secondary);margin-bottom:16px">' +
+          '<input type="checkbox" id="reanalyze-analyze-images">' +
+          '図面・画像を解析する（装置図の同定に vision AI を使用）' +
+        '</label>' +
+        '<div style="display:flex;gap:8px;justify-content:flex-end">' +
+          '<button id="reanalyze-cancel-btn" class="admin-action-btn">キャンセル</button>' +
+          '<button id="reanalyze-confirm-btn" class="admin-action-btn" style="background:var(--color-text-success);color:#fff">再開する</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) overlay.remove(); });
+    document.getElementById("reanalyze-cancel-btn").addEventListener("click", function () { overlay.remove(); });
+    document.getElementById("reanalyze-confirm-btn").addEventListener("click", function () {
+      var analyzeImages = document.getElementById("reanalyze-analyze-images").checked;
+      overlay.remove();
+      performReanalyze(docId, filename, triggerBtn, analyzeImages);
+    });
+  }
+
+  function performReanalyze(docId, filename, btn, analyzeImages) {
+    if (btn) { btn.disabled = true; btn.textContent = "再開中..."; }
+    apiFetch("/admin/documents/" + docId + "/reanalyze", {
+      method: "POST",
+      body: JSON.stringify({ analyze_images: !!analyzeImages }),
+    })
+      .then(function (res) {
+        if (!res.ok) throw new Error("status " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        if (btn) btn.textContent = "処理中";
+        if (data.task_id) startTaskPolling(data.task_id, filename);
+        loadMaterials();
+      })
+      .catch(function () {
+        if (btn) { btn.disabled = false; btn.textContent = "解析再開"; }
+        showUploadStatus("解析の再開に失敗しました。", "error");
+      });
+  }
+
+  // ── 図・画像（document_figures, migration 041） ─────────────────────
+  var _figuresModalState = { documentId: null, title: "", figures: [], objectUrls: [] };
+
+  function _figuresRevokeObjectUrls() {
+    _figuresModalState.objectUrls.forEach(function (u) { try { URL.revokeObjectURL(u); } catch (e) { /* noop */ } });
+    _figuresModalState.objectUrls = [];
+  }
+
+  function openFiguresModal(documentId, title) {
+    _figuresRevokeObjectUrls();
+    _figuresModalState.documentId = documentId;
+    _figuresModalState.title = title || "";
+    _figuresModalState.figures = [];
+
+    var existing = document.getElementById("figures-modal");
+    if (existing) existing.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = "figures-modal";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+    overlay.innerHTML =
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:520px;max-width:760px;max-height:82vh;display:flex;flex-direction:column">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
+          '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">図・画像 — ' + escHtml(title || "") + '</h3>' +
+          '<button id="figures-modal-close" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
+        '</div>' +
+        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 10px">' +
+          'PDFから抽出された図です。装置候補はAIによる推定であり、常に教員の確認が必要です（確定はライブラリへの昇格操作でのみ行われます）。' +
+        '</p>' +
+        '<div id="figures-modal-body" style="overflow-y:auto;flex:1">' +
+          '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">読み込み中...</div>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) { _figuresRevokeObjectUrls(); overlay.remove(); } });
+    document.getElementById("figures-modal-close").addEventListener("click", function () { _figuresRevokeObjectUrls(); overlay.remove(); });
+
+    loadFigures(documentId);
+  }
+
+  function loadFigures(documentId) {
+    apiFetch("/admin/documents/" + encodeURIComponent(documentId) + "/figures")
+      .then(function (res) {
+        if (!res.ok) throw new Error("status " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        _figuresModalState.figures = (data && data.figures) || [];
+        renderFiguresList();
+      })
+      .catch(function () {
+        var body = document.getElementById("figures-modal-body");
+        if (body) body.innerHTML = '<div style="padding:16px;color:var(--color-text-danger);font-size:13px">図の読み込みに失敗しました</div>';
+      });
+  }
+
+  function figureExtractionBadge(method) {
+    if (method === "embedded") {
+      return '<span class="admin-status" style="background:var(--color-background-info);color:var(--color-text-info)">埋込画像</span>';
+    }
+    if (method === "region_render") {
+      return '<span class="admin-status" style="background:var(--color-background-tertiary);color:var(--color-text-secondary)">領域推定</span>';
+    }
+    return "";
+  }
+
+  // match_status バッジ。confidence の生数値は出さず、段階バッジ + 固定の「要確認」注記のみ（review_status を確定表示しない）。
+  function figureMatchBadge(matchStatus) {
+    var label = { matched: "一致候補", novel: "新規候補", unknown: "不明" }[matchStatus] || "不明";
+    var bg = "var(--color-background-tertiary)", fg = "var(--color-text-tertiary)";
+    if (matchStatus === "matched") { bg = "var(--color-background-success)"; fg = "var(--color-text-success)"; }
+    else if (matchStatus === "novel") { bg = "var(--color-background-info)"; fg = "var(--color-text-info)"; }
+    return '<span class="admin-status" style="background:' + bg + ';color:' + fg + '">' + label + '</span>' +
+      '<span style="font-size:11px;color:var(--color-text-tertiary);margin-left:4px">（要確認）</span>';
+  }
+
+  function renderFiguresList() {
+    var body = document.getElementById("figures-modal-body");
+    if (!body) return;
+    var figures = _figuresModalState.figures;
+    if (!figures.length) {
+      body.innerHTML = '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">抽出された図はありません</div>';
+      return;
+    }
+    var html = "";
+    figures.forEach(function (fig, idx) {
+      html += '<div class="figure-card" data-figure-id="' + escHtml(fig.id) + '" style="display:flex;gap:12px;padding:10px 0;border-bottom:1px solid var(--color-border-tertiary)">' +
+        '<div style="width:120px;height:120px;flex:0 0 120px;background:var(--color-background-secondary);border-radius:4px;display:flex;align-items:center;justify-content:center;overflow:hidden">' +
+          '<img class="figure-thumb" data-figure-idx="' + idx + '" style="max-width:100%;max-height:100%;display:none" alt="">' +
+          '<span class="figure-thumb-placeholder" style="font-size:11px;color:var(--color-text-tertiary)">読込中...</span>' +
+        '</div>' +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="font-size:13px;font-weight:600;color:var(--color-text-primary)">' + escHtml(fig.figure_label || fig.figure_key || "図") +
+            (fig.page ? ' <span style="font-weight:400;color:var(--color-text-tertiary);font-size:11px">p.' + escHtml(fig.page) + '</span>' : "") +
+          '</div>' +
+          '<div style="font-size:12px;color:var(--color-text-secondary);margin:4px 0">' + escHtml(fig.caption_text || "(captionなし)") + '</div>' +
+          '<div style="margin-bottom:6px">' + figureExtractionBadge(fig.extraction_method) + '</div>' +
+          _renderApparatusCandidates(fig) +
+        '</div>' +
+      '</div>';
+    });
+    body.innerHTML = html;
+
+    // 画像はサムネイルごとに認証付きで遅延取得する（apiFetchRaw → blob → objectURL。PDFプレビューと同じ流儀）。
+    figures.forEach(function (fig, idx) { loadFigureThumbnail(fig, idx); });
+
+    body.querySelectorAll(".figure-promote-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var figureId = this.getAttribute("data-figure-id");
+        var fig = figures.filter(function (f) { return f.id === figureId; })[0];
+        var candIdx = parseInt(this.getAttribute("data-candidate-idx"), 10);
+        var candidate = fig && fig.apparatus_candidates && fig.apparatus_candidates[candIdx];
+        openLibraryEntryModal({
+          documentId: _figuresModalState.documentId,
+          figureId: figureId,
+          candidate: candidate || null,
+        });
+      });
+    });
+  }
+
+  function _renderApparatusCandidates(fig) {
+    var candidates = fig.apparatus_candidates || [];
+    if (!candidates.length) return "";
+    var html = '<div style="display:flex;flex-direction:column;gap:6px;margin-top:4px">';
+    candidates.forEach(function (c, i) {
+      var parts = (c.parts || []).map(function (p) {
+        return escHtml(p.name) + (p.role ? "（" + escHtml(p.role) + "）" : "");
+      }).join("、");
+      html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:var(--color-background-secondary);border-radius:4px;padding:6px 8px">' +
+        '<span style="font-size:12.5px;font-weight:600;color:var(--color-text-primary)">' + escHtml(c.apparatus_name_candidate || "(未同定)") + '</span>' +
+        figureMatchBadge(c.match_status) +
+        (parts ? '<span style="font-size:11.5px;color:var(--color-text-tertiary)">パーツ: ' + parts + '</span>' : "") +
+        '<span style="flex:1"></span>' +
+        '<button class="admin-action-btn figure-promote-btn" data-figure-id="' + escHtml(fig.id) + '" data-candidate-idx="' + i + '" style="font-size:11.5px;padding:2px 8px">ライブラリへ昇格</button>' +
+      '</div>';
+    });
+    html += '</div>';
+    return html;
+  }
+
+  function loadFigureThumbnail(fig, idx) {
+    var img = document.querySelector('.figure-thumb[data-figure-idx="' + idx + '"]');
+    if (!img) return;
+    // image_url が返っていればそれを使う（"/api" プレフィックス付きでも剥がして apiFetchRaw と整合させる）。
+    // 無ければ契約上のパスを組み立てる。
+    var path = fig.image_url || ("/admin/documents/" + encodeURIComponent(_figuresModalState.documentId) + "/figures/" + encodeURIComponent(fig.id) + "/image");
+    if (path.indexOf("/api/") === 0) path = path.substring(4);
+    apiFetchRaw(path, { _noJson: true })
+      .then(function (res) {
+        if (!res.ok) throw new Error("image load failed");
+        return res.blob();
+      })
+      .then(function (blob) {
+        var url = URL.createObjectURL(blob);
+        _figuresModalState.objectUrls.push(url);
+        img.src = url;
+        img.style.display = "";
+        var placeholder = img.parentNode.querySelector(".figure-thumb-placeholder");
+        if (placeholder) placeholder.remove();
+      })
+      .catch(function () {
+        var placeholder = img.parentNode.querySelector(".figure-thumb-placeholder");
+        if (placeholder) placeholder.textContent = "表示できません";
+      });
+  }
+
+  // ── ナレッジライブラリ（L層, migration 042）— 昇格 / 新規作成モーダル ──
+  // ライブラリへの書き込みは常に人間の操作のみ（LLMが自動昇格する経路は作らない）。
+  var _libEntryModalCtx = { documentId: null, figureId: null, candidate: null };
+  var _libSimilarDebounceTimer = null;
+
+  function _libraryPartsRowHtml(name, role) {
+    return '<div class="lib-part-row" style="display:flex;gap:6px;margin-bottom:4px">' +
+      '<input type="text" class="lib-part-name" placeholder="パーツ名" value="' + escHtml(name || "") + '" style="flex:1;padding:3px 6px;font-size:12.5px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)">' +
+      '<input type="text" class="lib-part-role" placeholder="役割" value="' + escHtml(role || "") + '" style="flex:1;padding:3px 6px;font-size:12.5px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)">' +
+      '<button type="button" class="lib-part-remove" style="background:none;border:none;color:var(--color-text-danger);cursor:pointer;font-size:13px">&times;</button>' +
+    '</div>';
+  }
+
+  function _libraryReadPartsRows(containerId) {
+    var rows = document.querySelectorAll("#" + containerId + " .lib-part-row");
+    var out = [];
+    rows.forEach(function (row) {
+      var name = row.querySelector(".lib-part-name").value.trim();
+      var role = row.querySelector(".lib-part-role").value.trim();
+      if (name) out.push({ name: name, role: role });
+    });
+    return out;
+  }
+
+  function _apparatusBodyFromCandidate(candidate) {
+    var parts = (candidate && candidate.parts) || [];
+    return {
+      typical_parts: parts.map(function (p) { return { name: p.name || "", role: p.role || "" }; }),
+      visual_cues: "",
+      typical_configurations: "",
+      measurement_targets: "",
+    };
+  }
+
+  // opts: { documentId, figureId, candidate } — 図からの昇格（figureId 付き）と
+  // 白紙からの新規作成（すべて null）を同じフォームで扱う（§6-4 の3経路のうち a と c）。
+  function openLibraryEntryModal(opts) {
+    opts = opts || {};
+    _libEntryModalCtx = {
+      documentId: opts.documentId || null,
+      figureId: opts.figureId || null,
+      candidate: opts.candidate || null,
+    };
+
+    var existing = document.getElementById("library-entry-modal");
+    if (existing) existing.remove();
+
+    var isPromote = !!(opts.candidate || opts.figureId);
+    var defaultName = (opts.candidate && opts.candidate.apparatus_name_candidate) || "";
+    var defaultBody = _apparatusBodyFromCandidate(opts.candidate);
+    var canOfferImage = !!(opts.figureId && opts.documentId);
+
+    var overlay = document.createElement("div");
+    overlay.id = "library-entry-modal";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:10000";
+    overlay.innerHTML =
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:460px;max-width:600px;max-height:86vh;overflow-y:auto">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
+          '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">' + (isPromote ? "ライブラリへ昇格" : "ライブラリに新規エントリを作成") + '</h3>' +
+          '<button id="library-entry-close" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
+        '</div>' +
+        (isPromote ? '<p style="font-size:12px;color:var(--color-text-warning);background:#fff6e6;border:1px solid var(--color-text-warning);border-radius:4px;padding:6px 8px;margin:0 0 12px">AIの候補をそのまま登録せず、自分の言葉で書き直すことを推奨します。</p>' : '') +
+        '<div id="library-entry-status" class="upload-status" style="display:none;margin-bottom:10px"></div>' +
+
+        '<label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:2px">分野 (domain_key)</label>' +
+        '<input type="text" id="lib-entry-domain" placeholder="例: particle_physics" style="width:100%;padding:5px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary);margin-bottom:10px;box-sizing:border-box">' +
+
+        '<label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:2px">種別</label>' +
+        '<select id="lib-entry-type" style="width:100%;padding:5px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary);margin-bottom:10px">' +
+          '<option value="apparatus" selected>装置 (apparatus)</option>' +
+          '<option value="theory_component">理論コンポーネント</option>' +
+        '</select>' +
+
+        '<label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:2px">名称</label>' +
+        '<input type="text" id="lib-entry-name" value="' + escHtml(defaultName) + '" style="width:100%;padding:5px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary);margin-bottom:10px;box-sizing:border-box">' +
+
+        '<label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:2px">別名 (カンマ区切り・任意)</label>' +
+        '<input type="text" id="lib-entry-aliases" style="width:100%;padding:5px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary);margin-bottom:10px;box-sizing:border-box">' +
+
+        '<label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:2px">要約</label>' +
+        '<textarea id="lib-entry-summary" rows="2" style="width:100%;padding:5px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary);margin-bottom:10px;box-sizing:border-box"></textarea>' +
+
+        '<div id="lib-entry-body-apparatus">' +
+          '<label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:2px">見た目の特徴 (visual_cues)</label>' +
+          '<textarea id="lib-entry-visual-cues" rows="2" placeholder="例: 円筒形で放射状にフランジ" style="width:100%;padding:5px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary);margin-bottom:10px;box-sizing:border-box"></textarea>' +
+
+          '<label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:4px">典型的な構成パーツ</label>' +
+          '<div id="lib-entry-parts-list" style="margin-bottom:6px">' +
+            (defaultBody.typical_parts.length ? defaultBody.typical_parts.map(function (p) { return _libraryPartsRowHtml(p.name, p.role); }).join("") : _libraryPartsRowHtml("", "")) +
+          '</div>' +
+          '<button type="button" id="lib-entry-parts-add" class="admin-action-btn" style="font-size:11.5px;padding:2px 8px;margin-bottom:10px">+ パーツを追加</button>' +
+
+          '<label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:2px">典型的な構成・用途 (任意)</label>' +
+          '<textarea id="lib-entry-configs" rows="2" style="width:100%;padding:5px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary);margin-bottom:10px;box-sizing:border-box"></textarea>' +
+
+          '<label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:2px">計測対象 (任意)</label>' +
+          '<textarea id="lib-entry-measurement" rows="2" style="width:100%;padding:5px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary);margin-bottom:10px;box-sizing:border-box"></textarea>' +
+        '</div>' +
+
+        '<div id="lib-entry-body-theory" style="display:none">' +
+          '<label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:2px">body (JSON、任意)</label>' +
+          '<textarea id="lib-entry-body-json" rows="4" placeholder="{}" style="width:100%;padding:5px 8px;font-size:12px;font-family:monospace;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary);margin-bottom:10px;box-sizing:border-box"></textarea>' +
+        '</div>' +
+
+        (canOfferImage
+          ? ('<label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-secondary);margin-bottom:4px">' +
+              '<input type="checkbox" id="lib-entry-include-image"> 例示画像を含める（元教材の所有者のみ有効）' +
+            '</label>' +
+            '<div id="lib-entry-image-warning" style="display:none;font-size:11.5px;color:var(--color-text-warning);background:#fff6e6;border:1px solid var(--color-text-warning);border-radius:4px;padding:5px 7px;margin-bottom:10px">この画像はライブラリを閲覧できる全教員に表示されます。元教材の所有者以外がこの操作を行うと拒否されます。</div>')
+          : "") +
+
+        '<div style="border-top:1px solid var(--color-border-tertiary);padding-top:10px;margin-top:4px">' +
+          '<label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:4px">' +
+            '<input type="radio" name="lib-entry-merge-target" value="" checked> 新規作成' +
+          '</label>' +
+          '<div id="lib-entry-similar-area" style="margin-bottom:8px;padding-left:22px"></div>' +
+        '</div>' +
+
+        '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">' +
+          '<button id="lib-entry-cancel" class="admin-action-btn">キャンセル</button>' +
+          '<button id="lib-entry-submit" class="admin-action-btn" style="background:var(--color-text-success);color:#fff">登録する</button>' +
+        '</div>' +
+      '</div>';
+
+    document.body.appendChild(overlay);
+
+    if (opts.candidate && opts.candidate.reason) {
+      document.getElementById("lib-entry-summary").value = opts.candidate.reason;
+    }
+
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) overlay.remove(); });
+    document.getElementById("library-entry-close").addEventListener("click", function () { overlay.remove(); });
+    document.getElementById("lib-entry-cancel").addEventListener("click", function () { overlay.remove(); });
+
+    document.getElementById("lib-entry-type").addEventListener("change", function () {
+      var isApparatus = this.value === "apparatus";
+      document.getElementById("lib-entry-body-apparatus").style.display = isApparatus ? "" : "none";
+      document.getElementById("lib-entry-body-theory").style.display = isApparatus ? "none" : "";
+    });
+
+    document.getElementById("lib-entry-parts-list").addEventListener("click", function (e) {
+      var btn = e.target.closest(".lib-part-remove");
+      if (!btn) return;
+      var row = btn.closest(".lib-part-row");
+      if (row) row.remove();
+    });
+    document.getElementById("lib-entry-parts-add").addEventListener("click", function () {
+      document.getElementById("lib-entry-parts-list").insertAdjacentHTML("beforeend", _libraryPartsRowHtml("", ""));
+    });
+
+    document.getElementById("lib-entry-name").addEventListener("input", _libraryTriggerSimilarSearch);
+    document.getElementById("lib-entry-domain").addEventListener("input", _libraryTriggerSimilarSearch);
+
+    if (canOfferImage) {
+      document.getElementById("lib-entry-include-image").addEventListener("change", function () {
+        document.getElementById("lib-entry-image-warning").style.display = this.checked ? "" : "none";
+      });
+    }
+
+    document.getElementById("lib-entry-submit").addEventListener("click", submitLibraryEntry);
+  }
+
+  function _libraryTriggerSimilarSearch() {
+    if (_libSimilarDebounceTimer) clearTimeout(_libSimilarDebounceTimer);
+    _libSimilarDebounceTimer = setTimeout(_libraryRunSimilarSearch, 400);
+  }
+
+  function _libraryRunSimilarSearch() {
+    var domainEl = document.getElementById("lib-entry-domain");
+    var nameEl = document.getElementById("lib-entry-name");
+    var area = document.getElementById("lib-entry-similar-area");
+    if (!domainEl || !nameEl || !area) return;
+    var domainKey = domainEl.value.trim();
+    var entryType = document.getElementById("lib-entry-type").value;
+    var name = nameEl.value.trim();
+    if (!domainKey || name.length < 2) { area.innerHTML = ""; return; }
+
+    apiFetch("/admin/library/entries/similar", {
+      method: "POST",
+      body: JSON.stringify({ domain_key: domainKey, entry_type: entryType, text: name, top_k: 5 }),
+    })
+      .then(function (res) { return res.ok ? res.json() : { entries: [] }; })
+      .then(function (data) { _renderLibrarySimilarResults((data && data.entries) || []); })
+      .catch(function () { /* 類似検索の失敗は致命的ではないので無視する */ });
+  }
+
+  function _renderLibrarySimilarResults(entries) {
+    var area = document.getElementById("lib-entry-similar-area");
+    if (!area) return;
+    if (!entries.length) {
+      area.innerHTML = '<div style="font-size:11.5px;color:var(--color-text-tertiary)">類似する既存エントリは見つかりませんでした</div>';
+      return;
+    }
+    var html = '<div style="font-size:11.5px;color:var(--color-text-secondary);margin-bottom:4px">類似する既存エントリが見つかりました。統合する場合は選択してください:</div>';
+    entries.forEach(function (e) {
+      html += '<label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:2px">' +
+        '<input type="radio" name="lib-entry-merge-target" value="' + escHtml(e.id) + '">' +
+        escHtml(e.name) + (e.summary ? ' <span style="color:var(--color-text-tertiary)">— ' + escHtml(e.summary.slice(0, 40)) + '</span>' : '') +
+      '</label>';
+    });
+    area.innerHTML = html;
+  }
+
+  function _libraryEntryStatus(msg, kind) {
+    var el = document.getElementById("library-entry-status");
+    if (!el) return;
+    if (!msg) { el.style.display = "none"; return; }
+    el.style.display = "block";
+    el.textContent = msg;
+    el.className = "upload-status upload-status-" + (kind || "info");
+  }
+
+  function submitLibraryEntry() {
+    var domainKey = document.getElementById("lib-entry-domain").value.trim();
+    var entryType = document.getElementById("lib-entry-type").value;
+    var name = document.getElementById("lib-entry-name").value.trim();
+    var aliasesRaw = document.getElementById("lib-entry-aliases").value.trim();
+    var summary = document.getElementById("lib-entry-summary").value.trim();
+
+    if (!domainKey) { _libraryEntryStatus("分野 (domain_key) を入力してください", "error"); return; }
+    if (!name) { _libraryEntryStatus("名称を入力してください", "error"); return; }
+
+    var aliases = aliasesRaw ? aliasesRaw.split(",").map(function (s) { return s.trim(); }).filter(Boolean) : [];
+
+    var body;
+    if (entryType === "apparatus") {
+      body = {
+        visual_cues: document.getElementById("lib-entry-visual-cues").value.trim(),
+        typical_parts: _libraryReadPartsRows("lib-entry-parts-list"),
+        typical_configurations: document.getElementById("lib-entry-configs").value.trim(),
+        measurement_targets: document.getElementById("lib-entry-measurement").value.trim(),
+      };
+    } else {
+      var raw = document.getElementById("lib-entry-body-json").value.trim();
+      try {
+        body = raw ? JSON.parse(raw) : {};
+      } catch (e) {
+        _libraryEntryStatus("body の JSON が不正です", "error");
+        return;
+      }
+    }
+
+    var includeImageEl = document.getElementById("lib-entry-include-image");
+    var includeImage = !!(includeImageEl && includeImageEl.checked);
+    var mergeTargetEl = document.querySelector('input[name="lib-entry-merge-target"]:checked');
+    var mergeTargetId = mergeTargetEl && mergeTargetEl.value ? mergeTargetEl.value : null;
+
+    var submitBtn = document.getElementById("lib-entry-submit");
+    submitBtn.disabled = true;
+    _libraryEntryStatus(mergeTargetId ? "統合しています..." : "登録しています...", "info");
+
+    if (mergeTargetId) {
+      _mergeIntoLibraryEntry(mergeTargetId, domainKey);
+      return;
+    }
+
+    var payload = {
+      domain_key: domainKey,
+      entry_type: entryType,
+      name: name,
+      aliases: aliases,
+      summary: summary,
+      body: body,
+      source_component_ids: [],
+      source_document_ids: _libEntryModalCtx.documentId ? [_libEntryModalCtx.documentId] : [],
+      exemplar_images: (includeImage && _libEntryModalCtx.figureId)
+        ? [{ figure_id: _libEntryModalCtx.figureId, source_document_id: _libEntryModalCtx.documentId }]
+        : [],
+    };
+
+    apiFetch("/admin/library/entries", { method: "POST", body: JSON.stringify(payload) })
+      .then(function (res) {
+        if (res.status === 403) throw { forbidden: true };
+        if (!res.ok) return res.json().then(function (d) { throw { message: (d && d.detail) || "登録に失敗しました" }; });
+        return res.json();
+      })
+      .then(function () {
+        _libraryEntryStatus("ライブラリに登録しました", "success");
+        setTimeout(function () {
+          var modal = document.getElementById("library-entry-modal");
+          if (modal) modal.remove();
+          _refreshLibraryAfterChange(domainKey);
+        }, 700);
+      })
+      .catch(function (err) {
+        submitBtn.disabled = false;
+        if (err && err.forbidden) {
+          _libraryEntryStatus("教材の所有者のみが画像を含められます", "error");
+        } else {
+          _libraryEntryStatus((err && err.message) || "登録に失敗しました", "error");
+        }
+      });
+  }
+
+  // 既存エントリへの統合 = provenance 追記のみ（本文はそのユーザーが編集した内容では上書きしない）。
+  function _mergeIntoLibraryEntry(entryId, domainKey) {
+    var submitBtn = document.getElementById("lib-entry-submit");
+    apiFetch("/admin/library/entries/" + encodeURIComponent(entryId))
+      .then(function (res) {
+        if (!res.ok) throw { message: "統合先エントリの取得に失敗しました" };
+        return res.json();
+      })
+      .then(function (entry) {
+        var existingDocIds = (entry.source_document_ids || []).slice();
+        if (_libEntryModalCtx.documentId && existingDocIds.indexOf(_libEntryModalCtx.documentId) === -1) {
+          existingDocIds.push(_libEntryModalCtx.documentId);
+        }
+        return apiFetch("/admin/library/entries/" + encodeURIComponent(entryId), {
+          method: "PUT",
+          body: JSON.stringify({
+            expected_revision: entry.revision,
+            source_document_ids: existingDocIds,
+          }),
+        });
+      })
+      .then(function (res) {
+        if (res.status === 409) throw { conflict: true };
+        if (!res.ok) return res.json().then(function (d) { throw { message: (d && d.detail) || "統合に失敗しました" }; });
+        return res.json();
+      })
+      .then(function () {
+        _libraryEntryStatus("既存エントリに統合しました（provenance を追記）", "success");
+        setTimeout(function () {
+          var modal = document.getElementById("library-entry-modal");
+          if (modal) modal.remove();
+          _refreshLibraryAfterChange(domainKey);
+        }, 700);
+      })
+      .catch(function (err) {
+        if (submitBtn) submitBtn.disabled = false;
+        if (err && err.conflict) {
+          _libraryEntryStatus("他の教員が更新しました。再読み込みしてください", "error");
+        } else {
+          _libraryEntryStatus((err && err.message) || "統合に失敗しました", "error");
+        }
+      });
+  }
+
+  function _refreshLibraryAfterChange(domainKey) {
+    var panel = document.getElementById("tab-knowledge-library");
+    if (!panel || !panel.classList.contains("vis")) return;
+    loadLibraryDomains();
+    if (domainKey) loadLibraryEntries();
+  }
+
+  // ── ナレッジライブラリタブ（一覧・編集・凍結・廃止・版履歴） ────────
+  var _libraryTabState = { selectedDomain: "", entries: [] };
+  var _libraryEntriesDebounceTimer = null;
+
+  function initKnowledgeLibraryTab() {
+    onTabActivate("knowledge-library", function () {
+      loadLibraryDomains();
+      loadLibraryEntries();
+    });
+
+    var newBtn = document.getElementById("library-new-entry-btn");
+    if (newBtn) newBtn.addEventListener("click", function () {
+      openLibraryEntryModal({ documentId: null, figureId: null, candidate: null });
+    });
+
+    var qEl = document.getElementById("library-search-q");
+    if (qEl) qEl.addEventListener("input", function () {
+      if (_libraryEntriesDebounceTimer) clearTimeout(_libraryEntriesDebounceTimer);
+      _libraryEntriesDebounceTimer = setTimeout(function () { loadLibraryEntries(); }, 400);
+    });
+    var typeEl = document.getElementById("library-filter-type");
+    if (typeEl) typeEl.addEventListener("change", function () { loadLibraryEntries(); });
+    var retiredEl = document.getElementById("library-include-retired");
+    if (retiredEl) retiredEl.addEventListener("change", function () { loadLibraryEntries(); });
+  }
+
+  function loadLibraryDomains() {
+    var listEl = document.getElementById("library-domains-list");
+    if (!listEl) return;
+    apiFetch("/admin/library/domains")
+      .then(function (res) { return res.ok ? res.json() : { domains: [] }; })
+      .then(function (data) { renderLibraryDomainsList((data && data.domains) || []); })
+      .catch(function () {
+        listEl.innerHTML = '<div style="padding:8px;color:var(--color-text-danger);font-size:12.5px">分野の読み込みに失敗しました</div>';
+      });
+  }
+
+  // ".admin-action-btn" に選択状態を示す専用CSSが無いため、選択中は背景色をインラインで
+  // 切り替える（既存クラスの追加なしで視覚的な区別を出す）。
+  function _libraryDomainButtonStyle(active) {
+    var base = "text-align:left;display:flex;justify-content:space-between;gap:6px;width:100%";
+    return active
+      ? base + ";background:var(--color-background-info);color:var(--color-text-info);border-color:var(--color-border-info)"
+      : base;
+  }
+
+  function renderLibraryDomainsList(domains) {
+    var listEl = document.getElementById("library-domains-list");
+    if (!listEl) return;
+    var allActive = !_libraryTabState.selectedDomain;
+    var html = '<button type="button" class="library-domain-item admin-action-btn" data-domain-key="" style="' + _libraryDomainButtonStyle(allActive) + '">すべての分野</button>';
+    domains.forEach(function (d) {
+      var active = _libraryTabState.selectedDomain === d.domain_key;
+      html += '<button type="button" class="library-domain-item admin-action-btn" data-domain-key="' + escHtml(d.domain_key) + '" style="' + _libraryDomainButtonStyle(active) + '">' +
+        '<span>' + escHtml(d.domain_key) + '</span>' +
+        '<span style="color:var(--color-text-tertiary);font-size:11px">' + (d.entry_count || 0) + '件 / 凍結' + (d.frozen_count || 0) + '</span>' +
+      '</button>';
+    });
+    listEl.innerHTML = html;
+    listEl.querySelectorAll(".library-domain-item").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        _libraryTabState.selectedDomain = this.getAttribute("data-domain-key") || "";
+        listEl.querySelectorAll(".library-domain-item").forEach(function (b) {
+          b.setAttribute("style", _libraryDomainButtonStyle(false));
+        });
+        this.setAttribute("style", _libraryDomainButtonStyle(true));
+        loadLibraryEntries();
+      });
+    });
+  }
+
+  function loadLibraryEntries() {
+    var listEl = document.getElementById("library-entries-list");
+    if (!listEl) return;
+    listEl.innerHTML = '<div style="padding:8px;color:var(--color-text-tertiary);font-size:12.5px">読み込み中...</div>';
+    var params = [];
+    if (_libraryTabState.selectedDomain) params.push("domain_key=" + encodeURIComponent(_libraryTabState.selectedDomain));
+    var typeEl = document.getElementById("library-filter-type");
+    if (typeEl && typeEl.value) params.push("entry_type=" + encodeURIComponent(typeEl.value));
+    var qEl = document.getElementById("library-search-q");
+    if (qEl && qEl.value.trim()) params.push("q=" + encodeURIComponent(qEl.value.trim()));
+    var retiredEl = document.getElementById("library-include-retired");
+    if (retiredEl && retiredEl.checked) params.push("include_retired=true");
+    var qs = params.length ? ("?" + params.join("&")) : "";
+
+    apiFetch("/admin/library/entries" + qs)
+      .then(function (res) { return res.ok ? res.json() : { entries: [] }; })
+      .then(function (data) {
+        _libraryTabState.entries = (data && data.entries) || [];
+        renderLibraryEntriesList();
+      })
+      .catch(function () {
+        listEl.innerHTML = '<div style="padding:8px;color:var(--color-text-danger);font-size:12.5px">読み込みに失敗しました</div>';
+      });
+  }
+
+  function renderLibraryEntriesList() {
+    var listEl = document.getElementById("library-entries-list");
+    if (!listEl) return;
+    var entries = _libraryTabState.entries;
+    if (!entries.length) {
+      listEl.innerHTML = '<div style="padding:8px;color:var(--color-text-tertiary);font-size:12.5px">エントリがありません</div>';
+      return;
+    }
+    var html = "";
+    entries.forEach(function (e) {
+      var retired = e.status === "retired";
+      html += '<button type="button" class="library-entry-item" data-entry-id="' + escHtml(e.id) + '" style="text-align:left;border:1px solid var(--color-border-tertiary);border-radius:4px;padding:6px 8px;background:' + (retired ? "var(--color-background-tertiary)" : "var(--color-background-primary)") + ';opacity:' + (retired ? "0.6" : "1") + ';cursor:pointer">' +
+        '<div style="font-size:12.5px;font-weight:600;color:var(--color-text-primary)">' + escHtml(e.name) +
+          (retired ? ' <span style="font-size:10.5px;color:var(--color-text-tertiary)">(廃止)</span>' : '') +
+        '</div>' +
+        '<div style="font-size:11px;color:var(--color-text-tertiary)">' + (e.entry_type === "apparatus" ? "装置" : "理論コンポーネント") +
+          ' ・ 版 ' + (e.latest_version_no || 0) +
+          (e.updated_by ? ' ・ 更新: ' + escHtml(e.updated_by) : '') +
+        '</div>' +
+      '</button>';
+    });
+    listEl.innerHTML = html;
+    listEl.querySelectorAll(".library-entry-item").forEach(function (btn) {
+      btn.addEventListener("click", function () { selectLibraryEntry(this.getAttribute("data-entry-id")); });
+    });
+  }
+
+  function selectLibraryEntry(entryId) {
+    var body = document.getElementById("library-detail-body");
+    if (body) body.innerHTML = '<div style="color:var(--color-text-tertiary);font-size:12.5px">読み込み中...</div>';
+    apiFetch("/admin/library/entries/" + encodeURIComponent(entryId))
+      .then(function (res) {
+        if (!res.ok) throw new Error("status " + res.status);
+        return res.json();
+      })
+      .then(function (entry) { renderLibraryDetail(entry); })
+      .catch(function () {
+        if (body) body.innerHTML = '<div style="color:var(--color-text-danger);font-size:12.5px">エントリの読み込みに失敗しました</div>';
+      });
+  }
+
+  function renderLibraryDetail(entry) {
+    var body = document.getElementById("library-detail-body");
+    if (!body) return;
+    var isApparatus = entry.entry_type === "apparatus";
+    var b = entry.body || {};
+    var parts = b.typical_parts || [];
+    var aliasesStr = (entry.aliases || []).join(", ");
+    var isRetired = entry.status === "retired";
+
+    var html =
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px">' +
+        '<div style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(entry.domain_key) + ' ・ ' + (isApparatus ? "装置" : "理論コンポーネント") + (isRetired ? ' ・ <span style="color:var(--color-text-danger)">廃止済み</span>' : '') + '</div>' +
+        '<div style="font-size:11px;color:var(--color-text-tertiary)">版 ' + (entry.latest_version_no || 0) + ' / revision ' + entry.revision + '</div>' +
+      '</div>' +
+      '<div id="library-detail-status" class="upload-status" style="display:none;margin-bottom:8px"></div>' +
+
+      '<label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:2px">名称</label>' +
+      '<input type="text" id="lib-detail-name" value="' + escHtml(entry.name) + '" style="width:100%;padding:5px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary);margin-bottom:8px;box-sizing:border-box">' +
+
+      '<label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:2px">別名 (カンマ区切り)</label>' +
+      '<input type="text" id="lib-detail-aliases" value="' + escHtml(aliasesStr) + '" style="width:100%;padding:5px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary);margin-bottom:8px;box-sizing:border-box">' +
+
+      '<label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:2px">要約</label>' +
+      '<textarea id="lib-detail-summary" rows="2" style="width:100%;padding:5px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary);margin-bottom:8px;box-sizing:border-box">' + escHtml(entry.summary || "") + '</textarea>';
+
+    if (isApparatus) {
+      html +=
+        '<label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:2px">見た目の特徴 (visual_cues)</label>' +
+        '<textarea id="lib-detail-visual-cues" rows="2" style="width:100%;padding:5px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary);margin-bottom:8px;box-sizing:border-box">' + escHtml(b.visual_cues || "") + '</textarea>' +
+
+        '<label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:4px">典型的な構成パーツ</label>' +
+        '<div id="lib-detail-parts-list" style="margin-bottom:6px">' +
+          (parts.length ? parts.map(function (p) { return _libraryPartsRowHtml(p.name, p.role); }).join("") : _libraryPartsRowHtml("", "")) +
+        '</div>' +
+        '<button type="button" id="lib-detail-parts-add" class="admin-action-btn" style="font-size:11.5px;padding:2px 8px;margin-bottom:8px">+ パーツを追加</button>' +
+
+        '<label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:2px">典型的な構成・用途</label>' +
+        '<textarea id="lib-detail-configs" rows="2" style="width:100%;padding:5px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary);margin-bottom:8px;box-sizing:border-box">' + escHtml(b.typical_configurations || "") + '</textarea>' +
+
+        '<label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:2px">計測対象</label>' +
+        '<textarea id="lib-detail-measurement" rows="2" style="width:100%;padding:5px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary);margin-bottom:8px;box-sizing:border-box">' + escHtml(b.measurement_targets || "") + '</textarea>';
+    } else {
+      html +=
+        '<label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:2px">body (JSON)</label>' +
+        '<textarea id="lib-detail-body-json" rows="6" style="width:100%;padding:5px 8px;font-size:12px;font-family:monospace;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary);margin-bottom:8px;box-sizing:border-box">' + escHtml(JSON.stringify(b, null, 2)) + '</textarea>';
+    }
+
+    // exemplar_images は含有承認済みの画像のみを指すが、v1 は件数テキスト表示に留める（画像自体は figures API 経由でのみ配信）。
+    var exemplarCount = (entry.exemplar_images || []).length;
+    html +=
+      '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-bottom:8px">例示画像 ' + exemplarCount + ' 件（含有承認済み）</div>' +
+
+      '<div style="font-size:11.5px;color:var(--color-text-secondary);margin-bottom:8px">' +
+        '<div>provenance — 由来教材: ' + ((entry.source_document_ids || []).length ? (entry.source_document_ids || []).map(escHtml).join(", ") : "なし") + '</div>' +
+        '<div>由来コンポーネント: ' + ((entry.source_component_ids || []).length ? (entry.source_component_ids || []).map(escHtml).join(", ") : "なし") + '</div>' +
+      '</div>' +
+
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">' +
+        '<button id="lib-detail-save" class="admin-action-btn" style="background:var(--color-text-success);color:#fff">保存</button>' +
+        (isRetired
+          ? '<button id="lib-detail-restore" class="admin-action-btn">復元</button>'
+          : ('<button id="lib-detail-freeze" class="admin-action-btn">凍結（版発行）</button>' +
+             '<button id="lib-detail-retire" class="admin-action-btn" style="background:var(--color-text-danger);color:#fff">廃止</button>')) +
+      '</div>' +
+
+      '<div style="font-size:12px;font-weight:600;margin-bottom:4px">版履歴</div>' +
+      '<div id="lib-detail-versions" style="font-size:11.5px;color:var(--color-text-tertiary)">読み込み中...</div>';
+
+    body.innerHTML = html;
+
+    if (isApparatus) {
+      document.getElementById("lib-detail-parts-list").addEventListener("click", function (e) {
+        var btn = e.target.closest(".lib-part-remove");
+        if (!btn) return;
+        var row = btn.closest(".lib-part-row");
+        if (row) row.remove();
+      });
+      document.getElementById("lib-detail-parts-add").addEventListener("click", function () {
+        document.getElementById("lib-detail-parts-list").insertAdjacentHTML("beforeend", _libraryPartsRowHtml("", ""));
+      });
+    }
+
+    document.getElementById("lib-detail-save").addEventListener("click", function () { saveLibraryEntryEdits(entry); });
+    var freezeBtn = document.getElementById("lib-detail-freeze");
+    if (freezeBtn) freezeBtn.addEventListener("click", function () { freezeLibraryEntry(entry.id); });
+    var retireBtn = document.getElementById("lib-detail-retire");
+    if (retireBtn) retireBtn.addEventListener("click", function () { retireLibraryEntry(entry.id); });
+    var restoreBtn = document.getElementById("lib-detail-restore");
+    if (restoreBtn) restoreBtn.addEventListener("click", function () { restoreLibraryEntry(entry.id); });
+
+    loadLibraryVersions(entry.id);
+  }
+
+  function _libraryDetailStatus(msg, kind) {
+    var el = document.getElementById("library-detail-status");
+    if (!el) return;
+    if (!msg) { el.style.display = "none"; return; }
+    el.style.display = "block";
+    el.textContent = msg;
+    el.className = "upload-status upload-status-" + (kind || "info");
+  }
+
+  function saveLibraryEntryEdits(entry) {
+    var name = document.getElementById("lib-detail-name").value.trim();
+    var aliasesRaw = document.getElementById("lib-detail-aliases").value.trim();
+    var summary = document.getElementById("lib-detail-summary").value.trim();
+    var aliases = aliasesRaw ? aliasesRaw.split(",").map(function (s) { return s.trim(); }).filter(Boolean) : [];
+
+    var payload = { expected_revision: entry.revision, name: name, aliases: aliases, summary: summary };
+
+    if (entry.entry_type === "apparatus") {
+      payload.body = {
+        visual_cues: document.getElementById("lib-detail-visual-cues").value.trim(),
+        typical_parts: _libraryReadPartsRows("lib-detail-parts-list"),
+        typical_configurations: document.getElementById("lib-detail-configs").value.trim(),
+        measurement_targets: document.getElementById("lib-detail-measurement").value.trim(),
+      };
+    } else {
+      var raw = document.getElementById("lib-detail-body-json").value.trim();
+      try {
+        payload.body = raw ? JSON.parse(raw) : {};
+      } catch (e) {
+        _libraryDetailStatus("body の JSON が不正です", "error");
+        return;
+      }
+    }
+
+    _libraryDetailStatus("保存しています...", "info");
+    apiFetch("/admin/library/entries/" + encodeURIComponent(entry.id), { method: "PUT", body: JSON.stringify(payload) })
+      .then(function (res) {
+        if (res.status === 409) throw { conflict: true };
+        if (!res.ok) return res.json().then(function (d) { throw { message: (d && d.detail) || "保存に失敗しました" }; });
+        return res.json();
+      })
+      .then(function (updated) {
+        _libraryDetailStatus("保存しました", "success");
+        renderLibraryDetail(updated);
+        loadLibraryEntries();
+      })
+      .catch(function (err) {
+        if (err && err.conflict) {
+          _libraryDetailStatus("他の教員が更新しました。再読み込みしてください", "error");
+        } else {
+          _libraryDetailStatus((err && err.message) || "保存に失敗しました", "error");
+        }
+      });
+  }
+
+  function freezeLibraryEntry(entryId) {
+    var note = prompt("凍結版のchangelogメモ（任意）");
+    if (note === null) return; // cancelled
+    if (!confirm("凍結版はパイプラインの解析に使われます。取り消せません（修正は次版で行います）。よろしいですか？")) return;
+    _libraryDetailStatus("凍結しています...", "info");
+    apiFetch("/admin/library/entries/" + encodeURIComponent(entryId) + "/freeze", { method: "POST", body: JSON.stringify({ note: note || "" }) })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "凍結に失敗しました"); });
+        return res.json();
+      })
+      .then(function () {
+        _libraryDetailStatus("凍結しました", "success");
+        selectLibraryEntry(entryId);
+        loadLibraryEntries();
+      })
+      .catch(function (err) { _libraryDetailStatus(err.message || "凍結に失敗しました", "error"); });
+  }
+
+  function retireLibraryEntry(entryId) {
+    if (!confirm("このエントリを廃止します。retrieval対象から外れますが、履歴・provenanceは保持されます。よろしいですか？")) return;
+    apiFetch("/admin/library/entries/" + encodeURIComponent(entryId) + "/retire", { method: "POST" })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "廃止に失敗しました"); });
+        return res.json();
+      })
+      .then(function () {
+        selectLibraryEntry(entryId);
+        loadLibraryEntries();
+      })
+      .catch(function (err) { _libraryDetailStatus(err.message || "廃止に失敗しました", "error"); });
+  }
+
+  function restoreLibraryEntry(entryId) {
+    apiFetch("/admin/library/entries/" + encodeURIComponent(entryId) + "/restore", { method: "POST" })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "復元に失敗しました"); });
+        return res.json();
+      })
+      .then(function () {
+        selectLibraryEntry(entryId);
+        loadLibraryEntries();
+      })
+      .catch(function (err) { _libraryDetailStatus(err.message || "復元に失敗しました", "error"); });
+  }
+
+  function loadLibraryVersions(entryId) {
+    var el = document.getElementById("lib-detail-versions");
+    if (!el) return;
+    apiFetch("/admin/library/entries/" + encodeURIComponent(entryId) + "/versions")
+      .then(function (res) { return res.ok ? res.json() : { versions: [] }; })
+      .then(function (data) {
+        var versions = (data && data.versions) || [];
+        if (!el) return;
+        if (!versions.length) { el.innerHTML = "まだ凍結版はありません"; return; }
+        var html = "";
+        versions.forEach(function (v) {
+          html += '<div style="padding:4px 0;border-bottom:1px solid var(--color-border-tertiary)">' +
+            '版 ' + escHtml(v.version_no) + (v.note ? " — " + escHtml(v.note) : "") +
+            '<span style="color:var(--color-text-tertiary)"> ・ ' + escHtml(v.published_by || "") + ' ・ ' + formatDateTime(v.created_at) + '</span>' +
+          '</div>';
+        });
+        el.innerHTML = html;
+      })
+      .catch(function () { if (el) el.textContent = "版履歴の読み込みに失敗しました"; });
+  }
+
   // ── File Upload ────────────────────────────────────────────────────
   function initUpload() {
     var zone = document.getElementById("upload-zone");
@@ -909,6 +1823,9 @@
 
     var formData = new FormData();
     formData.append("file", file);
+    // 画像読み取りパイプライン（migration 041）: チェックボックスの明示オプトインのみで vision LLM を呼ぶ
+    var analyzeImagesEl = document.getElementById("upload-analyze-images");
+    formData.append("analyze_images", (analyzeImagesEl && analyzeImagesEl.checked) ? "true" : "false");
 
     apiFetchRaw("/admin/materials/upload", {
       method: "POST",
@@ -11533,6 +12450,7 @@
     initUserManagement();
     initGroups();
     initSystemStats();
+    initKnowledgeLibraryTab();
     initLogout();
 
     // 横断ユーティリティ層（Admin Copilot）— 統合 AI アシスタント。

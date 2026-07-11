@@ -771,7 +771,7 @@ def test_orchestrator_accepts_tex_archive_source_kind():
 
     def fake_upsert(*, run_id=None, document_id, material_id, cartridge_id=None,
                     status="running", current_stage="save_pdf", stage_outputs=None,
-                    error_message=None):
+                    error_message=None, options=None):
         if stage_outputs and "_artifacts" in stage_outputs:
             saved_artifacts.update(stage_outputs["_artifacts"])
         return run_id or "run-tex"
@@ -1453,7 +1453,7 @@ def test_orchestrator_runs_newly_integrated_agents_and_saves_artifacts():
 
     def fake_upsert(*, run_id=None, document_id, material_id, cartridge_id=None,
                     status="running", current_stage="save_pdf", stage_outputs=None,
-                    error_message=None):
+                    error_message=None, options=None):
         if stage_outputs and "_artifacts" in stage_outputs:
             saved_artifacts.update(stage_outputs["_artifacts"])
         return run_id or "run-int"
