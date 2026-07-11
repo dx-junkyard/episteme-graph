@@ -596,6 +596,47 @@ P7 既存 A/B/C/D 層コードを変更しない/ P8 道案内は誘導まで（
 - **ガードレール**: `backend/tests/test_admin_assistant.py` が「全 `reversible=false` は `confirm=true`」
   「`core/admin_assistant/` が FastAPI を import しない」「locate は role で fail-closed」を構造的に守る。
 
+### ガイダンス層（G層, migration 039）
+
+「次にやること」バッジ + 状態導出型 To-Do + 地図 fail-closed 徹底。正本は
+`docs/features/guidance_layer_design.md`（設計書は migration 038 と記載だが **実装は 039**。
+038 は状態管理・通知基盤が使用済み）。Admin Copilot の capability registry と
+`runLocatePlan` を再利用する薄い層で、A/B/C/D/R/V 層のコードは変更しない（G7）。
+
+**不変条項**: G1 完了フラグを持たない（To-Do はサーバ状態から毎回決定論的に導出。実施すれば
+自動消滅）/ G2 非LLM・同期 / G3 capability registry を単一の真実源に（ロールで fail-closed。
+権限外ルールは評価すらしない）/ G4 押し付けない（バッジは件数のみ。パネル自動表示・ポーリング
+禁止）/ G5 却下は保持（dismiss は `revoked` 遷移で行削除しない）/ G6 理由は事実文（煽り・
+督促・数値スコア禁止）/ G8 道案内は誘導まで（`AdminAssistant.runLocatePlan` を呼ぶだけ）。
+
+- **エンジン**: `backend/core/admin_assistant/next_steps.py`（FastAPI / LLM 非 import）。
+  `compute_next_steps(session, user)` がルールカタログ v1（6件）を本人所有の教材・コースに
+  対して評価: `materials.none` / `material.analysis_failed` / `material.no_course`（required）、
+  `course.not_published` / `course.no_atlas_binding`（recommended）、`course.audio_missing`
+  （optional）。severity→古い順、上限 10 件（切り捨ては `truncated: true` で正直に返す）。
+  ルールは「次の一歩だけ」を出すチェーン設計（教材登録→コース作成→binding/公開と順に現れる）。
+- **API**（`routes/admin_assistant.py`、TEACHER 以上）: `GET /api/admin/assistant/next-steps`
+  → `{steps, hidden, truncated, assistant_cue_pending}`。
+  `POST .../next-steps/{step_key}/dismiss` / `POST .../{step_key}/restore`（upsert / `revoked`
+  遷移。`theory_review_events` に `entity_type='next_step'` で監査）。
+- **DB**（migration 039 `assistant_step_dismissals`）: `UNIQUE(user_id, step_key)`、
+  `step_key = "{rule_id}:{target_id}"`。初回ログイン cue のフラグも同テーブルの
+  `step_key='cue:first_login'` 行で代用（テーブルを増やさない）。
+- **追加 capability**: `course.atlas_binding` / `lecture_studio.generate_audio`
+  （いずれも `KIND_GUIDANCE_ONLY`。v1 は道案内のみ）。
+- **フロント**: `frontend/public/js/admin-next-steps.js`（ES5・`window.AdminNextSteps`）。
+  ヘッダーの `📋 次にやること` バッジ → severity 別パネル → `[案内する]` が
+  `AdminAssistant.runLocatePlan(step.locate_plan)` を呼ぶ。再取得はログイン時 / タブ切替 /
+  教材アップロード・コース登録・公開・binding 保存の成功後のみ（ポーリング禁止）。
+  cue（🤖 pulse）は `assistant_cue_pending` が true のとき一度きり、表示後に
+  `cue:first_login` を dismiss して永続化。取得失敗時は出さない（fail-closed）。
+- **地図 fail-closed（Phase 0）**: `atlas-data.js` の `DEFAULT_CARTRIDGE = "particle_physics"`
+  フォールバックを廃止。コース文脈も明示 cartridge も無ければ取得せず null（地図領域ごと
+  非表示）。未設定コースで無関係な素粒子物理の地図が出る最後の経路を塞いだ。
+- **ガードレール**: `backend/tests/test_next_steps_guardrails.py`（capability 存在・fail-closed・
+  行削除しない・core 非 FastAPI・禁止語彙・上限と truncated の整合）。
+- **非スコープ**: 学習者向けバッジ / To-Do 自動実行 / メール・プッシュ通知 / 進捗率表示。
+
 ### レクチャー音声キャッシュの判定（`backend/api/routes/lecture.py`）
 
 `student_material`/`content`/`summary` はコースビルダーが生成するほぼ全トピックに

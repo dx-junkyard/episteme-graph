@@ -21,6 +21,7 @@
         <a href="/" style="color:var(--color-text-info);text-decoration:none;font-size:12px">学習画面へ</a>
         <span style="opacity:.3">|</span>
         <span id="admin-username"></span>
+        <button id="admin-next-steps-toggle" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px" title="状態から導出した次のタスク">📋 次にやること</button>
         <button id="admin-copilot-toggle" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px" title="管理画面の操作を手伝う AI アシスタント">🤖 操作アシスタント</button>
         <span style="opacity:.3">|</span>
         <button id="logout-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px">ログアウト</button>
@@ -328,7 +329,7 @@
           </div>
           <!-- コース登録直後の地図配置の提案 (S2)。教員が承認して保存するまで確定しない -->
           <div id="cb-atlas-binding-area" style="display:none;margin-top:12px;border:1px solid var(--color-border);border-radius:6px;padding:10px">
-            <div style="font-size:13px;font-weight:600;margin-bottom:6px">分野の地図への配置（提案）</div>
+            <div style="font-size:13px;font-weight:600;margin-bottom:6px">次のステップ: 学習マップの割り当て（分野の地図への配置・提案）</div>
             <div id="cb-atlas-binding-body" style="font-size:12.5px"></div>
             <div id="cb-atlas-binding-status" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:6px"></div>
           </div>
@@ -340,7 +341,10 @@
       <div class="admin-section">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
           <h3 class="admin-section-title" style="margin-bottom:0">コース管理</h3>
-          <button id="cm-refresh" class="admin-action-btn">更新</button>
+          <div style="display:flex;gap:8px;align-items:center">
+            <button id="cm-atlas-binding-open" class="admin-action-btn" title="コースに学習マップ（分野の地図）を割り当てます">学習マップ編集</button>
+            <button id="cm-refresh" class="admin-action-btn">更新</button>
+          </div>
         </div>
         <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:16px">
           作成済みのコースを一覧し、グループ単位での共有（viewer=受講可・editor=編集可）を設定できます。
@@ -750,6 +754,8 @@
   <script src="/js/atlas-assist-panel.js?v=atlas-editor-20260707-1"></script>
   <!-- 横断ユーティリティ層（Admin Copilot）— 統合 AI アシスタント -->
   <script src="/js/admin-assistant.js?v=admin-copilot-20260707-1"></script>
+  <!-- G層（ガイダンス層）— 状態導出型 Next Steps バッジ + パネル -->
+  <script src="/js/admin-next-steps.js?v=next-steps-20260711-1"></script>
   <!-- V層（共有物のバージョン管理 + 更新通知 + 削除猶予, migration 037）-->
   <script src="/js/versioning.js?v=versioning-20260709-1"></script>
   <script src="/js/admin.js?v=versioning-20260709-1"></script>

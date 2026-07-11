@@ -255,6 +255,9 @@
       if (cbs) {
         cbs.forEach(function (fn) { fn(); });
       }
+
+      // G層: タブ切替のたびに Next Steps を再取得する（ポーリングはしない）。
+      if (window.AdminNextSteps) window.AdminNextSteps.refresh();
     });
 
     // Click outside any group closes the open dropdown
@@ -270,6 +273,8 @@
   function activateTabView(tabName) {
     _applyActiveTab(tabName);
     closeAllTabMenus();
+    // G層: タブ切替のたびに Next Steps を再取得する（ポーリングはしない）。
+    if (window.AdminNextSteps) window.AdminNextSteps.refresh();
   }
 
   // ── Materials Management ──────────────────────────────────────────
@@ -379,7 +384,7 @@
         } catch (e) { /* keep original */ }
       }
 
-      html += "<tr>";
+      html += '<tr data-material-id="' + escHtml(m.material_id) + '">';
       html += "<td>" + escHtml(m.filename) + "</td>";
       html += "<td>" + escHtml(m.title) + "</td>";
       html += '<td><span class="admin-status ' + statusClass + '" title="' +
@@ -920,8 +925,10 @@
           '<span class="typing" style="display:inline-flex;margin-left:8px"><span></span><span></span><span></span></span>',
           "info"
         );
+        showMaterialNextStepCard();
         loadMaterials();
         loadMaterialsForSelection();
+        if (window.AdminNextSteps) window.AdminNextSteps.refresh();
         if (data.task_id) {
           startTaskPolling(data.task_id, file.name);
         } else {
@@ -967,6 +974,8 @@
             disableUploadUI(false);
             loadMaterials();
             loadMaterialsForSelection();
+            // G層: 解析完了で material.no_course 等の対象になり得るため再取得する。
+            if (window.AdminNextSteps) window.AdminNextSteps.refresh();
           } else if (task.status === "failed") {
             stopTaskPolling(taskId);
             var errMsg = task.error_message || "不明なエラー";
@@ -1010,6 +1019,32 @@
     var el = document.getElementById("upload-status");
     el.innerHTML = message;
     el.className = "upload-status upload-status-" + type;
+  }
+
+  // G層 §7: 教材アップロード成功直後のインラインカード（自動遷移はしない・案内のみ）。
+  function showMaterialNextStepCard() {
+    var statusEl = document.getElementById("upload-status");
+    if (!statusEl || !statusEl.parentNode) return;
+    var existing = document.getElementById("admin-next-steps-inline-card-materials");
+    if (existing) existing.parentNode.removeChild(existing);
+
+    var card = document.createElement("div");
+    card.id = "admin-next-steps-inline-card-materials";
+    card.className = "admin-next-steps-inline-card";
+    card.innerHTML =
+      "<span>解析が完了したら『コース構築』でこの教材からコースを作成できます</span>" +
+      '<button type="button" class="admin-next-steps-inline-act">案内する</button>';
+    var actBtn = card.querySelector(".admin-next-steps-inline-act");
+    if (actBtn) {
+      actBtn.addEventListener("click", function () {
+        if (window.AdminAssistant && window.AdminAssistant.runLocatePlan) {
+          window.AdminAssistant.runLocatePlan({
+            steps: [{ screen: "course-builder", anchor_id: "cb_material_select", hint: "コースの素材となる教材を選びます" }]
+          });
+        }
+      });
+    }
+    statusEl.parentNode.insertBefore(card, statusEl.nextSibling);
   }
 
   // ── Course Builder Chat ────────────────────────────────────────────
@@ -1745,6 +1780,9 @@
         btn.style.background = "var(--color-text-success)";
 
         var newCourseId = data.id;
+
+        // G層: コース登録完了で material.no_course が消え course.* 系が現れ得るため再取得する。
+        if (window.AdminNextSteps) window.AdminNextSteps.refresh();
 
         // S2: コース登録直後に分野の地図への配置を提案する (教員が承認するまで確定しない)
         var cbAtlasArea = document.getElementById("cb-atlas-binding-area");
@@ -2850,6 +2888,8 @@
           } else {
             setStatus("バインドを解除しました");
           }
+          // G層: course.no_atlas_binding が解消され得るため再取得する。
+          if (window.AdminNextSteps) window.AdminNextSteps.refresh();
           if (onSaved) onSaved(body);
         })
         .catch(function (err) { setStatus("保存に失敗しました: " + err.message, true); });
@@ -10212,6 +10252,19 @@
     var refreshBtn = document.getElementById("cm-refresh");
     if (refreshBtn) refreshBtn.addEventListener("click", loadCourseManagement);
     onTabActivate("course-management", loadCourseManagement);
+
+    // 学習マップ編集への導線（既存の「分野の地図」タブの学習マップ編集セクションを開く）。
+    var atlasBindingOpenBtn = document.getElementById("cm-atlas-binding-open");
+    if (atlasBindingOpenBtn) {
+      atlasBindingOpenBtn.addEventListener("click", function () {
+        activateTabView("atlas");
+        var section = document.getElementById("atlas-binding-section");
+        if (section) {
+          try { section.scrollIntoView({ behavior: "smooth", block: "start" }); }
+          catch (e) { section.scrollIntoView(); }
+        }
+      });
+    }
   }
 
   function setCmStatus(msg, kind) {
@@ -10286,7 +10339,7 @@
       } else {
         actionHtml = '<span style="font-size:11px;color:var(--color-text-tertiary)">所有者のみ変更可</span>';
       }
-      html += '<tr>' +
+      html += '<tr data-course-id="' + escHtml(c.id) + '">' +
         '<td>' + escHtml(c.title) + '</td>' +
         '<td>' + roleBadge + '</td>' +
         '<td>' + permsHtml + '</td>' +
@@ -11010,6 +11063,16 @@
       registerAssistantHooks();
     }
 
+    // G層（ガイダンス層）— 状態導出型「次にやること」バッジ。AdminAssistant のすぐ後に起動する
+    // （案内先の runLocatePlan / open が既に登録済みであることを前提にするため）。
+    if (window.AdminNextSteps) {
+      window.AdminNextSteps.init({
+        apiFetch: apiFetch,
+        state: state,
+      });
+      window.AdminNextSteps.refresh();
+    }
+
     // V層（共有物のバージョン管理）: 依存注入 + 通知インボックス起動。
     if (window.Versioning) {
       window.Versioning.init({ apiFetch: apiFetch, state: state });
@@ -11029,9 +11092,15 @@
     if (!AA) return;
 
     // --- UI アンカー（道案内の点灯先。論理ID → 実 DOM） ---
+    // material_row / course_row は行単位解決: "material_row:m_123" のように param 付きで
+    // 呼ばれた場合はその行を返し、param が無ければ従来どおり tbody 全体にフォールバックする。
     AA.registerUiAnchors("materials", {
       upload_dropzone: function () { return document.getElementById("upload-zone"); },
-      material_row: function () { return document.getElementById("materials-tbody"); },
+      material_row: function (id) {
+        return id
+          ? document.querySelector('#materials-tbody tr[data-material-id="' + id + '"]') || document.getElementById("materials-tbody")
+          : document.getElementById("materials-tbody");
+      },
       material_visibility_control: function () { return document.getElementById("materials-tbody"); }
     });
     AA.registerUiAnchors("course-builder", {
@@ -11041,13 +11110,20 @@
     AA.registerUiAnchors("lecture-studio", {
       chunk_list: function () { return document.getElementById("ls-chunk-list"); },
       assistant_open_button: function () { return document.getElementById("ls-ai-assistant-btn"); },
-      "ls-rewrite-prompt": function () { return document.getElementById("ls-rewrite-prompt"); }
+      "ls-rewrite-prompt": function () { return document.getElementById("ls-rewrite-prompt"); },
+      ls_course_select: function () { return document.getElementById("ls-course-select"); },
+      ls_audio_generate: function () { return document.getElementById("ls-audio-all-btn"); }
     });
     AA.registerUiAnchors("course-management", {
       course_list: function () { return document.getElementById("cm-table"); },
-      course_row: function () { return document.getElementById("cm-tbody"); },
+      course_row: function (id) {
+        return id
+          ? document.querySelector('#cm-tbody tr[data-course-id="' + id + '"]') || document.getElementById("cm-tbody")
+          : document.getElementById("cm-tbody");
+      },
       course_visibility_control: function () { return document.getElementById("cm-tbody"); },
-      publish_button: function () { return document.getElementById("cm-table"); }
+      publish_button: function () { return document.getElementById("cm-table"); },
+      atlas_binding_button: function () { return document.getElementById("cm-atlas-binding-open"); }
     });
     AA.registerUiAnchors("atlas", {
       atlas_generate_button: function () { return document.getElementById("atlas-generate"); }

@@ -15,12 +15,15 @@
  *
  * 状態判定ロジックはサーバ側 (core/atlas_state.py)。ここでは判定を複製せず、
  * 取得と互換フォールバック (API 不通時はフィクスチャ) のみを行う。
+ *
+ * fail-closed (G層 #9): コース文脈もカートリッジ明示指定も無い場合はフォールバックせず
+ * 取得自体を行わない (null = 地図領域ごと非表示)。既定カートリッジへのフォールバックは
+ * 無関係な分野の地図を学習者に見せてしまう事故経路だったため廃止した。
  */
 (function () {
   "use strict";
 
   const STORAGE_KEY = "atlas_data_source";
-  const DEFAULT_CARTRIDGE = "particle_physics";
 
   let _runtimeSource = null; // runtime-config のキャッシュ (1回だけ取得)
 
@@ -75,8 +78,11 @@
       const topicId = (opts && opts.focusTopicId) || c.topicId;
       if (topicId) url += "&topic=" + encodeURIComponent(topicId);
     } else {
-      url = "/api/atlas?cartridge=" +
-        encodeURIComponent(cartridgeId || c.cartridgeId || DEFAULT_CARTRIDGE);
+      // fail-closed: 明示指定 (引数 / window.AtlasContext.cartridgeId) が無ければ
+      // 取得せず null を返す (地図領域ごと非表示)。既定カートリッジへは倒さない。
+      const cid = cartridgeId || c.cartridgeId;
+      if (!cid) return null;
+      url = "/api/atlas?cartridge=" + encodeURIComponent(cid);
     }
     if (opts && opts.focus) url += "&focus=" + encodeURIComponent(opts.focus);
 

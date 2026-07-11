@@ -1493,8 +1493,28 @@ def _run_migrations() -> None:
             "ON user_notifications(recipient_id, read_at, created_at DESC)"
         ))
 
+        # ---- Migration 039: ガイダンス層（G層）— Next Steps 却下台帳 ----
+        # 正本リファレンス: backend/db/039_assistant_step_dismissals.sql
+        # To-Do 本体は保存しない（core/admin_assistant/next_steps.py が毎回投影, G1）。
+        # 保存するのは却下の意図のみ。復元は行削除でなく revoked 遷移（G5/P4）。
+        # 初回ログイン cue のフラグも step_key='cue:first_login' 行で代用する（§8）。
+        session.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS assistant_step_dismissals (
+                id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                step_key     TEXT NOT NULL,
+                dismissed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                revoked      BOOLEAN NOT NULL DEFAULT FALSE,
+                UNIQUE (user_id, step_key)
+            )
+        """))
+        session.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS idx_assistant_step_dismissals_user "
+            "ON assistant_step_dismissals(user_id, revoked)"
+        ))
+
         session.commit()
-        logger.info("Migrations (002-038) applied successfully.")
+        logger.info("Migrations (002-039) applied successfully.")
 
         # 骨格 DB 管理化 (027): カートリッジ同梱の凍結骨格を一度だけ DB へ取り込む (冪等)
         try:

@@ -1188,3 +1188,30 @@ class AssistantActionSummary(BaseModel):
     status: str = "applied"
     created_at: str = ""
     reverted_at: str | None = None
+
+
+class NextStepOut(BaseModel):
+    """G層 Next Steps の 1 項目（core.admin_assistant.next_steps.NextStep の JSON 化）。"""
+    step_key: str
+    rule_id: str
+    severity: str                                  # required | recommended | optional
+    title: str
+    reason: str
+    capability_id: str
+    locate_plan: dict = Field(default_factory=dict)
+    target: dict = Field(default_factory=dict)
+    dismissible: bool = True
+
+
+class NextStepsResponse(BaseModel):
+    """GET /api/admin/assistant/next-steps のレスポンス（設計 §4）。"""
+    steps: list[NextStepOut] = Field(default_factory=list)
+    hidden: list[NextStepOut] = Field(default_factory=list)
+    truncated: bool = False
+    assistant_cue_pending: bool = False
+
+
+class NextStepDismissResponse(BaseModel):
+    """POST /next-steps/{step_key}/dismiss|restore の共通レスポンス。"""
+    status: str                                     # dismissed | restored
+    step_key: str

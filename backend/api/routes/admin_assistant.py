@@ -32,6 +32,7 @@ from core.admin_assistant import capabilities as caps
 from core.admin_assistant import intent as intent_mod
 from core.admin_assistant import knowledge as kb
 from core.admin_assistant import action_store
+from core.admin_assistant import next_steps as next_steps_mod
 from core.admin_assistant.actions import (
     ActionArgError,
     ActionContext,
@@ -58,6 +59,8 @@ from schemas import (
     AssistantLocatePlan,
     AssistantLocateStep,
     AssistantRevertResponse,
+    NextStepDismissResponse,
+    NextStepsResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -696,3 +699,97 @@ def assistant_list_actions(
         )
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# 8.5 Next Steps（G層）— GET /next-steps, POST /next-steps/{step_key}/dismiss|restore
+#
+# 設計原則（docs/features/guidance_layer_design.md）:
+#   - G2 非LLM・同期: next_steps_mod.compute_next_steps はルールベースの投影のみ。
+#   - G3 fail-closed: 判定はすべて next_steps_mod 側（capability registry 経由）。
+#   - G5/P4 却下は保持: dismiss/restore は行削除せず revoked を状態遷移する。
+#   - S5 と同型の fail-closed 縮退: DB 未接続環境でも捏造せず空配列に縮退する。
+# ---------------------------------------------------------------------------
+
+
+def _record_next_step_event(
+    step_key: str, new_status: str, user_id: str | None, metadata: dict | None = None,
+) -> None:
+    """theory_review_events への監査記録（entity_type='next_step'。_record_assistant_event と同型）。"""
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO theory_review_events
+                (entity_type, entity_id, old_status, new_status, changed_by, metadata)
+                VALUES ('next_step', :entity_id, '', :new_status,
+                        CAST(:changed_by AS uuid), CAST(:metadata AS jsonb))
+            """),
+            {
+                "entity_id": step_key,
+                "new_status": new_status or "",
+                "changed_by": user_id or None,
+                "metadata": json.dumps(metadata or {}, ensure_ascii=False),
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.warning("Failed to record next_step event for %s", step_key, exc_info=True)
+    finally:
+        session.close()
+
+
+@admin_router.get("/next-steps", response_model=NextStepsResponse)
+def get_next_steps(current_user: dict = Depends(_require_teacher)) -> NextStepsResponse:
+    """状態から導出する Next Steps（G層）。判定はすべてサーバ側（P1 と同型の fail-closed）。"""
+    uid = str(current_user.get("id") or "")
+    try:
+        session = _pg_session()
+        try:
+            result = next_steps_mod.compute_next_steps(session, current_user)
+            cue_pending = next_steps_mod.is_cue_pending(session, uid)
+        finally:
+            session.close()
+    except Exception:
+        # DB 未接続環境でも捏造せず空配列に縮退する（S5 と同型）。
+        # cue はフラグ確認不能時は表示しない（fail-closed、設計 §8）。
+        logger.warning("next-steps: failed to compute (DB unavailable?)", exc_info=True)
+        result = {"steps": [], "hidden": [], "truncated": False}
+        cue_pending = False
+    return NextStepsResponse(
+        steps=result.get("steps", []),
+        hidden=result.get("hidden", []),
+        truncated=bool(result.get("truncated", False)),
+        assistant_cue_pending=cue_pending,
+    )
+
+
+@admin_router.post("/next-steps/{step_key}/dismiss", response_model=NextStepDismissResponse)
+def dismiss_next_step(
+    step_key: str, current_user: dict = Depends(_require_teacher),
+) -> NextStepDismissResponse:
+    """却下を upsert する（行削除しない, G5/P4）。"""
+    uid = str(current_user["id"])
+    session = _pg_session()
+    try:
+        next_steps_mod.dismiss_step(session, uid, step_key)
+    finally:
+        session.close()
+    _record_next_step_event(step_key, "dismissed", uid)
+    return NextStepDismissResponse(status="dismissed", step_key=step_key)
+
+
+@admin_router.post("/next-steps/{step_key}/restore", response_model=NextStepDismissResponse)
+def restore_next_step(
+    step_key: str, current_user: dict = Depends(_require_teacher),
+) -> NextStepDismissResponse:
+    """revoked=TRUE に戻す（行削除しない, G5/P4）。"""
+    uid = str(current_user["id"])
+    session = _pg_session()
+    try:
+        next_steps_mod.restore_step(session, uid, step_key)
+    finally:
+        session.close()
+    _record_next_step_event(step_key, "restored", uid)
+    return NextStepDismissResponse(status="restored", step_key=step_key)

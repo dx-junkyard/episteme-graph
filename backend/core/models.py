@@ -330,4 +330,24 @@ class GroupInvitation(Base):
     inviter_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     status = Column(Text, nullable=False, default="pending")  # pending | accepted | declined | revoked
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+
+# ============================================================
+# ガイダンス層（G層）— Next Steps 却下台帳（migration 039）
+# ============================================================
+
+class AssistantStepDismissal(Base):
+    """Next Steps の却下台帳（G5/P4: 復元は行削除でなく revoked への状態遷移）。
+
+    `step_key='cue:first_login'` は操作アシスタント初回ログイン cue の
+    一度きりフラグとしても流用する（設計 §8。専用テーブルを増やさない）。
+    """
+    __tablename__ = "assistant_step_dismissals"
+    __table_args__ = (UniqueConstraint("user_id", "step_key"),)
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    step_key = Column(Text, nullable=False)
+    dismissed_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    revoked = Column(Boolean, nullable=False, default=False)
     responded_at = Column(DateTime(timezone=True), nullable=True)
