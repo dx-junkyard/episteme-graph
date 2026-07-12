@@ -1,5 +1,11 @@
 # E層（Exposition Layer / 段階的翻訳レイヤー）設計
 
+> **状態: 未実装（2026-07-12 時点、実装コードなし）**。本書は設計のみで、
+> `backend/core/exposition/` / `backend/api/routes/exposition.py` / migration 034
+> （`exposition_views` 等）はいずれもリポジトリに存在しない。「第五の層」を名乗る
+> R層（migration 036）・V層（migration 037）は実装済みだが、E層は issue化・着手ともに
+> 未了。実装に着手する際は本書 §10 の issue 分割を正本として使うこと。
+
 > **目的**: A層パイプラインが論文から再構成した component / claim / equation / TheoryOperationGraph は
 > 「その分野の専門家だからこそ読める」構造物である。これを、入門的立場の学生や非専門家が
 > 興味を持って手に取れる形へ**段階的に翻訳する層**を、既存実装に違和感なく積む。

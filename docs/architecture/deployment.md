@@ -10,7 +10,7 @@ Docker Compose によるサービス構成、ネットワーク設計、環境�
 
 | ファイル | 用途 | 追加するもの |
 |---|---|---|
-| `docker-compose.yml` | 本番 / CI 共通のベース | grobid, neo4j, minio, api-server, frontend |
+| `docker-compose.yml` | 本番 / CI 共通のベース | grobid, minio, api-server, frontend |
 | `docker-compose.local.yml` | ローカル開発 | `postgres`（`pgvector/pgvector:pg16`）、DB クライアント、デバッグポート公開など |
 | `docker-compose.prod.yml` | 本番補助 | `ngrok` トンネルなど |
 
@@ -41,14 +41,15 @@ docker compose logs -f api-server
 | サービス | イメージ / ビルド | 役割 |
 |---|---|---|
 | `grobid` | `lfoppiano/grobid:0.8.1` | PDF → TEI-XML 解析（8070） |
-| `neo4j` | `neo4j:5-community` | 概念グラフ（`NEO4J_AUTH: neo4j/episteme`） |
 | `minio` | `minio/minio:latest` | S3 互換ストレージ（コンソール 9001） |
 | `api-server` | `backend/Dockerfile` ビルド | FastAPI 本体。`.gcp` を `/app/.gcp:ro` でマウント |
 | `frontend` | `frontend/Dockerfile` ビルド | nginx（3000 公開） |
 
 - ネットワーク: `episteme`（bridge）。全サービスがこのネットワークで相互接続。
-- ボリューム: `neo4j_data`, `postgres_data`, `minio_data`。
-- `api-server` は `postgres`(healthy) / `neo4j` / `minio` / `grobid` の起動を待って起動（`depends_on`）。
+- ボリューム: `postgres_data`, `minio_data`。
+- `api-server` は `postgres`(healthy) / `minio` / `grobid` の起動を待って起動（`depends_on`）。
+
+> 旧 `neo4j` サービスは書き込み経路がなく実質未使用だったため 2026-07 に撤去済み。
 
 ### ネットワーク設計（セキュリティ）
 - 外部公開ポートは **frontend:3000 のみ**。
@@ -85,8 +86,6 @@ GOOGLE_APPLICATION_CREDENTIALS=/app/.gcp/application_default_credentials.json
 
 ### データストア
 ```bash
-NEO4J_URI=bolt://neo4j:7687
-NEO4J_AUTH=neo4j/episteme
 DATABASE_URL=postgresql://<user>:<pass>@<host>:<port>/<db>  # DB_* から組み立て
 MINIO_ENDPOINT=...
 MINIO_ACCESS_KEY=${MINIO_ROOT_USER}
@@ -137,7 +136,6 @@ TENSION_LLM_MODEL=               # 空なら fast tier（LLM_FAST_MODEL）を使
 | サービス | URL |
 |---|---|
 | Swagger UI | http://localhost:8001/docs（※直接公開する設定の場合） |
-| Neo4j Browser | http://localhost:7474 |
 | MinIO コンソール | http://localhost:9001 |
 | GROBID | http://localhost:8070 |
 | ngrok Web UI | http://localhost:4040 |

@@ -172,7 +172,8 @@ spotlight が粗い。`data-material-id` / `data-course-id` 属性で行を特�
 
 判定はすべてサーバ側。フロントは表示するだけ（P1 と同型）。
 
-## 5. DB（migration 038）
+## 5. DB（migration 039。設計時点では 038 を想定していたが、038 は状態管理・通知基盤
+`status_notification_design.md` が先に使用したため、実装では **039** が割り当てられた）
 
 ```sql
 CREATE TABLE IF NOT EXISTS assistant_step_dismissals (
@@ -265,7 +266,7 @@ url = "/api/atlas?cartridge=" + encodeURIComponent(cid);
 |---|---|---|
 | 0 | atlas-data.js の既定カートリッジフォールバック除去（§9） | なし・即時 |
 | 1 | `next_steps.py` + GET API + バッジ UI（6 ルール）+ 追加 capability + 不足アンカー | なし |
-| 2 | dismissal 永続化（migration 038）+ 監査 + 初回ログイン cue + インラインカード（§7・§8） | Phase 1 |
+| 2 | dismissal 永続化（migration 039）+ 監査 + 初回ログイン cue + インラインカード（§7・§8） | Phase 1 |
 | 3 | ルール拡充（共有・review-queue 滞留・地図修正報告未処理など） | Phase 2 |
 
 Phase 1 の時点では dismiss を localStorage 暫定にしてもよい（G5 の完全実装は Phase 2）。

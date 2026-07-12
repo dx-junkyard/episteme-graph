@@ -68,13 +68,31 @@ class TestLedgerEndpoints:
             assert "_require_teacher" in block.group(0), f"{fn} must require teacher"
 
     def test_all_writes_audited(self):
-        """全書き込みが theory_review_events に記録される（_record_doubt_event）。"""
-        for entity in ("'ledger'", "\"ledger\""):
-            pass
+        """全書き込みが theory_review_events に記録される（_record_doubt_event）。
+
+        entity_type は core/schema.py の AUDIT_ENTITY_TYPES カタログ定数を使う
+        （提案7: 監査 entity_type の一本化）。call site が catalog 定数を参照して
+        いること・カタログ側の値が期待どおりであることの双方を検証する。
+        """
+        from core.schema import (
+            AUDIT_ENTITY_ASSUMPTION,
+            AUDIT_ENTITY_CHALLENGE,
+            AUDIT_ENTITY_COUNTERFACTUAL_SESSION,
+            AUDIT_ENTITY_LEDGER,
+            AUDIT_ENTITY_VERIFICATION_PROPOSAL,
+        )
+
         assert _SRC.count("_record_doubt_event(") >= 10
-        for entity_type in ("ledger", "assumption", "challenge",
-                            "verification_proposal", "counterfactual_session"):
-            assert f'"{entity_type}"' in _SRC
+        expected = {
+            "AUDIT_ENTITY_LEDGER": ("ledger", AUDIT_ENTITY_LEDGER),
+            "AUDIT_ENTITY_ASSUMPTION": ("assumption", AUDIT_ENTITY_ASSUMPTION),
+            "AUDIT_ENTITY_CHALLENGE": ("challenge", AUDIT_ENTITY_CHALLENGE),
+            "AUDIT_ENTITY_VERIFICATION_PROPOSAL": ("verification_proposal", AUDIT_ENTITY_VERIFICATION_PROPOSAL),
+            "AUDIT_ENTITY_COUNTERFACTUAL_SESSION": ("counterfactual_session", AUDIT_ENTITY_COUNTERFACTUAL_SESSION),
+        }
+        for const_name, (literal, value) in expected.items():
+            assert const_name in _SRC, f"{const_name} must be referenced in doubt.py"
+            assert value == literal, f"{const_name} catalog value drifted from {literal!r}"
 
 
 class TestCandidateConfirmationFlow:

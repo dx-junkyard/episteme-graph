@@ -1,29 +1,26 @@
-"""Load cartridge context for ComponentGraphAgent."""
+"""Load cartridge context for ComponentGraphAgent.
+
+Subclasses the shared ``CartridgeLoader`` (see
+docs/architecture/consolidation_survey_2026-07.md, Tier 2 proposal 9:
+"cartridge 読み込みの統合"), reusing its base-dir resolution and JSON loading.
+
+This agent's CartridgeContext has an extra required field (``relation_types``)
+not present in the standard shape, so it keeps its own dataclass in
+``schema.py`` instead of the shared
+``episteme_graph.agents.cartridge_context.CartridgeContext`` — unifying the two
+would silently reorder the constructor's positional arguments used by
+existing call sites/tests.
+"""
 from __future__ import annotations
 
-import json
-import os
-
-from episteme_graph.agents.cartridge_paths import resolve_cartridge_base_dir
+from episteme_graph.agents.cartridge_loader import CartridgeLoader as _BaseCartridgeLoader
 
 from .schema import CartridgeContext
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_DEFAULT_CARTRIDGE_BASE = os.path.abspath(
-    os.path.join(_HERE, "..", "..", "..", "..", "backend", "cartridges")
-)
 
-
-class CartridgeLoader:
-    def __init__(self, cartridge_base_dir: str | None = None) -> None:
-        self._base_dir = cartridge_base_dir or resolve_cartridge_base_dir(_DEFAULT_CARTRIDGE_BASE)
-
+class CartridgeLoader(_BaseCartridgeLoader):
     def load(self, cartridge_id: str) -> CartridgeContext:
-        cartridge_dir = os.path.join(self._base_dir, cartridge_id)
-        if not os.path.isdir(cartridge_dir):
-            raise FileNotFoundError(
-                f"Cartridge '{cartridge_id}' not found at {cartridge_dir}"
-            )
+        cartridge_dir = self._cartridge_dir(cartridge_id)
         ontology = self._load_json(cartridge_dir, "ontology.json")
         validation_rules = self._load_json(cartridge_dir, "validation_rules.json")
         relation_types = self._load_json(cartridge_dir, "relation_types.json")
@@ -40,11 +37,3 @@ class CartridgeLoader:
             aliases=aliases,
             notation_patterns=ontology.get("notation_patterns") if ontology else None,
         )
-
-    @staticmethod
-    def _load_json(directory: str, filename: str) -> dict:
-        path = os.path.join(directory, filename)
-        if not os.path.exists(path):
-            return {}
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)

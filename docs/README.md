@@ -45,26 +45,27 @@ PDF 論文を投入するだけで知識をグラフ構造に変換し、それ�
         │   backend/api/   … 認証・学習・管理エンドポイント     │
         │   backend/core/  … 抽出・埋め込み・RAG・講義・スキーマ │
         │   src/episteme_graph/agents/ … PDF解析Agent群        │
-        └──┬──────────┬──────────┬──────────┬──────────────────┘
-           │          │          │          │
-   ┌───────▼──┐ ┌─────▼────┐ ┌───▼────┐ ┌───▼─────────┐
-   │PostgreSQL│ │  Neo4j   │ │ MinIO  │ │ LLM / TTS   │
-   │+ pgvector│ │(グラフ   │ │(S3互換 │ │ OpenAI /    │
-   │ (正本)   │ │ 走査専用)│ │ 原本)  │ │ Gemini      │
-   └──────────┘ └──────────┘ └────────┘ └─────────────┘
-                                          ┌─────────────┐
-                                          │ GROBID      │
-                                          │ (PDF解析)   │
-                                          └─────────────┘
+        └──┬──────────┬──────────┬──────────────────────────────┘
+           │          │          │
+   ┌───────▼──┐ ┌─────▼────┐ ┌───▼─────────┐
+   │PostgreSQL│ │ MinIO    │ │ LLM / TTS   │
+   │+ pgvector│ │(S3互換   │ │ OpenAI /    │
+   │ (正本)   │ │ 原本)    │ │ Gemini      │
+   └──────────┘ └──────────┘ └─────────────┘
+                              ┌─────────────┐
+                              │ GROBID      │
+                              │ (PDF解析)   │
+                              └─────────────┘
 ```
 
 各データストアの役割分担：
 
 - **PostgreSQL + pgvector（正本）** — ユーザー・認証、教材/ドキュメントメタデータ、チャンク本文+埋め込みベクトル、学習者状態、コース、対話履歴、スキーマ進化、講義スクリプト、理論コンポーネント、リビジョン履歴
-- **Neo4j（グラフ走査専用）** — 概念グラフ（REQUIRES / RELATES_TO / CONTAINS）、構造的同型パターンマッチ
-- **MinIO（S3 互換）** — PDF 原本、抽出済み `PaperStructure` JSON など
+- **MinIO（S3 互換）** — PDF 原本、図画像など
 - **GROBID** — PDF → TEI-XML の構造解析（利用不可時は PyMuPDF にフォールバック）
 - **LLM / TTS** — OpenAI または Gemini（`LLM_PROVIDER` で切替）、TTS は OpenAI / Google
+
+> 旧 Neo4j（グラフ走査専用として導入）は書き込み経路がなく実質未使用だったため 2026-07 に撤去済み。
 
 詳細は [アーキテクチャ概要](architecture/overview.md) と [デプロイ構成](architecture/deployment.md) を参照。
 
@@ -79,7 +80,7 @@ PDF アップロード
   → PDF解析 Agent パイプライン（23 ステージ）で
      構造・主張・数式・導出・理論操作グラフを段階的に生成
   → チャンク+埋め込みを PostgreSQL(pgvector) へ
-  → 概念グラフを Neo4j へ / 成果物 JSON を MinIO・PostgreSQL へ
+  → 理論コンポーネント・理論操作グラフを PostgreSQL へ / 図画像を MinIO へ
   → コースビルダーでコース化 → 公開
 ```
 → [パイプライン概要](pipeline/overview.md) / [Agent 詳細](pipeline/agents.md)
@@ -88,7 +89,7 @@ PDF アップロード
 ```
 公開コースを受講登録（クローン）
   → トピック選択 → RAG チャットで質問
-     （pgvector 検索 + PaperStructure + 履歴 → LLM 回答）
+     （pgvector 検索（tier 付き）+ 履歴 → LLM 回答）
   → 誤解検出・前提知識チェック・学習進捗トラッキング
   → レクチャーモードで TTS 音声 + ハイライト講義
 ```
@@ -101,7 +102,8 @@ PDF アップロード
 ### アーキテクチャ / 基盤
 - [アーキテクチャ概要](architecture/overview.md) — システム全体構成、ディレクトリ構成、データストア役割分担
 - [デプロイ構成](architecture/deployment.md) — Docker Compose 構成、環境変数、ネットワーク設計
-- [データモデル](architecture/data-model.md) — PostgreSQL テーブル設計、マイグレーション一覧（init → 022）
+- [データモデル](architecture/data-model.md) — PostgreSQL テーブル設計、マイグレーション一覧（init → 043）
+- [レイヤー索引表](architecture/layer_registry.md) — A〜V層・横断ユーティリティ層・状態通知基盤の正本設計書/実装場所/migration対応一覧
 
 ### バックエンド
 - [API とルーティング](backend/api.md) — エンドポイント一覧、認証・RBAC・開示範囲

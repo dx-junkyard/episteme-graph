@@ -20,11 +20,18 @@ for _p in (str(BACKEND), str(BACKEND / "api")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from tests.guardrail_helpers import (  # noqa: E402
+    assert_module_tree_does_not_import,
+    assert_module_tree_forbids,
+    assert_source_forbids,
+)
+
 _CORE_DIR = BACKEND / "core" / "status"
 _SCHEMA_SRC = (_CORE_DIR / "schema.py").read_text(encoding="utf-8")
 _PROJECTOR_SRC = (_CORE_DIR / "projector.py").read_text(encoding="utf-8")
 _WATCHER_SRC = (_CORE_DIR / "watcher.py").read_text(encoding="utf-8")
 _NOTIF_RULES_SRC = (_CORE_DIR / "notification_rules.py").read_text(encoding="utf-8")
+_NOTIF_RECIPIENTS_SRC = (BACKEND / "core" / "notification_recipients.py").read_text(encoding="utf-8")
 _INBOX_SRC = (_CORE_DIR / "inbox.py").read_text(encoding="utf-8")
 _STATUS_ROUTE_SRC = (BACKEND / "api" / "routes" / "status.py").read_text(encoding="utf-8")
 _NOTIF_ROUTE_SRC = (BACKEND / "api" / "routes" / "notifications.py").read_text(encoding="utf-8")
@@ -38,15 +45,10 @@ class TestCoreFastAPIFree:
     """S3: core/status/ は FastAPI / LLM クライアントを import しない。"""
 
     def test_no_fastapi_import_in_core(self):
-        for path in _CORE_DIR.rglob("*.py"):
-            src = path.read_text(encoding="utf-8")
-            assert "import fastapi" not in src, f"{path} が fastapi を import している"
-            assert "from fastapi" not in src, f"{path} が fastapi を import している"
+        assert_module_tree_does_not_import(_CORE_DIR, ["fastapi"])
 
     def test_no_llm_client_import_in_core(self):
-        for path in _CORE_DIR.rglob("*.py"):
-            src = path.read_text(encoding="utf-8")
-            assert "core.llm" not in src, f"{path} が core.llm を import している（S3: 非LLM）"
+        assert_module_tree_forbids(_CORE_DIR, ["core.llm"])
 
 
 class TestWatermarkIdempotency:
@@ -71,15 +73,30 @@ class TestWatermarkIdempotency:
 
 
 class TestNotificationRecipientsScoped:
-    """S5: 通知の宛先はサーバ側で権限判定（所有者・共有 editor のみ）に限る。"""
+    """S5: 通知の宛先はサーバ側で権限判定（所有者・共有 editor のみ）に限る。
+
+    JOIN の形（*_group_permissions を group_members と JOIN する部分）は
+    core/notification_recipients.py に集約済み（Tier2 提案10, core/versioning/notifications.py
+    と同型の実装が独立に存在していたのを統合）。「所有者を含める」「editor のみを対象にし
+    viewer は含めない」という組み立てはこのファイル（notification_rules.py）固有の呼び出しで
+    保証されていることを確認する。
+    """
 
     def test_material_recipients_owner_and_editor_only(self):
-        assert "uploaded_by" in _NOTIF_RULES_SRC
-        assert "permission = 'editor'" in _NOTIF_RULES_SRC
+        assert "document_owner_id" in _NOTIF_RULES_SRC
+        assert '_recipients.document_group_member_ids(session, document_id, ("editor",))' in _NOTIF_RULES_SRC
         assert "'viewer'" not in _NOTIF_RULES_SRC  # viewer には通知しない
 
     def test_course_recipients_owner_and_editor_only(self):
-        assert "SELECT user_id::text AS uid FROM learning_courses" in _NOTIF_RULES_SRC
+        assert "course_owner_id" in _NOTIF_RULES_SRC
+        assert '_recipients.course_group_member_ids(session, course_id, ("editor",))' in _NOTIF_RULES_SRC
+        assert "'viewer'" not in _NOTIF_RULES_SRC  # viewer には通知しない
+
+    def test_recipient_join_helpers_are_shared_and_fastapi_free(self):
+        # 宛先解決の JOIN 形は core/notification_recipients.py に集約済み。
+        assert "def document_group_member_ids" in _NOTIF_RECIPIENTS_SRC
+        assert "def course_group_member_ids" in _NOTIF_RECIPIENTS_SRC
+        assert "import fastapi" not in _NOTIF_RECIPIENTS_SRC.lower()
 
     def test_fan_out_rejects_unknown_event_kind(self):
         assert "EVENT_TO_NOTIFICATION_KIND.get(event_kind)" in _NOTIF_RULES_SRC
@@ -89,8 +106,9 @@ class TestNoRowDeletion:
     """S4: 既読・却下は状態遷移で行い、行削除しない。"""
 
     def test_inbox_has_no_delete_statement(self):
-        assert "DELETE FROM user_notifications" not in _INBOX_SRC
-        assert "DELETE FROM" not in _INBOX_SRC
+        assert_source_forbids(
+            _INBOX_SRC, ["DELETE FROM user_notifications", "DELETE FROM"], context="core/status/inbox.py",
+        )
 
     def test_mark_read_sets_column_not_delete(self):
         assert "SET read_at = now()" in _INBOX_SRC
@@ -181,8 +199,9 @@ class TestEventsReader:
         assert "min(_MAX_LIMIT" in _EVENTS_SRC or "min(" in _EVENTS_SRC
 
     def test_no_write_statements(self):
-        for forbidden in ("INSERT INTO", "UPDATE ", "DELETE FROM"):
-            assert forbidden not in _EVENTS_SRC
+        assert_source_forbids(
+            _EVENTS_SRC, ["INSERT INTO", "UPDATE ", "DELETE FROM"], context="core/status/events.py",
+        )
 
 
 class TestSharedLayerUntouched:
@@ -190,9 +209,11 @@ class TestSharedLayerUntouched:
 
     def test_unified_route_only_imports_versioning_reads(self):
         assert "from core.versioning import notifications as shared_notifications" in _NOTIF_ROUTE_SRC
-        for forbidden in ("INSERT INTO share_notifications", "DELETE FROM share_notifications",
-                          "ALTER TABLE share_notifications"):
-            assert forbidden not in _NOTIF_ROUTE_SRC
+        assert_source_forbids(
+            _NOTIF_ROUTE_SRC,
+            ["INSERT INTO share_notifications", "DELETE FROM share_notifications", "ALTER TABLE share_notifications"],
+            context="routes/notifications.py",
+        )
 
 
 _CAN_IMPORT_SCHEMA = True

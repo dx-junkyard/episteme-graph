@@ -51,7 +51,7 @@
 | 21 | `course_mapping` | **CourseMappingAgent** Component → Course topic 接続 | Det | CourseMappingResult |
 | 22 | `blueprint` | **BlueprintAgent** ナラティブアーク合成 | Det | Blueprint |
 | 23 | `export_validation` | **ExportValidationGate** 最終検証ゲート | Det | 検証結果 |
-| — | `persist_claims_components_graph` | claims/components/graph を Neo4j・PostgreSQL へ永続化 | Det | — |
+| — | `persist_claims_components_graph` | claims/components/graph を PostgreSQL へ永続化 | Det | — |
 | — | `completed` | ラン完了マーク | — | — |
 
 ---

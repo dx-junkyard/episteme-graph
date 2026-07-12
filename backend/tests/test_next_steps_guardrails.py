@@ -32,6 +32,11 @@ for _p in (str(BACKEND), str(BACKEND / "api")):
 from core.admin_assistant import capabilities as caps  # noqa: E402
 from core.admin_assistant import next_steps as next_steps_mod  # noqa: E402
 from core.admin_assistant.schema import ROLE_TEACHER  # noqa: E402
+from tests.guardrail_helpers import (  # noqa: E402
+    assert_source_does_not_import,
+    assert_source_forbids,
+    extract_function_source,
+)
 
 _NEXT_STEPS_SRC = (BACKEND / "core" / "admin_assistant" / "next_steps.py").read_text(encoding="utf-8")
 _ROUTE_SRC = (BACKEND / "api" / "routes" / "admin_assistant.py").read_text(encoding="utf-8")
@@ -112,26 +117,20 @@ class TestDismissalPersistence:
 
     def test_restore_uses_revoked_update_not_delete(self):
         assert "def restore_step" in _NEXT_STEPS_SRC
-        start = _NEXT_STEPS_SRC.index("def restore_step")
-        end = _NEXT_STEPS_SRC.index("\ndef ", start + 1)
-        body = _NEXT_STEPS_SRC[start:end]
+        body = extract_function_source(_NEXT_STEPS_SRC, "restore_step")
         assert "DELETE" not in body.upper().replace("REVOKED", "")
         assert "revoked = TRUE" in body or "revoked=TRUE" in body
 
     def test_dismiss_upserts_without_delete(self):
         assert "def dismiss_step" in _NEXT_STEPS_SRC
-        start = _NEXT_STEPS_SRC.index("def dismiss_step")
-        end = _NEXT_STEPS_SRC.index("\ndef ", start + 1)
-        body = _NEXT_STEPS_SRC[start:end]
+        body = extract_function_source(_NEXT_STEPS_SRC, "dismiss_step")
         assert "ON CONFLICT" in body
         assert "DELETE" not in body.upper()
 
     def test_routes_dismiss_restore_do_not_delete_rows(self):
         for fn_name in ("dismiss_next_step", "restore_next_step"):
             assert f"def {fn_name}" in _ROUTE_SRC
-            start = _ROUTE_SRC.index(f"def {fn_name}")
-            end = _ROUTE_SRC.index("\ndef ", start + 1) if "\ndef " in _ROUTE_SRC[start + 1:] else len(_ROUTE_SRC)
-            body = _ROUTE_SRC[start:end]
+            body = extract_function_source(_ROUTE_SRC, fn_name)
             assert "DELETE" not in body.upper()
 
     def test_cue_reuses_dismissal_table_key(self):
@@ -147,14 +146,11 @@ class TestDismissalPersistence:
 
 class TestGuardrails:
     def test_next_steps_does_not_import_fastapi(self):
-        assert "import fastapi" not in _NEXT_STEPS_SRC
-        assert "from fastapi" not in _NEXT_STEPS_SRC
+        assert_source_does_not_import(_NEXT_STEPS_SRC, ["fastapi"], context="next_steps.py")
 
     def test_next_steps_does_not_import_llm_client(self):
-        assert "import openai" not in _NEXT_STEPS_SRC
-        assert "from openai" not in _NEXT_STEPS_SRC
-        assert "core.llm" not in _NEXT_STEPS_SRC
-        assert "llm_client" not in _NEXT_STEPS_SRC
+        assert_source_does_not_import(_NEXT_STEPS_SRC, ["openai"], context="next_steps.py")
+        assert_source_forbids(_NEXT_STEPS_SRC, ["core.llm", "llm_client"], context="next_steps.py")
 
     def test_next_steps_uses_sqlalchemy_text_only(self):
         """SQLAlchemy セッション（sqlalchemy.text 等）の利用は可（タスク条件）。"""
@@ -181,8 +177,7 @@ class TestGuardrails:
 
 class TestReasonWording:
     def test_no_forbidden_vocabulary_in_source_literals(self):
-        for word in _FORBIDDEN_WORDS:
-            assert word not in _NEXT_STEPS_SRC, f"next_steps.py に禁止語彙が含まれている: {word}"
+        assert_source_forbids(_NEXT_STEPS_SRC, _FORBIDDEN_WORDS, context="next_steps.py")
 
     def test_reasons_are_factual_statements_not_commands(self):
         """reason の f-string テンプレートに命令調の「〜してください」を含めない。"""

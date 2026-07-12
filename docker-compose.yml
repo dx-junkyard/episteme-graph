@@ -9,15 +9,6 @@ services:
     networks:
       - episteme
 
-  neo4j:
-    image: neo4j:5-community
-    environment:
-      NEO4J_AUTH: neo4j/episteme
-    volumes:
-      - neo4j_data:/data
-    networks:
-      - episteme
-
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
@@ -54,8 +45,6 @@ services:
       # Vertex AI ADC 設定 (LLM_PROVIDER=gemini-vertex のときのみ有効、廃止予定)
       GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
       GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-us-central1}
-      NEO4J_URI: ${NEO4J_URI}
-      NEO4J_AUTH: ${NEO4J_AUTH}
       DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT}
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-${MINIO_ROOT_USER}}
@@ -82,8 +71,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      neo4j:
-        condition: service_started
       minio:
         condition: service_started
       grobid:
@@ -105,7 +92,6 @@ services:
       - episteme
 
 volumes:
-  neo4j_data:
   postgres_data:
   minio_data:
 

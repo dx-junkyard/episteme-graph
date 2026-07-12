@@ -11,31 +11,22 @@ import logging
 import os
 import threading
 import uuid
-from functools import lru_cache
+from dataclasses import dataclass
 
-from neo4j import GraphDatabase
 from sqlalchemy import text as sa_text
 
-from core.config import get_settings as _get_settings
 from core.lecture import normalize_to_placeholder_format as _normalize_formulas
 from core.llm import generate_text, generate_text_with_structured_output, generate_embeddings, get_embedding_dim
 from core.postgres import get_session as _pg_session
-from core.schema import PaperStructure
+from core.privacy import K_ANONYMITY
+from core.schema import (
+    AUDIT_ENTITY_STRUCTURE_ANCHOR,
+    AUDIT_ENTITY_TENSION,
+    PaperStructure,
+)
 from core.storage import get_storage_client as _get_storage
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Singletons
-# ---------------------------------------------------------------------------
-
-
-@lru_cache(maxsize=1)
-def _neo4j_driver():
-    settings = _get_settings()
-    user, password = settings.neo4j_auth.split("/", 1)
-    return GraphDatabase.driver(settings.neo4j_uri, auth=(user, password))
-
 
 # ---------------------------------------------------------------------------
 # Background material processing state
@@ -923,6 +914,98 @@ def user_can_edit_document(user_id: str, document_ref: str) -> bool:
     return _has_document_group_permission(user_id, doc["id"], ("editor",))
 
 
+@dataclass(frozen=True)
+class DocumentAccess:
+    """ドキュメント（教材解析成果）に対するアクセス判定のスナップショット（Tier2 提案10）。
+
+    `_resolve_document` の呼び出しを1回に集約し、view / edit / owner をまとめて返す。
+    判定条件そのものは `user_can_view_document` / `user_can_edit_document` /
+    `user_owns_document` と完全に同一にする（リファクタリングであって仕様変更ではない）。
+    コース経由（course_group_permissions）のフォールバックはここには含めない
+    （ドキュメント単体に閉じた判定のみ。コースフォールバックは呼び出し側 —
+    theory_components.py の `_find_viewable_course_for_chunk` 等 — が現行どおり担当する）。
+    """
+
+    document_id: str | None
+    source_path: str = ""
+    uploaded_by: str | None = None
+    is_owner: bool = False
+    can_view: bool = False
+    can_edit: bool = False
+
+    @property
+    def found(self) -> bool:
+        return self.document_id is not None
+
+
+def _document_group_permissions_for_user(user_id: str, document_uuid: str) -> set[str]:
+    """document_group_permissions からユーザーの権限集合を1クエリで返す。
+
+    旧実装は viewer/editor 判定用と editor 判定用でそれぞれ別クエリ
+    （`_has_document_group_permission(..., ("viewer","editor"))` と
+    `_has_document_group_permission(..., ("editor",))`）を発行していたが、
+    両方必要な場面（`resolve_document_access`）では1回にまとめる。
+    """
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT DISTINCT dgp.permission
+                FROM document_group_permissions dgp
+                JOIN group_members gm ON gm.group_id = dgp.group_id
+                WHERE dgp.document_id = CAST(:did AS uuid)
+                  AND gm.user_id = CAST(:uid AS uuid)
+            """),
+            {"did": document_uuid, "uid": user_id},
+        ).fetchall()
+        return {r[0] for r in rows}
+    finally:
+        session.close()
+
+
+def resolve_document_access(user_id: str, document_ref: str) -> DocumentAccess:
+    """document_ref（documents.id UUID か source_path=material_id）を1回だけ解決し、
+    view / edit / owner をまとめて返す（Tier2 提案10: theory_components.py の
+    chunk ごとの再解決による N+1 を解消するための集約判定）。
+
+    判定条件は既存の `user_can_view_document` / `user_can_edit_document` /
+    `user_owns_document` と完全に同一（所有者 / public / group 単一共有 /
+    document_group_permissions）。`_resolve_document` の呼び出しと
+    document_group_permissions の行取得をそれぞれ1回にまとめることで、
+    view と edit の両方が必要な呼び出し元（例: 同一リクエスト内で複数回
+    判定するケース）でのクエリ往復を減らす。
+    """
+    doc = _resolve_document(document_ref)
+    if not doc:
+        return DocumentAccess(document_id=None)
+
+    is_owner = bool(doc.get("uploaded_by") and doc["uploaded_by"] == user_id)
+    can_view = is_owner
+    can_edit = is_owner
+
+    if not can_view and doc.get("visibility") == "public":
+        can_view = True
+    if not can_view and doc.get("visibility") == "group" and doc.get("group_id"):
+        if user_can_access_group(user_id, doc["group_id"]):
+            can_view = True
+
+    if not can_view or not can_edit:
+        perms = _document_group_permissions_for_user(user_id, doc["id"])
+        if not can_view and perms:  # viewer/editor いずれでも閲覧可
+            can_view = True
+        if not can_edit and "editor" in perms:
+            can_edit = True
+
+    return DocumentAccess(
+        document_id=doc["id"],
+        source_path=doc.get("source_path", ""),
+        uploaded_by=doc.get("uploaded_by"),
+        is_owner=is_owner,
+        can_view=can_view,
+        can_edit=can_edit,
+    )
+
+
 def get_document_group_permissions(document_ref: str) -> list[dict]:
     """ドキュメントに紐づくグループ権限マッピング一覧を返す（グループ名付き）。"""
     doc = _resolve_document(document_ref)
@@ -972,8 +1055,15 @@ def record_review_event(
 
     C層/D層の `_record_review_event` と同じ表を使う共通ヘルパー。共有付与・解除など
     admin ルータからの監査記録に使う。
+
+    セッション取得は関数内で ``core.postgres`` を都度 import する（モジュール冒頭で
+    束縛した ``_pg_session`` を使わない）。各層のテストが
+    ``monkeypatch.setattr(core.postgres, "get_session", fake)`` で DB をフェイクに
+    差し替える前提（atlas.py 等の旧実装と同型）に合わせるため。
     """
-    session = _pg_session()
+    from core.postgres import get_session as _get_session
+
+    session = _get_session()
     try:
         session.execute(
             sa_text("""
@@ -1500,7 +1590,6 @@ def calculate_progress(user_id: str, course_id: str, course_data: dict) -> dict:
     topics = course_data.get("topics", [])
     concepts = course_data.get("concepts", [])
 
-    mastered = sum(1 for c in concepts if c.get("status") == "mastered")
     learning = sum(1 for c in concepts if c.get("status") == "learning")
 
     # Issue #145: 個人誤解は personal_graph から取得（マスターデータには含まれない）
@@ -1554,7 +1643,6 @@ def calculate_progress(user_id: str, course_id: str, course_data: dict) -> dict:
     streak = calculate_streak(user_id, course_id)
 
     return {
-        "mastered_concepts": mastered,
         "learning_concepts": learning,
         "misconceptions": total_misconceptions,
         "streak_days": streak,
@@ -2143,12 +2231,12 @@ def aggregate_interest_dashboard(course_id: str, topic_title_map: dict | None = 
 
     # k-匿名化: 関与人数 n<3 のセルは表示しない（個人を特定不可能にする）。
     # 痕跡本文・user_id は一切出さない（匿名件数 + tension_type 分布のみ）。
-    _TENSION_K_ANONYMITY = 3
+    # 閾値は core/privacy.py の共通 k-匿名ゲート（提案8）を使う。
     tension_heatmap = []
     from core.tension.schema import TENSION_TYPE_LABELS as _TT_LABELS
     for r in tension_rows:
         tid, ttype, cnt, learners = r[0], str(r[1]), int(r[2]), int(r[3])
-        if learners < _TENSION_K_ANONYMITY:
+        if learners < K_ANONYMITY:
             continue
         tension_heatmap.append({
             "topic_title": title_map.get(tid) or tid or "(不明トピック)",
@@ -2158,8 +2246,7 @@ def aggregate_interest_dashboard(course_id: str, topic_title_map: dict | None = 
             "learners": learners,  # 関与人数（個人は特定しない）
         })
 
-    # k-匿名化: 関与人数 n<3 のセルは表示しない（tension と同じ k=3）。
-    _ANCHOR_K_ANONYMITY = 3
+    # k-匿名化: 関与人数 n<3 のセルは表示しない（tension と同じ k=3。core/privacy.py 共通ゲート）。
     anchor_heatmap = []
     from core.structure_anchor.schema import (
         ANCHOR_TYPE_LABELS as _AT_LABELS,
@@ -2169,7 +2256,7 @@ def aggregate_interest_dashboard(course_id: str, topic_title_map: dict | None = 
         tid, atype, stage, dtype, cnt, learners = (
             r[0], str(r[1]), str(r[2]), str(r[3]), int(r[4]), int(r[5]),
         )
-        if learners < _ANCHOR_K_ANONYMITY:
+        if learners < K_ANONYMITY:
             continue
         anchor_heatmap.append({
             "topic_title": title_map.get(tid) or tid or "(不明トピック)",
@@ -2316,25 +2403,11 @@ _TENSION_DIGEST_MAX_ITEMS = 3
 def _record_tension_event(
     trace_id: str, old_status: str, new_status: str, user_id: str, metadata: dict | None = None,
 ) -> None:
-    """tension の状態変更を theory_review_events に監査記録する（entity_type='tension'）。"""
-    session = _pg_session()
-    try:
-        session.execute(
-            sa_text("""
-                INSERT INTO theory_review_events (entity_type, entity_id, old_status, new_status, changed_by, metadata)
-                VALUES ('tension', :eid, :old, :new, CAST(:uid AS uuid), CAST(:meta AS jsonb))
-            """),
-            {
-                "eid": str(trace_id), "old": old_status, "new": new_status,
-                "uid": user_id, "meta": json.dumps(metadata or {}, ensure_ascii=False),
-            },
-        )
-        session.commit()
-    except Exception as exc:
-        session.rollback()
-        logger.warning("_record_tension_event failed: %s", exc)
-    finally:
-        session.close()
+    """tension の状態変更を theory_review_events に監査記録する（entity_type='tension'）。
+
+    実体は共通ヘルパー ``record_review_event``（提案7の一本化）。
+    """
+    record_review_event(AUDIT_ENTITY_TENSION, str(trace_id), old_status, new_status, user_id, metadata)
 
 
 def get_tension_digest(user_id: str, course_id: str) -> dict:
@@ -2508,25 +2581,11 @@ _ANCHOR_DIGEST_MAX_ITEMS = 3
 def _record_anchor_event(
     trace_id: str, old_status: str, new_status: str, user_id: str, metadata: dict | None = None,
 ) -> None:
-    """帰属の状態変更を theory_review_events に監査記録する（entity_type='structure_anchor'）。"""
-    session = _pg_session()
-    try:
-        session.execute(
-            sa_text("""
-                INSERT INTO theory_review_events (entity_type, entity_id, old_status, new_status, changed_by, metadata)
-                VALUES ('structure_anchor', :eid, :old, :new, CAST(:uid AS uuid), CAST(:meta AS jsonb))
-            """),
-            {
-                "eid": str(trace_id), "old": old_status, "new": new_status,
-                "uid": user_id, "meta": json.dumps(metadata or {}, ensure_ascii=False),
-            },
-        )
-        session.commit()
-    except Exception as exc:
-        session.rollback()
-        logger.warning("_record_anchor_event failed: %s", exc)
-    finally:
-        session.close()
+    """帰属の状態変更を theory_review_events に監査記録する（entity_type='structure_anchor'）。
+
+    実体は共通ヘルパー ``record_review_event``（提案7の一本化）。
+    """
+    record_review_event(AUDIT_ENTITY_STRUCTURE_ANCHOR, str(trace_id), old_status, new_status, user_id, metadata)
 
 
 def get_anchor_digest(user_id: str, course_id: str) -> dict:

@@ -2,7 +2,8 @@
 
 G層（`guidance_layer_design.md`）の土台となる基盤層。通知とエージェント（Admin Copilot）で
 ユーザーサポートを行うために必要な「状態の読み取りモデル」「遷移の検知」「通知の届け先」を
-整備する。migration 039 想定。
+整備する。migration 038 で実装（設計時点では 039 を想定していたが、039 は先行して
+G層 `guidance_layer_design.md` が使用したため、実装では **038** が割り当てられた）。
 
 ## 0. 背景 — 通知・エージェント支援に必要な3要素
 
@@ -55,7 +56,7 @@ G層（`guidance_layer_design.md`）の土台となる基盤層。通知とエ�
 ## 3. アーキテクチャ
 
 ```
-既存テーブル（正本・非改変）                     新規（migration 039）
+既存テーブル（正本・非改変）                     新規（migration 038）
 ┌────────────────────────┐
 │ documents / document_analysis_runs │──┐
 │ background_tasks / lecture_audio_… │  │ ①投影（保存しない）
@@ -127,7 +128,7 @@ guidance モードで projection API の結果を事実文で回答する（DB �
   コース所有者 / 共有 editor）+ 重要度。v1 の配信対象は **完了・失敗の 6 種**
   （analysis completed/failed, script completed/failed, audio completed/failed）に限定
   （段階登録。通知過多は通知が無いのと同じ）。
-- `user_notifications`（migration 039）: `share_notifications` と同形
+- `user_notifications`（migration 038）: `share_notifications` と同形
   （recipient_id / kind / entity_type / entity_id / payload / created_at / read_at /
   dismissed_at）。**V層のテーブルは変更しない**。
 - 統合 API `GET /api/admin/notifications` が `user_notifications` と
@@ -138,7 +139,7 @@ guidance モードで projection API の結果を事実文で回答する（DB �
 - **G層バッジとの役割分担**: 🔔 = flow（何が起きたか。既読で消える）/
   📋 = stock（いま何が未実施か。やれば消える）。両方が同じ status 語彙を使う。
 
-## 4. DB（migration 039）
+## 4. DB（migration 038）
 
 ```sql
 -- 遷移イベント（append-only の事実ストリーム）
@@ -192,7 +193,7 @@ CREATE INDEX IF NOT EXISTS idx_user_notif_recipient
 | Phase | 内容 | 依存 |
 |---|---|---|
 | 1 | `core/status/schema.py` + `projector.py` + status API。admin.js の状況列とG層 next_steps をこれに載せる | なし（G層 Phase 1 と同時が理想） |
-| 2 | migration 039 + watcher + fan-out + 統合インボックス API + 🔔 一本化 | Phase 1 |
+| 2 | migration 038 + watcher + fan-out + 統合インボックス API + 🔔 一本化 | Phase 1 |
 | 3 | Copilot `status_query` intent / エージェント向けイベント購読（status_events を将来の自動支援のトリガーに使う） | Phase 2 |
 
 ## 7. 非スコープ / 決定事項

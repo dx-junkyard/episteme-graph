@@ -130,19 +130,12 @@ node の主たる backing は **atomic claim**（短く evidence_text 非空、p
 
 ---
 
-## 3. 構造的同型性評価
+## 3. 構造的同型性評価（削除済み）
 
-`batch.py` は、新しい `AbstractionPattern` が登録されたときに、過去論文群へ**クロスドメイン**でパターンを当てます。
-
-```
-パターン（name + description + variables + rules）
-  → pgvector で類似論文を top-K 取得（MinIO の PaperStructure を読む）
-  → LLM が「構造的に対応するか」を評価（confidence しきい値 0.5、0.8〜1.0 が高精度）
-  → 一致したら Neo4j に MATCHES_PATTERN エッジを作成
-```
-
-これにより「捕食者が被食者を抑制し、被食者が資源を要求する」のような同じ構造が、生態学と経済学のように
-**異なる分野の論文に共通して現れる**ことを発見できます。論文収集は `harvester.py`（arXiv API、商業出版社フィルタ）。
+旧 `batch.py` は、新しい `AbstractionPattern` が登録されたときに過去論文群へ**クロスドメイン**でパターンを当て、
+一致したら Neo4j に `MATCHES_PATTERN` エッジを作成する機能だったが、本番呼び出し元が存在しなかった
+（新パイプラインは `AbstractionPattern` を生成しない）ため 2026-07 に Neo4j ごと削除済み。
+論文収集自体は引き続き `harvester.py`（arXiv API、商業出版社フィルタ）が担う。
 
 ---
 

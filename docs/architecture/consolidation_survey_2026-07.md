@@ -292,3 +292,75 @@
   学習シグナル系の共通化(6)は Atlas の流儀に寄せる形で行うとよい。
 - 「導出 vs 保存」の境界（状態を複製しない）は 038/039 で正しく守られている。
   問題は導出器が UI に届いていないこと(16)だけ。
+
+---
+
+## 第4部: 実施記録（2026-07-12 追記）
+
+Tier 0〜Tier 2 を同日に実装した。実施内容と、実装時の検証で判明した本レポートの訂正事項。
+
+### 実施済み項目
+
+**Tier 0（全項目完了）**
+- 1: migration 043 の `_run_migrations()` 欠落は U層実装時に解消済みであることを確認（main.py:1661）。
+- 2: 設計書の migration 番号入替（status_notification→038 / guidance→039）、CLAUDE.md への V層追記、
+  A2 クローン記述の現行仕様（learning_states 方式）注記、data-model.md の 023〜043 追記、
+  E層設計書への「未実装」明記 — すべて実施。
+- 3: `docs/architecture/layer_registry.md` 新設（13層の索引）。追加発見: E層設計書は migration 034 を
+  予約しているが 034 は assistant_actions が使用済み（実装時に番号衝突する）。
+
+**Tier 1（全項目完了）**
+- 4: extractor.py の旧抽出パイプライン（856→255行）/ teacher_graph.py / batch.py /
+  chat.py::generate_chat_response（chat.py 181→78行）/ agents/graph_narrative/ /
+  calculate_progress の mastered 死にロジック（app.js の常時0表示カードも撤去）— すべて削除。
+  追加で seed_patterns.py（パターンシステム全体がデッド化）と、孤児化した
+  parse_tei_to_logical_chunks / extract_text_from_pdf_bytes / chunk_text（extractor.py 側）も削除。
+- 5: **Neo4j を完全撤去**。削除前の読み取り専用検証で「本番到達可能な Cypher 実行ゼロ・
+  新パイプライン非参照・neo4j_node_id カラムは書き込み元なしで常に NULL」を実測確認の上、
+  docker-compose（サービス/volume/depends_on/env）・core/db.py・services.py の第2ドライバ・
+  config.py フィールド・ORM カラム・lecture_studio.py 読み出し・admin.js 分岐・requirements・
+  関連ドキュメントを一括除去。物理 DB カラムの DROP は行っていない（無害な残置）。
+
+**Tier 2（提案 6〜12 全項目完了）**
+- 6: `core/llm_worker/`（client / repair / cost_gate、253行）新設。5系統が委譲、環境変数名・
+  冪等性フラグ・失敗時ドメイン処理は不変。ガードレール+単体テスト34件追加。
+- 7: 監査 INSERT 11箇所を `services.record_review_event` に委譲（core 層 2箇所と
+  トランザクション同乗の persistence.py は理由付き残置）。entity_type カタログ26語彙を
+  `core/schema.py` の `AUDIT_ENTITY_*` に定数化 + ガードレールテスト。
+- 8: `core/privacy.py` 新設（K_ANONYMITY=3）。4箇所が委譲、レスポンス形式は不変。
+- 9: `agents/cartridge_loader.py` + `agents/cartridge_context.py` 新設。9コピーは再エクスポート化、
+  固有差分のある3エージェント（apparatus_semantics / component_assembly / component_graph）は
+  サブクラス化。正味 -379行。
+- 10: `services.resolve_document_access()` 新設で theory_components.py の chunk ごと再解決 N+1 を
+  解消（material_id 単位に重複排除）。通知宛先解決は `core/notification_recipients.py` に共通
+  JOIN を抽出（宛先集合の方針は各層に残置）。groups.py は group_members.role という別概念のため
+  委譲せず残置（本レポート 10 の想定と異なる判断、下記訂正参照）。
+- 11: 音声 readiness を `core/lecture.py::compute_material_audio_readiness()`（スライド単位+言語一致）に
+  一本化し projector / lecture.py 両方が使用（chunk 粒度だった projector 側の判定は意図的に修正）。
+  スライド分割は `POST /api/admin/lecture-studio/preview-split` でサーバ一本化し、admin.js の
+  `lsSplitSlides` 並行実装を廃止。
+- 12: `backend/tests/guardrail_helpers.py` 新設、9テストファイルの重複アサーションを置換
+  （収集数 2,774 で不変）。
+
+### 本レポートの訂正（実装時の実測による）
+
+1. **§1 extractor.py**: 「GROBID ユーティリティ2関数を orchestrator が再利用」は誤り。実際に
+   orchestrator が import するのは `extract_tei_xml_from_pdf_bytes` の1関数のみ。また
+   `merge_paper_structures` という関数は存在しない（実体は `evaluate_and_merge_proposals`）。
+2. **§1 chat.py**: `generate_chat_response` だけでなく **chat.py モジュール全体が本番未使用**
+   だった（`search_chunks` は tier 契約のユニットテストが参照するため残置）。
+3. **§3/§11 Neo4j**: core/db.py に加え、**services.py:34 に第2の独立 Neo4j ドライバ実装**
+   （`_neo4j_driver`、これも呼び出し元ゼロ）が存在した。レポート未指摘。
+4. **§ Tier2-10**: groups.py の「独立実装」は視点の誤り — group_members.role（グループ運営の
+   admin/member）は文書の view/edit とは別ドメインで、services へ委譲するとむしろクエリが増える。
+   統合対象ではなく「別概念の正当な独立実装」だった。
+5. **§ Tier2-10**: 通知宛先解決の統合先として `services._resolve_recipients` を提案していたが、
+   呼び出し元は両方 core/ 配下のため services.py（api 層）への配置は core→api の逆依存を作る。
+   `core/notification_recipients.py` に配置した。
+6. **§2 スライド分割 / §5 状態合成**: 提案11の実施により解消。projector の UI 接続（提案16）は
+   未実施のまま（Tier 3 スコープ）。
+
+### 残課題（Tier 3、未着手）
+
+13〜20 は未実施。特に 13（マイグレーション実行の一本化）は Tier 0-1 と並ぶ優先度で検討推奨の
+まま残っている。16（projector の UI 接続）・17（admin.js 分割）が次の候補。

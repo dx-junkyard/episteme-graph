@@ -5,7 +5,7 @@
 の一連の流れを通して、数式データ（display_text / formulas）が欠落・破損なく
 フロントエンドに届くことを検証する。
 
-外部 API (OpenAI, PostgreSQL, Neo4j, MinIO) は一切呼び出さない。
+外部 API (OpenAI, PostgreSQL, MinIO) は一切呼び出さない。
 """
 
 from __future__ import annotations

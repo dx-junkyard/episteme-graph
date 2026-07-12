@@ -43,6 +43,11 @@ from core.admin_assistant.schema import (  # noqa: E402
     KIND_ACTION,
     role_satisfies,
 )
+from tests.guardrail_helpers import (  # noqa: E402
+    assert_module_tree_does_not_import,
+    assert_source_forbids,
+    extract_function_source,
+)
 
 _CORE_DIR = BACKEND / "core" / "admin_assistant"
 _ROUTE_SRC = (BACKEND / "api" / "routes" / "admin_assistant.py").read_text(encoding="utf-8")
@@ -223,10 +228,7 @@ class TestActionLogic:
 class TestGuardrails:
     def test_core_does_not_import_fastapi(self):
         """core/admin_assistant は FastAPI を import しない（開発ルール2 / testability）。"""
-        for py in _CORE_DIR.rglob("*.py"):
-            src = py.read_text(encoding="utf-8")
-            assert "import fastapi" not in src, f"{py} が fastapi を import している"
-            assert "from fastapi" not in src, f"{py} が fastapi を import している"
+        assert_module_tree_does_not_import(_CORE_DIR, ["fastapi"])
 
     def test_audit_uses_assistant_action_entity_type(self):
         assert "'assistant_action'" in _ROUTE_SRC
@@ -272,18 +274,11 @@ class TestStatusQueryGuardrails:
     """状態照会 intent は読み取り専用（DB非変更・LLM非呼び出し）であること。"""
 
     def test_no_write_statements_in_status_query_handler(self):
-        src = _ROUTE_SRC
-        start = src.index("def _status_query_response(")
-        end = src.index("\ndef ", start + 1)
-        handler_src = src[start:end]
-        for forbidden in ("INSERT", "UPDATE", "DELETE"):
-            assert forbidden not in handler_src, f"_status_query_response に {forbidden} が含まれている"
+        handler_src = extract_function_source(_ROUTE_SRC, "_status_query_response")
+        assert_source_forbids(handler_src, ["INSERT", "UPDATE", "DELETE"], context="_status_query_response")
 
     def test_scoped_to_current_user(self):
-        src = _ROUTE_SRC
-        start = src.index("def _status_query_response(")
-        end = src.index("\ndef ", start + 1)
-        handler_src = src[start:end]
+        handler_src = extract_function_source(_ROUTE_SRC, "_status_query_response")
         assert "uploaded_by" in handler_src
         assert "user_id" in handler_src
 

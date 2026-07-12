@@ -26,7 +26,7 @@ from pydantic import BaseModel
 from sqlalchemy import text as sa_text
 
 from dependencies import _get_current_user, _require_teacher
-from services import get_accessible_course_data
+from services import get_accessible_course_data, record_review_event
 from core.postgres import get_session as _pg_session
 from core.reconstruction import diff as recon_diff
 from core.reconstruction import item_builder
@@ -75,30 +75,8 @@ def _record_recon_event(
     user_id: str | None,
     metadata: dict | None = None,
 ) -> None:
-    """theory_review_events への監査記録（C層 _record_review_event と同型）。"""
-    session = _pg_session()
-    try:
-        session.execute(
-            sa_text("""
-                INSERT INTO theory_review_events
-                (entity_type, entity_id, old_status, new_status, changed_by, metadata)
-                VALUES (:etype, :eid, :old, :new, CAST(:uid AS uuid), CAST(:meta AS jsonb))
-            """),
-            {
-                "etype": entity_type,
-                "eid": entity_id,
-                "old": old_status or "",
-                "new": new_status or "",
-                "uid": user_id or None,
-                "meta": json.dumps(metadata or {}, ensure_ascii=False),
-            },
-        )
-        session.commit()
-    except Exception:
-        session.rollback()
-        logger.warning("Failed to record recon event for %s %s", entity_type, entity_id, exc_info=True)
-    finally:
-        session.close()
+    """theory_review_events への監査記録（実体は services.record_review_event, 提案7）。"""
+    record_review_event(entity_type, entity_id, old_status, new_status, user_id, metadata)
 
 
 def _course_scope(session, course_data: dict, topic_id: str | None = None) -> dict:

@@ -12,6 +12,7 @@ from sqlalchemy import text as sa_text
 
 from core.llm import generate_embeddings
 from core.postgres import get_session as _pg_session
+from core.schema import AUDIT_ENTITY_REVISION_RUN
 
 logger = logging.getLogger(__name__)
 
@@ -1662,12 +1663,13 @@ def _insert_revision_decision(
                 entity_type, entity_id, old_status, new_status, changed_by, metadata
             )
             VALUES (
-                'revision_run', :entity_id, :old_status, :new_status,
+                :entity_type, :entity_id, :old_status, :new_status,
                 CAST(:changed_by AS uuid), CAST(:metadata AS jsonb)
             )
             """
         ),
         {
+            "entity_type": AUDIT_ENTITY_REVISION_RUN,
             "entity_id": run_id,
             "old_status": old_status or "",
             "new_status": new_status or "",

@@ -78,6 +78,7 @@ from core.meta_analyzer import (
 )
 from core.postgres import get_session as _pg_session
 from core.reextractor import enqueue_reextraction, get_jobs as get_reextraction_jobs
+from core.schema import AUDIT_ENTITY_DOCUMENT_SHARE
 from core.schema_registry import (
     add_ontology_type,
     add_predicate,
@@ -2347,7 +2348,7 @@ def upsert_document_group_permission(
 
     # 監査: 共有付与を theory_review_events に記録（entity_type='document_share'）
     record_review_event(
-        "document_share", doc["id"], "", body.permission, current_user["id"],
+        AUDIT_ENTITY_DOCUMENT_SHARE, doc["id"], "", body.permission, current_user["id"],
         {"group_id": body.group_id, "action": "grant"},
     )
     logger.info(
@@ -2395,7 +2396,7 @@ def delete_document_group_permission(
     if not result:
         raise HTTPException(status_code=404, detail="Permission mapping not found")
     record_review_event(
-        "document_share", doc["id"], "shared", "removed", current_user["id"],
+        AUDIT_ENTITY_DOCUMENT_SHARE, doc["id"], "shared", "removed", current_user["id"],
         {"group_id": group_id, "action": "revoke"},
     )
     logger.info(

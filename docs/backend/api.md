@@ -14,7 +14,7 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | `backend/api/main.py` | FastAPI アプリ本体。lifespan で起動時マイグレーション・スキーマ seed・管理者初期化、ルーター登録、CORS、エラーログ middleware |
 | `backend/api/dependencies.py` | 認証・RBAC の依存関数（JWT 検証、ロール要求） |
 | `backend/api/schemas.py` | API 固有の Pydantic リクエスト/レスポンスモデル |
-| `backend/api/services.py` | 共通ビジネスロジック（バックグラウンドタスク CRUD、Neo4j ドライバ取得など） |
+| `backend/api/services.py` | 共通ビジネスロジック（バックグラウンドタスク CRUD など） |
 | `backend/api/routes/*.py` | 機能別ルーター（auth / learning / admin / lecture / lecture_studio / groups / theory_components / cartridges / revisions / error_logs / export）。lecture_studio・theory_components・cartridges・revisions は `admin.py` のルーターに include され `/api/admin` 配下で公開される（`export_artifacts.py` はルーターではなく export のヘルパー） |
 
 > `core/` には FastAPI を import しない方針（テスタビリティ確保）。API 固有モデルは `api/` 側に置きます。

@@ -21,6 +21,7 @@ from sqlalchemy import text as sa_text
 
 from core.config import get_settings
 from core.llm_usage.context import bind_usage_context
+from core.llm_worker.cost_gate import CostGate
 from core.postgres import get_session as _pg_session
 from core.reconstruction.input_builder import build_user_content
 from core.reconstruction.item_builder import preferred_elicit_mode, response_options_to_dicts
@@ -36,8 +37,10 @@ from core.reconstruction.schema import (
 
 logger = logging.getLogger(__name__)
 
-_call_counts_lock = threading.Lock()
-_daily_call_counts: dict[str, int] = {}
+# 実装は core/llm_worker/cost_gate.py の CostGate に共通化済み（daily のみ・session
+# 上限は使わない）。daily_call_counts は同じ dict オブジェクトへのエイリアス。
+_cost_gate = CostGate()
+_daily_call_counts: dict[str, int] = _cost_gate.daily_counts
 
 
 def _today() -> str:
@@ -47,13 +50,10 @@ def _today() -> str:
 def _check_and_count_llm_call() -> bool:
     """1 日あたりのオーサリング LLM コール上限内なら True。上限超過なら False。"""
     per_day = int(getattr(get_settings(), "recon_max_calls_per_day", 10))
-    key = _today()
-    with _call_counts_lock:
-        if _daily_call_counts.get(key, 0) >= per_day:
-            logger.info("recon item authoring skipped: per-day cap reached")
-            return False
-        _daily_call_counts[key] = _daily_call_counts.get(key, 0) + 1
-    return True
+    ok = _cost_gate.check_and_count(daily_limit=per_day, daily_key=_today())
+    if not ok:
+        logger.info("recon item authoring skipped: per-day cap reached")
+    return ok
 
 
 def _fetch_authorable_claims(session, document_id: str, limit: int) -> list[dict]:

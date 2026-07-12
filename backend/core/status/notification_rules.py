@@ -1,8 +1,13 @@
 """通知 fan-out（決定論的・非LLM）。イベント種別 → 宛先 + user_notifications 書き込み。
 
 宛先は教材所有者 / コース所有者 / 共有 editor に限定する（S5: 権限が所有者・共有 editor
-以外に広がらない）。v1 の配信対象は schema.EVENT_TO_NOTIFICATION_KIND の6種のみ
-（段階登録。通知過多は通知が無いのと同じ）。
+以外に広がらない。viewer には出さない）。v1 の配信対象は schema.EVENT_TO_NOTIFICATION_KIND
+の6種のみ（段階登録。通知過多は通知が無いのと同じ）。
+
+宛先解決の JOIN 形（*_group_permissions を group_members と JOIN する部分）は
+core.notification_recipients に集約している（core/versioning/notifications.py と
+同型の実装が独立に存在していたのを統合。Tier2 提案10）。「owner を含める」
+「editor のみを対象にする」という組み立て自体はこのファイル固有（S5 の要件）。
 """
 from __future__ import annotations
 
@@ -11,6 +16,7 @@ import logging
 
 from sqlalchemy import text as sa_text
 
+from core import notification_recipients as _recipients
 from core.postgres import get_session
 
 from . import schema
@@ -19,37 +25,21 @@ logger = logging.getLogger(__name__)
 
 
 def _material_recipients(session, document_id: str) -> list[str]:
-    rows = session.execute(
-        sa_text("""
-            SELECT DISTINCT uid FROM (
-                SELECT uploaded_by::text AS uid FROM documents WHERE id = CAST(:did AS uuid)
-                UNION
-                SELECT gm.user_id::text AS uid
-                FROM document_group_permissions p
-                JOIN group_members gm ON gm.group_id = p.group_id
-                WHERE p.document_id = CAST(:did AS uuid) AND p.permission = 'editor'
-            ) t WHERE uid IS NOT NULL
-        """),
-        {"did": document_id},
-    ).fetchall()
-    return [str(r[0]) for r in rows]
+    ids: set[str] = set()
+    owner = _recipients.document_owner_id(session, document_id)
+    if owner:
+        ids.add(owner)
+    ids.update(_recipients.document_group_member_ids(session, document_id, ("editor",)))
+    return list(ids)
 
 
 def _course_recipients(session, course_id: str) -> list[str]:
-    rows = session.execute(
-        sa_text("""
-            SELECT DISTINCT uid FROM (
-                SELECT user_id::text AS uid FROM learning_courses WHERE id = :cid
-                UNION
-                SELECT gm.user_id::text AS uid
-                FROM course_group_permissions p
-                JOIN group_members gm ON gm.group_id = p.group_id
-                WHERE p.course_id = :cid AND p.permission = 'editor'
-            ) t WHERE uid IS NOT NULL
-        """),
-        {"cid": course_id},
-    ).fetchall()
-    return [str(r[0]) for r in rows]
+    ids: set[str] = set()
+    owner = _recipients.course_owner_id(session, course_id)
+    if owner:
+        ids.add(owner)
+    ids.update(_recipients.course_group_member_ids(session, course_id, ("editor",)))
+    return list(ids)
 
 
 def recipients_for(entity_type: str, entity_id: str) -> list[str]:

@@ -5,7 +5,7 @@
 `backend/core/` は FastAPI に依存しない再利用可能なコアロジック群です。
 ここでは各モジュールの責務と、どのデータストア・外部サービスと話すかをまとめます。
 
-> 設計ルール: `core/` に FastAPI を import しない（テスト容易性）。`db.py` / `llm.py` / `storage.py` は
+> 設計ルール: `core/` に FastAPI を import しない（テスト容易性）。`llm.py` / `storage.py` は
 > `@lru_cache` 等でシングルトン化。PostgreSQL は `postgres.get_session()` を使い `try/finally` で必ず close。
 
 ---
@@ -15,9 +15,8 @@
 | モジュール | 役割 |
 |---|---|
 | `postgres.py` | SQLAlchemy エンジン/セッション管理（`get_engine()`, `get_session()`, `check_connection()`） |
-| `db.py` | Neo4j ドライバ（`get_driver()`）。概念グラフ走査・システムメタ提案の作成 |
 | `models.py` | SQLAlchemy ORM 定義（users, documents, chunks, learning_courses, background_tasks など。[データモデル](../architecture/data-model.md) 参照） |
-| `storage.py` | MinIO ラッパー（`StorageManager`）。バケット `raw-papers` / `raw-texts` / `extracted-structures` の upload/get |
+| `storage.py` | MinIO ラッパー（`StorageManager`）。バケット `raw-papers` / `raw-texts` / `figure-images` の upload/get |
 
 ---
 
@@ -33,25 +32,28 @@ OpenAI / Gemini(REST) / Vertex AI を 1 つのインターフェースで扱い�
 - `transcribe_audio(audio_bytes, filename, ...)` — 音声の文字起こし（`LLM_TRANSCRIBE_MODEL`、既定 whisper-1。openai プロバイダのみ、他プロバイダは RuntimeError）。ハンズフリー音声会話の入力に使用
 
 ### `config.py` — 設定
-`Settings`（pydantic-settings）。`LLM_PROVIDER` / `LLM_API_KEY` / 各モデル名 / `LLM_EMBEDDING_DIM` / GCP（Vertex ADC）/ `DATABASE_URL` / `NEO4J_*` / `MINIO_*` / `GROBID_URL` などを環境変数から読み込みます。互換のため `OPENAI_API_KEY` 等の別名も受け付けます。
+`Settings`（pydantic-settings）。`LLM_PROVIDER` / `LLM_API_KEY` / 各モデル名 / `LLM_EMBEDDING_DIM` / GCP（Vertex ADC）/ `DATABASE_URL` / `MINIO_*` / `GROBID_URL` などを環境変数から読み込みます。互換のため `OPENAI_API_KEY` 等の別名も受け付けます。
 
 ---
 
 ## 3. 抽出・埋め込み・検索
 
-### `extractor.py` — PDF → 構造化データ
-- `extract_tei_xml_from_pdf_bytes()` — GROBID `/api/processFulltextDocument` に投げて TEI-XML を得る
+### `extractor.py` — PDF → GROBID ユーティリティ + 構造 diff/merge
+- `extract_tei_xml_from_pdf_bytes()` — GROBID `/api/processFulltextDocument` に投げて TEI-XML を得る（`document_pipeline/orchestrator.py` が使用）
 - `parse_tei_to_logical_chunks()` — TEI から Abstract + 本文 `<div>` を抽出（参考文献等は除外）、長すぎる節は文境界で分割
-- `extract_paper_structure()` — **仮説駆動型のリファインメントループ**: 先頭チャンクから初期仮説を生成 → 後続チャンクで反復的に精緻化 → `PaperStructure`（変数 + SMILES DSL の因果エッジ）を確定
-- `compute_structure_diff()` / `evaluate_and_merge_proposals()` — 構造差分とマージ評価
+- `compute_structure_diff()` / `evaluate_and_merge_proposals()` — `PaperStructure` の構造差分とマージ評価（Gateway 層向け。`backend/tests/core/test_diff_merge.py` が参照）
 
-> なお、教材アップロード後の本格的な構造化は、より新しい **Agent パイプライン**（`document_pipeline/`）が担います。[パイプライン概要](../pipeline/overview.md) を参照。
+> 旧仮説駆動型の逐次 LLM 構造抽出（`extract_paper_structure()` とその内部ステップ）は本番呼び出し元が
+> 存在しなかったため 2026-07 に削除済み。教材アップロード後の本格的な構造化は、
+> **Agent パイプライン**（`document_pipeline/`）が担います。[パイプライン概要](../pipeline/overview.md) を参照。
 
 ### `embedder.py` — pgvector への保存
 - `embed_and_store(chunks, material_id, extracted_structure)` — チャンクを 100 件単位で埋め込み、`documents` を upsert、`chunks` に `embedding(halfvec 3072)` + `smiles_dsl` / `variables` / `ancestors` を保存
 
-### `chat.py` — RAG チャット
-ユーザー質問への回答を組み立てるオーケストレータ。詳細は専用ページ → [RAG チャットフロー](rag-chat.md)。
+### `chat.py` — RAG chat 用の共通ユーティリティ
+`search_chunks()` / `_embed_query()` による pgvector 類似度検索（tier 付与込み）を提供。
+実際の RAG チャット回答生成は `routes/learning.py::learning_chat` の別実装が担う。
+詳細は専用ページ → [RAG チャットフロー](rag-chat.md)。
 
 ---
 
@@ -81,7 +83,7 @@ OpenAI / Gemini(REST) / Vertex AI を 1 つのインターフェースで扱い�
 | `document_sections.py` | チャンクから階層セクション構造を復元（見出し検出、section_id 付与） |
 | `learning_experience.py` | 学習体験レイヤー（B層）の共通ロジック（OutOfSourceGuard・tier 集約など） |
 | `component_candidates.py` | 質問→理論コンポーネント候補の生成（C層。AI は候補提示まで、確定は教員） |
-| `graphs/` | 学生向け / 教員向けのグラフ組み立て（`student_graph.py` / `teacher_graph.py` / `state.py`） |
+| `graphs/` | 学生向けリアルタイム対話のグラフ組み立て（`student_graph.py` / `state.py`） |
 
 ### `tension/` — TensionMiningAgent（B層, マイグレーション 022）
 対話ログから「理解した上での引っかかり（tension）」の**候補**を抽出するサブパッケージ。
@@ -112,7 +114,6 @@ LLM 出力は常に `status='candidate'` で、本人の confirm を経てのみ
 | `theory_components.py` | DSL から理論コンポーネント抽出、TheoryOperationGraph 関連 | [理論操作グラフ](../pipeline/theory-graph.md) |
 | `isom.py` | `PaperStructure` を `.isom`（YAML front-matter + SMILES DSL）へシリアライズ | 〃 |
 | `harvester.py` | arXiv API から論文収集（商業出版社フィルタ付き）、MinIO 保存 | 〃 |
-| `batch.py` | 構造的同型性評価（新パターン登録時に過去論文へクロスドメインマッチ） | 〃 |
 
 ---
 
@@ -124,7 +125,7 @@ LLM 出力は常に `status='candidate'` で、本人の confirm を経てのみ
 |---|---|
 | `orchestrator.py` | `run_document_pipeline()`。23 ステージを順次実行。ステージ単位で再開可能、進捗コールバック、`PipelineStageError` でステージ名付きエラー |
 | `chunker.py` | ブロックからチャンク生成（決定論的） |
-| `persistence.py` | 成果物の PostgreSQL/Neo4j 永続化 |
+| `persistence.py` | 成果物の PostgreSQL 永続化 |
 | `export_validation_gate.py` | 最終検証ゲート（成果物完全性・ソースバッキング整合性） |
 | `completeness.py` / `dsl_text.py` / `tex_archive.py` / `revision/` | 完全性チェック、DSL テキスト化、TeX アーカイブ処理、リビジョン |
 

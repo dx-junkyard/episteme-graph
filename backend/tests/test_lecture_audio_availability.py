@@ -6,8 +6,8 @@
 （`lecture_audio_cache` にキャッシュ可能）を持つトピックまで `get_topic_audio_status`
 が has_audio=False を返し、管理画面で音声を生成してもレクチャーボタンが有効化されない。
 
-`routes/lecture.py` は fastapi/neo4j 経由の重い依存チェーンを持つため（services.py
-経由で neo4j 等）、対象の純関数 `_topic_has_linkable_material` はソースから直接
+`routes/lecture.py` は fastapi 経由の重い依存チェーンを持つため、
+対象の純関数 `_topic_has_linkable_material` はソースから直接
 exec して単体テストする。呼び出し側2箇所（get_topic_audio_status /
 get_lecture_sequence）は既存の `test_endorsement_sharing.py` と同様にソース文字列で
 配線を検証する。

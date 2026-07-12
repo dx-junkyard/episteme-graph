@@ -6874,12 +6874,19 @@
     if (materialEl) materialEl.addEventListener("focus", function () { courseSlideLastFocus = "ls-course-material-text"; });
     if (spokenScriptEl) spokenScriptEl.addEventListener("focus", function () { courseSlideLastFocus = "ls-course-spoken-script"; });
 
+    // サーバへの分割問い合わせは非同期になるため、連続入力時に古いレスポンスが
+    // 新しい入力内容を上書きしないよう世代を振って捨てる（lsUpdateSlideIndicatorsNow と同型）。
+    var courseSlideRequestSeq = 0;
     function updateCourseSlideIndicator() {
       var indicatorEl = document.getElementById("ls-course-slides-indicator");
       if (!indicatorEl) return;
       var dText = materialEl ? materialEl.value : lsTopicStudentMaterialSource(topic);
       var sText = spokenScriptEl ? spokenScriptEl.value : (topic.spoken_script || topic.content || "");
-      lsRenderSlideIndicatorEl(indicatorEl, lsSplitSlides(dText, sText));
+      var seq = ++courseSlideRequestSeq;
+      lsFetchSplitSlides(dText, sText, []).then(function (split) {
+        if (seq !== courseSlideRequestSeq) return; // 古いレスポンスは無視
+        lsRenderSlideIndicatorEl(indicatorEl, split);
+      });
     }
     var courseSlideIndicatorTimer = null;
     function scheduleCourseSlideIndicatorUpdate() {
@@ -7392,8 +7399,9 @@
         if (lsState.displayView === "formulas") lsRenderFormulas(chunk.formulas || []);
       }
       if (slidesEl) {
+        // 描画自体は末尾の lsUpdateSlideIndicatorsNow() が担う（分割問い合わせが
+        // 非同期になったため、ここで二重にリクエストしない）。
         slidesEl.hidden = lsState.displayView !== "slides";
-        if (lsState.displayView === "slides") lsRenderSlidesPanel(chunk);
       }
       if (slideToolsRow) slideToolsRow.hidden = lsState.displayView !== "script";
       lsRenderDisplayPreview();
@@ -9927,63 +9935,52 @@
   }
 
   // ── レクチャースライド同期 (migration 040 Phase 3) ──────────────────────
-  // スライド = 表示と音声の同期最小単位。display_text / spoken_text 内の単独行
-  // "===" マーカーで分割する。backend core/lecture.py の split_slides() と
-  // 同じ意味論をクライアント側で再現する（マーカー正規表現・空セグメント除去・
-  // 分割数不一致時の1枚縮退）。formulas の割当（_assign_slide_formulas 相当）は
-  // 行わない — 各スライドの表示は既存の lsRenderTextWithFormulas(text, formulas) に
-  // チャンク全体の formulas をそのまま渡せば、そのスライドに実在する
-  // [[FORMULA_N]] だけが解決されるため、事前の割当処理は不要。
-  var LS_SLIDE_MARKER_RE = /^[ \t]*={3,}[ \t]*$/gm;
-
-  function lsSplitSlideMarkerSegments(text) {
-    if (!text) return [];
-    var raw = String(text).split(LS_SLIDE_MARKER_RE);
-    var segments = [];
-    for (var i = 0; i < raw.length; i++) {
-      var seg = raw[i].replace(/^\s+|\s+$/g, "");
-      if (seg) segments.push(seg);
-    }
-    return segments;
-  }
-
-  // (displayText, spokenText) -> { slides: [{slide_index, display, spoken}],
-  //   mismatch, displayCount, spokenCount }
-  function lsSplitSlides(displayText, spokenText) {
-    var displaySegments = lsSplitSlideMarkerSegments(displayText);
-    if (!displaySegments.length) displaySegments = [""];
-    var spokenSegments = lsSplitSlideMarkerSegments(spokenText);
-
-    var slideTexts = [];
-    var mismatch = false;
-    if (!spokenSegments.length) {
-      // spoken_text が無い/空: display の分割数でスライドを作り spoken は null。
-      for (var i = 0; i < displaySegments.length; i++) {
-        slideTexts.push({ display: displaySegments[i], spoken: null });
-      }
-    } else if (displaySegments.length === spokenSegments.length) {
-      for (var j = 0; j < displaySegments.length; j++) {
-        slideTexts.push({ display: displaySegments[j], spoken: spokenSegments[j] });
-      }
-    } else {
-      // 分割数不一致 -> 1スライドに縮退（マーカー除去済み全文どうしをペア）。
-      mismatch = true;
-      slideTexts.push({
-        display: displaySegments.join("\n\n"),
-        spoken: spokenSegments.join("\n\n"),
+  // スライド = 表示と音声の同期最小単位。分割ロジックは backend core/lecture.py の
+  // split_slides() を唯一の正本とする（Tier2-11: 講義系の判定共通化 提案11）。
+  // 以前はここに split_slides() と同じ意味論をクライアント側で再現するローカル実装
+  // （マーカー正規表現・空セグメント除去・分割数不一致時の1枚縮退）があったが、
+  // 「プレビューと配信で分割ロジックを共有すること」という設計原則
+  // （docs/features/lecture_slide_sync_design.md）に反する手動同期の並行実装だった
+  // ため廃止し、教員ゲート付きプレビュー専用エンドポイントに一本化した。
+  //
+  // (displayText, spokenText, formulas) -> Promise<{ slides: [{slide_index, display, spoken}],
+  //   mismatch, displayCount, spokenCount, error }>
+  function lsFetchSplitSlides(displayText, spokenText, formulas) {
+    return apiFetch("/admin/lecture-studio/preview-split", {
+      method: "POST",
+      body: JSON.stringify({
+        display_text: displayText || "",
+        spoken_text: spokenText || null,
+        formulas: formulas || [],
+      }),
+    })
+      .then(function (res) {
+        if (!res.ok) throw new Error("preview-split failed: " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        var slides = (data.slides || []).map(function (sd) {
+          return { slide_index: sd.slide_index, display: sd.display_text, spoken: sd.spoken_text };
+        });
+        return {
+          slides: slides,
+          mismatch: !!data.mismatch,
+          displayCount: data.display_segment_count || 0,
+          spokenCount: data.spoken_segment_count || 0,
+        };
+      })
+      .catch(function (err) {
+        // fail-soft: 通信失敗時は「分割数不一致は1枚に縮退」の既定原則に合わせ、
+        // クラッシュせず1スライド表示に縮退した上で警告を出す。
+        console.warn("lsFetchSplitSlides failed, falling back to a single slide", err);
+        return {
+          slides: [{ slide_index: 0, display: displayText || "", spoken: spokenText || null }],
+          mismatch: false,
+          displayCount: 1,
+          spokenCount: spokenText ? 1 : 0,
+          error: true,
+        };
       });
-    }
-
-    var slides = slideTexts.map(function (t, idx) {
-      return { slide_index: idx, display: t.display, spoken: t.spoken };
-    });
-
-    return {
-      slides: slides,
-      mismatch: mismatch,
-      displayCount: displaySegments.length,
-      spokenCount: spokenSegments.length,
-    };
   }
 
   // display_text の実効長（長さ警告の判定用）。文字数 + [[FORMULA_N]] 1個 = 60文字換算。
@@ -9999,7 +9996,10 @@
   function lsRenderSlideIndicatorEl(el, split) {
     if (!el) return;
     el.classList.remove("ls-slides-indicator-ok", "ls-slides-indicator-warn");
-    if (split.mismatch) {
+    if (split.error) {
+      el.textContent = "⚠ 分割プレビューの取得に失敗しました — 1枚に統合して表示しています";
+      el.classList.add("ls-slides-indicator-warn");
+    } else if (split.mismatch) {
       el.textContent = "⚠ 表示 " + split.displayCount + " / 読み上げ " + split.spokenCount +
         " — 1枚に統合して配信されます";
       el.classList.add("ls-slides-indicator-warn");
@@ -10011,12 +10011,12 @@
     }
   }
 
-  // チャンク一覧 (§4 表示上の整合): slide_mismatch はバックエンド値があれば優先し、
-  // 無ければ (Phase 4 未反映でも動くよう) クライアント側で split して判定する。
+  // チャンク一覧 (§4 表示上の整合): slide_mismatch はバックエンド (get_course_scripts) が
+  // 保存済みテキストから確定させた値をそのまま使う。一覧描画は多数チャンクを同期的に
+  // 処理するため、ここでクライアント側の分割を再実行しない（Tier2-11: サーバ実装への
+  // 一本化）。値が無い場合は「不一致なし」とみなすフェイルセーフ。
   function lsChunkSlideMismatch(chunk) {
-    if (typeof chunk.slide_mismatch === "boolean") return chunk.slide_mismatch;
-    var split = lsSplitSlides(chunk.display_text || chunk.text || "", chunk.spoken_text || "");
-    return split.mismatch;
+    return chunk.slide_mismatch === true;
   }
 
   // 音声バッジ: 言語不一致 > 音声あり > 音声未生成 の優先順位で判定する。
@@ -10090,56 +10090,72 @@
 
   // 「スライド」タブ本体: チャンクを split して1枚ずつカード描画する。
   // 表示テキストは受講画面と同じレンダラ lsRenderTextWithFormulas を再利用する。
-  function lsRenderSlidesPanel(chunk) {
+  // 分割はサーバ（POST /admin/lecture-studio/preview-split）に問い合わせる非同期処理。
+  // precomputedSplit を渡すと再フェッチしない（lsUpdateSlideIndicatorsNow が既に取得した
+  // 結果を使い回し、同一テキストへの二重リクエストを避けるため）。
+  function lsRenderSlidesPanel(chunk, precomputedSplit) {
     var indicatorEl = document.getElementById("ls-slides-indicator");
     var listEl = document.getElementById("ls-slides-list");
     if (!listEl) return;
+
+    function renderWithSplit(split) {
+      lsRenderSlideIndicatorEl(indicatorEl, split);
+
+      var formulas = chunk.formulas || [];
+      var html = "";
+      split.slides.forEach(function (slide, idx) {
+        var effLen = lsSlideEffectiveLength(slide.display);
+        var lengthWarn = effLen > 600
+          ? '<div class="ls-slide-warn">⚠ 受講画面で縮小表示されます。=== で分割を検討してください</div>'
+          : "";
+        var badge = lsSlideAudioBadgeHtml(chunk, idx);
+        var notesHtml = slide.spoken
+          ? lsRenderTextWithFormulas(slide.spoken, formulas)
+          : '<span class="ls-course-muted">読み上げ原稿がありません</span>';
+        html +=
+          '<div class="ls-slide-card" data-slide-index="' + idx + '">' +
+            '<div class="ls-slide-card-head">' +
+              '<span class="ls-slide-card-index">スライド ' + (idx + 1) + ' / ' + split.slides.length + '</span>' +
+              badge +
+            '</div>' +
+            '<div class="ls-slide-card-body">' + lsRenderTextWithFormulas(slide.display, formulas) + '</div>' +
+            lengthWarn +
+            '<div class="ls-slide-card-notes">' + notesHtml + '</div>' +
+            '<div class="ls-slide-card-actions">' +
+              '<button type="button" class="ls-slide-play-btn admin-action-btn" data-slide-index="' + idx + '">▶ 試聴</button>' +
+              '<span class="ls-slide-play-status"></span>' +
+            '</div>' +
+          '</div>';
+      });
+      listEl.innerHTML = html || '<div class="ls-empty-state">スライドがありません</div>';
+      listEl.querySelectorAll(".ls-slide-play-btn").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var slideIndex = parseInt(this.getAttribute("data-slide-index"), 10) || 0;
+          lsToggleSlideAudio(chunk, slideIndex, this);
+        });
+      });
+    }
+
+    if (precomputedSplit) {
+      renderWithSplit(precomputedSplit);
+      return;
+    }
+
     var displayEl = document.getElementById("ls-display-text");
     var spokenEl = document.getElementById("ls-spoken-text");
     // displayEl/spokenEl の value は現在の編集内容の正本（hidden でも input リスナーで
     // chunk.display_text / spoken_text と常に同期している）。
     var displayText = (displayEl && displayEl.value) || chunk.display_text || chunk.text || "";
     var spokenText = (spokenEl && spokenEl.value) || chunk.spoken_text || "";
-    var split = lsSplitSlides(displayText, spokenText);
-    lsRenderSlideIndicatorEl(indicatorEl, split);
-
-    var formulas = chunk.formulas || [];
-    var html = "";
-    split.slides.forEach(function (slide, idx) {
-      var effLen = lsSlideEffectiveLength(slide.display);
-      var lengthWarn = effLen > 600
-        ? '<div class="ls-slide-warn">⚠ 受講画面で縮小表示されます。=== で分割を検討してください</div>'
-        : "";
-      var badge = lsSlideAudioBadgeHtml(chunk, idx);
-      var notesHtml = slide.spoken
-        ? lsRenderTextWithFormulas(slide.spoken, formulas)
-        : '<span class="ls-course-muted">読み上げ原稿がありません</span>';
-      html +=
-        '<div class="ls-slide-card" data-slide-index="' + idx + '">' +
-          '<div class="ls-slide-card-head">' +
-            '<span class="ls-slide-card-index">スライド ' + (idx + 1) + ' / ' + split.slides.length + '</span>' +
-            badge +
-          '</div>' +
-          '<div class="ls-slide-card-body">' + lsRenderTextWithFormulas(slide.display, formulas) + '</div>' +
-          lengthWarn +
-          '<div class="ls-slide-card-notes">' + notesHtml + '</div>' +
-          '<div class="ls-slide-card-actions">' +
-            '<button type="button" class="ls-slide-play-btn admin-action-btn" data-slide-index="' + idx + '">▶ 試聴</button>' +
-            '<span class="ls-slide-play-status"></span>' +
-          '</div>' +
-        '</div>';
-    });
-    listEl.innerHTML = html || '<div class="ls-empty-state">スライドがありません</div>';
-    listEl.querySelectorAll(".ls-slide-play-btn").forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        var slideIndex = parseInt(this.getAttribute("data-slide-index"), 10) || 0;
-        lsToggleSlideAudio(chunk, slideIndex, this);
-      });
-    });
+    listEl.innerHTML = '<div class="ls-empty-state">読み込み中...</div>';
+    lsFetchSplitSlides(displayText, spokenText, chunk.formulas || []).then(renderWithSplit);
   }
 
   var lsSlideToolsLastFocus = "ls-display-text";
   var lsSlideIndicatorDebounceTimer = null;
+  // サーバへの分割問い合わせは非同期になるため、連続入力時に古いレスポンスが後から
+  // 返って新しい入力内容を上書きしないよう、リクエストごとに世代を振って捨てる。
+  var lsSlideIndicatorRequestSeq = 0;
 
   function lsUpdateSlideIndicatorsNow() {
     var chunk = lsGetSelectedChunk();
@@ -10148,9 +10164,12 @@
     var spokenEl = document.getElementById("ls-spoken-text");
     var displayText = (displayEl && displayEl.value) || chunk.display_text || chunk.text || "";
     var spokenText = (spokenEl && spokenEl.value) || chunk.spoken_text || "";
-    var split = lsSplitSlides(displayText, spokenText);
-    lsRenderSlideIndicatorEl(document.getElementById("ls-slide-tools-indicator"), split);
-    if (lsState.displayView === "slides") lsRenderSlidesPanel(chunk);
+    var seq = ++lsSlideIndicatorRequestSeq;
+    lsFetchSplitSlides(displayText, spokenText, chunk.formulas || []).then(function (split) {
+      if (seq !== lsSlideIndicatorRequestSeq) return; // 古いレスポンスは無視
+      lsRenderSlideIndicatorEl(document.getElementById("ls-slide-tools-indicator"), split);
+      if (lsState.displayView === "slides") lsRenderSlidesPanel(chunk, split);
+    });
   }
 
   // textarea の input イベントでライブ更新するが、描画は debounce 300ms にする（§4-1）。
@@ -10228,9 +10247,6 @@
     var graphEl = document.getElementById("ls-graph-elements");
     var elements = chunk.graph_elements || [];
     var html = "";
-    if (chunk.neo4j_node_id) {
-      html += '<div class="ls-graph-row"><span class="ls-graph-badge">chunk</span><strong>' + escHtml(chunk.neo4j_node_id) + '</strong></div>';
-    }
     if (!elements.length) {
       html += '<div class="ls-empty-state">このチャンクに対応するグラフ要素は見つかりませんでした。PDF全体の構造解析結果が空、または本文との紐付けが未生成です。</div>';
     } else {

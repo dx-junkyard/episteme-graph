@@ -39,12 +39,14 @@ PDF教材からの知識抽出、RAGベースの対話型学習、コース管�
 | `backend/core/llm.py` | LLM 抽象化レイヤー | Reasoning モデル自動対応。`generate_structured_with_images()`（vision structured output、v1 は OpenAI 経路のみ） |
 | `backend/core/models.py` | SQLAlchemy ORM モデル | 全テーブル定義 |
 | `backend/core/schema.py` | Pydantic スキーマ | ドメインモデル (PaperStructure 等) |
-| `backend/core/extractor.py` | PDF 構造化抽出 | 仮説検証型チャンク解析 |
+| `backend/core/extractor.py` | GROBID 変換 + diff/merge | PDF→TEI XML（orchestrator の下請け）と PaperStructure diff/merge のみ（旧抽出パイプラインは 2026-07 削除済み） |
 | `backend/core/embedder.py` | ベクトル検索 | PostgreSQL pgvector |
-| `backend/core/chat.py` | RAG チャット | コンテキスト検索 + LLM |
+| `backend/core/chat.py` | tier 付き chunk 検索 | 実 RAG チャットは `routes/learning.py::learning_chat` |
 | `backend/core/postgres.py` | PostgreSQL セッション管理 | SQLAlchemy セッション |
-| `backend/core/db.py` | Neo4j ドライバ | グラフ走査専用 (レガシー) |
 | `backend/core/storage.py` | MinIO ストレージ | S3互換ファイル管理 |
+| `backend/core/llm_worker/` | 非同期 LLM worker 共通基盤 | BaseJSONLLMClient / run_with_repair / CostGate。tension・structure_anchor・reconstruction・doubt×2 の5系統が利用。新 worker はコピペせずここに接続 |
+| `backend/core/privacy.py` | k-匿名ゲートの正本 | K_ANONYMITY=3・件数レンジ導出（3-5/6-10/11+）。k=3 のリテラル再定義禁止 |
+| `backend/core/notification_recipients.py` | 通知宛先解決の共通 JOIN | status 系 / V層 versioning が利用（宛先集合の方針は各層に残す） |
 | `backend/core/tension/` | TensionMiningAgent (B層) | 会話からの違和感候補検出（prefilter=同期非LLM / agent=非同期LLM / validator・repair / worker）。候補は `interest_traces` kind='tension' status='candidate' に保存し、学習者本人の confirm/dismiss API（`/api/learning/tension/...`）で確定。教員へは k-匿名化集約のみ |
 | `backend/core/structure_anchor/` | StructureAnchorAgent (B層) | 学習チャットの問いを「構造のどこに・どう引っかかったか」へ帰属（agent=非同期LLM / validator・repair / worker、tension と同型の独立モジュール）。候補は `interest_traces.payload.structure_anchor` に `attribution_source='llm_candidate'` で保存し（行 status は変更しない）、学習者本人の confirm/dismiss API（`/api/learning/anchors/...`）で確定。明示アンカー（テキスト選択・要素タップ）は同期・非LLMで `learner_selected` 記録。教員へは k-匿名化集約のみ |
 | `backend/core/doubt/` | D層（Doubt Layer, migration 029〜033） | 認識的地位台帳。`schema.py`（語彙の正本）/ `ledger_builder.py`（A層成果物からの非LLMバックフィル。directly_verified は人間専用）/ `naive_signal.py`（k=3 匿名集計）/ `dependency.py`+`load_calculator.py`（下流到達可能性・閉路対応）/ `counterfactual.py`（3区分伝播。再構築は計算しない）/ `scope_candidates/`・`assumption_mining/`（tension と同型の非同期LLM worker。出力は常に candidate、確定は教員API）/ `open_assumptions.py` / `metrics.py`。A層コードは読むだけで変更しない |
@@ -82,7 +84,6 @@ FastAPIバックエンドとは**独立したPythonパッケージ**として実
 | API フレームワーク | FastAPI (ルーター分割済み) |
 | ORM | SQLAlchemy 2.x + pgvector |
 | RDB + ベクトル | PostgreSQL 16 + pgvector (cosine, 次元数は `LLM_EMBEDDING_DIM` で設定) |
-| グラフDB | Neo4j 5 (Cypher) — レガシー、グラフ走査のみ |
 | ストレージ | MinIO (S3互換) |
 | LLM | **マルチプロバイダ対応** (OpenAI / Gemini)。`LLM_PROVIDER` 環境変数で切替。詳細は下記参照。 |
 | 認証 | JWT (HS256) + bcrypt |

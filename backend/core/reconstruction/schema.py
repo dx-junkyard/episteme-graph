@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from core import schema as core_schema
+
 # --- 語彙（DB CHECK 制約と対応） -------------------------------------------
 
 ELICIT_MODES = ("predict", "restate", "symbol")
@@ -19,9 +21,10 @@ DELIVERABLE_STATUSES = ("auto", "confirmed")
 MACHINE_VERDICTS = ("match", "mismatch", "na")
 SELF_CHECK_VALUES = ("agreed", "disagreed", "verdict_wrong")
 
-# 監査 entity_type（theory_review_events）。R層の追加語彙。
-ENTITY_ITEM = "reconstruction_item"
-ENTITY_RESPONSE = "reconstruction_response"
+# 監査 entity_type（theory_review_events）。R層の追加語彙。値の正本は
+# core/schema.py の AUDIT_ENTITY_TYPES カタログ（全層横断の唯一の正本）。
+ENTITY_ITEM = core_schema.AUDIT_ENTITY_RECONSTRUCTION_ITEM
+ENTITY_RESPONSE = core_schema.AUDIT_ENTITY_RECONSTRUCTION_RESPONSE
 
 # 出題対象とする claim の support_status / review_status。
 # 未検証の構造で学習者を試さない（§2.2）。承認語彙は C層実装（teacher_approved が主。

@@ -1,6 +1,8 @@
 """V層の語彙・定数の正本。"""
 from __future__ import annotations
 
+from core import schema as core_schema
+
 # オブジェクト種別（ポリモーフィック: course=TEXT id, document=UUID）
 OBJECT_TYPE_COURSE = "course"
 OBJECT_TYPE_DOCUMENT = "document"
@@ -27,10 +29,11 @@ NOTIFICATION_KINDS = (
     NOTIF_DELETED,
 )
 
-# theory_review_events.entity_type（監査）
-AUDIT_RELEASE = "shared_release"
-AUDIT_DELETION = "shared_deletion"
-AUDIT_SUBSCRIPTION = "shared_subscription"
+# theory_review_events.entity_type（監査）。値の正本は core/schema.py の
+# AUDIT_ENTITY_TYPES カタログ（全層横断の唯一の正本）。
+AUDIT_RELEASE = core_schema.AUDIT_ENTITY_SHARED_RELEASE
+AUDIT_DELETION = core_schema.AUDIT_ENTITY_SHARED_DELETION
+AUDIT_SUBSCRIPTION = core_schema.AUDIT_ENTITY_SHARED_SUBSCRIPTION
 
 # 削除猶予の既定日数（所有者が予約時に上書き可能）
 DEFAULT_GRACE_DAYS = 14

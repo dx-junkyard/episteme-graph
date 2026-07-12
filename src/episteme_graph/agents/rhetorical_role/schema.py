@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 
+from episteme_graph.agents.cartridge_context import CartridgeContext
+
 ROLE_LABELS = [
     "definition",
     "observable_definition",
@@ -62,17 +64,6 @@ EXCLUSION_ROLES = {
     "citation_context",
     "background_general",
 }
-
-
-@dataclass
-class CartridgeContext:
-    cartridge_id: str
-    ontology: dict
-    validation_rules: dict
-    aliases: dict | None = None
-    notation_patterns: list | None = None
-    normalization_rules: list | None = None
-    extraction_hints: list | None = None
 
 
 @dataclass

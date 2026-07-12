@@ -1,0 +1,101 @@
+"""通知宛先解決の共通ビルディングブロック（Tier2 提案10）。
+
+`core/status/notification_rules.py`（状態遷移通知。S5: 宛先は所有者 + 共有 editor に限定し
+viewer には出さない）と `core/versioning/notifications.py`（V層のバージョン公開/削除通知。
+viewer|editor の共有先へ配信し、所有者は fan_out 側で除外する）は、どちらも
+「document/course の *_group_permissions を group_members と JOIN してユーザーを引く」という
+同型の実装を独立に持っていた（互いの docstring が「同型」と明記）。
+
+**宛先セット自体の意味（誰に何を届けるか）は層ごとに意図的に異なる**ため統合しない
+（S5 の fail-closed 要件と V層の共有可視性は別の設計判断）。ここに集約するのは
+JOIN の形そのもの（このモジュールの4関数）だけで、「owner を含めるか」「どの
+permission を対象にするか」「レガシー単一グループ共有を含めるか」の組み立ては
+呼び出し側（notification_rules.py / versioning/notifications.py）にそれぞれ残す。
+
+FastAPI 非 import（core 配下のガードレール）。backend/api を import する方向の
+依存は作らない。
+"""
+
+from __future__ import annotations
+
+from sqlalchemy import text as sa_text
+
+
+def document_owner_id(session, document_id: str) -> str | None:
+    """documents.uploaded_by（所有者 id）を返す。無ければ None。"""
+    row = session.execute(
+        sa_text("SELECT uploaded_by::text FROM documents WHERE id = CAST(:did AS uuid)"),
+        {"did": document_id},
+    ).fetchone()
+    return str(row[0]) if row and row[0] else None
+
+
+def course_owner_id(session, course_id: str) -> str | None:
+    """learning_courses.user_id（所有者 id）を返す。無ければ None。"""
+    row = session.execute(
+        sa_text("SELECT user_id::text FROM learning_courses WHERE id = :cid"),
+        {"cid": course_id},
+    ).fetchone()
+    return str(row[0]) if row and row[0] else None
+
+
+def document_group_member_ids(session, document_id: str, permissions: tuple[str, ...]) -> list[str]:
+    """document_group_permissions（migration 035）経由のグループメンバー user_id を返す。
+
+    ``permissions`` でフィルタする（例: ``("editor",)`` / ``("viewer", "editor")``）。
+    """
+    if not permissions:
+        return []
+    placeholders = ", ".join(f":p{i}" for i in range(len(permissions)))
+    params: dict = {"did": document_id}
+    for i, perm in enumerate(permissions):
+        params[f"p{i}"] = perm
+    rows = session.execute(
+        sa_text(f"""
+            SELECT DISTINCT gm.user_id::text
+            FROM document_group_permissions p
+            JOIN group_members gm ON gm.group_id = p.group_id
+            WHERE p.document_id = CAST(:did AS uuid) AND p.permission IN ({placeholders})
+        """),
+        params,
+    ).fetchall()
+    return [str(r[0]) for r in rows]
+
+
+def course_group_member_ids(session, course_id: str, permissions: tuple[str, ...]) -> list[str]:
+    """course_group_permissions 経由のグループメンバー user_id を返す（permission でフィルタ）。"""
+    if not permissions:
+        return []
+    placeholders = ", ".join(f":p{i}" for i in range(len(permissions)))
+    params: dict = {"cid": course_id}
+    for i, perm in enumerate(permissions):
+        params[f"p{i}"] = perm
+    rows = session.execute(
+        sa_text(f"""
+            SELECT DISTINCT gm.user_id::text
+            FROM course_group_permissions p
+            JOIN group_members gm ON gm.group_id = p.group_id
+            WHERE p.course_id = :cid AND p.permission IN ({placeholders})
+        """),
+        params,
+    ).fetchall()
+    return [str(r[0]) for r in rows]
+
+
+def document_legacy_group_visibility_member_ids(session, document_id: str) -> list[str]:
+    """レガシー単一グループ共有（documents.visibility='group' + group_id）のメンバー user_id。
+
+    document_group_permissions（migration 035）導入前からの共有経路。V層の通知は
+    services.user_can_view_document がこの経路でも閲覧を許可するため宛先に含める
+    （更新・削除予約・削除の取りこぼしを防ぐ）。
+    """
+    rows = session.execute(
+        sa_text("""
+            SELECT gm.user_id::text
+            FROM documents d
+            JOIN group_members gm ON gm.group_id = d.group_id
+            WHERE d.id = CAST(:did AS uuid) AND d.visibility = 'group' AND d.group_id IS NOT NULL
+        """),
+        {"did": document_id},
+    ).fetchall()
+    return [str(r[0]) for r in rows]

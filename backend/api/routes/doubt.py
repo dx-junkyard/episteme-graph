@@ -47,7 +47,14 @@ from core.doubt.schema import (
 )
 from core.doubt.scope_candidates.worker import maybe_schedule_scope_candidates
 from core.postgres import get_session as _pg_session
-from services import get_accessible_course_data
+from core.schema import (
+    AUDIT_ENTITY_ASSUMPTION,
+    AUDIT_ENTITY_CHALLENGE,
+    AUDIT_ENTITY_COUNTERFACTUAL_SESSION,
+    AUDIT_ENTITY_LEDGER,
+    AUDIT_ENTITY_VERIFICATION_PROPOSAL,
+)
+from services import get_accessible_course_data, record_review_event
 
 logger = logging.getLogger(__name__)
 
@@ -88,31 +95,8 @@ def _record_doubt_event(
     user_id: str | None,
     metadata: dict | None = None,
 ) -> None:
-    """theory_review_events への監査記録（C層 _record_review_event と同型）。"""
-    session = _pg_session()
-    try:
-        session.execute(
-            sa_text("""
-                INSERT INTO theory_review_events
-                (entity_type, entity_id, old_status, new_status, changed_by, metadata)
-                VALUES (:entity_type, :entity_id, :old_status, :new_status,
-                        CAST(:changed_by AS uuid), CAST(:metadata AS jsonb))
-            """),
-            {
-                "entity_type": entity_type,
-                "entity_id": entity_id,
-                "old_status": old_status or "",
-                "new_status": new_status or "",
-                "changed_by": user_id or None,
-                "metadata": json.dumps(metadata or {}, ensure_ascii=False),
-            },
-        )
-        session.commit()
-    except Exception:
-        session.rollback()
-        logger.warning("Failed to record doubt event for %s %s", entity_type, entity_id, exc_info=True)
-    finally:
-        session.close()
+    """theory_review_events への監査記録（実体は services.record_review_event, 提案7）。"""
+    record_review_event(entity_type, entity_id, old_status, new_status, user_id, metadata)
 
 
 def _require_ledger_target_type(target_type: str) -> str:
@@ -382,7 +366,7 @@ def add_ledger_scope(
         session.close()
 
     _record_doubt_event(
-        "ledger", f"{target_type}:{target_id}", "", "scope_added",
+        AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", "", "scope_added",
         current_user.get("id"),
         {"action": "scope_add", "scope_id": scope["scope_id"], "reason": scope["reason"]},
     )
@@ -451,7 +435,7 @@ def patch_ledger_scope(
         session.close()
 
     _record_doubt_event(
-        "ledger", f"{target_type}:{target_id}", "scope_updated", "scope_updated",
+        AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", "scope_updated", "scope_updated",
         current_user.get("id"),
         {"action": "scope_patch", "scope_id": scope_id, "old": old_scope},
     )
@@ -504,7 +488,7 @@ def put_verification_status(
         session.close()
 
     _record_doubt_event(
-        "ledger", f"{target_type}:{target_id}", old_status, new_status,
+        AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", old_status, new_status,
         current_user.get("id"),
         {"action": "verification_status", "reason": body.reason or ""},
     )
@@ -595,7 +579,7 @@ def confirm_scope_candidate(
         session.close()
 
     _record_doubt_event(
-        "ledger", f"{target_type}:{target_id}", "candidate", "scope_added",
+        AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", "candidate", "scope_added",
         current_user.get("id"),
         {"action": "scope_candidate_confirm", "candidate_id": candidate_id, "scope_id": scope["scope_id"]},
     )
@@ -646,7 +630,7 @@ def dismiss_scope_candidate(
         session.close()
 
     _record_doubt_event(
-        "ledger", f"{target_type}:{target_id}", "candidate", "dismissed",
+        AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", "candidate", "dismissed",
         current_user.get("id"),
         {"action": "scope_candidate_dismiss", "candidate_id": candidate_id},
     )
@@ -862,7 +846,7 @@ def create_assumption_manual(
         session.close()
 
     _record_doubt_event(
-        "assumption", assumption_id, "", "confirmed",
+        AUDIT_ENTITY_ASSUMPTION, assumption_id, "", "confirmed",
         current_user.get("id"),
         {"action": "manual_create", "reason": body.reason.strip()},
     )
@@ -923,7 +907,7 @@ def confirm_assumption(
         session.close()
 
     _record_doubt_event(
-        "assumption", assumption_id, "candidate", "confirmed",
+        AUDIT_ENTITY_ASSUMPTION, assumption_id, "candidate", "confirmed",
         current_user.get("id"),
         {"action": "confirm", "reason": body.reason.strip(), "statement_edited": bool(body.statement.strip())},
     )
@@ -966,7 +950,7 @@ def dismiss_assumption(
         session.close()
 
     _record_doubt_event(
-        "assumption", assumption_id, old_status, "dismissed",
+        AUDIT_ENTITY_ASSUMPTION, assumption_id, old_status, "dismissed",
         current_user.get("id"), {"action": "dismiss"},
     )
     return {"ok": True, "assumption_id": assumption_id, "status": "dismissed"}
@@ -1127,7 +1111,7 @@ def create_challenge(
         session.close()
 
     _record_doubt_event(
-        "challenge", challenge_id, "", "open",
+        AUDIT_ENTITY_CHALLENGE, challenge_id, "", "open",
         current_user.get("id"),
         {"action": "create", "target_type": target_type, "target_id": target_id,
          "challenge_type": body.challenge_type},
@@ -1211,7 +1195,7 @@ def withdraw_challenge(
         session.close()
 
     _record_doubt_event(
-        "challenge", challenge_id, old_status, "withdrawn",
+        AUDIT_ENTITY_CHALLENGE, challenge_id, old_status, "withdrawn",
         current_user.get("id"), {"action": "withdraw"},
     )
     return {"ok": True, "challenge_id": challenge_id, "status": "withdrawn"}
@@ -1272,11 +1256,11 @@ def create_verification_proposal(
         session.close()
 
     _record_doubt_event(
-        "verification_proposal", proposal_id, "", "proposed",
+        AUDIT_ENTITY_VERIFICATION_PROPOSAL, proposal_id, "", "proposed",
         current_user.get("id"), {"action": "create", "challenge_id": challenge_id},
     )
     _record_doubt_event(
-        "challenge", challenge_id, old_status, ChallengeStatus.LED_TO_VERIFICATION.value,
+        AUDIT_ENTITY_CHALLENGE, challenge_id, old_status, ChallengeStatus.LED_TO_VERIFICATION.value,
         current_user.get("id"), {"action": "proposal_promotion", "proposal_id": proposal_id},
     )
     return {"ok": True, "proposal_id": proposal_id, "challenge_status": "led_to_verification"}
@@ -1399,7 +1383,7 @@ def save_counterfactual_session(
         session.close()
 
     _record_doubt_event(
-        "counterfactual_session", session_id, "", body.shared_scope,
+        AUDIT_ENTITY_COUNTERFACTUAL_SESSION, session_id, "", body.shared_scope,
         current_user.get("id"),
         {"action": "create", "toggled_count": len(body.toggled_assumption_ids)},
     )
@@ -1514,7 +1498,7 @@ def patch_counterfactual_session(
 
     if body.shared_scope is not None and body.shared_scope != old_scope:
         _record_doubt_event(
-            "counterfactual_session", session_id, old_scope, body.shared_scope,
+            AUDIT_ENTITY_COUNTERFACTUAL_SESSION, session_id, old_scope, body.shared_scope,
             current_user.get("id"), {"action": "share_scope_change"},
         )
     return {"ok": True, "session_id": session_id}

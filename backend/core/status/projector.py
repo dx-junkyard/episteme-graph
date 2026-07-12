@@ -12,6 +12,8 @@ import logging
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
+from core.lecture import compute_material_audio_readiness, get_course_lecture_language
+
 from . import schema
 
 logger = logging.getLogger(__name__)
@@ -173,7 +175,6 @@ def project_course_status(session: Session, course_id: str) -> schema.CourseStat
 
     total_chunks = 0
     generated_chunks = 0
-    audio_chunks = 0
     if material_ids:
         chunk_rows = session.execute(
             sa_text("SELECT id, spoken_text FROM chunks WHERE material_id = ANY(:ids)"),
@@ -181,15 +182,6 @@ def project_course_status(session: Session, course_id: str) -> schema.CourseStat
         ).fetchall()
         total_chunks = len(chunk_rows)
         generated_chunks = sum(1 for r in chunk_rows if r[1])
-        chunk_ids = [r[0] for r in chunk_rows]
-        if chunk_ids:
-            audio_chunks = session.execute(
-                sa_text("""
-                    SELECT count(DISTINCT chunk_id) FROM lecture_audio_cache
-                    WHERE chunk_id = ANY(:ids)
-                """),
-                {"ids": chunk_ids},
-            ).scalar() or 0
 
     if total_chunks == 0 or generated_chunks == 0:
         script_status = schema.SCRIPT_STATUS_DRAFT
@@ -198,9 +190,18 @@ def project_course_status(session: Session, course_id: str) -> schema.CourseStat
     else:
         script_status = schema.SCRIPT_STATUS_PARTIAL
 
-    if total_chunks == 0 or audio_chunks == 0:
+    # 音声 readiness はスライド単位 + 言語一致（core/lecture.py の正本判定, Tier2-11）で
+    # 決める。旧実装は chunk 単位の粗い判定（lecture_audio_cache に1行でもあれば
+    # readiness とみなす）で、api/routes/lecture.py::get_topic_audio_status の
+    # スライド単位判定と食い違い得た。
+    lecture_language = get_course_lecture_language(data)
+    audio_readiness = compute_material_audio_readiness(session, material_ids, lecture_language)
+    total_slides = audio_readiness["total_slides"]
+    ready_slides = audio_readiness["ready_slides"]
+
+    if total_slides == 0 or ready_slides == 0:
         audio_status = schema.AUDIO_STATUS_NONE
-    elif audio_chunks == total_chunks:
+    elif ready_slides == total_slides:
         audio_status = schema.AUDIO_STATUS_GENERATED
     else:
         audio_status = schema.AUDIO_STATUS_PARTIAL

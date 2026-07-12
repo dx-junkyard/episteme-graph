@@ -18,17 +18,18 @@
 from __future__ import annotations
 
 import datetime
-import json
 import logging
 from collections import Counter
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text as sa_text
 
+import services
 from dependencies import _get_current_user, _require_teacher  # noqa: F401
 from core.config import get_settings
 from core.llm_usage.context import usage_context
 from core.postgres import get_session as _pg_session
+from core.schema import AUDIT_ENTITY_ASSISTANT_ACTION, AUDIT_ENTITY_NEXT_STEP
 from core.admin_assistant import capabilities as caps
 from core.admin_assistant import intent as intent_mod
 from core.admin_assistant import knowledge as kb
@@ -101,30 +102,8 @@ def _record_assistant_event(
     user_id: str | None,
     metadata: dict | None = None,
 ) -> None:
-    """theory_review_events への監査記録（P5。C/D 層と同型・entity_type 拡張のみ）。"""
-    session = _pg_session()
-    try:
-        session.execute(
-            sa_text("""
-                INSERT INTO theory_review_events
-                (entity_type, entity_id, old_status, new_status, changed_by, metadata)
-                VALUES ('assistant_action', :entity_id, :old_status, :new_status,
-                        CAST(:changed_by AS uuid), CAST(:metadata AS jsonb))
-            """),
-            {
-                "entity_id": entity_id,
-                "old_status": old_status or "",
-                "new_status": new_status or "",
-                "changed_by": user_id or None,
-                "metadata": json.dumps(metadata or {}, ensure_ascii=False),
-            },
-        )
-        session.commit()
-    except Exception:
-        session.rollback()
-        logger.warning("Failed to record assistant_action event for %s", entity_id, exc_info=True)
-    finally:
-        session.close()
+    """theory_review_events への監査記録（P5。実体は services.record_review_event, 提案7）。"""
+    services.record_review_event(AUDIT_ENTITY_ASSISTANT_ACTION, entity_id, old_status, new_status, user_id, metadata)
 
 
 def _assistant_model() -> str | None:
@@ -717,29 +696,8 @@ def assistant_list_actions(
 def _record_next_step_event(
     step_key: str, new_status: str, user_id: str | None, metadata: dict | None = None,
 ) -> None:
-    """theory_review_events への監査記録（entity_type='next_step'。_record_assistant_event と同型）。"""
-    session = _pg_session()
-    try:
-        session.execute(
-            sa_text("""
-                INSERT INTO theory_review_events
-                (entity_type, entity_id, old_status, new_status, changed_by, metadata)
-                VALUES ('next_step', :entity_id, '', :new_status,
-                        CAST(:changed_by AS uuid), CAST(:metadata AS jsonb))
-            """),
-            {
-                "entity_id": step_key,
-                "new_status": new_status or "",
-                "changed_by": user_id or None,
-                "metadata": json.dumps(metadata or {}, ensure_ascii=False),
-            },
-        )
-        session.commit()
-    except Exception:
-        session.rollback()
-        logger.warning("Failed to record next_step event for %s", step_key, exc_info=True)
-    finally:
-        session.close()
+    """theory_review_events への監査記録（entity_type='next_step'。実体は services.record_review_event, 提案7）。"""
+    services.record_review_event(AUDIT_ENTITY_NEXT_STEP, step_key, "", new_status, user_id, metadata)
 
 
 @admin_router.get("/next-steps", response_model=NextStepsResponse)

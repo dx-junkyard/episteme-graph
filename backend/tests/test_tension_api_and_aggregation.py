@@ -50,7 +50,7 @@ class TestMigration022:
 
 class TestVocabulary:
     def test_interest_kinds_and_statuses_extended(self):
-        # services.py は import に neo4j 等を要するため静的検証（既存テストと同方式）
+        # services.py の import は外部依存の初期化コストが大きいため静的検証（既存テストと同方式）
         source = _read(SERVICES)
         kinds_block = source.split("_INTEREST_KINDS = (")[1].split(")")[0]
         assert '"tension"' in kinds_block
@@ -107,9 +107,14 @@ class TestOwnershipAndPrivacy:
         assert '"confidence"' not in body
 
     def test_state_changes_are_audited(self):
+        """entity_type は core/schema.py の AUDIT_ENTITY_TENSION カタログ定数を使う（提案7）。"""
+        from core.schema import AUDIT_ENTITY_TENSION
+
+        assert AUDIT_ENTITY_TENSION == "tension"
         source = _read(SERVICES)
         assert "_record_tension_event" in source
-        assert "'tension'" in source.split("def _record_tension_event")[1].split("\ndef ")[0]
+        body = source.split("def _record_tension_event")[1].split("\ndef ")[0]
+        assert "AUDIT_ENTITY_TENSION" in body
 
     def test_candidates_hidden_from_trace_view(self):
         """未確定候補・棄却はダイジェスト経由でのみ提示（問いの軌跡に出さない）。"""
@@ -127,10 +132,14 @@ class TestAggregation:
         assert "'candidate'" not in body.split("kind = 'tension'")[1].split("GROUP BY")[0]
 
     def test_k_anonymity_suppresses_small_cells(self):
+        """k=3 の閾値は core/privacy.py の共通 k-匿名ゲート（提案8）に一本化されている。"""
+        from core.privacy import K_ANONYMITY
+
+        assert K_ANONYMITY == 3
         source = _read(SERVICES)
+        assert "from core.privacy import K_ANONYMITY" in source
         body = source.split("def aggregate_interest_dashboard")[1].split("\ndef ")[0]
-        assert "_TENSION_K_ANONYMITY = 3" in body
-        assert "learners < _TENSION_K_ANONYMITY" in body
+        assert "learners < K_ANONYMITY" in body
 
     def test_heatmap_has_no_personal_fields(self):
         source = _read(SERVICES)

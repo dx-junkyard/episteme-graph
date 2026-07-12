@@ -19,6 +19,8 @@ for _p in (str(BACKEND), str(BACKEND / "api")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from tests.guardrail_helpers import assert_module_tree_does_not_import  # noqa: E402
+
 _CORE_DIR = BACKEND / "core" / "versioning"
 _ROUTE_SRC = (BACKEND / "api" / "routes" / "versioning.py").read_text(encoding="utf-8")
 _MAIN_SRC = (BACKEND / "api" / "main.py").read_text(encoding="utf-8")
@@ -28,6 +30,7 @@ _WORKER_SRC = (_CORE_DIR / "worker.py").read_text(encoding="utf-8")
 _SCHEMA_SRC = (_CORE_DIR / "schema.py").read_text(encoding="utf-8")
 _AUDIT_SRC = (_CORE_DIR / "audit.py").read_text(encoding="utf-8")
 _NOTIF_SRC = (_CORE_DIR / "notifications.py").read_text(encoding="utf-8")
+_NOTIF_RECIPIENTS_SRC = (BACKEND / "core" / "notification_recipients.py").read_text(encoding="utf-8")
 _SERVICES_SRC = (BACKEND / "api" / "services.py").read_text(encoding="utf-8")
 _FRONTEND_JS = BACKEND.parent / "frontend" / "public" / "js"
 _VERSIONING_JS = (_FRONTEND_JS / "versioning.js").read_text(encoding="utf-8")
@@ -73,13 +76,22 @@ class TestManualDeleteTeardown:
 
 
 class TestNotificationRecipientsLegacyGroup:
-    """Issue 2c: レガシー単一グループ共有（documents.visibility='group'）の閲覧者も通知宛先に含む。"""
+    """Issue 2c: レガシー単一グループ共有（documents.visibility='group'）の閲覧者も通知宛先に含む。
+
+    JOIN の形（*_group_permissions を group_members と JOIN する部分）は
+    core/notification_recipients.py に集約済み（Tier2 提案10, core/status/notification_rules.py
+    と同型の実装が独立に存在していたのを統合）。レガシー可視性クエリ自体はそこに移設したが、
+    「viewer も含める」「所有者は含めない」という V層固有の組み立てはこのファイルに残る。
+    """
 
     def test_recipients_unified_source_of_truth(self):
         assert "def _recipient_ids" in _NOTIF_SRC
+        assert '_recipients.document_group_member_ids(session, object_id, ("viewer", "editor"))' in _NOTIF_SRC
+        assert '_recipients.course_group_member_ids(session, object_id, ("viewer", "editor"))' in _NOTIF_SRC
 
     def test_document_recipients_include_legacy_group_visibility(self):
-        assert "d.visibility = 'group'" in _NOTIF_SRC
+        assert "document_legacy_group_visibility_member_ids" in _NOTIF_SRC
+        assert "d.visibility = 'group'" in _NOTIF_RECIPIENTS_SRC
 
 
 class TestSourceDocumentDeletionNotice:
@@ -121,10 +133,7 @@ class TestLearnerBannerRobust:
 
 class TestCoreFastAPIFree:
     def test_no_fastapi_import_in_core(self):
-        for path in _CORE_DIR.rglob("*.py"):
-            src = path.read_text(encoding="utf-8")
-            assert "import fastapi" not in src, f"{path} が fastapi を import している"
-            assert "from fastapi" not in src, f"{path} が fastapi を import している"
+        assert_module_tree_does_not_import(_CORE_DIR, ["fastapi"])
 
 
 class TestOwnerGuards:
@@ -182,8 +191,24 @@ class TestSweeper:
 
 class TestAuditVocabulary:
     def test_audit_entity_types(self):
-        for t in ("shared_release", "shared_deletion", "shared_subscription"):
-            assert t in _SCHEMA_SRC, t
+        """entity_type の値は core/schema.py の AUDIT_ENTITY_* カタログが正本（提案7）。
+
+        core/versioning/schema.py はその値を再エクスポートするだけなので、ここでは
+        カタログ定数を実際に import して値を検証する（生文字列のソース検査はしない）。
+        """
+        from core.schema import (
+            AUDIT_ENTITY_SHARED_DELETION,
+            AUDIT_ENTITY_SHARED_RELEASE,
+            AUDIT_ENTITY_SHARED_SUBSCRIPTION,
+        )
+        from core.versioning.schema import AUDIT_DELETION, AUDIT_RELEASE, AUDIT_SUBSCRIPTION
+
+        assert AUDIT_RELEASE == AUDIT_ENTITY_SHARED_RELEASE == "shared_release"
+        assert AUDIT_DELETION == AUDIT_ENTITY_SHARED_DELETION == "shared_deletion"
+        assert AUDIT_SUBSCRIPTION == AUDIT_ENTITY_SHARED_SUBSCRIPTION == "shared_subscription"
+        assert "core_schema.AUDIT_ENTITY_SHARED_RELEASE" in _SCHEMA_SRC
+        assert "core_schema.AUDIT_ENTITY_SHARED_DELETION" in _SCHEMA_SRC
+        assert "core_schema.AUDIT_ENTITY_SHARED_SUBSCRIPTION" in _SCHEMA_SRC
 
     def test_audit_uses_review_events_table(self):
         assert "theory_review_events" in _AUDIT_SRC

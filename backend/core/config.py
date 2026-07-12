@@ -257,10 +257,6 @@ class Settings(BaseSettings):
     # --- PostgreSQL ---
     database_url: str = "postgresql://episteme:episteme@postgres:5432/episteme"
 
-    # --- Neo4j ---
-    neo4j_uri: str = "bolt://neo4j:7687"
-    neo4j_auth: str = "neo4j/password"
-
     # --- MinIO ---
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = Field(

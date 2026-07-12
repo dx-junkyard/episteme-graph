@@ -36,6 +36,7 @@ from services import (
 )
 from core.lecture import (
     build_lecture_sequence,
+    compute_material_audio_readiness,
     generate_spoken_text_and_formulas,
     get_course_lecture_language,
     get_user_mastered_concepts,
@@ -427,75 +428,22 @@ def get_topic_audio_status(
 
     session = _pg_session()
     try:
-        mid_placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
-        params: dict = {f"mid_{i}": mid for i, mid in enumerate(material_ids)}
-        chunk_rows = session.execute(
-            sa_text(f"""
-                SELECT c.id, c.display_text, c.text, c.spoken_text, c.formulas, c.spoken_language
-                FROM chunks c
-                WHERE c.material_id IN ({mid_placeholders})
-                  AND c.text IS NOT NULL AND c.text != ''
-            """),
-            params,
-        ).fetchall()
-
-        chunk_ids = [str(row[0]) for row in chunk_rows]
-        audio_rows = []
-        if chunk_ids:
-            audio_placeholders = ", ".join(f":cid_{i}" for i in range(len(chunk_ids)))
-            audio_params: dict = {f"cid_{i}": cid for i, cid in enumerate(chunk_ids)}
-            audio_rows = session.execute(
-                sa_text(f"""
-                    SELECT chunk_id, slide_index
-                    FROM lecture_audio_cache
-                    WHERE chunk_id IN ({audio_placeholders}) AND voice = 'alloy'
-                """),
-                audio_params,
-            ).fetchall()
+        # スライド単位 + 言語一致の readiness 判定は core.lecture.py が正本
+        # （Tier2-11: core/status/projector.py と本関数の両方から同じ判定を呼ぶ）。
+        readiness = compute_material_audio_readiness(session, material_ids, lecture_language)
     finally:
         session.close()
-
-    audio_slide_set = {(str(row[0]), int(row[1])) for row in audio_rows}
-
-    total_chunks = len(chunk_rows)
-    total_slides = 0
-    ready_slides = 0
-    ready_chunks = 0
-    stale_language = False
-
-    for row in chunk_rows:
-        chunk_id = str(row[0])
-        display_text = row[1] or row[2] or ""
-        spoken_text = row[3]
-        formulas = row[4] if row[4] else []
-        chunk_language = row[5] or "ja"
-
-        slides, _mismatch = split_slides(display_text, spoken_text, formulas)
-        total_slides += len(slides)
-
-        chunk_has_cached_slide = False
-        for slide in slides:
-            if (chunk_id, slide["slide_index"]) not in audio_slide_set:
-                continue
-            chunk_has_cached_slide = True
-            if chunk_language == lecture_language:
-                ready_slides += 1
-
-        if chunk_has_cached_slide:
-            ready_chunks += 1
-            if chunk_language != lecture_language:
-                stale_language = True
 
     return {
         "course_id": course_id,
         "topic_id": topic_id,
-        "has_audio": ready_slides > 0,
-        "ready_chunks": ready_chunks,
-        "total_chunks": total_chunks,
-        "ready_slides": ready_slides,
-        "total_slides": total_slides,
+        "has_audio": readiness["ready_slides"] > 0,
+        "ready_chunks": readiness["ready_chunks"],
+        "total_chunks": readiness["total_chunks"],
+        "ready_slides": readiness["ready_slides"],
+        "total_slides": readiness["total_slides"],
         "language": lecture_language,
-        "stale_language": stale_language,
+        "stale_language": readiness["stale_language"],
     }
 
 

@@ -125,11 +125,15 @@ class TestAdminRoutes:
         assert '"/documents/{document_id}/groups/{group_id}"' in self.src
 
     def test_upsert_owner_only_and_audited(self):
+        """entity_type は core/schema.py の AUDIT_ENTITY_DOCUMENT_SHARE カタログ定数を使う（提案7）。"""
+        from core.schema import AUDIT_ENTITY_DOCUMENT_SHARE
+
+        assert AUDIT_ENTITY_DOCUMENT_SHARE == "document_share"
         body = self.src.split("def upsert_document_group_permission")[1].split("\n@router")[0]
         assert "user_owns_document" in body
         assert "document_group_permissions" in body
         assert "ON CONFLICT (document_id, group_id)" in body
-        assert '"document_share"' in body  # 監査 entity_type
+        assert "AUDIT_ENTITY_DOCUMENT_SHARE" in body  # 監査 entity_type
 
     def test_delete_owner_only(self):
         body = self.src.split("def delete_document_group_permission")[1].split("\n@router")[0]

@@ -26,6 +26,7 @@ from sqlalchemy import text as sa_text
 
 from core.config import get_settings
 from core.llm_usage.context import bind_usage_context
+from core.llm_worker.cost_gate import CostGate, InMemoryCounterGate
 from core.postgres import get_session as _pg_session
 from core.structure_anchor.agent import StructureAnchorAgent
 from core.structure_anchor.schema import (
@@ -50,11 +51,15 @@ _MAX_CONCEPT_BLOCKS = 30
 
 # コスト上限のプロセス内カウンタ（tension worker と同方式・独立のカウンタ）。
 # API サーバーは単一プロセス運用のため in-memory で足りる。
-_call_counts_lock = threading.Lock()
-_session_call_counts: dict[tuple, int] = {}
-_daily_call_counts: dict[tuple, int] = {}
+# 実装は core/llm_worker/cost_gate.py の CostGate/InMemoryCounterGate に共通化済み
+# （session_call_counts / daily_call_counts / confirm_prompt_counts は同じ dict
+# オブジェクトへのエイリアス。既存テストの直接操作と互換）。
+_cost_gate = CostGate()
+_session_call_counts: dict[tuple, int] = _cost_gate.session_counts
+_daily_call_counts: dict[tuple, int] = _cost_gate.daily_counts
 # 方法C（回答末尾の帰属確認プロンプト）のセッション内提示カウンタ（P7: 毎回出さない）
-_confirm_prompt_counts: dict[tuple, int] = {}
+_confirm_gate = InMemoryCounterGate()
+_confirm_prompt_counts: dict[tuple, int] = _confirm_gate.counts
 
 
 def _today() -> str:
@@ -68,16 +73,13 @@ def _check_and_count_llm_call(user_id: str, course_id: str, topic_id: str) -> bo
     per_day = int(getattr(settings, "anchor_max_calls_per_day", 10))
     skey = (user_id, course_id, topic_id, _today())
     dkey = (user_id, _today())
-    with _call_counts_lock:
-        if _session_call_counts.get(skey, 0) >= per_session:
-            logger.info("anchor mining skipped: per-session cap reached (%s)", skey)
-            return False
-        if _daily_call_counts.get(dkey, 0) >= per_day:
-            logger.info("anchor mining skipped: per-day cap reached (%s)", dkey)
-            return False
-        _session_call_counts[skey] = _session_call_counts.get(skey, 0) + 1
-        _daily_call_counts[dkey] = _daily_call_counts.get(dkey, 0) + 1
-    return True
+    ok = _cost_gate.check_and_count(
+        session_limit=per_session, session_key=skey,
+        daily_limit=per_day, daily_key=dkey,
+    )
+    if not ok:
+        logger.info("anchor mining skipped: cost cap reached (session=%s, daily=%s)", skey, dkey)
+    return ok
 
 
 def check_and_count_confirm_prompt(user_id: str, course_id: str, topic_id: str | None) -> bool:
@@ -85,11 +87,7 @@ def check_and_count_confirm_prompt(user_id: str, course_id: str, topic_id: str |
     settings = get_settings()
     limit = int(getattr(settings, "anchor_confirm_max_per_session", 3))
     key = (user_id, course_id, topic_id or "", _today())
-    with _call_counts_lock:
-        if _confirm_prompt_counts.get(key, 0) >= limit:
-            return False
-        _confirm_prompt_counts[key] = _confirm_prompt_counts.get(key, 0) + 1
-    return True
+    return _confirm_gate.check_and_count(key, limit)
 
 
 def _fetch_pending_questions(session, user_id: str, course_id: str, topic_id: str | None) -> list:

@@ -47,6 +47,12 @@ _LEARNING_SRC = (BACKEND / "api" / "routes" / "learning.py").read_text(encoding=
 _MIGRATION_SQL_SRC = (BACKEND / "db" / "043_llm_usage_events.sql").read_text(encoding="utf-8")
 _MAIN_SRC = (BACKEND / "api" / "main.py").read_text(encoding="utf-8")
 
+from tests.guardrail_helpers import (  # noqa: E402
+    assert_module_tree_does_not_import,
+    assert_source_does_not_import,
+    assert_source_forbids,
+)
+
 _HAS_FASTAPI = True
 try:
     import fastapi  # noqa: F401
@@ -136,18 +142,13 @@ class TestRecorderNeverRaises:
 
 class TestNoFastAPIImportInCore:
     def test_no_fastapi_import_in_core_llm_usage(self):
-        for path in _CORE_LLM_USAGE_DIR.rglob("*.py"):
-            src = path.read_text(encoding="utf-8")
-            assert "import fastapi" not in src, f"{path} imports fastapi"
-            assert "from fastapi" not in src, f"{path} imports fastapi"
+        assert_module_tree_does_not_import(_CORE_LLM_USAGE_DIR, ["fastapi"])
 
     def test_no_fastapi_import_in_llm_py(self):
-        assert "import fastapi" not in _LLM_SRC
-        assert "from fastapi" not in _LLM_SRC
+        assert_source_does_not_import(_LLM_SRC, ["fastapi"], context="core/llm.py")
 
     def test_no_fastapi_import_in_tts_py(self):
-        assert "import fastapi" not in _TTS_SRC
-        assert "from fastapi" not in _TTS_SRC
+        assert_source_does_not_import(_TTS_SRC, ["fastapi"], context="core/tts.py")
 
 
 # ===========================================================================
@@ -157,10 +158,11 @@ class TestNoFastAPIImportInCore:
 
 class TestNoDeleteOrMutatingAPI:
     def test_no_mutating_route_decorators_in_source(self):
-        assert "@router.delete" not in _ROUTE_LLM_USAGE_SRC
-        assert "@router.post" not in _ROUTE_LLM_USAGE_SRC
-        assert "@router.patch" not in _ROUTE_LLM_USAGE_SRC
-        assert "@router.put" not in _ROUTE_LLM_USAGE_SRC
+        assert_source_forbids(
+            _ROUTE_LLM_USAGE_SRC,
+            ["@router.delete", "@router.post", "@router.patch", "@router.put"],
+            context="routes/llm_usage.py",
+        )
 
     @_skip_no_fastapi
     def test_all_registered_routes_are_get_only(self):
@@ -493,10 +495,7 @@ class TestLearnerAPINoUsageLeak:
     )
 
     def test_forbidden_usage_vocabulary_absent_from_learning_routes(self):
-        offending = [w for w in self._FORBIDDEN_VOCAB if w in _LEARNING_SRC]
-        assert offending == [], (
-            f"routes/learning.py contains forbidden usage-metering vocabulary: {offending}"
-        )
+        assert_source_forbids(_LEARNING_SRC, self._FORBIDDEN_VOCAB, context="routes/learning.py")
 
     def test_usage_context_attribution_wiring_is_not_accidentally_excluded(self):
         """帰属配線（usage_context）自体は許可された語彙であり、検査対象から除外されている

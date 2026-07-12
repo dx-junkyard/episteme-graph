@@ -34,6 +34,13 @@ for _p in (str(BACKEND), str(BACKEND / "api"), str(SRC)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from tests.guardrail_helpers import (  # noqa: E402
+    assert_module_tree_does_not_import,
+    assert_module_tree_forbids,
+    assert_source_does_not_import,
+    assert_source_forbids,
+)
+
 _DOC_PIPELINE_DIR = BACKEND / "core" / "document_pipeline"
 _LIBRARY_DIR = BACKEND / "core" / "library"
 _AGENTS_DIR = SRC / "episteme_graph" / "agents"
@@ -96,15 +103,7 @@ class TestNoLLMWriteToLibrary:
     def test_no_library_write_function_referenced_in_pipeline_or_agents(self):
         """document_pipeline / agents のソースに書き込み関数名が一切出現しない
         （search_frozen_entries / find_similar_entries の read 系は許可リスト）。"""
-        offending = []
-        for path in list(_DOC_PIPELINE_DIR.rglob("*.py")) + list(_AGENTS_DIR.rglob("*.py")):
-            src = path.read_text(encoding="utf-8")
-            for fn in _LIBRARY_WRITE_FUNCS:
-                if fn in src:
-                    offending.append(f"{path}:{fn}")
-        assert offending == [], (
-            f"library write functions referenced outside the human-only promotion flow: {offending}"
-        )
+        assert_module_tree_forbids((_DOC_PIPELINE_DIR, _AGENTS_DIR), _LIBRARY_WRITE_FUNCS)
 
     def test_orchestrator_only_imports_read_only_search_helper(self):
         assert "from core.library.search import search_frozen_entries" in _ORCHESTRATOR_SRC
@@ -323,7 +322,7 @@ class TestFigureApiUsesDocumentViewableGate:
 
 class TestNoDeleteAndRetiredExcluded:
     def test_no_delete_route_in_library_routes_source(self):
-        assert "@router.delete" not in _ROUTE_LIBRARY_SRC
+        assert_source_forbids(_ROUTE_LIBRARY_SRC, ["@router.delete"], context="routes/library.py")
 
     @_skip_no_fastapi
     def test_no_delete_route_registered_dynamically(self):
@@ -335,8 +334,11 @@ class TestNoDeleteAndRetiredExcluded:
         assert "DELETE" not in methods
 
     def test_store_never_deletes_rows(self):
-        assert "DELETE FROM library_entries" not in _STORE_SRC
-        assert "DELETE FROM library_entry_versions" not in _STORE_SRC
+        assert_source_forbids(
+            _STORE_SRC,
+            ["DELETE FROM library_entries", "DELETE FROM library_entry_versions"],
+            context="library/store.py",
+        )
 
     def test_retire_and_restore_are_status_transitions_not_deletes(self):
         assert "def retire_entry" in _STORE_SRC
@@ -495,15 +497,11 @@ class TestAnalyzeImagesSkippedByOption:
 
 class TestLibraryCoreHasNoFastAPI:
     def test_no_fastapi_import_in_core_library(self):
-        for path in _LIBRARY_DIR.rglob("*.py"):
-            src = path.read_text(encoding="utf-8")
-            assert "import fastapi" not in src, f"{path} imports fastapi"
-            assert "from fastapi" not in src, f"{path} imports fastapi"
+        assert_module_tree_does_not_import(_LIBRARY_DIR, ["fastapi"])
 
     def test_no_fastapi_import_in_figure_images_stage(self):
         """figure_image_extraction (非LLM決定論的ステージ) も core/ 共通ルールに従う。"""
-        assert "import fastapi" not in _FIGURE_IMAGES_SRC
-        assert "from fastapi" not in _FIGURE_IMAGES_SRC
+        assert_source_does_not_import(_FIGURE_IMAGES_SRC, ["fastapi"], context="figure_images.py")
 
 
 # ===========================================================================

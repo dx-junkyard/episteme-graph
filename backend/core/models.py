@@ -88,7 +88,6 @@ class Document(Base):
     publisher = Column(Text, nullable=True)
     language = Column(Text, default="en")
     source_path = Column(Text, nullable=True)
-    neo4j_node_id = Column(Text, nullable=True)
     # Material processing fields
     filename = Column(Text, nullable=True)
     status = Column(Text, default="uploaded")
@@ -127,7 +126,6 @@ class Chunk(Base):
     smiles_dsl = Column(Text, nullable=True)
     variables = Column(JSONB, nullable=True)
     ancestors = Column(JSONB, nullable=True)
-    neo4j_node_id = Column(Text, nullable=True)
     # Interactive Lecture Mode (Issue #66)
     display_text = Column(Text, nullable=True)
     spoken_text = Column(Text, nullable=True)

@@ -22,7 +22,6 @@ PDF文献から概念・主張・数式・関係性を自動抽出してナレ�
 | フロントエンド | Vanilla JS SPA + nginx |
 | APIサーバー | FastAPI (Python 3.11) |
 | RDB + ベクトル検索 | PostgreSQL 16 + pgvector (cosine, 次元数は `LLM_EMBEDDING_DIM`、既定 3072) |
-| グラフDB | Neo4j 5（概念グラフ走査専用） |
 | オブジェクトストレージ | MinIO（S3互換） |
 | PDF構造解析 | GROBID（TEI-XML）／フォールバックで PyMuPDF |
 | LLM | OpenAI API または Google Gemini / Vertex AI（`LLM_PROVIDER` で切替） |
@@ -96,7 +95,6 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
 | 管理UI（ローカル） | http://localhost:3000/admin.html |
 | 学習UI（ngrok） | https://your-subdomain.ngrok-free.app |
 | ngrok Web UI | http://localhost:4040 |
-| Neo4j Browser | http://localhost:7474 |
 | MinIO コンソール | http://localhost:9001 |
 | PostgreSQL | localhost:5432（psql / TablePlus など） |
 
@@ -144,7 +142,6 @@ PDF アップロード → MinIO 保存
      文書構造復元 → 主張（claim）の採否・atomic 化 → 数式の意味・導出チェーン
      → 中心命題の再構成 → DSL 接続 → 再利用可能コンポーネント → 理論操作グラフ
   → テキストチャンク → PostgreSQL pgvector（次元数は `LLM_EMBEDDING_DIM` 準拠）
-  → 概念ノード・エッジ → Neo4j（REQUIRES / RELATES_TO / CONTAINS）
   → 成果物 JSON → MinIO / PostgreSQL
 ```
 
@@ -261,7 +258,6 @@ episteme-graph/
 │   │   ├── schema_registry.py # 動的スキーマ（DBから読み込み・キャッシュ）
 │   │   ├── models.py          # SQLAlchemy ORM モデル
 │   │   ├── postgres.py        # PostgreSQL セッション管理
-│   │   ├── db.py              # Neo4j ドライバ
 │   │   ├── extractor.py       # PDF → 構造化データ抽出
 │   │   ├── embedder.py        # pgvector ベクトル保存・検索
 │   │   ├── chat.py            # RAG チャットロジック

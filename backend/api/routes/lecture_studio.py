@@ -27,6 +27,8 @@ from schemas import (
     LectureAudioGenerateResponse,
     LectureAudioGenerateStartResponse,
     LectureFormulaItem,
+    LecturePreviewSplitRequest,
+    LecturePreviewSplitResponse,
     LectureScriptChunkOut,
     LectureScriptGenerateRequest,
     LectureScriptGenerateStartResponse,
@@ -34,6 +36,7 @@ from schemas import (
     LectureScriptRewriteResponse,
     LectureScriptSaveRequest,
     LectureScriptSaveResponse,
+    LectureSlide,
     LectureStudioSettings,
     LectureTTSResponse,
 )
@@ -49,6 +52,7 @@ from services import (
     user_can_edit_course,
 )
 from core.lecture import (
+    count_slide_marker_segments,
     generate_spoken_text_and_formulas,
     get_course_lecture_language,
     normalize_to_placeholder_format,
@@ -220,8 +224,8 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
             sa_text(f"""
                 SELECT c.id, c.chunk_index, c.text, c.display_text, c.spoken_text, c.formulas,
                        c.material_id, c.document_id, c.page_start, c.page_end,
-                       c.smiles_dsl, c.variables, c.ancestors, c.neo4j_node_id,
-                       d.knowledge_graph, d.neo4j_node_id, c.spoken_language
+                       c.smiles_dsl, c.variables, c.ancestors,
+                       d.knowledge_graph, c.spoken_language
                 FROM chunks c
                 LEFT JOIN documents d ON c.document_id = d.id
                 WHERE ({where_clause})
@@ -252,7 +256,7 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
                 equation_previews=equation_previews,
             )
             display_text = _replace_equation_preview_text(display_text, formulas)
-            knowledge_graph = _json_obj(row[14])
+            knowledge_graph = _json_obj(row[13])
             graph_elements = _derive_chunk_graph_elements(
                 f"{raw_text}\n{display_text}",
                 knowledge_graph,
@@ -291,11 +295,10 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
                 "smiles_dsl": smiles_dsl,
                 "variables": variables,
                 "ancestors": ancestors,
-                "neo4j_node_id": row[13] or row[15] or "",
                 "graph_elements": graph_elements,
                 # レクチャースライド同期 (migration 040): 原稿の生成言語。
-                # len<=16 の古いモック行は未指定として扱う（後方互換）。
-                "spoken_language": (row[16] if len(row) > 16 else None) or "ja",
+                # len<=14 の古いモック行は未指定として扱う（後方互換）。
+                "spoken_language": (row[14] if len(row) > 14 else None) or "ja",
             })
         return enrich_chunks_with_sections(chunks)
     finally:
@@ -1024,7 +1027,6 @@ def get_course_scripts(
             smiles_dsl=c.get("smiles_dsl", ""),
             variables=c.get("variables"),
             ancestors=c.get("ancestors"),
-            neo4j_node_id=c.get("neo4j_node_id", ""),
             graph_elements=c.get("graph_elements", []),
             spoken_language=c.get("spoken_language") or "ja",
             slide_count=len(slides),
@@ -1032,6 +1034,45 @@ def get_course_scripts(
             audio_ready_slides=audio_ready_slides,
         ))
     return result
+
+
+# ---------------------------------------------------------------------------
+# POST: プレビュー用スライド分割（DB 非変更, Tier2-11: 講義系の判定共通化 提案11）
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/lecture-studio/preview-split",
+    response_model=LecturePreviewSplitResponse,
+)
+def preview_split_slides(
+    body: LecturePreviewSplitRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> LecturePreviewSplitResponse:
+    """原稿スタジオのプレビュー用スライド分割を返す（DB は一切変更しない）。
+
+    ``core.lecture.split_slides`` をそのまま呼ぶことで、プレビュー（本エンドポイント）と
+    配信（``get_lecture_sequence`` 等）が同一の分割ロジックを共有する
+    （docs/features/lecture_slide_sync_design.md の設計原則）。admin.js の
+    `lsSplitSlides` ローカル実装（クライアント側の並行再実装）はこの API 呼び出しに
+    置き換え、削除する（Tier2-11）。教員（``_require_teacher``）のみ利用可能。
+    """
+    slides, mismatch = split_slides(body.display_text, body.spoken_text, body.formulas)
+    display_count, spoken_count = count_slide_marker_segments(body.display_text, body.spoken_text)
+    return LecturePreviewSplitResponse(
+        slides=[
+            LectureSlide(
+                slide_index=sd["slide_index"],
+                display_text=sd["display_text"],
+                spoken_text=sd["spoken_text"],
+                formulas=[LectureFormulaItem(**f) for f in sd["formulas"]],
+            )
+            for sd in slides
+        ],
+        mismatch=mismatch,
+        display_segment_count=display_count,
+        spoken_segment_count=spoken_count,
+    )
 
 
 def _load_chunk_slide_audio_map(chunk_ids: list[str]) -> dict[str, set[int]]:

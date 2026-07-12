@@ -19,8 +19,6 @@ def _override_settings(monkeypatch):
         jwt_secret="test-secret-key",
         admin_password="test-admin-password",
         database_url="postgresql://test:test@localhost:5432/test",
-        neo4j_uri="bolt://localhost:7687",
-        neo4j_auth="neo4j/test",
         minio_endpoint="localhost:9000",
         minio_access_key="testaccess",
         minio_secret_key="testsecret",

@@ -27,6 +27,7 @@ from sqlalchemy import text as sa_text
 
 from core.config import get_settings
 from core.llm_usage.context import bind_usage_context
+from core.llm_worker.cost_gate import CostGate
 from core.postgres import get_session as _pg_session
 from core.tension.agent import DEFAULT_MAX_CANDIDATES, TensionMiningAgent
 from core.tension.input_builder import select_window_turns, turns_from_history
@@ -49,9 +50,11 @@ DIGEST_MAX_ITEMS = 3
 # コスト上限のプロセス内カウンタ（(user_id, course_id, topic_id, date) / (user_id, date)）。
 # API サーバーは単一プロセス運用のため in-memory で足りる。再起動でリセットされるが
 # 上限は安全側の防波堤であり厳密な会計ではない。
-_call_counts_lock = threading.Lock()
-_session_call_counts: dict[tuple, int] = {}
-_daily_call_counts: dict[tuple, int] = {}
+# 実装は core/llm_worker/cost_gate.py の CostGate に共通化済み（session_call_counts /
+# daily_call_counts は同じ dict オブジェクトへのエイリアス。既存テストの直接操作と互換）。
+_cost_gate = CostGate()
+_session_call_counts: dict[tuple, int] = _cost_gate.session_counts
+_daily_call_counts: dict[tuple, int] = _cost_gate.daily_counts
 
 
 def _today() -> str:
@@ -65,16 +68,13 @@ def _check_and_count_llm_call(user_id: str, course_id: str, topic_id: str) -> bo
     per_day = int(getattr(settings, "tension_max_calls_per_day", 10))
     skey = (user_id, course_id, topic_id, _today())
     dkey = (user_id, _today())
-    with _call_counts_lock:
-        if _session_call_counts.get(skey, 0) >= per_session:
-            logger.info("tension mining skipped: per-session cap reached (%s)", skey)
-            return False
-        if _daily_call_counts.get(dkey, 0) >= per_day:
-            logger.info("tension mining skipped: per-day cap reached (%s)", dkey)
-            return False
-        _session_call_counts[skey] = _session_call_counts.get(skey, 0) + 1
-        _daily_call_counts[dkey] = _daily_call_counts.get(dkey, 0) + 1
-    return True
+    ok = _cost_gate.check_and_count(
+        session_limit=per_session, session_key=skey,
+        daily_limit=per_day, daily_key=dkey,
+    )
+    if not ok:
+        logger.info("tension mining skipped: cost cap reached (session=%s, daily=%s)", skey, dkey)
+    return ok
 
 
 def _fetch_pending_hints(session, user_id: str, course_id: str, topic_id: str) -> list:

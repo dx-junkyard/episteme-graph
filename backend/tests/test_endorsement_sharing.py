@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "backend" / "api"))
 
+from tests.guardrail_helpers import assert_module_tree_forbids  # noqa: E402
+
 MAIN = ROOT / "backend" / "api" / "main.py"
 MIGRATION = ROOT / "backend" / "db" / "021_endorsement_sharing.sql"
 ROUTES = ROOT / "backend" / "api" / "routes" / "theory_components.py"
@@ -78,11 +80,19 @@ class TestRoutes:
         assert source.count("Depends(_require_teacher)") >= 10
 
     def test_audit_entity_types_extended(self):
+        """承認・共有の state 変更は theory_review_events に監査記録を残す。
+
+        entity_type は core/schema.py の AUDIT_ENTITY_* カタログ定数を使う
+        （entity_type を 'endorsement' / 'explanation' / 'citation' に拡張, 提案7）。
+        """
+        from core.schema import AUDIT_ENTITY_CITATION, AUDIT_ENTITY_ENDORSEMENT, AUDIT_ENTITY_EXPLANATION
+
+        assert (AUDIT_ENTITY_ENDORSEMENT, AUDIT_ENTITY_EXPLANATION, AUDIT_ENTITY_CITATION) == (
+            "endorsement", "explanation", "citation",
+        )
         source = _read(ROUTES)
-        # 承認・共有の state 変更は theory_review_events に監査記録を残す
-        # (entity_type を 'endorsement' / 'explanation' / 'citation' に拡張)。
         assert "_record_review_event(" in source
-        for entity in ('"endorsement"', '"explanation"', '"citation"'):
+        for entity in ("AUDIT_ENTITY_ENDORSEMENT", "AUDIT_ENTITY_EXPLANATION", "AUDIT_ENTITY_CITATION"):
             assert entity in source
 
     def test_claim_linking_stays_candidate_until_teacher_confirms(self):
@@ -181,9 +191,4 @@ class TestALayerUntouched:
     def test_agents_have_no_endorsement_or_citation_code(self):
         if not AGENTS.exists():
             pytest.skip("agents package not present in this checkout")
-        offenders = []
-        for path in AGENTS.rglob("*.py"):
-            text = _read(path)
-            if "component_endorsements" in text or "component_citations" in text:
-                offenders.append(str(path))
-        assert not offenders, f"A層に C層 の差分が混入: {offenders}"
+        assert_module_tree_forbids(AGENTS, ["component_endorsements", "component_citations"])

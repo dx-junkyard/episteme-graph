@@ -9,6 +9,8 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 
+from episteme_graph.agents.cartridge_context import CartridgeContext
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -256,21 +258,6 @@ DETECTION_METHODS = [
     "inline_equation_heuristic",
     "tex_source",
 ]
-
-
-# ---------------------------------------------------------------------------
-# Cartridge context
-# ---------------------------------------------------------------------------
-
-@dataclass
-class CartridgeContext:
-    cartridge_id: str
-    ontology: dict
-    validation_rules: dict
-    aliases: dict | None = None
-    notation_patterns: list | None = None
-    normalization_rules: list | None = None
-    extraction_hints: list | None = None
 
 
 # ---------------------------------------------------------------------------

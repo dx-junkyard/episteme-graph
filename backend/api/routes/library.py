@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 import services
 from dependencies import _require_teacher
 
+from core.schema import AUDIT_ENTITY_LIBRARY_ENTRY
 from core.library import schema as library_schema
 from core.library import search as library_search
 from core.library import store as library_store
@@ -204,7 +205,7 @@ def create_entry(payload: LibraryEntryCreateRequest, current_user: dict = Depend
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     _audit(
-        "library_entry",
+        AUDIT_ENTITY_LIBRARY_ENTRY,
         entry["id"],
         "",
         "created",
@@ -218,7 +219,7 @@ def create_entry(payload: LibraryEntryCreateRequest, current_user: dict = Depend
     )
     if authorized_images:
         _audit(
-            "library_entry",
+            AUDIT_ENTITY_LIBRARY_ENTRY,
             entry["id"],
             "",
             "exemplar_images_approved",
@@ -285,7 +286,7 @@ def update_entry(entry_id: str, payload: LibraryEntryUpdateRequest, current_user
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     _audit(
-        "library_entry",
+        AUDIT_ENTITY_LIBRARY_ENTRY,
         entry_id,
         "",
         "draft_updated",
@@ -294,7 +295,7 @@ def update_entry(entry_id: str, payload: LibraryEntryUpdateRequest, current_user
     )
     if newly_added_figure_ids:
         _audit(
-            "library_entry",
+            AUDIT_ENTITY_LIBRARY_ENTRY,
             entry_id,
             "",
             "exemplar_images_approved",
@@ -317,7 +318,7 @@ def freeze_entry(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     _audit(
-        "library_entry",
+        AUDIT_ENTITY_LIBRARY_ENTRY,
         entry_id,
         "",
         "frozen",
@@ -339,7 +340,7 @@ def retire_entry(entry_id: str, current_user: dict = Depends(_require_teacher)):
     except LibraryNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    _audit("library_entry", entry_id, library_schema.STATUS_ACTIVE, library_schema.STATUS_RETIRED, uid, {"domain_key": entry["domain_key"]})
+    _audit(AUDIT_ENTITY_LIBRARY_ENTRY, entry_id, library_schema.STATUS_ACTIVE, library_schema.STATUS_RETIRED, uid, {"domain_key": entry["domain_key"]})
     return entry
 
 
@@ -351,7 +352,7 @@ def restore_entry(entry_id: str, current_user: dict = Depends(_require_teacher))
     except LibraryNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    _audit("library_entry", entry_id, library_schema.STATUS_RETIRED, library_schema.STATUS_ACTIVE, uid, {"domain_key": entry["domain_key"]})
+    _audit(AUDIT_ENTITY_LIBRARY_ENTRY, entry_id, library_schema.STATUS_RETIRED, library_schema.STATUS_ACTIVE, uid, {"domain_key": entry["domain_key"]})
     return entry
 
 

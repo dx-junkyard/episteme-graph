@@ -15,6 +15,7 @@ from pathlib import Path
 
 from core.doubt.naive_signal import aggregate_entries
 from core.doubt.schema import ScopeCandidate
+from tests.guardrail_helpers import assert_module_tree_forbids, assert_paths_forbid
 
 _BACKEND = Path(__file__).resolve().parents[1]
 _REPO = _BACKEND.parent
@@ -150,9 +151,7 @@ class TestP4NothingDeleted:
 
     def test_no_delete_statements_in_doubt_layer(self):
         doubt_dir = _BACKEND / "core" / "doubt"
-        for path in doubt_dir.rglob("*.py"):
-            src = path.read_text(encoding="utf-8")
-            assert "DELETE FROM" not in src, f"{path} must not delete rows"
+        assert_module_tree_forbids(doubt_dir, ["DELETE FROM"])
         assert "DELETE FROM" not in _ROUTES_SRC
 
     def test_dismiss_and_withdraw_are_status_transitions(self):
@@ -176,10 +175,7 @@ class TestNoHypeLanguage:
         ]
 
     def test_no_banned_words(self):
-        for path in self._assets():
-            src = path.read_text(encoding="utf-8")
-            for word in self.BANNED:
-                assert word not in src, f"banned word {word!r} in {path}"
+        assert_paths_forbid(self._assets(), self.BANNED)
 
     def test_axes_are_factual_labels(self):
         """地図の軸ラベルは事実記述のみ。"""

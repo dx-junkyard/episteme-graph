@@ -31,6 +31,11 @@ from core.reconstruction.schema import (  # noqa: E402
     ITEM_STATUSES,
     SOURCE_BACKED,
 )
+from tests.guardrail_helpers import (  # noqa: E402
+    assert_module_tree_does_not_import,
+    assert_module_tree_forbids,
+    assert_source_forbids,
+)
 
 _CORE_DIR = BACKEND / "core" / "reconstruction"
 _ROUTE_SRC = (BACKEND / "api" / "routes" / "reconstruction.py").read_text(encoding="utf-8")
@@ -149,12 +154,12 @@ class TestNoDeleteOnlyRetire:
     """item は削除せず auto → flagged → retired の状態遷移（P4）。"""
 
     def test_no_delete_endpoint_in_routes(self):
-        assert "@learning_router.delete" not in _ROUTE_SRC
-        assert "@admin_router.delete" not in _ROUTE_SRC
+        assert_source_forbids(
+            _ROUTE_SRC, ["@learning_router.delete", "@admin_router.delete"], context="routes/reconstruction.py",
+        )
 
     def test_no_delete_from_in_reconstruction_core(self):
-        for path in _CORE_DIR.rglob("*.py"):
-            assert "DELETE FROM" not in path.read_text(encoding="utf-8"), f"{path} must not delete rows"
+        assert_module_tree_forbids(_CORE_DIR, ["DELETE FROM"])
 
     def test_retired_is_a_status_not_deletion(self):
         assert "retired" in ITEM_STATUSES
@@ -221,10 +226,7 @@ class TestCoreIsFrameworkFree:
     """core/reconstruction/ は FastAPI を import しない（テスタビリティ）。"""
 
     def test_no_fastapi_import_in_core(self):
-        for path in _CORE_DIR.rglob("*.py"):
-            src = path.read_text(encoding="utf-8")
-            assert "import fastapi" not in src, f"{path} imports fastapi"
-            assert "from fastapi" not in src, f"{path} imports fastapi"
+        assert_module_tree_does_not_import(_CORE_DIR, ["fastapi"])
 
 
 class TestAuditVocabulary:

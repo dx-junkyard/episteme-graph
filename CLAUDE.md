@@ -14,7 +14,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | フロントエンド | Vanilla JS SPA + nginx |
 | API | FastAPI (Python 3.11) |
 | RDB + ベクトル | PostgreSQL 16 + pgvector (cosine, 3072次元) |
-| グラフDB | Neo4j 5 (Cypher) — グラフ走査専用 |
 | ストレージ | MinIO (S3互換) |
 | LLM | OpenAI API (gpt-4o / text-embedding-3-large) |
 | 認証 | JWT (HS256) + bcrypt |
@@ -40,7 +39,6 @@ cd backend && pytest backend/tests/test_diff_merge.py -v
 # アクセス先
 # http://localhost:3000        → 学習UI
 # http://localhost:8001/docs   → Swagger UI
-# http://localhost:7474        → Neo4j Browser
 # http://localhost:9001        → MinIO コンソール
 ```
 
@@ -65,28 +63,31 @@ src/tests/                     → agents 用 pytest テスト
 |---|---|
 | `backend/core/schema.py` | 全 Pydantic モデル定義（OntologyType, CorePredicate, PaperStructure など） |
 | `backend/api/main.py` | FastAPI アプリ本体（全エンドポイント・API固有モデル） |
-| `backend/core/extractor.py` | PDF→GROBID→LLM 構造抽出パイプライン |
+| `backend/core/extractor.py` | GROBID 変換（PDF→TEI XML）+ PaperStructure diff/merge（Gateway層） |
 | `backend/core/embedder.py` | pgvector ベクトル保存・検索 (PostgreSQL) |
-| `backend/core/chat.py` | RAG チャットロジック |
+| `backend/core/chat.py` | tier 付き chunk 検索ユーティリティ（実 RAG チャットは `routes/learning.py`） |
 | `backend/core/postgres.py` | PostgreSQL セッション管理 |
-| `backend/core/db.py` | Neo4j ドライバ（グラフ走査専用） |
 | `backend/core/llm.py` | OpenAI クライアントファクトリ |
 | `backend/core/storage.py` | MinIO S3互換ストレージ |
+| `backend/core/llm_worker/` | 非同期 LLM worker 共通基盤（client / run_with_repair / CostGate。5系統が利用） |
+| `backend/core/privacy.py` | k-匿名ゲートの正本（K_ANONYMITY=3・件数レンジ導出） |
+| `backend/core/notification_recipients.py` | 通知宛先解決の共通 JOIN プリミティブ（status 系 / V層が利用） |
 
 ### データストア構成
 
-- **PostgreSQL（正本）:** ユーザー・認証、教材メタデータ、チャンク本文+embedding (pgvector)、学習者状態、コース管理、対話履歴、コースビルダーセッション、承認・共有（`component_explanations` / `component_endorsements` / `component_citations` — 承認・共有レイヤー(C層)）
-- **Neo4j（グラフ走査専用）:** 概念グラフ (REQUIRES, RELATES_TO, CONTAINS)、チャンク↔概念クロスリンク
-- **MinIO:** PDF原本、PaperStructure JSON
+- **PostgreSQL（正本）:** ユーザー・認証、教材メタデータ、チャンク本文+embedding (pgvector)、概念構造
+  （`theory_components` / `theory_claims` / `theory_component_graphs`）、学習者状態、コース管理、対話履歴、
+  コースビルダーセッション、承認・共有（`component_explanations` / `component_endorsements` /
+  `component_citations` — 承認・共有レイヤー(C層)）
+- **MinIO:** PDF原本 (`raw-papers`)、図画像 (`figure-images`)
 
 ### PDF → ナレッジグラフ パイプライン
 
 1. PDF アップロード → MinIO (`raw-papers` バケット)
 2. GROBID TEI-XML パース（利用不可の場合は PyMuPDF → 文分割にフォールバック）
-3. LLM で仮説駆動型分析 → `PaperStructure` 生成
-4. テキストチャンク → PostgreSQL pgvector に埋め込み（3072次元）
-5. 概念ノード・エッジ → Neo4j 保存（グラフ走査用）
-6. 抽出構造 → MinIO (`extracted-structures` バケット)
+3. テキストチャンク → PostgreSQL pgvector に埋め込み（3072次元）
+4. PDF解析Agentパイプライン（下記参照）が LLM で構造抽出・意味解析を実行
+5. 概念構造・claim → PostgreSQL (`theory_components` / `theory_claims` / `theory_component_graphs`) に保存
 
 ### PDF解析エージェント パイプライン（ドキュメントアップロード後処理）
 
@@ -157,7 +158,7 @@ src/episteme_graph/agents/
 ```
 __init__.py
 agent.py           → Agent本体クラス
-cartridge_loader.py → CartridgeLoader（各agentで実装、共通インターフェース）
+cartridge_loader.py → CartridgeLoader（正本は agents/cartridge_loader.py。各agent側は薄い再エクスポート。固有差分があるagentのみサブクラス化）
 input_builder.py   → LLM入力の構築
 prompt.py          → プロンプト定義
 llm_client.py      → LLM API呼び出し（structured output）
@@ -270,7 +271,10 @@ backend/cartridges/particle_physics/
   maturity_levels.json  → 成熟度レベル定義
 ```
 
-`CartridgeContext` は各agentの `CartridgeLoader` がロードし、prompt builder / validator に渡す:
+`CartridgeContext` の正本は `src/episteme_graph/agents/cartridge_context.py`、`CartridgeLoader` の正本は
+`src/episteme_graph/agents/cartridge_loader.py`（2026-07 整理で12コピーを統合）。各agentの
+`cartridge_loader.py` / `schema.py` は正本からの再エクスポートで、prompt builder / validator に渡す
+（component_assembly / component_graph はフィールド構成が異なる固有 `CartridgeContext` を維持）:
 ```python
 @dataclass
 class CartridgeContext:
@@ -285,8 +289,8 @@ class CartridgeContext:
 
 ### RAG チャットフロー
 
-1. ユーザー質問 → PostgreSQL pgvector 検索（コース/論文でフィルタ）
-2. 上位チャンク + MinIO から `PaperStructure` 取得
+1. ユーザー質問 → PostgreSQL pgvector 検索（`services.search_chunks_with_metadata`、tier(L1信頼性) 付与）
+2. 検索結果の `material_id` から `content_grounding`（course_material / other_material / model_generated）を判定
 3. チャット履歴 + コンテキストで LLM プロンプト構築
 4. レスポンスから誤解検出（「訂正」「誤り」「間違い」パターン）
 5. ドリルダウンリンク提示（`[〇〇について詳しく聞く]`）
@@ -684,6 +688,13 @@ P7 既存 A/B/C/D 層コードを変更しない/ P8 道案内は誘導まで（
   `GET /api/admin/chunks/{chunk_id}/lecture-audio`（`_require_teacher`・キャッシュ配信のみ））。
   音声生成はモーダルで言語選択。教員がプレビューで見た分割・聞いた音声がそのまま
   学習者に配信される（プレビューと配信のレンダラ・分割ロジックを共有すること）。
+- **分割・readiness の正本は Python 側（2026-07 整理）**: スライド分割のプレビューは
+  `POST /api/admin/lecture-studio/preview-split`（`_require_teacher`・DB 非変更）が
+  `core/lecture.py::split_slides` をそのまま返す。admin.js の JS 並行実装（`lsSplitSlides`）は
+  廃止済み — **クライアント側に分割ロジックを再実装しないこと**。音声準備完了の判定も
+  `core/lecture.py::compute_material_audio_readiness()`（スライド単位 + 言語一致）が単一の
+  正本で、`core/status/projector.py` と `routes/lecture.py::get_topic_audio_status` の両方が
+  これを呼ぶ（G層 To-Do と UI ボタン活性の食い違いを構造的に防止）。
 
 ### 画像読み取りパイプライン + 分野別ナレッジライブラリ（L層, migration 041/042）
 
@@ -881,6 +892,105 @@ P7 スコア・正答率数値を学習者に見せない、REFLECT は事実文
 - **ガードレール**: `backend/tests/test_reconstruction_guardrails.py`（伏せフィールド非漏洩・
   スコア非表示・出題対象制限・削除 API 不在・k-匿名・core が FastAPI 非 import・REFLECT 禁止語彙）。
 
+### 共有物のバージョン管理（V層, migration 037）
+
+パイプライン生成物（`theory_components` / `theory_claims` / `theory_component_graphs` +
+`document_analysis_runs`）とコース（`learning_courses`）を「発行版（Release）」として不変
+スナップショット化し、共有先の教員が**所有者の一方的な更新・削除から保護される**第五の運用機構。
+正本は `docs/features/shared_versioning_design.md`。A層は**読むだけ・非改変**。実装は
+`backend/core/versioning/`（`schema.py` / `audit.py` / `releases.py` / `subscriptions.py` /
+`notifications.py` / `deletion.py` / `resolver.py` / `worker.py`）+
+`backend/api/routes/versioning.py`（実パス `/api/admin/shared/...`）+
+`frontend/public/js/versioning.js`（ES5・`window.Versioning`）。
+
+**確定した仕様**: 版（Release）は所有者の明示発行のみ（下書き編集は発行するまで共有先に見えない）/
+削除猶予は所有者が予約時に指定（既定14日、`DEFAULT_GRACE_DAYS`）。期限（`purge_after`）後に
+全ユーザーから物理削除 / 消費側は fork せず発行版にピン留めして読む（同意（adopt）するまで
+内容が変わらない）。editor は working copy を編集できるが発行・削除はできず、常に HEAD を読む
+（ピンしない）。
+
+- **DB（migration 037）**: `shared_versions`（不変 Release。`object_type CHECK('course','document')` /
+  `object_id TEXT`（ポリモーフィック・FK なし）/ `version_no` / `snapshot JSONB` /
+  `UNIQUE(object_type,object_id,version_no)`）、`shared_version_state`
+  （`PRIMARY KEY(object_type,object_id)`。`active_release_id` / `latest_version_no` /
+  `lifecycle CHECK('active','pending_deletion','purged')` / 削除予約情報）、
+  `shared_version_subscriptions`（消費者のピン。`UNIQUE(object_type,object_id,subscriber_id)` /
+  `pinned_release_id`）、`share_notifications`（通知インボックス。
+  `kind CHECK('version_published','deletion_scheduled','deletion_cancelled','deleted')` /
+  `read_at` / `acted_at`）。既存 `component_citations`（migration 021）に引用の版固定列
+  （`source_object_type` / `source_object_id` / `source_release_id` / `source_version_no`）を追加。
+  document の版は成果物を複製せず、既に不変な `document_analysis_runs.stage_outputs` を指す
+  `analysis_run_id` をピンする（既存資産の再利用）。
+- **API**（`routes/versioning.py`、`/api/admin/shared/...`、全 endpoint `_require_teacher`）:
+  `POST /shared/{object_type}/{object_id}/releases`（発行、所有者限定）/
+  `GET /shared/{object_type}/{object_id}/releases`・`GET /shared/releases/{release_id}`（版一覧・単一）/
+  `GET /shared/{object_type}/{object_id}/version-state`（版状態 + 更新あり/削除予定バッジ）/
+  `POST|DELETE /shared/{object_type}/{object_id}/deletion`（削除予約・取消、所有者限定）/
+  `POST /shared/{object_type}/{object_id}/subscription/adopt`（取り込み、`expected_pinned_release_id`
+  楽観ロック・不一致 409）/ `GET /shared/subscription/me`（本人のピン一覧）/
+  `GET /shared/notifications`・`POST /shared/notifications/{id}/read`・`.../read-all`（インボックス）。
+  学習者向けは `GET /api/learning/courses/{course_id}/version-notice`（削除予定の一行バナー、fail-open）。
+  エラーは `PurgedError`→410 / `PendingDeletionError`・`AdoptConflictError`→409 /
+  `VersioningError`→422 にマッピングする。
+- **読み取りの版解決**: コースは `services._apply_course_version_view()` に一元化し、学習者の
+  全読み取り経路（チャット・lecture・atlas_view 等）が必ず通す。所有者・editor は HEAD（live
+  working copy）、純 viewer・学習者は有効な版（ピン or `active_release_id`）のスナップショットを見る。
+  版未発行のコースは live へフォールバック（既存挙動・後方互換）。document 成果物の読み取り
+  エンドポイント自体のピン凍結ブラウズは v1 未実装（既知の限界。現行は「更新ありバッジ + 通知 +
+  引用時の版固定（auto-pin）」で保護する）。
+- **物理削除（`purge_object`）**: 1オブジェクトを独立トランザクションで冪等削除し、course/document
+  それぞれの既存 orphan（D層 FK-less 孤児含む）まで削除範囲に含める。既存の即時削除
+  `delete_material`/`delete_course` 自体は非改変のまま、削除後に `teardown_versioning()` を
+  best-effort で呼んで版・ピン・通知を掃除し、state を `purged` 墓標として残す。
+- **スイーパ**（`core/versioning/worker.py`）: `main.py _lifespan` で migration 適用後に
+  `threading.Thread` daemon として起動（`VERSION_SWEEPER_ENABLED` 既定 on、
+  `VERSION_SWEEP_INTERVAL_SECONDS` 既定 3600）。`lifecycle='pending_deletion' AND
+  delete_purge_after<=now()` を検出し、権限が消える前に宛先を収集 → `purge_object` →
+  `deleted` 通知配信 → 監査。
+- **監査**: 発行・削除予約/取消/purge・取り込みを `theory_review_events`
+  （`entity_type='shared_release'|'shared_deletion'|'shared_subscription'`）に記録。
+- **フロント**: `versioning.js` の `openModal()`（発行・版履歴・削除予約/取消）+ `initInbox()`
+  （右下の通知ベル🔔・未読バッジ）。`admin.js` の教材管理行/コース管理（所有者行）に「共有版」
+  ボタン。`app.js`（学習者）は受講コースが削除予約中なら猶予バナーを表示するのみ（ピン UI なし）。
+- **ガードレール**: `backend/tests/test_shared_versioning_guardrails.py`（core が FastAPI 非 import・
+  所有者ガード・purge の orphan gap 解消・スイーパの thread+env・監査語彙・ルータ登録）他、
+  `test_shared_versioning_{migration,api,logic}.py`。
+
+### 横断基盤（共有ユーティリティ、2026-07 整理で新設）
+
+同型実装のコピペ増殖を止めるための正本モジュール群。**新機能で同種の処理を書くときは
+必ずこれらを使う**（正本の所在は `docs/architecture/consolidation_survey_2026-07.md` の
+実施記録も参照）。
+
+- **`backend/core/llm_worker/`** — 非同期 LLM worker の共通骨格。`client.py`
+  （`BaseJSONLLMClient(model_setting_key)`・`core.llm` 経由で U層計測を維持）/ `repair.py`
+  （`run_with_repair(...)`: 1+2回試行、修復失敗時の後処理は `on_repair_failed` 注入で各系統に残す）/
+  `cost_gate.py`（`CostGate`(session+daily) / `InMemoryCounterGate`）。tension / structure_anchor /
+  reconstruction / doubt.scope_candidates / doubt.assumption_mining の5系統が利用中。
+  **6系統目はコピペせず15〜20行のアダプタで接続すること**。環境変数名・冪等性フラグ・
+  トリガー条件・DB 書き込みはドメイン側の責務。
+- **`backend/core/privacy.py`** — k-匿名ゲートの正本（`K_ANONYMITY = 3` /
+  `meets_k_anonymity` / `bucket_count_range`(3-5 / 6-10 / 11+) 等）。reconstruction/health.py・
+  doubt/schema.py・services.py の集計はここに委譲済み（表示文言は各所に残る）。
+  **k=3 をリテラルで再定義しない**。
+- **監査 entity_type カタログ** — `backend/core/schema.py` の `AUDIT_ENTITY_*` 定数 +
+  `AUDIT_ENTITY_TYPES`（26語彙）。`theory_review_events` への記帳は原則
+  `services.record_review_event` に委譲する（core 層からの記帳と、呼び出し元トランザクションに
+  同乗する `document_pipeline/persistence.py` のみ例外として直接 INSERT を許容。entity_type は
+  必ずカタログ定数を使う）。
+- **`backend/core/notification_recipients.py`** — 通知宛先解決（所有者 / group member）の共通
+  JOIN プリミティブ。宛先集合の方針（status 系 = owner+editor のみ / V層 = viewer+editor・owner 除外）
+  は各層に残し、SQL だけを共有する。
+- **`services.resolve_document_access(user_id, ref) -> DocumentAccess`** — document の
+  view / edit / owner / canonical id を1回で解決する権限判定の入口（`documents.id` と
+  `source_path` の両対応）。チャンク単位のループ内で `user_can_view_document` を繰り返し
+  呼ばないこと（N+1）。
+- **`backend/tests/guardrail_helpers.py`** — ガードレールテスト用共通アサーション
+  （`assert_module_tree_does_not_import` / `assert_source_forbids` / `extract_function_source` 等）。
+  新しい層のガードレールテストはこれを使って書く。
+- **`src/episteme_graph/agents/cartridge_loader.py` / `cartridge_context.py`** —
+  agent 側 cartridge 読み込みの正本（上記「カートリッジシステム」参照）。
+
 
 ## 開発ルール
 
@@ -902,7 +1012,7 @@ P7 スコア・正答率数値を学習者に見せない、REFLECT は事実文
 
 ### 4. LLM 呼び出しの注意点
 - `system` ロールと `temperature`/`max_tokens` を避ける（o1/o3-mini 互換のため）
-- シングルトンパターン: `db.py`, `llm.py`, `storage.py` は `@lru_cache` または同等の初期化済みインスタンスを使用
+- シングルトンパターン: `llm.py`, `storage.py` は `@lru_cache` または同等の初期化済みインスタンスを使用
 - PostgreSQL セッションは `core/postgres.py` の `get_session()` を使い、必ず `try/finally` で `session.close()` する
 
 ### 5. フロントエンド
@@ -920,7 +1030,9 @@ P7 スコア・正答率数値を学習者に見せない、REFLECT は事実文
 - 実装場所は `src/episteme_graph/agents/<agent_name>/` とする（`backend/` には置かない）
 - 各Agentは `agent.py` の `run()` メソッドを公開インターフェースとする
 - LLM呼び出しは `llm_client.py` に分離し、`agent.py` から直接LLM SDKを呼ばない
-- `CartridgeLoader` は各agentディレクトリに実装する（共通インターフェースを維持）
+- `CartridgeLoader` / `CartridgeContext` の正本は `agents/cartridge_loader.py` / `agents/cartridge_context.py`。
+  各agentディレクトリの `cartridge_loader.py` は正本の薄い再エクスポート（または固有差分のサブクラス）とし、
+  実装をコピペしない（import パスの共通インターフェースは維持）
 - agentの出力は `schema.py` の dataclass に型付けし、必ずJSONシリアライズ可能にする
 - cartridgeがない場合でもagentが単独動作できるよう、すべてのcartridge参照は `Optional` とする
 - domain-specific なロジックをagent内にハードコードしない（cartridgeから読む）
@@ -970,6 +1082,19 @@ P7 スコア・正答率数値を学習者に見せない、REFLECT は事実文
    - 「受講開始」ボタンでクローンAPIを呼び出す
 6. `admin.js` を修正:
    - コースビルダーの承認後に「公開する」ボタンを表示
+
+**※現行仕様（Issue #133 / migration 011 で更新、クローン方式は廃止済み）**:
+上記の `cloned_from` によるコース丸ごとクローン方式は、①マスター更新がクローンに反映されない
+（陳腐化）②マスター削除後もクローンが残る（ゴーストデータ）③同一マスターから複数クローンが
+増殖する、という技術的負債が判明したため `backend/db/011_course_states_separation.sql` で
+廃止された（既存クローンをハードリセットのうえ `learning_courses.cloned_from` カラム自体を
+DROP）。現行は「1つの不変なマスターコース（`learning_courses`）+ ユーザーごとの学習状態
+（`learning_states`）」の分離方式で、`POST /api/learning/courses/{course_id}/enroll`
+（`routes/learning.py::enroll_course`）はコースを複製せず、`services.enroll_user_in_course()`
+が `learning_states`（`user_id`, `course_id`, `progress_data`, `personal_graph`,
+`UNIQUE(user_id, course_id)` で二重受講を DB レベルで防止）に1行 INSERT するだけになっている。
+`app.js` の「受講開始」ボタンが呼ぶ API パス自体は変わっていないが、内部動作はクローン生成
+ではなく学習状態の作成である。
 
 ### A3: 前提知識チェックをコースデータで動作させる
 

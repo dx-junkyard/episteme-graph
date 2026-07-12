@@ -232,6 +232,149 @@ class TestGetCourseLectureLanguage:
 
 
 # ---------------------------------------------------------------------------
+# 1b. core.lecture.compute_material_audio_readiness (Tier2-11: 音声 readiness の一本化)
+#
+# core/status/projector.py と api/routes/lecture.py::get_topic_audio_status の両方が
+# 呼ぶ唯一の正本判定。スライド単位 + 言語一致で readiness を決める。
+# ---------------------------------------------------------------------------
+
+
+class TestComputeMaterialAudioReadiness:
+    def test_no_material_ids_returns_empty_without_querying(self):
+        from core.lecture import compute_material_audio_readiness
+
+        session = MagicMock()
+        result = compute_material_audio_readiness(session, [], "ja")
+
+        session.execute.assert_not_called()
+        assert result == {
+            "total_chunks": 0,
+            "generated_chunks": 0,
+            "ready_chunks": 0,
+            "total_slides": 0,
+            "ready_slides": 0,
+            "stale_language": False,
+        }
+
+    def test_no_chunk_rows_returns_empty(self):
+        from core.lecture import compute_material_audio_readiness
+
+        chunk_result = MagicMock()
+        chunk_result.fetchall.return_value = []
+        session = MagicMock()
+        session.execute.side_effect = [chunk_result]
+
+        result = compute_material_audio_readiness(session, ["m1"], "ja")
+
+        assert result["total_chunks"] == 0
+        assert result["total_slides"] == 0
+
+    def test_single_slide_chunks_ready_and_not_ready(self):
+        from core.lecture import compute_material_audio_readiness
+
+        # 10 チャンク（マーカーなし = 1スライド/チャンク）、うち4チャンクに音声キャッシュあり
+        chunk_rows = [
+            (f"c{i}", f"text {i}", f"text {i}", f"spoken {i}", [], "ja")
+            for i in range(10)
+        ]
+        audio_rows = [(f"c{i}", 0) for i in range(4)]
+
+        chunk_result = MagicMock()
+        chunk_result.fetchall.return_value = chunk_rows
+        audio_result = MagicMock()
+        audio_result.fetchall.return_value = audio_rows
+
+        session = MagicMock()
+        session.execute.side_effect = [chunk_result, audio_result]
+
+        result = compute_material_audio_readiness(session, ["m1"], "ja")
+
+        assert result["total_chunks"] == 10
+        assert result["generated_chunks"] == 10
+        assert result["ready_chunks"] == 4
+        assert result["total_slides"] == 10
+        assert result["ready_slides"] == 4
+        assert result["stale_language"] is False
+
+    def test_multi_slide_chunk_counts_slides_not_chunks(self):
+        """1チャンクが2スライドに分割される場合、readiness はスライド単位で数える
+        （chunk 単位の粗い判定なら1行のキャッシュだけで「対応チャンク済み」と誤認しうる）。"""
+        from core.lecture import compute_material_audio_readiness
+
+        display = "Slide A\n===\nSlide B"
+        spoken = "Speak A\n===\nSpeak B"
+        chunk_rows = [("c0", display, display, spoken, [], "ja")]
+        audio_rows = [("c0", 0)]  # スライド0のみ音声あり（スライド1は未生成）
+
+        chunk_result = MagicMock()
+        chunk_result.fetchall.return_value = chunk_rows
+        audio_result = MagicMock()
+        audio_result.fetchall.return_value = audio_rows
+
+        session = MagicMock()
+        session.execute.side_effect = [chunk_result, audio_result]
+
+        result = compute_material_audio_readiness(session, ["m1"], "ja")
+
+        assert result["total_slides"] == 2
+        assert result["ready_slides"] == 1
+        assert result["ready_chunks"] == 1
+        assert result["total_chunks"] == 1
+
+    def test_stale_language_not_counted_as_ready(self):
+        from core.lecture import compute_material_audio_readiness
+
+        chunk_rows = [("c0", "text", "text", "spoken", [], "en")]
+        audio_rows = [("c0", 0)]
+
+        chunk_result = MagicMock()
+        chunk_result.fetchall.return_value = chunk_rows
+        audio_result = MagicMock()
+        audio_result.fetchall.return_value = audio_rows
+
+        session = MagicMock()
+        session.execute.side_effect = [chunk_result, audio_result]
+
+        result = compute_material_audio_readiness(session, ["m1"], "ja")
+
+        assert result["ready_slides"] == 0
+        assert result["ready_chunks"] == 1  # 「何かキャッシュがある」ことは分かる
+        assert result["stale_language"] is True
+
+
+# ---------------------------------------------------------------------------
+# 1c. core.lecture.count_slide_marker_segments (Tier2-11: プレビュー整合インジケータ用)
+# ---------------------------------------------------------------------------
+
+
+class TestCountSlideMarkerSegments:
+    def test_no_marker_is_one_segment_each(self):
+        from core.lecture import count_slide_marker_segments
+
+        assert count_slide_marker_segments("Hello", "Speak") == (1, 1)
+
+    def test_marker_splits_into_multiple_segments(self):
+        from core.lecture import count_slide_marker_segments
+
+        display_count, spoken_count = count_slide_marker_segments(
+            "A\n===\nB\n===\nC", "X\n===\nY",
+        )
+        assert display_count == 3
+        assert spoken_count == 2
+
+    def test_empty_spoken_text_is_zero_segments(self):
+        from core.lecture import count_slide_marker_segments
+
+        assert count_slide_marker_segments("A", None) == (1, 0)
+        assert count_slide_marker_segments("A", "") == (1, 0)
+
+    def test_none_display_text_is_zero_segments(self):
+        from core.lecture import count_slide_marker_segments
+
+        assert count_slide_marker_segments(None, None) == (0, 0)
+
+
+# ---------------------------------------------------------------------------
 # 2. GET .../sequence — slides / total_slides / language
 # ---------------------------------------------------------------------------
 

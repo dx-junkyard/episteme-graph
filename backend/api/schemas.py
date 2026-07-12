@@ -255,7 +255,6 @@ class LearningSession(BaseModel):
 
 
 class LearningProgress(BaseModel):
-    mastered_concepts: int = 0
     learning_concepts: int = 0
     misconceptions: int = 0
     streak_days: int = 0
@@ -652,7 +651,6 @@ class LectureScriptChunkOut(BaseModel):
     smiles_dsl: str = ""
     variables: dict | list | None = None
     ancestors: list | None = None
-    neo4j_node_id: str = ""
     graph_elements: list[dict] = []
     # レクチャースライド同期 + 音声言語切替 (migration 040 Phase 4)
     spoken_language: str | None = None  # 原稿の生成言語。None/未生成時は "ja" とみなす
@@ -696,6 +694,33 @@ class LectureScriptSaveResponse(BaseModel):
     """手動スクリプト保存レスポンス。"""
     chunk_id: str
     status: str = "edited"
+
+
+class LecturePreviewSplitRequest(BaseModel):
+    """原稿スタジオのプレビュー用スライド分割リクエスト（DB 非変更, Tier2-11）。
+
+    ``core.lecture.split_slides`` をそのまま呼ぶための入力。未保存の編集途中テキストも
+    そのまま渡せる（保存済みチャンクである必要はない）。
+    """
+    display_text: str = ""
+    spoken_text: str | None = None
+    formulas: list[dict] = []
+
+
+class LecturePreviewSplitResponse(BaseModel):
+    """原稿スタジオのプレビュー用スライド分割レスポンス。
+
+    ``core.lecture.split_slides`` の結果をそのまま返す。プレビュー（本レスポンス）と
+    配信（``get_lecture_sequence`` 等）が同一の分割ロジックを共有するための唯一の経路
+    （docs/features/lecture_slide_sync_design.md「プレビューと配信で分割ロジックを
+    共有すること」）。``display_segment_count``/``spoken_segment_count`` は
+    整合インジケータ表示専用の補助情報（``mismatch=True`` の場合 ``slides`` は1件に
+    縮退するため、縮退前のセグメント数をクライアントに渡す）。
+    """
+    slides: list[LectureSlide] = []
+    mismatch: bool = False
+    display_segment_count: int = 0
+    spoken_segment_count: int = 0
 
 
 class LectureScriptRewriteRequest(BaseModel):

@@ -1,7 +1,11 @@
 """通知インボックス。発行・削除予約・取消・削除を共有先へ配信する。
 
 宛先＝当該オブジェクトに viewer|editor を持つグループメンバー（所有者は exclude）。
-join 形は services._has_document_group_permission / user_can_view_course と同型。
+JOIN の形（*_group_permissions を group_members と JOIN する部分）は
+core.notification_recipients に集約している（core/status/notification_rules.py と
+同型の実装が独立に存在していたのを統合。Tier2 提案10）。「所有者を含めない」
+「viewer も対象にする」「レガシー単一グループ共有も含める」という組み立て自体は
+このファイル固有（V層の共有可視性の要件）。
 """
 from __future__ import annotations
 
@@ -10,6 +14,7 @@ import logging
 
 from sqlalchemy import text as sa_text
 
+from core import notification_recipients as _recipients
 from core.postgres import get_session
 
 from . import schema
@@ -27,34 +32,10 @@ def _recipient_ids(session, object_type: str, object_id: str) -> list[str]:
       通知の宛先も揃える（更新・削除予約・削除の取りこぼしを防ぐ）。
     """
     if object_type == schema.OBJECT_TYPE_COURSE:
-        rows = session.execute(
-            sa_text("""
-                SELECT DISTINCT gm.user_id::text
-                FROM course_group_permissions p
-                JOIN group_members gm ON gm.group_id = p.group_id
-                WHERE p.course_id = :oid AND p.permission IN ('viewer','editor')
-            """),
-            {"oid": object_id},
-        ).fetchall()
-    else:
-        rows = session.execute(
-            sa_text("""
-                SELECT DISTINCT uid FROM (
-                    SELECT gm.user_id::text AS uid
-                    FROM document_group_permissions p
-                    JOIN group_members gm ON gm.group_id = p.group_id
-                    WHERE p.document_id = CAST(:oid AS uuid) AND p.permission IN ('viewer','editor')
-                    UNION
-                    SELECT gm.user_id::text AS uid
-                    FROM documents d
-                    JOIN group_members gm ON gm.group_id = d.group_id
-                    WHERE d.id = CAST(:oid AS uuid)
-                      AND d.visibility = 'group' AND d.group_id IS NOT NULL
-                ) t
-            """),
-            {"oid": object_id},
-        ).fetchall()
-    return [str(r[0]) for r in rows]
+        return _recipients.course_group_member_ids(session, object_id, ("viewer", "editor"))
+    ids = set(_recipients.document_group_member_ids(session, object_id, ("viewer", "editor")))
+    ids.update(_recipients.document_legacy_group_visibility_member_ids(session, object_id))
+    return list(ids)
 
 
 def fan_out(
