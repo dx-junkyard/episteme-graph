@@ -317,6 +317,10 @@ class TestAdminRoutesDelegateToProjector:
         assert "status_projector.derive_material_status(" in body
         assert "_legacy_material_status(" in body
 
+    def test_list_materials_latest_run_query_selects_run_id(self):
+        body = self._list_materials_body()
+        assert "id::text AS id" in body
+
     def test_get_material_calls_projector_for_run_aware_status(self):
         body = self._get_material_body()
         assert "status_projector.project_material_status(" in body

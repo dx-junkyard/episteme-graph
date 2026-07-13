@@ -600,7 +600,7 @@ def list_materials(
                 sa_text(
                     f"""
                     SELECT DISTINCT ON (material_id)
-                           material_id, status, current_stage, error_message,
+                           id::text AS id, material_id, status, current_stage, error_message,
                            stage_outputs, updated_at, completed_at
                     FROM document_analysis_runs
                     WHERE material_id IN ({run_placeholders})
