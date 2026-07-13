@@ -1581,6 +1581,23 @@ def test_export_validation_error_summary_includes_first_errors():
     assert "(+1 more)" in summary
 
 
+# --- Tier 3-19: PipelineStage 抽象化の構造不変条件 ---------------------------
+
+
+def test_pipeline_steps_match_pipeline_stages():
+    """_PIPELINE_STEPS の named ステージ列は PIPELINE_STAGES（completed を除く）と
+    完全一致しなければならない（ステージの脱落・順序ズレ・二重登録の構造的検出）。
+    name=None のフックステップ（resume に関係なく毎回実行される中間処理）は対象外。"""
+    from core.document_pipeline.orchestrator import PIPELINE_STAGES, _PIPELINE_STEPS
+
+    named = [step.name for step in _PIPELINE_STEPS if step.name is not None]
+    expected = [stage for stage in PIPELINE_STAGES if stage != "completed"]
+    assert named == expected
+
+    # 各ステップは実行可能な execute を持つ
+    assert all(callable(step.execute) for step in _PIPELINE_STEPS)
+
+
 # --- issue #282: GROBID integration ----------------------------------------
 
 

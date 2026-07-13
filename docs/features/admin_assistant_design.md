@@ -13,7 +13,7 @@
 | 既存AI機能 | 画面 | 実体 | 種別 |
 |---|---|---|---|
 | コース構築チャット | `course-builder` タブ | `POST /api/admin/course-builder/chat`（[`admin.py:1451`](../../backend/api/routes/admin.py)）+ `course_builder_sessions` 永続化 | 多ターンチャット・提案のみ（DB非変更） |
-| 原稿スタジオ アシスタント | `lecture-studio` タブ（`#ls-assistant-modal`） | `POST /api/admin/chunks/{chunk_id}/lecture-script/rewrite`（[`lecture_studio.py:1190`](../../backend/api/routes/lecture_studio.py)）/ `.../course-topics/{topic_id}/draft/rewrite`（[`lecture_studio.py:2664`](../../backend/api/routes/lecture_studio.py)） | 表示中要素の**修正代行**（`lsRewriteScript()` [`admin.js:9226`](../../frontend/public/js/admin.js)） |
+| 原稿スタジオ アシスタント | `lecture-studio` タブ（`#ls-assistant-modal`） | `POST /api/admin/chunks/{chunk_id}/lecture-script/rewrite` / `.../course-topics/{topic_id}/draft/rewrite`（[`routes/lecture_studio/`](../../backend/api/routes/lecture_studio/) パッケージ） | 表示中要素の**修正代行**（`lsRewriteScript()` [`admin.js:9226`](../../frontend/public/js/admin.js)） |
 | コンポーネント候補生成 | 質問由来 | `POST /api/admin/theory-components/candidates/from-query`（[`theory_components.py:3340`](../../backend/api/routes/theory_components.py)） | 候補をDBに作成（`status=candidate`） |
 
 **課題:**
@@ -211,7 +211,7 @@ class AssistantAction(Protocol):
     def revert(self, before: dict) -> None: ...   # reversible=True のときのみ
 ```
 
-`apply` は**既存エンドポイント/関数を呼ぶだけ**（P7）。例: `lecture_studio.rewrite_chunk_script` は内部で `rewrite_lecture_script()` の結果を返し、確定保存は既存 `PUT /chunks/{id}/lecture-script`（[`lecture_studio.py:964`](../../backend/api/routes/lecture_studio.py)）に委ねる。
+`apply` は**既存エンドポイント/関数を呼ぶだけ**（P7）。例: `lecture_studio.rewrite_chunk_script` は内部で `rewrite_lecture_script()` の結果を返し、確定保存は既存 `PUT /chunks/{id}/lecture-script`（[`routes/lecture_studio/`](../../backend/api/routes/lecture_studio/) パッケージ）に委ねる。
 
 ### 6.2 リスク階層と確認ゲート（P2）
 | リスク | 例 | 挙動 |

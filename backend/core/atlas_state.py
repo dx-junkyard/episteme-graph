@@ -39,6 +39,7 @@ from sqlalchemy import bindparam
 from sqlalchemy import text as sa_text
 
 from core import atlas_placement
+from core.course_data import course_cartridge_id, course_source_material_ids, course_topics
 
 logger = logging.getLogger(__name__)
 
@@ -829,16 +830,11 @@ def resolve_course_cartridge(session, course_data: dict) -> str:
          (status='completed' の最頻カートリッジ、同数なら id 昇順)
       3. 既定カートリッジへ縮退
     """
-    if isinstance(course_data, dict):
-        explicit = str(course_data.get("cartridge_id") or "").strip()
-        if explicit:
-            return explicit
+    explicit = course_cartridge_id(course_data)
+    if explicit:
+        return explicit
 
-    material_ids: list[str] = []
-    if isinstance(course_data, dict):
-        for source in course_data.get("sources") or []:
-            if isinstance(source, dict) and source.get("material_id"):
-                material_ids.append(str(source["material_id"]))
+    material_ids = course_source_material_ids(course_data)
     if material_ids and session is not None:
         try:
             row = session.execute(
@@ -871,7 +867,7 @@ def course_has_skeleton_anchor(session, skeleton, cartridge_id: str, course_data
         return False
     from core import atlas as atlas_module
 
-    topics = [t for t in (course_data.get("topics") or []) if isinstance(t, dict)]
+    topics = [t for t in course_topics(course_data) if isinstance(t, dict)]
 
     # 1) 明示 binding / ラベル一致 (純粋・非DB)
     for topic in topics:

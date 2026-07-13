@@ -34,6 +34,12 @@ from services import (
     persist_chat_history,
     search_chunks_with_metadata,
 )
+from core.course_data import (
+    course_source_material_ids,
+    course_sources,
+    course_title as _course_title,
+    find_course_topic,
+)
 from core.lecture import (
     build_lecture_sequence,
     compute_material_audio_readiness,
@@ -76,11 +82,7 @@ def get_lecture_sequence(
         raise HTTPException(status_code=404, detail="Course not found")
 
     # トピック情報を取得
-    topic_info = None
-    for t in course_data.get("topics", []):
-        if t.get("id") == topic_id:
-            topic_info = t
-            break
+    topic_info = find_course_topic(course_data, topic_id)
     if not topic_info:
         raise HTTPException(status_code=404, detail="Topic not found")
 
@@ -101,8 +103,7 @@ def get_lecture_sequence(
         )
 
     # コースのソース教材 (material_id) を収集
-    sources = course_data.get("sources", [])
-    material_ids = [s.get("material_id") for s in sources if s.get("material_id")]
+    material_ids = course_source_material_ids(course_data)
 
     if not material_ids:
         # ソースが指定されていない場合はシステム全域から検索
@@ -393,9 +394,7 @@ def get_topic_audio_status(
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
 
-    topic_info = next(
-        (t for t in course_data.get("topics", []) if t.get("id") == topic_id), None,
-    )
+    topic_info = find_course_topic(course_data, topic_id)
     if not topic_info:
         raise HTTPException(status_code=404, detail="Topic not found")
 
@@ -421,8 +420,7 @@ def get_topic_audio_status(
     ):
         return empty
 
-    sources = course_data.get("sources", [])
-    material_ids = [s.get("material_id") for s in sources if s.get("material_id")]
+    material_ids = course_source_material_ids(course_data)
     if not material_ids:
         return empty
 
@@ -497,12 +495,8 @@ def lecture_interrupt_chat(
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
 
-    course_title = course_data.get("title", course_id)
-    topic_info = None
-    for t in course_data.get("topics", []):
-        if t.get("id") == topic_id:
-            topic_info = t
-            break
+    course_title = _course_title(course_data, default=course_id)
+    topic_info = find_course_topic(course_data, topic_id)
     topic_title = topic_info["title"] if topic_info else topic_id
     # domain が未設定の場合は course_title にフォールバック
     domain = course_data.get("domain") or course_title
@@ -598,8 +592,7 @@ def _topic_has_linkable_material(topic: dict, course_data: dict) -> bool:
     """
     if topic.get("material_chunk_ids"):
         return True
-    sources = course_data.get("sources", []) if isinstance(course_data, dict) else []
-    return any(isinstance(s, dict) and s.get("material_id") for s in sources)
+    return any(s.get("material_id") for s in course_sources(course_data))
 
 
 import re as _re

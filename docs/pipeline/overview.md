@@ -22,36 +22,41 @@
 
 ---
 
-## 2. パイプライン 23 ステージ
+## 2. パイプライン 26 ステージ
 
-`orchestrator.py:39-64` の `PIPELINE_STAGES`。LLM=LLM-first、Det=決定論的（非 LLM）。
+`orchestrator.py` の `_PIPELINE_STEPS`（名前付き26ステージ + between-stage 決定論的後処理の
+`_hook_*` フック2件）。LLM=LLM-first、Det=決定論的（非 LLM）。
 
 | # | ステージ | 担当 Agent / 処理 | 種別 | 出力（要旨） |
 |---|---|---|---|---|
 | 1 | `save_pdf` | PDF を一時ファイルへ | Det | — |
 | 2 | `grobid_parse` | GROBID で TEI-XML 抽出（失敗時 PyMuPDF へフォールバック、非致命的） | Det | TEI-XML |
 | 3 | `document_structure` | **DocumentStructureAgent** 文書構造復元 | structure-first | DocumentStructureResult（blocks, sections, metadata） |
-| 4 | `source_chunking` | ブロックからチャンク生成 | Det | チャンク |
-| 5 | `source_embedding` | チャンクを pgvector へ保存 | Det | — |
-| 6 | `paper_skeleton` | **PaperSkeletonAgent** 論文 backbone 仮説化 | LLM | PaperSkeletonResult |
-| 7 | `rhetorical_role` | **RhetoricalRoleAgent** 論理役割判定 | LLM | RhetoricalRoleResult |
-| 8 | `claim_qualification` | **ClaimQualificationAgent** Claim 採否・区分 + atomic rewrite | LLM | ClaimQualificationResult |
-| 9 | `equation_semantics` | **EquationSemanticsAgent** 数式の意味役割復元 | LLM | EquationSemanticsResult |
-| 10 | `evidence_registry` | **EvidenceRegistryBuilder** PDF 原文 evidence の一元管理 | Det | EvidenceRegistryResult |
-| 11 | `claim_object_builder` | **ClaimObjectBuilder** 最終 claims.json 組立 | Det | ClaimObjectBuildResult |
-| 12 | `symbol_registry` | **SymbolRegistryBuilder** 数式記号の定義・表記ゆれ管理 | Det | SymbolRegistryResult |
-| 13 | `derivation_chain` | **DerivationChainAgent** 式間導出チェーン構築 | Det | DerivationChainResult |
-| 14 | `figure_table_semantics` | **FigureTableSemanticsAgent** 図表の意味復元 | caption-first | FigureTableSemanticsResult |
-| 15 | `thesis_reconstruction` | **ThesisReconstructionAgent** 中心命題・支持構造の再構成 | LLM | ThesisReconstructionResult |
-| 16 | `dsl_linking` | **DSLLinkingAgent** Claim/Equation/Thesis → DSL グラフ接続 | LLM | DSLLinkingResult |
-| 17 | `dsl_embedding` | DSL を pgvector へ保存（検索用） | Det | — |
-| 18 | `component_assembly` | **ComponentAssemblyAgent** 再利用可能コンポーネント生成 | LLM | ComponentAssemblyResult |
-| 19 | `component_graph` | **ComponentGraphAgent** 理論操作グラフ構築 | Det+LLM | ComponentGraphResult |
-| 20 | `narrative_annotator` | **NarrativeAnnotator** main graph への narrative 注釈（構造非変更） | LLM | NarrativeAnnotationResult |
-| 21 | `course_mapping` | **CourseMappingAgent** Component → Course topic 接続 | Det | CourseMappingResult |
-| 22 | `blueprint` | **BlueprintAgent** ナラティブアーク合成 | Det | Blueprint |
-| 23 | `export_validation` | **ExportValidationGate** 最終検証ゲート | Det | 検証結果 |
-| — | `persist_claims_components_graph` | claims/components/graph を PostgreSQL へ永続化 | Det | — |
+| 4 | `figure_image_extraction` | PyMuPDF 埋め込み画像抽出 + caption 近傍の領域レンダリング fallback（常時実行） | Det | document_figures（MinIO `figure-images`） |
+| 5 | `source_chunking` | ブロックからチャンク生成 | Det | チャンク |
+| 6 | `source_embedding` | チャンクを pgvector へ保存 | Det | — |
+| 7 | `paper_skeleton` | **PaperSkeletonAgent** 論文 backbone 仮説化 | LLM | PaperSkeletonResult |
+| 8 | `rhetorical_role` | **RhetoricalRoleAgent** 論理役割判定 | LLM | RhetoricalRoleResult |
+| 9 | `claim_qualification` | **ClaimQualificationAgent** Claim 採否・区分 + atomic rewrite | LLM | ClaimQualificationResult |
+| 10 | `equation_semantics` | **EquationSemanticsAgent** 数式の意味役割復元 | LLM | EquationSemanticsResult |
+| 11 | `evidence_registry` | **EvidenceRegistryBuilder** PDF 原文 evidence の一元管理 | Det | EvidenceRegistryResult |
+| 12 | `claim_object_builder` | **ClaimObjectBuilder** 最終 claims.json 組立 | Det | ClaimObjectBuildResult |
+| — | （フック） `_hook_claim_equation_canonicalization` | claim/equation の正規化後処理 | Det | — |
+| 13 | `symbol_registry` | **SymbolRegistryBuilder** 数式記号の定義・表記ゆれ管理 | Det | SymbolRegistryResult |
+| 14 | `derivation_chain` | **DerivationChainAgent** 式間導出チェーン構築 | Det | DerivationChainResult |
+| — | （フック） `_hook_equation_claim_synthesis` | 式↔claim の合成後処理 | Det | — |
+| 15 | `figure_table_semantics` | **FigureTableSemanticsAgent** 図表の意味復元 | caption-first | FigureTableSemanticsResult |
+| 16 | `apparatus_semantics` | **ApparatusSemanticsAgent**（L層）装置・パーツ候補抽出（`analyze_images=true` 時のみ、常に `review_required`） | vision LLM | ApparatusSemanticsResult |
+| 17 | `thesis_reconstruction` | **ThesisReconstructionAgent** 中心命題・支持構造の再構成 | LLM | ThesisReconstructionResult |
+| 18 | `dsl_linking` | **DSLLinkingAgent** Claim/Equation/Thesis → DSL グラフ接続 | LLM | DSLLinkingResult |
+| 19 | `dsl_embedding` | DSL を pgvector へ保存（検索用） | Det | — |
+| 20 | `component_assembly` | **ComponentAssemblyAgent** 再利用可能コンポーネント生成 | LLM | ComponentAssemblyResult |
+| 21 | `component_graph` | **ComponentGraphAgent** 理論操作グラフ構築 | Det+LLM | ComponentGraphResult |
+| 22 | `narrative_annotator` | **NarrativeAnnotator** main graph への narrative 注釈（構造非変更） | LLM | NarrativeAnnotationResult |
+| 23 | `course_mapping` | **CourseMappingAgent** Component → Course topic 接続 | Det | CourseMappingResult |
+| 24 | `blueprint` | **BlueprintAgent** ナラティブアーク合成 | Det | Blueprint |
+| 25 | `export_validation` | **ExportValidationGate** 最終検証ゲート | Det | 検証結果 |
+| 26 | `persist_claims_components_graph` | claims/components/graph を PostgreSQL へ永続化 | Det | — |
 | — | `completed` | ラン完了マーク | — | — |
 
 ---

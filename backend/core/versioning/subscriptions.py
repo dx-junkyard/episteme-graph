@@ -197,13 +197,15 @@ def adopt_latest(
                     "pinned_release_id changed since read; refresh and retry"
                 )
 
-        # 関連する未対応通知に acted_at を刻む
+        # 関連する未対応通知に acted_at を刻む（migration 045 で user_notifications に統合。
+        # source='shared' でスコープし status 層の行を巻き込まない）
         session.execute(
             sa_text("""
-                UPDATE share_notifications
+                UPDATE user_notifications
                 SET acted_at = now()
                 WHERE recipient_id = CAST(:uid AS uuid)
-                  AND object_type = :ot AND object_id = :oid
+                  AND source = 'shared'
+                  AND entity_type = :ot AND entity_id = :oid
                   AND kind = 'version_published' AND acted_at IS NULL
             """),
             {"uid": subscriber_id, "ot": object_type, "oid": object_id},

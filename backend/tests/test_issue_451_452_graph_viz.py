@@ -5,7 +5,8 @@
 #452: 主グラフに前提→主張アンカーの推奨経路を順序付きで重畳。経路は到達可能ノードのみ
       （reachability 検証）。特定ノードID列をハードコードしない。
 
-frontend に JS テストハーネスが無いため、admin.js の純粋ヘルパを Node で評価して
+frontend に JS テストハーネスが無いため、原稿スタジオ（Lecture Script Studio。Tier 3-17b で
+admin.js から admin-lecture-studio.js へ分離済み）の純粋ヘルパを Node で評価して
 ドメイン横断の入力に対する挙動を検証する（Node が無い環境では source-assertion に縮退）。
 """
 from __future__ import annotations
@@ -18,7 +19,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-ADMIN_JS = ROOT / "frontend" / "public" / "js" / "admin.js"
+ADMIN_LS_JS = ROOT / "frontend" / "public" / "js" / "admin-lecture-studio.js"
 STYLES_CSS = ROOT / "frontend" / "public" / "css" / "styles.css"
 SCHEMAS = ROOT / "backend" / "api" / "schemas.py"
 
@@ -29,7 +30,7 @@ def _read(path: Path) -> str:
 
 class TestIssue451PolaritySource:
     def test_polarity_helper_and_field_based(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         assert "function lsGraphEdgePolarity" in source
         # 判定は edge.polarity フィールドに基づく。
         assert "edge.polarity" in source
@@ -46,7 +47,7 @@ class TestIssue451PolaritySource:
         assert "polarity: str = \"\"" in schemas[start:end]
 
     def test_legend_explains_polarity(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         assert "ls-legend-line-negative" in source
         css = _read(STYLES_CSS)
         assert ".ls-legend-line-negative" in css
@@ -65,13 +66,13 @@ class TestIssue451PolaritySource:
 
 class TestIssue452ReadingPath:
     def test_path_helpers_exist(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         for fn in ("function lsGraphComputeReadingPath", "function lsGraphReadingPathToggleHtml",
                    "function lsBindGraphReadingPathToggle", "function lsCircledNumber"):
             assert fn in source, fn
 
     def test_path_uses_reachability_and_anchor_not_hardcoded(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         body = source[source.index("function lsGraphComputeReadingPath"):][:3000]
         # アンカーは node フラグ由来、順序は stage 由来、到達可能性で検証。
         assert "is_thesis_anchor" in body
@@ -79,7 +80,7 @@ class TestIssue452ReadingPath:
         assert "canReachAnchor" in body and "reachableFromRoot" in body
 
     def test_path_overlay_and_css(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         assert "pathOrder" in source
         assert "lsCircledNumber(pathOrder[id])" in source
         css = _read(STYLES_CSS)
@@ -125,7 +126,7 @@ process.stdout.write(JSON.stringify(out));
 """
     script = tmp_path / "h.js"
     script.write_text(harness, encoding="utf-8")
-    proc = subprocess.run(["node", str(script), str(ADMIN_JS)], capture_output=True, text=True, timeout=30)
+    proc = subprocess.run(["node", str(script), str(ADMIN_LS_JS)], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)
     # #451 — distinction is from the polarity field, independent of label

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import text as sa_text
 
+from core.course_data import course_source_material_ids, course_sources, course_topics
 from core.lecture import normalize_to_placeholder_format as _normalize_formulas
 from core.llm import generate_text, generate_text_with_structured_output, generate_embeddings, get_embedding_dim
 from core.postgres import get_session as _pg_session
@@ -568,7 +569,7 @@ def course_deletion_notice(course_id: str) -> dict | None:
         return None
     data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
     owner_id = row[1]
-    sources = data.get("sources", []) if isinstance(data, dict) else []
+    sources = course_sources(data)
 
     candidates: list[tuple[str, dict]] = []
     seen_docs: set[str] = set()
@@ -673,20 +674,24 @@ def get_user_group_ids(user_id: str) -> list[str]:
 
 
 def get_course_group_permissions(course_id: str) -> list[dict]:
-    """コースに紐づくグループ権限マッピング一覧を返す（グループ名付き）。"""
+    """コースに紐づくグループ権限マッピング一覧を返す（グループ名付き）。
+
+    object_group_permissions（migration 044、統合前は専用テーブル=migration 010）を
+    object_type='course' で絞り込む。
+    """
     session = _pg_session()
     try:
         rows = session.execute(
             sa_text("""
-                SELECT cgp.course_id,
+                SELECT cgp.object_id AS course_id,
                        cgp.group_id,
                        COALESCE(g.name, '') AS group_name,
                        cgp.permission,
                        cgp.created_at,
                        cgp.updated_at
-                FROM course_group_permissions cgp
+                FROM object_group_permissions cgp
                 LEFT JOIN groups g ON g.id = cgp.group_id
-                WHERE cgp.course_id = :course_id
+                WHERE cgp.object_type = 'course' AND cgp.object_id = :course_id
                 ORDER BY cgp.permission, g.name
             """),
             {"course_id": course_id},
@@ -740,9 +745,10 @@ def user_can_edit_course(user_id: str, course_id: str) -> bool:
         editor_row = session.execute(
             sa_text("""
                 SELECT 1
-                FROM course_group_permissions cgp
+                FROM object_group_permissions cgp
                 JOIN group_members gm ON gm.group_id = cgp.group_id
-                WHERE cgp.course_id = :course_id
+                WHERE cgp.object_type = 'course'
+                  AND cgp.object_id = :course_id
                   AND cgp.permission = 'editor'
                   AND gm.user_id = CAST(:uid AS uuid)
                 LIMIT 1
@@ -769,9 +775,10 @@ def user_can_view_course(user_id: str, course_id: str) -> bool:
         row = session.execute(
             sa_text("""
                 SELECT 1
-                FROM course_group_permissions cgp
+                FROM object_group_permissions cgp
                 JOIN group_members gm ON gm.group_id = cgp.group_id
-                WHERE cgp.course_id = :course_id
+                WHERE cgp.object_type = 'course'
+                  AND cgp.object_id = :course_id
                   AND cgp.permission = 'viewer'
                   AND gm.user_id = CAST(:uid AS uuid)
                 LIMIT 1
@@ -810,7 +817,7 @@ def user_can_access_group(user_id: str, group_id: str | None) -> bool:
 # ---------------------------------------------------------------------------
 # パイプライン成果（theory_components / theory_claims / theory_component_graphs /
 # document_analysis_runs）はすべて document_id 由来なので、権限はドキュメント単位に
-# 集約し、成果はそれを継承する（course_group_permissions の移植）。
+# 集約し、成果はそれを継承する（object_group_permissions の object_type='document'）。
 
 
 def _resolve_document(document_ref: str) -> dict | None:
@@ -845,7 +852,7 @@ def _resolve_document(document_ref: str) -> dict | None:
 
 
 def _has_document_group_permission(user_id: str, document_uuid: str, permissions: tuple[str, ...]) -> bool:
-    """ユーザーが document_group_permissions 経由で当該権限を持つか。"""
+    """ユーザーが object_group_permissions（object_type='document'）経由で当該権限を持つか。"""
     if not permissions:
         return False
     session = _pg_session()
@@ -857,9 +864,10 @@ def _has_document_group_permission(user_id: str, document_uuid: str, permissions
         row = session.execute(
             sa_text(f"""
                 SELECT 1
-                FROM document_group_permissions dgp
+                FROM object_group_permissions dgp
                 JOIN group_members gm ON gm.group_id = dgp.group_id
-                WHERE dgp.document_id = CAST(:did AS uuid)
+                WHERE dgp.object_type = 'document'
+                  AND dgp.object_id = CAST(:did AS uuid)::text
                   AND dgp.permission IN ({ph})
                   AND gm.user_id = CAST(:uid AS uuid)
                 LIMIT 1
@@ -883,8 +891,9 @@ def user_can_view_document(user_id: str, document_ref: str) -> bool:
     - 所有者
     - visibility='public'
     - visibility='group' の単一グループ共有（既存）に所属
-    - document_group_permissions の viewer/editor グループに所属（migration 035）
-    のいずれか。コース経由の閲覧可否（既存の course_group_permissions）は
+    - object_group_permissions（migration 044、統合前は専用テーブル=migration 035）の
+      viewer/editor グループに所属
+    のいずれか。コース経由の閲覧可否（既存の object_group_permissions object_type='course'）は
     呼び出し側（theory_components._ensure_document_viewable）が別途フォールバックする。
     """
     doc = _resolve_document(document_ref)
@@ -903,7 +912,7 @@ def user_can_edit_document(user_id: str, document_ref: str) -> bool:
     """ユーザーがドキュメントの解析成果を編集（再解析・説明追加等）できるか。
 
     - 所有者
-    - document_group_permissions の editor グループに所属
+    - object_group_permissions（object_type='document'）の editor グループに所属
     のいずれか。
     """
     doc = _resolve_document(document_ref)
@@ -921,8 +930,8 @@ class DocumentAccess:
     `_resolve_document` の呼び出しを1回に集約し、view / edit / owner をまとめて返す。
     判定条件そのものは `user_can_view_document` / `user_can_edit_document` /
     `user_owns_document` と完全に同一にする（リファクタリングであって仕様変更ではない）。
-    コース経由（course_group_permissions）のフォールバックはここには含めない
-    （ドキュメント単体に閉じた判定のみ。コースフォールバックは呼び出し側 —
+    コース経由（object_group_permissions object_type='course'）のフォールバックはここには
+    含めない（ドキュメント単体に閉じた判定のみ。コースフォールバックは呼び出し側 —
     theory_components.py の `_find_viewable_course_for_chunk` 等 — が現行どおり担当する）。
     """
 
@@ -939,7 +948,8 @@ class DocumentAccess:
 
 
 def _document_group_permissions_for_user(user_id: str, document_uuid: str) -> set[str]:
-    """document_group_permissions からユーザーの権限集合を1クエリで返す。
+    """object_group_permissions（object_type='document'）からユーザーの権限集合を
+    1クエリで返す。
 
     旧実装は viewer/editor 判定用と editor 判定用でそれぞれ別クエリ
     （`_has_document_group_permission(..., ("viewer","editor"))` と
@@ -951,9 +961,10 @@ def _document_group_permissions_for_user(user_id: str, document_uuid: str) -> se
         rows = session.execute(
             sa_text("""
                 SELECT DISTINCT dgp.permission
-                FROM document_group_permissions dgp
+                FROM object_group_permissions dgp
                 JOIN group_members gm ON gm.group_id = dgp.group_id
-                WHERE dgp.document_id = CAST(:did AS uuid)
+                WHERE dgp.object_type = 'document'
+                  AND dgp.object_id = CAST(:did AS uuid)::text
                   AND gm.user_id = CAST(:uid AS uuid)
             """),
             {"did": document_uuid, "uid": user_id},
@@ -970,8 +981,8 @@ def resolve_document_access(user_id: str, document_ref: str) -> DocumentAccess:
 
     判定条件は既存の `user_can_view_document` / `user_can_edit_document` /
     `user_owns_document` と完全に同一（所有者 / public / group 単一共有 /
-    document_group_permissions）。`_resolve_document` の呼び出しと
-    document_group_permissions の行取得をそれぞれ1回にまとめることで、
+    object_group_permissions）。`_resolve_document` の呼び出しと
+    object_group_permissions の行取得をそれぞれ1回にまとめることで、
     view と edit の両方が必要な呼び出し元（例: 同一リクエスト内で複数回
     判定するケース）でのクエリ往復を減らす。
     """
@@ -1007,7 +1018,11 @@ def resolve_document_access(user_id: str, document_ref: str) -> DocumentAccess:
 
 
 def get_document_group_permissions(document_ref: str) -> list[dict]:
-    """ドキュメントに紐づくグループ権限マッピング一覧を返す（グループ名付き）。"""
+    """ドキュメントに紐づくグループ権限マッピング一覧を返す（グループ名付き）。
+
+    object_group_permissions（migration 044、統合前は専用テーブル=migration 035）を
+    object_type='document' で絞り込む。
+    """
     doc = _resolve_document(document_ref)
     if not doc:
         return []
@@ -1015,15 +1030,16 @@ def get_document_group_permissions(document_ref: str) -> list[dict]:
     try:
         rows = session.execute(
             sa_text("""
-                SELECT dgp.document_id::text,
+                SELECT dgp.object_id AS document_id,
                        dgp.group_id,
                        COALESCE(g.name, '') AS group_name,
                        dgp.permission,
                        dgp.created_at,
                        dgp.updated_at
-                FROM document_group_permissions dgp
+                FROM object_group_permissions dgp
                 LEFT JOIN groups g ON g.id = dgp.group_id
-                WHERE dgp.document_id = CAST(:did AS uuid)
+                WHERE dgp.object_type = 'document'
+                  AND dgp.object_id = CAST(:did AS uuid)::text
                 ORDER BY dgp.permission, g.name
             """),
             {"did": doc["id"]},
@@ -1099,6 +1115,17 @@ def delete_course_data(user_id: str, course_id: str) -> bool:
             """),
             {"course_id": course_id, "user_id": user_id},
         ).fetchone()
+        if result is not None:
+            # object_group_permissions は course_id への FK が無いポリモーフィック
+            # テーブルなので明示削除する（孤児防止。migration 044。旧テーブルは
+            # learning_courses への FK CASCADE で自動的に消えていた）。
+            session.execute(
+                sa_text(
+                    "DELETE FROM object_group_permissions "
+                    "WHERE object_type = 'course' AND object_id = :course_id"
+                ),
+                {"course_id": course_id},
+            )
         session.commit()
         return result is not None
     except Exception:
@@ -1529,8 +1556,7 @@ def get_course_chunks_ordered(course_data: dict) -> list[dict]:
     テキストは display_text（音声原稿用スクリプト）を優先し、旧フォーマットは
     normalize_to_placeholder_format で [[FORMULA_N]] 形式に正規化する。
     """
-    sources = course_data.get("sources", [])
-    material_ids = [s.get("material_id") for s in sources if s.get("material_id")]
+    material_ids = course_source_material_ids(course_data)
 
     if not material_ids:
         return []
@@ -1587,7 +1613,7 @@ def get_course_chunks_ordered(course_data: dict) -> list[dict]:
 
 def calculate_progress(user_id: str, course_id: str, course_data: dict) -> dict:
     """コースデータとチャット履歴から進捗を計算する。"""
-    topics = course_data.get("topics", [])
+    topics = course_topics(course_data)
     concepts = course_data.get("concepts", [])
 
     learning = sum(1 for c in concepts if c.get("status") == "learning")
@@ -1712,7 +1738,7 @@ def check_prerequisites(
 
     try:
         current_topic = None
-        for t in course_data.get("topics", []):
+        for t in course_topics(course_data):
             if t.get("title") == topic_title or t.get("id") == topic_title:
                 current_topic = t
                 break
@@ -1754,7 +1780,7 @@ def check_prerequisites(
         topics_with_history: set[str] = {r[0] for r in rows}
 
         title_to_id: dict[str, str] = {}
-        for t in course_data.get("topics", []):
+        for t in course_topics(course_data):
             title = t.get("title", "").lower().strip()
             if title:
                 title_to_id[title] = t.get("id", "")
@@ -2778,11 +2804,7 @@ def get_graph_element_context(
     element_label: str | None = None,
 ) -> dict:
     """EXPLAIN_GRAPH_ELEMENT 用にチャンク、グラフ説明、関連教材を集める。"""
-    material_ids = [
-        s.get("material_id")
-        for s in course_data.get("sources", [])
-        if isinstance(s, dict) and s.get("material_id")
-    ]
+    material_ids = course_source_material_ids(course_data)
     session = _pg_session()
     try:
         row = session.execute(
@@ -3789,13 +3811,9 @@ def reanalyze_course_structure_background(
     task_id: str,
 ) -> None:
     """既存チャンクを維持したまま、コース教材の構造メタデータだけ再解析する。"""
-    sources = course_data.get("sources", []) if isinstance(course_data, dict) else []
-    material_ids = [
-        str(s.get("material_id")).strip()
-        for s in sources
-        if isinstance(s, dict) and s.get("material_id")
-    ]
-    material_ids = list(dict.fromkeys(material_ids))
+    material_ids = list(dict.fromkeys(
+        mid.strip() for mid in course_source_material_ids(course_data)
+    ))
 
     total = len(material_ids)
     result_data = {

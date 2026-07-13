@@ -14,7 +14,9 @@ test_image_library_guardrails.py の流儀 — ソースコードを read_text /
 7. 価格ハードコード禁止（U7） — pricing.py に価格表の dict リテラルが無い
 8. 学習者 API 非漏洩（U5） — routes/learning.py にトークン/使用量系語彙が出現しない
 9. estimator の決定性 — 同一入力で常に同一出力・乱数や時刻に非依存
-10. （追加）migration DDL の二重管理整合 — 043_llm_usage_events.sql と main.py の 043 ブロックが一致
+10. （追加）043_llm_usage_events.sql（正本）が期待する DDL 構造を定義していること
+    + core/models.py の LlmUsageEvent（ORM）とカラム集合が一致していること
+    （2026-07 migration 正本一本化: main.py のインライン DDL との二重管理比較は廃止）
 
 外部サービス（PostgreSQL / OpenAI / Gemini）への実接続は行わない。
 """
@@ -45,7 +47,6 @@ _LLM_SRC = (BACKEND / "core" / "llm.py").read_text(encoding="utf-8")
 _TTS_SRC = (BACKEND / "core" / "tts.py").read_text(encoding="utf-8")
 _LEARNING_SRC = (BACKEND / "api" / "routes" / "learning.py").read_text(encoding="utf-8")
 _MIGRATION_SQL_SRC = (BACKEND / "db" / "043_llm_usage_events.sql").read_text(encoding="utf-8")
-_MAIN_SRC = (BACKEND / "api" / "main.py").read_text(encoding="utf-8")
 
 from tests.guardrail_helpers import (  # noqa: E402
     assert_module_tree_does_not_import,
@@ -551,12 +552,8 @@ class TestEstimatorDeterminism:
 
 
 # ===========================================================================
-# 10.（追加）migration DDL の二重管理整合
+# 10.（追加）043_llm_usage_events.sql（正本）が期待する DDL 構造を定義していること
 # ===========================================================================
-
-
-def _normalize_whitespace(s: str) -> str:
-    return re.sub(r"\s+", " ", s).strip()
 
 
 def _extract_balanced_parens_block(text: str, start_pattern: str) -> str:
@@ -575,91 +572,40 @@ def _extract_balanced_parens_block(text: str, start_pattern: str) -> str:
     raise AssertionError(f"unbalanced parentheses for pattern: {start_pattern}")
 
 
-def _extract_main_py_llm_usage_sql_texts() -> list[str]:
-    """main.py の migration 043 ブロック内の sa_text(...) 呼び出しから
-    llm_usage_events / llm_usage_daily に言及する SQL 文字列を AST 経由で抽出する。
+class TestMigrationSqlDefinesUsageEventsSchema:
+    """backend/db/043_llm_usage_events.sql（正本）が期待する DDL 構造を定義していること。
 
-    Python の隣接文字列リテラル連結は ast.parse の時点で単一の Constant に畳み込まれるため、
-    複数行にわたる文字列連結表記も正しく1本の文字列として取得できる。
-    """
-    tree = ast.parse(_MAIN_SRC)
-    texts: list[str] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        name = None
-        if isinstance(func, ast.Name):
-            name = func.id
-        elif isinstance(func, ast.Attribute):
-            name = func.attr
-        if name != "sa_text" or not node.args:
-            continue
-        arg = node.args[0]
-        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-            if "llm_usage_events" in arg.value or "llm_usage_daily" in arg.value:
-                texts.append(arg.value)
-    return texts
-
-
-class TestMigrationDualManagementConsistency:
-    """backend/db/043_llm_usage_events.sql と backend/api/main.py の migration 043 ブロックは
-    独立に保守されるため、内容が乖離していないことを構造的に検査する
-    （test_doubt_guardrails.py の migration 検査の流儀を踏襲。完全一致までは要求しない現実的な比較）。
+    2026-07 の migration 正本一本化により、main.py のインライン DDL との二重管理比較
+    （旧 TestMigrationDualManagementConsistency）は廃止した。index / view / CHECK 語彙は
+    ORM（core/models.py の LlmUsageEvent）に対応物を持たないため、ここでは正本 SQL 単独で
+    検査する。カラム集合の SQL⇄ORM 二方比較は下の TestOrmModelMatchesMigration が担う。
     """
 
-    def test_main_py_contains_llm_usage_migration_block(self):
-        assert "Migration 043" in _MAIN_SRC
-        assert "llm_usage_events" in _MAIN_SRC
-
-    def test_create_table_statement_matches_after_whitespace_normalization(self):
-        sql_table = _extract_balanced_parens_block(
+    def test_create_table_statement_is_present(self):
+        table = _extract_balanced_parens_block(
             _MIGRATION_SQL_SRC, r"CREATE TABLE IF NOT EXISTS llm_usage_events \("
         )
-        main_texts = _extract_main_py_llm_usage_sql_texts()
-        main_combined = "\n".join(main_texts)
-        main_table = _extract_balanced_parens_block(
-            main_combined, r"CREATE TABLE IF NOT EXISTS llm_usage_events \("
-        )
-        assert _normalize_whitespace(sql_table) == _normalize_whitespace(main_table), (
-            "CREATE TABLE llm_usage_events differs between "
-            "db/043_llm_usage_events.sql and api/main.py's migration 043 block"
-        )
+        assert "llm_usage_events" in table
 
-    def test_all_four_index_names_present_in_both(self):
+    def test_all_four_index_names_present(self):
         index_names = (
             "idx_llm_usage_events_occurred",
             "idx_llm_usage_events_feature",
             "idx_llm_usage_events_model",
             "idx_llm_usage_events_document",
         )
-        main_combined = "\n".join(_extract_main_py_llm_usage_sql_texts())
         for idx_name in index_names:
             assert idx_name in _MIGRATION_SQL_SRC, f"{idx_name} missing from 043_llm_usage_events.sql"
-            assert idx_name in main_combined, f"{idx_name} missing from main.py migration 043 block"
 
-    def test_llm_usage_daily_view_present_and_matches_in_both(self):
+    def test_llm_usage_daily_view_present(self):
         assert "CREATE OR REPLACE VIEW llm_usage_daily AS" in _MIGRATION_SQL_SRC
-        main_combined = "\n".join(_extract_main_py_llm_usage_sql_texts())
-        assert "CREATE OR REPLACE VIEW llm_usage_daily AS" in main_combined
-
-        sql_view_match = re.search(
+        view_match = re.search(
             r"CREATE OR REPLACE VIEW llm_usage_daily AS[\s\S]*?(?:;|\Z)", _MIGRATION_SQL_SRC
         )
-        main_view_match = re.search(
-            r"CREATE OR REPLACE VIEW llm_usage_daily AS[\s\S]*", main_combined
-        )
-        assert sql_view_match and main_view_match
-        sql_view = _normalize_whitespace(sql_view_match.group(0).rstrip(";"))
-        main_view = _normalize_whitespace(main_view_match.group(0))
-        assert sql_view == main_view, (
-            "llm_usage_daily view definition differs between "
-            "db/043_llm_usage_events.sql and api/main.py's migration 043 block"
-        )
+        assert view_match
 
-    def test_check_constraint_vocabulary_matches_in_both(self):
-        """operation IN (...) / usage_source IN (...) の許可値集合が両方で一致すること。"""
-        main_combined = "\n".join(_extract_main_py_llm_usage_sql_texts())
+    def test_check_constraint_vocabulary_matches_schema_py(self):
+        """operation IN (...) / usage_source IN (...) の許可値集合が schema.py（語彙の正本）と一致すること。"""
 
         def _vocab(text: str, column: str) -> set[str]:
             match = re.search(rf"{column} TEXT NOT NULL(?: DEFAULT '[^']*')? CHECK \({column} IN\s*\(([^)]*)\)\)", text)
@@ -667,12 +613,7 @@ class TestMigrationDualManagementConsistency:
             return {v.strip().strip("'") for v in match.group(1).split(",")}
 
         sql_operation_vocab = _vocab(_MIGRATION_SQL_SRC, "operation")
-        main_operation_vocab = _vocab(main_combined, "operation")
-        assert sql_operation_vocab == main_operation_vocab
-
         sql_usage_source_vocab = _vocab(_MIGRATION_SQL_SRC, "usage_source")
-        main_usage_source_vocab = _vocab(main_combined, "usage_source")
-        assert sql_usage_source_vocab == main_usage_source_vocab
 
         # 語彙の正本（schema.py）ともずれていないこと
         from core.llm_usage.schema import OPERATIONS, USAGE_SOURCES
@@ -682,9 +623,9 @@ class TestMigrationDualManagementConsistency:
 
 
 class TestOrmModelMatchesMigration:
-    """core/models.py の LlmUsageEvent は migration 043 の DDL と独立に保守される
-    3つ目の定義（SQL ファイル / main.py ブロック / ORM）。カラム集合が DDL と
-    乖離していないことを検査する。
+    """core/models.py の LlmUsageEvent は 043_llm_usage_events.sql（正本）の DDL と
+    独立に保守される2つ目の定義（SQL ファイル / ORM）。カラム集合が乖離していないことを
+    043.sql ⇄ ORM の二方比較で検査する（main.py 側との比較は migration 正本一本化により廃止）。
     """
 
     def test_orm_columns_match_sql_table_columns(self):

@@ -245,7 +245,7 @@ episteme-graph/
 │   │       ├── learning.py    # /api/learning/*（チャット・tension・voice など）
 │   │       ├── admin.py       # /api/admin/*
 │   │       ├── lecture.py     # /api/learning/lecture/*
-│   │       ├── lecture_studio.py    # /api/admin/...（Lecture Studio）
+│   │       ├── lecture_studio/      # /api/admin/...（Lecture Studio。_shared/scripts/pipeline/topics に分割）
 │   │       ├── theory_components.py # /api/admin/...（理論コンポーネント・C層承認共有）
 │   │       ├── cartridges.py        # /api/admin/cartridges/*
 │   │       ├── revisions.py         # /api/admin/documents/{id}/revisions/*
@@ -313,7 +313,7 @@ episteme-graph/
 | 学習 | `/api/learning` | コースCRUD・受講登録・進捗・RAGチャット・理解度チェック・問いの軌跡・tension ダイジェスト（confirm/dismiss/connect）・音声（transcribe/speak）・承認済み説明の閲覧 |
 | レクチャー | `/api/learning/lecture` | 適応的シーケンス・TTS・中断チャット |
 | 管理 | `/api/admin` | 教材管理・コースビルダー・コース公開/権限・ユーザー管理・スキーマ進化・タスク・関心ダッシュボード |
-| Lecture Studio | `/api/admin`（`lecture_studio.py`） | スクリプト/音声のバッチ生成・ペルソナ設定・コース構造編集・ドキュメントパイプライン実行 |
+| Lecture Studio | `/api/admin`（`lecture_studio/` パッケージ） | スクリプト/音声のバッチ生成・ペルソナ設定・コース構造編集・ドキュメントパイプライン実行 |
 | 理論コンポーネント / C層 | `/api/admin`（`theory_components.py`） | コンポーネントCRUD・component-graph・説明バージョン・承認（endorse）・引用・共有ダッシュボード |
 | カートリッジ | `/api/admin/cartridges` | オントロジー・コンポーネント型・関係型などの参照 |
 | リビジョン | `/api/admin/documents/{id}/revisions` | リビジョン作成・実行・レポート・承認/棄却 |

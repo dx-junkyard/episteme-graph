@@ -40,7 +40,6 @@ OpenAI / Gemini(REST) / Vertex AI を 1 つのインターフェースで扱い�
 
 ### `extractor.py` — PDF → GROBID ユーティリティ + 構造 diff/merge
 - `extract_tei_xml_from_pdf_bytes()` — GROBID `/api/processFulltextDocument` に投げて TEI-XML を得る（`document_pipeline/orchestrator.py` が使用）
-- `parse_tei_to_logical_chunks()` — TEI から Abstract + 本文 `<div>` を抽出（参考文献等は除外）、長すぎる節は文境界で分割
 - `compute_structure_diff()` / `evaluate_and_merge_proposals()` — `PaperStructure` の構造差分とマージ評価（Gateway 層向け。`backend/tests/core/test_diff_merge.py` が参照）
 
 > 旧仮説駆動型の逐次 LLM 構造抽出（`extract_paper_structure()` とその内部ステップ）は本番呼び出し元が

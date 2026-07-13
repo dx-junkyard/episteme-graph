@@ -20,7 +20,6 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "backend" / "api"))
 
-MAIN = ROOT / "backend" / "api" / "main.py"
 MIGRATION = ROOT / "backend" / "db" / "025_structure_anchor.sql"
 LEARNING = ROOT / "backend" / "api" / "routes" / "learning.py"
 SERVICES = ROOT / "backend" / "api" / "services.py"
@@ -36,18 +35,13 @@ def _read(path: Path) -> str:
 
 class TestMigration025:
     def test_reference_sql_defines_indexes_only(self):
+        """正本は backend/db/025_structure_anchor.sql（main.py のインライン DDL ではない）。"""
         sql = _read(MIGRATION)
         assert "idx_interest_traces_anchor_candidate" in sql
         assert "idx_interest_traces_anchor_pending" in sql
         # 新テーブル・列追加はゼロ（payload 拡張のみ）
         assert "CREATE TABLE" not in sql
         assert "ALTER TABLE" not in sql
-
-    def test_main_applies_migration_025(self):
-        source = _read(MAIN)
-        assert "Migration 025" in source
-        assert "idx_interest_traces_anchor_candidate" in source
-        assert "idx_interest_traces_anchor_pending" in source
 
 
 class TestMethodAWiring:

@@ -297,7 +297,11 @@ class TestDeleteMaterial:
         # 1st call: document lookup (fetchone)
         # 2nd call: course list (fetchall)
         # 3rd call: course data lookup (fetchone) for each course
-        # 4th+: DELETE statements
+        # 4th+: DELETE statements (including the migration-044
+        #   object_group_permissions cleanup that replaces the FK CASCADE the old
+        #   course_group_permissions/document_group_permissions tables used to give
+        #   for free — delete_material now issues one extra DELETE per linked
+        #   course and one extra DELETE for the document itself)
 
         call_count = {"n": 0}
         original_execute = mock_pg.execute
@@ -325,19 +329,25 @@ class TestDeleteMaterial:
                 # Delete chat history for course-1
                 result.rowcount = 0
             elif n == 5:
+                # Delete object_group_permissions (object_type='course') for course-1
+                result.rowcount = 0
+            elif n == 6:
                 # Delete course-1
                 result.rowcount = 1
-            elif n == 6:
+            elif n == 7:
                 # Course-2 data with different material
                 result.fetchone.return_value = (
                     json.dumps({
                         "sources": [{"material_id": "mat-999", "title": "別の教材"}]
                     }),
                 )
-            elif n == 7:
+            elif n == 8:
                 # Delete chunks
                 result.rowcount = 5
-            elif n == 8:
+            elif n == 9:
+                # Delete object_group_permissions (object_type='document') for the material
+                result.rowcount = 0
+            elif n == 10:
                 # Delete document
                 result.rowcount = 1
             return result

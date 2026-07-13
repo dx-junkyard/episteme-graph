@@ -21,7 +21,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_DIR = PROJECT_ROOT / "backend"
 SERVICES_PY = BACKEND_DIR / "api" / "services.py"
 ADMIN_PY = BACKEND_DIR / "api" / "routes" / "admin.py"
-LECTURE_STUDIO_PY = BACKEND_DIR / "api" / "routes" / "lecture_studio.py"
+# Tier 3-17a: get_course_scripts / batch_generate_scripts / batch_generate_audio は
+# lecture_studio パッケージの scripts.py に移設された。
+LECTURE_STUDIO_PY = BACKEND_DIR / "api" / "routes" / "lecture_studio" / "scripts.py"
 
 
 # ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ routes/doubt.py は `from dependencies import ...` の flat import を含むた�
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 _BACKEND = Path(__file__).resolve().parents[2]
@@ -14,19 +15,35 @@ _SRC = (_BACKEND / "api" / "routes" / "doubt.py").read_text(encoding="utf-8")
 _MAIN = (_BACKEND / "api" / "main.py").read_text(encoding="utf-8")
 _ADMIN = (_BACKEND / "api" / "routes" / "admin.py").read_text(encoding="utf-8")
 
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
+from tests.guardrail_helpers import read_migration_sql  # noqa: E402
+
+# migration 029〜033（D層）の番号 → テーブル名。正本は backend/db/0NN_*.sql
+# （main.py のインライン DDL ではない, 2026-07 migration 正本一本化）。
+_D_LAYER_MIGRATION_TABLES = {
+    29: "epistemic_ledger",
+    30: "assumption_nodes",
+    31: "challenges",
+    32: "verification_proposals",
+    33: "counterfactual_sessions",
+}
+
 
 class TestRouterRegistration:
     def test_admin_router_included(self):
-        assert "from routes.doubt import admin_router" in _ADMIN
-        assert "_doubt_admin_router" in _ADMIN
+        # Tier 3-17c: admin.py 経由の二段ネストではなく main.py から
+        # `/api/admin` prefix で直接マウントするフラット構造。
+        assert "from routes import doubt as doubt_routes" in _MAIN
+        assert 'app.include_router(doubt_routes.admin_router, prefix="/api/admin")' in _MAIN
 
     def test_learning_router_registered(self):
         assert "doubt_routes.learning_router" in _MAIN
 
     def test_migrations_029_to_033_present(self):
-        for name in ("epistemic_ledger", "assumption_nodes", "challenges",
-                     "verification_proposals", "counterfactual_sessions"):
-            assert f"CREATE TABLE IF NOT EXISTS {name}" in _MAIN
+        for number, name in _D_LAYER_MIGRATION_TABLES.items():
+            sql = read_migration_sql(_BACKEND, number)
+            assert f"CREATE TABLE IF NOT EXISTS {name}" in sql
 
 
 class TestLedgerEndpoints:

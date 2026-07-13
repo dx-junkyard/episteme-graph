@@ -40,9 +40,12 @@ def course_owner_id(session, course_id: str) -> str | None:
 
 
 def document_group_member_ids(session, document_id: str, permissions: tuple[str, ...]) -> list[str]:
-    """document_group_permissions（migration 035）経由のグループメンバー user_id を返す。
+    """object_group_permissions（migration 044、object_type='document'）経由の
+    グループメンバー user_id を返す。
 
     ``permissions`` でフィルタする（例: ``("editor",)`` / ``("viewer", "editor")``）。
+    document 側の object_id は ``CAST(... AS uuid)::text``（小文字 canonical form）で
+    正規化して比較する（migration 044 の設計注記どおり、大文字小文字の揺れを避ける）。
     """
     if not permissions:
         return []
@@ -53,9 +56,11 @@ def document_group_member_ids(session, document_id: str, permissions: tuple[str,
     rows = session.execute(
         sa_text(f"""
             SELECT DISTINCT gm.user_id::text
-            FROM document_group_permissions p
+            FROM object_group_permissions p
             JOIN group_members gm ON gm.group_id = p.group_id
-            WHERE p.document_id = CAST(:did AS uuid) AND p.permission IN ({placeholders})
+            WHERE p.object_type = 'document'
+              AND p.object_id = CAST(:did AS uuid)::text
+              AND p.permission IN ({placeholders})
         """),
         params,
     ).fetchall()
@@ -63,7 +68,8 @@ def document_group_member_ids(session, document_id: str, permissions: tuple[str,
 
 
 def course_group_member_ids(session, course_id: str, permissions: tuple[str, ...]) -> list[str]:
-    """course_group_permissions 経由のグループメンバー user_id を返す（permission でフィルタ）。"""
+    """object_group_permissions（migration 044、object_type='course'）経由の
+    グループメンバー user_id を返す（permission でフィルタ）。"""
     if not permissions:
         return []
     placeholders = ", ".join(f":p{i}" for i in range(len(permissions)))
@@ -73,9 +79,11 @@ def course_group_member_ids(session, course_id: str, permissions: tuple[str, ...
     rows = session.execute(
         sa_text(f"""
             SELECT DISTINCT gm.user_id::text
-            FROM course_group_permissions p
+            FROM object_group_permissions p
             JOIN group_members gm ON gm.group_id = p.group_id
-            WHERE p.course_id = :cid AND p.permission IN ({placeholders})
+            WHERE p.object_type = 'course'
+              AND p.object_id = :cid
+              AND p.permission IN ({placeholders})
         """),
         params,
     ).fetchall()
@@ -85,9 +93,9 @@ def course_group_member_ids(session, course_id: str, permissions: tuple[str, ...
 def document_legacy_group_visibility_member_ids(session, document_id: str) -> list[str]:
     """レガシー単一グループ共有（documents.visibility='group' + group_id）のメンバー user_id。
 
-    document_group_permissions（migration 035）導入前からの共有経路。V層の通知は
-    services.user_can_view_document がこの経路でも閲覧を許可するため宛先に含める
-    （更新・削除予約・削除の取りこぼしを防ぐ）。
+    object_group_permissions（migration 044。前身のドキュメント単体共有テーブルは
+    migration 035）導入前からの共有経路。V層の通知は services.user_can_view_document が
+    この経路でも閲覧を許可するため宛先に含める（更新・削除予約・削除の取りこぼしを防ぐ）。
     """
     rows = session.execute(
         sa_text("""

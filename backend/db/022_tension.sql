@@ -7,8 +7,8 @@
 --   - P3: 候補・確定とも既定で本人のみ可視。教員へは k-匿名化した集約のみ。
 --   - P4: dismiss は削除でなく status='dismissed' で保持する。
 --
--- 実際の適用は backend/api/main.py の _run_migrations()（Migration 022）で行う。
--- このファイルは正本スキーマのリファレンス。
+-- このファイルが正本。適用は backend/core/migrations.py のランナーが起動時に行う
+-- （冪等・毎起動再実行）。
 
 CREATE INDEX IF NOT EXISTS idx_interest_traces_kind_status
     ON interest_traces(kind, status);

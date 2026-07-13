@@ -119,7 +119,7 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | POST | `/api/courses/{course_id}/export-bundle` | コース一式のエクスポートバンドル生成 |
 | POST | `/api/documents/{document_id}/export-bundle` | ドキュメント一式のエクスポートバンドル生成 |
 
-### Lecture Studio `/api/admin`（`routes/lecture_studio.py`）
+### Lecture Studio `/api/admin`（`routes/lecture_studio/` パッケージ）
 教員向けの講義原稿・音声の事前構築、理論コンポーネント、ドキュメントパイプライン操作。
 
 | 分類 | 代表的なエンドポイント |

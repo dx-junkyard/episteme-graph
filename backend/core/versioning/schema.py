@@ -17,7 +17,7 @@ LIFECYCLE_PURGED = "purged"
 SUB_ACTIVE = "active"
 SUB_UNSUBSCRIBED = "unsubscribed"
 
-# share_notifications.kind
+# user_notifications.kind（V層由来行, source='shared'。migration 045 で統合済み）
 NOTIF_VERSION_PUBLISHED = "version_published"
 NOTIF_DELETION_SCHEDULED = "deletion_scheduled"
 NOTIF_DELETION_CANCELLED = "deletion_cancelled"

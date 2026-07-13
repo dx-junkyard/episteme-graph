@@ -1,6 +1,8 @@
 -- Migration 040: レクチャースライド同期 + 音声言語切替 Phase 1 — スライド基盤
 -- 正本: docs/features/lecture_slide_sync_design.md (§2, §5-3)
 --
+-- このファイルが正本。適用は `backend/core/migrations.py` のランナーが起動時に行う（冪等・毎起動再実行）。
+--
 -- 変更概要:
 --   1. lecture_audio_cache をスライド単位のキャッシュキーに拡張
 --        slide_index : スライド番号（既定 0 = 後方互換。マーカーなしチャンクはそのまま有効）

@@ -62,8 +62,9 @@ src/tests/                     → agents 用 pytest テスト
 | ファイル | 役割 |
 |---|---|
 | `backend/core/schema.py` | 全 Pydantic モデル定義（OntologyType, CorePredicate, PaperStructure など） |
-| `backend/api/main.py` | FastAPI アプリ本体（全エンドポイント・API固有モデル） |
-| `backend/core/extractor.py` | GROBID 変換（PDF→TEI XML）+ PaperStructure diff/merge（Gateway層） |
+| `backend/api/main.py` | FastAPI アプリ本体（lifespan・全ルーターのフラット登録。admin 系子ルーター13本は `prefix="/api/admin"` で main.py から直接登録する — admin.router に子ルーターを include しない（Tier 3-17c）） |
+| `backend/api/routes/lecture_studio/` | 原稿スタジオルーター（Tier 3-17a で `_shared` / `scripts` / `pipeline` / `topics` に分割したパッケージ。`__init__.py` が router と互換シンボルを再エクスポートするため import 面は旧単一ファイルと同じ） |
+| `backend/core/extractor.py` | GROBID 変換（PDF→TEI XML）。orchestrator の下請け。旧 diff/merge は本番未使用のため削除済み（2026-07） |
 | `backend/core/embedder.py` | pgvector ベクトル保存・検索 (PostgreSQL) |
 | `backend/core/chat.py` | tier 付き chunk 検索ユーティリティ（実 RAG チャットは `routes/learning.py`） |
 | `backend/core/postgres.py` | PostgreSQL セッション管理 |
@@ -72,6 +73,10 @@ src/tests/                     → agents 用 pytest テスト
 | `backend/core/llm_worker/` | 非同期 LLM worker 共通基盤（client / run_with_repair / CostGate。5系統が利用） |
 | `backend/core/privacy.py` | k-匿名ゲートの正本（K_ANONYMITY=3・件数レンジ導出） |
 | `backend/core/notification_recipients.py` | 通知宛先解決の共通 JOIN プリミティブ（status 系 / V層が利用） |
+| `backend/core/course_data.py` | `learning_courses.data` JSONB の正本スキーマ（CourseData 系 Pydantic モデル＝全て `extra="allow"` + アクセサ群）。course_data への素の dict アクセスを新規に書かない（Tier 3-18） |
+| `backend/core/revision_store.py` | draft/freeze/楽観ロックの共通プリミティブ（`RevisionConflictError` / `update_with_revision_lock` / `idempotent_seed_import`。atlas_store と library/store が委譲。Tier 3-20） |
+| `backend/core/status/projector.py` | 教材・コース状態導出の正本（MaterialStatus / CourseStatus、バッチ導出 `project_material_statuses_bulk` 付き）。`/api/admin/materials` は projector の導出 + legacy 語彙マッピングを使う — status を独自 JOIN で再合成しない（Tier 3-16） |
+| `backend/core/migrations.py` | マイグレーションランナー。`backend/db/*.sql`（init.sql + 番号順ファイル群）が正本で、毎起動・番号順に全ファイルを冪等再実行する（pg_advisory_lock で多重起動排他） |
 
 ### データストア構成
 
@@ -308,28 +313,39 @@ class CartridgeContext:
 - **Private**: 作成者（自分）のみアクセス可能
 ※ グループへの参加は、管理者による直接招待、または招待コードにより行われる。
 
-### パイプライン成果のグループ共有（migration 035）
+### パイプライン成果のグループ共有（migration 035 → 044 でテーブル統合）
 
 コースを作らずに **PDF 解析パイプラインの成果**（`theory_components` / `theory_claims` /
 `theory_component_graphs` / `document_analysis_runs`）を指定グループへ共有する層。成果は
 すべて `document_id` 由来なので、**権限はドキュメント単位に集約**し、成果はそれを継承する
-（成果テーブルに列を足さない）。`course_group_permissions`（migration 010）の完全な移植。
+（成果テーブルに列を足さない）。当初は `course_group_permissions`（migration 010）の完全な
+移植として `document_group_permissions`（migration 035）が独立テーブルで実装されたが、
+アーキテクチャ整理 Tier 3-14（migration 044）で `course_group_permissions` と統合され、
+`object_group_permissions`（`object_type ∈ {course, document}` のポリモーフィック1枚）に
+一本化された。以下の記述はテーブル名以外は現行のまま有効。
 
-- **`document_group_permissions`**（migration 035）: `PRIMARY KEY(document_id, group_id)`、
-  `permission ∈ {viewer, editor}`。viewer=解析成果の閲覧・引用、editor=再解析・説明追加等の編集。
-  `documents(id)` / `groups(id)` に `ON DELETE CASCADE`。
+- **`object_group_permissions`**（migration 044、`object_type='document'` 行が本層に対応）:
+  `PRIMARY KEY(object_type, object_id, group_id)`、`object_id` は `document_id` の正規化済み
+  テキスト表現。`permission ∈ {viewer, editor}`。viewer=解析成果の閲覧・引用、editor=再解析・
+  説明追加等の編集。`object_id` には FK を張らない（ポリモーフィックのため）ので、document
+  削除経路（`_purge_document` / `delete_material` 等）が明示 `DELETE` で孤児行を防ぐ
+  （`groups(id)` への `group_id` のみ `ON DELETE CASCADE`）。旧 `document_group_permissions`
+  （035）は 044 適用時にデータ移行のうえ `DROP TABLE` 済み（`backend/db/035_*.sql` はコメントのみの
+  スタブに書き換え済み）。
 - **アクセス判定（`services.py`）**: `user_can_view_document` / `user_can_edit_document` /
   `user_owns_document`（共有変更は所有者のみ）。`_resolve_document(ref)` は `documents.id`(UUID) と
   `source_path`(material_id) の両方を解決する。view = 所有者 / public / group単一共有 /
-  document_group_permissions(viewer|editor)。既存のコース経由（course_group_permissions）は
-  `theory_components._ensure_document_viewable/editable` がフォールバックで併用する。
+  object_group_permissions(document, viewer|editor)。既存のコース経由（course 側の
+  object_group_permissions 行）は `theory_components._ensure_document_viewable/editable` が
+  フォールバックで併用する。
 - **成果読み取りゲート**: `/api/admin/documents/{document_id}/...`（structure / component-graph /
   sections/{id}/components / chunks/{id}/claims）は `_ensure_document_viewable/editable` を通すため、
   ドキュメント共有だけで全成果が閲覧可能になる（コース不要）。
 - **API**（`backend/api/routes/admin.py`、実パス `/api/admin/...`）:
   `GET /documents/{id}/groups`（閲覧可能な者は参照、変更は所有者のみ）、
   `POST /documents/{id}/groups`（共有付与/更新）、`DELETE /documents/{id}/groups/{group_id}`（解除）。
-  `list_materials` / `get_material` は document_group_permissions 経由の共有も一覧・取得対象に含める。
+  `list_materials` / `get_material` は object_group_permissions 経由の共有も一覧・取得対象に含める。
+  API パス・レスポンス形式は 044 統合後も不変。
 - **監査**: 付与・解除を `theory_review_events`（`entity_type='document_share'`）に記録。
 - **UI**（`admin.js`）: 教材管理タブの各行「共有」ボタン → `openDocumentShareModal`（コース共有
   モーダルと同型。グループ選択＋viewer/editor）。
@@ -915,9 +931,11 @@ P7 スコア・正答率数値を学習者に見せない、REFLECT は事実文
   （`PRIMARY KEY(object_type,object_id)`。`active_release_id` / `latest_version_no` /
   `lifecycle CHECK('active','pending_deletion','purged')` / 削除予約情報）、
   `shared_version_subscriptions`（消費者のピン。`UNIQUE(object_type,object_id,subscriber_id)` /
-  `pinned_release_id`）、`share_notifications`（通知インボックス。
-  `kind CHECK('version_published','deletion_scheduled','deletion_cancelled','deleted')` /
-  `read_at` / `acted_at`）。既存 `component_citations`（migration 021）に引用の版固定列
+  `pinned_release_id`）、通知インボックス（当初は専用テーブル `share_notifications` として実装
+  されたが、アーキテクチャ整理 Tier 3-15（migration 045）で状態管理・通知基盤の
+  `user_notifications` に統合済み。V層由来行は `source='shared'` で区別し、`kind`/`release_id`/
+  `acted_at` 列は `user_notifications` へ移設されている。下記 API・フロントの挙動・列名の意味は
+  不変）。既存 `component_citations`（migration 021）に引用の版固定列
   （`source_object_type` / `source_object_id` / `source_release_id` / `source_version_no`）を追加。
   document の版は成果物を複製せず、既に不変な `document_analysis_runs.stage_outputs` を指す
   `analysis_run_id` をピンする（既存資産の再利用）。
@@ -990,13 +1008,27 @@ P7 スコア・正答率数値を学習者に見せない、REFLECT は事実文
   新しい層のガードレールテストはこれを使って書く。
 - **`src/episteme_graph/agents/cartridge_loader.py` / `cartridge_context.py`** —
   agent 側 cartridge 読み込みの正本（上記「カートリッジシステム」参照）。
+- **`backend/core/course_data.py`**（Tier 3-18） — `learning_courses.data` の正本スキーマ + アクセサ
+  （`course_topics`（フラット）/ `iter_all_topics`（chapters ネスト防御込み）/ `course_sources` /
+  `course_source_material_ids` / `course_cartridge_id` / `course_title` / `lecture_studio_settings` /
+  `find_course_topic` / `course_atlas_binding_facts` / `validate_course_data`）。
+  **course_data への素の dict アクセスを新規に書かない**。モデルは全て `extra="allow"` で
+  未知キーを落とさない。atlas binding の判定方針（projector=AND / next_steps=cartridge_id 単独で
+  不要）は各層に残る意図的差異 — 走査だけがここに一本化されている。
+- **`backend/core/revision_store.py`**（Tier 3-20） — draft/freeze/楽観ロックの共通プリミティブ。
+  revision 照合更新と冪等シード取込の**制御フロー**だけを共有し、draft 粒度・freeze 方式・
+  status 語彙・セッション規約はドメイン側（atlas_store / library/store）に残す。
+  第3の draft/freeze 利用者はコピペせずこれに接続すること。
+- **`backend/core/document_pipeline/orchestrator.py` のステージ追加**（Tier 3-19） —
+  新ステージは `_stage_<name>(ctx)` 関数 + `_PIPELINE_STEPS` リストへの登録で追加する
+  （インライン展開に戻さない）。ステージ間の受け渡しは `PipelineContext` のフィールド。
 
 
 ## 開発ルール
 
 ### 1. 環境変数
 - シークレット値はハードコードしない。全て環境変数経由（`.env.example` 参照）
-- 主要変数: `OPENAI_API_KEY`, `JWT_SECRET`, `ADMIN_PASSWORD`, `NEO4J_AUTH`, `MINIO_ACCESS_KEY`
+- 主要変数: `OPENAI_API_KEY`, `JWT_SECRET`, `ADMIN_PASSWORD`, `MINIO_ACCESS_KEY`
 
 ### 2. Pydanticスキーマ
 - データモデルの定義は `backend/core/schema.py` に集約
@@ -1017,6 +1049,10 @@ P7 スコア・正答率数値を学習者に見せない、REFLECT は事実文
 
 ### 5. フロントエンド
 - `admin.js` は Vanilla JS (ES5互換) で記述すること（既存コードに合わせる）
+- 原稿スタジオ（`ls` 接頭辞の関数群）は `admin-lecture-studio.js` に分離済み（Tier 3-17b。
+  ES5・`window.LectureStudio`、公開 API は `init` / `openExportModal` / `getScreenContext`。
+  admin-assistant.js と同型の DI 注入、読み込み順は doubt-atlas.js より後・admin.js より前）。
+  原稿スタジオの UI 変更はこちらに書く
 - `app.js` は ES6+ (const/let, async/await) を使用している
 - フレームワーク不使用（Vanilla JS のみ）
 
@@ -1024,7 +1060,6 @@ P7 スコア・正答率数値を学習者に見せない、REFLECT は事実文
 - `pytest` を使用
 - FastAPI / core 用テストは `backend/tests/` に配置
 - agents 用テストは `src/tests/agents/<agent_name>/` に配置
-- 既存の `test_diff_merge.py` が `metaweave.extractor` を参照しているのは既知の問題（モジュールパスは実際は `core.extractor`）
 
 ### 7. PDF解析Agentの実装ルール
 - 実装場所は `src/episteme_graph/agents/<agent_name>/` とする（`backend/` には置かない）
@@ -1114,6 +1149,31 @@ DROP）。現行は「1つの不変なマスターコース（`learning_courses`
 3. コースビルダーで生成される `topics[].prerequisites` に適切な値がセットされるよう、
    `_COURSE_BUILDER_SYSTEM_PROMPT` を修正
 
+（※Neo4j は2026-07 のアーキテクチャ整理（Tier 1）で完全撤去済み。現行の `check_prerequisites` は
+Neo4j 非依存で、コースデータの `topic.prerequisites` のみを参照する。）
+
 ## 実装時の注意事項
 
 - マイグレーションSQLは `backend/db/` に `002_a1_a2_a3.sql` として配置する
+  （※これは Priority A 実装時点の記述。以降のマイグレーション運用ルールは次項参照）
+
+### マイグレーションの正本一本化（アーキテクチャ整理 Tier 3-13）
+
+`backend/db/*.sql`（init.sql + 番号順ファイル群）が**唯一の正本**。かつて `backend/api/main.py`
+の `_run_migrations()` に約1,600行のインライン DDL が並行して存在したが撤去済みで、現在は
+`backend/core/migrations.py` の薄いランナーが **毎起動、番号順に全ファイルを冪等再実行**する
+（pg_advisory_lock で多重起動排他・ファイル単位トランザクション）。
+
+- **新しいスキーマ変更は必ず新番号の SQL ファイルを追加する**（既存ファイルの編集は typo や
+  冪等性のような「最終状態の是正」に限り、過去に適用済みの意味を変えない）。
+- **すべてのファイルは冪等でなければならない**（`CREATE TABLE IF NOT EXISTS` /
+  `ADD COLUMN IF NOT EXISTS` / `DO $$ ... $$` の存在確認ガード等）。再起動のたびに全ファイルが
+  再実行されるため、非冪等な DDL は次回起動でエラーになるか、既存データを壊す
+  （例: 無ガードの `CREATE INDEX` を伴う次元変更は再起動ごとに embedding を全消失させ得る）。
+- **`main.py` に DDL を書き戻さない**（DDL の正本を2箇所に増やさない）。
+- ガードレールは `backend/tests/test_migrations_runner.py`（冪等性 lint・番号連続性・
+  main.py への DDL 再侵入禁止）が構造的に守る。
+- 統合系マイグレーション（複数の旧テーブルを1枚に集約するもの。例: migration 044/045）は、
+  置換された旧ファイルを空撤去にはせず**コメントのみのスタブ化**に留める（`002_a1_a2_a3.sql` の
+  `cloned_from` 列と同じ「最終状態への巻き戻し」パターン。毎起動再実行方式では、旧ファイルを
+  削除・空にすると「作って即壊す」往復が起きるため）。

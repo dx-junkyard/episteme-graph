@@ -3,8 +3,10 @@
 [← ドキュメント目次](../README.md) ｜ [← コアエンジン](core-engine.md)
 
 学生の質問に答える RAG（Retrieval-Augmented Generation）の流れを解説します。
-学習チャットのエンドポイントは `POST /api/learning/courses/{cid}/topics/{tid}/chat`（`api/routes/learning.py`）、
-教材単体に対する基本 RAG ロジックは `backend/core/chat.py` にあります。
+実チャットの正本は `POST /api/learning/courses/{cid}/topics/{tid}/chat`（`api/routes/learning.py::learning_chat`）で、
+コンテキスト構築・出所判定（content_grounding）・casual モード分岐までここに実装されています。
+`backend/core/chat.py` は tier 付き chunk 検索ユーティリティ（`search_chunks()` / `_embed_query()`）のみを提供する下請けモジュールで、
+`learning_chat` の RAG 検索自体は `services.py::search_chunks_with_metadata()` を使います。
 
 ---
 
@@ -13,55 +15,50 @@
 ```
 ユーザー質問
   │
-  ① 質問を埋め込みベクトル化            … chat.py: _embed_query()
+  ① 前提知識チェック                     … learning_support_agent.py: check_prerequisites()
+  │   未習得の前提があれば RAG より先に逆質問で会話を止める（casual/寄り道復帰時はスキップ）
   │
-  ② pgvector で関連チャンク検索          … chat.py: search_chunks() (top_k=5)
-  │   ORDER BY embedding <=> query_vec, material_id で絞り込み
+  ② pgvector で関連チャンク検索          … services.py: search_chunks_with_metadata() (top_k=8)
+  │   コース全教材横断で検索、tier(L1信頼性) 付与、スコア 0.30 以上を採用
   │
-  ③ MinIO から PaperStructure を取得     … chat.py: _get_paper_structure()
-  │   （title / abstract_structure(変数・エッジ・SMILES DSL) / methodology …）
+  ③ 出所判定（content_grounding）        … learning.py（course_material / other_material / model_generated）
+  │   採用チャンクの tier を安全側集約した overall_tier（out_of_source 判定）も算出
   │
-  ④ プロンプト組み立て                   … chat.py: generate_chat_response()
-  │   system プロンプト + 関連チャンク + PaperStructure + 会話履歴
+  ④ プロンプト組み立て                   … learning.py: _get_integrated_tutor_system_prompt() 等
+  │   system プロンプト + 関連チャンク + 会話履歴。out_of_source なら OutOfSourceGuard を追加注入
   │
   ⑤ LLM 生成（temperature=0.3）          … llm.py: generate_text()
   │   末尾にドリルダウンリンクを Markdown で提示
   │
   ⑥ 誤解検出 → 個人レイヤーへ記録        … learning.py + detect_and_record_misconception()
   │
-  ⑦ 前提知識チェック・学習支援アクション … learning_support_agent.py
-  │
-  ⑧ 出所判定（content_grounding）        … learning.py（course_material / other_material / model_generated）
-  │
-  ⑨ 関心痕跡の記録 + tension プレフィルタ … services.py + core/tension/prefilter.py（同期・非LLM）
+  ⑦ 関心痕跡の記録 + tension プレフィルタ … services.py + core/tension/prefilter.py（同期・非LLM）
   ▼
 回答 + next_actions + content_grounding + course_update（誤解・アンカー）
 ```
 
-> ⑥⑦ は `intent_mode="casual"`（カジュアル対話モード）ではスキップされます（→ §3）。
-> ⑧⑨ は casual を含む全モードで実行されます。
+> ①⑥ は `intent_mode="casual"`（カジュアル対話モード）ではスキップされます（→ §3）。
+> ②〜⑤⑦ は casual を含む全モードで実行されます。
 
 ---
 
 ## 2. 各ステップ詳細
 
-### ① 質問の埋め込み（`chat.py:_embed_query`）
-質問文を `generate_embeddings([question])` で 1 本のベクトル（次元 = `LLM_EMBEDDING_DIM`、既定 3072）に変換します。
+### ① 前提知識チェック（`learning_support_agent.py::check_prerequisites`）
+- 現在トピックの `prerequisites` を取得し、各前提について関連トピックのチャット履歴（`learning_chat_history`）の有無で習得を判定。
+- 未習得なら逆質問を返し、`mode="prerequisite_review"` などの構造化アクションを付与して RAG より前に応答を返す。
+- 学生が「理解している」と答えれば、またはコース側の atlas 文脈中であればスキップして ② へ進む。
+- 「学習パスに戻る」「詳細を続ける」などの遷移は `next_actions` として返り、UI がボタン化します。
 
-### ② ベクトル検索（`chat.py:search_chunks`）
-`chunks` テーブルに対し pgvector の距離演算子（`<=>`, cosine）で類似度検索し、上位 `top_k`（既定 5）チャンクを取得します。`material_id` でコース/論文に絞り込みます。
+### ② ベクトル検索（`services.py::search_chunks_with_metadata`）
+コースの特定教材に絞らず、システム全域のチャンクを pgvector 類似度検索し（`top_k=8`）、各チャンクに tier（L1信頼性、教員承認状況から導出）を付与して返します。スコア `>= 0.30` のチャンクのみ回答コンテキストの根拠として採用します。
 
-```sql
-... ORDER BY embedding::halfvec(3072) <=> :query_vector LIMIT :top_k
-```
+### ③ 出所判定（content_grounding・overall_tier）
+採用チャンクの `material_id` が現在コースの `sources[].material_id` に含まれれば `course_material`、含まれなければ `other_material`、採用チャンクが一つもなければ `model_generated` と判定します（`tier` = 教員承認状況とは別軸）。
+また採用チャンクの tier を `aggregate_overall_tier()` で最弱根拠へ安全側集約し、採用根拠が無ければ `out_of_source` になります。
 
-### ③ PaperStructure 取得（`chat.py:_get_paper_structure`）
-MinIO `extracted-structures/{paper_id}.json` から抽出済み構造を読み込みます。
-`abstract_structure`（変数・因果エッジ・SMILES DSL）を含み、概念どうしの関係を LLM に伝えるために使います。
-取得失敗時は warning を出して続行（構造なしでもチャンクのみで回答可能）。
-
-### ④⑤ プロンプト組み立てと生成（`chat.py:generate_chat_response`）
-system プロンプトには次の指示が含まれます（`chat.py:45-50`）。
+### ④⑤ プロンプト組み立てと生成（`routes/learning.py::learning_chat`）
+system プロンプトは通常モードで `_get_integrated_tutor_system_prompt()`、casual モードで `_get_casual_teacher_system_prompt()` を使い、`overall_tier == out_of_source` のときは `out_of_source_guard_instruction()`（断定回避・予想促し）を追加注入します。
 
 - SMILES DSL を使って因果・関係グラフを説明する
 - 回答末尾に **ドリルダウンリンク**（関連子ノード・前提ノード・親ノード）を Markdown のリストで提示する
@@ -71,21 +68,12 @@ system プロンプトには次の指示が含まれます（`chat.py:45-50`）�
   - [親概念Cの全体像について詳しく聞く]
   ```
 
-学習チャット側（`learning.py:613`）では、誤解の訂正は冷たい「訂正：」を避け、
-「この点については 〇〇 と考えるとより正確です」のように教育的配慮を持って導くよう指示されます。
+生成は `generate_text(messages, temperature=0.3)`（精度重視）。`overall_tier == out_of_source` かつ非 casual のときは、`out_of_source_notice()` の注意書きを回答冒頭に追加します。
 
-生成は `generate_text(messages, temperature=0.3)`（精度重視）。
-
-### ⑥ 誤解検出（`learning.py:1213-1216`）
+### ⑥ 誤解検出
 LLM の回答に誤解訂正のシグナル（`"訂正"`, `"より正確です"`, `"誤解"` など）が含まれると、
 `detect_and_record_misconception(...)` が誤解を抽出し、`event_type="misconception"` として個人レイヤーに記録します。
-この記録はマスター教材ではなく **個人レイヤー**（`learning_states` 由来）に保存され、レスポンスの `course_update.personal_layer.misconceptions_by_topic` で UI に返ります。
-
-### ⑦ 前提知識チェック・学習支援（`learning_support_agent.py`）
-- 現在トピックの `prerequisites` を取得し、各前提について関連トピックのチャット履歴（`learning_chat_history`）の有無で習得を判定。
-- 未習得なら逆質問を返し、`mode="prerequisite_review"` などの構造化アクションを付与。
-- 学生が「理解している」と答えればスキップ。
-- 「学習パスに戻る」「詳細を続ける」などの遷移は `next_actions` として返り、UI がボタン化します。
+この記録はマスター教材ではなく **個人レイヤー**（`learning_states` 由来）に保存され、レスポンスの `course_update.personal_layer.misconceptions_by_topic` で UI に返ります。casual モードではスキップされます。
 
 ---
 

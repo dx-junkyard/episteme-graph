@@ -20,6 +20,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 ADMIN_JS = ROOT / "frontend" / "public" / "js" / "admin.js"
+# 原稿スタジオ (Lecture Script Studio) は Tier 3-17b で admin.js から分離済み。
+# lsNormalizeEvidenceId / lsEquationEmbedBody / lsTopicFormulas はこちらに存在する。
+ADMIN_LS_JS = ROOT / "frontend" / "public" / "js" / "admin-lecture-studio.js"
 APP_JS = ROOT / "frontend" / "public" / "js" / "app.js"
 
 
@@ -29,15 +32,15 @@ def _read(p: Path) -> str:
 
 class TestSourceGuards:
     def test_eq_prefix_collapsed_in_normalizers(self):
-        assert "(?:eq_){2,}" in _read(ADMIN_JS)
+        assert "(?:eq_){2,}" in _read(ADMIN_LS_JS)
         assert "(?:eq_){2,}" in _read(APP_JS)
 
     def test_fallback_render_helpers_exist(self):
-        assert "function lsEquationEmbedBody" in _read(ADMIN_JS)
+        assert "function lsEquationEmbedBody" in _read(ADMIN_LS_JS)
         assert "function renderMaterialEquationBody" in _read(APP_JS)
 
     def test_topic_formulas_keep_latexless_items(self):
-        body = _read(ADMIN_JS)
+        body = _read(ADMIN_LS_JS)
         start = body.index("function lsTopicFormulas")
         snippet = body[start:start + 700]
         # No longer dropped purely for lacking latex.
@@ -75,7 +78,7 @@ process.stdout.write(JSON.stringify(out));
 """
     script = tmp_path / "h.js"
     script.write_text(harness, encoding="utf-8")
-    proc = subprocess.run(["node", str(script), str(ADMIN_JS)], capture_output=True, text=True, timeout=30)
+    proc = subprocess.run(["node", str(script), str(ADMIN_LS_JS)], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)
     assert out["collapse"], "eq_eq_F2 must normalize to eq_F2"

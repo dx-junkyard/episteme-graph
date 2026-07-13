@@ -106,16 +106,11 @@ DBスキーマ変更・マイグレーション作成時は `LLM_EMBEDDING_DIM` 
 
 CorePredicate の定義は `backend/core/schema.py` を直接読んで最新の列挙値を確認すること。
 
-## パターンマッチング
+## パターンマッチング（撤去済み）
 
-`backend/core/batch.py` で実装。
-
-1. 新しい AbstractionPattern が登録される
-2. PostgreSQL pgvector でパターンベクトルに類似する論文チャンクを検索
-3. LLM が構造的同型性を評価 (信頼度スコア 0.0-1.0)
-4. 閾値以上で結果を保存
-
-実装の詳細は `backend/core/batch.py` を直接読んで確認すること。
+AbstractionPattern によるパターンマッチングシステム（旧 `backend/core/batch.py` /
+`seed_patterns.py`）は 2026-07 のアーキテクチャ整理（Tier 1）で Neo4j とともに完全撤去済み。
+知識抽出は現在 [PDF解析Agentパイプライン](#概要) が担う。
 
 ## LLM プロバイダ環境変数仕様
 

@@ -35,7 +35,9 @@ class CorePredicate(str, Enum):
     """分野横断検索を可能にする標準化されたエッジ述語（Core Predicate）。
 
     ドメイン固有の動詞（domain_verb）の上位に位置する抽象述語であり、
-    異分野間の Structural Isomorphism 検索を Neo4j 上で実現するために使用する。
+    異分野間の Structural Isomorphism 検索を PostgreSQL 上の概念構造
+    （`theory_components` / `theory_claims` / `theory_component_graphs`）で
+    実現するために使用する。
     """
 
     CAUSES = "CAUSES"
@@ -102,7 +104,8 @@ class CausalEdge(BaseModel):
     core_predicate: CorePredicate = Field(
         default=CorePredicate.CAUSES,
         description=(
-            "Standardized predicate for cross-domain Neo4j search "
+            "Standardized predicate for cross-domain search over PostgreSQL-backed "
+            "concept structures "
             "(CAUSES, INHIBITS, CORRELATES, DEFINES, MEASURES, TRANSFORMS, "
             "REQUIRES, CONTAINS, EQUIVALENT)"
         ),
@@ -299,27 +302,6 @@ class PatternMatch(BaseModel):
         ge=0.0,
         le=1.0,
         description="Confidence score of the match (0.0–1.0)",
-    )
-
-
-# ---------------------------------------------------------------------------
-# LLM merge result schema (Gateway layer)
-# ---------------------------------------------------------------------------
-
-class FieldDiff(BaseModel):
-    """A single field-level diff between base and proposed structures."""
-
-    field_path: str = Field(description="Dot-separated path to the changed field (e.g. 'hypothesis.statement')")
-    base_value: str = Field(default="", description="Value in the base (canonical) structure")
-    proposed_value: str = Field(default="", description="Value in the proposed structure")
-
-
-class MergeResult(BaseModel):
-    """Result of the LLM-driven proposal evaluation and merge."""
-
-    merged_structure: PaperStructure = Field(description="The merged canonical structure")
-    evaluation_reasoning: str = Field(
-        description="Explanation of what was merged, improved, or rejected and why"
     )
 
 

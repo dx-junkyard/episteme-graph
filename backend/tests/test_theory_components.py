@@ -17,8 +17,12 @@ CORE = ROOT / "backend" / "core" / "theory_components.py"
 MIGRATION = ROOT / "backend" / "db" / "013_theory_components.sql"
 ADMIN_HTML = ROOT / "frontend" / "public" / "admin.html"
 ADMIN_JS = ROOT / "frontend" / "public" / "js" / "admin.js"
+# Tier 3-17b: 原稿スタジオの JS は admin-lecture-studio.js に分離された。
+ADMIN_LECTURE_STUDIO_JS = ROOT / "frontend" / "public" / "js" / "admin-lecture-studio.js"
 STYLES = ROOT / "frontend" / "public" / "css" / "styles.css"
-LECTURE_STUDIO = ROOT / "backend" / "api" / "routes" / "lecture_studio.py"
+# Tier 3-17a: get_lecture_studio_components は lecture_studio パッケージの
+# topics.py に移設された。
+LECTURE_STUDIO = ROOT / "backend" / "api" / "routes" / "lecture_studio" / "topics.py"
 
 
 def _read(path: Path) -> str:
@@ -27,17 +31,13 @@ def _read(path: Path) -> str:
 
 class TestTheoryComponentMigration:
     def test_migration_creates_component_tables(self):
+        """正本は backend/db/013_theory_components.sql（main.py のインライン DDL ではない）。"""
         sql = _read(MIGRATION)
         assert "CREATE TABLE IF NOT EXISTS theory_components" in sql
         assert "CREATE TABLE IF NOT EXISTS theory_component_links" in sql
         assert "source_chunks       JSONB" in sql
         assert "blackbox_policy     JSONB" in sql
-
-    def test_main_applies_migration_013(self):
-        source = _read(ROOT / "backend" / "api" / "main.py")
-        assert "Migration 013" in source
-        assert "idx_theory_components_course" in source
-        assert "Migrations (002-0" in source
+        assert "idx_theory_components_course" in sql
 
 
 class TestTheoryComponentSchemas:
@@ -94,9 +94,11 @@ class TestTheoryComponentRoutes:
         assert "lower(name) = lower(:name)" in source
 
     def test_lecture_studio_router_registers_theory_components(self):
-        source = _read(ROOT / "backend" / "api" / "routes" / "admin.py")
+        # Tier 3-17c: admin.py 経由の二段ネストではなく main.py から
+        # "/api/admin" prefix で直接マウントするフラット構造。
+        source = _read(ROOT / "backend" / "api" / "main.py")
         assert "routes.theory_components" in source
-        assert "router.include_router(_theory_components_router)" in source
+        assert 'app.include_router(_theory_components_router, prefix="/api/admin")' in source
 
     def test_lecture_studio_components_reads_document_scoped_pipeline_results(self):
         source = _read(LECTURE_STUDIO)
@@ -163,7 +165,7 @@ class TestTheoryComponentFrontend:
         assert 'id="ls-extract-theory-btn"' in html
 
     def test_frontend_load_extract_insert_and_preview_exist(self):
-        js = _read(ADMIN_JS)
+        js = _read(ADMIN_LECTURE_STUDIO_JS)
         assert "componentsByChunk" in js
         assert "lsLoadTheoryComponentsForChunk" in js
         assert "lsExtractTheoryComponents" in js
@@ -172,7 +174,7 @@ class TestTheoryComponentFrontend:
         assert "EG_PREVIEW_THEORY" in js
 
     def test_existing_formula_placeholder_path_is_preserved(self):
-        js = _read(ADMIN_JS)
+        js = _read(ADMIN_LECTURE_STUDIO_JS)
         assert "FORMULA_" in js
         assert "EG_PREVIEW_MATH" in js
         assert "formulaById" in js

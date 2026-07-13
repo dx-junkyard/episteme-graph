@@ -1,6 +1,9 @@
 -- ============================================================
 -- Episteme Graph — PostgreSQL schema (pgvector enabled)
 -- ============================================================
+--
+-- このファイルが正本。適用は backend/core/migrations.py のランナーが
+-- 起動時に行う（冪等・毎起動再実行、番号順で init.sql が最初）。
 
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -9,7 +12,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- 認証・セッション管理
 -- ============================================================
 
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     email           TEXT UNIQUE NOT NULL,
     display_name    TEXT NOT NULL,
@@ -21,7 +24,7 @@ CREATE TABLE users (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE sessions (
+CREATE TABLE IF NOT EXISTS sessions (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     token_hash      TEXT NOT NULL UNIQUE,
@@ -31,14 +34,14 @@ CREATE TABLE sessions (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_sessions_user_id ON sessions(user_id);
-CREATE INDEX idx_sessions_expires ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 
 -- ============================================================
 -- 教材メタデータ・書誌情報
 -- ============================================================
 
-CREATE TABLE documents (
+CREATE TABLE IF NOT EXISTS documents (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     title           TEXT NOT NULL,
     authors         TEXT[] NOT NULL DEFAULT '{}',
@@ -66,13 +69,13 @@ CREATE TABLE documents (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_documents_uploaded_by ON documents(uploaded_by);
+CREATE INDEX IF NOT EXISTS idx_documents_uploaded_by ON documents(uploaded_by);
 
 -- ============================================================
 -- チャンク（テキスト＋埋め込み）
 -- ============================================================
 
-CREATE TABLE chunks (
+CREATE TABLE IF NOT EXISTS chunks (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     document_id     UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     chunk_index     INTEGER NOT NULL,
@@ -98,19 +101,19 @@ CREATE TABLE chunks (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_chunks_document ON chunks(document_id);
-CREATE INDEX idx_chunks_material ON chunks(material_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_material ON chunks(material_id);
 
 -- HNSW index on halfvec cast (pgvector の vector 型は HNSW 上限 2000 次元だが、
 -- halfvec 型は 16000 次元まで対応するため 3072 次元でもインデックス作成可能)
-CREATE INDEX idx_chunks_embedding ON chunks
+CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks
     USING hnsw ((embedding::halfvec(3072)) halfvec_cosine_ops);
 
 -- ============================================================
 -- 学習者状態
 -- ============================================================
 
-CREATE TABLE learner_profiles (
+CREATE TABLE IF NOT EXISTS learner_profiles (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id         UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
     current_level   INTEGER NOT NULL DEFAULT 1
@@ -119,7 +122,7 @@ CREATE TABLE learner_profiles (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE learner_mastered_concepts (
+CREATE TABLE IF NOT EXISTS learner_mastered_concepts (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     learner_id      UUID NOT NULL REFERENCES learner_profiles(id) ON DELETE CASCADE,
     concept_id      TEXT NOT NULL,
@@ -129,9 +132,9 @@ CREATE TABLE learner_mastered_concepts (
     UNIQUE (learner_id, concept_id)
 );
 
-CREATE INDEX idx_mastered_learner ON learner_mastered_concepts(learner_id);
+CREATE INDEX IF NOT EXISTS idx_mastered_learner ON learner_mastered_concepts(learner_id);
 
-CREATE TABLE learner_struggling_concepts (
+CREATE TABLE IF NOT EXISTS learner_struggling_concepts (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     learner_id      UUID NOT NULL REFERENCES learner_profiles(id) ON DELETE CASCADE,
     concept_id      TEXT NOT NULL,
@@ -141,9 +144,9 @@ CREATE TABLE learner_struggling_concepts (
     UNIQUE (learner_id, concept_id)
 );
 
-CREATE INDEX idx_struggling_learner ON learner_struggling_concepts(learner_id);
+CREATE INDEX IF NOT EXISTS idx_struggling_learner ON learner_struggling_concepts(learner_id);
 
-CREATE TABLE learner_misconception_corrections (
+CREATE TABLE IF NOT EXISTS learner_misconception_corrections (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     learner_id      UUID NOT NULL REFERENCES learner_profiles(id) ON DELETE CASCADE,
     concept_id      TEXT NOT NULL,
@@ -153,13 +156,13 @@ CREATE TABLE learner_misconception_corrections (
     corrected_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_corrections_learner ON learner_misconception_corrections(learner_id);
+CREATE INDEX IF NOT EXISTS idx_corrections_learner ON learner_misconception_corrections(learner_id);
 
 -- ============================================================
 -- コース管理 (migrated from Neo4j LearningCourse node)
 -- ============================================================
 
-CREATE TABLE learning_courses (
+CREATE TABLE IF NOT EXISTS learning_courses (
     id              TEXT PRIMARY KEY,
     user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     title           TEXT NOT NULL,
@@ -168,13 +171,13 @@ CREATE TABLE learning_courses (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_courses_user ON learning_courses(user_id);
+CREATE INDEX IF NOT EXISTS idx_courses_user ON learning_courses(user_id);
 
 -- ============================================================
 -- 対話・セッション履歴
 -- ============================================================
 
-CREATE TABLE chat_sessions (
+CREATE TABLE IF NOT EXISTS chat_sessions (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -183,9 +186,9 @@ CREATE TABLE chat_sessions (
     concepts_touched TEXT[] DEFAULT '{}'
 );
 
-CREATE INDEX idx_chat_sessions_user ON chat_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_chat_sessions_user ON chat_sessions(user_id);
 
-CREATE TABLE chat_messages (
+CREATE TABLE IF NOT EXISTS chat_messages (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     session_id      UUID NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
     role            TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
@@ -195,13 +198,13 @@ CREATE TABLE chat_messages (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_chat_messages_session ON chat_messages(session_id);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id);
 
 -- ============================================================
 -- 学習チャット履歴 (migrated from Neo4j LEARNING_CHAT relationship)
 -- ============================================================
 
-CREATE TABLE learning_chat_history (
+CREATE TABLE IF NOT EXISTS learning_chat_history (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     course_id       TEXT NOT NULL,
@@ -211,5 +214,5 @@ CREATE TABLE learning_chat_history (
     UNIQUE (user_id, course_id, topic_id)
 );
 
-CREATE INDEX idx_learning_chat_user ON learning_chat_history(user_id);
-CREATE INDEX idx_learning_chat_course ON learning_chat_history(course_id);
+CREATE INDEX IF NOT EXISTS idx_learning_chat_user ON learning_chat_history(user_id);
+CREATE INDEX IF NOT EXISTS idx_learning_chat_course ON learning_chat_history(course_id);

@@ -303,6 +303,13 @@ class BlockClassifier:
         if len(compact) < 6 or len(compact) > 120:
             return False
 
+        # Numbered headings ("3.2.1 Details") contain digits but no operators;
+        # a section-number prefix followed by prose must stay a heading.
+        if _SECTION_NUM_RE.match(text) and not any(
+            c in _MATH_SYMBOLS or c in "=<>+*/^∫∑∞" for c in text
+        ):
+            return False
+
         prose_words = _PROSE_WORD_RE.findall(text)
         japanese_runs = _JAPANESE_TEXT_RE.findall(text)
         japanese_chars = sum(len(run) for run in japanese_runs)

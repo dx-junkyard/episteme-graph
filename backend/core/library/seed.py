@@ -14,6 +14,7 @@ from pathlib import Path
 
 from sqlalchemy import text as sa_text
 
+from core import revision_store
 from core.postgres import get_session
 
 from . import schema, store
@@ -70,6 +71,7 @@ def import_bundled_library() -> dict:
     imported = 0
     skipped = 0
     try:
+        candidates: list[dict] = []
         for summary in summaries:
             domain_key = summary.cartridge_id
             try:
@@ -96,43 +98,65 @@ def import_bundled_library() -> dict:
                     )
                     skipped += 1
                     continue
+                candidates.append(
+                    {"domain_key": domain_key, "entry_type": entry_type, "name": name, "entry": entry}
+                )
 
-                exists = session.execute(
-                    sa_text(
-                        """
-                        SELECT 1 FROM library_entries
-                         WHERE domain_key = :domain_key AND name = :name AND entry_type = :entry_type
-                         LIMIT 1
-                        """
-                    ),
-                    {"domain_key": domain_key, "name": name, "entry_type": entry_type},
-                ).fetchone()
-                if exists:
-                    skipped += 1
-                    continue
+        def _exists(candidate: dict) -> bool:
+            row = session.execute(
+                sa_text(
+                    """
+                    SELECT 1 FROM library_entries
+                     WHERE domain_key = :domain_key AND name = :name AND entry_type = :entry_type
+                     LIMIT 1
+                    """
+                ),
+                {
+                    "domain_key": candidate["domain_key"],
+                    "name": candidate["name"],
+                    "entry_type": candidate["entry_type"],
+                },
+            ).fetchone()
+            return row is not None
 
-                try:
-                    store.create_entry(
-                        domain_key=domain_key,
-                        entry_type=entry_type,
-                        name=name,
-                        aliases=entry.get("aliases") or [],
-                        summary=str(entry.get("summary") or ""),
-                        body=entry.get("body") or {},
-                        source_component_ids=entry.get("source_component_ids") or [],
-                        source_document_ids=entry.get("source_document_ids") or [],
-                        created_by="bundled_import",
-                    )
-                    imported += 1
-                    logger.info("bundled library entry imported: domain=%s name=%s", domain_key, name)
-                except Exception:  # noqa: BLE001 — 1件の失敗で取込全体を止めない
-                    logger.warning(
-                        "failed to import bundled library entry: domain=%s name=%s",
-                        domain_key,
-                        name,
-                        exc_info=True,
-                    )
-                    skipped += 1
+        def _create(candidate: dict) -> None:
+            entry = candidate["entry"]
+            store.create_entry(
+                domain_key=candidate["domain_key"],
+                entry_type=candidate["entry_type"],
+                name=candidate["name"],
+                aliases=entry.get("aliases") or [],
+                summary=str(entry.get("summary") or ""),
+                body=entry.get("body") or {},
+                source_component_ids=entry.get("source_component_ids") or [],
+                source_document_ids=entry.get("source_document_ids") or [],
+                created_by="bundled_import",
+            )
+
+        def _on_created(candidate: dict) -> None:
+            logger.info(
+                "bundled library entry imported: domain=%s name=%s",
+                candidate["domain_key"],
+                candidate["name"],
+            )
+
+        def _on_create_error(candidate: dict, exc: Exception) -> None:
+            logger.warning(
+                "failed to import bundled library entry: domain=%s name=%s",
+                candidate["domain_key"],
+                candidate["name"],
+                exc_info=exc,
+            )
+
+        result = revision_store.idempotent_seed_import(
+            candidates,
+            exists_fn=_exists,
+            create_fn=_create,
+            on_created=_on_created,
+            on_create_error=_on_create_error,
+        )
+        imported += result["imported"]
+        skipped += result["skipped"]
     finally:
         session.close()
 

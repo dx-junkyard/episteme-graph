@@ -1,7 +1,7 @@
 """Tests for iterative-improvement run version management (#402).
 
 Covers:
-    - migration SQL (019 + runtime migration in main.py) adds version columns
+    - migration SQL (019, the source of truth under backend/db/) adds version columns
     - active-run vs latest-run helper separation
     - create_revision_run requires base_run_id and only writes the runs table
     - optimistic active-run switch (rowcount-based)
@@ -83,6 +83,7 @@ def fake_session(monkeypatch):
 # --- migration SQL ---------------------------------------------------------
 
 def test_migration_019_adds_version_columns():
+    """正本は backend/db/019_revision_runs.sql（main.py のインライン DDL ではない）。"""
     sql = (ROOT / "backend/db/019_revision_runs.sql").read_text(encoding="utf-8")
     assert "ADD COLUMN IF NOT EXISTS run_type" in sql
     assert "ADD COLUMN IF NOT EXISTS base_run_id" in sql
@@ -91,16 +92,10 @@ def test_migration_019_adds_version_columns():
     assert "ADD COLUMN IF NOT EXISTS active_analysis_run_id UUID" in sql
     # revision runs must carry a base_run_id
     assert "run_type <> 'revision' OR base_run_id IS NOT NULL" in sql
+    assert "document_analysis_runs_base_run_required_chk" in sql
     # backfill latest completed run as active, never failed runs
     assert "WHERE status = 'completed'" in sql
     assert "active_analysis_run_id IS NULL" in sql
-
-
-def test_runtime_migration_in_main_matches_file():
-    main_src = (ROOT / "backend/api/main.py").read_text(encoding="utf-8")
-    assert "ADD COLUMN IF NOT EXISTS run_type" in main_src
-    assert "ADD COLUMN IF NOT EXISTS active_analysis_run_id UUID" in main_src
-    assert "document_analysis_runs_base_run_required_chk" in main_src
 
 
 # --- run-fetch SQL must be alias-qualified (regression: ambiguous "id") -------

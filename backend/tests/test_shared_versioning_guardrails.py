@@ -19,7 +19,10 @@ for _p in (str(BACKEND), str(BACKEND / "api")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from tests.guardrail_helpers import assert_module_tree_does_not_import  # noqa: E402
+from tests.guardrail_helpers import (  # noqa: E402
+    assert_module_tree_does_not_import,
+    assert_module_tree_forbids,
+)
 
 _CORE_DIR = BACKEND / "core" / "versioning"
 _ROUTE_SRC = (BACKEND / "api" / "routes" / "versioning.py").read_text(encoding="utf-8")
@@ -163,14 +166,40 @@ class TestPurgeClosesOrphanGap:
             assert tbl in _DELETION_SRC, tbl
 
     def test_purge_cleans_versioning_tables(self):
-        for tbl in ("shared_versions", "shared_version_subscriptions", "share_notifications"):
+        # share_notifications は migration 045 で user_notifications に統合済み。
+        for tbl in ("shared_versions", "shared_version_subscriptions"):
             assert f"DELETE FROM {tbl}" in _DELETION_SRC, tbl
+        assert "DELETE FROM user_notifications" in _DELETION_SRC
+
+    def test_purge_notification_delete_scoped_to_shared_source(self):
+        # Tier 3-15 最重要注意点: source='shared' を付け忘れると status 層
+        # （状態管理・通知基盤）の通知履歴まで巻き込んで削除してしまう。
+        idx = _DELETION_SRC.find("DELETE FROM user_notifications")
+        assert idx != -1
+        end = _DELETION_SRC.find(")", idx)
+        stmt = _DELETION_SRC[idx: end if end != -1 else idx + 300]
+        assert "source = 'shared'" in stmt
 
     def test_purge_leaves_purged_tombstone(self):
         assert "'purged'" in _DELETION_SRC
 
     def test_purge_idempotent_guard(self):
         assert "already_purged" in _DELETION_SRC
+
+
+class TestNoLeftoverShareNotificationsReferences:
+    """通知テーブル統合（migration 045, Tier 3-15）後: share_notifications は
+
+    backend/core・backend/api の Python コードのどこからも参照されていないこと
+    （実テーブルが無いため、参照が残っていれば実行時にエラーになる）。
+    migration SQL（backend/db/*.sql）・テスト自身・docs は対象外。
+    """
+
+    def test_no_python_source_references_share_notifications(self):
+        assert_module_tree_forbids(
+            [BACKEND / "core", BACKEND / "api"],
+            ["share_notifications"],
+        )
 
 
 class TestSweeper:
@@ -223,9 +252,10 @@ class TestAuditVocabulary:
 
 class TestRouterRegistration:
     def test_router_mounted_under_admin(self):
-        # versioning ルータは admin ルータ配下（/api/admin）にマウントする
-        assert "from routes.versioning import router as _versioning_router" in _ADMIN_SRC
-        assert "router.include_router(_versioning_router)" in _ADMIN_SRC
+        # versioning ルータは "/api/admin" prefix でマウントする。
+        # Tier 3-17c: admin.py 経由の二段ネストではなく main.py から直接マウント。
+        assert "from routes.versioning import router as _versioning_router" in _MAIN_SRC
+        assert 'app.include_router(_versioning_router, prefix="/api/admin")' in _MAIN_SRC
 
     def test_sweeper_wired_in_lifespan(self):
         assert "start_background_sweeper" in _MAIN_SRC

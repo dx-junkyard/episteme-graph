@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy core engine, API and agents
 COPY backend/core/ /app/core/
+COPY backend/db/ /app/db/
 COPY backend/cartridges/ /app/cartridges/
 COPY backend/api/ /app/
 COPY src/ /app/src/

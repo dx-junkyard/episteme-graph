@@ -19,7 +19,6 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "backend" / "api"))
 
-MAIN = ROOT / "backend" / "api" / "main.py"
 MIGRATION = ROOT / "backend" / "db" / "022_tension.sql"
 LEARNING = ROOT / "backend" / "api" / "routes" / "learning.py"
 SERVICES = ROOT / "backend" / "api" / "services.py"
@@ -33,19 +32,13 @@ def _read(path: Path) -> str:
 
 class TestMigration022:
     def test_reference_sql_defines_indexes_only(self):
+        """正本は backend/db/022_tension.sql（main.py のインライン DDL ではない）。"""
         sql = _read(MIGRATION)
         assert "CREATE INDEX IF NOT EXISTS idx_interest_traces_kind_status" in sql
         assert "CREATE INDEX IF NOT EXISTS idx_interest_traces_candidate" in sql
         # 新テーブル・列追加はゼロ（設計書 §3）
         assert "CREATE TABLE" not in sql
         assert "ALTER TABLE" not in sql
-
-    def test_main_applies_migration_022(self):
-        source = _read(MAIN)
-        assert "Migration 022" in source
-        assert "idx_interest_traces_kind_status" in source
-        assert "idx_interest_traces_candidate" in source
-        assert "Migrations (002-" in source  # 以降の migration 追加 (023...) でも壊れないよう prefix で確認
 
 
 class TestVocabulary:

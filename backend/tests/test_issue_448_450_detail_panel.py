@@ -5,7 +5,8 @@
 #450: 詳細パネルを「説明 → 根拠リンク → 隣接」の三段に再構成。参照は共通の解決ロジック
       （`lsGraphResolveRef`）を介し、解決可能なら遷移リンク、解決不能なら明示する。
 
-frontend に JS テストハーネスが無いため、admin.js の純粋ヘルパを Node で評価して
+frontend に JS テストハーネスが無いため、原稿スタジオ（Lecture Script Studio。Tier 3-17b で
+admin.js から admin-lecture-studio.js へ分離済み）の純粋ヘルパを Node で評価して
 ドメイン横断の入力に対する挙動を検証する（Node が無い環境では source-assertion に縮退）。
 """
 
@@ -19,7 +20,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-ADMIN_JS = ROOT / "frontend" / "public" / "js" / "admin.js"
+ADMIN_LS_JS = ROOT / "frontend" / "public" / "js" / "admin-lecture-studio.js"
 STYLES_CSS = ROOT / "frontend" / "public" / "css" / "styles.css"
 
 
@@ -32,12 +33,12 @@ def _read(path: Path) -> str:
 
 class TestIssue448RoleNotType:
     def test_role_mapping_helper_exists(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         assert "function lsGraphRoleLabel" in source
         assert "LS_GRAPH_ROLE_LABELS" in source
 
     def test_tooltip_uses_role_not_internal_type(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         start = source.index("function lsGraphNodeTooltip")
         body = source[start:start + 500]
         assert "lsGraphRoleLabel(node)" in body
@@ -45,7 +46,7 @@ class TestIssue448RoleNotType:
         assert "component_type_text || node.component_type || node.review_status" not in body
 
     def test_detail_badge_uses_role_not_internal_type(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         start = source.index("function lsRenderGraphNodeDetail")
         body = source[start:start + 4000]
         assert "ls-graph-detail-badge" in body
@@ -59,7 +60,7 @@ class TestIssue448RoleNotType:
 
 class TestIssue450DetailPanelStructure:
     def test_three_sections_in_order(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         start = source.index("function lsRenderGraphNodeDetail")
         body = source[start:start + 5000]
         i_expl = body.index("<b>説明</b>")
@@ -68,7 +69,7 @@ class TestIssue450DetailPanelStructure:
         assert i_expl < i_evid < i_neigh, "説明 → 根拠リンク → 隣接 の順で表示されること"
 
     def test_resolution_and_navigation_helpers_exist(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         for fn in (
             "function lsGraphBuildResolver",
             "function lsGraphResolveRef",
@@ -81,7 +82,7 @@ class TestIssue450DetailPanelStructure:
         assert "lsGraphNavigateToNode(el.getAttribute" in source
 
     def test_unresolved_reference_is_explicit(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         assert "ls-graph-ref-unresolved" in source
         assert "未解決" in source
 
@@ -95,11 +96,11 @@ class TestIssue450EdgeDetail:
     """#450 は Node/Edge 両方の詳細パネル。エッジ選択でも三段が出ること。"""
 
     def test_edge_detail_renderer_exists(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         assert "function lsRenderGraphEdgeDetail" in source
 
     def test_edge_selection_is_wired(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         # 単一の click ハンドラが node/edge 双方を処理する。
         assert 'network.on("click"' in source
         assert "lsRenderGraphEdgeDetail(edge, graph)" in source
@@ -107,7 +108,7 @@ class TestIssue450EdgeDetail:
         assert "edgeById" in source
 
     def test_edge_detail_has_three_sections(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         start = source.index("function lsRenderGraphEdgeDetail")
         body = source[start:start + 4000]
         i_expl = body.index("<b>説明</b>")
@@ -165,7 +166,7 @@ process.stdout.write(JSON.stringify(out));
     script = tmp_path / "h.js"
     script.write_text(harness, encoding="utf-8")
     proc = subprocess.run(
-        ["node", str(script), str(ADMIN_JS)], capture_output=True, text=True, timeout=30,
+        ["node", str(script), str(ADMIN_LS_JS)], capture_output=True, text=True, timeout=30,
     )
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)
@@ -233,7 +234,7 @@ process.stdout.write(JSON.stringify(out));
     script = tmp_path / "edge.js"
     script.write_text(harness, encoding="utf-8")
     proc = subprocess.run(
-        ["node", str(script), str(ADMIN_JS)], capture_output=True, text=True, timeout=30,
+        ["node", str(script), str(ADMIN_LS_JS)], capture_output=True, text=True, timeout=30,
     )
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)

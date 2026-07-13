@@ -379,7 +379,6 @@ class TestNextStepsAPI:
 
 import re  # noqa: E402
 
-_MAIN_SRC = (BACKEND / "api" / "main.py").read_text(encoding="utf-8")
 _MIGRATION_SQL = (BACKEND / "db" / "039_assistant_step_dismissals.sql").read_text(encoding="utf-8")
 _NEXT_STEPS_JS = (ROOT / "frontend" / "public" / "js" / "admin-next-steps.js").read_text(encoding="utf-8")
 _ADMIN_HTML = (ROOT / "frontend" / "public" / "admin.html").read_text(encoding="utf-8")
@@ -387,19 +386,17 @@ _ADMIN_JS_MAIN = (ROOT / "frontend" / "public" / "js" / "admin.js").read_text(en
 
 
 class TestMigrationWiring:
-    """migration 039 が正本 SQL・_run_migrations()・ORM の三点で一致していること。"""
+    """migration 039 が正本 SQL・ORM の二点で一致していること
+    （main.py 側との比較は 2026-07 の migration 正本一本化により廃止）。
+    """
 
     def test_sql_reference_defines_table(self):
         assert "CREATE TABLE IF NOT EXISTS assistant_step_dismissals" in _MIGRATION_SQL
         assert "UNIQUE (user_id, step_key)" in _MIGRATION_SQL
         assert "revoked" in _MIGRATION_SQL
 
-    def test_main_registers_migration_039(self):
-        # 起動時 _run_migrations() で実テーブルが作られる（配線漏れの再発防止）。
-        assert "CREATE TABLE IF NOT EXISTS assistant_step_dismissals" in _MAIN_SRC
-        assert "idx_assistant_step_dismissals_user" in _MAIN_SRC
-        # 適用完了ログの範囲は後続 migration 追加で末尾が伸びるため prefix で確認する。
-        assert "Migrations (002-" in _MAIN_SRC
+    def test_sql_reference_defines_expected_index(self):
+        assert "idx_assistant_step_dismissals_user" in _MIGRATION_SQL
 
     def test_orm_model_exists(self):
         from core import models

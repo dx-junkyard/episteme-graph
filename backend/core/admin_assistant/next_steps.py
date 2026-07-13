@@ -29,6 +29,7 @@ from typing import Any, Optional
 from sqlalchemy import text as sa_text
 
 from core.admin_assistant import capabilities as caps
+from core.course_data import course_atlas_binding_facts
 from core.status import projector as status_projector
 from core.status import schema as status_schema
 
@@ -158,19 +159,14 @@ def _make_step(
 
 
 def _course_has_atlas_node(data: dict) -> bool:
-    """topics[].atlas_node_id が（章内・トップレベルいずれかで）1 つでも埋まっているか。"""
-    if not isinstance(data, dict):
-        return False
-    for chapter in data.get("chapters") or []:
-        if not isinstance(chapter, dict):
-            continue
-        for topic in chapter.get("topics") or []:
-            if isinstance(topic, dict) and topic.get("atlas_node_id"):
-                return True
-    for topic in data.get("topics") or []:
-        if isinstance(topic, dict) and topic.get("atlas_node_id"):
-            return True
-    return False
+    """topics[].atlas_node_id が（章内・トップレベルいずれかで）1 つでも埋まっているか。
+
+    走査自体は core/course_data.py::course_atlas_binding_facts に共通化済み
+    （正本は Tier3-18 で core/status/projector.py から移設）。判定方針（このモジュールは
+    cartridge_id 優先）はこちらに残す。
+    """
+    _, has_atlas_node = course_atlas_binding_facts(data)
+    return has_atlas_node
 
 
 def _course_needs_atlas_binding(data: dict) -> bool:
@@ -181,9 +177,10 @@ def _course_needs_atlas_binding(data: dict) -> bool:
     """
     if not isinstance(data, dict):
         return True
-    if data.get("cartridge_id"):
+    has_cartridge, has_atlas_node = course_atlas_binding_facts(data)
+    if has_cartridge:
         return False
-    return not _course_has_atlas_node(data)
+    return not has_atlas_node
 
 
 # ---------------------------------------------------------------------------

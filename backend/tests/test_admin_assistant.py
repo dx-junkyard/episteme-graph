@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
 
@@ -47,11 +46,11 @@ from tests.guardrail_helpers import (  # noqa: E402
     assert_module_tree_does_not_import,
     assert_source_forbids,
     extract_function_source,
+    read_migration_sql,
 )
 
 _CORE_DIR = BACKEND / "core" / "admin_assistant"
 _ROUTE_SRC = (BACKEND / "api" / "routes" / "admin_assistant.py").read_text(encoding="utf-8")
-_MAIN_SRC = (BACKEND / "api" / "main.py").read_text(encoding="utf-8")
 _ADMIN_JS = (ROOT / "frontend" / "public" / "js" / "admin-assistant.js").read_text(encoding="utf-8")
 _ADMIN_JS_MAIN = (ROOT / "frontend" / "public" / "js" / "admin.js").read_text(encoding="utf-8")
 
@@ -244,11 +243,9 @@ class TestGuardrails:
         assert "cap.confirm and not body.confirm" in _ROUTE_SRC
 
     def test_migration_034_present(self):
-        assert "assistant_actions" in _MAIN_SRC
-        assert (BACKEND / "db" / "034_assistant_actions.sql").exists()
-        # マイグレーション範囲が 034 以上をカバーしている（後続 migration の追加で壊れない形で確認）
-        m = re.search(r"Migrations \(002-(\d+)\)", _MAIN_SRC)
-        assert m and int(m.group(1)) >= 34
+        """正本は backend/db/034_assistant_actions.sql（main.py のインライン DDL ではない）。"""
+        sql = read_migration_sql(BACKEND, 34)
+        assert "assistant_actions" in sql
 
     def test_registry_anchor_ids_registered_in_frontend(self):
         """registry の locate anchor（base id）が admin.js の registerUiAnchors に存在する。"""

@@ -105,6 +105,23 @@ def assert_source_does_not_import(
     assert_source_forbids(src, terms, context=context)
 
 
+def read_migration_sql(backend_dir: Path, number: int) -> str:
+    """``backend_dir/db`` 配下の ``NNN_*.sql``（3桁ゼロ埋め番号プレフィックス）を
+    1件読み込んで返す。
+
+    マイグレーション正本は ``backend/db/*.sql``（``core/migrations.py`` が起動時に
+    番号順に適用する）。ガードレールテストが「migration N が適用される」ことを
+    検査する際は、``backend/api/main.py`` のインライン DDL ではなくこのヘルパー
+    経由で正本 SQL ファイルを読むこと（2026-07 migration 正本一本化）。
+    """
+    matches = sorted((Path(backend_dir) / "db").glob(f"{number:03d}_*.sql"))
+    assert len(matches) == 1, (
+        f"expected exactly one migration file numbered {number:03d} in "
+        f"{Path(backend_dir) / 'db'}, found {[m.name for m in matches]}"
+    )
+    return matches[0].read_text(encoding="utf-8")
+
+
 def extract_function_source(src: str, fn_name: str) -> str:
     """``def {fn_name}`` の開始位置から、次のトップレベル ``\\ndef `` 直前
     （無ければ文字列末尾）までを素朴に切り出す。

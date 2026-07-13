@@ -120,6 +120,45 @@ class TestNoRowDeletion:
         assert '"/{notification_id}/dismiss"' in _NOTIF_ROUTE_SRC
 
 
+class TestInboxSourceScoped:
+    """通知テーブル統合（migration 045, Tier 3-15）: user_notifications は
+
+    status 層（source='status'）と V層（source='shared'）の行を同居させるため、
+    core/status/inbox.py の読み取り・既読・却下は必ず source='status' でスコープ
+    しなければならない（付け忘れると V層由来の行が status 側の一覧・未読数にも
+    二重に見えてしまう。統合の最重要注意点）。
+    """
+
+    def test_list_inbox_scoped_to_status_source(self):
+        idx = _INBOX_SRC.find("def list_inbox")
+        end = _INBOX_SRC.find("def unread_count")
+        assert idx != -1 and end != -1
+        assert "n.source = 'status'" in _INBOX_SRC[idx:end]
+
+    def test_unread_count_scoped_to_status_source(self):
+        idx = _INBOX_SRC.find("def unread_count")
+        end = _INBOX_SRC.find("def mark_read")
+        assert idx != -1 and end != -1
+        assert "source = 'status'" in _INBOX_SRC[idx:end]
+
+    def test_mark_read_scoped_to_status_source(self):
+        idx = _INBOX_SRC.find("def mark_read")
+        end = _INBOX_SRC.find("def mark_all_read")
+        assert idx != -1 and end != -1
+        assert "source = 'status'" in _INBOX_SRC[idx:end]
+
+    def test_mark_all_read_scoped_to_status_source(self):
+        idx = _INBOX_SRC.find("def mark_all_read")
+        end = _INBOX_SRC.find("def dismiss")
+        assert idx != -1 and end != -1
+        assert "source = 'status'" in _INBOX_SRC[idx:end]
+
+    def test_dismiss_scoped_to_status_source(self):
+        idx = _INBOX_SRC.find("def dismiss")
+        assert idx != -1
+        assert "source = 'status'" in _INBOX_SRC[idx:]
+
+
 class TestFailClosedUnknown:
     """S5: 投影不能なエンティティは unknown を返す（例外にしない）。"""
 
@@ -155,12 +194,14 @@ class TestNotificationKindCapAtSix:
 
 class TestRouterRegistration:
     def test_status_router_mounted_under_admin(self):
-        assert "from routes.status import router as _status_router" in _ADMIN_SRC
-        assert "router.include_router(_status_router)" in _ADMIN_SRC
+        # Tier 3-17c: admin.py 経由の二段ネストではなく main.py から
+        # "/api/admin" prefix で直接マウントするフラット構造。
+        assert "from routes.status import router as _status_router" in _MAIN_SRC
+        assert 'app.include_router(_status_router, prefix="/api/admin")' in _MAIN_SRC
 
     def test_notifications_router_mounted_under_admin(self):
-        assert "from routes.notifications import router as _notifications_router" in _ADMIN_SRC
-        assert "router.include_router(_notifications_router)" in _ADMIN_SRC
+        assert "from routes.notifications import router as _notifications_router" in _MAIN_SRC
+        assert 'app.include_router(_notifications_router, prefix="/api/admin")' in _MAIN_SRC
 
     def test_watcher_wired_in_lifespan(self):
         assert "start_watcher" in _MAIN_SRC
@@ -204,16 +245,29 @@ class TestEventsReader:
         )
 
 
-class TestSharedLayerUntouched:
-    """既存 V層（share_notifications / core/versioning）は読み取りのみで変更しない。"""
+class TestUnifiedNotificationsRoute:
+    """通知テーブル統合（migration 045, Tier 3-15）後: routes/notifications.py は
 
-    def test_unified_route_only_imports_versioning_reads(self):
-        assert "from core.versioning import notifications as shared_notifications" in _NOTIF_ROUTE_SRC
+    read/mark 専用であり、書き込み（INSERT）・行削除（DELETE）は一切行わない
+    （通知の生成は core/status/notification_rules.py・core/versioning/notifications.py の
+    責務のまま。dismiss のみ core/status/inbox.dismiss 経由で committed される）。
+    """
+
+    def test_route_has_no_insert_or_delete(self):
         assert_source_forbids(
             _NOTIF_ROUTE_SRC,
-            ["INSERT INTO share_notifications", "DELETE FROM share_notifications", "ALTER TABLE share_notifications"],
+            ["INSERT INTO user_notifications", "DELETE FROM user_notifications"],
             context="routes/notifications.py",
         )
+
+    def test_route_reads_and_updates_unified_table_directly(self):
+        # 統合後は2テーブルのアプリ層マージが不要になり、単一クエリで完結する。
+        assert "FROM user_notifications" in _NOTIF_ROUTE_SRC
+        assert "UPDATE user_notifications" in _NOTIF_ROUTE_SRC
+
+    def test_dismiss_still_scoped_to_status_layer_only(self):
+        # V層通知への dismiss 拡張はやらない（挙動保存）。status_inbox.dismiss 経由。
+        assert "status_inbox.dismiss(notification_id, uid)" in _NOTIF_ROUTE_SRC
 
 
 _CAN_IMPORT_SCHEMA = True

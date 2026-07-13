@@ -27,16 +27,13 @@ from typing import Any
 from sqlalchemy import text as sa_text
 
 from core import atlas as atlas_module
+from core import revision_store
 
 logger = logging.getLogger(__name__)
 
 
-class DraftRevisionConflict(Exception):
+class DraftRevisionConflict(revision_store.RevisionConflictError):
     """楽観ロックの衝突。current_revision に最新値を持つ (API 層で 409)。"""
-
-    def __init__(self, message: str, current_revision: int | None = None):
-        super().__init__(message)
-        self.current_revision = current_revision
 
 
 # ---------------------------------------------------------------------------
@@ -346,9 +343,9 @@ def save_draft(
         )
         return 1
 
-    result = session.execute(
-        sa_text(
-            """
+    revision_store.update_with_revision_lock(
+        session,
+        update_sql="""
             UPDATE atlas_skeletons
                SET content = CAST(:content AS jsonb),
                    revision = revision + 1,
@@ -358,28 +355,22 @@ def save_draft(
                    updated_at = now()
              WHERE domain_key = :domain_key AND status = 'draft'
                AND revision = :expected_revision
-            """
-        ),
-        {
+            """,
+        update_params={
             "domain_key": domain_key,
             "content": content,
             "generated_by": generated_by,
             "user_id": user_id or None,
             "expected_revision": int(expected_revision),
         },
+        select_sql=(
+            "SELECT revision FROM atlas_skeletons "
+            "WHERE domain_key = :domain_key AND status = 'draft' LIMIT 1"
+        ),
+        select_params={"domain_key": domain_key},
+        conflict_exc=DraftRevisionConflict,
+        conflict_message="draft が他の編集で更新されています。最新を読み込み直してください",
     )
-    if getattr(result, "rowcount", 0) != 1:
-        current = session.execute(
-            sa_text(
-                "SELECT revision FROM atlas_skeletons "
-                "WHERE domain_key = :domain_key AND status = 'draft' LIMIT 1"
-            ),
-            {"domain_key": domain_key},
-        ).fetchone()
-        raise DraftRevisionConflict(
-            "draft が他の編集で更新されています。最新を読み込み直してください",
-            current_revision=int(current[0]) if current else None,
-        )
     return int(expected_revision) + 1
 
 
@@ -445,13 +436,17 @@ def import_bundled_skeletons(session) -> int:
         logger.warning("bundled cartridge listing failed for import", exc_info=True)
         return 0
 
-    imported = 0
+    candidates: list[tuple[str, atlas_module.AtlasSkeleton]] = []
     for summary in summaries:
         domain_key = summary.cartridge_id
         skeleton = _bundled_skeleton(domain_key)
         if skeleton is None or not skeleton.version:
             continue
-        exists = session.execute(
+        candidates.append((domain_key, skeleton))
+
+    def _exists(candidate: tuple[str, atlas_module.AtlasSkeleton]) -> bool:
+        domain_key, skeleton = candidate
+        row = session.execute(
             sa_text(
                 "SELECT 1 FROM atlas_skeletons "
                 "WHERE domain_key = :domain_key AND status = 'frozen' "
@@ -459,13 +454,24 @@ def import_bundled_skeletons(session) -> int:
             ),
             {"domain_key": domain_key, "version": skeleton.version},
         ).fetchone()
-        if exists:
-            continue
-        insert_frozen(
-            session, domain_key, skeleton, generated_by="bundled_import"
-        )
-        imported += 1
+        return row is not None
+
+    def _create(candidate: tuple[str, atlas_module.AtlasSkeleton]) -> None:
+        domain_key, skeleton = candidate
+        insert_frozen(session, domain_key, skeleton, generated_by="bundled_import")
+
+    def _on_created(candidate: tuple[str, atlas_module.AtlasSkeleton]) -> None:
+        domain_key, skeleton = candidate
         logger.info(
             "bundled atlas skeleton imported: %s %s", domain_key, skeleton.version
         )
-    return imported
+
+    result = revision_store.idempotent_seed_import(
+        candidates,
+        exists_fn=_exists,
+        create_fn=_create,
+        # 同梱データは信頼できる前提で fail-fast する (library と異なり握って続行しない)。
+        catch_create_errors=False,
+        on_created=_on_created,
+    )
+    return result["imported"]

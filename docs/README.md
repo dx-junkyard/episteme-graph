@@ -77,7 +77,7 @@ PDF 論文を投入するだけで知識をグラフ構造に変換し、それ�
 ```
 PDF アップロード
   → MinIO 保存 → GROBID / PyMuPDF でテキスト化
-  → PDF解析 Agent パイプライン（23 ステージ）で
+  → PDF解析 Agent パイプライン（26 ステージ）で
      構造・主張・数式・導出・理論操作グラフを段階的に生成
   → チャンク+埋め込みを PostgreSQL(pgvector) へ
   → 理論コンポーネント・理論操作グラフを PostgreSQL へ / 図画像を MinIO へ
@@ -87,7 +87,7 @@ PDF アップロード
 
 ### 学習（学生）
 ```
-公開コースを受講登録（クローン）
+公開コースを受講登録（`learning_states` に1行 INSERT。コース本体は複製しない）
   → トピック選択 → RAG チャットで質問
      （pgvector 検索（tier 付き）+ 履歴 → LLM 回答）
   → 誤解検出・前提知識チェック・学習進捗トラッキング
@@ -102,7 +102,7 @@ PDF アップロード
 ### アーキテクチャ / 基盤
 - [アーキテクチャ概要](architecture/overview.md) — システム全体構成、ディレクトリ構成、データストア役割分担
 - [デプロイ構成](architecture/deployment.md) — Docker Compose 構成、環境変数、ネットワーク設計
-- [データモデル](architecture/data-model.md) — PostgreSQL テーブル設計、マイグレーション一覧（init → 043）
+- [データモデル](architecture/data-model.md) — PostgreSQL テーブル設計、マイグレーション一覧（init → 045）
 - [レイヤー索引表](architecture/layer_registry.md) — A〜V層・横断ユーティリティ層・状態通知基盤の正本設計書/実装場所/migration対応一覧
 
 ### バックエンド
@@ -111,7 +111,7 @@ PDF アップロード
 - [RAG チャットフロー](backend/rag-chat.md) — 検索 → コンテキスト構築 → 生成 → 誤解検出、カジュアル対話モード、出所判定（content_grounding）、TensionMiningAgent（違和感候補検出）
 
 ### PDF 解析パイプライン
-- [パイプライン概要](pipeline/overview.md) — PDF → ナレッジグラフの全 23 ステージ
+- [パイプライン概要](pipeline/overview.md) — PDF → ナレッジグラフの全 26 ステージ
 - [PDF 解析 Agent 詳細](pipeline/agents.md) — 各 Agent の役割・入出力・LLM/決定論の区別
 - [カートリッジシステム](pipeline/cartridges.md) — ドメイン固有語彙・検証ルールの注入
 - [DSL と理論操作グラフ](pipeline/theory-graph.md) — SMILES 風 DSL、TheoryOperationGraph、ソースバッキング

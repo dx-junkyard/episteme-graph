@@ -32,6 +32,16 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 - **`doubt-atlas.js`（D2-3 前提の地図 / Assumption Atlas）は Field Atlas と別機能**。ファイル名が
   紛らわしいが D層のドキュメントで明記の通り、コード・API・UI 文言とも `doubt-` / `assumption-`
   プレフィックスで衝突回避されている。
+- **アーキテクチャ整理 Tier 3（migration 044/045）はレイヤーをまたいで既存テーブルを統合した**:
+  `object_group_permissions`（044）は C層とは無関係の「共有の仕組み」全般（レガシー単一グループ共有＝
+  migration 009 とは別）に属する `course_group_permissions`（010）と、本表「L層」以前の
+  「パイプライン成果のグループ共有」（`document_group_permissions`, 035）を統合したもの。
+  `user_notifications`（045 で拡張）は「状態通知基盤」（038）と V層（037 `share_notifications`）の
+  通知インボックスを統合したもの。**統合してもレイヤー自体の migration 番号（037/038 等）は
+  変更されていない** — テーブル統合は独立した後続 migration（044/045）として追加されており、
+  各層の「主 migration 番号」は本表のまま参照してよい。詳細は
+  `docs/architecture/data-model.md` §1 と `consolidation_survey_2026-07.md` 第4部（Tier 3-14/15）
+  を参照。
 - **docs/README.md の3層モデルとの対応**（別粒度・ユーザー向けジャーニーの3段階であり、下表の
   アルファベット層とは目的が異なる）: ① 知識の構造化 ＝ A層そのもの / ② 適応的学習 ＝
   B・C・D・G・S(Field Atlas)・U層 + 横断(Admin Copilot) + 状態通知基盤（学習者支援・教員運用支援の
@@ -53,9 +63,9 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | **R層** | 再構成ループ（Reconstruction Loop） | `docs/features/reconstruction_loop_design.md` | `backend/core/reconstruction/` + `routes/reconstruction.py` + `reconstruction.js` | 036 | 実装済み |
 | **S層**（便宜上のラベル。CLAUDE.md 自体はこの呼称を使わない） | 分野の地図（Field Atlas） | `docs/features/field_atlas_*.md`（skeleton / binding / correction_reports / db_managed_skeleton / detail_panel / skeleton_editor_upgrade の計6ファイルに分割） | `backend/core/atlas*.py`（7ファイル）+ `routes/atlas.py` / `routes/atlas_view.py` + `frontend/public/js/atlas-*.js`（9ファイル） | 023, 024, 026, 027, 028（骨格・キャッシュ・導線計測・DB管理化・ドメインメタ） | 実装済み（Stage 2 まで。調査全体で最も設計品質が高い領域） |
 | **U層** | LLM トークン使用量推計（Usage Metering） | `docs/features/llm_usage_metering_design.md` | `backend/core/llm_usage/` + `routes/llm_usage.py` | 043 | 実装済み |
-| **V層** | 共有物のバージョン管理 + 更新通知 + 削除猶予 | `docs/features/shared_versioning_design.md` | `backend/core/versioning/` + `routes/versioning.py` + `versioning.js` | 037 | 実装済み（CLAUDE.md には本タスクで追記済み。従来欠落していた） |
+| **V層** | 共有物のバージョン管理 + 更新通知 + 削除猶予 | `docs/features/shared_versioning_design.md` | `backend/core/versioning/` + `routes/versioning.py` + `versioning.js` | 037（通知インボックス `share_notifications` は 045 で `user_notifications` に統合済み） | 実装済み（CLAUDE.md には本タスクで追記済み。従来欠落していた） |
 | **横断ユーティリティ層** | Admin Copilot（統合AIアシスタント） | `docs/features/admin_assistant_design.md` | `backend/core/admin_assistant/`（`capabilities.py` / `knowledge.py` / `intent.py` / `actions/`）+ `routes/admin_assistant.py`（G層と同居） | 034 | 実装済み |
-| **状態通知基盤**（レター無し） | Status Projection + 遷移イベント + 統合通知インボックス | `docs/features/status_notification_design.md`（設計書表記は「039」だが実装は038） | `backend/core/status/`（`projector.py` / `watcher.py` / `notification_rules.py`）+ `routes/status.py` | 038 | 実装済み（G層の土台。CLAUDE.md に専用セクションはまだ無い — 別途整備候補） |
+| **状態通知基盤**（レター無し） | Status Projection + 遷移イベント + 統合通知インボックス | `docs/features/status_notification_design.md`（設計書表記は「039」だが実装は038） | `backend/core/status/`（`projector.py` / `watcher.py` / `notification_rules.py`）+ `routes/status.py` | 038（`user_notifications` は 045 で V層 `share_notifications` を統合し `source`/`release_id`/`acted_at` 列を追加） | 実装済み（G層の土台。CLAUDE.md に専用セクションはまだ無い — 別途整備候補） |
 
 ## 2. 補足
 

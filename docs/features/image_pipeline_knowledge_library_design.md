@@ -74,7 +74,8 @@
 6. **コスト fail-closed**: vision 呼び出しはアップロード時チェックボックスの明示
    オプトイン + 環境変数の上限（§10）で二重に守る。自動有効化はしない。
 7. **画像の権利 fail-closed**: 抽出画像は元 document の権限（所有者 / visibility /
-   `document_group_permissions`）を継承し、閲覧できない者に配信しない。
+   `object_group_permissions`。設計当時は `document_group_permissions` という独立テーブルだったが、
+   マイグレーション044で `object_group_permissions` に統合済み）を継承し、閲覧できない者に配信しない。
    ライブラリ昇格は既定でテキストのみ。例示画像の含有は**元 document の所有者だけが**
    明示確認を経て実行でき、含有 = 教員全体への開示許諾とみなす（§6-4）。
 8. **ファイルはシード・DB が正本**: ライブラリはカートリッジ同梱シードを起動時に

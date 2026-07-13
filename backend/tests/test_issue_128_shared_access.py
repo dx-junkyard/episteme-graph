@@ -125,7 +125,8 @@ class TestAdminMaterialsSharedAccess:
             re.DOTALL,
         )
         body = m.group(0)
-        assert "course_group_permissions" in body
+        assert "object_group_permissions" in body
+        assert "object_type = 'course'" in body
         assert "jsonb_array_elements" in body
         assert "material_id" in body
 
@@ -155,7 +156,7 @@ class TestAdminMaterialsSharedAccess:
         assert m, "get_material 関数本体が抽出できない"
         body = m.group(0)
         assert "visibility = 'public'" in body
-        assert "course_group_permissions" in body
+        assert "object_group_permissions" in body
 
     def test_get_material_removes_hardcoded_uploaded_by_only(self):
         """get_material の WHERE に uploaded_by 単独が残っていないこと。"""

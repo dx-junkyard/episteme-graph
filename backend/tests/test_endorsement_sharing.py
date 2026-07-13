@@ -18,12 +18,13 @@ sys.path.insert(0, str(ROOT / "backend" / "api"))
 
 from tests.guardrail_helpers import assert_module_tree_forbids  # noqa: E402
 
-MAIN = ROOT / "backend" / "api" / "main.py"
 MIGRATION = ROOT / "backend" / "db" / "021_endorsement_sharing.sql"
 ROUTES = ROOT / "backend" / "api" / "routes" / "theory_components.py"
 LEARNING = ROOT / "backend" / "api" / "routes" / "learning.py"
 CANDIDATES = ROOT / "backend" / "core" / "component_candidates.py"
-ADMIN_JS = ROOT / "frontend" / "public" / "js" / "admin.js"
+# 原稿スタジオ (Lecture Script Studio) は Tier 3-17b で admin.js から分離済み。
+# lsOpenEndorsementModal はこちらに存在する。
+ADMIN_LS_JS = ROOT / "frontend" / "public" / "js" / "admin-lecture-studio.js"
 APP_JS = ROOT / "frontend" / "public" / "js" / "app.js"
 AGENTS = ROOT / "src" / "episteme_graph" / "agents"
 
@@ -34,6 +35,7 @@ def _read(path: Path) -> str:
 
 class TestMigration021:
     def test_reference_sql_defines_tables_and_view(self):
+        """正本は backend/db/021_endorsement_sharing.sql（main.py のインライン DDL ではない）。"""
         sql = _read(MIGRATION)
         assert "CREATE TABLE IF NOT EXISTS component_explanations" in sql
         assert "CREATE TABLE IF NOT EXISTS component_endorsements" in sql
@@ -53,14 +55,6 @@ class TestMigration021:
         sql = _read(MIGRATION)
         assert "uq_component_explanations_standard" in sql
         assert "WHERE kind = 'standard'" in sql
-
-    def test_main_applies_migration_021(self):
-        source = _read(MAIN)
-        assert "Migration 021" in source
-        assert "component_explanations" in source
-        assert "component_endorsements" in source
-        assert "component_citations" in source
-        assert "Migrations (002-" in source  # 以降の migration 追加 (023...) でも壊れないよう prefix で確認
 
 
 class TestRoutes:
@@ -173,7 +167,7 @@ class TestCandidateGeneration:
 
 class TestFrontend:
     def test_admin_js_has_endorsement_modal(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         assert "lsOpenEndorsementModal" in source
         assert 'data-theory-action="endorse"' in source
         assert "/admin/theory-components/candidates/from-query" in source

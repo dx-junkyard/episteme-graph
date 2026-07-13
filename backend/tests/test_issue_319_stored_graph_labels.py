@@ -17,7 +17,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 ROUTES = ROOT / "backend" / "api" / "routes" / "theory_components.py"
-ADMIN_JS = ROOT / "frontend" / "public" / "js" / "admin.js"
+# 原稿スタジオ (Lecture Script Studio) は Tier 3-17b で admin.js から分離済み。
+# lsGraphMainStageLabel / lsGraphSemanticLabel / lsGraphStripInternalIds はこちらに存在する。
+ADMIN_LS_JS = ROOT / "frontend" / "public" / "js" / "admin-lecture-studio.js"
 SCHEMAS = ROOT / "backend" / "api" / "schemas.py"
 PERSISTENCE = ROOT / "backend" / "core" / "document_pipeline" / "persistence.py"
 
@@ -252,7 +254,7 @@ class TestSchemaAndPersistencePlumbing:
 
 class TestAdminJsMainLabelGuard:
     def test_admin_js_has_main_stage_label_guard(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         assert "lsGraphMainStageLabel" in source
         # Issue #447: the visual node label, detail heading and text fallback must
         # route through lsGraphSemanticLabel, which strips internal identifiers and

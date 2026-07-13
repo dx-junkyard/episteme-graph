@@ -690,11 +690,11 @@ _WORKER_CHUNK_ID = "550e8400-e29b-41d4-a716-446655440000"
 
 
 class TestBatchAudioWorkerSlides:
-    @patch("api.routes.lecture_studio.time.sleep", return_value=None)
-    @patch("api.routes.lecture_studio.generate_tts_audio")
-    @patch("api.routes.lecture_studio._pg_session")
-    @patch("api.routes.lecture_studio.update_background_task")
-    @patch("api.routes.lecture_studio.create_background_task")
+    @patch("api.routes.lecture_studio.scripts.time.sleep", return_value=None)
+    @patch("api.routes.lecture_studio.scripts.generate_tts_audio")
+    @patch("api.routes.lecture_studio.scripts._pg_session")
+    @patch("api.routes.lecture_studio.scripts.update_background_task")
+    @patch("api.routes.lecture_studio.scripts.create_background_task")
     def test_worker_generates_audio_per_slide(
         self, mock_create, mock_update, mock_pg, mock_tts, mock_sleep,
     ):
@@ -750,11 +750,11 @@ class TestBatchAudioWorkerSlides:
         assert result_data["generated"] == 1
         assert result_data["errors"] == 0
 
-    @patch("api.routes.lecture_studio.time.sleep", return_value=None)
-    @patch("api.routes.lecture_studio.generate_tts_audio")
-    @patch("api.routes.lecture_studio._pg_session")
-    @patch("api.routes.lecture_studio.update_background_task")
-    @patch("api.routes.lecture_studio.create_background_task")
+    @patch("api.routes.lecture_studio.scripts.time.sleep", return_value=None)
+    @patch("api.routes.lecture_studio.scripts.generate_tts_audio")
+    @patch("api.routes.lecture_studio.scripts._pg_session")
+    @patch("api.routes.lecture_studio.scripts.update_background_task")
+    @patch("api.routes.lecture_studio.scripts.create_background_task")
     def test_worker_skips_already_cached_slides(
         self, mock_create, mock_update, mock_pg, mock_tts, mock_sleep,
     ):
@@ -780,10 +780,10 @@ class TestBatchAudioWorkerSlides:
         assert result_data["skipped"] == 1
         assert result_data["generated"] == 0
 
-    @patch("api.routes.lecture_studio.generate_tts_audio")
-    @patch("api.routes.lecture_studio._pg_session")
-    @patch("api.routes.lecture_studio.update_background_task")
-    @patch("api.routes.lecture_studio.create_background_task")
+    @patch("api.routes.lecture_studio.scripts.generate_tts_audio")
+    @patch("api.routes.lecture_studio.scripts._pg_session")
+    @patch("api.routes.lecture_studio.scripts.update_background_task")
+    @patch("api.routes.lecture_studio.scripts.create_background_task")
     def test_worker_skips_chunk_without_spoken_text(
         self, mock_create, mock_update, mock_pg, mock_tts,
     ):
@@ -805,10 +805,10 @@ class TestBatchAudioWorkerSlides:
         result_data = completed_calls[-1].kwargs["result_data"]
         assert result_data["skipped"] == 1
 
-    @patch("api.routes.lecture_studio.generate_tts_audio")
-    @patch("api.routes.lecture_studio._pg_session")
-    @patch("api.routes.lecture_studio.update_background_task")
-    @patch("api.routes.lecture_studio.create_background_task")
+    @patch("api.routes.lecture_studio.scripts.generate_tts_audio")
+    @patch("api.routes.lecture_studio.scripts._pg_session")
+    @patch("api.routes.lecture_studio.scripts.update_background_task")
+    @patch("api.routes.lecture_studio.scripts.create_background_task")
     def test_worker_aborts_on_fatal_tts_error(
         self, mock_create, mock_update, mock_pg, mock_tts,
     ):

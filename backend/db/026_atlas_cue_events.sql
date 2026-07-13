@@ -8,7 +8,8 @@
 -- (user_id, cue='first_login', event='opened') 行の存在で表す。専用フラグ列や
 -- 設定テーブルは作らない (再ログイン・別端末を含め永続)。
 --
--- 適用: 本 SQL は正本リファレンス。実際の適用は backend/api/main.py の _run_migrations() 内。
+-- 適用: このファイルが正本。backend/core/migrations.py のランナーが起動時に行う
+--   （冪等・毎起動再実行）。
 --
 -- cue   = minimap / topbar / topic_complete / chapter_end / detour_return / first_login
 -- event = shown (導線カード表示) / opened (オーバーレイを開いた) /

@@ -5,7 +5,7 @@
 **日本語 / 英語で切り替え**られるようにする。原稿スタジオ（教員）と受講体験（学習者）の
 両方を、単一のメンタルモデル **「スライド + スピーカーノーツ」** で貫く。
 
-- 対象: `backend/api/routes/lecture.py` / `lecture_studio.py`、`backend/core/lecture.py` /
+- 対象: `backend/api/routes/lecture.py` / `lecture_studio/`（パッケージ）、`backend/core/lecture.py` /
   `tts.py`、`frontend/public/js/app.js`（受講）/ `admin.js`（原稿スタジオ）
 - 非対象（変更しない）: A層パイプライン（`src/episteme_graph/agents/`）、チャンク抽出、
   通常閲覧ビュー（`#material-region` の非レクチャー時表示）、学習チャット本体
@@ -242,7 +242,7 @@ display_text = スライド本文、spoken_text = そのスライドのナレー
   `has_audio` の意味は従来どおり（ready > 0）。ただし stale_language の音声は
   ready に数えない。
 
-### 5-2. 教員向け（`routes/lecture_studio.py`）
+### 5-2. 教員向け（`routes/lecture_studio/` パッケージ）
 
 - `POST /courses/{id}/lecture-scripts/generate` — body に `language`（省略時は設定値）。
 - `POST /courses/{id}/lecture-audio/generate` — body に `language`（省略時は設定値）。

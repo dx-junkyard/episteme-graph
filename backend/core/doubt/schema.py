@@ -142,7 +142,6 @@ LOAD_LEVEL_LABELS = {
 # 学習者シグナルの件数レンジ表示（D1-5, k-匿名 k=3: 3 未満は非表示なのでレンジ最小は 3-5）
 # 実体は core/privacy.py の共通 k-匿名ゲート（提案8）。この名前 (NAIVE_SIGNAL_K_ANONYMITY)
 # は core/doubt/naive_signal.py が import しているため後方互換のため残す。
-NAIVE_SIGNAL_COUNT_RANGES = ("3-5", "6-10", "11+")
 NAIVE_SIGNAL_K_ANONYMITY = privacy.K_ANONYMITY
 
 

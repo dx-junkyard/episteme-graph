@@ -270,6 +270,8 @@ def test_revise_creates_child_with_parent_and_active_base(monkeypatch):
                         lambda *, document_id, material_id=None: {
                             "id": "active-1", "document_id": document_id,
                             "stage_outputs": {"_artifacts": {}}})
+    monkeypatch.setattr(coordinator.persistence, "load_revision_projection_overlay",
+                        lambda *, document_id: {})
     captured = {}
     monkeypatch.setattr(coordinator.persistence, "create_revision_run",
                         lambda **k: captured.update(k) or "child-1")

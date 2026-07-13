@@ -13,8 +13,8 @@
 --   本テーブルの step_key='cue:first_login' 行（revoked=FALSE）で代用する。
 --
 -- 正本設計書: docs/features/guidance_layer_design.md §5 / §8
--- 実際の適用は backend/api/main.py の _run_migrations() が起動時に行う（同 DDL を実行）。
--- このファイルは正本スキーマのリファレンス。全文 IF NOT EXISTS で冪等。
+-- このファイルが正本。適用は `backend/core/migrations.py` のランナーが起動時に行う（冪等・毎起動再実行）。
+-- 全文 IF NOT EXISTS で冪等。
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS assistant_step_dismissals (

@@ -37,13 +37,37 @@ for _p in (str(BACKEND), str(BACKEND / "api"), str(SRC)):
 
 
 def _read(rel_path: str) -> str:
-    return (BACKEND / rel_path).read_text(encoding="utf-8")
+    """Read a source file, or — for a package directory — the concatenation of
+    every ``*.py`` file inside it (Tier 3-17a: lecture_studio.py was split into
+    ``api/routes/lecture_studio/`` and simple substring "wiring checklist" checks
+    just need to see the aggregate source)."""
+    path = BACKEND / rel_path
+    if path.is_dir():
+        return "\n".join(
+            p.read_text(encoding="utf-8") for p in sorted(path.glob("*.py"))
+        )
+    return path.read_text(encoding="utf-8")
+
+
+def _lecture_studio_files() -> dict[str, str]:
+    """Return {file_name: source} for every module in the lecture_studio package.
+
+    Used by checks that need to reason about function boundaries (regex spans),
+    where naively concatenating files risks a span leaking across a file
+    boundary — so those checks operate per-file instead of on one big string.
+    """
+    base = BACKEND / _LECTURE_STUDIO
+    return {p.name: p.read_text(encoding="utf-8") for p in sorted(base.glob("*.py"))}
 
 
 _ORCHESTRATOR = "core/document_pipeline/orchestrator.py"
 _LEARNING = "api/routes/learning.py"
 _ADMIN = "api/routes/admin.py"
-_LECTURE_STUDIO = "api/routes/lecture_studio.py"
+# Tier 3-17a: lecture_studio.py (3,450 lines) was split into a package
+# (_shared.py / scripts.py / pipeline.py / topics.py). _read() concatenates all
+# of them for the simple substring checklist below; per-file guardrail checks
+# use _lecture_studio_files() instead.
+_LECTURE_STUDIO = "api/routes/lecture_studio"
 _ADMIN_ASSISTANT = "api/routes/admin_assistant.py"
 _THEORY_COMPONENTS = "api/routes/theory_components.py"
 _ATLAS_GENERATOR = "core/atlas_generator.py"
@@ -195,45 +219,63 @@ class TestNoBindInRequestHandlerFiles:
         assert "bind_usage_context(" not in src
 
     def test_lecture_studio_bind_calls_are_confined_to_thread_target_functions(self):
-        """lecture_studio.py は request handler と daemon-thread worker
+        """lecture_studio パッケージは request handler と daemon-thread worker
         （``_batch_generate_worker`` / ``_batch_audio_worker`` /
-        ``_batch_generate_and_audio_worker``）を同居させている。``bind_usage_context``
-        の出現箇所はすべて、``threading.Thread(target=...)`` で実際にスレッド起動対象と
-        なっている関数の本体内に限られることを検査する（request handler 本体には出現しない）。
+        ``_batch_generate_and_audio_worker``、いずれも ``scripts.py``）を同居させている。
+        ``bind_usage_context`` の出現箇所はすべて、``threading.Thread(target=...)`` で
+        実際にスレッド起動対象となっている関数の本体内に限られることを検査する
+        （request handler 本体には出現しない）。Tier 3-17a でパッケージ分割された後も、
+        ファイルごとに検査して結果を合算することで意味論を維持する
+        （複数ファイルを単純結合すると関数境界の正規表現がファイル間を跨いで誤検出しうるため）。
         """
-        src = _read(_LECTURE_STUDIO)
+        files = _lecture_studio_files()
 
-        thread_targets = sorted(set(re.findall(r"target=(\w+)", src)))
-        assert thread_targets, "no threading.Thread(target=...) found in lecture_studio.py"
-
-        def _function_span(fn_name: str) -> tuple[int, int]:
+        def _function_span(src: str, fn_name: str) -> tuple[int, int] | None:
             start_match = re.search(rf"\ndef {re.escape(fn_name)}\(", src)
-            assert start_match, f"def {fn_name} not found"
+            if not start_match:
+                return None
             start = start_match.start()
             rest = src[start + 1:]
             end_match = re.search(r"\n(?:def |@router)", rest)
             end = (start + 1 + end_match.start()) if end_match else len(src)
             return start, end
 
-        target_spans = [_function_span(name) for name in thread_targets if f"\ndef {name}(" in src]
-        assert target_spans, "none of the thread targets are locally-defined functions"
+        total_thread_targets = 0
+        total_bind_positions = 0
+        for fname, src in files.items():
+            thread_targets = sorted(set(re.findall(r"target=(\w+)", src)))
+            total_thread_targets += len(thread_targets)
 
-        bind_positions = [m.start() for m in re.finditer(r"bind_usage_context\(", src)]
-        assert bind_positions, "expected at least one bind_usage_context( call in lecture_studio.py"
+            target_spans = [
+                span
+                for name in thread_targets
+                if (span := _function_span(src, name)) is not None
+            ]
 
-        for pos in bind_positions:
-            assert any(start <= pos < end for start, end in target_spans), (
-                f"bind_usage_context( call at offset {pos} in lecture_studio.py is outside all "
-                "known thread-target function bodies — it may leak into a pooled request thread"
-            )
+            bind_positions = [m.start() for m in re.finditer(r"bind_usage_context\(", src)]
+            total_bind_positions += len(bind_positions)
+
+            for pos in bind_positions:
+                assert any(start <= pos < end for start, end in target_spans), (
+                    f"bind_usage_context( call at offset {pos} in {fname} is outside all "
+                    "known thread-target function bodies — it may leak into a pooled request thread"
+                )
+
+        assert total_thread_targets, "no threading.Thread(target=...) found in lecture_studio package"
+        assert total_bind_positions, "expected at least one bind_usage_context( call in lecture_studio package"
 
     def test_lecture_studio_request_handlers_use_with_statement_only(self):
-        """原稿スタジオの2つの request handler は usage_context（with）のみを使う。"""
-        src = _read(_LECTURE_STUDIO)
+        """原稿スタジオの2つの request handler は usage_context（with）のみを使う。
+
+        Tier 3-17a: ``rewrite_lecture_script`` は ``scripts.py``、
+        ``rewrite_lecture_studio_course_topic`` は ``topics.py`` に分かれている。
+        """
+        files = _lecture_studio_files()
 
         for fn_name in ("rewrite_lecture_script", "rewrite_lecture_studio_course_topic"):
+            src = next((s for s in files.values() if f"\ndef {fn_name}(" in s), None)
+            assert src is not None, f"def {fn_name} not found in lecture_studio package"
             start_match = re.search(rf"\ndef {fn_name}\(", src)
-            assert start_match, f"def {fn_name} not found"
             rest = src[start_match.start() + 1:]
             end_match = re.search(r"\n(?:def |@router)", rest[1:])
             body = rest[: end_match.start() + 1] if end_match else rest

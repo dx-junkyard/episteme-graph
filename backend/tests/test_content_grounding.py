@@ -77,9 +77,17 @@ class TestSchemaFields(object):
 
 class TestGroundingClassificationWiring:
     def test_course_material_ids_computed_from_course_sources(self):
+        """course_material_ids はコースの sources[].material_id 集合（dict/truthy フィルタ込み）。
+
+        Tier3-18: 素の dict 内包表記から `core.course_data.course_source_material_ids`
+        （同じフィルタ条件を持つ共有アクセサ）経由に置換された。フィルタ条件自体は
+        `core/course_data.py::course_source_material_ids`/`course_sources` 側で検証する
+        （tests/core/test_course_data.py）。
+        """
         source = _read(LEARNING)
-        assert "course_material_ids = {" in source
-        assert 'if isinstance(s, dict) and s.get("material_id")' in source
+        assert "course_material_ids = set(course_source_material_ids(course_data))" in source
+        assert "from core.course_data import (" in source
+        assert "course_source_material_ids," in source
 
     def test_origin_assigned_per_cited_source(self):
         source = _read(LEARNING)

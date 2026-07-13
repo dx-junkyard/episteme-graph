@@ -52,6 +52,7 @@ from core.schema import (
     AUDIT_ENTITY_EXPLANATION,
 )
 from core.concept_normalizer import normalize_concept, normalize_concepts, normalize_key
+from core.course_data import course_source_material_ids, course_sources
 from core.document_sections import build_document_structure, detect_section_heading, enrich_chunks_with_sections
 from core.postgres import get_session as _pg_session
 from core.cartridges import load_cartridge
@@ -586,13 +587,9 @@ def _find_viewable_course_for_chunk(chunk: dict, current_user: dict) -> str | No
 
 
 def _course_chunks(course_data: dict) -> list[dict]:
-    sources = course_data.get("sources", []) if isinstance(course_data, dict) else []
-    material_ids = [
-        str(s.get("material_id")).strip()
-        for s in sources
-        if isinstance(s, dict) and s.get("material_id")
-    ]
-    material_ids = list(dict.fromkeys(material_ids))
+    material_ids = list(dict.fromkeys(
+        mid.strip() for mid in course_source_material_ids(course_data)
+    ))
     if not material_ids:
         return []
     session = _pg_session()
@@ -683,7 +680,7 @@ def _ensure_document_viewable(document_id: str, current_user: dict) -> list[dict
         raise HTTPException(status_code=404, detail="Document not found")
     if current_user.get("role") == ROLE_SYSTEM_ADMIN:
         return chunks
-    # migration 035: ドキュメント直接共有（所有者 / public / group / document_group_permissions）。
+    # ドキュメント直接共有（所有者 / public / group / object_group_permissions object_type='document'）。
     # document_id は UUID か material_id のどちらでも user_can_view_document が解決する。
     if user_can_view_document(current_user["id"], document_id):
         return chunks
@@ -2535,10 +2532,10 @@ def list_theory_components(
         course_data = get_viewable_course_data(current_user["id"], course_id) or _system_admin_course_data(course_id) or {}
         document_ids = []
         material_ids = []
-        for source in course_data.get("sources", []) if isinstance(course_data, dict) else []:
-            if isinstance(source, dict) and source.get("document_id"):
+        for source in course_sources(course_data):
+            if source.get("document_id"):
                 document_ids.append(str(source["document_id"]))
-            if isinstance(source, dict) and source.get("material_id"):
+            if source.get("material_id"):
                 material_ids.append(str(source["material_id"]))
         if material_ids:
             mid_placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
@@ -3366,10 +3363,10 @@ def _claims_for_course(course_id: str, current_user: dict, limit: int = 100) -> 
     )
     document_ids: list[str] = []
     material_ids: list[str] = []
-    for source in course_data.get("sources", []) if isinstance(course_data, dict) else []:
-        if isinstance(source, dict) and source.get("document_id"):
+    for source in course_sources(course_data):
+        if source.get("document_id"):
             document_ids.append(str(source["document_id"]))
-        if isinstance(source, dict) and source.get("material_id"):
+        if source.get("material_id"):
             material_ids.append(str(source["material_id"]))
     session = _pg_session()
     try:

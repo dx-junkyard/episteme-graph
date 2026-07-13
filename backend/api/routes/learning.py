@@ -65,6 +65,12 @@ from services import (
     user_can_view_course,
 )
 from pydantic import BaseModel
+from core.course_data import (
+    course_source_material_ids,
+    course_title as _course_title,
+    course_topics,
+    find_course_topic,
+)
 from core.llm import generate_text, get_llm_params, transcribe_audio
 from core.llm_usage.context import usage_context
 from core.tts import generate_tts_audio, strip_text_for_speech
@@ -238,7 +244,7 @@ def list_courses(
 
         # グループ共有コース（自分が参加するグループ、かつ未受講のみ）
         # - 旧: learning_courses.group_id + visibility='group' を参照
-        # - 新: course_group_permissions 多対多マッピング (viewer/editor)
+        # - 新: object_group_permissions 多対多マッピング (viewer/editor、object_type='course')
         if user_groups:
             # UUID リストを展開
             gph = ", ".join(f"CAST(:g_{i} AS uuid)" for i in range(len(user_groups)))
@@ -254,7 +260,8 @@ def list_courses(
                            lc.group_id,
                            COALESCE(lc.description, '')
                     FROM learning_courses lc
-                    LEFT JOIN course_group_permissions cgp ON cgp.course_id = lc.id
+                    LEFT JOIN object_group_permissions cgp
+                        ON cgp.object_type = 'course' AND cgp.object_id = lc.id
                     WHERE lc.user_id != CAST(:user_id AS uuid)
                       AND (
                           (lc.visibility = 'group' AND lc.group_id IN ({gph}))
@@ -491,7 +498,7 @@ def enroll_course(
     ):
         enrollable = True
     elif user_can_view_course(current_user["id"], course_id):
-        # course_group_permissions 経由で viewer/editor 権限を持つ場合
+        # object_group_permissions（object_type='course'）経由で viewer/editor 権限を持つ場合
         enrollable = True
 
     if not enrollable:
@@ -624,7 +631,7 @@ def _generate_learning_advice_response(
     # コース全体のトピック一覧（最大10件）
     topics_block = ""
     if course_data:
-        topics = course_data.get("topics", [])
+        topics = course_topics(course_data)
         if topics:
             topics_list = "\n".join(
                 f"  - {t.get('title', t.get('id', ''))}" for t in topics[:10]
@@ -1011,7 +1018,7 @@ def get_topic_material(
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
 
-    topics = course_data.get("topics", [])
+    topics = course_topics(course_data)
     topic_index = None
     topic = None
     for i, t in enumerate(topics):
@@ -1071,7 +1078,7 @@ def check_topic_understanding(
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
 
-    topic = next((t for t in course_data.get("topics", []) if t.get("id") == topic_id), None)
+    topic = find_course_topic(course_data, topic_id)
     if not topic:
         raise HTTPException(status_code=404, detail="Topic not found")
 
@@ -1090,7 +1097,7 @@ def check_topic_understanding(
     prompt = (
         "あなたは確認問題を採点する大学教員です。JSONのみを返してください。\n"
         "形式: {\"passed\": true/false, \"feedback\": \"短い講評\", \"model_answer\": \"模範解答\", \"explanation\": \"必要なら解説\"}\n\n"
-        f"コース: {course_data.get('title', course_id)}\n"
+        f"コース: {_course_title(course_data, default=course_id)}\n"
         f"セクション: {topic.get('title', topic_id)}\n"
         f"教材:\n{material_text[:5000]}\n\n"
         f"確認問題: {question}\n"
@@ -1396,7 +1403,7 @@ def _atlas_action_response(
             node_pill=str(ctx.get("node_pill") or ""),
             related=_atlas_step_dicts(ctx.get("related")),
             juxtapose=_atlas_step_dicts(ctx.get("juxtapose")),
-            course_topics=course_data.get("topics") or [],
+            course_topics=course_topics(course_data),
             interest_traces=(interest_view or {}).get("traces") or [],
         )
         answer = (
@@ -1447,13 +1454,9 @@ def learning_chat(
         if _trunc is not None:
             body.history = _trunc["truncated_history"]
 
-    topic_info = None
-    for t in course_data.get("topics", []):
-        if t.get("id") == topic_id:
-            topic_info = t
-            break
+    topic_info = find_course_topic(course_data, topic_id)
     topic_title = topic_info["title"] if topic_info else topic_id
-    course_title = course_data.get("title", course_id)
+    course_title = _course_title(course_data, default=course_id)
     # domain が未設定の場合は course_title にフォールバック
     domain = course_data.get("domain") or course_title
     response_persona = course_persona_settings(course_data)["response_persona"]
@@ -1621,10 +1624,7 @@ def learning_chat(
     # 4. RAG: システム全域のチャンクを検索し、コンテキストを構築
     #    search_chunks_with_metadata は各チャンクに tier(L1信頼性) を付与して返す。
     # このコース自身の教材（material_id）の集合。出典が「教材」か「別の資料」かの分類に使う。
-    course_material_ids = {
-        str(s.get("material_id")) for s in course_data.get("sources", [])
-        if isinstance(s, dict) and s.get("material_id")
-    }
+    course_material_ids = set(course_source_material_ids(course_data))
     chunk_results = search_chunks_with_metadata(body.message, top_k=8)
     cited_chunks = []
     cited_sources: list[dict] = []  # L1: 文脈に採用した根拠の tier 一覧

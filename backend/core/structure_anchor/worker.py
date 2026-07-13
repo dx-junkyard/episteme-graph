@@ -25,6 +25,7 @@ import threading
 from sqlalchemy import text as sa_text
 
 from core.config import get_settings
+from core.course_data import course_chapters, course_topics
 from core.llm_usage.context import bind_usage_context
 from core.llm_worker.cost_gate import CostGate, InMemoryCounterGate
 from core.postgres import get_session as _pg_session
@@ -348,8 +349,8 @@ def _topic_labels(course_data, topic_id: str | None) -> tuple[str, str]:
         return topic_id or "", topic_id or ""
     topic_title = topic_id
     chapter_title = ""
-    chapters = data.get("chapters", [])
-    for t in data.get("topics", []):
+    chapters = course_chapters(data)
+    for t in course_topics(data):
         if isinstance(t, dict) and str(t.get("id")) == str(topic_id):
             topic_title = t.get("title") or topic_id
             ci = t.get("chapter_index")

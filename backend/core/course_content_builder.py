@@ -12,6 +12,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
+from core.course_data import course_chapters, course_source_material_ids, course_title, course_topics
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
 from core.postgres import get_session as _pg_session
 
@@ -90,7 +91,7 @@ def build_course_content(user_id: str, course_id: str) -> dict:
             return {"status": "waiting_for_pipeline", "updated_topics": 0}
 
         chunks_by_material = _load_chunks(session, material_ids)
-        enriched_topics = _enrich_topics(course.get("topics") or [], bundle, chunks_by_material)
+        enriched_topics = _enrich_topics(course_topics(course), bundle, chunks_by_material)
         draft_result = _generate_course_topic_drafts(course, enriched_topics)
         course["topics"] = enriched_topics
         course["referenced_sections"] = _referenced_sections_from_topics(enriched_topics)
@@ -123,11 +124,7 @@ def build_course_content(user_id: str, course_id: str) -> dict:
 
 
 def _course_material_ids(course: dict) -> list[str]:
-    ids: list[str] = []
-    for source in course.get("sources") or []:
-        if isinstance(source, dict) and source.get("material_id"):
-            ids.append(str(source["material_id"]))
-    return list(dict.fromkeys(ids))
+    return list(dict.fromkeys(course_source_material_ids(course)))
 
 
 def _load_document_ids(session, material_ids: list[str]) -> list[str]:
@@ -858,7 +855,7 @@ def _generate_single_topic_draft(
 
 
 def _course_context_for_prompt(course: dict, topics: list[dict]) -> dict:
-    chapters = course.get("chapters") or []
+    chapters = course_chapters(course)
     grouped: dict[int, list[dict]] = defaultdict(list)
     for idx, topic in enumerate(topics):
         grouped[int(topic.get("chapter_index") or 0)].append({
@@ -869,7 +866,7 @@ def _course_context_for_prompt(course: dict, topics: list[dict]) -> dict:
             "prerequisites": topic.get("prerequisites") or [],
         })
     return {
-        "title": course.get("title") or "",
+        "title": course_title(course),
         "goal": course.get("goal") or course.get("description") or "",
         "target_audience": course.get("target_audience") or "",
         "chapters": [

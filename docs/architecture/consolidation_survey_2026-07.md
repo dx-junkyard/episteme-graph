@@ -342,6 +342,88 @@ Tier 0〜Tier 2 を同日に実装した。実施内容と、実装時の検証�
 - 12: `backend/tests/guardrail_helpers.py` 新設、9テストファイルの重複アサーションを置換
   （収集数 2,774 で不変）。
 
+**Tier 3（13/14/15 完了、2026-07-12 追記）**
+- 13: **マイグレーション実行の一本化**。`main.py::_run_migrations()`（約1,681行のインライン DDL）を
+  削除し、main.py は 208行に縮小。正本は `backend/db/*.sql`（init.sql + 002〜045）に一本化され、
+  新設の `backend/core/migrations.py` のランナーが**毎起動、番号順に全ファイルを冪等再実行**する
+  （pg_advisory_lock で多重起動排他・ファイル単位トランザクション・失敗時はファイル名付き例外で
+  起動リトライへ）。`init.sql` 自体も冪等化。ドリフト整合の過程で 016（無ガードだと再起動ごとに
+  全 embedding 消失）、007/009/011 等の実差分を修正した。`backend/Dockerfile` に
+  `COPY backend/db/ /app/db/` を追加。CI はフレッシュ DB への番号順全適用を毎回検証する回帰
+  ゲートに変更。ガードレールは `backend/tests/test_migrations_runner.py`（冪等性 lint = 新規
+  044 以降のファイルにも適用 / main.py への DDL 再侵入禁止 / 番号連続性）。
+- 14: **グループ権限テーブルの統合**。`course_group_permissions`（010）+
+  `document_group_permissions`（035）→ `object_group_permissions`（migration 044、
+  `object_type ∈ {course, document}` + `object_id TEXT`、FK なしポリモーフィック、V層 037 の
+  先例を踏襲）。010/035 はコメントのみのスタブへ書き換え（データ移行 + `DROP TABLE` は 044 が
+  実施）。API パス・レスポンス形式は不変。FK CASCADE の代替として、削除経路 **7箇所**
+  （`_purge_course` / `_purge_document` ×2 / `services.delete_course_data` /
+  `admin.delete_material` ×2 / `admin.delete_course`）に明示 `DELETE` を追加し、ソース検査
+  テストで固定した（提案時点の想定は3系統だったが実装時の実測で7箇所と判明。下記訂正9参照）。
+- 15: **通知テーブルの統合**。`share_notifications`（037, V層）→ `user_notifications`
+  （migration 045 で `source('status'|'shared')` / `release_id` / `acted_at` 列を追加して統合し、
+  移行後 `DROP TABLE`。037 の share_notifications セクションはスタブ化）。`kind` に DB CHECK は
+  付けず、V層側は `core/versioning/schema.py::NOTIFICATION_KINDS` という既存の Python 語彙が
+  引き続きゲートする（open-vocab 設計の状態層に合わせた）。status 側 inbox は
+  `source='status'`、V層は `source='shared'` にスコープすることで、二重表示と purge 誤削除を
+  防止（ソース検査テストあり）。`routes/notifications.py` は単一クエリ化し、旧来の
+  `user_notifications` と `share_notifications` を別々に問い合わせて併合する二重試行を廃止した。
+  API 形式・フロントは不変。
+
+**Tier 3（16〜20 完了、2026-07-13 追記）**
+- 16: **status projector の UI 接続**。`core/status/projector.py` に純関数 `derive_material_status()` と
+  セットベースのバッチ導出 `project_material_statuses_bulk()`（documents 1 + runs 1 の定数2クエリ、
+  N+1 なし）を追加し、`/api/admin/materials`（list_materials / get_material）の独自 status 合成を
+  projector 委譲に差し替えた。API 語彙は route 側の legacy マッピング（analyzing→processing /
+  analyzed→completed / analysis_failed→failed。uploaded / chunking / unknown は上書きせず
+  documents.status・プロセス内メモリの値を維持）で完全不変、フロント非改変。
+  **get_material が runs を見ないため一覧と詳細で status が食い違っていた既知バグはこの一本化で解消**。
+  atlas binding 判定は走査プリミティブ `course_atlas_binding_facts()` のみ共通化し、判定方針
+  （projector=AND 条件 / next_steps=cartridge_id 単独で不要 / atlas_state=ラベル一致込みの
+  地図ゲート）は意図的差異として各層に残した（訂正10参照）。
+- 17: **巨大ファイルの分割**（3点とも完了）。
+  - admin.js（13,066行）→ 原稿スタジオの連続ブロック 6,293行（L5029-11321）を
+    `admin-lecture-studio.js`（ES5・`window.LectureStudio`、公開 API は `init` /
+    `openExportModal` / `getScreenContext` の3つ、admin-assistant.js と同型の DI 注入）に分離。
+    admin.js は 6,774行に半減。境界は注入5シンボル（apiFetch / apiFetchRaw / escHtml /
+    onTabActivate / state）+ 逆方向2箇所のみで、読み込み順は doubt-atlas.js より後・admin.js より前。
+  - lecture_studio.py（3,450行）→ `routes/lecture_studio/` パッケージ（`__init__.py` 82 /
+    `_shared.py` 520 / `scripts.py` 1,418 / `pipeline.py` 823 / `topics.py` 745）。`__init__.py` の
+    再エクスポートで import 面は不変のため admin.py / main.py は非改変。ルート20本の
+    (path, methods) 完全一致を検証。呼び出し元ゼロのデッドコード `_load_pipeline_pdf` を削除。
+  - main.py ルーター二段ネスト → admin.py が末尾で束ねていた子ルーター（提案時「8」だが
+    **実測13**、訂正11）を main.py から `prefix="/api/admin"` 明示で直接登録するフラット構成に。
+    全252ルートの (path, methods) が前後で完全一致。
+- 18: **learning_courses.data の正本スキーマ化**。`core/course_data.py` 新設 —
+  `CourseData` / `CourseTopic` / `CourseSource` 等の Pydantic モデル群（**全て `extra="allow"`**、
+  全フィールド Optional。既存データを拒否も欠落もさせないカタログ）+ アクセサ11関数
+  （`course_topics` / `iter_all_topics` / `course_sources` / `course_source_material_ids` /
+  `course_cartridge_id` / `course_title` / `lecture_studio_settings` / `find_course_topic` /
+  `course_atlas_binding_facts` / `validate_course_data` / `course_chapters`）。容器レベルの
+  素 dict アクセスを **24ファイル**で置換。topics の2系統走査（フラットが正・chapters ネストは
+  防御）は `course_topics()` と `iter_all_topics()` に分離し、各サイトの現行挙動を厳密保存
+  （ネスト走査していなかった箇所に iter_all_topics を入れない）。`course_atlas_binding_facts` は
+  projector から本モジュールへ移設（projector は後方互換の再エクスポート）。書き込み経路6箇所・
+  topic 子フィールド読みは意図的に対象外（PUT の topics 丸ごと置換の限界も現状維持、残課題参照）。
+- 19: **orchestrator の PipelineStage 抽象化**。約1,400行のインライン26ステージを
+  `PipelineContext`（ステージ間状態 + report/save_artifact 等の操作クロージャ）+
+  `PipelineStageDef` の順序付きリスト `_PIPELINE_STEPS` + 薄いランナーループに分解。各ステージは
+  `_stage_<name>(ctx)` のモジュールレベル関数へ**逐語移設**し、resume 有無に関係なく毎回実行される
+  2つの中間ブロック（claim/equation canonicalization、equation claim synthesis）は `name=None` の
+  フックステップとして明示化。テスト互換（`patch.multiple(orchestrator, ...)` のモジュール
+  グローバル patch / `_canonicalize_*` の直接 import / ステージ名リテラル検査 / report_start
+  正規表現）は全て維持し、ガードレールテストの更新は test_background_tasks.py の
+  インデント一致1件のみ。行数は 2,378→2,599（+221、訂正14参照）。
+- 20: **draft/freeze 共通ミックスイン**。`core/revision_store.py` 新設 —
+  `RevisionConflictError` 共通基底 / `update_with_revision_lock()`（revision 照合 UPDATE →
+  不一致時に現在値再 SELECT → current_revision 付き conflict 例外）/ `idempotent_seed_import()`
+  （存在チェック→作成→1件失敗の扱いは `catch_create_errors` で明示）。atlas_store と
+  library/store の該当処理が委譲（例外クラス名・シグネチャ・戻り値・SQL 文面は不変で
+  `AtlasSkeletonTableFake` は無修正）。調査で判明したテスト空白 — library store の
+  conflict/freeze 挙動を固定するテストが皆無 — に `library_entries_fake` フィクスチャ +
+  21テストを新設。draft 粒度・freeze 方式・status 語彙・列型・セッション規約の差異は
+  ドメイン固有として統合せず。
+
 ### 本レポートの訂正（実装時の実測による）
 
 1. **§1 extractor.py**: 「GROBID ユーティリティ2関数を orchestrator が再利用」は誤り。実際に
@@ -359,8 +441,54 @@ Tier 0〜Tier 2 を同日に実装した。実施内容と、実装時の検証�
    `core/notification_recipients.py` に配置した。
 6. **§2 スライド分割 / §5 状態合成**: 提案11の実施により解消。projector の UI 接続（提案16）は
    未実施のまま（Tier 3 スコープ）。
+7. **§12 通知機能 / status_notification_design.md §0**: 「`acted_at` は書込箇所なし（実運用上は
+   死列）」という記述は誤り。実装時の実測で `core/versioning/subscriptions.py::adopt_latest` が
+   `acted_at` を書いていることを確認した（取り込み＝adopt 操作の記録用）。migration 045 の
+   統合作業でこの書き込みは `user_notifications.acted_at` へ正しく移設済み。
+8. **提案13（マイグレーション一本化）の帰結**: 「毎起動・全ファイル再実行」方式を採用した結果、
+   複数の旧テーブルを1枚に統合する系のマイグレーション（010/035→044、037/038→045）では、
+   統合元の旧ファイルをそのまま残す（＝再起動のたびに旧テーブルが再作成され、新テーブルへの
+   統合処理が繰り返される「作って即壊す」往復が起きる）わけにも、削除する（＝過去に適用済みの
+   意味を変えてしまう）わけにもいかないことが判明した。解決として、統合元ファイルは
+   `002_a1_a2_a3.sql` の `cloned_from` 列削除（migration 011）と同じ「最終状態への巻き戻し」
+   パターン — 実 DDL をコメントのみのスタブに書き換える — を踏襲した。この方式は当レポートには
+   記載がなかったが、毎起動再実行ランナーの下では統合系マイグレーションの標準パターンになる。
+9. **提案14（グループ権限統合）の削除経路**: 「§4 共有の仕組み」および提案10の記述では
+   FK CASCADE の代替として必要な明示削除経路は3系統（`_purge_course` / `_purge_document` /
+   `admin.py` の削除エンドポイント群）という想定だったが、実装時の実測で
+   `services.delete_course_data` にも同種の削除経路が存在し、あわせて7箇所への追加が必要と
+   判明した。
 
-### 残課題（Tier 3、未着手）
+### 本レポートの訂正・追補（Tier 3 16〜20 実装時の実測、2026-07-13）
 
-13〜20 は未実施。特に 13（マイグレーション実行の一本化）は Tier 0-1 と並ぶ優先度で検討推奨の
-まま残っている。16（projector の UI 接続）・17（admin.js 分割）が次の候補。
+10. **§5/§7 コース完了判定の「3箇所」**: atlas binding 判定の3実装は単純な重複ではなかった。
+    next_steps.py はコード内コメントで「cartridge_id があれば binding 不要（一部 topic のみ済みの
+    コースは対象外）」という**意図的に緩い方針**を明記しており、atlas_state.py の
+    `course_has_skeleton_anchor` はラベル一致フォールバックまで見る**地図 fail-closed ゲート**で
+    目的自体が異なる。よって完全統合ではなく走査プリミティブ（`course_atlas_binding_facts`）の
+    共通化に留めた（Tier 2-10 の groups.py と同種の「別概念の正当な独立実装」）。
+11. **提案17の「8ルーター」**: admin.py が束ねていた子ルーターの実数は **13**（11モジュール）。
+12. **提案16実装時の意図的な挙動差**: ①get_material が document_analysis_runs を反映するように
+    なった（一覧と詳細の status 不整合バグの解消）。②run が completed かつ chunk_count==0 の
+    病的ケースで、旧 list_materials は 'completed'、新実装は projector の既存導出
+    （analyzing 扱い→'processing'）に従う。projector 単体の既存セマンティクス
+    （G層 next_steps・routes/status.py も使用）との整合を優先した。
+13. **§1 lecture_studio のスレッド「7箇所」**: `threading.Thread(` の実測は **8箇所**
+    （batch_generate_audio 内の言語切替 if/else 2分岐を含む）。
+14. **提案19と行数**: ステージオブジェクト化で orchestrator.py の行数はむしろ増える（+221）。
+    解消したのは「26回繰り返される定型コピペ」であり、行数削減は達成基準ではない。
+
+### 残課題（2026-07-13 更新）
+
+**Tier 0〜3 の全提案（1〜20）が実施済み**となり、本レポートの提案は完了した。
+実装過程で発見された今後の候補（本レポートのスコープ外・必要になった時点で個別判断）:
+- `get_materials_stats`（admin.py、SYSTEM_ADMIN ダッシュボード）の script/audio 進捗が
+  chunk 単位集計の**第4の並行実装**のまま（projector のスライド単位判定と未統一）。
+- `/api/admin/status/*` の認可（所有者限定）と `/api/admin/materials`（共有教材含む閲覧可能性）の
+  非対称。UI を status API 直結に切り替える場合は認可統一が先決。
+- `PUT /api/learning/courses/{id}` の topics 丸ごと置換が AI 生成フィールド
+  （evidence_links / content_source 等）を落とし得る既知の限界（現状フロントは topics を送らない）。
+- CourseData の**書き込み経路**への validate 組込み（現状は読み側アクセサ + カタログのみ）。
+- `src/episteme_graph` パッケージが backend/.venv に未インストールのため、
+  tests/test_course_data_isolation.py が単独実行時に順序依存で error になり得る環境ギャップ
+  （フルスイートでは再現しない・実装とは無関係）。

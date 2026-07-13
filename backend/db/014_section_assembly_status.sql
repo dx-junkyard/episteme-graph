@@ -1,4 +1,6 @@
 -- Migration 014: Section assembly status tracking for retry support
+--
+-- このファイルが正本。適用は `backend/core/migrations.py` のランナーが起動時に行う（冪等・毎起動再実行）。
 
 CREATE TABLE IF NOT EXISTS section_assembly_status (
     id                          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

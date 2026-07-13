@@ -19,8 +19,8 @@
 --   {"scope_id": "...", "condition": "", "domain": "", "precision": "", "system": "",
 --    "evidence_ids": [], "recorded_by": "<user_id>", "reason": "", "recorded_at": "..."}
 --
--- 実際の適用は backend/api/main.py の _run_migrations()（Migration 029）で行う。
--- このファイルは正本スキーマのリファレンス。
+-- このファイルが正本。適用は backend/core/migrations.py のランナーが起動時に行う
+-- （冪等・毎起動再実行）。
 
 CREATE TABLE IF NOT EXISTS epistemic_ledger (
     id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),

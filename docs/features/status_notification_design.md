@@ -5,6 +5,14 @@ G層（`guidance_layer_design.md`）の土台となる基盤層。通知とエ�
 整備する。migration 038 で実装（設計時点では 039 を想定していたが、039 は先行して
 G層 `guidance_layer_design.md` が使用したため、実装では **038** が割り当てられた）。
 
+> **2026-07 更新（アーキテクチャ整理 Tier 3）**: 本設計書が新設した `user_notifications` は
+> migration 045 で V層（`shared_versioning_design.md`）の `share_notifications`（migration 037）を
+> 統合する存続テーブルとなり、`source`(`status`|`shared`) / `release_id` / `acted_at` 列が
+> 追加された（`source='status'` が本層由来の行）。以下の本文はこの統合が行われる**前**の
+> 設計当時の記述であり、テーブル名・スキーマの記載は歴史的経緯として残している
+> （API 形式・フロントの挙動は統合後も不変）。詳細は `docs/architecture/data-model.md` と
+> `docs/architecture/consolidation_survey_2026-07.md` 第4部（Tier 3-15）を参照。
+
 ## 0. 背景 — 通知・エージェント支援に必要な3要素
 
 | 要素 | 問い | 用途 |

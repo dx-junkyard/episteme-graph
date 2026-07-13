@@ -127,7 +127,18 @@ def cancel_deletion(*, object_type: str, object_id: str, cancelled_by: str | Non
 
 def _purge_course(session, course_id: str) -> None:
     session.execute(sa_text("DELETE FROM learning_chat_history WHERE course_id = :cid"), {"cid": course_id})
-    # CASCADE で learning_states / course_group_permissions / course スコープ theory_* も削除される
+    # object_group_permissions（migration 044）は course_id への FK を持たない
+    # ポリモーフィックテーブルなので、CASCADE には頼れず明示的に削除する
+    # （統合前の専用テーブル=migration 010 は learning_courses への FK CASCADE で
+    # 自動的に消えていたが、統合後はこの明示 DELETE が無いと孤児行が残る）。
+    session.execute(
+        sa_text(
+            "DELETE FROM object_group_permissions "
+            "WHERE object_type = 'course' AND object_id = :cid"
+        ),
+        {"cid": course_id},
+    )
+    # CASCADE で learning_states / course スコープ theory_* も削除される
     session.execute(sa_text("DELETE FROM learning_courses WHERE id = :cid"), {"cid": course_id})
 
 
@@ -153,6 +164,16 @@ def _purge_document(session, document_id: str) -> None:
         ).fetchall()
         for (cid,) in course_ids:
             session.execute(sa_text("DELETE FROM learning_chat_history WHERE course_id = :cid"), {"cid": cid})
+            # object_group_permissions は course_id への FK が無いため明示削除する
+            # （_purge_course と同じ理由。ここは _purge_course を経由しない独立した
+            # コース削除経路なので、同じ後始末をここでも行う必要がある）。
+            session.execute(
+                sa_text(
+                    "DELETE FROM object_group_permissions "
+                    "WHERE object_type = 'course' AND object_id = :cid"
+                ),
+                {"cid": cid},
+            )
             session.execute(sa_text("DELETE FROM learning_courses WHERE id = :cid"), {"cid": cid})
 
     # 2) document スコープの成果物（orphan gap 解消。document_id は UUID / material_id 両形）
@@ -179,8 +200,14 @@ def _purge_document(session, document_id: str) -> None:
         session.execute(sa_text("DELETE FROM challenges WHERE target_id = ANY(:ids)"), {"ids": target_ids})
         session.execute(sa_text("DELETE FROM epistemic_ledger WHERE target_id = ANY(:ids)"), {"ids": target_ids})
 
+    # object_group_permissions は document_id への FK が無いポリモーフィックテーブル
+    # なので明示削除する（統合前の専用テーブル=migration 035 は documents への FK CASCADE で
+    # 自動的に消えていた）。object_id は書き込み時と同じ正規化（小文字 canonical text）で比較する。
     session.execute(
-        sa_text("DELETE FROM document_group_permissions WHERE document_id = CAST(:a AS uuid)"),
+        sa_text(
+            "DELETE FROM object_group_permissions "
+            "WHERE object_type = 'document' AND object_id = CAST(:a AS uuid)::text"
+        ),
         {"a": document_id},
     )
     # 3) チャンク → ドキュメント → 解析 Run（documents.active_analysis_run_id FK があるため runs は最後）
@@ -191,7 +218,12 @@ def _purge_document(session, document_id: str) -> None:
 
 def _cleanup_version_tables(session, object_type: str, object_id: str) -> None:
     """版テーブルを FK 順（notifications/subscriptions → versions）に明示削除し、
-    state を 'purged' 墓標として残す（同一 id の再発行で古いピンが復活しないように）。"""
+    state を 'purged' 墓標として残す（同一 id の再発行で古いピンが復活しないように）。
+
+    通知は migration 045 で user_notifications に統合済み。source='shared' を必ず
+    付けて削除する（付け忘れると status 層（状態管理・通知基盤）の通知履歴まで
+    削除してしまう。status 層由来の通知は教材削除でも残す現行の非対称を維持する）。
+    """
     session.execute(
         sa_text("""
             INSERT INTO shared_version_state (object_type, object_id, lifecycle, active_release_id, updated_at)
@@ -202,7 +234,10 @@ def _cleanup_version_tables(session, object_type: str, object_id: str) -> None:
         {"ot": object_type, "oid": object_id},
     )
     session.execute(
-        sa_text("DELETE FROM share_notifications WHERE object_type = :ot AND object_id = :oid"),
+        sa_text(
+            "DELETE FROM user_notifications "
+            "WHERE source = 'shared' AND entity_type = :ot AND entity_id = :oid"
+        ),
         {"ot": object_type, "oid": object_id},
     )
     session.execute(

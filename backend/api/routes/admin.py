@@ -66,6 +66,12 @@ from services import (
     user_owns_course,
     user_owns_document,
 )
+from core.course_data import (
+    course_chapters,
+    course_sources,
+    course_title as _course_title,
+    course_topics,
+)
 from core.document_pipeline.figure_images import load_document_figures
 from core.document_pipeline.persistence import get_latest_analysis_run
 from core.llm import generate_text
@@ -85,6 +91,8 @@ from core.schema_registry import (
     get_ontology_types,
     get_predicates,
 )
+from core.status import projector as status_projector
+from core.status import schema as status_schema
 from core.storage import get_storage_client
 # 画像パイプライン §7: 図画像 API は theory_components.py の
 # _ensure_document_viewable（document_id は UUID / material_id 両対応）を必ず通す。
@@ -475,6 +483,29 @@ def reanalyze_document(
     }
 
 
+# Tier3-16: list_materials / get_material の status 合成を core/status/projector.py に委譲する。
+# projector の6値語彙 (uploaded/chunking/analyzing/analyzed/analysis_failed/unknown) のうち、
+# 実際に run が存在し running/failed/completed のいずれかであるときにのみ生まれる3状態だけを
+# legacy 4値語彙 (uploaded/processing/completed/failed) へマップする。
+# uploaded/chunking/unknown は意図的にマップしない（None を返す）: これらは
+# 「run が無い」または「run が pending」のときにしか生まれず、その場合は現行どおり
+# 上書きしない（documents.status の生値 or アップロード直後のメモリ上書き値を維持する）。
+_LEGACY_MATERIAL_STATUS_OVERRIDE = {
+    status_schema.MATERIAL_STATE_ANALYZING: "processing",
+    status_schema.MATERIAL_STATE_ANALYZED: "completed",
+    status_schema.MATERIAL_STATE_ANALYSIS_FAILED: "failed",
+}
+
+
+def _legacy_material_status(mstatus: status_schema.MaterialStatus) -> str | None:
+    """projector の MaterialStatus を admin API のレガシー4値語彙へ変換する。
+
+    None を返す場合、呼び出し側は既存の status（documents.status の生値 or
+    アップロード直後のメモリ上書き値）をそのまま使う。
+    """
+    return _LEGACY_MATERIAL_STATUS_OVERRIDE.get(mstatus.state)
+
+
 @router.get("/materials", response_model=list[MaterialOut])
 def list_materials(
     include: str | None = None,
@@ -486,7 +517,7 @@ def list_materials(
     - visibility='public' の教材
     - visibility='group' かつ自分の参加グループで共有された教材
     - 自分が editor/viewer 権限を持つコースで参照されている教材
-      （course_group_permissions 経由）
+      （object_group_permissions object_type='course' 経由）
 
     ``include=summary`` を指定すると、教材選択UI向けにサマリ情報
     （主要 theory component 名・件数・文書構造の見出し・コース作成済みか）を
@@ -509,7 +540,8 @@ def list_materials(
             d.source_path IN (
                 SELECT (jsonb_array_elements(lc.data->'sources')->>'material_id')
                 FROM learning_courses lc
-                JOIN course_group_permissions cgp ON cgp.course_id = lc.id
+                JOIN object_group_permissions cgp
+                    ON cgp.object_type = 'course' AND cgp.object_id = lc.id
                 JOIN group_members gm ON gm.group_id = cgp.group_id
                 WHERE gm.user_id = CAST(:user_id AS uuid)
                   AND cgp.group_id IN ({gph})
@@ -518,13 +550,14 @@ def list_materials(
                   AND jsonb_typeof(lc.data->'sources') = 'array'
             )
         """
-        # migration 035: 解析成果をグループへ直接共有（document_group_permissions 経由）
+        # migration 044: 解析成果をグループへ直接共有（object_group_permissions object_type='document' 経由）
         doc_perm_clause = f"""
-            d.id IN (
-                SELECT dgp.document_id
-                FROM document_group_permissions dgp
+            d.id::text IN (
+                SELECT dgp.object_id
+                FROM object_group_permissions dgp
                 JOIN group_members gm ON gm.group_id = dgp.group_id
-                WHERE gm.user_id = CAST(:user_id AS uuid)
+                WHERE dgp.object_type = 'document'
+                  AND gm.user_id = CAST(:user_id AS uuid)
                   AND dgp.group_id IN ({gph})
                   AND dgp.permission IN ('viewer', 'editor')
             )
@@ -648,20 +681,25 @@ def list_materials(
             if mid in _material_status:
                 status = _material_status[mid].get("status", status)
 
-        run = latest_runs.get(mid) or {}
-        stage_outputs = run.get("stage_outputs") or {}
-        current_stage = run.get("current_stage")
+        run = latest_runs.get(mid)
+        run_data = run or {}
+        stage_outputs = run_data.get("stage_outputs") or {}
+        current_stage = run_data.get("current_stage")
         stage_info = stage_outputs.get(current_stage) if current_stage else None
         if not isinstance(stage_info, dict):
             stage_info = {}
-        if run.get("status") == "running":
-            status = "processing"
-        elif run.get("status") == "failed":
-            status = "failed"
-        elif run.get("status") == "completed":
-            status = "completed"
 
-        completed_at = run.get("completed_at")
+        # Tier3-16: run の有無・状態からの status 合成は projector に一本化する
+        # （get_material と同一ロジック。一覧と詳細の status を一致させる）。
+        mstatus = status_projector.derive_material_status(
+            document_id=r[9], material_id=mid, doc_status=r[3],
+            chunk_count=r[8], doc_updated_at=None, run=run,
+        )
+        legacy_status = _legacy_material_status(mstatus)
+        if legacy_status is not None:
+            status = legacy_status
+
+        completed_at = run_data.get("completed_at")
         analyzed_at = (
             completed_at.isoformat()
             if completed_at is not None and status == "completed"
@@ -715,7 +753,7 @@ def list_materials(
             analysis_progress=stage_info.get("progress"),
             analysis_processed=stage_info.get("processed"),
             analysis_total=stage_info.get("total"),
-            analysis_error=run.get("error_message") or None,
+            analysis_error=run_data.get("error_message") or None,
             authors=authors,
             year=year,
             doc_type=doc_type,
@@ -755,7 +793,8 @@ def get_material(
             d.source_path IN (
                 SELECT (jsonb_array_elements(lc.data->'sources')->>'material_id')
                 FROM learning_courses lc
-                JOIN course_group_permissions cgp ON cgp.course_id = lc.id
+                JOIN object_group_permissions cgp
+                    ON cgp.object_type = 'course' AND cgp.object_id = lc.id
                 JOIN group_members gm ON gm.group_id = cgp.group_id
                 WHERE gm.user_id = CAST(:user_id AS uuid)
                   AND cgp.group_id IN ({gph})
@@ -764,13 +803,14 @@ def get_material(
                   AND jsonb_typeof(lc.data->'sources') = 'array'
             )
         """
-        # migration 035: 解析成果のグループ直接共有（document_group_permissions 経由）
+        # migration 044: 解析成果のグループ直接共有（object_group_permissions object_type='document' 経由）
         doc_perm_clause = f"""
-            d.id IN (
-                SELECT dgp.document_id
-                FROM document_group_permissions dgp
+            d.id::text IN (
+                SELECT dgp.object_id
+                FROM object_group_permissions dgp
                 JOIN group_members gm ON gm.group_id = dgp.group_id
-                WHERE gm.user_id = CAST(:user_id AS uuid)
+                WHERE dgp.object_type = 'document'
+                  AND gm.user_id = CAST(:user_id AS uuid)
                   AND dgp.group_id IN ({gph})
                   AND dgp.permission IN ('viewer', 'editor')
             )
@@ -801,6 +841,10 @@ def get_material(
             """),
             params,
         ).fetchone()
+        # Tier3-16: list_materials と同じ projector 導出で run を反映する
+        # （従来 get_material は run を一切見ておらず、一覧と詳細の status が
+        # 食い違うバグがあった。同一セッション内で1回だけ追加で投影する）。
+        mstatus = status_projector.project_material_status(session, material_id) if record else None
     finally:
         session.close()
 
@@ -813,6 +857,10 @@ def get_material(
     with _material_lock:
         if material_id in _material_status:
             status = _material_status[material_id].get("status", status)
+
+    legacy_status = _legacy_material_status(mstatus)
+    if legacy_status is not None:
+        status = legacy_status
 
     uploaded_at = record[4].isoformat() if record[4] else ""
     return MaterialOut(
@@ -1157,7 +1205,7 @@ def delete_material(
             if not course_data_row or not course_data_row[0]:
                 continue
             data = course_data_row[0] if isinstance(course_data_row[0], dict) else json.loads(course_data_row[0])
-            sources = data.get("sources", [])
+            sources = course_sources(data)
             linked = any(
                 s.get("material_id") == material_id for s in sources if isinstance(s, dict)
             )
@@ -1165,6 +1213,15 @@ def delete_material(
                 # 関連する学習チャット履歴を削除
                 session.execute(
                     sa_text("DELETE FROM learning_chat_history WHERE course_id = :cid"),
+                    {"cid": course_id},
+                )
+                # object_group_permissions は course_id への FK が無いポリモーフィック
+                # テーブルなので明示削除する（孤児防止。migration 044）。
+                session.execute(
+                    sa_text(
+                        "DELETE FROM object_group_permissions "
+                        "WHERE object_type = 'course' AND object_id = :cid"
+                    ),
                     {"cid": course_id},
                 )
                 # コース削除
@@ -1177,6 +1234,16 @@ def delete_material(
         # 3) チャンク削除
         session.execute(
             sa_text("DELETE FROM chunks WHERE document_id = :doc_id"),
+            {"doc_id": doc_id},
+        )
+
+        # object_group_permissions は document_id への FK が無いポリモーフィック
+        # テーブルなので明示削除する（孤児防止。migration 044）。
+        session.execute(
+            sa_text(
+                "DELETE FROM object_group_permissions "
+                "WHERE object_type = 'document' AND object_id = CAST(:doc_id AS uuid)::text"
+            ),
             {"doc_id": doc_id},
         )
 
@@ -2002,12 +2069,13 @@ def list_teacher_courses(
                        COALESCE(lc.is_template, false) AS is_template,
                        COALESCE(lc.is_published, false) AS is_published,
                        lc.created_at, lc.updated_at,
-                       CASE 
+                       CASE
                            WHEN lc.user_id = CAST(:user_id AS uuid) THEN 'owner'
                            WHEN EXISTS (
-                               SELECT 1 FROM course_group_permissions cgp
+                               SELECT 1 FROM object_group_permissions cgp
                                JOIN group_members gm ON gm.group_id = cgp.group_id
-                               WHERE cgp.course_id = lc.id 
+                               WHERE cgp.object_type = 'course'
+                                 AND cgp.object_id = lc.id
                                  AND gm.user_id = CAST(:user_id AS uuid)
                                  AND cgp.permission = 'editor'
                            ) THEN 'editor'
@@ -2016,9 +2084,10 @@ def list_teacher_courses(
                 FROM learning_courses lc
                 WHERE lc.user_id = CAST(:user_id AS uuid)
                    OR EXISTS (
-                       SELECT 1 FROM course_group_permissions cgp
+                       SELECT 1 FROM object_group_permissions cgp
                        JOIN group_members gm ON gm.group_id = cgp.group_id
-                       WHERE cgp.course_id = lc.id 
+                       WHERE cgp.object_type = 'course'
+                         AND cgp.object_id = lc.id
                          AND gm.user_id = CAST(:user_id AS uuid)
                          AND cgp.permission IN ('editor', 'viewer')
                    )
@@ -2075,11 +2144,11 @@ def get_course_as_draft(
     data = record[0] if isinstance(record[0], dict) else (
         json.loads(record[0]) if record[0] else {}
     )
-    course_title = record[1] or data.get("title", "")
+    course_title = record[1] or _course_title(data)
 
     # --- Convert registered course data → course_draft format ---
-    topics = data.get("topics", [])
-    chapters_raw = data.get("chapters", [])
+    topics = course_topics(data)
+    chapters_raw = course_chapters(data)
 
     # Group topics by chapter_index
     chapter_topics: dict[int, list] = {}
@@ -2115,7 +2184,7 @@ def get_course_as_draft(
 
     # Build sources
     sources = []
-    for s in data.get("sources", []):
+    for s in course_sources(data):
         sources.append({
             "title": s.get("title", ""),
             "subtitle": s.get("subtitle", ""),
@@ -2198,12 +2267,13 @@ def upsert_course_group_permission(
 
         row = session.execute(
             sa_text("""
-                INSERT INTO course_group_permissions (course_id, group_id, permission)
-                VALUES (:course_id, CAST(:gid AS uuid), :permission)
-                ON CONFLICT (course_id, group_id) DO UPDATE
+                INSERT INTO object_group_permissions
+                    (object_type, object_id, group_id, permission)
+                VALUES ('course', :course_id, CAST(:gid AS uuid), :permission)
+                ON CONFLICT (object_type, object_id, group_id) DO UPDATE
                 SET permission = EXCLUDED.permission,
                     updated_at = now()
-                RETURNING course_id, group_id, permission, created_at, updated_at
+                RETURNING object_id, group_id, permission, created_at, updated_at
             """),
             {
                 "course_id": course_id,
@@ -2251,9 +2321,10 @@ def delete_course_group_permission(
     try:
         result = session.execute(
             sa_text("""
-                DELETE FROM course_group_permissions
-                WHERE course_id = :course_id AND group_id = CAST(:gid AS uuid)
-                RETURNING course_id
+                DELETE FROM object_group_permissions
+                WHERE object_type = 'course' AND object_id = :course_id
+                  AND group_id = CAST(:gid AS uuid)
+                RETURNING object_id
             """),
             {"course_id": course_id, "gid": group_id},
         ).fetchone()
@@ -2274,10 +2345,11 @@ def delete_course_group_permission(
 
 
 # ---------------------------------------------------------------------------
-# ドキュメント（教材・パイプライン成果）× グループ 共有（migration 035）
+# ドキュメント（教材・パイプライン成果）× グループ 共有（migration 044、旧 035）
 # ---------------------------------------------------------------------------
 # コースを作らずに解析成果（theory_components / theory_claims / graphs / analysis_runs、
-# すべて document_id 由来）を指定グループへ共有する。course_group_permissions の移植。
+# すべて document_id 由来）を指定グループへ共有する。object_group_permissions
+# （object_type='document'）を使う。
 
 
 @router.get(
@@ -2328,12 +2400,13 @@ def upsert_document_group_permission(
 
         row = session.execute(
             sa_text("""
-                INSERT INTO document_group_permissions (document_id, group_id, permission)
-                VALUES (CAST(:did AS uuid), CAST(:gid AS uuid), :permission)
-                ON CONFLICT (document_id, group_id) DO UPDATE
+                INSERT INTO object_group_permissions
+                    (object_type, object_id, group_id, permission)
+                VALUES ('document', CAST(:did AS uuid)::text, CAST(:gid AS uuid), :permission)
+                ON CONFLICT (object_type, object_id, group_id) DO UPDATE
                 SET permission = EXCLUDED.permission,
                     updated_at = now()
-                RETURNING document_id, group_id, permission, created_at, updated_at
+                RETURNING object_id, group_id, permission, created_at, updated_at
             """),
             {"did": doc["id"], "gid": body.group_id, "permission": body.permission},
         ).fetchone()
@@ -2380,9 +2453,10 @@ def delete_document_group_permission(
     try:
         result = session.execute(
             sa_text("""
-                DELETE FROM document_group_permissions
-                WHERE document_id = CAST(:did AS uuid) AND group_id = CAST(:gid AS uuid)
-                RETURNING document_id
+                DELETE FROM object_group_permissions
+                WHERE object_type = 'document' AND object_id = CAST(:did AS uuid)::text
+                  AND group_id = CAST(:gid AS uuid)
+                RETURNING object_id
             """),
             {"did": doc["id"], "gid": group_id},
         ).fetchone()
@@ -2555,7 +2629,17 @@ def delete_course(
             sa_text("DELETE FROM learning_chat_history WHERE course_id = :cid"),
             {"cid": course_id},
         )
-        # コース削除（CASCADE で course_group_permissions も削除される）
+        # object_group_permissions は course_id への FK が無いポリモーフィック
+        # テーブルなので明示削除する（孤児防止。migration 044。旧テーブルは
+        # learning_courses への FK CASCADE で自動的に消えていた）。
+        session.execute(
+            sa_text(
+                "DELETE FROM object_group_permissions "
+                "WHERE object_type = 'course' AND object_id = :course_id"
+            ),
+            {"course_id": course_id},
+        )
+        # コース削除
         session.execute(
             sa_text("DELETE FROM learning_courses WHERE id = :course_id"),
             {"course_id": course_id},
@@ -3059,7 +3143,7 @@ def get_interest_dashboard(
     title_map: dict = {}
     try:
         data = _fetch_course_data_row(course_id) or {}
-        for t in data.get("topics", []):
+        for t in course_topics(data):
             if isinstance(t, dict) and t.get("id"):
                 title_map[t["id"]] = t.get("title") or t["id"]
     except Exception:
@@ -3069,32 +3153,10 @@ def get_interest_dashboard(
 
 
 # ---------------------------------------------------------------------------
-# Lecture Script Studio (Issue #70) — サブルーターとしてインクルード
+# Tier 3-17c: 従来ここで13個の子ルーター（lecture_studio / theory_components /
+# cartridges / revisions / atlas 系 / doubt / admin_assistant / reconstruction /
+# versioning / status / notifications）を import + include_router していたが、
+# 「router(prefix=/api/admin) に子ルーターをネストする」二段構造をやめ、
+# api/main.py から `app.include_router(<router>, prefix="/api/admin")` で
+# 直接マウントするフラット構造に統一した（URL・認可・レスポンスは不変）。
 # ---------------------------------------------------------------------------
-from routes.lecture_studio import router as _lecture_studio_router  # noqa: E402
-from routes.theory_components import router as _theory_components_router  # noqa: E402
-from routes.cartridges import router as _cartridges_router  # noqa: E402
-from routes.revisions import router as _revisions_router  # noqa: E402
-from routes.atlas import router as _atlas_router  # noqa: E402
-from routes.atlas import admin_atlas_router as _admin_atlas_router  # noqa: E402
-from routes.atlas import binding_router as _atlas_binding_router  # noqa: E402
-from routes.doubt import admin_router as _doubt_admin_router  # noqa: E402
-from routes.admin_assistant import admin_router as _admin_assistant_router  # noqa: E402
-from routes.reconstruction import admin_router as _reconstruction_admin_router  # noqa: E402
-from routes.versioning import router as _versioning_router  # noqa: E402
-from routes.status import router as _status_router  # noqa: E402
-from routes.notifications import router as _notifications_router  # noqa: E402
-
-router.include_router(_lecture_studio_router)
-router.include_router(_theory_components_router)
-router.include_router(_cartridges_router)
-router.include_router(_revisions_router)
-router.include_router(_atlas_router)
-router.include_router(_admin_atlas_router)
-router.include_router(_atlas_binding_router)
-router.include_router(_doubt_admin_router)
-router.include_router(_admin_assistant_router)
-router.include_router(_reconstruction_admin_router)
-router.include_router(_versioning_router)
-router.include_router(_status_router)
-router.include_router(_notifications_router)

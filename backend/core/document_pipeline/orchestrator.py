@@ -4,6 +4,17 @@ PDF/TeX archive → DocumentStructure → SourceChunking → SourceEmbedding →
 RhetoricalRole → ClaimQualification → EquationSemantics → ThesisReconstruction →
 DSLLinking → DSLEmbedding → ComponentAssembly → ComponentGraph →
 CoursMapping → Blueprint → ExportValidation → Persist → Completed
+
+Tier 3-19 (アーキテクチャ整理): 26 ステージがかつて ``run_document_pipeline`` 1関数に
+インライン展開されていた（~1,400行）。現在は ``PipelineContext``（ステージ間で受け渡す
+状態を1箇所に集約するデータ構造）+ ``PipelineStageDef`` のリスト（各ステージの実行本体
+への参照）+ 薄いランナーループに分解してある。挙動保存を最優先し、各ステージの
+artifact/resume/report/finish_target_stage の呼び出し順序・payload・非致命/致命の
+分岐は元のコードと完全に同一。ステージごとの逸脱（options ゲート・非同期側の post
+処理・resume 経路の違い等）が大きいため、無理な共通テンプレート化はせず
+``_stage_<name>(ctx) -> bool``（True = target_stage で停止）という「本体を1関数に
+括り出す」形を全ステージで採用している（一部の between-stage 決定論的後処理は
+``_hook_*`` として PIPELINE_STAGES に無い独立ステップにしてある）。
 """
 from __future__ import annotations
 
@@ -129,6 +140,88 @@ def _import_agents() -> dict:
         "CourseMappingAgent": CourseMappingAgent,
         "BlueprintAgent": BlueprintAgent,
     }
+
+
+# ---------------------------------------------------------------------------
+# PipelineContext: 全ステージ間で受け渡す状態を1箇所に集約する。
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PipelineContext:
+    """1回の ``run_document_pipeline`` 呼び出しに閉じたステージ間共有状態。
+
+    フィールドは元のインライン実装でローカル変数として持ち回されていた値
+    （structure / skeleton / roles / ... 等）と、report_start/report_done/
+    save_artifact/artifact/should_use_artifact/finish_target_stage の各クロージャ
+    （``run_document_pipeline`` 側で定義されたものをそのまま bind する）で構成する。
+    """
+
+    # 固定入力（構築後は不変）
+    pdf_bytes: bytes
+    document_id: str
+    material_id: str
+    filename: str | None
+    source_kind: str
+    cartridge_id: str | None
+    course_id: str | None
+    run_id: str | None
+    agent_classes: dict
+    effective_options: dict
+    result: DocumentPipelineResult
+
+    # クロージャ（run_document_pipeline が定義したものを構築後に bind する）
+    report: Callable | None = None
+    report_start: Callable | None = None
+    report_item: Callable | None = None
+    report_done: Callable | None = None
+    save_artifact: Callable | None = None
+    artifact: Callable | None = None
+    should_use_artifact: Callable | None = None
+    finish_target_stage: Callable | None = None
+    all_artifacts: Callable | None = None
+
+    # ステージ間で受け渡される可変状態
+    pdf_path: str | None = None
+    tei_xml: str | None = None
+    structure: Any = None
+    figure_extraction_summary: dict | None = None
+    source_chunks: list | None = None
+    chunk_index: Any = None
+    skeleton: Any = None
+    roles: Any = None
+    qualified: Any = None
+    equations: Any = None
+    evidence: Any = None
+    claim_objects: Any = None
+    symbol_registry: Any = None
+    derivations: Any = None
+    fig_tbl: Any = None
+    apparatus_result: Any = None
+    thesis: Any = None
+    dsl: Any = None
+    component_result: Any = None
+    component_graph_result: Any = None
+    narrative: Any = None
+    course_mapping: Any = None
+    blueprint: Any = None
+    validation_result_dict: dict | None = None
+    skip_graph_persist: bool = False
+    skip_component_persist: bool = False
+    degraded_stages: list = field(default_factory=list)
+
+
+@dataclass
+class PipelineStageDef:
+    """``_PIPELINE_STEPS`` の1要素。
+
+    ``name`` は PIPELINE_STAGES に対応するステージ名（between-stage の決定論的
+    後処理フックには対応する PIPELINE_STAGES エントリが無いため None）。``execute``
+    がステージ本体で、``ctx`` を受け取り「target_stage で停止すべきか」(bool) を返す。
+    """
+
+    name: str | None
+    execute: Callable[["PipelineContext"], bool]
 
 
 def run_document_pipeline(
@@ -326,6 +419,9 @@ def run_document_pipeline(
         )
         return True
 
+    def all_artifacts() -> dict:
+        return dict(previous_artifacts)
+
     result = DocumentPipelineResult(
         document_id=document_id,
         material_id=material_id,
@@ -344,1170 +440,39 @@ def run_document_pipeline(
         default_agents.update(agents)
         agent_classes = default_agents
 
-    pdf_path: str | None = None
+    ctx = PipelineContext(
+        pdf_bytes=pdf_bytes,
+        document_id=document_id,
+        material_id=material_id,
+        filename=filename,
+        source_kind=source_kind,
+        cartridge_id=cartridge_id,
+        course_id=course_id,
+        run_id=run_id,
+        agent_classes=agent_classes,
+        effective_options=effective_options,
+        result=result,
+    )
+    ctx.report = report
+    ctx.report_start = report_start
+    ctx.report_item = report_item
+    ctx.report_done = report_done
+    ctx.save_artifact = save_artifact
+    ctx.artifact = artifact
+    ctx.should_use_artifact = should_use_artifact
+    ctx.finish_target_stage = finish_target_stage
+    ctx.all_artifacts = all_artifacts
+
     try:
         if source_kind not in {"pdf", "tex_archive"}:
             raise ValueError(f"unsupported source_kind: {source_kind}")
 
-        source_suffix = ".pdf" if source_kind == "pdf" else ".tar.gz"
+        for step in _PIPELINE_STEPS:
+            if step.execute(ctx):
+                return ctx.result
 
-        # ── Stage 1: save_pdf (一時ファイル化。MinIO への保存は呼び出し側担当) ─
-        report_done("save_pdf", {"size_bytes": len(pdf_bytes), "source_kind": source_kind})
-        with tempfile.NamedTemporaryFile(
-            mode="wb", suffix=source_suffix, delete=False
-        ) as f:
-            f.write(pdf_bytes)
-            pdf_path = f.name
-
-        # ── Stage 2: grobid_parse ──────────────────────────────────────────
-        tei_xml: str | None = None
-        grobid_artifact = artifact("grobid_parse")
-        if should_use_artifact("grobid_parse"):
-            tei_xml = (grobid_artifact or {}).get("tei_xml") or None
-            logger.info("Resuming document pipeline: loaded grobid_parse artifact for document %s", document_id)
-        elif source_kind == "tex_archive":
-            save_artifact("grobid_parse", {
-                "status": "skipped",
-                "reason": "tex_archive",
-                "tei_bytes": 0,
-                "tei_xml": None,
-            })
-        else:
-            report_start("grobid_parse", total=1, unit="document")
-            try:
-                tei_xml = _run_grobid_parse(pdf_bytes)
-            except Exception:
-                logger.warning(
-                    "grobid_parse failed (non-fatal); will use PyMuPDF fallback: document=%s",
-                    document_id,
-                    exc_info=True,
-                )
-                tei_xml = None
-            save_artifact("grobid_parse", {
-                "status": "ok" if tei_xml else "fallback",
-                "tei_bytes": len(tei_xml.encode()) if tei_xml else 0,
-                "tei_xml": tei_xml,
-            })
-        grobid_status = "skipped" if source_kind == "tex_archive" else ("ok" if tei_xml else "fallback")
-        report_done("grobid_parse", {
-            "status": grobid_status,
-            "tei_bytes": len(tei_xml.encode()) if tei_xml else 0,
-        })
-        if finish_target_stage("grobid_parse", {"status": grobid_status}):
-            return result
-
-        # ── Stage 3: document_structure ────────────────────────────────────
-        structure_artifact = artifact("document_structure")
-        if should_use_artifact("document_structure"):
-            structure = _from_agent_dict("document_structure", structure_artifact)
-            logger.info("Resuming document pipeline: loaded document_structure artifact for document %s", document_id)
-        else:
-            report_start("document_structure", total=1, unit="document")
-            try:
-                if source_kind == "tex_archive":
-                    structure = build_structure_from_tex_archive(
-                        pdf_bytes,
-                        document_id=document_id,
-                        source_file=filename or pdf_path,
-                        cartridge_id=cartridge_id,
-                    )
-                else:
-                    ds_agent = agent_classes["DocumentStructureAgent"]() if isinstance(
-                        agent_classes["DocumentStructureAgent"], type
-                    ) else agent_classes["DocumentStructureAgent"]
-                    structure = ds_agent.run(
-                        pdf_path=pdf_path,
-                        cartridge_id=cartridge_id,
-                        tei_xml=tei_xml,
-                    )
-                structure.document_id = document_id  # 強制的に上書きして後段一貫
-            except Exception as exc:
-                raise PipelineStageError("document_structure", str(exc), cause=exc) from exc
-            save_artifact("document_structure", structure)
-        report_done("document_structure", {
-            "block_count": len(structure.blocks),
-            "section_count": len(structure.sections),
-        })
-        structure.document_id = document_id
-        if source_kind == "pdf":
-            structure.source_file = pdf_path
-        if finish_target_stage("document_structure", {"block_count": len(structure.blocks), "section_count": len(structure.sections)}):
-            return result
-
-        # ── Stage 2b: figure_image_extraction (non-LLM, deterministic, always runs) ─
-        # 画像パイプライン §4: caption ブロックの分類結果 (document_structure) を使う
-        # ため直後に置く。チェックボックス (options.analyze_images) に関係なく常時
-        # 実行する（決定 0-4-2）。非致命: 失敗しても pipeline は継続する。
-        figure_extraction_artifact = artifact("figure_image_extraction")
-        if should_use_artifact("figure_image_extraction"):
-            figure_extraction_summary = figure_extraction_artifact or {}
-            logger.info(
-                "Resuming document pipeline: loaded figure_image_extraction artifact for document %s",
-                document_id,
-            )
-        else:
-            report_start("figure_image_extraction", total=1, unit="builder")
-            if source_kind != "pdf":
-                figure_extraction_summary = {"skipped": True, "reason": "not_pdf"}
-            else:
-                try:
-                    from .figure_images import extract_document_figures
-
-                    figure_extraction_summary = extract_document_figures(
-                        pdf_bytes=pdf_bytes,
-                        document_id=document_id,
-                        run_id=run_id,
-                        structure=structure,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "figure_image_extraction stage failed (non-fatal): document=%s material=%s error=%s",
-                        document_id, material_id, exc, exc_info=True,
-                    )
-                    figure_extraction_summary = {"status": "completed", "error": str(exc)}
-            save_artifact("figure_image_extraction", figure_extraction_summary)
-        report_done("figure_image_extraction", dict(figure_extraction_summary or {}))
-        if finish_target_stage("figure_image_extraction", dict(figure_extraction_summary or {})):
-            return result
-
-        # ── Stage 3: source_chunking ───────────────────────────────────────
-        source_chunks_artifact = artifact("source_chunking")
-        if should_use_artifact("source_chunking"):
-            source_chunks = _from_source_chunks(source_chunks_artifact)
-            logger.info("Resuming document pipeline: loaded %d source chunks for document %s", len(source_chunks), document_id)
-        else:
-            report_start("source_chunking", total=len(structure.blocks), unit="blocks")
-            try:
-                source_chunks = build_source_chunks(structure)
-            except Exception as exc:
-                raise PipelineStageError("source_chunking", str(exc), cause=exc) from exc
-            save_artifact("source_chunking", source_chunks)
-        if not source_chunks:
-            raise PipelineStageError(
-                "source_chunking",
-                "no source chunks produced from document structure",
-            )
-        report_done("source_chunking", {"chunk_count": len(source_chunks)})
-        if finish_target_stage("source_chunking", {"chunk_count": len(source_chunks)}):
-            return result
-
-        # ── Stage 4: source_embedding ──────────────────────────────────────
-        if should_use_artifact("source_embedding"):
-            chunk_index = load_source_chunk_index(document_id=document_id)
-            logger.info("Resuming document pipeline: loaded %d persisted chunks for document %s", len(chunk_index), document_id)
-        else:
-            report_start("source_embedding", total=len(source_chunks), unit="chunks")
-            try:
-                chunk_index = persist_source_chunks(
-                    document_id=document_id,
-                    material_id=material_id,
-                    chunks=source_chunks,
-                )
-            except Exception as exc:
-                raise PipelineStageError("source_embedding", str(exc), cause=exc) from exc
-            save_artifact("source_embedding", {"saved_chunks": len(chunk_index)})
-        result.chunk_count = len(chunk_index)
-        report_done("source_embedding", {"saved_chunks": len(chunk_index), "total": len(source_chunks), "processed": len(source_chunks)})
-        if finish_target_stage("source_embedding", {"saved_chunks": len(chunk_index), "total": len(source_chunks), "processed": len(source_chunks)}):
-            return result
-
-        # ── Stage 5: paper_skeleton ────────────────────────────────────────
-        skeleton_artifact = artifact("paper_skeleton")
-        if should_use_artifact("paper_skeleton"):
-            skeleton = _from_agent_dict("paper_skeleton", skeleton_artifact)
-            logger.info("Resuming document pipeline: loaded paper_skeleton artifact for document %s", document_id)
-        else:
-            report_start("paper_skeleton", total=1, unit="llm_call")
-            try:
-                ps_agent = _instantiate(agent_classes["PaperSkeletonAgent"])
-                skeleton = ps_agent.run(structure=structure, cartridge_id=cartridge_id)
-            except Exception as exc:
-                logger.exception("paper_skeleton stage failed for document=%s material=%s", document_id, material_id)
-                raise PipelineStageError("paper_skeleton", str(exc), cause=exc) from exc
-            save_artifact("paper_skeleton", skeleton)
-        report_done("paper_skeleton", {"document_id": document_id, "total": 1, "processed": 1})
-        if finish_target_stage("paper_skeleton", {"document_id": document_id, "total": 1, "processed": 1}):
-            return result
-
-        # ── Stage 6: rhetorical_role ───────────────────────────────────────
-        roles_artifact = artifact("rhetorical_role")
-        if should_use_artifact("rhetorical_role"):
-            roles = _from_agent_dict("rhetorical_role", roles_artifact)
-            logger.info("Resuming document pipeline: loaded rhetorical_role artifact for document %s", document_id)
-        else:
-            report_start("rhetorical_role", total=_agent_input_count("rhetorical_role", agent_classes, structure, skeleton, cartridge_id), unit="blocks")
-            try:
-                rr_agent = _instantiate(agent_classes["RhetoricalRoleAgent"])
-                roles = rr_agent.run(
-                    structure=structure,
-                    skeleton=skeleton,
-                    cartridge_id=cartridge_id,
-                    progress_callback=lambda processed, total: report_item("rhetorical_role", processed, total, "blocks"),
-                )
-            except Exception as exc:
-                logger.exception("rhetorical_role stage failed for document=%s material=%s", document_id, material_id)
-                raise PipelineStageError("rhetorical_role", str(exc), cause=exc) from exc
-            save_artifact("rhetorical_role", roles)
-        report_done("rhetorical_role", getattr(roles, "summary_stats", {}) or {})
-        if finish_target_stage("rhetorical_role", getattr(roles, "summary_stats", {}) or {}):
-            return result
-
-        # ── Stage 7: claim_qualification ───────────────────────────────────
-        qualified_artifact = artifact("claim_qualification")
-        if should_use_artifact("claim_qualification"):
-            qualified = _from_agent_dict("claim_qualification", qualified_artifact)
-            logger.info("Resuming document pipeline: loaded claim_qualification artifact for document %s", document_id)
-        else:
-            report_start("claim_qualification", total=_agent_input_count("claim_qualification", agent_classes, structure, skeleton, cartridge_id, roles=roles), unit="spans")
-            try:
-                cq_agent = _instantiate(agent_classes["ClaimQualificationAgent"])
-                qualified = cq_agent.run(
-                    structure=structure, skeleton=skeleton, roles=roles,
-                    cartridge_id=cartridge_id,
-                    progress_callback=lambda processed, total: report_item("claim_qualification", processed, total, "spans"),
-                )
-            except Exception as exc:
-                logger.exception("claim_qualification stage failed for document=%s material=%s", document_id, material_id)
-                raise PipelineStageError("claim_qualification", str(exc), cause=exc) from exc
-            save_artifact("claim_qualification", qualified)
-        report_done("claim_qualification", {
-            "qualified_count": len(qualified.qualified_spans),
-        })
-        if finish_target_stage("claim_qualification", {"qualified_count": len(qualified.qualified_spans)}):
-            return result
-
-        # ── Stage 8: equation_semantics ────────────────────────────────────
-        equations_artifact = artifact("equation_semantics")
-        if should_use_artifact("equation_semantics"):
-            equations = _from_agent_dict("equation_semantics", equations_artifact)
-            logger.info("Resuming document pipeline: loaded equation_semantics artifact for document %s", document_id)
-        else:
-            report_start("equation_semantics", total=_agent_input_count("equation_semantics", agent_classes, structure, skeleton, cartridge_id, roles=roles), unit="equations")
-            try:
-                eq_agent = _instantiate(agent_classes["EquationSemanticsAgent"])
-                equations = eq_agent.run(
-                    structure=structure, skeleton=skeleton, roles=roles,
-                    cartridge_id=cartridge_id,
-                    progress_callback=lambda processed, total: report_item("equation_semantics", processed, total, "equations"),
-                )
-            except Exception as exc:
-                logger.exception("equation_semantics stage failed for document=%s material=%s", document_id, material_id)
-                raise PipelineStageError("equation_semantics", str(exc), cause=exc) from exc
-            save_artifact("equation_semantics", equations)
-            try:
-                persist_equation_previews_to_chunks(document_id, equations)
-            except Exception:
-                logger.warning(
-                    "Failed to persist equation previews into chunks for document %s",
-                    document_id,
-                    exc_info=True,
-                )
-        report_done("equation_semantics", {"equations": len(getattr(equations, "equations", []) or [])})
-        if finish_target_stage("equation_semantics", {"equations": len(getattr(equations, "equations", []) or [])}):
-            return result
-
-        # ── Stage 8b: evidence_registry (deterministic, source-backed) ─────
-        evidence_artifact = artifact("evidence_registry")
-        if should_use_artifact("evidence_registry"):
-            evidence = _from_agent_dict("evidence_registry", evidence_artifact)
-            logger.info("Resuming document pipeline: loaded evidence_registry artifact for document %s", document_id)
-        else:
-            report_start("evidence_registry", total=1, unit="builder")
-            try:
-                evidence = _build_evidence_registry(
-                    agent_classes=agent_classes,
-                    document_id=document_id,
-                    cartridge_id=cartridge_id,
-                    structure=structure,
-                    qualified=qualified,
-                    equations=equations,
-                    roles=roles,
-                )
-            except Exception as exc:
-                logger.exception(
-                    "evidence_registry stage failed (non-fatal): document=%s material=%s error=%s",
-                    document_id, material_id, exc,
-                )
-                evidence = _empty_evidence_registry(document_id, cartridge_id)
-            save_artifact("evidence_registry", evidence)
-        report_done("evidence_registry", {
-            "records": len(getattr(evidence, "records", []) or []),
-            "total": 1,
-            "processed": 1,
-        })
-        # Document completeness check at the DocumentStructure / EvidenceRegistry
-        # exit (#366): record a deterministic ingest-completeness artifact and
-        # propagate failures into document_structure.validation_issues so the
-        # signal flows downstream (and a truncated document never silently
-        # reaches publish-ready).
-        try:
-            # equation_semantics (stage 8) runs before this point, so the real
-            # EquationRecords are available and MUST be passed so equation artifact
-            # coverage reflects them (#420) — otherwise the saved artifact is
-            # permanently incomplete for any TeX document with math.
-            _record_document_completeness(
-                structure=structure,
-                evidence=evidence,
-                equations=equations,
-                document_id=document_id,
-                save_artifact=save_artifact,
-            )
-        except Exception:
-            logger.exception(
-                "document_completeness check failed (non-fatal): document=%s", document_id
-            )
-        if finish_target_stage("evidence_registry", {"records": len(getattr(evidence, "records", []) or []), "total": 1, "processed": 1}):
-            return result
-
-        # ── Stage 8c: claim_object_builder (deterministic claims.json) ─────
-        claim_object_artifact = artifact("claim_object_builder")
-        if should_use_artifact("claim_object_builder"):
-            claim_objects = _from_agent_dict("claim_object_builder", claim_object_artifact)
-            logger.info("Resuming document pipeline: loaded claim_object_builder artifact for document %s", document_id)
-        else:
-            report_start("claim_object_builder", total=1, unit="builder")
-            try:
-                claim_objects = _build_claim_objects(
-                    agent_classes=agent_classes,
-                    document_id=document_id,
-                    cartridge_id=cartridge_id,
-                    qualified=qualified,
-                    equations=equations,
-                    evidence=evidence,
-                    document_structure=structure,
-                )
-            except Exception as exc:
-                logger.exception(
-                    "claim_object_builder stage failed (non-fatal): document=%s material=%s error=%s",
-                    document_id, material_id, exc,
-                )
-                claim_objects = _empty_claim_object_result(document_id, cartridge_id)
-            save_artifact("claim_object_builder", claim_objects)
-        report_done("claim_object_builder", {
-            "claims": len(getattr(claim_objects, "claims", []) or []),
-            "total": 1,
-            "processed": 1,
-        })
-        if finish_target_stage("claim_object_builder", {"claims": len(getattr(claim_objects, "claims", []) or []), "total": 1, "processed": 1}):
-            return result
-
-        # ── Stage 8c.1: claim ID canonicalization contract (issue #340) ────
-        # claim_object_builder is the source of truth for claim IDs. Re-map or
-        # drop any provisional claim refs still carried by equation_semantics so
-        # the downstream derivation_chain / component / graph / export artifacts
-        # only ever reference final claim IDs (or nothing). Dropped refs are kept
-        # as review warnings — we never silently retain an unresolved ref.
-        try:
-            eq_dropped = _canonicalize_equation_claim_links(equations, claim_objects)
-            if eq_dropped:
-                save_artifact("equation_semantics", equations)
-                logger.info(
-                    "Canonicalized equation claim links for document %s: dropped provisional refs on %d equation(s)",
-                    document_id, len(eq_dropped),
-                )
-        except Exception:
-            logger.warning(
-                "equation claim-link canonicalization failed (non-fatal): document=%s",
-                document_id, exc_info=True,
-            )
-
-        # ── Stage 8c.1b: claim↔equation link symmetry (issue #358) ─────────
-        # One-way links are demoted to inferred: moved out of the primary link
-        # fields into inferred_equation_ids / inferred_claim_ids (kept, never
-        # dropped) plus review metadata on both artifacts.
-        try:
-            from episteme_graph.agents.id_canonicalization import (
-                annotate_claim_equation_link_asymmetries,
-            )
-
-            asymmetries = annotate_claim_equation_link_asymmetries(
-                claim_objects, equations
-            )
-            if asymmetries:
-                save_artifact("claim_object_builder", claim_objects)
-                save_artifact("equation_semantics", equations)
-                logger.info(
-                    "Annotated %d one-way claim↔equation link(s) for document %s",
-                    asymmetries, document_id,
-                )
-        except Exception:
-            logger.warning(
-                "claim-equation link symmetry annotation failed (non-fatal): document=%s",
-                document_id, exc_info=True,
-            )
-
-        # ── Stage 8c.2: symbol_registry (deterministic from equations, #355) ─
-        # Aggregates defined/used symbols into a document-wide registry and
-        # annotates DefinedSymbol.symbol_id on the equations in place. Non-fatal:
-        # downstream stages do not depend on it yet.
-        symbol_registry_artifact = artifact("symbol_registry")
-        if should_use_artifact("symbol_registry"):
-            symbol_registry = _from_agent_dict("symbol_registry", symbol_registry_artifact)
-            logger.info("Resuming document pipeline: loaded symbol_registry artifact for document %s", document_id)
-        else:
-            report_start("symbol_registry", total=1, unit="builder")
-            symbol_registry = None
-            try:
-                from episteme_graph.agents.symbol_registry.builder import SymbolRegistryBuilder
-
-                symbol_registry = SymbolRegistryBuilder().run(
-                    equations, cartridge_id=cartridge_id
-                )
-                # Issue #432: derive inter-equation links from structural cues
-                # (shared symbols from the registry + textual references), record
-                # link_provenance, drop dangling links, and assign link_status.
-                # Mutates the equation records in place before they are persisted.
-                try:
-                    from episteme_graph.agents.symbol_registry.link_normalizer import (
-                        EquationLinkNormalizer,
-                    )
-
-                    link_summary = EquationLinkNormalizer().normalize(
-                        equations, symbol_registry
-                    )
-                    logger.info(
-                        "equation link normalization for document %s: %s links, "
-                        "%d dangling dropped, statuses=%s",
-                        document_id,
-                        link_summary.get("link_count"),
-                        link_summary.get("dangling_dropped", 0),
-                        link_summary.get("link_status_counts"),
-                    )
-                except Exception:
-                    logger.warning(
-                        "equation link normalization failed (non-fatal): document=%s",
-                        document_id, exc_info=True,
-                    )
-                # The builder set DefinedSymbol.symbol_id in place and the link
-                # normalizer rewrote the equation links; persist the annotated
-                # equations so resumes keep the registry references and links.
-                save_artifact("equation_semantics", equations)
-                save_artifact("symbol_registry", symbol_registry)
-            except Exception as exc:
-                logger.warning(
-                    "symbol_registry stage failed (non-fatal): document=%s error=%s",
-                    document_id, exc, exc_info=True,
-                )
-        symbol_count = len(getattr(symbol_registry, "records", []) or [])
-        report_done("symbol_registry", {"symbols": symbol_count, "total": 1, "processed": 1})
-        if finish_target_stage("symbol_registry", {"symbols": symbol_count, "total": 1, "processed": 1}):
-            return result
-
-        # ── Stage 8d: derivation_chain (deterministic from equation links) ─
-        derivation_artifact = artifact("derivation_chain")
-        if should_use_artifact("derivation_chain"):
-            derivations = _from_agent_dict("derivation_chain", derivation_artifact)
-            logger.info("Resuming document pipeline: loaded derivation_chain artifact for document %s", document_id)
-        else:
-            report_start("derivation_chain", total=1, unit="builder")
-            try:
-                derivations = _build_derivation_chains(
-                    agent_classes=agent_classes,
-                    cartridge_id=cartridge_id,
-                    equations=equations,
-                    claim_objects=claim_objects,
-                    evidence=evidence,
-                )
-            except Exception as exc:
-                logger.exception(
-                    "derivation_chain stage failed (non-fatal): document=%s material=%s error=%s",
-                    document_id, material_id, exc,
-                )
-                derivations = _empty_derivation_chain_result(document_id, cartridge_id)
-            save_artifact("derivation_chain", derivations)
-        # Defensive canonicalization (issue #340): even though equations were
-        # canonicalized before this stage, re-resolve every derivation step's
-        # claim refs against the final claim set so no provisional claim ID can
-        # reach component / graph / export from a resumed or stale artifact.
-        try:
-            deriv_dropped = _canonicalize_derivation_claim_refs(derivations, claim_objects)
-            if deriv_dropped:
-                save_artifact("derivation_chain", derivations)
-                logger.info(
-                    "Canonicalized derivation claim refs for document %s: dropped provisional refs on %d step(s)",
-                    document_id, len(deriv_dropped),
-                )
-        except Exception:
-            logger.warning(
-                "derivation claim-ref canonicalization failed (non-fatal): document=%s",
-                document_id, exc_info=True,
-            )
-        report_done("derivation_chain", {
-            "chains": len(getattr(derivations, "chains", []) or []),
-            "total": 1,
-            "processed": 1,
-        })
-        if finish_target_stage("derivation_chain", {"chains": len(getattr(derivations, "chains", []) or []), "total": 1, "processed": 1}):
-            return result
-
-        # ── Stage 8d.1: equation/derivation claim synthesis (issue #388) ─
-        # Turn source-backed equation structure and system-level derivations into
-        # atomic equation_backed / derived_from_linked_artifacts claims so the
-        # claim artifact is not weak when prose claims miss equation-expressed
-        # propositions. Additive and non-fatal: synthesised claims are appended to
-        # the claim_object_builder artifact (and to claim_objects so downstream
-        # component assembly can cite them).
-        try:
-            synthesized = _synthesize_equation_claims(
-                equations=equations, derivations=derivations, claim_objects=claim_objects,
-            )
-            if synthesized:
-                claim_objects.claims = list(getattr(claim_objects, "claims", []) or []) + synthesized
-                save_artifact("claim_object_builder", claim_objects)
-                logger.info(
-                    "Synthesised %d equation/derivation-backed claims for document %s",
-                    len(synthesized), document_id,
-                )
-        except Exception:
-            logger.warning(
-                "equation claim synthesis failed (non-fatal): document=%s",
-                document_id, exc_info=True,
-            )
-
-        # ── Stage 8e: figure_table_semantics (caption-first deterministic) ─
-        fig_tbl_artifact = artifact("figure_table_semantics")
-        if should_use_artifact("figure_table_semantics"):
-            fig_tbl = _from_agent_dict("figure_table_semantics", fig_tbl_artifact)
-            logger.info("Resuming document pipeline: loaded figure_table_semantics artifact for document %s", document_id)
-        else:
-            report_start("figure_table_semantics", total=1, unit="builder")
-            try:
-                fig_tbl = _build_figure_table_semantics(
-                    agent_classes=agent_classes,
-                    cartridge_id=cartridge_id,
-                    structure=structure,
-                    evidence=evidence,
-                    claim_objects=claim_objects,
-                )
-            except Exception as exc:
-                logger.exception(
-                    "figure_table_semantics stage failed (non-fatal): document=%s material=%s error=%s",
-                    document_id, material_id, exc,
-                )
-                fig_tbl = _empty_figure_table_result(document_id, cartridge_id)
-            save_artifact("figure_table_semantics", fig_tbl)
-        report_done("figure_table_semantics", {
-            "figures": len(getattr(fig_tbl, "figures", []) or []),
-            "tables": len(getattr(fig_tbl, "tables", []) or []),
-            "total": 1,
-            "processed": 1,
-        })
-        if finish_target_stage("figure_table_semantics", {"figures": len(getattr(fig_tbl, "figures", []) or []), "tables": len(getattr(fig_tbl, "tables", []) or []), "total": 1, "processed": 1}):
-            return result
-
-        # ── Stage 8f: apparatus_semantics (vision LLM, opt-in via options.analyze_images) ─
-        # 画像パイプライン §5: FigureRecord (figure_table_semantics) と caption 意味付けを
-        # 入力に使うためこの位置に置く。出力は component_assembly が下流で消費する (§5-5)。
-        apparatus_artifact = artifact("apparatus_semantics")
-        if should_use_artifact("apparatus_semantics"):
-            apparatus_result = _from_agent_dict("apparatus_semantics", apparatus_artifact)
-            if apparatus_result is None:
-                # 前回 run が skipped_by_option / エラーで保存した placeholder。
-                # component_assembly には渡さず、そのまま正直に報告する。
-                apparatus_done_payload = dict(apparatus_artifact or {})
-                apparatus_done_payload.setdefault("status", "completed")
-            else:
-                apparatus_done_payload = {
-                    "status": "completed",
-                    "apparatus_records": len(getattr(apparatus_result, "apparatus_records", []) or []),
-                }
-            logger.info(
-                "Resuming document pipeline: loaded apparatus_semantics artifact for document %s",
-                document_id,
-            )
-        else:
-            report_start("apparatus_semantics", total=1, unit="builder")
-            if not effective_options.get("analyze_images"):
-                apparatus_result = None
-                apparatus_done_payload = {"status": "completed", "skipped_by_option": True}
-                save_artifact("apparatus_semantics", {"skipped_by_option": True})
-            else:
-                try:
-                    apparatus_result, apparatus_done_payload = _build_apparatus_semantics(
-                        document_id=document_id,
-                        cartridge_id=cartridge_id,
-                        fig_tbl=fig_tbl,
-                    )
-                    save_artifact("apparatus_semantics", apparatus_result)
-                except Exception as exc:
-                    logger.warning(
-                        "apparatus_semantics stage failed (non-fatal): document=%s material=%s error=%s",
-                        document_id, material_id, exc, exc_info=True,
-                    )
-                    apparatus_result = None
-                    apparatus_done_payload = {"status": "completed", "error": str(exc)}
-                    save_artifact("apparatus_semantics", {"status": "completed", "error": str(exc)})
-        report_done("apparatus_semantics", apparatus_done_payload)
-        if finish_target_stage("apparatus_semantics", apparatus_done_payload):
-            return result
-
-        # ── Stage 9: thesis_reconstruction ─────────────────────────────────
-        thesis_artifact = artifact("thesis_reconstruction")
-        if should_use_artifact("thesis_reconstruction"):
-            thesis = _from_agent_dict("thesis_reconstruction", thesis_artifact)
-            logger.info("Resuming document pipeline: loaded thesis_reconstruction artifact for document %s", document_id)
-        else:
-            report_start("thesis_reconstruction", total=1, unit="llm_call")
-            try:
-                th_agent = _instantiate(agent_classes["ThesisReconstructionAgent"])
-                thesis = th_agent.run(
-                    skeleton=skeleton, qualified_claims=qualified, equations=equations,
-                    cartridge_id=cartridge_id, claim_objects=claim_objects,
-                )
-            except Exception as exc:
-                logger.exception("thesis_reconstruction stage failed for document=%s material=%s", document_id, material_id)
-                raise PipelineStageError("thesis_reconstruction", str(exc), cause=exc) from exc
-            save_artifact("thesis_reconstruction", thesis)
-        report_done("thesis_reconstruction", {"total": 1, "processed": 1})
-        if finish_target_stage("thesis_reconstruction", {"total": 1, "processed": 1}):
-            return result
-
-        # ── Stage 10: dsl_linking ──────────────────────────────────────────
-        dsl_artifact = artifact("dsl_linking")
-        if should_use_artifact("dsl_linking"):
-            dsl = _from_agent_dict("dsl_linking", dsl_artifact)
-            logger.info("Resuming document pipeline: loaded dsl_linking artifact for document %s", document_id)
-        else:
-            report_start("dsl_linking", total=1, unit="llm_call")
-            try:
-                dsl_agent = _instantiate(agent_classes["DSLLinkingAgent"])
-                dsl = dsl_agent.run(
-                    qualified_claims=qualified, equations=equations, thesis=thesis,
-                    claim_objects=claim_objects,
-                )
-            except Exception as exc:
-                logger.exception("dsl_linking stage failed for document=%s material=%s", document_id, material_id)
-                raise PipelineStageError("dsl_linking", str(exc), cause=exc) from exc
-            # Issue #442: cross-link the thesis artifact and the DSL graph so the
-            # thesis has explicit traversal anchors and the anchor nodes carry the
-            # is_thesis_anchor flag. Deterministic, non-fatal — re-save both.
-            try:
-                from episteme_graph.agents.thesis_reconstruction.anchor_linker import (
-                    link_thesis_anchors,
-                )
-                anchors = link_thesis_anchors(thesis, dsl)
-                if anchors:
-                    save_artifact("thesis_reconstruction", thesis)
-            except Exception as exc:
-                logger.warning(
-                    "thesis anchor linking failed (non-fatal): document=%s error=%s",
-                    document_id, exc,
-                )
-            save_artifact("dsl_linking", dsl)
-        result.dsl_node_count = len(dsl.nodes)
-        result.dsl_edge_count = len(dsl.edges)
-        report_done("dsl_linking", {
-            "nodes": len(dsl.nodes), "edges": len(dsl.edges), "total": 1, "processed": 1,
-        })
-        if finish_target_stage("dsl_linking", {"nodes": len(dsl.nodes), "edges": len(dsl.edges), "total": 1, "processed": 1}):
-            return result
-
-        # ── Stage 11: dsl_embedding ────────────────────────────────────────
-        report_start("dsl_embedding", total=1, unit="embedding")
-        if not should_use_artifact("dsl_embedding"):
-            try:
-                dsl_text = dsl_result_to_search_text(dsl, document_id=document_id)
-                persist_document_embedding(
-                    document_id=document_id,
-                    material_id=material_id,
-                    embedding_type="dsl_graph",
-                    text=dsl_text,
-                    metadata={
-                        "node_count": len(dsl.nodes),
-                        "edge_count": len(dsl.edges),
-                    },
-                )
-                save_artifact("dsl_embedding", {"saved": True})
-            except Exception as exc:
-                # embedding は best-effort（agent pipeline 全体の致命傷にはしない）
-                logger.exception("dsl_embedding stage failed (non-fatal): document=%s material=%s error=%s", document_id, material_id, exc)
-        report_done("dsl_embedding", {"total": 1, "processed": 1})
-        if finish_target_stage("dsl_embedding", {"total": 1, "processed": 1}):
-            return result
-
-        # ── Stage 12: component_assembly ───────────────────────────────────
-        component_artifact = artifact("component_assembly")
-        reuse_component_artifact = should_use_artifact("component_assembly")
-        if reuse_component_artifact:
-            component_result = _from_agent_dict("component_assembly", component_artifact)
-            reuse_component_artifact = _component_assembly_artifact_reusable(
-                component_result, document_id=document_id, material_id=material_id,
-            )
-        if reuse_component_artifact:
-            logger.info("Resuming document pipeline: loaded component_assembly artifact for document %s", document_id)
-        else:
-            report_start("component_assembly", total=1, unit="llm_call")
-            try:
-                ca_agent = _instantiate(agent_classes["ComponentAssemblyAgent"])
-                ca_kwargs: dict[str, Any] = dict(
-                    qualified_claims=qualified, equations=equations,
-                    thesis=thesis, dsl=dsl, cartridge_id=cartridge_id,
-                    claim_objects=claim_objects,
-                    evidence_registry=evidence,
-                    derivations=derivations,
-                )
-                # 画像パイプライン §5-5: apparatus_semantics の出力を装置候補として
-                # 下流に渡す。別チームが並行して agent 側に同名 kwarg を実装中のため、
-                # 未対応なら渡さず素通りさせる（防御的）。
-                if apparatus_result is not None:
-                    try:
-                        run_sig = inspect.signature(ca_agent.run)
-                        accepts_apparatus = (
-                            "apparatus_semantics" in run_sig.parameters
-                            or any(
-                                p.kind == inspect.Parameter.VAR_KEYWORD
-                                for p in run_sig.parameters.values()
-                            )
-                        )
-                    except (TypeError, ValueError):
-                        accepts_apparatus = False
-                    if accepts_apparatus:
-                        ca_kwargs["apparatus_semantics"] = apparatus_result
-                    else:
-                        logger.info(
-                            "component_assembly: ComponentAssemblyAgent.run() does not "
-                            "accept apparatus_semantics yet; skipping (document=%s)",
-                            document_id,
-                        )
-                component_result = ca_agent.run(**ca_kwargs)
-            except Exception as exc:
-                logger.exception("component_assembly stage failed for document=%s material=%s", document_id, material_id)
-                raise PipelineStageError("component_assembly", str(exc), cause=exc) from exc
-            save_artifact("component_assembly", component_result)
-        result.component_count = len(component_result.components)
-        component_done_payload: dict[str, Any] = {
-            "components": len(component_result.components), "total": 1, "processed": 1,
-        }
-        fallback_info = _component_assembly_fallback_info(component_result)
-        if fallback_info:
-            logger.warning(
-                "component_assembly used deterministic fallback: document=%s material=%s "
-                "fallback_reason=%r original_failure_codes=%s fallback_components=%d",
-                document_id, material_id,
-                fallback_info["fallback_reason"],
-                fallback_info["original_failure_codes"],
-                fallback_info["fallback_component_count"],
-            )
-            component_done_payload.update(fallback_info)
-        report_done("component_assembly", component_done_payload)
-        if finish_target_stage("component_assembly", component_done_payload):
-            return result
-
-        # ── Stage 12a: component_graph (hybrid deterministic/LLM edge builder) ─
-        component_graph_artifact = artifact("component_graph")
-        if should_use_artifact("component_graph"):
-            component_graph_result = _from_agent_dict("component_graph", component_graph_artifact)
-            logger.info("Resuming document pipeline: loaded component_graph artifact for document %s", document_id)
-        else:
-            report_start("component_graph", total=1, unit="llm_call")
-            try:
-                cg_agent = _instantiate(agent_classes["ComponentGraphAgent"])
-                # Flatten claims for Material 4 context
-                flat_claims = [
-                    {"claim_id": c.claim_id, "text": c.text}
-                    for c in (getattr(claim_objects, "claims", []) or [])
-                ]
-                # Flatten evidence records for Material 4 context
-                flat_evidence = [
-                    {"evidence_id": r.evidence_id, "evidence_text": r.evidence_text}
-                    for r in (getattr(evidence, "records", []) or [])
-                ]
-                component_graph_result = cg_agent.run(
-                    components=component_result,
-                    dsl=dsl,
-                    derivations=derivations,
-                    claims=flat_claims,
-                    evidence_snippets=flat_evidence,
-                    cartridge_id=cartridge_id,
-                )
-            except Exception as exc:
-                logger.exception(
-                    "component_graph stage failed (non-fatal): document=%s material=%s error=%s",
-                    document_id, material_id, exc,
-                )
-                # フォールバック: ノードのみ、エッジなし
-                from episteme_graph.agents.component_graph.schema import ComponentGraphResult
-                component_graph_result = ComponentGraphResult.make_fallback(
-                    document_id, cartridge_id, str(exc)
-                )
-            save_artifact("component_graph", component_graph_result)
-        # Issue #449: propagate the thesis-anchor flag onto the component graph so
-        # the UI can always highlight the argument's goal nodes. Deterministic and
-        # non-fatal; applied on both fresh and resumed graphs (mutates in place,
-        # so the DB persist below carries the flag).
-        try:
-            from episteme_graph.agents.component_graph.anchor_linker import (
-                link_component_thesis_anchors,
-            )
-            link_component_thesis_anchors(thesis, component_graph_result)
-        except Exception as exc:
-            logger.warning(
-                "component thesis-anchor linking failed (non-fatal): document=%s error=%s",
-                document_id, exc,
-            )
-        # Issue #451: propagate DSL edge polarity onto the component graph so the UI
-        # can visualise promotion vs. inhibition. Deterministic, non-fatal.
-        try:
-            from episteme_graph.agents.component_graph.edge_polarity_linker import (
-                link_component_edge_polarity,
-            )
-            link_component_edge_polarity(dsl, component_graph_result)
-        except Exception as exc:
-            logger.warning(
-                "component edge polarity linking failed (non-fatal): document=%s error=%s",
-                document_id, exc,
-            )
-        report_done("component_graph", {
-            "nodes": len(getattr(component_graph_result, "nodes", []) or []),
-            "edges": len(getattr(component_graph_result, "edges", []) or []),
-            "total": 1,
-            "processed": 1,
-        })
-        if finish_target_stage("component_graph", {"nodes": len(getattr(component_graph_result, "nodes", []) or []), "edges": len(getattr(component_graph_result, "edges", []) or []), "total": 1, "processed": 1}):
-            return result
-
-        # ── Stage 12a.1: narrative_annotator (reading layer for main graph, #360) ─
-        # Annotation-only LLM stage: graph_summary / narrative_role /
-        # transition_text are stored as a separate artifact and never modify the
-        # graph. Non-fatal: downstream stages do not depend on it.
-        narrative_artifact = artifact("narrative_annotator")
-        if should_use_artifact("narrative_annotator"):
-            narrative = _from_agent_dict("narrative_annotator", narrative_artifact)
-            logger.info("Resuming document pipeline: loaded narrative_annotator artifact for document %s", document_id)
-        else:
-            report_start("narrative_annotator", total=1, unit="llm_call")
-            narrative = None
-            try:
-                from episteme_graph.agents.narrative_annotator.agent import NarrativeAnnotator
-
-                narrative = NarrativeAnnotator().run(
-                    component_graph_result,
-                    thesis=thesis,
-                    derivations=derivations,
-                    cartridge_id=cartridge_id,
-                )
-                save_artifact("narrative_annotator", narrative)
-            except Exception as exc:
-                logger.warning(
-                    "narrative_annotator stage failed (non-fatal): document=%s error=%s",
-                    document_id, exc, exc_info=True,
-                )
-        narrative_counts = {
-            "node_narratives": len(getattr(narrative, "node_narratives", []) or []),
-            "edge_narratives": len(getattr(narrative, "edge_narratives", []) or []),
-            "total": 1,
-            "processed": 1,
-        }
-        report_done("narrative_annotator", narrative_counts)
-        if finish_target_stage("narrative_annotator", narrative_counts):
-            return result
-
-        # ── Stage 12b: course_mapping (deterministic component → topic map) ─
-        course_mapping_artifact = artifact("course_mapping")
-        if should_use_artifact("course_mapping"):
-            course_mapping = _from_agent_dict("course_mapping", course_mapping_artifact)
-            logger.info("Resuming document pipeline: loaded course_mapping artifact for document %s", document_id)
-        else:
-            report_start("course_mapping", total=1, unit="builder")
-            try:
-                course_mapping = _build_course_mapping(
-                    agent_classes=agent_classes,
-                    document_id=document_id,
-                    cartridge_id=cartridge_id,
-                    component_result=component_result,
-                    claim_objects=claim_objects,
-                )
-            except Exception as exc:
-                logger.exception(
-                    "course_mapping stage failed (non-fatal): document=%s material=%s error=%s",
-                    document_id, material_id, exc,
-                )
-                course_mapping = _empty_course_mapping_result(document_id, cartridge_id)
-            save_artifact("course_mapping", course_mapping)
-        report_done("course_mapping", {
-            "topics": len(getattr(course_mapping, "topics", []) or []),
-            "total": 1,
-            "processed": 1,
-        })
-        if finish_target_stage("course_mapping", {"topics": len(getattr(course_mapping, "topics", []) or []), "total": 1, "processed": 1}):
-            return result
-
-        # ── Stage 12c: blueprint (narrative arc) ───────────────────────────
-        blueprint_artifact_data = artifact("blueprint")
-        if should_use_artifact("blueprint"):
-            blueprint = _from_agent_dict("blueprint", blueprint_artifact_data)
-            logger.info("Resuming document pipeline: loaded blueprint artifact for document %s", document_id)
-        else:
-            report_start("blueprint", total=1, unit="builder")
-            try:
-                blueprint = _build_blueprint(
-                    agent_classes=agent_classes,
-                    course_mapping=course_mapping,
-                    component_result=component_result,
-                    course_id=course_id,
-                )
-            except Exception as exc:
-                logger.exception(
-                    "blueprint stage failed (non-fatal): document=%s material=%s error=%s",
-                    document_id, material_id, exc,
-                )
-                blueprint = _empty_blueprint_result(document_id, course_id)
-            save_artifact("blueprint", blueprint)
-        report_done("blueprint", {
-            "steps": len(getattr(blueprint, "narrative_arc", []) or []),
-            "total": 1,
-            "processed": 1,
-        })
-        if finish_target_stage("blueprint", {"steps": len(getattr(blueprint, "narrative_arc", []) or []), "total": 1, "processed": 1}):
-            return result
-
-        # ── Stage 12d: export_validation ───────────────────────────────────
-        export_validation_artifact = artifact("export_validation")
-        if should_use_artifact("export_validation"):
-            validation_result_dict = export_validation_artifact
-            logger.info("Resuming document pipeline: loaded export_validation artifact for document %s", document_id)
-        else:
-            report_start("export_validation", total=1, unit="gate")
-            try:
-                from .export_validation_gate import ExportValidationGate
-
-                gate = ExportValidationGate()
-                validation_result = gate.run(
-                    artifacts=dict(previous_artifacts),
-                    component_result=component_result,
-                    course_mapping=course_mapping,
-                    claim_objects=claim_objects,
-                    evidence=evidence,
-                    dsl=dsl,
-                )
-                validation_result_dict = validation_result.to_dict()
-            except Exception as exc:
-                logger.exception(
-                    "export_validation stage failed (non-fatal): document=%s material=%s error=%s",
-                    document_id, material_id, exc,
-                )
-                validation_result_dict = {
-                    "status": "passed_with_warnings",
-                    "exportable": True,
-                    "publish_ready": False,
-                    "errors": [],
-                    "warnings": [{"code": "GATE_ERROR", "message": str(exc), "artifact": "export_validation"}],
-                    "review_items": [],
-                    "summary": {"error_count": 0, "warning_count": 1, "review_required_count": 0},
-                }
-            save_artifact("export_validation", validation_result_dict)
-        # Keep the gate verdict under `gate_status` (passed / passed_with_warnings
-        # / needs_review / failed_validation) and let report_done/finish_target_stage
-        # set `status="completed"`, so the UI stage mark reflects "this stage ran"
-        # rather than mis-mapping the verdict string to a blank "not_started" dot.
-        export_validation_payload = {
-            "gate_status": validation_result_dict.get("status"),
-            "error_count": (validation_result_dict.get("summary") or {}).get("error_count", 0),
-            "warning_count": (validation_result_dict.get("summary") or {}).get("warning_count", 0),
-            "total": 1,
-            "processed": 1,
-        }
-        report_done("export_validation", export_validation_payload)
-        if finish_target_stage("export_validation", {"status": "completed", **export_validation_payload}):
-            return result
-
-        # ── Export-validation failure: graceful degradation ─────────────────
-        # 設計原則: source_embedding が成功した後は status=failed にしない。
-        # chunks + embeddings は常に保存済みであり RAG は必ず動く。
-        # validation エラーは「どの機能が使えないか」を示すだけで、
-        # ユーザーを完全に詰まらせてはならない。
-        #
-        # エラーの種類に応じて persist をスキップし、completed（機能縮退）で完了する:
-        #   component_graph エラー   → graph のみスキップ、claims + components は保存
-        #   no_components /
-        #   deterministic_fallback   → components + graph スキップ、claims は保存
-        #   その他の品質エラー       → すべて保存（review_required フラグのみ）
-        #
-        # status=failed になる唯一のケースは source_chunking / source_embedding の
-        # 失敗（= chunks が保存されていない）であり、それは既にパイプライン前段で
-        # PipelineStageError として raise 済み。
-        _COMPONENT_SKIP_CODES = {
-            # LLM が完全に失敗して placeholder しかない → コンポーネント保存不可
-            "component_assembly_deterministic_fallback",
-            # コンポーネントが 1 件もない → 保存対象なし
-            "no_components",
-            # コンポーネント型が不正 → DB スキーマ違反になる
-            "invalid_component_type",
-        }
-        _skip_graph_persist = False
-        _skip_component_persist = False
-        _degraded_stages: list[str] = []
-        if validation_result_dict.get("status") == "failed_validation":
-            all_val_errors = validation_result_dict.get("errors") or []
-            component_skip_errors = [e for e in all_val_errors if e.get("code") in _COMPONENT_SKIP_CODES]
-            graph_errors = [e for e in all_val_errors if e.get("artifact") == "component_graph"]
-
-            if component_skip_errors:
-                # components も graph も保存しない: claims だけ保存して completed
-                _skip_component_persist = True
-                _skip_graph_persist = True
-                _degraded_stages = ["component_assembly", "component_graph"]
-                logger.warning(
-                    "ExportValidationGate: コンポーネント生成不可 (%d error(s)) — "
-                    "claims のみ保存して completed に移行: document=%s material=%s",
-                    len(all_val_errors), document_id, material_id,
-                )
-            elif graph_errors:
-                # graph のみスキップ、claims + components は保存
-                _skip_graph_persist = True
-                _degraded_stages = ["component_graph"]
-                logger.warning(
-                    "ExportValidationGate: component_graph エラー (%d) — "
-                    "graph のみスキップして completed に移行: document=%s material=%s",
-                    len(graph_errors), document_id, material_id,
-                )
-            else:
-                # その他の品質エラー: 全部保存して review_required フラグを残す
-                _degraded_stages = []
-                logger.warning(
-                    "ExportValidationGate: 品質エラー (%d) — "
-                    "全アーティファクトを保存して completed に移行: document=%s material=%s",
-                    len(all_val_errors), document_id, material_id,
-                )
-
-        # ── Stage 13: persist_claims_components_graph ──────────────────────
-        report_start("persist_claims_components_graph", total=3, unit="tables")
-        if should_use_artifact("persist_claims_components_graph"):
-            persisted = artifact("persist_claims_components_graph") or {}
-            result.claim_count = int(persisted.get("claims") or 0)
-        else:
-            try:
-                saved_claims = persist_qualified_claims(
-                    document_id=document_id,
-                    qualified_result=qualified,
-                    chunk_index=chunk_index,
-                )
-                claim_id_map: dict[str, str] = {}
-                for saved in saved_claims:
-                    for key in _claim_legacy_keys(saved):
-                        claim_id_map[key] = saved["claim_id"]
-                result.claim_count = len(saved_claims)
-                report_item("persist_claims_components_graph", 1, 3, "tables")
-
-                id_map: dict[str, str] = {}
-                if _skip_component_persist:
-                    logger.warning(
-                        "components persist skipped (validation errors): document=%s",
-                        document_id,
-                    )
-                else:
-                    id_map = persist_components(
-                        document_id=document_id,
-                        component_result=component_result,
-                        course_id=course_id,
-                        claim_id_map=claim_id_map,
-                    )
-                report_item("persist_claims_components_graph", 2, 3, "tables")
-
-                if _skip_graph_persist or _skip_component_persist:
-                    logger.warning(
-                        "component_graph persist skipped (validation errors): document=%s",
-                        document_id,
-                    )
-                else:
-                    persist_component_graph(
-                        document_id=document_id,
-                        component_id_map=id_map,
-                        component_result=component_result,
-                        dsl_result=dsl,
-                        course_id=course_id,
-                        component_graph_result=component_graph_result,
-                        claim_id_map=claim_id_map,
-                        narrative_result=narrative,
-                    )
-                save_artifact("persist_claims_components_graph", {
-                    "claims": result.claim_count,
-                    "components": result.component_count,
-                    "graph_skipped": _skip_graph_persist or _skip_component_persist,
-                    "components_skipped": _skip_component_persist,
-                    "degraded_stages": _degraded_stages,
-                })
-            except Exception as exc:
-                logger.exception("persist_claims_components_graph stage failed for document=%s material=%s", document_id, material_id)
-                raise PipelineStageError(
-                    "persist_claims_components_graph", str(exc), cause=exc
-                ) from exc
-        report_done("persist_claims_components_graph", {
-            "claims": result.claim_count,
-            "components": result.component_count,
-            "total": 3,
-            "processed": 3,
-        })
-        if finish_target_stage("persist_claims_components_graph", {"claims": result.claim_count, "components": result.component_count, "total": 3, "processed": 3}):
-            return result
-
-        # ── Stage 14: completed ────────────────────────────────────────────
-        upsert_analysis_run(
-            run_id=run_id,
-            document_id=document_id,
-            material_id=material_id,
-            cartridge_id=cartridge_id,
-            status="completed",
-            current_stage="completed",
-            stage_outputs={"completed": {
-                "chunks": result.chunk_count,
-                "claims": result.claim_count,
-                "components": result.component_count,
-                "dsl_nodes": result.dsl_node_count,
-                "dsl_edges": result.dsl_edge_count,
-            }},
-        )
-        # 初回 (initial) pipeline 完了時は、この Run を採用 (active) Run とする。
-        # 再解析でも最新の completed initial run を active に進める（従来の
-        # 「latest = 参照対象」挙動を維持）。revision Run はこの経路を通らず、
-        # accept API でのみ optimistic に active を切り替える (#402)。
-        # active pointer は best-effort: 失敗しても pipeline 自体は成功扱いにする。
-        try:
-            set_active_analysis_run(
-                document_id=document_id,
-                run_id=run_id,
-                expected_run_id=get_active_analysis_run_id(document_id=document_id),
-            )
-        except Exception:
-            logger.warning(
-                "failed to set active analysis run for document=%s run=%s",
-                document_id, run_id, exc_info=True,
-            )
-        result.final_stage = "completed"
-        # D層 (D1-2): A層パイプライン完了後の後処理として認識的地位台帳を
-        # 決定論的にバックフィルする（読むだけ・best-effort・失敗しても pipeline は成功扱い）。
-        try:
-            from core.doubt.ledger_builder import backfill_document_ledger
-
-            backfill_document_ledger(document_id=document_id, course_id=course_id or "")
-        except Exception:
-            logger.warning(
-                "epistemic ledger backfill skipped for document=%s", document_id, exc_info=True
-            )
-        # D層 (D2-1): 負荷度の再計算（非LLM・決定論的, best-effort）。
-        try:
-            from core.doubt.load_calculator import recompute_load_scores
-
-            recompute_load_scores(document_id=document_id)
-        except Exception:
-            logger.warning(
-                "load score recompute skipped for document=%s", document_id, exc_info=True
-            )
-        # D層 (D1-4): 検証スコープ候補の非同期 LLM 補助（P6: 同期パスに LLM を入れない）。
-        try:
-            from core.doubt.scope_candidates.worker import maybe_schedule_scope_candidates
-
-            maybe_schedule_scope_candidates(document_id=document_id)
-        except Exception:
-            logger.warning(
-                "scope candidate scheduling skipped for document=%s", document_id, exc_info=True
-            )
-        report_done("completed", {
-            "chunks": result.chunk_count,
-            "claims": result.claim_count,
-            "components": result.component_count,
-        }, run_status="completed")
-        return result
+        _stage_completed(ctx)
+        return ctx.result
 
     except PipelineStageError as exc:
         upsert_analysis_run(
@@ -1519,14 +484,1271 @@ def run_document_pipeline(
             current_stage=exc.stage,
             error_message=str(exc),
         )
-        result.final_stage = exc.stage
+        ctx.result.final_stage = exc.stage
         raise
     finally:
-        if pdf_path:
+        if ctx.pdf_path:
             try:
-                os.unlink(pdf_path)
+                os.unlink(ctx.pdf_path)
             except OSError:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# ステージ本体（1関数 = 1 stage）。observable な挙動（artifact resume / report_*
+# の呼び出し順序・payload / 致命・非致命の分岐）は元のインライン実装と完全一致させる。
+# ---------------------------------------------------------------------------
+
+
+def _stage_save_pdf(ctx: PipelineContext) -> bool:
+    # ── Stage 1: save_pdf (一時ファイル化。MinIO への保存は呼び出し側担当) ─
+    source_suffix = ".pdf" if ctx.source_kind == "pdf" else ".tar.gz"
+    ctx.report_done("save_pdf", {"size_bytes": len(ctx.pdf_bytes), "source_kind": ctx.source_kind})
+    with tempfile.NamedTemporaryFile(
+        mode="wb", suffix=source_suffix, delete=False
+    ) as f:
+        f.write(ctx.pdf_bytes)
+        ctx.pdf_path = f.name
+    return False
+
+
+def _stage_grobid_parse(ctx: PipelineContext) -> bool:
+    # ── Stage 2: grobid_parse ──────────────────────────────────────────
+    grobid_artifact = ctx.artifact("grobid_parse")
+    if ctx.should_use_artifact("grobid_parse"):
+        ctx.tei_xml = (grobid_artifact or {}).get("tei_xml") or None
+        logger.info("Resuming document pipeline: loaded grobid_parse artifact for document %s", ctx.document_id)
+    elif ctx.source_kind == "tex_archive":
+        ctx.save_artifact("grobid_parse", {
+            "status": "skipped",
+            "reason": "tex_archive",
+            "tei_bytes": 0,
+            "tei_xml": None,
+        })
+    else:
+        ctx.report_start("grobid_parse", total=1, unit="document")
+        try:
+            ctx.tei_xml = _run_grobid_parse(ctx.pdf_bytes)
+        except Exception:
+            logger.warning(
+                "grobid_parse failed (non-fatal); will use PyMuPDF fallback: document=%s",
+                ctx.document_id,
+                exc_info=True,
+            )
+            ctx.tei_xml = None
+        ctx.save_artifact("grobid_parse", {
+            "status": "ok" if ctx.tei_xml else "fallback",
+            "tei_bytes": len(ctx.tei_xml.encode()) if ctx.tei_xml else 0,
+            "tei_xml": ctx.tei_xml,
+        })
+    grobid_status = "skipped" if ctx.source_kind == "tex_archive" else ("ok" if ctx.tei_xml else "fallback")
+    ctx.report_done("grobid_parse", {
+        "status": grobid_status,
+        "tei_bytes": len(ctx.tei_xml.encode()) if ctx.tei_xml else 0,
+    })
+    return ctx.finish_target_stage("grobid_parse", {"status": grobid_status})
+
+
+def _stage_document_structure(ctx: PipelineContext) -> bool:
+    # ── Stage 3: document_structure ────────────────────────────────────
+    structure_artifact = ctx.artifact("document_structure")
+    if ctx.should_use_artifact("document_structure"):
+        ctx.structure = _from_agent_dict("document_structure", structure_artifact)
+        logger.info("Resuming document pipeline: loaded document_structure artifact for document %s", ctx.document_id)
+    else:
+        ctx.report_start("document_structure", total=1, unit="document")
+        try:
+            if ctx.source_kind == "tex_archive":
+                ctx.structure = build_structure_from_tex_archive(
+                    ctx.pdf_bytes,
+                    document_id=ctx.document_id,
+                    source_file=ctx.filename or ctx.pdf_path,
+                    cartridge_id=ctx.cartridge_id,
+                )
+            else:
+                ds_agent = ctx.agent_classes["DocumentStructureAgent"]() if isinstance(
+                    ctx.agent_classes["DocumentStructureAgent"], type
+                ) else ctx.agent_classes["DocumentStructureAgent"]
+                ctx.structure = ds_agent.run(
+                    pdf_path=ctx.pdf_path,
+                    cartridge_id=ctx.cartridge_id,
+                    tei_xml=ctx.tei_xml,
+                )
+            ctx.structure.document_id = ctx.document_id  # 強制的に上書きして後段一貫
+        except Exception as exc:
+            raise PipelineStageError("document_structure", str(exc), cause=exc) from exc
+        ctx.save_artifact("document_structure", ctx.structure)
+    ctx.report_done("document_structure", {
+        "block_count": len(ctx.structure.blocks),
+        "section_count": len(ctx.structure.sections),
+    })
+    ctx.structure.document_id = ctx.document_id
+    if ctx.source_kind == "pdf":
+        ctx.structure.source_file = ctx.pdf_path
+    return ctx.finish_target_stage("document_structure", {
+        "block_count": len(ctx.structure.blocks), "section_count": len(ctx.structure.sections),
+    })
+
+
+def _stage_figure_image_extraction(ctx: PipelineContext) -> bool:
+    # ── Stage 2b: figure_image_extraction (non-LLM, deterministic, always runs) ─
+    # 画像パイプライン §4: caption ブロックの分類結果 (document_structure) を使う
+    # ため直後に置く。チェックボックス (options.analyze_images) に関係なく常時
+    # 実行する（決定 0-4-2）。非致命: 失敗しても pipeline は継続する。
+    figure_extraction_artifact = ctx.artifact("figure_image_extraction")
+    if ctx.should_use_artifact("figure_image_extraction"):
+        ctx.figure_extraction_summary = figure_extraction_artifact or {}
+        logger.info(
+            "Resuming document pipeline: loaded figure_image_extraction artifact for document %s",
+            ctx.document_id,
+        )
+    else:
+        ctx.report_start("figure_image_extraction", total=1, unit="builder")
+        if ctx.source_kind != "pdf":
+            ctx.figure_extraction_summary = {"skipped": True, "reason": "not_pdf"}
+        else:
+            try:
+                from .figure_images import extract_document_figures
+
+                ctx.figure_extraction_summary = extract_document_figures(
+                    pdf_bytes=ctx.pdf_bytes,
+                    document_id=ctx.document_id,
+                    run_id=ctx.run_id,
+                    structure=ctx.structure,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "figure_image_extraction stage failed (non-fatal): document=%s material=%s error=%s",
+                    ctx.document_id, ctx.material_id, exc,
+                    exc_info=True,
+                )
+                ctx.figure_extraction_summary = {"status": "completed", "error": str(exc)}
+        ctx.save_artifact("figure_image_extraction", ctx.figure_extraction_summary)
+    ctx.report_done("figure_image_extraction", dict(ctx.figure_extraction_summary or {}))
+    return ctx.finish_target_stage("figure_image_extraction", dict(ctx.figure_extraction_summary or {}))
+
+
+def _stage_source_chunking(ctx: PipelineContext) -> bool:
+    # ── Stage 3: source_chunking ───────────────────────────────────────
+    source_chunks_artifact = ctx.artifact("source_chunking")
+    if ctx.should_use_artifact("source_chunking"):
+        ctx.source_chunks = _from_source_chunks(source_chunks_artifact)
+        logger.info("Resuming document pipeline: loaded %d source chunks for document %s", len(ctx.source_chunks), ctx.document_id)
+    else:
+        ctx.report_start("source_chunking", total=len(ctx.structure.blocks), unit="blocks")
+        try:
+            ctx.source_chunks = build_source_chunks(ctx.structure)
+        except Exception as exc:
+            raise PipelineStageError("source_chunking", str(exc), cause=exc) from exc
+        ctx.save_artifact("source_chunking", ctx.source_chunks)
+    if not ctx.source_chunks:
+        raise PipelineStageError(
+            "source_chunking",
+            "no source chunks produced from document structure",
+        )
+    ctx.report_done("source_chunking", {"chunk_count": len(ctx.source_chunks)})
+    return ctx.finish_target_stage("source_chunking", {"chunk_count": len(ctx.source_chunks)})
+
+
+def _stage_source_embedding(ctx: PipelineContext) -> bool:
+    # ── Stage 4: source_embedding ──────────────────────────────────────
+    if ctx.should_use_artifact("source_embedding"):
+        ctx.chunk_index = load_source_chunk_index(document_id=ctx.document_id)
+        logger.info("Resuming document pipeline: loaded %d persisted chunks for document %s", len(ctx.chunk_index), ctx.document_id)
+    else:
+        ctx.report_start("source_embedding", total=len(ctx.source_chunks), unit="chunks")
+        try:
+            ctx.chunk_index = persist_source_chunks(
+                document_id=ctx.document_id,
+                material_id=ctx.material_id,
+                chunks=ctx.source_chunks,
+            )
+        except Exception as exc:
+            raise PipelineStageError("source_embedding", str(exc), cause=exc) from exc
+        ctx.save_artifact("source_embedding", {"saved_chunks": len(ctx.chunk_index)})
+    ctx.result.chunk_count = len(ctx.chunk_index)
+    ctx.report_done("source_embedding", {"saved_chunks": len(ctx.chunk_index), "total": len(ctx.source_chunks), "processed": len(ctx.source_chunks)})
+    return ctx.finish_target_stage("source_embedding", {"saved_chunks": len(ctx.chunk_index), "total": len(ctx.source_chunks), "processed": len(ctx.source_chunks)})
+
+
+def _stage_paper_skeleton(ctx: PipelineContext) -> bool:
+    # ── Stage 5: paper_skeleton ────────────────────────────────────────
+    skeleton_artifact = ctx.artifact("paper_skeleton")
+    if ctx.should_use_artifact("paper_skeleton"):
+        ctx.skeleton = _from_agent_dict("paper_skeleton", skeleton_artifact)
+        logger.info("Resuming document pipeline: loaded paper_skeleton artifact for document %s", ctx.document_id)
+    else:
+        ctx.report_start("paper_skeleton", total=1, unit="llm_call")
+        try:
+            ps_agent = _instantiate(ctx.agent_classes["PaperSkeletonAgent"])
+            ctx.skeleton = ps_agent.run(structure=ctx.structure, cartridge_id=ctx.cartridge_id)
+        except Exception as exc:
+            logger.exception("paper_skeleton stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
+            raise PipelineStageError("paper_skeleton", str(exc), cause=exc) from exc
+        ctx.save_artifact("paper_skeleton", ctx.skeleton)
+    ctx.report_done("paper_skeleton", {"document_id": ctx.document_id, "total": 1, "processed": 1})
+    return ctx.finish_target_stage("paper_skeleton", {"document_id": ctx.document_id, "total": 1, "processed": 1})
+
+
+def _stage_rhetorical_role(ctx: PipelineContext) -> bool:
+    # ── Stage 6: rhetorical_role ───────────────────────────────────────
+    roles_artifact = ctx.artifact("rhetorical_role")
+    if ctx.should_use_artifact("rhetorical_role"):
+        ctx.roles = _from_agent_dict("rhetorical_role", roles_artifact)
+        logger.info("Resuming document pipeline: loaded rhetorical_role artifact for document %s", ctx.document_id)
+    else:
+        ctx.report_start("rhetorical_role", total=_agent_input_count("rhetorical_role", ctx.agent_classes, ctx.structure, ctx.skeleton, ctx.cartridge_id), unit="blocks")
+        try:
+            rr_agent = _instantiate(ctx.agent_classes["RhetoricalRoleAgent"])
+            ctx.roles = rr_agent.run(
+                structure=ctx.structure,
+                skeleton=ctx.skeleton,
+                cartridge_id=ctx.cartridge_id,
+                progress_callback=lambda processed, total: ctx.report_item("rhetorical_role", processed, total, "blocks"),
+            )
+        except Exception as exc:
+            logger.exception("rhetorical_role stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
+            raise PipelineStageError("rhetorical_role", str(exc), cause=exc) from exc
+        ctx.save_artifact("rhetorical_role", ctx.roles)
+    ctx.report_done("rhetorical_role", getattr(ctx.roles, "summary_stats", {}) or {})
+    return ctx.finish_target_stage("rhetorical_role", getattr(ctx.roles, "summary_stats", {}) or {})
+
+
+def _stage_claim_qualification(ctx: PipelineContext) -> bool:
+    # ── Stage 7: claim_qualification ───────────────────────────────────
+    qualified_artifact = ctx.artifact("claim_qualification")
+    if ctx.should_use_artifact("claim_qualification"):
+        ctx.qualified = _from_agent_dict("claim_qualification", qualified_artifact)
+        logger.info("Resuming document pipeline: loaded claim_qualification artifact for document %s", ctx.document_id)
+    else:
+        ctx.report_start("claim_qualification", total=_agent_input_count("claim_qualification", ctx.agent_classes, ctx.structure, ctx.skeleton, ctx.cartridge_id, roles=ctx.roles), unit="spans")
+        try:
+            cq_agent = _instantiate(ctx.agent_classes["ClaimQualificationAgent"])
+            ctx.qualified = cq_agent.run(
+                structure=ctx.structure, skeleton=ctx.skeleton, roles=ctx.roles,
+                cartridge_id=ctx.cartridge_id,
+                progress_callback=lambda processed, total: ctx.report_item("claim_qualification", processed, total, "spans"),
+            )
+        except Exception as exc:
+            logger.exception("claim_qualification stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
+            raise PipelineStageError("claim_qualification", str(exc), cause=exc) from exc
+        ctx.save_artifact("claim_qualification", ctx.qualified)
+    ctx.report_done("claim_qualification", {
+        "qualified_count": len(ctx.qualified.qualified_spans),
+    })
+    return ctx.finish_target_stage("claim_qualification", {"qualified_count": len(ctx.qualified.qualified_spans)})
+
+
+def _stage_equation_semantics(ctx: PipelineContext) -> bool:
+    # ── Stage 8: equation_semantics ────────────────────────────────────
+    equations_artifact = ctx.artifact("equation_semantics")
+    if ctx.should_use_artifact("equation_semantics"):
+        ctx.equations = _from_agent_dict("equation_semantics", equations_artifact)
+        logger.info("Resuming document pipeline: loaded equation_semantics artifact for document %s", ctx.document_id)
+    else:
+        ctx.report_start("equation_semantics", total=_agent_input_count("equation_semantics", ctx.agent_classes, ctx.structure, ctx.skeleton, ctx.cartridge_id, roles=ctx.roles), unit="equations")
+        try:
+            eq_agent = _instantiate(ctx.agent_classes["EquationSemanticsAgent"])
+            ctx.equations = eq_agent.run(
+                structure=ctx.structure, skeleton=ctx.skeleton, roles=ctx.roles,
+                cartridge_id=ctx.cartridge_id,
+                progress_callback=lambda processed, total: ctx.report_item("equation_semantics", processed, total, "equations"),
+            )
+        except Exception as exc:
+            logger.exception("equation_semantics stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
+            raise PipelineStageError("equation_semantics", str(exc), cause=exc) from exc
+        ctx.save_artifact("equation_semantics", ctx.equations)
+        try:
+            persist_equation_previews_to_chunks(ctx.document_id, ctx.equations)
+        except Exception:
+            logger.warning(
+                "Failed to persist equation previews into chunks for document %s",
+                ctx.document_id,
+                exc_info=True,
+            )
+    ctx.report_done("equation_semantics", {"equations": len(getattr(ctx.equations, "equations", []) or [])})
+    return ctx.finish_target_stage("equation_semantics", {"equations": len(getattr(ctx.equations, "equations", []) or [])})
+
+
+def _stage_evidence_registry(ctx: PipelineContext) -> bool:
+    # ── Stage 8b: evidence_registry (deterministic, source-backed) ─────
+    evidence_artifact = ctx.artifact("evidence_registry")
+    if ctx.should_use_artifact("evidence_registry"):
+        ctx.evidence = _from_agent_dict("evidence_registry", evidence_artifact)
+        logger.info("Resuming document pipeline: loaded evidence_registry artifact for document %s", ctx.document_id)
+    else:
+        ctx.report_start("evidence_registry", total=1, unit="builder")
+        try:
+            ctx.evidence = _build_evidence_registry(
+                agent_classes=ctx.agent_classes,
+                document_id=ctx.document_id,
+                cartridge_id=ctx.cartridge_id,
+                structure=ctx.structure,
+                qualified=ctx.qualified,
+                equations=ctx.equations,
+                roles=ctx.roles,
+            )
+        except Exception as exc:
+            logger.exception(
+                "evidence_registry stage failed (non-fatal): document=%s material=%s error=%s",
+                ctx.document_id, ctx.material_id, exc,
+            )
+            ctx.evidence = _empty_evidence_registry(ctx.document_id, ctx.cartridge_id)
+        ctx.save_artifact("evidence_registry", ctx.evidence)
+    ctx.report_done("evidence_registry", {
+        "records": len(getattr(ctx.evidence, "records", []) or []),
+        "total": 1,
+        "processed": 1,
+    })
+    # Document completeness check at the DocumentStructure / EvidenceRegistry
+    # exit (#366): record a deterministic ingest-completeness artifact and
+    # propagate failures into document_structure.validation_issues so the
+    # signal flows downstream (and a truncated document never silently
+    # reaches publish-ready).
+    try:
+        # equation_semantics (stage 8) runs before this point, so the real
+        # EquationRecords are available and MUST be passed so equation artifact
+        # coverage reflects them (#420) — otherwise the saved artifact is
+        # permanently incomplete for any TeX document with math.
+        _record_document_completeness(
+            structure=ctx.structure,
+            evidence=ctx.evidence,
+            equations=ctx.equations,
+            document_id=ctx.document_id,
+            save_artifact=ctx.save_artifact,
+        )
+    except Exception:
+        logger.exception(
+            "document_completeness check failed (non-fatal): document=%s", ctx.document_id
+        )
+    return ctx.finish_target_stage("evidence_registry", {"records": len(getattr(ctx.evidence, "records", []) or []), "total": 1, "processed": 1})
+
+
+def _stage_claim_object_builder(ctx: PipelineContext) -> bool:
+    # ── Stage 8c: claim_object_builder (deterministic claims.json) ─────
+    claim_object_artifact = ctx.artifact("claim_object_builder")
+    if ctx.should_use_artifact("claim_object_builder"):
+        ctx.claim_objects = _from_agent_dict("claim_object_builder", claim_object_artifact)
+        logger.info("Resuming document pipeline: loaded claim_object_builder artifact for document %s", ctx.document_id)
+    else:
+        ctx.report_start("claim_object_builder", total=1, unit="builder")
+        try:
+            ctx.claim_objects = _build_claim_objects(
+                agent_classes=ctx.agent_classes,
+                document_id=ctx.document_id,
+                cartridge_id=ctx.cartridge_id,
+                qualified=ctx.qualified,
+                equations=ctx.equations,
+                evidence=ctx.evidence,
+                document_structure=ctx.structure,
+            )
+        except Exception as exc:
+            logger.exception(
+                "claim_object_builder stage failed (non-fatal): document=%s material=%s error=%s",
+                ctx.document_id, ctx.material_id, exc,
+            )
+            ctx.claim_objects = _empty_claim_object_result(ctx.document_id, ctx.cartridge_id)
+        ctx.save_artifact("claim_object_builder", ctx.claim_objects)
+    ctx.report_done("claim_object_builder", {
+        "claims": len(getattr(ctx.claim_objects, "claims", []) or []),
+        "total": 1,
+        "processed": 1,
+    })
+    return ctx.finish_target_stage("claim_object_builder", {"claims": len(getattr(ctx.claim_objects, "claims", []) or []), "total": 1, "processed": 1})
+
+
+def _hook_claim_equation_canonicalization(ctx: PipelineContext) -> bool:
+    """Between claim_object_builder and symbol_registry: resume に関係なく毎回実行。
+
+    PIPELINE_STAGES には無い（report_start/finish_target_stage を持たない）決定論的な
+    後処理。claim_object_builder の finish_target_stage で停止した場合はここまで到達
+    しない（元のインライン実装と同じ条件）。
+    """
+    # ── Stage 8c.1: claim ID canonicalization contract (issue #340) ────
+    # claim_object_builder is the source of truth for claim IDs. Re-map or
+    # drop any provisional claim refs still carried by equation_semantics so
+    # the downstream derivation_chain / component / graph / export artifacts
+    # only ever reference final claim IDs (or nothing). Dropped refs are kept
+    # as review warnings — we never silently retain an unresolved ref.
+    try:
+        eq_dropped = _canonicalize_equation_claim_links(ctx.equations, ctx.claim_objects)
+        if eq_dropped:
+            ctx.save_artifact("equation_semantics", ctx.equations)
+            logger.info(
+                "Canonicalized equation claim links for document %s: dropped provisional refs on %d equation(s)",
+                ctx.document_id, len(eq_dropped),
+            )
+    except Exception:
+        logger.warning(
+            "equation claim-link canonicalization failed (non-fatal): document=%s",
+            ctx.document_id, exc_info=True,
+        )
+
+    # ── Stage 8c.1b: claim↔equation link symmetry (issue #358) ─────────
+    # One-way links are demoted to inferred: moved out of the primary link
+    # fields into inferred_equation_ids / inferred_claim_ids (kept, never
+    # dropped) plus review metadata on both artifacts.
+    try:
+        from episteme_graph.agents.id_canonicalization import (
+            annotate_claim_equation_link_asymmetries,
+        )
+
+        asymmetries = annotate_claim_equation_link_asymmetries(
+            ctx.claim_objects, ctx.equations
+        )
+        if asymmetries:
+            ctx.save_artifact("claim_object_builder", ctx.claim_objects)
+            ctx.save_artifact("equation_semantics", ctx.equations)
+            logger.info(
+                "Annotated %d one-way claim↔equation link(s) for document %s",
+                asymmetries, ctx.document_id,
+            )
+    except Exception:
+        logger.warning(
+            "claim-equation link symmetry annotation failed (non-fatal): document=%s",
+            ctx.document_id, exc_info=True,
+        )
+    return False
+
+
+def _stage_symbol_registry(ctx: PipelineContext) -> bool:
+    # ── Stage 8c.2: symbol_registry (deterministic from equations, #355) ─
+    # Aggregates defined/used symbols into a document-wide registry and
+    # annotates DefinedSymbol.symbol_id on the equations in place. Non-fatal:
+    # downstream stages do not depend on it yet.
+    symbol_registry_artifact = ctx.artifact("symbol_registry")
+    if ctx.should_use_artifact("symbol_registry"):
+        ctx.symbol_registry = _from_agent_dict("symbol_registry", symbol_registry_artifact)
+        logger.info("Resuming document pipeline: loaded symbol_registry artifact for document %s", ctx.document_id)
+    else:
+        ctx.report_start("symbol_registry", total=1, unit="builder")
+        ctx.symbol_registry = None
+        try:
+            from episteme_graph.agents.symbol_registry.builder import SymbolRegistryBuilder
+
+            ctx.symbol_registry = SymbolRegistryBuilder().run(
+                ctx.equations, cartridge_id=ctx.cartridge_id
+            )
+            # Issue #432: derive inter-equation links from structural cues
+            # (shared symbols from the registry + textual references), record
+            # link_provenance, drop dangling links, and assign link_status.
+            # Mutates the equation records in place before they are persisted.
+            try:
+                from episteme_graph.agents.symbol_registry.link_normalizer import (
+                    EquationLinkNormalizer,
+                )
+
+                link_summary = EquationLinkNormalizer().normalize(
+                    ctx.equations, ctx.symbol_registry
+                )
+                logger.info(
+                    "equation link normalization for document %s: %s links, "
+                    "%d dangling dropped, statuses=%s",
+                    ctx.document_id,
+                    link_summary.get("link_count"),
+                    link_summary.get("dangling_dropped", 0),
+                    link_summary.get("link_status_counts"),
+                )
+            except Exception:
+                logger.warning(
+                    "equation link normalization failed (non-fatal): document=%s",
+                    ctx.document_id, exc_info=True,
+                )
+            # The builder set DefinedSymbol.symbol_id in place and the link
+            # normalizer rewrote the equation links; persist the annotated
+            # equations so resumes keep the registry references and links.
+            ctx.save_artifact("equation_semantics", ctx.equations)
+            ctx.save_artifact("symbol_registry", ctx.symbol_registry)
+        except Exception as exc:
+            logger.warning(
+                "symbol_registry stage failed (non-fatal): document=%s error=%s",
+                ctx.document_id, exc, exc_info=True,
+            )
+    symbol_count = len(getattr(ctx.symbol_registry, "records", []) or [])
+    ctx.report_done("symbol_registry", {"symbols": symbol_count, "total": 1, "processed": 1})
+    return ctx.finish_target_stage("symbol_registry", {"symbols": symbol_count, "total": 1, "processed": 1})
+
+
+def _stage_derivation_chain(ctx: PipelineContext) -> bool:
+    # ── Stage 8d: derivation_chain (deterministic from equation links) ─
+    derivation_artifact = ctx.artifact("derivation_chain")
+    if ctx.should_use_artifact("derivation_chain"):
+        ctx.derivations = _from_agent_dict("derivation_chain", derivation_artifact)
+        logger.info("Resuming document pipeline: loaded derivation_chain artifact for document %s", ctx.document_id)
+    else:
+        ctx.report_start("derivation_chain", total=1, unit="builder")
+        try:
+            ctx.derivations = _build_derivation_chains(
+                agent_classes=ctx.agent_classes,
+                cartridge_id=ctx.cartridge_id,
+                equations=ctx.equations,
+                claim_objects=ctx.claim_objects,
+                evidence=ctx.evidence,
+            )
+        except Exception as exc:
+            logger.exception(
+                "derivation_chain stage failed (non-fatal): document=%s material=%s error=%s",
+                ctx.document_id, ctx.material_id, exc,
+            )
+            ctx.derivations = _empty_derivation_chain_result(ctx.document_id, ctx.cartridge_id)
+        ctx.save_artifact("derivation_chain", ctx.derivations)
+    # Defensive canonicalization (issue #340): even though equations were
+    # canonicalized before this stage, re-resolve every derivation step's
+    # claim refs against the final claim set so no provisional claim ID can
+    # reach component / graph / export from a resumed or stale artifact.
+    try:
+        deriv_dropped = _canonicalize_derivation_claim_refs(ctx.derivations, ctx.claim_objects)
+        if deriv_dropped:
+            ctx.save_artifact("derivation_chain", ctx.derivations)
+            logger.info(
+                "Canonicalized derivation claim refs for document %s: dropped provisional refs on %d step(s)",
+                ctx.document_id, len(deriv_dropped),
+            )
+    except Exception:
+        logger.warning(
+            "derivation claim-ref canonicalization failed (non-fatal): document=%s",
+            ctx.document_id, exc_info=True,
+        )
+    ctx.report_done("derivation_chain", {
+        "chains": len(getattr(ctx.derivations, "chains", []) or []),
+        "total": 1,
+        "processed": 1,
+    })
+    return ctx.finish_target_stage("derivation_chain", {"chains": len(getattr(ctx.derivations, "chains", []) or []), "total": 1, "processed": 1})
+
+
+def _hook_equation_claim_synthesis(ctx: PipelineContext) -> bool:
+    """Between derivation_chain and figure_table_semantics: resume に関係なく毎回実行。"""
+    # ── Stage 8d.1: equation/derivation claim synthesis (issue #388) ─
+    # Turn source-backed equation structure and system-level derivations into
+    # atomic equation_backed / derived_from_linked_artifacts claims so the
+    # claim artifact is not weak when prose claims miss equation-expressed
+    # propositions. Additive and non-fatal: synthesised claims are appended to
+    # the claim_object_builder artifact (and to claim_objects so downstream
+    # component assembly can cite them).
+    try:
+        synthesized = _synthesize_equation_claims(
+            equations=ctx.equations, derivations=ctx.derivations, claim_objects=ctx.claim_objects,
+        )
+        if synthesized:
+            ctx.claim_objects.claims = list(getattr(ctx.claim_objects, "claims", []) or []) + synthesized
+            ctx.save_artifact("claim_object_builder", ctx.claim_objects)
+            logger.info(
+                "Synthesised %d equation/derivation-backed claims for document %s",
+                len(synthesized), ctx.document_id,
+            )
+    except Exception:
+        logger.warning(
+            "equation claim synthesis failed (non-fatal): document=%s",
+            ctx.document_id, exc_info=True,
+        )
+    return False
+
+
+def _stage_figure_table_semantics(ctx: PipelineContext) -> bool:
+    # ── Stage 8e: figure_table_semantics (caption-first deterministic) ─
+    fig_tbl_artifact = ctx.artifact("figure_table_semantics")
+    if ctx.should_use_artifact("figure_table_semantics"):
+        ctx.fig_tbl = _from_agent_dict("figure_table_semantics", fig_tbl_artifact)
+        logger.info("Resuming document pipeline: loaded figure_table_semantics artifact for document %s", ctx.document_id)
+    else:
+        ctx.report_start("figure_table_semantics", total=1, unit="builder")
+        try:
+            ctx.fig_tbl = _build_figure_table_semantics(
+                agent_classes=ctx.agent_classes,
+                cartridge_id=ctx.cartridge_id,
+                structure=ctx.structure,
+                evidence=ctx.evidence,
+                claim_objects=ctx.claim_objects,
+            )
+        except Exception as exc:
+            logger.exception(
+                "figure_table_semantics stage failed (non-fatal): document=%s material=%s error=%s",
+                ctx.document_id, ctx.material_id, exc,
+            )
+            ctx.fig_tbl = _empty_figure_table_result(ctx.document_id, ctx.cartridge_id)
+        ctx.save_artifact("figure_table_semantics", ctx.fig_tbl)
+    ctx.report_done("figure_table_semantics", {
+        "figures": len(getattr(ctx.fig_tbl, "figures", []) or []),
+        "tables": len(getattr(ctx.fig_tbl, "tables", []) or []),
+        "total": 1,
+        "processed": 1,
+    })
+    return ctx.finish_target_stage("figure_table_semantics", {"figures": len(getattr(ctx.fig_tbl, "figures", []) or []), "tables": len(getattr(ctx.fig_tbl, "tables", []) or []), "total": 1, "processed": 1})
+
+
+def _stage_apparatus_semantics(ctx: PipelineContext) -> bool:
+    # ── Stage 8f: apparatus_semantics (vision LLM, opt-in via options.analyze_images) ─
+    # 画像パイプライン §5: FigureRecord (figure_table_semantics) と caption 意味付けを
+    # 入力に使うためこの位置に置く。出力は component_assembly が下流で消費する (§5-5)。
+    apparatus_artifact = ctx.artifact("apparatus_semantics")
+    if ctx.should_use_artifact("apparatus_semantics"):
+        ctx.apparatus_result = _from_agent_dict("apparatus_semantics", apparatus_artifact)
+        if ctx.apparatus_result is None:
+            # 前回 run が skipped_by_option / エラーで保存した placeholder。
+            # component_assembly には渡さず、そのまま正直に報告する。
+            apparatus_done_payload = dict(apparatus_artifact or {})
+            apparatus_done_payload.setdefault("status", "completed")
+        else:
+            apparatus_done_payload = {
+                "status": "completed",
+                "apparatus_records": len(getattr(ctx.apparatus_result, "apparatus_records", []) or []),
+            }
+        logger.info(
+            "Resuming document pipeline: loaded apparatus_semantics artifact for document %s",
+            ctx.document_id,
+        )
+    else:
+        ctx.report_start("apparatus_semantics", total=1, unit="builder")
+        if not ctx.effective_options.get("analyze_images"):
+            ctx.apparatus_result = None
+            apparatus_done_payload = {"status": "completed", "skipped_by_option": True}
+            ctx.save_artifact("apparatus_semantics", {"skipped_by_option": True})
+        else:
+            try:
+                ctx.apparatus_result, apparatus_done_payload = _build_apparatus_semantics(
+                    document_id=ctx.document_id,
+                    cartridge_id=ctx.cartridge_id,
+                    fig_tbl=ctx.fig_tbl,
+                )
+                ctx.save_artifact("apparatus_semantics", ctx.apparatus_result)
+            except Exception as exc:
+                logger.warning(
+                    "apparatus_semantics stage failed (non-fatal): document=%s material=%s error=%s",
+                    ctx.document_id, ctx.material_id, exc, exc_info=True,
+                )
+                ctx.apparatus_result = None
+                apparatus_done_payload = {"status": "completed", "error": str(exc)}
+                ctx.save_artifact("apparatus_semantics", {"status": "completed", "error": str(exc)})
+    ctx.report_done("apparatus_semantics", apparatus_done_payload)
+    return ctx.finish_target_stage("apparatus_semantics", apparatus_done_payload)
+
+
+def _stage_thesis_reconstruction(ctx: PipelineContext) -> bool:
+    # ── Stage 9: thesis_reconstruction ─────────────────────────────────
+    thesis_artifact = ctx.artifact("thesis_reconstruction")
+    if ctx.should_use_artifact("thesis_reconstruction"):
+        ctx.thesis = _from_agent_dict("thesis_reconstruction", thesis_artifact)
+        logger.info("Resuming document pipeline: loaded thesis_reconstruction artifact for document %s", ctx.document_id)
+    else:
+        ctx.report_start("thesis_reconstruction", total=1, unit="llm_call")
+        try:
+            th_agent = _instantiate(ctx.agent_classes["ThesisReconstructionAgent"])
+            ctx.thesis = th_agent.run(
+                skeleton=ctx.skeleton, qualified_claims=ctx.qualified, equations=ctx.equations,
+                cartridge_id=ctx.cartridge_id, claim_objects=ctx.claim_objects,
+            )
+        except Exception as exc:
+            logger.exception("thesis_reconstruction stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
+            raise PipelineStageError("thesis_reconstruction", str(exc), cause=exc) from exc
+        ctx.save_artifact("thesis_reconstruction", ctx.thesis)
+    ctx.report_done("thesis_reconstruction", {"total": 1, "processed": 1})
+    return ctx.finish_target_stage("thesis_reconstruction", {"total": 1, "processed": 1})
+
+
+def _stage_dsl_linking(ctx: PipelineContext) -> bool:
+    # ── Stage 10: dsl_linking ──────────────────────────────────────────
+    dsl_artifact = ctx.artifact("dsl_linking")
+    if ctx.should_use_artifact("dsl_linking"):
+        ctx.dsl = _from_agent_dict("dsl_linking", dsl_artifact)
+        logger.info("Resuming document pipeline: loaded dsl_linking artifact for document %s", ctx.document_id)
+    else:
+        ctx.report_start("dsl_linking", total=1, unit="llm_call")
+        try:
+            dsl_agent = _instantiate(ctx.agent_classes["DSLLinkingAgent"])
+            ctx.dsl = dsl_agent.run(
+                qualified_claims=ctx.qualified, equations=ctx.equations, thesis=ctx.thesis,
+                claim_objects=ctx.claim_objects,
+            )
+        except Exception as exc:
+            logger.exception("dsl_linking stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
+            raise PipelineStageError("dsl_linking", str(exc), cause=exc) from exc
+        # Issue #442: cross-link the thesis artifact and the DSL graph so the
+        # thesis has explicit traversal anchors and the anchor nodes carry the
+        # is_thesis_anchor flag. Deterministic, non-fatal — re-save both.
+        try:
+            from episteme_graph.agents.thesis_reconstruction.anchor_linker import (
+                link_thesis_anchors,
+            )
+            anchors = link_thesis_anchors(ctx.thesis, ctx.dsl)
+            if anchors:
+                ctx.save_artifact("thesis_reconstruction", ctx.thesis)
+        except Exception as exc:
+            logger.warning(
+                "thesis anchor linking failed (non-fatal): document=%s error=%s",
+                ctx.document_id, exc,
+            )
+        ctx.save_artifact("dsl_linking", ctx.dsl)
+    ctx.result.dsl_node_count = len(ctx.dsl.nodes)
+    ctx.result.dsl_edge_count = len(ctx.dsl.edges)
+    ctx.report_done("dsl_linking", {
+        "nodes": len(ctx.dsl.nodes), "edges": len(ctx.dsl.edges), "total": 1, "processed": 1,
+    })
+    return ctx.finish_target_stage("dsl_linking", {"nodes": len(ctx.dsl.nodes), "edges": len(ctx.dsl.edges), "total": 1, "processed": 1})
+
+
+def _stage_dsl_embedding(ctx: PipelineContext) -> bool:
+    # ── Stage 11: dsl_embedding ────────────────────────────────────────
+    ctx.report_start("dsl_embedding", total=1, unit="embedding")
+    if not ctx.should_use_artifact("dsl_embedding"):
+        try:
+            dsl_text = dsl_result_to_search_text(ctx.dsl, document_id=ctx.document_id)
+            persist_document_embedding(
+                document_id=ctx.document_id,
+                material_id=ctx.material_id,
+                embedding_type="dsl_graph",
+                text=dsl_text,
+                metadata={
+                    "node_count": len(ctx.dsl.nodes),
+                    "edge_count": len(ctx.dsl.edges),
+                },
+            )
+            ctx.save_artifact("dsl_embedding", {"saved": True})
+        except Exception as exc:
+            # embedding は best-effort（agent pipeline 全体の致命傷にはしない）
+            logger.exception("dsl_embedding stage failed (non-fatal): document=%s material=%s error=%s", ctx.document_id, ctx.material_id, exc)
+    ctx.report_done("dsl_embedding", {"total": 1, "processed": 1})
+    return ctx.finish_target_stage("dsl_embedding", {"total": 1, "processed": 1})
+
+
+def _stage_component_assembly(ctx: PipelineContext) -> bool:
+    # ── Stage 12: component_assembly ───────────────────────────────────
+    component_artifact = ctx.artifact("component_assembly")
+    reuse_component_artifact = ctx.should_use_artifact("component_assembly")
+    if reuse_component_artifact:
+        ctx.component_result = _from_agent_dict("component_assembly", component_artifact)
+        reuse_component_artifact = _component_assembly_artifact_reusable(
+            ctx.component_result, document_id=ctx.document_id, material_id=ctx.material_id,
+        )
+    if reuse_component_artifact:
+        logger.info("Resuming document pipeline: loaded component_assembly artifact for document %s", ctx.document_id)
+    else:
+        ctx.report_start("component_assembly", total=1, unit="llm_call")
+        try:
+            ca_agent = _instantiate(ctx.agent_classes["ComponentAssemblyAgent"])
+            ca_kwargs: dict[str, Any] = dict(
+                qualified_claims=ctx.qualified, equations=ctx.equations,
+                thesis=ctx.thesis, dsl=ctx.dsl, cartridge_id=ctx.cartridge_id,
+                claim_objects=ctx.claim_objects,
+                evidence_registry=ctx.evidence,
+                derivations=ctx.derivations,
+            )
+            # 画像パイプライン §5-5: apparatus_semantics の出力を装置候補として
+            # 下流に渡す。別チームが並行して agent 側に同名 kwarg を実装中のため、
+            # 未対応なら渡さず素通りさせる（防御的）。
+            if ctx.apparatus_result is not None:
+                try:
+                    run_sig = inspect.signature(ca_agent.run)
+                    accepts_apparatus = (
+                        "apparatus_semantics" in run_sig.parameters
+                        or any(
+                            p.kind == inspect.Parameter.VAR_KEYWORD
+                            for p in run_sig.parameters.values()
+                        )
+                    )
+                except (TypeError, ValueError):
+                    accepts_apparatus = False
+                if accepts_apparatus:
+                    ca_kwargs["apparatus_semantics"] = ctx.apparatus_result
+                else:
+                    logger.info(
+                        "component_assembly: ComponentAssemblyAgent.run() does not "
+                        "accept apparatus_semantics yet; skipping (document=%s)",
+                        ctx.document_id,
+                    )
+            ctx.component_result = ca_agent.run(**ca_kwargs)
+        except Exception as exc:
+            logger.exception("component_assembly stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
+            raise PipelineStageError("component_assembly", str(exc), cause=exc) from exc
+        ctx.save_artifact("component_assembly", ctx.component_result)
+    ctx.result.component_count = len(ctx.component_result.components)
+    component_done_payload: dict[str, Any] = {
+        "components": len(ctx.component_result.components), "total": 1, "processed": 1,
+    }
+    fallback_info = _component_assembly_fallback_info(ctx.component_result)
+    if fallback_info:
+        logger.warning(
+            "component_assembly used deterministic fallback: document=%s material=%s "
+            "fallback_reason=%r original_failure_codes=%s fallback_components=%d",
+            ctx.document_id, ctx.material_id,
+            fallback_info["fallback_reason"],
+            fallback_info["original_failure_codes"],
+            fallback_info["fallback_component_count"],
+        )
+        component_done_payload.update(fallback_info)
+    ctx.report_done("component_assembly", component_done_payload)
+    return ctx.finish_target_stage("component_assembly", component_done_payload)
+
+
+def _stage_component_graph(ctx: PipelineContext) -> bool:
+    # ── Stage 12a: component_graph (hybrid deterministic/LLM edge builder) ─
+    component_graph_artifact = ctx.artifact("component_graph")
+    if ctx.should_use_artifact("component_graph"):
+        ctx.component_graph_result = _from_agent_dict("component_graph", component_graph_artifact)
+        logger.info("Resuming document pipeline: loaded component_graph artifact for document %s", ctx.document_id)
+    else:
+        ctx.report_start("component_graph", total=1, unit="llm_call")
+        try:
+            cg_agent = _instantiate(ctx.agent_classes["ComponentGraphAgent"])
+            # Flatten claims for Material 4 context
+            flat_claims = [
+                {"claim_id": c.claim_id, "text": c.text}
+                for c in (getattr(ctx.claim_objects, "claims", []) or [])
+            ]
+            # Flatten evidence records for Material 4 context
+            flat_evidence = [
+                {"evidence_id": r.evidence_id, "evidence_text": r.evidence_text}
+                for r in (getattr(ctx.evidence, "records", []) or [])
+            ]
+            ctx.component_graph_result = cg_agent.run(
+                components=ctx.component_result,
+                dsl=ctx.dsl,
+                derivations=ctx.derivations,
+                claims=flat_claims,
+                evidence_snippets=flat_evidence,
+                cartridge_id=ctx.cartridge_id,
+            )
+        except Exception as exc:
+            logger.exception(
+                "component_graph stage failed (non-fatal): document=%s material=%s error=%s",
+                ctx.document_id, ctx.material_id, exc,
+            )
+            # フォールバック: ノードのみ、エッジなし
+            from episteme_graph.agents.component_graph.schema import ComponentGraphResult
+            ctx.component_graph_result = ComponentGraphResult.make_fallback(
+                ctx.document_id, ctx.cartridge_id, str(exc)
+            )
+        ctx.save_artifact("component_graph", ctx.component_graph_result)
+    # Issue #449: propagate the thesis-anchor flag onto the component graph so
+    # the UI can always highlight the argument's goal nodes. Deterministic and
+    # non-fatal; applied on both fresh and resumed graphs (mutates in place,
+    # so the DB persist below carries the flag).
+    try:
+        from episteme_graph.agents.component_graph.anchor_linker import (
+            link_component_thesis_anchors,
+        )
+        link_component_thesis_anchors(ctx.thesis, ctx.component_graph_result)
+    except Exception as exc:
+        logger.warning(
+            "component thesis-anchor linking failed (non-fatal): document=%s error=%s",
+            ctx.document_id, exc,
+        )
+    # Issue #451: propagate DSL edge polarity onto the component graph so the UI
+    # can visualise promotion vs. inhibition. Deterministic, non-fatal.
+    try:
+        from episteme_graph.agents.component_graph.edge_polarity_linker import (
+            link_component_edge_polarity,
+        )
+        link_component_edge_polarity(ctx.dsl, ctx.component_graph_result)
+    except Exception as exc:
+        logger.warning(
+            "component edge polarity linking failed (non-fatal): document=%s error=%s",
+            ctx.document_id, exc,
+        )
+    ctx.report_done("component_graph", {
+        "nodes": len(getattr(ctx.component_graph_result, "nodes", []) or []),
+        "edges": len(getattr(ctx.component_graph_result, "edges", []) or []),
+        "total": 1,
+        "processed": 1,
+    })
+    return ctx.finish_target_stage("component_graph", {"nodes": len(getattr(ctx.component_graph_result, "nodes", []) or []), "edges": len(getattr(ctx.component_graph_result, "edges", []) or []), "total": 1, "processed": 1})
+
+
+def _stage_narrative_annotator(ctx: PipelineContext) -> bool:
+    # ── Stage 12a.1: narrative_annotator (reading layer for main graph, #360) ─
+    # Annotation-only LLM stage: graph_summary / narrative_role /
+    # transition_text are stored as a separate artifact and never modify the
+    # graph. Non-fatal: downstream stages do not depend on it.
+    narrative_artifact = ctx.artifact("narrative_annotator")
+    if ctx.should_use_artifact("narrative_annotator"):
+        ctx.narrative = _from_agent_dict("narrative_annotator", narrative_artifact)
+        logger.info("Resuming document pipeline: loaded narrative_annotator artifact for document %s", ctx.document_id)
+    else:
+        ctx.report_start("narrative_annotator", total=1, unit="llm_call")
+        ctx.narrative = None
+        try:
+            from episteme_graph.agents.narrative_annotator.agent import NarrativeAnnotator
+
+            ctx.narrative = NarrativeAnnotator().run(
+                ctx.component_graph_result,
+                thesis=ctx.thesis,
+                derivations=ctx.derivations,
+                cartridge_id=ctx.cartridge_id,
+            )
+            ctx.save_artifact("narrative_annotator", ctx.narrative)
+        except Exception as exc:
+            logger.warning(
+                "narrative_annotator stage failed (non-fatal): document=%s error=%s",
+                ctx.document_id, exc, exc_info=True,
+            )
+    narrative_counts = {
+        "node_narratives": len(getattr(ctx.narrative, "node_narratives", []) or []),
+        "edge_narratives": len(getattr(ctx.narrative, "edge_narratives", []) or []),
+        "total": 1,
+        "processed": 1,
+    }
+    ctx.report_done("narrative_annotator", narrative_counts)
+    return ctx.finish_target_stage("narrative_annotator", narrative_counts)
+
+
+def _stage_course_mapping(ctx: PipelineContext) -> bool:
+    # ── Stage 12b: course_mapping (deterministic component → topic map) ─
+    course_mapping_artifact = ctx.artifact("course_mapping")
+    if ctx.should_use_artifact("course_mapping"):
+        ctx.course_mapping = _from_agent_dict("course_mapping", course_mapping_artifact)
+        logger.info("Resuming document pipeline: loaded course_mapping artifact for document %s", ctx.document_id)
+    else:
+        ctx.report_start("course_mapping", total=1, unit="builder")
+        try:
+            ctx.course_mapping = _build_course_mapping(
+                agent_classes=ctx.agent_classes,
+                document_id=ctx.document_id,
+                cartridge_id=ctx.cartridge_id,
+                component_result=ctx.component_result,
+                claim_objects=ctx.claim_objects,
+            )
+        except Exception as exc:
+            logger.exception(
+                "course_mapping stage failed (non-fatal): document=%s material=%s error=%s",
+                ctx.document_id, ctx.material_id, exc,
+            )
+            ctx.course_mapping = _empty_course_mapping_result(ctx.document_id, ctx.cartridge_id)
+        ctx.save_artifact("course_mapping", ctx.course_mapping)
+    ctx.report_done("course_mapping", {
+        "topics": len(getattr(ctx.course_mapping, "topics", []) or []),
+        "total": 1,
+        "processed": 1,
+    })
+    return ctx.finish_target_stage("course_mapping", {"topics": len(getattr(ctx.course_mapping, "topics", []) or []), "total": 1, "processed": 1})
+
+
+def _stage_blueprint(ctx: PipelineContext) -> bool:
+    # ── Stage 12c: blueprint (narrative arc) ───────────────────────────
+    blueprint_artifact_data = ctx.artifact("blueprint")
+    if ctx.should_use_artifact("blueprint"):
+        ctx.blueprint = _from_agent_dict("blueprint", blueprint_artifact_data)
+        logger.info("Resuming document pipeline: loaded blueprint artifact for document %s", ctx.document_id)
+    else:
+        ctx.report_start("blueprint", total=1, unit="builder")
+        try:
+            ctx.blueprint = _build_blueprint(
+                agent_classes=ctx.agent_classes,
+                course_mapping=ctx.course_mapping,
+                component_result=ctx.component_result,
+                course_id=ctx.course_id,
+            )
+        except Exception as exc:
+            logger.exception(
+                "blueprint stage failed (non-fatal): document=%s material=%s error=%s",
+                ctx.document_id, ctx.material_id, exc,
+            )
+            ctx.blueprint = _empty_blueprint_result(ctx.document_id, ctx.course_id)
+        ctx.save_artifact("blueprint", ctx.blueprint)
+    ctx.report_done("blueprint", {
+        "steps": len(getattr(ctx.blueprint, "narrative_arc", []) or []),
+        "total": 1,
+        "processed": 1,
+    })
+    return ctx.finish_target_stage("blueprint", {"steps": len(getattr(ctx.blueprint, "narrative_arc", []) or []), "total": 1, "processed": 1})
+
+
+def _stage_export_validation(ctx: PipelineContext) -> bool:
+    # ── Stage 12d: export_validation ───────────────────────────────────
+    export_validation_artifact = ctx.artifact("export_validation")
+    if ctx.should_use_artifact("export_validation"):
+        ctx.validation_result_dict = export_validation_artifact
+        logger.info("Resuming document pipeline: loaded export_validation artifact for document %s", ctx.document_id)
+    else:
+        ctx.report_start("export_validation", total=1, unit="gate")
+        try:
+            from .export_validation_gate import ExportValidationGate
+
+            gate = ExportValidationGate()
+            validation_result = gate.run(
+                artifacts=ctx.all_artifacts(),
+                component_result=ctx.component_result,
+                course_mapping=ctx.course_mapping,
+                claim_objects=ctx.claim_objects,
+                evidence=ctx.evidence,
+                dsl=ctx.dsl,
+            )
+            ctx.validation_result_dict = validation_result.to_dict()
+        except Exception as exc:
+            logger.exception(
+                "export_validation stage failed (non-fatal): document=%s material=%s error=%s",
+                ctx.document_id, ctx.material_id, exc,
+            )
+            ctx.validation_result_dict = {
+                "status": "passed_with_warnings",
+                "exportable": True,
+                "publish_ready": False,
+                "errors": [],
+                "warnings": [{"code": "GATE_ERROR", "message": str(exc), "artifact": "export_validation"}],
+                "review_items": [],
+                "summary": {"error_count": 0, "warning_count": 1, "review_required_count": 0},
+            }
+        ctx.save_artifact("export_validation", ctx.validation_result_dict)
+    # Keep the gate verdict under `gate_status` (passed / passed_with_warnings
+    # / needs_review / failed_validation) and let report_done/finish_target_stage
+    # set `status="completed"`, so the UI stage mark reflects "this stage ran"
+    # rather than mis-mapping the verdict string to a blank "not_started" dot.
+    export_validation_payload = {
+        "gate_status": ctx.validation_result_dict.get("status"),
+        "error_count": (ctx.validation_result_dict.get("summary") or {}).get("error_count", 0),
+        "warning_count": (ctx.validation_result_dict.get("summary") or {}).get("warning_count", 0),
+        "total": 1,
+        "processed": 1,
+    }
+    ctx.report_done("export_validation", export_validation_payload)
+    return ctx.finish_target_stage("export_validation", {"status": "completed", **export_validation_payload})
+
+
+# Export-validation failure: graceful degradation ─────────────────
+# 設計原則: source_embedding が成功した後は status=failed にしない。
+# chunks + embeddings は常に保存済みであり RAG は必ず動く。
+# validation エラーは「どの機能が使えないか」を示すだけで、
+# ユーザーを完全に詰まらせてはならない。
+#
+# エラーの種類に応じて persist をスキップし、completed（機能縮退）で完了する:
+#   component_graph エラー   → graph のみスキップ、claims + components は保存
+#   no_components /
+#   deterministic_fallback   → components + graph スキップ、claims は保存
+#   その他の品質エラー       → すべて保存（review_required フラグのみ）
+#
+# status=failed になる唯一のケースは source_chunking / source_embedding の
+# 失敗（= chunks が保存されていない）であり、それは既にパイプライン前段で
+# PipelineStageError として raise 済み。
+_COMPONENT_SKIP_CODES = {
+    # LLM が完全に失敗して placeholder しかない → コンポーネント保存不可
+    "component_assembly_deterministic_fallback",
+    # コンポーネントが 1 件もない → 保存対象なし
+    "no_components",
+    # コンポーネント型が不正 → DB スキーマ違反になる
+    "invalid_component_type",
+}
+
+
+def _compute_persist_degradation_flags(ctx: PipelineContext) -> None:
+    """export_validation の結果から persist スキップフラグを計算する（#3ステージ間の非常時後処理）。
+
+    元の実装では export_validation の finish_target_stage チェック直後・
+    persist_claims_components_graph の report_start より前に無条件（resume 有無に
+    関係なく）実行されていた。ここではその到達条件を維持するため
+    ``_stage_persist_claims_components_graph`` の先頭で呼ぶ。
+    """
+    ctx.skip_graph_persist = False
+    ctx.skip_component_persist = False
+    ctx.degraded_stages = []
+    if ctx.validation_result_dict.get("status") == "failed_validation":
+        all_val_errors = ctx.validation_result_dict.get("errors") or []
+        component_skip_errors = [e for e in all_val_errors if e.get("code") in _COMPONENT_SKIP_CODES]
+        graph_errors = [e for e in all_val_errors if e.get("artifact") == "component_graph"]
+
+        if component_skip_errors:
+            # components も graph も保存しない: claims だけ保存して completed
+            ctx.skip_component_persist = True
+            ctx.skip_graph_persist = True
+            ctx.degraded_stages = ["component_assembly", "component_graph"]
+            logger.warning(
+                "ExportValidationGate: コンポーネント生成不可 (%d error(s)) — "
+                "claims のみ保存して completed に移行: document=%s material=%s",
+                len(all_val_errors), ctx.document_id, ctx.material_id,
+            )
+        elif graph_errors:
+            # graph のみスキップ、claims + components は保存
+            ctx.skip_graph_persist = True
+            ctx.degraded_stages = ["component_graph"]
+            logger.warning(
+                "ExportValidationGate: component_graph エラー (%d) — "
+                "graph のみスキップして completed に移行: document=%s material=%s",
+                len(graph_errors), ctx.document_id, ctx.material_id,
+            )
+        else:
+            # その他の品質エラー: 全部保存して review_required フラグを残す
+            ctx.degraded_stages = []
+            logger.warning(
+                "ExportValidationGate: 品質エラー (%d) — "
+                "全アーティファクトを保存して completed に移行: document=%s material=%s",
+                len(all_val_errors), ctx.document_id, ctx.material_id,
+            )
+
+
+def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
+    _compute_persist_degradation_flags(ctx)
+    # ── Stage 13: persist_claims_components_graph ──────────────────────
+    ctx.report_start("persist_claims_components_graph", total=3, unit="tables")
+    if ctx.should_use_artifact("persist_claims_components_graph"):
+        persisted = ctx.artifact("persist_claims_components_graph") or {}
+        ctx.result.claim_count = int(persisted.get("claims") or 0)
+    else:
+        try:
+            saved_claims = persist_qualified_claims(
+                document_id=ctx.document_id,
+                qualified_result=ctx.qualified,
+                chunk_index=ctx.chunk_index,
+            )
+            claim_id_map: dict[str, str] = {}
+            for saved in saved_claims:
+                for key in _claim_legacy_keys(saved):
+                    claim_id_map[key] = saved["claim_id"]
+            ctx.result.claim_count = len(saved_claims)
+            ctx.report_item("persist_claims_components_graph", 1, 3, "tables")
+
+            id_map: dict[str, str] = {}
+            if ctx.skip_component_persist:
+                logger.warning(
+                    "components persist skipped (validation errors): document=%s",
+                    ctx.document_id,
+                )
+            else:
+                id_map = persist_components(
+                    document_id=ctx.document_id,
+                    component_result=ctx.component_result,
+                    course_id=ctx.course_id,
+                    claim_id_map=claim_id_map,
+                )
+            ctx.report_item("persist_claims_components_graph", 2, 3, "tables")
+
+            if ctx.skip_graph_persist or ctx.skip_component_persist:
+                logger.warning(
+                    "component_graph persist skipped (validation errors): document=%s",
+                    ctx.document_id,
+                )
+            else:
+                persist_component_graph(
+                    document_id=ctx.document_id,
+                    component_id_map=id_map,
+                    component_result=ctx.component_result,
+                    dsl_result=ctx.dsl,
+                    course_id=ctx.course_id,
+                    component_graph_result=ctx.component_graph_result,
+                    claim_id_map=claim_id_map,
+                    narrative_result=ctx.narrative,
+                )
+            ctx.save_artifact("persist_claims_components_graph", {
+                "claims": ctx.result.claim_count,
+                "components": ctx.result.component_count,
+                "graph_skipped": ctx.skip_graph_persist or ctx.skip_component_persist,
+                "components_skipped": ctx.skip_component_persist,
+                "degraded_stages": ctx.degraded_stages,
+            })
+        except Exception as exc:
+            logger.exception("persist_claims_components_graph stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
+            raise PipelineStageError(
+                "persist_claims_components_graph", str(exc), cause=exc
+            ) from exc
+    ctx.report_done("persist_claims_components_graph", {
+        "claims": ctx.result.claim_count,
+        "components": ctx.result.component_count,
+        "total": 3,
+        "processed": 3,
+    })
+    return ctx.finish_target_stage("persist_claims_components_graph", {"claims": ctx.result.claim_count, "components": ctx.result.component_count, "total": 3, "processed": 3})
+
+
+def _stage_completed(ctx: PipelineContext) -> None:
+    # ── Stage 14: completed ────────────────────────────────────────────
+    upsert_analysis_run(
+        run_id=ctx.run_id,
+        document_id=ctx.document_id,
+        material_id=ctx.material_id,
+        cartridge_id=ctx.cartridge_id,
+        status="completed",
+        current_stage="completed",
+        stage_outputs={"completed": {
+            "chunks": ctx.result.chunk_count,
+            "claims": ctx.result.claim_count,
+            "components": ctx.result.component_count,
+            "dsl_nodes": ctx.result.dsl_node_count,
+            "dsl_edges": ctx.result.dsl_edge_count,
+        }},
+    )
+    # 初回 (initial) pipeline 完了時は、この Run を採用 (active) Run とする。
+    # 再解析でも最新の completed initial run を active に進める（従来の
+    # 「latest = 参照対象」挙動を維持）。revision Run はこの経路を通らず、
+    # accept API でのみ optimistic に active を切り替える (#402)。
+    # active pointer は best-effort: 失敗しても pipeline 自体は成功扱いにする。
+    try:
+        set_active_analysis_run(
+            document_id=ctx.document_id,
+            run_id=ctx.run_id,
+            expected_run_id=get_active_analysis_run_id(document_id=ctx.document_id),
+        )
+    except Exception:
+        logger.warning(
+            "failed to set active analysis run for document=%s run=%s",
+            ctx.document_id, ctx.run_id, exc_info=True,
+        )
+    ctx.result.final_stage = "completed"
+    # D層 (D1-2): A層パイプライン完了後の後処理として認識的地位台帳を
+    # 決定論的にバックフィルする（読むだけ・best-effort・失敗しても pipeline は成功扱い）。
+    try:
+        from core.doubt.ledger_builder import backfill_document_ledger
+
+        backfill_document_ledger(document_id=ctx.document_id, course_id=ctx.course_id or "")
+    except Exception:
+        logger.warning(
+            "epistemic ledger backfill skipped for document=%s", ctx.document_id, exc_info=True
+        )
+    # D層 (D2-1): 負荷度の再計算（非LLM・決定論的, best-effort）。
+    try:
+        from core.doubt.load_calculator import recompute_load_scores
+
+        recompute_load_scores(document_id=ctx.document_id)
+    except Exception:
+        logger.warning(
+            "load score recompute skipped for document=%s", ctx.document_id, exc_info=True
+        )
+    # D層 (D1-4): 検証スコープ候補の非同期 LLM 補助（P6: 同期パスに LLM を入れない）。
+    try:
+        from core.doubt.scope_candidates.worker import maybe_schedule_scope_candidates
+
+        maybe_schedule_scope_candidates(document_id=ctx.document_id)
+    except Exception:
+        logger.warning(
+            "scope candidate scheduling skipped for document=%s", ctx.document_id, exc_info=True
+        )
+    ctx.report_done("completed", {
+        "chunks": ctx.result.chunk_count,
+        "claims": ctx.result.claim_count,
+        "components": ctx.result.component_count,
+    }, run_status="completed")
+
+
+# ---------------------------------------------------------------------------
+# ステージ実行順序の正本。PIPELINE_STAGES と同じ順序（+ between-stage の決定論的
+# 後処理フック。name=None で PIPELINE_STAGES に対応エントリが無いことを示す）。
+# ---------------------------------------------------------------------------
+_PIPELINE_STEPS: list[PipelineStageDef] = [
+    PipelineStageDef("save_pdf", _stage_save_pdf),
+    PipelineStageDef("grobid_parse", _stage_grobid_parse),
+    PipelineStageDef("document_structure", _stage_document_structure),
+    PipelineStageDef("figure_image_extraction", _stage_figure_image_extraction),
+    PipelineStageDef("source_chunking", _stage_source_chunking),
+    PipelineStageDef("source_embedding", _stage_source_embedding),
+    PipelineStageDef("paper_skeleton", _stage_paper_skeleton),
+    PipelineStageDef("rhetorical_role", _stage_rhetorical_role),
+    PipelineStageDef("claim_qualification", _stage_claim_qualification),
+    PipelineStageDef("equation_semantics", _stage_equation_semantics),
+    PipelineStageDef("evidence_registry", _stage_evidence_registry),
+    PipelineStageDef("claim_object_builder", _stage_claim_object_builder),
+    PipelineStageDef(None, _hook_claim_equation_canonicalization),
+    PipelineStageDef("symbol_registry", _stage_symbol_registry),
+    PipelineStageDef("derivation_chain", _stage_derivation_chain),
+    PipelineStageDef(None, _hook_equation_claim_synthesis),
+    PipelineStageDef("figure_table_semantics", _stage_figure_table_semantics),
+    PipelineStageDef("apparatus_semantics", _stage_apparatus_semantics),
+    PipelineStageDef("thesis_reconstruction", _stage_thesis_reconstruction),
+    PipelineStageDef("dsl_linking", _stage_dsl_linking),
+    PipelineStageDef("dsl_embedding", _stage_dsl_embedding),
+    PipelineStageDef("component_assembly", _stage_component_assembly),
+    PipelineStageDef("component_graph", _stage_component_graph),
+    PipelineStageDef("narrative_annotator", _stage_narrative_annotator),
+    PipelineStageDef("course_mapping", _stage_course_mapping),
+    PipelineStageDef("blueprint", _stage_blueprint),
+    PipelineStageDef("export_validation", _stage_export_validation),
+    PipelineStageDef("persist_claims_components_graph", _stage_persist_claims_components_graph),
+]
 
 
 def _instantiate(agent_class_or_instance):

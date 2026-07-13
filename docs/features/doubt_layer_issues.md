@@ -74,7 +74,7 @@ D2-2 → D3-5(マイニングB)
   `'verification_proposal'` / `'counterfactual_session'` を許容拡張。
 - 設計原則（§0 の不変条項）を docstring / docs に明文化。
 
-**やらないこと**: 記帳ロジック・API・UI（後続 issue）。Neo4j 側の語彙追加（動的スキーマ進化に乗せる D3 以降）。
+**やらないこと**: 記帳ロジック・API・UI（後続 issue）。（Neo4j は撤去済みのため対象外。動的スキーマ進化側の語彙追加は D3 以降）。
 
 **受け入れ条件**:
 - マイグレーションが冪等に適用できる
@@ -213,7 +213,7 @@ D2-2 → D3-5(マイニングB)
   - `load_score` は生数値で保存するが、**API/UI では段階ラベル**（低 / 中 / 高 / 最高位=上位パーセンタイル）
     に変換して返す（数値スコアを見せない原則）
   - `graph_layer='debug'` / `inferred` ノードは負荷計算の**根拠にしない**（弱い backing を負荷に混ぜない）
-- 既存の `backend/core/batch.py` パターンに乗せた再計算バッチ（解析完了時 + 手動トリガ）
+- 再計算バッチ（解析完了時 + 手動トリガ）。（旧 `backend/core/batch.py` パターンは撤去済みのため対象外。`core/llm_worker/` 等の現行正本に接続する）
 - `epistemic_ledger.load_score` への書き込み + `load_computed_at`
 
 **受け入れ条件**:

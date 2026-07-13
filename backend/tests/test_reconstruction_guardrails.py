@@ -39,7 +39,7 @@ from tests.guardrail_helpers import (  # noqa: E402
 
 _CORE_DIR = BACKEND / "core" / "reconstruction"
 _ROUTE_SRC = (BACKEND / "api" / "routes" / "reconstruction.py").read_text(encoding="utf-8")
-_MAIN_SRC = (BACKEND / "api" / "main.py").read_text(encoding="utf-8")
+_MIGRATION_SRC = (BACKEND / "db" / "036_reconstruction_loop.sql").read_text(encoding="utf-8")
 _STUMBLE_SRC = (_CORE_DIR / "stumble.py").read_text(encoding="utf-8")
 _HEALTH_SRC = (_CORE_DIR / "health.py").read_text(encoding="utf-8")
 
@@ -191,7 +191,7 @@ class TestKAnonymity:
 
     def test_k_gate_counts_distinct_users_not_rows(self):
         """k-匿名の母数は人数（DISTINCT user_id）。応答行数でセルを開示しない（P3、D層と同じ扱い）。"""
-        assert "COUNT(DISTINCT r.user_id)" in _MAIN_SRC  # health ビューの n_users
+        assert "COUNT(DISTINCT r.user_id)" in _MIGRATION_SRC  # health ビューの n_users（正本 SQL）
         assert "COUNT(DISTINCT r.user_id)" in _STUMBLE_SRC
         assert "COUNT(DISTINCT user_id)" in _STUMBLE_SRC  # FAQ（interest_traces）も人数
         assert "n_users" in _HEALTH_SRC and "gate_by_users" in _HEALTH_SRC
@@ -242,6 +242,7 @@ class TestAuditVocabulary:
         assert "verdict_wrong" in _ROUTE_SRC  # 機械判定への異議を監査
 
     def test_migration_present(self):
-        assert "reconstruction_items" in _MAIN_SRC
-        assert "learner_reconstructions" in _MAIN_SRC
-        assert "reconstruction_item_health" in _MAIN_SRC
+        """正本は backend/db/036_reconstruction_loop.sql（main.py のインライン DDL ではない）。"""
+        assert "reconstruction_items" in _MIGRATION_SRC
+        assert "learner_reconstructions" in _MIGRATION_SRC
+        assert "reconstruction_item_health" in _MIGRATION_SRC

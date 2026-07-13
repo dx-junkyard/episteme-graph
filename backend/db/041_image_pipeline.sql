@@ -7,6 +7,7 @@
 --   3. theory_components.component_type の CHECK 制約に apparatus / instrument / part を追加
 --      （装置・実験機器コンポーネントを候補として組み立てられるようにする）
 --
+-- このファイルが正本。適用は `backend/core/migrations.py` のランナーが起動時に行う（冪等・毎起動再実行）。
 -- すべて IF NOT EXISTS / DO ブロックの存在チェックで冪等。
 
 -- ----------------------------------------------------------------------------

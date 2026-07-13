@@ -63,7 +63,7 @@ ORM 定義は `backend/core/models.py`、スキーマ初期化は `backend/db/in
 | `groups` | グループ（`invite_code` UNIQUE, `created_by`） |
 | `group_members` | メンバーシップ（`role`: admin/member） |
 | `group_invitations` | 招待（`status`: pending/accepted/declined/revoked） |
-| `course_group_permissions` | コース×グループ権限（viewer/editor） |
+| `object_group_permissions`（旧 `course_group_permissions`, マイグレーション044で統合） | コース×グループ権限（viewer/editor）。`object_type='course'` 行が対応。詳細は後述「グループ権限テーブルの統合（マイグレーション 044）」参照 |
 
 ### スキーマ進化
 | テーブル | 役割 |
@@ -132,10 +132,21 @@ A層（生成パイプライン）を書き換えず、その上に「教員に�
 |---|---|
 | `assistant_actions`（034） | Admin Copilot が代行した操作の戻す台帳。`before_snapshot`/`after_snapshot`（P3）、`status`(applied/reverted/failed/confirm_pending)。`reversible=FALSE` の操作は戻す UI で無効化 |
 
-### パイプライン成果のグループ共有（マイグレーション 035）
+### パイプライン成果のグループ共有（マイグレーション 035 → 044 でテーブル統合）
+成果テーブル（theory_*）には列を足さず、権限はドキュメント単位に集約してそこから継承する方針は
+不変。当初は `course_group_permissions`（010）の完全な移植版として独立テーブル
+`document_group_permissions`（035, `PRIMARY KEY(document_id, group_id)`）が実装されたが、
+下記「グループ権限テーブルの統合（マイグレーション 044）」で `course_group_permissions` と
+統合され、`object_group_permissions`（`object_type='document'` 行）に一本化された。
+
+### グループ権限テーブルの統合（マイグレーション 044）
+`course_group_permissions`（010）と `document_group_permissions`（035）は permission 語彙
+（viewer/editor）・PK 形・インデックスまで完全に相似の構造だったため、V層（037）の
+`object_type` ポリモーフィック方式を踏襲して1枚に統合した。
+
 | テーブル | 役割 |
 |---|---|
-| `document_group_permissions`（035） | ドキュメント×グループ権限マッピング。`course_group_permissions`（010）の完全な移植版。`PRIMARY KEY(document_id, group_id)`、`permission`(viewer/editor)。成果テーブル（theory_*）には列を足さず、権限はドキュメント単位に集約してそこから継承する |
+| `object_group_permissions`（044） | コース×グループ / ドキュメント×グループ権限の統合テーブル。`object_type CHECK('course','document')` + `object_id TEXT`（FK なしポリモーフィック）+ `group_id`（`groups(id)` に `ON DELETE CASCADE`）で `PRIMARY KEY(object_type, object_id, group_id)`。`permission`(viewer/editor)。`object_id` に FK が張れないため、course/document の削除経路（`_purge_course`/`_purge_document`/`services.delete_course_data`/`admin.delete_material`/`admin.delete_course` 等7箇所）が明示 `DELETE` で孤児行を防ぐ。旧2テーブルは移行後 `DROP TABLE` 済み（`010_course_group_permissions.sql` / `035_document_group_permissions.sql` はコメントのみのスタブに書き換え）。API パス・レスポンス形式は不変 |
 
 ### 再構成ループ（Reconstruction Loop, R層, マイグレーション 036）
 学習者に理論の再構成（予測/言い直し）をさせ、`theory_claims` を答えキーとして構造照合する。
@@ -156,7 +167,7 @@ A層（生成パイプライン）を書き換えず、その上に「教員に�
 | `shared_versions`（037） | 不変 Release。`object_type CHECK('course','document')` / `object_id TEXT`（ポリモーフィック・FK なし）/ `version_no` / `snapshot(JSONB)`。`UNIQUE(object_type, object_id, version_no)` |
 | `shared_version_state`（037） | `PRIMARY KEY(object_type, object_id)`。`active_release_id`/`latest_version_no`/`lifecycle`(active/pending_deletion/purged)/削除予約情報 |
 | `shared_version_subscriptions`（037） | 消費者のピン。`UNIQUE(object_type, object_id, subscriber_id)`。`pinned_release_id` が消費者の見る版（所有者が新版発行しても既存ピンは動かない） |
-| `share_notifications`（037） | 通知インボックス。`kind`(version_published/deletion_scheduled/deletion_cancelled/deleted)、`read_at`/`acted_at` |
+| ~~`share_notifications`（037）~~ | 通知インボックス。当初は専用テーブルとして実装（`kind`(version_published/deletion_scheduled/deletion_cancelled/deleted)、`read_at`/`acted_at`）。**マイグレーション 045 で `user_notifications`（状態管理・通知基盤, 038）に統合済み**（`source='shared'` で区別）。詳細は下記「状態管理・通知基盤」節と「通知テーブルの統合（マイグレーション 045）」参照 |
 | `component_citations`（021 を ALTER, 037） | 引用の版固定列 `source_object_type`/`source_object_id`/`source_release_id`/`source_version_no` を追加 |
 
 ### 状態管理・通知基盤（マイグレーション 038）
@@ -168,7 +179,19 @@ A層（生成パイプライン）を書き換えず、その上に「教員に�
 | テーブル | 役割 |
 |---|---|
 | `status_events`（038） | 遷移イベント（append-only の事実ストリーム）。`event_kind`（例 `material.analysis_completed`）、`source_table`/`source_id` に対し `UNIQUE(source_table, source_id, event_kind)` で冪等 |
-| `user_notifications`（038） | 汎用通知インボックス（`share_notifications` と同形・V層非改変）。`read_at`/`dismissed_at` で状態遷移（行削除しない） |
+| `user_notifications`（038、045 で拡張） | 汎用通知インボックス。当初は `share_notifications`（V層, 037）と同形の独立テーブルだったが、マイグレーション 045 で両者を統合する存続テーブルとなり `source`(`status`\|`shared`)・`release_id`・`acted_at` 列を追加。`read_at`/`dismissed_at`/`acted_at` で状態遷移（行削除しない）。詳細は下記「通知テーブルの統合（マイグレーション 045）」参照 |
+
+### 通知テーブルの統合（マイグレーション 045）
+`share_notifications`（037, V層）と `user_notifications`（038, 状態管理・通知基盤）は
+`id`/`recipient_id`/`payload`/`created_at`/`read_at` が完全に同型だったため、`user_notifications`
+を存続テーブルとして統合した。差分列（V層固有の `source`/`release_id`/`acted_at`）は ALTER で
+追加し、`share_notifications` は移行後 `DROP TABLE`（`037_shared_versioning.sql` の
+share_notifications セクションはコメントのみのスタブに書き換え）。`source='status'` は状態管理・
+通知基盤由来、`source='shared'` は V層由来の行を示し、両者を区別することで二重表示と
+purge 誤削除を防止する。`kind` に DB CHECK は付けず、V層側の4値ゲートは
+`core/versioning/schema.py::NOTIFICATION_KINDS` が Python 側で引き続き担う（open-vocab 設計の
+状態層側に合わせた）。`routes/notifications.py` は単一クエリでの読み取りに簡素化され、旧来の
+2テーブル個別問い合わせによる二重試行を廃止した。API 形式・フロントは不変。
 
 ### ガイダンス層（G層, マイグレーション 039）
 「次にやること」バッジ + 状態導出型 To-Do。正本は `docs/features/guidance_layer_design.md`
@@ -291,9 +314,18 @@ claim 紐づけの最終確定は必ず教員が行い、AI 候補は `backing_c
 | `041_image_pipeline.sql` | 画像読み取りパイプライン — document_figures 新設・document_analysis_runs.options 追加・component_type 語彙拡張 |
 | `042_knowledge_library.sql` | 分野別ナレッジライブラリ(L層) — library_entries / library_entry_versions |
 | `043_llm_usage_events.sql` | LLM トークン使用量推計(U層) — llm_usage_events + llm_usage_daily 集計ビュー |
+| `044_object_group_permissions.sql` | アーキテクチャ整理 Tier 3-14 — `course_group_permissions`(010) + `document_group_permissions`(035) を `object_group_permissions` に統合。旧2テーブルはデータ移行後 DROP、ファイル自体はスタブ化 |
+| `045_unified_notifications.sql` | アーキテクチャ整理 Tier 3-15 — `share_notifications`(037) を `user_notifications`(038) に統合（`source`/`release_id`/`acted_at` 列を追加）。旧テーブルはデータ移行後 DROP、`037_shared_versioning.sql` の該当セクションはスタブ化 |
 
-> 注: マイグレーションは `backend/db/*.sql` を正本リファレンスとしつつ、実際の適用は
-> `backend/api/main.py` の `_run_migrations()` に直書きした DDL を起動時に冪等適用する方式です。
+> 注（2026-07 アーキテクチャ整理 Tier 3-13 で更新）: マイグレーションの実行方式を一本化した。
+> かつては `backend/db/*.sql` を正本リファレンスとしつつ、実際の適用は `backend/api/main.py` の
+> `_run_migrations()` に直書きした約1,600行のインライン DDL が別途担う「正本が2つ」の状態
+> だったが、この二重管理を撤去した。現在は `backend/db/*.sql`（init.sql + 番号順ファイル群）が
+> **唯一の正本**であり、`backend/core/migrations.py` の薄いランナーが毎起動・番号順に全ファイルを
+> 冪等再実行する（pg_advisory_lock で多重起動排他・ファイル単位トランザクション）。新しい
+> スキーマ変更は新番号のファイルを追加すること。詳細は CLAUDE.md
+> 「マイグレーションの正本一本化」および `docs/architecture/consolidation_survey_2026-07.md`
+> 第4部（Tier 3-13）を参照。
 
 ---
 

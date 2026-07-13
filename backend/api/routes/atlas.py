@@ -22,6 +22,7 @@ from core import atlas
 from core import atlas_reports
 from core import atlas_store
 from core import cartridges as cartridges_module
+from core.course_data import course_cartridge_id, course_topics
 from core.schema import (
     AUDIT_ENTITY_ATLAS_ASSIST,
     AUDIT_ENTITY_ATLAS_BINDING,
@@ -743,7 +744,7 @@ def propose_course_atlas_binding(
     session = _skeleton_session()
     try:
         course_data = _load_course_for_teacher(session, course_id, current_user)
-        topics = [t for t in (course_data.get("topics") or []) if isinstance(t, dict)]
+        topics = [t for t in course_topics(course_data) if isinstance(t, dict)]
         proposals: list[dict] = []
         for domain in atlas_store.list_domains(session):
             skeleton = atlas_store.load_learner_skeleton(domain["domain_key"], session)
@@ -788,7 +789,7 @@ def propose_course_atlas_binding(
         recommended = proposals[0]["domain_key"]
     return {
         "course_id": course_id,
-        "current_cartridge_id": str(course_data.get("cartridge_id") or ""),
+        "current_cartridge_id": course_cartridge_id(course_data),
         "recommended": recommended,
         "proposals": proposals,
     }
@@ -834,7 +835,7 @@ def save_course_atlas_binding(
         }
         applied = 0
         skipped: list[str] = []
-        for topic in course_data.get("topics") or []:
+        for topic in course_topics(course_data):
             if not isinstance(topic, dict):
                 continue
             topic_id = str(topic.get("id") or "")

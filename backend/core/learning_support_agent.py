@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass, field
 
+from core.course_data import course_chapters
+
 
 # 本文に埋め込まれたクリック候補マーカー。フロント側でのパース（\x00 センチネル方式）を
 # 廃し、ここ（サーバ側）の1か所で構造化アクションへ正規化する。
@@ -71,7 +73,7 @@ class LearningSupportAgent:
         topic = topic_info or {}
         chapter_title = ""
         chapter_index = topic.get("chapter_index")
-        chapters = self.course_data.get("chapters") or []
+        chapters = course_chapters(self.course_data)
         if isinstance(chapter_index, int) and 0 <= chapter_index < len(chapters):
             chapter = chapters[chapter_index] or {}
             chapter_title = str(chapter.get("title") or "")

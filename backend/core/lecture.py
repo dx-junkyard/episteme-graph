@@ -13,6 +13,13 @@ import time
 
 from sqlalchemy import text as sa_text
 
+from core.course_data import (
+    course_chapters,
+    course_title as _course_title,
+    course_topics,
+    find_course_topic,
+    lecture_studio_settings as _lecture_studio_settings,
+)
 from core.llm import generate_text, get_llm_params
 from core.personas import persona_prompt
 
@@ -157,10 +164,10 @@ def _parse_spoken_text_response(raw: str) -> dict:
 def _build_course_context_text(course_data: dict) -> str:
     """コースデータから章・トピック構成を文字列化する"""
     lines = []
-    for i, ch in enumerate(course_data.get("chapters", [])):
+    for i, ch in enumerate(course_chapters(course_data)):
         title = ch if isinstance(ch, str) else ch.get("title", "")
         lines.append(f"第{i+1}章: {title}")
-        for t in course_data.get("topics", []):
+        for t in course_topics(course_data):
             if t.get("chapter_index") == i:
                 lines.append(f"  - トピック: {t.get('title', '')}")
     return "\n".join(lines)
@@ -191,7 +198,7 @@ def generate_spoken_text_and_formulas(
     course_structure = "不明"
 
     if course_data:
-        course_title = course_data.get("title", course_title)
+        course_title = _course_title(course_data, default=course_title)
         course_goal = course_data.get("goal", course_goal)
         prereqs = course_data.get("prerequisites", [])
         if prereqs:
@@ -538,12 +545,9 @@ def get_course_lecture_language(course_data: dict | None) -> str:
 
     設定が無い、または ``lecture_language`` 未設定の場合は既定の ``"ja"`` を返す。
     """
-    if isinstance(course_data, dict):
-        settings = course_data.get("lecture_studio_settings")
-        if isinstance(settings, dict):
-            language = settings.get("lecture_language")
-            if language:
-                return str(language)
+    language = _lecture_studio_settings(course_data).get("lecture_language")
+    if language:
+        return str(language)
     return "ja"
 
 
@@ -719,11 +723,7 @@ def build_lecture_sequence(
     mastered_lower = {c.lower() for c in mastered} if mastered else set()
 
     # トピックの前提知識情報を取得
-    topic_info = None
-    for t in course_data.get("topics", []):
-        if t.get("id") == topic_id:
-            topic_info = t
-            break
+    topic_info = find_course_topic(course_data, topic_id)
 
     # 前提知識の概念名リストを収集（習得済みかどうかの判定に使う）
     prerequisite_names: set[str] = set()
@@ -880,7 +880,7 @@ def get_user_mastered_concepts(user_id: str, course_id: str, course_data: dict) 
             session.close()
 
         # 学習済みトピックに紐づく前提知識概念を mastered に追加
-        for t in course_data.get("topics", []):
+        for t in course_topics(course_data):
             if t.get("id") in studied_topic_ids:
                 for p in t.get("prerequisites", []):
                     name = p.get("name", p) if isinstance(p, dict) else str(p)

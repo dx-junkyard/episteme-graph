@@ -204,9 +204,9 @@ class TestTeacherBatchGeneration:
         ]
 
         with (
-            patch("api.routes.lecture_studio._pg_session", return_value=mock_session),
-            patch("api.routes.lecture_studio.update_background_task"),
-            patch("api.routes.lecture_studio.create_background_task"),
+            patch("api.routes.lecture_studio.scripts._pg_session", return_value=mock_session),
+            patch("api.routes.lecture_studio.scripts.update_background_task"),
+            patch("api.routes.lecture_studio.scripts.create_background_task"),
         ):
             _batch_generate_worker("task-1", _COURSE_ID, chunks, False, _COURSE_DATA)
 
@@ -259,9 +259,9 @@ class TestTeacherBatchGeneration:
 
         mock_session = MagicMock()
         with (
-            patch("api.routes.lecture_studio._pg_session", return_value=mock_session),
-            patch("api.routes.lecture_studio.update_background_task") as mock_update,
-            patch("api.routes.lecture_studio.create_background_task"),
+            patch("api.routes.lecture_studio.scripts._pg_session", return_value=mock_session),
+            patch("api.routes.lecture_studio.scripts.update_background_task") as mock_update,
+            patch("api.routes.lecture_studio.scripts.create_background_task"),
         ):
             _batch_generate_worker("task-1", _COURSE_ID, chunks, False, _COURSE_DATA)
 

@@ -1,4 +1,6 @@
 -- Migration 013: Theory Components for Lecture Studio
+--
+-- このファイルが正本。適用は `backend/core/migrations.py` のランナーが起動時に行う（冪等・毎起動再実行）。
 
 CREATE TABLE IF NOT EXISTS theory_components (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -51,14 +53,34 @@ CREATE INDEX IF NOT EXISTS idx_theory_claims_document ON theory_claims(document_
 CREATE INDEX IF NOT EXISTS idx_theory_claims_chunk ON theory_claims(chunk_id);
 CREATE INDEX IF NOT EXISTS idx_theory_claims_review ON theory_claims(review_status);
 ALTER TABLE theory_claims ADD COLUMN IF NOT EXISTS equation JSONB NOT NULL DEFAULT '{}'::jsonb;
-ALTER TABLE theory_claims DROP CONSTRAINT IF EXISTS theory_claims_claim_type_check;
-ALTER TABLE theory_claims ADD CONSTRAINT theory_claims_claim_type_check CHECK (claim_type IN (
-    'definition', 'assumption', 'approximation', 'equation', 'relation',
-    'derivation_step', 'observable_definition', 'correction',
-    'uncertainty', 'limitation', 'result', 'diagnostic_claim',
-    'equation_definition', 'equation_relation', 'equation_transformation',
-    'equation_approximation', 'equation_constraint'
-));
+
+-- claim_type の CHECK を拡張版（equation_* 系5語彙を含む17値）にする。
+-- 既に拡張済みであれば何もしない（DROP→ADD の往復を毎起動発生させない）。
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'theory_claims_claim_type_check'
+          AND pg_get_constraintdef(oid) NOT LIKE '%equation_definition%'
+    ) THEN
+        ALTER TABLE theory_claims DROP CONSTRAINT theory_claims_claim_type_check;
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'theory_claims_claim_type_check'
+    ) THEN
+        ALTER TABLE theory_claims ADD CONSTRAINT theory_claims_claim_type_check CHECK (claim_type IN (
+            'definition', 'assumption', 'approximation', 'equation', 'relation',
+            'derivation_step', 'observable_definition', 'correction',
+            'uncertainty', 'limitation', 'result', 'diagnostic_claim',
+            'equation_definition', 'equation_relation', 'equation_transformation',
+            'equation_approximation', 'equation_constraint'
+        ));
+    END IF;
+END $$;
 
 ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS source_scope JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE theory_components ADD COLUMN IF NOT EXISTS evidence_claims JSONB NOT NULL DEFAULT '[]'::jsonb;

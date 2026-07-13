@@ -20,6 +20,7 @@ from typing import Any
 
 from sqlalchemy import text as sa_text
 
+from core import revision_store
 from core.postgres import get_session
 
 from . import schema
@@ -35,12 +36,8 @@ class LibraryNotFoundError(LibraryError):
     """指定した entry_id が存在しない。"""
 
 
-class LibraryConflictError(LibraryError):
+class LibraryConflictError(LibraryError, revision_store.RevisionConflictError):
     """楽観ロック衝突（expected_revision が現在値と不一致）。current_revision に現在値を持つ。"""
-
-    def __init__(self, message: str, current_revision: int | None = None):
-        super().__init__(message)
-        self.current_revision = current_revision
 
 
 # ---------------------------------------------------------------------------
@@ -255,9 +252,9 @@ def update_entry(entry_id: str, *, expected_revision: int, updated_by: str | Non
 
     session = get_session()
     try:
-        row = session.execute(
-            sa_text(
-                f"""
+        result = revision_store.update_with_revision_lock(
+            session,
+            update_sql=f"""
                 UPDATE library_entries
                    SET {set_sql},
                        revision = revision + 1,
@@ -265,25 +262,18 @@ def update_entry(entry_id: str, *, expected_revision: int, updated_by: str | Non
                        updated_at = now()
                  WHERE id = CAST(:id AS uuid) AND revision = :expected_revision
                 RETURNING {_ENTRY_COLUMNS_SQL}
-                """
-            ),
-            params,
-        ).fetchone()
-        if row is None:
-            existing = session.execute(
-                sa_text("SELECT revision FROM library_entries WHERE id = CAST(:id AS uuid) LIMIT 1"),
-                {"id": entry_id},
-            ).fetchone()
-            session.rollback()
-            if not existing:
-                raise LibraryNotFoundError(f"library entry not found: {entry_id}")
-            raise LibraryConflictError(
-                "library entry has been updated by someone else",
-                current_revision=int(existing[0] or 1),
-            )
+                """,
+            update_params=params,
+            select_sql="SELECT revision FROM library_entries WHERE id = CAST(:id AS uuid) LIMIT 1",
+            select_params={"id": entry_id},
+            conflict_exc=LibraryConflictError,
+            conflict_message="library entry has been updated by someone else",
+            not_found_exc=LibraryNotFoundError,
+            not_found_message=f"library entry not found: {entry_id}",
+            revision_default=1,
+        )
+        row = result.fetchone()
         session.commit()
-    except (LibraryNotFoundError, LibraryConflictError):
-        raise
     except Exception:
         session.rollback()
         raise

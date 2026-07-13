@@ -32,7 +32,7 @@ if _API_DIR not in sys.path:
 _CHUNK_ID = "550e8400-e29b-41d4-a716-446655440000"
 
 _LECTURE_STUDIO_SOURCE = os.path.join(
-    os.path.dirname(__file__), "..", "api", "routes", "lecture_studio.py",
+    os.path.dirname(__file__), "..", "api", "routes", "lecture_studio", "scripts.py",
 )
 
 
@@ -334,8 +334,8 @@ class TestLanguageSchemaValidation:
 
 
 class TestLectureStudioSettingsLanguageEndpoint:
-    @patch("api.routes.lecture_studio._pg_session")
-    @patch("api.routes.lecture_studio.get_viewable_course_data")
+    @patch("api.routes.lecture_studio.scripts._pg_session")
+    @patch("api.routes.lecture_studio.scripts.get_viewable_course_data")
     def test_get_settings_returns_stored_language(self, mock_course, mock_pg):
         from api.routes.lecture_studio import get_lecture_studio_settings
 
@@ -343,8 +343,8 @@ class TestLectureStudioSettingsLanguageEndpoint:
         result = get_lecture_studio_settings("course-1", {"id": "u1", "role": "TEACHER"})
         assert result.lecture_language == "en"
 
-    @patch("api.routes.lecture_studio._pg_session")
-    @patch("api.routes.lecture_studio.get_viewable_course_data")
+    @patch("api.routes.lecture_studio.scripts._pg_session")
+    @patch("api.routes.lecture_studio.scripts.get_viewable_course_data")
     def test_get_settings_clamps_invalid_stored_value_to_ja(self, mock_course, mock_pg):
         """レガシーデータで不正値が入っていても 500 にせず ja にフォールバックする。"""
         from api.routes.lecture_studio import get_lecture_studio_settings
@@ -353,8 +353,8 @@ class TestLectureStudioSettingsLanguageEndpoint:
         result = get_lecture_studio_settings("course-1", {"id": "u1", "role": "TEACHER"})
         assert result.lecture_language == "ja"
 
-    @patch("api.routes.lecture_studio._pg_session")
-    @patch("api.routes.lecture_studio.get_editable_course_data")
+    @patch("api.routes.lecture_studio.scripts._pg_session")
+    @patch("api.routes.lecture_studio.scripts.get_editable_course_data")
     def test_put_settings_persists_language_and_marks_regeneration(self, mock_course, mock_pg):
         from api.routes.lecture_studio import update_lecture_studio_settings
         from schemas import LectureStudioSettings
@@ -372,8 +372,8 @@ class TestLectureStudioSettingsLanguageEndpoint:
         assert saved["lecture_studio_settings"]["lecture_language"] == "en"
         assert saved["lecture_studio_settings"]["scripts_need_regeneration"] is True
 
-    @patch("api.routes.lecture_studio._pg_session")
-    @patch("api.routes.lecture_studio.get_editable_course_data")
+    @patch("api.routes.lecture_studio.scripts._pg_session")
+    @patch("api.routes.lecture_studio.scripts.get_editable_course_data")
     def test_put_settings_same_language_does_not_force_regeneration(self, mock_course, mock_pg):
         from api.routes.lecture_studio import update_lecture_studio_settings
         from schemas import LectureStudioSettings
@@ -399,11 +399,11 @@ _WORKER_CHUNK_ID = _CHUNK_ID
 
 
 class TestBatchGenerateWorkerLanguage:
-    @patch("api.routes.lecture_studio.time.sleep", return_value=None)
-    @patch("api.routes.lecture_studio.generate_spoken_text_and_formulas")
-    @patch("api.routes.lecture_studio._pg_session")
-    @patch("api.routes.lecture_studio.update_background_task")
-    @patch("api.routes.lecture_studio.create_background_task")
+    @patch("api.routes.lecture_studio.scripts.time.sleep", return_value=None)
+    @patch("api.routes.lecture_studio.scripts.generate_spoken_text_and_formulas")
+    @patch("api.routes.lecture_studio.scripts._pg_session")
+    @patch("api.routes.lecture_studio.scripts.update_background_task")
+    @patch("api.routes.lecture_studio.scripts.create_background_task")
     def test_worker_uses_course_language_and_persists_spoken_language(
         self, mock_create, mock_update, mock_pg, mock_gen, mock_sleep,
     ):
@@ -426,11 +426,11 @@ class TestBatchGenerateWorkerLanguage:
         assert len(update_calls) == 1
         assert update_calls[0].args[1]["spoken_language"] == "en"
 
-    @patch("api.routes.lecture_studio.time.sleep", return_value=None)
-    @patch("api.routes.lecture_studio.generate_spoken_text_and_formulas")
-    @patch("api.routes.lecture_studio._pg_session")
-    @patch("api.routes.lecture_studio.update_background_task")
-    @patch("api.routes.lecture_studio.create_background_task")
+    @patch("api.routes.lecture_studio.scripts.time.sleep", return_value=None)
+    @patch("api.routes.lecture_studio.scripts.generate_spoken_text_and_formulas")
+    @patch("api.routes.lecture_studio.scripts._pg_session")
+    @patch("api.routes.lecture_studio.scripts.update_background_task")
+    @patch("api.routes.lecture_studio.scripts.create_background_task")
     def test_explicit_language_overrides_course_setting(
         self, mock_create, mock_update, mock_pg, mock_gen, mock_sleep,
     ):
@@ -448,13 +448,13 @@ class TestBatchGenerateWorkerLanguage:
 
         assert mock_gen.call_args.kwargs["language"] == "en"
 
-    @patch("api.routes.lecture_studio.time.sleep", return_value=None)
-    @patch("api.routes.lecture_studio._get_course_chunks", return_value=[])
-    @patch("api.routes.lecture_studio.threading.Thread")
-    @patch("api.routes.lecture_studio.generate_spoken_text_and_formulas")
-    @patch("api.routes.lecture_studio._pg_session")
-    @patch("api.routes.lecture_studio.update_background_task")
-    @patch("api.routes.lecture_studio.create_background_task")
+    @patch("api.routes.lecture_studio.scripts.time.sleep", return_value=None)
+    @patch("api.routes.lecture_studio.scripts._get_course_chunks", return_value=[])
+    @patch("api.routes.lecture_studio.scripts.threading.Thread")
+    @patch("api.routes.lecture_studio.scripts.generate_spoken_text_and_formulas")
+    @patch("api.routes.lecture_studio.scripts._pg_session")
+    @patch("api.routes.lecture_studio.scripts.update_background_task")
+    @patch("api.routes.lecture_studio.scripts.create_background_task")
     def test_auto_audio_chain_is_active_and_passes_language(
         self, mock_create, mock_update, mock_pg, mock_gen, mock_thread, mock_get_chunks, mock_sleep,
     ):
@@ -494,10 +494,10 @@ class TestBatchGenerateWorkerLanguage:
 
 
 class TestBatchGenerateAudioLanguageChain:
-    @patch("api.routes.lecture_studio.threading.Thread")
-    @patch("api.routes.lecture_studio.create_background_task")
-    @patch("api.routes.lecture_studio._get_course_chunks")
-    @patch("api.routes.lecture_studio.get_editable_course_data")
+    @patch("api.routes.lecture_studio.scripts.threading.Thread")
+    @patch("api.routes.lecture_studio.scripts.create_background_task")
+    @patch("api.routes.lecture_studio.scripts._get_course_chunks")
+    @patch("api.routes.lecture_studio.scripts.get_editable_course_data")
     def test_same_language_uses_simple_audio_worker(
         self, mock_course, mock_chunks, mock_create, mock_thread,
     ):
@@ -520,10 +520,10 @@ class TestBatchGenerateAudioLanguageChain:
         mock_thread_instance.start.assert_called_once()
         assert resp.total_chunks == 2
 
-    @patch("api.routes.lecture_studio.threading.Thread")
-    @patch("api.routes.lecture_studio.create_background_task")
-    @patch("api.routes.lecture_studio._get_course_chunks")
-    @patch("api.routes.lecture_studio.get_editable_course_data")
+    @patch("api.routes.lecture_studio.scripts.threading.Thread")
+    @patch("api.routes.lecture_studio.scripts.create_background_task")
+    @patch("api.routes.lecture_studio.scripts._get_course_chunks")
+    @patch("api.routes.lecture_studio.scripts.get_editable_course_data")
     def test_no_body_falls_back_to_course_language(
         self, mock_course, mock_chunks, mock_create, mock_thread,
     ):
@@ -539,11 +539,11 @@ class TestBatchGenerateAudioLanguageChain:
         assert mock_thread.call_args.kwargs["target"].__name__ == "_batch_audio_worker"
         assert resp.total_chunks == 1
 
-    @patch("api.routes.lecture_studio.threading.Thread")
-    @patch("api.routes.lecture_studio.create_background_task")
-    @patch("api.routes.lecture_studio._save_lecture_language")
-    @patch("api.routes.lecture_studio._get_course_chunks")
-    @patch("api.routes.lecture_studio.get_editable_course_data")
+    @patch("api.routes.lecture_studio.scripts.threading.Thread")
+    @patch("api.routes.lecture_studio.scripts.create_background_task")
+    @patch("api.routes.lecture_studio.scripts._save_lecture_language")
+    @patch("api.routes.lecture_studio.scripts._get_course_chunks")
+    @patch("api.routes.lecture_studio.scripts.get_editable_course_data")
     def test_language_switch_updates_setting_and_uses_chain_worker(
         self, mock_course, mock_chunks, mock_save_lang, mock_create, mock_thread,
     ):
@@ -563,10 +563,10 @@ class TestBatchGenerateAudioLanguageChain:
         mock_save_lang.assert_called_once_with("course-1", course_data, "en")
         assert mock_thread.call_args.kwargs["target"].__name__ == "_batch_generate_and_audio_worker"
 
-    @patch("api.routes.lecture_studio.threading.Thread")
-    @patch("api.routes.lecture_studio.create_background_task")
-    @patch("api.routes.lecture_studio._get_course_chunks")
-    @patch("api.routes.lecture_studio.get_editable_course_data")
+    @patch("api.routes.lecture_studio.scripts.threading.Thread")
+    @patch("api.routes.lecture_studio.scripts.create_background_task")
+    @patch("api.routes.lecture_studio.scripts._get_course_chunks")
+    @patch("api.routes.lecture_studio.scripts.get_editable_course_data")
     def test_mismatched_chunk_language_triggers_chain_even_if_setting_matches(
         self, mock_course, mock_chunks, mock_create, mock_thread,
     ):
@@ -587,12 +587,12 @@ class TestBatchGenerateAudioLanguageChain:
 
 
 class TestBatchGenerateAndAudioChainWorker:
-    @patch("api.routes.lecture_studio._batch_audio_worker")
-    @patch("api.routes.lecture_studio.time.sleep", return_value=None)
-    @patch("api.routes.lecture_studio.generate_spoken_text_and_formulas")
-    @patch("api.routes.lecture_studio._pg_session")
-    @patch("api.routes.lecture_studio.update_background_task")
-    @patch("api.routes.lecture_studio._get_course_chunks")
+    @patch("api.routes.lecture_studio.scripts._batch_audio_worker")
+    @patch("api.routes.lecture_studio.scripts.time.sleep", return_value=None)
+    @patch("api.routes.lecture_studio.scripts.generate_spoken_text_and_formulas")
+    @patch("api.routes.lecture_studio.scripts._pg_session")
+    @patch("api.routes.lecture_studio.scripts.update_background_task")
+    @patch("api.routes.lecture_studio.scripts._get_course_chunks")
     def test_script_phase_then_audio_phase(
         self, mock_get_chunks, mock_update, mock_pg, mock_gen, mock_sleep, mock_audio_worker,
     ):
@@ -637,12 +637,12 @@ class TestBatchGenerateAndAudioChainWorker:
         assert args[1] == "course-1"
         assert args[3] == "en"
 
-    @patch("api.routes.lecture_studio._batch_audio_worker")
-    @patch("api.routes.lecture_studio.time.sleep", return_value=None)
-    @patch("api.routes.lecture_studio.generate_spoken_text_and_formulas")
-    @patch("api.routes.lecture_studio._pg_session")
-    @patch("api.routes.lecture_studio.update_background_task")
-    @patch("api.routes.lecture_studio._get_course_chunks")
+    @patch("api.routes.lecture_studio.scripts._batch_audio_worker")
+    @patch("api.routes.lecture_studio.scripts.time.sleep", return_value=None)
+    @patch("api.routes.lecture_studio.scripts.generate_spoken_text_and_formulas")
+    @patch("api.routes.lecture_studio.scripts._pg_session")
+    @patch("api.routes.lecture_studio.scripts.update_background_task")
+    @patch("api.routes.lecture_studio.scripts._get_course_chunks")
     def test_script_phase_failure_marks_task_failed_and_skips_audio(
         self, mock_get_chunks, mock_update, mock_pg, mock_gen, mock_sleep, mock_audio_worker,
     ):
@@ -665,11 +665,11 @@ class TestBatchAudioWorkerPhaseLabel:
     """_batch_audio_worker が result_data.phase="audio" を出すこと（既存 generated/errors
     などのキー・挙動は変更しない）。"""
 
-    @patch("api.routes.lecture_studio.time.sleep", return_value=None)
-    @patch("api.routes.lecture_studio.generate_tts_audio")
-    @patch("api.routes.lecture_studio._pg_session")
-    @patch("api.routes.lecture_studio.update_background_task")
-    @patch("api.routes.lecture_studio.create_background_task")
+    @patch("api.routes.lecture_studio.scripts.time.sleep", return_value=None)
+    @patch("api.routes.lecture_studio.scripts.generate_tts_audio")
+    @patch("api.routes.lecture_studio.scripts._pg_session")
+    @patch("api.routes.lecture_studio.scripts.update_background_task")
+    @patch("api.routes.lecture_studio.scripts.create_background_task")
     def test_phase_audio_present_and_language_passed_to_tts(
         self, mock_create, mock_update, mock_pg, mock_tts, mock_sleep,
     ):
@@ -766,7 +766,7 @@ class TestLectureScriptChunkOutLanguageFields:
 
 
 class TestLoadChunkSlideAudioMap:
-    @patch("api.routes.lecture_studio._pg_session")
+    @patch("api.routes.lecture_studio.scripts._pg_session")
     def test_groups_slide_indices_by_chunk(self, mock_pg):
         from api.routes.lecture_studio import _load_chunk_slide_audio_map
 
@@ -786,10 +786,10 @@ class TestLoadChunkSlideAudioMap:
 
 
 class TestGetCourseScriptsSlideFields:
-    @patch("api.routes.lecture_studio._chunk_status", return_value="generated")
-    @patch("api.routes.lecture_studio._load_chunk_slide_audio_map")
-    @patch("api.routes.lecture_studio._get_course_chunks")
-    @patch("api.routes.lecture_studio.get_viewable_course_data")
+    @patch("api.routes.lecture_studio.scripts._chunk_status", return_value="generated")
+    @patch("api.routes.lecture_studio.scripts._load_chunk_slide_audio_map")
+    @patch("api.routes.lecture_studio.scripts._get_course_chunks")
+    @patch("api.routes.lecture_studio.scripts.get_viewable_course_data")
     def test_slide_fields_computed_with_single_audio_query(
         self, mock_course, mock_chunks, mock_audio_map, mock_status,
     ):
@@ -814,10 +814,10 @@ class TestGetCourseScriptsSlideFields:
         assert chunk_out.audio_ready_slides == 1
         mock_audio_map.assert_called_once_with(["c1"])
 
-    @patch("api.routes.lecture_studio._chunk_status", return_value="ungenerated")
-    @patch("api.routes.lecture_studio._load_chunk_slide_audio_map", return_value={})
-    @patch("api.routes.lecture_studio._get_course_chunks")
-    @patch("api.routes.lecture_studio.get_viewable_course_data")
+    @patch("api.routes.lecture_studio.scripts._chunk_status", return_value="ungenerated")
+    @patch("api.routes.lecture_studio.scripts._load_chunk_slide_audio_map", return_value={})
+    @patch("api.routes.lecture_studio.scripts._get_course_chunks")
+    @patch("api.routes.lecture_studio.scripts.get_viewable_course_data")
     def test_slide_mismatch_flagged(self, mock_course, mock_chunks, mock_audio_map, mock_status):
         from api.routes.lecture_studio import get_course_scripts
 
@@ -876,7 +876,7 @@ class TestPreviewLectureAudioBehavior:
             preview_lecture_audio("topic:abc", 0, "alloy", {"id": "u1", "role": "TEACHER"})
         assert exc.value.status_code == 404
 
-    @patch("api.routes.lecture_studio._pg_session")
+    @patch("api.routes.lecture_studio.scripts._pg_session")
     def test_no_cache_returns_404(self, mock_pg):
         from fastapi import HTTPException
         from api.routes.lecture_studio import preview_lecture_audio
@@ -889,7 +889,7 @@ class TestPreviewLectureAudioBehavior:
             preview_lecture_audio(_CHUNK_ID, 0, "alloy", {"id": "u1", "role": "TEACHER"})
         assert exc.value.status_code == 404
 
-    @patch("api.routes.lecture_studio._pg_session")
+    @patch("api.routes.lecture_studio.scripts._pg_session")
     def test_cache_hit_returns_expected_response_shape(self, mock_pg):
         from api.routes.lecture_studio import preview_lecture_audio
 
@@ -910,7 +910,7 @@ class TestPreviewLectureAudioBehavior:
         assert "SELECT" in str(query_call.args[0])
         assert "generate_tts_audio" not in str(query_call.args[0])
 
-    @patch("api.routes.lecture_studio._pg_session")
+    @patch("api.routes.lecture_studio.scripts._pg_session")
     def test_does_not_generate_audio(self, mock_pg):
         """生成しない方針: generate_tts_audio が一切呼ばれないこと。"""
         from api.routes.lecture_studio import preview_lecture_audio
@@ -919,13 +919,13 @@ class TestPreviewLectureAudioBehavior:
         mock_session.execute.return_value.fetchone.return_value = None
         mock_pg.return_value = mock_session
 
-        with patch("api.routes.lecture_studio.generate_tts_audio") as mock_tts:
+        with patch("api.routes.lecture_studio.scripts.generate_tts_audio") as mock_tts:
             from fastapi import HTTPException
             with pytest.raises(HTTPException):
                 preview_lecture_audio(_CHUNK_ID, 0, "alloy", {"id": "u1", "role": "TEACHER"})
             mock_tts.assert_not_called()
 
-    @patch("api.routes.lecture_studio._pg_session")
+    @patch("api.routes.lecture_studio.scripts._pg_session")
     def test_db_error_is_treated_as_not_generated_not_500(self, mock_pg):
         """DB エラーでも 500 で詳細を漏らさず 404 (未生成扱い) にする（fail-safe）。"""
         from fastapi import HTTPException
@@ -947,7 +947,7 @@ class TestPreviewLectureAudioBehavior:
 
 
 class TestSaveLectureStudioSettingsErrorHandling:
-    @patch("api.routes.lecture_studio._pg_session")
+    @patch("api.routes.lecture_studio.scripts._pg_session")
     def test_db_error_rolls_back_and_reraises(self, mock_pg):
         from api.routes.lecture_studio import _save_lecture_studio_settings
 
@@ -963,12 +963,12 @@ class TestSaveLectureStudioSettingsErrorHandling:
 
 
 class TestBatchGenerateAndAudioWorkerErrorHandling:
-    @patch("api.routes.lecture_studio._batch_audio_worker")
-    @patch("api.routes.lecture_studio.time.sleep", return_value=None)
-    @patch("api.routes.lecture_studio.generate_spoken_text_and_formulas")
-    @patch("api.routes.lecture_studio._pg_session")
-    @patch("api.routes.lecture_studio.update_background_task")
-    @patch("api.routes.lecture_studio._get_course_chunks")
+    @patch("api.routes.lecture_studio.scripts._batch_audio_worker")
+    @patch("api.routes.lecture_studio.scripts.time.sleep", return_value=None)
+    @patch("api.routes.lecture_studio.scripts.generate_spoken_text_and_formulas")
+    @patch("api.routes.lecture_studio.scripts._pg_session")
+    @patch("api.routes.lecture_studio.scripts.update_background_task")
+    @patch("api.routes.lecture_studio.scripts._get_course_chunks")
     def test_script_phase_db_error_rolls_back_session(
         self, mock_get_chunks, mock_update, mock_pg, mock_gen, mock_sleep, mock_audio_worker,
     ):

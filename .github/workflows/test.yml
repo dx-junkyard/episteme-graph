@@ -42,12 +42,16 @@ jobs:
       - name: Install dependencies
         run: pip install -r api/requirements.txt
 
-      - name: Initialize PostgreSQL schema
+      # 正本は backend/db/*.sql（core/migrations.py::run_migrations() が起動時に
+      # 番号順に全ファイルを適用するのと同じ手順）。個別ファイルの決め打ちではなく
+      # 全件を番号順に流すことで、CI が「フレッシュ DB への番号順全適用」を毎回
+      # 実地検証する回帰ゲートになる（2026-07 の main.py インライン DDL 撤去に伴い変更）。
+      - name: Initialize PostgreSQL schema (apply all migrations in order)
         run: |
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/init.sql
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/013_theory_components.sql
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/015_document_pipeline.sql
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/019_revision_runs.sql
+          for f in $(ls db/[0-9][0-9][0-9]_*.sql | sort); do
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
+          done
 
       - name: Run tests
         run: python -m pytest tests/ -v

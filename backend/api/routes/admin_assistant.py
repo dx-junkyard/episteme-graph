@@ -27,6 +27,7 @@ from sqlalchemy import text as sa_text
 import services
 from dependencies import _get_current_user, _require_teacher  # noqa: F401
 from core.config import get_settings
+from core.course_data import course_title as _course_title
 from core.llm_usage.context import usage_context
 from core.postgres import get_session as _pg_session
 from core.schema import AUDIT_ENTITY_ASSISTANT_ACTION, AUDIT_ENTITY_NEXT_STEP
@@ -400,7 +401,7 @@ def _status_query_response(message: str, current_user: dict) -> AssistantChatRes
             for row in course_rows:
                 cs = status_projector.project_course_status(session, row["id"])
                 data = row["data"] if isinstance(row["data"], dict) else {}
-                title = data.get("title") or row["id"]
+                title = _course_title(data) or row["id"]
                 courses.append((title, cs))
         finally:
             session.close()

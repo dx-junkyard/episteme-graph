@@ -56,7 +56,7 @@ class _FakeDocumentSession:
             requested = {v for k, v in params.items() if k.startswith("p")}
             hit = bool(requested & self.doc_group_permissions)
             return _FakeResult([(1,)] if hit else [])
-        if "FROM document_group_permissions" in sql:
+        if "FROM object_group_permissions" in sql:
             return _FakeResult([])
         if "FROM group_members" in sql:
             return _FakeResult([(1,)] if self.group_member_hit else [])

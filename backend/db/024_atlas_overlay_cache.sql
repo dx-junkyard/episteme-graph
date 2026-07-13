@@ -6,7 +6,8 @@
 -- リアルタイム LLM 生成はしない。状態判定ロジックはサーバ側(core/atlas_state.py)に
 -- 一箇所隔離し、フロントへ複製しない。
 --
--- 適用: 本 SQL は正本リファレンス。実際の適用は backend/api/main.py の _run_migrations() 内。
+-- 適用: このファイルが正本。backend/core/migrations.py のランナーが起動時に行う
+--   （冪等・毎起動再実行）。
 --
 -- 設計上の確定:
 -- - 状態はすべて既存データ(theory_components / theory_claims /

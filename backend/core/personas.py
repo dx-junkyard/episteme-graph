@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from core.course_data import lecture_studio_settings as _lecture_studio_settings
+
 _VALID_PERSONA_IDS = {"", "general_friendly", "general_formal", "expert_friendly", "expert_formal"}
 
 _NARRATION_PROMPTS: dict[str, str] = {
@@ -96,7 +98,7 @@ def course_persona_settings(course_data: dict) -> dict:
         ``{"narration_persona": str, "response_persona": str}``
         未知のペルソナIDは空文字列に正規化される。
     """
-    settings = course_data.get("lecture_studio_settings", {}) or {}
+    settings = _lecture_studio_settings(course_data)
     return {
         "narration_persona": normalize_persona_id(settings.get("narration_persona")),
         "response_persona": normalize_persona_id(settings.get("response_persona")),

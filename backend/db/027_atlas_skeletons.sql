@@ -20,6 +20,9 @@
 --     同形の JSONB (YAML と共通スキーマ)
 --   - 既存カートリッジ同梱の skeleton.yaml は起動時に一度だけ取り込む (冪等)。
 --     以後 DB が正本、ファイルは新規環境のシードとして残置
+--
+-- 適用: 本 SQL ファイルが正本。backend/core/migrations.py のランナーが起動時に行う
+--   （冪等・毎起動再実行）。
 
 CREATE TABLE IF NOT EXISTS atlas_skeletons (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),

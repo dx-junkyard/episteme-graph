@@ -8,6 +8,7 @@
 --   消失したりしないため。帰属 ID は文字列/UUID として残すのみ）。
 --   コスト（金額）列は持たない。単価は変動するため集計時に価格表（U7）で都度換算する。
 --
+-- このファイルが正本。適用は `backend/core/migrations.py` のランナーが起動時に行う（冪等・毎起動再実行）。
 -- すべて IF NOT EXISTS / CREATE OR REPLACE で冪等。
 
 CREATE TABLE IF NOT EXISTS llm_usage_events (

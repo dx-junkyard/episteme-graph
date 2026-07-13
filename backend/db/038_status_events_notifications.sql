@@ -19,8 +19,8 @@
 --     で状態遷移する（S4）。
 --
 -- 正本設計書: docs/features/status_notification_design.md
--- 実際の適用は backend/api/main.py の _run_migrations()（Migration 038）で行う。
--- このファイルは正本スキーマのリファレンス。全文 IF NOT EXISTS で冪等。
+-- このファイルが正本。適用は `backend/core/migrations.py` のランナーが起動時に行う（冪等・毎起動再実行）。
+-- 全文 IF NOT EXISTS で冪等。
 -- ============================================================
 
 -- ------------------------------------------------------------
