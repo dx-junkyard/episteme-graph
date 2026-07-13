@@ -19,8 +19,6 @@ def _override_settings(monkeypatch):
         jwt_secret="test-secret-key",
         admin_password="test-admin-password",
         database_url="postgresql://test:test@localhost:5432/test",
-        neo4j_uri="bolt://localhost:7687",
-        neo4j_auth="neo4j/test",
         minio_endpoint="localhost:9000",
         minio_access_key="testaccess",
         minio_secret_key="testsecret",
@@ -44,3 +42,15 @@ def _override_settings(monkeypatch):
     yield
 
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_llm_usage_context():
+    """bind_usage_context を使う worker 関数をテストがメインスレッドで直接呼ぶと
+    contextvar が後続テストへ漏れるため、テストごとに既定値へ戻す。"""
+    yield
+    try:
+        from core.llm_usage import context as _llm_usage_context
+        _llm_usage_context._current_context.set(_llm_usage_context.UsageContext())
+    except Exception:
+        pass

@@ -29,6 +29,7 @@ from sqlalchemy import text as sa_text
 from core import atlas as atlas_module
 from core import atlas_state
 from core import atlas_placement
+from core.course_data import course_cartridge_id, course_topics
 from dependencies import _get_current_user
 
 logger = logging.getLogger(__name__)
@@ -202,9 +203,7 @@ def get_atlas(
                 course_data = None
             if course_data is not None:
                 resolved = atlas_state.resolve_course_cartridge(session, course_data)
-                explicit_course_cartridge = bool(
-                    str(course_data.get("cartridge_id") or "").strip()
-                )
+                explicit_course_cartridge = bool(course_cartridge_id(course_data))
                 derived_cartridge = (
                     not cartridge_id and not explicit_course_cartridge and bool(resolved)
                 )
@@ -239,7 +238,7 @@ def get_atlas(
         if not resolved_focus and topic:
             topic_info = None
             if course_data is not None:
-                for t in course_data.get("topics") or []:
+                for t in course_topics(course_data):
                     if isinstance(t, dict) and str(t.get("id") or "") == str(topic):
                         topic_info = t
                         break

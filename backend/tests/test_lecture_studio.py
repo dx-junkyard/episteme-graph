@@ -211,7 +211,8 @@ class TestLectureStudioModeUI:
     def test_mode_settings_logic_exists(self):
         from pathlib import Path
 
-        js = (Path(__file__).resolve().parents[2] / "frontend" / "public" / "js" / "admin.js").read_text(encoding="utf-8")
+        # Tier 3-17b: 原稿スタジオの JS は admin-lecture-studio.js に分離された。
+        js = (Path(__file__).resolve().parents[2] / "frontend" / "public" / "js" / "admin-lecture-studio.js").read_text(encoding="utf-8")
         assert "lsOpenSettingsModal" in js
         assert "/lecture-studio/settings" in js
         assert "サイエンス・コミュニケーター" in js
@@ -221,7 +222,7 @@ class TestLectureStudioModeUI:
         """Course topic detail rendering must not preempt the theory graph tabs."""
         from pathlib import Path
 
-        js = (Path(__file__).resolve().parents[2] / "frontend" / "public" / "js" / "admin.js").read_text(encoding="utf-8")
+        js = (Path(__file__).resolve().parents[2] / "frontend" / "public" / "js" / "admin-lecture-studio.js").read_text(encoding="utf-8")
         assert 'selectedScope.type === "course_topic" && !lsIsTheoryGraphView(currentView)' in js
         assert "lsScopeHasDocumentContext" in js
         assert 'lsState.view === "graph"' in js
@@ -232,7 +233,7 @@ class TestLectureStudioModeUI:
 
         root = Path(__file__).resolve().parents[2]
         html = (root / "frontend" / "public" / "admin.html").read_text(encoding="utf-8")
-        js = (root / "frontend" / "public" / "js" / "admin.js").read_text(encoding="utf-8")
+        js = (root / "frontend" / "public" / "js" / "admin-lecture-studio.js").read_text(encoding="utf-8")
         assert '<button class="ls-work-tab" data-ls-view="graph" hidden>理論グラフ</button>' in html
         assert 'if (lsState.leftTab === "document") return ["edit", "structure", "graph"];' in js
         assert 'var topView = lsIsTheoryGraphView(view) ? "graph" : view;' in js
@@ -240,7 +241,7 @@ class TestLectureStudioModeUI:
     def test_course_draft_check_question_detail_fields_exist(self):
         from pathlib import Path
 
-        js = (Path(__file__).resolve().parents[2] / "frontend" / "public" / "js" / "admin.js").read_text(encoding="utf-8")
+        js = (Path(__file__).resolve().parents[2] / "frontend" / "public" / "js" / "admin-lecture-studio.js").read_text(encoding="utf-8")
         assert "ls-course-check-model-answer" in js
         assert "ls-course-check-requirements" in js
         assert "ls-course-check-explanation" in js
@@ -257,13 +258,19 @@ class TestLectureStudioModeUI:
     def test_full_document_pipeline_run_does_not_resume_failed_artifacts(self):
         from pathlib import Path
 
-        source = (Path(__file__).resolve().parents[1] / "api" / "routes" / "lecture_studio.py").read_text(encoding="utf-8")
+        # Tier 3-17a: document-pipeline の実行ロジックは lecture_studio パッケージの
+        # pipeline.py に移設された。
+        source = (
+            Path(__file__).resolve().parents[1] / "api" / "routes" / "lecture_studio" / "pipeline.py"
+        ).read_text(encoding="utf-8")
         assert "resume=target_stage is not None" in source
 
 
 class TestMaterialPipelineSourceLoading:
     def test_load_pipeline_source_detects_tex_archive_without_filename_suffix(self, monkeypatch):
-        from routes import lecture_studio
+        # Tier 3-17a: _load_pipeline_source / get_storage_client は
+        # routes.lecture_studio.pipeline モジュールで定義されている。
+        from routes.lecture_studio import pipeline as lecture_studio_pipeline
 
         calls = []
 
@@ -274,16 +281,16 @@ class TestMaterialPipelineSourceLoading:
                     return b"tex-archive"
                 raise FileNotFoundError(object_name)
 
-        monkeypatch.setattr(lecture_studio, "get_storage_client", lambda: FakeStorage())
+        monkeypatch.setattr(lecture_studio_pipeline, "get_storage_client", lambda: FakeStorage())
 
-        data, source_kind = lecture_studio._load_pipeline_source("mat-1", "arXiv-2407.01221v2")
+        data, source_kind = lecture_studio_pipeline._load_pipeline_source("mat-1", "arXiv-2407.01221v2")
 
         assert data == b"tex-archive"
         assert source_kind == "tex_archive"
         assert calls[0] == ("raw-papers", "uploads/mat-1.tar.gz")
 
     def test_load_pipeline_source_keeps_pdf_when_pdf_exists(self, monkeypatch):
-        from routes import lecture_studio
+        from routes.lecture_studio import pipeline as lecture_studio_pipeline
 
         class FakeStorage:
             def get_object(self, bucket, object_name):
@@ -291,9 +298,9 @@ class TestMaterialPipelineSourceLoading:
                     return b"pdf"
                 raise FileNotFoundError(object_name)
 
-        monkeypatch.setattr(lecture_studio, "get_storage_client", lambda: FakeStorage())
+        monkeypatch.setattr(lecture_studio_pipeline, "get_storage_client", lambda: FakeStorage())
 
-        data, source_kind = lecture_studio._load_pipeline_source("mat-2", "paper.pdf")
+        data, source_kind = lecture_studio_pipeline._load_pipeline_source("mat-2", "paper.pdf")
 
         assert data == b"pdf"
         assert source_kind == "pdf"
@@ -360,7 +367,11 @@ class TestPersonaPromptHelpers:
 class TestLectureStudioSettingsRegeneration:
     """口調設定変更後の全スクリプト再生成フラグを検証する。"""
 
-    SOURCE_FILE = os.path.join(os.path.dirname(__file__), "..", "api", "routes", "lecture_studio.py")
+    # Tier 3-17a: 口調設定・再生成フラグのロジックは lecture_studio パッケージの
+    # scripts.py に移設された。
+    SOURCE_FILE = os.path.join(
+        os.path.dirname(__file__), "..", "api", "routes", "lecture_studio", "scripts.py",
+    )
 
     def test_settings_change_marks_scripts_for_regeneration(self):
         source = open(self.SOURCE_FILE, encoding="utf-8").read()

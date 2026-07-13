@@ -8,7 +8,7 @@ Usage::
     from core.tts import generate_tts_audio, TtsFatalError
 
     try:
-        audio_bytes = generate_tts_audio("読み上げるテキスト")
+        audio_bytes = generate_tts_audio("読み上げるテキスト", language="ja")
     except TtsFatalError:
         # 設定起因の恒久エラー。リトライ不要
         ...
@@ -18,10 +18,22 @@ from __future__ import annotations
 
 import logging
 import re
+import time
+from typing import Any
 
 from core.config import get_settings
+from core.llm_usage.observe import observe_tts
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_len(value: Any) -> int:
+    """``len()`` が例外を投げうる想定外入力でも安全に 0 を返す（観測フック専用）。"""
+    try:
+        return len(value)
+    except Exception:
+        return 0
+
 
 # 音声読み上げ前のテキスト整形: LaTeX・markdown 記号・システムマーカーを除去する。
 _SPEECH_STRIP_PATTERNS = (
@@ -55,7 +67,7 @@ class TtsFatalError(Exception):
     """
 
 
-def generate_tts_audio(spoken_text: str) -> bytes | None:
+def generate_tts_audio(spoken_text: str, language: str = "ja") -> bytes | None:
     """設定に基づいて TTS プロバイダを動的に選択し、MP3 音声データを返す。
 
     選択ロジック:
@@ -66,6 +78,10 @@ def generate_tts_audio(spoken_text: str) -> bytes | None:
 
     Args:
         spoken_text: 音声合成するテキスト。OpenAI は 4096 文字、Google は 5000 文字で切り詰める。
+        language: 読み上げ言語 (``"ja"`` / ``"en"``)。既定は ``"ja"``（後方互換）。
+            OpenAI は多言語対応の voice を使うため voice 自体の切替は不要（テキストに従う）。
+            Google Cloud TTS はこの値で ``language_code`` を切り替える
+            （migration 040: ``ja-JP`` ハードコード撤廃）。
 
     Returns:
         bytes: MP3 形式の音声データ。生成失敗またはプロバイダ未設定の場合は ``None``。
@@ -76,20 +92,37 @@ def generate_tts_audio(spoken_text: str) -> bytes | None:
     settings = get_settings()
     api_key = settings.llm_api_key
     provider = settings.llm_provider
+    # lecture_tts_voice 未設定の Settings 互換オブジェクト（テストのモック等）でも
+    # 動作するよう getattr で防御的に取得する。
+    voice = getattr(settings, "lecture_tts_voice", None) or "alloy"
+    google_language_code = "en-US" if language == "en" else "ja-JP"
 
     # --- OpenAI TTS ---
     if provider == "openai":
+        text_to_speak = spoken_text[:4096]
+        synthesis_attempted = False
+        started: float | None = None
         try:
             import openai  # type: ignore[import]
             client = openai.OpenAI(api_key=api_key)
+            synthesis_attempted = True
+            started = time.monotonic()
             response = client.audio.speech.create(
                 model="tts-1",
-                voice="alloy",
-                input=spoken_text[:4096],
+                voice=voice,
+                input=text_to_speak,
                 response_format="mp3",
             )
-            return response.content
         except Exception as exc:
+            if synthesis_attempted:
+                # 実際に合成を試行した場合のみ記録する（characters は実際に送ったテキスト長）。
+                observe_tts(
+                    provider="openai",
+                    model="tts-1",
+                    characters=_safe_len(text_to_speak),
+                    error=exc,
+                    started_monotonic=started,
+                )
             exc_str = str(exc)
             # 認証エラーはリトライしても回復しない
             if "401" in exc_str or "AuthenticationError" in type(exc).__name__:
@@ -98,27 +131,47 @@ def generate_tts_audio(spoken_text: str) -> bytes | None:
                 ) from exc
             logger.exception("OpenAI TTS の呼び出しに失敗しました")
             return None
+        observe_tts(
+            provider="openai",
+            model="tts-1",
+            characters=_safe_len(text_to_speak),
+            started_monotonic=started,
+        )
+        return response.content
 
     # --- Google Cloud Text-to-Speech ---
     if provider in ("google", "gemini-vertex"):
+        text_to_speak = spoken_text[:5000]
+        synthesis_attempted = False
+        started: float | None = None
+        tts_model_label = f"google-tts:{google_language_code}"
         try:
             from google.cloud import texttospeech  # type: ignore[import]
             tts_client = texttospeech.TextToSpeechClient()
-            synthesis_input = texttospeech.SynthesisInput(text=spoken_text[:5000])
+            synthesis_input = texttospeech.SynthesisInput(text=text_to_speak)
             voice_params = texttospeech.VoiceSelectionParams(
-                language_code="ja-JP",
+                language_code=google_language_code,
                 ssml_gender=texttospeech.SsmlVoiceGender.NEUTRAL,
             )
             audio_config = texttospeech.AudioConfig(
                 audio_encoding=texttospeech.AudioEncoding.MP3,
             )
+            synthesis_attempted = True
+            started = time.monotonic()
             tts_response = tts_client.synthesize_speech(
                 input=synthesis_input,
                 voice=voice_params,
                 audio_config=audio_config,
             )
-            return tts_response.audio_content
         except Exception as exc:
+            if synthesis_attempted:
+                observe_tts(
+                    provider=provider,
+                    model=tts_model_label,
+                    characters=_safe_len(text_to_speak),
+                    error=exc,
+                    started_monotonic=started,
+                )
             exc_str = str(exc)
             # SERVICE_DISABLED はリトライしても回復しない恒久エラー
             if "SERVICE_DISABLED" in exc_str or "has not been used" in exc_str:
@@ -129,6 +182,13 @@ def generate_tts_audio(spoken_text: str) -> bytes | None:
                 ) from exc
             logger.exception("Google Cloud TTS の呼び出しに失敗しました")
             return None
+        observe_tts(
+            provider=provider,
+            model=tts_model_label,
+            characters=_safe_len(text_to_speak),
+            started_monotonic=started,
+        )
+        return tts_response.audio_content
 
     # --- プロバイダ未設定 ---
     logger.error(

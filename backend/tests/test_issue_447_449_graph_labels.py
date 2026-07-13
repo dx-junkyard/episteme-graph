@@ -7,7 +7,8 @@
       マッチではなく node 自身のフラグ参照から導かれる。フラグは API/agent schema を
       経由して frontend に伝搬する。
 
-frontend に JS テストハーネスが無いため、admin.js の純粋ヘルパを Node で評価して
+frontend に JS テストハーネスが無いため、原稿スタジオ（Lecture Script Studio。Tier 3-17b で
+admin.js から admin-lecture-studio.js へ分離済み）の純粋ヘルパを Node で評価して
 ドメイン横断の入力に対する挙動を検証する（Node が無い環境では source-assertion に縮退）。
 """
 
@@ -22,7 +23,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-ADMIN_JS = ROOT / "frontend" / "public" / "js" / "admin.js"
+ADMIN_LS_JS = ROOT / "frontend" / "public" / "js" / "admin-lecture-studio.js"
 STYLES_CSS = ROOT / "frontend" / "public" / "css" / "styles.css"
 SCHEMAS = ROOT / "backend" / "api" / "schemas.py"
 
@@ -40,7 +41,7 @@ def _read(path: Path) -> str:
 
 class TestIssue447NoInternalIdInLabel:
     def test_admin_js_defines_strip_helpers(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         for fn in (
             "lsGraphLooksLikeInternalId",
             "lsGraphStripInternalIds",
@@ -50,13 +51,13 @@ class TestIssue447NoInternalIdInLabel:
             assert "function " + fn in source, f"{fn} must be defined in admin.js"
 
     def test_display_label_routes_through_semantic_label(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         # 主たる label entrypoint が semantic label を経由する。
         assert "function lsGraphNodeDisplayLabel" in source
         assert "lsGraphSemanticLabel(node)" in source
 
     def test_main_stage_shortening_applies_to_all_operation_nodes(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         # 旧実装の main-layer 限定ガードを撤去し、operation node 全般へ拡張したこと。
         assert 'layer !== "main" || ctype !== "TheoryOperationNode"' not in source
         assert "isOperationNode" in source
@@ -64,7 +65,7 @@ class TestIssue447NoInternalIdInLabel:
     @pytest.mark.skipif(shutil.which("node") is None, reason="node unavailable")
     def test_strip_internal_ids_cross_domain(self):
         # admin.js の純粋ヘルパを抜き出して Node で評価する（ドメイン横断 fixture）。
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         helpers = []
         for marker in ("function lsGraphLooksLikeInternalId", "function lsGraphStripInternalIds"):
             start = source.index(marker)
@@ -103,13 +104,13 @@ class TestIssue447NoInternalIdInLabel:
 
 class TestIssue449AnchorEmphasis:
     def test_vis_node_references_anchor_flag(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         # visNode 構築が node.is_thesis_anchor を参照すること（ID マッチに依存しない）。
         assert "node.is_thesis_anchor" in source
         assert "visNode.borderWidth = 4" in source
 
     def test_legend_explains_anchor_symbol(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         assert "ls-legend-anchor" in source
         css = _read(STYLES_CSS)
         assert ".ls-legend-anchor" in css

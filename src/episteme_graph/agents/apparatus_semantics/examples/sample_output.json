@@ -1,0 +1,60 @@
+{
+  "document_id": "doc_sample_paper",
+  "cartridge_id": "particle_physics",
+  "apparatus_records": [
+    {
+      "figure_id": "fig_1",
+      "figure_key": "fig_1",
+      "apparatus_name_candidate": "Time-of-flight drift chamber",
+      "matched_library_entry_id": "lib_entry_0001",
+      "matched_library_version_no": 3,
+      "match_status": "matched",
+      "parts": [
+        {
+          "name": "ion source",
+          "role": "injects charged particles into the drift tube",
+          "evidence_quote": "an ion source that injects charged particles into an evacuated drift tube",
+          "reason": "Explicitly named and described in the nearby text.",
+          "confidence": 0.88
+        },
+        {
+          "name": "drift tube",
+          "role": "field-free flight path between source and detector",
+          "evidence_quote": "drift tube",
+          "reason": "Named in both caption and nearby text.",
+          "confidence": 0.9
+        },
+        {
+          "name": "detector plate",
+          "role": "records arrival time of each particle",
+          "evidence_quote": "A detector plate at the far end records the arrival time of each particle.",
+          "reason": "Explicitly described in the nearby text.",
+          "confidence": 0.85
+        }
+      ],
+      "connections": [
+        {
+          "from_part": "ion source",
+          "to_part": "drift tube",
+          "relation": "injects particles into",
+          "reason": "Caption describes source, drift tube, and detector 'connected in series'.",
+          "confidence": 0.8
+        },
+        {
+          "from_part": "drift tube",
+          "to_part": "detector plate",
+          "relation": "delivers particles to",
+          "reason": "Caption describes source, drift tube, and detector 'connected in series'.",
+          "confidence": 0.8
+        }
+      ],
+      "evidence_quote": "Schematic of the vacuum chamber assembly, showing the ion source, drift tube, and detector plate connected in series.",
+      "reason": "Image and caption match the retrieved library candidate's visual cues and typical parts closely.",
+      "confidence": 0.86,
+      "source_backing_status": "partially_source_backed",
+      "review_status": "review_required",
+      "repair_failed": false
+    }
+  ],
+  "validation_issues": []
+}

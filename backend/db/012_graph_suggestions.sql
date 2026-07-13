@@ -1,6 +1,11 @@
 -- ============================================================
 -- Migration 012: チャンク別グラフサジェストと教員向けつまづき記録
 -- ============================================================
+--
+-- このファイルが正本。適用は `backend/core/migrations.py` のランナーが起動時に行う（冪等・毎起動再実行）。
+-- element_type の CHECK は最初から6値（'reference' / 'citation' を含む）で作る。
+-- 旧バージョンの本ファイルで4値のまま作られた既存 DB の治癒は
+-- backend/db/017_tex_references_mentions.sql が担当する（本ファイルでは再定義しない）。
 
 CREATE TABLE IF NOT EXISTS chunk_graph_mentions (
     id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),

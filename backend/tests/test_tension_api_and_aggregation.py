@@ -19,7 +19,6 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "backend" / "api"))
 
-MAIN = ROOT / "backend" / "api" / "main.py"
 MIGRATION = ROOT / "backend" / "db" / "022_tension.sql"
 LEARNING = ROOT / "backend" / "api" / "routes" / "learning.py"
 SERVICES = ROOT / "backend" / "api" / "services.py"
@@ -33,6 +32,7 @@ def _read(path: Path) -> str:
 
 class TestMigration022:
     def test_reference_sql_defines_indexes_only(self):
+        """正本は backend/db/022_tension.sql（main.py のインライン DDL ではない）。"""
         sql = _read(MIGRATION)
         assert "CREATE INDEX IF NOT EXISTS idx_interest_traces_kind_status" in sql
         assert "CREATE INDEX IF NOT EXISTS idx_interest_traces_candidate" in sql
@@ -40,17 +40,10 @@ class TestMigration022:
         assert "CREATE TABLE" not in sql
         assert "ALTER TABLE" not in sql
 
-    def test_main_applies_migration_022(self):
-        source = _read(MAIN)
-        assert "Migration 022" in source
-        assert "idx_interest_traces_kind_status" in source
-        assert "idx_interest_traces_candidate" in source
-        assert "Migrations (002-" in source  # 以降の migration 追加 (023...) でも壊れないよう prefix で確認
-
 
 class TestVocabulary:
     def test_interest_kinds_and_statuses_extended(self):
-        # services.py は import に neo4j 等を要するため静的検証（既存テストと同方式）
+        # services.py の import は外部依存の初期化コストが大きいため静的検証（既存テストと同方式）
         source = _read(SERVICES)
         kinds_block = source.split("_INTEREST_KINDS = (")[1].split(")")[0]
         assert '"tension"' in kinds_block
@@ -107,9 +100,14 @@ class TestOwnershipAndPrivacy:
         assert '"confidence"' not in body
 
     def test_state_changes_are_audited(self):
+        """entity_type は core/schema.py の AUDIT_ENTITY_TENSION カタログ定数を使う（提案7）。"""
+        from core.schema import AUDIT_ENTITY_TENSION
+
+        assert AUDIT_ENTITY_TENSION == "tension"
         source = _read(SERVICES)
         assert "_record_tension_event" in source
-        assert "'tension'" in source.split("def _record_tension_event")[1].split("\ndef ")[0]
+        body = source.split("def _record_tension_event")[1].split("\ndef ")[0]
+        assert "AUDIT_ENTITY_TENSION" in body
 
     def test_candidates_hidden_from_trace_view(self):
         """未確定候補・棄却はダイジェスト経由でのみ提示（問いの軌跡に出さない）。"""
@@ -127,10 +125,14 @@ class TestAggregation:
         assert "'candidate'" not in body.split("kind = 'tension'")[1].split("GROUP BY")[0]
 
     def test_k_anonymity_suppresses_small_cells(self):
+        """k=3 の閾値は core/privacy.py の共通 k-匿名ゲート（提案8）に一本化されている。"""
+        from core.privacy import K_ANONYMITY
+
+        assert K_ANONYMITY == 3
         source = _read(SERVICES)
+        assert "from core.privacy import K_ANONYMITY" in source
         body = source.split("def aggregate_interest_dashboard")[1].split("\ndef ")[0]
-        assert "_TENSION_K_ANONYMITY = 3" in body
-        assert "learners < _TENSION_K_ANONYMITY" in body
+        assert "learners < K_ANONYMITY" in body
 
     def test_heatmap_has_no_personal_fields(self):
         source = _read(SERVICES)

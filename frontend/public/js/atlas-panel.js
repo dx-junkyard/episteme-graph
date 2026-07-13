@@ -69,7 +69,10 @@
       if (!act.always && !info[act.key]) return; // learn/evid: 霧・行間では非表示
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.className = "atlas-act-btn";
+      const actionClass = act.key === "learn"
+        ? "atlas-act-primary"
+        : act.key === "evid" ? "atlas-act-secondary" : "atlas-act-quiet";
+      btn.className = "atlas-act-btn " + actionClass;
       btn.setAttribute("data-act", act.key);
       btn.textContent = act.label;
       btn.addEventListener("click", () => runAction(act.key));

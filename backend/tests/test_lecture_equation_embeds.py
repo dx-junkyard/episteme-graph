@@ -3,7 +3,7 @@
 数式埋め込みは evidence_links の `latex`（描画用 TeX）を最優先で使い、
 `summary`（意味要約・散文）を LaTeX として埋め込まないこと。
 
-`routes/lecture.py` は fastapi/neo4j 経由の重い依存チェーンを持つため、
+`routes/lecture.py` は fastapi 経由の重い依存チェーンを持つため、
 既存の `test_lecture_audio_availability.py` と同様に、対象の純関数
 `_resolve_equation_embeds` をソースから直接 exec して単体テストする。
 """

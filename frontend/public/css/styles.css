@@ -295,47 +295,14 @@ body {
   background: var(--color-text-info);
 }
 
-/* レクチャー読み上げキャプション: いま読んでいる文だけを 1〜2 行で表示 */
-.lecture-caption {
-  display: none;
-  flex: 0 0 auto;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 8px 12px;
-  margin-bottom: 10px;
-  border-radius: 8px;
-  border-left: 3px solid var(--color-text-info);
-  background: var(--color-background-info);
-  font-size: 14px;
-  line-height: 1.7;
-  color: var(--color-text-primary);
-}
-.lecture-caption.visible { display: flex; }
-.lecture-caption.warn {
-  border-left-color: var(--color-text-warning);
-  background: #fff6e6;
-}
-.lecture-caption-icon {
-  flex: 0 0 auto;
-  font-size: 13px;
-  margin-top: 2px;
-}
-.lecture-caption-text {
-  flex: 1;
-  min-width: 0;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-/* レクチャー中のレイアウト: 下段（チャット/ホワイトボード）と分割ハンドルを畳み、
-   上段の教材をいっぱいに広げる。中段キャプション（読み上げ中の行）は教材直下に残す。 */
+/* レクチャー中のレイアウト: 上段の教材区画（#material-region）を隠し、代わりに
+   スライドステージ（#lecture-slide-stage）をいっぱいに広げる。下段（チャット/
+   ホワイトボード）と分割ハンドルは畳む。 */
 .mn.lecture-on #material-region {
-  flex: 1 1 auto !important;
-  max-height: none !important;
-  height: auto !important;
-  margin-bottom: 0;
+  display: none !important;
+}
+.mn.lecture-on .lecture-slide-stage {
+  display: flex !important;
 }
 .mn.lecture-on #split-handle,
 .mn.lecture-on #chat-area,
@@ -1421,6 +1388,151 @@ body {
 
 .admin-tab-group.open .admin-tab-menu {
   display: block;
+}
+
+/* ── Field Atlas operations dashboard ───────────────────────────── */
+.atlas-admin-subtitle {
+  margin: 0;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+}
+.atlas-admin-overview {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg-secondary);
+  padding: 14px;
+}
+.atlas-admin-empty {
+  color: var(--color-text-tertiary);
+  font-size: 13px;
+}
+.atlas-admin-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+.atlas-admin-summary-card {
+  background: var(--color-background-primary);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-height: 54px;
+}
+.atlas-admin-summary-label {
+  display: block;
+  color: var(--color-text-tertiary);
+  font-size: 11.5px;
+  margin-bottom: 4px;
+}
+.atlas-admin-summary-value {
+  color: var(--color-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+.atlas-admin-next {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--color-text-info);
+  background: var(--color-background-primary);
+  border-radius: 6px;
+}
+.atlas-admin-next-copy {
+  min-width: 0;
+  font-size: 13px;
+  color: var(--color-text-primary);
+}
+.atlas-admin-next-copy small {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--color-text-tertiary);
+}
+.atlas-admin-primary {
+  background: var(--color-text-info, #378add) !important;
+  border-color: var(--color-text-info, #378add) !important;
+  color: #fff !important;
+}
+.atlas-admin-local-nav {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+  overflow-x: auto;
+}
+.atlas-admin-local-nav-btn {
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: 7px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  font: inherit;
+  font-size: 12.5px;
+}
+.atlas-admin-local-nav-btn.on {
+  color: var(--color-text-info);
+  border-bottom-color: var(--color-text-info);
+}
+.atlas-admin-local-nav-btn span:not(:empty) {
+  display: inline-block;
+  min-width: 16px;
+  padding: 1px 5px;
+  margin-left: 3px;
+  border-radius: 9px;
+  background: var(--color-bg-tertiary);
+  font-size: 10.5px;
+}
+.atlas-admin-workflow {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.atlas-admin-step {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 9px;
+  border: 1px solid var(--color-border);
+  border-radius: 7px;
+  color: var(--color-text-tertiary);
+  font-size: 11.5px;
+}
+.atlas-admin-step b {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--color-bg-tertiary);
+  font-size: 11px;
+}
+.atlas-admin-step.done { color: var(--color-text-success, #0f6e56); }
+.atlas-admin-step.done b { background: #e1f5ee; }
+.atlas-admin-step.current {
+  color: var(--color-text-info);
+  border-color: var(--color-text-info);
+  background: rgba(55, 138, 221, 0.06);
+}
+.atlas-admin-step.current b { background: #e6f1fb; }
+.atlas-admin-report-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 8px;
+  font-size: 10.5px;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+}
+.atlas-admin-report-badge.pending { background: #faeeda; color: #633806; }
+.atlas-admin-report-badge.accepted { background: #e6f1fb; color: #0c447c; }
+
+@media (max-width: 760px) {
+  .atlas-admin-summary-grid,
+  .atlas-admin-workflow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .atlas-admin-next { align-items: flex-start; flex-direction: column; }
 }
 
 /* menu items (were the old flat tab buttons) */
@@ -2528,27 +2640,76 @@ body {
   background: #fef5e6;
 }
 
-/* Lecture content area — 音声で解説する「教材」の本文を読ませる面。
-   読み上げ台本を並べるのではなく、教材を落ち着いて表示し、
-   いま読んでいる文だけを最小限ハイライトする。 */
-.lecture-content {
+/* レクチャースライドステージ: 表示と音声の同期最小単位（スライド）を1枚だけ表示する
+   面。縦スクロールはさせず、収まらない場合は #lecture-slide-inner 側で
+   フォント段階縮小 → 等比縮小して全文を1画面に収める（fitLectureSlideContent）。 */
+.lecture-slide-stage {
   display: none;
-  flex-direction: column;
-  gap: 10px;
-  padding: 16px 0;
-}
-
-.lecture-content.visible {
-  display: flex;
-  flex: 1;
-  overflow-y: auto;
+  position: relative;
+  flex: 1 1 auto;
   min-height: 0;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 20px 28px;
+  border: 0.5px solid var(--color-border-tertiary);
+  border-radius: 10px;
+  background: var(--color-background-secondary, #fafbfd);
+  margin-bottom: 12px;
 }
 
-.lecture-loading {
-  display: flex;
-  align-items: center;
-  padding: 8px 0;
+.lecture-slide-inner {
+  width: 100%;
+  max-width: 880px;
+  max-height: 100%;
+  overflow: hidden;
+  font-size: 16px;
+  line-height: 1.8;
+  color: var(--color-text-primary);
+  transform-origin: top center;
+}
+
+.lecture-slide-message {
+  color: var(--color-text-tertiary);
+  font-size: 14px;
+  text-align: center;
+}
+
+.lecture-slide-message.warn {
+  color: var(--color-text-warning);
+}
+
+/* 「音声未生成」の恒常バッジ（ステージ右下・控えめ） */
+.lecture-slide-badge {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  background: var(--color-background-primary);
+  border: 0.5px solid var(--color-border-tertiary);
+  border-radius: 10px;
+  padding: 2px 8px;
+  opacity: 0.85;
+}
+
+/* 一時的な通知（音声準備中・自動再生ブロック・再生失敗などの警告） */
+.lecture-slide-notice {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 10px;
+  font-size: 12px;
+  text-align: center;
+  color: var(--color-text-info);
+  background: var(--color-background-info);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
+.lecture-slide-notice.warn {
+  color: var(--color-text-warning);
+  background: #fff6e6;
 }
 
 /* 文単位の追従ハイライト（読んでいるところの最小限表示）。
@@ -2565,33 +2726,6 @@ body {
 .lecture-sentence.reading {
   background: var(--color-background-info);
   color: var(--color-text-primary);
-}
-
-.lecture-segment {
-  opacity: 0;
-  transform: translateY(8px);
-  transition: opacity 0.6s ease-out, transform 0.6s ease-out;
-  line-height: 1.9;
-  font-size: 15px;
-  color: var(--color-text-primary);
-}
-
-.lecture-segment.visible {
-  opacity: 1;
-  transform: translateY(0);
-}
-
-/* 教材としてどの段落も読めるよう、既読でも大きくは沈めない。 */
-.lecture-segment.past {
-  opacity: 0.78;
-}
-
-/* 現在のセグメントは大きな塗り箱ではなく、細い左アクセントだけの控えめな表示にして、
-   文単位の reading ハイライトが主役になるようにする。 */
-.lecture-segment.current {
-  opacity: 1;
-  padding-left: 12px;
-  border-left: 3px solid var(--color-text-info);
 }
 
 /* Lecture formula display */
@@ -3449,6 +3583,173 @@ body {
 
 .ls-display-preview p {
   margin: 0 0 12px;
+}
+
+/* レクチャースライド同期 (migration 040 Phase 3): スライドプレビュー・区切り挿入・整合インジケータ */
+.ls-slide-tools-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-background-secondary);
+}
+
+.ls-slide-tools-row[hidden] {
+  display: none !important;
+}
+
+.ls-slides-panel {
+  height: 100%;
+  min-height: 360px;
+  padding: 12px;
+  overflow-y: auto;
+  background: var(--color-background-primary);
+}
+
+.ls-slides-panel[hidden] {
+  display: none !important;
+}
+
+.ls-slides-indicator {
+  margin-bottom: 10px;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  background: var(--color-background-secondary);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+}
+
+.ls-slides-indicator-ok {
+  color: var(--color-text-success);
+  border-color: var(--color-text-success);
+}
+
+.ls-slides-indicator-warn {
+  color: var(--color-text-warning);
+  border-color: var(--color-text-warning);
+}
+
+.ls-slides-indicator-inline {
+  display: inline-block;
+  margin: 0;
+  padding: 3px 8px;
+}
+
+.ls-slide-card {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  margin-bottom: 14px;
+  padding: 12px;
+  background: var(--color-background-primary);
+}
+
+.ls-slide-card-playing {
+  border-color: var(--color-text-info);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25);
+}
+
+.ls-slide-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.ls-slide-card-index {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+}
+
+.ls-slide-card-body {
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.ls-slide-card-body p {
+  margin: 0 0 10px;
+}
+
+.ls-slide-card-notes {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--color-background-secondary);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ls-slide-card-notes p {
+  margin: 0 0 6px;
+}
+
+.ls-slide-warn {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--color-text-warning);
+}
+
+.ls-slide-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.ls-slide-play-status {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.ls-slide-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.ls-slide-badge-ready {
+  color: var(--color-text-success);
+  border-color: var(--color-text-success);
+}
+
+.ls-slide-badge-warn {
+  color: var(--color-text-warning);
+  border-color: var(--color-text-warning);
+}
+
+.ls-slide-badge-none {
+  color: var(--color-text-tertiary);
+}
+
+.ls-slide-mismatch-badge {
+  color: var(--color-text-warning);
+  margin-left: 4px;
+}
+
+.ls-audio-lang-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: var(--color-text-primary);
+}
+
+.ls-course-slide-tools-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-background-secondary);
 }
 
 .ls-course-draft {
@@ -5520,6 +5821,164 @@ body {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.24);
   pointer-events: none;
   z-index: 10060;
+}
+
+/* ===========================================================================
+ * ガイダンス層（G層）— 「次にやること」バッジ + Next Steps パネル
+ * 識別子は admin-next-steps- プレフィックス（admin-assistant / atlas / doubt と非衝突）。
+ * =========================================================================== */
+
+#admin-next-steps-toggle { position: relative; }
+
+.admin-next-steps-count {
+  margin-left: 3px;
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.admin-next-steps-count.required {
+  color: var(--color-text-danger, #e24b4a);
+  font-weight: 600;
+}
+
+.admin-next-steps-panel {
+  position: fixed;
+  top: 46px;
+  right: 20px;
+  width: 340px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 96px);
+  overflow-y: auto;
+  background: var(--color-background-primary, #fff);
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 12px;
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.24);
+  z-index: 10045;
+}
+.admin-next-steps-panel[hidden] { display: none !important; }
+
+.admin-next-steps-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--color-border, #e5e5ea);
+  background: var(--color-background-secondary, #f5f5f7);
+  position: sticky;
+  top: 0;
+}
+.admin-next-steps-title { font-size: 13px; font-weight: 600; color: var(--color-text-primary, #1d1d1f); }
+.admin-next-steps-close {
+  background: none; border: none; font-size: 18px; line-height: 1;
+  color: var(--color-text-secondary, #6e6e73); cursor: pointer;
+}
+
+.admin-next-steps-body { padding: 10px 14px; font-size: 12.5px; }
+.admin-next-steps-empty { color: var(--color-text-tertiary, #aeaeb2); padding: 8px 0; }
+
+.admin-next-steps-group { margin-bottom: 10px; }
+.admin-next-steps-group-label {
+  font-size: 11.5px; font-weight: 600; color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 4px;
+}
+.admin-next-steps-item {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--color-border, #e5e5ea);
+}
+.admin-next-steps-item:last-child { border-bottom: none; }
+.admin-next-steps-item-title { color: var(--color-text-primary, #1d1d1f); margin-bottom: 2px; }
+.admin-next-steps-item-reason { color: var(--color-text-tertiary, #aeaeb2); font-size: 11.5px; margin-bottom: 6px; }
+.admin-next-steps-item-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.admin-next-steps-act {
+  padding: 4px 10px;
+  font-size: 11.5px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-secondary, #f5f5f7);
+  color: var(--color-text-primary, #1d1d1f);
+  cursor: pointer;
+}
+.admin-next-steps-act.primary {
+  background: var(--color-text-info, #378add); border-color: var(--color-text-info, #378add); color: #fff;
+}
+
+.admin-next-steps-truncated-note {
+  font-size: 11px; color: var(--color-text-tertiary, #aeaeb2); margin: 4px 0 8px;
+}
+
+.admin-next-steps-foot {
+  border-top: 1px solid var(--color-border, #e5e5ea);
+  margin-top: 4px;
+  padding-top: 8px;
+}
+.admin-next-steps-hidden-toggle {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none; border: none; cursor: pointer;
+  font-size: 11.5px;
+  color: var(--color-text-secondary, #6e6e73);
+  padding: 4px 0;
+}
+.admin-next-steps-hidden-toggle[disabled] { opacity: .5; cursor: default; }
+.admin-next-steps-hidden-list[hidden] { display: none; }
+.admin-next-steps-hidden-list .admin-next-steps-item { opacity: .8; }
+.admin-next-steps-assistant-link {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none; border: none; cursor: pointer;
+  font-size: 11.5px;
+  color: var(--color-text-info, #378add);
+  padding: 6px 0 2px;
+}
+
+/* 教材アップロード完了直後などのインラインカード（§7） */
+.admin-next-steps-inline-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+  background: var(--color-background-secondary, #f5f5f7);
+  border: 1px dashed var(--color-border-secondary, #d2d2d7);
+  border-radius: 8px;
+}
+.admin-next-steps-inline-card span { flex: 1; }
+.admin-next-steps-inline-act {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  font-size: 11.5px;
+  border-radius: 6px;
+  border: 1px solid var(--color-text-info, #378add);
+  background: none;
+  color: var(--color-text-info, #378add);
+  cursor: pointer;
+}
+
+/* 初回ログイン一度きりの cue（§8） — 🤖 操作アシスタントボタンへの pulse + 吹き出し */
+.admin-next-steps-pulse {
+  animation: admin-next-steps-pulse-ring 1s ease-in-out 3;
+  border-radius: 8px;
+}
+@keyframes admin-next-steps-pulse-ring {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(55, 138, 221, 0.3); }
+  50% { box-shadow: 0 0 0 7px rgba(55, 138, 221, 0.06); }
+}
+.admin-next-steps-cue-bubble {
+  position: absolute;
+  max-width: 220px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #fff;
+  background: rgba(29, 29, 31, 0.92);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.24);
+  pointer-events: none;
+  z-index: 10060;
+  display: none;
 }
 
 /* ── 再構成ループ (R層) 学習カード ─────────────────────────────── */

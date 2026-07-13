@@ -35,7 +35,9 @@ class CorePredicate(str, Enum):
     """分野横断検索を可能にする標準化されたエッジ述語（Core Predicate）。
 
     ドメイン固有の動詞（domain_verb）の上位に位置する抽象述語であり、
-    異分野間の Structural Isomorphism 検索を Neo4j 上で実現するために使用する。
+    異分野間の Structural Isomorphism 検索を PostgreSQL 上の概念構造
+    （`theory_components` / `theory_claims` / `theory_component_graphs`）で
+    実現するために使用する。
     """
 
     CAUSES = "CAUSES"
@@ -102,7 +104,8 @@ class CausalEdge(BaseModel):
     core_predicate: CorePredicate = Field(
         default=CorePredicate.CAUSES,
         description=(
-            "Standardized predicate for cross-domain Neo4j search "
+            "Standardized predicate for cross-domain search over PostgreSQL-backed "
+            "concept structures "
             "(CAUSES, INHIBITS, CORRELATES, DEFINES, MEASURES, TRANSFORMS, "
             "REQUIRES, CONTAINS, EQUIVALENT)"
         ),
@@ -303,27 +306,6 @@ class PatternMatch(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# LLM merge result schema (Gateway layer)
-# ---------------------------------------------------------------------------
-
-class FieldDiff(BaseModel):
-    """A single field-level diff between base and proposed structures."""
-
-    field_path: str = Field(description="Dot-separated path to the changed field (e.g. 'hypothesis.statement')")
-    base_value: str = Field(default="", description="Value in the base (canonical) structure")
-    proposed_value: str = Field(default="", description="Value in the proposed structure")
-
-
-class MergeResult(BaseModel):
-    """Result of the LLM-driven proposal evaluation and merge."""
-
-    merged_structure: PaperStructure = Field(description="The merged canonical structure")
-    evaluation_reasoning: str = Field(
-        description="Explanation of what was merged, improved, or rejected and why"
-    )
-
-
-# ---------------------------------------------------------------------------
 # Missing Link Suggestion schemas (v2 feature)
 # ---------------------------------------------------------------------------
 
@@ -416,3 +398,91 @@ class PublicDSLExport(BaseModel):
         if len(v) > 200:
             return v[:199] + "…"
         return v
+
+
+# ---------------------------------------------------------------------------
+# 監査 entity_type カタログ（theory_review_events, 調査レポート Tier2 提案7）
+# ---------------------------------------------------------------------------
+# ``theory_review_events`` テーブルに entity_type の CHECK 制約はない（各層が
+# 独自に追記してきた経緯のため）。ここを唯一の正本（single source of truth）とし、
+# 新しい entity_type を追加するときは必ずここに追記すること。
+#
+# 各層固有の語彙モジュール（core/doubt/schema.py の LEDGER_REVIEW_ENTITY_TYPES,
+# core/versioning/schema.py の AUDIT_RELEASE 等, core/reconstruction/schema.py の
+# ENTITY_ITEM/ENTITY_RESPONSE）は、既存の参照元を壊さないようここの値を再エクスポート
+# する（値の重複定義はしない）。core/ モジュールが本ファイルを import するのは問題ない
+# （core → core の依存で、core → api の逆方向にはならない）。
+
+# C層（承認・共有レイヤー）
+AUDIT_ENTITY_COMPONENT = "component"
+AUDIT_ENTITY_CLAIM = "claim"
+AUDIT_ENTITY_EXPLANATION = "explanation"
+AUDIT_ENTITY_ENDORSEMENT = "endorsement"
+AUDIT_ENTITY_CITATION = "citation"
+
+# B層（違和感・構造帰属型の問い）
+AUDIT_ENTITY_TENSION = "tension"
+AUDIT_ENTITY_STRUCTURE_ANCHOR = "structure_anchor"
+
+# 分野の地図（Field Atlas）
+AUDIT_ENTITY_ATLAS_SKELETON = "atlas_skeleton"
+AUDIT_ENTITY_ATLAS_ASSIST = "atlas_assist"
+AUDIT_ENTITY_ATLAS_BINDING = "atlas_binding"
+AUDIT_ENTITY_ATLAS_REPORT = "atlas_report"
+
+# パイプライン成果のグループ共有 / L層ライブラリ
+AUDIT_ENTITY_DOCUMENT_SHARE = "document_share"
+AUDIT_ENTITY_LIBRARY_ENTRY = "library_entry"
+
+# 横断ユーティリティ層（Admin Copilot）/ ガイダンス層（G層）
+AUDIT_ENTITY_ASSISTANT_ACTION = "assistant_action"
+AUDIT_ENTITY_NEXT_STEP = "next_step"
+
+# D層（Doubt Layer）
+AUDIT_ENTITY_LEDGER = "ledger"
+AUDIT_ENTITY_ASSUMPTION = "assumption"
+AUDIT_ENTITY_CHALLENGE = "challenge"
+AUDIT_ENTITY_VERIFICATION_PROPOSAL = "verification_proposal"
+AUDIT_ENTITY_COUNTERFACTUAL_SESSION = "counterfactual_session"
+
+# 再構成ループ（R層）
+AUDIT_ENTITY_RECONSTRUCTION_ITEM = "reconstruction_item"
+AUDIT_ENTITY_RECONSTRUCTION_RESPONSE = "reconstruction_response"
+
+# 共有物のバージョン管理（V層）
+AUDIT_ENTITY_SHARED_RELEASE = "shared_release"
+AUDIT_ENTITY_SHARED_DELETION = "shared_deletion"
+AUDIT_ENTITY_SHARED_SUBSCRIPTION = "shared_subscription"
+
+# 教材リビジョン（document_pipeline/revision）
+AUDIT_ENTITY_REVISION_RUN = "revision_run"
+
+# カタログ本体（新規 entity_type はここへの追記が必須。ガードレールテスト対象）。
+AUDIT_ENTITY_TYPES = (
+    AUDIT_ENTITY_COMPONENT,
+    AUDIT_ENTITY_CLAIM,
+    AUDIT_ENTITY_EXPLANATION,
+    AUDIT_ENTITY_ENDORSEMENT,
+    AUDIT_ENTITY_CITATION,
+    AUDIT_ENTITY_TENSION,
+    AUDIT_ENTITY_STRUCTURE_ANCHOR,
+    AUDIT_ENTITY_ATLAS_SKELETON,
+    AUDIT_ENTITY_ATLAS_ASSIST,
+    AUDIT_ENTITY_ATLAS_BINDING,
+    AUDIT_ENTITY_ATLAS_REPORT,
+    AUDIT_ENTITY_DOCUMENT_SHARE,
+    AUDIT_ENTITY_LIBRARY_ENTRY,
+    AUDIT_ENTITY_ASSISTANT_ACTION,
+    AUDIT_ENTITY_NEXT_STEP,
+    AUDIT_ENTITY_LEDGER,
+    AUDIT_ENTITY_ASSUMPTION,
+    AUDIT_ENTITY_CHALLENGE,
+    AUDIT_ENTITY_VERIFICATION_PROPOSAL,
+    AUDIT_ENTITY_COUNTERFACTUAL_SESSION,
+    AUDIT_ENTITY_RECONSTRUCTION_ITEM,
+    AUDIT_ENTITY_RECONSTRUCTION_RESPONSE,
+    AUDIT_ENTITY_SHARED_RELEASE,
+    AUDIT_ENTITY_SHARED_DELETION,
+    AUDIT_ENTITY_SHARED_SUBSCRIPTION,
+    AUDIT_ENTITY_REVISION_RUN,
+)

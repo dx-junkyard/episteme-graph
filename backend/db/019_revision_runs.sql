@@ -12,6 +12,8 @@
 --      （failed Run は active にしない）
 --
 -- すべて IF NOT EXISTS / DO ブロックの存在チェックで冪等。
+--
+-- このファイルが正本。適用は `backend/core/migrations.py` のランナーが起動時に行う（冪等・毎起動再実行）。
 
 -- ----------------------------------------------------------------------------
 -- document_analysis_runs: 版管理カラム
@@ -108,19 +110,27 @@ END $$;
 --   - failed Run は active にしない
 --   - 既に active が設定済みの document は変更しない
 --   - document_analysis_runs.document_id は TEXT、documents.id は UUID のため text 比較
+--
+-- バックフィル対象（active_analysis_run_id が未設定の document）が無ければ
+-- 何もしない DO $$ ガードで包み、埋まった後の再実行を静かにする。
 -- ----------------------------------------------------------------------------
-UPDATE documents d
-SET active_analysis_run_id = sub.id
-FROM (
-    SELECT DISTINCT ON (document_id)
-        document_id,
-        id
-    FROM document_analysis_runs
-    WHERE status = 'completed'
-    ORDER BY document_id,
-             completed_at DESC NULLS LAST,
-             created_at DESC,
-             id DESC
-) sub
-WHERE d.id::text = sub.document_id
-  AND d.active_analysis_run_id IS NULL;
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM documents WHERE active_analysis_run_id IS NULL) THEN
+        UPDATE documents d
+        SET active_analysis_run_id = sub.id
+        FROM (
+            SELECT DISTINCT ON (document_id)
+                document_id,
+                id
+            FROM document_analysis_runs
+            WHERE status = 'completed'
+            ORDER BY document_id,
+                     completed_at DESC NULLS LAST,
+                     created_at DESC,
+                     id DESC
+        ) sub
+        WHERE d.id::text = sub.document_id
+          AND d.active_analysis_run_id IS NULL;
+    END IF;
+END $$;

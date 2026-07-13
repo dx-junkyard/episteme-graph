@@ -113,6 +113,13 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("LLM_TRANSCRIBE_MODEL"),
     )
 
+    # --- レクチャースライド同期 + 音声言語切替 (migration 040) ---
+    # OpenAI TTS の voice。多言語対応の音声のため言語による分岐は不要（既定 "alloy"）。
+    lecture_tts_voice: str = Field(
+        default="alloy",
+        validation_alias=AliasChoices("LECTURE_TTS_VOICE"),
+    )
+
     # --- TensionMiningAgent (B層) — コスト制御（設計書 §8） ---
     # 1セッション（user×course×topic×日）あたりの LLM コール上限
     tension_max_calls_per_session: int = Field(
@@ -216,16 +223,39 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("ASSISTANT_LLM_MODEL"),
     )
 
+    # --- 画像読み取りパイプライン（apparatus_semantics） — コスト制御（他機能とは独立） ---
+    # vision 同定に使う LLM モデル（OpenAI 経路のみ対応。§5-4）
+    apparatus_llm_model: str = Field(
+        default="gpt-4o",
+        validation_alias=AliasChoices("APPARATUS_LLM_MODEL"),
+    )
+    # 1 document あたり vision 対象にする図の上限（超過分は skipped_by_limit で保持, P4）
+    apparatus_max_images_per_document: int = Field(
+        default=20,
+        validation_alias=AliasChoices("APPARATUS_MAX_IMAGES_PER_DOCUMENT"),
+    )
+    # vision 呼び出しの日次上限（他機能と独立のカウンタ）
+    apparatus_max_calls_per_day: int = Field(
+        default=30,
+        validation_alias=AliasChoices("APPARATUS_MAX_CALLS_PER_DAY"),
+    )
+    # 例示画像の few-shot 添付（含有承認済みのみ。既定 off — コスト・権利の両面で保守的に）
+    apparatus_fewshot_images: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("APPARATUS_FEWSHOT_IMAGES"),
+    )
+    # ライブラリ retrieval（凍結版のみ）の候補数
+    apparatus_retrieval_top_k: int = Field(
+        default=5,
+        validation_alias=AliasChoices("APPARATUS_RETRIEVAL_TOP_K"),
+    )
+
     # --- JWT / Auth ---
     jwt_secret: str = "episteme-dev-secret-change-in-prod"
     admin_password: str = ""
 
     # --- PostgreSQL ---
     database_url: str = "postgresql://episteme:episteme@postgres:5432/episteme"
-
-    # --- Neo4j ---
-    neo4j_uri: str = "bolt://neo4j:7687"
-    neo4j_auth: str = "neo4j/password"
 
     # --- MinIO ---
     minio_endpoint: str = "localhost:9000"
@@ -316,6 +346,33 @@ class Settings(BaseSettings):
     atlas_data_source: str = Field(
         default="api",
         validation_alias=AliasChoices("ATLAS_DATA_SOURCE"),
+    )
+
+    # --- U層（LLM 使用量計測, migration 043） ---
+    # false で record() を no-op に（テスト・ローカル用）
+    llm_usage_tracking_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("LLM_USAGE_TRACKING_ENABLED"),
+    )
+    # in-memory バッファ上限。超過分は最古から破棄し dropped_events に計上する（U8）
+    llm_usage_buffer_max: int = Field(
+        default=1000,
+        validation_alias=AliasChoices("LLM_USAGE_BUFFER_MAX"),
+    )
+    # バックグラウンド flusher の周期（秒）
+    llm_usage_flush_interval_seconds: float = Field(
+        default=10.0,
+        validation_alias=AliasChoices("LLM_USAGE_FLUSH_INTERVAL_SECONDS"),
+    )
+    # この件数到達で flusher を即時起こす
+    llm_usage_flush_batch: int = Field(
+        default=100,
+        validation_alias=AliasChoices("LLM_USAGE_FLUSH_BATCH"),
+    )
+    # モデル単価表 (JSON) のパス。空なら cost_usd は常に null（U7: 価格をハードコードしない）
+    llm_price_table_path: str = Field(
+        default="",
+        validation_alias=AliasChoices("LLM_PRICE_TABLE_PATH"),
     )
 
 

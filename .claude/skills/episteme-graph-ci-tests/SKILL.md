@@ -94,7 +94,7 @@ def test_xxx(self, input, expected):
 
 #### テスト設計の原則
 
-1. **外部サービス依存なし**: OpenAI API、PostgreSQL、Neo4j、MinIO への実際の接続は行わない。`unittest.mock.patch` で分離する
+1. **外部サービス依存なし**: OpenAI API、PostgreSQL、MinIO への実際の接続は行わない。`unittest.mock.patch` で分離する
 2. **conftest.py の設定を活用**: `_override_settings` フィクスチャが自動適用されるため、`get_settings()` は常にテスト用ダミー値を返す
 3. **1テスト1検証**: 各テストメソッドは単一の振る舞いを検証する
 4. **境界値テスト**: 空リスト、None、空文字列、極端な値のケースを含める

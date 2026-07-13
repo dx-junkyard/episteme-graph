@@ -4,7 +4,8 @@
 -- 導線(review 語彙 + theory_review_events 監査 + 管理画面のレビュー表示)へ流す。
 -- 新規のキュー機構は作らない(このテーブルは報告レコードの正本のみ)。
 --
--- 適用: 本 SQL は正本リファレンス。実際の適用は backend/api/main.py の _run_migrations() 内。
+-- 適用: このファイルが正本。backend/core/migrations.py のランナーが起動時に行う
+--   （冪等・毎起動再実行）。
 --
 -- 設計上の確定:
 -- - 送信は帰属つき(匿名不可): reporter_id NOT NULL + API 側も要認証

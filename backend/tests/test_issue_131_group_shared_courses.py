@@ -3,7 +3,7 @@
 
 対象:
   - `backend/api/routes/learning.py` の `list_courses`
-    (course_group_permissions 経由で共有されたコースも返すこと)
+    (object_group_permissions〔object_type='course'〕経由で共有されたコースも返すこと)
 """
 
 from __future__ import annotations
@@ -32,11 +32,12 @@ class TestListCoursesSharedViaPermissions:
         assert m, "list_courses 関数本体が抽出できない"
         return m.group(0)
 
-    def test_joins_course_group_permissions(self):
+    def test_joins_object_group_permissions(self):
         body = self._list_courses_body()
-        assert "course_group_permissions" in body, (
-            "list_courses が course_group_permissions と JOIN していない"
+        assert "object_group_permissions" in body, (
+            "list_courses が object_group_permissions と JOIN していない"
         )
+        assert "object_type = 'course'" in body
 
     def test_filters_viewer_or_editor(self):
         body = self._list_courses_body()
@@ -65,9 +66,9 @@ class TestListCoursesSharedViaPermissions:
         ), "既受講コースを除外する learning_states の NOT EXISTS 句が見当たらない"
 
     def test_deduplicates_by_course_id(self):
-        """visibility='public' のテンプレートが course_group_permissions に
-        登録されていると、public_records と group_records の両方にヒットし
-        同じコースが重複して返るため、ID で重複排除すること。"""
+        """visibility='public' のテンプレートが object_group_permissions
+        （object_type='course'）に登録されていると、public_records と group_records の
+        両方にヒットし同じコースが重複して返るため、ID で重複排除すること。"""
         body = self._list_courses_body()
         assert "seen_ids" in body, (
             "list_courses に course_id による重複排除処理が無い"

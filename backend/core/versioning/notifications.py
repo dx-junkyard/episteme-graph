@@ -1,7 +1,19 @@
 """通知インボックス。発行・削除予約・取消・削除を共有先へ配信する。
 
 宛先＝当該オブジェクトに viewer|editor を持つグループメンバー（所有者は exclude）。
-join 形は services._has_document_group_permission / user_can_view_course と同型。
+JOIN の形（*_group_permissions を group_members と JOIN する部分）は
+core.notification_recipients に集約している（core/status/notification_rules.py と
+同型の実装が独立に存在していたのを統合。Tier2 提案10）。「所有者を含めない」
+「viewer も対象にする」「レガシー単一グループ共有も含める」という組み立て自体は
+このファイル固有（V層の共有可視性の要件）。
+
+【2026-07 アーキテクチャ整理 Tier 3-15】通知の実体は user_notifications（migration 038,
+状態管理・通知基盤）に統合済み（migration 045）。本モジュールは source='shared' で
+スコープした行のみを読み書きする（status 層の行と混ざらない）。旧・専用通知テーブルの
+object_type/object_id は統合テーブルの entity_type/entity_id 列に入っており、この
+モジュールの公開関数のシグネチャ・戻り値の形（object_type/object_id/release_id/acted_at
+等のキー名）は SQL 側のエイリアスで従来どおり保つ（routes/versioning.py の生形式 API
+互換のため）。
 """
 from __future__ import annotations
 
@@ -10,6 +22,7 @@ import logging
 
 from sqlalchemy import text as sa_text
 
+from core import notification_recipients as _recipients
 from core.postgres import get_session
 
 from . import schema
@@ -20,41 +33,19 @@ logger = logging.getLogger(__name__)
 def _recipient_ids(session, object_type: str, object_id: str) -> list[str]:
     """当該オブジェクトの共有先（通知を届けるべきユーザー id）を返す。fan_out / recipients_for の単一の真実源。
 
-    - course: course_group_permissions の viewer|editor グループメンバー。
-    - document: document_group_permissions（migration 035）の viewer|editor に加え、
+    - course: object_group_permissions（migration 044、統合前は専用テーブル=migration 010）の
+      viewer|editor グループメンバー。
+    - document: object_group_permissions（統合前は専用テーブル=migration 035）の
+      viewer|editor に加え、
       レガシー単一グループ共有（documents.visibility='group' + group_id）のメンバーも含める。
       これらは services.user_can_view_document で閲覧・pin/adopt が許可されるため、
       通知の宛先も揃える（更新・削除予約・削除の取りこぼしを防ぐ）。
     """
     if object_type == schema.OBJECT_TYPE_COURSE:
-        rows = session.execute(
-            sa_text("""
-                SELECT DISTINCT gm.user_id::text
-                FROM course_group_permissions p
-                JOIN group_members gm ON gm.group_id = p.group_id
-                WHERE p.course_id = :oid AND p.permission IN ('viewer','editor')
-            """),
-            {"oid": object_id},
-        ).fetchall()
-    else:
-        rows = session.execute(
-            sa_text("""
-                SELECT DISTINCT uid FROM (
-                    SELECT gm.user_id::text AS uid
-                    FROM document_group_permissions p
-                    JOIN group_members gm ON gm.group_id = p.group_id
-                    WHERE p.document_id = CAST(:oid AS uuid) AND p.permission IN ('viewer','editor')
-                    UNION
-                    SELECT gm.user_id::text AS uid
-                    FROM documents d
-                    JOIN group_members gm ON gm.group_id = d.group_id
-                    WHERE d.id = CAST(:oid AS uuid)
-                      AND d.visibility = 'group' AND d.group_id IS NOT NULL
-                ) t
-            """),
-            {"oid": object_id},
-        ).fetchall()
-    return [str(r[0]) for r in rows]
+        return _recipients.course_group_member_ids(session, object_id, ("viewer", "editor"))
+    ids = set(_recipients.document_group_member_ids(session, object_id, ("viewer", "editor")))
+    ids.update(_recipients.document_legacy_group_visibility_member_ids(session, object_id))
+    return list(ids)
 
 
 def fan_out(
@@ -107,10 +98,10 @@ def notify_users(
         for rid in ids:
             session.execute(
                 sa_text("""
-                    INSERT INTO share_notifications
-                        (recipient_id, object_type, object_id, kind, release_id, payload)
+                    INSERT INTO user_notifications
+                        (recipient_id, entity_type, entity_id, kind, release_id, payload, source)
                     VALUES (CAST(:uid AS uuid), :ot, :oid, :kind,
-                            CAST(:rid AS uuid), CAST(:payload AS jsonb))
+                            CAST(:rid AS uuid), CAST(:payload AS jsonb), 'shared')
                 """),
                 {"uid": rid, "ot": object_type, "oid": object_id, "kind": kind,
                  "rid": release_id, "payload": payload_json},
@@ -126,17 +117,20 @@ def notify_users(
 
 
 def list_inbox(recipient_id: str, *, unread_only: bool = False, limit: int = 100) -> list[dict]:
-    """本人の通知一覧（新しい順）。release_id があれば version_no を添える。"""
+    """本人の通知一覧（新しい順）。release_id があれば version_no を添える。
+
+    source='shared' でスコープする（status 層の行を混ぜない。二重表示防止）。
+    """
     session = get_session()
     try:
         clause = "AND n.read_at IS NULL" if unread_only else ""
         rows = session.execute(
             sa_text(f"""
-                SELECT n.id::text, n.object_type, n.object_id, n.kind, n.release_id::text,
+                SELECT n.id::text, n.entity_type, n.entity_id, n.kind, n.release_id::text,
                        n.payload, n.created_at, n.read_at, n.acted_at, v.version_no
-                FROM share_notifications n
+                FROM user_notifications n
                 LEFT JOIN shared_versions v ON v.id = n.release_id
-                WHERE n.recipient_id = CAST(:uid AS uuid) {clause}
+                WHERE n.recipient_id = CAST(:uid AS uuid) AND n.source = 'shared' {clause}
                 ORDER BY n.created_at DESC
                 LIMIT :limit
             """),
@@ -162,12 +156,13 @@ def list_inbox(recipient_id: str, *, unread_only: bool = False, limit: int = 100
 
 
 def unread_count(recipient_id: str) -> int:
+    """source='shared' でスコープする（status 層の未読数と混ざらない）。"""
     session = get_session()
     try:
         return int(session.execute(
             sa_text("""
-                SELECT count(*) FROM share_notifications
-                WHERE recipient_id = CAST(:uid AS uuid) AND read_at IS NULL
+                SELECT count(*) FROM user_notifications
+                WHERE recipient_id = CAST(:uid AS uuid) AND source = 'shared' AND read_at IS NULL
             """),
             {"uid": recipient_id},
         ).scalar() or 0)
@@ -176,15 +171,16 @@ def unread_count(recipient_id: str) -> int:
 
 
 def mark_read(notification_id: str, recipient_id: str) -> bool:
-    """通知を既読にする（本人のみ）。戻り値は更新できたか。"""
+    """通知を既読にする（本人のみ）。戻り値は更新できたか。source='shared' でスコープする。"""
     session = get_session()
     try:
         result = session.execute(
             sa_text("""
-                UPDATE share_notifications
+                UPDATE user_notifications
                 SET read_at = now()
                 WHERE id = CAST(:nid AS uuid)
                   AND recipient_id = CAST(:uid AS uuid)
+                  AND source = 'shared'
                   AND read_at IS NULL
             """),
             {"nid": notification_id, "uid": recipient_id},
@@ -200,13 +196,14 @@ def mark_read(notification_id: str, recipient_id: str) -> bool:
 
 
 def mark_all_read(recipient_id: str) -> int:
+    """source='shared' でスコープする（status 層の行を巻き込んで既読にしない）。"""
     session = get_session()
     try:
         result = session.execute(
             sa_text("""
-                UPDATE share_notifications
+                UPDATE user_notifications
                 SET read_at = now()
-                WHERE recipient_id = CAST(:uid AS uuid) AND read_at IS NULL
+                WHERE recipient_id = CAST(:uid AS uuid) AND source = 'shared' AND read_at IS NULL
             """),
             {"uid": recipient_id},
         )

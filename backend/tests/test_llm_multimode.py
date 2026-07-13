@@ -2,12 +2,11 @@
 
 - pydantic-settings による環境変数からの LLM 設定読み込み
 - get_llm_params() が適切なモデルと推論レベルを返すこと
-- StudentGraph / TeacherGraph の構造検証
+- StudentGraph の構造検証
 """
 
 from __future__ import annotations
 
-import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -263,63 +262,3 @@ class TestStudentGraphStructure:
         with patch("core.graphs.student_graph.generate_text", side_effect=Exception("LLM error")):
             result = format_guard_node({"raw_answer": "テスト回答"})
             assert result["answer"] == "テスト回答"
-
-
-# ---------------------------------------------------------------------------
-# 5. TeacherGraph 構造テスト
-# ---------------------------------------------------------------------------
-
-
-class TestTeacherGraphStructure:
-    """TeacherGraph が正しいノードとエッジで構成されていること。"""
-
-    @pytest.fixture()
-    def graph(self):
-        from core.graphs.teacher_graph import build_teacher_graph
-
-        return build_teacher_graph()
-
-    def test_graph_compiles(self, graph):
-        """グラフがエラーなくコンパイルされること。"""
-        assert graph is not None
-
-    def test_teacher_graph_returns_diff_not_writes_db(self):
-        """TeacherGraph が diff_data を返し、DB直接書き込みを行わないこと。"""
-        from core.graphs.teacher_graph import diff_review_formatter_node
-
-        concept_graph = {
-            "nodes": [{"id": "n1", "label": "テスト概念", "type": "THEOREM", "description": "テスト"}],
-            "edges": [],
-            "misconceptions": [],
-        }
-        with patch("core.graphs.teacher_graph.generate_text", return_value=json.dumps({
-            "paper_id": "test-paper",
-            "status": "pending_review",
-            "summary": "テスト差分",
-            "additions": {"nodes": concept_graph["nodes"], "edges": [], "misconceptions": []},
-            "statistics": {"total_nodes": 1, "total_edges": 0, "total_misconceptions": 0},
-        })):
-            result = diff_review_formatter_node({
-                "concept_graph": concept_graph,
-                "paper_id": "test-paper",
-            })
-            assert "diff_data" in result
-            assert result["diff_data"]["status"] == "pending_review"
-
-    def test_diff_formatter_fallback_on_empty_graph(self):
-        """concept_graph が空の場合にエラー状態の diff_data を返すこと。"""
-        from core.graphs.teacher_graph import diff_review_formatter_node
-
-        result = diff_review_formatter_node({
-            "concept_graph": {},
-            "paper_id": "test-paper",
-        })
-        assert result["diff_data"]["status"] == "error"
-
-    def test_structure_extraction_no_chunks(self):
-        """チャンクが空の場合にエラーを返すこと。"""
-        from core.graphs.teacher_graph import structure_extraction_node
-
-        result = structure_extraction_node({"chunks": []})
-        assert result["sections"] == []
-        assert "error" in result

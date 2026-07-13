@@ -10,7 +10,6 @@ created_from.normalization_failed=true を付けて candidate として保持す
 
 from __future__ import annotations
 
-import datetime
 import json
 import logging
 import threading
@@ -22,28 +21,26 @@ from core.doubt.assumption_mining.detector import detect_gap_clusters, register_
 from core.doubt.assumption_mining.llm_client import AssumptionLLMClient
 from core.doubt.assumption_mining.prompt import build_content
 from core.doubt.assumption_mining.repair import run_with_repair
+from core.llm_usage.context import bind_usage_context
+from core.llm_worker.cost_gate import CostGate, today_str
 from core.postgres import get_session
 
 logger = logging.getLogger(__name__)
 
 _BATCH_LIMIT = 10
 
-_call_counts_lock = threading.Lock()
-_daily_call_counts: dict[str, int] = {}
+# 実装は core/llm_worker/cost_gate.py の CostGate に共通化済み（daily のみ・過去日の
+# カウンタは古い方から破棄=prune_stale_daily。daily_call_counts は同じ dict のエイリアス）。
+_cost_gate = CostGate()
+_daily_call_counts: dict[str, int] = _cost_gate.daily_counts
 
 
 def _check_and_count_llm_call() -> bool:
     settings = get_settings()
     per_day = int(getattr(settings, "doubt_assumption_max_calls_per_day", 10))
-    key = datetime.date.today().isoformat()
-    with _call_counts_lock:
-        current = _daily_call_counts.get(key, 0)
-        if current >= per_day:
-            return False
-        for stale in [k for k in _daily_call_counts if k != key]:
-            _daily_call_counts.pop(stale, None)
-        _daily_call_counts[key] = current + 1
-    return True
+    return _cost_gate.check_and_count(
+        daily_limit=per_day, daily_key=today_str(), prune_stale_daily=True,
+    )
 
 
 def _pending_normalizations(session) -> list[tuple[str, dict]]:
@@ -86,6 +83,7 @@ def _mark_created_from(session, assumption_id: str, patch: dict) -> None:
 
 def run_assumption_mining(course_id: str = "") -> dict:
     """検出 + 登録 + 正規化を 1 バッチ実行する（同期実行本体）。"""
+    bind_usage_context("doubt:assumption_normalize", course_id=course_id or None)
     session = get_session()
     registered = 0
     normalized = 0

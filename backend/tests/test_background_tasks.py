@@ -216,8 +216,10 @@ class TestProcessMaterialBackgroundFailures:
 
     def test_zero_chunks_raises_failure(self):
         # source_chunking stage で chunk が 0 件なら PipelineStageError を上げる
-        assert "if not source_chunks:" in self.source
-        assert 'PipelineStageError(\n                "source_chunking"' in self.source
+        # (Tier 3-19: source_chunking のロジックは _stage_source_chunking(ctx) に
+        # 括り出されており、chunk 変数は ctx.source_chunks 経由でアクセスする)
+        assert "if not ctx.source_chunks:" in self.source
+        assert 'PipelineStageError(\n            "source_chunking"' in self.source
 
     def test_zero_embedded_chunks_raises_failure(self):
         # source_embedding stage で persist が失敗 / 0 件なら PipelineStageError を上げる

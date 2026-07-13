@@ -12,6 +12,7 @@ from sqlalchemy import text as sa_text
 
 from core.llm import generate_embeddings
 from core.postgres import get_session as _pg_session
+from core.schema import AUDIT_ENTITY_REVISION_RUN
 
 logger = logging.getLogger(__name__)
 
@@ -578,14 +579,20 @@ def persist_components(
             outputs = _remap_nested_claim_refs(getattr(comp, "outputs", []) or [], claim_id_map)
             preconditions = _remap_nested_claim_refs(getattr(comp, "preconditions", []) or [], claim_id_map)
             cautions = _remap_nested_claim_refs(getattr(comp, "cautions", []) or [], claim_id_map)
+            raw_component_type = _strip_nuls(getattr(comp, "component_type", "") or "")
             params = {
                 "course_id": course_id,
                 "document_id": document_id,
                 "name": _strip_nuls(getattr(comp, "label", "") or "Untitled"),
-                "component_type": "theory",
-                "component_type_text": _strip_nuls(
-                    getattr(comp, "component_type", "") or ""
+                # migration 041 で CHECK に追加された装置系語彙のみ実値を保存し、
+                # それ以外（assembly の自由語彙）は従来どおり 'theory' に丸める
+                # （実語彙は component_type_text が正）。
+                "component_type": (
+                    raw_component_type
+                    if raw_component_type in ("apparatus", "instrument", "part")
+                    else "theory"
                 ),
+                "component_type_text": raw_component_type,
                 "summary": _strip_nuls(getattr(comp, "summary", "") or ""),
                 "status": "candidate",
                 "source_chunks": _json_dumps(
@@ -1096,10 +1103,17 @@ def upsert_analysis_run(
     error_message: str = "",
     stage_outputs: dict | None = None,
     run_id: str | None = None,
+    options: dict | None = None,
 ) -> str:
     """`document_analysis_runs` に upsert する。
 
     run_id を渡すとそのレコードを更新、None なら新規作成。
+
+    ``options``（migration 041 §3-2）はアップロード時オプション（例:
+    ``analyze_images``）のスナップショット。新規作成時は ``options or {}`` を
+    保存する。更新時は ``options`` が明示的に渡されたときのみ上書きし、
+    ``None`` のときは既存値を保持する（呼び出し側が毎回 options を意識せず
+    呼べるようにするため）。
     """
     session = _pg_session()
     try:
@@ -1109,11 +1123,12 @@ def upsert_analysis_run(
                     """
                     INSERT INTO document_analysis_runs (
                         document_id, material_id, cartridge_id, status,
-                        current_stage, error_message, stage_outputs, started_at
+                        current_stage, error_message, stage_outputs, options, started_at
                     )
                     VALUES (
                         :document_id, :material_id, :cartridge_id, :status,
                         :current_stage, :error_message, CAST(:stage_outputs AS jsonb),
+                        CAST(:options AS jsonb),
                         CASE WHEN :status = 'running' THEN now() ELSE NULL END
                     )
                     RETURNING id
@@ -1127,6 +1142,7 @@ def upsert_analysis_run(
                     "current_stage": current_stage,
                     "error_message": error_message or "",
                     "stage_outputs": _json_dumps(stage_outputs or {}),
+                    "options": _json_dumps(options or {}),
                 },
             ).fetchone()
             session.commit()
@@ -1140,6 +1156,7 @@ def upsert_analysis_run(
                         current_stage = :current_stage,
                         error_message = :error_message,
                         stage_outputs = stage_outputs || CAST(:stage_outputs AS jsonb),
+                        options = CASE WHEN :options_provided THEN CAST(:options AS jsonb) ELSE options END,
                         completed_at = CASE WHEN :status IN ('completed', 'failed')
                                             THEN now() ELSE completed_at END,
                         updated_at = now()
@@ -1152,6 +1169,8 @@ def upsert_analysis_run(
                     "current_stage": current_stage,
                     "error_message": error_message or "",
                     "stage_outputs": _json_dumps(stage_outputs or {}),
+                    "options_provided": options is not None,
+                    "options": _json_dumps(options or {}),
                 },
             )
             session.commit()
@@ -1176,7 +1195,7 @@ def get_latest_analysis_run(
                 """
                 SELECT id::text, document_id::text, material_id, cartridge_id, status,
                        current_stage, error_message, stage_outputs, started_at,
-                       completed_at, created_at, updated_at
+                       completed_at, created_at, updated_at, options
                 FROM document_analysis_runs
                 WHERE document_id = :document_id
                   AND (:material_id IS NULL OR material_id = :material_id)
@@ -1644,12 +1663,13 @@ def _insert_revision_decision(
                 entity_type, entity_id, old_status, new_status, changed_by, metadata
             )
             VALUES (
-                'revision_run', :entity_id, :old_status, :new_status,
+                :entity_type, :entity_id, :old_status, :new_status,
                 CAST(:changed_by AS uuid), CAST(:metadata AS jsonb)
             )
             """
         ),
         {
+            "entity_type": AUDIT_ENTITY_REVISION_RUN,
             "entity_id": run_id,
             "old_status": old_status or "",
             "new_status": new_status or "",

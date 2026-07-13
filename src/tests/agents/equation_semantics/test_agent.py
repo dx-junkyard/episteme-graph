@@ -177,7 +177,9 @@ def test_label_only_blocks_with_matched_label_become_provisional():
 
     The input_builder extracts the label "3.14" from "(3.14)" and sets
     matched_label, making this a high-signal provisional candidate instead
-    of a rejected one.
+    of a rejected one. PDF-derived math text is never trusted, so provisional
+    candidates are also sent to the LLM for reconstruction (force
+    reconstruction policy) — but their records must stay non-source-backed.
     """
     structure = DocumentStructureResult(
         document_id="doc_test",
@@ -190,22 +192,25 @@ def test_label_only_blocks_with_matched_label_become_provisional():
             _typed("e_valid", "N = a + b (1.1)", "equation_block", 1),
         ],
     )
-    response = _response("eq_1_1", "e_valid", "1.1", "N = a + b", "definition", "Definition.")
-    with patch.object(agent := EquationSemanticsAgent(), "_llm_client") as mock_llm:
-        mock_llm.generate.return_value = response
+    responses = [
+        _response("eq_1_1", "e_valid", "1.1", "N = a + b", "definition", "Definition."),
+        _response("eq_3_14", "e_label", "3.14", "(3.14)", "definition", "Label only."),
+    ]
+    agent = EquationSemanticsAgent()
+    with patch.object(agent._llm_client, "generate", side_effect=responses) as mock_llm:
         result = agent.run(structure)
 
     label_candidates = [c for c in result.equation_candidates if c.source_location["block_id"] == "e_label"]
     assert label_candidates[0].extraction_status == "label_only"
     # matched_label present → provisional (high-signal, not outright rejected)
     assert label_candidates[0].acceptance_status == "provisional"
-    # LLM is called only for accepted block, not for provisional
-    assert mock_llm.generate.call_count == 1
-    # Provisional EquationRecord is generated with can_support_claim=False
-    provisional_records = [r for r in result.equations if r.confidence_policy.can_support_claim is False
-                           and r.equation_id.startswith("eq_provisional")]
-    assert len(provisional_records) == 1
-    assert provisional_records[0].label == "3.14"
+    # LLM reconstruction runs for accepted AND provisional candidates
+    assert mock_llm.call_count == 2
+    # The label-only record stays non-source-backed regardless of LLM output
+    label_records = [r for r in result.equations if r.label == "3.14"]
+    assert len(label_records) == 1
+    assert label_records[0].confidence_policy.can_support_claim is False
+    assert label_records[0].confidence_policy.must_not_treat_as_source_extracted is True
 
 
 def test_relation_or_result_summary_is_preserved():
@@ -303,11 +308,15 @@ def test_tex_source_equation_is_source_backed():
     assert record.confidence_policy.can_support_claim is True
 
 
-def test_no_accepted_returns_provisional_only_no_llm():
-    """全候補が accepted でない場合、LLM は呼ばれず provisional のみが返る (issue #259).
+def test_provisional_only_candidates_are_reconstructed_but_never_source_backed():
+    """accepted が無く provisional のみでも LLM 再構成は走る（PDF 数式不信ポリシー）.
 
-    "(3.14)" → matched_label あり → provisional EquationRecord が生成される
-    "+"     → fragment, no matched_label → needs_merge (no EquationRecord)
+    旧仕様 (#259) では provisional は LLM 非対象だったが、現行は PDF 由来の
+    数式テキストを信用せず accepted/provisional すべてを復元対象にする。
+    復元されても記録は source-backed になってはならない（安全側固定）。
+
+    "(3.14)" → matched_label あり → provisional
+    "+"      → fragment_only → provisional（縮退）
     """
     structure = DocumentStructureResult(
         document_id="doc_test",
@@ -316,17 +325,25 @@ def test_no_accepted_returns_provisional_only_no_llm():
         metadata=DocumentMetadata(title="Test", pages=1),
         sections=[Section("sec_1", "Results", 1, 1, 1)],
         blocks=[
-            _typed("e1", "(3.14)", "equation_block", 0),   # label_only + matched_label → provisional
-            _typed("e2", "+", "equation_block", 1),         # fragment → needs_merge (no record)
+            _typed("e1", "(3.14)", "equation_block", 0),
+            _typed("e2", "+", "equation_block", 1),
         ],
     )
     agent = EquationSemanticsAgent()
-    with patch.object(agent._llm_client, "generate") as mock_llm:
+    responses = [
+        _response("eq_3_14", "e1", "3.14", "(3.14)", "definition", "Provisional."),
+        _response("eq_frag", "e2", None, "+", "definition", "Fragment."),
+    ]
+    with patch.object(agent._llm_client, "generate", side_effect=responses) as mock_llm:
         result = agent.run(structure)
 
-    mock_llm.assert_not_called()
+    assert mock_llm.call_count == 2
     assert len(result.equation_candidates) == 2
-    # "(3.14)" gets a provisional EquationRecord; "+" does not
-    provisional_eq = [e for e in result.equations if e.confidence_policy.can_support_claim is False]
-    assert len(provisional_eq) == 1
-    assert provisional_eq[0].confidence_policy.must_not_treat_as_source_extracted is True
+    assert all(
+        c.acceptance_status == "provisional" for c in result.equation_candidates
+    )
+    # Reconstruction-only records can never support claims
+    assert result.equations
+    for record in result.equations:
+        assert record.confidence_policy.can_support_claim is False
+        assert record.confidence_policy.must_not_treat_as_source_extracted is True

@@ -26,7 +26,6 @@ ADMIN_HTML = ROOT / "frontend" / "public" / "admin.html"
 INDEX_HTML = ROOT / "frontend" / "public" / "index.html"
 FIXTURE_JS = ROOT / "frontend" / "public" / "js" / "atlas-fixture.js"
 MIGRATION_SQL = ROOT / "backend" / "db" / "023_atlas_correction_reports.sql"
-MAIN_PY = ROOT / "backend" / "api" / "main.py"
 
 
 def _read(path: Path) -> str:
@@ -172,9 +171,9 @@ class TestReporterNotificationUI:
 
 
 class TestMigrationSchema:
-    def test_reference_sql_and_runtime_migration_are_consistent(self):
+    def test_reference_sql_defines_expected_columns(self):
+        """正本は backend/db/023_atlas_correction_reports.sql（main.py のインライン DDL ではない）。"""
         sql = _read(MIGRATION_SQL)
-        main = _read(MAIN_PY)
         for fragment in (
             "CREATE TABLE IF NOT EXISTS atlas_correction_reports",
             "reporter_id      UUID NOT NULL REFERENCES users(id)",
@@ -183,7 +182,6 @@ class TestMigrationSchema:
             "kind             TEXT NOT NULL DEFAULT 'map_correction'",
         ):
             assert fragment in sql, f"023 SQL に {fragment!r} がない"
-            assert fragment in main, f"main.py の migration に {fragment!r} がない"
 
     def test_status_vocabulary_supports_review_flow(self):
         sql = _read(MIGRATION_SQL)

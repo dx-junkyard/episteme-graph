@@ -37,16 +37,27 @@ from services import (
     get_editable_course_data,
     get_viewable_course_data,
     reanalyze_course_structure_background,
+    record_review_event,
+    resolve_document_access,
     update_background_task,
     user_can_edit_document,
     user_can_view_document,
 )
 from core.config import get_settings
+from core.schema import (
+    AUDIT_ENTITY_CITATION,
+    AUDIT_ENTITY_CLAIM,
+    AUDIT_ENTITY_COMPONENT,
+    AUDIT_ENTITY_ENDORSEMENT,
+    AUDIT_ENTITY_EXPLANATION,
+)
 from core.concept_normalizer import normalize_concept, normalize_concepts, normalize_key
+from core.course_data import course_source_material_ids, course_sources
 from core.document_sections import build_document_structure, detect_section_heading, enrich_chunks_with_sections
 from core.postgres import get_session as _pg_session
 from core.cartridges import load_cartridge
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
+from core.llm_usage.context import usage_context
 from core.theory_components import (
     enrich_theory_components_with_llm,
     extract_theory_components_from_dsl,
@@ -576,13 +587,9 @@ def _find_viewable_course_for_chunk(chunk: dict, current_user: dict) -> str | No
 
 
 def _course_chunks(course_data: dict) -> list[dict]:
-    sources = course_data.get("sources", []) if isinstance(course_data, dict) else []
-    material_ids = [
-        str(s.get("material_id")).strip()
-        for s in sources
-        if isinstance(s, dict) and s.get("material_id")
-    ]
-    material_ids = list(dict.fromkeys(material_ids))
+    material_ids = list(dict.fromkeys(
+        mid.strip() for mid in course_source_material_ids(course_data)
+    ))
     if not material_ids:
         return []
     session = _pg_session()
@@ -652,20 +659,38 @@ def _chunks_for_document(document_id: str) -> list[dict]:
         session.close()
 
 
+def _distinct_material_id_chunks(chunks: list[dict]) -> list[dict]:
+    """chunks から material_id ごとに代表 chunk を1つずつ返す（Tier2 提案10: N+1 回避）。
+
+    1ドキュメントの chunk は通常すべて同一 material_id を持つため、chunk の数だけ
+    `resolve_document_access` / `_find_*_course_for_chunk` を繰り返す必要はない。
+    distinct な material_id の集合だけを走査すれば十分（大半のドキュメントは1件のみ）。
+    """
+    seen: dict[str, dict] = {}
+    for chunk in chunks:
+        mid = chunk.get("material_id")
+        if mid and mid not in seen:
+            seen[mid] = chunk
+    return list(seen.values())
+
+
 def _ensure_document_viewable(document_id: str, current_user: dict) -> list[dict]:
     chunks = _chunks_for_document(document_id)
     if not chunks:
         raise HTTPException(status_code=404, detail="Document not found")
     if current_user.get("role") == ROLE_SYSTEM_ADMIN:
         return chunks
-    # migration 035: ドキュメント直接共有（所有者 / public / group / document_group_permissions）。
+    # ドキュメント直接共有（所有者 / public / group / object_group_permissions object_type='document'）。
     # document_id は UUID か material_id のどちらでも user_can_view_document が解決する。
     if user_can_view_document(current_user["id"], document_id):
         return chunks
-    for chunk in chunks:
-        # chunk 側の material_id でも判定（document_id が UUID でない経路の保険）
+    # chunk 側の material_id でも判定（document_id が UUID でない経路の保険）。
+    # distinct material_id 単位でのみ判定し、chunk 数ぶんの再クエリ（N+1）を避ける
+    # （Tier2 提案10）。resolve_document_access は services.py の正本判定
+    # （user_can_view_document と同一条件）をまとめて返す集約版。
+    for chunk in _distinct_material_id_chunks(chunks):
         mid = chunk.get("material_id")
-        if mid and user_can_view_document(current_user["id"], mid):
+        if mid and resolve_document_access(current_user["id"], mid).can_view:
             return chunks
         course_id = _find_viewable_course_for_chunk(chunk, current_user)
         if course_id:
@@ -682,9 +707,11 @@ def _ensure_document_editable(document_id: str, current_user: dict) -> list[dict
     # migration 035: ドキュメント直接共有（所有者 / editor グループ）でも編集可
     if user_can_edit_document(current_user["id"], document_id):
         return chunks
-    for chunk in chunks:
+    # distinct material_id 単位でのみ判定する（Tier2 提案10, N+1 回避。理由は
+    # _ensure_document_viewable のコメント参照）。
+    for chunk in _distinct_material_id_chunks(chunks):
         mid = chunk.get("material_id")
-        if mid and user_can_edit_document(current_user["id"], mid):
+        if mid and resolve_document_access(current_user["id"], mid).can_edit:
             return chunks
         course_id = _find_course_for_chunk(chunk, current_user)
         if course_id:
@@ -1131,28 +1158,8 @@ def _insert_claim(document_id: str, chunk_id: str, payload: dict, user_id: str) 
 
 
 def _record_review_event(entity_type: str, entity_id: str, old_status: str, new_status: str, user_id: str | None, metadata: dict | None = None) -> None:
-    session = _pg_session()
-    try:
-        session.execute(
-            sa_text("""
-                INSERT INTO theory_review_events (entity_type, entity_id, old_status, new_status, changed_by, metadata)
-                VALUES (:entity_type, :entity_id, :old_status, :new_status, CAST(:changed_by AS uuid), CAST(:metadata AS jsonb))
-            """),
-            {
-                "entity_type": entity_type,
-                "entity_id": entity_id,
-                "old_status": old_status or "",
-                "new_status": new_status or "",
-                "changed_by": user_id or None,
-                "metadata": json.dumps(metadata or {}, ensure_ascii=False),
-            },
-        )
-        session.commit()
-    except Exception:
-        session.rollback()
-        logger.warning("Failed to record review event for %s %s", entity_type, entity_id, exc_info=True)
-    finally:
-        session.close()
+    """theory_review_events への監査記録（実体は services.record_review_event, 提案7）。"""
+    record_review_event(entity_type, entity_id, old_status, new_status, user_id, metadata)
 
 
 def _propagate_rejected_claim(claim_id: str) -> None:
@@ -1560,7 +1567,7 @@ def _update_component(component_id: str, payload: dict) -> TheoryComponentOut:
         session.commit()
         updated = _get_component(component_id)
         if existing_component and updated and existing_component.review_status != updated.review_status:
-            _record_review_event("component", component_id, existing_component.review_status, updated.review_status, None)
+            _record_review_event(AUDIT_ENTITY_COMPONENT, component_id, existing_component.review_status, updated.review_status, None)
             if updated.review_status == "rejected" or updated.status == "rejected":
                 _propagate_rejected_component(component_id)
         return updated
@@ -2436,7 +2443,7 @@ def update_claim(
         session.commit()
         updated = _row_to_claim(row)
         if existing[1] != updated.review_status:
-            _record_review_event("claim", claim_id, existing[1], updated.review_status, current_user.get("id"))
+            _record_review_event(AUDIT_ENTITY_CLAIM, claim_id, existing[1], updated.review_status, current_user.get("id"))
             if updated.review_status == "rejected":
                 _propagate_rejected_claim(claim_id)
             # R層: claim が承認済みへ遷移したら再構成 item のオーサリングを非同期起動する
@@ -2525,10 +2532,10 @@ def list_theory_components(
         course_data = get_viewable_course_data(current_user["id"], course_id) or _system_admin_course_data(course_id) or {}
         document_ids = []
         material_ids = []
-        for source in course_data.get("sources", []) if isinstance(course_data, dict) else []:
-            if isinstance(source, dict) and source.get("document_id"):
+        for source in course_sources(course_data):
+            if source.get("document_id"):
                 document_ids.append(str(source["document_id"]))
-            if isinstance(source, dict) and source.get("material_id"):
+            if source.get("material_id"):
                 material_ids.append(str(source["material_id"]))
         if material_ids:
             mid_placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
@@ -3008,7 +3015,7 @@ def create_component_explanation(
         session.close()
     explanation_id = str(row[0])
     _record_review_event(
-        "explanation", explanation_id, "", "teacher_review_required", current_user.get("id"),
+        AUDIT_ENTITY_EXPLANATION, explanation_id, "", "teacher_review_required", current_user.get("id"),
         {"action": "create", "component_id": component_id},
     )
     out = _get_explanation_out(explanation_id)
@@ -3067,7 +3074,7 @@ def patch_explanation(
 
     if body.review_status is not None and body.review_status != old_review_status:
         _record_review_event(
-            "explanation", explanation_id, old_review_status, body.review_status, current_user.get("id"),
+            AUDIT_ENTITY_EXPLANATION, explanation_id, old_review_status, body.review_status, current_user.get("id"),
         )
     out = _get_explanation_out(explanation_id)
     if not out:
@@ -3123,7 +3130,7 @@ def endorse_explanation(
     finally:
         session.close()
     _record_review_event(
-        "endorsement", explanation_id, "", level, current_user.get("id"),
+        AUDIT_ENTITY_ENDORSEMENT, explanation_id, "", level, current_user.get("id"),
         {"action": "endorse", "expertise_tag": body.expertise_tag or ""},
     )
     out = _get_explanation_out(explanation_id)
@@ -3160,7 +3167,7 @@ def revoke_endorsement(
         session.close()
     if result:
         _record_review_event(
-            "endorsement", explanation_id, "endorsed", "revoked", current_user.get("id"),
+            AUDIT_ENTITY_ENDORSEMENT, explanation_id, "endorsed", "revoked", current_user.get("id"),
             {"action": "revoke"},
         )
     out = _get_explanation_out(explanation_id)
@@ -3257,7 +3264,7 @@ def cite_explanation(
     except Exception:  # noqa: BLE001 — 版固定の失敗は引用を止めない
         logger.debug("citation source-version stamping skipped for %s", explanation_id, exc_info=True)
     _record_review_event(
-        "citation", explanation_id, "", "cited", current_user.get("id"),
+        AUDIT_ENTITY_CITATION, explanation_id, "", "cited", current_user.get("id"),
         {"action": "cite", "citing_course_id": citing_course_id},
     )
     return {"citation_id": str(row[0]), "explanation_id": explanation_id, "citing_course_id": citing_course_id}
@@ -3356,10 +3363,10 @@ def _claims_for_course(course_id: str, current_user: dict, limit: int = 100) -> 
     )
     document_ids: list[str] = []
     material_ids: list[str] = []
-    for source in course_data.get("sources", []) if isinstance(course_data, dict) else []:
-        if isinstance(source, dict) and source.get("document_id"):
+    for source in course_sources(course_data):
+        if source.get("document_id"):
             document_ids.append(str(source["document_id"]))
-        if isinstance(source, dict) and source.get("material_id"):
+        if source.get("material_id"):
             material_ids.append(str(source["material_id"]))
     session = _pg_session()
     try:
@@ -3433,7 +3440,8 @@ def create_candidates_from_query(
     """
     _ensure_editable(body.course_id, current_user)
     existing_claims = _claims_for_course(body.course_id, current_user, limit=max(1, min(body.max_claims, 300)))
-    result = generate_component_candidates(body.question, body.answer_text, existing_claims)
+    with usage_context("admin:component_candidates", user_id=current_user["id"], course_id=body.course_id):
+        result = generate_component_candidates(body.question, body.answer_text, existing_claims)
 
     created: list[dict] = []
     for candidate in result.components:
@@ -3481,7 +3489,7 @@ def create_candidates_from_query(
             session.close()
         explanation_id = str(exp_row[0])
         _record_review_event(
-            "explanation", explanation_id, "", "teacher_review_required", current_user.get("id"),
+            AUDIT_ENTITY_EXPLANATION, explanation_id, "", "teacher_review_required", current_user.get("id"),
             {"action": "candidate_from_query", "origin_query_id": body.origin_query_id or ""},
         )
         created.append({

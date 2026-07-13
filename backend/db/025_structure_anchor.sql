@@ -3,6 +3,9 @@
 -- 質問原文 text は残したまま追加する）。帰属候補は attribution_source='llm_candidate'
 -- で保存され、学習者本人の confirm/dismiss でのみ確定・棄却する（P1）。
 -- 行の status は変更しない（問い自体は確定済み。候補なのは帰属だけ）。
+--
+-- このファイルが正本。適用は backend/core/migrations.py のランナーが起動時に行う
+-- （冪等・毎起動再実行）。
 
 -- ダイジェスト取得（本人の llm_candidate を新しい順に）用
 CREATE INDEX IF NOT EXISTS idx_interest_traces_anchor_candidate

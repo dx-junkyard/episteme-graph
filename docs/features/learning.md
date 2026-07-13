@@ -25,7 +25,7 @@
 | 機能 | 仕組み | API |
 |---|---|---|
 | コース一覧 | 「自分のコース」と「受講可能なコース（公開テンプレート）」を分けて表示 | `GET /api/learning/courses` |
-| 受講登録 | 公開テンプレートをクローンして自分用インスタンスを作成 | `POST /api/learning/courses/{id}/enroll` |
+| 受講登録 | 公開テンプレートをクローンせず、`learning_states` に1行 INSERT して個人の学習状態を作成 | `POST /api/learning/courses/{id}/enroll` |
 | コース読込 | マスター + 個人レイヤーを取得 | `GET /api/learning/courses/{id}` |
 | 進捗 | 章ごとの完了状況、セッション履歴 | `GET /api/learning/courses/{id}/progress` |
 | トピック教材 | コンテキスト用にチャンクを取得 | `GET .../topics/{tid}/material` |

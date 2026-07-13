@@ -22,8 +22,8 @@
 --   - 発行・削除予約は所有者のみ。editor は working copy を編集できるが発行/削除はできず、
 --     常に HEAD を読む（ピンしない）。監査は theory_review_events（entity_type は open vocab）。
 --
--- 実際の適用は backend/api/main.py の _run_migrations()（Migration 037）で行う。
--- このファイルは正本スキーマのリファレンス。全文 IF NOT EXISTS で冪等。
+-- このファイルが正本。適用は `backend/core/migrations.py` のランナーが起動時に行う（冪等・毎起動再実行）。
+-- 全文 IF NOT EXISTS で冪等。
 -- ============================================================
 
 -- ------------------------------------------------------------
@@ -85,24 +85,19 @@ CREATE INDEX IF NOT EXISTS idx_svsub_subscriber
     ON shared_version_subscriptions(subscriber_id, status);
 
 -- ------------------------------------------------------------
--- 4) share_notifications — 通知インボックス
+-- 4) share_notifications — 統合済み no-op（アーキテクチャ整理 Tier 3-15）
 -- ------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS share_notifications (
-    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    recipient_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    object_type  TEXT NOT NULL,
-    object_id    TEXT NOT NULL,
-    kind         TEXT NOT NULL CHECK (kind IN
-                     ('version_published', 'deletion_scheduled', 'deletion_cancelled', 'deleted')),
-    release_id   UUID REFERENCES shared_versions(id),
-    payload      JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    read_at      TIMESTAMPTZ,
-    acted_at     TIMESTAMPTZ
-);
-CREATE INDEX IF NOT EXISTS idx_share_notif_recipient
-    ON share_notifications(recipient_id, read_at, created_at DESC);
-
+-- 【2026-07 アーキテクチャ整理 Tier 3-15】share_notifications は migration 045 で
+-- user_notifications（migration 038、状態管理・通知基盤）と統合され、source='shared'
+-- 列で区別する行として user_notifications に統合された。
+--
+-- 本ファイルで CREATE TABLE share_notifications を行うと、045 が毎起動「旧テーブルを
+-- INSERT ... SELECT で移行 → DROP TABLE」するため、037 で作って 045 で即座に壊すだけの
+-- 往復が発生してしまう。そのため本セクションは意図的に省略する（010/035 と同じ
+-- 「最終状態への巻き戻し」パターン）。
+--
+-- 正本は backend/db/045_unified_notifications.sql を参照。
+--
 -- ------------------------------------------------------------
 -- 5) component_citations（migration 021）に引用の版固定カラムを追加
 --    他教員の説明を引用/再利用したとき、その時点の Release を刻んで表示を固定する。

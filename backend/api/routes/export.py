@@ -15,6 +15,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
 from dependencies import _require_teacher
+from core.course_data import (
+    course_chapters,
+    course_source_material_ids,
+    course_sources,
+    course_topics,
+)
 from core.postgres import get_session as _pg_session
 from core.document_pipeline.persistence import resolve_artifact_runs
 from routes.export_artifacts import (
@@ -124,9 +130,9 @@ def _load_course(session: Any, course_id: str) -> dict | None:
     if not row:
         return None
     course_data = _load_json_field(row[6], {})
-    topics_raw = course_data.get("topics", [])
-    chapters_raw = course_data.get("chapters", [])
-    sources_raw = course_data.get("sources", [])
+    topics_raw = course_topics(course_data)
+    chapters_raw = course_chapters(course_data)
+    sources_raw = course_sources(course_data)
 
     topics_out = []
     for t in (topics_raw if isinstance(topics_raw, list) else []):
@@ -194,8 +200,7 @@ def _get_document_ids_for_course(session: Any, course_id: str) -> list[str]:
     if not row or not row[0]:
         return []
     course_data = _load_json_field(row[0], {})
-    sources = course_data.get("sources", [])
-    material_ids = [s.get("material_id") for s in sources if isinstance(s, dict) and s.get("material_id")]
+    material_ids = course_source_material_ids(course_data)
     if not material_ids:
         return []
     placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))

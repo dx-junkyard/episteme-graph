@@ -130,6 +130,19 @@ _REGISTRY: list[Capability] = [
             _step("lecture-studio", "ls-rewrite-prompt", "ここに書き換えの指示を入力します"),
         ),
     ),
+    Capability(
+        id="lecture_studio.generate_audio",
+        screen="lecture-studio",
+        title="コース原稿の音声を生成する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/lecture_studio.md#audio",
+        locate_steps=(
+            _step("lecture-studio", "ls_course_select", "対象のコースを選びます"),
+            _step("lecture-studio", "ls_audio_generate", "音声生成を実行します",
+                  precondition="course_selected"),
+        ),
+    ),
     # --- コース管理 (course-management) ---
     Capability(
         id="course.set_visibility",
@@ -182,6 +195,20 @@ _REGISTRY: list[Capability] = [
         api={"method": "DELETE", "path": "/api/admin/courses/{course_id}"},
         locate_steps=(
             _step("course-management", "course_row:{course_id}", "削除したいコースを選びます"),
+        ),
+    ),
+    # --- ガイダンス層（G層）Next Steps が参照する道案内専用 capability（設計 §3.2）---
+    Capability(
+        id="course.atlas_binding",
+        screen="course-management",
+        title="コースに学習マップ（分野の地図）を割り当てる",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,   # v1 は道案内のみ。代行は将来（propose API は既存）
+        howto_doc="admin_operations/course.md#atlas-binding",
+        locate_steps=(
+            _step("course-management", "course_row:{course_id}", "対象のコースを選びます"),
+            _step("course-management", "atlas_binding_button", "『学習マップ編集』を開きます",
+                  precondition="course_selected"),
         ),
     ),
     # --- 分野の地図 (atlas) ---

@@ -26,7 +26,8 @@ from pydantic import BaseModel
 from sqlalchemy import text as sa_text
 
 from dependencies import _get_current_user, _require_teacher
-from services import get_accessible_course_data
+from services import get_accessible_course_data, record_review_event
+from core.course_data import course_source_material_ids, course_topics
 from core.postgres import get_session as _pg_session
 from core.reconstruction import diff as recon_diff
 from core.reconstruction import item_builder
@@ -75,30 +76,8 @@ def _record_recon_event(
     user_id: str | None,
     metadata: dict | None = None,
 ) -> None:
-    """theory_review_events への監査記録（C層 _record_review_event と同型）。"""
-    session = _pg_session()
-    try:
-        session.execute(
-            sa_text("""
-                INSERT INTO theory_review_events
-                (entity_type, entity_id, old_status, new_status, changed_by, metadata)
-                VALUES (:etype, :eid, :old, :new, CAST(:uid AS uuid), CAST(:meta AS jsonb))
-            """),
-            {
-                "etype": entity_type,
-                "eid": entity_id,
-                "old": old_status or "",
-                "new": new_status or "",
-                "uid": user_id or None,
-                "meta": json.dumps(metadata or {}, ensure_ascii=False),
-            },
-        )
-        session.commit()
-    except Exception:
-        session.rollback()
-        logger.warning("Failed to record recon event for %s %s", entity_type, entity_id, exc_info=True)
-    finally:
-        session.close()
+    """theory_review_events への監査記録（実体は services.record_review_event, 提案7）。"""
+    record_review_event(entity_type, entity_id, old_status, new_status, user_id, metadata)
 
 
 def _course_scope(session, course_data: dict, topic_id: str | None = None) -> dict:
@@ -108,8 +87,7 @@ def _course_scope(session, course_data: dict, topic_id: str | None = None) -> di
     sources[].material_id（=documents.source_path）と一致しない。chunks は両方を
     持つため、claim → course のブリッジは chunks.material_id を主に使う。
     """
-    sources = course_data.get("sources", []) if isinstance(course_data, dict) else []
-    material_ids = [str(s.get("material_id")) for s in sources if isinstance(s, dict) and s.get("material_id")]
+    material_ids = course_source_material_ids(course_data)
     doc_refs = list(material_ids)
     if material_ids:
         try:
@@ -125,7 +103,7 @@ def _course_scope(session, course_data: dict, topic_id: str | None = None) -> di
 
     topic_chunk_ids: list[str] = []
     if topic_id:
-        for t in course_data.get("topics", []) if isinstance(course_data, dict) else []:
+        for t in course_topics(course_data):
             if isinstance(t, dict) and str(t.get("id")) == str(topic_id):
                 topic_chunk_ids = [str(c) for c in (t.get("material_chunk_ids") or []) if str(c).strip()]
                 break

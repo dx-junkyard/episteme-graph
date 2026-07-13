@@ -1,6 +1,13 @@
 -- Migration 006: Interactive Lecture Mode (Issue #66)
 -- chunks テーブルに spoken_text / formulas カラムを追加
 -- lecture_audio_cache テーブルを新規作成
+--
+-- このファイルが正本。適用は backend/core/migrations.py のランナーが
+-- 起動時に行う（冪等・毎起動再実行）。
+--
+-- NOTE: chunks.display_text の追加は 008_display_text.sql の担当。
+--       lecture_audio_cache.slide_index / language 等の拡張は 040_lecture_slides.sql の担当。
+--       このファイルには含めない（main.py の実行順ではこの間に割り込むが、ファイル分割は変えない）。
 
 -- 1. chunks に音声読み上げ用テキストと数式メタデータを追加
 ALTER TABLE chunks ADD COLUMN IF NOT EXISTS spoken_text TEXT;

@@ -62,27 +62,42 @@ def _canonical(object_type: str, object_id: str) -> str:
 
 
 def _require_owner(object_type: str, object_id: str, current_user: dict) -> str:
-    """所有者のみ許可。非所有者は 404（既存 user_owns_* の慣習）。canonical id を返す。"""
-    canonical = _canonical(object_type, object_id)
+    """所有者のみ許可。非所有者は 404（既存 user_owns_* の慣習）。canonical id を返す。
+
+    document の場合は services.resolve_document_access で解決 + 判定を1回にまとめる
+    （旧実装は _canonical が _resolve_document で解決した後、user_owns_document が
+    同じドキュメントをもう一度 _resolve_document していた。Tier2 提案10）。
+    course は _resolve_document 相当の前段解決が無いため従来どおり。
+    """
     uid = _uid(current_user)
     if object_type == vschema.OBJECT_TYPE_DOCUMENT:
-        owns = services.user_owns_document(uid, canonical)
-    else:
-        owns = services.user_owns_course(uid, canonical)
-    if not owns:
+        access = services.resolve_document_access(uid, object_id)
+        if not access.found:
+            raise HTTPException(status_code=404, detail="document not found")
+        if not access.is_owner:
+            raise HTTPException(status_code=404, detail="not found")
+        return access.document_id
+    canonical = _canonical(object_type, object_id)
+    if not services.user_owns_course(uid, canonical):
         raise HTTPException(status_code=404, detail="not found")
     return canonical
 
 
 def _require_viewer(object_type: str, object_id: str, current_user: dict) -> str:
-    """閲覧権限（所有者/editor/viewer）を要求。canonical id を返す。"""
-    canonical = _canonical(object_type, object_id)
+    """閲覧権限（所有者/editor/viewer）を要求。canonical id を返す。
+
+    document 分岐は _require_owner と同じ理由で resolve_document_access に統合済み。
+    """
     uid = _uid(current_user)
     if object_type == vschema.OBJECT_TYPE_DOCUMENT:
-        can = services.user_can_view_document(uid, canonical)
-    else:
-        can = services.user_can_view_course(uid, canonical)
-    if not can:
+        access = services.resolve_document_access(uid, object_id)
+        if not access.found:
+            raise HTTPException(status_code=404, detail="document not found")
+        if not access.can_view:
+            raise HTTPException(status_code=404, detail="not found")
+        return access.document_id
+    canonical = _canonical(object_type, object_id)
+    if not services.user_can_view_course(uid, canonical):
         raise HTTPException(status_code=404, detail="not found")
     return canonical
 

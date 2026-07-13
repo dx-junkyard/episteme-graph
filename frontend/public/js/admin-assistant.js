@@ -309,6 +309,9 @@
         reversible: !!data.reversible,
         action_id: data.action_id
       });
+      // G層: 代行（例: course.publish の公開）成功で Next Steps の対象が変わり得るため再取得する。
+      // 会話1コールに留める（P6 と同型）ため next-steps 自体には LLM を呼ばない。
+      if (window.AdminNextSteps) window.AdminNextSteps.refresh();
     }).catch(function () {
       hideTyping();
       appendAiMsg("実行中にエラーが発生しました。");

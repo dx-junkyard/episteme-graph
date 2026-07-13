@@ -2,19 +2,18 @@
 
 2回失敗しても検出クラスタ行は保持され、呼び出し側（worker）が
 created_from.normalization_failed=true を付けて placeholder 文のまま残す（P4）。
+
+ループの骨格は core/llm_worker/repair.py に共通化済み。ここでは assumption_mining 固有の
+validate_output 呼び出しと、失敗時に None を返す（呼び出し側が P4 で保持する）挙動のみを持つ。
 """
 
 from __future__ import annotations
 
-import json
-import logging
-
 from core.doubt.assumption_mining.prompt import build_repair_prompt
 from core.doubt.assumption_mining.validator import validate_output
+from core.llm_worker.repair import MAX_REPAIR_ATTEMPTS, run_with_repair as _run_with_repair
 
-logger = logging.getLogger(__name__)
-
-MAX_REPAIR_ATTEMPTS = 2
+__all__ = ["MAX_REPAIR_ATTEMPTS", "run_with_repair"]
 
 
 def run_with_repair(
@@ -23,28 +22,11 @@ def run_with_repair(
     source_texts: list[str],
 ) -> dict | None:
     """成功時は正規化 dict、全試行失敗時は None（呼び出し側が P4 で保持）。"""
-    previous_raw = ""
-    errors: list[str] = []
-    for attempt in range(1 + MAX_REPAIR_ATTEMPTS):
-        if attempt == 0:
-            content = base_content
-        else:
-            content = base_content + "\n\n" + build_repair_prompt(previous_raw, errors)
-        try:
-            data = llm_client.complete_json(content)
-        except Exception as exc:
-            errors = [f"output was not valid JSON: {exc}"]
-            previous_raw = ""
-            logger.warning("assumption normalization attempt %d parse failed: %s", attempt + 1, exc)
-            continue
-        previous_raw = json.dumps(data, ensure_ascii=False)
-        result, errors, _warnings = validate_output(data, source_texts)
-        if result is not None:
-            return result
-        logger.info("assumption normalization attempt %d failed validation: %s", attempt + 1, errors)
-
-    logger.warning(
-        "assumption normalization repair failed after %d attempts: %s",
-        1 + MAX_REPAIR_ATTEMPTS, errors,
+    return _run_with_repair(
+        llm_client,
+        base_content,
+        validate=lambda data: validate_output(data, source_texts),
+        build_repair_prompt=build_repair_prompt,
+        on_repair_failed=lambda errors: None,
+        log_label="assumption normalization",
     )
-    return None

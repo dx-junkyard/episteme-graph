@@ -22,6 +22,8 @@ from sqlalchemy import text as sa_text
 from core.config import get_settings
 from core.doubt.scope_candidates.agent import ScopeCandidateAgent
 from core.doubt.scope_candidates.input_builder import build_target_context
+from core.llm_usage.context import bind_usage_context
+from core.llm_worker.cost_gate import CostGate
 from core.postgres import get_session
 
 logger = logging.getLogger(__name__)
@@ -29,8 +31,10 @@ logger = logging.getLogger(__name__)
 # 1 回の worker 起動で処理する対象数の上限
 _BATCH_LIMIT = 10
 
-_call_counts_lock = threading.Lock()
-_daily_call_counts: dict[str, int] = {}
+# 実装は core/llm_worker/cost_gate.py の CostGate に共通化済み（daily のみ・過去日の
+# カウンタは古い方から破棄=prune_stale_daily。daily_call_counts は同じ dict のエイリアス）。
+_cost_gate = CostGate()
+_daily_call_counts: dict[str, int] = _cost_gate.daily_counts
 
 
 def _today_key() -> str:
@@ -41,16 +45,9 @@ def _check_and_count_llm_call() -> bool:
     """日次上限内なら加算して True。上限超過なら False。"""
     settings = get_settings()
     per_day = int(getattr(settings, "doubt_scope_max_calls_per_day", 10))
-    key = _today_key()
-    with _call_counts_lock:
-        current = _daily_call_counts.get(key, 0)
-        if current >= per_day:
-            return False
-        # 過去日のカウンタは捨てる（メモリリーク防止）
-        for stale in [k for k in _daily_call_counts if k != key]:
-            _daily_call_counts.pop(stale, None)
-        _daily_call_counts[key] = current + 1
-    return True
+    return _cost_gate.check_and_count(
+        daily_limit=per_day, daily_key=_today_key(), prune_stale_daily=True,
+    )
 
 
 def _claim_pending_targets(session, document_id: str, course_id: str) -> list[tuple[str, str]]:
@@ -103,6 +100,11 @@ def _append_candidates(session, target_type: str, target_id: str, candidates: li
 
 def run_scope_candidate_mining(document_id: str = "", course_id: str = "") -> dict:
     """未解析の台帳行に対してスコープ候補を抽出する（同期実行本体）。"""
+    bind_usage_context(
+        "doubt:scope_candidates",
+        document_id=document_id or None,
+        course_id=course_id or None,
+    )
     session = get_session()
     try:
         targets = _claim_pending_targets(session, document_id, course_id)

@@ -8,8 +8,8 @@
 --     chat_anchors への二重書きは禁止（last-write 競合回避。仕様書 §3.1）。
 --   - kind は分類前の生記録を既定 'raw'。Stage 4 の TraceAnalyzer が interest_kind を後付け。
 --
--- 実際の適用は backend/api/main.py の _run_migrations()（Migration 020）で行う。
--- このファイルは正本スキーマのリファレンス。
+-- このファイルが正本。適用は backend/core/migrations.py のランナーが起動時に行う
+-- （冪等・毎起動再実行）。
 
 CREATE TABLE IF NOT EXISTS interest_traces (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -1,7 +1,10 @@
-"""機能1: パイプライン成果のグループ共有（migration 035）。
+"""機能1: パイプライン成果のグループ共有（migration 035 → 044 で統合済み）。
 
 対象:
-  - `backend/db/035_document_group_permissions.sql` と main.py のマイグレーション登録
+  - `backend/db/035_document_group_permissions.sql`
+    （2026-07 アーキテクチャ整理 Tier 3-14 で migration 044 に統合済み。本ファイルは
+    no-op スタブ。実テーブルの正本は `backend/db/044_object_group_permissions.sql`。
+    044 自体のスキーマ検査は `test_course_group_permissions.py::TestMigration044` を参照）
   - `backend/api/schemas.py` の DocumentGroupPermission{Out,UpsertRequest}
   - `backend/api/services.py` の権限ヘルパー・監査ヘルパー
   - `backend/api/routes/admin.py` の共有エンドポイント + list_materials/get_material 拡張
@@ -22,7 +25,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_DIR = PROJECT_ROOT / "backend"
 FRONTEND_DIR = PROJECT_ROOT / "frontend" / "public"
 
-MAIN_PY = BACKEND_DIR / "api" / "main.py"
 SCHEMAS_PY = BACKEND_DIR / "api" / "schemas.py"
 SERVICES_PY = BACKEND_DIR / "api" / "services.py"
 ADMIN_PY = BACKEND_DIR / "api" / "routes" / "admin.py"
@@ -30,27 +32,35 @@ THEORY_PY = BACKEND_DIR / "api" / "routes" / "theory_components.py"
 MIGRATION_SQL = BACKEND_DIR / "db" / "035_document_group_permissions.sql"
 ADMIN_JS = FRONTEND_DIR / "js" / "admin.js"
 
+_SQL_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
+
 
 # ---------------------------------------------------------------------------
 # migration
 # ---------------------------------------------------------------------------
 
 
-def test_migration_sql_exists_and_defines_table():
+def test_migration_sql_is_now_a_stub():
+    """035 は統合（migration 044）で no-op スタブになっている。
+
+    実テーブルの CREATE はもう行わない（044 が旧テーブルを検出して移行・DROP する
+    往復を避けるため）。
+    """
     assert MIGRATION_SQL.exists(), "035_document_group_permissions.sql が無い"
     sql = MIGRATION_SQL.read_text(encoding="utf-8")
-    assert "CREATE TABLE IF NOT EXISTS document_group_permissions" in sql
-    assert "PRIMARY KEY (document_id, group_id)" in sql
-    assert "REFERENCES documents(id) ON DELETE CASCADE" in sql
-    assert "CHECK (permission IN ('viewer', 'editor'))" in sql
+    executable = _SQL_LINE_COMMENT_RE.sub("", sql)
+    assert not re.search(r"\bCREATE\s+TABLE\b", executable, re.IGNORECASE)
+    assert "044" in sql
 
 
-def test_main_registers_migration_035():
-    src = MAIN_PY.read_text(encoding="utf-8")
-    assert "CREATE TABLE IF NOT EXISTS document_group_permissions" in src
-    assert "idx_dgp_group_permission" in src
-    # migration 035 は登録済み（適用完了ログの範囲は後続 migration 追加で末尾が伸びる）
-    assert "Migrations (002-037) applied successfully." in src
+def test_migration_044_is_the_new_source_of_truth():
+    """正本は backend/db/044_object_group_permissions.sql に移った
+    （main.py のインライン DDL でも 035 でもない）。"""
+    mig_044 = BACKEND_DIR / "db" / "044_object_group_permissions.sql"
+    assert mig_044.exists()
+    sql = mig_044.read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS object_group_permissions" in sql
+    assert "idx_ogp_group_permission" in sql
 
 
 # ---------------------------------------------------------------------------
@@ -124,16 +134,22 @@ class TestAdminRoutes:
         assert '"/documents/{document_id}/groups/{group_id}"' in self.src
 
     def test_upsert_owner_only_and_audited(self):
+        """entity_type は core/schema.py の AUDIT_ENTITY_DOCUMENT_SHARE カタログ定数を使う（提案7）。"""
+        from core.schema import AUDIT_ENTITY_DOCUMENT_SHARE
+
+        assert AUDIT_ENTITY_DOCUMENT_SHARE == "document_share"
         body = self.src.split("def upsert_document_group_permission")[1].split("\n@router")[0]
         assert "user_owns_document" in body
-        assert "document_group_permissions" in body
-        assert "ON CONFLICT (document_id, group_id)" in body
-        assert '"document_share"' in body  # 監査 entity_type
+        assert "object_group_permissions" in body
+        assert "'document'" in body
+        assert "ON CONFLICT (object_type, object_id, group_id)" in body
+        assert "AUDIT_ENTITY_DOCUMENT_SHARE" in body  # 監査 entity_type
 
     def test_delete_owner_only(self):
         body = self.src.split("def delete_document_group_permission")[1].split("\n@router")[0]
         assert "user_owns_document" in body
-        assert "DELETE FROM document_group_permissions" in body
+        assert "DELETE FROM object_group_permissions" in body
+        assert "object_type = 'document'" in body
 
     def test_list_uses_view_gate(self):
         body = self.src.split("def list_document_group_permissions")[1].split("\n@router")[0]
@@ -142,7 +158,7 @@ class TestAdminRoutes:
     def test_list_materials_includes_doc_perm_clause(self):
         body = self.src.split("def list_materials")[1].split("return materials")[0]
         assert "doc_perm_clause" in body
-        assert "document_group_permissions" in body
+        assert "object_group_permissions" in body
 
     def test_get_material_includes_doc_perm_clause(self):
         body = self.src.split("def get_material")[1].split("return MaterialOut")[0]

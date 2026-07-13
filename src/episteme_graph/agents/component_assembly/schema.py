@@ -15,6 +15,17 @@ CORE_COMPONENT_TYPES = [
     "MethodComponent",
     "TheoryComponent",
     "ClaimBundleComponent",
+    # Image pipeline (design doc §5-5, migration 041): apparatus/instrument
+    # identification candidates built deterministically by
+    # apparatus_components.py from ApparatusSemanticsAgent's vision-LLM
+    # output. Kept in the built-in default vocabulary (not cartridge-only)
+    # so these components remain valid even without a cartridge loaded
+    # (design principle #5: cartridge absence must not break the agent).
+    # Matches the theory_components.component_type DB CHECK vocabulary
+    # added by migration 041 (backend/db/041_image_pipeline.sql).
+    "apparatus",
+    "instrument",
+    "part",
 ]
 
 CORE_DEPENDENCY_TYPES = [

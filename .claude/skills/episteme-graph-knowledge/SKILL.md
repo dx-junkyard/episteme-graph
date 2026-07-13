@@ -106,16 +106,11 @@ DBスキーマ変更・マイグレーション作成時は `LLM_EMBEDDING_DIM` 
 
 CorePredicate の定義は `backend/core/schema.py` を直接読んで最新の列挙値を確認すること。
 
-## パターンマッチング
+## パターンマッチング（撤去済み）
 
-`backend/core/batch.py` で実装。
-
-1. 新しい AbstractionPattern が登録される
-2. PostgreSQL pgvector でパターンベクトルに類似する論文チャンクを検索
-3. LLM が構造的同型性を評価 (信頼度スコア 0.0-1.0)
-4. 閾値以上で結果を保存
-
-実装の詳細は `backend/core/batch.py` を直接読んで確認すること。
+AbstractionPattern によるパターンマッチングシステム（旧 `backend/core/batch.py` /
+`seed_patterns.py`）は 2026-07 のアーキテクチャ整理（Tier 1）で Neo4j とともに完全撤去済み。
+知識抽出は現在 [PDF解析Agentパイプライン](#概要) が担う。
 
 ## LLM プロバイダ環境変数仕様
 
@@ -142,6 +137,17 @@ CorePredicate の定義は `backend/core/schema.py` を直接読んで最新の�
 | `LLM_TRANSCRIBE_MODEL` | 音声文字起こしモデル（ハンズフリー会話、openai プロバイダのみ） | `whisper-1` |
 | `ASSISTANT_MAX_CALLS_PER_DAY` | Admin Copilot: chat の 1 ユーザー 1 日あたり LLM コール上限 | `20` |
 | `ASSISTANT_LLM_MODEL` | Admin Copilot: intent 分類/応答が使うモデル（空なら fast tier に委譲） | （空） |
+| `LECTURE_TTS_VOICE` | レクチャー音声生成の TTS voice（OpenAI 経路。多言語対応 voice を想定） | `alloy` |
+| `APPARATUS_LLM_MODEL` | apparatus_semantics: vision 同定モデル（OpenAI 経路のみ） | `gpt-4o` |
+| `APPARATUS_MAX_IMAGES_PER_DOCUMENT` | apparatus_semantics: 1 document あたり vision 対象の図の上限（超過は `skipped_by_limit` で保持） | `20` |
+| `APPARATUS_MAX_CALLS_PER_DAY` | apparatus_semantics: vision 呼び出しの日次上限（他機能と独立） | `30` |
+| `APPARATUS_FEWSHOT_IMAGES` | apparatus_semantics: 含有承認済み例示画像の few-shot 添付 | `false` |
+| `APPARATUS_RETRIEVAL_TOP_K` | apparatus_semantics: ライブラリ凍結版 retrieval の候補数 | `5` |
+| `LLM_USAGE_TRACKING_ENABLED` | U層: LLM 使用量記録の有効化（false で record() を no-op に） | `true` |
+| `LLM_USAGE_BUFFER_MAX` | U層: in-memory バッファ上限（超過は dropped_events に計上して開示） | `1000` |
+| `LLM_USAGE_FLUSH_INTERVAL_SECONDS` | U層: flusher スレッドの書込周期（秒） | `10` |
+| `LLM_USAGE_FLUSH_BATCH` | U層: この件数到達で即時 flush | `100` |
+| `LLM_PRICE_TABLE_PATH` | U層: モデル単価 JSON のパス（1Mトークンあたり USD・前方一致）。空なら cost_usd=null | （空） |
 
 > **禁止**: `google-cloud-aiplatform` (Vertex AI) を新規パイプラインコードで使用すること。
 > Google の LLM を使う場合は必ず `LLM_PROVIDER=gemini` (`google-generativeai`) を指定すること。

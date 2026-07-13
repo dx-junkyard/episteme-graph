@@ -22,7 +22,6 @@ PDF文献から概念・主張・数式・関係性を自動抽出してナレ�
 | フロントエンド | Vanilla JS SPA + nginx |
 | APIサーバー | FastAPI (Python 3.11) |
 | RDB + ベクトル検索 | PostgreSQL 16 + pgvector (cosine, 次元数は `LLM_EMBEDDING_DIM`、既定 3072) |
-| グラフDB | Neo4j 5（概念グラフ走査専用） |
 | オブジェクトストレージ | MinIO（S3互換） |
 | PDF構造解析 | GROBID（TEI-XML）／フォールバックで PyMuPDF |
 | LLM | OpenAI API または Google Gemini / Vertex AI（`LLM_PROVIDER` で切替） |
@@ -96,7 +95,6 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
 | 管理UI（ローカル） | http://localhost:3000/admin.html |
 | 学習UI（ngrok） | https://your-subdomain.ngrok-free.app |
 | ngrok Web UI | http://localhost:4040 |
-| Neo4j Browser | http://localhost:7474 |
 | MinIO コンソール | http://localhost:9001 |
 | PostgreSQL | localhost:5432（psql / TablePlus など） |
 
@@ -144,7 +142,6 @@ PDF アップロード → MinIO 保存
      文書構造復元 → 主張（claim）の採否・atomic 化 → 数式の意味・導出チェーン
      → 中心命題の再構成 → DSL 接続 → 再利用可能コンポーネント → 理論操作グラフ
   → テキストチャンク → PostgreSQL pgvector（次元数は `LLM_EMBEDDING_DIM` 準拠）
-  → 概念ノード・エッジ → Neo4j（REQUIRES / RELATES_TO / CONTAINS）
   → 成果物 JSON → MinIO / PostgreSQL
 ```
 
@@ -248,7 +245,7 @@ episteme-graph/
 │   │       ├── learning.py    # /api/learning/*（チャット・tension・voice など）
 │   │       ├── admin.py       # /api/admin/*
 │   │       ├── lecture.py     # /api/learning/lecture/*
-│   │       ├── lecture_studio.py    # /api/admin/...（Lecture Studio）
+│   │       ├── lecture_studio/      # /api/admin/...（Lecture Studio。_shared/scripts/pipeline/topics に分割）
 │   │       ├── theory_components.py # /api/admin/...（理論コンポーネント・C層承認共有）
 │   │       ├── cartridges.py        # /api/admin/cartridges/*
 │   │       ├── revisions.py         # /api/admin/documents/{id}/revisions/*
@@ -261,7 +258,6 @@ episteme-graph/
 │   │   ├── schema_registry.py # 動的スキーマ（DBから読み込み・キャッシュ）
 │   │   ├── models.py          # SQLAlchemy ORM モデル
 │   │   ├── postgres.py        # PostgreSQL セッション管理
-│   │   ├── db.py              # Neo4j ドライバ
 │   │   ├── extractor.py       # PDF → 構造化データ抽出
 │   │   ├── embedder.py        # pgvector ベクトル保存・検索
 │   │   ├── chat.py            # RAG チャットロジック
@@ -317,7 +313,7 @@ episteme-graph/
 | 学習 | `/api/learning` | コースCRUD・受講登録・進捗・RAGチャット・理解度チェック・問いの軌跡・tension ダイジェスト（confirm/dismiss/connect）・音声（transcribe/speak）・承認済み説明の閲覧 |
 | レクチャー | `/api/learning/lecture` | 適応的シーケンス・TTS・中断チャット |
 | 管理 | `/api/admin` | 教材管理・コースビルダー・コース公開/権限・ユーザー管理・スキーマ進化・タスク・関心ダッシュボード |
-| Lecture Studio | `/api/admin`（`lecture_studio.py`） | スクリプト/音声のバッチ生成・ペルソナ設定・コース構造編集・ドキュメントパイプライン実行 |
+| Lecture Studio | `/api/admin`（`lecture_studio/` パッケージ） | スクリプト/音声のバッチ生成・ペルソナ設定・コース構造編集・ドキュメントパイプライン実行 |
 | 理論コンポーネント / C層 | `/api/admin`（`theory_components.py`） | コンポーネントCRUD・component-graph・説明バージョン・承認（endorse）・引用・共有ダッシュボード |
 | カートリッジ | `/api/admin/cartridges` | オントロジー・コンポーネント型・関係型などの参照 |
 | リビジョン | `/api/admin/documents/{id}/revisions` | リビジョン作成・実行・レポート・承認/棄却 |

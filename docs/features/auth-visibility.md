@@ -44,13 +44,13 @@ JWT 認証、RBAC（ロールベースアクセス制御）、グループ、Vis
 | 範囲 | 意味 | アクセス可否 |
 |---|---|---|
 | `public` | システム全体に公開 | 全ユーザー（コースは `is_published=true`） |
-| `group` | 指定グループのメンバーのみ | `course_group_permissions` の権限（viewer/editor）を持つグループ員 |
+| `group` | 指定グループのメンバーのみ | `object_group_permissions`（`object_type='course'`。旧 `course_group_permissions`、マイグレーション044で統合）の権限（viewer/editor）を持つグループ員 |
 | `private` | 作成者のみ | オーナーのみ |
 
 ルール（例: `learning.py`）:
 - `visibility='group'` の場合は有効な `group_id`（ユーザーが所属するグループ）が必要。
 - `visibility='public'` のコースは `is_template=true` かつ `is_published=true`。
-- 更新はオーナーまたは `course_group_permissions.editor`、削除はオーナーのみ。
+- 更新はオーナーまたは `object_group_permissions.editor`、削除はオーナーのみ。
 
 ---
 
@@ -63,7 +63,7 @@ JWT 認証、RBAC（ロールベースアクセス制御）、グループ、Vis
 | `groups` | グループ（`invite_code` UNIQUE, `created_by`） |
 | `group_members` | メンバーシップ（`role`: admin/member, `UNIQUE(group_id, user_id)`） |
 | `group_invitations` | 招待（`status`: pending/accepted/declined/revoked） |
-| `course_group_permissions` | コース×グループの権限（viewer/editor） |
+| `object_group_permissions`（旧 `course_group_permissions`。マイグレーション044で `document_group_permissions` と統合） | コース×グループの権限（viewer/editor）。`object_type='course'` 行が対応。詳細は `docs/architecture/data-model.md`「グループ権限テーブルの統合（マイグレーション 044）」参照 |
 
 参加経路は 2 つ:
 1. **管理者による直接招待** — `POST /groups/{id}/members` → 招待者が `POST /me/invitations/{id}/accept`
@@ -79,8 +79,8 @@ JWT 認証、RBAC（ロールベースアクセス制御）、グループ、Vis
 
 ```
 学生がコースを開く
-  ├─ public        → 誰でも閲覧可（受講登録でクローン）
-  ├─ group         → そのグループに所属 & course_group_permissions あり
+  ├─ public        → 誰でも閲覧可（受講登録は `learning_states` に1行 INSERT。クローンしない）
+  ├─ group         → そのグループに所属 & object_group_permissions(course) あり
   └─ private/owner  → 作成者のみ
 
 教員が教材を操作

@@ -16,12 +16,15 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "backend" / "api"))
 
-MAIN = ROOT / "backend" / "api" / "main.py"
+from tests.guardrail_helpers import assert_module_tree_forbids  # noqa: E402
+
 MIGRATION = ROOT / "backend" / "db" / "021_endorsement_sharing.sql"
 ROUTES = ROOT / "backend" / "api" / "routes" / "theory_components.py"
 LEARNING = ROOT / "backend" / "api" / "routes" / "learning.py"
 CANDIDATES = ROOT / "backend" / "core" / "component_candidates.py"
-ADMIN_JS = ROOT / "frontend" / "public" / "js" / "admin.js"
+# 原稿スタジオ (Lecture Script Studio) は Tier 3-17b で admin.js から分離済み。
+# lsOpenEndorsementModal はこちらに存在する。
+ADMIN_LS_JS = ROOT / "frontend" / "public" / "js" / "admin-lecture-studio.js"
 APP_JS = ROOT / "frontend" / "public" / "js" / "app.js"
 AGENTS = ROOT / "src" / "episteme_graph" / "agents"
 
@@ -32,6 +35,7 @@ def _read(path: Path) -> str:
 
 class TestMigration021:
     def test_reference_sql_defines_tables_and_view(self):
+        """正本は backend/db/021_endorsement_sharing.sql（main.py のインライン DDL ではない）。"""
         sql = _read(MIGRATION)
         assert "CREATE TABLE IF NOT EXISTS component_explanations" in sql
         assert "CREATE TABLE IF NOT EXISTS component_endorsements" in sql
@@ -52,14 +56,6 @@ class TestMigration021:
         assert "uq_component_explanations_standard" in sql
         assert "WHERE kind = 'standard'" in sql
 
-    def test_main_applies_migration_021(self):
-        source = _read(MAIN)
-        assert "Migration 021" in source
-        assert "component_explanations" in source
-        assert "component_endorsements" in source
-        assert "component_citations" in source
-        assert "Migrations (002-" in source  # 以降の migration 追加 (023...) でも壊れないよう prefix で確認
-
 
 class TestRoutes:
     def test_endorsement_and_sharing_routes_exist(self):
@@ -78,11 +74,19 @@ class TestRoutes:
         assert source.count("Depends(_require_teacher)") >= 10
 
     def test_audit_entity_types_extended(self):
+        """承認・共有の state 変更は theory_review_events に監査記録を残す。
+
+        entity_type は core/schema.py の AUDIT_ENTITY_* カタログ定数を使う
+        （entity_type を 'endorsement' / 'explanation' / 'citation' に拡張, 提案7）。
+        """
+        from core.schema import AUDIT_ENTITY_CITATION, AUDIT_ENTITY_ENDORSEMENT, AUDIT_ENTITY_EXPLANATION
+
+        assert (AUDIT_ENTITY_ENDORSEMENT, AUDIT_ENTITY_EXPLANATION, AUDIT_ENTITY_CITATION) == (
+            "endorsement", "explanation", "citation",
+        )
         source = _read(ROUTES)
-        # 承認・共有の state 変更は theory_review_events に監査記録を残す
-        # (entity_type を 'endorsement' / 'explanation' / 'citation' に拡張)。
         assert "_record_review_event(" in source
-        for entity in ('"endorsement"', '"explanation"', '"citation"'):
+        for entity in ("AUDIT_ENTITY_ENDORSEMENT", "AUDIT_ENTITY_EXPLANATION", "AUDIT_ENTITY_CITATION"):
             assert entity in source
 
     def test_claim_linking_stays_candidate_until_teacher_confirms(self):
@@ -163,7 +167,7 @@ class TestCandidateGeneration:
 
 class TestFrontend:
     def test_admin_js_has_endorsement_modal(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         assert "lsOpenEndorsementModal" in source
         assert 'data-theory-action="endorse"' in source
         assert "/admin/theory-components/candidates/from-query" in source
@@ -181,9 +185,4 @@ class TestALayerUntouched:
     def test_agents_have_no_endorsement_or_citation_code(self):
         if not AGENTS.exists():
             pytest.skip("agents package not present in this checkout")
-        offenders = []
-        for path in AGENTS.rglob("*.py"):
-            text = _read(path)
-            if "component_endorsements" in text or "component_citations" in text:
-                offenders.append(str(path))
-        assert not offenders, f"A層に C層 の差分が混入: {offenders}"
+        assert_module_tree_forbids(AGENTS, ["component_endorsements", "component_citations"])

@@ -26,6 +26,9 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
+from core import privacy
+from core import schema as core_schema
+
 SCHEMA_VERSION = "doubt-layer/v1"
 
 # ---------------------------------------------------------------------------
@@ -115,15 +118,16 @@ class CounterfactualRegion(str, Enum):
     INDETERMINATE = "indeterminate"
 
 
-# theory_review_events.entity_type の D層拡張語彙（テーブルに CHECK はないため
-# ここが正本）。既存語彙: component / claim / explanation / endorsement /
-# citation / tension / structure_anchor / atlas_skeleton / atlas_binding など。
+# theory_review_events.entity_type の D層拡張語彙。値の正本は core/schema.py の
+# AUDIT_ENTITY_TYPES カタログ（全層横断の唯一の正本）。既存語彙: component / claim /
+# explanation / endorsement / citation / tension / structure_anchor /
+# atlas_skeleton / atlas_binding など。
 LEDGER_REVIEW_ENTITY_TYPES = (
-    "ledger",
-    "assumption",
-    "challenge",
-    "verification_proposal",
-    "counterfactual_session",
+    core_schema.AUDIT_ENTITY_LEDGER,
+    core_schema.AUDIT_ENTITY_ASSUMPTION,
+    core_schema.AUDIT_ENTITY_CHALLENGE,
+    core_schema.AUDIT_ENTITY_VERIFICATION_PROPOSAL,
+    core_schema.AUDIT_ENTITY_COUNTERFACTUAL_SESSION,
 )
 
 # 負荷度の段階ラベル（D2-1）。生数値は DB のみに保持し、API/UI はこの語彙で返す。
@@ -136,8 +140,9 @@ LOAD_LEVEL_LABELS = {
 }
 
 # 学習者シグナルの件数レンジ表示（D1-5, k-匿名 k=3: 3 未満は非表示なのでレンジ最小は 3-5）
-NAIVE_SIGNAL_COUNT_RANGES = ("3-5", "6-10", "11+")
-NAIVE_SIGNAL_K_ANONYMITY = 3
+# 実体は core/privacy.py の共通 k-匿名ゲート（提案8）。この名前 (NAIVE_SIGNAL_K_ANONYMITY)
+# は core/doubt/naive_signal.py が import しているため後方互換のため残す。
+NAIVE_SIGNAL_K_ANONYMITY = privacy.K_ANONYMITY
 
 
 def count_range_label(count: int) -> str:
@@ -145,13 +150,7 @@ def count_range_label(count: int) -> str:
 
     k-匿名の閾値未満（n < 3）は呼び出し側で行ごと除外すること。
     """
-    if count < NAIVE_SIGNAL_K_ANONYMITY:
-        return ""
-    if count <= 5:
-        return "3-5"
-    if count <= 10:
-        return "6-10"
-    return "11+"
+    return privacy.count_range_gated(count, below_label="", k=NAIVE_SIGNAL_K_ANONYMITY)
 
 
 # ---------------------------------------------------------------------------

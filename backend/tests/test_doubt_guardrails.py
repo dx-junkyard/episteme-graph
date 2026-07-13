@@ -15,11 +15,13 @@ from pathlib import Path
 
 from core.doubt.naive_signal import aggregate_entries
 from core.doubt.schema import ScopeCandidate
+from tests.guardrail_helpers import assert_module_tree_forbids, assert_paths_forbid
 
 _BACKEND = Path(__file__).resolve().parents[1]
 _REPO = _BACKEND.parent
 _ROUTES_SRC = (_BACKEND / "api" / "routes" / "doubt.py").read_text(encoding="utf-8")
-_MAIN_SRC = (_BACKEND / "api" / "main.py").read_text(encoding="utf-8")
+_MIGRATION_031_SRC = (_BACKEND / "db" / "031_challenges.sql").read_text(encoding="utf-8")
+_MIGRATION_029_SRC = (_BACKEND / "db" / "029_epistemic_ledger.sql").read_text(encoding="utf-8")
 
 
 class TestAINeverAsserts:
@@ -56,15 +58,18 @@ class TestAINeverAsserts:
 class TestNoAnonymousChallenge:
     """匿名疑義なし: 帰属と理由のない疑義は構造的に作れない。"""
 
-    def test_migration_constraints(self):
-        table = re.search(r"CREATE TABLE IF NOT EXISTS challenges[\s\S]+?\)\s*\"\"\"", _MAIN_SRC).group(0)
+    def test_reference_sql_constraints(self):
+        """正本は backend/db/031_challenges.sql（main.py のインライン DDL ではない）。
+
+        CREATE TABLE ブロックだけを切り出して検査することで、コメント等に
+        同じ語が出現しても誤検出しない（旧 test_migration_constraints の
+        main.py 版と同じ厳密さを維持）。
+        """
+        table = re.search(
+            r"CREATE TABLE IF NOT EXISTS challenges[\s\S]+?\)\s*;", _MIGRATION_031_SRC
+        ).group(0)
         assert "challenger_id  UUID NOT NULL" in table
         assert re.search(r"reason\s+TEXT NOT NULL CHECK \(reason <> ''\)", table)
-
-    def test_reference_sql_constraints(self):
-        sql = (_BACKEND / "db" / "031_challenges.sql").read_text(encoding="utf-8")
-        assert "challenger_id  UUID NOT NULL" in sql
-        assert "CHECK (reason <> '')" in sql
 
     def test_api_rejects_empty_reason(self):
         block = re.search(r"def create_challenge[\s\S]+?\n@admin_router", _ROUTES_SRC).group(0)
@@ -150,9 +155,7 @@ class TestP4NothingDeleted:
 
     def test_no_delete_statements_in_doubt_layer(self):
         doubt_dir = _BACKEND / "core" / "doubt"
-        for path in doubt_dir.rglob("*.py"):
-            src = path.read_text(encoding="utf-8")
-            assert "DELETE FROM" not in src, f"{path} must not delete rows"
+        assert_module_tree_forbids(doubt_dir, ["DELETE FROM"])
         assert "DELETE FROM" not in _ROUTES_SRC
 
     def test_dismiss_and_withdraw_are_status_transitions(self):
@@ -176,10 +179,7 @@ class TestNoHypeLanguage:
         ]
 
     def test_no_banned_words(self):
-        for path in self._assets():
-            src = path.read_text(encoding="utf-8")
-            for word in self.BANNED:
-                assert word not in src, f"banned word {word!r} in {path}"
+        assert_paths_forbid(self._assets(), self.BANNED)
 
     def test_axes_are_factual_labels(self):
         """地図の軸ラベルは事実記述のみ。"""
@@ -194,7 +194,8 @@ class TestEmptyScopeIsNormal:
         assert '"unscoped"' in _ROUTES_SRC
 
     def test_migration_has_unscoped_index(self):
-        assert "idx_epistemic_ledger_unscoped" in _MAIN_SRC
+        """正本は backend/db/029_epistemic_ledger.sql（main.py のインライン DDL ではない）。"""
+        assert "idx_epistemic_ledger_unscoped" in _MIGRATION_029_SRC
 
     def test_frontend_shows_empty_as_fact(self):
         src = (_REPO / "frontend" / "public" / "js" / "doubt-atlas.js").read_text(encoding="utf-8")

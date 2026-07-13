@@ -1,0 +1,420 @@
+# W層（Element Deliberation Workspace / 要素検討ワークスペース）設計
+
+> **状態: 設計のみ・未実装**（2026-07-13 時点、実装コードなし）。本書は設計の正本で、
+> `backend/core/deliberation/` / `backend/api/routes/deliberation.py` / migration 046
+> （`deliberation_sessions` / `element_annotations`）はいずれもまだリポジトリに存在しない。
+> 実装に着手する際は §13 の issue 分割を正本として使うこと。
+>
+> **命名の注意**: 「E層」は既に Exposition Layer（`exposition_layer_design.md`）が占有している
+> ため、本層は **W層（Workspace）** とする。「分野の地図（Field Atlas）」とは別機能
+> （コード・API・UI 文言は `deliberation-` / `element-` プレフィックスで衝突回避）。
+
+---
+
+## §0 位置づけと不変条項
+
+### 何を解くか
+
+パイプライン（A層 `src/episteme_graph/agents/`）は PDF を一度処理して図・知識コンポーネント・
+claim・数式などの成果を生成する。しかしこれらは**生成されたきり**で、教員が
+
+- 「この要素は**関連論文・資料の中でどこに位置づくのか**」（文脈）
+- 「この要素の**中に何が含まれ、それぞれ何を意味するのか**」（内訳）
+
+を一箇所で確認・対話・追記する場が無い。W層は、**一度処理された任意の1要素**を選び、
+その要素を文脈の中で深掘りし、AI と対話し、解釈を**候補として**付与できる横断ハブを提供する。
+
+### 立場（他層と同じ「読む側」）
+
+W層は A層成果（`theory_components` / `theory_claims` / `theory_component_graphs` /
+`document_figures` / `document_analysis_runs.stage_outputs`）を**読むだけ**で、A層コードを
+変更しない。C層（承認）・D層（疑義/検証）・atlas（分野の地図）・L層（ライブラリ）が
+既に持つ機能を**再発明せず合成する**ハブとして実装する（§10）。
+
+### 不変条項（他層から継承）
+
+- **W1 A層非改変**: `src/episteme_graph/agents/` を読むだけ。成果テーブルに列を足さない
+  （W層専用テーブルに積む）。
+- **W2 確定は人間・AIは候補のみ**: 対話で AI が出す解釈は常に `status='candidate'`。
+  人間が明示コミットするまで既存構造（component/claim/explanation/ledger/library）に
+  反映しない。`source_backed` を自動付与しない。
+- **W3 evidence-based**: すべての AI 出力に `evidence`（逐語引用・要素参照）+ `reason` +
+  `confidence` を付ける。断定形にせず「〜の可能性」の仮説文体（D層 §0 と同じ）。
+- **W4 情報を落とさない（P4）**: 対話ログ・候補注釈・却下は削除しない。status 遷移
+  （`candidate → committed` / `candidate → dismissed`）で保持。行削除 API を作らない。
+- **W5 権限 fail-closed（スコープで分岐）**: document-scoped 要素は `_ensure_document_viewable`
+  / `_ensure_document_editable`（既存 `services.resolve_document_access`）。domain-scoped 共通部品
+  （L層 library_entry）は **L層の権限モデル**（本文テキストは教員全体に開示、例示画像は由来
+  document の権限を継承・非所有者 403）。いずれも fail-closed。
+- **W6 同期パスを重くしすぎない**: 対話は教員起動の同期だが 1 応答=1 LLM コール上限、
+  失敗時は非LLM（既存データ集約のみ）へ縮退。コスト上限は session/day で bound（§11）。
+- **W7 監査必須**: セッション開始・候補生成・コミット・却下を `theory_review_events`
+  （`entity_type='deliberation'`）に記録。
+- **W8 数値を見せない**: `confidence` の生値・件数の生数字は UI に出さず段階ラベル
+  （暫定 / 参考 / 確度高 等）で表示。教員向けでも他層と同じ流儀を守る。
+- **W9 U層計測**: 新規 LLM 呼び出しは `core/llm.py` 経由なので U層計測は自動。feature 語彙は
+  `deliberation:chat` / `deliberation:vision`。
+
+---
+
+## §1 スコープ（v1）
+
+### 対象要素型（4つ）
+
+| element_type | 実体 | 由来 |
+|---|---|---|
+| `figure` | 図画像 + 装置/部品候補 | `document_figures` + apparatus_semantics artifact |
+| `theory_component` | 知識コンポーネント（TheoryOperationNode 含む） | `theory_components` / `theory_component_graphs` |
+| `theory_claim` | claim（atomic claim 含む） | `theory_claims` |
+| `equation` | 数式ブロック | `theory_claims.equation` + `stage_outputs`(equations.json) + graph の `linked_equation_ids` |
+
+### 含めるもの
+
+- 3つの面すべて（§3）: **内訳・同定** / **文脈的位置づけ** / **対話的検討**。
+- 対話（マルチターン、text + figure は vision）まで含む。
+- **共通部品（domain-scoped, `shared_part`）** も対象。複数論文にまたがる再利用部品は
+  1論文に紐づけず L層 library_entry として扱い、対話・注釈はそこに蓄積する（§2 / §5）。
+  上表の4型は「共通部品を見つける入口＝インスタンス」で、`shared_part` は「見つけた部品を
+  共通化した先」。両者を同じワークスペースで繋ぐのが本層の主眼。
+
+### 利用者
+
+- **教員（TEACHER 以上）のみ**。学習者向け表示は v1 非スコープ（§14）。
+
+---
+
+## §2 核となる抽象: ElementRef と2つのスコープ
+
+要素型ごとに UI/API/権限を作り直さないため、全要素を1つの多態参照で扱う
+（既存 `object_group_permissions` / `shared_versions` のポリモーフィック集約と同じ思想）。
+ただし **要素には2つのスコープがある**。これを分けないと「**共通化したい部品を1論文だけに
+紐づける**」不整合が起きる（本層の設計上の要点）:
+
+- **インスタンス（`scope='document'`）**: ある1論文から抽出された具体的な出現。
+  figure / theory_component / theory_claim / equation。`document_id` に紐づく。
+- **共通部品（`scope='domain'`）**: 複数論文にまたがって再利用したい抽象。**1論文に紐づけない**。
+  分野（`domain_key`）に属し、複数の出現（instances）を provenance として束ねる。
+
+```
+ElementRef = (scope, element_type, element_id, anchor)
+scope='document' → element_type ∈ {figure, theory_component, theory_claim, equation}, anchor = document_id
+scope='domain'   → element_type ∈ {shared_part},                                     anchor = domain_key
+```
+
+**「共通化したい部品」の格納庫は L層 `library_entries`（`domain_key` スコープ・
+`source_document_ids` / `source_component_ids` 複数）を正本とする**（W層は共通部品テーブルを
+新設しない・§10）。`shared_part` の `element_id` は `library_entries.id`。W層は
+「インスタンス→共通部品への昇格・統合」導線（既存 L層 昇格経路・人間操作）と、共通部品そのものへの
+対話・注釈を提供する（§5）。
+
+### element_id の解決（`core/deliberation/refs.py`）
+
+**document-scoped**:
+
+| element_type | element_id の実体 | 解決方法 |
+|---|---|---|
+| `figure` | `document_figures.id` | 直接 |
+| `theory_component` | `theory_components.id` (UUID) | 直接 |
+| `theory_claim` | `theory_claims.id` (UUID) | 直接 |
+| `equation` | equations.json の `equation_id`（**テーブル無し**） | run の `stage_outputs.equations` を索く + 逆に `theory_claims.equation` / graph の `linked_equation_ids` から参照元を辿る |
+
+**domain-scoped**:
+
+| element_type | element_id の実体 | 解決方法 |
+|---|---|---|
+| `shared_part` | `library_entries.id` | L層 store（対話・retrieval が読むのは凍結版本文） |
+
+> **設計上の注意**: 数式は独立テーブルを持たない。`equation` の ElementRef は
+> 「document_id + equations.json 内 equation_id」で一意化し、resolver が `stage_outputs`
+> （＝不変な run artifact）から本文・記号・導出リンクを組み立てる。将来テーブル化しても
+> ElementRef の外形は変えない。
+
+---
+
+## §3 「深く検討する」の3つの面
+
+| 面 | 内容 | 実装 |
+|---|---|---|
+| **① 内訳・同定** | この要素は何か／中に何が含まれるか | A層成果を読むだけ（§3.1） |
+| **② 文脈的位置づけ** | この要素が置かれた文脈を4レンズで（§4） | 既存機構を合成（§10） |
+| **③ 対話的検討** | ①②を根拠に AI と Q&A し、解釈を候補として産出（§5） | 新規（会話版 LLM/vision） |
+
+### §3.1 内訳・同定（面①）
+
+要素型ごとの内訳（すべて既存データの読み出し）:
+
+- **figure**: apparatus/instrument/part 候補（`review_required` 系）、caption、近傍本文。
+- **theory_component**: 構成 claim 群、関連数式、TheoryOperationGraph 上の node（stage /
+  source_backing_status / review_reasons）、member/parent 関係。
+- **theory_claim**: `claim_type` / `support_status` / `evidence_text` / `normalized_text` /
+  `concepts` / 紐づく `equation` / atomic 性。
+- **equation**: 本文、記号（SymbolRegistry）、導出チェーン上の入出力、参照する claim。
+
+---
+
+## §4 文脈的位置づけ（面②）— 4レンズ
+
+`core/deliberation/positioning.py` が ElementRef を受け、以下4レンズを**合成して**返す。
+各レンズは既存機構を呼ぶだけで、新しい抽出はしない（唯一の例外はコーパス横断・§4.2）。
+
+### §4.1 論文内（intra-document）
+
+要素が属するセクション・導出チェーン・thesis の位置。A層 structure（`stage_outputs` の
+document_structure / derivation_chain / thesis）を辿る。
+
+### §4.2 コーパス横断（cross-corpus）— **唯一の新下地**
+
+「関連する論文・資料の中での位置づけ」の核。他 document の類似要素と出現箇所を返す。
+
+- **問題**: `theory_components` / `theory_claims` に embedding 列が**無い**
+  （embedding は `chunks` と `library_entry_versions` のみ）。
+- **v1 方針（chunk-proxy）**: 要素→代表テキスト（claim.text / component.summary /
+  equation の記号説明）→ **既存の chunk ベクトル検索**（`embedder.search_similar_papers` /
+  `services` のベクトル検索）で近傍 chunk を引き、その `material_id`/`document_id` から
+  「関連論文」を提示する。**新 migration 不要ですぐ動く**（粒度は粗い）。
+- **将来（Phase 3）**: 精度が要れば `theory_claims` / `theory_components` に embedding 列を
+  追加し要素↔要素の直接類似に置換（ElementRef 外形は不変）。
+- 権限: 近傍 document のうち閲覧不可のものは `_ensure_document_viewable` で除外
+  （fail-closed。件数の生数字は出さない・W8）。
+
+### §4.3 分野の地図（field atlas）
+
+要素（特に claim/component の概念）が atlas のどのノードに対応するか。既存
+`atlas_state.build_concept_signals` / `load_corpus_snapshot` を再利用。骨格なし分野では
+このレンズを非表示（atlas の fail-closed をそのまま継承）。
+
+### §4.4 承認・疑義（social / epistemic）
+
+- **C層**: この要素（component/explanation）を誰が承認・引用したか
+  （`component_endorsements` / `component_citations` の集計。段階ラベルのみ）。
+- **D層**: この要素の検証状態（`epistemic_ledger` の verification_status/scopes）、
+  ついている疑義（`challenges`）、所属する暗黙前提（assumption_mining/corpus_audit）。
+
+---
+
+## §5 対話的検討（面③）
+
+### 会話モデル
+
+- 教員が要素を開いた状態で自由文の質問を送る。W層は面①②で集めた文脈を **system 相当の
+  grounding**（要素本文 + 内訳 + 4レンズ要約）として LLM に注入し、応答を返す。
+- **figure は vision**（画像 + caption + 近傍本文）。現状 `core/llm.py` の vision は
+  `generate_structured_with_images()`（structured・1発）のみなので、**マルチターン会話版
+  vision/text を新設**する（`core/llm.py`、v1 OpenAI 経路）。
+- 応答は自由文（教員向け）だが、AI が「これは注釈化できる」と判断した箇所は
+  **候補注釈（element_annotation, `status='candidate'`）** として構造化提案も返す
+  （evidence/reason/confidence 付き・W2/W3）。
+
+### 注釈の帰属先はスコープで決まる（本層の要点）
+
+- **共通部品（domain-scoped）への注釈は分野全体に蓄積・再利用される**。1論文に紐づかないので、
+  同じ部品が別論文に現れても同じ蓄積を参照できる（＝「共通化したい部品を1論文に閉じ込めない」）。
+- **インスタンス（document-scoped）への注釈はその出現に固有**。ただし「これは共通化したい」と
+  判断したら **インスタンス→共通部品への昇格・統合**（既存 L層 昇格経路・人間操作。類似エントリ
+  提示付きで既存部品にマージ可）で domain-scoped に引き上げ、以降の対話・注釈は共通部品側へ貯める。
+  これが本層の中心導線。cross-corpus レンズ（§4.2）が「この部品は論文 X/Y/Z にも出る」を示し、
+  昇格・統合の判断材料になる。
+
+### 候補注釈の確定（コミット）
+
+教員が候補注釈を「確定」すると、**既存構造へルーティング**する（W層独自の最終格納庫を持たない）:
+
+| 注釈の種類 | コミット先（既存） | scope |
+|---|---|---|
+| 共通部品の意味づけ・内訳 | L層 `library_entries`（draft 更新→凍結。人間操作） | domain |
+| インスタンスの意味づけ・内訳補正 | `theory_components.body`/`summary` / apparatus 候補の精緻化 | document |
+| 解釈バージョン | C層 `component_explanations`（`kind='personal'`） | document |
+| 検証スコープ・疑義 | D層 `epistemic_ledger.scope_candidates` / `challenges`（起動するだけ） | document |
+
+- コミット権限はスコープで分岐（W5）。`source_backed` 自動付与なし（W2）。
+- コミットしない候補・却下候補も `element_annotations` に status を残す（W4）。
+
+---
+
+## §6 データモデル（migration 046）
+
+W層専用は2枚のみ。成果テーブルには列を足さない（W1）。
+
+### `deliberation_sessions`（対話セッション）
+
+```
+id             UUID PK
+scope          TEXT  CHECK (scope IN ('document','domain'))  NOT NULL
+element_type   TEXT  CHECK (element_type IN ('figure','theory_component','theory_claim','equation','shared_part'))
+element_id     TEXT  NOT NULL              -- ElementRef（equation=equations.json id / shared_part=library_entries.id）
+document_id    TEXT                        -- scope='document' のとき正規化済み。'domain' は NULL
+domain_key     TEXT                        -- scope='domain' のとき分野。'document' は NULL
+title          TEXT  DEFAULT ''
+messages       JSONB DEFAULT '[]'          -- [{role, content, grounding_ref?, created_at}]（P4: 追記のみ）
+created_by     UUID  REFERENCES users(id)
+created_at / updated_at  TIMESTAMPTZ
+```
+
+FK は `element_id` に張らない（ポリモーフィック）。孤児掃除は scope で分岐:
+- `scope='document'`: document 削除経路（`_purge_document` / `purge_object`）が明示 DELETE
+  （V層 orphan gap と同じ扱い）。
+- `scope='domain'`: L層 library_entry のライフサイクルに従う（library は削除せず `retired` 遷移
+  なので、W層行も残す＝P4）。
+
+### `element_annotations`（候補注釈・確定注釈）
+
+```
+id             UUID PK
+scope          TEXT  CHECK (scope IN ('document','domain'))  NOT NULL
+element_type   TEXT  (同上 CHECK・shared_part 含む)
+element_id     TEXT  NOT NULL
+document_id    TEXT                        -- scope='document' のみ
+domain_key     TEXT                        -- scope='domain' のみ
+session_id     UUID  REFERENCES deliberation_sessions(id) ON DELETE SET NULL
+kind           TEXT  -- 'meaning' | 'decomposition' | 'positioning_note' | 'interpretation'
+body           JSONB DEFAULT '{}'
+evidence       JSONB DEFAULT '[]'          -- 逐語引用・要素参照
+reason         TEXT  DEFAULT ''
+confidence     REAL                        -- 生値は DB のみ・API はラベル（W8）
+status         TEXT  CHECK (status IN ('candidate','committed','dismissed'))  DEFAULT 'candidate'
+committed_target JSONB DEFAULT '{}'        -- コミット先（component/explanation/ledger/library の id）
+created_by / updated_by  UUID
+created_at / updated_at  TIMESTAMPTZ
+```
+
+削除 API 無し（W4）。`candidate → committed / dismissed` の遷移のみ。
+
+### 監査カタログ拡張
+
+`core/schema.py` に `AUDIT_ENTITY_DELIBERATION = "deliberation"` を追加し `AUDIT_ENTITY_TYPES`
+に登録（既存27→28語彙）。
+
+---
+
+## §7 core モジュール構成
+
+`backend/core/deliberation/`（**FastAPI 非 import**・開発ルール2）:
+
+```
+__init__.py
+refs.py          → ElementRef 解決（要素型ごと resolver。equation は stage_outputs 索き）
+positioning.py   → 4レンズ合成（§4。既存 atlas/C層/D層/embedder を呼ぶだけ）
+decomposition.py → 面①内訳の組み立て（要素型ごと）
+dialogue.py      → grounding 構築 + 会話1ターン（llm_worker 基盤 + 会話版 vision）
+annotations.py   → 候補注釈の生成・status 遷移・コミットルーティング（§5）
+store.py         → deliberation_sessions / element_annotations の DB プリミティブ
+schema.py        → 語彙・dataclass の正本
+```
+
+- 会話は llm_worker の `client` を使いつつ、**同期・マルチターン**なので `run_with_repair` は
+  構造化提案部分にのみ適用（自由文応答は非構造）。コスト上限は `CostGate`（§11）。
+- 集約系（positioning/decomposition）は非LLM。W6 の縮退先＝この非LLM 集約のみ。
+
+---
+
+## §8 API（`backend/api/routes/deliberation.py`、実パス `/api/admin/deliberation/...`、`_require_teacher`）
+
+| メソッド・パス | 役割 |
+|---|---|
+| `GET /elements/{element_type}/{element_id}/overview` | 面①内訳 + 面②位置づけの集約（**非LLM・DB非変更**。Phase 0 の主役） |
+| `POST /sessions` | 対話セッション開始（ElementRef 指定） |
+| `GET /sessions/{id}` | セッション取得（messages 込み） |
+| `POST /sessions/{id}/messages` | 1ターン送信 → 応答 + 候補注釈（1 LLM コール・W6） |
+| `GET /elements/{element_type}/{element_id}/annotations` | 候補/確定注釈一覧（confidence はラベル・W8） |
+| `POST /annotations/{id}/commit` | 確定 → 既存構造へルーティング（`_ensure_document_editable`） |
+| `POST /annotations/{id}/dismiss` | 却下（status 遷移・保持） |
+
+- overview / 一覧は `_ensure_document_viewable`、commit は `_ensure_document_editable`。
+- 図の実画像は既存 `GET /api/admin/documents/{id}/figures/{fid}/image` を流用（権限ゲート済み）。
+
+---
+
+## §9 フロント（`frontend/public/js/deliberation.js`、ES5・`window.Deliberation`）
+
+- 管理画面（教材詳細・コンポーネントグラフ・claim 一覧・図ペイン）の各要素に
+  **「深く検討」ボタン** → 右ペイン/モーダルで W層ワークスペースを開く。
+- レイアウト: 左=**内訳＋4レンズ位置づけ**（overview API）、右=**対話**（sessions API）。
+- 候補注釈は対話下にカード表示 → `[確定]`（commit）/ `[却下]`（dismiss）。
+- 既存の詳細表示（admin.js の component graph / claims / structure）は**壊さず**、そこから
+  W層への入口を足す（Phase 0 は overview の統合表示のみで価値が出る）。
+- **数値を出さない**（W8）: confidence・関連件数はラベル/レンジ表示。
+
+---
+
+## §10 既存層との合成（重複させない）
+
+W層の新規価値は **①統合入口（4要素型を1つの場に）②コーパス横断の要素位置づけ ③対話ループ**
+の3点に限定する。他はすべて既存機能を **surface（呼び出して見せる）** だけにする:
+
+- 「検証されていない」と気づいたら → **D層の challenge / verification proposal を起動**（新設しない）
+- 「この解釈を承認・共有」 → **C層 explanation / endorsement**
+- 「分野の別テーマと繋がる」 → **atlas のリンク**
+- 「分野知識に昇格 / 共通部品として蓄積」 → **L層の既存昇格経路（人間操作）**。
+  **共通部品（domain-scoped ElementRef）の実体は L層 library_entry であり、W層は独自の
+  共通部品テーブルを作らない**（§2）。domain-scoped 対話・注釈も library_entry を軸に貯まる。
+
+これを守らないと D層/C層/L層と機能が二重化する。W層は**ハブ**であって格納庫ではない。
+
+---
+
+## §11 コスト・権限・計測
+
+- **コスト上限**: `DELIBERATION_MAX_CALLS_PER_SESSION`（既定 8）/ `DELIBERATION_MAX_CALLS_PER_DAY`
+  （既定 40、他機能と独立）。`llm_worker.cost_gate.CostGate` を再利用。モデルは fast tier 既定
+  （`DELIBERATION_LLM_MODEL` で上書き）。
+- **権限**: 全経路 `_require_teacher` + document 単位ゲート（W5）。commit は editor 以上。
+- **U層**: `usage_context(feature='deliberation:chat'|'deliberation:vision', user_id, document_id)`
+  を dialogue 呼び出し前にセット（W9）。
+- **監査**: `entity_type='deliberation'` で session 開始 / 候補生成 / commit / dismiss を記録（W7）。
+
+---
+
+## §12 ガードレール（`backend/tests/test_deliberation_guardrails.py`）
+
+`guardrail_helpers.py` を使い構造的に守る:
+
+- `core/deliberation/` が FastAPI を import しない。
+- AI 出力が常に candidate（commit 前に `source_backed` を付けない）。
+- 削除 API が存在しない（status 遷移のみ・W4）。
+- overview / annotations が document 権限ゲートを通す（fail-closed・W5）。
+- confidence の生値を返す API/UI 経路が無い（W8）。
+- コーパス横断レンズが閲覧不可 document を除外する。
+- A層コード（`src/episteme_graph/agents/`）に差分が無い（W1）。
+- 監査 entity_type がカタログ定数を使う。
+
+---
+
+## §13 issue 分割（実装フェーズ）
+
+- **Phase 0（W-0）**: ElementRef + `refs.py` + `decomposition.py` + `positioning.py`（§4.1/4.3/4.4
+  ＝既存データ合成のみ）+ `GET .../overview` + フロント統合パネル。**新 LLM・新 migration 無し**、
+  4要素型の「内訳＋位置づけ」を1画面に束ねるだけで即価値。
+- **Phase 1（W-1）**: コーパス横断レンズ（§4.2、chunk-proxy）。
+- **Phase 2（W-2）**: migration 046（2テーブル・scope 分岐）+ 対話（会話版 vision/text）+
+  候補注釈 + **インスタンス→共通部品（L層 library_entry）への昇格・統合導線 + domain-scoped
+  共通部品への対話・注釈** + コミットルーティング + 監査 + コスト上限 + ガードレール。
+- **Phase 3（W-3・任意）**: 要素粒度 embedding へ置換（§4.2 将来）。
+
+---
+
+## §14 非スコープ（v1）
+
+- 学習者向け表示・学習者の対話（教員向けから。B層のプライバシー規定を別途載せる必要があるため
+  別 issue）。
+- 要素粒度 embedding テーブル（Phase 3 まで chunk-proxy で近似）。
+- W層独自の最終格納庫（コミットは既存構造へ返す・§5）。
+- TheoryOperationGraph への W層由来ノード追加（グラフ構造は A層のまま）。
+- リアルタイム自動対話・バッチ対話（対話は教員起動の同期のみ）。
+
+---
+
+## §15 未決事項
+
+1. **コミット先ルーティングの粒度**: 候補注釈の種類→既存構造の対応（§5 表）を v1 で全部繋ぐか、
+   まず component.body と C層 explanation の2経路だけにするか。
+2. **コーパス横断の representative text 生成**: claim/component/equation の代表テキストの作り方
+   （非LLM で連結 vs 要約 LLM）。W6 的には非LLM 連結が無難。
+3. **overview のキャッシュ**: 4レンズ合成は重くなり得る。atlas overlay cache のように
+   コーパス signature でキャッシュするか、都度計算か（Phase 0 は都度計算で開始でよい）。
+4. **domain-scoped ref の対象範囲**: v1 の共通部品を L層 library_entry のみとするか、D層
+   `assumption_nodes`（論文横断の暗黙前提）や atlas concept も `scope='domain'` の ElementRef
+   として開くか。まず library_entry のみで開始し、必要になれば assumption / concept を足すのが
+   無難（いずれも既存の domain-scoped 実体なので ElementRef 外形は不変）。
+5. **昇格 vs 統合の既定挙動**: インスタンスを共通部品化するとき、新規 library_entry 作成と
+   既存エントリへの統合（source_document_ids 追記）のどちらを既定提示にするか。cross-corpus
+   類似ヒットがあれば統合を優先提示するのが自然。

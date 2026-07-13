@@ -65,6 +65,24 @@
       "origin": "paper",
       "description": "個別論文に含まれる数値結果・図表・実験結果。",
       "default_maturity_level": "paper_claim"
+    },
+    {
+      "id": "apparatus",
+      "origin": "paper",
+      "description": "論文の図から同定された実験装置・観測装置の候補（画像解析パイプライン §5-5、常に教員未確認の候補）。",
+      "default_maturity_level": "paper_claim"
+    },
+    {
+      "id": "instrument",
+      "origin": "paper",
+      "description": "装置を構成する主要な計測・制御機器の候補。",
+      "default_maturity_level": "paper_claim"
+    },
+    {
+      "id": "part",
+      "origin": "paper",
+      "description": "装置・機器を構成する個別パーツの候補。",
+      "default_maturity_level": "paper_claim"
     }
   ]
 }

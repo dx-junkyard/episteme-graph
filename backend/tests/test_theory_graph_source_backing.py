@@ -12,7 +12,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 ROUTES = ROOT / "backend" / "api" / "routes" / "theory_components.py"
 SCHEMAS = ROOT / "backend" / "api" / "schemas.py"
-ADMIN_JS = ROOT / "frontend" / "public" / "js" / "admin.js"
+# 原稿スタジオ (Lecture Script Studio) は Tier 3-17b で admin.js から分離済み。
+# lsGraphForCurrentLayer / lsGraphLayerToolbarHtml / lsGraphSourceBackingLabel /
+# lsGraphReviewReasonLabel はこちらに存在する。
+ADMIN_LS_JS = ROOT / "frontend" / "public" / "js" / "admin-lecture-studio.js"
 STYLES = ROOT / "frontend" / "public" / "css" / "styles.css"
 
 
@@ -88,7 +91,7 @@ class TestGraphLayering:
             assert field in source, f"route does not propagate node field {field}"
 
     def test_admin_js_supports_layer_toggle(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         assert "graphLayerFilter" in source
         assert "lsGraphForCurrentLayer" in source
         assert "lsGraphLayerToolbarHtml" in source
@@ -99,7 +102,7 @@ class TestGraphLayering:
 
 class TestFrontendDistinguishesSourceBacking:
     def test_admin_js_renders_source_backing(self):
-        source = _read(ADMIN_JS)
+        source = _read(ADMIN_LS_JS)
         assert "source_backing_status" in source
         assert "lsGraphSourceBackingLabel" in source
         assert "lsGraphReviewReasonLabel" in source

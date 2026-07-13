@@ -1,7 +1,8 @@
 """Structure-Anchored Questions Stage 1/2/3 — API・集計・冪等性・プライバシーの検証。
 
 tension の test_tension_api_and_aggregation.py と同様、SQL/ソースの静的検証 +
-純粋関数のユニットテストで構成する（services.py は import に neo4j 等を要するため）。
+純粋関数のユニットテストで構成する（services.py の import は外部依存の初期化コストが
+大きいため、フルスタックの結合テストではなく静的検証に留める）。
 
 観点:
 - 記録: 方法A（learner_selected）が同期・非LLMで配線されている
@@ -19,7 +20,6 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "backend" / "api"))
 
-MAIN = ROOT / "backend" / "api" / "main.py"
 MIGRATION = ROOT / "backend" / "db" / "025_structure_anchor.sql"
 LEARNING = ROOT / "backend" / "api" / "routes" / "learning.py"
 SERVICES = ROOT / "backend" / "api" / "services.py"
@@ -35,18 +35,13 @@ def _read(path: Path) -> str:
 
 class TestMigration025:
     def test_reference_sql_defines_indexes_only(self):
+        """正本は backend/db/025_structure_anchor.sql（main.py のインライン DDL ではない）。"""
         sql = _read(MIGRATION)
         assert "idx_interest_traces_anchor_candidate" in sql
         assert "idx_interest_traces_anchor_pending" in sql
         # 新テーブル・列追加はゼロ（payload 拡張のみ）
         assert "CREATE TABLE" not in sql
         assert "ALTER TABLE" not in sql
-
-    def test_main_applies_migration_025(self):
-        source = _read(MAIN)
-        assert "Migration 025" in source
-        assert "idx_interest_traces_anchor_candidate" in source
-        assert "idx_interest_traces_anchor_pending" in source
 
 
 class TestMethodAWiring:
@@ -114,10 +109,14 @@ class TestOwnershipAndPrivacy:
         assert '"confidence"' not in body
 
     def test_state_changes_are_audited(self):
+        """entity_type は core/schema.py の AUDIT_ENTITY_STRUCTURE_ANCHOR カタログ定数を使う（提案7）。"""
+        from core.schema import AUDIT_ENTITY_STRUCTURE_ANCHOR
+
+        assert AUDIT_ENTITY_STRUCTURE_ANCHOR == "structure_anchor"
         source = _read(SERVICES)
         assert "_record_anchor_event" in source
         body = source.split("def _record_anchor_event")[1].split("\ndef ")[0]
-        assert "'structure_anchor'" in body
+        assert "AUDIT_ENTITY_STRUCTURE_ANCHOR" in body
 
     def test_trace_view_shows_only_owned_attributions(self):
         """問いの軌跡には learner_selected/confirmed のみ載せる（llm_candidate は digest 経由。P1）。"""
@@ -134,10 +133,14 @@ class TestAggregation:
         assert "'llm_candidate'" not in body
 
     def test_k_anonymity_suppresses_small_cells(self):
+        """k=3 の閾値は core/privacy.py の共通 k-匿名ゲート（提案8）に一本化されている。"""
+        from core.privacy import K_ANONYMITY
+
+        assert K_ANONYMITY == 3
         source = _read(SERVICES)
+        assert "from core.privacy import K_ANONYMITY" in source
         body = source.split("def aggregate_interest_dashboard")[1].split("\ndef ")[0]
-        assert "_ANCHOR_K_ANONYMITY = 3" in body
-        assert "learners < _ANCHOR_K_ANONYMITY" in body
+        assert "learners < K_ANONYMITY" in body
 
     def test_heatmap_has_no_personal_fields(self):
         """集計は語彙（anchor_type/stage/doubt_type）のみ。本文・自由記述ラベルを出さない。"""

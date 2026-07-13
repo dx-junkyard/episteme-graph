@@ -16,8 +16,7 @@
 --   - 監査: 全状態変更を theory_review_events に記録。entity_type は
 --     'reconstruction_item' / 'reconstruction_response' をコード側の正本語彙で管理する。
 --
--- 実際の適用は backend/api/main.py の _run_migrations()（Migration 036）で行う。
--- このファイルは正本スキーマのリファレンス。
+-- このファイルが正本。適用は `backend/core/migrations.py` のランナーが起動時に行う（冪等・毎起動再実行）。
 -- ============================================================
 
 -- 再構成課題（item）: claim から LLM が自動オーサリングする出題。

@@ -51,7 +51,7 @@ LLM との対話形式でコース構造（章・トピック・前提知識・�
 | 学生への公開 | `PUT /api/admin/courses/{id}/publish` |
 | グループへの権限付与/剥奪（viewer/editor） | `GET/POST /courses/{id}/groups`, `DELETE /courses/{id}/groups/{gid}` |
 
-公開（`is_published = TRUE`）されたテンプレートは学生の「受講可能なコース」に並び、受講登録でクローンされます。
+公開（`is_published = TRUE`）されたテンプレートは学生の「受講可能なコース」に並び、受講登録は複製せず `learning_states` に1行 INSERT するだけです（コース本体は不変のまま共有）。
 
 ---
 

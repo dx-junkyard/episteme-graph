@@ -1,5 +1,8 @@
 -- Migration 005: background_tasks (Issue #63)
 -- バックグラウンドタスクの状態管理テーブル
+--
+-- このファイルが正本。適用は backend/core/migrations.py のランナーが
+-- 起動時に行う（冪等・毎起動再実行）。
 
 CREATE TABLE IF NOT EXISTS background_tasks (
     id            TEXT PRIMARY KEY,

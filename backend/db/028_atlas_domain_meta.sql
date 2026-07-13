@@ -11,6 +11,9 @@
 --
 --   domain_meta を domain_key 単位で永続化し、body.domain が省略された場合の
 --   フォールバックに使う。
+--
+-- 適用: このファイルが正本。backend/core/migrations.py のランナーが起動時に行う
+--   （冪等・毎起動再実行）。
 
 CREATE TABLE IF NOT EXISTS atlas_domain_meta (
     domain_key         TEXT PRIMARY KEY,

@@ -262,7 +262,9 @@ def client_and_users(monkeypatch):
     monkeypatch.setattr("routes.learning.user_can_view_course", lambda uid, cid: True, raising=False)
 
     # --- lecture_studio が使う get_viewable_course_data の差し替え ---
-    monkeypatch.setattr("routes.lecture_studio.get_viewable_course_data", _fake_get_course_data)
+    # (Tier 3-17a: lecture_studio はパッケージ化され、get_course_scripts は
+    #  routes.lecture_studio.scripts モジュールで定義されている)
+    monkeypatch.setattr("routes.lecture_studio.scripts.get_viewable_course_data", _fake_get_course_data)
 
     # --- _get_course_chunks の差し替え ---------------------------------------------
     def _fake_get_course_chunks(course_data):
@@ -279,11 +281,11 @@ def client_and_users(monkeypatch):
             chunks.extend(copy.deepcopy(CHUNKS_MATERIAL_B))
         return chunks
 
-    monkeypatch.setattr("routes.lecture_studio._get_course_chunks", _fake_get_course_chunks)
+    monkeypatch.setattr("routes.lecture_studio.scripts._get_course_chunks", _fake_get_course_chunks)
 
     # _chunk_status は lecture_audio_cache テーブルを参照するため、シンプルなスタブに
     monkeypatch.setattr(
-        "routes.lecture_studio._chunk_status",
+        "routes.lecture_studio.scripts._chunk_status",
         lambda chunk: "generated" if chunk.get("spoken_text") else "ungenerated",
     )
 

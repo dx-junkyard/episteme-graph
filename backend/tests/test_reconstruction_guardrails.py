@@ -31,10 +31,15 @@ from core.reconstruction.schema import (  # noqa: E402
     ITEM_STATUSES,
     SOURCE_BACKED,
 )
+from tests.guardrail_helpers import (  # noqa: E402
+    assert_module_tree_does_not_import,
+    assert_module_tree_forbids,
+    assert_source_forbids,
+)
 
 _CORE_DIR = BACKEND / "core" / "reconstruction"
 _ROUTE_SRC = (BACKEND / "api" / "routes" / "reconstruction.py").read_text(encoding="utf-8")
-_MAIN_SRC = (BACKEND / "api" / "main.py").read_text(encoding="utf-8")
+_MIGRATION_SRC = (BACKEND / "db" / "036_reconstruction_loop.sql").read_text(encoding="utf-8")
 _STUMBLE_SRC = (_CORE_DIR / "stumble.py").read_text(encoding="utf-8")
 _HEALTH_SRC = (_CORE_DIR / "health.py").read_text(encoding="utf-8")
 
@@ -149,12 +154,12 @@ class TestNoDeleteOnlyRetire:
     """item は削除せず auto → flagged → retired の状態遷移（P4）。"""
 
     def test_no_delete_endpoint_in_routes(self):
-        assert "@learning_router.delete" not in _ROUTE_SRC
-        assert "@admin_router.delete" not in _ROUTE_SRC
+        assert_source_forbids(
+            _ROUTE_SRC, ["@learning_router.delete", "@admin_router.delete"], context="routes/reconstruction.py",
+        )
 
     def test_no_delete_from_in_reconstruction_core(self):
-        for path in _CORE_DIR.rglob("*.py"):
-            assert "DELETE FROM" not in path.read_text(encoding="utf-8"), f"{path} must not delete rows"
+        assert_module_tree_forbids(_CORE_DIR, ["DELETE FROM"])
 
     def test_retired_is_a_status_not_deletion(self):
         assert "retired" in ITEM_STATUSES
@@ -186,7 +191,7 @@ class TestKAnonymity:
 
     def test_k_gate_counts_distinct_users_not_rows(self):
         """k-匿名の母数は人数（DISTINCT user_id）。応答行数でセルを開示しない（P3、D層と同じ扱い）。"""
-        assert "COUNT(DISTINCT r.user_id)" in _MAIN_SRC  # health ビューの n_users
+        assert "COUNT(DISTINCT r.user_id)" in _MIGRATION_SRC  # health ビューの n_users（正本 SQL）
         assert "COUNT(DISTINCT r.user_id)" in _STUMBLE_SRC
         assert "COUNT(DISTINCT user_id)" in _STUMBLE_SRC  # FAQ（interest_traces）も人数
         assert "n_users" in _HEALTH_SRC and "gate_by_users" in _HEALTH_SRC
@@ -221,10 +226,7 @@ class TestCoreIsFrameworkFree:
     """core/reconstruction/ は FastAPI を import しない（テスタビリティ）。"""
 
     def test_no_fastapi_import_in_core(self):
-        for path in _CORE_DIR.rglob("*.py"):
-            src = path.read_text(encoding="utf-8")
-            assert "import fastapi" not in src, f"{path} imports fastapi"
-            assert "from fastapi" not in src, f"{path} imports fastapi"
+        assert_module_tree_does_not_import(_CORE_DIR, ["fastapi"])
 
 
 class TestAuditVocabulary:
@@ -240,6 +242,7 @@ class TestAuditVocabulary:
         assert "verdict_wrong" in _ROUTE_SRC  # 機械判定への異議を監査
 
     def test_migration_present(self):
-        assert "reconstruction_items" in _MAIN_SRC
-        assert "learner_reconstructions" in _MAIN_SRC
-        assert "reconstruction_item_health" in _MAIN_SRC
+        """正本は backend/db/036_reconstruction_loop.sql（main.py のインライン DDL ではない）。"""
+        assert "reconstruction_items" in _MIGRATION_SRC
+        assert "learner_reconstructions" in _MIGRATION_SRC
+        assert "reconstruction_item_health" in _MIGRATION_SRC

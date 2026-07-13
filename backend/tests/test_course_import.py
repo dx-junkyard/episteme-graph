@@ -199,6 +199,9 @@ class TestListTeacherCourses:
         assert data[0]["title"] == "量子力学入門"
         assert data[0]["is_template"] is True
         assert data[0]["is_published"] is True
+        assert data[0]["atlas_cartridge_id"] == ""
+        assert data[0]["atlas_topic_count"] == 0
+        assert data[0]["topic_count"] == 0
 
     def test_list_courses_requires_auth(self, client):
         """認証なしで401が返ること。"""

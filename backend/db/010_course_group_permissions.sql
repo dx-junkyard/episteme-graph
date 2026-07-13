@@ -1,29 +1,18 @@
 -- ============================================================
--- Migration 010: コース × グループ 権限マッピング（Issue #125）
+-- Migration 010: コース × グループ 権限マッピング（Issue #125） — 統合済み no-op
 -- ============================================================
 --
--- 背景:
---   従来のコース共有は「公開（is_published=true）／グループ単指定（group_id）／private」の
---   3択だったが、実運用では「特定ゼミに閲覧権限、特定TAに編集権限」等、複数グループへの
---   細やかなアクセス制御が必要となった。
+-- 【2026-07 アーキテクチャ整理 Tier 3-14】course_group_permissions は
+-- migration 044 で document_group_permissions（035）と統合され、object_type
+-- ポリモーフィックな object_group_permissions（object_type='course'）に
+-- 置き換えられた。
 --
--- 設計:
---   learning_courses と groups の多対多マッピングを permission 付きで表現する。
---   permission = 'viewer' → グループメンバー（学生）がコースを受講できる
---   permission = 'editor' → グループメンバー（TA/教員）がコースを管理・編集できる
+-- 本ファイルで CREATE TABLE course_group_permissions を行うと、044 が毎起動
+-- 「旧テーブルを INSERT ... SELECT で移行 → DROP TABLE」するため、010 で作って
+-- 044 で即座に壊すだけの往復が発生してしまう。そのため本ファイルは意図的に
+-- no-op とする（002_a1_a2_a3.sql の cloned_from カラムと同じ「最終状態への
+-- 巻き戻し」パターン。過去に適用済みの意味を書き換えるのではなく、現在の
+-- 正本状態に file の内容を追従させる）。
+--
+-- 正本は backend/db/044_object_group_permissions.sql を参照。
 -- ============================================================
-
-CREATE TABLE IF NOT EXISTS course_group_permissions (
-    course_id   TEXT NOT NULL REFERENCES learning_courses(id) ON DELETE CASCADE,
-    group_id    UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
-    permission  TEXT NOT NULL DEFAULT 'viewer'
-                    CHECK (permission IN ('viewer', 'editor')),
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (course_id, group_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_cgp_course ON course_group_permissions(course_id);
-CREATE INDEX IF NOT EXISTS idx_cgp_group  ON course_group_permissions(group_id);
-CREATE INDEX IF NOT EXISTS idx_cgp_group_permission
-    ON course_group_permissions(group_id, permission);

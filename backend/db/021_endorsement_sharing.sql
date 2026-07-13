@@ -5,7 +5,8 @@
 --   C層は A層が出力した theory_components / theory_claims を「読む側」として実装し、
 --   承認と共有の情報を新規テーブルに積む(B層=学習者体験レイヤーと同じ立場)。
 --
--- 適用: 本 SQL は正本リファレンス。実際の適用は backend/api/main.py の _run_migrations() 内。
+-- 適用: このファイルが正本。backend/core/migrations.py のランナーが起動時に行う
+--   （冪等・毎起動再実行）。
 --
 -- 設計上の確定: 承認(endorsement)は「説明バージョン(explanation)」単位で付ける。
 --   「標準説明を承認したのか、A先生の説明を承認したのか」を区別できるようにするため。

@@ -36,7 +36,6 @@
 | 構造要素 | 出所 | 粒度 | 現状の取得可否 |
 |---|---|---|---|
 | セグメント / チャンク | `position_anchor`・`cited_sources[].chunk_id` | 粗い（場所） | **記録済み** |
-| 概念ノード + REQUIRES | Neo4j（チャンク↔概念クロスリンク） | 中（何について） | 取得可 |
 | atomic claim / 数式 / 導出ステップ | claims.json / equations.json / DerivationChain | 細かい（どの命題・どの式変形） | 取得可 |
 | theory stage（theory_basis / equation_system / elimination…） | TheoryOperationGraph（#308, domain-neutral 語彙） | 上位（理論構成のどの段階） | 取得可 |
 

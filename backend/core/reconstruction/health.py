@@ -14,29 +14,26 @@ from typing import Any
 from sqlalchemy import text as sa_text
 
 from core.postgres import get_session as _pg_session
+from core.privacy import K_ANONYMITY as K_ANON
+from core.privacy import count_range_gated, gate_label
 
 # k-匿名しきい値。**人数（DISTINCT user）**がこれ未満のシグナルは方向性を出さない
 # （まだデータなし）。応答行数ではなく人数で数える（D層 naive_signal と同じ扱い。P3:
 # 1人の学習者が複数回答しただけでセルが開示されてはならない）。
-K_ANON = 3
+# 実体は core/privacy.py の共通 k-匿名ゲート（提案8）。この名前 (K_ANON) は
+# core/reconstruction/stumble.py が import しているため後方互換のため残す。
 
 _NO_DATA = "まだデータなし"
 
 
 def gate_by_users(label: str, n_users: int) -> str:
     """k-匿名ゲート: 学習者の人数が k 未満なら段階ラベル/レンジを出さない。"""
-    return label if n_users >= K_ANON else _NO_DATA
+    return gate_label(label, n_users, below_label=_NO_DATA, k=K_ANON)
 
 
 def count_range(n: int) -> str:
     """件数をレンジ表示に落とす（k-匿名。生の小さい数を出さない）。"""
-    if n < K_ANON:
-        return _NO_DATA
-    if n <= 5:
-        return "3-5"
-    if n <= 10:
-        return "6-10"
-    return "11+"
+    return count_range_gated(n, below_label=_NO_DATA, k=K_ANON)
 
 
 def rate_level(numerator: int, denominator: int) -> str:

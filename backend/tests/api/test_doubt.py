@@ -7,6 +7,7 @@ routes/doubt.py は `from dependencies import ...` の flat import を含むた�
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 _BACKEND = Path(__file__).resolve().parents[2]
@@ -14,19 +15,35 @@ _SRC = (_BACKEND / "api" / "routes" / "doubt.py").read_text(encoding="utf-8")
 _MAIN = (_BACKEND / "api" / "main.py").read_text(encoding="utf-8")
 _ADMIN = (_BACKEND / "api" / "routes" / "admin.py").read_text(encoding="utf-8")
 
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
+from tests.guardrail_helpers import read_migration_sql  # noqa: E402
+
+# migration 029〜033（D層）の番号 → テーブル名。正本は backend/db/0NN_*.sql
+# （main.py のインライン DDL ではない, 2026-07 migration 正本一本化）。
+_D_LAYER_MIGRATION_TABLES = {
+    29: "epistemic_ledger",
+    30: "assumption_nodes",
+    31: "challenges",
+    32: "verification_proposals",
+    33: "counterfactual_sessions",
+}
+
 
 class TestRouterRegistration:
     def test_admin_router_included(self):
-        assert "from routes.doubt import admin_router" in _ADMIN
-        assert "_doubt_admin_router" in _ADMIN
+        # Tier 3-17c: admin.py 経由の二段ネストではなく main.py から
+        # `/api/admin` prefix で直接マウントするフラット構造。
+        assert "from routes import doubt as doubt_routes" in _MAIN
+        assert 'app.include_router(doubt_routes.admin_router, prefix="/api/admin")' in _MAIN
 
     def test_learning_router_registered(self):
         assert "doubt_routes.learning_router" in _MAIN
 
     def test_migrations_029_to_033_present(self):
-        for name in ("epistemic_ledger", "assumption_nodes", "challenges",
-                     "verification_proposals", "counterfactual_sessions"):
-            assert f"CREATE TABLE IF NOT EXISTS {name}" in _MAIN
+        for number, name in _D_LAYER_MIGRATION_TABLES.items():
+            sql = read_migration_sql(_BACKEND, number)
+            assert f"CREATE TABLE IF NOT EXISTS {name}" in sql
 
 
 class TestLedgerEndpoints:
@@ -68,13 +85,31 @@ class TestLedgerEndpoints:
             assert "_require_teacher" in block.group(0), f"{fn} must require teacher"
 
     def test_all_writes_audited(self):
-        """全書き込みが theory_review_events に記録される（_record_doubt_event）。"""
-        for entity in ("'ledger'", "\"ledger\""):
-            pass
+        """全書き込みが theory_review_events に記録される（_record_doubt_event）。
+
+        entity_type は core/schema.py の AUDIT_ENTITY_TYPES カタログ定数を使う
+        （提案7: 監査 entity_type の一本化）。call site が catalog 定数を参照して
+        いること・カタログ側の値が期待どおりであることの双方を検証する。
+        """
+        from core.schema import (
+            AUDIT_ENTITY_ASSUMPTION,
+            AUDIT_ENTITY_CHALLENGE,
+            AUDIT_ENTITY_COUNTERFACTUAL_SESSION,
+            AUDIT_ENTITY_LEDGER,
+            AUDIT_ENTITY_VERIFICATION_PROPOSAL,
+        )
+
         assert _SRC.count("_record_doubt_event(") >= 10
-        for entity_type in ("ledger", "assumption", "challenge",
-                            "verification_proposal", "counterfactual_session"):
-            assert f'"{entity_type}"' in _SRC
+        expected = {
+            "AUDIT_ENTITY_LEDGER": ("ledger", AUDIT_ENTITY_LEDGER),
+            "AUDIT_ENTITY_ASSUMPTION": ("assumption", AUDIT_ENTITY_ASSUMPTION),
+            "AUDIT_ENTITY_CHALLENGE": ("challenge", AUDIT_ENTITY_CHALLENGE),
+            "AUDIT_ENTITY_VERIFICATION_PROPOSAL": ("verification_proposal", AUDIT_ENTITY_VERIFICATION_PROPOSAL),
+            "AUDIT_ENTITY_COUNTERFACTUAL_SESSION": ("counterfactual_session", AUDIT_ENTITY_COUNTERFACTUAL_SESSION),
+        }
+        for const_name, (literal, value) in expected.items():
+            assert const_name in _SRC, f"{const_name} must be referenced in doubt.py"
+            assert value == literal, f"{const_name} catalog value drifted from {literal!r}"
 
 
 class TestCandidateConfirmationFlow:

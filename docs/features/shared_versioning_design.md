@@ -13,6 +13,16 @@
   グループ共有（migration 010 `course_group_permissions` / migration 035 `document_group_permissions`）/
   承認・共有レイヤー C層（`component_citations`）/ 監査（`theory_review_events`）
 
+> **2026-07 更新（アーキテクチャ整理 Tier 3）**: `share_notifications` は migration 045 で
+> `user_notifications`（状態管理・通知基盤, migration 038）に統合され（`source='shared'` で区別）、
+> `course_group_permissions`（010）/ `document_group_permissions`（035）は migration 044 で
+> `object_group_permissions` に統合された。マイグレーションの実行方式自体も一本化され、
+> `main.py::_run_migrations()` は廃止済みで `backend/core/migrations.py` のランナーが
+> `backend/db/*.sql` を毎起動・冪等再実行する。以下の本文はこれらの統合が行われる**前**の
+> 設計当時の記述であり、テーブル名・実行方式の記載は歴史的経緯として残している
+> （API パス・挙動は統合後も不変）。詳細は `docs/architecture/data-model.md` と
+> `docs/architecture/consolidation_survey_2026-07.md` 第4部（Tier 3-13/14/15）を参照。
+
 ---
 
 ## 1. 背景 — なぜ必要か

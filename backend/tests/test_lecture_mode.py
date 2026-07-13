@@ -535,13 +535,6 @@ class TestHelperUuidGuards:
 
         assert _get_audio_cache("search_0", "alloy") is None
 
-    @patch("api.routes.lecture._pg_session")
-    def test_save_audio_cache_non_uuid_skips_db(self, mock_session):
-        from api.routes.lecture import _save_audio_cache
-
-        _save_audio_cache("search_0", "alloy", b"audio", 1000, [])
-        mock_session.assert_not_called()
-
     def test_get_chunk_spoken_text_non_uuid(self):
         from api.routes.lecture import _get_chunk_spoken_text
 
@@ -705,20 +698,36 @@ class TestTopicAudioStatus:
     @patch("api.routes.lecture._pg_session")
     @patch("api.routes.lecture.get_course_data")
     def test_material_topic_with_cached_audio(self, mock_course, mock_session):
+        """migration 040: chunk 行 + lecture_audio_cache 行の2クエリでスライド単位判定する。"""
         from api.routes.lecture import get_topic_audio_status
 
         mock_course.return_value = {
             "topics": [{"id": "t1"}],
             "sources": [{"material_id": "m1"}],
         }
+        # 10 チャンク（マーカーなし = 1スライド/チャンク）、うち4チャンクに音声キャッシュあり
+        chunk_rows = [
+            (f"c{i}", f"text {i}", f"text {i}", f"spoken {i}", [], "ja")
+            for i in range(10)
+        ]
+        audio_rows = [(f"c{i}", 0) for i in range(4)]
+
+        chunk_result = MagicMock()
+        chunk_result.fetchall.return_value = chunk_rows
+        audio_result = MagicMock()
+        audio_result.fetchall.return_value = audio_rows
+
         session = MagicMock()
-        session.execute.return_value.fetchone.return_value = (10, 4)
+        session.execute.side_effect = [chunk_result, audio_result]
         mock_session.return_value = session
 
         result = get_topic_audio_status("c1", "t1", {"id": "u1"})
         assert result["has_audio"] is True
         assert result["total_chunks"] == 10
         assert result["ready_chunks"] == 4
+        assert result["total_slides"] == 10
+        assert result["ready_slides"] == 4
+        assert result["stale_language"] is False
 
     @patch("api.routes.lecture._pg_session")
     @patch("api.routes.lecture.get_course_data")
@@ -729,10 +738,49 @@ class TestTopicAudioStatus:
             "topics": [{"id": "t1"}],
             "sources": [{"material_id": "m1"}],
         }
+        chunk_rows = [
+            (f"c{i}", f"text {i}", f"text {i}", f"spoken {i}", [], "ja")
+            for i in range(10)
+        ]
+        chunk_result = MagicMock()
+        chunk_result.fetchall.return_value = chunk_rows
+        audio_result = MagicMock()
+        audio_result.fetchall.return_value = []
+
         session = MagicMock()
-        session.execute.return_value.fetchone.return_value = (10, 0)
+        session.execute.side_effect = [chunk_result, audio_result]
         mock_session.return_value = session
 
         result = get_topic_audio_status("c1", "t1", {"id": "u1"})
         assert result["has_audio"] is False
         assert result["ready_chunks"] == 0
+        assert result["ready_slides"] == 0
+
+    @patch("api.routes.lecture._pg_session")
+    @patch("api.routes.lecture.get_course_data")
+    def test_stale_language_audio_not_counted_as_ready(self, mock_course, mock_session):
+        """spoken_language がコースの lecture_language と不一致の音声は ready に数えない。"""
+        from api.routes.lecture import get_topic_audio_status
+
+        mock_course.return_value = {
+            "topics": [{"id": "t1"}],
+            "sources": [{"material_id": "m1"}],
+            # lecture_language 未設定 -> 既定 "ja"
+        }
+        chunk_rows = [("c0", "text", "text", "spoken", [], "en")]  # 原稿は英語
+        audio_rows = [("c0", 0)]  # 音声キャッシュはあるが言語不一致
+
+        chunk_result = MagicMock()
+        chunk_result.fetchall.return_value = chunk_rows
+        audio_result = MagicMock()
+        audio_result.fetchall.return_value = audio_rows
+
+        session = MagicMock()
+        session.execute.side_effect = [chunk_result, audio_result]
+        mock_session.return_value = session
+
+        result = get_topic_audio_status("c1", "t1", {"id": "u1"})
+        assert result["has_audio"] is False
+        assert result["ready_slides"] == 0
+        assert result["stale_language"] is True
+        assert result["language"] == "ja"

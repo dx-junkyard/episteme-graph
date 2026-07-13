@@ -5,6 +5,8 @@ main.py から分離した API 固有のスキーマを集約する。
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -253,7 +255,6 @@ class LearningSession(BaseModel):
 
 
 class LearningProgress(BaseModel):
-    mastered_concepts: int = 0
     learning_concepts: int = 0
     misconceptions: int = 0
     streak_days: int = 0
@@ -549,6 +550,21 @@ class LectureFormulaItem(BaseModel):
     review_reason: list[str] = Field(default_factory=list)
 
 
+class LectureSlide(BaseModel):
+    """レクチャーセグメント内の1スライド（migration 040: レクチャースライド同期 Phase 1）。
+
+    表示 (display_text) と読み上げ (spoken_text) の同期最小単位。既定では
+    1セグメント（チャンク）= 1スライドだが、``===`` マーカーで複数スライドに分割できる
+    （``core.lecture.split_slides`` が導出。DB には保存しない）。
+    """
+    slide_index: int
+    display_text: str
+    spoken_text: str | None = None
+    formulas: list[LectureFormulaItem] = []
+    has_audio: bool = False
+    duration_ms: int = 0
+
+
 class LectureSegment(BaseModel):
     """レクチャーモードの1セグメント（チャンク単位）。"""
     chunk_id: str
@@ -559,6 +575,8 @@ class LectureSegment(BaseModel):
     has_audio: bool = False
     duration_ms: int = 0
     segment_mode: str = "full"  # full | summary | skip
+    slides: list[LectureSlide] = []
+    language: str = "ja"  # このセグメントの spoken_language（無指定は "ja"）
 
 
 class LectureSequenceResponse(BaseModel):
@@ -570,12 +588,14 @@ class LectureSequenceResponse(BaseModel):
     total_duration_ms: int = 0
     skipped_segments: int = 0  # 習得済みスキップ数
     summary_segments: int = 0  # 簡易版変換数
+    total_slides: int = 0  # 全セグメントのスライド数合計
 
 
 class LectureTTSRequest(BaseModel):
     """TTS 音声生成リクエスト。"""
     chunk_id: str
     voice: str = "alloy"
+    slide_index: int = 0
 
 
 class LectureTTSResponse(BaseModel):
@@ -593,6 +613,7 @@ class LectureInterruptRequest(BaseModel):
     current_chunk_id: str
     pause_position_ms: int = 0
     history: list[dict] = []
+    current_slide_index: int | None = None  # 記録用。挙動には影響しない
 
 
 class LectureInterruptResponse(BaseModel):
@@ -630,14 +651,19 @@ class LectureScriptChunkOut(BaseModel):
     smiles_dsl: str = ""
     variables: dict | list | None = None
     ancestors: list | None = None
-    neo4j_node_id: str = ""
     graph_elements: list[dict] = []
+    # レクチャースライド同期 + 音声言語切替 (migration 040 Phase 4)
+    spoken_language: str | None = None  # 原稿の生成言語。None/未生成時は "ja" とみなす
+    slide_count: int = 1  # split_slides() でのスライド枚数
+    slide_mismatch: bool = False  # 表示/読み上げの区切り数不一致で1枚に縮退したか
+    audio_ready_slides: int = 0  # 音声キャッシュ済みスライド数
 
 
 class LectureScriptGenerateRequest(BaseModel):
     """バッチスクリプト生成リクエスト。"""
     override: bool = False  # 既存スクリプトを上書きするか
     auto_audio: bool = False  # スクリプト生成完了後、自動で音声生成タスクを起動するか (Issue #139)
+    language: Literal["ja", "en"] | None = None  # 省略時はコース設定 (lecture_language) を使う
 
 
 class LectureScriptGenerateStartResponse(BaseModel):
@@ -670,6 +696,33 @@ class LectureScriptSaveResponse(BaseModel):
     status: str = "edited"
 
 
+class LecturePreviewSplitRequest(BaseModel):
+    """原稿スタジオのプレビュー用スライド分割リクエスト（DB 非変更, Tier2-11）。
+
+    ``core.lecture.split_slides`` をそのまま呼ぶための入力。未保存の編集途中テキストも
+    そのまま渡せる（保存済みチャンクである必要はない）。
+    """
+    display_text: str = ""
+    spoken_text: str | None = None
+    formulas: list[dict] = []
+
+
+class LecturePreviewSplitResponse(BaseModel):
+    """原稿スタジオのプレビュー用スライド分割レスポンス。
+
+    ``core.lecture.split_slides`` の結果をそのまま返す。プレビュー（本レスポンス）と
+    配信（``get_lecture_sequence`` 等）が同一の分割ロジックを共有するための唯一の経路
+    （docs/features/lecture_slide_sync_design.md「プレビューと配信で分割ロジックを
+    共有すること」）。``display_segment_count``/``spoken_segment_count`` は
+    整合インジケータ表示専用の補助情報（``mismatch=True`` の場合 ``slides`` は1件に
+    縮退するため、縮退前のセグメント数をクライアントに渡す）。
+    """
+    slides: list[LectureSlide] = []
+    mismatch: bool = False
+    display_segment_count: int = 0
+    spoken_segment_count: int = 0
+
+
 class LectureScriptRewriteRequest(BaseModel):
     """AI スクリプト書き換えリクエスト。"""
     prompt: str
@@ -685,6 +738,11 @@ class LectureScriptRewriteResponse(BaseModel):
     spoken_text: str
     formulas: list[LectureFormulaItem] = []
     theory_components: list[dict] = Field(default_factory=list)
+
+
+class LectureAudioGenerateRequest(BaseModel):
+    """バッチ音声生成リクエスト (migration 040 Phase 4: 言語切替)。"""
+    language: Literal["ja", "en"] | None = None  # 省略時はコース設定 (lecture_language) を使う
 
 
 class LectureAudioGenerateResponse(BaseModel):
@@ -991,6 +1049,9 @@ class LectureStudioSettings(BaseModel):
     """原稿スタジオのコース単位設定。"""
     narration_persona: str = ""
     response_persona: str = ""
+    # レクチャースライド同期 + 音声言語切替 (migration 040 Phase 4): コース単位の読み上げ言語。
+    # 不正値は pydantic のバリデーションで 422 になる。
+    lecture_language: Literal["ja", "en"] = "ja"
 
 
 # ---------------------------------------------------------------------------
@@ -1144,7 +1205,7 @@ class AssistantLocatePlan(BaseModel):
 class AssistantChatResponse(BaseModel):
     """POST /api/admin/assistant/chat のレスポンス。"""
     answer: str
-    intent: str                                  # guidance | locate | action | clarify
+    intent: str                                  # guidance | locate | action | clarify | status_query
     action_plan: AssistantActionPlan | None = None
     locate_plan: AssistantLocatePlan | None = None
     next_actions: list[dict] = Field(default_factory=list)
@@ -1188,3 +1249,30 @@ class AssistantActionSummary(BaseModel):
     status: str = "applied"
     created_at: str = ""
     reverted_at: str | None = None
+
+
+class NextStepOut(BaseModel):
+    """G層 Next Steps の 1 項目（core.admin_assistant.next_steps.NextStep の JSON 化）。"""
+    step_key: str
+    rule_id: str
+    severity: str                                  # required | recommended | optional
+    title: str
+    reason: str
+    capability_id: str
+    locate_plan: dict = Field(default_factory=dict)
+    target: dict = Field(default_factory=dict)
+    dismissible: bool = True
+
+
+class NextStepsResponse(BaseModel):
+    """GET /api/admin/assistant/next-steps のレスポンス（設計 §4）。"""
+    steps: list[NextStepOut] = Field(default_factory=list)
+    hidden: list[NextStepOut] = Field(default_factory=list)
+    truncated: bool = False
+    assistant_cue_pending: bool = False
+
+
+class NextStepDismissResponse(BaseModel):
+    """POST /next-steps/{step_key}/dismiss|restore の共通レスポンス。"""
+    status: str                                     # dismissed | restored
+    step_key: str

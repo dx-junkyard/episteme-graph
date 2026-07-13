@@ -13,7 +13,6 @@
 | フロントエンド | Vanilla JS SPA + nginx（フレームワーク不使用） |
 | API サーバー | FastAPI (Python 3.11) |
 | RDB + ベクトル検索 | PostgreSQL 16 + pgvector（cosine, 次元数は `LLM_EMBEDDING_DIM`、既定 3072） |
-| グラフ DB | Neo4j 5（概念グラフ走査専用） |
 | オブジェクトストレージ | MinIO（S3 互換） |
 | PDF 構造解析 | GROBID（TEI-XML）／フォールバックで PyMuPDF |
 | LLM | OpenAI API または Google Gemini / Vertex AI（`LLM_PROVIDER` で切替） |
@@ -32,8 +31,7 @@
 | `frontend` | nginx。静的 SPA 配信 + `/api/*` を api-server へリバースプロキシ | 3000（唯一の外部公開） |
 | `api-server` | FastAPI 本体。`backend/api` + `backend/core` + `src/episteme_graph/agents` | （内部のみ 8001） |
 | `postgres` | PostgreSQL 16 + pgvector。正本データ | （内部のみ。本番はマネージド DB） |
-| `neo4j` | 概念グラフ走査専用 | （内部のみ） |
-| `minio` | PDF 原本・抽出構造の保存 | 9001（コンソール、開発時） |
+| `minio` | PDF 原本・図画像の保存 | 9001（コンソール、開発時） |
 | `grobid` | PDF → TEI-XML 解析 | 8070（開発時） |
 
 > `postgres` サービスは本体 `docker-compose.yml` には含まれず、`docker-compose.local.yml`（`pgvector/pgvector:pg16`）で提供されるか、本番ではマネージド DB を `DB_HOST` で参照します。詳細は [デプロイ構成](deployment.md)。
@@ -62,12 +60,12 @@ episteme-graph/
 │   ├── core/                     # コアエンジン（→ backend/core-engine.md）
 │   │   ├── schema.py             # 全 Pydantic モデル（OntologyType, CorePredicate など）
 │   │   ├── extractor.py / embedder.py / chat.py / lecture.py / tts.py
-│   │   ├── llm.py / config.py / storage.py / postgres.py / db.py / models.py
+│   │   ├── llm.py / config.py / storage.py / postgres.py / models.py
 │   │   ├── schema_registry.py / meta_analyzer.py / simulator.py / reextractor.py
-│   │   ├── theory_components.py / component_candidates.py / isom.py / harvester.py / batch.py
+│   │   ├── theory_components.py / component_candidates.py / isom.py / harvester.py
 │   │   ├── learning_experience.py / learning_support_agent.py / personas.py
 │   │   ├── document_pipeline/    # Agent パイプライン オーケストレータ（revision/ を含む）
-│   │   ├── graphs/               # 学生向け/教員向けグラフ組み立て（student_graph / teacher_graph）
+│   │   ├── graphs/               # 学生向けグラフ組み立て（student_graph）
 │   │   └── tension/              # TensionMiningAgent（prefilter / agent / worker など, B層）
 │   ├── cartridges/               # ドメインカートリッジ（particle_physics）
 │   ├── db/                       # SQL マイグレーション（init.sql, 002〜022）
@@ -84,7 +82,8 @@ episteme-graph/
 
 ## 4. データストアの役割分担
 
-知識の **正本は PostgreSQL** に置き、Neo4j はグラフ走査専用、MinIO はバイナリ/大きな JSON 専用、という明確な分離がこのシステムの基本方針です。
+知識の **正本は PostgreSQL** に置き、MinIO はバイナリ（PDF 原本・図画像）専用、という明確な分離がこのシステムの基本方針です
+（旧 Neo4j はグラフ走査用に導入されていたが、書き込み経路がなく実質未使用だったため 2026-07 に撤去済み）。
 
 ### PostgreSQL + pgvector（正本）
 - ユーザー・認証・セッション
@@ -99,15 +98,10 @@ episteme-graph/
 
 詳細なテーブル一覧は [データモデル](data-model.md) を参照。
 
-### Neo4j（グラフ走査専用）
-- 概念ノードとエッジ（`REQUIRES` / `RELATES_TO` / `CONTAINS`）
-- チャンク↔概念のクロスリンク
-- 構造的同型パターンとのマッチ（`MATCHES_PATTERN`）、システムメタ提案
-
 ### MinIO（S3 互換オブジェクトストレージ）
 - `raw-papers` — PDF 原本
 - `raw-texts` — フォールバックで抽出した素のテキスト
-- `extracted-structures` — 抽出済み `PaperStructure` JSON（`{paper_id}.json`）
+- `figure-images` — 図画像抽出パイプライン（L層）が抽出した図の画像
 
 ### GROBID / LLM / TTS（外部・補助）
 - GROBID: PDF → TEI-XML（落ちていても PyMuPDF で継続）
@@ -121,7 +115,7 @@ episteme-graph/
 | サブシステム | 概要 | 詳細 |
 |---|---|---|
 | PDF 解析パイプライン | アップロードされた PDF を 23 ステージの Agent 群で構造化 | [pipeline/overview.md](../pipeline/overview.md) |
-| RAG チャット | pgvector 検索 + PaperStructure でコンテキストを組み、LLM が回答 | [backend/rag-chat.md](../backend/rag-chat.md) |
+| RAG チャット | pgvector 検索（tier 付き）でコンテキストを組み、LLM が回答 | [backend/rag-chat.md](../backend/rag-chat.md) |
 | 動的スキーマ進化 | 未回答クエリから新しい OntologyType/CorePredicate を提案・検証・反映 | [pipeline/schema-evolution.md](../pipeline/schema-evolution.md) |
 | 理論操作グラフ | 導出チェーンから理論の操作構造を 2 層グラフで表現 | [pipeline/theory-graph.md](../pipeline/theory-graph.md) |
 | 学習・講義 | 適応的 RAG 学習 + TTS インタラクティブ講義 + ハンズフリー音声会話 | [features/learning.md](../features/learning.md) |

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     Column,
@@ -87,7 +88,6 @@ class Document(Base):
     publisher = Column(Text, nullable=True)
     language = Column(Text, default="en")
     source_path = Column(Text, nullable=True)
-    neo4j_node_id = Column(Text, nullable=True)
     # Material processing fields
     filename = Column(Text, nullable=True)
     status = Column(Text, default="uploaded")
@@ -126,11 +126,13 @@ class Chunk(Base):
     smiles_dsl = Column(Text, nullable=True)
     variables = Column(JSONB, nullable=True)
     ancestors = Column(JSONB, nullable=True)
-    neo4j_node_id = Column(Text, nullable=True)
     # Interactive Lecture Mode (Issue #66)
     display_text = Column(Text, nullable=True)
     spoken_text = Column(Text, nullable=True)
     formulas = Column(JSONB, default=list)
+    # レクチャースライド同期 + 音声言語切替 (migration 040): 原稿の生成言語。
+    # NULL は既存データ（日本語前提で生成済み）とみなす。
+    spoken_language = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
 
     document = relationship("Document", back_populates="chunks")
@@ -141,14 +143,22 @@ class Chunk(Base):
 # ============================================================
 
 class LectureAudioCache(Base):
-    """TTS 音声キャッシュ (Issue #66)。"""
+    """TTS 音声キャッシュ (Issue #66)。
+
+    migration 040 でスライド単位 (``slide_index``) + 言語 (``language``) に拡張。
+    ``UNIQUE(chunk_id, slide_index, voice)``。既存行は ``slide_index=0`` のまま有効
+    （マーカーなしチャンク = 1スライドとして後方互換）。
+    """
     __tablename__ = "lecture_audio_cache"
-    __table_args__ = (UniqueConstraint("chunk_id", "voice"),)
+    __table_args__ = (UniqueConstraint("chunk_id", "slide_index", "voice"),)
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
     chunk_id = Column(UUID(as_uuid=True), ForeignKey("chunks.id", ondelete="CASCADE"), nullable=False)
+    slide_index = Column(Integer, nullable=False, default=0)
     voice = Column(Text, nullable=False, default="alloy")
-    audio_data = Column(Text, nullable=False)  # base64-encoded audio
+    language = Column(Text, nullable=False, default="ja")
+    # 実体は BYTEA（生SQL経由でバイナリ格納。ORM 自体は音声IOに未使用のため型不整合は挙動に影響しない）。
+    audio_data = Column(Text, nullable=False)
     duration_ms = Column(Integer, nullable=False, default=0)
     word_timestamps = Column(JSONB, default=list)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
@@ -330,4 +340,63 @@ class GroupInvitation(Base):
     inviter_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     status = Column(Text, nullable=False, default="pending")  # pending | accepted | declined | revoked
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+
+# ============================================================
+# ガイダンス層（G層）— Next Steps 却下台帳（migration 039）
+# ============================================================
+
+class AssistantStepDismissal(Base):
+    """Next Steps の却下台帳（G5/P4: 復元は行削除でなく revoked への状態遷移）。
+
+    `step_key='cue:first_login'` は操作アシスタント初回ログイン cue の
+    一度きりフラグとしても流用する（設計 §8。専用テーブルを増やさない）。
+    """
+    __tablename__ = "assistant_step_dismissals"
+    __table_args__ = (UniqueConstraint("user_id", "step_key"),)
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    step_key = Column(Text, nullable=False)
+    dismissed_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    revoked = Column(Boolean, nullable=False, default=False)
     responded_at = Column(DateTime(timezone=True), nullable=True)
+
+
+# ============================================================
+# U層（LLM トークン使用量推計）— llm_usage_events（migration 043）
+# ============================================================
+
+class LlmUsageEvent(Base):
+    """LLM/TTS/STT 呼び出し1回分の使用量記録（append-only。行削除 API は作らない, U6）。
+
+    FK を意図的に張らない（テレメトリ行が本体の削除を妨げたり、本体削除でカスケード
+    消失したりしないため。帰属 ID は文字列/UUID として残すのみ。設計書 §5）。
+    """
+    __tablename__ = "llm_usage_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    occurred_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    provider = Column(Text, nullable=False)
+    model = Column(Text, nullable=False)
+    operation = Column(Text, nullable=False)  # chat|structured|embedding|vision|transcribe|tts
+    feature = Column(Text, nullable=False, default="unattributed")
+    usage_source = Column(Text, nullable=False)  # reported|estimated_tokenizer|estimated_heuristic
+    prompt_tokens = Column(Integer, nullable=True)
+    completion_tokens = Column(Integer, nullable=True)
+    total_tokens = Column(Integer, nullable=True)
+    cached_tokens = Column(Integer, nullable=True)
+    reasoning_tokens = Column(Integer, nullable=True)
+    input_characters = Column(Integer, nullable=True)
+    output_characters = Column(Integer, nullable=True)
+    image_count = Column(Integer, nullable=False, default=0)
+    audio_bytes = Column(BigInteger, nullable=True)
+    tts_characters = Column(Integer, nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+    success = Column(Boolean, nullable=False, default=True)
+    error_type = Column(Text, nullable=True)
+    user_id = Column(UUID(as_uuid=True), nullable=True)
+    document_id = Column(UUID(as_uuid=True), nullable=True)
+    course_id = Column(Text, nullable=True)
+    run_id = Column(UUID(as_uuid=True), nullable=True)
+    metadata_json = Column("metadata", JSONB, nullable=False, default=dict)

@@ -8,6 +8,8 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Optional
 
+from episteme_graph.agents.cartridge_context import CartridgeContext
+
 UNIT_TYPES = [
     "article",
     "chapter",
@@ -51,17 +53,6 @@ HARD_ERROR_RULE_IDS = {
     "empty_included_block_ids",
     "high_confidence_missing_title",
 }
-
-
-@dataclass
-class CartridgeContext:
-    cartridge_id: str
-    ontology: dict
-    validation_rules: dict
-    aliases: dict | None = None
-    notation_patterns: list | None = None
-    normalization_rules: list | None = None
-    extraction_hints: list | None = None
 
 
 @dataclass

@@ -8,6 +8,8 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Optional
 
+from episteme_graph.agents.cartridge_context import CartridgeContext
+
 LOGICAL_BLOCK_TYPES = [
     "problem_setting",
     "background",
@@ -34,17 +36,6 @@ EXCLUDED_REGION_TYPES = [
 ]
 
 SKELETON_VERSION = "v1"
-
-
-@dataclass
-class CartridgeContext:
-    cartridge_id: str
-    ontology: dict
-    validation_rules: dict
-    aliases: dict | None = None
-    notation_patterns: list | None = None
-    normalization_rules: list | None = None
-    extraction_hints: list | None = None
 
 
 @dataclass

@@ -12,6 +12,11 @@
 --      stage 単位の状況・raw output を保持）
 --
 -- すべて IF NOT EXISTS / DROP CONSTRAINT IF EXISTS で冪等。
+--
+-- このファイルが正本。適用は `backend/core/migrations.py` のランナーが起動時に行う（冪等・毎起動再実行）。
+-- 注意: learning_courses.cloned_from カラムの後始末（DELETE + DROP COLUMN）は
+-- 本ファイルの担当ではない。Issue #133 (Migration 011) の一部であり
+-- backend/db/011_course_states_separation.sql に属する。
 
 -- ----------------------------------------------------------------------------
 -- chunks: section-aware metadata
@@ -38,25 +43,27 @@ ALTER TABLE theory_component_graphs ALTER COLUMN course_id DROP NOT NULL;
 -- 重複保存できなくなるため、document_id 単独の UNIQUE 制約を追加する。
 -- 既存環境には同一 document_id の graph が複数残っている場合があるため、
 -- 制約追加前に最新の updated_at / created_at を持つ 1 行へ畳む。
-DELETE FROM theory_component_graphs t
-USING (
-    SELECT
-        id,
-        row_number() OVER (
-            PARTITION BY document_id
-            ORDER BY updated_at DESC, created_at DESC, id DESC
-        ) AS rn
-    FROM theory_component_graphs
-) d
-WHERE t.id = d.id
-  AND d.rn > 1;
-
+-- dedup の DELETE は「制約がまだ無い」ときにしか意味を持たない一度きりの
+-- 後始末なので、制約追加と同じ DO $$ ガードに入れて再実行を静かにする。
 DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conname = 'theory_component_graphs_document_uq'
     ) THEN
+        DELETE FROM theory_component_graphs t
+        USING (
+            SELECT
+                id,
+                row_number() OVER (
+                    PARTITION BY document_id
+                    ORDER BY updated_at DESC, created_at DESC, id DESC
+                ) AS rn
+            FROM theory_component_graphs
+        ) d
+        WHERE t.id = d.id
+          AND d.rn > 1;
+
         ALTER TABLE theory_component_graphs
             ADD CONSTRAINT theory_component_graphs_document_uq UNIQUE (document_id);
     END IF;

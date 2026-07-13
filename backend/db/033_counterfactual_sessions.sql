@@ -11,8 +11,7 @@
 --   - notes は本人の言葉。モード退出で通常表示に完全復帰（UI 側, D3-4）。
 --   - 監査: theory_review_events（entity_type='counterfactual_session'）。
 --
--- 実際の適用は backend/api/main.py の _run_migrations()（Migration 033）で行う。
--- このファイルは正本スキーマのリファレンス。
+-- このファイルが正本。適用は `backend/core/migrations.py` のランナーが起動時に行う（冪等・毎起動再実行）。
 
 CREATE TABLE IF NOT EXISTS counterfactual_sessions (
     id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -1,0 +1,45 @@
+{
+  "__note__": "Illustrative only. image_bytes is real bytes at runtime (not JSON-serializable) and is shown here as null; a real FigureImageInput carries the PNG/JPEG bytes fetched from MinIO (document_figures.minio_key).",
+  "document_id": "doc_sample_paper",
+  "cartridge_id": "particle_physics",
+  "figures": [
+    {
+      "figure_id": "fig_1",
+      "figure_key": "fig_1",
+      "figure_label": "Figure 1",
+      "caption_text": "Figure 1: Schematic of the vacuum chamber assembly, showing the ion source, drift tube, and detector plate connected in series.",
+      "image_bytes": null,
+      "nearby_text": [
+        "The apparatus consists of an ion source that injects charged particles into an evacuated drift tube.",
+        "A detector plate at the far end records the arrival time of each particle."
+      ],
+      "figure_record": {
+        "figure_id": "fig_1",
+        "figure_type": "schematic",
+        "caption": "Schematic of the vacuum chamber assembly, showing the ion source, drift tube, and detector plate connected in series."
+      }
+    }
+  ],
+  "library_candidates": {
+    "fig_1": [
+      {
+        "entry_id": "lib_entry_0001",
+        "version_no": 3,
+        "name": "Time-of-flight drift chamber",
+        "aliases": ["TOF chamber", "drift tube assembly"],
+        "summary": "A vacuum chamber used to measure particle arrival time over a fixed drift length.",
+        "body": {
+          "typical_parts": [
+            {"name": "ion source", "role": "injects charged particles"},
+            {"name": "drift tube", "role": "field-free flight path"},
+            {"name": "detector plate", "role": "records arrival time"}
+          ],
+          "visual_cues": [
+            "cylindrical chamber with radial flanges",
+            "particle source at one end, flat detector plate at the other"
+          ]
+        }
+      }
+    ]
+  }
+}

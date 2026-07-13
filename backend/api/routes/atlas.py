@@ -17,10 +17,18 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+import services
 from core import atlas
 from core import atlas_reports
 from core import atlas_store
 from core import cartridges as cartridges_module
+from core.course_data import course_cartridge_id, course_topics
+from core.schema import (
+    AUDIT_ENTITY_ATLAS_ASSIST,
+    AUDIT_ENTITY_ATLAS_BINDING,
+    AUDIT_ENTITY_ATLAS_REPORT,
+    AUDIT_ENTITY_ATLAS_SKELETON,
+)
 from dependencies import _get_current_user, _require_teacher
 
 logger = logging.getLogger(__name__)
@@ -54,41 +62,17 @@ def _record_review_event(
     new_status: str,
     user_id: str | None,
     metadata: dict | None = None,
-    entity_type: str = "atlas_skeleton",
+    entity_type: str = AUDIT_ENTITY_ATLAS_SKELETON,
 ) -> None:
-    """凍結・生成・報告などの状態遷移を監査記録する。DB 不通時は警告のみ (非致命)。"""
+    """凍結・生成・報告などの状態遷移を監査記録する。DB 不通時は警告のみ (非致命)。
+
+    実体は services.record_review_event（提案7の一本化）。DB セッション自体が
+    確立できない場合でも致命的にしない atlas 固有のフォールバックはここで維持する。
+    """
     try:
-        from sqlalchemy import text as sa_text
-
-        from core.postgres import get_session
-
-        session = get_session()
+        services.record_review_event(entity_type, entity_id, old_status, new_status, user_id, metadata)
     except Exception:  # noqa: BLE001
         logger.warning("atlas review event skipped (no DB session)", exc_info=True)
-        return
-    try:
-        session.execute(
-            sa_text(
-                """
-                INSERT INTO theory_review_events (entity_type, entity_id, old_status, new_status, changed_by, metadata)
-                VALUES (:entity_type, :entity_id, :old_status, :new_status, CAST(:changed_by AS uuid), CAST(:metadata AS jsonb))
-                """
-            ),
-            {
-                "entity_type": entity_type,
-                "entity_id": entity_id,
-                "old_status": old_status or "",
-                "new_status": new_status or "",
-                "changed_by": user_id or None,
-                "metadata": json.dumps(metadata or {}, ensure_ascii=False),
-            },
-        )
-        session.commit()
-    except Exception:  # noqa: BLE001
-        session.rollback()
-        logger.warning("Failed to record atlas review event for %s", entity_id, exc_info=True)
-    finally:
-        session.close()
 
 
 def _reports_session():
@@ -640,7 +624,7 @@ def assist_interpret(
     _record_review_event(
         cartridge_id, atlas.STATUS_DRAFT, atlas.STATUS_DRAFT, current_user.get("id"),
         {"action": "assist_interpret", "revision": revision},
-        entity_type="atlas_assist",
+        entity_type=AUDIT_ENTITY_ATLAS_ASSIST,
     )
     return {
         "cartridge_id": cartridge_id,
@@ -697,7 +681,7 @@ def assist_propose(
     _record_review_event(
         cartridge_id, atlas.STATUS_DRAFT, atlas.STATUS_DRAFT, current_user.get("id"),
         {"action": "assist_propose", "revision": revision, "ops": len(patch)},
-        entity_type="atlas_assist",
+        entity_type=AUDIT_ENTITY_ATLAS_ASSIST,
     )
     return {
         "cartridge_id": cartridge_id,
@@ -760,7 +744,7 @@ def propose_course_atlas_binding(
     session = _skeleton_session()
     try:
         course_data = _load_course_for_teacher(session, course_id, current_user)
-        topics = [t for t in (course_data.get("topics") or []) if isinstance(t, dict)]
+        topics = [t for t in course_topics(course_data) if isinstance(t, dict)]
         proposals: list[dict] = []
         for domain in atlas_store.list_domains(session):
             skeleton = atlas_store.load_learner_skeleton(domain["domain_key"], session)
@@ -805,7 +789,7 @@ def propose_course_atlas_binding(
         recommended = proposals[0]["domain_key"]
     return {
         "course_id": course_id,
-        "current_cartridge_id": str(course_data.get("cartridge_id") or ""),
+        "current_cartridge_id": course_cartridge_id(course_data),
         "recommended": recommended,
         "proposals": proposals,
     }
@@ -851,7 +835,7 @@ def save_course_atlas_binding(
         }
         applied = 0
         skipped: list[str] = []
-        for topic in course_data.get("topics") or []:
+        for topic in course_topics(course_data):
             if not isinstance(topic, dict):
                 continue
             topic_id = str(topic.get("id") or "")
@@ -893,7 +877,7 @@ def save_course_atlas_binding(
             "bindings_applied": applied,
             "bindings_skipped": skipped,
         },
-        entity_type="atlas_binding",
+        entity_type=AUDIT_ENTITY_ATLAS_BINDING,
     )
     return {
         "course_id": course_id,
@@ -1048,6 +1032,10 @@ class AtlasReportResolveRequest(BaseModel):
     merge_into: str = Field(default="", description="重複統合(merge)の統合先 report_id")
 
 
+class AtlasReportIncorporateRequest(BaseModel):
+    note: str = Field(default="", description="次版で行った対応のメモ")
+
+
 @report_router.post("/report", status_code=201)
 def create_atlas_report(
     body: AtlasReportRequest, current_user: dict = Depends(_get_current_user)
@@ -1102,7 +1090,7 @@ def create_atlas_report(
             "region_id": body.region_id,
             "level": body.level,
         },
-        entity_type="atlas_report",
+        entity_type=AUDIT_ENTITY_ATLAS_REPORT,
     )
     return {"report_id": report_id, "status": atlas_reports.STATUS_PENDING}
 
@@ -1227,7 +1215,47 @@ def resolve_atlas_report(
             "merge_into": body.merge_into,
             "cartridge_id": cartridge_id,
         },
-        entity_type="atlas_report",
+        entity_type=AUDIT_ENTITY_ATLAS_REPORT,
+    )
+    return {"report_id": report_id, **transition}
+
+
+@router.post("/{cartridge_id}/atlas/reports/{report_id}/incorporate")
+def incorporate_atlas_report(
+    cartridge_id: str,
+    report_id: str,
+    body: AtlasReportIncorporateRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """採用済み報告を、編集中の次版で対応済みとして記録する。"""
+    _ensure_domain_exists(cartridge_id)
+    resolver_id = str(current_user.get("id") or "").strip()
+    session = _reports_session()
+    try:
+        transition = atlas_reports.mark_report_incorporated(
+            session, report_id=report_id, resolver_id=resolver_id, note=body.note
+        )
+        session.commit()
+    except LookupError as exc:
+        session.rollback()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        session.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        logger.error("Failed to mark atlas report incorporated %s", report_id, exc_info=True)
+        raise HTTPException(status_code=500, detail="次版での対応記録に失敗しました") from exc
+    finally:
+        session.close()
+
+    _record_review_event(
+        report_id,
+        transition["old_status"],
+        transition["new_status"],
+        resolver_id,
+        {"action": "incorporate", "note": body.note, "cartridge_id": cartridge_id},
+        entity_type=AUDIT_ENTITY_ATLAS_REPORT,
     )
     return {"report_id": report_id, **transition}
 
