@@ -20,7 +20,7 @@ BEGIN
     IF EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conname = 'chunk_graph_mentions_element_type_check'
-          AND pg_get_constraintdef(oid) NOT LIKE '%reference%'
+          AND pg_get_constraintdef(oid) NOT LIKE '%%reference%%'
     ) THEN
         ALTER TABLE chunk_graph_mentions
             DROP CONSTRAINT chunk_graph_mentions_element_type_check;

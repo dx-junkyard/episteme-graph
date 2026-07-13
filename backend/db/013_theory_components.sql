@@ -61,7 +61,7 @@ BEGIN
     IF EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conname = 'theory_claims_claim_type_check'
-          AND pg_get_constraintdef(oid) NOT LIKE '%equation_definition%'
+          AND pg_get_constraintdef(oid) NOT LIKE '%%equation_definition%%'
     ) THEN
         ALTER TABLE theory_claims DROP CONSTRAINT theory_claims_claim_type_check;
     END IF;

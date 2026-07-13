@@ -54,7 +54,7 @@ BEGIN
     IF EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conname = 'theory_components_component_type_check'
-          AND pg_get_constraintdef(oid) NOT LIKE '%apparatus%'
+          AND pg_get_constraintdef(oid) NOT LIKE '%%apparatus%%'
     ) THEN
         ALTER TABLE theory_components DROP CONSTRAINT theory_components_component_type_check;
     END IF;
