@@ -308,6 +308,12 @@
   // -------------------------------------------------------------------------
 
   function refresh() {
+    // setupRoleBasedUI() may activate a role-specific default tab before
+    // AdminNextSteps.init() has injected apiFetch.  Treat that early refresh as
+    // a no-op; the normal initApp() path explicitly refreshes immediately after
+    // init.  Without this guard SYSTEM_ADMIN initialization aborts before tabs
+    // are wired, leaving the whole grouped navigation inert.
+    if (!initialized) return;
     apiFetch("/admin/assistant/next-steps")
       .then(function (res) {
         if (!res.ok) throw new Error("status " + res.status);

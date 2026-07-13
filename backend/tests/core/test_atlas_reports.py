@@ -75,6 +75,9 @@ def _report(**overrides) -> dict:
         "resolved_by": None,
         "resolved_at": None,
         "merged_into": None,
+        "incorporated_at": None,
+        "incorporated_by": None,
+        "incorporation_note": "",
         "applied_version": "",
         "notified_at": None,
         "created_at": "2026-07-01T00:00:00",
@@ -294,6 +297,26 @@ class TestAckAndFreezeApplication:
         assert "reporter_id = CAST(:user_id AS uuid)" in sql
         assert "resolved_at IS NOT NULL" in sql
 
+    def test_only_accepted_report_can_be_marked_incorporated(self):
+        session = FakeSession(
+            lambda sql, p: FakeResult(rows=[("accepted", None, "")])
+            if sql.startswith("SELECT") else FakeResult(rowcount=1)
+        )
+        transition = atlas_reports.mark_report_incorporated(
+            session, report_id="r1", resolver_id="t1", note="配置を修正"
+        )
+        assert transition == {"old_status": "accepted", "new_status": "incorporated"}
+        update_sql, params = session.calls[-1]
+        assert "SET incorporated_at = now()" in update_sql
+        assert params["note"] == "配置を修正"
+
+    def test_pending_report_cannot_be_marked_incorporated(self):
+        session = FakeSession(lambda sql, p: FakeResult(rows=[("pending", None, "")]))
+        with pytest.raises(ValueError, match="採用済み"):
+            atlas_reports.mark_report_incorporated(
+                session, report_id="r1", resolver_id="t1"
+            )
+
     def test_apply_freeze_stamps_accepted_and_migrates_pending(self):
         """凍結時: 採用済みは applied_version 刻印で自動クローズ、
         pending は id_migrations に従って新版へ引き継ぐ (D-3)。"""
@@ -308,6 +331,7 @@ class TestAckAndFreezeApplication:
         assert summary == {"applied": 2, "migrated": 2}
         stamp_sql, stamp_params = session.calls[0]
         assert "SET applied_version = :version" in stamp_sql
+        assert "incorporated_at IS NOT NULL" in stamp_sql
         assert stamp_params["status"] == atlas_reports.STATUS_ACCEPTED
         migrate_sql, migrate_params = session.calls[1]
         assert "SET node_id = :to_id" in migrate_sql

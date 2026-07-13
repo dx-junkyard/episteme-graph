@@ -31,7 +31,7 @@ from sqlalchemy import text as sa_text
 # ---------------------------------------------------------------------------
 
 STATUS_PENDING = "pending"      # レビュー待ち(キュー内)
-STATUS_ACCEPTED = "accepted"    # 採用 — 次版へ反映予定(凍結で applied_version 刻印)
+STATUS_ACCEPTED = "accepted"    # 採用 — incorporated_at 記録後に凍結で applied_version 刻印
 STATUS_DECLINED = "declined"    # 見送り(理由つき)
 STATUS_MERGED = "merged"        # 重複統合(merged_into に統合先)
 REPORT_STATUSES = (STATUS_PENDING, STATUS_ACCEPTED, STATUS_DECLINED, STATUS_MERGED)
@@ -66,6 +66,9 @@ _REPORT_COLUMNS = (
     "resolved_by",
     "resolved_at",
     "merged_into",
+    "incorporated_at",
+    "incorporated_by",
+    "incorporation_note",
     "applied_version",
     "notified_at",
     "created_at",
@@ -76,7 +79,8 @@ _SELECT_REPORTS = """
            r.level, r.node_label, r.report_text, r.reporter_id::text,
            COALESCE(u.display_name, r.reporter_id::text) AS reporter_name,
            r.status, r.resolution_note, r.resolved_by::text, r.resolved_at,
-           r.merged_into::text, r.applied_version, r.notified_at, r.created_at
+           r.merged_into::text, r.incorporated_at, r.incorporated_by::text,
+           r.incorporation_note, r.applied_version, r.notified_at, r.created_at
       FROM atlas_correction_reports r
  LEFT JOIN users u ON u.id = r.reporter_id
 """
@@ -86,7 +90,7 @@ def _rows_to_dicts(rows: Iterable[Any]) -> list[dict[str, Any]]:
     out = []
     for row in rows:
         rec = dict(zip(_REPORT_COLUMNS, row))
-        for key in ("resolved_at", "notified_at", "created_at"):
+        for key in ("resolved_at", "incorporated_at", "notified_at", "created_at"):
             if rec.get(key) is not None:
                 rec[key] = str(rec[key])
         out.append(rec)
@@ -148,7 +152,9 @@ def summarize_queue(
         if not target:
             continue
         is_open = report.get("status") == STATUS_PENDING or (
-            report.get("status") == STATUS_ACCEPTED and not report.get("applied_version")
+            report.get("status") == STATUS_ACCEPTED
+            and not report.get("incorporated_at")
+            and not report.get("applied_version")
         )
         if is_open:
             open_counts[target] = open_counts.get(target, 0) + 1
@@ -363,11 +369,52 @@ def ack_report(session, *, report_id: str, user_id: str) -> bool:
     return bool(getattr(result, "rowcount", 0))
 
 
+def mark_report_incorporated(
+    session, *, report_id: str, resolver_id: str, note: str = ""
+) -> dict[str, Any]:
+    """採用済み報告を「次版で対応済み」に進める。
+
+    採用判断と実際の編集完了を分離し、公開時に未対応の報告を誤って
+    applied 扱いにしないための明示的な状態遷移。
+    """
+    row = session.execute(
+        sa_text(
+            "SELECT status, incorporated_at, applied_version "
+            "FROM atlas_correction_reports WHERE id = CAST(:id AS uuid)"
+        ),
+        {"id": report_id},
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"報告が見つかりません: {report_id}")
+    if row[0] != STATUS_ACCEPTED:
+        raise ValueError("採用済みの報告だけを次版で対応済みにできます")
+    if row[2]:
+        raise ValueError(f"この報告は版 {row[2]} に反映済みです")
+    if row[1] is not None:
+        raise ValueError("この報告はすでに次版で対応済みです")
+
+    session.execute(
+        sa_text(
+            """
+            UPDATE atlas_correction_reports
+               SET incorporated_at = now(),
+                   incorporated_by = CAST(:resolver_id AS uuid),
+                   incorporation_note = :note,
+                   updated_at = now()
+             WHERE id = CAST(:id AS uuid)
+            """
+        ),
+        {"id": report_id, "resolver_id": resolver_id, "note": (note or "").strip()},
+    )
+    return {"old_status": STATUS_ACCEPTED, "new_status": "incorporated"}
+
+
 def accepted_unapplied_reports(session, cartridge_id: str) -> list[dict[str, Any]]:
-    """採用済みでまだ版に反映されていない報告(凍結時の credits 合流対象)。古い順。"""
+    """次版で対応済みかつ未公開の報告(凍結時の credits 合流対象)。古い順。"""
     sql = (
         _SELECT_REPORTS
         + " WHERE r.cartridge_id = :cartridge_id AND r.status = :status"
+        + " AND r.incorporated_at IS NOT NULL"
         + " AND r.applied_version = '' ORDER BY r.created_at ASC"
     )
     return _rows_to_dicts(
@@ -382,7 +429,7 @@ def apply_freeze_to_reports(
 ) -> dict[str, int]:
     """新版凍結時の報告の後処理(受け入れ条件・D-3)。
 
-    - 採用済み(accepted・未反映)に applied_version を刻印して自動クローズ扱いにする
+    - 採用済みかつ次版で対応済みの報告に applied_version を刻印する
     - 未対応(pending)は新版へ引き継ぐ。改版で概念 id が統合・分割された場合は
       id_migrations(当該版のもの)に従って対象 node_id を付け替える
     """
@@ -393,6 +440,7 @@ def apply_freeze_to_reports(
                SET applied_version = :version, notified_at = NULL, updated_at = now()
              WHERE cartridge_id = :cartridge_id
                AND status = :status
+               AND incorporated_at IS NOT NULL
                AND applied_version = ''
             """
         ),

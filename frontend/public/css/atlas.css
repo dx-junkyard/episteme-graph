@@ -86,6 +86,15 @@
   color: var(--color-text-tertiary, #aeaeb2);
   margin: 6px 0 8px;
 }
+.atlas-context {
+  margin: -2px 0 10px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--color-text-info, #378add);
+  border-radius: 0 6px 6px 0;
+  background: var(--color-background-info, #e6f1fb);
+  color: var(--color-text-primary, #1d1d1f);
+  font-size: 12.5px;
+}
 
 /* マップキャンバス */
 .atlas-canvas {
@@ -174,6 +183,19 @@
 }
 .atlas-act-btn:hover {
   background: var(--color-background-tertiary, #eeeef0);
+}
+.atlas-act-primary {
+  background: var(--color-text-info, #378add);
+  border-color: var(--color-text-info, #378add);
+  color: #fff;
+  font-weight: 600;
+}
+.atlas-act-primary:hover { filter: brightness(0.94); }
+.atlas-act-secondary { background: var(--color-background-info, #e6f1fb); }
+.atlas-act-quiet {
+  border-color: transparent;
+  background: transparent;
+  color: var(--color-text-secondary, #6e6e73);
 }
 
 /* 学習パス提案カード (Issue C-3) — 中央対話パネルに表示 */

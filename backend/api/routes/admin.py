@@ -67,6 +67,7 @@ from services import (
     user_owns_document,
 )
 from core.course_data import (
+    course_cartridge_id,
     course_chapters,
     course_sources,
     course_title as _course_title,
@@ -2080,7 +2081,8 @@ def list_teacher_courses(
                                  AND cgp.permission = 'editor'
                            ) THEN 'editor'
                            ELSE 'viewer'
-                       END AS role
+                       END AS role,
+                       lc.data
                 FROM learning_courses lc
                 WHERE lc.user_id = CAST(:user_id AS uuid)
                    OR EXISTS (
@@ -2098,8 +2100,12 @@ def list_teacher_courses(
     finally:
         session.close()
 
-    return [
-        {
+    result = []
+    for r in records:
+        data = r[7] if len(r) > 7 and isinstance(r[7], dict) else {}
+        topics = [t for t in course_topics(data) if isinstance(t, dict)]
+        bound_topics = sum(1 for t in topics if str(t.get("atlas_node_id") or "").strip())
+        result.append({
             "id": r[0],
             "title": r[1],
             "is_template": bool(r[2]),
@@ -2107,9 +2113,14 @@ def list_teacher_courses(
             "created_at": r[4].isoformat() if r[4] else "",
             "updated_at": r[5].isoformat() if r[5] else "",
             "role": r[6],  # "owner" | "editor" | "viewer"
-        }
-        for r in records
-    ]
+            # Atlas operations dashboard projection.  These additive fields do
+            # not expose course content; they only let the UI identify courses
+            # whose map placement needs attention.
+            "atlas_cartridge_id": course_cartridge_id(data),
+            "atlas_topic_count": bound_topics,
+            "topic_count": len(topics),
+        })
+    return result
 
 
 @router.get("/courses/{course_id}/draft-format")

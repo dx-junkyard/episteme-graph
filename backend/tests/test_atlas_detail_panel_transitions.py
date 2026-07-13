@@ -298,7 +298,7 @@ class TestDetailPanelFrontend:
         assert "if (restoreSel) selectNode(restoreSel);" in source
 
     def test_index_includes_panel_script(self):
-        assert '<script src="/js/atlas-panel.js"></script>' in _read(INDEX_HTML)
+        assert '<script src="/js/atlas-panel.js' in _read(INDEX_HTML)
 
     def test_panel_and_css_have_no_evaluative_words(self):
         """受け入れ条件6 (スナップショットレビューの自動化部分)。

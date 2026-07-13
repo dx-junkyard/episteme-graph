@@ -1032,6 +1032,10 @@ class AtlasReportResolveRequest(BaseModel):
     merge_into: str = Field(default="", description="重複統合(merge)の統合先 report_id")
 
 
+class AtlasReportIncorporateRequest(BaseModel):
+    note: str = Field(default="", description="次版で行った対応のメモ")
+
+
 @report_router.post("/report", status_code=201)
 def create_atlas_report(
     body: AtlasReportRequest, current_user: dict = Depends(_get_current_user)
@@ -1211,6 +1215,46 @@ def resolve_atlas_report(
             "merge_into": body.merge_into,
             "cartridge_id": cartridge_id,
         },
+        entity_type=AUDIT_ENTITY_ATLAS_REPORT,
+    )
+    return {"report_id": report_id, **transition}
+
+
+@router.post("/{cartridge_id}/atlas/reports/{report_id}/incorporate")
+def incorporate_atlas_report(
+    cartridge_id: str,
+    report_id: str,
+    body: AtlasReportIncorporateRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """採用済み報告を、編集中の次版で対応済みとして記録する。"""
+    _ensure_domain_exists(cartridge_id)
+    resolver_id = str(current_user.get("id") or "").strip()
+    session = _reports_session()
+    try:
+        transition = atlas_reports.mark_report_incorporated(
+            session, report_id=report_id, resolver_id=resolver_id, note=body.note
+        )
+        session.commit()
+    except LookupError as exc:
+        session.rollback()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        session.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        logger.error("Failed to mark atlas report incorporated %s", report_id, exc_info=True)
+        raise HTTPException(status_code=500, detail="次版での対応記録に失敗しました") from exc
+    finally:
+        session.close()
+
+    _record_review_event(
+        report_id,
+        transition["old_status"],
+        transition["new_status"],
+        resolver_id,
+        {"action": "incorporate", "note": body.note, "cartridge_id": cartridge_id},
         entity_type=AUDIT_ENTITY_ATLAS_REPORT,
     )
     return {"report_id": report_id, **transition}

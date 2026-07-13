@@ -123,6 +123,7 @@
 
     // パンくず
     sheet.appendChild(el("p", { class: "atlas-crumb", id: "atlas-crumb" }));
+    sheet.appendChild(el("p", { class: "atlas-context", id: "atlas-context" }));
 
     // マップキャンバス
     sheet.appendChild(el("div", { class: "atlas-canvas", id: "atlas-canvas" }));
@@ -566,6 +567,14 @@
     }
     showLevel(restoreLevel);
     if (restoreSel) selectNode(restoreSel);
+    const contextId = restoreSel || state.selected ||
+      ((state.data.initial_selection || {})[String(restoreLevel)] || "");
+    const contextEl = ov.querySelector("#atlas-context");
+    if (contextEl) {
+      contextEl.textContent = contextId && state.data.nodes && state.data.nodes[contextId]
+        ? "現在地: 「" + (state.data.nodes[contextId].label || contextId) + "」。ノードを選ぶと、記帳された根拠と学習への入口を確認できます。"
+        : "ノードを選ぶと、その位置に記帳された根拠と学習への入口を確認できます。";
+    }
     if (opts.highlight) pulseNode(restoreSel || state.selected);
     setIntroNote(!!opts.intro);
     state.openSource = opts.source || "";

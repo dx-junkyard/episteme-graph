@@ -3166,6 +3166,9 @@
     var editor = document.getElementById("atlas-draft-editor");
     var validationEl = document.getElementById("atlas-validation");
     var generateBtn = document.getElementById("atlas-generate");
+    var overviewEl = document.getElementById("atlas-overview");
+    var navReportCountEl = document.getElementById("atlas-nav-report-count");
+    var navCourseCountEl = document.getElementById("atlas-nav-course-count");
     // JSON編集 / プレビュー タブ (skeleton editor upgrade P1/P2)
     var jsonView = document.getElementById("atlas-view-json");
     var previewView = document.getElementById("atlas-view-preview");
@@ -3181,7 +3184,10 @@
     var currentIssues = { errorIssues: [], warningIssues: [] };
     // P5: プレビュー上でクリックしたノード (AI agent のスコープヒント)
     var selectionHint = null;
-    var activeView = "json";
+    var activeView = "preview";
+    var latestAtlasState = null;
+    var latestReportsData = null;
+    var latestAtlasCourses = [];
     // 新分野 (カートリッジファイル無し) の生成メタデータ: domain_key → {name, description}
     var pendingDomainMeta = {};
 
@@ -3192,6 +3198,105 @@
 
     function basePath() {
       return "/admin/cartridges/" + encodeURIComponent(select.value) + "/atlas/skeleton";
+    }
+
+    function scrollToAtlasSection(sectionId) {
+      var section = document.getElementById(sectionId);
+      if (!section) return;
+      document.querySelectorAll("[data-atlas-section]").forEach(function (btn) {
+        btn.classList.toggle("on", btn.getAttribute("data-atlas-section") === sectionId);
+      });
+      try { section.scrollIntoView({ behavior: "smooth", block: "start" }); }
+      catch (e) { section.scrollIntoView(); }
+    }
+
+    document.querySelectorAll("[data-atlas-section]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        scrollToAtlasSection(btn.getAttribute("data-atlas-section"));
+      });
+    });
+
+    function setWorkflowStep(currentId, doneIds) {
+      ["atlas-step-create", "atlas-step-review", "atlas-step-impact", "atlas-step-publish"].forEach(function (id) {
+        var step = document.getElementById(id);
+        if (!step) return;
+        step.classList.toggle("current", id === currentId);
+        step.classList.toggle("done", doneIds.indexOf(id) >= 0);
+      });
+    }
+
+    function renderAtlasOverview() {
+      if (!overviewEl) return;
+      if (!select.value) {
+        overviewEl.innerHTML = '<div class="atlas-admin-empty">分野を選ぶと、現在の状態と次にすることが表示されます。</div>';
+        if (navReportCountEl) navReportCountEl.textContent = "";
+        if (navCourseCountEl) navCourseCountEl.textContent = "";
+        setWorkflowStep("atlas-step-create", []);
+        return;
+      }
+
+      var frozen = latestAtlasState && latestAtlasState.frozen ? latestAtlasState.frozen.skeleton : null;
+      var draft = latestAtlasState && latestAtlasState.draft ? latestAtlasState.draft : null;
+      var validation = draft && draft.validation ? draft.validation : { errors: [], warnings: [] };
+      var reports = latestReportsData && latestReportsData.reports ? latestReportsData.reports : [];
+      var pending = reports.filter(function (r) { return r.status === "pending"; }).length;
+      var acceptedOpen = reports.filter(function (r) {
+        return r.status === "accepted" && !r.incorporated_at && !r.applied_version;
+      }).length;
+      var incorporated = reports.filter(function (r) {
+        return r.status === "accepted" && r.incorporated_at && !r.applied_version;
+      }).length;
+      var relevantCourses = latestAtlasCourses.filter(function (c) {
+        return !c.atlas_cartridge_id || c.atlas_cartridge_id === select.value;
+      });
+      var courseNeedsReview = relevantCourses.filter(function (c) {
+        var total = Number(c.topic_count || 0);
+        var bound = Number(c.atlas_topic_count || 0);
+        return !c.atlas_cartridge_id || total === 0 || bound < total;
+      });
+
+      var publishedText = frozen ? ("版 " + escHtml(frozen.version || "—")) : "未公開";
+      var draftText = draft
+        ? ("編集中" + ((validation.errors || []).length ? "・エラー " + validation.errors.length + "件" : "・確認可能") )
+        : "なし";
+      var reportText = "未確認 " + pending + "件" +
+        (acceptedOpen ? "・次版で未対応 " + acceptedOpen + "件" : "") +
+        (incorporated ? "・公開待ち " + incorporated + "件" : "");
+      var courseText = courseNeedsReview.length ? "要確認 " + courseNeedsReview.length + "件" : "確認事項なし";
+
+      var action = { text: "現在、急いで対応する項目はありません。", label: "マップを見る", section: "atlas-map-section" };
+      if (!frozen && !draft) {
+        action = { text: "学習者に表示する最初の分野マップを作成してください。", label: "最初の地図を作る", generate: true };
+        setWorkflowStep("atlas-step-create", []);
+      } else if (pending > 0) {
+        action = { text: "未確認の修正報告が " + pending + "件あります。改版の要否を判断してください。", label: "修正報告を確認", section: "atlas-reports-section" };
+        setWorkflowStep("atlas-step-impact", ["atlas-step-create"]);
+      } else if (draft) {
+        action = { text: "編集中の次版があります。地図の見え方と検証結果を確認してください。", label: "次版の編集を続ける", section: "atlas-map-section" };
+        setWorkflowStep("atlas-step-review", ["atlas-step-create"]);
+      } else if (courseNeedsReview.length > 0) {
+        action = { text: "地図配置を確認するコースが " + courseNeedsReview.length + "件あります。", label: "コース配置を確認", section: "atlas-binding-section" };
+        setWorkflowStep("atlas-step-impact", ["atlas-step-create", "atlas-step-review"]);
+      } else {
+        setWorkflowStep("atlas-step-publish", ["atlas-step-create", "atlas-step-review", "atlas-step-impact"]);
+      }
+
+      overviewEl.innerHTML =
+        '<div class="atlas-admin-summary-grid">' +
+          '<div class="atlas-admin-summary-card"><span class="atlas-admin-summary-label">学習者に公開中</span><span class="atlas-admin-summary-value">' + publishedText + '</span></div>' +
+          '<div class="atlas-admin-summary-card"><span class="atlas-admin-summary-label">編集中の次版</span><span class="atlas-admin-summary-value">' + escHtml(draftText) + '</span></div>' +
+          '<div class="atlas-admin-summary-card"><span class="atlas-admin-summary-label">修正報告</span><span class="atlas-admin-summary-value">' + escHtml(reportText) + '</span></div>' +
+          '<div class="atlas-admin-summary-card"><span class="atlas-admin-summary-label">コース配置</span><span class="atlas-admin-summary-value">' + escHtml(courseText) + '</span></div>' +
+        '</div>' +
+        '<div class="atlas-admin-next"><div class="atlas-admin-next-copy"><small>次にすること</small>' + escHtml(action.text) + '</div>' +
+          '<button type="button" id="atlas-overview-action" class="admin-action-btn atlas-admin-primary">' + escHtml(action.label) + '</button></div>';
+      var overviewAction = document.getElementById("atlas-overview-action");
+      if (overviewAction) overviewAction.addEventListener("click", function () {
+        if (action.generate && generateBtn) generateBtn.click();
+        else scrollToAtlasSection(action.section || "atlas-map-section");
+      });
+      if (navReportCountEl) navReportCountEl.textContent = pending ? String(pending) : "";
+      if (navCourseCountEl) navCourseCountEl.textContent = courseNeedsReview.length ? String(courseNeedsReview.length) : "";
     }
 
     function renderValidation(validation) {
@@ -3264,19 +3369,20 @@
     if (editor) editor.addEventListener("blur", function () { if (activeView === "preview") renderPreview(); });
 
     function renderState(data) {
+      latestAtlasState = data || null;
       hasDraft = !!(data && data.draft);
       var frozen = data && data.frozen ? data.frozen.skeleton : null;
       if (frozen) {
         var reviewers = (frozen.reviewed_by || []).join(", ");
         var infoHtml =
-          "凍結済み: 版 <b>" + escHtml(frozen.version) + "</b>" +
-          " ／ 生成来歴: " + escHtml(frozen.generated_by || "—") +
-          " ／ レビュー帰属: " + escHtml(reviewers || "—") +
-          "（凍結版は不変。修正は draft を作って次版で凍結）";
+          "学習者に公開中: 版 <b>" + escHtml(frozen.version) + "</b>" +
+          " ／ 作成方法: " + escHtml(frozen.generated_by || "—") +
+          " ／ 確認者: " + escHtml(reviewers || "—") +
+          "（公開済みの版は直接変更せず、次版として編集します）";
         // changelog と修正報告者への帰属 credits の表示 (Issue D-3, 受け入れ条件3)
         var entries = frozen.changelog || [];
         if (entries.length) {
-          infoHtml += "<div style='margin-top:6px'>changelog:</div><ul style='margin:2px 0 0 18px;padding:0'>";
+          infoHtml += "<div style='margin-top:6px'>これまでの変更:</div><ul style='margin:2px 0 0 18px;padding:0'>";
           for (var ci = entries.length - 1; ci >= 0; ci--) {
             var entry = entries[ci];
             infoHtml += "<li>版 " + escHtml(entry.version) + " — " + escHtml(entry.note || "");
@@ -3289,33 +3395,38 @@
         }
         frozenInfoEl.innerHTML = infoHtml;
       } else {
-        frozenInfoEl.textContent = "凍結済みの骨格はまだありません（学習者には地図が表示されません）。";
+        frozenInfoEl.textContent = "公開中の分野マップはまだありません（学習者には地図が表示されません）。";
       }
       if (hasDraft) {
         draftArea.style.display = "";
         editor.value = JSON.stringify({ atlas_skeleton: data.draft.skeleton }, null, 2);
         renderValidation(data.draft.validation);
-        generateBtn.textContent = "draft を再生成（AIバッチ・上書き）";
+        generateBtn.textContent = "次版の対応案を作り直す（現在の編集内容を置換）";
         draftRevision = data.draft.revision || null;
+        switchView("preview");
       } else {
         draftArea.style.display = "none";
         editor.value = "";
         renderValidation(null);
-        generateBtn.textContent = "draft を生成（AIバッチ）";
+        generateBtn.textContent = frozen ? "新しい版の編集を始める" : "最初の地図を作る";
         draftRevision = null;
       }
       // draft を読み直したら AI agent は古い revision に基づくため会話を無効化する
       if (window.AtlasAssistPanel && window.AtlasAssistPanel.notifyDraftChanged) {
         window.AtlasAssistPanel.notifyDraftChanged(draftRevision);
       }
+      renderAtlasOverview();
     }
 
     function loadState() {
       if (!select.value) {
+        latestAtlasState = null;
+        latestReportsData = null;
         frozenInfoEl.textContent = "";
         draftArea.style.display = "none";
         renderReports(null);
         setStatus("カートリッジを選択してください");
+        renderAtlasOverview();
         return;
       }
       setStatus("読み込み中...");
@@ -3337,7 +3448,7 @@
 
     var REPORT_STATUS_LABELS = {
       pending: "レビュー待ち",
-      accepted: "採用（次版へ反映予定）",
+      accepted: "採用済み",
       declined: "見送り",
       merged: "重複統合",
     };
@@ -3355,10 +3466,13 @@
     function renderReports(data) {
       if (!reportsListEl) return;
       if (!data) {
+        latestReportsData = null;
         reportsListEl.innerHTML = "";
         reportsHintEl.innerHTML = "";
+        renderAtlasOverview();
         return;
       }
+      latestReportsData = data;
       // 改版検討ヒント (issue A の閾値と接続。表示のみ・自動改版はしない)
       var hints = data.revision_hint_targets || [];
       if (hints.length) {
@@ -3369,7 +3483,12 @@
       } else {
         reportsHintEl.innerHTML = "";
       }
-      var reports = data.reports || [];
+      var allReports = data.reports || [];
+      var selectedStatus = reportsFilterEl ? reportsFilterEl.value : "pending";
+      var reports = selectedStatus
+        ? allReports.filter(function (r) { return r.status === selectedStatus; })
+        : allReports;
+      renderAtlasOverview();
       if (!reports.length) {
         reportsListEl.innerHTML = "<div style='color:var(--color-text-tertiary)'>該当する報告はありません。</div>";
         return;
@@ -3387,7 +3506,11 @@
           // 旧版への報告の識別 (受け入れ条件5)
           html += "<span style='color:var(--color-text-danger,#e53935);border:1px solid currentColor;border-radius:4px;padding:0 6px;font-size:11px'>旧版（現行 " + escHtml(data.current_version || "—") + "）</span>";
         }
-        html += "<span style='color:var(--color-text-secondary)'>" + escHtml(REPORT_STATUS_LABELS[r.status] || r.status) + "</span>";
+        var statusLabel = REPORT_STATUS_LABELS[r.status] || r.status;
+        if (r.status === "accepted" && r.applied_version) statusLabel = "公開版に反映済み";
+        else if (r.status === "accepted" && r.incorporated_at) statusLabel = "次版で対応済み";
+        else if (r.status === "accepted") statusLabel = "採用・次版で対応待ち";
+        html += "<span class='atlas-admin-report-badge " + escHtml(r.status) + "'>" + escHtml(statusLabel) + "</span>";
         if (r.open_count_for_target > 1) {
           html += "<span style='color:var(--color-text-secondary)'>同一対象の未クローズ報告: " + escHtml(String(r.open_count_for_target)) + "件</span>";
         }
@@ -3398,6 +3521,9 @@
         if (r.resolution_note) {
           html += "<div style='color:var(--color-text-secondary);font-size:12px;margin-top:4px'>処理メモ: " + escHtml(r.resolution_note) + "</div>";
         }
+        if (r.incorporation_note) {
+          html += "<div style='color:var(--color-text-secondary);font-size:12px;margin-top:2px'>次版での対応: " + escHtml(r.incorporation_note) + "</div>";
+        }
         if (r.applied_version) {
           html += "<div style='color:var(--color-text-secondary);font-size:12px;margin-top:2px'>版 " + escHtml(r.applied_version) + " に反映済み</div>";
         }
@@ -3407,6 +3533,10 @@
             "<button class='admin-action-btn' data-report-action='decline'>見送り（理由つき）</button>" +
             "<button class='admin-action-btn' data-report-action='merge'>重複統合</button>" +
             "</div>";
+        } else if (r.status === "accepted" && !r.incorporated_at && !r.applied_version) {
+          html += "<div style='display:flex;gap:6px;margin-top:6px;flex-wrap:wrap'>" +
+            "<button class='admin-action-btn' data-report-action='incorporate'>次版で対応済みにする</button>" +
+            "</div>";
         }
         html += "</div>";
       });
@@ -3415,9 +3545,10 @@
 
     function loadReports() {
       if (!select.value || !reportsListEl) { renderReports(null); return; }
-      var status = reportsFilterEl ? reportsFilterEl.value : "pending";
       setReportsStatus("読み込み中...");
-      apiFetch(reportsPath() + (status ? "?status=" + encodeURIComponent(status) : ""))
+      // Always load all statuses once.  The dashboard counts and the filtered
+      // review list must be projections of the same report set.
+      apiFetch(reportsPath())
         .then(function (res) {
           if (!res.ok) throw new Error("HTTP " + res.status);
           return res.json();
@@ -3430,6 +3561,24 @@
     }
 
     function resolveReport(reportId, action) {
+      if (action === "incorporate") {
+        var incorporationNote = prompt("次版で行った対応のメモ（任意）") || "";
+        if (!confirm("この報告を、編集中の次版で対応済みとして記録しますか？")) return;
+        setReportsStatus("次版での対応を記録中...");
+        apiFetch(reportsPath() + "/" + encodeURIComponent(reportId) + "/incorporate", {
+          method: "POST",
+          body: JSON.stringify({ note: incorporationNote }),
+        })
+          .then(function (res) {
+            return res.json().then(function (body) {
+              if (!res.ok) throw new Error(typeof body.detail === "string" ? body.detail : "HTTP " + res.status);
+              return body;
+            });
+          })
+          .then(function () { setReportsStatus("次版で対応済みとして記録しました"); loadReports(); })
+          .catch(function (err) { setReportsStatus("記録に失敗しました: " + err.message, true); });
+        return;
+      }
       var note = "";
       var mergeInto = "";
       if (action === "decline") {
@@ -3440,7 +3589,7 @@
         if (!mergeInto.trim()) { setReportsStatus("統合先の報告IDが必要です", true); return; }
         note = prompt("統合メモ（任意）") || "";
       } else if (action === "accept") {
-        if (!confirm("この報告を採用します。次版の凍結時に changelog へ報告者の帰属が記録されます。よろしいですか？")) return;
+        if (!confirm("この報告を採用します。次版で対応した後に、対応済みとして記録してください。よろしいですか？")) return;
         note = prompt("処理メモ（任意）") || "";
       }
       setReportsStatus("処理中...");
@@ -3470,7 +3619,10 @@
         resolveReport(item.getAttribute("data-report-id"), btn.getAttribute("data-report-action"));
       });
       document.getElementById("atlas-reports-refresh").addEventListener("click", loadReports);
-      reportsFilterEl.addEventListener("change", loadReports);
+      reportsFilterEl.addEventListener("change", function () {
+        if (latestReportsData) renderReports(latestReportsData);
+        else loadReports();
+      });
     }
 
     function addDomainOption(key, label) {
@@ -3520,8 +3672,15 @@
         .catch(function () { setStatus("分野一覧の取得に失敗しました", true); });
     }
 
+    function loadAtlasCourses() {
+      apiFetch("/admin/courses")
+        .then(function (res) { if (!res.ok) throw new Error("HTTP " + res.status); return res.json(); })
+        .then(function (courses) { latestAtlasCourses = courses || []; renderAtlasOverview(); })
+        .catch(function () { latestAtlasCourses = []; renderAtlasOverview(); });
+    }
+
     function runGenerate(force) {
-      setStatus("LLM バッチ生成中...（この操作は明示的な一度だけの実行です）");
+      setStatus("次版の対応案を作成中...");
       var payload = { force: !!force };
       if (pendingDomainMeta[select.value]) {
         payload.domain = pendingDomainMeta[select.value];
@@ -3544,13 +3703,13 @@
             return body;
           });
         })
-        .then(function () { setStatus("draft を生成しました。レビュー・修正のうえ凍結してください"); loadState(); })
+        .then(function () { setStatus("次版を作成しました。地図プレビューを確認してください"); loadState(); })
         .catch(function (err) { setStatus("生成に失敗しました: " + err.message, true); });
     }
 
     generateBtn.addEventListener("click", function () {
       if (!select.value) { setStatus("分野を選択してください", true); return; }
-      if (hasDraft && !confirm("既存の draft を破棄して再生成します。よろしいですか？")) return;
+      if (hasDraft && !confirm("現在の次版を置き換えて、対応案を作り直しますか？")) return;
       runGenerate(hasDraft);
     });
 
@@ -3566,7 +3725,7 @@
         var name = document.getElementById("atlas-new-domain-name").value.trim();
         var desc = document.getElementById("atlas-new-domain-desc").value.trim();
         if (!/^[a-z][a-z0-9_]*$/.test(key)) {
-          setStatus("domain_key は英小文字・数字・アンダースコア (先頭は英字) で入力してください", true);
+          setStatus("管理IDは英小文字・数字・アンダースコア（先頭は英字）で入力してください", true);
           return;
         }
         if (!name) { setStatus("分野名を入力してください", true); return; }
@@ -3599,7 +3758,7 @@
               if (res.status === 409) {
                 // 楽観ロック衝突: 他の教員の保存が先行した。最新を読み直す
                 loadState();
-                throw new Error("他の教員の編集で draft が更新されています。最新の内容を再読込しました。編集をやり直してください");
+                throw new Error("他の教員が次版を更新しました。最新の内容を読み込み直したため、編集をやり直してください");
               }
               if (detail && detail.errors) {
                 renderValidation({
@@ -3616,7 +3775,7 @@
         .then(function (body) {
           renderValidation(body.draft.validation);
           draftRevision = body.draft.revision || null;
-          setStatus("draft を保存しました");
+          setStatus("次版を保存しました");
           // 4.1: draft が更新されたので AI agent の古い revision の提案を無効化する
           if (window.AtlasAssistPanel && window.AtlasAssistPanel.notifyDraftChanged) {
             window.AtlasAssistPanel.notifyDraftChanged(draftRevision);
@@ -3670,8 +3829,30 @@
       var version = document.getElementById("atlas-freeze-version").value.trim();
       var note = document.getElementById("atlas-freeze-note").value.trim();
       if (!version) { setStatus("版数を入力してください (例: 2026.1)", true); return; }
-      if (!confirm("版 " + version + " として凍結します。凍結後は不変で、あなたのIDがレビュー帰属として記録されます。よろしいですか？")) return;
-      setStatus("凍結中...");
+      if (currentIssues.errorIssues.length) {
+        setStatus("検証エラーが " + currentIssues.errorIssues.length + "件あります。修正してから公開してください", true);
+        switchView("preview");
+        return;
+      }
+      var allReports = latestReportsData && latestReportsData.reports ? latestReportsData.reports : [];
+      var pendingCount = allReports.filter(function (r) { return r.status === "pending"; }).length;
+      var acceptedOpenCount = allReports.filter(function (r) {
+        return r.status === "accepted" && !r.incorporated_at && !r.applied_version;
+      }).length;
+      if (acceptedOpenCount) {
+        setStatus("採用済みで次版に未対応の修正報告が " + acceptedOpenCount + "件あります。対応後に公開してください", true);
+        scrollToAtlasSection("atlas-reports-section");
+        return;
+      }
+      var warningCount = currentIssues.warningIssues.length;
+      var check = "公開前チェック\n\n" +
+        "公開版: " + version + "\n" +
+        "検証エラー: 0件\n" +
+        "検証警告: " + warningCount + "件\n" +
+        "未確認の修正報告: " + pendingCount + "件\n\n" +
+        "この次版を学習者向けに公開しますか？";
+      if (!confirm(check)) return;
+      setStatus("学習者向けに公開中...");
       apiFetch(basePath() + "/freeze", {
         method: "POST",
         body: JSON.stringify({ version: version, note: note }),
@@ -3685,27 +3866,28 @@
             return body;
           });
         })
-        .then(function () { setStatus("凍結しました。学習者に表示されます（骨格はDBで管理）"); loadState(); })
-        .catch(function (err) { setStatus("凍結に失敗しました: " + err.message, true); });
+        .then(function () { setStatus("版 " + version + " を学習者向けに公開しました"); loadState(); loadReports(); })
+        .catch(function (err) { setStatus("公開に失敗しました: " + err.message, true); });
     });
 
     select.addEventListener("change", function () {
       // 分野を切り替えたら選択ヒント・ビュー・AI agent をリセットする
       selectionHint = null;
-      switchView("json");
+      switchView("preview");
       if (assistPanelEl) assistPanelEl.style.display = "none";
       if (window.AtlasAssistPanel && window.AtlasAssistPanel.reset) window.AtlasAssistPanel.reset();
       loadState();
     });
     document.getElementById("atlas-refresh").addEventListener("click", loadState);
-    onTabActivate("atlas", loadCartridges);
+    onTabActivate("atlas", function () { loadCartridges(); loadAtlasCourses(); });
+    document.addEventListener("atlas:binding-saved", loadAtlasCourses);
     initAtlasBinding();
   }
 
   // ── 学習マップ編集 — コース ⇄ 地図バインディング (S2) ─────────────────
   //
   // 提案は決定論的な突合 (サーバ側 match_topic_to_concept)。教員が確認して
-  // 「承認して保存」するまで確定しない。コースビルダーの登録直後にも同じ
+  // 「この対応で反映」するまで確定しない。コースビルダーの登録直後にも同じ
   // エディタを cb-atlas-binding-area へ描画する。
 
   function atlasBindingRenderEditor(bodyEl, statusEl, courseId, data, onSaved) {
@@ -3738,7 +3920,7 @@
     }
     html += "</div>";
     html += "<div data-role='ab-table'></div>";
-    html += "<div style='margin-top:8px'><button data-role='ab-save' class='admin-action-btn'>承認して保存</button></div>";
+    html += "<div style='margin-top:8px'><button data-role='ab-save' class='admin-action-btn'>この対応で反映</button></div>";
     bodyEl.innerHTML = html;
 
     var domainSelect = bodyEl.querySelector("[data-role='ab-domain']");
@@ -3807,6 +3989,7 @@
           }
           // G層: course.no_atlas_binding が解消され得るため再取得する。
           if (window.AdminNextSteps) window.AdminNextSteps.refresh();
+          document.dispatchEvent(new CustomEvent("atlas:binding-saved"));
           if (onSaved) onSaved(body);
         })
         .catch(function (err) { setStatus("保存に失敗しました: " + err.message, true); });
@@ -3816,7 +3999,7 @@
   function atlasBindingPropose(courseId, bodyEl, statusEl, onSaved) {
     if (!courseId || !bodyEl) return;
     if (statusEl) {
-      statusEl.textContent = "配置を提案中...";
+      statusEl.textContent = "トピックの対応案を作成中...";
       statusEl.style.color = "var(--color-text-secondary)";
     }
     apiFetch("/admin/courses/" + encodeURIComponent(courseId) + "/atlas-binding/propose", { method: "POST" })
@@ -3851,7 +4034,7 @@
 
     function loadCourses() {
       if (coursesLoaded) return;
-      apiFetch("/learning/courses")
+      apiFetch("/admin/courses")
         .then(function (res) { return res.json(); })
         .then(function (courses) {
           (courses || []).forEach(function (c) {

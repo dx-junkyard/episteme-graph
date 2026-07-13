@@ -177,6 +177,9 @@ def _report_row(**overrides):
         "resolved_by": None,
         "resolved_at": None,
         "merged_into": None,
+        "incorporated_at": None,
+        "incorporated_by": None,
+        "incorporation_note": "",
         "applied_version": "",
         "notified_at": None,
         "created_at": "2026-07-01T00:00:00",
@@ -354,6 +357,33 @@ class TestReviewQueue:
         assert audit[1]["old_status"] == "pending"
         assert audit[1]["new_status"] == "accepted"
         assert audit[1]["changed_by"] == TEACHER_ID
+
+    def test_incorporate_marks_accepted_report_and_audits(
+        self, client, teacher_headers, sandbox_cartridges, fake_db
+    ):
+        def route(sql, params):
+            if sql.startswith("SELECT status, incorporated_at"):
+                return FakeResult(rows=[("accepted", None, "")])
+            return FakeResult(rowcount=1)
+
+        fake_db.route = route
+        resp = client.post(
+            "/api/admin/cartridges/particle_physics/atlas/reports/rep-1/incorporate",
+            headers=teacher_headers,
+            json={"note": "領域を移動した"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["new_status"] == "incorporated"
+        update = next(
+            (sql, p) for sql, p in fake_db.all_calls()
+            if "SET incorporated_at = now()" in sql
+        )
+        assert update[1]["note"] == "領域を移動した"
+        audit = next(
+            (sql, p) for sql, p in fake_db.all_calls()
+            if "INSERT INTO theory_review_events" in sql
+        )
+        assert audit[1]["new_status"] == "incorporated"
 
 
 # ---------------------------------------------------------------------------

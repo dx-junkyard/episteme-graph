@@ -1390,6 +1390,151 @@ body {
   display: block;
 }
 
+/* ── Field Atlas operations dashboard ───────────────────────────── */
+.atlas-admin-subtitle {
+  margin: 0;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+}
+.atlas-admin-overview {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg-secondary);
+  padding: 14px;
+}
+.atlas-admin-empty {
+  color: var(--color-text-tertiary);
+  font-size: 13px;
+}
+.atlas-admin-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+.atlas-admin-summary-card {
+  background: var(--color-background-primary);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-height: 54px;
+}
+.atlas-admin-summary-label {
+  display: block;
+  color: var(--color-text-tertiary);
+  font-size: 11.5px;
+  margin-bottom: 4px;
+}
+.atlas-admin-summary-value {
+  color: var(--color-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+.atlas-admin-next {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--color-text-info);
+  background: var(--color-background-primary);
+  border-radius: 6px;
+}
+.atlas-admin-next-copy {
+  min-width: 0;
+  font-size: 13px;
+  color: var(--color-text-primary);
+}
+.atlas-admin-next-copy small {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--color-text-tertiary);
+}
+.atlas-admin-primary {
+  background: var(--color-text-info, #378add) !important;
+  border-color: var(--color-text-info, #378add) !important;
+  color: #fff !important;
+}
+.atlas-admin-local-nav {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+  overflow-x: auto;
+}
+.atlas-admin-local-nav-btn {
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: 7px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  font: inherit;
+  font-size: 12.5px;
+}
+.atlas-admin-local-nav-btn.on {
+  color: var(--color-text-info);
+  border-bottom-color: var(--color-text-info);
+}
+.atlas-admin-local-nav-btn span:not(:empty) {
+  display: inline-block;
+  min-width: 16px;
+  padding: 1px 5px;
+  margin-left: 3px;
+  border-radius: 9px;
+  background: var(--color-bg-tertiary);
+  font-size: 10.5px;
+}
+.atlas-admin-workflow {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.atlas-admin-step {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 9px;
+  border: 1px solid var(--color-border);
+  border-radius: 7px;
+  color: var(--color-text-tertiary);
+  font-size: 11.5px;
+}
+.atlas-admin-step b {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--color-bg-tertiary);
+  font-size: 11px;
+}
+.atlas-admin-step.done { color: var(--color-text-success, #0f6e56); }
+.atlas-admin-step.done b { background: #e1f5ee; }
+.atlas-admin-step.current {
+  color: var(--color-text-info);
+  border-color: var(--color-text-info);
+  background: rgba(55, 138, 221, 0.06);
+}
+.atlas-admin-step.current b { background: #e6f1fb; }
+.atlas-admin-report-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 8px;
+  font-size: 10.5px;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+}
+.atlas-admin-report-badge.pending { background: #faeeda; color: #633806; }
+.atlas-admin-report-badge.accepted { background: #e6f1fb; color: #0c447c; }
+
+@media (max-width: 760px) {
+  .atlas-admin-summary-grid,
+  .atlas-admin-workflow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .atlas-admin-next { align-items: flex-start; flex-direction: column; }
+}
+
 /* menu items (were the old flat tab buttons) */
 .admin-tab {
   display: block;
