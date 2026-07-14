@@ -144,9 +144,73 @@ class TestGenerateSpokenTextAndFormulas:
         assert result["formulas"] == []
 
 
-# ---------------------------------------------------------------------------
-# 2. レクチャーシーケンス構築テスト
-# ---------------------------------------------------------------------------
+class TestPromptSeparatesDisplayAndSpoken:
+    """生成プロンプトが「表示=教材本文 / 読み上げ=別個のナレーション」を区別すること。
+
+    表示(display_text)と読み上げ(spoken_text)が同一文になってしまう不具合の再発防止
+    （字幕型ではなく「スライド＋スピーカーノーツ」型を生成させる）。
+    """
+
+    def test_spoken_text_prompt_marks_display_as_material(self):
+        from core.lecture import _SPOKEN_TEXT_PROMPT
+
+        # display_text は「教材本文」として位置づけられている
+        assert "教材本文" in _SPOKEN_TEXT_PROMPT
+
+    def test_spoken_text_prompt_forbids_verbatim_readback(self):
+        from core.lecture import _SPOKEN_TEXT_PROMPT
+
+        # spoken_text は display_text の丸読みではなく別個のナレーション
+        assert "そのまま読み上げてはいけません" in _SPOKEN_TEXT_PROMPT
+        assert "使い回し" in _SPOKEN_TEXT_PROMPT
+
+
+class TestAutoPaginateSlides:
+    """長いトピック教材の自動ページ分割（表示と読み上げを同数ページ・同順で対応させる）。"""
+
+    def test_short_text_stays_single_slide(self):
+        from core.lecture import auto_paginate_slides
+
+        slides, _mismatch = auto_paginate_slides("短い教材", "短い読み上げ")
+        assert len(slides) == 1
+
+    def test_explicit_marker_takes_precedence_over_auto_split(self):
+        from core.lecture import auto_paginate_slides
+
+        display = "A\n===\nB"
+        spoken = "a\n===\nb"
+        slides, _mismatch = auto_paginate_slides(display, spoken, max_chars=1)
+        # === が明示されていれば max_chars に関わらず教員の分割を尊重（自動再分割しない）
+        assert len(slides) == 2
+        assert slides[0]["display_text"] == "A"
+        assert slides[1]["display_text"] == "B"
+
+    def test_long_equal_structure_splits_into_aligned_pages(self):
+        from core.lecture import auto_paginate_slides
+
+        display = "\n\n".join("段落%d。%s" % (i, "あ" * 250) for i in range(4))
+        spoken = "\n\n".join("ナレ%d。%s" % (i, "い" * 250) for i in range(4))
+        slides, _mismatch = auto_paginate_slides(display, spoken, max_chars=600)
+        assert len(slides) >= 2
+        # 各スライドに表示と読み上げが揃う（音声を割り当てられる）
+        assert all(s["display_text"].strip() and s["spoken_text"].strip() for s in slides)
+
+    def test_long_display_without_spoken_paginates_display_only(self):
+        from core.lecture import auto_paginate_slides
+
+        display = "\n\n".join("段落%d。%s" % (i, "あ" * 250) for i in range(4))
+        slides, _mismatch = auto_paginate_slides(display, "", max_chars=600)
+        assert len(slides) >= 2
+        # 読み上げが無ければ各スライドの spoken は None（受講側でタイマー送り）
+        assert all(not s["spoken_text"] for s in slides)
+
+    def test_english_single_paragraph_paginates(self):
+        from core.lecture import auto_paginate_slides
+
+        display = "This is a sentence. " * 80
+        spoken = "This is narration. " * 80
+        slides, _mismatch = auto_paginate_slides(display, spoken, max_chars=600)
+        assert len(slides) >= 2
 
 class TestBuildLectureSequence:
     """レクチャーシーケンスの構築ロジック。"""

@@ -660,15 +660,40 @@ P7 既存 A/B/C/D 層コードを変更しない/ P8 道案内は誘導まで（
   行削除しない・core 非 FastAPI・禁止語彙・上限と truncated の整合）。
 - **非スコープ**: 学習者向けバッジ / To-Do 自動実行 / メール・プッシュ通知 / 進捗率表示。
 
-### レクチャー音声キャッシュの判定（`backend/api/routes/lecture.py`）
+### レクチャーの表示ソースと音声（トピック教材ベース、migration 047）
 
-`student_material`/`content`/`summary` はコースビルダーが生成するほぼ全トピックに
-設定されるため、これらの有無だけで「ドラフト専用トピック（`topic:` セグメント再生、
-音声キャッシュ不可）」を判定してはならない（実チャンク教材を持つトピックまで
-`get_topic_audio_status`/`get_lecture_sequence` が無効化してしまう）。判定は
-`_topic_has_linkable_material(topic, course_data)`（`topic.material_chunk_ids` または
-`course_data.sources[].material_id` の有無）を必ず経由し、実チャンク教材が無い
-トピックに限ってドラフト（`_build_topic_draft_segment`）へフォールバックすること。
+**レクチャー受講の表示は、非レクチャー時の教材表示（`get_topic_material` =
+`topics[].student_material` 最優先）と一致させる。** かつては音声キャッシュのために
+「実チャンク教材を持つトピックはチャンク経路（PDF由来チャンク）を優先」していたが、
+これだと受講画面のレクチャーが「トピックに紐づく整形済み教材」ではなく生 PDF チャンク
+（英語原文・OCR ノイズ）を流してしまい、表示が非レクチャー時と食い違った。現在は逆に
+**トピック教材を最優先**する。
+
+- **表示ソース判定の正本は `_lecture_uses_topic_material(topic)`**（`backend/api/routes/lecture.py`）:
+  トピックが `student_material`/`content`/`summary` または `spoken_script` を持つなら
+  トピック教材経路（`_build_topic_draft_segment`＝display=student_material /
+  read=spoken_script をスライド分割）を使う。持たないトピックだけが PDF 由来
+  チャンク経路へフォールバックする。`get_lecture_sequence` / `get_topic_audio_status` /
+  studio のトピック音声生成の3者が**同じ述語**を使い、表示・ボタン活性・音声生成の
+  食い違いを防ぐ（`_topic_has_linkable_material` は撤去済み）。
+- **スライド分割の正本は `_build_topic_slides(topic)`**（`routes/lecture.py`、決定論的・LLM 非使用）:
+  正規化＋`![[equation]]` 解決のうえ `core/lecture.py::auto_paginate_slides` で分割する。
+  受講表示・音声生成・readiness の3者が**この関数を通る**ことで `slide_index` を完全一致させる。
+  分割規約: `===` マーカーがあれば教員の明示分割を優先。無く display が長い（既定600字目安・
+  数式1個=60字換算）場合は**段落境界で自動ページ分割**し、表示と読み上げを同数ページ・同順で
+  対応させる（読み上げが同数ページに割れないときは spoken を空＝タイマー送りに縮退し表示だけ
+  分割）。チャンク経路は従来どおり `split_slides`（自動ページ分割しない）。
+- **トピック音声は別テーブル `topic_lecture_audio_cache`（migration 047）**にキャッシュする。
+  キーは `(course_id, topic_id, slide_index, voice)`。`lecture_audio_cache` は `chunk_id`
+  が `chunks(id)` への FK を持ちトピック（JSON キー）を格納できないため独立テーブルにした
+  （既存のチャンク音声・#491 readiness には影響しない）。学習側 `generate_tts` は
+  chunk_id が `topic:{topic_id}` 形式なら本テーブルから配信する（`_parse_topic_ref` /
+  `_get_topic_audio_cache`）。生成は studio の音声生成（`_batch_audio_worker` 内の
+  `_generate_course_topic_audio`）が担い、受講側と同じ `split_slides` で分割して各スライドの
+  `spoken_text` を TTS 化する（表示スライドと音声スライドが同じ `slide_index` で一致）。
+  トピックの授業用教材/読み上げ原稿を編集すると当該トピックのトピック音声は無効化される
+  （`save_lecture_studio_course_topic` が `DELETE`）。学習者経路からの音声生成禁止
+  （`generate_tts` はキャッシュ配信のみ・404 方針）は不変。
 
 ### レクチャースライド同期 + 音声言語切替（migration 040）
 

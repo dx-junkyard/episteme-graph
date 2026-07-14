@@ -33,7 +33,9 @@ logger = logging.getLogger(__name__)
 _SPOKEN_TEXT_PROMPT = """あなたは大学院レベルの学習を支援する教育者AIです。
 
 以下の「チャンクテキスト」は、PDFから抽出された教材の一部であり、OCRノイズや数式の欠落が含まれる不完全なテキストです。
-このテキストが意図している学術的な主張を推測し、その学問分野の標準的な知識に基づいて、正確で論理的な講義スクリプトを再構築してください。
+このテキストが意図している学術的な主張を推測し、その学問分野の標準的な知識に基づいて、
+学習者が画面で読む「教材本文（display_text）」と、それを先生が口頭で説明する「読み上げ原稿（spoken_text）」の
+2つを作成してください。この2つは役割が異なるため、同じ文をそのまま流用してはいけません。
 
 ## コース情報
 - タイトル: {course_title}
@@ -56,12 +58,17 @@ _SPOKEN_TEXT_PROMPT = """あなたは大学院レベルの学習を支援する�
 {language_instruction}
 
 ## 指示:
-1. **display_text**: 画面表示用テキストを再構築してください。
-   - 抽出テキスト内の欠落・OCRノイズ・崩れた数式を補正し、教材として自然に読める本文へ修復する
+1. **display_text（画面に表示する教材本文）**: 学習者が画面で読む「教材」そのものを再構築してください。
+   - これは読み上げ原稿ではなく、教科書・スライドに載る学習内容です。原文（抽出テキスト）の内容・構造・用語に忠実に整える
+   - 抽出テキスト内の欠落・OCRノイズ・崩れた数式のみを補正し、原文に無い解説・具体例・話題を勝手に足さない
+   - 教科書のような記述体で書く。「〜しましょう」「〜ですね」等の話しかけ・ナレーション調は使わない
    - 本文中に数式の LaTeX コードを直接書かず、代わりに `[[FORMULA_0]]`, `[[FORMULA_1]]` のような一意のプレースホルダーを配置する
    - `$...$` や `$$...$$` などの LaTeX デリミタは display_text に絶対に使わないこと
    - 段落構造は維持し、必要に応じて文を補完してよい
-2. **spoken_text**: 上記の「現在地」の文脈を踏まえ、このチャンクがコース全体の中で果たすべき役割（導入、詳細解説、まとめ等）を意識して、音声読み上げ用のテキストを構築してください。
+2. **spoken_text（音声で読み上げるナレーション）**: 上記 display_text の教材を、先生が口頭で説明するための読み上げ原稿を構築してください。
+   - **display_text をそのまま読み上げてはいけません。** 教材の内容を噛み砕き、導入・要点の言い換え・補足・次への橋渡しを加えた、自然な話し言葉のナレーションにする
+   - ただし display_text が扱う範囲・順序に沿って説明し、別の話題を始めない（表示と読み上げが同じ内容を指すようにするため）
+   - このチャンクがコース全体で果たす役割（導入、詳細解説、まとめ等）を意識する
    - 抽出の欠落や論理の飛躍がある場合は、該当分野の標準知識を用いて、前後の文脈と整合するように補完してください。
    - LaTeX 数式は自然言語に変換する（例: `E = mc^2` → 「Eイコールmcの二乗」）
    - 専門用語にはふりがなや読み方を含める
@@ -76,8 +83,8 @@ _SPOKEN_TEXT_PROMPT = """あなたは大学院レベルの学習を支援する�
 
 ## 出力形式 (厳密にJSON):
 {{
-  "display_text": "エネルギーは [[FORMULA_0]] で表される。",
-  "spoken_text": "エネルギーは Eイコールmcの二乗 で表される。",
+  "display_text": "質量とエネルギーは等価であり、[[FORMULA_0]] で表される。",
+  "spoken_text": "ここでは質量とエネルギーの関係を確認しましょう。この2つは本質的に等価で、式にすると、Eイコールmcの二乗、という形で表されます... この式が何を意味するのかを順に見ていきます。",
   "formulas": [
     {{"id": "[[FORMULA_0]]", "latex": "E = mc^2", "spoken": "Eイコールmcの二乗", "is_display": false}}
   ]
@@ -85,6 +92,7 @@ _SPOKEN_TEXT_PROMPT = """あなたは大学院レベルの学習を支援する�
 
 ## 重要:
 - JSON のみを出力してください。マークダウンコードフェンスは不要です。
+- display_text（教材本文）と spoken_text（読み上げ）は同じ文の使い回しにせず、役割に応じて必ず書き分けてください。
 - formulas の各要素には必ず `latex` と `spoken` の両方のキーを含めてください。
 - `latex` を `formula`・`expression`・`math` などに改名してはいけません。
 - `spoken` を `reading`・`text`・`description` などに改名してはいけません。
@@ -521,6 +529,169 @@ def split_slides(
     return slides, mismatch
 
 
+# ---------------------------------------------------------------------------
+# 自動ページ分割 (long topic 教材 を複数スライドへ)
+# ---------------------------------------------------------------------------
+#
+# `===` マーカーが無い長いトピック教材を、読みやすいスライド（ページ）に自動分割する。
+# 表示（display）と読み上げ（spoken）は別テキストになり得るため、両者を同じ page 数・
+# 同じ意味順で分割して slide_index を対応させることが不変条件（表示スライドと音声スライドの
+# 同期を壊さない）。この分割は「トピック教材ベースのレクチャー」（routes/lecture.py の
+# `_build_topic_slides`）と、そこから音声を作る studio 側の両方が**同じ関数**を通ることで
+# 一致を保証する（決定論的・LLM 非使用）。
+
+_FORMULA_PLACEHOLDER_LEN = 60  # [[FORMULA_N]] 1個の表示長換算（§4-1 の目安に合わせる）
+DEFAULT_SLIDE_MAX_CHARS = 600  # スライド1枚の display 目安（§4-1）
+_JP_SENTENCE_ENDERS = "。．！？"
+
+
+def _sentence_units(text: str) -> list[str]:
+    """テキストを文単位に分割する（日本語 ``。．！？`` と、空白/行末が続く英語 ``.!?`` の両対応）。
+
+    ``3.14`` のような小数で切らないよう、英語ピリオドは直後が空白/改行/末尾のときのみ文末とみなす。
+    """
+    out: list[str] = []
+    buf = ""
+    for i, ch in enumerate(text):
+        buf += ch
+        if ch in _JP_SENTENCE_ENDERS:
+            out.append(buf)
+            buf = ""
+        elif ch in ".!?":
+            nxt = text[i + 1] if i + 1 < len(text) else ""
+            if nxt in (" ", "\n", "\t", ""):
+                out.append(buf)
+                buf = ""
+    if buf.strip():
+        out.append(buf)
+    return [s.strip() for s in out if s.strip()]
+
+
+def _display_length(text: str | None) -> int:
+    """``[[FORMULA_N]]`` を一定長に換算した表示長を返す（ページ分割の目安計算用）。"""
+    if not text:
+        return 0
+    formula_count = len(_SLIDE_FORMULA_ID_RE.findall(text))
+    plain = _SLIDE_FORMULA_ID_RE.sub("", text)
+    return len(plain) + formula_count * _FORMULA_PLACEHOLDER_LEN
+
+
+def _paragraph_units(text: str | None) -> list[str]:
+    """テキストを段落単位に分割する（空行→単一改行→文、の順で粒度を落とす）。
+
+    ``[[FORMULA_N]]`` プレースホルダーは1トークンとして段落内に残す（数式を割らない）。
+    """
+    if not text or not text.strip():
+        return []
+    parts = [p.strip() for p in re.split(r"\n[ \t]*\n", text.strip()) if p.strip()]
+    if len(parts) >= 2:
+        return parts
+    lines = [ln.strip() for ln in text.strip().split("\n") if ln.strip()]
+    if len(lines) >= 2:
+        return lines
+    sents = _sentence_units(text.strip())
+    return sents if sents else [text.strip()]
+
+
+def _group_units_by_size(units: list[str], max_chars: int) -> list[tuple[int, int]]:
+    """段落を表示長 ``max_chars`` 以下のページ（連続 index 範囲）に貪欲にまとめる。"""
+    groups: list[tuple[int, int]] = []
+    start = 0
+    cur = 0
+    for i, unit in enumerate(units):
+        ulen = _display_length(unit)
+        if i > start and cur + ulen > max_chars:
+            groups.append((start, i))
+            start = i
+            cur = 0
+        cur += ulen
+    groups.append((start, len(units)))
+    return groups
+
+
+def _balance_units_into_n(units: list[str], n: int) -> list[tuple[int, int]] | None:
+    """段落をちょうど ``n`` 個の非空ページ（連続 index 範囲）に均す。作れなければ None。
+
+    表示（display）が n ページに分かれたとき、読み上げ（spoken）も同数ページに揃えるための
+    比例分割。段落数が n 未満のときは None（呼び出し側は音声なし=タイマー送りに縮退する）。
+    """
+    if n <= 0 or len(units) < n:
+        return None
+    lengths = [_display_length(u) for u in units]
+    total = sum(lengths) or 1
+    target = total / n
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    acc = 0
+    for i in range(len(units)):
+        acc += lengths[i]
+        groups_open = len(ranges)
+        remaining_units = len(units) - (i + 1)
+        remaining_groups = n - groups_open - 1
+        # 残りページに最低1段落ずつ残せなくなる直前で必ず閉じる（ちょうど n ページを保証）。
+        force = remaining_units == remaining_groups
+        if groups_open < n - 1 and (force or acc >= target):
+            ranges.append((start, i + 1))
+            start = i + 1
+            acc = 0
+    ranges.append((start, len(units)))
+    if len(ranges) != n or any(s >= e for s, e in ranges):
+        return None
+    return ranges
+
+
+def auto_paginate_slides(
+    display_text: str | None,
+    spoken_text: str | None,
+    formulas: list | None = None,
+    max_chars: int = DEFAULT_SLIDE_MAX_CHARS,
+) -> tuple[list[dict], bool]:
+    """``split_slides`` を自動ページ分割で包む（長いトピック教材を複数スライドへ）。
+
+    - display / spoken に ``===`` マーカーがあれば、教員の明示分割を優先して
+      ``split_slides`` にそのまま委譲する（自動分割しない）。
+    - マーカーが無く display が ``max_chars`` を超える場合のみ、段落境界で複数ページに分割し、
+      表示と読み上げを同数ページ・同じ意味順で対応させてから ``split_slides`` に渡す。
+      spoken を同数ページに割れない場合は spoken を空（タイマー送り）に縮退させ、表示だけを
+      ページ分割する（同期を壊さないための安全側）。
+    - それ以外は従来どおり 1 スライド（``split_slides`` に委譲）。
+
+    戻り値は ``split_slides`` と同形 ``(slides, mismatch)``。
+    """
+    if _SLIDE_MARKER_RE.search(display_text or "") or _SLIDE_MARKER_RE.search(spoken_text or ""):
+        return split_slides(display_text, spoken_text, formulas)
+
+    if _display_length(display_text) <= max_chars:
+        return split_slides(display_text, spoken_text, formulas)
+
+    units_d = _paragraph_units(display_text)
+    if len(units_d) < 2:
+        return split_slides(display_text, spoken_text, formulas)
+
+    groups_d = _group_units_by_size(units_d, max_chars)
+    if len(groups_d) < 2:
+        return split_slides(display_text, spoken_text, formulas)
+
+    n = len(groups_d)
+    display_pages = ["\n\n".join(units_d[s:e]) for s, e in groups_d]
+
+    spoken_pages: list[str] | None = None
+    if spoken_text and spoken_text.strip():
+        units_s = _paragraph_units(spoken_text)
+        if len(units_s) == len(units_d):
+            # 表示と読み上げが同じ段落構造 → 同じ index 境界で対応（完全整合）。
+            spoken_pages = ["\n\n".join(units_s[s:e]) for s, e in groups_d]
+        else:
+            # 構造が異なる → n ページへ比例分割（近似整合）。割れなければタイマー送りへ。
+            groups_s = _balance_units_into_n(units_s, n)
+            if groups_s is not None:
+                spoken_pages = ["\n\n".join(units_s[s:e]) for s, e in groups_s]
+
+    display_marked = "\n===\n".join(display_pages)
+    spoken_marked = "\n===\n".join(spoken_pages) if spoken_pages else ""
+    return split_slides(display_marked, spoken_marked, formulas)
+
+
 def count_slide_marker_segments(
     display_text: str | None,
     spoken_text: str | None,
@@ -560,9 +731,11 @@ def get_course_lecture_language(course_data: dict | None) -> str:
 # 学習画面のレクチャーボタン活性判定（この関数の旧個別実装）が食い違い得た）。
 # ``core/status/projector.py::project_course_status`` と
 # ``api/routes/lecture.py::get_topic_audio_status`` の両方から本関数を呼ぶ。
-# トピック単位のドラフト判定（``_topic_has_linkable_material`` 経由の早期リターン）は
-# 呼び出し側の責務のままとし、本関数は「material_ids に属する chunks の音声 readiness」
-# という下位の判定だけに責務を限定する。
+# 本関数は「material_ids に属する chunks の音声 readiness」という下位の判定に責務を
+# 限定する（チャンク経路レクチャー用）。トピック教材ベースのレクチャー
+# （``_lecture_uses_topic_material`` が真のトピック）の音声 readiness は
+# ``api/routes/lecture.py::_compute_topic_audio_readiness``（topic_lecture_audio_cache）
+# が別途担う。
 
 
 _AUDIO_READINESS_EMPTY: dict = {

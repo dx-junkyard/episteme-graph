@@ -268,6 +268,16 @@ def save_lecture_studio_course_topic(
                 "data": json.dumps(course_data, ensure_ascii=False),
             },
         )
+        # トピックの授業用教材（student_material）/読み上げ原稿（spoken_script）が変わったため、
+        # 生成済みのトピック音声を無効化する（原稿編集時のチャンク音声無効化と同じ方針。
+        # 次回の音声生成で作り直される）。表示スライドと音声スライドの食い違いを防ぐ。
+        session.execute(
+            sa_text("""
+                DELETE FROM topic_lecture_audio_cache
+                WHERE course_id = :course_id AND topic_id = :topic_id
+            """),
+            {"course_id": course_id, "topic_id": topic_id},
+        )
         session.commit()
     except HTTPException:
         raise

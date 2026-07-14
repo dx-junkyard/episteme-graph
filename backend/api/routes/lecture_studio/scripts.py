@@ -41,7 +41,10 @@ from services import (
     get_viewable_course_data,
     update_background_task,
 )
-from core.course_data import lecture_studio_settings as _lecture_studio_settings
+from core.course_data import (
+    iter_all_topics as _iter_all_topics,
+    lecture_studio_settings as _lecture_studio_settings,
+)
 from core.lecture import (
     count_slide_marker_segments,
     generate_spoken_text_and_formulas,
@@ -336,7 +339,7 @@ def _batch_generate_worker(
             create_background_task(audio_task_id, "audio_generation", user_id)
             threading.Thread(
                 target=_batch_audio_worker,
-                args=(audio_task_id, course_id, fresh_chunks, effective_language),
+                args=(audio_task_id, course_id, fresh_chunks, effective_language, course_data),
                 daemon=True,
             ).start()
             next_task_id = audio_task_id
@@ -642,6 +645,9 @@ _REWRITE_PROMPT = """あなたは大学講義の音声原稿を改善するア�
 画面表示テキストと音声原稿を書き換えてください。
 
 **重要:**
+- display_text（画面に表示する教材本文）と spoken_text（音声で読み上げるナレーション）は役割が異なります。同じ文をそのまま両方に入れないでください
+- **display_text = 教材本文**: 学習者が画面で読む教科書・スライドの記述体本文。原文の内容・構造・用語に忠実に整え、話しかけ・ナレーション調（「〜しましょう」等）は使わない
+- **spoken_text = 読み上げ**: display_text の教材を先生が口頭で説明するナレーション。display_text をそのまま読み上げず、噛み砕いた説明・補足・つなぎを加える。ただし display_text の範囲・順序に沿って説明する
 - 教員の指示に従い、必要に応じて一般的な物理学・数学の知識を補足してください
 - ソーステキストに限定されず、教員が指示する内容を反映させてください
 - display_text では数式を `[[FORMULA_0]]`, `[[FORMULA_1]]` のようなプレースホルダーで表現してください。`$...$` や `$$...$$` は使わないでください
@@ -667,14 +673,14 @@ _REWRITE_PROMPT = """あなたは大学講義の音声原稿を改善するア�
 
 ## 出力形式 (厳密にJSON):
 {{
-  "display_text": "エネルギーは [[FORMULA_0]] で表される。",
-  "spoken_text": "エネルギーは Eイコールmcの二乗 で表される。",
+  "display_text": "質量とエネルギーは等価であり、[[FORMULA_0]] で表される。",
+  "spoken_text": "ここでは質量とエネルギーの関係を確認しましょう。この2つは本質的に等価で、式にすると、Eイコールmcの二乗、という形で表されます... この式の意味を順に見ていきます。",
   "formulas": [
     {{"id": "[[FORMULA_0]]", "latex": "E = mc^2", "spoken": "Eイコールmcの二乗", "is_display": false}}
   ]
 }}
 
-重要: JSON のみを出力してください。マークダウンコードフェンスは不要です。"""
+重要: JSON のみを出力してください。display_text（教材）と spoken_text（読み上げ）は同じ文の使い回しにせず書き分けてください。マークダウンコードフェンスは不要です。"""
 
 _THEORY_ASSIST_PROMPT = """あなたは原稿スタジオの理論コンポーネント編集アシスタントです。
 
@@ -739,7 +745,8 @@ _AUDIO_ASSIST_PROMPT = """あなたは大学講義の読み上げ原稿を改善
 現在のタブ: 音声
 
 目的:
-- 表示テキストや数式プレースホルダーは変更せず、spoken_text だけを改善してください。
+- 表示テキスト（教材本文）や数式プレースホルダーは変更せず、spoken_text だけを改善してください。
+- spoken_text は表示テキスト（教材）を先生が口頭で説明する読み上げナレーションです。表示テキストをそのまま読み上げるのではなく、噛み砕いた説明・補足・つなぎを加えてください（ただし表示テキストの範囲・順序に沿うこと）。
 - 音声で自然に理解できる文にしてください。
 - 数式・記号は必要に応じて自然な読みへ変換してください。
 - JSONのみを出力してください。
@@ -772,10 +779,10 @@ _DISPLAY_ASSIST_PROMPT = """あなたは原稿スタジオの表示テキスト�
 現在のタブ: {studio_view}
 
 目的:
-- 表示テキストと数式メタデータを改善してください。
+- 表示テキスト（画面に表示する教材本文）と数式メタデータを改善してください。教科書・スライドの記述体で、話しかけ・ナレーション調にはしないでください。
 - display_text では数式を [[FORMULA_0]], [[FORMULA_1]] のようなプレースホルダーで表現してください。
 - formulas には各プレースホルダーの latex / spoken / is_display を入れてください。
-- spoken_text は表示テキストに対応する自然な読み上げ文にしてください。
+- spoken_text は表示テキスト（教材）をそのまま読み上げるのではなく、口頭で説明する別個のナレーションにしてください（表示テキストの範囲・順序に沿うこと）。
 - JSONのみを出力してください。
 
 ソース本文:
@@ -955,11 +962,144 @@ def rewrite_lecture_script(
 # ---------------------------------------------------------------------------
 
 
+def _generate_course_topic_audio(
+    course_id: str,
+    course_data: dict,
+    course_language: str,
+    voice: str = "alloy",
+) -> None:
+    """トピック教材ベースのレクチャー用に、各トピックのスライド音声を生成・キャッシュする。
+
+    受講側 (``routes/lecture.py::_build_topic_draft_segment``) と同じソース
+    （student_material=表示 / spoken_script=読み上げ）を同じ ``split_slides`` で分割し、
+    各スライドの ``spoken_text`` に TTS を生成して ``topic_lecture_audio_cache``
+    （``(course_id, topic_id, slide_index, voice)``）へ upsert する。受講側の表示スライドと
+    音声スライドが同じ ``slide_index`` で一致する（``===`` マーカー・縮退ロジックを共有）。
+
+    チャンク音声（``lecture_audio_cache``・FK 制約あり）とは別テーブルで管理し、既存の
+    チャンク音声・#491 の readiness には影響しない。既に同一言語でキャッシュ済みの
+    スライドはスキップする（未生成分のみ生成）。
+    """
+    # 受講側と同じスライド分割（自動ページ分割込み）を使う。`_build_topic_slides` を通すことで
+    # 受講表示・音声・readiness の slide_index を完全一致させる（食い違い防止）。
+    from routes.lecture import (  # 遅延 import（routes 間の循環回避）
+        _build_topic_slides,
+        _lecture_uses_topic_material,
+    )
+
+    for topic in _iter_all_topics(course_data):
+        if not _lecture_uses_topic_material(topic):
+            continue
+        topic_id = str(topic.get("id") or "").strip()
+        if not topic_id:
+            continue
+
+        slides, _display, _spoken, _formulas = _build_topic_slides(topic)
+
+        # スライド数が減った場合の残留行を掃除する（生成前に一度だけ）
+        session = _pg_session()
+        try:
+            session.execute(
+                sa_text("""
+                    DELETE FROM topic_lecture_audio_cache
+                    WHERE course_id = :course_id AND topic_id = :topic_id
+                      AND slide_index >= :slide_count
+                """),
+                {"course_id": course_id, "topic_id": topic_id, "slide_count": len(slides)},
+            )
+            session.commit()
+        except Exception:
+            session.rollback()
+            logger.warning(
+                "Failed to clean up stale topic audio rows for %s/%s", course_id, topic_id,
+                exc_info=True,
+            )
+        finally:
+            session.close()
+
+        for slide in slides:
+            slide_spoken = slide.get("spoken_text")
+            slide_index = slide["slide_index"]
+            if not slide_spoken:
+                continue
+
+            # 既に同一言語でキャッシュ済みならスキップ（未生成分のみ生成）
+            session = _pg_session()
+            try:
+                cached = session.execute(
+                    sa_text("""
+                        SELECT 1 FROM topic_lecture_audio_cache
+                        WHERE course_id = :course_id AND topic_id = :topic_id
+                          AND slide_index = :slide_index AND voice = :voice
+                          AND language = :language
+                        LIMIT 1
+                    """),
+                    {
+                        "course_id": course_id, "topic_id": topic_id,
+                        "slide_index": slide_index, "voice": voice, "language": course_language,
+                    },
+                ).fetchone()
+            finally:
+                session.close()
+            if cached:
+                continue
+
+            try:
+                audio_bytes = generate_tts_audio(slide_spoken, language=course_language)
+            except TtsFatalError:
+                # 恒久的失敗（API 未有効化・認証エラー等）は上位で扱えるよう再送出する。
+                raise
+            except Exception:
+                logger.warning(
+                    "Topic TTS generation failed for %s/%s slide %d", course_id, topic_id, slide_index,
+                    exc_info=True,
+                )
+                continue
+            if audio_bytes is None:
+                continue
+
+            duration_ms = max(1000, len(audio_bytes) * 8 // 128)
+            session = _pg_session()
+            try:
+                session.execute(
+                    sa_text("""
+                        INSERT INTO topic_lecture_audio_cache
+                            (course_id, topic_id, slide_index, voice, audio_data, duration_ms, language)
+                        VALUES
+                            (:course_id, :topic_id, :slide_index, :voice, :audio_data, :duration_ms, :language)
+                        ON CONFLICT (course_id, topic_id, slide_index, voice) DO UPDATE
+                        SET audio_data = EXCLUDED.audio_data,
+                            duration_ms = EXCLUDED.duration_ms,
+                            language = EXCLUDED.language,
+                            created_at = now()
+                    """),
+                    {
+                        "course_id": course_id, "topic_id": topic_id,
+                        "slide_index": slide_index, "voice": voice,
+                        "audio_data": audio_bytes, "duration_ms": duration_ms,
+                        "language": course_language,
+                    },
+                )
+                session.commit()
+            except Exception:
+                session.rollback()
+                logger.warning(
+                    "Failed to cache topic audio for %s/%s slide %d", course_id, topic_id, slide_index,
+                    exc_info=True,
+                )
+            finally:
+                session.close()
+
+            # レート制限対策: スライド間に 0.5 秒の遅延
+            time.sleep(0.5)
+
+
 def _batch_audio_worker(
     task_id: str,
     course_id: str,
     chunks: list[dict],
     course_language: str = "ja",
+    course_data: dict | None = None,
 ) -> None:
     """バックグラウンドスレッドでスライド単位に TTS 音声を一括生成する (migration 040)。
 
@@ -1146,6 +1286,23 @@ def _batch_audio_worker(
             "progress": int(processed * 100 / total) if total > 0 else 100,
         })
 
+    # トピック教材ベースのレクチャー用の音声も生成する（チャンク音声とは別テーブル
+    # topic_lecture_audio_cache に加算的にキャッシュ。course_data が渡されたときのみ）。
+    # 受講画面がトピック教材ベースで表示するトピックは、この音声で読み上げられる。
+    # 完了マークの前に実行して、タスク完了＝再生可能を保証する。
+    if course_data is not None:
+        try:
+            _generate_course_topic_audio(course_id, course_data, course_language)
+        except TtsFatalError as exc:
+            logger.error("Topic TTS fatal error, aborting task %s: %s", task_id, exc)
+            update_background_task(task_id, "failed", error_message=str(exc))
+            return
+        except Exception:
+            logger.warning(
+                "Topic audio generation failed for task %s (chunk audio unaffected)", task_id,
+                exc_info=True,
+            )
+
     update_background_task(task_id, "completed", result_data={
         "course_id": course_id,
         "phase": "audio",
@@ -1261,7 +1418,7 @@ def _batch_generate_and_audio_worker(
         "starting audio phase",
         task_id, course_id, target_language,
     )
-    _batch_audio_worker(task_id, course_id, fresh_chunks, target_language)
+    _batch_audio_worker(task_id, course_id, fresh_chunks, target_language, course_data)
 
 
 @router.post(
@@ -1348,7 +1505,7 @@ def batch_generate_audio(
     else:
         thread = threading.Thread(
             target=_batch_audio_worker,
-            args=(task_id, course_id, chunks, target_language),
+            args=(task_id, course_id, chunks, target_language, course_data),
             daemon=True,
         )
     thread.start()
