@@ -15,6 +15,11 @@
 > 人間確定）」と読むこと**。library_entry には `local_expressions`（出所付き表現リスト）を
 > 追加し、論文ごとの表記を潰さない。`element_annotations.kind` には `identity` /
 > `standardization` を加える（ビジョン文書 §3 修正②③・§7 Phase W-α）。
+>
+> **W-α 反映済み（2026-07-14）**: 上記の意味論修正を本文へ反映した。§5.5（同一性・標準化と
+> 非破壊リンク）・§6 の `element_annotations.kind` 拡張・§5 コミットルーティング表に
+> `identity` / `standardization` を追記。実体テーブル `element_identity_links` は Phase W-β
+> （migration 046 同乗）で追加する（本 W-α は意味論と注釈語彙の確定まで。コードなし）。
 
 ---
 
@@ -111,8 +116,8 @@ scope='domain'   → element_type ∈ {shared_part},                            
 **「共通化したい部品」の格納庫は L層 `library_entries`（`domain_key` スコープ・
 `source_document_ids` / `source_component_ids` 複数）を正本とする**（W層は共通部品テーブルを
 新設しない・§10）。`shared_part` の `element_id` は `library_entries.id`。W層は
-「インスタンス→共通部品への昇格・統合」導線（既存 L層 昇格経路・人間操作）と、共通部品そのものへの
-対話・注釈を提供する（§5）。
+「インスタンス→共通部品への昇格・リンク」導線（既存 L層 昇格経路・人間操作。同一性は非破壊リンク＝
+§5.5/KN-2）と、共通部品そのものへの対話・注釈を提供する（§5）。
 
 ### element_id の解決（`core/deliberation/refs.py`）
 
@@ -217,24 +222,53 @@ document_structure / derivation_chain / thesis）を辿る。
 - **共通部品（domain-scoped）への注釈は分野全体に蓄積・再利用される**。1論文に紐づかないので、
   同じ部品が別論文に現れても同じ蓄積を参照できる（＝「共通化したい部品を1論文に閉じ込めない」）。
 - **インスタンス（document-scoped）への注釈はその出現に固有**。ただし「これは共通化したい」と
-  判断したら **インスタンス→共通部品への昇格・統合**（既存 L層 昇格経路・人間操作。類似エントリ
-  提示付きで既存部品にマージ可）で domain-scoped に引き上げ、以降の対話・注釈は共通部品側へ貯める。
-  これが本層の中心導線。cross-corpus レンズ（§4.2）が「この部品は論文 X/Y/Z にも出る」を示し、
-  昇格・統合の判断材料になる。
+  判断したら **インスタンス→共通部品への昇格・リンク**（既存 L層 昇格経路・人間操作）で
+  domain-scoped に引き上げ、以降の対話・注釈は共通部品側へ貯める。これが本層の中心導線。
+  cross-corpus レンズ（§4.2）が「この部品は論文 X/Y/Z にも出る」を示し、昇格・リンクの判断材料になる。
+- **「統合」は非破壊のリンク追加であって、表現の置換ではない（KN-2/KN-3）**。既存の共通部品に
+  「実は同じもの」を対応づけるときも、インスタンス側の label / notation / 文脈は**書き換えない**。
+  同一性は `element_identity_links`（instance ↔ shared_part、Phase W-β）の**リンク**で表し、
+  共通部品側は `local_expressions`（出所付き表現リスト）に「この論文ではこう書く」を追記するだけ。
+  詳細は §5.5。
 
 ### 候補注釈の確定（コミット）
 
 教員が候補注釈を「確定」すると、**既存構造へルーティング**する（W層独自の最終格納庫を持たない）:
 
-| 注釈の種類 | コミット先（既存） | scope |
+| 注釈の種類（kind） | コミット先（既存） | scope |
 |---|---|---|
-| 共通部品の意味づけ・内訳 | L層 `library_entries`（draft 更新→凍結。人間操作） | domain |
-| インスタンスの意味づけ・内訳補正 | `theory_components.body`/`summary` / apparatus 候補の精緻化 | document |
-| 解釈バージョン | C層 `component_explanations`（`kind='personal'`） | document |
-| 検証スコープ・疑義 | D層 `epistemic_ledger.scope_candidates` / `challenges`（起動するだけ） | document |
+| 共通部品の意味づけ・内訳（`meaning`/`decomposition`） | L層 `library_entries`（draft 更新→凍結。人間操作） | domain |
+| インスタンスの意味づけ・内訳補正（`meaning`/`decomposition`） | `theory_components.body`/`summary` / apparatus 候補の精緻化 | document |
+| 解釈バージョン（`interpretation`） | C層 `component_explanations`（`kind='personal'`） | document |
+| 検証スコープ・疑義（`positioning_note` 起点） | D層 `epistemic_ledger.scope_candidates` / `challenges`（起動するだけ） | document |
+| **同一性（`identity`）** | **`element_identity_links`（instance ↔ shared_part、W-β）＋ shared_part 側 `local_expressions` 追記。非破壊（KN-2）** | document→domain |
+| **標準化判定（`standardization`）** | **shared_part（L層 library_entry）の `standardization_status`。LLM 直書き経路なし（L層ガードレール維持）** | domain |
 
 - コミット権限はスコープで分岐（W5）。`source_backed` 自動付与なし（W2）。
 - コミットしない候補・却下候補も `element_annotations` に status を残す（W4）。
+- **`identity` / `standardization` は常に candidate 始まり・人間確定のみ（KN-3）**。確定・却下は
+  status 遷移で保持し（P4）、`theory_review_events`（`entity_type='deliberation'`）に監査記録する。
+
+### §5.5 同一性・標準化と非破壊リンク（W-α 反映）
+
+ビジョン §3 修正②③・KN-2/KN-3 を本層の語彙で確定する。W層は同一性・標準化の**候補提示器**であり、
+確定の格納庫（identity link・library_entry）は既存の domain-scoped 実体を使う（新設しない・§10）。
+
+- **同一性（`kind='identity'`）**: 「論文 A の component_x と論文 B の equation_y は実は同じ共通部品」
+  という対応を、**インスタンス側を書き換えず**リンクで表す。対話・cross-corpus レンズ（§4.2）が
+  候補を提示し、教員が確定すると `element_identity_links`（instance ↔ shared_part、Phase W-β の
+  テーブル。旅の traversal のため JSONB でなくテーブル）に1本追加し、共通部品側の
+  `local_expressions` に「この論文での label / notation / 文脈」を追記する。**既存の表現は潰さない**。
+  対象は当面ハブ経由（instance ↔ shared_part）に限定する（ビジョン §8 未決2。instance ↔ instance の
+  直接リンクは将来判断）。
+- **標準化判定（`kind='standardization'`）**: 「この共通部品は教科書級の標準か / 分野内標準か /
+  コーパス内でのみ反復する未発見の共通パーツ候補か」を三角測量（LLM 事前知識 + L層凍結版類似 +
+  コーパス内反復）で候補化し、`standardization_status`（`standard` / `field_standard` /
+  `emerging_common` / `novel` / `unknown`）＋証拠＋reason＋confidence を注釈に持つ。判定 worker 本体は
+  ビジョン Phase S（llm_worker 6系統目アダプタ）で実装し、W層はその候補の**置き場と確定 UI**を担う。
+  `emerging_common` が発見的価値の在り処（ビジョン §3 修正③）。**LLM が library_entry へ直接書く
+  経路は作らない**（L層既存ガードレール維持）。教員確定で library_entry の `standardization_status`
+  へ反映する。
 
 ---
 
@@ -274,17 +308,21 @@ document_id    TEXT                        -- scope='document' のみ
 domain_key     TEXT                        -- scope='domain' のみ
 session_id     UUID  REFERENCES deliberation_sessions(id) ON DELETE SET NULL
 kind           TEXT  -- 'meaning' | 'decomposition' | 'positioning_note' | 'interpretation'
-body           JSONB DEFAULT '{}'
+                     --      | 'identity' | 'standardization'（W-α で追加。§5.5）
+body           JSONB DEFAULT '{}'          -- identity: {shared_part_id, local_expression{label,notation,context}}
+                                           -- standardization: {standardization_status, claimed_canonical_name?, evidence_kinds[]}
 evidence       JSONB DEFAULT '[]'          -- 逐語引用・要素参照
 reason         TEXT  DEFAULT ''
 confidence     REAL                        -- 生値は DB のみ・API はラベル（W8）
 status         TEXT  CHECK (status IN ('candidate','committed','dismissed'))  DEFAULT 'candidate'
-committed_target JSONB DEFAULT '{}'        -- コミット先（component/explanation/ledger/library の id）
+committed_target JSONB DEFAULT '{}'        -- コミット先（component/explanation/ledger/library/identity_link の id）
 created_by / updated_by  UUID
 created_at / updated_at  TIMESTAMPTZ
 ```
 
-削除 API 無し（W4）。`candidate → committed / dismissed` の遷移のみ。
+削除 API 無し（W4）。`candidate → committed / dismissed` の遷移のみ。`identity` / `standardization`
+の確定先は §5.5 のとおり（それぞれ `element_identity_links`＋`local_expressions` /
+library_entry の `standardization_status`）。いずれも LLM 直書きなし・人間確定のみ（KN-3）。
 
 ### 監査カタログ拡張
 
@@ -392,9 +430,13 @@ W層の新規価値は **①統合入口（4要素型を1つの場に）②コ�
   ＝既存データ合成のみ）+ `GET .../overview` + フロント統合パネル。**新 LLM・新 migration 無し**、
   4要素型の「内訳＋位置づけ」を1画面に束ねるだけで即価値。
 - **Phase 1（W-1）**: コーパス横断レンズ（§4.2、chunk-proxy）。
-- **Phase 2（W-2）**: migration 046（2テーブル・scope 分岐）+ 対話（会話版 vision/text）+
-  候補注釈 + **インスタンス→共通部品（L層 library_entry）への昇格・統合導線 + domain-scoped
+- **Phase 2（W-2）**: migration 046（`deliberation_sessions` / `element_annotations` の2テーブル・
+  scope 分岐）+ 対話（会話版 vision/text）+ 候補注釈（`identity` / `standardization` を含む・§5.5）+
+  **インスタンス→共通部品（L層 library_entry）への昇格・リンク導線（非破壊・KN-2）+ domain-scoped
   共通部品への対話・注釈** + コミットルーティング + 監査 + コスト上限 + ガードレール。
+- **Phase W-β**: `element_identity_links`（instance ↔ shared_part、candidate/confirmed/rejected、
+  evidence、確定者）を migration 046 に同乗。旅の traversal のため JSONB 埋め込みでなくテーブルで持つ
+  （ビジョン §7）。`identity` 注釈の確定先。
 - **Phase 3（W-3・任意）**: 要素粒度 embedding へ置換（§4.2 将来）。
 
 ---

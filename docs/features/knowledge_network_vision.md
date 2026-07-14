@@ -2,9 +2,10 @@
 
 > **状態: ビジョン文書（2026-07-13 確定・実装なし）**。本書は個別機能の設計書ではなく、
 > 複数の設計を束ねる**親文書**である。子設計:
-> - `element_deliberation_workspace_design.md`（W層・設計済み未実装。本書 §7 Phase W-α の
->   改訂を反映すること）
-> - `personal_knowledge_network_design.md`（個人知識ネットワーク・未起草。§7 Phase P）
+> - `element_deliberation_workspace_design.md`（W層・設計済み。§7 Phase W-α の改訂は
+>   2026-07-14 反映済み。Phase 0 面①内訳の backend slice 実装着手済み）
+> - `personal_knowledge_network_design.md`（個人知識ネットワーク・2026-07-14 起草済み。
+>   §7 Phase P。§8 未決4「ノード導出規則」は同書 §2 で確定）
 > - 標準化判定 worker（§5・§7 Phase S。独立文書化するか W層設計に含めるかは未決）
 >
 > 本書の役割は「何を作るか」ではなく「**何を壊さずに育てるか**」の判断基準を固定すること。

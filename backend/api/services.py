@@ -18,6 +18,7 @@ from sqlalchemy import text as sa_text
 from core.course_data import course_source_material_ids, course_sources, course_topics
 from core.lecture import normalize_to_placeholder_format as _normalize_formulas
 from core.llm import generate_text, generate_text_with_structured_output, generate_embeddings, get_embedding_dim
+from core.personal_graph import graph_data as personal_graph_data
 from core.postgres import get_session as _pg_session
 from core.privacy import K_ANONYMITY
 from core.schema import (
@@ -299,10 +300,13 @@ def get_personal_layer(user_id: str, course_id: str) -> dict:
         ).fetchone()
         if not row or not row[0]:
             return {"misconceptions_by_topic": {}, "chat_anchors": {}}
-        personal = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        raw = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        # personal_graph 列の読み書きは core.personal_graph.graph_data アクセサに一本化
+        # （Phase P-0。素の dict アクセスを新規に書かない）。
+        data = personal_graph_data.parse_personal_graph(raw)
         return {
-            "misconceptions_by_topic": personal.get("misconceptions_by_topic", {}) or {},
-            "chat_anchors": personal.get("chat_anchors", {}) or {},
+            "misconceptions_by_topic": dict(data.misconceptions_by_topic),
+            "chat_anchors": dict(data.chat_anchors),
         }
     finally:
         session.close()
@@ -377,12 +381,10 @@ def record_personal_misconception(
         ).fetchone()
 
         personal_raw = row[0] if row and row[0] is not None else {}
-        personal = personal_raw if isinstance(personal_raw, dict) else json.loads(personal_raw)
-        by_topic = personal.get("misconceptions_by_topic", {}) or {}
-        current = by_topic.get(topic_id, []) or []
-        current = [misconception] + current
-        by_topic[topic_id] = current[:5]
-        personal["misconceptions_by_topic"] = by_topic
+        raw = personal_raw if isinstance(personal_raw, dict) else json.loads(personal_raw)
+        # 「先頭に追加・最新5件」の上限ロジックはアクセサ側が正本（Phase P-0）。
+        data = personal_graph_data.parse_personal_graph(raw)
+        data = personal_graph_data.append_misconception(data, topic_id, misconception)
 
         session.execute(
             sa_text("""
@@ -394,7 +396,7 @@ def record_personal_misconception(
             {
                 "user_id": user_id,
                 "course_id": course_id,
-                "personal": json.dumps(personal, ensure_ascii=False),
+                "personal": json.dumps(personal_graph_data.to_jsonb(data), ensure_ascii=False),
             },
         )
         session.commit()

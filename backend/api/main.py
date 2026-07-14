@@ -60,6 +60,7 @@ from routes import doubt as doubt_routes
 from routes import reconstruction as reconstruction_routes
 from routes import library as library_routes
 from routes import llm_usage as llm_usage_routes
+from routes import personal_map as personal_map_routes
 # Tier 3-17c: 旧 routes/admin.py 末尾で `router.include_router(...)` されていた
 # 13個の子ルーターを、admin.py 経由の二段ネストではなく main.py から直接
 # `/api/admin` prefix でフラットにマウントする（下記「ルーターのマウント」参照）。
@@ -71,6 +72,7 @@ from routes.admin_assistant import admin_router as _admin_assistant_router
 from routes.versioning import router as _versioning_router
 from routes.status import router as _status_router
 from routes.notifications import router as _notifications_router
+from routes.deliberation import router as _deliberation_router
 from core.config import get_settings as _get_settings
 from core.postgres import get_session as _pg_session, check_connection as _pg_check
 from core.migrations import run_migrations
@@ -212,6 +214,7 @@ app.include_router(doubt_routes.learning_router)
 app.include_router(reconstruction_routes.learning_router)
 app.include_router(library_routes.router)
 app.include_router(llm_usage_routes.router)
+app.include_router(personal_map_routes.router)
 
 # Tier 3-17c: 旧 routes/admin.py の `router.include_router(...)` 二段ネストを
 # フラット化。以下13ルーターは admin.router と同じ "/api/admin" prefix で
@@ -229,6 +232,7 @@ app.include_router(reconstruction_routes.admin_router, prefix="/api/admin")
 app.include_router(_versioning_router, prefix="/api/admin")
 app.include_router(_status_router, prefix="/api/admin")
 app.include_router(_notifications_router, prefix="/api/admin")
+app.include_router(_deliberation_router, prefix="/api/admin")
 
 
 @app.get("/healthz")
