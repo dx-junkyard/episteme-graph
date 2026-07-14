@@ -88,6 +88,11 @@
     rightPaneVisible: true,
     courseStructure: null,
     courseComponents: null,
+    // 音声準備確認フロー (Issue #491) §2-2: コース選択後の非同期ロード完了フラグ。
+    // lecture-scripts（scriptsLoaded）とコース構造（structureLoaded）の両方が現在の
+    // コース分だけ揃うまで音声生成を有効化しない（それまでは「読み込み中」扱い）。
+    scriptsLoaded: false,
+    structureLoaded: false,
     // 再構成ループ (R層): コーストピック右ペインの表示 ("evidence" | "stumble")
     rightPaneMode: "evidence",
     stumbleByDocument: {},
@@ -256,6 +261,18 @@
       var courseId = this.value;
       if (courseId) {
         lsState.courseId = courseId;
+        // 音声準備確認フロー (Issue #491) §2-2: コース切替の開始時に前コースの
+        // chunks・構造・分析状態・音声準備状態（ロード完了フラグ）をクリアし、
+        // 音声言語モーダルを必ず閉じる（前コースの状態で音声生成が有効になったり、
+        // モーダルが漏れ出すのを防ぐ。以降の非同期ロードが揃うまで readiness=読み込み中）。
+        lsState.chunks = [];
+        lsState.courseStructure = null;
+        lsState.courseComponents = null;
+        lsState.analysisStatus = null;
+        lsState.pipelineTask = null;
+        lsState.scriptsLoaded = false;
+        lsState.structureLoaded = false;
+        lsCloseAudioLangModal();
         // ボタンはチャンク読み込み完了後に lsRenderChunkList で制御するため
         // ここでは一旦無効化して読み込みを待つ
         if (audioAllBtn) audioAllBtn.disabled = true;
@@ -264,6 +281,7 @@
         moreMenuBtn.disabled = false;
         lsState.rightPaneVisible = true;
         lsUpdateCourseShell();
+        lsUpdateCourseControls();
         lsLoadSettings(courseId);
         lsLoadScripts(courseId);
       } else {
@@ -282,6 +300,11 @@
         lsState.settings = { narration_persona: "", response_persona: "", lecture_language: "ja" };
         lsState.courseStructure = null;
         lsState.courseComponents = null;
+        // 音声準備確認フロー (Issue #491): コース未選択に戻したらロード完了フラグを
+        // リセットし、音声言語モーダルを閉じる（§2-1）。
+        lsState.scriptsLoaded = false;
+        lsState.structureLoaded = false;
+        lsCloseAudioLangModal();
         if (audioAllBtn) audioAllBtn.disabled = true;
         settingsBtn.disabled = true;
         if (courseContentBtn) courseContentBtn.disabled = true;
@@ -316,8 +339,9 @@
     });
 
     if (audioAllBtn) audioAllBtn.addEventListener("click", function () {
-      if (!lsState.courseId || lsState.generating) return;
-      if (!lsIsCourseContentComplete()) return;
+      // 音声準備確認フロー (Issue #491) §3-1: モーダルを開けるのは音声生成が
+      // 有効な（全条件を満たす）ときだけ。fail-closed。
+      if (!lsCanGenerateAudio()) return;
       lsCloseMenus();
       lsOpenAudioLangModal();
     });
@@ -643,6 +667,9 @@
   }
 
   function lsOpenAudioLangModal() {
+    // 音声準備確認フロー (Issue #491) §3-1: モーダルを開けるのは音声生成が有効なとき
+    // だけ（fail-closed）。ボタンの click 経路以外からの誤呼び出しでも準備未完了なら開かない。
+    if (!lsCanGenerateAudio()) return;
     var modal = document.getElementById("ls-audio-lang-modal");
     if (!modal) {
       // モーダルDOMが無い場合でも音声生成自体は現在の設定言語でブロックしない（fail-safe）。
@@ -654,11 +681,28 @@
     var enRadio = document.getElementById("ls-audio-lang-en");
     if (jaRadio) jaRadio.checked = currentLanguage !== "en";
     if (enRadio) enRadio.checked = currentLanguage === "en";
+    lsRenderAudioLangSummary();
     lsRenderAudioLangModalStatus(currentLanguage);
     lsUpdateAudioLangWarning(currentLanguage);
     var startBtn = document.getElementById("ls-audio-lang-start");
     if (startBtn) startBtn.disabled = false;
     modal.hidden = false;
+  }
+
+  // 音声準備確認フロー (Issue #491) §3-1: モーダル上部に選択中コース名と対象スライド数を表示する。
+  function lsRenderAudioLangSummary() {
+    var el = document.getElementById("ls-audio-lang-summary");
+    if (!el) return;
+    var title = lsSelectedCourseTitle() || lsState.courseId || "";
+    var totalSlides = 0;
+    (lsState.chunks || []).forEach(function (c) {
+      if (typeof c.slide_count === "number") totalSlides += c.slide_count;
+    });
+    var html = "コース: <strong>" + escHtml(title) + "</strong>";
+    if (totalSlides > 0) {
+      html += "<br>対象スライド数: <strong>" + totalSlides + "</strong> 枚";
+    }
+    el.innerHTML = html;
   }
 
   function lsCloseAudioLangModal() {
@@ -725,7 +769,11 @@
         return res.json();
       })
       .then(function (chunks) {
+        // 音声準備確認フロー (Issue #491) §2-2: 選択が切り替わっていたら遅れて届いた
+        // 応答は破棄する（前コースの chunks で音声生成が有効化されるのを防ぐ）。
+        if (lsState.courseId !== courseId) return;
         lsState.chunks = chunks;
+        lsState.scriptsLoaded = true;
         lsState.selectedChunkId = null;
         lsState.componentsByChunk = {};
         lsState.claimsByChunk = {};
@@ -747,7 +795,15 @@
         lsLoadCourseComponents(courseId);
       })
       .catch(function () {
+        // 音声準備確認フロー (Issue #491): 読み込み失敗も「読み込み完了（結果は空）」
+        // として扱い、音声生成を fail-closed で無効のままにする。scripts の失敗時は
+        // 後続の lsLoadCourseStructure が走らないため、両フラグをここで確定させて
+        // readiness が「読み込み中」のまま固まらないようにする。
+        if (lsState.courseId !== courseId) return;
+        lsState.scriptsLoaded = true;
+        lsState.structureLoaded = true;
         listEl.innerHTML = '<div style="padding:16px;color:var(--color-text-danger);font-size:13px">読み込みに失敗しました</div>';
+        lsUpdateCourseControls();
       });
   }
 
@@ -803,12 +859,18 @@
     apiFetch("/admin/courses/" + courseId + "/lecture-studio/course-structure")
       .then(function (res) { return res.ok ? res.json() : null; })
       .then(function (data) {
-        if (!data || lsState.courseId !== courseId) return;
-        lsState.courseStructure = data;
+        // 音声準備確認フロー (Issue #491) §2-2: 遅れて届いた応答は破棄。courseId が
+        // 一致する場合はデータの有無に関わらず「構造ロード完了」とし、chunks 側と
+        // 合わせて readiness を確定させる（構造無し＝コース内容未完了として無効化）。
+        if (lsState.courseId !== courseId) return;
+        lsState.structureLoaded = true;
+        lsState.courseStructure = data || null;
         lsUpdateCourseControls();
         if (lsState.leftTab === "course") lsRenderCourseStructure();
       })
       .catch(function () {
+        if (lsState.courseId !== courseId) return;
+        lsState.structureLoaded = true;
         lsState.courseStructure = null;
         lsUpdateCourseControls();
         if (lsState.leftTab === "course") lsRenderCourseStructure();
@@ -5445,6 +5507,70 @@
     return Boolean(status && status.status === "completed");
   }
 
+  // 音声準備確認フロー (Issue #491) §2-3 条件4: 全対象チャンクに空でない読み上げ原稿
+  // (spoken_text) があるか。API の spoken_text フィールドは display_text へフォールバック
+  // するため信頼できないので、サーバ由来の status（"ungenerated" は原稿未生成）で判定する。
+  function lsAllChunksHaveSpokenText() {
+    var chunks = lsState.chunks || [];
+    if (!chunks.length) return false;
+    return chunks.every(function (c) {
+      return c && c.status && c.status !== "ungenerated";
+    });
+  }
+
+  // 音声準備確認フロー (Issue #491) §2-2/§2-3: 音声生成の準備状態を1つに集約して返す。
+  // "no_course" / "loading" / "content_incomplete" / "script_incomplete" / "busy" / "ready"
+  function lsAudioReadinessState() {
+    if (!lsState.courseId) return "no_course";
+    if (lsState.generating) return "busy";
+    if (!lsState.scriptsLoaded || !lsState.structureLoaded) return "loading";
+    if (!lsIsCourseContentComplete() || !(lsState.chunks && lsState.chunks.length)) return "content_incomplete";
+    if (!lsAllChunksHaveSpokenText()) return "script_incomplete";
+    return "ready";
+  }
+
+  // 音声準備確認フロー (Issue #491) §2-3: 上記条件をすべて満たすときだけ音声生成可能。
+  function lsCanGenerateAudio() {
+    return lsAudioReadinessState() === "ready";
+  }
+
+  // 音声準備確認フロー (Issue #491) §3-2: 未準備時に近傍へ出す「理由」と「次の操作」。
+  function lsAudioReadinessGuidance(state) {
+    switch (state) {
+      case "no_course":
+        return { reason: "音声化するコースを選択してください", action: "コースを選択" };
+      case "loading":
+        return { reason: "コースの音声準備状態を確認しています", action: "完了を待つ" };
+      case "content_incomplete":
+        return { reason: "スライドの準備が完了していません", action: "コース内容生成を行う" };
+      case "script_incomplete":
+        return { reason: "読み上げ原稿が未生成のスライドがあります", action: "原稿生成を行う" };
+      default:
+        return null;
+    }
+  }
+
+  // 音声準備確認フロー (Issue #491) §3-2: コース設定メニュー内の音声生成ボタン近傍に
+  // 理由と次の操作を描画する（生成可能・タスク進行中は非表示）。
+  function lsRenderAudioReadinessNote() {
+    var note = document.getElementById("ls-audio-readiness-note");
+    if (!note) return;
+    var reasonEl = document.getElementById("ls-audio-readiness-reason");
+    var actionEl = document.getElementById("ls-audio-readiness-action");
+    var state = lsAudioReadinessState();
+    var guidance = lsAudioReadinessGuidance(state);
+    if (!guidance) {
+      // "ready"（生成可能）や "busy"（進捗は #ls-progress が表示）では案内を出さない。
+      note.hidden = true;
+      if (reasonEl) reasonEl.textContent = "";
+      if (actionEl) actionEl.textContent = "";
+      return;
+    }
+    if (reasonEl) reasonEl.textContent = guidance.reason;
+    if (actionEl) actionEl.textContent = guidance.action ? "→ " + guidance.action : "";
+    note.hidden = false;
+  }
+
   function lsPipelineStepVisual(step, state) {
     var task = lsState.pipelineTask || {};
     if (task.step === step && task.status === "running") return "running";
@@ -5487,7 +5613,6 @@
 
   function lsUpdateCourseControls() {
     var hasCourse = Boolean(lsState.courseId);
-    var hasChunks = Boolean(lsState.chunks && lsState.chunks.length);
     var busy = Boolean(lsState.generating);
     var ready = hasCourse && !busy;
     var state = lsCoursePipelineState();
@@ -5498,7 +5623,11 @@
       moreMenuBtn.classList.toggle("ls-menu-trigger-busy", busy);
     }
 
-    lsSetMenuItemState("ls-audio-all-btn", ready && hasChunks && lsIsCourseContentComplete(), lsPipelineStepVisual("audio", state));
+    // 音声準備確認フロー (Issue #491) §2-3: 音声生成の有効化は lsCanGenerateAudio() の
+    // 全条件（コース選択・読み込み完了・コース内容完了・チャンク存在・全チャンクに
+    // spoken_text・タスク非進行中）を満たすときのみ。理由と次の操作も近傍に描画する。
+    lsSetMenuItemState("ls-audio-all-btn", lsCanGenerateAudio(), lsPipelineStepVisual("audio", state));
+    lsRenderAudioReadinessNote();
 
     var settingsBtn = document.getElementById("ls-settings-btn");
     var courseContentBtn = document.getElementById("ls-course-content-btn");

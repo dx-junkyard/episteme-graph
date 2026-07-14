@@ -3742,6 +3742,58 @@ body {
   color: var(--color-text-primary);
 }
 
+/* 音声準備確認フロー (Issue #491) §3-1: 音声言語モーダル上部の対象サマリ
+   （選択中コース名・対象スライド数） */
+.ls-audio-lang-summary {
+  margin-bottom: 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-background-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+
+.ls-audio-lang-summary:empty {
+  display: none;
+}
+
+.ls-audio-lang-summary strong {
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+
+/* 音声準備確認フロー (Issue #491) §3-2: コース設定メニュー内、音声生成が
+   無効なときの理由と次の操作の案内 */
+.ls-audio-readiness-note {
+  padding: 8px 12px;
+  border-top: 1px solid var(--color-border);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--color-text-tertiary);
+  white-space: normal;
+}
+
+.ls-audio-readiness-note[hidden] {
+  display: none;
+}
+
+.ls-audio-readiness-reason {
+  display: block;
+  color: var(--color-text-secondary);
+}
+
+.ls-audio-readiness-action {
+  display: block;
+  margin-top: 2px;
+  color: var(--color-text-tertiary);
+}
+
+.ls-audio-readiness-action:empty {
+  display: none;
+}
+
 .ls-course-slide-tools-row {
   display: flex;
   align-items: center;
@@ -5058,6 +5110,14 @@ body {
   align-items: center;
   justify-content: center;
   background: rgba(0, 0, 0, 0.45);
+}
+
+/* 音声準備確認フロー (Issue #491) §3-1: .ls-settings-modal の display:flex は
+   [hidden] 属性（UA 既定の display:none）を上書きしてしまうため、hidden の音声言語
+   モーダルが常時表示され得る。明示的に打ち消し、コース未選択・タブ初期化・原稿一覧
+   読み込みの各局面でモーダルが漏れ出さないようにする。 */
+#ls-audio-lang-modal[hidden] {
+  display: none !important;
 }
 
 .ls-settings-dialog {

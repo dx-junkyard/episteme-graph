@@ -412,6 +412,11 @@
                 <button id="ls-settings-btn" class="ls-menu-item" type="button" disabled><span>設定</span></button>
                 <button id="ls-course-content-btn" class="ls-menu-item" type="button" disabled><span>コース内容生成</span></button>
                 <button id="ls-audio-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>音声生成</span></button>
+                <!-- 音声準備確認フロー (Issue #491) §3-2: 音声生成が無効なとき、理由と次の操作を近傍に示す -->
+                <div id="ls-audio-readiness-note" class="ls-audio-readiness-note" hidden>
+                  <span id="ls-audio-readiness-reason" class="ls-audio-readiness-reason"></span>
+                  <span id="ls-audio-readiness-action" class="ls-audio-readiness-action"></span>
+                </div>
               </div>
             </div>
           </div>
@@ -595,6 +600,7 @@
               <h3>音声を生成します</h3>
               <button id="ls-audio-lang-close" class="lecture-chat-close" type="button">&times;</button>
             </div>
+            <div id="ls-audio-lang-summary" class="ls-audio-lang-summary"></div>
             <div class="ls-settings-field">
               <span>読み上げ言語</span>
               <label class="ls-audio-lang-option">

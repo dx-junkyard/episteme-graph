@@ -711,6 +711,21 @@ P7 既存 A/B/C/D 層コードを変更しない/ P8 道案内は誘導まで（
   `core/lecture.py::compute_material_audio_readiness()`（スライド単位 + 言語一致）が単一の
   正本で、`core/status/projector.py` と `routes/lecture.py::get_topic_audio_status` の両方が
   これを呼ぶ（G層 To-Do と UI ボタン活性の食い違いを構造的に防止）。
+- **音声生成の準備確認フロー（Issue #491、`lecture_studio/scripts.py` + `admin-lecture-studio.js`）**:
+  音声生成は「コースを選ぶ → 読み上げ可能を確認 → 言語を選ぶ → 生成」の状態起点操作にする。
+  - **フロント**: 音声言語モーダル `#ls-audio-lang-modal` は `class="ls-settings-modal"`（`display:flex`）
+    が `[hidden]` を上書きするため、`#ls-audio-lang-modal[hidden]{display:none!important}` を明示
+    （でないとコース未選択でも開いたまま漏れる）。モーダルを開けるのは `lsCanGenerateAudio()` が
+    真のときの `#ls-audio-all-btn` 押下時だけ（コース選択・タブ初期化・原稿一覧読込では開かない）。
+    音声生成の有効化 = `lsCanGenerateAudio()`（コース選択 / lecture-scripts・コース構造の両ロード完了 /
+    コース内容完了 / チャンク≥1 / **全チャンクに spoken_text（＝`status!=="ungenerated"`。API の
+    `spoken_text` は display_text へフォールバックするため使わない）** / タスク非進行中）。未準備時は
+    `lsAudioReadinessState()` で理由＋次操作を近傍表示。コース切替の開始時に前コースの
+    chunks・構造・分析・ロード完了フラグをクリアし、遅延応答は courseId 不一致で破棄する。
+  - **API**: `POST /api/admin/courses/{id}/lecture-audio/generate` は UI 非経由の呼び出しにも同じ
+    前提を強制する。対象チャンクなし=422、通常経路（言語切替チェーンでない）で空 `spoken_text` の
+    対象があれば不足件数付き 422。判定は DB 実値 `stored_spoken_text` を使う。言語切替チェーン
+    （原稿再生成 → 音声生成）は原稿を作り直すため、この事前チェックを免除する。
 
 ### 画像読み取りパイプライン + 分野別ナレッジライブラリ（L層, migration 041/042）
 

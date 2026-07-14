@@ -1286,6 +1286,12 @@ def batch_generate_audio(
     チェーンを1タスクで実行する（既存の音声は無効化されることが前提。§3-3 の確認ダイアログは
     フロント側の責務）。同一言語で全チャンクの spoken_language も一致していれば、
     従来どおり未生成スライドのみ生成する。
+
+    音声準備確認フロー (Issue #491) §4: UI を経由しない呼び出しに対しても前提を強制する。
+    対象チャンクが無ければ 422、1件でも読み上げ原稿 (``spoken_text``) が空の対象チャンクが
+    あれば不足件数付きで 422 を返し、ワーカーが空原稿を黙ってスキップして見かけ上成功する
+    経路を残さない。ただし言語切替チェーン（原稿再生成 → 音声生成）は例外で、原稿再生成後に
+    全対象の ``spoken_text`` を作り直してから音声生成するため、この事前チェックを免除する。
     """
     course_data = get_editable_course_data(current_user["id"], course_id)
     if not course_data and current_user.get("role") == ROLE_SYSTEM_ADMIN:
@@ -1312,6 +1318,21 @@ def batch_generate_audio(
         for c in chunks
     )
     needs_chain = target_language != current_language or language_mismatch
+
+    # 音声準備確認フロー (Issue #491) §4: 言語切替チェーンでない（＝既存の spoken_text を
+    # そのまま音声化する）通常経路では、全対象チャンクに空でない読み上げ原稿があることを
+    # 要求する。``stored_spoken_text`` は DB 実値（``_get_course_chunks`` の ``spoken_text``
+    # は display_text へフォールバックするため readiness 判定には使わない）。
+    if not needs_chain:
+        missing = sum(1 for c in chunks if not str(c.get("stored_spoken_text") or "").strip())
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"読み上げ原稿が未生成の箇所が {missing} 件あります。"
+                    "先に読み上げ原稿を生成してから音声を生成してください。"
+                ),
+            )
 
     task_id = str(uuid.uuid4())[:12]
     create_background_task(task_id, "audio_generation", current_user["id"])
