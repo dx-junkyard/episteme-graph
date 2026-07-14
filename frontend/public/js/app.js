@@ -1473,6 +1473,13 @@
       loadInterestTraces();
     }
     bindProgressTabEvents(el);
+
+    // Phase P-1: 「わたしの地図」との相互リンク（問いの軌跡→地図上の位置）。
+    // 未ロード時は静的コンテナが無いため実質何もしない（fail-closed）。
+    if (window.PersonalMap) {
+      var trajList = document.getElementById("lx-trajectory-list");
+      if (trajList) window.PersonalMap.annotateTrajectoryList(trajList);
+    }
   }
 
   // コース行程ブロック（全行程レール＋現在地＋一本パス＋戻りCTA）。
@@ -2056,12 +2063,14 @@
       fbtn("detour", "寄り道", "var(--lx-kind-detour)") +
       fbtn("misconception", "誤答", "var(--lx-kind-mis)") + '</div>';
 
-    // トレース群（status を主役に）
+    // トレース群（status を主役に）。「わたしの地図」との相互リンクのためコンテナに id を付与する
+    // (Phase P-1: PersonalMap.annotateTrajectoryList / openTrajectory が data-trace-id を参照する)。
+    html += '<div id="lx-trajectory-list">';
     traces.forEach(function (t) {
       if (f !== "all" && t.kind !== f) return;
       var kc = TRACE_KIND_CLS[t.kind] || "q";
       var sm = STATUS_META[t.status] || { label: t.status || "", cls: "open" };
-      html += '<div class="lx-trace ' + kc + '"><div class="lx-rail"></div><div class="lx-trace-body">';
+      html += '<div class="lx-trace ' + kc + '" data-trace-id="' + escHtml(t.id || "") + '"><div class="lx-rail"></div><div class="lx-trace-body">';
       html += '<div class="lx-trace-top"><span class="lx-kind-tag">' + escHtml(TRACE_KIND_LABEL[t.kind] || t.kind || "記録") + '</span>';
       html += '<span class="lx-status-tag ' + sm.cls + '">' + escHtml(sm.label) + '</span></div>';
       html += '<div class="lx-trace-text">' + escHtml(t.text || "") + '</div>';
@@ -2085,6 +2094,7 @@
       }
       html += '</div></div>';
     });
+    html += '</div>';
     return html;
   }
 
@@ -2125,6 +2135,23 @@
     }
     renderProgressTab();
     updateProgressTabDot();
+  }
+
+  // Phase P-1: 「わたしの地図」からの遷移先（PersonalMap.init の openTrajectory）。
+  // 進捗タブへ切替 → 軌跡が未ロードならロード → 該当アイテムへスクロールし一時ハイライト
+  // (jumpToChatMessage と同じ mg-highlight の一時強調パターンを流用)。
+  async function openTrajectory(traceId) {
+    if (!traceId) return;
+    var progressBtn = document.querySelector('#tabBar button[data-tab="progress"]');
+    if (progressBtn && !progressBtn.classList.contains("on")) progressBtn.click();
+    if (state.interestTraces === null) {
+      await loadInterestTraces();
+    }
+    var target = document.querySelector('[data-trace-id="' + traceId + '"]');
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    target.classList.add("mg-highlight");
+    setTimeout(function () { target.classList.remove("mg-highlight"); }, 2400);
   }
 
   // ── Topic Navigation ───────────────────────────────────────────────
@@ -2958,6 +2985,9 @@
     state.course = null;
     state.personalLayer = null;
     state.learningSupport = null;
+
+    // Phase P-1: コース切替で「わたしの地図」のキャッシュ・表示状態を破棄させる。
+    if (window.PersonalMap) window.PersonalMap.invalidate();
 
     // Re-render with clean state
     renderSidebar();
@@ -4484,6 +4514,8 @@
     initLogout();
     initLectureMode();
     initSplitHandle();
+    // Phase P-1: 「わたしの地図」から問いの軌跡へ戻る導線 (openTrajectory) を一度だけ登録する。
+    if (window.PersonalMap) window.PersonalMap.init({ openTrajectory: openTrajectory });
     await initCourseSelector();
     // 分野の地図 (Issue F-2 導線4): 初回ログイン時のみ L1 を俯瞰位置で自動表示する。
     // フラグはサーバに永続化され、再ログイン・別端末でも繰り返さない。

@@ -1,12 +1,18 @@
 # 個人知識ネットワーク（Personal Knowledge Network, Phase P）設計
 
-> **状態: Phase P-0 実装済み**（2026-07-14 起草・同日 P-0 実装。P-1/P-2 は未実装）。本書は
-> `knowledge_network_vision.md`（親文書）§7 Phase P の独立設計書であり、
+> **状態: Phase P-0 / P-1 実装済み**（2026-07-14 起草・同日 P-0/P-1 実装。P-2（旅）は未実装）。
+> 本書は `knowledge_network_vision.md`（親文書）§7 Phase P の独立設計書であり、
 > ビジョン §8 未決事項 4「ノード導出規則の詳細」を本書 §2 で確定する。
 > P-0 実装物: `backend/core/personal_graph/`（schema / queries / derive / graph_data）+
 > `backend/api/routes/personal_map.py`（`GET /api/learning/courses/{course_id}/personal-network`）+
 > `backend/tests/test_personal_graph_{derive,guardrails}.py`。§2「同意の汲み取り」の
 > N4 opt-out 規則（match + 異議なし、NULL 含む）はユーザー確認済み（2026-07-14）。
+> P-1 実装物: `frontend/public/js/personal-map.js`（`window.PersonalMap`。トグル既定OFF・
+> in-memory のみ・kind 別ドット4種を L1 のみに重畳・「まだ地図にない」トレイ・軌跡ビュー
+> 相互リンク）+ atlas-overlay.js のガード付きフック3箇所 + app.js 統合（init/DI・
+> `data-trace-id`・annotate・コース切替 invalidate）+
+> `backend/tests/test_personal_map_ui_guardrails.py`（静的15項目: ポーリング禁止・
+> 禁止語彙・user_id 非送信・ミニマップ非改変・ガード形式）。ミニマップ（F-1）非改変。
 >
 > **親文書**: `knowledge_network_vision.md`。KN-1〜KN-4 の不変条項に従う。
 > **兄弟設計**: `element_deliberation_workspace_design.md`（W層。同一性リンク

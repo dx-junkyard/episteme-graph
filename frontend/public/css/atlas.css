@@ -508,3 +508,192 @@
   font-size: 12px;
   color: var(--color-text-secondary, #6e6e73);
 }
+
+/* ── 個人知識ネットワーク (Phase P-1) — 「わたしの地図」トグル・凡例・トレイ ──────
+ * 設計書 §9。既定 OFF・数値 (件数・%・スコア) を一切描かない (PN-4)。
+ * コース文脈・トークンが無ければ personal-map.js が .personal-map-controls を
+ * hidden にする (fail-closed・PN-1/PN-7)。 */
+.personal-map-controls {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 0.5px dashed var(--color-border, #e5e5ea);
+}
+.personal-map-toggle-row {
+  display: flex;
+  align-items: center;
+}
+.personal-map-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--color-text-primary, #1d1d1f);
+  cursor: pointer;
+}
+.personal-map-toggle input { cursor: pointer; }
+
+.personal-map-legend {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.personal-map-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.personal-map-legend-swatch {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  flex: none;
+}
+
+/* kind 別の形+色 (色覚に配慮し形も変える)。SVG マーカーとレジェンドの両方で使う */
+.personal-map-dot-question {
+  fill: #378add;
+  stroke: #185fa5;
+  stroke-width: 1;
+}
+.personal-map-legend-swatch.personal-map-dot-question { border-radius: 50%; background: #378add; }
+
+.personal-map-dot-tension {
+  fill: #ba7517;
+  stroke: #854f0b;
+  stroke-width: 1;
+}
+.personal-map-legend-swatch.personal-map-dot-tension {
+  background: #ba7517;
+  clip-path: polygon(50% 0%, 0% 100%, 100% 100%);
+}
+
+.personal-map-dot-reconstruction {
+  fill: #0f6e56;
+  stroke: #085041;
+  stroke-width: 1;
+}
+.personal-map-legend-swatch.personal-map-dot-reconstruction { background: #0f6e56; }
+
+.personal-map-dot-bridge {
+  fill: #7b4fa0;
+  stroke: #57316e;
+  stroke-width: 1;
+}
+.personal-map-legend-swatch.personal-map-dot-bridge { background: #7b4fa0; transform: rotate(45deg); }
+
+.personal-map-marker-group { cursor: pointer; }
+.personal-map-marker-group:focus { outline: none; }
+.personal-map-marker-group:focus-visible .personal-map-dot {
+  filter: drop-shadow(0 0 2px rgba(123, 79, 160, 0.9));
+}
+
+/* 「まだ地図にない」トレイ — 空なら見出しごと personal-map.js が非表示にする (P4: 異常演出にしない) */
+.personal-map-tray {
+  margin-top: 8px;
+}
+.personal-map-tray-heading {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 4px;
+}
+.personal-map-tray-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.personal-map-tray-item {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  font-size: 12px;
+}
+.personal-map-tray-kind {
+  flex: none;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 8px;
+  background: var(--color-background-tertiary, #eeeef0);
+  color: var(--color-text-secondary, #6e6e73);
+  white-space: nowrap;
+}
+.personal-map-tray-text {
+  color: var(--color-text-primary, #1d1d1f);
+}
+
+/* マーカークリックの小ポップ (本人の痕跡一覧。数値は出さない) */
+.personal-map-popup {
+  position: fixed;
+  z-index: 1400;
+  max-width: 280px;
+  background: var(--color-background, #fff);
+  border: 1px solid var(--color-border, #d2d2d7);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  padding: 10px 12px;
+}
+.personal-map-popup-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.personal-map-popup-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-bottom: 6px;
+  border-bottom: 0.5px solid var(--color-border, #e5e5ea);
+}
+.personal-map-popup-item:last-child { border-bottom: none; padding-bottom: 0; }
+.personal-map-popup-kind {
+  font-size: 10.5px;
+  color: var(--color-text-tertiary, #aeaeb2);
+}
+.personal-map-popup-text {
+  font-size: 12.5px;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.personal-map-popup-link {
+  align-self: flex-start;
+  font-size: 11.5px;
+  padding: 2px 9px;
+  border: 1px solid #378add;
+  border-radius: 6px;
+  background: var(--color-background, #fff);
+  color: #185fa5;
+  cursor: pointer;
+  font-family: inherit;
+}
+.personal-map-popup-link:hover { background: #e6f1fb; }
+.personal-map-popup-close {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  border: none;
+  background: none;
+  color: var(--color-text-tertiary, #aeaeb2);
+  font-size: 14px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+/* 問いの軌跡ビューとの相互リンク (app.js #lx-trajectory-list の各行に後付け) */
+.personal-map-locate-btn {
+  margin-top: 4px;
+  font-size: 11px;
+  padding: 2px 9px;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-secondary, #6e6e73);
+  cursor: pointer;
+  font-family: inherit;
+}
+.personal-map-locate-btn:hover {
+  background: var(--color-background-tertiary, #eeeef0);
+  color: var(--color-text-primary, #1d1d1f);
+}

@@ -143,6 +143,10 @@
     // フッター: 骨格の版数 (出所の常時明示 §13)
     sheet.appendChild(el("p", { class: "atlas-foot", id: "atlas-foot" }));
 
+    // 個人知識ネットワーク (Phase P-1): 「わたしの地図」トグル + 凡例 + 「まだ地図にない」トレイ。
+    // PersonalMap が無い環境 (未読み込み等) では従来どおり何も差し込まれない。
+    if (window.PersonalMap) window.PersonalMap.mountControls(sheet);
+
     ov.addEventListener("keydown", (e) => {
       if (e.key === "Escape") { e.stopPropagation(); closeOverlay(); }
     });
@@ -473,6 +477,9 @@
     canvas.replaceChildren(RENDERERS[level](state.data.levels[String(level)] || { viewBox: [680, 370] }));
     const initial = (state.data.initial_selection || {})[String(level)];
     if (initial) selectNode(initial, { silent: false });
+    // 個人知識ネットワーク (Phase P-1): L1 かつ「わたしの地図」ON のときだけ本人の痕跡ドットを
+    // 重ね描く。判定・描画は PersonalMap 側の責務 (§9)。
+    if (window.PersonalMap) window.PersonalMap.onLevelRendered(level, canvas);
   }
 
   function selectNode(id, opts) {
@@ -598,6 +605,8 @@
       },
     }));
     if (state.lastFocus && typeof state.lastFocus.focus === "function") state.lastFocus.focus();
+    // 個人知識ネットワーク (Phase P-1): マーカーの小ポップ等を後始末する。
+    if (window.PersonalMap) window.PersonalMap.onOverlayClosed();
   }
 
   window.AtlasOverlay = {
