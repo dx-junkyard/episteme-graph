@@ -8,6 +8,13 @@
 > **命名の注意**: 「E層」は既に Exposition Layer（`exposition_layer_design.md`）が占有している
 > ため、本層は **W層（Workspace）** とする。「分野の地図（Field Atlas）」とは別機能
 > （コード・API・UI 文言は `deliberation-` / `element-` プレフィックスで衝突回避）。
+>
+> **親文書**: `knowledge_network_vision.md`（知識ネットワークビジョン）。本層はその
+> Phase W-α / W-β の実装先であり、KN-1〜KN-4 の不変条項に従う。特に **KN-2/KN-3 により、
+> §5 の「昇格・統合」は「重心の移動」ではなく「同一性リンクの追加（非破壊・candidate →
+> 人間確定）」と読むこと**。library_entry には `local_expressions`（出所付き表現リスト）を
+> 追加し、論文ごとの表記を潰さない。`element_annotations.kind` には `identity` /
+> `standardization` を加える（ビジョン文書 §3 修正②③・§7 Phase W-α）。
 
 ---
 
