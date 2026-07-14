@@ -506,8 +506,8 @@ class TestBatchGenerateAudioLanguageChain:
 
         mock_course.return_value = {"lecture_studio_settings": {"lecture_language": "ja"}}
         mock_chunks.return_value = [
-            {"id": "c1", "spoken_language": "ja"},
-            {"id": "c2", "spoken_language": "ja"},
+            {"id": "c1", "spoken_language": "ja", "stored_spoken_text": "s1"},
+            {"id": "c2", "spoken_language": "ja", "stored_spoken_text": "s2"},
         ]
         mock_thread_instance = MagicMock()
         mock_thread.return_value = mock_thread_instance
@@ -531,7 +531,7 @@ class TestBatchGenerateAudioLanguageChain:
         from api.routes.lecture_studio import batch_generate_audio
 
         mock_course.return_value = {"lecture_studio_settings": {"lecture_language": "ja"}}
-        mock_chunks.return_value = [{"id": "c1", "spoken_language": "ja"}]
+        mock_chunks.return_value = [{"id": "c1", "spoken_language": "ja", "stored_spoken_text": "s1"}]
         mock_thread.return_value = MagicMock()
 
         resp = batch_generate_audio("course-1", None, {"id": "u1", "role": "TEACHER"})
@@ -582,6 +582,82 @@ class TestBatchGenerateAudioLanguageChain:
         mock_thread.return_value = MagicMock()
 
         batch_generate_audio("course-1", None, {"id": "u1", "role": "TEACHER"})
+
+        assert mock_thread.call_args.kwargs["target"].__name__ == "_batch_generate_and_audio_worker"
+
+
+class TestBatchGenerateAudioReadinessGate:
+    """音声準備確認フロー (Issue #491) §4: API 側の spoken_text 不足ガード。"""
+
+    @patch("api.routes.lecture_studio.scripts.threading.Thread")
+    @patch("api.routes.lecture_studio.scripts.create_background_task")
+    @patch("api.routes.lecture_studio.scripts._get_course_chunks")
+    @patch("api.routes.lecture_studio.scripts.get_editable_course_data")
+    def test_no_chunks_returns_422(
+        self, mock_course, mock_chunks, mock_create, mock_thread,
+    ):
+        from fastapi import HTTPException
+
+        from api.routes.lecture_studio import batch_generate_audio
+
+        mock_course.return_value = {"lecture_studio_settings": {"lecture_language": "ja"}}
+        mock_chunks.return_value = []
+        mock_thread.return_value = MagicMock()
+
+        with pytest.raises(HTTPException) as exc:
+            batch_generate_audio("course-1", None, {"id": "u1", "role": "TEACHER"})
+        assert exc.value.status_code == 422
+        mock_thread.assert_not_called()
+
+    @patch("api.routes.lecture_studio.scripts.threading.Thread")
+    @patch("api.routes.lecture_studio.scripts.create_background_task")
+    @patch("api.routes.lecture_studio.scripts._get_course_chunks")
+    @patch("api.routes.lecture_studio.scripts.get_editable_course_data")
+    def test_missing_spoken_text_returns_422_with_count(
+        self, mock_course, mock_chunks, mock_create, mock_thread,
+    ):
+        """同一言語で一部チャンクの spoken_text が空なら不足件数付きで 422、ワーカーは起動しない。"""
+        from fastapi import HTTPException
+
+        from api.routes.lecture_studio import batch_generate_audio
+
+        mock_course.return_value = {"lecture_studio_settings": {"lecture_language": "ja"}}
+        mock_chunks.return_value = [
+            {"id": "c1", "spoken_language": "ja", "stored_spoken_text": "s1"},
+            {"id": "c2", "spoken_language": "ja", "stored_spoken_text": ""},
+            {"id": "c3", "spoken_language": "ja", "stored_spoken_text": "   "},
+        ]
+        mock_thread.return_value = MagicMock()
+
+        with pytest.raises(HTTPException) as exc:
+            batch_generate_audio("course-1", None, {"id": "u1", "role": "TEACHER"})
+        assert exc.value.status_code == 422
+        assert "2" in str(exc.value.detail)
+        mock_thread.assert_not_called()
+
+    @patch("api.routes.lecture_studio.scripts.threading.Thread")
+    @patch("api.routes.lecture_studio.scripts.create_background_task")
+    @patch("api.routes.lecture_studio.scripts._save_lecture_language")
+    @patch("api.routes.lecture_studio.scripts._get_course_chunks")
+    @patch("api.routes.lecture_studio.scripts.get_editable_course_data")
+    def test_language_switch_chain_bypasses_spoken_text_gate(
+        self, mock_course, mock_chunks, mock_save_lang, mock_create, mock_thread,
+    ):
+        """言語切替チェーンは原稿を再生成するため、空 spoken_text でも 422 にせずチェーン実行する。"""
+        from api.routes.lecture_studio import batch_generate_audio
+        from schemas import LectureAudioGenerateRequest
+
+        course_data = {"lecture_studio_settings": {"lecture_language": "ja"}}
+        mock_course.return_value = course_data
+        mock_chunks.return_value = [
+            {"id": "c1", "spoken_language": "ja", "stored_spoken_text": ""},
+        ]
+        mock_save_lang.return_value = {"lecture_studio_settings": {"lecture_language": "en"}}
+        mock_thread.return_value = MagicMock()
+
+        batch_generate_audio(
+            "course-1", LectureAudioGenerateRequest(language="en"), {"id": "u1", "role": "TEACHER"},
+        )
 
         assert mock_thread.call_args.kwargs["target"].__name__ == "_batch_generate_and_audio_worker"
 
