@@ -357,6 +357,13 @@ class TestIdentityLinkUniqueConstraintIncludesDocumentId:
         assert "DROP CONSTRAINT" in _MIGRATION_048_SRC
         assert "to_regclass" in _MIGRATION_048_SRC
 
+    def test_backward_compatibility_guard_avoids_dbapi_percent_markers(self):
+        # migration runner は SQLAlchemy の exec_driver_sql() を通じて DB-API へ
+        # SQL を渡す。PostgreSQL format() の識別子トークンは DB-API 側でプレースホルダと
+        # 誤認され、実行前に TypeError になるため使わない。
+        assert "%" not in _MIGRATION_048_SRC
+        assert "quote_ident(old_conname)" in _MIGRATION_048_SRC
+
     def test_migration_passes_the_repo_wide_idempotency_lint(self):
         # backend/db/*.sql 全体に対する構造的な冪等性 lint（test_migrations_runner.py の
         # TestIdempotencyLint と同じ検査ロジック）を 048 単体にも直接適用しておく

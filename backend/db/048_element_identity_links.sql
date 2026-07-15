@@ -94,7 +94,10 @@ BEGIN
     LIMIT 1;
 
     IF old_conname IS NOT NULL THEN
-        EXECUTE format('ALTER TABLE element_identity_links DROP CONSTRAINT %I', old_conname);
+        -- ``exec_driver_sql`` 経由では PostgreSQL の format() に渡す識別子トークンが
+        -- DB-API のプレースホルダとして解釈される。quote_ident() で同じ安全な
+        -- 識別子クォートを行い、ドライバにパーセント記号を含む SQL を渡さない。
+        EXECUTE 'ALTER TABLE element_identity_links DROP CONSTRAINT ' || quote_ident(old_conname);
     END IF;
 
     IF NOT EXISTS (
