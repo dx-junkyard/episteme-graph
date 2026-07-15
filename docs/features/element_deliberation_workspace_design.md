@@ -1,8 +1,41 @@
 # W層（Element Deliberation Workspace / 要素検討ワークスペース）設計
 
-> **状態: 設計のみ・未実装**（2026-07-13 時点、実装コードなし）。本書は設計の正本で、
-> `backend/core/deliberation/` / `backend/api/routes/deliberation.py` / migration 046
-> （`deliberation_sessions` / `element_annotations`）はいずれもまだリポジトリに存在しない。
+> **状態: Phase 0 + Phase W-β 実装済み**（2026-07-15 時点）。本書は設計の正本。
+> W-β 実装物: migration 048 `element_identity_links`（candidate/confirmed/rejected・
+> `local_expression` はリンク行が保持・library_entries へ実FK・孤児掃除は
+> `_purge_document`/`delete_material` に同乗）+ `core/deliberation/identity_links.py`
+> （`create_candidate` は status 固定・`decide` は decided_by 必須・
+> `confirmed_links_for_document` が P-2 traversal の読み取り正本）+ API 5本
+> （POST candidate 作成 / confirm / reject・GET instance/shared_part 別一覧。
+> confidence は段階ラベルのみ・監査 `AUDIT_ENTITY_DELIBERATION`）。同一性リンクの一意性は
+> `instance_document_id` を含めた4列で判定する（equation の `element_id` は論文間で衝突
+> しうるため。レビュー指摘2026-07-15で修正・migration 048 の `DO $$` 冪等ガードで旧3列
+> 制約からの移行にも対応）。`GET /shared-parts/{id}/identity-links` は各リンクの
+> `instance_document_id` を閲覧できないリクエスト者からは除外し、隠した件数を
+> `hidden_count` として正直に返す（同レビュー指摘で追加）。
+> library_entries 側 `local_expressions` への materialize は W-2（コミットルーティング）で行う。
+> 実装済み: `backend/core/deliberation/`（schema / refs / decomposition / positioning）+
+> `routes/deliberation.py`（overview = 面①内訳 + 面②位置づけ §4.1/4.3/4.4。shared_part の
+> `frozen_content.exemplar_images` は各画像の由来 document の閲覧権限（
+> `services.resolve_document_access`）でフィルタし、隠した件数を
+> `fields.exemplar_images_hidden_count` として正直に返す — W5 の「画像は由来 document の
+> 権限を継承」を core 層の分離を保ったまま route 層で強制する。レビュー指摘2026-07-15）+
+> `frontend/public/js/deliberation.js`（「深く検討」モーダル本体）。4要素型すべてに
+> 導線がある（レビュー指摘2026-07-15で追加）: `admin.js` の図モーダル（figure）・
+> revisions 画面の equation 変更、`admin-lecture-studio.js`（原稿スタジオ）の
+> チャンク/セクションの論理要素カード・「選択中コンポーネント」ビュー（theory_component、
+> `TheoryComponentOut.source_scope.document_id` を使う）・チャンクの主張一覧
+> （theory_claim、`ClaimOut.document_id` を使う）。revisions 画面上の変更差分
+> （`entity_changes`）に限っては、claim/component の `entity_id` が pipeline 内部 id で
+> theory_claims/theory_components の DB id と一致する保証がないため、そこでの導線のみ
+> 引き続き equation に限定する（理由は admin.js にインライン文書化）+
+> ガードレール（test_deliberation_guardrails / test_deliberation_positioning /
+> test_deliberation_ui_static）。§4.2 コーパス横断（Phase 1）・対話（Phase 2）は未実装。
+>
+> **migration 番号の補正（2026-07-15）**: 本書の「migration 046」は起草後に 046/047 が
+> 他機能（atlas_report_incorporation / topic_lecture_audio）で使用されたため無効。
+> **Phase W-β の `element_identity_links` は migration 048** で実装する。Phase 2 の
+> `deliberation_sessions` / `element_annotations` は着手時点の次番号を取ること。
 > 実装に着手する際は §13 の issue 分割を正本として使うこと。
 >
 > **命名の注意**: 「E層」は既に Exposition Layer（`exposition_layer_design.md`）が占有している
@@ -371,12 +404,19 @@ schema.py        → 語彙・dataclass の正本
 
 ## §9 フロント（`frontend/public/js/deliberation.js`、ES5・`window.Deliberation`）
 
-- 管理画面（教材詳細・コンポーネントグラフ・claim 一覧・図ペイン）の各要素に
+- 管理画面（教材詳細の図ペイン、原稿スタジオのチャンク/セクション論理要素カード・
+  主張一覧・「選択中コンポーネント」ビュー）の4要素型すべてに
   **「深く検討」ボタン** → 右ペイン/モーダルで W層ワークスペースを開く。
 - レイアウト: 左=**内訳＋4レンズ位置づけ**（overview API）、右=**対話**（sessions API）。
 - 候補注釈は対話下にカード表示 → `[確定]`（commit）/ `[却下]`（dismiss）。
-- 既存の詳細表示（admin.js の component graph / claims / structure）は**壊さず**、そこから
-  W層への入口を足す（Phase 0 は overview の統合表示のみで価値が出る）。
+- 既存の詳細表示（`admin.js` の図モーダル・revisions 画面、`admin-lecture-studio.js`
+  （原稿スタジオ）の component graph / claims / theory 一覧）は**壊さず**、そこから
+  W層への入口を足す（Phase 0 は overview の統合表示のみで価値が出る）。theory_component /
+  theory_claim は DB UUID（`theory_components.id` / `theory_claims.id`）が手に入る原稿
+  スタジオの画面を導線に使い、revisions 画面の変更差分一覧（`entity_id` が pipeline
+  内部 id で DB UUID と一致する保証がない）には導線を出さない（equation のみ例外。
+  equation は独立テーブルを持たず artifact 上の `equation_id` をそのまま ElementRef に
+  使う設計のため、この不一致が生じない）。
 - **数値を出さない**（W8）: confidence・関連件数はラベル/レンジ表示。
 
 ---

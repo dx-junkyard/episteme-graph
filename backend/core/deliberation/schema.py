@@ -36,6 +36,24 @@ DOCUMENT_ELEMENT_TYPES = (
 DOMAIN_ELEMENT_TYPES = (ELEMENT_SHARED_PART,)
 ELEMENT_TYPES = DOCUMENT_ELEMENT_TYPES + DOMAIN_ELEMENT_TYPES
 
+# ── 同一性リンク状態語彙（Phase W-β。知識ネットワークビジョン §4 KN-3 / W層設計 §5.5）───────
+# instance（scope='document'）↔ shared_part（library_entries）の同一性リンクは常に
+# candidate 始まりで、人間の確定（confirmed）/ 却下（rejected）でのみ状態が変わる。
+# LLM が自動で confirmed/rejected を書き込む経路は作らない（KN-3）。
+IDENTITY_LINK_STATUS_CANDIDATE = "candidate"
+IDENTITY_LINK_STATUS_CONFIRMED = "confirmed"
+IDENTITY_LINK_STATUS_REJECTED = "rejected"
+IDENTITY_LINK_STATUSES = (
+    IDENTITY_LINK_STATUS_CANDIDATE,
+    IDENTITY_LINK_STATUS_CONFIRMED,
+    IDENTITY_LINK_STATUS_REJECTED,
+)
+# decide() が受理する遷移先（candidate からのみ辿り着く終端状態。P4: 行削除しない）。
+IDENTITY_LINK_DECIDABLE_STATUSES = (
+    IDENTITY_LINK_STATUS_CONFIRMED,
+    IDENTITY_LINK_STATUS_REJECTED,
+)
+
 
 class ElementResolutionError(Exception):
     """ElementRef の解決に失敗した（要素型が不正 / スコープ不一致 / 要素が存在しない）。

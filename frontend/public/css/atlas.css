@@ -697,3 +697,110 @@
   background: var(--color-background-tertiary, #eeeef0);
   color: var(--color-text-primary, #1d1d1f);
 }
+
+/* ── 旅の経路探索 (Phase P-2) — 旅カード ──────────────────────────────
+ * 設計書 §6/§9。明示操作 (「ここから旅に出る」) でのみ表示。常に最新1枚。
+ * 数値 (step 数・件数・%) は一切描かない (PN-4)。frontier_note は警告色にせず
+ * 通常の事実文と同じ見た目で出す (D層「空欄は発見」と同族)。 */
+.personal-map-journey-btn {
+  margin-top: 4px;
+  font-size: 11px;
+  padding: 2px 9px;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-secondary, #6e6e73);
+  cursor: pointer;
+  font-family: inherit;
+}
+.personal-map-journey-btn:hover {
+  background: var(--color-background-tertiary, #eeeef0);
+  color: var(--color-text-primary, #1d1d1f);
+}
+
+/* マーカー小ポップ内のアクション行 (「軌跡で見る」+「ここから旅に出る」を並べる) */
+.personal-map-journey-popup-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+/* 「まだ地図にない」トレイの各項目に添える旅ボタンの行 */
+.personal-map-journey-tray-actions {
+  margin: -2px 0 6px;
+}
+
+.personal-map-journey-card {
+  position: relative;
+  margin-top: 10px;
+  padding: 10px 30px 10px 12px;
+  border: 1px solid var(--color-border, #d2d2d7);
+  border-radius: 8px;
+  background: var(--color-background, #fff);
+}
+.personal-map-journey-heading {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 6px;
+}
+.personal-map-journey-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.personal-map-journey-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12.5px;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.personal-map-journey-fact {
+  line-height: 1.4;
+}
+.personal-map-journey-ref-link {
+  align-self: flex-start;
+  font-size: 11px;
+  padding: 1px 8px;
+  border: 1px solid #378add;
+  border-radius: 8px;
+  background: transparent;
+  color: #185fa5;
+  cursor: pointer;
+  font-family: inherit;
+}
+.personal-map-journey-ref-link:hover { background: #e6f1fb; }
+.personal-map-journey-ref-label {
+  align-self: flex-start;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 8px;
+  background: var(--color-background-tertiary, #eeeef0);
+  color: var(--color-text-secondary, #6e6e73);
+}
+/* 経路が途切れた事実 (frontier_note) — 警告色にしない (§6) */
+.personal-map-journey-frontier {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 0.5px dashed var(--color-border, #e5e5ea);
+  font-size: 12px;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.personal-map-journey-truncated {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--color-text-tertiary, #aeaeb2);
+}
+.personal-map-journey-close {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  border: none;
+  background: none;
+  color: var(--color-text-tertiary, #aeaeb2);
+  font-size: 14px;
+  cursor: pointer;
+  line-height: 1;
+}

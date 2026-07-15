@@ -1,6 +1,15 @@
 # 個人知識ネットワーク（Personal Knowledge Network, Phase P）設計
 
-> **状態: Phase P-0 / P-1 実装済み**（2026-07-14 起草・同日 P-0/P-1 実装。P-2（旅）は未実装）。
+> **状態: Phase P-0 / P-1 / P-2 実装済み**（2026-07-14 起草・P-0/P-1 実装、2026-07-15 P-2 実装
+> — 本書の全フェーズ完了）。
+> P-2 実装物: `backend/core/personal_graph/journey.py`（純粋部 `build_journey` + 遅延import の
+> `journey_for_node`。`MAX_FANOUT_PER_SEGMENT=5` / `MAX_STEPS=12`）+ queries 拡張 +
+> `GET .../personal-network/journey`（GET のみ・本人のみ）+ personal-map.js 旅カード
+> （マーカーポップ/トレイの「ここから旅に出る」・常に最新1枚・frontier_note は通常文体）。
+> **v1 の実装判断**: [3] 他論文ホップは§6の権限規則のサブセットとして**当該コースの sources 内
+> に限定**（fail-closed 最小実装。コース横断は将来拡張）。frontier_note は component/claim
+> アンカー起点で confirmed リンクが空のときのみ（topic 起点は [1]-[3] を静かに省く）。
+> PN-6 は W-β の `confirmed_links_for_document`（confirmed のみ返す正本）経由で構造的に担保。
 > 本書は `knowledge_network_vision.md`（親文書）§7 Phase P の独立設計書であり、
 > ビジョン §8 未決事項 4「ノード導出規則の詳細」を本書 §2 で確定する。
 > P-0 実装物: `backend/core/personal_graph/`（schema / queries / derive / graph_data）+
@@ -143,7 +152,7 @@ segment`）をそのまま使い、粗い粒度への縮退も B層既存の
 
 | 痕跡 | アンカー |
 |---|---|
-| N1 connect 済み tension | `payload.target_refs.component_ids / edge_ids`（`connect_tension_trace` が書く既存形式） |
+| N1 connect 済み tension | `payload.connected_refs.component_ids / edge_ids`（`connect_tension_trace` が connect 操作時に**本人が指定した ID のみ**で書く専用キー。実装レビューで判明した通り、LLM 候補生成時点で書かれる `payload.target_refs` は本人未確認のまま非空になり得るため、`status='connected'` かつ `connected_refs` が非空のときのみこのアンカーを使う。それ以外（`target_refs` しか無い等）は N1 未接続として扱う） |
 | N1 未接続 tension / N3 | `topic_id` → `topics[].atlas_node_id`（コース⇄地図バインディング。無ければ topic 粒度のまま） |
 | N2 | `payload.structure_anchor.anchor_type / anchor_id / anchor_label` |
 | N4 | `claim_id`（`learner_reconstructions` 非正規化列） |
@@ -160,7 +169,7 @@ segment`）をそのまま使い、粗い粒度への縮退も B層既存の
 
 | edge_kind | 由来（事実） | 事実文の例 |
 |---|---|---|
-| `bridge` | tension `connect`（`status='connected'` + `payload.target_refs`）。**本人が明示的に張った唯一の著述辺**であり、Phase B「多くの学習者がここに橋を架ける」集約の入力になる | 「この引っかかりを◯◯に自分でつないだ」 |
+| `bridge` | tension `connect`（`status='connected'` + `payload.connected_refs`。本人が connect 操作で明示的に指定した ID のみ・LLM 候補由来の `target_refs` は使わない）。**本人が明示的に張った唯一の著述辺**であり、Phase B「多くの学習者がここに橋を架ける」集約の入力になる | 「この引っかかりを◯◯に自分でつないだ」 |
 | `revision` | `learner_reconstructions.revision_of` チェーン | 「改訂を経てたどり着いた再構成」 |
 | `descend` | `learner_reconstructions.descended_to_symbol=TRUE` → 対応する symbol 葉 | 「原因を絞るため記号まで降りた」 |
 
@@ -237,8 +246,21 @@ queries.py   → SQL 読みプリミティブ（core.postgres.get_session 直読
 
 - 深さは上記5区間で固定（それ以上遡行しない）。各区間の fan-out ≤ 5、
   経路全体の提示 step ≤ 12。順序は決定論的（`created_at, id`）。乱択なし。
+- **起点アンカーが解決する document 自体の閲覧可否をまず確認する**（実装レビューで
+  判明した抜け穴の是正）: `journey_for_node` は component/claim アンカーから document を
+  解決した直後、`services.user_can_view_document` 相当の判定を通し、閲覧不可なら
+  ローカルグラフ・同一性リンクを一切読まず document が見つからなかった場合と同じ経路
+  （[1]〜[3] を省く）に倒す。`core/personal_graph/` は FastAPI / services を import しない
+  規約のため、判定関数は呼び出し側（`routes/personal_map.py`）が
+  `journey_for_node(..., can_view_document=user_can_view_document)` として注入する。
 - [3] の他論文インスタンスは**学習者が閲覧可能な教材のみ**（受講コースの
   `sources[].material_id` / public 教材に限定。判定不能な document は黙って省く・PN-7）。
+  加えて `connect_tension_trace`（tension を component/edge に接続する既存 API）も
+  connect 時点で component の閲覧可否を検証し、不正・閲覧不可な参照は接続自体を拒否する
+  （journey が閲覧不可 document の情報を漏らす経路を connect 時点で断つ）。
+- [3] の L層ハブは **active な `library_entries` 行のみ**を経由する。retired・存在しない
+  shared_part は（generic な「共通部品」名へのフォールバックも含め）hop 自体を生成しない
+  ——active であることをハブ traversal の前提条件として扱う。
 - 各区間は独立に縮退する: 骨格なし → [4][5] を省く / W-β 未実装 or confirmed リンク
   0件 → [2][3] を省く / connect 未実施の tension → topic 粒度から [4] へ直行。
 

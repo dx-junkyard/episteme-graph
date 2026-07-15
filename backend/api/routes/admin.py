@@ -1248,6 +1248,18 @@ def delete_material(
             {"doc_id": doc_id},
         )
 
+        # W層 同一性リンク（migration 048）の instance 側も document_id への FK が無い
+        # ポリモーフィック行なので明示削除する（孤児防止。_purge_document と同じ
+        # orphan gap パターン。document_id は UUID / material_id 両形で書かれ得るため
+        # 両方を見る）。
+        session.execute(
+            sa_text(
+                "DELETE FROM element_identity_links "
+                "WHERE instance_document_id IN (CAST(:doc_id AS uuid)::text, :material_id)"
+            ),
+            {"doc_id": doc_id, "material_id": material_id},
+        )
+
         # 4) ドキュメント削除
         session.execute(
             sa_text("DELETE FROM documents WHERE id = :doc_id"),

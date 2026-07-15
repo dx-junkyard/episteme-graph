@@ -2545,16 +2545,60 @@ def dismiss_tension_trace(user_id: str, trace_id: str) -> dict | None:
     return {"trace_id": str(trace_id), "status": "dismissed"}
 
 
+def _tension_connect_component_viewable(user_id: str, component_id: str) -> bool:
+    """connect 先の component が本人にとって閲覧可能な document に属するかを検証する。
+
+    Phase P（個人知識ネットワーク）の journey が connected tension の component アンカーから
+    ``theory_component_graphs`` / 同一性リンクを辿れるようになったため、connect 時点で
+    不正・閲覧不可な component 参照を弾く（設計書 §6 / PN-7 の fail-closed をここでも担保する）。
+
+    ``theory_components`` は document_id 列を持たず ``source_scope`` JSONB に格納する
+    （``routes/theory_components.py::_normalize_source_scope`` と同じ規約）。component_id が
+    UUID として不正・component が存在しない・document が特定できない場合はすべて
+    安全側（不可）に倒す。
+    """
+    session = _pg_session()
+    try:
+        try:
+            row = session.execute(
+                sa_text(
+                    "SELECT source_scope->>'document_id' FROM theory_components "
+                    "WHERE id = CAST(:id AS uuid)"
+                ),
+                {"id": component_id},
+            ).fetchone()
+        except Exception:
+            return False
+    finally:
+        session.close()
+    document_id = str(row[0]) if row and row[0] else None
+    if not document_id:
+        return False
+    return resolve_document_access(user_id, document_id).can_view
+
+
 def connect_tension_trace(
     user_id: str, trace_id: str, component_id: str = "", edge_id: str = "",
 ) -> dict | None:
     """確定済み tension をグラフ上の node/edge に接続する: → connected（後続フェーズ）。
 
     candidate からの直接 connect は許さない（本人の confirm を経ること。P1）。
+    ``component_id`` を指定する場合、本人が閲覧できる document に属する theory_component
+    でなければ拒否する（不正・閲覧不可な component 参照を持つ trace から、Phase P の
+    journey が閲覧不可 document の情報を漏らさないための事前検証。PN-7）。
+
+    本人が connect 操作で明示的に指定した ID は ``payload.connected_refs`` に書く。
+    LLM 候補生成時点で書かれる ``payload.target_refs``（``core/tension/worker.py``）とは
+    別キーであり、こちらは後方互換・他機能（D1-5 素朴な問いの計器化 `core/doubt/naive_signal.py`
+    等）のため変更せず引き続き追記する。Phase P の個人ネットワーク導出
+    （``core/personal_graph/derive.py``）は ``connected_refs`` のみをアンカー・橋の根拠に使い、
+    本人が接続していない LLM 候補由来の ``target_refs`` を使わない（PN-3）。
     """
     component_id = (component_id or "").strip()
     edge_id = (edge_id or "").strip()
     if not component_id and not edge_id:
+        return None
+    if component_id and not _tension_connect_component_viewable(user_id, component_id):
         return None
     session = _pg_session()
     try:
@@ -2563,14 +2607,25 @@ def connect_tension_trace(
                 UPDATE interest_traces
                 SET status = 'connected',
                     payload = jsonb_set(
-                        payload,
-                        '{target_refs}',
-                        COALESCE(payload->'target_refs', '{}'::jsonb) || jsonb_build_object(
+                        jsonb_set(
+                            payload,
+                            '{target_refs}',
+                            COALESCE(payload->'target_refs', '{}'::jsonb) || jsonb_build_object(
+                                'component_ids',
+                                COALESCE(payload->'target_refs'->'component_ids', '[]'::jsonb)
+                                    || CASE WHEN :comp <> '' THEN jsonb_build_array(CAST(:comp AS text)) ELSE '[]'::jsonb END,
+                                'edge_ids',
+                                COALESCE(payload->'target_refs'->'edge_ids', '[]'::jsonb)
+                                    || CASE WHEN :edge <> '' THEN jsonb_build_array(CAST(:edge AS text)) ELSE '[]'::jsonb END
+                            )
+                        ),
+                        '{connected_refs}',
+                        jsonb_build_object(
                             'component_ids',
-                            COALESCE(payload->'target_refs'->'component_ids', '[]'::jsonb)
+                            COALESCE(payload->'connected_refs'->'component_ids', '[]'::jsonb)
                                 || CASE WHEN :comp <> '' THEN jsonb_build_array(CAST(:comp AS text)) ELSE '[]'::jsonb END,
                             'edge_ids',
-                            COALESCE(payload->'target_refs'->'edge_ids', '[]'::jsonb)
+                            COALESCE(payload->'connected_refs'->'edge_ids', '[]'::jsonb)
                                 || CASE WHEN :edge <> '' THEN jsonb_build_array(CAST(:edge AS text)) ELSE '[]'::jsonb END
                         )
                     ),

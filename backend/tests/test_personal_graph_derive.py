@@ -7,8 +7,11 @@ DB 接続を持たない純粋関数契約（fake row=dict を直接渡してテ
 検証観点:
 - N1 引っかかり: 本人が引き受けた status（``TENSION_OWNED_STATUSES``）のみノード化。
   candidate / dismissed / unclassified は除外（PN-3）。
-- connected tension は ``target_refs`` の component_ids / edge_ids へ bridge 辺を張り、
-  ノード自身のアンカーは component を優先する。
+- connected tension は ``payload.connected_refs``（``connect_tension_trace`` が本人の
+  connect 操作でのみ書く別キー）の component_ids / edge_ids へ bridge 辺を張り、
+  ノード自身のアンカーは component を優先する。LLM 候補生成時点の
+  ``payload.target_refs`` は、たとえ非空でも connected の判定に使わない（PN-3）——
+  未接続（open/articulated 等）は status を問わず topic 粒度へ縮退する。
 - N2/N3 問い: ``learner_selected`` / ``confirmed`` かつ ``structure_anchor.status='active'``
   のみ精密アンカーを使う。``llm_candidate`` 帰属は topic 粒度へ縮退し、LLM の
   anchor_id は使わない（PN-3）。``superseded`` は除外。
@@ -130,7 +133,7 @@ class TestConnectedTensionBridge:
             kind="tension",
             status="connected",
             topic_id="topic1",
-            payload={"target_refs": {"component_ids": ["c1"], "edge_ids": ["e1"]}},
+            payload={"connected_refs": {"component_ids": ["c1"], "edge_ids": ["e1"]}},
         )
         net = build_network([trace], [], _ATLAS)
 
@@ -146,6 +149,50 @@ class TestConnectedTensionBridge:
             assert edge.from_node_id == node.id
         to_refs = sorted((e.to_ref["ref_type"], e.to_ref["ref_id"]) for e in net.edges)
         assert to_refs == [("component", "c1"), ("graph_edge", "e1")]
+
+    def test_connected_tension_ignores_llm_candidate_target_refs_even_alongside_connected_refs(self):
+        """PN-3 回帰: LLM 候補生成時点の target_refs（別 component）が payload に
+        残っていても、アンカー・橋の根拠は connected_refs（本人が connect した component）
+        だけを使う。target_refs の component は一切ノードに現れない。"""
+        trace = _trace(
+            id_="t-connected-both",
+            kind="tension",
+            status="connected",
+            topic_id="topic1",
+            payload={
+                "target_refs": {"component_ids": ["c_llm_guess"], "edge_ids": []},
+                "connected_refs": {"component_ids": ["c_user_picked"], "edge_ids": []},
+            },
+        )
+        net = build_network([trace], [], _ATLAS)
+        assert len(net.nodes) == 1
+        node = net.nodes[0]
+        assert node.anchor.anchor_type == "component"
+        assert node.anchor.anchor_id == "c_user_picked"
+
+        assert len(net.edges) == 1
+        assert net.edges[0].to_ref == {"ref_type": "component", "ref_id": "c_user_picked"}
+        # LLM 候補由来の component は edges にも一切現れない
+        all_ref_ids = {e.to_ref["ref_id"] for e in net.edges}
+        assert "c_llm_guess" not in all_ref_ids
+
+    def test_connected_tension_without_connected_refs_falls_back_to_topic(self):
+        """後方互換の fail-closed: connected_refs を持たない connect 済み行
+        （本機能未コミット時点では実データに存在しないが、将来の古いデータを想定）は
+        LLM 候補由来の target_refs があっても使わず topic 粒度へ縮退する。"""
+        trace = _trace(
+            id_="t-connected-legacy",
+            kind="tension",
+            status="connected",
+            topic_id="topic1",
+            payload={"target_refs": {"component_ids": ["c_llm_guess"], "edge_ids": []}},
+        )
+        net = build_network([trace], [], _ATLAS)
+        assert len(net.nodes) == 1
+        node = net.nodes[0]
+        assert node.anchor.anchor_type == "topic"
+        assert node.anchor.anchor_id == "topic1"
+        assert net.edges == []
 
 
 class TestUnconnectedTensionFallsBackToTopic:
@@ -170,6 +217,29 @@ class TestUnconnectedTensionFallsBackToTopic:
         assert node.anchor.anchor_type == "topic"
         assert node.anchor.anchor_id == "topic_unbound"
         assert node.anchor.atlas_node_id is None
+
+    def test_open_status_with_llm_candidate_target_refs_does_not_use_component_anchor(self):
+        """指摘1（review P1）の核心回帰: tension 候補生成時点で payload.target_refs に
+        component_ids が入っており（LLM が本人未確認のまま提案した対象）、本人が
+        confirm しただけ（confirm_tension_trace は payload を保持したまま status を
+        open/articulated に変えるだけで connect は未実施）の場合、status が 'connected'
+        でない限り target_refs を一切アンカーの根拠に使わず topic 粒度へ縮退する
+        （PN-3: 本人が接続操作をしていない LLM 帰属を根拠にしない）。"""
+        for status in ("open", "articulated", "abstracted"):
+            trace = _trace(
+                id_=f"t-{status}-llm-refs",
+                kind="tension",
+                status=status,
+                topic_id="topic1",
+                payload={"target_refs": {"component_ids": ["c_llm_guess"], "edge_ids": ["e_llm_guess"]}},
+            )
+            net = build_network([trace], [], _ATLAS)
+            assert len(net.nodes) == 1, status
+            node = net.nodes[0]
+            assert node.anchor.anchor_type == "topic", status
+            assert node.anchor.anchor_id == "topic1", status
+            # 未接続なので bridge 辺も一切張らない
+            assert net.edges == [], status
 
 
 # ---------------------------------------------------------------------------
@@ -398,7 +468,7 @@ class TestDeterministicOrdering:
     def test_edges_also_sorted_deterministically(self):
         trace = _trace(
             id_="t-connected2", kind="tension", status="connected", topic_id="topic1",
-            payload={"target_refs": {"component_ids": ["c1", "c2"], "edge_ids": ["e1"]}},
+            payload={"connected_refs": {"component_ids": ["c1", "c2"], "edge_ids": ["e1"]}},
         )
         net1 = build_network([trace], [], _ATLAS)
         net2 = build_network([dict(trace)], [], dict(_ATLAS))
@@ -410,7 +480,7 @@ class TestNoAggregateNumbers:
         traces = [
             _trace(
                 id_="t-agg", kind="tension", status="connected", topic_id="topic1",
-                payload={"target_refs": {"component_ids": ["c1"], "edge_ids": ["e1"]}},
+                payload={"connected_refs": {"component_ids": ["c1"], "edge_ids": ["e1"]}},
             ),
         ]
         reconstructions = [_recon(id_="r-agg", machine_verdict="match", self_check="agreed")]

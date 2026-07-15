@@ -1478,6 +1478,14 @@
         if (action === "approve") lsSaveTheoryComponent(component, { status: "teacher_reviewed" });
         if (action === "reject") lsRejectTheoryComponent(component);
         if (action === "endorse") lsOpenEndorsementModal(component);
+        if (action === "deliberate") {
+          if (window.Deliberation) {
+            window.Deliberation.openElement("theory_component", component.id, {
+              documentId: lsTheoryElementDocumentId(component),
+              title: component.name || "",
+            });
+          }
+        }
       });
     });
   }
@@ -2651,6 +2659,9 @@
         '<div class="ls-theory-section"><b>support</b> ' + escHtml(claim.support_status || "source_backed") + '</div>' +
         '<div class="ls-theory-section"><b>source_scope</b> <span class="ls-theory-ref">' + escHtml(scopeText) + '</span></div>' +
         '<div class="ls-theory-section"><b>evidence</b><div class="ls-theory-muted">' + escHtml(claim.evidence_text || "") + '</div></div>' +
+        '<div class="ls-theory-actions">' +
+          '<button class="admin-action-btn ls-claim-deliberate-btn" type="button" data-claim-id="' + escHtml(claim.claim_id) + '" data-document-id="' + escHtml(claim.document_id || "") + '">深く検討</button>' +
+        '</div>' +
       '</div>';
   }
 
@@ -2676,6 +2687,20 @@
     container.innerHTML =
       '<div class="ls-theory-current">Chunk #' + escHtml(chunk.chunk_index || "") + ' / 主張ビュー</div>' +
       claims.map(lsClaimCardHtml).join("");
+    // W層（要素検討ワークスペース, Phase 0）— theory_claim 要素の「深く検討」導線。
+    container.querySelectorAll(".ls-claim-deliberate-btn").forEach(function (btn) {
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var claimId = this.getAttribute("data-claim-id");
+        var documentId = this.getAttribute("data-document-id");
+        if (window.Deliberation) {
+          window.Deliberation.openElement("theory_claim", claimId, {
+            documentId: documentId,
+            title: claimId,
+          });
+        }
+      });
+    });
   }
 
   function lsLoadClaimsForChunk(chunk) {
@@ -2804,8 +2829,19 @@
           '<button class="admin-action-btn" data-theory-action="approve"' + approveDisabled + '>承認</button>' +
           '<button class="admin-action-btn" data-theory-action="reject">却下</button>' +
           '<button class="admin-action-btn" data-theory-action="endorse">説明・承認の共有</button>' +
+          '<button class="admin-action-btn" data-theory-action="deliberate">深く検討</button>' +
         '</div>' +
       '</div>';
+  }
+
+  // W層（要素検討ワークスペース, Phase 0）— theory_component 要素の「深く検討」導線で
+  // 使う document_id の解決。TheoryComponentOut.source_scope.document_id
+  // （backend/api/schemas.py の TheorySourceScope）は chunk 由来・section 由来・
+  // 「選択中コンポーネント」経路のいずれでも共通して埋まっているフィールドなので、
+  // 呼び出し元の表示スコープ（チャンク/セクション/単体）に依存せずここから直接読む。
+  function lsTheoryElementDocumentId(component) {
+    var scope = (component && component.source_scope) || {};
+    return scope.document_id || "";
   }
 
   function lsRenderTheoryPanel(chunk) {
@@ -2834,6 +2870,14 @@
           if (action === "approve") lsSaveTheoryComponent(component, { status: "teacher_reviewed" });
           if (action === "reject") lsRejectTheoryComponent(component);
           if (action === "endorse") lsOpenEndorsementModal(component);
+          if (action === "deliberate") {
+            if (window.Deliberation) {
+              window.Deliberation.openElement("theory_component", component.id, {
+                documentId: lsTheoryElementDocumentId(component),
+                title: component.name || "",
+              });
+            }
+          }
         });
       });
       return;
@@ -2867,6 +2911,14 @@
         if (action === "approve") lsSaveTheoryComponent(component, { status: "teacher_reviewed" });
         if (action === "reject") lsRejectTheoryComponent(component);
         if (action === "endorse") lsOpenEndorsementModal(component);
+        if (action === "deliberate") {
+          if (window.Deliberation) {
+            window.Deliberation.openElement("theory_component", component.id, {
+              documentId: lsTheoryElementDocumentId(component),
+              title: component.name || "",
+            });
+          }
+        }
       });
     });
   }

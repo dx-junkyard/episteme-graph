@@ -31,6 +31,7 @@ _AUDIT_CALLER_FILES = [
     _BACKEND / "api" / "routes" / "admin.py",
     _BACKEND / "api" / "routes" / "library.py",
     _BACKEND / "api" / "routes" / "versioning.py",
+    _BACKEND / "api" / "routes" / "deliberation.py",
 ]
 
 # 監査 INSERT 呼び出しのパターン（関数名 + 開き括弧の直後）。

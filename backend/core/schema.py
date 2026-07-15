@@ -457,6 +457,9 @@ AUDIT_ENTITY_SHARED_SUBSCRIPTION = "shared_subscription"
 # 教材リビジョン（document_pipeline/revision）
 AUDIT_ENTITY_REVISION_RUN = "revision_run"
 
+# W層（要素検討ワークスペース / 同一性リンク, Phase W-β）
+AUDIT_ENTITY_DELIBERATION = "deliberation"
+
 # カタログ本体（新規 entity_type はここへの追記が必須。ガードレールテスト対象）。
 AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_COMPONENT,
@@ -485,4 +488,5 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_SHARED_DELETION,
     AUDIT_ENTITY_SHARED_SUBSCRIPTION,
     AUDIT_ENTITY_REVISION_RUN,
+    AUDIT_ENTITY_DELIBERATION,
 )

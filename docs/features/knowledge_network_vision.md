@@ -183,9 +183,9 @@
 | Phase | 内容 | 依存 | 規模 |
 |---|---|---|---|
 | **W-α** | W層設計書の改訂（コード無し）: 「昇格・統合」→「リンク追加（非破壊）」の意味論、`local_expressions`、`element_annotations.kind` に `identity` / `standardization` 追加 | なし | 小（文書のみ） |
-| **W-β** | 同一性リンクの実体化: `element_identity_links` テーブル（instance ↔ shared_part、candidate/confirmed/rejected、evidence、確定者）。W層 migration 046 に同乗。旅の経路探索で traversal するため JSONB 埋め込みでなくテーブルで持つ | W層 Phase 2 | 中 |
+| **W-β** | 同一性リンクの実体化: `element_identity_links` テーブル（instance ↔ shared_part、candidate/confirmed/rejected、evidence、確定者）。**migration 048**（当初の「046 同乗」は 046/047 が他機能で使用済みのため補正。2026-07-15 実装）。旅の経路探索で traversal するため JSONB 埋め込みでなくテーブルで持つ | なし（W層 Phase 2 と独立に実装可と判明） | 中 |
 | **S** | 標準化判定 worker（§6） | W-β（annotations 置き場） | 中 |
-| **P** | 個人知識ネットワークの形式化: `core/personal_graph.py` アクセサ新設（`course_data.py` と同じ「素の dict アクセス禁止」方式）。ノード＝本人確定 trace・再構成成功から**決定論的に導出**（G層と同じ「完了フラグを持たず状態から導出」思想）。学習者 UI「わたしの地図」（atlas P層の本格化・本人のみ可視）。**旅の経路探索**: `論文ローカルグラフ → 同一性リンク → L層ハブ → atlas骨格 → 本人のノード` を非LLM・決定論的に traversal し、事実文の経路を提示（数値スコアなし・自動で開かない） | W-β、atlas | **大**（独立設計書 `personal_knowledge_network_design.md` を起草すること） |
+| **P** | 個人知識ネットワークの形式化: `core/personal_graph/` アクセサ新設（`course_data.py` と同じ「素の dict アクセス禁止」方式）。ノード＝本人確定 trace・再構成成功から**決定論的に導出**（G層と同じ「完了フラグを持たず状態から導出」思想）。学習者 UI「わたしの地図」（atlas P層の本格化・本人のみ可視）。**旅の経路探索**: `論文ローカルグラフ → 同一性リンク → L層ハブ → atlas骨格 → 本人のノード` を非LLM・決定論的に traversal し、事実文の経路を提示（数値スコアなし・自動で開かない） | W-β、atlas | **完了**（設計書 `personal_knowledge_network_design.md` 起草済み・P-0/P-1/P-2 実装済み 2026-07-14〜15） |
 | **B** | 学習者重ね合わせの集約: k-匿名（k=3）・本人確定 trace のみ →「多くの学習者がここに橋を架ける / ここで繋がりを見失う」を**橋候補**として教員レビューへ。コーパス系とは別パイプライン・別ラベル（KN-4） | P | 中 |
 
 推奨順序: W-α（即・コストゼロ）→ W層 Phase 0〜2 と W-β → S → P → B。

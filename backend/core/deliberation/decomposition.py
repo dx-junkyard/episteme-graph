@@ -264,17 +264,18 @@ def _decompose_shared_part(ref: ElementRef) -> dict[str, Any]:
         entry = session.execute(
             sa_text(
                 """
-                SELECT domain_key, entry_type, status
+                SELECT domain_key, entry_type, status, name, summary
                 FROM library_entries WHERE id = CAST(:id AS uuid) LIMIT 1
                 """
             ),
             {"id": ref.element_id},
         ).fetchone()
-        # 凍結版本文（最新の frozen version）。パイプラインが読むのは凍結版のみ（L層方針）。
+        # 凍結版本文（最新の frozen version）。retrieval が読むのは凍結版のみ（L層方針）なので、
+        # 凍結版があればそのスナップショット（content JSONB = エントリ全体）を優先表示する。
         version = session.execute(
             sa_text(
                 """
-                SELECT title, body FROM library_entry_versions
+                SELECT content, version_no FROM library_entry_versions
                 WHERE entry_id = CAST(:id AS uuid)
                 ORDER BY version_no DESC LIMIT 1
                 """
@@ -288,16 +289,20 @@ def _decompose_shared_part(ref: ElementRef) -> dict[str, Any]:
     notes: list[str] = []
     if str(entry[2] or "") == "retired":
         notes.append("retired（retrieval には出ない・P4 で保持）")
-    title = str(version[0]) if version and version[0] else ""
+    frozen_content = _json(version[0], {}) if version else {}
+    if not version:
+        notes.append("凍結版なし（draft のみ。パイプライン retrieval には未反映）")
+    name = str(entry[3] or "")
     return {
         "element_type": ELEMENT_SHARED_PART,
-        "label": title or f"shared_part:{ref.element_id[:8]}",
+        "label": name or f"shared_part:{ref.element_id[:8]}",
         "fields": {
             "domain_key": str(entry[0] or ""),
             "entry_type": str(entry[1] or ""),
             "status": str(entry[2] or ""),
-            "title": title,
-            "body": _json(version[1], {}) if version else {},
+            "name": name,
+            "summary": str(entry[4] or ""),
+            "frozen_content": frozen_content,
         },
         "notes": notes,
     }

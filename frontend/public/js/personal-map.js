@@ -1,22 +1,31 @@
-/* 個人知識ネットワーク（Phase P-1）— 「わたしの地図」UI
+/* 個人知識ネットワーク（Phase P-1 / P-2）— 「わたしの地図」UI + 旅カード
  *
- * 設計の正本: docs/features/personal_knowledge_network_design.md §9（フロント「わたしの地図」）。
- * 参照する不変条項（同 §0）: PN-1（本人のみ可視）/ PN-2（導出のみ・保存しない）/
- * PN-3（本人確定のみノード化。サーバ側 core/personal_graph/derive.py が担保）/
- * PN-4（数値を見せない。件数・%・スコアは一切描かない）/ PN-5（非LLM・決定論・自動で開かない）/
- * PN-7（fail-closed。コース文脈・トークン・骨格が無ければ機能ごと隠す）。
+ * 設計の正本: docs/features/personal_knowledge_network_design.md §9（フロント「わたしの地図」）・
+ * §6（旅の経路探索）。参照する不変条項（同 §0）: PN-1（本人のみ可視）/
+ * PN-2（導出のみ・保存しない）/ PN-3（本人確定のみノード化。サーバ側
+ * core/personal_graph/derive.py が担保）/ PN-4（数値を見せない。件数・%・スコアは
+ * 一切描かない）/ PN-5（非LLM・決定論・自動で開かない。旅も明示操作＝「ここから
+ * 旅に出る」ボタンでのみ開く）/ PN-6（同一性リンクは confirmed のみ辿る。サーバ側
+ * journey.py が担保）/ PN-7（fail-closed。コース文脈・トークン・骨格が無ければ
+ * 機能ごと隠す）。
  *
  * atlas-overlay.js の L1 描画の上に、本人の痕跡（tension/question/reconstruction、
  * および bridge 辺を張った tension の variant）を kind 別の小さな図形で重ねるだけの薄い層。
  * 既存の描画（状態ドット・いまここ・足あと・霧）は一切変更しない。atlas-minimap.js には触れない。
  *
+ * 旅カード（Phase P-2, §6/§9）: マーカー小ポップ・「まだ地図にない」トレイの各項目に
+ * 「ここから旅に出る」ボタンを追加し、journey API の結果を常に最新1枚のカードとして
+ * オーバーレイ内（トレイの近く）に表示する。fetch はボタン押下時のみ・キャッシュしない。
+ * 関連関数（fetchJourney / requestJourney / renderJourneyCard / closeJourneyCard 等）は
+ * すべて内部実装であり、公開契約（下記6メソッド）には含めない。
+ *
  * 公開契約 window.PersonalMap（呼び出し側は app.js。名前・引数は固定）:
  *   init(deps)                          — deps.openTrajectory(traceId) を登録
  *   mountControls(shellEl)              — atlas-overlay buildShell 完了時に一度だけ呼ばれる
  *   onLevelRendered(level, canvasEl)    — atlas-overlay showLevel の描画後に毎回呼ばれる
- *   onOverlayClosed()                   — atlas-overlay closeOverlay 時
+ *   onOverlayClosed()                   — atlas-overlay closeOverlay 時（旅カードも破棄する）
  *   annotateTrajectoryList(containerEl) — 問いの軌跡一覧に「地図で見る」を後付け
- *   invalidate()                        — コース切替時にキャッシュ・トグル状態を破棄
+ *   invalidate()                        — コース切替時にキャッシュ・トグル状態を破棄（旅カードも破棄する）
  */
 (() => {
   "use strict";
@@ -49,6 +58,7 @@
     toggleInputEl: null,
     legendEl: null,
     trayEl: null,
+    journeyCardEl: null, // Phase P-2: 旅カード（常に最新1枚）
     popupEl: null,
     lastCanvas: null,
     lastLevel: 1,
@@ -270,6 +280,9 @@
       text.textContent = node.label || "";
       item.appendChild(text);
 
+      const actions = document.createElement("div");
+      actions.className = "personal-map-journey-popup-actions";
+
       // init 未呼び出し（openTrajectory 未登録）なら導線を出さない
       if (state.deps && typeof state.deps.openTrajectory === "function") {
         const link = document.createElement("button");
@@ -281,8 +294,11 @@
           state.deps.openTrajectory(node.id);
           if (window.AtlasOverlay) window.AtlasOverlay.close();
         });
-        item.appendChild(link);
+        actions.appendChild(link);
       }
+      // Phase P-2: ノードから旅に出る（明示操作のみ・PN-5）
+      actions.appendChild(buildJourneyButton(node.id));
+      item.appendChild(actions);
       list.appendChild(item);
     });
     popup.appendChild(list);
@@ -311,6 +327,8 @@
       state.trayEl.hidden = true;
       state.trayEl.innerHTML = "";
     }
+    // Phase P-2: トグル OFF（コース切替による強制 OFF を含む）では旅カードも破棄する
+    if (!state.enabled) closeJourneyCard();
   }
 
   function renderTray(data) {
@@ -340,6 +358,13 @@
       row.appendChild(kindLabel);
       row.appendChild(text);
       list.appendChild(row);
+
+      // Phase P-2: 「まだ地図にない」ノードからも旅に出られる（アンカーが無くても
+      // 旅の起点にはなれる — journey.py 側で topic 粒度等へ縮退する）
+      const actionsRow = document.createElement("div");
+      actionsRow.className = "personal-map-journey-tray-actions";
+      actionsRow.appendChild(buildJourneyButton(node.id));
+      list.appendChild(actionsRow);
     });
     tray.appendChild(list);
     tray.hidden = false;
@@ -362,6 +387,11 @@
     state.enabled = true;
     updateLegendTrayVisibility();
     loadNetwork(courseId).then((data) => {
+      // コース切替後に届いた遅延応答は破棄する（別コースの UI に描画しない）。
+      // invalidate() はキャッシュ・トグル状態は消すが進行中の Promise 自体は
+      // キャンセルできないため、応答到着時に要求開始時の courseId と現在の
+      // courseId を突き合わせる（admin-lecture-studio.js のコース切替と同じ流儀）。
+      if (courseId !== state.courseId) return;
       if (!data) {
         // 401/404/失敗時は静かに OFF へ戻す（エラーバナーは出さない）
         state.enabled = false;
@@ -412,6 +442,12 @@
     tray.hidden = true;
     wrap.appendChild(tray);
 
+    // Phase P-2: 旅カード（常に最新1枚・トレイの近くに常設。§6/§9）
+    const journeyCard = document.createElement("div");
+    journeyCard.className = "personal-map-journey-card";
+    journeyCard.hidden = true;
+    wrap.appendChild(journeyCard);
+
     // 凡例（atlas-legend）の直後に差し込む。無ければフッター手前・最悪シェル末尾。
     const atlasLegend = shellEl.querySelector(".atlas-legend");
     const foot = shellEl.querySelector("#atlas-foot");
@@ -427,6 +463,7 @@
     state.toggleInputEl = checkbox;
     state.legendEl = legend;
     state.trayEl = tray;
+    state.journeyCardEl = journeyCard;
   }
 
   // 現在のコース文脈・トークンの有無からトグルの可視性を再判定する（PN-1/PN-7 fail-closed）。
@@ -471,6 +508,9 @@
     const items = containerEl.querySelectorAll("[data-trace-id]");
     if (!items.length) return;
     loadNetwork(courseId).then((data) => {
+      // コース切替後に届いた遅延応答は破棄する（別コースの軌跡一覧に誤って
+      // 「地図で見る」導線を付けない。onToggleChange と同じ courseId 突き合わせ）。
+      if (courseId !== currentCourseId()) return;
       if (!data) return; // fail-closed
       const byId = {};
       (data.nodes || []).forEach((n) => { byId[n.id] = n; });
@@ -490,6 +530,149 @@
         itemEl.appendChild(btn);
       });
     });
+  }
+
+  // -------------------------------------------------------------------
+  // 旅の経路探索（Journey, Phase P-2, §6/§9）
+  //
+  // 明示操作（「ここから旅に出る」ボタン）でのみ journey API を fetch する。
+  // キャッシュせず、ポーリングもしない（PN-5）。旅カードは常に最新1枚（atlas cues
+  // の流儀 F-2 と同じ）で、新しい旅を開くと前のカードを即座に置き換える。
+  // 404・失敗は静かに何も出さない（fail-closed。カードを空のまま隠す）。
+  // -------------------------------------------------------------------
+
+  function fetchJourney(courseId, nodeId) {
+    const t = token();
+    if (!t) return Promise.resolve(null);
+    return fetch(
+      API_BASE +
+        "/learning/courses/" +
+        encodeURIComponent(courseId) +
+        "/personal-network/journey?node_id=" +
+        encodeURIComponent(nodeId),
+      { headers: { Authorization: "Bearer " + t } }
+    )
+      .then((res) => {
+        if (!res.ok) throw new Error("journey " + res.status);
+        return res.json();
+      })
+      .catch(() => null); // fail-closed: 404/失敗は静かに何も出さない
+  }
+
+  // ref.kind === "atlas_node" のときだけリンク化する（§9）。既存の
+  // AtlasOverlay.showLevel / selectNode をそのまま使い、フォーカス演出を独自実装しない。
+  function focusAtlasNodeFromJourney(atlasNodeId) {
+    if (!atlasNodeId || !window.AtlasOverlay) return;
+    window.AtlasOverlay.showLevel(1);
+    window.AtlasOverlay.selectNode(atlasNodeId);
+  }
+
+  function closeJourneyCard() {
+    if (state.journeyCardEl) {
+      state.journeyCardEl.hidden = true;
+      state.journeyCardEl.innerHTML = "";
+    }
+  }
+
+  function renderJourneyCard(data) {
+    const card = state.journeyCardEl;
+    if (!card) return;
+    card.innerHTML = "";
+    if (!data || !Array.isArray(data.steps) || !data.steps.length) {
+      // steps が空/取得失敗なら何も出さない（fail-closed。エラーバナーは出さない）
+      card.hidden = true;
+      return;
+    }
+
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "personal-map-journey-close";
+    closeBtn.setAttribute("aria-label", "閉じる");
+    closeBtn.textContent = "×";
+    closeBtn.addEventListener("click", closeJourneyCard);
+    card.appendChild(closeBtn);
+
+    const heading = document.createElement("div");
+    heading.className = "personal-map-journey-heading";
+    heading.textContent = "旅の経路";
+    card.appendChild(heading);
+
+    // 番号なしリスト（PN-4: step 数を匂わせない）
+    const list = document.createElement("div");
+    list.className = "personal-map-journey-list";
+    data.steps.forEach((step) => {
+      const item = document.createElement("div");
+      item.className = "personal-map-journey-item";
+
+      const factText = document.createElement("span");
+      factText.className = "personal-map-journey-fact";
+      factText.textContent = step.fact || "";
+      item.appendChild(factText);
+
+      const ref = step.ref || null;
+      if (ref && ref.kind === "atlas_node" && ref.id) {
+        // atlas_node のみリンク化する（§9）
+        const link = document.createElement("button");
+        link.type = "button";
+        link.className = "personal-map-journey-ref-link";
+        link.textContent = ref.label || factText.textContent;
+        link.addEventListener("click", () => focusAtlasNodeFromJourney(ref.id));
+        item.appendChild(link);
+      } else if (ref && ref.label) {
+        // atlas_node 以外はテキスト併記のみ（リンク化しない）
+        const label = document.createElement("span");
+        label.className = "personal-map-journey-ref-label";
+        label.textContent = ref.label;
+        item.appendChild(label);
+      }
+
+      list.appendChild(item);
+    });
+    card.appendChild(list);
+
+    if (data.frontier_note) {
+      // 経路が途切れた事実をそのまま出す（警告色にしない。D層「空欄は発見」と同族・§6）
+      const frontier = document.createElement("div");
+      frontier.className = "personal-map-journey-frontier";
+      frontier.textContent = data.frontier_note;
+      card.appendChild(frontier);
+    }
+
+    if (data.truncated) {
+      const truncated = document.createElement("div");
+      truncated.className = "personal-map-journey-truncated";
+      truncated.textContent = "（途中まで）";
+      card.appendChild(truncated);
+    }
+
+    card.hidden = false;
+    if (typeof card.scrollIntoView === "function") card.scrollIntoView({ block: "nearest" });
+  }
+
+  function requestJourney(nodeId) {
+    const courseId = state.courseId;
+    if (!courseId || !nodeId) return;
+    closePopup();
+    // 旅カードは常に最新1枚 — 新しい旅を開くと前のカードは即座に置き換わる
+    closeJourneyCard();
+    fetchJourney(courseId, nodeId).then((data) => {
+      // コース切替後に届いた遅延応答は破棄する（別コースの旅カードに描画しない。
+      // onToggleChange と同じ courseId 突き合わせ）。
+      if (courseId !== state.courseId) return;
+      renderJourneyCard(data);
+    });
+  }
+
+  function buildJourneyButton(nodeId) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "personal-map-journey-btn";
+    btn.textContent = "ここから旅に出る";
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      requestJourney(nodeId);
+    });
+    return btn;
   }
 
   // -------------------------------------------------------------------
@@ -522,6 +705,9 @@
 
   function onOverlayClosed() {
     closePopup();
+    // Phase P-2: オーバーレイを閉じたら旅カードも破棄する（再オープン時に古い旅を
+    // 引き継がない。トグル状態が ON のままでも旅カードだけは毎回明示操作からやり直す）。
+    closeJourneyCard();
   }
 
   function invalidate() {
@@ -530,6 +716,7 @@
     state.courseId = "";
     if (state.toggleInputEl) state.toggleInputEl.checked = false;
     closePopup();
+    closeJourneyCard();
     updateLegendTrayVisibility();
     renderDotsLayer(state.lastCanvas);
   }

@@ -196,6 +196,10 @@ def _purge_document(session, document_id: str) -> None:
     # verification_proposals は challenges に ON DELETE CASCADE なので challenges 削除で自動的に消える。
     session.execute(sa_text("DELETE FROM epistemic_ledger WHERE document_id IN (:a, :b)"), id_forms)
     session.execute(sa_text("DELETE FROM counterfactual_sessions WHERE document_id IN (:a, :b)"), id_forms)
+    # W層 同一性リンク（migration 048）: instance 側は document への FK が無い
+    # ポリモーフィック行（同じ orphan gap パターン）。shared_part_id 側は library_entries への
+    # 実 FK があるが、library_entries 自体は document 削除で消えないため触らない。
+    session.execute(sa_text("DELETE FROM element_identity_links WHERE instance_document_id IN (:a, :b)"), id_forms)
     if target_ids:
         session.execute(sa_text("DELETE FROM challenges WHERE target_id = ANY(:ids)"), {"ids": target_ids})
         session.execute(sa_text("DELETE FROM epistemic_ledger WHERE target_id = ANY(:ids)"), {"ids": target_ids})

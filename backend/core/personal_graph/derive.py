@@ -64,15 +64,31 @@ def _tension_label(payload: dict) -> str:
 
 
 def _tension_anchor(trace: dict, topic_atlas: dict[str, str]) -> PersonalAnchor:
-    """§2: target_refs.component_ids / edge_ids が非空ならそちら、無ければ topic 粒度。"""
+    """§2: 本人が connect 操作を経た tension（``status='connected'``）のみ、
+    ``payload.connected_refs.component_ids / edge_ids`` をアンカーに使う。
+
+    ``payload.target_refs`` は使わない — tension は LLM 候補生成時点で
+    ``target_refs``（component_ids 等）が payload に書かれており（
+    ``core/tension/worker.py`` → ``candidate_to_payload``）、``confirm_tension_trace`` は
+    confirm 時にその payload をそのまま残して status だけを変える。したがって
+    ``status`` を見ずに ``target_refs`` を読むと、本人が接続操作をしていない
+    LLM 帰属の component がアンカーになってしまう（PN-3 違反）。
+
+    ``connected_refs`` は ``connect_tension_trace``（``backend/api/services.py``）が
+    connect 時に **本人が指定した component_id / edge_id のみ**を書く別キーであり、
+    LLM 由来の ``target_refs`` とは区別される。``connected_refs`` を持たない
+    connect 済み行（本機能未コミット時点のデータには存在しないが、将来の後方互換のため）は
+    topic 粒度へ fail-closed に縮退する。
+    """
     payload = trace.get("payload") or {}
-    refs = payload.get("target_refs") or {}
-    component_ids = [str(c) for c in (refs.get("component_ids") or []) if c]
-    edge_ids = [str(e) for e in (refs.get("edge_ids") or []) if e]
-    if component_ids:
-        return PersonalAnchor(anchor_type=ANCHOR_TYPE_COMPONENT, anchor_id=component_ids[0])
-    if edge_ids:
-        return PersonalAnchor(anchor_type=ANCHOR_TYPE_GRAPH_EDGE, anchor_id=edge_ids[0])
+    if trace.get("status") == "connected":
+        refs = payload.get("connected_refs") or {}
+        component_ids = [str(c) for c in (refs.get("component_ids") or []) if c]
+        edge_ids = [str(e) for e in (refs.get("edge_ids") or []) if e]
+        if component_ids:
+            return PersonalAnchor(anchor_type=ANCHOR_TYPE_COMPONENT, anchor_id=component_ids[0])
+        if edge_ids:
+            return PersonalAnchor(anchor_type=ANCHOR_TYPE_GRAPH_EDGE, anchor_id=edge_ids[0])
     topic_id = str(trace.get("topic_id") or "")
     return PersonalAnchor(
         anchor_type=ANCHOR_TYPE_TOPIC,
@@ -96,9 +112,12 @@ def _tension_node(trace: dict, topic_atlas: dict[str, str]) -> PersonalNode:
 
 
 def _tension_bridge_edges(trace: dict) -> list[PersonalEdge]:
-    """§3: status='connected' の tension について component_ids / edge_ids の各要素へ橋を張る。"""
+    """§3: status='connected' の tension について ``connected_refs``
+    （本人が connect 操作で明示的に指定した component_ids / edge_ids のみ。
+    ``_tension_anchor`` と同じ理由で LLM 候補由来の ``target_refs`` は使わない・PN-3）
+    の各要素へ橋を張る。"""
     payload = trace.get("payload") or {}
-    refs = payload.get("target_refs") or {}
+    refs = payload.get("connected_refs") or {}
     trace_id = str(trace["id"])
     edges: list[PersonalEdge] = []
     for cid in refs.get("component_ids") or []:

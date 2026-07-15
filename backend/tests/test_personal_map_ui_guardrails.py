@@ -141,6 +141,111 @@ class TestPersonalMapModule:
         assert "達成率" not in src
 
 
+def _extract_function(src: str, name: str) -> str:
+    """personal-map.js の IIFE トップレベル関数 (2-space インデント) の本体を切り出す。
+
+    既存の全関数が `  function <name>(...) {` で始まり `  }` (2-space) で閉じる
+    様式に合わせて簡易抽出する (ネストしたブロックはより深いインデントのため
+    誤って早期終了しない)。
+    """
+    match = re.search(
+        r"\n  function " + re.escape(name) + r"\(.*?\n  \}\n", src, re.S
+    )
+    assert match, f"{name} 関数が personal-map.js に見つかりません"
+    return match.group(0)
+
+
+class TestJourneyCard:
+    """旅の経路探索 (Phase P-2) — 旅カードの静的ガードレール (§6/§9)。
+
+    journey API は明示操作 (「ここから旅に出る」ボタン) でのみ fetch する非LLM・
+    決定論の traversal 結果を表示するだけであり、書き込みを一切行わない。
+    """
+
+    def test_fetches_journey_endpoint(self):
+        """§7: journey は `.../personal-network/journey` を叩く。"""
+        src = _read(PERSONAL_MAP_JS)
+        assert "/personal-network/journey" in src
+
+    def test_journey_button_label_present(self):
+        """§9: 「ここから旅に出る」ボタンが存在する (明示操作のみ・PN-5)。"""
+        src = _read(PERSONAL_MAP_JS)
+        assert "ここから旅に出る" in src
+
+    def test_journey_fetch_is_get_only(self):
+        """journey 用 fetch 呼び出しに method 指定 (POST 等) が無いことを検証する
+        (fetch のデフォルトは GET。明示 method があれば書き込み API 化の兆候であり、
+        journey は DB 非変更の読み取り専用でなければならない)。
+        """
+        src = _read(PERSONAL_MAP_JS)
+        fn_src = _extract_function(src, "fetchJourney")
+        assert "/personal-network/journey" in fn_src
+        assert "method" not in fn_src.lower()
+
+    def test_journey_code_has_no_forbidden_vocabulary_or_polling(self):
+        """旅カード関連コードにも禁止語彙・setInterval が無いことを確認する。
+
+        test_no_polling / test_no_forbidden_vocabulary は既にファイル全体
+        (旅カードのコードを含む) を検査しているため、ここでは旅カードの
+        コードが実在した上でそれらの検査が効いていることを明示的に固定する。
+        """
+        src = _read(PERSONAL_MAP_JS)
+        assert "/personal-network/journey" in src  # 旅カードのコードが実在すること
+        assert "setInterval" not in src
+        for word in ("踏破", "達成率", "ランキング"):
+            assert word not in src
+
+    def test_journey_card_is_single_and_replaced(self):
+        """旅カードは常に最新1枚 — 新しい旅を開くと前のカードが置き換わる (§6/§9)。"""
+        src = _read(PERSONAL_MAP_JS)
+        fn_src = _extract_function(src, "requestJourney")
+        assert "closeJourneyCard" in fn_src
+
+    def test_journey_card_destroyed_on_overlay_close_toggle_off_and_invalidate(self):
+        """旅カードはオーバーレイ閉時 (onOverlayClosed) / トグル OFF / invalidate で破棄する。"""
+        src = _read(PERSONAL_MAP_JS)
+        assert "closeJourneyCard" in _extract_function(src, "onOverlayClosed")
+        assert "closeJourneyCard" in _extract_function(src, "invalidate")
+        # トグル OFF はコース切替による強制 OFF も含め updateLegendTrayVisibility に
+        # 一本化されている (state.enabled が false のときのみ破棄する)。
+        assert "closeJourneyCard" in _extract_function(src, "updateLegendTrayVisibility")
+
+    def test_atlas_node_ref_uses_existing_overlay_api(self):
+        """ref.kind === "atlas_node" のリンクは既存 AtlasOverlay API でフォーカスする
+        (独自のフォーカス演出を実装しない)。
+        """
+        src = _read(PERSONAL_MAP_JS)
+        fn_src = _extract_function(src, "focusAtlasNodeFromJourney")
+        assert "window.AtlasOverlay" in fn_src
+        assert "atlas_node" not in fn_src  # kind 判定は呼び出し側が担う
+
+
+class TestCourseSwitchRaceGuard:
+    """review 指摘4（P2）: コース切替中の非同期応答が別コースの UI に表示されるバグの回帰防止。
+
+    ``loadNetwork(courseId)`` / ``fetchJourney(courseId, nodeId)`` の消費側
+    （``onToggleChange`` / ``annotateTrajectoryList`` / ``requestJourney``）は、応答到着時に
+    要求開始時の courseId が現在の courseId と一致するかを確認し、不一致なら描画を破棄する
+    （``invalidate()`` は進行中の Promise 自体はキャンセルできないため）。
+    admin-lecture-studio.js のコース切替と同じ「遅延応答は courseId 不一致で破棄」パターン。
+    """
+
+    def test_on_toggle_change_discards_stale_course_response(self):
+        src = _read(PERSONAL_MAP_JS)
+        fn_src = _extract_function(src, "onToggleChange")
+        assert "courseId !== state.courseId" in fn_src
+
+    def test_annotate_trajectory_list_discards_stale_course_response(self):
+        src = _read(PERSONAL_MAP_JS)
+        fn_src = _extract_function(src, "annotateTrajectoryList")
+        assert "courseId !== currentCourseId()" in fn_src
+
+    def test_request_journey_discards_stale_course_response(self):
+        src = _read(PERSONAL_MAP_JS)
+        fn_src = _extract_function(src, "requestJourney")
+        assert "courseId !== state.courseId" in fn_src
+
+
 class TestAtlasOverlayIntegration:
     """atlas-overlay.js からの PersonalMap 参照はすべてガード形で行われている。"""
 

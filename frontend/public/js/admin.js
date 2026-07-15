@@ -1014,7 +1014,9 @@
             (fig.page ? ' <span style="font-weight:400;color:var(--color-text-tertiary);font-size:11px">p.' + escHtml(fig.page) + '</span>' : "") +
           '</div>' +
           '<div style="font-size:12px;color:var(--color-text-secondary);margin:4px 0">' + escHtml(fig.caption_text || "(captionなし)") + '</div>' +
-          '<div style="margin-bottom:6px">' + figureExtractionBadge(fig.extraction_method) + '</div>' +
+          '<div style="margin-bottom:6px">' + figureExtractionBadge(fig.extraction_method) +
+            ' <button class="admin-action-btn figure-deliberate-btn" type="button" data-figure-id="' + escHtml(fig.id) + '" style="font-size:11px;padding:2px 8px;margin-left:4px">深く検討</button>' +
+          '</div>' +
           _renderApparatusCandidates(fig) +
         '</div>' +
       '</div>';
@@ -1035,6 +1037,20 @@
           figureId: figureId,
           candidate: candidate || null,
         });
+      });
+    });
+
+    // W層（要素検討ワークスペース, Phase 0）— 図要素の「深く検討」導線。
+    body.querySelectorAll(".figure-deliberate-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var figureId = this.getAttribute("data-figure-id");
+        var fig = figures.filter(function (f) { return f.id === figureId; })[0];
+        if (window.Deliberation) {
+          window.Deliberation.openElement("figure", figureId, {
+            documentId: _figuresModalState.documentId,
+            title: (fig && (fig.figure_label || fig.figure_key)) || "",
+          });
+        }
       });
     });
   }
@@ -6350,6 +6366,10 @@
           state: state,
         });
       }
+      // W層（要素検討ワークスペース, Phase 0）— 「深く検討」統合パネルの起動。
+      if (window.Deliberation) {
+        window.Deliberation.init({ apiFetch: apiFetch, escHtml: escHtml });
+      }
     }
     initStumbles();
     initAtlas();
@@ -6778,12 +6798,20 @@
       if (!changes.length) return '<p class="eg-rev-empty">該当する変更はありません。</p>';
       return '<ul class="eg-rev-changes">' + changes.map(function (c) {
         var protectedTag = c.protected ? ' <span class="eg-rev-badge eg-rev-badge-protected">保護項目</span>' : '';
+        // W層「深く検討」導線: entity_id はこのレポート内では claim/component は
+        // パイプライン内部の artifact id であり theory_claims/theory_components の DB id と
+        // 一致する保証がない（accept 時に再生成されるため）。equation のみ独立テーブルを
+        // 持たず artifact 上の equation_id をそのまま使う設計（decomposition.py）のため、
+        // ここでは equation の変更にだけ導線を出す（claim/component/graph_edge は見送り）。
+        var deliberateTag = (c.entity_type === "equation" && c.entity_id)
+          ? ' <button class="admin-action-btn eg-rev-deliberate-btn" type="button" data-equation-id="' + escHtml(c.entity_id) + '" style="font-size:10.5px;padding:1px 6px;margin-left:6px">深く検討</button>'
+          : '';
         var src = (c.source_locations || []).map(function (s) {
           return escHtml(s.section_id || s.chunk_id || JSON.stringify(s));
         }).join(", ");
         return '<li class="eg-rev-change">' +
           '<span class="eg-rev-ctype">' + escHtml(c.change_type) + '</span> ' +
-          '<code>' + escHtml(c.entity_type) + ':' + escHtml(c.entity_id || "") + '</code>' + protectedTag +
+          '<code>' + escHtml(c.entity_type) + ':' + escHtml(c.entity_id || "") + '</code>' + protectedTag + deliberateTag +
           (c.reason ? '<div class="eg-rev-reason">理由: ' + escHtml(c.reason) + '</div>' : '') +
           (c.checkpoint_ids && c.checkpoint_ids.length ? '<div class="eg-rev-trace">checkpoint: ' + escHtml(c.checkpoint_ids.join(", ")) + '</div>' : '') +
           (c.evidence_refs && c.evidence_refs.length ? '<div class="eg-rev-trace">evidence: ' + escHtml(c.evidence_refs.join(", ")) + '</div>' : '') +
@@ -6888,6 +6916,19 @@
         b.addEventListener("click", function () {
           current.filter = this.getAttribute("data-filter");
           renderReport();
+        });
+      });
+      // W層「深く検討」導線（equation のみ。上の changesHtml のコメント参照）。
+      rep.querySelectorAll(".eg-rev-deliberate-btn").forEach(function (b) {
+        b.addEventListener("click", function (e) {
+          e.stopPropagation();
+          var equationId = this.getAttribute("data-equation-id");
+          if (window.Deliberation) {
+            window.Deliberation.openElement("equation", equationId, {
+              documentId: current.documentId,
+              title: "数式 " + equationId,
+            });
+          }
         });
       });
     }
