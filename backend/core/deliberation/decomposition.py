@@ -174,7 +174,10 @@ def _decompose_figure(ref: ElementRef) -> dict[str, Any]:
                 SELECT figure_label, caption_text, page, status,
                        extraction_method, caption_block_id, document_id, figure_key,
                        suggested_mode, reviewed_mode, mode_reason, mode_review_status,
-                       analysis_profile, bbox, inner_labels
+                       analysis_profile, bbox, inner_labels,
+                       reviewed_analysis_mode, reviewed_analysis_profile,
+                       analysis_review_status, analysis_reviewed_by::text,
+                       analysis_reviewed_at, analysis_review_source_annotation_id::text
                 FROM document_figures WHERE id = CAST(:id AS uuid) LIMIT 1
                 """
             ),

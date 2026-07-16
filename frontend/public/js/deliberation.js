@@ -583,6 +583,8 @@
       escHtml(FIGURE_MODE_LABELS[mode]) + '</span>' +
       (reviewed ? '<span class="deliberation-figure-reviewed">教員確認済み</span>' :
         (status === "pending" ? '<span class="deliberation-figure-muted">AI候補・要確認</span>' : '')) +
+      (fields.analysis_source === "teacher_reviewed"
+        ? '<span class="deliberation-figure-reviewed">構成も確認済み</span>' : '') +
       '</div>' +
       (reasonText ? '<p class="deliberation-figure-mode-reason">' + escHtml(reasonText) + '</p>' : '') +
       '<div class="deliberation-mode-review">' +
@@ -596,6 +598,8 @@
         '</select>' +
         '<button id="deliberation-mode-save" type="button">保存</button>' +
         '<span id="deliberation-mode-save-status" role="status"></span>' +
+        '<button id="deliberation-figure-reanalyze" type="button">AIで図を再解析</button>' +
+        '<span id="deliberation-figure-reanalyze-status" role="status"></span>' +
       '</div>';
     if (mode === "functional_diagram") return header + _functionalDiagramHtml(_figureAnalysis(fields, mode), false);
     if (mode === "data_plot") return header + _dataPlotHtml(_figureAnalysis(fields, mode), false);
@@ -670,6 +674,7 @@
       _bindFigureImageActions();
       _bindFigureContextActions();
       _bindFigureModeReview(decomposition);
+      _bindFigureReanalysis(decomposition);
       _loadFigureImage(decomposition);
     }
   }
@@ -874,6 +879,43 @@
           if (status) status.textContent = (err && err.detail) || "保存に失敗しました";
         })
         .then(function () { save.disabled = false; });
+    });
+  }
+
+  function _bindFigureReanalysis(decomposition) {
+    var button = document.getElementById("deliberation-figure-reanalyze");
+    var status = document.getElementById("deliberation-figure-reanalyze-status");
+    var fields = (decomposition && decomposition.fields) || {};
+    var documentId = fields.document_id || decomposition.document_id || (chatState.ref && chatState.ref.documentId);
+    var figureId = decomposition.element_id || (chatState.ref && chatState.ref.elementId);
+    if (!button) return;
+    if (!documentId || !figureId) {
+      button.disabled = true;
+      if (status) status.textContent = "再解析先を特定できません";
+      return;
+    }
+    button.addEventListener("click", function () {
+      button.disabled = true;
+      if (status) status.textContent = "原図を解析中...";
+      apiFetch(
+        "/admin/documents/" + encodeURIComponent(documentId) + "/figures/" +
+          encodeURIComponent(figureId) + "/reanalyze",
+        { method: "POST" }
+      )
+        .then(_parseJsonResponse)
+        .then(function () {
+          if (status) status.textContent = "構造化候補を作成しました。内容を確認して確定してください";
+          chatState.selectedContext = null;
+          _updateSelectedContextUi();
+          return _reloadOverview();
+        })
+        .then(function () {
+          _loadAnnotations("figure", figureId, documentId);
+        })
+        .catch(function (err) {
+          if (status) status.textContent = (err && err.detail) || "図を再解析できませんでした";
+        })
+        .then(function () { button.disabled = false; });
     });
   }
 
@@ -1217,11 +1259,30 @@
 
   function _annotationBodyText(body) {
     if (typeof body === "string") return body;
+    if (body && typeof body === "object" && body.text) return String(body.text);
     try {
       return JSON.stringify(body);
     } catch (e) {
       return String(body);
     }
+  }
+
+  function _structuredFigureCandidateHtml(body) {
+    if (!body || typeof body !== "object" || body.candidate_type !== "figure_analysis") return "";
+    var mode = _normalizedFigureMode(body.presentation_mode || body.suggested_mode);
+    var analysis = body.analysis_profile || {};
+    var detail = "";
+    if (mode === "functional_diagram") detail = _functionalDiagramHtml(analysis, true);
+    else if (mode === "data_plot") detail = _dataPlotHtml(analysis, true);
+    else if (mode === "descriptive_image") detail = _descriptiveImageHtml(analysis, true);
+    else if (mode === "mixed") {
+      detail = '<section class="deliberation-figure-analysis nested"><h5>複合図</h5>' +
+        _mixedPanelsHtml({ analysis_profile: analysis }) + '</section>';
+    }
+    if (!detail) return "";
+    return '<details class="deliberation-figure-candidate-preview" open>' +
+      '<summary>再解析で検出した構成を確認（' + escHtml(FIGURE_MODE_LABELS[mode]) + '）</summary>' +
+      detail + '</details>';
   }
 
   // カード DOM の中身を注釈データから（再）構築する。commit/dismiss 成功後の
@@ -1230,6 +1291,7 @@
     ann = ann || {};
     var kindLabel = ANNOTATION_KIND_LABELS[ann.kind] || ann.kind || "";
     var isPending = ann.status !== "committed" && ann.status !== "dismissed";
+    var canCommit = ann.commit_supported !== false;
     card.setAttribute("data-annotation-id", ann.id || "");
     card.innerHTML =
       '<div class="deliberation-annotation-kind">' +
@@ -1239,12 +1301,15 @@
           : '') +
       '</div>' +
       '<div class="deliberation-annotation-body">' + escHtml(_annotationBodyText(ann.body)) + '</div>' +
+      _structuredFigureCandidateHtml(ann.body) +
       (ann.reason ? '<div class="deliberation-annotation-reason">' + escHtml(ann.reason) + '</div>' : '') +
+      (isPending && !canCommit && ann.commit_note
+        ? '<div class="deliberation-annotation-note">' + escHtml(ann.commit_note) + '</div>' : '') +
       '<div class="deliberation-annotation-error" style="display:none"></div>' +
       _annotationStatusHtml(ann.status) +
       (isPending
         ? '<div class="deliberation-annotation-actions">' +
-            '<button type="button" class="deliberation-annotation-btn commit" data-action="commit">確定</button>' +
+            (canCommit ? '<button type="button" class="deliberation-annotation-btn commit" data-action="commit">確定</button>' : '') +
             '<button type="button" class="deliberation-annotation-btn dismiss" data-action="dismiss">却下</button>' +
           '</div>'
         : '');
@@ -1261,6 +1326,7 @@
         _decideAnnotation(ann.id, "dismiss", card, commitBtn, dismissBtn);
       });
     }
+    _bindFigureContextActions(card);
   }
 
   function _buildAnnotationCard(ann) {
@@ -1280,6 +1346,7 @@
     (annotations || []).forEach(function (ann) {
       container.appendChild(_buildAnnotationCard(ann));
     });
+    if (chatState.ref && chatState.ref.elementType === "figure") _renderFigureOverlays();
   }
 
   function _decideAnnotation(id, action, card, commitBtn, dismissBtn) {
@@ -1291,6 +1358,11 @@
       .then(_parseJsonResponse)
       .then(function (data) {
         _fillAnnotationCard(card, (data && data.annotation) || {});
+        if (action === "commit" && chatState.ref && chatState.ref.elementType === "figure") {
+          return _reloadOverview().then(function () {
+            _loadAnnotations("figure", chatState.ref.elementId, chatState.ref.documentId);
+          });
+        }
       })
       .catch(function (err) {
         var errEl = card.querySelector(".deliberation-annotation-error");

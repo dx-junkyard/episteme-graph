@@ -73,6 +73,83 @@ def test_patch_requires_teacher(client_and_tokens):
     ).status_code == 403
 
 
+def test_reanalysis_requires_teacher(client_and_tokens):
+    client, student, _teacher = client_and_tokens
+    path = "/api/admin/documents/doc-1/figures/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/reanalyze"
+    assert client.post(path).status_code in (401, 403)
+    assert client.post(path, headers=_auth(student)).status_code == 403
+
+
+def test_teacher_reanalysis_returns_unconfirmed_structured_candidate(
+    client_and_tokens, monkeypatch
+):
+    client, _student, teacher = client_and_tokens
+    import routes.figure_presentation as routes
+
+    monkeypatch.setattr(
+        routes,
+        "_ensure_document_editable",
+        lambda *_args, **_kwargs: [{"document_id": "doc-canonical"}],
+    )
+    calls = []
+
+    def fake_reanalyze(document_id, figure_id, *, created_by):
+        calls.append((document_id, figure_id, created_by))
+        return {
+            "figure_id": figure_id,
+            "suggested_mode": "descriptive_image",
+            "mode_reason": "vision",
+            "analysis_profile": {"summary": "Laser の写真"},
+            "annotation": {
+                "id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                "kind": "decomposition",
+                "body": {
+                    "candidate_type": "figure_analysis",
+                    "text": "Laser の写真",
+                    "presentation_mode": "descriptive_image",
+                    "analysis_profile": {"summary": "Laser の写真"},
+                },
+                "evidence": ["原図"],
+                "reason": "vision",
+                "confidence": 0.8,
+                "status": "candidate",
+                "created_at": "2026-07-17T00:00:00+00:00",
+            },
+        }
+
+    monkeypatch.setattr(routes.figure_reanalysis, "reanalyze_figure", fake_reanalyze)
+    monkeypatch.setattr(routes, "record_review_event", lambda *args, **kwargs: None)
+    path = "/api/admin/documents/doc-1/figures/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/reanalyze"
+    response = client.post(path, headers=_auth(teacher))
+    assert response.status_code == 200
+    body = response.json()
+    assert body["suggested_mode"] == "descriptive_image"
+    assert body["annotation"]["status"] == "candidate"
+    assert body["annotation"]["commit_supported"] is True
+    assert "confidence" not in body["annotation"]
+    assert calls[0][0] == "doc-canonical"
+
+
+def test_reanalysis_limit_is_mapped_to_429(client_and_tokens, monkeypatch):
+    client, _student, teacher = client_and_tokens
+    import routes.figure_presentation as routes
+
+    monkeypatch.setattr(
+        routes,
+        "_ensure_document_editable",
+        lambda *_args, **_kwargs: [{"document_id": "doc-canonical"}],
+    )
+
+    def fail(*_args, **_kwargs):
+        raise routes.figure_reanalysis.FigureReanalysisError("上限です", kind="limit")
+
+    monkeypatch.setattr(routes.figure_reanalysis, "reanalyze_figure", fail)
+    path = "/api/admin/documents/doc-1/figures/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/reanalyze"
+    response = client.post(path, headers=_auth(teacher))
+    assert response.status_code == 429
+    assert response.json()["detail"] == "上限です"
+
+
 def test_teacher_can_review_and_clear_mode(client_and_tokens, monkeypatch):
     client, _student, teacher = client_and_tokens
     import routes.figure_presentation as routes

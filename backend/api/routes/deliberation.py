@@ -487,6 +487,7 @@ def _annotation_response(annotation: dict[str, Any]) -> dict[str, Any]:
     """候補/確定/却下注釈を API 応答用に整形する（W8: confidence は生値を返さずラベルのみ。
     ``identity_links.confidence_label`` を再利用し、W層内で閾値の定義を二重化しない）。
     """
+    commit_supported, commit_note = delib_annotations.commit_capability(annotation)
     return {
         "id": annotation["id"],
         "kind": annotation["kind"],
@@ -497,6 +498,8 @@ def _annotation_response(annotation: dict[str, Any]) -> dict[str, Any]:
         "status": annotation["status"],
         "committed_target": annotation.get("committed_target") or {},
         "created_at": annotation.get("created_at", ""),
+        "commit_supported": commit_supported,
+        "commit_note": commit_note,
     }
 
 
@@ -694,9 +697,9 @@ def commit_element_annotation(
 ) -> dict[str, Any]:
     """候補注釈を確定し、既存構造へルーティングする（``_ensure_document_editable``）。
 
-    v1 は3経路のみ（interpretation→C層 explanation / meaning・decomposition→
-    theory_components 更新 / identity→identity_link 候補作成）。positioning_note /
-    standardization は 422「この種別のコミットは未対応（後続フェーズ）」を返す。
+    theory_component の meaning/decomposition、figure の構造化 decomposition、
+    interpretation、identity、standardization を各保存先へ反映する。UI は
+    ``commit_capability`` が false の候補には確定操作を提示しない。
     """
     existing = delib_store.get_annotation(annotation_id)
     if not existing:

@@ -9,6 +9,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from dependencies import _require_teacher
+from core import figure_reanalysis
+from core.deliberation.identity_links import confidence_label
 from core.document_pipeline.figure_images import load_document_figures
 from core.document_pipeline.persistence import get_latest_analysis_run
 from core.figure_presentation import presentation_payload, set_reviewed_mode
@@ -157,3 +159,54 @@ def update_figure_presentation_mode(
         },
     )
     return {"figure_id": figure_id, **result}
+
+
+@router.post("/documents/{document_id}/figures/{figure_id}/reanalyze")
+def reanalyze_document_figure(
+    document_id: str,
+    figure_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """Create a structured AI candidate for one figure; never auto-confirm it."""
+    chunks = _ensure_document_editable(document_id, current_user)
+    canonical_document_id = _canonical_document_id(chunks, document_id)
+    try:
+        result = figure_reanalysis.reanalyze_figure(
+            canonical_document_id,
+            figure_id,
+            created_by=current_user.get("id"),
+        )
+    except figure_reanalysis.FigureReanalysisError as exc:
+        status = {"not_found": 404, "limit": 429}.get(exc.kind, 422)
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    annotation = result.pop("annotation")
+    record_review_event(
+        AUDIT_ENTITY_FIGURE_PRESENTATION,
+        figure_id,
+        "",
+        "candidate",
+        current_user.get("id"),
+        {
+            "action": "figure.analysis.reanalyze",
+            "document_id": canonical_document_id,
+            "annotation_id": annotation.get("id"),
+            "suggested_mode": result.get("suggested_mode"),
+        },
+    )
+    return {
+        **result,
+        "annotation": {
+            "id": annotation.get("id"),
+            "kind": annotation.get("kind"),
+            "body": annotation.get("body") or {},
+            "evidence": annotation.get("evidence") or [],
+            "reason": annotation.get("reason") or "",
+            "confidence_label": confidence_label(annotation.get("confidence")),
+            "status": annotation.get("status"),
+            "committed_target": {},
+            "created_at": annotation.get("created_at") or "",
+            "commit_supported": True,
+            "commit_note": "",
+        },
+    }

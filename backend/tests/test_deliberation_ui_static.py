@@ -131,13 +131,14 @@ class TestDeliberationModule:
         assert "openElement:" in src
 
     def test_fetch_targets_use_exact_allowlist(self):
-        """Issue #496: deliberation API に加え、図画像取得と表示分類レビューだけを許可する。"""
+        """Issue #496: deliberation API に加え、図画像・分類レビュー・再解析だけを許可する。"""
         src = _read(DELIBERATION_JS)
         assert "/admin/deliberation/" in src
-        # document API は image_url fallback と presentation-mode の2箇所だけ。
-        assert src.count('"/admin/documents/"') == 2
+        # document API は image_url fallback・presentation-mode・reanalyze の3箇所だけ。
+        assert src.count('"/admin/documents/"') == 3
         assert '"/image"' in src
         assert '"/presentation-mode"' in src
+        assert '"/reanalyze"' in src
         idx = 0
         while True:
             idx = src.find("/admin/", idx)
@@ -182,7 +183,7 @@ class TestDeliberationDialoguePhase2:
     """面③ 対話的検討（Phase 2）固有の受け入れ条件。"""
 
     def test_write_methods_scoped_to_deliberation_dialogue(self):
-        """POST は従来経路、PATCH は図の presentation-mode 1箇所だけに限定する。"""
+        """POST は従来経路と図再解析、PATCH は図の presentation-mode 1箇所に限定する。"""
         src = _read(DELIBERATION_JS)
         for method in ("PUT", "DELETE"):
             assert f'"{method}"' not in src
@@ -569,6 +570,17 @@ class TestFigurePresentationWorkspace:
         assert 'method: "PATCH"' in src
         assert "presentation_mode: select.value || null" in src
         assert "function _reloadOverview" in src
+
+    def test_teacher_can_reanalyze_and_only_supported_candidates_show_confirm(self):
+        src = _read(DELIBERATION_JS)
+        assert "function _bindFigureReanalysis" in src
+        assert "function _structuredFigureCandidateHtml" in src
+        assert "再解析で検出した構成を確認" in src
+        assert '"/reanalyze"' in src
+        assert 'method: "POST"' in src
+        assert "ann.commit_supported !== false" in src
+        assert "ann.commit_note" in src
+        assert "body.text" in src
 
     def test_figure_layout_is_responsive_and_zoomable(self):
         css = _read(ROOT / "frontend" / "public" / "css" / "styles.css")

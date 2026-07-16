@@ -79,6 +79,7 @@ KNOWN_FEATURES = (
     "deliberation:cross_corpus",
     "deliberation:chat",
     "deliberation:vision",
+    "deliberation:figure_reanalysis",
     "deliberation:standardization",
     # --- 埋め込み ---
     "embedding:chunks",

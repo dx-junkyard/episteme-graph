@@ -595,7 +595,10 @@ def load_document_figures(document_id: str) -> list[dict]:
                        page, bbox, caption_block_id, caption_text, minio_key,
                        extraction_method, region_confidence, status, created_at, inner_labels,
                        suggested_mode, mode_reason, analysis_profile, reviewed_mode,
-                       mode_review_status, mode_reviewed_by::text, mode_reviewed_at
+                       mode_review_status, mode_reviewed_by::text, mode_reviewed_at,
+                       reviewed_analysis_mode, reviewed_analysis_profile,
+                       analysis_review_status, analysis_reviewed_by::text,
+                       analysis_reviewed_at, analysis_review_source_annotation_id::text
                 FROM document_figures
                 WHERE document_id = :document_id
                 ORDER BY page NULLS LAST, figure_key
@@ -628,6 +631,14 @@ def load_document_figures(document_id: str) -> list[dict]:
                     item["analysis_profile"] = {}
             elif not isinstance(analysis_profile, dict):
                 item["analysis_profile"] = {}
+            reviewed_profile = item.get("reviewed_analysis_profile")
+            if isinstance(reviewed_profile, str):
+                try:
+                    item["reviewed_analysis_profile"] = json.loads(reviewed_profile)
+                except (ValueError, TypeError):
+                    item["reviewed_analysis_profile"] = {}
+            elif not isinstance(reviewed_profile, dict):
+                item["reviewed_analysis_profile"] = {}
             result.append(item)
         return result
     finally:

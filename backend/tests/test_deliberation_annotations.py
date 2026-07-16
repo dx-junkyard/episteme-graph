@@ -203,6 +203,81 @@ class TestCreateCandidatesFromDialogue:
         )
         assert result == []
 
+    def test_figure_free_text_candidate_is_not_persisted(self, monkeypatch):
+        monkeypatch.setattr(
+            annotations_mod.store_mod,
+            "create_annotation",
+            lambda *a, **k: pytest.fail("figure chat must not create a committable candidate"),
+        )
+        from core.deliberation.schema import ELEMENT_FIGURE, ElementRef
+
+        ref = ElementRef(
+            scope=SCOPE_DOCUMENT,
+            element_type=ELEMENT_FIGURE,
+            element_id="figure-1",
+            document_id="doc-1",
+        )
+        result = annotations_mod.create_candidates_from_dialogue(
+            ref,
+            session_id="s1",
+            raw_items=[{
+                "kind": ANNOTATION_KIND_DECOMPOSITION,
+                "body": "Laser と Detector がある",
+                "evidence": ["図中の Laser ラベル"],
+                "reason": "会話応答からの自由文",
+            }],
+            created_by="u1",
+        )
+        assert result == []
+
+
+class TestFigureCommitCapability:
+    @staticmethod
+    def _annotation(body: dict) -> dict:
+        return {
+            "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "scope": SCOPE_DOCUMENT,
+            "element_type": "figure",
+            "element_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            "document_id": "doc-1",
+            "kind": ANNOTATION_KIND_DECOMPOSITION,
+            "body": body,
+        }
+
+    def test_old_free_text_figure_candidate_is_dismiss_only(self):
+        supported, note = annotations_mod.commit_capability(
+            self._annotation({"text": "図には Laser がある"})
+        )
+        assert supported is False
+        assert "再解析" in note
+
+    def test_structured_figure_candidate_commits_reviewed_analysis(self, monkeypatch):
+        candidate = {
+            "candidate_type": "figure_analysis",
+            "text": "Laser の役割",
+            "presentation_mode": "descriptive_image",
+            "analysis_profile": {
+                "summary": "Laser の配置を示す画像",
+                "subjects": [{"id": "laser", "name": "Laser"}],
+            },
+        }
+        annotation = self._annotation(candidate)
+        supported, note = annotations_mod.commit_capability(annotation)
+        assert supported is True
+        assert note == ""
+
+        calls = []
+        monkeypatch.setattr(
+            annotations_mod,
+            "commit_reviewed_analysis",
+            lambda document_id, figure_id, body, user_id, annotation_id: calls.append(
+                (document_id, figure_id, body, user_id, annotation_id)
+            ) or {"type": "figure_analysis", "id": figure_id},
+        )
+        target = annotations_mod._commit_meaning_or_decomposition(annotation, "u1")
+        assert target["type"] == "figure_analysis"
+        assert calls[0][0:2] == ("doc-1", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+
 
 # ---------------------------------------------------------------------------
 # _route_commit: ルーティング分岐（各ハンドラを monkeypatch したフェイクで検証）

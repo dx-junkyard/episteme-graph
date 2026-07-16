@@ -43,6 +43,10 @@ from sqlalchemy import text as sa_text
 
 from core.postgres import get_session
 from core.deliberation import identity_links, store as store_mod
+from core.figure_presentation import (
+    commit_reviewed_analysis,
+    normalize_figure_analysis_candidate,
+)
 from core.deliberation.schema import (
     ANNOTATION_KIND_DECOMPOSITION,
     ANNOTATION_KIND_IDENTITY,
@@ -54,6 +58,7 @@ from core.deliberation.schema import (
     ANNOTATION_STATUS_CANDIDATE,
     ANNOTATION_STATUS_COMMITTED,
     ANNOTATION_STATUS_DISMISSED,
+    ELEMENT_FIGURE,
     ELEMENT_SHARED_PART,
     ELEMENT_THEORY_COMPONENT,
     SCOPE_DOCUMENT,
@@ -179,6 +184,19 @@ def create_candidates_from_dialogue(
         if normalized is None:
             logger.info("deliberation candidate annotation dropped: %s", error)
             continue
+        if ref.element_type == ELEMENT_FIGURE and normalized["kind"] in (
+            ANNOTATION_KIND_MEANING,
+            ANNOTATION_KIND_INTERPRETATION,
+            ANNOTATION_KIND_DECOMPOSITION,
+        ):
+            # Free-form vision chat is useful as a reply but is not a safe
+            # source for confirmed functions/ports.  Figure decomposition
+            # candidates must come from the dedicated structured re-analysis.
+            logger.info(
+                "dialogue-generated figure annotation dropped: kind=%s",
+                normalized["kind"],
+            )
+            continue
         created.append(
             store_mod.create_annotation(
                 ref,
@@ -268,9 +286,29 @@ def _commit_interpretation(annotation: dict, current_user_id: str | None) -> dic
 
 
 def _commit_meaning_or_decomposition(annotation: dict, current_user_id: str | None) -> dict:
+    if (
+        annotation["scope"] == SCOPE_DOCUMENT
+        and annotation["element_type"] == ELEMENT_FIGURE
+        and annotation["kind"] == ANNOTATION_KIND_DECOMPOSITION
+    ):
+        try:
+            target = commit_reviewed_analysis(
+                str(annotation.get("document_id") or ""),
+                str(annotation.get("element_id") or ""),
+                annotation.get("body") or {},
+                current_user_id,
+                str(annotation.get("id") or ""),
+            )
+        except ValueError as exc:
+            raise CommitRoutingError(str(exc), kind="invalid") from exc
+        if target is None:
+            raise CommitRoutingError(
+                f"figure not found: {annotation.get('element_id')}", kind="not_found"
+            )
+        return target
     if annotation["scope"] != SCOPE_DOCUMENT or annotation["element_type"] != ELEMENT_THEORY_COMPONENT:
         raise CommitRoutingError(
-            "meaning/decomposition のコミットは theory_component のみ対応です（後続フェーズ）",
+            "この意味づけ・内訳候補には確定先がありません",
             kind="unsupported",
         )
     column = "summary" if annotation["kind"] == ANNOTATION_KIND_MEANING else "teacher_notes"
@@ -382,6 +420,35 @@ _COMMIT_ROUTES = {
     ANNOTATION_KIND_IDENTITY: _commit_identity,
     ANNOTATION_KIND_STANDARDIZATION: _commit_standardization,
 }
+
+
+def commit_capability(annotation: dict) -> tuple[bool, str]:
+    """Return whether the UI may offer confirm for this exact candidate."""
+    kind = str(annotation.get("kind") or "")
+    element_type = str(annotation.get("element_type") or "")
+    scope = str(annotation.get("scope") or "")
+    if kind == ANNOTATION_KIND_INTERPRETATION:
+        if element_type == ELEMENT_THEORY_COMPONENT and scope == SCOPE_DOCUMENT:
+            return True, ""
+        return False, "この候補は現在の要素には反映できません"
+    if kind in (ANNOTATION_KIND_MEANING, ANNOTATION_KIND_DECOMPOSITION):
+        if element_type == ELEMENT_THEORY_COMPONENT and scope == SCOPE_DOCUMENT:
+            return True, ""
+        if (
+            kind == ANNOTATION_KIND_DECOMPOSITION
+            and element_type == ELEMENT_FIGURE
+            and scope == SCOPE_DOCUMENT
+        ):
+            if normalize_figure_analysis_candidate(annotation.get("body") or {}) is not None:
+                return True, ""
+            return False, "旧形式の候補です。図を再解析すると構造化候補を確定できます"
+        return False, "この候補は現在の要素には反映できません"
+    if kind == ANNOTATION_KIND_IDENTITY:
+        return (scope == SCOPE_DOCUMENT, "" if scope == SCOPE_DOCUMENT else "対象外の候補です")
+    if kind == ANNOTATION_KIND_STANDARDIZATION:
+        supported = element_type == ELEMENT_SHARED_PART and scope == SCOPE_DOMAIN
+        return supported, "" if supported else "対象外の候補です"
+    return False, "この候補はメモとして保持できますが、確定先は未実装です"
 
 
 def _route_commit(annotation: dict, current_user_id: str | None) -> dict:
