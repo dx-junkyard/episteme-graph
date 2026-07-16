@@ -13,6 +13,9 @@
         {
           "name": "ion source",
           "role": "injects charged particles into the drift tube",
+          "label_ref": "IS",
+          "expanded_name": "ion source",
+          "bbox": [120.0, 200.0, 140.0, 212.0],
           "evidence_quote": "an ion source that injects charged particles into an evacuated drift tube",
           "reason": "Explicitly named and described in the nearby text.",
           "confidence": 0.88
@@ -20,6 +23,9 @@
         {
           "name": "drift tube",
           "role": "field-free flight path between source and detector",
+          "label_ref": "DT",
+          "expanded_name": "drift tube",
+          "bbox": [220.0, 200.0, 240.0, 212.0],
           "evidence_quote": "drift tube",
           "reason": "Named in both caption and nearby text.",
           "confidence": 0.9
@@ -27,6 +33,9 @@
         {
           "name": "detector plate",
           "role": "records arrival time of each particle",
+          "label_ref": "DET",
+          "expanded_name": "detector plate",
+          "bbox": [320.0, 200.0, 345.0, 212.0],
           "evidence_quote": "A detector plate at the far end records the arrival time of each particle.",
           "reason": "Explicitly described in the nearby text.",
           "confidence": 0.85

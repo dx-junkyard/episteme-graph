@@ -62,6 +62,13 @@ class FigureImageInput:
     image_bytes: bytes | None
     nearby_text: list[str] = field(default_factory=list)
     figure_record: dict | None = None
+    # In-figure text spans extracted deterministically from the PDF text layer
+    # (figure_image_extraction stage, page coordinate system):
+    # [{"text": str, "bbox": [x0, y0, x1, y1]}, ...].
+    inner_labels: list[dict] = field(default_factory=list)
+    # Abbreviation → expansion dictionary mined from the paper body
+    # (figure_context stage), e.g. {"ECDL": "external cavity diode laser"}.
+    abbreviations: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -87,6 +94,17 @@ class LibraryCandidate:
 class ApparatusPart:
     name: str
     role: str
+    # Reference to one of ``FigureImageInput.inner_labels[].text`` (LLM output,
+    # verbatim). validator.py checks this actually exists among inner_labels.
+    label_ref: str | None = None
+    # Abbreviation expansion of label_ref/name. Deterministically derived from
+    # ``FigureImageInput.abbreviations`` by agent.py::_attach_label_grounding —
+    # never taken from the LLM (design principle #2/#4).
+    expanded_name: str = ""
+    # [x0, y0, x1, y1] in the same page coordinate system as
+    # ``document_figures.bbox``. Deterministically derived by matching
+    # label_ref against inner_labels — never taken verbatim from the LLM.
+    bbox: list | None = None
     evidence_quote: str = ""
     reason: str = ""
     confidence: float = 0.0
@@ -166,6 +184,11 @@ def _record_from_dict(d: dict) -> ApparatusRecord:
         ApparatusPart(
             name=p.get("name", ""),
             role=p.get("role", ""),
+            # New fields default when absent so older exported artifacts
+            # (produced before this extension) still round-trip (P4).
+            label_ref=(p.get("label_ref") or None),
+            expanded_name=p.get("expanded_name", "") or "",
+            bbox=list(p["bbox"]) if p.get("bbox") else None,
             evidence_quote=p.get("evidence_quote", ""),
             reason=p.get("reason", ""),
             confidence=float(p.get("confidence", 0.0) or 0.0),

@@ -314,9 +314,10 @@ class TestEpistemicItemsFromLedger:
 
 
 class TestBuildContract:
-    def test_build_returns_all_four_lens_keys_only(self):
-        # Phase 0 は cross_corpus を持たない（§4.2 は Phase 1）。存在しない要素 id を渡すと
-        # 各レンズは DB 上で見つからず fail-soft で None になるが、キー自体は必ず4つ揃う。
+    def test_build_returns_all_five_lens_keys_only(self):
+        # Phase 1 で cross_corpus（§4.2）が5番目のレンズとして加わった。存在しない要素 id を
+        # 渡すと各レンズは DB 上で見つからず（DB 接続自体が無い test 環境では例外）fail-soft で
+        # None になるが、キー自体は必ず5つ揃う。
         ref = positioning.ElementRef(
             scope="document",
             element_type="theory_claim",
@@ -324,4 +325,151 @@ class TestBuildContract:
             document_id="does-not-exist",
         )
         result = positioning.build(ref)
-        assert set(result.keys()) == {"intra_document", "atlas", "endorsement", "epistemic"}
+        assert set(result.keys()) == {
+            "intra_document",
+            "cross_corpus",
+            "atlas",
+            "endorsement",
+            "epistemic",
+        }
+
+
+# ---------------------------------------------------------------------------
+# §4.2 コーパス横断（cross_corpus）— chunk-proxy 方式の純粋部
+# ---------------------------------------------------------------------------
+
+
+class TestCrossCorpusRepresentativeText:
+    """代表テキストの非LLM連結（設計書 §4.2・§15 未決2: 要約 LLM ではなく連結を採用）。"""
+
+    def test_theory_claim_joins_text_and_normalized_text(self):
+        parts = {"text": "運動量は保存される。", "normalized_text": "運動量保存則"}
+        result = positioning._cross_corpus_representative_text("theory_claim", parts)
+        assert result == "運動量は保存される。\n運動量保存則"
+
+    def test_theory_component_joins_name_and_summary(self):
+        parts = {"name": "ラグランジアン形式", "summary": "作用原理から運動方程式を導く枠組み"}
+        result = positioning._cross_corpus_representative_text("theory_component", parts)
+        assert result == "ラグランジアン形式\n作用原理から運動方程式を導く枠組み"
+
+    def test_equation_joins_plain_text_and_symbol_descriptions(self):
+        parts = {"plain_text": "F = m a", "symbol_descriptions": "F: 力、m: 質量"}
+        result = positioning._cross_corpus_representative_text("equation", parts)
+        assert result == "F = m a\nF: 力、m: 質量"
+
+    def test_figure_uses_caption_text_only(self):
+        parts = {"caption_text": "図1: 実験装置の概略図"}
+        assert positioning._cross_corpus_representative_text("figure", parts) == "図1: 実験装置の概略図"
+
+    def test_shared_part_joins_name_and_summary(self):
+        parts = {"name": "ゲージ場", "summary": "局所対称性から導入される場"}
+        result = positioning._cross_corpus_representative_text("shared_part", parts)
+        assert result == "ゲージ場\n局所対称性から導入される場"
+
+    def test_empty_parts_returns_empty_string(self):
+        assert positioning._cross_corpus_representative_text("theory_claim", {}) == ""
+
+    def test_missing_field_is_skipped_not_stringified(self):
+        # normalized_text が無いとき "None" のような文字列を連結してはいけない。
+        parts = {"text": "  Aだけがある。  "}
+        assert positioning._cross_corpus_representative_text("theory_claim", parts) == "Aだけがある。"
+
+    def test_whitespace_only_parts_returns_empty_string(self):
+        parts = {"text": "   ", "normalized_text": None}
+        assert positioning._cross_corpus_representative_text("theory_claim", parts) == ""
+
+    def test_unknown_element_type_returns_empty_string(self):
+        assert positioning._cross_corpus_representative_text("unknown_type", {"text": "x"}) == ""
+
+
+class TestCrossCorpusItemsFromResults:
+    """検索結果 → items 契約への変換（自 document 除外・label/value/document_id のみ）。"""
+
+    def test_builds_items_with_title_and_document_id(self):
+        results = [{"material_id": "mat-a", "score": 0.91, "text": "..."}]
+        documents_by_material_id = {"mat-a": {"document_id": "doc-a", "title": "論文A"}}
+        items = positioning._cross_corpus_items_from_results(results, documents_by_material_id, None)
+        assert items == [{"label": "関連する教材", "value": "論文A", "document_id": "doc-a"}]
+
+    def test_falls_back_to_material_id_when_title_missing(self):
+        results = [{"material_id": "mat-a"}]
+        documents_by_material_id = {"mat-a": {"document_id": "doc-a", "title": ""}}
+        items = positioning._cross_corpus_items_from_results(results, documents_by_material_id, None)
+        assert items[0]["value"] == "mat-a"
+
+    def test_excludes_self_document(self):
+        # exclude_material_id の一次防御に加え、material_id → document_id 変換後にも
+        # 自 document を二重に除外する（設計書 §4.2「自 document は除外」）。
+        results = [
+            {"material_id": "mat-self"},
+            {"material_id": "mat-other"},
+        ]
+        documents_by_material_id = {
+            "mat-self": {"document_id": "doc-self", "title": "自分の論文"},
+            "mat-other": {"document_id": "doc-other", "title": "他の論文"},
+        }
+        items = positioning._cross_corpus_items_from_results(
+            results, documents_by_material_id, "doc-self"
+        )
+        assert [i["document_id"] for i in items] == ["doc-other"]
+
+    def test_unresolvable_material_id_is_skipped(self):
+        results = [{"material_id": "mat-unknown"}]
+        items = positioning._cross_corpus_items_from_results(results, {}, None)
+        assert items == []
+
+    def test_empty_results_returns_empty_list(self):
+        assert positioning._cross_corpus_items_from_results([], {}, None) == []
+
+    def test_items_never_carry_score_or_confidence_keys(self):
+        # W8: 近傍検索の一致度・生数値は items に持ち出さない。
+        results = [{"material_id": "mat-a", "score": 0.99}]
+        documents_by_material_id = {"mat-a": {"document_id": "doc-a", "title": "論文A"}}
+        items = positioning._cross_corpus_items_from_results(results, documents_by_material_id, None)
+        for item in items:
+            assert set(item.keys()) == {"label", "value", "document_id"}
+
+    def test_respects_top_k_constant(self):
+        # 設計書 §4.2: 上位 k（既定5）。定数自体の値を固定する。
+        assert positioning._CROSS_CORPUS_TOP_K == 5
+
+
+class TestEquationSymbolDescriptions:
+    """SymbolRegistry（#355）artifact から equation の記号説明を連結する。"""
+
+    def test_collects_defining_and_used_symbols(self):
+        artifacts = {
+            "symbol_registry": {
+                "records": [
+                    {
+                        "canonical_symbol": "F",
+                        "defining_equation_ids": ["eq_1"],
+                        "used_in_equation_ids": [],
+                        "definition_evidence_texts": ["力を表す"],
+                    },
+                    {
+                        "canonical_symbol": "m",
+                        "defining_equation_ids": [],
+                        "used_in_equation_ids": ["eq_1"],
+                        "definition_evidence_texts": [],
+                    },
+                    {
+                        "canonical_symbol": "q",
+                        "defining_equation_ids": ["eq_2"],
+                        "used_in_equation_ids": [],
+                        "definition_evidence_texts": [],
+                    },
+                ]
+            }
+        }
+        result = positioning._equation_symbol_descriptions(artifacts, "eq_1")
+        assert "F: 力を表す" in result
+        assert "m" in result
+        assert "q" not in result
+
+    def test_no_symbol_registry_artifact_returns_empty_string(self):
+        assert positioning._equation_symbol_descriptions({}, "eq_1") == ""
+
+    def test_no_matching_records_returns_empty_string(self):
+        artifacts = {"symbol_registry": {"records": [{"canonical_symbol": "x", "defining_equation_ids": ["eq_9"]}]}}
+        assert positioning._equation_symbol_descriptions(artifacts, "eq_1") == ""

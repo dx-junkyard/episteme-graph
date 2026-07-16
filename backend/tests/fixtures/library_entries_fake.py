@@ -38,6 +38,11 @@ _ENTRY_COLUMN_ORDER = (
     "source_component_ids",
     "source_document_ids",
     "status",
+    # ガバナンス列（migration 050）。UPDATABLE_FIELDS には含まれないため
+    # _update_entry_optimistic では触らず、standardization commit 経路
+    # （core.deliberation.annotations._commit_standardization、本フェイクでは
+    # 未使用の別 UPDATE 文）でのみ更新される想定。
+    "standardization_status",
     "revision",
     "latest_version_no",
     "created_by",
@@ -136,6 +141,7 @@ class LibraryEntryTableFake:
             "source_component_ids": _as_list(p.get("source_component_ids")),
             "source_document_ids": _as_list(p.get("source_document_ids")),
             "status": "active",
+            "standardization_status": "unknown",
             "revision": 1,
             "latest_version_no": 0,
             "created_by": p.get("created_by"),

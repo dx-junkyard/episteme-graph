@@ -258,6 +258,10 @@ def build_network(
     - N4 reconstruction: revision_of チェーンの終端行のみを対象に、
       ``machine_verdict='match'`` かつ ``self_check`` が異議シグナル
       （disagreed/verdict_wrong）でなければ採用する（NULL は異議なしとして含める）。
+    - ``payload.map_excluded`` が truthy な trace（tension/question 両方）は本人が
+      「地図には反映しない」を選んだ痕跡として導出から除外する（提案書 §6。行自体は
+      保持され dismiss/supersede と同様に導出対象から外れるだけ・P4。書き込み側は別
+      エージェントが実装する既存/将来 API の責務で、本関数はこのキーを読むだけ）。
     - 出力順は nodes・edges とも (created_at, id) の決定論順。
     """
     nodes: list[PersonalNode] = []
@@ -267,6 +271,11 @@ def build_network(
     for trace in traces_sorted:
         kind = trace.get("kind")
         status = trace.get("status")
+        payload = trace.get("payload") or {}
+        if payload.get("map_excluded"):
+            # 本人が「地図には反映しない」を選んだ痕跡（提案書 §6）。行は保持されるが
+            # 個人ネットワークのノードにはしない（P4: 削除ではなく導出対象から外すだけ）。
+            continue
         if kind == "tension":
             if status not in TENSION_OWNED_STATUSES:
                 continue
@@ -307,3 +316,118 @@ def derive_personal_network(user_id: str, course_id: str) -> PersonalNetwork:
     reconstructions = queries.fetch_reconstructions(user_id, course_id)
     topic_atlas = queries.fetch_topic_atlas_binding(course_id)
     return build_network(traces, reconstructions, topic_atlas)
+
+
+# ---------------------------------------------------------------------------
+# Phase P-0.5（意味論移行, 設計書 §5.1〜5.3）
+#
+# ``build_network``（上記）は単一コーススコープの導出であり、既存の
+# ``derive_personal_network`` / ``GET /api/learning/courses/{course_id}/personal-network``
+# はそのままコースビューとして維持する（互換）。以下は本人スコープ（``/api/me/...``）の
+# 正本導出で、複数コースの痕跡を1つの個人ネットワークへ束ねる。
+# ---------------------------------------------------------------------------
+
+
+def build_person_network(
+    traces: list[dict],
+    reconstructions: list[dict],
+    atlas_by_course: dict[str, dict[str, str]],
+) -> PersonalNetwork:
+    """本人スコープの導出（純粋関数・非LLM・決定論）。設計書 §5.1/§5.2。
+
+    rows を ``course_id`` でグルーピングし、各コースについて既存 ``build_network`` を
+    そのコースの topic_atlas（``atlas_by_course.get(course_id, {})``）で呼び、返った
+    ノードに ``course_id`` をスタンプしてマージする。最後に nodes を (created_at, id) で
+    再ソートする。edges はコースIDの辞書順に連結する（決定論。edges 自体は再ソートしない
+    — ``build_network`` が既にコース内で決定論順に組み立てている）。
+
+    ``course_id`` は所有境界ではなく provenance（設計書 §5.1）: 同じユーザーの複数コースの
+    痕跡が1つのネットワークにマージされる（KN-1 egocentric の自然な帰結）。
+
+    reconstruction の revision チェーンはコース内で閉じている前提（コースをまたぐ
+    ``revision_of`` は現実に発生しない — 再構成は常に同一コースの同一 ELICIT item への
+    提出であり、item 自体がコーススコープで生成される。したがって
+    ``_reconstruction_terminal_ids`` / ``_reconstruction_chain_facts`` の遡行をコース単位
+    ``build_network`` 呼び出しに閉じ込めても、チェーンが分断される実害は無い）。
+    """
+    traces_by_course: dict[str, list[dict]] = {}
+    for trace in traces:
+        course_id = str(trace.get("course_id") or "")
+        traces_by_course.setdefault(course_id, []).append(trace)
+
+    recon_by_course: dict[str, list[dict]] = {}
+    for row in reconstructions:
+        course_id = str(row.get("course_id") or "")
+        recon_by_course.setdefault(course_id, []).append(row)
+
+    course_ids = sorted(set(traces_by_course) | set(recon_by_course))
+
+    all_nodes: list[PersonalNode] = []
+    all_edges: list[PersonalEdge] = []
+    for course_id in course_ids:
+        topic_atlas = atlas_by_course.get(course_id, {})
+        sub_network = build_network(
+            traces_by_course.get(course_id, []),
+            recon_by_course.get(course_id, []),
+            topic_atlas,
+        )
+        for node in sub_network.nodes:
+            node.course_id = course_id
+        all_nodes.extend(sub_network.nodes)
+        all_edges.extend(sub_network.edges)
+
+    all_nodes.sort(key=lambda n: (n.created_at, n.id))
+    return PersonalNetwork(nodes=all_nodes, edges=all_edges)
+
+
+def group_nodes_by_anchor(network: PersonalNetwork) -> list[dict]:
+    """同じ公共アンカーをコースごとに複製しないためのレスポンス表現（設計書 §5.2）。
+
+    キーは ``(anchor_type, anchor_id)``（``anchor_id`` が非空のノードのみ対象。topic
+    アンカーが未解決で anchor_id が空文字のノードはどのグループにも属さない）。
+
+    各グループは ``{"anchor": {...}, "node_ids": [...], "course_ids": [出現順ユニーク]}``。
+    ``anchor`` はそのグループの先頭ノード（``network.nodes`` の並び=決定論順で最初に
+    現れたノード）の ``anchor.to_dict()``。件数フィールドは付けない（PN-4）。
+
+    戻り値は ``(anchor_type, anchor_id)`` の辞書順にソートする（決定論）。
+    """
+    groups: dict[tuple[str, str], dict] = {}
+    for node in network.nodes:
+        anchor_id = node.anchor.anchor_id
+        if not anchor_id:
+            continue
+        key = (node.anchor.anchor_type, anchor_id)
+        entry = groups.get(key)
+        if entry is None:
+            entry = {
+                "anchor": node.anchor.to_dict(),
+                "node_ids": [],
+                "course_ids": [],
+            }
+            groups[key] = entry
+        entry["node_ids"].append(node.id)
+        course_id = node.course_id
+        if course_id and course_id not in entry["course_ids"]:
+            entry["course_ids"].append(course_id)
+
+    return [groups[key] for key in sorted(groups.keys())]
+
+
+def derive_person_network(user_id: str) -> PersonalNetwork:
+    """本人スコープのエントリポイント（設計書 §5、Phase P-0.5）。
+
+    ``derive_personal_network``（コーススコープ, Phase P-0）と同じ遅延 import 流儀。
+    本人の全痕跡を course_id 条件なしで読み、``build_person_network`` へ渡す。
+    """
+    from core.personal_graph import queries  # 遅延 import（理由は derive_personal_network 参照）
+
+    traces = queries.fetch_traces_for_user(user_id)
+    reconstructions = queries.fetch_reconstructions_for_user(user_id)
+    course_ids = sorted({
+        str(row.get("course_id") or "")
+        for row in (*traces, *reconstructions)
+        if row.get("course_id")
+    })
+    atlas_by_course = queries.fetch_topic_atlas_binding_for_courses(course_ids)
+    return build_person_network(traces, reconstructions, atlas_by_course)

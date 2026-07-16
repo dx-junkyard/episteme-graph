@@ -13,8 +13,14 @@ import base64
 
 from .schema import CartridgeContext, FigureImageInput, LibraryCandidate
 
-_MAX_NEARBY_TEXT_ITEMS = 6
-_MAX_NEARBY_TEXT_CHARS = 600
+# Backstop only — the upstream figure_context stage (§ image pipeline design)
+# owns the main text budget for nearby_text. These caps just guard against an
+# unexpectedly large upstream payload reaching the LLM prompt unbounded.
+_MAX_NEARBY_TEXT_ITEMS = 16
+_MAX_NEARBY_TEXT_CHARS = 1500
+
+_MAX_INNER_LABEL_HINTS = 60
+_MAX_ABBREVIATIONS = 40
 
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _JPEG_MAGIC = b"\xff\xd8\xff"
@@ -55,6 +61,40 @@ class ApparatusSemanticsInputBuilder:
         texts = [t.strip() for t in (figure.nearby_text or []) if t and t.strip()]
         return [t[:_MAX_NEARBY_TEXT_CHARS] for t in texts[:_MAX_NEARBY_TEXT_ITEMS]]
 
+    def build_inner_label_hints(self, figure: FigureImageInput) -> list[str]:
+        """Distinct in-figure label strings, order-preserving, for the prompt.
+
+        Text only (no bbox) — the LLM only ever needs to reference a label by
+        name (``ApparatusPart.label_ref``); bbox grounding happens
+        deterministically downstream in agent.py, never from the LLM.
+        """
+        hints: list[str] = []
+        seen: set[str] = set()
+        for label in figure.inner_labels or []:
+            if not isinstance(label, dict):
+                continue
+            text = str(label.get("text", "") or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            hints.append(text)
+            if len(hints) >= _MAX_INNER_LABEL_HINTS:
+                break
+        return hints
+
+    def build_abbreviations(self, figure: FigureImageInput) -> dict[str, str]:
+        """Normalized abbreviation → expansion dict, insertion-order capped."""
+        abbreviations: dict[str, str] = {}
+        for key, value in (figure.abbreviations or {}).items():
+            key = str(key).strip()
+            value = str(value).strip()
+            if not key or not value:
+                continue
+            abbreviations[key] = value
+            if len(abbreviations) >= _MAX_ABBREVIATIONS:
+                break
+        return abbreviations
+
     def build_cartridge_hints(self, cartridge: CartridgeContext | None) -> dict:
         """Optional vocabulary hints only — the agent must work identically
         (minus these hints) when ``cartridge`` is ``None`` (design principle 1)."""
@@ -62,10 +102,13 @@ class ApparatusSemanticsInputBuilder:
             return {}
         hints = cartridge.extraction_hints
         component_types: list = []
+        relation_types: list = []
         if isinstance(hints, dict):
             component_types = hints.get("component_types") or []
+            relation_types = hints.get("relation_types") or []
         return {
             "component_types": component_types,
+            "relation_types": relation_types,
             "aliases": cartridge.aliases or {},
         }
 

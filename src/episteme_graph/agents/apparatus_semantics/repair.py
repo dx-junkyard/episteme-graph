@@ -66,9 +66,16 @@ def _parse_record(
     for p in raw.get("parts", []) or []:
         if not isinstance(p, dict):
             continue
+        # label_ref is the only new field trusted from the LLM here (it names
+        # which in-figure label the part refers to). bbox / expanded_name are
+        # intentionally NOT read from raw LLM output — they are spatial /
+        # dictionary-lookup facts, deterministically attached downstream by
+        # agent.py::_attach_label_grounding (design principle #2/#4).
+        label_ref = str(p.get("label_ref") or "").strip() or None
         parts.append(ApparatusPart(
             name=str(p.get("name", "") or ""),
             role=str(p.get("role", "") or ""),
+            label_ref=label_ref,
             evidence_quote=str(p.get("evidence_quote", "") or ""),
             reason=str(p.get("reason", "") or ""),
             confidence=_safe_float(p.get("confidence", 0.0)),
@@ -165,6 +172,8 @@ class ApparatusSemanticsRepairer:
         prompt_factory: ApparatusSemanticsPromptFactory,
         validator: object,
         image_payload: dict,
+        inner_label_hints: list[str] | None = None,
+        abbreviations: dict | None = None,
     ) -> ApparatusRecord:
         candidate_ids = {c.entry_id for c in candidates}
         for attempt in range(1, _MAX_REPAIR_ATTEMPTS + 1):
@@ -175,6 +184,7 @@ class ApparatusSemanticsRepairer:
             messages = prompt_factory.build_repair_messages(
                 figure, candidate_briefs, nearby_text, cartridge_hints,
                 raw_output, validation_issues,
+                inner_label_hints=inner_label_hints, abbreviations=abbreviations,
             )
             try:
                 raw_output = llm_client.generate(messages, images=[image_payload])

@@ -143,6 +143,8 @@ AbstractionPattern によるパターンマッチングシステム（旧 `backe
 | `APPARATUS_MAX_CALLS_PER_DAY` | apparatus_semantics: vision 呼び出しの日次上限（他機能と独立） | `30` |
 | `APPARATUS_FEWSHOT_IMAGES` | apparatus_semantics: 含有承認済み例示画像の few-shot 添付 | `false` |
 | `APPARATUS_RETRIEVAL_TOP_K` | apparatus_semantics: ライブラリ凍結版 retrieval の候補数 | `5` |
+| `APPARATUS_CONTEXT_MAX_ITEMS` | apparatus_semantics: 図ごとの周辺本文（figure_context 収集）の最大ブロック数 | `12` |
+| `APPARATUS_CONTEXT_MAX_CHARS` | apparatus_semantics: 図ごとの周辺本文の合計文字数上限（トークン費用制御） | `6000` |
 | `LLM_USAGE_TRACKING_ENABLED` | U層: LLM 使用量記録の有効化（false で record() を no-op に） | `true` |
 | `LLM_USAGE_BUFFER_MAX` | U層: in-memory バッファ上限（超過は dropped_events に計上して開示） | `1000` |
 | `LLM_USAGE_FLUSH_INTERVAL_SECONDS` | U層: flusher スレッドの書込周期（秒） | `10` |

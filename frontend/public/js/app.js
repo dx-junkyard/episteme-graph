@@ -2070,7 +2070,10 @@
       if (f !== "all" && t.kind !== f) return;
       var kc = TRACE_KIND_CLS[t.kind] || "q";
       var sm = STATUS_META[t.status] || { label: t.status || "", cls: "open" };
-      html += '<div class="lx-trace ' + kc + '" data-trace-id="' + escHtml(t.id || "") + '"><div class="lx-rail"></div><div class="lx-trace-body">';
+      // data-map-excluded: 「わたしの地図」に反映しない設定の有無（Phase P-3 §6）。
+      // PersonalMap.annotateTrajectoryList がこの属性を見て「地図に戻す」チップを付ける。
+      html += '<div class="lx-trace ' + kc + '" data-trace-id="' + escHtml(t.id || "") +
+        '" data-map-excluded="' + (t.map_excluded ? "1" : "0") + '"><div class="lx-rail"></div><div class="lx-trace-body">';
       html += '<div class="lx-trace-top"><span class="lx-kind-tag">' + escHtml(TRACE_KIND_LABEL[t.kind] || t.kind || "記録") + '</span>';
       html += '<span class="lx-status-tag ' + sm.cls + '">' + escHtml(sm.label) + '</span></div>';
       html += '<div class="lx-trace-text">' + escHtml(t.text || "") + '</div>';
@@ -2988,6 +2991,9 @@
 
     // Phase P-1: コース切替で「わたしの地図」のキャッシュ・表示状態を破棄させる。
     if (window.PersonalMap) window.PersonalMap.invalidate();
+    // Phase P-3: 最上位「わたしの地図」も同様にキャッシュを破棄する（本人スコープの
+    // コース横断ネットワークだが、コース切替のたびに古い表示を残さないよう揃える）。
+    if (window.PersonalMapHome) window.PersonalMapHome.invalidate();
 
     // Re-render with clean state
     renderSidebar();
@@ -4516,6 +4522,14 @@
     initSplitHandle();
     // Phase P-1: 「わたしの地図」から問いの軌跡へ戻る導線 (openTrajectory) を一度だけ登録する。
     if (window.PersonalMap) window.PersonalMap.init({ openTrajectory: openTrajectory });
+    // Phase P-3: 最上位「わたしの地図」パネル。openTrajectory は将来のノード詳細導線用（任意）。
+    if (window.PersonalMapHome) window.PersonalMapHome.init({ openTrajectory: openTrajectory });
+    var myMapBtn = document.getElementById("my-map-btn");
+    if (myMapBtn) {
+      myMapBtn.addEventListener("click", function () {
+        if (window.PersonalMapHome) window.PersonalMapHome.open();
+      });
+    }
     await initCourseSelector();
     // 分野の地図 (Issue F-2 導線4): 初回ログイン時のみ L1 を俯瞰位置で自動表示する。
     // フラグはサーバに永続化され、再ログイン・別端末でも繰り返さない。

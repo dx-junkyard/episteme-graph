@@ -1,7 +1,10 @@
 # 個人知識ネットワーク（Personal Knowledge Network, Phase P）設計
 
-> **状態: Phase P-0 / P-1 / P-2 実装済み**（2026-07-14 起草・P-0/P-1 実装、2026-07-15 P-2 実装
-> — 本書の全フェーズ完了）。
+> **状態: Phase P-0 / P-1 / P-2 / P-0.5 / P-2拡張（コース横断）/ P-3 実装済み**
+> （2026-07-14 起草・P-0/P-1 実装、2026-07-15 P-2 実装、2026-07-16 に UX 提案書
+> `/Users/Shared/issues/episteme_graph_personal_knowledge_network_ux_proposal.md` に基づき
+> P-0.5「個人スコープへの意味論移行」/ P-2拡張「コース横断の橋」/ P-3「最上位わたしの地図」/
+> §6 訂正操作（地図には反映しない）を実装 — 詳細は本書 **§16**）。
 > P-2 実装物: `backend/core/personal_graph/journey.py`（純粋部 `build_journey` + 遅延import の
 > `journey_for_node`。`MAX_FANOUT_PER_SEGMENT=5` / `MAX_STEPS=12`）+ queries 拡張 +
 > `GET .../personal-network/journey`（GET のみ・本人のみ）+ personal-map.js 旅カード
@@ -281,6 +284,10 @@ queries.py   → SQL 読みプリミティブ（core.postgres.get_session 直読
 
 ## §7 API（`backend/api/routes/personal_map.py`、実パス `/api/learning/...`、本人のみ）
 
+> **P-0.5 追記（2026-07-16）**: 本節のコース配下 API は「コースビュー」＝互換ラッパー。
+> 正本は個人スコープの `GET /api/me/personal-network` / `GET /api/me/personal-network/journey`
+> （同ファイル `me_router`。§16 参照）。
+
 | メソッド・パス | 役割 |
 |---|---|
 | `GET /api/learning/courses/{course_id}/personal-network` | §4 の導出結果 `{nodes, edges}`（各 node は `atlas_node_id` nullable — 「まだ地図にない」はクライアント側で導出）。**非LLM・DB 非変更**。受講ゲートは `get_accessible_course_data`（既存）。集計数値なし（PN-4） |
@@ -393,11 +400,118 @@ queries.py   → SQL 読みプリミティブ（core.postgres.get_session 直読
 
 1. **誤解ノード（N5）**: `misconceptions_by_topic` に本人 confirm フローを付けてから
    ノード化するか（P1 を守る形でのみ）。
-2. **コース横断ビュー**: 同一ユーザーの複数コースの個人ネットワークを1画面に重ねるか。
-   KN-1（egocentric）とは矛盾しないが、v1 はコース単位で十分。
+2. ~~**コース横断ビュー**~~ → **§16 で解決済み**（2026-07-16）。個人スコープ正本 API
+   `/api/me/personal-network` + 最上位「わたしの地図」パネルとして実装。
 3. **weight / DecayPolicy の扱い**: 減衰を「薄くなる」表現に使うか、使わないままか。
    煽り（忘却の可視化）にならない表現が見つかるまで使わない。
 4. **時間近接エッジ**: 同セッション共起を「点線の弱い辺」として出すか。推測辺は
    KN-3 の精神に反しやすく、v1 は見送り。
 5. **journey の提示条件の詳細**: どの画面のどのノード詳細に「旅に出る」を置くか
    （atlas 導線①〜④との整合。Phase P-2 着手時に確定）。
+
+---
+
+## §16 個人スコープへの意味論移行（Phase P-0.5 / P-2拡張 / P-3、2026-07-16 実装）
+
+仕様の正本: `/Users/Shared/issues/episteme_graph_personal_knowledge_network_ux_proposal.md`。
+本書 §1 の「コース単位スコープ」を次のように**読み替える**:
+
+> 個人知識ネットワークの所有単位は常に **`user_id`（本人）**であり、`course_id` は
+> 所有境界ではなく **provenance（学習が起きた出所）+ 表示フィルター**である。
+> コース配下 API（§7）は「コースビュー」＝互換ラッパーとして維持する。
+> コースを削除・終了しても本人の痕跡は本人の地図から消えない（タイトルが引けなくなる
+> だけでノードは残る）。
+
+### P-0.5: 個人スコープの正本 API
+
+- `PersonalNode.course_id`（`kw_only`・既定 None）を追加（provenance。schema.py）。
+- `derive.build_person_network(traces, reconstructions, atlas_by_course)`（純粋関数）:
+  course_id でグルーピング → 既存 `build_network` をコースごとの topic_atlas で呼び →
+  course_id をスタンプしてマージ・(created_at, id) 再ソート。DB 起点は
+  `derive_person_network(user_id)`。queries に `fetch_traces_for_user` /
+  `fetch_reconstructions_for_user` / `fetch_topic_atlas_binding_for_courses` /
+  `fetch_course_titles` を追加。
+- `derive.group_nodes_by_anchor(network)`: 同じ公共アンカー（anchor_type, anchor_id）を
+  またぐ複数コース痕跡を1グループへ束ねるレスポンス表現（提案書 §5.2「同じ公共アンカーを
+  コースごとに複製しない」）。件数フィールドなし（PN-4）。
+- **`GET /api/me/personal-network`**（`me_router`、main.py 登録済み・nginx `/api/me/` は
+  既存 proxy）: `{nodes, edges, anchor_groups, courses:{course_id:{title}}}`。
+  クエリ: `context_type=course&context_id=`（コースビューへの投影）/ `focus_anchor_id` /
+  `include_candidate_links`（**true は 422**。候補リンクは本人確定まで含めない fail-closed。
+  opt-in の余地を作らない）。受講ゲートなし（本人自身の痕跡のみ・PN-1）。
+- **`GET /api/me/personal-network/journey?node_id=`**: コース横断の旅（下記）。
+- me_router は**読み取り専用**（書き込みメソッド禁止をガードレールで固定）。
+
+### P-2拡張: コース横断の橋（journey.py）
+
+- `build_person_journey(...)`（純粋関数）: 既存 `build_journey` と同じ5区間を全コースの
+  個人ネットワークに対して辿る。差分は3点 — [3] のフィルタが「当該コース限定」でなく
+  「can_view_document で事前フィルタ済みの viewable_document_ids」/ atlas 解決が各ノードの
+  course_id ごとの binding / [5] の兄弟探索が全コース（同一 atlas 解決 or 非topicアンカー
+  (anchor_type, anchor_id) 完全一致。後者は atlas が無くても提示）。別コースの兄弟の
+  事実文はコース名を含める（「あなたが『◯◯』で残した問い『…』もここにつながっています」。
+  タイトル不明は「以前の学習」）— 元のコース文脈と表現を失わない（提案書完了条件）。
+- `journey_for_person_node(user_id, node_id, can_view_document)`: DB 起点。
+  can_view_document が callable でなければ他インスタンス hop を**空集合**に倒す
+  （既存 journey_for_node の後方互換スキップより厳しい fail-closed）。
+- 既存 `journey_for_node`（コーススコープ）の戻り値に **`cross_course_hint`** を追加:
+  別コースに同一アンカーの兄弟が存在すれば
+  `{"fact": "以前の学習につながる道があります", "node_id": ...}`、無ければ null。
+  コース名・件数は伏せる（本人が開いたときだけコース外へ移動する。提案書 §3.2-B）。
+  hint 計算は例外を握って null に倒し、単一コースの旅を壊さない。
+
+### §6 訂正操作: 地図には反映しない / 地図に戻す
+
+- `services.set_trace_map_exclusion(user_id, trace_id, excluded)`: 本人の tension/question
+  行の `payload.map_excluded` を jsonb_set で更新（**status は触らない** — dismiss（候補の
+  当落判定）とは独立の表示除外。行削除しない・P4）。監査は `record_review_event` で
+  既存カタログ定数（tension → AUDIT_ENTITY_TENSION / question →
+  AUDIT_ENTITY_STRUCTURE_ANCHOR）に記帳。
+- `POST /api/learning/traces/{trace_id}/map-exclude` / `.../map-restore`（learning.py。
+  personal_map.py には置かない — 読み取り専用ガードレール維持）。
+- `GET .../interest-traces` の各項目に `map_excluded: bool` を付与（restore 導線用）。
+- 導出側は `build_network` が `payload.map_excluded` truthy な trace をスキップ
+  （コースビュー・個人スコープの両方に自動で効く）。
+
+### P-3: 最上位「わたしの地図」（frontend）
+
+- `personal-map-home.js`（新規・`window.PersonalMapHome`: init/open/close/invalidate）。
+  ヘッダの「わたしの地図」ボタン（`#my-map-btn`、地図ボタンの隣）から開く全画面パネル。
+  データソースは `/api/me/personal-network` のみ。常設注記
+  「この地図はあなたにだけ表示されます。成績評価には使用されません。」（提案書 §7.1）。
+- タブ3つ（提案書 §3.2 A/C/D。B「このコースでの地図」は既存 personal-map.js の担当）:
+  **いまの地図**（直近痕跡=現在地 + 同一アンカーグループ + 直近5件。巨大グラフを作らない）/
+  **問いからの旅**（question/tension 新しい順・上限20件・「すべて見る」なし）/
+  **振り返り**（月別グルーピング・件数/進捗率なし）。各ノードから「ここから旅に出る」→
+  `/api/me/.../journey` の事実文カード（常に最新1枚・ref.kind 別の種別ラベルで
+  専門家確認済み共通部品/理論構成/教材/あなたの痕跡を区別 — 提案書 §2.5）。
+  空状態は「まだ痕跡がありません。…」（空の巨大地図を見せない §3.1）。
+- `personal-map.js` 拡張: 旅カードに cross_course_hint の静かな一行 +
+  「以前の学習につながる道を見る」（押下時のみ横断版へ差し替え）/ マーカーポップに
+  「地図には反映しない」（tension/question のみ）/ 問いの軌跡の除外済み項目
+  （`data-map-excluded="1"`、付与元 app.js）に「地図に戻す」チップ。
+- fetch はすべて明示操作起点・ポーリングなし・fail-closed（失敗は「いまは表示できません」）。
+
+### ガードレール追加
+
+- `test_personal_graph_person_scope.py`（17）: 個人スコープ導出・アンカーバンドル・
+  map_excluded フィルタ・決定論。
+- `test_personal_graph_journey_person.py`（19）: 横断兄弟の事実文・閲覧不可 hop 非生成・
+  上限・`_has_cross_course_sibling`。
+- `test_personal_graph_map_ops.py`（29）: 本人行のみ・status 非変更・DELETE なし・
+  監査カタログ定数・一覧 enrich。
+- `test_personal_map_home_ui_static.py`（静的）: ポーリング禁止・禁止語彙・プライバシー
+  注記・user_id 非送信・正本 API 使用・横断/除外の結線。
+- 既存 `test_personal_graph_guardrails.py` に me_router 読み取り専用・
+  include_candidate_links fail-closed・map_excluded 語彙の検査を追加。
+
+### v1 の正直な限界
+
+- `context_type` は `course` のみ（document コンテキストは別 issue）。`cursor`
+  ページングなし（本人痕跡は数十〜数百行で全件返しても提案書の「巨大グラフ一括取得」には
+  当たらない — nodes はカード列挙用で、クライアントは局所表示のみ）。
+- 教材オープン時の「過去の理解との接続」事実文（提案書 §4.1）は旅カードの
+  cross_course_hint までで、トピック表示への自動掲出は未実装（自動で開かない原則を
+  優先。導線設計が固まったら別 issue）。
+- AI候補（tension digest / anchor digest）は地図・わたしの地図に出さない（PN-3 維持。
+  提案書 §2.5 の「AIが見つけた候補」の表示面は既存 digest UI が担う）。

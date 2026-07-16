@@ -314,6 +314,22 @@ class TestFigureApiUsesDocumentViewableGate:
     def test_admin_imports_ensure_document_viewable_from_theory_components(self):
         assert "from routes.theory_components import _ensure_document_viewable" in _ROUTE_ADMIN_SRC
 
+    def test_list_document_figures_passes_through_inner_labels_and_bbox(self):
+        """Phase 2（レビューUX）: 図の bbox / inner_labels をレスポンスにそのまま
+        passthrough する（別タスクが load_document_figures に実装する契約を信じ、
+        ここでは .get() でのデフォルト付与のみを行う）。"""
+        body = _extract_function_body(_ROUTE_ADMIN_SRC, "list_document_figures")
+        assert '"bbox": row.get("bbox")' in body
+        assert '"inner_labels": row.get("inner_labels") or []' in body
+
+    def test_list_document_figures_passes_through_apparatus_part_fields(self):
+        """apparatus_semantics の parts に Phase 2 で追加される
+        label_ref/expanded_name/bbox/evidence_quote/reason/confidence を
+        .get() 経由で passthrough する（旧 artifact にキーが無くても落ちない）。"""
+        body = _extract_function_body(_ROUTE_ADMIN_SRC, "list_document_figures")
+        for key in ("label_ref", "expanded_name", "bbox", "evidence_quote", "reason", "confidence"):
+            assert f'"{key}": p.get("{key}"' in body, f"parts passthrough missing key {key}"
+
 
 # ===========================================================================
 # 5. ライブラリに行削除APIが無い・retired が retrieval に出ない

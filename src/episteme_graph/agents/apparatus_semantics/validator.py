@@ -32,19 +32,41 @@ def _source_text(figure: FigureImageInput) -> str:
     return " ".join(parts)
 
 
-class ApparatusSemanticsValidator:
-    def validate(self, result: ApparatusSemanticsResult) -> list[ValidationIssue]:
-        """Aggregate, context-free validation over the full result.
+def _inner_label_texts(figure: FigureImageInput) -> list[str]:
+    """Distinct, order-preserving in-figure label strings for one figure."""
+    texts: list[str] = []
+    for label in figure.inner_labels or []:
+        if not isinstance(label, dict):
+            continue
+        text = str(label.get("text", "") or "").strip()
+        if text and text not in texts:
+            texts.append(text)
+    return texts
 
-        This is the *second*, coarser pass run once at the end of
-        ``agent.run()`` — the figure/candidate-aware checks (evidence quote
-        entailment, matched_library_entry_id membership) already ran per
-        figure via :meth:`validate_record` with context, inline in the
-        generate → validate → repair loop.
+
+class ApparatusSemanticsValidator:
+    def validate(
+        self,
+        result: ApparatusSemanticsResult,
+        *,
+        figures_by_id: dict[str, FigureImageInput] | None = None,
+        candidate_ids_by_figure: dict[str, set[str]] | None = None,
+    ) -> list[ValidationIssue]:
+        """Aggregate validation over the full result.
+
+        ``figures_by_id`` / ``candidate_ids_by_figure`` are optional for
+        backward compatibility with context-free callers.  The agent supplies
+        both mappings so evidence and label-grounding warnings are preserved in
+        the final artifact instead of being used only transiently by the repair
+        loop (P4).
         """
         issues: list[ValidationIssue] = []
         for record in result.apparatus_records:
-            issues += self.validate_record(record)
+            issues += self.validate_record(
+                record,
+                figure=(figures_by_id or {}).get(record.figure_id),
+                candidate_ids=(candidate_ids_by_figure or {}).get(record.figure_id),
+            )
         issues += self._check_duplicate_matches(result.apparatus_records)
         return issues
 
@@ -199,6 +221,67 @@ class ApparatusSemanticsValidator:
                             "verbatim in caption/nearby text"
                         ),
                         field=f"{fid}.parts[{idx}].evidence_quote",
+                    ))
+
+            # label_ref grounding checks (Phase 1 subtask C). Both require
+            # figure context, so both are skipped entirely when figure=None —
+            # same gating as the evidence-quote checks above.
+            inner_label_texts = _inner_label_texts(figure)
+            inner_label_set = set(inner_label_texts)
+            inner_label_set_ci = {t.casefold() for t in inner_label_texts}
+            covered_ci: set[str] = set()
+
+            for idx, part in enumerate(record.parts):
+                label_ref = (part.label_ref or "").strip()
+                if not label_ref:
+                    continue
+                if not inner_label_texts:
+                    # No inner_labels for this figure at all (e.g. a raster
+                    # image with no PDF text layer) — do not error-loop the
+                    # repair cycle over something the LLM cannot verify (P4).
+                    issues.append(ValidationIssue(
+                        rule_id="label_ref_without_inner_labels",
+                        severity="warning",
+                        message=(
+                            f"{fid} part[{idx}] has label_ref {label_ref!r} but "
+                            "figure.inner_labels is empty"
+                        ),
+                        field=f"{fid}.parts[{idx}].label_ref",
+                    ))
+                    continue
+                if label_ref in inner_label_set:
+                    covered_ci.add(label_ref.casefold())
+                elif label_ref.casefold() in inner_label_set_ci:
+                    covered_ci.add(label_ref.casefold())
+                else:
+                    issues.append(ValidationIssue(
+                        rule_id="part_label_ref_not_in_inner_labels",
+                        severity="error",
+                        message=(
+                            f"{fid} part[{idx}] label_ref {label_ref!r} does not match "
+                            "any figure.inner_labels entry"
+                        ),
+                        field=f"{fid}.parts[{idx}].label_ref",
+                    ))
+
+            if inner_label_texts:
+                uncovered = [t for t in inner_label_texts if t.casefold() not in covered_ci]
+                if uncovered:
+                    # Cannot tell apparatus components from parameter/annotation
+                    # labels mechanically, so this stays a warning (kept for
+                    # human review, P4) rather than an error.
+                    shown = uncovered[:10]
+                    message = (
+                        f"{fid} has {len(uncovered)} in-figure label(s) not referenced "
+                        f"by any part: {', '.join(shown)}"
+                    )
+                    if len(uncovered) > 10:
+                        message += f" (+{len(uncovered) - 10} more)"
+                    issues.append(ValidationIssue(
+                        rule_id="inner_labels_not_covered",
+                        severity="warning",
+                        message=message,
+                        field=f"{fid}.parts",
                     ))
 
         return issues

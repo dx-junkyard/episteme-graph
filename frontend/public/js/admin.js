@@ -1040,6 +1040,16 @@
       });
     });
 
+    // Phase 2（装置図理解機能の拡張）— 図上でパーツ・図中ラベルの位置を確認するオーバーレイ。
+    body.querySelectorAll(".figure-overlay-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var figureId = this.getAttribute("data-figure-id");
+        var fig = figures.filter(function (f) { return f.id === figureId; })[0];
+        var candIdx = parseInt(this.getAttribute("data-candidate-idx"), 10);
+        if (fig) openApparatusOverlayModal(fig, candIdx);
+      });
+    });
+
     // W層（要素検討ワークスペース, Phase 0）— 図要素の「深く検討」導線。
     body.querySelectorAll(".figure-deliberate-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
@@ -1061,12 +1071,20 @@
     var html = '<div style="display:flex;flex-direction:column;gap:6px;margin-top:4px">';
     candidates.forEach(function (c, i) {
       var parts = (c.parts || []).map(function (p) {
-        return escHtml(p.name) + (p.role ? "（" + escHtml(p.role) + "）" : "");
+        var namePart = p.expanded_name ? (p.name + " = " + p.expanded_name) : p.name;
+        return escHtml(namePart) + (p.role ? "（" + escHtml(p.role) + "）" : "");
       }).join("、");
+      // 「図で確認」導線: 図の bbox があり、パーツの一部に bbox がある、または
+      // 図中ラベルが取得できている場合のみオーバーレイ表示が可能。
+      var hasPartBbox = (c.parts || []).some(function (p) { return !!p.bbox; });
+      var canOverlay = !!fig.bbox && (hasPartBbox || (fig.inner_labels && fig.inner_labels.length > 0));
       html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:var(--color-background-secondary);border-radius:4px;padding:6px 8px">' +
         '<span style="font-size:12.5px;font-weight:600;color:var(--color-text-primary)">' + escHtml(c.apparatus_name_candidate || "(未同定)") + '</span>' +
         figureMatchBadge(c.match_status) +
         (parts ? '<span style="font-size:11.5px;color:var(--color-text-tertiary)">パーツ: ' + parts + '</span>' : "") +
+        (canOverlay
+          ? '<button class="admin-action-btn figure-overlay-btn" type="button" data-figure-id="' + escHtml(fig.id) + '" data-candidate-idx="' + i + '" style="font-size:11.5px;padding:2px 8px">図で確認</button>'
+          : "") +
         '<span style="flex:1"></span>' +
         '<button class="admin-action-btn figure-promote-btn" data-figure-id="' + escHtml(fig.id) + '" data-candidate-idx="' + i + '" style="font-size:11.5px;padding:2px 8px">ライブラリへ昇格</button>' +
       '</div>';
@@ -1098,6 +1116,245 @@
       .catch(function () {
         var placeholder = img.parentNode.querySelector(".figure-thumb-placeholder");
         if (placeholder) placeholder.textContent = "表示できません";
+      });
+  }
+
+  // ── 装置候補オーバーレイ（Phase 2, 装置図理解機能の拡張・レビューUX） ─────────
+  // figures-modal の上に重ねる第2モーダル。装置候補は常に review_required 系の
+  // candidate であり、ここでは位置の確認のみを行う（確定操作は既存のライブラリ
+  // 昇格導線に委ねる。candidate-only 原則）。
+  var _apparatusOverlayState = { objectUrls: [], requestId: 0 };
+
+  function _apparatusOverlayRevokeObjectUrls() {
+    _apparatusOverlayState.objectUrls.forEach(function (u) { try { URL.revokeObjectURL(u); } catch (e) { /* noop */ } });
+    _apparatusOverlayState.objectUrls = [];
+  }
+
+  function _apparatusOverlayClose(overlay) {
+    // Invalidate an image request that may still be resolving. Without this,
+    // a slower previous request can paint its image into a newly opened modal.
+    _apparatusOverlayState.requestId += 1;
+    _apparatusOverlayRevokeObjectUrls();
+    if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
+  }
+
+  // ページ座標系(pt)の bbox を、図領域 fb（同じくページ座標系）に対する相対 % に変換する。
+  // region_render / embedded どちらの抽出方式でも同じ変換でよい（正規化のため）。
+  function _figureRelativeRect(fb, b) {
+    if (!fb || !b || fb.length < 4 || b.length < 4) return null;
+    var w = fb[2] - fb[0];
+    var h = fb[3] - fb[1];
+    if (w <= 0 || h <= 0) return null;
+    var clamp = function (v) { return Math.max(0, Math.min(100, v)); };
+    var left = clamp((b[0] - fb[0]) / w * 100);
+    var top = clamp((b[1] - fb[1]) / h * 100);
+    var right = clamp((b[2] - fb[0]) / w * 100);
+    var bottom = clamp((b[3] - fb[1]) / h * 100);
+    var width = right - left;
+    var height = bottom - top;
+    if (width <= 0 || height <= 0) return null;
+    return { left: left, top: top, width: width, height: height };
+  }
+
+  function _apparatusOverlayClearSelection(wrap) {
+    wrap.querySelectorAll(".apparatus-overlay-box").forEach(function (b) {
+      var isUnmatched = b.className.indexOf("apparatus-overlay-box-unmatched") !== -1;
+      b.style.borderColor = isUnmatched ? "var(--color-text-tertiary)" : "var(--color-text-info)";
+      b.style.borderWidth = "2px";
+    });
+  }
+
+  function _apparatusOverlaySelectPart(wrap, box, p) {
+    _apparatusOverlayClearSelection(wrap);
+    box.style.borderColor = "var(--color-text-danger)";
+    box.style.borderWidth = "3px";
+    var detail = document.getElementById("apparatus-overlay-detail");
+    if (!detail) return;
+    var roleText = p.role ? escHtml(p.role) : "本文根拠なし（画像からの推定のみ）";
+    var evidenceText = p.evidence_quote ? escHtml(p.evidence_quote) : "本文根拠なし（画像からの推定のみ）";
+    var html = '<div style="font-weight:600;color:var(--color-text-primary);margin-bottom:2px">' +
+      escHtml(p.name || "") + (p.expanded_name ? " = " + escHtml(p.expanded_name) : "") + '</div>';
+    if (p.label_ref) {
+      html += '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-bottom:2px">図中ラベル: ' + escHtml(p.label_ref) + '</div>';
+    }
+    html += '<div style="margin-bottom:2px"><span style="color:var(--color-text-tertiary)">役割: </span>' + roleText + '</div>';
+    html += '<div style="margin-bottom:2px"><span style="color:var(--color-text-tertiary)">根拠: </span>' + evidenceText + '</div>';
+    if (p.reason) {
+      html += '<div style="font-size:11.5px;color:var(--color-text-tertiary)">推定理由: ' + escHtml(p.reason) + '</div>';
+    }
+    detail.innerHTML = html;
+  }
+
+  function _apparatusOverlaySelectLabel(wrap, box, text) {
+    _apparatusOverlayClearSelection(wrap);
+    box.style.borderColor = "var(--color-text-danger)";
+    box.style.borderWidth = "3px";
+    var detail = document.getElementById("apparatus-overlay-detail");
+    if (!detail) return;
+    detail.innerHTML = '<div>未対応の図中ラベル: ' + escHtml(text || "") + '</div>';
+  }
+
+  function _renderApparatusOverlayBoxes(figBbox, parts, innerLabels) {
+    var wrap = document.getElementById("apparatus-overlay-imgwrap");
+    if (!wrap) return;
+    wrap.querySelectorAll(".apparatus-overlay-box").forEach(function (b) { b.remove(); });
+
+    // label_ref に一致する（完全一致・大文字小文字無視）図中ラベルは part 側の
+    // ボックスでカバーされるため、未対応ラベルの薄色ボックスからは除外する。
+    var referencedLabels = {};
+    (parts || []).forEach(function (p) {
+      if (p.label_ref) referencedLabels[String(p.label_ref).toLowerCase()] = true;
+    });
+
+    (parts || []).forEach(function (p) {
+      if (!p.bbox) return;
+      var rect = _figureRelativeRect(figBbox, p.bbox);
+      if (!rect) return;
+      var box = document.createElement("div");
+      box.className = "apparatus-overlay-box";
+      box.title = p.name || "";
+      box.style.cssText = "position:absolute;box-sizing:border-box;cursor:pointer;" +
+        "left:" + rect.left + "%;top:" + rect.top + "%;width:" + rect.width + "%;height:" + rect.height + "%;" +
+        "border:2px solid var(--color-text-info);background:rgba(55,138,221,0.08)";
+      box.addEventListener("click", function (e) {
+        e.stopPropagation();
+        _apparatusOverlaySelectPart(wrap, box, p);
+      });
+      wrap.appendChild(box);
+    });
+
+    (innerLabels || []).forEach(function (lbl) {
+      if (!lbl || !lbl.bbox) return;
+      var text = lbl.text || "";
+      if (text && referencedLabels[String(text).toLowerCase()]) return;
+      var rect = _figureRelativeRect(figBbox, lbl.bbox);
+      if (!rect) return;
+      var box = document.createElement("div");
+      box.className = "apparatus-overlay-box apparatus-overlay-box-unmatched";
+      box.title = text;
+      box.style.cssText = "position:absolute;box-sizing:border-box;cursor:pointer;" +
+        "left:" + rect.left + "%;top:" + rect.top + "%;width:" + rect.width + "%;height:" + rect.height + "%;" +
+        "border:2px dashed var(--color-text-tertiary);background:rgba(174,174,178,0.08)";
+      box.addEventListener("click", function (e) {
+        e.stopPropagation();
+        _apparatusOverlaySelectLabel(wrap, box, text);
+      });
+      wrap.appendChild(box);
+    });
+  }
+
+  function _apparatusOverlayPartsTableHtml(parts) {
+    if (!parts.length) {
+      return '<tr><td colspan="5" style="padding:6px;color:var(--color-text-tertiary);font-size:12px">パーツ候補はありません</td></tr>';
+    }
+    return parts.map(function (p) {
+      return '<tr style="border-bottom:1px solid var(--color-border-tertiary)">' +
+        '<td style="padding:4px 6px;font-size:12px;color:var(--color-text-secondary)">' + escHtml(p.label_ref || "—") + '</td>' +
+        '<td style="padding:4px 6px;font-size:12px;color:var(--color-text-primary)">' + escHtml(p.name || "") + '</td>' +
+        '<td style="padding:4px 6px;font-size:12px;color:var(--color-text-primary)">' + escHtml(p.expanded_name || "") + '</td>' +
+        '<td style="padding:4px 6px;font-size:12px;color:var(--color-text-secondary)">' + escHtml(p.role || "本文根拠なし（画像からの推定のみ）") + '</td>' +
+        '<td style="padding:4px 6px;font-size:11.5px;color:var(--color-text-tertiary)">' + escHtml(p.evidence_quote || "本文根拠なし（画像からの推定のみ）") + '</td>' +
+      '</tr>';
+    }).join("");
+  }
+
+  // fig: figures 一覧中の1件。candidateIdx: fig.apparatus_candidates のインデックス。
+  function openApparatusOverlayModal(fig, candidateIdx) {
+    _apparatusOverlayRevokeObjectUrls();
+    var requestId = ++_apparatusOverlayState.requestId;
+
+    var candidate = (fig.apparatus_candidates && fig.apparatus_candidates[candidateIdx]) || null;
+    var parts = (candidate && candidate.parts) || [];
+    var figBbox = fig.bbox || null;
+    var innerLabels = fig.inner_labels || [];
+    var figLabel = fig.figure_label || fig.figure_key || "図";
+    var nameCandidate = (candidate && candidate.apparatus_name_candidate) || "(未同定)";
+
+    var existing = document.getElementById("apparatus-overlay-modal");
+    if (existing) existing.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = "apparatus-overlay-modal";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;z-index:10000";
+
+    var imgWrapHtml =
+      '<div id="apparatus-overlay-imgwrap" style="position:relative;background:var(--color-background-secondary);border-radius:4px;overflow:hidden;min-height:220px;display:flex;align-items:center;justify-content:center">' +
+        '<img id="apparatus-overlay-img" style="display:none;width:100%;height:auto" alt="">' +
+        '<span id="apparatus-overlay-img-placeholder" style="font-size:12px;color:var(--color-text-tertiary)">読込中...</span>' +
+      '</div>';
+
+    var bodyHtml;
+    if (figBbox) {
+      bodyHtml = imgWrapHtml;
+    } else {
+      bodyHtml = imgWrapHtml +
+        '<p style="font-size:11.5px;color:var(--color-text-warning);margin:8px 0">位置情報なし（bbox 未取得） — 図内の位置と対応付けできないため、一覧表示のみです。</p>' +
+        '<div style="overflow-x:auto">' +
+          '<table style="width:100%;border-collapse:collapse">' +
+            '<thead><tr style="text-align:left;border-bottom:1px solid var(--color-border-tertiary)">' +
+              '<th style="padding:4px 6px;font-size:11.5px;color:var(--color-text-tertiary)">ラベル</th>' +
+              '<th style="padding:4px 6px;font-size:11.5px;color:var(--color-text-tertiary)">名称</th>' +
+              '<th style="padding:4px 6px;font-size:11.5px;color:var(--color-text-tertiary)">展開名</th>' +
+              '<th style="padding:4px 6px;font-size:11.5px;color:var(--color-text-tertiary)">役割</th>' +
+              '<th style="padding:4px 6px;font-size:11.5px;color:var(--color-text-tertiary)">根拠</th>' +
+            '</tr></thead>' +
+            '<tbody>' + _apparatusOverlayPartsTableHtml(parts) + '</tbody>' +
+          '</table>' +
+        '</div>';
+    }
+
+    overlay.innerHTML =
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:20px;min-width:560px;max-width:820px;max-height:88vh;display:flex;flex-direction:column">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">' +
+          '<h3 style="margin:0;font-size:15px;color:var(--color-text-primary)">' + escHtml(figLabel) + ' — ' + escHtml(nameCandidate) + '</h3>' +
+          '<button id="apparatus-overlay-close" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
+        '</div>' +
+        '<p style="font-size:11.5px;color:var(--color-text-tertiary);margin:0 0 10px">装置候補（レビュー待ち） — AIによる推定であり、確定はライブラリへの昇格操作でのみ行われます。</p>' +
+        '<div style="overflow-y:auto;flex:1">' + bodyHtml + '</div>' +
+        '<div id="apparatus-overlay-detail" style="margin-top:10px;border-top:1px solid var(--color-border-tertiary);padding-top:8px;font-size:12.5px;color:var(--color-text-secondary);min-height:20px">クリックしてパーツや図中ラベルの詳細を確認できます。</div>' +
+      '</div>';
+
+    document.body.appendChild(overlay);
+
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) _apparatusOverlayClose(overlay); });
+    overlay.querySelector("#apparatus-overlay-close").addEventListener("click", function () { _apparatusOverlayClose(overlay); });
+
+    // 画像は figures-modal のサムネイルと同じ流儀（apiFetchRaw → blob → objectURL）で取得する。
+    var path = fig.image_url || "";
+    if (path.indexOf("/api/") === 0) path = path.substring(4);
+    apiFetchRaw(path, { _noJson: true })
+      .then(function (res) {
+        if (!res.ok) throw new Error("image load failed");
+        return res.blob();
+      })
+      .then(function (blob) {
+        if (requestId !== _apparatusOverlayState.requestId || !overlay.parentNode) return;
+        var url = URL.createObjectURL(blob);
+        _apparatusOverlayState.objectUrls.push(url);
+        var img = overlay.querySelector("#apparatus-overlay-img");
+        if (!img) return;
+        var wrap = overlay.querySelector("#apparatus-overlay-imgwrap");
+        if (wrap) {
+          // The positioning container must match the rendered image box.
+          // The loading min-height/flex layout would offset percentage bboxes.
+          wrap.style.minHeight = "0";
+          wrap.style.display = "block";
+        }
+        img.style.display = "block";
+        var placeholder = overlay.querySelector("#apparatus-overlay-img-placeholder");
+        if (placeholder) placeholder.remove();
+        if (figBbox) {
+          img.addEventListener("load", function () {
+            if (requestId !== _apparatusOverlayState.requestId || !overlay.parentNode) return;
+            _renderApparatusOverlayBoxes(figBbox, parts, innerLabels);
+          });
+        }
+        img.src = url;
+      })
+      .catch(function () {
+        if (requestId !== _apparatusOverlayState.requestId || !overlay.parentNode) return;
+        var placeholder = overlay.querySelector("#apparatus-overlay-img-placeholder");
+        if (placeholder) placeholder.textContent = "画像を表示できません";
       });
   }
 

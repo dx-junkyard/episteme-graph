@@ -91,6 +91,19 @@
   // パネル DOM
   // -------------------------------------------------------------------------
 
+  // 常設フローティング起動ボタン（右下）。以前この位置は通知ベル（🔔）が占めていたが、
+  // 「AI アシスタントへのアクセスを良くする」ため位置を入れ替え、通知はトップバーへ移した。
+  function buildToggleButton() {
+    toggleBtn = document.createElement("button");
+    toggleBtn.id = "admin-copilot-toggle";
+    toggleBtn.type = "button";
+    toggleBtn.className = "admin-assistant-fab";
+    toggleBtn.title = "管理画面の操作を手伝う AI アシスタント";
+    toggleBtn.innerHTML = "🤖";
+    toggleBtn.addEventListener("click", togglePanel);
+    document.body.appendChild(toggleBtn);
+  }
+
   function buildPanel() {
     panelEl = document.createElement("div");
     panelEl.className = "admin-assistant-panel";
@@ -451,9 +464,7 @@
     deps.activateTabView = options.activateTabView || null;
 
     buildPanel();
-
-    toggleBtn = document.getElementById("admin-copilot-toggle");
-    if (toggleBtn) toggleBtn.addEventListener("click", togglePanel);
+    buildToggleButton();
 
     initialized = true;
   }

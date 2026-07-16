@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Episteme Graph — 管理画面</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-  <link rel="stylesheet" href="/css/styles.css?v=field-atlas-20260713-1">
+  <link rel="stylesheet" href="/css/styles.css?v=copilot-fab-20260716-1">
   <script defer src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
 </head>
 <body>
@@ -22,7 +22,7 @@
         <span style="opacity:.3">|</span>
         <span id="admin-username"></span>
         <button id="admin-next-steps-toggle" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px" title="状態から導出した次のタスク">📋 次にやること</button>
-        <button id="admin-copilot-toggle" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px" title="管理画面の操作を手伝う AI アシスタント">🤖 操作アシスタント</button>
+        <button id="vg-inbox-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px" title="共有物の更新通知">🔔 通知</button>
         <span style="opacity:.3">|</span>
         <button id="logout-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px">ログアウト</button>
       </div>
@@ -862,11 +862,11 @@
   <script src="/js/atlas-draft-preview.js?v=atlas-editor-20260707-1"></script>
   <script src="/js/atlas-assist-panel.js?v=atlas-editor-20260707-1"></script>
   <!-- 横断ユーティリティ層（Admin Copilot）— 統合 AI アシスタント -->
-  <script src="/js/admin-assistant.js?v=admin-copilot-20260707-1"></script>
+  <script src="/js/admin-assistant.js?v=copilot-fab-20260716-1"></script>
   <!-- G層（ガイダンス層）— 状態導出型 Next Steps バッジ + パネル -->
-  <script src="/js/admin-next-steps.js?v=field-atlas-20260713-1"></script>
+  <script src="/js/admin-next-steps.js?v=copilot-fab-20260716-1"></script>
   <!-- V層（共有物のバージョン管理 + 更新通知 + 削除猶予, migration 037）-->
-  <script src="/js/versioning.js?v=versioning-20260709-1"></script>
+  <script src="/js/versioning.js?v=copilot-fab-20260716-1"></script>
   <!-- 原稿スタジオ（Lecture Script Studio, Issue #70）— admin.js から分離（Tier 3-17b） -->
   <script src="/js/admin-lecture-studio.js?v=ls-split-20260713-1"></script>
   <!-- W層（要素検討ワークスペース, Phase 0）— 「深く検討」統合パネル -->

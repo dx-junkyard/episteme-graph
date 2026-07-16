@@ -767,11 +767,30 @@ PDF 内の画像（装置図・設計図等）を解析パイプラインに取�
   fallback（`extraction_method='embedded'|'region_render'`）。MinIO `figure-images` バケット +
   `document_figures` テーブル（`UNIQUE(document_id, figure_key)` upsert）。caption 対応が
   取れない画像も `caption_block_id=NULL` で保持（P4）。図単位の失敗は `status='failed'` で
-  非致命。
+  非致命。**図中ラベル抽出（migration 051）**: 図領域内のテキストスパンを
+  `page.get_text("words", clip=...)` で収集し、同一行・近接語をグルーピングして
+  `document_figures.inner_labels JSONB`（`[{"text","bbox":[x0,y0,x1,y1]}]`、ページ座標系）に
+  保存する（決定論・非LLM。caption ブロックと重なる語は除外。`f = 75 mm` 等の
+  パラメータ表記も落とさない、P4）。ベクター描画の図（TikZ 等）でラベルが PDF テキスト層に
+  埋まっているケース（装置模式図）のパーツ列挙グラウンディングに使う。
+- **`figure_context.py`**（`core/document_pipeline/`、非LLM・決定論的）: 図ごとの文脈収集
+  `collect_figure_context(structure, figure_row, inner_labels=...) -> FigureContext`。
+  ① caption ブロックが属するセクションの本文 ② `Fig. 5.2` 型の参照メンション段落（±1ブロック、
+  図番号は figure_label / figure_key から導出）③ `フル表記 (略語)` / `略語 (フル表記)` パターンの
+  略語辞書（inner_labels の語で引けるものに絞る）を優先度順
+  （略語定義 > caption 直近 > 参照段落 > セクション残り）に収集。上限は
+  `APPARATUS_CONTEXT_MAX_ITEMS`（既定12）/ `APPARATUS_CONTEXT_MAX_CHARS`（既定6000）。
 - **`apparatus_semantics`**（`src/episteme_graph/agents/apparatus_semantics/`、vision LLM、
   `figure_table_semantics` 直後・`analyze_images=true` のときのみ）: 画像 + caption + 近傍本文
-  + ライブラリ**凍結版**の retrieval（caption テキスト embedding → pgvector top-k、既定5）を
-  入力に、装置同定・パーツ分解を structured output で候補化。出力は常に
+  （`figure_context.py` の実収集結果。かつて `nearby_text=[]` 固定だったギャップは解消済み）
+  + 図中ラベル + 略語辞書 + ライブラリ**凍結版**の retrieval（caption + 近傍本文 + 略語展開の
+  テキスト embedding → pgvector top-k、既定5）を入力に、装置同定・パーツ分解を structured
+  output で候補化。`ApparatusPart` は `label_ref`（図中ラベルへの参照、LLM出力・validator が
+  inner_labels 実在を hard error 検査）/ `expanded_name` / `bbox` を持ち、**bbox と
+  expanded_name は agent 側で label_ref → inner_labels / abbreviations の突合により決定論的に
+  付与する（LLM 出力からは取らない）**。role は本文からの verbatim quote で裏付け、根拠のない
+  役割は書かせない（見た目の推測は reason に留める）。図中ラベルは網羅を促すがパラメータ表記
+  （`f = 75 mm`・`s-pol.` 等）はスキップ可、未カバーは warning で保持（P4）。出力は常に
   `review_status='review_required'` 系・`source_backed` を自動付与しない（確定は人間のみ）。
   off 時は `{"skipped_by_option": true}` を `stage_outputs` に正直に記録。ライブラリ 0 件でも
   単独動作（`match_status ∈ {novel, unknown}` に縮退）。参照版は
@@ -796,7 +815,11 @@ PDF 内の画像（装置図・設計図等）を解析パイプラインに取�
   （所有者以外は 403、fail-closed）。エントリ本文（テキスト）は教員全体に開示、
   画像は元 document の権限を継承。
 - **図画像 API**: `GET /api/admin/documents/{id}/figures` / `GET .../figures/{fid}/image` —
-  必ず `_ensure_document_viewable` を通す（権利 fail-closed）。
+  必ず `_ensure_document_viewable` を通す（権利 fail-closed）。figures 一覧は図の `bbox` /
+  `inner_labels` と装置候補パーツの `label_ref` / `expanded_name` / `bbox` / `evidence_quote`
+  も返し、管理UI（`admin.js` 図モーダル）が図画像上に bbox オーバーレイ（%座標 = ページ座標を
+  図 bbox で正規化。region_render / embedded 両方式で同一変換）+ パーツ詳細を表示する。
+  オーバーレイは閲覧・レビュー用で、確定操作は既存のライブラリ昇格導線のみ（candidate-only 原則）。
 - **監査**: 作成・draft 更新・凍結・retire/restore・画像含有承認を `theory_review_events`
   `entity_type='library_entry'` に記録。
 - **ガードレール**: `backend/tests/test_image_library_guardrails.py`（LLM 直接書込経路なし・
@@ -1013,6 +1036,57 @@ P7 スコア・正答率数値を学習者に見せない、REFLECT は事実文
 - **ガードレール**: `backend/tests/test_shared_versioning_guardrails.py`（core が FastAPI 非 import・
   所有者ガード・purge の orphan gap 解消・スイーパの thread+env・監査語彙・ルータ登録）他、
   `test_shared_versioning_{migration,api,logic}.py`。
+
+### 個人知識ネットワーク（Personal Knowledge Network, Phase P + P-0.5〜P-3）
+
+学習者本人の確定痕跡（tension / 帰属付き問い / 再構成成功 / connect した橋）から
+**決定論的に導出される**個人の知識ネットワーク。正本は
+`docs/features/personal_knowledge_network_design.md`（§16 に P-0.5〜P-3 の意味論移行）。
+親文書は `knowledge_network_vision.md`（KN-1〜4）。**保存物ではなく毎回導出**（PN-2）・
+**本人のみ可視**（PN-1、教員向けは Phase B の k-匿名橋候補集約
+`GET /api/admin/courses/{id}/bridge-insights` のみ）・candidate を数えない（PN-3）・
+数値を見せない（PN-4）・旅は非LLM/境界付き/明示操作のみ（PN-5）・同一性リンクは
+confirmed のみ（PN-6）・fail-closed（PN-7）。migration 不要（既存テーブルの読みのみ）。
+
+- **所有単位は本人（P-0.5, 2026-07-16）**: 個人ネットワークの所有は常に `user_id`。
+  `course_id` は所有境界ではなく **provenance（出所）+ フィルター**。正本 API は
+  `GET /api/me/personal-network`（`{nodes, edges, anchor_groups, courses}`。
+  `include_candidate_links=true` は 422 の fail-closed）と
+  `GET /api/me/personal-network/journey?node_id=`。コース配下
+  `GET /api/learning/courses/{id}/personal-network(...)` は「コースビュー」＝互換。
+  コース削除後も本人の痕跡はノードとして残る（タイトルが引けなくなるだけ）。
+- **実装**: `backend/core/personal_graph/`（schema / queries / derive / journey / graph_data /
+  bridges。FastAPI 非 import・DB 読みは queries.py に集約）+ `routes/personal_map.py`
+  （`router`=コースビュー / `me_router`=正本。**両方とも読み取り専用** — 書き込みAPIを
+  ここに作らない。ガードレールで固定）。導出純粋部（build_network /
+  build_person_network / build_journey / build_person_journey）は fake rows のみで
+  テスト可能（sqlalchemy 遅延 import）。
+- **ノード導出規則の正本は設計書 §2**: tension は `TENSION_OWNED_STATUSES` +
+  connect 済みは `payload.connected_refs` のみアンカー化（LLM 候補由来の `target_refs` は
+  使わない・PN-3）。question は本人確定 structure_anchor（llm_candidate 不使用・topic 縮退）。
+  reconstruction は revision チェーン終端の match + 非異議（opt-out 同意汲み取り）。
+  `payload.map_excluded` truthy な trace は導出から除外。
+- **旅（journey）**: 本人ノード→[1]論文ローカルグラフ→[2]confirmed 同一性リンク→
+  [3]L層ハブ(active のみ)→他インスタンス→[4]atlas 骨格→[5]本人の別ノード。
+  fan-out≤5・step≤12・事実文のみ。コーススコープの旅は当該コース sources 内限定 +
+  `cross_course_hint`（別コースに同一アンカーの兄弟がいれば「以前の学習につながる道が
+  あります」だけを返す。詳細は本人が開くまで伏せる）。コース横断版
+  （`journey_for_person_node`）は can_view_document で hop を個別 fail-closed
+  フィルタし、別コース兄弟の事実文にコース名を含める（出所を失わない）。
+- **訂正操作（提案書 §6）**: `POST /api/learning/traces/{trace_id}/map-exclude` /
+  `.../map-restore`（routes/learning.py。`payload.map_excluded` の状態遷移のみで
+  **status・行は触らない**。dismiss とは独立。監査は既存カタログ定数
+  tension/structure_anchor で記帳）。`GET .../interest-traces` 各項目に `map_excluded`。
+- **フロント**: `personal-map.js`（コースビュー: atlas トグル・kind 別ドット・
+  「まだ地図にない」トレイ・旅カード + cross_course_hint 導線 + 「地図には反映しない」
+  「地図に戻す」）と `personal-map-home.js`（P-3 最上位「わたしの地図」パネル。
+  ヘッダ `#my-map-btn` → いまの地図 / 問いからの旅 / 振り返り の3タブ +
+  `/api/me/...` の旅カード。常設注記「この地図はあなたにだけ表示されます。成績評価には
+  使用されません。」・ポーリング禁止・数値/進捗/ゲーミフィケーション表示禁止）。
+- **ガードレール**: `test_personal_graph_guardrails.py`（core 非 FastAPI・読み取り専用・
+  connected_refs・confirmed のみ・Phase B の k=3 は `core/privacy.py` 正本）+
+  `test_personal_graph_{derive,person_scope,journey,journey_person,map_ops}.py` +
+  `test_personal_map_{ui_guardrails,home_ui_static}.py`。
 
 ### 横断基盤（共有ユーティリティ、2026-07 整理で新設）
 

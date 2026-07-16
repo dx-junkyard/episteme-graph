@@ -1110,6 +1110,7 @@ def _stage_apparatus_semantics(ctx: PipelineContext) -> bool:
                     document_id=ctx.document_id,
                     cartridge_id=ctx.cartridge_id,
                     fig_tbl=ctx.fig_tbl,
+                    structure=ctx.structure,
                 )
                 ctx.save_artifact("apparatus_semantics", ctx.apparatus_result)
             except Exception as exc:
@@ -2348,6 +2349,7 @@ def _build_apparatus_semantics(
     document_id: str,
     cartridge_id: str | None,
     fig_tbl: Any,
+    structure: Any = None,
 ) -> tuple[Any, dict]:
     """apparatus_semantics ステージ本体（画像パイプライン §5-3/5-5）。
 
@@ -2355,6 +2357,8 @@ def _build_apparatus_semantics(
     bytes を取得し、ライブラリ retrieval（凍結版のみ、§6-5）で few-shot 候補を
     注入して ApparatusSemanticsAgent を実行する。上限（1 document あたり /
     日次）を超えた図は agent に渡さず ``skipped_by_limit`` として記録する (P4)。
+    ``structure``（document_structure の成果）から ``collect_figure_context``
+    で図ごとの周辺本文・略語辞書を収集し agent 入力に配線する（G1 ギャップ解消）。
 
     Returns: (ApparatusSemanticsResult, done_payload dict)
     """
@@ -2366,6 +2370,7 @@ def _build_apparatus_semantics(
         LibraryCandidate,
     )
 
+    from .figure_context import collect_figure_context
     from .figure_images import load_document_figures
 
     settings = get_settings()
@@ -2395,6 +2400,7 @@ def _build_apparatus_semantics(
 
     figure_inputs: list[FigureImageInput] = []
     skipped_by_limit: list[str] = []
+    context_collected = 0
     for idx, row in enumerate(figure_rows):
         figure_key = str(row.get("figure_key") or "")
         if idx >= max_images or daily_remaining <= 0:
@@ -2419,6 +2425,23 @@ def _build_apparatus_semantics(
             or fig_record_by_key.get(figure_key)
         )
         caption_text = str(row.get("caption_text") or "")
+        inner_labels = row.get("inner_labels") or []
+
+        try:
+            fig_context = collect_figure_context(
+                structure, row,
+                inner_labels=inner_labels,
+                max_items=settings.apparatus_context_max_items,
+                max_chars=settings.apparatus_context_max_chars,
+            )
+        except Exception:
+            logger.warning(
+                "apparatus_semantics: figure context collection failed document=%s figure=%s",
+                document_id, figure_key, exc_info=True,
+            )
+            fig_context = None
+        if fig_context and fig_context.nearby_text:
+            context_collected += 1
 
         figure_inputs.append(FigureImageInput(
             figure_id=str(row.get("id") or figure_key),
@@ -2426,8 +2449,10 @@ def _build_apparatus_semantics(
             figure_label=row.get("figure_label"),
             caption_text=caption_text,
             image_bytes=image_bytes,
-            nearby_text=[],
+            nearby_text=(fig_context.nearby_text if fig_context else []),
             figure_record=fig_record,
+            inner_labels=inner_labels,
+            abbreviations=(fig_context.abbreviations if fig_context else {}),
         ))
 
     # ライブラリ retrieval（凍結版のみ、§5-3/6-5）: cartridge が無ければ候補なしに
@@ -2442,7 +2467,11 @@ def _build_apparatus_semantics(
         if search_frozen_entries is not None:
             for fig_input in figure_inputs:
                 query_text = " ".join(
-                    t for t in [fig_input.caption_text, *(fig_input.nearby_text or [])] if t
+                    t for t in [
+                        fig_input.caption_text,
+                        *(fig_input.nearby_text or []),
+                        *sorted((fig_input.abbreviations or {}).values()),
+                    ] if t
                 ).strip()
                 if not query_text:
                     continue
@@ -2497,6 +2526,7 @@ def _build_apparatus_semantics(
         "vision_calls": vision_calls,
         "skipped_by_limit": skipped_by_limit,
         "referenced_library_versions": referenced_versions,
+        "context_collected": context_collected,
     }
     return result, done_payload
 

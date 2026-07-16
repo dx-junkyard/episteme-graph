@@ -215,6 +215,7 @@ app.include_router(reconstruction_routes.learning_router)
 app.include_router(library_routes.router)
 app.include_router(llm_usage_routes.router)
 app.include_router(personal_map_routes.router)
+app.include_router(personal_map_routes.me_router)
 
 # Tier 3-17c: 旧 routes/admin.py の `router.include_router(...)` 二段ネストを
 # フラット化。以下13ルーターは admin.router と同じ "/api/admin" prefix で

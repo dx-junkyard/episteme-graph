@@ -41,6 +41,7 @@ _OUTPUT_SCHEMA = {
         {
             "name": "string",
             "role": "string — this part's function in the apparatus",
+            "label_ref": "one of the in-figure labels verbatim, or null",
             "evidence_quote": "verbatim quote from caption/nearby text, or empty string",
             "reason": "string",
             "confidence": 0.0,
@@ -60,6 +61,16 @@ _OUTPUT_SCHEMA = {
     "confidence": 0.0,
 }
 
+# Suggested (not enforced — validator.py never hard-constrains this vocabulary)
+# relation vocabulary for ``connections[].relation``, used only when the
+# cartridge does not supply its own ``relation_types`` extraction hint.
+_DEFAULT_CONNECTION_RELATIONS = (
+    "optical_path",
+    "electrical_signal",
+    "feedback_control",
+    "mechanical",
+)
+
 
 class ApparatusSemanticsPromptFactory:
     def build_messages(
@@ -68,11 +79,14 @@ class ApparatusSemanticsPromptFactory:
         candidate_briefs: list[dict],
         nearby_text: list[str],
         cartridge_hints: dict,
+        inner_label_hints: list[str] | None = None,
+        abbreviations: dict | None = None,
     ) -> list[dict]:
         return [
             {"role": "system", "content": _SYSTEM_CONTENT},
             {"role": "user", "content": self._build_user_content(
                 figure, candidate_briefs, nearby_text, cartridge_hints,
+                inner_label_hints, abbreviations,
             )},
         ]
 
@@ -84,12 +98,17 @@ class ApparatusSemanticsPromptFactory:
         cartridge_hints: dict,
         previous_output: dict,
         issues: list,
+        inner_label_hints: list[str] | None = None,
+        abbreviations: dict | None = None,
     ) -> list[dict]:
         issue_text = "\n".join(
             f"- [{i.severity}] {i.rule_id}: {i.message}" for i in issues
         )
         content = (
-            self._build_user_content(figure, candidate_briefs, nearby_text, cartridge_hints)
+            self._build_user_content(
+                figure, candidate_briefs, nearby_text, cartridge_hints,
+                inner_label_hints, abbreviations,
+            )
             + "\n\n## Previous Output\n"
             + json.dumps(previous_output, ensure_ascii=False, indent=2)
             + "\n\n## Validation Issues\n"
@@ -107,6 +126,8 @@ class ApparatusSemanticsPromptFactory:
         candidate_briefs: list[dict],
         nearby_text: list[str],
         cartridge_hints: dict,
+        inner_label_hints: list[str] | None = None,
+        abbreviations: dict | None = None,
     ) -> str:
         parts: list[str] = []
         parts.append("## Task")
@@ -129,6 +150,21 @@ class ApparatusSemanticsPromptFactory:
         if nearby_text:
             parts.append("\n## Nearby Text")
             parts.extend(f"- {t}" for t in nearby_text)
+
+        if inner_label_hints:
+            parts.append(
+                "\n## In-Figure Labels (extracted deterministically from the PDF text layer)"
+            )
+            parts.extend(f"- {label}" for label in inner_label_hints)
+
+        if abbreviations:
+            parts.append("\n## Abbreviation Dictionary (from the paper body)")
+            parts.append(json.dumps(abbreviations, ensure_ascii=False, indent=2))
+            parts.append(
+                "You may use an abbreviation's expansion when choosing a part's "
+                "name, but label_ref must stay the in-figure label string "
+                "verbatim (do not expand it)."
+            )
 
         if candidate_briefs:
             parts.append(
@@ -153,6 +189,14 @@ class ApparatusSemanticsPromptFactory:
             parts.append("\n## Cartridge Term Aliases (hint only)")
             parts.append(json.dumps(cartridge_hints["aliases"], ensure_ascii=False))
 
+        relation_types = cartridge_hints.get("relation_types") or list(_DEFAULT_CONNECTION_RELATIONS)
+        parts.append(
+            "\n## Suggested Connection Relation Vocabulary (hint only, not exhaustive — "
+            "prefer one of these for connections[].relation, but a short free-text "
+            "description is fine if none fit)"
+        )
+        parts.append(json.dumps(relation_types, ensure_ascii=False))
+
         parts.append("\n## Output Schema")
         parts.append(json.dumps(_OUTPUT_SCHEMA, ensure_ascii=False, indent=2))
         parts.append("\n## Allowed Values")
@@ -165,6 +209,18 @@ class ApparatusSemanticsPromptFactory:
             "(or an empty string if nothing supports it — never invent a quote)\n"
             "- from_part / to_part in connections must reference a name from parts[]\n"
             "- confidence must be between 0.0 and 1.0\n"
+            "- For every in-figure label that denotes a physical component, output exactly one "
+            "part with label_ref set to that label string verbatim. If caption/nearby text do "
+            "not let you determine its role, still output the part with role=\"\" and a low "
+            "confidence — do not drop it.\n"
+            "- Parameter/annotation-style labels (e.g. 'f = 75 mm', 's-pol.') are not components "
+            "and may be skipped — do not force a part for these.\n"
+            "- Visible parts with no corresponding in-figure label must have label_ref=null.\n"
+            "- role must be backed by a verbatim evidence_quote from the caption/nearby text. "
+            "If the body text gives no basis for a role, leave role empty and put any "
+            "appearance-based guess in reason instead — never assert an unsupported role.\n"
+            "- Do NOT output bbox or expanded_name for parts — these are attached "
+            "deterministically downstream from label_ref, not by you.\n"
             "- Return ONLY valid JSON, no markdown fences"
         )
         return "\n".join(parts)

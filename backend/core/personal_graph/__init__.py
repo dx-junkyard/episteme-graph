@@ -11,10 +11,12 @@ Phase P-0 スコープ（本パッケージ現状）:
 - ``schema.py``    : node_kind/edge_kind/anchor 語彙・PersonalNode/PersonalEdge/
   PersonalNetwork の正本
 - ``queries.py``   : interest_traces / learner_reconstructions / コース atlas binding
-  の SQL 読みプリミティブ（パッケージ内で DB を直接知るのはここだけ）
+  の SQL 読みプリミティブ（本人スコープの DB 読みはここだけ）
 - ``derive.py``    : §4 の導出アルゴリズム（純粋関数 ``build_network`` +
   エントリポイント ``derive_personal_network``）
 - ``graph_data.py``: ``learning_states.personal_graph`` JSONB の正本アクセサ
+- ``bridges.py``   : ビジョン Phase B — 橋候補の k-匿名集約（教員向け・コーススコープ。
+  本人スコープの個人ネットワーク導出とは別系統で、集約読みを自前に持つ）
 
 **開発ルール2**: 本パッケージは FastAPI / routes / services / ``core.llm`` を import しない
 （非LLM・決定論であることを import レベルで保証する。PN-5）。受講ゲート等の権限判定は

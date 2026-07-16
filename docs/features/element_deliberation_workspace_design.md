@@ -1,6 +1,19 @@
 # W層（Element Deliberation Workspace / 要素検討ワークスペース）設計
 
-> **状態: Phase 0 + Phase W-β 実装済み**（2026-07-15 時点）。本書は設計の正本。
+> **状態: Phase 0 + Phase 1 + Phase W-β 実装済み**（2026-07-16 時点）。本書は設計の正本。
+> Phase 1 実装物: `core/deliberation/positioning.py` に §4.2 コーパス横断レンズ
+> （`cross_corpus`）を追加。要素→代表テキスト（非LLM連結・§15 未決2）→
+> `core.embedder.search_similar_papers` で近傍 chunk を検索し、自 document を除外した
+> 上位5件の他 document を返す（各 item に `document_id` を付与）。embedding 生成を
+> 伴う唯一のレンズだが新規抽出ロジックは無く、書き込みもゼロ。U層計測は
+> `usage_context("deliberation:cross_corpus", ...)` でラップ（`core/llm_usage/schema.py`
+> の `KNOWN_FEATURES` に追記）。閲覧不可 document 由来の候補は `positioning.py`（core、
+> per-user 権限を判定できない）ではなく `routes/deliberation.py` の
+> `_apply_cross_corpus_gate`（既存 `_filter_by_document_view` / `_make_document_view_checker`
+> を再利用）が overview 応答の段階で最終フィルタする（W5・fail-closed。フィルタ後 items が
+> 空ならレンズごと None に落とす）。フロントは `deliberation.js` の `LENS_LABELS`/`LENS_ORDER`
+> に `cross_corpus: "コーパス横断"` を追加するだけで、既存レンダラが `item.label`/`item.value`
+> のみを描画するため `document_id`/`hidden_count` は自然と非表示になる（W8）。
 > W-β 実装物: migration 048 `element_identity_links`（candidate/confirmed/rejected・
 > `local_expression` はリンク行が保持・library_entries へ実FK・孤児掃除は
 > `_purge_document`/`delete_material` に同乗）+ `core/deliberation/identity_links.py`
@@ -30,7 +43,30 @@
 > theory_claims/theory_components の DB id と一致する保証がないため、そこでの導線のみ
 > 引き続き equation に限定する（理由は admin.js にインライン文書化）+
 > ガードレール（test_deliberation_guardrails / test_deliberation_positioning /
-> test_deliberation_ui_static）。§4.2 コーパス横断（Phase 1）・対話（Phase 2）は未実装。
+> test_deliberation_ui_static）。
+>
+> **Phase 2 実装済み（2026-07-16）**: migration 049（`deliberation_sessions` /
+> `element_annotations`・§6 のスキーマどおり）+ `core/deliberation/{store,dialogue,annotations}.py`
+> + `core/llm.py::generate_conversation_turn`（マルチターン+vision・structured output 同時取得・
+> system ロール回避の家風）+ API 6本（sessions 作成/取得・messages・annotations 一覧/commit/dismiss）。
+> 1応答=1 LLM コール（W6。注釈抽出も同一コールの structured output。スキーマ検証失敗は注釈なしに
+> 縮退・LLM 失敗は `degraded:true` の非LLM フォールバック）。CostGate
+> `DELIBERATION_MAX_CALLS_PER_SESSION`(8)/`_PER_DAY`(40)・fast tier 既定。孤児掃除は
+> `_purge_document`/`delete_material` に同乗。**コミットルーティング v1 は3経路**（§15 未決1 の判断）:
+> `interpretation`→C層 explanation(kind='personal') / `meaning`・`decomposition`→
+> `theory_components.summary`/`teacher_notes` / `identity`→W-β `create_candidate`。
+> `positioning_note` は 422（後続）。`standardization` は **Phase S（2026-07-16 実装済み）**で解禁:
+> `core/deliberation/standardization/`（llm_worker 6系統目アダプタ・三角測量＝LLM事前知識+
+> L層凍結版類似+コーパス反復（confirmed identity links ∪ source_document_ids ≥2）→
+> `aggregate.decide()` の決定論5語彙合成。**LLM 単独主張は unknown（幻覚ガード）**・
+> 修復失敗は evidence①非認知として続行）+ worker（threading・冪等スキップ・`force` 再評価・
+> `STDPART_MAX_CALLS_PER_DAY` 既定10・`STDPART_LLM_MODEL`）+ 手動バッチ API 2本
+> （shared-part 単体 / domain 一括、`{"queued", "note"}` 応答・生件数なし）+ migration 050
+> （`library_entries.standardization_status`。revision 非変更のガバナンス列・
+> `UPDATABLE_FIELDS` 外＝draft 編集から書けず教員 commit のみ）。語彙の正本は
+> `core/library/schema.py`（ライブラリ自身の統治列のため）。フロントは
+> モーダル2ペイン化（右=対話・注釈カード confirm/dismiss・遅延セッション作成・429/degraded は
+> 事実文）。セッション履歴の一覧・復元 UI は未実装（DB には全ログ保持・P4。後続で一覧 UI）。
 >
 > **migration 番号の補正（2026-07-15）**: 本書の「migration 046」は起草後に 046/047 が
 > 他機能（atlas_report_incorporation / topic_lecture_audio）で使用されたため無効。

@@ -69,6 +69,15 @@ class PersonalNode:
     そのまま使う。``label`` は本人の言葉の抜粋（80字で切る）。``facts`` は事実文のみを
     保持し、件数・回数などの数値は入れない（PN-4）。``source`` はデバッグ・UI 詳細用の
     出所メタ（kind / status / attribution_source 等）。
+
+    ``course_id``（Phase P-0.5, 設計書 §5.1）: このノードの由来痕跡が属していたコース。
+    個人ネットワークの**所有境界ではなく provenance（学習が起きた出所）**である —
+    ネットワークの所有単位は常に ``user_id``（本人）であり、``course_id`` は「どの学習
+    文脈で生まれたか」を記録するフィルター用メタに過ぎない。コースが削除・終了しても
+    このノード自体は本人の地図から消えない設計にするための布石（既存 dataclass 定義順
+    との衝突を避けるため kw_only フィールドとして末尾ではなく ``topic_id`` の直後に
+    配置している）。既定 ``None`` で Phase P-0/P-1/P-2 実装済みのコーススコープ呼び出し
+    （``derive_personal_network`` 経由）との後方互換を保つ。
     """
 
     id: str
@@ -76,6 +85,7 @@ class PersonalNode:
     label: str
     anchor: PersonalAnchor
     topic_id: str | None
+    course_id: str | None = field(default=None, kw_only=True)
     created_at: str
     facts: list[str]
     source: dict

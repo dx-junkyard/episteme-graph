@@ -48,7 +48,7 @@ class LibraryConflictError(LibraryError, revision_store.RevisionConflictError):
 _ENTRY_COLUMNS_SQL = """
     id::text, domain_key, entry_type, name, aliases, summary, body,
     exemplar_images, source_component_ids, source_document_ids,
-    status, revision, latest_version_no, created_by, updated_by,
+    status, standardization_status, revision, latest_version_no, created_by, updated_by,
     created_at, updated_at
 """
 
@@ -72,12 +72,13 @@ def _row_to_entry(row: Any) -> dict:
         source_component_ids=schema.as_list(row[8]),
         source_document_ids=schema.as_list(row[9]),
         status=row[10] or "",
-        revision=int(row[11] or 1),
-        latest_version_no=int(row[12] or 0),
-        created_by=row[13],
-        updated_by=row[14],
-        created_at=row[15].isoformat() if row[15] else "",
-        updated_at=row[16].isoformat() if row[16] else "",
+        standardization_status=row[11] or schema.STANDARDIZATION_STATUS_UNKNOWN,
+        revision=int(row[12] or 1),
+        latest_version_no=int(row[13] or 0),
+        created_by=row[14],
+        updated_by=row[15],
+        created_at=row[16].isoformat() if row[16] else "",
+        updated_at=row[17].isoformat() if row[17] else "",
     )
     return entry.to_dict()
 

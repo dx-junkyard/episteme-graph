@@ -249,6 +249,45 @@ class Settings(BaseSettings):
         default=5,
         validation_alias=AliasChoices("APPARATUS_RETRIEVAL_TOP_K"),
     )
+    # 図ごとの周辺本文（figure_context 収集）の最大ブロック数
+    apparatus_context_max_items: int = Field(
+        default=12,
+        validation_alias=AliasChoices("APPARATUS_CONTEXT_MAX_ITEMS"),
+    )
+    # 図ごとの周辺本文（figure_context 収集）の合計文字数上限
+    apparatus_context_max_chars: int = Field(
+        default=6000,
+        validation_alias=AliasChoices("APPARATUS_CONTEXT_MAX_CHARS"),
+    )
+
+    # --- W層（Element Deliberation Workspace, 対話的検討） — コスト制御（他機能とは独立） ---
+    # 1セッションあたりの LLM コール上限
+    deliberation_max_calls_per_session: int = Field(
+        default=8,
+        validation_alias=AliasChoices("DELIBERATION_MAX_CALLS_PER_SESSION"),
+    )
+    # 1ユーザー1日あたりの LLM コール上限
+    deliberation_max_calls_per_day: int = Field(
+        default=40,
+        validation_alias=AliasChoices("DELIBERATION_MAX_CALLS_PER_DAY"),
+    )
+    # 空文字なら fast tier（llm_fast_model）に委譲
+    deliberation_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("DELIBERATION_LLM_MODEL"),
+    )
+
+    # --- 標準化判定 worker（Phase S, 知識ネットワークビジョン §6） — コスト制御（他機能とは独立） ---
+    # 三角測量の証拠①（LLM 事前知識）の 1 日あたり LLM コール上限
+    stdpart_max_calls_per_day: int = Field(
+        default=10,
+        validation_alias=AliasChoices("STDPART_MAX_CALLS_PER_DAY"),
+    )
+    # 空文字なら fast tier（llm_fast_model）に委譲
+    stdpart_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("STDPART_LLM_MODEL"),
+    )
 
     # --- JWT / Auth ---
     jwt_secret: str = "episteme-dev-secret-change-in-prod"

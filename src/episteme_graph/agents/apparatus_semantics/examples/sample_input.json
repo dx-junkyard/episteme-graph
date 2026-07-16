@@ -17,6 +17,16 @@
         "figure_id": "fig_1",
         "figure_type": "schematic",
         "caption": "Schematic of the vacuum chamber assembly, showing the ion source, drift tube, and detector plate connected in series."
+      },
+      "inner_labels": [
+        {"text": "IS", "bbox": [120.0, 200.0, 140.0, 212.0]},
+        {"text": "DT", "bbox": [220.0, 200.0, 240.0, 212.0]},
+        {"text": "DET", "bbox": [320.0, 200.0, 345.0, 212.0]}
+      ],
+      "abbreviations": {
+        "IS": "ion source",
+        "DT": "drift tube",
+        "DET": "detector plate"
       }
     }
   ],

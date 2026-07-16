@@ -38,6 +38,7 @@ APPARATUS_RESPONSE_SCHEMA: dict = {
                 "properties": {
                     "name": {"type": "string"},
                     "role": {"type": "string"},
+                    "label_ref": {"type": ["string", "null"]},
                     "evidence_quote": {"type": "string"},
                     "reason": {"type": "string"},
                     "confidence": {"type": "number"},

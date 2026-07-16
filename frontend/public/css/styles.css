@@ -5699,7 +5699,30 @@ body {
 /* ===========================================================================
  * 横断ユーティリティ層（Admin Copilot）— 統合 AI アシスタント
  * 識別子は admin-assistant- プレフィックス（Field Atlas / Doubt Atlas と非衝突）。
+ * 右下常設フローティングボタン（旧: 通知ベルの位置。AI アシスタントへのアクセスを
+ * 良くするため入れ替え、通知はトップバーの #vg-inbox-btn へ移した）。
  * =========================================================================== */
+
+.admin-assistant-fab {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: none;
+  background: var(--color-text-info, #06c);
+  color: #fff;
+  font-size: 20px;
+  line-height: 44px;
+  padding: 0;
+  cursor: pointer;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25);
+  z-index: 9999;
+}
+.admin-assistant-fab:hover { box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32); }
+/* G層の初回ログイン cue（.admin-next-steps-pulse）が丸ボタンでも円のまま光るように上書き */
+.admin-assistant-fab.admin-next-steps-pulse { border-radius: 50%; }
 
 .admin-assistant-panel {
   position: fixed;
@@ -6157,4 +6180,481 @@ body {
 .ls-stumble-mini {
   padding: 3px 10px; border: 1px solid var(--lx-line, #d0d7de); border-radius: 6px; cursor: pointer;
   font-size: 12px; background: var(--color-background-primary, #fff); color: var(--color-text-primary, #1f2328);
+}
+
+/* ===========================================================================
+ * W層（要素検討ワークスペース）— 面③ 対話的検討（Phase 2）
+ * 識別子は deliberation- プレフィックス（Field Atlas / Doubt Atlas と非衝突）。
+ * モーダル本体・面①②の既存レイアウトはインライン style のまま維持し、
+ * Phase 2 で新設した右ペイン（対話・候補注釈）だけをクラス化する。
+ * =========================================================================== */
+
+.deliberation-modal-columns {
+  display: flex;
+  gap: 18px;
+  flex: 1;
+  min-height: 0;
+}
+
+.deliberation-modal-left {
+  flex: 1 1 50%;
+  min-width: 0;
+  overflow-y: auto;
+  padding-right: 12px;
+  border-right: 1px solid var(--color-border-tertiary, #e5e5ea);
+}
+
+.deliberation-chat-pane {
+  flex: 1 1 50%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.deliberation-chat-messages {
+  flex: 1;
+  min-height: 120px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 2px 8px;
+}
+
+.deliberation-chat-empty {
+  font-size: 12.5px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  padding: 8px 2px;
+}
+
+.deliberation-chat-msg {
+  max-width: 92%;
+  font-size: 13px;
+  line-height: 1.55;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.deliberation-chat-msg.user {
+  align-self: flex-end;
+  background: var(--color-background-info, #eef4fb);
+  color: var(--color-text-info, #378add);
+  padding: 8px 12px;
+  border-radius: 12px 12px 4px 12px;
+}
+.deliberation-chat-msg.ai {
+  align-self: flex-start;
+  color: var(--color-text-primary, #1d1d1f);
+  padding: 8px 12px;
+  background: var(--color-background-secondary, #f5f5f7);
+  border-radius: 12px 12px 12px 4px;
+}
+
+.deliberation-chat-note {
+  align-self: flex-start;
+  font-size: 12px;
+  color: var(--color-text-tertiary, #8b949e);
+  padding: 2px 10px;
+}
+
+.deliberation-chat-annotations {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 34%;
+  overflow-y: auto;
+  padding: 8px 2px 0;
+  border-top: 1px solid var(--color-border-tertiary, #e5e5ea);
+  margin-top: 6px;
+}
+.deliberation-chat-annotations:empty { border-top: none; margin-top: 0; padding-top: 0; }
+
+.deliberation-annotation-card {
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--color-background-primary, #fff);
+}
+
+.deliberation-annotation-kind {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 3px;
+}
+.deliberation-annotation-confidence {
+  font-weight: 400;
+  color: var(--color-text-tertiary, #aeaeb2);
+}
+
+.deliberation-annotation-body {
+  font-size: 13px;
+  color: var(--color-text-primary, #1d1d1f);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.deliberation-annotation-reason {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--color-text-tertiary, #8b949e);
+}
+
+.deliberation-annotation-error {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--color-text-danger, #e24b4a);
+}
+
+.deliberation-annotation-status {
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 11.5px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--color-background-tertiary, #eeeef0);
+  color: var(--color-text-secondary, #6e6e73);
+}
+.deliberation-annotation-status.committed {
+  background: var(--color-background-success, #e6f4ea);
+  color: var(--color-text-success, #1e7e34);
+}
+.deliberation-annotation-status.dismissed {
+  color: var(--color-text-tertiary, #aeaeb2);
+}
+
+.deliberation-annotation-actions {
+  margin-top: 6px;
+  display: flex;
+  gap: 6px;
+}
+.deliberation-annotation-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-secondary, #f5f5f7);
+  color: var(--color-text-primary, #1d1d1f);
+  cursor: pointer;
+}
+.deliberation-annotation-btn.commit {
+  background: var(--color-text-info, #378add);
+  border-color: var(--color-text-info, #378add);
+  color: #fff;
+}
+.deliberation-annotation-btn.dismiss { color: var(--color-text-secondary, #6e6e73); }
+.deliberation-annotation-btn[disabled] { opacity: .5; cursor: default; }
+
+.deliberation-chat-inputrow {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  padding-top: 8px;
+}
+.deliberation-chat-input {
+  flex: 1;
+  resize: none;
+  max-height: 96px;
+  padding: 8px 10px;
+  font-size: 13px;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 8px;
+  font-family: inherit;
+}
+.deliberation-chat-input[disabled] { opacity: .6; }
+.deliberation-chat-send {
+  padding: 8px 14px;
+  font-size: 13px;
+  border: none;
+  border-radius: 8px;
+  background: var(--color-text-info, #378add);
+  color: #fff;
+  cursor: pointer;
+}
+.deliberation-chat-send[disabled] { opacity: .6; cursor: default; }
+
+/* ===================================================================
+   個人知識ネットワーク（Phase P-3）— personal-map.js 追加分
+   本人による訂正（提案書 §6）: 「地図には反映しない」/「地図に戻す」/
+   コース横断の橋（旅カードの静かな一行）。既存 personal-map.js の大半のスタイルは
+   atlas.css 側にあるが、本 Phase の追加分はここに置く（ファイル所有境界のため）。
+   =================================================================== */
+.personal-map-exclude-btn,
+.personal-map-restore-chip {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-secondary, #6e6e73);
+  cursor: pointer;
+  border-radius: 7px;
+  padding: 4px 9px;
+  font-size: 11px;
+  font-family: inherit;
+}
+.personal-map-exclude-btn:hover,
+.personal-map-restore-chip:hover {
+  background: var(--color-background-secondary, #f5f5f7);
+  color: var(--color-text-primary, #1d1d1f);
+}
+.personal-map-restore-chip { margin-left: 8px; }
+
+.personal-map-transient-note {
+  margin-top: 6px;
+  padding: 6px 9px;
+  border-radius: 7px;
+  background: var(--color-background-secondary, #f5f5f7);
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.personal-map-journey-cross-hint {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.personal-map-journey-cross-hint span {
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.personal-map-journey-cross-btn {
+  align-self: flex-start;
+  appearance: none;
+  border: 1px solid var(--color-border-info, #378add);
+  background: var(--color-background-info, #eef4fb);
+  color: var(--color-text-info, #378add);
+  cursor: pointer;
+  border-radius: 7px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-family: inherit;
+}
+.personal-map-journey-cross-btn:hover { background: var(--color-background-primary, #fff); }
+
+/* ===================================================================
+   個人知識ネットワーク（Phase P-3）— 最上位「わたしの地図」パネル
+   frontend/public/js/personal-map-home.js（window.PersonalMapHome）。
+   atlas オーバーレイとは独立の軽量 DOM。`.pm-home-` プレフィックス。
+   =================================================================== */
+.pm-home-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1450;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  padding: 24px 16px;
+}
+.pm-home-overlay[hidden] { display: none; }
+
+.pm-home-panel {
+  width: min(720px, 96vw);
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-primary, #1d1d1f);
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.32);
+  overflow: hidden;
+}
+
+.pm-home-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+}
+.pm-home-title { font-size: 15px; font-weight: 600; }
+.pm-home-close-btn {
+  appearance: none;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--color-text-secondary, #6e6e73);
+  padding: 2px 6px;
+}
+.pm-home-close-btn:hover { color: var(--color-text-primary, #1d1d1f); }
+
+.pm-home-note {
+  padding: 8px 18px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--color-text-tertiary, #aeaeb2);
+  border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+  background: var(--color-background-secondary, #f5f5f7);
+}
+
+.pm-home-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 18px 0;
+  border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+}
+.pm-home-tab {
+  appearance: none;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+  padding: 8px 12px 10px;
+  border-bottom: 2px solid transparent;
+}
+.pm-home-tab.active {
+  color: var(--color-text-info, #378add);
+  border-bottom-color: var(--color-text-info, #378add);
+  font-weight: 600;
+}
+
+.pm-home-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 18px;
+}
+
+.pm-home-empty,
+.pm-home-fail,
+.pm-home-loading {
+  font-size: 12px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  line-height: 1.6;
+  margin: 8px 0;
+}
+
+.pm-home-current-heading,
+.pm-home-related-heading {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6e6e73);
+  margin: 4px 0 8px;
+}
+.pm-home-related { margin-top: 16px; }
+.pm-home-related-sub {
+  font-size: 11px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  margin: 10px 0 6px;
+}
+
+.pm-home-node-row,
+.pm-home-journey-card-item {
+  border: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+.pm-home-node-top { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.pm-home-node-kind {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--color-text-info, #378add);
+  background: var(--color-background-info, #eef4fb);
+  border-radius: 5px;
+  padding: 1px 6px;
+  flex: 0 0 auto;
+}
+.pm-home-node-label { font-size: 13px; color: var(--color-text-primary, #1d1d1f); }
+.pm-home-node-ctx {
+  font-size: 11px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  margin-top: 3px;
+}
+.pm-home-facts {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+  line-height: 1.5;
+}
+.pm-home-node-actions { margin-top: 8px; }
+.pm-home-journey-btn {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-info, #378add);
+  cursor: pointer;
+  border-radius: 7px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-family: inherit;
+}
+.pm-home-journey-btn:hover { background: var(--color-background-info, #eef4fb); }
+
+.pm-home-reflect-month { margin-bottom: 18px; }
+.pm-home-reflect-month-heading {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 8px;
+}
+.pm-home-reflect-item {
+  border-left: 2px solid var(--color-border-tertiary, #e5e5ea);
+  padding: 2px 0 10px 12px;
+  margin-bottom: 4px;
+}
+.pm-home-reflect-item-title {
+  font-size: 13px;
+  color: var(--color-text-primary, #1d1d1f);
+}
+
+.pm-home-journey-area {
+  border-top: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+  padding: 12px 18px;
+  position: relative;
+  background: var(--color-background-secondary, #f5f5f7);
+  max-height: 34vh;
+  overflow-y: auto;
+}
+.pm-home-journey-area[hidden] { display: none; }
+.pm-home-journey-close {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  appearance: none;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.pm-home-journey-heading {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 8px;
+}
+.pm-home-journey-list { display: flex; flex-direction: column; gap: 6px; }
+.pm-home-journey-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.pm-home-journey-fact { color: var(--color-text-primary, #1d1d1f); }
+.pm-home-journey-ref-kind {
+  font-size: 10px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  border: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+.pm-home-journey-frontier {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.pm-home-journey-truncated {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--color-text-tertiary, #aeaeb2);
 }

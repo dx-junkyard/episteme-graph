@@ -28,6 +28,29 @@ STATUS_ACTIVE = "active"
 STATUS_RETIRED = "retired"
 ENTRY_STATUSES = (STATUS_ACTIVE, STATUS_RETIRED)
 
+# 標準化判定（Phase S・知識ネットワークビジョン §3 修正③・migration 050）の判定語彙。
+# 三角測量（LLM 事前知識 + 本モジュールの凍結版類似 + コーパス内反復）で決定論的に導出される
+# `core/deliberation/standardization/aggregate.py` の出力語彙と、この列の CHECK 制約が
+# 同じ5値を使う（正本はこちら。deliberation.standardization 側は読み取り専用で参照する）。
+# ガバナンス列であり、draft 本文編集（UPDATABLE_FIELDS）とは別経路
+# （core.deliberation.annotations の standardization commit ルーティング）でのみ更新する。
+STANDARDIZATION_STATUS_STANDARD = "standard"
+STANDARDIZATION_STATUS_FIELD_STANDARD = "field_standard"
+STANDARDIZATION_STATUS_EMERGING_COMMON = "emerging_common"
+STANDARDIZATION_STATUS_NOVEL = "novel"
+STANDARDIZATION_STATUS_UNKNOWN = "unknown"
+STANDARDIZATION_STATUSES = (
+    STANDARDIZATION_STATUS_STANDARD,
+    STANDARDIZATION_STATUS_FIELD_STANDARD,
+    STANDARDIZATION_STATUS_EMERGING_COMMON,
+    STANDARDIZATION_STATUS_NOVEL,
+    STANDARDIZATION_STATUS_UNKNOWN,
+)
+
+
+def is_valid_standardization_status(value: str) -> bool:
+    return value in STANDARDIZATION_STATUSES
+
 # apparatus body の型別ペイロードとして推奨されるキー（§6-2）。
 # domain-specific な値をここに書くことはしない（キー名の一覧のみ）。
 APPARATUS_BODY_KEY_TYPICAL_PARTS = "typical_parts"
@@ -90,6 +113,9 @@ class LibraryEntry:
     source_component_ids: list[str] = field(default_factory=list)
     source_document_ids: list[str] = field(default_factory=list)
     status: str = STATUS_ACTIVE
+    # ガバナンス列（migration 050）。draft 本文編集（UPDATABLE_FIELDS）とは独立に
+    # standardization commit ルーティングのみが更新する（revision は変更しない）。
+    standardization_status: str = STANDARDIZATION_STATUS_UNKNOWN
     revision: int = 1
     latest_version_no: int = 0
     created_by: str | None = None
@@ -110,6 +136,7 @@ class LibraryEntry:
             "source_component_ids": list(self.source_component_ids),
             "source_document_ids": list(self.source_document_ids),
             "status": self.status,
+            "standardization_status": self.standardization_status,
             "revision": self.revision,
             "latest_version_no": self.latest_version_no,
             "created_by": self.created_by,

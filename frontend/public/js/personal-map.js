@@ -3,7 +3,7 @@
  * 設計の正本: docs/features/personal_knowledge_network_design.md §9（フロント「わたしの地図」）・
  * §6（旅の経路探索）。参照する不変条項（同 §0）: PN-1（本人のみ可視）/
  * PN-2（導出のみ・保存しない）/ PN-3（本人確定のみノード化。サーバ側
- * core/personal_graph/derive.py が担保）/ PN-4（数値を見せない。件数・%・スコアは
+ * core/personal_graph/derive.py が担保）/ PN-4（数値を見せない。件数・%・順位付けは
  * 一切描かない）/ PN-5（非LLM・決定論・自動で開かない。旅も明示操作＝「ここから
  * 旅に出る」ボタンでのみ開く）/ PN-6（同一性リンクは confirmed のみ辿る。サーバ側
  * journey.py が担保）/ PN-7（fail-closed。コース文脈・トークン・骨格が無ければ
@@ -18,6 +18,17 @@
  * オーバーレイ内（トレイの近く）に表示する。fetch はボタン押下時のみ・キャッシュしない。
  * 関連関数（fetchJourney / requestJourney / renderJourneyCard / closeJourneyCard 等）は
  * すべて内部実装であり、公開契約（下記6メソッド）には含めない。
+ *
+ * コース横断の橋（Phase P-2「コース横断の橋」/ 提案書 §4.1・§5）: 旅カードの応答に
+ * `cross_course_hint`（コース内 journey API が付与）が含まれる場合、本人が選んだときだけ
+ * `/api/me/personal-network/journey` を叩いてコース横断版の旅へ差し替える（自動では
+ * 開かない。提案書「本人が選んだ場合のみ」）。
+ *
+ * 本人による訂正（提案書 §6）: マーカー小ポップに「地図には反映しない」
+ * （tension/question のみ・POST /api/learning/traces/{id}/map-exclude）、問いの軌跡の
+ * 除外済み項目（`data-map-excluded="1"`。付与元は app.js）に「地図に戻す」
+ * （POST .../map-restore）を追加する。どちらも痕跡行自体は削除せず（P4）、地図の導出から
+ * 外れる/戻るだけ。
  *
  * 公開契約 window.PersonalMap（呼び出し側は app.js。名前・引数は固定）:
  *   init(deps)                          — deps.openTrajectory(traceId) を登録
@@ -59,6 +70,8 @@
     legendEl: null,
     trayEl: null,
     journeyCardEl: null, // Phase P-2: 旅カード（常に最新1枚）
+    noteEl: null, // Phase P-3: 「地図には反映しません」等の一時メッセージ
+    noteTimer: null,
     popupEl: null,
     lastCanvas: null,
     lastLevel: 1,
@@ -298,6 +311,11 @@
       }
       // Phase P-2: ノードから旅に出る（明示操作のみ・PN-5）
       actions.appendChild(buildJourneyButton(node.id));
+      // Phase P-3: 「地図には反映しない」（対象は tension/question のみ。
+      // reconstruction ノードには出さない — 提案書 §6）
+      if (node.node_kind === "tension" || node.node_kind === "question") {
+        actions.appendChild(buildMapExcludeButton(node.id));
+      }
       item.appendChild(actions);
       list.appendChild(item);
     });
@@ -329,6 +347,12 @@
     }
     // Phase P-2: トグル OFF（コース切替による強制 OFF を含む）では旅カードも破棄する
     if (!state.enabled) closeJourneyCard();
+    // Phase P-3: トグル OFF では一時メッセージも消す
+    if (!state.enabled && state.noteEl) {
+      if (state.noteTimer) clearTimeout(state.noteTimer);
+      state.noteEl.hidden = true;
+      state.noteEl.innerHTML = "";
+    }
   }
 
   function renderTray(data) {
@@ -442,6 +466,12 @@
     tray.hidden = true;
     wrap.appendChild(tray);
 
+    // Phase P-3: 一時メッセージ（「地図には反映しません」等。数秒で自動的に隠れる）
+    const note = document.createElement("div");
+    note.className = "personal-map-transient-note";
+    note.hidden = true;
+    wrap.appendChild(note);
+
     // Phase P-2: 旅カード（常に最新1枚・トレイの近くに常設。§6/§9）
     const journeyCard = document.createElement("div");
     journeyCard.className = "personal-map-journey-card";
@@ -463,6 +493,7 @@
     state.toggleInputEl = checkbox;
     state.legendEl = legend;
     state.trayEl = tray;
+    state.noteEl = note;
     state.journeyCardEl = journeyCard;
   }
 
@@ -507,6 +538,18 @@
     if (!courseId || !token()) return; // コース文脈なし/未ログインなら何もしない
     const items = containerEl.querySelectorAll("[data-trace-id]");
     if (!items.length) return;
+
+    // Phase P-3: 「地図に戻す」チップ（`data-map-excluded="1"` のみ。付与元は app.js の
+    // 一覧描画）。除外済みトレースは地図ノードとして返らないため network fetch には
+    // 依存しない（§6。行削除ではなく状態遷移で保持されているだけ）。
+    items.forEach((itemEl) => {
+      if (itemEl.getAttribute("data-map-excluded") !== "1") return;
+      if (itemEl.querySelector(".personal-map-restore-chip")) return; // 二重付与防止
+      const excludedTraceId = itemEl.getAttribute("data-trace-id");
+      if (!excludedTraceId) return;
+      itemEl.appendChild(buildRestoreChip(excludedTraceId, itemEl));
+    });
+
     loadNetwork(courseId).then((data) => {
       // コース切替後に届いた遅延応答は破棄する（別コースの軌跡一覧に誤って
       // 「地図で見る」導線を付けない。onToggleChange と同じ courseId 突き合わせ）。
@@ -554,6 +597,23 @@
     )
       .then((res) => {
         if (!res.ok) throw new Error("journey " + res.status);
+        return res.json();
+      })
+      .catch(() => null); // fail-closed: 404/失敗は静かに何も出さない
+  }
+
+  // コース横断版の旅（Phase P-2「コース横断の橋」）。本人が旅カードの静かな一行
+  // 「以前の学習につながる道を見る」を選んだときだけ呼ぶ（自動では開かない）。
+  // 正本API `/api/me/personal-network/journey` を使う（コース所有ではなく本人スコープ）。
+  function fetchCrossCourseJourney(nodeId) {
+    const t = token();
+    if (!t) return Promise.resolve(null);
+    return fetch(
+      API_BASE + "/me/personal-network/journey?node_id=" + encodeURIComponent(nodeId),
+      { headers: { Authorization: "Bearer " + t } }
+    )
+      .then((res) => {
+        if (!res.ok) throw new Error("cross-course journey " + res.status);
         return res.json();
       })
       .catch(() => null); // fail-closed: 404/失敗は静かに何も出さない
@@ -645,6 +705,27 @@
       card.appendChild(truncated);
     }
 
+    // Phase P-2「コース横断の橋」: 静かな一行 + 本人が選んだときだけコース横断版へ
+    // 差し替える（提案書 §4.1・§5.2「本人が選んだ場合のみ」。自動では開かない）。
+    if (data.cross_course_hint && data.cross_course_hint.fact) {
+      const hint = document.createElement("div");
+      hint.className = "personal-map-journey-cross-hint";
+      const hintText = document.createElement("span");
+      hintText.textContent = data.cross_course_hint.fact;
+      hint.appendChild(hintText);
+      const hintBtn = document.createElement("button");
+      hintBtn.type = "button";
+      hintBtn.className = "personal-map-journey-cross-btn";
+      hintBtn.textContent = "以前の学習につながる道を見る";
+      hintBtn.addEventListener("click", () => {
+        const crossNodeId = data.cross_course_hint && data.cross_course_hint.node_id;
+        if (!crossNodeId) return;
+        fetchCrossCourseJourney(crossNodeId).then((crossData) => renderJourneyCard(crossData));
+      });
+      hint.appendChild(hintBtn);
+      card.appendChild(hint);
+    }
+
     card.hidden = false;
     if (typeof card.scrollIntoView === "function") card.scrollIntoView({ block: "nearest" });
   }
@@ -673,6 +754,103 @@
       requestJourney(nodeId);
     });
     return btn;
+  }
+
+  // -------------------------------------------------------------------
+  // 本人による訂正: 「地図には反映しない」／「地図に戻す」（Phase P-3, 提案書 §6）
+  //
+  // 痕跡行そのものは削除しない（P4）。地図の導出（core/personal_graph/derive.py）から
+  // 外れる/戻るだけの状態遷移で、tension/anchor の dismiss（候補の当落判定）とは独立
+  // — status には触れない。
+  // -------------------------------------------------------------------
+
+  function showTransientNote(text) {
+    const el = state.noteEl;
+    if (!el) return;
+    el.textContent = text;
+    el.hidden = false;
+    if (state.noteTimer) clearTimeout(state.noteTimer);
+    state.noteTimer = setTimeout(() => {
+      el.hidden = true;
+      el.textContent = "";
+    }, 4000);
+  }
+
+  // 除外/復帰の成否に関わらずキャッシュを破棄し、ON中なら現在レベルを再描画する
+  // （state.lastCanvas/lastLevel を使う。onToggleChange と同じ再取得パターン）。
+  function refreshAfterMapExclusionChange() {
+    delete state.networkCache[state.courseId];
+    if (!state.enabled) return;
+    loadNetwork(state.courseId).then((data) => {
+      if (!data) return;
+      renderDotsLayer(state.lastCanvas);
+      renderTray(data);
+    });
+  }
+
+  function requestMapExclude(traceId) {
+    const t = token();
+    if (!t || !traceId) return;
+    closePopup();
+    fetch(API_BASE + "/learning/traces/" + encodeURIComponent(traceId) + "/map-exclude", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + t },
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error("map-exclude " + res.status);
+        return res.json();
+      })
+      .then(() => {
+        refreshAfterMapExclusionChange();
+        showTransientNote("地図には反映しません（問いの軌跡には残ります）");
+      })
+      .catch(() => {}); // fail-closed: 失敗時は何も出さない（エラーバナーは出さない）
+  }
+
+  function requestMapRestore(traceId, itemEl) {
+    const t = token();
+    if (!t || !traceId) return;
+    fetch(API_BASE + "/learning/traces/" + encodeURIComponent(traceId) + "/map-restore", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + t },
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error("map-restore " + res.status);
+        return res.json();
+      })
+      .then(() => {
+        if (itemEl) {
+          itemEl.setAttribute("data-map-excluded", "0");
+          const chip = itemEl.querySelector(".personal-map-restore-chip");
+          if (chip) chip.remove();
+        }
+        refreshAfterMapExclusionChange();
+      })
+      .catch(() => {}); // fail-closed: 失敗時は何も出さない
+  }
+
+  function buildMapExcludeButton(traceId) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "personal-map-exclude-btn";
+    btn.textContent = "地図には反映しない";
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      requestMapExclude(traceId);
+    });
+    return btn;
+  }
+
+  function buildRestoreChip(traceId, itemEl) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "personal-map-restore-chip";
+    chip.textContent = "地図に戻す";
+    chip.addEventListener("click", (e) => {
+      e.stopPropagation();
+      requestMapRestore(traceId, itemEl);
+    });
+    return chip;
   }
 
   // -------------------------------------------------------------------

@@ -54,6 +54,46 @@ IDENTITY_LINK_DECIDABLE_STATUSES = (
     IDENTITY_LINK_STATUS_REJECTED,
 )
 
+# ── 候補注釈の kind 語彙（Phase 2。設計書 §5/§6）─────────────────────────────
+# meaning/decomposition = 意味づけ・内訳補正、positioning_note = D層起動、
+# interpretation = C層解釈バージョン、identity/standardization = W-α で追加（§5.5）。
+ANNOTATION_KIND_MEANING = "meaning"
+ANNOTATION_KIND_DECOMPOSITION = "decomposition"
+ANNOTATION_KIND_POSITIONING_NOTE = "positioning_note"
+ANNOTATION_KIND_INTERPRETATION = "interpretation"
+ANNOTATION_KIND_IDENTITY = "identity"
+ANNOTATION_KIND_STANDARDIZATION = "standardization"
+ANNOTATION_KINDS = (
+    ANNOTATION_KIND_MEANING,
+    ANNOTATION_KIND_DECOMPOSITION,
+    ANNOTATION_KIND_POSITIONING_NOTE,
+    ANNOTATION_KIND_INTERPRETATION,
+    ANNOTATION_KIND_IDENTITY,
+    ANNOTATION_KIND_STANDARDIZATION,
+)
+
+# ── 候補注釈の状態語彙（W2: AI 出力は常に candidate / W4: 行削除しない）───────────
+ANNOTATION_STATUS_CANDIDATE = "candidate"
+ANNOTATION_STATUS_COMMITTED = "committed"
+ANNOTATION_STATUS_DISMISSED = "dismissed"
+ANNOTATION_STATUSES = (
+    ANNOTATION_STATUS_CANDIDATE,
+    ANNOTATION_STATUS_COMMITTED,
+    ANNOTATION_STATUS_DISMISSED,
+)
+# set_annotation_status() が受理する遷移先（candidate からのみ辿り着く終端状態）。
+ANNOTATION_DECIDABLE_STATUSES = (ANNOTATION_STATUS_COMMITTED, ANNOTATION_STATUS_DISMISSED)
+
+# v1 でコミット未対応の kind（オーケストレータ判断・§15 未決1）。commit は 422
+# 「この種別のコミットは未対応（後続フェーズ）」を返し、dismiss のみ許可する。
+# positioning_note は D層起動（challenge/verification proposal 起動）が本層のスコープ外
+# のため未対応のまま。standardization は Phase S（migration 050・library_entries の
+# standardization_status 列 + core.deliberation.annotations._commit_standardization）で
+# 対応済みになったため、ここから外した（2026-07）。
+ANNOTATION_KINDS_COMMIT_UNSUPPORTED = (
+    ANNOTATION_KIND_POSITIONING_NOTE,
+)
+
 
 class ElementResolutionError(Exception):
     """ElementRef の解決に失敗した（要素型が不正 / スコープ不一致 / 要素が存在しない）。

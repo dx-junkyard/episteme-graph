@@ -50,6 +50,7 @@ from services import (
     get_graph_element_context,
     get_interest_traces,
     get_personal_layer,
+    get_trace_map_exclusion_flags,
     get_user_group_ids,
     log_unanswered_query,
     persist_chat_history,
@@ -59,6 +60,7 @@ from services import (
     record_student_stumble_event,
     resolve_interest_trace,
     save_course_data,
+    set_trace_map_exclusion,
     delete_course_data,
     search_chunks_with_metadata,
     user_can_access_group,
@@ -1840,7 +1842,14 @@ def get_interest_traces_route(
 
     interest_traces から本人の痕跡を status 主役で返す。個人特定情報は含めない。
     """
-    return get_interest_traces(current_user["id"], course_id, topic_id)
+    view = get_interest_traces(current_user["id"], course_id, topic_id)
+    # 個人知識ネットワーク（わたしの地図）への表示除外フラグを付与する（UX proposal §6:
+    # 地図には反映しない/地図に戻す）。既存の get_interest_traces は変更せず、
+    # ここで1フィールド足すだけの最小変更にする。
+    exclusion_flags = get_trace_map_exclusion_flags(current_user["id"], course_id)
+    for trace in view.get("traces") or []:
+        trace["map_excluded"] = exclusion_flags.get(trace["id"], False)
+    return view
 
 
 @router.post("/courses/{course_id}/interest-traces/{trace_id}/resolve")
@@ -2115,6 +2124,39 @@ def dismiss_anchor_route(
     result = dismiss_anchor_trace(current_user["id"], trace_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Anchor candidate not found")
+    return {"ok": True, **result}
+
+
+# ---------------------------------------------------------------------------
+# 個人知識ネットワーク（わたしの地図）— 表示除外/復帰 (UX proposal §6)
+# ---------------------------------------------------------------------------
+# 「地図には反映しない」「地図に戻す」操作。痕跡は削除されず（P4）、地図の導出
+# （core/personal_graph/derive.py）から外れるだけ。tension/anchor の dismiss（候補の
+# 当落判定）とは独立で、status には触れない。本人のみ（current_user 以外の
+# user_id を受けない）。
+
+
+@router.post("/traces/{trace_id}/map-exclude")
+def map_exclude_trace_route(
+    trace_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """個人知識ネットワークへの表示から本人の痕跡を除外する（削除ではない。P4）。"""
+    result = set_trace_map_exclusion(current_user["id"], trace_id, True)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    return {"ok": True, **result}
+
+
+@router.post("/traces/{trace_id}/map-restore")
+def map_restore_trace_route(
+    trace_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """表示除外していた痕跡を個人知識ネットワークの表示へ戻す。"""
+    result = set_trace_map_exclusion(current_user["id"], trace_id, False)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Trace not found")
     return {"ok": True, **result}
 
 

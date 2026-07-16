@@ -508,3 +508,91 @@ MinIO: 新バケット `figure-images`（起動時 ensure、`raw-papers` 等と�
 - グループ限定ライブラリ（v1 は教員全体の共同財。需要が出たら migration 035 同型で追加）
 - vision の自動有効化（画像枚数による推奨表示を含め、まずは明示チェックボックスのみ）
 - 表（table）の画像解析（v1 は figure のみ。table は既存 caption-first を維持）
+
+---
+
+## 14. 追補 — 装置図理解の拡張（migration 051, 2026-07-16）
+
+Figure 5.2 型（論文全体の実験セットアップ模式図・TikZ 系ベクター描画）に対して、
+初版実装に残っていた3ギャップを解消した拡張。設計原則（candidate-only / P4 /
+cartridge 非依存 / 決定論的 input-building）はすべて維持。
+
+| # | ギャップ | 解消 |
+|---|---|---|
+| G1 | `_build_apparatus_semantics` が `nearby_text=[]` をハードコード | `collect_figure_context` の実収集結果を配線（orchestrator） |
+| G2 | 図中ラベル（PDF テキスト層の "ECDL", "EOM" 等）を未利用 | `document_figures.inner_labels JSONB`（migration 051）+ `ApparatusPart.label_ref/bbox/expanded_name` |
+| G3 | 文脈が caption 近傍に限定 | セクション本文 + `Fig. N.M` 参照メンション段落 + 略語辞書の優先度付き収集 |
+
+### 14-1. 図中ラベル抽出（`figure_images.py::_extract_inner_labels`、非LLM）
+
+- 図領域確定後に `page.get_text("words", clip=...)` でテキストスパンを収集し、
+  `(block_no, line_no)` グルーピング + 水平ギャップ 6pt 以下のマージで
+  `[{"text","bbox":[x0,y0,x1,y1]}]`（ページ座標系）を構築。caption ブロックと交差する
+  語は除外。パラメータ表記（`f = 75 mm` 等）も保持する（P4。意味フィルタは LLM
+  プロンプト側の責務）。embedded / region_render / 残余 embedded の3経路すべてで実行。
+- 保存: `document_figures.inner_labels JSONB NOT NULL DEFAULT '[]'`（migration 051。
+  設計時の 044 は旧スナップショット番号）。
+
+### 14-2. 文脈収集（`figure_context.py`、新設・非LLM・純関数）
+
+`collect_figure_context(structure, figure_row, *, inner_labels, max_items, max_chars)
+-> FigureContext(nearby_text, abbreviations, source_counts)`:
+
+1. caption 直近（前後2ブロック）
+2. `(?:Fig\.?|Figure|図)\s*N\.M(?![0-9.])` の参照メンション段落 ±1ブロック（全文走査）
+3. caption ブロックと同一セクションの残り本文
+4. 略語辞書: `フル表記 (略語)` / `略語 (フル表記)` パターン + initials 部分列検査
+   （文中埋め込み定義は先頭語を落とす接尾辞トリムで救済）。inner_labels の語で
+   引けるものに絞る（完全一致 → 大文字小文字無視 → prefix+残り3文字以内。
+   "RFPDs"/"RFPDp" → キー "RFPD"）。
+
+予算は `APPARATUS_CONTEXT_MAX_ITEMS`（既定12）/ `APPARATUS_CONTEXT_MAX_CHARS`
+（既定6000）。`source_counts` に採用内訳を正直に記録。structure 欠落時は空に縮退。
+
+### 14-3. agent 拡張（`apparatus_semantics`）
+
+- 入力: `FigureImageInput.inner_labels / abbreviations` を追加。プロンプトに
+  In-Figure Labels / Abbreviation Dictionary セクションと網羅指示（構成要素ラベルは
+  必ず part 化・role="" でも落とさない / パラメータ表記はスキップ可 / role は
+  verbatim quote 裏付け必須・根拠なしは reason へ / relation 推奨語彙
+  `optical_path・electrical_signal・feedback_control・mechanical`、cartridge の
+  relation_types で置換可）。
+- 出力: `ApparatusPart.label_ref`（LLM出力・validator が inner_labels 実在を hard error
+  検査 → repair ループ）。**`bbox` / `expanded_name` は LLM 出力から取らず**、
+  `agent.py::_attach_label_grounding` が label_ref → inner_labels / abbreviations の
+  突合で決定論的に付与。未カバーラベルは `inner_labels_not_covered` warning で保持（P4）。
+- 後方互換: 旧 artifact は `from_dict` のデフォルトで読める。
+
+### 14-4. レビュー UI（Phase 2）
+
+- `GET /documents/{id}/figures` が図の `bbox` / `inner_labels` とパーツの
+  `label_ref/expanded_name/bbox/evidence_quote/reason/confidence` を返す。
+- 図モーダルの候補行「図で確認」→ bbox オーバーレイモーダル（%座標 = ページ座標を
+  図 bbox で正規化。region_render / embedded 同一変換）。パーツ実線・未対応ラベル点線、
+  クリックで根拠詳細。確定操作は既存のライブラリ昇格導線のみ（candidate-only）。
+
+### 14-5. テスト
+
+`test_figure_inner_labels.py` / `test_figure_context.py` / `test_apparatus_context_wiring.py`
+（backend）+ `src/tests/agents/apparatus_semantics/test_label_grounding.py`。
+既存ガードレール（`test_image_library_guardrails.py`）に figures API の passthrough
+構造テストを追加。
+
+### 14-6. 非スコープ（本追補で作らなかったもの）
+
+- パーツ単位の承認 API（確定はライブラリ昇格・W層「深く検討」の既存導線に委ねる）
+- `get_drawings()` による領域推定改善 / Gemini vision / 画像 embedding 検索（原 issue の Phase 3）
+
+### 14-7. 原 issue 設計書からの意図的差分
+
+原 issue（装置図理解機能の拡張設計 — Figure 5.2 型、2026-07-15_23 スナップショット時点）
+に対する実装時の意図的な差分。いずれも原則の変更ではなく整合性のための調整。
+
+| 項目 | 原 issue の記述 | 実装 | 理由 |
+|---|---|---|---|
+| migration 番号 | `044_figure_inner_labels.sql` | **`051_figure_inner_labels.sql`** | 044〜050 はスナップショット後に他機能（object_group_permissions 〜 library standardization）で使用済み |
+| `ApparatusPart.bbox` の型 | `bbox: dict \| None` | **`bbox: list \| None`**（`[x0,y0,x1,y1]`） | `document_figures.bbox` / DocumentStructure の block bbox と同形式に統一（リポジトリ内の bbox 表現は全て list） |
+| パーツ単位の承認 API | 「クリックで name/role/evidence を表示・**承認**」 | オーバーレイは閲覧・レビュー専用。承認系の新 API は作らず、確定操作は既存のライブラリ昇格導線・W層「深く検討」に委ねる | candidate-only 原則の維持と、承認状態モデルの二重化（L層昇格と別の per-part 承認）回避。必要になれば別 issue で判断 |
+| nearby_text の上限 | input_builder の `_MAX_NEARBY_TEXT_*` を「引き上げ（設定値化）」 | 設定値化は**上流の figure_context 側**（`APPARATUS_CONTEXT_MAX_ITEMS/CHARS`）で実施し、input_builder 側は 16項目×1500字の固定バックストップに引き上げ | 予算管理の正本を1箇所（収集側）にする。agent 単体利用時の防波堤としてバックストップは残す |
+| 略語抽出 | `フル表記 (略語)` 正規表現のみ | 正規表現 + initials 部分列検査 + **先頭語を落とす接尾辞トリム** | 文中埋め込み定義（"The setup uses an external cavity diode laser (ECDL) to ..."）で lazy 量指定子が先行語句を巻き込み定義を取り落とすため |
+| Phase 3（Gemini vision / `get_drawings` / 画像 embedding） | 「任意の強化」 | 未実装 | 原 issue どおり任意。現行 LLM 構成は OpenAI 経路で Phase 1/2 に不要 |

@@ -1,16 +1,28 @@
-"""W層（要素検討ワークスペース）Phase 0 フロント統合の静的ガードレール。
+"""W層（要素検討ワークスペース）Phase 0/1/2 フロント統合の静的ガードレール。
 
 正本: docs/features/element_deliberation_workspace_design.md（§8 API / §9 フロント）。
-frontend/public/js/deliberation.js は Phase 0（overview の統合表示のみ・読み取り専用）の
-実装で、既存の atlas / personal-map 静的テストと同様にソースの静的検証で受け入れ条件を
-固定する（test_personal_map_ui_guardrails.py と同型）。
+frontend/public/js/deliberation.js は既存の atlas / personal-map 静的テストと同様に
+ソースの静的検証で受け入れ条件を固定する（test_personal_map_ui_guardrails.py と同型）。
+
+Phase 0/1: overview の統合表示のみ（読み取り専用）。
+Phase 2（本ファイルの改訂対象）: 右ペインに面③対話的検討（sessions/messages）+
+候補注釈カード（annotations の一覧・commit・dismiss）を追加。書き込み系の fetch が
+初めて登場するため、従来の「POST/PUT/PATCH/DELETE の fetch が一切無いこと」という
+検査を「POST は /admin/deliberation/ 配下の sessions・messages・commit・dismiss に
+限り許可し、PUT/PATCH/DELETE は引き続き使わない」に改訂する。
 
 受け入れ条件との対応:
 1. deliberation.js: ポーリング禁止 / 禁止語彙なし（踏破・達成率・ランキング）/
-   fetch 先が "/admin/deliberation/" のみ / POST・PUT・PATCH・DELETE の fetch が無い
-   （Phase 0 は読み取り専用）/ window.Deliberation のエクスポートがある
+   fetch 先が "/admin/deliberation/" のみ / PUT・PATCH・DELETE の fetch が無い /
+   POST は sessions・messages・commit・dismiss のみに使う /
+   window.Deliberation のエクスポートがある
 2. admin.html: deliberation.js の script タグが admin.js より前にある
 3. admin.js: window.Deliberation への参照はすべてガード形（素の Deliberation. 直呼びなし）
+4. 面③固有: セッションは最初の送信時にだけ作成する（モーダルを開いただけでは
+   POST /sessions を呼ばない）/ kind ラベル辞書が6種類（meaning/decomposition/
+   positioning_note/interpretation/identity/standardization）そろっている /
+   429（対話上限）・degraded（AI応答生成不可）を事実文として処理する /
+   対話・候補注釈カードの動的テキスト描画に escHtml を使う（XSS対策）
 """
 
 from __future__ import annotations
@@ -88,7 +100,8 @@ class TestDeliberationModule:
         assert DELIBERATION_JS.exists(), "frontend/public/js/deliberation.js が存在しません。"
 
     def test_no_polling(self):
-        """§9: 地図・アシスタント系と同様ポーリング禁止。開くたび fetch する。"""
+        """§9: 地図・アシスタント系と同様ポーリング禁止。開くたび fetch する。
+        対話送信・注釈コミット/却下も setInterval のような定期実行は使わない。"""
         src = _read(DELIBERATION_JS)
         assert "setInterval" not in src
 
@@ -105,7 +118,8 @@ class TestDeliberationModule:
         assert "openElement:" in src
 
     def test_fetch_target_is_deliberation_only(self):
-        """§8: overview API 以外の admin API パスを直接参照しない。"""
+        """§8: /api/admin/deliberation/ 配下以外の admin API パスを直接参照しない
+        （overview・sessions・messages・annotations・commit・dismiss すべて含む）。"""
         src = _read(DELIBERATION_JS)
         assert "/admin/deliberation/" in src
         idx = 0
@@ -125,17 +139,116 @@ class TestDeliberationModule:
         src = _read(DELIBERATION_JS)
         assert re.search(r"(?<!api)fetch\(", src) is None
 
-    def test_no_write_methods(self):
-        """Phase 0 は overview の読み取りのみ（面③対話・注釈コミットは Phase 2）。"""
-        src = _read(DELIBERATION_JS)
-        for method in ("POST", "PUT", "PATCH", "DELETE"):
-            assert f'"{method}"' not in src
-            assert f"'{method}'" not in src
-
     def test_equation_requires_document_id(self):
         """設計書 §2: equation は document_id で一意化するため必須。"""
         src = _read(DELIBERATION_JS)
         assert 'elementType === "equation" && !opts.documentId' in src
+
+    def test_cross_corpus_lens_is_registered(self):
+        """Phase 1（§4.2）: cross_corpus レンズが LENS_LABELS / LENS_ORDER の両方にあること。
+        既存レンダラ（_lensSectionHtml/_kvTableHtml）は item.label/item.value しか読まない
+        ため、cross_corpus の document_id は自然と非表示になる（別途の描画コードは不要）。
+        """
+        src = _read(DELIBERATION_JS)
+        assert "cross_corpus:" in src
+        assert '"cross_corpus"' in src
+
+
+class TestDeliberationDialoguePhase2:
+    """面③ 対話的検討（Phase 2）固有の受け入れ条件。"""
+
+    def test_write_methods_scoped_to_deliberation_dialogue(self):
+        """POST は sessions・messages・annotations の commit/dismiss にのみ使い、
+        PUT/PATCH/DELETE は引き続き使わない（削除 API は無い・W4）。"""
+        src = _read(DELIBERATION_JS)
+        for method in ("PUT", "PATCH", "DELETE"):
+            assert f'"{method}"' not in src
+            assert f"'{method}'" not in src
+        assert '"POST"' in src or "'POST'" in src
+        # POST を使う既知のエンドポイント（設計書 §8）がすべて揃っていること。
+        # test_fetch_target_is_deliberation_only により、これらはすべて
+        # /admin/deliberation/ 配下に限定されていることも別途保証される。
+        # commit/dismiss は _decideAnnotation(id, action, ...) が共通実装のため
+        # パス末尾は "/" + action で動的に組み立てる（"commit"/"dismiss" という
+        # action 文字列自体は data-action 属性・呼び出し引数として存在する）。
+        assert "/sessions" in src
+        assert "/messages" in src
+        assert '"/admin/deliberation/annotations/"' in src
+        assert '"/" + action' in src
+        assert '"commit"' in src
+        assert '"dismiss"' in src
+
+    def test_session_created_lazily_on_first_send(self):
+        """W6/§9: モーダルを開いただけではセッションを作らない（無駄な行・コストを
+        作らない）。POST /sessions は _ensureChatSession に隔離され、openElement の
+        本体からは直接呼ばれない（ユーザーの最初の送信操作を経て初めて呼ばれる）。"""
+        src = _read(DELIBERATION_JS)
+        assert "function _ensureChatSession" in src
+        assert '"/admin/deliberation/sessions"' in src
+
+        start = src.index("function openElement")
+        end = src.index("window.Deliberation = {")
+        open_element_src = src[start:end]
+        assert '"/admin/deliberation/sessions"' not in open_element_src, (
+            "openElement 内で直接セッションを作成しています（開くだけでセッションが"
+            "作られてはならない）"
+        )
+
+    def test_annotations_restored_on_reopen(self):
+        """W4: モーダル再オープン時は候補/確定/却下すべての注釈を GET で復元表示する。"""
+        src = _read(DELIBERATION_JS)
+        assert "function _loadAnnotations" in src
+        assert "/annotations" in src
+
+    def test_annotation_kind_labels_present(self):
+        """設計書 §5/§6: コミットルーティング表にある6種類の kind すべてに
+        日本語ラベルがあること（数値化・件数化はしない・W8）。"""
+        src = _read(DELIBERATION_JS)
+        assert "ANNOTATION_KIND_LABELS" in src
+        for kind in (
+            "meaning",
+            "decomposition",
+            "positioning_note",
+            "interpretation",
+            "identity",
+            "standardization",
+        ):
+            assert f"{kind}:" in src, f"kind={kind!r} の日本語ラベルが見つかりません"
+
+    def test_annotation_commit_dismiss_wired(self):
+        """候補注釈カードに [確定]/[却下] ボタンが配線されていること。"""
+        src = _read(DELIBERATION_JS)
+        assert 'data-action="commit"' in src
+        assert 'data-action="dismiss"' in src
+
+    def test_degraded_and_rate_limit_are_factual_notes(self):
+        """W3: 断定・煽りを足さない。429（対話上限）は detail をそのまま表示し、
+        degraded（AI応答が生成できなかった）は事実文の注記として添える。"""
+        src = _read(DELIBERATION_JS)
+        assert "degraded" in src
+        assert "429" in src
+        assert "err.status === 429" in src
+
+    def test_no_numeric_confidence_rendered(self):
+        """W8: confidence の生値は表示せず、API が返す confidence_label のみ描画する。"""
+        src = _read(DELIBERATION_JS)
+        assert "confidence_label" in src
+        assert re.search(r"\bann\.confidence\b(?!_label)", src) is None
+
+    def test_chat_rendering_uses_esc_html(self):
+        """XSS対策: 対話メッセージ・候補注釈カードの動的テキストは escHtml 経由で
+        描画する（innerHTML への生埋め込みをしない）。"""
+        src = _read(DELIBERATION_JS)
+
+        assert "function _appendChatMessage" in src
+        msg_start = src.index("function _appendChatMessage")
+        msg_end = src.index("function _appendChatNote")
+        assert "escHtml(" in src[msg_start:msg_end]
+
+        assert "function _fillAnnotationCard" in src
+        card_start = src.index("function _fillAnnotationCard")
+        card_end = src.index("function _buildAnnotationCard")
+        assert src[card_start:card_end].count("escHtml(") >= 3
 
 
 class TestAdminHtmlIntegration:

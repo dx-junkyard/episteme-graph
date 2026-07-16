@@ -4,14 +4,38 @@
 document-scoped 要素は ``_ensure_document_viewable``/``_ensure_document_editable`` で
 fail-closed（W5）。
 
-Phase 0（overview）: 面①「内訳」+ 面②「位置づけ」（§4.1/4.3/4.4 のみ・§4.2 コーパス横断は
-Phase 1）の集約 overview。
+Phase 0（overview）: 面①「内訳」+ 面②「位置づけ」（§4.1/4.3/4.4）の集約 overview。
 
-Phase W-β（本増分）: 同一性リンク（`element_identity_links`、migration 048）の
+Phase 1（本増分）: 面②に §4.2 コーパス横断レンズ（chunk-proxy 方式）を追加。
+`core.deliberation.positioning.build()` が embedding 検索で近傍 chunk を引き、
+その material_id から他 document の候補（各 item に `document_id` 付き）を返す。
+core は per-user 権限を判定できないため、閲覧不可 document 由来の候補は本ルータの
+`_apply_cross_corpus_gate` が最終フィルタする（W5・fail-closed）。
+
+Phase W-β: 同一性リンク（`element_identity_links`、migration 048）の
 作成・確定・却下・一覧。設計は `docs/features/knowledge_network_vision.md`
 （§3 修正② / §4 KN-2・KN-3）と本設計書 §5.5。LLM 呼び出しはゼロ（人間操作のみ）。
 確定・却下は常に候補（`status='candidate'`）からの人間の判断（KN-3）で、
 行削除 API は作らない（W4）。
+
+Phase 2（本増分、migration 049）: 対話的検討 + 候補注釈 + コミットルーティング（§5）。
+`deliberation_sessions` / `element_annotations` の CRUD は `core.deliberation.store`
+（生SQL・FastAPI 非import）、grounding 構築 + LLM 1ターン実行は
+`core.deliberation.dialogue`（`core.llm.generate_conversation_turn` 経由。会話は
+教員起動の同期だが 1 応答=1 LLM コール・コスト上限あり、W6/§11）、候補注釈の検証
+（W3: evidence/reason 必須）・status 遷移・コミットルーティング（§5 表・3経路のみ）は
+`core.deliberation.annotations` が担う。生成された候補注釈は常に `status='candidate'`
+（W2）。commit は `_ensure_document_editable`（domain-scoped は `_require_teacher`
+のみ）。positioning_note / standardization の commit は v1 未対応（422、dismiss のみ可）。
+
+Phase S（本増分、migration 050）: 標準化判定 worker（知識ネットワークビジョン §3 修正③・
+§6・§7）の手動バッチ起動 API。三角測量（①LLM 事前知識 ②L層凍結版類似 ③コーパス内反復）は
+`core.deliberation.standardization`（llm_worker 6系統目アダプタ）が非同期 daemon thread
+（`core/tension/worker.py` と同型）で実行し、常に `status='candidate'` の
+`element_annotations`（`kind='standardization'`）を書く。本ルータはトリガーのみで
+LLM 呼び出しを含む実処理は行わない（W6 同様に同期パスを重くしない）。確定（commit）は
+既存の `POST /annotations/{id}/commit` がそのまま扱う（§5 表に `standardization` →
+`library_entries.standardization_status` 経路を追加済み）。
 
 core 側（`core.deliberation`）は FastAPI を import しない。
 """
@@ -19,14 +43,25 @@ core 側（`core.deliberation`）は FastAPI を import しない。
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from dependencies import _require_teacher
-from core.deliberation import decomposition, identity_links, positioning, refs
+from core.deliberation import (
+    annotations as delib_annotations,
+    decomposition,
+    dialogue,
+    identity_links,
+    positioning,
+    refs,
+    store as delib_store,
+)
+from core.deliberation.standardization import worker as standardization_worker
 from core.deliberation.schema import (
+    ELEMENT_FIGURE,
     ELEMENT_SHARED_PART,
     IDENTITY_LINK_STATUS_CONFIRMED,
     IDENTITY_LINK_STATUS_REJECTED,
@@ -127,6 +162,36 @@ def _apply_exemplar_image_gate(breakdown: dict[str, Any], current_user: dict) ->
     fields["exemplar_images_hidden_count"] = hidden
 
 
+def _apply_cross_corpus_gate(positioning_payload: dict[str, Any], current_user: dict) -> None:
+    """面② cross_corpus レンズ（設計書 §4.2、Phase 1）の items を、各 item の由来
+    document 閲覧権限でフィルタする（fail-closed・W5）。
+
+    ``core.deliberation.positioning`` は per-user 権限を判定できない（core は
+    services/routes を import しない）ため、``_build_cross_corpus`` が返す items
+    （各 item に ``document_id`` フィールドを持つ）をこの route 層で最終フィルタする。
+    隠した件数は ``hidden_count`` として正直に返す（P4・出所の正直さ。ただし UI は
+    描画しない）。フィルタ後 items が空ならレンズ自体を None に落とす
+    （``_apply_exemplar_image_gate`` と同型のパターン）。
+    """
+    lenses = positioning_payload.get("lenses")
+    if not isinstance(lenses, dict):
+        return
+    lens = lenses.get("cross_corpus")
+    if not isinstance(lens, dict):
+        return
+    items = lens.get("items")
+    if not isinstance(items, list) or not items:
+        return
+    visible, hidden = _filter_by_document_view(
+        items, "document_id", _make_document_view_checker(current_user)
+    )
+    if not visible:
+        lenses["cross_corpus"] = None
+        return
+    lens["items"] = visible
+    lens["hidden_count"] = hidden
+
+
 @router.get("/elements/{element_type}/{element_id}/overview")
 def get_element_overview(
     element_type: str,
@@ -144,7 +209,9 @@ def get_element_overview(
       ``_ensure_document_viewable`` を通す（fail-closed・W5）。
     - domain-scoped（shared_part）は L層方針で本文テキストを教員全体に開示するため
       ``_require_teacher`` のみ（画像含有等の狭い開示は本エンドポイントの対象外）。
-    - 数値（confidence 等）は返さない（W8。Phase 0 は集約のみで confidence 自体を持たない）。
+    - 数値（confidence 等）は返さない（W8）。
+    - 面②の cross_corpus レンズ（§4.2、Phase 1）は他 document の候補を返しうるため、
+      閲覧不可 document 由来の候補をこの route 層でフィルタする（``_apply_cross_corpus_gate``）。
     """
     try:
         ref = refs.resolve(element_type, element_id, document_id=document_id)
@@ -181,6 +248,11 @@ def get_element_overview(
             "available": False,
             "note": "位置づけレンズの取得に失敗したため内訳のみ返す",
         }
+
+    if positioning_payload.get("available"):
+        # cross_corpus は他 document の候補を返しうるため、閲覧不可 document 由来の
+        # 候補をここでフィルタする（W5・fail-closed。§4.2「閲覧不可のものは除外」）。
+        _apply_cross_corpus_gate(positioning_payload, current_user)
 
     return {
         "ref": ref.to_dict(),
@@ -363,4 +435,376 @@ def list_identity_links_for_shared_part(
         "ref": ref.to_dict(),
         "identity_links": [_identity_link_response(link) for link in visible],
         "hidden_count": hidden,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: 対話的検討 + 候補注釈 + コミットルーティング
+# ---------------------------------------------------------------------------
+
+
+class SessionCreateRequest(BaseModel):
+    """対話セッション開始リクエスト（設計書 §8）。"""
+
+    scope: str
+    element_type: str
+    element_id: str
+    document_id: str | None = Field(
+        default=None,
+        description="equation 要素で必須（refs.resolve の一意化に使う）。他型では無視される。",
+    )
+    title: str = ""
+
+
+class MessageCreateRequest(BaseModel):
+    content: str
+
+
+def _session_response(session: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": session["id"],
+        "scope": session["scope"],
+        "element_type": session["element_type"],
+        "element_id": session["element_id"],
+        "document_id": session.get("document_id"),
+        "domain_key": session.get("domain_key"),
+        "title": session.get("title", ""),
+        "messages": session.get("messages") or [],
+        "created_at": session.get("created_at", ""),
+    }
+
+
+def _annotation_response(annotation: dict[str, Any]) -> dict[str, Any]:
+    """候補/確定/却下注釈を API 応答用に整形する（W8: confidence は生値を返さずラベルのみ。
+    ``identity_links.confidence_label`` を再利用し、W層内で閾値の定義を二重化しない）。
+    """
+    return {
+        "id": annotation["id"],
+        "kind": annotation["kind"],
+        "body": annotation.get("body") or {},
+        "evidence": annotation.get("evidence") or [],
+        "reason": annotation.get("reason", ""),
+        "confidence_label": identity_links.confidence_label(annotation.get("confidence")),
+        "status": annotation["status"],
+        "committed_target": annotation.get("committed_target") or {},
+        "created_at": annotation.get("created_at", ""),
+    }
+
+
+def _http_from_commit_error(exc: delib_annotations.CommitRoutingError) -> HTTPException:
+    status = {"not_found": 404, "conflict": 409}.get(exc.kind, 422)
+    return HTTPException(status_code=status, detail=str(exc))
+
+
+def _ensure_session_owner(session: dict[str, Any] | None, current_user: dict) -> dict[str, Any]:
+    """セッションの作成者本人のみアクセスできる（他人のセッションは404。設計書 §8）。"""
+    if not session or session.get("created_by") != current_user.get("id"):
+        raise HTTPException(status_code=404, detail="deliberation session not found")
+    return session
+
+
+@router.post("/sessions")
+def create_deliberation_session(
+    body: SessionCreateRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict[str, Any]:
+    """対話セッションを開始する（設計書 §8）。
+
+    ゲート: document-scoped 要素は ``_ensure_document_viewable``（fail-closed・W5）。
+    domain-scoped（shared_part）は L層方針により ``_require_teacher`` のみ。
+    """
+    try:
+        ref = refs.resolve(body.element_type, body.element_id, document_id=body.document_id)
+    except ElementResolutionError as exc:
+        raise _http_from_resolution_error(exc) from exc
+    if ref.scope != body.scope:
+        raise HTTPException(
+            status_code=422,
+            detail=f"scope {body.scope!r} does not match the resolved element (scope={ref.scope!r})",
+        )
+    if ref.scope == SCOPE_DOCUMENT:
+        _ensure_document_viewable(ref.document_id or "", current_user)
+
+    session = delib_store.create_session(ref, title=body.title, created_by=current_user.get("id"))
+    record_review_event(
+        AUDIT_ENTITY_DELIBERATION,
+        session["id"],
+        "",
+        "session_started",
+        current_user.get("id"),
+        {"action": "session.create", "element_type": ref.element_type, "element_id": ref.element_id},
+    )
+    return {"session": _session_response(session)}
+
+
+@router.get("/sessions/{session_id}")
+def get_deliberation_session(
+    session_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict[str, Any]:
+    """セッション取得（messages 込み）。作成者本人のみ（他人のセッションは404）。"""
+    session = _ensure_session_owner(delib_store.get_session_by_id(session_id), current_user)
+    return {"session": _session_response(session)}
+
+
+@router.post("/sessions/{session_id}/messages")
+def post_deliberation_message(
+    session_id: str,
+    body: MessageCreateRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict[str, Any]:
+    """1ターン送信 → 応答 + 候補注釈（1 LLM コール・W6）。
+
+    grounding（面①内訳 + 面②レンズ要約）は最初の user メッセージにのみ注入する
+    （設計書 §5）。cross_corpus / exemplar_images の権限フィルタは overview と同じ
+    route 層ゲートを適用してから grounding テキスト化する（W5）。figure 要素は
+    vision（画像添付）で対話する。生成された候補注釈は常に ``status='candidate'``
+    で永続化する（W2）。
+    """
+    session = _ensure_session_owner(delib_store.get_session_by_id(session_id), current_user)
+
+    try:
+        ref = refs.resolve(
+            session["element_type"], session["element_id"], document_id=session.get("document_id")
+        )
+    except ElementResolutionError as exc:
+        raise _http_from_resolution_error(exc) from exc
+    if ref.scope == SCOPE_DOCUMENT:
+        _ensure_document_viewable(ref.document_id or "", current_user)
+
+    user_content = (body.content or "").strip()
+    if not user_content:
+        raise HTTPException(status_code=422, detail="content is required")
+
+    if not dialogue.check_and_count_llm_call(session_id, current_user.get("id")):
+        raise HTTPException(
+            status_code=429,
+            detail="本日またはこのセッションでの対話回数の上限に達しました。しばらくしてから再度お試しください。",
+        )
+
+    grounding = dialogue.build_grounding(ref)
+    if grounding.get("positioning", {}).get("available"):
+        _apply_cross_corpus_gate(grounding["positioning"], current_user)
+    if ref.element_type == ELEMENT_SHARED_PART:
+        _apply_exemplar_image_gate(grounding["breakdown"], current_user)
+    grounding_text = dialogue.grounding_to_text(grounding)
+
+    images: list[bytes] | None = None
+    if ref.element_type == ELEMENT_FIGURE:
+        image_bytes = dialogue.figure_image_bytes(ref.element_id)
+        images = [image_bytes] if image_bytes else None
+
+    prior_messages = [
+        {"role": str(m.get("role") or "user"), "content": str(m.get("content") or "")}
+        for m in (session.get("messages") or [])
+        if isinstance(m, dict)
+    ]
+
+    result = dialogue.run_turn(
+        ref,
+        prior_messages=prior_messages,
+        user_content=user_content,
+        grounding_text=grounding_text,
+        images=images,
+        user_id=current_user.get("id"),
+    )
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    delib_store.append_messages(
+        session_id,
+        [
+            {"role": "user", "content": user_content, "created_at": now_iso},
+            {"role": "assistant", "content": result.reply, "created_at": now_iso},
+        ],
+    )
+
+    created_annotations = delib_annotations.create_candidates_from_dialogue(
+        ref,
+        session_id=session_id,
+        raw_items=result.annotations,
+        created_by=current_user.get("id"),
+    )
+    for annotation in created_annotations:
+        record_review_event(
+            AUDIT_ENTITY_DELIBERATION,
+            annotation["id"],
+            "",
+            annotation["status"],
+            current_user.get("id"),
+            {"action": "annotation.candidate_generated", "kind": annotation["kind"], "session_id": session_id},
+        )
+
+    return {
+        "reply": result.reply,
+        "annotations": [_annotation_response(a) for a in created_annotations],
+        "degraded": result.degraded,
+    }
+
+
+@router.get("/elements/{element_type}/{element_id}/annotations")
+def list_element_annotations(
+    element_type: str,
+    element_id: str,
+    document_id: str | None = Query(
+        default=None,
+        description="equation 要素で必須（独立テーブルを持たないため document で一意化)。"
+        "他型では無視される。",
+    ),
+    current_user: dict = Depends(_require_teacher),
+) -> dict[str, Any]:
+    """要素に付いた候補/確定/却下注釈の一覧（confidence はラベル・W8）。"""
+    try:
+        ref = refs.resolve(element_type, element_id, document_id=document_id)
+    except ElementResolutionError as exc:
+        raise _http_from_resolution_error(exc) from exc
+    if ref.scope == SCOPE_DOCUMENT:
+        _ensure_document_viewable(ref.document_id or "", current_user)
+    # domain-scoped（shared_part）は L層方針で _require_teacher のみ（overview と同型）。
+
+    items = delib_store.list_annotations_for_element(
+        ref.element_type, ref.element_id, document_id=ref.document_id, domain_key=ref.domain_key,
+    )
+    return {"annotations": [_annotation_response(a) for a in items]}
+
+
+@router.post("/annotations/{annotation_id}/commit")
+def commit_element_annotation(
+    annotation_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict[str, Any]:
+    """候補注釈を確定し、既存構造へルーティングする（``_ensure_document_editable``）。
+
+    v1 は3経路のみ（interpretation→C層 explanation / meaning・decomposition→
+    theory_components 更新 / identity→identity_link 候補作成）。positioning_note /
+    standardization は 422「この種別のコミットは未対応（後続フェーズ）」を返す。
+    """
+    existing = delib_store.get_annotation(annotation_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="annotation not found")
+    if existing["scope"] == SCOPE_DOCUMENT:
+        _ensure_document_editable(existing.get("document_id") or "", current_user)
+    # domain-scoped（shared_part）は L層方針で _require_teacher のみ。
+
+    try:
+        updated = delib_annotations.commit(annotation_id, current_user_id=current_user.get("id"))
+    except delib_annotations.CommitRoutingError as exc:
+        raise _http_from_commit_error(exc) from exc
+
+    record_review_event(
+        AUDIT_ENTITY_DELIBERATION,
+        annotation_id,
+        existing["status"],
+        updated["status"],
+        current_user.get("id"),
+        {"action": "annotation.commit", "kind": existing["kind"]},
+    )
+    return {
+        "annotation": _annotation_response(updated),
+        "committed_target": updated.get("committed_target") or {},
+    }
+
+
+@router.post("/annotations/{annotation_id}/dismiss")
+def dismiss_element_annotation(
+    annotation_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict[str, Any]:
+    """候補注釈を却下する（status 遷移で保持・W4。``_ensure_document_editable``）。"""
+    existing = delib_store.get_annotation(annotation_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="annotation not found")
+    if existing["scope"] == SCOPE_DOCUMENT:
+        _ensure_document_editable(existing.get("document_id") or "", current_user)
+
+    updated = delib_annotations.dismiss(annotation_id, updated_by=current_user.get("id"))
+    if updated is None:
+        raise HTTPException(status_code=409, detail="annotation is not a candidate (already decided)")
+
+    record_review_event(
+        AUDIT_ENTITY_DELIBERATION,
+        annotation_id,
+        existing["status"],
+        updated["status"],
+        current_user.get("id"),
+        {"action": "annotation.dismiss", "kind": existing["kind"]},
+    )
+    return {"annotation": _annotation_response(updated)}
+
+
+# ---------------------------------------------------------------------------
+# Phase S: 標準化判定 worker の手動バッチ起動（知識ネットワークビジョン §6・§7）
+# ---------------------------------------------------------------------------
+#
+# domain-scoped（shared_part）なので L層方針で ``_require_teacher`` のみ（overview /
+# identity-links の shared_part 系エンドポイントと同型）。LLM 呼び出し・retrieval を
+# 含む実処理は同期処理せず、既存の tension/doubt.scope_candidates と同型の daemon
+# thread へ委譲する（結果は element_annotations の candidate として非同期に書かれ、
+# 教員は GET .../annotations で後から確認する）。冪等性チェック（既に candidate/committed
+# の standardization 注釈があるか）だけは軽い DB 読み取りのため同期で行い、件数の生数字を
+# 出さない事実文で応答する（W8）。
+
+
+@router.post("/shared-parts/{shared_part_id}/standardization/assess")
+def assess_shared_part_standardization(
+    shared_part_id: str,
+    force: bool = Query(
+        default=False,
+        description="既に candidate/committed の standardization 注釈があっても再評価する。",
+    ),
+    current_user: dict = Depends(_require_teacher),
+) -> dict[str, Any]:
+    """1つの共通部品（shared_part）について標準化判定（三角測量）の評価を開始する。"""
+    try:
+        ref = refs.resolve(ELEMENT_SHARED_PART, shared_part_id)
+    except ElementResolutionError as exc:
+        raise _http_from_resolution_error(exc) from exc
+
+    if not force and standardization_worker.has_pending_or_committed_assessment(
+        ref.element_id, ref.domain_key or ""
+    ):
+        return {
+            "queued": False,
+            "note": "既に標準化判定の候補または確定があるため、評価をスキップしました"
+            "（force で再評価できます）。",
+        }
+
+    standardization_worker.schedule_assess_shared_part(ref.element_id, force=force)
+    record_review_event(
+        AUDIT_ENTITY_DELIBERATION,
+        ref.element_id,
+        "",
+        "standardization_assess_requested",
+        current_user.get("id"),
+        {"action": "standardization.assess_requested", "scope": "shared_part"},
+    )
+    return {"queued": True, "note": "標準化判定の評価をバックグラウンドで開始しました。"}
+
+
+@router.post("/domains/{domain_key}/standardization/assess")
+def assess_domain_standardization(
+    domain_key: str,
+    force: bool = Query(
+        default=False,
+        description="既に candidate/committed の standardization 注釈があるエントリも再評価する。",
+    ),
+    current_user: dict = Depends(_require_teacher),
+) -> dict[str, Any]:
+    """domain 内の active な共通部品すべてについて標準化判定の評価を開始する。
+
+    件数の生数字は返さない（W8）——対象がいくつあるかは
+    ``GET /elements/shared_part/{id}/annotations`` を個別に確認する。
+    """
+    standardization_worker.schedule_assess_domain(domain_key, force=force)
+    record_review_event(
+        AUDIT_ENTITY_DELIBERATION,
+        domain_key,
+        "",
+        "standardization_assess_requested",
+        current_user.get("id"),
+        {"action": "standardization.assess_requested", "scope": "domain"},
+    )
+    return {
+        "queued": True,
+        "note": "この分野の標準化判定の評価をバックグラウンドで開始しました"
+        "（既に候補・確定があるエントリはスキップされます）。",
     }

@@ -202,26 +202,30 @@
   // 共有先向け通知インボックス
   // -------------------------------------------------------------------------
 
+  // 通知ベルはトップバーの常設ボタン（admin.html の #vg-inbox-btn）を使う。
+  // 以前この位置は右下の常設フローティングボタンだったが、「AI アシスタントへの
+  // アクセスを良くする」ため位置を入れ替え、右下フローティングは Admin Copilot（🤖）に譲った。
   function initInbox() {
-    if (document.getElementById("vg-inbox-btn")) return;
-    var btn = document.createElement("button");
-    btn.id = "vg-inbox-btn";
-    btn.title = "共有物の更新通知";
-    btn.style.cssText = "position:fixed;right:18px;bottom:18px;width:44px;height:44px;border-radius:50%;border:none;background:var(--color-text-info,#06c);color:#fff;font-size:20px;cursor:pointer;box-shadow:0 3px 10px rgba(0,0,0,0.25);z-index:9998";
-    btn.innerHTML = "🔔<span id=\"vg-inbox-badge\" style=\"position:absolute;top:-4px;right:-4px;background:var(--color-text-danger,#c00);color:#fff;border-radius:10px;font-size:10px;min-width:16px;height:16px;line-height:16px;display:none\"></span>";
+    var btn = document.getElementById("vg-inbox-btn");
+    if (!btn || btn.dataset.vgInboxBound) return;
+    btn.dataset.vgInboxBound = "1";
+    var badge = document.createElement("span");
+    badge.id = "vg-inbox-badge";
+    badge.style.cssText = "margin-left:3px;font-size:11px";
+    btn.appendChild(badge);
     btn.addEventListener("click", _toggleInbox);
-    document.body.appendChild(btn);
     _refreshInbox();
     _inboxTimer = setInterval(_refreshInbox, 60000);
   }
 
   function _refreshInbox() {
+    var badge = document.getElementById("vg-inbox-badge");
     apiFetch("/admin/notifications").then(json).then(function (data) {
-      var badge = document.getElementById("vg-inbox-badge");
       if (!badge) return;
       var n = (data && data.unread_count) || 0;
-      badge.textContent = n > 9 ? "9+" : String(n);
-      badge.style.display = n > 0 ? "block" : "none";
+      badge.textContent = n > 0 ? (n > 9 ? " (9+)" : " (" + n + ")") : "";
+      badge.style.color = n > 0 ? "var(--color-text-danger,#e24b4a)" : "var(--color-text-secondary,#6e6e73)";
+      badge.style.fontWeight = n > 0 ? "600" : "normal";
     }).catch(function () {});
   }
 
@@ -230,7 +234,7 @@
     if (existing) { existing.remove(); return; }
     var panel = document.createElement("div");
     panel.id = "vg-inbox-panel";
-    panel.style.cssText = "position:fixed;right:18px;bottom:70px;width:360px;max-height:60vh;overflow:auto;background:var(--color-bg-primary,#fff);border:1px solid var(--color-border,#ddd);border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,0.2);z-index:9998;padding:12px";
+    panel.style.cssText = "position:fixed;top:46px;right:20px;width:340px;max-width:calc(100vw - 32px);max-height:60vh;overflow:auto;background:var(--color-background-primary,#fff);border:1px solid var(--color-border-secondary,#d2d2d7);border-radius:12px;box-shadow:0 20px 48px rgba(0,0,0,0.24);z-index:10045;padding:12px";
     panel.innerHTML =
       '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
         '<b style="font-size:14px;color:var(--color-text-primary)">共有物の更新通知</b>' +

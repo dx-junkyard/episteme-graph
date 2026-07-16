@@ -34,10 +34,12 @@ from tests.guardrail_helpers import (  # noqa: E402
     assert_module_tree_does_not_import,
     assert_module_tree_forbids,
     assert_source_forbids,
+    extract_function_source,
 )
 
 _CORE_DIR = BACKEND / "core" / "personal_graph"
 _ROUTE_SRC = (BACKEND / "api" / "routes" / "personal_map.py").read_text(encoding="utf-8")
+_ADMIN_ROUTE_SRC = (BACKEND / "api" / "routes" / "admin.py").read_text(encoding="utf-8")
 
 _BANNED_VOCAB = ("踏破", "達成率", "ランキング")
 
@@ -202,3 +204,129 @@ class TestJourneyUsesConfirmedLinksOnly:
         journey_src = (_CORE_DIR / "journey.py").read_text(encoding="utf-8")
         assert "MAX_FANOUT_PER_SEGMENT" in journey_src
         assert "MAX_STEPS" in journey_src
+
+
+class TestBridgeAggregationGuardrails:
+    """ビジョン Phase B（学習者重ね合わせの橋候補集約, §3 修正①/§4 KN-4/§7 Phase B）。
+
+    - 集約の根拠は本人が connect 操作で指定した ``payload.connected_refs`` のみ。
+      LLM 候補由来の ``target_refs`` を ``bridges.py`` が一切参照しない（KN-4/PN-3）
+    - k=3 は ``core/privacy.py`` の ``K_ANONYMITY`` を import して使う（リテラル再定義禁止）
+    - 応答組み立てに生カウントキー（"count"/"learners" 等）が無く、
+      ``bucket_count_range`` のレンジ文字列のみを経由する（PN-1/P3）
+    - core 非 FastAPI / 非 services / 禁止語彙（踏破・達成率 等）は既存の
+      ``TestCoreIsFrameworkFreeAndReadOnly`` / ``TestBannedVocabulary`` の
+      ディレクトリ横断検査が ``bridges.py`` も自動的にカバーする
+      （ここではファイル存在のみ確認して検査対象に入っていることを固定する）
+    """
+
+    def test_bridges_module_exists_and_is_covered_by_tree_guardrails(self):
+        assert (_CORE_DIR / "bridges.py").is_file()
+
+    def test_bridges_reads_connected_refs_only(self):
+        src = (_CORE_DIR / "bridges.py").read_text(encoding="utf-8")
+        assert "connected_refs" in src
+        assert "target_refs" not in src
+        assert "'connected'" in src  # status='connected' 行のみを対象にする
+
+    def test_bridges_uses_privacy_canon_without_redefining_k(self):
+        src = (_CORE_DIR / "bridges.py").read_text(encoding="utf-8")
+        assert "from core.privacy import" in src
+        assert "K_ANONYMITY" in src
+        assert "bucket_count_range" in src
+        # k=3 のリテラル再定義（K_ANONYMITY = 3 / NAIVE_SIGNAL_... 相当）を持たない
+        assert "K_ANONYMITY =" not in src
+        assert "K_ANONYMITY=" not in src
+
+    def test_bridges_response_uses_range_only(self):
+        src = (_CORE_DIR / "bridges.py").read_text(encoding="utf-8")
+        assert "learner_count_range" in src
+        # 生カウント・関与人数の生値キーを応答に持たない
+        assert_source_forbids(
+            src, ['"count"', '"learners"'], context="core/personal_graph/bridges.py",
+        )
+        # 集約純粋部の応答組み立てに user_id キーが出ない（distinct 計数の内部利用のみ）
+        aggregate_body = extract_function_source(src, "aggregate_entries")
+        assert '"user_id"' not in aggregate_body
+        assert "bucket_count_range(" in aggregate_body
+
+    def test_admin_route_registered_with_teacher_gate(self):
+        """教員向け GET /api/admin/courses/{course_id}/bridge-insights が
+        interest-dashboard（B層教員向け集約）と同じ ``_require_teacher`` ゲートで
+        routes/admin.py に登録されている。"""
+        assert '"/courses/{course_id}/bridge-insights"' in _ADMIN_ROUTE_SRC
+        body = extract_function_source(_ADMIN_ROUTE_SRC, "get_bridge_insights")
+        assert "_require_teacher" in body
+        assert "aggregate_bridge_candidates" in body
+
+    def test_admin_route_response_carries_no_personal_fields(self):
+        """応答組み立てに user_id・生カウントが無く、注記（評価利用禁止）を含む。"""
+        body = extract_function_source(_ADMIN_ROUTE_SRC, "get_bridge_insights")
+        assert_source_forbids(
+            body, ['"user_id"', '"count"', '"learners"'],
+            context="routes/admin.py:get_bridge_insights",
+        )
+        assert "評価利用は禁止" in body
+
+    def test_no_learner_facing_bridge_endpoint(self):
+        """学習者向け API を作らない（教員のみ。PN-1）—
+        routes/learning.py・routes/personal_map.py に bridge-insights が無い。"""
+        learning_src = (BACKEND / "api" / "routes" / "learning.py").read_text(encoding="utf-8")
+        assert "bridge-insights" not in learning_src
+        assert "bridge-insights" not in _ROUTE_SRC
+
+
+class TestMeRouterIsReadOnly:
+    """Phase P-0.5（提案書 §5.3）: ``/api/me/personal-network...`` 正本 API も
+    ``router``（コースビュー）と同じ読み取り専用制約を守る。"""
+
+    def test_no_write_or_delete_endpoints_on_me_router(self):
+        assert_source_forbids(
+            _ROUTE_SRC,
+            ["@me_router.post", "@me_router.put", "@me_router.patch", "@me_router.delete"],
+            context="routes/personal_map.py (me_router)",
+        )
+
+    def test_me_router_registered_and_read_only_get(self):
+        assert "me_router = APIRouter(prefix=\"/api/me\"" in _ROUTE_SRC
+        assert '"/personal-network"' in _ROUTE_SRC
+        assert '"/personal-network/journey"' in _ROUTE_SRC
+
+    def test_no_user_id_path_parameter_covers_me_router(self):
+        """既存 ``test_no_user_id_path_parameter``（``TestRouteIsPersonalScopeOnly``）が
+        ``_ROUTE_SRC``（personal_map.py 全体のソース）を検査対象にしているため、
+        ``router`` / ``me_router`` いずれに ``{user_id}`` パスパラメータを追加しても
+        既存アサーションが自動的に検出する（本テストは意図の明示のみ）。"""
+        assert "{user_id}" not in _ROUTE_SRC
+
+
+class TestIncludeCandidateLinksFailsClosed:
+    """PN-3/PN-6: 候補リンク（本人未確定情報）を個人ネットワークに含める opt-in を
+    サーバ側が拒否する（提案書 §5.3 ``include_candidate_links=false`` の既定・強制）。"""
+
+    def test_include_candidate_links_rejected_with_422(self):
+        assert "include_candidate_links" in _ROUTE_SRC
+        assert "422" in _ROUTE_SRC
+
+
+class TestDeriveHandlesMapExcluded:
+    """提案書 §6「地図には反映しない」操作の受け皿。derive.py が
+    ``payload.map_excluded`` を読み、導出対象から外す（行削除ではない・P4）。"""
+
+    def test_derive_source_processes_map_excluded_vocabulary(self):
+        derive_src = (_CORE_DIR / "derive.py").read_text(encoding="utf-8")
+        assert "map_excluded" in derive_src
+
+
+class TestPersonScopeDeriveFunctionsExist:
+    """Phase P-0.5 の本人スコープ導出関数が実装されていることの構造的固定
+    （``routes/personal_map.py`` がこれらを import して呼ぶ契約）。"""
+
+    def test_derive_exposes_person_scope_entrypoints(self):
+        derive_src = (_CORE_DIR / "derive.py").read_text(encoding="utf-8")
+        for name in ("def build_person_network", "def group_nodes_by_anchor", "def derive_person_network"):
+            assert name in derive_src, f"derive.py is missing expected function: {name!r}"
+
+    def test_route_uses_person_scope_entrypoints(self):
+        assert "derive_person_network" in _ROUTE_SRC
+        assert "group_nodes_by_anchor" in _ROUTE_SRC

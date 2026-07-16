@@ -1260,6 +1260,24 @@ def delete_material(
             {"doc_id": doc_id, "material_id": material_id},
         )
 
+        # W層 対話セッション + 候補注釈（migration 049）の scope='document' 行も document_id への
+        # FK が無いポリモーフィック行なので明示削除する（_purge_document と同じ orphan gap
+        # パターン。scope='domain' 行は document_id が NULL のため対象外・L層のライフサイクルに従う）。
+        session.execute(
+            sa_text(
+                "DELETE FROM element_annotations "
+                "WHERE document_id IN (CAST(:doc_id AS uuid)::text, :material_id)"
+            ),
+            {"doc_id": doc_id, "material_id": material_id},
+        )
+        session.execute(
+            sa_text(
+                "DELETE FROM deliberation_sessions "
+                "WHERE document_id IN (CAST(:doc_id AS uuid)::text, :material_id)"
+            ),
+            {"doc_id": doc_id, "material_id": material_id},
+        )
+
         # 4) ドキュメント削除
         session.execute(
             sa_text("DELETE FROM documents WHERE id = :doc_id"),
@@ -2550,7 +2568,18 @@ def list_document_figures(
                 "apparatus_name_candidate": record.get("apparatus_name_candidate", ""),
                 "match_status": record.get("match_status", "unknown"),
                 "parts": [
-                    {"name": p.get("name", ""), "role": p.get("role", "")}
+                    {
+                        "name": p.get("name", ""),
+                        "role": p.get("role", ""),
+                        # Phase 2 拡張（label_ref/expanded_name/bbox/evidence_quote/reason/confidence）。
+                        # 旧 artifact にはキーが無いため .get() でデフォルトを与える（情報を落とさない）。
+                        "label_ref": p.get("label_ref"),
+                        "expanded_name": p.get("expanded_name", ""),
+                        "bbox": p.get("bbox"),
+                        "evidence_quote": p.get("evidence_quote", ""),
+                        "reason": p.get("reason", ""),
+                        "confidence": p.get("confidence", 0.0),
+                    }
                     for p in (record.get("parts") or [])
                     if isinstance(p, dict)
                 ],
@@ -2577,6 +2606,8 @@ def list_document_figures(
             "region_confidence": row.get("region_confidence"),
             "status": row.get("status"),
             "image_url": f"/api/admin/documents/{document_id}/figures/{fig_id}/image",
+            "bbox": row.get("bbox"),
+            "inner_labels": row.get("inner_labels") or [],
             "apparatus_candidates": apparatus_by_figure.get(fig_id, []),
         })
     return {"figures": figures}
@@ -3173,6 +3204,35 @@ def get_interest_dashboard(
         title_map = {}
 
     return aggregate_interest_dashboard(course_id, title_map)
+
+
+# ---------------------------------------------------------------------------
+# 知識ネットワークビジョン Phase B — 学習者重ね合わせの橋候補（教員向け）
+# ---------------------------------------------------------------------------
+@router.get("/courses/{course_id}/bridge-insights")
+def get_bridge_insights(
+    course_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """教員向け橋候補インサイト（ビジョン §3 修正①・§4 KN-4・§7 Phase B）。
+
+    学習者が tension の connect 操作で自分の引っかかりを公共構造
+    （theory_component / TheoryOperationGraph の edge）へ自分で繋いだ「橋」を、
+    コース単位で k-匿名集約（k=3・人数はレンジ表示のみ。正本は core/privacy.py）した
+    橋候補として返す。ゲート・集約の流儀は interest-dashboard（B層教員向け集約）と同一。
+
+    - 個別の学習者・個別の痕跡行は一切返さない（PN-1/P3・評価利用禁止）
+    - 教員への候補提示のみで、ドメイン知識候補への自動昇格経路は作らない（KN-4）
+    - 「繋がりを見失う」側（迷いの集約）は v1 見送り（橋のみ）
+    """
+    from core.personal_graph.bridges import aggregate_bridge_candidates
+
+    bridges = aggregate_bridge_candidates(course_id)
+    return {
+        "course_id": course_id,
+        "bridges": bridges,
+        "note": "学習者個人は特定できません（k-匿名集約・人数はレンジ表示のみ）。評価利用は禁止です。",
+    }
 
 
 # ---------------------------------------------------------------------------

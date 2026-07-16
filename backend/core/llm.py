@@ -1220,3 +1220,127 @@ def generate_structured_with_images(
         raise ValueError(
             f"vision 構造化レスポンスを JSON として解析できませんでした: {raw!r}"
         ) from exc
+
+
+# ---------------------------------------------------------------------------
+# 公開 API: マルチターン会話（構造化出力・W層 §5 対話的検討 向けに新設）
+# ---------------------------------------------------------------------------
+
+
+def generate_conversation_turn(
+    messages: list[dict[str, Any]],
+    response_format: type[T],
+    *,
+    images: list[bytes] | None = None,
+    model: str | None = None,
+) -> T:
+    """マルチターン会話の1ターンを構造化出力で実行する。
+
+    既存 ``generate_text_with_structured_output`` はテキストのみのマルチターンに
+    対応済みだが ``images`` 引数を持たず、``generate_structured_with_images`` は
+    画像対応だが単発（会話履歴を持てない）。W層（要素検討ワークスペース、設計書
+    §5 対話的検討）は「figure 要素は画像付きで複数ターン会話する」を必要とするため、
+    両者を1本化する新規関数として追加する（既存2関数は非改変）。
+
+    - ``messages``: 会話履歴。``[{"role": "user"|"assistant", "content": str}, ...]``
+      の形式で、**最後の要素は新しい ``user`` ターンであること**（開発ルール4に従い
+      ``system`` ロールは使わない）。
+    - ``images``: 指定されれば最後の ``user`` メッセージへ画像パーツとして添付する
+      （``generate_structured_with_images`` と同じ base64 data URL エンコード・
+      ``detail="high"``）。None/空なら通常のテキストのみの構造化出力になる。
+    - v1 は OpenAI 経路のみ対応（vision 対応のため。他プロバイダは
+      ``NotImplementedError``。テキストのみの用途でも本関数は OpenAI 限定とし、
+      ``generate_text_with_structured_output`` のマルチプロバイダ対応とは独立に保つ）。
+
+    Returns
+    -------
+    T
+        パースされた Pydantic モデルインスタンス（``response_format``）。
+    """
+    settings = get_settings()
+    if settings.llm_provider != "openai":
+        raise NotImplementedError(
+            "generate_conversation_turn is only supported for LLM_PROVIDER=openai (v1)"
+        )
+    if not messages or messages[-1].get("role") != "user":
+        raise ValueError("messages must be non-empty and end with a 'user' turn")
+
+    model_name = model or settings.llm_analysis_model
+
+    prepared_messages: list[dict[str, Any]] = list(messages)
+    if images:
+        last = prepared_messages[-1]
+        content: list[dict[str, Any]] = [{"type": "text", "text": last.get("content", "")}]
+        for image_bytes in images:
+            mime_type = _detect_image_mime_type(image_bytes)
+            data_b64 = base64.b64encode(image_bytes).decode("ascii")
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime_type};base64,{data_b64}", "detail": "high"},
+                }
+            )
+        prepared_messages = prepared_messages[:-1] + [{"role": "user", "content": content}]
+
+    adapted_messages = _adapt_messages_for_model(prepared_messages, model_name)
+    schema = _safe_json_schema(response_format)
+    client = _get_openai_client()
+
+    # observe フックは images の有無で使い分ける（generate_structured_with_images と
+    # 同じ区別。vision は画像トークン推計・image_count を持つため別の観測系にする）。
+    prompt_for_observe = str(messages[-1].get("content", "")) if messages else ""
+
+    started = time.monotonic()
+    try:
+        response = client.beta.chat.completions.parse(
+            model=model_name,
+            messages=adapted_messages,
+            response_format=response_format,
+        )
+    except Exception as exc:
+        if images:
+            observe_vision(
+                provider=settings.llm_provider,
+                model=model_name,
+                prompt=prompt_for_observe,
+                image_count=_safe_len(images),
+                schema=schema,
+                error=exc,
+                started_monotonic=started,
+            )
+        else:
+            observe_chat(
+                provider=settings.llm_provider,
+                model=model_name,
+                messages=messages,
+                operation="structured",
+                schema=schema,
+                error=exc,
+                started_monotonic=started,
+            )
+        raise
+
+    response_message = response.choices[0].message
+    response_text = getattr(response_message, "content", None)
+    if images:
+        observe_vision(
+            provider=settings.llm_provider,
+            model=model_name,
+            prompt=prompt_for_observe,
+            image_count=_safe_len(images),
+            schema=schema,
+            response=response,
+            started_monotonic=started,
+        )
+    else:
+        observe_chat(
+            provider=settings.llm_provider,
+            model=model_name,
+            messages=messages,
+            operation="structured",
+            schema=schema,
+            response=response,
+            response_text=response_text,
+            started_monotonic=started,
+        )
+    return response_message.parsed

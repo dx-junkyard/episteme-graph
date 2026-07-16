@@ -1,23 +1,27 @@
-"""面②「文脈的位置づけ」の4レンズ合成（設計書 §4）。
+"""面②「文脈的位置づけ」の5レンズ合成（設計書 §4）。
 
-Phase 0 スコープは §4.1（論文内）/ §4.3（分野の地図）/ §4.4（承認・疑義）の3レンズのみ。
-§4.2（コーパス横断）は Phase 1（chunk-proxy 実装待ち）のため本モジュールには含めない
-（``build()`` は常に ``cross_corpus`` キーを持たない）。
+Phase 0 スコープは §4.1（論文内）/ §4.3（分野の地図）/ §4.4（承認・疑義）の3レンズ。
+Phase 1（本増分）で §4.2（コーパス横断・chunk-proxy 方式）を追加した。唯一 LLM 呼び出し
+（embedding 生成）を伴うレンズだが、新しい抽出ロジックは持たず既存の
+``core.embedder.search_similar_papers`` を呼ぶだけで、書き込みは一切行わない（W1/W6）。
 
-各レンズは既存機構を読むだけの非LLM合成（W6 の縮退先そのもの）。新しい抽出・LLM呼び出し・
-書き込みは一切行わない。レンズ単位で fail-soft: 1レンズの例外は握って None にし、他レンズ・
-overview 全体は引き続き返す。
+各レンズは既存機構を読むだけの合成（cross_corpus のみ embedding 生成を挟む。他は非LLM。
+W6 の縮退先=非LLM 集約のみ）。レンズ単位で fail-soft: 1レンズの例外は握って None にし、
+他レンズ・overview 全体は引き続き返す。
 
 外形（設計書のレスポンス契約）::
 
     {
       "intra_document": {"items": [{"label": str, "value": str}, ...]} | None,
+      "cross_corpus":   {"items": [{"label": str, "value": str, "document_id": str}, ...]} | None,
       "atlas":          {"items": [...]} | None,
       "endorsement":    {"items": [...]} | None,
       "epistemic":      {"items": [...]} | None,
     }
 
 value は事実文・段階ラベル・語彙ラベルのみ。生の件数・%・生数値は入れない（W8）。
+cross_corpus の各 item が持つ ``document_id`` は route 層の権限フィルタ専用の内部フィールド
+（W5。フロントは描画しない）。
 """
 
 from __future__ import annotations
@@ -28,7 +32,9 @@ from typing import Any
 from sqlalchemy import text as sa_text
 
 from core import atlas as atlas_module
+from core import embedder as embedder_module
 from core.atlas_store import load_learner_skeleton
+from core.llm_usage import usage_context
 from core.postgres import get_session
 from core.deliberation import refs as refs_mod
 from core.deliberation.schema import (
@@ -43,6 +49,10 @@ from core.deliberation.schema import (
 )
 
 logger = logging.getLogger(__name__)
+
+# コーパス横断レンズ（§4.2）の上位 k 件（既定5・設計書どおり）。
+_CROSS_CORPUS_TOP_K = 5
+_CROSS_CORPUS_LABEL = "関連する教材"
 
 # ── 語彙ラベル（生値を返さない・W8） ─────────────────────────────────────
 # epistemic_ledger.verification_status（migration 029 の CHECK 語彙をそのまま日本語化）。
@@ -529,6 +539,249 @@ def _build_intra_document(ref: ElementRef) -> list[dict[str, str]] | None:
 
 
 # ---------------------------------------------------------------------------
+# §4.2 コーパス横断（cross_corpus）— chunk-proxy 方式（唯一の新下地）
+# ---------------------------------------------------------------------------
+#
+# 要素→代表テキスト（非LLM連結・§15 未決2）→ 既存の chunk ベクトル検索
+# （``core.embedder.search_similar_papers``）で近傍 chunk を引き、その material_id から
+# 「関連する他の教材」を提示する。要素↔要素の直接類似ではなく chunk を介した粗い近似
+# （将来 Phase 3 で要素粒度 embedding に置換）。
+
+
+def _cross_corpus_representative_text(element_type: str, parts: dict[str, Any]) -> str:
+    """要素型ごとの代表テキストを非LLMの連結で組み立てる純粋関数（設計書 §4.2・§15 未決2:
+    要約 LLM ではなく非LLM 連結を採用する）。
+
+    ``parts`` の実体は要素型ごとに異なる（設計書 §4.2 の記述どおり）:
+    theory_claim={"text","normalized_text"} / theory_component={"name","summary"} /
+    equation={"plain_text","symbol_descriptions"（記号説明を1本の文字列へ連結済み）} /
+    figure={"caption_text"} / shared_part={"name","summary"}。DB 非依存で fake dict から
+    テスト可能（test_deliberation_positioning.py）。
+    """
+    if element_type == ELEMENT_THEORY_CLAIM:
+        pieces = (parts.get("text"), parts.get("normalized_text"))
+    elif element_type == ELEMENT_THEORY_COMPONENT:
+        pieces = (parts.get("name"), parts.get("summary"))
+    elif element_type == ELEMENT_EQUATION:
+        pieces = (parts.get("plain_text"), parts.get("symbol_descriptions"))
+    elif element_type == ELEMENT_FIGURE:
+        pieces = (parts.get("caption_text"),)
+    elif element_type == ELEMENT_SHARED_PART:
+        pieces = (parts.get("name"), parts.get("summary"))
+    else:
+        pieces = ()
+    cleaned = [str(p).strip() for p in pieces if str(p or "").strip()]
+    return "\n".join(cleaned)
+
+
+def _cross_corpus_items_from_results(
+    results: list[dict[str, Any]],
+    documents_by_material_id: dict[str, dict[str, str]],
+    self_document_id: str | None,
+) -> list[dict[str, str]]:
+    """chunk 検索結果（material_id 単位）を設計書 §4.2 の items 契約へ変換する純粋関数。
+
+    自 document（``self_document_id``）は除外する（呼び出し側の exclude_material_id
+    フィルタに加えた二重防御）。近傍検索の生の一致度はここで捨て、items には
+    label/value/document_id のみを残す（W8。件数・生値を持ち出さない）。
+    """
+    items: list[dict[str, str]] = []
+    for result in results:
+        material_id = str((result or {}).get("material_id") or "")
+        doc = documents_by_material_id.get(material_id)
+        if not doc:
+            continue
+        doc_id = str(doc.get("document_id") or "")
+        if not doc_id or doc_id == self_document_id:
+            continue
+        value = str(doc.get("title") or "").strip() or material_id
+        items.append({"label": _CROSS_CORPUS_LABEL, "value": value, "document_id": doc_id})
+    return items
+
+
+def _cross_corpus_parts_claim(element_id: str) -> dict[str, Any]:
+    session = get_session()
+    try:
+        row = session.execute(
+            sa_text(
+                "SELECT text, normalized_text FROM theory_claims WHERE id = CAST(:id AS uuid) LIMIT 1"
+            ),
+            {"id": element_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not row:
+        return {}
+    return {"text": row[0], "normalized_text": row[1]}
+
+
+def _cross_corpus_parts_component(element_id: str) -> dict[str, Any]:
+    session = get_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT name, summary FROM theory_components WHERE id = CAST(:id AS uuid) LIMIT 1"),
+            {"id": element_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not row:
+        return {}
+    return {"name": row[0], "summary": row[1]}
+
+
+def _equation_symbol_descriptions(artifacts: dict[str, Any], equation_id: str) -> str:
+    """SymbolRegistry（#355）から equation に関わる記号の説明を1本の文字列へ連結する
+    （設計書 §4.2「equation=plain_text+記号説明」）。best-effort・見つからなければ空文字。
+    """
+    registry = artifacts.get("symbol_registry")
+    records = _dict_list(registry, "records")
+    labels: list[str] = []
+    for rec in records:
+        defining = [str(x) for x in (rec.get("defining_equation_ids") or [])]
+        used = [str(x) for x in (rec.get("used_in_equation_ids") or [])]
+        if equation_id not in defining and equation_id not in used:
+            continue
+        symbol = str(rec.get("canonical_symbol") or "").strip()
+        if not symbol:
+            continue
+        evidences = [
+            str(e).strip() for e in (rec.get("definition_evidence_texts") or []) if str(e or "").strip()
+        ]
+        labels.append(f"{symbol}: {evidences[0]}" if evidences else symbol)
+    return "、".join(labels)
+
+
+def _cross_corpus_parts_equation(ref: ElementRef) -> dict[str, Any]:
+    records = refs_mod.equation_records(ref.document_id or "")
+    record = next(
+        (r for r in records if str(r.get("equation_id") or "") == str(ref.element_id)), None
+    )
+    if not record:
+        return {}
+    src = record.get("source_extraction")
+    src = src if isinstance(src, dict) else {}
+    rec = record.get("reconstruction")
+    rec = rec if isinstance(rec, dict) else {}
+    plain_text = rec.get("plain_text") or src.get("plain_text")
+    artifacts = refs_mod.document_run_artifacts(ref.document_id or "")
+    symbol_descriptions = _equation_symbol_descriptions(artifacts, ref.element_id)
+    return {"plain_text": plain_text, "symbol_descriptions": symbol_descriptions}
+
+
+def _cross_corpus_parts_figure(element_id: str) -> dict[str, Any]:
+    session = get_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT caption_text FROM document_figures WHERE id = CAST(:id AS uuid) LIMIT 1"),
+            {"id": element_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not row:
+        return {}
+    return {"caption_text": row[0]}
+
+
+def _cross_corpus_parts_shared_part(element_id: str) -> dict[str, Any]:
+    session = get_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT name, summary FROM library_entries WHERE id = CAST(:id AS uuid) LIMIT 1"),
+            {"id": element_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not row:
+        return {}
+    return {"name": row[0], "summary": row[1]}
+
+
+_CROSS_CORPUS_PARTS_BUILDERS: dict[str, Any] = {
+    ELEMENT_THEORY_CLAIM: lambda ref: _cross_corpus_parts_claim(ref.element_id),
+    ELEMENT_THEORY_COMPONENT: lambda ref: _cross_corpus_parts_component(ref.element_id),
+    ELEMENT_EQUATION: _cross_corpus_parts_equation,
+    ELEMENT_FIGURE: lambda ref: _cross_corpus_parts_figure(ref.element_id),
+    ELEMENT_SHARED_PART: lambda ref: _cross_corpus_parts_shared_part(ref.element_id),
+}
+
+
+def _material_id_for_document(document_id: str) -> str | None:
+    """documents.id（UUID文字列）から chunks.material_id（source_path）を引く。
+
+    自 document を近傍検索から除外する（``search_similar_papers`` の
+    ``exclude_material_id``）ために使う。document が無ければ None。
+    """
+    if not str(document_id or "").strip():
+        return None
+    session = get_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT source_path FROM documents WHERE id::text = :id LIMIT 1"),
+            {"id": document_id},
+        ).fetchone()
+    finally:
+        session.close()
+    material_id = str(row[0] or "").strip() if row else ""
+    return material_id or None
+
+
+def _documents_by_material_id(material_ids: list[str]) -> dict[str, dict[str, str]]:
+    """material_id（source_path）→ {document_id, title} の索引をまとめて引く（N+1回避）。"""
+    if not material_ids:
+        return {}
+    session = get_session()
+    try:
+        rows = session.execute(
+            sa_text("SELECT source_path, id::text, title FROM documents WHERE source_path = ANY(:ids)"),
+            {"ids": material_ids},
+        ).fetchall()
+    finally:
+        session.close()
+    return {
+        str(r[0]): {"document_id": str(r[1]), "title": str(r[2] or "")}
+        for r in rows
+        if r[0]
+    }
+
+
+def _build_cross_corpus(ref: ElementRef) -> list[dict[str, str]] | None:
+    """要素の代表テキストで chunk ベクトル検索し「関連する他の教材」を返す（設計書 §4.2）。
+
+    自 document（scope='document' のとき）は除外する。閲覧不可 document の除外は
+    per-user 権限を判定できない core 層ではなく route 層（``_apply_cross_corpus_gate``）が
+    行う（W5・fail-closed）。embedding 生成や近傍検索が失敗した場合は ``_safe_lens`` が
+    握って None にする（W6 の縮退）。
+    """
+    builder = _CROSS_CORPUS_PARTS_BUILDERS.get(ref.element_type)
+    if builder is None:
+        return None
+    parts = builder(ref)
+    if not parts:
+        return None
+    representative_text = _cross_corpus_representative_text(ref.element_type, parts)
+    if not representative_text:
+        return None
+
+    self_document_id = ref.document_id if ref.scope == SCOPE_DOCUMENT else None
+    exclude_material_id = _material_id_for_document(self_document_id) if self_document_id else None
+
+    # embedding 生成を伴う唯一の呼び出し。U層計測のため feature を明示する（W9）。
+    with usage_context("deliberation:cross_corpus", document_id=self_document_id):
+        results = embedder_module.search_similar_papers(
+            representative_text,
+            top_k=_CROSS_CORPUS_TOP_K,
+            exclude_material_id=exclude_material_id,
+        )
+    if not results:
+        return None
+
+    material_ids = sorted({str(r.get("material_id") or "") for r in results if r.get("material_id")})
+    documents_by_material_id = _documents_by_material_id(material_ids)
+    items = _cross_corpus_items_from_results(results, documents_by_material_id, self_document_id)
+    return items or None
+
+
+# ---------------------------------------------------------------------------
 # §4.3 分野の地図（atlas）
 # ---------------------------------------------------------------------------
 
@@ -658,9 +911,10 @@ def _safe_lens(name: str, builder: Any, ref: ElementRef) -> dict[str, Any] | Non
 
 
 def build(ref: ElementRef) -> dict[str, Any]:
-    """ElementRef の面②位置づけ（Phase 0: §4.1 / §4.3 / §4.4）を合成して返す。"""
+    """ElementRef の面②位置づけ（§4.1 / §4.2 / §4.3 / §4.4）を合成して返す。"""
     return {
         "intra_document": _safe_lens("intra_document", _build_intra_document, ref),
+        "cross_corpus": _safe_lens("cross_corpus", _build_cross_corpus, ref),
         "atlas": _safe_lens("atlas", _build_atlas, ref),
         "endorsement": _safe_lens("endorsement", _build_endorsement, ref),
         "epistemic": _safe_lens("epistemic", _build_epistemic, ref),

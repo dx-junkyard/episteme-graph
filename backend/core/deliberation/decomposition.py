@@ -264,7 +264,7 @@ def _decompose_shared_part(ref: ElementRef) -> dict[str, Any]:
         entry = session.execute(
             sa_text(
                 """
-                SELECT domain_key, entry_type, status, name, summary
+                SELECT domain_key, entry_type, status, name, summary, standardization_status
                 FROM library_entries WHERE id = CAST(:id AS uuid) LIMIT 1
                 """
             ),
@@ -302,6 +302,10 @@ def _decompose_shared_part(ref: ElementRef) -> dict[str, Any]:
             "status": str(entry[2] or ""),
             "name": name,
             "summary": str(entry[4] or ""),
+            # 標準化判定（Phase S）の確定状態。候補（element_annotations, kind='standardization',
+            # status='candidate'）はここには出ない — 確定（commit）されて初めてこの列に反映される
+            # （教員向け一覧は `GET .../annotations` を参照。§5.5・migration 050）。
+            "standardization_status": str(entry[5] or "unknown"),
             "frozen_content": frozen_content,
         },
         "notes": notes,

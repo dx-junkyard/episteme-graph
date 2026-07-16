@@ -9,6 +9,8 @@
   agent ディレクトリを作らない（LLM を使わない決定論的工程のため。
   evidence_registry / derivation_chain と同じ扱い、CLAUDE.md 参照）。
 - 図単位の失敗は ``status='failed'`` 行を残して継続する（非致命、P4）。
+- 図領域内のテキストラベル（TikZ 系ベクター図の "ECDL" 等）を ``_extract_inner_labels``
+  で抽出し ``document_figures.inner_labels`` に保存する（装置図理解機能拡張, G2 ギャップ解消）。
 - FastAPI を import しない（core/ 共通ルール）。
 """
 from __future__ import annotations
@@ -40,6 +42,8 @@ _MAX_MATCH_DISTANCE = 500.0
 _PAGE_TOP_MARGIN = 20.0
 # caption/画像の左右に加える余白 (page width に対する割合)。
 _COLUMN_PAD_RATIO = 0.03
+# 図中ラベル抽出: 同一行内で語を1ラベルにマージする最大水平ギャップ (pt)。
+_INNER_LABEL_WORD_GAP = 6.0
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +214,66 @@ def _extract_embedded_image_png(doc: Any, xref: int) -> bytes | None:
 
 
 # ---------------------------------------------------------------------------
+# 図中ラベル抽出（inner_labels, TikZ 系ベクター図の "ECDL" / "EOM" / "PBS" 等）
+# ---------------------------------------------------------------------------
+
+
+def _extract_inner_labels(
+    page: Any,
+    figure_bbox: list[float] | None,
+    caption_bbox: list[float] | None = None,
+) -> list[dict]:
+    """図領域内に埋め込まれたテキストラベルを決定論的・非LLM で抽出する。
+
+    (block_no, line_no) でグルーピングしたうえで x0 昇順に整列し、隣接語の水平ギャップが
+    ``_INNER_LABEL_WORD_GAP`` 以下なら1ラベルにマージする（"CCD camera" や "f = 75 mm" の
+    ような複数トークンのラベル・パラメータ表記を1つにまとめる）。caption_bbox と交差する語は
+    キャプション本文の混入として除外する。パラメータ表記も含め意味的なフィルタは行わない
+    （情報を落とさない。フィルタは下流の LLM プロンプト側の責務、P4）。
+    """
+    if not figure_bbox or fitz is None:
+        return []
+    try:
+        words = page.get_text("words", clip=fitz.Rect(*figure_bbox))
+        groups: dict[tuple[Any, Any], list[tuple[float, float, float, float, str]]] = {}
+        for w in words:
+            x0, y0, x1, y1, word_text, block_no, line_no = w[0], w[1], w[2], w[3], w[4], w[5], w[6]
+            if not word_text or not word_text.strip():
+                continue
+            if caption_bbox is not None and not (
+                x1 <= caption_bbox[0] or x0 >= caption_bbox[2]
+                or y1 <= caption_bbox[1] or y0 >= caption_bbox[3]
+            ):
+                continue
+            groups.setdefault((block_no, line_no), []).append((x0, y0, x1, y1, word_text))
+
+        labels: list[dict] = []
+        for tokens in groups.values():
+            tokens.sort(key=lambda t: t[0])
+            texts: list[str] = []
+            bbox: list[float] | None = None
+            prev_x1: float | None = None
+            for x0, y0, x1, y1, word_text in tokens:
+                if bbox is not None and prev_x1 is not None and (x0 - prev_x1) <= _INNER_LABEL_WORD_GAP:
+                    texts.append(word_text)
+                    bbox = [min(bbox[0], x0), min(bbox[1], y0), max(bbox[2], x1), max(bbox[3], y1)]
+                else:
+                    if bbox is not None:
+                        labels.append({"text": " ".join(texts), "bbox": bbox})
+                    texts = [word_text]
+                    bbox = [x0, y0, x1, y1]
+                prev_x1 = x1
+            if bbox is not None:
+                labels.append({"text": " ".join(texts), "bbox": bbox})
+
+        labels.sort(key=lambda lbl: (round(lbl["bbox"][1], 1), lbl["bbox"][0]))
+        return labels
+    except Exception:
+        logger.warning("figure_image_extraction: inner label extraction failed", exc_info=True)
+        return []
+
+
+# ---------------------------------------------------------------------------
 # 永続化（MinIO + PostgreSQL）
 # ---------------------------------------------------------------------------
 
@@ -239,6 +303,7 @@ def _save_figure(
     caption_text: str,
     extraction_method: str,
     region_confidence: float | None,
+    inner_labels: list[dict] | None = None,
     image_bytes: bytes | None,
     storage: Any,
 ) -> tuple[str, bool]:
@@ -255,13 +320,13 @@ def _save_figure(
                 INSERT INTO document_figures (
                     id, document_id, run_id, figure_key, figure_label, page, bbox,
                     caption_block_id, caption_text, minio_key, extraction_method,
-                    region_confidence, status
+                    region_confidence, inner_labels, status
                 )
                 VALUES (
                     CAST(:id AS uuid), :document_id, CAST(:run_id AS uuid), :figure_key,
                     :figure_label, :page, CAST(:bbox AS jsonb), :caption_block_id,
                     :caption_text, :minio_key, :extraction_method, :region_confidence,
-                    'extracted'
+                    CAST(:inner_labels AS jsonb), 'extracted'
                 )
                 ON CONFLICT (document_id, figure_key) DO UPDATE SET
                     run_id = EXCLUDED.run_id,
@@ -271,6 +336,7 @@ def _save_figure(
                     caption_text = EXCLUDED.caption_text,
                     extraction_method = EXCLUDED.extraction_method,
                     region_confidence = EXCLUDED.region_confidence,
+                    inner_labels = EXCLUDED.inner_labels,
                     status = 'extracted'
                 RETURNING id::text
                 """
@@ -288,6 +354,7 @@ def _save_figure(
                 "minio_key": placeholder_key,
                 "extraction_method": extraction_method,
                 "region_confidence": region_confidence,
+                "inner_labels": json.dumps(inner_labels or []),
             },
         ).fetchone()
         session.commit()
@@ -423,6 +490,7 @@ def extract_document_figures(
             if figure_key in seen_keys:
                 figure_key = f"{figure_key}_{idx}"
             seen_keys.add(figure_key)
+            page_obj = doc[page_num - 1] if 1 <= page_num <= len(doc) else None
 
             if match_idx is not None:
                 used.add(match_idx)
@@ -434,11 +502,14 @@ def extract_document_figures(
                     page=page_num, bbox=image.get("bbox"),
                     caption_block_id=cap.get("block_id"), caption_text=cap.get("text", ""),
                     extraction_method="embedded", region_confidence=None,
+                    inner_labels=(
+                        _extract_inner_labels(page_obj, image.get("bbox"), cap.get("bbox"))
+                        if page_obj is not None else []
+                    ),
                     image_bytes=image.get("image_bytes"), storage=storage,
                 )
                 method = "embedded"
             else:
-                page_obj = doc[page_num - 1] if 1 <= page_num <= len(doc) else None
                 region_bbox, confidence = (
                     _estimate_region_bbox(page_obj, cap, blocks_by_page.get(page_num, []))
                     if page_obj is not None else (None, 0.0)
@@ -451,6 +522,10 @@ def extract_document_figures(
                     page=page_num, bbox=region_bbox,
                     caption_block_id=cap.get("block_id"), caption_text=cap.get("text", ""),
                     extraction_method="region_render", region_confidence=confidence,
+                    inner_labels=(
+                        _extract_inner_labels(page_obj, region_bbox, cap.get("bbox"))
+                        if page_obj is not None else []
+                    ),
                     image_bytes=image_bytes, storage=storage,
                 )
                 method = "region_render"
@@ -467,6 +542,7 @@ def extract_document_figures(
         # ── Phase 3: caption と対応しない残余 embedded image も P4 のため保持する ─
         for page_num, candidates in embedded_by_page.items():
             used = used_image_indices.get(page_num, set())
+            page_obj = doc[page_num - 1] if 1 <= page_num <= len(doc) else None
             for i, image in enumerate(candidates):
                 if i in used:
                     continue
@@ -481,6 +557,10 @@ def extract_document_figures(
                     page=page_num, bbox=image.get("bbox"),
                     caption_block_id=None, caption_text="",
                     extraction_method="embedded", region_confidence=None,
+                    inner_labels=(
+                        _extract_inner_labels(page_obj, image.get("bbox"))
+                        if page_obj is not None else []
+                    ),
                     image_bytes=image.get("image_bytes"), storage=storage,
                 )
                 counts["figures"] += 1
@@ -510,7 +590,7 @@ def load_document_figures(document_id: str) -> list[dict]:
                 """
                 SELECT id::text, document_id, run_id::text, figure_key, figure_label,
                        page, bbox, caption_block_id, caption_text, minio_key,
-                       extraction_method, region_confidence, status, created_at
+                       extraction_method, region_confidence, status, created_at, inner_labels
                 FROM document_figures
                 WHERE document_id = :document_id
                 ORDER BY page NULLS LAST, figure_key
@@ -527,6 +607,14 @@ def load_document_figures(document_id: str) -> list[dict]:
                     item["bbox"] = json.loads(bbox)
                 except (ValueError, TypeError):
                     item["bbox"] = None
+            inner_labels = item.get("inner_labels")
+            if isinstance(inner_labels, str):
+                try:
+                    item["inner_labels"] = json.loads(inner_labels)
+                except (ValueError, TypeError):
+                    item["inner_labels"] = []
+            elif inner_labels is None:
+                item["inner_labels"] = []
             result.append(item)
         return result
     finally:

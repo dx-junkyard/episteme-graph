@@ -39,8 +39,18 @@ for _p in (str(BACKEND), str(BACKEND / "api"), str(ROOT / "src")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from core.deliberation import refs, decomposition, positioning, identity_links  # noqa: E402,F401
+from core.deliberation import (  # noqa: E402,F401
+    annotations as delib_annotations,
+    decomposition,
+    dialogue,
+    identity_links,
+    positioning,
+    refs,
+    store as delib_store,
+)
 from core.deliberation.schema import (  # noqa: E402
+    ANNOTATION_KINDS_COMMIT_UNSUPPORTED,
+    ANNOTATION_STATUS_CANDIDATE,
     DOCUMENT_ELEMENT_TYPES,
     DOMAIN_ELEMENT_TYPES,
     ELEMENT_EQUATION,
@@ -66,6 +76,9 @@ _CORE_DIR = BACKEND / "core" / "deliberation"
 _ROUTE_SRC = (BACKEND / "api" / "routes" / "deliberation.py").read_text(encoding="utf-8")
 _POSITIONING_SRC = (BACKEND / "core" / "deliberation" / "positioning.py").read_text(encoding="utf-8")
 _IDENTITY_LINKS_SRC = (BACKEND / "core" / "deliberation" / "identity_links.py").read_text(encoding="utf-8")
+_STORE_SRC = (BACKEND / "core" / "deliberation" / "store.py").read_text(encoding="utf-8")
+_DIALOGUE_SRC = (BACKEND / "core" / "deliberation" / "dialogue.py").read_text(encoding="utf-8")
+_ANNOTATIONS_SRC = (BACKEND / "core" / "deliberation" / "annotations.py").read_text(encoding="utf-8")
 _DELETION_SRC = (BACKEND / "core" / "versioning" / "deletion.py").read_text(encoding="utf-8")
 _ADMIN_SRC = (BACKEND / "api" / "routes" / "admin.py").read_text(encoding="utf-8")
 
@@ -97,25 +110,32 @@ class TestPermissionGate:
 
 class TestReadOnlyPhase0:
     """Phase 0 は overview のみで読み取り専用だったが、Phase W-β で同一性リンクの
-    POST 系（作成・確定・却下）が加わった。「DELETE が無い」（W4）は不変のまま、
-    「POST が存在しない」という旧テストは「POST は identity-links 系のみ」に改訂する。
-    PUT/PATCH は W-β でも作らない（確定/却下は POST の状態遷移で表現する。§8）。
+    POST 系（作成・確定・却下）が、Phase 2 で対話セッション・候補注釈の POST 系
+    （sessions / messages / annotations の commit・dismiss）が加わった。
+    「DELETE が無い」（W4）は不変のまま、「POST が存在しない」という旧テストは
+    「POST は identity-links / sessions / messages / annotations(commit|dismiss) のみ」
+    に改訂する。PUT/PATCH は Phase 2 でも作らない（確定/却下は POST の状態遷移で
+    表現する。§8）。
     """
 
     def test_no_delete_endpoint(self):
-        # W4: 削除・DELETE 経路を作らない（Phase W-β でも不変）。
+        # W4: 削除・DELETE 経路を作らない（Phase 2 でも不変）。
         assert_source_forbids(_ROUTE_SRC, ["@router.delete", ".delete("])
 
     def test_no_put_or_patch_endpoint(self):
         assert_source_forbids(_ROUTE_SRC, ["@router.put", "@router.patch"])
 
-    def test_post_endpoints_are_scoped_to_identity_links(self):
-        # POST は identity-links の作成・確定・却下のみ（overview 等の読み取り専用経路に
+    def test_post_endpoints_are_scoped_to_known_write_routes(self):
+        # POST は identity-links の作成・確定・却下 / sessions の作成・messages 送信 /
+        # annotations の commit・dismiss のみ（overview 等の読み取り専用経路に
         # 書き込みを混ぜない）。
         paths = re.findall(r'@router\.post\("([^"]+)"\)', _ROUTE_SRC)
-        assert paths, "expected at least one @router.post(...) route (identity-links)"
+        assert paths, "expected at least one @router.post(...) route"
+        allowed_fragments = ("identity-links", "sessions", "annotations", "standardization")
         for path in paths:
-            assert "identity-links" in path, f"unexpected POST route outside identity-links: {path}"
+            assert any(fragment in path for fragment in allowed_fragments), (
+                f"unexpected POST route outside identity-links/sessions/annotations/standardization: {path}"
+            )
 
 
 class TestScopeVocabulary:
@@ -604,3 +624,362 @@ class TestPositioningEndorsementLensAggregatesCitations:
         # 形式の文字列組み立てが positioning.py に持ち込まれていないことのみ確認する。
         assert "citation_count}" not in _POSITIONING_SRC
         assert "f\"{count}" not in _POSITIONING_SRC
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: コーパス横断レンズ（§4.2、chunk-proxy）
+# ---------------------------------------------------------------------------
+
+
+class TestCrossCorpusLensExists:
+    """positioning.build() が cross_corpus レンズを合成すること（設計書 §4.2）。"""
+
+    def test_build_composes_cross_corpus_lens(self):
+        body = extract_function_source(_POSITIONING_SRC, "build")
+        assert '"cross_corpus"' in body
+        assert "_build_cross_corpus" in body
+
+    def test_cross_corpus_reuses_existing_embedder_search(self):
+        # 新しい抽出ロジックを持たず、既存の core.embedder.search_similar_papers を呼ぶだけ
+        # であること（設計書 §4.2「新しい抽出はしない（唯一の例外はコーパス横断）」の中身が
+        # さらに「新規実装」でないことを固定する）。
+        body = extract_function_source(_POSITIONING_SRC, "_build_cross_corpus")
+        assert "embedder_module.search_similar_papers" in body
+
+    def test_cross_corpus_excludes_self_document(self):
+        body = extract_function_source(_POSITIONING_SRC, "_build_cross_corpus")
+        assert "exclude_material_id" in body
+
+    def test_cross_corpus_sets_usage_context_feature(self):
+        # U9: embedding 呼び出し前に feature を明示する（W9）。
+        assert 'usage_context("deliberation:cross_corpus"' in _POSITIONING_SRC
+
+    def test_cross_corpus_feature_registered_in_known_features(self):
+        from core.llm_usage.schema import KNOWN_FEATURES
+
+        assert "deliberation:cross_corpus" in KNOWN_FEATURES
+
+
+class TestCrossCorpusRouteLevelPermissionGate:
+    """core は per-user 権限を判定できないため、route 層が cross_corpus items を
+    フィルタする（W5・fail-closed）。既存 `_filter_by_document_view` /
+    `_make_document_view_checker`（W-β で導入済み）を再利用し、独自実装を増やさない。"""
+
+    def test_route_defines_cross_corpus_gate_helper(self):
+        assert "_apply_cross_corpus_gate" in _ROUTE_SRC
+
+    def test_gate_helper_reuses_existing_filter_primitive(self):
+        body = extract_function_source(_ROUTE_SRC, "_apply_cross_corpus_gate")
+        assert "_filter_by_document_view(" in body
+        assert '"document_id"' in body
+
+    def test_overview_route_calls_the_gate(self):
+        assert "_apply_cross_corpus_gate(positioning_payload, current_user)" in _ROUTE_SRC
+
+    def test_gate_falls_back_to_none_when_all_items_hidden(self):
+        body = extract_function_source(_ROUTE_SRC, "_apply_cross_corpus_gate")
+        assert 'lenses["cross_corpus"] = None' in body
+
+
+@_skip_no_fastapi
+class TestApplyCrossCorpusGateBehavior:
+    """`_apply_cross_corpus_gate` の実行時挙動（DB 非依存・フェイク can_view で検証）。"""
+
+    def test_filters_hidden_items_and_reports_hidden_count(self, deliberation_routes, monkeypatch):
+        def _fake_resolve(uid, doc_id):
+            class _A:
+                can_view = doc_id == "doc-a"
+
+            return _A()
+
+        monkeypatch.setattr(deliberation_routes, "resolve_document_access", _fake_resolve)
+        payload = {
+            "available": True,
+            "lenses": {
+                "cross_corpus": {
+                    "items": [
+                        {"label": "関連する教材", "value": "論文A", "document_id": "doc-a"},
+                        {"label": "関連する教材", "value": "論文B", "document_id": "doc-b"},
+                    ]
+                }
+            },
+        }
+        deliberation_routes._apply_cross_corpus_gate(payload, {"id": "u1"})
+        lens = payload["lenses"]["cross_corpus"]
+        assert [i["value"] for i in lens["items"]] == ["論文A"]
+        assert lens["hidden_count"] == 1
+
+    def test_all_hidden_collapses_lens_to_none(self, deliberation_routes, monkeypatch):
+        monkeypatch.setattr(
+            deliberation_routes, "resolve_document_access", lambda uid, doc_id: type("A", (), {"can_view": False})()
+        )
+        payload = {
+            "available": True,
+            "lenses": {
+                "cross_corpus": {
+                    "items": [{"label": "関連する教材", "value": "論文A", "document_id": "doc-a"}]
+                }
+            },
+        }
+        deliberation_routes._apply_cross_corpus_gate(payload, {"id": "u1"})
+        assert payload["lenses"]["cross_corpus"] is None
+
+    def test_missing_lens_is_a_noop(self, deliberation_routes):
+        payload = {"available": True, "lenses": {"atlas": None}}
+        deliberation_routes._apply_cross_corpus_gate(payload, {"id": "u1"})
+        assert payload == {"available": True, "lenses": {"atlas": None}}
+
+    def test_no_lenses_key_is_a_noop(self, deliberation_routes):
+        payload = {"available": False, "note": "x"}
+        deliberation_routes._apply_cross_corpus_gate(payload, {"id": "u1"})
+        assert payload == {"available": False, "note": "x"}
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: 対話的検討 + 候補注釈 + コミットルーティング（migration 049）
+# ---------------------------------------------------------------------------
+
+
+class TestPhase2CoreLayering:
+    """store.py / dialogue.py / annotations.py も FastAPI・routes・services を import
+    しない（TestLayering はディレクトリ単位で既に rglob 経由でカバーしているが、
+    Phase 2 で新設した3ファイルを明示的に固定する）。dialogue.py が core.llm を使うのは
+    正当（対話層のため。personal_graph 等の学習者向け機構とは無関係）。
+    """
+
+    def test_store_module_has_no_disallowed_imports(self):
+        assert_source_does_not_import(
+            _STORE_SRC, ["fastapi", "episteme_graph.agents", "routes", "services"],
+            context="core/deliberation/store.py",
+        )
+
+    def test_dialogue_module_has_no_disallowed_imports(self):
+        assert_source_does_not_import(
+            _DIALOGUE_SRC, ["fastapi", "episteme_graph.agents", "routes", "services"],
+            context="core/deliberation/dialogue.py",
+        )
+
+    def test_annotations_module_has_no_disallowed_imports(self):
+        assert_source_does_not_import(
+            _ANNOTATIONS_SRC, ["fastapi", "episteme_graph.agents", "routes", "services"],
+            context="core/deliberation/annotations.py",
+        )
+
+    def test_dialogue_module_uses_core_llm(self):
+        # dialogue.py が core.llm 経由で LLM を呼ぶこと（ベンダ SDK 直接利用禁止・開発ルール4）。
+        assert "from core.llm import generate_conversation_turn" in _DIALOGUE_SRC
+
+
+class TestAnnotationAlwaysCandidate:
+    """W2: AI が出す候補注釈は常に ``status='candidate'``。生成側が確定状態を
+    指定できないこと（identity_links の TestIdentityLinkAlwaysStartsCandidate と同型）。"""
+
+    def test_create_annotation_has_no_status_parameter(self):
+        sig = inspect.signature(delib_store.create_annotation)
+        assert "status" not in sig.parameters
+
+    def test_create_annotation_binds_candidate_constant_not_a_literal(self):
+        body = extract_function_source(_STORE_SRC, "create_annotation")
+        assert "ANNOTATION_STATUS_CANDIDATE" in body
+        assert '"status": ANNOTATION_STATUS_CANDIDATE' in body
+
+    def test_validate_candidate_item_requires_evidence(self):
+        normalized, error = delib_annotations.validate_candidate_item(
+            {"kind": "meaning", "body": "text", "evidence": [], "reason": "because", "confidence": 0.5}
+        )
+        assert normalized is None
+        assert error is not None
+
+    def test_validate_candidate_item_requires_reason(self):
+        normalized, error = delib_annotations.validate_candidate_item(
+            {"kind": "meaning", "body": "text", "evidence": ["quote"], "reason": "", "confidence": 0.5}
+        )
+        assert normalized is None
+        assert error is not None
+
+    def test_validate_candidate_item_rejects_unknown_kind(self):
+        normalized, error = delib_annotations.validate_candidate_item(
+            {"kind": "nonsense", "body": "text", "evidence": ["quote"], "reason": "because"}
+        )
+        assert normalized is None
+        assert error is not None
+
+    def test_validate_candidate_item_accepts_well_formed_item(self):
+        normalized, error = delib_annotations.validate_candidate_item(
+            {"kind": "meaning", "body": "text", "evidence": ["quote"], "reason": "because", "confidence": 0.6}
+        )
+        assert error is None
+        assert normalized is not None
+        assert normalized["kind"] == "meaning"
+        assert normalized["body"] == {"text": "text"}
+
+
+class TestSetAnnotationStatusGuards:
+    def test_rejects_candidate_as_target_status(self):
+        with pytest.raises(ValueError):
+            delib_store.set_annotation_status(
+                "00000000-0000-0000-0000-000000000000",
+                status=ANNOTATION_STATUS_CANDIDATE,
+                committed_target=None,
+                updated_by="u1",
+            )
+
+    def test_rejects_arbitrary_status(self):
+        with pytest.raises(ValueError):
+            delib_store.set_annotation_status(
+                "00000000-0000-0000-0000-000000000000",
+                status="withdrawn",
+                committed_target=None,
+                updated_by="u1",
+            )
+
+
+class TestCommitEditableGate:
+    """W5: annotation の commit/dismiss は editor 以上（``_ensure_document_editable``）。"""
+
+    def test_commit_route_uses_editable_gate(self):
+        body = extract_function_source(_ROUTE_SRC, "commit_element_annotation")
+        assert "_ensure_document_editable(" in body
+
+    def test_dismiss_route_uses_editable_gate(self):
+        body = extract_function_source(_ROUTE_SRC, "dismiss_element_annotation")
+        assert "_ensure_document_editable(" in body
+
+
+class TestAnnotationConfidenceLabelOnly:
+    """W8: annotation 応答が raw confidence を返す経路を持たず confidence_label 経由。"""
+
+    def test_annotation_response_helper_uses_confidence_label(self):
+        body = extract_function_source(_ROUTE_SRC, "_annotation_response")
+        assert "identity_links.confidence_label(" in body
+        assert '"confidence_label"' in body
+        assert '"confidence":' not in body
+
+
+class TestMessagesGoThroughCostGate:
+    """W6/§11: messages 送信は CostGate（session/day）を通ってから LLM を呼ぶ。"""
+
+    def test_route_checks_cost_gate_before_running_turn(self):
+        body = extract_function_source(_ROUTE_SRC, "post_deliberation_message")
+        gate_idx = body.index("dialogue.check_and_count_llm_call(")
+        run_idx = body.index("dialogue.run_turn(")
+        assert gate_idx < run_idx
+
+    def test_cost_gate_rejection_returns_429_without_numbers(self):
+        body = extract_function_source(_ROUTE_SRC, "post_deliberation_message")
+        assert "status_code=429" in body
+        # 事実文のみで数値レンジ・残数を含めない（detail="..." の中身に数字を含まないこと）。
+        match = re.search(r'status_code=429,\s*detail="([^"]*)"', body)
+        assert match is not None, 'expected an HTTPException(status_code=429, detail="...") raise'
+        assert not any(c.isdigit() for c in match.group(1))
+
+    def test_dialogue_cost_gate_uses_shared_cost_gate_primitive(self):
+        assert "from core.llm_worker.cost_gate import CostGate" in _DIALOGUE_SRC
+
+
+class TestUnsupportedKindCommitReturns422:
+    """positioning_note の commit は v1 未対応(422)。dismiss のみ可。
+
+    standardization は Phase S（migration 050）で library_entries.standardization_status
+    への commit ルーティングが実装されたため、この集合から外れている
+    （test_deliberation_standardization.py 側で commit 経路そのものを検証する）。
+    """
+
+    def test_commit_unsupported_kinds_are_positioning_note_only(self):
+        assert set(ANNOTATION_KINDS_COMMIT_UNSUPPORTED) == {"positioning_note"}
+
+    def test_route_forbids_unsupported_kind_mapping_falls_back_to_422(self):
+        body = extract_function_source(_ROUTE_SRC, "_http_from_commit_error")
+        # not_found→404 / conflict→409 が明示され、それ以外(unsupported/invalid)は
+        # デフォルトの 422 に落ちること。
+        assert '"not_found": 404' in body
+        assert '"conflict": 409' in body
+        assert ".get(exc.kind, 422)" in body
+
+    def test_commit_raises_routing_error_for_unsupported_kind(self):
+        annotation = {
+            "id": "a1", "status": ANNOTATION_STATUS_CANDIDATE, "kind": "positioning_note",
+            "scope": SCOPE_DOCUMENT, "element_type": "theory_claim", "element_id": "c1",
+            "document_id": "doc-1", "body": {}, "evidence": [], "reason": "", "confidence": None,
+        }
+        with pytest.raises(delib_annotations.CommitRoutingError) as excinfo:
+            delib_annotations._route_commit(annotation, "u1")
+        assert excinfo.value.kind == "unsupported"
+
+
+class TestMigration049Idempotent:
+    """migration 049（deliberation_sessions / element_annotations）が冪等 lint を通る。"""
+
+    def test_migration_049_passes_idempotency_lint(self):
+        import tempfile
+        from pathlib import Path as _Path
+
+        from tests.test_migrations_runner import _collect_idempotency_violations
+
+        src = read_migration_sql(BACKEND, 49)
+        with tempfile.TemporaryDirectory() as tmp:
+            target = _Path(tmp) / "049_deliberation_sessions_annotations.sql"
+            target.write_text(src, encoding="utf-8")
+            violations = _collect_idempotency_violations(_Path(tmp))
+        assert violations == [], violations
+
+    def test_migration_049_defines_both_tables(self):
+        src = read_migration_sql(BACKEND, 49)
+        assert "CREATE TABLE IF NOT EXISTS deliberation_sessions" in src
+        assert "CREATE TABLE IF NOT EXISTS element_annotations" in src
+
+
+class TestPhase2OrphanCleanup:
+    """document 削除経路の両方が element_annotations / deliberation_sessions の
+    scope='document' 行を掃除する（element_identity_links と同じ orphan gap パターン）。"""
+
+    def test_purge_document_cleans_element_annotations(self):
+        body = extract_function_source(_DELETION_SRC, "_purge_document")
+        assert "element_annotations" in body
+
+    def test_purge_document_cleans_deliberation_sessions(self):
+        body = extract_function_source(_DELETION_SRC, "_purge_document")
+        assert "deliberation_sessions" in body
+
+    def test_delete_material_cleans_element_annotations(self):
+        body = extract_function_source(_ADMIN_SRC, "delete_material")
+        assert "element_annotations" in body
+
+    def test_delete_material_cleans_deliberation_sessions(self):
+        body = extract_function_source(_ADMIN_SRC, "delete_material")
+        assert "deliberation_sessions" in body
+
+
+class TestSessionOwnerOnlyAccessWiring:
+    """設計書 §8: セッションは作成者本人のみ(他人のセッションは404)。ソース上の配線を固定する
+    (実行時挙動は下の TestSessionOwnerOnlyAccessBehavior が deliberation_routes フィクスチャで検証)。
+    """
+
+    def test_get_session_route_uses_owner_guard(self):
+        body = extract_function_source(_ROUTE_SRC, "get_deliberation_session")
+        assert "_ensure_session_owner(" in body
+
+    def test_messages_route_uses_owner_guard(self):
+        body = extract_function_source(_ROUTE_SRC, "post_deliberation_message")
+        assert "_ensure_session_owner(" in body
+
+
+@_skip_no_fastapi
+class TestSessionOwnerOnlyAccessBehavior:
+    """``_ensure_session_owner`` の実行時挙動(DB 非依存・フェイクセッション dict で検証)。"""
+
+    def test_raises_404_when_session_missing(self, deliberation_routes):
+        with pytest.raises(Exception) as excinfo:
+            deliberation_routes._ensure_session_owner(None, {"id": "u1"})
+        assert getattr(excinfo.value, "status_code", None) == 404
+
+    def test_raises_404_when_current_user_is_not_creator(self, deliberation_routes):
+        session = {"id": "s1", "created_by": "owner-1"}
+        with pytest.raises(Exception) as excinfo:
+            deliberation_routes._ensure_session_owner(session, {"id": "someone-else"})
+        assert getattr(excinfo.value, "status_code", None) == 404
+
+    def test_returns_session_when_current_user_is_creator(self, deliberation_routes):
+        session = {"id": "s1", "created_by": "owner-1"}
+        result = deliberation_routes._ensure_session_owner(session, {"id": "owner-1"})
+        assert result is session

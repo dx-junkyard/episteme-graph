@@ -2853,6 +2853,84 @@ def dismiss_anchor_trace(user_id: str, trace_id: str) -> dict | None:
     return {"trace_id": str(trace_id), "anchor_status": "dismissed"}
 
 
+# ---------------------------------------------------------------------------
+# 個人知識ネットワーク — 「地図には反映しない/地図に戻す」(UX proposal §6)
+# ---------------------------------------------------------------------------
+# tension/anchor の dismiss（候補の当落判定）とは独立した「表示除外」フラグ。
+# 行削除・status 変更ではなく payload.map_excluded を立てるだけ（P4: 情報を落とさない）。
+# 導出側フィルタ（core/personal_graph/derive.py）が payload.map_excluded を見て
+# 個人知識ネットワークの表示から外す（別実装。本関数は書き込みのみを担当する）。
+
+
+def set_trace_map_exclusion(user_id: str, trace_id: str, excluded: bool) -> dict | None:
+    """本人が痕跡の個人知識ネットワーク表示を除外/復帰する。
+
+    対象は本人の tension/question 行のみ（他人の行・対象外 kind・存在しない trace_id は
+    None を返し、呼び出し側で 404 とする）。status・structure_anchor.status には触れない
+    （地図から消えるだけで digest・軌跡・既存機能の扱いは不変）。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                UPDATE interest_traces
+                SET payload = jsonb_set(payload, '{map_excluded}', to_jsonb(CAST(:excluded AS boolean))),
+                    last_seen_at = now()
+                WHERE id = CAST(:tid AS uuid) AND user_id = CAST(:uid AS uuid)
+                  AND kind IN ('tension', 'question')
+                RETURNING kind
+            """),
+            {"excluded": excluded, "tid": trace_id, "uid": user_id},
+        ).fetchone()
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.warning("set_trace_map_exclusion failed: %s", exc)
+        return None
+    finally:
+        session.close()
+    if row is None:
+        return None
+    kind = row[0]
+    entity_type = AUDIT_ENTITY_TENSION if kind == "tension" else AUDIT_ENTITY_STRUCTURE_ANCHOR
+    old_status, new_status = (
+        ("included_in_map", "excluded_from_map") if excluded
+        else ("excluded_from_map", "included_in_map")
+    )
+    record_review_event(
+        entity_type, str(trace_id), old_status, new_status, user_id,
+        {"action": "map_exclude" if excluded else "map_restore", "map_excluded": excluded},
+    )
+    return {"trace_id": str(trace_id), "map_excluded": excluded}
+
+
+def get_trace_map_exclusion_flags(user_id: str, course_id: str) -> dict[str, bool]:
+    """本人の痕跡のうち ``payload.map_excluded`` が真の trace_id 集合を返す。
+
+    interest-traces 一覧（``get_interest_traces``）は既存関数を変更せず、ルート側で
+    この関数の結果とマージして "map_excluded" フィールドを1つ足すだけにする
+    （UX proposal §6: 地図には反映しない/地図に戻す）。
+    """
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT id
+                FROM interest_traces
+                WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
+                  AND kind IN ('tension', 'question')
+                  AND payload->>'map_excluded' = 'true'
+            """),
+            {"uid": user_id, "cid": course_id},
+        ).fetchall()
+    except Exception as exc:
+        logger.warning("get_trace_map_exclusion_flags failed: %s", exc)
+        return {}
+    finally:
+        session.close()
+    return {str(r[0]): True for r in rows}
+
+
 def get_graph_element_context(
     course_data: dict,
     chunk_id: str,
