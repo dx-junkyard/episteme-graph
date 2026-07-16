@@ -82,7 +82,7 @@
       if (!data.item) {
         el.innerHTML = cardShell(
           '<div class="recon-muted">この範囲で挑戦できる再構成課題はまだありません。' +
-          '学習を進めると増えていきます。</div>'
+          '教員が承認した主張が揃うと自動で用意されます。学習を進めると増えていきます。</div>'
         );
         bindClose();
         return;

@@ -135,8 +135,13 @@ class CourseSetVisibilityAction(AssistantAction):
         group_id = args.get("group_id") if visibility == "group" else None
         if visibility == "group" and not group_id:
             raise ActionArgError("visibility='group' には group_id が必要です")
-        # 既存エンドポイント同様、public 化は published/template を立てる。
-        is_published = True if visibility == "public" else before["is_published"]
+        # G1-6 是正: is_published は「現在 visibility='public' か」を常に正確に反映する
+        # （admin.py::update_course_visibility の G1-1 是正と同一意味論。旧実装は public 化の
+        # ときだけ True を立て、group/private へ戻しても is_published が True のまま残る
+        # バグがあった — Copilot 経由の代行がサーバ本体と異なる状態を作ってしまっていた）。
+        # is_template は「テンプレートとして作られたことがあるか」の意図を保つため、
+        # 従来どおり public 化時のみ True を立て、離脱時にリセットはしない。
+        is_published = visibility == "public"
         is_template = True if visibility == "public" else before["is_template"]
         return {
             "visibility": visibility,

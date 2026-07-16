@@ -21,6 +21,8 @@ from core.admin_assistant.schema import (
 )
 
 # admin.js の data-tab に一致する既知スクリーン。locate_steps の妥当性検証にも使う。
+# G6 是正: knowledge-library / llm-usage は実装済みタブだが未登録で「構造的に案内不能」
+# だった（vision_ux_gap_survey_2026-07.md G6）。新規タブを追加したら必ずここに足すこと。
 KNOWN_SCREENS = (
     "materials",
     "course-builder",
@@ -34,6 +36,8 @@ KNOWN_SCREENS = (
     "groups",
     "system-stats",
     "error-analysis",
+    "knowledge-library",
+    "llm-usage",
 )
 
 
@@ -174,7 +178,11 @@ _REGISTRY: list[Capability] = [
         target_type="course",
         howto_doc="admin_operations/course.md#publish",
         description="コースをテンプレートとして公開し、学生が受講できるようにする。",
-        api={"method": "PUT", "path": "/api/admin/courses/{course_id}/publish"},
+        # G1-6 是正: `PUT .../publish` は撤去済み（test_publish_endpoint_removed）。
+        # 後継は visibility=public への更新（is_published は visibility から常時導出される,
+        # admin.py::update_course_visibility の G1-1 是正と同一意味論）。
+        api={"method": "PUT", "path": "/api/admin/courses/{course_id}/visibility",
+             "body": {"visibility": "public"}},
         locate_steps=(
             _step("course-management", "course_row:{course_id}", "公開したいコースを選びます"),
             _step("course-management", "publish_button", "『公開する』を押します", precondition="course_selected"),
@@ -293,6 +301,184 @@ _REGISTRY: list[Capability] = [
         howto_doc="admin_operations/system.md#error-logs",
         description="システムのエラーログを確認する。",
         api={"method": "GET", "path": "/api/admin/error-logs"},
+    ),
+    # -------------------------------------------------------------------
+    # G6 是正（vision_ux_gap_survey_2026-07.md）: C/D/R/W/L/V/U 層・Phase B の
+    # 段階登録。すべて guidance_only（DB 非変更）。捏造しない（P4）ため、UI から
+    # 実際に到達できる導線だけを locate_steps にする（到達経路が無い操作は
+    # locate_steps を持たせず、guidance の説明文に留める）。
+    # -------------------------------------------------------------------
+    # --- D層（Doubt Layer, doubt-atlas） ---
+    Capability(
+        id="doubt.record_verification_status",
+        screen="doubt-atlas",
+        title="検証状態を記帳する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/doubt.md#record-verification-status",
+        description="認識的地位台帳の検証状態（未検証・間接的支持・直接検証・反証等）を記帳する。"
+                    "「確定は人間」の実行手段そのもの。",
+        api={"method": "PUT", "path": "/api/admin/doubt/ledger/{target_type}/{target_id}/verification-status"},
+        locate_steps=(
+            _step("doubt-atlas", "doubt_verification_form_button",
+                  "台帳ノードの詳細ペインで「検証状態を記帳する」ボタンを押します"),
+        ),
+    ),
+    Capability(
+        id="doubt.manage_challenge",
+        screen="doubt-atlas",
+        title="疑義を取り下げる・検証提案にする",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/doubt.md#manage-challenge",
+        description="自分が投稿した疑義を取り下げる、または検証提案へ昇格させる。",
+        locate_steps=(
+            _step("doubt-atlas", "doubt_challenge_withdraw_button",
+                  "取り下げたい自分の疑義の「取り下げ」ボタンを押します"),
+            _step("doubt-atlas", "doubt_challenge_proposal_button",
+                  "検証提案にしたい疑義の「検証提案にする」ボタンを押します"),
+        ),
+    ),
+    # --- R層（再構成ループ, lecture-studio） ---
+    Capability(
+        id="reconstruction.review_queue",
+        screen="lecture-studio",
+        title="再構成レビューキューを確認する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/lecture_studio.md#review-queue",
+        description="再構成ループ（R層）の疑わしさランク順レビューキューを確認する。",
+        api={"method": "GET", "path": "/api/admin/reconstruction/items/review-queue"},
+        locate_steps=(
+            _step("lecture-studio", "ls_course_select", "対象のコースを選びます"),
+            _step("lecture-studio", "recon_review_button", "「再構成の確認」ボタンを押します",
+                  precondition="course_selected"),
+        ),
+    ),
+    # --- W層（要素検討ワークスペース, lecture-studio の「深く検討」モーダル） ---
+    Capability(
+        id="deliberation.identity_links_standardization",
+        screen="lecture-studio",
+        title="同一性リンクを確定する・標準化度を評価する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/lecture_studio.md#identity-links-standardization",
+        description="要素検討（深く検討）モーダルで同一性リンクの候補を確定・却下する。"
+                    "共通部品（shared_part）を開いた場合のみ標準化度評価も行える。",
+        locate_steps=(
+            _step("lecture-studio", "deliberation_open_button",
+                  "対象要素の「深く検討」ボタンを押してモーダルを開きます"),
+            _step("lecture-studio", "identity_link_confirm_button",
+                  "「同一性リンク」セクションの確定/却下ボタンを押します",
+                  precondition="deliberation_modal_open"),
+        ),
+    ),
+    # --- L層（分野別ナレッジライブラリ, knowledge-library） ---
+    Capability(
+        id="library.view_and_freeze",
+        screen="knowledge-library",
+        title="ナレッジライブラリのエントリを参照・凍結する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/library.md#view-and-freeze",
+        description="分野別ナレッジライブラリのエントリを参照し、凍結版として発行する。",
+        api={"method": "POST", "path": "/api/admin/library/entries/{entry_id}/freeze"},
+        locate_steps=(
+            _step("knowledge-library", "library_domain_list", "分野を選び、参照したいエントリを開きます"),
+            _step("knowledge-library", "library_entry_freeze_button", "「凍結（版発行）」を押します",
+                  precondition="entry_selected"),
+        ),
+    ),
+    # --- V層（共有物のバージョン管理） ---
+    Capability(
+        id="materials.manage_shared_version",
+        screen="materials",
+        title="教材の共有版を発行・削除予約する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/materials.md#manage-shared-version",
+        description="教材の解析成果を共有版として発行し、削除猶予を予約・取消する。",
+        api={"method": "POST", "path": "/api/admin/shared/document/{object_id}/releases"},
+        locate_steps=(
+            _step("materials", "material_row:{material_id}", "対象の教材を選びます"),
+            _step("materials", "shared_version_button", "「版の管理」を押します",
+                  precondition="material_selected"),
+        ),
+    ),
+    Capability(
+        id="course.manage_shared_version",
+        screen="course-management",
+        title="コースの共有版を発行・削除予約する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/course.md#manage-shared-version",
+        description="コースを共有版として発行し、削除猶予を予約・取消する。",
+        api={"method": "POST", "path": "/api/admin/shared/course/{object_id}/releases"},
+        locate_steps=(
+            _step("course-management", "course_row:{course_id}", "対象のコースを選びます"),
+            _step("course-management", "shared_version_button", "「版の管理」を押します",
+                  precondition="course_selected"),
+        ),
+    ),
+    # --- U層（LLM トークン使用量推計） ---
+    Capability(
+        id="llm_usage.view_metrics",
+        screen="llm-usage",
+        title="LLM使用量メトリクスを確認する",
+        required_role=ROLE_SYSTEM_ADMIN,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/llm_usage.md#view-metrics",
+        description="LLM トークン使用量（実測/推計の分離集計・dropped_events・費用）を確認する。",
+        api={"method": "GET", "path": "/api/admin/llm-usage/metrics"},
+        locate_steps=(
+            _step("llm-usage", "llm_usage_metrics", "使用量メトリクスを確認します"),
+        ),
+    ),
+    Capability(
+        id="materials.estimate_cost",
+        screen="materials",
+        title="教材の解析コストを見積る",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/materials.md#estimate-cost",
+        description="教材の解析パイプラインが使うトークン量の目安をレンジで確認する（金額は出さない）。",
+        api={"method": "GET", "path": "/api/admin/llm-usage/estimate/documents/{document_id}"},
+        locate_steps=(
+            _step("materials", "material_row:{material_id}", "対象の教材を選びます"),
+            _step("materials", "material_estimate_button", "「解析コスト見積り」を押します",
+                  precondition="material_selected"),
+        ),
+    ),
+    # --- 個人知識ネットワーク Phase B / C層（承認・共有レイヤー） ---
+    Capability(
+        id="interest_dashboard.bridge_insights",
+        screen="interest-dashboard",
+        title="橋の候補集約（Phase B）を確認する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/interest_dashboard.md#bridge-insights",
+        description="個人知識ネットワーク Phase B の「橋」の候補集約（k-匿名）を確認する。",
+        api={"method": "GET", "path": "/api/admin/courses/{course_id}/bridge-insights"},
+        locate_steps=(
+            _step("interest-dashboard", "interest_dashboard_course_select", "対象のコースを選びます"),
+            _step("interest-dashboard", "bridge_insights_section", "橋の候補集約セクションを確認します",
+                  precondition="course_selected"),
+        ),
+    ),
+    Capability(
+        id="course.sharing_dashboard",
+        screen="course-management",
+        title="共有ダッシュボードを確認する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/course.md#sharing-dashboard",
+        description="コースの理論コンポーネントに紐づく説明バージョンの共有・承認・引用状況を確認する。",
+        api={"method": "GET", "path": "/api/admin/courses/{course_id}/sharing-dashboard"},
+        locate_steps=(
+            _step("course-management", "course_row:{course_id}", "対象のコースを選びます"),
+            _step("course-management", "sharing_dashboard_button", "「共有ダッシュボード」を押します",
+                  precondition="course_selected"),
+        ),
     ),
 ]
 

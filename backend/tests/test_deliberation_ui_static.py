@@ -23,6 +23,19 @@ Phase 2（本ファイルの改訂対象）: 右ペインに面③対話的検�
    positioning_note/interpretation/identity/standardization）そろっている /
    429（対話上限）・degraded（AI応答生成不可）を事実文として処理する /
    対話・候補注釈カードの動的テキスト描画に escHtml を使う（XSS対策）
+
+vision_ux_gap_survey_2026-07.md G2-W への対応（本ファイル追記分）: Phase W-β の
+identity-links（`GET/POST/PATCH/DELETE .../identity-links` のうち実際に使うのは
+GET・POST のみ）と Phase S の standardization/assess は API 実装済みだったが UI
+未接続だった。追加した `_loadIdentityLinks` / `_bindStandardizationAssessButton`
+の受け入れ条件:
+5. 同一性リンク一覧が candidate/confirmed/rejected を区別するラベルを持つ
+   （IDENTITY_LINK_STATUS_LABELS）/ confirm・reject は POST のみ（PUT/PATCH/DELETE
+   を増やさない）/ instance 要素は `/elements/{type}/{id}/identity-links`、
+   shared_part は `/shared-parts/{id}/identity-links` を使い分ける
+6. 標準化度は shared_part 要素にのみ「標準化度を評価」ボタンを表示し、
+   `POST /shared-parts/{id}/standardization/assess` を呼ぶ。結果は既存の
+   候補注釈カード（commit/dismiss）に現れ、自動確定はしない
 """
 
 from __future__ import annotations
@@ -348,3 +361,112 @@ class TestLectureStudioDeliberationEntryPoints:
         src = _read(LECTURE_STUDIO_JS)
         for word in ("踏破", "達成率", "ランキング"):
             assert word not in src
+
+
+# ---------------------------------------------------------------------------
+# vision_ux_gap_survey_2026-07.md G2-W: identity-links / standardization/assess は
+# API 実装済みだったがフロント未接続だった。Phase W-β・Phase S の UI 配線を固定する。
+# ---------------------------------------------------------------------------
+
+
+class TestIdentityLinksWiring:
+    """Phase W-β: 同一性リンク（element_identity_links）一覧・確定・却下の配線。"""
+
+    def _function_block(self, src: str, name: str) -> str:
+        m = re.search(r"function " + name + r"\([\s\S]+?\n  \}\n", src)
+        assert m, f"function {name} が見つかりません"
+        return m.group(0)
+
+    def test_load_identity_links_function_present(self):
+        src = _read(DELIBERATION_JS)
+        assert "function _loadIdentityLinks" in src
+
+    def test_document_scoped_endpoint_used_for_instance_elements(self):
+        src = _read(DELIBERATION_JS)
+        block = self._function_block(src, "_loadIdentityLinks")
+        assert '"/admin/deliberation/elements/"' in block
+        assert '"/identity-links"' in block
+
+    def test_domain_scoped_endpoint_used_for_shared_part(self):
+        """shared_part は L層の開示方針が異なるため別エンドポイントを使う（§5 W5）。"""
+        src = _read(DELIBERATION_JS)
+        block = self._function_block(src, "_loadIdentityLinks")
+        assert '"/admin/deliberation/shared-parts/"' in block
+        assert 'ref.elementType === "shared_part"' in block
+
+    def test_status_labels_distinguish_candidate_confirmed_rejected(self):
+        """G2-W: candidate/confirmed の別を明示する（設計書 KN-3: 確定は人間のみ）。"""
+        src = _read(DELIBERATION_JS)
+        assert "IDENTITY_LINK_STATUS_LABELS" in src
+        for status in ("candidate", "confirmed", "rejected"):
+            assert f"{status}:" in src
+
+    def test_confirm_and_reject_actions_wired(self):
+        src = _read(DELIBERATION_JS)
+        assert 'data-identity-action="confirm"' in src
+        assert 'data-identity-action="reject"' in src
+
+    def test_decide_uses_post_only(self):
+        """確定・却下は POST のみ（PUT/PATCH/DELETE を新たに増やさない・W4 削除API不在）。"""
+        src = _read(DELIBERATION_JS)
+        block = self._function_block(src, "_decideIdentityLink")
+        assert '"/admin/deliberation/identity-links/"' in block
+        assert 'method: "POST"' in block
+
+    def test_pending_only_shows_confirm_reject_buttons(self):
+        """確定・却下済みのリンクには操作ボタンを出さない（教員の再確定を促さない）。"""
+        src = _read(DELIBERATION_JS)
+        block = self._function_block(src, "_identityLinkRowHtml")
+        assert 'link.status === "candidate"' in block
+
+    def test_instance_side_local_expression_not_rewritten(self):
+        """KN-2: インスタンス側の表記は書き換えないという説明文をUIに残す。"""
+        src = _read(DELIBERATION_JS)
+        assert "既存の表記は書き換えません" in src
+
+    def test_hidden_count_shown_when_present(self):
+        """shared_part 経由の一覧は閲覧不可 document 由来のリンクを隠しうる。
+        件数を黙って欠落させず正直に表示する（P4 / 出所の正直さ）。"""
+        src = _read(DELIBERATION_JS)
+        assert "hidden_count" in src
+
+    def test_no_raw_confidence_rendered_for_identity_links(self):
+        """W8: identity link のカードも confidence_label のみ描画する。"""
+        src = _read(DELIBERATION_JS)
+        block = self._function_block(src, "_identityLinkRowHtml")
+        assert "confidence_label" in block
+        assert re.search(r"\blink\.confidence\b(?!_label)", block) is None
+
+
+class TestStandardizationAssessWiring:
+    """Phase S: 標準化度の評価ボタン（三角測量 worker の手動起動）。"""
+
+    def test_assess_button_only_for_shared_part(self):
+        src = _read(DELIBERATION_JS)
+        m = re.search(r"function _standardizationSectionHtml[\s\S]+?\n  \}\n", src)
+        assert m
+        block = m.group(0)
+        assert 'elementType !== "shared_part"' in block
+        assert 'return ""' in block
+
+    def test_assess_calls_existing_endpoint_with_post(self):
+        src = _read(DELIBERATION_JS)
+        m = re.search(r"function _bindStandardizationAssessButton[\s\S]+?\n  \}\n", src)
+        assert m
+        block = m.group(0)
+        assert '"/standardization/assess"' in block
+        assert 'method: "POST"' in block
+
+    def test_assess_reuses_existing_annotation_loading(self):
+        """自動確定しない: 評価結果は既存の候補注釈一覧（commit/dismiss）に現れるだけ。"""
+        src = _read(DELIBERATION_JS)
+        m = re.search(r"function _bindStandardizationAssessButton[\s\S]+?\n  \}\n", src)
+        assert m
+        assert "_loadAnnotations(" in m.group(0)
+
+    def test_assess_note_is_factual_server_text(self):
+        """事実文（サーバの note）をそのまま表示し、断定・煽りを足さない。"""
+        src = _read(DELIBERATION_JS)
+        m = re.search(r"function _bindStandardizationAssessButton[\s\S]+?\n  \}\n", src)
+        assert m
+        assert "data.note" in m.group(0)

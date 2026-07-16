@@ -290,48 +290,49 @@
       });
   }
 
+  // 表示ラベルは教員向けの日本語にする（内部ステージキーは agent 実装と結び付いているため変更しない）。
   var materialPipelineStageGroups = [
     {
       label: "文書構造を読む",
       stages: [
-        ["document_structure", "DocumentStructureAgent"],
-        ["paper_skeleton", "PaperSkeletonAgent"],
+        ["document_structure", "文書構造の復元"],
+        ["paper_skeleton", "論文アウトラインの推定"],
       ],
     },
     {
       label: "論述・主張を抽出する",
       stages: [
-        ["rhetorical_role", "RhetoricalRoleAgent"],
-        ["claim_qualification", "ClaimQualificationAgent"],
-        ["equation_semantics", "EquationSemanticsAgent"],
+        ["rhetorical_role", "論述の役割分類"],
+        ["claim_qualification", "主張の抽出・分類"],
+        ["equation_semantics", "数式の意味付け"],
       ],
     },
     {
       label: "根拠・派生関係を整理する",
       stages: [
-        ["evidence_registry", "EvidenceRegistryBuilder"],
-        ["claim_object_builder", "ClaimObjectBuilder"],
-        ["symbol_registry", "SymbolRegistryBuilder"],
-        ["derivation_chain", "DerivationChainAgent"],
-        ["figure_table_semantics", "FigureTableSemanticsAgent"],
+        ["evidence_registry", "根拠の一元管理"],
+        ["claim_object_builder", "主張オブジェクトの組み立て"],
+        ["symbol_registry", "数式記号の整理"],
+        ["derivation_chain", "導出関係の構築"],
+        ["figure_table_semantics", "図表の意味復元"],
       ],
     },
     {
       label: "理論コンポーネントを組み立てる",
       stages: [
-        ["thesis_reconstruction", "ThesisReconstructionAgent"],
-        ["dsl_linking", "DSLLinkingAgent"],
-        ["component_assembly", "ComponentAssemblyAgent"],
-        ["component_graph", "ComponentGraphAgent"],
-        ["narrative_annotator", "NarrativeAnnotator"],
+        ["thesis_reconstruction", "中心命題の再構成"],
+        ["dsl_linking", "概念グラフへの接続"],
+        ["component_assembly", "理論コンポーネントの組み立て"],
+        ["component_graph", "理論操作グラフの構築"],
+        ["narrative_annotator", "説明注釈の付与"],
       ],
     },
     {
       label: "コース化・出力を準備する",
       stages: [
-        ["course_mapping", "CourseMappingAgent"],
-        ["blueprint", "BlueprintAgent"],
-        ["export_validation", "ExportValidationGate"],
+        ["course_mapping", "コース項目への対応付け"],
+        ["blueprint", "コース設計案の生成"],
+        ["export_validation", "整合性の最終チェック"],
       ],
     },
   ];
@@ -411,17 +412,21 @@
       if (m.status === "failed" && m.document_id) {
         resumeBtn = '<button class="admin-resume-analysis-btn" data-document-id="' + escHtml(m.document_id) + '" data-filename="' + escHtml(m.filename || m.title || "教材") + '" title="保存済みPDFから解析を再開">解析再開</button>';
       }
-      // 機能1: 解析成果をグループへ共有（document_id が必要）
+      // 機能1: 解析成果のグループ共有 + 開示範囲（G1-1）（document_id が必要）
       var shareBtn = m.document_id
-        ? '<button class="admin-share-doc-btn" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="解析成果をグループへ共有" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">共有</button>'
+        ? '<button class="admin-share-doc-btn" data-document-id="' + escHtml(m.document_id) + '" data-material-id="' + escHtml(m.material_id || "") + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" data-visibility="' + escHtml(m.visibility || "private") + '" data-group-id="' + escHtml(m.group_id || "") + '" title="グループ共有・開示範囲（公開/グループ限定/非公開）を設定します" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">共有設定</button>'
         : "";
-      // V層: 共有版の発行・履歴・削除予約（document_id が必要）
+      // V層: 共有版（リリース）の発行・履歴・削除予約（document_id が必要。上の「共有設定」とは別機能）
       var versionBtn = m.document_id
-        ? '<button class="admin-version-doc-btn" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="共有バージョンを管理" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">共有版</button>'
+        ? '<button class="admin-version-doc-btn" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="解析成果を版（リリース）として発行・履歴管理します（共有設定とは別機能）" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">版の管理</button>'
         : "";
       // 画像読み取りパイプライン（migration 041）: 抽出された図・画像を表示（document_id が必要）
       var figuresBtn = m.document_id
         ? '<button class="admin-figures-btn" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="抽出された図・画像を表示" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">図・画像</button>'
+        : "";
+      // U層（LLM使用量推計, migration 043）: 解析前の事前トークン見積り（TEACHER・レンジのみ・金額なし, G2-U）
+      var estimateBtn = m.material_id
+        ? '<button class="admin-estimate-btn" data-material-id="' + escHtml(m.material_id) + '" title="解析パイプラインが使うトークン量の目安をレンジで表示します（金額は表示されません）" style="background:none;border:1px solid var(--color-text-tertiary);color:var(--color-text-secondary);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">解析コスト見積り</button>'
         : "";
       html += '<td><div class="materials-action-cell">' +
         materialPipelineMenuHtml(m) +
@@ -430,6 +435,7 @@
         figuresBtn +
         shareBtn +
         versionBtn +
+        estimateBtn +
         '<button class="admin-delete-btn" data-material-id="' + escHtml(m.material_id) + '" data-material-title="' + escHtml(m.title) + '" style="background:none;border:1px solid var(--color-text-danger);color:var(--color-text-danger);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">削除</button>' +
         '</div></td>';
       html += "</tr>";
@@ -450,10 +456,16 @@
       });
     });
 
-    // 機能1: 解析成果のグループ共有ボタン
+    // 機能1: 解析成果のグループ共有 + 開示範囲ボタン
     tbody.querySelectorAll(".admin-share-doc-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
-        openDocumentShareModal(this.getAttribute("data-document-id"), this.getAttribute("data-title"));
+        openDocumentShareModal(
+          this.getAttribute("data-document-id"),
+          this.getAttribute("data-title"),
+          this.getAttribute("data-material-id"),
+          this.getAttribute("data-visibility"),
+          this.getAttribute("data-group-id")
+        );
       });
     });
 
@@ -469,6 +481,15 @@
       btn.addEventListener("click", function () {
         if (window.Versioning) {
           window.Versioning.openModal("document", this.getAttribute("data-document-id"), this.getAttribute("data-title"));
+        }
+      });
+    });
+
+    // U層（G2-U）: 解析コスト見積り（レンジのみ・金額なし）ポップオーバー
+    tbody.querySelectorAll(".admin-estimate-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (window.AdminLlmUsage) {
+          window.AdminLlmUsage.openEstimatePopover(this.getAttribute("data-material-id"), this);
         }
       });
     });
@@ -529,8 +550,13 @@
         var materialId = this.getAttribute("data-material-id");
         var stage = this.getAttribute("data-stage");
         if (!materialId || !stage) return;
-        if (!confirm("ステージ「" + stage + "」を再実行します。既存の結果は上書きされます。よろしいですか？")) return;
-        runMaterialPipeline(materialId, stage);
+        openDangerConfirmModal({
+          title: "ステージの再実行",
+          message: "ステージ「" + stage + "」を再実行します。既存の結果は上書きされます。よろしいですか？",
+          confirmLabel: "再実行する",
+        }, function () {
+          runMaterialPipeline(materialId, stage);
+        });
       });
     });
   }
@@ -585,8 +611,15 @@
         if (!menu) return;
         var panel = menu.querySelector(".material-pipeline-panel");
         if (panel) panel.hidden = true;
-        if (!confirm("既存の実行結果を上書きします。本当に実行しますか？")) return;
-        runMaterialPipeline(menu.getAttribute("data-material-id"), this.getAttribute("data-stage") || "");
+        var materialId = menu.getAttribute("data-material-id");
+        var stage = this.getAttribute("data-stage") || "";
+        openDangerConfirmModal({
+          title: "パイプラインの再実行",
+          message: "既存の実行結果を上書きします。本当に実行しますか？",
+          confirmLabel: "実行する",
+        }, function () {
+          runMaterialPipeline(materialId, stage);
+        });
       });
     });
     root.querySelectorAll(".material-revision-item").forEach(function (btn) {
@@ -861,6 +894,49 @@
 
     // Focus input
     input.focus();
+  }
+
+  // ── Danger Confirmation Modal (G5-3) ────────────────────────────────
+  // 不可逆・破壊的だが「名前入力」までは不要な操作向けの共通確認モーダル。
+  // ブラウザ標準の confirm() は反射的に押し抜けてしまいがちなため、
+  // 明示のボタンクリックを要求する「2段確認」に統一する（削除系は
+  // openDeleteConfirmModal の名前入力必須モーダルを引き続き使う）。
+  function openDangerConfirmModal(opts, onConfirm) {
+    opts = opts || {};
+    var existing = document.getElementById("danger-confirm-modal");
+    if (existing) existing.remove();
+
+    var messages = Array.isArray(opts.message) ? opts.message : [opts.message];
+    var messagesHtml = messages.filter(function (m) { return !!m; }).map(function (m) {
+      return '<p style="font-size:13px;color:var(--color-text-primary);margin:0 0 8px;white-space:pre-wrap">' + escHtml(m) + '</p>';
+    }).join("");
+
+    var overlay = document.createElement("div");
+    overlay.id = "danger-confirm-modal";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+
+    overlay.innerHTML =
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border-secondary);border-radius:8px;padding:24px;min-width:380px;max-width:480px">' +
+        '<h3 style="margin:0 0 12px;font-size:16px;color:var(--color-text-danger)">' + escHtml(opts.title || "確認") + '</h3>' +
+        messagesHtml +
+        '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">' +
+          '<button id="danger-confirm-cancel-btn" style="padding:6px 16px;border:1px solid var(--color-border);border-radius:4px;background:none;color:var(--color-text-secondary);cursor:pointer;font-size:13px">' + escHtml(opts.cancelLabel || "キャンセル") + '</button>' +
+          '<button id="danger-confirm-exec-btn" style="padding:6px 16px;border:none;border-radius:4px;background:var(--color-text-danger);color:#fff;cursor:pointer;font-size:13px">' + escHtml(opts.confirmLabel || "実行する") + '</button>' +
+        '</div>' +
+      '</div>';
+
+    document.body.appendChild(overlay);
+
+    overlay.addEventListener("click", function (e) {
+      if (e.target === overlay) overlay.remove();
+    });
+    document.getElementById("danger-confirm-cancel-btn").addEventListener("click", function () {
+      overlay.remove();
+    });
+    document.getElementById("danger-confirm-exec-btn").addEventListener("click", function () {
+      overlay.remove();
+      if (typeof onConfirm === "function") onConfirm();
+    });
   }
 
   // ── 画像読み取りパイプライン（migration 041）— 再解析オプション ─────────
@@ -1991,33 +2067,43 @@
   function freezeLibraryEntry(entryId) {
     var note = prompt("凍結版のchangelogメモ（任意）");
     if (note === null) return; // cancelled
-    if (!confirm("凍結版はパイプラインの解析に使われます。取り消せません（修正は次版で行います）。よろしいですか？")) return;
-    _libraryDetailStatus("凍結しています...", "info");
-    apiFetch("/admin/library/entries/" + encodeURIComponent(entryId) + "/freeze", { method: "POST", body: JSON.stringify({ note: note || "" }) })
-      .then(function (res) {
-        if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "凍結に失敗しました"); });
-        return res.json();
-      })
-      .then(function () {
-        _libraryDetailStatus("凍結しました", "success");
-        selectLibraryEntry(entryId);
-        loadLibraryEntries();
-      })
-      .catch(function (err) { _libraryDetailStatus(err.message || "凍結に失敗しました", "error"); });
+    openDangerConfirmModal({
+      title: "ライブラリエントリの凍結",
+      message: ["凍結版はパイプラインの解析に使われます。取り消せません（修正は次版で行います）。", "よろしいですか？"],
+      confirmLabel: "凍結する",
+    }, function () {
+      _libraryDetailStatus("凍結しています...", "info");
+      apiFetch("/admin/library/entries/" + encodeURIComponent(entryId) + "/freeze", { method: "POST", body: JSON.stringify({ note: note || "" }) })
+        .then(function (res) {
+          if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "凍結に失敗しました"); });
+          return res.json();
+        })
+        .then(function () {
+          _libraryDetailStatus("凍結しました", "success");
+          selectLibraryEntry(entryId);
+          loadLibraryEntries();
+        })
+        .catch(function (err) { _libraryDetailStatus(err.message || "凍結に失敗しました", "error"); });
+    });
   }
 
   function retireLibraryEntry(entryId) {
-    if (!confirm("このエントリを廃止します。retrieval対象から外れますが、履歴・provenanceは保持されます。よろしいですか？")) return;
-    apiFetch("/admin/library/entries/" + encodeURIComponent(entryId) + "/retire", { method: "POST" })
-      .then(function (res) {
-        if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "廃止に失敗しました"); });
-        return res.json();
-      })
-      .then(function () {
-        selectLibraryEntry(entryId);
-        loadLibraryEntries();
-      })
-      .catch(function (err) { _libraryDetailStatus(err.message || "廃止に失敗しました", "error"); });
+    openDangerConfirmModal({
+      title: "ライブラリエントリの廃止",
+      message: "このエントリを廃止します。retrieval対象から外れますが、履歴・provenanceは保持されます。よろしいですか？",
+      confirmLabel: "廃止する",
+    }, function () {
+      apiFetch("/admin/library/entries/" + encodeURIComponent(entryId) + "/retire", { method: "POST" })
+        .then(function (res) {
+          if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "廃止に失敗しました"); });
+          return res.json();
+        })
+        .then(function () {
+          selectLibraryEntry(entryId);
+          loadLibraryEntries();
+        })
+        .catch(function (err) { _libraryDetailStatus(err.message || "廃止に失敗しました", "error"); });
+    });
   }
 
   function restoreLibraryEntry(entryId) {
@@ -4118,29 +4204,35 @@
         return;
       }
       var warningCount = currentIssues.warningIssues.length;
-      var check = "公開前チェック\n\n" +
-        "公開版: " + version + "\n" +
-        "検証エラー: 0件\n" +
-        "検証警告: " + warningCount + "件\n" +
-        "未確認の修正報告: " + pendingCount + "件\n\n" +
-        "この次版を学習者向けに公開しますか？";
-      if (!confirm(check)) return;
-      setStatus("学習者向けに公開中...");
-      apiFetch(basePath() + "/freeze", {
-        method: "POST",
-        body: JSON.stringify({ version: version, note: note }),
-      })
-        .then(function (res) {
-          return res.json().then(function (body) {
-            if (!res.ok) {
-              var detail = body.detail;
-              throw new Error(typeof detail === "string" ? detail : "HTTP " + res.status);
-            }
-            return body;
-          });
+      var checkLines = [
+        "公開版: " + version,
+        "検証エラー: 0件",
+        "検証警告: " + warningCount + "件",
+        "未確認の修正報告: " + pendingCount + "件",
+        "この次版を学習者向けに公開しますか？取り消せません（修正は次版で行います）。",
+      ];
+      openDangerConfirmModal({
+        title: "分野の地図骨格を公開前チェック",
+        message: checkLines,
+        confirmLabel: "公開する",
+      }, function () {
+        setStatus("学習者向けに公開中...");
+        apiFetch(basePath() + "/freeze", {
+          method: "POST",
+          body: JSON.stringify({ version: version, note: note }),
         })
-        .then(function () { setStatus("版 " + version + " を学習者向けに公開しました"); loadState(); loadReports(); })
-        .catch(function (err) { setStatus("公開に失敗しました: " + err.message, true); });
+          .then(function (res) {
+            return res.json().then(function (body) {
+              if (!res.ok) {
+                var detail = body.detail;
+                throw new Error(typeof detail === "string" ? detail : "HTTP " + res.status);
+              }
+              return body;
+            });
+          })
+          .then(function () { setStatus("版 " + version + " を学習者向けに公開しました"); loadState(); loadReports(); })
+          .catch(function (err) { setStatus("公開に失敗しました: " + err.message, true); });
+      });
     });
 
     select.addEventListener("change", function () {
@@ -4360,6 +4452,9 @@
     var select = document.getElementById("interest-dashboard-course-select");
     if (!body) return;
     var courseId = select ? select.value : "";
+    // 知識ネットワークビジョン Phase B — 橋の候補は独立セクションなので、関心集約本体の
+    // 早期 return（コース未選択・データなし）に巻き込まれないよう常に呼ぶ。
+    loadBridgeInsights(courseId);
     if (!courseId) {
       body.innerHTML = '<div style="color:var(--color-text-tertiary)">コースを選択してください</div>';
       return;
@@ -4425,6 +4520,46 @@
             '本人が確定した帰属のみ・3名未満のセルは表示されません（教材改善用。評価には使いません）</div>';
         }
 
+        body.innerHTML = html;
+      })
+      .catch(function () {
+        body.innerHTML = '<div style="color:var(--color-text-danger)">読み込みに失敗しました</div>';
+      });
+  }
+
+  // ── 知識ネットワークビジョン Phase B — 橋の候補（教員向け唯一の窓口, G2-B）────
+  // GET /api/admin/courses/{course_id}/bridge-insights をそのまま事実文で提示する。
+  // 個人特定・数値スコア・ランキング表現は作らない（k-匿名集約はサーバ側 core/privacy.py が正本）。
+  function loadBridgeInsights(courseId) {
+    var body = document.getElementById("bridge-insights-body");
+    if (!body) return;
+    if (!courseId) {
+      body.innerHTML = '<div style="color:var(--color-text-tertiary)">コースを選択してください</div>';
+      return;
+    }
+    body.innerHTML = '<div style="color:var(--color-text-tertiary)">読み込み中…</div>';
+    apiFetch("/admin/courses/" + encodeURIComponent(courseId) + "/bridge-insights")
+      .then(function (res) {
+        if (!res.ok) throw new Error("status " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        var bridges = data.bridges || [];
+        if (!bridges.length) {
+          body.innerHTML = '<div style="color:var(--color-text-tertiary)">まだ表示できる集約はありません（3名以上の確定痕跡が必要です）。</div>';
+          return;
+        }
+        var html = '<ul style="margin:0;padding-left:18px;font-size:13px;line-height:1.8">';
+        bridges.forEach(function (b) {
+          var kindLabel = b.ref_type === "graph_edge" ? "構造グラフの関係" : "コンポーネント";
+          var name = b.label ? escHtml(b.label) : (kindLabel + "（" + escHtml(b.ref_id || "") + "）");
+          html += "<li>" + name +
+            ' <span style="color:var(--color-text-tertiary);font-size:11px">（' +
+            escHtml(b.learner_count_range || "") + '名の学習者が結びつけました）</span></li>';
+        });
+        html += "</ul>";
+        html += '<div style="font-size:11px;color:var(--color-text-tertiary);margin-top:8px">' +
+          escHtml(data.note || "") + "</div>";
         body.innerHTML = html;
       })
       .catch(function () {
@@ -4859,6 +4994,10 @@
 
       var ssTabBtn = document.getElementById("tab-btn-system-stats");
       if (ssTabBtn) ssTabBtn.style.display = "";
+
+      // U層（LLM使用量推計, migration 043）— SYSTEM_ADMIN のみメトリクス閲覧可（G2-U）。
+      var llmUsageTabBtn = document.getElementById("tab-btn-llm-usage");
+      if (llmUsageTabBtn) llmUsageTabBtn.style.display = "";
     }
 
     // Show schema evolution tab for TEACHER/SYSTEM_ADMIN
@@ -4867,7 +5006,7 @@
       schemaTab.className = "admin-tab";
       schemaTab.dataset.tab = "schema";
       schemaTab.setAttribute("role", "menuitem");
-      schemaTab.textContent = "スキーマ管理";
+      schemaTab.textContent = "DSL進化分析";
       knowledgeMenu.appendChild(schemaTab);
     }
 
@@ -4985,7 +5124,7 @@
       .then(function (res) { return res.json(); })
       .then(function (proposals) {
         if (!proposals || proposals.length === 0) {
-          container.innerHTML = '<p style="color:var(--color-text-tertiary)">提案はまだありません。「スキーマ管理」タブからAIメタ分析を実行してください。</p>';
+          container.innerHTML = '<p style="color:var(--color-text-tertiary)">提案はまだありません。「DSL進化分析」タブからAIメタ分析を実行してください。</p>';
           return;
         }
         var html = "";
@@ -5656,8 +5795,13 @@
       });
       var del = bodyEl.querySelector("#groups-delete-btn");
       if (del) del.addEventListener("click", function () {
-        if (!confirm("グループ「" + g.name + "」を削除します。よろしいですか？")) return;
-        deleteGroup(g.id);
+        openDangerConfirmModal({
+          title: "グループの削除",
+          message: "グループ「" + g.name + "」を削除します。よろしいですか？",
+          confirmLabel: "削除する",
+        }, function () {
+          deleteGroup(g.id);
+        });
       });
       var removeBtns = bodyEl.querySelectorAll(".groups-remove-btn");
       for (var i = 0; i < removeBtns.length; i++) {
@@ -5825,6 +5969,10 @@
     currentCourseTitle: "",
     perms: [],
   };
+  // Admin Copilot の道案内（course_row → course_visibility_control / publish_button）が
+  // どのコース行を指しているかを覚えておくための最小限の状態（G1-6 のテーブル全体
+  // フォールバックを解消するため。行単位の実コントロールを返せるようにする）。
+  var _cmLastAnchoredCourseId = null;
 
   function initCourseManagement() {
     var refreshBtn = document.getElementById("cm-refresh");
@@ -5857,7 +6005,7 @@
   function loadCourseManagement() {
     var tbody = document.getElementById("cm-tbody");
     if (!tbody) return;
-    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">読み込み中...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--color-text-tertiary)">読み込み中...</td></tr>';
 
     Promise.all([
       apiFetch("/admin/courses").then(function (res) { return res.json(); }),
@@ -5868,7 +6016,7 @@
         _cmState.groups = results[1] || [];
         // グループ権限マッピングをコース毎に取得
         if (!_cmState.courses.length) {
-          tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">コースがありません</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--color-text-tertiary)">コースがありません</td></tr>';
           return;
         }
         return Promise.all(_cmState.courses.map(function (c) {
@@ -5882,11 +6030,33 @@
       });
   }
 
+  // G1-1/G5-2: 開示範囲バッジ・地図バインディング状態の表示テキスト（事実文のみ・煽り表示なし）。
+  function courseVisibilityLabel(v) {
+    if (v === "public") return "公開中";
+    if (v === "group") return "グループ限定";
+    return "非公開";
+  }
+  function courseVisibilityBadgeClass(v) {
+    if (v === "public") return "status-visibility-public";
+    if (v === "group") return "status-visibility-group";
+    return "status-visibility-private";
+  }
+  function courseVisibilityBadgeHtml(c) {
+    var v = c.visibility || "private";
+    return '<span class="admin-status ' + courseVisibilityBadgeClass(v) + '">' + courseVisibilityLabel(v) + '</span>';
+  }
+  function courseAtlasBindingText(c) {
+    if (c.atlas_cartridge_id) {
+      return "地図: " + c.atlas_cartridge_id + "（" + (c.atlas_topic_count || 0) + "/" + (c.topic_count || 0) + " トピック）";
+    }
+    return "地図: 未設定";
+  }
+
   function renderCourseManagementTable() {
     var tbody = document.getElementById("cm-tbody");
     if (!tbody) return;
     if (!_cmState.courses.length) {
-      tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">コースがありません</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--color-text-tertiary)">コースがありません</td></tr>';
       return;
     }
     var html = "";
@@ -5911,16 +6081,37 @@
         }).join("");
       }
       var actionHtml;
+      var stateHtml;
+      // C層(承認・共有レイヤー) — 説明バージョン・承認・引用の状況を見る共有ダッシュボード。
+      // グループ共有（V層「版の管理」）とは別機能。閲覧可能な行なら owner/editor/viewer 問わず開ける
+      // （sharing-dashboard API は _ensure_viewable のみを要求する）。
+      var sharingDashboardBtn = '<button class="cm-sharing-dashboard-btn admin-action-btn" data-course-id="' +
+        escHtml(c.id) + '" data-course-title="' + escHtml(c.title) +
+        '" style="font-size:11px;padding:2px 8px" title="説明バージョン・承認・引用の状況を表示します">共有ダッシュボード</button>';
       if (c.role === "owner") {
-        actionHtml = '<button class="cm-manage-btn admin-action-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '">共有設定</button>' +
-          ' <button class="cm-version-btn admin-action-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '">共有版</button>';
+        actionHtml = '<button class="cm-manage-btn admin-action-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '" title="開示範囲・グループ共有を設定します">共有設定</button>' +
+          ' <button class="cm-version-btn admin-action-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '" title="コースを版（リリース）として発行・履歴管理します（共有設定とは別機能）">版の管理</button>' +
+          ' ' + sharingDashboardBtn;
+        var isPublic = c.visibility === "public";
+        var quickToggle = '<button class="cm-quick-publish-btn admin-action-btn" data-course-id="' + escHtml(c.id) + '" data-action="' + (isPublic ? "unpublish" : "publish") + '" style="font-size:11px;padding:2px 8px;margin-top:4px">' +
+          (isPublic ? "公開を止める" : "公開する") + '</button>';
+        stateHtml = '<div style="display:flex;flex-direction:column;gap:3px;align-items:flex-start">' +
+          courseVisibilityBadgeHtml(c) +
+          '<span style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(courseAtlasBindingText(c)) + '</span>' +
+          quickToggle +
+          '</div>';
       } else {
-        actionHtml = '<span style="font-size:11px;color:var(--color-text-tertiary)">所有者のみ変更可</span>';
+        actionHtml = '<span style="font-size:11px;color:var(--color-text-tertiary)">所有者のみ変更可</span> ' + sharingDashboardBtn;
+        stateHtml = '<div style="display:flex;flex-direction:column;gap:3px;align-items:flex-start">' +
+          courseVisibilityBadgeHtml(c) +
+          '<span style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(courseAtlasBindingText(c)) + '</span>' +
+          '</div>';
       }
       html += '<tr data-course-id="' + escHtml(c.id) + '">' +
         '<td>' + escHtml(c.title) + '</td>' +
         '<td>' + roleBadge + '</td>' +
         '<td>' + permsHtml + '</td>' +
+        '<td>' + stateHtml + '</td>' +
         '<td>' + actionHtml + '</td>' +
         '</tr>';
     });
@@ -5938,6 +6129,121 @@
         }
       });
     });
+    // C層(承認・共有レイヤー) — 共有ダッシュボード（G2-C）
+    tbody.querySelectorAll(".cm-sharing-dashboard-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        openSharingDashboardModal(this.getAttribute("data-course-id"), this.getAttribute("data-course-title"));
+      });
+    });
+    // G1-1: 行内の「公開する/公開を止める」クイック操作（visibility=public ⇔ private の切替）。
+    // 細かいグループ指定が必要な場合は「共有設定」モーダルの開示範囲セクションを使う。
+    tbody.querySelectorAll(".cm-quick-publish-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var courseId = this.getAttribute("data-course-id");
+        var action = this.getAttribute("data-action");
+        var nextVisibility = action === "publish" ? "public" : "private";
+        openDangerConfirmModal({
+          title: action === "publish" ? "コースを公開" : "コースの公開を止める",
+          message: action === "publish"
+            ? "このコースを公開します。学生が受講できるようになります。"
+            : "このコースの公開を止めます（非公開に切り替えます）。学生の新規受講はできなくなります。",
+          confirmLabel: action === "publish" ? "公開する" : "公開を止める",
+        }, function () {
+          setCmStatus(action === "publish" ? "公開しています..." : "非公開にしています...", "info");
+          apiFetch("/admin/courses/" + encodeURIComponent(courseId) + "/visibility", {
+            method: "PUT",
+            body: JSON.stringify({ visibility: nextVisibility }),
+          }).then(function (res) {
+            if (!res.ok) return res.json().then(function (d) { throw new Error(d.detail || "更新に失敗しました"); });
+            return res.json();
+          }).then(function () {
+            setCmStatus(action === "publish" ? "公開しました" : "非公開にしました", "success");
+            loadCourseManagement();
+            if (window.AdminNextSteps) window.AdminNextSteps.refresh();
+          }).catch(function (e) {
+            setCmStatus(e.message || "更新に失敗しました", "error");
+          });
+        });
+      });
+    });
+  }
+
+  // ── C層(承認・共有レイヤー) — 共有ダッシュボード（G2-C）────────────────────
+  // GET /admin/courses/{course_id}/sharing-dashboard をそのまま提示する。
+  // 承認は API が返す段階ラベル(endorsement_label)を使う（数値の捏造・独自スコア化はしない）。
+  function openSharingDashboardModal(courseId, courseTitle) {
+    var existing = document.getElementById("sharing-dashboard-modal");
+    if (existing) existing.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = "sharing-dashboard-modal";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+    overlay.innerHTML =
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:520px;max-width:760px;max-height:82vh;display:flex;flex-direction:column">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
+          '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">共有ダッシュボード — ' + escHtml(courseTitle || "") + '</h3>' +
+          '<button id="sharing-dashboard-modal-close" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
+        '</div>' +
+        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 10px">' +
+          'このコースの理論コンポーネントに紐づく説明バージョンごとの、共有・承認・引用の状況です（個人ごとの追跡ではなく集計です）。' +
+        '</p>' +
+        '<div id="sharing-dashboard-modal-body" style="overflow-y:auto;flex:1">' +
+          '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">読み込み中...</div>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) overlay.remove(); });
+    document.getElementById("sharing-dashboard-modal-close").addEventListener("click", function () { overlay.remove(); });
+
+    apiFetch("/admin/courses/" + encodeURIComponent(courseId) + "/sharing-dashboard")
+      .then(function (res) {
+        if (!res.ok) throw new Error("status " + res.status);
+        return res.json();
+      })
+      .then(renderSharingDashboardModal)
+      .catch(function () {
+        var body = document.getElementById("sharing-dashboard-modal-body");
+        if (body) body.innerHTML = '<div style="padding:16px;color:var(--color-text-danger);font-size:13px">読み込みに失敗しました</div>';
+      });
+  }
+
+  function renderSharingDashboardModal(data) {
+    var body = document.getElementById("sharing-dashboard-modal-body");
+    if (!body) return;
+    var totals = data.totals || {};
+    var explanations = data.explanations || [];
+    var html = '<div style="display:flex;gap:16px;flex-wrap:wrap;font-size:13px;margin-bottom:14px;padding:10px;background:var(--color-background-tertiary);border-radius:6px">' +
+      '<div>説明バージョン: <strong>' + escHtml(String(totals.explanation_count || 0)) + '</strong></div>' +
+      '<div>共有中: <strong>' + escHtml(String(totals.shared_count || 0)) + '</strong></div>' +
+      '<div>承認あり: <strong>' + escHtml(String(totals.endorsed_count || 0)) + '</strong></div>' +
+      '<div>引用合計: <strong>' + escHtml(String(totals.citation_total || 0)) + '</strong></div>' +
+      '</div>';
+
+    if (!explanations.length) {
+      html += '<div style="color:var(--color-text-tertiary);font-size:13px">このコースにはまだ説明バージョンがありません。</div>';
+      body.innerHTML = html;
+      return;
+    }
+
+    html += '<table class="admin-table"><thead><tr>' +
+      '<th>説明</th><th>種別</th><th>作成者</th><th>共有</th><th>承認</th><th>引用</th>' +
+      '</tr></thead><tbody>';
+    explanations.forEach(function (e) {
+      var kindLabel = e.kind === "standard" ? "標準（AI由来の説明）" : "教員独自の解釈";
+      var sharedLabel = e.shared
+        ? '<span class="admin-status status-visibility-public">共有中</span>'
+        : '<span class="admin-status status-visibility-private">未共有</span>';
+      html += "<tr>" +
+        "<td>" + escHtml(e.title || "(無題)") + "</td>" +
+        "<td>" + escHtml(kindLabel) + "</td>" +
+        "<td>" + escHtml(e.author_name || "-") + "</td>" +
+        "<td>" + sharedLabel + "</td>" +
+        "<td>" + escHtml(e.endorsement_label || "未承認") + "</td>" +
+        "<td>" + escHtml(String(e.citation_count || 0)) + "</td>" +
+        "</tr>";
+    });
+    html += "</tbody></table>";
+    body.innerHTML = html;
   }
 
   function openPermissionModal(courseId, courseTitle) {
@@ -5954,10 +6260,24 @@
     overlay.innerHTML =
       '<div style="background:var(--color-background-primary);border:1px solid var(--color-border-secondary);border-radius:8px;padding:24px;min-width:480px;max-width:640px;max-height:80vh;display:flex;flex-direction:column">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">' +
-          '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">グループ共有設定</h3>' +
+          '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">コースの共有・開示範囲</h3>' +
           '<button id="cm-perm-close-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
         '</div>' +
-        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 12px">コース:「' + escHtml(courseTitle) + '」の共有グループと権限を管理します。</p>' +
+        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 12px">コース:「' + escHtml(courseTitle) + '」の設定です。</p>' +
+        '<h4 style="font-size:13px;margin:0 0 8px 0;color:var(--color-text-secondary)">開示範囲</h4>' +
+        '<p style="font-size:11.5px;color:var(--color-text-tertiary);margin:0 0 8px">誰がこのコースを見て受講できるかを設定します。</p>' +
+        '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">' +
+          '<select id="cm-visibility-select" style="padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">' +
+            '<option value="private">非公開（自分のみ）</option>' +
+            '<option value="group">グループ限定</option>' +
+            '<option value="public">公開（誰でも受講可）</option>' +
+          '</select>' +
+          '<select id="cm-visibility-group-select" style="display:none;padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)"></select>' +
+          '<button id="cm-visibility-apply-btn" class="admin-action-btn">適用</button>' +
+        '</div>' +
+        '<div id="cm-visibility-status" class="upload-status" style="display:none;margin-bottom:12px"></div>' +
+        '<hr style="border:none;border-top:1px solid var(--color-border);margin:4px 0 12px 0">' +
+        '<h4 style="font-size:13px;margin:0 0 8px 0;color:var(--color-text-secondary)">解析成果・受講のグループ共有</h4>' +
         '<div id="cm-perm-status-inline" class="upload-status" style="display:none;margin-bottom:12px"></div>' +
         '<h4 style="font-size:13px;margin:0 0 8px 0;color:var(--color-text-secondary)">現在の共有設定</h4>' +
         '<div id="cm-perm-current" style="margin-bottom:16px;overflow-y:auto;flex:1"></div>' +
@@ -5983,7 +6303,87 @@
     });
     document.getElementById("cm-perm-add-btn").addEventListener("click", addPermissionMapping);
 
+    initCourseVisibilitySection();
     loadPermissionModal();
+  }
+
+  // G1-1: 「共有設定」モーダルに統合した開示範囲セクション（public/group/private）。
+  function initCourseVisibilitySection() {
+    var course = null;
+    for (var i = 0; i < _cmState.courses.length; i++) {
+      if (_cmState.courses[i].id === _cmState.currentCourseId) { course = _cmState.courses[i]; break; }
+    }
+    var visSelect = document.getElementById("cm-visibility-select");
+    var groupSelect = document.getElementById("cm-visibility-group-select");
+    if (!visSelect || !groupSelect) return;
+
+    visSelect.value = (course && course.visibility) || "private";
+    var groupHtml = '<option value="">グループを選択...</option>';
+    _cmState.groups.forEach(function (g) {
+      groupHtml += '<option value="' + escHtml(g.id) + '">' + escHtml(g.name) + '</option>';
+    });
+    groupSelect.innerHTML = groupHtml;
+    if (course && course.visibility === "group" && course.group_id) groupSelect.value = course.group_id;
+    toggleCmVisibilityGroupSelect();
+
+    visSelect.addEventListener("change", toggleCmVisibilityGroupSelect);
+    document.getElementById("cm-visibility-apply-btn").addEventListener("click", applyCourseVisibility);
+  }
+
+  function toggleCmVisibilityGroupSelect() {
+    var visSelect = document.getElementById("cm-visibility-select");
+    var groupSelect = document.getElementById("cm-visibility-group-select");
+    if (!visSelect || !groupSelect) return;
+    groupSelect.style.display = visSelect.value === "group" ? "" : "none";
+  }
+
+  function setCmVisibilityStatus(msg, kind) {
+    var el = document.getElementById("cm-visibility-status");
+    if (!el) return;
+    if (!msg) { el.style.display = "none"; return; }
+    el.style.display = "block";
+    el.textContent = msg;
+    el.className = "upload-status upload-status-" + (kind || "info");
+  }
+
+  function applyCourseVisibility() {
+    var visSelect = document.getElementById("cm-visibility-select");
+    var groupSelect = document.getElementById("cm-visibility-group-select");
+    if (!visSelect) return;
+    var visibility = visSelect.value;
+    var groupId = groupSelect ? groupSelect.value : "";
+    if (visibility === "group" && !groupId) {
+      setCmVisibilityStatus("グループを選択してください", "error");
+      return;
+    }
+    var courseId = _cmState.currentCourseId;
+
+    function doApply() {
+      setCmVisibilityStatus("更新しています...", "info");
+      apiFetch("/admin/courses/" + encodeURIComponent(courseId) + "/visibility", {
+        method: "PUT",
+        body: JSON.stringify({ visibility: visibility, group_id: visibility === "group" ? groupId : null }),
+      }).then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw new Error(d.detail || "更新に失敗しました"); });
+        return res.json();
+      }).then(function () {
+        setCmVisibilityStatus("更新しました", "success");
+        loadCourseManagement();
+        if (window.AdminNextSteps) window.AdminNextSteps.refresh();
+      }).catch(function (e) {
+        setCmVisibilityStatus(e.message || "更新に失敗しました", "error");
+      });
+    }
+
+    if (visibility === "public") {
+      openDangerConfirmModal({
+        title: "コースを公開",
+        message: "このコースを公開します。学生が受講できるようになります。",
+        confirmLabel: "公開する",
+      }, doApply);
+    } else {
+      doApply();
+    }
   }
 
   function setPermStatus(msg, kind) {
@@ -6092,12 +6492,21 @@
   }
 
   // ── 機能1: ドキュメント（解析成果）のグループ共有（migration 035）─────────
-  // 教材管理タブの「共有」ボタンから開く。コース共有モーダルと同型。
-  var _docShareState = { documentId: null, title: "", perms: [], groups: [] };
+  // 教材管理タブの「共有設定」ボタンから開く。コース共有モーダルと同型。
+  // G1-1: 開示範囲（public/group/private）セクションも同じモーダルに統合する
+  // （モーダル乱立を避けるため、別モーダルを新設しない）。
+  var _docShareState = { documentId: null, materialId: null, title: "", visibility: "private", groupId: "", perms: [], groups: [] };
+  // Admin Copilot の道案内（material_row → material_visibility_control）が
+  // どの教材行を指しているかを覚えておくための最小限の状態（course 側の
+  // _cmLastAnchoredCourseId と同型）。
+  var _matLastAnchoredMaterialId = null;
 
-  function openDocumentShareModal(documentId, title) {
+  function openDocumentShareModal(documentId, title, materialId, visibility, groupId) {
     _docShareState.documentId = documentId;
+    _docShareState.materialId = materialId || "";
     _docShareState.title = title || "";
+    _docShareState.visibility = visibility || "private";
+    _docShareState.groupId = groupId || "";
 
     var existing = document.getElementById("doc-share-modal");
     if (existing) existing.remove();
@@ -6108,10 +6517,25 @@
     overlay.innerHTML =
       '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:24px;min-width:480px;max-width:640px;max-height:80vh;display:flex;flex-direction:column">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">' +
-          '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">解析成果のグループ共有</h3>' +
+          '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">教材の共有・開示範囲</h3>' +
           '<button id="doc-share-close" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
         '</div>' +
-        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 12px">教材「' + escHtml(title || "") + '」の解析成果（理論コンポーネント・グラフ・Claim）を指定グループへ共有します。viewer=閲覧・引用／editor=編集・再解析。</p>' +
+        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 12px">教材「' + escHtml(title || "") + '」の設定です。</p>' +
+        '<h4 style="font-size:13px;margin:0 0 8px 0;color:var(--color-text-secondary)">開示範囲</h4>' +
+        '<p style="font-size:11.5px;color:var(--color-text-tertiary);margin:0 0 8px">誰がこの教材（と解析成果）を見られるかを設定します。</p>' +
+        '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">' +
+          '<select id="doc-visibility-select" style="padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)">' +
+            '<option value="private">非公開（自分のみ）</option>' +
+            '<option value="group">グループ限定</option>' +
+            '<option value="public">公開（誰でも閲覧可）</option>' +
+          '</select>' +
+          '<select id="doc-visibility-group-select" style="display:none;padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)"></select>' +
+          '<button id="doc-visibility-apply-btn" class="admin-action-btn">適用</button>' +
+        '</div>' +
+        '<div id="doc-visibility-status" class="upload-status" style="display:none;margin-bottom:12px"></div>' +
+        '<hr style="border:none;border-top:1px solid var(--color-border);margin:4px 0 12px 0">' +
+        '<h4 style="font-size:13px;margin:0 0 8px 0;color:var(--color-text-secondary)">解析成果のグループ共有</h4>' +
+        '<p style="font-size:11.5px;color:var(--color-text-tertiary);margin:0 0 8px">解析成果（理論コンポーネント・グラフ・Claim）を指定グループへ個別に共有します。viewer=閲覧・引用／editor=編集・再解析。</p>' +
         '<div id="doc-share-status" class="upload-status" style="display:none;margin-bottom:12px"></div>' +
         '<h4 style="font-size:13px;margin:0 0 8px 0;color:var(--color-text-secondary)">現在の共有設定</h4>' +
         '<div id="doc-share-current" style="margin-bottom:16px;overflow-y:auto;flex:1"></div>' +
@@ -6132,7 +6556,82 @@
     document.getElementById("doc-share-close").addEventListener("click", function () { overlay.remove(); });
     document.getElementById("doc-share-add").addEventListener("click", addDocumentShare);
 
+    var visSelect = document.getElementById("doc-visibility-select");
+    visSelect.value = _docShareState.visibility;
+    toggleDocVisibilityGroupSelect();
+    visSelect.addEventListener("change", toggleDocVisibilityGroupSelect);
+    document.getElementById("doc-visibility-apply-btn").addEventListener("click", applyMaterialVisibility);
+
     loadDocumentShareModal();
+  }
+
+  function toggleDocVisibilityGroupSelect() {
+    var visSelect = document.getElementById("doc-visibility-select");
+    var groupSelect = document.getElementById("doc-visibility-group-select");
+    if (!visSelect || !groupSelect) return;
+    groupSelect.style.display = visSelect.value === "group" ? "" : "none";
+  }
+
+  function setDocVisibilityStatus(msg, kind) {
+    var el = document.getElementById("doc-visibility-status");
+    if (!el) return;
+    if (!msg) { el.style.display = "none"; return; }
+    el.style.display = "block";
+    el.textContent = msg;
+    el.className = "upload-status upload-status-" + (kind || "info");
+  }
+
+  function renderDocVisibilityGroupOptions() {
+    var sel = document.getElementById("doc-visibility-group-select");
+    if (!sel) return;
+    var html = '<option value="">グループを選択...</option>';
+    _docShareState.groups.forEach(function (g) {
+      html += '<option value="' + escHtml(g.id) + '">' + escHtml(g.name) + '</option>';
+    });
+    sel.innerHTML = html;
+    if (_docShareState.visibility === "group" && _docShareState.groupId) sel.value = _docShareState.groupId;
+  }
+
+  function applyMaterialVisibility() {
+    var visSelect = document.getElementById("doc-visibility-select");
+    var groupSelect = document.getElementById("doc-visibility-group-select");
+    if (!visSelect) return;
+    var visibility = visSelect.value;
+    var groupId = groupSelect ? groupSelect.value : "";
+    if (visibility === "group" && !groupId) {
+      setDocVisibilityStatus("グループを選択してください", "error");
+      return;
+    }
+    if (!_docShareState.materialId) {
+      setDocVisibilityStatus("この教材の識別子が取得できませんでした", "error");
+      return;
+    }
+
+    function doApply() {
+      setDocVisibilityStatus("更新しています...", "info");
+      apiFetch("/admin/materials/" + encodeURIComponent(_docShareState.materialId) + "/visibility", {
+        method: "PUT",
+        body: JSON.stringify({ visibility: visibility, group_id: visibility === "group" ? groupId : null }),
+      }).then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw new Error(d.detail || "更新に失敗しました"); });
+        return res.json();
+      }).then(function () {
+        _docShareState.visibility = visibility;
+        _docShareState.groupId = visibility === "group" ? groupId : "";
+        setDocVisibilityStatus("更新しました", "success");
+        loadMaterials();
+      }).catch(function (e) { setDocVisibilityStatus(e.message || "更新に失敗しました", "error"); });
+    }
+
+    if (visibility === "public") {
+      openDangerConfirmModal({
+        title: "教材を公開",
+        message: "この教材（と解析成果）を公開します。誰でも閲覧できるようになります。",
+        confirmLabel: "公開する",
+      }, doApply);
+    } else {
+      doApply();
+    }
   }
 
   function setDocShareStatus(msg, kind) {
@@ -6154,6 +6653,7 @@
       _docShareState.groups = results[1] || [];
       renderDocShareCurrent();
       renderDocShareDropdown();
+      renderDocVisibilityGroupOptions();
     }).catch(function () { setDocShareStatus("共有設定の取得に失敗しました", "error"); });
   }
 
@@ -6643,6 +7143,17 @@
     initKnowledgeLibraryTab();
     initLogout();
 
+    // U層（LLM トークン使用量推計, migration 043）— SYSTEM_ADMIN メトリクスタブ +
+    // TEACHER 向け教材見積りポップオーバー。DI 注入して疎結合に起動する（G2-U）。
+    if (window.AdminLlmUsage) {
+      window.AdminLlmUsage.init({
+        apiFetch: apiFetch,
+        escHtml: escHtml,
+        onTabActivate: onTabActivate,
+        state: state,
+      });
+    }
+
     // 横断ユーティリティ層（Admin Copilot）— 統合 AI アシスタント。
     // 依存を注入して疎結合に起動し、各画面の状態・点灯先フックを登録する。
     if (window.AdminAssistant) {
@@ -6684,15 +7195,36 @@
 
     // --- UI アンカー（道案内の点灯先。論理ID → 実 DOM） ---
     // material_row / course_row は行単位解決: "material_row:m_123" のように param 付きで
-    // 呼ばれた場合はその行を返し、param が無ければ従来どおり tbody 全体にフォールバックする。
+    // 呼ばれた場合はその行を返し（同時に「直近に選ばれた行」として記憶する）、param が
+    // 無ければ従来どおり tbody 全体にフォールバックする。
+    // G1-1/G1-6: material_visibility_control / course_visibility_control / publish_button は
+    // かつてテーブル全体（tbody・table 要素）を返すだけで実コントロールを指していなかった。
+    // 開示範囲セクション・クイック公開トグルを実装したので、開いているモーダルの実コントロール
+    // → 直近に選んだ行のクイックボタン、の順に解決する（見つからなければ null=P8 fail-closed。
+    // 「この先はこの画面での操作のあとに案内します」に自然に縮退する）。
     AA.registerUiAnchors("materials", {
       upload_dropzone: function () { return document.getElementById("upload-zone"); },
       material_row: function (id) {
+        if (id) _matLastAnchoredMaterialId = id;
         return id
           ? document.querySelector('#materials-tbody tr[data-material-id="' + id + '"]') || document.getElementById("materials-tbody")
           : document.getElementById("materials-tbody");
       },
-      material_visibility_control: function () { return document.getElementById("materials-tbody"); }
+      material_visibility_control: function () { return document.getElementById("doc-visibility-select"); },
+      // U層（G2-U）: 教材行の解析コスト見積り導線。行 id 指定があればその行、無ければ先頭行。
+      material_estimate_button: function (id) {
+        if (id) _matLastAnchoredMaterialId = id;
+        var mid = id || _matLastAnchoredMaterialId;
+        return (mid && document.querySelector('#materials-tbody tr[data-material-id="' + mid + '"] .admin-estimate-btn'))
+          || document.querySelector('#materials-tbody .admin-estimate-btn');
+      },
+      // V層（G6）: 教材行の「版の管理」ボタン（共有版の発行・削除予約）。
+      shared_version_button: function (id) {
+        if (id) _matLastAnchoredMaterialId = id;
+        var mid = id || _matLastAnchoredMaterialId;
+        return (mid && document.querySelector('#materials-tbody tr[data-material-id="' + mid + '"] .admin-version-doc-btn'))
+          || document.querySelector('#materials-tbody .admin-version-doc-btn');
+      }
     });
     AA.registerUiAnchors("course-builder", {
       cb_material_select: function () { return document.getElementById("cb-material-select"); },
@@ -6703,18 +7235,57 @@
       assistant_open_button: function () { return document.getElementById("ls-ai-assistant-btn"); },
       "ls-rewrite-prompt": function () { return document.getElementById("ls-rewrite-prompt"); },
       ls_course_select: function () { return document.getElementById("ls-course-select"); },
-      ls_audio_generate: function () { return document.getElementById("ls-audio-all-btn"); }
+      ls_audio_generate: function () { return document.getElementById("ls-audio-all-btn"); },
+      // R層（G6）: 再構成レビューキュー直行ボタン（未レビュー件数バッジ付き）。
+      recon_review_button: function () { return document.querySelector("[data-ls-recon-review]"); },
+      // W層（G6）: 要素検討（深く検討）モーダルを開くボタン。claim/component/figure/equation の
+      // いずれかで最初に見つかったもの（画面上に複数あり得るため代表 1 件でよい）。
+      deliberation_open_button: function () {
+        return document.querySelector(".ls-claim-deliberate-btn")
+          || document.querySelector('[data-theory-action="deliberate"]')
+          || document.querySelector(".figure-deliberate-btn")
+          || document.querySelector(".eg-rev-deliberate-btn");
+      },
+      // W層（G6）: 深く検討モーダル内の同一性リンク確定/却下ボタン（候補があるときのみ出現）。
+      identity_link_confirm_button: function () { return document.querySelector("[data-identity-action]"); }
     });
     AA.registerUiAnchors("course-management", {
       course_list: function () { return document.getElementById("cm-table"); },
       course_row: function (id) {
+        if (id) _cmLastAnchoredCourseId = id;
         return id
           ? document.querySelector('#cm-tbody tr[data-course-id="' + id + '"]') || document.getElementById("cm-tbody")
           : document.getElementById("cm-tbody");
       },
-      course_visibility_control: function () { return document.getElementById("cm-tbody"); },
-      publish_button: function () { return document.getElementById("cm-table"); },
-      atlas_binding_button: function () { return document.getElementById("cm-atlas-binding-open"); }
+      course_visibility_control: function () {
+        var modalSelect = document.getElementById("cm-visibility-select");
+        if (modalSelect) return modalSelect;
+        return _cmLastAnchoredCourseId
+          ? document.querySelector('#cm-tbody tr[data-course-id="' + _cmLastAnchoredCourseId + '"] .cm-quick-publish-btn')
+          : null;
+      },
+      publish_button: function () {
+        var applyBtn = document.getElementById("cm-visibility-apply-btn");
+        if (applyBtn) return applyBtn;
+        return _cmLastAnchoredCourseId
+          ? document.querySelector('#cm-tbody tr[data-course-id="' + _cmLastAnchoredCourseId + '"] .cm-quick-publish-btn')
+          : null;
+      },
+      atlas_binding_button: function () { return document.getElementById("cm-atlas-binding-open"); },
+      // C層（G2-C）: コース行の共有ダッシュボードボタン。行 id 指定があればその行、無ければ先頭行。
+      sharing_dashboard_button: function (id) {
+        if (id) _cmLastAnchoredCourseId = id;
+        var cid = id || _cmLastAnchoredCourseId;
+        return (cid && document.querySelector('#cm-tbody tr[data-course-id="' + cid + '"] .cm-sharing-dashboard-btn'))
+          || document.querySelector('#cm-tbody .cm-sharing-dashboard-btn');
+      },
+      // V層（G6）: コース行の「版の管理」ボタン（共有版の発行・削除予約）。
+      shared_version_button: function (id) {
+        if (id) _cmLastAnchoredCourseId = id;
+        var cid = id || _cmLastAnchoredCourseId;
+        return (cid && document.querySelector('#cm-tbody tr[data-course-id="' + cid + '"] .cm-version-btn'))
+          || document.querySelector('#cm-tbody .cm-version-btn');
+      }
     });
     AA.registerUiAnchors("atlas", {
       atlas_generate_button: function () { return document.getElementById("atlas-generate"); }
@@ -6722,6 +7293,27 @@
     AA.registerUiAnchors("groups", {
       create_student_form: function () { return document.getElementById("tab-groups"); },
       create_teacher_form: function () { return document.getElementById("tab-groups"); }
+    });
+    // 知識ネットワークビジョン Phase B（G2-B）: 橋の候補セクション。
+    AA.registerUiAnchors("interest-dashboard", {
+      interest_dashboard_course_select: function () { return document.getElementById("interest-dashboard-course-select"); },
+      bridge_insights_section: function () { return document.getElementById("bridge-insights-section"); }
+    });
+    // U層（G2-U）: LLM使用量タブの主要コンテナ（SYSTEM_ADMIN 向けメトリクス）。
+    AA.registerUiAnchors("llm-usage", {
+      llm_usage_metrics: function () { return document.getElementById("llm-usage-metrics-body") || document.getElementById("tab-llm-usage"); }
+    });
+    // D層（G6）: 前提の地図タブの検証状態記帳フォーム・疑義の取り下げ/検証提案化ボタン。
+    // ノード詳細ペインに動的に描画されるため data 属性で解決する（doubt-atlas.js は非改変）。
+    AA.registerUiAnchors("doubt-atlas", {
+      doubt_verification_form_button: function () { return document.querySelector("[data-doubt-vstatus-form]"); },
+      doubt_challenge_withdraw_button: function () { return document.querySelector("[data-doubt-challenge-withdraw]"); },
+      doubt_challenge_proposal_button: function () { return document.querySelector("[data-doubt-challenge-proposal]"); }
+    });
+    // L層（G6）: ナレッジライブラリタブの分野・エントリ一覧、凍結ボタン。
+    AA.registerUiAnchors("knowledge-library", {
+      library_domain_list: function () { return document.getElementById("library-domains-list"); },
+      library_entry_freeze_button: function () { return document.getElementById("lib-detail-freeze"); }
     });
 
     // --- 画面コンテキスト（現在の選択・可視要素） ---

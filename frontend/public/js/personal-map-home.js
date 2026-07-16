@@ -72,6 +72,9 @@
     cache: null, // { promise, data } — open() のたびに1回だけ fetch。invalidate() で破棄
     lastFetchFailed: false, // 「読み込み中」と「取得失敗」の表示を区別するためだけの一時フラグ
     lastFocus: null,
+    // G3-P1: 「いまの地図」タブのコース絞り込み（既定=すべて。クライアント側フィルタのみ・
+    // 再 fetch しない。地図オーバーレイに依存しない導線として本パネルに持たせる）。
+    courseFilter: "",
   };
 
   // -------------------------------------------------------------------
@@ -136,6 +139,9 @@
 
   // 旅の経路探索（コース横断・正本API）。明示操作（「ここから旅に出る」ボタン）でのみ
   // fetch する。キャッシュしない（旅は毎回明示操作からやり直す。PN-5）。
+  // 404（対象なし）は従来どおり fail-closed で null に丸めるが、それ以外の非 ok /
+  // 通信例外は `_fetch_error` で区別する（renderJourneyArea が「空」と「取得できな
+  // かった」を分けて表示するため。G3）。
   function fetchJourney(nodeId) {
     const t = token();
     if (!t || !nodeId) return Promise.resolve(null);
@@ -144,10 +150,11 @@
       { headers: { Authorization: "Bearer " + t } }
     )
       .then((res) => {
-        if (!res.ok) throw new Error("journey " + res.status);
+        if (res.status === 404) return null;
+        if (!res.ok) return { _fetch_error: true };
         return res.json();
       })
-      .catch(() => null); // fail-closed: 404/失敗は静かに何も出さない
+      .catch(() => ({ _fetch_error: true }));
   }
 
   // -------------------------------------------------------------------
@@ -168,6 +175,43 @@
   function nodesByRecency(data) {
     const nodes = (data && data.nodes) || [];
     return nodes.slice().sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+  }
+
+  // G3-P1: ノードの provenance（course_id）に現れるコース一覧を出現順で返す（candidate は
+  // 数えない・件数は出さない。フィルタの選択肢を作るためだけの導出）。
+  function distinctCourseIds(data) {
+    const seen = {};
+    const order = [];
+    ((data && data.nodes) || []).forEach((n) => {
+      const cid = n.course_id || "";
+      if (!cid || seen[cid]) return;
+      seen[cid] = true;
+      order.push(cid);
+    });
+    return order;
+  }
+
+  // 「いまの地図」タブのみのコース絞り込み（クライアント側フィルタ・再 fetch しない）。
+  function filteredNodes(data) {
+    const nodes = nodesByRecency(data);
+    if (!state.courseFilter) return nodes;
+    return nodes.filter((n) => (n.course_id || "") === state.courseFilter);
+  }
+
+  // 複数コースの痕跡があるときだけ意味を持つため、コースが1つ以下なら何も描かない。
+  function renderCourseFilter(data) {
+    const ids = distinctCourseIds(data);
+    if (ids.length < 2) return "";
+    let html = '<div class="pm-home-course-filter">';
+    html += '<label class="pm-home-course-filter-label">コース</label>';
+    html += '<select class="pm-home-course-filter-select" data-pm-home-course-filter="1">';
+    html += '<option value=""' + (state.courseFilter === "" ? " selected" : "") + '>すべて</option>';
+    ids.forEach((cid) => {
+      const sel = state.courseFilter === cid ? " selected" : "";
+      html += '<option value="' + esc(cid) + '"' + sel + '>' + esc(courseTitleOf(data, cid)) + '</option>';
+    });
+    html += '</select></div>';
+    return html;
   }
 
   function renderFacts(facts) {
@@ -222,15 +266,21 @@
   }
 
   function renderNow(data) {
-    const nodes = nodesByRecency(data);
+    // G3-P1: コース絞り込み（地図オーバーレイに依存しない、コース単位の分岐を持つ導線）。
+    const filterHtml = renderCourseFilter(data);
+    const nodes = filteredNodes(data);
     if (!nodes.length) {
-      return '<p class="pm-home-empty">まだ痕跡がありません。学習の中で問いを残すと、ここに現れます。</p>';
+      const emptyMsg = state.courseFilter
+        ? "このコースに紐づく痕跡はまだありません。"
+        : "まだ痕跡がありません。学習の中で問いを残すと、ここに現れます。";
+      return filterHtml + '<p class="pm-home-empty">' + esc(emptyMsg) + "</p>";
     }
     const byId = {};
     nodes.forEach((n) => { byId[n.id] = n; });
     const current = nodes[0];
 
-    let html = '<div class="pm-home-current">';
+    let html = filterHtml;
+    html += '<div class="pm-home-current">';
     html += '<div class="pm-home-current-heading">現在地</div>';
     html += nodeRowHtml(current, data);
     html += "</div>";
@@ -355,8 +405,17 @@
   function renderJourneyArea(data) {
     const area = state.journeyAreaEl;
     if (!area) return;
+    if (data && data._fetch_error) {
+      // G3: 404/空（fail-closed）とは区別し、通信エラーで読み込めなかった事実だけを出す。
+      area.innerHTML =
+        '<button type="button" class="pm-home-journey-close" aria-label="閉じる">×</button>' +
+        '<div class="pm-home-journey-heading">旅の経路</div>' +
+        '<div class="pm-home-journey-fact">旅の経路を読み込めませんでした。</div>';
+      area.hidden = false;
+      return;
+    }
     if (!data || !Array.isArray(data.steps) || !data.steps.length) {
-      // steps が空/取得失敗なら何も出さない（fail-closed。エラーバナーは出さない）
+      // steps が空/対象なし（404）なら何も出さない（fail-closed。エラーバナーは出さない）
       area.hidden = true;
       area.innerHTML = "";
       return;
@@ -378,6 +437,10 @@
     if (data.frontier_note) {
       // 経路が途切れた事実をそのまま出す（警告色にしない。通常文体で表示する）
       html += '<div class="pm-home-journey-frontier">' + esc(data.frontier_note) + "</div>";
+      // G7-J: 行き止まりで終わらせず、別の問いから旅をやり直せる導線を出す（事実文のみ）。
+      html +=
+        '<button type="button" class="pm-home-journey-btn pm-home-journey-restart" ' +
+        'data-pm-home-journey-restart="1">別の問いから旅に出る</button>';
     }
     if (data.truncated) {
       html += '<div class="pm-home-journey-truncated">（途中まで）</div>';
@@ -456,10 +519,26 @@
       return;
     }
 
+    // G7-J: 旅の行き止まりから「問いからの旅」タブ（ノード一覧）へ戻り、別の問いを選び直せる。
+    const journeyRestart = e.target.closest("[data-pm-home-journey-restart]");
+    if (journeyRestart) {
+      closeJourneyArea();
+      switchTab("journeys");
+      return;
+    }
+
     const tabBtn = e.target.closest("[data-pm-home-tab]");
     if (tabBtn) {
       switchTab(tabBtn.getAttribute("data-pm-home-tab"));
     }
+  }
+
+  // G3-P1: コース絞り込み select の変更（クライアント側フィルタのみ・再 fetch しない）。
+  function onOverlayChange(e) {
+    const sel = e.target.closest("[data-pm-home-course-filter]");
+    if (!sel) return;
+    state.courseFilter = sel.value || "";
+    renderPanel();
   }
 
   function ensureOverlay() {
@@ -502,6 +581,7 @@
 
     overlay.appendChild(panel);
     overlay.addEventListener("click", onOverlayClick);
+    overlay.addEventListener("change", onOverlayChange);
     document.body.appendChild(overlay);
 
     state.overlayEl = overlay;
@@ -541,6 +621,7 @@
   function invalidate() {
     state.cache = null;
     state.activeTab = "now";
+    state.courseFilter = "";
     closeJourneyArea();
     if (state.overlayEl && !state.overlayEl.hidden) renderPanel();
   }

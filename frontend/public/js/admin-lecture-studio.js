@@ -96,6 +96,10 @@
     // 再構成ループ (R層): コーストピック右ペインの表示 ("evidence" | "stumble")
     rightPaneMode: "evidence",
     stumbleByDocument: {},
+    // 再構成ループ (R層, G4-R): レビューキュー直行ボタンの件数バッジ。
+    // null = 未取得（ボタンは件数無しで表示）。教員自身の作業件数であり、
+    // 学習者統計の k-匿名レンジ表示原則とは別物（内部運用カウント）。
+    reconReviewCount: null,
   };
 
   var lsPersonaOptions = [
@@ -272,6 +276,8 @@
         lsState.pipelineTask = null;
         lsState.scriptsLoaded = false;
         lsState.structureLoaded = false;
+        lsState.reconReviewCount = null;
+        lsState.stumbleByDocument = {};
         lsCloseAudioLangModal();
         // ボタンはチャンク読み込み完了後に lsRenderChunkList で制御するため
         // ここでは一旦無効化して読み込みを待つ
@@ -304,6 +310,8 @@
         // リセットし、音声言語モーダルを閉じる（§2-1）。
         lsState.scriptsLoaded = false;
         lsState.structureLoaded = false;
+        lsState.reconReviewCount = null;
+        lsState.stumbleByDocument = {};
         lsCloseAudioLangModal();
         if (audioAllBtn) audioAllBtn.disabled = true;
         settingsBtn.disabled = true;
@@ -793,6 +801,8 @@
         // Issue #232: コース構造とコンポーネントを非同期ロード
         lsLoadCourseStructure(courseId);
         lsLoadCourseComponents(courseId);
+        // 再構成ループ (R層, G4-R): レビューキュー直行ボタンの件数バッジを更新
+        lsRefreshReconReviewBadge(courseId);
       })
       .catch(function () {
         // 音声準備確認フロー (Issue #491): 読み込み失敗も「読み込み完了（結果は空）」
@@ -913,11 +923,13 @@
       '<div class="ls-doc-title">' + escHtml(s.title || "コース") + '</div>' +
       '<div class="ls-doc-meta">' + escHtml(statusLabel[s.course_status] || s.course_status || "") +
       (s.total_chunks > 0 ? ' (' + (s.generated_chunks || 0) + '/' + s.total_chunks + ')' : '') + '</div>' +
+      lsReconReviewBadgeHtml() +
       '</div>';
 
     if (!s.chapters || !s.chapters.length) {
       html += '<div style="padding:12px 16px;color:var(--color-text-tertiary);font-size:12px">章構造がありません。<br>コースビルダーでコース設計を完了してください。</div>';
       el.innerHTML = html;
+      lsBindReconReviewButtons();
       return;
     }
 
@@ -935,6 +947,7 @@
     });
 
     el.innerHTML = html;
+    lsBindReconReviewButtons();
 
     el.querySelectorAll(".ls-course-topic").forEach(function (item) {
       item.addEventListener("click", function () {
@@ -978,6 +991,7 @@
       '<div class="ls-doc-title">理論コンポーネント</div>' +
       '<div class="ls-doc-meta">' + escHtml(analysisLabel[data.analysis_status] || data.analysis_status || "") +
       ' / ' + (data.components ? data.components.length : 0) + '件</div>' +
+      lsReconReviewBadgeHtml() +
       '</div>';
 
     if (data.analysis_status !== "completed" && (!data.components || !data.components.length)) {
@@ -987,6 +1001,7 @@
          "Agent解析が未完了です。<br>パイプラインを実行してコンポーネントを生成してください。") +
         '</div>';
       el.innerHTML = html;
+      lsBindReconReviewButtons();
       return;
     }
 
@@ -1036,6 +1051,7 @@
     }
 
     el.innerHTML = html;
+    lsBindReconReviewButtons();
 
     el.querySelectorAll(".ls-component-item").forEach(function (item) {
       item.addEventListener("click", function () {
@@ -1773,16 +1789,163 @@
       .catch(function () { box.innerHTML = '<div class="ls-course-muted">読み込みに失敗しました。</div>'; });
   }
 
-  function lsPatchReconItem(itemId, status, box, claimId) {
-    apiFetch("/admin/reconstruction/items/" + encodeURIComponent(itemId), {
+  // 既存 PATCH API（教員向け status 遷移。削除 API は無い・retire のみ）の共通呼び出し。
+  // claim 別インライン確認パネル（lsToggleReviewQueueForClaim）とレビューキュー直行
+  // モーダル（G4-R, lsOpenReconReviewModal）の双方から再利用する。
+  function lsPatchReconItemStatus(itemId, status) {
+    return apiFetch("/admin/reconstruction/items/" + encodeURIComponent(itemId), {
       method: "PATCH",
       body: JSON.stringify({ status: status }),
-    })
-      .then(function (res) { return res.ok ? res.json() : null; })
+    }).then(function (res) { return res.ok ? res.json() : null; });
+  }
+
+  function lsPatchReconItem(itemId, status, box, claimId) {
+    lsPatchReconItemStatus(itemId, status)
       .then(function () {
         // review キューを再取得して反映
         box.hidden = true;
         lsToggleReviewQueueForClaim(claimId);
+      })
+      .catch(function () {});
+  }
+
+  // ── G4-R: R層レビューキューへの直行導線 ──────────────────────────────
+  // 原稿スタジオは「コース→トピック→右ペイン切替→claim カード展開」の5段階の奥に
+  // レビューキューが埋もれている（到達前にバッジも無い）。コース選択直後のコース/
+  // コンポーネントビュー付近に件数バッジ付きボタンを出し、押下でレビューキューを
+  // フラットに一覧するモーダルを開き、その場で confirm/retire まで行えるようにする。
+  // 既存の5段階の経路（lsToggleReviewQueueForClaim 経由）はそのまま残す。
+
+  function lsReconReviewBadgeHtml() {
+    var label = "再構成の確認";
+    if (typeof lsState.reconReviewCount === "number") {
+      label += "（要レビュー " + lsState.reconReviewCount + "件）";
+    }
+    return '<button type="button" class="ls-recon-review-btn" data-ls-recon-review="1">' +
+      escHtml(label) + '</button>';
+  }
+
+  function lsUpdateReconReviewBadgeText() {
+    var label = "再構成の確認";
+    if (typeof lsState.reconReviewCount === "number") {
+      label += "（要レビュー " + lsState.reconReviewCount + "件）";
+    }
+    document.querySelectorAll("[data-ls-recon-review]").forEach(function (btn) {
+      btn.textContent = label;
+    });
+  }
+
+  function lsBindReconReviewButtons() {
+    document.querySelectorAll("[data-ls-recon-review]").forEach(function (btn) {
+      btn.onclick = function () { lsOpenReconReviewModal(); };
+    });
+  }
+
+  // 件数バッジの母数: status='auto'（教員未確認）かつ rank_tier が付いた（人数 k=3
+  // 以上で疑わしさランクが算出された）item のみを「教員が今日やること」として数える。
+  // 「情報不足」（k未満）は教員の作業対象ではないため数えない。これは学習者統計の
+  // k-匿名レンジ表示（3-5/6-10/11+）とは別物の内部運用カウントであり、生数値のまま表示してよい
+  // （教員自身の作業件数。学習者個別データは一切含まない）。
+  function lsRefreshReconReviewBadge(courseId) {
+    var documentId = lsCurrentDocumentId() || lsCoursePrimaryDocumentId();
+    if (!documentId) {
+      lsState.reconReviewCount = null;
+      lsUpdateReconReviewBadgeText();
+      return;
+    }
+    apiFetch("/admin/reconstruction/items/review-queue?document_id=" + encodeURIComponent(documentId))
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        if (courseId && lsState.courseId !== courseId) return;
+        var items = (data && data.items) || [];
+        lsState.reconReviewCount = items.filter(function (it) {
+          return it.status === "auto" && it.rank_tier && it.rank_tier !== "情報不足";
+        }).length;
+        lsUpdateReconReviewBadgeText();
+      })
+      .catch(function () {
+        lsState.reconReviewCount = null;
+        lsUpdateReconReviewBadgeText();
+      });
+  }
+
+  function lsOpenReconReviewModal() {
+    var existing = document.getElementById("ls-recon-review-modal");
+    if (existing) existing.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = "ls-recon-review-modal";
+    overlay.className = "ls-settings-modal";
+    overlay.innerHTML =
+      '<div class="ls-settings-dialog ls-recon-review-dialog">' +
+        '<div class="ls-settings-head">' +
+          '<h3>再構成の確認</h3>' +
+          '<button id="ls-recon-review-close" class="lecture-chat-close" type="button">&times;</button>' +
+        '</div>' +
+        '<p class="ls-course-muted">疑わしさランク順の一覧です。教員は事後の監査役であり、' +
+          'AI が自動生成した問いをその場で追認（confirm）・配信停止（retire）できます。</p>' +
+        '<div id="ls-recon-review-list"><div class="ls-course-muted">読み込み中…</div></div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    function close() { overlay.remove(); }
+    document.getElementById("ls-recon-review-close").addEventListener("click", close);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
+
+    lsLoadReconReviewModalList();
+  }
+
+  function lsLoadReconReviewModalList() {
+    var list = document.getElementById("ls-recon-review-list");
+    if (!list) return;
+    var documentId = lsCurrentDocumentId() || lsCoursePrimaryDocumentId();
+    var qs = documentId ? "?document_id=" + encodeURIComponent(documentId) : "";
+    apiFetch("/admin/reconstruction/items/review-queue" + qs)
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        lsRenderReconReviewModalList((data && data.items) || []);
+      })
+      .catch(function () {
+        list.innerHTML = '<div class="ls-course-muted">読み込みに失敗しました。</div>';
+      });
+  }
+
+  function lsRenderReconReviewModalList(items) {
+    var list = document.getElementById("ls-recon-review-list");
+    if (!list) return;
+    if (!items.length) {
+      list.innerHTML = '<div class="ls-course-muted">現在レビュー対象の再構成課題はありません。</div>';
+      return;
+    }
+    list.innerHTML = items.map(function (it) {
+      var sig = it.signals || {};
+      return '<div class="ls-stumble-item" data-recon-item="' + escHtml(it.item_id) + '">' +
+        '<div class="ls-stumble-item-tier">' + escHtml(it.rank_tier || "") + ' · ' + escHtml(it.elicit_mode || "") +
+          (it.status ? ' · ' + escHtml(it.status) : '') + '</div>' +
+        '<div class="ls-stumble-item-prompt">' + escHtml(it.prompt || "") + '</div>' +
+        '<div class="ls-stumble-item-sig">回答 ' + escHtml(sig.responses || "-") +
+          ' / 誤り ' + escHtml(sig.mismatch_level || "-") +
+          (sig.verdict_dissent ? ' / 判定への異議あり' : '') + '</div>' +
+        '<div class="ls-stumble-item-actions">' +
+          '<button type="button" class="ls-stumble-mini" data-recon-item-status="retired" data-recon-item-id="' + escHtml(it.item_id) + '">配信停止（retire）</button>' +
+          '<button type="button" class="ls-stumble-mini" data-recon-item-status="confirmed" data-recon-item-id="' + escHtml(it.item_id) + '">追認（confirm）</button>' +
+        '</div>' +
+      '</div>';
+    }).join("");
+    list.querySelectorAll("[data-recon-item-id]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        lsPatchReconItemInModal(btn.getAttribute("data-recon-item-id"), btn.getAttribute("data-recon-item-status"));
+      });
+    });
+  }
+
+  function lsPatchReconItemInModal(itemId, status) {
+    lsPatchReconItemStatus(itemId, status)
+      .then(function () {
+        lsLoadReconReviewModalList();
+        lsRefreshReconReviewBadge();
+        // claim 別つまづきパネルのキャッシュも古くなるため破棄する（次回開いたときに再取得）
+        lsState.stumbleByDocument = {};
       })
       .catch(function () {});
   }

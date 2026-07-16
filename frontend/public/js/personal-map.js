@@ -584,6 +584,9 @@
   // 404・失敗は静かに何も出さない（fail-closed。カードを空のまま隠す）。
   // -------------------------------------------------------------------
 
+  // 404（対象なし）は従来どおり fail-closed で null に丸めるが、それ以外の非 ok /
+  // 通信例外は `_fetch_error` で区別する（renderJourneyCard が「空」と「取得できな
+  // かった」を分けて表示するため。G3）。
   function fetchJourney(courseId, nodeId) {
     const t = token();
     if (!t) return Promise.resolve(null);
@@ -596,10 +599,11 @@
       { headers: { Authorization: "Bearer " + t } }
     )
       .then((res) => {
-        if (!res.ok) throw new Error("journey " + res.status);
+        if (res.status === 404) return null;
+        if (!res.ok) return { _fetch_error: true };
         return res.json();
       })
-      .catch(() => null); // fail-closed: 404/失敗は静かに何も出さない
+      .catch(() => ({ _fetch_error: true }));
   }
 
   // コース横断版の旅（Phase P-2「コース横断の橋」）。本人が旅カードの静かな一行
@@ -613,10 +617,11 @@
       { headers: { Authorization: "Bearer " + t } }
     )
       .then((res) => {
-        if (!res.ok) throw new Error("cross-course journey " + res.status);
+        if (res.status === 404) return null;
+        if (!res.ok) return { _fetch_error: true };
         return res.json();
       })
-      .catch(() => null); // fail-closed: 404/失敗は静かに何も出さない
+      .catch(() => ({ _fetch_error: true }));
   }
 
   // ref.kind === "atlas_node" のときだけリンク化する（§9）。既存の
@@ -638,8 +643,31 @@
     const card = state.journeyCardEl;
     if (!card) return;
     card.innerHTML = "";
+    if (data && data._fetch_error) {
+      // G3: 404/空（fail-closed）とは区別し、通信エラーで読み込めなかった事実だけを出す。
+      const errClose = document.createElement("button");
+      errClose.type = "button";
+      errClose.className = "personal-map-journey-close";
+      errClose.setAttribute("aria-label", "閉じる");
+      errClose.textContent = "×";
+      errClose.addEventListener("click", closeJourneyCard);
+      card.appendChild(errClose);
+
+      const errHeading = document.createElement("div");
+      errHeading.className = "personal-map-journey-heading";
+      errHeading.textContent = "旅の経路";
+      card.appendChild(errHeading);
+
+      const errText = document.createElement("div");
+      errText.className = "personal-map-journey-fact";
+      errText.textContent = "旅の経路を読み込めませんでした。";
+      card.appendChild(errText);
+
+      card.hidden = false;
+      return;
+    }
     if (!data || !Array.isArray(data.steps) || !data.steps.length) {
-      // steps が空/取得失敗なら何も出さない（fail-closed。エラーバナーは出さない）
+      // steps が空/対象なし（404）なら何も出さない（fail-closed。エラーバナーは出さない）
       card.hidden = true;
       return;
     }
@@ -696,6 +724,19 @@
       frontier.className = "personal-map-journey-frontier";
       frontier.textContent = data.frontier_note;
       card.appendChild(frontier);
+
+      // G7-J: 行き止まりで終わらせず、別の問いから旅をやり直せる導線を出す（事実文のみ）。
+      const restartBtn = document.createElement("button");
+      restartBtn.type = "button";
+      restartBtn.className = "personal-map-journey-btn";
+      restartBtn.textContent = "別の問いから旅に出る";
+      restartBtn.addEventListener("click", () => {
+        closeJourneyCard();
+        if (state.trayEl && !state.trayEl.hidden && typeof state.trayEl.scrollIntoView === "function") {
+          state.trayEl.scrollIntoView({ block: "nearest" });
+        }
+      });
+      card.appendChild(restartBtn);
     }
 
     if (data.truncated) {

@@ -577,9 +577,24 @@ body {
 /* ── Input area ─────────────────────────────────────────────────── */
 .ia {
   display: flex;
+  align-items: center;
   gap: 8px;
   padding-top: 10px;
   border-top: 0.5px solid var(--color-border-tertiary);
+}
+
+/* G4-L: レクチャートグルの無効理由をボタン近傍にインライン表示する */
+.lecture-toggle-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.lecture-toggle-hint {
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
 }
 
 .ia input {
@@ -1030,6 +1045,43 @@ body {
   font-size: 14px;
   text-align: center;
   line-height: 1.6;
+}
+
+/* G4-D: 受講可能コースの description をここでも表示する（プルダウンの title だけでは
+   ホバーしないと気づけないため）。 */
+.no-course-empty {
+  height: 100%;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  gap: 12px;
+}
+.no-course-list {
+  width: 100%;
+  max-width: 380px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.no-course-item {
+  border: 0.5px solid var(--color-border-secondary);
+  border-radius: 8px;
+  padding: 10px 12px;
+  text-align: left;
+}
+.no-course-item-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.no-course-item-desc {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  line-height: 1.5;
 }
 
 /* Legacy course-select (sidebar) */
@@ -1730,6 +1782,75 @@ body {
 .status-failed {
   background: #fcebeb;
   color: var(--color-text-danger);
+}
+
+/* G1-1/G5-2: コース/教材の開示範囲バッジ（.admin-status と併用）。 */
+.status-visibility-public {
+  background: var(--color-background-success);
+  color: var(--color-text-success);
+}
+
+.status-visibility-group {
+  background: var(--color-background-info);
+  color: var(--color-text-info);
+}
+
+.status-visibility-private {
+  background: #f0f0f2;
+  color: var(--color-text-tertiary);
+}
+
+/* U層（LLM使用量推計, migration 043）— TEACHER 向け解析コスト見積りポップオーバー（G2-U）。
+   レンジのみ・金額なしの表示専用スタイル（数値は本文で描画、ここは箱の見た目のみ）。 */
+.llm-usage-estimate-popover {
+  z-index: 9999;
+  width: 280px;
+  max-width: calc(100vw - 16px);
+  background: var(--color-background-primary);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  padding: 12px 14px;
+  font-size: 12.5px;
+  color: var(--color-text-secondary);
+}
+
+.llm-usage-estimate-title {
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--color-text-primary);
+  margin-bottom: 6px;
+}
+
+.llm-usage-estimate-total {
+  margin-bottom: 6px;
+}
+
+.llm-usage-estimate-list {
+  margin: 0 0 6px;
+  padding-left: 18px;
+  line-height: 1.6;
+}
+
+.llm-usage-estimate-note {
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.llm-usage-estimate-footnote {
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+.llm-usage-table th,
+.llm-usage-table td {
+  text-align: right;
+}
+
+.llm-usage-table th:first-child,
+.llm-usage-table td:first-child {
+  text-align: left;
 }
 
 .admin-pdf-reupload-btn {
@@ -5420,6 +5541,8 @@ body {
 
 /* 進捗タブの再訪推奨ドット */
 .lx-tab-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--lx-revisit); margin-left:6px; vertical-align:middle; }
+/* G4-T: 違和感/帰属候補ダイジェストの気づきドット（再訪推奨ドットと区別できる色） */
+.lx-tab-dot-hint { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--lx-kind-q); margin-left:6px; vertical-align:middle; }
 
 /* --- 出典タブ：全体格バナー --- */
 .lx-overall { display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:9px; margin-bottom:18px; font-size:13px; line-height:1.5; }
@@ -5499,6 +5622,8 @@ body {
 .lx-revisit .k { font-size:11px; font-weight:700; color:var(--lx-revisit); letter-spacing:.04em; }
 .lx-revisit .h { font-size:13.5px; font-weight:600; margin:3px 0 2px; }
 .lx-revisit .s { font-size:12px; color:var(--lx-ink-soft); }
+/* G3: 違和感/帰属候補ダイジェストの「候補ゼロ」「取得できなかった」を示す一行事実文 */
+.lx-digest-empty { font-size:12px; color:var(--lx-ink-faint); margin:0 0 12px; line-height:1.5; }
 .lx-filters { display:flex; gap:8px; margin:0 0 14px; flex-wrap:wrap; }
 .lx-filter { appearance:none; border:1px solid var(--lx-line); background:#fff; cursor:pointer; border-radius:999px; padding:5px 11px; font-size:12px; color:var(--lx-ink-soft); font-family:inherit; display:inline-flex; align-items:center; gap:6px; }
 .lx-filter[aria-pressed="true"] { border-color:var(--lx-brand); background:var(--lx-brand-soft); color:var(--lx-brand); font-weight:600; }
@@ -6182,6 +6307,31 @@ body {
   font-size: 12px; background: var(--color-background-primary, #fff); color: var(--color-text-primary, #1f2328);
 }
 
+/* G4-R: R層レビューキューへの直行導線（コース/コンポーネントビュー付近のバッジボタン
+   + フラットな一覧モーダル）。モーダル自体は既存 .ls-settings-modal / .ls-settings-dialog
+   を再利用し、幅だけをレビューキュー向けに広げる。 */
+.ls-recon-review-btn {
+  justify-self: start;
+  margin-top: 4px;
+  padding: 3px 10px;
+  border: 1px solid var(--lx-line, #d0d7de);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  background: var(--color-background-secondary, #f6f8fa);
+  color: var(--color-text-primary, #1f2328);
+}
+.ls-recon-review-btn:hover { background: var(--color-background-tertiary, #eaeef2); }
+.ls-recon-review-dialog { width: min(640px, calc(100vw - 32px)); }
+#ls-recon-review-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 60vh;
+  overflow-y: auto;
+  margin-top: 8px;
+}
+
 /* ===========================================================================
  * W層（要素検討ワークスペース）— 面③ 対話的検討（Phase 2）
  * 識別子は deliberation- プレフィックス（Field Atlas / Doubt Atlas と非衝突）。
@@ -6373,6 +6523,23 @@ body {
 }
 .deliberation-chat-send[disabled] { opacity: .6; cursor: default; }
 
+/* Phase W-β: 同一性リンク（identity-links）・Phase S 標準化度セクション。
+   カード内の状態・本文・理由・確定操作は既存の deliberation-annotation-* を
+   再利用し（G2-W）、行そのものの枠だけをここで定義する。 */
+.deliberation-identity-link-row {
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: var(--color-background-primary, #fff);
+}
+.deliberation-identity-empty,
+.deliberation-identity-hidden {
+  font-size: 12px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  margin: 4px 0;
+}
+
 /* ===================================================================
    個人知識ネットワーク（Phase P-3）— personal-map.js 追加分
    本人による訂正（提案書 §6）: 「地図には反映しない」/「地図に戻す」/
@@ -6537,6 +6704,27 @@ body {
   color: var(--color-text-secondary, #6e6e73);
   margin: 4px 0 8px;
 }
+
+/* G3-P1: 「いまの地図」タブのコース絞り込み（複数コースに痕跡があるときだけ表示） */
+.pm-home-course-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.pm-home-course-filter-label {
+  font-size: 11px;
+  color: var(--color-text-tertiary, #aeaeb2);
+}
+.pm-home-course-filter-select {
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--color-text-primary, #1d1d1f);
+  background: var(--color-background-primary, #fff);
+  border: 0.5px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 7px;
+  padding: 4px 8px;
+}
 .pm-home-related { margin-top: 16px; }
 .pm-home-related-sub {
   font-size: 11px;
@@ -6658,3 +6846,5 @@ body {
   font-size: 11px;
   color: var(--color-text-tertiary, #aeaeb2);
 }
+/* G7-J: 旅の行き止まり（frontier_note）から、別の問いで旅をやり直す導線 */
+.pm-home-journey-restart { margin-top: 8px; }

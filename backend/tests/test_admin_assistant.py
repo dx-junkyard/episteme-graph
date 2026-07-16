@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -55,6 +56,27 @@ _ADMIN_JS = (ROOT / "frontend" / "public" / "js" / "admin-assistant.js").read_te
 _ADMIN_JS_MAIN = (ROOT / "frontend" / "public" / "js" / "admin.js").read_text(encoding="utf-8")
 
 
+def _extract_js_function(src: str, fn_name: str) -> str:
+    """``function fn_name(`` から対応する閉じ ``}`` までを波括弧カウントで切り出す。
+
+    ``extract_function_source``（guardrail_helpers）は Python の ``def`` 構文専用のため、
+    ES5 の ``function foo() {...}`` 宣言には使えない。admin-assistant.js は ES5 なので
+    このテストファイル内だけの素朴な波括弧カウント版を使う。
+    """
+    marker = f"function {fn_name}("
+    start = src.index(marker)
+    brace_start = src.index("{", start)
+    depth = 0
+    for i in range(brace_start, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : i + 1]
+    raise ValueError(f"unbalanced braces while extracting function {fn_name}")
+
+
 # ===========================================================================
 # Group A-1: Capability Registry（P1 / P2）
 # ===========================================================================
@@ -75,9 +97,53 @@ class TestRegistry:
         assert "users.create_teacher" not in teacher_ids
         assert "system.view_stats" not in teacher_ids
         assert "system.view_error_logs" not in teacher_ids
+        assert "llm_usage.view_metrics" not in teacher_ids  # G6: SYSTEM_ADMIN専用
         # 教員が使える安全な操作は含まれる
         assert "materials.upload" in teacher_ids
         assert "course.publish" in teacher_ids
+
+    def test_known_screens_include_g6_new_tabs(self):
+        """G6是正: knowledge-library / llm-usage は実装済みタブなのに未登録で
+        「構造的に案内不能」だった（vision_ux_gap_survey_2026-07.md G6）。"""
+        assert "knowledge-library" in caps.KNOWN_SCREENS
+        assert "llm-usage" in caps.KNOWN_SCREENS
+
+    def test_g6_new_capabilities_registered(self):
+        """G6是正: C/D/R/W/L/V/U層・Phase Bの段階登録（新規11件）。"""
+        expected = {
+            "doubt.record_verification_status": ("doubt-atlas", "TEACHER"),
+            "doubt.manage_challenge": ("doubt-atlas", "TEACHER"),
+            "reconstruction.review_queue": ("lecture-studio", "TEACHER"),
+            "deliberation.identity_links_standardization": ("lecture-studio", "TEACHER"),
+            "library.view_and_freeze": ("knowledge-library", "TEACHER"),
+            "materials.manage_shared_version": ("materials", "TEACHER"),
+            "course.manage_shared_version": ("course-management", "TEACHER"),
+            "llm_usage.view_metrics": ("llm-usage", "SYSTEM_ADMIN"),
+            "materials.estimate_cost": ("materials", "TEACHER"),
+            "interest_dashboard.bridge_insights": ("interest-dashboard", "TEACHER"),
+            "course.sharing_dashboard": ("course-management", "TEACHER"),
+        }
+        for cap_id, (screen, role) in expected.items():
+            cap = caps.get_capability(cap_id)
+            assert cap is not None, f"{cap_id} が未登録"
+            assert cap.screen == screen, f"{cap_id} の screen が不一致: {cap.screen}"
+            assert cap.required_role == role, f"{cap_id} の required_role が不一致: {cap.required_role}"
+            assert cap.kind == "guidance_only", f"{cap_id} は guidance_only であるべき"
+            assert cap.howto_doc, f"{cap_id} に howto_doc が無い"
+
+    def test_g6_capabilities_reachable_only_by_declared_role(self):
+        assert caps.can_access("llm_usage.view_metrics", "TEACHER") is False
+        assert caps.can_access("llm_usage.view_metrics", "SYSTEM_ADMIN") is True
+        assert caps.can_access("doubt.record_verification_status", "TEACHER") is True
+        assert caps.can_access("doubt.record_verification_status", "STUDENT") is False
+
+    def test_course_publish_api_points_to_real_visibility_endpoint(self):
+        """G1-6是正: `PUT .../publish` は撤去済み（test_publish_endpoint_removed）。
+        capability の api メタデータが存在しないエンドポイントを指してはいけない。"""
+        cap = caps.get_capability("course.publish")
+        assert cap.api is not None
+        assert cap.api["path"] == "/api/admin/courses/{course_id}/visibility"
+        assert "/publish" not in cap.api["path"]
 
     def test_system_admin_reaches_everything(self):
         admin_ids = {c.id for c in caps.capabilities_for("SYSTEM_ADMIN")}
@@ -214,6 +280,26 @@ class TestActionLogic:
         before = {"visibility": "private", "group_id": None, "is_published": False, "is_template": False}
         with pytest.raises(ActionArgError):
             act._target_state(before, {"visibility": "everyone"})
+
+    def test_visibility_public_to_private_forces_unpublished(self):
+        """G1-6是正の回帰テスト: admin.py::update_course_visibility は
+        `is_published = (visibility = 'public')` を常に強制する（G1-1 是正）。
+        Copilot 経由の代行がこれと異なる状態（is_published を旧値のまま残す）を
+        作っていたバグを固定する。"""
+        act = CourseSetVisibilityAction()
+        before = {"visibility": "public", "group_id": None, "is_published": True, "is_template": True}
+        after = act._target_state(before, {"visibility": "private"})
+        assert after["visibility"] == "private"
+        assert after["is_published"] is False
+        # is_template は「作られたことがあるか」の意図を保つため離脱時にリセットしない
+        assert after["is_template"] is True
+
+    def test_visibility_public_to_group_forces_unpublished(self):
+        act = CourseSetVisibilityAction()
+        before = {"visibility": "public", "group_id": None, "is_published": True, "is_template": True}
+        after = act._target_state(before, {"visibility": "group", "group_id": "g1"})
+        assert after["is_published"] is False
+        assert after["group_id"] == "g1"
 
     def test_publish_capability_id(self):
         assert CoursePublishAction.capability_id == "course.publish"
@@ -511,6 +597,24 @@ class TestActionAPI:
         assert store.courses["c1"]["is_published"] is False
         assert ("reverted" in [e[1] for e in store.events])         # P5 監査
 
+    def test_set_visibility_public_to_private_via_api_forces_unpublished(self, api):
+        """G1-6 是正の回帰テスト（API 経由）: いったん public にしたコースを private へ
+        戻すと is_published が False になる（admin.py の visibility エンドポイントと
+        同一意味論。旧実装のバグでは is_published=True のまま残っていた）。"""
+        client, store, _mp, _svc = api
+        store.courses["c1"] = {"visibility": "public", "group_id": None,
+                                "is_published": True, "is_template": True}
+        r = client.post("/api/admin/assistant/actions",
+                        json={"capability_id": "course.set_visibility",
+                              "target": {"type": "course", "id": "c1"},
+                              "args": {"visibility": "private"}},
+                        headers=_headers("TEACHER"))
+        assert r.status_code == 200
+        data = r.json()
+        assert data["after"]["visibility"] == "private"
+        assert data["after"]["is_published"] is False
+        assert store.courses["c1"]["is_published"] is False
+
     def test_publish_confirm_gate_then_apply(self, api):
         client, store, _mp, _svc = api
         self._seed_course(store)
@@ -575,3 +679,77 @@ class TestActionAPI:
                         json={"capability_id": "nope.nope", "target": {}},
                         headers=_headers("TEACHER"))
         assert r.status_code == 404
+
+    def test_list_actions_returns_reversible_status_for_undo_reconstruction(self, api):
+        """Copilot Undo 永続化（低優先度課題）: GET /actions が admin-assistant.js の
+        loadServerActionHistory() が actionStack を再構成するのに必要な
+        reversible / status / capability_id を返すこと。"""
+        client, store, _mp, _svc = api
+        self._seed_course(store)
+        r = client.post("/api/admin/assistant/actions",
+                        json={"capability_id": "course.set_visibility",
+                              "target": {"type": "course", "id": "c1"},
+                              "args": {"visibility": "public"}},
+                        headers=_headers("TEACHER"))
+        assert r.status_code == 200
+        r2 = client.get("/api/admin/assistant/actions", headers=_headers("TEACHER"))
+        assert r2.status_code == 200
+        rows = r2.json()
+        assert len(rows) == 1
+        assert rows[0]["capability_id"] == "course.set_visibility"
+        assert rows[0]["reversible"] is True
+        assert rows[0]["status"] == "applied"
+        assert "action_id" in rows[0]
+
+    def test_list_actions_forbidden_for_student(self, api):
+        client, _store, _mp, _svc = api
+        r = client.get("/api/admin/assistant/actions", headers=_headers("STUDENT"))
+        assert r.status_code == 403
+
+
+# ===========================================================================
+# Group A-7: Copilot Undo の永続化（低優先度課題）— フロント静的配線の検証
+#
+# 「Admin Copilot の Undo はメモリ内 actionStack のみで、サーバ側 assistant_actions
+# 履歴はリロード後に一切見えない」（vision_ux_gap_survey_2026-07.md §2 G2 末尾）を
+# 是正する。init() 時に GET /admin/assistant/actions からまだ取り消し可能な行だけを
+# 積み直す。JS 実行はしない静的アサーションのみ（既存 TestFrontendIntegration 方式）。
+# ===========================================================================
+
+
+class TestUndoPersistenceFrontend:
+    def test_load_server_action_history_function_exists(self):
+        assert "function loadServerActionHistory" in _ADMIN_JS
+
+    def test_init_calls_load_server_action_history(self):
+        init_src = _extract_js_function(_ADMIN_JS, "init")
+        assert "loadServerActionHistory()" in init_src
+
+    def test_history_endpoint_is_actions_list(self):
+        body = _extract_js_function(_ADMIN_JS, "loadServerActionHistory")
+        assert '"/admin/assistant/actions"' in body or "'/admin/assistant/actions'" in body
+
+    def test_only_reversible_and_applied_are_reconstructed(self):
+        """revert 済み・不可逆（reversible=false）は積まない。"""
+        body = _extract_js_function(_ADMIN_JS, "loadServerActionHistory")
+        assert "reversible" in body
+        assert '"applied"' in body or "'applied'" in body
+
+    def test_reconstructed_entries_are_kind_server(self):
+        body = _extract_js_function(_ADMIN_JS, "loadServerActionHistory")
+        assert '"server"' in body or "'server'" in body
+
+    def test_fails_closed_on_fetch_error(self):
+        """取得失敗時は静かに空スタックのまま（既存 actionStack を壊さない）。"""
+        body = _extract_js_function(_ADMIN_JS, "loadServerActionHistory")
+        assert ".catch(" in body
+
+    def test_admin_assistant_js_is_es5(self):
+        # admin-assistant.js は既存コードが ES5 のため、追加分も規約を維持する
+        # （既存の renderMarkdown は正規表現中のバッククォートであってテンプレート
+        # リテラルではないため、追加した関数だけを対象に確認する）。
+        added = _extract_js_function(_ADMIN_JS, "loadServerActionHistory")
+        assert "=>" not in added
+        assert re.search(r"\bconst\s", added) is None
+        assert re.search(r"\blet\s", added) is None
+        assert "`" not in added

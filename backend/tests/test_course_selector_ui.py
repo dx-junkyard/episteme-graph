@@ -173,27 +173,55 @@ class TestAppJSCourseSelector:
         """change イベントで "enroll:" プレフィックスを判定していること。"""
         assert 'val.indexOf("enroll:") === 0' in self.js
 
-    def test_change_handler_calls_enroll_course(self):
-        """enroll: プレフィックスの場合に enrollCourse を呼び出すこと。"""
-        handler_match = re.search(
-            r'addEventListener\("change".*?\n(.*?)\}\);',
+    def _init_course_select_handler_body(self):
+        """initCourseSelectHandler 関数全体を切り出す（change ハンドラは内部に
+        openEnrollConfirm のネストしたコールバックを持つため、単純な
+        `\\}\\);` 終端の非貪欲マッチでは enrollCourse 呼び出し前に打ち切れてしまう。
+        関数全体の境界（2-space インデントの閉じ括弧）で切り出す。"""
+        match = re.search(
+            r"function initCourseSelectHandler\(\).*?\n  \}\n",
             self.js,
             re.DOTALL,
         )
-        assert handler_match
-        body = handler_match.group(1)
+        assert match, "initCourseSelectHandler 関数が見つかりません"
+        return match.group(0)
+
+    def test_change_handler_calls_enroll_course(self):
+        """enroll: プレフィックスの場合、確認モーダルを経て enrollCourse を呼び出すこと
+        (G1-5: 確認なし即時 enroll をやめる)。"""
+        body = self._init_course_select_handler_body()
         assert "enrollCourse" in body
 
     def test_change_handler_calls_switch_course(self):
         """マイコース選択時に switchCourse を呼び出すこと。"""
-        handler_match = re.search(
-            r'addEventListener\("change".*?\n(.*?)\}\);',
+        body = self._init_course_select_handler_body()
+        assert "switchCourse" in body
+
+    def test_change_handler_confirms_before_enroll(self):
+        """G1-5: enroll: 選択時に確認モーダル (openEnrollConfirm) を経由すること
+        （確認なしの即時 enrollCourse 呼び出しに戻さない）。"""
+        body = self._init_course_select_handler_body()
+        assert "openEnrollConfirm" in body
+        # enrollCourse の呼び出しは openEnrollConfirm のコールバック内（confirmed 分岐）にある。
+        assert body.index("openEnrollConfirm") < body.index("enrollCourse")
+
+    def test_change_handler_resets_select_on_cancel(self):
+        """G1-5: キャンセル時は select を元の値に戻すこと。"""
+        body = self._init_course_select_handler_body()
+        assert "select.value = prevVal" in body
+
+    def test_enroll_confirm_shows_title_and_description(self):
+        """openEnrollConfirm がコースのタイトルと description を提示すること。"""
+        match = re.search(
+            r"function openEnrollConfirm\(.*?\n  \}\n",
             self.js,
             re.DOTALL,
         )
-        assert handler_match
-        body = handler_match.group(1)
-        assert "switchCourse" in body
+        assert match, "openEnrollConfirm 関数が見つかりません"
+        body = match.group(0)
+        assert "course.title" in body
+        assert "course.description" in body
+        assert "キャンセル" in body
 
     def test_switch_course_clears_state(self):
         """switchCourse がチャット履歴とトピックIDをクリアすること。"""

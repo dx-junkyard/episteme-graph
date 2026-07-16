@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# core/document_pipeline/tex_archive.py 等が src/ 配下の episteme_graph を import する。
+# src/tests/ 側テストの収集順に依存せず import できるよう、ここで決定論的にパスへ載せる。
+_SRC_DIR = Path(__file__).resolve().parents[2] / "src"
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+
 import pytest
 
 from core.config import Settings, get_settings

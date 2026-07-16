@@ -383,6 +383,39 @@
     }).then(function () { busy = false; refreshUndo(); });
   }
 
+  // G2 是正: サーバ側 assistant_actions 履歴（GET /admin/assistant/actions）から
+  // actionStack を再構成する。従来 actionStack はメモリ内のみで、ページを再読み込み
+  // すると「戻す」が常に空になっていた（P3「before スナップショットで取り消し可能」の
+  // 約束がセッション内でしか成立していなかった）。まだ取り消し可能（reversible かつ
+  // status='applied'）な行だけを、古い順に積み直す（最新のものが「戻す」の対象になる）。
+  // 取得に失敗しても静かに空スタックのまま（fail-closed。ローカル L1 Undo はセッション
+  // 限りのまま変更しない）。
+  function loadServerActionHistory() {
+    apiFetch("/admin/assistant/actions").then(function (res) {
+      return res.ok ? res.json() : [];
+    }).then(function (rows) {
+      if (!rows || !rows.length) return;
+      var revertible = [];
+      for (var i = 0; i < rows.length; i++) {
+        var r = rows[i];
+        if (r && r.reversible && r.status === "applied") revertible.push(r);
+      }
+      // サーバは新しい順に返すため、古い順に積み直す（最新が一番上=次の Undo 対象）。
+      revertible.reverse();
+      for (var j = 0; j < revertible.length; j++) {
+        actionStack.push({
+          kind: "server",
+          // AssistantActionSummary には人間向けタイトルが無いため capability_id を使う
+          // （plan.title || plan.capability_id という既存のフォールバック方針と同じ, P4）。
+          label: revertible[j].capability_id,
+          reversible: true,
+          action_id: revertible[j].action_id
+        });
+      }
+      refreshUndo();
+    }).catch(function () { /* fail-closed: 履歴なしのまま続行 */ });
+  }
+
   // -------------------------------------------------------------------------
   // 道案内（runLocatePlan + スポットライト） — 変更を伴わない（P8）
   // -------------------------------------------------------------------------
@@ -465,6 +498,7 @@
 
     buildPanel();
     buildToggleButton();
+    loadServerActionHistory();
 
     initialized = true;
   }

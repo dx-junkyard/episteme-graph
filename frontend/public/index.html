@@ -84,7 +84,10 @@
         </div>
       </div>
       <div class="ia">
-        <button class="lecture-toggle-btn" id="lecture-toggle" title="レクチャーモード切替">&#127897; レクチャー</button>
+        <div class="lecture-toggle-wrap">
+          <button class="lecture-toggle-btn" id="lecture-toggle" title="レクチャーモード切替">&#127897; レクチャー</button>
+          <span class="lecture-toggle-hint" id="lecture-toggle-hint" hidden></span>
+        </div>
         <input type="text" id="chat-input" placeholder="質問を入力してください…（Enterで送信）">
         <button id="send-btn" title="質問する（回答が教材由来か自動で判定し、出典タブと回答欄に表示します）">質問</button>
         <button id="voice-mode-btn" class="voice-mode-btn" title="気軽に話せる先生とハンズフリーで会話">🤖</button>

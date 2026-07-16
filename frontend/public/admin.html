@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Episteme Graph — 管理画面</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-  <link rel="stylesheet" href="/css/styles.css?v=copilot-fab-20260716-1">
+  <link rel="stylesheet" href="/css/styles.css?v=gap-fixes-20260716-2">
   <script defer src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
 </head>
 <body>
@@ -76,6 +76,7 @@
         <div class="admin-tab-menu" id="admin-tab-menu-ops" role="menu">
           <button class="admin-tab" data-tab="groups" role="menuitem">グループ管理</button>
           <button class="admin-tab" data-tab="system-stats" id="tab-btn-system-stats" role="menuitem" style="display:none">システム統計</button>
+          <button class="admin-tab" data-tab="llm-usage" id="tab-btn-llm-usage" role="menuitem" style="display:none">LLM使用量</button>
           <button class="admin-tab" data-tab="error-analysis" id="tab-btn-error-analysis" role="menuitem" style="display:none">エラー解析</button>
         </div>
       </div>
@@ -380,11 +381,12 @@
               <th>タイトル</th>
               <th>役割</th>
               <th>共有グループ</th>
+              <th>公開・地図</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody id="cm-tbody">
-            <tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">読み込み中...</td></tr>
+            <tr><td colspan="5" style="text-align:center;color:var(--color-text-tertiary)">読み込み中...</td></tr>
           </tbody>
         </table>
       </div>
@@ -783,6 +785,20 @@
           <div style="color:var(--color-text-tertiary)">コースを選択してください</div>
         </div>
       </div>
+
+      <!-- 知識ネットワークビジョン Phase B — 橋の候補（学習者の重ね合わせ、教員向け唯一の窓口）。
+           選択中のコース（#interest-dashboard-course-select）と連動する。k-匿名集約はサーバ側。 -->
+      <div class="admin-section" id="bridge-insights-section">
+        <h3 class="admin-section-title" style="margin-bottom:0">橋の候補（学習者の重ね合わせ）</h3>
+        <p style="font-size:12px;color:var(--color-text-tertiary);margin:8px 0 12px">
+          複数の学習者が、自分の引っかかり（tension）を同じ構造要素に自分で結び付けた場合に、
+          その要素を候補として表示します（k-匿名集約・3名以上のみ・人数はレンジ表示）。
+          個人は特定できず、ドメイン知識としての自動採用は行いません。評価利用は禁止です。
+        </p>
+        <div id="bridge-insights-body">
+          <div style="color:var(--color-text-tertiary)">コースを選択してください</div>
+        </div>
+      </div>
     </div>
 
     <!-- System Stats tab (Issue #144, SYSTEM_ADMIN only) -->
@@ -821,6 +837,10 @@
         </table>
       </div>
     </div>
+
+    <!-- U層（LLM トークン使用量推計, migration 043）— SYSTEM_ADMIN 向けメトリクス。
+         中身は admin-llm-usage.js が描画する（doubt-atlas.js と同型の空パネル方式）。 -->
+    <div class="admin-panel" id="tab-llm-usage"></div>
   </div>
 
   <!-- Export bundle modal -->
@@ -857,20 +877,22 @@
 
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
   <!-- D層（Doubt Layer）管理 UI — 「分野の地図」(atlas-*) とは別機能 -->
-  <script src="/js/doubt-atlas.js?v=doubt-layer-20260707-1"></script>
+  <script src="/js/doubt-atlas.js?v=gap-fixes-20260716-1"></script>
   <!-- Field Atlas 骨格エディタ改善: ビジュアルプレビュー + AIアシスト編集 -->
   <script src="/js/atlas-draft-preview.js?v=atlas-editor-20260707-1"></script>
   <script src="/js/atlas-assist-panel.js?v=atlas-editor-20260707-1"></script>
   <!-- 横断ユーティリティ層（Admin Copilot）— 統合 AI アシスタント -->
-  <script src="/js/admin-assistant.js?v=copilot-fab-20260716-1"></script>
+  <script src="/js/admin-assistant.js?v=gap-fixes-20260716-3"></script>
   <!-- G層（ガイダンス層）— 状態導出型 Next Steps バッジ + パネル -->
   <script src="/js/admin-next-steps.js?v=copilot-fab-20260716-1"></script>
   <!-- V層（共有物のバージョン管理 + 更新通知 + 削除猶予, migration 037）-->
   <script src="/js/versioning.js?v=copilot-fab-20260716-1"></script>
   <!-- 原稿スタジオ（Lecture Script Studio, Issue #70）— admin.js から分離（Tier 3-17b） -->
-  <script src="/js/admin-lecture-studio.js?v=ls-split-20260713-1"></script>
+  <script src="/js/admin-lecture-studio.js?v=gap-fixes-20260716-1"></script>
   <!-- W層（要素検討ワークスペース, Phase 0）— 「深く検討」統合パネル -->
-  <script src="/js/deliberation.js?v=deliberation-20260714-1"></script>
-  <script src="/js/admin.js?v=field-atlas-20260713-1"></script>
+  <script src="/js/deliberation.js?v=gap-fixes-20260716-1"></script>
+  <!-- U層（LLM トークン使用量推計, migration 043）管理 UI — SYSTEM_ADMIN メトリクス + TEACHER 事前見積り -->
+  <script src="/js/admin-llm-usage.js?v=gap-fixes-20260716-2"></script>
+  <script src="/js/admin.js?v=gap-fixes-20260716-3"></script>
 </body>
 </html>

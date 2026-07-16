@@ -85,6 +85,14 @@
     standardization: "標準化"
   };
 
+  // Phase W-β: 同一性リンク（element_identity_links）の状態ラベル。
+  // KN-3: 確定は人間のみ・行削除はしない。candidate/confirmed/rejected を明示区別する（G2-W）。
+  var IDENTITY_LINK_STATUS_LABELS = {
+    candidate: "候補（未確定）",
+    confirmed: "確定済み",
+    rejected: "却下"
+  };
+
   // 面③ 対話状態。モーダルを開くたび（_closeModal で）リセットする単一セッション分の状態
   // （1モーダル=1対話。複数セッションの並行管理は v1 では行わない）。
   var chatState = { sessionId: null, ref: null, sending: false };
@@ -200,7 +208,172 @@
         _fieldsHtml(decomposition.fields) +
       '</div>' +
       _notesHtml(decomposition.notes) +
-      _positioningHtml(data.positioning);
+      _positioningHtml(data.positioning) +
+      _identityLinksSectionHtml() +
+      _standardizationSectionHtml(decomposition.element_type);
+  }
+
+  // ── Phase W-β: 同一性リンク（identity-links）セクション ─────────────────
+  // 「この要素は別の資料・共通部品と同じものだ」という対応づけの一覧。候補
+  // （candidate）・確定（confirmed）・却下（rejected）を明示区別し（G2-W）、
+  // 確定・却下は教員のみが行う（KN-3）。インスタンス側の表記は書き換えない（KN-2）。
+  function _identityLinksSectionHtml() {
+    return '<div class="deliberation-identity-links-wrap" style="margin-top:16px;padding-top:14px;border-top:1px solid var(--color-border-tertiary)">' +
+      '<h4 style="margin:0 0 6px;font-size:14px;color:var(--color-text-primary)">同一性リンク</h4>' +
+      '<p style="font-size:11.5px;color:var(--color-text-tertiary);margin:0 0 8px">' +
+        'この要素が別の資料・共通部品と同じものだという対応づけです。候補は AI 対話または教員が作成し、' +
+        '確定・却下は教員のみが行います。既存の表記は書き換えません（リンクの追加のみ）。' +
+      '</p>' +
+      '<div id="deliberation-identity-links"><p class="deliberation-identity-empty">読み込み中...</p></div>' +
+    '</div>';
+  }
+
+  function _identityLinkRowHtml(link) {
+    link = link || {};
+    var statusLabel = IDENTITY_LINK_STATUS_LABELS[link.status] || link.status || "";
+    var localExpr = link.local_expression || {};
+    var exprLabel = localExpr.label || localExpr.notation || "";
+    var pending = link.status === "candidate";
+    return '<div class="deliberation-identity-link-row" data-identity-link-id="' + escHtml(link.id) + '">' +
+      '<span class="deliberation-annotation-status ' + (link.status === "confirmed" ? "committed" : (link.status === "rejected" ? "dismissed" : "")) + '">' +
+        escHtml(statusLabel) +
+      '</span>' +
+      (exprLabel ? '<div class="deliberation-annotation-body">' + escHtml(exprLabel) + '</div>' : '') +
+      (link.shared_part_id ? '<div class="deliberation-annotation-reason">共通部品: ' + escHtml(link.shared_part_id) + '</div>' : '') +
+      (link.instance_element_type
+        ? '<div class="deliberation-annotation-reason">インスタンス: ' + escHtml(link.instance_element_type) +
+          (link.instance_document_id ? ' / ' + escHtml(link.instance_document_id) : '') + '</div>'
+        : '') +
+      (link.reason ? '<div class="deliberation-annotation-reason">' + escHtml(link.reason) + '</div>' : '') +
+      (link.confidence_label ? '<span class="deliberation-annotation-confidence">' + escHtml(link.confidence_label) + '</span>' : '') +
+      (pending
+        ? '<div class="deliberation-annotation-actions">' +
+            '<button type="button" class="deliberation-annotation-btn commit" data-identity-action="confirm">確定</button>' +
+            '<button type="button" class="deliberation-annotation-btn dismiss" data-identity-action="reject">却下</button>' +
+          '</div>'
+        : '') +
+      '<div class="deliberation-annotation-error" style="display:none"></div>' +
+    '</div>';
+  }
+
+  function _bindIdentityLinkActions(root) {
+    Array.prototype.forEach.call(root.querySelectorAll("[data-identity-action]"), function (btn) {
+      btn.addEventListener("click", function () {
+        var row = btn.closest(".deliberation-identity-link-row");
+        if (!row) return;
+        _decideIdentityLink(row.getAttribute("data-identity-link-id"), btn.getAttribute("data-identity-action"), row);
+      });
+    });
+  }
+
+  function _decideIdentityLink(linkId, action, row) {
+    if (!linkId) return;
+    var buttons = row.querySelectorAll("[data-identity-action]");
+    Array.prototype.forEach.call(buttons, function (b) { b.disabled = true; });
+    apiFetch("/admin/deliberation/identity-links/" + encodeURIComponent(linkId) + "/" + action, { method: "POST" })
+      .then(_parseJsonResponse)
+      .then(function (link) {
+        var wrapper = document.createElement("div");
+        wrapper.innerHTML = _identityLinkRowHtml(link || {});
+        var newRow = wrapper.firstChild;
+        if (row.parentNode) row.parentNode.replaceChild(newRow, row);
+        _bindIdentityLinkActions(newRow);
+      })
+      .catch(function (err) {
+        var errEl = row.querySelector(".deliberation-identity-link-error");
+        var message = (err && err.detail) || "操作に失敗しました（既に確定・却下済みの可能性があります）";
+        if (errEl) {
+          errEl.style.display = "";
+          errEl.innerHTML = escHtml(message);
+        }
+        Array.prototype.forEach.call(buttons, function (b) { b.disabled = false; });
+      });
+  }
+
+  function _renderIdentityLinks(links, hiddenCount) {
+    var container = document.getElementById("deliberation-identity-links");
+    if (!container) return;
+    links = links || [];
+    if (!links.length) {
+      container.innerHTML = '<p class="deliberation-identity-empty">同一性リンクはまだありません。</p>';
+    } else {
+      container.innerHTML = links.map(_identityLinkRowHtml).join("");
+    }
+    if (hiddenCount) {
+      container.innerHTML += '<p class="deliberation-identity-hidden">閲覧権限のない資料に由来する ' +
+        escHtml(String(hiddenCount)) + ' 件は非表示です。</p>';
+    }
+    _bindIdentityLinkActions(container);
+  }
+
+  // ref = chatState.ref（elementType/elementId/documentId）。shared_part は domain-scoped
+  // なので別エンドポイント（GET /shared-parts/{id}/identity-links）を使う（§5 W5）。
+  function _loadIdentityLinks(ref) {
+    ref = ref || {};
+    var container = document.getElementById("deliberation-identity-links");
+    if (!container) return;
+    var path;
+    if (ref.elementType === "shared_part") {
+      path = "/admin/deliberation/shared-parts/" + encodeURIComponent(ref.elementId) + "/identity-links";
+    } else {
+      path = "/admin/deliberation/elements/" + encodeURIComponent(ref.elementType) + "/" + encodeURIComponent(ref.elementId) + "/identity-links";
+      if (ref.elementType === "equation" && ref.documentId) {
+        path += "?document_id=" + encodeURIComponent(ref.documentId);
+      }
+    }
+    apiFetch(path)
+      .then(_parseJsonResponse)
+      .then(function (data) {
+        _renderIdentityLinks((data && data.identity_links) || [], data && data.hidden_count);
+      })
+      .catch(function () {
+        // fail-soft: 同一性リンクの読み込みに失敗しても内訳・対話は継続できる
+        container.innerHTML = '<p class="deliberation-identity-empty">同一性リンクの読み込みに失敗しました。</p>';
+      });
+  }
+
+  // ── Phase S: 標準化度の評価（三角測量 worker の手動起動）。shared_part（共通部品）
+  // にのみ表示する。評価結果は element_annotations(kind='standardization') の候補として
+  // 既存の候補注釈カード（対話ペイン下）に現れる。自動確定はしない（教員の commit のみ）。
+  function _standardizationSectionHtml(elementType) {
+    if (elementType !== "shared_part") return "";
+    return '<div class="deliberation-standardization" style="margin-top:16px;padding-top:14px;border-top:1px solid var(--color-border-tertiary)">' +
+      '<h4 style="margin:0 0 6px;font-size:14px;color:var(--color-text-primary)">標準化度</h4>' +
+      '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
+        '<button type="button" id="deliberation-standardization-assess" class="deliberation-chat-send" style="padding:4px 10px;font-size:12px">標準化度を評価</button>' +
+        '<span id="deliberation-standardization-note" style="font-size:12px;color:var(--color-text-tertiary)"></span>' +
+      '</div>' +
+      '<p style="font-size:11.5px;color:var(--color-text-tertiary);margin:6px 0 0">' +
+        '評価は三角測量（LLM 事前知識・ライブラリ内の類似・コーパス内の反復）による候補です。' +
+        '確定は下の候補カード（対話ペイン下）から教員が行います。自動では確定しません。' +
+      '</p>' +
+    '</div>';
+  }
+
+  function _bindStandardizationAssessButton(ref) {
+    var btn = document.getElementById("deliberation-standardization-assess");
+    if (!btn || !ref || ref.elementType !== "shared_part") return;
+    btn.addEventListener("click", function () {
+      btn.disabled = true;
+      apiFetch("/admin/deliberation/shared-parts/" + encodeURIComponent(ref.elementId) + "/standardization/assess", {
+        method: "POST"
+      })
+        .then(_parseJsonResponse)
+        .then(function (data) {
+          var note = document.getElementById("deliberation-standardization-note");
+          if (note) note.textContent = (data && data.note) || "";
+          // 評価は非同期（daemon thread）。間に合えば候補一覧に反映されるが、
+          // 反映前でもエラーにはしない（W4: 後でモーダルを開き直しても拾える）。
+          _loadAnnotations(ref.elementType, ref.elementId, ref.documentId);
+        })
+        .catch(function (err) {
+          var note = document.getElementById("deliberation-standardization-note");
+          if (note) note.textContent = (err && err.detail) || "評価の開始に失敗しました";
+        })
+        .then(function () {
+          btn.disabled = false;
+        });
+    });
   }
 
   function _renderError(status) {
@@ -532,6 +705,8 @@
       })
       .then(function (data) {
         _renderModalBody(data);
+        _bindStandardizationAssessButton(chatState.ref);
+        _loadIdentityLinks(chatState.ref);
       })
       .catch(function (err) {
         _renderError(err && err.status);

@@ -1057,7 +1057,16 @@ def update_course_visibility(
     body: VisibilityUpdateRequest,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """コースの開示範囲を更新する。"""
+    """コースの開示範囲を更新する。
+
+    G1-1 是正: is_published は「現在 visibility='public' か」を常に正確に反映させる
+    （旧実装は public 化のときだけ true を立て、group/private へ戻しても is_published が
+    true のまま残っていた。学習者向け一覧・enroll・get_accessible_course_data は
+    visibility も併せて見るため受講可能一覧への漏れは無かったが、教員向けの公開状態表示
+    （コース管理タブ・G層 next-steps の「未公開」判定）が実態とずれていたため是正する）。
+    is_template は「テンプレートとして作られたことがあるか」の意図を保つため、
+    従来どおり public 化時のみ true を立て、離脱時にリセットはしない。
+    """
     if body.visibility not in ("public", "group", "private"):
         raise HTTPException(status_code=400, detail=f"Invalid visibility: {body.visibility}")
     if body.visibility == "group":
@@ -1073,7 +1082,7 @@ def update_course_visibility(
                 UPDATE learning_courses
                 SET visibility = :visibility,
                     group_id = CAST(:group_id AS uuid),
-                    is_published = CASE WHEN :visibility = 'public' THEN true ELSE is_published END,
+                    is_published = (:visibility = 'public'),
                     is_template = CASE WHEN :visibility = 'public' THEN true ELSE is_template END,
                     updated_at = now()
                 WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
@@ -2112,7 +2121,9 @@ def list_teacher_courses(
                            ) THEN 'editor'
                            ELSE 'viewer'
                        END AS role,
-                       lc.data
+                       lc.data,
+                       COALESCE(lc.visibility, 'private') AS visibility,
+                       lc.group_id
                 FROM learning_courses lc
                 WHERE lc.user_id = CAST(:user_id AS uuid)
                    OR EXISTS (
@@ -2149,6 +2160,9 @@ def list_teacher_courses(
             "atlas_cartridge_id": course_cartridge_id(data),
             "atlas_topic_count": bound_topics,
             "topic_count": len(topics),
+            # G1-1/G5-2: 公開状態・開示範囲を管理画面のコース管理テーブルで確認できるようにする。
+            "visibility": (r[8] if len(r) > 8 else None) or "private",
+            "group_id": str(r[9]) if len(r) > 9 and r[9] else None,
         })
     return result
 
