@@ -13,6 +13,7 @@ import threading
 import uuid
 
 from fastapi import APIRouter, Body, Depends, HTTPException
+from sqlalchemy import text as sa_text
 
 from dependencies import ROLE_SYSTEM_ADMIN, _require_teacher
 from schemas import BackgroundTaskOut
