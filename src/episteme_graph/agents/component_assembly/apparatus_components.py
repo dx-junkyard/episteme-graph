@@ -64,10 +64,11 @@ def build_apparatus_components(
     pass the IDs already used by claim/equation-derived components so the new
     ``apparatus_*`` IDs never collide with them.
 
-    Every ``ApparatusRecord`` present is kept, including ``match_status ==
-    'unknown'`` ones (P4, "情報を落とさない") — an unidentified apparatus
-    still becomes a reviewable component with a neutral label, it is never
-    silently dropped.
+    Only functional-diagram records are folded into apparatus components.
+    Older artifacts without an explicit mode remain compatible; a legacy
+    record is recognized by its apparatus fields (or an absent mode reason).
+    Data plots and descriptive images never become ``Unidentified apparatus``
+    components merely because this stage retains its historical name.
     """
     result = _coerce_result(apparatus_semantics)
     if result is None:
@@ -76,12 +77,33 @@ def build_apparatus_components(
     used_ids: set[str] = set(existing_component_ids or ())
     components: list[ComponentRecord] = []
     for idx, record in enumerate(result.apparatus_records or [], start=1):
+        if not _mode_allows_apparatus_component(record):
+            continue
         component_id = _unique_component_id(record, idx, used_ids)
         used_ids.add(component_id)
         components.append(
             _component_from_record(record, component_id, document_id, cartridge)
         )
     return components
+
+
+def _mode_allows_apparatus_component(record: ApparatusRecord) -> bool:
+    mode = str(getattr(record, "suggested_mode", "") or "").strip()
+    if mode == "functional_diagram":
+        return True
+    if mode == "mixed":
+        panels = (getattr(record, "analysis_profile", None) or {}).get("panels") or []
+        return any(
+            isinstance(panel, dict) and panel.get("mode") == "functional_diagram"
+            for panel in panels
+        ) or bool(record.parts or record.connections or record.apparatus_name_candidate)
+    if mode in ("data_plot", "descriptive_image"):
+        return False
+    if mode == "unknown" and str(getattr(record, "mode_reason", "") or "").strip():
+        # New classifier explicitly chose/failed to classify this image.
+        return False
+    # Pre-#496 artifact: no explicit mode metadata. Preserve prior behaviour.
+    return True
 
 
 def _coerce_result(

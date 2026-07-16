@@ -140,6 +140,12 @@ class ApparatusRecord:
     # (repair.py, max 2 attempts) without producing a valid output. The figure
     # is still kept as a reviewable record (P4) — never dropped.
     repair_failed: bool = False
+    # Issue #496: generic presentation classification produced by the same
+    # vision call.  It remains candidate-only until a teacher writes
+    # document_figures.reviewed_mode.
+    suggested_mode: str = "unknown"
+    mode_reason: str = ""
+    analysis_profile: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -220,4 +226,11 @@ def _record_from_dict(d: dict) -> ApparatusRecord:
         source_backing_status=d.get("source_backing_status", "inferred"),
         review_status=d.get("review_status", REVIEW_STATUS_DEFAULT),
         repair_failed=bool(d.get("repair_failed", False)),
+        suggested_mode=d.get("suggested_mode", d.get("figure_mode_candidate", "unknown")),
+        mode_reason=d.get("mode_reason", ""),
+        analysis_profile=(
+            dict(d.get("analysis_profile") or d.get("mode_analysis") or {})
+            if isinstance(d.get("analysis_profile") or d.get("mode_analysis") or {}, dict)
+            else {}
+        ),
     )

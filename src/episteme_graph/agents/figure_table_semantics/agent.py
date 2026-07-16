@@ -25,6 +25,7 @@ from .schema import (
     TableRecord,
     ValidationIssue,
 )
+from episteme_graph.agents.figure_modes import infer_mode_from_text
 
 _FIG_LABEL_RE = re.compile(r"^(?:Figure|Fig\.?)\s*([0-9A-Za-z\.]+)\s*[:.\-]?\s*", re.IGNORECASE)
 _TBL_LABEL_RE = re.compile(r"^Table\s*([0-9A-Za-z\.]+)\s*[:.\-]?\s*", re.IGNORECASE)
@@ -204,6 +205,7 @@ class FigureTableSemanticsAgent:
         label, caption_text = self._split_label(block.text, _FIG_LABEL_RE)
         figure_id = f"fig_{label}" if label else block.block_id
         figure_type = self._infer_figure_type(caption_text)
+        suggested_mode, mode_reason = infer_mode_from_text(caption_text, figure_type)
         comparison_axes = self._infer_comparison_axes(
             caption_text + " " + " ".join(b.text for b in neighbors)
         )
@@ -226,6 +228,8 @@ class FigureTableSemanticsAgent:
             interpretation="",
             teaching_takeaway=self._figure_takeaway(figure_type, caption_text, comparison_axes),
             source_evidence_ids=list(evidence_index.get(block.block_id, [])),
+            suggested_mode=suggested_mode,
+            mode_reason=mode_reason,
         )
 
     def _build_table_record(

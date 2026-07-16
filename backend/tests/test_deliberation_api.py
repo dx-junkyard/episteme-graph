@@ -238,6 +238,7 @@ class TestPostMessageFlow:
         import routes.deliberation as route_mod
         from core.deliberation.dialogue import DialogueTurnResult
 
+        seen = {}
         self._patch_owned_session(monkeypatch, route_mod)
         monkeypatch.setattr(route_mod.dialogue, "check_and_count_llm_call", lambda *a, **k: True)
         monkeypatch.setattr(
@@ -245,15 +246,19 @@ class TestPostMessageFlow:
             lambda ref: {"breakdown": {}, "positioning": {"available": False}},
         )
         monkeypatch.setattr(route_mod.dialogue, "grounding_to_text", lambda g: "GROUNDING")
-        monkeypatch.setattr(
-            route_mod.dialogue, "run_turn",
-            lambda *a, **k: DialogueTurnResult(
+        def fake_run_turn(*args, **kwargs):
+            seen["llm_user_content"] = kwargs["user_content"]
+            return DialogueTurnResult(
                 reply="回答です",
                 annotations=[{"kind": "meaning", "body": "x", "evidence": ["q"], "reason": "r", "confidence": 0.5}],
                 degraded=False,
-            ),
-        )
-        monkeypatch.setattr(route_mod.delib_store, "append_messages", lambda *a, **k: None)
+            )
+
+        def fake_append_messages(_session_id, messages):
+            seen["persisted_messages"] = messages
+
+        monkeypatch.setattr(route_mod.dialogue, "run_turn", fake_run_turn)
+        monkeypatch.setattr(route_mod.delib_store, "append_messages", fake_append_messages)
         monkeypatch.setattr(
             route_mod.delib_annotations, "create_candidates_from_dialogue",
             lambda *a, **k: [
@@ -267,7 +272,10 @@ class TestPostMessageFlow:
 
         response = client.post(
             "/api/admin/deliberation/sessions/s1/messages",
-            json={"content": "これは何ですか？"},
+            json={
+                "content": "これは何ですか？",
+                "selected_context": {"kind": "part", "id": "sensor-1", "label": "センサー"},
+            },
             headers=_auth(teacher),
         )
         assert response.status_code == 200
@@ -277,6 +285,9 @@ class TestPostMessageFlow:
         assert len(body["annotations"]) == 1
         assert body["annotations"][0]["confidence_label"] in ("暫定", "参考", "確度高")
         assert "confidence" not in body["annotations"][0]
+        assert "kind=part; id=sensor-1; label=センサー" in seen["llm_user_content"]
+        assert "not as evidence" in seen["llm_user_content"]
+        assert seen["persisted_messages"][0]["content"] == "これは何ですか？"
 
 
 class TestListAnnotations:

@@ -7125,7 +7125,7 @@
       }
       // W層（要素検討ワークスペース, Phase 0）— 「深く検討」統合パネルの起動。
       if (window.Deliberation) {
-        window.Deliberation.init({ apiFetch: apiFetch, escHtml: escHtml });
+        window.Deliberation.init({ apiFetch: apiFetch, apiFetchRaw: apiFetchRaw, escHtml: escHtml });
       }
     }
     initStumbles();

@@ -100,6 +100,49 @@ def _attach_label_grounding(record: ApparatusRecord, figure: FigureImageInput) -
         part.expanded_name = _expand_label(label_ref or part.name, figure.abbreviations)
 
 
+def _attach_profile_grounding(record: ApparatusRecord, figure: FigureImageInput) -> None:
+    """Copy only deterministic PDF-label grounding into mode profile items."""
+    profile = record.analysis_profile if isinstance(record.analysis_profile, dict) else {}
+    label_bbox: dict[str, list | None] = {}
+    for label in figure.inner_labels or []:
+        if not isinstance(label, dict):
+            continue
+        label_text = str(label.get("text") or "").strip()
+        if label_text:
+            label_bbox.setdefault(label_text.casefold(), label.get("bbox"))
+
+    parts_by_label = {
+        str(part.label_ref or "").strip().casefold(): part
+        for part in record.parts
+        if str(part.label_ref or "").strip()
+    }
+    parts_by_name = {
+        str(part.name or "").strip().casefold(): part
+        for part in record.parts
+        if str(part.name or "").strip()
+    }
+    for key in ("functions", "subjects", "regions", "observations", "highlights"):
+        for item in profile.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            label_ref = str(item.get("label_ref") or "").strip()
+            name = str(item.get("name") or item.get("label") or "").strip()
+            part = parts_by_label.get(label_ref.casefold()) or parts_by_name.get(name.casefold())
+            # A model-provided bbox is not a PDF page-coordinate fact. Remove
+            # it unless it can be replaced by deterministic text-layer data.
+            item["bbox"] = None
+            if part is not None:
+                item["bbox"] = list(part.bbox) if part.bbox else None
+                item["expanded_name"] = part.expanded_name
+                if not item.get("evidence_quote"):
+                    item["evidence_quote"] = part.evidence_quote
+                continue
+            bbox = label_bbox.get(label_ref.casefold()) if label_ref else None
+            if bbox:
+                item["bbox"] = list(bbox)
+                item["expanded_name"] = _expand_label(label_ref, figure.abbreviations)
+
+
 class ApparatusSemanticsAgent:
     def __init__(
         self,
@@ -201,6 +244,7 @@ class ApparatusSemanticsAgent:
             # (normal parse, repair success, repair exhaustion) (design
             # principle #2/#4: never taken from the LLM).
             _attach_label_grounding(record, figure)
+            _attach_profile_grounding(record, figure)
             records.append(record)
 
         result = ApparatusSemanticsResult(

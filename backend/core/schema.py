@@ -460,6 +460,9 @@ AUDIT_ENTITY_REVISION_RUN = "revision_run"
 # W層（要素検討ワークスペース / 同一性リンク, Phase W-β）
 AUDIT_ENTITY_DELIBERATION = "deliberation"
 
+# 図表示モード（AI候補 → 教員 reviewed override、issue #496）
+AUDIT_ENTITY_FIGURE_PRESENTATION = "figure_presentation"
+
 # カタログ本体（新規 entity_type はここへの追記が必須。ガードレールテスト対象）。
 AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_COMPONENT,
@@ -489,4 +492,5 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_SHARED_SUBSCRIPTION,
     AUDIT_ENTITY_REVISION_RUN,
     AUDIT_ENTITY_DELIBERATION,
+    AUDIT_ENTITY_FIGURE_PRESENTATION,
 )

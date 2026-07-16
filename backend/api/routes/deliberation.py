@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -456,8 +456,17 @@ class SessionCreateRequest(BaseModel):
     title: str = ""
 
 
+class SelectedFigureContext(BaseModel):
+    """Bounded UI focus hint; never treated as evidence or hidden authority."""
+
+    kind: Literal["part", "observation", "subject"]
+    id: str = Field(min_length=1, max_length=160)
+    label: str = Field(min_length=1, max_length=300)
+
+
 class MessageCreateRequest(BaseModel):
     content: str
+    selected_context: SelectedFigureContext | None = None
 
 
 def _session_response(session: dict[str, Any]) -> dict[str, Any]:
@@ -588,6 +597,17 @@ def post_deliberation_message(
     if ref.element_type == ELEMENT_SHARED_PART:
         _apply_exemplar_image_gate(grounding["breakdown"], current_user)
     grounding_text = dialogue.grounding_to_text(grounding)
+    llm_user_content = user_content
+    if body.selected_context is not None:
+        context = body.selected_context
+        # This text is an explicit focus hint selected from the visible UI.
+        # It is not persisted in the message and must not be mistaken for
+        # source evidence or a teacher-confirmed statement.
+        llm_user_content = (
+            "[User-selected UI focus; use only to scope the question, not as evidence] "
+            f"kind={context.kind}; id={context.id}; label={context.label}\n\n"
+            + user_content
+        )
 
     images: list[bytes] | None = None
     if ref.element_type == ELEMENT_FIGURE:
@@ -603,7 +623,7 @@ def post_deliberation_message(
     result = dialogue.run_turn(
         ref,
         prior_messages=prior_messages,
-        user_content=user_content,
+        user_content=llm_user_content,
         grounding_text=grounding_text,
         images=images,
         user_id=current_user.get("id"),

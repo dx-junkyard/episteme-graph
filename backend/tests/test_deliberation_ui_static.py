@@ -130,20 +130,31 @@ class TestDeliberationModule:
         assert "init:" in src
         assert "openElement:" in src
 
-    def test_fetch_target_is_deliberation_only(self):
-        """§8: /api/admin/deliberation/ 配下以外の admin API パスを直接参照しない
-        （overview・sessions・messages・annotations・commit・dismiss すべて含む）。"""
+    def test_fetch_targets_use_exact_allowlist(self):
+        """Issue #496: deliberation API に加え、図画像取得と表示分類レビューだけを許可する。"""
         src = _read(DELIBERATION_JS)
         assert "/admin/deliberation/" in src
+        # document API は image_url fallback と presentation-mode の2箇所だけ。
+        assert src.count('"/admin/documents/"') == 2
+        assert '"/image"' in src
+        assert '"/presentation-mode"' in src
         idx = 0
         while True:
             idx = src.find("/admin/", idx)
             if idx == -1:
                 break
-            fragment = src[idx : idx + len("/admin/deliberation")]
-            assert fragment == "/admin/deliberation", (
-                "deliberation.js が deliberation 以外の /admin/ パスを参照しています: "
-                + src[idx : idx + 60]
+            allowed = (
+                src.startswith("/admin/deliberation", idx)
+                or src.startswith("/admin/documents/", idx)
+                # _figureImagePath の外部URL拒否ガード文字列そのもの。
+                or (
+                    src.startswith("/admin/", idx)
+                    and src[idx + len("/admin/")] in ('"', "'")
+                )
+            )
+            assert allowed, (
+                "deliberation.js が許可外の /admin/ パスを参照しています: "
+                + src[idx : idx + 80]
             )
             idx += 1
 
@@ -171,12 +182,14 @@ class TestDeliberationDialoguePhase2:
     """面③ 対話的検討（Phase 2）固有の受け入れ条件。"""
 
     def test_write_methods_scoped_to_deliberation_dialogue(self):
-        """POST は sessions・messages・annotations の commit/dismiss にのみ使い、
-        PUT/PATCH/DELETE は引き続き使わない（削除 API は無い・W4）。"""
+        """POST は従来経路、PATCH は図の presentation-mode 1箇所だけに限定する。"""
         src = _read(DELIBERATION_JS)
-        for method in ("PUT", "PATCH", "DELETE"):
+        for method in ("PUT", "DELETE"):
             assert f'"{method}"' not in src
             assert f"'{method}'" not in src
+        assert src.count('method: "PATCH"') == 1
+        patch_pos = src.index('method: "PATCH"')
+        assert "/presentation-mode" in src[max(0, patch_pos - 500) : patch_pos]
         assert '"POST"' in src or "'POST'" in src
         # POST を使う既知のエンドポイント（設計書 §8）がすべて揃っていること。
         # test_fetch_target_is_deliberation_only により、これらはすべて
@@ -479,3 +492,97 @@ class TestStandardizationAssessWiring:
         m = re.search(r"function _bindStandardizationAssessButton[\s\S]+?\n  \}\n", src)
         assert m
         assert "data.note" in m.group(0)
+
+
+
+class TestFigurePresentationWorkspace:
+    """Issue #496: 原図を証拠として分類別に検討するUIの静的契約。"""
+
+    def test_authenticated_blob_image_lifecycle(self):
+        src = _read(DELIBERATION_JS)
+        assert "apiFetchRaw(path, { _noJson: true })" in src
+        assert "res.blob()" in src
+        assert "URL.createObjectURL" in src
+        assert "URL.revokeObjectURL" in src
+        assert 'path.indexOf("/api/") === 0' in src
+        assert 'path.indexOf("/admin/") !== 0' in src
+
+    def test_admin_injects_raw_fetch(self):
+        src = _read(ADMIN_JS)
+        assert "window.Deliberation.init({ apiFetch: apiFetch, apiFetchRaw: apiFetchRaw" in src
+
+    def test_all_presentation_modes_have_dedicated_fail_soft_rendering(self):
+        src = _read(DELIBERATION_JS)
+        for mode in (
+            "functional_diagram",
+            "data_plot",
+            "descriptive_image",
+            "mixed",
+            "unknown",
+        ):
+            assert f"{mode}:" in src
+        for renderer in (
+            "_functionalDiagramHtml",
+            "_dataPlotHtml",
+            "_descriptiveImageHtml",
+        ):
+            assert f"function {renderer}" in src
+        assert "原図と周辺本文を確認しながら質問できます" in src
+        assert "図の種類を判定できませんでした" in src
+        assert "panel.analysis || panel.analysis_profile" in src
+        assert "パネルの解析を見る" in src
+
+    def test_flat_and_legacy_analysis_contracts_are_supported(self):
+        src = _read(DELIBERATION_JS)
+        assert "fields.analysis_profile" in src
+        for key in ("functional_analysis", "data_plot_analysis", "descriptive_analysis"):
+            assert key in src
+        for key in ("from_function_id", "from_output_id", "to_function_id", "to_input_id"):
+            assert key in src
+        assert "analysis.y_axes" in src
+        assert "function _functionLookup" in src
+        assert "_connectionText(connection, functionLookup)" in src
+
+    def test_plot_observation_meaning_and_highlight_contract(self):
+        src = _read(DELIBERATION_JS)
+        assert "analysis.interpretations" in src
+        assert "candidate.observation_id" in src
+        assert "analysis.highlights" in src
+        assert "意味候補" in src
+        assert "注目箇所" in src
+
+    def test_raw_metadata_is_collapsed(self):
+        src = _read(DELIBERATION_JS)
+        assert '<details class="deliberation-figure-raw">' in src
+        assert "抽出データ・根拠を見る" in src
+
+    def test_selected_visual_context_is_sent_separately(self):
+        src = _read(DELIBERATION_JS)
+        assert "chatState.selectedContext" in src
+        assert "messageBody.selected_context" in src
+        for kind in ("part", "observation", "subject"):
+            assert f'_contextAttrs("{kind}"' in src
+
+    def test_teacher_mode_override_is_exactly_scoped(self):
+        src = _read(DELIBERATION_JS)
+        assert "/presentation-mode" in src
+        assert 'method: "PATCH"' in src
+        assert "presentation_mode: select.value || null" in src
+        assert "function _reloadOverview" in src
+
+    def test_figure_layout_is_responsive_and_zoomable(self):
+        css = _read(ROOT / "frontend" / "public" / "css" / "styles.css")
+        assert ".deliberation-figure-lightbox.is-open" in css
+        assert ".deliberation-figure-image-card" in css
+        assert "@media (max-width: 820px)" in css
+
+    def test_bbox_overlays_and_related_connections_are_fail_soft(self):
+        src = _read(DELIBERATION_JS)
+        css = _read(ROOT / "frontend" / "public" / "css" / "styles.css")
+        assert "function _relativeBbox" in src
+        assert "function _renderFigureOverlays" in src
+        assert 'data-figure-bbox="' in src
+        assert "if (!figureBbox) return null" in src
+        assert "data-deliberation-connection" in src
+        assert ".deliberation-figure-overlay.is-selected" in css
+        assert ".deliberation-connection-list li.is-related" in css

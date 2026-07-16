@@ -17,6 +17,8 @@ from __future__ import annotations
 import logging
 import re
 
+from episteme_graph.agents.figure_modes import analysis_profile_for_record
+
 from .llm_client import ApparatusSemanticsLLMClient
 from .prompt import ApparatusSemanticsPromptFactory
 from .schema import (
@@ -113,6 +115,39 @@ def _parse_record(
             raw.get("matched_library_version_no"),
         )
 
+    mode_payload = analysis_profile_for_record(
+        {
+            **raw,
+            "parts": [
+                {
+                    "name": part.name,
+                    "role": part.role,
+                    "label_ref": part.label_ref,
+                    "evidence_quote": part.evidence_quote,
+                    "reason": part.reason,
+                    "confidence": part.confidence,
+                }
+                for part in parts
+            ],
+            "connections": [
+                {
+                    "from_part": connection.from_part,
+                    "to_part": connection.to_part,
+                    "relation": connection.relation,
+                    "reason": connection.reason,
+                    "confidence": connection.confidence,
+                }
+                for connection in connections
+            ],
+            "figure_record": figure.figure_record or {},
+        },
+        caption_text=figure.caption_text,
+    )
+
+    raw_suggested_mode = str(
+        raw.get("suggested_mode") or raw.get("figure_mode_candidate") or ""
+    ).strip()
+
     return ApparatusRecord(
         figure_id=figure.figure_id,
         figure_key=figure.figure_key,
@@ -128,6 +163,9 @@ def _parse_record(
         source_backing_status=source_backing_status,
         review_status=REVIEW_STATUS_DEFAULT,
         repair_failed=False,
+        suggested_mode=raw_suggested_mode or mode_payload["suggested_mode"],
+        mode_reason=mode_payload["mode_reason"],
+        analysis_profile=mode_payload["analysis_profile"],
     )
 
 
@@ -154,6 +192,9 @@ def _fallback_record(
         source_backing_status="inferred",
         review_status=REVIEW_STATUS_DEFAULT,
         repair_failed=repair_failed,
+        suggested_mode="unknown",
+        mode_reason=reason,
+        analysis_profile={"summary": "", "reason": reason},
     )
 
 

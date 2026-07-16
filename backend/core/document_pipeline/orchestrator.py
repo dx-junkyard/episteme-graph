@@ -2510,6 +2510,22 @@ def _build_apparatus_semantics(
         cartridge_id=cartridge_id,
     )
 
+    # #496: persist the generic vision classification/profile separately from
+    # any teacher override.  Artifact persistence remains the source for old
+    # runs; a DB write failure is therefore fail-soft and must not discard the
+    # completed analysis result.
+    try:
+        from core.figure_presentation import persist_suggestions
+
+        persist_suggestions(document_id, getattr(result, "apparatus_records", []) or [])
+    except Exception:
+        logger.warning(
+            "apparatus_semantics: failed to persist figure presentation suggestions "
+            "document=%s",
+            document_id,
+            exc_info=True,
+        )
+
     seen_versions: set[tuple[str, int]] = set()
     referenced_versions: list[dict] = []
     for candidates in library_candidates.values():
@@ -2527,6 +2543,15 @@ def _build_apparatus_semantics(
         "skipped_by_limit": skipped_by_limit,
         "referenced_library_versions": referenced_versions,
         "context_collected": context_collected,
+        "presentation_modes": {
+            mode: sum(
+                1 for record in (getattr(result, "apparatus_records", []) or [])
+                if getattr(record, "suggested_mode", "unknown") == mode
+            )
+            for mode in (
+                "functional_diagram", "data_plot", "descriptive_image", "mixed", "unknown"
+            )
+        },
     }
     return result, done_payload
 

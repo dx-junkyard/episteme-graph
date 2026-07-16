@@ -39,11 +39,18 @@
 
   // 注入される依存（疎結合）。未注入なら window グローバルへフォールバック
   // （admin-lecture-studio.js / admin-assistant.js と同型）。
-  var deps = { apiFetch: null, escHtml: null };
+  var deps = { apiFetch: null, apiFetchRaw: null, escHtml: null };
   var initialized = false;
 
   function apiFetch(path, opts) {
     var fn = deps.apiFetch || window.apiFetch;
+    return fn(path, opts);
+  }
+
+  // 図の原画像は JSON ではなく blob として取得する。管理画面の認証ヘッダーを
+  // そのまま使うため apiFetchRaw を DI し、未注入時だけ apiFetch にフォールバックする。
+  function apiFetchRaw(path, opts) {
+    var fn = deps.apiFetchRaw || window.apiFetchRaw || deps.apiFetch || window.apiFetch;
     return fn(path, opts);
   }
 
@@ -95,22 +102,33 @@
 
   // 面③ 対話状態。モーダルを開くたび（_closeModal で）リセットする単一セッション分の状態
   // （1モーダル=1対話。複数セッションの並行管理は v1 では行わない）。
-  var chatState = { sessionId: null, ref: null, sending: false };
+  var chatState = { sessionId: null, ref: null, sending: false, selectedContext: null };
+  var figureImageState = { objectUrls: [], requestId: 0 };
 
   function _resetChatState() {
-    chatState = { sessionId: null, ref: null, sending: false };
+    chatState = { sessionId: null, ref: null, sending: false, selectedContext: null };
+  }
+
+  function _resetFigureImageState() {
+    figureImageState.requestId += 1;
+    figureImageState.objectUrls.forEach(function (url) {
+      try { URL.revokeObjectURL(url); } catch (e) { /* noop */ }
+    });
+    figureImageState.objectUrls = [];
   }
 
   // ── 公開 API: init ───────────────────────────────────────────────────
   function init(options) {
     options = options || {};
     deps.apiFetch = options.apiFetch || null;
+    deps.apiFetchRaw = options.apiFetchRaw || null;
     deps.escHtml = options.escHtml || null;
     initialized = true;
   }
 
   // ── モーダル DOM ──────────────────────────────────────────────────────
   function _closeModal() {
+    _resetFigureImageState();
     var m = document.getElementById("deliberation-modal");
     if (m) m.remove();
     _resetChatState();
@@ -191,11 +209,447 @@
     '</div>';
   }
 
+  // ── 図・画像の読み解き UI（Issue #496）─────────────────────────────
+  // API の移行期間中も表示を止めないよう、analysis_profile 配下と各専用キーの
+  // どちらも受け付ける。分類や解析が無い場合は原図＋一般案内へ fail-soft する。
+  var FIGURE_MODE_LABELS = {
+    functional_diagram: "機能構成図",
+    data_plot: "グラフ",
+    descriptive_image: "写真・解説画像",
+    mixed: "複合図",
+    unknown: "未分類"
+  };
+  var FIGURE_MODE_REASON_LABELS = {
+    caption_or_legacy_type_contains_multiple_mode_cues: "captionに複数種類の手がかりがあります",
+    caption_or_legacy_type_heuristic: "captionと周辺情報から推定しました",
+    insufficient_classification_signal: "分類に十分な手がかりがありません",
+    legacy_apparatus_artifact: "既存の装置解析結果から推定しました"
+  };
+
+  function _asArray(value) {
+    if (Array.isArray(value)) return value;
+    if (value === null || value === undefined || value === "") return [];
+    return [value];
+  }
+
+  function _itemText(item) {
+    if (item === null || item === undefined) return "";
+    if (typeof item !== "object") return String(item);
+    return String(item.name || item.label || item.title || item.text || item.value ||
+      item.description || item.summary || "");
+  }
+
+  function _itemId(item, fallback) {
+    if (!item || typeof item !== "object") return String(fallback || _itemText(item));
+    return String(item.id || item.function_id || item.component_id || item.part_id || item.subject_id ||
+      item.observation_id || item.key || fallback || _itemText(item));
+  }
+
+  function _contextAttrs(kind, id, label, bbox) {
+    var attrs = ' data-deliberation-context-kind="' + escHtml(kind) + '"' +
+      ' data-deliberation-context-id="' + escHtml(String(id || "")) + '"' +
+      ' data-deliberation-context-label="' + escHtml(label || "") + '"';
+    if (bbox) {
+      try { attrs += ' data-deliberation-bbox="' + escHtml(JSON.stringify(bbox)) + '"'; } catch (e) { /* noop */ }
+    }
+    return attrs;
+  }
+
+  function _normalizedFigureMode(value) {
+    var mode = String(value || "unknown").toLowerCase();
+    if (mode === "functional" || mode === "schematic" || mode === "apparatus" || mode === "system_diagram") {
+      return "functional_diagram";
+    }
+    if (mode === "graph" || mode === "plot" || mode === "chart") return "data_plot";
+    if (mode === "photo" || mode === "photograph" || mode === "illustration" || mode === "descriptive") {
+      return "descriptive_image";
+    }
+    if (!FIGURE_MODE_LABELS[mode]) return "unknown";
+    return mode;
+  }
+
+  function _figureAnalysis(fields, mode) {
+    fields = fields || {};
+    var profile = fields.analysis_profile || {};
+    var keyMap = {
+      functional_diagram: "functional_analysis",
+      data_plot: "data_plot_analysis",
+      descriptive_image: "descriptive_analysis"
+    };
+    var key = keyMap[mode];
+    if (!key) return null;
+    var nested = fields[key] || profile[key] || profile[mode];
+    if (nested) return nested;
+    if (profile.mode === mode || profile.effective_mode === mode) return profile;
+    // Terra の主契約は effective_mode ごとの flat analysis_profile。mode フィールドが
+    // 無い場合も代表キーで安全に識別し、旧 nested 形式と併存させる。
+    if (mode === "functional_diagram" &&
+        (profile.overall_function || profile.functions || profile.functional_units || profile.connections)) return profile;
+    if (mode === "data_plot" &&
+        (profile.plot_type || profile.axes || profile.x_axis || profile.y_axis || profile.y_axes || profile.series ||
+          profile.observations || profile.interpretations || profile.highlights)) return profile;
+    if (mode === "descriptive_image" &&
+        (profile.subjects || profile.objects || profile.entities || profile.regions || profile.scene ||
+          profile.description || profile.teaching_points || profile.key_points)) return profile;
+    return null;
+  }
+
+  function _simpleListHtml(items, emptyText) {
+    var values = _asArray(items).map(_itemText).filter(Boolean);
+    if (!values.length) {
+      return emptyText ? '<span class="deliberation-figure-muted">' + escHtml(emptyText) + '</span>' : "";
+    }
+    return '<ul class="deliberation-figure-list">' + values.map(function (value) {
+      return '<li>' + escHtml(value) + '</li>';
+    }).join("") + '</ul>';
+  }
+
+  function _ioHtml(label, items) {
+    var values = _asArray(items).map(_itemText).filter(Boolean);
+    return '<div class="deliberation-figure-io">' +
+      '<span class="deliberation-figure-io-label">' + escHtml(label) + '</span>' +
+      (values.length ? values.map(function (value) {
+        return '<span class="deliberation-figure-chip">' + escHtml(value) + '</span>';
+      }).join("") : '<span class="deliberation-figure-muted">情報なし</span>') +
+    '</div>';
+  }
+
+  function _endpointText(value, port) {
+    var text = _itemText(value);
+    if (!text && value && typeof value === "object") {
+      text = _itemText(value.function || value.component || value.part || value.node);
+      port = port || value.port || value.output || value.input;
+    }
+    return text + (port ? "（" + _itemText(port) + "）" : "");
+  }
+
+  function _functionLookup(functions) {
+    var lookup = {};
+    _asArray(functions).forEach(function (item, index) {
+      if (!item || typeof item !== "object") return;
+      var id = _itemId(item, index + 1);
+      var entry = { name: _itemText(item.name || item.label || item.title) || id, inputs: {}, outputs: {} };
+      _asArray(item.inputs || item.input_ports).forEach(function (port, portIndex) {
+        if (!port || typeof port !== "object") return;
+        entry.inputs[_itemId(port, portIndex + 1)] = _itemText(port) || _itemId(port, portIndex + 1);
+      });
+      _asArray(item.outputs || item.output_ports).forEach(function (port, portIndex) {
+        if (!port || typeof port !== "object") return;
+        entry.outputs[_itemId(port, portIndex + 1)] = _itemText(port) || _itemId(port, portIndex + 1);
+      });
+      lookup[id] = entry;
+      lookup[entry.name] = entry;
+    });
+    return lookup;
+  }
+
+  function _resolvedEndpoint(functionValue, portValue, lookup, direction) {
+    var functionKey = _itemText(functionValue);
+    var portKey = _itemText(portValue);
+    var entry = lookup[functionKey];
+    if (!entry) return _endpointText(functionValue, portValue);
+    var portName = (direction === "output" ? entry.outputs : entry.inputs)[portKey] || portKey;
+    return entry.name + (portName ? "（" + portName + "）" : "");
+  }
+
+  function _connectionText(connection, functionLookup) {
+    if (typeof connection !== "object" || connection === null) return _itemText(connection);
+    functionLookup = functionLookup || {};
+    var fromFunction = connection.from || connection.source || connection.source_function || connection.from_function ||
+      connection.from_function_id || connection.source_function_id || connection.source_id || connection.upstream;
+    var fromPort = connection.from_port || connection.source_port || connection.output_port || connection.from_output ||
+      connection.from_output_id || connection.source_output_id;
+    var toFunction = connection.to || connection.target || connection.target_function || connection.to_function ||
+      connection.to_function_id || connection.target_function_id || connection.target_id || connection.downstream;
+    var toPort = connection.to_port || connection.target_port || connection.input_port || connection.to_input ||
+      connection.to_input_id || connection.target_input_id;
+    var from = _resolvedEndpoint(fromFunction, fromPort, functionLookup, "output");
+    var to = _resolvedEndpoint(toFunction, toPort, functionLookup, "input");
+    var transfer = _itemText(connection.transfer || connection.carries || connection.signal ||
+      connection.flow || connection.relation || connection.medium || connection.description);
+    var path = from && to ? from + " → " + to : (from || to);
+    return path + (path && transfer ? "：" : "") + transfer;
+  }
+
+  function _connectionIds(connection) {
+    if (!connection || typeof connection !== "object") return [];
+    return [
+      connection.from_function_id, connection.source_function_id, connection.from_function,
+      connection.source_function, connection.from, connection.source,
+      connection.to_function_id, connection.target_function_id, connection.to_function,
+      connection.target_function, connection.to, connection.target
+    ].map(_itemText).filter(Boolean);
+  }
+
+  function _functionalDiagramHtml(analysis, nested) {
+    analysis = analysis || {};
+    var functions = _asArray(analysis.functions || analysis.functional_units || analysis.components || analysis.parts);
+    var connections = _asArray(analysis.connections || analysis.links || analysis.flows);
+    var functionLookup = _functionLookup(functions);
+    var overall = _itemText(analysis.overall_function || analysis.system_function || analysis.summary || analysis.description);
+    var hasData = overall || functions.length || connections.length || analysis.inputs || analysis.external_inputs ||
+      analysis.outputs || analysis.external_outputs;
+    return '<section class="deliberation-figure-analysis' + (nested ? ' nested' : '') + '">' +
+      (nested ? '<h5>機能構成</h5>' : '') +
+      (!hasData ? '<p class="deliberation-figure-empty">機能・接続の解析結果はまだありません。原図と周辺本文を確認しながら質問できます。</p>' : '') +
+      (overall ? '<div class="deliberation-figure-overall"><span>全体の機能</span><strong>' + escHtml(overall) + '</strong></div>' : '') +
+      '<div class="deliberation-figure-system-io">' +
+        _ioHtml("外部入力", analysis.external_inputs || analysis.inputs) +
+        _ioHtml("外部出力", analysis.external_outputs || analysis.outputs) +
+      '</div>' +
+      (functions.length ? '<div class="deliberation-figure-subheading">機能と入出力</div><div class="deliberation-function-grid">' +
+        functions.map(function (item, index) {
+          item = (item && typeof item === "object") ? item : { name: item };
+          var name = _itemText(item.name || item.label || item.title) || ("機能 " + (index + 1));
+          var itemId = _itemId(item, index + 1);
+          var role = _itemText(item.role || item.function || item.description || item.purpose);
+          return '<article class="deliberation-function-card">' +
+            '<h6><button type="button" class="deliberation-context-target"' +
+              _contextAttrs("part", itemId, name, item.bbox || item.region) + '>' +
+              escHtml(name) + '</button></h6>' +
+            (role ? '<p>' + escHtml(role) + '</p>' : '<p class="deliberation-figure-muted">役割の説明はまだありません</p>') +
+            _ioHtml("入力", item.inputs || item.input_ports) +
+            _ioHtml("出力", item.outputs || item.output_ports) +
+          '</article>';
+        }).join("") + '</div>' : '') +
+      (connections.length ? '<div class="deliberation-figure-subheading">接続と流れ</div><ol class="deliberation-connection-list">' +
+        connections.map(function (connection) {
+          return '<li data-deliberation-connection="' + escHtml(_connectionIds(connection).join("|")) + '">' +
+            escHtml(_connectionText(connection, functionLookup) || "接続情報") + '</li>';
+        }).join("") + '</ol>' : '') +
+    '</section>';
+  }
+
+  function _axisText(key, axis) {
+    if (typeof axis !== "object" || axis === null) return key + "：" + _itemText(axis);
+    key = _itemText(axis.orientation || axis.axis) || key;
+    var name = _itemText(axis.name || axis.label || axis.variable) || key;
+    var unit = _itemText(axis.unit);
+    var scale = _itemText(axis.scale || axis.scale_type);
+    return key + "：" + name + (unit ? "（" + unit + "）" : "") + (scale ? "・" + scale : "");
+  }
+
+  function _axesHtml(axes) {
+    if (!axes) return '<span class="deliberation-figure-muted">軸情報なし</span>';
+    var rows = [];
+    if (Array.isArray(axes)) {
+      rows = axes.map(function (axis, index) { return _axisText("軸" + (index + 1), axis); });
+    } else if (typeof axes === "object") {
+      rows = Object.keys(axes).map(function (key) { return _axisText(key, axes[key]); });
+    } else {
+      rows = [_itemText(axes)];
+    }
+    return _simpleListHtml(rows);
+  }
+
+  function _observationHtml(item, index, interpretation) {
+    if (typeof item !== "object" || item === null) item = { observation: item };
+    var observed = _itemText(item.observation || item.observed || item.fact || item.text || item.description);
+    interpretation = interpretation || {};
+    var meaning = _itemText(item.interpretation || item.meaning || item.implication || item.meaning_candidate ||
+      interpretation.meaning_candidate || interpretation.interpretation || interpretation.meaning || interpretation.text);
+    var approximate = item.approximate || item.is_approximate || item.estimated || item.value_kind === "approximate";
+    var itemId = _itemId(item, index + 1);
+    var contextLabel = observed || ("観測 " + (index + 1));
+    return '<li>' +
+      '<div><strong><button type="button" class="deliberation-context-target"' +
+        _contextAttrs("observation", itemId, contextLabel, item.bbox || item.region) + '>' +
+        '観測' + (approximate ? '（概算）' : '') + '</button></strong>' +
+        (observed ? '<p>' + escHtml(observed) + '</p>' : '<p class="deliberation-figure-muted">記述なし</p>') +
+      '</div>' +
+      (meaning ? '<div><strong>意味候補</strong><p>' + escHtml(meaning) + '</p></div>' : '') +
+    '</li>';
+  }
+
+  function _interpretationHtml(item) {
+    var text = _itemText(item && typeof item === "object"
+      ? (item.meaning_candidate || item.interpretation || item.meaning || item.text || item.description)
+      : item);
+    return '<li><strong>意味候補</strong><p>' + escHtml(text || "記述なし") + '</p></li>';
+  }
+
+  function _selectableSubjectsHtml(items) {
+    var values = _asArray(items);
+    if (!values.length) return "";
+    return '<ul class="deliberation-figure-list deliberation-subject-list">' + values.map(function (item, index) {
+      var label = _itemText(item) || ("対象 " + (index + 1));
+      return '<li><button type="button" class="deliberation-context-target"' +
+        _contextAttrs("subject", _itemId(item, index + 1), label,
+          item && typeof item === "object" ? (item.bbox || item.region) : null) + '>' +
+        escHtml(label) + '</button></li>';
+    }).join("") + '</ul>';
+  }
+
+  function _dataPlotHtml(analysis, nested) {
+    analysis = analysis || {};
+    var series = _asArray(analysis.series || analysis.data_series || analysis.legend);
+    var observations = _asArray(analysis.observations || analysis.insights || analysis.findings || analysis.notable_points);
+    var interpretations = _asArray(analysis.interpretations || analysis.meanings || analysis.meaning_candidates);
+    var highlights = _asArray(analysis.highlights || analysis.highlight_regions);
+    var hasData = analysis.axes || analysis.x_axis || analysis.y_axis || analysis.y_axes || series.length ||
+      observations.length || interpretations.length || highlights.length || analysis.summary;
+    var axes = analysis.axes || null;
+    if (!axes && (analysis.x_axis || analysis.y_axis || analysis.y_axes)) {
+      axes = {};
+      if (analysis.x_axis) axes.x = analysis.x_axis;
+      if (analysis.y_axis) axes.y = analysis.y_axis;
+      _asArray(analysis.y_axes).forEach(function (axis, index) { axes["y" + (index + 1)] = axis; });
+    }
+    return '<section class="deliberation-figure-analysis' + (nested ? ' nested' : '') + '">' +
+      (nested ? '<h5>グラフ</h5>' : '') +
+      (!hasData ? '<p class="deliberation-figure-empty">軸・系列・観測点の解析結果はまだありません。値を断定せず原図を確認してください。</p>' : '') +
+      (analysis.summary ? '<div class="deliberation-figure-overall"><span>グラフの概要</span><strong>' + escHtml(_itemText(analysis.summary)) + '</strong></div>' : '') +
+      '<div class="deliberation-plot-basics"><div><h6>軸・単位・尺度</h6>' + _axesHtml(axes) + '</div>' +
+      '<div><h6>系列</h6>' + _simpleListHtml(series, "系列情報なし") + '</div></div>' +
+      (observations.length ? '<div class="deliberation-figure-subheading">読み取り</div><ul class="deliberation-observation-list">' +
+        observations.map(function (observation, index) {
+          var observationId = _itemId(observation, index + 1);
+          var matched = interpretations.filter(function (candidate) {
+            if (!candidate || typeof candidate !== "object") return false;
+            return String(candidate.observation_id || candidate.observation_ref || candidate.source_observation_id || "") === observationId;
+          })[0];
+          return _observationHtml(observation, index, matched);
+        }).join("") + '</ul>' : '') +
+      (interpretations.filter(function (candidate) {
+        if (!candidate || typeof candidate !== "object") return true;
+        var reference = String(candidate.observation_id || candidate.observation_ref || candidate.source_observation_id || "");
+        return !reference || !observations.some(function (observation, index) { return _itemId(observation, index + 1) === reference; });
+      }).length ? '<div class="deliberation-figure-subheading">意味候補</div><ul class="deliberation-observation-list deliberation-interpretation-list">' +
+        interpretations.filter(function (candidate) {
+          if (!candidate || typeof candidate !== "object") return true;
+          var reference = String(candidate.observation_id || candidate.observation_ref || candidate.source_observation_id || "");
+          return !reference || !observations.some(function (observation, index) { return _itemId(observation, index + 1) === reference; });
+        }).map(_interpretationHtml).join("") + '</ul>' : '') +
+      (highlights.length ? '<div class="deliberation-figure-subheading">注目箇所</div><ul class="deliberation-observation-list">' +
+        highlights.map(function (highlight, index) { return _observationHtml(highlight, index, null); }).join("") + '</ul>' : '') +
+      '<p class="deliberation-figure-caution">画像から読み取った数値は概算です。原図の目盛り・凡例・誤差表示を確認してください。</p>' +
+    '</section>';
+  }
+
+  function _descriptiveImageHtml(analysis, nested) {
+    analysis = analysis || {};
+    var summary = _itemText(analysis.summary || analysis.description || analysis.explanation || analysis.scene);
+    var subjects = _asArray(analysis.subjects).concat(
+      _asArray(analysis.objects || analysis.entities), _asArray(analysis.regions)
+    );
+    var points = _asArray(analysis.teaching_points).concat(
+      _asArray(analysis.key_points || analysis.observations || analysis.details)
+    );
+    var hasData = summary || _asArray(subjects).length || _asArray(points).length;
+    return '<section class="deliberation-figure-analysis' + (nested ? ' nested' : '') + '">' +
+      (nested ? '<h5>写真・解説画像</h5>' : '') +
+      (!hasData ? '<p class="deliberation-figure-empty">画像の短い解説はまだありません。原図とcaptionを確認しながら質問できます。</p>' : '') +
+      (summary ? '<div class="deliberation-figure-overall"><span>この画像について</span><strong>' + escHtml(summary) + '</strong></div>' : '') +
+      (_asArray(subjects).length ? '<div class="deliberation-figure-subheading">写っているもの・領域</div>' + _selectableSubjectsHtml(subjects) : '') +
+      (_asArray(points).length ? '<div class="deliberation-figure-subheading">確認ポイント</div>' + _simpleListHtml(points) : '') +
+    '</section>';
+  }
+
+  function _mixedPanelsHtml(fields) {
+    var profile = (fields && fields.analysis_profile) || {};
+    var summary = _itemText(profile.summary || profile.description);
+    var panels = _asArray(profile.panels);
+    return (summary ? '<div class="deliberation-figure-overall"><span>図全体</span><strong>' + escHtml(summary) + '</strong></div>' : '') +
+      (panels.length ? '<div class="deliberation-figure-subheading">パネル</div><div class="deliberation-function-grid">' +
+        panels.map(function (panel, index) {
+          panel = panel && typeof panel === "object" ? panel : { label: panel };
+          var label = _itemText(panel.label || panel.name || panel.title) || ("パネル " + (index + 1));
+          var panelMode = _normalizedFigureMode(panel.mode || panel.presentation_mode || panel.type);
+          var description = _itemText(panel.description || panel.summary || panel.role);
+          var panelAnalysis = panel.analysis || panel.analysis_profile || null;
+          var detail = "";
+          if (panelAnalysis && typeof panelAnalysis === "object" && Object.keys(panelAnalysis).length) {
+            if (panelMode === "functional_diagram") detail = _functionalDiagramHtml(panelAnalysis, true);
+            else if (panelMode === "data_plot") detail = _dataPlotHtml(panelAnalysis, true);
+            else if (panelMode === "descriptive_image") detail = _descriptiveImageHtml(panelAnalysis, true);
+          }
+          return '<article class="deliberation-function-card deliberation-mixed-panel"><h6><button type="button" class="deliberation-context-target"' +
+            _contextAttrs("subject", _itemId(panel, index + 1), label, panel.bbox || panel.region) + '>' + escHtml(label) + '</button></h6>' +
+            '<p>' + escHtml(FIGURE_MODE_LABELS[panelMode]) + (description ? ' — ' + escHtml(description) : '') + '</p>' +
+            (detail ? '<details class="deliberation-mixed-panel-detail"><summary>パネルの解析を見る</summary>' + detail + '</details>' : '') +
+            '</article>';
+        }).join("") + '</div>' : '');
+  }
+
+  function _figureModeHtml(fields) {
+    fields = fields || {};
+    var mode = _normalizedFigureMode(fields.effective_mode || fields.reviewed_mode || fields.suggested_mode);
+    var status = fields.mode_review_status || "";
+    var reason = fields.mode_reason || "";
+    var reasonText = FIGURE_MODE_REASON_LABELS[reason] ||
+      (reason && reason.indexOf("_") === -1 ? reason : "");
+    var reviewed = fields.reviewed_mode;
+    var header = '<div class="deliberation-figure-mode-header"><span class="deliberation-figure-mode-badge">' +
+      escHtml(FIGURE_MODE_LABELS[mode]) + '</span>' +
+      (reviewed ? '<span class="deliberation-figure-reviewed">教員確認済み</span>' :
+        (status === "pending" ? '<span class="deliberation-figure-muted">AI候補・要確認</span>' : '')) +
+      '</div>' +
+      (reasonText ? '<p class="deliberation-figure-mode-reason">' + escHtml(reasonText) + '</p>' : '') +
+      '<div class="deliberation-mode-review">' +
+        '<label for="deliberation-mode-select">表示分類</label>' +
+        '<select id="deliberation-mode-select">' +
+          '<option value="">AI候補に戻す</option>' +
+          Object.keys(FIGURE_MODE_LABELS).filter(function (key) { return key !== "unknown"; }).map(function (key) {
+            return '<option value="' + escHtml(key) + '"' + (reviewed === key ? ' selected' : '') + '>' +
+              escHtml(FIGURE_MODE_LABELS[key]) + '</option>';
+          }).join("") +
+        '</select>' +
+        '<button id="deliberation-mode-save" type="button">保存</button>' +
+        '<span id="deliberation-mode-save-status" role="status"></span>' +
+      '</div>';
+    if (mode === "functional_diagram") return header + _functionalDiagramHtml(_figureAnalysis(fields, mode), false);
+    if (mode === "data_plot") return header + _dataPlotHtml(_figureAnalysis(fields, mode), false);
+    if (mode === "descriptive_image") return header + _descriptiveImageHtml(_figureAnalysis(fields, mode), false);
+    if (mode === "mixed") {
+      var functional = _figureAnalysis(fields, "functional_diagram");
+      var plot = _figureAnalysis(fields, "data_plot");
+      var descriptive = _figureAnalysis(fields, "descriptive_image");
+      return header + '<p class="deliberation-figure-empty">複数の表現を含む図です。取得できた解析を種類ごとに示します。</p>' +
+        _mixedPanelsHtml(fields) +
+        (functional ? _functionalDiagramHtml(functional, true) : '') +
+        (plot ? _dataPlotHtml(plot, true) : '') +
+        (descriptive ? _descriptiveImageHtml(descriptive, true) : '') +
+        (!functional && !plot && !descriptive ? _descriptiveImageHtml(null, true) : '');
+    }
+    var unknownProfile = fields.analysis_profile || {};
+    var unknownSummary = _itemText(unknownProfile.summary || unknownProfile.description);
+    return header + '<p class="deliberation-figure-empty">図の種類を判定できませんでした。原図・caption・周辺本文を確認しながら質問できます。</p>' +
+      (unknownSummary ? '<div class="deliberation-figure-overall"><span>取得できた説明</span><strong>' + escHtml(unknownSummary) + '</strong></div>' : '');
+  }
+
+  function _figureWorkspaceHtml(decomposition, positioning) {
+    var fields = decomposition.fields || {};
+    return '<div class="deliberation-figure-workspace">' +
+      '<div class="deliberation-figure-image-card">' +
+        '<div class="deliberation-figure-image-toolbar"><span>原図</span>' +
+          '<button id="deliberation-figure-expand" type="button" disabled>拡大表示</button></div>' +
+        '<div class="deliberation-figure-image-stage" data-figure-bbox="' +
+          escHtml(JSON.stringify(fields.bbox || fields.figure_bbox || null)) + '">' +
+          '<div id="deliberation-figure-image-status">画像を読み込み中...</div>' +
+          '<div id="deliberation-figure-image-canvas" class="deliberation-figure-image-canvas" hidden>' +
+            '<img id="deliberation-figure-image" alt="' + escHtml(decomposition.label || "検討対象の図") + '">' +
+            '<div id="deliberation-figure-overlays" class="deliberation-figure-overlays"></div>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div id="deliberation-figure-mode-container">' + _figureModeHtml(fields) + '</div>' +
+      '<details class="deliberation-figure-raw"><summary>抽出データ・根拠を見る</summary>' +
+        '<div class="deliberation-figure-raw-body">' + _fieldsHtml(fields) + _notesHtml(decomposition.notes) + '</div>' +
+      '</details>' +
+      _positioningHtml(positioning) +
+      '<div id="deliberation-figure-lightbox" class="deliberation-figure-lightbox" aria-hidden="true">' +
+        '<button id="deliberation-figure-lightbox-close" type="button" aria-label="拡大表示を閉じる">&times;</button>' +
+        '<img id="deliberation-figure-lightbox-image" alt="' + escHtml(decomposition.label || "検討対象の図") + '">' +
+      '</div>' +
+    '</div>';
+  }
+
   function _renderModalBody(data) {
     var body = document.getElementById("deliberation-modal-body");
     if (!body) return;
     var decomposition = data.decomposition || {};
     var typeLabel = ELEMENT_TYPE_LABELS[decomposition.element_type] || decomposition.element_type || "";
+    var isFigure = decomposition.element_type === "figure";
     body.innerHTML =
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">' +
         '<span class="admin-status" style="background:var(--color-background-info);color:var(--color-text-info)">' +
@@ -203,14 +657,261 @@
         '</span>' +
         '<h4 style="margin:0;font-size:15px;color:var(--color-text-primary)">' + escHtml(decomposition.label || "") + '</h4>' +
       '</div>' +
-      '<div style="margin-bottom:6px">' +
-        '<div style="font-size:12.5px;font-weight:600;color:var(--color-text-secondary);margin-bottom:4px">内訳</div>' +
-        _fieldsHtml(decomposition.fields) +
-      '</div>' +
-      _notesHtml(decomposition.notes) +
-      _positioningHtml(data.positioning) +
+      (isFigure ? _figureWorkspaceHtml(decomposition, data.positioning) :
+        '<div style="margin-bottom:6px">' +
+          '<div style="font-size:12.5px;font-weight:600;color:var(--color-text-secondary);margin-bottom:4px">内訳</div>' +
+          _fieldsHtml(decomposition.fields) +
+        '</div>' +
+        _notesHtml(decomposition.notes) +
+        _positioningHtml(data.positioning)) +
       _identityLinksSectionHtml() +
       _standardizationSectionHtml(decomposition.element_type);
+    if (isFigure) {
+      _bindFigureImageActions();
+      _bindFigureContextActions();
+      _bindFigureModeReview(decomposition);
+      _loadFigureImage(decomposition);
+    }
+  }
+
+  function _figureImagePath(decomposition) {
+    var fields = decomposition.fields || {};
+    var path = fields.image_url || decomposition.image_url || "";
+    var documentId = fields.document_id || decomposition.document_id ||
+      (chatState.ref && chatState.ref.documentId);
+    var figureId = decomposition.element_id || (chatState.ref && chatState.ref.elementId);
+    if (!path && documentId && figureId) {
+      path = "/admin/documents/" + encodeURIComponent(documentId) + "/figures/" +
+        encodeURIComponent(figureId) + "/image";
+    }
+    // apiFetchRaw は内部で /api を付加するため、overview が返す公開形式から剥がす。
+    if (path.indexOf("/api/") === 0) path = path.substring(4);
+    // 認証情報を意図しない外部 URL へ送らない。契約外 URL は fail-soft 表示にする。
+    if (path.indexOf("/admin/") !== 0) return "";
+    return path;
+  }
+
+  function _setFigureLightbox(open) {
+    var lightbox = document.getElementById("deliberation-figure-lightbox");
+    if (!lightbox) return;
+    lightbox.classList.toggle("is-open", !!open);
+    lightbox.setAttribute("aria-hidden", open ? "false" : "true");
+    if (open) {
+      var close = document.getElementById("deliberation-figure-lightbox-close");
+      if (close) close.focus();
+    }
+  }
+
+  function _bindFigureImageActions() {
+    var expand = document.getElementById("deliberation-figure-expand");
+    var image = document.getElementById("deliberation-figure-image");
+    var lightbox = document.getElementById("deliberation-figure-lightbox");
+    var close = document.getElementById("deliberation-figure-lightbox-close");
+    if (expand) expand.addEventListener("click", function () { _setFigureLightbox(true); });
+    if (image) image.addEventListener("click", function () { _setFigureLightbox(true); });
+    if (close) close.addEventListener("click", function () { _setFigureLightbox(false); });
+    if (lightbox) lightbox.addEventListener("click", function (event) {
+      if (event.target === lightbox) _setFigureLightbox(false);
+    });
+  }
+
+  function _updateSelectedContextUi() {
+    var bar = document.getElementById("deliberation-chat-context");
+    var label = document.getElementById("deliberation-chat-context-label");
+    if (!bar || !label) return;
+    if (!chatState.selectedContext) {
+      bar.hidden = true;
+      label.textContent = "";
+      return;
+    }
+    bar.hidden = false;
+    label.textContent = chatState.selectedContext.label;
+  }
+
+  function _activateFigureContext(button) {
+    var kind = button.getAttribute("data-deliberation-context-kind");
+    var id = button.getAttribute("data-deliberation-context-id");
+    Array.prototype.forEach.call(document.querySelectorAll("[data-deliberation-context-kind]"), function (candidate) {
+      var selected = candidate.getAttribute("data-deliberation-context-kind") === kind &&
+        candidate.getAttribute("data-deliberation-context-id") === id;
+      candidate.classList.toggle("is-selected", selected);
+      candidate.setAttribute("aria-pressed", selected ? "true" : "false");
+    });
+    Array.prototype.forEach.call(document.querySelectorAll("[data-deliberation-connection]"), function (connection) {
+      var linked = (connection.getAttribute("data-deliberation-connection") || "").split("|");
+      connection.classList.toggle("is-related", kind === "part" && linked.indexOf(id) !== -1);
+    });
+    chatState.selectedContext = {
+      kind: kind,
+      id: id,
+      label: button.getAttribute("data-deliberation-context-label")
+    };
+    _updateSelectedContextUi();
+  }
+
+  function _bindFigureContextActions(root) {
+    root = root || document;
+    Array.prototype.forEach.call(root.querySelectorAll("[data-deliberation-context-kind]"), function (button) {
+      if (button.getAttribute("data-deliberation-context-bound") === "true") return;
+      button.setAttribute("data-deliberation-context-bound", "true");
+      button.setAttribute("aria-pressed", "false");
+      button.addEventListener("click", function () { _activateFigureContext(button); });
+    });
+  }
+
+  function _bboxValues(value) {
+    if (!value) return null;
+    if (value.bbox) return _bboxValues(value.bbox);
+    var values;
+    if (Array.isArray(value) && value.length >= 4) {
+      values = [value[0], value[1], value[2], value[3]];
+    } else if (typeof value === "object") {
+      if (value.x0 !== undefined) values = [value.x0, value.y0, value.x1, value.y1];
+      else if (value.left !== undefined) values = [value.left, value.top, value.right, value.bottom];
+      else if (value.x !== undefined && value.width !== undefined) {
+        values = [value.x, value.y, Number(value.x) + Number(value.width), Number(value.y) + Number(value.height)];
+      }
+    }
+    if (!values) return null;
+    values = values.map(Number);
+    if (values.some(function (number) { return !isFinite(number); }) || values[2] <= values[0] || values[3] <= values[1]) return null;
+    return values;
+  }
+
+  function _relativeBbox(target, figure) {
+    var bbox = _bboxValues(target);
+    if (!bbox) return null;
+    if (bbox.every(function (number) { return number >= 0 && number <= 1; })) return bbox;
+    var figureBbox = _bboxValues(figure);
+    if (!figureBbox) return null;
+    var width = figureBbox[2] - figureBbox[0];
+    var height = figureBbox[3] - figureBbox[1];
+    var relative = [
+      (bbox[0] - figureBbox[0]) / width,
+      (bbox[1] - figureBbox[1]) / height,
+      (bbox[2] - figureBbox[0]) / width,
+      (bbox[3] - figureBbox[1]) / height
+    ];
+    relative = relative.map(function (number) { return Math.max(0, Math.min(1, number)); });
+    if (relative[2] <= relative[0] || relative[3] <= relative[1]) return null;
+    return relative;
+  }
+
+  function _renderFigureOverlays() {
+    var stage = document.querySelector(".deliberation-figure-image-stage");
+    var layer = document.getElementById("deliberation-figure-overlays");
+    if (!stage || !layer) return;
+    layer.innerHTML = "";
+    var figureBbox = null;
+    try { figureBbox = JSON.parse(stage.getAttribute("data-figure-bbox") || "null"); } catch (e) { /* noop */ }
+    var seen = {};
+    Array.prototype.forEach.call(document.querySelectorAll(".deliberation-context-target[data-deliberation-bbox]"), function (source, index) {
+      var raw;
+      try { raw = JSON.parse(source.getAttribute("data-deliberation-bbox")); } catch (e) { return; }
+      var bbox = _relativeBbox(raw, figureBbox);
+      if (!bbox) return;
+      var key = source.getAttribute("data-deliberation-context-kind") + ":" + source.getAttribute("data-deliberation-context-id");
+      if (seen[key]) return;
+      seen[key] = true;
+      var marker = document.createElement("button");
+      marker.type = "button";
+      marker.className = "deliberation-figure-overlay deliberation-context-target";
+      marker.setAttribute("data-deliberation-context-kind", source.getAttribute("data-deliberation-context-kind"));
+      marker.setAttribute("data-deliberation-context-id", source.getAttribute("data-deliberation-context-id"));
+      marker.setAttribute("data-deliberation-context-label", source.getAttribute("data-deliberation-context-label"));
+      marker.setAttribute("aria-label", source.getAttribute("data-deliberation-context-label") + "を選択");
+      marker.title = source.getAttribute("data-deliberation-context-label");
+      marker.style.left = (bbox[0] * 100) + "%";
+      marker.style.top = (bbox[1] * 100) + "%";
+      marker.style.width = ((bbox[2] - bbox[0]) * 100) + "%";
+      marker.style.height = ((bbox[3] - bbox[1]) * 100) + "%";
+      marker.textContent = String(index + 1);
+      layer.appendChild(marker);
+    });
+    _bindFigureContextActions(layer);
+    if (chatState.selectedContext) {
+      var selected = null;
+      Array.prototype.some.call(document.querySelectorAll("[data-deliberation-context-kind]"), function (candidate) {
+        if (candidate.getAttribute("data-deliberation-context-kind") === chatState.selectedContext.kind &&
+            candidate.getAttribute("data-deliberation-context-id") === chatState.selectedContext.id) {
+          selected = candidate;
+          return true;
+        }
+        return false;
+      });
+      if (selected) _activateFigureContext(selected);
+    }
+  }
+
+  function _bindFigureModeReview(decomposition) {
+    var select = document.getElementById("deliberation-mode-select");
+    var save = document.getElementById("deliberation-mode-save");
+    var status = document.getElementById("deliberation-mode-save-status");
+    var fields = (decomposition && decomposition.fields) || {};
+    var documentId = fields.document_id || decomposition.document_id || (chatState.ref && chatState.ref.documentId);
+    var figureId = decomposition.element_id || (chatState.ref && chatState.ref.elementId);
+    if (!select || !save) return;
+    if (!documentId || !figureId) {
+      save.disabled = true;
+      if (status) status.textContent = "保存先を特定できません";
+      return;
+    }
+    save.addEventListener("click", function () {
+      save.disabled = true;
+      if (status) status.textContent = "保存中...";
+      apiFetch(
+        "/admin/documents/" + encodeURIComponent(documentId) + "/figures/" + encodeURIComponent(figureId) + "/presentation-mode",
+        { method: "PATCH", body: JSON.stringify({ presentation_mode: select.value || null }) }
+      )
+        .then(_parseJsonResponse)
+        .then(function () {
+          if (status) status.textContent = "保存しました";
+          chatState.selectedContext = null;
+          _updateSelectedContextUi();
+          return _reloadOverview();
+        })
+        .catch(function (err) {
+          if (status) status.textContent = (err && err.detail) || "保存に失敗しました";
+        })
+        .then(function () { save.disabled = false; });
+    });
+  }
+
+  function _loadFigureImage(decomposition) {
+    var path = _figureImagePath(decomposition);
+    var requestId = ++figureImageState.requestId;
+    var status = document.getElementById("deliberation-figure-image-status");
+    if (!path) {
+      if (status) status.textContent = "原図の取得先がありません";
+      return;
+    }
+    apiFetchRaw(path, { _noJson: true })
+      .then(function (res) {
+        if (!res.ok) throw new Error("image load failed");
+        return res.blob();
+      })
+      .then(function (blob) {
+        if (requestId !== figureImageState.requestId || !document.getElementById("deliberation-modal")) return;
+        var url = URL.createObjectURL(blob);
+        figureImageState.objectUrls.push(url);
+        var image = document.getElementById("deliberation-figure-image");
+        var largeImage = document.getElementById("deliberation-figure-lightbox-image");
+        var expand = document.getElementById("deliberation-figure-expand");
+        var canvas = document.getElementById("deliberation-figure-image-canvas");
+        if (image) {
+          image.addEventListener("load", _renderFigureOverlays);
+          image.src = url;
+        }
+        if (canvas) canvas.hidden = false;
+        if (largeImage) largeImage.src = url;
+        if (expand) expand.disabled = false;
+        if (status) status.remove();
+      })
+      .catch(function () {
+        if (requestId !== figureImageState.requestId) return;
+        var currentStatus = document.getElementById("deliberation-figure-image-status");
+        if (currentStatus) currentStatus.textContent = "原図を表示できません。メタデータと対話は引き続き利用できます。";
+      });
   }
 
   // ── Phase W-β: 同一性リンク（identity-links）セクション ─────────────────
@@ -472,9 +1173,15 @@
     _setChatSending(true);
     _ensureChatSession()
       .then(function (sessionId) {
+        var messageBody = { content: text };
+        if (chatState.selectedContext) {
+          // content は変更せず、選択中の機能・観測・被写体を補助文脈として渡す。
+          // backend が未対応の期間も通常の本文契約を維持できる形にする。
+          messageBody.selected_context = chatState.selectedContext;
+        }
         return apiFetch(
           "/admin/deliberation/sessions/" + encodeURIComponent(sessionId) + "/messages",
-          { method: "POST", body: JSON.stringify({ content: text }) }
+          { method: "POST", body: JSON.stringify(messageBody) }
         );
       })
       .then(_parseJsonResponse)
@@ -620,6 +1327,29 @@
       });
   }
 
+  function _overviewPath(ref) {
+    ref = ref || {};
+    var path = "/admin/deliberation/elements/" + encodeURIComponent(ref.elementType) + "/" +
+      encodeURIComponent(ref.elementId) + "/overview";
+    if (ref.elementType === "equation" && ref.documentId) {
+      path += "?document_id=" + encodeURIComponent(ref.documentId);
+    }
+    return path;
+  }
+
+  function _reloadOverview() {
+    var ref = chatState.ref || {};
+    return apiFetch(_overviewPath(ref))
+      .then(_parseJsonResponse)
+      .then(function (data) {
+        _resetFigureImageState();
+        _renderModalBody(data);
+        _bindStandardizationAssessButton(ref);
+        _loadIdentityLinks(ref);
+        return data;
+      });
+  }
+
   // ── 公開 API: openElement ────────────────────────────────────────────
   // opts = { documentId: string|null, title: string|null }
   // equation は document_id が必須（無ければ何もしない。設計書 §2 の equation 一意化の要件）。
@@ -640,7 +1370,7 @@
     overlay.id = "deliberation-modal";
     overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
     overlay.innerHTML =
-      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:760px;max-width:1080px;width:92vw;max-height:86vh;display:flex;flex-direction:column">' +
+      '<div class="deliberation-modal-dialog">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
           '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">深く検討' +
             (opts.title ? ' — ' + escHtml(opts.title) : '') +
@@ -661,6 +1391,10 @@
               _chatEmptyStateHtml() +
             '</div>' +
             '<div class="deliberation-chat-annotations" id="deliberation-chat-annotations"></div>' +
+            '<div id="deliberation-chat-context" class="deliberation-chat-context" hidden>' +
+              '<span>質問対象: <strong id="deliberation-chat-context-label"></strong></span>' +
+              '<button id="deliberation-chat-context-clear" type="button" aria-label="質問対象を解除">解除</button>' +
+            '</div>' +
             '<div class="deliberation-chat-inputrow">' +
               '<textarea id="deliberation-chat-input" class="deliberation-chat-input" rows="2" placeholder="この要素について質問..."></textarea>' +
               '<button id="deliberation-chat-send" type="button" class="deliberation-chat-send">送信</button>' +
@@ -675,7 +1409,19 @@
 
     var chatInput = document.getElementById("deliberation-chat-input");
     var chatSendBtn = document.getElementById("deliberation-chat-send");
+    var chatContextClear = document.getElementById("deliberation-chat-context-clear");
     if (chatSendBtn) chatSendBtn.addEventListener("click", _sendChatMessage);
+    if (chatContextClear) chatContextClear.addEventListener("click", function () {
+      chatState.selectedContext = null;
+      Array.prototype.forEach.call(document.querySelectorAll("[data-deliberation-context-kind]"), function (candidate) {
+        candidate.classList.remove("is-selected");
+        candidate.setAttribute("aria-pressed", "false");
+      });
+      Array.prototype.forEach.call(document.querySelectorAll("[data-deliberation-connection]"), function (connection) {
+        connection.classList.remove("is-related");
+      });
+      _updateSelectedContextUi();
+    });
     if (chatInput) {
       chatInput.addEventListener("keydown", function (e) {
         if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
@@ -689,12 +1435,7 @@
     // ここでは作らない（POST /sessions は最初の送信時にのみ _ensureChatSession が呼ぶ）。
     _loadAnnotations(elementType, elementId, opts.documentId);
 
-    var path = "/admin/deliberation/elements/" + encodeURIComponent(elementType) + "/" + encodeURIComponent(elementId) + "/overview";
-    if (elementType === "equation" && opts.documentId) {
-      path += "?document_id=" + encodeURIComponent(opts.documentId);
-    }
-
-    apiFetch(path)
+    apiFetch(_overviewPath(chatState.ref))
       .then(function (res) {
         if (!res.ok) {
           var status = res.status;

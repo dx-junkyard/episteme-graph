@@ -337,6 +337,9 @@ def _save_figure(
                     extraction_method = EXCLUDED.extraction_method,
                     region_confidence = EXCLUDED.region_confidence,
                     inner_labels = EXCLUDED.inner_labels,
+                    suggested_mode = 'unknown',
+                    mode_reason = '',
+                    analysis_profile = '{}'::jsonb,
                     status = 'extracted'
                 RETURNING id::text
                 """
@@ -590,7 +593,9 @@ def load_document_figures(document_id: str) -> list[dict]:
                 """
                 SELECT id::text, document_id, run_id::text, figure_key, figure_label,
                        page, bbox, caption_block_id, caption_text, minio_key,
-                       extraction_method, region_confidence, status, created_at, inner_labels
+                       extraction_method, region_confidence, status, created_at, inner_labels,
+                       suggested_mode, mode_reason, analysis_profile, reviewed_mode,
+                       mode_review_status, mode_reviewed_by::text, mode_reviewed_at
                 FROM document_figures
                 WHERE document_id = :document_id
                 ORDER BY page NULLS LAST, figure_key
@@ -615,6 +620,14 @@ def load_document_figures(document_id: str) -> list[dict]:
                     item["inner_labels"] = []
             elif inner_labels is None:
                 item["inner_labels"] = []
+            analysis_profile = item.get("analysis_profile")
+            if isinstance(analysis_profile, str):
+                try:
+                    item["analysis_profile"] = json.loads(analysis_profile)
+                except (ValueError, TypeError):
+                    item["analysis_profile"] = {}
+            elif not isinstance(analysis_profile, dict):
+                item["analysis_profile"] = {}
             result.append(item)
         return result
     finally:

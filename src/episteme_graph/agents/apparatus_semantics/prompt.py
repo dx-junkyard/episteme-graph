@@ -10,19 +10,23 @@ from __future__ import annotations
 import json
 
 from .schema import MATCH_STATUSES, FigureImageInput
+from episteme_graph.agents.figure_modes import FIGURE_MODES
 
 _SYSTEM_CONTENT = """\
-You are analyzing a figure image from a scientific paper (an experimental \
-apparatus / instrument / setup diagram).
+You are analyzing a figure image from a scientific paper. It may be a \
+functional diagram, a data plot, a descriptive photo/illustration, a mixed \
+multi-panel figure, or something that cannot be classified. Do not assume \
+that every image is an apparatus diagram.
 
 Your task is NOT to judge whether the apparatus works or whether the paper's \
 claims are correct. Your task is to describe what is depicted:
 
-1. A short candidate name for the depicted apparatus/instrument
-2. Whether it matches one of the supplied library candidates, is a novel \
-   apparatus not in the library, or cannot be determined (unknown)
-3. The apparatus's constituent parts and their role
-4. How the parts connect to each other
+1. Suggest one presentation mode and explain the classification
+2. Produce the matching mode-specific analysis profile
+3. For functional diagrams only, identify the functions, their multiple \
+   inputs/outputs, and how outputs connect to inputs
+4. Preserve the legacy apparatus fields for functional diagrams; leave them \
+   empty for data plots and descriptive images
 5. Evidence: quote the caption/nearby text verbatim wherever it supports your \
    reading. Do not invent quotes.
 
@@ -34,6 +38,39 @@ Return ONLY valid JSON matching the output schema — no markdown fences.
 """
 
 _OUTPUT_SCHEMA = {
+    "suggested_mode": "functional_diagram | data_plot | descriptive_image | mixed | unknown",
+    "mode_reason": "short reason; distinguish direct evidence from visual inference",
+    "analysis_profile": {
+        "overall_function": "functional_diagram: purpose of the whole system",
+        "external_inputs": [{"id": "input id", "name": "input", "type": "light/signal/material/information/etc"}],
+        "external_outputs": [{"id": "output id", "name": "output", "type": "light/signal/material/information/etc"}],
+        "functions": [{
+            "id": "stable local id",
+            "name": "display name",
+            "role": "function performed",
+            "inputs": [{"id": "input id", "name": "port/input", "type": "what is received"}],
+            "outputs": [{"id": "output id", "name": "port/output", "type": "what is emitted"}],
+            "label_ref": "in-figure label verbatim, or null",
+        }],
+        "connections": [{
+            "from_function_id": "function id",
+            "from_output_id": "output id",
+            "to_function_id": "function id",
+            "to_input_id": "input id",
+            "relation": "how/what is transferred",
+        }],
+        "plot_type": "data_plot: line/bar/scatter/heatmap/etc",
+        "axes": [{"orientation": "x/y/color/other", "name": "axis label", "unit": "unit", "scale": "linear/log/unknown"}],
+        "series": [{"name": "series", "visual_encoding": "color/line/marker"}],
+        "observations": [{"id": "stable observation id", "kind": "peak/trend/crossing/etc", "description": "direct observation"}],
+        "interpretations": [{"observation_id": "optional observation id", "meaning_candidate": "possible meaning, kept separate from observation"}],
+        "highlights": [{"label": "point/region", "description": "why it matters"}],
+        "summary": "descriptive_image/mixed/unknown: concise explanation",
+        "subjects": [{"name": "subject", "description": "what is visibly depicted"}],
+        "regions": [{"label": "region", "bbox": [0, 0, 0, 0], "description": "region explanation"}],
+        "teaching_points": [{"title": "point", "description": "instructional explanation"}],
+        "panels": [{"label": "(a)", "mode": "one allowed mode", "analysis": {}}],
+    },
     "apparatus_name_candidate": "short free-text name for the depicted apparatus",
     "matched_library_entry_id": "entry_id of a candidate below, or null",
     "match_status": "matched | novel | unknown",
@@ -132,8 +169,8 @@ class ApparatusSemanticsPromptFactory:
         parts: list[str] = []
         parts.append("## Task")
         parts.append(
-            "Identify the apparatus shown in the attached image using the caption, "
-            "nearby text, and (if any) the library candidates below. "
+            "Classify and analyze the attached scientific figure using the caption, "
+            "nearby text, and (for functional apparatus diagrams only) any library candidates below. "
             "Return ONLY JSON matching the output schema."
         )
 
@@ -201,8 +238,19 @@ class ApparatusSemanticsPromptFactory:
         parts.append(json.dumps(_OUTPUT_SCHEMA, ensure_ascii=False, indent=2))
         parts.append("\n## Allowed Values")
         parts.append(f"match_status: {', '.join(MATCH_STATUSES)}")
+        parts.append(f"suggested_mode: {', '.join(FIGURE_MODES)}")
         parts.append("\n## Constraints")
         parts.append(
+            "- Never classify an image as functional_diagram merely because this pipeline stage has "
+            "an apparatus-oriented legacy name\n"
+            "- data_plot analysis must separate directly visible observations from interpretation\n"
+            "- descriptive_image analysis explains visible subjects/regions and must not invent connections\n"
+            "- mixed is for genuinely mixed panels; include panels[] with a mode per panel\n"
+            "- unknown is preferred when evidence is insufficient\n"
+            "- For modes other than functional_diagram (and functional panels in mixed), leave "
+            "apparatus_name_candidate empty, set match_status=unknown, set "
+            "matched_library_entry_id=null, matched_library_version_no=null, and leave "
+            "parts/connections empty\n"
             "- matched_library_entry_id must be one of the candidates' entry_id values above, "
             "or null when match_status is not 'matched'\n"
             "- evidence_quote fields must be verbatim substrings of the caption or nearby text "

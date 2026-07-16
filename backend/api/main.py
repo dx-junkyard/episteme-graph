@@ -54,6 +54,7 @@ from sqlalchemy import text as sa_text
 
 from dependencies import _hash_password
 from routes import auth, learning, admin, lecture, groups, error_logs, export as export_routes
+from routes import figure_presentation as figure_presentation_routes
 from routes import atlas as atlas_routes
 from routes import atlas_view as atlas_view_routes
 from routes import doubt as doubt_routes
@@ -202,6 +203,17 @@ error_logs.register_error_log_middleware(app)
 # ルーターのマウント
 app.include_router(auth.router)
 app.include_router(learning.router)
+# #496 moved the figures list to figure_presentation so there is one
+# registered GET operation (not two order-dependent handlers).  The legacy
+# function remains importable for static/backward-compatibility tests.
+admin.router.routes[:] = [
+    route for route in admin.router.routes
+    if not (
+        getattr(route, "path", "") == "/api/admin/documents/{document_id}/figures"
+        and "GET" in (getattr(route, "methods", set()) or set())
+    )
+]
+app.include_router(figure_presentation_routes.router)
 app.include_router(admin.router)
 app.include_router(error_logs.router)
 app.include_router(lecture.router)

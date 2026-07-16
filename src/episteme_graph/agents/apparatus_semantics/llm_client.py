@@ -28,6 +28,37 @@ logger = logging.getLogger(__name__)
 APPARATUS_RESPONSE_SCHEMA: dict = {
     "type": "object",
     "properties": {
+        "suggested_mode": {
+            "type": "string",
+            "enum": [
+                "functional_diagram", "data_plot", "descriptive_image", "mixed", "unknown"
+            ],
+        },
+        "mode_reason": {"type": "string"},
+        # Mode-specific content intentionally uses a permissive nested shape:
+        # validator.py owns acceptance and older providers differ in how fully
+        # they implement JSON Schema for nested structured output.
+        "analysis_profile": {
+            "type": "object",
+            "properties": {
+                "overall_function": {"type": "string"},
+                "external_inputs": {"type": "array", "items": {"type": "object"}},
+                "external_outputs": {"type": "array", "items": {"type": "object"}},
+                "functions": {"type": "array", "items": {"type": "object"}},
+                "connections": {"type": "array", "items": {"type": "object"}},
+                "plot_type": {"type": "string"},
+                "axes": {"type": "array", "items": {"type": "object"}},
+                "series": {"type": "array", "items": {"type": "object"}},
+                "observations": {"type": "array", "items": {"type": "object"}},
+                "interpretations": {"type": "array", "items": {"type": "object"}},
+                "highlights": {"type": "array", "items": {"type": "object"}},
+                "summary": {"type": "string"},
+                "subjects": {"type": "array", "items": {"type": "object"}},
+                "regions": {"type": "array", "items": {"type": "object"}},
+                "teaching_points": {"type": "array", "items": {"type": "object"}},
+                "panels": {"type": "array", "items": {"type": "object"}},
+            },
+        },
         "apparatus_name_candidate": {"type": "string"},
         "matched_library_entry_id": {"type": ["string", "null"]},
         "match_status": {"type": "string", "enum": ["matched", "novel", "unknown"]},

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 
+from episteme_graph.agents.figure_modes import FIGURE_MODES
+
 from .schema import (
     MATCH_STATUSES,
     REVIEW_STATUSES,
@@ -79,6 +81,23 @@ class ApparatusSemanticsValidator:
     ) -> list[ValidationIssue]:
         issues: list[ValidationIssue] = []
         fid = record.figure_id
+
+        if record.suggested_mode not in FIGURE_MODES:
+            issues.append(ValidationIssue(
+                rule_id="invalid_suggested_mode",
+                severity="error",
+                message=f"{fid} has invalid suggested_mode {record.suggested_mode!r}",
+                field=f"{fid}.suggested_mode",
+            ))
+        if not isinstance(record.analysis_profile, dict):
+            issues.append(ValidationIssue(
+                rule_id="invalid_analysis_profile",
+                severity="error",
+                message=f"{fid} analysis_profile must be an object",
+                field=f"{fid}.analysis_profile",
+            ))
+        elif record.suggested_mode == "functional_diagram":
+            issues.extend(self._validate_functional_profile(record))
 
         if record.match_status not in MATCH_STATUSES:
             issues.append(ValidationIssue(
@@ -284,6 +303,76 @@ class ApparatusSemanticsValidator:
                         field=f"{fid}.parts",
                     ))
 
+        return issues
+
+    @staticmethod
+    def _validate_functional_profile(record: ApparatusRecord) -> list[ValidationIssue]:
+        """Validate function/port references without asserting visual guesses as facts."""
+        issues: list[ValidationIssue] = []
+        fid = record.figure_id
+        functions = [
+            item for item in (record.analysis_profile.get("functions") or [])
+            if isinstance(item, dict)
+        ]
+        function_ids = [str(item.get("id") or "") for item in functions]
+        if any(not value for value in function_ids) or len(function_ids) != len(set(function_ids)):
+            issues.append(ValidationIssue(
+                rule_id="functional_diagram_invalid_function_ids",
+                severity="error",
+                message=f"{fid} functional diagram has missing or duplicate function ids",
+                field=f"{fid}.analysis_profile.functions",
+            ))
+            return issues
+
+        by_id = {str(item.get("id")): item for item in functions}
+        for index, connection in enumerate(record.analysis_profile.get("connections") or []):
+            if not isinstance(connection, dict):
+                continue
+            source_id = str(connection.get("from_function_id") or "")
+            target_id = str(connection.get("to_function_id") or "")
+            output_id = str(connection.get("from_output_id") or "")
+            input_id = str(connection.get("to_input_id") or "")
+            if not source_id or not target_id or not output_id or not input_id:
+                issues.append(ValidationIssue(
+                    rule_id="functional_connection_missing_endpoint_id",
+                    severity="error",
+                    message=(
+                        f"{fid} connection[{index}] must reference function and port ids "
+                        "at both endpoints"
+                    ),
+                    field=f"{fid}.analysis_profile.connections[{index}]",
+                ))
+                continue
+            if source_id not in by_id or target_id not in by_id:
+                issues.append(ValidationIssue(
+                    rule_id="functional_connection_unknown_function",
+                    severity="error",
+                    message=f"{fid} connection[{index}] references an unknown function",
+                    field=f"{fid}.analysis_profile.connections[{index}]",
+                ))
+                continue
+            output_ids = {
+                str(port.get("id") or "") for port in (by_id[source_id].get("outputs") or [])
+                if isinstance(port, dict)
+            }
+            input_ids = {
+                str(port.get("id") or "") for port in (by_id[target_id].get("inputs") or [])
+                if isinstance(port, dict)
+            }
+            if output_id and output_id not in output_ids:
+                issues.append(ValidationIssue(
+                    rule_id="functional_connection_unknown_output",
+                    severity="error",
+                    message=f"{fid} connection[{index}] references an unknown output port",
+                    field=f"{fid}.analysis_profile.connections[{index}].from_output_id",
+                ))
+            if input_id and input_id not in input_ids:
+                issues.append(ValidationIssue(
+                    rule_id="functional_connection_unknown_input",
+                    severity="error",
+                    message=f"{fid} connection[{index}] references an unknown input port",
+                    field=f"{fid}.analysis_profile.connections[{index}].to_input_id",
+                ))
         return issues
 
     @staticmethod

@@ -20,6 +20,8 @@ from typing import Any
 from sqlalchemy import text as sa_text
 
 from core.postgres import get_session
+from core.figure_presentation import presentation_payload
+from core.document_pipeline.persistence import get_latest_analysis_run
 from core.deliberation import refs as refs_mod
 from core.deliberation.schema import (
     ELEMENT_EQUATION,
@@ -170,12 +172,14 @@ def _decompose_figure(ref: ElementRef) -> dict[str, Any]:
             sa_text(
                 """
                 SELECT figure_label, caption_text, page, status,
-                       extraction_method, caption_block_id
+                       extraction_method, caption_block_id, document_id, figure_key,
+                       suggested_mode, reviewed_mode, mode_reason, mode_review_status,
+                       analysis_profile, bbox, inner_labels
                 FROM document_figures WHERE id = CAST(:id AS uuid) LIMIT 1
                 """
             ),
             {"id": ref.element_id},
-        ).fetchone()
+        ).mappings().first()
         # 装置・部品候補（apparatus_semantics → ComponentAssembly 経由の候補コンポーネント）。
         apparatus_rows = session.execute(
             sa_text(
@@ -206,19 +210,44 @@ def _decompose_figure(ref: ElementRef) -> dict[str, Any]:
     notes: list[str] = []
     if apparatus:
         notes.append("装置・部品候補は review_required（確定は人間・L層）")
-    if not fig[1]:
+    if not fig.get("caption_text"):
         notes.append("caption 対応なし（caption_block_id=NULL でも保持・P4）")
+    artifact_record: dict[str, Any] = {}
+    try:
+        latest_run = get_latest_analysis_run(document_id=ref.document_id or "")
+        artifacts = (((latest_run or {}).get("stage_outputs") or {}).get("_artifacts") or {})
+        for record in (artifacts.get("apparatus_semantics") or {}).get("apparatus_records") or []:
+            if isinstance(record, dict) and str(record.get("figure_id") or "") == ref.element_id:
+                artifact_record = record
+                break
+    except Exception:
+        # Old/no run is expected; persisted columns and an unknown profile are
+        # sufficient for a useful, fail-soft overview.
+        artifact_record = {}
+    presentation = presentation_payload(
+        dict(fig), artifact_record, caption_text=str(fig.get("caption_text") or "")
+    )
+    document_id = str(fig.get("document_id") or ref.document_id or "")
     return {
         "element_type": ELEMENT_FIGURE,
-        "label": str(fig[0] or ref.provenance.get("figure_key") or "figure"),
+        "label": str(
+            fig.get("figure_label") or ref.provenance.get("figure_key") or "figure"
+        ),
         "fields": {
-            "figure_label": str(fig[0] or ""),
-            "figure_key": str(ref.provenance.get("figure_key") or ""),
-            "caption_text": str(fig[1] or ""),
-            "page": fig[2],
-            "status": str(fig[3] or ""),
-            "extraction_method": str(fig[4] or ""),
+            "document_id": document_id,
+            "image_url": f"/api/admin/documents/{document_id}/figures/{ref.element_id}/image",
+            "figure_label": str(fig.get("figure_label") or ""),
+            "figure_key": str(
+                fig.get("figure_key") or ref.provenance.get("figure_key") or ""
+            ),
+            "caption_text": str(fig.get("caption_text") or ""),
+            "page": fig.get("page"),
+            "status": str(fig.get("status") or ""),
+            "extraction_method": str(fig.get("extraction_method") or ""),
+            "bbox": _json(fig.get("bbox"), []),
+            "inner_labels": _json(fig.get("inner_labels"), []),
             "apparatus_candidates": apparatus,
+            **presentation,
         },
         "notes": notes,
     }
