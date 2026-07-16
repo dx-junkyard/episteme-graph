@@ -72,27 +72,39 @@ def _rank_tier(score: float, n_users: int) -> str:
     return "要確認（低）"
 
 
-def _fetch_health_rows(session, document_id: str | None) -> list[dict]:
-    if document_id:
-        sql = """
-            SELECT h.item_id::text, h.claim_id::text, h.status, h.author_confidence,
-                   h.n_responses, h.n_mismatch, h.n_verdict_dissent,
-                   h.n_verdict_self_disagree, h.n_descend, h.n_users,
-                   i.elicit_mode, i.prompt
-            FROM reconstruction_item_health h
-            JOIN reconstruction_items i ON i.id = h.item_id
-            WHERE i.document_id = :doc
-        """
-        params: dict[str, Any] = {"doc": document_id}
+_HEALTH_SELECT = """
+    SELECT h.item_id::text, h.claim_id::text, h.status, h.author_confidence,
+           h.n_responses, h.n_mismatch, h.n_verdict_dissent,
+           h.n_verdict_self_disagree, h.n_descend, h.n_users,
+           i.elicit_mode, i.prompt
+    FROM reconstruction_item_health h
+    JOIN reconstruction_items i ON i.id = h.item_id
+"""
+
+
+def _fetch_health_rows(
+    session,
+    document_id: str | None = None,
+    document_ids: list[str] | None = None,
+) -> list[dict]:
+    """review キューの health 行を取得する。
+
+    ``document_ids`` が指定された場合（複数教材コースの集約, レビュー指摘2）はそちらを
+    優先する。**空リストが渡された場合は全件フォールバックせず空を返す**（fail-closed。
+    コースの source 教材が0件、または解決できた document_id が1つも無いことの正直な
+    反映であり、「フィルタ無し=全件」に静かに戻さない）。``document_ids`` が未指定
+    （None）のときのみ、従来どおり単一 ``document_id`` または無条件（全件）にフォールバックする。
+    """
+    if document_ids is not None:
+        if not document_ids:
+            return []
+        sql = _HEALTH_SELECT + " WHERE i.document_id = ANY(:docs)"
+        params: dict[str, Any] = {"docs": list(document_ids)}
+    elif document_id:
+        sql = _HEALTH_SELECT + " WHERE i.document_id = :doc"
+        params = {"doc": document_id}
     else:
-        sql = """
-            SELECT h.item_id::text, h.claim_id::text, h.status, h.author_confidence,
-                   h.n_responses, h.n_mismatch, h.n_verdict_dissent,
-                   h.n_verdict_self_disagree, h.n_descend, h.n_users,
-                   i.elicit_mode, i.prompt
-            FROM reconstruction_item_health h
-            JOIN reconstruction_items i ON i.id = h.item_id
-        """
+        sql = _HEALTH_SELECT
         params = {}
     rows = session.execute(sa_text(sql), params).fetchall()
     out: list[dict] = []
@@ -114,14 +126,21 @@ def _fetch_health_rows(session, document_id: str | None) -> list[dict]:
     return out
 
 
-def get_review_queue(document_id: str | None = None) -> dict:
+def get_review_queue(
+    document_id: str | None = None,
+    document_ids: list[str] | None = None,
+) -> dict:
     """疑わしさランク順の item 一覧（health 集計を段階ラベル / レンジで付与）。
 
     教員・管理者向け。学習者の個別履歴は含めない（P3）。
+
+    ``document_ids`` は複数教材コース（レビュー指摘2）向けの集約フィルタで、
+    指定時は ``document_id`` より優先される。空リストは0件（fail-closed。
+    ``_fetch_health_rows`` 参照）。両方省略時は従来どおり全件を返す（既存挙動維持）。
     """
     session = _pg_session()
     try:
-        rows = _fetch_health_rows(session, document_id)
+        rows = _fetch_health_rows(session, document_id=document_id, document_ids=document_ids)
     finally:
         session.close()
 

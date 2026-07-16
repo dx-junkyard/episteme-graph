@@ -1768,12 +1768,13 @@
         }
         box.innerHTML = items.map(function (it) {
           var sig = it.signals || {};
-          return '<div class="ls-stumble-item">' +
+          return '<div class="ls-stumble-item" data-recon-item="' + escHtml(it.item_id) + '">' +
             '<div class="ls-stumble-item-tier">' + escHtml(it.rank_tier || "") + ' · ' + escHtml(it.elicit_mode || "") + '</div>' +
             '<div class="ls-stumble-item-prompt">' + escHtml(it.prompt || "") + '</div>' +
             '<div class="ls-stumble-item-sig">回答 ' + escHtml(sig.responses || "-") +
               ' / 誤り ' + escHtml(sig.mismatch_level || "-") +
               (sig.verdict_dissent ? ' / 判定への異議あり' : '') + '</div>' +
+            '<div class="ls-course-muted ls-recon-item-error" data-recon-item-error="' + escHtml(it.item_id) + '" hidden></div>' +
             '<div class="ls-stumble-item-actions">' +
               '<button type="button" class="ls-stumble-mini" data-item-status="retired" data-item-id="' + escHtml(it.item_id) + '">配信停止（retire）</button>' +
               '<button type="button" class="ls-stumble-mini" data-item-status="confirmed" data-item-id="' + escHtml(it.item_id) + '">追認（confirm）</button>' +
@@ -1782,31 +1783,73 @@
         }).join("");
         box.querySelectorAll("[data-item-id]").forEach(function (b) {
           b.addEventListener("click", function () {
-            lsPatchReconItem(this.getAttribute("data-item-id"), this.getAttribute("data-item-status"), box, claimId);
+            lsPatchReconItem(this.getAttribute("data-item-id"), this.getAttribute("data-item-status"), box, claimId, this);
           });
         });
       })
       .catch(function () { box.innerHTML = '<div class="ls-course-muted">読み込みに失敗しました。</div>'; });
   }
 
+  // 対象 item カード（[data-recon-item]）内のボタンを一括で有効/無効化する共通ヘルパー。
+  // claim 別インラインパネル（data-item-id）とレビューキューモーダル（data-recon-item-id）
+  // の両方の markup を対象にする（レビュー指摘5）。
+  function lsSetReconItemBusy(card, busy) {
+    if (!card) return;
+    card.querySelectorAll("[data-item-id], [data-recon-item-id]").forEach(function (b) {
+      b.disabled = busy;
+    });
+  }
+
+  function lsShowReconItemError(card, message) {
+    if (!card) return;
+    var errorBox = card.querySelector("[data-recon-item-error]");
+    if (!errorBox) return;
+    errorBox.hidden = false;
+    errorBox.textContent = message;
+  }
+
+  function lsClearReconItemError(card) {
+    if (!card) return;
+    var errorBox = card.querySelector("[data-recon-item-error]");
+    if (!errorBox) return;
+    errorBox.hidden = true;
+    errorBox.textContent = "";
+  }
+
   // 既存 PATCH API（教員向け status 遷移。削除 API は無い・retire のみ）の共通呼び出し。
   // claim 別インライン確認パネル（lsToggleReviewQueueForClaim）とレビューキュー直行
   // モーダル（G4-R, lsOpenReconReviewModal）の双方から再利用する。
+  // 非 2xx は resolve せず reject する（レビュー指摘5: PATCH 失敗が成功扱いになっていた）。
   function lsPatchReconItemStatus(itemId, status) {
     return apiFetch("/admin/reconstruction/items/" + encodeURIComponent(itemId), {
       method: "PATCH",
       body: JSON.stringify({ status: status }),
-    }).then(function (res) { return res.ok ? res.json() : null; });
+    }).then(function (res) {
+      if (res.ok) return res.json();
+      return res.json()
+        .catch(function () { return null; })
+        .then(function (body) {
+          var detail = (body && body.detail) || "更新に失敗しました。";
+          throw new Error(detail);
+        });
+    });
   }
 
-  function lsPatchReconItem(itemId, status, box, claimId) {
+  function lsPatchReconItem(itemId, status, box, claimId, triggerBtn) {
+    var card = (triggerBtn && triggerBtn.closest) ? triggerBtn.closest("[data-recon-item]") : null;
+    lsClearReconItemError(card);
+    lsSetReconItemBusy(card, true);
     lsPatchReconItemStatus(itemId, status)
       .then(function () {
-        // review キューを再取得して反映
+        // review キューを再取得して反映（成功時のみ。再取得後は DOM が置換されるため
+        // ボタンの再有効化は不要）
         box.hidden = true;
         lsToggleReviewQueueForClaim(claimId);
       })
-      .catch(function () {});
+      .catch(function (err) {
+        lsSetReconItemBusy(card, false);
+        lsShowReconItemError(card, (err && err.message) || "更新に失敗しました。");
+      });
   }
 
   // ── G4-R: R層レビューキューへの直行導線 ──────────────────────────────
@@ -1815,6 +1858,27 @@
   // コンポーネントビュー付近に件数バッジ付きボタンを出し、押下でレビューキューを
   // フラットに一覧するモーダルを開き、その場で confirm/retire まで行えるようにする。
   // 既存の5段階の経路（lsToggleReviewQueueForClaim 経由）はそのまま残す。
+
+  // クエリ構築の共通ヘルパー（レビュー指摘2）: コース選択中は course_id を優先する
+  // （バックエンドがコース内の全 source 教材の item を集約するため、複数教材コースで
+  // 先頭教材以外の項目が欠落する問題を解消する）。コース未選択時（コンポーネント
+  // ビュー単体等）は従来どおり document_id にフォールバックする。バッジ
+  // （lsRefreshReconReviewBadge）とモーダル一覧（lsLoadReconReviewModalList）の
+  // 両方がこのヘルパーを使うことで、常に同じスコープを見る。
+  function lsReconReviewQueryString() {
+    if (lsState.courseId) return "course_id=" + encodeURIComponent(lsState.courseId);
+    var documentId = lsCurrentDocumentId() || lsCoursePrimaryDocumentId();
+    return documentId ? "document_id=" + encodeURIComponent(documentId) : "";
+  }
+
+  // 「要レビュー」判定の共通述語（レビュー指摘2）: status='auto'（教員未確認）かつ
+  // rank_tier が付いた（人数 k=3 以上で疑わしさランクが算出された）item のみを
+  // 「教員が今日やること」として数える。「情報不足」（k未満）は教員の作業対象では
+  // ないため数えない。バッジの件数とモーダルの「要レビュー」セクションの母数を
+  // 一致させるため、両方がこの述語を使う。
+  function lsReconItemNeedsReview(it) {
+    return !!it && it.status === "auto" && !!it.rank_tier && it.rank_tier !== "情報不足";
+  }
 
   function lsReconReviewBadgeHtml() {
     var label = "再構成の確認";
@@ -1841,26 +1905,23 @@
     });
   }
 
-  // 件数バッジの母数: status='auto'（教員未確認）かつ rank_tier が付いた（人数 k=3
-  // 以上で疑わしさランクが算出された）item のみを「教員が今日やること」として数える。
-  // 「情報不足」（k未満）は教員の作業対象ではないため数えない。これは学習者統計の
-  // k-匿名レンジ表示（3-5/6-10/11+）とは別物の内部運用カウントであり、生数値のまま表示してよい
-  // （教員自身の作業件数。学習者個別データは一切含まない）。
+  // 件数バッジの母数: lsReconItemNeedsReview を満たす item のみを「教員が今日
+  // やること」として数える。これは学習者統計の k-匿名レンジ表示（3-5/6-10/11+）とは
+  // 別物の内部運用カウントであり、生数値のまま表示してよい（教員自身の作業件数。
+  // 学習者個別データは一切含まない）。
   function lsRefreshReconReviewBadge(courseId) {
-    var documentId = lsCurrentDocumentId() || lsCoursePrimaryDocumentId();
-    if (!documentId) {
+    var qs = lsReconReviewQueryString();
+    if (!qs) {
       lsState.reconReviewCount = null;
       lsUpdateReconReviewBadgeText();
       return;
     }
-    apiFetch("/admin/reconstruction/items/review-queue?document_id=" + encodeURIComponent(documentId))
+    apiFetch("/admin/reconstruction/items/review-queue?" + qs)
       .then(function (res) { return res.ok ? res.json() : null; })
       .then(function (data) {
         if (courseId && lsState.courseId !== courseId) return;
         var items = (data && data.items) || [];
-        lsState.reconReviewCount = items.filter(function (it) {
-          return it.status === "auto" && it.rank_tier && it.rank_tier !== "情報不足";
-        }).length;
+        lsState.reconReviewCount = items.filter(lsReconItemNeedsReview).length;
         lsUpdateReconReviewBadgeText();
       })
       .catch(function () {
@@ -1898,9 +1959,8 @@
   function lsLoadReconReviewModalList() {
     var list = document.getElementById("ls-recon-review-list");
     if (!list) return;
-    var documentId = lsCurrentDocumentId() || lsCoursePrimaryDocumentId();
-    var qs = documentId ? "?document_id=" + encodeURIComponent(documentId) : "";
-    apiFetch("/admin/reconstruction/items/review-queue" + qs)
+    var qs = lsReconReviewQueryString();
+    apiFetch("/admin/reconstruction/items/review-queue" + (qs ? "?" + qs : ""))
       .then(function (res) { return res.ok ? res.json() : null; })
       .then(function (data) {
         lsRenderReconReviewModalList((data && data.items) || []);
@@ -1910,6 +1970,10 @@
       });
   }
 
+  // レビュー対象母数（バッジ件数）と一覧の食い違い解消（レビュー指摘2）: API の全項目
+  // （confirmed/retired/情報不足含む）を一律に描画するのではなく、「要レビュー」
+  // （lsReconItemNeedsReview を満たす item・確認操作可）と「その他」（情報不足は
+  // 操作可のまま残す・処理済みは履歴表示のみ）にセクション分離する。
   function lsRenderReconReviewModalList(items) {
     var list = document.getElementById("ls-recon-review-list");
     if (!list) return;
@@ -1917,8 +1981,17 @@
       list.innerHTML = '<div class="ls-course-muted">現在レビュー対象の再構成課題はありません。</div>';
       return;
     }
-    list.innerHTML = items.map(function (it) {
+    var needsReview = items.filter(lsReconItemNeedsReview);
+    var others = items.filter(function (it) { return !lsReconItemNeedsReview(it); });
+
+    function itemCardHtml(it, withActions) {
       var sig = it.signals || {};
+      var actions = withActions
+        ? '<div class="ls-stumble-item-actions">' +
+            '<button type="button" class="ls-stumble-mini" data-recon-item-status="retired" data-recon-item-id="' + escHtml(it.item_id) + '">配信停止（retire）</button>' +
+            '<button type="button" class="ls-stumble-mini" data-recon-item-status="confirmed" data-recon-item-id="' + escHtml(it.item_id) + '">追認（confirm）</button>' +
+          '</div>'
+        : '';
       return '<div class="ls-stumble-item" data-recon-item="' + escHtml(it.item_id) + '">' +
         '<div class="ls-stumble-item-tier">' + escHtml(it.rank_tier || "") + ' · ' + escHtml(it.elicit_mode || "") +
           (it.status ? ' · ' + escHtml(it.status) : '') + '</div>' +
@@ -1926,28 +1999,49 @@
         '<div class="ls-stumble-item-sig">回答 ' + escHtml(sig.responses || "-") +
           ' / 誤り ' + escHtml(sig.mismatch_level || "-") +
           (sig.verdict_dissent ? ' / 判定への異議あり' : '') + '</div>' +
-        '<div class="ls-stumble-item-actions">' +
-          '<button type="button" class="ls-stumble-mini" data-recon-item-status="retired" data-recon-item-id="' + escHtml(it.item_id) + '">配信停止（retire）</button>' +
-          '<button type="button" class="ls-stumble-mini" data-recon-item-status="confirmed" data-recon-item-id="' + escHtml(it.item_id) + '">追認（confirm）</button>' +
-        '</div>' +
+        '<div class="ls-course-muted ls-recon-item-error" data-recon-item-error="' + escHtml(it.item_id) + '" hidden></div>' +
+        actions +
       '</div>';
-    }).join("");
+    }
+
+    var html = '<div class="ls-recon-review-section">' +
+      '<h4 class="ls-recon-review-section-title">要レビュー</h4>' +
+      (needsReview.length
+        ? needsReview.map(function (it) { return itemCardHtml(it, true); }).join("")
+        : '<div class="ls-course-muted">現在レビュー対象の再構成課題はありません。</div>') +
+      '</div>';
+    html += '<div class="ls-recon-review-section">' +
+      '<h4 class="ls-recon-review-section-title">その他（情報不足・処理済み）</h4>' +
+      (others.length
+        ? others.map(function (it) { return itemCardHtml(it, it.status === "auto"); }).join("")
+        : '<div class="ls-course-muted">該当する item はありません。</div>') +
+      '</div>';
+    list.innerHTML = html;
+
     list.querySelectorAll("[data-recon-item-id]").forEach(function (btn) {
       btn.addEventListener("click", function () {
-        lsPatchReconItemInModal(btn.getAttribute("data-recon-item-id"), btn.getAttribute("data-recon-item-status"));
+        lsPatchReconItemInModal(btn.getAttribute("data-recon-item-id"), btn.getAttribute("data-recon-item-status"), btn);
       });
     });
   }
 
-  function lsPatchReconItemInModal(itemId, status) {
+  function lsPatchReconItemInModal(itemId, status, triggerBtn) {
+    var card = (triggerBtn && triggerBtn.closest) ? triggerBtn.closest("[data-recon-item]") : null;
+    lsClearReconItemError(card);
+    lsSetReconItemBusy(card, true);
     lsPatchReconItemStatus(itemId, status)
       .then(function () {
+        // 成功時のみ一覧・バッジ・キャッシュを更新する（一覧再取得で DOM が置換される
+        // ため、ボタンの再有効化は不要）
         lsLoadReconReviewModalList();
         lsRefreshReconReviewBadge();
         // claim 別つまづきパネルのキャッシュも古くなるため破棄する（次回開いたときに再取得）
         lsState.stumbleByDocument = {};
       })
-      .catch(function () {});
+      .catch(function (err) {
+        lsSetReconItemBusy(card, false);
+        lsShowReconItemError(card, (err && err.message) || "更新に失敗しました。");
+      });
   }
 
   function lsTopicCoverageStatus(topic) {

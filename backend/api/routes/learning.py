@@ -43,6 +43,7 @@ from services import (
     course_deletion_notice,
     enroll_user_in_course,
     get_course_chunks_ordered,
+    get_course_completion,
     get_course_data,
     get_editable_course_data,
     get_viewable_course_data,
@@ -58,6 +59,7 @@ from services import (
     record_internalization,
     record_interest_trace,
     record_student_stumble_event,
+    record_topic_check_pass,
     resolve_interest_trace,
     save_course_data,
     set_trace_map_exclusion,
@@ -1162,12 +1164,39 @@ def check_topic_understanding(
             generated_explanation=model_answer[:4000],
         )
 
+    # コース完了判定のサーバー正本化: 採点結果だけでなく、合格トピック・コース完了状態を
+    # learning_states.progress_data に永続化する（フロントが「次のトピックが無い」ことだけで
+    # 完走と断定していた問題の是正）。永続化の失敗で採点レスポンス自体は落とさない（fail-open）。
+    topic_completed = False
+    course_completed = False
+    completed_topic_ids: list[str] = []
+    try:
+        if passed:
+            completion = record_topic_check_pass(
+                current_user["id"], course_id, topic_id, course_data,
+            )
+            topic_completed = bool(completion.get("topic_completed"))
+            course_completed = bool(completion.get("course_completed"))
+            completed_topic_ids = list(completion.get("completed_topic_ids") or [])
+        else:
+            completion = get_course_completion(current_user["id"], course_id, course_data)
+            course_completed = bool(completion.get("course_completed"))
+            completed_topic_ids = list(completion.get("completed_topic_ids") or [])
+    except Exception:
+        logger.warning(
+            "Failed to persist topic check completion for user=%s course=%s topic=%s",
+            current_user["id"], course_id, topic_id, exc_info=True,
+        )
+
     return LearningCheckQuestionResponse(
         passed=passed,
         feedback=feedback,
         model_answer=model_answer,
         answer_requirements=answer_requirements,
         explanation=response_explanation,
+        topic_completed=topic_completed,
+        course_completed=course_completed,
+        completed_topic_ids=completed_topic_ids,
     )
 
 

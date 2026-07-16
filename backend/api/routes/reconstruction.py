@@ -26,7 +26,7 @@ from pydantic import BaseModel
 from sqlalchemy import text as sa_text
 
 from dependencies import _get_current_user, _require_teacher
-from services import get_accessible_course_data, record_review_event
+from services import get_accessible_course_data, record_review_event, user_can_view_course
 from core.course_data import course_source_material_ids, course_topics
 from core.postgres import get_session as _pg_session
 from core.reconstruction import diff as recon_diff
@@ -533,9 +533,35 @@ class ItemPatchRequest(BaseModel):
 @admin_router.get("/reconstruction/items/review-queue")
 def review_queue(
     document_id: str | None = None,
+    course_id: str | None = None,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """疑わしさランク順の item 一覧（health 集計を段階ラベル / レンジで付与）。"""
+    """疑わしさランク順の item 一覧（health 集計を段階ラベル / レンジで付与）。
+
+    レビュー指摘2: 複数教材コースでは先頭教材の項目しか返らなかった欠落を解消する。
+    ``course_id`` 指定時は ``document_id`` より優先し、コースの全 source 教材に
+    紐づく item を集約する。権限が無い / コースが見つからない場合は 404 で
+    fail-closed（``admin.py`` の既存コース閲覧ガード, admin.py の
+    ``list_course_group_permissions`` と同じ規約 — 403 ではなく 404）。
+    ``course_id`` 未指定時は従来どおり ``document_id`` 指定 / 無指定の挙動を維持する。
+    """
+    if course_id:
+        if not user_can_view_course(current_user["id"], course_id):
+            raise HTTPException(status_code=404, detail="Course not found")
+        from services import _fetch_course_data_row
+
+        course_data = _fetch_course_data_row(course_id)
+        if course_data is None:
+            raise HTTPException(status_code=404, detail="Course not found")
+
+        session = _pg_session()
+        try:
+            scope = _course_scope(session, course_data)
+        finally:
+            session.close()
+        # sources が空のコースは doc_refs も空になり、get_review_queue が
+        # fail-closed で {"items": [], ...} を返す（全件フォールバックしない）。
+        return get_review_queue(document_ids=scope["doc_refs"])
     return get_review_queue(document_id)
 
 

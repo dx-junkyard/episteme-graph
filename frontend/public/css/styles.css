@@ -113,6 +113,23 @@ body {
   line-height: 1.35;
 }
 
+/* P1: サーバーが全トピック確認済みと判定したときのみ出す事実文（数値・割合は出さない）。 */
+.course-tree-done {
+  padding: 0 14px 8px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+/* P1: リロード後の復元。トピックが確認済み（progress.completed_topic_ids）であることの
+   控えめなマーカー（件数・進捗率は出さない）。 */
+.ni-done {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  color: var(--color-text-success);
+  margin-left: 2px;
+}
+
 .ni {
   display: flex;
   align-items: center;
@@ -1229,6 +1246,14 @@ body {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 14px;
+}
+
+/* 指摘4: 受講登録確認モーダルの失敗表示（再試行可能な状態のまま提示する）。 */
+.enroll-confirm-error {
+  margin-top: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-text-danger);
 }
 
 .check-secondary,

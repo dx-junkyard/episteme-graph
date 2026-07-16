@@ -63,11 +63,13 @@ class TestReconReviewBadgeWiring:
         assert "/admin/reconstruction/items/review-queue" in block
 
     def test_badge_count_excludes_low_signal_items(self):
-        """情報不足（k未満）の item は教員の作業件数に数えない。"""
+        """情報不足（k未満）の item は教員の作業件数に数えない（共通述語 lsReconItemNeedsReview 経由）。"""
         src = _read()
         block = _function_block(src, "lsRefreshReconReviewBadge")
-        assert '"情報不足"' in block
-        assert 'it.status === "auto"' in block
+        assert "lsReconItemNeedsReview" in block
+        predicate_block = _function_block(src, "lsReconItemNeedsReview")
+        assert '"情報不足"' in predicate_block
+        assert 'it.status === "auto"' in predicate_block
 
     def test_badge_reset_on_course_change(self):
         """コース切替・未選択でバッジの件数をクリアする（前コースの件数が漏れ出さない）。"""
@@ -133,6 +135,74 @@ class TestReconReviewModalWiring:
         src = _read()
         assert "function lsToggleReviewQueueForClaim" in src
         assert "function lsRenderStumbleSummary" in src
+
+
+class TestReconReviewCourseScopeAndSharedPredicate:
+    """レビュー指摘2: 複数教材コースの集約 + バッジ/モーダルの母数一致。"""
+
+    def test_query_helper_present_and_prefers_course_id(self):
+        src = _read()
+        assert "function lsReconReviewQueryString" in src
+        block = _function_block(src, "lsReconReviewQueryString")
+        assert "course_id=" in block
+        assert "document_id=" in block
+        assert "lsState.courseId" in block
+
+    def test_badge_and_modal_list_use_shared_query_helper(self):
+        """バッジとモーダルの両方が同じクエリ構築ヘルパーを使う。"""
+        src = _read()
+        badge_block = _function_block(src, "lsRefreshReconReviewBadge")
+        list_block = _function_block(src, "lsLoadReconReviewModalList")
+        assert "lsReconReviewQueryString(" in badge_block
+        assert "lsReconReviewQueryString(" in list_block
+
+    def test_shared_needs_review_predicate_exists(self):
+        src = _read()
+        assert "function lsReconItemNeedsReview" in src
+        block = _function_block(src, "lsReconItemNeedsReview")
+        assert '"情報不足"' in block
+        assert 'it.status === "auto"' in block
+
+    def test_badge_and_modal_use_shared_predicate(self):
+        """バッジ件数とモーダルの「要レビュー」セクションが同一述語を使い、母数の食い違いを防ぐ。"""
+        src = _read()
+        badge_block = _function_block(src, "lsRefreshReconReviewBadge")
+        modal_block = _function_block(src, "lsRenderReconReviewModalList")
+        assert "lsReconItemNeedsReview" in badge_block
+        assert "lsReconItemNeedsReview" in modal_block
+
+    def test_modal_separates_needs_review_from_others(self):
+        """API の全項目を一律表示せず「要レビュー」と「その他」にセクション分離する。"""
+        src = _read()
+        block = _function_block(src, "lsRenderReconReviewModalList")
+        assert "要レビュー" in block
+        assert "その他" in block
+
+
+class TestReconPatchFailureHandling:
+    """レビュー指摘5: PATCH 失敗が成功扱いになっていた問題の解消。"""
+
+    def test_patch_status_rejects_on_non_2xx(self):
+        src = _read()
+        block = _function_block(src, "lsPatchReconItemStatus")
+        assert "res.ok" in block
+        assert "throw new Error" in block
+
+    def test_no_empty_catch_in_patch_callers(self):
+        """PATCH 呼び出し側（lsPatchReconItem / lsPatchReconItemInModal）に空 catch を残さない。"""
+        src = _read()
+        for name in ("lsPatchReconItem", "lsPatchReconItemInModal"):
+            block = _function_block(src, name)
+            assert re.search(r"catch\s*\(\s*function\s*\(\s*\)\s*\{\s*\}\s*\)", block) is None, name
+
+    def test_patch_callers_handle_error_and_toggle_busy_state(self):
+        """失敗時にボタンを再有効化し、対象項目の近傍にエラーを行内表示する。"""
+        src = _read()
+        for name in ("lsPatchReconItem", "lsPatchReconItemInModal"):
+            block = _function_block(src, name)
+            assert ".catch(function (err)" in block
+            assert "lsSetReconItemBusy" in block
+            assert "lsShowReconItemError" in block
 
 
 class TestNoForbiddenVocabularyOrPolling:

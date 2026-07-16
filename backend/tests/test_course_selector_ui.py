@@ -311,6 +311,81 @@ class TestAppJSCourseSelector:
         assert "loadCourses()" in body
         assert "switchCourse" in body
 
+    def _enroll_course_body(self):
+        match = re.search(
+            r"async function enrollCourse.*?\n(.*?)\n  \}",
+            self.js,
+            re.DOTALL,
+        )
+        assert match, "enrollCourse 関数が見つかりません"
+        return match.group(1)
+
+    def _open_enroll_confirm_body(self):
+        match = re.search(
+            r"function openEnrollConfirm\(.*?\n  \}\n",
+            self.js,
+            re.DOTALL,
+        )
+        assert match, "openEnrollConfirm 関数が見つかりません"
+        return match.group(0)
+
+    # -----------------------------------------------------------------
+    # レビュー指摘4 (P2): 受講登録失敗後に再試行できない
+    # -----------------------------------------------------------------
+
+    def test_enroll_course_throws_on_non_ok_response(self):
+        """enrollCourse は非2xxを握りつぶさず throw すること
+        （呼び出し元が select を復元し再試行できるようにするため）。"""
+        body = self._enroll_course_body()
+        assert "if (!res.ok)" in body
+        assert "throw new Error" in body
+        # 旧実装の「catch (_) { /* ignore */ }」型の握りつぶしに戻さない。
+        assert "/* ignore */" not in body
+
+    def test_enroll_course_does_not_swallow_exceptions(self):
+        """enrollCourse 自体が例外を catch して握りつぶさないこと
+        （通信例外はそのまま呼び出し元へ伝播させる）。"""
+        body = self._enroll_course_body()
+        assert "catch (_) { /* ignore */ }" not in body
+        assert "catch (_) {}" not in body
+
+    def test_enroll_course_returns_true_on_success(self):
+        body = self._enroll_course_body()
+        assert "return true;" in body
+
+    def test_open_enroll_confirm_has_error_display_area(self):
+        """openEnrollConfirm が失敗表示用の領域を持つこと（再試行可能な状態を保つ）。"""
+        body = self._open_enroll_confirm_body()
+        assert "enroll-confirm-error" in body
+
+    def test_open_enroll_confirm_disables_buttons_while_busy(self):
+        """通信中はキャンセル/OK 両ボタンを disabled にし、二重送信を防ぐこと。"""
+        body = self._open_enroll_confirm_body()
+        assert "cancelBtn.disabled = busy" in body or "cancelBtn.disabled = true" in body
+        assert "okBtn.disabled = busy" in body or "okBtn.disabled = true" in body
+        assert "受講手続き中" in body
+
+    def test_open_enroll_confirm_reenables_buttons_on_failure(self):
+        """失敗時にボタンを再有効化し、再試行できる状態に戻すこと。"""
+        body = self._open_enroll_confirm_body()
+        assert "setBusy(false)" in body
+        assert "受講登録に失敗しました" in body
+
+    def test_open_enroll_confirm_awaits_callback_before_closing(self):
+        """OK 押下で即座に overlay を閉じず、callback(confirmed) の完了を待ってから
+        閉じる/エラー表示を切り替えること。"""
+        body = self._open_enroll_confirm_body()
+        assert "await callback(true)" in body
+
+    def test_change_handler_restores_select_on_enroll_failure(self):
+        """change ハンドラは enrollCourse 失敗時にも select を prevVal へ戻すこと。"""
+        body = self._init_course_select_handler_body()
+        assert "catch (err)" in body
+        # 失敗時の復元は confirmed 分岐（try/catch）内にあり、単にキャンセル分岐だけの
+        # 話ではないことを確認する。
+        confirmed_branch = body[body.index("if (confirmed)"):body.index("} else {")]
+        assert "select.value = prevVal" in confirmed_branch
+
 
 # ---------------------------------------------------------------------------
 # CSS tests
@@ -346,3 +421,7 @@ class TestStylesCSSCourseSelector:
     def test_no_course_message_style_exists(self):
         """.no-course-message スタイルが定義されていること。"""
         assert ".no-course-message" in self.css
+
+    def test_enroll_confirm_error_style_exists(self):
+        """レビュー指摘4: 受講登録失敗表示用の .enroll-confirm-error が定義されていること。"""
+        assert ".enroll-confirm-error" in self.css

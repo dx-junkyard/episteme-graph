@@ -407,6 +407,128 @@ def record_personal_misconception(
         session.close()
 
 
+def _course_topic_ids(course_data: dict) -> list[str]:
+    """course_data.topics[].id を文字列で正規化して返す（id 無しはスキップ）。"""
+    return [str(t["id"]) for t in course_topics(course_data) if t.get("id")]
+
+
+def _course_completed_from_topic_ids(topic_ids: list[str], completed_topics: dict) -> bool:
+    """コース完了状態を保存値ではなく毎回導出する。
+
+    現在のコーストピック集合すべてが completed_topics に含まれ、かつトピックが
+    1件以上あることを条件にする（トピックが1件も無いコースを完了扱いにしない。
+    また、コース構成が後から変わった場合に古い完了断定を残さないよう、判定は
+    常にこの関数を通す）。
+    """
+    if not topic_ids:
+        return False
+    return all(tid in completed_topics for tid in topic_ids)
+
+
+def record_topic_check_pass(
+    user_id: str,
+    course_id: str,
+    topic_id: str,
+    course_data: dict,
+) -> dict:
+    """確認問題の合格を learning_states.progress_data に永続化する。
+
+    - `progress_data.completed_topics`（topic_id → ISO8601 UTC タイムスタンプ）に upsert する。
+      既に完了済みのトピックはタイムスタンプを上書きしない。
+    - 現在のコーストピック（`core.course_data.course_topics`）が全て completed_topics に
+      含まれ、かつ `progress_data.course_completed_at` が未設定なら現在時刻を設定する
+      （一度設定した完了時刻は上書きしない）。
+    - 未受講の場合はレコードを自動生成してから書き込む（record_personal_misconception と同じパターン）。
+    """
+    topic_ids = _course_topic_ids(course_data)
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO learning_states (id, user_id, course_id)
+                VALUES (gen_random_uuid(), CAST(:user_id AS uuid), :course_id)
+                ON CONFLICT (user_id, course_id) DO NOTHING
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        )
+        row = session.execute(
+            sa_text("""
+                SELECT progress_data FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+
+        progress_raw = row[0] if row and row[0] is not None else {}
+        progress = progress_raw if isinstance(progress_raw, dict) else json.loads(progress_raw)
+        completed_topics = dict(progress.get("completed_topics") or {})
+
+        topic_key = str(topic_id)
+        if topic_key not in completed_topics:
+            completed_topics[topic_key] = now_iso
+        progress["completed_topics"] = completed_topics
+
+        course_completed = _course_completed_from_topic_ids(topic_ids, completed_topics)
+        if course_completed and not progress.get("course_completed_at"):
+            progress["course_completed_at"] = now_iso
+
+        session.execute(
+            sa_text("""
+                UPDATE learning_states
+                SET progress_data = CAST(:progress AS jsonb),
+                    updated_at = now()
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+            """),
+            {
+                "user_id": user_id,
+                "course_id": course_id,
+                "progress": json.dumps(progress, ensure_ascii=False),
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    return {
+        "topic_completed": True,
+        "course_completed": course_completed,
+        "completed_topic_ids": list(completed_topics.keys()),
+    }
+
+
+def get_course_completion(user_id: str, course_id: str, course_data: dict) -> dict:
+    """コース完了状態を読み取り専用で返す（保存値ではなく毎回導出、record_topic_check_pass 不使用時にも安全）。"""
+    topic_ids = _course_topic_ids(course_data)
+
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT progress_data FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+    finally:
+        session.close()
+
+    progress_raw = row[0] if row and row[0] is not None else {}
+    progress = progress_raw if isinstance(progress_raw, dict) else json.loads(progress_raw)
+    completed_topics = dict(progress.get("completed_topics") or {})
+
+    return {
+        "course_completed": _course_completed_from_topic_ids(topic_ids, completed_topics),
+        "completed_topic_ids": list(completed_topics.keys()),
+    }
+
+
 def _fetch_course_data_row(course_id: str) -> dict | None:
     """course_id だけから data 本体を取得する内部ヘルパ。"""
     session = _pg_session()
@@ -1670,11 +1792,15 @@ def calculate_progress(user_id: str, course_id: str, course_data: dict) -> dict:
 
     streak = calculate_streak(user_id, course_id)
 
+    completion = get_course_completion(user_id, course_id, course_data)
+
     return {
         "learning_concepts": learning,
         "misconceptions": total_misconceptions,
         "streak_days": streak,
         "sessions": sessions_list[:5],
+        "completed_topic_ids": completion["completed_topic_ids"],
+        "course_completed": completion["course_completed"],
     }
 
 

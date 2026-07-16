@@ -136,6 +136,125 @@ class TestCourseCompletionCard:
 
 
 # ---------------------------------------------------------------------------
+# レビュー指摘1 (P1): 完了カードのサーバー状態 gating
+#   - 途中を飛ばしても「全トピックを学習しました」と断定しない
+#   - courseCompleted は /check レスポンスの course_completed（サーバー正本）でのみ真
+# ---------------------------------------------------------------------------
+
+
+class TestCourseCompletionCardServerGating:
+    def test_show_course_completion_card_takes_course_completed_param(self):
+        src = _read(APP_JS)
+        assert re.search(
+            r"function showCourseCompletionCard\(\s*completedTopic,\s*courseCompleted\s*\)",
+            src,
+        ), "showCourseCompletionCard は第2引数 courseCompleted を取ること"
+
+    def test_completion_card_branches_on_course_completed(self):
+        """courseCompleted が falsy のときは断定文言を出さず、事実文のみの縮退版にする。"""
+        body = _extract_function(_read(APP_JS), "showCourseCompletionCard")
+        assert "courseCompleted" in body
+        assert "まだ確認を終えていないトピックがあります" in body
+        assert "全トピックを学習しました" in body
+        # 縮退版でも件数・割合は出さない（踏破率を数値にしない原則）。
+        for word in FORBIDDEN_WORDS:
+            assert word not in body
+
+    def test_submit_check_answer_stores_and_uses_server_course_completed(self):
+        """合格経路: data.course_completed===true のときだけ true を渡し、応答受信時に
+        state.lastCheckCourseCompleted へ現況を保存する（data-advance 経路が参照する）。"""
+        body = _extract_function(_read(APP_JS), "submitCheckAnswer")
+        assert "state.lastCheckCourseCompleted = !!data.course_completed" in body
+        assert "showCourseCompletionCard(completedTopic, data.course_completed === true)" in body
+
+    def test_submit_check_answer_direct_advance_uses_last_check_flag(self):
+        """不合格→「理解したので次へ」の data-advance 経路（サーバー応答なし）は、
+        直前の check 応答が保存した state.lastCheckCourseCompleted を渡す。"""
+        body = _extract_function(_read(APP_JS), "submitCheckAnswer")
+        assert "showCourseCompletionCard(directCompleted, state.lastCheckCourseCompleted)" in body
+
+    def test_last_check_course_completed_reset_on_topic_switch(self):
+        """トピック切替（selectTopic）で古いコース/トピックの完了現況を持ち越さない。"""
+        body = _extract_function(_read(APP_JS), "selectTopic")
+        assert "state.lastCheckCourseCompleted = false" in body
+
+    def test_last_check_course_completed_reset_on_course_switch(self):
+        src = _read(APP_JS)
+        switch_match = re.search(
+            r"async function switchCourse.*?\n(.*?)await loadAndRenderCourse",
+            src,
+            re.DOTALL,
+        )
+        assert switch_match, "switchCourse function body should exist"
+        assert "state.lastCheckCourseCompleted = false" in switch_match.group(1)
+
+    def test_sidebar_shows_confirmed_marker_from_progress(self):
+        """リロード後の復元: progress.completed_topic_ids に含まれるトピックへ
+        控えめな確認済みマークを付ける。"""
+        body = _extract_function(_read(APP_JS), "renderSidebar")
+        assert "completed_topic_ids" in body
+        assert "ni-done" in body
+        assert "確認済み" in body
+
+    def test_sidebar_shows_course_completed_fact_line_without_numbers(self):
+        """progress.course_completed が true なら一行の事実文を出す（数値は出さない）。"""
+        body = _extract_function(_read(APP_JS), "renderSidebar")
+        assert "course_completed" in body
+        assert "全トピックの確認を終えています" in body
+        for word in FORBIDDEN_WORDS:
+            assert word not in body
+
+    def test_css_defines_sidebar_completion_markers(self):
+        css = _read(STYLES_CSS)
+        assert ".ni-done" in css
+        assert ".course-tree-done" in css
+
+
+# ---------------------------------------------------------------------------
+# レビュー指摘3 (P2): コース切替時の digest/state 汚染防止
+# ---------------------------------------------------------------------------
+
+
+class TestCourseSwitchDigestReset:
+    def test_switch_course_resets_digest_and_trace_state(self):
+        """switchCourse がコースA由来の候補カード・気づきドットをコースBへ残さないよう、
+        interestTraces/tensionDigest/anchorDigest/tensionDeferred/anchorDeferred を
+        state 宣言時の初期値と同じ形へ戻すこと。"""
+        src = _read(APP_JS)
+        switch_match = re.search(
+            r"async function switchCourse.*?\n(.*?)await loadAndRenderCourse",
+            src,
+            re.DOTALL,
+        )
+        assert switch_match
+        body = switch_match.group(1)
+        assert "state.interestTraces = null" in body
+        assert "state.tensionDigest = null" in body
+        assert "state.tensionDeferred = {}" in body
+        assert "state.anchorDigest = null" in body
+        assert "state.anchorDeferred = {}" in body
+
+    def test_load_interest_traces_guards_stale_course_response(self):
+        body = _extract_function(_read(APP_JS), "loadInterestTraces")
+        assert "var cid = state.courseId" in body or "const cid = state.courseId" in body
+        assert "state.courseId !== cid" in body
+        # 応答反映（renderProgressTab/updateProgressTabDot）より前にガードがあること。
+        guard_idx = body.index("state.courseId !== cid")
+        render_idx = body.index("renderProgressTab()")
+        assert guard_idx < render_idx
+
+    def test_load_tension_digest_guards_stale_course_response(self):
+        body = _extract_function(_read(APP_JS), "loadTensionDigest")
+        assert "var cid = state.courseId" in body or "const cid = state.courseId" in body
+        assert "state.courseId !== cid" in body
+
+    def test_load_anchor_digest_guards_stale_course_response(self):
+        body = _extract_function(_read(APP_JS), "loadAnchorDigest")
+        assert "var cid = state.courseId" in body or "const cid = state.courseId" in body
+        assert "state.courseId !== cid" in body
+
+
+# ---------------------------------------------------------------------------
 # T4 (G4-T): tension/anchor ダイジェストの気づき導線
 # ---------------------------------------------------------------------------
 

@@ -20,6 +20,10 @@
     learningSupport: null, // {mode, status_label, origin}
     sending: false,
     checkingUnderstanding: false,
+    // P1: 直前の /check 応答が返した course_completed（サーバー正本）。
+    // data-advance（サーバー応答なしの前進）経路が完了カードを出す判断に使う。
+    // トピック切替・コース切替でリセットする（古いコースの完了状態を持ち越さない）。
+    lastCheckCourseCompleted: false,
     topicHasAudio: false, // 現トピックに再生可能なキャッシュ済み音声があるか
     topicStaleLanguage: false, // audio-status.stale_language（表示のみ・判定には使わない）
     // ── 学習者体験レイヤー(B層) Stage M ──
@@ -438,8 +442,16 @@
       return;
     }
     const course = state.course;
+    // P1: リロード後の復元。サーバー正本の progress（loadAndRenderCourse が
+    // course.progress に格納する）から、確認済みトピックと全完了状態を控えめに示す
+    // （件数・割合は数値として出さない設計不変条項に従う）。
+    const progress = course.progress || {};
+    const completedTopicIds = Array.isArray(progress.completed_topic_ids) ? progress.completed_topic_ids : [];
     let html = '<div class="sb-hd">コースツリー</div>';
     html += '<div class="course-tree-title">' + escHtml(course.title || "コース") + '</div>';
+    if (progress.course_completed) {
+      html += '<div class="course-tree-done">全トピックの確認を終えています</div>';
+    }
 
     (course.chapters || []).forEach(function (ch, ci) {
       const chNum = ci + 1;
@@ -475,8 +487,12 @@
               escHtml(support.status_label || "詳細説明中") + '</span>'
           : "";
 
+        const doneBadge = completedTopicIds.indexOf(t.id) !== -1
+          ? '<span class="ni-done" title="確認済み">✓</span>'
+          : "";
+
         html += '<div class="' + cls + '" data-topic="' + t.id + '" style="padding-left:36px">';
-        html += escHtml(t.title) + annotationBadge + supportBadge;
+        html += escHtml(t.title) + annotationBadge + supportBadge + doneBadge;
         html += '<span class="dot ' + dotCls + '" style="margin-left:auto"></span></div>';
       });
     });
@@ -1674,26 +1690,35 @@
 
   // G3: 「候補ゼロ」と「取得できなかった」を区別するため、非 ok 応答/例外は
   // items:[] に丸めつつ _error フラグを立てる（renderTensionDigestCard が読む）。
+  // P2: 開始時のコースIDを保持し、応答時に別コースへ切替済みなら state への書き込みを
+  // 破棄する（コースAの候補がコースBの画面に残る汚染を防ぐ）。
   async function loadTensionDigest() {
     if (!state.courseId) return;
+    var cid = state.courseId;
     try {
-      var res = await apiFetch("/learning/courses/" + state.courseId + "/tension/digest");
-      state.tensionDigest = res.ok ? await res.json() : { items: [], _error: true };
+      var res = await apiFetch("/learning/courses/" + cid + "/tension/digest");
+      var digest = res.ok ? await res.json() : { items: [], _error: true };
     } catch (_) {
-      state.tensionDigest = { items: [], _error: true };
+      digest = { items: [], _error: true };
     }
+    if (state.courseId !== cid) return; // 遅延応答ガード
+    state.tensionDigest = digest;
   }
 
   // ── 構造帰属（Structure-Anchored Questions）Stage 2: ダイジェスト・本人確定 ──
 
+  // P2: loadTensionDigest と同様、コース切替後の遅延応答を破棄する。
   async function loadAnchorDigest() {
     if (!state.courseId) return;
+    var cid = state.courseId;
     try {
-      var res = await apiFetch("/learning/courses/" + state.courseId + "/anchors/digest");
-      state.anchorDigest = res.ok ? await res.json() : { items: [], _error: true };
+      var res = await apiFetch("/learning/courses/" + cid + "/anchors/digest");
+      var digest = res.ok ? await res.json() : { items: [], _error: true };
     } catch (_) {
-      state.anchorDigest = { items: [], _error: true };
+      digest = { items: [], _error: true };
     }
+    if (state.courseId !== cid) return; // 遅延応答ガード
+    state.anchorDigest = digest;
   }
 
   // 帰属を本人が確定/訂正する（doubtType は任意。空なら候補のまま確定）。
@@ -2153,26 +2178,33 @@
     }
   }
 
+  // P2: コース切替後の遅延応答を破棄する（cid を開始時に保持し、state へ反映する直前・
+  // renderProgressTab/updateProgressTabDot を呼ぶ直前に courseId 一致を確認する）。
   async function loadInterestTraces() {
     if (!state.courseId) return;
+    var cid = state.courseId;
     state.interestTraces = {}; // 多重ロード防止のプレースホルダ
     try {
       var res = await apiFetch(
-        "/learning/courses/" + state.courseId + "/interest-traces" +
+        "/learning/courses/" + cid + "/interest-traces" +
         (state.currentTopicId ? "?topic_id=" + encodeURIComponent(state.currentTopicId) : "")
       );
-      state.interestTraces = res.ok ? await res.json() : { traces: [] };
+      var traces = res.ok ? await res.json() : { traces: [] };
     } catch (_) {
-      state.interestTraces = { traces: [] };
+      traces = { traces: [] };
     }
+    if (state.courseId !== cid) return; // 遅延応答ガード: state 反映・再描画を破棄
+    state.interestTraces = traces;
     // 違和感ダイジェスト（次回ログイン時の提示。会話への割り込みはしない）
     if (state.tensionDigest === null) {
       await loadTensionDigest();
     }
+    if (state.courseId !== cid) return;
     // 帰属候補ダイジェスト（同上。確認カードは進捗タブでのみ提示する）
     if (state.anchorDigest === null) {
       await loadAnchorDigest();
     }
+    if (state.courseId !== cid) return;
     renderProgressTab();
     updateProgressTabDot();
   }
@@ -2298,6 +2330,8 @@
     state.editingMessageId = null; // 機能3: トピック切替で書き直し状態を解除
     hideEditIndicator();
     state.topicMaterial = [];
+    // P1: トピック切替で「直前の check 応答の course_completed」を持ち越さない。
+    state.lastCheckCourseCompleted = false;
     // 分野の地図 (gap3): course/topic の文脈を配線し、地図データを正しいカートリッジ・
     // 現在地で取得できるようにする (AtlasData / AtlasMinimap / AtlasCues が参照)。
     var _topicForAtlas = (state.course && (state.course.topics || []).find(function (t) {
@@ -2425,8 +2459,10 @@
         showAtlasCueAfterAdvance(directCompleted, directNext);
       } else {
         // G1-4: 最終トピックでは完了カードへ繋ぐ（次の案内が消えるだけで終わらせない）。
+        // P1: このパスはサーバー応答を伴わないため、断定文言は直前の /check 応答が
+        // 確認済みの course_completed（state.lastCheckCourseCompleted）でのみ出す。
         if (lectureState.active) deactivateLecture();
-        showCourseCompletionCard(directCompleted);
+        showCourseCompletionCard(directCompleted, state.lastCheckCourseCompleted);
       }
       return;
     }
@@ -2456,6 +2492,8 @@
       );
       if (!res.ok) throw new Error("check failed");
       var data = await res.json();
+      // P1: サーバー正本の完了状態を保持する（data-advance 経路が後で参照する）。
+      state.lastCheckCourseCompleted = !!data.course_completed;
       if (data.passed) {
         var next = getNextTopic();
         var completedTopic = getCurrentTopic();
@@ -2468,8 +2506,9 @@
           showAtlasCueAfterAdvance(completedTopic, next);
         } else {
           // G1-4: 最終トピック合格 → コース完走の完了カードへ繋ぐ（事実文のみ・数値なし）。
+          // P1: サーバーが course_completed===true を確認したときのみ断定文言を出す。
           if (lectureState.active) deactivateLecture();
-          showCourseCompletionCard(completedTopic);
+          showCourseCompletionCard(completedTopic, data.course_completed === true);
         }
       } else {
         if (feedbackEl) {
@@ -2499,19 +2538,27 @@
     }
   }
 
-  // G1-4: コース完走時の完了カード。事実文のみ（数値・スコア・祝祭演出は出さない）で、
+  // G1-4 / P1: コース完走時の完了カード。事実文のみ（数値・スコア・祝祭演出は出さない）で、
   // 他のコースへの導線とわたしの地図への導線を添える。
-  function showCourseCompletionCard(completedTopic) {
+  // courseCompleted は呼び出し元が保持するサーバー正本の判定（/check レスポンスの
+  // course_completed）。true のときだけ「全トピックを学習しました」と断定してよい。
+  // falsy（未確認・不明を含む）なら fail-closed で縮退した事実文にする（途中を飛ばしても
+  // 断定文言が出ないようにする）。
+  function showCourseCompletionCard(completedTopic, courseCompleted) {
     var existing = document.getElementById("course-complete-overlay");
     if (existing) existing.remove();
     var courseTitle = state.course ? (state.course.title || "") : "";
+    var titleText = courseCompleted ? "学習を完了しました" : "最後のトピックの確認を終えました";
+    var bodyText = courseCompleted
+      ? ('「' + escHtml(courseTitle) + '」の全トピックを学習しました。')
+      : "まだ確認を終えていないトピックがあります。";
     var overlay = document.createElement("div");
     overlay.id = "course-complete-overlay";
     overlay.className = "check-overlay";
     overlay.innerHTML =
       '<div class="check-box">' +
-        '<div class="check-title">学習を完了しました</div>' +
-        '<div class="check-section">「' + escHtml(courseTitle) + '」の全トピックを学習しました。</div>' +
+        '<div class="check-title">' + escHtml(titleText) + '</div>' +
+        '<div class="check-section">' + bodyText + '</div>' +
         (completedTopic
           ? '<div class="check-question">最後のトピック「' + escHtml(completedTopic.title || "") +
             '」の確認問題に回答しました。</div>'
@@ -3058,8 +3105,11 @@
     select.innerHTML = html;
   }
 
-  // G1-5: 受講登録の確認モーダル。タイトル＋description を提示し、キャンセル時は
+  // G1-5 / 指摘4: 受講登録の確認モーダル。タイトル＋description を提示し、キャンセル時は
   // select を元の値へ戻す（確認なし即時 enroll をやめる）。
+  // callback(true) は enrollCourse を await する非同期関数を渡す想定。失敗（例外）時は
+  // モーダルを閉じずにエラーを表示し、ボタンを再有効化して再試行できるようにする
+  // （通信中は二重送信を防ぐため両ボタンを disabled にする）。
   function openEnrollConfirm(course, callback) {
     var existing = document.getElementById("enroll-confirm-overlay");
     if (existing) existing.remove();
@@ -3073,19 +3123,52 @@
         '<div class="check-title">このコースを受講しますか？</div>' +
         '<div class="check-section">' + escHtml(title) + '</div>' +
         (desc ? '<div class="check-question">' + escHtml(desc) + '</div>' : '') +
+        '<div id="enroll-confirm-error" class="enroll-confirm-error" hidden></div>' +
         '<div class="check-actions">' +
           '<button class="check-secondary" id="enroll-confirm-cancel">キャンセル</button>' +
           '<button class="check-primary" id="enroll-confirm-ok">受講する</button>' +
         '</div>' +
       '</div>';
     document.body.appendChild(overlay);
-    function close(result) {
-      overlay.remove();
-      callback(result);
+    var cancelBtn = document.getElementById("enroll-confirm-cancel");
+    var okBtn = document.getElementById("enroll-confirm-ok");
+    var errorEl = document.getElementById("enroll-confirm-error");
+    var busy = false;
+    function setBusy(next) {
+      busy = next;
+      cancelBtn.disabled = busy;
+      okBtn.disabled = busy;
+      okBtn.textContent = busy ? "受講手続き中…" : "受講する";
     }
-    document.getElementById("enroll-confirm-cancel").addEventListener("click", function () { close(false); });
-    document.getElementById("enroll-confirm-ok").addEventListener("click", function () { close(true); });
-    overlay.addEventListener("click", function (e) { if (e.target === overlay) close(false); });
+    function showError(message) {
+      errorEl.textContent = message;
+      errorEl.hidden = false;
+    }
+    cancelBtn.addEventListener("click", function () {
+      if (busy) return;
+      overlay.remove();
+      callback(false);
+    });
+    okBtn.addEventListener("click", async function () {
+      if (busy) return;
+      setBusy(true);
+      errorEl.hidden = true;
+      try {
+        await callback(true);
+        overlay.remove();
+      } catch (err) {
+        showError("受講登録に失敗しました。もう一度お試しください。" +
+          (err && err.message ? "（" + err.message + "）" : ""));
+        setBusy(false);
+      }
+    });
+    overlay.addEventListener("click", function (e) {
+      if (busy) return;
+      if (e.target === overlay) {
+        overlay.remove();
+        callback(false);
+      }
+    });
   }
 
   function initCourseSelectHandler() {
@@ -3095,12 +3178,19 @@
       const val = this.value;
       const prevVal = state.courseId || "";
       if (val.indexOf("enroll:") === 0) {
-        // 未受講コース → 受講前に確認（G1-5）。キャンセル時は select を元に戻す。
+        // 未受講コース → 受講前に確認（G1-5）。キャンセル時・失敗時は select を元に戻す。
         const courseId = val.substring(7);
         const course = (_allCourses || []).find(function (c) { return c.id === courseId; });
-        openEnrollConfirm(course, function (confirmed) {
+        openEnrollConfirm(course, async function (confirmed) {
           if (confirmed) {
-            enrollCourse(courseId);
+            try {
+              await enrollCourse(courseId);
+            } catch (err) {
+              // 指摘4: 失敗時も select を元に戻し、再試行できるようにする
+              // （openEnrollConfirm 側がエラー表示・ボタン再有効化を行う）。
+              select.value = prevVal;
+              throw err;
+            }
           } else {
             select.value = prevVal;
           }
@@ -3122,6 +3212,15 @@
     state.course = null;
     state.personalLayer = null;
     state.learningSupport = null;
+    state.lastCheckCourseCompleted = false;
+
+    // P2: 違和感/帰属候補ダイジェスト・関心痕跡は前のコースのものを残さない
+    // （state 宣言時の初期値と同じ形に戻す）。
+    state.interestTraces = null;
+    state.tensionDigest = null;
+    state.tensionDeferred = {};
+    state.anchorDigest = null;
+    state.anchorDeferred = {};
 
     // Phase P-1: コース切替で「わたしの地図」のキャッシュ・表示状態を破棄させる。
     if (window.PersonalMap) window.PersonalMap.invalidate();
@@ -3146,17 +3245,25 @@
     await loadAndRenderCourse();
   }
 
+  // 指摘4: 失敗（非2xx・通信例外）を握りつぶさず throw する。呼び出し元
+  // （openEnrollConfirm 経由の initCourseSelectHandler）がこれを捕捉して
+  // select を復元し、再試行できる状態に戻す。
   async function enrollCourse(courseId) {
-    try {
-      const res = await apiFetch("/learning/courses/" + courseId + "/enroll", { method: "POST" });
-      if (res.ok) {
-        const data = await res.json();
-        // Refresh course list and switch to the new course
-        const courses = await loadCourses();
-        _allCourses = courses;
-        await switchCourse(data.id);
-      }
-    } catch (_) { /* ignore */ }
+    const res = await apiFetch("/learning/courses/" + courseId + "/enroll", { method: "POST" });
+    if (!res.ok) {
+      let detail = "";
+      try {
+        const errBody = await res.json();
+        detail = errBody && errBody.detail ? errBody.detail : "";
+      } catch (_) { /* detail を JSON 化できない応答は detail なし扱い */ }
+      throw new Error(detail || ("HTTP " + res.status));
+    }
+    const data = await res.json();
+    // Refresh course list and switch to the new course
+    const courses = await loadCourses();
+    _allCourses = courses;
+    await switchCourse(data.id);
+    return true;
   }
 
   function showNoCourseState(hasEnrollable = false) {

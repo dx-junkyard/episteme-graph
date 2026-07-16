@@ -437,6 +437,15 @@ class TestIdentityLinksWiring:
         assert "confidence_label" in block
         assert re.search(r"\blink\.confidence\b(?!_label)", block) is None
 
+    def test_identity_link_error_class_matches_between_render_and_catch(self):
+        """レビュー指摘6: 描画側のエラー要素クラスと catch 側の querySelector が一致すること。
+        不一致だと確定・却下失敗時に errEl が常に null になり失敗理由が表示されない。"""
+        src = _read(DELIBERATION_JS)
+        row_block = self._function_block(src, "_identityLinkRowHtml")
+        decide_block = self._function_block(src, "_decideIdentityLink")
+        assert "deliberation-identity-link-error" in row_block
+        assert '".deliberation-identity-link-error"' in decide_block
+
 
 class TestStandardizationAssessWiring:
     """Phase S: 標準化度の評価ボタン（三角測量 worker の手動起動）。"""

@@ -252,7 +252,8 @@
             '<button type="button" class="deliberation-annotation-btn dismiss" data-identity-action="reject">却下</button>' +
           '</div>'
         : '') +
-      '<div class="deliberation-annotation-error" style="display:none"></div>' +
+      // 確定・却下失敗時の表示先。catch 側が引く専用クラス（スタイルは annotation-error を流用）
+      '<div class="deliberation-annotation-error deliberation-identity-link-error" style="display:none"></div>' +
     '</div>';
   }
 

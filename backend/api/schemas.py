@@ -259,6 +259,10 @@ class LearningProgress(BaseModel):
     misconceptions: int = 0
     streak_days: int = 0
     sessions: list[LearningSession] = []
+    # コース完了判定のサーバー正本化: 保存済みの合格トピックと、それから毎回導出する完了状態
+    # (services.get_course_completion / calculate_progress)。
+    completed_topic_ids: list[str] = Field(default_factory=list)
+    course_completed: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +367,11 @@ class LearningCheckQuestionResponse(BaseModel):
     model_answer: str = ""
     answer_requirements: list[str] = Field(default_factory=list)
     explanation: str = ""
+    # コース完了判定のサーバー正本化: 合格時は services.record_topic_check_pass の永続化結果、
+    # 不合格時は services.get_course_completion の現況（topic_completed=False のまま）。
+    topic_completed: bool = False
+    course_completed: bool = False
+    completed_topic_ids: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
