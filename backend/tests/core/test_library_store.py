@@ -156,14 +156,30 @@ class TestFreezeEntry:
 class TestRetireRestore:
     def test_retire_sets_status_retired(self, fake):
         entry = _make_entry()
-        retired = store.retire_entry(entry["id"], updated_by="teacher-1")
+        retired, previous_status = store.retire_entry(entry["id"], updated_by="teacher-1")
         assert retired["status"] == "retired"
+        assert previous_status == "active"
 
     def test_restore_sets_status_active(self, fake):
         entry = _make_entry()
         store.retire_entry(entry["id"])
-        restored = store.restore_entry(entry["id"])
+        restored, previous_status = store.restore_entry(entry["id"])
         assert restored["status"] == "active"
+        assert previous_status == "retired"
+
+    def test_idempotent_transition_reports_actual_previous_status(self, fake):
+        """既に目的の status だった冪等呼び出しでも、遷移前 status は事実
+        （ハードコードの active/retired ではなく実際の現在値）を返す。"""
+        entry = _make_entry()
+        store.retire_entry(entry["id"])
+        retired_again, previous_status = store.retire_entry(entry["id"])
+        assert retired_again["status"] == "retired"
+        assert previous_status == "retired"
+
+        store.restore_entry(entry["id"])
+        restored_again, previous_status = store.restore_entry(entry["id"])
+        assert restored_again["status"] == "active"
+        assert previous_status == "active"
 
     def test_retire_missing_entry_raises_not_found(self, fake):
         with pytest.raises(LibraryNotFoundError):

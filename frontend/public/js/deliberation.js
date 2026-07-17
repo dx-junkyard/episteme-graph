@@ -82,6 +82,25 @@
     shared_part: "共通部品"
   };
 
+  // ── 要素インベントリ（Element Inventory / 検出要素の一覧）─────────────────
+  // 正本: docs/features/element_inventory_design.md §4/§6/§7/§9。
+  // 教材単位の統合入口。種別チップ + キーワードのフィルタは全面クライアントサイド
+  // （§6: 1回のフェッチで全件を取得し、キー入力ごとの再フェッチをしない）。
+  var INVENTORY_TYPE_ORDER = ["all", "theory_component", "theory_claim", "equation", "figure"];
+  var INVENTORY_TYPE_CHIP_LABELS = {
+    all: "すべて",
+    theory_component: "論理要素",
+    theory_claim: "主張",
+    equation: "数式",
+    figure: "図・画像"
+  };
+  var INVENTORY_TYPE_BADGE_LABELS = {
+    theory_component: "論理要素",
+    theory_claim: "主張",
+    equation: "数式",
+    figure: "図"
+  };
+
   // 面③ 候補注釈の kind → 日本語ラベル（設計書 §5 コミットルーティング表 / §6）。
   var ANNOTATION_KIND_LABELS = {
     meaning: "意味づけ",
@@ -103,7 +122,26 @@
   // 面③ 対話状態。モーダルを開くたび（_closeModal で）リセットする単一セッション分の状態
   // （1モーダル=1対話。複数セッションの並行管理は v1 では行わない）。
   var chatState = { sessionId: null, ref: null, sending: false, selectedContext: null };
-  var figureImageState = { objectUrls: [], requestId: 0 };
+  // 教員指示付き再解析（guided reanalysis, focusMode/focusBbox/hintText）は
+  // _reloadOverview を跨いで保持する（設計書 §7-3「送信した guidance は成功・失敗に
+  // かかわらず消さない」）。別の要素でモーダルを開くとき（_closeModal 経由）にのみ
+  // _resetFigureGuidanceState でリセットする（_resetFigureImageState とは別管理）。
+  var figureImageState = {
+    objectUrls: [], requestId: 0,
+    focusMode: false,
+    focusBbox: null,
+    hintText: ""
+  };
+
+  // 要素インベントリモーダルの状態（1モーダル分）。フィルタ（typeFilter/keyword）は
+  // クライアントサイドのみで完結し、変更のたびに再フェッチはしない（§6）。
+  // 「深く検討」で別モーダル（#deliberation-modal）を開いても、このモーダルと
+  // 状態は独立 DOM のため保持されたまま残る（再フェッチは「再読込」ボタンのみ）。
+  var inventoryState = { documentId: null, title: null, data: null, typeFilter: "all", keyword: "" };
+
+  function _resetInventoryState() {
+    inventoryState = { documentId: null, title: null, data: null, typeFilter: "all", keyword: "" };
+  }
 
   function _resetChatState() {
     chatState = { sessionId: null, ref: null, sending: false, selectedContext: null };
@@ -115,6 +153,12 @@
       try { URL.revokeObjectURL(url); } catch (e) { /* noop */ }
     });
     figureImageState.objectUrls = [];
+  }
+
+  function _resetFigureGuidanceState() {
+    figureImageState.focusMode = false;
+    figureImageState.focusBbox = null;
+    figureImageState.hintText = "";
   }
 
   // ── 公開 API: init ───────────────────────────────────────────────────
@@ -129,6 +173,7 @@
   // ── モーダル DOM ──────────────────────────────────────────────────────
   function _closeModal() {
     _resetFigureImageState();
+    _resetFigureGuidanceState();
     var m = document.getElementById("deliberation-modal");
     if (m) m.remove();
     _resetChatState();
@@ -571,6 +616,164 @@
         }).join("") + '</div>' : '');
   }
 
+  // ── 教員指示付き図再解析（Guided Figure Re-analysis）───────────────────
+  // 正本: docs/features/guided_figure_reanalysis_design.md §7。
+  // GF1: 指示は注意誘導であって確定ではない（送信しても候補が生まれるだけ）。
+  // 状態は figureImageState.focusMode / focusBbox / hintText に持つ
+  // （_reloadOverview を跨いで保持・別要素を開いたときのみリセット。上部の
+  // _resetFigureGuidanceState 参照）。
+
+  function _figureFocusControlsHtml() {
+    var active = !!figureImageState.focusMode;
+    var hasBbox = !!figureImageState.focusBbox;
+    return '<div class="deliberation-figure-focus-row">' +
+      '<button id="deliberation-focus-toggle" type="button" ' +
+        'class="deliberation-focus-toggle' + (active ? ' is-active' : '') + '" ' +
+        'aria-pressed="' + (active ? 'true' : 'false') + '">領域を指定して再解析</button>' +
+      '<button id="deliberation-focus-clear" type="button"' + (hasBbox ? '' : ' hidden') + '>領域をクリア</button>' +
+      '</div>' +
+      '<textarea id="deliberation-reanalyze-hint" class="deliberation-reanalyze-hint" rows="2" maxlength="2000" ' +
+        'placeholder="例：左下の EOM と書かれた箱が変調器。3.2節の説明に対応する">' +
+        escHtml(figureImageState.hintText || "") +
+      '</textarea>';
+  }
+
+  function _setFigureFocusLayerActive(active) {
+    var layer = document.getElementById("deliberation-figure-focus-layer");
+    if (layer) layer.classList.toggle("is-drawable", !!active);
+  }
+
+  // 描画済みの矩形は focus モード OFF でも常時表示する（設計書 §7-2）。
+  function _renderFigureFocusRect() {
+    var layer = document.getElementById("deliberation-figure-focus-layer");
+    if (!layer) return;
+    var existing = layer.querySelector(".deliberation-figure-focus-rect");
+    if (existing) existing.remove();
+    var bbox = figureImageState.focusBbox;
+    if (!bbox) return;
+    var rect = document.createElement("div");
+    rect.className = "deliberation-figure-focus-rect";
+    rect.style.left = (bbox[0] * 100) + "%";
+    rect.style.top = (bbox[1] * 100) + "%";
+    rect.style.width = ((bbox[2] - bbox[0]) * 100) + "%";
+    rect.style.height = ((bbox[3] - bbox[1]) * 100) + "%";
+    layer.appendChild(rect);
+  }
+
+  function _bindFigureFocusToggle() {
+    var toggle = document.getElementById("deliberation-focus-toggle");
+    if (!toggle) return;
+    toggle.addEventListener("click", function () {
+      figureImageState.focusMode = !figureImageState.focusMode;
+      toggle.classList.toggle("is-active", figureImageState.focusMode);
+      toggle.setAttribute("aria-pressed", figureImageState.focusMode ? "true" : "false");
+      _setFigureFocusLayerActive(figureImageState.focusMode);
+    });
+  }
+
+  function _bindFigureFocusClear() {
+    var clearBtn = document.getElementById("deliberation-focus-clear");
+    if (!clearBtn) return;
+    clearBtn.addEventListener("click", function () {
+      figureImageState.focusBbox = null;
+      clearBtn.hidden = true;
+      _renderFigureFocusRect();
+    });
+  }
+
+  // touch/mouse 共通のイベント座標抽出（touchend/touchcancel は changedTouches のみ持つ）。
+  function _figureFocusEventClientPoint(event) {
+    if (event.touches && event.touches.length) {
+      return { x: event.touches[0].clientX, y: event.touches[0].clientY };
+    }
+    if (event.changedTouches && event.changedTouches.length) {
+      return { x: event.changedTouches[0].clientX, y: event.changedTouches[0].clientY };
+    }
+    return { x: event.clientX, y: event.clientY };
+  }
+
+  // layer の実表示サイズに対する相対座標 0..1 に正規化する（画像内相対座標、設計書 §3）。
+  function _figureFocusRelativePoint(layer, clientPoint) {
+    var rect = layer.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    var x = (clientPoint.x - rect.left) / rect.width;
+    var y = (clientPoint.y - rect.top) / rect.height;
+    return [Math.max(0, Math.min(1, x)), Math.max(0, Math.min(1, y))];
+  }
+
+  // #deliberation-figure-overlays の兄弟レイヤーに矩形ドラッグ描画を配線する
+  // （既存オーバーレイのクリック選択と干渉させない。focus モード ON のときのみ
+  // pointer-events を有効化する ── _setFigureFocusLayerActive / CSS is-drawable）。
+  function _bindFigureFocusDrawing() {
+    _bindFigureFocusToggle();
+    _bindFigureFocusClear();
+    _setFigureFocusLayerActive(figureImageState.focusMode);
+    _renderFigureFocusRect();
+
+    var hintInput = document.getElementById("deliberation-reanalyze-hint");
+    if (hintInput) {
+      hintInput.addEventListener("input", function () {
+        figureImageState.hintText = hintInput.value;
+      });
+    }
+
+    var layer = document.getElementById("deliberation-figure-focus-layer");
+    if (!layer) return;
+
+    var dragStart = null;
+    var dragPreviousBbox = null;
+
+    function pointFromEvent(event) {
+      return _figureFocusRelativePoint(layer, _figureFocusEventClientPoint(event));
+    }
+
+    function onDown(event) {
+      if (!figureImageState.focusMode) return;
+      var point = pointFromEvent(event);
+      if (!point) return;
+      event.preventDefault();
+      dragStart = point;
+      dragPreviousBbox = figureImageState.focusBbox;
+    }
+
+    function onMove(event) {
+      if (!dragStart) return;
+      var point = pointFromEvent(event);
+      if (!point) return;
+      event.preventDefault();
+      figureImageState.focusBbox = [
+        Math.min(dragStart[0], point[0]),
+        Math.min(dragStart[1], point[1]),
+        Math.max(dragStart[0], point[0]),
+        Math.max(dragStart[1], point[1])
+      ];
+      _renderFigureFocusRect();
+    }
+
+    function onUp() {
+      if (!dragStart) return;
+      dragStart = null;
+      var bbox = figureImageState.focusBbox;
+      // 幅または高さが 0.02 未満の極小ドラッグは誤クリックとして無視する
+      // （サーバ側 422 の閾値と整合。設計書 §7-2 / §4-1）。
+      var tooSmall = !bbox || (bbox[2] - bbox[0] < 0.02) || (bbox[3] - bbox[1] < 0.02);
+      if (tooSmall) figureImageState.focusBbox = dragPreviousBbox;
+      dragPreviousBbox = null;
+      _renderFigureFocusRect();
+      var clearBtn = document.getElementById("deliberation-focus-clear");
+      if (clearBtn) clearBtn.hidden = !figureImageState.focusBbox;
+    }
+
+    layer.addEventListener("mousedown", onDown);
+    layer.addEventListener("mousemove", onMove);
+    layer.addEventListener("mouseup", onUp);
+    layer.addEventListener("mouseleave", onUp);
+    layer.addEventListener("touchstart", onDown, { passive: false });
+    layer.addEventListener("touchmove", onMove, { passive: false });
+    layer.addEventListener("touchend", onUp);
+    layer.addEventListener("touchcancel", onUp);
+  }
+
   function _figureModeHtml(fields) {
     fields = fields || {};
     var mode = _normalizedFigureMode(fields.effective_mode || fields.reviewed_mode || fields.suggested_mode);
@@ -600,7 +803,8 @@
         '<span id="deliberation-mode-save-status" role="status"></span>' +
         '<button id="deliberation-figure-reanalyze" type="button">AIで図を再解析</button>' +
         '<span id="deliberation-figure-reanalyze-status" role="status"></span>' +
-      '</div>';
+      '</div>' +
+      _figureFocusControlsHtml();
     if (mode === "functional_diagram") return header + _functionalDiagramHtml(_figureAnalysis(fields, mode), false);
     if (mode === "data_plot") return header + _dataPlotHtml(_figureAnalysis(fields, mode), false);
     if (mode === "descriptive_image") return header + _descriptiveImageHtml(_figureAnalysis(fields, mode), false);
@@ -633,6 +837,7 @@
           '<div id="deliberation-figure-image-canvas" class="deliberation-figure-image-canvas" hidden>' +
             '<img id="deliberation-figure-image" alt="' + escHtml(decomposition.label || "検討対象の図") + '">' +
             '<div id="deliberation-figure-overlays" class="deliberation-figure-overlays"></div>' +
+            '<div id="deliberation-figure-focus-layer" class="deliberation-figure-focus-layer"></div>' +
           '</div>' +
         '</div>' +
       '</div>' +
@@ -674,6 +879,7 @@
       _bindFigureImageActions();
       _bindFigureContextActions();
       _bindFigureModeReview(decomposition);
+      _bindFigureFocusDrawing();
       _bindFigureReanalysis(decomposition);
       _loadFigureImage(decomposition);
     }
@@ -882,6 +1088,25 @@
     });
   }
 
+  // 教員指示（hint_text / focusBbox）から reanalyze リクエストの body を組み立てる。
+  // 両方とも無ければ null を返し、呼び出し側は従来どおり body なしで POST する
+  // （後方互換。設計書 §4-1「body なし / 両フィールド null = 従来動作」）。
+  function _figureReanalyzeGuidancePayload() {
+    var hint = (figureImageState.hintText || "").trim();
+    var focusBbox = figureImageState.focusBbox;
+    var payload = {};
+    var hasGuidance = false;
+    if (hint) {
+      payload.hint_text = hint;
+      hasGuidance = true;
+    }
+    if (focusBbox) {
+      payload.focus_bbox = focusBbox;
+      hasGuidance = true;
+    }
+    return hasGuidance ? payload : null;
+  }
+
   function _bindFigureReanalysis(decomposition) {
     var button = document.getElementById("deliberation-figure-reanalyze");
     var status = document.getElementById("deliberation-figure-reanalyze-status");
@@ -897,14 +1122,25 @@
     button.addEventListener("click", function () {
       button.disabled = true;
       if (status) status.textContent = "原図を解析中...";
+      var guidance = _figureReanalyzeGuidancePayload();
+      var requestOptions = guidance ?
+        { method: "POST", body: JSON.stringify(guidance) } :
+        { method: "POST" };
       apiFetch(
         "/admin/documents/" + encodeURIComponent(documentId) + "/figures/" +
           encodeURIComponent(figureId) + "/reanalyze",
-        { method: "POST" }
+        requestOptions
       )
         .then(_parseJsonResponse)
-        .then(function () {
-          if (status) status.textContent = "構造化候補を作成しました。内容を確認して確定してください";
+        .then(function (data) {
+          // GF3: 指示した要素が見つからなかった場合も guidance_note の事実文で
+          // 教員はここで即座に知れる（無言で無視しない）。
+          var note = data && data.guidance_note;
+          if (status) {
+            status.textContent = note ?
+              "構造化候補を作成しました。AIの応答: " + note.substring(0, 120) :
+              "構造化候補を作成しました。内容を確認して確定してください";
+          }
           chatState.selectedContext = null;
           _updateSelectedContextUi();
           return _reloadOverview();
@@ -1357,11 +1593,18 @@
     apiFetch(path, { method: "POST" })
       .then(_parseJsonResponse)
       .then(function (data) {
-        _fillAnnotationCard(card, (data && data.annotation) || {});
+        var updatedAnn = (data && data.annotation) || {};
+        _fillAnnotationCard(card, updatedAnn);
         if (action === "commit" && chatState.ref && chatState.ref.elementType === "figure") {
           return _reloadOverview().then(function () {
             _loadAnnotations("figure", chatState.ref.elementId, chatState.ref.documentId);
           });
+        }
+        // figure 以外の要素型（theory_component/theory_claim/equation/shared_part）は
+        // _reloadOverview を呼ばないため、identity 注釈のコミットでは同一性リンク一覧を
+        // ここで明示的に再読込する（さもないと確定直後も candidate のまま表示され続ける）。
+        if (action === "commit" && updatedAnn.kind === "identity" && chatState.ref) {
+          _loadIdentityLinks(chatState.ref);
         }
       })
       .catch(function (err) {
@@ -1527,8 +1770,264 @@
       });
   }
 
+  // ── 要素インベントリ: モーダル DOM / 描画 ───────────────────────────────
+
+  function _closeInventoryModal() {
+    var modal = document.getElementById("deliberation-inventory-modal");
+    if (modal) modal.remove();
+    _resetInventoryState();
+  }
+
+  function _inventoryTotalCount(counts) {
+    counts = counts || {};
+    var total = 0;
+    INVENTORY_TYPE_ORDER.forEach(function (key) {
+      if (key === "all") return;
+      total += counts[key] || 0;
+    });
+    return total;
+  }
+
+  function _inventoryStatusBadgeHtml(deliberation) {
+    deliberation = deliberation || {};
+    var annotations = deliberation.annotations || {};
+    var identityLinks = deliberation.identity_links || {};
+    var committed = (annotations.committed || 0) > 0 || (identityLinks.confirmed || 0) > 0;
+    var candidate = (annotations.candidate || 0) > 0 || (identityLinks.candidate || 0) > 0;
+    // dismissed は意図的に表示しない（設計書 §7: 情報は落とさない=APIは返す、表示だけ抑制）。
+    if (committed) return '<span class="deliberation-annotation-status committed">検討済み</span>';
+    if (candidate) return '<span class="deliberation-annotation-status">候補あり</span>';
+    return '<span class="deliberation-annotation-status dismissed">未検討</span>';
+  }
+
+  function _inventoryBadgesHtml(badges) {
+    var keys = Object.keys(badges || {});
+    if (!keys.length) return "";
+    var chips = keys.map(function (key) {
+      var value = badges[key];
+      if (value === null || value === undefined || value === "") return "";
+      return '<span style="font-size:11px;padding:1px 6px;border-radius:8px;' +
+        'background:var(--color-background-tertiary,#eeeef0);color:var(--color-text-secondary,#6e6e73)">' +
+        escHtml(String(value)) + '</span>';
+    }).join("");
+    if (!chips) return "";
+    return '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">' + chips + '</div>';
+  }
+
+  function _inventorySnippetText(snippet) {
+    var text = snippet || "";
+    if (text.length > 240) text = text.substring(0, 240) + "…";
+    return text;
+  }
+
+  function _inventoryCardHtml(el) {
+    el = el || {};
+    var label = el.label || "(無題)";
+    return '<article class="deliberation-annotation-card">' +
+      '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
+        '<span class="admin-status" style="background:var(--color-background-info);color:var(--color-text-info)">' +
+          escHtml(INVENTORY_TYPE_BADGE_LABELS[el.element_type] || el.element_type || "") +
+        '</span>' +
+        _inventoryStatusBadgeHtml(el.deliberation) +
+      '</div>' +
+      '<div style="font-size:13.5px;font-weight:600;color:var(--color-text-primary);margin-top:6px">' +
+        escHtml(label) +
+      '</div>' +
+      (el.snippet
+        ? '<div style="font-size:12.5px;color:var(--color-text-secondary);margin-top:2px;white-space:pre-wrap;word-break:break-word">' +
+            escHtml(_inventorySnippetText(el.snippet)) +
+          '</div>'
+        : '') +
+      _inventoryBadgesHtml(el.badges) +
+      '<div style="margin-top:8px">' +
+        '<button type="button" class="deliberation-annotation-btn" data-inventory-deliberate="true" ' +
+          'data-inventory-element-type="' + escHtml(el.element_type) + '" ' +
+          'data-inventory-element-id="' + escHtml(el.element_id) + '" ' +
+          'data-inventory-label="' + escHtml(label) + '">深く検討</button>' +
+      '</div>' +
+    '</article>';
+  }
+
+  // 「深く検討」クリック: 既存 openElement をそのまま呼ぶ（非改変・同一モジュール内）。
+  // インベントリモーダル（#deliberation-inventory-modal）とは独立 DOM のため、
+  // 深く検討モーダルを閉じてもインベントリのフィルタ状態は保持されたまま残る。
+  function _bindInventoryDeliberateButtons(root) {
+    root.querySelectorAll("[data-inventory-deliberate]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var elementType = btn.getAttribute("data-inventory-element-type");
+        var elementId = btn.getAttribute("data-inventory-element-id");
+        var label = btn.getAttribute("data-inventory-label");
+        openElement(elementType, elementId, {
+          documentId: inventoryState.documentId,
+          title: label
+        });
+      });
+    });
+  }
+
+  function _renderInventoryList() {
+    var list = document.getElementById("deliberation-inventory-list");
+    if (!list) return;
+    var data = inventoryState.data || {};
+    var elements = data.elements || [];
+    var typeFilter = inventoryState.typeFilter || "all";
+    var keyword = (inventoryState.keyword || "").trim().toLowerCase();
+    var filtered = elements.filter(function (el) {
+      if (typeFilter !== "all" && el.element_type !== typeFilter) return false;
+      if (!keyword) return true;
+      var haystack = ((el.label || "") + " " + (el.snippet || "")).toLowerCase();
+      return haystack.indexOf(keyword) !== -1;
+    });
+    if (!filtered.length) {
+      list.innerHTML = '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">' +
+        (elements.length ? "条件に一致する要素がありません" : "検出された要素はありません") +
+        '</div>';
+      return;
+    }
+    list.innerHTML = filtered.map(_inventoryCardHtml).join("");
+    _bindInventoryDeliberateButtons(list);
+  }
+
+  function _renderInventoryToolbar() {
+    var toolbar = document.getElementById("deliberation-inventory-toolbar");
+    if (!toolbar) return;
+    var data = inventoryState.data || {};
+    var counts = data.counts || {};
+    var total = _inventoryTotalCount(counts);
+    var totalEl = document.getElementById("deliberation-inventory-total");
+    if (totalEl) totalEl.textContent = "(" + total + "件)";
+
+    var chipsHtml = INVENTORY_TYPE_ORDER.map(function (key) {
+      var active = (inventoryState.typeFilter || "all") === key;
+      var count = key === "all" ? total : (counts[key] || 0);
+      return '<button type="button" class="deliberation-inventory-chip" data-inventory-type="' +
+        escHtml(key) + '" style="padding:4px 10px;border-radius:14px;font-size:12px;cursor:pointer;' +
+        'border:1px solid ' + (active ? "var(--color-text-info)" : "var(--color-border-secondary,#d2d2d7)") + ';' +
+        'background:' + (active ? "var(--color-background-info,#eef6ff)" : "none") + ';' +
+        'color:' + (active ? "var(--color-text-info)" : "var(--color-text-secondary)") + '">' +
+        escHtml(INVENTORY_TYPE_CHIP_LABELS[key]) + '（' + count + '）</button>';
+    }).join("");
+
+    toolbar.innerHTML = chipsHtml +
+      '<input id="deliberation-inventory-keyword" type="text" placeholder="キーワードで絞り込み" ' +
+        'value="' + escHtml(inventoryState.keyword || "") + '" style="flex:1;min-width:160px;padding:4px 8px;' +
+        'font-size:12px;border:1px solid var(--color-border-secondary,#d2d2d7);border-radius:6px">' +
+      '<button id="deliberation-inventory-reload" type="button" style="padding:4px 10px;font-size:12px;' +
+        'border-radius:6px;border:1px solid var(--color-border-secondary,#d2d2d7);' +
+        'background:var(--color-background-secondary,#f5f5f7);color:var(--color-text-primary);cursor:pointer">再読込</button>';
+
+    toolbar.querySelectorAll("[data-inventory-type]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        inventoryState.typeFilter = btn.getAttribute("data-inventory-type");
+        _renderInventoryToolbar();
+        _renderInventoryList();
+      });
+    });
+    // キーワード入力は _renderInventoryList のみを呼ぶ（ツールバー全体は再構築しない）。
+    // ツールバーを作り直すと入力中のフォーカス・カーソル位置が失われるため。
+    var keywordInput = document.getElementById("deliberation-inventory-keyword");
+    if (keywordInput) {
+      keywordInput.addEventListener("input", function () {
+        inventoryState.keyword = keywordInput.value || "";
+        _renderInventoryList();
+      });
+    }
+    var reloadBtn = document.getElementById("deliberation-inventory-reload");
+    if (reloadBtn) reloadBtn.addEventListener("click", _loadInventory);
+
+    var truncatedTypes = data.truncated_types || [];
+    var truncatedNote = document.getElementById("deliberation-inventory-truncated-note");
+    if (truncatedNote) {
+      truncatedNote.textContent = truncatedTypes.length
+        ? truncatedTypes.map(function (t) {
+            return (INVENTORY_TYPE_CHIP_LABELS[t] || t) + "は500件で省略されています";
+          }).join(" / ")
+        : "";
+    }
+  }
+
+  // GET のみ・DB 非変更（I1）。「再読込」ボタンだけがこれを呼ぶ（§9）。
+  function _loadInventory() {
+    var list = document.getElementById("deliberation-inventory-list");
+    if (list) {
+      list.innerHTML = '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">読み込み中...</div>';
+    }
+    var documentId = inventoryState.documentId;
+    apiFetch("/admin/deliberation/documents/" + encodeURIComponent(documentId) + "/elements")
+      .then(function (res) {
+        if (!res.ok) {
+          var status = res.status;
+          var err = new Error("status " + status);
+          err.status = status;
+          throw err;
+        }
+        return res.json();
+      })
+      .then(function (data) {
+        inventoryState.data = data || {};
+        _renderInventoryToolbar();
+        _renderInventoryList();
+      })
+      .catch(function (err) {
+        var currentList = document.getElementById("deliberation-inventory-list");
+        if (!currentList) return;
+        var message = (err && err.status === 404)
+          ? "この教材は見つからないか、閲覧できません"
+          : "検出要素の読み込みに失敗しました";
+        currentList.innerHTML = '<div style="padding:16px;color:var(--color-text-danger);font-size:13px">' +
+          escHtml(message) + '</div>';
+      });
+  }
+
+  // ── 公開 API: openInventory ──────────────────────────────────────────
+  // opts = { title: string|null }
+  function openInventory(documentId, opts) {
+    opts = opts || {};
+    if (!deps.apiFetch && !window.apiFetch) return;
+    if (!documentId) return;
+
+    _closeInventoryModal();
+    inventoryState.documentId = documentId;
+    inventoryState.title = opts.title || null;
+    inventoryState.typeFilter = "all";
+    inventoryState.keyword = "";
+    inventoryState.data = null;
+
+    var overlay = document.createElement("div");
+    overlay.id = "deliberation-inventory-modal";
+    // z-index は既存の深く検討モーダル（#deliberation-modal）より低い 9400 にする
+    // （インベントリの上に深く検討モーダルが重なる。設計書 §9）。
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;" +
+      "background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9400";
+    overlay.innerHTML =
+      '<div class="deliberation-modal-dialog" style="width:min(920px,92vw)">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
+          '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">検出要素の一覧' +
+            (inventoryState.title ? ' — ' + escHtml(inventoryState.title) : '') +
+            '<span id="deliberation-inventory-total" style="margin-left:8px;font-size:12px;font-weight:400;color:var(--color-text-tertiary)"></span>' +
+          '</h3>' +
+          '<button id="deliberation-inventory-close" type="button" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
+        '</div>' +
+        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 10px">' +
+          'この教材からパイプラインが検出した要素の一覧です。表示はすべて既存データの読み出しで、確定済みの判断ではありません。' +
+        '</p>' +
+        '<div id="deliberation-inventory-toolbar" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px"></div>' +
+        '<div id="deliberation-inventory-truncated-note" style="font-size:11.5px;color:var(--color-text-tertiary);margin:0 0 8px"></div>' +
+        '<div id="deliberation-inventory-list" style="overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:8px">' +
+          '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">読み込み中...</div>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) _closeInventoryModal(); });
+    document.getElementById("deliberation-inventory-close").addEventListener("click", _closeInventoryModal);
+
+    _loadInventory();
+  }
+
   window.Deliberation = {
     init: init,
-    openElement: openElement
+    openElement: openElement,
+    openInventory: openInventory
   };
 })();

@@ -177,6 +177,12 @@ class TestWorkerIdempotencyAndCost:
         source = _read(WORKER)
         assert "payload->'structure_anchor' IS NULL\n" in source
 
+    def test_cost_cap_releases_claim_instead_of_losing_questions(self):
+        """コスト上限時は claim（anchor_analyzed_at）を解放し、問いを無言で失わない（P4）。"""
+        source = _read(WORKER)
+        gate = source.split("if not _check_and_count_llm_call(")[1].split("course_row = ")[0]
+        assert "payload - 'anchor_analyzed_at'" in gate
+
 
 class TestConfirmDefaults:
     def test_confirm_without_anchor_creates_segment_fallback(self):

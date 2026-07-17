@@ -42,7 +42,7 @@ from typing import Any
 from sqlalchemy import text as sa_text
 
 from core.postgres import get_session
-from core.deliberation import identity_links, store as store_mod
+from core.deliberation import identity_links, refs, store as store_mod
 from core.figure_presentation import (
     commit_reviewed_analysis,
     normalize_figure_analysis_candidate,
@@ -64,6 +64,7 @@ from core.deliberation.schema import (
     SCOPE_DOCUMENT,
     SCOPE_DOMAIN,
     ElementRef,
+    ElementResolutionError,
 )
 from core.library.schema import STANDARDIZATION_STATUSES
 
@@ -346,6 +347,16 @@ def _commit_identity(annotation: dict, current_user_id: str | None) -> dict:
     shared_part_id = str(body.get("shared_part_id") or "").strip()
     if not shared_part_id:
         raise CommitRoutingError("identity annotation body is missing shared_part_id", kind="invalid")
+    # 人間直叩き経路（POST /identity-links）と同じく shared_part の実在検証を通す。
+    # LLM 候補由来の body には存在しない ID や UUID 非形式が入りうるため、無検証で
+    # identity_links.create_candidate（CAST :shared_part_id AS uuid + FK）へ渡すと
+    # IntegrityError/DataError が API 層の CommitRoutingError 捕捉を素通りして 500 になる。
+    # 解決失敗は CommitRoutingError に変換し、API 層で 404/422 にマップさせる。
+    try:
+        shared_part_ref = refs.resolve(ELEMENT_SHARED_PART, shared_part_id)
+    except ElementResolutionError as exc:
+        kind = "invalid" if getattr(exc, "kind", "not_found") == "invalid" else "not_found"
+        raise CommitRoutingError(str(exc), kind=kind) from exc
     local_expression = body.get("local_expression")
     local_expression = local_expression if isinstance(local_expression, dict) else {}
 
@@ -357,7 +368,7 @@ def _commit_identity(annotation: dict, current_user_id: str | None) -> dict:
     )
     link = identity_links.create_candidate(
         instance_ref,
-        shared_part_id,
+        shared_part_ref.element_id,
         local_expression=local_expression,
         evidence=annotation.get("evidence") or [],
         reason=annotation.get("reason") or "",

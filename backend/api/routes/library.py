@@ -23,6 +23,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 
 import services
 from dependencies import _require_teacher
@@ -316,6 +317,13 @@ def freeze_entry(
         version = library_store.freeze_entry(entry_id, published_by=uid, note=payload.note)
     except LibraryNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        # UNIQUE(entry_id, version_no) 競合 = 同時に別の凍結が同じ次版番号を確保した。
+        # 素の 500 で漏らさず、draft 更新の楽観ロック衝突（409）と同じ流儀で返す。
+        raise HTTPException(
+            status_code=409,
+            detail="同時に凍結が実行されました。再読み込みして再試行してください",
+        ) from exc
 
     _audit(
         AUDIT_ENTITY_LIBRARY_ENTRY,
@@ -336,11 +344,13 @@ def freeze_entry(
 def retire_entry(entry_id: str, current_user: dict = Depends(_require_teacher)):
     uid = _uid(current_user)
     try:
-        entry = library_store.retire_entry(entry_id, updated_by=uid)
+        entry, previous_status = library_store.retire_entry(entry_id, updated_by=uid)
     except LibraryNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    _audit(AUDIT_ENTITY_LIBRARY_ENTRY, entry_id, library_schema.STATUS_ACTIVE, library_schema.STATUS_RETIRED, uid, {"domain_key": entry["domain_key"]})
+    # old_status はハードコードせず store が返す遷移前の実状態を使う（冪等呼び出し
+    # — 既に retired だった場合 — でも監査が事実と食い違わない）。
+    _audit(AUDIT_ENTITY_LIBRARY_ENTRY, entry_id, previous_status, library_schema.STATUS_RETIRED, uid, {"domain_key": entry["domain_key"]})
     return entry
 
 
@@ -348,11 +358,11 @@ def retire_entry(entry_id: str, current_user: dict = Depends(_require_teacher)):
 def restore_entry(entry_id: str, current_user: dict = Depends(_require_teacher)):
     uid = _uid(current_user)
     try:
-        entry = library_store.restore_entry(entry_id, updated_by=uid)
+        entry, previous_status = library_store.restore_entry(entry_id, updated_by=uid)
     except LibraryNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    _audit(AUDIT_ENTITY_LIBRARY_ENTRY, entry_id, library_schema.STATUS_RETIRED, library_schema.STATUS_ACTIVE, uid, {"domain_key": entry["domain_key"]})
+    _audit(AUDIT_ENTITY_LIBRARY_ENTRY, entry_id, previous_status, library_schema.STATUS_ACTIVE, uid, {"domain_key": entry["domain_key"]})
     return entry
 
 

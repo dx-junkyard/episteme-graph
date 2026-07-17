@@ -1997,3 +1997,174 @@ def test_persist_components_filters_fallback_but_persists_normal_components():
         if len(call.args) > 1 and isinstance(call.args[1], dict) and "maturity_source" in call.args[1]
     ]
     assert inserted_names == ["relation"]
+
+
+# --- options 継承（画像パイプライン §3-2 / 解析再開の analyze_images 引き継ぎ） ------
+#
+# バグ修正: reanalyze_document が analyze_images 未指定でも常に明示 False の options を
+# 渡していたため、orchestrator の「options is None なら前回 run の options を引き継ぐ」
+# 分岐が到達不能だった。ここでは orchestrator 側の継承分岐（全体再解析 = resume=True /
+# resume=False の全体再実行の両方）と、route 側が None のとき options=None を渡すことを
+# 固定する。パイプライン本体は _PIPELINE_STEPS を1ステップの即時停止に差し替えて
+# 走らせない（options の確定はステップループより前に行われる）。
+
+
+def _run_pipeline_capturing_options(*, options, resume, latest_run):
+    from core.document_pipeline import orchestrator
+
+    captured: dict = {}
+
+    def fake_upsert(*, run_id=None, document_id, material_id, cartridge_id=None,
+                    status="running", current_stage=None, stage_outputs=None,
+                    error_message="", options=None):
+        if options is not None and "options" not in captured:
+            captured["options"] = options
+        return run_id or "run-new"
+
+    fake_get_latest = MagicMock(return_value=latest_run)
+    noop_steps = [orchestrator.PipelineStageDef("save_pdf", lambda ctx: True)]
+    with patch.object(orchestrator, "get_latest_analysis_run", fake_get_latest), \
+         patch.object(orchestrator, "upsert_analysis_run", side_effect=fake_upsert), \
+         patch.object(orchestrator, "_PIPELINE_STEPS", noop_steps):
+        orchestrator.run_document_pipeline(
+            pdf_bytes=b"%PDF-1.4",
+            document_id="doc-1",
+            material_id="mat-1",
+            resume=resume,
+            options=options,
+        )
+    return captured, fake_get_latest
+
+
+_PREVIOUS_RUN_WITH_IMAGES = {
+    "id": "run-prev",
+    "status": "completed",
+    "current_stage": "completed",
+    "stage_outputs": {},
+    "options": {"analyze_images": True},
+}
+
+
+def test_orchestrator_inherits_previous_options_when_options_none_full_reanalysis():
+    """全体再解析（resume=True・options=None）: 前回 run の analyze_images=True を引き継ぐ。"""
+    captured, _ = _run_pipeline_capturing_options(
+        options=None, resume=True, latest_run=dict(_PREVIOUS_RUN_WITH_IMAGES),
+    )
+    assert captured["options"] == {"analyze_images": True}
+
+
+def test_orchestrator_inherits_previous_options_even_when_resume_false():
+    """resume=False の全体再実行（lecture studio の document-pipeline/run 等）でも
+    options だけは最新 run から引き継ぐ（artifact 再利用とは独立の関心事）。"""
+    captured, fake_get_latest = _run_pipeline_capturing_options(
+        options=None, resume=False, latest_run=dict(_PREVIOUS_RUN_WITH_IMAGES),
+    )
+    assert captured["options"] == {"analyze_images": True}
+    assert fake_get_latest.called
+
+def test_orchestrator_explicit_options_override_previous_run():
+    """明示 options は前回 run より優先される（明示 False で OFF にできる）。"""
+    captured, _ = _run_pipeline_capturing_options(
+        options={"analyze_images": False}, resume=True,
+        latest_run=dict(_PREVIOUS_RUN_WITH_IMAGES),
+    )
+    assert captured["options"] == {"analyze_images": False}
+
+
+def test_orchestrator_no_previous_run_defaults_to_empty_options():
+    """前回 run が無ければ空 options（apparatus_semantics は既定 OFF・原則6）。"""
+    captured, _ = _run_pipeline_capturing_options(
+        options=None, resume=True, latest_run=None,
+    )
+    assert captured["options"] == {}
+
+
+# --- reanalyze_document ルート: analyze_images 未指定は options=None を渡す -----------
+
+
+def _import_admin_routes():
+    """routes/admin.py を import する（本ファイルは既定で src しか sys.path に足さない
+    ため、API 系テストファイルと同じ backend / backend/api のパス設定をここで行う）。"""
+    pytest.importorskip("fastapi")
+    backend_dir = Path(__file__).resolve().parents[1]
+    for _p in (str(backend_dir), str(backend_dir / "api")):
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
+    import routes.admin as admin_mod
+    return admin_mod
+
+
+def _reanalyze_with_mocks(monkeypatch, body):
+    admin_mod = _import_admin_routes()
+
+    captured: dict = {}
+
+    class _FakeThread:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+        def start(self):
+            pass
+
+    select_session = MagicMock()
+    select_session.execute.return_value.fetchone.return_value = (
+        "dddddddd-dddd-dddd-dddd-dddddddddddd", "Title", "file.pdf", "mat-1",
+    )
+    update_session = MagicMock()
+    fake_pg = MagicMock(side_effect=[select_session, update_session])
+
+    storage = MagicMock()
+    storage.get_object.return_value = b"%PDF-1.4"
+
+    monkeypatch.setattr(admin_mod, "_pg_session", fake_pg)
+    monkeypatch.setattr(admin_mod, "get_storage_client", lambda: storage)
+    monkeypatch.setattr(admin_mod, "create_background_task", lambda *a, **k: None)
+    monkeypatch.setattr(admin_mod.threading, "Thread", _FakeThread)
+
+    response = admin_mod.reanalyze_document(
+        "dddddddd-dddd-dddd-dddd-dddddddddddd",
+        body=body,
+        current_user={"id": "22222222-2222-2222-2222-222222222222"},
+    )
+    return captured, response
+
+
+def test_reanalyze_request_analyze_images_defaults_to_none():
+    admin_mod = _import_admin_routes()
+
+    assert admin_mod.ReanalyzeRequest().analyze_images is None
+
+
+def test_reanalyze_without_body_passes_options_none_for_inheritance(monkeypatch):
+    """analyze_images 未指定（body なし）→ options=None を渡し、orchestrator の
+    前回 run 継承分岐を生かす（従来は常に {"analyze_images": False} で上書きされ、
+    未レビューの AI 図分類が無警告で消えていた）。"""
+    captured, response = _reanalyze_with_mocks(monkeypatch, body=None)
+    assert captured["kwargs"] == {"options": None}
+    assert response["status"] == "pending"
+
+
+def test_reanalyze_with_unset_field_passes_options_none(monkeypatch):
+    admin_mod = _import_admin_routes()
+
+    captured, _ = _reanalyze_with_mocks(monkeypatch, body=admin_mod.ReanalyzeRequest())
+    assert captured["kwargs"] == {"options": None}
+
+
+def test_reanalyze_with_explicit_true_passes_true(monkeypatch):
+    admin_mod = _import_admin_routes()
+
+    captured, _ = _reanalyze_with_mocks(
+        monkeypatch, body=admin_mod.ReanalyzeRequest(analyze_images=True)
+    )
+    assert captured["kwargs"] == {"options": {"analyze_images": True}}
+
+
+def test_reanalyze_with_explicit_false_passes_false(monkeypatch):
+    """明示 false は従来どおり上書き（オプトアウトの意思を尊重する）。"""
+    admin_mod = _import_admin_routes()
+
+    captured, _ = _reanalyze_with_mocks(
+        monkeypatch, body=admin_mod.ReanalyzeRequest(analyze_images=False)
+    )
+    assert captured["kwargs"] == {"options": {"analyze_images": False}}

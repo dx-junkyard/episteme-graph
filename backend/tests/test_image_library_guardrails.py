@@ -54,6 +54,9 @@ _SEARCH_SRC = (_LIBRARY_DIR / "search.py").read_text(encoding="utf-8")
 _STORE_SRC = (_LIBRARY_DIR / "store.py").read_text(encoding="utf-8")
 _VALIDATOR_SRC = (_APPARATUS_DIR / "validator.py").read_text(encoding="utf-8")
 _REPAIR_SRC = (_APPARATUS_DIR / "repair.py").read_text(encoding="utf-8")
+_AGENT_SRC = (_APPARATUS_DIR / "agent.py").read_text(encoding="utf-8")
+_PERSISTENCE_SRC = (_DOC_PIPELINE_DIR / "persistence.py").read_text(encoding="utf-8")
+_FIGURE_REANALYSIS_SRC = (BACKEND / "core" / "figure_reanalysis.py").read_text(encoding="utf-8")
 
 _LIBRARY_WRITE_FUNCS = ("create_entry", "update_entry", "freeze_entry", "retire_entry", "restore_entry")
 
@@ -552,3 +555,194 @@ class TestRetrievalDoesNotReadDraft:
             "retrieval summary source instead of restoring it from the frozen "
             "library_entry_versions.content snapshot (§6-5 原則8 violation)"
         )
+
+
+# ===========================================================================
+# 9. 教員指示付き図再解析（guided_figure_reanalysis_design.md §1 不変条項）
+# ===========================================================================
+
+_GUIDED_FIELDS = (
+    "guidance_text",
+    "focus_bbox_rel",
+    "focus_image_bytes",
+    "focus_label_texts",
+)
+
+
+class TestGuidedFigureReanalysisGuardrails:
+    def test_batch_pipeline_never_sets_guidance_fields(self):
+        """GF7: バッチパイプライン非改変 — orchestrator.py（analyze_images 経由の
+        一括解析）も persistence.py も guidance フィールドを一切設定しない。
+        これらは deliberation の単図再解析（core/figure_reanalysis.py）専用。"""
+        assert_source_forbids(_ORCHESTRATOR_SRC, _GUIDED_FIELDS, context="orchestrator.py")
+        assert_source_forbids(_PERSISTENCE_SRC, _GUIDED_FIELDS, context="persistence.py")
+
+    def test_figure_reanalysis_never_assigns_review_or_backing_status(self):
+        """GF1: 指示は注意誘導であって確定ではない。core/figure_reanalysis.py が
+        review_status / source_backing_status を書き換える代入を一切持たない
+        （確定は既存の annotation commit フローのみ。agent 側の決定論的導出も
+        文字列リテラル代入ではなく既存メカニズムのまま — このガードレールは
+        guided re-analysis 追加によって新たな上書き経路が生まれていないことを
+        構造的に検査する）。"""
+        assert_source_forbids(
+            _FIGURE_REANALYSIS_SRC,
+            ["review_status =", "review_status=", "source_backing_status =", "source_backing_status="],
+            context="figure_reanalysis.py",
+        )
+
+    def test_figure_reanalysis_never_writes_part_bbox_directly(self):
+        """GF4: 決定論的グラウンディング維持 — 部品の bbox / expanded_name は
+        従来どおり label_ref → inner_labels 突合（agent.py の
+        _attach_label_grounding）のみが導出する。core/figure_reanalysis.py は
+        record.parts や part.bbox に一切触れず、focus_bbox を部品座標として
+        直接採用する経路を持たない。"""
+        assert_source_forbids(
+            _FIGURE_REANALYSIS_SRC,
+            [".parts[", "part.bbox", "parts=[", '"bbox":'],
+            context="figure_reanalysis.py",
+        )
+
+    def test_attach_label_grounding_still_runs_unconditionally_in_agent(self):
+        """GF4 (agent.py 側の構造維持確認): guided/unguided で分岐せず、
+        image 欠落フォールバック・LLM失敗フォールバック・通常パスの
+        いずれでも record 確定の直前に _attach_label_grounding が呼ばれる
+        構造が維持されていること（guidance 追加のために弱められていないか）。"""
+        assert _AGENT_SRC.count("_attach_label_grounding(") >= 3
+
+    def test_figure_reanalysis_validates_guidance_before_any_figure_lookup(self):
+        """GF6/§5: guidance 検証（_normalize_guidance）は load_document_figures
+        より前で行う — 不正な指示は課金境界はおろかストレージ/DB アクセスの
+        前に弾かれる（構造的検査: ソース中の出現順）。"""
+        normalize_pos = _FIGURE_REANALYSIS_SRC.index("norm_guidance = _normalize_guidance(guidance)")
+        load_pos = _FIGURE_REANALYSIS_SRC.index("rows = load_document_figures(document_id)")
+        assert normalize_pos < load_pos
+
+    def test_no_new_cost_gate_env_var_introduced(self):
+        """GF6: 新しい環境変数・上限を作らない — CostGate 呼び出しは既存の
+        _consume_budget(figure_id, user_id) のみで、guidance 由来の別キー
+        （例: guidance を混ぜた session_key）を作らない。"""
+        assert "_consume_budget(figure_id, created_by)" in _FIGURE_REANALYSIS_SRC
+        assert "guidance" not in _extract_function_body(_FIGURE_REANALYSIS_SRC, "_consume_budget")
+
+
+# ===========================================================================
+# 9. 凍結の同時実行（UNIQUE 競合 → 409）/ retire・restore 監査の遷移前 status
+# ===========================================================================
+
+
+@_skip_no_fastapi
+class TestFreezeConcurrencyMapsTo409:
+    """`library_entry_versions` の UNIQUE(entry_id, version_no) 競合が素の 500 で
+    漏れず、draft 楽観ロック衝突と同じ流儀の 409 になる。"""
+
+    def test_freeze_integrity_error_returns_409(self, monkeypatch):
+        import routes.library as library_routes
+        from fastapi import HTTPException
+        from sqlalchemy.exc import IntegrityError
+
+        def _conflict(entry_id, *, published_by=None, note=None, **_kwargs):
+            raise IntegrityError(
+                "INSERT INTO library_entry_versions ...",
+                {},
+                Exception("duplicate key value violates unique constraint"),
+            )
+
+        monkeypatch.setattr(library_routes.library_store, "freeze_entry", _conflict)
+        with pytest.raises(HTTPException) as exc_info:
+            library_routes.freeze_entry(
+                "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+                library_routes.FreezeRequest(),
+                {"id": "u1"},
+            )
+        assert exc_info.value.status_code == 409
+        assert "再試行" in str(exc_info.value.detail)
+
+    def test_freeze_not_found_still_maps_to_404(self, monkeypatch):
+        import routes.library as library_routes
+        from fastapi import HTTPException
+        from core.library.store import LibraryNotFoundError
+
+        def _missing(entry_id, *, published_by=None, note=None, **_kwargs):
+            raise LibraryNotFoundError(f"library entry not found: {entry_id}")
+
+        monkeypatch.setattr(library_routes.library_store, "freeze_entry", _missing)
+        with pytest.raises(HTTPException) as exc_info:
+            library_routes.freeze_entry(
+                "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+                library_routes.FreezeRequest(),
+                {"id": "u1"},
+            )
+        assert exc_info.value.status_code == 404
+
+
+@_skip_no_fastapi
+class TestRetireRestoreAuditUsesActualPreviousStatus:
+    """retire/restore の監査 old_status はハードコード（常に active / 常に retired）
+    ではなく、store が返す遷移前の実状態を記帳する（冪等呼び出しでも事実と一致）。"""
+
+    def _capture_audit(self, monkeypatch):
+        import routes.library as library_routes
+
+        events: list[tuple] = []
+        monkeypatch.setattr(
+            library_routes.services,
+            "record_review_event",
+            lambda *args, **kwargs: events.append(args),
+        )
+        return library_routes, events
+
+    def test_retire_records_actual_previous_status(self, monkeypatch):
+        library_routes, events = self._capture_audit(monkeypatch)
+        entry = {"id": "e1", "domain_key": "particle_physics", "status": "retired"}
+        # 既に retired だった冪等呼び出し（遷移前も retired）を模す。
+        monkeypatch.setattr(
+            library_routes.library_store,
+            "retire_entry",
+            lambda entry_id, updated_by=None: (entry, "retired"),
+        )
+
+        result = library_routes.retire_entry("e1", {"id": "u1"})
+        assert result == entry  # レスポンスは entry dict のまま（tuple を漏らさない）
+        assert len(events) == 1
+        _entity_type, _entity_id, old_status, new_status = events[0][:4]
+        assert old_status == "retired"
+        assert new_status == "retired"
+
+    def test_restore_records_actual_previous_status(self, monkeypatch):
+        library_routes, events = self._capture_audit(monkeypatch)
+        entry = {"id": "e1", "domain_key": "particle_physics", "status": "active"}
+        # 既に active だった冪等呼び出し（遷移前も active）を模す。
+        monkeypatch.setattr(
+            library_routes.library_store,
+            "restore_entry",
+            lambda entry_id, updated_by=None: (entry, "active"),
+        )
+
+        result = library_routes.restore_entry("e1", {"id": "u1"})
+        assert result == entry
+        assert len(events) == 1
+        _entity_type, _entity_id, old_status, new_status = events[0][:4]
+        assert old_status == "active"
+        assert new_status == "active"
+
+    def test_normal_transitions_record_expected_pair(self, monkeypatch):
+        library_routes, events = self._capture_audit(monkeypatch)
+        monkeypatch.setattr(
+            library_routes.library_store,
+            "retire_entry",
+            lambda entry_id, updated_by=None: (
+                {"id": "e1", "domain_key": "d", "status": "retired"}, "active",
+            ),
+        )
+        monkeypatch.setattr(
+            library_routes.library_store,
+            "restore_entry",
+            lambda entry_id, updated_by=None: (
+                {"id": "e1", "domain_key": "d", "status": "active"}, "retired",
+            ),
+        )
+        library_routes.retire_entry("e1", {"id": "u1"})
+        library_routes.restore_entry("e1", {"id": "u1"})
+        assert [(e[2], e[3]) for e in events] == [
+            ("active", "retired"), ("retired", "active"),
+        ]

@@ -91,6 +91,17 @@ def aggregate_overall_tier(tiers: list[str]) -> str:
     return min(tiers, key=lambda t: _TIER_STRENGTH.get(t, 0))
 
 
+def tier_floor(tier: str, floor: str) -> str:
+    """tier が floor より弱ければ floor へ引き上げる（強い方を返す）。
+
+    プロンプトに実根拠（例: 現在表示中のトピック教材）を注入済みのとき、集約結果が
+    out_of_source（教材の裏づけなし）へ落ちて事実と矛盾するのを防ぐ用途。
+    approved を floor に渡さないこと（承認への昇格は judge_source_tier の
+    ``approved is True`` 経路のみ — 不可侵の一線）。
+    """
+    return max([tier, floor], key=lambda t: _TIER_STRENGTH.get(t, 0))
+
+
 def attach_tiers(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """チャンク dict 群に tier を付与して返す（破壊的: 各 dict に 'tier' を追記）。"""
     for c in chunks:

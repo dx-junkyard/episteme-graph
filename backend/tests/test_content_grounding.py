@@ -108,6 +108,17 @@ class TestGroundingClassificationWiring:
         assert "has_topic_material = False" in source
         assert "has_topic_material = True" in source
 
+    def test_topic_material_floors_overall_tier_to_source(self):
+        """トピック教材を注入した回答を out_of_source にしない（grounding との矛盾表示防止）。
+
+        「📘 教材から回答」(content_grounding=course_material) と「参考」(out_of_source)
+        バナーが同時に出る矛盾の再発防止。approved への昇格はしない（tier_floor の下限は source）。
+        """
+        source = _read(LEARNING)
+        block = source.split("overall_tier = aggregate_overall_tier")[1][:600]
+        assert "if has_topic_material:" in block
+        assert "overall_tier = tier_floor(overall_tier, TIER_SOURCE)" in block
+
     def test_response_includes_content_grounding(self):
         source = _read(LEARNING)
         tail = source.split("return LearningChatResponse(")[-1][:400]

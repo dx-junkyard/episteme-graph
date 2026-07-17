@@ -162,6 +162,13 @@ def run_tension_mining(user_id: str, course_id: str, topic_id: str | None) -> in
             return 0
 
         if not _check_and_count_llm_call(user_id, course_id, topic_id or ""):
+            # コスト上限で解析できない窓は claim を解放する（P4: ヒント痕跡を無言で
+            # 失わない）。上限リセット後の実行で未解析として再取得される。
+            session.execute(
+                sa_text("UPDATE interest_traces SET analyzed_at = NULL WHERE id::text = ANY(:ids)"),
+                {"ids": [str(r[0]) for r in claimed]},
+            )
+            session.commit()
             return 0
 
         history_row = session.execute(

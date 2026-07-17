@@ -65,7 +65,14 @@ router = APIRouter(tags=["Lecture Script Studio"])
 
 
 def _normalize_lecture_language(value: str | None, default: str = "ja") -> str:
-    """読み上げ言語を ``"ja"``/``"en"`` に正規化する（不正値は default にフォールバック）。"""
+    """読み上げ言語を ``"ja"``/``"en"`` に正規化する（不正値は default にフォールバック）。
+
+    ``value=None``（設定 PUT で言語フィールドが省略された場合）も「不正値」として
+    ``default`` にフォールバックする。呼び出し側（``_save_lecture_studio_settings``）は
+    ``default=前回保存済みの言語`` を渡すため、これにより「省略 = 変更しない」が
+    成立する（省略と明示的な不正値を区別する必要はない — どちらも「今回は指定なし」
+    として前回値を保持する）。
+    """
     return value if value in ("ja", "en") else default
 
 
@@ -75,6 +82,10 @@ def _save_lecture_studio_settings(course_id: str, course_data: dict, settings: d
     口調 (narration_persona/response_persona) または lecture_language が変わった場合は
     ``scripts_need_regeneration`` を立て、次回のバッチ生成で全チャンクを再生成させる。
     更新後の course_data を返す（呼び出し側が続けて最新設定を使えるように）。
+
+    ``settings["lecture_language"]`` が ``None``（API スキーマ側で省略された場合）は
+    ``_normalize_lecture_language`` が ``previous_language`` にフォールバックするため、
+    前回保存済みの言語がそのまま維持される（口調のみの変更が言語設定を巻き戻さない）。
     """
     updated = dict(course_data)
     previous = updated.get("lecture_studio_settings") or {}
@@ -219,7 +230,15 @@ def update_lecture_studio_settings(
     body: LectureStudioSettings,
     current_user: dict = Depends(_require_teacher),
 ) -> LectureStudioSettings:
-    """原稿スタジオのコース単位設定を保存する。"""
+    """原稿スタジオのコース単位設定を保存する。
+
+    ``body.lecture_language`` が省略された（``None`` の）リクエストは「変更しない」を
+    意味する。``_save_lecture_studio_settings`` → ``_normalize_lecture_language`` が
+    ``None`` を前回保存済みの言語へフォールバックさせるため、口調のみの設定保存で
+    既存の言語設定が無警告で "ja" に巻き戻ることはない。レスポンスは常に実際に
+    保存された（解決済みの）設定を返す — ローカルの ``settings`` dict をそのまま
+    返すと ``lecture_language=None`` を返してしまうため使わない。
+    """
     course_data = get_editable_course_data(current_user["id"], course_id)
     if not course_data and current_user.get("role") == ROLE_SYSTEM_ADMIN:
         course_data = _get_system_admin_course_data(course_id)
@@ -231,8 +250,13 @@ def update_lecture_studio_settings(
         "response_persona": normalize_persona_id(body.response_persona),
         "lecture_language": body.lecture_language,
     }
-    _save_lecture_studio_settings(course_id, course_data, settings)
-    return LectureStudioSettings(**settings)
+    updated = _save_lecture_studio_settings(course_id, course_data, settings)
+    saved = updated.get("lecture_studio_settings") or {}
+    return LectureStudioSettings(
+        narration_persona=saved.get("narration_persona") or "",
+        response_persona=saved.get("response_persona") or "",
+        lecture_language=_normalize_lecture_language(saved.get("lecture_language")),
+    )
 
 
 def _batch_generate_worker(

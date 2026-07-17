@@ -598,3 +598,416 @@ class TestFigurePresentationWorkspace:
         assert "data-deliberation-connection" in src
         assert ".deliberation-figure-overlay.is-selected" in css
         assert ".deliberation-connection-list li.is-related" in css
+
+
+# ---------------------------------------------------------------------------
+# 教員指示付き図再解析（Guided Figure Re-analysis）。
+# 正本: docs/features/guided_figure_reanalysis_design.md §7 フロントエンド / §8 テスト計画。
+# ---------------------------------------------------------------------------
+
+
+def _function_block(src: str, name: str) -> str:
+    """モジュールレベル関数（2スペースインデント）本体をソースから切り出す。
+
+    TestIdentityLinksWiring._function_block と同型（本ファイル内の他クラスとの
+    重複を避けるためモジュールレベルへ寄せる。引数リストは `_bindFigureReanalysis
+    (decomposition)` のように空でない場合もあるため `[^)]*` で受ける）。
+    """
+    m = re.search(r"function " + name + r"\([^)]*\)\s*\{[\s\S]+?\n  \}\n", src)
+    assert m, f"function {name} が見つかりません"
+    return m.group(0)
+
+
+class TestGuidedFigureReanalysis:
+    """教員指示付き図再解析（focus_bbox による領域指定 + hint_text による言葉の指示）。"""
+
+    def test_focus_toggle_and_hint_controls_present(self):
+        """設計書 §7-1: トグルボタン・クリアボタン・指示欄（2000字まで）。"""
+        src = _read(DELIBERATION_JS)
+        assert 'id="deliberation-focus-toggle"' in src
+        assert 'id="deliberation-focus-clear"' in src
+        assert 'id="deliberation-reanalyze-hint"' in src
+        assert 'maxlength="2000"' in src
+
+    def test_focus_controls_placed_right_after_mode_review_row(self):
+        """設計書 §7-1: `.deliberation-mode-review`（既存の再解析ボタン等を含む行）
+        の直下に配置する。"""
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_figureModeHtml")
+        assert "_figureFocusControlsHtml()" in block
+        mode_review_idx = block.index('deliberation-mode-review')
+        focus_controls_idx = block.index("_figureFocusControlsHtml()")
+        assert mode_review_idx < focus_controls_idx, (
+            "focus controls が .deliberation-mode-review より前に置かれています"
+        )
+
+    def test_focus_layer_is_sibling_of_read_only_overlays(self):
+        """設計書 §7-2: 既存 #deliberation-figure-overlays（読み取り専用マーカー）
+        との干渉を避けるため、独立した描画レイヤーを兄弟として追加する。"""
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_figureWorkspaceHtml")
+        assert 'id="deliberation-figure-overlays"' in block
+        assert 'id="deliberation-figure-focus-layer"' in block
+        assert block.index('id="deliberation-figure-overlays"') < block.index(
+            'id="deliberation-figure-focus-layer"'
+        )
+
+    def test_focus_mode_gates_pointer_events_via_css_class(self):
+        """focus モード ON のときのみドラッグ描画レイヤーが操作可能になる。"""
+        src = _read(DELIBERATION_JS)
+        assert "function _setFigureFocusLayerActive" in src
+        assert '"is-drawable"' in src
+
+    def test_mouse_and_touch_drag_handlers_bound_on_focus_layer(self):
+        """設計書 §7-2: mousedown/mousemove/mouseup + touch 系を同ハンドラに束ねる
+        （タブレットでのレビューを想定）。"""
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_bindFigureFocusDrawing")
+        for evt in ("mousedown", "mousemove", "mouseup", "touchstart", "touchmove", "touchend"):
+            assert f'"{evt}"' in block, f"{evt} のハンドラ登録が見つかりません"
+
+    def test_micro_drag_is_ignored_matching_server_threshold(self):
+        """設計書 §4-1/§7-2: 幅または高さ 0.02 未満のドラッグは誤クリックとして
+        無視する（サーバ側 422 の閾値と整合）。"""
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_bindFigureFocusDrawing")
+        assert "0.02" in block
+
+    def test_focus_bbox_state_field_present(self):
+        """設計書 §7-2: 描画結果は figureImageState.focusBbox（画像内相対座標 0..1）
+        に保持する。"""
+        src = _read(DELIBERATION_JS)
+        assert "focusBbox" in src
+        assert "hintText" in src
+        assert "focusMode" in src
+
+    def test_guidance_state_persists_across_reload_overview(self):
+        """設計書 §7-3: 送信した guidance は成功・失敗にかかわらず消さない。
+        _reloadOverview（再解析成功時に自動で呼ばれる）は guidance をリセットしない
+        —— _resetFigureImageState は画像 blob のライフサイクルのみをリセットし、
+        focusBbox/hintText/focusMode には触れない。"""
+        src = _read(DELIBERATION_JS)
+        reset_image = _function_block(src, "_resetFigureImageState")
+        assert "focusBbox" not in reset_image
+        assert "hintText" not in reset_image
+
+        reload_overview = _function_block(src, "_reloadOverview")
+        assert "_resetFigureGuidanceState" not in reload_overview, (
+            "_reloadOverview が guidance をリセットしています（再解析成功直後の"
+            "自動リロードで教員の指示が消えてしまいます）"
+        )
+
+    def test_guidance_state_resets_only_when_opening_a_different_element(self):
+        """設計書 §7-2: 別の要素でモーダルを開いたとき（_closeModal 経由）のみ
+        focus 状態を完全リセットする。"""
+        src = _read(DELIBERATION_JS)
+        assert "function _resetFigureGuidanceState" in src
+        reset_guidance = _function_block(src, "_resetFigureGuidanceState")
+        assert "focusBbox" in reset_guidance
+        assert "hintText" in reset_guidance
+        assert "focusMode" in reset_guidance
+
+        close_modal = _function_block(src, "_closeModal")
+        assert "_resetFigureGuidanceState()" in close_modal
+
+    def test_drawn_rect_and_hint_restored_after_rerender(self):
+        """モーダル再描画後もテキストエリアの値・矩形描画を復元する。"""
+        src = _read(DELIBERATION_JS)
+        controls = _function_block(src, "_figureFocusControlsHtml")
+        assert "figureImageState.hintText" in controls
+        assert "figureImageState.focusBbox" in controls
+
+        drawing = _function_block(src, "_bindFigureFocusDrawing")
+        assert "_renderFigureFocusRect()" in drawing
+
+    def test_reanalyze_sends_no_body_when_guidance_is_empty(self):
+        """設計書 §4-1: body なし / 両フィールド null = 従来動作（後方互換）。
+        hint_text も focus_bbox も無ければ _figureReanalyzeGuidancePayload は null を
+        返し、呼び出し側は body キー自体を省略した従来どおりのリクエストを送る。"""
+        src = _read(DELIBERATION_JS)
+        payload_fn = _function_block(src, "_figureReanalyzeGuidancePayload")
+        assert "return hasGuidance ? payload : null" in payload_fn
+        assert "payload.hint_text" in payload_fn
+        assert "payload.focus_bbox" in payload_fn
+
+        bind_fn = _function_block(src, "_bindFigureReanalysis")
+        assert "guidance ?" in bind_fn
+        assert '{ method: "POST" }' in bind_fn
+
+    def test_guidance_note_surfaced_as_factual_status_text(self):
+        """GF3/GF5: guidance_note が返れば AI の応答を status に表示する
+        （指示された要素が見つからなかった場合も教員はここで正直に知れる）。"""
+        src = _read(DELIBERATION_JS)
+        bind_fn = _function_block(src, "_bindFigureReanalysis")
+        assert "data.guidance_note" in bind_fn
+        assert "AIの応答" in bind_fn
+        assert "note.substring(0, 120)" in bind_fn
+
+    def test_focus_layer_and_rect_have_dedicated_css(self):
+        """CSS: 描画レイヤー（focus-layer）と矩形（focus-rect）、トグルの ON 状態、
+        指示欄の見た目が定義されていること。"""
+        css = _read(ROOT / "frontend" / "public" / "css" / "styles.css")
+        assert ".deliberation-figure-focus-layer" in css
+        assert ".deliberation-figure-focus-layer.is-drawable" in css
+        assert ".deliberation-figure-focus-rect" in css
+        assert ".deliberation-focus-toggle.is-active" in css
+        assert ".deliberation-reanalyze-hint" in css
+
+
+class TestDeliberationJsEs5RegressionGuard:
+    """deliberation.js は ES5 準拠（開発ルール5）。test_apparatus_overlay_ui_static.py
+    の admin.js 用リグレッションガード（TestAdminJsEs5RegressionGuard）と同型。
+    教員指示付き図再解析の追加でこの既存規約を崩していないことを固定する。"""
+
+    def test_no_arrow_functions_anywhere_in_file(self):
+        src = _read(DELIBERATION_JS)
+        assert "=>" not in src
+
+    def test_no_const_or_let_declarations_anywhere_in_file(self):
+        src = _read(DELIBERATION_JS)
+        assert re.search(r"\bconst\s+\w", src) is None
+        assert re.search(r"\blet\s+\w", src) is None
+
+    def test_no_template_literals_anywhere_in_file(self):
+        src = _read(DELIBERATION_JS)
+        assert "`" not in src
+
+    def test_only_var_declarations_used(self):
+        src = _read(DELIBERATION_JS)
+        assert "var " in src
+
+
+# ---------------------------------------------------------------------------
+# 要素インベントリ（Element Inventory / 検出要素の一覧）。
+# 正本: docs/features/element_inventory_design.md §4/§5/§6/§7/§9。
+# I-2（フロント）: deliberation.js に openInventory を追加 + admin.js/
+# admin-lecture-studio.js に導線を追加する（バックエンドの
+# GET /api/admin/deliberation/documents/{document_id}/elements は別issueで実装）。
+# ---------------------------------------------------------------------------
+
+
+class TestElementInventoryDeliberationJs:
+    """openInventory 本体（deliberation.js）の受け入れ条件。"""
+
+    def test_openinventory_exported(self):
+        src = _read(DELIBERATION_JS)
+        assert "window.Deliberation" in src
+        assert "openInventory:" in src
+
+    def test_modal_dom_ids_present(self):
+        """§9: 独立 DOM id（既存の深く検討モーダル #deliberation-modal とは別ID）。"""
+        src = _read(DELIBERATION_JS)
+        assert 'overlay.id = "deliberation-inventory-modal"' in src
+        for dom_id in (
+            'id="deliberation-inventory-toolbar"',
+            'id="deliberation-inventory-list"',
+            'id="deliberation-inventory-truncated-note"',
+            'id="deliberation-inventory-keyword"',
+            'id="deliberation-inventory-reload"',
+        ):
+            assert dom_id in src, f"{dom_id} が見つかりません"
+
+    def test_fetch_endpoint_matches_design_contract(self):
+        """§5: GET /api/admin/deliberation/documents/{document_id}/elements。"""
+        src = _read(DELIBERATION_JS)
+        assert '"/admin/deliberation/documents/"' in src
+        assert '"/elements"' in src
+
+    def test_fetch_targets_still_within_allowlist(self):
+        """既存の許可リスト検査（test_fetch_targets_use_exact_allowlist）と同じ
+        許容ルールに新エンドポイントが収まること（/admin/deliberation 配下）。"""
+        src = _read(DELIBERATION_JS)
+        idx = src.index('"/admin/deliberation/documents/"')
+        assert src.startswith("/admin/deliberation", idx + 1)
+        # 既存契約（/admin/documents/ は3箇所固定）を増やしていないこと。
+        assert src.count('"/admin/documents/"') == 3
+
+    def test_keyword_input_does_not_trigger_fetch(self):
+        """§6: フィルタはクライアントサイド。キー入力ごとに再フェッチしない。"""
+        src = _read(DELIBERATION_JS)
+        m = re.search(
+            r'keywordInput\.addEventListener\("input",\s*function\s*\(\)\s*\{([\s\S]*?)\}\);',
+            src,
+        )
+        assert m, "キーワード入力のイベントハンドラが見つかりません"
+        handler_body = m.group(1)
+        assert "apiFetch(" not in handler_body
+        assert "fetch(" not in handler_body
+        assert "_renderInventoryList()" in handler_body
+
+    def test_reload_button_is_the_only_manual_refetch(self):
+        """§9: 「再読込」ボタンだけが再フェッチする（深く検討を閉じても再フェッチしない）。"""
+        src = _read(DELIBERATION_JS)
+        assert 'document.getElementById("deliberation-inventory-reload")' in src
+        assert "reloadBtn.addEventListener(\"click\", _loadInventory)" in src
+
+    def test_deliberate_button_reuses_open_element_without_refetch(self):
+        """§9: 「深く検討」は既存 openElement をそのまま呼ぶ。openElement 自体は
+        非改変（_bindInventoryDeliberateButtons からの直接呼び出しのみを追加）。"""
+        src = _read(DELIBERATION_JS)
+        m = re.search(r"function _bindInventoryDeliberateButtons[\s\S]+?\n  \}\n", src)
+        assert m
+        block = m.group(0)
+        assert "openElement(elementType, elementId" in block
+        assert "documentId: inventoryState.documentId" in block
+
+    def test_modal_z_index_lower_than_element_modal(self):
+        """§9: インベントリの上に既存の深く検討モーダル（z-index:9999）が重なる。"""
+        src = _read(DELIBERATION_JS)
+        element_modal_z = re.search(
+            r'overlay\.id = "deliberation-modal";[\s\S]{0,400}?z-index:(\d+)', src
+        )
+        inventory_modal_z = re.search(
+            r'overlay\.id = "deliberation-inventory-modal";[\s\S]{0,400}?z-index:(\d+)', src
+        )
+        assert element_modal_z and inventory_modal_z
+        assert int(inventory_modal_z.group(1)) < int(element_modal_z.group(1))
+
+    def test_type_filter_chips_match_design(self):
+        """§6: すべて / 論理要素 / 主張 / 数式 / 図・画像 の5チップ。"""
+        src = _read(DELIBERATION_JS)
+        assert "INVENTORY_TYPE_CHIP_LABELS" in src
+        for label in ("すべて", "論理要素", "主張", "数式", "図・画像"):
+            assert label in src
+
+    def test_deliberation_status_badge_three_levels_only(self):
+        """§7: 検討済み/候補あり/未検討の3段階のみ。dismissed 件数は判定材料に
+        使わない（API では返すが表示は抑制する。既存 .dismissed CSS クラスを
+        「未検討」のスタイル流用に使うのは可）。"""
+        src = _read(DELIBERATION_JS)
+        m = re.search(r"function _inventoryStatusBadgeHtml[\s\S]+?\n  \}\n", src)
+        assert m
+        block = m.group(0)
+        assert "検討済み" in block
+        assert "候補あり" in block
+        assert "未検討" in block
+        assert re.search(r"\.dismissed\b", block) is None
+
+    def test_truncated_types_note_is_factual(self):
+        """§6/I4: 上限到達時は正直に事実文で伝える。"""
+        src = _read(DELIBERATION_JS)
+        assert "truncated_types" in src
+        assert "は500件で省略されています" in src
+
+    def test_no_confidence_numeric_value_rendered_for_inventory_cards(self):
+        """I3: equations.json 由来の confidence 生数値をカードに含めない。"""
+        src = _read(DELIBERATION_JS)
+        m = re.search(r"function _inventoryCardHtml[\s\S]+?\n  \}\n", src)
+        assert m
+        assert re.search(r"\bel\.confidence\b", m.group(0)) is None
+
+    def test_inventory_uses_esc_html_for_dynamic_text(self):
+        """XSS対策: label/snippet/badges はすべて escHtml 経由で描画する。"""
+        src = _read(DELIBERATION_JS)
+        m = re.search(r"function _inventoryCardHtml[\s\S]+?\n  \}\n", src)
+        assert m
+        assert m.group(0).count("escHtml(") >= 3
+
+
+class TestElementInventoryAdminJsIntegration:
+    """admin.js: 教材管理行の「検出要素」ボタン導線。"""
+
+    def test_inventory_button_class_present(self):
+        src = _read(ADMIN_JS)
+        assert "admin-inventory-btn" in src
+
+    def test_button_gated_on_document_id_like_figures_button(self):
+        """§2/§9: document_id がある教材のみ活性（図・画像ボタンと同条件）。"""
+        src = _read(ADMIN_JS)
+        assert 'var figuresBtn = m.document_id' in src
+        assert 'var inventoryBtn = m.document_id' in src
+
+    def test_inventory_button_placed_next_to_figures_button(self):
+        """§2: 「図・画像」の隣に配置する。"""
+        src = _read(ADMIN_JS)
+        assert re.search(r"figuresBtn\s*\+\s*\n\s*inventoryBtn\s*\+", src)
+
+    def test_click_calls_open_inventory_guarded(self):
+        src = _read(ADMIN_JS)
+        assert "window.Deliberation.openInventory(" in src
+        _assert_deliberation_calls_guarded(src, "admin.js")
+
+    def test_inventory_click_binding_uses_admin_inventory_btn_class(self):
+        src = _read(ADMIN_JS)
+        m = re.search(r'tbody\.querySelectorAll\("\.admin-inventory-btn"\)[\s\S]+?\}\);\s*\n\s*\}\);', src)
+        assert m, "admin-inventory-btn の click バインディングが見つかりません"
+        assert "window.Deliberation.openInventory(" in m.group(0)
+
+
+class TestElementInventoryLectureStudioIntegration:
+    """admin-lecture-studio.js: コース構造タブのコースヘッダの「検出要素」入口。"""
+
+    def test_button_html_function_present(self):
+        src = _read(LECTURE_STUDIO_JS)
+        assert "function lsCourseInventoryButtonHtml" in src
+        assert "function lsCourseInventorySources" in src
+        assert "function lsBindCourseInventoryButtons" in src
+
+    def test_sources_read_pattern_matches_primary_document_id(self):
+        """§9-3: sources の読み方は lsCoursePrimaryDocumentId() と同じにする。"""
+        src = _read(LECTURE_STUDIO_JS)
+        pattern = "course.sources || (course.data && course.data.sources) || []"
+        assert src.count(pattern) >= 2
+
+    def test_button_hidden_without_sources_or_without_deliberation(self):
+        """§9-3: sources が0件、または window.Deliberation が無いときはボタンを描画しない。"""
+        src = _read(LECTURE_STUDIO_JS)
+        m = re.search(r"function lsCourseInventoryButtonHtml[\s\S]+?\n  \}\n", src)
+        assert m
+        block = m.group(0)
+        assert 'if (!window.Deliberation) return ""' in block
+        assert 'if (!sources.length) return ""' in block
+
+    def test_multiple_sources_use_menu_pattern(self):
+        """§9-3: 複数件は既存 ls-menu パターンの小メニューで教材を選ばせる。"""
+        src = _read(LECTURE_STUDIO_JS)
+        m = re.search(r"function lsCourseInventoryButtonHtml[\s\S]+?\n  \}\n", src)
+        assert m
+        block = m.group(0)
+        assert '"ls-menu ls-course-inventory-menu"' in block
+        assert '"ls-menu-item ls-course-inventory-item"' in block
+
+    def test_material_id_passed_through_without_reshaping(self):
+        """§9-3: material_id をそのまま渡してよい（API側が正規化する）。"""
+        src = _read(LECTURE_STUDIO_JS)
+        m = re.search(r"function lsCourseInventorySources[\s\S]+?\n  \}\n", src)
+        assert m
+        assert "src.material_id" in m.group(0)
+
+    def test_calls_open_inventory_guarded(self):
+        src = _read(LECTURE_STUDIO_JS)
+        assert "window.Deliberation.openInventory(" in src
+        _assert_deliberation_calls_guarded(src, "admin-lecture-studio.js")
+
+    def test_render_course_structure_binds_inventory_buttons(self):
+        """コース構造タブの再描画（lsRenderCourseStructure）のあらゆる分岐で
+        lsBindCourseInventoryButtons が呼ばれること（章構造なし早期returnを含む）。"""
+        src = _read(LECTURE_STUDIO_JS)
+        start = src.index("function lsRenderCourseStructure")
+        end = src.index("function lsRenderComponentsTab")
+        block = src[start:end]
+        assert block.count("lsBindCourseInventoryButtons()") >= 2
+
+
+class TestElementInventoryLectureStudioEs5Guard:
+    """追加した検出要素導線の ES5 準拠（開発ルール5）。"""
+
+    def _added_region(self):
+        src = _read(LECTURE_STUDIO_JS)
+        start = src.index("function lsCourseInventorySources")
+        end = src.index("function lsRenderComponentsTab")
+        return src[start:end]
+
+    def test_no_arrow_functions(self):
+        assert "=>" not in self._added_region()
+
+    def test_no_const_or_let(self):
+        region = self._added_region()
+        assert re.search(r"\bconst\s+\w", region) is None
+        assert re.search(r"\blet\s+\w", region) is None
+
+    def test_no_template_literals(self):
+        assert "`" not in self._added_region()
+
+    def test_only_var_used(self):
+        assert "var " in self._added_region()

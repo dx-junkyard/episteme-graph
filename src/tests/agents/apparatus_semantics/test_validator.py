@@ -222,3 +222,67 @@ def test_validate_aggregates_all_records():
     result = ApparatusSemanticsResult(document_id="doc_test", cartridge_id=None, apparatus_records=[good, bad])
     issues = VALIDATOR.validate(result)
     assert any(i.rule_id == "invalid_match_status" for i in issues)
+
+
+# ------------------------------------------------------------------
+# Guided re-analysis: guidance_note_missing / guidance_note_unexpected
+# (guided_figure_reanalysis_design.md §6-5) — both must be warnings, never
+# errors, so they can never trigger the repair loop or block delivery.
+# ------------------------------------------------------------------
+
+
+def test_guidance_note_missing_is_warning_when_guidance_given_but_note_empty():
+    figure = _figure()
+    figure.guidance_text = "look at the left component"
+    record = _record(guidance_note="")
+    issues = VALIDATOR.validate_record(record, figure=figure)
+    matching = [i for i in issues if i.rule_id == "guidance_note_missing"]
+    assert matching and matching[0].severity == "warning"
+
+
+def test_guidance_note_missing_via_focus_bbox_without_hint_text():
+    figure = _figure()
+    figure.focus_bbox_rel = [0.1, 0.2, 0.5, 0.6]
+    record = _record(guidance_note="")
+    issues = VALIDATOR.validate_record(record, figure=figure)
+    assert any(i.rule_id == "guidance_note_missing" for i in issues)
+
+
+def test_no_guidance_note_missing_warning_when_guidance_note_present():
+    figure = _figure()
+    figure.guidance_text = "look at the left component"
+    record = _record(guidance_note="Found it in the focus region.")
+    issues = VALIDATOR.validate_record(record, figure=figure)
+    assert [i for i in issues if i.rule_id == "guidance_note_missing"] == []
+
+
+def test_guidance_note_unexpected_is_warning_when_no_guidance_input():
+    figure = _figure()  # no guidance_text / focus_bbox_rel / focus_image_bytes
+    record = _record(guidance_note="I focused on the left box as instructed.")
+    issues = VALIDATOR.validate_record(record, figure=figure)
+    matching = [i for i in issues if i.rule_id == "guidance_note_unexpected"]
+    assert matching and matching[0].severity == "warning"
+
+
+def test_no_guidance_note_unexpected_warning_for_unguided_empty_note():
+    figure = _figure()
+    record = _record(guidance_note="")
+    issues = VALIDATOR.validate_record(record, figure=figure)
+    assert [i for i in issues if i.rule_id == "guidance_note_unexpected"] == []
+
+
+def test_guidance_note_checks_never_produce_errors():
+    figure = _figure()
+    figure.guidance_text = "look at the left component"
+    # Missing note, given guidance -> only a warning, never an error.
+    record = _record(guidance_note="")
+    issues = VALIDATOR.validate_record(record, figure=figure)
+    guidance_issues = [i for i in issues if i.rule_id.startswith("guidance_note_")]
+    assert guidance_issues
+    assert all(i.severity == "warning" for i in guidance_issues)
+
+
+def test_guidance_checks_skipped_without_figure_context():
+    record = _record(guidance_note="anything")
+    issues = VALIDATOR.validate_record(record, figure=None)
+    assert [i for i in issues if i.rule_id.startswith("guidance_note_")] == []

@@ -34,6 +34,22 @@ def _source_text(figure: FigureImageInput) -> str:
     return " ".join(parts)
 
 
+def _has_guidance_input(figure: FigureImageInput) -> bool:
+    """Whether ``figure`` carries any teacher-guidance input for this run.
+
+    Mirrors input_builder.build_guidance's non-emptiness test (hint text /
+    focus region / focus crop image / focus labels) without depending on the
+    normalized dict, so this validator can be called directly against a
+    ``FigureImageInput`` alone.
+    """
+    return bool(
+        (figure.guidance_text or "").strip()
+        or figure.focus_bbox_rel
+        or figure.focus_image_bytes
+        or (figure.focus_label_texts or [])
+    )
+
+
 def _inner_label_texts(figure: FigureImageInput) -> list[str]:
     """Distinct, order-preserving in-figure label strings for one figure."""
     texts: list[str] = []
@@ -302,6 +318,32 @@ class ApparatusSemanticsValidator:
                         message=message,
                         field=f"{fid}.parts",
                     ))
+
+            # Guided re-analysis (guided_figure_reanalysis_design.md §6-5).
+            # Both are non-fatal warnings (the record is already
+            # review_required regardless) — this flags a prompt-adherence
+            # gap for human review rather than blocking delivery.
+            guidance_present = _has_guidance_input(figure)
+            guidance_note = (record.guidance_note or "").strip()
+            if guidance_present and not guidance_note:
+                issues.append(ValidationIssue(
+                    rule_id="guidance_note_missing",
+                    severity="warning",
+                    message=(
+                        f"{fid} received teacher guidance but guidance_note is empty"
+                    ),
+                    field=f"{fid}.guidance_note",
+                ))
+            elif not guidance_present and guidance_note:
+                issues.append(ValidationIssue(
+                    rule_id="guidance_note_unexpected",
+                    severity="warning",
+                    message=(
+                        f"{fid} has no teacher guidance input but guidance_note is "
+                        "non-empty (possible prompt contamination)"
+                    ),
+                    field=f"{fid}.guidance_note",
+                ))
 
         return issues
 

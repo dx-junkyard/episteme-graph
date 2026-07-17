@@ -24,6 +24,7 @@ from core.learning_experience import (
     judge_source_tier,
     out_of_source_guard_instruction,
     out_of_source_notice,
+    tier_floor,
 )
 
 
@@ -68,6 +69,14 @@ def test_out_of_source_guard_instruction_is_non_assertive():
     g = out_of_source_guard_instruction()
     assert "断定しない" in g
     assert "予想" in g  # 学習者の予想を促す（Productive Failure）
+
+
+def test_tier_floor_lifts_weaker_but_never_lowers():
+    # トピック教材の実根拠がある回答は out_of_source から source へ引き上げる
+    assert tier_floor(TIER_OUT_OF_SOURCE, TIER_SOURCE) == TIER_SOURCE
+    # 既に強い格は floor で下がらない（approved を維持）
+    assert tier_floor(TIER_APPROVED, TIER_SOURCE) == TIER_APPROVED
+    assert tier_floor(TIER_SOURCE, TIER_SOURCE) == TIER_SOURCE
 
 
 def test_aggregate_overall_tier_is_weakest_link():

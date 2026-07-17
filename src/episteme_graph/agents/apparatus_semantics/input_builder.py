@@ -22,6 +22,11 @@ _MAX_NEARBY_TEXT_CHARS = 1500
 _MAX_INNER_LABEL_HINTS = 60
 _MAX_ABBREVIATIONS = 40
 
+# Guided re-analysis (guided_figure_reanalysis_design.md §6-2): teacher
+# hint_text is re-capped here so a caller that bypasses the API-layer
+# validation (e.g. a direct core call) still cannot blow up the prompt.
+_MAX_GUIDANCE_TEXT_CHARS = 2000
+
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _JPEG_MAGIC = b"\xff\xd8\xff"
 
@@ -30,12 +35,61 @@ class ApparatusSemanticsInputBuilder:
     def build_image_payload(self, figure: FigureImageInput) -> dict | None:
         """Return ``{"mime_type", "data_base64"}`` for the figure image, or
         ``None`` when no image bytes are available (agent.py handles that case
-        by never calling the LLM — see design doc §5-2)."""
+        by never calling the LLM — see design doc §5-2).
+
+        Kept for backward compatibility (single-image callers); returns the
+        first element of :meth:`build_image_payloads` (or ``None``).
+        """
+        payloads = self.build_image_payloads(figure)
+        return payloads[0] if payloads else None
+
+    def build_image_payloads(self, figure: FigureImageInput) -> list[dict]:
+        """Return the ordered image payload list for the vision call.
+
+        First element (when present) is always the original figure image.
+        A second element — a magnified crop of the teacher's focus region —
+        is appended when ``figure.focus_image_bytes`` is set (guided
+        re-analysis only; batch pipeline figures never set this field, so
+        this always degrades to a single-element/empty list there — GF7).
+        Returns ``[]`` when there is no original image at all.
+        """
         if not figure.image_bytes:
-            return None
-        return {
+            return []
+        payloads = [{
             "mime_type": self._detect_mime_type(figure.image_bytes),
             "data_base64": base64.b64encode(figure.image_bytes).decode("ascii"),
+        }]
+        if figure.focus_image_bytes:
+            payloads.append({
+                "mime_type": self._detect_mime_type(figure.focus_image_bytes),
+                "data_base64": base64.b64encode(figure.focus_image_bytes).decode("ascii"),
+            })
+        return payloads
+
+    def build_guidance(self, figure: FigureImageInput) -> dict:
+        """Normalize the teacher-guidance inputs for ``prompt.py``.
+
+        Returns ``{}`` (falsy) when there is nothing to say — no hint text,
+        no focus region, no focus image, and no focus labels — so
+        ``prompt.py`` can skip the "## Teacher Guidance" section entirely for
+        every batch-pipeline figure (GF7) and for un-guided deliberation
+        re-analyze calls alike.
+        """
+        hint_text = str(figure.guidance_text or "").strip()[:_MAX_GUIDANCE_TEXT_CHARS]
+        focus_bbox_rel = list(figure.focus_bbox_rel) if figure.focus_bbox_rel else None
+        focus_label_texts = [
+            str(t).strip() for t in (figure.focus_label_texts or []) if str(t).strip()
+        ]
+        has_focus_image = bool(figure.focus_image_bytes)
+
+        if not (hint_text or focus_bbox_rel or has_focus_image or focus_label_texts):
+            return {}
+
+        return {
+            "hint_text": hint_text,
+            "focus_bbox_rel": focus_bbox_rel,
+            "focus_label_texts": focus_label_texts,
+            "has_focus_image": has_focus_image,
         }
 
     def build_candidate_briefs(self, candidates: list[LibraryCandidate] | None) -> list[dict]:

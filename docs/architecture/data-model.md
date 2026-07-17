@@ -98,14 +98,14 @@ A層（生成パイプライン）を書き換えず、その上に「教員に�
 | `document_analysis_runs` | Agent パイプライン実行履歴（`status`, `current_stage`, `stage_outputs(JSONB)`, `run_type`, `base_run_id`, `revision_status`, `created_by`, マイグレーション041で `options(JSONB)` 追加 — アップロード時オプションのスナップショット） |
 | `background_tasks` | 非同期ジョブ追跡（`task_type`, `status`, `result_data`, `error_message`） |
 
-### 分野の地図（Field Atlas, マイグレーション 023・024・026・027・028）
+### 分野の地図（Field Atlas, マイグレーション 023・024・026・027・028・046）
 3層モデル（S=骨格 / C=状態導出キャッシュ / P=個人層 `interest_traces`）で「いま学習中の箇所が
 分野全体のどこか」を示す。詳細は `docs/features/field_atlas_*.md` 系設計書群、CLAUDE.md
 「分野の地図（Field Atlas）」参照。
 
 | テーブル | 役割 |
 |---|---|
-| `atlas_correction_reports`（023） | 骨格への修正報告（帰属必須・匿名不可、`reporter_id NOT NULL`）。`status`(pending/accepted/declined/merged)。採用は骨格次版に反映され `applied_version` に刻印 |
+| `atlas_correction_reports`（023、046 で列追加） | 骨格への修正報告（帰属必須・匿名不可、`reporter_id NOT NULL`）。`status`(pending/accepted/declined/merged)。採用は骨格次版に反映され `applied_version` に刻印。046 で `incorporated_at`/`incorporated_by`/`incorporation_note` を追加し「採用」と「次版で反映済み」を区別 |
 | `atlas_overlay_cache`（024） | 状態導出キャッシュ（3層モデルの C）。`entry_type`(region/node/chain/meta) 単位で `(cartridge_id, skeleton_version)` ごとに保持。既存データからの決定論的導出のみでリアルタイム LLM 生成はしない |
 | `atlas_overlay_dirty`（024） | `atlas_overlay_cache` の差分更新契機管理（イベント発生で1行立ち、refresh 処理後に消える） |
 | `atlas_cue_events`（026） | 見晴らしの導線（ミニマップ・初回ログイン等）の内部計測。`cue`/`event`。数値・進捗率はユーザーに見せない |
@@ -210,7 +210,16 @@ purge 誤削除を防止する。`kind` に DB CHECK は付けず、V層側の4�
 | `lecture_audio_cache`（040, ALTER） | `slide_index`（既定0）/ `language`（既定'ja'）を追加。`UNIQUE(chunk_id, voice)` → `UNIQUE(chunk_id, slide_index, voice)` に張替え |
 | `chunks`（040, ALTER） | `spoken_language` を追加（原稿の生成言語。NULL は 'ja' とみなす） |
 
-### 画像読み取りパイプライン（マイグレーション 041）
+### トピック教材ベースのレクチャー音声キャッシュ（マイグレーション 047）
+正本は `docs/features/lecture_slide_sync_design.md`（トピック教材レクチャーへの拡張）。レクチャー受講の
+表示をトピック教材（`student_material`/`spoken_script`）優先に揃えたことに伴い、音声キャッシュも
+チャンク単位の `lecture_audio_cache`（040）とは別キーで持つ。
+
+| テーブル | 役割 |
+|---|---|
+| `topic_lecture_audio_cache`（047） | トピック単位の TTS 音声キャッシュ。キーは `(course_id, topic_id, slide_index, voice)`（`course_id`/`topic_id` は FK なしのテキストキー）。トピックの授業用教材/読み上げ原稿を編集すると当該トピックの音声行が DELETE される |
+
+### 画像読み取りパイプライン（マイグレーション 041・051・052・053）
 正本は `docs/features/image_pipeline_knowledge_library_design.md`。既存 agent は非改変。
 
 | テーブル/変更 | 役割 |
@@ -218,8 +227,11 @@ purge 誤削除を防止する。`kind` に DB CHECK は付けず、V層側の4�
 | `document_analysis_runs`（041, ALTER） | `options(JSONB)` を追加（アップロード時オプション `analyze_images` 等のスナップショット。`stage_outputs` への相乗り禁止で独立列） |
 | `document_figures`（041） | PDF から抽出した図画像のレジストリ。`extraction_method`(embedded/region_render)、`UNIQUE(document_id, figure_key)`（再解析は upsert） |
 | `theory_components.component_type`（041, CHECK 拡張） | `apparatus`/`instrument`/`part` を追加（装置・実験機器コンポーネント候補を組み立て可能に） |
+| `document_figures.inner_labels`（051, ALTER） | 図領域内のテキストラベル抽出結果を追加（`JSONB`配列、`[{"text","bbox"}]`、決定論的・非LLM）。`apparatus_semantics` の `label_ref` 突合に使用 |
+| `document_figures`（052, ALTER, #496） | 図の提示モード分類。vision 提案（`suggested_mode`/`mode_reason`/`analysis_profile`）と教員レビュー確定（`reviewed_mode`/`mode_review_status`/`mode_reviewed_by`/`mode_reviewed_at`）を分離して保持 |
+| `document_figures`（053, ALTER） | モード別詳細分析（functions/ports/connections 等）の教員レビュー確定を分離保存（`reviewed_analysis_mode`/`reviewed_analysis_profile`/`analysis_review_status`/`analysis_reviewed_by`/`analysis_reviewed_at`/`analysis_review_source_annotation_id`）。再解析は AI 候補（`analysis_profile`）のみ更新し、レビュー済み内容は上書きしない |
 
-### 分野別ナレッジライブラリ（L層, マイグレーション 042）
+### 分野別ナレッジライブラリ（L層, マイグレーション 042・050）
 `atlas_skeletons`（027）と同じ「draft が正本・凍結版が履歴・カートリッジ同梱シードを起動時に
 冪等取込」パターンを踏襲。正本は `docs/features/image_pipeline_knowledge_library_design.md`。
 
@@ -227,6 +239,7 @@ purge 誤削除を防止する。`kind` に DB CHECK は付けず、V層側の4�
 |---|---|
 | `library_entries`（042） | エントリ本体（draft が正本）。`domain_key`（cartridge_id と同一名前空間）、`entry_type`(apparatus/theory_component)、`status`(active/retired)、`revision` 楽観ロック。削除 API は無く `retired` 遷移のみ |
 | `library_entry_versions`（042） | 凍結版（不変・履歴保持）。パイプラインの retrieval はここだけを読む（draft は読まない）。`embedding vector(3072)` を凍結時に計算（pgvector 3072次元, マイグレーション016 を流用） |
+| `library_entries.standardization_status`（050, ALTER） | 標準化判定 worker（Phase S、`core/deliberation/standardization/`）の確定先ガバナンス列。`standard/field_standard/emerging_common/novel/unknown`。draft 本文編集（`revision` 楽観ロック）とは独立した関心事として扱う |
 
 ### LLM トークン使用量推計（U層, マイグレーション 043）
 正本は `docs/features/llm_usage_metering_design.md`。呼び出し側コードは変更せず `core/llm.py`
@@ -236,6 +249,18 @@ purge 誤削除を防止する。`kind` に DB CHECK は付けず、V層側の4�
 |---|---|
 | `llm_usage_events`（043） | LLM 呼び出しのトークン使用量台帳（append-only、削除 API を作らない）。`usage_source`(reported/estimated_tokenizer/estimated_heuristic) を分離集計。`feature`（帰属、既定 `unattributed`）。FK なし・金額列なし（価格は集計時に価格表で都度換算） |
 | `llm_usage_daily`（043, VIEW） | day × feature × model × usage_source の SUM 集計ビュー。専用カウンタテーブルは持たない |
+
+### W層（要素検討ワークスペース, マイグレーション 048・049）
+教員が図・理論コンポーネント・claim・数式などパイプライン成果を「深く検討」するための対話・注釈層。
+A層は非改変。正本は `docs/features/element_deliberation_workspace_design.md`（親文書
+`docs/features/knowledge_network_vision.md`）。設計書は当初 migration 046 への同乗を想定していたが、
+046/047 が先に他機能へ割り当てられたため実装は 048（Phase W-β）・049（Phase 2）を使う。
+
+| テーブル | 役割 |
+|---|---|
+| `element_identity_links`（048） | 同一性リンク（Phase W-β）。インスタンス側（figure/theory_component/theory_claim/equation、`scope='document'` のポリモーフィック行・FK なし）と共通部品側（`shared_part_id` → `library_entries` への実FK）を非破壊に対応付ける。`status`(candidate/confirmed/rejected)。一意制約は `instance_document_id` を含む4列（equation の `element_id` は論文間で衝突しうるため） |
+| `deliberation_sessions`（049） | 対話的検討（Phase 2）のセッション。`scope`(document/domain)、`element_type`/`element_id`、`messages(JSONB)`（追記のみ） |
+| `element_annotations`（049） | 候補注釈（Phase 2）。`kind`(meaning/decomposition/positioning_note/interpretation/identity/standardization)、`status`(candidate/committed/dismissed)。`committed_target` にコミット先の既存構造を記録 |
 
 ---
 
@@ -316,6 +341,14 @@ claim 紐づけの最終確定は必ず教員が行い、AI 候補は `backing_c
 | `043_llm_usage_events.sql` | LLM トークン使用量推計(U層) — llm_usage_events + llm_usage_daily 集計ビュー |
 | `044_object_group_permissions.sql` | アーキテクチャ整理 Tier 3-14 — `course_group_permissions`(010) + `document_group_permissions`(035) を `object_group_permissions` に統合。旧2テーブルはデータ移行後 DROP、ファイル自体はスタブ化 |
 | `045_unified_notifications.sql` | アーキテクチャ整理 Tier 3-15 — `share_notifications`(037) を `user_notifications`(038) に統合（`source`/`release_id`/`acted_at` 列を追加）。旧テーブルはデータ移行後 DROP、`037_shared_versioning.sql` の該当セクションはスタブ化 |
+| `046_atlas_report_incorporation.sql` | 分野の地図 — 修正報告の「採用」と「次版で反映済み」を分離（`atlas_correction_reports` に `incorporated_at`/`incorporated_by`/`incorporation_note` を追加） |
+| `047_topic_lecture_audio.sql` | レクチャーの表示ソースと音声 — トピック教材ベースの音声キャッシュ新設（`topic_lecture_audio_cache`。キーは `(course_id, topic_id, slide_index, voice)`） |
+| `048_element_identity_links.sql` | W層（要素検討ワークスペース）Phase W-β — 同一性リンク（`element_identity_links`。instance↔shared_part、`candidate/confirmed/rejected`） |
+| `049_deliberation_sessions_annotations.sql` | W層（要素検討ワークスペース）Phase 2 — 対話的検討 + 候補注釈（`deliberation_sessions`, `element_annotations`） |
+| `050_library_standardization_status.sql` | 分野別ナレッジライブラリ(L層) — 標準化判定 worker（Phase S）の確定先列を追加（`library_entries.standardization_status`） |
+| `051_figure_inner_labels.sql` | 画像読み取りパイプライン — 図中ラベル抽出（`document_figures.inner_labels`、決定論的・非LLM） |
+| `052_figure_presentation_modes.sql` | 図の提示モード分類・教員レビュー（#496） — `document_figures` に `suggested_mode`/`reviewed_mode` 等を追加 |
+| `053_figure_reviewed_analysis.sql` | 教員レビュー済み図解析プロファイルの分離保存 — `document_figures` に `reviewed_analysis_mode`/`reviewed_analysis_profile` 等を追加（再解析時も教員レビュー済み内容を上書きしない） |
 
 > 注（2026-07 アーキテクチャ整理 Tier 3-13 で更新）: マイグレーションの実行方式を一本化した。
 > かつては `backend/db/*.sql` を正本リファレンスとしつつ、実際の適用は `backend/api/main.py` の

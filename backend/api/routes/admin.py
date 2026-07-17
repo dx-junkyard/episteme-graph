@@ -374,8 +374,15 @@ def upload_material(
 
 
 class ReanalyzeRequest(BaseModel):
-    """画像パイプライン §3: 再解析時の analyze_images オプション（任意 body）。"""
-    analyze_images: bool = False
+    """画像パイプライン §3: 再解析時の analyze_images オプション（任意 body）。
+
+    ``None``（未指定）は「前回 run の options を引き継ぐ」。orchestrator の継承分岐
+    （options is None → 最新 run の options を再利用）を生かすため、
+    ``reanalyze_document`` は ``options=None`` を渡す。明示 true/false のときのみ
+    上書きする。かつては未指定でも常に ``{"analyze_images": False}`` を渡していた
+    ため継承分岐が到達不能で、画像解析 ON で作った未レビューの AI 図分類
+    （suggested_mode / analysis_profile）が再解析のたびに無警告で消えていた。"""
+    analyze_images: bool | None = None
 
 
 @router.post("/documents/{document_id}/reanalyze", status_code=202)
@@ -391,7 +398,9 @@ def reanalyze_document(
     エンドポイントの後継。
 
     ``body.analyze_images``（画像パイプライン §3）: True のとき
-    ``apparatus_semantics`` ステージを有効にする。省略時は False
+    ``apparatus_semantics`` ステージを有効にする。省略（None）時は前回 run の
+    options を引き継ぐ（初回解析で ON にした選択が再解析で黙って落ちない）。
+    前回 run が無い場合の実効値は orchestrator 側の既定で False
     （明示オプトインのみ有効、原則6）。
     """
     session = _pg_session()
@@ -463,11 +472,14 @@ def reanalyze_document(
     finally:
         session.close()
 
-    analyze_images = bool(body.analyze_images) if body is not None else False
+    # None（body 無し / analyze_images 未指定）は options=None を渡し、orchestrator の
+    # 「前回 run の options を引き継ぐ」分岐を生かす。明示 true/false のみ上書きする。
+    analyze_images = body.analyze_images if body is not None else None
+    options = {"analyze_images": bool(analyze_images)} if analyze_images is not None else None
     thread = threading.Thread(
         target=process_material_background,
         args=(material_id, document_id, filename, source_bytes, task_id, None, source_kind or "pdf"),
-        kwargs={"options": {"analyze_images": analyze_images}},
+        kwargs={"options": options},
         daemon=True,
     )
     thread.start()
@@ -602,7 +614,7 @@ def list_materials(
                     f"""
                     SELECT DISTINCT ON (material_id)
                            id::text AS id, material_id, status, current_stage, error_message,
-                           stage_outputs, updated_at, completed_at
+                           stage_outputs, options, updated_at, completed_at
                     FROM document_analysis_runs
                     WHERE material_id IN ({run_placeholders})
                     ORDER BY material_id, created_at DESC
@@ -755,6 +767,8 @@ def list_materials(
             analysis_processed=stage_info.get("processed"),
             analysis_total=stage_info.get("total"),
             analysis_error=run_data.get("error_message") or None,
+            # 最新 run の options（JSONB）。run が無ければ None（フロント契約: analysis_options）。
+            analysis_options=(run_data.get("options") if run else None),
             authors=authors,
             year=year,
             doc_type=doc_type,

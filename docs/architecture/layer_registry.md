@@ -18,10 +18,14 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   「migration 034」を提案しているが、034 は既に Admin Copilot の `assistant_actions`
   （`backend/db/034_assistant_actions.sql`）に割り当て済み。E層は未実装のため実害はまだ無いが、
   実装に着手する際は次の空き番号（044 以降）へ採番し直す必要がある。
-- **設計時想定と実装後の migration 番号がずれている組が1組ある**: 状態管理・通知基盤の設計書は
+- **設計時想定と実装後の migration 番号がずれている組が複数ある**: 状態管理・通知基盤の設計書は
   「039 想定」と書いて実装は **038**、ガイダンス層（G層）の設計書は「038」と書いて実装は
   **039**（039 を先に G層が使う予定だったが、実装順の都合で入れ替わった）。両設計書は本タスクで
   注記を追記済み（`docs/features/status_notification_design.md` / `docs/features/guidance_layer_design.md`）。
+  また W層（要素検討ワークスペース）は起草時に Phase W-β / Phase 2 とも「migration 046（同乗）」を
+  想定したが、046/047 が先に他機能（atlas_report_incorporation / topic_lecture_audio）へ割り当て
+  られたため、実装は **W-β=048 / Phase 2=049**（設計書冒頭に補正注記あり。一次情報は
+  `backend/db/048_*.sql` / `049_*.sql` の冒頭コメント）。
   **migration 番号の一次情報は常に `backend/db/0NN_*.sql` の実ファイル名**であり、設計書の文中表記
   ではない。
 - **Field Atlas（分野の地図）内部の「S/C/P」3層モデルは、本表の A〜U のアルファベット層とは別の粒度**。
@@ -64,8 +68,10 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | **S層**（便宜上のラベル。CLAUDE.md 自体はこの呼称を使わない） | 分野の地図（Field Atlas） | `docs/features/field_atlas_*.md`（skeleton / binding / correction_reports / db_managed_skeleton / detail_panel / skeleton_editor_upgrade の計6ファイルに分割） | `backend/core/atlas*.py`（7ファイル）+ `routes/atlas.py` / `routes/atlas_view.py` + `frontend/public/js/atlas-*.js`（9ファイル） | 023, 024, 026, 027, 028（骨格・キャッシュ・導線計測・DB管理化・ドメインメタ） | 実装済み（Stage 2 まで。調査全体で最も設計品質が高い領域） |
 | **U層** | LLM トークン使用量推計（Usage Metering） | `docs/features/llm_usage_metering_design.md` | `backend/core/llm_usage/` + `routes/llm_usage.py` | 043 | 実装済み |
 | **V層** | 共有物のバージョン管理 + 更新通知 + 削除猶予 | `docs/features/shared_versioning_design.md` | `backend/core/versioning/` + `routes/versioning.py` + `versioning.js` | 037（通知インボックス `share_notifications` は 045 で `user_notifications` に統合済み） | 実装済み（CLAUDE.md には本タスクで追記済み。従来欠落していた） |
+| **W層** | 要素検討ワークスペース（Element Deliberation Workspace） | `docs/features/element_deliberation_workspace_design.md`（親文書 `docs/features/knowledge_network_vision.md`） | `backend/core/deliberation/` + `routes/deliberation.py` + `deliberation.js` | 048（Phase W-β の `element_identity_links`）, 049（Phase 2 の `deliberation_sessions`/`element_annotations`） | 実装済み（Phase 0/1/W-β/2/S。CLAUDE.md に専用セクションはまだ無い — 別途整備候補） |
 | **横断ユーティリティ層** | Admin Copilot（統合AIアシスタント） | `docs/features/admin_assistant_design.md` | `backend/core/admin_assistant/`（`capabilities.py` / `knowledge.py` / `intent.py` / `actions/`）+ `routes/admin_assistant.py`（G層と同居） | 034 | 実装済み |
 | **状態通知基盤**（レター無し） | Status Projection + 遷移イベント + 統合通知インボックス | `docs/features/status_notification_design.md`（設計書表記は「039」だが実装は038） | `backend/core/status/`（`projector.py` / `watcher.py` / `notification_rules.py`）+ `routes/status.py` | 038（`user_notifications` は 045 で V層 `share_notifications` を統合し `source`/`release_id`/`acted_at` 列を追加） | 実装済み（G層の土台。CLAUDE.md に専用セクションはまだ無い — 別途整備候補） |
+| **個人知識ネットワーク**（レター無し。設計書は「Phase P」と呼び「P層」とは呼ばない） | Personal Knowledge Network（個人知識ネットワーク） | `docs/features/personal_knowledge_network_design.md`（親文書 `docs/features/knowledge_network_vision.md`） | `backend/core/personal_graph/` + `routes/personal_map.py` + `personal-map.js` / `personal-map-home.js` | 不要（既存テーブル `interest_traces` 等の読み取りのみで新規テーブルは無い） | 実装済み（Phase P-0〜P-3。CLAUDE.md に専用セクションはまだ無い — 別途整備候補） |
 
 ## 2. 補足
 
@@ -75,5 +81,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   読んで判断しないこと。
 - **「実装済み」であっても CLAUDE.md に記載が無い層があった**（V層。本タスクで追記済み）。同種の
   見落としを防ぐため、新しい層を追加した際は本表と CLAUDE.md の両方を同時に更新することを推奨する。
-- 状態通知基盤（038）は独自のアルファベット文字を持たない唯一の実装済みレイヤーである
-  （G層の土台として設計されたため「G層の一部」と誤認されやすいが、テーブル・コアモジュールは独立）。
+- 状態通知基盤（038）と個人知識ネットワーク（Phase P）は独自のアルファベット文字を持たない実装済み
+  レイヤーである（前者は G層の土台として設計されたため「G層の一部」と誤認されやすいが、テーブル・
+  コアモジュールは独立。後者は設計書自身が P1〜P7 不変条項との混同を避けるため「P層」と呼ばない
+  ことを明示している）。

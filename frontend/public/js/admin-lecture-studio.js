@@ -588,9 +588,14 @@
   function lsSaveSettings(modal) {
     var statusEl = document.getElementById("ls-settings-status");
     var saveBtn = document.getElementById("ls-settings-save");
+    // lecture_language を明示的に含めて送信する。バックエンドは省略 (undefined/null)
+    // を「変更しない」として前回値を保持するが、このモーダルは口調しか編集しない
+    // ため、省略に頼らず現在のコース言語を毎回明示送信して事故を二重に防ぐ
+    // （設定保存で既存の言語設定が無警告で ja に巻き戻る事故の再発防止）。
     var settings = {
       narration_persona: document.getElementById("ls-narration-persona").value,
       response_persona: document.getElementById("ls-response-persona").value,
+      lecture_language: lsCourseLectureLanguage(),
     };
     statusEl.textContent = "保存中...";
     statusEl.className = "upload-status upload-status-info";
@@ -656,6 +661,18 @@
     statusEl.textContent = "現状: " + lsAudioLangLabel(language) + "音声 " + stat.ready + "/" + stat.total + " スライド生成済み";
   }
 
+  // 選択言語と実際に生成済みの原稿言語 (chunk.spoken_language) が食い違うチャンク数を返す。
+  // spoken_language 未設定（原稿未生成 or 旧データ）のチャンクはここでは数えない
+  // （生成前のチャンクは「言語が食い違っている」わけではないため）。
+  function lsChunksWithMismatchedSpokenLanguage(language) {
+    var chunks = lsState.chunks || [];
+    var mismatched = 0;
+    chunks.forEach(function (c) {
+      if (c && c.spoken_language && c.spoken_language !== language) mismatched += 1;
+    });
+    return mismatched;
+  }
+
   function lsUpdateAudioLangWarning(selectedLanguage) {
     var warnEl = document.getElementById("ls-audio-lang-warning");
     if (!warnEl) return;
@@ -663,6 +680,16 @@
     if (selectedLanguage !== currentLanguage) {
       warnEl.textContent = "⚠ 読み上げ原稿を " + lsAudioLangLabel(selectedLanguage) + " で再生成し、音声を作り直します。" +
         "既存の " + lsAudioLangLabel(currentLanguage) + " 音声は使われなくなります。";
+      warnEl.style.display = "block";
+      return;
+    }
+    // コース設定言語とは一致していても、一部チャンクの原稿が別言語のまま生成済み
+    // なことがある（言語切替の途中経過・旧データ等）。lsCanGenerateAudio() 自体は
+    // ブロックしないため、ここで気づけるよう警告文だけ出す。
+    var mismatched = lsChunksWithMismatchedSpokenLanguage(selectedLanguage);
+    if (mismatched > 0) {
+      warnEl.textContent = "⚠ " + mismatched + " 件のスライドの読み上げ原稿が " +
+        lsAudioLangLabel(selectedLanguage) + " ではありません。生成前に原稿の言語をご確認ください。";
       warnEl.style.display = "block";
     } else {
       warnEl.style.display = "none";
@@ -924,12 +951,14 @@
       '<div class="ls-doc-meta">' + escHtml(statusLabel[s.course_status] || s.course_status || "") +
       (s.total_chunks > 0 ? ' (' + (s.generated_chunks || 0) + '/' + s.total_chunks + ')' : '') + '</div>' +
       lsReconReviewBadgeHtml() +
+      lsCourseInventoryButtonHtml() +
       '</div>';
 
     if (!s.chapters || !s.chapters.length) {
       html += '<div style="padding:12px 16px;color:var(--color-text-tertiary);font-size:12px">章構造がありません。<br>コースビルダーでコース設計を完了してください。</div>';
       el.innerHTML = html;
       lsBindReconReviewButtons();
+      lsBindCourseInventoryButtons();
       return;
     }
 
@@ -948,6 +977,7 @@
 
     el.innerHTML = html;
     lsBindReconReviewButtons();
+    lsBindCourseInventoryButtons();
 
     el.querySelectorAll(".ls-course-topic").forEach(function (item) {
       item.addEventListener("click", function () {
@@ -965,6 +995,79 @@
           lsRenderWorkspace();
         }
       });
+    });
+  }
+
+  // 要素インベントリ（検出要素の一覧）: コース構造タブのコースヘッダに置く入口
+  // （設計書 element_inventory_design.md §9-3）。sources の読み方は
+  // lsCoursePrimaryDocumentId() と同じ（course.sources || course.data.sources）。
+  function lsCourseInventorySources() {
+    var course = lsState.courseStructure || {};
+    var sources = course.sources || (course.data && course.data.sources) || [];
+    var result = [];
+    sources.forEach(function (src) {
+      if (src && src.material_id) {
+        result.push({ materialId: src.material_id, title: src.title || src.material_id });
+      }
+    });
+    return result;
+  }
+
+  // 0件はボタン自体を描画しない。window.Deliberation が無い場合も同様（fail-soft）。
+  function lsCourseInventoryButtonHtml() {
+    if (!window.Deliberation) return "";
+    var sources = lsCourseInventorySources();
+    if (!sources.length) return "";
+    if (sources.length === 1) {
+      return '<button type="button" class="admin-action-btn ls-course-inventory-btn" ' +
+        'data-ls-inventory-material-id="' + escHtml(sources[0].materialId) + '" ' +
+        'data-ls-inventory-title="' + escHtml(sources[0].title) + '">検出要素</button>';
+    }
+    var menuItems = sources.map(function (src) {
+      return '<button type="button" class="ls-menu-item ls-course-inventory-item" ' +
+        'data-ls-inventory-material-id="' + escHtml(src.materialId) + '" ' +
+        'data-ls-inventory-title="' + escHtml(src.title) + '"><span>' + escHtml(src.title) + '</span></button>';
+    }).join("");
+    return '<div class="ls-course-inventory-menu-wrap" style="position:relative;display:inline-block">' +
+      '<button type="button" class="admin-action-btn ls-menu-trigger ls-course-inventory-trigger">検出要素 ▼</button>' +
+      '<div class="ls-menu ls-course-inventory-menu" hidden>' + menuItems + '</div>' +
+    '</div>';
+  }
+
+  function lsBindCourseInventoryButtons() {
+    document.querySelectorAll(".ls-course-inventory-btn").forEach(function (btn) {
+      btn.onclick = function () {
+        if (window.Deliberation) {
+          window.Deliberation.openInventory(btn.getAttribute("data-ls-inventory-material-id"), {
+            title: btn.getAttribute("data-ls-inventory-title")
+          });
+        }
+      };
+    });
+    document.querySelectorAll(".ls-course-inventory-trigger").forEach(function (btn) {
+      btn.onclick = function (e) {
+        e.stopPropagation();
+        var wrap = btn.closest(".ls-course-inventory-menu-wrap");
+        var menu = wrap && wrap.querySelector(".ls-course-inventory-menu");
+        if (!menu) return;
+        var willOpen = menu.hidden;
+        document.querySelectorAll(".ls-menu").forEach(function (m) { m.hidden = true; });
+        menu.hidden = !willOpen;
+      };
+    });
+    document.querySelectorAll(".ls-course-inventory-menu").forEach(function (menu) {
+      menu.onclick = function (e) { e.stopPropagation(); };
+    });
+    document.querySelectorAll(".ls-course-inventory-item").forEach(function (btn) {
+      btn.onclick = function () {
+        var menu = btn.closest(".ls-menu");
+        if (menu) menu.hidden = true;
+        if (window.Deliberation) {
+          window.Deliberation.openInventory(btn.getAttribute("data-ls-inventory-material-id"), {
+            title: btn.getAttribute("data-ls-inventory-title")
+          });
+        }
+      };
     });
   }
 
@@ -5762,12 +5865,14 @@
     });
   }
 
+  // `lsAllChunksHaveSpokenText` と同じ判定に統一する。API の spoken_text は
+  // display_text へフォールバックして返るため、その値の有無だけで判定すると
+  // 原稿未生成でも常に真になってしまう（パイプライン状態表示が「原稿生成」を
+  // 済み扱いしてしまうバグ）。サーバ由来の status（"ungenerated" は原稿未生成）
+  // で判定する関数へ委譲する（呼び出し元 lsCoursePipelineState は every の
+  // 全件一致セマンティクスのまま）。
   function lsHasScripts() {
-    var chunks = lsState.chunks || [];
-    if (!chunks.length) return false;
-    return chunks.every(function (chunk) {
-      return Boolean(String(chunk.spoken_text || chunk.display_text || "").trim());
-    });
+    return lsAllChunksHaveSpokenText();
   }
 
   function lsHasAudio() {
@@ -6001,60 +6106,6 @@
           : { step: "document_pipeline", status: "failed" };
         lsShowProgress(label + "に失敗しました: " + (err.message || "不明なエラー"), "error");
         lsSetCourseTaskBusy(false);
-      });
-  }
-
-  function lsRunCourseStep(kind, endpoint, label, body) {
-    var stepMap = { structure: "structure", claims: "claims", components: "components", graph: "graph" };
-    lsState.pipelineTask = { step: stepMap[kind] || kind, status: "running" };
-    lsSetCourseTaskBusy(true);
-    lsShowProgress(label + "を開始しています...", "info");
-    apiFetch(endpoint, {
-      method: "POST",
-      body: body || "{}",
-    })
-      .then(function (res) {
-        if (!res.ok) {
-          return res.json().then(function (errBody) {
-            throw new Error((errBody && errBody.detail) || label + "を開始できませんでした");
-          }, function () {
-            throw new Error(label + "を開始できませんでした");
-          });
-        }
-        return res.json();
-      })
-      .then(function (data) {
-        lsPollGenericCourseTask(data.task_id, label, stepMap[kind] || kind);
-      })
-      .catch(function (err) {
-        lsState.pipelineTask = { step: stepMap[kind] || kind, status: "failed" };
-        lsShowProgress(label + "に失敗しました: " + (err.message || "不明なエラー"), "error");
-        lsSetCourseTaskBusy(false);
-      });
-  }
-
-  function lsRunCourseStepWithRetryConfirm(kind, endpoint, label) {
-    lsShowProgress(label + "の状態を確認しています...", "info");
-    apiFetch("/admin/courses/" + lsState.courseId + "/analysis-status")
-      .then(function (res) {
-        if (!res.ok) throw new Error("解析状態を確認できませんでした");
-        return res.json();
-      })
-      .then(function (status) {
-        var step = status[kind] || {};
-        var force = false;
-        if (step.complete) {
-          var ok = window.confirm(label + "は解析済です。解析済のデータも含めてすべて再度実行しますか？");
-          if (!ok) {
-            lsHideProgress();
-            return;
-          }
-          force = true;
-        }
-        lsRunCourseStep(kind, endpoint, label, JSON.stringify({ force: force }));
-      })
-      .catch(function (err) {
-        lsShowProgress((err && err.message) || "解析状態を確認できませんでした", "error");
       });
   }
 

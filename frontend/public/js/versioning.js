@@ -180,12 +180,27 @@
       var grace = parseInt((document.getElementById("vg-grace") || {}).value, 10);
       var reason = (document.getElementById("vg-reason") || {}).value || "";
       if (!grace || grace < 1) { _setStatus("猶予日数を1以上で指定してください", "error"); return; }
-      if (!window.confirm("削除を予約します。期限後に全ユーザーから物理削除されます。よろしいですか？")) return;
-      sched.disabled = true;
-      apiFetch(base + "/deletion", { method: "POST", body: JSON.stringify({ grace_days: grace, reason: reason }) })
-        .then(function (res) { if (!res.ok) return res.json().then(function (b) { throw b; }); return res.json(); })
-        .then(function () { _setStatus("削除を予約しました", "success"); _loadModal(objectType, objectId, title); })
-        .catch(function (b) { sched.disabled = false; _setStatus((b && b.detail) || "予約に失敗しました", "error"); });
+
+      function _doScheduleDeletion() {
+        sched.disabled = true;
+        apiFetch(base + "/deletion", { method: "POST", body: JSON.stringify({ grace_days: grace, reason: reason }) })
+          .then(function (res) { if (!res.ok) return res.json().then(function (b) { throw b; }); return res.json(); })
+          .then(function () { _setStatus("削除を予約しました", "success"); _loadModal(objectType, objectId, title); })
+          .catch(function (b) { sched.disabled = false; _setStatus((b && b.detail) || "予約に失敗しました", "error"); });
+      }
+
+      // admin.js の共通2段確認モーダル（明示ボタンクリック必須）があればそれを使い、
+      // 無ければ従来の window.confirm() にフォールバックする。
+      if (window.AdminDangerConfirm && typeof window.AdminDangerConfirm.open === "function") {
+        window.AdminDangerConfirm.open({
+          title: "削除の予約",
+          message: "削除を予約します。期限後に全ユーザーから物理削除されます。よろしいですか？",
+          confirmLabel: "予約する",
+        }, _doScheduleDeletion);
+      } else {
+        if (!window.confirm("削除を予約します。期限後に全ユーザーから物理削除されます。よろしいですか？")) return;
+        _doScheduleDeletion();
+      }
     });
 
     var cancel = document.getElementById("vg-cancel-del");
@@ -325,7 +340,10 @@
         _adopt(objectType, objectId).then(function (ok) {
           var doneLabel = objectType === "document" ? "確認済み" : "取り込み済み";
           adoptBtn.textContent = ok ? doneLabel : "再読込してください";
-          apiFetch("/admin/notifications/" + encodeURIComponent(id) + "/read", { method: "POST" });
+          // 取り込みに失敗したら未読のまま残す（成功時のみ既読化する）。
+          if (ok) {
+            apiFetch("/admin/notifications/" + encodeURIComponent(id) + "/read", { method: "POST" });
+          }
           _refreshInbox(); _loadInboxList();
         });
       });

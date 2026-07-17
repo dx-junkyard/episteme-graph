@@ -34,6 +34,10 @@ def _figure(
     abbreviations=None,
     nearby=None,
     image_bytes=None,
+    guidance_text: str = "",
+    focus_bbox_rel=None,
+    focus_image_bytes=None,
+    focus_label_texts=None,
 ) -> FigureImageInput:
     return FigureImageInput(
         figure_id=figure_id,
@@ -44,6 +48,10 @@ def _figure(
         nearby_text=nearby if nearby is not None else [],
         inner_labels=inner_labels if inner_labels is not None else [],
         abbreviations=abbreviations if abbreviations is not None else {},
+        guidance_text=guidance_text,
+        focus_bbox_rel=focus_bbox_rel,
+        focus_image_bytes=focus_image_bytes,
+        focus_label_texts=focus_label_texts if focus_label_texts is not None else [],
     )
 
 
@@ -257,3 +265,97 @@ def test_build_image_payload_base64_encodes_bytes_correctly():
     figure = _figure(image_bytes=_PNG_BYTES)
     payload = BUILDER.build_image_payload(figure)
     assert base64.b64decode(payload["data_base64"]) == _PNG_BYTES
+
+
+# ---------------------------------------------------------------------------
+# build_image_payloads (guided_figure_reanalysis_design.md §6-2)
+# ---------------------------------------------------------------------------
+
+
+def test_build_image_payloads_returns_empty_list_when_no_original_image():
+    figure = _figure(image_bytes=None, focus_image_bytes=_PNG_BYTES)
+    # No original image -> no list at all, even if a focus crop is present
+    # (a crop without the original never reaches the LLM as a standalone call).
+    assert BUILDER.build_image_payloads(figure) == []
+
+
+def test_build_image_payloads_single_image_without_focus():
+    figure = _figure(image_bytes=_PNG_BYTES)
+    payloads = BUILDER.build_image_payloads(figure)
+    assert len(payloads) == 1
+    assert base64.b64decode(payloads[0]["data_base64"]) == _PNG_BYTES
+
+
+def test_build_image_payloads_two_images_with_focus_crop():
+    figure = _figure(image_bytes=_PNG_BYTES, focus_image_bytes=_JPEG_BYTES)
+    payloads = BUILDER.build_image_payloads(figure)
+    assert len(payloads) == 2
+    # first element is always the original figure image...
+    assert payloads[0]["mime_type"] == "image/png"
+    assert base64.b64decode(payloads[0]["data_base64"]) == _PNG_BYTES
+    # ...second is the magnified focus crop
+    assert payloads[1]["mime_type"] == "image/jpeg"
+    assert base64.b64decode(payloads[1]["data_base64"]) == _JPEG_BYTES
+
+
+def test_build_image_payload_singular_returns_first_of_payloads():
+    """Backward-compat wrapper: same first element, never the focus crop."""
+    figure = _figure(image_bytes=_PNG_BYTES, focus_image_bytes=_JPEG_BYTES)
+    assert BUILDER.build_image_payload(figure) == BUILDER.build_image_payloads(figure)[0]
+
+
+# ---------------------------------------------------------------------------
+# build_guidance (guided_figure_reanalysis_design.md §6-2)
+# ---------------------------------------------------------------------------
+
+
+def test_build_guidance_returns_empty_dict_when_nothing_supplied():
+    figure = _figure()
+    assert BUILDER.build_guidance(figure) == {}
+
+
+def test_build_guidance_normalizes_hint_text_only():
+    figure = _figure(guidance_text="  look at the left box  ")
+    guidance = BUILDER.build_guidance(figure)
+    assert guidance == {
+        "hint_text": "look at the left box",
+        "focus_bbox_rel": None,
+        "focus_label_texts": [],
+        "has_focus_image": False,
+    }
+
+
+def test_build_guidance_includes_focus_bbox_and_image_flag():
+    figure = _figure(
+        focus_bbox_rel=[0.1, 0.2, 0.5, 0.6],
+        focus_image_bytes=_PNG_BYTES,
+        focus_label_texts=["EOM", "PBS"],
+    )
+    guidance = BUILDER.build_guidance(figure)
+    assert guidance["focus_bbox_rel"] == [0.1, 0.2, 0.5, 0.6]
+    assert guidance["has_focus_image"] is True
+    assert guidance["focus_label_texts"] == ["EOM", "PBS"]
+    assert guidance["hint_text"] == ""
+
+
+def test_build_guidance_present_when_only_focus_bbox_given():
+    """A bbox with no hint text is still meaningful guidance (not {})."""
+    figure = _figure(focus_bbox_rel=[0.0, 0.0, 1.0, 1.0])
+    assert BUILDER.build_guidance(figure) != {}
+
+
+def test_build_guidance_caps_hint_text_at_2000_chars():
+    figure = _figure(guidance_text="x" * 3000)
+    guidance = BUILDER.build_guidance(figure)
+    assert len(guidance["hint_text"]) == 2000
+
+
+def test_build_guidance_strips_whitespace_only_focus_label_texts():
+    figure = _figure(focus_bbox_rel=[0.1, 0.1, 0.2, 0.2], focus_label_texts=["  ", "EOM", ""])
+    guidance = BUILDER.build_guidance(figure)
+    assert guidance["focus_label_texts"] == ["EOM"]
+
+
+def test_build_guidance_empty_focus_bbox_list_is_treated_as_absent():
+    figure = _figure(focus_bbox_rel=[])
+    assert BUILDER.build_guidance(figure) == {}

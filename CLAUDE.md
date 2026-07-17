@@ -70,7 +70,7 @@ src/tests/                     → agents 用 pytest テスト
 | `backend/core/postgres.py` | PostgreSQL セッション管理 |
 | `backend/core/llm.py` | OpenAI クライアントファクトリ |
 | `backend/core/storage.py` | MinIO S3互換ストレージ |
-| `backend/core/llm_worker/` | 非同期 LLM worker 共通基盤（client / run_with_repair / CostGate。5系統が利用） |
+| `backend/core/llm_worker/` | 非同期 LLM worker 共通基盤（client / run_with_repair / CostGate。フル骨格は6系統が利用、CostGate 等の部分利用が別途あり） |
 | `backend/core/privacy.py` | k-匿名ゲートの正本（K_ANONYMITY=3・件数レンジ導出） |
 | `backend/core/notification_recipients.py` | 通知宛先解決の共通 JOIN プリミティブ（status 系 / V層が利用） |
 | `backend/core/course_data.py` | `learning_courses.data` JSONB の正本スキーマ（CourseData 系 Pydantic モデル＝全て `extra="allow"` + アクセサ群）。course_data への素の dict アクセスを新規に書かない（Tier 3-18） |
@@ -1097,9 +1097,12 @@ confirmed のみ（PN-6）・fail-closed（PN-7）。migration 不要（既存�
 - **`backend/core/llm_worker/`** — 非同期 LLM worker の共通骨格。`client.py`
   （`BaseJSONLLMClient(model_setting_key)`・`core.llm` 経由で U層計測を維持）/ `repair.py`
   （`run_with_repair(...)`: 1+2回試行、修復失敗時の後処理は `on_repair_failed` 注入で各系統に残す）/
-  `cost_gate.py`（`CostGate`(session+daily) / `InMemoryCounterGate`）。tension / structure_anchor /
-  reconstruction / doubt.scope_candidates / doubt.assumption_mining の5系統が利用中。
-  **6系統目はコピペせず15〜20行のアダプタで接続すること**。環境変数名・冪等性フラグ・
+  `cost_gate.py`（`CostGate`(session+daily) / `InMemoryCounterGate`）。フル骨格
+  （BaseJSONLLMClient + run_with_repair）は tension / structure_anchor / reconstruction /
+  doubt.scope_candidates / doubt.assumption_mining / deliberation.standardization の6系統が利用中。
+  ほかに deliberation の対話（`core/deliberation/dialogue.py`。同期パスのため run_with_repair は
+  意図的に不使用・縮退方式）と figure_reanalysis が CostGate / resolve_model のみ部分利用する。
+  **新系統はコピペせず15〜20行のアダプタで接続すること**。環境変数名・冪等性フラグ・
   トリガー条件・DB 書き込みはドメイン側の責務。
 - **`backend/core/privacy.py`** — k-匿名ゲートの正本（`K_ANONYMITY = 3` /
   `meets_k_anonymity` / `bucket_count_range`(3-5 / 6-10 / 11+) 等）。reconstruction/health.py・

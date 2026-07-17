@@ -37,6 +37,15 @@ LLM 呼び出しを含む実処理は行わない（W6 同様に同期パスを�
 既存の `POST /annotations/{id}/commit` がそのまま扱う（§5 表に `standardization` →
 `library_entries.standardization_status` 経路を追加済み）。
 
+要素インベントリ（本増分、`docs/features/element_inventory_design.md`）: 教材（document）
+単位で `theory_component` / `theory_claim` / `equation` / `figure` の全検出要素を統一カード
+一覧で返す `GET /documents/{document_id}/elements`。W層「深く検討」の文脈的導線
+（figure/equation/theory_component/theory_claim がそれぞれ別画面に埋め込まれている）を
+補う俯瞰・探索用の第5導線で、新しい層ではない。全要素が同一 document に属するため
+per-element ゲートは不要（`services.resolve_document_access` で正規化 + 閲覧判定を1回だけ
+行う。fail-closed=404）。組み立ては非LLM・DB 書き込みゼロの `core.deliberation.inventory.build()`
+に一任し、本ルータは権限ゲートと整形のみを担う。
+
 core 側（`core.deliberation`）は FastAPI を import しない。
 """
 
@@ -55,6 +64,7 @@ from core.deliberation import (
     decomposition,
     dialogue,
     identity_links,
+    inventory,
     positioning,
     refs,
     store as delib_store,
@@ -831,3 +841,37 @@ def assess_domain_standardization(
         "note": "この分野の標準化判定の評価をバックグラウンドで開始しました"
         "（既に候補・確定があるエントリはスキップされます）。",
     }
+
+
+# ---------------------------------------------------------------------------
+# 要素インベントリ（`docs/features/element_inventory_design.md` §5）
+# ---------------------------------------------------------------------------
+#
+# 教材（document）単位で theory_component / theory_claim / equation / figure の
+# 全検出要素を統一カード一覧で返す、教材管理から開く俯瞰・探索用の第5導線（§1/§2）。
+# フィルタは全面クライアントサイド（§6）なのでクエリパラメータは無い。
+# 全要素が同一 document に属するため per-element ゲートは不要で、
+# `services.resolve_document_access` による document 単位の正規化 + 閲覧判定を1回だけ
+# 行う（§5/I2）。不在・非閲覧は 404（既存 `_ensure_document_viewable` と同じ fail-closed
+# の挙動に合わせる — 403 は使わない）。組み立て自体は `core.deliberation.inventory.build()`
+# に一任し（非LLM・DB 書き込みゼロ・I1）、本ルータは権限ゲートと正規化済み document_id の
+# 受け渡しだけを行う。
+
+
+@router.get("/documents/{document_id}/elements")
+def get_document_element_inventory(
+    document_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict[str, Any]:
+    """document 1件分の検出要素インベントリを返す（設計書 §5）。
+
+    ``document_id`` は ``documents.id``(UUID) と ``source_path``(material_id) の
+    どちらでも受け付ける（原稿スタジオはコースの sources の material_id をそのまま渡す）。
+    ``resolve_document_access`` で正規化した ``access.document_id`` を
+    ``inventory.build()`` に渡す（正規化前の値のまま渡すと各テーブルの document_id
+    照合が空振りする）。
+    """
+    access = resolve_document_access(current_user.get("id"), document_id)
+    if not access.found or not access.can_view:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return inventory.build(access.document_id)

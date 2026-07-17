@@ -36,6 +36,11 @@ logger = logging.getLogger(__name__)
 _MAX_REPAIR_ATTEMPTS = 2
 _WHITESPACE_RE = re.compile(r"\s+")
 
+# Mirrors input_builder._MAX_GUIDANCE_TEXT_CHARS — guidance_note is an LLM
+# output field (not a re-echo of the teacher's hint), but is capped the same
+# way defensively so a runaway response cannot bloat the stored artifact.
+_MAX_GUIDANCE_NOTE_CHARS = 2000
+
 
 def _safe_float(value: object, default: float = 0.0) -> float:
     try:
@@ -166,6 +171,7 @@ def _parse_record(
         suggested_mode=raw_suggested_mode or mode_payload["suggested_mode"],
         mode_reason=mode_payload["mode_reason"],
         analysis_profile=mode_payload["analysis_profile"],
+        guidance_note=str(raw.get("guidance_note", "") or "").strip()[:_MAX_GUIDANCE_NOTE_CHARS],
     )
 
 
@@ -176,7 +182,11 @@ def _fallback_record(
     repair_failed: bool = False,
 ) -> ApparatusRecord:
     """A minimal reviewable record for a figure the agent could not process
-    (no image / LLM call failed / repair exhausted). Never dropped (P4)."""
+    (no image / LLM call failed / repair exhausted). Never dropped (P4).
+
+    ``guidance_note`` is left at its dataclass default ("") — there is no LLM
+    output to draw one from on this path, guided or not.
+    """
     return ApparatusRecord(
         figure_id=figure.figure_id,
         figure_key=figure.figure_key,
@@ -212,9 +222,10 @@ class ApparatusSemanticsRepairer:
         llm_client: ApparatusSemanticsLLMClient,
         prompt_factory: ApparatusSemanticsPromptFactory,
         validator: object,
-        image_payload: dict,
+        image_payloads: list[dict],
         inner_label_hints: list[str] | None = None,
         abbreviations: dict | None = None,
+        guidance: dict | None = None,
     ) -> ApparatusRecord:
         candidate_ids = {c.entry_id for c in candidates}
         for attempt in range(1, _MAX_REPAIR_ATTEMPTS + 1):
@@ -226,9 +237,10 @@ class ApparatusSemanticsRepairer:
                 figure, candidate_briefs, nearby_text, cartridge_hints,
                 raw_output, validation_issues,
                 inner_label_hints=inner_label_hints, abbreviations=abbreviations,
+                guidance=guidance,
             )
             try:
-                raw_output = llm_client.generate(messages, images=[image_payload])
+                raw_output = llm_client.generate(messages, images=image_payloads)
             except Exception as exc:
                 logger.warning(
                     "apparatus_semantics repair LLM call failed figure=%s: %s",

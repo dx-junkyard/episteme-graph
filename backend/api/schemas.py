@@ -65,6 +65,10 @@ class MaterialOut(BaseModel):
     analysis_processed: int | None = None
     analysis_total: int | None = None
     analysis_error: str | None = None
+    # 最新 document_analysis_runs.options の JSONB（例: {"analyze_images": true}）。
+    # run が無ければ None。フロントが再解析モーダルで前回選択を復元するための契約
+    # フィールド（フィールド名 analysis_options は admin.js との確定契約）。
+    analysis_options: dict | None = None
     # --- メタデータ（教材選択UIの情報提示用。documents 列から常時付与）---
     authors: list[str] = Field(default_factory=list)
     year: int | None = None
@@ -1060,7 +1064,11 @@ class LectureStudioSettings(BaseModel):
     response_persona: str = ""
     # レクチャースライド同期 + 音声言語切替 (migration 040 Phase 4): コース単位の読み上げ言語。
     # 不正値は pydantic のバリデーションで 422 になる。
-    lecture_language: Literal["ja", "en"] = "ja"
+    # 省略時は None（PUT では「変更しない」を意味し、前回保存済みの言語を保持する —
+    # 旧 default="ja" だと省略が明示的な "ja" 指定と区別できず、口調のみの設定保存で
+    # 既存の言語設定を無警告で ja に巻き戻していた）。GET レスポンスは常に解決済みの
+    # ja/en を返す（routes 側で _normalize_lecture_language により埋める）。
+    lecture_language: Literal["ja", "en"] | None = None
 
 
 # ---------------------------------------------------------------------------

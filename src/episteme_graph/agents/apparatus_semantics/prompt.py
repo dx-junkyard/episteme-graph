@@ -96,6 +96,7 @@ _OUTPUT_SCHEMA = {
     "evidence_quote": "verbatim quote from caption/nearby text supporting the overall identification, or empty string",
     "reason": "string — overall justification",
     "confidence": 0.0,
+    "guidance_note": "how the teacher guidance was applied, or why the requested element could not be found; empty string when no guidance was given",
 }
 
 # Suggested (not enforced — validator.py never hard-constrains this vocabulary)
@@ -118,12 +119,13 @@ class ApparatusSemanticsPromptFactory:
         cartridge_hints: dict,
         inner_label_hints: list[str] | None = None,
         abbreviations: dict | None = None,
+        guidance: dict | None = None,
     ) -> list[dict]:
         return [
             {"role": "system", "content": _SYSTEM_CONTENT},
             {"role": "user", "content": self._build_user_content(
                 figure, candidate_briefs, nearby_text, cartridge_hints,
-                inner_label_hints, abbreviations,
+                inner_label_hints, abbreviations, guidance,
             )},
         ]
 
@@ -137,6 +139,7 @@ class ApparatusSemanticsPromptFactory:
         issues: list,
         inner_label_hints: list[str] | None = None,
         abbreviations: dict | None = None,
+        guidance: dict | None = None,
     ) -> list[dict]:
         issue_text = "\n".join(
             f"- [{i.severity}] {i.rule_id}: {i.message}" for i in issues
@@ -144,7 +147,7 @@ class ApparatusSemanticsPromptFactory:
         content = (
             self._build_user_content(
                 figure, candidate_briefs, nearby_text, cartridge_hints,
-                inner_label_hints, abbreviations,
+                inner_label_hints, abbreviations, guidance,
             )
             + "\n\n## Previous Output\n"
             + json.dumps(previous_output, ensure_ascii=False, indent=2)
@@ -165,6 +168,7 @@ class ApparatusSemanticsPromptFactory:
         cartridge_hints: dict,
         inner_label_hints: list[str] | None = None,
         abbreviations: dict | None = None,
+        guidance: dict | None = None,
     ) -> str:
         parts: list[str] = []
         parts.append("## Task")
@@ -202,6 +206,9 @@ class ApparatusSemanticsPromptFactory:
                 "name, but label_ref must stay the in-figure label string "
                 "verbatim (do not expand it)."
             )
+
+        if guidance:
+            parts.extend(self._build_guidance_section(guidance))
 
         if candidate_briefs:
             parts.append(
@@ -272,3 +279,48 @@ class ApparatusSemanticsPromptFactory:
             "- Return ONLY valid JSON, no markdown fences"
         )
         return "\n".join(parts)
+
+    @staticmethod
+    def _build_guidance_section(guidance: dict) -> list[str]:
+        """Render the "## Teacher Guidance" section (guided_figure_reanalysis_design.md §6-3).
+
+        Only called when ``guidance`` is a non-empty dict — un-guided calls
+        (including every batch-pipeline figure, GF7) never see this section
+        at all. GF2 is enforced here structurally: the rules text explicitly
+        forbids treating the teacher's hint as an evidence_quote source.
+        """
+        lines: list[str] = [
+            "\n## Teacher Guidance (attention directive from a human reviewer)"
+        ]
+        hint_text = guidance.get("hint_text") or ""
+        if hint_text:
+            lines.append(f"hint: {hint_text}")
+
+        focus_bbox_rel = guidance.get("focus_bbox_rel")
+        if focus_bbox_rel:
+            lines.append(
+                "focus_region (relative coords in the first image): "
+                + json.dumps(focus_bbox_rel, ensure_ascii=False)
+            )
+            if guidance.get("has_focus_image"):
+                lines.append(
+                    "The second attached image is a magnified crop of this focus region."
+                )
+            focus_label_texts = guidance.get("focus_label_texts") or []
+            labels_display = (
+                ", ".join(focus_label_texts) if focus_label_texts else "unavailable"
+            )
+            lines.append(f"In-figure labels inside the focus region: {labels_display}")
+
+        lines.append("\nRules for using this guidance:")
+        lines.append(
+            "- The guidance directs your attention; it is NOT evidence. evidence_quote "
+            "fields must still be verbatim substrings of the caption/nearby text only — "
+            "never quote the teacher's hint as evidence.\n"
+            "- Prioritize detecting components inside the focus region, but do not delete "
+            "or contradict correct findings outside it.\n"
+            "- In the output field \"guidance_note\", state briefly how you applied the "
+            "guidance. If you could not find what the teacher pointed at, say so "
+            "explicitly — do not fabricate a detection to satisfy the hint."
+        )
+        return lines

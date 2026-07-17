@@ -7015,6 +7015,27 @@ body {
   box-shadow: 0 0 0 2px rgba(255, 255, 255, .85), 0 0 0 4px var(--color-text-info, #378add);
 }
 
+/* 教員指示付き図再解析（Guided Figure Re-analysis）: 領域指定のドラッグ描画レイヤー。
+   #deliberation-figure-overlays の兄弟として既存オーバーレイのクリック選択とは
+   独立に重ねる。既定は pointer-events:none、focus モード ON（is-drawable）のときだけ
+   ドラッグを受け付ける。 */
+.deliberation-figure-focus-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.deliberation-figure-focus-layer.is-drawable {
+  pointer-events: auto;
+  cursor: crosshair;
+}
+.deliberation-figure-focus-rect {
+  position: absolute;
+  border: 1.5px dashed var(--color-text-warning, #ef9f27);
+  border-radius: 3px;
+  background: rgba(239, 159, 39, .16);
+  pointer-events: none;
+}
+
 .deliberation-figure-lightbox {
   display: none;
   position: fixed;
@@ -7091,6 +7112,48 @@ body {
 #deliberation-mode-save-status,
 #deliberation-figure-reanalyze-status {
   color: var(--color-text-tertiary, #8b949e);
+}
+
+/* 教員指示付き図再解析（Guided Figure Re-analysis）: トグル・クリアボタンと指示欄。 */
+.deliberation-figure-focus-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  margin: 0 0 7px;
+}
+.deliberation-focus-toggle,
+#deliberation-focus-clear {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 6px;
+  background: var(--color-background-secondary, #f5f5f7);
+  color: var(--color-text-primary, #1d1d1f);
+  padding: 4px 9px;
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.deliberation-focus-toggle.is-active {
+  border-color: var(--color-text-warning, #ef9f27);
+  background: var(--color-background-warning, #fff3cd);
+  color: var(--color-text-warning, #ef9f27);
+  font-weight: 600;
+}
+.deliberation-reanalyze-hint {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 9px;
+  padding: 6px 8px;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 6px;
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-primary, #1d1d1f);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  resize: vertical;
 }
 
 .deliberation-figure-analysis {

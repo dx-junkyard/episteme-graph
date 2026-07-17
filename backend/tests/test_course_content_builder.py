@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 
 def test_course_json_dumps_strips_nul_characters():
     from core.course_content_builder import _json_dumps
@@ -461,3 +463,96 @@ def test_fallback_topic_draft_creates_detailed_check_question():
     assert topic["check_questions"][0]["model_answer"] == "銀河分布の歪度と尖度を用いてモデルを評価する。"
     assert topic["check_questions"][0]["answer_requirements"]
     assert topic["check_questions"][0]["explanation"]
+
+
+# ---------------------------------------------------------------------------
+# 回帰テスト: build_course_content はトピック draft 再生成後にトピック音声
+# キャッシュ (topic_lecture_audio_cache) を無効化しなければならない。
+#
+# build_course_content は全トピックの student_material/spoken_script を
+# 無条件で上書きする (_generate_course_topic_drafts) が、個別トピック編集経路
+# (routes/lecture_studio/topics.py::save_lecture_studio_course_topic) にはある
+# DELETE FROM topic_lecture_audio_cache がここには無かった。表示スライドと
+# 音声スライドの食い違いを防ぐため、コース単位で無効化されることを確認する。
+# ---------------------------------------------------------------------------
+
+
+def test_invalidate_topic_lecture_audio_cache_issues_course_scoped_delete():
+    from core.course_content_builder import _invalidate_topic_lecture_audio_cache
+
+    mock_session = MagicMock()
+    _invalidate_topic_lecture_audio_cache(mock_session, "course-1")
+
+    mock_session.execute.assert_called_once()
+    call = mock_session.execute.call_args
+    assert "DELETE FROM topic_lecture_audio_cache" in str(call.args[0])
+    assert call.args[1] == {"course_id": "course-1"}
+    # commit はしない。呼び出し元 (build_course_content -> _save_course) の
+    # コミットに相乗りする既存パターンに従う。
+    mock_session.commit.assert_not_called()
+
+
+def test_build_course_content_deletes_topic_lecture_audio_cache_after_regenerating_drafts():
+    """build_course_content 経由でもトピック音声キャッシュが無効化されることを確認する
+
+    （individual トピック編集の test_lecture_topic_audio.py::
+    TestTopicAudioInvalidatedOnEdit と対になる回帰テスト）。
+    """
+    from core.course_content_builder import build_course_content
+
+    course_data = {
+        "sources": [{"material_id": "m1"}],
+        "topics": [{"id": "t1", "title": "Topic 1"}],
+    }
+
+    def _execute_side_effect(query, params=None):
+        sql = str(query)
+        result = MagicMock()
+        if "SELECT data, user_id" in sql:
+            result.fetchone.return_value = (course_data, "user-1")
+        elif "document_id::text" in sql:
+            result.fetchall.return_value = [("doc-1",)]
+        elif "chunk_index ASC" in sql:
+            result.fetchall.return_value = []
+        return result
+
+    mock_session = MagicMock()
+    mock_session.execute.side_effect = _execute_side_effect
+
+    fake_artifacts = {
+        "doc-1": {
+            "stage_outputs": {
+                "_artifacts": {
+                    "course_mapping": {"topics": [{"title": "Topic 1", "description": "desc"}]},
+                },
+            },
+        },
+    }
+
+    with patch("core.course_content_builder._pg_session", return_value=mock_session), \
+         patch("core.document_pipeline.persistence.resolve_artifact_runs", return_value=fake_artifacts), \
+         patch("core.course_content_builder.generate_text_with_structured_output") as mock_generate:
+        mock_generate.return_value = {
+            "key_concepts": ["k"],
+            "student_material": {"source_format": "eg-markdown-v1", "source_text": "text"},
+            "spoken_script": "script",
+            "cautions": [],
+            "check_questions": [],
+        }
+
+        result = build_course_content("user-1", "course-1")
+
+    assert result["status"] == "completed"
+
+    execute_calls = mock_session.execute.call_args_list
+    delete_indices = [
+        i for i, c in enumerate(execute_calls)
+        if "DELETE FROM topic_lecture_audio_cache" in str(c.args[0])
+    ]
+    assert len(delete_indices) == 1
+    assert execute_calls[delete_indices[0]].args[1] == {"course_id": "course-1"}
+
+    # DELETE はトピック draft 再生成の後、コース保存 (UPDATE ... title = :title)
+    # より前に実行される（_save_course と同一トランザクションでまとめて確定するため）。
+    save_indices = [i for i, c in enumerate(execute_calls) if "title = :title" in str(c.args[0])]
+    assert save_indices and delete_indices[0] < save_indices[0]

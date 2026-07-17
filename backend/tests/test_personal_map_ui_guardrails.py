@@ -224,10 +224,11 @@ class TestCourseSwitchRaceGuard:
     """review 指摘4（P2）: コース切替中の非同期応答が別コースの UI に表示されるバグの回帰防止。
 
     ``loadNetwork(courseId)`` / ``fetchJourney(courseId, nodeId)`` の消費側
-    （``onToggleChange`` / ``annotateTrajectoryList`` / ``requestJourney``）は、応答到着時に
-    要求開始時の courseId が現在の courseId と一致するかを確認し、不一致なら描画を破棄する
-    （``invalidate()`` は進行中の Promise 自体はキャンセルできないため）。
-    admin-lecture-studio.js のコース切替と同じ「遅延応答は courseId 不一致で破棄」パターン。
+    （``onToggleChange`` / ``annotateTrajectoryList`` / ``requestJourney`` /
+    ``refreshAfterMapExclusionChange``）は、応答到着時に要求開始時の courseId が現在の
+    courseId と一致するかを確認し、不一致なら描画を破棄する（``invalidate()`` は進行中の
+    Promise 自体はキャンセルできないため）。admin-lecture-studio.js のコース切替と同じ
+    「遅延応答は courseId 不一致で破棄」パターン。
     """
 
     def test_on_toggle_change_discards_stale_course_response(self):
@@ -244,6 +245,50 @@ class TestCourseSwitchRaceGuard:
         src = _read(PERSONAL_MAP_JS)
         fn_src = _extract_function(src, "requestJourney")
         assert "courseId !== state.courseId" in fn_src
+
+    def test_refresh_after_map_exclusion_change_discards_stale_course_response(self):
+        """指摘1（本チケット）: 「地図には反映しない/戻す」後の再取得
+        (``refreshAfterMapExclusionChange``) にも同型ガードが必要
+        （``loadNetwork`` の遅延応答が別コースの UI に描画されるのを防ぐ）。
+        """
+        src = _read(PERSONAL_MAP_JS)
+        fn_src = _extract_function(src, "refreshAfterMapExclusionChange")
+        assert "courseId !== state.courseId" in fn_src
+
+    def test_all_load_network_consumers_have_course_switch_guard(self):
+        """構造検査: ``loadNetwork(`` を ``.then`` で消費する関数を IIFE 全体から列挙し、
+        すべてに courseId 突き合わせガードがあることを固定する（個別関数名の列挙し忘れに
+        よる回帰を防ぐ）。函数名の列挙は ``_extract_function`` と同じ 2-space 関数宣言様式に
+        依存する。関数自身の宣言行（例: ``function loadNetwork(courseId) {``）による
+        自己名一致の誤検知を避けるため、本体は最初の ``{`` より後だけを見る。
+        """
+        src = _read(PERSONAL_MAP_JS)
+        names = re.findall(r"\n  function (\w+)\(", src)
+        assert names, "personal-map.js の関数宣言が見つかりません"
+
+        consumers = []
+        for name in names:
+            fn_src = _extract_function(src, name)
+            body_only = fn_src[fn_src.index("{") + 1 :]
+            if "loadNetwork(" in body_only:
+                consumers.append((name, fn_src))
+
+        # 現在判明している消費者が列挙から漏れていないこと（列挙ロジック自体の回帰防止）
+        found_names = {name for name, _ in consumers}
+        assert {
+            "onToggleChange",
+            "annotateTrajectoryList",
+            "refreshAfterMapExclusionChange",
+        } <= found_names
+
+        for name, fn_src in consumers:
+            has_guard = (
+                "courseId !== state.courseId" in fn_src
+                or "courseId !== currentCourseId()" in fn_src
+            )
+            assert has_guard, (
+                f"{name}: loadNetwork(...) の消費側に courseId 突き合わせガードがありません"
+            )
 
 
 class TestAtlasOverlayIntegration:

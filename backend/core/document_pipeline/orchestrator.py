@@ -273,18 +273,28 @@ def run_document_pipeline(
     if start_stage and target_stage and stage_order[start_stage] > stage_order[target_stage]:
         raise ValueError(f"start_stage {start_stage!r} is after target_stage {target_stage!r}")
 
+    fetched_previous_run = resume and agents is None
     previous_run = (
         get_latest_analysis_run(document_id=document_id, material_id=material_id)
-        if resume and agents is None else None
+        if fetched_previous_run else None
     )
     # options（migration 041 §3-2）: 明示指定があればそれを優先し、なければ前回 run の
     # options を引き継ぐ（再解析のたびに analyze_images 等を指定しなくても前回の選択が
     # 維持される）。completed 済み run は artifact 再利用の対象から外れる（下の reset）が、
     # options の引き継ぎ元としては有効なので reset **前**にここで確定させる。
+    # resume=False の全体再実行（lecture studio の document-pipeline/run 等）でも
+    # options だけは最新 run から引き継ぐ — previous_run は artifact 再利用のために
+    # resume 時のみ読むが、options の継承はそれとは独立の関心事（agents 注入の
+    # ユニットテスト実行では DB を読まない）。
     if options is not None:
         effective_options = dict(options)
     else:
-        effective_options = dict((previous_run or {}).get("options") or {})
+        options_source_run = previous_run
+        if not fetched_previous_run and agents is None:
+            options_source_run = get_latest_analysis_run(
+                document_id=document_id, material_id=material_id
+            )
+        effective_options = dict((options_source_run or {}).get("options") or {})
     if previous_run and previous_run.get("status") == "completed" and target_stage is None and start_stage is None:
         previous_run = None
     previous_outputs = dict((previous_run or {}).get("stage_outputs") or {})

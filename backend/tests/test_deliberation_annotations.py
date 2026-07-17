@@ -441,6 +441,140 @@ class TestCommitTopLevel:
 
 
 # ---------------------------------------------------------------------------
+# _commit_identity: shared_part_id の実在検証（人間直叩き経路と対称にする）
+#
+# 既存の TestRouteCommitDispatch.test_identity_routes_to_identity_handler は
+# _COMMIT_ROUTES をスタブ差し替えするため実体 _commit_identity を通らない。
+# ここでは commit() → 実 _COMMIT_ROUTES → 実 _commit_identity → 実 refs.resolve
+# の経路で、存在しない/UUID 非形式の shared_part_id が CommitRoutingError
+# （API 層で 4xx）になり、IntegrityError/DataError の 500 素通りが起きないことを
+# 固定する。refs の DB 読みだけを fake session で差し替える。
+# ---------------------------------------------------------------------------
+
+
+class _FakeRefsResult:
+    def __init__(self, row):
+        self._row = row
+
+    def fetchone(self):
+        return self._row
+
+
+class _FakeRefsSession:
+    def __init__(self, row):
+        self._row = row
+
+    def execute(self, *args, **kwargs):
+        return _FakeRefsResult(self._row)
+
+    def close(self):
+        pass
+
+
+class TestCommitIdentityValidatesSharedPart:
+    _MISSING_UUID = "00000000-0000-0000-0000-000000000000"
+
+    def _identity_annotation(self, shared_part_id: str) -> dict:
+        return {
+            "id": "a1",
+            "status": ANNOTATION_STATUS_CANDIDATE,
+            "kind": ANNOTATION_KIND_IDENTITY,
+            "scope": SCOPE_DOCUMENT,
+            "element_type": "theory_claim",
+            "element_id": "c1",
+            "document_id": "doc-1",
+            "body": {"shared_part_id": shared_part_id, "local_expression": {"label": "x"}},
+            "evidence": ["q"],
+            "reason": "r",
+            "confidence": 0.6,
+        }
+
+    def _forbid_create_candidate(self, monkeypatch):
+        monkeypatch.setattr(
+            annotations_mod.identity_links,
+            "create_candidate",
+            lambda *a, **k: pytest.fail(
+                "create_candidate must not be reached for an unresolvable shared_part_id"
+            ),
+        )
+
+    def test_commit_with_malformed_uuid_shared_part_id_raises_invalid(self, monkeypatch):
+        """UUID 非形式 → refs.resolve が DB 接続前に invalid を返し、CommitRoutingError
+        （kind='invalid' → API 層 422）になる。DataError の 500 にならない。"""
+        annotation = self._identity_annotation("not-a-uuid")
+        monkeypatch.setattr(annotations_mod.store_mod, "get_annotation", lambda _id: annotation)
+        self._forbid_create_candidate(monkeypatch)
+
+        with pytest.raises(annotations_mod.CommitRoutingError) as excinfo:
+            annotations_mod.commit("a1", current_user_id="u1")
+        assert excinfo.value.kind == "invalid"
+
+    def test_commit_with_missing_shared_part_raises_not_found(self, monkeypatch):
+        """UUID 形式だが library_entries に行が無い → CommitRoutingError
+        （kind='not_found' → API 層 404）。IntegrityError の 500 にならない。"""
+        annotation = self._identity_annotation(self._MISSING_UUID)
+        monkeypatch.setattr(annotations_mod.store_mod, "get_annotation", lambda _id: annotation)
+        monkeypatch.setattr(annotations_mod.refs, "get_session", lambda: _FakeRefsSession(None))
+        self._forbid_create_candidate(monkeypatch)
+
+        with pytest.raises(annotations_mod.CommitRoutingError) as excinfo:
+            annotations_mod.commit("a1", current_user_id="u1")
+        assert excinfo.value.kind == "not_found"
+
+    def test_commit_error_kinds_map_to_4xx_not_500(self):
+        """API 層の _http_from_commit_error が invalid/not_found を 422/404 に
+        マップすること（本修正が防ぐのは 500 素通りなので、マッピングも固定する）。"""
+        pytest.importorskip("fastapi")
+        from routes.deliberation import _http_from_commit_error
+
+        invalid = _http_from_commit_error(
+            annotations_mod.CommitRoutingError("bad id", kind="invalid")
+        )
+        missing = _http_from_commit_error(
+            annotations_mod.CommitRoutingError("no row", kind="not_found")
+        )
+        assert invalid.status_code == 422
+        assert missing.status_code == 404
+
+    def test_commit_with_resolved_shared_part_reaches_create_candidate(self, monkeypatch):
+        """実在する shared_part は従来どおり identity_links.create_candidate へ渡る
+        （解決済み ElementRef の element_id を使う）。"""
+        annotation = self._identity_annotation(self._MISSING_UUID)
+        monkeypatch.setattr(annotations_mod.store_mod, "get_annotation", lambda _id: annotation)
+        # refs._resolve_shared_part は (domain_key, status) の1行を読む。
+        monkeypatch.setattr(
+            annotations_mod.refs, "get_session",
+            lambda: _FakeRefsSession(("particle_physics", "active")),
+        )
+        created = {}
+
+        def fake_create_candidate(instance_ref, shared_part_id, **kwargs):
+            created["instance_ref"] = instance_ref
+            created["shared_part_id"] = shared_part_id
+            return {"id": "link-1", "status": "candidate"}
+
+        monkeypatch.setattr(
+            annotations_mod.identity_links, "create_candidate", fake_create_candidate
+        )
+        monkeypatch.setattr(
+            annotations_mod.store_mod,
+            "set_annotation_status",
+            lambda annotation_id, *, status, committed_target, updated_by: {
+                **annotation, "status": status, "committed_target": committed_target,
+            },
+        )
+
+        result = annotations_mod.commit("a1", current_user_id="u1")
+        assert result["status"] == ANNOTATION_STATUS_COMMITTED
+        assert result["committed_target"] == {
+            "type": "identity_link", "id": "link-1", "status": "candidate",
+        }
+        assert created["shared_part_id"] == self._MISSING_UUID
+        assert created["instance_ref"].element_id == "c1"
+        assert created["instance_ref"].document_id == "doc-1"
+
+
+# ---------------------------------------------------------------------------
 # dismiss(): status 遷移のみ委譲する薄いラッパ
 # ---------------------------------------------------------------------------
 

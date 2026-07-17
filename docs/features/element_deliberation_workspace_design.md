@@ -1,6 +1,6 @@
 # W層（Element Deliberation Workspace / 要素検討ワークスペース）設計
 
-> **状態: Phase 0 + Phase 1 + Phase W-β 実装済み**（2026-07-16 時点）。本書は設計の正本。
+> **状態: Phase 0 + Phase 1 + Phase W-β + Phase 2 + Phase S 実装済み**（2026-07-16 時点）。本書は設計の正本。
 > Phase 1 実装物: `core/deliberation/positioning.py` に §4.2 コーパス横断レンズ
 > （`cross_corpus`）を追加。要素→代表テキスト（非LLM連結・§15 未決2）→
 > `core.embedder.search_similar_papers` で近傍 chunk を検索し、自 document を除外した
@@ -506,12 +506,14 @@ W層の新規価値は **①統合入口（4要素型を1つの場に）②コ�
   ＝既存データ合成のみ）+ `GET .../overview` + フロント統合パネル。**新 LLM・新 migration 無し**、
   4要素型の「内訳＋位置づけ」を1画面に束ねるだけで即価値。
 - **Phase 1（W-1）**: コーパス横断レンズ（§4.2、chunk-proxy）。
-- **Phase 2（W-2）**: migration 046（`deliberation_sessions` / `element_annotations` の2テーブル・
-  scope 分岐）+ 対話（会話版 vision/text）+ 候補注釈（`identity` / `standardization` を含む・§5.5）+
+- **Phase 2（W-2）**: migration 049（`deliberation_sessions` / `element_annotations` の2テーブル・
+  scope 分岐。起草時は 046 を想定したが冒頭の補正注記どおり実装は 049）+ 対話（会話版 vision/text）+
+  候補注釈（`identity` / `standardization` を含む・§5.5）+
   **インスタンス→共通部品（L層 library_entry）への昇格・リンク導線（非破壊・KN-2）+ domain-scoped
   共通部品への対話・注釈** + コミットルーティング + 監査 + コスト上限 + ガードレール。
 - **Phase W-β**: `element_identity_links`（instance ↔ shared_part、candidate/confirmed/rejected、
-  evidence、確定者）を migration 046 に同乗。旅の traversal のため JSONB 埋め込みでなくテーブルで持つ
+  evidence、確定者）を migration 048 で追加（起草時は 046 同乗を想定したが冒頭の補正注記どおり
+  実装は 048）。旅の traversal のため JSONB 埋め込みでなくテーブルで持つ
   （ビジョン §7）。`identity` 注釈の確定先。
 - **Phase 3（W-3・任意）**: 要素粒度 embedding へ置換（§4.2 将来）。
 

@@ -5,6 +5,8 @@ GET is authoritative while retaining the existing URL and response fields.
 """
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -16,8 +18,10 @@ from core.document_pipeline.persistence import get_latest_analysis_run
 from core.figure_presentation import presentation_payload, set_reviewed_mode
 from core.schema import AUDIT_ENTITY_FIGURE_PRESENTATION
 from routes.theory_components import _ensure_document_editable, _ensure_document_viewable
-from services import record_review_event
+from services import record_review_event, resolve_document_access
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin", tags=["figure-presentation"])
 
@@ -52,6 +56,19 @@ def list_document_figures_with_presentation(
     """Return the existing figures contract plus classification/profile data."""
     chunks = _ensure_document_viewable(document_id, current_user)
     canonical_document_id = _canonical_document_id(chunks, document_id)
+    # L層の例示画像チェック（元 document 所有者のみ・fail-closed）のための所有者フラグ。
+    # resolve_document_access は UUID / material_id の両方を1回で解決する（チャンク単位の
+    # ループ内で呼ばない）。フィールド名 viewer_is_owner は admin.js との確定契約。
+    # 判定に失敗したら false（fail-closed: 所有者と確認できない限りチェックボックスを出さない）。
+    try:
+        viewer_is_owner = bool(
+            resolve_document_access(current_user.get("id"), document_id).is_owner
+        )
+    except Exception:
+        logger.warning(
+            "viewer_is_owner resolution failed for document=%s", document_id, exc_info=True,
+        )
+        viewer_is_owner = False
     rows = load_document_figures(canonical_document_id)
     artifacts = _latest_records(canonical_document_id)
     figures: list[dict] = []
@@ -114,7 +131,7 @@ def list_document_figures_with_presentation(
             "apparatus_candidates": apparatus_candidates,
             **presentation,
         })
-    return {"figures": figures}
+    return {"figures": figures, "viewer_is_owner": viewer_is_owner}
 
 
 class FigurePresentationModePatch(BaseModel):
@@ -161,38 +178,57 @@ def update_figure_presentation_mode(
     return {"figure_id": figure_id, **result}
 
 
+class FigureReanalyzeRequest(BaseModel):
+    """教員指示付き再解析（guided_figure_reanalysis_design.md §4-1）。
+
+    両フィールドとも省略・null なら従来どおりの無指示再解析（後方互換）。
+    値域検証は ``core.figure_reanalysis._normalize_guidance`` に一本化する
+    （ここでは型だけを宣言し、範囲チェックはしない）。
+    """
+    hint_text: str | None = None
+    focus_bbox: list[float] | None = None
+
+
 @router.post("/documents/{document_id}/figures/{figure_id}/reanalyze")
 def reanalyze_document_figure(
     document_id: str,
     figure_id: str,
+    body: FigureReanalyzeRequest | None = None,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """Create a structured AI candidate for one figure; never auto-confirm it."""
     chunks = _ensure_document_editable(document_id, current_user)
     canonical_document_id = _canonical_document_id(chunks, document_id)
+    guidance = (
+        {"hint_text": body.hint_text, "focus_bbox": body.focus_bbox} if body else None
+    )
     try:
         result = figure_reanalysis.reanalyze_figure(
             canonical_document_id,
             figure_id,
             created_by=current_user.get("id"),
+            guidance=guidance,
         )
     except figure_reanalysis.FigureReanalysisError as exc:
         status = {"not_found": 404, "limit": 429}.get(exc.kind, 422)
         raise HTTPException(status_code=status, detail=str(exc)) from exc
 
     annotation = result.pop("annotation")
+    audit_payload = {
+        "action": "figure.analysis.reanalyze",
+        "document_id": canonical_document_id,
+        "annotation_id": annotation.get("id"),
+        "suggested_mode": result.get("suggested_mode"),
+    }
+    if result.get("guidance"):
+        audit_payload["guidance"] = result["guidance"]
     record_review_event(
         AUDIT_ENTITY_FIGURE_PRESENTATION,
         figure_id,
         "",
         "candidate",
         current_user.get("id"),
-        {
-            "action": "figure.analysis.reanalyze",
-            "document_id": canonical_document_id,
-            "annotation_id": annotation.get("id"),
-            "suggested_mode": result.get("suggested_mode"),
-        },
+        audit_payload,
     )
     return {
         **result,

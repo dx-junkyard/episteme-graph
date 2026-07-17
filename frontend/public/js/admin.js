@@ -26,6 +26,7 @@
     materialSearch: "",
     materialPipelineStatus: {},
     materialPipelineTimers: {},
+    materialsList: [],
     exportContext: null,
     errorLogs: [],
     selectedErrorLogIds: new Set(),
@@ -315,6 +316,7 @@
         ["symbol_registry", "数式記号の整理"],
         ["derivation_chain", "導出関係の構築"],
         ["figure_table_semantics", "図表の意味復元"],
+        ["apparatus_semantics", "図の装置・パーツ解析"],
       ],
     },
     {
@@ -342,6 +344,8 @@
 
   function renderMaterials(materials) {
     var tbody = document.getElementById("materials-tbody");
+    // 解析再開モーダルが直近の analysis_options を復元できるよう、一覧取得のたびにキャッシュする。
+    state.materialsList = materials || [];
     if (!materials || materials.length === 0) {
       tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--color-text-tertiary)">教材がまだアップロードされていません</td></tr>';
       return;
@@ -424,6 +428,12 @@
       var figuresBtn = m.document_id
         ? '<button class="admin-figures-btn" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="抽出された図・画像を表示" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">図・画像</button>'
         : "";
+      // 要素インベントリ（W層の教材単位の統合入口）: この教材からパイプラインが検出した
+      // theory_component / theory_claim / equation / figure の全件を一覧表示する
+      // （document_id が必要。図・画像ボタンと同条件・その隣に並べる）。
+      var inventoryBtn = m.document_id
+        ? '<button class="admin-inventory-btn" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="この教材からパイプラインが検出した要素の一覧を表示" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">検出要素</button>'
+        : "";
       // U層（LLM使用量推計, migration 043）: 解析前の事前トークン見積り（TEACHER・レンジのみ・金額なし, G2-U）
       var estimateBtn = m.material_id
         ? '<button class="admin-estimate-btn" data-material-id="' + escHtml(m.material_id) + '" title="解析パイプラインが使うトークン量の目安をレンジで表示します（金額は表示されません）" style="background:none;border:1px solid var(--color-text-tertiary);color:var(--color-text-secondary);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">解析コスト見積り</button>'
@@ -433,6 +443,7 @@
         '<button class="admin-pdf-reupload-btn' + pdfBtnClass + '" data-material-id="' + escHtml(m.material_id) + '" title="' + escHtml(pdfBtnTitle) + '">' + pdfBtnLabel + '</button>' +
         resumeBtn +
         figuresBtn +
+        inventoryBtn +
         shareBtn +
         versionBtn +
         estimateBtn +
@@ -473,6 +484,17 @@
     tbody.querySelectorAll(".admin-figures-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
         openFiguresModal(this.getAttribute("data-document-id"), this.getAttribute("data-title"));
+      });
+    });
+
+    // 要素インベントリ（検出要素の一覧）
+    tbody.querySelectorAll(".admin-inventory-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (window.Deliberation) {
+          window.Deliberation.openInventory(this.getAttribute("data-document-id"), {
+            title: this.getAttribute("data-title")
+          });
+        }
       });
     });
 
@@ -939,7 +961,21 @@
     });
   }
 
+  // 他モジュール（versioning.js 等）から同じ2段確認モーダルを再利用できるように公開する。
+  // 生の window.confirm() をモジュールごとに個別実装しないための共通導線。
+  window.AdminDangerConfirm = { open: openDangerConfirmModal };
+
   // ── 画像読み取りパイプライン（migration 041）— 再解析オプション ─────────
+  // モーダルは document_id しか受け取れないため、直近の /admin/materials 一覧
+  // キャッシュ（state.materialsList）から material を逆引きする。
+  function _findMaterialByDocumentId(docId) {
+    var list = state.materialsList || [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && list[i].document_id === docId) return list[i];
+    }
+    return null;
+  }
+
   // 「解析再開」ボタンのフローにもアップロード時と同じチェックボックスを出す。
   function openReanalyzeOptionsModal(docId, filename, triggerBtn) {
     var existing = document.getElementById("reanalyze-options-modal");
@@ -962,6 +998,12 @@
         '</div>' +
       '</div>';
     document.body.appendChild(overlay);
+
+    // 前回の解析オプション（analysis_options）があればチェック状態を復元する（防御的）。
+    var lastMaterial = _findMaterialByDocumentId(docId);
+    var lastOpts = lastMaterial && lastMaterial.analysis_options;
+    var analyzeImagesCheckbox = document.getElementById("reanalyze-analyze-images");
+    if (analyzeImagesCheckbox) analyzeImagesCheckbox.checked = !!(lastOpts && lastOpts.analyze_images);
 
     overlay.addEventListener("click", function (e) { if (e.target === overlay) overlay.remove(); });
     document.getElementById("reanalyze-cancel-btn").addEventListener("click", function () { overlay.remove(); });
@@ -994,7 +1036,9 @@
   }
 
   // ── 図・画像（document_figures, migration 041） ─────────────────────
-  var _figuresModalState = { documentId: null, title: "", figures: [], objectUrls: [] };
+  // viewerIsOwner: 図一覧APIレスポンスの viewer_is_owner（元教材の所有者か）。
+  // ライブラリ昇格モーダルの例示画像チェック（fail-closed）に使う。
+  var _figuresModalState = { documentId: null, title: "", figures: [], objectUrls: [], viewerIsOwner: false };
 
   function _figuresRevokeObjectUrls() {
     _figuresModalState.objectUrls.forEach(function (u) { try { URL.revokeObjectURL(u); } catch (e) { /* noop */ } });
@@ -1006,6 +1050,7 @@
     _figuresModalState.documentId = documentId;
     _figuresModalState.title = title || "";
     _figuresModalState.figures = [];
+    _figuresModalState.viewerIsOwner = false;
 
     var existing = document.getElementById("figures-modal");
     if (existing) existing.remove();
@@ -1042,6 +1087,8 @@
       })
       .then(function (data) {
         _figuresModalState.figures = (data && data.figures) || [];
+        // fail-closed: レスポンスに無ければ所有者ではない扱い。
+        _figuresModalState.viewerIsOwner = !!(data && data.viewer_is_owner);
         renderFiguresList();
       })
       .catch(function () {
@@ -1112,6 +1159,7 @@
           documentId: _figuresModalState.documentId,
           figureId: figureId,
           candidate: candidate || null,
+          viewerIsOwner: _figuresModalState.viewerIsOwner,
         });
       });
     });
@@ -1484,7 +1532,8 @@
     var isPromote = !!(opts.candidate || opts.figureId);
     var defaultName = (opts.candidate && opts.candidate.apparatus_name_candidate) || "";
     var defaultBody = _apparatusBodyFromCandidate(opts.candidate);
-    var canOfferImage = !!(opts.figureId && opts.documentId);
+    // fail-closed: viewer_is_owner が真であることも必須にする（未取得・false ならチェックボックス自体を出さない）。
+    var canOfferImage = !!(opts.figureId && opts.documentId && opts.viewerIsOwner);
 
     var overlay = document.createElement("div");
     overlay.id = "library-entry-modal";
@@ -1542,7 +1591,8 @@
           ? ('<label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-secondary);margin-bottom:4px">' +
               '<input type="checkbox" id="lib-entry-include-image"> 例示画像を含める（元教材の所有者のみ有効）' +
             '</label>' +
-            '<div id="lib-entry-image-warning" style="display:none;font-size:11.5px;color:var(--color-text-warning);background:#fff6e6;border:1px solid var(--color-text-warning);border-radius:4px;padding:5px 7px;margin-bottom:10px">この画像はライブラリを閲覧できる全教員に表示されます。元教材の所有者以外がこの操作を行うと拒否されます。</div>')
+            '<div id="lib-entry-image-warning" style="display:none;font-size:11.5px;color:var(--color-text-warning);background:#fff6e6;border:1px solid var(--color-text-warning);border-radius:4px;padding:5px 7px;margin-bottom:10px">この画像はライブラリを閲覧できる全教員に表示されます。元教材の所有者以外がこの操作を行うと拒否されます。</div>' +
+            '<div id="lib-entry-image-merge-note" style="display:none;font-size:11.5px;color:var(--color-text-tertiary);margin-bottom:10px">統合では例示画像は引き継がれません（新規作成時のみ）</div>')
           : "") +
 
         '<div style="border-top:1px solid var(--color-border-tertiary);padding-top:10px;margin-top:4px">' +
@@ -1572,6 +1622,8 @@
       var isApparatus = this.value === "apparatus";
       document.getElementById("lib-entry-body-apparatus").style.display = isApparatus ? "" : "none";
       document.getElementById("lib-entry-body-theory").style.display = isApparatus ? "none" : "";
+      // 種別が変わると類似候補（統合先）の母集団も変わるため再検索する。
+      _libraryTriggerSimilarSearch();
     });
 
     document.getElementById("lib-entry-parts-list").addEventListener("click", function (e) {
@@ -1593,7 +1645,34 @@
       });
     }
 
+    // 統合先ラジオ（新規作成 + _renderLibrarySimilarResults が動的追加する候補）は
+    // イベント委譲で拾う。統合を選ぶと例示画像は引き継がれないため、無効化+チェック
+    // 解除してその旨を注記する（サイレント破棄をやめ正直に伝える。§6-4 修正7）。
+    overlay.addEventListener("change", function (e) {
+      if (e.target && e.target.name === "lib-entry-merge-target") {
+        _libraryUpdateImageCheckboxForMergeTarget();
+      }
+    });
+
     document.getElementById("lib-entry-submit").addEventListener("click", submitLibraryEntry);
+  }
+
+  function _libraryUpdateImageCheckboxForMergeTarget() {
+    var includeImageEl = document.getElementById("lib-entry-include-image");
+    if (!includeImageEl) return; // canOfferImage が false のときはチェックボックス自体が無い
+    var mergeTargetEl = document.querySelector('input[name="lib-entry-merge-target"]:checked');
+    var mergeTargetId = mergeTargetEl && mergeTargetEl.value ? mergeTargetEl.value : null;
+    var noteEl = document.getElementById("lib-entry-image-merge-note");
+    var warningEl = document.getElementById("lib-entry-image-warning");
+    if (mergeTargetId) {
+      includeImageEl.checked = false;
+      includeImageEl.disabled = true;
+      if (warningEl) warningEl.style.display = "none";
+      if (noteEl) noteEl.style.display = "";
+    } else {
+      includeImageEl.disabled = false;
+      if (noteEl) noteEl.style.display = "none";
+    }
   }
 
   function _libraryTriggerSimilarSearch() {
@@ -1625,16 +1704,19 @@
     if (!area) return;
     if (!entries.length) {
       area.innerHTML = '<div style="font-size:11.5px;color:var(--color-text-tertiary)">類似する既存エントリは見つかりませんでした</div>';
-      return;
+    } else {
+      var html = '<div style="font-size:11.5px;color:var(--color-text-secondary);margin-bottom:4px">類似する既存エントリが見つかりました。統合する場合は選択してください:</div>';
+      entries.forEach(function (e) {
+        html += '<label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:2px">' +
+          '<input type="radio" name="lib-entry-merge-target" value="' + escHtml(e.id) + '">' +
+          escHtml(e.name) + (e.summary ? ' <span style="color:var(--color-text-tertiary)">— ' + escHtml(e.summary.slice(0, 40)) + '</span>' : '') +
+        '</label>';
+      });
+      area.innerHTML = html;
     }
-    var html = '<div style="font-size:11.5px;color:var(--color-text-secondary);margin-bottom:4px">類似する既存エントリが見つかりました。統合する場合は選択してください:</div>';
-    entries.forEach(function (e) {
-      html += '<label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:2px">' +
-        '<input type="radio" name="lib-entry-merge-target" value="' + escHtml(e.id) + '">' +
-        escHtml(e.name) + (e.summary ? ' <span style="color:var(--color-text-tertiary)">— ' + escHtml(e.summary.slice(0, 40)) + '</span>' : '') +
-      '</label>';
-    });
-    area.innerHTML = html;
+    // 再検索で選択中だった統合先候補が消えることがある（change イベントは発火しない）。
+    // 例示画像チェックボックスの有効/無効を現在の選択状況に合わせて再同期しておく。
+    _libraryUpdateImageCheckboxForMergeTarget();
   }
 
   function _libraryEntryStatus(msg, kind) {
@@ -2078,8 +2160,12 @@
           if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "凍結に失敗しました"); });
           return res.json();
         })
-        .then(function () {
-          _libraryDetailStatus("凍結しました", "success");
+        .then(function (data) {
+          if (data && data.embedding_status === "failed") {
+            _libraryDetailStatus("凍結しましたが、検索用インデックスの生成に失敗しました。再度凍結すると再試行されます", "error");
+          } else {
+            _libraryDetailStatus("凍結しました", "success");
+          }
           selectLibraryEntry(entryId);
           loadLibraryEntries();
         })
@@ -5347,7 +5433,13 @@
 
     fullBtn.addEventListener("click", function () {
       if (!_currentSimProposalId) return;
-      approveWithScope(_currentSimProposalId, "full", []);
+      openDangerConfirmModal({
+        title: "スキーマ提案をシステム全体へ適用",
+        message: "スキーマ提案をシステム全体に適用し、全教材の再抽出ジョブを開始します。この操作は取り消せません。",
+        confirmLabel: "適用する",
+      }, function () {
+        approveWithScope(_currentSimProposalId, "full", []);
+      });
     });
 
     canaryBtn.addEventListener("click", function () {

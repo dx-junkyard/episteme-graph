@@ -80,10 +80,12 @@ from core.llm_usage.context import usage_context
 from core.tts import generate_tts_audio, strip_text_for_speech
 from core.learning_experience import (
     TIER_OUT_OF_SOURCE,
+    TIER_SOURCE,
     aggregate_overall_tier,
     build_position_anchor,
     out_of_source_guard_instruction,
     out_of_source_notice,
+    tier_floor,
 )
 from core.learning_support_agent import (
     LearningSupportAgent,
@@ -1684,6 +1686,11 @@ def learning_chat(
 
     # L1: 回答全体の格を最弱根拠へ安全側集約。採用根拠が無ければ未踏(out_of_source)。
     overall_tier = aggregate_overall_tier([s["tier"] for s in cited_sources])
+    # トピック教材をコンテキストに注入済みなら回答には実根拠があり、out_of_source
+    # （「教材の裏づけなし」バナー + 未踏ガード）は事実と矛盾する。承認チェーン由来
+    # ではないため approved には昇格させず、source を下限に引き上げる。
+    if has_topic_material:
+        overall_tier = tier_floor(overall_tier, TIER_SOURCE)
     # 回答内容の出所分類（tier=教員承認状況とは別軸）:
     #   教材(このコース) > 別の資料 > 出典を追えないモデル生成、の優先度で決める。
     if has_topic_material or any(s["origin"] == "course_material" for s in cited_sources):

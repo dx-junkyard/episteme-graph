@@ -247,13 +247,14 @@
     document.body.appendChild(overlay);
 
     let isLogin = true;
-    document.getElementById("auth-switch").addEventListener("click", function () {
+    // #auth-switch は innerHTML 差し替えで毎回作り直されるため、安定な親 #auth-toggle に委任する
+    document.getElementById("auth-toggle").addEventListener("click", function (e) {
+      if (!e.target || e.target.id !== "auth-switch") return;
       isLogin = !isLogin;
       document.getElementById("auth-btn").textContent = isLogin ? "ログイン" : "登録";
       document.getElementById("auth-toggle").innerHTML = isLogin
         ? 'アカウントがない場合 <a id="auth-switch">新規登録</a>'
         : '既にアカウントがある場合 <a id="auth-switch">ログイン</a>';
-      document.getElementById("auth-switch").addEventListener("click", arguments.callee);
     });
 
     document.getElementById("auth-form").addEventListener("submit", async function (e) {

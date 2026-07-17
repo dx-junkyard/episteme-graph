@@ -109,6 +109,7 @@ def build_course_content(user_id: str, course_id: str) -> dict:
                 "draft_errors": draft_result["draft_errors"],
             },
         )
+        _invalidate_topic_lecture_audio_cache(session, course_id)
         _save_course(session, course_id, course)
         return {
             "status": "completed",
@@ -121,6 +122,27 @@ def build_course_content(user_id: str, course_id: str) -> dict:
         raise
     finally:
         session.close()
+
+
+def _invalidate_topic_lecture_audio_cache(session, course_id: str) -> None:
+    """コース内容生成が全トピックの student_material/spoken_script を無条件上書き
+
+    （``_generate_course_topic_drafts`` / ``_apply_deterministic_topic_draft_fallback``）
+    するため、生成済みのトピック音声キャッシュ (``topic_lecture_audio_cache``) を
+    無効化する。個別トピック編集時の DELETE
+    （``routes/lecture_studio/topics.py::save_lecture_studio_course_topic``）と同じ方針で、
+    次回の音声生成で作り直される。全トピックが無条件上書きされるため、トピック単位
+    ではなくコース単位で削除する。呼び出し元 ``build_course_content`` の
+    try/except/finally（rollback・close）にそのまま乗るよう、commit はしない
+    （``_save_course`` の commit と同一トランザクションでまとめて確定する）。
+    """
+    session.execute(
+        sa_text("""
+            DELETE FROM topic_lecture_audio_cache
+            WHERE course_id = :course_id
+        """),
+        {"course_id": course_id},
+    )
 
 
 def _course_material_ids(course: dict) -> list[str]:

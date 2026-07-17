@@ -144,6 +144,20 @@ class TestRunTensionMining:
         assert worker.run_tension_mining("u1", "c1", "t1") == 0
         assert agent.run.call_count == 0
 
+    def test_daily_cost_cap_releases_claim_for_retry(self, monkeypatch):
+        """コスト上限時は claim（analyzed_at）を解放し、上限リセット後に再解析できる（P4）。"""
+        script = {
+            "payload->>'tension_hint' = 'true'": [("id-1", {"text": "x"}, None)],
+            "SET analyzed_at = now()": [("id-1",)],
+        }
+        log, agent = _wire(monkeypatch, script, TensionMiningResult(candidates=[_candidate()]))
+        worker._daily_call_counts[("u1", worker._today())] = 10_000
+        assert worker.run_tension_mining("u1", "c1", "t1") == 0
+        assert agent.run.call_count == 0
+        releases = [(s, p) for s, p in log if "SET analyzed_at = NULL" in s]
+        assert len(releases) == 1
+        assert releases[0][1]["ids"] == ["id-1"]
+
 
 class TestMaybeSchedule:
     def _wire_threads(self, monkeypatch, pending_rows):

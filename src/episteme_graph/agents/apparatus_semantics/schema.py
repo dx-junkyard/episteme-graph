@@ -69,6 +69,14 @@ class FigureImageInput:
     # Abbreviation → expansion dictionary mined from the paper body
     # (figure_context stage), e.g. {"ECDL": "external cavity diode laser"}.
     abbreviations: dict[str, str] = field(default_factory=dict)
+    # --- Guided re-analysis (docs/features/guided_figure_reanalysis_design.md).
+    # Populated only for a teacher-directed deliberation re-analyze call; the
+    # batch orchestrator pipeline never sets these (GF7 — all default to a
+    # falsy value so existing callers/artifacts are unaffected).
+    guidance_text: str = ""  # normalized teacher hint (<=2000 chars)
+    focus_bbox_rel: list | None = None  # [x0, y0, x1, y1] image-relative 0..1
+    focus_image_bytes: bytes | None = None  # magnified crop, produced upstream by core
+    focus_label_texts: list[str] = field(default_factory=list)  # inner_labels inside focus_bbox_rel
 
 
 @dataclass
@@ -146,6 +154,11 @@ class ApparatusRecord:
     suggested_mode: str = "unknown"
     mode_reason: str = ""
     analysis_profile: dict = field(default_factory=dict)
+    # Teacher-guidance response (GF3): how the LLM applied guidance_text /
+    # focus_bbox_rel, or an explicit "could not find it" statement when the
+    # requested element was not found. Always empty string when the run had
+    # no guidance input — never fabricated for an unguided run.
+    guidance_note: str = ""
 
 
 @dataclass
@@ -233,4 +246,7 @@ def _record_from_dict(d: dict) -> ApparatusRecord:
             if isinstance(d.get("analysis_profile") or d.get("mode_analysis") or {}, dict)
             else {}
         ),
+        # Absent in artifacts exported before this extension — defaults to ""
+        # so old artifacts still round-trip (P4).
+        guidance_note=d.get("guidance_note", ""),
     )

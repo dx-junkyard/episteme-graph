@@ -190,19 +190,24 @@ class ApparatusSemanticsAgent:
                 records.append(fallback)
                 continue
 
-            image_payload = self._input_builder.build_image_payload(figure)
+            image_payloads = self._input_builder.build_image_payloads(figure)
             candidate_briefs = self._input_builder.build_candidate_briefs(candidates)
             nearby_text = self._input_builder.build_nearby_text(figure)
             cartridge_hints = self._input_builder.build_cartridge_hints(cartridge)
             inner_label_hints = self._input_builder.build_inner_label_hints(figure)
             abbreviations = self._input_builder.build_abbreviations(figure)
+            # Guided re-analysis only (guided_figure_reanalysis_design.md); a
+            # batch-pipeline figure always yields {} here, so build_messages
+            # omits the guidance section entirely (GF7).
+            guidance = self._input_builder.build_guidance(figure)
             messages = self._prompt_factory.build_messages(
                 figure, candidate_briefs, nearby_text, cartridge_hints,
                 inner_label_hints=inner_label_hints, abbreviations=abbreviations,
+                guidance=guidance,
             )
 
             try:
-                raw_output = self._llm_client.generate(messages, images=[image_payload])
+                raw_output = self._llm_client.generate(messages, images=image_payloads)
             except Exception as exc:
                 logger.exception(
                     "apparatus_semantics LLM call failed document=%s figure=%s",
@@ -235,9 +240,10 @@ class ApparatusSemanticsAgent:
                     llm_client=self._llm_client,
                     prompt_factory=self._prompt_factory,
                     validator=self._validator,
-                    image_payload=image_payload,
+                    image_payloads=image_payloads,
                     inner_label_hints=inner_label_hints,
                     abbreviations=abbreviations,
+                    guidance=guidance,
                 )
             # Deterministic bbox/expanded_name grounding — always applied last,
             # right before the record is kept, across every code path

@@ -70,6 +70,7 @@
     legendEl: null,
     trayEl: null,
     journeyCardEl: null, // Phase P-2: 旅カード（常に最新1枚）
+    journeySeq: 0, // 旅カード fetch の連番 (closeJourneyCard で進める。後着の古い応答の破棄に使う)
     noteEl: null, // Phase P-3: 「地図には反映しません」等の一時メッセージ
     noteTimer: null,
     popupEl: null,
@@ -359,14 +360,23 @@
     const tray = state.trayEl;
     if (!tray) return;
     tray.innerHTML = "";
-    if (!state.enabled || !data) { tray.hidden = true; return; }
+    if (!state.enabled || !data) { tray.hidden = true; return; } // トグル OFF 時は領域ごと非表示のまま
     const entries = unanchoredEntries(data);
-    if (!entries.length) { tray.hidden = true; return; } // 空なら見出しごと非表示（異常演出にしない）
 
     const heading = document.createElement("div");
     heading.className = "personal-map-tray-heading";
     heading.textContent = "まだ地図にない";
     tray.appendChild(heading);
+
+    if (!entries.length) {
+      // 0件でも見出しは残す（異常演出にしない・数値や進捗は出さない）
+      const empty = document.createElement("div");
+      empty.className = "personal-map-tray-empty";
+      empty.textContent = "まだ記録がありません。学習の中で問いを残すと、ここに現れます。";
+      tray.appendChild(empty);
+      tray.hidden = false;
+      return;
+    }
 
     const list = document.createElement("div");
     list.className = "personal-map-tray-list";
@@ -633,6 +643,9 @@
   }
 
   function closeJourneyCard() {
+    // 進行中の旅 fetch を無効化する（応答到着時にこの連番との一致を確認し、
+    // 閉じた後／別の旅要求に上書きされた後に届く古い応答を破棄する。到着順の逆転対策）。
+    state.journeySeq += 1;
     if (state.journeyCardEl) {
       state.journeyCardEl.hidden = true;
       state.journeyCardEl.innerHTML = "";
@@ -761,7 +774,15 @@
       hintBtn.addEventListener("click", () => {
         const crossNodeId = data.cross_course_hint && data.cross_course_hint.node_id;
         if (!crossNodeId) return;
-        fetchCrossCourseJourney(crossNodeId).then((crossData) => renderJourneyCard(crossData));
+        // requestJourney と同じ courseId 突き合わせ + 連番ガード（コース切替・連打対策）。
+        const courseId = state.courseId;
+        state.journeySeq += 1;
+        const seq = state.journeySeq;
+        fetchCrossCourseJourney(crossNodeId).then((crossData) => {
+          if (courseId !== state.courseId) return;
+          if (seq !== state.journeySeq) return;
+          renderJourneyCard(crossData);
+        });
       });
       hint.appendChild(hintBtn);
       card.appendChild(hint);
@@ -777,10 +798,13 @@
     closePopup();
     // 旅カードは常に最新1枚 — 新しい旅を開くと前のカードは即座に置き換わる
     closeJourneyCard();
+    const seq = state.journeySeq;
     fetchJourney(courseId, nodeId).then((data) => {
       // コース切替後に届いた遅延応答は破棄する（別コースの旅カードに描画しない。
       // onToggleChange と同じ courseId 突き合わせ）。
       if (courseId !== state.courseId) return;
+      // 連打で新しい旅要求が発行済みなら、後着の古い応答は破棄する（到着順の逆転対策）。
+      if (seq !== state.journeySeq) return;
       renderJourneyCard(data);
     });
   }
@@ -820,9 +844,13 @@
   // 除外/復帰の成否に関わらずキャッシュを破棄し、ON中なら現在レベルを再描画する
   // （state.lastCanvas/lastLevel を使う。onToggleChange と同じ再取得パターン）。
   function refreshAfterMapExclusionChange() {
-    delete state.networkCache[state.courseId];
+    const courseId = state.courseId;
+    delete state.networkCache[courseId];
     if (!state.enabled) return;
-    loadNetwork(state.courseId).then((data) => {
+    loadNetwork(courseId).then((data) => {
+      // コース切替後に届いた遅延応答は破棄する（別コースの UI に描画しない。
+      // onToggleChange と同じ courseId 突き合わせ）。
+      if (courseId !== state.courseId) return;
       if (!data) return;
       renderDotsLayer(state.lastCanvas);
       renderTray(data);
@@ -866,6 +894,7 @@
           if (chip) chip.remove();
         }
         refreshAfterMapExclusionChange();
+        showTransientNote("地図に戻しました");
       })
       .catch(() => {}); // fail-closed: 失敗時は何も出さない
   }

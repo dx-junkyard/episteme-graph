@@ -163,3 +163,72 @@ def test_library_candidate_defaults():
     assert candidate.aliases == []
     assert candidate.summary == ""
     assert candidate.body == {}
+
+
+# ------------------------------------------------------------------
+# Guided re-analysis fields (guided_figure_reanalysis_design.md §6-1)
+# ------------------------------------------------------------------
+
+
+def test_figure_image_input_guidance_field_defaults():
+    """Batch-pipeline figures never set these — all default falsy (GF7)."""
+    figure = FigureImageInput(
+        figure_id="fig_1",
+        figure_key="fig_1",
+        figure_label="Figure 1",
+        caption_text="A schematic.",
+        image_bytes=None,
+    )
+    assert figure.guidance_text == ""
+    assert figure.focus_bbox_rel is None
+    assert figure.focus_image_bytes is None
+    assert figure.focus_label_texts == []
+
+
+def test_figure_image_input_guidance_fields_can_be_set():
+    figure = FigureImageInput(
+        figure_id="fig_1",
+        figure_key="fig_1",
+        figure_label="Figure 1",
+        caption_text="A schematic.",
+        image_bytes=b"\x89PNG\r\n\x1a\nimg",
+        guidance_text="look at the left box",
+        focus_bbox_rel=[0.1, 0.2, 0.5, 0.6],
+        focus_image_bytes=b"\xff\xd8\xffcrop",
+        focus_label_texts=["EOM"],
+    )
+    assert figure.guidance_text == "look at the left box"
+    assert figure.focus_bbox_rel == [0.1, 0.2, 0.5, 0.6]
+    assert figure.focus_image_bytes == b"\xff\xd8\xffcrop"
+    assert figure.focus_label_texts == ["EOM"]
+
+
+def test_apparatus_record_guidance_note_defaults_to_empty_string():
+    record = _make_record()
+    assert record.guidance_note == ""
+
+
+def test_guidance_note_round_trips_through_to_dict_and_from_dict():
+    record = _make_record()
+    record.guidance_note = "Found the EOM in the focus region as requested."
+    result = ApparatusSemanticsResult(
+        document_id="doc_test", cartridge_id=None, apparatus_records=[record],
+    )
+    restored = ApparatusSemanticsResult.from_dict(json.loads(result.to_json()))
+    assert restored.apparatus_records[0].guidance_note == (
+        "Found the EOM in the focus region as requested."
+    )
+
+
+def test_guidance_note_defaults_to_empty_string_when_absent_from_dict():
+    """Artifacts exported before this extension must still round-trip (P4)."""
+    minimal = {
+        "document_id": "doc_test",
+        "cartridge_id": None,
+        "apparatus_records": [
+            {"figure_id": "fig_x", "match_status": "unknown"},
+        ],
+        "validation_issues": [],
+    }
+    restored = ApparatusSemanticsResult.from_dict(minimal)
+    assert restored.apparatus_records[0].guidance_note == ""

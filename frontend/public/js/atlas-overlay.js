@@ -631,7 +631,9 @@
         btn.style.display = "none";
         return;
       }
-      openOverlay(data, { level: 1, source: "topbar" });
+      // 「ただ開くだけ」の呼び出し: level/focus を渡さず openOverlay の C-2 復元
+      // (state.reopen ? 直前のレベル・選択 : 初回は L1) に委ねる。
+      openOverlay(data, { source: "topbar" });
     });
   });
 })();

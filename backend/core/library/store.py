@@ -400,9 +400,24 @@ def freeze_entry(
 # ---------------------------------------------------------------------------
 
 
-def _set_status(entry_id: str, status: str, *, updated_by: str | None) -> dict:
+def _set_status(entry_id: str, status: str, *, updated_by: str | None) -> tuple[dict, str]:
+    """status を遷移させ、``(更新後 entry, 遷移前 status)`` を返す。
+
+    監査記録（routes/library.py）が遷移前の実状態を事実どおり記帳できるよう、
+    UPDATE 前に現在行を読んで遷移前 status を確定する（既に目的の status だった
+    冪等呼び出しでも old_status をハードコードせず事実を返す）。
+    """
     session = get_session()
     try:
+        current = session.execute(
+            sa_text(f"{_SELECT_ENTRY_SQL} WHERE id = CAST(:id AS uuid) LIMIT 1"),
+            {"id": entry_id},
+        ).fetchone()
+        if current is None:
+            session.rollback()
+            raise LibraryNotFoundError(f"library entry not found: {entry_id}")
+        # _ENTRY_COLUMNS_SQL の並びで status は index 10（_row_to_entry と同じ規約）。
+        previous_status = str(current[10] or "")
         row = session.execute(
             sa_text(
                 f"""
@@ -425,16 +440,16 @@ def _set_status(entry_id: str, status: str, *, updated_by: str | None) -> dict:
         raise
     finally:
         session.close()
-    return _row_to_entry(row)
+    return _row_to_entry(row), previous_status
 
 
-def retire_entry(entry_id: str, updated_by: str | None = None) -> dict:
-    """status を 'retired' に遷移する（行削除はしない）。"""
+def retire_entry(entry_id: str, updated_by: str | None = None) -> tuple[dict, str]:
+    """status を 'retired' に遷移する（行削除はしない）。``(entry, 遷移前 status)`` を返す。"""
     return _set_status(entry_id, schema.STATUS_RETIRED, updated_by=updated_by)
 
 
-def restore_entry(entry_id: str, updated_by: str | None = None) -> dict:
-    """status を 'active' に戻す。"""
+def restore_entry(entry_id: str, updated_by: str | None = None) -> tuple[dict, str]:
+    """status を 'active' に戻す。``(entry, 遷移前 status)`` を返す。"""
     return _set_status(entry_id, schema.STATUS_ACTIVE, updated_by=updated_by)
 
 

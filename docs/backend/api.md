@@ -62,7 +62,7 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | PUT | `/courses/{id}` | コース更新 | オーナー or editor |
 | DELETE | `/courses/{id}` | コース削除 | オーナーのみ |
 | GET | `/courses/{id}/progress` | 学習進捗 | 受講者 |
-| POST | `/courses/{id}/enroll` | 公開コースへ受講登録（クローン） | 要ログイン（可視性/グループ確認） |
+| POST | `/courses/{id}/enroll` | 公開コースへ受講登録（コースは複製せず `learning_states` に1行 INSERT するだけ。migration 011 でクローン方式は廃止済み） | 要ログイン（可視性/グループ確認） |
 | GET | `/courses/{cid}/topics/{tid}/chat` | チャット履歴取得 | 受講者 |
 | POST | `/courses/{cid}/topics/{tid}/chat` | RAG チャット + 誤解検出 | 受講者 |
 | POST | `/courses/{cid}/topics/{tid}/check-question` | 理解度チェック | 受講者 |
@@ -102,7 +102,7 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 |---|---|
 | 教材管理 | `POST /materials/upload`（非同期, 202）, `GET /materials`, `GET /materials/{id}`, `GET/PUT /materials/{id}/pdf`, `PUT /materials/{id}/visibility`, `DELETE /materials/{id}`, `POST /documents/{id}/reanalyze` |
 | コースビルダー | `POST/GET /course-builder/sessions`, `GET/PUT /course-builder/sessions/{id}`, `POST /course-builder/chat` |
-| コース公開/権限 | `GET /courses`, `PUT /courses/{id}/publish`, `GET/POST /courses/{id}/groups`, `DELETE /courses/{id}/groups/{gid}` |
+| コース公開/権限 | `GET /courses`, `PUT /courses/{id}/visibility`（`visibility='public'` 指定で `is_published` も更新）, `GET/POST /courses/{id}/groups`, `DELETE /courses/{id}/groups/{gid}` |
 | ユーザー管理 | `POST /users/student`（TEACHER+）, `POST /users/teacher`（SYSTEM_ADMIN のみ） |
 | スキーマ進化 | `GET/POST /schema/types`, `GET/POST /schema/predicates`, `GET /schema-proposals`, `POST /schema-proposals/analyze`, `PUT /schema-proposals/{id}/approve`（`/approve-with-scope`, `/reject`）, `GET/POST /reextraction-jobs` |
 | タスク/分析 | `GET /tasks/{task_id}`, `GET /courses/{id}/unanswered-queries`, `GET /system/materials-stats`（SYSTEM_ADMIN）, `GET /interest-dashboard`（関心・tension の k-匿名化集計） |
