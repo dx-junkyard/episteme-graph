@@ -399,3 +399,57 @@ L層エントリ retire（引用者宛て）。G4「押し付けない」原則�
 
 *調査・修正: 2026-07-17。前回調査 `vision_ux_gap_survey_2026-07.md`（2026-07-16）の後継。
 本文書の課題 ID（N1〜N42）は前回の G 系列とは独立。*
+
+---
+
+## 追補: 残課題の解消記録（2026-07-18）
+
+§3 の 🔧 / 💬 全件を解消した（Fable 5 指揮 + Sonnet 5 サブエージェント12体の並列実施、未コミット）。
+テスト: backend **4,382 passed / 0 failed**（+249）、src 1,396 passed、フロント JS 全21ファイル esprima 構文 OK。
+
+- **N1/N2（最後の1マイル）**: ライブラリ詳細に standardization バッジ（5語彙・数値なし）+「深く検討」ボタン
+  → Phase S セクション開通。対話 grounding に同分野凍結エントリ top-k（id/名称/aliases のみ、
+  `DELIBERATION_IDENTITY_CANDIDATES_TOP_K` 既定5）を供給、0件時は identity 候補生成を明示禁止
+  （捏造ガード）。手動「共通部品と結びつける」UI（新設 `GET /elements/{type}/{id}/shared-part-candidates`
+  → 既存 `POST /identity-links`）も追加。
+- **N3/N30/N35（C層確定）**: backing_claims の確定/却下ボタン（PATCH 全置換・却下は
+  `status="rejected"` 保持で可逆）+ 承認者一覧（段階ラベルのみ）+ 引用のコースセレクタ
+  （owner/editor 絞り込み）。既知の限界: standard 説明（author_id=NULL）は非 admin 教員が PATCH 不可。
+- **N10残/N36**: version-state に `is_owner`/`can_publish`/`role` 等を追加し、コース版モーダルを
+  非所有者に読み取り専用開放（発行・削除予約は理由付き無効化）。教材テーブルに開示範囲バッジ。
+- **N12/N13/N31**: Copilot capability に `executable` フラグ（挨拶文が実装済みのみ例示）、
+  rewrite_chunk_script 実行ハンドラ（L2 可逆・実装済み action は3件に）、G層
+  `figure.unreviewed_modes` ルール、stumbles / schema-proposals の capability+KB、
+  アンカー整合ガードレールを screen 単位検査に強化。
+- **N14**: `core/status/cross_layer_notify.py` 新設。C層承認受領 / D層疑義被起票 / R層 flagged
+  （宛先=document 所有者。`created_by` は全経路 NULL のため）/ L層 retire（宛先=confirmed
+  同一性リンクの instance document 所有者）を `source='status'` で統合インボックスへ fan-out
+  （dismiss 可・migration 不要）。
+- **N15残**: 学習者向け `GET /courses/{cid}/chunks/{chunk_id}/claim-refs` を新設（コース sources
+  所属検証つき fail-closed）し、出典タブの台帳併記が equation + claim の両対応に。
+- **N16/N17/N38**: 再構成ノードは `topics[].linked_claim_ids` 逆引きでトピック/atlas に帰属
+  （解決不能は誤帰属よりゼロ帰属、設計書 §14 に明記）。トグル改名「自分の記録を重ねる」+
+  最上位パネルに map-exclude。connect の edge_id 閲覧可否を fail-closed 検証。
+- **N18**: readiness 正本を `core/lecture.py::compute_course_audio_readiness` に一本化
+  （トピック教材経路の原稿充足を合算）、音声バッチの完了サマリを「対象トピック n / 生成 m /
+  原稿未生成 k」の正直な報告に。
+- **N23残/N27/N28/N29/N6残**: embedding fallback（有効 embedding を持つ最新凍結版が代表）、
+  domain_key の datalist 化、connections の昇格転記（`APPARATUS_BODY_KEYS` 拡張）、
+  **retired は読み取り専用**（編集・凍結 409、restore が先 — 仕様確定）、明示 OFF 再解析時の
+  「未レビュー AI 分類 n 件が失われます」確認ダイアログ。
+- **N32/N33**: ロックトピックは事実文トースト表示のみで遷移許可。ハンズフリーはエラー時に
+  TTS/パネルでフィードバック（15秒クールダウン）。
+- **N34/N40（仕様確定）**: journey 兄弟検出の非対称は意図的仕様として設計書に明記。
+  counterfactual のノード数は「評価スコアでなく理論構造の事実」として数値表示維持を doubt 文書に明記。
+- **N41/N42**: E層設計書に着手前提4点を追記。api.md を26ルーター・272エンドポイントの正本表に
+  全面改訂、admin.md 18タブ表、frontend/overview.md 22モジュール+DI 契約、learning.md 6機能、
+  agents.md ApparatusSemanticsAgent 節、**#496 図分類を L層設計書 §15 + CLAUDE.md に文書化**、
+  CLAUDE.md に W層節、README 索引 29 リンク化、layer_registry に migration 帰属一覧（〜053）、
+  `docs/development_checklist.md` 新設（2機能境界回帰テストの DoD 化を含む）。
+
+**調査中に発見・未対応のコード課題（別途判断）**: `unanswered-queries`（学生名付きログが任意
+TEACHER に可視）/ `reanalyze` / `bridge-insights` のコース・document ゲート欠落、
+`source-chunk` のチャンク可視性ゲートなし（course_id 未使用）、`PUT /materials/{id}/pdf` が
+閲覧権のみで差し替え可、原稿スタジオのチャンク単位 API に所有チェックなし、学習者向け
+open-assumptions の `dependent_count` 生整数露出、theory_components.py の旧インライン LLM
+抽出機構の死蔵コード群、`_classify_intent` 等の物理学ハードコード文言。

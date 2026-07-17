@@ -32,6 +32,28 @@
 
 > マスター（不変）と個人進捗（可変）の分離は [データモデル](../architecture/data-model.md#重要な設計パターン) を参照。
 
+### 2.1 受講登録の確認ダイアログ
+
+コース選択で「受講可能なコース」を選んでも即時には受講登録しない。確認モーダル
+（`app.js` の受講確認オーバーレイ。コースタイトル + `description` を提示し
+「受講する / キャンセル」）を経てから `POST .../enroll` を呼ぶ。キャンセル時は
+select を元の値へ戻し、失敗時はモーダル内にエラー表示して再試行できる。
+
+### 2.2 コース完了カード（サーバー正本の完了判定）
+
+確認問題（`POST .../topics/{tid}/check-question` → `.../check`）に合格すると、サーバーが
+`services.record_topic_check_pass()` で **`learning_states.progress_data`** に永続化する:
+
+- `progress_data.completed_topics`（topic_id → 合格時刻 ISO8601。既存タイムスタンプは上書きしない）
+- 全トピック合格時に `progress_data.course_completed_at` を一度だけ設定
+
+`/check` レスポンスの `course_completed` / `completed_topic_ids` が**サーバー正本**で、
+フロント（`app.js` の `showCourseCompletionCard`）は `course_completed === true` のときだけ
+「全トピックを学習しました」と断定する（「次のトピックが無い」ことだけで完走と断定しない。
+未確認なら「まだ確認を終えていないトピックがあります」に縮退 — fail-closed）。カードは
+事実文のみ（数値・スコア・祝祭演出なし）で、「他のコースを見る」「わたしの地図を見る」
+（`PersonalMapHome.open()`）への導線を添える。
+
 ---
 
 ## 3. RAG チャット
@@ -96,6 +118,26 @@ interest_traces 記録と tension プレフィルタは通常どおり効きま�
 
 ---
 
+## 3.7 チャットメッセージの書き直し・削除（truncate セマンティクス）
+
+学習者は自分の入力メッセージを **書き直し（✏️）／以降削除（🗑）** できる（`app.js`。
+id を持つ user バブルにのみボタンを出し、送信中は出さない）。どちらも
+「そのメッセージ以降の往復を捨てる」**truncate セマンティクス**で統一されている。
+
+- **書き直し**: ✏️ で本文を入力欄へ戻し `editingMessageId` を立てる。送信時に
+  `LearningChatRequest.replace_message_id` を添えると、サーバーは
+  `services.truncate_chat_and_supersede()` で正本履歴を当該メッセージ位置で切り詰めてから、
+  新しい本文を同じ位置から通常フローで再処理する（誤解検出・tier・grounding は自然に再実行）。
+  クライアント履歴も同位置で truncate する。トピック切替で編集状態は解除。
+- **削除**: 🗑 で確認の上
+  `DELETE /api/learning/courses/{id}/topics/{tid}/chat/messages/{message_id}` を呼ぶ
+  （同じ truncate、再送なし。履歴が空になれば行削除）。
+- **派生痕跡の後始末（P4）**: 取り除いたメッセージ由来の `interest_traces` は削除せず
+  `status='superseded'` へ遷移し、以降の tension / anchor worker・ダイジェスト・
+  問いの軌跡ビューから除外される。
+
+---
+
 ## 4. インタラクティブ・レクチャーモード
 
 論文チャンクを **セミナー形式の音声講義**に変換する没入型機能。「🎙️ レクチャー」ボタンで起動。
@@ -122,7 +164,68 @@ interest_traces 記録と tension プレフィルタは通常どおり効きま�
 
 ---
 
-## 5. 認証フロー
+## 5. 分野の地図（Field Atlas: オーバーレイ + ミニマップ）
+
+学習中の箇所が**分野全体のどこに該当するか**を示す機能（CLAUDE.md「分野の地図」節が正本）。
+宣言しない・煽らない・**踏破率を数値にしない**・リアルタイム LLM 生成をしない、が設計原則。
+
+- **全画面オーバーレイ**: ヘッダの「地図」ボタン（`#atlas-btn`）や各導線カードから
+  `AtlasOverlay.open()`（`atlas-overlay.js`）で開く。詳細パネルは `atlas-panel.js`、
+  修正報告は `atlas-report.js`。
+- **常設ミニマップ**（`atlas-minimap.js`）: 左パネル下・切手大。「いまここ + 状態ドット +
+  霧ハッチ」のみで、数値・ラベル・凡例は描かない。更新はトピック遷移とオーバーレイ閉時のみ
+  （ポーリング禁止）。
+- **導線**（`atlas-cues.js`）: ①トピック完了直後 ②章末 ③寄り道復帰（戻った位置を
+  ハイライト）④初回ログインの一度きり自動表示。①〜③はカード提示に留め自動では開かない。
+  内部計測は `POST /api/learning/atlas/cues/events` / `GET .../cues/state`（数値をユーザーに
+  見せる UI は無い）。
+- **データ取得**: `GET /api/atlas`（`atlas-data.js`。状態判定はサーバー側のみ）。
+  骨格の無いコース・カートリッジでは 404 → 地図領域ごと非表示（fail-closed。フィクスチャへの
+  自動退避はしない）。
+
+---
+
+## 6. わたしの地図（個人知識ネットワーク）
+
+本人の確定痕跡（tension / 帰属付き問い / 再構成成功 / connect した橋）から**毎回決定論的に
+導出される**個人の知識ネットワーク（正本: `docs/features/personal_knowledge_network_design.md`）。
+保存物ではなく導出・**本人のみ可視**・candidate は数えない・数値を見せない。
+
+- **最上位パネル**（`personal-map-home.js`、ヘッダ「わたしの地図」ボタン `#my-map-btn`）:
+  「いまの地図 / 問いからの旅 / 振り返り」の 3 タブ。データソースは正本 API
+  `GET /api/me/personal-network`（+ `GET /api/me/personal-network/journey?node_id=`）のみ。
+  常設注記「この地図はあなたにだけ表示されます。成績評価には使用されません。」
+- **コースビュー**（`personal-map.js`）: Field Atlas オーバーレイに自分の記録を重ねる表示 +
+  旅カード。コーススコープの旅 API は
+  `GET /api/learning/courses/{id}/personal-network(...)`。別コースに同一アンカーの兄弟が
+  あれば `cross_course_hint`（「以前の学習につながる道があります」）だけを返し、本人が
+  開いたときのみコース横断版へ差し替える。
+- **訂正操作**: `POST /api/learning/traces/{trace_id}/map-exclude` / `.../map-restore`
+  （`payload.map_excluded` の状態遷移のみ。dismiss とは独立・行削除しない）。問いの軌跡の
+  除外済み項目には「地図に戻す」チップが付く。
+
+---
+
+## 7. 再構成ループ（Reconstruction Loop）
+
+学習者に理論の再構成（予測 / 言い直し）をさせ、A層の `theory_claims` を答えキーとして
+**非LLM の構造照合**でズレを事実として返す閉ループ（R層。正本:
+`docs/features/reconstruction_loop_design.md`）。
+
+- **導線**: トピック学習ビュー下部の「🧩 再構成に挑戦」ボタン（`reconstruction.js`、
+  `window.Reconstruction`）。自動では開かない。カードには「この問いは AI が自動生成した
+  ものです」を常に明示。
+- **フロー**: ELICIT（出題 `GET .../topics/{tid}/reconstruction/next`）→ CAPTURE（提出
+  `POST /api/learning/reconstruction/{item_id}/submit` → DIFF + 出典リビール）→
+  SELF-CHECK（必須 `POST .../{recon_id}/self-check`。「そのとおり / 納得できない /
+  判定が間違っている」）→ 再挑戦（`POST .../{item_id}/revise`）または記号葉への降下
+  （`POST .../{recon_id}/descend`）。
+- 判定は「食い違いの可能性」という仮説文体で表示し、権威は出典のリビールに置く。
+  数値スコア・正答率は学習者に見せない（サーバー側でも返さない）。
+
+---
+
+## 8. 認証フロー
 
 1. ログイン `POST /api/auth/login` → JWT 取得
 2. `localStorage["eg_token"]` に保存

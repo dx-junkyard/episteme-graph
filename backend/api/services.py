@@ -2513,6 +2513,59 @@ def get_chunk_passage(chunk_id: str) -> dict | None:
     }
 
 
+def get_chunk_claim_refs(course_data: dict | None, chunk_id: str) -> list[dict] | None:
+    """学習者向け chunk→claim ID 解決（読み取り専用・最小フィールドのみ）。
+
+    D3-6 の出典タブ台帳併記（equation）を claim にも拡張するための下請け。
+    チャンクが当該コースの sources 教材に属することを ``chunks.material_id`` と
+    ``course_source_material_ids(course_data)`` の一致で検証し、属さない場合・
+    チャンクが存在しない場合・chunk_id が不正な場合は ``None`` を返す
+    （呼び出し側は 404 として fail-closed に扱う）。ドキュメント全体への
+    フォールバックはしない（チャンク厳密一致のみ）。数値（confidence 等）は含めない。
+    """
+    course_material_ids = set(course_source_material_ids(course_data))
+    session = _pg_session()
+    try:
+        try:
+            chunk_row = session.execute(
+                sa_text("SELECT material_id FROM chunks WHERE id = CAST(:cid AS uuid)"),
+                {"cid": chunk_id},
+            ).fetchone()
+        except Exception as exc:
+            logger.warning("get_chunk_claim_refs: invalid chunk_id %s: %s", chunk_id, exc)
+            return None
+        if not chunk_row:
+            return None
+        chunk_material_id = str(chunk_row[0] or "")
+        if not chunk_material_id or chunk_material_id not in course_material_ids:
+            return None
+        rows = session.execute(
+            sa_text("""
+                SELECT id, claim_type, text, normalized_text
+                FROM theory_claims
+                WHERE chunk_id = CAST(:cid AS uuid)
+                ORDER BY created_at ASC
+            """),
+            {"cid": chunk_id},
+        ).fetchall()
+    except Exception as exc:
+        logger.warning("get_chunk_claim_refs failed: %s", exc)
+        return None
+    finally:
+        session.close()
+
+    claims: list[dict] = []
+    for row in rows:
+        label_source = (row[3] or row[2] or "").strip()
+        label = (label_source[:60] + "…") if len(label_source) > 60 else label_source
+        claims.append({
+            "id": str(row[0]),
+            "claim_type": row[1] or "",
+            "label": label,
+        })
+    return claims
+
+
 def record_internalization(user_id: str, trace_id: str, reason: str) -> bool:
     """痕跡に「なぜ自分に重要か」(Internalization Prompt) を payload へ保存する（L3/内発的動機）。
 

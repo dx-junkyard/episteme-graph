@@ -197,3 +197,85 @@ class TestPersonalMapCrossCourseAndCorrections:
         assert "setInterval" not in src
         hits = [w for w in FORBIDDEN_WORDS if w in src]
         assert not hits, f"禁止語彙が見つかりました: {hits}"
+
+
+class TestOverlayToggleRenamedToAvoidLabelCollision:
+    """N17（2026-07-17）: オーバーレイ内トグルと最上位パネルが同じ「わたしの地図」ラベルを
+    使っていた重複の解消。オーバーレイ内トグル（personal-map.js）は「自分の記録を重ねる」、
+    最上位パネル名（personal-map-home.js）は「わたしの地図」のまま — 名前で機能を
+    区別できることを固定する。
+    """
+
+    def test_overlay_toggle_uses_new_label(self):
+        src = _read(PERSONAL_MAP_JS)
+        assert "自分の記録を重ねる" in src
+
+    def test_overlay_toggle_no_longer_creates_my_map_text_node(self):
+        """トグルのラベルテキストとして「わたしの地図」を生成しない（コメント・docstring
+        での言及は許容 — createTextNode の引数だけを検査する）。"""
+        src = _read(PERSONAL_MAP_JS)
+        assert 'createTextNode("わたしの地図")' not in src
+
+    def test_home_panel_keeps_my_map_title(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        assert "わたしの地図" in src
+
+
+class TestHomePanelMapExclude:
+    """N17（2026-07-17）: 最上位パネルのノード行から「地図には反映しない」を使えること。
+    既存 API `POST /api/learning/traces/{id}/map-exclude` を再利用し、コースビュー
+    （personal-map.js）と同じフィードバック文言・fail-closed 様式に合わせる。
+    """
+
+    def test_map_exclude_wired_in_home_panel(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        assert "/map-exclude" in src
+        assert "data-pm-home-map-exclude" in src
+
+    def test_map_exclude_button_label_present_in_home_panel(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        assert "地図には反映しない" in src
+
+    def test_map_exclude_only_for_tension_and_question_in_node_row(self):
+        """対象は tension/question のみ。reconstruction ノードには出さない
+        （コースビュー personal-map.js の showPopup と同じ対象範囲）。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"\n  function nodeRowHtml\(.*?\n  \}\n", src, re.S)
+        assert match, "nodeRowHtml 関数が見つかりません"
+        body = match.group(0)
+        assert "data-pm-home-map-exclude" in body
+        assert 'node.node_kind === "tension" || node.node_kind === "question"' in body
+
+    def test_map_exclude_feedback_wording_matches_course_view(self):
+        """フィードバック文言はコースビュー（personal-map.js）と同一に揃える。"""
+        home_src = _read(PERSONAL_MAP_HOME_JS)
+        map_src = _read(PERSONAL_MAP_JS)
+        wording = "地図には反映しません（問いの軌跡には残ります）"
+        assert wording in home_src
+        assert wording in map_src
+
+    def test_map_exclude_refetches_and_rerenders(self):
+        """操作後はキャッシュ破棄 → 再取得 → 再描画（PN-2: 導出はサーバ状態が正）。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"\n  function requestMapExclude\(.*?\n  \}\n", src, re.S)
+        assert match, "requestMapExclude 関数が見つかりません"
+        body = match.group(0)
+        assert "state.cache = null" in body
+        assert "loadNetwork()" in body
+        assert "renderPanel()" in body
+
+    def test_map_exclude_fail_closed(self):
+        """失敗時は何も出さない（エラーバナー・alert を出さない fail-closed）。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"\n  function requestMapExclude\(.*?\n  \}\n", src, re.S)
+        assert match
+        body = match.group(0)
+        assert ".catch(() => {})" in body
+        assert "alert(" not in body
+
+    def test_no_delete_or_dismiss_calls_from_home_panel(self):
+        """訂正操作は map-exclude（表示除外）のみ。行削除・dismiss（候補の当落判定）を
+        最上位パネルから呼ばない（P4 / 提案書 §6 の独立性）。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        assert "/dismiss" not in src
+        assert 'method: "DELETE"' not in src

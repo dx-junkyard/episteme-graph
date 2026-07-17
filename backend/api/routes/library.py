@@ -29,10 +29,12 @@ import services
 from dependencies import _require_teacher
 
 from core.schema import AUDIT_ENTITY_LIBRARY_ENTRY
+from core.deliberation import identity_links as _identity_links
 from core.library import schema as library_schema
 from core.library import search as library_search
 from core.library import store as library_store
-from core.library.store import LibraryConflictError, LibraryNotFoundError
+from core.library.store import LibraryConflictError, LibraryNotFoundError, LibraryRetiredError
+from core.status import cross_layer_notify
 
 logger = logging.getLogger(__name__)
 
@@ -275,6 +277,9 @@ def update_entry(entry_id: str, payload: LibraryEntryUpdateRequest, current_user
         )
     except LibraryNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LibraryRetiredError as exc:
+        # N29: retired は読み取り専用（編集には restore が先）。事実文をそのまま返す。
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except LibraryConflictError as exc:
         raise HTTPException(
             status_code=409,
@@ -317,6 +322,9 @@ def freeze_entry(
         version = library_store.freeze_entry(entry_id, published_by=uid, note=payload.note)
     except LibraryNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LibraryRetiredError as exc:
+        # N29: retired は読み取り専用（凍結には restore が先）。事実文をそのまま返す。
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except IntegrityError as exc:
         # UNIQUE(entry_id, version_no) 競合 = 同時に別の凍結が同じ次版番号を確保した。
         # 素の 500 で漏らさず、draft 更新の楽観ロック衝突（409）と同じ流儀で返す。
@@ -340,6 +348,51 @@ def freeze_entry(
     }
 
 
+def _notify_citers_of_retirement(entry_id: str, domain_key: str, actor_id: str | None) -> None:
+    """引用者（＝当該エントリに confirmed の同一性リンクを張った instance document の
+    所有者たち）へ retire を通知する（横断インボックス fan-out, N14, best-effort）。
+
+    「引用者」の導出: W-β の `element_identity_links`（migration 048）で
+    `shared_part_id=entry_id` かつ `status='confirmed'` の行を集め、各行の
+    `instance_document_id`（インスタンス側 document）の所有者を宛先とする
+    （候補・却下は対象にしない — KN-3「未確定の同一視を事実として辿らせない」と同じ
+    fail-closed 原則）。retire を実行した教員本人は宛先から除外する。
+    """
+    try:
+        links = _identity_links.list_for_shared_part(entry_id)
+    except Exception:  # noqa: BLE001 — 宛先解決の失敗は retire を止めない
+        logger.debug("cross-layer notify (library retire): identity link lookup failed for %s", entry_id, exc_info=True)
+        return
+    doc_ids = {
+        str(link.get("instance_document_id") or "").strip()
+        for link in links
+        if link.get("status") == "confirmed" and link.get("instance_document_id")
+    }
+    if not doc_ids:
+        return
+    actor = str(actor_id or "")
+    recipients: set[str] = set()
+    for doc_id in doc_ids:
+        try:
+            doc = services._resolve_document(doc_id)
+        except Exception:  # noqa: BLE001
+            continue
+        owner_id = str(doc.get("uploaded_by") or "") if doc else ""
+        if owner_id and owner_id != actor:
+            recipients.add(owner_id)
+    for recipient_id in recipients:
+        try:
+            cross_layer_notify.notify_user(
+                recipient_id,
+                cross_layer_notify.NOTIF_LIBRARY_ENTRY_RETIRED,
+                "library_entry",
+                entry_id,
+                {"domain_key": domain_key},
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("cross-layer notify (library retire) skipped for %s -> %s", entry_id, recipient_id, exc_info=True)
+
+
 @router.post("/entries/{entry_id}/retire")
 def retire_entry(entry_id: str, current_user: dict = Depends(_require_teacher)):
     uid = _uid(current_user)
@@ -351,6 +404,8 @@ def retire_entry(entry_id: str, current_user: dict = Depends(_require_teacher)):
     # old_status はハードコードせず store が返す遷移前の実状態を使う（冪等呼び出し
     # — 既に retired だった場合 — でも監査が事実と食い違わない）。
     _audit(AUDIT_ENTITY_LIBRARY_ENTRY, entry_id, previous_status, library_schema.STATUS_RETIRED, uid, {"domain_key": entry["domain_key"]})
+    if previous_status != library_schema.STATUS_RETIRED:
+        _notify_citers_of_retirement(entry_id, entry["domain_key"], uid)
     return entry
 
 

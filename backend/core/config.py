@@ -276,6 +276,12 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("DELIBERATION_LLM_MODEL"),
     )
+    # 対話 grounding へ供給する同一性候補（同分野の凍結済み library_entries）の件数上限
+    # （N2: 供給は事実の一覧のみで LLM に同一視を促しすぎない・apparatus_retrieval_top_k と同型）
+    deliberation_identity_candidates_top_k: int = Field(
+        default=5,
+        validation_alias=AliasChoices("DELIBERATION_IDENTITY_CANDIDATES_TOP_K"),
+    )
 
     # --- 標準化判定 worker（Phase S, 知識ネットワークビジョン §6） — コスト制御（他機能とは独立） ---
     # 三角測量の証拠①（LLM 事前知識）の 1 日あたり LLM コール上限

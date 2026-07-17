@@ -266,3 +266,191 @@ class TestCheckAndCountLlmCall:
         assert dialogue.check_and_count_llm_call(f"s-{uuid.uuid4()}", user_id) is True
         # 別セッションなら1回目はまだ許可される（セッション単位カウンタ）。
         assert dialogue.check_and_count_llm_call(f"s-{uuid.uuid4()}", user_id) is True
+
+
+# ---------------------------------------------------------------------------
+# N2: 同一性候補の供給（collect_identity_candidates / build_grounding /
+# grounding_to_text の捏造ガード分岐）
+# ---------------------------------------------------------------------------
+
+
+def _figure_ref() -> ElementRef:
+    return ElementRef(scope=SCOPE_DOCUMENT, element_type="figure", element_id="f1", document_id="doc-1")
+
+
+class TestCollectIdentityCandidates:
+    def _patch_settings(self, monkeypatch, top_k: int = 5) -> None:
+        monkeypatch.setattr(
+            dialogue,
+            "get_settings",
+            lambda: SimpleNamespace(deliberation_identity_candidates_top_k=top_k),
+        )
+
+    def test_document_scoped_ref_collects_frozen_entries(self, monkeypatch):
+        self._patch_settings(monkeypatch)
+        monkeypatch.setattr(
+            dialogue, "get_latest_analysis_run",
+            lambda **k: {"cartridge_id": "particle_physics"},
+        )
+        captured: dict = {}
+
+        def fake_search(**kwargs):
+            captured.update(kwargs)
+            return [
+                {
+                    "entry_id": "e-1", "name": "PMT",
+                    "aliases": ["photomultiplier", ""], "summary": "s", "distance": 0.12,
+                },
+                {"entry_id": "", "name": "id なしはスキップ"},
+            ]
+
+        monkeypatch.setattr(dialogue, "search_frozen_entries", fake_search)
+
+        breakdown = {"label": "光電子増倍管", "fields": {"text": "PMT を使う"}}
+        out = dialogue.collect_identity_candidates(_sample_ref(), breakdown)
+
+        # 供給は実在エントリの事実（id・名称・aliases）のみ。distance 等の数値は載せない。
+        assert out == [{"shared_part_id": "e-1", "name": "PMT", "aliases": ["photomultiplier"]}]
+        assert captured["domain_key"] == "particle_physics"
+        assert captured["top_k"] == 5
+        # クエリは内訳（label + 既知テキストフィールド）から決定論的に組み立てる。
+        assert "光電子増倍管" in captured["query_text"]
+        assert "PMT を使う" in captured["query_text"]
+        # theory_claim → theory_component エントリに絞り込む。
+        assert captured["entry_type"] == "theory_component"
+
+    def test_figure_element_filters_apparatus_entries(self, monkeypatch):
+        self._patch_settings(monkeypatch)
+        monkeypatch.setattr(
+            dialogue, "get_latest_analysis_run", lambda **k: {"cartridge_id": "pp"}
+        )
+        captured: dict = {}
+
+        def fake_search(**kwargs):
+            captured.update(kwargs)
+            return []
+
+        monkeypatch.setattr(dialogue, "search_frozen_entries", fake_search)
+        dialogue.collect_identity_candidates(
+            _figure_ref(), {"label": "fig", "fields": {"caption_text": "装置図"}}
+        )
+        assert captured["entry_type"] == "apparatus"
+
+    def test_domain_scoped_ref_returns_empty_without_search(self, monkeypatch):
+        called = {"search": False}
+        monkeypatch.setattr(
+            dialogue, "search_frozen_entries",
+            lambda **k: called.__setitem__("search", True) or [],
+        )
+        out = dialogue.collect_identity_candidates(
+            _sample_ref(SCOPE_DOMAIN), {"label": "x", "fields": {}}
+        )
+        assert out == []
+        assert called["search"] is False
+
+    def test_unresolved_domain_key_returns_empty_without_search(self, monkeypatch):
+        self._patch_settings(monkeypatch)
+        monkeypatch.setattr(dialogue, "get_latest_analysis_run", lambda **k: None)
+        called = {"search": False}
+        monkeypatch.setattr(
+            dialogue, "search_frozen_entries",
+            lambda **k: called.__setitem__("search", True) or [],
+        )
+        out = dialogue.collect_identity_candidates(
+            _sample_ref(), {"label": "x", "fields": {}}
+        )
+        assert out == []
+        assert called["search"] is False
+
+    def test_zero_top_k_skips_search(self, monkeypatch):
+        self._patch_settings(monkeypatch, top_k=0)
+        monkeypatch.setattr(
+            dialogue, "get_latest_analysis_run", lambda **k: {"cartridge_id": "pp"}
+        )
+        called = {"search": False}
+        monkeypatch.setattr(
+            dialogue, "search_frozen_entries",
+            lambda **k: called.__setitem__("search", True) or [],
+        )
+        assert dialogue.collect_identity_candidates(_sample_ref(), {"label": "x", "fields": {}}) == []
+        assert called["search"] is False
+
+    def test_search_failure_degrades_to_empty(self, monkeypatch):
+        self._patch_settings(monkeypatch)
+        monkeypatch.setattr(
+            dialogue, "get_latest_analysis_run", lambda **k: {"cartridge_id": "pp"}
+        )
+
+        def boom(**kwargs):
+            raise RuntimeError("search down")
+
+        monkeypatch.setattr(dialogue, "search_frozen_entries", boom)
+        assert dialogue.collect_identity_candidates(_sample_ref(), {"label": "x", "fields": {}}) == []
+
+
+class TestBuildGroundingIdentitySupply:
+    def test_grounding_includes_identity_candidates(self, monkeypatch):
+        monkeypatch.setattr(
+            dialogue.decomposition, "build",
+            lambda ref: {"element_type": "theory_claim", "label": "L", "fields": {"text": "T"}, "notes": []},
+        )
+        monkeypatch.setattr(dialogue.positioning, "build", lambda ref: {})
+        monkeypatch.setattr(
+            dialogue, "get_latest_analysis_run", lambda **k: {"cartridge_id": "pp"}
+        )
+        monkeypatch.setattr(
+            dialogue, "search_frozen_entries",
+            lambda **k: [{"entry_id": "e-1", "name": "N", "aliases": []}],
+        )
+        monkeypatch.setattr(
+            dialogue, "get_settings",
+            lambda: SimpleNamespace(deliberation_identity_candidates_top_k=5),
+        )
+        grounding = dialogue.build_grounding(_sample_ref())
+        assert grounding["identity_candidates"] == [
+            {"shared_part_id": "e-1", "name": "N", "aliases": []}
+        ]
+
+    def test_domain_scoped_ref_gets_empty_candidates(self, monkeypatch):
+        monkeypatch.setattr(
+            dialogue.decomposition, "build",
+            lambda ref: {"element_type": "shared_part", "label": "L", "fields": {}, "notes": []},
+        )
+        monkeypatch.setattr(dialogue.positioning, "build", lambda ref: {})
+        grounding = dialogue.build_grounding(_sample_ref(SCOPE_DOMAIN))
+        assert grounding["identity_candidates"] == []
+
+
+class TestGroundingToTextIdentityGuard:
+    def _base_grounding(self) -> dict:
+        return {
+            "breakdown": {"element_type": "theory_claim", "label": "c", "fields": {}, "notes": []},
+            "positioning": {"available": False},
+        }
+
+    def test_candidates_render_fact_list_and_conditional_instruction(self):
+        grounding = self._base_grounding()
+        grounding["identity_candidates"] = [
+            {"shared_part_id": "e-1", "name": "PMT", "aliases": ["photomultiplier"]},
+            {"shared_part_id": "e-2", "name": "TPC", "aliases": []},
+        ]
+        text = dialogue.grounding_to_text(grounding)
+        assert "[同分野の既存の共通部品（凍結済みライブラリ）]" in text
+        assert "- id=e-1: PMT（別名: photomultiplier）" in text
+        assert "- id=e-2: TPC" in text
+        # 「該当がある場合のみ」+ 一覧内の実在 id 限定（§6-1 の推奨案）。
+        assert "一覧に無い id を作らないこと" in text
+        assert "該当が無ければ identity の注釈は追加しないでください" in text
+        # 供給あり時に 0 件ガードは出ない。
+        assert "供給されていないため" not in text
+
+    def test_zero_candidates_emit_fabrication_guard(self):
+        text = dialogue.grounding_to_text(self._base_grounding())
+        assert "kind='identity' の注釈は追加しないでください" in text
+        assert "[同分野の既存の共通部品" not in text
+
+    def test_header_only_conditionally_allows_identity(self):
+        # 指示ヘッダは identity を無条件に促さない（一覧が示されている場合に限定）。
+        header = dialogue._INSTRUCTION_HEADER
+        assert "一覧が無いときは identity を使わないでください" in header
+        assert "同一性の気づき" not in header

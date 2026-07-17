@@ -59,6 +59,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from dependencies import _require_teacher
+from core.config import get_settings
 from core.deliberation import (
     annotations as delib_annotations,
     decomposition,
@@ -69,6 +70,7 @@ from core.deliberation import (
     refs,
     store as delib_store,
 )
+from core.library import search as library_search
 from core.deliberation.standardization import worker as standardization_worker
 from core.deliberation.schema import (
     ELEMENT_FIGURE,
@@ -417,6 +419,89 @@ def list_identity_links_for_element(
         "ref": ref.to_dict(),
         "identity_links": [_identity_link_response(link) for link in links],
     }
+
+
+@router.get("/elements/{element_type}/{element_id}/shared-part-candidates")
+def list_shared_part_candidates_for_element(
+    element_type: str,
+    element_id: str,
+    document_id: str | None = Query(
+        default=None,
+        description="equation 要素で必須。他型では無視される。",
+    ),
+    q: str = Query(
+        default="",
+        description="検索テキスト。空なら対象要素の内訳（label・text 等）から自動で組み立てる。",
+    ),
+    current_user: dict = Depends(_require_teacher),
+) -> dict[str, Any]:
+    """手動の同一性リンク作成用: 同分野の類似 library_entries 候補を返す（N2）。
+
+    - 非LLM・DB 非変更（読み取りのみ）。検索は L層の既存 ``find_similar_entries``
+      （embedding + ILIKE マージ。draft のみの active エントリも ILIKE 側で拾える —
+      同一性リンクは ``library_entries.id`` を参照するため凍結の有無を問わない）の再利用。
+    - ``domain_key`` は対象要素の document → 最新解析 run の cartridge_id からサーバ側で
+      決定論的に解決する（``dialogue.document_domain_key``。フロントに domain 知識を
+      持たせない）。解決できない場合は 0 件 + 事実文 note で縮退する（fail-soft）。
+    - 対象は document-scoped インスタンスのみ（identity link の source 制約と同じ）。
+      閲覧ゲートは ``_ensure_document_viewable``（検索は読み取り・作成時は
+      ``POST /identity-links`` 側の ``_ensure_document_editable`` が別途ゲートする）。
+    - 数値（distance 等）は返さない（W8）。
+    """
+    try:
+        ref = refs.resolve(element_type, element_id, document_id=document_id)
+    except ElementResolutionError as exc:
+        raise _http_from_resolution_error(exc) from exc
+    if ref.scope != SCOPE_DOCUMENT:
+        raise HTTPException(
+            status_code=422,
+            detail="identity link source must be a document-scoped instance element",
+        )
+    _ensure_document_viewable(ref.document_id or "", current_user)
+
+    domain_key = dialogue.document_domain_key(ref.document_id or "")
+    if not domain_key:
+        return {
+            "domain_key": "",
+            "entries": [],
+            "note": "この教材の分野（カートリッジ）が特定できないため、共通部品を検索できません。",
+        }
+
+    query_text = (q or "").strip()
+    if not query_text:
+        try:
+            query_text = dialogue.identity_query_text(decomposition.build(ref))
+        except ElementResolutionError as exc:
+            raise _http_from_resolution_error(exc) from exc
+    if not query_text:
+        return {
+            "domain_key": domain_key,
+            "entries": [],
+            "note": "検索テキストを入力してください。",
+        }
+
+    settings = get_settings()
+    top_k = int(getattr(settings, "deliberation_identity_candidates_top_k", 5))
+    hits = library_search.find_similar_entries(
+        domain_key=domain_key,
+        text=query_text,
+        entry_type=dialogue.identity_entry_type_for_element(ref.element_type),
+        top_k=top_k,
+    )
+    entries = [
+        {
+            "shared_part_id": str(hit.get("entry_id") or ""),
+            "name": str(hit.get("name") or ""),
+            "aliases": [str(a) for a in (hit.get("aliases") or []) if str(a or "").strip()],
+            "summary": str(hit.get("summary") or ""),
+        }
+        for hit in hits
+        if hit.get("entry_id")
+    ]
+    response: dict[str, Any] = {"domain_key": domain_key, "entries": entries}
+    if not entries:
+        response["note"] = "同分野の共通部品が見つかりません。"
+    return response
 
 
 @router.get("/shared-parts/{shared_part_id}/identity-links")

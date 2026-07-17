@@ -3,29 +3,17 @@
 数式埋め込みは evidence_links の `latex`（描画用 TeX）を最優先で使い、
 `summary`（意味要約・散文）を LaTeX として埋め込まないこと。
 
-`routes/lecture.py` は fastapi 経由の重い依存チェーンを持つため、
-既存の `test_lecture_audio_availability.py` と同様に、対象の純関数
-`_resolve_equation_embeds` をソースから直接 exec して単体テストする。
+N18（2026-07）: `_resolve_equation_embeds` の正本は routes/lecture.py から
+core/lecture.py へ移設された（`build_topic_slides` と一体で、状態投影と分割・述語の
+正本を共有するため）。core.lecture から直接 import して単体テストする。
 """
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[2]
-LECTURE_PY = ROOT / "backend" / "api" / "routes" / "lecture.py"
-
 
 def _load_resolve_equation_embeds():
-    """依存モジュール（fastapi 等）を経由せず、対象関数だけをソースから抽出して実行する。"""
-    source = LECTURE_PY.read_text(encoding="utf-8")
-    start = source.index("def _resolve_equation_embeds")
-    end = source.index("\ndef ", start + 10)
-    func_src = source[start:end]
-    ns: dict = {"_re": re}
-    exec(func_src, ns)  # noqa: S102 - テスト専用の純関数抽出
-    return ns["_resolve_equation_embeds"]
+    from core.lecture import _resolve_equation_embeds
+    return _resolve_equation_embeds
 
 
 def _links():

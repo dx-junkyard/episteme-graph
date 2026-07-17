@@ -103,7 +103,8 @@ PDF アップロード
 - [アーキテクチャ概要](architecture/overview.md) — システム全体構成、ディレクトリ構成、データストア役割分担
 - [デプロイ構成](architecture/deployment.md) — Docker Compose 構成、環境変数、ネットワーク設計
 - [データモデル](architecture/data-model.md) — PostgreSQL テーブル設計、マイグレーション一覧（init → 053）
-- [レイヤー索引表](architecture/layer_registry.md) — A〜V層・横断ユーティリティ層・状態通知基盤の正本設計書/実装場所/migration対応一覧
+- [レイヤー索引表](architecture/layer_registry.md) — A〜W層・横断ユーティリティ層・状態通知基盤の正本設計書/実装場所/migration対応一覧（migration 帰属一覧 init〜053 付き）
+- [新機能 PR チェックリスト](development_checklist.md) — Copilot capability/KB/G層ルールの追随、docs 3点セット更新、2機能境界の回帰テスト、アンカー整合
 
 ### バックエンド
 - [API とルーティング](backend/api.md) — エンドポイント一覧、認証・RBAC・開示範囲

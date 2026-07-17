@@ -157,6 +157,163 @@ class TestDeletionScheduling:
         assert r.status_code == 404
 
 
+class TestVersionStatePermissionFlags:
+    """N10残: version-state に is_owner/can_publish/can_schedule_deletion/can_edit/role を
+    追加し、コース版管理を非所有者にも読み取り専用で開放できるようにする下地。
+    「見せて、できない操作は理由付きで無効化」に対応するため、閲覧権があれば
+    version-state 自体は 200 を返し、権限フラグだけで発行・削除予約セクションの
+    活性化をフロントに判定させる契約。
+    """
+
+    def test_course_owner_gets_full_flags(self, client_and_tokens, monkeypatch):
+        client, _s, teacher = client_and_tokens
+        monkeypatch.setattr("services.user_can_view_course", lambda uid, cid: True)
+        monkeypatch.setattr("services.user_owns_course", lambda uid, cid: True)
+        monkeypatch.setattr("services.user_can_edit_course", lambda uid, cid: True)
+        monkeypatch.setattr(
+            "core.versioning.resolver.view_badges",
+            lambda ot, oid, uid: {"has_versioning": True, "lifecycle": "active"},
+        )
+        r = client.get("/api/admin/shared/course/c1/version-state", headers=_auth(teacher))
+        assert r.status_code == 200
+        body = r.json()
+        assert body["is_owner"] is True
+        assert body["can_publish"] is True
+        assert body["can_schedule_deletion"] is True
+        assert body["can_edit"] is True
+        assert body["role"] == "owner"
+        # 既存のバッジフィールドは維持される
+        assert body["has_versioning"] is True
+
+    def test_course_group_editor_can_edit_but_not_publish(self, client_and_tokens, monkeypatch):
+        client, _s, teacher = client_and_tokens
+        monkeypatch.setattr("services.user_can_view_course", lambda uid, cid: True)
+        monkeypatch.setattr("services.user_owns_course", lambda uid, cid: False)
+        monkeypatch.setattr("services.user_can_edit_course", lambda uid, cid: True)
+        monkeypatch.setattr(
+            "core.versioning.resolver.view_badges",
+            lambda ot, oid, uid: {"has_versioning": True},
+        )
+        r = client.get("/api/admin/shared/course/c1/version-state", headers=_auth(teacher))
+        assert r.status_code == 200
+        body = r.json()
+        assert body["is_owner"] is False
+        assert body["can_publish"] is False
+        assert body["can_schedule_deletion"] is False
+        assert body["can_edit"] is True
+        assert body["role"] == "editor"
+
+    def test_course_group_viewer_is_read_only(self, client_and_tokens, monkeypatch):
+        client, _s, teacher = client_and_tokens
+        monkeypatch.setattr("services.user_can_view_course", lambda uid, cid: True)
+        monkeypatch.setattr("services.user_owns_course", lambda uid, cid: False)
+        monkeypatch.setattr("services.user_can_edit_course", lambda uid, cid: False)
+        monkeypatch.setattr(
+            "core.versioning.resolver.view_badges",
+            lambda ot, oid, uid: {"has_versioning": True},
+        )
+        r = client.get("/api/admin/shared/course/c1/version-state", headers=_auth(teacher))
+        assert r.status_code == 200
+        body = r.json()
+        assert body["is_owner"] is False
+        assert body["can_publish"] is False
+        assert body["can_edit"] is False
+        assert body["role"] == "viewer"
+
+    def test_course_non_viewer_gets_404(self, client_and_tokens, monkeypatch):
+        client, _s, teacher = client_and_tokens
+        monkeypatch.setattr("services.user_can_view_course", lambda uid, cid: False)
+        r = client.get("/api/admin/shared/course/c1/version-state", headers=_auth(teacher))
+        assert r.status_code == 404
+
+    def test_document_owner_gets_full_flags(self, client_and_tokens, monkeypatch):
+        client, _s, teacher = client_and_tokens
+        from services import DocumentAccess
+
+        monkeypatch.setattr(
+            "services.resolve_document_access",
+            lambda uid, ref: DocumentAccess(
+                document_id="doc-1", is_owner=True, can_view=True, can_edit=True,
+            ),
+        )
+        monkeypatch.setattr(
+            "core.versioning.resolver.view_badges",
+            lambda ot, oid, uid: {"has_versioning": True},
+        )
+        r = client.get("/api/admin/shared/document/doc-1/version-state", headers=_auth(teacher))
+        assert r.status_code == 200
+        body = r.json()
+        assert body["is_owner"] is True
+        assert body["can_publish"] is True
+        assert body["role"] == "owner"
+
+    def test_document_group_editor_not_owner(self, client_and_tokens, monkeypatch):
+        client, _s, teacher = client_and_tokens
+        from services import DocumentAccess
+
+        monkeypatch.setattr(
+            "services.resolve_document_access",
+            lambda uid, ref: DocumentAccess(
+                document_id="doc-1", is_owner=False, can_view=True, can_edit=True,
+            ),
+        )
+        monkeypatch.setattr(
+            "core.versioning.resolver.view_badges",
+            lambda ot, oid, uid: {"has_versioning": True},
+        )
+        r = client.get("/api/admin/shared/document/doc-1/version-state", headers=_auth(teacher))
+        assert r.status_code == 200
+        body = r.json()
+        assert body["is_owner"] is False
+        assert body["can_edit"] is True
+        assert body["role"] == "editor"
+
+    def test_document_group_viewer_read_only(self, client_and_tokens, monkeypatch):
+        client, _s, teacher = client_and_tokens
+        from services import DocumentAccess
+
+        monkeypatch.setattr(
+            "services.resolve_document_access",
+            lambda uid, ref: DocumentAccess(
+                document_id="doc-1", is_owner=False, can_view=True, can_edit=False,
+            ),
+        )
+        monkeypatch.setattr(
+            "core.versioning.resolver.view_badges",
+            lambda ot, oid, uid: {"has_versioning": True},
+        )
+        r = client.get("/api/admin/shared/document/doc-1/version-state", headers=_auth(teacher))
+        assert r.status_code == 200
+        body = r.json()
+        assert body["is_owner"] is False
+        assert body["can_publish"] is False
+        assert body["can_edit"] is False
+        assert body["role"] == "viewer"
+
+    def test_permission_flags_fail_closed_on_error(self, client_and_tokens, monkeypatch):
+        """権限判定が例外を投げても version-state 全体を落とさず、フラグは最も制限的な
+        側（is_owner=False 等）に fail-closed する（figure_presentation の
+        viewer_is_owner と同型の防御）。"""
+        client, _s, teacher = client_and_tokens
+        monkeypatch.setattr("services.user_can_view_course", lambda uid, cid: True)
+
+        def _boom(uid, cid):
+            raise RuntimeError("db down")
+        monkeypatch.setattr("services.user_owns_course", _boom)
+        monkeypatch.setattr("services.user_can_edit_course", _boom)
+        monkeypatch.setattr(
+            "core.versioning.resolver.view_badges",
+            lambda ot, oid, uid: {"has_versioning": True},
+        )
+        r = client.get("/api/admin/shared/course/c1/version-state", headers=_auth(teacher))
+        assert r.status_code == 200
+        body = r.json()
+        assert body["is_owner"] is False
+        assert body["can_publish"] is False
+        assert body["can_edit"] is False
+        assert body["role"] == "viewer"
+
+
 class TestNotificationsInbox:
     def test_inbox_requires_auth(self, client_and_tokens):
         client, _s, _t = client_and_tokens

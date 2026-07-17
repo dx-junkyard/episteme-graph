@@ -330,3 +330,102 @@ class TestPersonScopeDeriveFunctionsExist:
     def test_route_uses_person_scope_entrypoints(self):
         assert "derive_person_network" in _ROUTE_SRC
         assert "group_nodes_by_anchor" in _ROUTE_SRC
+
+
+class TestConnectTensionValidatesEdgeViewability:
+    """N38（2026-07-17・予防的）: connect の ``edge_id`` にも component と同型の
+    閲覧可否検証を追加。graph edge は独立テーブルを持たず
+    ``theory_component_graphs.graph_json`` の edges[] 内にのみ存在するため、
+    route 側（``routes/learning.py``）が JSONB containment で所属 document を解決し
+    ``resolve_document_access`` で判定する。fail-closed（edge 不明・document 不明・
+    閲覧不可はすべて拒否）だが、既存の connected 行には触らない。
+    """
+
+    def _learning_src(self) -> str:
+        return (BACKEND / "api" / "routes" / "learning.py").read_text(encoding="utf-8")
+
+    def test_connect_route_checks_edge_viewability(self):
+        src = self._learning_src()
+        body = src.split("def connect_tension_route")[1].split("\ndef ")[0]
+        assert "_tension_connect_edge_viewable" in body
+
+    def test_edge_viewability_helper_uses_resolve_document_access(self):
+        src = self._learning_src()
+        body = src.split("def _tension_connect_edge_viewable")[1].split("\ndef ")[0]
+        assert "resolve_document_access" in body
+        assert "theory_component_graphs" in body
+
+    def test_edge_viewability_helper_is_fail_closed(self):
+        """document を1件も解決できなければ False（安全側）に倒す。"""
+        src = self._learning_src()
+        body = src.split("def _tension_connect_edge_viewable")[1].split("\ndef ")[0]
+        assert "if not document_ids:" in body
+        assert "return False" in body
+
+
+class TestConnectTensionEdgeViewabilityBehavior:
+    """N38 の挙動レベル検証（DB 非接続・monkeypatch）。"""
+
+    def _import_learning(self):
+        import routes.learning as learning_mod
+        return learning_mod
+
+    class _FakeSession:
+        def __init__(self, rows=None, raise_on_execute=False):
+            self._rows = rows or []
+            self._raise = raise_on_execute
+            self.closed = False
+
+        def execute(self, *a, **kw):
+            if self._raise:
+                raise RuntimeError("bad edge id")
+            rows = self._rows
+
+            class _Result:
+                def fetchall(self_inner):
+                    return rows
+
+            return _Result()
+
+        def close(self):
+            self.closed = True
+
+    def test_no_matching_graph_returns_false(self, monkeypatch):
+        learning_mod = self._import_learning()
+        fake = self._FakeSession(rows=[])
+        monkeypatch.setattr(learning_mod, "_pg_session", lambda: fake)
+        assert learning_mod._tension_connect_edge_viewable("user1", "edge-x") is False
+        assert fake.closed  # try/finally で必ず close（開発ルール4）
+
+    def test_sql_error_returns_false(self, monkeypatch):
+        learning_mod = self._import_learning()
+        fake = self._FakeSession(raise_on_execute=True)
+        monkeypatch.setattr(learning_mod, "_pg_session", lambda: fake)
+        assert learning_mod._tension_connect_edge_viewable("user1", "edge-x") is False
+        assert fake.closed
+
+    def test_viewable_document_returns_true(self, monkeypatch):
+        learning_mod = self._import_learning()
+        import services as services_mod
+
+        fake = self._FakeSession(rows=[("doc-1",)])
+        monkeypatch.setattr(learning_mod, "_pg_session", lambda: fake)
+
+        class _Access:
+            can_view = True
+
+        monkeypatch.setattr(services_mod, "resolve_document_access", lambda uid, did: _Access())
+        assert learning_mod._tension_connect_edge_viewable("user1", "edge-x") is True
+
+    def test_unviewable_document_returns_false(self, monkeypatch):
+        learning_mod = self._import_learning()
+        import services as services_mod
+
+        fake = self._FakeSession(rows=[("doc-1",)])
+        monkeypatch.setattr(learning_mod, "_pg_session", lambda: fake)
+
+        class _Access:
+            can_view = False
+
+        monkeypatch.setattr(services_mod, "resolve_document_access", lambda uid, did: _Access())
+        assert learning_mod._tension_connect_edge_viewable("user1", "edge-x") is False

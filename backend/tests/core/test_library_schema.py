@@ -25,6 +25,15 @@ class TestEntryTypeAndStatusVocabulary:
         assert lib_schema.is_valid_status("retired")
         assert not lib_schema.is_valid_status("deleted")
 
+    def test_apparatus_body_keys_include_connections(self):
+        """N28: 装置候補の connections の受け皿キー。昇格モーダルが候補から転記する
+        （キーが無いと接続情報が昇格で構造的に落ちる = P4 違反）。"""
+        assert lib_schema.APPARATUS_BODY_KEY_CONNECTIONS == "connections"
+        assert "connections" in lib_schema.APPARATUS_BODY_KEYS
+        # 既存キーの互換（並びの先頭4つは従来どおり）。
+        for key in ("typical_parts", "visual_cues", "typical_configurations", "measurement_targets"):
+            assert key in lib_schema.APPARATUS_BODY_KEYS
+
 
 class TestLibraryEntryToDictRoundTrip:
     def test_to_dict_contains_all_expected_keys(self):

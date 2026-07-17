@@ -4901,7 +4901,20 @@
       ".ls-exp-controls input,.ls-exp-controls select{font-size:12px;padding:3px 6px;}" +
       ".ls-endorse-form{border-top:1px solid #eee;margin-top:12px;padding-top:12px;}" +
       ".ls-endorse-form textarea,.ls-endorse-form input{width:100%;margin:3px 0;font-size:13px;padding:4px;box-sizing:border-box;}" +
-      ".ls-endorse-status{font-size:12px;margin:6px 0;min-height:16px;}";
+      ".ls-endorse-status{font-size:12px;margin:6px 0;min-height:16px;}" +
+      ".ls-exp-backing{margin-top:6px;font-size:12px;}" +
+      ".ls-exp-claim-row{display:flex;align-items:center;gap:6px;margin:3px 0;flex-wrap:wrap;}" +
+      ".ls-exp-claim-row .admin-action-btn{font-size:11px;padding:2px 8px;}" +
+      ".ls-exp-claim-state{font-size:11px;color:#666;}" +
+      ".ls-exp-claim-confirmed .ls-exp-claim-state{color:#0a7;}" +
+      ".ls-exp-claim-rejected{opacity:.7;}" +
+      ".ls-exp-endorsers{margin-top:6px;font-size:12px;}" +
+      ".ls-exp-endorsers summary{cursor:pointer;color:#555;}" +
+      ".ls-exp-endorser-row{margin:2px 0 2px 12px;}" +
+      // ls-settings-modal と同じ罠 (Issue #491): display:flex が [hidden] を上書きするため
+      // [hidden] 時の display:none を明示する。
+      ".ls-exp-cite-area{margin-top:6px;font-size:12px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;}" +
+      ".ls-exp-cite-area[hidden]{display:none;}";
     document.head.appendChild(style);
   }
 
@@ -4925,16 +4938,64 @@
       '</select>';
   }
 
+  // 直近に読み込んだ説明バージョンのキャッシュ（claim 紐づけ更新時に
+  // 現在の backing_claims 配列を組み立て直すために使う）。
+  var lsExplanationCache = {};
+
+  // backing_claims の各要素は dict（claim_id/reason/confidence/confirmed[/status]）
+  // または素の claim_id 文字列（後方互換）。dict に正規化する。
+  function lsBackingClaimEntry(b) {
+    if (typeof b === "string") return { claim_id: b };
+    return b || {};
+  }
+
+  // claim 紐づけの3状態: confirmed（教員が確定）/ rejected（教員が却下・記録は保持, P4）/
+  // candidate（AI候補のまま）。
+  function lsBackingClaimState(b) {
+    var entry = lsBackingClaimEntry(b);
+    if (entry.confirmed) return "confirmed";
+    if (entry.status === "rejected") return "rejected";
+    return "candidate";
+  }
+
+  // N3: claim 紐づけの確定/却下ボタン付き表示。
+  // 「claim 紐づけの最終確定は必ず教員」(C層設計原則2) の確定操作を担う。
+  function lsRenderBackingClaims(exp) {
+    var items = exp.backing_claims || [];
+    if (!items.length) return "";
+    var rows = items.map(function (b) {
+      var entry = lsBackingClaimEntry(b);
+      var cid = String(entry.claim_id || "");
+      if (!cid) return "";
+      var st = lsBackingClaimState(entry);
+      var stateLabel = st === "confirmed" ? "✓ 確定" : st === "rejected" ? "却下" : "候補";
+      var buttons;
+      if (st === "candidate") {
+        buttons =
+          '<button class="admin-action-btn" data-claim-action="confirm" data-claim-id="' + escHtml(cid) + '">確定</button>' +
+          '<button class="admin-action-btn" data-claim-action="reject" data-claim-id="' + escHtml(cid) + '">却下</button>';
+      } else {
+        // 確定・却下とも可逆（記録は保持したまま候補状態に戻せる）。
+        buttons = '<button class="admin-action-btn" data-claim-action="reset" data-claim-id="' + escHtml(cid) + '">候補に戻す</button>';
+      }
+      var reasonAttr = entry.reason ? ' title="' + escHtml(String(entry.reason)) + '"' : "";
+      return '<div class="ls-exp-claim-row ls-exp-claim-' + st + '">' +
+        '<span class="ls-theory-ref"' + reasonAttr + '>' + escHtml(cid) + '</span>' +
+        '<span class="ls-exp-claim-state">[' + stateLabel + ']</span>' +
+        buttons +
+        '</div>';
+    }).join("");
+    return '<div class="ls-exp-backing">' +
+      '<div class="ls-theory-muted">根拠claim（AI候補。確定・却下は教員のみ。却下しても記録は保持されます）:</div>' +
+      rows +
+      '</div>';
+  }
+
   function lsRenderExplanationCard(exp) {
     var kindLabel = exp.kind === "standard" ? "標準の説明" : ("教員: " + (exp.author_name || "不明"));
     var reviewLabel = exp.review_status === "teacher_approved" ? "承認済み" :
       exp.review_status === "rejected" ? "却下" :
       exp.review_status === "needs_revision" ? "要修正" : "査読待ち";
-    var backing = (exp.backing_claims || []).map(function (b) {
-      var cid = b.claim_id || b;
-      var confirmed = (b && b.confirmed) ? "✓" : "候補";
-      return '<span class="ls-theory-ref">' + escHtml(String(cid)) + " [" + confirmed + "]</span>";
-    }).join(" ");
     return '<div class="ls-exp-card kind-' + escHtml(exp.kind) + '" data-exp-id="' + escHtml(exp.id) + '">' +
       '<div class="ls-exp-head">' +
         '<div><span class="ls-exp-badge">' + escHtml(kindLabel) + '</span> <strong>' + escHtml(exp.title || "(無題)") + '</strong></div>' +
@@ -4942,7 +5003,13 @@
       '</div>' +
       '<div class="ls-exp-body">' + escHtml(exp.body || "") + '</div>' +
       '<div class="ls-theory-muted">状態: ' + escHtml(reviewLabel) + ' / 共有: ' + (exp.shared ? "ON" : "OFF") +
-        ' / 引用: ' + escHtml(String(exp.citation_count || 0)) + (backing ? (' / 根拠: ' + backing) : "") + '</div>' +
+        ' / 引用: ' + escHtml(String(exp.citation_count || 0)) + '</div>' +
+      lsRenderBackingClaims(exp) +
+      // N30: 承認者個別一覧（名前+専門タグ+段階ラベルのみ。数値スコアは出さない）。
+      '<details class="ls-exp-endorsers" data-exp-endorsers="' + escHtml(exp.id) + '">' +
+        '<summary>承認者一覧</summary>' +
+        '<div class="ls-exp-endorsers-body ls-theory-muted">開くと読み込みます...</div>' +
+      '</details>' +
       '<div class="ls-exp-controls">' +
         lsExpLevelSelect(exp.id) +
         '<input type="text" data-exp-tag="' + escHtml(exp.id) + '" placeholder="専門タグ (例: 統計物理)" />' +
@@ -4952,6 +5019,8 @@
         '<button class="admin-action-btn" data-exp-action="share">' + (exp.shared ? "共有OFF" : "共有ON") + '</button>' +
         '<button class="admin-action-btn" data-exp-action="cite">別コースで引用</button>' +
       '</div>' +
+      // N35: 引用先コースのインライン選択エリア（window.prompt の置換）。
+      '<div class="ls-exp-cite-area" data-cite-area="' + escHtml(exp.id) + '" hidden></div>' +
       '</div>';
   }
 
@@ -4975,11 +5044,143 @@
           var turnOn = this.textContent.indexOf("ON") >= 0;
           lsCallExplanation(component, "/admin/explanations/" + expId, "PATCH", { shared: turnOn }, "共有設定を更新しました");
         } else if (action === "cite") {
-          var target = window.prompt("引用先のコースID を入力してください");
-          if (target) lsCallExplanation(component, "/admin/explanations/" + expId + "/cite", "POST", { citing_course_id: target }, "引用しました");
+          // N35: コースIDの手入力(window.prompt)ではなく、管理コース一覧からの選択。
+          lsOpenCiteSelector(component, expId, card);
         }
       });
     });
+    // N3: claim 紐づけの確定/却下/候補に戻す。
+    list.querySelectorAll("[data-claim-action]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var card = this.closest(".ls-exp-card");
+        var expId = card.getAttribute("data-exp-id");
+        lsSetBackingClaimState(component, expId, this.getAttribute("data-claim-id"), this.getAttribute("data-claim-action"));
+      });
+    });
+    // N30: 承認者一覧は開いたときに一度だけ読み込む。
+    list.querySelectorAll("[data-exp-endorsers]").forEach(function (det) {
+      det.addEventListener("toggle", function () {
+        if (this.open && !this.getAttribute("data-endorsers-loaded")) {
+          lsLoadEndorsers(this.getAttribute("data-exp-endorsers"), this);
+        }
+      });
+    });
+  }
+
+  // N3: backing_claims 内の1件の状態を更新して PATCH /admin/explanations/{id} を呼ぶ。
+  // 却下は行削除ではなく status='rejected' で保持する（P4: 情報を落とさない）。
+  function lsSetBackingClaimState(component, expId, claimId, action) {
+    var exp = lsExplanationCache[expId];
+    if (!exp) {
+      lsSetEndorseStatus("説明データが読み込まれていません。再読み込みしてください", "error");
+      return;
+    }
+    var changed = false;
+    var updated = (exp.backing_claims || []).map(function (b) {
+      var entry = Object.assign({}, lsBackingClaimEntry(b));
+      if (String(entry.claim_id || "") !== String(claimId)) return entry;
+      changed = true;
+      if (action === "confirm") {
+        entry.confirmed = true;
+        entry.status = "confirmed";
+      } else if (action === "reject") {
+        entry.confirmed = false;
+        entry.status = "rejected";
+      } else {
+        entry.confirmed = false;
+        entry.status = "candidate";
+      }
+      return entry;
+    });
+    if (!changed) {
+      lsSetEndorseStatus("対象のclaim紐づけが見つかりませんでした", "error");
+      return;
+    }
+    var okMsg = action === "confirm" ? "claim紐づけを確定しました" :
+      action === "reject" ? "claim紐づけを却下しました(記録は保持されます)" :
+      "claim紐づけを候補に戻しました";
+    lsCallExplanation(component, "/admin/explanations/" + expId, "PATCH", { backing_claims: updated }, okMsg);
+  }
+
+  function lsEndorseLevelLabel(level) {
+    return level === "strong" ? "強い承認" : level === "provisional" ? "暫定" : "承認";
+  }
+
+  // N30: 個別承認者リスト（名前 + 専門タグ + 段階ラベル）。数値スコアは表示しない。
+  function lsLoadEndorsers(expId, detailsEl) {
+    var body = detailsEl.querySelector(".ls-exp-endorsers-body");
+    if (!body) return;
+    body.textContent = "読み込み中...";
+    apiFetch("/admin/explanations/" + expId + "/endorsements")
+      .then(function (res) {
+        if (!res.ok) throw new Error("承認者一覧の取得に失敗しました");
+        return res.json();
+      })
+      .then(function (data) {
+        detailsEl.setAttribute("data-endorsers-loaded", "1");
+        var items = (data && data.endorsements) || [];
+        if (!items.length) {
+          body.innerHTML = '<div class="ls-theory-muted">承認者はまだいません。</div>';
+          return;
+        }
+        body.innerHTML = items.map(function (en) {
+          var name = en.endorser_name || "不明";
+          var tag = en.expertise_tag ? "（専門: " + en.expertise_tag + "）" : "";
+          return '<div class="ls-exp-endorser-row">' + escHtml(name) + escHtml(tag) +
+            ' <span class="ls-exp-badge">' + escHtml(lsEndorseLevelLabel(en.level)) + '</span></div>';
+        }).join("");
+      })
+      .catch(function (err) {
+        body.textContent = err.message || "承認者一覧の取得に失敗しました";
+      });
+  }
+
+  // N35: 引用先コースを管理コース一覧から選ぶインラインセレクタ。
+  // 引用APIは編集権限(_ensure_editable)を要求するため、owner/editor のコースに絞る。
+  function lsOpenCiteSelector(component, expId, card) {
+    var area = card.querySelector("[data-cite-area]");
+    if (!area) return;
+    if (!area.hidden) {
+      area.hidden = true;
+      area.innerHTML = "";
+      return;
+    }
+    area.hidden = false;
+    area.innerHTML = '<span class="ls-theory-muted">コース一覧を読み込み中...</span>';
+    apiFetch("/admin/courses")
+      .then(function (res) {
+        if (!res.ok) throw new Error("コース一覧の取得に失敗しました");
+        return res.json();
+      })
+      .then(function (courses) {
+        var options = (courses || []).filter(function (c) {
+          if (String(c.id) === String(component.course_id)) return false; // 引用元と同じコースは除外
+          return c.role === "owner" || c.role === "editor"; // 引用は編集権限が必要
+        });
+        if (!options.length) {
+          area.innerHTML = '<span class="ls-theory-muted">引用先にできる編集可能な別コースがありません。</span>';
+          return;
+        }
+        area.innerHTML = '<span>引用先コース:</span>' +
+          '<select data-cite-select>' + options.map(function (c) {
+            return '<option value="' + escHtml(c.id) + '">' + escHtml(c.title || c.id) + '</option>';
+          }).join("") + '</select>' +
+          '<button class="admin-action-btn" data-cite-run>引用する</button>' +
+          '<button class="admin-action-btn" data-cite-cancel>キャンセル</button>';
+        area.querySelector("[data-cite-run]").addEventListener("click", function () {
+          var sel = area.querySelector("[data-cite-select]");
+          var target = sel ? sel.value : "";
+          if (!target) return;
+          lsCallExplanation(component, "/admin/explanations/" + expId + "/cite", "POST", { citing_course_id: target }, "引用しました");
+        });
+        area.querySelector("[data-cite-cancel]").addEventListener("click", function () {
+          area.hidden = true;
+          area.innerHTML = "";
+        });
+      })
+      .catch(function (err) {
+        area.innerHTML = '<span class="ls-theory-muted">' + escHtml(err.message || "コース一覧の取得に失敗しました") + '</span>';
+      });
   }
 
   function lsEndorseExplanation(component, expId, payload) {
@@ -5011,6 +5212,10 @@
       .then(function (res) { if (!res.ok) throw new Error("読み込みに失敗しました"); return res.json(); })
       .then(function (data) {
         var items = data || [];
+        lsExplanationCache = {};
+        items.forEach(function (it) {
+          if (it && it.id) lsExplanationCache[it.id] = it;
+        });
         list.innerHTML = items.length ? items.map(lsRenderExplanationCard).join("") : '<div class="ls-empty-state">説明バージョンがありません。</div>';
         lsBindExplanationActions(component);
       })

@@ -1268,6 +1268,23 @@ class AssistantActionSummary(BaseModel):
     reverted_at: str | None = None
 
 
+class AssistantCapabilityOut(BaseModel):
+    """GET /api/admin/assistant/capabilities の 1 行（実行可否の事前開示, N12）。
+
+    `executable` = kind=action かつ代行ハンドラ実装済み。False の action は
+    「道案内のみ対応」としてフロントが明示する。
+    """
+    id: str
+    screen: str
+    title: str
+    required_role: str
+    kind: str                                      # guidance_only | action
+    reversible: bool = True
+    confirm: bool = False
+    description: str = ""
+    executable: bool = False
+
+
 class NextStepOut(BaseModel):
     """G層 Next Steps の 1 項目（core.admin_assistant.next_steps.NextStep の JSON 化）。"""
     step_key: str

@@ -488,3 +488,136 @@ class TestNoAggregateNumbers:
         blob = json.dumps(net.to_dict(), ensure_ascii=False).lower()
         for forbidden in ("count", "coverage", "score", "percentage", "ranking", "weight"):
             assert forbidden not in blob, f"aggregate-looking key/value {forbidden!r} leaked into to_dict()"
+
+
+# ---------------------------------------------------------------------------
+# N16（2026-07-17）: reconstruction ノードの claim → topic 解決
+# ---------------------------------------------------------------------------
+
+
+class TestReconstructionClaimTopicResolution:
+    """N16 是正: ``claim_topic_map``（topics[].linked_claim_ids の逆引き）で claim が
+    トピック教材に組み込まれていれば topic_id / anchor.atlas_node_id を解決する。
+    解決できない claim は従来どおり None（「まだ地図にない」トレイに残る・P4）。
+    """
+
+    def test_claim_in_map_with_atlas_binding_resolves_topic_and_atlas(self):
+        row = _recon(id_="r1", claim_id="claimX", machine_verdict="match", self_check=None)
+        net = build_network([], [row], _ATLAS, {"claimX": "topic1"})
+        assert len(net.nodes) == 1
+        node = net.nodes[0]
+        assert node.topic_id == "topic1"
+        assert node.anchor.anchor_type == "claim"
+        assert node.anchor.anchor_id == "claimX"
+        assert node.anchor.atlas_node_id == "atlas_n1"
+
+    def test_claim_in_map_without_atlas_binding_sets_topic_only(self):
+        row = _recon(id_="r1", claim_id="claimX", machine_verdict="match", self_check=None)
+        net = build_network([], [row], _ATLAS, {"claimX": "topic-unbound"})
+        assert len(net.nodes) == 1
+        node = net.nodes[0]
+        assert node.topic_id == "topic-unbound"
+        assert node.anchor.atlas_node_id is None
+
+    def test_claim_not_in_map_stays_unresolved(self):
+        row = _recon(id_="r1", claim_id="claimY", machine_verdict="match", self_check=None)
+        net = build_network([], [row], _ATLAS, {"claimX": "topic1"})
+        assert len(net.nodes) == 1
+        node = net.nodes[0]
+        assert node.topic_id is None
+        assert node.anchor.atlas_node_id is None
+
+    def test_map_omitted_keeps_backward_compatible_none(self):
+        row = _recon(id_="r1", claim_id="claimX", machine_verdict="match", self_check=None)
+        net = build_network([], [row], _ATLAS)
+        assert len(net.nodes) == 1
+        assert net.nodes[0].topic_id is None
+        assert net.nodes[0].anchor.atlas_node_id is None
+
+    def test_anchor_remains_claim_type_after_resolution(self):
+        """topic 解決してもアンカーは claim のまま（topic アンカーに置き換えない —
+        atlas_node_id だけを binding から導出する）。"""
+        row = _recon(id_="r1", claim_id="claimX", machine_verdict="match", self_check=None)
+        net = build_network([], [row], _ATLAS, {"claimX": "topic1"})
+        assert net.nodes[0].anchor.anchor_type == "claim"
+
+
+class TestClaimTopicMapFromCourseData:
+    """queries._claim_topic_map_from_data（純粋部・DB 非接続）: topics[].linked_claim_ids
+    の逆引きが決定論的で、フラット/章ネスト両形を走査すること。"""
+
+    def _map(self, data):
+        # 遅延 import（queries は sqlalchemy に依存するがここでは接続しない）
+        from core.personal_graph.queries import _claim_topic_map_from_data
+        return _claim_topic_map_from_data(data)
+
+    def test_flat_topics_reverse_lookup(self):
+        data = {"topics": [
+            {"id": "t1", "linked_claim_ids": ["c1", "c2"]},
+            {"id": "t2", "linked_claim_ids": ["c3"]},
+        ]}
+        assert self._map(data) == {"c1": "t1", "c2": "t1", "c3": "t2"}
+
+    def test_first_occurrence_wins_deterministically(self):
+        data = {"topics": [
+            {"id": "t1", "linked_claim_ids": ["c1"]},
+            {"id": "t2", "linked_claim_ids": ["c1"]},
+        ]}
+        assert self._map(data) == {"c1": "t1"}
+
+    def test_nested_chapter_topics_are_scanned(self):
+        data = {"chapters": [{"topics": [{"id": "t9", "linked_claim_ids": ["c9"]}]}]}
+        assert self._map(data) == {"c9": "t9"}
+
+    def test_topics_without_ids_or_claims_are_skipped(self):
+        data = {"topics": [
+            {"linked_claim_ids": ["c1"]},          # id なし
+            {"id": "t2"},                            # linked_claim_ids なし
+            {"id": "t3", "linked_claim_ids": []},   # 空
+        ]}
+        assert self._map(data) == {}
+
+
+class TestDeriveEntrypointsThreadClaimTopicMap:
+    """derive_personal_network / derive_person_network が queries の claim→topic 解決を
+    build_network / build_person_network へ渡すこと（monkeypatch・DB 非接続）。"""
+
+    def test_course_scope_entrypoint_uses_fetch_claim_topic_map(self, monkeypatch):
+        import core.personal_graph.queries as queries_mod
+        from core.personal_graph.derive import derive_personal_network
+
+        monkeypatch.setattr(queries_mod, "fetch_traces", lambda uid, cid: [])
+        monkeypatch.setattr(queries_mod, "fetch_reconstructions", lambda uid, cid: [
+            _recon(id_="r1", claim_id="claimX", machine_verdict="match", self_check=None),
+        ])
+        monkeypatch.setattr(queries_mod, "fetch_topic_atlas_binding", lambda cid: {"topic1": "atlas_n1"})
+        monkeypatch.setattr(queries_mod, "fetch_claim_topic_map", lambda cid: {"claimX": "topic1"})
+
+        net = derive_personal_network("user1", "course1")
+        assert len(net.nodes) == 1
+        assert net.nodes[0].topic_id == "topic1"
+        assert net.nodes[0].anchor.atlas_node_id == "atlas_n1"
+
+    def test_person_scope_entrypoint_uses_fetch_claim_topic_map_for_courses(self, monkeypatch):
+        import core.personal_graph.queries as queries_mod
+        from core.personal_graph.derive import derive_person_network
+
+        recon = _recon(id_="r1", claim_id="claimX", machine_verdict="match", self_check=None)
+        recon["course_id"] = "courseA"
+        monkeypatch.setattr(queries_mod, "fetch_traces_for_user", lambda uid: [])
+        monkeypatch.setattr(queries_mod, "fetch_reconstructions_for_user", lambda uid: [recon])
+        monkeypatch.setattr(
+            queries_mod, "fetch_topic_atlas_binding_for_courses",
+            lambda cids: {"courseA": {"topic1": "atlas_n1"}},
+        )
+        monkeypatch.setattr(
+            queries_mod, "fetch_claim_topic_map_for_courses",
+            lambda cids: {"courseA": {"claimX": "topic1"}},
+        )
+
+        net = derive_person_network("user1")
+        assert len(net.nodes) == 1
+        node = net.nodes[0]
+        assert node.course_id == "courseA"
+        assert node.topic_id == "topic1"
+        assert node.anchor.atlas_node_id == "atlas_n1"

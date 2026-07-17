@@ -461,6 +461,73 @@ class TestIdentityLinksWiring:
         assert '".deliberation-identity-link-error"' in decide_block
 
 
+class TestManualIdentityLinkCreation:
+    """N2: 手動リンク作成 UI（「共通部品と結びつける」→ 候補検索 → candidate 作成）。
+
+    受け入れ条件:
+    - 作成導線はインスタンス要素にのみ表示する（shared_part 自身には出さない —
+      identity link の source は常に document-scoped インスタンス）。
+    - 候補検索は GET .../shared-part-candidates（domain 解決はサーバ側）。
+    - 作成は既存の POST /admin/deliberation/identity-links（常に candidate。
+      確定・却下は既存の確定/却下ボタンがそのまま担う・KN-3）。
+    - 検索0件は事実文（煽らない・数値を出さない）。
+    - 作成成功後は同一性リンク一覧を再読込する。
+    """
+
+    def _function_block(self, src: str, name: str) -> str:
+        m = re.search(r"function " + name + r"\([\s\S]+?\n  \}\n", src)
+        assert m, f"function {name} が見つかりません"
+        return m.group(0)
+
+    def test_create_button_only_for_instance_elements(self):
+        src = _read(DELIBERATION_JS)
+        block = self._function_block(src, "_identityLinksSectionHtml")
+        assert "deliberation-identity-link-open-search" in block
+        assert 'elementType !== "shared_part"' in block
+        # bind 側も shared_part では何もしない（二重の防御）。
+        bind_block = self._function_block(src, "_bindIdentityLinkSearch")
+        assert 'ref.elementType === "shared_part"' in bind_block
+
+    def test_candidate_search_uses_server_side_domain_resolution_endpoint(self):
+        src = _read(DELIBERATION_JS)
+        block = self._function_block(src, "_searchSharedPartCandidates")
+        assert '"/shared-part-candidates"' in block
+        assert '"/admin/deliberation/elements/"' in block
+        # equation は document_id で一意化する（既存の一覧・注釈と同じ規約）。
+        assert 'ref.elementType === "equation" && ref.documentId' in block
+
+    def test_create_posts_existing_identity_links_endpoint(self):
+        src = _read(DELIBERATION_JS)
+        block = self._function_block(src, "_createIdentityLink")
+        assert '"/admin/deliberation/identity-links"' in block
+        assert 'method: "POST"' in block
+
+    def test_creation_is_candidate_only_messaging(self):
+        """KN-3: 作成されるのは候補であり、確定は別操作であることを UI 文言で明示する。"""
+        src = _read(DELIBERATION_JS)
+        assert "候補を作成" in src
+        block = self._function_block(src, "_createIdentityLink")
+        assert "確定・却下できます" in block
+
+    def test_zero_results_show_factual_message(self):
+        src = _read(DELIBERATION_JS)
+        assert "同分野の共通部品が見つかりません" in src
+
+    def test_identity_links_reloaded_after_creation(self):
+        src = _read(DELIBERATION_JS)
+        block = self._function_block(src, "_createIdentityLink")
+        assert "_loadIdentityLinks(" in block
+
+    def test_search_and_create_render_through_esc_html(self):
+        """XSS対策: 候補行の name/aliases/summary・エラー文言は escHtml 経由で描画する。"""
+        src = _read(DELIBERATION_JS)
+        row_block = self._function_block(src, "_sharedPartCandidateRowHtml")
+        assert "escHtml(entry.name" in row_block
+        assert "escHtml(entry.summary)" in row_block
+        create_block = self._function_block(src, "_createIdentityLink")
+        assert "escHtml(" in create_block
+
+
 class TestStandardizationAssessWiring:
     """Phase S: 標準化度の評価ボタン（三角測量 worker の手動起動）。"""
 

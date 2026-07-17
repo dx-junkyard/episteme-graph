@@ -676,6 +676,61 @@ class TestFreezeConcurrencyMapsTo409:
 
 
 @_skip_no_fastapi
+class TestRetiredEntryIsReadOnlyOverApi:
+    """N29: retired エントリへの draft 更新・凍結は 409（事実文つき）。
+    restore は従来どおり（TestRetireRestoreAuditUsesActualPreviousStatus 参照）。"""
+
+    def test_update_retired_maps_to_409_with_factual_detail(self, monkeypatch):
+        import routes.library as library_routes
+        from fastapi import HTTPException
+        from core.library.store import LibraryRetiredError
+
+        monkeypatch.setattr(
+            library_routes.library_store,
+            "get_entry",
+            lambda entry_id: {"id": entry_id, "status": "retired", "exemplar_images": []},
+        )
+
+        def _retired(entry_id, *, expected_revision, updated_by=None, **fields):
+            raise LibraryRetiredError("retired のエントリは編集できません。復元してから編集してください")
+
+        monkeypatch.setattr(library_routes.library_store, "update_entry", _retired)
+        payload = library_routes.LibraryEntryUpdateRequest(expected_revision=1, name="x")
+        with pytest.raises(HTTPException) as exc_info:
+            library_routes.update_entry("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", payload, {"id": "u1"})
+        assert exc_info.value.status_code == 409
+        assert "復元" in str(exc_info.value.detail)
+
+    def test_freeze_retired_maps_to_409_with_factual_detail(self, monkeypatch):
+        import routes.library as library_routes
+        from fastapi import HTTPException
+        from core.library.store import LibraryRetiredError
+
+        def _retired(entry_id, *, published_by=None, note=None, **_kwargs):
+            raise LibraryRetiredError("retired のエントリは凍結できません。復元してから凍結してください")
+
+        monkeypatch.setattr(library_routes.library_store, "freeze_entry", _retired)
+        with pytest.raises(HTTPException) as exc_info:
+            library_routes.freeze_entry(
+                "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+                library_routes.FreezeRequest(),
+                {"id": "u1"},
+            )
+        assert exc_info.value.status_code == 409
+        assert "復元" in str(exc_info.value.detail)
+
+    def test_store_blocks_retired_before_revision_lock(self):
+        """update_entry は楽観ロックに進む前に retired を検査する（構造検査）。
+        retired なのに楽観ロック衝突（「他の教員が更新しました」）の誤った文言を
+        返さないための順序保証。"""
+        update_src = _STORE_SRC[_STORE_SRC.index("def update_entry("):]
+        update_src = update_src[: update_src.index("\ndef freeze_entry(")]
+        retired_pos = update_src.index("raise LibraryRetiredError")
+        lock_pos = update_src.index("update_with_revision_lock")
+        assert retired_pos < lock_pos
+
+
+@_skip_no_fastapi
 class TestRetireRestoreAuditUsesActualPreviousStatus:
     """retire/restore の監査 old_status はハードコード（常に active / 常に retired）
     ではなく、store が返す遷移前の実状態を記帳する（冪等呼び出しでも事実と一致）。"""

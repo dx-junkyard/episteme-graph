@@ -57,11 +57,16 @@ APPARATUS_BODY_KEY_TYPICAL_PARTS = "typical_parts"
 APPARATUS_BODY_KEY_VISUAL_CUES = "visual_cues"
 APPARATUS_BODY_KEY_TYPICAL_CONFIGURATIONS = "typical_configurations"
 APPARATUS_BODY_KEY_MEASUREMENT_TARGETS = "measurement_targets"
+# 装置候補（apparatus_semantics）の connections（from_part/to_part/relation/reason 等）の
+# 受け皿（N28）。昇格モーダルが候補から転記する — 受け皿キーが無いと candidate の接続情報が
+# 昇格で構造的に落ちる（P4 違反）ため正式キーとして持つ。
+APPARATUS_BODY_KEY_CONNECTIONS = "connections"
 APPARATUS_BODY_KEYS = (
     APPARATUS_BODY_KEY_TYPICAL_PARTS,
     APPARATUS_BODY_KEY_VISUAL_CUES,
     APPARATUS_BODY_KEY_TYPICAL_CONFIGURATIONS,
     APPARATUS_BODY_KEY_MEASUREMENT_TARGETS,
+    APPARATUS_BODY_KEY_CONNECTIONS,
 )
 
 # update_entry() で編集可能なフィールドのホワイトリスト（§6-3 draft 編集）。

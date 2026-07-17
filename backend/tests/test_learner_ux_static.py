@@ -450,3 +450,138 @@ class TestJourneyDeadEndRestart:
             src = _read(path)
             for word in FORBIDDEN_WORDS:
                 assert word not in src, f"{path.name}: 禁止語彙 {word!r} が見つかりました"
+
+
+# ---------------------------------------------------------------------------
+# N15 (vision_ux_gap_survey_2026-07-17 §5-7): 出典タブへの D層検証状態の一行併記
+# ---------------------------------------------------------------------------
+
+
+class TestSourcesTabLedgerLine:
+    """出典タブの根拠カードに台帳（epistemic_ledger）の一行事実文を併記する（D3-6）。
+
+    - component ポップアップと同じ文言・様式（fetchLearnerLedgerFactLine /
+      makeLedgerLineDiv を共用）
+    - 台帳未記帳 (404)・API失敗時は何も出さない fail-closed
+    - 数値スコアを学習者に見せない
+    """
+
+    def test_render_sources_tab_triggers_ledger_annotation(self):
+        src = _read(APP_JS)
+        fn_src = _extract_function(src, "renderSourcesTab")
+        assert "annotateSourceCardsWithLedger" in fn_src
+        assert "data-lx-ledger-chunk" in fn_src
+
+    def test_annotation_uses_shared_ledger_helpers(self):
+        """component ポップアップ経路と同じ取得・整形ヘルパーを使う（文言・様式の同一性）。"""
+        src = _read(APP_JS)
+        card_fn = _extract_function(src, "annotateOneSourceCardLedger")
+        assert "fetchLearnerLedgerFactLine" in card_fn
+        assert "makeLedgerLineDiv" in card_fn
+        popup_fn = _extract_function(src, "appendLearnerLedgerLine")
+        assert "fetchLearnerLedgerFactLine" in popup_fn
+        assert "makeLedgerLineDiv" in popup_fn
+
+    def test_annotation_is_fail_closed(self):
+        """台帳未記帳・失敗時はエラー文言を出さず何も描かない（fail-closed）。"""
+        src = _read(APP_JS)
+        card_fn = _extract_function(src, "annotateOneSourceCardLedger")
+        assert "fail-closed" in card_fn
+        # エラーの可視化・警告文言を出さない（catch は無言）
+        assert "エラー" not in card_fn
+        fetch_fn = _extract_function(src, "fetchLearnerLedgerFactLine")
+        assert "return null" in fetch_fn or "= null" in fetch_fn
+
+    def test_ledger_fact_line_has_no_numeric_leak(self):
+        """一行事実文の描画は fact_line / scopes 由来テキストのみ（数値スコア非表示）。"""
+        src = _read(APP_JS)
+        fetch_fn = _extract_function(src, "fetchLearnerLedgerFactLine")
+        assert "fact_line" in fetch_fn
+        for banned in ("load_score", "confidence", "toFixed"):
+            assert banned not in fetch_fn
+
+    def test_non_pipeline_formula_ids_are_excluded(self):
+        """旧フォーマット変換の [[FORMULA_N]] / TOPIC_FORMULA_N は台帳対象にしない。"""
+        src = _read(APP_JS)
+        card_fn = _extract_function(src, "annotateOneSourceCardLedger")
+        assert "FORMULA_" in card_fn
+        assert "TOPIC_FORMULA_" in card_fn
+
+
+# ---------------------------------------------------------------------------
+# N15 拡張: 出典タブの claim 併記（chunk→claim ID の学習者向け読み取り API）
+# ---------------------------------------------------------------------------
+
+
+class TestSourcesTabClaimLedgerLine:
+    """equation に加え claim の台帳検証状態も出典カードへ一行併記する。
+
+    - チャンク→claim ID の解決は学習者向け読み取り専用 API
+      (`/learning/courses/{course_id}/chunks/{chunk_id}/claim-refs`) を使う
+      （equation 経路の source-chunk API とは独立）
+    - 台帳の取得・様式は equation と同じ共有ヘルパー
+      (fetchLearnerLedgerFactLine / makeLedgerLineDiv) を使う
+    - API 失敗・0件・台帳未記帳は何も出さない（fail-closed。equation 側の
+      失敗が claim 側を巻き込まない、その逆も同様）
+    - 1カードの上限3行は equation と claim の合算で維持する
+    """
+
+    def test_card_fetches_claim_refs_from_dedicated_endpoint(self):
+        src = _read(APP_JS)
+        card_fn = _extract_function(src, "annotateOneSourceCardLedger")
+        assert "claim-refs" in card_fn
+
+    def test_claim_ledger_line_uses_shared_helpers(self):
+        src = _read(APP_JS)
+        card_fn = _extract_function(src, "annotateOneSourceCardLedger")
+        # "claim" は fetchLearnerLedgerFactLine の targetType として渡される
+        assert '"claim"' in card_fn or "kind" in card_fn
+        assert "fetchLearnerLedgerFactLine" in card_fn
+        assert "makeLedgerLineDiv" in card_fn
+
+    def test_equation_and_claim_share_the_three_line_cap(self):
+        """equation と claim を合算した配列に対して 1回だけ 3行上限を適用する。"""
+        src = _read(APP_JS)
+        card_fn = _extract_function(src, "annotateOneSourceCardLedger")
+        assert "count < 3" in card_fn
+        # equation・claim それぞれ独立に 3件ループする旧実装には戻さない
+        assert card_fn.count("< 3") == 1
+
+    def test_claim_fetch_is_independently_fail_closed(self):
+        """claim-refs 取得の失敗は equation 側の結果に影響しない（個別 try/catch）。"""
+        src = _read(APP_JS)
+        card_fn = _extract_function(src, "annotateOneSourceCardLedger")
+        assert card_fn.count("fail-closed") >= 1
+        assert "エラー" not in card_fn
+
+
+# ---------------------------------------------------------------------------
+# N32 (同 §5-7): ロックトピックの視覚と挙動の齟齬 — 事実文トースト
+# ---------------------------------------------------------------------------
+
+
+class TestLockedTopicFactToast:
+    def test_locked_topic_click_shows_fact_and_still_navigates(self):
+        """ロック表示トピックのクリックで事実文を出すが、遷移は従来どおり許可する。"""
+        src = _read(APP_JS)
+        fn_src = _extract_function(src, "renderSidebar")
+        assert "maybeShowLockedTopicFact" in fn_src
+        # 事実文表示の後も selectTopic を呼ぶ（遷移をブロックしない）
+        toast_idx = fn_src.index("maybeShowLockedTopicFact")
+        select_idx = fn_src.index("selectTopic", toast_idx)
+        assert select_idx > toast_idx
+
+    def test_fact_line_is_factual_and_conditional(self):
+        """「前のトピックの確認が未完了です」は事実であるときだけ表示する。"""
+        src = _read(APP_JS)
+        fn_src = _extract_function(src, "maybeShowLockedTopicFact")
+        assert "前のトピックの確認が未完了です" in fn_src
+        # 前のトピックが確認済みなら出さない（completed_topic_ids を参照する）
+        assert "completed_topic_ids" in fn_src
+        # 数値・煽り語彙を出さない
+        for banned in ("%", "スコア", "急いで", "ロックされています"):
+            assert banned not in fn_src
+
+    def test_fact_toast_styles_exist(self):
+        css = _read(STYLES_CSS)
+        assert ".fact-toast" in css

@@ -40,6 +40,10 @@ class LibraryConflictError(LibraryError, revision_store.RevisionConflictError):
     """楽観ロック衝突（expected_revision が現在値と不一致）。current_revision に現在値を持つ。"""
 
 
+class LibraryRetiredError(LibraryError):
+    """retired エントリへの draft 更新・凍結（N29: retired は読み取り専用。編集には復元が先）。"""
+
+
 # ---------------------------------------------------------------------------
 # 行 ⇄ dict 変換
 # ---------------------------------------------------------------------------
@@ -226,6 +230,7 @@ def update_entry(entry_id: str, *, expected_revision: int, updated_by: str | Non
     raises:
         ValueError — ホワイトリスト外のフィールド指定 / フィールド未指定 / name を空にする更新
         LibraryNotFoundError — entry_id が存在しない
+        LibraryRetiredError — エントリが retired（読み取り専用。編集には restore が先。N29）
         LibraryConflictError — expected_revision が現在値と不一致（current_revision を持つ）
     """
     unknown = set(fields) - set(schema.UPDATABLE_FIELDS)
@@ -253,6 +258,20 @@ def update_entry(entry_id: str, *, expected_revision: int, updated_by: str | Non
 
     session = get_session()
     try:
+        # N29: retired は読み取り専用（履歴・provenance の保全対象）。draft 更新の前に
+        # 現在 status を確認し、retired なら楽観ロックに進まず明示エラーにする
+        # （restore してから編集する、が正規の経路）。
+        current = session.execute(
+            sa_text(f"{_SELECT_ENTRY_SQL} WHERE id = CAST(:id AS uuid) LIMIT 1"),
+            {"id": entry_id},
+        ).fetchone()
+        if current is None:
+            raise LibraryNotFoundError(f"library entry not found: {entry_id}")
+        # _ENTRY_COLUMNS_SQL の並びで status は index 10（_row_to_entry と同じ規約）。
+        if str(current[10] or "") == schema.STATUS_RETIRED:
+            raise LibraryRetiredError(
+                "retired のエントリは編集できません。復元してから編集してください"
+            )
         result = revision_store.update_with_revision_lock(
             session,
             update_sql=f"""
@@ -304,6 +323,7 @@ def freeze_entry(
 
     raises:
         LibraryNotFoundError — entry_id が存在しない
+        LibraryRetiredError — エントリが retired（読み取り専用。凍結には restore が先。N29）
     """
     session = get_session()
     try:
@@ -314,6 +334,12 @@ def freeze_entry(
         if row is None:
             raise LibraryNotFoundError(f"library entry not found: {entry_id}")
         entry = _row_to_entry(row)
+        # N29: retired は読み取り専用。retired のまま新版を発行できると retrieval 除外
+        # （status='active' フィルタ）と版履歴の意味が食い違うため、restore を先に要求する。
+        if entry["status"] == schema.STATUS_RETIRED:
+            raise LibraryRetiredError(
+                "retired のエントリは凍結できません。復元してから凍結してください"
+            )
         version_no = int(entry["latest_version_no"]) + 1
         content = entry
 

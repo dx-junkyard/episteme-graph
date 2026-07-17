@@ -26,13 +26,14 @@ from pydantic import BaseModel
 from sqlalchemy import text as sa_text
 
 from dependencies import _get_current_user, _require_teacher
-from services import get_accessible_course_data, record_review_event, user_can_view_course
+from services import _resolve_document, get_accessible_course_data, record_review_event, user_can_view_course
 from core.course_data import course_source_material_ids, course_topics
 from core.postgres import get_session as _pg_session
 from core.reconstruction import diff as recon_diff
 from core.reconstruction import item_builder
 from core.reconstruction.health import get_review_queue
 from core.reconstruction.stumble import get_stumble_summary
+from core.status import cross_layer_notify
 from core.reconstruction.schema import (
     APPROVED_REVIEW_STATUSES,
     DELIVERABLE_STATUSES,
@@ -578,13 +579,17 @@ def patch_item(
     session = _pg_session()
     try:
         existing = session.execute(
-            sa_text("SELECT status, claim_id::text FROM reconstruction_items WHERE id = CAST(:id AS uuid)"),
+            sa_text(
+                "SELECT status, claim_id::text, document_id FROM reconstruction_items "
+                "WHERE id = CAST(:id AS uuid)"
+            ),
             {"id": item_id},
         ).fetchone()
         if not existing:
             raise HTTPException(status_code=404, detail="Item not found")
         old_status = existing[0] or "auto"
         claim_id = existing[1] or ""
+        document_id = existing[2] or ""
 
         sets = ["updated_at = now()"]
         params: dict[str, Any] = {"id": item_id}
@@ -622,6 +627,27 @@ def patch_item(
             ENTITY_ITEM, item_id, old_status, new_status, current_user.get("id"),
             {"claim_id": claim_id, "by": "teacher"},
         )
+        if new_status == "flagged":
+            # 横断インボックス fan-out（N14, best-effort）: item のオーサーへ「flagged に
+            # なった」通知。reconstruction_items.created_by は現行実装では常に NULL
+            # （LLM 自動オーサリング・手動オーサリング API のどちらの経路も
+            # `_persist_item` が created_by を設定しない）ため、「作成主体」として最も
+            # 自然に解決できるのは由来 document の所有者（uploaded_by）。
+            # 操作した教員本人が所有者なら通知しない。
+            try:
+                doc = _resolve_document(document_id) if document_id else None
+                owner_id = str(doc.get("uploaded_by") or "") if doc else ""
+                actor_id = str(current_user.get("id") or "")
+                if owner_id and owner_id != actor_id:
+                    cross_layer_notify.notify_user(
+                        owner_id,
+                        cross_layer_notify.NOTIF_RECONSTRUCTION_ITEM_FLAGGED,
+                        "reconstruction_item",
+                        item_id,
+                        {"claim_id": claim_id, "document_id": document_id},
+                    )
+            except Exception:  # noqa: BLE001 — 通知失敗は status 遷移そのものを止めない
+                logger.debug("cross-layer notify (reconstruction flagged) skipped for %s", item_id, exc_info=True)
     return {"ok": True, "status": new_status}
 
 

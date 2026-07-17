@@ -76,6 +76,90 @@ class TestRuleCatalog:
             cap = caps.get_capability(cap_id)
             assert cap.locate_steps, f"{cap_id} に locate_steps が無い"
 
+    def test_all_rules_have_registered_evaluators(self):
+        """RULE_CATALOG と _RULE_EVALUATORS の対応漏れを構造的に防ぐ（追随の仕組み化）。"""
+        assert set(next_steps_mod.RULE_CATALOG.keys()) == set(
+            next_steps_mod._RULE_EVALUATORS.keys()
+        )
+
+
+# ===========================================================================
+# Group A-1b: figure.unreviewed_modes（N13, #496 追随）
+# ===========================================================================
+
+
+class _FakeResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def mappings(self):
+        return self
+
+    def fetchall(self):
+        return self._rows
+
+
+class _FakeSession:
+    def __init__(self, rows):
+        self.rows = rows
+        self.queries = []
+
+    def execute(self, stmt, params=None):
+        self.queries.append((str(stmt), params))
+        return _FakeResult(self.rows)
+
+
+class TestFigureUnreviewedModesRule:
+    def test_rule_registered_as_recommended_guidance(self):
+        rule = next_steps_mod.RULE_CATALOG[next_steps_mod.RULE_FIGURE_UNREVIEWED_MODES]
+        assert rule["severity"] == next_steps_mod.SEVERITY_RECOMMENDED
+        assert rule["capability_id"] == "materials.review_figures"
+        cap = caps.get_capability("materials.review_figures")
+        assert cap is not None
+        assert cap.kind == "guidance_only"  # 道案内のみ（図モーダルへ, G8）
+
+    def test_inventory_unvisited_rule_intentionally_absent(self):
+        """survey §5-5 の見送り推奨: 「検出要素を見たか」は押し付けになるため
+        ルール化しない（G4）。"""
+        assert "material.inventory_unvisited" not in next_steps_mod.RULE_CATALOG
+
+    def test_evaluator_sql_targets_pending_ai_suggestions_of_own_documents(self):
+        """未レビュー = mode_review_status='pending'、AI 分類済み = suggested_mode<>'unknown'、
+        対象は本人所有（uploaded_by）のみ。"""
+        src = extract_function_source(_NEXT_STEPS_SRC, "_eval_figure_unreviewed_modes")
+        assert "mode_review_status = 'pending'" in src
+        assert "suggested_mode <> 'unknown'" in src
+        assert "uploaded_by = CAST(:uid AS uuid)" in src
+        assert "document_figures" in src
+
+    def test_evaluator_builds_factual_step(self):
+        session = _FakeSession([
+            {
+                "id": "d-uuid-1",
+                "source_path": "mat_1",
+                "title": "レーザー分光の基礎",
+                "created_at": "2026-07-01T00:00:00+00:00",
+                "pending_count": 3,
+            },
+        ])
+        out = next_steps_mod._eval_figure_unreviewed_modes(session, "u1")
+        assert len(out) == 1
+        step, _sort_ts = out[0]
+        assert step.rule_id == next_steps_mod.RULE_FIGURE_UNREVIEWED_MODES
+        assert step.severity == next_steps_mod.SEVERITY_RECOMMENDED
+        assert step.step_key == "figure.unreviewed_modes:d-uuid-1"
+        assert step.target == {"material_id": "d-uuid-1"}
+        assert "3 件" in step.reason
+        assert "レーザー分光の基礎" in step.title
+        # locate の行アンカーは data-material-id（= source_path）で解決される
+        anchors = [s["anchor_id"] for s in step.locate_plan["steps"]]
+        assert "material_row:mat_1" in anchors
+        assert "material_figures_button" in anchors
+
+    def test_evaluator_returns_empty_when_no_pending_rows(self):
+        out = next_steps_mod._eval_figure_unreviewed_modes(_FakeSession([]), "u1")
+        assert out == []
+
 
 # ===========================================================================
 # Group A-2: fail-closed（STUDENT には何も出さない）

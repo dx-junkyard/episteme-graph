@@ -43,6 +43,10 @@ RULE_MATERIAL_NO_COURSE = "material.no_course"
 RULE_COURSE_NOT_PUBLISHED = "course.not_published"
 RULE_COURSE_NO_ATLAS_BINDING = "course.no_atlas_binding"
 RULE_COURSE_AUDIO_MISSING = "course.audio_missing"
+# N13（#496 追随）: 本人所有の教材に未レビューの AI 図分類が残っている。
+# `material.inventory_unvisited` は「見たかどうか」の押し付けになるため意図的に
+# 実装しない（vision_ux_gap_survey_2026-07-17.md §5-5 の見送り推奨, G4）。
+RULE_FIGURE_UNREVIEWED_MODES = "figure.unreviewed_modes"
 
 SEVERITY_REQUIRED = "required"
 SEVERITY_RECOMMENDED = "recommended"
@@ -76,6 +80,10 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
     RULE_COURSE_AUDIO_MISSING: {
         "severity": SEVERITY_OPTIONAL,
         "capability_id": "lecture_studio.generate_audio",
+    },
+    RULE_FIGURE_UNREVIEWED_MODES: {
+        "severity": SEVERITY_RECOMMENDED,
+        "capability_id": "materials.review_figures",  # 道案内のみ（図モーダルへ, #496）
     },
 }
 
@@ -361,6 +369,47 @@ def _eval_course_audio_missing(session, uid: str) -> list[tuple[NextStep, str]]:
     return out
 
 
+def _eval_figure_unreviewed_modes(session, uid: str) -> list[tuple[NextStep, str]]:
+    """N13: 本人所有の教材に、AI が分類したが未レビューの図・画像がある（#496）。
+
+    「AI 分類済み」= `suggested_mode <> 'unknown'`（migration 052 の既定値のままの行は
+    分類が走っていないため対象にしない）。「未レビュー」= `mode_review_status = 'pending'`。
+    レビューが済めば行の状態が変わり項目は自動消滅する（G1: 完了フラグを持たない）。
+    """
+    rows = session.execute(
+        sa_text("""
+            SELECT d.id::text AS id, d.source_path, d.title, d.created_at,
+                   count(*) AS pending_count
+            FROM documents d
+            JOIN document_figures f ON f.document_id = d.id
+            WHERE d.uploaded_by = CAST(:uid AS uuid)
+              AND f.mode_review_status = 'pending'
+              AND f.suggested_mode <> 'unknown'
+            GROUP BY d.id, d.source_path, d.title, d.created_at
+            ORDER BY d.created_at ASC
+        """),
+        {"uid": uid},
+    ).mappings().fetchall()
+    out: list[tuple[NextStep, str]] = []
+    for row in rows:
+        doc_id = row["id"]
+        title = row["title"] or doc_id
+        count = int(row["pending_count"] or 0)
+        # locate の material_row アンカーは教材一覧の data-material-id（= source_path）で
+        # 行解決するため、ctx には source_path 優先の id を渡す（_eval_material_no_course と同じ慣例）。
+        material_row_id = row["source_path"] or doc_id
+        step = _make_step(
+            rule_id=RULE_FIGURE_UNREVIEWED_MODES,
+            target_id=doc_id,
+            title=f"教材『{title}』の図・画像の分類を確認する",
+            reason=f"教材『{title}』に AI が分類した図・画像が {count} 件あり、まだ確認されていません。",
+            target={"material_id": doc_id},
+            ctx={"material_id": material_row_id},
+        )
+        out.append((step, _iso(row["created_at"])))
+    return out
+
+
 _RULE_EVALUATORS = {
     RULE_MATERIALS_NONE: _eval_materials_none,
     RULE_MATERIAL_ANALYSIS_FAILED: _eval_material_analysis_failed,
@@ -368,6 +417,7 @@ _RULE_EVALUATORS = {
     RULE_COURSE_NOT_PUBLISHED: _eval_course_not_published,
     RULE_COURSE_NO_ATLAS_BINDING: _eval_course_no_atlas_binding,
     RULE_COURSE_AUDIO_MISSING: _eval_course_audio_missing,
+    RULE_FIGURE_UNREVIEWED_MODES: _eval_figure_unreviewed_modes,
 }
 
 

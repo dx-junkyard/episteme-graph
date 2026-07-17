@@ -58,6 +58,7 @@ from core.postgres import get_session as _pg_session
 from core.cartridges import load_cartridge
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
 from core.llm_usage.context import usage_context
+from core.status import cross_layer_notify
 from core.theory_components import (
     enrich_theory_components_with_llm,
     extract_theory_components_from_dsl,
@@ -3076,6 +3077,24 @@ def patch_explanation(
         _record_review_event(
             AUDIT_ENTITY_EXPLANATION, explanation_id, old_review_status, body.review_status, current_user.get("id"),
         )
+    if body.backing_claims is not None:
+        # claim 紐づけの確定/却下は「価値判断の関門」の状態変更（設計原則3: 状態変更は監査）。
+        # 却下は行削除ではなく status='rejected' で保持する前提（P4）で、件数の内訳を残す。
+        confirmed_count = sum(
+            1 for b in body.backing_claims if isinstance(b, dict) and bool(b.get("confirmed"))
+        )
+        rejected_count = sum(
+            1 for b in body.backing_claims if isinstance(b, dict) and b.get("status") == "rejected"
+        )
+        _record_review_event(
+            AUDIT_ENTITY_EXPLANATION, explanation_id, "", "backing_claims_updated", current_user.get("id"),
+            {
+                "action": "backing_claims_update",
+                "total": len(body.backing_claims),
+                "confirmed": confirmed_count,
+                "rejected": rejected_count,
+            },
+        )
     out = _get_explanation_out(explanation_id)
     if not out:
         raise HTTPException(status_code=404, detail="Explanation not found")
@@ -3094,14 +3113,17 @@ def endorse_explanation(
     ctx = _explanation_context(explanation_id)
     if not ctx:
         raise HTTPException(status_code=404, detail="Explanation not found")
-    _component_id, course_id, _author_id, _shared, _review_status = ctx
+    _component_id, course_id, author_id, _shared, _review_status = ctx
     _ensure_viewable(course_id, current_user)
     level = (body.level or "endorsed").strip().lower()
     if level not in _ENDORSEMENT_LEVELS:
         raise HTTPException(status_code=422, detail="Invalid endorsement level")
     session = _pg_session()
     try:
-        session.execute(
+        # RETURNING (xmax = 0) は Postgres の定番イディオムで「本当に INSERT されたか
+        # （ON CONFLICT で UPDATE に倒れたのではないか）」を区別する。新規承認時のみ
+        # 通知するため（再承認・revoked 解除での重複通知を避けるため, N14）に使う。
+        row = session.execute(
             sa_text("""
                 INSERT INTO component_endorsements
                     (explanation_id, endorser_id, level, expertise_tag, note, revoked, updated_at)
@@ -3113,6 +3135,7 @@ def endorse_explanation(
                               note = EXCLUDED.note,
                               revoked = FALSE,
                               updated_at = now()
+                RETURNING (xmax = 0) AS inserted
             """),
             {
                 "eid": explanation_id,
@@ -3121,8 +3144,9 @@ def endorse_explanation(
                 "tag": body.expertise_tag or "",
                 "note": body.note or "",
             },
-        )
+        ).fetchone()
         session.commit()
+        is_new_endorsement = bool(row[0]) if row else False
     except Exception:
         session.rollback()
         logger.exception("Failed to endorse explanation %s", explanation_id)
@@ -3133,6 +3157,20 @@ def endorse_explanation(
         AUDIT_ENTITY_ENDORSEMENT, explanation_id, "", level, current_user.get("id"),
         {"action": "endorse", "expertise_tag": body.expertise_tag or ""},
     )
+    # 横断インボックス fan-out（N14, best-effort）: 説明の作者へ「承認を受けた」通知。
+    # standard 説明（A層由来・author_id なし）はスキップ、自己承認もスキップする。
+    endorser_id = str(current_user.get("id") or "")
+    if is_new_endorsement and author_id and author_id != endorser_id:
+        try:
+            cross_layer_notify.notify_user(
+                author_id,
+                cross_layer_notify.NOTIF_EXPLANATION_ENDORSED,
+                "explanation",
+                explanation_id,
+                {"component_id": _component_id, "course_id": course_id, "level": level},
+            )
+        except Exception:  # noqa: BLE001 — 通知失敗は承認そのものを止めない
+            logger.debug("cross-layer notify (endorsement) skipped for %s", explanation_id, exc_info=True)
     out = _get_explanation_out(explanation_id)
     if not out:
         raise HTTPException(status_code=404, detail="Explanation not found")

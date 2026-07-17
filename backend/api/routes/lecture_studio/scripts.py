@@ -46,9 +46,11 @@ from core.course_data import (
     lecture_studio_settings as _lecture_studio_settings,
 )
 from core.lecture import (
+    build_topic_slides,
     count_slide_marker_segments,
     generate_spoken_text_and_formulas,
     get_course_lecture_language,
+    lecture_uses_topic_material,
     split_slides,
 )
 from core.llm import generate_text, get_llm_params
@@ -986,39 +988,76 @@ def rewrite_lecture_script(
 # ---------------------------------------------------------------------------
 
 
+def _topic_audio_targets(course_data: dict | None) -> list[tuple[str, dict]]:
+    """トピック音声の生成対象（トピック教材経路のトピック）を列挙する。
+
+    ``lecture_uses_topic_material``（core/lecture.py の正本述語）が真で、かつ id を持つ
+    トピックのみが対象。``_batch_audio_worker`` のタスク総数（正直な完了サマリ）と
+    ``_generate_course_topic_audio`` の生成ループが同じ列挙を使う。
+    """
+    if not course_data:
+        return []
+    targets: list[tuple[str, dict]] = []
+    for topic in _iter_all_topics(course_data):
+        if not lecture_uses_topic_material(topic):
+            continue
+        topic_id = str(topic.get("id") or "").strip()
+        if not topic_id:
+            continue
+        targets.append((topic_id, topic))
+    return targets
+
+
 def _generate_course_topic_audio(
     course_id: str,
     course_data: dict,
     course_language: str,
     voice: str = "alloy",
-) -> None:
+) -> dict:
     """トピック教材ベースのレクチャー用に、各トピックのスライド音声を生成・キャッシュする。
 
     受講側 (``routes/lecture.py::_build_topic_draft_segment``) と同じソース
-    （student_material=表示 / spoken_script=読み上げ）を同じ ``split_slides`` で分割し、
-    各スライドの ``spoken_text`` に TTS を生成して ``topic_lecture_audio_cache``
-    （``(course_id, topic_id, slide_index, voice)``）へ upsert する。受講側の表示スライドと
-    音声スライドが同じ ``slide_index`` で一致する（``===`` マーカー・縮退ロジックを共有）。
+    （student_material=表示 / spoken_script=読み上げ）を同じ分割
+    （``core.lecture.build_topic_slides``）でスライド化し、各スライドの ``spoken_text`` に
+    TTS を生成して ``topic_lecture_audio_cache``（``(course_id, topic_id, slide_index,
+    voice)``）へ upsert する。受講側の表示スライドと音声スライドが同じ ``slide_index`` で
+    一致する（``===`` マーカー・縮退ロジックを共有）。
 
     チャンク音声（``lecture_audio_cache``・FK 制約あり）とは別テーブルで管理し、既存の
     チャンク音声・#491 の readiness には影響しない。既に同一言語でキャッシュ済みの
     スライドはスキップする（未生成分のみ生成）。
+
+    Returns
+    -------
+    dict
+        正直な完了サマリ（N18: 0件生成が黙って「完了」に化けないための集計）:
+        ``{"topics_total": int, "topics_generated": int, "topics_skipped": int,
+        "topics_failed": int, "topics_no_script": int}``。トピック単位の区分は
+        チャンク単位の集計と同じ規約（1枚でも生成できれば generated / 生成0でエラーありは
+        failed / 残りは skipped。skipped のうち読み上げ可能スライドが1枚も無いものを
+        no_script として数える）。
     """
-    # 受講側と同じスライド分割（自動ページ分割込み）を使う。`_build_topic_slides` を通すことで
-    # 受講表示・音声・readiness の slide_index を完全一致させる（食い違い防止）。
-    from routes.lecture import (  # 遅延 import（routes 間の循環回避）
-        _build_topic_slides,
-        _lecture_uses_topic_material,
-    )
+    # 受講側と同じスライド分割（自動ページ分割込み）を使う。`build_topic_slides`
+    # （core/lecture.py の正本）を通すことで受講表示・音声・readiness の slide_index を
+    # 完全一致させる（食い違い防止）。
+    targets = _topic_audio_targets(course_data)
+    topics_generated = 0
+    topics_skipped = 0
+    topics_failed = 0
+    topics_no_script = 0
 
-    for topic in _iter_all_topics(course_data):
-        if not _lecture_uses_topic_material(topic):
-            continue
-        topic_id = str(topic.get("id") or "").strip()
-        if not topic_id:
-            continue
+    for topic_id, topic in targets:
+        slides, _display, _spoken, _formulas = build_topic_slides(topic)
 
-        slides, _display, _spoken, _formulas = _build_topic_slides(topic)
+        speakable_slides = sum(
+            1 for slide in slides if str(slide.get("spoken_text") or "").strip()
+        )
+        if speakable_slides == 0:
+            # 読み上げ原稿（spoken_script 等）の draft 未充足: 生成できるスライドが無い。
+            # 黙って 0 件生成にせず、スキップ理由として集計する（N18: 正直な報告）。
+            topics_skipped += 1
+            topics_no_script += 1
+            continue
 
         # スライド数が減った場合の残留行を掃除する（生成前に一度だけ）
         session = _pg_session()
@@ -1041,6 +1080,8 @@ def _generate_course_topic_audio(
         finally:
             session.close()
 
+        topic_generated = 0
+        topic_errors = 0
         for slide in slides:
             slide_spoken = slide.get("spoken_text")
             slide_index = slide["slide_index"]
@@ -1074,12 +1115,14 @@ def _generate_course_topic_audio(
                 # 恒久的失敗（API 未有効化・認証エラー等）は上位で扱えるよう再送出する。
                 raise
             except Exception:
+                topic_errors += 1
                 logger.warning(
                     "Topic TTS generation failed for %s/%s slide %d", course_id, topic_id, slide_index,
                     exc_info=True,
                 )
                 continue
             if audio_bytes is None:
+                topic_errors += 1
                 continue
 
             duration_ms = max(1000, len(audio_bytes) * 8 // 128)
@@ -1105,8 +1148,10 @@ def _generate_course_topic_audio(
                     },
                 )
                 session.commit()
+                topic_generated += 1
             except Exception:
                 session.rollback()
+                topic_errors += 1
                 logger.warning(
                     "Failed to cache topic audio for %s/%s slide %d", course_id, topic_id, slide_index,
                     exc_info=True,
@@ -1116,6 +1161,22 @@ def _generate_course_topic_audio(
 
             # レート制限対策: スライド間に 0.5 秒の遅延
             time.sleep(0.5)
+
+        # トピック単位の集計（チャンク単位の集計と同じ規約）
+        if topic_generated > 0:
+            topics_generated += 1
+        elif topic_errors > 0:
+            topics_failed += 1
+        else:
+            topics_skipped += 1
+
+    return {
+        "topics_total": len(targets),
+        "topics_generated": topics_generated,
+        "topics_skipped": topics_skipped,
+        "topics_failed": topics_failed,
+        "topics_no_script": topics_no_script,
+    }
 
 
 def _batch_audio_worker(
@@ -1138,9 +1199,20 @@ def _batch_audio_worker(
     言語切替チェーン (``_batch_generate_and_audio_worker``) から呼ばれる場合はこの
     タスク自体が既に ``phase: "script"`` を経ているため、ここでは ``phase: "audio"`` を
     result_data に出す (§3-3)。
+
+    N18（正直な完了サマリ）: ``course_data`` が渡された場合はトピック教材経路のトピック
+    （``lecture_uses_topic_material`` が真）も生成対象1件として ``total_chunks`` /
+    ``generated`` / ``skipped`` / ``errors`` に合算する。フロント
+    （``admin-lecture-studio.js::_lsPollAudioTask``）は completed 時にこれらのカウントから
+    「N件生成 / M件スキップ (全T件)」を組み立てるため、フロント変更なしで
+    「対象トピックが原稿未生成でスキップされた」ことが件数として伝わる。内訳
+    （``topic_targets`` / ``topic_generated`` / ``topic_skipped`` / ``topic_failed`` /
+    ``topic_skipped_no_script``）と事実文 ``message`` も result_data に含める
+    （0件生成が「完了」とだけ表示される事故をなくす）。
     """
     bind_usage_context("admin:lecture_tts", course_id=course_id)
-    total = len(chunks)
+    topic_targets = _topic_audio_targets(course_data)
+    total = len(chunks) + len(topic_targets)
     generated = 0
     skipped = 0
     errors = 0
@@ -1314,9 +1386,17 @@ def _batch_audio_worker(
     # topic_lecture_audio_cache に加算的にキャッシュ。course_data が渡されたときのみ）。
     # 受講画面がトピック教材ベースで表示するトピックは、この音声で読み上げられる。
     # 完了マークの前に実行して、タスク完了＝再生可能を保証する。
-    if course_data is not None:
+    chunk_generated, chunk_skipped, chunk_errors = generated, skipped, errors
+    topic_summary = {
+        "topics_total": len(topic_targets),
+        "topics_generated": 0,
+        "topics_skipped": 0,
+        "topics_failed": 0,
+        "topics_no_script": 0,
+    }
+    if course_data is not None and topic_targets:
         try:
-            _generate_course_topic_audio(course_id, course_data, course_language)
+            topic_summary = _generate_course_topic_audio(course_id, course_data, course_language)
         except TtsFatalError as exc:
             logger.error("Topic TTS fatal error, aborting task %s: %s", task_id, exc)
             update_background_task(task_id, "failed", error_message=str(exc))
@@ -1326,6 +1406,31 @@ def _batch_audio_worker(
                 "Topic audio generation failed for task %s (chunk audio unaffected)", task_id,
                 exc_info=True,
             )
+            # トピック相当分を errors として集計する（黙って成功に見せない。N18）
+            topic_summary["topics_failed"] = len(topic_targets)
+
+    # トピック単位の結果をチャンク単位のカウントへ合算する（フロントは completed 時に
+    # generated/skipped/errors から完了メッセージを組み立てるため、フロント変更なしで
+    # 「対象トピックが原稿未生成でスキップされた」ことが件数として伝わる）。
+    generated += topic_summary["topics_generated"]
+    skipped += topic_summary["topics_skipped"]
+    errors += topic_summary["topics_failed"]
+
+    # 正直な完了サマリ（事実文）。0件生成が「完了」とだけ表示される事故をなくす。
+    message_parts = [
+        f"対象チャンク {len(chunks)} 件: 生成 {chunk_generated} 件 / "
+        f"スキップ {chunk_skipped} 件 / エラー {chunk_errors} 件"
+    ]
+    if topic_targets:
+        no_script = topic_summary["topics_no_script"]
+        reason = f"（うち原稿未生成 {no_script} 件）" if no_script else ""
+        message_parts.append(
+            f"対象トピック {topic_summary['topics_total']} 件: "
+            f"生成 {topic_summary['topics_generated']} 件 / "
+            f"スキップ {topic_summary['topics_skipped']} 件{reason} / "
+            f"エラー {topic_summary['topics_failed']} 件"
+        )
+    message = "、".join(message_parts)
 
     update_background_task(task_id, "completed", result_data={
         "course_id": course_id,
@@ -1335,10 +1440,18 @@ def _batch_audio_worker(
         "skipped": skipped,
         "errors": errors,
         "progress": 100,
+        # トピック教材経路の内訳（正直な報告。N18）
+        "chunk_targets": len(chunks),
+        "topic_targets": topic_summary["topics_total"],
+        "topic_generated": topic_summary["topics_generated"],
+        "topic_skipped": topic_summary["topics_skipped"],
+        "topic_failed": topic_summary["topics_failed"],
+        "topic_skipped_no_script": topic_summary["topics_no_script"],
+        "message": message,
     })
     logger.info(
-        "batch_audio_worker completed: task=%s course=%s generated=%d skipped=%d errors=%d",
-        task_id, course_id, generated, skipped, errors,
+        "batch_audio_worker completed: task=%s course=%s %s",
+        task_id, course_id, message,
     )
 
 
@@ -1534,15 +1647,21 @@ def batch_generate_audio(
         )
     thread.start()
 
+    # N18: トピック教材経路のトピックも生成対象1件として総数に含める（ワーカーの
+    # result_data.total_chunks と同じ数え方。フロントの「(全N件)」表示と、completed 時の
+    # generated/skipped/errors の合計が一致する）。
+    topic_targets = _topic_audio_targets(course_data)
+
     logger.info(
-        "batch_generate_audio accepted: task=%s course=%s chunks=%d language=%s chain=%s by user=%s",
-        task_id, course_id, len(chunks), target_language, needs_chain, current_user["id"],
+        "batch_generate_audio accepted: task=%s course=%s chunks=%d topics=%d language=%s chain=%s by user=%s",
+        task_id, course_id, len(chunks), len(topic_targets), target_language, needs_chain,
+        current_user["id"],
     )
 
     return LectureAudioGenerateStartResponse(
         task_id=task_id,
         course_id=course_id,
-        total_chunks=len(chunks),
+        total_chunks=len(chunks) + len(topic_targets),
         status="pending",
     )
 

@@ -7410,3 +7410,20 @@ body {
     grid-template-columns: 1fr;
   }
 }
+
+/* ── 一行の事実文トースト（N32: ロックトピックの視覚と挙動の齟齬を事実文で埋める） ── */
+.fact-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-secondary, #475569);
+  border: 1px solid var(--color-border-secondary, #d8dee6);
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-size: 12.5px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  z-index: 1200;
+  pointer-events: none;
+}

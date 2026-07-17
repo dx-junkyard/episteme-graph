@@ -535,3 +535,140 @@ class TestAssessDomainStandardization:
         assert body["queued"] is True
         assert not any(c.isdigit() for c in body["note"])
         assert scheduled == [("particle_physics", False)]
+
+
+# ---------------------------------------------------------------------------
+# N2: 手動リンク作成用の共通部品候補検索
+# GET /elements/{type}/{id}/shared-part-candidates
+# ---------------------------------------------------------------------------
+
+
+class TestSharedPartCandidates:
+    PATH = "/api/admin/deliberation/elements/theory_claim/c1/shared-part-candidates"
+
+    def test_unauthenticated_rejected(self, client_and_tokens):
+        client, _s, _t = client_and_tokens
+        response = client.get(self.PATH)
+        assert response.status_code in (401, 403)
+
+    def test_student_rejected(self, client_and_tokens):
+        client, student, _t = client_and_tokens
+        response = client.get(self.PATH, headers=_auth(student))
+        assert response.status_code == 403
+
+    def test_shared_part_element_returns_422(self, client_and_tokens, monkeypatch):
+        client, _s, teacher = client_and_tokens
+        import routes.deliberation as route_mod
+
+        monkeypatch.setattr(route_mod.refs, "resolve", lambda *a, **k: _fake_shared_part_ref())
+        response = client.get(
+            "/api/admin/deliberation/elements/shared_part/sp-1/shared-part-candidates",
+            headers=_auth(teacher),
+        )
+        assert response.status_code == 422
+
+    def test_viewable_gate_is_enforced(self, client_and_tokens, monkeypatch):
+        client, _s, teacher = client_and_tokens
+        import routes.deliberation as route_mod
+        from fastapi import HTTPException
+
+        monkeypatch.setattr(route_mod.refs, "resolve", lambda *a, **k: _fake_document_ref())
+
+        def deny(*a, **k):
+            raise HTTPException(status_code=404, detail="document not found")
+
+        monkeypatch.setattr(route_mod, "_ensure_document_viewable", deny)
+        response = client.get(self.PATH, headers=_auth(teacher))
+        assert response.status_code == 404
+
+    def test_unresolved_domain_degrades_with_factual_note(self, client_and_tokens, monkeypatch):
+        client, _s, teacher = client_and_tokens
+        import routes.deliberation as route_mod
+
+        monkeypatch.setattr(route_mod.refs, "resolve", lambda *a, **k: _fake_document_ref())
+        monkeypatch.setattr(route_mod, "_ensure_document_viewable", lambda *a, **k: None)
+        monkeypatch.setattr(route_mod.dialogue, "document_domain_key", lambda _d: "")
+
+        called = {"search": False}
+        monkeypatch.setattr(
+            route_mod.library_search, "find_similar_entries",
+            lambda **k: called.__setitem__("search", True) or [],
+        )
+        response = client.get(self.PATH, headers=_auth(teacher))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["entries"] == []
+        assert "検索できません" in body["note"]
+        assert called["search"] is False
+
+    def test_hits_are_returned_without_numeric_distance(self, client_and_tokens, monkeypatch):
+        client, _s, teacher = client_and_tokens
+        import routes.deliberation as route_mod
+
+        monkeypatch.setattr(route_mod.refs, "resolve", lambda *a, **k: _fake_document_ref())
+        monkeypatch.setattr(route_mod, "_ensure_document_viewable", lambda *a, **k: None)
+        monkeypatch.setattr(route_mod.dialogue, "document_domain_key", lambda _d: "particle_physics")
+
+        captured = {}
+
+        def fake_find(**kwargs):
+            captured.update(kwargs)
+            return [
+                {
+                    "entry_id": "e-1", "version_no": 3, "name": "PMT",
+                    "aliases": ["photomultiplier"], "summary": "sum",
+                    "body": {"typical_parts": []}, "distance": 0.07,
+                },
+                {"entry_id": "", "name": "id なしはスキップ"},
+            ]
+
+        monkeypatch.setattr(route_mod.library_search, "find_similar_entries", fake_find)
+
+        response = client.get(self.PATH + "?q=PMT", headers=_auth(teacher))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["domain_key"] == "particle_physics"
+        assert body["entries"] == [
+            {
+                "shared_part_id": "e-1",
+                "name": "PMT",
+                "aliases": ["photomultiplier"],
+                "summary": "sum",
+            }
+        ]
+        # 数値（distance 等）はレスポンスに出さない（W8）。
+        assert "distance" not in body["entries"][0]
+        # 明示クエリはそのまま検索に使われ、既存 find_similar_entries を再利用する。
+        assert captured["text"] == "PMT"
+        assert captured["domain_key"] == "particle_physics"
+        # theory_claim → theory_component エントリ絞り込み（dialogue と同じ規約）。
+        assert captured["entry_type"] == "theory_component"
+
+    def test_empty_query_falls_back_to_breakdown_text(self, client_and_tokens, monkeypatch):
+        client, _s, teacher = client_and_tokens
+        import routes.deliberation as route_mod
+
+        monkeypatch.setattr(route_mod.refs, "resolve", lambda *a, **k: _fake_document_ref())
+        monkeypatch.setattr(route_mod, "_ensure_document_viewable", lambda *a, **k: None)
+        monkeypatch.setattr(route_mod.dialogue, "document_domain_key", lambda _d: "pp")
+        monkeypatch.setattr(
+            route_mod.decomposition, "build",
+            lambda ref: {"element_type": "theory_claim", "label": "ラベルL", "fields": {"text": "本文T"}, "notes": []},
+        )
+
+        captured = {}
+
+        def fake_find(**kwargs):
+            captured.update(kwargs)
+            return []
+
+        monkeypatch.setattr(route_mod.library_search, "find_similar_entries", fake_find)
+
+        response = client.get(self.PATH, headers=_auth(teacher))
+        assert response.status_code == 200
+        body = response.json()
+        # 0件は事実文で正直に（煽らない）。
+        assert body["entries"] == []
+        assert "見つかりません" in body["note"]
+        assert "ラベルL" in captured["text"]
+        assert "本文T" in captured["text"]

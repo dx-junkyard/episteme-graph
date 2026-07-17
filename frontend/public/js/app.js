@@ -520,6 +520,9 @@
     sb.querySelectorAll("[data-topic]").forEach(function (el) {
       el.addEventListener("click", function () {
         var tid = this.getAttribute("data-topic");
+        // N32: ロック表示（グレー/鍵）のトピックも遷移は従来どおり許可する
+        // （押し付けない原則）。視覚と挙動の齟齬は一行の事実文で埋める。
+        maybeShowLockedTopicFact(tid);
         selectTopic(tid);
       });
     });
@@ -527,6 +530,49 @@
     // 分野の地図 (Issue F-1): 学習パスパネル下部の常設ミニマップ。
     // 骨格を同梱したカートリッジでのみ表示される (なければ領域ごと非表示)。
     if (window.AtlasMinimap) window.AtlasMinimap.mount(sb);
+  }
+
+  // 一行の事実文トースト。評価・催促の語彙を使わず、事実のみを短く示して自動で消える。
+  // 常に最新1枚のみ（連打で積み重ねない）。
+  var _factToastTimer = null;
+  function showFactToast(message) {
+    var existing = document.getElementById("fact-toast");
+    if (existing) existing.remove();
+    if (_factToastTimer) { clearTimeout(_factToastTimer); _factToastTimer = null; }
+    var div = document.createElement("div");
+    div.id = "fact-toast";
+    div.className = "fact-toast";
+    div.setAttribute("role", "status");
+    div.textContent = message;
+    document.body.appendChild(div);
+    _factToastTimer = setTimeout(function () {
+      div.remove();
+      _factToastTimer = null;
+    }, 4000);
+  }
+
+  // N32: ロック表示のトピックをクリックしたとき、視覚（鍵/グレー）と挙動（遷移可）の
+  // 齟齬を一行の事実文で埋める。遷移自体は従来どおり許可する（押し付けない原則）。
+  // 「前のトピックの確認が未完了です」が事実であるときだけ表示する
+  // （前のトピックが確認済みなら表示が古いだけなので何も出さない — fail-closed）。
+  function maybeShowLockedTopicFact(topicId) {
+    if (!state.course) return;
+    var topics = state.course.topics || [];
+    var idx = -1;
+    for (var i = 0; i < topics.length; i++) {
+      if (topics[i].id === topicId) { idx = i; break; }
+    }
+    if (idx <= 0) return; // 先頭トピック・不明トピックには「前のトピック」が無い
+    var topic = topics[idx];
+    if ((topic.status || "locked") !== "locked") return;
+    if (topic.id === state.currentTopicId) return;
+    var progress = state.course.progress || {};
+    if (progress.course_completed) return;
+    var completed = Array.isArray(progress.completed_topic_ids) ? progress.completed_topic_ids : [];
+    if (completed.indexOf(topic.id) !== -1) return; // 本人確認済み（ロック表示が古いだけ）
+    var prev = topics[idx - 1];
+    if (!prev || prev.status === "completed" || completed.indexOf(prev.id) !== -1) return;
+    showFactToast("前のトピックの確認が未完了です");
   }
 
   // ── Render: Chat ───────────────────────────────────────────────────
@@ -1167,28 +1213,53 @@
     }
   }
 
+  // D層 (D3-6): 台帳の一行事実文を取得する。台帳未記帳 (404)・取得失敗時は null
+  // （fail-closed）。段階ラベルと事実文のみで、数値スコアは扱わない。
+  // 同一 (targetType, targetId) はセッション内でキャッシュする（再描画のたびに
+  // 再取得しない。null＝未記帳もキャッシュして 404 の連打を避ける）。
+  var _ledgerFactLineCache = {};
+  async function fetchLearnerLedgerFactLine(targetType, targetId) {
+    if (!targetId || !state.courseId) return null;
+    var cacheKey = state.courseId + "|" + targetType + "|" + targetId;
+    if (Object.prototype.hasOwnProperty.call(_ledgerFactLineCache, cacheKey)) {
+      return _ledgerFactLineCache[cacheKey];
+    }
+    var text = null;
+    try {
+      const res = await apiFetch("/learning/courses/" + state.courseId +
+        "/ledger/" + encodeURIComponent(targetType) + "/" + encodeURIComponent(targetId));
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.fact_line) {
+          text = data.fact_line;
+          var axes = (data.scopes || []).map(function (s) {
+            return [s.condition, s.domain, s.precision, s.system].filter(Boolean).join(" / ");
+          }).filter(Boolean);
+          if (axes.length > 1) text += "（記帳スコープ: " + axes.join("；") + "）";
+        }
+      }
+    } catch (_) { /* fail-closed */ }
+    _ledgerFactLineCache[cacheKey] = text;
+    return text;
+  }
+
+  // 台帳一行の共通様式（component ポップアップと出典タブで同一の見た目にする）。
+  function makeLedgerLineDiv(text) {
+    var div = document.createElement("div");
+    div.className = "learner-ledger-line";
+    div.style.cssText = "margin-top:8px;padding-top:6px;border-top:1px dashed var(--color-border,#ddd);" +
+      "font-size:12px;color:var(--color-text-secondary,#64748b)";
+    div.textContent = text;
+    return div;
+  }
+
   // D層 (D3-6): 対象 claim/equation/component の検証状態の一行事実文を併記する。
   // 台帳未記帳 (404)・取得失敗時はセクション自体を出さない（fail-closed）。
   // 検証済みスコープも未記帳も同じ精度で示す（§8-1・8-2 — 不安を煽らない中立文言）。
   async function appendLearnerLedgerLine(container, targetType, targetId) {
-    if (!container || !targetId || !state.courseId) return;
-    try {
-      const res = await apiFetch("/learning/courses/" + state.courseId +
-        "/ledger/" + encodeURIComponent(targetType) + "/" + encodeURIComponent(targetId));
-      if (!res.ok) return;
-      const data = await res.json();
-      if (!data || !data.fact_line) return;
-      var text = data.fact_line;
-      var axes = (data.scopes || []).map(function (s) {
-        return [s.condition, s.domain, s.precision, s.system].filter(Boolean).join(" / ");
-      }).filter(Boolean);
-      if (axes.length > 1) text += "（記帳スコープ: " + axes.join("；") + "）";
-      var div = document.createElement("div");
-      div.style.cssText = "margin-top:8px;padding-top:6px;border-top:1px dashed var(--color-border,#ddd);" +
-        "font-size:12px;color:var(--color-text-secondary,#64748b)";
-      div.textContent = text;
-      container.appendChild(div);
-    } catch (_) { /* fail-closed */ }
+    if (!container) return;
+    var text = await fetchLearnerLedgerFactLine(targetType, targetId);
+    if (text) container.appendChild(makeLedgerLineDiv(text));
   }
 
   // ── 分野の地図: 学習パス提案カード (Issue C-3, 仕様書 §8) ─────────────
@@ -1888,7 +1959,8 @@
         html += '<p class="lx-sec-head">参照した根拠</p>';
         srcs.forEach(function (s) {
           var c = tierCls(s.tier);
-          html += '<div class="lx-src ' + c + '"><div class="lx-src-top">';
+          // D層 (D3-6): 台帳併記用にチャンク ID をカードへ持たせる（描画後に非同期併記）。
+          html += '<div class="lx-src ' + c + '" data-lx-ledger-chunk="' + escHtml(s.chunk_id || "") + '"><div class="lx-src-top">';
           html += '<span class="lx-src-title">' + escHtml(s.source_title || "不明な教材") + '</span>';
           html += '<span class="lx-src-badges">';
           if (s.origin) html += '<span class="lx-origin-badge">' + escHtml(ORIGIN_LABEL[s.origin] || s.origin) + '</span>';
@@ -1947,6 +2019,92 @@
         if (openDetails.open) loadLearnerOpenAssumptions();
       });
     }
+
+    // D層 (D3-6): 根拠カードへ台帳の検証状態を一行併記（非同期・fail-closed）。
+    annotateSourceCardsWithLedger(el);
+  }
+
+  // D層 (D3-6): 出典タブの根拠カードに、そのチャンクに含まれる数式（equation）・
+  // claim の台帳検証状態を一行の事実として併記する。学習者に開かれた ID 供給源は
+  // equation は source-chunk API の formulas[].id（解析パイプラインの equation_id）、
+  // claim は学習者向け読み取り専用 API `/chunks/{chunk_id}/claim-refs`（コース教材
+  // 厳密一致のみを返す）。台帳未記帳 (404)・API 失敗時は何も出さない
+  // （fail-closed: 台帳未記帳コースでは表示が一切変わらない）。数値は出さない。
+  var _chunkEquationIdsCache = {};
+  var _chunkClaimIdsCache = {};
+  function annotateSourceCardsWithLedger(root) {
+    if (!root || !state.courseId) return;
+    var cards = root.querySelectorAll("[data-lx-ledger-chunk]");
+    var seen = {};
+    Array.prototype.forEach.call(cards, function (card) {
+      var chunkId = card.getAttribute("data-lx-ledger-chunk");
+      if (!chunkId || seen[chunkId]) return; // 同一チャンクの重複カードは最初の1枚だけ
+      seen[chunkId] = true;
+      annotateOneSourceCardLedger(card, chunkId);
+    });
+  }
+
+  async function annotateOneSourceCardLedger(card, chunkId) {
+    try {
+      var entries = _chunkEquationIdsCache[chunkId];
+      if (!entries) {
+        entries = [];
+        try {
+          const res = await apiFetch("/learning/courses/" + state.courseId +
+            "/source-chunk/" + encodeURIComponent(chunkId));
+          if (res.ok) {
+            const data = await res.json();
+            var seenIds = {};
+            ((data && data.formulas) || []).forEach(function (f) {
+              var id = f && f.id ? String(f.id) : "";
+              // パイプライン由来の equation_id のみ対象。旧フォーマット変換で付く
+              // [[FORMULA_N]] やトピック教材の TOPIC_FORMULA_N は台帳対象ではない。
+              if (!id || /^\[\[FORMULA_\d+\]\]$/.test(id) || /^TOPIC_FORMULA_/.test(id)) return;
+              if (seenIds[id]) return;
+              seenIds[id] = true;
+              entries.push({ id: id, label: (f && f.label) ? String(f.label) : "" });
+            });
+          }
+        } catch (_) { /* fail-closed */ }
+        _chunkEquationIdsCache[chunkId] = entries;
+      }
+      // claim 拡張: チャンク→claim ID は学習者向け読み取り専用 API から解決する。
+      // equation 経路の成否とは独立に fail-closed（一方の失敗が他方を巻き込まない）。
+      var claimEntries = _chunkClaimIdsCache[chunkId];
+      if (!claimEntries) {
+        claimEntries = [];
+        try {
+          const cres = await apiFetch("/learning/courses/" + state.courseId +
+            "/chunks/" + encodeURIComponent(chunkId) + "/claim-refs");
+          if (cres.ok) {
+            const cdata = await cres.json();
+            ((cdata && cdata.claims) || []).forEach(function (c) {
+              var id = c && c.id ? String(c.id) : "";
+              if (!id) return;
+              claimEntries.push({ id: id, label: (c && c.label) ? String(c.label) : "" });
+            });
+          }
+        } catch (_) { /* fail-closed */ }
+        _chunkClaimIdsCache[chunkId] = claimEntries;
+      }
+      var combined = entries.map(function (e) {
+        return { kind: "equation", id: e.id, label: e.label, prefix: "数式 " };
+      }).concat(claimEntries.map(function (e) {
+        return { kind: "claim", id: e.id, label: e.label, prefix: "主張 " };
+      }));
+      var shown = {};
+      var count = 0;
+      // 1カード最大3行（過密防止）。equation・claim を合算した上限で維持する。
+      for (var i = 0; i < combined.length && count < 3; i++) {
+        var text = await fetchLearnerLedgerFactLine(combined[i].kind, combined[i].id);
+        if (!text) continue;
+        var line = combined[i].label ? (combined[i].prefix + combined[i].label + " — " + text) : text;
+        if (shown[line]) continue; // 同一文言の重複行は出さない
+        shown[line] = true;
+        count++;
+        if (card.isConnected) card.appendChild(makeLedgerLineDiv(line));
+      }
+    } catch (_) { /* fail-closed */ }
   }
 
   // D層 (D3-6): 未検証合意リスト（読み取り専用・台帳の投影）。
@@ -2781,6 +2939,10 @@
   const VOICE_MIN_SPEECH_MS = 400;    // これ未満の発話は物音とみなして破棄
   const VOICE_RMS_THRESHOLD = 0.015;  // 発話とみなす音量（RMS）
   const VOICE_IDLE_RESET_MS = 60000;  // 無発話でセグメントを作り直す（メモリ抑制）
+  // N33: エラー定型文の TTS はこの間隔をあける（失敗が続くときに TTS 呼び出しを
+  // 連打しない。間隔内はパネル表示のみに縮退）。
+  const VOICE_ERROR_TTS_COOLDOWN_MS = 15000;
+  const VOICE_ERROR_MESSAGE = "エラーが発生しました。もう一度どうぞ。";
 
   const voiceState = {
     active: false,
@@ -2797,6 +2959,7 @@
     segmentStart: 0,
     busy: false,   // 文字起こし〜応答再生中（この間は区切り検知を止める）
     player: null,
+    lastErrorTtsAt: 0,  // N33: エラー定型文 TTS の最終試行時刻
   };
 
   function setVoiceStatus(kind, label) {
@@ -2956,21 +3119,68 @@
 
     setVoiceStatus("thinking", "文字起こし中…");
     let text = "";
+    let transcribeFailed = false;
     try {
       text = await transcribeVoiceBlob(blob);
-    } catch (_) { /* best-effort */ }
+    } catch (_) { transcribeFailed = true; }
     if (!voiceState.active) return;
-    if (!text) { resumeVoiceListening(); return; }
+    if (transcribeFailed) {
+      // N33: サーバーエラーを無言で聞き取りに戻さない。短い定型文で知らせてから再開する。
+      await voiceErrorFeedback(VOICE_ERROR_MESSAGE);
+      if (voiceState.active) resumeVoiceListening();
+      return;
+    }
+    if (!text) { resumeVoiceListening(); return; }  // 無音・聞き取れず（エラーではない）
 
     setVoiceTranscript("あなた: " + text);
     setVoiceStatus("thinking", "先生が考えています…");
     const data = await sendMessage(text, { intent_mode: "casual" });
     if (!voiceState.active) return;
-    if (!data || !data.answer) { resumeVoiceListening(); return; }
+    if (!data || !data.answer) {
+      // N33: チャット失敗もエラーとして知らせる（sendMessage はエラー時 null を返す）。
+      await voiceErrorFeedback(VOICE_ERROR_MESSAGE);
+      if (voiceState.active) resumeVoiceListening();
+      return;
+    }
 
     showVoiceSourceMaterial(data.sources || []);
-    await speakVoiceAnswer(data.answer);
+    const spoken = await speakVoiceAnswer(data.answer);
+    if (!spoken && voiceState.active) {
+      // N33: TTS 自体が失敗しているのでパネル表示のみに縮退（TTS 再試行しない）。
+      setVoiceTranscript("音声を再生できませんでした。回答はチャット欄に表示されています。");
+    }
     if (voiceState.active) resumeVoiceListening();
+  }
+
+  // N33: ハンズフリー中のサーバーエラーを無言にしない。可能なら短い定型文を TTS で
+  // 再生し、TTS 自体が失敗している場合はボイスパネルへの表示のみに縮退する。
+  // 定型文 TTS は VOICE_ERROR_TTS_COOLDOWN_MS に1回までに抑え、失敗の連鎖で
+  // TTS 呼び出しのループにならないようにする（再帰・自動再試行はしない）。
+  async function voiceErrorFeedback(message) {
+    if (!voiceState.active) return;
+    setVoiceTranscript(message);
+    const now = Date.now();
+    if (voiceState.lastErrorTtsAt && now - voiceState.lastErrorTtsAt < VOICE_ERROR_TTS_COOLDOWN_MS) {
+      return; // パネル表示のみに縮退
+    }
+    voiceState.lastErrorTtsAt = now;
+    try {
+      const res = await apiFetch("/learning/voice/speak", {
+        method: "POST", body: JSON.stringify({ text: message }),
+      });
+      if (!res.ok) return; // パネル表示のみに縮退
+      const audioB64 = (await res.json()).audio_base64 || "";
+      if (!audioB64 || !voiceState.active) return;
+      setVoiceStatus("speaking", "先生が話しています…");
+      await new Promise(function (resolve) {
+        const player = new Audio("data:audio/mp3;base64," + audioB64);
+        voiceState.player = player;
+        player.onended = resolve;
+        player.onerror = resolve;
+        player.play().catch(resolve);
+      });
+      voiceState.player = null;
+    } catch (_) { /* パネル表示のみに縮退 */ }
   }
 
   function resumeVoiceListening() {
@@ -2989,12 +3199,15 @@
     const res = await fetch(API + "/learning/voice/transcribe?language=ja", {
       method: "POST", headers: headers, body: form,
     });
-    if (!res.ok) return "";
+    // N33: サーバーエラーは「無音（空文字）」と区別して throw する
+    // （呼び出し側がエラーフィードバックを返せるように）。
+    if (!res.ok) throw new Error("transcribe failed: " + res.status);
     const data = await res.json();
     return (data.text || "").trim();
   }
 
-  // 応答を TTS で再生する。TTS が使えない環境では静かにスキップ（テキストは残る）。
+  // 応答を TTS で再生する。再生できたら true、TTS が使えない環境・失敗時は false
+  //（N33: 呼び出し側がパネル表示のみへ縮退できるように成否を返す。テキストは残る）。
   async function speakVoiceAnswer(answerText) {
     let audioB64 = "";
     try {
@@ -3003,7 +3216,7 @@
       });
       if (res.ok) audioB64 = (await res.json()).audio_base64 || "";
     } catch (_) { /* best-effort */ }
-    if (!audioB64 || !voiceState.active) return;
+    if (!audioB64 || !voiceState.active) return false;
     setVoiceStatus("speaking", "先生が話しています…");
     await new Promise(function (resolve) {
       const player = new Audio("data:audio/mp3;base64," + audioB64);
@@ -3013,6 +3226,7 @@
       player.play().catch(resolve);
     });
     voiceState.player = null;
+    return true;
   }
 
   // 応答の第1根拠チャンクをパネルに教材表示する（会話中に教材が画面に出る）。

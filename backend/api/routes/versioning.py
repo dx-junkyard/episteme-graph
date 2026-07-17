@@ -102,6 +102,50 @@ def _require_viewer(object_type: str, object_id: str, current_user: dict) -> str
     return canonical
 
 
+def _permission_flags(object_type: str, canonical_id: str, uid: str | None) -> dict:
+    """version-state 用の権限フラグ（N10残: コース版管理の過剰隠蔽是正）。
+
+    フロントは「見せて、できない操作は理由付きで無効化」に統一するため、非所有者にも
+    version-state 自体は返す（`_require_viewer` を通過済み＝閲覧権はある）一方、
+    発行・削除予約セクションの活性化はこのフラグで判定させる。
+
+    - is_owner: 所有者か（`_require_owner` と同じ判定条件）。
+    - can_publish / can_schedule_deletion: 現状は is_owner と同値
+      （publish/schedule_deletion は `_require_owner` で所有者限定のため）。
+      将来これらの操作が editor 等に拡張されても呼び出し側（フロント）の分岐を
+      変えずに済むよう、意味的に独立したフィールドとして返す。
+    - can_edit: 所有者 or editor（document は resolve_document_access、course は
+      user_can_edit_course に委譲。両者とも所有者を含む判定）。
+    - role: "owner" / "editor" / "viewer" のいずれか（表示の出し分け用。
+      `_require_viewer` を通過済みのため viewer 未満は無い）。
+
+    判定に失敗したら全て fail-closed（is_owner=False 等、最も制限的な側）。
+    """
+    try:
+        if object_type == vschema.OBJECT_TYPE_DOCUMENT:
+            access = services.resolve_document_access(uid, canonical_id)
+            is_owner = bool(access.is_owner)
+            can_edit = bool(access.can_edit)
+        else:
+            is_owner = bool(services.user_owns_course(uid, canonical_id))
+            can_edit = bool(services.user_can_edit_course(uid, canonical_id))
+    except Exception:
+        logger.warning(
+            "permission flag resolution failed for %s=%s", object_type, canonical_id,
+            exc_info=True,
+        )
+        is_owner = False
+        can_edit = False
+    role = "owner" if is_owner else ("editor" if can_edit else "viewer")
+    return {
+        "is_owner": is_owner,
+        "can_publish": is_owner,
+        "can_schedule_deletion": is_owner,
+        "can_edit": can_edit,
+        "role": role,
+    }
+
+
 def _map_versioning_error(exc: Exception) -> HTTPException:
     if isinstance(exc, vschema.PurgedError):
         return HTTPException(status_code=410, detail=str(exc))
@@ -177,9 +221,17 @@ def get_version_state(
     object_id: str,
     current_user: dict = Depends(_require_teacher),
 ):
-    """オブジェクトの版状態 + 呼び出し元のバッジ（更新あり/削除予定）。"""
+    """オブジェクトの版状態 + 呼び出し元のバッジ（更新あり/削除予定）+ 権限フラグ。
+
+    権限フラグ（is_owner/can_publish/can_schedule_deletion/can_edit/role）は N10残の
+    対応: 非所有者にも version-state を返す（既に閲覧権はある）ため、フロントは
+    「見せて、できない操作は理由付きで無効化」の表示に切り替えられる。
+    """
     canonical = _require_viewer(object_type, object_id, current_user)
-    return resolver.view_badges(object_type, canonical, _uid(current_user))
+    uid = _uid(current_user)
+    badges = resolver.view_badges(object_type, canonical, uid)
+    perms = _permission_flags(object_type, canonical, uid)
+    return {**badges, **perms}
 
 
 # ---------------------------------------------------------------------------

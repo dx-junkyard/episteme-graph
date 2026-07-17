@@ -545,3 +545,34 @@ class TestMeJourneyRouteBehavior:
                 node_id="missing", current_user={"id": "user-1"},
             )
         assert exc_info.value.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# N16（2026-07-17）: 本人スコープでの reconstruction claim → topic 解決
+# （claim_topic_by_course はコースごとに独立して効く）
+# ---------------------------------------------------------------------------
+
+
+class TestPersonScopeClaimTopicResolution:
+    def test_claim_topic_by_course_is_applied_per_course(self):
+        reconstructions = [
+            _recon(id_="r-a", claim_id="claimX", course_id="courseA",
+                   created_at="2026-01-01T00:00:00Z"),
+            _recon(id_="r-b", claim_id="claimX", course_id="courseB",
+                   created_at="2026-01-02T00:00:00Z"),
+        ]
+        atlas_by_course = {"courseA": {"topicA1": "atlas_a1"}}
+        claim_topic_by_course = {"courseA": {"claimX": "topicA1"}}  # courseB には無い
+        net = build_person_network([], reconstructions, atlas_by_course, claim_topic_by_course)
+        by_id = {n.id: n for n in net.nodes}
+        assert by_id["r-a"].topic_id == "topicA1"
+        assert by_id["r-a"].anchor.atlas_node_id == "atlas_a1"
+        # courseB 側はマップが無いので従来どおり未解決（fail-closed / P4）
+        assert by_id["r-b"].topic_id is None
+        assert by_id["r-b"].anchor.atlas_node_id is None
+
+    def test_claim_topic_by_course_omitted_is_backward_compatible(self):
+        reconstructions = [_recon(id_="r-a", claim_id="claimX", course_id="courseA")]
+        net = build_person_network([], reconstructions, {})
+        assert net.nodes[0].topic_id is None
+        assert net.nodes[0].anchor.atlas_node_id is None

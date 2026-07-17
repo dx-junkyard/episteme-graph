@@ -125,6 +125,51 @@ def fetch_topic_atlas_binding(course_id: str) -> dict[str, str]:
     return binding
 
 
+def _claim_topic_map_from_data(data: dict) -> dict[str, str]:
+    """``topics[].linked_claim_ids`` から {claim_id: topic_id} を組み立てる（N16）。
+
+    ``linked_claim_ids`` は ``core/course_content_builder.py`` がトピック教材生成時に
+    component 経由で決定論的に書き込む既存フィールド（``CourseTopic.linked_claim_ids``、
+    正本は ``core/course_data.py``）。LLM を使わず、既存の教材構築結果を読むだけで
+    claim_id → topic_id を逆引きできる。1つの claim が複数トピックに現れる場合は
+    ``iter_all_topics`` の出現順で最初に見つかったトピックを採用する（決定論）。
+    """
+    mapping: dict[str, str] = {}
+    for topic in iter_all_topics(data):
+        topic_id = topic.get("id")
+        if not topic_id:
+            continue
+        for claim_id in topic.get("linked_claim_ids") or []:
+            claim_id = str(claim_id)
+            if claim_id and claim_id not in mapping:
+                mapping[claim_id] = str(topic_id)
+    return mapping
+
+
+def fetch_claim_topic_map(course_id: str) -> dict[str, str]:
+    """コースの ``topics[].linked_claim_ids`` から {claim_id: topic_id} を解決する（N16）。
+
+    ``learner_reconstructions.claim_id`` はどのトピックの教材にも紐づかない場合
+    ``topic_id=None`` のまま導出される（旅が atlas 骨格・コーススコープ近傍へ構造的に
+    到達できない既知の限界。設計書 §14）。ここでは既存の決定論的マッピング
+    （``course_content_builder.py`` がトピック生成時に component 経由で書き込む
+    ``linked_claim_ids``）を逆引きすることで、claim が実際に教材へ組み込まれている
+    ケースについてのみ topic_id を解決する（解決不能な claim はキー自体が無い＝
+    従来どおり None のまま。P4: 情報を落とさない・fail-closed）。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT data FROM learning_courses WHERE id = :course_id"),
+            {"course_id": course_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not row:
+        return {}
+    return _claim_topic_map_from_data(_payload_dict(row[0]))
+
+
 # ---------------------------------------------------------------------------
 # Phase P-0.5（意味論移行, 設計書 §5.1〜5.3）向けの本人スコープ読み取りプリミティブ。
 # course_id を所有境界の WHERE 条件にせず、出所（provenance）として返却 dict に含める。
@@ -235,6 +280,32 @@ def fetch_topic_atlas_binding_for_courses(course_ids: list[str]) -> dict[str, di
             if topic_id and atlas_node_id:
                 binding[str(topic_id)] = str(atlas_node_id)
         result[course_id] = binding
+    return result
+
+
+def fetch_claim_topic_map_for_courses(course_ids: list[str]) -> dict[str, dict[str, str]]:
+    """複数コースの claim→topic_id マップを1クエリで ``{course_id: {claim_id: topic_id}}``
+    として返す（N16, 設計書 §5.1〜5.3 の本人スコープ版と同型）。個人ネットワークが
+    コースをまたいで束ねられるため、``fetch_claim_topic_map`` をコース数だけ N 回
+    呼ぶのではなく、対象コース ID 集合をまとめて解決する。空リストは ``{}``。
+    """
+    ids = [str(c) for c in course_ids if c]
+    if not ids:
+        return {}
+    session = _pg_session()
+    try:
+        placeholders = ", ".join(f":cid_{i}" for i in range(len(ids)))
+        rows = session.execute(
+            sa_text(f"SELECT id, data FROM learning_courses WHERE id IN ({placeholders})"),
+            {f"cid_{i}": course_id for i, course_id in enumerate(ids)},
+        ).fetchall()
+    finally:
+        session.close()
+    result: dict[str, dict[str, str]] = {}
+    for row in rows:
+        course_id = str(row[0])
+        data = _payload_dict(row[1])
+        result[course_id] = _claim_topic_map_from_data(data)
     return result
 
 

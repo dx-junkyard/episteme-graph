@@ -6,6 +6,7 @@ A層(生成パイプライン)には手を入れず、その上に承認・共�
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -16,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "backend" / "api"))
 
-from tests.guardrail_helpers import assert_module_tree_forbids  # noqa: E402
+from tests.guardrail_helpers import assert_module_tree_forbids, extract_function_source  # noqa: E402
 
 MIGRATION = ROOT / "backend" / "db" / "021_endorsement_sharing.sql"
 ROUTES = ROOT / "backend" / "api" / "routes" / "theory_components.py"
@@ -177,6 +178,133 @@ class TestFrontend:
         source = _read(APP_JS)
         assert "showComponentExplanations" in source
         assert "/components/" in source
+
+
+def _js_fn(src: str, name: str, next_name: str) -> str:
+    """admin-lecture-studio.js から `function name` 〜 `function next_name` 直前を切り出す
+    （test_deliberation_ui_static.py 等と同じ簡易抽出方式）。"""
+    start = src.index("function " + name)
+    end = src.index("function " + next_name, start)
+    return src[start:end]
+
+
+class TestClaimLinkConfirmationUI:
+    """N3: claim 紐づけの確定/却下操作。
+
+    「claim 紐づけの最終確定は必ず教員」(設計原則2) の実行手段。AI 候補
+    (confirmed=false) を教員が確定/却下でき、却下は行削除ではなく status 保持(P4)。
+    """
+
+    def test_confirm_reject_reset_buttons_rendered(self):
+        src = _read(ADMIN_LS_JS)
+        assert 'data-claim-action="confirm"' in src
+        assert 'data-claim-action="reject"' in src
+        # 確定・却下とも可逆（候補に戻す）
+        assert 'data-claim-action="reset"' in src
+
+    def test_state_change_goes_through_patch_endpoint(self):
+        src = _read(ADMIN_LS_JS)
+        body = _js_fn(src, "lsSetBackingClaimState", "lsEndorseLevelLabel")
+        assert '"/admin/explanations/" + expId' in body
+        assert '"PATCH"' in body
+        assert "backing_claims" in body
+
+    def test_reject_preserves_entry_p4(self):
+        """却下は status='rejected' で保持し、配列から要素を除去しない（P4）。"""
+        src = _read(ADMIN_LS_JS)
+        body = _js_fn(src, "lsSetBackingClaimState", "lsEndorseLevelLabel")
+        assert '"rejected"' in body
+        assert ".splice(" not in body
+        assert ".filter(" not in body
+        assert ".map(" in body
+
+    def test_backing_claim_state_vocabulary(self):
+        src = _read(ADMIN_LS_JS)
+        body = _js_fn(src, "lsBackingClaimState", "lsRenderBackingClaims")
+        for st in ('"confirmed"', '"rejected"', '"candidate"'):
+            assert st in body
+
+    def test_backend_audits_backing_claims_update(self):
+        """PATCH /explanations/{id} は backing_claims 変更を theory_review_events に監査記録する
+        （設計原則3: 状態変更は監査）。"""
+        source = _read(ROUTES)
+        body = extract_function_source(source, "patch_explanation")
+        assert "backing_claims_update" in body
+        assert "_record_review_event(" in body
+
+
+class TestEndorserListUI:
+    """N30: 承認者個別一覧（名前 + 専門タグ + 段階ラベル。数値スコアは出さない）。"""
+
+    def test_endorsers_details_block_rendered(self):
+        src = _read(ADMIN_LS_JS)
+        assert "data-exp-endorsers" in src
+        assert "承認者一覧" in src
+
+    def test_fetches_individual_endorsements_api(self):
+        src = _read(ADMIN_LS_JS)
+        body = _js_fn(src, "lsLoadEndorsers", "lsOpenCiteSelector")
+        assert '"/admin/explanations/" + expId + "/endorsements"' in body
+
+    def test_shows_stage_labels_not_numeric_scores(self):
+        src = _read(ADMIN_LS_JS)
+        label_fn = _js_fn(src, "lsEndorseLevelLabel", "lsLoadEndorsers")
+        for label in ("強い承認", "暫定", "承認"):
+            assert label in label_fn
+        # 個別一覧の描画は集計の数値フィールドを表示しない（段階ラベルのみ）
+        body = _js_fn(src, "lsLoadEndorsers", "lsOpenCiteSelector")
+        for numeric_field in ("endorser_count", "strong_count", "provisional_count", "expertise_breadth"):
+            assert numeric_field not in body
+
+    def test_endorser_rendering_is_escaped(self):
+        src = _read(ADMIN_LS_JS)
+        body = _js_fn(src, "lsLoadEndorsers", "lsOpenCiteSelector")
+        assert "escHtml(name" in body
+        assert "escHtml(tag" in body
+
+
+class TestCiteCourseSelector:
+    """N35: 引用操作は生のコースID手入力（window.prompt）ではなくコース選択にする。"""
+
+    def test_no_window_prompt_left(self):
+        src = _read(ADMIN_LS_JS)
+        assert "window.prompt(" not in src
+
+    def test_courses_are_loaded_from_admin_courses_api(self):
+        src = _read(ADMIN_LS_JS)
+        body = _js_fn(src, "lsOpenCiteSelector", "lsEndorseExplanation")
+        assert '"/admin/courses"' in body
+        assert "data-cite-select" in body
+
+    def test_options_limited_to_editable_courses(self):
+        """引用API(_ensure_editable)が編集権限を要求するため owner/editor に絞る。"""
+        src = _read(ADMIN_LS_JS)
+        body = _js_fn(src, "lsOpenCiteSelector", "lsEndorseExplanation")
+        assert '"owner"' in body
+        assert '"editor"' in body
+
+    def test_source_course_excluded(self):
+        src = _read(ADMIN_LS_JS)
+        body = _js_fn(src, "lsOpenCiteSelector", "lsEndorseExplanation")
+        assert "component.course_id" in body
+
+    def test_cite_call_still_uses_cite_endpoint(self):
+        src = _read(ADMIN_LS_JS)
+        body = _js_fn(src, "lsOpenCiteSelector", "lsEndorseExplanation")
+        assert '"/cite"' in body
+
+
+class TestES5ComplianceCLayerUI:
+    """開発ルール5: admin 系 JS は ES5。C層 UI 領域の追加分をリグレッションガードする。"""
+
+    def test_c_layer_region_is_es5(self):
+        src = _read(ADMIN_LS_JS)
+        start = src.index("=== 承認・共有レイヤー(C層) UI")
+        end = src.index("function lsInsertTheoryChip", start)
+        region = src[start:end]
+        assert "=>" not in region
+        assert re.search(r"\b(const|let)\s", region) is None
+        assert "`" not in region
 
 
 class TestALayerUntouched:

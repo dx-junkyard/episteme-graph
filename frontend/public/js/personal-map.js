@@ -453,7 +453,10 @@
     checkbox.type = "checkbox";
     checkbox.addEventListener("change", () => onToggleChange(checkbox.checked));
     label.appendChild(checkbox);
-    label.appendChild(document.createTextNode("わたしの地図"));
+    // N17: 最上位パネル（personal-map-home.js）の「わたしの地図」とラベルが重複していた
+    // ため、オーバーレイ内トグルは「自分の記録を重ねる」に改名（機能は不変 — atlas の
+    // 公共骨格の上に本人の痕跡ドットを重畳表示するトグル）。
+    label.appendChild(document.createTextNode("自分の記録を重ねる"));
     row.appendChild(label);
     wrap.appendChild(row);
 

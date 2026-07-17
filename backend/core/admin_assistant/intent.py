@@ -66,6 +66,11 @@ _KEYWORDS: dict[str, tuple] = {
     "users.create_teacher": ("教員", "先生", "教師", "アカウント", "作成"),
     "system.view_stats": ("統計", "stats", "状況", "件数"),
     "system.view_error_logs": ("エラー", "ログ", "error", "障害"),
+    # N13/N31: 図分類レビュー・stumbles・schema-proposals（いずれも guidance_only）。
+    # 「図」「提案」単体は他語（地図・検証提案 等）に部分一致するため複合語のみを使う。
+    "materials.review_figures": ("図・画像", "図の分類", "画像の分類", "図分類"),
+    "stumbles.view": ("つまづき", "つまずき", "未回答", "答えられなかった"),
+    "schema_proposals.review": ("スキーマ提案", "スキーマ拡張", "shadow testing", "シャドーテスト"),
 }
 
 # selection のキー → target_type（曖昧な削除/可視性の絞り込みに使う）。

@@ -152,14 +152,48 @@
     if (panelEl.hasAttribute("hidden")) openPanel(); else closePanel();
   }
 
-  function greet() {
-    appendAiMsg(
+  // N12（実行可否の事前開示）: 挨拶文の「代行できます」例示は、サーバが executable=true と
+  // 申告した（＝代行ハンドラ実装済みの）操作に限定する。未実装の action は
+  // 「道案内のみ対応」と明示し、どれが実際に動くかを事前に区別できるようにする。
+  function buildGreeting(capabilities) {
+    var base =
       "こんにちは。管理画面の操作をお手伝いします。\n\n" +
       "・**説明**: 「コースを公開するには？」\n" +
-      "・**道案内**: 「教材ってどこからアップロードするの？」\n" +
-      "・**代行**: 「このコースを公開して」\n\n" +
-      "あなたの権限でできる操作だけをご案内します。"
-    );
+      "・**道案内**: 「教材ってどこからアップロードするの？」\n";
+    var executable = [];
+    var guideOnly = [];
+    var i, c;
+    if (capabilities && capabilities.length) {
+      for (i = 0; i < capabilities.length; i++) {
+        c = capabilities[i];
+        if (!c || c.kind !== "action") continue;
+        if (c.executable) executable.push(c.title);
+        else guideOnly.push(c.title);
+      }
+    }
+    if (executable.length) {
+      base += "・**代行**（実行まで対応）: " + executable.join("・") + "\n";
+      if (guideOnly.length) {
+        base += "・**道案内のみ対応**: " + guideOnly.join("・") + "\n";
+      }
+    } else {
+      // capability 一覧が取れないときは、実装済みと確認されている例だけを出す（捏造しない, P4）。
+      base += "・**代行**: 「このコースを公開して」\n";
+    }
+    base += "\nあなたの権限でできる操作だけをご案内します。";
+    return base;
+  }
+
+  function greet() {
+    // サーバの capability 一覧（executable フラグ付き）で挨拶を組み立てる。
+    // 取得失敗時は静的文面へ縮退（fail-closed。代行例示は実装済みのもののみ）。
+    apiFetch("/admin/assistant/capabilities").then(function (res) {
+      return res.ok ? res.json() : null;
+    }).then(function (rows) {
+      if (bodyEl && !bodyEl.childNodes.length) appendAiMsg(buildGreeting(rows));
+    }).catch(function () {
+      if (bodyEl && !bodyEl.childNodes.length) appendAiMsg(buildGreeting(null));
+    });
   }
 
   // -------------------------------------------------------------------------

@@ -57,6 +57,7 @@ from schemas import (
     AssistantActionRequest,
     AssistantActionResponse,
     AssistantActionSummary,
+    AssistantCapabilityOut,
     AssistantChatRequest,
     AssistantChatResponse,
     AssistantLocatePlan,
@@ -165,6 +166,22 @@ def _locate_plan_for(cap, screen_context: dict) -> AssistantLocatePlan | None:
 # ---------------------------------------------------------------------------
 
 
+def _capability_is_executable(cap) -> bool:
+    """代行ハンドラが実装済みか（N12: 実行可否の事前開示）。
+
+    kind=action かつ actions/ に handler が登録されているもののみ True。
+    guidance_only / handler 未実装の action は False（＝説明・道案内のみ）。
+    """
+    return cap.is_action() and get_handler(cap.id) is not None
+
+
+def _capability_display_title(cap) -> str:
+    """capability 提示用のタイトル。未実装 action には「道案内のみ対応」を付す（N12）。"""
+    if cap.is_action() and not _capability_is_executable(cap):
+        return f"{cap.title}（道案内のみ対応）"
+    return cap.title
+
+
 def _denial_response(cap, role: str) -> AssistantChatResponse:
     """権限外（P1）。説明も道案内も代行もしない honest な拒否。"""
     need = _ROLE_LABELS.get(cap.required_role, cap.required_role)
@@ -217,7 +234,9 @@ def _guidance_response(message: str, role: str, cap) -> AssistantChatResponse:
         )
         screen = primary.get("screen", "")
     else:
-        examples = "・".join(c.title for c in allowed[:5])
+        # N12: 代行ハンドラ未実装の action は「道案内のみ対応」を明示する
+        # （どれが実際に動くか事前に判る。実行可否の事前開示）。
+        examples = "・".join(_capability_display_title(c) for c in allowed[:5])
         parts.append(
             "できる操作の例: " + examples + "。"
             "知りたい操作を具体的に教えてください（例: コースの公開、教材のアップロード）。"
@@ -263,6 +282,12 @@ def _infer_args(cap, message: str) -> tuple[dict, str | None]:
             return {}, "開示範囲を public（全体）/ group（グループ限定）/ private（自分のみ）の" \
                        "どれにしますか？"
         return {"visibility": vis}, None
+    if cap.id == "lecture_studio.rewrite_chunk_script":
+        # 発話そのものが書き換え指示（例: 「この原稿をもっとやさしく書き換えて」）。
+        text = (message or "").strip()
+        if not text:
+            return {}, "どのように書き換えるか、指示内容を教えてください。"
+        return {"prompt": text}, None
     return {}, None
 
 
@@ -505,6 +530,30 @@ def assistant_chat(
 
     resp.source = res.source
     return resp
+
+
+# ---------------------------------------------------------------------------
+# 8.1b GET /capabilities（実行可否の事前開示, N12）
+# ---------------------------------------------------------------------------
+
+
+@admin_router.get("/capabilities", response_model=list[AssistantCapabilityOut])
+def assistant_list_capabilities(
+    current_user: dict = Depends(_require_teacher),
+) -> list[AssistantCapabilityOut]:
+    """現在ロールで到達可能な capability の一覧（P1: サーバ側でフィルタ）。
+
+    `executable` は「代行ハンドラが実装済みか」（N12）。フロントの挨拶文・capability
+    提示はこのフラグで「代行できます」と「道案内のみ対応」を区別する。読み取り専用・
+    DB 非変更・LLM 非呼び出し。
+    """
+    role = current_user["role"]
+    out: list[AssistantCapabilityOut] = []
+    for cap in caps.capabilities_for(role):
+        d = cap.summary_dict()
+        d["executable"] = _capability_is_executable(cap)
+        out.append(AssistantCapabilityOut(**d))
+    return out
 
 
 # ---------------------------------------------------------------------------

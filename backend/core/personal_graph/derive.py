@@ -224,14 +224,39 @@ def _reconstruction_chain_facts(root_id: str, by_id: dict[str, dict]) -> list[st
     return facts
 
 
-def _reconstruction_node(row: dict, by_id: dict[str, dict]) -> PersonalNode:
+def _reconstruction_node(
+    row: dict,
+    by_id: dict[str, dict],
+    claim_topic_map: dict[str, str] | None = None,
+    topic_atlas: dict[str, str] | None = None,
+) -> PersonalNode:
+    """N4 ノードを組み立てる。
+
+    ``topic_id`` は既定 ``None``（claim アンカーは topic 粒度の帰属を持たないため）だが、
+    N16 是正として ``claim_topic_map``（``queries.fetch_claim_topic_map`` が
+    ``topics[].linked_claim_ids`` から逆引きした {claim_id: topic_id}）で claim が
+    実際にいずれかのトピック教材へ組み込まれていることが分かれば、そのトピックを
+    ``topic_id`` に設定する。さらにそのトピックがコース⇄地図バインディング
+    （``topic_atlas``）を持てば ``anchor.atlas_node_id`` にも反映する（アンカー自体は
+    claim のまま — atlas_node_id は topic 由来の binding からの導出という P-0 の意味論を
+    維持する）。これにより journey の [4]/[5]（atlas 骨格・コーススコープ近傍）区間と
+    「わたしの地図」のドット配置が reconstruction ノードでも成立する（決定論・非LLM。
+    ``course_content_builder.py`` が component 経由で書き込んだ既存マッピングを読むだけ）。
+    解決できない claim（どのトピックにも組み込まれていない）は従来どおり ``None``
+    のまま — 「まだ地図にない」トレイに残る（P4: 情報を落とさない）。
+    """
     row_id = str(row["id"])
+    claim_id = str(row.get("claim_id") or "")
+    topic_id = (claim_topic_map or {}).get(claim_id)
+    atlas_node_id = (topic_atlas or {}).get(str(topic_id)) if topic_id else None
     return PersonalNode(
         id=row_id,
         node_kind=NODE_KIND_RECONSTRUCTION,
         label="claim への再構成",
-        anchor=PersonalAnchor(anchor_type="claim", anchor_id=str(row.get("claim_id") or "")),
-        topic_id=None,
+        anchor=PersonalAnchor(
+            anchor_type="claim", anchor_id=claim_id, atlas_node_id=atlas_node_id,
+        ),
+        topic_id=topic_id,
         created_at=str(row.get("created_at") or ""),
         facts=_reconstruction_chain_facts(row_id, by_id),
         source={
@@ -247,8 +272,13 @@ def build_network(
     traces: list[dict],
     reconstructions: list[dict],
     topic_atlas: dict[str, str],
+    claim_topic_map: dict[str, str] | None = None,
 ) -> PersonalNetwork:
     """§4 の導出アルゴリズム本体（純粋関数・非LLM・決定論）。
+
+    ``claim_topic_map``（N16 是正, 既定 None＝後方互換）は {claim_id: topic_id} で、
+    reconstruction ノードの ``topic_id`` 解決に使う（``_reconstruction_node`` 参照）。
+    省略時は従来どおり全 reconstruction ノードの ``topic_id`` が ``None`` になる。
 
     - N1 tension: ``kind='tension'`` かつ ``status in TENSION_OWNED_STATUSES`` のみ採用。
       ``status='connected'`` の行だけ bridge 辺を張る。
@@ -298,7 +328,7 @@ def build_network(
             continue
         if row.get("self_check") in _SELF_CHECK_DISAGREE:
             continue
-        nodes.append(_reconstruction_node(row, by_id))
+        nodes.append(_reconstruction_node(row, by_id, claim_topic_map, topic_atlas))
 
     nodes.sort(key=lambda n: (n.created_at, n.id))
     return PersonalNetwork(nodes=nodes, edges=edges)
@@ -315,7 +345,8 @@ def derive_personal_network(user_id: str, course_id: str) -> PersonalNetwork:
     traces = queries.fetch_traces(user_id, course_id)
     reconstructions = queries.fetch_reconstructions(user_id, course_id)
     topic_atlas = queries.fetch_topic_atlas_binding(course_id)
-    return build_network(traces, reconstructions, topic_atlas)
+    claim_topic_map = queries.fetch_claim_topic_map(course_id)
+    return build_network(traces, reconstructions, topic_atlas, claim_topic_map)
 
 
 # ---------------------------------------------------------------------------
@@ -332,12 +363,17 @@ def build_person_network(
     traces: list[dict],
     reconstructions: list[dict],
     atlas_by_course: dict[str, dict[str, str]],
+    claim_topic_by_course: dict[str, dict[str, str]] | None = None,
 ) -> PersonalNetwork:
     """本人スコープの導出（純粋関数・非LLM・決定論）。設計書 §5.1/§5.2。
 
     rows を ``course_id`` でグルーピングし、各コースについて既存 ``build_network`` を
     そのコースの topic_atlas（``atlas_by_course.get(course_id, {})``）で呼び、返った
-    ノードに ``course_id`` をスタンプしてマージする。最後に nodes を (created_at, id) で
+    ノードに ``course_id`` をスタンプしてマージする。
+
+    ``claim_topic_by_course``（N16 是正, 既定 None＝後方互換）は
+    ``{course_id: {claim_id: topic_id}}``。各コースの ``build_network`` 呼び出しへ
+    そのコース分の claim_topic_map を渡し、reconstruction ノードの topic 解決に使う。最後に nodes を (created_at, id) で
     再ソートする。edges はコースIDの辞書順に連結する（決定論。edges 自体は再ソートしない
     — ``build_network`` が既にコース内で決定論順に組み立てている）。
 
@@ -366,10 +402,12 @@ def build_person_network(
     all_edges: list[PersonalEdge] = []
     for course_id in course_ids:
         topic_atlas = atlas_by_course.get(course_id, {})
+        claim_topic_map = (claim_topic_by_course or {}).get(course_id)
         sub_network = build_network(
             traces_by_course.get(course_id, []),
             recon_by_course.get(course_id, []),
             topic_atlas,
+            claim_topic_map,
         )
         for node in sub_network.nodes:
             node.course_id = course_id
@@ -430,4 +468,5 @@ def derive_person_network(user_id: str) -> PersonalNetwork:
         if row.get("course_id")
     })
     atlas_by_course = queries.fetch_topic_atlas_binding_for_courses(course_ids)
-    return build_person_network(traces, reconstructions, atlas_by_course)
+    claim_topic_by_course = queries.fetch_claim_topic_map_for_courses(course_ids)
+    return build_person_network(traces, reconstructions, atlas_by_course, claim_topic_by_course)

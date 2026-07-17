@@ -47,6 +47,7 @@ from core.doubt.schema import (
 )
 from core.doubt.scope_candidates.worker import maybe_schedule_scope_candidates
 from core.postgres import get_session as _pg_session
+from core.status import cross_layer_notify
 from core.schema import (
     AUDIT_ENTITY_ASSUMPTION,
     AUDIT_ENTITY_CHALLENGE,
@@ -195,6 +196,50 @@ def _endorsement_label(consensus_explicit: dict) -> str:
     if count <= 0:
         return ""
     return f"教員{count}名が承認"
+
+
+def _challenge_target_recorder(target_type: str, target_id: str) -> str | None:
+    """疑義対象を記帳・確定した教員 id（横断インボックス fan-out の宛先解決, N14）。
+
+    対象種別ごとに「最も自然な記帳者」を辿る:
+      - assumption: `assumption_nodes.confirmed_by`（未確定なら手動作成者 `created_by` に
+        フォールバック——どちらも本人が記帳する行為に相当する）。
+      - claim: `epistemic_ledger.verification_scopes`（JSONB 配列）の直近エントリの
+        `recorded_by`。スコープ 0 件（空欄）は D層の正常状態（§0「空欄はエラーではなく
+        事実」）なので、その場合は None を返し通知しない（宛先不在は fail-closed）。
+    """
+    session = _pg_session()
+    try:
+        if target_type == "assumption":
+            row = session.execute(
+                sa_text(
+                    "SELECT confirmed_by::text, created_by::text FROM assumption_nodes "
+                    "WHERE id::text = :aid"
+                ),
+                {"aid": target_id},
+            ).fetchone()
+            if not row:
+                return None
+            return row[0] or row[1] or None
+        if target_type == "claim":
+            row = session.execute(
+                sa_text(
+                    "SELECT verification_scopes FROM epistemic_ledger "
+                    "WHERE target_type = 'claim' AND target_id = :tid"
+                ),
+                {"tid": target_id},
+            ).fetchone()
+            if not row or not row[0]:
+                return None
+            scopes = row[0] if isinstance(row[0], list) else json.loads(row[0] or "[]")
+            for scope in reversed(scopes):
+                recorded_by = str((scope or {}).get("recorded_by") or "").strip()
+                if recorded_by:
+                    return recorded_by
+            return None
+        return None
+    finally:
+        session.close()
 
 
 def _load_level_for_row(session, course_id: str, load_score: Any) -> str:
@@ -1116,6 +1161,22 @@ def create_challenge(
         {"action": "create", "target_type": target_type, "target_id": target_id,
          "challenge_type": body.challenge_type},
     )
+    # 横断インボックス fan-out（N14, best-effort）: 対象を記帳・確定した教員へ「疑義が
+    # 起票された」通知。主語は疑義の型（人格対立にしない）。起票者本人が記帳者なら
+    # 通知しない（自己起票への通知は無意味）。
+    try:
+        recorder_id = _challenge_target_recorder(target_type, target_id)
+        actor_id = str(current_user.get("id") or "")
+        if recorder_id and recorder_id != actor_id:
+            cross_layer_notify.notify_user(
+                recorder_id,
+                cross_layer_notify.NOTIF_LEDGER_TARGET_CHALLENGED,
+                target_type,
+                target_id,
+                {"challenge_id": challenge_id, "challenge_type": body.challenge_type},
+            )
+    except Exception:  # noqa: BLE001 — 通知失敗は疑義の起票そのものを止めない
+        logger.debug("cross-layer notify (challenge) skipped for %s/%s", target_type, target_id, exc_info=True)
     return {"ok": True, "challenge_id": challenge_id, "status": "open"}
 
 

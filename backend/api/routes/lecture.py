@@ -40,12 +40,14 @@ from core.course_data import (
     find_course_topic,
 )
 from core.lecture import (
-    auto_paginate_slides,
     build_lecture_sequence,
+    build_topic_slides,
     compute_material_audio_readiness,
+    compute_topic_audio_readiness,
     generate_spoken_text_and_formulas,
     get_course_lecture_language,
     get_user_mastered_concepts,
+    lecture_uses_topic_material,
     normalize_to_placeholder_format,
     split_slides,
 )
@@ -92,8 +94,10 @@ def get_lecture_sequence(
     # 非レクチャー時と一致させる）。実チャンク教材しか無いトピックだけがチャンク経路
     # （下記・PDF由来チャンク）へフォールバックする。音声はスライド単位で
     # topic_lecture_audio_cache から解決する（_build_topic_draft_segment 内）。
+    # 述語・スライド分割の正本は core/lecture.py（lecture_uses_topic_material /
+    # build_topic_slides）。
     topic_segment = None
-    if _lecture_uses_topic_material(topic_info):
+    if lecture_uses_topic_material(topic_info):
         topic_segment = _build_topic_draft_segment(course_id, topic_id, topic_info, course_data)
     if topic_segment:
         return LectureSequenceResponse(
@@ -419,12 +423,17 @@ def get_topic_audio_status(
 
     # トピック教材ベースのレクチャー（表示＝非レクチャー教材表示と一致）は、
     # トピック音声 (topic_lecture_audio_cache) の readiness で判定する。
-    # get_lecture_sequence の表示ソース判定（_lecture_uses_topic_material）と同じ
-    # 述語を使い、ボタン活性・表示・音声生成の食い違いを防ぐ。
-    if _lecture_uses_topic_material(topic_info):
-        readiness = _compute_topic_audio_readiness(
-            course_id, topic_id, topic_info, lecture_language,
-        )
+    # get_lecture_sequence の表示ソース判定（lecture_uses_topic_material）と同じ
+    # 述語を使い、ボタン活性・表示・音声生成の食い違いを防ぐ。判定の正本は
+    # core/lecture.py::compute_topic_audio_readiness（状態投影と同じ判定を共有）。
+    if lecture_uses_topic_material(topic_info):
+        session = _pg_session()
+        try:
+            readiness = compute_topic_audio_readiness(
+                session, course_id, topic_id, topic_info, lecture_language,
+            )
+        finally:
+            session.close()
         ready_slides = readiness["ready_slides"]
         return {
             "course_id": course_id,
@@ -587,112 +596,10 @@ def _is_valid_uuid(value: str) -> bool:
         return False
 
 
-def _topic_student_material(topic: dict) -> str:
-    material = topic.get("student_material")
-    if isinstance(material, dict):
-        text = str(material.get("source_text") or "").strip()
-        if text:
-            return text
-    return str(topic.get("content") or topic.get("summary") or "").strip()
-
-
-def _topic_spoken_script(topic: dict) -> str:
-    return str(topic.get("spoken_script") or topic.get("content") or topic.get("summary") or "").strip()
-
-
-def _lecture_uses_topic_material(topic: dict) -> bool:
-    """このトピックのレクチャーをトピック教材（student_material/spoken_script）ベースで
-    組むかどうかを判定する（唯一の正本）。
-
-    受講画面の非レクチャー表示（``get_topic_material`` = student_material 最優先）と
-    レクチャー表示を一致させるため、トピックが授業用の教材本文または読み上げ原稿を
-    持つならトピック教材経路を使う。持たなければ PDF 由来チャンク経路へフォールバックする。
-    ``get_lecture_sequence`` / ``get_topic_audio_status`` / トピック音声生成の3者が
-    同じ判定を使うことで、表示・ボタン活性・音声生成の食い違いを防ぐ。
-    """
-    return bool(_topic_student_material(topic) or _topic_spoken_script(topic))
-
-
-import re as _re
-
-def _resolve_equation_embeds(
-    text: str,
-    evidence_links: list[dict],
-    existing_formulas: list[dict],
-) -> tuple[str, list[dict]]:
-    """![[equation:xxx]] / [[equation:xxx]] 埋め込みを [[FORMULA_N]] プレースホルダーに変換する。
-
-    evidence_links から LaTeX を取得できる場合はそれを使い、取得できない場合は
-    埋め込みを空文字列に除去する（生テキストをフロントに渡さない）。
-    """
-    eq_by_id: dict[str, dict] = {}
-    for link in (evidence_links or []):
-        if link.get("kind") == "equation":
-            tid = str(link.get("target_id") or "").strip()
-            if tid:
-                eq_by_id[tid] = link
-
-    formulas = list(existing_formulas)
-    formula_offset = len(formulas)
-
-    def _replace(m: _re.Match) -> str:
-        eq_id = m.group(1).strip()
-        link = eq_by_id.get(eq_id)
-        latex = str(link.get("latex") or "") if link else ""
-        summary = str(link.get("summary") or "") if link else ""
-        plain_text = str(link.get("plain_text") or "") if link else ""
-        idx = formula_offset + len(formulas) - len(existing_formulas)
-        placeholder = f"[[FORMULA_{idx}]]"
-        # 描画用 LaTeX は link.latex を最優先する。summary は意味要約（散文）の
-        # 場合があり、それを LaTeX として埋め込むと数式描画が壊れる。
-        body = latex or summary
-        if body:
-            formulas.append({
-                "id": placeholder,
-                "latex": body,
-                # 読み上げは人間向けテキストを優先する（生 TeX を読み上げない）。
-                "spoken": plain_text or summary or body,
-                "is_display": True,
-            })
-            return placeholder
-        # 解決できない場合は埋め込みを除去する（生テキストを見せない）
-        return ""
-
-    result = _re.sub(r"!\[\[equation:([^\]]+)\]\]", _replace, text)
-    result = _re.sub(r"\[\[equation:([^\]]+)\]\]", _replace, result)
-    return result, formulas
-
-
-def _build_topic_slides(topic: dict) -> tuple[list[dict], str, str, list[dict]]:
-    """トピック教材から、表示・音声・readiness が共有する正準スライドを決定論的に構築する。
-
-    display=student_material、spoken=spoken_script（無ければ content/summary）を、数式
-    プレースホルダー正規化・``![[equation:xxx]]`` 解決のうえ ``auto_paginate_slides`` で
-    スライド分割する（``===`` マーカーがあれば教員の明示分割を優先、無く長い場合は段落
-    境界で自動ページ分割）。受講側（``_build_topic_draft_segment``）・studio の音声生成・
-    readiness の3者がこの関数を通ることで ``slide_index`` を完全一致させる。**LLM を使わない
-    ＝決定論的**（同期パスに非決定性を入れない）。
-
-    Returns
-    -------
-    tuple[list[dict], str, str, list[dict]]
-        ``(slide_dicts, display_text, spoken_text, formulas)``。教材が無ければ
-        ``([], "", "", [])``。
-    """
-    display_text = _topic_student_material(topic)
-    spoken_text = _topic_spoken_script(topic)
-    if not display_text and not spoken_text:
-        return [], "", "", []
-
-    evidence_links = topic.get("evidence_links") or []
-    normalized, formulas = normalize_to_placeholder_format(display_text or spoken_text, [])
-    display_text = normalized
-    # ![[equation:xxx]] 埋め込みを [[FORMULA_N]] プレースホルダーに解決する
-    display_text, formulas = _resolve_equation_embeds(display_text, evidence_links, formulas)
-    display_text, formulas = normalize_to_placeholder_format(display_text or spoken_text, formulas)
-
-    slide_dicts, _mismatch = auto_paginate_slides(display_text, spoken_text, formulas)
-    return slide_dicts, display_text, spoken_text, formulas
+# トピック教材の表示ソース判定（lecture_uses_topic_material）・スライド分割
+# （build_topic_slides）の正本は core/lecture.py に移設済み（N18: 状態投影
+# core/status/projector.py と readiness 判定を共有するため。core から routes を
+# import しない）。
 
 
 def _build_topic_draft_segment(
@@ -705,13 +612,14 @@ def _build_topic_draft_segment(
     変換する。
 
     受講画面の非レクチャー教材表示（``get_topic_material``）と同じ student_material を
-    ``display_text`` に、``spoken_script`` を ``spoken_text`` に割り当て、``_build_topic_slides``
-    でスライド分割する（長い教材は段落境界で自動ページ分割）。各スライドの音声は
-    ``topic_lecture_audio_cache``（``(course_id, topic_id, slide_index)``）から解決し、
-    キャッシュ済みスライドは ``has_audio=True`` にする（教員が原稿スタジオで生成済みなら
-    実声で読み上げ、無ければ受講側でタイマー送りにフォールバックする。§6-4）。
+    ``display_text`` に、``spoken_script`` を ``spoken_text`` に割り当て、
+    ``core.lecture.build_topic_slides`` でスライド分割する（長い教材は段落境界で自動ページ
+    分割）。各スライドの音声は ``topic_lecture_audio_cache``
+    （``(course_id, topic_id, slide_index)``）から解決し、キャッシュ済みスライドは
+    ``has_audio=True`` にする（教員が原稿スタジオで生成済みなら実声で読み上げ、無ければ
+    受講側でタイマー送りにフォールバックする。§6-4）。
     """
-    slide_dicts, display_text, spoken_text, formulas = _build_topic_slides(topic)
+    slide_dicts, display_text, spoken_text, formulas = build_topic_slides(topic)
     if not slide_dicts:
         return None
 
@@ -903,51 +811,8 @@ def _get_topic_audio_cache(
         session.close()
 
 
-def _compute_topic_audio_readiness(
-    course_id: str, topic_id: str, topic: dict, target_language: str,
-) -> dict:
-    """トピック教材ベースのレクチャー音声の readiness を判定する。
-
-    ``_build_topic_slides``（受講側・音声生成側と同一のスライド分割＝自動ページ分割込み）で
-    導出したスライド数と、``topic_lecture_audio_cache`` にキャッシュ済み（かつ
-    ``target_language`` 一致）のスライド数を返す。LLM は呼ばない（軽量なボタン活性判定用）。
-    """
-    slides, _display, _spoken, _formulas = _build_topic_slides(topic)
-    total_slides = len(slides)
-
-    session = _pg_session()
-    try:
-        rows = session.execute(
-            sa_text("""
-                SELECT slide_index, language
-                FROM topic_lecture_audio_cache
-                WHERE course_id = :course_id AND topic_id = :topic_id AND voice = 'alloy'
-            """),
-            {"course_id": course_id, "topic_id": topic_id},
-        ).fetchall()
-    except Exception:
-        logger.warning(
-            "Failed to compute topic audio readiness for %s/%s", course_id, topic_id, exc_info=True,
-        )
-        rows = []
-    finally:
-        session.close()
-
-    lang_by_slide = {int(r[0]): (r[1] or "ja") for r in rows}
-    ready_slides = 0
-    stale_language = False
-    for slide in slides:
-        idx = slide["slide_index"]
-        if idx in lang_by_slide:
-            if lang_by_slide[idx] == target_language:
-                ready_slides += 1
-            else:
-                stale_language = True
-    return {
-        "total_slides": total_slides,
-        "ready_slides": ready_slides,
-        "stale_language": stale_language,
-    }
+# トピック教材ベースの音声 readiness 判定の正本は
+# core/lecture.py::compute_topic_audio_readiness に移設済み（N18）。
 
 
 def _build_slides_for_segment(

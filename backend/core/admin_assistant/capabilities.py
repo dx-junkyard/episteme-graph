@@ -121,13 +121,19 @@ _REGISTRY: list[Capability] = [
         title="チャンクの原稿を AI で書き換える",
         required_role=ROLE_TEACHER,
         kind=KIND_ACTION,
-        scope="own_course",
-        reversible=True,  # L1: 保存前のエディタ反映（クライアント側 Undo）
+        # N12 是正: 既存 rewrite エンドポイント（routes/lecture_studio/scripts.py::
+        # rewrite_lecture_script）は `_require_teacher` のみでコース所有チェックを持たない。
+        # 代行も同一の権限意味論に合わせる（P7: 既存 API の契約を変えない）。
+        scope="any",
+        # N12 是正: 実 API は chunks.display_text / spoken_text / formulas を即時 UPDATE し
+        # 音声キャッシュも無効化する（「保存は別操作」ではない）。したがって L1（クライアント
+        # Undo）ではなく L2 永続可逆 — before スナップショットからサーバ側 revert で復元する。
+        reversible=True,
         target_type="chunk",
         howto_doc="admin_operations/lecture_studio.md#rewrite-chunk",
-        description="選択中チャンクの原稿を指示に沿って AI が書き換える（保存は別操作）。",
-        api={"method": "PUT", "path": "/api/admin/chunks/{chunk_id}/lecture-script/rewrite"},
-        revert={"strategy": "client_local"},
+        description="選択中チャンクの原稿を指示に沿って AI が書き換えて保存する（あとで戻せる）。",
+        api={"method": "POST", "path": "/api/admin/chunks/{chunk_id}/lecture-script/rewrite"},
+        revert={"strategy": "restore_chunk_script"},
         locate_steps=(
             _step("lecture-studio", "chunk_list", "対象のチャンクを選びます", precondition="chunk_selected"),
             _step("lecture-studio", "assistant_open_button", "AI アシスタントを開きます"),
@@ -478,6 +484,60 @@ _REGISTRY: list[Capability] = [
             _step("course-management", "course_row:{course_id}", "対象のコースを選びます"),
             _step("course-management", "sharing_dashboard_button", "「共有ダッシュボード」を押します",
                   precondition="course_selected"),
+        ),
+    ),
+    # -------------------------------------------------------------------
+    # N13/N31 是正（vision_ux_gap_survey_2026-07-17.md §5-5）: 図分類レビュー導線と、
+    # capability 登録ゼロで Copilot から構造的に不可視だった stumbles / schema-proposals
+    # の2画面を段階登録する。いずれも guidance_only（DB 非変更）。
+    # -------------------------------------------------------------------
+    # --- 図・画像の分類レビュー (#496, materials) ---
+    Capability(
+        id="materials.review_figures",
+        screen="materials",
+        title="図・画像の分類を確認する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/materials.md#review-figures",
+        description="教材から抽出された図・画像の AI 分類（機能構成図/データグラフ/解説画像）を"
+                    "確認・確定する。AI の分類は教員が確認するまで候補のまま。",
+        api={"method": "GET", "path": "/api/admin/documents/{document_id}/figures"},
+        locate_steps=(
+            _step("materials", "material_row:{material_id}", "対象の教材を選びます"),
+            _step("materials", "material_figures_button", "「図・画像」を押してモーダルを開きます",
+                  precondition="material_selected"),
+        ),
+    ),
+    # --- つまづきデータ (stumbles) ---
+    Capability(
+        id="stumbles.view",
+        screen="stumbles",
+        title="学生のつまづきデータを確認する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/stumbles.md#view",
+        description="RAG 検索で教材から回答できなかった質問の一覧を確認し、教材補強に活用する。"
+                    "claim 単位のつまづきサマリーは k-匿名集約（評価利用禁止）。",
+        api={"method": "GET", "path": "/api/admin/courses/{course_id}/unanswered-queries"},
+        locate_steps=(
+            _step("stumbles", "stumbles_course_select", "対象のコースを選びます"),
+            _step("stumbles", "stumbles_table", "つまづきデータの一覧を確認します",
+                  precondition="course_selected"),
+        ),
+    ),
+    # --- スキーマ提案 (schema-proposals) ---
+    Capability(
+        id="schema_proposals.review",
+        screen="schema-proposals",
+        title="スキーマ提案を確認・承認する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/schema_proposals.md#review",
+        description="AI が提案したスキーマ拡張をシミュレーションで検証し、承認・却下する。"
+                    "システム全体への適用は全教材の再抽出を伴うため確認ゲートがある。",
+        api={"method": "GET", "path": "/api/admin/schema-proposals"},
+        locate_steps=(
+            _step("schema-proposals", "sp_proposals_list", "提案の一覧を確認します"),
         ),
     ),
 ]

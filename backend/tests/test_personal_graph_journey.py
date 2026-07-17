@@ -558,3 +558,80 @@ class TestJourneyForNodeDocumentViewabilityGate:
         result = journey_for_node("user1", "course1", start.id)
         assert result is not None
         assert calls["graph"] == 1
+
+
+# ---------------------------------------------------------------------------
+# N16（2026-07-17）: 再構成成功ノード（claim アンカー + 解決済み topic_id）が
+# [4] atlas 骨格・[5] 近傍の本人ノードに到達できることの回帰防止。
+# derive.py の claim→topic 解決（claim_topic_map）により topic_id /
+# anchor.atlas_node_id が設定されるようになったため、build_journey は追加変更なしで
+# [4]/[5] を生成できる — その結線を journey 側から固定する。
+# ---------------------------------------------------------------------------
+
+
+class TestReconstructionNodeReachesAtlasSegments:
+    def test_reconstruction_with_resolved_topic_reaches_atlas_step(self):
+        start = _node(
+            id_="r1",
+            node_kind="reconstruction",
+            anchor=_claim_anchor("claimX", atlas_node_id="atlas_1"),
+            topic_id="topic1",
+        )
+        network = PersonalNetwork(nodes=[start])
+        result = build_journey(
+            start, network, _EMPTY_GRAPH, [], {}, {"topic1": "atlas_1"}, set(),
+        )
+        atlas_steps = [s for s in result["steps"] if s["ref"]["kind"] == "atlas_node"]
+        assert len(atlas_steps) == 1
+        assert atlas_steps[0]["ref"]["id"] == "atlas_1"
+
+    def test_reconstruction_with_topic_binding_only_also_reaches_atlas_step(self):
+        """anchor.atlas_node_id が無くても topic_id → topic_atlas のフォールバックで
+        [4] に到達する（_resolved_atlas_node_id の既存フォールバック経路）。"""
+        start = _node(
+            id_="r1",
+            node_kind="reconstruction",
+            anchor=_claim_anchor("claimX"),
+            topic_id="topic1",
+        )
+        network = PersonalNetwork(nodes=[start])
+        result = build_journey(
+            start, network, _EMPTY_GRAPH, [], {}, {"topic1": "atlas_1"}, set(),
+        )
+        atlas_steps = [s for s in result["steps"] if s["ref"]["kind"] == "atlas_node"]
+        assert len(atlas_steps) == 1
+
+    def test_reconstruction_finds_sibling_nodes_near_same_atlas_node(self):
+        start = _node(
+            id_="r1",
+            node_kind="reconstruction",
+            anchor=_claim_anchor("claimX", atlas_node_id="atlas_1"),
+            topic_id="topic1",
+        )
+        sibling = _node(
+            id_="t1",
+            anchor=_topic_anchor("topic1", atlas_node_id="atlas_1"),
+            created_at="2026-02-01T00:00:00Z",
+        )
+        network = PersonalNetwork(nodes=[start, sibling])
+        result = build_journey(
+            start, network, _EMPTY_GRAPH, [], {}, {"topic1": "atlas_1"}, set(),
+        )
+        personal_steps = [s for s in result["steps"] if s["ref"]["kind"] == "personal_node"]
+        assert [s["ref"]["id"] for s in personal_steps] == ["t1"]
+
+    def test_unresolved_reconstruction_still_skips_atlas_segments(self):
+        """claim→topic 解決不能なノード（topic_id=None・atlas_node_id なし）は従来どおり
+        [4]/[5] を静かに省く（設計書 §14 既知の限界）。"""
+        start = _node(
+            id_="r1",
+            node_kind="reconstruction",
+            anchor=_claim_anchor("claimX"),
+            topic_id=None,
+        )
+        network = PersonalNetwork(nodes=[start])
+        result = build_journey(
+            start, network, _EMPTY_GRAPH, [], {}, {"topic1": "atlas_1"}, set(),
+        )
+        assert not any(s["ref"]["kind"] == "atlas_node" for s in result["steps"])
+        assert not any(s["ref"]["kind"] == "personal_node" for s in result["steps"])

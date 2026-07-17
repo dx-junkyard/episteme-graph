@@ -80,6 +80,32 @@
 `figure_table_semantics/agent.py`。図表の意味を caption 優先で復元（LLM enricher は任意）。
 - 出力: `FigureTableSemanticsResult`
 
+### ApparatusSemanticsAgent（L層）— vision LLM・オプトイン
+`apparatus_semantics/agent.py`。図画像（`document_figures` + MinIO `figure-images`）から
+装置・パーツ候補を抽出する vision LLM agent（正本:
+[画像パイプライン + L層 設計書](../features/image_pipeline_knowledge_library_design.md) §5）。
+`figure_table_semantics` 直後に実行されるが、**アップロード時の `analyze_images`
+チェックボックスがオン（既定 off）のときのみ**動く。off の run は
+`{"skipped_by_option": true}` を `stage_outputs` に正直に記録する。
+- 入力: 画像 + caption + 近傍本文（`figure_context.py` の決定論的収集）+ 図中ラベル
+  （`document_figures.inner_labels`、migration 051）+ 略語辞書 + L層ライブラリ**凍結版**の
+  retrieval 候補（0 件でも単独動作 — `match_status ∈ {novel, unknown}` に縮退）
+- 出力: `ApparatusSemanticsResult`（`apparatus_records`: 装置同定候補・parts・connections。
+  #496 以降は図の分類 `suggested_mode` / `analysis_profile` も同一 vision コールで出力）
+- **label_ref grounding**: `ApparatusPart.label_ref`（図中ラベルへの参照）は validator が
+  `inner_labels` 実在を hard error 検査し、`bbox` / `expanded_name` は **LLM 出力からは
+  取らず** `agent.py::_attach_label_grounding` が label_ref → inner_labels / abbreviations の
+  突合で決定論的に付与する
+- **review_required 徹底**: 全出力は常に `review_status='review_required'` 系で、
+  `source_backed` を自動付与しない（確定は人間のみ）。role は本文からの verbatim quote で
+  裏付け、根拠のない役割は書かせない。2 回修復失敗した図も `match_status='unknown'` /
+  `confidence=0.0` の 1 レコードとして保持（P4）
+- 上限: `APPARATUS_MAX_IMAGES_PER_DOCUMENT`（既定 20）/ `APPARATUS_MAX_CALLS_PER_DAY`
+  （既定 30）。超過分は `skipped_by_limit` で保持しステージは正常完了
+- vision 呼び出しは `core/llm.py` の `generate_structured_with_images()`（v1 は OpenAI 経路のみ）。
+  装置候補は ComponentAssembly 経由で `status='candidate'` の theory_components になるが、
+  **TheoryOperationGraph には組み込まない**（式 backing が無いため）
+
 ### ThesisReconstructionAgent（#221）— LLM-first
 `thesis_reconstruction/agent.py`。中心命題（headline thesis）と支持構造（supporting claims）を再構成。
 - 入力: PaperSkeleton + ClaimQualification + EquationSemantics（+ claim objects）

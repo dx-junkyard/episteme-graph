@@ -596,3 +596,93 @@ cartridge 非依存 / 決定論的 input-building）はすべて維持。
 | nearby_text の上限 | input_builder の `_MAX_NEARBY_TEXT_*` を「引き上げ（設定値化）」 | 設定値化は**上流の figure_context 側**（`APPARATUS_CONTEXT_MAX_ITEMS/CHARS`）で実施し、input_builder 側は 16項目×1500字の固定バックストップに引き上げ | 予算管理の正本を1箇所（収集側）にする。agent 単体利用時の防波堤としてバックストップは残す |
 | 略語抽出 | `フル表記 (略語)` 正規表現のみ | 正規表現 + initials 部分列検査 + **先頭語を落とす接尾辞トリム** | 文中埋め込み定義（"The setup uses an external cavity diode laser (ECDL) to ..."）で lazy 量指定子が先行語句を巻き込み定義を取り落とすため |
 | Phase 3（Gemini vision / `get_drawings` / 画像 embedding） | 「任意の強化」 | 未実装 | 原 issue どおり任意。現行 LLM 構成は OpenAI 経路で Phase 1/2 に不要 |
+
+---
+
+## 15. 追補 — 図・画像の分類と「深く検討」UI 切替（#496, migration 052/053, 2026-07-17）
+
+初版実装は抽出画像を一律「装置候補」として扱っていたが、実際の論文図版は装置図だけでは
+ない。#496（commit `5c4c26d` + `cf08ac0`）で、vision 解析が図を**提示モード（presentation
+mode）**に分類し、W層「深く検討」モーダルがモード別の解析 UI に切り替わるようになった。
+candidate-only 原則（原則 2）は不変 — **vision 出力は常に suggestion、確定は教員のみ**。
+
+### 15-1. 分類語彙（`src/episteme_graph/agents/figure_modes.py` が正本）
+
+`FIGURE_MODES = (functional_diagram, data_plot, descriptive_image, mixed, unknown)`
+（UI 表示名: 機能構成図 / グラフ / 写真・解説画像 / 複合 / 不明）。
+
+- 分類は apparatus_semantics の**同一 vision コール**に相乗り（追加 LLM コールなし）。
+  プロンプトは「全画像を装置図と仮定しない」ことを明示し、`suggested_mode` +
+  `mode_reason` + モード別 `analysis_profile` を structured output で返させる。
+  functional_diagram 以外では apparatus 系フィールド（parts/connections 等）は空にさせる。
+- vision 不在時（analyze_images=off・旧 run）は `infer_mode_from_text()` が caption /
+  legacy figure_type から**保守的に**推定する非LLMフォールバック（判別できなければ
+  `unknown`。複数の手掛かりが混在すれば `mixed`）。旧 apparatus artifact は
+  `legacy_apparatus_artifact` 理由付きで functional_diagram に読み替える。
+- モード別 analysis_profile の正規化（`analysis_profile_for_record()`）:
+  functional_diagram = 機能（function）+ 入出力ポート + 接続のグラフ（旧 parts/connections
+  からの決定論的変換 `functional_profile_from_apparatus()` あり）/ data_plot = plot_type・
+  axes・series・**observations（直接観察）と interpretations（解釈）の分離**・highlights /
+  descriptive_image = summary・subjects・regions・teaching_points / mixed = panels[]
+  （パネルごとにモード）。
+
+### 15-2. 保存先カラムとレビューフラグ（migration 052/053）
+
+`document_figures` に追加（AI 提案と教員判断を**別カラムで分離** — 再解析は AI 提案を
+更新してよいが教員判断を上書きしてはならない）:
+
+| 列 | 意味 | migration |
+|---|---|---|
+| `suggested_mode` / `mode_reason` / `analysis_profile JSONB` | AI（vision または caption ヒューリスティック）の分類候補・理由・モード別解析。再解析で置換可 | 052 |
+| `reviewed_mode` / `mode_review_status`（pending/reviewed）/ `mode_reviewed_by` / `mode_reviewed_at` | 教員の**分類**オーバーライドと帰属。null クリアで提案に復帰 | 052 |
+| `reviewed_analysis_mode` / `reviewed_analysis_profile JSONB` / `analysis_review_status` / `analysis_reviewed_by` / `analysis_reviewed_at` / `analysis_review_source_annotation_id`（element_annotations への FK） | 教員が確定した**構造化解析**（W層注釈 commit 由来）。AI 候補の再解析でも消えない | 053 |
+
+- `effective_mode = reviewed_mode ?? suggested_mode`（`figure_modes.effective_mode()`）。
+  教員がモードを訂正したが対応する解析が未確定の場合、旧モードの解析を新モードの顔で
+  見せず**空プロファイルに縮退**する（`presentation_payload()` の `analysis_source='none'`）。
+  応答には `analysis_source ∈ {teacher_reviewed, ai_suggestion, none}` を明示。
+- 分類集計は run の `stage_outputs.presentation_modes`（モード別件数）にも記録。
+  DB 書込失敗は fail-soft（解析結果自体は捨てない）。
+
+### 15-3. API（`backend/api/routes/figure_presentation.py`、`_require_teacher`）
+
+- `GET /api/admin/documents/{id}/figures` — 既存契約に分類・プロファイルを追加した正本
+  （legacy admin ルーターより先にマウント）。apparatus_candidates は
+  `effective_mode ∈ {functional_diagram, mixed}` のときのみ返す。
+- `PATCH .../figures/{fid}/presentation-mode` — 教員オーバーライド設定 / null でクリア
+  （`_ensure_document_editable`。監査 `AUDIT_ENTITY_FIGURE_PRESENTATION`）。
+- `POST .../figures/{fid}/reanalyze` — 1図単位の再解析（教員指示 `hint_text` /
+  `focus_bbox` は guided_figure_reanalysis_design.md）。結果は W層 `element_annotations` の
+  **candidate 注釈**になり、教員の commit（`core/figure_presentation.py::
+  commit_reviewed_analysis`。自由文注釈は confirm 不可 —
+  `normalize_figure_analysis_candidate` が構造化候補のみ受理）で 053 列へ昇格する。
+
+### 15-4. UI 切替（`deliberation.js`「深く検討」モーダル）
+
+図要素の overview（`core/deliberation/decomposition.py` が presentation を同梱）を受け、
+`effective_mode` に応じて解析ペインを切り替える: functional_diagram = 機能・ポート・接続
+ビュー / data_plot = 軸・系列・観察/解釈ビュー / descriptive_image = 被写体・領域・
+教示ポイント / mixed = パネル別ネスト表示。ヘッダに分類バッジ + 教員の分類訂正
+セレクト + 「AIで図を再解析」ボタン（hint 入力付き）。分類・解析とも**教員の確定操作
+なしに reviewed にならない**。
+
+### 15-5. ガードレール・テスト
+
+`test_figure_presentation_core.py` / `test_figure_presentation_api.py` /
+`test_figure_reanalysis.py` / `test_deliberation_ui_static.py`（UI 結線）/
+`src/tests/agents/test_figure_modes.py`（分類・変換の決定性）。
+
+---
+
+## 16. 設計判断の追記（2026-07-17）— retired エントリは読み取り専用（N29）
+
+vision×UX ギャップ調査（`docs/architecture/vision_ux_gap_survey_2026-07-17.md` N29）で
+「retired エントリの編集・凍結が素通しになっている」ことが指摘され、次のとおり確定した:
+
+- **`status='retired'` のライブラリエントリは読み取り専用**。draft 編集（`PUT /entries/{id}`）
+  と凍結（`POST /entries/{id}/freeze`）は **409** で拒否し、変更したい場合は先に
+  `POST /entries/{id}/restore` で active に戻す（restore → 編集 → 必要なら再 retire）。
+- 根拠: retire は「retrieval・昇格候補から外す」という運用上の引退宣言であり、引退中の
+  エントリが裏で書き換わったり新版が発行されると、provenance と監査の読みが崩れる。
+  restore を必ず経由させることで「引退の取り消し」自体が監査に残る（P4 と整合）。
+- 閲覧（GET）・版履歴・provenance 表示は retired でも従来どおり可能（情報は落とさない）。

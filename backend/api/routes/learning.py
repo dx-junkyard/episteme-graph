@@ -48,6 +48,7 @@ from services import (
     get_editable_course_data,
     get_viewable_course_data,
     get_chunk_passage,
+    get_chunk_claim_refs,
     get_graph_element_context,
     get_interest_traces,
     get_personal_layer,
@@ -1868,6 +1869,28 @@ def get_source_chunk_route(
     return passage
 
 
+@router.get("/courses/{course_id}/chunks/{chunk_id}/claim-refs")
+def get_chunk_claim_refs_route(
+    course_id: str,
+    chunk_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """出典タブの台帳併記（D3-6）を claim にも拡張するための学習者向け読み取り API。
+
+    チャンクが当該コースの sources 教材に属するかを検証したうえで、そのチャンクに
+    紐づく claim の最小情報（id・claim_type・短い label）のみを返す。数値
+    （confidence 等）は含めない。コース非アクセス・チャンクがコース教材に属さない
+    場合は 404（fail-closed。既存 source-chunk API のゲート欠落は繰り返さない）。
+    """
+    course_data = get_course_data(current_user["id"], course_id)
+    if course_data is None:
+        raise HTTPException(status_code=404, detail="Course not found")
+    claims = get_chunk_claim_refs(course_data, chunk_id)
+    if claims is None:
+        raise HTTPException(status_code=404, detail="Chunk not found in this course")
+    return {"claims": claims}
+
+
 @router.get("/courses/{course_id}/interest-traces")
 def get_interest_traces_route(
     course_id: str,
@@ -2257,13 +2280,58 @@ def voice_speak_route(
     return {"audio_base64": base64.b64encode(audio_bytes).decode("ascii"), "format": "mp3"}
 
 
+def _tension_connect_edge_viewable(user_id: str, edge_id: str) -> bool:
+    """connect 先の graph edge が本人にとって閲覧可能な document に属するか検証する（N38）。
+
+    component 側の検証（``services._tension_connect_component_viewable``）と同型の
+    予防的 fail-closed ゲート。graph edge は独立テーブルを持たず
+    ``theory_component_graphs.graph_json`` の ``edges[]`` 内に ``edge_id`` キーで
+    存在するため、JSONB containment で所属 document を解決し、
+    ``services.resolve_document_access`` で閲覧可否を判定する。
+
+    edge が見つからない・document が特定できない・閲覧不可、のいずれも False
+    （安全側）。既存の connected 行には触らない — connect 時の新規書き込みだけを
+    堰き止める（設計書 §6 / PN-7。journey が閲覧不可 document の情報を漏らす経路を
+    connect 時点で断つ、component 側と同じ理由の予防措置）。
+    """
+    from services import resolve_document_access  # 既存 services の権限判定正本を再利用
+
+    session = _pg_session()
+    try:
+        try:
+            rows = session.execute(
+                sa_text("""
+                    SELECT DISTINCT document_id FROM theory_component_graphs
+                    WHERE graph_json->'edges' @> jsonb_build_array(
+                        jsonb_build_object('edge_id', CAST(:eid AS text))
+                    )
+                """),
+                {"eid": edge_id},
+            ).fetchall()
+        except Exception:
+            return False
+    finally:
+        session.close()
+    document_ids = sorted(str(r[0]) for r in rows if r and r[0])
+    if not document_ids:
+        return False
+    return any(resolve_document_access(user_id, doc_id).can_view for doc_id in document_ids)
+
+
 @router.post("/tension/{trace_id}/connect")
 def connect_tension_route(
     trace_id: str,
     body: TensionConnectRequest,
     current_user: dict = Depends(_get_current_user),
 ) -> dict:
-    """確定済み tension をグラフ上の node/edge に接続する（後続フェーズ）。"""
+    """確定済み tension をグラフ上の node/edge に接続する（後続フェーズ）。
+
+    component_id の閲覧可否は ``services.connect_tension_trace`` 内で検証済み。
+    edge_id は route 側で同型に検証する（N38。fail-closed・既存データ非改変）。
+    """
+    edge_id = (body.edge_id or "").strip()
+    if edge_id and not _tension_connect_edge_viewable(current_user["id"], edge_id):
+        raise HTTPException(status_code=400, detail="Could not connect tension trace")
     result = connect_tension_trace(
         current_user["id"], trace_id,
         component_id=body.component_id, edge_id=body.edge_id,

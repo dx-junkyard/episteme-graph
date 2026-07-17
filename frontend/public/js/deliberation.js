@@ -873,7 +873,7 @@
         '</div>' +
         _notesHtml(decomposition.notes) +
         _positioningHtml(data.positioning)) +
-      _identityLinksSectionHtml() +
+      _identityLinksSectionHtml(decomposition.element_type) +
       _standardizationSectionHtml(decomposition.element_type);
     if (isFigure) {
       _bindFigureImageActions();
@@ -1196,7 +1196,27 @@
   // 「この要素は別の資料・共通部品と同じものだ」という対応づけの一覧。候補
   // （candidate）・確定（confirmed）・却下（rejected）を明示区別し（G2-W）、
   // 確定・却下は教員のみが行う（KN-3）。インスタンス側の表記は書き換えない（KN-2）。
-  function _identityLinksSectionHtml() {
+  // N2: インスタンス要素（document-scoped）には手動でリンク候補を作る導線
+  // 「共通部品と結びつける」を出す（shared_part 自身には出さない — リンクの
+  // source は常にインスタンス側）。作成されるのは常に候補（candidate）で、
+  // 確定は既存の確定/却下ボタンが担う（KN-3）。
+  function _identityLinksSectionHtml(elementType) {
+    var createHtml = "";
+    if (elementType && elementType !== "shared_part") {
+      createHtml =
+        '<div style="margin-top:8px">' +
+          '<button type="button" id="deliberation-identity-link-open-search" class="deliberation-chat-send" style="padding:4px 10px;font-size:12px">共通部品と結びつける</button>' +
+        '</div>' +
+        '<div id="deliberation-identity-link-search" hidden style="margin-top:8px;padding:8px;border:1px solid var(--color-border-tertiary);border-radius:6px">' +
+          '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">' +
+            '<input type="text" id="deliberation-identity-search-input" class="deliberation-chat-input" style="flex:1;min-width:160px;padding:4px 8px;font-size:12.5px" placeholder="検索テキスト（空欄ならこの要素の内容から自動検索）">' +
+            '<button type="button" id="deliberation-identity-search-btn" class="deliberation-chat-send" style="padding:4px 10px;font-size:12px">検索</button>' +
+          '</div>' +
+          '<input type="text" id="deliberation-identity-search-reason" class="deliberation-chat-input" style="width:100%;margin-top:6px;padding:4px 8px;font-size:12.5px" placeholder="結びつける理由（任意）">' +
+          '<div id="deliberation-identity-search-results" style="margin-top:8px"></div>' +
+          '<div id="deliberation-identity-search-note" style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:6px"></div>' +
+        '</div>';
+    }
     return '<div class="deliberation-identity-links-wrap" style="margin-top:16px;padding-top:14px;border-top:1px solid var(--color-border-tertiary)">' +
       '<h4 style="margin:0 0 6px;font-size:14px;color:var(--color-text-primary)">同一性リンク</h4>' +
       '<p style="font-size:11.5px;color:var(--color-text-tertiary);margin:0 0 8px">' +
@@ -1204,7 +1224,135 @@
         '確定・却下は教員のみが行います。既存の表記は書き換えません（リンクの追加のみ）。' +
       '</p>' +
       '<div id="deliberation-identity-links"><p class="deliberation-identity-empty">読み込み中...</p></div>' +
+      createHtml +
     '</div>';
+  }
+
+  // ── N2: 手動リンク作成（共通部品の候補検索 → candidate 作成）────────────────
+  // 検索は GET .../shared-part-candidates（domain はサーバ側で document → cartridge_id
+  // から決定論的に解決。フロントは domain を知らない）。作成は既存の
+  // POST /identity-links（常に candidate・確定は既存 UI）。数値は表示しない（W8）。
+  function _bindIdentityLinkSearch(ref) {
+    var openBtn = document.getElementById("deliberation-identity-link-open-search");
+    if (!openBtn || !ref || ref.elementType === "shared_part") return;
+    openBtn.addEventListener("click", function () {
+      var panel = document.getElementById("deliberation-identity-link-search");
+      if (!panel) return;
+      panel.hidden = !panel.hidden;
+      if (!panel.hidden) {
+        var results = document.getElementById("deliberation-identity-search-results");
+        if (results && !results.childNodes.length) _searchSharedPartCandidates(ref);
+      }
+    });
+    var searchBtn = document.getElementById("deliberation-identity-search-btn");
+    if (searchBtn) {
+      searchBtn.addEventListener("click", function () { _searchSharedPartCandidates(ref); });
+    }
+    var input = document.getElementById("deliberation-identity-search-input");
+    if (input) {
+      input.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" && !e.isComposing && e.keyCode !== 229) {
+          e.preventDefault();
+          _searchSharedPartCandidates(ref);
+        }
+      });
+    }
+  }
+
+  function _searchSharedPartCandidates(ref) {
+    var results = document.getElementById("deliberation-identity-search-results");
+    var note = document.getElementById("deliberation-identity-search-note");
+    if (!results) return;
+    if (note) note.textContent = "";
+    var input = document.getElementById("deliberation-identity-search-input");
+    var q = input ? input.value.trim() : "";
+    results.innerHTML = '<p class="deliberation-identity-empty">検索中...</p>';
+    var path = "/admin/deliberation/elements/" + encodeURIComponent(ref.elementType) + "/" +
+      encodeURIComponent(ref.elementId) + "/shared-part-candidates";
+    var params = [];
+    if (ref.elementType === "equation" && ref.documentId) {
+      params.push("document_id=" + encodeURIComponent(ref.documentId));
+    }
+    if (q) params.push("q=" + encodeURIComponent(q));
+    if (params.length) path += "?" + params.join("&");
+    apiFetch(path)
+      .then(_parseJsonResponse)
+      .then(function (data) {
+        _renderSharedPartCandidates(ref, data || {});
+      })
+      .catch(function (err) {
+        results.innerHTML = '<p class="deliberation-identity-empty">' +
+          escHtml((err && err.detail) || "候補の検索に失敗しました。") + '</p>';
+      });
+  }
+
+  function _sharedPartCandidateRowHtml(entry) {
+    entry = entry || {};
+    var aliases = (entry.aliases || []).filter(function (a) { return a; });
+    return '<div class="deliberation-identity-link-row" data-shared-part-id="' + escHtml(entry.shared_part_id) + '">' +
+      '<div class="deliberation-annotation-body">' + escHtml(entry.name || "(無名)") +
+        (aliases.length ? '<span style="font-size:11.5px;color:var(--color-text-tertiary)">（別名: ' + escHtml(aliases.join("、")) + '）</span>' : '') +
+      '</div>' +
+      (entry.summary ? '<div class="deliberation-annotation-reason">' + escHtml(entry.summary) + '</div>' : '') +
+      '<div class="deliberation-annotation-actions">' +
+        '<button type="button" class="deliberation-annotation-btn commit" data-identity-create="1">この部品と結びつける（候補を作成）</button>' +
+      '</div>' +
+      '<div class="deliberation-annotation-error deliberation-identity-create-error" style="display:none"></div>' +
+    '</div>';
+  }
+
+  function _renderSharedPartCandidates(ref, data) {
+    var results = document.getElementById("deliberation-identity-search-results");
+    if (!results) return;
+    var entries = data.entries || [];
+    if (!entries.length) {
+      // 事実文のみ（0件は正常状態。煽らない・数値を出さない）。
+      results.innerHTML = '<p class="deliberation-identity-empty">' +
+        escHtml(data.note || "同分野の共通部品が見つかりません。") + '</p>';
+      return;
+    }
+    results.innerHTML = entries.map(_sharedPartCandidateRowHtml).join("");
+    Array.prototype.forEach.call(results.querySelectorAll("[data-identity-create]"), function (btn) {
+      btn.addEventListener("click", function () {
+        var row = btn.closest(".deliberation-identity-link-row");
+        if (!row) return;
+        _createIdentityLink(ref, row.getAttribute("data-shared-part-id"), row);
+      });
+    });
+  }
+
+  function _createIdentityLink(ref, sharedPartId, row) {
+    if (!sharedPartId) return;
+    var buttons = row.querySelectorAll("[data-identity-create]");
+    Array.prototype.forEach.call(buttons, function (b) { b.disabled = true; });
+    var reasonInput = document.getElementById("deliberation-identity-search-reason");
+    var body = {
+      instance_element_type: ref.elementType,
+      instance_element_id: ref.elementId,
+      shared_part_id: sharedPartId,
+      reason: reasonInput ? reasonInput.value.trim() : ""
+    };
+    if (ref.documentId) body.document_id = ref.documentId;
+    apiFetch("/admin/deliberation/identity-links", {
+      method: "POST",
+      body: JSON.stringify(body)
+    })
+      .then(_parseJsonResponse)
+      .then(function () {
+        var note = document.getElementById("deliberation-identity-search-note");
+        if (note) note.textContent = "候補を作成しました。上の一覧から確定・却下できます。";
+        // 作成済み（または既存）の候補を一覧に反映する。
+        _loadIdentityLinks(ref);
+        Array.prototype.forEach.call(buttons, function (b) { b.disabled = false; });
+      })
+      .catch(function (err) {
+        var errEl = row.querySelector(".deliberation-identity-create-error");
+        if (errEl) {
+          errEl.style.display = "";
+          errEl.innerHTML = escHtml((err && err.detail) || "リンク候補の作成に失敗しました。");
+        }
+        Array.prototype.forEach.call(buttons, function (b) { b.disabled = false; });
+      });
   }
 
   function _identityLinkRowHtml(link) {
@@ -1660,6 +1808,7 @@
         _resetFigureImageState();
         _renderModalBody(data);
         _bindStandardizationAssessButton(ref);
+        _bindIdentityLinkSearch(ref);
         _loadIdentityLinks(ref);
         return data;
       });
@@ -1763,6 +1912,7 @@
       .then(function (data) {
         _renderModalBody(data);
         _bindStandardizationAssessButton(chatState.ref);
+        _bindIdentityLinkSearch(chatState.ref);
         _loadIdentityLinks(chatState.ref);
       })
       .catch(function (err) {

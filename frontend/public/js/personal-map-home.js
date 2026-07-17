@@ -75,6 +75,9 @@
     // G3-P1: 「いまの地図」タブのコース絞り込み（既定=すべて。クライアント側フィルタのみ・
     // 再 fetch しない。地図オーバーレイに依存しない導線として本パネルに持たせる）。
     courseFilter: "",
+    // N17: 訂正操作の一時フィードバック（personal-map.js の showTransientNote と同じ様式）。
+    noteEl: null,
+    noteTimer: null,
   };
 
   // -------------------------------------------------------------------
@@ -235,6 +238,15 @@
       '<button type="button" class="pm-home-journey-btn" data-pm-home-journey="' +
       esc(node.id) +
       '">ここから旅に出る</button>';
+    // N17: 訂正操作「地図には反映しない」（提案書 §6）を最上位パネルからも使えるようにする。
+    // 対象は tension/question のみ（reconstruction には出さない — コースビュー
+    // personal-map.js の showPopup と同じ対象範囲）。node.id は interest_traces.id。
+    if (node.node_kind === "tension" || node.node_kind === "question") {
+      html +=
+        '<button type="button" class="personal-map-exclude-btn" data-pm-home-map-exclude="' +
+        esc(node.id) +
+        '">地図には反映しない</button>';
+    }
     html += "</div>";
     html += "</div>";
     return html;
@@ -458,6 +470,48 @@
   }
 
   // -------------------------------------------------------------------
+  // N17: 本人による訂正「地図には反映しない」（提案書 §6。コースビュー
+  // personal-map.js の requestMapExclude と同じ API・同じフィードバック文言）。
+  // 痕跡行そのものは削除しない（P4）— 地図の導出から外れるだけの状態遷移で、
+  // dismiss（候補の当落判定）とは独立。操作後はキャッシュを破棄して再取得・再描画する。
+  // -------------------------------------------------------------------
+
+  function showTransientNote(text) {
+    const el = state.noteEl;
+    if (!el) return;
+    el.textContent = text;
+    el.hidden = false;
+    if (state.noteTimer) clearTimeout(state.noteTimer);
+    state.noteTimer = setTimeout(() => {
+      el.hidden = true;
+      el.textContent = "";
+    }, 4000);
+  }
+
+  function requestMapExclude(traceId) {
+    const t = token();
+    if (!t || !traceId) return;
+    fetch(API_BASE + "/learning/traces/" + encodeURIComponent(traceId) + "/map-exclude", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + t },
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error("map-exclude " + res.status);
+        return res.json();
+      })
+      .then(() => {
+        // 除外したノードを起点にした旅カードが残ると stale になるため破棄する
+        closeJourneyArea();
+        // 再取得・再描画（PN-2: 導出はサーバ状態が正。除外済みノードは次の導出から消える）
+        state.cache = null;
+        renderPanel(); // キャッシュ破棄直後は「読み込み中」表示
+        loadNetwork().then(() => renderPanel());
+        showTransientNote("地図には反映しません（問いの軌跡には残ります）");
+      })
+      .catch(() => {}); // fail-closed: 失敗時は何も出さない（エラーバナーは出さない）
+  }
+
+  // -------------------------------------------------------------------
   // パネル全体の描画
   // -------------------------------------------------------------------
 
@@ -519,6 +573,13 @@
       return;
     }
 
+    // N17: 「地図には反映しない」（tension/question のみ。nodeRowHtml が付与する）
+    const excludeBtn = e.target.closest("[data-pm-home-map-exclude]");
+    if (excludeBtn) {
+      requestMapExclude(excludeBtn.getAttribute("data-pm-home-map-exclude"));
+      return;
+    }
+
     // G7-J: 旅の行き止まりから「問いからの旅」タブ（ノード一覧）へ戻り、別の問いを選び直せる。
     const journeyRestart = e.target.closest("[data-pm-home-journey-restart]");
     if (journeyRestart) {
@@ -574,6 +635,13 @@
     content.className = "pm-home-content";
     panel.appendChild(content);
 
+    // N17: 訂正操作の一時フィードバック（数秒で自動的に隠れる。スタイルは
+    // personal-map.js と同じ .personal-map-transient-note を再利用する）
+    const transientNote = document.createElement("div");
+    transientNote.className = "personal-map-transient-note";
+    transientNote.hidden = true;
+    panel.appendChild(transientNote);
+
     const journeyArea = document.createElement("div");
     journeyArea.className = "pm-home-journey-area";
     journeyArea.hidden = true;
@@ -587,6 +655,7 @@
     state.overlayEl = overlay;
     state.tabsEl = tabs;
     state.contentEl = content;
+    state.noteEl = transientNote;
     state.journeyAreaEl = journeyArea;
     return overlay;
   }
@@ -615,6 +684,12 @@
     if (!state.overlayEl) return;
     state.overlayEl.hidden = true;
     closeJourneyArea();
+    // N17: 一時フィードバックも破棄する（次回 open 時に古い文言を残さない）
+    if (state.noteTimer) clearTimeout(state.noteTimer);
+    if (state.noteEl) {
+      state.noteEl.hidden = true;
+      state.noteEl.textContent = "";
+    }
     if (state.lastFocus && typeof state.lastFocus.focus === "function") state.lastFocus.focus();
   }
 

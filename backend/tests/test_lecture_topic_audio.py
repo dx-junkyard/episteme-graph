@@ -15,6 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 LECTURE_PY = ROOT / "backend" / "api" / "routes" / "lecture.py"
+CORE_LECTURE_PY = ROOT / "backend" / "core" / "lecture.py"
 SCRIPTS_PY = ROOT / "backend" / "api" / "routes" / "lecture_studio" / "scripts.py"
 TOPICS_PY = ROOT / "backend" / "api" / "routes" / "lecture_studio" / "topics.py"
 MIGRATION = ROOT / "backend" / "db" / "047_topic_lecture_audio.sql"
@@ -100,23 +101,28 @@ class TestTopicAudioInvalidatedOnEdit:
 
 
 class TestSharedSlideBuilderForConsistency:
-    """表示・音声・readiness の3者が同じ `_build_topic_slides` を通ること（slide_index 一致の要）。"""
+    """表示・音声・readiness の3者が同じ `build_topic_slides`（core/lecture.py の正本）を
+    通ること（slide_index 一致の要）。N18 で正本が routes から core へ移設された。"""
 
     def test_learner_segment_uses_shared_builder(self):
         src = LECTURE_PY.read_text(encoding="utf-8")
-        assert "_build_topic_slides(topic)" in _extract_func(src, "_build_topic_draft_segment")
+        assert "build_topic_slides(topic)" in _extract_func(src, "_build_topic_draft_segment")
 
     def test_readiness_uses_shared_builder(self):
-        src = LECTURE_PY.read_text(encoding="utf-8")
-        assert "_build_topic_slides(topic)" in _extract_func(src, "_compute_topic_audio_readiness")
+        src = CORE_LECTURE_PY.read_text(encoding="utf-8")
+        assert "build_topic_slides(topic)" in _extract_func(src, "compute_topic_audio_readiness")
+
+    def test_course_readiness_uses_shared_builder(self):
+        # コース全体の合算 readiness（状態投影が使う正本）も同じビルダーを通ること。
+        src = CORE_LECTURE_PY.read_text(encoding="utf-8")
+        assert "build_topic_slides(topic)" in _extract_func(src, "compute_course_audio_readiness")
 
     def test_audio_generator_uses_shared_builder(self):
         src = SCRIPTS_PY.read_text(encoding="utf-8")
         body = _extract_func(src, "_generate_course_topic_audio")
-        assert "_build_topic_slides(topic)" in body
         # 音声生成は自前で split せず、共有ビルダーの slide_index をそのまま使う
-        assert "import" in body and "_build_topic_slides" in body
+        assert "build_topic_slides(topic)" in body
 
     def test_shared_builder_uses_auto_pagination(self):
-        src = LECTURE_PY.read_text(encoding="utf-8")
-        assert "auto_paginate_slides(" in _extract_func(src, "_build_topic_slides")
+        src = CORE_LECTURE_PY.read_text(encoding="utf-8")
+        assert "auto_paginate_slides(" in _extract_func(src, "build_topic_slides")

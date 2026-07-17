@@ -827,6 +827,27 @@ PDF 内の画像（装置図・設計図等）を解析パイプラインに取�
   skipped_by_option 記録・core/library の FastAPI 非 import・retrieval が draft を読まない）。
 - **非スコープ（v1）**: 学習者向け表示 / TheoryOperationGraph への装置ノード / CLIP 等の
   画像埋め込みモデル / グループ限定ライブラリ / vision 自動有効化 / table の画像解析。
+- **図・画像の分類と「深く検討」UI 切替（#496, migration 052/053）**: vision 解析
+  （apparatus_semantics の**同一コール**に相乗り・追加 LLM なし）が図を提示モードに分類する。
+  語彙の正本は `src/episteme_graph/agents/figure_modes.py` の `FIGURE_MODES`
+  （`functional_diagram`（機能構成図）/ `data_plot`（グラフ）/ `descriptive_image`
+  （写真・解説画像）/ `mixed` / `unknown`）。vision 不在時は caption ヒューリスティック
+  `infer_mode_from_text()` に縮退（判別不能は `unknown`）。保存先は `document_figures`:
+  AI 候補 = `suggested_mode` / `mode_reason` / `analysis_profile JSONB`（052、再解析で置換可）、
+  教員の分類オーバーライド = `reviewed_mode` / `mode_review_status(pending|reviewed)` /
+  `mode_reviewed_by/at`（052）、教員確定の構造化解析 = `reviewed_analysis_mode` /
+  `reviewed_analysis_profile` / `analysis_review_status` / `analysis_reviewed_by/at` /
+  `analysis_review_source_annotation_id`（053。W層注釈 commit 由来・AI 再解析で消えない）。
+  `effective_mode = reviewed_mode ?? suggested_mode` で、モード訂正後に対応解析が未確定なら
+  旧モードの解析を新モードの顔で見せず空プロファイルに縮退（`analysis_source` を明示）。
+  API は `routes/figure_presentation.py`（figures GET の正本 / `PATCH .../presentation-mode` /
+  `POST .../reanalyze`＝候補注釈化。監査 `entity_type='figure_presentation'`）。UI は
+  `deliberation.js`「深く検討」モーダルが `effective_mode` 別に解析ペインを切替
+  （機能・ポート・接続 / 軸・系列・観察と解釈の分離 / 被写体・領域・教示ポイント / パネル別）。
+  分類・解析とも教員の確定操作なしに reviewed にならない（candidate-only 原則を継承）。
+  詳細は `docs/features/image_pipeline_knowledge_library_design.md` §15。
+- **retired エントリは読み取り専用（2026-07-17 確定）**: retired の draft 編集・凍結は 409。
+  変更は `restore` で active に戻してから（同設計書 §16）。
 
 ### LLM トークン使用量推計（U層, migration 043）
 
@@ -1087,6 +1108,71 @@ confirmed のみ（PN-6）・fail-closed（PN-7）。migration 不要（既存�
   connected_refs・confirmed のみ・Phase B の k=3 は `core/privacy.py` 正本）+
   `test_personal_graph_{derive,person_scope,journey,journey_person,map_ops}.py` +
   `test_personal_map_{ui_guardrails,home_ui_static}.py`。
+
+### 要素検討ワークスペース（W層, migration 048〜050）
+
+一度パイプラインで処理された**任意の1要素**（figure / theory_component / theory_claim /
+equation / 共通部品）を選び、内訳・文脈を確認し AI と対話し、解釈を**候補として**付与する
+横断ハブ。正本は `docs/features/element_deliberation_workspace_design.md`（親文書
+`knowledge_network_vision.md`。KN-1〜4 の不変条項に従う）。Phase 0/1/W-β/2/S 実装済み。
+「E層」は Exposition Layer が占有しているため W層（Workspace）。Field Atlas とは別機能
+（`deliberation-` / `element-` プレフィックスで衝突回避）。教員（TEACHER 以上）のみ。
+実装は `backend/core/deliberation/`（refs / decomposition / positioning / dialogue /
+annotations / store / identity_links / standardization/。FastAPI 非 import）+
+`backend/api/routes/deliberation.py`（実パス `/api/admin/deliberation/...`）+
+`frontend/public/js/deliberation.js`（ES5・`window.Deliberation`）。
+
+**不変条項**: W1 A層非改変（成果テーブルに列を足さず W層専用テーブルに積む）/
+W2 確定は人間・AI は候補のみ（対話の解釈は常に `status='candidate'`、`source_backed` を
+自動付与しない）/ W3 evidence-based（evidence + reason + confidence、断定せず仮説文体）/
+W4 情報を落とさない（対話ログ・候補・却下は削除せず `candidate → committed / dismissed`
+遷移。行削除 API なし）/ W5 権限 fail-closed（document-scoped は
+`_ensure_document_viewable/editable`、domain-scoped 共通部品は L層の権限モデル）/
+W6 同期パスを重くしない（1応答=1 LLM コール、失敗時は非LLM集約へ縮退）/ W7 監査必須
+（`entity_type='deliberation'`）/ W8 数値を見せない（confidence は段階ラベル）/
+W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cross_corpus`）。
+
+- **ElementRef と2スコープ**: `(scope, element_type, element_id, anchor)`。
+  `scope='document'`（1論文からの出現: figure=document_figures.id /
+  theory_component・theory_claim=DB UUID / equation=equations.json の equation_id —
+  テーブル無しのため `stage_outputs` を索く）と `scope='domain'`（共通部品
+  `shared_part` = **L層 `library_entries.id`**。W層は共通部品テーブルを新設しない）。
+- **3つの面**: ①内訳・同定（`decomposition.py`、A層成果の読み出しのみ。figure は #496 の
+  presentation 分類を同梱）②文脈的位置づけ（`positioning.py` の4レンズ = 論文内 /
+  コーパス横断（chunk-proxy ベクトル検索・唯一の新下地。閲覧不可 document は route 層
+  `_apply_cross_corpus_gate` で除外）/ 分野の地図 / C層承認・D層疑義）③対話的検討
+  （`dialogue.py`。figure は vision。`core/llm.py::generate_conversation_turn` で
+  マルチターン + 候補注釈を同一コールの structured output で取得。スキーマ検証失敗は
+  注釈なしに縮退・LLM 失敗は `degraded:true` の非LLMフォールバック）。
+- **DB（migration 049）**: `deliberation_sessions`（対話ログ・追記のみ）/
+  `element_annotations`（`kind ∈ {meaning, decomposition, positioning_note, interpretation,
+  identity, standardization}`・`status ∈ {candidate, committed, dismissed}`）。
+  FK は element_id に張らない（ポリモーフィック）。孤児掃除は document 削除経路に同乗。
+- **コミットルーティング（v1 は3経路）**: `interpretation` → C層 explanation
+  (`kind='personal'`) / `meaning`・`decomposition` → `theory_components.summary` /
+  `teacher_notes` / `identity` → W-β `create_candidate`。`positioning_note` は 422（後続）。
+  W層独自の最終格納庫を持たない（既存構造へ返すハブ）。
+- **同一性リンク（Phase W-β, migration 048 `element_identity_links`）**: instance ↔
+  shared_part の**非破壊リンク**（KN-2。インスタンス側の表記は書き換えず、共通部品側
+  `local_expressions` に出所付き表現を追記）。candidate/confirmed/rejected、一意性は
+  `instance_document_id` を含む4列（equation の element_id が論文間で衝突しうるため）。
+  `confirmed_links_for_document` が P-2 旅 traversal の読み取り正本。閲覧不可 document 由来の
+  リンクは一覧から除外し `hidden_count` を正直に返す。
+- **標準化判定（Phase S, migration 050）**: `core/deliberation/standardization/`
+  （llm_worker 6系統目アダプタ）が三角測量（LLM 事前知識 + L層凍結版類似 + コーパス反復）→
+  `aggregate.decide()` の決定論5語彙（`standard / field_standard / emerging_common / novel /
+  unknown`）合成。**LLM 単独主張は unknown（幻覚ガード）**。確定は教員 commit のみで
+  `library_entries.standardization_status`（migration 050。draft 編集から書けないガバナンス列、
+  語彙の正本は `core/library/schema.py`）へ反映。上限 `STDPART_MAX_CALLS_PER_DAY`（既定10）。
+- **コスト上限**: `DELIBERATION_MAX_CALLS_PER_SESSION`（既定8）/
+  `DELIBERATION_MAX_CALLS_PER_DAY`（既定40）、fast tier 既定（`DELIBERATION_LLM_MODEL`）。
+- **フロント導線**: 4要素型すべてに「深く検討」ボタン（`admin.js` 図モーダル・revisions の
+  equation 変更、`admin-lecture-studio.js` の論理要素カード・選択中コンポーネント・主張一覧）。
+  モーダルは2ペイン（左=内訳+4レンズ / 右=対話+候補注釈カード confirm/dismiss）。figure は
+  #496 のモード別解析ペイン切替 + 「AIで図を再解析」（教員指示付き再解析）を持つ。
+- **ガードレール**: `test_deliberation_guardrails.py` / `test_deliberation_positioning.py` /
+  `test_deliberation_ui_static.py` / `test_deliberation_annotations.py`（FastAPI 非 import・
+  candidate-only・削除 API 不在・権限ゲート・confidence 生値非漏洩・A層非改変）。
 
 ### 横断基盤（共有ユーティリティ、2026-07 整理で新設）
 
