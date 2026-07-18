@@ -18,6 +18,7 @@ from episteme_graph.agents.document_structure.schema import (
     TypedBlock,
 )
 
+from .crosslink import apply_mention_crosslinks
 from .schema import (
     FigureRecord,
     FigureSourceLocation,
@@ -97,6 +98,13 @@ class FigureTableSemanticsAgent:
                             field=tbl.table_id,
                         ))
                 tables.append(tbl)
+
+        # F1 (docs/features/figure_concept_linking_design.md): caption block_id
+        # lookup above is structurally near-empty (claim spans only come from
+        # body_paragraph blocks). Apply the mention-based cross-link pass before
+        # the validation checks below so figures/tables with an explicit "Fig. N"
+        # / "Table N" reference in the body text lose their missing-link warning.
+        apply_mention_crosslinks(structure, figures, tables, claim_link_index)
 
         for fig in figures:
             if not fig.caption:

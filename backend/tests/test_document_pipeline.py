@@ -1999,6 +1999,123 @@ def test_persist_components_filters_fallback_but_persists_normal_components():
     assert inserted_names == ["relation"]
 
 
+# --- F2: persist_components が agent の source_scope を保持する ------------
+# (docs/features/figure_concept_linking_design.md F2)
+#
+# 従来は theory_components.source_scope を {"document_id", "legacy_ids"} で
+# 全上書きしていたため、apparatus_components.py の ComponentRecord.source_scope
+# に載る figure_id / figure_key / match_status 等が DB 行から失われていた。
+# document_id / legacy_ids の上書きセマンティクスは不変（context_lens.py の
+# _component_id_lookup_from_rows が legacy_ids=[component_id] に依存する）。
+
+
+def _apparatus_component(component_id="comp_apparatus_001", label="spectrometer"):
+    return types.SimpleNamespace(
+        component_id=component_id,
+        component_type="apparatus",
+        label=label,
+        summary="apparatus candidate",
+        evidence_refs={"claim_ids": []},
+        inputs=[], outputs=[], preconditions=[], cautions=[],
+        dependencies=[], internal_flow=[],
+        maturity_source="llm_proposed",
+        fallback_reason="",
+        review_status="teacher_review_required",
+        source_scope={
+            "source": "apparatus_semantics",
+            # agent 側が書く document_id は persist 側で上書きされる想定の値
+            # （わざと本来の document_id と異なる値にして上書きを確認する）。
+            "document_id": "stale-document-id-from-agent",
+            "cartridge_id": "particle_physics",
+            "figure_id": "fig-uuid-1",
+            "figure_key": "fig_5.2",
+            "match_status": "matched",
+            "matched_library_entry_id": "lib-entry-1",
+            "matched_library_version_no": 3,
+            "evidence_quote": "The spectrometer (Fig. 5.2) ...",
+            "source_backing_status": "source_backed",
+            "repair_failed": False,
+        },
+    )
+
+
+def _inserted_params_for(session, name):
+    for call in session.execute.call_args_list:
+        if len(call.args) > 1 and isinstance(call.args[1], dict) and call.args[1].get("name") == name:
+            return call.args[1]
+    raise AssertionError(f"no INSERT params captured for name={name!r}")
+
+
+def test_persist_components_preserves_agent_source_scope_for_apparatus_components():
+    """apparatus 候補の figure_id 等が persist 後も DB 行の source_scope に残る。"""
+    import json
+
+    from core.document_pipeline import persistence
+
+    component_result = types.SimpleNamespace(components=[_apparatus_component()])
+    session = MagicMock()
+    session.execute.return_value.fetchone.return_value = ("db-uuid-apparatus",)
+    with patch.object(persistence, "_pg_session", return_value=session):
+        persistence.persist_components(document_id="doc_1", component_result=component_result)
+
+    params = _inserted_params_for(session, "spectrometer")
+    scope = json.loads(params["source_scope"])
+    assert scope["source"] == "apparatus_semantics"
+    assert scope["cartridge_id"] == "particle_physics"
+    assert scope["figure_id"] == "fig-uuid-1"
+    assert scope["figure_key"] == "fig_5.2"
+    assert scope["match_status"] == "matched"
+    assert scope["matched_library_entry_id"] == "lib-entry-1"
+    assert scope["matched_library_version_no"] == 3
+    assert scope["source_backing_status"] == "source_backed"
+    # document_id / legacy_ids は persist 側の値で上書きされる（agent 側の値は捨てる）。
+    assert scope["document_id"] == "doc_1"
+    assert scope["legacy_ids"] == ["comp_apparatus_001"]
+
+
+def test_persist_components_claim_derived_source_scope_stays_document_and_legacy_ids_only():
+    """source_scope を持たない claim 由来コンポーネントは従来どおりの形のまま（後方互換）。"""
+    import json
+
+    from core.document_pipeline import persistence
+
+    component_result = types.SimpleNamespace(components=[_normal_component()])
+    session = MagicMock()
+    session.execute.return_value.fetchone.return_value = ("db-uuid-1",)
+    with patch.object(persistence, "_pg_session", return_value=session):
+        persistence.persist_components(document_id="doc_1", component_result=component_result)
+
+    params = _inserted_params_for(session, "relation")
+    scope = json.loads(params["source_scope"])
+    assert scope == {"document_id": "doc_1", "legacy_ids": ["comp_001"]}
+
+
+def test_persist_components_legacy_ids_always_component_id():
+    """legacy_ids は常に [component_id]（_component_id_lookup_from_rows の依存が不変）。"""
+    import json
+
+    from core.document_pipeline import persistence
+
+    component_result = types.SimpleNamespace(
+        components=[
+            _apparatus_component("comp_apparatus_XYZ", label="apparatus_xyz"),
+            _normal_component("comp_XYZ"),
+        ]
+    )
+    session = MagicMock()
+    session.execute.return_value.fetchone.return_value = ("db-uuid-x",)
+    with patch.object(persistence, "_pg_session", return_value=session):
+        persistence.persist_components(document_id="doc_1", component_result=component_result)
+
+    for name, expected_component_id in (
+        ("apparatus_xyz", "comp_apparatus_XYZ"),
+        ("relation", "comp_XYZ"),
+    ):
+        params = _inserted_params_for(session, name)
+        scope = json.loads(params["source_scope"])
+        assert scope["legacy_ids"] == [expected_component_id]
+
+
 # --- options 継承（画像パイプライン §3-2 / 解析再開の analyze_images 引き継ぎ） ------
 #
 # バグ修正: reanalyze_document が analyze_images 未指定でも常に明示 False の options を
@@ -2168,3 +2285,180 @@ def test_reanalyze_with_explicit_false_passes_false(monkeypatch):
         monkeypatch, body=admin_mod.ReanalyzeRequest(analyze_images=False)
     )
     assert captured["kwargs"] == {"options": {"analyze_images": False}}
+
+
+# --- _build_figure_table_semantics claim_link_index (F1 cross-link) ----------
+#
+# docs/features/figure_concept_linking_design.md F1: the agent's mention-based
+# cross-link pass looks the index up with block ids, but claims only carry
+# rhetorical-role span ids ("span_001"-style, generated per block). The
+# orchestrator must resolve span_id -> block_id via claim_qualification's
+# qualified_spans (and via evidence ids, which are block-scoped) so the index
+# is keyed by block_id.
+
+
+class _FigTblSpyAgent:
+    """Records the kwargs the orchestrator passes to agent.run()."""
+
+    def __init__(self):
+        self.captured = None
+
+    def run(self, structure, *, cartridge_id=None, evidence_index=None, claim_link_index=None):
+        self.captured = {
+            "structure": structure,
+            "cartridge_id": cartridge_id,
+            "evidence_index": evidence_index,
+            "claim_link_index": claim_link_index,
+        }
+        return types.SimpleNamespace(figures=[], tables=[], validation_issues=[])
+
+
+def _fig_tbl_structure():
+    return _Structure(
+        document_id="doc-figtbl",
+        blocks=[
+            _Block(block_id="block_A", page=1, order=1, text="Fig. 1 shows the result."),
+            _Block(block_id="block_B", page=1, order=2, text="Another paragraph."),
+        ],
+        sections=[_Section(section_id="sec_a", title="A")],
+    )
+
+
+def _qualified_with(spans):
+    return types.SimpleNamespace(
+        qualified_spans=[
+            types.SimpleNamespace(span_id=s, block_id=b) for (s, b) in spans
+        ]
+    )
+
+
+def _claims_with(claims):
+    return types.SimpleNamespace(
+        claims=[
+            types.SimpleNamespace(
+                claim_id=cid,
+                source_span_ids=list(span_ids),
+                source_evidence_ids=list(ev_ids),
+            )
+            for (cid, span_ids, ev_ids) in claims
+        ]
+    )
+
+
+def _run_build_figure_table_semantics(*, claim_objects, qualified, evidence=None):
+    from core.document_pipeline.orchestrator import _build_figure_table_semantics
+
+    spy = _FigTblSpyAgent()
+    _build_figure_table_semantics(
+        agent_classes={"FigureTableSemanticsAgent": spy},
+        cartridge_id=None,
+        structure=_fig_tbl_structure(),
+        evidence=evidence or types.SimpleNamespace(records=[]),
+        claim_objects=claim_objects,
+        qualified=qualified,
+    )
+    assert spy.captured is not None, "spy agent.run was never called"
+    return spy.captured
+
+
+def test_fig_tbl_claim_link_index_keyed_by_block_id_via_qualified_spans():
+    """span_001 -> block_A の対応（qualified_spans）から block_id キーで索引が作られる。"""
+    captured = _run_build_figure_table_semantics(
+        claim_objects=_claims_with([("claim_x", ["span_001"], [])]),
+        qualified=_qualified_with([("span_001", "block_A")]),
+    )
+    assert captured["claim_link_index"] == {"block_A": ["claim_x"]}
+
+
+def test_fig_tbl_claim_link_index_qualified_none_keeps_span_id_keys():
+    """qualified=None でも落ちず、従来どおり span_id キーで保持される（防御的縮退）。"""
+    captured = _run_build_figure_table_semantics(
+        claim_objects=_claims_with([("claim_x", ["span_001"], [])]),
+        qualified=None,
+    )
+    assert captured["claim_link_index"] == {"span_001": ["claim_x"]}
+
+
+def test_fig_tbl_claim_link_index_unknown_span_id_keeps_span_id_key():
+    """マップに無い span_id はそのまま span_id をキーに保持する（情報を落とさない, P4）。"""
+    captured = _run_build_figure_table_semantics(
+        claim_objects=_claims_with([
+            ("claim_x", ["span_001"], []),
+            ("claim_y", ["span_zzz"], []),
+        ]),
+        qualified=_qualified_with([("span_001", "block_A")]),
+    )
+    assert captured["claim_link_index"] == {
+        "block_A": ["claim_x"],
+        "span_zzz": ["claim_y"],
+    }
+
+
+def test_fig_tbl_claim_link_index_ambiguous_span_id_not_guessed():
+    """span_001 が複数 block に存在する（rhetorical_role の span id は block ごとに
+    振り直されるため実運用で頻出）場合、first-wins で誤った block に紐づけず
+    span_id キーへ縮退する。"""
+    captured = _run_build_figure_table_semantics(
+        claim_objects=_claims_with([("claim_x", ["span_001"], [])]),
+        qualified=_qualified_with([("span_001", "block_A"), ("span_001", "block_B")]),
+    )
+    assert captured["claim_link_index"] == {"span_001": ["claim_x"]}
+
+
+def test_fig_tbl_claim_link_index_evidence_join_resolves_block():
+    """claim.source_evidence_ids は block 単位で解決されているため、evidence 経由で
+    曖昧な span_id でも正しい block キーに解決できる。"""
+    evidence = types.SimpleNamespace(records=[
+        types.SimpleNamespace(
+            evidence_id="ev_A1",
+            source=types.SimpleNamespace(block_id="block_A"),
+        ),
+    ])
+    captured = _run_build_figure_table_semantics(
+        claim_objects=_claims_with([("claim_x", ["span_001"], ["ev_A1"])]),
+        qualified=_qualified_with([("span_001", "block_A"), ("span_001", "block_B")]),
+        evidence=evidence,
+    )
+    index = captured["claim_link_index"]
+    assert index["block_A"] == ["claim_x"]
+    # 曖昧 span_id 分は span_id キーで保持される（P4）が、block_B には付かない。
+    assert index.get("span_001") == ["claim_x"]
+    assert "block_B" not in index
+
+
+def test_fig_tbl_claim_link_index_dedups_claim_ids_per_block():
+    """同一 block に evidence 経由 + span 経由で同じ claim が来ても重複しない。
+    複数 claim が同一 block に来る場合は順序を保って並ぶ。"""
+    evidence = types.SimpleNamespace(records=[
+        types.SimpleNamespace(
+            evidence_id="ev_A1",
+            source=types.SimpleNamespace(block_id="block_A"),
+        ),
+    ])
+    captured = _run_build_figure_table_semantics(
+        claim_objects=_claims_with([
+            ("claim_x", ["span_001"], ["ev_A1"]),
+            ("claim_y", ["span_002"], ["ev_A1"]),
+        ]),
+        qualified=_qualified_with([
+            ("span_001", "block_A"),
+            ("span_002", "block_A"),
+        ]),
+        evidence=evidence,
+    )
+    assert captured["claim_link_index"] == {"block_A": ["claim_x", "claim_y"]}
+
+
+def test_fig_tbl_stage_passes_ctx_qualified():
+    """_stage_figure_table_semantics が ctx.qualified を _build_figure_table_semantics
+    に渡している（実配線の確認。resume 経路でも ctx.qualified は
+    _stage_claim_qualification が artifact から復元する）。"""
+    import inspect
+
+    from core.document_pipeline import orchestrator as orch
+
+    src_stage = inspect.getsource(orch._stage_figure_table_semantics)
+    assert "qualified=ctx.qualified" in src_stage
+    sig = inspect.signature(orch._build_figure_table_semantics)
+    assert "qualified" in sig.parameters
+    assert sig.parameters["qualified"].default is None

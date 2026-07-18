@@ -25,7 +25,6 @@ never dropped (P4, "情報を落とさない"). ``run_figure`` never raises.
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import asdict
 
 from .llm_client import (
@@ -65,9 +64,6 @@ logger = logging.getLogger(__name__)
 _OBSERVATION_MAX_REPAIR_ATTEMPTS = 1
 _ALIGNMENT_MAX_REPAIR_ATTEMPTS = 2
 _VERIFICATION_MAX_REPAIR_ATTEMPTS = 1
-
-_PART_INDEX_RE = re.compile(r"\.parts\[(\d+)\]")
-
 
 class VisionBudget:
     """Mutable vision-call budget shared across every figure in one
@@ -170,7 +166,7 @@ class IterativeFigureAnalyzer:
             ia.convergence_status = "aborted_error"
             self._finalize_ia(
                 ia, alignment_items=[], review_questions_raw=[], open_tasks=[],
-                figure=figure,
+                unresolved_tasks=[], figure=figure,
             )
             record.iterative_analysis = ia
             return record
@@ -197,9 +193,10 @@ class IterativeFigureAnalyzer:
         ia.alignment_items = alignment_items
         ia.alternative_hypotheses = alternative_hypotheses
         open_tasks = [t for t in tasks if t.status == "open"]
+        unresolved_tasks = [t for t in tasks if t.status == "unresolved"]
         self._finalize_ia(
             ia, alignment_items=alignment_items, review_questions_raw=review_questions_raw,
-            open_tasks=open_tasks, figure=figure,
+            open_tasks=open_tasks, unresolved_tasks=unresolved_tasks, figure=figure,
         )
         ia.open_verification_tasks = open_tasks
 
@@ -329,7 +326,7 @@ class IterativeFigureAnalyzer:
         ia.alignment_items = alignment_items
         self._finalize_ia(
             ia, alignment_items=alignment_items, review_questions_raw=[], open_tasks=[],
-            figure=figure,
+            unresolved_tasks=[], figure=figure,
         )
         return record
 
@@ -389,23 +386,48 @@ class IterativeFigureAnalyzer:
             error_issues = [i for i in issues if i.severity == "error"]
             attempt += 1
 
+        inner_label_ci_set, observation_ids = self._support_sets(figure, observations_obj)
+        alignment_items_seen = list((iterative_parts or {}).get("alignment_items") or [])
+
         if error_issues:
             # Repair exhausted without a clean result — never fail the whole
-            # figure over this (P4). Structurally guarantee the invariant
-            # "no part without visual backing" via a deterministic strip
-            # instead (design doc "決定論的ガード").
-            removed = self._strip_unsupported_parts(record, error_issues)
-            if removed:
+            # figure over this (P4). Structurally guarantee two invariants via
+            # deterministic Python-only recovery instead (design doc "決定論的
+            # ガード"): (1) an item claiming supported_by_both/visual_only but
+            # whose visual backing cannot be traced to a known observation or
+            # in-figure label gets downgraded rather than trusted as-is (gap
+            # #3 — a free-text description alone is not visual evidence), then
+            # (2) any part left without a *supporting and traceable* alignment
+            # item is stripped (gap #1).
+            downgraded = self._downgrade_untraceable_alignment_items(
+                alignment_items_seen,
+                inner_label_ci_set=inner_label_ci_set,
+                observation_ids=observation_ids,
+            )
+            if downgraded:
                 ia.stage_failures.append(
-                    "alignment: removed parts without visual support after "
-                    "repair exhaustion: " + ", ".join(removed)
+                    "alignment: downgraded untraceable items after repair "
+                    "exhaustion: " + "; ".join(downgraded)
                 )
+
+        removed = self._enforce_part_support(
+            record, alignment_items_seen,
+            inner_label_ci_set=inner_label_ci_set, observation_ids=observation_ids,
+        )
+        if removed:
+            ia.stage_failures.append(
+                "alignment: removed parts without visual support: " + "; ".join(removed)
+            )
+
+        if error_issues:
             remaining_fatal = [
                 i for i in self._validator.validate_alignment(
                     record, iterative_parts, figure=figure, candidate_ids=candidate_ids,
                     observations=observations_obj,
                 )
-                if i.severity == "error" and i.rule_id != "part_without_visual_support"
+                if i.severity == "error" and i.rule_id not in (
+                    "part_without_visual_support", "alignment_visual_support_untraceable",
+                )
             ]
             if remaining_fatal:
                 ia.stage_failures.append(
@@ -416,26 +438,159 @@ class IterativeFigureAnalyzer:
         return record, iterative_parts
 
     @staticmethod
-    def _strip_unsupported_parts(record: ApparatusRecord, issues: list) -> list[str]:
-        bad_indexes: set[int] = set()
-        for issue in issues:
-            if issue.rule_id != "part_without_visual_support" or not issue.field:
+    def _support_sets(
+        figure: FigureImageInput, observations,
+    ) -> tuple[set[str], set[str]]:
+        """(inner_label_ci_set, observation_id_set) shared by every
+        deterministic part-support guard (``_enforce_part_support`` /
+        ``_downgrade_untraceable_alignment_items``)."""
+        inner_label_ci_set = {
+            str(label.get("text", "") or "").strip().casefold()
+            for label in (figure.inner_labels or [])
+            if isinstance(label, dict) and str(label.get("text", "") or "").strip()
+        }
+        observation_ids = {
+            e.observation_id for e in (observations.elements if observations else []) if e.observation_id
+        }
+        return inner_label_ci_set, observation_ids
+
+    @staticmethod
+    def _item_visual_support_traceable(
+        item: AlignmentItem, *, inner_label_ci_set: set[str], observation_ids: set[str],
+    ) -> bool:
+        """Whether ``item``'s observation_refs/label_ref actually resolve to a
+        known observation or a real in-figure label (gap #3) — mirrors
+        validator.py's ``_alignment_visual_support_is_traceable`` (the
+        observations-present branch), expressed over the engine's precomputed
+        sets rather than the raw ``VisualObservationSet``/``FigureImageInput``.
+        """
+        obs_refs = [str(r) for r in (item.observation_refs or []) if str(r).strip()]
+        if any(r in observation_ids for r in obs_refs):
+            return True
+        label_ref = (item.label_ref or "").strip().casefold()
+        if label_ref and (not inner_label_ci_set or label_ref in inner_label_ci_set):
+            return True
+        return False
+
+    @staticmethod
+    def _downgrade_untraceable_alignment_items(
+        alignment_items: list[AlignmentItem],
+        *,
+        inner_label_ci_set: set[str],
+        observation_ids: set[str],
+    ) -> list[str]:
+        """Deterministic recovery once the alignment repair budget is
+        exhausted (gap #3): an item claiming supported_by_both/visual_only
+        whose visual backing cannot be traced to a known observation or
+        in-figure label is downgraded rather than left to silently fabricate
+        visual support. supported_by_both downgrades to text_only when it
+        still has text backing (and its now-untrustworthy visual refs are
+        cleared); everything else downgrades to unresolved.
+        """
+        changes: list[str] = []
+        for item in alignment_items:
+            if item.status not in ("supported_by_both", "visual_only"):
                 continue
-            match = _PART_INDEX_RE.search(issue.field)
-            if match:
-                bad_indexes.add(int(match.group(1)))
-        if not bad_indexes:
+            if IterativeFigureAnalyzer._item_visual_support_traceable(
+                item, inner_label_ci_set=inner_label_ci_set, observation_ids=observation_ids,
+            ):
+                continue
+            old_status = item.status
+            if old_status == "supported_by_both" and item.text_evidence.strip():
+                item.status = "text_only"
+                item.observation_refs = []
+                item.label_ref = ""
+            else:
+                item.status = "unresolved"
+            changes.append(
+                f"alignment item {item.item_id or '<unknown>'}: downgraded "
+                f"{old_status} -> {item.status} (visual evidence not traceable "
+                "to a known observation or in-figure label)"
+            )
+        return changes
+
+    @staticmethod
+    def _enforce_part_support(
+        record: ApparatusRecord,
+        alignment_items: list[AlignmentItem],
+        *,
+        inner_label_ci_set: set[str],
+        observation_ids: set[str],
+    ) -> list[str]:
+        """Deterministically strip any part whose backing alignment item is
+        missing, no longer a supporting status, or not traceable to a known
+        visual observation (design doc gap #1: a verification round can
+        downgrade an item to text_only/unresolved without also returning
+        parts_to_remove, letting the negated part survive into the final
+        record).
+
+        Mirrors the part<->item matching rule used by validator.py's
+        ``part_without_visual_support`` (label_ref equality, else name<->label
+        case-insensitive equality; an OR across the two, not "pick one and
+        stop") plus the traceability requirement from gap #3. Safe to call
+        repeatedly / on an already-consistent record (no-op — returns ``[]``).
+        """
+        supporting_by_label: set[str] = set()
+        supporting_by_name: set[str] = set()
+        any_item_by_label: dict[str, AlignmentItem] = {}
+        any_item_by_name: dict[str, AlignmentItem] = {}
+
+        for item in alignment_items:
+            label_ref = (item.label_ref or "").strip().casefold()
+            name = (item.label or "").strip().casefold()
+            if label_ref:
+                any_item_by_label.setdefault(label_ref, item)
+            if name:
+                any_item_by_name.setdefault(name, item)
+            if item.status not in ("supported_by_both", "visual_only"):
+                continue
+            if not IterativeFigureAnalyzer._item_visual_support_traceable(
+                item, inner_label_ci_set=inner_label_ci_set, observation_ids=observation_ids,
+            ):
+                continue
+            if label_ref:
+                supporting_by_label.add(label_ref)
+            if name:
+                supporting_by_name.add(name)
+
+        changes: list[str] = []
+        kept: list[ApparatusPart] = []
+        for part in record.parts:
+            part_label_ref = (part.label_ref or "").strip().casefold()
+            part_name = (part.name or "").strip().casefold()
+            supported = (
+                bool(part_label_ref) and part_label_ref in supporting_by_label
+            ) or (
+                bool(part_name) and part_name in supporting_by_name
+            )
+            if supported:
+                kept.append(part)
+                continue
+            matching_item = None
+            if part_label_ref:
+                matching_item = any_item_by_label.get(part_label_ref)
+            if matching_item is None and part_name:
+                matching_item = any_item_by_name.get(part_name)
+            status = matching_item.status if matching_item is not None else "missing"
+            changes.append(f"part removed (alignment status={status}): {part.name}")
+
+        if len(kept) == len(record.parts):
             return []
-        removed_names = [
-            record.parts[i].name for i in sorted(bad_indexes) if i < len(record.parts)
-        ]
-        record.parts = [p for i, p in enumerate(record.parts) if i not in bad_indexes]
-        remaining_names = {p.name for p in record.parts}
-        record.connections = [
-            c for c in record.connections
-            if c.from_part in remaining_names and c.to_part in remaining_names
-        ]
-        return removed_names
+
+        record.parts = kept
+        kept_names = {p.name for p in kept}
+        surviving_connections: list[ApparatusConnection] = []
+        for conn in record.connections:
+            if conn.from_part in kept_names and conn.to_part in kept_names:
+                surviving_connections.append(conn)
+            else:
+                changes.append(
+                    "connection removed (part no longer supported): "
+                    f"{conn.from_part}->{conn.to_part}"
+                )
+        record.connections = surviving_connections
+
+        return changes
 
     # ------------------------------------------------------------------
     # Step 4: gap-driven verification loop
@@ -456,29 +611,33 @@ class IterativeFigureAnalyzer:
         rescan_allowance: int,
         ia: IterativeAnalysisRecord,
     ) -> None:
-        inner_label_texts = [
-            str(label.get("text", "") or "").strip()
-            for label in (figure.inner_labels or [])
-            if isinstance(label, dict) and str(label.get("text", "") or "").strip()
-        ]
-        inner_label_ci_set = {t.casefold() for t in inner_label_texts}
+        inner_label_ci_set, observation_ids = self._support_sets(figure, observations)
 
         executed_keys: set[tuple] = set()
         max_rounds = max(0, min(self._config.max_iterations, rescan_allowance))
         iteration_index = 0
 
         while True:
-            open_tasks = [
-                t for t in tasks if t.status == "open" and _task_key(t) not in executed_keys
-            ]
+            # Convergence is judged over the *true* status of every task ever
+            # seen, never filtered by ``executed_keys`` (design doc gap #2:
+            # "未回答の検証課題があっても converged になる" — a task that was
+            # executed but got no finding back must not quietly vanish from
+            # this check just because it is in ``executed_keys``).
+            # ``executed_keys`` dedupes only which tasks get *re-sent* to the
+            # LLM this round, never whether the loop considers itself done.
             has_high_contradiction = any(
                 item.status == "contradicted" and item.severity == "high"
                 for item in alignment_items
             )
+            any_open_task = any(t.status == "open" for t in tasks)
 
-            if not has_high_contradiction and not open_tasks:
+            if not has_high_contradiction and not any_open_task:
                 ia.convergence_status = "converged"
                 return
+
+            open_tasks = [
+                t for t in tasks if t.status == "open" and _task_key(t) not in executed_keys
+            ]
             if not open_tasks:
                 ia.convergence_status = "no_progress"
                 return
@@ -490,6 +649,7 @@ class IterativeFigureAnalyzer:
                 return
 
             iteration_index += 1
+            executed_task_ids_this_round = {t.task_id for t in open_tasks}
             for task in open_tasks:
                 executed_keys.add(_task_key(task))
 
@@ -567,11 +727,22 @@ class IterativeFigureAnalyzer:
                 alignment_items=alignment_items,
                 alternative_hypotheses=alternative_hypotheses,
                 record=record,
-                observations=observations,
+                observation_ids=observation_ids,
                 inner_label_ci_set=inner_label_ci_set,
                 iteration_index=iteration_index,
                 executed_keys=executed_keys,
+                executed_task_ids=executed_task_ids_this_round,
             )
+
+            # Gap #1: a verification round can downgrade an item's status
+            # (e.g. to text_only/unresolved) without also returning a matching
+            # parts_to_remove delta. Re-derive part support from the
+            # (possibly just-updated) alignment items after every merge so a
+            # negated part can never survive into the final record.
+            changes.extend(self._enforce_part_support(
+                record, alignment_items,
+                inner_label_ci_set=inner_label_ci_set, observation_ids=observation_ids,
+            ))
 
             ia.verification_iterations.append(VerificationIterationRecord(
                 iteration_index=iteration_index,
@@ -587,10 +758,10 @@ class IterativeFigureAnalyzer:
                     item.status == "contradicted" and item.severity == "high"
                     for item in alignment_items
                 )
-                still_open = [
-                    t for t in tasks if t.status == "open" and _task_key(t) not in executed_keys
-                ]
-                ia.convergence_status = "converged" if not has_high and not still_open else "no_progress"
+                any_open_task_now = any(t.status == "open" for t in tasks)
+                ia.convergence_status = (
+                    "converged" if not has_high and not any_open_task_now else "no_progress"
+                )
                 return
             # else: loop back to top and re-evaluate convergence conditions.
 
@@ -602,10 +773,11 @@ class IterativeFigureAnalyzer:
         alignment_items: list[AlignmentItem],
         alternative_hypotheses: list,
         record: ApparatusRecord,
-        observations,
+        observation_ids: set[str],
         inner_label_ci_set: set[str],
         iteration_index: int,
         executed_keys: set[tuple],
+        executed_task_ids: set[str],
     ) -> list[str]:
         changes: list[str] = []
 
@@ -623,6 +795,16 @@ class IterativeFigureAnalyzer:
             if new_status and new_status != task.status:
                 changes.append(f"task {task.task_id}: {task.status} -> {new_status}")
                 task.status = new_status
+
+        # --- tasks executed this round but with no finding returned at all:
+        # force them to "unresolved" rather than silently leaving them "open"
+        # forever (design doc gap #2: "未回答の検証課題があっても converged
+        # になる" — an "open" task whose key is already in executed_keys used
+        # to be invisible to the next round's convergence check).
+        for task in tasks:
+            if task.task_id in executed_task_ids and task.status == "open":
+                changes.append(f"task {task.task_id}: no finding returned -> unresolved")
+                task.status = "unresolved"
 
         # --- alignment item updates (by item_id) ---
         by_id = {item.item_id: item for item in alignment_items if item.item_id}
@@ -657,9 +839,6 @@ class IterativeFigureAnalyzer:
             changes.append(f"align item added: {candidate_id}")
 
         # --- record deltas (parts/connections) ---
-        observation_id_set = {
-            e.observation_id for e in (observations.elements if observations else []) if e.observation_id
-        }
         deltas = parsed.get("record_deltas") or {}
 
         for part_delta in deltas.get("parts_to_add") or []:
@@ -669,7 +848,7 @@ class IterativeFigureAnalyzer:
                 str(r) for r in (part_delta.get("observation_refs") or []) if str(r).strip()
             ]
             label_ref = str(part_delta.get("label_ref") or "").strip()
-            has_obs_backing = bool(obs_refs) and any(r in observation_id_set for r in obs_refs)
+            has_obs_backing = bool(obs_refs) and any(r in observation_ids for r in obs_refs)
             has_label_backing = bool(label_ref) and (
                 not inner_label_ci_set or label_ref.casefold() in inner_label_ci_set
             )
@@ -774,6 +953,7 @@ class IterativeFigureAnalyzer:
         alignment_items: list[AlignmentItem],
         review_questions_raw: list[dict],
         open_tasks: list[VerificationTask],
+        unresolved_tasks: list[VerificationTask],
         figure: FigureImageInput,
     ) -> None:
         ia.unresolved_conflicts = [
@@ -782,33 +962,58 @@ class IterativeFigureAnalyzer:
         ]
 
         review_questions = [dict(q) for q in review_questions_raw if isinstance(q, dict)]
+        seen_question_ids = {q.get("question_id") for q in review_questions}
 
-        if ia.convergence_status != "converged" and not review_questions:
-            for task in open_tasks:
-                review_questions.append({
-                    "question_id": f"open_task_{task.task_id}",
-                    "question": task.question or self._generic_question(figure),
-                    "related_item_ids": list(task.target_item_ids),
-                    "region_hint": task.region_hint,
-                })
-
-        if ia.convergence_status != "converged" and not review_questions:
-            for idx, item in enumerate(alignment_items, start=1):
-                if item.status in ("text_only", "contradicted", "unresolved"):
-                    review_questions.append({
-                        "question_id": f"synthesized_{item.item_id or idx}",
-                        "question": self._synthesize_question(item),
-                        "related_item_ids": [item.item_id] if item.item_id else [],
-                        "region_hint": "",
-                    })
-
-        if ia.convergence_status != "converged" and not review_questions:
+        def _add_question(question_id: str, question: str, related_item_ids: list, region_hint: str = "") -> None:
+            if question_id in seen_question_ids:
+                return
             review_questions.append({
-                "question_id": "synthesized_generic",
-                "question": self._generic_question(figure),
-                "related_item_ids": [],
-                "region_hint": "",
+                "question_id": question_id,
+                "question": question,
+                "related_item_ids": related_item_ids,
+                "region_hint": region_hint,
             })
+            seen_question_ids.add(question_id)
+
+        non_converged = ia.convergence_status != "converged"
+
+        if non_converged and not review_questions:
+            for task in open_tasks:
+                _add_question(
+                    f"open_task_{task.task_id}", task.question or self._generic_question(figure),
+                    list(task.target_item_ids), task.region_hint,
+                )
+
+        # Design doc: "未解決点が明示されていることが収束条件の一部" — an
+        # "unresolved" verification task or an unresolved/contradicted
+        # alignment item must surface as a review question regardless of
+        # convergence_status. A task/item can end up "unresolved" (rather
+        # than "open") on a run that otherwise converged (e.g. only a
+        # low/medium-severity contradiction remained), so this must not be
+        # gated by ``non_converged`` (gap #2).
+        for task in unresolved_tasks:
+            _add_question(
+                f"unresolved_task_{task.task_id}", task.question or self._generic_question(figure),
+                list(task.target_item_ids), task.region_hint,
+            )
+
+        for idx, item in enumerate(alignment_items, start=1):
+            if item.status in ("contradicted", "unresolved"):
+                _add_question(
+                    f"synthesized_{item.item_id or idx}", self._synthesize_question(item),
+                    [item.item_id] if item.item_id else [],
+                )
+
+        if non_converged and not review_questions:
+            for idx, item in enumerate(alignment_items, start=1):
+                if item.status == "text_only":
+                    _add_question(
+                        f"synthesized_{item.item_id or idx}", self._synthesize_question(item),
+                        [item.item_id] if item.item_id else [],
+                    )
+
+        if non_converged and not review_questions:
+            _add_question("synthesized_generic", self._generic_question(figure), [])
 
         ia.review_questions = review_questions
 

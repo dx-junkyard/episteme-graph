@@ -123,6 +123,8 @@ PDF ファイル
 [#237] DerivationChainAgent     — 式間導出チェーン構築（非LLM）
     ↓  DerivationChainResult (JSON)
 [#237] FigureTableSemanticsAgent — 図表の意味復元（caption-first, LLM enricher 任意）
+                                  + mention クロスリンク（本文の Fig./Table/図/表 参照から
+                                    claim ⇄ 図・表を決定論リンク。crosslink.py, 2026-07-18）
     ↓  FigureTableSemanticsResult (JSON)
 [L層]  ApparatusSemanticsAgent    — 図画像の装置・パーツ候補抽出（vision LLM、`analyze_images` オプトイン時のみ）
     ↓  ApparatusSemanticsResult (JSON; 全出力 review_required 系)
@@ -820,12 +822,27 @@ PDF 内の画像（装置図・設計図等）を解析パイプラインに取�
   設定: `APPARATUS_ANALYSIS_MODE`（`iterative`|`one_shot`、既定 iterative）/
   `APPARATUS_VERIFY_MAX_ITERATIONS`（既定3）/ `APPARATUS_REANALYZE_MAX_ITERATIONS`（既定1）。
   `APPARATUS_MAX_CALLS_PER_DAY` は vision 呼び出し数の意味のまま（orchestrator が日次残数を
-  `IterativeConfig.vision_call_budget` として渡し、engine が図間で観察1回分を予約しつつ動的消費）。
+  `IterativeConfig.vision_call_budget` として渡し、engine が図間で観察1回分を予約しつつ動的消費。
+  同期再解析も日次残数を budget として渡し、完了後に実測 `vision_calls` を日次カウンタへ事後計上 —
+  `CostGate.daily_remaining` / `count_extra_daily`）。
   `IterativeConfig` 未指定の agent は従来 one-shot（後方互換）。
 - **component_type 語彙拡張**（migration 041）: `theory_components.component_type` CHECK に
   `apparatus` / `instrument` / `part` を追加。カートリッジ `component_types.json` にも同語彙。
   装置候補は ComponentAssembly 経由で `status='candidate'` の theory_components になる。
   **TheoryOperationGraph には組み込まない**（v1。式 backing が無いため）。
+- **図⇄概念構造の接続（2026-07-18）**: 正本は `docs/features/figure_concept_linking_design.md`。
+  ①claim ⇄ 図・表リンクの正本は `FigureRecord.linked_claim_ids` /
+  `TableRecord.linked_claim_ids` の一箇所（`figure_table_semantics/crosslink.py` の
+  mention ベースクロスリンク。**claim 側 `figure_ids` は artifact 冪等性のため populate
+  しない** — `_link_figures_tables` は意図的に空のまま）。②orchestrator の
+  `claim_link_index` は **block_id キー**（claim の `source_evidence_ids` → evidence の
+  block_id join が主経路。rhetorical_role の span_id は block ごとに振り直され文書内で
+  一意でないため、span map は一意対応時のみ使用）。③`persist_components` は agent 側
+  `ComponentRecord.source_scope` を保持したうえで `document_id` / `legacy_ids` を上書き
+  マージする（全上書きに戻さない — 装置候補の `figure_id` / `figure_key` が図単位対応の
+  正本）。④W層 context lens は figure_id/figure_key で装置候補を図単位に絞り込み、
+  linked claim との `evidence_claims` 交差で図→component 候補（inferred）と図→thesis を
+  読み時導出する。
 - **L層ライブラリ**（migration 042 `library_entries` / `library_entry_versions`、
   `backend/core/library/`（store/search/seed、FastAPI 非 import）+
   `backend/api/routes/library.py`（実パス `/api/admin/library/...`、`_require_teacher`））:

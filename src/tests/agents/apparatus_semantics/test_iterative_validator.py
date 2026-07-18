@@ -322,6 +322,118 @@ def test_alignment_unknown_observation_ref_is_warning():
     assert matching and matching[0].severity == "warning"
 
 
+# ---------------------------------------------------------------------------
+# alignment_visual_support_untraceable (#499 review fix, gap #3): a free-text
+# visual_evidence description alone must never count as traceable visual
+# support for visual_only/supported_by_both — it must resolve to a real
+# observation_id or a real in-figure label.
+# ---------------------------------------------------------------------------
+
+
+def test_alignment_visual_support_untraceable_is_error_for_free_text_only_evidence():
+    """A 'ghost part' backed only by a descriptive sentence — no
+    observation_refs, no label_ref — is not traceable visual evidence."""
+    record = _record()
+    iterative_parts = {"alignment_items": [
+        AlignmentItem(
+            item_id="align_1", item_kind="element", label="ghost part",
+            status="visual_only", visual_evidence="a box is visible in the corner",
+        ),
+    ]}
+    observations = VisualObservationSet(elements=[ObservedElement(observation_id="obs_1")])
+    issues = VALIDATOR.validate_alignment(record, iterative_parts, observations=observations)
+    assert any(
+        i.rule_id == "alignment_visual_support_untraceable" and i.severity == "error"
+        for i in issues
+    )
+
+
+def test_alignment_visual_support_untraceable_is_error_for_unknown_observation_ref_only():
+    record = _record()
+    iterative_parts = {"alignment_items": [
+        AlignmentItem(
+            item_id="align_1", item_kind="element", label="x", status="visual_only",
+            observation_refs=["obs_ghost"],
+        ),
+    ]}
+    observations = VisualObservationSet(elements=[ObservedElement(observation_id="obs_1")])
+    issues = VALIDATOR.validate_alignment(record, iterative_parts, observations=observations)
+    assert any(i.rule_id == "alignment_visual_support_untraceable" and i.severity == "error" for i in issues)
+
+
+def test_alignment_visual_support_traceable_via_known_observation_ref_has_no_error():
+    record = _record()
+    iterative_parts = {"alignment_items": [
+        AlignmentItem(
+            item_id="align_1", item_kind="element", label="x", status="visual_only",
+            observation_refs=["obs_1"],
+        ),
+    ]}
+    observations = VisualObservationSet(elements=[ObservedElement(observation_id="obs_1")])
+    issues = VALIDATOR.validate_alignment(record, iterative_parts, observations=observations)
+    assert not any(i.rule_id == "alignment_visual_support_untraceable" for i in issues)
+
+
+def test_alignment_visual_support_traceable_via_real_label_ref_has_no_error():
+    record = _record()
+    iterative_parts = {"alignment_items": [
+        AlignmentItem(
+            item_id="align_1", item_kind="element", label="x", status="supported_by_both",
+            label_ref="ION", text_evidence="injects particles",
+        ),
+    ]}
+    figure = _figure_stub(
+        caption="injects particles", inner_labels=[{"text": "ION", "bbox": [0, 0, 1, 1]}],
+    )
+    observations = VisualObservationSet(elements=[])
+    issues = VALIDATOR.validate_alignment(record, iterative_parts, figure=figure, observations=observations)
+    assert not any(i.rule_id == "alignment_visual_support_untraceable" for i in issues)
+
+
+def test_alignment_visual_support_untraceable_does_not_apply_to_contradicted():
+    """contradicted may legitimately rest on a textual description of what
+    looks different in the image — it is exempt from the traceability rule
+    (the design doc's own carve-out)."""
+    record = _record()
+    iterative_parts = {"alignment_items": [
+        AlignmentItem(
+            item_id="align_1", item_kind="element", label="x", status="contradicted",
+            text_evidence="text says X", visual_evidence="but the image shows Y instead",
+            severity="medium",
+        ),
+    ]}
+    observations = VisualObservationSet(elements=[ObservedElement(observation_id="obs_1")])
+    issues = VALIDATOR.validate_alignment(record, iterative_parts, observations=observations)
+    assert not any(i.rule_id == "alignment_visual_support_untraceable" for i in issues)
+
+
+def test_alignment_visual_support_untraceable_degrades_to_existence_check_without_observations():
+    """When no ``observations`` are supplied at all, there is nothing to
+    verify observation_refs/label_ref against, so the check degrades to a
+    structural non-empty existence check rather than raising false errors."""
+    record = _record()
+    iterative_parts = {"alignment_items": [
+        AlignmentItem(
+            item_id="align_1", item_kind="element", label="x", status="visual_only",
+            label_ref="ANYTHING",
+        ),
+    ]}
+    issues = VALIDATOR.validate_alignment(record, iterative_parts)
+    assert not any(i.rule_id == "alignment_visual_support_untraceable" for i in issues)
+
+
+def test_alignment_visual_support_untraceable_is_error_when_wholly_unbacked_without_observations():
+    record = _record()
+    iterative_parts = {"alignment_items": [
+        AlignmentItem(
+            item_id="align_1", item_kind="element", label="x", status="visual_only",
+            visual_evidence="something is visible",
+        ),
+    ]}
+    issues = VALIDATOR.validate_alignment(record, iterative_parts)
+    assert any(i.rule_id == "alignment_visual_support_untraceable" for i in issues)
+
+
 def test_alignment_label_ref_not_in_inner_labels_is_error():
     record = _record()
     iterative_parts = {"alignment_items": [

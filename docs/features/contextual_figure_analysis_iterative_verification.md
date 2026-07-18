@@ -237,12 +237,21 @@ Vision由来の結果は引き続きcandidate止まりとし、人間のレビ�
 
 - ③に画像を渡さないことで「文章にあるから画像で発見した」ことにする経路を**構造的に**遮断する。
   parts は observation_refs / label_ref による視覚根拠が必須（validator `part_without_visual_support` = error）。
+  さらに視覚根拠は**実在の observation_id / inner_labels に追跡可能**であることが必須
+  （`alignment_visual_support_untraceable` = error。自由記述 `visual_evidence` 単独は根拠にならない —
+  説明専用）。照合修復が尽きた場合、追跡不能な item は決定論的に降格する
+  （supported_by_both + text_evidence あり → text_only / それ以外 → unresolved）。
   text_only の期待要素は alignment item として保持され parts には决して入らない。
 - ④の課題は `(target_item_ids, 正規化question)` で重複排除し、既実行課題の再実行を engine が拒否する
   （新課題ゼロなら打ち切り）。iteration 記録の `executed_task_ids` 空は validator error（無目的再実行の禁止）。
-- 収束条件（決定論）: severity=high の contradicted が無い、open task が無い、直前 iteration での
-  alignment 状態変化が 0。非収束時は `review_questions` / `unresolved_conflicts` を必ず残す
-  （LLM 由来が無ければ決定論テンプレートで合成）。
+  **毎 iteration のマージ直後に `_enforce_part_support()` が parts↔alignment の整合を決定論的に回復**する
+  （再スキャンで item が降格されたら、LLM の `parts_to_remove` 出力に依存せず該当 part と関連
+  connection を除去）。finding が返らなかった実行済み課題は `unresolved` へ強制遷移する
+  （「実行済みなのに open」の状態を構造的に排除）。
+- 収束条件（決定論）: severity=high の contradicted が無い、`status='open'` の task が無い
+  （実行済み・未回答の課題は unresolved に遷移済みのため全 task を対象に判定）、直前 iteration での
+  alignment 状態変化が 0。未解決の課題・矛盾は**収束状態にかかわらず** `review_questions` /
+  `unresolved_conflicts` として必ず明示する（LLM 由来が無ければ決定論テンプレートで合成）。
 - 類似形状 prior: ②の repeated_motifs → ④の検証課題生成の手掛かりに限定。プロンプトで
   「形状一致は機能一致の証拠にしない」を明記（証拠には使わない）。
 - 段階失敗時の縮退（P4 情報を落とさない）: ①失敗→仮説なしで続行 / ②失敗→parts を出さず
@@ -292,7 +301,10 @@ Vision由来の結果は引き続きcandidate止まりとし、人間のレビ�
 - reanalyze API 拡張: `FigureReanalyzeRequest.unresolved_item_ids: list[str] | None`。
   保存済み `iterative_analysis` の alignment item / review question の id を指定すると、
   該当項目の question / region から hint_text・focus_bbox を決定論合成して既存 guided 経路に
-  乗せる（未知 id は 422）。コストゲートは従来どおり invocation 単位。
+  乗せる（未知 id は 422）。コストゲートは日次残数を `IterativeConfig.vision_call_budget`
+  （= 計上済みの1回 + 残数）としてエンジンに渡し、完了後に実測 `vision_calls` を日次カウンタへ
+  事後計上する（`CostGate.daily_remaining` / `count_extra_daily`。修復・検証を含む全 vision
+  コールが `APPARATUS_MAX_CALLS_PER_DAY` の対象になる）。session 上限（図×教員あたり3回）は不変。
 - UI（`deliberation.js`）: 図ワークスペースに照合サマリー（区分別 alignment 表示: 両方で確認 /
   画像のみ / 文章のみ・未確認 / 矛盾 / 未解決）、収束ステータス、レビュー質問カード
   （「この箇所を再解析」→ `unresolved_item_ids` 付き reanalyze）、iteration 履歴の折り畳み。

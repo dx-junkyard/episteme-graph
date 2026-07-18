@@ -715,6 +715,170 @@ class TestFigureReanalysisDefaultAgentIterativeConfig:
 
 
 # ===========================================================================
+# core.figure_reanalysis: daily vision-call metering (#499 review P1)
+#
+# Prior to this fix, ``reanalyze_figure`` built the default agent's
+# IterativeConfig with ``vision_call_budget=None`` (unlimited) while
+# ``_consume_budget`` only ever incremented the daily counter by 1 per
+# request — even though the iterative engine can spend up to 1 (observation)
+# + max_iterations * (1 verification), each with up to 2 repair attempts, in
+# vision calls for a single ``analyzer.run()`` call. That let one synchronous
+# re-analysis request blow past ``APPARATUS_MAX_CALLS_PER_DAY`` by ~4x. The
+# fix passes the live remaining daily allowance as the default agent's
+# vision_call_budget and reconciles actual spend (``record.iterative_analysis
+# .vision_calls``) into the shared daily counter after every run, whether the
+# agent was built here or injected by the caller.
+# ===========================================================================
+
+
+def _ir_result_with_vision_calls(vision_calls: int, *, mode: str = "functional_diagram"):
+    """Like ``_ir_result`` but with a populated ``iterative_analysis`` so the
+    post-run reconciliation logic under test has real data to read. Reuses
+    ``_ir_result``'s non-empty profile so ``normalize_figure_analysis_candidate``
+    still accepts the record (an empty profile is rejected as insufficient)."""
+    from dataclasses import replace
+
+    from episteme_graph.agents.apparatus_semantics.schema import IterativeAnalysisRecord
+
+    base_record = _ir_result(mode).apparatus_records[0]
+    record = replace(
+        base_record,
+        iterative_analysis=IterativeAnalysisRecord(
+            convergence_status="converged", vision_calls=vision_calls,
+        ),
+    )
+    return _ir_result_from_record(record)
+
+
+def _ir_result_from_record(record):
+    from episteme_graph.agents.apparatus_semantics.schema import ApparatusSemanticsResult
+
+    return ApparatusSemanticsResult(
+        document_id="doc-1", cartridge_id=None, apparatus_records=[record], validation_issues=[],
+    )
+
+
+class TestFigureReanalysisCostGateMetering:
+    def _fresh_gate(self, monkeypatch):
+        from core.llm_worker.cost_gate import CostGate
+
+        gate = CostGate()
+        monkeypatch.setattr(figure_reanalysis, "_cost_gate", gate)
+        return gate
+
+    def test_actual_vision_calls_are_reconciled_into_daily_counter(self, monkeypatch):
+        """A fake agent reporting 4 vision calls must add up to 4 total in
+        the daily counter (1 from _consume_budget + 3 reconciled extra)."""
+        gate = self._fresh_gate(monkeypatch)
+        _patch_ir_dependencies(
+            monkeypatch, settings_overrides={"apparatus_max_calls_per_day": 100}
+        )
+        agent = _IRAgent(_ir_result_with_vision_calls(4))
+        figure_reanalysis.reanalyze_figure(
+            "doc-1", FIGURE_ID, created_by="user-1",
+            agent=agent, storage=_IRStorage(), enforce_cost_gate=True,
+        )
+        key = figure_reanalysis._daily_budget_key("user-1")
+        assert gate.daily_counts[key] == 4
+
+    def test_default_agent_receives_remaining_daily_allowance_as_vision_budget(
+        self, monkeypatch,
+    ):
+        gate = self._fresh_gate(monkeypatch)
+        _patch_ir_dependencies(
+            monkeypatch, settings_overrides={"apparatus_max_calls_per_day": 5}
+        )
+        key = figure_reanalysis._daily_budget_key("user-1")
+        gate.daily_counts[key] = 3  # already consumed 3 of today's 5 before this call
+
+        captured: dict = {}
+
+        def _factory(cartridge_id=None, iterative_config=None, **_kwargs):
+            captured["iterative_config"] = iterative_config
+            return _IRAgent(_ir_result_with_vision_calls(1))
+
+        monkeypatch.setattr(figure_reanalysis, "ApparatusSemanticsAgent", _factory)
+        figure_reanalysis.reanalyze_figure(
+            "doc-1", FIGURE_ID, created_by="user-1",
+            storage=_IRStorage(), enforce_cost_gate=True,
+        )
+        # _consume_budget takes the counter from 3 -> 4 (allowed, limit=5).
+        # remaining = 5 - 4 = 1; budget = 1 (already counted) + 1 (remaining) = 2.
+        assert captured["iterative_config"].vision_call_budget == 2
+
+    def test_limit_already_reached_raises_before_default_agent_is_built(self, monkeypatch):
+        gate = self._fresh_gate(monkeypatch)
+        _patch_ir_dependencies(
+            monkeypatch, settings_overrides={"apparatus_max_calls_per_day": 2}
+        )
+        key = figure_reanalysis._daily_budget_key("user-1")
+        gate.daily_counts[key] = 2  # already at today's limit
+
+        def _fail_factory(*_args, **_kwargs):
+            pytest.fail(
+                "ApparatusSemanticsAgent must not be constructed once the daily limit is hit"
+            )
+
+        monkeypatch.setattr(figure_reanalysis, "ApparatusSemanticsAgent", _fail_factory)
+        with pytest.raises(FigureReanalysisError) as excinfo:
+            figure_reanalysis.reanalyze_figure(
+                "doc-1", FIGURE_ID, created_by="user-1",
+                storage=_IRStorage(), enforce_cost_gate=True,
+            )
+        assert excinfo.value.kind == "limit"
+
+    def test_enforce_cost_gate_false_keeps_unlimited_budget_and_no_accounting(
+        self, monkeypatch,
+    ):
+        gate = self._fresh_gate(monkeypatch)
+        _patch_ir_dependencies(monkeypatch)
+        captured: dict = {}
+
+        def _factory(cartridge_id=None, iterative_config=None, **_kwargs):
+            captured["iterative_config"] = iterative_config
+            return _IRAgent(_ir_result_with_vision_calls(4))
+
+        monkeypatch.setattr(figure_reanalysis, "ApparatusSemanticsAgent", _factory)
+        figure_reanalysis.reanalyze_figure(
+            "doc-1", FIGURE_ID, created_by="user-1",
+            storage=_IRStorage(), enforce_cost_gate=False,
+        )
+        assert captured["iterative_config"].vision_call_budget is None
+        assert gate.daily_counts == {}
+
+    def test_externally_injected_agent_is_still_metered(self, monkeypatch):
+        """An externally-configured agent's IterativeConfig is left untouched,
+        but its actual vision spend must still be reconciled into the shared
+        daily counter when enforce_cost_gate=True."""
+        gate = self._fresh_gate(monkeypatch)
+        _patch_ir_dependencies(
+            monkeypatch, settings_overrides={"apparatus_max_calls_per_day": 100}
+        )
+        agent = _IRAgent(_ir_result_with_vision_calls(3))
+        figure_reanalysis.reanalyze_figure(
+            "doc-1", FIGURE_ID, created_by="user-1",
+            agent=agent, storage=_IRStorage(), enforce_cost_gate=True,
+        )
+        key = figure_reanalysis._daily_budget_key("user-1")
+        assert gate.daily_counts[key] == 3  # 1 (consume_budget) + 2 (extra)
+
+    def test_record_without_iterative_analysis_keeps_one_call_approximation(
+        self, monkeypatch,
+    ):
+        gate = self._fresh_gate(monkeypatch)
+        _patch_ir_dependencies(
+            monkeypatch, settings_overrides={"apparatus_max_calls_per_day": 100}
+        )
+        agent = _IRAgent(_ir_result())  # default iterative_analysis=None (one_shot shape)
+        figure_reanalysis.reanalyze_figure(
+            "doc-1", FIGURE_ID, created_by="user-1",
+            agent=agent, storage=_IRStorage(), enforce_cost_gate=True,
+        )
+        key = figure_reanalysis._daily_budget_key("user-1")
+        assert gate.daily_counts[key] == 1
+
+
+# ===========================================================================
 # core.figure_reanalysis: unresolved_item_ids
 # ===========================================================================
 

@@ -580,6 +580,16 @@ def persist_components(
             preconditions = _remap_nested_claim_refs(getattr(comp, "preconditions", []) or [], claim_id_map)
             cautions = _remap_nested_claim_refs(getattr(comp, "cautions", []) or [], claim_id_map)
             raw_component_type = _strip_nuls(getattr(comp, "component_type", "") or "")
+            # source_scope は agent 側（例: apparatus_components.py の
+            # ComponentRecord.source_scope）をベースに document_id / legacy_ids を
+            # 上書きマージする（figure_concept_linking_design.md F2）。かつては
+            # {"document_id", "legacy_ids"} で全上書きしており、apparatus 候補の
+            # figure_id / figure_key / match_status 等が DB 行から失われていた。
+            # legacy_ids=[component_id] の既存セマンティクスは
+            # _component_id_lookup_from_rows（context_lens.py）が依存するため不変。
+            source_scope = dict(getattr(comp, "source_scope", {}) or {})
+            source_scope["document_id"] = document_id
+            source_scope["legacy_ids"] = [getattr(comp, "component_id", "")]
             params = {
                 "course_id": course_id,
                 "document_id": document_id,
@@ -610,10 +620,7 @@ def persist_components(
                 }),
                 "validation_warnings": _json_dumps([]),
                 "teacher_notes": "",
-                "source_scope": _json_dumps({
-                    "document_id": document_id,
-                    "legacy_ids": [getattr(comp, "component_id", "")],
-                }),
+                "source_scope": _json_dumps(source_scope),
                 "evidence_claims": _json_dumps(
                     evidence_refs.get("claim_ids") or []
                 ),

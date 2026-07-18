@@ -19,6 +19,7 @@ from .schema import (
     MATCH_STATUSES,
     REVIEW_STATUSES,
     SOURCE_BACKING_STATUSES,
+    AlignmentItem,
     ApparatusRecord,
     ApparatusSemanticsResult,
     ContextHypothesis,
@@ -72,6 +73,45 @@ def _inner_label_texts(figure: FigureImageInput) -> list[str]:
         if text and text not in texts:
             texts.append(text)
     return texts
+
+
+def _alignment_visual_support_is_traceable(
+    item: AlignmentItem,
+    *,
+    observations: VisualObservationSet | None,
+    figure: FigureImageInput | None,
+) -> bool:
+    """Whether ``item``'s claimed visual backing can actually be traced to a
+    known observation or a real in-figure label, rather than resting on
+    free-text ``visual_evidence`` alone (gap #3, contextual_figure_analysis_
+    iterative_verification.md: a "ghost part" backed only by a descriptive
+    sentence like "a box is visible" must not count as visual evidence).
+
+    - ``observations`` provided: an ``observation_refs`` entry must resolve to
+      a real ``observation_id``, OR ``label_ref`` must match a real
+      ``figure.inner_labels`` entry (case-insensitive) when ``figure`` is
+      known — degrades to a non-empty check when ``figure`` is ``None``
+      (nothing to verify label_ref against).
+    - ``observations`` is ``None``: degrades to a structural existence check
+      (non-empty ``observation_refs`` or non-empty ``label_ref``) — there is
+      no observation set to verify against either way.
+    """
+    obs_refs = [str(r) for r in (item.observation_refs or []) if str(r).strip()]
+    label_ref = (item.label_ref or "").strip()
+
+    if observations is None:
+        return bool(obs_refs) or bool(label_ref)
+
+    observation_id_set = {e.observation_id for e in observations.elements if e.observation_id}
+    obs_backed = any(r in observation_id_set for r in obs_refs)
+    if figure is not None:
+        inner_label_ci = {t.casefold() for t in _inner_label_texts(figure)}
+        label_backed = bool(label_ref) and (
+            not inner_label_ci or label_ref.casefold() in inner_label_ci
+        )
+    else:
+        label_backed = bool(label_ref)
+    return obs_backed or label_backed
 
 
 class ApparatusSemanticsValidator:
@@ -694,6 +734,27 @@ class ApparatusSemanticsValidator:
                     message=(
                         f"{prefix} status={item.status!r} requires observation_refs, "
                         "label_ref, or visual_evidence"
+                    ),
+                    field=prefix,
+                ))
+
+            # Hard guardrail (gap #3): free-text visual_evidence alone must
+            # never count as "visual support" for visual_only/supported_by_both
+            # — it must be traceable to a real observation_id or a real
+            # in-figure label. "contradicted" is exempt: a contradiction can
+            # legitimately be "the image looks different from what the text
+            # says" without pinning an observation_id.
+            if item.status in ("visual_only", "supported_by_both") and not (
+                _alignment_visual_support_is_traceable(item, observations=observations, figure=figure)
+            ):
+                issues.append(ValidationIssue(
+                    rule_id="alignment_visual_support_untraceable",
+                    severity="error",
+                    message=(
+                        f"{prefix} status={item.status!r} has no traceable visual evidence "
+                        "— observation_refs must resolve to a known observation_id, or "
+                        "label_ref must match a real figure.inner_labels entry; a free-text "
+                        "visual_evidence description alone is not sufficient"
                     ),
                     field=prefix,
                 ))

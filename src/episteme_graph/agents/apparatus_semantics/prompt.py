@@ -526,7 +526,9 @@ verification tasks by looking at the image again — do not re-derive the \
 whole analysis from scratch.
 
 For each task, return an outcome (resolved | refuted | unresolved) with the \
-evidence you actually see in the image. Then return only the alignment items \
+evidence you actually see in the image. Return a finding for EVERY listed \
+task. If you cannot decide from the image, return outcome "unresolved" for \
+that task — do not omit it. Then return only the alignment items \
 that changed as a result (updated_alignment_items), any brand-new alignment \
 items you discovered while checking (new_alignment_items), updated status/\
 confidence for any alternative hypothesis affected (hypothesis_updates), new \
@@ -768,6 +770,9 @@ class IterativePromptFactory:
         parts.append("\n## Constraints")
         parts.append(
             "- Answer ONLY the tasks listed above; do not re-derive the whole analysis\n"
+            "- Return a finding in task_findings for EVERY task listed above. If you "
+            "cannot decide from the image, return outcome \"unresolved\" for that task — "
+            "never omit a listed task from task_findings\n"
             "- Do not propose a new_verification_task that repeats a question already asked\n"
             "- Every entry in record_deltas.parts_to_add must cite observation_refs or a "
             "label_ref that grounds it in what is visible now — never add a part without "

@@ -82,3 +82,17 @@ class CostGate:
                 self.session_counts[session_key] = self.session_counts.get(session_key, 0) + 1
             self.daily_counts[daily_key] = self.daily_counts.get(daily_key, 0) + 1
         return True
+
+    def daily_remaining(self, *, daily_limit: int, daily_key: Hashable) -> int:
+        """daily_key の残回数（負にならない）。読み取りのみでカウントは進めない。"""
+        with self._lock:
+            used = self.daily_counts.get(daily_key, 0)
+        return max(0, daily_limit - used)
+
+    def count_extra_daily(self, *, daily_key: Hashable, amount: int) -> None:
+        """事後の実測計上。チェックせず daily カウンタへ amount を加算する
+        （上限を跨いだ実測も正直に記録する会計用。amount<=0 は no-op）。"""
+        if amount <= 0:
+            return
+        with self._lock:
+            self.daily_counts[daily_key] = self.daily_counts.get(daily_key, 0) + amount

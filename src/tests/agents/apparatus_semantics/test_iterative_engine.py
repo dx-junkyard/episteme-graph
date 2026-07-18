@@ -268,6 +268,130 @@ def _alignment_raw_with_single_task(
     )
 
 
+def _alignment_raw_with_part_and_task() -> dict:
+    """Like ``_alignment_raw()`` (one supported part) but with an extra
+    unresolved item + verification task alongside it, so a verification round
+    actually runs while the supported part's item is still present."""
+    base = _alignment_raw()
+    base["alignment_items"] = base["alignment_items"] + [{
+        "item_id": "align_2",
+        "item_kind": "element",
+        "label": "mystery box",
+        "status": "unresolved",
+        "severity": "medium",
+        "text_evidence": "",
+        "visual_evidence": "",
+        "reason": "ambiguous",
+        "confidence": 0.3,
+    }]
+    base["verification_tasks"] = [{
+        "task_id": "task_1",
+        "question": "Is mystery box A visible?",
+        "target_item_ids": ["align_2"],
+        "region_hint": "center",
+        "focus_bbox_rel": None,
+        "success_condition": "clarified",
+        "refutation_condition": "still ambiguous",
+    }]
+    return base
+
+
+def _alignment_raw_with_two_tasks() -> dict:
+    """Two independent unresolved items, each with its own verification task,
+    both open in the same round — used to exercise "one task's finding never
+    comes back" (gap #2)."""
+    return _alignment_raw(
+        parts=[],
+        alignment_items=[
+            {
+                "item_id": "align_2", "item_kind": "element", "label": "mystery box A",
+                "status": "unresolved", "severity": "medium",
+                "text_evidence": "", "visual_evidence": "",
+                "reason": "ambiguous", "confidence": 0.3,
+            },
+            {
+                "item_id": "align_3", "item_kind": "element", "label": "mystery box B",
+                "status": "unresolved", "severity": "medium",
+                "text_evidence": "", "visual_evidence": "",
+                "reason": "ambiguous", "confidence": 0.3,
+            },
+        ],
+        verification_tasks=[
+            {
+                "task_id": "task_1", "question": "Is mystery box A visible?",
+                "target_item_ids": ["align_2"], "region_hint": "left",
+                "focus_bbox_rel": None, "success_condition": "clarified",
+                "refutation_condition": "still ambiguous",
+            },
+            {
+                "task_id": "task_2", "question": "Is mystery box B visible?",
+                "target_item_ids": ["align_3"], "region_hint": "right",
+                "focus_bbox_rel": None, "success_condition": "clarified",
+                "refutation_condition": "still ambiguous",
+            },
+        ],
+    )
+
+
+def _bad_alignment_raw_with_untraceable_supported_item(**overrides) -> dict:
+    """A 'ghost part' whose only backing alignment item claims
+    supported_by_both but cites nothing traceable — no observation_refs, no
+    label_ref, only a free-text ``visual_evidence`` sentence (gap #3). Has
+    non-empty text_evidence, so the deterministic downgrade path should land
+    on text_only rather than unresolved."""
+    base = _alignment_raw(
+        parts=[{
+            "name": "ion source",
+            "role": "injects particles",
+            "label_ref": None,
+            "evidence_quote": "",
+            "reason": "seen in the image, apparently",
+            "confidence": 0.5,
+        }],
+        alignment_items=[{
+            "item_id": "align_1",
+            "item_kind": "element",
+            "label": "ion source",
+            "status": "supported_by_both",
+            "text_evidence": "ion source injects particles into the drift tube",
+            "visual_evidence": "a box is visible in the corner",
+            "severity": "low",
+            "reason": "text says so and a box looks like it",
+            "confidence": 0.5,
+        }],
+    )
+    base.update(overrides)
+    return base
+
+
+def _bad_alignment_raw_with_untraceable_visual_only_item(**overrides) -> dict:
+    """Same gap #3 shape as above, but status visual_only with no
+    text_evidence at all — the downgrade path should land on unresolved."""
+    base = _alignment_raw(
+        parts=[{
+            "name": "detector",
+            "role": "detects particles",
+            "label_ref": None,
+            "evidence_quote": "",
+            "reason": "looks like a detector",
+            "confidence": 0.5,
+        }],
+        alignment_items=[{
+            "item_id": "align_1",
+            "item_kind": "element",
+            "label": "detector",
+            "status": "visual_only",
+            "text_evidence": "",
+            "visual_evidence": "a shape that looks like a detector",
+            "severity": "low",
+            "reason": "seen in the image, apparently",
+            "confidence": 0.5,
+        }],
+    )
+    base.update(overrides)
+    return base
+
+
 def _verification_raw(**overrides) -> dict:
     base = {
         "task_findings": [],
@@ -663,3 +787,231 @@ def test_iterative_path_never_assigns_source_backed():
     record = result.apparatus_records[0]
     assert record.source_backing_status != "source_backed"
     assert record.review_status == "review_required"
+
+
+# ---------------------------------------------------------------------------
+# 14. Review fix (#499) — gap #1: a verification round that downgrades an
+# item's status without returning a matching parts_to_remove delta must not
+# leave the negated part in the final record.
+# ---------------------------------------------------------------------------
+
+
+def test_verification_downgrade_without_parts_to_remove_strips_part():
+    fake = FakeLLMClient()
+    fake.alignment_queue.append(_alignment_raw_with_part_and_task())
+    fake.verification_queue.append({
+        "task_findings": [{
+            "task_id": "task_1", "outcome": "resolved",
+            "observation": "the box is not actually a separate part", "evidence": "obs_1",
+        }],
+        "updated_alignment_items": [{
+            "item_id": "align_1", "item_kind": "element", "label": "ion source",
+            "status": "text_only",
+            "text_evidence": "ion source injects particles into the drift tube",
+            "visual_evidence": "", "observation_refs": [], "label_ref": "",
+            "severity": "medium",
+            "reason": "on closer inspection this was not actually visible in the image",
+            "confidence": 0.4,
+        }],
+        "new_alignment_items": [],
+        # Deliberately no record_deltas.parts_to_remove — the LLM downgraded
+        # the backing item but did not also propose removing the part.
+        "new_verification_tasks": [{
+            "task_id": "task_2",
+            "question": "Is the ion source actually a distinct visible part?",
+            "target_item_ids": ["align_1"],
+            "region_hint": "left",
+            "focus_bbox_rel": None,
+            "success_condition": "a distinct box is visible",
+            "refutation_condition": "no distinct box is visible",
+        }],
+        "hypothesis_updates": [],
+        "record_deltas": {},
+        "notes": "",
+    })
+
+    analyzer = _analyzer(fake, max_iterations=1)
+    record = _run(analyzer, _figure(), VisionBudget(None), rescan_allowance=1)
+
+    ia = record.iterative_analysis
+    # The part must not survive once its only supporting alignment item was
+    # downgraded to text_only, even though the LLM never returned a matching
+    # parts_to_remove delta (design doc gap #1).
+    assert record.parts == []
+    assert not any(p.name == "ion source" for p in record.parts)
+    assert ia.verification_iterations
+    assert any(
+        "ion source" in c and "removed" in c for c in ia.verification_iterations[0].changes
+    )
+    # The downgrade itself raised a fresh, still-open question about the same
+    # item -> this run must not be misreported as converged.
+    assert ia.convergence_status != "converged"
+    assert ia.convergence_status == "max_iterations_reached"
+    assert any(t.task_id == "task_2" for t in ia.open_verification_tasks)
+
+
+# ---------------------------------------------------------------------------
+# 15. Review fix (#499) — gap #2: a verification round that answers only
+# some of the tasks it was sent must not let the others silently stay "open"
+# forever (invisible to the convergence check just because their key is in
+# ``executed_keys``).
+# ---------------------------------------------------------------------------
+
+
+def test_missing_finding_forces_unresolved_and_surfaces_review_question():
+    fake = FakeLLMClient()
+    fake.alignment_queue.append(_alignment_raw_with_two_tasks())
+    fake.verification_queue.append({
+        # task_1 gets a finding; task_2 (also sent this round) gets none.
+        "task_findings": [{
+            "task_id": "task_1", "outcome": "resolved",
+            "observation": "box A is visible", "evidence": "obs_1",
+        }],
+        "updated_alignment_items": [],
+        "new_alignment_items": [],
+        "new_verification_tasks": [],
+        "hypothesis_updates": [],
+        "record_deltas": {},
+        "notes": "",
+    })
+
+    analyzer = _analyzer(fake, max_iterations=3)
+    record = _run(analyzer, _figure(), VisionBudget(None), rescan_allowance=3)
+
+    ia = record.iterative_analysis
+    # No infinite loop / no repeated round chasing task_2 — it must resolve to
+    # "unresolved" deterministically within this single round.
+    assert len(ia.verification_iterations) == 1
+    assert any(
+        "task_2" in c and "unresolved" in c for c in ia.verification_iterations[0].changes
+    )
+    assert ia.open_verification_tasks == []
+    assert ia.convergence_status == "converged"
+    # gap #2: "未解決点が明示されている" — the unanswered task must still
+    # surface as a review question even though the figure converged overall.
+    assert any("task_2" in (q.get("question_id") or "") for q in ia.review_questions)
+
+
+def test_converged_with_explicit_unresolved_task_still_has_review_questions():
+    """A task explicitly resolved as outcome='unresolved' (as opposed to the
+    "no finding returned at all" case above) must also surface a review
+    question, even when nothing else keeps the run from converging."""
+    fake = FakeLLMClient()
+    fake.alignment_queue.append(_alignment_raw_with_single_task())
+    fake.verification_queue.append({
+        "task_findings": [{
+            "task_id": "task_1", "outcome": "unresolved",
+            "observation": "still unclear even after the rescan", "evidence": "",
+        }],
+        "updated_alignment_items": [],
+        "new_alignment_items": [],
+        "new_verification_tasks": [],
+        "hypothesis_updates": [],
+        "record_deltas": {},
+        "notes": "",
+    })
+
+    analyzer = _analyzer(fake, max_iterations=3)
+    record = _run(analyzer, _figure(), VisionBudget(None), rescan_allowance=3)
+
+    ia = record.iterative_analysis
+    assert ia.convergence_status == "converged"
+    assert ia.open_verification_tasks == []
+    assert ia.review_questions
+    assert any("task_1" in (q.get("question_id") or "") for q in ia.review_questions)
+
+
+# ---------------------------------------------------------------------------
+# 16. Review fix (#499) — gap #3: once the alignment repair budget is
+# exhausted, an item whose only "visual" backing is a free-text description
+# (no observation_refs/label_ref that actually resolve to something real)
+# must be downgraded deterministically, and its part stripped — never left to
+# fabricate visual support for a "ghost part".
+# ---------------------------------------------------------------------------
+
+
+def test_alignment_repair_exhaustion_downgrades_untraceable_supported_item_and_strips_part():
+    fake = FakeLLMClient()
+    bad = _bad_alignment_raw_with_untraceable_supported_item()
+    fake.alignment_queue.extend([bad, bad, bad])  # initial + 2 repairs, all the same untraceable claim
+
+    analyzer = _analyzer(fake)
+    record = _run(analyzer, _figure(), VisionBudget(None))
+
+    ia = record.iterative_analysis
+    assert record.parts == []
+    downgraded = next(item for item in ia.alignment_items if item.item_id == "align_1")
+    # Has non-empty text_evidence -> downgrades to text_only, not unresolved.
+    assert downgraded.status == "text_only"
+    assert downgraded.observation_refs == []
+    assert not downgraded.label_ref
+    assert any("downgraded" in f and "align_1" in f for f in ia.stage_failures)
+    assert any("removed parts without visual support" in f for f in ia.stage_failures)
+
+
+def test_alignment_repair_exhaustion_downgrades_untraceable_visual_only_item_to_unresolved():
+    fake = FakeLLMClient()
+    bad = _bad_alignment_raw_with_untraceable_visual_only_item()
+    fake.alignment_queue.extend([bad, bad, bad])
+
+    analyzer = _analyzer(fake)
+    record = _run(analyzer, _figure(), VisionBudget(None))
+
+    ia = record.iterative_analysis
+    assert record.parts == []
+    downgraded = next(item for item in ia.alignment_items if item.item_id == "align_1")
+    # No text_evidence at all -> downgrades all the way to unresolved.
+    assert downgraded.status == "unresolved"
+    assert any("downgraded" in f and "align_1" in f for f in ia.stage_failures)
+
+
+# ---------------------------------------------------------------------------
+# 17. Review fix (#499) — every vision-spending call must be accounted for by
+# VisionBudget.try_consume(): the backend's daily vision-call accounting
+# depends on ia.vision_calls reflecting the true budget spend.
+# ---------------------------------------------------------------------------
+
+
+class _CountingVisionBudget(VisionBudget):
+    def __init__(self, total):
+        super().__init__(total)
+        self.consumed = 0
+
+    def try_consume(self):
+        ok = super().try_consume()
+        if ok:
+            self.consumed += 1
+        return ok
+
+
+def test_all_vision_calls_go_through_the_budget():
+    fake = FakeLLMClient()
+    # Force an observation repair round: invalid first response (missing
+    # observation_id), clean retry.
+    fake.observation_queue.append({
+        "panels": [],
+        "elements": [{
+            "observation_id": "", "kind": "box", "description": "x",
+            "label_text": "", "region_hint": "",
+        }],
+        "connections": [], "ocr_labels": [], "repeated_motifs": [],
+        "unreadable_regions": [], "undecidable_elements": [],
+        "visual_mode_guess": "functional_diagram", "reason": "", "confidence": 0.5,
+    })
+    fake.alignment_queue.append(_alignment_raw_with_single_task())
+    # Force a verification repair round too: invalid outcome, clean retry.
+    fake.verification_queue.append({
+        "task_findings": [{"task_id": "task_1", "outcome": "maybe", "observation": "", "evidence": ""}],
+        "updated_alignment_items": [], "new_alignment_items": [], "new_verification_tasks": [],
+        "hypothesis_updates": [], "record_deltas": {}, "notes": "",
+    })
+    fake.verification_queue.append(_verification_raw_resolves_task())
+
+    budget = _CountingVisionBudget(None)
+    analyzer = _analyzer(fake, max_iterations=3)
+    record = _run(analyzer, _figure(), budget, rescan_allowance=3)
+
+    ia = record.iterative_analysis
+    assert ia.vision_calls == fake.vision_call_count()
+    assert ia.vision_calls == budget.consumed
+    assert ia.vision_calls == 4  # observation initial+repair, verification initial+repair

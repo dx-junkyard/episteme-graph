@@ -1070,6 +1070,10 @@ def _stage_figure_table_semantics(ctx: PipelineContext) -> bool:
                 structure=ctx.structure,
                 evidence=ctx.evidence,
                 claim_objects=ctx.claim_objects,
+                # span_id -> block_id resolution for the F1 claim cross-link
+                # (works both freshly-run and resumed: _stage_claim_qualification
+                # restores ctx.qualified from the artifact via from_dict).
+                qualified=ctx.qualified,
             )
         except Exception as exc:
             logger.exception(
@@ -2274,6 +2278,7 @@ def _build_figure_table_semantics(
     structure: Any,
     evidence: Any,
     claim_objects: Any,
+    qualified: Any = None,
 ):
     from episteme_graph.agents.figure_table_semantics.agent import (
         FigureTableSemanticsAgent,
@@ -2291,11 +2296,54 @@ def _build_figure_table_semantics(
         if block_id and ev_id:
             evidence_index.setdefault(block_id, []).append(ev_id)
 
-    # block_id -> [claim_id, ...] from claim_objects (claim's source span block).
+    # claim_link_index: block_id -> [claim_id, ...] (F1 cross-link contract).
+    #
+    # The agent's mention cross-link pass (figure_table_semantics/crosslink.py)
+    # looks this index up with *block ids*, but ClaimObjectRecord only stores
+    # rhetorical-role span ids ("span_001"-style) in source_span_ids. Those span
+    # ids are generated per block and routinely repeat across blocks, so two
+    # joins back to the source block are used here:
+    #   (1) claim.source_evidence_ids -> evidence record's block_id
+    #       (unambiguous: evidence ids are unique and block-scoped, and the
+    #       builder resolves a claim's evidence strictly from its own block);
+    #   (2) span_id -> block_id via claim_qualification's QualifiedSpanRecord,
+    #       used only when the span id maps to exactly one block.
+    # A span id that is unknown or ambiguous (maps to multiple blocks) keeps its
+    # raw span_id key so no information is dropped (P4); such keys simply never
+    # match a body-paragraph block id in the cross-link pass.
+    span_to_blocks: dict[str, set[str]] = {}
+    for span in getattr(qualified, "qualified_spans", []) or []:
+        span_id = getattr(span, "span_id", None)
+        block_id = getattr(span, "block_id", None)
+        if span_id and block_id:
+            span_to_blocks.setdefault(span_id, set()).add(block_id)
+
+    evidence_block_index: dict[str, str] = {}
+    for block_id, ev_ids in evidence_index.items():
+        for ev_id in ev_ids:
+            evidence_block_index.setdefault(ev_id, block_id)
+
     claim_link_index: dict[str, list[str]] = {}
+
+    def _index_claim(key: str, claim_id: str) -> None:
+        bucket = claim_link_index.setdefault(key, [])
+        if claim_id not in bucket:
+            bucket.append(claim_id)
+
     for claim in getattr(claim_objects, "claims", []) or []:
+        claim_id = getattr(claim, "claim_id", None)
+        if not claim_id:
+            continue
+        for ev_id in getattr(claim, "source_evidence_ids", []) or []:
+            block_id = evidence_block_index.get(ev_id)
+            if block_id:
+                _index_claim(block_id, claim_id)
         for span_id in getattr(claim, "source_span_ids", []) or []:
-            claim_link_index.setdefault(span_id, []).append(claim.claim_id)
+            blocks = span_to_blocks.get(span_id)
+            if blocks and len(blocks) == 1:
+                _index_claim(next(iter(blocks)), claim_id)
+            else:
+                _index_claim(span_id, claim_id)
 
     return agent.run(
         structure,

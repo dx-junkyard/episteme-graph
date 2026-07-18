@@ -627,6 +627,288 @@ class TestBuildFigureWiring:
 
 
 # ---------------------------------------------------------------------------
+# F3: 図単位の装置コンポーネント対応 (figure_id/figure_key 一致 vs legacy 縮退)
+# ---------------------------------------------------------------------------
+
+
+def _base_figure_row(figure_id: str, figure_key: str = "fig_3_1") -> dict:
+    return {
+        "id": figure_id,
+        "document_id": "doc-1",
+        "figure_key": figure_key,
+        "figure_label": "Figure 3.1",
+        "caption_text": "An apparatus diagram.",
+        "caption_block_id": None,
+        "page": 10,
+        "bbox": [0, 0, 100, 100],
+        "suggested_mode": None,
+        "mode_reason": None,
+        "analysis_profile": {},
+        "reviewed_mode": None,
+        "mode_review_status": "pending",
+        "reviewed_analysis_mode": None,
+        "reviewed_analysis_profile": {},
+        "analysis_review_status": "pending",
+    }
+
+
+def _patch_build_figure_common(
+    monkeypatch,
+    figure_row: dict,
+    artifacts: dict,
+    apparatus_components: list,
+    *,
+    claim_lookup: dict | None = None,
+    claims_by_id: dict | None = None,
+    components_with_evidence_claims: list | None = None,
+) -> None:
+    monkeypatch.setattr(context_lens, "_load_figure_row", lambda _id: figure_row)
+    monkeypatch.setattr(context_lens.refs_mod, "document_run_artifacts", lambda _doc: artifacts)
+    monkeypatch.setattr(context_lens, "_claim_id_lookup", lambda _doc: dict(claim_lookup or {}))
+    monkeypatch.setattr(context_lens, "_component_id_lookup", lambda _doc: {})
+    monkeypatch.setattr(context_lens, "_claims_by_id", lambda ids: {
+        i: claims_by_id[i] for i in ids if claims_by_id and i in claims_by_id
+    })
+    monkeypatch.setattr(context_lens, "_components_by_id", lambda _ids: {})
+    monkeypatch.setattr(context_lens, "_load_apparatus_components", lambda _doc: apparatus_components)
+    monkeypatch.setattr(
+        context_lens, "_load_components_with_evidence_claims",
+        lambda _doc: list(components_with_evidence_claims or []),
+    )
+    monkeypatch.setattr(context_lens, "presentation_payload", lambda *_a, **_k: {})
+    monkeypatch.setattr(context_lens, "_annotations_for", lambda *_a, **_k: [])
+
+
+class TestBuildFigureApparatusComponentScoping:
+    def test_figure_id_match_shows_only_matching_component_without_paper_wide_note(self, monkeypatch):
+        figure_id = "33333333-3333-3333-3333-333333333333"
+        figure_row = _base_figure_row(figure_id)
+        apparatus_components = [
+            {
+                "id": "comp-match", "name": "Matching device", "component_type": "apparatus",
+                "status": "candidate", "review_status": "teacher_review_required", "summary": "",
+                "source_scope": {"figure_id": figure_id, "figure_key": "fig_3_1"},
+            },
+            {
+                "id": "comp-other", "name": "Other figure device", "component_type": "apparatus",
+                "status": "candidate", "review_status": "teacher_review_required", "summary": "",
+                "source_scope": {"figure_id": "other-fig-id", "figure_key": "fig_9_9"},
+            },
+        ]
+        _patch_build_figure_common(monkeypatch, figure_row, {}, apparatus_components)
+
+        result = context_lens._build_figure(ElementRef(
+            scope="document", element_type=ELEMENT_FIGURE, element_id=figure_id, document_id="doc-1",
+        ))
+
+        lower_ids = {item["element_id"] for item in result["lower"]}
+        assert "comp-match" in lower_ids
+        assert "comp-other" not in lower_ids
+        assert not any("論文単位" in note for note in result["notes"])
+
+    def test_figure_key_match_associates_component_even_when_figure_id_differs(self, monkeypatch):
+        figure_id = "55555555-5555-5555-5555-555555555555"
+        figure_row = _base_figure_row(figure_id, figure_key="fig_7_2")
+        apparatus_components = [
+            {
+                "id": "comp-keyed", "name": "Keyed device", "component_type": "apparatus",
+                "status": "candidate", "review_status": "teacher_review_required", "summary": "",
+                # figure_id is stale/mismatched but figure_key matches.
+                "source_scope": {"figure_id": "stale-id-not-matching", "figure_key": "fig_7_2"},
+            },
+        ]
+        _patch_build_figure_common(monkeypatch, figure_row, {}, apparatus_components)
+
+        result = context_lens._build_figure(ElementRef(
+            scope="document", element_type=ELEMENT_FIGURE, element_id=figure_id, document_id="doc-1",
+        ))
+
+        lower_ids = {item["element_id"] for item in result["lower"]}
+        assert "comp-keyed" in lower_ids
+        assert not any("論文単位" in note for note in result["notes"])
+
+    def test_legacy_components_without_figure_key_fall_back_to_document_wide_list_with_note(self, monkeypatch):
+        figure_id = "44444444-4444-4444-4444-444444444444"
+        figure_row = _base_figure_row(figure_id)
+        apparatus_components = [
+            {
+                "id": "comp-legacy", "name": "Legacy device", "component_type": "apparatus",
+                "status": "candidate", "review_status": "teacher_review_required", "summary": "",
+                "source_scope": {"document_id": "doc-1", "legacy_ids": ["apparatus_x"]},
+            },
+        ]
+        _patch_build_figure_common(monkeypatch, figure_row, {}, apparatus_components)
+
+        result = context_lens._build_figure(ElementRef(
+            scope="document", element_type=ELEMENT_FIGURE, element_id=figure_id, document_id="doc-1",
+        ))
+
+        lower_ids = {item["element_id"] for item in result["lower"]}
+        assert "comp-legacy" in lower_ids
+        assert any("論文単位" in note for note in result["notes"])
+
+    def test_no_apparatus_components_yields_no_note(self, monkeypatch):
+        figure_id = "22222222-2222-2222-2222-222222222222"
+        figure_row = _base_figure_row(figure_id)
+        _patch_build_figure_common(monkeypatch, figure_row, {}, [])
+
+        result = context_lens._build_figure(ElementRef(
+            scope="document", element_type=ELEMENT_FIGURE, element_id=figure_id, document_id="doc-1",
+        ))
+
+        assert not any("論文単位" in note for note in result["notes"])
+
+
+# ---------------------------------------------------------------------------
+# F3: 図 → component（claim 交差）/ 図 → thesis（linked_claim_ids 経由）
+# ---------------------------------------------------------------------------
+
+
+class TestBuildFigureClaimComponentIntersection:
+    def test_component_sharing_linked_claim_appears_in_upper_as_inferred_candidate(self, monkeypatch):
+        figure_id = "66666666-6666-6666-6666-666666666666"
+        figure_row = _base_figure_row(figure_id)
+        artifacts = {
+            "figure_table_semantics": {
+                "figures": [{
+                    "figure_id": "fig_3.1",
+                    "figure_key": "fig_3_1",
+                    "linked_claim_ids": ["claim-raw-1"],
+                    "linked_component_candidates": [],
+                }]
+            },
+        }
+        _patch_build_figure_common(
+            monkeypatch, figure_row, artifacts, [],
+            claim_lookup={"claim-raw-1": "claim-db-1"},
+            claims_by_id={"claim-db-1": {"text": "運動量は保存される"}},
+            components_with_evidence_claims=[
+                {"id": "comp-shared", "name": "Shared component", "evidence_claims": ["claim-db-1"]},
+                {"id": "comp-unrelated", "name": "Unrelated component", "evidence_claims": ["claim-db-9"]},
+            ],
+        )
+
+        result = context_lens._build_figure(ElementRef(
+            scope="document", element_type=ELEMENT_FIGURE, element_id=figure_id, document_id="doc-1",
+        ))
+
+        matches = [i for i in result["upper"] if i["element_id"] == "comp-shared"]
+        assert len(matches) == 1
+        assert matches[0]["relation"] == "related_component_candidate"
+        assert matches[0]["relation_status"] == CONTEXT_STATUS_CANDIDATE
+        assert not any(i["element_id"] == "comp-unrelated" for i in result["upper"])
+
+    def test_no_linked_claims_means_no_intersection_lookup_needed(self, monkeypatch):
+        figure_id = "77777777-7777-7777-7777-777777777777"
+        figure_row = _base_figure_row(figure_id)
+        artifacts = {
+            "figure_table_semantics": {
+                "figures": [{
+                    "figure_id": "fig_3.1",
+                    "figure_key": "fig_3_1",
+                    "linked_claim_ids": [],
+                    "linked_component_candidates": [],
+                }]
+            },
+        }
+        _patch_build_figure_common(
+            monkeypatch, figure_row, artifacts, [],
+            components_with_evidence_claims=[
+                {"id": "comp-should-not-appear", "name": "x", "evidence_claims": []},
+            ],
+        )
+
+        result = context_lens._build_figure(ElementRef(
+            scope="document", element_type=ELEMENT_FIGURE, element_id=figure_id, document_id="doc-1",
+        ))
+
+        assert not any(i["element_id"] == "comp-should-not-appear" for i in result["upper"])
+
+
+class TestBuildFigureThesisViaLinkedClaim:
+    def test_linked_claim_via_thesis_appears_in_upper(self, monkeypatch):
+        figure_id = "88888888-8888-8888-8888-888888888888"
+        figure_row = _base_figure_row(figure_id)
+        artifacts = {
+            "figure_table_semantics": {
+                "figures": [{
+                    "figure_id": "fig_3.1",
+                    "figure_key": "fig_3_1",
+                    "linked_claim_ids": ["claim-raw-1"],
+                    "linked_component_candidates": [],
+                }]
+            },
+            "thesis_reconstruction": {
+                "headline_claim": "統一理論の帰結",
+                "central_thesis": {"claim_ids": ["claim-raw-1"]},
+            },
+        }
+        _patch_build_figure_common(
+            monkeypatch, figure_row, artifacts, [],
+            claim_lookup={"claim-raw-1": "claim-db-1"},
+            claims_by_id={"claim-db-1": {"text": "運動量は保存される"}},
+        )
+
+        result = context_lens._build_figure(ElementRef(
+            scope="document", element_type=ELEMENT_FIGURE, element_id=figure_id, document_id="doc-1",
+        ))
+
+        assert any(
+            item["element_type"] == "thesis" and item["relation"] == "supports_thesis"
+            for item in result["upper"]
+        )
+
+
+# ---------------------------------------------------------------------------
+# F3: claim レンズ側の既存 fallback（linked_claim_ids 逆引き → 図が lower に出る）
+# ---------------------------------------------------------------------------
+
+
+class TestBuildClaimWiring:
+    def test_linked_figure_fallback_appears_in_lower(self, monkeypatch):
+        claim_id = "claim-db-1"
+        claim_row = {
+            "id": claim_id,
+            "document_id": "doc-1",
+            "claim_type": "empirical",
+            "text": "運動量は保存される",
+            "normalized_text": "運動量は保存される",
+            "support_status": "source_backed",
+            "review_status": "teacher_approved",
+            "evidence_text": "",
+            "source_scope": {},
+        }
+        artifacts = {
+            "figure_table_semantics": {
+                "figures": [{
+                    "figure_id": "fig-uuid-1",
+                    "caption": "Figure 3.1: apparatus diagram.",
+                    "linked_claim_ids": ["claim-raw-1"],
+                }]
+            },
+        }
+        monkeypatch.setattr(context_lens, "_load_claim_row", lambda _id: claim_row)
+        monkeypatch.setattr(context_lens.refs_mod, "document_run_artifacts", lambda _doc: artifacts)
+        monkeypatch.setattr(context_lens, "_claim_id_lookup", lambda _doc: {"claim-raw-1": claim_id})
+        monkeypatch.setattr(context_lens, "_components_supporting_claim", lambda _doc, _cid: [])
+        monkeypatch.setattr(context_lens, "_claims_by_id", lambda _ids: {})
+        monkeypatch.setattr(context_lens, "_annotations_for", lambda *_a, **_k: [])
+
+        result = context_lens._build_claim(ElementRef(
+            scope="document", element_type=ELEMENT_THEORY_CLAIM, element_id=claim_id, document_id="doc-1",
+        ))
+
+        assert result is not None
+        matches = [
+            i for i in result["lower"]
+            if i["element_type"] == "figure" and i["relation"] == "evidenced_by_figure"
+        ]
+        assert len(matches) == 1
+        assert matches[0]["element_id"] == "fig-uuid-1"
+        assert matches[0]["label"] == "Figure 3.1: apparatus diagram."
+
+
+# ---------------------------------------------------------------------------
 # equation ヘルパ
 # ---------------------------------------------------------------------------
 

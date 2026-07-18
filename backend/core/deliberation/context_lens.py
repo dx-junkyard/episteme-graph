@@ -249,6 +249,42 @@ def _matching_figure_record(
     return None
 
 
+def _component_source_scope_figure_keys(comp: dict[str, Any]) -> tuple[str, str]:
+    """装置候補コンポーネントの source_scope から figure_id / figure_key を取り出す。"""
+    scope = comp.get("source_scope") if isinstance(comp.get("source_scope"), dict) else {}
+    return (
+        str(scope.get("figure_id") or "").strip(),
+        str(scope.get("figure_key") or "").strip(),
+    )
+
+
+def _has_figure_scope_key(comp: dict[str, Any]) -> bool:
+    """当該コンポーネントの source_scope が figure_id/figure_key のいずれかを
+    持つか（= F2 適用後に persist された図対応済み行か）を判定する。"""
+    figure_id, figure_key = _component_source_scope_figure_keys(comp)
+    return bool(figure_id or figure_key)
+
+
+def _apparatus_component_matches_figure(comp: dict[str, Any], fig: dict[str, Any]) -> bool:
+    """装置候補コンポーネントの source_scope が当該 fig（document_figures 行）に
+    対応するか判定する。
+
+    ``figure_id``（document_figures.id の DB UUID）または ``figure_key`` の一致で
+    判定する。``_matching_figure_record`` と同様、空文字同士の一致は対応とみなさない
+    （図キーを持たない legacy 行を誤って全図に紐づけないため）。
+    """
+    comp_figure_id, comp_figure_key = _component_source_scope_figure_keys(comp)
+    if not comp_figure_id and not comp_figure_key:
+        return False
+    fig_id = str(fig.get("id") or "").strip()
+    fig_key = str(fig.get("figure_key") or "").strip()
+    if comp_figure_id and fig_id and comp_figure_id == fig_id:
+        return True
+    if comp_figure_key and fig_key and comp_figure_key == fig_key:
+        return True
+    return False
+
+
 def _item(
     element_type: str,
     element_id: str | None,
@@ -658,16 +694,21 @@ def _component_id_lookup(document_id: str) -> dict[str, str]:
 def _load_apparatus_components(document_id: str) -> list[dict[str, Any]]:
     """当該 document の装置・部品候補 theory_components 一覧（migration 041 語彙）。
 
-    figure_id は persist 時に source_scope から失われるため（persist_components が
-    source_scope を {document_id, legacy_ids} で上書きする）、figure 単位の厳密な
-    対応付けはできない。呼び出し側（_build_figure）がこの制約を notes に明示する。
+    F2（persistence.py の source_scope マージ）以降、agent 側 source_scope の
+    ``figure_id`` / ``figure_key`` が DB 行に残るため、figure 単位の厳密な対応付けが
+    可能になる。``source_scope`` を併せて返すのはそのため（呼び出し側 `_build_figure`
+    が figure_id/figure_key の一致で図ごとに絞り込む）。F2 適用前に persist された
+    行や、図キーを持たない legacy 行は ``source_scope`` に ``figure_id``/``figure_key``
+    が無いため、呼び出し側は document 単位の縮退表示 + notes にフォールバックする
+    （P4: 情報を落とさない）。
     """
     session = get_session()
     try:
         rows = session.execute(
             sa_text(
                 """
-                SELECT id::text AS id, name, component_type, status, review_status, summary
+                SELECT id::text AS id, name, component_type, status, review_status, summary,
+                       source_scope
                 FROM theory_components
                 WHERE document_id = :doc AND component_type IN ('apparatus', 'instrument', 'part')
                 ORDER BY created_at ASC
@@ -677,7 +718,39 @@ def _load_apparatus_components(document_id: str) -> list[dict[str, Any]]:
         ).mappings().all()
     finally:
         session.close()
-    return [dict(r) for r in rows]
+    result: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        d["source_scope"] = d.get("source_scope") if isinstance(d.get("source_scope"), dict) else {}
+        result.append(d)
+    return result
+
+
+def _load_components_with_evidence_claims(document_id: str) -> list[dict[str, Any]]:
+    """当該 document の theory_components 一覧（id/name/evidence_claims のみ）。
+
+    図 → component（claim 交差）判定専用の読み取り専用ローダー（F3）。
+    ``evidence_claims`` は persist 時に DB UUID へ remap 済み（persistence.py の
+    ``_remap_string_list``）なので、``_claim_id_lookup`` で解決した図の
+    linked_claim_ids（DB UUID）と素の集合演算で交差判定できる。W1: A層は書き換えない
+    （読むだけ）。
+    """
+    session = get_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                "SELECT id::text AS id, name, evidence_claims FROM theory_components WHERE document_id = :doc"
+            ),
+            {"doc": document_id},
+        ).mappings().all()
+    finally:
+        session.close()
+    result: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        d["evidence_claims"] = d.get("evidence_claims") if isinstance(d.get("evidence_claims"), list) else []
+        result.append(d)
+    return result
 
 
 def _load_component_graph(document_id: str) -> dict[str, list[dict[str, Any]]]:
@@ -1119,11 +1192,13 @@ def _figure_part_items_from_apparatus_record(
 def _figure_apparatus_component_items(
     components: list[dict[str, Any]], document_id: str | None
 ) -> list[dict[str, Any]]:
-    """document 単位の装置・部品候補 theory_components 一覧から、図の下位構造の
-    navigable な theory_component 項目を組み立てる（純粋関数）。
+    """装置・部品候補 theory_components の一覧から、図の下位構造の navigable な
+    theory_component 項目を組み立てる（純粋関数）。
 
-    figure 単位の厳密な対応付けはできない（_load_apparatus_components の docstring
-    参照）ため、呼び出し側が事実として notes に明示すること。
+    渡された ``components`` を無条件にアイテム化するだけで、当該図への絞り込み
+    （figure_id/figure_key 一致 or document 単位への縮退）は呼び出し側
+    （``_build_figure``）の責務とする。document 単位に縮退した場合は呼び出し側が
+    事実として notes に明示すること（P4）。
     """
     items: list[dict[str, Any]] = []
     for comp in components:
@@ -1193,6 +1268,19 @@ def _build_figure(ref: ElementRef) -> dict[str, Any] | None:
                 _item("theory_component", comp_db, document_id, label, "related_component_candidate", _status_for_link("inferred"))
             )
 
+    if linked_claim_db_ids:
+        linked_claim_id_set = set(linked_claim_db_ids)
+        for comp in _safe(lambda: _load_components_with_evidence_claims(document_id), []):
+            evidence_claims = {str(x) for x in (comp.get("evidence_claims") or [])}
+            if linked_claim_id_set & evidence_claims:
+                upper.append(
+                    _item(
+                        "theory_component", comp.get("id"), document_id,
+                        comp.get("name") or "component", "related_component_candidate",
+                        _status_for_link("inferred"),
+                    )
+                )
+
     thesis = artifacts.get("thesis_reconstruction")
     if isinstance(thesis, dict) and linked_claim_db_ids:
         headline = str(thesis.get("headline_claim") or "").strip() or "中心命題"
@@ -1229,9 +1317,19 @@ def _build_figure(ref: ElementRef) -> dict[str, Any] | None:
         lower.extend(_figure_part_items_from_apparatus_record(matched_apparatus, document_id))
 
     apparatus_components = _safe(lambda: _load_apparatus_components(document_id), [])
-    if apparatus_components:
-        notes.append("装置・部品候補は論文単位の一覧です（図ごとの厳密な対応付けは未対応）")
-    lower.extend(_figure_apparatus_component_items(apparatus_components, document_id))
+    if any(_has_figure_scope_key(c) for c in apparatus_components):
+        # F2 適用後: 図対応キー（figure_id/figure_key）を持つ行が1つでもあれば、
+        # 当該図に一致するものだけを図単位で表示する(「論文単位」note は不要)。
+        figure_scoped_components = [
+            c for c in apparatus_components if _apparatus_component_matches_figure(c, fig)
+        ]
+    else:
+        # 全行が legacy（図対応キーなし）の場合は従来どおり document 単位の縮退表示
+        # + notes（P4: 情報を落とさない）。
+        figure_scoped_components = apparatus_components
+        if figure_scoped_components:
+            notes.append("装置・部品候補は論文単位の一覧です（図ごとの厳密な対応付けは未対応）")
+    lower.extend(_figure_apparatus_component_items(figure_scoped_components, document_id))
 
     upper = _cap_lane(_dedupe_items(upper), notes, "上位構造")
     lower = _cap_lane(_dedupe_items(lower), notes, "下位構造")

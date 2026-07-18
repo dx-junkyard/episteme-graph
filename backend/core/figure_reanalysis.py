@@ -398,13 +398,30 @@ def _synthesize_focus_bbox(
     return [round(x0, 6), round(y0, 6), round(x1, 6), round(y1, 6)]
 
 
+def _daily_budget_key(user_id: str | None) -> tuple[str, str]:
+    """CostGate の daily_key を1箇所で定義する。
+
+    ``_consume_budget`` の check_and_count と、デフォルト agent 構築時の
+    ``vision_call_budget`` 算出（``daily_remaining``）・run 後の実測超過分の
+    事後計上（``count_extra_daily``）が必ず同じキーを指すようにする
+    （#499 P1 修正: キーがずれるとカウンタが分裂し上限が機能しなくなる）。
+    """
+    return (today_str(), user_id or "")
+
+
+def _daily_budget_limit(settings: Any) -> int:
+    """CostGate の daily_limit を1箇所で定義する（``_consume_budget`` と
+    ``vision_call_budget`` 算出とで同じ値を使う）。"""
+    return max(1, int(settings.apparatus_max_calls_per_day))
+
+
 def _consume_budget(figure_id: str, user_id: str | None) -> None:
     settings = get_settings()
     allowed = _cost_gate.check_and_count(
         session_limit=3,
         session_key=(user_id or "", figure_id),
-        daily_limit=max(1, int(settings.apparatus_max_calls_per_day)),
-        daily_key=(today_str(), user_id or ""),
+        daily_limit=_daily_budget_limit(settings),
+        daily_key=_daily_budget_key(user_id),
         prune_stale_daily=True,
     )
     if not allowed:
@@ -604,23 +621,44 @@ def reanalyze_figure(
         focus_image_bytes=focus_image_bytes,
         focus_label_texts=focus_label_texts,
     )
+    # Count only requests that reached the paid vision boundary.  Missing or
+    # corrupt stored images must not consume the teacher's re-analysis budget.
+    # This must run *before* building a default agent's IterativeConfig below
+    # — the remaining-budget computation reads the daily counter this call
+    # just incremented (#499 P1 fix; see the long comment below).
+    if enforce_cost_gate:
+        _consume_budget(figure_id, created_by)
     if agent is not None:
         analyzer = agent
     else:
-        # #499: the synchronous re-analysis API bounds iteration count more
-        # tightly than the batch pipeline to protect response time; budget is
-        # per-call (invocation-scoped cost gate above), not a shared daily pool.
+        # #499 P1 fix: a single call to ``analyzer.run`` can spend far more
+        # than 1 vision call — the iterative engine budgets 1 observation +
+        # up to 2 observation-repair attempts + max_iterations * (1
+        # verification + up to 2 verification-repair attempts). The single
+        # ``_consume_budget`` call above only accounts for 1 of those, so
+        # leaving ``vision_call_budget=None`` here let a single synchronous
+        # re-analysis blow through ``APPARATUS_MAX_CALLS_PER_DAY`` by ~4x.
+        # Instead we pass the *actual remaining daily allowance* (including
+        # the 1 call already counted) as the engine's own per-run vision
+        # budget, so its ``VisionBudget.try_consume`` refuses further vision
+        # calls once today's real allowance is exhausted. After ``run()``
+        # returns we reconcile the true spend against the 1-call estimate
+        # (see below) so unused headroom isn't lost and overshoot is
+        # recorded honestly.
+        vision_call_budget = None
+        if enforce_cost_gate:
+            remaining = _cost_gate.daily_remaining(
+                daily_limit=_daily_budget_limit(settings),
+                daily_key=_daily_budget_key(created_by),
+            )
+            vision_call_budget = 1 + remaining
         iterative_config = IterativeConfig(
             enabled=(settings.apparatus_analysis_mode != "one_shot"),
             max_iterations=settings.apparatus_reanalyze_max_iterations,
-            vision_call_budget=None,
+            vision_call_budget=vision_call_budget,
             model_name=settings.apparatus_llm_model,
         )
         analyzer = ApparatusSemanticsAgent(cartridge_id=cartridge_id, iterative_config=iterative_config)
-    # Count only requests that reached the paid vision boundary.  Missing or
-    # corrupt stored images must not consume the teacher's re-analysis budget.
-    if enforce_cost_gate:
-        _consume_budget(figure_id, created_by)
     with usage_context(
         "deliberation:figure_reanalysis",
         user_id=created_by,
@@ -633,6 +671,22 @@ def reanalyze_figure(
             cartridge_id=cartridge_id,
         )
     record = (result.apparatus_records or [None])[0]
+    if enforce_cost_gate and record is not None:
+        # Reconcile the 1-call estimate charged by ``_consume_budget`` above
+        # against the actual vision spend for this run (this applies
+        # regardless of whether the agent was built above or injected by the
+        # caller — an externally-configured agent's cost still counts). A
+        # record with no ``iterative_analysis`` (one_shot mode, or an older
+        # artifact shape) keeps the previous approximation of exactly 1 call.
+        iterative_record = getattr(record, "iterative_analysis", None)
+        actual_vision_calls = (
+            int(getattr(iterative_record, "vision_calls", 1) or 0)
+            if iterative_record is not None
+            else 1
+        )
+        extra = max(0, actual_vision_calls - 1)
+        if extra:
+            _cost_gate.count_extra_daily(daily_key=_daily_budget_key(created_by), amount=extra)
     if record is None or getattr(record, "repair_failed", False):
         raise FigureReanalysisError("図の構造化解析を生成できませんでした", kind="invalid")
     if any(issue.severity == "error" for issue in result.validation_issues or []):
