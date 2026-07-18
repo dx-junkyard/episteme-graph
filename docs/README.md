@@ -123,6 +123,8 @@ PDF アップロード
 - [管理機能（教員/管理者UI）](features/admin.md) — 教材管理、コースビルダー、Lecture Studio
 - [承認・共有レイヤー（C層）](features/endorsement-sharing.md) — 教員による査読承認、独自解釈の並存、教員間共有、質問→候補生成
 - [認証・権限・開示範囲](features/auth-visibility.md) — JWT、RBAC、グループ、Visibility
+- [要素検討ワークスペース（W層）](features/element_deliberation_workspace_design.md) — 任意要素の内訳・位置づけ・対話的検討
+- [要素中心コンテキストビュー設計](features/element_context_lens_design.md) — 選択要素を中心に上位構造・文脈上の役割・下位構造を一体表示する追補設計（#498）
 
 ### フロントエンド
 - [フロントエンド構成](frontend/overview.md) — SPA 構成、画面フロー、API 連携

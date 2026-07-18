@@ -1,6 +1,8 @@
 # W層（Element Deliberation Workspace / 要素検討ワークスペース）設計
 
 > **状態: Phase 0 + Phase 1 + Phase W-β + Phase 2 + Phase S 実装済み**（2026-07-16 時点）。本書は設計の正本。
+> **追補（設計・未実装）**: 選択要素を中心に上位構造・文脈上の役割・下位構造を一体表示する
+> [要素中心コンテキストビュー設計](element_context_lens_design.md) は Issue [#498](https://github.com/dx-junkyard/episteme-graph/issues/498) を正本とする。
 > Phase 1 実装物: `core/deliberation/positioning.py` に §4.2 コーパス横断レンズ
 > （`cross_corpus`）を追加。要素→代表テキスト（非LLM連結・§15 未決2）→
 > `core.embedder.search_similar_papers` で近傍 chunk を検索し、自 document を除外した

@@ -131,6 +131,7 @@ class TestFigureUnreviewedModesRule:
         assert "suggested_mode <> 'unknown'" in src
         assert "uploaded_by = CAST(:uid AS uuid)" in src
         assert "document_figures" in src
+        assert "f.document_id = d.id::text" in src
 
     def test_evaluator_builds_factual_step(self):
         session = _FakeSession([
